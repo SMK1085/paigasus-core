@@ -62,11 +62,11 @@ structurally rather than by waiver.
 This table counts the **blob-matched** set only. Script-following (§3.2) adds three more:
 `repo:publish-metadata`, which already declares the file; `repo:version-lockstep`, which
 does not and correctly should not (§2.4); and `repo:actionlint`, which enters because its
-script quotes another gate's cargo line as pinned text (§2.2) and which A9 excludes on
+script quotes another gate's cargo line as pinned text (§2.2) and which A10 excludes on
 both the verb and the cwd test.
 
 The issue's "39 unasserted `build`/`build-release`/`test` declarations" are really
-**three lines** in `.moon/tasks/rust.yml`, inherited by thirteen crates. A9 reads
+**three lines** in `.moon/tasks/rust.yml`, inherited by thirteen crates. A10 reads
 moon's RESOLVED inputs, so inheritance is transparent to it and deleting one line reds
 thirteen tasks at once.
 
@@ -147,8 +147,8 @@ content rather than on a filter that could silently drop real code.
 One consequence for §3.2: because `script_cargo_lines` returns a non-empty list for
 `ci/actionlint/run.sh`, `repo:actionlint` is a **third** member of the derived set's
 `script` kind. It is harmless for both consumers and needs no waiver — all five of its
-rows carry `--locked` for A8, and for A9 the script holds zero config-sensitive verbs
-and zero cd-into-`rs` tokens, so A9 excludes it on both tests independently.
+rows carry `--locked` for A8, and for A10 the script holds zero config-sensitive verbs
+and zero cd-into-`rs` tokens, so A10 excludes it on both tests independently.
 
 `ci/cargo-lock-integrity/run.sh` carries 2 rows and 1 would-report row, but **no Moon
 task invokes it** — it is an unconditional `ci.yml` step (SMA-601). A8's script arm
@@ -304,7 +304,7 @@ Floor: `REQUIRED_LOCKED_TASKS` plus `repo:publish-metadata` and
 follower reds instead of degrading to a vacuous PASS. A self-test asserts the three
 kinds remain distinguishable at the derivation boundary, not only inside A8.
 
-### 3.3 A9 — `rs/.cargo/config.toml` inputs (Half A, AC 2–4)
+### 3.3 A10 — `rs/.cargo/config.toml` inputs (Half A, AC 2–4)
 
 **Its own verb predicate.** `CONFIG_SENSITIVE_VERBS` names subcommands that compile or
 link, and is deliberately NOT `LOCK_RESOLVING_VERBS`: `bench`, `build`, `check`,
@@ -318,7 +318,7 @@ Two consequences, both improvements over the first draft:
 * the thirteen `fmt` tasks are excluded **by a stated rule** instead of by coincidence
   with a list written for the lock question; and
 * `repo:wasm-getrandom-free` (`cargo tree`) and `repo:version-lockstep`
-  (`cargo update`) fall out **structurally**, so A9 ships with **zero waivers**.
+  (`cargo update`) fall out **structurally**, so A10 ships with **zero waivers**.
 
 AC 4 asks that the `cargo tree` exclusion be "encoded with a stated reason or removed".
 Encoding it in the verb predicate satisfies that more durably than a per-task waiver:
@@ -384,6 +384,21 @@ Check 8e asserts containment and floors the array at `-ge 20`;
 (`ci/actionlint/run.sh:2100-2122`) and the task declares 22 resolved inputs. Replacing
 four with one gives 18 and would force loosening that floor. Adding gives 22 and 23.
 
+## 3.6 Naming: this assertion is A10, not A9
+
+SMA-604 (`05fa484`, PR 189) landed a DIFFERENT assertion named **A9**
+(`check_member_globs`, Dependabot's `[workspace] members` expansion) in this same file
+while SMA-599 was in flight. It took the `"a9"` key, the `collect_findings` arity
+fixture and both PASS strings. Since it reached `main` first, this design's assertion is
+**A10** (`check_cargo_config_inputs`, key `"a10"`), ordered after A9 in
+`EXPECTED_FINDING_KEYS` and in `collect_findings`.
+
+The two are independent — A9 asks whether Dependabot can see every workspace crate, A10
+asks whether a compiling cargo task keys on `rs/.cargo/config.toml` — so the merge kept
+both sides of every conflict verbatim. The only judgement was the rename and the
+ordering. `ci/affected-graph/README.md`'s A9 bullets belong to SMA-604 and are not about
+this change.
+
 ## 4. Registry and documentation obligations
 
 | Obligation | Needed? |
@@ -396,12 +411,12 @@ four with one gives 18 and would force loosening that floor. Adding gives 22 and
 | `EXPECTED_FINDING_KEYS` | **Yes** — add `a9` |
 | `SELF_TEST_COUNT` in `ci/actionlint/run.sh` | No — counts that file's own tables |
 | **CLAUDE.md prose** | **Yes** — three sentences become false (below) |
-| **`ci/affected-graph/README.md`** | **Yes** — add the A9 bullet; `:173-177` becomes false |
+| **`ci/affected-graph/README.md`** | **Yes** — add the A10 bullet; `:173-177` becomes false |
 | `cargo_moon_parity.py:1673` PASS string | **Yes** — "all eight assertions" → nine |
 
 CLAUDE.md's `rs/.cargo/config.toml` bullet currently states *"Only 16 of those 61
 declarations are asserted"*, *"delete one and CI stays green"*, and the follow-on bullet
-*"Nothing enforces that one rule."* A9 makes all three false. **No gate asserts this
+*"Nothing enforces that one rule."* A10 makes all three false. **No gate asserts this
 prose**, so it must be corrected by hand in the same PR. `README.md:173-177` states that
 a cargo call inside a `.sh` is outside A8's derived set — also now false.
 
@@ -435,7 +450,7 @@ a cargo call inside a `.sh` is outside A8's derived set — also now false.
    one, and `ls a[bc <<EOF` — an UNCLOSED bracketed span before a real opener — still opens.
    An unterminated heredoc must raise `MoonOutputError`. A nineteen-mutation battery — one
    mutation per decision — must kill every mutant.
-2. **A9** — missing input reports; declared does not; empty-reason waiver is a row;
+2. **A10** — missing input reports; declared does not; empty-reason waiver is a row;
    stale waiver is a row; floor member out of scope reports; floor member allowlisted
    reports; `--manifest-path rs/Cargo.toml` and `cargo machete rs` do NOT confer scope;
    each of the four cwd shapes resolves.
@@ -456,9 +471,9 @@ a cargo call inside a `.sh` is outside A8's derived set — also now false.
 
 Mutation proofs on the real tree, each restored afterwards (AC 3):
 
-* remove `rs/.cargo/config.toml` from `repo:observability-drift`'s `inputs` → A9 names
+* remove `rs/.cargo/config.toml` from `repo:observability-drift`'s `inputs` → A10 names
   it → restore;
-* remove the same line from `.moon/tasks/rust.yml`'s `test` task → A9 names thirteen
+* remove the same line from `.moon/tasks/rust.yml`'s `test` task → A10 names thirteen
   crates → restore;
 * drop `--locked` from `ci/publish-metadata/run.sh:742` → widened A8 names script and
   line → restore.
@@ -471,10 +486,10 @@ original code and print a meaningless result.
 Inspection suggests none (every case at `:258-353` touches `contracts/` or `rs/`, none
 `ci/`), but the AC asks for a run, not an inspection.
 
-**Rollback.** `repo:affected-smoke` is in `ci.yml`'s `T=(…)` array, so an A9 reporting
+**Rollback.** `repo:affected-smoke` is in `ci.yml`'s `T=(…)` array, so an A10 reporting
 unexpected rows blocks every PR. If the first real run produces rows this design did not
 predict, the fix is to correct the derivation, not to widen the allowlist under time
-pressure; if that cannot be done same-day, revert the A9 entry from
+pressure; if that cannot be done same-day, revert the A10 entry from
 `EXPECTED_FINDING_KEYS` and land the rest.
 
 ## 6. Decisions and rejected alternatives
@@ -517,8 +532,8 @@ stability for none of the parsing.
 require modelling `case`/`if` dispatch on `"$1"` — shell static analysis, out of
 proportion here. Hence L1.
 
-**D9 — A9 gets its own verb predicate, separate from `LOCK_RESOLVING_VERBS`.** The first
-draft reused A8's list, which made A9 fail to implement the rule §1 states: `fmt` fell out
+**D9 — A10 gets its own verb predicate, separate from `LOCK_RESOLVING_VERBS`.** The first
+draft reused A8's list, which made A10 fail to implement the rule §1 states: `fmt` fell out
 by coincidence, and any future compiling-but-not-resolving subcommand (`cargo llvm-cov`,
 `insta`, `udeps`, `bloat`) would be silently out of scope with no floor able to see it.
 Two named constants sharing a classifier but not a membership rule.
@@ -568,7 +583,7 @@ present, staleness induced by a member manifest gaining a dependency. Not measur
 no lockfile, nor with a new workspace member. D4 generalises beyond what was measured;
 re-measure on a cargo bump.
 
-**L7 — A9 proves the `rs/.cargo/config.toml` rule specifically.** CLAUDE.md's general
+**L7 — A10 proves the `rs/.cargo/config.toml` rule specifically.** CLAUDE.md's general
 warning stands: a future `repo:*` task can omit some *other* input it reads and nothing
 reds.
 
@@ -597,33 +612,33 @@ a spec decision with its own blast radius, parked for a follow-up issue rather t
 here. Until then, neither A8's blob arm nor its script arm can see a variable-driven cargo
 call, and the spec claims no coverage of one.
 
-**L11 — A9's `CONFIG_SENSITIVE_VERBS` split narrows only what's already derived; it does not
-widen A9's coverage to a new subcommand.** `CONFIG_SENSITIVE_VERBS` is a strict subset of
+**L11 — A10's `CONFIG_SENSITIVE_VERBS` split narrows only what's already derived; it does not
+widen A10's coverage to a new subcommand.** `CONFIG_SENSITIVE_VERBS` is a strict subset of
 `LOCK_RESOLVING_VERBS` (A8's list), and both `derive_cargo_tasks` and `script_cargo_lines`
 gate on `CARGO_INVOCATION_RE` — built from `LOCK_RESOLVING_VERBS`, not from
-`CONFIG_SENSITIVE_VERBS` — before A9 ever runs. So `cargo llvm-cov`, `insta`, `udeps`,
-`bloat`, or `tarpaulin` yield an EMPTY derivation today, and A9 examines nothing for them —
+`CONFIG_SENSITIVE_VERBS` — before A10 ever runs. So `cargo llvm-cov`, `insta`, `udeps`,
+`bloat`, or `tarpaulin` yield an EMPTY derivation today, and A10 examines nothing for them —
 no row, and no `FLOOR:` row either, since the floor only sees what the derivation produced.
-An earlier version of the in-code comment overclaimed that A9's own verb list "covered" this
+An earlier version of the in-code comment overclaimed that A10's own verb list "covered" this
 case; it does not (SMA-599 review, corrected in-code alongside this entry). Closing this
 properly means widening `CARGO_INVOCATION_RE` itself, the same class of change L10 defers.
 
 **L12 — the stale-waiver check is unasserted, by construction.** `check_cargo_config_inputs`
-reports a row when `ALLOW_MISSING_CARGO_CONFIG` names a task A9 does not examine (`set(allow) -
+reports a row when `ALLOW_MISSING_CARGO_CONFIG` names a task A10 does not examine (`set(allow) -
 in_scope`), the same "delete the dead waiver" contract A8's waiver lists carry. No self-test
-fixture exercises this path because the allowlist is EMPTY (by design — every A9 exclusion is
+fixture exercises this path because the allowlist is EMPTY (by design — every A10 exclusion is
 meant to be structural, via the verb or the cwd rule, never a waiver). The moment a first entry
 is ever added to `ALLOW_MISSING_CARGO_CONFIG`, this arm becomes reachable and should gain a
 fixture then; recorded here rather than fixed now, per SMA-599 review scope.
 
 **L13 — `repo:version-lockstep`'s own `run.sh` runs a real `napi build --cwd
-.../rs/crates/bindings/paigasus-node-bindings` (ci/version-lockstep/run.sh:592-593), and A9
+.../rs/crates/bindings/paigasus-node-bindings` (ci/version-lockstep/run.sh:592-593), and A10
 does not see it.** The task is derived as kind `script` (its moon.yml blob carries no cargo
 verb; the script's `cargo update -w` line is what makes `derive_cargo_tasks` follow it), never
 as kind `wrapper` — the `kind == "wrapper"` auto-sensitive bypass in
 `check_cargo_config_inputs` only fires when an FFI marker sits in the moon.yml BLOB itself, not
 inside a referenced script's text. `CONFIG_SENSITIVE_RE` looks for a literal `cargo <verb>`
-token and does not recognize `napi build` at all, so this call is invisible to A9's sensitivity
+token and does not recognize `napi build` at all, so this call is invisible to A10's sensitivity
 test regardless of its `--cwd`. This is harmless ONLY because both the `cargo update -w` line
 and the `napi build` line above it live inside `run_write()`, which `ci/version-lockstep/run.sh`
 invokes only under `--write` — and `check_version_lockstep_no_write` (in

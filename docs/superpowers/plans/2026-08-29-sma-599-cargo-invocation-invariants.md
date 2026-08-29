@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add A9 — an assertion that every Moon task whose cargo subcommand is influenced by `rs/.cargo/config.toml` declares that file as an input — and widen A8 so both assertions also see cargo reached through a gate's shell script.
+**Goal:** Add A10 — an assertion that every Moon task whose cargo subcommand is influenced by `rs/.cargo/config.toml` declares that file as an input — and widen A8 so both assertions also see cargo reached through a gate's shell script.
 
-**Architecture:** Everything lands in the existing `ci/affected-graph/cargo_moon_parity.py`, which already runs inside `repo:affected-smoke`. Two new shared helpers (a shell-line classifier and a task derivation returning match kinds) are consumed by both A8 and the new A9. A9 uses its own verb predicate — subcommands that compile or link — deliberately separate from A8's lock-resolving verbs. No new `repo:*` task, so none of the five new-gate registry obligations apply.
+**Architecture:** Everything lands in the existing `ci/affected-graph/cargo_moon_parity.py`, which already runs inside `repo:affected-smoke`. Two new shared helpers (a shell-line classifier and a task derivation returning match kinds) are consumed by both A8 and the new A10. A10 uses its own verb predicate — subcommands that compile or link — deliberately separate from A8's lock-resolving verbs. No new `repo:*` task, so none of the five new-gate registry obligations apply.
 
 **Tech Stack:** Python 3 standard library only (`re`, `json`, `subprocess`, `tomllib`, `pathlib`). The gate is `toolchain: 'system'` and must not shell out to cargo. Bash for the Moon task and `ci/actionlint/run.sh`. YAML for `moon.yml`.
 
@@ -369,7 +369,7 @@ PY
 
 Expected: `Counter({'literal': 57, 'wrapper': 3, 'script': 3})` and the script list is exactly `['repo:actionlint', 'repo:publish-metadata', 'repo:version-lockstep']`.
 
-`repo:actionlint` belongs in that list, and an earlier draft of this step said `2` because it was measured against the four-layer classifier that stripped quoted strings. The shipped conservative rule does not strip them, so `ci/actionlint/run.sh`'s five pinned cargo strings surface as rows — all carrying `--locked`, so 0 would-report. It needs no waiver anywhere: A8 clears it on the flag, and A9 excludes it on both tests (that script holds zero config-sensitive verbs and zero cd-into-`rs` tokens). If the counts differ from 57/3/3, reconcile before continuing — spec §1.3 and §2.2 depend on them.
+`repo:actionlint` belongs in that list, and an earlier draft of this step said `2` because it was measured against the four-layer classifier that stripped quoted strings. The shipped conservative rule does not strip them, so `ci/actionlint/run.sh`'s five pinned cargo strings surface as rows — all carrying `--locked`, so 0 would-report. It needs no waiver anywhere: A8 clears it on the flag, and A10 excludes it on both tests (that script holds zero config-sensitive verbs and zero cd-into-`rs` tokens). If the counts differ from 57/3/3, reconcile before continuing — spec §1.3 and §2.2 depend on them.
 
 - [ ] **Step 7: Commit**
 
@@ -696,10 +696,10 @@ git commit -m "ci(repo): widen A8 to cargo reached through a gate script (SMA-59
 
 ---
 
-### Task 4: A9 — the `rs/.cargo/config.toml` assertion
+### Task 4: A10 — the `rs/.cargo/config.toml` assertion
 
 **Files:**
-- Modify: `ci/affected-graph/cargo_moon_parity.py` (add A9 constants after `SCRIPT_REF_RE`; add `check_cargo_config_inputs` after `check_cargo_locked_scripts`; extend `EXPECTED_FINDING_KEYS` at :1690; add the `a9` tuple to `collect_findings`; update the PASS string at :1673; add self-test rows)
+- Modify: `ci/affected-graph/cargo_moon_parity.py` (add A10 constants after `SCRIPT_REF_RE`; add `check_cargo_config_inputs` after `check_cargo_locked_scripts`; extend `EXPECTED_FINDING_KEYS` at :1690; add the `a9` tuple to `collect_findings`; update the PASS string at :1673; add self-test rows)
 
 **Interfaces:**
 - Consumes: `derive_cargo_tasks`, `task_script_refs`, `script_cargo_lines`.
@@ -708,7 +708,7 @@ git commit -m "ci(repo): widen A8 to cargo reached through a gate script (SMA-59
 - [ ] **Step 1: Write the failing self-test rows**
 
 ```python
-    # SMA-599 — A9. Its verb predicate is its OWN, not LOCK_RESOLVING_VERBS: reusing A8's list
+    # SMA-599 — A10. Its verb predicate is its OWN, not LOCK_RESOLVING_VERBS: reusing A8's list
     # excluded the thirteen `fmt` tasks by COINCIDENCE and would hide any future
     # compiling-but-not-resolving subcommand (cargo llvm-cov, insta, udeps).
     a9_fixture = {
@@ -730,52 +730,52 @@ git commit -m "ci(repo): widen A8 to cargo reached through a gate script (SMA-59
         },
     }
     if check_cargo_config_inputs(a9_fixture, Path("."), allow={}, floor=("c-rs:build",)):
-        failures.append("A9 reported violations on a clean fixture")
+        failures.append("A10 reported violations on a clean fixture")
 
     # The core assertion: an in-scope task missing the input.
     broken = json.loads(json.dumps(a9_fixture))
     broken["c-rs"]["task_inputs"]["build"] = []
     if not any("c-rs:build" in r for r in
                check_cargo_config_inputs(broken, Path("."), allow={}, floor=("c-rs:build",))):
-        failures.append("A9 did not fire on a cargo-from-rs task missing rs/.cargo/config.toml")
+        failures.append("A10 did not fire on a cargo-from-rs task missing rs/.cargo/config.toml")
 
     # `fmt` is out of scope BY THE VERB, not by accident. It declares nothing and must pass.
     if any("c-rs:fmt" in r for r in
            check_cargo_config_inputs(a9_fixture, Path("."), allow={}, floor=("c-rs:build",))):
-        failures.append("A9 demanded rs/.cargo/config.toml from `cargo fmt`, which cannot read it")
+        failures.append("A10 demanded rs/.cargo/config.toml from `cargo fmt`, which cannot read it")
 
     # cwd is what excludes repo:deny — NOT a waiver. `--manifest-path rs/...` and a bare `rs`
     # argument must never confer scope, or D2's structural exclusion collapses.
     for task in ("repo:deny", "repo:mach"):
         if any(task in r for r in
                check_cargo_config_inputs(a9_fixture, Path("."), allow={}, floor=("c-rs:build",))):
-            failures.append(f"A9 pulled {task} into scope from an `rs` path ARGUMENT, not a cd")
+            failures.append(f"A10 pulled {task} into scope from an `rs` path ARGUMENT, not a cd")
 
     # `cargo tree` runs from rs/ but resolves without compiling — out of scope by verb (AC 4).
     if any("repo:tree" in r for r in
            check_cargo_config_inputs(a9_fixture, Path("."), allow={}, floor=("c-rs:build",))):
-        failures.append("A9 demanded the config file from `cargo tree`, which never compiles")
+        failures.append("A10 demanded the config file from `cargo tree`, which never compiles")
 
     # Floor: a member that leaves scope must fail, or the derivation could empty silently.
     if not any("FLOOR:" in r for r in
                check_cargo_config_inputs(a9_fixture, Path("."), allow={}, floor=("c-rs:nope",))):
-        failures.append("A9's floor did not fire on a member outside the derived set")
+        failures.append("A10's floor did not fire on a member outside the derived set")
 
     # Second vacuity mode, specific to default-deny: an allowlist that swallows a floor member.
     swallow = {"c-rs:build": "a reason"}
     if not any("FLOOR:" in r for r in
                check_cargo_config_inputs(broken, Path("."), allow=swallow, floor=("c-rs:build",))):
-        failures.append("A9's floor let an allowlist entry cover a floor member")
+        failures.append("A10's floor let an allowlist entry cover a floor member")
 
     # An empty reason is itself a row.
     if not any("empty reason" in r for r in check_cargo_config_inputs(
             broken, Path("."), allow={"c-rs:build": " "}, floor=())):
-        failures.append("A9 accepted an ALLOW_MISSING_CARGO_CONFIG entry with an empty reason")
+        failures.append("A10 accepted an ALLOW_MISSING_CARGO_CONFIG entry with an empty reason")
 
     if not REQUIRED_CARGO_CONFIG_TASKS:
-        failures.append("REQUIRED_CARGO_CONFIG_TASKS is empty — A9's floor would assert nothing")
+        failures.append("REQUIRED_CARGO_CONFIG_TASKS is empty — A10's floor would assert nothing")
     if not CONFIG_SENSITIVE_VERBS:
-        failures.append("CONFIG_SENSITIVE_VERBS is empty — A9 would examine nothing")
+        failures.append("CONFIG_SENSITIVE_VERBS is empty — A10 would examine nothing")
 ```
 
 - [ ] **Step 2: Run to verify it fails**
@@ -786,15 +786,15 @@ python3 ci/affected-graph/cargo_moon_parity.py --self-test
 
 Expected: FAIL with `NameError: name 'check_cargo_config_inputs' is not defined`.
 
-- [ ] **Step 3: Add the A9 constants**
+- [ ] **Step 3: Add the A10 constants**
 
 After `SCRIPT_REF_RE`:
 
 ```python
-# SMA-599 — A9's verb predicate, deliberately NOT LOCK_RESOLVING_VERBS.
+# SMA-599 — A10's verb predicate, deliberately NOT LOCK_RESOLVING_VERBS.
 #
-# The two lists answer different questions. A8 asks "does this resolve the lock"; A9 asks
-# "can rs/.cargo/config.toml change this command's OUTPUT". Reusing A8's list made A9 fail to
+# The two lists answer different questions. A8 asks "does this resolve the lock"; A10 asks
+# "can rs/.cargo/config.toml change this command's OUTPUT". Reusing A8's list made A10 fail to
 # implement its own rule: the thirteen `cargo fmt --check` tasks run with cwd inside `rs/` and
 # fell out of scope only because `fmt` happens to be absent from a lock-oriented list — an
 # accidental coupling, not a stated exclusion. It would also have left any future
@@ -829,12 +829,12 @@ CWD_TOKEN_RE = re.compile(r"(?:\bcd\b|\bpushd\b|--cwd)\s+[\"']?([^\"'\s;&|)]+)")
 VAR_ASSIGN_RE = re.compile(r"""(?m)^\s*([A-Za-z_][A-Za-z0-9_]*)=["']?([^"'\s]+)["']?""")
 RS_PATH_RE = re.compile(r"(?:^|/)rs(?:/|$)")
 
-# A9's waivers. EMPTY, like ALLOW_OVER_APPROXIMATION: every exclusion is structural, via the
+# A10's waivers. EMPTY, like ALLOW_OVER_APPROXIMATION: every exclusion is structural, via the
 # verb predicate or the cwd rule. An entry needs a non-empty reason, and an entry naming a task
 # outside the examined set is itself a row.
 ALLOW_MISSING_CARGO_CONFIG = {}
 
-# A9's floor. Members must be IN SCOPE and NOT allowlisted — a default-deny gate has a second
+# A10's floor. Members must be IN SCOPE and NOT allowlisted — a default-deny gate has a second
 # vacuity mode the FFI floors do not: an allowlist that grows to swallow the derived set.
 REQUIRED_CARGO_CONFIG_TASKS = (
     "paigasus-kernel-rs:build",
@@ -845,7 +845,7 @@ REQUIRED_CARGO_CONFIG_TASKS = (
 )
 ```
 
-- [ ] **Step 4: Implement A9**
+- [ ] **Step 4: Implement A10**
 
 After `check_version_lockstep_no_write`:
 
@@ -870,7 +870,7 @@ def _cwd_inside_rs(text, source_dir):
 
 
 def check_cargo_config_inputs(projects, root, allow=None, floor=None):
-    """A9: every task whose cargo can READ rs/.cargo/config.toml must key on it.
+    """A10: every task whose cargo can READ rs/.cargo/config.toml must key on it.
 
     Scope is the conjunction of two independent tests, and both matter:
       * the subcommand is in CONFIG_SENSITIVE_VERBS (it compiles or links); and
@@ -921,7 +921,7 @@ def check_cargo_config_inputs(projects, root, allow=None, floor=None):
             )
     for target in sorted(set(floor) - in_scope):
         rows.append(
-            f"FLOOR: A9 examines {len(in_scope)} task(s) and {target} is not among them — "
+            f"FLOOR: A10 examines {len(in_scope)} task(s) and {target} is not among them — "
             f"the derivation or the cwd rule has degraded and would assert nothing"
         )
     for target in sorted(set(floor) & set(allow)):
@@ -931,24 +931,24 @@ def check_cargo_config_inputs(projects, root, allow=None, floor=None):
         )
     for target in sorted(set(allow) - in_scope):
         rows.append(
-            f"ALLOW_MISSING_CARGO_CONFIG names {target}, which A9 does not examine — the "
+            f"ALLOW_MISSING_CARGO_CONFIG names {target}, which A10 does not examine — the "
             f"waiver is stale; delete it"
         )
     return rows
 ```
 
-- [ ] **Step 5: Register A9**
+- [ ] **Step 5: Register A10**
 
 Change `EXPECTED_FINDING_KEYS` (`:1690`):
 
 ```python
-EXPECTED_FINDING_KEYS = ("a1", "a2", "a3", "a4-lint", "a4-fmt", "a5", "a6", "a7", "a8", "a9")
+EXPECTED_FINDING_KEYS = ("a1", "a2", "a3", "a4-lint", "a4-fmt", "a5", "a6", "a7", "a8", "a9", "a10")
 ```
 
 Append to `collect_findings`' list, after the `a8` tuple:
 
 ```python
-        ("a9", check_cargo_config_inputs(projects, root),
+        ("a10", check_cargo_config_inputs(projects, root),
              "A task runs a COMPILING cargo command with cwd inside rs/ but does not key on\n"
              "    rs/.cargo/config.toml, so a rustflags edit replays its cached result\n"
              "    (SMA-594, SMA-599).\n"
@@ -958,7 +958,7 @@ Append to `collect_findings`' list, after the `a8` tuple:
              "    `cargo fmt`, `cargo tree`, `cargo metadata`, `cargo deny` and `cargo machete`\n"
              "    are out of scope BY VERB (they never compile or link) — see\n"
              "    CONFIG_SENSITIVE_VERBS. A `FLOOR:` row means the check itself cannot be\n"
-             "    trusted; fix that first, every other A9 row is meaningless until it passes."),
+             "    trusted; fix that first, every other A10 row is meaningless until it passes."),
 ```
 
 Update the PASS string (`:1673`) — change `every cargo-resolving task passes --locked` to:
@@ -976,7 +976,7 @@ export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
 python3 ci/affected-graph/cargo_moon_parity.py; echo "rc=$?"
 ```
 
-Expected: both PASS, rc=0. If A9 reports rows on the real tree, do NOT waive them — reconcile
+Expected: both PASS, rc=0. If A10 reports rows on the real tree, do NOT waive them — reconcile
 against the spec's §1.3 table first (58 of 60 blob-matched tasks already declare the file).
 
 **Two scope outcomes to expect, neither a bug — do not "fix" them.**
@@ -989,7 +989,7 @@ covered — by the assertion that owns it. If the `paigasus-kernel-ts:build` flo
 the `--cwd` token is not surviving into moon's resolved blob; fix `CWD_TOKEN_RE`, do not drop
 the floor member.
 
-- [ ] **Step 7: Prove A9 can FAIL — mutation 1, a `repo:*` gate**
+- [ ] **Step 7: Prove A10 can FAIL — mutation 1, a `repo:*` gate**
 
 ```bash
 python3 - <<'PY'
@@ -1015,7 +1015,7 @@ git checkout -- moon.yml && git diff --stat moon.yml
 
 (`git checkout --` is safe HERE and only here: `moon.yml` carries no uncommitted work of ours until Task 5.)
 
-- [ ] **Step 8: Prove A9 can FAIL — mutation 2, the shared inherited line**
+- [ ] **Step 8: Prove A10 can FAIL — mutation 2, the shared inherited line**
 
 ```bash
 python3 - <<'PY'
@@ -1032,7 +1032,7 @@ export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
 python3 ci/affected-graph/cargo_moon_parity.py; echo "rc=$?"
 ```
 
-Expected: rc=1 with **thirteen** `:test` rows — one per crate — proving A9 sees inheritance. Restore:
+Expected: rc=1 with **thirteen** `:test` rows — one per crate — proving A10 sees inheritance. Restore:
 
 ```bash
 git checkout -- .moon/tasks/rust.yml && git diff --stat .moon/tasks/rust.yml
@@ -1062,7 +1062,7 @@ git commit -m "ci(repo): assert every compiling cargo task keys on .cargo/config
 In `moon.yml`, immediately after the existing `- 'ci/actionlint/**/*'` entry, add:
 
 ```yaml
-      # SMA-599 — A8's script arm and A9 both READ the gate scripts a Moon task invokes
+      # SMA-599 — A8's script arm and A10 both READ the gate scripts a Moon task invokes
       # (ci/publish-metadata/run.sh, ci/version-lockstep/run.sh today, any future one
       # tomorrow). Without a glob covering them the assertions are real but unreachable: the
       # PR that drops a `--locked` from a gate script does not schedule this task. The four
@@ -1138,12 +1138,12 @@ git commit -m "ci(repo): key repo:affected-smoke on the gate scripts its pins re
 
 **Files:**
 - Modify: `CLAUDE.md` (the `rs/.cargo/config.toml` bullet and its follow-on bullet)
-- Modify: `ci/affected-graph/README.md` (add the A9 bullet; correct `:173-177`)
+- Modify: `ci/affected-graph/README.md` (add the A10 bullet; correct `:173-177`)
 
 **Interfaces:**
 - Consumes: nothing.
 - Produces: nothing. **No gate asserts this prose**, which is exactly why it must land in the
-  same PR — a future engineer reading the stale text would either rebuild A9 or assume the
+  same PR — a future engineer reading the stale text would either rebuild A10 or assume the
   input may be omitted.
 
 - [ ] **Step 1: Correct the CLAUDE.md counts**
@@ -1154,10 +1154,10 @@ declarations and the three gates are declared by hand and asserted by nothing �
 CI stays green."* with:
 
 ```
-  **Every one of those declarations is now asserted** by `repo:affected-smoke`'s A9
+  **Every one of those declarations is now asserted** by `repo:affected-smoke`'s A10
   (`ci/affected-graph/cargo_moon_parity.py`, SMA-599): a task is in scope when its cargo
   subcommand COMPILES or LINKS (`CONFIG_SENSITIVE_VERBS`) and its cwd resolves inside `rs/`.
-  A9 reads moon's RESOLVED inputs, so the three inherited lines in `.moon/tasks/rust.yml`
+  A10 reads moon's RESOLVED inputs, so the three inherited lines in `.moon/tasks/rust.yml`
   cover thirteen crates each and deleting one reds thirteen tasks. `cargo fmt` is out of
   scope BY VERB, not by accident — it neither compiles nor links, which is why `fmt` omits
   the input deliberately.
@@ -1168,7 +1168,7 @@ CI stays green."* with:
 Replace the bullet opening *"**Nothing enforces that one rule.**"* with:
 
 ```
-- **A9 enforces the cargo-config rule; nothing enforces the GENERAL one.** A9
+- **A10 enforces the cargo-config rule; nothing enforces the GENERAL one.** A10
   (`ci/affected-graph/cargo_moon_parity.py`, SMA-599) closes the `rs/.cargo/config.toml`
   case specifically, including for a gate that reaches cargo through its own
   `ci/**/run.sh` — that whole class was outside A8 too until SMA-599. What is still true:
@@ -1194,12 +1194,12 @@ invoking another script, `ops/nats/check-subjects.sh`, and the three `.py` gate 
 are all unfollowed.
 ```
 
-- [ ] **Step 4: Add the A9 bullet to the README's assertion list**
+- [ ] **Step 4: Add the A10 bullet to the README's assertion list**
 
 Beside the existing A8 bullet:
 
 ```markdown
-- **A9** — every Moon task whose cargo subcommand COMPILES or LINKS, with cwd inside `rs/`,
+- **A10** — every Moon task whose cargo subcommand COMPILES or LINKS, with cwd inside `rs/`,
   keys on `rs/.cargo/config.toml`. Scope is a conjunction: the verb predicate
   (`CONFIG_SENSITIVE_VERBS`, deliberately NOT A8's `LOCK_RESOLVING_VERBS`) and a cwd rule that
   reads raw text so `RS_DIR="$REPO_ROOT/rs"` … `cd "$RS_DIR"` resolves. `repo:deny` and
@@ -1221,7 +1221,7 @@ does NOT touch — if actionlint reds, check that neither marker was duplicated 
 
 ```bash
 git add CLAUDE.md ci/affected-graph/README.md
-git commit -m "docs(repo): record A9 where the stale no-enforcement claims lived (SMA-599)"
+git commit -m "docs(repo): record A10 where the stale no-enforcement claims lived (SMA-599)"
 ```
 
 ---
@@ -1292,7 +1292,7 @@ Only if Steps 1–3 required a change:
 
 ```bash
 git add -A
-git commit -m "ci(repo): reconcile the affected-graph expected sets with A9 (SMA-599)"
+git commit -m "ci(repo): reconcile the affected-graph expected sets with A10 (SMA-599)"
 ```
 
 ---
