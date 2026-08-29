@@ -67,8 +67,20 @@ pub enum GatewayError {
     /// context (`principal_prn`, `key_id`); the response body stays generic.
     Internal,
     // ---- egress (OpenAI-upstream) cases (G7) -------------------------------------------------
-    /// The request body was not valid JSON — the gateway could not parse `model`/`stream` → 400.
+    /// The request body could not be read or parsed as JSON — a syntax error, a truncated body,
+    /// or an empty one → 400. A body that parses but does not match the target type is
+    /// `InvalidRequestSchema` since SMA-588.
     BadRequestBody,
+    /// The request body was syntactically valid JSON but did not match
+    /// `ChatCompletionRequest` → 400. Split out of `BadRequestBody` by SMA-588 so
+    /// `invalid-request-body` means "malformed or unreadable" on this service exactly as it
+    /// does on IAM.
+    ///
+    /// The status stays 400, unlike IAM's 422 for the same code. That asymmetry is deliberate
+    /// (spec decision 5): the OpenAI SDKs map status to an exception class, and OpenAI's own
+    /// API answers 400 for a bad chat-completions body, so 422 would break the wire
+    /// compatibility that is this service's purpose.
+    InvalidRequestSchema,
     /// The OpenAI upstream could not be reached (connect/transport/build failure) → 502.
     UpstreamUnavailable,
     /// The OpenAI upstream did not respond within a configured timeout → 504.
@@ -131,6 +143,13 @@ impl GatewayError {
                 None,
                 "The request body is not valid JSON.",
             ),
+            GatewayError::InvalidRequestSchema => (
+                StatusCode::BAD_REQUEST,
+                "invalid_request_error",
+                Some("invalid-request-schema"),
+                None,
+                "The request body does not match the expected schema.",
+            ),
             GatewayError::UpstreamUnavailable => (
                 StatusCode::BAD_GATEWAY,
                 "api_error",
@@ -157,7 +176,7 @@ impl GatewayError {
         match self {
             Self::IamUnavailable | Self::UpstreamUnavailable | Self::UpstreamTimeout => Retryable::Yes,
             Self::Internal | Self::MissingScope => Retryable::Unknown,
-            Self::MissingBearer | Self::InvalidCredential | Self::AuthzDenied | Self::BadRequestBody | Self::StreamingDisabled => Retryable::No,
+            Self::MissingBearer | Self::InvalidCredential | Self::AuthzDenied | Self::BadRequestBody | Self::InvalidRequestSchema | Self::StreamingDisabled => Retryable::No,
         }
     }
 }
@@ -310,5 +329,16 @@ mod tests {
         let body = body_json(GatewayError::InvalidCredential.into_response()).await;
         let keys: std::collections::BTreeSet<&str> = body["error"].as_object().expect("an object").keys().map(String::as_str).collect();
         assert_eq!(keys, ["code", "message", "param", "type"].into_iter().collect::<std::collections::BTreeSet<_>>());
+    }
+
+    /// SMA-588: a schema mismatch is its own code, reconverging `invalid-request-body` on "malformed
+    /// or unreadable" across both services. The STATUS stays 400 (spec decision 5): the OpenAI SDKs
+    /// map status to an exception class, so 422 would move every affected body out of a caller's
+    /// `BadRequestError` handler, and OpenAI's own API answers 400 here.
+    #[test]
+    fn a_schema_mismatch_has_its_own_code_on_an_unchanged_status() {
+        let resp = GatewayError::InvalidRequestSchema.into_response();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(GatewayError::InvalidRequestSchema.retryable(), Retryable::No);
     }
 }

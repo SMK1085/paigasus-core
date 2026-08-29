@@ -151,6 +151,27 @@ fn chat_request(body: &str, bearer: Option<&str>) -> Request<Body> {
     builder.body(Body::from(body.to_owned())).expect("build request")
 }
 
+/// `POST /v1/chat/completions` with raw bytes and an authorized bearer ([`CALLER_KEY`], against
+/// [`FakeIam::allowed`]), returning `(status, body)`. Builds its own app + mock upstream per call
+/// so each row is independent. `body` falls back to `Value::Null` when the response is not JSON
+/// (e.g. a `413` body-limit rejection, Task 9) rather than panicking on the decode.
+async fn post_chat_bytes(raw: &[u8]) -> (StatusCode, serde_json::Value) {
+    let mock = MockOpenAi::spawn_json(StatusCode::OK, "{}").await;
+    let app = app_for(FakeIam::allowed(), mock.base_url.clone(), ONE_MIB);
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/chat/completions")
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::AUTHORIZATION, format!("Bearer {CALLER_KEY}"))
+        .body(Body::from(raw.to_vec()))
+        .expect("build request");
+    let resp = app.oneshot(req).await.unwrap();
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let body = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+    (status, body)
+}
+
 // ---- auth-path rows (real middleware) ---------------------------------------------------------
 
 #[tokio::test]
@@ -219,6 +240,34 @@ async fn invalid_json_body_is_400() {
     let resp = app.oneshot(chat_request("not valid json", Some(CALLER_KEY))).await.unwrap();
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     assert!(mock.recorded().is_none(), "a malformed body must never reach the upstream");
+}
+
+/// SMA-588: the two body-failure classes answer with distinct codes on the SAME status.
+///
+/// The status assertion is the load-bearing half. `invalid-request-schema` is 422 on IAM and
+/// 400 here, and a future reader "harmonising" them would silently change every affected body's
+/// exception class in a caller's OpenAI SDK. Asserting 400 on every row makes that a red test
+/// rather than a quiet wire break.
+#[tokio::test]
+async fn a_refused_body_distinguishes_malformed_from_schema_mismatch() {
+    // (raw body, expected code)
+    let cases: [(&[u8], &str); 6] = [
+        (b"{not json", "invalid-request-body"),
+        (b"{\"model\":\"m\",", "invalid-request-body"),
+        (b"", "invalid-request-body"),
+        (br#"{"messages":[]}"#, "invalid-request-schema"),
+        (br#"{"model":42,"messages":[]}"#, "invalid-request-schema"),
+        // A bare scalar is a `Category::Data` error too: `ChatCompletionRequest` is a struct, so
+        // any non-object is an `invalid type`. Measured, not assumed.
+        (br#""hello""#, "invalid-request-schema"),
+    ];
+
+    for (raw, expected) in cases {
+        let (status, body) = post_chat_bytes(raw).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "body {:?}: {body}", String::from_utf8_lossy(raw));
+        assert_eq!(body["error"]["code"], expected, "body {:?}: {body}", String::from_utf8_lossy(raw));
+        assert_eq!(body["error"]["type"], "invalid_request_error", "body {:?}: {body}", String::from_utf8_lossy(raw));
+    }
 }
 
 #[tokio::test]

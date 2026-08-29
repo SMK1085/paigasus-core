@@ -77,10 +77,19 @@ pub async fn chat_completions(State(state): State<AppState>, caller: Option<Exte
         return GatewayError::Internal.into_response();
     };
 
-    // Parse a COPY only to read `model` + `stream`; the ORIGINAL `body` bytes flow upstream verbatim.
+    // Parse a COPY only to read `model` + `stream`; the ORIGINAL `body` bytes flow upstream
+    // verbatim. SMA-588 splits the failure: `serde_json` classifies its own errors, so a body
+    // that PARSED but did not match the type is reported distinctly from one that could not be
+    // read at all. `Category::Io` cannot arise from a `&[u8]`, but is grouped with the
+    // unreadable cases so the match is exhaustive without a wildcard.
     let dto: ChatCompletionRequest = match serde_json::from_slice(&body) {
         Ok(dto) => dto,
-        Err(_) => return GatewayError::BadRequestBody.into_response(),
+        Err(e) => {
+            return match e.classify() {
+                serde_json::error::Category::Data => GatewayError::InvalidRequestSchema.into_response(),
+                serde_json::error::Category::Syntax | serde_json::error::Category::Eof | serde_json::error::Category::Io => GatewayError::BadRequestBody.into_response(),
+            };
+        }
     };
     let model = dto.model;
     let stream = dto.stream;
