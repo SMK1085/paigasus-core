@@ -2432,7 +2432,7 @@ affected_smoke_block_verdict() {
 # so it runs in a process substitution's own subshell where `exit 2` would exit only that
 # subshell. Echo a token and return, always (the rule affected_graph_wiring_verdict records).
 cargo_lock_step_verdict() { # $1 workflow file
-  local f="$1" line stripped window n_step n_moon n_end idx prev coe cond
+  local f="$1" line stripped window keys n_step n_moon n_end idx prev coe cond
 
   [ -f "$f" ] && [ -r "$f" ] || { echo 'no-file'; return; }
 

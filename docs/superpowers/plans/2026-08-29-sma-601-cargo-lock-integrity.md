@@ -17,7 +17,7 @@
 - Never use `--offline` or `--frozen` in the new gate: on a cold cargo cache `cargo metadata` needs the registry index, so `--offline` reports a false red.
 - `set -euo pipefail` is required in every Moon `script:` block — Moon takes a block's status from its last command.
 - **errexit does not propagate through `$( )`**: `foo || ec=$?` cannot observe an `exit 2` raised inside a command substitution that `foo` called, because POSIX suspends errexit for the left side of an AND-OR list. Use explicit `|| return 2` instead of relying on errexit.
-- Prefix local commands with `export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"` so moon/cargo/uv resolve to the repo-pinned versions.
+- Prefix local commands with `export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"` so the proto-managed tools — moon, uv, buf, nextest — resolve to the repo-pinned versions. `cargo` itself comes from rustup, which honours `rs/rust-toolchain.toml` whenever it is invoked inside the Rust workspace, so the export does not pin it.
 - Branch: `feature/sma-601-cargo-lock-integrity`. Conventional commits with a workspace scope.
 - Do NOT add a `repo:*` Moon task. Adding one would pull in eight registry obligations the spec deliberately avoids.
 

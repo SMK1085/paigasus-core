@@ -1330,6 +1330,14 @@ def self_test():
         (rs / "Dockerfile").write_text("RUN cargo build --release -p paigasus-iam\n")
         if not check_dockerfile_locked(Path(tmp)):
             failures.append("A8 did not fire on an unlocked Dockerfile cargo build")
+        # The FLOOR, for the reason REQUIRED_LOCKED_TASKS carries: a Dockerfile that stopped
+        # invoking cargo at all leaves this assertion covering nothing while still printing PASS.
+        # Untested until CodeRabbit's SMA-601 local review; the floor existed but nothing proved
+        # it fires, which is the same defect class the floor itself guards against.
+        (rs / "Dockerfile").write_text("FROM scratch\nCOPY --from=build /out /out\n")
+        rows = check_dockerfile_locked(Path(tmp))
+        if not any("A8 examines rs/Dockerfile" in r for r in rows):
+            failures.append("A8's Dockerfile floor did not fire on a file with no cargo call")
         (rs / "Dockerfile").unlink()
         try:
             check_dockerfile_locked(Path(tmp))
