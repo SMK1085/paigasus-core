@@ -71,11 +71,21 @@ path_field!(/// `{id}` on a role-grant route.
     RoleGrantId => "role_grant_id");
 path_field!(/// `{id}` on a dead-letter route.
     DeadLetterId => "dead_letter_id");
+path_field!(/// `{policy_id}` on a policy route, and `{id}` on the system-policy retire route —
+    /// both name the same wire field.
+    PolicyId => "policy_id");
 
 /// The `{field} must be a uuid` envelope response — the one construction point both extractors
 /// below use, so they cannot drift apart on status, code or shape.
 fn malformed_uuid(field: &'static str) -> Response {
     ApiError(TenancyError::InvalidUuid(field)).into_response()
+}
+
+/// The `{field} is not a valid path segment` envelope response — `malformed_uuid`'s sibling,
+/// built the same way and for the same reason: one construction point, so status, code and
+/// shape cannot drift between the extractors below.
+fn malformed_segment(field: &'static str) -> Response {
+    ApiError(TenancyError::InvalidPathSegment(field)).into_response()
 }
 
 /// Was this rejection raised because the CALLER's path was bad, or because the ROUTE is wrong?
@@ -147,6 +157,38 @@ impl<S: Send + Sync, F1: PathField, F2: PathField> FromRequestParts<S> for UuidP
         let first = Uuid::parse_str(&raw_first).map_err(|_| malformed_uuid(F1::NAME))?;
         let second = Uuid::parse_str(&raw_second).map_err(|_| malformed_uuid(F2::NAME))?;
         Ok(UuidPathPair { first, second, _marker: PhantomData })
+    }
+}
+
+/// A single NON-UUID path segment, reported as `F::NAME` when it is undecodable (SMA-588).
+///
+/// `UuidPath`'s sibling for the two routes whose `{id}` is an opaque policy id rather than a
+/// uuid — `authz::delete_policy` and `system_retirement::retire`. Both took axum's plain
+/// `Path<String>`, whose rejection escapes the error envelope entirely.
+///
+/// `Path<String>` cannot fail to PARSE, so the one client-side rejection reachable here is a
+/// segment whose percent-decoding is not valid UTF-8. On a one-segment route `F::NAME` is the
+/// only field it can be, so naming it is a fact rather than the guess `UuidPathPair` refuses to
+/// make. Everything axum classes 5xx — `MissingPathParams`, `WrongNumberOfParameters`,
+/// `UnsupportedType` — is a ROUTE bug and keeps axum's own response (module docs).
+///
+/// `FromRequestParts`, not `FromRequest`: `system_retirement::retire` takes this extractor
+/// FOLLOWED BY an `Option<EnvelopeJson<RetireBody>>` body, and only one `FromRequest` extractor
+/// is permitted per handler and it must come last.
+pub(crate) struct StringPath<F: PathField> {
+    pub value: String,
+    _marker: PhantomData<F>,
+}
+
+impl<S: Send + Sync, F: PathField> FromRequestParts<S> for StringPath<F> {
+    type Rejection = Response;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        match Path::<String>::from_request_parts(parts, state).await {
+            Ok(Path(value)) => Ok(StringPath { value, _marker: PhantomData }),
+            Err(rejection) if is_client_error(&rejection) => Err(malformed_segment(F::NAME)),
+            Err(rejection) => Err(rejection.into_response()),
+        }
     }
 }
 
@@ -248,11 +290,64 @@ mod tests {
         assert_eq!(String::from_utf8(bytes).unwrap(), format!("{valid} {valid}"));
     }
 
+    async fn ok_string(path: StringPath<PolicyId>) -> String {
+        path.value
+    }
+
+    /// The registry's `invalid-path-segment` wire string, resolved through the enum rather
+    /// than spelled as a literal — a literal in this `src/` file would put the module on
+    /// `ci/error-registry/check.py`'s MANIFEST and blind that gate here.
+    fn invalid_path_segment_wire() -> String {
+        use paigasus_proto::paigasus::common::v1::ErrorReason;
+        ErrorReason::InvalidPathSegment.as_wire_reason().expect("not the Unspecified sentinel")
+    }
+
+    /// SMA-588: a segment whose percent-decoding is not valid UTF-8 answers inside the error
+    /// envelope, naming its field. `%FF` is not a valid UTF-8 sequence, so axum raises
+    /// `FailedToDeserializePathParams` with a 400 status, which `is_client_error` admits.
+    #[tokio::test]
+    async fn an_undecodable_segment_answers_in_the_error_envelope() {
+        let (status, bytes) = probe(Router::new().route("/x/{id}", get(ok_string)), "/x/%FF").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["error"]["code"], invalid_path_segment_wire());
+        assert_eq!(body["error"]["message"], "policy_id is not a valid path segment");
+    }
+
+    /// An ordinary segment reaches the handler unchanged — including one that is not a uuid,
+    /// which is the whole point of this extractor existing beside `UuidPath`.
+    #[tokio::test]
+    async fn an_ordinary_string_segment_extracts() {
+        let (status, bytes) = probe(Router::new().route("/x/{id}", get(ok_string)), "/x/allow-root-read").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(String::from_utf8(bytes).unwrap(), "allow-root-read");
+    }
+
+    /// A ROUTER bug keeps its own 5xx rather than being relabelled as the caller's mistake —
+    /// the same rule `UuidPath` and `json.rs`'s `classify` follow. Three extractors, one rule.
+    #[tokio::test]
+    async fn a_string_path_router_arity_bug_keeps_its_own_server_error() {
+        let (status, bytes) = probe(Router::new().route("/x/{a}/{b}", get(ok_string)), "/x/one/two").await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(
+            serde_json::from_slice::<serde_json::Value>(&bytes).is_err(),
+            "axum's own plain-text rejection is preserved, not re-wrapped: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+    }
+
     /// A rename tripwire, nothing more: every marker's `NAME` is pinned to the literal its
     /// routes' errors carry, so renaming one is a deliberate edit here rather than a silent
     /// wire-contract change. It does NOT look at a route, so it cannot see a marker attached to
     /// the wrong handler — `each_segment_of_a_pair_names_its_own_field` and the integration
     /// coverage in `tests/` are what cover that.
+    ///
+    /// It also cannot see a marker with NO row here. `path_field!` is a `macro_rules!` macro, and
+    /// `macro_rules!` cannot accumulate across invocations, so there is no list to count against
+    /// — a count assertion here could only compare a literal to itself and would pass with every
+    /// row below deleted. Closing that would mean collapsing the nine declarations into one
+    /// registry-shaped invocation, which is a larger change than SMA-588 justifies. Stated rather
+    /// than papered over with a tautology (SMA-588, controller Ruling 1).
     #[test]
     fn the_path_field_names_are_stable() {
         assert_eq!(OrganizationId::NAME, "organization_id");
@@ -263,5 +358,6 @@ mod tests {
         assert_eq!(MembershipId::NAME, "membership_id");
         assert_eq!(RoleGrantId::NAME, "role_grant_id");
         assert_eq!(DeadLetterId::NAME, "dead_letter_id");
+        assert_eq!(PolicyId::NAME, "policy_id");
     }
 }
