@@ -463,6 +463,40 @@ def check_cargo_locked(projects, allow=ALLOW_UNLOCKED_CARGO, floor=REQUIRED_LOCK
     return rows
 
 
+def check_dockerfile_locked(root):
+    """Return A8 rows for rs/Dockerfile, which moon's task graph cannot see.
+
+    A narrow, line-oriented assertion rather than a general text scan: the file holds one cargo
+    line and no prose that mentions a cargo verb, so the false-positive rate that killed the
+    general scan does not apply. A missing file is infrastructure, never a silent pass.
+    """
+    path = root / "rs" / "Dockerfile"
+    if not path.is_file():
+        raise MoonOutputError(
+            f"{path} is absent — A8's Dockerfile assertion cannot be evaluated. If the file "
+            f"legitimately moved, update check_dockerfile_locked rather than deleting the check"
+        )
+    rows = []
+    seen = 0
+    for lineno, line in enumerate(path.read_text().splitlines(), 1):
+        stripped = line.split("#", 1)[0]
+        if not CARGO_INVOCATION_RE.search(stripped):
+            continue
+        seen += 1
+        if LOCKED_FLAG not in stripped:
+            rows.append(
+                f"rs/Dockerfile:{lineno} reaches cargo without {LOCKED_FLAG}: {stripped.strip()}"
+            )
+    # The floor, for the reason REQUIRED_LOCKED_TASKS carries: zero matches asserts nothing while
+    # still printing PASS.
+    if seen == 0:
+        rows.append(
+            "A8 examines rs/Dockerfile and found no cargo invocation at all — the image build "
+            "stopped compiling in this file, so this assertion now covers nothing"
+        )
+    return rows
+
+
 def check_ffi_inputs(projects, required=FFI_TASK_INPUTS, floor=REQUIRED_FFI_TASKS):
     """Return the A5 violation list: FFI-compiling tasks that do not key on the workspace files.
 
@@ -986,6 +1020,11 @@ def self_test():
     if not EXPECTED_FINDING_KEYS:
         failures.append("EXPECTED_FINDING_KEYS is empty — the findings floor would assert nothing")
     with tempfile.TemporaryDirectory() as tmp:
+        # collect_findings now folds check_dockerfile_locked(root) into a8, which requires a real
+        # rs/Dockerfile under root — write a locked one so this arity check stays about arity.
+        tmp_rs = Path(tmp) / "rs"
+        tmp_rs.mkdir()
+        (tmp_rs / "Dockerfile").write_text("RUN cargo build --release --locked -p paigasus-iam\n")
         collected = collect_findings(ok, crates, Path(tmp))
     if len(collected) != len(EXPECTED_FINDING_KEYS):
         failures.append(
@@ -1269,6 +1308,24 @@ def self_test():
     if check_cargo_locked(stray, allow={"k-ts:build": "napi has no --locked"},
                           floor=("k-ts:build",)):
         failures.append("A8 did not clear a wrapper task that carries an allowlist entry")
+
+    # A8-g: rs/Dockerfile is outside moon's view, so it takes a narrow text assertion of its own.
+    # One RUN line, one verb — none of the prose-collision risk a general text scan carries.
+    with tempfile.TemporaryDirectory() as tmp:
+        rs = Path(tmp) / "rs"
+        rs.mkdir()
+        (rs / "Dockerfile").write_text("RUN cargo build --release --locked -p paigasus-iam\n")
+        if check_dockerfile_locked(Path(tmp)):
+            failures.append("A8 reported a violation on a locked Dockerfile")
+        (rs / "Dockerfile").write_text("RUN cargo build --release -p paigasus-iam\n")
+        if not check_dockerfile_locked(Path(tmp)):
+            failures.append("A8 did not fire on an unlocked Dockerfile cargo build")
+        (rs / "Dockerfile").unlink()
+        try:
+            check_dockerfile_locked(Path(tmp))
+            failures.append("A8 did not raise infra on a missing rs/Dockerfile")
+        except MoonOutputError:
+            pass
 
     a1, a2, a3 = check(ok, crates)
     if (a1, a2, a3) != ([], [], []):
@@ -1628,7 +1685,7 @@ def collect_findings(projects, crates, root):
     """
     a1, a2, a3 = check(projects, crates)
     a5 = check_ffi_inputs(projects)
-    a8 = check_cargo_locked(projects)
+    a8 = check_cargo_locked(projects) + check_dockerfile_locked(root)
     # SMA-594. Derived, never hand-listed, for the same reason `self_test`'s `complete_inputs` is:
     # these two hints named three files while the checks already demanded four, so a developer who
     # followed the advice verbatim was left with a still-red gate. `/`-prefixed because that is the

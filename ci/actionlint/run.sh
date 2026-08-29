@@ -2108,6 +2108,7 @@ T_AFFECTED_SMOKE_REQUIRED_INPUTS=(
   'ts/packages/*/moon.yml'
   'ts/apps/*/moon.yml'
   'rs/**/Cargo.toml'
+  'rs/Dockerfile'
   'py/packages/*/pyproject.toml'
   'rs/crates/*/*/pyproject.toml'
   'rs/crates/*/*/package.json'

@@ -177,6 +177,11 @@ tasks:
       - 'ts/packages/*/moon.yml'
       - 'ts/apps/*/moon.yml'
       - 'rs/**/Cargo.toml'
+      # SMA-601 — A8 ASSERTS on this file (moon's task graph cannot see a Dockerfile RUN line),
+      # so without it the assertion is real but unreachable behind a cached PASS on exactly the
+      # PR that drops `--locked` from the image build. Same reasoning as the ci/actionlint/**/*
+      # entry below.
+      - 'rs/Dockerfile'
       - 'py/packages/*/pyproject.toml'
       - 'rs/crates/*/*/pyproject.toml'
       - 'rs/crates/*/*/package.json'
