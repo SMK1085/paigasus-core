@@ -1,0 +1,26 @@
+{
+  "cli_version": "0.10.3",
+  "checkpoint_id": "a02c38a13e9f",
+  "strategy": "manual-commit",
+  "branch": "feature/sma-fix-dependabot-181",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "rs/Cargo.lock"
+  ],
+  "sessions": [
+    {
+      "metadata": "/a0/2c38a13e9f/0/metadata.json",
+      "transcript": "/a0/2c38a13e9f/0/full.jsonl",
+      "compact_transcript": "/a0/2c38a13e9f/0/transcript.jsonl",
+      "content_hash": "/a0/2c38a13e9f/0/content_hash.txt",
+      "prompt": "/a0/2c38a13e9f/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 84,
+    "cache_creation_tokens": 267171,
+    "cache_read_tokens": 5766389,
+    "output_tokens": 29771,
+    "api_call_count": 42
+  }
+}

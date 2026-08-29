@@ -1,0 +1,5 @@
+Check Paigasus Polyglot in Linear, what from the MVP milestone backlog should we do next? can we combine some?
+
+---
+
+once done run the feature pipeline for SMA-596
