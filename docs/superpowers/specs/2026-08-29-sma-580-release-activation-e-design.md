@@ -316,7 +316,7 @@ Check 2 correct for the *next* unpublished sibling. Keep the rule; do not keep t
 A concern raised in review, and closed by measurement. `cargo publish --dry-run` of a name and
 version already on crates.io **succeeds** — it never consults the registry for its own version, and
 the "already exists" error comes from the server at upload, which a dry run skips. Measured with
-`ripgrep@14.1.0`, §11.4.
+`ripgrep@14.1.0`, §11.5.
 
 So `main` sitting at `0.1.0` after the release does not red `repo:publish-metadata` on every
 subsequent pull request.
@@ -702,18 +702,17 @@ reachable, and only three have a clean recovery.
 | `release` failed partway | Re-run it. `is_published` and the tag short-circuit converge |
 | crates.io done, PyPI failed | Re-run `publish-pypi`. `skip-existing: true` makes it converge |
 | crates.io done, npm main packages failed | Re-run `publish-npm`. The `npmstate` pre-check skips what landed |
-| **npm platform loop failed partway** | **No bound.** See below |
+| npm platform loop failed partway | Re-run `publish-npm`. `napi prepublish` skips each already-published platform package — measured, §11.4 |
 
-`release.yml`'s `npmstate` pre-check queries only `@paigasus/wasm` and `@paigasus/node-bindings`.
-The **seven platform packages** `napi prepublish` publishes have no equivalent guard. If the loop
-dies partway, a re-run re-enters `napi prepublish` and may hit npm's 403 *"cannot publish over the
-previously published versions"* on the ones that landed — the exact failure `npmstate` exists to
-prevent, on the packages it does not cover.
+`release.yml`'s `npmstate` pre-check queries only `@paigasus/wasm` and `@paigasus/node-bindings`,
+so the **seven platform packages** have no guard in the workflow. Revision 2 recorded that as an
+unbounded state. **It is bounded, in the publisher rather than the workflow** — measured, §11.4:
+`napi prepublish` catches npm's 403 per target and continues the loop.
 
-**This must be measured before step D:** does `@napi-rs/cli` 3.7.2's `prepublish` skip an
-already-published platform package, or abort? If it aborts, that is a `release.yml` fix, and §10
-asks whether it lands before the flip. §9.2 excludes `release.yml` job-graph changes; this is the one
-candidate to overrule that.
+So `publish-npm` is re-runnable in every partial state, and **no `release.yml` change is needed**.
+Two limits worth keeping: the guard is `@napi-rs/cli`'s, not this repository's, so a napi upgrade
+could remove it silently; and it matches on the error **message text**, so an npm wording change
+would break it. Neither is gated.
 
 **Rollback reality.** crates.io supports `cargo yank` only — never delete, never reuse. PyPI
 supports delete but never reuse. npm supports unpublish within 72 hours only. A wrong publish is a
@@ -754,13 +753,10 @@ Both are temporary by decision. Neither is enforced by any gate, which is why th
 
 ### 10.2 Still open
 
-1. **Does the §8.1 npm platform-loop guard land before the flip?** It is a `release.yml` change,
-   which §9.2 excludes. The measurement of `@napi-rs/cli` 3.7.2's `prepublish` behaviour decides
-   whether that exclusion is safe. **This is the last blocking unknown.**
-2. **Does release-plz's registry query skip yanked versions?** If it does not, `0.1.0-alpha.1`
+1. **Does release-plz's registry query skip yanked versions?** If it does not, `0.1.0-alpha.1`
    stays the baseline forever and §2.4's analysis re-applies at `0.2.0`. If it does, the baseline
    silently becomes "unpublished" again after step J. Knowable before step J, either way.
-3. **Does one `crates-io-auth-action` OIDC exchange yield a token valid for all three crates?** The
+2. **Does one `crates-io-auth-action` OIDC exchange yield a token valid for all three crates?** The
    action runs once; release-plz publishes three; three separate trusted-publisher configs exist.
 
 ---
@@ -801,14 +797,33 @@ The last row is why §2.2.4 removes the flag: it converts the guard into a silen
 - `cargo publish --dry-run -p paigasus-proto-derive -p paigasus-proto`: **succeeds**, cargo
   resolves the order itself and both reach *"aborting upload due to dry run"*.
 
-### 11.4 A dry run of an already-published version succeeds
+### 11.4 `napi prepublish` skips an already-published platform package
+
+`@napi-rs/cli` 3.7.2, `dist/index.js:3451-3463`. Inside the per-target loop:
+
+```js
+try {
+  const output = execSync(`${npmClient} publish`, { cwd: pkgDir, ... })
+  process.stdout.write(output)
+} catch (e) {
+  if (e instanceof Error && e.message.includes("You cannot publish over the previously published versions")) {
+    console.info(e.message)
+    debug$3.warn(`${pkgDir} has been published, skipping`)
+  } else throw e
+}
+```
+
+It catches that one error, logs, and **continues the loop**. Any other error rethrows. So the
+platform loop is idempotent on re-run. Closes revision 2's one unbounded partial-failure state.
+
+### 11.5 A dry run of an already-published version succeeds
 
 A scratch crate declaring `name = "ripgrep"`, `version = "14.1.0"` — definitively on crates.io —
 runs `cargo publish --dry-run` to *"aborting upload due to dry run"*. Confirms §2.8.
 
 ---
 
-## 12. What changed in revision 2
+## 12. What changed
 
 Folded in from the adversarial review, after independent measurement where possible.
 
@@ -829,7 +844,7 @@ derive→proto publish, tag rulesets and the observation-gate timeout, plus §8.
 table and its one unbounded state.
 
 **Closed by measurement:** tag protection is absent (§1.3); `repo:publish-metadata` Check 2 does
-not red `main` after the release (§2.8, §11.4).
+not red `main` after the release (§2.8, §11.5).
 
 **Corrected:** §1.1's npm row measured names that mostly never publish; §2.7's reason expires at
 step I; step J now verifies before yanking; the release PR is identified by JSON, not by number
@@ -856,6 +871,10 @@ trigger: the flag still gates every build job, `approve-release` still requires 
 approval, and the trigger is removed at step J. §9.1 now tracks both temporary items — the
 dispatch trigger and `NPM_TOKEN` — with their removal conditions, because **no gate enforces
 either removal**.
+
+**Closed by measurement:** `@napi-rs/cli` 3.7.2's `prepublish` skips an already-published platform
+package rather than aborting (§11.4), so §8.1's one unbounded partial-failure state is bounded and
+**no `release.yml` job-graph change is needed**. That was the last blocking unknown.
 
 Checked, not assumed: no gate in `ci/` asserts anything about `release.yml`'s trigger set.
 `repo:actionlint`'s branches-filter extractor has nothing to parse in a bare `workflow_dispatch`,
