@@ -2,7 +2,7 @@
 
 # SMA-603 — a `plan` job for `release.yml`
 
-**Status:** design, approved 2026-08-29
+**Status:** design, revision 2 (revision 1's approach was disproven by measurement M6 below)
 **Issue:** [SMA-603](https://linear.app/smaschek/issue/SMA-603/release-every-push-to-main-now-builds-the-full-matrix-and-waits-at-the)
 **Related:** SMA-579 (the gated release job), SMA-580 (the first live release), SMA-602 (a
 version-override input for re-dispatch recovery)
@@ -21,38 +21,17 @@ cancel the run by hand. Observed on run 33265567805, the merge of PR 187.
 The interim mitigation is to keep the flag `false` between releases and flip it on only for a
 release. Nothing enforces that discipline.
 
-## 2. What was measured, and what it overturns
-
-`release.yml`'s header records SMA-579's decision not to build a `plan` job:
-
-> Measured against the real repository: the dry-run FAILS every time, with `no matching package
-> named paigasus-proto-derive` … That failure is permanent until a LIVE release publishes the
-> derive crate first.
-
-The issue argues that condition is now satisfied, because `paigasus-proto-derive@0.1.0` is on
-crates.io and `cargo publish --dry-run -p paigasus-proto` now exits 0.
-
-**That argument is wrong, and the measurements below show why.** The evidence in the issue was
-taken at the *current* version, 0.1.0, where the derive crate at 0.1.0 is indeed on the index.
-It does not transfer to a release. release-plz's `version_group` bumps the whole kernel family
-in lockstep, and `rs/Cargo.toml` pins the in-tree dependency with a version requirement:
-
-```toml
-paigasus-proto-derive = { path = "crates/libs/paigasus-proto-derive", version = "0.1.0" }
-```
-
-So at the next release `paigasus-proto` at `0.1.1` requires `paigasus-proto-derive ^0.1.1`,
-which reaches the index only *during* the live publish. **The derive blocker is permanent.**
-SMA-579's header was right about the mechanism. It was wrong only about the remedy.
-
-### 2.1 The four measurements
+## 2. Measurements
 
 All taken 2026-08-29 against release-plz 0.3.158, the proto-pinned version, with
 `CARGO_REGISTRY_TOKEN` unset. `--dry-run` is source-verified never to reach
-`create_git_tag_and_release`, so nothing was published and no tag was cut.
+`create_git_tag_and_release`, so nothing was published and no tag was cut. M3 and M6 ran in
+isolated clones under the scratchpad, never in the worktree.
 
-**M1 — the dry-run needs a *valid* token, not merely a present one.** With
-`GIT_TOKEN` set to an invalid value, on `main` at `a73d13c`:
+### 2.1 The dry-run
+
+**M1 — the dry-run needs a *valid* GitHub token, not merely a present one.** With `GIT_TOKEN`
+set to an invalid value, on `main` at `a73d13c`:
 
 ```
 ERROR Response body: {"message": "Bad credentials", "status": "401"}
@@ -61,67 +40,102 @@ Caused by: HTTP status client error (401 Unauthorized) for url
 EXIT=1
 ```
 
-This extends what CLAUDE.md records. The entry says `get_git_client()` runs unconditionally.
-It does more than construct a client: it makes a live, authenticated `GET
-/repos/{owner}/{repo}/commits/{sha}/pulls`.
+This extends what CLAUDE.md records. The entry says `get_git_client()` runs unconditionally. It
+does more than construct a client: it makes a live, authenticated
+`GET /repos/{owner}/{repo}/commits/{sha}/pulls`.
 
-**M2 — the empty case exits 0 and reports an empty array, in about 0.5 s.** Same tree, with a
-valid token:
+**M2 — nothing to release: exit 0, empty array, about 0.5 s.** Same tree, valid token:
 
 ```
-INFO paigasus-kernel 0.1.0: Already published - Tag paigasus-kernel-v0.1.0 already exists
-INFO paigasus-proto-derive 0.1.0: Already published - Tag paigasus-proto-derive-v0.1.0 already exists
-INFO paigasus-proto 0.1.0: Already published - Tag paigasus-proto-v0.1.0 already exists
-{"releases":[]}
+stderr: INFO paigasus-kernel 0.1.0: Already published - Tag paigasus-kernel-v0.1.0 already exists
+stderr: INFO paigasus-proto-derive 0.1.0: Already published - Tag paigasus-proto-derive-v0.1.0 already exists
+stderr: INFO paigasus-proto 0.1.0: Already published - Tag paigasus-proto-v0.1.0 already exists
+stdout: {"releases":[]}
 EXIT=0
 ```
 
-Note *why* it exits 0: it short-circuits on "tag already exists" and never invokes
-`cargo publish --dry-run` at all. The derive resolution is never attempted in this case.
+It short-circuits on **tag existence** and never invokes `cargo publish --dry-run`.
 
-**M3 — the non-empty case exits 1, in about 6 s.** Measured in an isolated clone with the three
-version-group packages bumped to 0.1.1 and committed (`cargo publish` refuses a dirty tree,
-which is M3's own first finding):
+**M3 — a `proto`-group release: exit 1, about 6 s.** Isolated clone, all three version-group
+packages bumped to 0.1.1 and committed (`cargo publish` refuses a dirty tree, M3's own first
+finding):
 
 ```
-INFO paigasus-kernel 0.1.1: due to dry, skipping the following: ["cargo registry upload", …]
-INFO paigasus-proto-derive 0.1.1: due to dry, skipping the following: ["cargo registry upload", …]
-ERROR failed to release package
-Caused by: failed to publish paigasus-proto: failed to prepare local package for uploading
+ERROR failed to publish paigasus-proto: failed to prepare local package for uploading
   Caused by: failed to select a version for the requirement `paigasus-proto-derive = "^0.1.1"`
     candidate versions found which didn't match: 0.1.0
-EXIT=1
+EXIT=1     (stdout empty — the JSON line never appears)
 ```
 
-Nothing is printed on stdout in this case. The JSON line never appears.
-
 **M4 — the dry-run requires HEAD to be on a branch with an upstream.** A detached checkout dies
-with `cannot determine current branch … fatal: HEAD does not point to a branch`. This does not
-affect CI: `actions/checkout` on a `push` or `workflow_dispatch` event checks out the branch ref
-and creates a local branch tracking `origin/<branch>`. It is recorded because it will bite
-anyone who reproduces M2 or M3 by checking out a SHA.
+with `cannot determine current branch … fatal: HEAD does not point to a branch`. Recorded
+because it will bite anyone reproducing M2/M3/M6 by checking out a SHA. It does not affect CI:
+`actions/checkout` creates a local branch tracking `origin/<branch>`.
 
-### 2.2 Why the job is viable anyway
+**M5 — stdout carries only the JSON.** Streams captured separately: stdout is exactly the
+16-byte line `{"releases":[]}`; every `INFO` line goes to stderr. Revision 1 asserted this
+without evidence.
 
-SMA-579's design failed because it read the dry-run as a **pass/fail gate**: any non-zero exit
-would red the whole graph on every push. M2 and M3 separate cleanly on a different reading:
+**M6 — THE DECISIVE ONE. The dry-run reports an empty `releases` array even when it would
+publish.** Isolated clone with **only** the `kernel` group bumped to 0.1.1 — `paigasus-kernel`
+is a publish group of one with no in-tree dependency, so M3's derive blocker cannot apply:
 
-| Outcome | Meaning | Decision |
-| --- | --- | --- |
-| exit 0 **and** `.releases` is empty | release-plz itself would do nothing | **skip** the matrix |
-| exit non-zero | inconclusive — includes the permanent derive failure, a 401, an outage | **build** |
-| exit 0 **and** `.releases` is non-empty | a real release is pending | **build** |
-| stdout is absent or unparsable | inconclusive | **build** |
+```
+stderr: INFO paigasus-kernel 0.1.1: due to dry, skipping the following:
+        ["cargo registry upload", "creation of tag 'paigasus-kernel-v0.1.1'", "creation of git release"]
+stderr: INFO paigasus-proto-derive 0.1.0: Already published - Tag …-v0.1.0 already exists
+stderr: INFO paigasus-proto      0.1.0: Already published - Tag …-v0.1.0 already exists
+stdout: {"releases":[]}
+EXIT=0, 3 s
+```
 
-Read this way the permanent derive failure is not a defect. It is the *signal for the case where
-we must build anyway*. The job never needs the dry-run to succeed. It needs only the empty,
-exit-0 outcome to be trustworthy as "nothing to release", and M2 measures exactly that.
+release-plz states it **would publish `paigasus-kernel` and cut `paigasus-kernel-v0.1.1`**, and
+reports `{"releases":[]}` at exit 0. In dry mode the `releases` array is never populated: it
+records *performed* releases, and a dry run performs none.
 
-The one failure that matters is a **false skip**, which requires the dry-run to succeed and lie.
-For that to happen release-plz would have to report an empty `releases` array while a live
-`release-plz release` would publish something — that is, it would have to disagree with itself,
-since the plan job runs the same command in the same working directory against the same
-`rs/release-plz.toml`.
+### 2.2 What M6 kills
+
+Revision 1 read the dry-run as a three-way signal and skipped on `exit 0 AND empty releases`.
+M6 shows that conjunction is **true in both** the "nothing to release" state (M2) and the
+"a kernel-group release is pending" state (M6). Revision 1 argued a false skip would require
+release-plz to "succeed and lie". It does not have to: the field it was being asked to
+interpret is simply not populated in dry mode.
+
+Approach A would therefore have silently, greenly and permanently skipped every kernel-group
+release — the exact catastrophic outcome the design exists to prevent. It is rejected, and §7
+records it so nobody reintroduces it.
+
+Two corrections to revision 1 follow from the same reading:
+
+- **`rs/release-plz.toml` has two version groups, `kernel` and `proto`.** So "the derive blocker
+  is permanent" is true only of the `proto` group. A `kernel`-only release never touches the
+  derive crate.
+- SMA-579's header conclusion — that a dry-run-based `plan` job is not viable — **stands**, for
+  a better reason than the one it gives. The blocker is not only the derive resolution. It is
+  that the dry-run's structured output cannot distinguish the two states at all.
+
+### 2.3 The signal that does work
+
+M2 and M6 show release-plz deciding on **tag existence**, before any registry or cargo work, and
+saying so: `Already published - Tag <pkg>-v<version> already exists` versus `due to dry,
+skipping … creation of tag '<pkg>-v<version>'`. The predicate the `plan` job needs is exactly
+that, and it is answerable from local state:
+
+> For every releasable package, does the tag `<package>-v<version>` already exist?
+
+CLAUDE.md records the matching measurement from the first live release: release-plz **only tags
+what it publishes** — three tags, not six. The repository carries exactly
+`paigasus-kernel-v0.1.0`, `paigasus-proto-v0.1.0`, `paigasus-proto-derive-v0.1.0`, confirmed by
+`git tag -l`.
+
+This needs no token, no network, no `get_git_client()`, and no `cargo`. It is a pure function of
+`rs/release-plz.toml`, the crate manifests and the tag list — so it can be unit-tested with a
+fixture table, which is how every other control in this repo is built and is what would have
+caught revision 1's defects before they reached a spec.
+
+Its cost is that it restates release-plz's releasable set in a second place. §3.2 answers that
+by **deriving** the set from `rs/release-plz.toml` rather than hard-coding it, and asserting the
+derivation in CI.
 
 ## 3. Design
 
@@ -131,222 +145,289 @@ since the plan job runs the same command in the same working directory against t
 plan ──> { wheels, prebuild, proto-dist } ──> approve-release ──> release ──> { publish-pypi, publish-npm }
 ```
 
-`plan` becomes the single holder of the literal flag gate:
+`plan` becomes the single holder of the literal flag gate. `wheels`, `prebuild` and `proto-dist`
+drop their own literal gate and take `needs: [plan]` plus the fail-safe condition. `release-pr`
+is untouched: it stays push-only, on the `release-pr` environment, and in `UNGATED_JOBS`.
+
+**The flag still reaches every job.** Flag off → `plan` skips → a job whose `needs:` dependency
+skipped is itself skipped → everything below skips. `release_guard.py`'s `is_gated`
+(`release_guard.py:185`) accepts this: the three build jobs are no longer gated directly, but
+every `needs:` entry resolves to `plan`, which carries the literal `GATE_EXPR`.
+
+The job in full — revision 1 omitted the `outputs:` block, without which the whole design is
+inert, and omitted `runs-on`/`timeout-minutes`:
 
 ```yaml
-plan:
-  if: vars.PAIGASUS_RELEASE_ENABLED == 'true'
+  plan:
+    name: decide whether anything is releasable
+    if: vars.PAIGASUS_RELEASE_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      # A STEP output is not a JOB output. Without this mapping every
+      # `needs.plan.outputs.nothing_to_release` below is the empty string. Guard V9 asserts
+      # both this key and that `steps.decide` names a step that exists in this job.
+      nothing_to_release: ${{ steps.decide.outputs.nothing_to_release }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@…  # v7.0.1, pinned as everywhere else
+        with:
+          # LOAD-BEARING. The tags ARE the signal. A shallow checkout has no tags, which
+          # decide.sh detects and reports as inconclusive rather than as "nothing to release".
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Decide
+        id: decide
+        env:
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+        run: ci/release-plan/run.sh --github-output
 ```
 
-`wheels`, `prebuild` and `proto-dist` drop their own literal gate and take:
+No credential, no `environment:`, no network. This also removes revision 1's contradiction with
+the file header's claim that every credential in this workflow is an environment secret.
 
-```yaml
-  needs: [plan]
-  if: needs.plan.outputs.nothing_to_release != 'true'
+### 3.2 `ci/release-plan/` — the decision, as a tested script
+
+Layout mirrors `ci/workflow-credentials/` (SMA-593): a **dedicated zero-dependency uv project**,
+not `uv run --project py`, which would compile a PyO3 cdylib on every run.
+
+```
+ci/release-plan/
+  release_plan.py     the decision + its fixture table
+  run.sh              mode dispatch, exit-code mapping, $GITHUB_OUTPUT
+  pyproject.toml      requires-python >=3.12, dependencies = []   (tomllib is stdlib)
+  uv.lock
+  README.md           limitations, in the style of ci/actionlint/README.md
 ```
 
-`release-pr` is untouched. It stays push-only, stays on the `release-pr` environment, and stays
-in `release_guard.py`'s `UNGATED_JOBS`. It must keep proposing the release PR while the flag is
-off, so it must not depend on `plan`.
+**The decision, as a pure function** of `(event_name, release_plz_toml, crate_manifests, tags)`:
 
-**The flag still reaches every job.** With the flag off, `plan` skips; a job whose `needs:`
-dependency skipped is itself skipped, regardless of its own `if:`. So the three build jobs skip,
-`approve-release` skips, and everything below it skips. `release_guard.py`'s `is_gated` accepts
-this: the three build jobs are no longer gated directly, but every one of their `needs:` entries
-resolves to `plan`, which carries the literal `GATE_EXPR`.
+1. If `event_name != "push"` → `false`. A `workflow_dispatch` always builds (§3.4).
+2. Derive the releasable set from `rs/release-plz.toml`: every `[[package]]` with `release` not
+   `false` **and** `publish` not `false`. That is the set release-plz tags, per CLAUDE.md's
+   measured "it only tags what it publishes".
+3. Resolve each name to its manifest by walking `rs/crates/**/Cargo.toml` and reading
+   `[package] name`, then read that manifest's literal `[package] version`. A `version.workspace
+   = true`, a missing manifest, or a duplicate name → **inconclusive**.
+4. Floor: if the repository reports **zero** tags at all, → **inconclusive**. This is what stops
+   a shallow checkout reading as "everything is already released".
+5. Floor: if `rs/release-plz.toml` sets `git_tag_name` anywhere, → **inconclusive**. The
+   `<package>-v<version>` format is release-plz's default and step 6 assumes it.
+6. `true` if and only if every releasable package's `<name>-v<version>` tag exists. Otherwise
+   `false`.
 
-This also removes two of the three copies of the gate expression. The file header's current
-"three ways, not one" note becomes "two ways": literal on `plan`, transitive everywhere else.
+Every inconclusive outcome yields `false`, which builds.
 
-### 3.2 The decision
+**Modes**, matching the repo's gate idiom:
 
-`nothing_to_release` is `'true'` on the conjunction of three conditions and on nothing else:
+- default — print `nothing_to_release=true|false`; `run.sh --github-output` appends it to
+  `$GITHUB_OUTPUT`.
+- `--self-test` — the fixture table, in-process.
+- `--negative-control` — assert the checker reports `false` on a fixture that must not skip.
+- `--assert` — the CI-side assertions of §3.5.
 
-1. `github.event_name == 'push'`, and
-2. the dry-run exited 0, and
-3. `.releases | length` parsed to 0.
+**`run.sh`'s exit-code contract, and why it is not the usual one.** `workflow_credentials.py`
+exits 3 for an assertion failure and `run.sh` maps 3 → 1 and everything else → 2, so a `uv`
+resolution failure cannot read as a real violation. Here the **runtime** path inverts that
+deliberately: on any non-zero status from the checker, `run.sh --github-output` writes
+`nothing_to_release=false`, prints a `::warning::` naming the status, and **exits 0**. A broken
+decision must not fail the `plan` job, because a failed `plan` job skips its dependents (§3.4) —
+it must build. The `--self-test`, `--negative-control` and `--assert` modes keep the normal
+contract and exit non-zero, and CI runs those (§3.5).
 
-Per the approved answer to the dispatch question, **a `workflow_dispatch` always builds.** A
-dispatch is a deliberate act meaning "release now". Keeping it unconditional preserves today's
-behaviour as an escape hatch — including the SMA-580 case where the tags were already cut, the
-dry-run therefore reports empty, and a human still needs the artifacts built. Making the
-dispatch path skip would remove the only lever left in that state, which SMA-602 tracks
-separately.
+**The producer polarity is covered by the fixture table**, not by a pinned shell line. Revision
+1 put the decision in an inline `run:` block, where swapping two `echo` lines inverted the
+result with no check anywhere. Moving it into a fixture-tested function is what closes that,
+and it is why this is a script rather than a workflow step.
 
-**The polarity is carried by the comparison operator, not by a code path.** The output is named
-for the *skip* condition and is tested with `!=`, so any value other than the literal `'true'`
-builds: `'false'`, the empty string, an unset output because the step never ran, an unset output
-because the job died. The alternative naming — `should_build` tested with `== 'true'` — fails
-closed, and a job that dies before writing its output would silently drop a release. That is the
-exact failure the issue's Risks section names, so the naming is load-bearing and V9 (§3.4) pins
+### 3.3 Guard: V8 and V9
+
+**V8 — the approval boundary, asserted in both directions.** Implemented with the existing
+`job_publishes()` (`release_guard.py:236`), which already reads `run` **and** `uses`, splits per
+command segment, and exempts a segment containing `--dry-run`. Revision 1 re-derived this loop
+over `run:` only and would have missed `uses: pypa/gh-action-pypi-publish`.
+
+- **V8a, floor:** a job named `approve-release` exists and declares an `environment:` key.
+  Without it the rule's premise is gone and the check passes vacuously — the shape of fix round
+  1's Minor 9.
+- **V8b:** no job in `gated_path_jobs("approve-release", jobs)` may satisfy `job_publishes()`.
+- **V8c, the complement:** every job satisfying `job_publishes()` must have `approve-release` in
+  its own `gated_path_jobs(job_id, jobs)`. Without this, deleting `approve-release` from
+  `release`'s `needs:` at `release.yml:409` removes the only human gate in the file and passes
+  V1, V3, V4, V7 and V8a/V8b.
+- **V8d, callees:** `check_called` (`release_guard.py:381`) *permits* a publish step in a
+  `workflow_call`-only workflow, and the fixture at `:477` asserts that is clean. But `wheels`
+  and `prebuild` are `uses:` jobs **upstream of the approval gate**. So for a `uses: ./…` job in
+  the pre-approval set, the callee is loaded and publishing is forbidden there regardless of its
+  triggers. This closes a live publish-before-approval path that predates this change.
+
+**V9 — the plan job's contract.**
+
+- **V9a, floor:** a job named `plan` exists and at least one job names it in `needs:`. V9 keys on
+  that literal name, so without the floor a rename leaves it iterating an empty set.
+- **V9b:** every job naming `plan` in `needs:` carries `if:` in one of exactly two accepted
+  literal forms — `needs.plan.outputs.nothing_to_release != 'true'` and its `${{ }}` wrapping.
+  Literal pinning, as V2 pins `GATE_EXPR`. `== 'true'` (inverted) and `== 'false'` (fails closed
+  on an unset output) both red.
+- **V9c:** `plan` declares `outputs.nothing_to_release`, and the `steps.<id>` it interpolates
+  names a step that exists in `plan`. Catches the near-miss revision 1 could not: a typo'd step
+  id yields `''` forever, silently.
+- **V9d:** `plan`'s decision step invokes `ci/release-plan/run.sh`. Without it V9c passes on an
+  inline `echo nothing_to_release=true`.
+
+**Constraint on the invocation.** `command_segments` is per **physical line**
+(`release_guard.py:214`), so any command in this file must not be split across a backslash
+continuation — the first fragment would be judged without its flags. `release.yml:808` already
+records this class for `napi prepublish`. A comment says so at the plan step.
+
+### 3.4 Two corrections revision 1 got wrong
+
+**A failed `plan` job skips its dependents; it does not build them.** GitHub applies an implicit
+`success()` to a job-level `if:` containing no status function. Revision 1 claimed "an unset
+output because the job died → builds". That is false. The run is red, so this is not a *silent*
+failure — but `plan` is a new single point of failure ahead of the entire release path, and
+`continue-on-error` cannot mitigate it (V4 rejects any value but literal `false` on a gated
+path). Mitigations, all in the design: the job has two steps and no toolchain, it makes no
+network call, it takes seconds, and it carries `timeout-minutes: 10`.
+
+**The `workflow_dispatch` trigger becomes permanent, and that is a decision this change makes.**
+§3.2 step 1 makes a dispatch always build; that is the lever for the state where tags are cut
+but a registry is missing (SMA-580's npm half). But `release.yml:60` and
+`RUNBOOK-release-activation.md:696` both instruct removing the trigger once the first release
+has published — which happened on 2026-08-29 — and no gate enforces or prevents that removal.
+Leaving both statements standing would leave the design's stated recovery lever scheduled for
+deletion. So this change **declares the trigger permanent** and amends both the trigger comment
+and the runbook row accordingly. The file header's authorization argument is unaffected: it
+states the boundary is the environments and their branch policies, explicitly *not* the trigger.
+
+This is the one decision in the spec that is a judgement call rather than a measurement, and it
+is flagged for review as such.
+
+### 3.5 Where the new code is exercised
+
+`release_plan.py` is invoked the way `release_guard.py` already is — from `ci/actionlint/run.sh`,
+not as a new `repo:*` Moon task. A new Moon gate would carry five registry obligations (the
+`T=(…)` array, the marker-delimited command in CLAUDE.md, `SELF_SCHEDULED_GATES`,
+`SELF_TASK_EXPECTED_GLOBS`, `T_AFFECTED_SMOKE_REQUIRED_INPUTS`); this route carries two, and
+`repo:actionlint` already has `inputs: ['**/*']`, so the check runs on every PR.
+
+- **`ci/actionlint/run.sh` gains check 11**, running `--self-test`, `--negative-control` and
+  `--assert` under an explicit `set -euo pipefail`, and routing **every** exit status of its
+  wrapper. CLAUDE.md records why: `run.sh` is `set -uo pipefail` with no `-e`, so an unrouted
+  status leaves the output empty and the check asserts nothing — measured at rc 127 from a
+  missing `uv`.
+- **`SELF_TEST_COUNT` goes 12 → 13**, and `ci/actionlint/run.sh` gains a
+  `release_plan_self_test` table. The gate asserts invocations *and* definitions.
+- **`ACTIONLINT_SH_CALL_SITES`** in `ci/affected-graph/ci_targets.py` gains check 11's call
+  sites as whole lines, exactly as `run_self_tests` and `selftest_mutation_battery` are pinned.
+
+`--assert` mode asserts, against the real repository: the derived releasable set equals a pinned
+`EXPECTED_RELEASABLE = {paigasus-kernel, paigasus-proto, paigasus-proto-derive}` (strict
+equality, the `EXPECTED_PR_SUBJECTS` idiom — a newly publishable crate reds until someone
+re-baselines deliberately); every member resolves to exactly one manifest with a literal
+version; and `git_tag_name` is unset. The **runtime** path deliberately does not use the pinned
+set — it derives, so a new publishable crate is honoured immediately even if the re-baseline was
+forgotten. The pin exists to force that re-baseline to be conscious, not to drive the decision.
+
+### 3.6 The guard's fixture corpus
+
+Not additive. `_OK_MAIN` (`release_guard.py:416`) already contains a `plan` job, contains **no**
+`approve-release` job, and its `release` job carries `needs: [plan]` with no `if:` — so V8a reds
+every `kind == "main"` row and V9b reds the *healthy control*. **34 of the 44 `FIXTURES` rows are
+`.replace()` calls anchored to `_OK_MAIN`'s exact text**, plus `_critical2_end_to_end`
+(`release_guard.py:621`), which builds its YAML from it.
+
+`_OK_MAIN` is therefore restructured to mirror the real graph — `release-pr`, `plan` (gated,
+with `outputs:`), `build` (`needs: [plan]` + the accepted `if:`), `approve-release` (with
+`environment:`), `release` (`needs: [build, approve-release]`) — and all 34 anchors are
+re-derived. This is the largest single piece of work in the change and the plan must budget for
 it.
 
-`continue-on-error` cannot be used to survive M3's non-zero exit: `release_guard.py` V4 rejects
-any value but literal `false` on a gated path, and the reason it does — a failed publish
-counting as success for `needs:` — applies here too. The step therefore captures the status in
-shell:
+### 3.7 Documentation
 
-```yaml
-      - name: Decide whether anything is releasable
-        id: plan
-        working-directory: rs
-        env:
-          GIT_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          EVENT_NAME: ${{ github.event_name }}
-        run: |
-          set -euo pipefail
-          OUT=""
-          EC=0
-          OUT="$(release-plz release --dry-run --output json)" || EC=$?
-          echo "release-plz exit status: $EC"
-          echo "release-plz stdout: $OUT"
-
-          N=-1
-          if [ "$EC" -eq 0 ]; then
-            N="$(printf '%s' "$OUT" | jq -r '.releases | length' 2>/dev/null || echo -1)"
-          fi
-
-          if [ "$EVENT_NAME" = "push" ] && [ "$EC" -eq 0 ] && [ "$N" = "0" ]; then
-            echo "nothing_to_release=true" >> "$GITHUB_OUTPUT"
-            echo "::notice::Nothing to release — skipping the build matrix."
-          else
-            echo "nothing_to_release=false" >> "$GITHUB_OUTPUT"
-          fi
-```
-
-Three details in that block are deliberate. `set -euo pipefail` with `|| EC=$?` is safe here
-because the command is invoked directly, not through a nested `$( )` whose exit status errexit
-would suspend. `N` is initialised to `-1` and only computed on `EC -eq 0`, so an unparsable or
-absent stdout can never read as zero. The raw exit status and stdout are echoed so a log reader
-can tell M2 from M3 without re-running anything.
-
-### 3.3 Credential
-
-`GIT_TOKEN: ${{ secrets.GITHUB_TOKEN }}`, with job-level permissions:
-
-```yaml
-    permissions:
-      contents: read
-      pull-requests: read
-```
-
-Job-level `permissions:` replaces the workflow-level block rather than merging with it, so
-`contents: read` is restated. M1 shows the one API call the dry-run makes is
-`GET /repos/{owner}/{repo}/commits/{sha}/pulls`, which `pull-requests: read` covers.
-
-This deliberately avoids both a GitHub App token and an `environment:` key. `plan` sits upstream
-of `approve-release`, and putting a write-capable credential or an approval-bearing environment
-there would place a credential before the one human checkpoint in the file.
-
-**This is the design's single unverified premise.** Whether `GITHUB_TOKEN` satisfies that call
-cannot be tested locally; it is only observable on a real run. The consequence of being wrong is
-bounded and is in the safe direction: the job 401s exactly as M1 shows, exits non-zero, and
-`!= 'true'` builds. The workflow degrades to today's behaviour and never to a silent skip. If it
-does turn out insufficient, the follow-up is to give `plan` the App token on its own
-environment, which is a strictly larger change and is out of scope here.
-
-### 3.4 Guard
-
-Approach A puts the literal command `release-plz release` into a job that runs **upstream of the
-approval gate**. Dropping `--dry-run` is a one-word edit whose effect is to publish to crates.io
-and cut tags before any human approves — the split state that `release.yml`'s job-order comment
-exists to prevent. `PUBLISH_MARKERS` already matches that command, but `check_main` applies the
-detector only to `UNGATED_JOBS` members, so a gated `plan` job is invisible to it today. The
-guard work is therefore mandatory, not optional.
-
-Two new verdicts in `ci/actionlint/release_guard.py`. Both get rows in the existing
-`release_guard` self-test table, so `ci/actionlint/run.sh`'s `SELF_TEST_COUNT` stays 12 — no
-thirteenth `*_self_test` table is added.
-
-**V8 — nothing upstream of the approval gate may publish for real.**
-
-1. Floor: a job named `approve-release` exists and declares an `environment:` key. Without this
-   the rule's premise is gone and the check would pass vacuously — the same failure shape as
-   fix round 1's Minor 9 (an empty `jobs:` mapping returning a false-clean result).
-2. For every job in `gated_path_jobs("approve-release", jobs)` — the job plus its whole `needs:`
-   path, so `plan`, `wheels`, `prebuild` and `proto-dist` — every `run:` line is split with the
-   existing `command_segments`, and a segment matching `_PUBLISH_RE` must also contain
-   `--dry-run` **in that same segment**.
-
-Per-segment scoping is what stops a decoy: a `--dry-run` mentioned in a comment or on an
-adjacent line does not satisfy the rule. This is the same fix shape as V5's Important 4 and V6's
-own per-line scoping.
-
-V8 reuses `gated_path_jobs` and `command_segments` unchanged. It adds no new parsing.
-
-**V9 — the fail-safe polarity is pinned, not reviewed.**
-
-1. Floor, for the same reason V8 carries one: a job named `plan` exists, and at least one job
-   names it in `needs:`. V9 keys on that literal job name, so without the floor a rename would
-   leave it iterating an empty set and reporting clean — asserting nothing about the polarity it
-   exists to pin.
-2. Every job naming `plan` in `needs:` must carry an `if:` in one of exactly two accepted
-   literal forms:
-
-```python
-PLAN_GATE_EXPR = "needs.plan.outputs.nothing_to_release != 'true'"
-ACCEPTED_PLAN_FORMS = frozenset({PLAN_GATE_EXPR, "${{ " + PLAN_GATE_EXPR + " }}"})
-```
-
-Literal pinning, exactly as V2 pins `GATE_EXPR`, and for the same reason: a substring or
-structural test would admit `== 'false'`, which is *not* equivalent — it fails closed on an
-unset output. `== 'true'` (a full inversion) and a missing `if:` both red.
-
-The accepted set is deliberately closed. A future job that needs a different condition on `plan`
-reds the guard until someone edits the set. That friction is the point: it forces the polarity
-decision to be made in the guard, in the open, rather than in a workflow diff.
-
-### 3.5 Documentation
-
-Three files, all correcting statements that are now measurably wrong:
-
-1. **`release.yml`'s header.** The "NO `plan` JOB EXISTS" block states the opposite decision and
-   gives an obsolete reason. Its replacement records what §2 measured: the derive blocker is
-   **permanent**, not resolved; the issue's contrary premise was measured at the wrong version;
-   and the job is viable because the dry-run is read as a three-way signal, not as a pass/fail
-   gate. The header's "three ways, not one" gating note becomes two ways.
-2. **`docs/ops/RUNBOOK-release-activation.md` §6.** It assumes every dispatch reaches the
-   approval gate. That stays true for `workflow_dispatch` by §3.2's decision, and stops being
-   true for a push. §6 says which is which.
-3. **`CLAUDE.md`.** Add M1 through M4 to the release gotchas, and correct the existing entry
-   that says the dry-run merely requires a git token — it makes a live authenticated API call.
+1. **`release.yml`'s header** — the "NO `plan` JOB EXISTS" block. Its *conclusion* survives; its
+   *reason* is replaced by M6, which is a stronger and more general one. It records that the
+   dry-run's `releases` array is empty in dry mode even for a real release, so no dry-run-based
+   plan job can work, and that the tag check is what replaced it.
+2. **`release.yml:474`** — a second comment saying "There is no `plan` job … a job that does not
+   exist". Becomes false and actively misleading.
+3. **`release.yml:60`** — the `workflow_dispatch` removal instruction, per §3.4.
+4. **`RUNBOOK-release-activation.md` §6** (assumes every dispatch reaches the gate) and **§8/step
+   J** (the trigger removal).
+5. **`CLAUDE.md`** — three entries. Correct the one saying the dry-run merely *requires* a git
+   token (M1: it makes a live authenticated API call). Correct the one saying "the dry-run cannot
+   pass until `paigasus-proto-derive` is published … this is why the release job graph carries no
+   `plan`-stage dry-run" (true for the `proto` group only, and no longer the operative reason).
+   Add M6 as a new entry.
 
 ## 4. Scope
 
-**In scope:** the `plan` job; the gating change on `wheels`/`prebuild`/`proto-dist`; V8 and V9
-with their self-test rows; the three documentation corrections above.
+**In:** `ci/release-plan/`; the `plan` job and the gating change on
+`wheels`/`prebuild`/`proto-dist`; V8a–d and V9a–d; the `_OK_MAIN` restructure and 34 re-derived
+fixture rows; check 11 with `SELF_TEST_COUNT` 12 → 13 and its `ACTIONLINT_SH_CALL_SITES` pins;
+the five documentation items.
 
-**Out of scope**, and each already has a home:
+**Out**, each with a home:
 
-- A version-override input to make a re-dispatch recoverable after tags are cut — **SMA-602**.
-- Removing the `workflow_dispatch` trigger after the first release — runbook step J, which no
-  gate enforces.
+- A version-override input making a re-dispatch recoverable after tags are cut — **SMA-602**.
 - Any change to `release-pr`, to the environments, or to the credential boundary.
-- Making the derive-crate dry-run resolvable. It is permanent, and §2.2 explains why this design
-  does not need it fixed.
+- Whether `release-approval` has required reviewers configured. That is a repository setting,
+  not code; V8a asserts only that the `environment:` key is present, and the README says so.
+- Making the `proto`-group dry-run resolvable. It is permanent, and irrelevant under §2.3.
 
 ## 5. Testing
 
-| What | How | Where it runs |
+| What | How | Where |
 | --- | --- | --- |
-| V8 and V9 verdicts, both directions | new rows in `release_guard.py`'s self-test table | `--self-test`, invoked by `ci/actionlint/run.sh` check 10 |
+| The decision, all branches | `release_plan.py --self-test` fixture table | `ci/actionlint/run.sh` check 11, every PR |
+| The self-test can fail | `--negative-control` | check 11, every PR |
+| The real repo's releasable set, manifests, `git_tag_name` | `--assert` | check 11, every PR |
+| V8a–d, V9a–d, both directions | new rows in `release_guard.py`'s table | `--self-test`, check 10 |
 | The guard against the real `release.yml` | `moon run repo:actionlint` | every affected PR |
-| Workflow syntax and trigger filters | `repo:actionlint`'s actionlint pass | every affected PR |
-| The full gate graph | `moon ci …` with the marker-delimited target list | every affected PR |
+| Check 11 is actually invoked and defined | `SELF_TEST_COUNT`, `ACTIONLINT_SH_CALL_SITES` | `repo:affected-smoke` |
 
-**What CI cannot prove.** That a push to `main` with nothing to release actually skips the
-matrix is observable only on `main`, after merge — `release.yml` has no `pull_request` trigger,
-and it must never gain one. The same is true of §3.3's token premise. The spec states this
-rather than implying the PR's green checks cover it. The first push to `main` after merge is the
-acceptance evidence, and its expected shape is: `release-pr` runs, `plan` runs and reports
-`nothing_to_release=true`, and every other job skips.
+Fixture rows must cover, at minimum: every tag present → `true`; one tag missing → `false`; zero
+tags in the repo → `false`; `version.workspace = true` → `false`; a `git_tag_name` override →
+`false`; a package name resolving to no manifest → `false`; to two manifests → `false`;
+`event_name = workflow_dispatch` with every tag present → `false`.
+
+**What CI cannot prove.** That a push to `main` with nothing to release actually skips the matrix
+is observable only on `main` after merge — `release.yml` has no `pull_request` trigger and must
+never gain one. The first push to `main` after merge is the acceptance evidence; its expected
+shape is `release-pr` runs, `plan` runs and reports `nothing_to_release=true`, every other job
+skips. Unlike revision 1, the *decision logic* is no longer in that untestable region — only its
+wiring is, and V9c/V9d assert the wiring statically.
 
 ## 6. Risks
 
 | Risk | Direction | Mitigation |
 | --- | --- | --- |
-| `GITHUB_TOKEN` lacks the scope for the `/pulls` call | safe — 401, non-zero exit, builds | §3.3; falls back to today's behaviour, and the log shows the 401 verbatim |
-| A dropped `--dry-run` publishes before approval | **unsafe and irreversible** | V8 |
-| An inverted `if:` polarity silently skips real releases | unsafe, fails green | V9 |
-| release-plz's dry-run behaviour changes on a version bump | unknown | the pin is 0.3.158; §2's measurements are dated and versioned, and must be re-taken on a bump |
-| `plan` adds about a minute to a real release | cost only | accepted; it removes about 15 minutes from every push that releases nothing |
+| The derived releasable set drifts from what release-plz tags | **unsafe, fails green** | derived at runtime, not hard-coded; `--assert` pins the expected set with strict equality |
+| A tag naming scheme change (`git_tag_name`) | unsafe | floor 5 → inconclusive → builds |
+| A shallow checkout removes the tags | unsafe | floor 4 (zero tags → inconclusive) plus `fetch-depth: 0` |
+| An inverted decision | unsafe | fixture table covers polarity directly; V9b pins the consumer side |
+| A publish step added upstream of approval | **unsafe, irreversible** | V8b, and V8d for callees |
+| `approve-release` removed from `release`'s `needs:` | **unsafe, irreversible** | V8c |
+| `plan` fails and blocks a real release | safe — red, not green | §3.4: two steps, no toolchain, no network, `timeout-minutes: 10` |
+| release-plz changes its tag-existence short-circuit on a bump | unsafe | the pin is 0.3.158; M2/M6 are dated and versioned, and must be re-taken on a bump. Recorded in CLAUDE.md |
+
+## 7. Alternatives rejected
+
+**A — read `release-plz release --dry-run --output json` as a three-way signal.** This was
+revision 1's approved design. **M6 disproves it:** the dry-run reports `{"releases":[]}` at exit
+0 while stating it would publish `paigasus-kernel` and cut its tag. The array records performed
+releases and a dry run performs none, so the output cannot distinguish "nothing to release" from
+"a release is pending". It also required a valid token (M1), a network call, and put a single
+point of failure upstream of the approval gate. Recorded here so it is not reintroduced.
+
+**B — parse the dry-run's stderr** for `Already published - Tag …` versus `due to dry,
+skipping`. This *does* carry the information M6 shows is missing from the JSON. Rejected: it
+parses unstructured human-readable log text that carries no stability promise, is version-
+sensitive on every release-plz bump, and keeps A's token, network call and single point of
+failure — while answering a question about purely local state.
+
+**C — gate on the release commit's message**, e.g. `startsWith(github.event.head_commit.message,
+'chore: release')`. Cheapest of all, and the repo's own release commit is literally `chore:
+release v0.1.0` (64c9624). Rejected: the message is set by release-plz's changelog config and by
+whoever squashes the PR, neither of which is asserted anywhere, and a reworded squash silently
+skips a real release with no signal.
