@@ -205,6 +205,15 @@ jobs:
       - name: Drop any cached nextest JUnit reports (stale-artifact guard)
         run: rm -f rs/target/nextest/iam*/junit.xml
 
+      # SMA-601 — MUST stay BEFORE the `moon ci` step. Placement is the whole guarantee: an
+      # unlocked cargo invocation inside the graph (measured: repo:deny and
+      # repo:wasm-getrandom-free) re-resolves and rewrites an inconsistent lock in place, so a
+      # check that ran inside `moon ci` would race the repair and pass. Carries no `if:`, for
+      # the reason CLAUDE.md gives for the codegen-drift step below: it must run on EVERY CI run
+      # and must not be deselectable. Pinned by check 8f in ci/actionlint/run.sh.
+      - name: Cargo lockfile integrity (rs/Cargo.lock satisfies every manifest)
+        run: bash ci/cargo-lock-integrity/run.sh
+
       - name: moon ci (affected graph)
         env:
           EVENT: ${{ github.event_name }}
