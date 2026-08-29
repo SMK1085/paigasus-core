@@ -25,218 +25,131 @@
 
 ---
 
-### Task 1: The shared shell-line classifier
+### Task 1: The shared shell-line classifier — THE CONSERVATIVE RULE
 
 **Files:**
-- Modify: `ci/affected-graph/cargo_moon_parity.py` (add constants after `LOCKED_FLAG` at :171; add `script_cargo_lines` after `derive_ffi_tasks` at :397; add self-test rows inside `self_test()` before its `return`)
+- Modify: `ci/affected-graph/cargo_moon_parity.py` (constants after `LOCKED_FLAG`; `_code_region`, `_join`, `_classify_shell_line`, `script_cargo_lines`; self-test rows inside `self_test()` before its `return`)
 
 **Interfaces:**
-- Consumes: `CARGO_INVOCATION_RE`, `LOCKED_FLAG`, `MoonOutputError` (all existing).
-- Produces: `ScriptCargoLine` namedtuple with fields `lineno raw segment resolves locked unclassifiable`; `script_cargo_lines(path) -> list[ScriptCargoLine]`. Task 2 and Task 3 both consume it.
+- Consumes: `CARGO_INVOCATION_RE`, `LOCKED_FLAG`, `MoonOutputError`, `_strip_arithmetic` (all existing).
+- Produces: `ScriptCargoLine` namedtuple with fields `lineno raw segment resolves locked`; `script_cargo_lines(path) -> list[ScriptCargoLine]`. Task 2 and Task 3 both consume it.
+- There is **no `unclassifiable` field.** The conservative rule reports such a line as an ordinary row, so the field would be dead.
 
-- [ ] **Step 1: Write the failing self-test rows**
-
-Add inside `self_test()`, just before its final `return`, using a `tempfile.TemporaryDirectory()` so the fixtures are real files:
-
-```python
-    # SMA-599 — script_cargo_lines. Each row pins ONE filter, and the ORDER rows are the
-    # point: both orderings agree on today's corpus, so only a fixture holds the rule.
-    with tempfile.TemporaryDirectory() as tmp:
-        def _lines(body):
-            p = Path(tmp) / "probe.sh"
-            p.write_text(body)
-            return script_cargo_lines(p)
-
-        # Filter order: strings BEFORE comments. Stripping `#` first truncates the line
-        # inside the string and deletes a real invocation — a false negative.
-        if not any(s.segment.strip().startswith("cargo build") for s in _lines(
-            'echo "a # b" && cargo build\n'
-        )):
-            failures.append("script_cargo_lines stripped a comment inside a string and lost `cargo build`")
-
-        # Backslash continuation: the flag is on the NEXT physical line.
-        rows = _lines("cargo build \\\n  --locked\n")
-        if len(rows) != 1 or not rows[0].locked or rows[0].lineno != 1:
-            failures.append(
-                f"script_cargo_lines did not join a backslash continuation: {rows}"
-            )
-
-        # Command scoping: --locked belongs to the SECOND command, not the first.
-        rows = _lines("cargo build && cargo metadata --locked\n")
-        if not any(r.segment.strip().startswith("cargo build") and not r.locked for r in rows):
-            failures.append("script_cargo_lines let a later command's --locked cover `cargo build`")
-
-        # --no-deps does not resolve (MEASURED: it never rewrites the lock).
-        rows = _lines("cargo metadata --format-version 1 --no-deps\n")
-        if not rows or rows[0].resolves:
-            failures.append("script_cargo_lines treated `cargo metadata --no-deps` as resolving")
-
-        # A cargo verb inside a heredoc body is DATA, not an invocation.
-        if _lines("cat <<'PY'\ncargo build\nPY\n"):
-            failures.append("script_cargo_lines read a cargo line inside a heredoc body")
-
-        # An unterminated heredoc would silently swallow the rest of the file.
-        try:
-            _lines("cat <<'PY'\ncargo build\n")
-        except MoonOutputError:
-            pass
-        else:
-            failures.append("script_cargo_lines did not raise on an unterminated heredoc")
-
-        # A cargo invocation CAN live inside a quoted string. Report it, never skip it.
-        rows = _lines('bash -c "cargo build"\n')
-        if not any(r.unclassifiable for r in rows):
-            failures.append("script_cargo_lines silently dropped a `bash -c \"cargo ...\"` invocation")
-
-        # Prose in a comment is not an invocation.
-        if _lines("# run cargo build here\n"):
-            failures.append("script_cargo_lines reported a cargo verb inside a comment")
-```
-
-- [ ] **Step 2: Run the self-test to verify it fails**
+**COURSE CHANGE, recorded.** This task was first delivered as a four-layer shell lexer — heredoc
+tracking, comment cutting, cross-line quote parity, paren-depth substitution extraction,
+arithmetic stripping, escape awareness — 441 lines, of which the quote-span tracker alone was 196
+with six states feeding three consumers. Three review rounds each found a real **silent false
+negative**, and rounds 2-4 were each an interaction between one layer and the layer added before
+it. The last one, unfixed at the time of the replacement:
 
 ```bash
-export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
-python3 ci/affected-graph/cargo_moon_parity.py --self-test
+bash -c \
+  "cargo build"
 ```
 
-Expected: FAIL with `NameError: name 'script_cargo_lines' is not defined`.
+reported 0 rows and no error while real bash runs cargo unlocked, because the exec-vs-plain
+decision read the RAW physical line while continuation joining happened later on the LOGICAL
+line. The lexer was deleted rather than patched a fourth time. Against the four historical
+defects the conservative rule scores 4/4 where the lexer scored, at each round, whatever the
+previous round had not yet broken — and it is ~25 lines of decision logic against 441. Its
+failure mode is a **loud false positive**, not a silent pass.
 
-- [ ] **Step 3: Add the constants**
+- [x] **Step 1: The rule**
 
-Insert directly after `LOCKED_FLAG = "--locked"` (`:171`):
+Report every cargo invocation whose own command segment lacks `--locked`. Exclude exactly three
+regions, because in each the shell provably never executes the text:
 
-```python
-# SMA-599 — the shell-script line classifier shared by A8's script arm and A9.
-#
-# ORDER IS LOAD-BEARING, and self_test pins it:
-#   1 join backslash continuations   2 skip heredoc bodies
-#   3 strip quoted strings, THEN `#` 4 command-scope the flag tests
-#
-# Step 3 is the one that looks arbitrary and is not. Stripping `#` FIRST truncates a line at a
-# hash living inside a string, so `echo "a # b" && cargo build` loses its real invocation — a
-# FALSE NEGATIVE, the fatal direction for a default-deny gate. check_dockerfile_locked uses the
-# naive order legitimately, on its stated premise that the Dockerfile "holds one cargo line and
-# no prose"; a general shell scanner has no such premise. Both orders agree on today's corpus,
-# so the FIXTURE is what holds this, not the tree.
-HEREDOC_OPEN_RE = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
-SHELL_STRING_RE = re.compile(r"'[^']*'|\"[^\"]*\"")
-# A cargo invocation is USUALLY not inside a quoted string — but `bash -c "cargo build"`,
-# `sh -c '...'` and `eval "cargo ..."` all are. When string-stripping removes a cargo verb and
-# leaves one of these behind, the line is REPORTED as unclassifiable rather than passed over.
-# No live instance exists today; this is forward cover.
-SHELL_EXEC_RE = re.compile(r"\b(?:bash|sh|zsh)\s+-c\b|\beval\b")
-# Command separators. Both flag tests are scoped to the segment holding the cargo verb, so
-# `cargo build && cargo metadata --locked` does NOT count as locking `cargo build`.
-COMMAND_SPLIT_RE = re.compile(r"[;&|]+")
-CARGO_METADATA_RE = re.compile(r"\bcargo\s+(?:\+\S+\s+)?metadata\b")
+1. **Heredoc bodies** (the existing tracker; a heredoc open at EOF still raises `MoonOutputError`).
+2. **`#` comment tails** (`_code_region`, quote-aware, cut PER PHYSICAL LINE before continuations
+   are joined — a `#` comment ends at the newline even when the previous line ends in a backslash).
+3. **`$(( ... ))` arithmetic** (`_strip_arithmetic`, before the heredoc scan, so `$((1 << BITS))`
+   cannot read as a heredoc named `BITS`).
 
-ScriptCargoLine = collections.namedtuple(
-    "ScriptCargoLine", "lineno raw segment resolves locked unclassifiable"
-)
+Plus the `cargo metadata --no-deps` carve-out (MEASURED: `--no-deps` never resolves, so `--locked`
+on it is inert).
+
+**Quoted strings are NOT stripped.** That layer created every silent drop. A cargo verb inside a
+string simply reports; the three live instances in `ci/` are waived in Task 3.
+
+`--locked` is required **in the segment, after the verb**. The segment scope keeps
+`cargo build && cargo metadata --locked` reporting `cargo build`; the after-the-verb scope keeps a
+`--locked` that is string content sitting BEFORE the verb (`X="abc` / `--locked" cargo build`, one
+bash statement across two physical lines) from covering a genuinely unlocked call.
+
+`_code_region` carries one extra guard: an ODD count of surviving double quotes means the quote
+masking paired the wrong characters, so it refuses to cut at all. Cutting on a mispaired mask is
+the one remaining way this scanner can DROP a live invocation (`X="a` / `b # c" cargo build`).
+A/B-measured against the whole `ci/**/*.sh` corpus: the guard fires on 343 physical lines and
+changes not one row.
+
+- [x] **Step 2: Fail-first**
+
+Against the pre-change classifier, `bash -c \` + newline + `"cargo build"` returned `[]` — no row,
+no error — while `--self-test` returned 0. The silent pass was the point.
+
+- [x] **Step 3: Implement, and prove the fixtures bite**
+
+Fifteen fixtures. Must NOT report: a heredoc body, a full-line comment, `cargo build --locked`,
+`cargo metadata --no-deps`. Must report (each verified against real bash to actually run cargo):
+
+```
+VERSION="$(cargo metadata --format-version 1 | jq -r .version)"
+if ! OUT="$(cargo build 2>&1)"; then
+X="abc\n--locked" cargo build          (locked=False)
+X="$(\n  cargo build\n)"
+X="$(cargo build) more\nstuff"
+bash -c \\\n  "cargo build"            (the defect that retired the previous design)
+MASK=$((1 << BITS))\ncargo build\nBITS
+echo "a # b" && cargo build
+X="a\nb # c" cargo build               (the odd-quote guard)
+# note \\\ncargo build                 (the per-physical-line comment cut)
+echo "start\ncargo build\nend"         (THE ACCEPTED FALSE POSITIVE, pinned deliberately)
 ```
 
-Add `import collections` to the import block at the top (alphabetically before `import inspect`).
+A nine-mutation battery killed every mutation, one per decision: the odd-quote guard, the
+after-the-verb flag scope, the arithmetic strip, the per-physical-line comment cut, string
+stripping, the heredoc body skip, the `--no-deps` carve-out, continuation joining, and the
+`MoonOutputError` on a heredoc open at EOF.
 
-- [ ] **Step 4: Implement `script_cargo_lines`**
-
-Insert after `derive_ffi_tasks` (`:397`):
-
-```python
-def _classify_shell_line(lineno, logical):
-    """Rows for one LOGICAL line (continuations already joined). See the constants above."""
-    code = SHELL_STRING_RE.sub(" ", logical).split("#", 1)[0]
-    # A cargo verb that existed before string-stripping and not after was inside a string. That
-    # is normally prose, but `bash -c`/`eval` make it an invocation — report, never skip.
-    if CARGO_INVOCATION_RE.search(logical) and not CARGO_INVOCATION_RE.search(code):
-        if SHELL_EXEC_RE.search(code):
-            return [ScriptCargoLine(lineno, logical, code, True, False, True)]
-        return []
-    rows = []
-    for segment in COMMAND_SPLIT_RE.split(code):
-        if not CARGO_INVOCATION_RE.search(segment):
-            continue
-        # MEASURED (SMA-599 §2.1): `cargo metadata --no-deps` does not resolve and never
-        # rewrites the lock, so --locked on it is INERT. Demanding the flag would be
-        # cargo-cult compliance a later reader would mistake for a guarantee.
-        resolves = not (
-            CARGO_METADATA_RE.search(segment) and re.search(r"--no-deps\b", segment)
-        )
-        rows.append(
-            ScriptCargoLine(
-                lineno, logical, segment, resolves, LOCKED_FLAG in segment, False
-            )
-        )
-    return rows
-
-
-def script_cargo_lines(path):
-    """Every cargo invocation in a shell script, with its flags classified.
-
-    Raises MoonOutputError on a heredoc still open at EOF: otherwise the scanner silently
-    skips the rest of the file and reports zero rows, which is a vacuous PASS. Same
-    "infrastructure, never a silent pass" contract check_dockerfile_locked uses.
-    """
-    rows, delim, pending = [], None, []
-    for lineno, raw in enumerate(Path(path).read_text().splitlines(), 1):
-        if delim is not None:
-            if raw.strip() == delim:
-                delim = None
-            continue
-        opener = HEREDOC_OPEN_RE.search(raw)
-        pending.append((lineno, raw))
-        if opener is None and raw.rstrip().endswith("\\"):
-            continue
-        logical = " ".join(p[1].rstrip().rstrip("\\") for p in pending)
-        rows.extend(_classify_shell_line(pending[0][0], logical))
-        pending = []
-        if opener is not None:
-            delim = opener.group(2)
-    if pending:
-        logical = " ".join(p[1].rstrip().rstrip("\\") for p in pending)
-        rows.extend(_classify_shell_line(pending[0][0], logical))
-    if delim is not None:
-        raise MoonOutputError(
-            f"{path}: heredoc `{delim}` is still open at EOF — the scan would silently skip "
-            f"the rest of the file and report zero rows"
-        )
-    return rows
-```
-
-- [ ] **Step 5: Run the self-test to verify it passes**
-
-```bash
-export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
-python3 ci/affected-graph/cargo_moon_parity.py --self-test
-```
-
-Expected: PASS.
-
-- [ ] **Step 6: Verify against the real corpus**
+- [x] **Step 4: Verify against the real corpus**
 
 ```bash
 python3 - <<'PY'
 import sys; sys.path.insert(0, "ci/affected-graph")
 from pathlib import Path
 from cargo_moon_parity import script_cargo_lines
-for s in sorted(Path("ci").glob("*/run.sh")):
+for s in sorted(Path("ci").rglob("*.sh")):
     rows = script_cargo_lines(s)
-    bad = [r for r in rows if (r.resolves and not r.locked) or r.unclassifiable]
+    bad = [r for r in rows if r.resolves and not r.locked]
     print(f"{s}: {len(rows)} cargo line(s), {len(bad)} would report")
     for r in bad:
         print(f"    {r.lineno}: {r.segment.strip()[:90]}")
 PY
 ```
 
-Expected, exactly: `ci/version-lockstep/run.sh` reports **2** rows (both `cargo update -w`); every other script reports **0**. If `ci/publish-metadata/run.sh` reports anything, the `--no-deps` or command-scoping rule is wrong — fix it before continuing.
+Measured — five would-report rows, and Task 3 waives all five:
 
-- [ ] **Step 7: Commit**
+| file:line | segment | what it is |
+| --- | --- | --- |
+| `ci/version-lockstep/run.sh:583` | `cargo update -w --offline >/dev/null 2>` | real call |
+| `ci/version-lockstep/run.sh:583` | `cargo update -w >/dev/null )` | real call |
+| `ci/version-lockstep/run.sh:583` | `die_infra "cargo update -w failed (site 16)"` | prose in an error string |
+| `ci/publish-metadata/run.sh:1663` | ``die_infra "FATAL: \`cargo metadata\` failed in $RS_DIR …"`` | prose in an error string |
+| `ci/cargo-lock-integrity/run.sh:60` | `1) echo "::error::rs/Cargo.lock does not satisfy … run 'cargo metadata' in rs/ …"` | prose in an error string |
+
+All three `ci/version-lockstep/run.sh` rows carry line **583**, not 583/584/585: `:583-585` is ONE
+logical line joined by backslash continuations, and a row is reported against the FIRST physical
+line. `ci/publish-metadata/run.sh:1663-1664` is the same shape.
+
+Every other `ci/**/*.sh` reports 0. `ci/actionlint/run.sh` needs nothing: its cargo matches are 3
+full-line comments (excluded) and 5 fixture strings that all carry `--locked`.
+
+- [x] **Step 5: Commit**
 
 ```bash
 git add ci/affected-graph/cargo_moon_parity.py
-git commit -m "ci(repo): add the shared shell-script cargo line classifier (SMA-599)"
+git commit -m "ci(repo): replace the shell cargo lexer with the conservative rule (SMA-599)"
 ```
-
 ---
 
 ### Task 2: The shared derivation with match kinds
@@ -548,13 +461,12 @@ def check_cargo_locked_scripts(projects, root, allow=None):
             seen[rel] = lines
             for line in lines:
                 text = line.segment.strip()
-                if line.unclassifiable:
-                    rows.append(
-                        f"{rel}:{line.lineno} reaches cargo inside a quoted string via "
-                        f"bash -c/eval — the scanner cannot classify its flags: {text[:100]}"
-                    )
-                    continue
-                if not line.resolves or LOCKED_FLAG in text:
+                # Task 1's conservative rule leaves nothing "unclassifiable": every row is an
+                # ordinary row, and a benign string that mentions a cargo verb is waived here.
+                # Use `line.locked`, not `LOCKED_FLAG in text` — the classifier already scoped
+                # the flag to the segment tail AFTER the verb, and a bare substring test on the
+                # segment throws that scoping away.
+                if not line.resolves or line.locked:
                     continue
                 reason = allow.get((rel, text))
                 if reason is None:

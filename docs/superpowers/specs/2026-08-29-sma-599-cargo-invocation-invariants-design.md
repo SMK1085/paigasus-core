@@ -169,39 +169,69 @@ All of it lands in `ci/affected-graph/cargo_moon_parity.py`, inside the existing
 
 ### 3.1 `script_cargo_lines(path)` — the shared classifier
 
-Returns `(first_lineno, code, raw, resolves)` per cargo invocation. Order is
-load-bearing and pinned by fixtures:
+Returns one `ScriptCargoLine(lineno, raw, segment, resolves, locked)` per cargo invocation.
 
-1. **Join backslash continuations** into one logical line, reported against the FIRST
-   physical line number. Required: `ci/version-lockstep/run.sh:583-584` and
-   `ci/publish-metadata/run.sh:1663` all end in `\`. Without joining, reflowing
-   `cargo build \` / `  --locked` yields a false row, and `cargo metadata \` /
-   `  --no-deps` is misread as resolving.
-2. **Skip heredoc bodies.** Accepted forms: `<<DELIM`, `<<'DELIM'`, `<<"DELIM"`,
-   `<<-DELIM` (terminator may be tab-indented). A heredoc still open at EOF raises
-   `MoonOutputError` (rc 2) — otherwise the scanner silently skips the rest of the file
-   and reports zero rows, the same "infrastructure, never a silent pass" contract
-   `check_dockerfile_locked` uses (`cargo_moon_parity.py:484-488`).
-3. **Strip quoted string literals, THEN `#` comments — in that order.** The first draft
-   had these reversed, which deletes a real invocation:
-   `echo "a # b" && cargo build` truncates at the `#` inside the string and the
-   `cargo build` vanishes. That is a **false negative**, the fatal direction for a
-   default-deny gate. `check_dockerfile_locked` uses the naive order legitimately, on
-   the stated premise that the Dockerfile "holds one cargo line and no prose"; a general
-   shell scanner has no such premise. On today's corpus both orders agree — the fixture,
-   not the corpus, is what holds this.
-4. **Report an unclassifiable line rather than passing it over.** The premise "a cargo
-   invocation is never inside a quoted string" is **false**: `bash -c "cargo build"`,
-   `eval "cargo build"`, `sh -c '…'` are all invocations inside quotes. When a stripped
-   string contained a cargo verb and the surviving code holds `bash -c`, `sh -c` or
-   `eval`, emit an infra-shaped row ("cannot classify") instead of silence. No live
-   instance exists today (the three `bash -c`/`eval` hits in `ci/actionlint/run.sh` are
-   a grep pattern, a label assignment and prose), so this is forward cover.
-5. **Command-scope both flag tests.** `--locked` and `--no-deps` are each evaluated
-   within the `[^;&|]` segment holding the cargo verb. The first draft tested `--locked`
-   per LINE and `--no-deps` per COMMAND, so `cargo build && cargo metadata --locked`
-   would have passed with `cargo build` unlocked — the per-blob form of which
-   `ci/affected-graph/README.md:174-177` already records as an open residual.
+**THE CONSERVATIVE RULE.** Report every cargo invocation whose own command segment does not
+carry `--locked` after the verb. Exclude exactly three regions, because in each the shell
+provably never executes the text:
+
+1. **Heredoc bodies.** Accepted openers: `<<DELIM`, `<<'DELIM'`, `<<"DELIM"`, `<<-DELIM`
+   (terminator may be tab-indented). A heredoc still open at EOF raises `MoonOutputError`
+   (rc 2) — otherwise the scanner silently skips the rest of the file and reports zero rows,
+   the same "infrastructure, never a silent pass" contract `check_dockerfile_locked` uses.
+2. **`#` comment tails.** The cut is quote-aware (a `#` inside a string is not a comment
+   marker, hence the `echo "a # b" && cargo build` fixture) and runs **per physical line,
+   before continuations are joined**: a `#` comment ends at the newline even when the
+   previous line ends in a backslash, so joining first would pull the next line's real
+   invocation into the comment. It carries one guard of its own — an ODD count of surviving
+   double quotes means the quote masking paired the wrong characters, so it refuses to cut at
+   all. That is the one remaining way this scanner can DROP a live invocation
+   (`X="a` / `b # c" cargo build` is one bash statement that runs cargo). A/B-measured over
+   the whole `ci/**/*.sh` corpus: the guard fires on 343 physical lines and changes not one row.
+3. **`$(( ... ))` arithmetic**, blanked before the heredoc scan, because `HEREDOC_OPEN_RE`
+   matches a bare `<<` and `$((1 << BITS))` would otherwise read as a heredoc named `BITS`,
+   swallowing every line up to the next bare `BITS`.
+
+Two more rules complete it. Backslash continuations are joined into one logical line, reported
+against the FIRST physical line number. And `--locked` counts only **in the segment holding the
+verb, after that verb** — the segment scope keeps `cargo build && cargo metadata --locked`
+reporting `cargo build`; the after-the-verb scope keeps a `--locked` that is string content
+sitting *before* the verb (`X="abc` / `--locked" cargo build`, one bash statement across two
+physical lines) from covering a genuinely unlocked call. `cargo metadata --no-deps` is carved
+out (§2.1: `--no-deps` never resolves, so `--locked` on it is inert).
+
+**Quoted string literals are NOT stripped.** A cargo verb inside a string reports like any
+other.
+
+#### Why this replaced a four-layer lexer
+
+The first implementation stripped quoted strings and then tried to decide, per line, whether a
+verb inside one still executed — `bash -c "…"`, `eval`, a `$( … )` body, a quote span crossing
+physical lines. Four layers, 441 lines, of which the cross-line quote tracker alone was 196
+with six states feeding three consumers. Three review rounds each found a different **silent
+false negative**, and rounds 2-4 were each an interaction between one layer and the layer added
+before it. The last one, measured against real bash:
+
+```bash
+bash -c \
+  "cargo build"
+```
+
+reported zero rows and no error while bash runs cargo unlocked, because the exec-vs-plain
+decision read the RAW physical line while continuation joining happened later, on the LOGICAL
+line.
+
+The conservative rule is ~25 lines of decision logic against 441, and it answers all four
+historical defects (10/10 on the reviewers' scoring against the lexer's 7/10) because it has
+**one** decision to get wrong. That is the real argument: a future defect in this design can
+only be a **false positive** — a benign string that mentions a cargo verb reports, CI reds
+loudly, and a reviewer adds a waiver. The lexer's defects were silent passes, and a gate whose
+defects are silent passes cannot converge.
+
+The cost is five would-report rows on today's corpus instead of two: the two real
+`cargo update -w` calls in `ci/version-lockstep/run.sh`, plus three cargo mentions inside error
+message strings (`ci/version-lockstep/run.sh`, `ci/publish-metadata/run.sh:1663`,
+`ci/cargo-lock-integrity/run.sh:60`). All five are A8 waivers. See L8.
 
 ### 3.2 `derive_cargo_tasks(projects, root)` — the shared derivation (AC 1)
 
@@ -326,12 +356,20 @@ a cargo call inside a `.sh` is outside A8's derived set — also now false.
 
 `--self-test` fixture tables for:
 
-1. **`script_cargo_lines`**, one per filter and one per ordering hazard:
-   `echo "a # b" && cargo build` must report (pins filter order);
-   `cargo build \` + `--locked` must NOT report (pins continuation joining);
-   `cargo build && cargo metadata --locked` must report `cargo build` (pins command
-   scoping); an unterminated heredoc must raise; `bash -c "cargo build"` must emit the
-   unclassifiable row; a `--no-deps` call must not report.
+1. **`script_cargo_lines`**, one fixture per decision in §3.1. Must NOT report: a heredoc
+   body; a full-line comment; `cargo build --locked`; `cargo metadata --no-deps`. Must
+   report — each verified against real bash to actually run cargo:
+   `echo "a # b" && cargo build` (quote-aware comment cut);
+   `VERSION="$(cargo metadata … | jq …)"` and `if ! OUT="$(cargo build 2>&1)"; then` (the
+   repo's house idiom); `X="abc` / `--locked" cargo build` with `locked=False` (the flag
+   scope after the verb); `X="$(` / `cargo build` / `)"` and
+   `X="$(cargo build) more` / `stuff"`; `bash -c \` / `"cargo build"` (the defect that
+   retired the previous design); `MASK=$((1 << BITS))` / `cargo build` / `BITS`;
+   `X="a` / `b # c" cargo build` (the odd-double-quote guard); `# note \` / `cargo build`
+   (the per-physical-line comment cut); and `echo "start` / `cargo build` / `end"`, the
+   accepted false positive of L8, pinned so nobody reintroduces string stripping.
+   An unterminated heredoc must raise `MoonOutputError`. A nine-mutation battery — one
+   mutation per decision — must kill every mutant.
 2. **A9** — missing input reports; declared does not; empty-reason waiver is a row;
    stale waiver is a row; floor member out of scope reports; floor member allowlisted
    reports; `--manifest-path rs/Cargo.toml` and `cargo machete rs` do NOT confer scope;
@@ -447,11 +485,14 @@ contains only `[target.*-apple-darwin]` `rustflags` keys, with the file among
 `repo:affected-smoke`'s inputs. Not taken here — it is a separate assertion with its own
 mutation proofs.
 
-**L4 — `ci/actionlint/run.sh`'s cargo prose is one edit from a row.** Its eight matches
-survive on the string and comment filters; `:5094` (`the 'cargo metadata --locked' line
-IS the assertion`) stays clean only because of its inner single quotes. Rewriting that
-sentence without them fires a row against a required check, with a message no reviewer
-will immediately understand.
+**L4 — `ci/actionlint/run.sh`'s cargo prose is one edit from a row.** Of its eight matches,
+three are full-line comments (excluded) and five are fixture strings that classify as
+ordinary rows and stay clean **only because each carries `--locked` after the verb** — this
+is measured, not assumed. `:5094` (`the 'cargo metadata --locked' line IS the assertion`) is
+the fragile one: the conservative rule does not strip strings, so rewriting that sentence to
+drop the `--locked` — or to put it before the verb — fires a row against a required check,
+with a message no reviewer will immediately understand. The same holds for `:3714`, whose
+`${script/…/…}` substitution names both the locked and the unlocked form.
 
 **L5 — the cwd derivation resolves one round of literal substitution.** A script
 computing its cargo cwd dynamically is missed. `REQUIRED_CWD_SHAPES` covers today's four
@@ -465,3 +506,10 @@ re-measure on a cargo bump.
 **L7 — A9 proves the `rs/.cargo/config.toml` rule specifically.** CLAUDE.md's general
 warning stands: a future `repo:*` task can omit some *other* input it reads and nothing
 reds.
+
+**L8 — a benign multi-line string containing a cargo verb reports.** The conservative rule
+(§3.1) does not strip quoted strings, so prose such as
+`die_infra "cargo update -w failed (site 16)"` produces a row. Three such rows exist today and
+all three are A8 waivers. This is the design's accepted false-positive direction, pinned by a
+self-test fixture so nobody "fixes" it by reintroducing string stripping; it reds CI loudly
+rather than passing silently.
