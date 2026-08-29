@@ -181,24 +181,34 @@ Expected: `rc=2`. Output contains `FATAL: release-parity ABORTED: infrastructure
 `release-plz did not resolve to an executable file`, and the JSON blob after `Got:`.
 It must **not** contain `line 103` or `No such file or directory`.
 
-- [ ] **Step 6: Restore, and prove the flag is what fixes it**
+- [ ] **Step 6: Prove the flag is what fixes it, not the assertion**
+
+**Never restore a mutation with `git checkout -- <file>`.** It reverts Step 2 as well, and
+the next mutation test then runs against the ORIGINAL file and reports a meaningless
+result that looks like a real failure. Restore by removing exactly what you inserted.
+
+Delete **only** the `--reporter text` in the `proto` call on the `RELEASE_PLZ_BIN=` line —
+not the two other occurrences, which are the error message and a comment. A blind
+search-and-replace over the file rewrites the error message text too, and a narrower
+restore then leaves it wrong. Run:
 
 ```bash
 export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
 cd /Users/smaschek/dev/paigasus/paigasus-core/.claude/worktrees/sma-596
-git checkout -- ci/release-parity/ecosystems/release-plz.sh
-```
-
-That reverts Step 2 as well, so re-apply Step 2, then delete **only** `--reporter text`
-from the `proto` call and run:
-
-```bash
+env | grep -qE '^PROTO_REPORTER=' && echo "!! PROTO_REPORTER is set — unset it or this test is void"
 bash ci/release-parity/run.sh --negative-control; echo "rc=$?"
 ```
 
 Expected: `rc=2` with the same `did not resolve to an executable file` message and a JSON
 blob after `Got:`. This is what distinguishes "the assertion fires" from "the flag works" —
-without it, Step 5 alone cannot tell them apart. Then restore `--reporter text`.
+without it, Step 5 alone cannot tell them apart.
+
+Then put `--reporter text` back and confirm all four occurrences are correct:
+
+```bash
+grep -c 'reporter text' ci/release-parity/ecosystems/release-plz.sh   # expect 4
+grep -c 'proto bin release-plz' ci/release-parity/ecosystems/release-plz.sh  # expect 0
+```
 
 - [ ] **Step 7: Prove the `CARGO_BIN` assertion bites**
 
