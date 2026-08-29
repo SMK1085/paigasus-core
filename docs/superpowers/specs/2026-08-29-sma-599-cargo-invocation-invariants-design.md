@@ -373,7 +373,7 @@ slash-free `rs/.cargo/config.toml`, which is why every declaring task matches ve
 Final counts on the shipped corpus: **59** tasks declare the file, A10 examines **58** of
 them, and the one it does not — `paigasus-kernel-py:test` — is asserted by **A5** instead
 (its `FFI_TASK_INPUTS` splat already demands the file; A10's cwd rule does not reach it,
-because the task's own cwd is `py/packages/kernel`).
+because the task's own cwd is `py/packages/paigasus-kernel`).
 
 `ALLOW_MISSING_CARGO_CONFIG` exists but is **empty**, like `ALLOW_OVER_APPROXIMATION`.
 An entry requires a non-empty reason, and an entry matching no task is itself a row —
@@ -647,6 +647,21 @@ The individual cd forms, including the prefix-collision case, are exercised by d
 present, staleness induced by a member manifest gaining a dependency. Not measured with
 no lockfile, nor with a new workspace member. D4 generalises beyond what was measured;
 re-measure on a cargo bump.
+
+**L14 — an outer flag written AFTER a nested call lands in the nested call's tail.**
+`cargo build --features "$(cargo test)" --locked` reports the outer invocation correctly, but
+marks the nested `cargo test` `locked=True`. Strictly better than the pre-SMA-599 behaviour,
+which reported neither — but a waiver keyed on that segment would then silence both rows.
+
+**L15 — two UNLOCKED calls in one segment cannot be waived.** They produce two reporting rows
+with identical segment text, so any `ALLOW_UNLOCKED_CARGO_SCRIPT` entry for that text is
+permanently AMBIGUOUS. Reproducer: `cargo build "$(cargo test)"`. It fails SAFE (the gate reds),
+but the only way out is to rewrite the line.
+
+**L16 — the `--no-deps` scope has no single-half fixture.** The self-test kills a reversion of
+`--no-deps` scoping only when BOTH halves revert together; reverting the `--no-deps` half alone,
+or the `CARGO_METADATA_RE` half alone, survives at rc 0. The composite mutation is covered; the
+finer ones are not.
 
 **L7 — A10 proves the `rs/.cargo/config.toml` rule specifically.** CLAUDE.md's general
 warning stands: a future `repo:*` task can omit some *other* input it reads and nothing

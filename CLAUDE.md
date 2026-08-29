@@ -521,8 +521,9 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   and `repo:publish-metadata`, which select on everything). **59 of those declarations are now
   asserted**: 58 by `repo:affected-smoke`'s A10 (`ci/affected-graph/cargo_moon_parity.py`,
   SMA-599, findings key `a10`), and `paigasus-kernel-py:test` by **A5**, not A10 — it is an FFI
-  wrapper task, so the `FFI_TASK_INPUTS` splat already demands the file and A10's derivation
-  never reaches it. A task is in A10's scope when its cargo subcommand COMPILES or LINKS
+  wrapper task, so the `FFI_TASK_INPUTS` splat already demands the file. A10 DOES derive it (as
+  `wrapper`, so the verb test passes); what excludes it is the CWD rule — its blob is
+  `uv sync --reinstall-package …` with no cd, and its source dir is `py/packages/paigasus-kernel`. A task is in A10's scope when its cargo subcommand COMPILES or LINKS
   (`CONFIG_SENSITIVE_VERBS`, deliberately NOT A8's `LOCK_RESOLVING_VERBS`) AND its cwd resolves
   inside `rs/` — crate tasks and the `repo:*` gates that reach cargo through their own
   `ci/**/run.sh` alike. `repo:deny` and `repo:machete` are out of scope BY VERB, not on the cwd
