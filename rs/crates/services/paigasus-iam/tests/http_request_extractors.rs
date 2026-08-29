@@ -124,11 +124,13 @@ async fn an_undecodable_path_segment_answers_in_the_error_envelope() {
     }
 
     // An ORDINARY, decodable segment reaches the handler — it is not a uuid, which is exactly
-    // why these two routes need `StringPath` rather than `UuidPath`. The policy does not exist,
-    // so the handler answers on its own terms; what matters is that it is not the extractor's
-    // refusal above.
-    let (_, err) = send(&app, "DELETE", "/v1/authz/policies/allow-root-read", None, Some(token.as_str())).await;
-    assert_ne!(err["error"]["code"], wire(ErrorReason::InvalidPathSegment), "a decodable segment must reach the handler: {err}");
+    // why these two routes need `StringPath` rather than `UuidPath`. `PolicyService::delete` is
+    // idempotent (deleting an id that never existed is `Ok(())`), so this proves the segment
+    // reached `delete_policy`'s own logic and completed: `204 NO_CONTENT`, empirically observed.
+    // An `assert_ne!` on the error code here would pass just as well on a 401/403/404/500 — it
+    // would prove only "not the extractor's refusal", never that the handler ran.
+    let (status, _) = send(&app, "DELETE", "/v1/authz/policies/allow-root-read", None, Some(token.as_str())).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "a decodable segment must reach the handler, which deletes idempotently");
 
     // Same for `retire`: a decodable, non-uuid, but unknown policy id reaches the handler,
     // which reports `NotFound` on its own terms (empirically observed: 404,
