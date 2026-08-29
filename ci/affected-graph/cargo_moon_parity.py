@@ -12,6 +12,11 @@
 # (`paigasus-kernel.workspace = true`), inline tables, and `package =` renames. That regex reported
 # five sound edges as phantom.
 #
+# It also carries A8 (SMA-601), which is about the FLAGS rather than the graph: every task whose
+# resolved invocation reaches cargo must pass --locked, because an unlocked one re-resolves and
+# rewrites an inconsistent Cargo.lock in place. That is how five Dependabot PRs merged a truncated
+# lock through a green required check.
+#
 # It also carries A4 (SMA-534), which is about task INPUTS rather than edges: every crate's `lint`
 # must key on the workspace-level files (Cargo.lock, Cargo.toml, rust-toolchain.toml and, since
 # SMA-594, .cargo/config.toml), since `rs/` has no Moon project for a dependency edge to point at. A4 reads moon's RESOLVED `inputFiles`, so
@@ -20,6 +25,7 @@
 # usage: cargo_moon_parity.py [--self-test]
 import inspect
 import json
+import re
 import subprocess
 import sys
 import tempfile
@@ -128,6 +134,76 @@ REQUIRED_FFI_TASKS = (
     "paigasus-kernel-py:test",
     "paigasus-kernel-ts:build",
     "paigasus-kernel-ts:test",
+)
+
+# SMA-601 — the cargo subcommands that RESOLVE the dependency graph, and therefore rewrite an
+# inconsistent Cargo.lock in place unless --locked is passed. `fmt` and `machete` are absent
+# deliberately: neither reads the lock.
+#
+# The list holds two kinds of verb. The first kind resolves as a side effect of doing something
+# else (`build`, `test`, `tree`, …). The second kind exists to WRITE the lock: `add`, `remove`,
+# `generate-lockfile`, `vendor` and `fix`. None of the second kind is used in this repo today,
+# and `--locked` is meaningless or rejected for some of them — which is the point. A8 must report
+# such a verb rather than pass it over in silence, so that a future `cargo add` inside a Moon task
+# is a reviewed ALLOW_UNLOCKED_CARGO entry and not an unnoticed lock repairer.
+#
+# Matched against the same resolved `command` + `args` +
+# `script` blob A5 uses, NOT against file text — a text scan of moon.yml/.moon/tasks/*.yml/
+# rs/Dockerfile/ci/**/*.sh was measured at 45 matches of which ~14 were real invocations, because
+# `moon.yml:323` is `echo "cargo tree failed ..."` on an EXECUTING line and
+# `ci/publish-metadata/run.sh:179` is a Python f-string inside a heredoc. The resolved blob is not
+# prose-free either — `repo:wasm-getrandom-free`'s own script carries that same
+# `echo "cargo tree failed ..."` and the regex matches it — but it holds no prose about a task
+# OTHER than itself, which is what makes the TASK-level count clean: measured at 60 matched tasks
+# (57 literal-cargo, 3 wrapper), 0 false positives.
+LOCK_RESOLVING_VERBS = (
+    "add", "bench", "build", "check", "clippy", "deny", "doc", "fetch", "fix",
+    "generate-lockfile", "metadata", "nextest", "package", "publish", "remove",
+    "run", "test", "tree", "update", "vendor",
+)
+
+CARGO_INVOCATION_RE = re.compile(
+    r"\bcargo\s+(?:\+\S+\s+)?(?:" + "|".join(LOCK_RESOLVING_VERBS) + r")\b"
+)
+
+# `--locked` is accepted; `--frozen` is NOT — it implies `--offline`, which false-reds on a cold
+# cargo cache, the same reason this gate refuses `--offline` elsewhere.
+LOCKED_FLAG = "--locked"
+
+# A wrapper reaches cargo without the literal token, so A8 matches FFI_MARKERS too. Without this
+# the three wrapper tasks would be silently OUT of scope rather than visibly allowlisted.
+#
+# The two match kinds are NOT interchangeable, and conflating them is vacuous (SMA-601, measured).
+# A literal `cargo <verb>` match is satisfied by `--locked` appearing in the blob, because that
+# blob IS the invocation. A WRAPPER match is not: `paigasus-kernel-ts:build` runs `napi build`
+# AND `wasm-pack build ... -- --locked` in one script, so a blob-level `--locked` test greens the
+# task while `napi build` still re-resolves and repairs the lock. A wrapper-matched task therefore
+# ALWAYS needs an ALLOW_UNLOCKED_CARGO entry, whether or not `--locked` appears anywhere in its
+# blob; a task matching both kinds is governed by the wrapper rule, which is the stricter one.
+ALLOW_UNLOCKED_CARGO = {
+    "paigasus-kernel-ts:build": (
+        "reaches cargo through TWO wrappers, neither of which can guarantee a locked resolution "
+        "(both measured, SMA-601). `napi build` exposes no --locked and no cargo passthrough, and "
+        "cargo has no env-var equivalent. `wasm-pack build ... -- --locked` DOES forward the flag "
+        "to the cargo build it wraps, but wasm-pack makes its OWN unlocked cargo call BEFORE that "
+        "build and repairs the lock there: measured against a truncated 176-package lock it exits "
+        "0 and rewrites the lock to 548. The flag is kept anyway — it constrains the forwarded "
+        "build — but it does not lock the task."
+    ),
+    "paigasus-kernel-ts:test": "as paigasus-kernel-ts:build",
+    "paigasus-kernel-py:test": (
+        "reaches cargo through `uv sync --reinstall-package`, which drives maturin, which drives "
+        "cargo — no flag path through either (SMA-601)"
+    ),
+}
+
+# The floor, for the reason REQUIRED_FFI_TASKS carries: a derived set that shrinks to EMPTY
+# asserts nothing while still printing PASS. Every task named here MUST be in the derived set.
+REQUIRED_LOCKED_TASKS = (
+    "paigasus-kernel-rs:lint",
+    "paigasus-iam-rs:test",
+    "repo:deny",
+    "repo:wasm-getrandom-free",
 )
 
 # SMA-528 — the tasks that must key on their crate's upstream sources. `fmt` is crate-local by
@@ -318,6 +394,117 @@ def derive_ffi_tasks(projects):
             if any(marker in blob for marker in FFI_MARKERS):
                 matched.add(f"{pid}:{name}")
     return matched
+
+
+def check_cargo_locked(projects, allow=ALLOW_UNLOCKED_CARGO, floor=REQUIRED_LOCKED_TASKS):
+    """Return the A8 violation list: cargo-resolving tasks that do not pass --locked.
+
+    An unlocked cargo invocation re-resolves the graph and REWRITES an inconsistent Cargo.lock in
+    place. That is how five Dependabot PRs merged a truncated lock through a green `moon ci`: the
+    first cargo task repaired the lock, and every later task read a resolution the PR never
+    shipped.
+
+    Two match kinds, deliberately NOT treated alike (SMA-601):
+
+    * A literal `cargo <verb>` match (CARGO_INVOCATION_RE) is satisfied by `--locked` in the blob.
+      The blob IS the invocation there, so the flag reaching it is the whole assertion.
+    * An FFI_MARKERS match is a WRAPPER, and its own cargo call takes no flag. Such a task always
+      needs an `allow` entry, whether or not `--locked` appears in its blob — measured, because
+      `paigasus-kernel-ts:build` runs an unlocked `napi build` beside a
+      `wasm-pack build ... -- --locked`, so a blob-level flag test greens a task that still
+      repairs the lock. A task matching BOTH kinds is governed by the wrapper rule.
+
+    An `allow` entry is a RECORDED DECISION: an empty reason is itself a violation, the idiom
+    ALLOW_NO_CARGO_BACKING and ALLOW_DEAD_INPUT already use.
+
+    The FLOOR carries REQUIRED_FFI_TASKS' job: a derived set that degrades to empty asserts
+    nothing while still printing PASS.
+
+    Raises MoonOutputError if a task in `floor` exposes none of a command, a script, or any
+    args — the same absent-invocation contract A5 uses. That contract is WEAKER than
+    `derive_ffi_tasks`', which raises on ANY None blob: a None outside `floor` is skipped here.
+    The difference is unreachable today only because `collect_findings` computes `a5` before `a8`,
+    so A5's stricter rule aborts the run first. Reordering or removing A5 makes it reachable.
+    """
+    rows = []
+    matched = set()
+    for pid in sorted(projects):
+        invocations = projects[pid].get("invocations") or {}
+        for name in sorted(invocations):
+            target = f"{pid}:{name}"
+            blob = invocations[name]
+            if blob is None:
+                if target in floor:
+                    raise MoonOutputError(
+                        f"{target} reported none of a `command`, a `script`, or any `args` — "
+                        f"moon's output shape changed, so A8 cannot be evaluated"
+                    )
+                continue
+            is_wrapper = any(marker in blob for marker in FFI_MARKERS)
+            if not (is_wrapper or CARGO_INVOCATION_RE.search(blob)):
+                continue
+            matched.add(target)
+            if not is_wrapper and LOCKED_FLAG in blob:
+                continue
+            reason = allow.get(target)
+            if reason is None:
+                if is_wrapper:
+                    rows.append(
+                        f"{target} reaches cargo through a wrapper (FFI_MARKERS), whose own "
+                        f"cargo call cannot take {LOCKED_FLAG} — a {LOCKED_FLAG} elsewhere in "
+                        f"the script does NOT cover it, so this task needs an "
+                        f"ALLOW_UNLOCKED_CARGO entry: {blob[:120]}"
+                    )
+                else:
+                    rows.append(
+                        f"{target} reaches cargo without {LOCKED_FLAG} — it will re-resolve and "
+                        f"REWRITE an inconsistent Cargo.lock in place: {blob[:120]}"
+                    )
+            elif not reason.strip():
+                rows.append(
+                    f"{target} is in ALLOW_UNLOCKED_CARGO with an empty reason — an exemption "
+                    f"is allowed, a silent one is not"
+                )
+    for target in sorted(set(floor) - matched):
+        rows.append(
+            f"A8 examines {len(matched)} task(s) and {target} is not among them — the "
+            f"derivation has degraded and would assert nothing"
+        )
+    return rows
+
+
+def check_dockerfile_locked(root):
+    """Return A8 rows for rs/Dockerfile, which moon's task graph cannot see.
+
+    A narrow, line-oriented assertion rather than a general text scan: the file holds one cargo
+    line and no prose that mentions a cargo verb, so the false-positive rate that killed the
+    general scan does not apply. A missing file is infrastructure, never a silent pass.
+    """
+    path = root / "rs" / "Dockerfile"
+    if not path.is_file():
+        raise MoonOutputError(
+            f"{path} is absent — A8's Dockerfile assertion cannot be evaluated. If the file "
+            f"legitimately moved, update check_dockerfile_locked rather than deleting the check"
+        )
+    rows = []
+    seen = 0
+    for lineno, line in enumerate(path.read_text().splitlines(), 1):
+        stripped = line.split("#", 1)[0]
+        if not CARGO_INVOCATION_RE.search(stripped):
+            continue
+        seen += 1
+        if LOCKED_FLAG not in stripped:
+            rows.append(
+                f"rs/Dockerfile:{lineno} reaches cargo without {LOCKED_FLAG}: {stripped.strip()}"
+            )
+    # The floor, for the reason REQUIRED_LOCKED_TASKS carries: zero matches asserts nothing while
+    # still printing PASS.
+    if seen == 0:
+        rows.append(
+            "A8 examines rs/Dockerfile and found no cargo invocation at all — the image build "
+            "stopped compiling in this file, so this assertion now covers nothing"
+        )
+    return rows
 
 
 def check_ffi_inputs(projects, required=FFI_TASK_INPUTS, floor=REQUIRED_FFI_TASKS):
@@ -731,12 +918,17 @@ def self_test():
     # default `floor=REQUIRED_FFI_TASKS`; emptying either is caught TODAY only incidentally, by
     # unrelated row-text assertions elsewhere in this function, which is not a guarantee — so all
     # three get a direct, explicit non-emptiness check here instead.
+    #
+    # SMA-601 adds a fourth. A8's calls all pass an explicit `floor=` too, so `REQUIRED_LOCKED_TASKS
+    # = ()` was MEASURED leaving `--self-test` at rc 0 while A8's real-run floor asserted nothing.
     if not REQUIRED_CLOSURE_EDGES:
         failures.append("REQUIRED_CLOSURE_EDGES is empty — A6's floor would assert nothing")
     if not UPSTREAM_INPUT_TASKS:
         failures.append("UPSTREAM_INPUT_TASKS is empty — A6's per-crate loop would assert nothing")
     if not REQUIRED_FFI_TASKS:
         failures.append("REQUIRED_FFI_TASKS is empty — A5's floor would assert nothing")
+    if not REQUIRED_LOCKED_TASKS:
+        failures.append("REQUIRED_LOCKED_TASKS is empty — A8's floor would assert nothing")
 
     if not FMT_TASK_INPUTS:
         failures.append("FMT_TASK_INPUTS is empty — the fmt half of A4 would assert nothing")
@@ -838,6 +1030,11 @@ def self_test():
     if not EXPECTED_FINDING_KEYS:
         failures.append("EXPECTED_FINDING_KEYS is empty — the findings floor would assert nothing")
     with tempfile.TemporaryDirectory() as tmp:
+        # collect_findings now folds check_dockerfile_locked(root) into a8, which requires a real
+        # rs/Dockerfile under root — write a locked one so this arity check stays about arity.
+        tmp_rs = Path(tmp) / "rs"
+        tmp_rs.mkdir()
+        (tmp_rs / "Dockerfile").write_text("RUN cargo build --release --locked -p paigasus-iam\n")
         collected = collect_findings(ok, crates, Path(tmp))
     if len(collected) != len(EXPECTED_FINDING_KEYS):
         failures.append(
@@ -1042,6 +1239,111 @@ def self_test():
         # unsatisfiable row the day this branch is written wrong.
         if any(row.endswith(".pyi") and "rs/crates/libs/kern/" in row for row in rows):
             failures.append("A7 demanded a .pyi for an upstream that has none on disk")
+
+    # A8 (SMA-601): every task whose resolved invocation reaches cargo must pass --locked.
+    # An unlocked one re-resolves and REWRITES an inconsistent lock in place, which is how five
+    # Dependabot PRs merged a truncated lock through a green `moon ci`.
+    #
+    # `k-ts:build` is a WRAPPER match and carries no --locked at all, so the clean baseline proves
+    # an allowlist entry is what clears it. A8-f below proves the converse: a wrapper is NOT
+    # cleared by a --locked that belongs to some other command in the same script.
+    locked_ok = {
+        "a-rs": {"invocations": {"lint": "cargo clippy --locked --all-targets"}},
+        "b-rs": {"invocations": {"build": "cargo build --locked"}},
+        "k-ts": {"invocations": {"build": "pnpm exec napi build --platform"}},
+    }
+    if check_cargo_locked(locked_ok, allow={"k-ts:build": "napi has no --locked"},
+                          floor=("a-rs:lint",)):
+        failures.append("A8 reported violations on a clean fixture")
+
+    # A8-a: an unlocked cargo invocation with no allowlist entry must fire, and name the task.
+    broken = {"a-rs": {"invocations": {"lint": "cargo clippy --all-targets"}}}
+    rows = check_cargo_locked(broken, allow={}, floor=("a-rs:lint",))
+    if not any("a-rs:lint" in r and "without --locked" in r for r in rows):
+        failures.append("A8 did not fire on an unlocked cargo invocation")
+
+    # A8-b: --frozen is NOT accepted. It implies --offline, which false-reds on a cold cargo
+    # cache — the reason the gate itself refuses --offline.
+    frozen = {"a-rs": {"invocations": {"lint": "cargo clippy --frozen"}}}
+    if not any(
+        "without --locked" in r
+        for r in check_cargo_locked(frozen, allow={}, floor=("a-rs:lint",))
+    ):
+        failures.append("A8 accepted --frozen, which implies --offline")
+
+    # A8-c: an allowlist entry with an empty reason must be rejected, like A6-d's.
+    rows = check_cargo_locked(broken, allow={"a-rs:lint": ""}, floor=("a-rs:lint",))
+    if not any("empty reason" in r for r in rows):
+        failures.append("A8 accepted an allowlist entry with an empty reason")
+
+    # A8-d: the FLOOR must fire when the derivation degrades to empty — a derived set that
+    # matches nothing asserts nothing while still printing PASS (the A5 lesson).
+    rows = check_cargo_locked({"a-rs": {"invocations": {"lint": "echo nothing"}}},
+                              allow={}, floor=("a-rs:lint",))
+    if not any("A8 examines" in r for r in rows):
+        failures.append("A8 floor did not fire when a required task stopped matching")
+
+    # A8-e: an absent invocation is infra-shaped, never a silent skip. Mirrors A5.
+    try:
+        check_cargo_locked({"a-rs": {"invocations": {"lint": None}}}, allow={},
+                           floor=("a-rs:lint",))
+        failures.append("A8 did not raise infra on a task with no command and no script")
+    except MoonOutputError:
+        pass
+
+    # A8-f: THE ANTI-VACUITY ROW for the wrapper half, and the reason A8 does not test the blob
+    # uniformly. `paigasus-kernel-ts:build` really does run an unlocked `napi build` beside a
+    # `wasm-pack build ... -- --locked`; a blob-level `--locked in blob` test greens it while
+    # napi still re-resolves and repairs the lock. A wrapper match must demand an allowlist entry
+    # REGARDLESS of a --locked elsewhere in the script.
+    stray = {
+        "k-ts": {
+            "invocations": {
+                "build": (
+                    "pnpm exec napi build --platform && wasm-pack build . --release "
+                    "-- --locked"
+                )
+            }
+        }
+    }
+    rows = check_cargo_locked(stray, allow={}, floor=("k-ts:build",))
+    if not any("k-ts:build" in r and "through a wrapper" in r for r in rows):
+        failures.append(
+            "A8 accepted a wrapper task on a stray --locked belonging to another command in the "
+            "same script — the wrapper's own cargo call is still unlocked"
+        )
+
+    # ...and the wrapper rule must still be SATISFIABLE by an allowlist entry, or A8-f would be
+    # proving an unfixable row rather than a correct one.
+    if check_cargo_locked(stray, allow={"k-ts:build": "napi has no --locked"},
+                          floor=("k-ts:build",)):
+        failures.append("A8 did not clear a wrapper task that carries an allowlist entry")
+
+    # A8-g: rs/Dockerfile is outside moon's view, so it takes a narrow text assertion of its own.
+    # One RUN line, one verb — none of the prose-collision risk a general text scan carries.
+    with tempfile.TemporaryDirectory() as tmp:
+        rs = Path(tmp) / "rs"
+        rs.mkdir()
+        (rs / "Dockerfile").write_text("RUN cargo build --release --locked -p paigasus-iam\n")
+        if check_dockerfile_locked(Path(tmp)):
+            failures.append("A8 reported a violation on a locked Dockerfile")
+        (rs / "Dockerfile").write_text("RUN cargo build --release -p paigasus-iam\n")
+        if not check_dockerfile_locked(Path(tmp)):
+            failures.append("A8 did not fire on an unlocked Dockerfile cargo build")
+        # The FLOOR, for the reason REQUIRED_LOCKED_TASKS carries: a Dockerfile that stopped
+        # invoking cargo at all leaves this assertion covering nothing while still printing PASS.
+        # Untested until CodeRabbit's SMA-601 local review; the floor existed but nothing proved
+        # it fires, which is the same defect class the floor itself guards against.
+        (rs / "Dockerfile").write_text("FROM scratch\nCOPY --from=build /out /out\n")
+        rows = check_dockerfile_locked(Path(tmp))
+        if not any("A8 examines rs/Dockerfile" in r for r in rows):
+            failures.append("A8's Dockerfile floor did not fire on a file with no cargo call")
+        (rs / "Dockerfile").unlink()
+        try:
+            check_dockerfile_locked(Path(tmp))
+            failures.append("A8 did not raise infra on a missing rs/Dockerfile")
+        except MoonOutputError:
+            pass
 
     a1, a2, a3 = check(ok, crates)
     if (a1, a2, a3) != ([], [], []):
@@ -1368,7 +1670,7 @@ def self_test():
     if failures:
         print("negative-control FAILED: the parity gate can pass vacuously", file=sys.stderr)
         return 1
-    print("  OK   [parity] all seven assertions fire on synthetic violations")
+    print("  OK   [parity] all eight assertions fire on synthetic violations")
     return 0
 
 
@@ -1385,7 +1687,7 @@ def self_test():
 # rather than a bare count.
 #
 # Adding a check means adding its key here AND its tuple there, in the same order.
-EXPECTED_FINDING_KEYS = ("a1", "a2", "a3", "a4-lint", "a4-fmt", "a5", "a6", "a7")
+EXPECTED_FINDING_KEYS = ("a1", "a2", "a3", "a4-lint", "a4-fmt", "a5", "a6", "a7", "a8")
 
 
 def collect_findings(projects, crates, root):
@@ -1401,6 +1703,7 @@ def collect_findings(projects, crates, root):
     """
     a1, a2, a3 = check(projects, crates)
     a5 = check_ffi_inputs(projects)
+    a8 = check_cargo_locked(projects) + check_dockerfile_locked(root)
     # SMA-594. Derived, never hand-listed, for the same reason `self_test`'s `complete_inputs` is:
     # these two hints named three files while the checks already demanded four, so a developer who
     # followed the advice verbatim was left with a still-red gate. `/`-prefixed because that is the
@@ -1472,6 +1775,17 @@ def collect_findings(projects, crates, root):
              "    A `FLOOR:` row means the check itself cannot be trusted — the wrapper is\n"
              "    missing, its closure derivation broke, or its task stopped matching an FFI\n"
              "    marker — fix that first, every other A7 row is meaningless until it passes."),
+        ("a8", a8,
+             "Cargo-resolving task without --locked (it REPAIRS a truncated lock mid-run,\n"
+             "    so every later --locked gate reads a lock the PR never shipped — SMA-601).\n"
+             "    Fix: add `--locked` to the task's command, or add an ALLOW_UNLOCKED_CARGO\n"
+             "    entry with the measured reason it cannot take one.\n"
+             "    A `through a wrapper` row can ONLY be cleared by an allowlist entry: the\n"
+             "    wrapper's own cargo call takes no flag, so a `--locked` elsewhere in the same\n"
+             "    script does not cover it.\n"
+             "    An `A8 examines` row means the opposite — the derivation stopped matching a\n"
+             "    task it must cover; fix that first, every other A8 row is meaningless until\n"
+             "    it passes."),
     ]
 
     return findings
@@ -1495,7 +1809,7 @@ def main():
             f"{len(crates)} crates: every Cargo dep has a Moon edge that schedules its build, "
             f"every lint and fmt keys on the files its command reads, every FFI build task does "
             f"too, every crate keys on its upstream sources, and every py/ts wrapper keys on the "
-            f"Rust crates it builds"
+            f"Rust crates it builds, and every cargo-resolving task passes --locked"
         )
         return 0
 

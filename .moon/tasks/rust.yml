@@ -32,7 +32,7 @@ fileGroups:
 # neither carries `^:build` either.
 tasks:
   build:
-    command: 'cargo build'
+    command: 'cargo build --locked'
     # `/rs/.cargo/config.toml` (SMA-594) sets rustflags for the two *-apple-darwin targets, and
     # cargo reads it by walking up from the cwd — which for every task here is inside `rs/`. It is
     # on build/build-release/test/lint and deliberately NOT on `fmt`: `cargo fmt --check` neither
@@ -45,13 +45,13 @@ tasks:
       - '@group(upstreams)'
       - '/rs/.cargo/config.toml'
   build-release:
-    command: 'cargo build --release'
+    command: 'cargo build --release --locked'
     inputs:
       - '@group(sources)'
       - 'Cargo.toml'
       - '/rs/.cargo/config.toml'
   test:
-    command: 'cargo nextest run --no-tests=pass'
+    command: 'cargo nextest run --locked --no-tests=pass'
     # `/rs/.config/nextest.toml` is workspace-relative (leading `/`). Required because `rs/` is
     # NOT a Moon project — `.moon/workspace.yml` globs cover only `rs/crates/{libs,bindings,
     # services}/*` — so the profile is outside every project's project-relative inputs and
@@ -69,10 +69,13 @@ tasks:
     # `--locked` so clippy lints the resolution the PR actually SHIPS. Without it cargo silently
     # re-resolves and rewrites an inconsistent Cargo.lock, and the thirteen lints below would
     # compile against newest-compatible versions instead — which would make the whole point of the
-    # workspace inputs unprovable. Among the compile gates, only `lint` passes `--locked`;
-    # `repo:publish-metadata` also uses it, for its packaging checks
-    # (`ci/publish-metadata/run.sh:243,258`). A Dependabot Cargo PR has already shipped a lockfile
-    # resolved from 3 of 11 workspace members here (SMA-534).
+    # workspace inputs unprovable. Since SMA-601 EVERY cargo-resolving task in the graph passes
+    # `--locked`, not `lint` alone: an unlocked invocation repairs a truncated lock in place before
+    # any locked task reads it, which is how five Dependabot PRs merged a truncated lock through a
+    # green `moon ci`. `repo:publish-metadata` also uses it, for its packaging checks
+    # (`ci/publish-metadata/run.sh:742,812`). The flag set is asserted by
+    # `repo:affected-smoke`'s A8 (ci/affected-graph/cargo_moon_parity.py). A Dependabot Cargo
+    # PR has already shipped a lockfile resolved from 3 of 11 workspace members here (SMA-534).
     command: 'cargo clippy --locked --all-targets -- -D warnings'
     # `^:build` schedules each upstream's build before this crate's clippy runs (and orders
     # `contracts:generate` on the proto chain); it does NOT confer affectedness —
