@@ -457,6 +457,16 @@ git commit -m "feat(rs): add StringPath for non-uuid path segments (SMA-588)"
 
 ---
 
+> **Execution note (controller ruling, added during execution).** Tasks 4 and 5 are dispatched as
+> ONE unit and land in one commit. They were mis-sized as separate tasks: `warnings = "deny"` makes
+> an unused `pub(crate)` item a hard compile error, so a task that adds an extractor without its
+> call sites leaves `cargo build` failing — Task 3 hit exactly this and was verified to fail with
+> three `dead_code` errors. `EnvelopeQuery` would hit it identically. Merging them means every new
+> item is constructed at the commit that introduces it. The alternative, `#[allow(dead_code)]` with
+> later removal, was rejected: a forgotten allow permanently blinds the lint. Their verification
+> must run `cargo build` and `cargo clippy --all-targets`, not only `cargo nextest` — nextest
+> compiles the test binary, which constructs the items, so it cannot see this class of failure.
+
 ### Task 4: `EnvelopeQuery<T>` in a new `query.rs`
 
 **Files:**
