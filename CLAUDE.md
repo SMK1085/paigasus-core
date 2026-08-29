@@ -291,9 +291,10 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   `run_self_tests` and `selftest_mutation_battery` as **whole lines** in `run.sh` (a substring
   match would survive deleting the call, since the name is a prefix of its own definition). That
   pin only works because `repo:affected-smoke` lists `ci/actionlint/**/*` in its `inputs` — remove
-  that and the pin stays green on exactly the PR that breaks it. Adding a twelfth-and-later
-  `*_self_test` table means bumping `SELF_TEST_COUNT` (currently 11, SMA-579 added the eleventh —
-  `release_guard_self_test`, check 10): the gate asserts invocations AND definitions. The cycle's
+  that and the pin stays green on exactly the PR that breaks it. Adding a thirteenth-and-later
+  `*_self_test` table means bumping `SELF_TEST_COUNT` (currently 12 — SMA-579 added the eleventh,
+  `release_guard_self_test` at check 10, and SMA-601 the twelfth, `cargo_lock_step_self_test` at
+  check 8f): the gate asserts invocations AND definitions. The cycle's
   second half is now closed too (SMA-542 residual closure): check 8c
   in `ci/actionlint/run.sh` pins `ci/affected-graph/run.sh`'s own two call sites into
   `ci_targets.py`, mirroring `ci_targets.py`'s `RUN_SH_CALL_SITES` from the other, independently
@@ -625,7 +626,16 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   never committed, so `main` keeps the truncated one. Two consequences. A gate that reads the lock
   from the WORKING TREE inside `moon ci` races the repair and is worthless — which is why
   `ci/cargo-lock-integrity/run.sh` is an unconditional **`ci.yml` step placed before the `moon ci`
-  step** (pinned by check 8f in `ci/actionlint/run.sh`), not a `repo:*` task. And `cargo deny`
+  step** (pinned by check 8f in `ci/actionlint/run.sh`), not a `repo:*` task. That step runs all
+  **three** modes — `--self-test`, `--negative-control`, then the real run, under an explicit
+  `set -euo pipefail` — because the bare mode alone is a gate that can lie: with `--locked` deleted
+  from `run.sh`'s `cargo metadata` line the command exits **0 and repairs the lock itself**, so the
+  gate prints "satisfies every manifest" and becomes the first repairer (MEASURED). Check 8f pins
+  both sides — the step's six `ci.yml` lines whole, in order, inside the step's own window, and six
+  whole lines inside `run.sh` (`T_CARGO_LOCK_SH_CALL_SITES`), the `cargo metadata --locked` line
+  included. It also bans **any `if:` on that step**: a skipped step is a GREEN step, so an `if:`
+  switches the guarantee off for every event it excludes, `pull_request` included — which is
+  exactly where a Dependabot PR ships a truncated lock. And `cargo deny`
   audits a re-resolved graph whenever the lock does not already satisfy the manifests — not on
   every PR, since cargo rewrites nothing when the lock is consistent, but on exactly the PRs that
   matter. Since SMA-601 every cargo-resolving task passes `--locked`, asserted generically by A8
@@ -634,7 +644,11 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   flag path, and `wasm-pack` — which DOES forward `-- --locked` — makes its own unlocked cargo
   call before the forwarded build and repairs the lock there (measured: 176 -> 548 packages,
   exit 0). All three carry `ALLOW_UNLOCKED_CARGO` entries, and A8 demands one for every
-  wrapper-matched task even when `--locked` appears elsewhere in its script. `--locked` proves the lock is
+  wrapper-matched task even when `--locked` appears elsewhere in its script. A8's
+  `LOCK_RESOLVING_VERBS` also lists the verbs that exist to WRITE the lock (`add`, `remove`,
+  `generate-lockfile`, `vendor`, `fix`); none is used today, and they are there so a future
+  `cargo add` in a Moon task becomes a reviewed `ALLOW_UNLOCKED_CARGO` entry instead of an
+  unnoticed repairer. `--locked` proves the lock is
   CONSISTENT with the manifests, not that it is correct: a swapped-but-compatible version or a
   tampered checksum still passes.
 

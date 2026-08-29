@@ -57,10 +57,10 @@ usage() {
   echo "  --self-test    run the eleven fixture tables only — extractor, path-filter verdicts," >&2
   echo "                 branch-filter verdicts, config allowlist, ci-target floor, invocation" >&2
   echo "                 allowlist, affected-graph wiring, block execution, kill predicate," >&2
-  echo "                 affected-smoke block, release guard. No actionlint binary is required," >&2
-  echo "                 but the branch-filter table needs a git repo carrying" >&2
-  echo "                 refs/remotes/origin/main, and the release-guard table shells out to" >&2
-  echo "                 'uv run --locked --project py', so it needs uv on PATH and a py" >&2
+  echo "                 affected-smoke block, release guard, cargo-lock step. No actionlint" >&2
+  echo "                 binary is required, but the branch-filter table needs a git repo" >&2
+  echo "                 carrying refs/remotes/origin/main, and the release-guard table shells" >&2
+  echo "                 out to 'uv run --locked --project py', so it needs uv on PATH and a py" >&2
   echo "                 workspace whose uv.lock is up to date." >&2
   echo "                 The check-9 mutation battery is NOT part of this — full gate only." >&2
   exit 2
@@ -2125,9 +2125,60 @@ T_AFFECTED_SMOKE_REQUIRED_INPUTS=(
 # none of ci_targets.py's registries can see it: no T entry, no SELF_SCHEDULED_GATES row. The
 # codegen-drift step has the same exposure and carries no pin; this one does. Whole lines,
 # compared after stripping.
+#
+# ENTRY 0 IS SPECIAL. It is the step's `- name:` line, matched against the whole stripped file
+# and used to LOCATE the step. Every later entry is matched inside the step's own window only
+# (the name line up to the next `- ` list item), because `run: |` and `set -euo pipefail` are
+# not distinctive: ci.yml carries both in other steps, so a whole-file match would stay green
+# with the lockfile step's own run block gutted.
+#
+# The step runs all three modes (SMA-601 review I2). The bare mode alone was measured to be a
+# gate that can lie: with `--locked` removed from run.sh's `cargo metadata` line the command
+# exits 0 and repairs the lock itself, so only --self-test and --negative-control catch it.
+# Order is asserted too, for the reason T_AFFECTED_SMOKE_REQUIRED_SCRIPT records: moving
+# `set -euo pipefail` below the invocations keeps every line byte-identical while a failing
+# earlier mode stops aborting the block.
 T_CARGO_LOCK_STEP_REQUIRED=(
   '- name: Cargo lockfile integrity (rs/Cargo.lock satisfies every manifest)'
-  'run: bash ci/cargo-lock-integrity/run.sh'
+  'run: |'
+  'set -euo pipefail'
+  'bash ci/cargo-lock-integrity/run.sh --self-test'
+  'bash ci/cargo-lock-integrity/run.sh --negative-control'
+  'bash ci/cargo-lock-integrity/run.sh'
+)
+
+# SMA-601 review I2(b) — the same guard-the-guard class as RELEASE_PARITY_SH_CALL_SITES and
+# WORKFLOW_CREDENTIALS_SH_CALL_SITES, for ci/cargo-lock-integrity/run.sh. The step pin above
+# proves the three modes are INVOKED; it has no view of whether the script still asserts
+# anything. MEASURED: deleting `--locked` from the `cargo metadata` line makes the real run exit
+# 0 while cargo REPAIRS the lock in place — the gate then prints "satisfies every manifest" and
+# becomes the first repairer, defeating SMA-601 silently and permanently.
+#
+# Check 8f is the right home rather than ci_targets.py: repo:actionlint carries
+# `inputs: ['**/*']`, so it is scheduled on every PR and this pin needs no new input
+# registration — and, unlike a pin inside ci/affected-graph/, it is not the sole judge of its own
+# reachability.
+#
+# Six discrete stripped WHOLE lines, not one span, for the reason RELEASE_PARITY_SH_CALL_SITES
+# records: a span pin is satisfied by any single surviving copy, and the bypasses have different
+# shapes. Whole lines rather than substrings because a substring rule would let a COMMENTED-OUT
+# copy satisfy the pin, and because `--locked` is exactly the token an attacker deletes while the
+# rest of the line is unchanged. Each was verified to occur EXACTLY ONCE in run.sh.
+#   entries 1-2  the flag parse — neutering it makes --self-test/--negative-control fall through
+#                to the real run, which then exits 0 having asserted nothing new
+#   entry 3      the assertion itself, with --locked. The whole exploit is this one token.
+#   entry 4      the negative control calling the REAL assertion function. Without it the control
+#                is the SMA-530 "control that actively lies" shape.
+#   entry 5      the control's rc=1 report arm — pinned because the message text alone would
+#                survive `exit 0`/`exit 1` being swapped
+#   entry 6      the real run's own call. Deleting it leaves report() printing a green line.
+T_CARGO_LOCK_SH_CALL_SITES=(
+  '--self-test)        self_test; return $? ;;'
+  '--negative-control) negative_control; return $? ;;'
+  'if ( cd "$dir" && cargo metadata --locked --format-version 1 >/dev/null ) 2>"$out"; then'
+  'assert_lock_satisfies_manifests "$tmp/rs" || rc=$?'
+  '1) echo "cargo-lock-integrity --negative-control: reported red (rc=1) as expected" ;;'
+  'assert_lock_satisfies_manifests "$RS_DIR" || rc=$?'
 )
 
 # The same three lines ci_targets.py's SELF_SCHEDULED_GATES["affected-smoke"] pins — but pinned
@@ -2370,38 +2421,107 @@ affected_smoke_block_verdict() {
 }
 
 # Check 8f (SMA-601). Echoes one row per violation, nothing when clean. Row vocabulary:
-#   missing-line <text>       a required line is absent
-#   out-of-order              the step does not precede the `moon ci` step
-#   continue-on-error <value> the step's continue-on-error is anything but the literal false
+#   missing-line <text>          a required line is absent
+#   out-of-order-script <text>   a required run-block line sits before the one listed above it
+#   out-of-order                 the step does not precede the `moon ci` step
+#   continue-on-error <value>    the step's continue-on-error is anything but the literal false
+#   conditional <expr>           the step carries an `if:` — see the case arm for why that is fatal
+#   no-file                      the workflow file is absent or is not a readable regular file
+#
+# Never `infra` from in here: this function is consumed as `done < <(cargo_lock_step_verdict ...)`,
+# so it runs in a process substitution's own subshell where `exit 2` would exit only that
+# subshell. Echo a token and return, always (the rule affected_graph_wiring_verdict records).
 cargo_lock_step_verdict() { # $1 workflow file
-  local f="$1" line stripped n_step n_moon coe
+  local f="$1" line stripped window n_step n_moon n_end idx prev coe cond
 
-  for line in "${T_CARGO_LOCK_STEP_REQUIRED[@]}"; do
-    if ! grep -qxF -e "$line" <(sed 's/^[[:space:]]*//' "$f"); then
+  [ -f "$f" ] && [ -r "$f" ] || { echo 'no-file'; return; }
+
+  stripped="$(sed 's/^[[:space:]]*//' "$f")"
+
+  # Entry 0 LOCATES the step; without it there is no window to search, and reporting the five
+  # run-block lines as individually missing would misdescribe one deletion as six.
+  n_step="$(printf '%s\n' "$stripped" \
+    | grep -nxF -e "${T_CARGO_LOCK_STEP_REQUIRED[0]}" | head -1 | cut -d: -f1)"
+  if [ -z "$n_step" ]; then
+    echo "missing-line ${T_CARGO_LOCK_STEP_REQUIRED[0]}"
+    return
+  fi
+
+  # The step's own window: everything after its `- name:` line up to the next `- ` list item
+  # (stripped, so every step in the job starts at column 0). Falls back to end-of-file for a
+  # step that is last in its job.
+  n_end="$(printf '%s\n' "$stripped" | tail -n +"$((n_step + 1))" \
+    | grep -nE '^- ' | head -1 | cut -d: -f1)"
+  if [ -n "$n_end" ]; then
+    n_end=$((n_step + n_end - 1))
+  else
+    n_end="$(printf '%s\n' "$stripped" | wc -l | tr -d '[:space:]')"
+  fi
+  window="$(printf '%s\n' "$stripped" | sed -n "$((n_step + 1)),${n_end}p")"
+
+  # Presence AND order, inside the window only. `run: |` and `set -euo pipefail` occur in other
+  # ci.yml steps, so a whole-file match on them would be vacuous here. Order is asserted for the
+  # reason T_AFFECTED_SMOKE_REQUIRED_SCRIPT records: moving `set -euo pipefail` below the
+  # invocations keeps every line byte-identical while a failing mode stops aborting the block.
+  prev=0
+  for line in "${T_CARGO_LOCK_STEP_REQUIRED[@]:1}"; do
+    idx="$(printf '%s\n' "$window" | grep -nxF -e "$line" | head -1 | cut -d: -f1)"
+    if [ -z "$idx" ]; then
       echo "missing-line $line"
+    elif [ "$idx" -le "$prev" ]; then
+      echo "out-of-order-script $line"
+    else
+      prev="$idx"
     fi
   done
 
-  # Placement is the guarantee, so ordering is asserted, not assumed. Both greps are anchored on
-  # the stripped text so indentation changes do not defeat them.
-  n_step="$(sed 's/^[[:space:]]*//' "$f" | grep -nxF \
-    -e '- name: Cargo lockfile integrity (rs/Cargo.lock satisfies every manifest)' \
-    | head -1 | cut -d: -f1)"
-  n_moon="$(sed 's/^[[:space:]]*//' "$f" | grep -nxF \
+  # Placement is the guarantee, so ordering is asserted, not assumed. Anchored on the stripped
+  # text so indentation changes do not defeat it.
+  n_moon="$(printf '%s\n' "$stripped" | grep -nxF \
     -e '- name: moon ci (affected graph)' | head -1 | cut -d: -f1)"
-  if [ -n "$n_step" ] && [ -n "$n_moon" ] && [ "$n_step" -gt "$n_moon" ]; then
+  if [ -n "$n_moon" ] && [ "$n_step" -gt "$n_moon" ]; then
     echo "out-of-order"
   fi
 
   # Anything but the literal `false` suppresses the step's failure. Same rule check 8 applies to
-  # the moon ci step.
-  if [ -n "$n_step" ]; then
-    coe="$(sed 's/^[[:space:]]*//' "$f" | sed -n "$((n_step + 1)),$((n_step + 4))p" \
-      | grep -m1 '^continue-on-error:' | sed 's/^continue-on-error:[[:space:]]*//')"
-    if [ -n "$coe" ] && [ "$coe" != "false" ]; then
-      echo "continue-on-error $coe"
-    fi
+  # the moon ci step. Scanned over the whole window rather than a fixed line count: the run block
+  # is multi-line now, so continue-on-error legitimately sits several lines below the name.
+  coe="$(printf '%s\n' "$window" \
+    | grep -m1 '^continue-on-error:' | sed 's/^continue-on-error:[[:space:]]*//')"
+  if [ -n "$coe" ] && [ "$coe" != "false" ]; then
+    echo "continue-on-error $coe"
   fi
+
+  # SMA-601 review I1, MEASURED: inserting an `if: github.event_name == push` expression above
+  # the step run: line left the whole gate at exit 0, and the step would then be skipped on
+  # every pull request — switching the entire guarantee off for exactly the event on which a
+  # Dependabot PR is reviewed. Any `if:` at all is reported; "carries no if:" is what ci.yml's
+  # own comment and CLAUDE.md both name as load-bearing, so there is no value worth allowlisting.
+  #
+  # An `if:` written BEFORE the `name:` key needs no separate rule: the step then opens with
+  # `- if: ...` and its name line is no longer `- name: ...`, so entry 0 is reported missing.
+  cond="$(printf '%s\n' "$window" | grep -m1 '^if:' | sed 's/^if:[[:space:]]*//')"
+  if [ -n "$cond" ]; then
+    echo "conditional $cond"
+  fi
+}
+
+# Check 8f, second half (SMA-601 review I2b). The script pin — see T_CARGO_LOCK_SH_CALL_SITES.
+# Row vocabulary:
+#   no-file             ci/cargo-lock-integrity/run.sh is absent or is not a readable file
+#   missing-site <text> a pinned whole line is gone
+#
+# Stripped whole-line comparison, matching T_CARGO_LOCK_SH_CALL_SITES' own note. Same
+# no-`infra` rule as above: consumed from a process substitution.
+cargo_lock_script_verdict() { # $1 script file
+  local f="$1" site
+
+  [ -f "$f" ] && [ -r "$f" ] || { echo 'no-file'; return; }
+
+  for site in "${T_CARGO_LOCK_SH_CALL_SITES[@]}"; do
+    grep -qxF -e "$site" <(sed 's/^[[:space:]]*//;s/[[:space:]]*$//' "$f") \
+      || echo "missing-site $site"
+  done
 }
 
 # The standing control for check 8. Both directions on every verdict: a table whose rows all fire
@@ -3323,8 +3443,12 @@ missing-input CLAUDE.md' "$no_claude"
 }
 
 # The standing control for check 8f (SMA-601). Both directions per SMA-466: a wired,
-# correctly-ordered step is clean, and each required line, the ordering guarantee, and
-# continue-on-error each fire on their own.
+# correctly-ordered step is clean, and each required line, the run-block order, the ordering
+# guarantee, continue-on-error, the `if:` ban and every script pin fire on their own.
+#
+# Fixtures are built in PURE BASH (heredocs and `${var/old/new}`), never with a `sed`
+# substitution carrying a newline — that is a GNU extension BSD sed does not honour, and a
+# fixture that silently fails to mutate on macOS is a self-test that proves nothing there.
 cargo_lock_step_self_test() {
   SELF_TESTS_RAN=$((SELF_TESTS_RAN + 1))
   local rc=0 tmp got
@@ -3341,12 +3465,28 @@ cargo_lock_step_self_test() {
     fi
   }
 
+  expect_script() { # $1 name  $2 expected-verdict  $3 body
+    tmp="$(mktemp)"
+    printf '%s' "$3" > "$tmp"
+    got="$(cargo_lock_script_verdict "$tmp")"
+    rm -f "$tmp"
+    if [ "$got" != "$2" ]; then
+      fail "cargo-lock-script self-test '$1': got '$got', expected '$2'. Check 8f's script pin
+      is not deciding what it is documented to decide."
+      rc=1
+    fi
+  }
+
   local wired
   wired="jobs:
   ci:
     steps:
       - name: Cargo lockfile integrity (rs/Cargo.lock satisfies every manifest)
-        run: bash ci/cargo-lock-integrity/run.sh
+        run: |
+          set -euo pipefail
+          bash ci/cargo-lock-integrity/run.sh --self-test
+          bash ci/cargo-lock-integrity/run.sh --negative-control
+          bash ci/cargo-lock-integrity/run.sh
 
       - name: moon ci (affected graph)
         run: moon ci
@@ -3363,28 +3503,182 @@ cargo_lock_step_self_test() {
         run: moon ci
 
       - name: Cargo lockfile integrity (rs/Cargo.lock satisfies every manifest)
-        run: bash ci/cargo-lock-integrity/run.sh
+        run: |
+          set -euo pipefail
+          bash ci/cargo-lock-integrity/run.sh --self-test
+          bash ci/cargo-lock-integrity/run.sh --negative-control
+          bash ci/cargo-lock-integrity/run.sh
 "
   expect_step 'the step after moon ci is out of order' 'out-of-order' "$reordered"
 
-  expect_step 'a missing run: line is reported' \
-    'missing-line run: bash ci/cargo-lock-integrity/run.sh' \
-    "$(printf '%s' "$wired" | grep -vxF -e '        run: bash ci/cargo-lock-integrity/run.sh')"
+  expect_step 'a missing real-run line is reported' \
+    'missing-line bash ci/cargo-lock-integrity/run.sh' \
+    "$(printf '%s' "$wired" | grep -vxF -e '          bash ci/cargo-lock-integrity/run.sh')"
 
-  expect_step 'a missing name: line is reported' \
+  # I2: the two control modes are the only thing that catches a `--locked` deletion inside
+  # run.sh, so dropping either one from ci.yml must red.
+  expect_step 'a missing --self-test invocation is reported' \
+    'missing-line bash ci/cargo-lock-integrity/run.sh --self-test' \
+    "$(printf '%s' "$wired" | grep -vxF \
+        -e '          bash ci/cargo-lock-integrity/run.sh --self-test')"
+
+  expect_step 'a missing --negative-control invocation is reported' \
+    'missing-line bash ci/cargo-lock-integrity/run.sh --negative-control' \
+    "$(printf '%s' "$wired" | grep -vxF \
+        -e '          bash ci/cargo-lock-integrity/run.sh --negative-control')"
+
+  expect_step 'a missing set -euo pipefail is reported' \
+    'missing-line set -euo pipefail' \
+    "$(printf '%s' "$wired" | grep -vxF -e '          set -euo pipefail')"
+
+  expect_step 'a missing name: line is reported, and nothing else' \
     'missing-line - name: Cargo lockfile integrity (rs/Cargo.lock satisfies every manifest)' \
     "$(printf '%s' "$wired" | grep -vxF \
         -e '      - name: Cargo lockfile integrity (rs/Cargo.lock satisfies every manifest)')"
 
+  # `set -euo pipefail` moved below the invocations leaves every pinned line byte-identical
+  # while a failing --self-test no longer aborts the block.
+  local shuffled
+  shuffled="jobs:
+  ci:
+    steps:
+      - name: Cargo lockfile integrity (rs/Cargo.lock satisfies every manifest)
+        run: |
+          bash ci/cargo-lock-integrity/run.sh --self-test
+          bash ci/cargo-lock-integrity/run.sh --negative-control
+          set -euo pipefail
+          bash ci/cargo-lock-integrity/run.sh
+
+      - name: moon ci (affected graph)
+        run: moon ci
+"
+  local shuffled_expected
+  shuffled_expected='out-of-order-script bash ci/cargo-lock-integrity/run.sh --self-test
+out-of-order-script bash ci/cargo-lock-integrity/run.sh --negative-control'
+  expect_step 'set -euo pipefail below the invocations is out of order' \
+    "$shuffled_expected" "$shuffled"
+
   # continue-on-error: true would let the step red and the job stay green — a silent bypass.
   local coe_true coe_false
-  coe_true="${wired/        run: bash ci\/cargo-lock-integrity\/run.sh/        run: bash ci\/cargo-lock-integrity\/run.sh
+  coe_true="${wired/          bash ci\/cargo-lock-integrity\/run.sh --self-test/          bash ci\/cargo-lock-integrity\/run.sh --self-test
         continue-on-error: true}"
   expect_step 'continue-on-error: true is reported' 'continue-on-error true' "$coe_true"
 
-  coe_false="${wired/        run: bash ci\/cargo-lock-integrity\/run.sh/        run: bash ci\/cargo-lock-integrity\/run.sh
+  coe_false="${wired/          bash ci\/cargo-lock-integrity\/run.sh --self-test/          bash ci\/cargo-lock-integrity\/run.sh --self-test
         continue-on-error: false}"
   expect_step 'continue-on-error: false is clean' '' "$coe_false"
+
+  # SMA-601 review I1. An `if:` makes the step SKIP on the events it excludes, and a skipped
+  # step is green — so the guarantee is off for exactly the PR event a Dependabot lock lands on.
+  # Written out in full rather than derived with ${wired/.../...}: parameter-expansion
+  # replacement undergoes quote removal, so the single quotes around 'push' — the realistic
+  # form, and the one the reviewer measured — would be eaten before the fixture is written.
+  local conditional
+  conditional="jobs:
+  ci:
+    steps:
+      - name: Cargo lockfile integrity (rs/Cargo.lock satisfies every manifest)
+        if: github.event_name == 'push'
+        run: |
+          set -euo pipefail
+          bash ci/cargo-lock-integrity/run.sh --self-test
+          bash ci/cargo-lock-integrity/run.sh --negative-control
+          bash ci/cargo-lock-integrity/run.sh
+
+      - name: moon ci (affected graph)
+        run: moon ci
+"
+  expect_step 'an if: on the step is reported' \
+    "conditional github.event_name == 'push'" "$conditional"
+
+  # And the other direction, so a stuck rule cannot masquerade as a working one: the wired
+  # fixture above already carries no `if:` and is clean, and so is one whose `if:` belongs to a
+  # DIFFERENT step further down.
+  local if_elsewhere
+  if_elsewhere="${wired/      - name: moon ci (affected graph)/      - name: moon ci (affected graph)
+        if: always()}"
+  expect_step 'an if: on a later step is not attributed to this one' '' "$if_elsewhere"
+
+  # ---- the script pin (T_CARGO_LOCK_SH_CALL_SITES) ----
+  local script
+  script="$(printf '%s\n' \
+    'set -euo pipefail' \
+    'classify_cargo_failure() {' \
+    "  if grep -qF 'because --locked was passed to prevent this' \"\$1\"; then" \
+    '    return 1' \
+    '  fi' \
+    '}' \
+    'assert_lock_satisfies_manifests() {' \
+    '  if ( cd "$dir" && cargo metadata --locked --format-version 1 >/dev/null ) 2>"$out"; then' \
+    '    return 0' \
+    '  fi' \
+    '}' \
+    'negative_control() {' \
+    '  assert_lock_satisfies_manifests "$tmp/rs" || rc=$?' \
+    '  case "$rc" in' \
+    '    1) echo "cargo-lock-integrity --negative-control: reported red (rc=1) as expected" ;;' \
+    '  esac' \
+    '}' \
+    'main() {' \
+    '  case "${1:-}" in' \
+    '    --self-test)        self_test; return $? ;;' \
+    '    --negative-control) negative_control; return $? ;;' \
+    '  esac' \
+    '  assert_lock_satisfies_manifests "$RS_DIR" || rc=$?' \
+    '}')"
+  expect_script 'a wired run.sh is clean' '' "$script"
+
+  # THE measured exploit: `--locked` gone from that one line makes cargo exit 0 AND repair the
+  # lock, so the gate reports green and becomes the first repairer.
+  local unlocked
+  unlocked="${script/cargo metadata --locked --format-version 1/cargo metadata --format-version 1}"
+  expect_script 'dropping --locked from the cargo line is reported' \
+    'missing-site if ( cd "$dir" && cargo metadata --locked --format-version 1 >/dev/null ) 2>"$out"; then' \
+    "$unlocked"
+
+  # Neutering the flag parse makes both control modes fall through to the real run, which then
+  # exits 0 having asserted nothing new.
+  expect_script 'a deleted --self-test flag parse is reported' \
+    'missing-site --self-test)        self_test; return $? ;;' \
+    "$(printf '%s' "$script" | grep -vxF -e '    --self-test)        self_test; return $? ;;')"
+
+  expect_script 'a deleted --negative-control flag parse is reported' \
+    'missing-site --negative-control) negative_control; return $? ;;' \
+    "$(printf '%s' "$script" \
+        | grep -vxF -e '    --negative-control) negative_control; return $? ;;')"
+
+  # The SMA-530 shape: a control that never calls the real assertion still prints its message.
+  expect_script 'a control that no longer calls the assertion is reported' \
+    'missing-site assert_lock_satisfies_manifests "$tmp/rs" || rc=$?' \
+    "$(printf '%s' "$script" \
+        | grep -vxF -e '  assert_lock_satisfies_manifests "$tmp/rs" || rc=$?')"
+
+  expect_script 'a deleted control report arm is reported' \
+    'missing-site 1) echo "cargo-lock-integrity --negative-control: reported red (rc=1) as expected" ;;' \
+    "$(printf '%s' "$script" | grep -vxF \
+        -e '    1) echo "cargo-lock-integrity --negative-control: reported red (rc=1) as expected" ;;')"
+
+  expect_script 'a deleted real-run call is reported' \
+    'missing-site assert_lock_satisfies_manifests "$RS_DIR" || rc=$?' \
+    "$(printf '%s' "$script" \
+        | grep -vxF -e '  assert_lock_satisfies_manifests "$RS_DIR" || rc=$?')"
+
+  # A renamed script, or a directory left in its place, must not read as "every pin satisfied" —
+  # six 'missing-site' rows would misdescribe one rename as six deliberate deletions, and
+  # `[ -e ]` would let a DIRECTORY fall through to exactly that (the rule
+  # affected_graph_wiring_verdict records).
+  local scratch path name
+  scratch="$(mktemp -d)"
+  for name in absent directory; do
+    if [ "$name" = absent ]; then path="$scratch/does-not-exist"; else path="$scratch"; fi
+    got="$(cargo_lock_script_verdict "$path")"
+    if [ "$got" != 'no-file' ]; then
+      fail "cargo-lock-script self-test 'a $name script path is reported': got '$got',
+      expected 'no-file'."
+      rc=1
+    fi
+  done
+  rmdir "$scratch"
 
   return "$rc"
 }
@@ -4669,15 +4963,62 @@ while IFS= read -r verdict; do
       invocation inside the moon graph repairs a truncated lock in place, so a check that runs
       after moon ci would pass on a lock the PR never shipped. Move the step back above 'moon ci
       (affected graph)'." ;;
+    'out-of-order-script '*)
+      fail ".github/workflows/ci.yml's cargo-lock-integrity step runs
+      '${verdict#out-of-order-script }' before the line listed above it in
+      T_CARGO_LOCK_STEP_REQUIRED. The order is load-bearing: 'set -euo pipefail' below the
+      invocations leaves every line byte-identical while a failing --self-test or
+      --negative-control stops aborting the block, and the real run must come last so it never
+      masks a control that already reported. Restore the documented order." ;;
     'continue-on-error '*)
       fail ".github/workflows/ci.yml's cargo-lock-integrity step sets
       'continue-on-error: ${verdict#continue-on-error }', which lets the step fail while the job
       stays green — a silent bypass of the whole check. Remove the key, or set it to false." ;;
+    'conditional '*)
+      fail ".github/workflows/ci.yml's cargo-lock-integrity step carries
+      'if: ${verdict#conditional }'. A skipped step is a GREEN step, so any 'if:' switches the
+      whole guarantee off for every event the expression excludes — including pull_request,
+      which is exactly where a Dependabot PR ships a truncated lock. The step must run on EVERY
+      CI run, for the same reason the codegen-drift step below carries no 'if:'. Remove it." ;;
+    no-file)
+      fail ".github/workflows/ci.yml is not a readable regular file, so check 8f could not read
+      the cargo-lock-integrity step at all." ;;
     *)
       infra "unhandled cargo-lock-step verdict '$verdict'" ;;
   esac
 done < <(cargo_lock_step_verdict .github/workflows/ci.yml)
 fi
+
+# ---------------------------------------------------------------------------------------------
+# Check 8f, second half (SMA-601 review I2b) — ci/cargo-lock-integrity/run.sh still asserts
+# something. The half above proves the three modes are INVOKED; this one proves the script they
+# invoke has not been gutted. MEASURED: with `--locked` deleted from its `cargo metadata` line the
+# real run exits 0 AND cargo repairs the lock, so the gate prints "satisfies every manifest" and
+# becomes the first repairer. Rationale and the pinned lines are with T_CARGO_LOCK_SH_CALL_SITES.
+#
+# Not gated on CI_YML_MISSING: this reads a different file, and a missing ci.yml says nothing
+# about the script.
+# ---------------------------------------------------------------------------------------------
+while IFS= read -r verdict; do
+  case "$verdict" in
+    '') ;;
+    no-file)
+      fail "ci/cargo-lock-integrity/run.sh is missing, or is not a readable regular file. The
+      ci.yml step pinned by the half of check 8f above invokes exactly that path, so the whole
+      lockfile guarantee is gone. Restore the script, or — if it moved deliberately — update
+      T_CARGO_LOCK_SH_CALL_SITES' path here and the three invocations in ci.yml together." ;;
+    'missing-site '*)
+      fail "ci/cargo-lock-integrity/run.sh no longer contains the line
+      '${verdict#missing-site }'. Each pinned line is load-bearing on its own: the two flag-parse
+      arms make --self-test and --negative-control fall through to the real run when neutered,
+      the 'cargo metadata --locked' line IS the assertion (dropping --locked makes the gate
+      repair the lock it exists to police), the negative control's call to
+      assert_lock_satisfies_manifests is what stops it reporting red while asserting nothing, and
+      the real run's own call is what makes the bare mode mean anything. Restore it." ;;
+    *)
+      infra "unhandled cargo-lock-script verdict '$verdict'" ;;
+  esac
+done < <(cargo_lock_script_verdict ci/cargo-lock-integrity/run.sh)
 
 # Guard lives here, AFTER the --self-test early exit: --self-test never shells out to actionlint,
 # so it must not infra-exit on a machine that simply doesn't have the binary on PATH yet.

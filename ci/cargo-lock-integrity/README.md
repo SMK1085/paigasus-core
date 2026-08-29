@@ -9,6 +9,25 @@ plain `ci.yml` step, not a `repo:*` Moon task — see below for why.
 of three outcomes: the lock is consistent, the lock is not consistent, or the check
 could not be completed at all.
 
+## The three modes, and why `ci.yml` runs all of them
+
+`run.sh` takes `--self-test`, `--negative-control`, or no argument. The `ci.yml` step
+runs all three, in that order, under an explicit `set -euo pipefail`.
+
+The bare mode alone is not enough. Delete `--locked` from the `cargo metadata` line and
+that command exits `0` **and repairs the lock itself** — the gate then prints "satisfies
+every manifest" and becomes the first repairer, defeating this whole gate silently and
+permanently. Only `--negative-control` catches that: it mutates a copy of the lock in a
+tempdir and requires the assertion to report `rc=1`. This is the same "control that
+actively lies" shape SMA-530 closed for `release-parity`, and the same reason
+`version-lockstep` and `workflow-credentials` run their controls in CI too.
+
+Check 8f in `ci/actionlint/run.sh` pins both halves: `T_CARGO_LOCK_STEP_REQUIRED` pins
+the step's six lines in `ci.yml` — in order, inside the step's own window, with no `if:`
+and no suppressing `continue-on-error:` — and `T_CARGO_LOCK_SH_CALL_SITES` pins six
+whole lines inside this `run.sh`, including the `cargo metadata --locked` line itself.
+`repo:actionlint` carries `inputs: ['**/*']`, so that check is scheduled on every PR.
+
 ## The measured root cause
 
 Dependabot cargo PRs have five times shipped a truncated `rs/Cargo.lock` (PRs 83, 96,

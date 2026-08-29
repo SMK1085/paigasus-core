@@ -91,8 +91,20 @@ the `moon ci` step:
 
 ```yaml
 - name: Cargo lockfile integrity (rs/Cargo.lock satisfies every manifest)
-  run: bash ci/cargo-lock-integrity/run.sh
+  run: |
+    set -euo pipefail
+    bash ci/cargo-lock-integrity/run.sh --self-test
+    bash ci/cargo-lock-integrity/run.sh --negative-control
+    bash ci/cargo-lock-integrity/run.sh
 ```
+
+All three modes run, in the order every self-scheduled gate in this repo uses.
+The bare mode alone is not enough: with `--locked` deleted from `run.sh`'s
+`cargo metadata` line that command exits `0` **and repairs the lock itself**,
+so the gate would print "satisfies every manifest" and become the first
+repairer. Only `--negative-control` catches that, so it must execute in CI —
+the same reason `release-parity`, `version-lockstep` and `workflow-credentials`
+run their controls there.
 
 Nothing has run yet at that point, so the working tree still holds the
 committed lock. The check is therefore race-free by **placement** rather than
@@ -247,7 +259,7 @@ entry, no CLAUDE.md marker change, no `SELF_SCHEDULED_GATES` entry, no
 fails rather than passing silently.
 
 `rs/Dockerfile` is checked separately by a single-line text assertion — it is
-one `RUN cargo build --release --locked` line (`rs/Dockerfile:25`), already
+one `RUN cargo build --release --locked` line (`rs/Dockerfile:27`), already
 correct, and moon cannot see it. `repo:affected-smoke` gains `rs/Dockerfile` as
 an input so the assertion is not served from cache, and
 `T_AFFECTED_SMOKE_REQUIRED_INPUTS` in `ci/actionlint/run.sh` gains the same

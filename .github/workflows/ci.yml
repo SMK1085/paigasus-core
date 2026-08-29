@@ -211,8 +211,19 @@ jobs:
       # check that ran inside `moon ci` would race the repair and pass. Carries no `if:`, for
       # the reason CLAUDE.md gives for the codegen-drift step below: it must run on EVERY CI run
       # and must not be deselectable. Pinned by check 8f in ci/actionlint/run.sh.
+      #
+      # All THREE modes run here, in the order every self-scheduled gate in this repo uses, and
+      # under an explicit `set -euo pipefail` so a failing mode cannot be swallowed. The bare
+      # mode alone was not enough: removing `--locked` from run.sh's `cargo metadata` line makes
+      # that command exit 0 AND repair the lock itself, so the gate would print "satisfies every
+      # manifest" and become the first repairer — the SMA-530 "control that actively lies" shape.
+      # --self-test and --negative-control are what catch it, so they must execute in CI.
       - name: Cargo lockfile integrity (rs/Cargo.lock satisfies every manifest)
-        run: bash ci/cargo-lock-integrity/run.sh
+        run: |
+          set -euo pipefail
+          bash ci/cargo-lock-integrity/run.sh --self-test
+          bash ci/cargo-lock-integrity/run.sh --negative-control
+          bash ci/cargo-lock-integrity/run.sh
 
       - name: moon ci (affected graph)
         env:
