@@ -17,9 +17,9 @@ with no `pull_request` or `pull_request_target` trigger instead.
 - `--negative-control`, which asserts against the real tree. It covers the `release.yml`
   exclusion and the exit-code mapping below.
 
-## The four rules
+## The five rules
 
-The checker parses every workflow file into YAML and walks it. Four rules fire on a
+The checker parses every workflow file into YAML and walks it. Five rules fire on a
 parsed document.
 
 | Rule | Condition | Example that turns it red |

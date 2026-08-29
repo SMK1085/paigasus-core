@@ -182,7 +182,7 @@ keys are not in the YAML 1.2 spec Actions follows and never shipped. A workflow 
 therefore never runs on GitHub Actions regardless, so this rejection can only ever fire on an
 input Actions itself would already refuse.
 
-### 4.2 The four rules
+### 4.2 The five rules
 
 | Rule | Condition | Closes |
 |---|---|---|
@@ -368,7 +368,7 @@ because `CODEOWNERS`, the issue templates and `dependabot.yml` all live there. B
 carry a filesystem self-test row (rows 2a and 2b).
 
 **The red output contract.** A red names the workflow file, the rule, and the YAML path to the
-offending node. With six files and four rules, triage is otherwise a manual re-run.
+offending node. With six files and five rules, triage is otherwise a manual re-run.
 
 The interpreter is selected with `--python '>=3.12'`, matching every package's
 `requires-python`. A bare `--python 3.12` would fail on a host carrying only 3.13.
@@ -446,7 +446,7 @@ documents an input Actions rejects. All are labelled as regression pins, not as 
 
 | File | Change |
 |---|---|
-| `ci/workflow-credentials/workflow_credentials.py` | new — discovery, four rules, `--self-test` table |
+| `ci/workflow-credentials/workflow_credentials.py` | new — discovery, five rules, `--self-test` table |
 | `ci/workflow-credentials/run.sh` | new — preflight, mode dispatch, rc mapping, `--negative-control` |
 | `ci/workflow-credentials/pyproject.toml` | new — one dependency, `pyyaml>=6.0.3,<7` |
 | `ci/workflow-credentials/uv.lock` | new — generated |
