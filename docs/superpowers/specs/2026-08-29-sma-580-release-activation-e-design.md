@@ -585,8 +585,31 @@ the narrower scope. `repo:workflow-credentials` asserts only that no `pull_reque
 *declares* a credential — its README's non-goals say it says nothing about whether one could be
 obtained.
 
-Trusted Publishing cannot be configured before a package's first publish, the same constraint
-crates.io imposes. The token becomes unnecessary after the first release — §9 names the follow-up.
+**Why a token at all, re-verified 2026-08-29.** npm Trusted Publishing carries the same
+first-publish constraint crates.io does. `npm trust`'s own documentation states it as a
+prerequisite — *"Package must exist: The package you're configuring must already exist on the npm
+registry"* — and `npm/cli#8544`, the request to allow an initial OIDC publish, is **still open**.
+So the nine packages cannot be published by OIDC until they exist.
+
+**The token now has a HARD DEADLINE, not just an intention.** GitHub's changelog of 2026-07-31
+restricts npm granular access tokens that bypass 2FA: they have already lost the ability to change
+package access, maintainers and trusted-publishing configuration, and **they lose direct publish
+entirely in January 2027**. Direct publishing still works today. So an Automation token is viable
+for this release and unviable for releases after that date.
+
+That converts §9.1's `NPM_TOKEN` removal from a tidy-up into a dated obligation: configure trusted
+publishing on all nine packages once they exist, then delete the token, **before January 2027**.
+
+**Two alternatives were considered and not chosen** (§10.2 reopens the choice):
+
+1. **Seed npm the way crates.io is seeded** — publish nine placeholder packages, configure trusted
+   publishing on each, then delete the token before the real release. It removes the credential
+   from CI entirely. It costs nine placeholder publishes plus nine configurations, and seven of the
+   nine are per-platform packages built by `napi artifacts` in CI, so placeholders would not be the
+   real artifacts.
+2. **npm staged publishing** — CI stages the publish and a maintainer approves it with 2FA. Named
+   in the same changelog as a recommended replacement. It removes the bypass-2FA token but adds a
+   manual approval to every npm release, on top of the `approve-release` gate.
 
 The first release creates **nine** packages under the scope: `@paigasus/node-bindings`, seven
 platform packages named for the `napi.targets` entries, and `@paigasus/wasm`.
@@ -803,7 +826,7 @@ Both are temporary by decision. Neither is enforced by any gate, which is why th
 | Item | Removal condition | Owner |
 | --- | --- | --- |
 | `workflow_dispatch` on `release.yml` (§6.3) | The first release has published and §7 has passed. Remove at **step J**, in the same pull request that records the outcome | owner |
-| `NPM_TOKEN` (§5.2) | Every `@paigasus/*` package exists, so npm Trusted Publishing becomes configurable. **Needs a filed follow-up issue.** Set the token's expiry short enough to bound the gap | owner |
+| `NPM_TOKEN` (§5.2) | Every `@paigasus/*` package exists, so npm Trusted Publishing becomes configurable. **HARD DEADLINE: January 2027**, when npm 2FA-bypass tokens lose direct publish (GitHub changelog, 2026-07-31). Needs a filed follow-up issue; set the token's expiry to bound the gap | owner |
 
 ### 9.2 Out of scope
 
@@ -832,10 +855,14 @@ Both are temporary by decision. Neither is enforced by any gate, which is why th
    token granting about what a write-access holder already has — but it is real, and the `if:`
    added in this branch narrows it without closing it. The migration cannot be verified before
    merge, because a botched one skips green. **Decide before, or together with, step H.**
-2. **Does release-plz's registry query skip yanked versions?** If it does not, `0.1.0-alpha.1`
+2. **Does npm keep a token at all, or get seeded like crates.io?** §5.2 records the two
+   alternatives. The current plan — token for the first release, trusted publishing afterwards —
+   is simplest and is safe until January 2027. Seeding npm removes the credential from CI up
+   front, at the cost of nine placeholder publishes.
+3. **Does release-plz's registry query skip yanked versions?** If it does not, `0.1.0-alpha.1`
    stays the baseline forever and §2.4's analysis re-applies at `0.2.0`. If it does, the baseline
    silently becomes "unpublished" again after step J. Knowable before step J, either way.
-3. **Does one `crates-io-auth-action` OIDC exchange yield a token valid for all three crates?** The
+4. **Does one `crates-io-auth-action` OIDC exchange yield a token valid for all three crates?** The
    action runs once; release-plz publishes three; three separate trusted-publisher configs exist.
 
 ---
