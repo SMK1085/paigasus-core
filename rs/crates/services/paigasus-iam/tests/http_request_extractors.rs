@@ -98,6 +98,8 @@ async fn a_refused_query_on_a_nested_list_route_answers_in_the_error_envelope() 
     // Well-formed on the same routes reaches the handler.
     let (status, err) = send(&app, "GET", &format!("/v1/organizations/{org_id}/teams?limit=1"), None, Some(token.as_str())).await;
     assert_eq!(status, StatusCode::OK, "{err}");
+    let (status, err) = send(&app, "GET", &format!("/v1/teams/{team_id}/projects?limit=1"), None, Some(token.as_str())).await;
+    assert_eq!(status, StatusCode::OK, "{err}");
 }
 
 /// The two `Path<String>` routes. `%FF` is not a valid UTF-8 percent-encoding, so axum refuses
@@ -127,4 +129,15 @@ async fn an_undecodable_path_segment_answers_in_the_error_envelope() {
     // refusal above.
     let (_, err) = send(&app, "DELETE", "/v1/authz/policies/allow-root-read", None, Some(token.as_str())).await;
     assert_ne!(err["error"]["code"], wire(ErrorReason::InvalidPathSegment), "a decodable segment must reach the handler: {err}");
+
+    // Same for `retire`: a decodable, non-uuid, but unknown policy id reaches the handler,
+    // which reports `NotFound` on its own terms (empirically observed: 404,
+    // `{"error":{"code":"not-found","message":"resource not found"}}`). `retire` and
+    // `delete_policy` share the `PolicyId` marker and identical `InvalidPathSegment` message
+    // text above, so only a control that pins `retire`'s OWN outcome distinguishes a correctly
+    // wired `retire` from one silently mis-wired to `delete_policy`'s handler.
+    let (status, err) = send(&app, "POST", "/v1/authz/system-policies/some-policy-id/retire", None, Some(token.as_str())).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{err}");
+    assert_eq!(err["error"]["code"], wire(ErrorReason::NotFound), "{err}");
+    assert_eq!(err["error"]["message"], "resource not found", "{err}");
 }
