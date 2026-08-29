@@ -239,6 +239,25 @@ Add inside `self_test()` after Task 1's block:
 
     if not REQUIRED_LOCKED_TASKS:
         failures.append("REQUIRED_LOCKED_TASKS is empty — A8's floor would assert nothing")
+
+    # PRECEDENCE, and it needs its own fixture because none of the four tasks above carries
+    # two signals at once. Measured: with only single-signal fixtures, swapping the wrapper
+    # and literal branches still passes --self-test at rc 0. A8 records as MEASURED that a
+    # wrapper and a literal must not be treated alike (paigasus-kernel-ts:build runs an
+    # unlocked `napi build` beside a `wasm-pack build ... -- --locked`), so a silent collapse
+    # to `literal` would green a task that still repairs the lock.
+    both = {
+        "p": {
+            "source_dir": ".", "deps": {}, "tasks": {},
+            "task_inputs": {}, "task_input_globs": {},
+            "invocations": {"mixed": "pnpm exec napi build --platform && cargo build --locked"},
+        },
+    }
+    if derive_cargo_tasks(both, Path(".")) != {"p:mixed": "wrapper"}:
+        failures.append(
+            "derive_cargo_tasks did not apply wrapper > literal precedence to a task matching "
+            "BOTH kinds — the stricter rule must win"
+        )
 ```
 
 - [ ] **Step 2: Run to verify it fails**
@@ -249,7 +268,7 @@ python3 ci/affected-graph/cargo_moon_parity.py --self-test
 
 Expected: FAIL with `NameError: name 'derive_cargo_tasks' is not defined`.
 
-- [ ] **Step 3: Add `SCRIPT_REF_RE` and extend the floor**
+- [ ] **Step 3: Add `SCRIPT_REF_RE`**
 
 Beside the Task 1 constants:
 
@@ -261,21 +280,15 @@ Beside the Task 1 constants:
 SCRIPT_REF_RE = re.compile(r"(?:^|[\s;&|(])(?:bash\s+|sh\s+)?(ci/[\w./-]+\.sh)\b")
 ```
 
-Extend `REQUIRED_LOCKED_TASKS` (`:199-206`), keeping its existing comment and adding:
-
-```python
-REQUIRED_LOCKED_TASKS = (
-    "paigasus-kernel-rs:lint",
-    "paigasus-iam-rs:test",
-    "repo:deny",
-    "repo:wasm-getrandom-free",
-    # SMA-599 — these two reach cargo ONLY through a gate script, so they are the floor
-    # members that fail if script-following silently stops working. Without them a broken
-    # follower degrades the derived set in exactly the direction nothing else can see.
-    "repo:publish-metadata",
-    "repo:version-lockstep",
-)
-```
+**Do NOT extend `REQUIRED_LOCKED_TASKS` in this task.** That extension moved to Task 3, and the
+reason is a measured regression: `REQUIRED_LOCKED_TASKS` is read by `check_cargo_locked`, the
+already-shipped A8 from SMA-601, which does not gain script-following until Task 3. Adding
+`repo:publish-metadata` and `repo:version-lockstep` to the floor here makes A8 fail immediately —
+`moon run repo:affected-smoke --force` exits 1 with two `A8 examines 60 task(s) and … is not
+among them` rows — because the floor names tasks A8's blob-only derivation cannot yet reach.
+`--self-test` does NOT catch it: it exercises synthetic fixtures and never runs the real corpus
+through `collect_findings`. Landing the floor with its consumer keeps every commit on the branch
+green and bisectable.
 
 - [ ] **Step 4: Implement the derivation**
 
@@ -443,9 +456,28 @@ python3 ci/affected-graph/cargo_moon_parity.py --self-test
 
 Expected: FAIL with `NameError: name 'check_cargo_locked_scripts' is not defined`.
 
-- [ ] **Step 3: Add the allowlist**
+- [ ] **Step 3: Add the allowlist AND extend the floor**
 
-After `ALLOW_UNLOCKED_CARGO` (`:197`):
+Extend `REQUIRED_LOCKED_TASKS` (`:199-206`), keeping its existing comment and adding:
+
+```python
+REQUIRED_LOCKED_TASKS = (
+    "paigasus-kernel-rs:lint",
+    "paigasus-iam-rs:test",
+    "repo:deny",
+    "repo:wasm-getrandom-free",
+    # SMA-599 — these two reach cargo ONLY through a gate script, so they are the floor
+    # members that fail if script-following silently stops working. Without them a broken
+    # follower degrades the derived set in exactly the direction nothing else can see.
+    # This landed in Task 3 rather than Task 2 DELIBERATELY: the floor is read by
+    # check_cargo_locked, which cannot reach either task until this task's script arm
+    # exists, so extending it earlier reds repo:affected-smoke on every commit in between.
+    "repo:publish-metadata",
+    "repo:version-lockstep",
+)
+```
+
+Then, after `ALLOW_UNLOCKED_CARGO` (`:197`):
 
 ```python
 # SMA-599 — waivers for cargo lines inside a gate's own script. Keyed by
