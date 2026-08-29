@@ -617,7 +617,8 @@ merged `router(...)`**.
 | gRPC | the two new divergences: no `adapters/grpc/**` source constructs `InvalidQueryParameter` or `InvalidPathSegment` |
 | gate | `--self-test` fixtures for the three newly-enabled rows and the new one, the `Path` row's `<` requirement (`&Path` legal, `Path<String>` a violation), the inverted `Bytes` fixture, and the re-pointed `reserved` fixture |
 
-**Which probe each `Query` row uses.** Eight routes carry a numeric field and use `?limit=abc`.
+**Which probe each `Query` row uses.** Nine of the ten routes carry a numeric field and use
+`?limit=abc` — every one except `list_role_grants`.
 `RoleGrantQuery` (`list_role_grants`) carries **no numeric field**, so `?limit=abc` there is an
 ignored unknown key and answers 200 — it must use a **repeated key**
 (`?principal_prn=a&principal_prn=b`). `AuditQuery`/`DeadLetterQuery` carry `Option<u64>` and either

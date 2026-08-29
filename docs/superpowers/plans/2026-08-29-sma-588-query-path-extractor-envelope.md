@@ -643,7 +643,7 @@ pub(crate) mod query;
 Run: `export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH" && cd rs && cargo nextest run -p paigasus-iam --lib --no-tests=pass 2>&1 | tail -20`
 Expected: PASS, four new `query.rs` tests included.
 
-Note: `EnvelopeQuery` is not yet used by a handler. It is `pub(crate)` and constructed in its own tests, so `warnings = "deny"` is satisfied. If the build complains about dead code, the module declaration in Step 2 was missed.
+Note: `EnvelopeQuery` has no handler using it at this point, and `cargo nextest` passing does **not** mean the crate builds. `cargo build` compiles the lib target only, where a `pub(crate)` item constructed solely by `#[cfg(test)]` code is dead code — a hard error under `warnings = "deny"`. This was measured on Task 3's `StringPath`, which failed exactly this way. It is why Tasks 4 and 5 land together (see the execution note above this task), and why their verification runs `cargo build` and `cargo clippy --all-targets` rather than nextest alone.
 
 - [ ] **Step 4: Format and commit**
 
@@ -817,7 +817,8 @@ async fn a_refused_query_string_answers_in_the_error_envelope() {
 
     // (uri with a refused query, uri with a well-formed one).
     //
-    // Eight routes carry a numeric field and use `?limit=abc`. `list_role_grants` carries NO
+    // Nine of the ten routes carry a numeric field and use `?limit=abc`; the three that nest
+    // under a uuid segment are covered in the test below. `list_role_grants` carries NO
     // numeric field — `RoleGrantQuery` is a lone `Option<String>` — so `?limit=abc` there is an
     // ignored UNKNOWN key and answers 200. It uses a REPEATED key instead, which reaches every
     // field on every route. Getting this wrong is how a row ends up asserting nothing.
@@ -857,8 +858,13 @@ async fn a_refused_query_string_answers_in_the_error_envelope() {
     assert_eq!(err["error"]["code"], wire(ErrorReason::InvalidQueryParameter), "{err}");
 }
 
-/// The two nested list routes, which take a uuid path segment BEFORE their query string — so a
+/// The THREE nested list routes, which take a uuid path segment BEFORE their query string — so a
 /// refused query on them proves the two extractors compose in one signature.
+///
+/// Together with the seven rows in the test above, this is what makes the coverage TEN routes
+/// rather than nine. `api_keys.rs`'s `list` is the one most easily missed: it nests under a
+/// SERVICE ACCOUNT's uuid rather than an organization's or a team's, so it needs its own fixture
+/// and cannot be appended to either existing loop.
 #[tokio::test]
 async fn a_refused_query_on_a_nested_list_route_answers_in_the_error_envelope() {
     use paigasus_proto::paigasus::common::v1::ErrorReason;
@@ -872,18 +878,35 @@ async fn a_refused_query_on_a_nested_list_route_answers_in_the_error_envelope() 
     provision_platform_admin(&state, &token).await;
 
     let (_, created) = send(&app, "POST", "/v1/organizations", Some(json!({"slug": "nested", "name": "Nested"})), Some(token.as_str())).await;
-    let org_id = created["organization"]["prn"].as_str().expect("organization.prn").rsplit('/').next().unwrap().to_string();
+    let org_prn = created["organization"]["prn"].as_str().expect("organization.prn").to_string();
+    let org_id = org_prn.rsplit('/').next().unwrap().to_string();
     let team_id = created["default_team"]["prn"].as_str().expect("default_team.prn").rsplit('/').next().unwrap().to_string();
 
-    for uri in [format!("/v1/organizations/{org_id}/teams?limit=abc"), format!("/v1/teams/{team_id}/projects?limit=abc")] {
+    // A real service account, owned by the organization above. A fabricated uuid would trip the
+    // route's `UuidPath<ServiceAccountId>` first and never reach the query extractor at all.
+    let (_, sa_created) = send(&app, "POST", "/v1/service-accounts", Some(json!({"owner_prn": org_prn, "name": "nested-sa"})), Some(token.as_str())).await;
+    let sa_id = sa_created["prn"].as_str().expect("service account prn").rsplit('/').next().unwrap().to_string();
+
+    for uri in [
+        format!("/v1/organizations/{org_id}/teams?limit=abc"),
+        format!("/v1/teams/{team_id}/projects?limit=abc"),
+        format!("/v1/service-accounts/{sa_id}/api-keys?limit=abc"),
+    ] {
         let (status, err) = send(&app, "GET", &uri, None, Some(token.as_str())).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "GET {uri}: {err}");
         assert_eq!(err["error"]["code"], wire(ErrorReason::InvalidQueryParameter), "GET {uri}: {err}");
     }
 
-    // Well-formed on the same routes reaches the handler.
-    let (status, err) = send(&app, "GET", &format!("/v1/organizations/{org_id}/teams?limit=1"), None, Some(token.as_str())).await;
-    assert_eq!(status, StatusCode::OK, "{err}");
+    // A well-formed query on EACH of the same routes reaches the handler, so every row above is
+    // an assertion about the query's shape and not about a broken route.
+    for uri in [
+        format!("/v1/organizations/{org_id}/teams?limit=1"),
+        format!("/v1/teams/{team_id}/projects?limit=1"),
+        format!("/v1/service-accounts/{sa_id}/api-keys?limit=1"),
+    ] {
+        let (status, err) = send(&app, "GET", &uri, None, Some(token.as_str())).await;
+        assert_eq!(status, StatusCode::OK, "GET {uri}: {err}");
+    }
 }
 
 /// The two `Path<String>` routes. `%FF` is not a valid UTF-8 percent-encoding, so axum refuses
