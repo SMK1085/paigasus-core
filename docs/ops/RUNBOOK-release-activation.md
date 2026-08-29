@@ -177,27 +177,50 @@ cd /tmp/seed/rs && cargo metadata --format-version 1 >/dev/null && echo "resolve
 `rs/Cargo.lock` is rewritten by the first cargo command. That is expected in a throwaway tree.
 **Do not pass `--locked`.**
 
-### 4.4 Assert no VCS info, before any upload
+### 4.4 Assert no VCS info — two crates now, the third mid-publish
 
-Run this for all three crates. It turns an irreversible discovery into a free local red.
+**`paigasus-proto` cannot be packaged yet, and that is not a fault.** `cargo package` resolves the
+crate's dependencies against the **crates.io index**, so it needs `paigasus-proto-derive` at
+`=0.1.0-alpha.1` to be published already. Before the derive is uploaded it fails with:
+
+```
+error: failed to prepare local package for uploading
+Caused by:
+  no matching package named `paigasus-proto-derive` found
+  location searched: crates.io index
+```
+
+**Measured, both forms** — `--no-verify` does **not** help, because the failure is in dependency
+resolution, not in the verification build. So the assertion interleaves with the publish: two
+crates here, `paigasus-proto` in §4.5 after the index poll converges.
+
+Save the check as a shell function; §4.5 calls it again.
 
 ```bash
 cd /tmp/seed/rs
 set -euo pipefail
-for c in paigasus-kernel paigasus-proto-derive paigasus-proto; do
+
+assert_no_vcs () {
+  c="$1"
   crate="target/package/$c-0.1.0-alpha.1.crate"
   # FAIL CLOSED. Without these two lines a failed `cargo package` leaves no archive,
   # `tar` writes nothing, `grep -c` prints 0, and the assertion reports OK on a crate it
   # never inspected. Measured: `tar tzf missing.crate | grep -c cargo_vcs_info` gives 0.
-  cargo package -p "$c" || { echo "$c: cargo package FAILED — STOP"; exit 1; }
-  [ -f "$crate" ] || { echo "$c: no archive at $crate — STOP"; exit 1; }
+  cargo package -p "$c" || { echo "$c: cargo package FAILED — STOP"; return 1; }
+  [ -f "$crate" ] || { echo "$c: no archive at $crate — STOP"; return 1; }
   n=$(tar tzf "$crate" | grep -c cargo_vcs_info || true)
-  [ "$n" -eq 0 ] && echo "$c OK" || { echo "$c CARRIES VCS INFO — STOP"; exit 1; }
-done
+  [ "$n" -eq 0 ] && echo "$c OK" || { echo "$c CARRIES VCS INFO — STOP"; return 1; }
+}
+
+assert_no_vcs paigasus-kernel
+assert_no_vcs paigasus-proto-derive
 ```
 
-Every crate must print `OK`. A non-zero count means the tree is inside a git repository. Go back to
-§4.2.
+Both must print `OK`. A non-zero count means the tree is inside a git repository — go back to §4.2.
+
+**Expected file counts, so a surprise is visible:** `paigasus-kernel` 12 files,
+`paigasus-proto-derive` 7. A count that jumps by one is the signature of an added
+`.cargo_vcs_info.json`.
 
 ### 4.5 Publish
 
@@ -224,6 +247,10 @@ for i in $(seq 1 18); do
   echo "waiting for the index… ($i/18)"; sleep 10
 done
 [ "$ok" -eq 1 ] || { echo "index did not converge — use the fallback below"; exit 1; }
+
+# paigasus-proto could not be asserted in §4.4 — the derive crate was not on the index
+# yet. It is now. Assert BEFORE uploading it.
+assert_no_vcs paigasus-proto        # must print OK before the upload below
 
 cargo publish -p paigasus-proto
 cargo publish -p paigasus-kernel
