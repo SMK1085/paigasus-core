@@ -3,9 +3,10 @@
 Fifth and final increment of SMA-407. Input spec: §10 and §13 of
 `docs/superpowers/specs/2026-08-22-sma-407-release-activation-design.md` (the umbrella).
 
-**Status:** design, **revision 2**. Revision 1 was reviewed adversarially and returned NEEDS
-REWORK with two blocking findings. Both are now **measured**, not argued — §11 records the
-measurements and §12 records what changed. Nothing here is implemented yet.
+**Status:** design, **revision 3**. Revision 1 was reviewed adversarially and returned NEEDS
+REWORK with two blocking findings; both are **measured**, not argued (§11). Revision 3 records two
+owner decisions: the owner performs the flip, and `release.yml` gains a **temporary**
+`workflow_dispatch` trigger. §12 records what changed. Nothing here is implemented yet.
 
 ---
 
@@ -324,14 +325,14 @@ subsequent pull request.
 
 ## 3. The activation order
 
-`release.yml` triggers on `push: branches: [main]` only. It carries no `workflow_dispatch`.
-So a push to `main` is the only way to fire a release. The order below respects that.
+`release.yml` triggers on `push: branches: [main]` only. **This issue adds a temporary
+`workflow_dispatch` trigger** (§6.3), so step I is an explicit dispatch rather than a push.
 
 **Steps F, G and I depend on a workflow trigger. The rest are manual actions with no trigger.**
 
 | Step | Action | Trigger | Owner | Reversible |
 | --- | --- | --- | --- | --- |
-| **A** | Write this issue's PR — runbook, `release.yml` comment, ADR amendment | — | agent | yes |
+| **A** | Write this issue's PR — runbook, `release.yml` comment + dispatch trigger, ADR amendment | — | agent | yes |
 | **B1** | Create both environments with the **full** settings in §4 | — | agent | yes |
 | **B2** | Add the required reviewer to `release-approval` | — | agent | yes |
 | **B3** | Prove the App can push a tag and cut a Release (throwaway tag, then delete) | — | agent | yes |
@@ -340,9 +341,13 @@ So a push to `main` is the only way to fire a release. The order below respects 
 | **E** | Configure crates.io Trusted Publishing for the three crates (§5.3) | — | owner | yes |
 | **F** | Merge this issue's PR. **OBSERVATION GATE**, §3.1 | the merge in F | owner | yes |
 | **G** | Merge PR 170. The path is still gated, so nothing publishes | the merge in G | owner | yes |
-| **H** | **THE FLIP** — set `PAIGASUS_RELEASE_ENABLED` to `true` | — | see §10 | yes, until I |
-| **I** | **Re-run G's workflow run.** `approve-release` pauses. The owner approves | the re-run | owner | **no** |
-| **J** | Verify §7. **Then** yank the three seeds | — | owner | — |
+| **H** | **THE FLIP** — set `PAIGASUS_RELEASE_ENABLED` to `true` | — | **owner** | yes, until I |
+| **I** | **Dispatch `release.yml` on `main`.** `approve-release` pauses. The owner approves | the dispatch | owner | **no** |
+| **J** | Verify §7. **Then** yank the seeds and remove the dispatch trigger | — | owner | — |
+
+**Steps B1–B3 need `administration` scope**, which this session's token does not carry (`repo`
+only). If the agent cannot create the environments, they move to the owner; §4 states the full
+settings either way. **Step H is the owner's, by decision, not by capability.**
 
 Steps C, D and E use the runbook from the PR branch, before F merges it.
 
@@ -394,23 +399,29 @@ PR 170 merge would fire the release. The cost is bounded but real: the publish i
 be the correct `0.1.0` code, but the two GitHub Releases would carry thin notes, because the
 `CHANGELOG.md` files PR 170 creates would not yet exist on `main`.
 
-### 3.3 Step I — the trigger, and why it is a re-run
+### 3.3 Step I — an explicit dispatch
 
-G's merge produces a workflow run in which `wheels`, `prebuild` and `proto-dist` **skip**, because
-the flag was still off. Re-running that run after the flip re-evaluates
-`if: vars.PAIGASUS_RELEASE_ENABLED == 'true'` against the **current** variable value, so the same
-commit now executes the full path.
+**Owner decision.** Revision 2 proposed re-running G's workflow run. That rested on two premises
+this design never measured: that a re-run re-reads repository variables, and that "re-run all jobs"
+re-executes jobs that previously **skipped** rather than only those that ran. A temporary
+`workflow_dispatch` trigger removes both.
 
-This is what makes the sequence deterministic. No contrived commit is needed, no window exists
-between G and H, and the release commit is exactly PR 170's merge.
+So step I is: flip at H, then dispatch `release.yml` against `main`. The commit released is
+`main`'s head, which after G is PR 170's merge — the same commit the re-run would have used, chosen
+explicitly instead of inferred.
 
-**VERIFY at step I.** Two things are stated behaviour, not measured here: that a re-run re-reads
-repository variables, and that "re-run all jobs" re-executes jobs that previously **skipped**
-rather than only those that ran. Confirm both on the run. **Fallback:** merge any other prepared
-pull request and let that push fire the path. The changelogs are already on `main` from G, so the
-release is correct either way.
+**What the trigger costs, stated plainly.** `workflow_dispatch` lets anyone with write access fire
+an irreversible release. Three things bound it, and none of them is the trigger itself:
 
-§10 asks whether adding `workflow_dispatch` to `release.yml` would be a better trigger than this.
+- `vars.PAIGASUS_RELEASE_ENABLED` still gates every build job, so the dispatch does nothing while
+  the flag is off.
+- `approve-release` still pauses in the `release-approval` environment and needs the owner's
+  approval before anything publishes.
+- The trigger is **temporary**. §6.3 states the removal condition and §9 tracks it.
+
+`release.yml` must still never gain `pull_request` or `pull_request_target`. `workflow_dispatch`
+carries no such prohibition, and no gate in `ci/` asserts anything about this file's trigger set —
+checked, not assumed.
 
 ### 3.4 The branch ruleset does not obstruct the sequence
 
@@ -428,7 +439,7 @@ approval is irreversible.**
 `release` publishes the three crates, cuts six tags and creates two GitHub Releases.
 `publish-pypi` uploads three projects. `publish-npm` publishes nine packages.
 
-`release-pr` is ungated, so it also runs on G's merge and on the step-I re-run. It may open a
+`release-pr` is ungated, so it also runs on G's merge. It may open a
 second release pull request proposing `0.1.0` again over the alpha baseline. **The operator must
 not merge it.** The runbook says so explicitly.
 
@@ -444,7 +455,7 @@ release by a different mechanism.
 | Setting | Value | Reason |
 | --- | --- | --- |
 | Required reviewers | the repository owner | The one place a human can stop the run. `approve-release` is its only consumer |
-| Prevent self-review | **OFF** | The owner triggers the step-I re-run *and* must approve it |
+| Prevent self-review | **OFF** | The owner dispatches the step-I run *and* must approve it |
 | Wait timer | 0 | Nothing to delay |
 | Deployment branch policy | must permit `main` | A policy excluding `main` fails the job |
 
@@ -571,7 +582,29 @@ git checkout, §2.7's grouping rule, and §3.5's "do not merge the second releas
 Add one line at **both** mint steps, saying the workflow reuses the existing Paigasus bot GitHub
 App. The purpose is to stop a reader creating a second App while debugging a skipped job.
 
-### 6.3 The ADR-0011 amendment — **Notion, not committed**
+### 6.3 The temporary `workflow_dispatch` trigger — committed
+
+Add to `release.yml`'s `on:` block:
+
+```yaml
+on:
+  push:
+    branches:
+      - main
+  # TEMPORARY (SMA-580). Step I of the activation sequence dispatches this workflow explicitly
+  # rather than re-running a skipped run, which removes two unmeasured premises about re-run
+  # semantics. REMOVE once the first release has published — see the spec §9. The gate
+  # (`vars.PAIGASUS_RELEASE_ENABLED`) and the `release-approval` environment both still apply, so
+  # a dispatch cannot publish on its own.
+  workflow_dispatch:
+```
+
+No `inputs:`, so `repo:actionlint`'s branches-filter extractor has nothing to parse and needs no
+`BRANCH_SKIP` entry. `release_guard.py` gates on the jobs' `if:`/`needs:` chain, not on triggers,
+so V1 is unaffected. `repo:workflow-credentials` applies only to `pull_request` and
+`pull_request_target` workflows. **All three checked, not assumed.**
+
+### 6.4 The ADR-0011 amendment — **Notion, not committed**
 
 This repository holds no ADR directory; ADRs live in Notion, as CLAUDE.md states. So this artifact
 is **not reviewable in the pull request**. The agent drafts it; the owner applies it to the Notion
@@ -650,7 +683,8 @@ Yank the three seeds (§2.6) and revoke the local crates.io token (§5.4).
 | **`release-plz release`'s live derive→proto publish fails** | The highest-likelihood failure of the irreversible job: CLAUDE.md records that this path has never run live. §2.2.4's sequential seed rehearses it. Recovery: re-run the `release` job — release-plz's `is_published` and existing-tag short-circuits make it converge |
 | **Partial multi-registry failure** | See §8.1 — it has no complete bound today |
 | crates.io rate-limits new crates | Three new crates land in one session. crates.io documents a burst of **5** per account, so three fits. **Provenance is weak** — the docs page renders client-side and could not be fetched. If refused, wait and retry; earlier seeds stay valid |
-| A re-run does not re-read the flipped variable, or does not re-run skipped jobs (§3.3) | Verified at step I. The fallback is any other prepared pull request |
+| The `workflow_dispatch` trigger lets a non-owner fire an irreversible release | The flag gates every build job, and `approve-release` still needs the owner's approval. The trigger is removed at step J (§6.3, §9) |
+| The dispatch trigger is left in place after the release | §9 names it as a tracked removal with its condition. **Nothing in CI enforces the removal** — this is a real residual |
 | A PyPI publisher field is wrong, or no slots are free | Fails after crates.io published. §5.1 verifies at step C, before D |
 | The npm scope is not owned, or the token is the wrong type | Fails after crates.io **and** PyPI published. §1.4 and §5.2 confirm at step C |
 | A tag ruleset blocks release-plz's six tag pushes | Measured absent, §1.3. Step B3 proves the App can actually push one |
@@ -678,7 +712,7 @@ prevent, on the packages it does not cover.
 
 **This must be measured before step D:** does `@napi-rs/cli` 3.7.2's `prepublish` skip an
 already-published platform package, or abort? If it aborts, that is a `release.yml` fix, and §10
-asks whether it lands before the flip. §9 puts `release.yml` changes out of scope; this is the one
+asks whether it lands before the flip. §9.2 excludes `release.yml` job-graph changes; this is the one
 candidate to overrule that.
 
 **Rollback reality.** crates.io supports `cargo yank` only — never delete, never reuse. PyPI
@@ -687,33 +721,46 @@ permanent version burn in two of three registries.
 
 ---
 
-## 9. Out of scope
+## 9. Scope and tracked removals
 
-- Any change to `release.yml`'s job graph, credentials or gating — **except** the §8.1 platform-loop
-  guard, if the measurement there says it is needed. §10 decides.
-- npm and crates.io Trusted Publishing for the *second* release. Both become configurable once the
-  packages exist. **This needs a filed follow-up issue**, because it is what removes the
-  long-lived `NPM_TOKEN`; the token's expiry must be set short enough to bound the gap.
+### 9.1 The two tracked removals
+
+Both are temporary by decision. Neither is enforced by any gate, which is why they are named here.
+
+| Item | Removal condition | Owner |
+| --- | --- | --- |
+| `workflow_dispatch` on `release.yml` (§6.3) | The first release has published and §7 has passed. Remove at **step J**, in the same pull request that records the outcome | owner |
+| `NPM_TOKEN` (§5.2) | Every `@paigasus/*` package exists, so npm Trusted Publishing becomes configurable. **Needs a filed follow-up issue.** Set the token's expiry short enough to bound the gap | owner |
+
+### 9.2 Out of scope
+
+- Any change to `release.yml`'s job graph, credentials or gating. The **trigger** change in §6.3 is
+  in scope by owner decision; the §8.1 platform-loop guard is the one remaining candidate, and §10
+  decides it.
+- crates.io Trusted Publishing beyond the three configurations §5.3 creates.
 - A CI gate that proves the release path is configured. §1.3 shows the path is silently inert when
   a credential is absent, and nothing in CI says so. That gap is real and is not closed here.
 
 ---
 
-## 10. Open questions for the owner
+## 10. Questions
 
-1. **Who performs steps B and H?** The table assigns them to the agent. Creating environments,
-   adding reviewers and setting a variable all need `administration` scope; the session token
-   currently carries `repo` only. And §9 concedes the guard "protects the mechanism, not the
-   decision" — **THE FLIP** may be the wrong action to delegate regardless of scope.
-2. **Does the §8.1 npm platform-loop guard land before the flip?** It is a `release.yml` change,
-   which §9 puts out of scope. The measurement decides whether that exclusion is safe.
-3. **Would `workflow_dispatch` on `release.yml` be a better step-I trigger than the re-run?** It
-   removes §3.3's two unverified premises and needs no fallback. It also widens who can fire an
-   irreversible release, and it is a `release.yml` change.
-4. **Does release-plz's registry query skip yanked versions?** If it does not, `0.1.0-alpha.1`
+### 10.1 Settled by the owner
+
+- **Who performs the flip?** The **owner**, by decision. Step H is no longer delegated. Steps
+  B1–B3 stay with the agent if its token permits, and move to the owner if not (§3).
+- **`workflow_dispatch` or a re-run for step I?** **`workflow_dispatch`, temporarily** (§3.3,
+  §6.3). It removes two unmeasured premises. Its removal is tracked in §9.1.
+
+### 10.2 Still open
+
+1. **Does the §8.1 npm platform-loop guard land before the flip?** It is a `release.yml` change,
+   which §9.2 excludes. The measurement of `@napi-rs/cli` 3.7.2's `prepublish` behaviour decides
+   whether that exclusion is safe. **This is the last blocking unknown.**
+2. **Does release-plz's registry query skip yanked versions?** If it does not, `0.1.0-alpha.1`
    stays the baseline forever and §2.4's analysis re-applies at `0.2.0`. If it does, the baseline
-   silently becomes "unpublished" again after step J. Either way it is knowable before step J.
-5. **Does one `crates-io-auth-action` OIDC exchange yield a token valid for all three crates?** The
+   silently becomes "unpublished" again after step J. Knowable before step J, either way.
+3. **Does one `crates-io-auth-action` OIDC exchange yield a token valid for all three crates?** The
    action runs once; release-plz publishes three; three separate trusted-publisher configs exist.
 
 ---
@@ -790,3 +837,27 @@ step I; step J now verifies before yanking; the release PR is identified by JSON
 contradicted its own table.
 
 **Rejected:** nothing. Every finding was either folded in or converted into an §10 question.
+
+### Revision 3 — two owner decisions
+
+**The owner performs the flip.** Step H is no longer delegated to the agent (§3, §10.1). Steps
+B1–B3 stay with the agent only if its token carries `administration` scope; it currently carries
+`repo` only, so they may move to the owner as well. §4 states the full settings either way, so the
+outcome does not depend on who applies them.
+
+**`release.yml` gains a temporary `workflow_dispatch` trigger** (§6.3), and step I becomes an
+explicit dispatch instead of a re-run of a skipped run (§3.3). This removes revision 2's two
+unmeasured premises about re-run semantics. It is now a third committed artifact, so §9.2's
+"no `release.yml` changes" exclusion is narrowed to the job graph, credentials and gating — the
+trigger set is in scope by decision.
+
+The trigger widens who can fire an irreversible release. Three things bound it, none of them the
+trigger: the flag still gates every build job, `approve-release` still requires the owner's
+approval, and the trigger is removed at step J. §9.1 now tracks both temporary items — the
+dispatch trigger and `NPM_TOKEN` — with their removal conditions, because **no gate enforces
+either removal**.
+
+Checked, not assumed: no gate in `ci/` asserts anything about `release.yml`'s trigger set.
+`repo:actionlint`'s branches-filter extractor has nothing to parse in a bare `workflow_dispatch`,
+`release_guard.py` gates on the jobs' `if:`/`needs:` chain rather than on triggers, and
+`repo:workflow-credentials` applies only to `pull_request` and `pull_request_target` workflows.
