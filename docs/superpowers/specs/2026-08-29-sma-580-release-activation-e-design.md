@@ -440,6 +440,37 @@ The trigger is also **temporary**. §6.3 states the removal condition and §9.1 
 carries no such prohibition, and no gate in `ci/` asserts anything about this file's trigger set —
 checked, not assumed.
 
+### 3.3.1 What the boundary does NOT cover — `release-pr`, an open decision
+
+Found in the PR review, after §3.3's boundary was written. **§3.3 covers only the jobs that enter
+`release-publish`.** `release-pr` enters no environment at all.
+
+It mints an App token with `contents: write` and `pull-requests: write` from **repository**
+secrets, and a repository secret is readable by any run of the workflow regardless of ref. So a
+dispatched ref can still reach those credentials — by adding a step, or by editing a script the
+job already runs, such as `ci/version-lockstep/run.sh`.
+
+**How much this escalates is genuinely limited.** `create-github-app-token` defaults `repositories`
+to the current repository, so the minted token is repo-scoped and grants roughly what a
+write-access holder already has. It is masked and revoked in the action's post-step. The real loss
+is auditability: a dispatch runs without a pull request and without `moon ci`.
+
+**What was done:** `release-pr` now carries `if: github.event_name == 'push'`. This closes the
+**accidental** case only — a dispatch never mints the token by mistake. It is **not** a boundary:
+an edited copy of `release.yml` on the dispatched ref simply deletes the line. The spec says so,
+and so does the workflow comment, because overstating this is exactly the error §3.3 was written
+to correct.
+
+**The proper fix, and why it is not in this branch.** Move `PAIGASUS_BOT_APP_ID` and
+`PAIGASUS_BOT_PRIVATE_KEY` from repository secrets to **environment** secrets on a `main`-only
+environment, and give `release-pr` that environment. Then the same both-directions property holds:
+keeping the environment hits the branch policy, removing it loses the secrets.
+
+It is deliberately not done blind. `release-pr`'s preflight step makes the whole job **skip green**
+when `PAIGASUS_BOT_APP_ID` is absent, so a botched secret migration is invisible — it looks
+identical to "not configured yet". This is the only job in the release path that currently works,
+and the migration cannot be verified before merge. **Owner decision — §10.2.**
+
 ### 3.4 The branch ruleset does not obstruct the sequence
 
 `strict = true` (§1.3) means a pull request must be up to date with `main` before it merges. Step
@@ -610,9 +641,11 @@ on:
       - main
   # TEMPORARY (SMA-580). Step I of the activation sequence dispatches this workflow explicitly
   # rather than re-running a skipped run, which removes two unmeasured premises about re-run
-  # semantics. REMOVE once the first release has published — see the spec §9. The gate
-  # (`vars.PAIGASUS_RELEASE_ENABLED`) and the `release-approval` environment both still apply, so
-  # a dispatch cannot publish on its own.
+  # semantics. REMOVE once the first release has published — see §9.1.
+  #
+  # THE AUTHORIZATION BOUNDARY IS NOT IN THIS FILE. A dispatch runs the definition from the
+  # DISPATCHED REF, so the `if:` gate and the `environment:` keys are attacker-controlled there.
+  # See §3.3 for what actually bounds it, and for the `release-pr` residual it does NOT bound.
   workflow_dispatch:
 ```
 
@@ -702,7 +735,8 @@ Yank the three seeds (§2.6) and revoke the local crates.io token (§5.4).
 | **`release-plz release`'s live derive→proto publish fails** | The highest-likelihood failure of the irreversible job: CLAUDE.md records that this path has never run live. §2.2.4's sequential seed rehearses it. Recovery: re-run the `release` job — release-plz's `is_published` and existing-tag short-circuits make it converge |
 | **Partial multi-registry failure** | See §8.1 — it has no complete bound today |
 | crates.io rate-limits new crates | Three new crates land in one session. crates.io documents a burst of **5** per account, so three fits. **Provenance is weak** — the docs page renders client-side and could not be fetched. If refused, wait and retry; earlier seeds stay valid |
-| The `workflow_dispatch` trigger lets a non-owner fire an irreversible release | The flag gates every build job, and `approve-release` still needs the owner's approval. The trigger is removed at step J (§6.3, §9) |
+| The `workflow_dispatch` trigger lets a non-owner fire an irreversible release | Bounded **outside** the workflow file: the `release-publish` branch policy is `main`-only and all three registry credentials require that environment (§3.3). Nothing in the file bounds it |
+| A dispatched ref reaches `release-pr`'s **repository-level** App secrets (§3.3.1) | **NOT bounded by the above** — `release-pr` enters no environment. Narrowed, not closed. Open decision |
 | The dispatch trigger is left in place after the release | §9 names it as a tracked removal with its condition. **Nothing in CI enforces the removal** — this is a real residual |
 | A PyPI publisher field is wrong, or no slots are free | Fails after crates.io published. §5.1 verifies at step C, before D |
 | The npm scope is not owned, or the token is the wrong type | Fails after crates.io **and** PyPI published. §1.4 and §5.2 confirm at step C |
@@ -773,10 +807,15 @@ Both are temporary by decision. Neither is enforced by any gate, which is why th
 
 ### 10.2 Still open
 
-1. **Does release-plz's registry query skip yanked versions?** If it does not, `0.1.0-alpha.1`
+1. **Do the App secrets move to an environment (§3.3.1)?** `release-pr` reaches repository-level
+   `contents: write` credentials from a dispatched ref. The escalation is narrow — a repo-scoped
+   token granting about what a write-access holder already has — but it is real, and the `if:`
+   added in this branch narrows it without closing it. The migration cannot be verified before
+   merge, because a botched one skips green. **Decide before, or together with, step H.**
+2. **Does release-plz's registry query skip yanked versions?** If it does not, `0.1.0-alpha.1`
    stays the baseline forever and §2.4's analysis re-applies at `0.2.0`. If it does, the baseline
    silently becomes "unpublished" again after step J. Knowable before step J, either way.
-2. **Does one `crates-io-auth-action` OIDC exchange yield a token valid for all three crates?** The
+3. **Does one `crates-io-auth-action` OIDC exchange yield a token valid for all three crates?** The
    action runs once; release-plz publishes three; three separate trusted-publisher configs exist.
 
 ---
@@ -886,11 +925,12 @@ unmeasured premises about re-run semantics. It is now a third committed artifact
 "no `release.yml` changes" exclusion is narrowed to the job graph, credentials and gating — the
 trigger set is in scope by decision.
 
-The trigger widens who can fire an irreversible release. Three things bound it, none of them the
-trigger: the flag still gates every build job, `approve-release` still requires the owner's
-approval, and the trigger is removed at step J. §9.1 now tracks both temporary items — the
-dispatch trigger and `NPM_TOKEN` — with their removal conditions, because **no gate enforces
-either removal**.
+The trigger widens who can fire an irreversible release, and **nothing inside the workflow file
+bounds it** — a dispatch runs the definition from the dispatched ref. §3.3 states the external
+boundary: the `release-publish` deployment branch policy set to `main`-only, plus all three
+registry credentials requiring that environment. Trigger removal at step J is operational cleanup,
+**not** part of that boundary. §9.1 tracks it and `NPM_TOKEN` together, because **no gate enforces
+either removal**. §3.3 also records the one path the boundary does not cover — `release-pr`.
 
 **Closed by measurement:** `@napi-rs/cli` 3.7.2's `prepublish` skips an already-published platform
 package rather than aborting (§11.4), so §8.1's one unbounded partial-failure state is bounded and

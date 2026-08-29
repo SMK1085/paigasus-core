@@ -96,6 +96,16 @@ this repository close that, and they hold in both directions:
 **Do not relax the branch policy, and do not leave the environment field blank on any of the three
 registry configurations.** Together they are the boundary.
 
+**One path this boundary does NOT cover.** `release-pr` enters no environment, and mints an App
+token with `contents: write` from **repository** secrets, which any run reaches regardless of ref.
+So a dispatched ref can still reach those credentials. The escalation is narrow — the token is
+repo-scoped, masked, and revoked at job end, granting about what a write-access holder already has
+— and `release-pr` now carries `if: github.event_name == 'push'`, which stops an *accidental*
+dispatch from minting it. That `if:` is **not** a boundary: an edited copy of the workflow deletes
+it. Closing it properly means moving `PAIGASUS_BOT_APP_ID` and `PAIGASUS_BOT_PRIVATE_KEY` to
+environment secrets on a `main`-only environment. **That is an open decision — see the spec
+§3.3.1 and §10.2. Settle it before or together with step H.**
+
 GitHub pauses **each** job that enters an environment, and three enter this one: `release`,
 `publish-pypi` and `publish-npm`. A reviewer here would stop the run again between crates.io and
 PyPI. A rejected or timed-out second approval leaves crates.io published and PyPI empty — the split
@@ -173,9 +183,15 @@ Run this for all three crates. It turns an irreversible discovery into a free lo
 
 ```bash
 cd /tmp/seed/rs
+set -euo pipefail
 for c in paigasus-kernel paigasus-proto-derive paigasus-proto; do
-  cargo package -p "$c"
-  n=$(tar tzf "target/package/$c-0.1.0-alpha.1.crate" | grep -c cargo_vcs_info || true)
+  crate="target/package/$c-0.1.0-alpha.1.crate"
+  # FAIL CLOSED. Without these two lines a failed `cargo package` leaves no archive,
+  # `tar` writes nothing, `grep -c` prints 0, and the assertion reports OK on a crate it
+  # never inspected. Measured: `tar tzf missing.crate | grep -c cargo_vcs_info` gives 0.
+  cargo package -p "$c" || { echo "$c: cargo package FAILED — STOP"; exit 1; }
+  [ -f "$crate" ] || { echo "$c: no archive at $crate — STOP"; exit 1; }
+  n=$(tar tzf "$crate" | grep -c cargo_vcs_info || true)
   [ "$n" -eq 0 ] && echo "$c OK" || { echo "$c CARRIES VCS INFO — STOP"; exit 1; }
 done
 ```
@@ -451,3 +467,6 @@ Both are temporary by decision. **No gate enforces either.**
 - **Never add `--allow-dirty`** to any command in §4. See the warning there.
 - **Never give `release-publish` a reviewer or a wait timer.** See §3.
 - **Never add a `pull_request` or `pull_request_target` trigger to `release.yml`.**
+- **Never treat an in-workflow check as the authorization boundary for the dispatch trigger.** A
+  dispatch runs the definition from the dispatched ref, so every `if:`, `environment:` and
+  `github.ref` check in the file is attacker-controlled there. §3 has the real boundary.
