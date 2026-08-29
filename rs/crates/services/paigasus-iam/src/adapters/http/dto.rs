@@ -363,8 +363,9 @@ impl From<RoleGrant> for RoleGrantDto {
 /// `PageQuery`'s fields) — `RoleService::list` always lists exactly one principal's grants,
 /// there is no list-everyone mode over HTTP. Kept `Option` here (rather than a bare
 /// `String`) so a missing param maps through `http/authz.rs`'s own
-/// `TenancyError::MissingRequiredField` funnel — the same `{"error":{code,message}}` envelope
-/// every other validation error uses — instead of axum's default plain-text query-rejection.
+/// `TenancyError::MissingRequiredField` funnel — a SPECIFIC reason naming the field, rather
+/// than `EnvelopeQuery`'s general `invalid-query-parameter` (SMA-588), which is what a bare
+/// `String` would produce.
 #[derive(Debug, Clone, Deserialize)]
 pub struct RoleGrantQuery {
     pub principal_prn: Option<String>,
@@ -412,8 +413,9 @@ pub struct CreateServiceAccountBody {
 
 /// Query params for `GET /v1/service-accounts`: `owner_prn` is REQUIRED (mirrors
 /// `RoleGrantQuery::principal_prn` — kept `Option` so a missing param funnels through the
-/// `TenancyError::MissingRequiredField` `{"error":{code,message}}` envelope instead of axum's
-/// default plain-text query rejection).
+/// `TenancyError::MissingRequiredField` funnel — a SPECIFIC reason naming the field, rather
+/// than `EnvelopeQuery`'s general `invalid-query-parameter` (SMA-588), which is what a bare
+/// `String` would produce).
 #[derive(Debug, Clone, Deserialize)]
 pub struct ServiceAccountQuery {
     pub owner_prn: Option<String>,

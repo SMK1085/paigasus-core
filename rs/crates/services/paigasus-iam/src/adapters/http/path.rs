@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! A uuid path-segment extractor that answers inside IAM's error envelope (SMA-586 D5.1).
+//! Path-segment extractors that answer inside IAM's error envelope: one family for uuid
+//! segments (SMA-586 D5.1), one for opaque non-uuid segments (SMA-588).
 //!
 //! axum's own `Path<Uuid>` rejects a malformed segment with a plain-text 400 that is not the
 //! `{"error":{code,message}}` contract every other IAM failure uses — so 26 path segments
@@ -39,7 +40,8 @@ use uuid::Uuid;
 use crate::adapters::http::error::ApiError;
 use crate::application::error::TenancyError;
 
-/// Names the wire field a uuid path segment stands for, for `TenancyError::InvalidUuid`.
+/// Names the wire field a path segment stands for — a uuid segment for
+/// `TenancyError::InvalidUuid`, a non-uuid segment for `TenancyError::InvalidPathSegment`.
 pub(crate) trait PathField {
     const NAME: &'static str;
 }

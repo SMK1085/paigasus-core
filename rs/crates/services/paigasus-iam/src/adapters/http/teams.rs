@@ -11,7 +11,7 @@
 //! two fetch the team first (`s.teams.get`), which doubles as the pre-existing NotFound-on-
 //! missing-team behavior every service call already had.
 
-use axum::extract::{Query, State};
+use axum::extract::State;
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
@@ -22,6 +22,7 @@ use super::dto::{CreateNodeBody, PageQuery, ProjectDto, RenameBody, TeamDto};
 use super::error::ApiError;
 use super::json::EnvelopeJson;
 use super::path::{TeamId, UuidPath};
+use super::query::EnvelopeQuery;
 use crate::adapters::auth::AuthContext;
 use crate::application::pagination::Page;
 
@@ -91,7 +92,12 @@ async fn create_project(
     Ok((StatusCode::CREATED, Json(view.into())))
 }
 
-async fn list_projects(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, path: UuidPath<TeamId>, Query(q): Query<PageQuery>) -> Result<Json<Vec<ProjectDto>>, ApiError> {
+async fn list_projects(
+    State(s): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
+    path: UuidPath<TeamId>,
+    EnvelopeQuery(q): EnvelopeQuery<PageQuery>,
+) -> Result<Json<Vec<ProjectDto>>, ApiError> {
     let team_id = path.id;
     if s.enforce_tenancy {
         let team_view = s.teams.get(team_id).await?;

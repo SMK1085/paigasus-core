@@ -18,7 +18,7 @@
 //! [`introspect_router`], a SEPARATE `Router` from [`router`]'s management routes so `mod.rs`
 //! can merge each into the correct half of the HTTP surface.
 
-use axum::extract::{DefaultBodyLimit, Query, State};
+use axum::extract::{DefaultBodyLimit, State};
 use axum::http::StatusCode;
 use axum::routing::{delete, post};
 use axum::{Extension, Json, Router};
@@ -32,6 +32,7 @@ use super::dto::{ApiKeyDto, IntrospectApiKeyRequestBody, IntrospectApiKeyRespons
 use super::error::ApiError;
 use super::json::EnvelopeJson;
 use super::path::{ApiKeyId as ApiKeyIdField, ServiceAccountId, UuidPath, UuidPathPair};
+use super::query::EnvelopeQuery;
 use crate::adapters::auth::AuthContext;
 use crate::application::error::TenancyError;
 use crate::application::pagination::Page;
@@ -97,7 +98,12 @@ async fn issue(
 
 /// `GET /v1/service-accounts/{sa}/api-keys`: lists the SA's keys — NEVER a secret/hash
 /// (`ApiKeyDto`'s own doc; `ApiKey` structurally has neither field).
-async fn list(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, path: UuidPath<ServiceAccountId>, Query(q): Query<PageQuery>) -> Result<Json<Vec<ApiKeyDto>>, ApiError> {
+async fn list(
+    State(s): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
+    path: UuidPath<ServiceAccountId>,
+    EnvelopeQuery(q): EnvelopeQuery<PageQuery>,
+) -> Result<Json<Vec<ApiKeyDto>>, ApiError> {
     let actor = actor_prn(&ctx);
     let sa_id = service_account_id(path.id);
     let page = Page::new(q.limit, q.offset)?;

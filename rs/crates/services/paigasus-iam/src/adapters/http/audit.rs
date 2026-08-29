@@ -12,7 +12,7 @@
 //! comes from the auth middleware's `AuthContext` extension, never a client-supplied value
 //! (mirrors every other handler in this module).
 
-use axum::extract::{Query, State};
+use axum::extract::State;
 use axum::routing::get;
 use axum::{Extension, Json, Router};
 use chrono::{DateTime, Utc};
@@ -23,6 +23,7 @@ use uuid::Uuid;
 use super::AppState;
 use super::dto::{AuditListResponseDto, AuditQuery};
 use super::error::ApiError;
+use super::query::EnvelopeQuery;
 use crate::adapters::auth::AuthContext;
 use crate::application::error::TenancyError;
 use crate::application::pagination::DEFAULT_LIMIT;
@@ -114,7 +115,7 @@ pub(crate) fn to_filter(q: AuditQuery) -> Result<AuditFilter, TenancyError> {
 /// when the page came back FULL (a full page implies more rows may follow), else `None` — the
 /// standard keyset-pagination "under-full page proves there is no next page" convention
 /// (mirrors `grpc::audit::list_audit_entries`'s identical doc).
-async fn list(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, Query(q): Query<AuditQuery>) -> Result<Json<AuditListResponseDto>, ApiError> {
+async fn list(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, EnvelopeQuery(q): EnvelopeQuery<AuditQuery>) -> Result<Json<AuditListResponseDto>, ApiError> {
     let actor = actor_prn(&ctx);
     let filter = to_filter(q)?;
     let limit = filter.capped_limit();

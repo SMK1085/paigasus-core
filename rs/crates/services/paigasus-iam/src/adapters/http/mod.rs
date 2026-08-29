@@ -36,6 +36,7 @@ mod organizations;
 // transport parity guard drives `UuidPath<DeadLetterId>` directly (SMA-586 fix round 1, Finding 1).
 pub(crate) mod path;
 mod projects;
+pub(crate) mod query;
 mod service_accounts;
 mod service_info;
 mod system_retirement;
