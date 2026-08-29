@@ -23,6 +23,7 @@ import re
 import sys
 import tempfile
 from pathlib import Path
+from typing import NoReturn
 
 try:
     import yaml
@@ -90,8 +91,15 @@ PUBLISH_MARKERS = (
 )
 _PUBLISH_RE = re.compile("|".join(PUBLISH_MARKERS))
 
+# V5: matches V6's own whitespace tolerance (`napi\s+prepublish` in PUBLISH_MARKERS above). V5 used
+# to test the literal substring "napi prepublish", so `napi  prepublish` (two spaces) or a tab
+# between the words was recognised as a publish step by V6 while V5's --no-gh-release assertion
+# never fired on it — the tagging boundary went unasserted for a command the guard otherwise knew
+# about (CodeRabbit round 1 finding 2).
+_NAPI_PREPUBLISH_RE = re.compile(r"napi\s+prepublish")
 
-def infra(msg: str) -> "NoReturn":  # type: ignore[valid-type]
+
+def infra(msg: str) -> NoReturn:
     print(f"release-guard: {msg}", file=sys.stderr)
     raise SystemExit(2)
 
@@ -279,7 +287,7 @@ def napi_violations(job: dict, job_id: str, name: str) -> list[str]:
         run = str(step.get("run") or "")
         for line in run.splitlines():
             for segment in command_segments(line):
-                if "napi prepublish" in segment and "--no-gh-release" not in segment:
+                if _NAPI_PREPUBLISH_RE.search(segment) and "--no-gh-release" not in segment:
                     out.append(
                         f"{name}: job '{job_id}' runs `napi prepublish` without "
                         f"--no-gh-release. release-plz owns every tag (ADR-0011 S3); napi "
@@ -462,11 +470,11 @@ FIXTURES: list[tuple[str, str, str, str | None]] = [
     ("called workflow that is workflow_call-only may publish", "called",
      "on:\n  workflow_call:\njobs:\n  build:\n    steps: [{run: twine upload dist/*}]\n", None),
     ("called workflow with pull_request may NOT publish", "called",
-     "on:\n  workflow_call:\n  pull_request:\n    branches:\n      - main\n"
-     "jobs:\n  build:\n    steps: [{run: twine upload dist/*}]\n", "workflow_call-ONLY"),
+     ("on:\n  workflow_call:\n  pull_request:\n    branches:\n      - main\n"
+      "jobs:\n  build:\n    steps: [{run: twine upload dist/*}]\n"), "workflow_call-ONLY"),
     ("called workflow with no publish step is clean", "called",
-     "on:\n  workflow_call:\n  pull_request:\n    branches:\n      - main\n"
-     "jobs:\n  build:\n    steps: [{run: maturin build}]\n", None),
+     ("on:\n  workflow_call:\n  pull_request:\n    branches:\n      - main\n"
+      "jobs:\n  build:\n    steps: [{run: maturin build}]\n"), None),
 
     # --- Fix round 1 additions -------------------------------------------------------------
     ("Critical 1: case-insensitive Always() bypass", "main",
@@ -479,9 +487,9 @@ FIXTURES: list[tuple[str, str, str, str | None]] = [
      _OK_MAIN.replace("    needs: [plan]", "    needs: [plan]\n    if: ${{ !Cancelled() }}"),
      "status function"),
     ("Important 3: napi prepublish --dry-run in a called workflow is not a publish", "called",
-     "on:\n  workflow_call:\n  pull_request:\n    branches:\n      - main\n"
-     "jobs:\n  build:\n    steps: [{run: pnpm exec napi prepublish --dry-run --no-gh-release "
-     "--npm-dir npm}]\n", None),
+     ("on:\n  workflow_call:\n  pull_request:\n    branches:\n      - main\n"
+      "jobs:\n  build:\n    steps: [{run: pnpm exec napi prepublish --dry-run --no-gh-release "
+      "--npm-dir npm}]\n"), None),
     ("Important 4: V5 is not fooled by a decoy --no-gh-release mention on another line", "main",
      _OK_MAIN.replace(
          "steps: [{run: release-plz release}]",
@@ -526,9 +534,9 @@ FIXTURES: list[tuple[str, str, str, str | None]] = [
          "napi prepublish --npm-dir npm  # remember --no-gh-release"),
      "without --no-gh-release"),
     ("R2 Important 1: job_publishes sees a real publish chained with a decoy --dry-run", "called",
-     "on:\n  workflow_call:\n  pull_request:\n    branches:\n      - main\n"
-     "jobs:\n  build:\n    steps:\n      - run: |\n          "
-     'npm publish && echo "not --dry-run"\n',
+     ("on:\n  workflow_call:\n  pull_request:\n    branches:\n      - main\n"
+      "jobs:\n  build:\n    steps:\n      - run: |\n          "
+      'npm publish && echo "not --dry-run"\n'),
      "workflow_call-ONLY"),
 
     # --- Fix round 3 additions (Critical 2, Important 3, Important 4) ----------------------
@@ -556,33 +564,38 @@ FIXTURES: list[tuple[str, str, str, str | None]] = [
     # Important 3 — the four publish verbs this repo's own tooling uses, which PUBLISH_MARKERS
     # omitted. `wheels.yml` IS a maturin workflow carrying pull_request and push.
     ("R3 Important 3: maturin publish in a non-workflow_call-only callee reds", "called",
-     "on:\n  workflow_call:\n  pull_request:\n    branches:\n      - main\n"
-     "jobs:\n  build:\n    steps: [{run: maturin publish --skip-existing}]\n",
+     ("on:\n  workflow_call:\n  pull_request:\n    branches:\n      - main\n"
+      "jobs:\n  build:\n    steps: [{run: maturin publish --skip-existing}]\n"),
      "workflow_call-ONLY"),
     ("R3 Important 3: maturin upload reds the same way", "called",
-     "on:\n  workflow_call:\n  push:\n    branches:\n      - main\n"
-     "jobs:\n  build:\n    steps: [{run: maturin upload dist/*}]\n",
+     ("on:\n  workflow_call:\n  push:\n    branches:\n      - main\n"
+      "jobs:\n  build:\n    steps: [{run: maturin upload dist/*}]\n"),
      "workflow_call-ONLY"),
     ("R3 Important 3: uv publish reds the same way", "called",
-     "on:\n  workflow_call:\n  pull_request:\n    branches:\n      - main\n"
-     "jobs:\n  build:\n    steps: [{run: uv publish --trusted-publishing always}]\n",
+     ("on:\n  workflow_call:\n  pull_request:\n    branches:\n      - main\n"
+      "jobs:\n  build:\n    steps: [{run: uv publish --trusted-publishing always}]\n"),
      "workflow_call-ONLY"),
     ("R3 Important 3: yarn publish reds the same way", "called",
-     "on:\n  workflow_call:\n  pull_request:\n    branches:\n      - main\n"
-     "jobs:\n  build:\n    steps: [{run: yarn publish --access public}]\n",
+     ("on:\n  workflow_call:\n  pull_request:\n    branches:\n      - main\n"
+      "jobs:\n  build:\n    steps: [{run: yarn publish --access public}]\n"),
      "workflow_call-ONLY"),
 
     # Important 4 — V5 on a CALLED workflow. `--dry-run` is present on purpose: it keeps V6/V7
     # silent, so the only thing this row can be reporting is V5 itself.
     ("R3 Important 4: V5 now reaches a CALLED workflow's napi prepublish", "called",
-     "on:\n  workflow_call:\n  pull_request:\n    branches:\n      - main\n"
-     "jobs:\n  build:\n    steps: [{run: pnpm exec napi prepublish --dry-run --npm-dir npm}]\n",
+     ("on:\n  workflow_call:\n  pull_request:\n    branches:\n      - main\n"
+      "jobs:\n  build:\n    steps: [{run: pnpm exec napi prepublish --dry-run --npm-dir npm}]\n"),
      "without --no-gh-release"),
     ("R3 Important 4 CONTROL: a called workflow carrying the flag stays clean", "called",
-     "on:\n  workflow_call:\n  pull_request:\n    branches:\n      - main\n"
-     "jobs:\n  build:\n    steps: [{run: pnpm exec napi prepublish --dry-run --no-gh-release "
-     "--npm-dir npm}]\n",
+     ("on:\n  workflow_call:\n  pull_request:\n    branches:\n      - main\n"
+      "jobs:\n  build:\n    steps: [{run: pnpm exec napi prepublish --dry-run --no-gh-release "
+      "--npm-dir npm}]\n"),
      None),
+
+    # --- CodeRabbit round 1 additions (finding 2: V5 whitespace tolerance) -----------------
+    ("CR1 finding 2: V5 catches a two-space `napi  prepublish` without --no-gh-release", "main",
+     _OK_MAIN.replace("run: release-plz release", "run: napi  prepublish --npm-dir npm"),
+     "without --no-gh-release"),
 ]
 
 
