@@ -18,15 +18,39 @@ A_TAGFMT="paigasus-release-parity-a-v{version}"
 B_TAGFMT="paigasus-release-parity-b-v{version}"
 BASELINE="0.1.0"
 
+# Same contract as release-plz.sh's _rp_fatal, deliberately duplicated rather than
+# shared: run.sh sources exactly one module per run, and a ci/lib/ layer was
+# considered and rejected (SMA-596 D4). The distinct name keeps that honest.
+_psr_fatal() { # line...
+  echo "FATAL: release-parity ABORTED: infrastructure error (rc=2)" >&2
+  printf '       %s\n' "$@" >&2
+  exit 2
+}
+
 # PSR is a Python package in py/'s uv dev-deps. The fixture lives in /tmp, outside
 # the repo, where `uv run` can't resolve the project — so resolve the absolute
 # semantic-release binary once, from py/ (mirrors release-plz.sh's RELEASE_PLZ_BIN).
 # `uv run --frozen` also bootstraps py/.venv from uv.lock (there is no separate
 # `uv sync` CI step).
+#
+# The `|| true` is KEPT so a failure lands as an empty value on the assertion below
+# rather than killing the script under `set -e` with no explanation.
+#
+# The old `|| command -v semantic-release || echo semantic-release` fallback is GONE
+# (SMA-596 D3.1). Unlike release-plz's dead fallbacks it was genuinely reachable, so
+# on a machine with a global semantic-release installed it could silently make an
+# unpinned build the tool under test. That matters more here than anywhere else in
+# this harness: this module is the REFERENCE implementation for the 0.x expectation
+# the other ecosystems are compared against, so substituting it corrupts the whole
+# comparison rather than one side of it.
 _PSR_SELF="${BASH_SOURCE[0]:-$0}"
 _PSR_REPO_ROOT="$(cd "$(dirname "$_PSR_SELF")/../../.." && pwd)"
 PSR_BIN="$( (cd "$_PSR_REPO_ROOT/py" && uv run --frozen python -c 'import shutil,sys; sys.stdout.write(shutil.which("semantic-release") or "")') 2>/dev/null || true )"
-[ -n "$PSR_BIN" ] || PSR_BIN="$( command -v semantic-release 2>/dev/null || echo semantic-release )"
+[ -x "$PSR_BIN" ] || _psr_fatal \
+  "python-semantic-release.sh: semantic-release did not resolve to an executable file." \
+  "Got: ${PSR_BIN:-<empty>}" \
+  "Run 'uv sync' in py/, and check py/uv.lock still carries python-semantic-release." \
+  "There is deliberately no PATH fallback (SMA-596 D3.1)."
 
 # Real configs the fixture derives its classification settings from (F3). Both
 # packages must agree (both must honor the canonical contract).
