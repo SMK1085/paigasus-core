@@ -48,7 +48,7 @@
 //! that takes an owned `RetireOutcome` and returns a `Response` lets every variant be
 //! constructed directly in a test, with no `AppState`/database/request needed.
 
-use axum::extract::{Path, State};
+use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
@@ -61,6 +61,7 @@ use serde_json::json;
 use super::AppState;
 use super::error::ApiError;
 use super::json::EnvelopeJson;
+use super::path::{PolicyId, StringPath};
 use crate::adapters::auth::AuthContext;
 
 pub fn router() -> Router<AppState> {
@@ -94,9 +95,9 @@ fn acknowledged(body: Option<RetireBody>) -> bool {
 /// below carry the information needed to act on them. The actual outcome -> response mapping
 /// lives in `response_for` (this module's doc), so it stays testable independent of this thin
 /// axum-wiring layer.
-async fn retire(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, Path(id): Path<String>, body: Option<EnvelopeJson<RetireBody>>) -> Result<Response, ApiError> {
+async fn retire(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, policy: StringPath<PolicyId>, body: Option<EnvelopeJson<RetireBody>>) -> Result<Response, ApiError> {
     let ack = acknowledged(body.map(|EnvelopeJson(b)| b));
-    let outcome = s.retirement.retire(&actor_prn(&ctx), &id, ack).await?;
+    let outcome = s.retirement.retire(&actor_prn(&ctx), &policy.value, ack).await?;
     Ok(response_for(outcome))
 }
 

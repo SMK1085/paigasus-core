@@ -24,7 +24,7 @@
 //! `DeadLetterService` application service, not a transport wrapping the other, with paired
 //! projection tests across both modules as the drift guard.
 
-use axum::extract::{Query, State};
+use axum::extract::State;
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
 use chrono::{DateTime, Utc};
@@ -37,6 +37,7 @@ use super::dto::{BulkReplayBody, BulkReplayResponseDto, DeadLetterEntryDto, Dead
 use super::error::ApiError;
 use super::json::EnvelopeJson;
 use super::path::{DeadLetterId, UuidPath};
+use super::query::EnvelopeQuery;
 use crate::adapters::auth::AuthContext;
 use crate::application::error::TenancyError;
 use crate::application::pagination::DEFAULT_LIMIT;
@@ -112,7 +113,7 @@ impl BulkReplayBody {
 /// `GET /v1/outbox/dead-letters`: Root-only (enforced inside `DeadLetterService::list`).
 /// `next_cursor` is the last returned entry's id when the page came back FULL, else `None` —
 /// mirrors `http::audit::list`'s identical keyset-pagination convention.
-async fn list(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, Query(q): Query<DeadLetterQuery>) -> Result<Json<DeadLetterListResponseDto>, ApiError> {
+async fn list(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, EnvelopeQuery(q): EnvelopeQuery<DeadLetterQuery>) -> Result<Json<DeadLetterListResponseDto>, ApiError> {
     let filter = to_filter(q)?;
     let limit = filter.capped_limit();
     let entries = s.dead_letters.list(&actor_prn(&ctx), filter).await?;

@@ -1194,6 +1194,11 @@ mod tests {
     /// below now — see the comment on that assertion for why the two codes legitimately differ.
     /// Divergences 3 and 4 are new in SMA-587: the two codes it added are HTTP-only
     /// structurally, the same way divergence 2 is.
+    /// Divergences 5 and 6 are new in SMA-588 (`invalid-query-parameter`, `invalid-path-segment`).
+    /// They are recorded here but asserted ELSEWHERE, in
+    /// `the_http_only_extractor_reasons_are_never_constructed_on_the_grpc_surface` — because unlike
+    /// every divergence above them, theirs is a property of this crate's own discipline rather than
+    /// of the transport, so it needs a guard rather than a note.
     #[tokio::test]
     async fn the_recorded_transport_divergences_still_hold() {
         use paigasus_proto::paigasus::common::v1::ErrorReason;
@@ -1264,5 +1269,55 @@ mod tests {
         //    checked at decode time, not layered on top of an already-succeeded parse the way
         //    `serde_json::from_slice` then `Deserialize::deserialize` are. There is nothing for a
         //    gRPC counterpart to assert here either.
+    }
+
+    /// SMA-588 divergences 5 and 6: `invalid-query-parameter` and `invalid-path-segment` are
+    /// HTTP-only, and unlike 905/906 that is NOT enforced by the transport — both are
+    /// `TenancyError` variants, which `status_to_grpc` maps unconditionally. This scan is what
+    /// holds the property the registry comments assert.
+    ///
+    /// Three limits, stated. First, a source scan is defeated by an alias or a re-export, exactly
+    /// as `ci/error-registry/check.py` documents for its own. Second, this scan SKIPS
+    /// `convert.rs` itself, because its own test module names both variant strings and would
+    /// otherwise trip the guard on itself — so a construction added inside `convert.rs` escapes
+    /// this check entirely. `convert.rs` is a mapping layer that constructs no `TenancyError` of
+    /// its own, so the realistic case — a gRPC handler reaching for a convenient existing
+    /// variant — is still covered, but the hole is real and this is where it is recorded. Third,
+    /// the scan matches on a bare SUBSTRING of the file's text, not on a construction site, so it
+    /// can also FALSE-POSITIVE on a mere textual mention of either variant name — a doc comment
+    /// or a string literal in another `adapters/grpc/*.rs` file trips it exactly like a real
+    /// construction would. That failure direction is a noisy red, never a silent pass.
+    #[test]
+    fn the_http_only_extractor_reasons_are_never_constructed_on_the_grpc_surface() {
+        let grpc_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/adapters/grpc");
+        let mut offenders = Vec::new();
+        let mut scanned = 0usize;
+
+        for entry in std::fs::read_dir(&grpc_dir).expect("the grpc adapter directory must exist") {
+            let path = entry.expect("readable dir entry").path();
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).expect("readable source file");
+            scanned += 1;
+            // This file's own test module names both variants; skip it, or the guard reds on itself.
+            if path.file_name().and_then(|n| n.to_str()) == Some("convert.rs") {
+                continue;
+            }
+            for needle in ["InvalidQueryParameter", "InvalidPathSegment"] {
+                if text.contains(needle) {
+                    offenders.push(format!("{}: {needle}", path.display()));
+                }
+            }
+        }
+
+        // A LIVENESS floor, not a completeness claim: proof the scan is still reading a real
+        // directory (currently 9 files), not that every file was checked — `convert.rs` above is
+        // deliberately skipped and still counts toward `scanned`.
+        assert!(scanned >= 6, "scanned {scanned} file(s) — the grpc adapter tree moved and this guard is scanning nothing");
+        assert!(
+            offenders.is_empty(),
+            "these reasons are declared HTTP-only in error.proto but are constructed on the gRPC surface: {offenders:?}"
+        );
     }
 }

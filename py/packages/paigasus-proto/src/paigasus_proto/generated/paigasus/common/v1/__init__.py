@@ -480,12 +480,11 @@ class ErrorReason(betterproto2.Enum):
 
     INVALID_REQUEST_BODY = 901
     """
-    "invalid-request-body" — the request body could not be read or deserialized. NOTE the two
-    services scope this differently since SMA-587: IAM's HTTP extractor emits it only for a
-    MALFORMED body (a JSON syntax error, or a body that failed to buffer), having split the
-    wrong-content-type and schema-mismatch cases out to 905 and 906; the gateway's own funnel
-    (`adapters/http/error.rs`) still emits it for ANY deserialization failure. Reconverging the
-    two is SMA-588, not an accident (amends ADR-0019 A1.3).
+    "invalid-request-body" — the request body could not be read or
+    deserialized. Both services scope this identically since SMA-588: a
+    MALFORMED body only (a JSON syntax error, a truncated body, or a body
+    that failed to buffer). The wrong-content-type and schema-mismatch
+    cases are 905 and 906.
     """
 
     REQUEST_TOO_LARGE = 902
@@ -509,17 +508,44 @@ class ErrorReason(betterproto2.Enum):
 
     UNSUPPORTED_CONTENT_TYPE = 905
     """
-    "unsupported-content-type" — the request declared a Content-Type the endpoint does not
-    accept, so the body was never read. HTTP-only, structurally: tonic negotiates
-    `application/grpc` at the transport layer, so a gRPC client cannot present a wrong
-    content type to a handler.
+    "unsupported-content-type" — the request declared a Content-Type the
+    endpoint does not accept, so the body was never read. IAM-only in
+    practice, for two independent reasons: tonic negotiates
+    `application/grpc` at the transport layer, so a gRPC client cannot
+    present a wrong content type; and the gateway reads its body as raw
+    Bytes and never inspects Content-Type at all (SMA-588 D4.1).
     """
 
     INVALID_REQUEST_SCHEMA = 906
     """
-    "invalid-request-schema" — the body was syntactically valid JSON but did not match the
-    target type. HTTP-only, structurally: proto3 decoding has no "syntactically valid but
-    schema-invalid" state, since unknown fields are skipped by design.
+    "invalid-request-schema" — the body was syntactically valid JSON but
+    did not match the target type. Emitted by BOTH services since SMA-588,
+    on DIFFERENT statuses: IAM answers 422 (axum's JsonDataError status),
+    the gateway answers 400 (OpenAI wire compatibility — its SDKs map
+    status to an exception class). A consumer mapping code -> status must
+    not assume it is one-to-one. HTTP-only, structurally: proto3 decoding
+    has no "syntactically valid but schema-invalid" state, since unknown
+    fields are skipped by design.
+    """
+
+    INVALID_QUERY_PARAMETER = 907
+    """
+    "invalid-query-parameter" — a query-string parameter could not be
+    deserialized into its target type, or was supplied more than once.
+    Emitted by IAM's EnvelopeQuery extractor before any handler runs.
+    HTTP-only: gRPC has no query string. Unlike 905/906, that property is
+    NOT enforced by the transport — this reason is a TenancyError variant,
+    which the gRPC surface also maps — so it is held by a source scan in
+    adapters/grpc/convert.rs instead (SMA-588).
+    """
+
+    INVALID_PATH_SEGMENT = 908
+    """
+    "invalid-path-segment" — a URL path segment could not be decoded as
+    text (its percent-encoding is not valid UTF-8). Emitted by IAM's
+    StringPath extractor for non-uuid segments; a malformed UUID segment
+    is ERROR_REASON_INVALID_UUID instead. HTTP-only on the same terms as
+    907, and held by the same source scan (SMA-588).
     """
 
     @classmethod
@@ -581,6 +607,8 @@ class ErrorReason(betterproto2.Enum):
             904: "ERROR_REASON_CAPABILITY_DISABLED",
             905: "ERROR_REASON_UNSUPPORTED_CONTENT_TYPE",
             906: "ERROR_REASON_INVALID_REQUEST_SCHEMA",
+            907: "ERROR_REASON_INVALID_QUERY_PARAMETER",
+            908: "ERROR_REASON_INVALID_PATH_SEGMENT",
         }
 
     @classmethod
@@ -642,6 +670,8 @@ class ErrorReason(betterproto2.Enum):
             "ERROR_REASON_CAPABILITY_DISABLED": 904,
             "ERROR_REASON_UNSUPPORTED_CONTENT_TYPE": 905,
             "ERROR_REASON_INVALID_REQUEST_SCHEMA": 906,
+            "ERROR_REASON_INVALID_QUERY_PARAMETER": 907,
+            "ERROR_REASON_INVALID_PATH_SEGMENT": 908,
         }
 
 

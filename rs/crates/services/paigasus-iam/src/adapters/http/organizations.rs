@@ -20,7 +20,7 @@
 //! would reach the entity-slice loader with a dangling id and fail closed as an internal error
 //! rather than the expected `NotFound`/404.
 
-use axum::extract::{Query, State};
+use axum::extract::State;
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
@@ -32,6 +32,7 @@ use super::dto::{CreateNodeBody, CreateOrgResponse, OrgDto, PageQuery, RenameBod
 use super::error::ApiError;
 use super::json::EnvelopeJson;
 use super::path::{OrganizationId, UuidPath};
+use super::query::EnvelopeQuery;
 use crate::adapters::auth::AuthContext;
 use crate::application::pagination::Page;
 
@@ -60,7 +61,7 @@ async fn create_org(State(s): State<AppState>, Extension(ctx): Extension<AuthCon
     Ok((StatusCode::CREATED, Json(out.into())))
 }
 
-async fn list_orgs(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, Query(q): Query<PageQuery>) -> Result<Json<Vec<OrgDto>>, ApiError> {
+async fn list_orgs(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, EnvelopeQuery(q): EnvelopeQuery<PageQuery>) -> Result<Json<Vec<OrgDto>>, ApiError> {
     if s.enforce_tenancy {
         s.authorize.check(&actor_prn(&ctx), Action::ListOrganizations, &root_prn()).await?;
     }
@@ -123,7 +124,12 @@ async fn create_team(
     Ok((StatusCode::CREATED, Json(view.into())))
 }
 
-async fn list_teams(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, path: UuidPath<OrganizationId>, Query(q): Query<PageQuery>) -> Result<Json<Vec<TeamDto>>, ApiError> {
+async fn list_teams(
+    State(s): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
+    path: UuidPath<OrganizationId>,
+    EnvelopeQuery(q): EnvelopeQuery<PageQuery>,
+) -> Result<Json<Vec<TeamDto>>, ApiError> {
     let org_id = path.id;
     if s.enforce_tenancy {
         let org_view = s.orgs.get(org_id).await?;

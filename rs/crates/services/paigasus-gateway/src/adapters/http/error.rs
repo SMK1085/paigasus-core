@@ -67,8 +67,27 @@ pub enum GatewayError {
     /// context (`principal_prn`, `key_id`); the response body stays generic.
     Internal,
     // ---- egress (OpenAI-upstream) cases (G7) -------------------------------------------------
-    /// The request body was not valid JSON — the gateway could not parse `model`/`stream` → 400.
+    /// The request body could not be read or parsed as JSON — a syntax error, a truncated body,
+    /// or an empty one → 400. Since SMA-588, `EnvelopeBytes` (`bytes.rs`) also routes its own
+    /// 400 arm here: a body that failed to BUFFER, e.g. a dropped connection mid-upload, not
+    /// only one that buffered but failed to PARSE — so the wire message names neither cause. A
+    /// body that parses but does not match the target type is `InvalidRequestSchema` since
+    /// SMA-588.
     BadRequestBody,
+    /// The request body was syntactically valid JSON but did not match
+    /// `ChatCompletionRequest` → 400. Split out of `BadRequestBody` by SMA-588 so
+    /// `invalid-request-body` means "malformed or unreadable" on this service exactly as it
+    /// does on IAM.
+    ///
+    /// The status stays 400, unlike IAM's 422 for the same code. That asymmetry is deliberate
+    /// (spec decision 5): the OpenAI SDKs map status to an exception class, and OpenAI's own
+    /// API answers 400 for a bad chat-completions body, so 422 would break the wire
+    /// compatibility that is this service's purpose.
+    InvalidRequestSchema,
+    /// The request body exceeded the configured byte limit → 413. Before SMA-588 this answered
+    /// with axum's own plain-text rejection, OUTSIDE the OpenAI envelope — the last request-path
+    /// escape in this service.
+    RequestTooLarge,
     /// The OpenAI upstream could not be reached (connect/transport/build failure) → 502.
     UpstreamUnavailable,
     /// The OpenAI upstream did not respond within a configured timeout → 504.
@@ -124,12 +143,20 @@ impl GatewayError {
                 "The authorization service is temporarily unavailable.",
             ),
             GatewayError::Internal => (StatusCode::INTERNAL_SERVER_ERROR, "api_error", Some("internal"), None, "Internal error."),
-            GatewayError::BadRequestBody => (
+            GatewayError::BadRequestBody => (StatusCode::BAD_REQUEST, "invalid_request_error", Some("invalid-request-body"), None, "Invalid request body."),
+            GatewayError::InvalidRequestSchema => (
                 StatusCode::BAD_REQUEST,
                 "invalid_request_error",
-                Some("invalid-request-body"),
+                Some("invalid-request-schema"),
                 None,
-                "The request body is not valid JSON.",
+                "The request body does not match the expected schema.",
+            ),
+            GatewayError::RequestTooLarge => (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "invalid_request_error",
+                Some("request-too-large"),
+                None,
+                "The request body is too large.",
             ),
             GatewayError::UpstreamUnavailable => (
                 StatusCode::BAD_GATEWAY,
@@ -157,7 +184,7 @@ impl GatewayError {
         match self {
             Self::IamUnavailable | Self::UpstreamUnavailable | Self::UpstreamTimeout => Retryable::Yes,
             Self::Internal | Self::MissingScope => Retryable::Unknown,
-            Self::MissingBearer | Self::InvalidCredential | Self::AuthzDenied | Self::BadRequestBody | Self::StreamingDisabled => Retryable::No,
+            Self::MissingBearer | Self::InvalidCredential | Self::AuthzDenied | Self::BadRequestBody | Self::InvalidRequestSchema | Self::RequestTooLarge | Self::StreamingDisabled => Retryable::No,
         }
     }
 }
@@ -198,6 +225,8 @@ mod tests {
         assert_eq!(GatewayError::IamUnavailable.into_response().status(), StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(GatewayError::Internal.into_response().status(), StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(GatewayError::BadRequestBody.into_response().status(), StatusCode::BAD_REQUEST);
+        assert_eq!(GatewayError::InvalidRequestSchema.into_response().status(), StatusCode::BAD_REQUEST);
+        assert_eq!(GatewayError::RequestTooLarge.into_response().status(), StatusCode::PAYLOAD_TOO_LARGE);
         assert_eq!(GatewayError::UpstreamUnavailable.into_response().status(), StatusCode::BAD_GATEWAY);
         assert_eq!(GatewayError::UpstreamTimeout.into_response().status(), StatusCode::GATEWAY_TIMEOUT);
         assert_eq!(GatewayError::StreamingDisabled.into_response().status(), StatusCode::BAD_REQUEST);
@@ -310,5 +339,16 @@ mod tests {
         let body = body_json(GatewayError::InvalidCredential.into_response()).await;
         let keys: std::collections::BTreeSet<&str> = body["error"].as_object().expect("an object").keys().map(String::as_str).collect();
         assert_eq!(keys, ["code", "message", "param", "type"].into_iter().collect::<std::collections::BTreeSet<_>>());
+    }
+
+    /// SMA-588: a schema mismatch is its own code, reconverging `invalid-request-body` on "malformed
+    /// or unreadable" across both services. The STATUS stays 400 (spec decision 5): the OpenAI SDKs
+    /// map status to an exception class, so 422 would move every affected body out of a caller's
+    /// `BadRequestError` handler, and OpenAI's own API answers 400 here.
+    #[test]
+    fn a_schema_mismatch_has_its_own_code_on_an_unchanged_status() {
+        let resp = GatewayError::InvalidRequestSchema.into_response();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(GatewayError::InvalidRequestSchema.retryable(), Retryable::No);
     }
 }
