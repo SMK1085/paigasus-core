@@ -734,7 +734,7 @@ must now name the job the mutation actually ungates.
 uv run --locked --project py python3 ci/actionlint/release_guard.py --self-test ; echo "rc=$?"
 uv run --locked --project py python3 ci/actionlint/release_guard.py --fixture-count
 ```
-Expected: rc=0, and the count is **44** — unchanged. A row deleted rather than fixed is the
+Expected: rc=0, and the count is **45** — unchanged. (An earlier revision of this plan said 44; that was a miscount of the FIXTURES rows, corrected after measuring the committed file at 2c416a9.) A row deleted rather than fixed is the
 failure mode here; the count is the guard against it.
 
 - [ ] **Step 5: Verify the guard still passes on the real workflow**
