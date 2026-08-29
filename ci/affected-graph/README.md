@@ -257,7 +257,7 @@ It also runs several checks that the per-case project sets structurally **cannot
   degrading to two empty sets. **`:affected-smoke` is load-bearing for every assertion in this
   file**: this gate runs *inside* it, so removing that one entry from `T` (and from CLAUDE.md)
   passes C1-C6 by never executing them, and takes the eight project cascade cases, the five task
-  cases, A1-A9 and `assert_include_relations` with it. Never exempt or drop it — see the design
+  cases, A1-A10 and `assert_include_relations` with it. Never exempt or drop it — see the design
   doc's L6.
   Not covered: whether a `repo:*` task's `inputs` still match anything — see the follow-up in the
   design doc's L3.

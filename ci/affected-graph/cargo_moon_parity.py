@@ -184,10 +184,10 @@ LOCKED_FLAG = "--locked"
 # spec made, and it invalidated its own "zero false positives" measurement.
 SCRIPT_REF_RE = re.compile(r"(?:^|[\s;&|(])(?:bash\s+|sh\s+)?(ci/[\w./-]+\.sh)\b")
 
-# SMA-599 — A9's verb predicate, deliberately NOT LOCK_RESOLVING_VERBS.
+# SMA-599 — A10's verb predicate, deliberately NOT LOCK_RESOLVING_VERBS.
 #
-# The two lists answer different questions. A8 asks "does this resolve the lock"; A9 asks
-# "can rs/.cargo/config.toml change this command's OUTPUT". Reusing A8's list made A9 fail to
+# The two lists answer different questions. A8 asks "does this resolve the lock"; A10 asks
+# "can rs/.cargo/config.toml change this command's OUTPUT". Reusing A8's list made A10 fail to
 # implement its own rule: the thirteen `cargo fmt --check` tasks run with cwd inside `rs/` and
 # fell out of scope only because `fmt` happens to be absent from a lock-oriented list — an
 # accidental coupling, not a stated exclusion.
@@ -197,7 +197,7 @@ SCRIPT_REF_RE = re.compile(r"(?:^|[\s;&|(])(?:bash\s+|sh\s+)?(ci/[\w./-]+\.sh)\b
 # LOCK_RESOLVING_VERBS already derives — it is NOT a general fix for "a future compiling
 # subcommand". Both `derive_cargo_tasks` and `script_cargo_lines` gate on CARGO_INVOCATION_RE
 # first, which is built from LOCK_RESOLVING_VERBS, not from this list. So `cargo llvm-cov`,
-# `insta`, `udeps`, `bloat` or `tarpaulin` yield an EMPTY derivation today and A9 never examines
+# `insta`, `udeps`, `bloat` or `tarpaulin` yield an EMPTY derivation today and A10 never examines
 # them — no row, and no `FLOOR:` row either, since the floor only sees what's derived (spec
 # L11). Widening the derivation to catch those verbs is a separate, larger change; this
 # predicate only narrows what's ALREADY derived.
@@ -247,12 +247,12 @@ CMD_SUBST_RE = re.compile(r"\$\([^()]*\)")
 VAR_ASSIGN_RE = re.compile(r"""(?m)^\s*([A-Za-z_][A-Za-z0-9_]*)=["']?([^"'\s]+)["']?""")
 RS_PATH_RE = re.compile(r"(?:^|/)rs(?:/|$)")
 
-# A9's waivers. EMPTY, like ALLOW_OVER_APPROXIMATION: every exclusion is structural, via the
+# A10's waivers. EMPTY, like ALLOW_OVER_APPROXIMATION: every exclusion is structural, via the
 # verb predicate or the cwd rule. An entry needs a non-empty reason, and an entry naming a task
 # outside the examined set is itself a row.
 ALLOW_MISSING_CARGO_CONFIG = {}
 
-# A9's floor. Members must be IN SCOPE and NOT allowlisted — a default-deny gate has a second
+# A10's floor. Members must be IN SCOPE and NOT allowlisted — a default-deny gate has a second
 # vacuity mode the FFI floors do not: an allowlist that grows to swallow the derived set.
 REQUIRED_CARGO_CONFIG_TASKS = (
     "paigasus-kernel-rs:build",
@@ -262,7 +262,7 @@ REQUIRED_CARGO_CONFIG_TASKS = (
     "repo:publish-metadata",
 )
 
-# SMA-599 — the shell-script cargo-line classifier shared by A8's script arm and A9.
+# SMA-599 — the shell-script cargo-line classifier shared by A8's script arm and A10.
 #
 # THE CONSERVATIVE RULE. Report every cargo invocation whose own command segment does not
 # carry `--locked` after the verb. Exactly three regions are excluded, because in each the
@@ -1056,7 +1056,7 @@ def _cwd_inside_rs(text, source_dir):
 
 
 def check_cargo_config_inputs(projects, root, allow=None, floor=None):
-    """A9: every task whose cargo can READ rs/.cargo/config.toml must key on it.
+    """A10: every task whose cargo can READ rs/.cargo/config.toml must key on it.
 
     Scope is the conjunction of two independent tests, and both matter:
       * the subcommand is in CONFIG_SENSITIVE_VERBS (it compiles or links); and
@@ -1113,7 +1113,7 @@ def check_cargo_config_inputs(projects, root, allow=None, floor=None):
             )
     for target in sorted(set(floor) - in_scope):
         rows.append(
-            f"FLOOR: A9 examines {len(in_scope)} task(s) and {target} is not among them — "
+            f"FLOOR: A10 examines {len(in_scope)} task(s) and {target} is not among them — "
             f"the derivation or the cwd rule has degraded and would assert nothing"
         )
     for target in sorted(set(floor) & set(allow)):
@@ -1123,7 +1123,7 @@ def check_cargo_config_inputs(projects, root, allow=None, floor=None):
         )
     for target in sorted(set(allow) - in_scope):
         rows.append(
-            f"ALLOW_MISSING_CARGO_CONFIG names {target}, which A9 does not examine — the "
+            f"ALLOW_MISSING_CARGO_CONFIG names {target}, which A10 does not examine — the "
             f"waiver is stale; delete it"
         )
     return rows
@@ -2907,7 +2907,7 @@ def self_test():
     if not REQUIRED_LOCKED_TASKS:
         failures.append("REQUIRED_LOCKED_TASKS is empty — A8's floor would assert nothing")
 
-    # SMA-599 — A9. Its verb predicate is its OWN, not LOCK_RESOLVING_VERBS: reusing A8's list
+    # SMA-599 — A10. Its verb predicate is its OWN, not LOCK_RESOLVING_VERBS: reusing A8's list
     # excluded the thirteen `fmt` tasks by COINCIDENCE and would hide any future
     # compiling-but-not-resolving subcommand (cargo llvm-cov, insta, udeps).
     a9_fixture = {
@@ -2931,23 +2931,23 @@ def self_test():
         },
     }
     if check_cargo_config_inputs(a9_fixture, Path("."), allow={}, floor=("c-rs:build",)):
-        failures.append("A9 reported violations on a clean fixture")
+        failures.append("A10 reported violations on a clean fixture")
 
     # The core assertion: an in-scope task missing the input.
     broken = json.loads(json.dumps(a9_fixture))
     broken["c-rs"]["task_inputs"]["build"] = []
     if not any("c-rs:build" in r for r in
                check_cargo_config_inputs(broken, Path("."), allow={}, floor=("c-rs:build",))):
-        failures.append("A9 did not fire on a cargo-from-rs task missing rs/.cargo/config.toml")
+        failures.append("A10 did not fire on a cargo-from-rs task missing rs/.cargo/config.toml")
 
-    # `fmt` never reaches A9's verb test at all: `fmt` is absent from LOCK_RESOLVING_VERBS, so
+    # `fmt` never reaches A10's verb test at all: `fmt` is absent from LOCK_RESOLVING_VERBS, so
     # `derive_cargo_tasks` never derives `c-rs:fmt` in the first place. This row is a
     # KNOWN-VACUOUS forward guard, exactly like `repo:mach` below, not a live exercise of
     # CONFIG_SENSITIVE_VERBS (SMA-599 review corrected the prior "excluded BY THE VERB" claim,
     # which wrongly implied the verb test runs and rejects `fmt` — it never runs at all).
     if any("c-rs:fmt" in r for r in
            check_cargo_config_inputs(a9_fixture, Path("."), allow={}, floor=("c-rs:build",))):
-        failures.append("A9 demanded rs/.cargo/config.toml from `cargo fmt`, which cannot read it")
+        failures.append("A10 demanded rs/.cargo/config.toml from `cargo fmt`, which cannot read it")
 
     # `repo:deny` and `repo:mach` are excluded BY VERB, not cwd (SMA-599 review corrected the
     # prior comment here, "cwd is what excludes repo:deny", which was factually wrong). `deny`
@@ -2963,12 +2963,12 @@ def self_test():
     for task in ("repo:deny", "repo:mach"):
         if any(task in r for r in
                check_cargo_config_inputs(a9_fixture, Path("."), allow={}, floor=("c-rs:build",))):
-            failures.append(f"A9 pulled {task} into scope from an `rs` path ARGUMENT, not a cd")
+            failures.append(f"A10 pulled {task} into scope from an `rs` path ARGUMENT, not a cd")
 
     # `cargo tree` runs from rs/ but resolves without compiling — out of scope by verb (AC 4).
     if any("repo:tree" in r for r in
            check_cargo_config_inputs(a9_fixture, Path("."), allow={}, floor=("c-rs:build",))):
-        failures.append("A9 demanded the config file from `cargo tree`, which never compiles")
+        failures.append("A10 demanded the config file from `cargo tree`, which never compiles")
 
     # cwd-only exclusion, negative coverage (SMA-599 review). Unlike repo:deny/repo:mach above,
     # this task IS verb-sensitive (`build`) — its ONLY exclusion is cwd being the repo root, not
@@ -2977,18 +2977,18 @@ def self_test():
     if any("repo:root-build" in r for r in
            check_cargo_config_inputs(a9_fixture, Path("."), allow={}, floor=("c-rs:build",))):
         failures.append(
-            "A9 pulled repo:root-build into scope though its cargo build runs from the repo "
+            "A10 pulled repo:root-build into scope though its cargo build runs from the repo "
             "root, not rs/ — the cwd exclusion is not being applied"
         )
 
     # Both input buckets matter, and an absent bucket is a violation, never a skip — the same
-    # contract A4/A5/A6/A7 already assert (SMA-599 review: neither half was exercised for A9).
+    # contract A4/A5/A6/A7 already assert (SMA-599 review: neither half was exercised for A10).
     glob_only = json.loads(json.dumps(a9_fixture))
     glob_only["c-rs"]["task_inputs"]["build"] = []
     glob_only["c-rs"]["task_input_globs"]["build"] = ["rs/.cargo/config.toml"]
     if check_cargo_config_inputs(glob_only, Path("."), allow={}, floor=("c-rs:build",)):
         failures.append(
-            "A9 ignored rs/.cargo/config.toml declared only in task_input_globs — dropping "
+            "A10 ignored rs/.cargo/config.toml declared only in task_input_globs — dropping "
             "`| set(globs)` from the production code must fail this"
         )
 
@@ -3003,30 +3003,30 @@ def self_test():
         )
     ):
         failures.append(
-            "A9 did not report a violation for a task with no inputFiles/inputGlobs bucket at "
+            "A10 did not report a violation for a task with no inputFiles/inputGlobs bucket at "
             "all — treating a missing bucket as a skip instead of a violation must fail this"
         )
 
     # Floor: a member that leaves scope must fail, or the derivation could empty silently.
     if not any("FLOOR:" in r for r in
                check_cargo_config_inputs(a9_fixture, Path("."), allow={}, floor=("c-rs:nope",))):
-        failures.append("A9's floor did not fire on a member outside the derived set")
+        failures.append("A10's floor did not fire on a member outside the derived set")
 
     # Second vacuity mode, specific to default-deny: an allowlist that swallows a floor member.
     swallow = {"c-rs:build": "a reason"}
     if not any("FLOOR:" in r for r in
                check_cargo_config_inputs(broken, Path("."), allow=swallow, floor=("c-rs:build",))):
-        failures.append("A9's floor let an allowlist entry cover a floor member")
+        failures.append("A10's floor let an allowlist entry cover a floor member")
 
     # An empty reason is itself a row.
     if not any("empty reason" in r for r in check_cargo_config_inputs(
             broken, Path("."), allow={"c-rs:build": " "}, floor=())):
-        failures.append("A9 accepted an ALLOW_MISSING_CARGO_CONFIG entry with an empty reason")
+        failures.append("A10 accepted an ALLOW_MISSING_CARGO_CONFIG entry with an empty reason")
 
     if not REQUIRED_CARGO_CONFIG_TASKS:
-        failures.append("REQUIRED_CARGO_CONFIG_TASKS is empty — A9's floor would assert nothing")
+        failures.append("REQUIRED_CARGO_CONFIG_TASKS is empty — A10's floor would assert nothing")
     if not CONFIG_SENSITIVE_VERBS:
-        failures.append("CONFIG_SENSITIVE_VERBS is empty — A9 would examine nothing")
+        failures.append("CONFIG_SENSITIVE_VERBS is empty — A10 would examine nothing")
 
     for f in failures:
         print(f"  FAIL {f}", file=sys.stderr)
