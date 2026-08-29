@@ -190,6 +190,7 @@ input Actions itself would already refuse.
 | R2 | a mapping key equals `id-token` and its value is `write` | rows 1, 2, 3, 6, 7, 14 |
 | R3 | a mapping key equals `permissions` and its scalar value is `write-all` | rows 12, 13 |
 | R4 | an Actions expression references the `secrets` context | rows 4, 5, 9, 10, 11 |
+| R5 | a `permissions:` mapping grants an individual `write` scope | no measured row — the gap the PR review named |
 
 R2 and R3 compare the parsed value after `str(value).strip().lower()`. Actions rejects a
 case-varied value, so the lowercase comparison only ever adds a conservative red.
@@ -382,24 +383,18 @@ The gate asserts **declaration**, not that no credential can reach a workflow by
   `workflow_run` is the classic pwn-request vector. Neither is used here today. They are out
   of scope **by decision, not by oversight**; adding them is a one-line change to the trigger
   set plus two control rows.
-- **`${{ github.token }}`, and an individual write-scope permission grant paired with it
-  (added during implementation).** A workflow that reads `${{ github.token }}` under
-  `permissions: contents: write` obtains a real, usable credential, and this gate does not
-  catch that case. Two measured reasons. First, `.github/workflows/ci.yml:58` already reads
-  `GH_TOKEN: ${{ github.token }}` deliberately, so a rule against `github.token` would red
-  the gate on day one against correct usage. Second, `github.token` is ephemeral and bounded
-  by the workflow's own `permissions:` block. Broadening R3 from `write-all` to any write scope
-  would turn a registry-credential-declaration gate into a least-privilege audit — a different
-  job. This is a named boundary, stated here and in the README, not a silent gap.
-  **Correction (F4).** An earlier draft of this bullet added "and `repo:actionlint` and zizmor
-  already govern `permissions:` for least privilege". That was false and is withdrawn. zizmor
-  runs nowhere in this repository — nothing pins it, installs it or calls it; the name occurs
-  only in prose and in one comment in `.github/workflows/release.yml`. `ci/actionlint/run.sh`
-  audits trigger filters and gate wiring, and holds no check on `permissions:` at all. **No
-  control in this repository catches an individual write-scope grant on a
-  pull-request-triggered workflow, and this gate deliberately does not either.** The boundary
-  rests on the scope decision alone. Adding such a rule is out of scope for SMA-593; only the
-  false justification is removed.
+- **`${{ github.token }}` itself, though no longer the write scope beside it.** R5 (added
+  after the PR review) reds any individual `write` value inside a `permissions:` mapping,
+  which is what makes a `github.token` read dangerous on a pull-request-triggered workflow.
+  The token READ stays out of scope: `.github/workflows/ci.yml:58` reads it deliberately and
+  correctly, and a read under `contents: read` obtains nothing abusable.
+  **History, kept deliberately.** This was a non-goal in revisions 2 and 3, on two stated
+  reasons. The first was a non-sequitur — it argued a rule against `github.token` would red
+  against `ci.yml:58`, but the rule that closes the gap is on the write SCOPE, not the token.
+  The second cited `repo:actionlint` and zizmor as already covering it; both citations were
+  false, since zizmor runs nowhere here and `ci/actionlint/run.sh` holds no `permissions:`
+  check. Measured before adding R5: all five subjects declare exactly
+  `permissions: {contents: read}`, so the rule is green on day one.
 
 The README states these, and states R4's residual false-positive surface, so the gate does
 not overclaim.
@@ -414,11 +409,11 @@ already-caught inputs; the 6 honest passes; `format('{0}', secrets.X)`; `toJSON(
 the three R4 false-positive strings from §4.3, which must **pass**; a duplicate-key document;
 a non-mapping document; and a bare `on:`.
 
-**Count, as shipped: 56 rows, not the ~34 this list enumerates.** The list above describes the
+**Count, as shipped: 63 rows, not the ~34 this list enumerates.** The list above describes the
 plan; implementation and the two reviews added rows to it, and the total is what
-`--self-test` prints. The 56 split across four tables: **37** `RULE_CASES` (the enumeration
+`--self-test` prints. The 63 split across four tables: **44** `RULE_CASES` (the enumeration
 above, plus the four bare/wrapped `if:` rows from ruling 8 and the two literal-aware span rows
-from F2), **8** `TRIGGER_CASES` (the six trigger shapes, the no-`on:` document, and the
+from F2, and the seven R5 rows), **8** `TRIGGER_CASES` (the six trigger shapes, the no-`on:` document, and the
 dual-key document from F3), **3** `PARSE_CASES`, and **8** filesystem rows that need a real
 directory (the six from F6 and F9, plus the non-UTF-8 row and the dot-prefixed-workflow row
 the pre-push and PR reviews added). Each of the first three tables carries an **arity floor** checked before any row

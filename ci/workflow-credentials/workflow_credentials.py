@@ -161,6 +161,21 @@ def rule_findings(doc) -> list[tuple[str, str, str]]:
             out.append(("R2", where, "grants `id-token: write`"))
         if key == "permissions" and _lower(value) == "write-all":
             out.append(("R3", where, "grants `permissions: write-all`, which includes id-token"))
+        # R5. Any INDIVIDUAL write scope, not just write-all. A pull-request-triggered
+        # workflow granting e.g. `contents: write` can push to the repository using the
+        # workflow's own `${{ github.token }}` — a real credential, obtained without any
+        # `secrets` key or context read, so R1-R4 never see it. Nothing else in this repo
+        # catches it: `repo:actionlint` validates scope NAMES against the schema and does
+        # not audit breadth, and zizmor is not run here at all (both were claimed as
+        # covering this and neither does).
+        # `id-token` is excluded because R2 already names it with a sharper message; without
+        # the exclusion every id-token grant would be reported twice.
+        # MEASURED green on all five subjects at the time of writing: each declares exactly
+        # `permissions: {contents: read}`.
+        if key == "permissions" and isinstance(value, dict):
+            for scope, level in value.items():
+                if scope != "id-token" and _lower(level) == "write":
+                    out.append(("R5", f"{where}.{scope}", f"grants `{scope}: write`"))
     for where, text in _scalar_strings(doc):
         for span in EXPR_SPAN.findall(text):
             if SECRETS_CTX.search(STRING_LITERAL.sub("", span)):
@@ -185,7 +200,7 @@ def _self_test() -> int:
     # These are FLOORS, not equalities: adding a row must not need an edit here. Lower one only
     # together with the row you are deliberately retiring.
     for name, table, floor in (
-        ("RULE_CASES", RULE_CASES, 35),
+        ("RULE_CASES", RULE_CASES, 42),
         ("TRIGGER_CASES", TRIGGER_CASES, 7),
         ("PARSE_CASES", PARSE_CASES, 3),
     ):
@@ -635,6 +650,18 @@ RULE_CASES: tuple[tuple[str, str, bool], ...] = (
     # R4's MEASURED false-positive class. All three matched a bare \bsecrets\b.
     ("P7 inputs.secrets-file", H + "    env:\n      T: ${{ inputs.secrets-file }}\n", False),
     ("P8 outputs.secrets",   H + "    env:\n      T: ${{ steps.x.outputs.secrets }}\n", False),
+    # R5 — an individual write scope. `contents: write` plus the workflow's own github.token
+    # is a real credential that R1-R4 cannot see.
+    ("R5a contents write",   H + "    permissions:\n      contents: write\n", True),
+    ("R5b packages write",   H + "    permissions:\n      packages: write\n", True),
+    ("R5c write at workflow level",
+     "on:\n  pull_request:\npermissions:\n  contents: write\njobs:\n  a:\n    runs-on: x\n", True),
+    # ...and the shapes it must NOT red on, since a first false positive is how a gate gets
+    # allowlisted into irrelevance.
+    ("R5d contents read",    H + "    permissions:\n      contents: read\n", False),
+    ("R5e read-all",         H + "    permissions: read-all\n", False),
+    ("R5f empty permissions", H + "    permissions: {}\n", False),
+    ("R5g scope none",       H + "    permissions:\n      contents: none\n", False),
     ("P9 hashFiles literal", H + "    env:\n      T: ${{ hashFiles('secrets.txt') }}\n", False),
 )
 

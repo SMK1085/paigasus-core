@@ -13,7 +13,7 @@ with no `pull_request` or `pull_request_target` trigger instead.
 `run.sh` runs the checker, `workflow_credentials.py`, in three modes:
 
 - a bare check of the real tree;
-- `--self-test`, an in-process table of 56 rows;
+- `--self-test`, an in-process table of 63 rows;
 - `--negative-control`, which asserts against the real tree. It covers the `release.yml`
   exclusion and the exit-code mapping below.
 
@@ -28,6 +28,7 @@ parsed document.
 | R2 | A mapping key equals `id-token`, and its value is `write` | `permissions: {id-token: write}` |
 | R3 | A mapping key equals `permissions`, and its value is `write-all` | `permissions: write-all` |
 | R4 | An Actions expression reads the `secrets` context | `${{ secrets.PYPI_API_TOKEN }}` |
+| R5 | A `permissions:` mapping grants an individual `write` scope | `permissions:`<br>`  contents: write` |
 
 Keys are compared case-sensitively for R1–R3, because Actions reads schema keys that
 way. The checker lowers values before it compares them, which only ever adds a
@@ -168,26 +169,17 @@ outside its scope, by decision, not by oversight:
   and `workflow_run` is a known attack path. Neither is used in this repository today.
   Adding either is a one-line change to the trigger set plus two new control rows, not
   a redesign.
-- **`${{ github.token }}`, and a write permission paired with it.** A workflow that
-  reads `${{ github.token }}` under `permissions: contents: write` obtains a real,
-  usable credential, and this gate does not catch that case. Two reasons support this
-  limit. First, `.github/workflows/ci.yml:58` already reads
-  `GH_TOKEN: ${{ github.token }}` deliberately, and that use is correct — a rule
-  against `github.token` would turn the gate red on day one against valid code.
-  Second, `github.token` is ephemeral, and the workflow's own `permissions:` block
-  bounds it. Widening R3 from `write-all` to any write scope would turn a
-  credential-declaration gate into a least-privilege audit — a different job.
+- **`${{ github.token }}` itself.** R5 does not look at token reads. A workflow may read
+  `${{ github.token }}` freely — `.github/workflows/ci.yml:58` does so deliberately, and
+  that use is correct. What R5 forbids is the WRITE SCOPE that would make such a read
+  dangerous. A read under `permissions: contents: read` obtains nothing a pull request
+  could abuse.
 
-  **No control in this repository catches an individual write-scope grant on a
-  pull-request-triggered workflow, and this gate deliberately does not either.** An
-  earlier version of this text named `repo:actionlint` and zizmor as controls that
-  already cover it. Both citations were wrong. zizmor runs nowhere in this repository —
-  `.prototools` does not pin it, no workflow installs it, and no `ci/` script calls it;
-  the only occurrences of the name are prose and one comment in
-  `.github/workflows/release.yml` that cites a zizmor rule name. `ci/actionlint/run.sh`
-  audits trigger filters and gate wiring, not permission breadth; it holds no check on
-  `permissions:` at all. This limit therefore rests on the scope decision above alone,
-  not on cover from elsewhere.
+  This was a stated non-goal until R5 was added. The earlier text also named
+  `repo:actionlint` and zizmor as controls that already covered the gap. Both citations
+  were wrong: zizmor runs nowhere in this repository, and `ci/actionlint/run.sh` audits
+  trigger filters and gate wiring with no check on `permissions:` at all. Nothing else
+  caught it, which is why R5 exists rather than a boundary note.
 
 **R4's residual false-positive surface.** R4 strips string literals out of each
 `${{ … }}` span, then matches the whole word `secrets`. Three measured cases pass
