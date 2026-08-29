@@ -172,14 +172,29 @@ It also runs several checks that the per-case project sets structurally **cannot
   to empty asserts nothing while still printing PASS.
   A cargo call inside a `ci/**/*.sh` a Moon task invokes IS in scope since SMA-599
   (`check_cargo_locked_scripts`): the derivation follows the script and classifies each line
-  under the conservative rule A8's script arm and A10 share — only a heredoc BODY, a `#` comment
-  tail and a `$(( ... ))` arithmetic expansion are excluded from what the shell executes; quoted
-  string literals are NOT stripped, so a cargo verb sitting inside one reports like any other and
-  is waived by hand (`ALLOW_UNLOCKED_CARGO_SCRIPT`) rather than silently excluded. Two limits
-  remain. The scan is PATH-INSENSITIVE (spec L1) — it reports a line the task's arguments may
-  never reach, which is why `repo:version-lockstep`'s `cargo update -w` is waived rather than
-  excluded. And following is one level deep and shell-only: a script invoking another script,
-  `ops/nats/check-subjects.sh`, and the three `.py` gate entrypoints are all unfollowed.
+  under the conservative rule — only a heredoc BODY, a `#` comment tail and a bracketed OPERATOR
+  SPAN are excluded from what the shell executes as a command. That last one is three shapes, not
+  one: `$(( … ))`, a bare `(( … ))` arithmetic command, and `[ … ]` (an array subscript, a
+  `[[ ]]` test, a glob); all three are blanked in the quote MASK only, so a `<<` inside them is a
+  shift and a `#` a base marker while the code text survives and still classifies. Quoted string
+  literals are NOT stripped, so a cargo verb sitting inside one reports like any other and is
+  waived by hand (`ALLOW_UNLOCKED_CARGO_SCRIPT`) rather than silently excluded. **A10 does not
+  share that line classifier**, and the README used to claim it did: `check_cargo_config_inputs`
+  scans the RAW referenced file text, comments and heredoc bodies included, as its own docstring
+  says. The direction is safe — a raw scan can only pull a task INTO scope, never out of it — so
+  its failure mode is a row a human dismisses, not a silently missed one. What the two DO share is
+  `derive_cargo_tasks`, and A10 follows a task's scripts for **every** kind, not only `script`:
+  `derive_cargo_tasks` assigns `literal` on any cargo verb anywhere in a blob, prose included, so
+  a benign `echo "running cargo check"` beside the invocation used to take that gate out of A10's
+  scope entirely (SMA-599 review; the fix is a no-op on today's corpus and closes the hole).
+  Each cargo invocation gets its OWN row — `finditer`, not `search` — and reads `--locked` from
+  its own tail, bounded by the next invocation in the segment. Reading only the first match hid a
+  nested unlocked call behind a locked one, the single failure direction the conservative rule
+  claims it cannot have; `ci/actionlint/run.sh:3715` is the one live instance and is waived.
+  Two limits remain. The scan is PATH-INSENSITIVE (spec L1) — it reports a line the task's
+  arguments may never reach, which is why `repo:version-lockstep`'s `cargo update -w` is waived
+  rather than excluded. And following is one level deep and shell-only: a script invoking another
+  script, `ops/nats/check-subjects.sh`, and the three `.py` gate entrypoints are all unfollowed.
   Separately, the literal-cargo half still tests `--locked` PER BLOB, not per invocation: a
   task's own `command`/`args` field chaining two cargo calls with the flag on only one of them
   would pass — the same vacuity class the wrapper rule closes, left open here because a
@@ -218,15 +233,23 @@ It also runs several checks that the per-case project sets structurally **cannot
   `rs/.cargo/config.toml`. Scope is a CONJUNCTION: the verb predicate (`CONFIG_SENSITIVE_VERBS`,
   deliberately NOT A8's `LOCK_RESOLVING_VERBS` — reusing that list would have left `cargo fmt` in
   scope by an accident of A8's lock-oriented list, not a stated exclusion) and a cwd rule that
-  reads RAW text, so `RS_DIR="$REPO_ROOT/rs"` … `cd "$RS_DIR"` still resolves. `cargo fmt`,
-  `cargo tree`, `cargo metadata`, `cargo deny` and `cargo machete` are out of scope BY VERB — none
-  compiles or links. `repo:deny` and `repo:machete` also fall out on the cwd half: both run from
-  the repo ROOT via `--manifest-path rs/Cargo.toml` — MEASURED on cargo 1.95.0, a malformed
-  `rs/.cargo/config.toml` fails cwd=rs/ at rc 101 but leaves cwd=root+`--manifest-path` at rc 0,
-  so `--manifest-path` does not move cargo's config walk. A10 reads moon's RESOLVED inputs, so its
+  reads RAW text (with variable substitution ordered LONGEST NAME FIRST, so a `R=…` assignment
+  cannot eat a later `$RS_DIR`), so `RS_DIR="$REPO_ROOT/rs"` … `cd "$RS_DIR"` still resolves.
+  `cargo fmt`, `cargo tree`, `cargo metadata`, `cargo deny` and `cargo machete` are out of scope
+  BY VERB — none compiles or links. That verb test is the ONLY thing excluding `repo:deny` and
+  `repo:machete`, and the cwd half never runs for either: `deny` IS derived (it is in
+  `LOCK_RESOLVING_VERBS`) but is absent from `CONFIG_SENSITIVE_VERBS`, so `_cwd_inside_rs` is
+  never called; `machete` is absent from `LOCK_RESOLVING_VERBS` and is never derived at all.
+  `repo:machete` runs `cargo machete rs` — a bare path ARGUMENT, not `--manifest-path`. The
+  `--manifest-path` measurement belongs to `repo:deny` and stays load-bearing for decision D2,
+  which is why a bare `rs`-containing argument must never confer a cwd: MEASURED on cargo 1.95.0,
+  a malformed `rs/.cargo/config.toml` fails cwd=rs/ at rc 101 but leaves cwd=root+`--manifest-path`
+  at rc 0, so `--manifest-path` does not move cargo's config walk. A10 reads moon's RESOLVED inputs, so its
   four inherited lines in `.moon/tasks/rust.yml` (`build`/`build-release`/`test`/`lint`) each
   cover thirteen crates — deleting one reds thirteen tasks. `ALLOW_MISSING_CARGO_CONFIG` ships
-  EMPTY; every exclusion is structural. A10 does NOT close the general problem: it shares
+  EMPTY; every exclusion is structural. Counts on today's corpus: 59 tasks declare the file, A10
+  examines 58 of them, and the one it does not — `paigasus-kernel-py:test` — is asserted by **A5**
+  instead, whose `FFI_TASK_INPUTS` splat already demands it. A10 does NOT close the general problem: it shares
   `derive_cargo_tasks`/`CARGO_INVOCATION_RE` with A8, built from `LOCK_RESOLVING_VERBS`, so a
   subcommand outside that list (`cargo llvm-cov`, `insta`, `udeps`, `bloat`) yields an empty
   derivation and stays invisible to A10 too (spec L11).

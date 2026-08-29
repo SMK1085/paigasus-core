@@ -57,7 +57,10 @@ AC 6. D6 supplies it.
 
 The two are `repo:deny` (cwd is the repo root — §2.3) and `repo:wasm-getrandom-free`
 (`cargo tree`). Neither is a defect, and under §3.3's verb predicate both fall out
-structurally rather than by waiver.
+structurally rather than by waiver. Note the ORDER that leaves: it is the VERB that
+excludes them, and `_cwd_inside_rs` is never called for either — `deny` and `tree` are
+both absent from `CONFIG_SENSITIVE_VERBS`. §2.3's cwd measurement is what justifies
+`repo:deny` needing no declaration at all; it is not the mechanism that removes it.
 
 This table counts the **blob-matched** set only. Script-following (§3.2) adds three more:
 `repo:publish-metadata`, which already declares the file; `repo:version-lockstep`, which
@@ -247,13 +250,20 @@ survived unfixed for `<<`'s siblings. Six sub-decisions, each with a fixture and
   scanned as ordinary code. Opening wrongly is what SWALLOWS. A/B-measured over the whole
   `ci/**/*.sh` corpus: the `"` guard fires on 343 physical lines and changes not one row.
 
-Two more rules complete it. Backslash continuations are joined into one logical line, reported
-against the FIRST physical line number. And `--locked` counts only **in the segment holding the
-verb, after that verb** — the segment scope keeps `cargo build && cargo metadata --locked`
-reporting `cargo build`; the after-the-verb scope keeps a `--locked` that is string content
-sitting *before* the verb (`X="abc` / `--locked" cargo build`, one bash statement across two
-physical lines) from covering a genuinely unlocked call. `cargo metadata --no-deps` is carved
-out (§2.1: `--no-deps` never resolves, so `--locked` on it is inert).
+Three more rules complete it. Backslash continuations are joined into one logical line, reported
+against the FIRST physical line number. **One row per INVOCATION, not per segment** — `finditer`,
+not `search`: a segment holding two cargo calls emits two rows, because reading only the first
+hid the nested unlocked call in `cargo build --locked --features "$(cargo test)"`, a silent
+false negative in the one direction this design claims it cannot have (SMA-599 final review).
+And `--locked` counts only **in the segment holding the verb, after that verb, and before the
+next invocation in that segment** — the segment scope keeps `cargo build && cargo metadata
+--locked` reporting `cargo build`; the after-the-verb scope keeps a `--locked` that is string
+content sitting *before* the verb (`X="abc` / `--locked" cargo build`, one bash statement across
+two physical lines) from covering a genuinely unlocked call; and the next-invocation bound keeps
+a nested call's flag off the outer one (`cargo build "$(cargo test --locked)"` reports
+`cargo build`). `cargo metadata --no-deps` is carved out (§2.1: `--no-deps` never resolves, so
+`--locked` on it is inert), scoped the same way — a `--no-deps` on a neighbouring invocation does
+not excuse a resolving one.
 
 **Quoted string literals are NOT stripped.** A cargo verb inside a string reports like any
 other.
@@ -283,10 +293,13 @@ only be a **false positive** — a benign string that mentions a cargo verb repo
 loudly, and a reviewer adds a waiver. The lexer's defects were silent passes, and a gate whose
 defects are silent passes cannot converge.
 
-The cost is five would-report rows on today's corpus instead of two: the two real
-`cargo update -w` calls in `ci/version-lockstep/run.sh`, plus three cargo mentions inside error
-message strings (`ci/version-lockstep/run.sh`, `ci/publish-metadata/run.sh:1663`,
-`ci/cargo-lock-integrity/run.sh:60`). All five are A8 waivers. See L8.
+The cost, MEASURED on today's corpus, is five would-report rows instead of two: the two real
+`cargo update -w` calls in `ci/version-lockstep/run.sh`; two cargo mentions inside error message
+strings (`ci/version-lockstep/run.sh:583`, `ci/publish-metadata/run.sh:1663`); and — added by
+the finditer rule above — `ci/actionlint/run.sh:3715`, a `${var/old/new}` substitution that
+names both the locked and the unlocked form of a cargo line. All five are A8 waivers. See L8.
+(`ci/cargo-lock-integrity/run.sh` is NOT among them: it is a `ci.yml` step, not a Moon task, so
+no derivation follows it.)
 
 ### 3.2 `derive_cargo_tasks(projects, root)` — the shared derivation (AC 1)
 
@@ -333,16 +346,34 @@ after one round of literal `VAR=<literal>` substitution (`$VAR` and `${VAR}` bot
 Live shapes covered: `cd rs`, `( cd rs && … )`, `cd "$REPO_ROOT/rs"`,
 `RS_DIR="$REPO_ROOT/rs"` … `cd "$RS_DIR"`, `--cwd ../../../rs/…`.
 
+Substitution runs **longest name first**, so a short variable name cannot eat a longer
+one it prefixes (`R=zzz` ahead of `RS_DIR=…` — measured both ways, SMA-599 final review).
+
 A bare `rs`-containing *argument* must NOT confer scope — `--manifest-path
 rs/Cargo.toml` and `cargo machete rs` are both fixtures asserting exactly that, because
-a loose "blob mentions `rs/`" test would destroy D2's structural exclusion and
-`repo:deny` is in the examined set.
+a loose "blob mentions `rs/`" test would destroy D2's structural exclusion. Both fixture
+rows are KNOWN-VACUOUS forward guards today and say so in the self-test: `repo:deny`
+reaches `derive_cargo_tasks` but never the cwd test (`deny` is not a sensitive verb), and
+`repo:machete` is never derived at all (`machete` is in neither verb list). The live
+cwd-only exclusion is the `repo:root-build` fixture — verb-sensitive, cwd at the repo root.
+
+**Script text is followed for EVERY kind, not only `script`.** `derive_cargo_tasks`
+assigns `literal` on any cargo verb anywhere in a blob, PROSE INCLUDED, so a gate whose
+invocation reads `echo "running cargo check"; bash ci/foo/run.sh` is `literal` while the
+identical gate without the echo is `script`. Reading the referenced file only for kind
+`script` therefore let a benign `echo` in a `moon.yml` block switch A10 off for that gate
+(SMA-599 final review; `task_script_refs` returns `[]` for a blob-only task, so following
+unconditionally costs nothing — measured, in_scope stays 58 and no row appears).
 
 **Verdict.** An in-scope task must declare `rs/.cargo/config.toml` in `inputFiles` or
 `inputGlobs` (both are read; an absent key is a violation, never a skip — the contract
 A4/A5/A6/A7 share). Measured: `moon.yml:239`'s `rs/.cargo/config.toml` and
 `.moon/tasks/rust.yml:46`'s `/rs/.cargo/config.toml` both resolve to the same
-slash-free `rs/.cargo/config.toml`, which is why all 58 declaring tasks match verbatim.
+slash-free `rs/.cargo/config.toml`, which is why every declaring task matches verbatim.
+Final counts on the shipped corpus: **59** tasks declare the file, A10 examines **58** of
+them, and the one it does not — `paigasus-kernel-py:test` — is asserted by **A5** instead
+(its `FFI_TASK_INPUTS` splat already demands the file; A10's cwd rule does not reach it,
+because the task's own cwd is `py/packages/kernel`).
 
 `ALLOW_MISSING_CARGO_CONFIG` exists but is **empty**, like `ALLOW_OVER_APPROXIMATION`.
 An entry requires a non-empty reason, and an entry matching no task is itself a row —
@@ -351,11 +382,16 @@ the stale-skip idiom `ci/actionlint/run.sh:2376-2383` uses.
 **Floors.** `REQUIRED_CARGO_CONFIG_TASKS` (`paigasus-kernel-rs:build`,
 `paigasus-iam-rs:test`, `paigasus-kernel-ts:build`, `repo:parity-corpus-drift`,
 `repo:publish-metadata`) must be in scope **and not allowlisted** — a default-deny gate's
-second vacuity mode is an allowlist that grows to swallow the set. A separate
-`REQUIRED_CWD_SHAPES` floor asserts each of the four cd forms still resolves for at
-least one task, because the bare `cd rs` shape's only exemplar
-(`repo:wasm-getrandom-free`, `moon.yml:326`) is now out of scope on its verb and so
-cannot be a floor member.
+second vacuity mode is an allowlist that grows to swallow the set.
+
+An earlier draft mandated a second `REQUIRED_CWD_SHAPES` floor, asserting that each cd
+form still resolves for at least one task. **It is not built, deliberately** (SMA-599
+final review). `REQUIRED_CARGO_CONFIG_TASKS` already covers the property against the REAL
+corpus: mutating `CWD_TOKEN_RE` to match nothing was measured to leave three floor rows,
+because every floor member reaches its cwd through one of those forms. A second floor
+asserting the same property from the same derivation adds a table to maintain and no
+coverage. The cd forms themselves are exercised directly instead, by the
+`_cwd_inside_rs` fixtures in the self-test — including the prefix-collision case below.
 
 ### 3.4 A8 widening
 
@@ -450,15 +486,25 @@ a cargo call inside a `.sh` is outside A8's derived set — also now false.
    positive controls: `cat <<'EOF' > "$out"`, plain `cat <<EOF` and `cat <<-EOF` all still
    open a heredoc whose body is skipped, an apostrophe in a trailing comment does not stop
    one, and `ls a[bc <<EOF` — an UNCLOSED bracketed span before a real opener — still opens.
-   An unterminated heredoc must raise `MoonOutputError`. A nineteen-mutation battery — one
+   An unterminated heredoc must raise `MoonOutputError`. Three more, added by the final
+   review: `cargo build --locked --features "$(cargo test)"` emits TWO rows, the second
+   unlocked (the finditer rule); `cargo build "$(cargo test --locked)"` reports the outer
+   call (the next-invocation flag bound); and `cargo build "$(cargo metadata --no-deps)"`
+   keeps `resolves=True` on the outer call. A **twenty-five**-mutation battery — one
    mutation per decision — must kill every mutant.
 2. **A10** — missing input reports; declared does not; empty-reason waiver is a row;
    stale waiver is a row; floor member out of scope reports; floor member allowlisted
    reports; `--manifest-path rs/Cargo.toml` and `cargo machete rs` do NOT confer scope;
-   each of the four cwd shapes resolves.
+   a verb-sensitive task whose cwd is the repo root does NOT (`repo:root-build` — the only
+   live exercise of the cwd exclusion); two gates running the SAME script, differing only by
+   a benign `echo "running cargo check"` in the blob, are BOTH in scope; and `_cwd_inside_rs`
+   is called directly on each cd shape, including the prefix-collision case
+   (`R=zzz` before `RS_DIR="$REPO_ROOT/rs"`).
 3. **Widened A8** — script-derived unlocked resolving line reports; `--locked` does not;
    `--no-deps` does not; a waiver whose text no longer occurs is a row; a `--write` in
-   version-lockstep's blob is a row.
+   version-lockstep's blob is a row; a waiver text occurring twice is a row, BUT a segment
+   holding one locked and one unlocked invocation is not ambiguous, because only reporting
+   rows are counted.
 4. **`derive_cargo_tasks`** — emptying it fails via the floor (AC 1); the three kinds
    stay distinguishable; an unresolvable script path raises.
 5. **Non-emptiness controls for every new constant.** `cargo_moon_parity.py:912-931`
@@ -577,8 +623,25 @@ with a message no reviewer will immediately understand. The same holds for `:371
 `${script/…/…}` substitution names both the locked and the unlocked form.
 
 **L5 — the cwd derivation resolves one round of literal substitution.** A script
-computing its cargo cwd dynamically is missed. `REQUIRED_CWD_SHAPES` covers today's four
-shapes, not tomorrow's.
+computing its cargo cwd dynamically is missed, in the false-negative direction. Two shapes
+are known and neither is fixed:
+
+* **Two-level indirection.** `A=rs; B="$A"; cd "$B"` needs a second round. Substituting
+  `B` yields the literal text `$A`, which `_cwd_inside_rs` never re-scans. No live script
+  does this; a fixed-point loop is not worth adding for a shape that does not exist yet.
+* **Anything computed at run time** — a cwd read from a command's output, a `case` arm, an
+  argument.
+
+Prefix collision USED to be a third shape and is now closed: substitution runs longest
+name first, so an `R=zzz` assignment can no longer eat a later `$RS_DIR` (measured both
+ways, SMA-599 final review).
+
+What actually holds the cwd rule honest is **`REQUIRED_CARGO_CONFIG_TASKS` against the
+real corpus**, not a shape table: with `CWD_TOKEN_RE` mutated to match nothing, A10's
+examined set falls from 58 tasks to 52 and three floor members red
+(`paigasus-kernel-ts:build`, `repo:parity-corpus-drift`, `repo:publish-metadata`).
+The individual cd forms, including the prefix-collision case, are exercised by direct
+`_cwd_inside_rs` fixtures in the self-test.
 
 **L6 — `--no-deps` was measured in one shape only** (§2.1): one cargo version, a lockfile
 present, staleness induced by a member manifest gaining a dependency. Not measured with
@@ -592,7 +655,12 @@ reds.
 **L8 — a benign multi-line string containing a cargo verb reports.** The conservative rule
 (§3.1) does not strip quoted strings, so prose such as
 `die_infra "cargo update -w failed (site 16)"` produces a row. Three such rows exist today and
-all three are A8 waivers. This is the design's accepted false-positive direction, pinned by a
+all three are A8 waivers: two `die_infra` diagnostics (`ci/version-lockstep/run.sh:583`,
+`ci/publish-metadata/run.sh:1663`) and — since the finditer rule — `ci/actionlint/run.sh:3715`,
+a `${var/old/new}` substitution that builds a mutated script text naming the unlocked form.
+That third one is the price of closing the nested-invocation false negative, and it is the
+trade this design makes on purpose: one waiver bought back the claim that a future defect here
+can only be a false positive. This is the design's accepted false-positive direction, pinned by a
 self-test fixture so nobody "fixes" it by reintroducing string stripping; it reds CI loudly
 rather than passing silently.
 

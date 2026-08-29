@@ -518,15 +518,22 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   gates that shell out to cargo (`repo:parity-corpus-drift`, `repo:observability-drift`,
   `repo:nats-permissions`). Editing it selects 61 tasks against 3 before — the 52 crate tasks, the
   3 FFI tasks, and 6 `repo:*` gates (those three, plus `repo:actionlint`, `repo:input-liveness`
-  and `repo:publish-metadata`, which select on everything). **Every one of those declarations is
-  now asserted** by `repo:affected-smoke`'s A10 (`ci/affected-graph/cargo_moon_parity.py`,
-  SMA-599, findings key `a10`): a task is in scope when its cargo subcommand COMPILES or LINKS
+  and `repo:publish-metadata`, which select on everything). **59 of those declarations are now
+  asserted**: 58 by `repo:affected-smoke`'s A10 (`ci/affected-graph/cargo_moon_parity.py`,
+  SMA-599, findings key `a10`), and `paigasus-kernel-py:test` by **A5**, not A10 — it is an FFI
+  wrapper task, so the `FFI_TASK_INPUTS` splat already demands the file and A10's derivation
+  never reaches it. A task is in A10's scope when its cargo subcommand COMPILES or LINKS
   (`CONFIG_SENSITIVE_VERBS`, deliberately NOT A8's `LOCK_RESOLVING_VERBS`) AND its cwd resolves
   inside `rs/` — crate tasks and the `repo:*` gates that reach cargo through their own
-  `ci/**/run.sh` alike. `repo:deny` and `repo:machete` fall out on the cwd half: both run from
-  the repo ROOT via `--manifest-path rs/Cargo.toml` — MEASURED on cargo 1.95.0, a malformed
-  `rs/.cargo/config.toml` fails cwd=rs/ at rc 101 but leaves cwd=root+`--manifest-path` at rc 0,
-  so `--manifest-path` does not move cargo's config walk. A10 reads moon's RESOLVED inputs, so
+  `ci/**/run.sh` alike. `repo:deny` and `repo:machete` are out of scope BY VERB, not on the cwd
+  half: `deny` is in `LOCK_RESOLVING_VERBS` and IS derived, but is absent from
+  `CONFIG_SENSITIVE_VERBS`, so `_cwd_inside_rs` is never called for it; `machete` is absent from
+  `LOCK_RESOLVING_VERBS` entirely and is never derived at all. (`repo:machete` also runs
+  `cargo machete rs`, a bare path ARGUMENT, not `--manifest-path`.) The `--manifest-path` fact
+  belongs to `repo:deny`, and it is still load-bearing for A10's design decision D2 — MEASURED on
+  cargo 1.95.0, a malformed `rs/.cargo/config.toml` fails cwd=rs/ at rc 101 but leaves
+  cwd=root+`--manifest-path` at rc 0, so `--manifest-path` does not move cargo's config walk and
+  a bare `rs`-containing argument must never confer a cwd. A10 reads moon's RESOLVED inputs, so
   its four inherited lines in `.moon/tasks/rust.yml` (`build`/`build-release`/`test`/`lint`) each
   cover thirteen crates — deleting one reds thirteen tasks. A10 ships with an EMPTY allowlist;
   every exclusion is structural. It is deliberately
