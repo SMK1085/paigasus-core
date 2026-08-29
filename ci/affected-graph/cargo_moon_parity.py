@@ -142,8 +142,11 @@ REQUIRED_FFI_TASKS = (
 # `script` blob A5 uses, NOT against file text — a text scan of moon.yml/.moon/tasks/*.yml/
 # rs/Dockerfile/ci/**/*.sh was measured at 45 matches of which ~14 were real invocations, because
 # `moon.yml:323` is `echo "cargo tree failed ..."` on an EXECUTING line and
-# `ci/publish-metadata/run.sh:179` is a Python f-string inside a heredoc. The resolved blob has
-# no prose: measured at 60 matches (57 literal-cargo, 3 wrapper), 0 false positives.
+# `ci/publish-metadata/run.sh:179` is a Python f-string inside a heredoc. The resolved blob is not
+# prose-free either — `repo:wasm-getrandom-free`'s own script carries that same
+# `echo "cargo tree failed ..."` and the regex matches it — but it holds no prose about a task
+# OTHER than itself, which is what makes the TASK-level count clean: measured at 60 matched tasks
+# (57 literal-cargo, 3 wrapper), 0 false positives.
 LOCK_RESOLVING_VERBS = (
     "bench", "build", "check", "clippy", "deny", "doc", "fetch", "metadata",
     "nextest", "package", "publish", "run", "test", "tree", "update",
@@ -408,7 +411,10 @@ def check_cargo_locked(projects, allow=ALLOW_UNLOCKED_CARGO, floor=REQUIRED_LOCK
     nothing while still printing PASS.
 
     Raises MoonOutputError if a task in `floor` exposes none of a command, a script, or any
-    args — the same absent-invocation contract A5 uses.
+    args — the same absent-invocation contract A5 uses. That contract is WEAKER than
+    `derive_ffi_tasks`', which raises on ANY None blob: a None outside `floor` is skipped here.
+    The difference is unreachable today only because `collect_findings` computes `a5` before `a8`,
+    so A5's stricter rule aborts the run first. Reordering or removing A5 makes it reachable.
     """
     rows = []
     matched = set()
@@ -868,12 +874,17 @@ def self_test():
     # default `floor=REQUIRED_FFI_TASKS`; emptying either is caught TODAY only incidentally, by
     # unrelated row-text assertions elsewhere in this function, which is not a guarantee — so all
     # three get a direct, explicit non-emptiness check here instead.
+    #
+    # SMA-601 adds a fourth. A8's calls all pass an explicit `floor=` too, so `REQUIRED_LOCKED_TASKS
+    # = ()` was MEASURED leaving `--self-test` at rc 0 while A8's real-run floor asserted nothing.
     if not REQUIRED_CLOSURE_EDGES:
         failures.append("REQUIRED_CLOSURE_EDGES is empty — A6's floor would assert nothing")
     if not UPSTREAM_INPUT_TASKS:
         failures.append("UPSTREAM_INPUT_TASKS is empty — A6's per-crate loop would assert nothing")
     if not REQUIRED_FFI_TASKS:
         failures.append("REQUIRED_FFI_TASKS is empty — A5's floor would assert nothing")
+    if not REQUIRED_LOCKED_TASKS:
+        failures.append("REQUIRED_LOCKED_TASKS is empty — A8's floor would assert nothing")
 
     if not FMT_TASK_INPUTS:
         failures.append("FMT_TASK_INPUTS is empty — the fmt half of A4 would assert nothing")

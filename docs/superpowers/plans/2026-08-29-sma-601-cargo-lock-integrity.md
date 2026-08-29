@@ -524,11 +524,12 @@ def check_cargo_locked(projects, allow=ALLOW_UNLOCKED_CARGO, floor=REQUIRED_LOCK
                         f"moon's output shape changed, so A8 cannot be evaluated"
                     )
                 continue
-            if not (CARGO_INVOCATION_RE.search(blob)
-                    or any(marker in blob for marker in FFI_MARKERS)):
+            is_wrapper = any(marker in blob for marker in FFI_MARKERS)
+            if not (is_wrapper or CARGO_INVOCATION_RE.search(blob)):
                 continue
             matched.add(target)
-            if LOCKED_FLAG in blob:
+            # A wrapper is NEVER cleared by the flag — see the note above this block.
+            if not is_wrapper and LOCKED_FLAG in blob:
                 continue
             reason = allow.get(target)
             if reason is None:

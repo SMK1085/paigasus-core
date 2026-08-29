@@ -170,8 +170,14 @@ It also runs several checks that the per-case project sets structurally **cannot
   truncated 176-package lock it exits 0 and rewrites the lock to 548. `REQUIRED_LOCKED_TASKS` is
   its anti-vacuity floor, for the reason `REQUIRED_FFI_TASKS` carries: a derived set that shrinks
   to empty asserts nothing while still printing PASS.
-  Not covered: a cargo call inside a `.sh` that a Moon task invokes is not in moon's resolved
-  command string, so it is outside A8's derived set.
+  Not covered, two things. A cargo call inside a `.sh` that a Moon task invokes is not in moon's
+  resolved command string, so it is outside A8's derived set. And the literal-cargo half tests
+  `--locked` PER BLOB, not per invocation: a script-form task running two cargo commands with the
+  flag on only one of them would pass — the same vacuity class the wrapper rule closes, left open
+  here because a per-invocation split needs a shell parse the gate deliberately does not do.
+  Nothing is wrong today: exactly one task has more than one regex match
+  (`repo:wasm-getrandom-free`, whose second match sits inside an `echo`), and its real cargo call
+  is locked.
 - **`ci-targets`** (`ci_targets.py`, SMA-541) asserts `ci.yml`'s hand-written `moon ci` target array
   is complete and live: **C1** every CI-eligible `repo:*` task appears in `T=(…)` and — strict
   equality, not a subset — nothing in `T` names a `repo` task that is switched off; **C2** every `T`
