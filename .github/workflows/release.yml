@@ -347,20 +347,76 @@ jobs:
           git commit -m "chore(rs): stamp the non-Cargo manifests to the release version"
           git push "$AUTH_REMOTE" "HEAD:$BRANCH"
 
+  # THE SKIP DECISION (SMA-603). Without this, every push to `main` with the flag on builds the
+  # full 12-leg matrix and then waits at `approve-release` for a human, indefinitely, even when
+  # there is nothing to release — observed on run 33265567805.
+  #
+  # WHY NOT `release-plz release --dry-run`. Measured (spec M6): with only the `kernel` version
+  # group bumped, release-plz logs that it WOULD publish paigasus-kernel and cut
+  # `paigasus-kernel-v0.1.1`, and still prints `{"releases":[]}` at exit 0. That array records
+  # PERFORMED releases and a dry run performs none, so it cannot tell "nothing to release" from
+  # "a release is pending". Reading it would silently skip every kernel-group release. Do not
+  # reintroduce it.
+  #
+  # This job is the ONLY holder of the literal flag gate now. `wheels`, `prebuild` and
+  # `proto-dist` gate transitively through `needs: [plan]` — with the flag off this job skips,
+  # and a job whose needs: dependency skipped is itself skipped.
+  plan:
+    name: decide whether anything is releasable
+    if: vars.PAIGASUS_RELEASE_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      # A STEP output is not a JOB output. Without this mapping every
+      # `needs.plan.outputs.nothing_to_release` below is the empty string — which builds, so it
+      # fails safe, but the feature would never fire. release_guard.py V9c asserts this key AND
+      # that `steps.decide` names a step that exists in this job.
+      nothing_to_release: ${{ steps.decide.outputs.nothing_to_release }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          # LOAD-BEARING. The tags ARE the signal, and a shallow checkout has none.
+          fetch-depth: 0
+          persist-credentials: false
+
+      # ONE PHYSICAL LINE. release_guard.py's command_segments is per physical line, so a
+      # backslash continuation would be judged without its flags.
+      - name: Decide
+        id: decide
+        env:
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+        run: ci/release-plan/run.sh --github-output
+
   # THE REVERSIBLE STAGE. Everything below `release` only downloads what these produce.
   wheels:
     name: build wheels
-    if: vars.PAIGASUS_RELEASE_ENABLED == 'true'
+    needs: [plan]
+    # FAIL-SAFE POLARITY, and it is carried by the operator. The output is named for the SKIP
+    # condition and tested with `!=`, so anything but the literal 'true' builds — 'false', the
+    # empty string, an unset output. `== 'true'` would invert it; `== 'false'` would fail closed
+    # on an unset output. release_guard.py V9b pins both accepted forms.
+    if: needs.plan.outputs.nothing_to_release != 'true'
     uses: ./.github/workflows/wheels.yml
 
   prebuild:
     name: build node addons and wasm
-    if: vars.PAIGASUS_RELEASE_ENABLED == 'true'
+    needs: [plan]
+    # FAIL-SAFE POLARITY, and it is carried by the operator. The output is named for the SKIP
+    # condition and tested with `!=`, so anything but the literal 'true' builds — 'false', the
+    # empty string, an unset output. `== 'true'` would invert it; `== 'false'` would fail closed
+    # on an unset output. release_guard.py V9b pins both accepted forms.
+    if: needs.plan.outputs.nothing_to_release != 'true'
     uses: ./.github/workflows/prebuild.yml
 
   proto-dist:
     name: build the Python proto distribution
-    if: vars.PAIGASUS_RELEASE_ENABLED == 'true'
+    needs: [plan]
+    # FAIL-SAFE POLARITY, and it is carried by the operator. The output is named for the SKIP
+    # condition and tested with `!=`, so anything but the literal 'true' builds — 'false', the
+    # empty string, an unset output. `== 'true'` would invert it; `== 'false'` would fail closed
+    # on an unset output. release_guard.py V9b pins both accepted forms.
+    if: needs.plan.outputs.nothing_to_release != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
