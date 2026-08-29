@@ -551,7 +551,13 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   because scheduled-vs-selected is the exact distinction every affectedness measurement in this
   repo turns on; an extraction that conflates the two cannot measure it. It inflated this branch's
   own spec table before the numbers were re-derived.
-- release-plz owns every tag (`<package>-v<version>`, its default). `napi prepublish` always
+- release-plz owns every tag it cuts (`<package>-v<version>`, its default), but it **only tags what
+  it PUBLISHES**. MEASURED on the first live release (SMA-580): three tags, not six. The three
+  `publish = false` kernel-family binding crates were never mentioned in the `release` job log at
+  all — not even as skipped — so `release = true` keeps a crate in the version group and does NOT
+  get it tagged. `rs/release-plz.toml`'s comment claimed otherwise and is corrected. Cosmetic: those
+  crates' versions come from `version_group` + `repo:version-lockstep`, neither of which reads a
+  tag. `napi prepublish` always
   carries `--no-gh-release` — a flag its own `--help` does not list. Two invocations exist:
   the real publish in `release.yml`'s `publish-npm` job, with the requirement recorded in the
   comment directly above it; and the dry run in `prebuild.yml`'s `assemble` job.
