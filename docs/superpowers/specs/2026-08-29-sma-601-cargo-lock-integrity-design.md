@@ -181,9 +181,19 @@ and `paigasus-kernel-py:test` reach cargo through wrappers, and all three
 declare `/rs/Cargo.lock` among their inputs (SMA-546), so a lock-only
 Dependabot PR selects them:
 
-* `wasm-pack build` — **fixable**. Its `[EXTRA_OPTIONS]...` positional is
-  documented as "List of extra options to pass to `cargo build`", so
-  `wasm-pack build … -- --locked` works.
+* `wasm-pack build` — **not fixable, despite appearances**. Its
+  `[EXTRA_OPTIONS]...` positional is documented as "List of extra options to
+  pass to `cargo build`", and the passthrough genuinely reaches that forwarded
+  build — `wasm-pack build … -- --zzz-not-a-real-cargo-flag` is rejected with
+  exit 1, proving the flag arrives. But `wasm-pack build … -- --locked`,
+  measured against PR 181's truncated 176-package lock, still exits 0 and
+  rewrites the lock 176 -> 548: wasm-pack makes its own **unlocked** cargo call
+  BEFORE the build it forwards to, repairs the lock there first, and the
+  forwarded `--locked` then sees an already-valid lock. `--locked` is kept on
+  both invocations anyway — it does constrain the forwarded `cargo build`
+  itself (`cargo build --lib --release --locked --target
+  wasm32-unknown-unknown` against the same truncated lock exits 101) — but it
+  cannot guarantee a locked resolution for the task as a whole.
 * `napi build` — **not fixable**. Measured against the pinned CLI: it exposes
   `--target`, `--target-dir`, `--profile`, `--features`, `--cross-compile` and
   more, but **no `--locked` and no cargo passthrough**. Cargo has no
@@ -191,7 +201,7 @@ Dependabot PR selects them:
 * `uv sync --reinstall-package paigasus-py-bindings` — **not fixable**. It
   drives maturin, which drives cargo, with no flag path through either.
 
-These two are a stated residual, not an oversight. They are acceptable
+These three are a stated residual, not an oversight. They are acceptable
 precisely because Part 1 does not depend on Part 2: the detector has already
 run and reported before any of them starts.
 
@@ -316,10 +326,14 @@ PR. Not needed once the required check reds.
   `cargo metadata --locked`. This gate detects truncation and any other
   inconsistency with the manifests. It is not a lockfile-tampering detector,
   and nothing here becomes one.
-* **`napi build` and `uv sync`/maturin cannot be locked** (measured, 3.2). Two
-  tasks therefore still re-resolve. Part 1 has already reported before they
-  run, so they cannot mask a truncated lock, but their own cargo work is not
-  audited against the shipped resolution.
+* **`napi build`, `uv sync`/maturin, and `wasm-pack build` cannot be locked**
+  (measured, 3.2). `napi build` and `uv sync` expose no flag or passthrough at
+  all. `wasm-pack build … -- --locked` forwards the flag to its `cargo build`
+  call, but wasm-pack's own pre-build cargo call is unlocked and repairs an
+  inconsistent lock first, so the forwarded flag sees an already-valid lock.
+  Three tasks therefore still re-resolve. Part 1 has already reported before
+  they run, so they cannot mask a truncated lock, but their own cargo work is
+  not audited against the shipped resolution.
 * **Gate scripts under `ci/**` are outside Part 3's derived set.** A cargo call
   inside a `.sh` invoked by a Moon task is not in moon's resolved command
   string. Today's instances are `ci/version-lockstep/run.sh`'s deliberate

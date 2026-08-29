@@ -96,10 +96,17 @@ detection as infrastructure, and the gate would never report red at all.
   tampered `checksum`, a removed `[patch]` — passes `cargo metadata --locked`. This
   gate detects truncation and any other inconsistency with the manifests. It is not a
   lockfile-tampering detector, and nothing here becomes one.
-* **`napi build` and `uv sync`/maturin cannot be locked** (measured). Two tasks
-  therefore still re-resolve. This gate has already reported before they run, so they
-  cannot mask a truncated lock, but their own cargo work is not audited against the
-  shipped resolution.
+* **`napi build`, `uv sync`/maturin, and `wasm-pack build` cannot be locked**
+  (measured). `napi build` exposes no `--locked` flag and no cargo passthrough; `uv
+  sync` drives maturin with no flag path either. `wasm-pack build … -- --locked` looks
+  fixable — the passthrough does reach the `cargo build` wasm-pack forwards to (a bad
+  flag there, e.g. `-- --zzz-not-a-real-cargo-flag`, is rejected with exit 1) — but
+  measured against a truncated 176-package lock it still exits 0 and rewrites the lock
+  176 -> 548: wasm-pack makes its own unlocked cargo call BEFORE the forwarded build and
+  repairs the lock there first, so the forwarded `--locked` sees an already-valid lock.
+  Three tasks therefore still re-resolve. This gate has already reported before they
+  run, so they cannot mask a truncated lock, but their own cargo work is not audited
+  against the shipped resolution.
 * **Gate scripts under `ci/**` are outside this gate's derived set.** A cargo call
   inside a `.sh` invoked by a Moon task is not in Moon's resolved command string.
   Today's instances are `ci/version-lockstep/run.sh`'s deliberate `cargo update -w`
