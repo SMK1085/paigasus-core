@@ -8,9 +8,12 @@
 //! that is exactly how a mis-named `{sa}` path segment survived its whole suite. Each row here
 //! pins one live route's extractor choice.
 //!
-//! No tenancy fixtures are seeded. Both extractors refuse BEFORE the handler runs, so every row
-//! is reachable with nothing but a valid bearer — and each block ends with a well-formed request
-//! on the same route, so a row cannot pass merely because the route is broken.
+//! No tenancy fixtures are seeded, except in the second test: its three nested list routes take
+//! a uuid path segment before their query string, so it creates an organization (and, for the
+//! api-keys route, a service account) to get real uuids to nest under. Both extractors refuse
+//! BEFORE the handler runs, so every other row is reachable with nothing but a valid bearer —
+//! and each block ends with a well-formed request on the same route, so a row cannot pass merely
+//! because the route is broken.
 //!
 //! All three capability flags default to `true` in `support::test_config`, so every route below
 //! is mounted. A disabled capability would 404 and the rows would pass for the wrong reason.
@@ -71,7 +74,7 @@ async fn a_refused_query_string_answers_in_the_error_envelope() {
     assert_eq!(err["error"]["code"], wire(ErrorReason::InvalidQueryParameter), "{err}");
 }
 
-/// The two nested list routes, which take a uuid path segment BEFORE their query string — so a
+/// The three nested list routes, which take a uuid path segment BEFORE their query string — so a
 /// refused query on them proves the two extractors compose in one signature.
 #[tokio::test]
 async fn a_refused_query_on_a_nested_list_route_answers_in_the_error_envelope() {
@@ -86,10 +89,21 @@ async fn a_refused_query_on_a_nested_list_route_answers_in_the_error_envelope() 
     provision_platform_admin(&state, &token).await;
 
     let (_, created) = send(&app, "POST", "/v1/organizations", Some(json!({"slug": "nested", "name": "Nested"})), Some(token.as_str())).await;
-    let org_id = created["organization"]["prn"].as_str().expect("organization.prn").rsplit('/').next().unwrap().to_string();
+    let org_prn = created["organization"]["prn"].as_str().expect("organization.prn").to_string();
+    let org_id = org_prn.rsplit('/').next().unwrap().to_string();
     let team_id = created["default_team"]["prn"].as_str().expect("default_team.prn").rsplit('/').next().unwrap().to_string();
 
-    for uri in [format!("/v1/organizations/{org_id}/teams?limit=abc"), format!("/v1/teams/{team_id}/projects?limit=abc")] {
+    // `api_keys.rs`'s list route also nests under a uuid path segment — a service account's,
+    // not an organization's or a team's — so it needs its own fixture: a real service account,
+    // owned by the organization created above.
+    let (_, sa_created) = send(&app, "POST", "/v1/service-accounts", Some(json!({"owner_prn": org_prn, "name": "nested-sa"})), Some(token.as_str())).await;
+    let sa_id = sa_created["prn"].as_str().expect("service account prn").rsplit('/').next().unwrap().to_string();
+
+    for uri in [
+        format!("/v1/organizations/{org_id}/teams?limit=abc"),
+        format!("/v1/teams/{team_id}/projects?limit=abc"),
+        format!("/v1/service-accounts/{sa_id}/api-keys?limit=abc"),
+    ] {
         let (status, err) = send(&app, "GET", &uri, None, Some(token.as_str())).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "GET {uri}: {err}");
         assert_eq!(err["error"]["code"], wire(ErrorReason::InvalidQueryParameter), "GET {uri}: {err}");
@@ -99,6 +113,8 @@ async fn a_refused_query_on_a_nested_list_route_answers_in_the_error_envelope() 
     let (status, err) = send(&app, "GET", &format!("/v1/organizations/{org_id}/teams?limit=1"), None, Some(token.as_str())).await;
     assert_eq!(status, StatusCode::OK, "{err}");
     let (status, err) = send(&app, "GET", &format!("/v1/teams/{team_id}/projects?limit=1"), None, Some(token.as_str())).await;
+    assert_eq!(status, StatusCode::OK, "{err}");
+    let (status, err) = send(&app, "GET", &format!("/v1/service-accounts/{sa_id}/api-keys?limit=1"), None, Some(token.as_str())).await;
     assert_eq!(status, StatusCode::OK, "{err}");
 }
 

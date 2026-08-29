@@ -22,6 +22,13 @@
 //! `BytesRejection` wraps `FailedToBufferBody`, itself `{LengthLimitError (413),
 //! UnknownBodyError (400)}`, so mapping the variant straight to `RequestTooLarge` would render a
 //! 413 code on a 400 response.
+//!
+//! `classify` admits only the two statuses this file can name: `413` maps to `RequestTooLarge`
+//! and `400` to `BadRequestBody`. Everything else — 5xx **and any unexpected client status** —
+//! returns `None` and hands axum's own response back. `BytesRejection` is `#[non_exhaustive]`,
+//! so a status this module cannot yet name is a real possibility, not a defensive-only branch;
+//! answering it with a fixed `BadRequestBody` would name a condition (an invalid body) that
+//! did not occur.
 
 use axum::body::Bytes;
 use axum::extract::rejection::BytesRejection;
@@ -31,13 +38,16 @@ use axum::response::{IntoResponse, Response};
 
 use crate::adapters::http::error::GatewayError;
 
-/// Maps a rejection's status to the client-facing error, or `None` when it is not the caller's
-/// mistake — in which case axum's own response is handed back rather than a 4xx-flavoured code
-/// being stamped onto a 5xx. IAM's `path.rs` and `json.rs` make the identical choice.
+/// Maps a rejection's status to the client-facing error, or `None` when this module cannot name
+/// the condition — a 5xx, since it is not the caller's mistake, or a client status other than
+/// the two this file knows about, since answering `BadRequestBody` for an unnamed status would
+/// claim a cause it cannot know. In both cases axum's own response is handed back rather than a
+/// fixed code being stamped onto a status it does not describe. IAM's `path.rs` and `json.rs`
+/// make the identical choice.
 fn classify(status: StatusCode) -> Option<GatewayError> {
     match status {
         StatusCode::PAYLOAD_TOO_LARGE => Some(GatewayError::RequestTooLarge),
-        s if s.is_client_error() => Some(GatewayError::BadRequestBody),
+        StatusCode::BAD_REQUEST => Some(GatewayError::BadRequestBody),
         _ => None,
     }
 }
@@ -86,6 +96,16 @@ mod tests {
         assert_eq!(classify(StatusCode::PAYLOAD_TOO_LARGE), Some(GatewayError::RequestTooLarge));
         assert_eq!(classify(StatusCode::BAD_REQUEST), Some(GatewayError::BadRequestBody));
         assert_eq!(classify(StatusCode::INTERNAL_SERVER_ERROR), None, "a server fault is not the caller's mistake");
+    }
+
+    /// `BytesRejection` is `#[non_exhaustive]`: axum can add a variant carrying a client status
+    /// other than 400/413. `classify` must hand that back to axum rather than guess
+    /// `BadRequestBody` — pinned directly here since no such variant exists to drive through a
+    /// real rejection today.
+    #[test]
+    fn classify_hands_back_an_unnamed_client_status() {
+        assert_eq!(classify(StatusCode::UNPROCESSABLE_ENTITY), None, "not 400 or 413 — this module cannot name the condition");
+        assert_eq!(classify(StatusCode::UNAUTHORIZED), None);
     }
 
     /// The 413 path end-to-end through a real `DefaultBodyLimit` router — the only way to

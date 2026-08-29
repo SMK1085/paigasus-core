@@ -1276,13 +1276,17 @@ mod tests {
     /// `TenancyError` variants, which `status_to_grpc` maps unconditionally. This scan is what
     /// holds the property the registry comments assert.
     ///
-    /// Two limits, stated. First, a source scan is defeated by an alias or a re-export, exactly
+    /// Three limits, stated. First, a source scan is defeated by an alias or a re-export, exactly
     /// as `ci/error-registry/check.py` documents for its own. Second, this scan SKIPS
     /// `convert.rs` itself, because its own test module names both variant strings and would
     /// otherwise trip the guard on itself — so a construction added inside `convert.rs` escapes
     /// this check entirely. `convert.rs` is a mapping layer that constructs no `TenancyError` of
     /// its own, so the realistic case — a gRPC handler reaching for a convenient existing
-    /// variant — is still covered, but the hole is real and this is where it is recorded.
+    /// variant — is still covered, but the hole is real and this is where it is recorded. Third,
+    /// the scan matches on a bare SUBSTRING of the file's text, not on a construction site, so it
+    /// can also FALSE-POSITIVE on a mere textual mention of either variant name — a doc comment
+    /// or a string literal in another `adapters/grpc/*.rs` file trips it exactly like a real
+    /// construction would. That failure direction is a noisy red, never a silent pass.
     #[test]
     fn the_http_only_extractor_reasons_are_never_constructed_on_the_grpc_surface() {
         let grpc_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/adapters/grpc");

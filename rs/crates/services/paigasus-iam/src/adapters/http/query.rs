@@ -26,6 +26,7 @@
 
 use axum::extract::rejection::QueryRejection;
 use axum::extract::{FromRequestParts, Query};
+use axum::http::StatusCode;
 use axum::http::request::Parts;
 use axum::response::{IntoResponse, Response};
 use serde::de::DeserializeOwned;
@@ -36,12 +37,15 @@ use crate::application::error::TenancyError;
 /// Was this rejection the CALLER's fault, or ours?
 ///
 /// `QueryRejection` is `#[non_exhaustive]` and carries a single variant today
-/// (`FailedToDeserializeQueryString`, a 400), so the fallback is mandatory rather than
-/// defensive. Anything not a client error is handed back to axum unchanged — the identical rule
-/// `path.rs:87-92` and `json.rs`'s `classify` follow, because three extractors answering server
-/// bugs differently would be worse than one plain-text 500.
+/// (`FailedToDeserializeQueryString`, a 400). This admits only `BAD_REQUEST` — the identical
+/// rule `path.rs`'s `is_client_error` and `json.rs`'s `classify` follow — rather than any
+/// `is_client_error()` status, so an axum variant added later with a DIFFERENT client status is
+/// handed back to axum unchanged instead of being answered as `invalid-query-parameter`, a
+/// reason that would no longer name the real condition. Anything not `BAD_REQUEST`, client or
+/// server, is handed back to axum unchanged — three extractors answering unnamed statuses
+/// differently would be worse than one plain-text 500.
 fn is_client_error(rejection: &QueryRejection) -> bool {
-    rejection.status().is_client_error()
+    rejection.status() == StatusCode::BAD_REQUEST
 }
 
 /// `Query<T>` with the IAM error envelope on rejection.
@@ -142,5 +146,22 @@ mod tests {
     async fn an_absent_query_string_extracts() {
         let (status, _) = probe("/x").await;
         assert_eq!(status, StatusCode::OK);
+    }
+
+    /// Pins `is_client_error`'s equality rule directly against a real rejection, not only
+    /// through the extractor's observable behaviour. `QueryRejection` is `#[non_exhaustive]`
+    /// and carries exactly one variant today (`FailedToDeserializeQueryString`, always
+    /// `BAD_REQUEST`), so this is the only status a REAL rejection can carry — unlike
+    /// `bytes.rs`, this module has no free `classify` function and `QueryRejection`'s variant
+    /// cannot be constructed from outside axum, so the negative branch (an unexpected client
+    /// status handed back to axum unchanged) is not unit-testable here today. It is pinned
+    /// directly for `bytes.rs::classify`, which carries no such construction restriction.
+    #[tokio::test]
+    async fn is_client_error_matches_the_only_real_rejection_today() {
+        let request = axum::http::Request::builder().uri("/x?limit=abc").body(()).unwrap();
+        let (mut parts, ()) = request.into_parts();
+        let rejection = Query::<Probe>::from_request_parts(&mut parts, &()).await.unwrap_err();
+        assert_eq!(rejection.status(), StatusCode::BAD_REQUEST);
+        assert!(is_client_error(&rejection));
     }
 }

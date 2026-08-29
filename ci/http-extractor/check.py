@@ -354,8 +354,10 @@ _PATTERNS = {name: _banned_pattern(name, needs_generic) for name, _, _, needs_ge
 def violations_in(text, origin="<fixture>", enabled=None):
     """[(fn_name, line, extractor, replacement)] for one file's worth of Rust source.
 
-    `enabled` defaults to the BANNED rows whose flag is on; the self-test passes an explicit set to
-    exercise the reserved rows without turning them on for the real tree.
+    `enabled` defaults to the BANNED rows whose flag is on. All four BANNED rows are enabled
+    today, so there are no reserved rows left to exercise this way; the self-test instead passes
+    an explicit set naming a synthetic `Widget` row, to prove a FUTURE row would work when
+    flipped on without turning any real one off for the real tree.
     """
     if enabled is None:
         enabled = {name: repl for name, on, repl, _g in BANNED if on}

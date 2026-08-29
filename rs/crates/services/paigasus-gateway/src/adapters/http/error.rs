@@ -68,8 +68,11 @@ pub enum GatewayError {
     Internal,
     // ---- egress (OpenAI-upstream) cases (G7) -------------------------------------------------
     /// The request body could not be read or parsed as JSON — a syntax error, a truncated body,
-    /// or an empty one → 400. A body that parses but does not match the target type is
-    /// `InvalidRequestSchema` since SMA-588.
+    /// or an empty one → 400. Since SMA-588, `EnvelopeBytes` (`bytes.rs`) also routes its own
+    /// 400 arm here: a body that failed to BUFFER, e.g. a dropped connection mid-upload, not
+    /// only one that buffered but failed to PARSE — so the wire message names neither cause. A
+    /// body that parses but does not match the target type is `InvalidRequestSchema` since
+    /// SMA-588.
     BadRequestBody,
     /// The request body was syntactically valid JSON but did not match
     /// `ChatCompletionRequest` → 400. Split out of `BadRequestBody` by SMA-588 so
@@ -140,13 +143,7 @@ impl GatewayError {
                 "The authorization service is temporarily unavailable.",
             ),
             GatewayError::Internal => (StatusCode::INTERNAL_SERVER_ERROR, "api_error", Some("internal"), None, "Internal error."),
-            GatewayError::BadRequestBody => (
-                StatusCode::BAD_REQUEST,
-                "invalid_request_error",
-                Some("invalid-request-body"),
-                None,
-                "The request body is not valid JSON.",
-            ),
+            GatewayError::BadRequestBody => (StatusCode::BAD_REQUEST, "invalid_request_error", Some("invalid-request-body"), None, "Invalid request body."),
             GatewayError::InvalidRequestSchema => (
                 StatusCode::BAD_REQUEST,
                 "invalid_request_error",
