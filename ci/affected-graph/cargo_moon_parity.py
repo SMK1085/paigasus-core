@@ -183,16 +183,25 @@ SCRIPT_REF_RE = re.compile(r"(?:^|[\s;&|(])(?:bash\s+|sh\s+)?(ci/[\w./-]+\.sh)\b
 # "can rs/.cargo/config.toml change this command's OUTPUT". Reusing A8's list made A9 fail to
 # implement its own rule: the thirteen `cargo fmt --check` tasks run with cwd inside `rs/` and
 # fell out of scope only because `fmt` happens to be absent from a lock-oriented list — an
-# accidental coupling, not a stated exclusion. It would also have left any future
-# compiling-but-not-resolving subcommand (cargo llvm-cov, insta, udeps, bloat) silently
-# out of scope, where no floor can see it.
+# accidental coupling, not a stated exclusion.
+#
+# CORRECTED CLAIM (SMA-599 review): CONFIG_SENSITIVE_VERBS is a STRICT SUBSET of
+# LOCK_RESOLVING_VERBS (A8's list), and the split is load-bearing ONLY for verbs
+# LOCK_RESOLVING_VERBS already derives — it is NOT a general fix for "a future compiling
+# subcommand". Both `derive_cargo_tasks` and `script_cargo_lines` gate on CARGO_INVOCATION_RE
+# first, which is built from LOCK_RESOLVING_VERBS, not from this list. So `cargo llvm-cov`,
+# `insta`, `udeps`, `bloat` or `tarpaulin` yield an EMPTY derivation today and A9 never examines
+# them — no row, and no `FLOOR:` row either, since the floor only sees what's derived (spec
+# L11). Widening the derivation to catch those verbs is a separate, larger change; this
+# predicate only narrows what's ALREADY derived.
 #
 # In: subcommands that COMPILE or LINK, so the two *-apple-darwin rustflags reach them.
 # Out, each for a stated reason:
 #   fmt                 formats; neither compiles nor links (.moon/tasks/rust.yml:125-149)
 #   tree, metadata      resolve the graph; never compile (this is AC 4's `cargo tree`
-#                       exclusion, encoded in the predicate so a FUTURE cargo-tree gate is
-#                       covered on day one rather than needing its own waiver)
+#                       exclusion, encoded in the predicate so a FUTURE cargo-tree gate, if
+#                       ever added to LOCK_RESOLVING_VERBS' derivation, is excluded on day one
+#                       rather than needing its own waiver)
 #   deny, machete       third-party static scans over the manifest and lock
 #   add/remove/update/generate-lockfile/vendor/fetch   lock manipulation, no build
 CONFIG_SENSITIVE_VERBS = (
@@ -209,9 +218,25 @@ CARGO_CONFIG_INPUT = "rs/.cargo/config.toml"
 # run from the repo ROOT. MEASURED on cargo 1.95.0 (SMA-599 §2.3): with rs/.cargo/config.toml
 # made malformed, cwd=rs/ fails at rc 101 while cwd=root with --manifest-path succeeds at rc 0,
 # so --manifest-path does NOT move cargo's config walk.
-CWD_TOKEN_RE = re.compile(r"(?:\bcd\b|\bpushd\b|--cwd)\s+[\"']?([^\"'\s;&|)]+)")
+# A leading `--` option terminator (`cd -- rs`) is skipped, not captured as the target —
+# SMA-599 review, MEASURED false negative before this fix: without the optional group the
+# captured token was the literal string "--", which never matches RS_PATH_RE.
+CWD_TOKEN_RE = re.compile(r"(?:\bcd\b|\bpushd\b|--cwd)\s+(?:--\s+)?[\"']?([^\"'\s;&|)]+)")
+# Command substitution `$(...)` breaks CWD_TOKEN_RE's character class above (it excludes `)`,
+# needed so a bare `rs`-containing ARGUMENT never confers scope — see the comment there).
+# `_cwd_inside_rs` deletes non-nested `$(...)` spans before tokenizing, so a target like
+# `"$(git rev-parse --show-toplevel)/rs"` still reads as ending in `/rs` once the substitution
+# is removed — SMA-599 review, MEASURED false negative before this fix (the un-fixed regex
+# truncated the captured token at the FIRST `)`, which lands inside the substitution, losing
+# the `/rs` suffix entirely). Nested substitution is not handled.
+CMD_SUBST_RE = re.compile(r"\$\([^()]*\)")
 # One round of literal substitution, enough for `RS_DIR="$REPO_ROOT/rs"` … `cd "$RS_DIR"`
-# (ci/publish-metadata/run.sh:89,1654). Both `$VAR` and `${VAR}` forms.
+# (ci/publish-metadata/run.sh:89,1654). Both `$VAR` and `${VAR}` forms. STATED LIMIT (spec L5,
+# SMA-599 review): two-level indirection — `A=rs; B="$A"; cd "$B"` — needs a SECOND round and
+# stays a false negative. Substituting `B` yields the literal text `$A`, which this function
+# never re-scans for a remaining `$A`/`${A}`. No live script does this today; if one starts to,
+# this is a silent false negative, not a crash — left unfixed deliberately rather than adding a
+# fixed-point loop for a shape that does not exist yet.
 VAR_ASSIGN_RE = re.compile(r"""(?m)^\s*([A-Za-z_][A-Za-z0-9_]*)=["']?([^"'\s]+)["']?""")
 RS_PATH_RE = re.compile(r"(?:^|/)rs(?:/|$)")
 
@@ -1013,7 +1038,8 @@ def _cwd_inside_rs(text, source_dir):
     if source_dir == "rs" or source_dir.startswith("rs/"):
         return True
     env = dict(VAR_ASSIGN_RE.findall(text))
-    for token in CWD_TOKEN_RE.findall(text):
+    scan_text = CMD_SUBST_RE.sub("", text)
+    for token in CWD_TOKEN_RE.findall(scan_text):
         resolved = token
         for name, value in env.items():
             resolved = resolved.replace(f"${{{name}}}", value).replace(f"${name}", value)
@@ -1033,6 +1059,12 @@ def check_cargo_config_inputs(projects, root, allow=None, floor=None):
     contract A4/A5/A6/A7 share. MEASURED: `moon.yml:239`'s `rs/.cargo/config.toml` and
     `.moon/tasks/rust.yml:46`'s `/rs/.cargo/config.toml` both resolve to the same slash-free
     path, which is why all 58 declaring tasks match verbatim.
+
+    For a `script` task, CONFIG_SENSITIVE_RE and CWD_TOKEN_RE run over the RAW referenced file
+    text — comments and string literals included, unlike A8's region-stripped scan. This is
+    over-approximation ONLY: it can only pull a task INTO scope that a stricter scan would have
+    left out (a false "in scope", never a false "out of scope"), so the failure direction is a
+    row a human must dismiss by hand, not a silently missed one (SMA-599 review).
     """
     allow = ALLOW_MISSING_CARGO_CONFIG if allow is None else allow
     floor = REQUIRED_CARGO_CONFIG_TASKS if floor is None else floor
@@ -2697,12 +2729,14 @@ def self_test():
         },
         "repo": {
             "source_dir": ".", "deps": {}, "tasks": {},
-            "task_inputs": {"deny": [], "tree": [], "mach": []},
-            "task_input_globs": {"deny": [], "tree": [], "mach": []},
+            "task_inputs": {"deny": [], "tree": [], "mach": [], "root-build": []},
+            "task_input_globs": {"deny": [], "tree": [], "mach": [], "root-build": []},
             "invocations": {
                 "deny": "cargo deny --locked --manifest-path rs/Cargo.toml check",
                 "tree": "cd rs && cargo tree --locked -p x",
                 "mach": "cargo machete rs",
+                # cwd-only exclusion coverage: verb-sensitive (`build`), cwd is the repo root.
+                "root-build": "cargo build --manifest-path rs/Cargo.toml",
             },
         },
     }
@@ -2716,18 +2750,26 @@ def self_test():
                check_cargo_config_inputs(broken, Path("."), allow={}, floor=("c-rs:build",))):
         failures.append("A9 did not fire on a cargo-from-rs task missing rs/.cargo/config.toml")
 
-    # `fmt` is out of scope BY THE VERB, not by accident. It declares nothing and must pass.
+    # `fmt` never reaches A9's verb test at all: `fmt` is absent from LOCK_RESOLVING_VERBS, so
+    # `derive_cargo_tasks` never derives `c-rs:fmt` in the first place. This row is a
+    # KNOWN-VACUOUS forward guard, exactly like `repo:mach` below, not a live exercise of
+    # CONFIG_SENSITIVE_VERBS (SMA-599 review corrected the prior "excluded BY THE VERB" claim,
+    # which wrongly implied the verb test runs and rejects `fmt` — it never runs at all).
     if any("c-rs:fmt" in r for r in
            check_cargo_config_inputs(a9_fixture, Path("."), allow={}, floor=("c-rs:build",))):
         failures.append("A9 demanded rs/.cargo/config.toml from `cargo fmt`, which cannot read it")
 
-    # cwd is what excludes repo:deny — NOT a waiver. `--manifest-path rs/...` and a bare `rs`
-    # argument must never confer scope, or D2's structural exclusion collapses.
-    # NOTE: `repo:deny` and `repo:mach` are not `LOCK_RESOLVING_VERBS`-excluded here — they
-    # never enter derive_cargo_tasks' derived set at all under `deny`/`machete`, so these two
-    # rows are forward guards should that verb list ever change; `repo:tree` below is the
-    # load-bearing one, since `tree` IS in LOCK_RESOLVING_VERBS and its blob does reach A9's
-    # derivation, so it is excluded purely by CONFIG_SENSITIVE_VERBS.
+    # `repo:deny` and `repo:mach` are excluded BY VERB, not cwd (SMA-599 review corrected the
+    # prior comment here, "cwd is what excludes repo:deny", which was factually wrong). `deny`
+    # IS in LOCK_RESOLVING_VERBS and does reach `derive_cargo_tasks`, but is not in
+    # CONFIG_SENSITIVE_VERBS, so `sensitive` is False and `_cwd_inside_rs` is never even
+    # called — this row exercises the verb split, exactly like `repo:tree` below, and proves
+    # nothing about cwd or about `--manifest-path`/a bare `rs` argument. `machete` is absent
+    # from LOCK_RESOLVING_VERBS entirely, so `repo:mach` never reaches `derive_cargo_tasks` at
+    # all — a KNOWN-VACUOUS forward guard, like `c-rs:fmt` above. The actual cwd-only exclusion
+    # (a verb-sensitive task whose cwd is NOT rs/) is `repo:root-build`, asserted below — before
+    # that fixture existed, mutating `_cwd_inside_rs` to unconditionally `return True` survived
+    # both --self-test and the real corpus.
     for task in ("repo:deny", "repo:mach"):
         if any(task in r for r in
                check_cargo_config_inputs(a9_fixture, Path("."), allow={}, floor=("c-rs:build",))):
@@ -2737,6 +2779,43 @@ def self_test():
     if any("repo:tree" in r for r in
            check_cargo_config_inputs(a9_fixture, Path("."), allow={}, floor=("c-rs:build",))):
         failures.append("A9 demanded the config file from `cargo tree`, which never compiles")
+
+    # cwd-only exclusion, negative coverage (SMA-599 review). Unlike repo:deny/repo:mach above,
+    # this task IS verb-sensitive (`build`) — its ONLY exclusion is cwd being the repo root, not
+    # rs/, so this is the fixture that actually exercises `_cwd_inside_rs`'s False branch on a
+    # sensitive task.
+    if any("repo:root-build" in r for r in
+           check_cargo_config_inputs(a9_fixture, Path("."), allow={}, floor=("c-rs:build",))):
+        failures.append(
+            "A9 pulled repo:root-build into scope though its cargo build runs from the repo "
+            "root, not rs/ — the cwd exclusion is not being applied"
+        )
+
+    # Both input buckets matter, and an absent bucket is a violation, never a skip — the same
+    # contract A4/A5/A6/A7 already assert (SMA-599 review: neither half was exercised for A9).
+    glob_only = json.loads(json.dumps(a9_fixture))
+    glob_only["c-rs"]["task_inputs"]["build"] = []
+    glob_only["c-rs"]["task_input_globs"]["build"] = ["rs/.cargo/config.toml"]
+    if check_cargo_config_inputs(glob_only, Path("."), allow={}, floor=("c-rs:build",)):
+        failures.append(
+            "A9 ignored rs/.cargo/config.toml declared only in task_input_globs — dropping "
+            "`| set(globs)` from the production code must fail this"
+        )
+
+    missing_bucket = json.loads(json.dumps(a9_fixture))
+    missing_bucket["c-rs"]["invocations"]["check"] = "cargo check --locked"
+    # `check` is deliberately absent from BOTH task_inputs and task_input_globs, simulating
+    # moon's output shape changing underneath this task.
+    if not any(
+        "c-rs:check" in r and "inputFiles" in r
+        for r in check_cargo_config_inputs(
+            missing_bucket, Path("."), allow={}, floor=("c-rs:build",)
+        )
+    ):
+        failures.append(
+            "A9 did not report a violation for a task with no inputFiles/inputGlobs bucket at "
+            "all — treating a missing bucket as a skip instead of a violation must fail this"
+        )
 
     # Floor: a member that leaves scope must fail, or the derivation could empty silently.
     if not any("FLOOR:" in r for r in

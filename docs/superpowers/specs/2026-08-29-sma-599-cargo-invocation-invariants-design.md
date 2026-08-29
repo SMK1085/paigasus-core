@@ -596,3 +596,39 @@ which merged under SMA-601, so closing it means widening `CARGO_INVOCATION_RE` r
 a spec decision with its own blast radius, parked for a follow-up issue rather than taken
 here. Until then, neither A8's blob arm nor its script arm can see a variable-driven cargo
 call, and the spec claims no coverage of one.
+
+**L11 — A9's `CONFIG_SENSITIVE_VERBS` split narrows only what's already derived; it does not
+widen A9's coverage to a new subcommand.** `CONFIG_SENSITIVE_VERBS` is a strict subset of
+`LOCK_RESOLVING_VERBS` (A8's list), and both `derive_cargo_tasks` and `script_cargo_lines`
+gate on `CARGO_INVOCATION_RE` — built from `LOCK_RESOLVING_VERBS`, not from
+`CONFIG_SENSITIVE_VERBS` — before A9 ever runs. So `cargo llvm-cov`, `insta`, `udeps`,
+`bloat`, or `tarpaulin` yield an EMPTY derivation today, and A9 examines nothing for them —
+no row, and no `FLOOR:` row either, since the floor only sees what the derivation produced.
+An earlier version of the in-code comment overclaimed that A9's own verb list "covered" this
+case; it does not (SMA-599 review, corrected in-code alongside this entry). Closing this
+properly means widening `CARGO_INVOCATION_RE` itself, the same class of change L10 defers.
+
+**L12 — the stale-waiver check is unasserted, by construction.** `check_cargo_config_inputs`
+reports a row when `ALLOW_MISSING_CARGO_CONFIG` names a task A9 does not examine (`set(allow) -
+in_scope`), the same "delete the dead waiver" contract A8's waiver lists carry. No self-test
+fixture exercises this path because the allowlist is EMPTY (by design — every A9 exclusion is
+meant to be structural, via the verb or the cwd rule, never a waiver). The moment a first entry
+is ever added to `ALLOW_MISSING_CARGO_CONFIG`, this arm becomes reachable and should gain a
+fixture then; recorded here rather than fixed now, per SMA-599 review scope.
+
+**L13 — `repo:version-lockstep`'s own `run.sh` runs a real `napi build --cwd
+.../rs/crates/bindings/paigasus-node-bindings` (ci/version-lockstep/run.sh:592-593), and A9
+does not see it.** The task is derived as kind `script` (its moon.yml blob carries no cargo
+verb; the script's `cargo update -w` line is what makes `derive_cargo_tasks` follow it), never
+as kind `wrapper` — the `kind == "wrapper"` auto-sensitive bypass in
+`check_cargo_config_inputs` only fires when an FFI marker sits in the moon.yml BLOB itself, not
+inside a referenced script's text. `CONFIG_SENSITIVE_RE` looks for a literal `cargo <verb>`
+token and does not recognize `napi build` at all, so this call is invisible to A9's sensitivity
+test regardless of its `--cwd`. This is harmless ONLY because both the `cargo update -w` line
+and the `napi build` line above it live inside `run_write()`, which `ci/version-lockstep/run.sh`
+invokes only under `--write` — and `check_version_lockstep_no_write` (in
+`cargo_moon_parity.py`) separately asserts the moon.yml task never passes `--write`. If that
+premise ever changes (the task starts passing `--write`, or `run_write()`'s napi call moves
+out from behind the flag), this napi build becomes reachable and rustflags-sensitive with no
+gate covering it — a coupling between two independent assertions that must not be broken
+silently (SMA-599 review; recorded, not fixed, per review scope).
