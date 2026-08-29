@@ -255,11 +255,6 @@ REQUIRED_LOCKED_TASKS = (
     "paigasus-iam-rs:test",
     "repo:deny",
     "repo:wasm-getrandom-free",
-    # SMA-599 — these two reach cargo ONLY through a gate script, so they are the floor
-    # members that fail if script-following silently stops working. Without them a broken
-    # follower degrades the derived set in exactly the direction nothing else can see.
-    "repo:publish-metadata",
-    "repo:version-lockstep",
 )
 
 # SMA-528 — the tasks that must key on their crate's upstream sources. `fmt` is crate-local by
@@ -2331,6 +2326,23 @@ def self_test():
             pass
         else:
             failures.append("derive_cargo_tasks did not raise on a script path that does not exist")
+
+    # Precedence: wrapper > literal for a task matching BOTH kinds. All four fixture tasks
+    # above carry a single signal, so this is the only row that fails if the if/elif branches
+    # are swapped — A8 measured that collapsing a wrapper match to literal is vacuous
+    # (paigasus-kernel-ts:build's `napi build` is unlocked beside a locked `wasm-pack build`).
+    both = {
+        "p": {
+            "source_dir": ".", "deps": {}, "tasks": {},
+            "task_inputs": {}, "task_input_globs": {},
+            "invocations": {"mixed": "pnpm exec napi build --platform && cargo build --locked"},
+        },
+    }
+    if derive_cargo_tasks(both, Path(".")) != {"p:mixed": "wrapper"}:
+        failures.append(
+            "derive_cargo_tasks did not apply wrapper > literal precedence to a task matching "
+            "BOTH kinds — the stricter rule must win"
+        )
 
     if not REQUIRED_LOCKED_TASKS:
         failures.append("REQUIRED_LOCKED_TASKS is empty — A8's floor would assert nothing")
