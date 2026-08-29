@@ -6,8 +6,9 @@ Date: 2026-08-29
 Issue: SMA-596
 Branch: `feature/sma-596-proto-bin-ndjson`
 
-Revision 2. Revision 1 was reworked after an adversarial review; §10 records what
-changed and why.
+Revision 3. Revision 1 was reworked after an adversarial review; revision 3 pulls the
+sibling module's fallback (formerly residual L5) into scope on Sven's instruction. §10
+records what changed and why.
 
 ## 1. The defect
 
@@ -219,6 +220,44 @@ Accepted cost: a contributor without proto installed now gets a hard error inste
 run that might have worked. `CONTRIBUTING.md` already makes `proto install` the first
 step of local setup.
 
+#### D3.1 — `PSR_BIN`'s fallback goes too
+
+`python-semantic-release.sh:29` is `[ -n "$PSR_BIN" ] || PSR_BIN="$( command -v
+semantic-release 2>/dev/null || echo semantic-release )"`. Unlike release-plz's dead
+fallbacks this one is genuinely **reachable**: line 28 ends in `|| true`, so any failure
+of `uv run --frozen` leaves `PSR_BIN` empty and hands the harness whatever
+`semantic-release` happens to be on `PATH` — or, failing that, the bare string.
+
+D3's argument applies to it word for word: a version-comparison harness must not
+silently substitute the tool under test. This module is the *reference* implementation
+for the 0.x expectation the other two are compared against, so a substituted binary here
+corrupts the comparison rather than one side of it.
+
+**Measured on this branch, in this fresh worktree, before any change:**
+
+| Arm | Result |
+| --- | ------ |
+| line 28, `uv run --frozen …` | rc=0 → `…/sma-596/py/.venv/bin/semantic-release` |
+| line 29, `command -v semantic-release` | **not on `PATH`** |
+| `py/.venv` present? | yes — line 28 bootstrapped it; `uv sync` was never run here |
+
+Two things follow. The fallback is **not** carrying the py gate today, so removing it
+cannot break the currently-green result (§2's rc=0 row). And if it ever did fire on this
+machine it would fall through to `echo semantic-release`, producing a bare string that
+fails at execution — later, and less readably, than an assertion would.
+
+So: drop the `command -v`/`echo` fallback, keep the `|| true` on line 28 only long
+enough to produce an empty value, and assert `[ -x "$PSR_BIN" ]` with the same rc=2
+classifier and the same message shape as D2. On a machine where `semantic-release` *is*
+globally installed — the case this repo has no control over — this converts a silent
+wrong-tool run into a loud failure.
+
+**Accepted cost, and it is larger here than for release-plz.** Line 28's own comment
+records that `uv run --frozen` bootstraps `py/.venv` from `uv.lock`. A contributor with a
+broken `py/` toolchain previously got a fallback; now they get rc=2. That is the same
+trade D3 makes, applied to a module where the primary arm does more work. §6 step 9
+exercises it.
+
 ### D4 — No new `repo:*` gate
 
 Considered and rejected for this issue. A gate scanning `ci/` for an unguarded captured
@@ -254,8 +293,9 @@ different symptom") stays valid and is left alone.
 
 ## 5. The change
 
-One functional file: `ci/release-parity/ecosystems/release-plz.sh`, lines 11-20. The
-contract:
+Two functional files.
+
+**`ci/release-parity/ecosystems/release-plz.sh`, lines 11-20.** The contract:
 
 - Resolve `RELEASE_PLZ_BIN` with `proto --reporter text bin release-plz`, no fallbacks.
 - Assert `[ -x ]` on `RELEASE_PLZ_BIN` and on `CARGO_BIN`.
@@ -269,16 +309,24 @@ contract:
 - Keep the comment's plural ("binaries"): it covers both resolutions.
 - Comment the `exit`-from-a-sourced-module choice, per D2.
 
+**`ci/release-parity/ecosystems/python-semantic-release.sh`, lines 26-29.** Per D3.1:
+drop the `command -v`/`echo` fallback and assert `[ -x "$PSR_BIN" ]`, with the same rc=2
+classifier and message shape. Keep line 28's `|| true` — an empty value is what the
+assertion reports on. Note in the comment that this module is the reference
+implementation for the 0.x expectation, which is why substitution matters more here.
+
 Exact wording is the plan's business. Error messages must not cite line numbers — they
-move as the comment block grows.
+move as the comment block grows. The two modules' assertions should read alike; a reader
+comparing them must not have to wonder whether a difference is meaningful.
 
 Documentation changes:
 
 - `CLAUDE.md` — rewrite the NDJSON bullet per D5, including L1.
-- `ci/release-parity/README.md` — add L5 (the sibling module's live fallback) to its
-  Limitations section, which is where a reader of *this* harness will look. L1 goes to
-  CLAUDE.md, not here: that section is about the negative-control pins, and a repo-wide
-  residual filed there would not be found by someone writing a new gate elsewhere.
+- `ci/release-parity/README.md` — record that both ecosystem modules now resolve their
+  tool with no fallback and assert it, so the policy is stated once for the harness rather
+  than inferred from two files. L1 goes to CLAUDE.md, not here: the README's Limitations
+  section is about the negative-control pins, and a repo-wide residual filed there would
+  not be found by someone writing a new gate elsewhere.
 
 ## 6. Verification
 
@@ -323,7 +371,15 @@ is unset in the environment — otherwise the steps pass for the wrong reason.
    the change is broken for every non-agent caller.
 7. **AC5 — read back the rewritten CLAUDE.md bullet** against §2 and D5 and confirm no
    "all three" claim survives anywhere in the file.
-8. **Full graph.** `moon ci` over CLAUDE.md's documented target list.
+8. **D3.1 — the py module's assertion, both directions.**
+   Point `PSR_BIN` at a nonexistent path and confirm the new assertion fires at
+   resolution with the rc=2 classifier, then restore. Then confirm the unmutated module
+   still resolves through arm 1: `(cd py && uv run --frozen python -c 'import
+   shutil,sys; sys.stdout.write(shutil.which("semantic-release") or "")')` must print a
+   path. The measured baseline is `…/py/.venv/bin/semantic-release`, with
+   `semantic-release` absent from `PATH` — so a green py gate after this change proves
+   arm 1 carried it, not the deleted fallback.
+9. **Full graph.** `moon ci` over CLAUDE.md's documented target list.
    `ci/release-parity/**/*` is an input to all three gates *and* to
    `repo:affected-smoke` (`moon.yml:196`), so this change re-runs the gate that holds the
    pins discussed in §9.
@@ -347,22 +403,21 @@ is unset in the environment — otherwise the steps pass for the wrong reason.
   fallbacks; both are on the line CI executes. The first CI run of this branch is the
   first execution of that path anywhere. This is the risk §6 step 6 reduces and does not
   remove.
-- **L5 — the sibling module keeps a live, unasserted fallback.**
-  `python-semantic-release.sh:29` is `command -v semantic-release || echo
-  semantic-release`, and it is genuinely reachable: line 28 ends in `|| true`, and
-  `uv run --frozen` fails in an unprovisioned `py/`. D3's argument — a substituted binary
-  makes the parity verdict meaningless — applies to it word for word. It is deliberately
-  not acted on here, to keep this issue to the defect it was filed for. Filed as a
-  residual so the asymmetry between two sibling modules is recorded rather than
-  discovered.
-- **L6 — the assertion has no continuous coverage.** §6 step 3 proves it can fire once,
-  by hand, then reverts. D4 declined the gate that would keep proving it. A future edit
-  that neuters the assertion would not red.
+- **L5 — the assertions have no continuous coverage.** §6 steps 3 and 8 prove they can
+  fire, once each, by hand, then revert. D4 declined the gate that would keep proving it.
+  A future edit that neuters either assertion would not red.
+- **L6 — `semantic-release.sh` keeps a different resolution style, unreviewed.** The ts
+  module invokes `node` directly against a runner script rather than resolving a tool
+  binary into a variable, so D2's "assert the resolution" contract has no obvious site
+  there. It was not examined for an equivalent hazard. Two of three modules now share a
+  policy; the third was not brought into it, and that is a gap rather than a decision.
 
 ## 8. Out of scope
 
-- Any change to `python-semantic-release.sh` or `semantic-release.sh`. §2 measures both
-  as unaffected by the NDJSON defect; L5 records the separate issue in the first.
+- Any change to `semantic-release.sh`. §2 measures it as unaffected by the NDJSON defect,
+  and L6 records that its different resolution style was not reviewed for an equivalent
+  hazard. `python-semantic-release.sh` **is** in scope, per D3.1 — it is unaffected by the
+  NDJSON defect but carries the live fallback D3 argues against.
 - A `repo:*` gate for captured proto invocations. D4.
 - Asserting `RELEASE_PLZ_BIN`'s *identity* (version) rather than its executability.
   D2.2.
@@ -425,3 +480,21 @@ error messages.
 
 **Nothing was rejected.** Every finding was either folded in or recorded as a stated
 residual.
+
+### Revision 3
+
+Sven instructed that residual L5 — the sibling module's live, unasserted fallback — be
+brought into scope rather than recorded. D3.1 is the result, and it is a stronger
+decision than revision 2's residual because the arms were measured first:
+
+- Arm 1 (`uv run --frozen`) resolves to `py/.venv/bin/semantic-release` and bootstrapped
+  `py/.venv` itself in this fresh worktree.
+- Arm 2 (`command -v semantic-release`) finds nothing — the tool is not on `PATH` here.
+
+So the fallback is not carrying the py gate, and removing it cannot break §2's rc=0 row.
+Had the measurement gone the other way, D3.1 would have had to keep the fallback.
+
+Two residuals were renumbered rather than dropped: the old L6 (no continuous coverage)
+is now L5, and a new L6 records that `semantic-release.sh`'s different resolution style
+was never reviewed for an equivalent hazard — two of three modules now share a policy and
+the third was not brought into it.
