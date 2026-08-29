@@ -21,6 +21,18 @@ on:
   push:
     branches:
       - main
+  # TEMPORARY (SMA-580). Step I of the activation sequence dispatches this workflow explicitly
+  # rather than re-running a run whose jobs skipped, which removes two premises about re-run
+  # semantics that SMA-580's design never measured: that a re-run re-reads repository variables,
+  # and that it re-executes jobs that previously skipped.
+  #
+  # This trigger lets anyone with write access START this workflow. It cannot publish on its own:
+  # `vars.PAIGASUS_RELEASE_ENABLED` still gates every build job, and `approve-release` still
+  # pauses in the `release-approval` environment for a required reviewer.
+  #
+  # REMOVE once the first release has published and its verification has passed — see
+  # docs/ops/RUNBOOK-release-activation.md step J. NO GATE ENFORCES THAT REMOVAL.
+  workflow_dispatch:
 
 # Least privilege for the auto GITHUB_TOKEN, matching every other workflow here: it is never
 # used for the push/PR below (that goes through the App installation token — see "Mint").
@@ -133,6 +145,9 @@ jobs:
       #
       # The action registers the token as a log mask and revokes it in its post-step, so it
       # does not outlive the run.
+      #
+      # WHICH APP: the EXISTING Paigasus bot GitHub App. Do not create a second one. If this job
+      # skips, the cause is a missing `PAIGASUS_BOT_APP_ID` secret, not a missing App.
       - name: Mint the App installation token
         id: app_token
         if: steps.preflight.outputs.configured == 'true'
@@ -354,6 +369,7 @@ jobs:
       # A SECOND mint: tokens are per-job and live one hour. Every checkout in this repo sets
       # persist-credentials: false, so there are no ambient git credentials and release-plz's
       # tag push needs this explicitly.
+      # Same App as the release-pr job above: the EXISTING Paigasus bot GitHub App.
       - name: Mint the App installation token
         id: app_token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # v3.2.0
