@@ -498,6 +498,14 @@ def _extract_substitutions(text):
     opened on this logical line was never closed on it: that must surface as an unclassifiable
     row, never a silent skip, because the flags on whatever cargo call is inside are invisible —
     but only when the line gives any reason to think cargo is involved at all (see the caller).
+
+    KNOWN LIMITATION (recorded, not fixed, SMA-599 round 2 re-review): this function only ever
+    sees ONE already-joined logical line, so a `$( ... )` that itself spans multiple PHYSICAL
+    lines (no backslash continuation joining them) is never tracked as a single substitution —
+    the opening line and the body line are classified independently, exactly as if the `$(`
+    were not there at all. That happens to be safe today: the body line still gets scanned as
+    ordinary top-level code by `_classify_shell_line`, so a real cargo invocation inside it is
+    still caught (just not attributed to the substitution). Do not assume unit tracking here.
     """
     remainder, bodies = [], []
     i, n = 0, len(text)
@@ -569,15 +577,21 @@ def _classify_shell_line(lineno, logical):
     outer, bodies, unterminated = _extract_substitutions(work)
     if unterminated:
         # We cannot see past the unclosed `$(`/backtick, so we cannot see its flags either —
-        # report, never drop. But gate that report on the line actually mentioning a cargo verb:
+        # report, never drop. But gate that report on CARGO_INVOCATION_RE actually matching:
         # a multi-line `$(...)`/backtick construct with no reason to think cargo is involved is
         # common in this corpus (a python/awk script piped through one, an embedded multi-line
         # quoted string) and reporting every one of those would bury the real findings in noise.
-        # Nothing here narrows what a REAL split invocation would need to satisfy: the bare
-        # substring `cargo` (not the stricter CARGO_INVOCATION_RE, which demands a verb too and
-        # so could miss an invocation split across the physical-line break) is what gates the
-        # report, staying on the default-deny side.
-        if "cargo" in work:
+        # A bare substring test on `cargo` was tried first and measured too loose against the
+        # real corpus: `.cargo_vcs_info` in a single-quoted grep pattern
+        # (ci/publish-metadata/run.sh) and `ci/cargo-lock-integrity/` path text inside a
+        # self-test fixture string (ci/actionlint/run.sh, three sites) both contain the
+        # substring `cargo` without being an invocation. CARGO_INVOCATION_RE is the SAME bar
+        # every other real-invocation check in this module uses, so this stays consistent
+        # rather than narrower; the residual risk is a genuine invocation split across the
+        # physical-line break with only the bare word `cargo` visible and no verb yet — narrow
+        # enough, and unmeasured in this corpus, to accept in exchange for not drowning real
+        # findings in noise from path fragments and prose.
+        if CARGO_INVOCATION_RE.search(work):
             return [ScriptCargoLine(lineno, logical, logical, True, False, True)]
         return []
     code = SHELL_STRING_RE.sub(" ", outer).split("#", 1)[0]
@@ -609,24 +623,100 @@ def _classify_shell_line(lineno, logical):
     return rows
 
 
+def _mask_quote_span(raw, open_quote):
+    """One physical line's contribution to CROSS-PHYSICAL-LINE quote-parity tracking.
+
+    Review fix (SMA-599 round 2): a real, valid shell assignment can carry a quoted value across
+    physical lines — `X="abc` / `--locked" cargo build` is one bash statement, and `cargo build`
+    on the second line runs UNLOCKED. Nothing upstream of this function joins those two physical
+    lines (there is no backslash continuation and no heredoc), so without this, `--locked"` on
+    line 2 reads as an unquoted `--locked` flag sitting right next to a real cargo invocation —
+    `LOCKED_FLAG in segment` is a bare substring test — and a genuinely unlocked call is
+    silently reported as locked. That is the fatal direction (a false negative on a default-deny
+    gate), so this blanks any span that is honestly INSIDE a quote opened on an earlier line
+    and/or still open at the end of this one, the same way `script_cargo_lines` already blanks
+    a heredoc body.
+
+    A quote pair that both opens and closes on THIS line is left completely untouched: that is
+    what `_code_region`/`_extract_substitutions`/`SHELL_STRING_RE` already handle, and the
+    `bash -c "cargo build"` unclassifiable detection specifically depends on seeing the string
+    intact (it compares before- and after-strip). Single quotes have no escape mechanism in
+    POSIX shell (a backslash inside them is literal), so their close is a plain search; double
+    quotes use `_is_escaped`, the same odd-backslash-count rule already governing `$(`/backtick
+    recognition elsewhere in this module.
+
+    Returns `(new_open_quote, masked)`. `new_open_quote` is None, "'", or '"' — the quote still
+    open at the end of this line, carried into the next call. GOVERNING RULE (coordinator
+    ruling): when in doubt, report. This function never resolves an ambiguous close by guessing;
+    a quote that is still open when the file ends is the caller's job to raise on, not this
+    function's job to paper over.
+
+    A real `#` comment is NOT scanned for quotes at all, at TOP LEVEL only (not while already
+    inside an open string, where `#` has no special meaning): this repo's comments are full of
+    contractions — "don't", "it's" — a single, deliberately unpaired apostrophe that is not a
+    string delimiter. Scanning past it corrupts cross-line parity for the rest of the FILE, not
+    just the line — measured against the real corpus, where it produced phantom rows several
+    files downstream and an EOF `MoonOutputError` on a file whose quoting was, in fact, fine.
+    """
+    out = []
+    i, n = 0, len(raw)
+    while i < n:
+        if open_quote is not None:
+            close = _find_unescaped(raw, '"', i) if open_quote == '"' else raw.find("'", i)
+            if close == -1:
+                out.append(" " * (n - i))
+                return open_quote, "".join(out)
+            out.append(" " * (close - i + 1))
+            i = close + 1
+            open_quote = None
+            continue
+        ch = raw[i]
+        if ch == "#" and (i == 0 or raw[i - 1] in _COMMENT_PRECEDING_CHARS):
+            # A real comment start: the rest of the line is prose, not code. Hand it through
+            # unmasked (`_code_region` strips it later, the same way it always has) rather than
+            # scanning it for quote characters that mean nothing here.
+            out.append(raw[i:])
+            return None, "".join(out)
+        if ch in ("'", '"'):
+            close = (
+                _find_unescaped(raw, '"', i + 1) if ch == '"' else raw.find("'", i + 1)
+            )
+            if close != -1:
+                # Complete on THIS line — hand it to the caller untouched.
+                out.append(raw[i : close + 1])
+                i = close + 1
+                continue
+            out.append(" " * (n - i))
+            return ch, "".join(out)
+        out.append(ch)
+        i += 1
+    return None, "".join(out)
+
+
 def script_cargo_lines(path):
     """Every cargo invocation in a shell script, with its flags classified.
 
-    Raises MoonOutputError on a heredoc still open at EOF: otherwise the scanner silently
-    skips the rest of the file and reports zero rows, which is a vacuous PASS. Same
-    "infrastructure, never a silent pass" contract check_dockerfile_locked uses.
+    Raises MoonOutputError on a heredoc still open at EOF, or on a quoted string still open at
+    EOF: otherwise the scanner silently skips the rest of the file (heredoc) or silently
+    classifies string content as code (quote), and both are a vacuous PASS by a different route.
+    Same "infrastructure, never a silent pass" contract check_dockerfile_locked uses.
     """
-    rows, delim, pending = [], None, []
+    rows, delim, pending, open_quote = [], None, [], None
     for lineno, raw in enumerate(Path(path).read_text().splitlines(), 1):
         if delim is not None:
             if raw.strip() == delim:
                 delim = None
             continue
-        # Review fix (SMA-599): scan a `_strip_arithmetic`'d view for the opener, not `raw`
-        # itself, so `$((1 << BITS))` cannot be misread as a heredoc named BITS.
-        opener = HEREDOC_OPEN_RE.search(_strip_arithmetic(raw))
-        pending.append((lineno, raw))
-        if opener is None and raw.rstrip().endswith("\\"):
+        # Review fix (SMA-599 round 2): mask any cross-line quote span BEFORE anything else
+        # sees this line, so a `"`/`'` opened on an earlier line cannot leak string content
+        # (including a bare `--locked` substring) into heredoc-opener detection, backslash-
+        # continuation detection, or cargo classification below.
+        open_quote, masked = _mask_quote_span(raw, open_quote)
+        # Review fix (SMA-599): scan a `_strip_arithmetic`'d view for the opener, not the raw
+        # line itself, so `$((1 << BITS))` cannot be misread as a heredoc named BITS.
+        opener = HEREDOC_OPEN_RE.search(_strip_arithmetic(masked))
+        pending.append((lineno, masked))
+        if opener is None and masked.rstrip().endswith("\\"):
             continue
         logical = " ".join(p[1].rstrip().rstrip("\\") for p in pending)
         rows.extend(_classify_shell_line(pending[0][0], logical))
@@ -640,6 +730,11 @@ def script_cargo_lines(path):
         raise MoonOutputError(
             f"{path}: heredoc `{delim}` is still open at EOF — the scan would silently skip "
             f"the rest of the file and report zero rows"
+        )
+    if open_quote is not None:
+        raise MoonOutputError(
+            f"{path}: a {open_quote!r} string is still open at EOF — the scan would silently "
+            f"treat string content as code, or code as string content, past that point"
         )
     return rows
 
@@ -1989,6 +2084,29 @@ def self_test():
         if not any(r.segment.strip().startswith("cargo build") for r in rows):
             failures.append(
                 "script_cargo_lines misread `$((1 << BITS))` as a heredoc opener"
+            )
+
+        # SMA-599 round 2 review fix — a real, valid bash assignment can carry a quoted value
+        # across physical lines. `X="abc` / `--locked" cargo build` is ONE statement, and
+        # `cargo build` on the second physical line runs UNLOCKED — `--locked"` there is string
+        # content, not a flag next to the invocation. Without cross-line quote tracking, the
+        # bare `LOCKED_FLAG in segment` substring test reads that trailing `--locked` as if it
+        # governed `cargo build`, silently reporting a genuinely unlocked call as locked — the
+        # fatal, false-negative direction for a default-deny gate.
+        rows = _lines('X="abc\n--locked" cargo build\n')
+        if not any(
+            r.segment.strip().startswith("cargo build") and not r.locked for r in rows
+        ):
+            failures.append(
+                "script_cargo_lines let a quoted string's `--locked` tail cover an unlocked "
+                "`cargo build` on the next physical line"
+            )
+
+        # A benign multi-line string must NOT produce a phantom row for a `cargo` mention that
+        # is honestly inside it — the false-positive-direction companion to the row above.
+        if _lines('echo "start\ncargo build\nend"\n'):
+            failures.append(
+                "script_cargo_lines reported a cargo verb sitting inside a multi-line string"
             )
 
     for f in failures:
