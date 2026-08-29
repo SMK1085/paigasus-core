@@ -12,15 +12,53 @@ name: release
 #     literally.
 #   * `approve-release`, `release`, `publish-pypi` and `publish-npm` carry NO `if:` of their own.
 #     They are gated TRANSITIVELY, through an unbroken `needs:` chain back to those three.
-#   * `release-pr` is not gated at all, by design — it must keep proposing the release PR while
-#     the flag is off. That is only safe because it cannot reach a registry, which
+#   * `release-pr` is not gated on the FLAG, by design — it must keep proposing the release PR
+#     while the flag is off. That is only safe because it cannot reach a registry, which
 #     `ci/actionlint/release_guard.py`'s V7 now ASSERTS (it is in that guard's `UNGATED_JOBS`,
 #     and a member of that set carrying a publish step fails the gate).
+#     It DOES carry `if: github.event_name == 'push'` (SMA-580), which is an event filter, not a
+#     flag gate and not a security boundary — see the job's own comment.
 # `release_guard.py` V1 accepts all three shapes and rejects a fourth.
 on:
   push:
     branches:
       - main
+  # TEMPORARY (SMA-580). Step I of the activation sequence dispatches this workflow explicitly
+  # rather than re-running a run whose jobs skipped, which removes two premises about re-run
+  # semantics that SMA-580's design never measured: that a re-run re-reads repository variables,
+  # and that it re-executes jobs that previously skipped.
+  #
+  # THE AUTHORIZATION BOUNDARY IS NOT IN THIS FILE, and must not be moved into it. A dispatch runs
+  # the workflow definition FROM THE DISPATCHED REF, so anyone with write access can push a branch
+  # carrying an edited copy of this file and dispatch that. Every in-workflow control — the `if:`
+  # gate below, the `environment:` keys, a `github.ref` check — is therefore attacker-controlled on
+  # such a ref, and none of them bounds this trigger.
+  #
+  # What DOES bound it is enforced outside this repository, by GitHub environments and by the
+  # registries, and it holds in both directions:
+  #
+  #   * Keep the `environment:` key — that environment's deployment branch policy is restricted to
+  #     `main` ONLY, so a job entering it from any other ref fails.
+  #   * Remove it — the job loses every credential, because ALL of them are ENVIRONMENT secrets
+  #     rather than repository secrets: `NPM_TOKEN` and `PYPI_API_TOKEN` on `release-publish`, and
+  #     `PAIGASUS_BOT_*` on both `release-pr` and `release-publish`. An OIDC exchange loses its
+  #     environment claim too, which is what the crates.io trusted publishers require.
+  #
+  # That pair is the boundary, and it now covers EVERY job that touches a credential — `release-pr`
+  # on `release-pr`, and `release`/`publish-pypi`/`publish-npm` on `release-publish`. There are no
+  # repository secrets left; `gh api .../actions/secrets` returns an empty list.
+  #
+  # It depends on both deployment branch policies staying `main`-only and on every credential
+  # staying an ENVIRONMENT secret. A repository secret of the same name would silently defeat this,
+  # because it resolves for any run regardless of ref. See
+  # docs/ops/RUNBOOK-release-activation.md §3. Do not relax either half.
+  #
+  # The `if: github.event_name == 'push'` on `release-pr` is NOT part of this boundary — an edited
+  # copy of this file on the dispatched ref deletes it. It closes the accidental case only.
+  #
+  # REMOVE this trigger once the first release has published and its verification has passed — see
+  # that runbook's step J. NO GATE ENFORCES THAT REMOVAL.
+  workflow_dispatch:
 
 # Least privilege for the auto GITHUB_TOKEN, matching every other workflow here: it is never
 # used for the push/PR below (that goes through the App installation token — see "Mint").
@@ -83,6 +121,26 @@ permissions:
 jobs:
   release-pr:
     name: release PR
+    # Push-only. This job has no business running on a manual dispatch: step I of the activation
+    # dispatches this workflow to publish, not to re-propose a release PR.
+    #
+    # This is NOT a security boundary, and must not be read as one. A dispatch runs the definition
+    # from the dispatched ref, so an edited copy deletes this line. It closes the ACCIDENTAL case
+    # only — a dispatch never mints the App token by mistake. See the `workflow_dispatch` comment
+    # at the top of this file for the residual it does not close.
+    if: github.event_name == 'push'
+    # THE CREDENTIAL BOUNDARY for this job, and the reason it is an environment rather than an
+    # `if:` (SMA-580). `release-pr`'s deployment branch policy is `main`-only, and the App
+    # credentials below are ENVIRONMENT secrets on it — not repository secrets. So both directions
+    # are closed on a dispatched ref carrying an edited copy of this file:
+    #
+    #   * keeps `environment: release-pr` -> the branch policy fails the job on any ref but `main`
+    #   * drops it                        -> the job cannot read PAIGASUS_BOT_* at all
+    #
+    # A job may declare only ONE environment, which is why this is its own environment rather than
+    # `release-publish`: that name is bound by the crates.io and PyPI trusted publishers and must
+    # stay on the `release` job. Do not merge the two.
+    environment: release-pr
     runs-on: ubuntu-latest
     timeout-minutes: 20
     # release-plz force-updates its PR branch on every run, so two rapid merges to main would
@@ -133,6 +191,14 @@ jobs:
       #
       # The action registers the token as a log mask and revokes it in its post-step, so it
       # does not outlive the run.
+      #
+      # WHICH APP: the EXISTING Paigasus bot GitHub App. Do not create a second one.
+      #
+      # TWO reasons this job can skip, and only the second is a misconfiguration:
+      #   1. The run was a `workflow_dispatch`. The job's `if:` is push-only (SMA-580), so it
+      #      skips BY DESIGN and the preflight step below never runs.
+      #   2. The run was a push and the preflight reported `configured=false` — then, and only
+      #      then, the cause is a missing `PAIGASUS_BOT_APP_ID` secret, not a missing App.
       - name: Mint the App installation token
         id: app_token
         if: steps.preflight.outputs.configured == 'true'
@@ -354,6 +420,7 @@ jobs:
       # A SECOND mint: tokens are per-job and live one hour. Every checkout in this repo sets
       # persist-credentials: false, so there are no ambient git credentials and release-plz's
       # tag push needs this explicitly.
+      # Same App as the release-pr job above: the EXISTING Paigasus bot GitHub App.
       - name: Mint the App installation token
         id: app_token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # v3.2.0
@@ -501,6 +568,24 @@ jobs:
             || { echo "::error::missing dist-bindings/paigasus_py_bindings-$KERNEL_VERSION.tar.gz"; exit 1; }
           echo "OK: $found wheels + sdist at $KERNEL_VERSION"
 
+      # AUTH: a PyPI API TOKEN, temporarily, NOT the OIDC trusted publishing this job's
+      # `id-token: write` was added for (SMA-580).
+      #
+      # PyPI allows only ONE *pending* trusted publisher per (owner, repo, workflow, environment)
+      # tuple, and all three projects below share that tuple exactly — same repo, same
+      # `release.yml`, same `release-publish` environment. Registering the second one fails with
+      # "A pending trusted publisher matching this configuration has already been registered for a
+      # different project name". That is pypi/warehouse#16920, open since 2024-10, and it is the
+      # documented monorepo limitation, not a misconfiguration.
+      #
+      # The constraint binds PENDING publishers only. So: create all three projects with a token
+      # once, then register NORMAL trusted publishers on each — normal publishers may share a
+      # tuple, which is the ordinary monorepo case — then delete the token. Tracked in SMA-602
+      # alongside the identical npm bootstrap.
+      #
+      # `id-token: write` stays on this job: it is what the normal publishers will use, and
+      # removing it now would just have to be added back.
+      #
       # ORDER IS LOAD-BEARING: bindings, then the face. skip-existing makes a partial failure
       # re-runnable — PyPI returns 400 "file already exists" otherwise, so an un-skipped retry can
       # never succeed unaided. PyPI is delete-but-never-reuse.
@@ -510,6 +595,7 @@ jobs:
         with:
           packages-dir: dist-bindings
           skip-existing: true
+          password: ${{ secrets.PYPI_API_TOKEN }}
 
       - name: Publish paigasus-kernel
         if: steps.relinfo.outputs.kernel_release == 'true'
@@ -517,6 +603,7 @@ jobs:
         with:
           packages-dir: dist-face
           skip-existing: true
+          password: ${{ secrets.PYPI_API_TOKEN }}
 
       # Binds the proto distribution to the release, same reason as the wheel/sdist assertion
       # above: `PROTO_VERSION` was computed but never exported, so this upload shipped whatever
@@ -544,6 +631,7 @@ jobs:
         with:
           packages-dir: dist-proto
           skip-existing: true
+          password: ${{ secrets.PYPI_API_TOKEN }}
 
   publish-npm:
     name: publish to npm
