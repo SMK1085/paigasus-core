@@ -73,14 +73,23 @@ tag template; it refuses to guess and builds instead.
 - `--self-test` — runs `release_plan.py --self-test` in-process: the pure `decide()` fixture
   table (nine rows) plus three collection-layer rows that build throwaway trees under
   `tempfile.mkdtemp()` to exercise `Inconclusive` paths a pure-function fixture cannot reach.
-- `--negative-control` — four rows against real and throwaway trees. It proves the checker's
-  exit-3-to-1 translation, that `--self-test` still notices a broken table, and — the row this
-  gate needs that a typical sibling does not — that `--github-output` actually flips direction
-  with the event name rather than being wired to a constant. Two rows do that: one asserts
-  `nothing_to_release=false` for a `workflow_dispatch` against the real, fully-tagged repo (the
-  state that would otherwise skip); the other asserts `nothing_to_release=true` for a `push`
-  against that same real repo. Without both, the control cannot tell a working decision from
-  a constant in either direction.
+- `--negative-control` — five rows against real and throwaway trees. Row 1 proves the checker's
+  exit-3-to-1 translation; row 2 proves `--self-test` still notices a broken table. Rows 3 and 4
+  each build their own throwaway git repository — one crate, one commit, tags added by the row
+  — and invoke `release_plan.py` directly against it, asserting `nothing_to_release=true` when
+  the wanted tag exists and `nothing_to_release=false` when it does not. Without both, the
+  control cannot tell a working decision from one wired to a constant in either direction.
+  **They use a synthetic tree rather than the real repository on purpose**: asserting a
+  direction against the live repository redded this gate on exactly the PR it exists to serve —
+  a release PR bumps `rs/crates/*/Cargo.toml` before the new tags exist, so a row asserting
+  `nothing_to_release=true` there would fail every time. Row 5 then closes the coverage gap
+  rows 3/4 leave: it runs the real `--github-output` mode against the real repository, with
+  `$GITHUB_OUTPUT` pointed at a scratch file, and asserts the wrapper exits `0` and writes
+  exactly one matching verdict line — proving the wrapper's non-zero/malformed-output catch, its
+  `::warning::` annotation, and its `$GITHUB_OUTPUT` append all still work. Row 5 asserts nothing
+  about *which* verdict comes back, for the same reason rows 3/4 no longer touch the real
+  repository directionally: the real repository's tag state is not a safe thing for this control
+  to depend on.
 - `--assert` — runs `release_plan.py --assert` against the real repository: the derived
   releasable set must equal `EXPECTED_RELEASABLE`, and the repository must report at least one
   tag (a shallow checkout with no tags cannot exercise the real decision).
@@ -100,8 +109,9 @@ therefore catches every failure mode of the underlying checker call, writes
 failure, and exits `0`. The build proceeds; nothing is silently skipped.
 
 `--self-test`, `--negative-control`, and `--assert` keep the normal contract. CI runs those
-three as the actual gate; `--github-output` is exercised only by the negative control's rows 3
-and 4, and by the release workflow itself at runtime.
+three as the actual gate; `--github-output` is exercised by the negative control's row 5 (see
+above — direction-agnostic, against the real repository, with `$GITHUB_OUTPUT` pointed at a
+scratch file) and by the release workflow itself at runtime.
 
 ## The checker's own exit codes, and why 3
 

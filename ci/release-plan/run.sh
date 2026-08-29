@@ -63,23 +63,29 @@ github_output() {
   exit 0
 }
 
-# The wiring rows — only what needs the real tree, plus two rows that build their OWN synthetic
-# git trees rather than reading the real repository. Rows 3 and 4 used to invoke
-# `--github-output` against the LIVE repository and assert the printed verdict flipped with
-# GITHUB_EVENT_NAME. That depended on TRANSIENT repository state: it held only while every
-# releasable package's manifest version already had a matching tag. On the release PR itself,
-# release-plz has just bumped rs/crates/*/Cargo.toml while the new tags do not exist yet —
-# FIXTURES' own "a kernel-only bump -> build (M6)" row is exactly this shape, and `decide()`
-# correctly returns False for it. So the old row 4 would fail, `--negative-control` would exit
-# 1, and this gate would red on precisely the PR it exists to serve — and the same window
-# reopens on `main` in the gap between a release merging and its tags landing. Fixed: rows 3 and
-# 4 now build throwaway git trees under $tmp and invoke the CHECKER directly — not
-# `github_output`, which hardcodes $REPO_ROOT and so cannot be pointed at a synthetic tree —
-# against each, asserting BOTH directions. That still proves the decision responds to its input
-# rather than being wired to a constant, without depending on what state the real repository
-# happens to be in. It also means this control now writes to $GITHUB_OUTPUT nowhere at all: the
-# real repository's tag state, whatever it is, only ever reaches `--assert` (row 1's kind of
-# check), which every PR already runs independently.
+# The wiring rows — only what needs the real tree, plus rows that build their OWN synthetic git
+# trees rather than reading the real repository. Rows 3 and 4 used to invoke `--github-output`
+# against the LIVE repository and assert the printed verdict flipped with GITHUB_EVENT_NAME.
+# That depended on TRANSIENT repository state: it held only while every releasable package's
+# manifest version already had a matching tag. On the release PR itself, release-plz has just
+# bumped rs/crates/*/Cargo.toml while the new tags do not exist yet — FIXTURES' own "a
+# kernel-only bump -> build (M6)" row is exactly this shape, and `decide()` correctly returns
+# False for it. So the old row 4 would fail, `--negative-control` would exit 1, and this gate
+# would red on precisely the PR it exists to serve — and the same window reopens on `main` in
+# the gap between a release merging and its tags landing. Fixed: rows 3 and 4 now build
+# throwaway git trees under $tmp and invoke the CHECKER directly — not `github_output`, which
+# hardcodes $REPO_ROOT and so cannot be pointed at a synthetic tree — against each, asserting
+# BOTH directions. That still proves the decision responds to its input rather than being wired
+# to a constant, without depending on what state the real repository happens to be in.
+#
+# Removing `--github-output` from rows 3/4 left `github_output()` ITSELF — its non-zero /
+# malformed-output catch, its `::warning::` annotation, its real `$GITHUB_OUTPUT` append — with
+# nothing automated exercising it. Row 5 closes that gap: it runs the real `--github-output`
+# mode against the real repository with `$GITHUB_OUTPUT` pointed at a scratch file, and asserts
+# only that the wrapper exits 0 and writes EXACTLY ONE matching verdict line — never WHICH
+# direction. Asserting a direction there would reintroduce the exact repository-state dependency
+# this comment just described removing from rows 3/4; see row 5's own comment for why that must
+# stay true even as the fixture table or the real repository's tags change over time.
 negative_control() {
   local failures=0 tmp out
 
@@ -161,6 +167,38 @@ negative_control() {
     printf '  --- output ---\n%s\n' "$out" >&2
     failures=$((failures + 1))
   fi
+
+  # Row 5 — the direction-agnostic wrapper row. Rows 3 and 4 above prove the DECISION responds
+  # to its input; neither one exercises the run.sh `github_output()` WRAPPER itself — its
+  # non-zero/malformed-output catch, its `::warning::` annotation, its real `$GITHUB_OUTPUT`
+  # append — because both call release_plan.py directly. This row closes that gap by running the
+  # real --github-output mode against the REAL repository, with $GITHUB_OUTPUT pointed at a
+  # scratch file so nothing leaks into an actual Actions output file. It deliberately asserts
+  # NOTHING about WHICH verdict comes back — only that the wrapper exits 0 and writes EXACTLY
+  # ONE line matching the verdict pattern. Asserting a direction here would depend on the real
+  # repository's tag state again, exactly what C1 removed from this control — DO NOT
+  # "strengthen" this row with a true/false assertion; that reintroduces the same failure mode
+  # that used to red this gate on the release PR. The line-COUNT assertion is a second,
+  # independent guard against M2's forged-second-line failure mode reappearing — it is the
+  # reason this row asserts more than the regex alone.
+  local gh_out_tmp rc line_count
+  gh_out_tmp="$(mktemp)"
+  rc=0
+  GITHUB_OUTPUT="$gh_out_tmp" bash "$0" --github-output >/dev/null 2>&1 || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    printf '  FAIL the --github-output wrapper exited %s against the real repo, expected 0\n' \
+      "$rc" >&2
+    failures=$((failures + 1))
+  fi
+  line_count="$(grep -cE '^nothing_to_release=(true|false)$' "$gh_out_tmp" || true)"
+  if [ "$line_count" != "1" ]; then
+    printf '  FAIL GITHUB_OUTPUT held %s matching verdict line(s), expected exactly 1\n' \
+      "$line_count" >&2
+    printf '  --- %s contents ---\n' "$gh_out_tmp" >&2
+    cat "$gh_out_tmp" >&2
+    failures=$((failures + 1))
+  fi
+  rm -f "$gh_out_tmp"
 
   rm -rf "$tmp"
   if [ "$failures" -gt 0 ]; then
