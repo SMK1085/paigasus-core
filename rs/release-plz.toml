@@ -28,9 +28,21 @@ dependencies_update = true
 # than to crates.io. `repo:version-lockstep` asserts the non-Cargo manifests follow.
 # GITHUB RELEASES (SMA-579 §2.1). release-plz creates one per released package by default, which
 # would mean SIX release pages per release commit for two lockstep families. Only the two family
-# HEADS carry one, each with its family's changelog. TAGS are unaffected — every package still
-# gets `<package>-v<version>`, because release-plz owns every tag (ADR-0011 S3) and napi is
-# barred from cutting any (`--no-gh-release`, asserted by ci/actionlint/release_guard.py V5).
+# HEADS carry one, each with its family's changelog. MEASURED on the first live release: exactly
+# two GitHub Releases were created, `paigasus-kernel-v0.1.0` and `paigasus-proto-v0.1.0`. Correct.
+#
+# TAGS: THREE, NOT SIX — the earlier claim here was WRONG (measured, SMA-580).
+# This comment used to say "every package still gets `<package>-v<version>`". It does not.
+# `release-plz release` tags only the packages it PUBLISHES. The first live release produced
+# `paigasus-kernel-v0.1.0`, `paigasus-proto-v0.1.0` and `paigasus-proto-derive-v0.1.0` — and the
+# three `publish = false` binding crates below were never mentioned in the job log AT ALL, not
+# even skipped. So `release = true` keeps a `publish = false` crate in the version group; it does
+# NOT get it tagged.
+#
+# This is cosmetic, not functional: the binding crates' versions come from `version_group` plus
+# `repo:version-lockstep`, neither of which reads a tag. Recorded so nobody hunts for the missing
+# three. napi is still barred from cutting any tag (`--no-gh-release`, asserted by
+# ci/actionlint/release_guard.py V5).
 [[package]]
 name = "paigasus-kernel"
 version_group = "kernel"
@@ -40,9 +52,10 @@ release = true
 # `publish = true` and hard-errors on the contradiction ("has `publish = false` ... in the
 # Cargo.toml, but it has `publish = true` in the release-plz configuration"), which blocked
 # `release-plz release` entirely — measured on this repo before SMA-579 fixed it. `release = true`
-# stays: it keeps these crates in the version group repo:version-lockstep asserts, and lets
-# release-plz TAG them. Tagged and version-grouped, but never uploaded to crates.io — they ship as
-# maturin/napi/wasm byproducts to PyPI and npm instead.
+# stays: it keeps these crates in the version group repo:version-lockstep asserts.
+# It does NOT get them tagged — see the TAGS note above; the first live release tagged only the
+# three crates it published. Version-grouped, never tagged, never uploaded to crates.io — they
+# ship as maturin/napi/wasm byproducts to PyPI and npm instead.
 [[package]]
 name = "paigasus-py-bindings"
 version_group = "kernel"

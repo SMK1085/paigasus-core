@@ -801,7 +801,12 @@ The umbrella spec §13 asks for four items. This issue adds a fifth.
 2. PyPI serves `paigasus-py-bindings`, `paigasus-kernel` and `paigasus-proto` at `0.1.0`.
    `paigasus-py-bindings` carries seven wheels and one sdist.
 3. npm serves nine packages at `0.1.0`.
-4. Six git tags of the form `<package>-v0.1.0` exist.
+4. **Three** git tags exist — `paigasus-kernel-v0.1.0`, `paigasus-proto-v0.1.0`,
+   `paigasus-proto-derive-v0.1.0`. **Revision 3 said six, and that was wrong** (measured
+   on the live release): `release-plz release` tags only the packages it PUBLISHES, so the
+   three `publish = false` binding crates get no tag. They were not even mentioned in the
+   job log. Cosmetic only — their versions come from `version_group` plus
+   `repo:version-lockstep`, neither of which reads a tag.
 5. Exactly **two** GitHub Releases exist for the release commit, one per family head.
 6. `moon ci` stays green on `main`.
 
