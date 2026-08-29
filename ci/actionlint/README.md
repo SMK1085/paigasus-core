@@ -520,10 +520,10 @@ export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"   # proto CLIs (moon, ac
                                                             # on a default shell PATH
 moon run repo:actionlint      # via Moon, as CI does
 ci/actionlint/run.sh          # directly, bypassing the Moon cache
-ci/actionlint/run.sh --self-test   # the eleven fixture tables only, for fast iteration
+ci/actionlint/run.sh --self-test   # the thirteen fixture tables only, for fast iteration
 ```
 
-`--self-test` runs the eleven fixture tables and nothing else — check 9's mutation battery is
+`--self-test` runs the thirteen fixture tables and nothing else — check 9's mutation battery is
 full-gate-only, which is what keeps `--self-test` the fast path and what makes the battery's own
 mutants (each internally invoked with `--self-test`) unable to recurse into a battery of their
 own.

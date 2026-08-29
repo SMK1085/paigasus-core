@@ -709,6 +709,14 @@ ACTIONLINT_SH_CALL_SITES = (
     # fourth pin for it thinking this is an oversight.
     'if [ "$rp_rc" -eq 2 ]; then',
     'elif [ "$rp_rc" -ne 0 ]; then',
+    # SMA-603 fix round 2 (re-review, new finding) — check 11's MIDDLE routing branch, the one
+    # that calls `fail()` on a real detected violation (rc 1). NOT a repeat of the silent-green
+    # shape above: the gate still exits non-zero without this branch, since rc 1 falls through to
+    # the `-ne 0` catch-all and that arm calls `infra`. It is a MISCLASSIFICATION gap instead — a
+    # genuine "the repository is wrong" verdict gets announced as "infrastructure broke", exactly
+    # the split ci/release-plan/run.sh's own header says nothing may collapse. MEASURED: deleting
+    # only this branch fires no other pin here.
+    'elif [ "$rp_rc" -eq 1 ]; then',
 )
 
 # SMA-579 — check 10's two remaining call sites, pinned SEPARATELY from ACTIONLINT_SH_CALL_SITES
@@ -1808,6 +1816,9 @@ def self_test():
         # ...and check 11's exit-status routing (SMA-603 fix round 1, I1) — the `if`/catch-all
         # `elif` pair, same shape as check 10's pair immediately above.
         'if [ "$rp_rc" -eq 2 ]; then\n'
+        # ...and its MIDDLE branch (SMA-603 fix round 2), the one that calls fail() on a real
+        # detected violation rather than misclassifying it as infra.
+        'elif [ "$rp_rc" -eq 1 ]; then\n'
         'elif [ "$rp_rc" -ne 0 ]; then\n'
         # ...and check 10's fixture-table arity floor and self-test invocation (SMA-579),
         # matched via ACTIONLINT_SH_INDENTED_CALL_SITES instead: both sit inside

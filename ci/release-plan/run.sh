@@ -23,11 +23,20 @@ die_infra() { printf 'release-plan: %s\n' "$*" >&2; exit 2; }
 command -v uv >/dev/null 2>&1 \
   || die_infra "uv is not on PATH — run 'proto install', or add ~/.proto/shims to PATH"
 
+# `--locked` on all four `uv run` calls below (SMA-603 fix round 2, ruled in): mirrors
+# ci/actionlint/run.sh's release_guard_py() wrapper for check 10, and the rationale applies MORE
+# strongly here — these four calls run on EVERY invocation of --self-test, --negative-control,
+# --assert and --github-output, where ci/actionlint/run.sh's own uv call is only the
+# --fixture-count bypass path. It is inert today because this project is zero-dependency (see
+# pyproject.toml's own comment) and becomes live the moment it gains one — without it, any of
+# these four modes could silently re-lock py/uv.lock's sibling here as a side effect of deciding
+# whether to release. Verified against the current lock: all four exit clean.
+
 # $@ is forwarded to the checker. Returns 0, returns 1 for a real assertion failure, and
 # EXITS 2 for anything else.
 run_checker() {
   local rc=0
-  uv run --project "$HERE" --python '>=3.12' python3 "$HERE/release_plan.py" "$@" || rc=$?
+  uv run --locked --project "$HERE" --python '>=3.12' python3 "$HERE/release_plan.py" "$@" || rc=$?
   case "$rc" in
     0) return 0 ;;
     3) return 1 ;;
@@ -43,7 +52,7 @@ run_checker() {
 # keep the normal contract, and CI runs those.
 github_output() {
   local rc=0 out
-  out="$(uv run --project "$HERE" --python '>=3.12' python3 \
+  out="$(uv run --locked --project "$HERE" --python '>=3.12' python3 \
     "$HERE/release_plan.py" --event-name "${GITHUB_EVENT_NAME:-}" "$REPO_ROOT" 2>&1)" || rc=$?
   printf '%s\n' "$out"
   if [ "$rc" -ne 0 ] || ! printf '%s\n' "$out" | grep -qE '^nothing_to_release=(true|false)$'; then
@@ -145,7 +154,7 @@ negative_control() {
   # target this tree at all).
   _build_synthetic_tree "$tmp/synthetic-true"
   git -C "$tmp/synthetic-true" tag "a-v1.0.0"
-  out="$(uv run --project "$HERE" --python '>=3.12' python3 "$HERE/release_plan.py" \
+  out="$(uv run --locked --project "$HERE" --python '>=3.12' python3 "$HERE/release_plan.py" \
     --event-name push "$tmp/synthetic-true" 2>&1)" || true
   if ! printf '%s\n' "$out" | grep -q '^nothing_to_release=true$'; then
     printf '  FAIL a synthetic tree with every tag already cut did not print nothing_to_release=true\n' >&2
@@ -160,7 +169,7 @@ negative_control() {
   # either direction.
   _build_synthetic_tree "$tmp/synthetic-false"
   git -C "$tmp/synthetic-false" tag "a-v0.9.0"
-  out="$(uv run --project "$HERE" --python '>=3.12' python3 "$HERE/release_plan.py" \
+  out="$(uv run --locked --project "$HERE" --python '>=3.12' python3 "$HERE/release_plan.py" \
     --event-name push "$tmp/synthetic-false" 2>&1)" || true
   if ! printf '%s\n' "$out" | grep -q '^nothing_to_release=false$'; then
     printf '  FAIL a synthetic tree with a missing tag did not print nothing_to_release=false\n' >&2
