@@ -37,9 +37,9 @@ FAILED=0
 # Deliberately NOT `readonly`: without `set -e` a reassignment only warns, so readonly buys no
 # protection and would break a future harness that sources this file twice (SMA-542 D3).
 SELF_TESTS_RAN=0
-SELF_TEST_COUNT=11  # extractor, path-filter, branch-filter, config, ci-target-floor,
+SELF_TEST_COUNT=12  # extractor, path-filter, branch-filter, config, ci-target-floor,
                     # invocation-allowlist, affected-graph-wiring, block-execution,
-                    # kill-predicate, affected-smoke-block, release-guard
+                    # kill-predicate, affected-smoke-block, release-guard, cargo-lock-step
 
 fail() {
   echo "actionlint gate: $*" >&2
@@ -2121,6 +2121,15 @@ T_AFFECTED_SMOKE_REQUIRED_INPUTS=(
   '.prototools'
 )
 
+# SMA-601 — check 8f. The lockfile-integrity step is a plain ci.yml step, not a Moon task, so
+# none of ci_targets.py's registries can see it: no T entry, no SELF_SCHEDULED_GATES row. The
+# codegen-drift step has the same exposure and carries no pin; this one does. Whole lines,
+# compared after stripping.
+T_CARGO_LOCK_STEP_REQUIRED=(
+  '- name: Cargo lockfile integrity (rs/Cargo.lock satisfies every manifest)'
+  'run: bash ci/cargo-lock-integrity/run.sh'
+)
+
 # The same three lines ci_targets.py's SELF_SCHEDULED_GATES["affected-smoke"] pins — but pinned
 # from here as well, and IN ORDER, for two reasons that copy cannot cover:
 #   1. ci/affected-graph/run.sh exits inside its --negative-control branch, before run_suite, so
@@ -2358,6 +2367,41 @@ affected_smoke_block_verdict() {
       prev="$idx"
     fi
   done
+}
+
+# Check 8f (SMA-601). Echoes one row per violation, nothing when clean. Row vocabulary:
+#   missing-line <text>       a required line is absent
+#   out-of-order              the step does not precede the `moon ci` step
+#   continue-on-error <value> the step's continue-on-error is anything but the literal false
+cargo_lock_step_verdict() { # $1 workflow file
+  local f="$1" line stripped n_step n_moon coe
+
+  for line in "${T_CARGO_LOCK_STEP_REQUIRED[@]}"; do
+    if ! grep -qxF -e "$line" <(sed 's/^[[:space:]]*//' "$f"); then
+      echo "missing-line $line"
+    fi
+  done
+
+  # Placement is the guarantee, so ordering is asserted, not assumed. Both greps are anchored on
+  # the stripped text so indentation changes do not defeat them.
+  n_step="$(sed 's/^[[:space:]]*//' "$f" | grep -nxF \
+    -e '- name: Cargo lockfile integrity (rs/Cargo.lock satisfies every manifest)' \
+    | head -1 | cut -d: -f1)"
+  n_moon="$(sed 's/^[[:space:]]*//' "$f" | grep -nxF \
+    -e '- name: moon ci (affected graph)' | head -1 | cut -d: -f1)"
+  if [ -n "$n_step" ] && [ -n "$n_moon" ] && [ "$n_step" -gt "$n_moon" ]; then
+    echo "out-of-order"
+  fi
+
+  # Anything but the literal `false` suppresses the step's failure. Same rule check 8 applies to
+  # the moon ci step.
+  if [ -n "$n_step" ]; then
+    coe="$(sed 's/^[[:space:]]*//' "$f" | sed -n "$((n_step + 1)),$((n_step + 4))p" \
+      | grep -m1 '^continue-on-error:' | sed 's/^continue-on-error:[[:space:]]*//')"
+    if [ -n "$coe" ] && [ "$coe" != "false" ]; then
+      echo "continue-on-error $coe"
+    fi
+  fi
 }
 
 # The standing control for check 8. Both directions on every verdict: a table whose rows all fire
@@ -3278,6 +3322,73 @@ missing-input CLAUDE.md' "$no_claude"
   return $rc
 }
 
+# The standing control for check 8f (SMA-601). Both directions per SMA-466: a wired,
+# correctly-ordered step is clean, and each required line, the ordering guarantee, and
+# continue-on-error each fire on their own.
+cargo_lock_step_self_test() {
+  SELF_TESTS_RAN=$((SELF_TESTS_RAN + 1))
+  local rc=0 tmp got
+
+  expect_step() { # $1 name  $2 expected-verdict  $3 body
+    tmp="$(mktemp)"
+    printf '%s' "$3" > "$tmp"
+    got="$(cargo_lock_step_verdict "$tmp")"
+    rm -f "$tmp"
+    if [ "$got" != "$2" ]; then
+      fail "cargo-lock-step self-test '$1': got '$got', expected '$2'. Check 8f is not
+      deciding what it is documented to decide."
+      rc=1
+    fi
+  }
+
+  local wired
+  wired="jobs:
+  ci:
+    steps:
+      - name: Cargo lockfile integrity (rs/Cargo.lock satisfies every manifest)
+        run: bash ci/cargo-lock-integrity/run.sh
+
+      - name: moon ci (affected graph)
+        run: moon ci
+"
+  expect_step 'a wired, correctly ordered step is clean' '' "$wired"
+
+  # Placement IS the guarantee: run after `moon ci` and an unlocked task has already repaired
+  # the lock, so an order-blind pin would be vacuous.
+  local reordered
+  reordered="jobs:
+  ci:
+    steps:
+      - name: moon ci (affected graph)
+        run: moon ci
+
+      - name: Cargo lockfile integrity (rs/Cargo.lock satisfies every manifest)
+        run: bash ci/cargo-lock-integrity/run.sh
+"
+  expect_step 'the step after moon ci is out of order' 'out-of-order' "$reordered"
+
+  expect_step 'a missing run: line is reported' \
+    'missing-line run: bash ci/cargo-lock-integrity/run.sh' \
+    "$(printf '%s' "$wired" | grep -vxF -e '        run: bash ci/cargo-lock-integrity/run.sh')"
+
+  expect_step 'a missing name: line is reported' \
+    'missing-line - name: Cargo lockfile integrity (rs/Cargo.lock satisfies every manifest)' \
+    "$(printf '%s' "$wired" | grep -vxF \
+        -e '      - name: Cargo lockfile integrity (rs/Cargo.lock satisfies every manifest)')"
+
+  # continue-on-error: true would let the step red and the job stay green — a silent bypass.
+  local coe_true coe_false
+  coe_true="${wired/        run: bash ci\/cargo-lock-integrity\/run.sh/        run: bash ci\/cargo-lock-integrity\/run.sh
+        continue-on-error: true}"
+  expect_step 'continue-on-error: true is reported' 'continue-on-error true' "$coe_true"
+
+  coe_false="${wired/        run: bash ci\/cargo-lock-integrity\/run.sh/        run: bash ci\/cargo-lock-integrity\/run.sh
+        continue-on-error: false}"
+  expect_step 'continue-on-error: false is clean' '' "$coe_false"
+
+  return "$rc"
+}
+
 # ---------------------------------------------------------------------------------------------
 # Check 8d (definitions) — the "moon ci (affected graph)" step's `run:` block, extracted from
 # ci.yml and EXECUTED once per GitHub event path against a stubbed `moon` (SMA-542 residual
@@ -4067,6 +4178,7 @@ run_self_tests() {
   kill_predicate_self_test
   affected_smoke_block_self_test
   release_guard_self_test
+  cargo_lock_step_self_test
 
   assert_self_tests_ran "$SELF_TEST_COUNT"
 
@@ -4532,6 +4644,40 @@ $(printf '        %s\n' "${T_AFFECTED_SMOKE_REQUIRED_SCRIPT[@]}")
       infra "unhandled affected-smoke-block verdict '$verdict'" ;;
   esac
 done < <(affected_smoke_block_verdict moon.yml)
+
+# ---------------------------------------------------------------------------------------------
+# Check 8f (SMA-601) — the cargo-lock-integrity step still exists in ci.yml, still precedes the
+# `moon ci` step, and still propagates its own failure. Rationale, T_CARGO_LOCK_STEP_REQUIRED and
+# cargo_lock_step_verdict are above, with affected_smoke_block_verdict.
+#
+# Skipped entirely when CI_YML_MISSING (set by check 8, above): check 8 has already reported the
+# missing file once, and cargo_lock_step_verdict would only say 'missing-line' twice for the same
+# underlying cause.
+# ---------------------------------------------------------------------------------------------
+if [ "$CI_YML_MISSING" -eq 0 ]; then
+while IFS= read -r verdict; do
+  case "$verdict" in
+    '') ;;
+    'missing-line '*)
+      fail ".github/workflows/ci.yml no longer contains the line
+      '${verdict#missing-line }' of the cargo-lock-integrity step. That step is a plain
+      workflow step, not a Moon task, so no T entry and no SELF_SCHEDULED_GATES row can see its
+      deletion — this check is the only thing that does. Restore it." ;;
+    out-of-order)
+      fail ".github/workflows/ci.yml's cargo-lock-integrity step no longer precedes the
+      'moon ci (affected graph)' step. Placement is the whole guarantee: an unlocked cargo
+      invocation inside the moon graph repairs a truncated lock in place, so a check that runs
+      after moon ci would pass on a lock the PR never shipped. Move the step back above 'moon ci
+      (affected graph)'." ;;
+    'continue-on-error '*)
+      fail ".github/workflows/ci.yml's cargo-lock-integrity step sets
+      'continue-on-error: ${verdict#continue-on-error }', which lets the step fail while the job
+      stays green — a silent bypass of the whole check. Remove the key, or set it to false." ;;
+    *)
+      infra "unhandled cargo-lock-step verdict '$verdict'" ;;
+  esac
+done < <(cargo_lock_step_verdict .github/workflows/ci.yml)
+fi
 
 # Guard lives here, AFTER the --self-test early exit: --self-test never shells out to actionlint,
 # so it must not infra-exit on a machine that simply doesn't have the binary on PATH yet.
