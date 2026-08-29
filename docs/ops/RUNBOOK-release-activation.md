@@ -313,8 +313,9 @@ to change package access, maintainers and trusted-publishing configuration, and 
 publish entirely in January 2027**. It works for this release. It will not work after that date.
 
 So §8's `NPM_TOKEN` removal is dated, not optional: once the nine packages exist, configure trusted
-publishing on each and delete the token, **before January 2027**. Set the token's expiry to bound
-the gap rather than relying on memory.
+publishing on each and delete the token, **before January 2027**. Tracked as **SMA-602** (due
+2026-12-15), unblocked the moment this release lands. Set the token's expiry to bound the gap
+rather than relying on memory.
 
 ### 5.2 PyPI — step C
 
@@ -500,7 +501,7 @@ Both are temporary by decision. **No gate enforces either.**
 | Item | Removal condition |
 | --- | --- |
 | `workflow_dispatch` on `release.yml` | The first release has published and §7 has passed. Remove it in the same pull request that records the outcome |
-| `NPM_TOKEN` | Every `@paigasus/*` package exists, so npm Trusted Publishing becomes configurable. **HARD DEADLINE: January 2027** — npm 2FA-bypass tokens lose direct publish then (GitHub changelog, 2026-07-31). File a follow-up issue and set the token's expiry to bound the gap |
+| `NPM_TOKEN` | Every `@paigasus/*` package exists, so npm Trusted Publishing becomes configurable. **HARD DEADLINE: January 2027** — npm 2FA-bypass tokens lose direct publish then (GitHub changelog, 2026-07-31). Tracked as **SMA-602**, due 2026-12-15. Set the token's expiry to bound the gap |
 
 ---
 

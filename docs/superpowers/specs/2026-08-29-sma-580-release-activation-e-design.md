@@ -599,6 +599,7 @@ for this release and unviable for releases after that date.
 
 That converts §9.1's `NPM_TOKEN` removal from a tidy-up into a dated obligation: configure trusted
 publishing on all nine packages once they exist, then delete the token, **before January 2027**.
+Filed as **SMA-602**, due 2026-12-15, blocked by this issue.
 
 **Two alternatives were considered and not chosen** (§10.2 reopens the choice):
 
@@ -826,7 +827,7 @@ Both are temporary by decision. Neither is enforced by any gate, which is why th
 | Item | Removal condition | Owner |
 | --- | --- | --- |
 | `workflow_dispatch` on `release.yml` (§6.3) | The first release has published and §7 has passed. Remove at **step J**, in the same pull request that records the outcome | owner |
-| `NPM_TOKEN` (§5.2) | Every `@paigasus/*` package exists, so npm Trusted Publishing becomes configurable. **HARD DEADLINE: January 2027**, when npm 2FA-bypass tokens lose direct publish (GitHub changelog, 2026-07-31). Needs a filed follow-up issue; set the token's expiry to bound the gap | owner |
+| `NPM_TOKEN` (§5.2) | Every `@paigasus/*` package exists, so npm Trusted Publishing becomes configurable. **HARD DEADLINE: January 2027**, when npm 2FA-bypass tokens lose direct publish (GitHub changelog, 2026-07-31). Filed as **SMA-602**, due 2026-12-15; set the token's expiry to bound the gap | owner |
 
 ### 9.2 Out of scope
 
@@ -845,6 +846,9 @@ Both are temporary by decision. Neither is enforced by any gate, which is why th
 
 - **Who performs the flip?** The **owner**, by decision. Step H is no longer delegated. Steps
   B1–B3 stay with the agent if its token permits, and move to the owner if not (§3).
+- **Does npm keep a token, or get seeded like crates.io?** **Keep the token**, by decision.
+  It is a bootstrap credential for one release; SMA-602 replaces it with trusted publishing before
+  the January 2027 cutoff. §5.2 records the two alternatives that were rejected.
 - **`workflow_dispatch` or a re-run for step I?** **`workflow_dispatch`, temporarily** (§3.3,
   §6.3). It removes two unmeasured premises. Its removal is tracked in §9.1.
 
@@ -855,14 +859,10 @@ Both are temporary by decision. Neither is enforced by any gate, which is why th
    token granting about what a write-access holder already has — but it is real, and the `if:`
    added in this branch narrows it without closing it. The migration cannot be verified before
    merge, because a botched one skips green. **Decide before, or together with, step H.**
-2. **Does npm keep a token at all, or get seeded like crates.io?** §5.2 records the two
-   alternatives. The current plan — token for the first release, trusted publishing afterwards —
-   is simplest and is safe until January 2027. Seeding npm removes the credential from CI up
-   front, at the cost of nine placeholder publishes.
-3. **Does release-plz's registry query skip yanked versions?** If it does not, `0.1.0-alpha.1`
+2. **Does release-plz's registry query skip yanked versions?** If it does not, `0.1.0-alpha.1`
    stays the baseline forever and §2.4's analysis re-applies at `0.2.0`. If it does, the baseline
    silently becomes "unpublished" again after step J. Knowable before step J, either way.
-4. **Does one `crates-io-auth-action` OIDC exchange yield a token valid for all three crates?** The
+3. **Does one `crates-io-auth-action` OIDC exchange yield a token valid for all three crates?** The
    action runs once; release-plz publishes three; three separate trusted-publisher configs exist.
 
 ---
