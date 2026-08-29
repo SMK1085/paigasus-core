@@ -144,6 +144,34 @@ It also runs several checks that the per-case project sets structurally **cannot
   containment: a containment check whose `want` set empties is VACUOUSLY satisfied — it prints
   PASS having asserted nothing — and a task-name floor cannot see that, because the tasks are
   still examined even when their required upstream edges have gone missing.
+- **A8** (in `cargo_moon_parity.py`, SMA-601) is the only assertion in this file about a task's
+  FLAGS rather than its graph position. Every task whose resolved invocation reaches cargo must
+  pass `--locked`, because an unlocked cargo re-resolves the dependency graph and REWRITES an
+  inconsistent `Cargo.lock` in place. That is how five Dependabot PRs merged a truncated lock
+  through a green required check: the first cargo task repaired the lock, and every later gate —
+  `:deny` included — audited a resolution the PR never shipped. A8 matches the same resolved
+  `command` + `args` + `script` blob A5 derives from, never file text: a text scan of
+  `moon.yml`/`.moon/tasks/*.yml`/`rs/Dockerfile`/`ci/**/*.sh` was measured at 45 matches of which
+  only ~14 were real invocations (`moon.yml`'s `echo "cargo tree failed …"` sits on an EXECUTING
+  line), while the resolved blob measured 60 matches with 0 false positives.
+  The two match kinds are NOT treated alike, and conflating them is measurably vacuous. A literal
+  `cargo <verb>` match (`CARGO_INVOCATION_RE`) is cleared by `--locked` in the blob, because the
+  blob IS the invocation. An `FFI_MARKERS` match is a WRAPPER whose own cargo call takes no flag,
+  so it ALWAYS needs an `ALLOW_UNLOCKED_CARGO` entry with a non-empty reason, whether or not
+  `--locked` appears anywhere in its script — `paigasus-kernel-ts:build` runs an unlocked
+  `napi build` beside a `wasm-pack build … -- --locked`, so a blob-level test would green a task
+  that still repairs the lock. A task matching both kinds is governed by the wrapper rule.
+  `--frozen` is deliberately NOT accepted: it implies `--offline`, which false-reds on a cold
+  cargo cache. Three tasks are the standing residual, each measured: `napi build` exposes no
+  `--locked` and no cargo passthrough (and cargo has no env-var equivalent); `uv sync
+  --reinstall-package` drives maturin, which drives cargo, with no flag path through either; and
+  `wasm-pack build … -- --locked` DOES forward the flag to the cargo build it wraps, but wasm-pack
+  makes its own unlocked cargo call BEFORE that build and repairs the lock there — against a
+  truncated 176-package lock it exits 0 and rewrites the lock to 548. `REQUIRED_LOCKED_TASKS` is
+  its anti-vacuity floor, for the reason `REQUIRED_FFI_TASKS` carries: a derived set that shrinks
+  to empty asserts nothing while still printing PASS.
+  Not covered: a cargo call inside a `.sh` that a Moon task invokes is not in moon's resolved
+  command string, so it is outside A8's derived set.
 - **`ci-targets`** (`ci_targets.py`, SMA-541) asserts `ci.yml`'s hand-written `moon ci` target array
   is complete and live: **C1** every CI-eligible `repo:*` task appears in `T=(…)` and — strict
   equality, not a subset — nothing in `T` names a `repo` task that is switched off; **C2** every `T`
@@ -198,7 +226,7 @@ It also runs several checks that the per-case project sets structurally **cannot
   degrading to two empty sets. **`:affected-smoke` is load-bearing for every assertion in this
   file**: this gate runs *inside* it, so removing that one entry from `T` (and from CLAUDE.md)
   passes C1-C6 by never executing them, and takes the eight project cascade cases, the five task
-  cases, A1-A7 and `assert_include_relations` with it. Never exempt or drop it — see the design
+  cases, A1-A8 and `assert_include_relations` with it. Never exempt or drop it — see the design
   doc's L6.
   Not covered: whether a `repo:*` task's `inputs` still match anything — see the follow-up in the
   design doc's L3.
@@ -316,8 +344,9 @@ emitting per-task `inputFiles` as a path-keyed object, A5 on it emitting per-tas
 per-project `language`. A7 depends on all four at once — it reuses A5's `command`/`args`/`script`
 derivation to find its task set, reads the same `inputFiles`/`inputGlobs` pair A4 and A6 read (both
 buckets, not one), and reads `language` to exclude the Rust projects A6 already covers — so it has
-no assumption of its own beyond what A4-A6 already state. A moon upgrade that changes any of
+no assumption of its own beyond what A4-A6 already state. A8 depends on the same
+`command`/`args`/`script` join A5 does, and on nothing else. A moon upgrade that changes any of
 `inputFiles`, `inputGlobs`, `language`, `command`, `args` or `script` — even benignly — will fail
-the guard, so re-grounding is a known step of any moon bump. All four treat a missing key as a
+the guard, so re-grounding is a known step of any moon bump. All five treat a missing key as a
 violation or an infrastructure error rather than skipping, precisely so such a change cannot turn
 into a silent pass.
