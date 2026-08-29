@@ -1,0 +1,1 @@
+Check on all dependabot PRs, merge the green ones and fix all failing ones then merge them as well
