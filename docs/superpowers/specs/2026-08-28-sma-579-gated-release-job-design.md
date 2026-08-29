@@ -393,7 +393,7 @@ release-plz 0.3.158 authenticates with `CARGO_REGISTRY_TOKEN` and has no native 
 ```yaml
 permissions:
   id-token: write     # crates.io OIDC exchange
-  contents: write     # release-plz pushes tags
+  contents: read      # the App token below pushes tags, not GITHUB_TOKEN
 steps:
   - uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18  # v1.0.5
     id: cratesio
@@ -1006,7 +1006,7 @@ Revision 1 had no such section; the umbrella has one and §1.1's whole rationale
 |---|---|---|
 | a build job fails (`wheels`, `prebuild`, `proto-dist`) | yes | nothing irreversible has run; fix and re-push, or re-run |
 | `approve-release` is rejected or times out | yes | nothing irreversible has run. This is the pause §4.5's reviewer row exists to create |
-| `release-plz release` fails **partway** — one crate published, next not, tags partial | **no** | crates.io cannot be unpublished (only yanked). Yank the published crate, delete the partial tags, fix, re-run: release-plz skips already-published packages, so a re-run converges |
+| `release-plz release` fails **partway** — one crate published, next not, tags partial | **no** | crates.io cannot be unpublished (only yanked), and release-plz determines what to release from the **registry**, not from tags. A yanked version still reads as published, so a re-run **skips it and never republishes** — yanking and re-running does not repair this. Either restore the published crates to an unyanked state and restore their tags, then re-run; or move the whole family to a **new version** and accept the burnt one. The burnt version is permanent (release-plz's registry-baseline behaviour, per its own docs — not measured on this repo) |
 | `publish-pypi` fails partway | **no** | `skip-existing: true` makes a re-run converge; PyPI is delete-but-never-reuse, so a bad file needs a **new version**, never a re-upload |
 | `publish-npm` fails partway | **no** | §6's `npm view` pre-check makes a re-run converge; a genuinely bad publish must be unpublished **within 72 hours** or superseded by a new version |
 | `release` succeeds, a publish job never runs | **no** | crates.io and tags are live while a registry is empty. Re-run the publish job; it is the reason both are independently re-runnable |
