@@ -138,7 +138,16 @@ REQUIRED_FFI_TASKS = (
 
 # SMA-601 — the cargo subcommands that RESOLVE the dependency graph, and therefore rewrite an
 # inconsistent Cargo.lock in place unless --locked is passed. `fmt` and `machete` are absent
-# deliberately: neither reads the lock. Matched against the same resolved `command` + `args` +
+# deliberately: neither reads the lock.
+#
+# The list holds two kinds of verb. The first kind resolves as a side effect of doing something
+# else (`build`, `test`, `tree`, …). The second kind exists to WRITE the lock: `add`, `remove`,
+# `generate-lockfile`, `vendor` and `fix`. None of the second kind is used in this repo today,
+# and `--locked` is meaningless or rejected for some of them — which is the point. A8 must report
+# such a verb rather than pass it over in silence, so that a future `cargo add` inside a Moon task
+# is a reviewed ALLOW_UNLOCKED_CARGO entry and not an unnoticed lock repairer.
+#
+# Matched against the same resolved `command` + `args` +
 # `script` blob A5 uses, NOT against file text — a text scan of moon.yml/.moon/tasks/*.yml/
 # rs/Dockerfile/ci/**/*.sh was measured at 45 matches of which ~14 were real invocations, because
 # `moon.yml:323` is `echo "cargo tree failed ..."` on an EXECUTING line and
@@ -148,8 +157,9 @@ REQUIRED_FFI_TASKS = (
 # OTHER than itself, which is what makes the TASK-level count clean: measured at 60 matched tasks
 # (57 literal-cargo, 3 wrapper), 0 false positives.
 LOCK_RESOLVING_VERBS = (
-    "bench", "build", "check", "clippy", "deny", "doc", "fetch", "metadata",
-    "nextest", "package", "publish", "run", "test", "tree", "update",
+    "add", "bench", "build", "check", "clippy", "deny", "doc", "fetch", "fix",
+    "generate-lockfile", "metadata", "nextest", "package", "publish", "remove",
+    "run", "test", "tree", "update", "vendor",
 )
 
 CARGO_INVOCATION_RE = re.compile(

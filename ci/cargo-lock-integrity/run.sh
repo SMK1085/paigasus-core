@@ -57,7 +57,7 @@ assert_lock_satisfies_manifests() { # $1 workspace dir
 report() { # $1 rc
   case "$1" in
     0) echo "cargo-lock-integrity: rs/Cargo.lock satisfies every workspace manifest" ;;
-    1) echo "::error::rs/Cargo.lock does not satisfy every workspace manifest. A dependency PR has probably shipped a TRUNCATED lock (see SMA-601). Repair it against the merge-base rather than force-pushing: compare package counts with 'grep -c ^.\\[\\[package\\]\\] rs/Cargo.lock'." >&2 ;;
+    1) echo "::error::rs/Cargo.lock does not satisfy every workspace manifest. Two causes give this same result. The common one is a dependency PR that shipped a TRUNCATED lock (see SMA-601): repair it against the merge-base rather than force-pushing, and compare package counts with: grep -c '^\\[\\[package\\]\\]' rs/Cargo.lock. The other is an rs/Cargo.toml edit committed without the regenerated lock: run 'cargo metadata' in rs/ and commit the updated rs/Cargo.lock." >&2 ;;
     2) echo "::error::cargo-lock-integrity ABORTED: infrastructure error (rc=2). The gate asserted NOTHING — this is not a green result." >&2 ;;
   esac
 }
