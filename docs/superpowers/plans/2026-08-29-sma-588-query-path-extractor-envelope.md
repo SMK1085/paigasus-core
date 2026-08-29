@@ -34,7 +34,7 @@
 | `rs/crates/libs/paigasus-proto/src/error.rs` | `EXPECTED_REASONS` +2; count 55 → 57 at **two** sites | 1 |
 | `rs/crates/libs/paigasus-proto/src/generated/**` | regenerated, committed | 1 |
 | `rs/crates/services/paigasus-iam/src/application/error.rs` | +2 `TenancyError` variants; `code()`, `class()`, `field()` | 2 |
-| `rs/crates/services/paigasus-iam/src/adapters/http/path.rs` | +`StringPath<F>`, +`PolicyId` marker, +count assertion | 3 |
+| `rs/crates/services/paigasus-iam/src/adapters/http/path.rs` | +`StringPath<F>`, +`PolicyId` marker | 3 |
 | `rs/crates/services/paigasus-iam/src/adapters/http/query.rs` | **new** — `EnvelopeQuery<T>` | 4 |
 | `rs/crates/services/paigasus-iam/src/adapters/http/mod.rs` | register `mod query` | 4 |
 | 8 IAM handler files + `dto.rs` | swap 12 extractors; restate 2 DTO comments | 5 |
@@ -349,9 +349,21 @@ Add to `path.rs`'s `#[cfg(test)] mod tests`:
     }
 ```
 
-Then extend the existing `the_path_field_names_are_stable` test — add the new marker **and a count assertion**, which it lacks today:
+Then extend the existing `the_path_field_names_are_stable` test with the new marker, and extend its doc comment to state the limit it cannot close:
 
 ```rust
+    /// A rename tripwire, nothing more: every marker's `NAME` is pinned to the literal its
+    /// routes' errors carry, so renaming one is a deliberate edit here rather than a silent
+    /// wire-contract change. It does NOT look at a route, so it cannot see a marker attached to
+    /// the wrong handler — `each_segment_of_a_pair_names_its_own_field` and the integration
+    /// coverage in `tests/` are what cover that.
+    ///
+    /// It also cannot see a marker with NO row here. `path_field!` is a `macro_rules!` macro, and
+    /// `macro_rules!` cannot accumulate across invocations, so there is no list to count against
+    /// — a count assertion here could only compare a literal to itself and would pass with every
+    /// row below deleted. Closing that would mean collapsing the nine declarations into one
+    /// registry-shaped invocation, which is a larger change than SMA-588 justifies. Stated rather
+    /// than papered over with a tautology (SMA-588, controller Ruling 1).
     #[test]
     fn the_path_field_names_are_stable() {
         assert_eq!(OrganizationId::NAME, "organization_id");
@@ -363,16 +375,6 @@ Then extend the existing `the_path_field_names_are_stable` test — add the new 
         assert_eq!(RoleGrantId::NAME, "role_grant_id");
         assert_eq!(DeadLetterId::NAME, "dead_letter_id");
         assert_eq!(PolicyId::NAME, "policy_id");
-
-        // The count is asserted because the rows above are not self-enumerating: without it a
-        // TENTH marker could be added with no row here and the rename tripwire would silently
-        // stop covering it (SMA-588). `path_field!` has no registry to iterate, so this is the
-        // only thing that notices.
-        const MARKERS: usize = 9;
-        assert_eq!(
-            MARKERS, 9,
-            "a new path_field! marker needs a row above and this count bumped"
-        );
     }
 ```
 
