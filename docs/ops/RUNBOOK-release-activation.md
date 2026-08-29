@@ -376,9 +376,17 @@ mechanism for a project that does not exist yet.
 | Workflow filename | `release.yml` — **with the extension** |
 | Environment name | `release-publish` |
 
-**Confirm three slots are free**, not merely that a cap exists. PyPI caps pending publishers per
-account. Verify the field labels against the live form; a wrong field fails *after* crates.io has
-published.
+**There is no slot limit to check** — PyPI's documented limit is a rate limit of 100 trusted
+publishers per user or IP per 24 hours, so three is trivial. An earlier revision of this runbook
+told you to confirm three free slots; that was wrong.
+
+Two things that *do* matter:
+
+- **Verify the field labels against the live form.** A wrong field fails *after* crates.io has
+  published.
+- **A pending publisher is invalidated if someone else registers the project name first.** The
+  three names are free today, and the window to step I is short, but the failure surfaces only at
+  the upload.
 
 ### 5.3 crates.io Trusted Publishing — step E, after the seed
 

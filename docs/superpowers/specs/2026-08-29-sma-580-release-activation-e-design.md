@@ -575,9 +575,19 @@ Projects: `paigasus-py-bindings`, `paigasus-kernel`, `paigasus-proto`.
 
 `publish-pypi` runs with `id-token: write` and no token.
 
-**VERIFY before step D.** PyPI caps pending publishers per account, and three are needed. Confirm
-that **three slots are free**, not merely that a cap exists, and confirm the field labels against
-the live form. A wrong field fails *after* crates.io has published.
+**Corrected 2026-08-29.** Revision 2 claimed PyPI "caps pending publishers per account" and told
+the operator to confirm three slots were free. **That was wrong** — it came from recollection, not
+measurement. PyPI's documented limit is a **rate limit: no more than 100 trusted publishers
+registered per user or IP in 24 hours.** Three is not close to it, and there is no slot accounting
+to check.
+
+Two real cautions remain:
+
+- **Confirm the field labels against the live form**, because a wrong field fails *after* crates.io
+  has published.
+- **A pending publisher is invalidated if someone else registers the project name before the first
+  publish** (PyPI's own documentation). The three names are free today (§1.1), and the window
+  between step C and step I is short, but the failure is silent until the upload.
 
 ### 5.2 npm — an Automation token, as an environment secret
 
