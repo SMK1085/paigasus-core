@@ -324,7 +324,9 @@ Then rewrite the `lint` comment block at `:69-76`. It currently claims "Among th
 
 `wasm-pack build`'s `[EXTRA_OPTIONS]...` positional is documented as "List of extra options to pass to `cargo build`". In `ts/packages/paigasus-kernel/moon.yml`, append ` -- --locked` to **both** `wasm-pack build` invocations (`:43` and `:131`), after `--out-name paigasus_wasm`.
 
-Do **not** attempt this for `napi build` or `uv sync`. Measured against the pinned CLI, `napi build` exposes no `--locked` and no cargo passthrough, and cargo has no environment-variable equivalent. Those two are the residual Task 3 allowlists.
+This does **not** make the task locked, and the plan originally claimed it did. The passthrough is real — a bogus flag there is rejected by cargo — but measured against a truncated 176-package lock, `wasm-pack build … -- --locked` still exits 0 and rewrites the lock to 548 packages: wasm-pack makes its own **unlocked** cargo call BEFORE the build it forwards to, and repairs the lock there. Keep the flag, because it does constrain the forwarded `cargo build`, and record the mechanism in a comment beside both invocations.
+
+Do **not** attempt this for `napi build` or `uv sync` either. Measured against the pinned CLI, `napi build` exposes no `--locked` and no cargo passthrough, and cargo has no environment-variable equivalent; `uv sync` drives maturin with no flag path through either. All **three** wrapper tools are the residual, so `paigasus-kernel-ts:build`, `paigasus-kernel-ts:test` and `paigasus-kernel-py:test` all need Task 3 allowlist entries.
 
 - [ ] **Step 5: Verify the unlocked count dropped and the graph still loads**
 
@@ -468,9 +470,13 @@ LOCKED_FLAG = "--locked"
 # ALLOW_DEAD_INPUT: an exemption is allowed, a SILENT one is not.
 ALLOW_UNLOCKED_CARGO = {
     "paigasus-kernel-ts:build": (
-        "reaches cargo through `napi build`, which exposes no --locked and no cargo passthrough "
-        "(measured against the pinned CLI, SMA-601); cargo has no env-var equivalent either. Its "
-        "wasm-pack half DOES pass `-- --locked`."
+        "reaches cargo through TWO wrappers, neither of which can guarantee a locked resolution "
+        "(both measured, SMA-601). `napi build` exposes no --locked and no cargo passthrough, and "
+        "cargo has no env-var equivalent. `wasm-pack build ... -- --locked` DOES forward the flag "
+        "to the cargo build it wraps, but wasm-pack makes its OWN unlocked cargo call BEFORE that "
+        "build and repairs the lock there: measured against a truncated 176-package lock it exits "
+        "0 and rewrites the lock to 548. The flag is kept anyway — it constrains the forwarded "
+        "build — but it does not lock the task."
     ),
     "paigasus-kernel-ts:test": "as paigasus-kernel-ts:build",
     "paigasus-kernel-py:test": (
@@ -492,6 +498,8 @@ REQUIRED_LOCKED_TASKS = (
 Confirm `import re` is already present at the top of the file; add it if not.
 
 - [ ] **Step 4: Add the check function**
+
+The body below tests `LOCKED_FLAG in blob` for every matched task. That is correct for a literal `cargo <verb>` match, and **vacuous for a wrapper match** — a consequence of the wasm-pack correction above. `paigasus-kernel-ts:build` runs an unlocked `napi build` beside a `wasm-pack build … -- --locked`, so a blob-level test greens a task whose own cargo call still repairs the lock. The implemented version therefore requires an `ALLOW_UNLOCKED_CARGO` entry for **every** FFI-marker match, whether or not `--locked` appears in its blob, and a task matching both kinds is governed by the wrapper rule. Read `check_cargo_locked`'s docstring for the shipped contract.
 
 Insert after `derive_ffi_tasks` (`cargo_moon_parity.py:318`):
 
@@ -920,8 +928,11 @@ Add to the Gotchas list. Do **not** touch the marker-delimited `ci-targets` comm
   every PR, since cargo rewrites nothing when the lock is consistent, but on exactly the PRs that
   matter. Since SMA-601 every cargo-resolving task passes `--locked`, asserted generically by A8
   (`ci/affected-graph/cargo_moon_parity.py`); the three FFI wrapper tasks cannot, because
-  `napi build` exposes no `--locked` and no cargo passthrough and `uv sync` drives maturin with no
-  flag path, so they carry `ALLOW_UNLOCKED_CARGO` entries. `--locked` proves the lock is
+  `napi build` exposes no `--locked` and no cargo passthrough, `uv sync` drives maturin with no
+  flag path, and `wasm-pack` — which DOES forward `-- --locked` — makes its own unlocked cargo
+  call before the forwarded build and repairs the lock there (measured: 176 -> 548 packages,
+  exit 0). All three carry `ALLOW_UNLOCKED_CARGO` entries, and A8 demands one for every
+  wrapper-matched task even when `--locked` appears elsewhere in its script. `--locked` proves the lock is
   CONSISTENT with the manifests, not that it is correct: a swapped-but-compatible version or a
   tampered checksum still passes.
 ```
