@@ -139,7 +139,11 @@ proceed until a bootstrap path exists.
 
 PyPI is not affected. Its pending-publisher form covers projects that do not exist.
 
-### 2.2 The decision — a throwaway pre-release seed
+### 2.2 The decision — a throwaway pre-release seed — **EXECUTED 2026-08-29**
+
+**Done.** All three crates are published at `0.1.0-alpha.1`, verified from the crates.io API:
+each has exactly one version and `max_stable_version` of `None`. The procedure below is the record
+of what ran.
 
 Publish `0.1.0-alpha.1` of the three crates by hand. This creates the crates, which makes Trusted
 Publishing configurable. The real `0.1.0` then publishes through the automated path.
@@ -321,7 +325,26 @@ requirement. It records the intent on the crates.io page.
 **Open, see §10:** whether release-plz's registry query skips yanked versions. That decides what
 the baseline is at `0.2.0`.
 
-### 2.7 A consequence to record
+### 2.7 A consequence to record — **now measured, 2026-08-29**
+
+**Confirmed after the seed.** `cargo publish --dry-run -p paigasus-proto` alone still fails, and
+`repo:publish-metadata` still passes on its combined group — measured immediately after step D:
+
+```
+failed to select a version for the requirement `paigasus-proto-derive = "^0.1.0"`
+candidate versions found which didn't match: 0.1.0-alpha.1
+```
+
+```
+publish-metadata: group [paigasus-kernel] OK
+publish-metadata: group [paigasus-proto paigasus-proto-derive] OK
+```
+
+**The error message changed**, which matters for anyone debugging it later. Before the seed it was
+`no matching package named 'paigasus-proto-derive' found`; now the crate exists but no version
+satisfies `^0.1.0`. Same outcome, different text — a grep for the old string will not match.
+
+
 
 `repo:publish-metadata` Check 2 runs one `cargo publish --dry-run` per publish group. The proto
 group needs the combined `-p paigasus-proto-derive -p paigasus-proto` form.

@@ -33,7 +33,7 @@ Steps **D** and **I** are irreversible. Work top to bottom. Do not reorder.
 | **B2** | ~~Add the required reviewer to `release-approval`~~ **done** | — | owner | yes |
 | **B3** | App tag/Release capability — evidenced, see §2 | — | owner | yes |
 | **C** | ~~npm scope, `NPM_TOKEN`, `PYPI_API_TOKEN`~~ **done** | — | owner | yes |
-| **D** | Publish the three `0.1.0-alpha.1` seeds | — | owner | **NO** |
+| **D** | ~~Publish the three `0.1.0-alpha.1` seeds~~ **done 2026-08-29** | — | owner | **NO** |
 | **E** | Configure crates.io Trusted Publishing for the three crates | — | owner | yes |
 | **F** | Merge this issue's PR. **OBSERVATION GATE** | the merge in F | owner | yes |
 | **G** | Merge the release PR. Still gated, so nothing publishes | the merge in G | owner | yes |
@@ -179,7 +179,25 @@ whose preflight skips **green**.
 
 ---
 
-## 4. Step D — the crates.io seed. IRREVERSIBLE
+## 4. Step D — the crates.io seed. IRREVERSIBLE — **EXECUTED 2026-08-29**
+
+> **Done. Do not repeat.** All three crates are published at `0.1.0-alpha.1` and verified against
+> the crates.io API:
+>
+> | Crate | Versions | `max_stable_version` |
+> | --- | --- | --- |
+> | `paigasus-proto-derive` | `0.1.0-alpha.1` | `None` |
+> | `paigasus-proto` | `0.1.0-alpha.1` | `None` |
+> | `paigasus-kernel` | `0.1.0-alpha.1` | `None` |
+>
+> `max_stable_version` is `None` on all three — only the pre-release exists, which is the baseline
+> §2.4 of the spec analyses. The three names are now permanently claimed, which also closes the
+> squatting hazard for good. The seeds are yanked at step J, **after** verification.
+>
+> The procedure below is kept as the record of what was run, and for anyone repeating it for a
+> future crate.
+
+
 
 crates.io cannot pre-register a Trusted Publisher for a crate that does not exist (RFC 3691). The
 `release` job holds no other crates.io credential. So three crates must exist before step E can be
