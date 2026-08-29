@@ -441,31 +441,69 @@ def derive_ffi_tasks(projects):
     return matched
 
 
-def _strip_arithmetic(text):
-    """Blank every `$(( ... ))` arithmetic-expansion region in `text` (nested parens honored).
+# Bracketed spans where a `<<` is a SHIFT and a `#` is a base marker, never a heredoc opener
+# and never a comment: `$(( ... ))`, a bare `(( ... ))` arithmetic command, and anything in
+# `[ ... ]` — an array subscript `a[1 << N]`, a `[[ ]]` test, a glob. The three are treated
+# alike on purpose. A first cut required a word character before the `[`, to tell a subscript
+# from the `[ -f x ]` test command; that guard changed no row across the corpus's 871
+# non-subscript `[` occurrences and no fixture could distinguish it, because blanking here
+# only ever REFUSES a cut or an open. An untestable guard is exactly what this gate keeps
+# finding in its own code, so it is not shipped.
+_ARITH_SPANS = (("$((", "(", ")"), ("((", "(", ")"), ("[", "[", "]"))
 
-    Review fix (SMA-599): `HEREDOC_OPEN_RE` matches a bare `<<`, so `$((1 << BITS))` reads as a
-    heredoc opener named BITS. Usually that fails safe by raising `MoonOutputError` at EOF, but
-    when a later line happens to equal `BITS` alone, everything between — a real unlocked
-    `cargo build` included — is swallowed as heredoc body. Blanking arithmetic before the
-    heredoc scan removes the phantom `<<` without touching any real heredoc opener.
+
+def _blank_operator_spans(masked):
+    """Blank bracketed operator spans IN THE MASK ONLY, leaving the code text alone.
+
+    Round 6 (SMA-599) turned this inside out, and the reason is the same one that merged the
+    comment cut and the heredoc scan a round earlier. The old `_strip_arithmetic` ran on the
+    RAW line, before any quote mask, and blanked from `$((` to EOL when the span never closed
+    — so `echo '$(( x' && cargo build` blanked the real invocation out of the CODE and
+    reported nothing. Blanking only the MASK cannot do that: the mask decides where a comment
+    starts and whether a `<<` is an opener, and blanking there only ever REFUSES a cut or an
+    open, which is the false-positive direction.
+
+    Three consequences, all deliberate. A span inside a quoted string is already blanked by
+    the quote mask, so it is never seen here. An UNCLOSED span is left alone entirely rather
+    than swallowing the rest of the line. And the code region keeps every span verbatim, which
+    is what makes the broad `[ ... ]` rule safe: `[ -n "$(cargo build)" ]` is blanked in the
+    mask, so no `#` or `<<` inside it is trusted, while the invocation itself still classifies
+    and still reports.
     """
-    out, i, n = [], 0, len(text)
+    out, i, n = list(masked), 0, len(masked)
     while i < n:
-        if text[i : i + 3] == "$((":
-            depth, j = 2, i + 3
-            while j < n and depth > 0:
-                if text[j] == "(":
+        for prefix, opener, closer in _ARITH_SPANS:
+            if not masked.startswith(prefix, i):
+                continue
+            depth, j = prefix.count(opener), i + len(prefix)
+            while j < n:
+                if masked[j] == opener:
                     depth += 1
-                elif text[j] == ")":
+                elif masked[j] == closer:
                     depth -= 1
+                    if depth == 0:
+                        break
                 j += 1
-            out.append(" " * (j - i))
-            i = j
-            continue
-        out.append(text[i])
+            if j < n and depth == 0:
+                out[i : j + 1] = " " * (j + 1 - i)
+                i = j
+            break
         i += 1
     return "".join(out)
+
+
+def _escaped(text, idx):
+    """True when `text[idx]` is preceded by an ODD number of backslashes, so it is quoted.
+
+    `echo a\\ #b && cargo build` runs cargo: the backslash escapes the SPACE, so `#b` stays
+    inside the word and starts no comment. Without this the word-start test sees a plain space
+    before the `#`, cuts there, and the invocation disappears (MEASURED against bash).
+    """
+    n, j = 0, idx - 1
+    while j >= 0 and text[j] == "\\":
+        n += 1
+        j -= 1
+    return n % 2 == 1
 
 
 # A real shell comment `#` starts a new WORD — it is preceded by whitespace, a shell
@@ -520,25 +558,43 @@ def _line_regions(raw):
     2. **The `#` must start a word.** `${#arr[@]}` / `${#var}` (bash's length operator) put a
        `#` mid-word, where it is never a comment; cutting there drops the rest of the line,
        `n=${#arr[@]} && cargo build` included.
-    3. **A heredoc opener must be UNMASKED.** `HEREDOC_OPEN_RE` is matched against the code
-       region but accepted only where the `<<` itself survives the mask, so `echo "a <<EOF b"`
-       opens nothing while `cat <<'EOF' > "$out"` still does — there the `<<` sits outside
-       every quote pair even though its delimiter is quoted.
+    3. **The `#` must be UNESCAPED.** `echo a\\ #b && cargo build` escapes the space, so `#b`
+       is part of the word and not a comment marker (round 6).
+    4. **A heredoc opener must be UNMASKED, and must not be a `<<<` here-string.**
+       `HEREDOC_OPEN_RE` is matched against the code region but accepted only where the `<<`
+       itself survives the mask, so `echo "a <<EOF b"` opens nothing while
+       `cat <<'EOF' > "$out"` still does — there the `<<` sits outside every quote pair even
+       though its delimiter is quoted. `cat <<<EOF` is a here-STRING: the regex matches at the
+       second `<`, where the mask check passes, so the third `<` has to be rejected explicitly
+       (round 6). The mask also carries `_blank_operator_spans`, which is what keeps a shift
+       inside `$(( ))`, `(( ))` or `a[ ]` from reading as an opener.
     """
-    text = _strip_arithmetic(raw)
-    masked = SHELL_STRING_RE.sub(lambda m: " " * len(m.group(0)), text)
+    quoted = SHELL_STRING_RE.sub(lambda m: " " * len(m.group(0)), raw)
+    masked = _blank_operator_spans(quoted)
     cut = len(masked)
-    if not _odd_quotes(masked):
+    # Parity is read off `quoted`, never `masked`: blanking an operator span could hide the
+    # very unpaired quote that makes this line ambiguous.
+    if not _odd_quotes(quoted):
         for idx, ch in enumerate(masked):
-            if ch == "#" and (idx == 0 or masked[idx - 1] in _COMMENT_PRECEDING_CHARS):
+            if ch == "#" and (
+                idx == 0
+                or (
+                    masked[idx - 1] in _COMMENT_PRECEDING_CHARS
+                    and not _escaped(masked, idx - 1)
+                )
+            ):
                 cut = idx
                 break
-    code, scan = text[:cut], masked[:cut]
-    if _odd_quotes(scan, singles=True):
+    code, scan = raw[:cut], masked[:cut]
+    if _odd_quotes(quoted[:cut], singles=True):
         return code, None
     for found in HEREDOC_OPEN_RE.finditer(code):
-        if scan[found.start() : found.start() + 2] == "<<":
-            return code, found
+        at = found.start()
+        if scan[at : at + 2] != "<<":
+            continue
+        if (at and code[at - 1] == "<") or code[at + 2 : at + 3] == "<":
+            continue  # `<<<` is a here-STRING; it opens no body
+        return code, found
     return code, None
 
 
@@ -593,7 +649,7 @@ def script_cargo_lines(path):
     A quoted string open at EOF raises nothing any more — with no string stripping there is
     no quote state to get wrong, so such a file classifies as ordinary code.
     """
-    rows, delim, pending = [], None, []
+    rows, delim, held, pending = [], None, None, []
     for lineno, raw in enumerate(Path(path).read_text().splitlines(), 1):
         if delim is not None:
             if raw.strip() == delim:
@@ -607,12 +663,17 @@ def script_cargo_lines(path):
         # otherwise read as a heredoc named BITS.
         work, opener = _line_regions(raw)
         pending.append((lineno, work))
-        if opener is None and work.rstrip().endswith("\\"):
+        if opener is not None and held is None:
+            held = opener.group(2)
+        # A heredoc body starts after the whole LOGICAL line, not after the physical line
+        # carrying the opener: `cat <<EOF \\` + newline + `| cargo build` is one command, and
+        # treating the continuation as body swallowed it (round 6, MEASURED against bash). So
+        # the opener is HELD across the continuation instead of ending it.
+        if work.rstrip().endswith("\\"):
             continue
         rows.extend(_classify_shell_line(pending[0][0], _join(pending)))
         pending = []
-        if opener is not None:
-            delim = opener.group(2)
+        delim, held = held, None
     if pending:
         rows.extend(_classify_shell_line(pending[0][0], _join(pending)))
     if delim is not None:
@@ -2102,6 +2163,78 @@ def self_test():
                 f"script_cargo_lines let an apostrophe in a comment stop a real heredoc from "
                 f"opening: {rows}"
             )
+
+        # --- round 6: the same masking defect, applied to `<<`'s four siblings ------------
+        #
+        # 4. Operator spans are blanked IN THE MASK, not in the code, and only when they
+        # CLOSE. The old form ran on the raw line before any quote mask and blanked from an
+        # unclosed `$((` to end of line, deleting the invocation from the code itself.
+        if not _reports("echo '$(( x' && cargo build\n"):
+            failures.append(
+                "script_cargo_lines blanked the rest of the line from an unclosed `$((` "
+                "inside a string and lost `cargo build`"
+            )
+        if not _reports("echo '$((' ; cargo build ; echo '))'\n"):
+            failures.append(
+                "script_cargo_lines paired a `$((` and a `))` that are both string content "
+                "and lost `cargo build`"
+            )
+        # 5. A shift lives in three span shapes, not one: `$(( ))`, a bare `(( ))` arithmetic
+        # command, and an array subscript `name[ ]`. Each hides a `<<` that is not an opener.
+        # The subscript rule needs the word character before the `[` — `[ -f x ]` is a test
+        # command and must not be blanked.
+        if not _reports("(( MASK = 1 << BITS ))\ncargo build\nBITS\n"):
+            failures.append(
+                "script_cargo_lines read the shift in a bare `(( ... ))` as a heredoc opener "
+                "and swallowed `cargo build`"
+            )
+        if not _reports("a[1 << N]=2\ncargo build\nN\n"):
+            failures.append(
+                "script_cargo_lines read the shift in an array subscript as a heredoc opener "
+                "and swallowed `cargo build`"
+            )
+        # 6. `<<<` is a here-STRING and opens no body. HEREDOC_OPEN_RE matches at the SECOND
+        # `<`, where the mask check passes, so the third one is rejected explicitly.
+        if not _reports("cat <<<EOF\ncargo build\nEOF\n"):
+            failures.append(
+                "script_cargo_lines treated a `<<<` here-string as a heredoc opener and "
+                "swallowed `cargo build`"
+            )
+        # 7. A heredoc body starts after the whole LOGICAL line. `cat <<EOF \` + newline +
+        # `| cargo build` is one command; ending the line at the opener made the continuation
+        # its body.
+        if not _reports("cat <<EOF \\\n| cargo build\nEOF\ncargo build --locked\n"):
+            failures.append(
+                "script_cargo_lines treated the continuation of a heredoc-opener line as "
+                "body and swallowed `cargo build`"
+            )
+        # 8. An ESCAPED space is not a word boundary: `echo a\ #b` keeps `#b` inside the word,
+        # so nothing is a comment and the `&&` invocation runs.
+        if not _reports("echo a\\ #b && cargo build\n"):
+            failures.append(
+                "script_cargo_lines cut at a `#` behind an escaped space and lost "
+                "`cargo build`"
+            )
+        # 9. POSITIVE CONTROLS for rows 5-7: the two remaining real opener shapes must still
+        # open and still skip their bodies. Without these, "never open a heredoc" passes every
+        # negative row above.
+        for label, probe in (
+            ("plain `cat <<EOF`", "cat <<EOF\ncargo build\nEOF\ncargo build\n"),
+            ("`cat <<-EOF`", "cat <<-EOF\ncargo build\n\tEOF\ncargo build\n"),
+            # An UNCLOSED bracketed span must be left alone, not blanked to end of line:
+            # `ls a[bc <<EOF` is a glob word followed by a REAL heredoc, and blanking from the
+            # `[` onwards hides the opener, so the body gets scanned as code. This is the row
+            # that makes the closed-span requirement testable — every other operator-span
+            # fixture passes with or without it.
+            ("an unclosed `[` before a real opener",
+             "ls a[bc <<EOF\ncargo build\nEOF\ncargo build\n"),
+        ):
+            rows = _lines(probe)
+            if len(rows) != 1 or rows[0].lineno != 4:
+                failures.append(
+                    f"script_cargo_lines did not skip the body of a real {label} "
+                    f"heredoc: {rows}"
+                )
 
     for f in failures:
         print(f"  FAIL {f}", file=sys.stderr)

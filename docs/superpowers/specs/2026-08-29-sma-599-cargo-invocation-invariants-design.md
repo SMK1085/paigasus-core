@@ -182,20 +182,36 @@ provably never executes the text:
 2. **`#` comment tails.** The cut runs **per physical line, before continuations are joined**:
    a `#` comment ends at the newline even when the previous line ends in a backslash, so
    joining first would pull the next line's real invocation into the comment.
-3. **`$(( ... ))` arithmetic**, blanked before everything else, because `HEREDOC_OPEN_RE`
-   matches a bare `<<` and `$((1 << BITS))` would otherwise read as a heredoc named `BITS`,
-   swallowing every line up to the next bare `BITS`.
+3. **Bracketed operator spans** — `$(( ... ))`, a bare `(( ... ))` arithmetic command, and
+   anything in `[ ... ]` (array subscript, `[[ ]]` test, glob). Inside them a `<<` is a SHIFT
+   and a `#` is a base marker, so `$((1 << BITS))`, `(( MASK = 1 << BITS ))` and
+   `a[1 << N]=2` would each otherwise read as a heredoc opener and swallow every line to the
+   next bare terminator.
 
-Exclusions 1 and 2 are **one decision, taken together** in `_line_regions`, from ONE
+Exclusions 1, 2 and 3 are **one decision, taken together** in `_line_regions`, from ONE
 within-line quote mask (matched pairs blanked to equal-length spaces, so every surviving
 offset still indexes the original, and the code region is sliced out of the ORIGINAL). Keeping
-them apart is what shipped a phantom heredoc in round 4: a `<<EOF` inside a string opened a
-real heredoc and swallowed the lines after it, silently. Three sub-decisions, each with a
-fixture and a mutation:
+them apart is what shipped a phantom heredoc in round 4 — a `<<EOF` inside a string opened a
+real heredoc and swallowed the lines after it, silently — and, in round 5, the same defect
+survived unfixed for `<<`'s siblings. Six sub-decisions, each with a fixture and a mutation:
 
-- **A `#` must start a WORD.** `${#arr[@]}` / `${#var}` is bash's length operator, never a
-  comment; cutting there drops `n=${#arr[@]} && cargo build`. This guard shipped in an earlier
-  round **with no fixture**, and its mutant passed the self-test at rc 0.
+- **A `#` must start a WORD, and be UNESCAPED.** `${#arr[@]}` / `${#var}` is bash's length
+  operator, never a comment; cutting there drops `n=${#arr[@]} && cargo build`. And an escaped
+  space is not a word boundary, so `echo a\ #b && cargo build` keeps `#b` inside the word and
+  runs cargo. The word-start guard shipped in an earlier round **with no fixture**, and its
+  mutant passed the self-test at rc 0.
+- **Operator spans are blanked IN THE MASK, never in the code, and only when they CLOSE.**
+  The first form ran on the raw line before any quote mask and blanked from `$((` to end of
+  line when the span never closed, so `echo '$(( x' && cargo build` deleted the invocation
+  from the code itself and reported nothing. Blanking the mask cannot do that: it only ever
+  REFUSES a cut or an open, which is the false-positive direction. An unclosed span is left
+  alone — `ls a[bc <<EOF` is a glob word followed by a REAL heredoc, and that row is what
+  makes the closed-span requirement testable.
+- **`<<<` is a here-STRING, not an opener.** `HEREDOC_OPEN_RE` matches at the SECOND `<` of
+  `cat <<<EOF`, where the mask check passes, so the third `<` is rejected explicitly.
+- **A heredoc body starts after the whole LOGICAL line.** `cat <<EOF \` + newline +
+  `| cargo build` is one command; ending the line at the opener made the continuation its
+  body. The opener is HELD across the continuation instead.
 - **A heredoc opener must be UNMASKED.** `HEREDOC_OPEN_RE` is matched against the code region
   and accepted only where the `<<` itself survives the mask, so `echo "a <<EOF b"` opens
   nothing while `cat <<'EOF' > "$out"` still does — there the `<<` sits outside every quote
@@ -386,14 +402,19 @@ a cargo call inside a `.sh` is outside A8's derived set — also now false.
    `X="a` / `b # c" cargo build` (the odd-double-quote guard); `# note \` / `cargo build`
    (the per-physical-line comment cut); and `echo "start` / `cargo build` / `end"`, the
    accepted false positive of L8, pinned so nobody reintroduces string stripping.
-   `n=${#arr[@]} && cargo build` (the `#` word-start guard); a `<<EOF` that must NOT open a
-   heredoc — inside a double-quoted string, as `<<-` with a tab-indented terminator, as
-   `<<'EOF'` inside a string, inside a single-quoted string, in realistic prose
-   (`die_infra "run <<EOF to reproduce"`), inside a comment, and on a line whose quote parity
-   is ambiguous (`echo \" # <<EOF`) — plus `X='a` / `b <<EOF c'` for single-quote parity; and
-   two positive controls, that `cat <<'EOF' > "$out"` still opens a heredoc whose body is
-   skipped and that an apostrophe in a trailing comment does not stop it.
-   An unterminated heredoc must raise `MoonOutputError`. A fourteen-mutation battery — one
+   `n=${#arr[@]} && cargo build` (the `#` word-start guard) and `echo a\ #b && cargo build`
+   (the escaped-space guard); a `<<EOF` that must NOT open a heredoc — inside a double-quoted
+   string, as `<<-` with a tab-indented terminator, as `<<'EOF'` inside a string, inside a
+   single-quoted string, in realistic prose (`die_infra "run <<EOF to reproduce"`), inside a
+   comment, and on a line whose quote parity is ambiguous (`echo \" # <<EOF`) — plus
+   `X='a` / `b <<EOF c'` for single-quote parity and `cat <<<EOF` for the here-string;
+   `echo '$(( x' && cargo build` and `echo '$((' ; cargo build ; echo '))'` for the
+   mask-not-code blanking; `(( MASK = 1 << BITS ))` and `a[1 << N]=2` for the two operator
+   spans beyond `$(( ))`; and `cat <<EOF \` / `| cargo build` for the held opener. Five
+   positive controls: `cat <<'EOF' > "$out"`, plain `cat <<EOF` and `cat <<-EOF` all still
+   open a heredoc whose body is skipped, an apostrophe in a trailing comment does not stop
+   one, and `ls a[bc <<EOF` — an UNCLOSED bracketed span before a real opener — still opens.
+   An unterminated heredoc must raise `MoonOutputError`. A nineteen-mutation battery — one
    mutation per decision — must kill every mutant.
 2. **A9** — missing input reports; declared does not; empty-reason waiver is a row;
    stale waiver is a row; floor member out of scope reports; floor member allowlisted
@@ -548,3 +569,11 @@ carrying an apostrophe, which is far more common — so the trade was taken deli
 direction that keeps today's corpus honest. The heredoc decision, where a wrong answer swallows
 whole blocks rather than one line, does count them. No instance of this shape exists in
 `ci/**/*.sh`.
+
+**L10 — cargo invoked through a variable is not seen, and this is DEFERRED, not covered.**
+`$CARGO build`, `"$cargo_bin" build`, and any other indirection past a literal `cargo` token
+produce no row at all. The gap is pre-existing and shared with A8's own literal-token match,
+which merged under SMA-601, so closing it means widening `CARGO_INVOCATION_RE` repo-wide —
+a spec decision with its own blast radius, parked for a follow-up issue rather than taken
+here. Until then, neither A8's blob arm nor its script arm can see a variable-driven cargo
+call, and the spec claims no coverage of one.

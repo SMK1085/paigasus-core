@@ -28,10 +28,10 @@
 ### Task 1: The shared shell-line classifier — THE CONSERVATIVE RULE
 
 **Files:**
-- Modify: `ci/affected-graph/cargo_moon_parity.py` (constants after `LOCKED_FLAG`; `_odd_quotes`, `_line_regions`, `_join`, `_classify_shell_line`, `script_cargo_lines`; self-test rows inside `self_test()` before its `return`)
+- Modify: `ci/affected-graph/cargo_moon_parity.py` (constants after `LOCKED_FLAG`; `_blank_operator_spans`, `_escaped`, `_odd_quotes`, `_line_regions`, `_join`, `_classify_shell_line`, `script_cargo_lines`; self-test rows inside `self_test()` before its `return`)
 
 **Interfaces:**
-- Consumes: `CARGO_INVOCATION_RE`, `LOCKED_FLAG`, `MoonOutputError`, `_strip_arithmetic` (all existing).
+- Consumes: `CARGO_INVOCATION_RE`, `LOCKED_FLAG`, `MoonOutputError` (all existing).
 - Produces: `ScriptCargoLine` namedtuple with fields `lineno raw segment resolves locked`; `script_cargo_lines(path) -> list[ScriptCargoLine]`. Task 2 and Task 3 both consume it.
 - There is **no `unclassifiable` field.** The conservative rule reports such a line as an ordinary row, so the field would be dead.
 
@@ -62,19 +62,29 @@ regions, because in each the shell provably never executes the text:
 1. **Heredoc bodies** (a heredoc open at EOF still raises `MoonOutputError`).
 2. **`#` comment tails**, cut PER PHYSICAL LINE before continuations are joined — a `#` comment
    ends at the newline even when the previous line ends in a backslash.
-3. **`$(( ... ))` arithmetic** (`_strip_arithmetic`, before everything else, so `$((1 << BITS))`
-   cannot read as a heredoc named `BITS`).
+3. **Bracketed operator spans** — `$(( ... ))`, a bare `(( ... ))` and anything in `[ ... ]`,
+   where a `<<` is a shift and a `#` is a base marker (`_blank_operator_spans`).
 
-Exclusions 1 and 2 are ONE decision, taken together in `_line_regions` from ONE within-line quote
-mask. Keeping them apart shipped a phantom heredoc (round 5): a `<<EOF` inside a string, a
-comment, or a line with ambiguous quote parity opened a real heredoc and SWALLOWED the lines
-after it, silently. Three sub-decisions, each with a fixture and a mutation: a `#` must start a
-word (`${#arr[@]}` is bash's length operator, and this guard had shipped with no fixture at all);
-a heredoc opener is accepted only where the `<<` survives the mask (so `cat <<'EOF' > "$out"`
-still opens, which is its own positive control); and ambiguous parity refuses BOTH decisions —
-counting `"` and `'` for the heredoc, `"` only for the comment cut, because an apostrophe in
-prose is English and counting it reds `ci/publish-metadata/run.sh:772` (measured, both directions
-pinned). Refusing can only add a false positive; opening wrongly swallows.
+All three are ONE decision, taken together in `_line_regions` from ONE within-line quote mask.
+Keeping them apart shipped a phantom heredoc (round 5) and then left the same defect standing for
+`<<`'s siblings (round 6): a `<<EOF` inside a string, a comment, an ambiguous-parity line, an
+arithmetic span or a subscript opened a real heredoc and SWALLOWED the lines after it, silently.
+Six sub-decisions, each with a fixture and a mutation:
+
+- a `#` must start a WORD and be UNESCAPED (`${#arr[@]}` is bash's length operator, and
+  `echo a\ #b` keeps `#b` inside the word; the word-start guard had shipped with no fixture);
+- a heredoc opener is accepted only where the `<<` survives the mask, so `cat <<'EOF' > "$out"`,
+  plain `cat <<EOF` and `cat <<-EOF` are all positive controls;
+- `<<<` is a here-string and opens nothing;
+- operator spans are blanked in the MASK, never the code, and only when they CLOSE — the old
+  form blanked from an unclosed `$((` to EOL in the code and deleted a real invocation;
+- a heredoc body starts after the whole LOGICAL line, so the opener is held across a
+  backslash continuation;
+- ambiguous parity refuses BOTH decisions — counting `"` and `'` for the heredoc, `"` only for
+  the comment cut, because an apostrophe in prose is English and counting it reds
+  `ci/publish-metadata/run.sh:772` (measured, both directions pinned).
+
+Refusing can only add a false positive; opening wrongly swallows.
 
 Plus the `cargo metadata --no-deps` carve-out (MEASURED: `--no-deps` never resolves, so `--locked`
 on it is inert).
@@ -116,19 +126,26 @@ X="a\nb # c" cargo build               (the odd-quote guard)
 n=${#arr[@]} && cargo build            (the `#` word-start guard)
 echo "a <<EOF b"                       (phantom heredoc: 5 string shapes + comment + ambiguous)
 X='a\nb <<EOF c'                       (single-quote parity on the heredoc decision)
+cat <<<EOF                             (here-string, not an opener)
+echo '$(( x' && cargo build            (mask-not-code blanking, unclosed span)
+(( MASK = 1 << BITS )) / a[1 << N]=2   (the two operator spans beyond `$(( ))`)
+cat <<EOF \\\n| cargo build             (the opener held across a continuation)
+echo a\\ #b && cargo build              (escaped space is not a word boundary)
 echo "start\ncargo build\nend"         (THE ACCEPTED FALSE POSITIVE, pinned deliberately)
 ```
 
-Two positive controls stop "never open a heredoc" passing the phantom rows: `cat <<'EOF' >
-"$out"` must still open one whose body is skipped, and an apostrophe in a trailing comment must
-not stop it.
+Five positive controls stop "never open a heredoc" passing the phantom rows: `cat <<'EOF' >
+"$out"`, plain `cat <<EOF` and `cat <<-EOF` must all still open one whose body is skipped, an
+apostrophe in a trailing comment must not stop one, and `ls a[bc <<EOF` — an UNCLOSED bracketed
+span before a real opener — must still open.
 
-A fourteen-mutation battery killed every mutation, one per decision: the double-quote ambiguity
-test, single-quote counting on the heredoc decision, single-quote counting NOT on the comment
-cut, the unmasked-opener check, the `#` word-start guard, the comment cut feeding the heredoc
-scan, the arithmetic strip, the per-physical-line cut, the after-the-verb flag scope, string
-stripping, the `--no-deps` carve-out, the heredoc body skip, continuation joining, and the
-`MoonOutputError` on a heredoc open at EOF.
+A nineteen-mutation battery killed every mutation, one per decision. Two mutations were retired
+rather than kept, both because they are unkillable BY CONSTRUCTION and a fixture for them would
+be theatre: "scan the opener on the raw line" is equivalent (the mask-position check already
+rejects any offset past the cut), and the word-character requirement that told a subscript from a
+`[ -f x ]` test changed no row across the corpus's 871 non-subscript `[` occurrences — so that
+guard was DELETED rather than shipped untested, the same call as the contraction regex a round
+earlier.
 
 - [x] **Step 4: Verify against the real corpus**
 
