@@ -73,6 +73,23 @@ pub enum TenancyError {
     /// proto3 `oneof`, which cannot carry two values.
     #[error("provide exactly one of {0}")]
     MutuallyExclusiveFields(&'static str),
+    /// SMA-588. A query-string parameter axum refused: a value that would not parse into its
+    /// target type, or a key supplied twice. Raised by `http::query::EnvelopeQuery` before any
+    /// handler runs.
+    ///
+    /// A UNIT variant, deliberately. axum's rejection does name the key (it wraps the
+    /// deserializer in `serde_path_to_error`), but this enum's field payload is `&'static str`
+    /// so that "never reflect untrusted input into an error body" is enforced by the type — and
+    /// a key read at runtime cannot become a `&'static str` without the `Box::leak` this file's
+    /// own docs forbid. HTTP-only: gRPC has no query string (`grpc/convert.rs`'s divergence 5).
+    #[error("invalid query parameter")]
+    InvalidQueryParameter,
+    /// SMA-588. A non-uuid path segment whose percent-decoding is not valid UTF-8, raised by
+    /// `http::path::StringPath`. Distinct from [`TenancyError::InvalidUuid`]: that one means
+    /// "this segment should have been a uuid and was not", this one means "this segment is not
+    /// decodable text at all". HTTP-only (`grpc/convert.rs`'s divergence 6).
+    #[error("{0} is not a valid path segment")]
+    InvalidPathSegment(&'static str),
     #[error("prn does not match stored resource")]
     PrnMismatch,
     #[error("invalid pagination parameters")]
@@ -167,6 +184,8 @@ impl TenancyError {
             Self::InvalidAuditOutcome(_) => "invalid-audit-outcome",
             Self::MissingRequiredField(_) => "missing-required-field",
             Self::MutuallyExclusiveFields(_) => "mutually-exclusive-fields",
+            Self::InvalidQueryParameter => "invalid-query-parameter",
+            Self::InvalidPathSegment(_) => "invalid-path-segment",
             Self::PrnMismatch => "prn-mismatch",
             Self::InvalidPagination => "invalid-pagination",
             Self::NothingToRename => "nothing-to-rename",
@@ -201,6 +220,8 @@ impl TenancyError {
             | Self::InvalidAuditOutcome(_)
             | Self::MissingRequiredField(_)
             | Self::MutuallyExclusiveFields(_)
+            | Self::InvalidQueryParameter
+            | Self::InvalidPathSegment(_)
             | Self::PrnMismatch
             | Self::InvalidPagination
             | Self::NothingToRename
@@ -236,7 +257,13 @@ impl TenancyError {
     /// `metadata["field"]` to a `_ => None` arm (SMA-586 fix round 2).
     pub fn field(&self) -> Option<&'static str> {
         match self {
-            Self::InvalidTimestamp(f) | Self::InvalidUuid(f) | Self::InvalidCursor(f) | Self::InvalidAuditOutcome(f) | Self::MissingRequiredField(f) | Self::MutuallyExclusiveFields(f) => Some(f),
+            Self::InvalidTimestamp(f)
+            | Self::InvalidUuid(f)
+            | Self::InvalidCursor(f)
+            | Self::InvalidAuditOutcome(f)
+            | Self::MissingRequiredField(f)
+            | Self::MutuallyExclusiveFields(f)
+            | Self::InvalidPathSegment(f) => Some(f),
             Self::SlugConflict
             | Self::DuplicateMembership
             | Self::EmailConflict
@@ -245,6 +272,7 @@ impl TenancyError {
             | Self::InvalidSlug(_)
             | Self::InvalidName(_)
             | Self::InvalidPrn(_)
+            | Self::InvalidQueryParameter
             | Self::PrnMismatch
             | Self::InvalidPagination
             | Self::NothingToRename
@@ -492,5 +520,25 @@ mod tests {
         assert_eq!(TenancyError::InvalidPrn("iam:bad".to_string()).field(), None);
         assert_eq!(TenancyError::NotFound.field(), None);
         assert_eq!(TenancyError::Internal.field(), None);
+    }
+
+    /// SMA-588. The two extractor reasons: `InvalidPathSegment` carries the field name so
+    /// `field()` can surface it as `metadata["field"]`, and `InvalidQueryParameter` carries
+    /// none — axum's rejection does expose the key (`serde_path_to_error`), but the payload is
+    /// `&'static str` by design and a runtime name cannot reach this constructor without the
+    /// `Box::leak` the type invariant forbids.
+    #[test]
+    fn the_extractor_reasons_classify_and_name_their_field() {
+        let q = TenancyError::InvalidQueryParameter;
+        assert_eq!(q.code(), "invalid-query-parameter");
+        assert_eq!(q.class(), ErrorClass::Validation);
+        assert_eq!(q.field(), None);
+        assert_eq!(q.to_string(), "invalid query parameter");
+
+        let p = TenancyError::InvalidPathSegment("policy_id");
+        assert_eq!(p.code(), "invalid-path-segment");
+        assert_eq!(p.class(), ErrorClass::Validation);
+        assert_eq!(p.field(), Some("policy_id"));
+        assert_eq!(p.to_string(), "policy_id is not a valid path segment");
     }
 }
