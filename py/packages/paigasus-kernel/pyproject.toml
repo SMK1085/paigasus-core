@@ -28,7 +28,7 @@ dependencies = ["paigasus-py-bindings==0.1.0"]
 pypi = true
 
 [build-system]
-requires = ["uv_build>=0.12.5,<0.13"]
+requires = ["uv_build>=0.12.6,<0.13"]
 build-backend = "uv_build"
 
 [tool.uv.sources]
