@@ -425,9 +425,23 @@ jobs:
   plan:
     if: vars.PAIGASUS_RELEASE_ENABLED == 'true'
     runs-on: ubuntu-latest
-    steps: [{run: echo plan}]
-  release:
+    outputs:
+      nothing_to_release: ${{ steps.decide.outputs.nothing_to_release }}
+    steps:
+      - id: decide
+        run: ci/release-plan/run.sh --github-output
+  build:
     needs: [plan]
+    if: needs.plan.outputs.nothing_to_release != 'true'
+    runs-on: ubuntu-latest
+    steps: [{run: echo build}]
+  approve-release:
+    needs: [build]
+    environment: release-approval
+    runs-on: ubuntu-latest
+    steps: [{run: echo approved}]
+  release:
+    needs: [build, approve-release]
     runs-on: ubuntu-latest
     steps: [{run: release-plz release}]
 """
@@ -437,31 +451,46 @@ FIXTURES: list[tuple[str, str, str, str | None]] = [
     ("ungated job", "main", _OK_MAIN.replace("    if: vars.PAIGASUS_RELEASE_ENABLED == 'true'\n", ""),
      "is not gated"),
     ("gate expression weakened to !=", "main",
-     _OK_MAIN.replace("== 'true'", "!= 'disabled'"), "is not gated"),
+     _OK_MAIN.replace("vars.PAIGASUS_RELEASE_ENABLED == 'true'",
+                      "vars.PAIGASUS_RELEASE_ENABLED != 'disabled'"), "is not gated"),
     ("gate expression widened with ||", "main",
-     _OK_MAIN.replace("== 'true'", "== 'true' || github.actor == 'x'"), "is not gated"),
+     _OK_MAIN.replace("vars.PAIGASUS_RELEASE_ENABLED == 'true'",
+                      "vars.PAIGASUS_RELEASE_ENABLED == 'true' || github.actor == 'x'"),
+     "is not gated"),
     ("wrapped gate form is accepted", "main",
      _OK_MAIN.replace("if: vars.PAIGASUS_RELEASE_ENABLED == 'true'",
                       "if: ${{ vars.PAIGASUS_RELEASE_ENABLED == 'true' }}"), None),
     ("always() on the gated job", "main",
-     _OK_MAIN.replace("    needs: [plan]", "    needs: [plan]\n    if: always()"), "status function"),
+     _OK_MAIN.replace("    needs: [build, approve-release]",
+                      "    needs: [build, approve-release]\n    if: always()"), "status function"),
     ("!cancelled() with spacing", "main",
-     _OK_MAIN.replace("    needs: [plan]", "    needs: [plan]\n    if: ${{ ! cancelled() }}"),
+     _OK_MAIN.replace("    needs: [build, approve-release]",
+                      "    needs: [build, approve-release]\n    if: ${{ ! cancelled() }}"),
      "status function"),
     ("success() || failure()", "main",
-     _OK_MAIN.replace("    needs: [plan]", "    needs: [plan]\n    if: success() || failure()"),
+     _OK_MAIN.replace("    needs: [build, approve-release]",
+                      "    needs: [build, approve-release]\n    if: success() || failure()"),
      "status function"),
     ("job-level continue-on-error: true", "main",
-     _OK_MAIN.replace("    needs: [plan]", "    needs: [plan]\n    continue-on-error: true"),
+     _OK_MAIN.replace("    needs: [build, approve-release]",
+                      "    needs: [build, approve-release]\n    continue-on-error: true"),
      "continue-on-error"),
     ("step-level continue-on-error: true", "main",
      _OK_MAIN.replace("steps: [{run: release-plz release}]",
                       "steps: [{run: release-plz release, continue-on-error: true}]"),
      "step with continue-on-error"),
     ("continue-on-error: false (bool) is accepted", "main",
-     _OK_MAIN.replace("    needs: [plan]", "    needs: [plan]\n    continue-on-error: false"), None),
+     _OK_MAIN.replace("    needs: [build, approve-release]",
+                      "    needs: [build, approve-release]\n    continue-on-error: false"), None),
     ('continue-on-error: "false" (str) is accepted', "main",
-     _OK_MAIN.replace("    needs: [plan]", '    needs: [plan]\n    continue-on-error: "false"'), None),
+     _OK_MAIN.replace("    needs: [build, approve-release]",
+                      '    needs: [build, approve-release]\n    continue-on-error: "false"'), None),
+    # These two anchor on `build`'s "    needs: [plan]" line (the release job's own needs is now
+    # the two-item "[build, approve-release]", which a scalar cannot represent losslessly).
+    # `build` still carries a genuine single-item needs list, so retargeting these rows onto
+    # `release` would either drop a dependency or require inventing new semantics; leaving them on
+    # `build` preserves the original list-to-scalar test exactly, and adding no `if:`/`needs:`
+    # collision (build's own `if:` line is untouched by either mutation).
     ("needs: as a SCALAR string still walks", "main",
      _OK_MAIN.replace("    needs: [plan]", "    needs: plan"), None),
     ("needs: scalar pointing at an ungated job reds", "main",
@@ -473,7 +502,8 @@ FIXTURES: list[tuple[str, str, str, str | None]] = [
      _OK_MAIN.replace("run: release-plz release",
                       "run: napi prepublish --no-gh-release --npm-dir npm"), None),
     ("job-level if: false is MORE restrictive, so clean", "main",
-     _OK_MAIN.replace("    needs: [plan]", "    needs: [plan]\n    if: false"), None),
+     _OK_MAIN.replace("    needs: [build, approve-release]",
+                      "    needs: [build, approve-release]\n    if: false"), None),
     ("called workflow that is workflow_call-only may publish", "called",
      "on:\n  workflow_call:\njobs:\n  build:\n    steps: [{run: twine upload dist/*}]\n", None),
     ("called workflow with pull_request may NOT publish", "called",
@@ -485,13 +515,16 @@ FIXTURES: list[tuple[str, str, str, str | None]] = [
 
     # --- Fix round 1 additions -------------------------------------------------------------
     ("Critical 1: case-insensitive Always() bypass", "main",
-     _OK_MAIN.replace("    needs: [plan]", "    needs: [plan]\n    if: Always()"),
+     _OK_MAIN.replace("    needs: [build, approve-release]",
+                      "    needs: [build, approve-release]\n    if: Always()"),
      "status function"),
     ("Critical 1: case-insensitive ALWAYS() wrapped form", "main",
-     _OK_MAIN.replace("    needs: [plan]", "    needs: [plan]\n    if: ${{ ALWAYS() }}"),
+     _OK_MAIN.replace("    needs: [build, approve-release]",
+                      "    needs: [build, approve-release]\n    if: ${{ ALWAYS() }}"),
      "status function"),
     ("Critical 1: case-insensitive !Cancelled() bypass", "main",
-     _OK_MAIN.replace("    needs: [plan]", "    needs: [plan]\n    if: ${{ !Cancelled() }}"),
+     _OK_MAIN.replace("    needs: [build, approve-release]",
+                      "    needs: [build, approve-release]\n    if: ${{ !Cancelled() }}"),
      "status function"),
     ("Important 3: napi prepublish --dry-run in a called workflow is not a publish", "called",
      ("on:\n  workflow_call:\n  pull_request:\n    branches:\n      - main\n"
