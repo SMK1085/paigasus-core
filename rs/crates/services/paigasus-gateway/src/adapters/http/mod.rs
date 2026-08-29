@@ -10,6 +10,7 @@
 //! but never authorizes, and carries no body limit.
 
 pub mod auth;
+pub(crate) mod bytes;
 pub mod chat;
 pub mod dto;
 pub mod error;
@@ -44,7 +45,8 @@ pub struct AppState {
     pub iam: Arc<dyn Iam>,
     /// The outbound OpenAI egress client (holds the real key; forwards raw request bytes).
     pub openai: Arc<OpenAiClient>,
-    /// Max inbound request-body size in bytes; an over-limit body is rejected with `413`.
+    /// Max inbound request-body size in bytes; an over-limit body is rejected by [`bytes::EnvelopeBytes`]
+    /// with a `413` rendered inside the OpenAI envelope (SMA-588).
     pub max_request_bytes: usize,
     /// The capability toggles this build was configured with (SMA-505), projected once via
     /// `Capabilities::from_config` in `main.rs` (mirrors `paigasus-iam`'s `AppState.capabilities`
@@ -82,7 +84,8 @@ pub fn router(state: AppState) -> Router {
     // final `with_state`, and independent of the handler's `AppState` — so this clone is just the
     // port, not the whole state.
     let auth = axum::middleware::from_fn_with_state(state.iam.clone(), require_iam_auth);
-    // The body-size limit: an over-limit body fails the handler's `Bytes` extractor with `413`.
+    // The body-size limit: an over-limit body fails the handler's `EnvelopeBytes` extractor with
+    // a `413` rendered inside the OpenAI envelope (SMA-588), not axum's plain text.
     // Note (M0): auth runs BEFORE the 413 (the limit is enforced at body extraction, after the
     // middleware) — acceptable here since auth reads only headers, never the body.
     let body_limit = DefaultBodyLimit::max(state.max_request_bytes);

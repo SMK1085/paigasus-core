@@ -81,6 +81,10 @@ pub enum GatewayError {
     /// API answers 400 for a bad chat-completions body, so 422 would break the wire
     /// compatibility that is this service's purpose.
     InvalidRequestSchema,
+    /// The request body exceeded the configured byte limit → 413. Before SMA-588 this answered
+    /// with axum's own plain-text rejection, OUTSIDE the OpenAI envelope — the last request-path
+    /// escape in this service.
+    RequestTooLarge,
     /// The OpenAI upstream could not be reached (connect/transport/build failure) → 502.
     UpstreamUnavailable,
     /// The OpenAI upstream did not respond within a configured timeout → 504.
@@ -150,6 +154,13 @@ impl GatewayError {
                 None,
                 "The request body does not match the expected schema.",
             ),
+            GatewayError::RequestTooLarge => (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "invalid_request_error",
+                Some("request-too-large"),
+                None,
+                "The request body is too large.",
+            ),
             GatewayError::UpstreamUnavailable => (
                 StatusCode::BAD_GATEWAY,
                 "api_error",
@@ -176,7 +187,7 @@ impl GatewayError {
         match self {
             Self::IamUnavailable | Self::UpstreamUnavailable | Self::UpstreamTimeout => Retryable::Yes,
             Self::Internal | Self::MissingScope => Retryable::Unknown,
-            Self::MissingBearer | Self::InvalidCredential | Self::AuthzDenied | Self::BadRequestBody | Self::InvalidRequestSchema | Self::StreamingDisabled => Retryable::No,
+            Self::MissingBearer | Self::InvalidCredential | Self::AuthzDenied | Self::BadRequestBody | Self::InvalidRequestSchema | Self::RequestTooLarge | Self::StreamingDisabled => Retryable::No,
         }
     }
 }
@@ -217,6 +228,8 @@ mod tests {
         assert_eq!(GatewayError::IamUnavailable.into_response().status(), StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(GatewayError::Internal.into_response().status(), StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(GatewayError::BadRequestBody.into_response().status(), StatusCode::BAD_REQUEST);
+        assert_eq!(GatewayError::InvalidRequestSchema.into_response().status(), StatusCode::BAD_REQUEST);
+        assert_eq!(GatewayError::RequestTooLarge.into_response().status(), StatusCode::PAYLOAD_TOO_LARGE);
         assert_eq!(GatewayError::UpstreamUnavailable.into_response().status(), StatusCode::BAD_GATEWAY);
         assert_eq!(GatewayError::UpstreamTimeout.into_response().status(), StatusCode::GATEWAY_TIMEOUT);
         assert_eq!(GatewayError::StreamingDisabled.into_response().status(), StatusCode::BAD_REQUEST);

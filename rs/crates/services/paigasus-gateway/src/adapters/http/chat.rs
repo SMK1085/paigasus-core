@@ -6,9 +6,10 @@
 //! already authenticated + authorized the caller and attached a [`CallerContext`] to the request
 //! extensions. This handler's job is narrow and security-sensitive:
 //!
-//! 1. Read the full request body as raw [`Bytes`] (the body-size limit is enforced by the
-//!    [`DefaultBodyLimit`](axum::extract::DefaultBodyLimit) layer, which fails oversized bodies with
-//!    a `413` before this handler is reached).
+//! 1. Read the full request body as raw [`EnvelopeBytes`] — the body-size limit is enforced by
+//!    the [`DefaultBodyLimit`](axum::extract::DefaultBodyLimit) layer, which `EnvelopeBytes`
+//!    honours and reports as a `413` INSIDE the OpenAI envelope (SMA-588); before that it was
+//!    axum's plain text, outside the error contract.
 //! 2. Parse a COPY of the body into [`ChatCompletionRequest`] ONLY to read `model` (logging) and
 //!    `stream` (which egress path to take). A JSON parse failure → `400`.
 //! 3. **Egress hygiene (load-bearing):** forward ONLY the raw body bytes to the OpenAI client —
@@ -42,6 +43,7 @@ use paigasus_observability::names;
 
 use super::AppState;
 use super::error::GatewayError;
+use crate::adapters::http::bytes::EnvelopeBytes;
 use crate::adapters::http::dto::ChatCompletionRequest;
 use crate::adapters::openai::{ChatResponse, OpenAiByteStream};
 use crate::domain::CallerContext;
@@ -63,15 +65,17 @@ const TERMINAL_SSE_ERROR: &str = "data: {\"error\":{\"message\":\"upstream strea
 /// Proxy a chat-completion request to the OpenAI upstream.
 ///
 /// Extractor order matters: [`State`] and [`Extension`] are `FromRequestParts` (they read only the
-/// head), while [`Bytes`] is `FromRequest` (it consumes the body) and so must come LAST. The
-/// [`Bytes`] extractor also honours the [`DefaultBodyLimit`](axum::extract::DefaultBodyLimit) layer,
-/// returning `413` for an over-limit body before this function body runs.
+/// head), while [`EnvelopeBytes`] is `FromRequest` (it consumes the body) and so must come LAST.
+/// [`EnvelopeBytes`] wraps [`Bytes`], so it honours the
+/// [`DefaultBodyLimit`](axum::extract::DefaultBodyLimit) layer the same way and returns `413`
+/// for an over-limit body before this function body runs — rendered through the OpenAI envelope
+/// rather than as axum's plain text (SMA-588). It is still `FromRequest`, so it must come LAST.
 ///
 /// `CallerContext` is taken as `Option<Extension<_>>` for defence in depth: the G5 middleware
 /// guarantees its presence on any request routed here, so its absence is an unreachable internal
 /// bug surfaced as a `500` (rendered through the OpenAI envelope) rather than axum's default
 /// extension-missing response.
-pub async fn chat_completions(State(state): State<AppState>, caller: Option<Extension<CallerContext>>, body: Bytes) -> Response {
+pub(crate) async fn chat_completions(State(state): State<AppState>, caller: Option<Extension<CallerContext>>, EnvelopeBytes(body): EnvelopeBytes) -> Response {
     let Some(Extension(caller)) = caller else {
         // Unreachable in practice — the auth middleware always attaches a CallerContext.
         return GatewayError::Internal.into_response();
