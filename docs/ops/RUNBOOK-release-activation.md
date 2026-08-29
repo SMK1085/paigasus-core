@@ -444,7 +444,23 @@ underscores, PyPI normalizes.
 publishers per user or IP per 24 hours. An earlier revision of this runbook told you to confirm
 three free slots; that was wrong.
 
-### 5.3 crates.io Trusted Publishing — step E, after the seed
+### 5.3 crates.io Trusted Publishing — step E — **done 2026-08-29, UNVERIFIED FROM OUTSIDE**
+
+**This is the one step in the sequence that cannot be checked programmatically.**
+`GET /api/v1/trusted_publishing/github_configs?crate=<name>` returns HTTP 403
+(*"this action requires authentication"*), so there is no unauthenticated way to confirm the three
+configurations exist or that their fields are right.
+
+**Check them by eye** at `https://crates.io/crates/<name>/settings` for each of the three, and
+confirm the **Environment** field reads exactly `release-publish` — not blank, not
+`release-approval`.
+
+**The failure mode, so the risk is clear.** `release`'s first step is
+`rust-lang/crates-io-auth-action`. A wrong configuration fails **there**, before `cargo publish`
+runs — so it cannot half-publish. But it fails *after* the 12-leg matrix has built and *after* the
+human approval, so the cost is a wasted run and a re-approval, not a split registry state.
+
+
 
 One configuration per crate: `paigasus-kernel`, `paigasus-proto`, `paigasus-proto-derive`.
 
