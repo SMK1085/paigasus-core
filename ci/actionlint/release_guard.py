@@ -239,7 +239,25 @@ def command_segments(line: str) -> list[str]:
     return [seg.split("#", 1)[0] for seg in _COMMAND_SEPS.split(line)]
 
 
-_DRY_RUN_FLAG_RE = re.compile(r"--dry-run\b")
+# V8 fix round 4, Important 2. The anchor was `\b`, and `-` is a NON-word character, so
+# `--dry-run-x` satisfied `--dry-run\b` and read as an effective dry-run flag. Measured on npm
+# 11.11.0: `--dry-run-x` warns `Unknown cli config`, sets `dry-run-x`, leaves `dry-run` UNSET,
+# and really publishes. The idiom PUBLISH_MARKERS uses for the same job (`release-plz
+# release(?![-\w])`) is not enough here: `.` is neither `-` nor a word character, so
+# `--dry-run.x` still matched under it (measured EXEMPT). A command-line flag token ends at
+# whitespace, so the anchor is `(?!\S)` — "followed by whitespace or by nothing" — which
+# subsumes `(?![-\w])` and also rejects `--dry-run.x`. The `=` form is NOT reachable here: the
+# value scan below returns before this regex is ever applied.
+_DRY_RUN_FLAG_RE = re.compile(r"--dry-run(?!\S)")
+
+# V8 fix round 4, Important 1. The general "any `=` value is unverified, so fail closed" rule,
+# hoisted out of _dry_run_exempts' per-occurrence loop and applied to the WHOLE tail beside the
+# negation scan. Inside the loop it was unreachable behind an earlier bare `--dry-run`, because
+# the loop returns True on the first occurrence it accepts. Deliberately NOT `--dry-run\s*=`:
+# `--dry-run = $DRY_RUN` is a bare flag followed by an unrelated positional argument, which npm
+# resolves to dry-run=true (see _dry_run_exempts' docstring), so a space-tolerant regex here
+# would produce a false red on a segment that really is dry.
+_DRY_RUN_VALUE_RE = re.compile(r"--dry-run=")
 
 # V8 fix round 2, Important 2 (N2). A negating form ANYWHERE after the publish marker's match end
 # — not only immediately after the FIRST `--dry-run` token — since every tool this guard has
@@ -248,10 +266,12 @@ _DRY_RUN_FLAG_RE = re.compile(r"--dry-run\b")
 # first qualifying `--dry-run` never sees the later negation. Covers `--no-dry-run`,
 # `--dry-run=false`, `--dry-run false`, `--dry-run=0`, `--dry-run 0` — the space form needs its
 # own alternative here because `\s*=\s*` requires a literal `=`. This is deliberately NOT the
-# general `=`-value rule (see _dry_run_exempts below for that one): it only recognises the two
-# LITERAL falsey values this guard can prove are unsafe, and a bare `=` with any OTHER value
-# (a shell variable, a `${{ }}` workflow expression, `no`, `off`, ...) is caught downstream by
-# the general "any `=` form is unverified, so it fails closed" rule instead.
+# general `=`-value rule (_DRY_RUN_VALUE_RE below): it only recognises the two LITERAL falsey
+# values this guard can prove are unsafe. A bare `=` with any OTHER value (a shell variable, a
+# `${{ }}` workflow expression, `no`, `off`, ...) is caught by _DRY_RUN_VALUE_RE, which since fix
+# round 4 scans the whole tail alongside this one. Before that hoist the two rules were NOT
+# interchangeable: the general rule ran per occurrence, so it saw an `=` value only when no
+# earlier bare `--dry-run` had already ended the scan.
 _DRY_RUN_NEGATION_RE = re.compile(
     r"--no-dry-run\b|--dry-run\s*=\s*(?:false|0)\b|--dry-run\s+(?:false|0)\b"
 )
@@ -286,17 +306,35 @@ def _dry_run_exempts(segment: str, after: int) -> bool:
     `=` value — a shell variable (`--dry-run=$DRY_RUN`), a `${{ }}` workflow expression
     (`--dry-run=${{ inputs.dry_run }}`), or a string this guard has no reason to trust (`=no`,
     `=off`, a bare `=`) — fell through to the bare positive check and read as EXEMPT, reopening
-    the exact hole fix round 1 closed. Restored: after the negation scan finds nothing, walk each
-    remaining `--dry-run` occurrence and require it NOT be immediately followed by `=` (any
-    value, not only `false`/`0`) or by a bare `false`/`0` on the space form — mirroring the
+    the exact hole fix round 1 closed. Restored: refuse to exempt a `--dry-run` followed by `=`
+    (any value, not only `false`/`0`) or by a bare `false`/`0` on the space form — mirroring the
     negation regex's space-form check, since `\\s*=\\s*` only matches an `=`, not whitespace.
+
+    V8 fix round 4, Important 1. Round 3 put that restored rule INSIDE the per-occurrence loop,
+    and the loop returns True on the FIRST occurrence it accepts — so one bare `--dry-run` token
+    in front of the `=` form ended the scan before the rule was ever applied, and the negation
+    scan sees only the two literal falsey values. Measured through main(): `npm publish
+    --dry-run=$DRY_RUN` red, but `npm publish --dry-run --dry-run=$DRY_RUN` read EXEMPT, and on
+    npm 11.11.0 `--dry-run --dry-run=false` resolves dry-run=false and really publishes. The `=`
+    rule is therefore now a WHOLE-TAIL scan (_DRY_RUN_VALUE_RE) beside the negation scan, not a
+    per-occurrence one, so the loop below no longer tests for `=` at all. Important 2 of the same
+    round narrowed the flag anchor; see _DRY_RUN_FLAG_RE.
+
+    V8 fix round 4, Minor 4 — a behaviour change round 3 shipped as a "restore" without saying
+    so. Fix round 1 lstripped the tail before testing `startswith("=")`, so it ALSO failed closed
+    on the space-separated `npm publish --dry-run = $DRY_RUN`; round 3 did not lstrip, which
+    moved that form from red to exempt. The round-3 behaviour is the CORRECT one and is kept:
+    measured on npm 11.11.0, `--dry-run = $DRY_RUN` resolves dry-run=true and the `=` is an
+    unrelated positional argument, so round 1's red was a false one. That is why
+    _DRY_RUN_VALUE_RE is `--dry-run=` and not `--dry-run\\s*=`.
     """
     tail = segment[after:]
     if _DRY_RUN_NEGATION_RE.search(tail):
         return False
+    if _DRY_RUN_VALUE_RE.search(tail):
+        return False
     for m in _DRY_RUN_FLAG_RE.finditer(tail):
-        rest = tail[m.end() :]
-        if rest.startswith("=") or re.match(r"\s+(false|0)\b", rest):
+        if re.match(r"\s+(false|0)\b", tail[m.end() :]):
             continue
         return True
     return False
@@ -889,6 +927,25 @@ FIXTURES: list[tuple[str, str, str, str | None]] = [
      _OK_MAIN.replace("steps: [{run: echo build}]",
                       "steps: [{run: npm publish --dry-run=$DRY_RUN}]"), "V8b"),
 
+    # --- V8 fix round 4 additions (Important 1, Important 2) ---------------------------------
+    # Important 1. The round-3 rule above lived INSIDE the per-occurrence loop, and that loop
+    # returns on the FIRST occurrence it accepts. So one bare `--dry-run` token in front of the
+    # `=` form made the guard stop scanning before it ever reached the `=` form, and the
+    # negation scan sees only the two literal falsey values. Measured on npm 11.11.0:
+    # `--dry-run --dry-run=false` resolves dry-run=false, so a `--dry-run=<value>` this guard
+    # cannot evaluate must fail closed even when a bare `--dry-run` precedes it. Without this
+    # row, hoisting the `=` rule back into the loop goes undetected.
+    ("V8 fix4 I1: a bare --dry-run in front of --dry-run=$DRY_RUN must not exempt", "main",
+     _OK_MAIN.replace("steps: [{run: echo build}]",
+                      "steps: [{run: npm publish --dry-run --dry-run=$DRY_RUN}]"), "V8b"),
+    # Important 2. The flag regex used `--dry-run\b`, and `-` is a non-word character, so a
+    # SUFFIXED flag satisfied it. Measured on npm 11.11.0: `--dry-run-x` warns `Unknown cli
+    # config`, sets `dry-run-x`, leaves `dry-run` UNSET, and really publishes. Nothing pinned the
+    # anchor: removing it outright survived the whole self-test.
+    ("V8 fix4 I2: --dry-run-x is a different flag and does not exempt", "main",
+     _OK_MAIN.replace("steps: [{run: echo build}]",
+                      "steps: [{run: npm publish --dry-run-x}]"), "V8b"),
+
     # --- Fix round 3 additions (Critical 2, Important 3, Important 4) ----------------------
     # Critical 2, both directions. The RED direction is the defect: this exact three-step job was
     # measured passing the whole guard at exit 0 before V7 existed. The two CLEAN directions are
@@ -1233,6 +1290,36 @@ def _v8d_missing_local_callee_direct() -> str | None:
     return None
 
 
+def _v8_fix4_dry_run_boundary_cases() -> str | None:
+    """V8 fix round 4. Two properties of _dry_run_exempts that the two new FIXTURES rows do NOT
+    pin, kept here rather than as rows so the fixture count stays the reviewed 62. Both were
+    MEASURED as mutation survivors before this helper existed: narrowing the flag anchor from
+    `(?!\\S)` to PUBLISH_MARKERS' `(?![-\\w])` idiom, and widening the value scan from
+    `--dry-run=` to `--dry-run\\s*=`, each left the whole self-test green.
+
+    1. `--dry-run.x` is a DIFFERENT flag, like `--dry-run-x`, and must not exempt. `.` is neither
+       `-` nor a word character, so `(?![-\\w])` admits it; only an anchor that ends the token at
+       whitespace rejects it.
+    2. `--dry-run = $DRY_RUN` IS an effective dry-run and must stay exempt. npm 11.11.0 resolves
+       it to dry-run=true, the `=` being an unrelated positional argument. Fix round 1 red it
+       (it lstripped before testing for `=`) and round 3 silently stopped doing so; this pins
+       the current, correct behaviour so the next reader cannot restore round 1's false red by
+       adding `\\s*` to the value scan.
+    """
+    cases = (
+        ("npm publish --dry-run.x", True,
+         "a suffixed flag is a different flag and must not exempt"),
+        ("npm publish --dry-run = $DRY_RUN", False,
+         "a bare flag followed by an unrelated = argument must still exempt"),
+    )
+    for command, want_publish, why in cases:
+        got = job_publishes({"steps": [{"run": command}]})
+        if got is not want_publish:
+            return (f"job_publishes({command!r}) returned {got}, expected {want_publish}: "
+                    f"{why}")
+    return None
+
+
 def _minor9_empty_jobs_floor() -> str | None:
     """Regression test for Minor 9: `jobs: {}` must infra (exit 2 via SystemExit), never return
     a false-clean [] having examined zero jobs. Expressed here, not as a FIXTURES row, because a
@@ -1327,6 +1414,8 @@ def self_test() -> int:
         ("v8d N6 no duplicate line for a shared nested target", _v8d_dedup_shared_nested_target),
         ("v8d N4 approval gate self-case", _v8d_approval_gate_self_case),
         ("v8d N5 missing local callee (direct call)", _v8d_missing_local_callee_direct),
+        ("v8 fix4 dry-run anchor and space-form boundary cases",
+         _v8_fix4_dry_run_boundary_cases),
         ("minor-9 empty jobs: {} floor", _minor9_empty_jobs_floor),
     ):
         err = fn()
