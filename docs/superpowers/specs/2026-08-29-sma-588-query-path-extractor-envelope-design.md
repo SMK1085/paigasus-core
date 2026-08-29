@@ -126,14 +126,22 @@ partner before drafting; they are recorded here so a reviewer can see what was c
 | 2 | The `Path<String>` shape | `StringPath<F>` sibling + a new `invalid-path-segment` (908) | one merged reason for both locations, or handing the case back to axum |
 | 3 | The gateway's 901 | adopt the 901/906 split, **not** 905 | full symmetry incl. 905, or declaring the asymmetry final |
 | 4 | The gateway's `Bytes` 413 | fold into this ticket | a follow-up ticket, or leaving it |
-| 5 | The gateway's 906 status | **422**, for full symmetry with IAM | keeping today's 400 |
+| 5 | The gateway's 906 status | **400**, today's status, kept | 422, for full symmetry with IAM |
 
-**Decision 5 was taken before two facts this revision measured** (§ *Compatibility*): the OpenAI
-client SDKs branch on status as well as `error.type`, mapping 400 → `BadRequestError` and 422 →
-`UnprocessableEntityError`; and `ChatCompletionRequest`'s `#[serde(flatten)]` field means a scalar,
-`null` or array body classifies as `Data` and therefore moves to 422 too. Both argue for 400 and
-neither was weighed. **Flagged for re-decision at spec approval**; the spec is written for 422 as
-decided.
+**Decision 5 was re-taken at spec approval.** It was first decided as 422, for symmetry with IAM's
+`(906, 422)` pairing, before two facts this revision measured: the OpenAI client SDKs branch on
+status as well as `error.type`, mapping 400 → `BadRequestError` and 422 →
+`UnprocessableEntityError`, and OpenAI's own API answers 400 here; and `ChatCompletionRequest`'s
+`#[serde(flatten)]` field means a scalar, `null` or array body classifies as `Data`, so 422 would
+have captured a wider set than "a schema mismatch" suggests. Both argue for 400, and 400 was
+chosen.
+
+**Consequence, stated so it is not read as an oversight:** `invalid-request-schema` (906) now sits
+on **422 in IAM and 400 in the gateway**. That is not the contradiction SMA-587 D1.1 forbade — that
+was a `request-too-large` code on a 400, where the code names a condition the status denies. Both
+statuses here are client errors and neither denies a schema mismatch. The reconvergence this ticket
+was asked for is of **901's meaning**, which D4.1 delivers; status parity was never part of it, and
+buying it would have cost OpenAI wire compatibility, which is the gateway's purpose.
 
 ## Design decisions
 
@@ -315,9 +323,12 @@ and could have changed the classification path:
 for exhaustiveness. After this, 901 means *malformed or unreadable* on both services, which is what
 AC-4 asks for.
 
-The last row is a consequence the first draft did not state: a scalar, `null` or array body is a
-`Data` error, so it moves to 906/422 along with genuine schema mismatches. § *Compatibility* records
-it.
+**Every row keeps status 400** (decision 5). Only the `code` moves, and only for the `Data` rows.
+
+The last row is a consequence the first draft did not state and is the reason decision 5 was
+re-taken: a scalar, `null` or array body is a `Data` error, so it answers 906 alongside genuine
+schema mismatches. On 400 that is a code change to an already-refused request; on 422 it would have
+been a status change too. § *Compatibility* records it.
 
 **905 is deliberately not adopted.** The gateway takes `Bytes` and never reads `Content-Type`.
 Adopting `unsupported-content-type` would mean *adding* a content-type check and rejecting requests
@@ -333,8 +344,12 @@ one of the two (§ *Review corrections*, C4):
 
 | variant | status | `type` | `code` | `param` | message | `retryable()` |
 | -- | -- | -- | -- | -- | -- | -- |
-| `InvalidRequestSchema` **new** | 422 | `invalid_request_error` | `invalid-request-schema` (906) | `None` | "The request body does not match the expected schema." | `No` |
+| `InvalidRequestSchema` **new** | 400 | `invalid_request_error` | `invalid-request-schema` (906) | `None` | "The request body does not match the expected schema." | `No` |
 | `RequestTooLarge` **new** | 413 | `invalid_request_error` | `request-too-large` (902) | `None` | "The request body is too large." | `No` |
+
+`InvalidRequestSchema` shares `BadRequestBody`'s status and differs only in `code` and `message`. It
+is still a **new variant** rather than an argument to the existing one, because `parts()` binds the
+whole tuple per variant — there is no way to vary the code without one.
 
 `param` is `None` on both. OpenAI's envelope uses `param` to name an offending *request parameter*,
 and the gateway parses with a plain `serde_json::from_slice` — no `serde_path_to_error` — so no
@@ -471,19 +486,24 @@ holds on any of those numbers, and the README's count is the one that must stay 
    on` describe work this ticket does. Both rewritten.
 5. **`error.proto`'s 901 comment** says "Reconverging the two is SMA-588, not an accident". After
    D4.1 the two *are* reconverged; the comment states the shared meaning instead.
-6. **`error.proto`'s 905 comment** says 905 is HTTP-only because tonic negotiates
+6. **`error.proto`'s 906 comment** gains a second emitter. It describes a body "syntactically valid
+   JSON but did not match the target type", which is true of both services after D4.1 — but the two
+   answer it on **different statuses** (IAM 422, gateway 400, decision 5). The comment says so, for
+   the same reason the 901 comment recorded IAM's narrowing: a consumer mapping code → status needs
+   to know it is not one-to-one.
+7. **`error.proto`'s 905 comment** says 905 is HTTP-only because tonic negotiates
    `application/grpc`. Still true, but now incomplete: it must also say the gateway does not emit
    it because it takes `Bytes` and never reads `Content-Type` — otherwise the next reader will file
    the same reconvergence ticket again.
-7. **`ci/http-extractor/README.md`** — L3 retired (below), plus four more sites the first draft
+8. **`ci/http-extractor/README.md`** — L3 retired (below), plus four more sites the first draft
    missed: "What it does NOT gate" (`:29-35`, a third copy of the reserved-rows prose), the
    identifier-boundary paragraph (`:60-61`), "The ALLOW table — One row" (`:86`), and the
    "Eighteen request positions" positive-control line (`:77`).
-8. **`chat.rs`'s module doc and `chat_completions`'s doc** both say the `DefaultBodyLimit` layer
+9. **`chat.rs`'s module doc and `chat_completions`'s doc** both say the `DefaultBodyLimit` layer
    "fails oversized bodies with a 413 before this handler is reached", describing the escape as
    correct behaviour. Rewritten for `EnvelopeBytes` — and so are three more copies the first draft
    missed: `gateway/src/adapters/http/mod.rs:47` and `:85-86`, and `tests/chat_proxy.rs:16,227-228`.
-9. **`dto.rs`'s query-DTO comments** — **two**, not four. `RoleGrantQuery` (`dto.rs:366-367`) and
+10. **`dto.rs`'s query-DTO comments** — **two**, not four. `RoleGrantQuery` (`dto.rs:366-367`) and
    `ServiceAccountQuery` (`:415-416`) justify keeping a field as a raw `Option<String>` by
    contrasting it with "axum's default plain-text query rejection", which these routes no longer
    produce. `AuditQuery` (`:587-592`) and `DeadLetterQuery` (`:651-653`) reference the handler
@@ -543,8 +563,10 @@ enforced by a source scan, not by the transport" rather than borrowing 905's str
 
 ## Compatibility
 
-**No IAM route's status changes.** Every new extractor preserves the rejection's own status, and
-all twelve escapes are 400 today and 400 after.
+**No route's status changes anywhere in this ticket** — in either service. Every new extractor
+preserves the rejection's own status; all twelve IAM escapes are 400 today and 400 after; the
+gateway's schema failures stay 400 (decision 5) and its oversized body stays 413. This restores the
+property SMA-587 stated for its own work, which the first draft's 422 would have broken.
 
 **One IAM wire change.** The twelve routes' refusal bodies change from axum's plain text to the
 `{"error":{code,message}}` envelope. The first draft claimed a second — that these routes gain the
@@ -555,23 +577,19 @@ returns `No` for a 400. These routes already answer `paigasus-retryable: false` 
 unchanged. (The contract test the first draft cited as `authn.rs:330-341` is at `authn.rs:166-177`;
 that file is 191 lines.)
 
-**One deliberate gateway status change, wider than it first appears.** `POST /v1/chat/completions`
-answers **422 instead of 400** for every `Category::Data` failure. Measured, that set includes not
-only a genuine schema mismatch but also a **scalar, `null` or array body** — `"hello"`, `42`,
-`true`, `null`, `[]` — because `ChatCompletionRequest` is a struct and any non-object is an
-`invalid type` data error. A syntactically malformed body still answers 400.
+**One gateway code change, wider than it first appears.** `POST /v1/chat/completions` answers
+`invalid-request-schema` instead of `invalid-request-body` for every `Category::Data` failure, on an
+unchanged 400. Measured, that set includes not only a genuine schema mismatch but also a **scalar,
+`null` or array body** — `"hello"`, `42`, `true`, `null`, `[]` — because `ChatCompletionRequest` is
+a struct and any non-object is an `invalid type` data error. A syntactically malformed body keeps
+`invalid-request-body`.
 
-Two consequences the decision was taken without (§ *Decision record*):
-
-- **The OpenAI client SDKs branch on status.** `error.rs:6-8` calls the envelope "a compatibility
-  contract" because "SDKs (the OpenAI client libraries our callers use) branch on `error.type`" —
-  but they also map status to an exception class: 400 → `BadRequestError`, 422 →
-  `UnprocessableEntityError`. A caller's `except BadRequestError` stops catching this case.
-- **OpenAI's own API returns 400, never 422**, for a bad chat-completions body. Wire compatibility
-  with OpenAI clients is this service's purpose, and 422 is a divergence from the thing it imitates.
-
-The spec is written for 422 as decided; this section exists so the decision can be re-taken with
-the facts.
+This is a change only a client reading `error.code` can observe. `error.rs:6-8` calls the envelope
+"a compatibility contract" because "SDKs (the OpenAI client libraries our callers use) branch on
+`error.type`" — and `type` is `invalid_request_error` before and after. The OpenAI SDKs also map
+**status** to an exception class (400 → `BadRequestError`, 422 → `UnprocessableEntityError`), which
+is why decision 5 kept 400: on 422 every one of these bodies would have changed exception class in
+a caller's `except` block.
 
 **One gateway body-shape change.** An oversized body answers inside the OpenAI envelope with
 `request-too-large` instead of axum's plain text. The status stays 413.
@@ -595,7 +613,7 @@ merged `router(...)`**.
 | `path.rs` unit | `StringPath` maps a non-UTF-8 segment (`/x/%FF`) to 908 naming `policy_id`; a well-formed segment extracts; a router-arity bug keeps its own 500 — mirroring `UuidPath`'s three existing tests |
 | `path.rs` unit | `the_path_field_names_are_stable` gains `PolicyId` **and a count assertion** — it pins eight names today with no count, so a ninth marker would otherwise escape the rename tripwire entirely |
 | IAM integration | each of the ten `Query` routes asserts a rejection → 400 `invalid-query-parameter`, and each table ends with a **well-formed query on the same route reaching the handler**, so every row asserts the query's shape and not a broken route. Both `Path<String>` routes assert a non-UTF-8 segment → 400 `invalid-path-segment` |
-| gateway | the 901/906 split (a syntax error → 400/901, a type mismatch → 422/906, a bare scalar → 422/906) and an oversized body → 413/`request-too-large` inside the OpenAI envelope |
+| gateway | the 901/906 split — a syntax error → 400/901, a type mismatch → 400/906, a bare scalar → 400/906 — asserting the **status is 400 on every row**, since that is the decision a future reader is most likely to undo; plus an oversized body → 413/`request-too-large` inside the OpenAI envelope |
 | gRPC | the two new divergences: no `adapters/grpc/**` source constructs `InvalidQueryParameter` or `InvalidPathSegment` |
 | gate | `--self-test` fixtures for the three newly-enabled rows and the new one, the `Path` row's `<` requirement (`&Path` legal, `Path<String>` a violation), the inverted `Bytes` fixture, and the re-pointed `reserved` fixture |
 
@@ -673,8 +691,11 @@ The one thing that *would* require plumbing is widening `SCAN_GLOB`, which D5.1 
 - **`repo:http-extractor-envelope`'s remaining residuals.** README L1 (an aliased import,
   `use axum::Json as J`), L2 and L4 are unchanged and stay recorded. Only L3 goes, because it is
   wrong rather than merely a limit.
-- **`param` on the gateway's 422.** Populating it needs `serde_path_to_error` in the gateway's parse
-  path (D4.2). Worth doing; not here.
+- **`param` on the gateway's `invalid-request-schema`.** Populating it needs `serde_path_to_error`
+  in the gateway's parse path (D4.2). Worth doing; not here.
+- **Status parity for 906.** IAM answers 422 and the gateway 400, by decision 5. Harmonising them
+  means changing one service's status on a live endpoint, which is a wire decision of its own and
+  not something to fold into a reconvergence of `error.code`.
 - **Handler-validated query fields.** `RoleGrantQuery::principal_prn`,
   `ServiceAccountQuery::owner_prn`, `AuditQuery`'s timestamps and cursors, and `Page::new`'s range
   checks keep funnelling through their existing, more specific `TenancyError`s. 907 is for a failure
@@ -699,7 +720,7 @@ precedent.
 | C7 | MAJOR | `check.py:640-642` asserts the reserved rows are off — the flip reds the gate's own self-test | D5 leads with it; D6 lists it first |
 | C8 | MAJOR | `ALLOW` is per-**file**, not per-row, so the proposed rows exempt more than intended | New D5.1, with a table of what each row also exempts; `path.rs` row dropped as unneeded |
 | C9 | MAJOR | `EnvelopeBytes`'s home was unstated, and putting it in `chat.rs` would fail the gate **open** on the one file the new row targets | D4.2 names the file; D5.1 forbids a `chat.rs` row |
-| C10 | MAJOR | The 422 decision was never weighed against OpenAI SDK compatibility, and `#[serde(flatten)]` widens it to scalar/`null`/array bodies | Both recorded in § *Compatibility*; flagged for re-decision in § *Decision record* |
+| C10 | MAJOR | The 422 decision was never weighed against OpenAI SDK compatibility, and `#[serde(flatten)]` widens it to scalar/`null`/array bodies | Raised at spec approval and **decision 5 was reversed to 400**. Only `error.code` moves; no route's status changes in either service |
 | C11 | MAJOR | The `paigasus-retryable` "unclaimed win" does not exist — `CorrelationLayer` already supplies the header | Claim deleted from § *Compatibility*; citation corrected |
 | C12 | MINOR ×8 | `BANNED` 3-tuple fan-out · the `<` flag reverses a documented comment · `PathBuf` already excluded · three more copies of the invalidated `chat.rs` prose and four more README sites · only two of four DTO comments are affected · the registry count appears twice · `the_path_field_names_are_stable` has no count assertion · both extractors must be `FromRequestParts` · bearer auth is a test prerequisite · D4.2's 413 mechanism sentence was misleading | All folded into D3, D4.2, D5, D6, § *Registry mechanics* and § *Testing* |
 
