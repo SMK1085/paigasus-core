@@ -29,9 +29,9 @@ Steps **D** and **I** are irreversible. Work top to bottom. Do not reorder.
 | Step | Action | Trigger | Owner | Reversible |
 | --- | --- | --- | --- | --- |
 | **A** | **Prepare** this issue's PR — runbook, `release.yml` comment + dispatch trigger, ADR draft | — | agent | yes |
-| **B1** | Create both environments with the settings in §3 | — | agent or owner | yes |
-| **B2** | Add the required reviewer to `release-approval` | — | agent or owner | yes |
-| **B3** | Prove the App can push a tag and cut a Release | — | agent or owner | yes |
+| **B1** | ~~Create the three environments (§3)~~ **done** | — | owner | yes |
+| **B2** | ~~Add the required reviewer to `release-approval`~~ **done** | — | owner | yes |
+| **B3** | App tag/Release capability — evidenced, see §2 | — | owner | yes |
 | **C** | `@paigasus` npm scope, `NPM_TOKEN`, three PyPI pending publishers | — | owner | yes |
 | **D** | Publish the three `0.1.0-alpha.1` seeds | — | owner | **NO** |
 | **E** | Configure crates.io Trusted Publishing for the three crates | — | owner | yes |
@@ -51,11 +51,26 @@ Steps C, D and E use this runbook **from the PR branch**, before step F merges i
 bot App, and the temporary `workflow_dispatch` trigger. **That pull request is merged at step F,
 not here** — you read this runbook from its branch while you work through steps C, D and E.
 
-**B1 and B2** created the two environments. **B3** proved the App installation can push a tag and
-create a GitHub Release, using a throwaway tag that was then deleted. The absence of tag protection
-does not prove the App can push — that is why B3 exists.
+**B1 and B2 are done — measured 2026-08-29:**
 
-If any of B1–B3 was not performed, stop and perform it now. §3 has the settings.
+| Environment | Branches | Reviewers | Secrets |
+| --- | --- | --- | --- |
+| `release-pr` | `main` only | none | `PAIGASUS_BOT_APP_ID`, `PAIGASUS_BOT_PRIVATE_KEY` |
+| `release-approval` | `main` only | `SMK1085`, self-review allowed | — |
+| `release-publish` | `main` only | none | `NPM_TOKEN`, `PAIGASUS_BOT_APP_ID`, `PAIGASUS_BOT_PRIVATE_KEY` |
+
+No wait timers. **The two repository secrets are deleted** (`gh api …/actions/secrets` returns an
+empty list), so the App credentials now live only on the two environments that need them, and §3.1's
+migration is live.
+
+**B3 — the App's tag and Release capability — is satisfied by evidence already in hand, with one
+stated gap.** The App force-updates the release-plz branch on every push to `main` (that is how
+PR 170 stays current), which proves its `contents: write` works. Tag creation uses the same
+permission, and §1.3 measured that no ruleset targets `refs/tags/**` and that tag protection returns
+404. **The gap:** a branch push is not literally a tag push. The inference is small and the two
+measurements bracket it, but it is an inference. The first real proof is step I.
+
+If any of B1–B3 looks different from the table above, stop and fix it. §3 has the settings.
 
 ---
 
@@ -131,12 +146,15 @@ The environment must still exist. Both PyPI's and crates.io's OIDC claims bind t
 
 ### 3.1 Finishing the App-secret migration — the step that makes it real
 
-1. **Confirm you still hold the App private key** (`.pem`), or can generate a new one from the
-   App's settings. **A GitHub secret cannot be read back**, so this is the only rollback.
-2. **Delete the repository secrets** `PAIGASUS_BOT_APP_ID` and `PAIGASUS_BOT_PRIVATE_KEY`.
-   Until this is done the environment secrets are untested.
-3. Push to `main` and confirm `release-pr` **ran** — that it reached release-plz and refreshed the
-   release PR.
+1. ~~Confirm you still hold the App private key~~ — done.
+2. ~~**Delete the repository secrets**~~ — **done 2026-08-29.** `gh api …/actions/secrets` returns
+   an empty list, so an environment secret is now the only source.
+3. **Still outstanding.** Push to `main` and confirm `release-pr` **ran** — that it reached
+   release-plz and refreshed the release PR.
+
+**Step F is that push.** Merging this issue's pull request is the next push to `main`, so it doubles
+as the migration proof. Check it there before going near step H — the observation gate and this
+check read the same run.
 
 **Step 3 is the only proof, and "the run was green" is not it.** `release-pr`'s preflight makes the
 whole job skip **green** when `PAIGASUS_BOT_APP_ID` is unreadable, so a botched migration looks

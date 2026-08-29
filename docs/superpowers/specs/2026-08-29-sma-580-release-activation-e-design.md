@@ -495,12 +495,15 @@ publishers bind their OIDC claim to that name. Putting `release-pr` there would 
 deployment to the publish environment on every push to `main`, and any reviewer added there later
 would block every merge. So the App secrets are duplicated across both environments deliberately.
 
-**ONE STEP OUTSTANDING, and without it this is not closed.** An environment secret does **not**
-shadow a repository secret of the same name — the repository one still resolves. So while
-`PAIGASUS_BOT_APP_ID` and `PAIGASUS_BOT_PRIVATE_KEY` remain repository secrets, the job succeeds
-either way and the migration is unproven. They must be deleted, and the next `release-pr` run
-inspected to confirm it **executed** rather than skipped — the preflight skips **green**, so the
-checks list cannot tell the two apart. Runbook §3.1 carries the procedure.
+**The repository secrets are deleted (measured 2026-08-29** — `gh api …/actions/secrets` returns an
+empty list**), so the migration is live.** That mattered because an environment secret does not
+shadow a repository secret of the same name; while both existed the job would have succeeded either
+way and proved nothing.
+
+**Unproven until a run executes.** `release-pr`'s preflight skips the job **green** when
+`PAIGASUS_BOT_APP_ID` is unreadable, so the checks list cannot distinguish a healthy run from a
+broken migration. Step F's merge is the next push to `main` and therefore the proof — open the run
+and confirm the job ran rather than skipped. Runbook §3.1.
 
 ### 3.4 The branch ruleset does not obstruct the sequence
 
@@ -536,7 +539,7 @@ release by a different mechanism.
 | Required reviewers | the repository owner | The one place a human can stop the run. `approve-release` is its only consumer |
 | Prevent self-review | **OFF** | The owner dispatches the step-I run *and* must approve it |
 | Wait timer | 0 | Nothing to delay |
-| Deployment branch policy | must permit `main` | A policy excluding `main` fails the job |
+| Deployment branch policy | **`main` only** | Configured and measured 2026-08-29 |
 
 ### 4.2 `release-publish` — no reviewers, deliberately
 
@@ -791,7 +794,7 @@ Yank the three seeds (§2.6) and revoke the local crates.io token (§5.4).
 | **Partial multi-registry failure** | See §8.1 — it has no complete bound today |
 | crates.io rate-limits new crates | Three new crates land in one session. crates.io documents a burst of **5** per account, so three fits. **Provenance is weak** — the docs page renders client-side and could not be fetched. If refused, wait and retry; earlier seeds stay valid |
 | The `workflow_dispatch` trigger lets a non-owner fire an irreversible release | Bounded **outside** the workflow file: the `release-publish` branch policy is `main`-only and all three registry credentials require that environment (§3.3). Nothing in the file bounds it |
-| A dispatched ref reaches `release-pr`'s App secrets (§3.3.1) | **Closed** by the `release-pr` environment (`main`-only, environment secrets) — **once the repository secrets are deleted**. Until then, unproven |
+| A dispatched ref reaches `release-pr`'s App secrets (§3.3.1) | **Closed** — `release-pr` environment is `main`-only with environment secrets, and the repository secrets are deleted (measured). Execution proof lands at step F |
 | The dispatch trigger is left in place after the release | §9 names it as a tracked removal with its condition. **Nothing in CI enforces the removal** — this is a real residual |
 | A PyPI publisher field is wrong, or no slots are free | Fails after crates.io published. §5.1 verifies at step C, before D |
 | The npm scope is not owned, or the token is the wrong type | Fails after crates.io **and** PyPI published. §1.4 and §5.2 confirm at step C |
@@ -857,9 +860,9 @@ Both are temporary by decision. Neither is enforced by any gate, which is why th
 
 - **Who performs the flip?** The **owner**, by decision. Step H is no longer delegated. Steps
   B1–B3 stay with the agent if its token permits, and move to the owner if not (§3).
-- **Do the App secrets move to an environment?** **Yes, done** — a third environment `release-pr`,
-  `main`-only, holding both as environment secrets (§3.3.1). The repository secrets must still be
-  deleted for it to take effect; runbook §3.1 has the steps.
+- **Do the App secrets move to an environment?** **Yes — done and live.** A third environment
+  `release-pr`, `main`-only, holds both as environment secrets, and the repository secrets are
+  deleted (§3.3.1). Execution proof lands at step F.
 - **Does npm keep a token, or get seeded like crates.io?** **Keep the token**, by decision.
   It is a bootstrap credential for one release; SMA-602 replaces it with trusted publishing before
   the January 2027 cutoff. §5.2 records the two alternatives that were rejected.
