@@ -58,6 +58,18 @@ UNGATED_JOBS = frozenset({"release-pr"})
 # `release` job's needs: removes the only gate in the file and passes V1, V3, V4, V7 and V8a/b.
 APPROVAL_JOB = "approve-release"
 
+# V9. The plan job decides whether a release happens at all, and it sits upstream of the approval
+# gate — so a wrong polarity here fails GREEN, silently dropping every release. The producer side
+# is covered by ci/release-plan's fixture table; this pins the WIRING, which no fixture can reach.
+PLAN_JOB = "plan"
+PLAN_OUTPUT = "nothing_to_release"
+PLAN_SCRIPT = "ci/release-plan/run.sh"
+# Literal pinning, exactly as V2 pins GATE_EXPR, and for the same reason: a structural test would
+# admit `== 'false'`, which is NOT equivalent — it fails closed on an unset output.
+PLAN_GATE_EXPR = f"needs.{PLAN_JOB}.outputs.{PLAN_OUTPUT} != 'true'"
+ACCEPTED_PLAN_FORMS = frozenset({PLAN_GATE_EXPR, "${{ " + PLAN_GATE_EXPR + " }}"})
+_PLAN_STEP_RE = re.compile(r"steps\.([A-Za-z0-9_-]+)\.outputs\." + re.escape(PLAN_OUTPUT))
+
 # V3: the real bypass class is any status-check function, not two literal spellings.
 # `success() || failure()`, `!failure()` and `${{ ! cancelled() }}` all evade a two-string test.
 STATUS_FUNCS = ("always", "cancelled", "success", "failure")
@@ -481,8 +493,52 @@ def approval_boundary_violations(jobs: dict, name: str) -> list[str]:
     return out
 
 
+def plan_contract_violations(jobs: dict, name: str) -> list[str]:
+    plan = jobs.get(PLAN_JOB)
+    if not isinstance(plan, dict):
+        return [f"{name}: V9a: no job named '{PLAN_JOB}' exists. V9 keys on that literal name, so "
+                f"without this floor a rename would leave it asserting nothing."]
+    out: list[str] = []
+
+    consumers = [jid for jid, j in jobs.items()
+                 if isinstance(j, dict) and PLAN_JOB in needs_of(j)]
+    if not consumers:
+        out.append(f"{name}: V9a: no job names '{PLAN_JOB}' in needs:. The decision is computed "
+                   f"and then read by nothing.")
+    for jid in sorted(consumers):
+        if if_text(jobs[jid]) not in ACCEPTED_PLAN_FORMS:
+            out.append(f"{name}: V9b: job '{jid}' needs '{PLAN_JOB}' but its if: is "
+                       f"{if_text(jobs[jid])!r}, not {PLAN_GATE_EXPR!r}. Only `!=` fails safe: "
+                       f"`== 'true'` inverts the decision and `== 'false'` skips on an unset "
+                       f"output.")
+
+    outs = plan.get("outputs")
+    expr = outs.get(PLAN_OUTPUT) if isinstance(outs, dict) else None
+    if not isinstance(expr, str):
+        out.append(f"{name}: V9c: job '{PLAN_JOB}' declares no outputs.{PLAN_OUTPUT}. A STEP "
+                   f"output is not a JOB output, so every consumer would read the empty string.")
+    else:
+        m = _PLAN_STEP_RE.search(expr)
+        if not m:
+            out.append(f"{name}: V9c: outputs.{PLAN_OUTPUT} is {expr!r}, which names no "
+                       f"steps.<id>.outputs.{PLAN_OUTPUT}.")
+        else:
+            ids = {s.get("id") for s in (plan.get("steps") or []) if isinstance(s, dict)}
+            if m.group(1) not in ids:
+                out.append(f"{name}: V9c: outputs.{PLAN_OUTPUT} names step id {m.group(1)!r}, "
+                           f"which does not exist in '{PLAN_JOB}'. A typo here yields '' "
+                           f"forever, silently.")
+
+    runs = "\n".join(str(s.get("run") or "")
+                     for s in (plan.get("steps") or []) if isinstance(s, dict))
+    if PLAN_SCRIPT not in runs:
+        out.append(f"{name}: V9d: job '{PLAN_JOB}' never invokes {PLAN_SCRIPT}. Without this, "
+                   f"V9c passes on an inline `echo {PLAN_OUTPUT}=true`.")
+    return out
+
+
 def check_main(doc: dict, name: str) -> list[str]:
-    """V1-V5, V7 and V8a-c over the release workflow. V6 applies to CALLED workflows (see
+    """V1-V5, V7, V8a-c and V9 over the release workflow. V6 applies to CALLED workflows (see
     check_called) and V8d to every job's local callee (see callee_boundary_violations) — both
     need the filesystem, which this function, driven purely off a parsed doc, deliberately does
     not touch."""
@@ -560,6 +616,9 @@ def check_main(doc: dict, name: str) -> list[str]:
     # V8: the approval boundary, both directions. Called once, outside the per-job loop above —
     # that loop has `continue` statements that would skip a call placed inside it.
     out += approval_boundary_violations(jobs, name)
+    # V9: the plan job's output wiring and fail-safe polarity. Same reason as V8: called once,
+    # outside the per-job loop, which the loop's `continue` statements would otherwise skip.
+    out += plan_contract_violations(jobs, name)
     return out
 
 
@@ -712,6 +771,11 @@ jobs:
     if: needs.plan.outputs.nothing_to_release != 'true'
     runs-on: ubuntu-latest
     steps: [{run: echo build}]
+  wheels:
+    needs: [plan]
+    if: ${{ needs.plan.outputs.nothing_to_release != 'true' }}
+    runs-on: ubuntu-latest
+    steps: [{run: echo wheels}]
   approve-release:
     needs: [build]
     environment: release-approval
@@ -768,10 +832,14 @@ FIXTURES: list[tuple[str, str, str, str | None]] = [
     # `release` would either drop a dependency or require inventing new semantics; leaving them on
     # `build` preserves the original list-to-scalar test exactly, and adding no `if:`/`needs:`
     # collision (build's own `if:` line is untouched by either mutation).
+    # Both rows below now name an explicit `1` count: since V9's `wheels` consumer (added below)
+    # shares the identical "    needs: [plan]" text with `build`, an unbounded .replace() would
+    # rewrite BOTH jobs' needs: here, which is not what either row is testing. `1` pins these back
+    # to their original, single-consumer meaning — `build` is always the first occurrence.
     ("needs: as a SCALAR string still walks", "main",
-     _OK_MAIN.replace("    needs: [plan]", "    needs: plan"), None),
+     _OK_MAIN.replace("    needs: [plan]", "    needs: plan", 1), None),
     ("needs: scalar pointing at an ungated job reds", "main",
-     _OK_MAIN.replace("    needs: [plan]", "    needs: release-pr"), "is not gated"),
+     _OK_MAIN.replace("    needs: [plan]", "    needs: release-pr", 1), "is not gated"),
     ("napi prepublish without --no-gh-release", "main",
      _OK_MAIN.replace("run: release-plz release", "run: napi prepublish --npm-dir npm"),
      "without --no-gh-release"),
@@ -1015,6 +1083,45 @@ FIXTURES: list[tuple[str, str, str, str | None]] = [
      _OK_MAIN.replace("run: release-plz release",
                       "run: napi prepublish --no-gh-release --npm-dir npm"),
      None),
+
+    # --- V9 additions (the plan job's output wiring and fail-safe polarity) ----------------
+    # `_OK_MAIN` now carries TWO consumers of `plan` — `build` (bare `if:` form) and `wheels`
+    # (wrapped `${{ }}` form, added deliberately to disambiguate: it keeps every row below from
+    # accidentally mutating both consumers at once via a shared anchor string). Real release.yml
+    # has three (wheels, prebuild, proto-dist); two is enough to prove "EVERY consumer", not "SOME
+    # consumer".
+    ("V9a: the plan job renamed out from under V9", "main",
+     _OK_MAIN.replace("  plan:\n", "  planning:\n")
+             .replace("needs: [plan]", "needs: [planning]")
+             .replace("needs.plan.outputs", "needs.planning.outputs"), "V9a"),
+    ("V9b: an INVERTED consumer condition", "main",
+     _OK_MAIN.replace("if: needs.plan.outputs.nothing_to_release != 'true'",
+                      "if: needs.plan.outputs.nothing_to_release == 'true'"), "V9b"),
+    ("V9b: == 'false' fails closed and is not accepted", "main",
+     _OK_MAIN.replace("if: needs.plan.outputs.nothing_to_release != 'true'",
+                      "if: needs.plan.outputs.nothing_to_release == 'false'"), "V9b"),
+    ("V9b: a consumer with no if: at all", "main",
+     _OK_MAIN.replace("    if: needs.plan.outputs.nothing_to_release != 'true'\n", ""), "V9b"),
+    ("V9b CONTROL: the ${{ }} wrapping is accepted", "main",
+     _OK_MAIN.replace("if: needs.plan.outputs.nothing_to_release != 'true'",
+                      "if: ${{ needs.plan.outputs.nothing_to_release != 'true' }}"), None),
+    # This is the required addition: `build`'s bare-form `if:` is untouched here, and only
+    # `wheels`'s wrapped-form `if:` is inverted (the anchor below matches wheels's exact literal
+    # text and nothing else in `_OK_MAIN`). A `plan_contract_violations` that stops at the FIRST
+    # bad consumer, rather than checking EVERY one, would pass this row for the wrong reason
+    # (build's `if:` alone is fine) — it must still red, naming 'wheels'.
+    ("V9b: EVERY consumer must be checked, not just one — wheels alone goes bad", "main",
+     _OK_MAIN.replace("if: ${{ needs.plan.outputs.nothing_to_release != 'true' }}",
+                      "if: ${{ needs.plan.outputs.nothing_to_release == 'true' }}"), "V9b"),
+    ("V9c: the outputs mapping is missing", "main",
+     _OK_MAIN.replace("    outputs:\n      nothing_to_release: "
+                      "${{ steps.decide.outputs.nothing_to_release }}\n", ""), "V9c"),
+    ("V9c: the mapping names a step id that does not exist", "main",
+     _OK_MAIN.replace("${{ steps.decide.outputs.nothing_to_release }}",
+                      "${{ steps.decdie.outputs.nothing_to_release }}"), "V9c"),
+    ("V9d: the decision step no longer invokes the checker", "main",
+     _OK_MAIN.replace("run: ci/release-plan/run.sh --github-output",
+                      "run: echo nothing_to_release=true >> \"$GITHUB_OUTPUT\""), "V9d"),
 ]
 
 
