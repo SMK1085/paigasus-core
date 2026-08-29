@@ -40,7 +40,7 @@ tasks:
   # don't race two concurrent `rustup target add` (SMA-427 CI fix). `--out-dir` stays relative to the
   # crate, so the glue still lands in the crate dir; the subshell reverts cwd for the copy-back.
   build:
-    script: 'touch ../../../rs/crates/libs/paigasus-kernel/src/lib.rs ../../../rs/crates/bindings/paigasus-node-bindings/src/lib.rs ../../../rs/crates/bindings/paigasus-wasm/src/lib.rs && pnpm exec napi build --platform --cwd ../../../rs/crates/bindings/paigasus-node-bindings && ( cd ../../../rs/crates/bindings/paigasus-wasm && wasm-pack build . --target bundler --release --no-pack --out-dir .wasmpack-out --out-name paigasus_wasm ) && cp ../../../rs/crates/bindings/paigasus-wasm/.wasmpack-out/paigasus_wasm* ../../../rs/crates/bindings/paigasus-wasm/ && rm -rf ../../../rs/crates/bindings/paigasus-wasm/.wasmpack-out && pnpm exec tsc -p tsconfig.json --noEmit'
+    script: 'touch ../../../rs/crates/libs/paigasus-kernel/src/lib.rs ../../../rs/crates/bindings/paigasus-node-bindings/src/lib.rs ../../../rs/crates/bindings/paigasus-wasm/src/lib.rs && pnpm exec napi build --platform --cwd ../../../rs/crates/bindings/paigasus-node-bindings && ( cd ../../../rs/crates/bindings/paigasus-wasm && wasm-pack build . --target bundler --release --no-pack --out-dir .wasmpack-out --out-name paigasus_wasm -- --locked ) && cp ../../../rs/crates/bindings/paigasus-wasm/.wasmpack-out/paigasus_wasm* ../../../rs/crates/bindings/paigasus-wasm/ && rm -rf ../../../rs/crates/bindings/paigasus-wasm/.wasmpack-out && pnpm exec tsc -p tsconfig.json --noEmit'
     deps: ['^:build']
     inputs:
       - 'src/**/*'
@@ -128,7 +128,7 @@ tasks:
   # current source before the assertion (napi analog of py's `uv sync --reinstall-package`); it is
   # host-agnostic, unlike a per-triple `cargo clean --target`.
   test:
-    script: 'touch ../../../rs/crates/libs/paigasus-kernel/src/lib.rs ../../../rs/crates/bindings/paigasus-node-bindings/src/lib.rs ../../../rs/crates/bindings/paigasus-wasm/src/lib.rs && pnpm exec napi build --platform --cwd ../../../rs/crates/bindings/paigasus-node-bindings && ( cd ../../../rs/crates/bindings/paigasus-wasm && wasm-pack build . --target bundler --release --no-pack --out-dir .wasmpack-test-out --out-name paigasus_wasm ) && pnpm exec vitest run'
+    script: 'touch ../../../rs/crates/libs/paigasus-kernel/src/lib.rs ../../../rs/crates/bindings/paigasus-node-bindings/src/lib.rs ../../../rs/crates/bindings/paigasus-wasm/src/lib.rs && pnpm exec napi build --platform --cwd ../../../rs/crates/bindings/paigasus-node-bindings && ( cd ../../../rs/crates/bindings/paigasus-wasm && wasm-pack build . --target bundler --release --no-pack --out-dir .wasmpack-test-out --out-name paigasus_wasm -- --locked ) && pnpm exec vitest run'
     deps: ['^:build']
     inputs:
       - 'src/**/*'

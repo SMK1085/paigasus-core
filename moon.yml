@@ -16,7 +16,7 @@ tasks:
 
   deny:
     description: 'cargo-deny supply-chain/license/advisory gate over the rs/ workspace (SMA-375).'
-    command: 'cargo deny --manifest-path rs/Cargo.toml check'
+    command: 'cargo deny --locked --manifest-path rs/Cargo.toml check'
     toolchain: 'system'
     inputs:
       - 'rs/**/Cargo.toml'
@@ -215,7 +215,7 @@ tasks:
     # Run the generator crate-scoped from rs/ so rs/.cargo/config.toml is in scope, then assert the
     # committed corpus is unchanged. NEVER broaden to --workspace: the parity crate is a plain
     # lib+bin (no cdylib), so it needs none of the apple-darwin link flags the FFI cdylibs do.
-    script: '( cd rs && cargo run -p paigasus-kernel-parity --bin gen-parity-vectors ) && git diff --exit-code rs/crates/libs/paigasus-kernel-parity/vectors/'
+    script: '( cd rs && cargo run --locked -p paigasus-kernel-parity --bin gen-parity-vectors ) && git diff --exit-code rs/crates/libs/paigasus-kernel-parity/vectors/'
     toolchain: 'system'
     # Narrow inputs — `repo` owns the whole tree, so without these the guard would run on every change.
     inputs:
@@ -239,7 +239,7 @@ tasks:
     # the root `repo` project, while the crate's `test` inputs are project-relative — an ops-only
     # change never makes the crate affected, so without this task the drift guard would not run on
     # exactly the PRs that introduce drift. Same shape as parity-corpus-drift above.
-    script: '( cd rs && cargo nextest run --no-tests=pass -p paigasus-observability --test drift )'
+    script: '( cd rs && cargo nextest run --locked --no-tests=pass -p paigasus-observability --test drift )'
     toolchain: 'system'
     # Narrow inputs — `repo` owns the whole tree, so without these the guard would run on every change.
     inputs:
@@ -267,7 +267,7 @@ tasks:
       # docker-containers group still come from `profile.default`, which custom profiles inherit.
       # Its own profile, not `iam`: this task and paigasus-iam-rs:test can run concurrently, and a
       # shared store dir would clobber one report with the other (SMA-521).
-      ( cd rs && cargo nextest run --no-tests=pass -p paigasus-iam --test nats_permissions --test docker_preflight --profile iam-nats )
+      ( cd rs && cargo nextest run --locked --no-tests=pass -p paigasus-iam --test nats_permissions --test docker_preflight --profile iam-nats )
     toolchain: 'system'
     # Narrow inputs — `repo` owns the whole tree, so without these the guard runs on every change.
     # Per entry:
@@ -319,7 +319,7 @@ tasks:
     # it absent: fail the task only when the (successfully resolved) tree contains it.
     script: |
       cd rs
-      if ! out="$(cargo tree -p paigasus-wasm --target wasm32-unknown-unknown -e no-dev)"; then
+      if ! out="$(cargo tree --locked -p paigasus-wasm --target wasm32-unknown-unknown -e no-dev)"; then
         echo "cargo tree failed for paigasus-wasm (wasm32) — cannot verify getrandom absence" >&2
         exit 2
       fi
