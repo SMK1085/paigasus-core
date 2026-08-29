@@ -1,5 +1,11 @@
 # SMA-579 — Gated release job, npm activation, release guard: Implementation Plan
 
+> **Historical record.** This plan describes what was planned, not what shipped. Several
+> embedded code snippets contained defects — the `lstrip("./")` path bug, a process-substitution
+> exit-2 swallow, missing `read_text` error handling, and the `plan`-job fallback's dangling
+> outputs — that were found in review and corrected during execution. The code on this branch
+> does NOT match the code shown below. The spec and the shipped files are authoritative.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Ship the complete-but-inert irreversible half of the release path — tags, crates.io, PyPI and npm — behind `vars.PAIGASUS_RELEASE_ENABLED`, plus a CI gate that asserts every registry-reaching job is gated.
