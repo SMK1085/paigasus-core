@@ -70,11 +70,6 @@
 #   Check P2 the files those fields NAME exist on disk. uv_build does not auto-glob license
 #            files (SMA-378), so a declared-but-absent LICENSE ships a wheel with no licence
 #            text and nothing else notices.
-#   Check P-D6 .github/workflows/wheels.yml declares neither `secrets:` nor
-#            `id-token: write`. It is pull_request-triggered and same-repo PRs receive
-#            repository secrets, so moving the upload into it — the natural refactor once
-#            the artifacts are there — would reopen SMA-407 §7 review M2. wheels.yml's own
-#            header comment cites this gate; that check is what makes the citation true.
 #
 # The Python arm is deliberately SPELLING-LEVEL and pure-Python: this gate is in ci.yml's
 # required `moon ci` target list under `toolchain: 'system'`, which installs no maturin, so
@@ -1037,88 +1032,6 @@ assert_sdist_lint_tables() { # $@ crate dirs (absolute)
   return "$rc"
 }
 
-# Check P-D6 — assert wheels.yml never gains registry credentials (SMA-578 D6). It carries
-# a pull_request trigger, and same-repo PRs receive repository secrets — moving the upload
-# into it, the natural refactor once the artifacts are there, would reopen SMA-407 §7/M2.
-# The workflow's own header comment claims this gate asserts it; this function is what makes
-# that claim true.
-#
-# THREE spellings are banned, because the first two alone honoured the header's literal
-# wording while leaving its stated RATIONALE unasserted. A normal job needs no `secrets:`
-# key at all to read the `secrets` CONTEXT — that key appears only for reusable-workflow
-# pass-through — so
-#
-#     env:
-#       MATURIN_PYPI_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
-#
-# was MEASURED to pass, which is precisely the credential the decision exists to keep out
-# (SMA-578 review I2). Hence the third pattern.
-#
-# None of the patterns is line-anchored, because YAML inline FLOW mappings evade an anchor:
-# `permissions: { id-token: write }` and `secrets: inherit` inside a flow mapping were both
-# measured green against `(?m)^\s*…` (review Minor 2). repo:actionlint bans inline flow only
-# for trigger filters, so nothing else forbids that spelling here.
-#
-# Dropping the anchor is only safe because comments are stripped FIRST: wheels.yml's own
-# header quotes every banned spelling verbatim, so an unanchored match over raw text would
-# make the workflow fail on the very comment describing the rule.
-assert_wheels_has_no_credentials() { # $1 workflow path
-  python3 - "$1" <<'PY'
-import re, sys
-
-# (pattern, message). Non-vacuity: an empty table would pass on anything.
-PATTERNS = (
-    (r'(?:^|[\s{,])id-token\s*:\s*write\b', "declares `id-token: write`"),
-    (r'(?:^|[\s{,])secrets\s*:', "declares `secrets:`"),
-    (r'\$\{\{\s*secrets\.', "reads the `secrets` context (`${{ secrets.… }}`)"),
-)
-
-if not PATTERNS:
-    print("FATAL: empty pattern table — this check would pass vacuously", file=sys.stderr)
-    raise SystemExit(2)
-
-try:
-    text = open(sys.argv[1], encoding="utf-8").read()
-except OSError as exc:
-    print(f"FATAL: cannot read {sys.argv[1]}: {exc}", file=sys.stderr)
-    raise SystemExit(2)
-
-
-def strip_comments(src):
-    """Blank out YAML comments so the unanchored patterns cannot match prose.
-
-    YAML starts a comment at a `#` that is at the start of a line or preceded by
-    whitespace, and not inside a quoted scalar. That is exactly the rule applied here —
-    without it, wheels.yml's own header (which quotes `secrets:` and `id-token: write` to
-    state the ban) would trip the ban it documents.
-    """
-    out = []
-    for line in src.splitlines():
-        in_single = in_double = False
-        cut = None
-        for i, ch in enumerate(line):
-            if ch == "'" and not in_double:
-                in_single = not in_single
-            elif ch == '"' and not in_single:
-                in_double = not in_double
-            elif ch == "#" and not in_single and not in_double and (i == 0 or line[i - 1] in " \t"):
-                cut = i
-                break
-        out.append(line if cut is None else line[:cut])
-    return "\n".join(out)
-
-
-body = strip_comments(text)
-bad = [msg for pattern, msg in PATTERNS if re.search(pattern, body, re.M)]
-if bad:
-    print("Check P-D6 FAILED: wheels.yml " + " and ".join(bad) +
-          " — it is pull_request-triggered, so a same-repo PR would receive the "
-          "credential. Publishing belongs in release.yml (SMA-407 §7 review M2).",
-          file=sys.stderr)
-    raise SystemExit(1)
-PY
-}
-
 # Discovery + Checks P0/P1/P2, composed. main() and --negative-control both go through THIS
 # function rather than each assembling the steps themselves, so a fixture row exercises the
 # composition production actually uses — the wiring, not only the verdict (SMA-542).
@@ -1708,59 +1621,6 @@ $scanroot/rs/crates/bindings/paigasus-py-bindings/pyproject.toml"
   _expect_rc 2 "Check P1 (the sdist wrapper with no crate dirs is INFRA, not a vacuous pass)" \
     assert_sdist_lint_tables
 
-  # --- SMA-578 review I2 + Minor 2: the credential spellings an anchored regex missed ---
-  # The measured bypass: a normal job needs no `secrets:` KEY to read the `secrets` CONTEXT.
-  { printf 'on:\n  pull_request:\njobs:\n  a:\n    steps:\n'
-    printf '      - name: upload to PyPI\n        env:\n'
-    printf '          MATURIN_PYPI_TOKEN: ${{ secrets.PYPI_API_TOKEN }}\n'
-    printf '        run: maturin upload dist/*\n'
-  } >"$tmp/ctx-wheels.yml"
-  _expect_rc 1 "Check P-D6 (a \${{ secrets.… }} context read in a job env)" \
-    assert_wheels_has_no_credentials "$tmp/ctx-wheels.yml"
-
-  # Inline FLOW mappings — invisible to a line-anchored pattern.
-  printf 'on:\n  pull_request:\njobs:\n  a:\n    permissions: { id-token: write, contents: read }\n' \
-    >"$tmp/flow-idtoken.yml"
-  _expect_rc 1 "Check P-D6 (id-token: write inside an inline flow mapping)" \
-    assert_wheels_has_no_credentials "$tmp/flow-idtoken.yml"
-  printf 'on:\n  pull_request:\njobs: { a: { uses: ./.github/workflows/x.yml, secrets: inherit } }\n' \
-    >"$tmp/flow-secrets.yml"
-  _expect_rc 1 "Check P-D6 (secrets: inherit inside an inline flow mapping)" \
-    assert_wheels_has_no_credentials "$tmp/flow-secrets.yml"
-
-  # Comment stripping. Dropping the line anchor is only safe because comments go first —
-  # wheels.yml's own header quotes every banned spelling to STATE the ban, so without this
-  # the workflow would fail on the comment describing the rule. A quoted `#` must NOT be
-  # read as a comment, or the ban could be smuggled past behind one.
-  { printf '# this workflow must never declare `secrets:` or `id-token: write`\n'
-    printf 'on:\n  pull_request:\njobs:\n  a:\n    name: "sharp # sign"\n'
-    printf '    permissions:\n      contents: read\n'
-  } >"$tmp/comment-wheels.yml"
-  _expect_rc 0 "Check P-D6 (banned spellings quoted in a COMMENT do not trip the ban)" \
-    assert_wheels_has_no_credentials "$tmp/comment-wheels.yml"
-  printf 'on:\n  pull_request:\njobs:\n  a:\n    name: "x # y"\n    permissions:\n      id-token: write\n' \
-    >"$tmp/hash-in-string.yml"
-  _expect_rc 1 "Check P-D6 (a # inside a quoted scalar does not blind the scan to what follows)" \
-    assert_wheels_has_no_credentials "$tmp/hash-in-string.yml"
-
-  # D6 — wheels.yml must never carry registry credentials.
-  printf 'on:\n  pull_request:\njobs:\n  a:\n    permissions:\n      id-token: write\n' \
-    >"$tmp/bad-wheels.yml"
-  _expect_rc 1 "Check P-D6 (id-token: write in wheels.yml)" \
-    assert_wheels_has_no_credentials "$tmp/bad-wheels.yml"
-  printf 'on:\n  workflow_call:\n    secrets:\n      PYPI_TOKEN:\n' >"$tmp/secrets-wheels.yml"
-  _expect_rc 1 "Check P-D6 (a workflow_call secrets: declaration in wheels.yml)" \
-    assert_wheels_has_no_credentials "$tmp/secrets-wheels.yml"
-  printf 'on:\n  pull_request:\njobs:\n  a:\n    permissions:\n      contents: read\n' \
-    >"$tmp/good-wheels.yml"
-  _expect_rc 0 "Check P-D6 (a credential-free wheels.yml passes)" \
-    assert_wheels_has_no_credentials "$tmp/good-wheels.yml"
-  _expect_rc 2 "Check P-D6 (workflow file unreadable is INFRA)" \
-    assert_wheels_has_no_credentials "$tmp/no-such-wheels.yml"
-  # The REAL workflow must satisfy the same assertion the fixtures do — this is what makes
-  # wheels.yml's own "repo:publish-metadata asserts this" header comment true.
-  _expect_rc 0 "Check P-D6 (the real wheels.yml passes)" \
-    assert_wheels_has_no_credentials "$REPO_ROOT/.github/workflows/wheels.yml"
   # Positive control: a clean fixture must pass, or every "red" above is meaningless.
   _meta "$tmp/good.json" "$(printf '%s' "$base" | sed 's/"version":"0.0.0"/"version":"0.1.0"/')"
   _expect_rc 0 "clean fixture passes (checks are not vacuously red)" \
@@ -1838,13 +1698,10 @@ main() {
 
   assert_check2_covered_everything "${enumerated[@]}" || exit $?
 
-
   # --- SMA-578: the PyPI arm. Absolute paths throughout, because main() runs from rs/. -
   status=0; run_pypi_arm "$REPO_ROOT" || status=$?
   [ "$status" -eq 0 ] || exit "$status"
   status=0; assert_sdist_lint_tables "${SDIST_SHIPPED_CRATES[@]/#/$REPO_ROOT/}" || status=$?
-  [ "$status" -eq 0 ] || exit "$status"
-  status=0; assert_wheels_has_no_credentials "$REPO_ROOT/.github/workflows/wheels.yml" || status=$?
   [ "$status" -eq 0 ] || exit "$status"
 
   echo "publish-metadata: all checks passed"

@@ -3,7 +3,10 @@
 # `repo:publish-metadata`
 
 Asserts every publishable crate is genuinely releasable (SMA-376), and that its
-`categories` are real crates.io slugs (SMA-529).
+`categories` are real crates.io slugs (SMA-529). A second, Python arm covers the PyPI-bound
+distributions (SMA-578) — the `P*` checks below. That arm asserts a DIFFERENT set of things:
+which packages are PyPI-bound, their `[project]` metadata, and that the files they name exist.
+It does not validate category slugs, which are a crates.io concept.
 
 ## Checks
 
@@ -18,6 +21,17 @@ Asserts every publishable crate is genuinely releasable (SMA-376), and that its
 | 2b | The packaged file list ships README + LICENSE, not moon.yml | 1 |
 | 3 | A 0.0.0 crate is release-blocked | 1 |
 | 4 | The freshness job's call site still exists | 1 / 2 |
+| P0 | The PyPI-bound set equals `EXPECTED_PYPI_PUBLISHABLE`, discovered at runtime | 1 / 2 |
+| P1 | Every PyPI-bound distribution carries the `[project]` metadata PyPI needs, pairs no SPDX expression with a `License ::` classifier, and — for sdist-shipped crates — carries Check 1c's non-denying lint table | 1 / 2 |
+| P2 | The README and LICENSE files named by those `[project]` fields exist on disk | 1 / 2 |
+
+The `P*` rows are the Python arm (SMA-578). They were absent from this table until
+SMA-593; the arm was never undocumented in the gate itself — `run.sh`'s own header
+describes each one — but this file did not list them. A fourth Python-arm check
+(SMA-578 D6) banned registry credentials in `.github/workflows/wheels.yml`. SMA-593
+moved that rule out of this gate entirely: it now lives in `repo:workflow-credentials`,
+which parses YAML instead of matching regexes and covers every
+`pull_request`/`pull_request_target`-triggered workflow, not `wheels.yml` alone.
 
 Exit codes: `0` pass, `1` the repo is wrong, `2` infrastructure failed. Check 4's `1 / 2`
 split: `assert_freshness_call_site` returns `2` when the workflow file is missing or

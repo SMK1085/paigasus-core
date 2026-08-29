@@ -43,6 +43,10 @@ tasks:
       - 'osv-scanner.toml'
       - 'ts/pnpm-lock.yaml'
       - 'py/uv.lock'
+      # SMA-593 — repo:workflow-credentials resolves pyyaml through its own uv project, so
+      # its lockfile is a third pip-ecosystem manifest. It is in ci/osv/run.sh's LOCKFILES
+      # array too; this entry is what re-keys the gate when that lockfile changes.
+      - 'ci/workflow-credentials/uv.lock'
       - '.prototools'
       - '.proto/plugins/osv-scanner.toml'
 
@@ -190,6 +194,11 @@ tasks:
       # Without this the pin is real but unreachable: the PR that deletes the block does not
       # schedule this task. Same reasoning as the ci/actionlint/**/* entry above.
       - 'ci/release-parity/**/*'
+      # SMA-593 — this task now pins ci/workflow-credentials/run.sh's --negative-control block
+      # (WORKFLOW_CREDENTIALS_SH_CALL_SITES), so a change under ci/workflow-credentials/ MUST
+      # re-key it. Without this the pin is real but unreachable: the PR that deletes the block
+      # does not schedule this task. Same reasoning as the ci/release-parity/**/* entry above.
+      - 'ci/workflow-credentials/**/*'
       # SMA-541 — this task now asserts that CLAUDE.md's documented full-graph command mirrors
       # ci.yml's `T=(...)` array, so a docs-only edit MUST re-key it; without this the assertion is
       # real but unreachable behind a cached PASS. (repo:actionlint's `**/*` already covers
@@ -509,7 +518,7 @@ tasks:
       - '.proto/plugins/promtool.toml'
 
   publish-metadata:
-    description: 'Assert every publishable crate carries crates.io-valid metadata, packages exactly the intended files, and cannot be released by release-plz while still at the 0.0.0 stub floor (SMA-376); and that every PyPI-bound distribution carries PyPI-valid metadata whose declared README/LICENSE files exist, while wheels.yml stays credential-free (SMA-578).'
+    description: 'Assert every publishable crate carries crates.io-valid metadata, packages exactly the intended files, and cannot be released by release-plz while still at the 0.0.0 stub floor (SMA-376); and that every PyPI-bound distribution carries PyPI-valid metadata whose declared README/LICENSE files exist (SMA-578).'
     # The self-test runs FIRST: a gate that cannot report red is worse than no gate, and it
     # is sub-second, so paying for it before the real (network + compile) checks is free.
     # Moon does not enable errexit for `script:` blocks — same latent defect as the
@@ -544,23 +553,19 @@ tasks:
       - 'rs/.cargo/config.toml'
       - 'rs/release-plz.toml'
       - '.gitignore'
-      # The PyPI arm (SMA-578). wheels.yml is an input because Check P-D6 ASSERTS ON IT;
-      # without it the credential ban would serve a cached pass on exactly the PR that
-      # adds a registry credential.
-      #
-      # The py/ entries are SINGLE-LEVEL GLOBS, matching run.sh's PYPI_SCAN_GLOB. They
-      # were literal per-package paths until SMA-578 review I1 measured the hole that
-      # leaves: a PR ADDING a PyPI-bound package under py/packages/ touches no listed
-      # input, so Moon never selects this task and the new package's metadata is never
-      # checked at all. A glob selects the task for a package that does not exist yet;
-      # a literal list cannot. ONE level, never `**/`: a recursive glob would sweep in
-      # py/pyproject.toml (a uv virtual root with no [project] table) and node-gyp's
-      # copy under ts/node_modules in a provisioned tree — `py/packages/*/` matches
-      # neither. README/LICENSE are globbed because Check P2 asserts they EXIST, so
-      # deleting one must select this task rather than replay a cached pass. The
-      # bindings crate's pyproject/README/LICENSE are already covered by
-      # 'rs/crates/**/*' above.
-      - '.github/workflows/wheels.yml'
+      # The PyPI arm (SMA-578). The py/ entries are SINGLE-LEVEL GLOBS, matching
+      # run.sh's PYPI_SCAN_GLOB. They were literal per-package paths until SMA-578
+      # review I1 measured the hole that leaves: a PR ADDING a PyPI-bound package
+      # under py/packages/ touches no listed input, so Moon never selects this task
+      # and the new package's metadata is never checked at all. A glob selects the
+      # task for a package that does not exist yet; a literal list cannot. ONE
+      # level, never `**/`: a recursive glob would sweep in py/pyproject.toml (a uv
+      # virtual root with no [project] table) and node-gyp's copy under
+      # ts/node_modules in a provisioned tree — `py/packages/*/` matches neither.
+      # README/LICENSE are globbed because Check P2 asserts they EXIST, so deleting
+      # one must select this task rather than replay a cached pass. The bindings
+      # crate's pyproject/README/LICENSE are already covered by 'rs/crates/**/*'
+      # above.
       - 'py/packages/*/pyproject.toml'
       - 'py/packages/*/README.md'
       - 'py/packages/*/LICENSE'
@@ -726,3 +731,42 @@ tasks:
     inputs:
       - 'rs/crates/services/*/src/adapters/http/**/*.rs'
       - 'ci/http-extractor/**/*'
+
+  workflow-credentials:
+    description: 'Assert no pull-request-triggered workflow declares a registry credential or an individual write permission (SMA-593).'
+    # WHY THIS EXISTS — a same-repo pull request receives repository secrets, so a credential
+    # in a pull_request-triggered workflow is readable by any code that PR introduces
+    # (SMA-407 §7 review M2). This was P-D6 inside repo:publish-metadata, guarding wheels.yml
+    # alone with three regexes over comment-stripped text; SMA-593 measured FOURTEEN bypasses,
+    # including `permissions: write-all` and a YAML alias that no text scan reaches.
+    #
+    # WHY ITS OWN GATE — repo:publish-metadata runs `cargo publish --dry-run` per publish
+    # group. Widening THAT gate to every workflow would put a cargo build on every ci.yml
+    # edit, on a required check. This gate is a sub-second YAML parse instead.
+    #
+    # The first glob is IDENTICAL to workflow_credentials.py's SCAN_GLOB on purpose:
+    # scheduling and scanning must not drift apart. `.y*ml` covers BOTH extensions — Actions
+    # accepts .yaml, and globbing .yml alone is a complete bypass by rename.
+    #
+    # `--self-test` and `--negative-control` run FIRST and in the SAME block: a gate that
+    # cannot report red is worse than no gate. `set -euo pipefail` is REQUIRED — Moon does
+    # not enable errexit for `script:` blocks, so without it a failing control is masked by
+    # the passing real run. These four lines are pinned by SELF_SCHEDULED_GATES.
+    script: |
+      set -euo pipefail
+      bash ci/workflow-credentials/run.sh --self-test
+      bash ci/workflow-credentials/run.sh --negative-control
+      bash ci/workflow-credentials/run.sh
+    toolchain: 'system'
+    inputs:
+      - '.github/workflows/*.y*ml'
+      # A DOT-PREFIXED workflow needs its own entry: a `*` does not match a leading dot in
+      # moon's matcher any more than in python's glob, and the checker was widened with
+      # include_hidden for the same reason. Without this a PR adding ONLY
+      # `.github/workflows/.x.yml` would not select this gate, so the widened scan would
+      # never run on it. Matches zero tracked files today — see ALLOW_DEAD_INPUT.
+      - '.github/workflows/.*.y*ml'
+      - 'ci/workflow-credentials/**/*'
+      # The gate shells out to `uv`, whose version is pinned here — without this input a uv
+      # bump would not invalidate a cached PASS, exactly as the release-parity tasks list it.
+      - '.prototools'

@@ -112,7 +112,8 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   :redis-connect-single-site :iam-docker-policy-single-site :error-code-single-site
   :http-extractor-envelope :input-liveness :promtool :observability-drift
   :nats-permissions :release-parity :release-parity-py :release-parity-ts
-  :publish-metadata :version-lockstep --base origin/main --include-relations`
+  :publish-metadata :version-lockstep :workflow-credentials --base origin/main
+  --include-relations`
   <!-- ci-targets:end -->
 - A new `repo:*` gate reds `:affected-smoke` until it is in **both** `ci.yml`'s `T=(…)` array and
   the marker-delimited command above — `ci/affected-graph/ci_targets.py` asserts the two agree, and
@@ -290,8 +291,8 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   and both running inside `repo:affected-smoke`: `SELF_SCHEDULED_GATES` pins every
   self-scheduled gate's `moon.yml` invocation lines — `set -euo pipefail` included — for
   `input-liveness`, the three `release-parity*` tasks, `version-lockstep`,
-  `publish-metadata`, `error-code-single-site`, `affected-smoke`, `actionlint` and (SMA-587)
-  `http-extractor-envelope` (whole
+  `publish-metadata`, `error-code-single-site`, `affected-smoke`, `actionlint`, (SMA-587)
+  `http-extractor-envelope` and (SMA-593) `workflow-credentials` (whole
   lines, compared after stripping — reordering a flag or adding a trailing comment still
   reds it; a bare number here would only rot again as the registry grows, which is why this
   names its current membership instead), and `RELEASE_PARITY_SH_CALL_SITES` pins five discrete
@@ -393,7 +394,9 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   plus a source-verified sdist**, built by `.github/workflows/wheels.yml` (SMA-578) — a
   *reusable* workflow (`on: workflow_call`) that SMA-579's gated `release` job will consume. It
   must **never** declare `secrets:` or `id-token: write`: it carries a `pull_request` trigger, so
-  a same-repo PR would receive the credential — `repo:publish-metadata` asserts this. Four facts
+  a same-repo PR would receive the credential — `repo:workflow-credentials` asserts this, and it
+  applies the same ban to EVERY `pull_request`/`pull_request_target`-triggered workflow, not to
+  `wheels.yml` alone (SMA-593; it was `repo:publish-metadata`'s P-D6 until then). Four facts
   that cost a measurement each: (1) maturin injects the apple-darwin `-undefined dynamic_lookup`
   args **itself**, so an sdist builds on macOS without `rs/.cargo/config.toml` — that file exists
   for plain `cargo build`, as its own comment says, and the old "no sdist" rule rested on a false
@@ -435,6 +438,30 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   behaviour: a wheel needing LESS than its `manylinux_2_17` tag promises is correct, since the
   tag declares a minimum platform. When one of these reds, read what the tool produced, confirm
   it is correct, and re-pin the constant — never loosen the comparison to an inequality.
+- `repo:workflow-credentials` (SMA-593) asserts that no `pull_request`/`pull_request_target`
+  workflow **declares** a credential — a `secrets` key, `id-token: write`, `permissions:
+  write-all`, or a `secrets` context read. It says nothing about whether one could **obtain**
+  a credential by another path; the README's Non-goals list those, and no control in this repo
+  audits per-scope `permissions:` breadth (`repo:actionlint` does not, and zizmor is named in
+  prose but runs nowhere). A new gate of this shape carries **five** registry obligations, and
+  missing any one of them reds `:affected-smoke`, not this gate: `ci.yml`'s `T=(…)` array, the
+  marker-delimited command above, `SELF_SCHEDULED_GATES` (its four `moon.yml` lines —
+  `set -euo pipefail`, `--self-test`, `--negative-control`, the real run),
+  `SELF_TASK_EXPECTED_GLOBS` (both literal `inputs`), and
+  `T_AFFECTED_SMOKE_REQUIRED_INPUTS` in `ci/actionlint/run.sh`, which floors
+  `ci/workflow-credentials/**/*` among `:affected-smoke`'s own inputs — without that last one
+  the script pin below stays green on exactly the PR that breaks it.
+  `WORKFLOW_CREDENTIALS_SH_CALL_SITES` pins **five** lines in `run.sh`, and the fifth is an
+  ASSERTION line: with only the flag parse, the dispatch arm and the two report lines pinned,
+  deleting every `_expect` and `grep` row left all four byte-identical and the control exited 0
+  having asserted nothing (MEASURED).
+  The **exit codes differ between the checker and the wrapper, deliberately**:
+  `workflow_credentials.py` exits **3** for an assertion failure, and `run.sh` maps 3 -> 1 and
+  everything else -> 2. `uv` itself exits 1 on a failed resolution, so a shared code would let
+  a PyPI outage read as "a workflow declares a credential". Do not "normalize" the checker to 1.
+  `EXPECTED_PR_SUBJECTS` is a **hand-maintained strict-equality** pin of the five subject
+  filenames — a new `pull_request`-triggered workflow reds this gate until someone adds it,
+  which is the point, so re-baseline it deliberately rather than loosening the comparison.
 - `moon query projects --json` **errors** on Moon 2.5.3 too (`unexpected argument '--json' found`,
   re-checked on the 2.5.3 bump, SMA-595) —
   bare `moon query projects` already emits JSON. **Measure its exit status UNPIPED (2):** `jq`

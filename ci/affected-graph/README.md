@@ -224,7 +224,7 @@ It also runs several checks that the per-case project sets structurally **cannot
   `repo:error-code-single-site` (three) and `repo:actionlint` (`("**/*",)`, the premise every
   check in `ci/actionlint/run.sh` — 8, 8b, 8c, 8d and 8e — relies on, itself pinned back from
   `SELF_TASK_EXPECTED_GLOBS["actionlint"]`). The fourth, `repo:affected-smoke`, is instead
-  registered in `SELF_TASK_GLOBS_EXEMPT` with a delegation reason: its own nineteen inputs are
+  registered in `SELF_TASK_GLOBS_EXEMPT` with a delegation reason: its own twenty inputs are
   the most load-bearing list in the repo — every pin in this file is reachable only because
   `moon.yml` still lists `moon.yml` itself among them — so an exact-match copy here would make
   `repo:affected-smoke` the sole judge of its own reachability, the exact defect the delegation

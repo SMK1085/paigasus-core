@@ -9,7 +9,8 @@ name: wheels
 # DECISION (SMA-578 D6): this workflow must NEVER declare `secrets:` or `id-token: write`.
 # It carries a `pull_request` trigger, and same-repo PRs receive repository secrets — putting
 # a registry credential here is the exfiltration hazard SMA-407 §7 review M2 exists to
-# prevent. repo:publish-metadata asserts this.
+# prevent. repo:workflow-credentials asserts this, for every pull_request-triggered
+# workflow in the repo, not for this one alone (SMA-593).
 #
 # TWO RULES that govern every assertion below:
 #   1. Exact equality, never a substring. prebuild.yml's `lipo -archs` lesson: `grep -q x86_64`

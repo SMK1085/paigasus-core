@@ -70,6 +70,29 @@ updates:
           - minor
           - patch
 
+  # ---- Python: standalone uv project for repo:workflow-credentials (SMA-593) ----
+  # A SECOND uv entry, not a widening of the one above: dependabot resolves each `directory`
+  # independently, and this gate's project is outside the py/ workspace on purpose (it is CI
+  # tooling, not a shipped package). Without this entry its pinned pyyaml is in a lockfile that
+  # nothing watches, which the spec's "the pin is in a lockfile, where Dependabot sees it"
+  # justification assumed was already true. Settings mirror the /py block exactly.
+  - package-ecosystem: uv
+    directory: /ci/workflow-credentials
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Etc/UTC
+    commit-message:
+      prefix: "build(deps)"
+      prefix-development: "build(deps)"
+    groups:
+      uv-minor-patch:
+        applies-to: version-updates
+        update-types:
+          - minor
+          - patch
+
   # ---- GitHub Actions: workflows at repo root ----
   - package-ecosystem: github-actions
     directory: /

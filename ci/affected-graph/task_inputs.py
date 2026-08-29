@@ -104,7 +104,17 @@ SELF_EXPECTED_GLOBS = ("**/*",)
 # An entry is a RECORDED DECISION: the reason string is required to be non-blank AFTER STRIPPING
 # whitespace — "" and "   " are both an assertion failure, not merely "". Mirrors
 # cargo_moon_parity.py's ALLOW_NO_CARGO_BACKING, which uses the same `.strip()` test.
-ALLOW_DEAD_INPUT = {}
+ALLOW_DEAD_INPUT = {
+    # SMA-593. repo:workflow-credentials keys on dot-prefixed workflows as well as ordinary
+    # ones, because neither moon's matcher nor python's glob matches a leading dot with `*`.
+    # There is no such file today and there should never be one — the entry exists so that a
+    # PR ADDING one selects the gate rather than serving a cached pass. Removing it would
+    # reopen exactly that hole, which is why it is waived rather than deleted.
+    ("workflow-credentials", ".github/workflows/.*.y*ml"): (
+        "forward guard: no dot-prefixed workflow exists yet, and the gate must be scheduled "
+        "by the PR that first adds one (SMA-593)"
+    ),
+}
 
 
 def classify(pattern):

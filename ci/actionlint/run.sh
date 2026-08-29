@@ -2084,7 +2084,7 @@ affected_graph_wiring_verdict() {
 # MEASURED to match dot-prefixed paths, so a .github/-only PR does schedule it — and that
 # premise is itself now pinned, from ci_targets.py's SELF_TASK_EXPECTED_GLOBS["actionlint"].
 #
-# CONTAINMENT, not equality: the list is nineteen entries and legitimately grows every time a
+# CONTAINMENT, not equality: the list is twenty entries and legitimately grows every time a
 # gate keys on a new directory, so an exact match would red on every honest addition. The set
 # below is the WHOLE current list rather than a judged subset — a floor, not a judgement call.
 # The first design draft picked seven by a stated principle and an adversarial review showed the
@@ -2112,6 +2112,7 @@ T_AFFECTED_SMOKE_REQUIRED_INPUTS=(
   'ts/apps/*/package.json'
   'ci/actionlint/**/*'
   'ci/release-parity/**/*'
+  'ci/workflow-credentials/**/*'
   'CLAUDE.md'
   '.prototools'
 )
@@ -2292,7 +2293,7 @@ affected_smoke_block_verdict() {
   # unquoting one would make `ci/**` match anything, which is why they are never bare.
   recs_hay="$nl$recs$nl"
 
-  # A block we could not parse cannot support a per-line answer, and nineteen missing-input rows
+  # A block we could not parse cannot support a per-line answer, and twenty missing-input rows
   # on top of the real problem would bury it. Report the structural verdict alone.
   case "$recs_hay" in
     *"${nl}ERR${tab}"*)
@@ -3030,7 +3031,7 @@ affected_smoke_block_self_test() {
   }
 
   # `q` rather than the '"'"' idiom: these fixtures are almost entirely single-quoted YAML
-  # scalars, and the escaped form is unreadable nineteen entries deep.
+  # scalars, and the escaped form is unreadable twenty entries deep.
   local q="'" wired glob line
 
   wired="tasks:
@@ -3146,7 +3147,7 @@ out-of-order-script ci/affected-graph/run.sh' "$reordered"
       - ${q}CLAUDE.md${q}")"
 
   # Shapes this extractor refuses to guess at. Each reports its OWN token and nothing else: a
-  # block we could not parse cannot support a per-line answer, and nineteen missing-input rows on
+  # block we could not parse cannot support a per-line answer, and twenty missing-input rows on
   # top would bury the real problem.
   expect_smoke_block 'a folded script scalar fires bad-script-form' 'bad-script-form' \
     "$(rewrite_line "$wired" '    script: |' '    script: >')"
@@ -4430,7 +4431,7 @@ fi
 # whitespace, so indenting either one (by wrapping this block in a conditional, say) reds that pin
 # rather than silently satisfying it.
 # ---------------------------------------------------------------------------------------------
-[ "${#T_AFFECTED_SMOKE_REQUIRED_INPUTS[@]}" -ge 19 ] || infra "check 8e: T_AFFECTED_SMOKE_REQUIRED_INPUTS has ${#T_AFFECTED_SMOKE_REQUIRED_INPUTS[@]} entries, expected at least 19"
+[ "${#T_AFFECTED_SMOKE_REQUIRED_INPUTS[@]}" -ge 20 ] || infra "check 8e: T_AFFECTED_SMOKE_REQUIRED_INPUTS has ${#T_AFFECTED_SMOKE_REQUIRED_INPUTS[@]} entries, expected at least 20"
 [ "${#T_AFFECTED_SMOKE_REQUIRED_SCRIPT[@]}" -ge 3 ] || infra "check 8e: T_AFFECTED_SMOKE_REQUIRED_SCRIPT has ${#T_AFFECTED_SMOKE_REQUIRED_SCRIPT[@]} entries, expected at least 3"
 
 while IFS= read -r verdict; do

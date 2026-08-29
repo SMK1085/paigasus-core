@@ -186,7 +186,7 @@ reachable.
   `RELEASE_PARITY_SH_CALL_SITES` is reachable through, and `- 'moon.yml'` itself, whose removal is
   self-concealing (a root `moon.yml` edit whose own remaining globs no longer match the removed
   file) — was pinned by anything. It now is: check 8e in `ci/actionlint/run.sh` asserts
-  `repo:affected-smoke`'s `moon.yml` block still declares its whole nineteen-entry `inputs` list
+  `repo:affected-smoke`'s `moon.yml` block still declares its whole twenty-entry `inputs` list
   (`T_AFFECTED_SMOKE_REQUIRED_INPUTS`, matched by containment, since the list legitimately grows)
   and still runs its `set -euo pipefail` / `--negative-control` / real-run script lines in order
   (`T_AFFECTED_SMOKE_REQUIRED_SCRIPT`). It lives there rather than in `ci_targets.py` for the same

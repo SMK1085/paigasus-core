@@ -33,6 +33,7 @@ cd "$(git rev-parse --show-toplevel)" || exit 2
 LOCKFILES=(
   'ts/pnpm-lock.yaml'
   'py/uv.lock'
+  'ci/workflow-credentials/uv.lock'
 )
 
 args=(scan source --config osv-scanner.toml --format json)
@@ -65,7 +66,13 @@ for lf in "${LOCKFILES[@]}"; do
     cat "$stderr_file" >&2
     exit 2
   fi
-  count="$(printf '%s\n' "$line" | sed -n 's/.*found \([0-9][0-9]*\) packages.*/\1/p')"
+  # `packages\{0,1\}` — osv-scanner writes the count in the SINGULAR ("found 1 package") for a
+  # one-package lockfile, which the plural-only expression parsed to the empty string, so
+  # the zero-package branch below fired on a lockfile that had in fact been scanned
+  # (SMA-593, measured on ci/workflow-credentials/uv.lock). Widening it does NOT weaken the
+  # control: the assertion is `count is empty or 0`, and "found 0 packages" is itself
+  # plural, so a genuinely empty lockfile still parses to 0 and still fires.
+  count="$(printf '%s\n' "$line" | sed -n 's/.*found \([0-9][0-9]*\) packages\{0,1\}.*/\1/p')"
   if [ -z "$count" ] || [ "$count" -eq 0 ]; then
     echo "osv gate: '$lf' contributed 0 packages — it failed to parse, or the extractor regressed." >&2
     echo "  A zero-package lockfile makes 'no vulnerabilities' vacuous." >&2
