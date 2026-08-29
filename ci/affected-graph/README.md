@@ -170,11 +170,21 @@ It also runs several checks that the per-case project sets structurally **cannot
   truncated 176-package lock it exits 0 and rewrites the lock to 548. `REQUIRED_LOCKED_TASKS` is
   its anti-vacuity floor, for the reason `REQUIRED_FFI_TASKS` carries: a derived set that shrinks
   to empty asserts nothing while still printing PASS.
-  Not covered, two things. A cargo call inside a `.sh` that a Moon task invokes is not in moon's
-  resolved command string, so it is outside A8's derived set. And the literal-cargo half tests
-  `--locked` PER BLOB, not per invocation: a script-form task running two cargo commands with the
-  flag on only one of them would pass — the same vacuity class the wrapper rule closes, left open
-  here because a per-invocation split needs a shell parse the gate deliberately does not do.
+  A cargo call inside a `ci/**/*.sh` a Moon task invokes IS in scope since SMA-599
+  (`check_cargo_locked_scripts`): the derivation follows the script and classifies each line
+  under the conservative rule A8's script arm and A10 share — only a heredoc BODY, a `#` comment
+  tail and a `$(( ... ))` arithmetic expansion are excluded from what the shell executes; quoted
+  string literals are NOT stripped, so a cargo verb sitting inside one reports like any other and
+  is waived by hand (`ALLOW_UNLOCKED_CARGO_SCRIPT`) rather than silently excluded. Two limits
+  remain. The scan is PATH-INSENSITIVE (spec L1) — it reports a line the task's arguments may
+  never reach, which is why `repo:version-lockstep`'s `cargo update -w` is waived rather than
+  excluded. And following is one level deep and shell-only: a script invoking another script,
+  `ops/nats/check-subjects.sh`, and the three `.py` gate entrypoints are all unfollowed.
+  Separately, the literal-cargo half still tests `--locked` PER BLOB, not per invocation: a
+  task's own `command`/`args` field chaining two cargo calls with the flag on only one of them
+  would pass — the same vacuity class the wrapper rule closes, left open here because a
+  per-invocation split needs a shell parse the gate deliberately does not do for a task's own
+  command field.
   Nothing is wrong today: exactly one task has more than one regex match
   (`repo:wasm-getrandom-free`, whose second match sits inside an `echo`), and its real cargo call
   is locked.
@@ -203,6 +213,23 @@ It also runs several checks that the per-case project sets structurally **cannot
   other assertion here is identical. **Adding a crate directory** (a fourth sibling of
   `libs`/`services`/`bindings`) needs a new `members` entry; adding a crate inside an existing one
   does not.
+- **A10** (`check_cargo_config_inputs` in `cargo_moon_parity.py`, SMA-599, findings key `a10`) is
+  every Moon task whose cargo subcommand COMPILES or LINKS, with cwd inside `rs/`, keying on
+  `rs/.cargo/config.toml`. Scope is a CONJUNCTION: the verb predicate (`CONFIG_SENSITIVE_VERBS`,
+  deliberately NOT A8's `LOCK_RESOLVING_VERBS` — reusing that list would have left `cargo fmt` in
+  scope by an accident of A8's lock-oriented list, not a stated exclusion) and a cwd rule that
+  reads RAW text, so `RS_DIR="$REPO_ROOT/rs"` … `cd "$RS_DIR"` still resolves. `cargo fmt`,
+  `cargo tree`, `cargo metadata`, `cargo deny` and `cargo machete` are out of scope BY VERB — none
+  compiles or links. `repo:deny` and `repo:machete` also fall out on the cwd half: both run from
+  the repo ROOT via `--manifest-path rs/Cargo.toml` — MEASURED on cargo 1.95.0, a malformed
+  `rs/.cargo/config.toml` fails cwd=rs/ at rc 101 but leaves cwd=root+`--manifest-path` at rc 0,
+  so `--manifest-path` does not move cargo's config walk. A10 reads moon's RESOLVED inputs, so its
+  four inherited lines in `.moon/tasks/rust.yml` (`build`/`build-release`/`test`/`lint`) each
+  cover thirteen crates — deleting one reds thirteen tasks. `ALLOW_MISSING_CARGO_CONFIG` ships
+  EMPTY; every exclusion is structural. A10 does NOT close the general problem: it shares
+  `derive_cargo_tasks`/`CARGO_INVOCATION_RE` with A8, built from `LOCK_RESOLVING_VERBS`, so a
+  subcommand outside that list (`cargo llvm-cov`, `insta`, `udeps`, `bloat`) yields an empty
+  derivation and stays invisible to A10 too (spec L11).
 - **`ci-targets`** (`ci_targets.py`, SMA-541) asserts `ci.yml`'s hand-written `moon ci` target array
   is complete and live: **C1** every CI-eligible `repo:*` task appears in `T=(…)` and — strict
   equality, not a subset — nothing in `T` names a `repo` task that is switched off; **C2** every `T`
