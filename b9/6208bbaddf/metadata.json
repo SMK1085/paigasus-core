@@ -3,7 +3,7 @@
   "checkpoint_id": "b96208bbaddf",
   "strategy": "manual-commit",
   "branch": "feature/sma-dependabot-182-fix",
-  "checkpoints_count": 2,
+  "checkpoints_count": 3,
   "files_touched": [
     "ts/pnpm-lock.yaml"
   ],
@@ -20,6 +20,13 @@
       "transcript": "/b9/6208bbaddf/1/full.jsonl",
       "compact_transcript": "/b9/6208bbaddf/1/transcript.jsonl",
       "content_hash": "/b9/6208bbaddf/1/content_hash.txt",
+      "prompt": ""
+    },
+    {
+      "metadata": "/b9/6208bbaddf/2/metadata.json",
+      "transcript": "/b9/6208bbaddf/2/full.jsonl",
+      "compact_transcript": "/b9/6208bbaddf/2/transcript.jsonl",
+      "content_hash": "/b9/6208bbaddf/2/content_hash.txt",
       "prompt": ""
     }
   ],
