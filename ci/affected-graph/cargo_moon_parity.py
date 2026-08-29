@@ -248,6 +248,41 @@ ALLOW_UNLOCKED_CARGO = {
     ),
 }
 
+# SMA-599 — waivers for cargo lines inside a gate's own script. Keyed by
+# (script path, stripped segment text) and NOT by line number: a line-number key would red
+# repo:affected-smoke on any unrelated insertion above the line, in a 620-line file that
+# SMA-576 and SMA-579 both edited. The uniqueness assertion is what makes text safe — a text
+# occurring twice is ambiguous and is reported rather than silently covering both.
+#
+# A stale entry (text no longer present) is a row, the stale-skip idiom
+# ci/actionlint/run.sh:2376-2383 already uses.
+ALLOW_UNLOCKED_CARGO_SCRIPT = {
+    ("ci/version-lockstep/run.sh", "cargo update -w --offline >/dev/null 2>"): (
+        "MEASURED unreachable from the Moon task (SMA-599 §2.4): repo:version-lockstep runs "
+        "run.sh --self-test, --negative-control and bare, while this line is inside "
+        "run_write(), reached only by `--write`. `--locked` would defeat the function, whose "
+        "PURPOSE is to regenerate the lock after writing the six non-Cargo version sites. The "
+        "scan is path-insensitive and cannot see this (L1), so the waiver stands in for it; "
+        "check_version_lockstep_no_write below is what keeps the premise honest."
+    ),
+    ("ci/version-lockstep/run.sh", "cargo update -w >/dev/null )"): (
+        "the un-offline fallback of the line above, same reason"
+    ),
+    ("ci/version-lockstep/run.sh", 'die_infra "cargo update -w failed (site 16)"'): (
+        "PROSE, not an invocation: the failure message for the two lines above. The "
+        "conservative rule does not strip quoted strings — that stripping is exactly what "
+        "silently dropped real invocations before SMA-599's classifier was replaced — so a "
+        "cargo verb inside a diagnostic surfaces as a row and is waived here instead. "
+        "A false positive waived is the trade the design makes for never missing a real call."
+    ),
+    ("ci/publish-metadata/run.sh",
+     'die_infra "FATAL: \\`cargo metadata\\` failed in $RS_DIR — nothing could be verified."'): (
+        "PROSE, same class as the entry above: the diagnostic for the `cargo metadata "
+        "--no-deps` call on the joined logical line starting at :1663. The real invocation "
+        "itself does not report, because --no-deps never resolves (MEASURED, §2.1)."
+    ),
+}
+
 # The floor, for the reason REQUIRED_FFI_TASKS carries: a derived set that shrinks to EMPTY
 # asserts nothing while still printing PASS. Every task named here MUST be in the derived set.
 REQUIRED_LOCKED_TASKS = (
@@ -255,6 +290,14 @@ REQUIRED_LOCKED_TASKS = (
     "paigasus-iam-rs:test",
     "repo:deny",
     "repo:wasm-getrandom-free",
+    # SMA-599 — these two reach cargo ONLY through a gate script, so they are the floor
+    # members that fail if script-following silently stops working. Without them a broken
+    # follower degrades the derived set in exactly the direction nothing else can see.
+    # This landed in Task 3 rather than Task 2 DELIBERATELY: the floor is read by
+    # check_cargo_locked, which cannot reach either task until this task's script arm
+    # exists, so extending it earlier reds repo:affected-smoke on every commit in between.
+    "repo:publish-metadata",
+    "repo:version-lockstep",
 )
 
 # SMA-528 — the tasks that must key on their crate's upstream sources. `fmt` is crate-local by
@@ -740,7 +783,7 @@ def derive_cargo_tasks(projects, root):
     return kinds
 
 
-def check_cargo_locked(projects, allow=ALLOW_UNLOCKED_CARGO, floor=REQUIRED_LOCKED_TASKS):
+def check_cargo_locked(projects, root=None, allow=ALLOW_UNLOCKED_CARGO, floor=REQUIRED_LOCKED_TASKS):
     """Return the A8 violation list: cargo-resolving tasks that do not pass --locked.
 
     An unlocked cargo invocation re-resolves the graph and REWRITES an inconsistent Cargo.lock in
@@ -769,6 +812,16 @@ def check_cargo_locked(projects, allow=ALLOW_UNLOCKED_CARGO, floor=REQUIRED_LOCK
     `derive_ffi_tasks`', which raises on ANY None blob: a None outside `floor` is skipped here.
     The difference is unreachable today only because `collect_findings` computes `a5` before `a8`,
     so A5's stricter rule aborts the run first. Reordering or removing A5 makes it reachable.
+
+    SMA-599 — `root`, when given, widens the FLOOR match (never the row emission above) with
+    `derive_cargo_tasks(projects, root)`. A task reaching cargo ONLY through a gate script
+    (`repo:publish-metadata`, `repo:version-lockstep`) never contains a literal `cargo <verb>`
+    or an FFI_MARKERS string in its OWN blob, so this function's blob-only `matched` can never
+    see it — that gap is exactly why those two floor members had to wait for the script arm
+    (`check_cargo_locked_scripts`) to exist before joining REQUIRED_LOCKED_TASKS. Widening only
+    the floor check, not row emission, keeps this function from reporting a script's own
+    unlocked lines twice — `check_cargo_locked_scripts` is the sole source of those rows.
+    `root=None` (every self-test call) preserves the old blob-only floor exactly.
     """
     rows = []
     matched = set()
@@ -809,12 +862,92 @@ def check_cargo_locked(projects, allow=ALLOW_UNLOCKED_CARGO, floor=REQUIRED_LOCK
                     f"{target} is in ALLOW_UNLOCKED_CARGO with an empty reason — an exemption "
                     f"is allowed, a silent one is not"
                 )
-    for target in sorted(set(floor) - matched):
+    # SMA-599 — widen the FLOOR match only (see docstring); row emission above is unaffected.
+    floor_matched = matched | set(derive_cargo_tasks(projects, root)) if root is not None else matched
+    for target in sorted(set(floor) - floor_matched):
         rows.append(
             f"A8 examines {len(matched)} task(s) and {target} is not among them — the "
             f"derivation has degraded and would assert nothing"
         )
     return rows
+
+
+def check_cargo_locked_scripts(projects, root, allow=None):
+    """A8 rows for cargo invocations inside the gate scripts a Moon task runs.
+
+    A blob-level derivation cannot see these: `repo:publish-metadata`'s invocation is
+    `bash ci/publish-metadata/run.sh`, while its `cargo package --list --locked` and
+    `cargo publish --dry-run --locked` live in the script. Before SMA-599 that whole class of
+    gate was outside A8.
+
+    Path-INSENSITIVE (SMA-599 L1): it reports a line the task's arguments may never reach.
+    That is why the version-lockstep waiver exists, and why a reviewer must check reachability
+    by hand rather than trusting a row.
+    """
+    allow = ALLOW_UNLOCKED_CARGO_SCRIPT if allow is None else allow
+    rows, seen = [], {}
+    for target in sorted(derive_cargo_tasks(projects, root)):
+        for path in task_script_refs(projects, root, target):
+            rel = path.relative_to(root).as_posix()
+            if rel in seen:
+                continue
+            lines = script_cargo_lines(path)
+            seen[rel] = lines
+            for line in lines:
+                text = line.segment.strip()
+                # Task 1's conservative rule leaves nothing "unclassifiable": every row is an
+                # ordinary row, and a benign string that mentions a cargo verb is waived here.
+                # Use `line.locked`, not `LOCKED_FLAG in text` — the classifier already scoped
+                # the flag to the segment tail AFTER the verb, and a bare substring test on the
+                # segment throws that scoping away.
+                if not line.resolves or line.locked:
+                    continue
+                reason = allow.get((rel, text))
+                if reason is None:
+                    rows.append(
+                        f"{rel}:{line.lineno} reaches cargo without {LOCKED_FLAG} — it will "
+                        f"re-resolve and REWRITE an inconsistent Cargo.lock in place: {text[:100]}"
+                    )
+                elif not reason.strip():
+                    rows.append(
+                        f"{rel}:{line.lineno} is in ALLOW_UNLOCKED_CARGO_SCRIPT with an empty "
+                        f"reason — an exemption is allowed, a silent one is not"
+                    )
+    # Stale and ambiguous waiver entries. A waiver that matches nothing has silently stopped
+    # asserting; one that matches twice covers a line nobody reviewed.
+    for (rel, text), _reason in sorted(allow.items()):
+        hits = [l for l in seen.get(rel, []) if l.segment.strip() == text]
+        if not hits:
+            rows.append(
+                f"ALLOW_UNLOCKED_CARGO_SCRIPT entry ({rel}, {text[:60]!r}) matches no line — "
+                f"the waiver is stale; delete it or update the text"
+            )
+        elif len(hits) > 1:
+            rows.append(
+                f"ALLOW_UNLOCKED_CARGO_SCRIPT entry ({rel}, {text[:60]!r}) occurs "
+                f"{len(hits)} times — the key is ambiguous and would waive a line nobody reviewed"
+            )
+    return rows
+
+
+def check_version_lockstep_no_write(projects):
+    """The premise of ALLOW_UNLOCKED_CARGO_SCRIPT's two entries, asserted.
+
+    Their reason is "unreachable, because the Moon task never passes --write". Adding
+    `--write` to that task would make both waivers silently wrong, so assert it directly.
+    """
+    blob = (projects.get("repo", {}).get("invocations") or {}).get("version-lockstep")
+    if blob is None:
+        return [
+            "repo:version-lockstep has no resolved invocation — ALLOW_UNLOCKED_CARGO_SCRIPT's "
+            "reachability premise cannot be evaluated"
+        ]
+    if "--write" in blob:
+        return [
+            "repo:version-lockstep now passes --write, so its `cargo update -w` lines ARE "
+            "reachable and their ALLOW_UNLOCKED_CARGO_SCRIPT waivers are wrong (SMA-599 §2.4)"
+        ]
+    return []
 
 
 def check_dockerfile_locked(root):
@@ -1373,6 +1506,16 @@ def self_test():
     # the LIST itself — arity first, so a shrunk list says so plainly, then the exact key sequence.
     if not EXPECTED_FINDING_KEYS:
         failures.append("EXPECTED_FINDING_KEYS is empty — the findings floor would assert nothing")
+    # SMA-599 — this tmp root holds ONLY rs/Dockerfile. That is safe because `ok` declares
+    # no invocation referencing a ci/**/*.sh, so task_script_refs never looks for one. If a
+    # future fixture adds such an invocation it MUST also create the script under this tmp
+    # root, or task_script_refs raises MoonOutputError and the arity check stops being
+    # about arity.
+    if any("ci/" in (blob or "") for p in ok.values()
+           for blob in (p.get("invocations") or {}).values()):
+        failures.append(
+            "the arity fixture now references a ci/ script but its tmp root does not create one"
+        )
     with tempfile.TemporaryDirectory() as tmp:
         # collect_findings now folds check_dockerfile_locked(root) into a8, which requires a real
         # rs/Dockerfile under root — write a locked one so this arity check stays about arity.
@@ -1688,6 +1831,61 @@ def self_test():
             failures.append("A8 did not raise infra on a missing rs/Dockerfile")
         except MoonOutputError:
             pass
+
+    # SMA-599 — A8's script arm.
+    with tempfile.TemporaryDirectory() as tmp:
+        probe = Path(tmp) / "ci" / "probe"
+        probe.mkdir(parents=True)
+        (probe / "run.sh").write_text("cd rs\ncargo update -w\ncargo build --locked\n")
+        fixture = {
+            "repo": {
+                "source_dir": ".", "deps": {}, "tasks": {},
+                "task_inputs": {}, "task_input_globs": {},
+                "invocations": {"g": "bash ci/probe/run.sh"},
+            },
+        }
+        # Fires on the unlocked resolving line, and NOT on the locked one.
+        rows = check_cargo_locked_scripts(fixture, Path(tmp), allow={})
+        if len(rows) != 1 or "cargo update -w" not in rows[0]:
+            failures.append(f"A8's script arm did not report exactly the unlocked line: {rows}")
+
+        # A waiver keyed by unique TEXT clears it.
+        allow_ok = {("ci/probe/run.sh", "cargo update -w"): "deliberate lock writer"}
+        if check_cargo_locked_scripts(fixture, Path(tmp), allow=allow_ok):
+            failures.append("A8's script arm ignored a valid text-keyed waiver")
+
+        # An empty reason is itself a row.
+        allow_bare = {("ci/probe/run.sh", "cargo update -w"): "  "}
+        if not any("empty reason" in r for r in
+                   check_cargo_locked_scripts(fixture, Path(tmp), allow=allow_bare)):
+            failures.append("A8's script arm accepted a waiver with an empty reason")
+
+        # A STALE waiver — text no longer present — must be reported, not ignored.
+        allow_stale = dict(allow_ok)
+        allow_stale[("ci/probe/run.sh", "cargo vendor")] = "gone"
+        if not any("matches no line" in r for r in
+                   check_cargo_locked_scripts(fixture, Path(tmp), allow=allow_stale)):
+            failures.append("A8's script arm did not report a stale waiver entry")
+
+        # A waiver whose text occurs TWICE is ambiguous and must be rejected.
+        (probe / "run.sh").write_text("cargo update -w\ncargo update -w\n")
+        if not any("occurs 2 times" in r for r in
+                   check_cargo_locked_scripts(fixture, Path(tmp), allow=allow_ok)):
+            failures.append("A8's script arm accepted a waiver text that is not unique")
+
+    if not ALLOW_UNLOCKED_CARGO_SCRIPT:
+        failures.append("ALLOW_UNLOCKED_CARGO_SCRIPT is empty — its stale-entry rule asserts nothing")
+
+    # The waivers' PREMISE, asserted. Both entries rest on "the Moon task never passes
+    # --write"; adding it would make them silently wrong.
+    write_fixture = {"repo": {"invocations": {"version-lockstep": "bash x.sh --write"}}}
+    if not check_version_lockstep_no_write(write_fixture):
+        failures.append("check_version_lockstep_no_write missed a --write in the task blob")
+    clean_fixture = {"repo": {"invocations": {"version-lockstep": "bash x.sh --self-test"}}}
+    if check_version_lockstep_no_write(clean_fixture):
+        failures.append("check_version_lockstep_no_write fired on a task that passes no --write")
+    if check_version_lockstep_no_write({"repo": {"invocations": {}}}) == []:
+        failures.append("check_version_lockstep_no_write treated an absent task as a pass")
 
     a1, a2, a3 = check(ok, crates)
     if (a1, a2, a3) != ([], [], []):
@@ -2385,7 +2583,12 @@ def collect_findings(projects, crates, root):
     """
     a1, a2, a3 = check(projects, crates)
     a5 = check_ffi_inputs(projects)
-    a8 = check_cargo_locked(projects) + check_dockerfile_locked(root)
+    a8 = (
+        check_cargo_locked(projects, root)
+        + check_dockerfile_locked(root)
+        + check_cargo_locked_scripts(projects, root)
+        + check_version_lockstep_no_write(projects)
+    )
     # SMA-594. Derived, never hand-listed, for the same reason `self_test`'s `complete_inputs` is:
     # these two hints named three files while the checks already demanded four, so a developer who
     # followed the advice verbatim was left with a still-red gate. `/`-prefixed because that is the
@@ -2467,7 +2670,11 @@ def collect_findings(projects, crates, root):
              "    script does not cover it.\n"
              "    An `A8 examines` row means the opposite — the derivation stopped matching a\n"
              "    task it must cover; fix that first, every other A8 row is meaningless until\n"
-             "    it passes."),
+             "    it passes.\n"
+             "    A `<script>:<line>` row is inside a gate's own run.sh: add `--locked` there, or an\n"
+             "    ALLOW_UNLOCKED_CARGO_SCRIPT entry keyed by (script, exact segment text). The scan is\n"
+             "    path-insensitive — check by hand whether the task's arguments actually reach that\n"
+             "    line before waiving it (SMA-599 L1)."),
     ]
 
     return findings
