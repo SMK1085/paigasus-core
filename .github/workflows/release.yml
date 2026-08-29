@@ -37,25 +37,24 @@ on:
   # What DOES bound it is enforced outside this repository, by GitHub environments and by the
   # registries, and it holds in both directions:
   #
-  #   * Keep `environment: release-publish` — the environment's deployment branch policy is
-  #     restricted to `main` ONLY, so a job entering it from any other ref fails.
-  #   * Remove `environment: release-publish` — the OIDC token then carries no environment claim,
-  #     and the crates.io and PyPI trusted publishers are configured to REQUIRE `release-publish`,
-  #     so both registries reject it. `NPM_TOKEN` is an environment secret on the same
-  #     environment, so npm loses its credential too.
+  #   * Keep the `environment:` key — that environment's deployment branch policy is restricted to
+  #     `main` ONLY, so a job entering it from any other ref fails.
+  #   * Remove it — the job loses every credential, because ALL of them are ENVIRONMENT secrets
+  #     rather than repository secrets: `NPM_TOKEN` and `PYPI_API_TOKEN` on `release-publish`, and
+  #     `PAIGASUS_BOT_*` on both `release-pr` and `release-publish`. An OIDC exchange loses its
+  #     environment claim too, which is what the crates.io trusted publishers require.
   #
-  # That pair is the boundary. It depends on the `release-publish` deployment branch policy staying
-  # `main`-only and on all three registry credentials staying bound to that environment — see
-  # docs/ops/RUNBOOK-release-activation.md §3. Do not relax either.
+  # That pair is the boundary, and it now covers EVERY job that touches a credential — `release-pr`
+  # on `release-pr`, and `release`/`publish-pypi`/`publish-npm` on `release-publish`. There are no
+  # repository secrets left; `gh api .../actions/secrets` returns an empty list.
   #
-  # WHAT THAT PAIR DOES NOT COVER, stated honestly: `release-pr` enters NO environment, and mints a
-  # `contents: write` + `pull-requests: write` App token from REPOSITORY secrets, which any run
-  # reaches regardless of ref. A dispatched ref can therefore still reach those credentials. The
-  # `if:` below narrows the accidental case, NOT the malicious one — an edited copy of this file
-  # simply deletes it. Closing it properly means moving PAIGASUS_BOT_APP_ID and
-  # PAIGASUS_BOT_PRIVATE_KEY to environment secrets on a `main`-only environment. That is an open
-  # decision (SMA-580 spec §3.3.1), deliberately not done blind: the preflight step below makes a
-  # botched secret migration SKIP GREEN rather than fail, so it cannot be verified before merge.
+  # It depends on both deployment branch policies staying `main`-only and on every credential
+  # staying an ENVIRONMENT secret. A repository secret of the same name would silently defeat this,
+  # because it resolves for any run regardless of ref. See
+  # docs/ops/RUNBOOK-release-activation.md §3. Do not relax either half.
+  #
+  # The `if: github.event_name == 'push'` on `release-pr` is NOT part of this boundary — an edited
+  # copy of this file on the dispatched ref deletes it. It closes the accidental case only.
   #
   # REMOVE this trigger once the first release has published and its verification has passed — see
   # that runbook's step J. NO GATE ENFORCES THAT REMOVAL.
@@ -569,6 +568,24 @@ jobs:
             || { echo "::error::missing dist-bindings/paigasus_py_bindings-$KERNEL_VERSION.tar.gz"; exit 1; }
           echo "OK: $found wheels + sdist at $KERNEL_VERSION"
 
+      # AUTH: a PyPI API TOKEN, temporarily, NOT the OIDC trusted publishing this job's
+      # `id-token: write` was added for (SMA-580).
+      #
+      # PyPI allows only ONE *pending* trusted publisher per (owner, repo, workflow, environment)
+      # tuple, and all three projects below share that tuple exactly — same repo, same
+      # `release.yml`, same `release-publish` environment. Registering the second one fails with
+      # "A pending trusted publisher matching this configuration has already been registered for a
+      # different project name". That is pypi/warehouse#16920, open since 2024-10, and it is the
+      # documented monorepo limitation, not a misconfiguration.
+      #
+      # The constraint binds PENDING publishers only. So: create all three projects with a token
+      # once, then register NORMAL trusted publishers on each — normal publishers may share a
+      # tuple, which is the ordinary monorepo case — then delete the token. Tracked in SMA-602
+      # alongside the identical npm bootstrap.
+      #
+      # `id-token: write` stays on this job: it is what the normal publishers will use, and
+      # removing it now would just have to be added back.
+      #
       # ORDER IS LOAD-BEARING: bindings, then the face. skip-existing makes a partial failure
       # re-runnable — PyPI returns 400 "file already exists" otherwise, so an un-skipped retry can
       # never succeed unaided. PyPI is delete-but-never-reuse.
@@ -578,6 +595,7 @@ jobs:
         with:
           packages-dir: dist-bindings
           skip-existing: true
+          password: ${{ secrets.PYPI_API_TOKEN }}
 
       - name: Publish paigasus-kernel
         if: steps.relinfo.outputs.kernel_release == 'true'
@@ -585,6 +603,7 @@ jobs:
         with:
           packages-dir: dist-face
           skip-existing: true
+          password: ${{ secrets.PYPI_API_TOKEN }}
 
       # Binds the proto distribution to the release, same reason as the wheel/sdist assertion
       # above: `PROTO_VERSION` was computed but never exported, so this upload shipped whatever
@@ -612,6 +631,7 @@ jobs:
         with:
           packages-dir: dist-proto
           skip-existing: true
+          password: ${{ secrets.PYPI_API_TOKEN }}
 
   publish-npm:
     name: publish to npm

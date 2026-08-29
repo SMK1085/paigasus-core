@@ -366,27 +366,48 @@ rather than relying on memory.
 
 ### 5.2 PyPI — step C
 
-Create a **pending publisher** for each of the three project names. Pending publishers are PyPI's
-mechanism for a project that does not exist yet.
+**A token first, then trusted publishing. Pending publishers cannot work here.**
+
+PyPI allows only **one pending** trusted publisher per `(owner, repo, workflow, environment)`
+tuple. All three projects share that tuple exactly — same repository, same `release.yml`, same
+`release-publish` environment — so registering the second fails with *"A pending trusted publisher
+matching this configuration has already been registered for a different project name"*. That is
+[pypi/warehouse#16920](https://github.com/pypi/warehouse/issues/16920), open since October 2024. It
+is the documented monorepo limitation, not a misconfiguration.
+
+The constraint binds **pending** publishers only. Normal publishers may share a tuple — that is the
+ordinary monorepo case. So:
+
+1. **Delete any pending publisher you already registered**, so nothing is half-configured.
+2. Create a PyPI **API token** at <https://pypi.org/manage/account/token/>. Scope it to *"Entire
+   account"* — the three projects do not exist yet, so there is nothing narrower to scope to.
+3. Add it to the **`release-publish` environment** as `PYPI_API_TOKEN`. **Environment secret, not a
+   repository secret** — a repository secret resolves for any run regardless of ref and would
+   defeat §3's boundary.
+4. The first release creates all three projects with it.
+5. **Afterwards**, add a *normal* trusted publisher to each of the three projects, then delete
+   `PYPI_API_TOKEN` and re-scope. Tracked in **SMA-602** together with the identical npm bootstrap.
+
+`publish-pypi` keeps `id-token: write`: it is what the normal publishers will use at step 5, and
+removing it now would only have to be added back.
+
+**Normal publisher fields, for step 5** (and for reference — they are what the pending form would
+have taken):
 
 | Field | Value |
 | --- | --- |
-| PyPI project name | `paigasus-py-bindings`, then `paigasus-kernel`, then `paigasus-proto` |
-| Repository owner and name | this repository |
-| Workflow filename | `release.yml` — **with the extension** |
+| Owner | `SMK1085` |
+| Repository name | `paigasus-core` |
+| Workflow name | `release.yml` — **with the extension** |
 | Environment name | `release-publish` |
 
-**There is no slot limit to check** — PyPI's documented limit is a rate limit of 100 trusted
-publishers per user or IP per 24 hours, so three is trivial. An earlier revision of this runbook
-told you to confirm three free slots; that was wrong.
+The three project names are `paigasus-py-bindings`, `paigasus-kernel` and `paigasus-proto`, taken
+from the `[project] name` in each `pyproject.toml`, not from the wheel filenames — the wheels use
+underscores, PyPI normalizes.
 
-Two things that *do* matter:
-
-- **Verify the field labels against the live form.** A wrong field fails *after* crates.io has
-  published.
-- **A pending publisher is invalidated if someone else registers the project name first.** The
-  three names are free today, and the window to step I is short, but the failure surfaces only at
-  the upload.
+**There is no slot limit to check.** PyPI's documented limit is a rate limit of 100 trusted
+publishers per user or IP per 24 hours. An earlier revision of this runbook told you to confirm
+three free slots; that was wrong.
 
 ### 5.3 crates.io Trusted Publishing — step E, after the seed
 
@@ -556,6 +577,7 @@ Both are temporary by decision. **No gate enforces either.**
 | Item | Removal condition |
 | --- | --- |
 | `workflow_dispatch` on `release.yml` | The first release has published and §7 has passed. Remove it in the same pull request that records the outcome |
+| `PYPI_API_TOKEN` | All three PyPI projects exist, so a *normal* trusted publisher can be added to each. Then delete the token. Tracked as **SMA-602** |
 | `NPM_TOKEN` | Every `@paigasus/*` package exists, so npm Trusted Publishing becomes configurable. **HARD DEADLINE: January 2027** — npm 2FA-bypass tokens lose direct publish then (GitHub changelog, 2026-07-31). Tracked as **SMA-602**, due 2026-12-15. Set the token's expiry to bound the gap |
 
 ---

@@ -562,32 +562,45 @@ The environment must still exist, because both PyPI's and crates.io's OIDC claim
 
 ## 5. Credentials
 
-### 5.1 PyPI — three pending publishers
+### 5.1 PyPI — a token first, then normal publishers
 
-Projects: `paigasus-py-bindings`, `paigasus-kernel`, `paigasus-proto`.
+**Revision 3 specified three pending publishers. That cannot work, and the failure was hit live at
+step C on 2026-08-29.**
 
-| Field | Value |
-| --- | --- |
-| PyPI project name | one per project, above |
-| Repository URL / owner + name | this repository |
-| Workflow filename | `release.yml` — **with the extension** |
-| Environment name | `release-publish` |
+PyPI allows only **one pending** trusted publisher per `(owner, repo, workflow, environment)`.
+All three projects share that tuple exactly, so the second registration fails with *"A pending
+trusted publisher matching this configuration has already been registered for a different project
+name"*. This is `pypi/warehouse#16920`, open since 2024-10 — the documented monorepo limitation.
 
-`publish-pypi` runs with `id-token: write` and no token.
+**My earlier research surfaced that issue and did not open it.** The three pending publishers were
+specified from the happy-path documentation alone.
 
-**Corrected 2026-08-29.** Revision 2 claimed PyPI "caps pending publishers per account" and told
-the operator to confirm three slots were free. **That was wrong** — it came from recollection, not
-measurement. PyPI's documented limit is a **rate limit: no more than 100 trusted publishers
-registered per user or IP in 24 hours.** Three is not close to it, and there is no slot accounting
-to check.
+**The constraint binds PENDING publishers only.** Normal publishers may share a tuple, which is the
+ordinary monorepo case. So PyPI takes the same bootstrap shape npm already needed:
 
-Two real cautions remain:
+1. A PyPI API token as `PYPI_API_TOKEN`, an **environment** secret on `release-publish`.
+2. `publish-pypi`'s three steps pass it as `password:`; the first release creates all three
+   projects.
+3. Afterwards, register a *normal* trusted publisher on each and delete the token — SMA-602.
 
-- **Confirm the field labels against the live form**, because a wrong field fails *after* crates.io
-  has published.
-- **A pending publisher is invalidated if someone else registers the project name before the first
-  publish** (PyPI's own documentation). The three names are free today (§1.1), and the window
-  between step C and step I is short, but the failure is silent until the upload.
+`id-token: write` stays on the job: it is what those normal publishers will use.
+
+**Why not the alternatives** (both were considered at step C):
+
+- *One pending publisher, enrol the rest later* — the first release would publish one project and
+  fail auth on two, a deliberate partial failure on the irreversible path, plus a hand edit to the
+  publish job between two releases.
+- *A distinct environment per project* — the environment is part of the tuple, so three
+  environments would give three distinct tuples. But a job declares only one environment, so
+  `publish-pypi` would have to split into three jobs. That restructures the irreversible path,
+  which `release.yml`'s own comments forbid, and complicates the §3.3 boundary.
+
+**Corrected alongside this:** revision 2 claimed PyPI "caps pending publishers per account" and
+told the operator to confirm three free slots. PyPI's documented limit is a **rate limit of 100
+trusted publishers per user or IP per 24 hours**. There is no slot accounting.
+
+**Still true:** a pending publisher is invalidated if another user registers the project name
+first, and the field labels should be checked against the live form.
 
 ### 5.2 npm — an Automation token, as an environment secret
 
@@ -851,6 +864,7 @@ Both are temporary by decision. Neither is enforced by any gate, which is why th
 | Item | Removal condition | Owner |
 | --- | --- | --- |
 | `workflow_dispatch` on `release.yml` (§6.3) | The first release has published and §7 has passed. Remove at **step J**, in the same pull request that records the outcome | owner |
+| `PYPI_API_TOKEN` (§5.1) | All three PyPI projects exist, so *normal* trusted publishers can be registered on each. Filed as **SMA-602** | owner |
 | `NPM_TOKEN` (§5.2) | Every `@paigasus/*` package exists, so npm Trusted Publishing becomes configurable. **HARD DEADLINE: January 2027**, when npm 2FA-bypass tokens lose direct publish (GitHub changelog, 2026-07-31). Filed as **SMA-602**, due 2026-12-15; set the token's expiry to bound the gap | owner |
 
 ### 9.2 Out of scope
