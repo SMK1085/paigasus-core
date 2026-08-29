@@ -503,8 +503,13 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 ```bash
 export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
 cd /Users/smaschek/dev/paigasus/paigasus-core/.claude/worktrees/sma-596
-env | grep -E '^(AI_AGENT|CLAUDECODE|CLAUDE_CODE_ENTRYPOINT)=' ; echo "--- markers above must be non-empty ---"
-env | grep -E '^PROTO_REPORTER=' || echo "PROTO_REPORTER unset (required)"
+# Assert the preconditions — do not merely print them. A precondition that only
+# reports leaves the run passing for the wrong reason, which is this issue's own
+# failure class.
+for v in AI_AGENT CLAUDECODE CLAUDE_CODE_ENTRYPOINT; do
+  [ -n "${!v-}" ] || { echo "ABORT: $v is not set — this test would prove nothing"; exit 1; }
+done
+[ -z "${PROTO_REPORTER-}" ] || { echo "ABORT: PROTO_REPORTER is set — unset it"; exit 1; }
 moon run repo:release-parity --force; echo "rc=$?"
 moon run repo:release-parity-py --force; echo "rc=$?"
 moon run repo:release-parity-ts --force; echo "rc=$?"

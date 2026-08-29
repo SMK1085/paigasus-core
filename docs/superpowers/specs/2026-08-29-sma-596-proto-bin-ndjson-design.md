@@ -365,8 +365,10 @@ is unset in the environment — otherwise the steps pass for the wrong reason.
    nonexistent path and confirm the new assertion fires at resolution rather than at
    line 103.
 6. **D3's risk — exercise the non-agent code path.**
-   `env -u AI_AGENT -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT bash ci/release-parity/run.sh`
-   and `env -u … proto bin release-plz; echo $?`. CI runs this shape and has never run
+   `env -u AI_AGENT -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u PROTO_REPORTER bash
+   ci/release-parity/run.sh` and `env -u … proto bin release-plz; echo $?`. Unset
+   `PROTO_REPORTER` too: an inherited `text` would make the probe pass for the wrong
+   reason, proving nothing about the flag in the code. CI runs this shape and has never run
    the new one. This does not prove CI behaviour (§7 L3) but it removes the case where
    the change is broken for every non-agent caller.
 7. **AC5 — read back the rewritten CLAUDE.md bullet** against §2 and D5 and confirm no
