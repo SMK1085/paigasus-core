@@ -555,7 +555,10 @@ release_plan_self_test() {
     ci/release-plan/release_plan.py --fixture-count)" \
     || infra "check 11: release_plan.py --fixture-count failed"
   case "$n" in ''|*[!0-9]*) infra "check 11: --fixture-count printed '$n', expected an integer" ;; esac
-  [ "$n" -ge 9 ] || infra "check 11: release_plan.py reports $n fixtures, expected at least 9"
+  # Floor, not a count: it exists to catch an EMPTIED table, and one row of headroom keeps a
+  # legitimate row removal from aborting the gate as infra. Check 10's own floor is equally
+  # loose (20 against 44 actual).
+  [ "$n" -ge 8 ] || infra "check 11: release_plan.py reports $n fixtures, expected at least 8"
 
   release_plan_sh --self-test || { fail "check 11: release_plan.py --self-test reported a broken
       verdict. The release-plan decision is not deciding what it is documented to decide."; rc=1; }
@@ -1187,10 +1190,14 @@ moon ci :build :test :lint :fmt :deny :osv :machete :actionlint :typecheck :brea
   :publish-metadata :version-lockstep :workflow-credentials --base origin/main \
   --include-relations
 ```
-Expected: all pass. Diagnose an unattributed failure via `.moon/cache/ciReport.json`. The three
-`repo:release-parity*` gates abort **inconclusive at rc=2** inside an agent session because
-`proto` emits NDJSON — `unset AI_AGENT CLAUDECODE CLAUDE_CODE_ENTRYPOINT` before running them, or
-an inconclusive abort reads as a pass.
+Expected: all pass. Diagnose an unattributed failure via `.moon/cache/ciReport.json`.
+
+**`repo:release-parity` alone** — not `-py`, not `-ts` — can abort **inconclusive at rc=2**
+inside an agent session, because `proto` emits NDJSON on stdout when it detects one and only
+`ci/release-parity/ecosystems/release-plz.sh` captures a proto call. `-py` resolves through
+`uv run` and `-ts` through `node`, and both were measured green in the same agent session that
+showed `release-parity` aborting. If that one gate aborts, `unset AI_AGENT CLAUDECODE
+CLAUDE_CODE_ENTRYPOINT` and re-run it — an inconclusive abort otherwise reads as a pass.
 
 - [ ] **Step 6: Commit**
 
