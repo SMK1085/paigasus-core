@@ -445,6 +445,7 @@ jobs:
           else
             echo "proto_release=false" >> "$GITHUB_OUTPUT"
           fi
+          echo "proto_version=$PROTO_VERSION" >> "$GITHUB_OUTPUT"
 
       # THREE downloads, not one. wheels.yml deliberately keeps face-paigasus-kernel OUTSIDE the
       # wheel-* namespace precisely so a single `pattern: wheel-*` + merge-multiple cannot
@@ -492,7 +493,13 @@ jobs:
             esac
           done
           [ "$found" -ge 7 ] || { echo "::error::found $found wheels, expected at least 7"; exit 1; }
-          echo "OK: $found wheels at $KERNEL_VERSION"
+          # The sdist is not a `.whl`, so the loop above never inspects it — without this it
+          # ships whatever version wheels.yml's `sdist` job happened to build, unbound to the
+          # release. A re-run against a moved main could then publish an sdist at the wrong,
+          # permanently-burnt PyPI version.
+          test -f "dist-bindings/paigasus_py_bindings-$KERNEL_VERSION.tar.gz" \
+            || { echo "::error::missing dist-bindings/paigasus_py_bindings-$KERNEL_VERSION.tar.gz"; exit 1; }
+          echo "OK: $found wheels + sdist at $KERNEL_VERSION"
 
       # ORDER IS LOAD-BEARING: bindings, then the face. skip-existing makes a partial failure
       # re-runnable — PyPI returns 400 "file already exists" otherwise, so an un-skipped retry can
@@ -510,6 +517,24 @@ jobs:
         with:
           packages-dir: dist-face
           skip-existing: true
+
+      # Binds the proto distribution to the release, same reason as the wheel/sdist assertion
+      # above: `PROTO_VERSION` was computed but never exported, so this upload shipped whatever
+      # proto-dist happened to build — a re-run against a moved main could publish it at a
+      # version that does not match the release. Filenames match `uv build --package
+      # paigasus-proto`'s output (a pure-Python uv_build wheel, tag py3-none-any).
+      - name: Assert the proto distribution matches the released version
+        if: steps.relinfo.outputs.proto_release == 'true'
+        env:
+          PROTO_VERSION: ${{ steps.relinfo.outputs.proto_version }}
+        run: |
+          set -euo pipefail
+          [ -n "$PROTO_VERSION" ] || { echo "::error::no proto version from relinfo"; exit 1; }
+          test -f "dist-proto/paigasus_proto-$PROTO_VERSION-py3-none-any.whl" \
+            || { echo "::error::missing dist-proto/paigasus_proto-$PROTO_VERSION-py3-none-any.whl"; exit 1; }
+          test -f "dist-proto/paigasus_proto-$PROTO_VERSION.tar.gz" \
+            || { echo "::error::missing dist-proto/paigasus_proto-$PROTO_VERSION.tar.gz"; exit 1; }
+          echo "OK: proto wheel + sdist at $PROTO_VERSION"
 
       # Independent cadence: release-plz sees the RUST crate `paigasus-proto`; what uploads here
       # is the PYTHON distribution built from py/packages/paigasus-proto. Same name, two things.
