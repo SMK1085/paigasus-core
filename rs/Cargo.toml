@@ -1,5 +1,13 @@
 [workspace]
-members  = ["crates/*/*"]
+# ONE wildcard level per entry. `crates/*/*` reads identically to Cargo, but Dependabot's cargo
+# file fetcher cannot expand it: `expand_workspaces` lists exactly one directory level, so it
+# sees `crates/libs`, `crates/services`, `crates/bindings` and then drops all three, because
+# `File.fnmatch?("crates/*/*", "crates/libs")` is false. It then found ZERO members and built its
+# sandbox from the five crates still reachable through `path =` in [workspace.dependencies]. Cargo
+# re-resolved that 5-member workspace down to 176 packages, which is both the recurring truncated
+# rs/Cargo.lock (SMA-601 gates the symptom) and the hard `Failed to update serde!` that failed
+# every `cargo in /rs` job from 2026-08-17 on. Keep each entry at one `*` (SMA-604).
+members  = ["crates/bindings/*", "crates/libs/*", "crates/services/*"]
 resolver = "3"
 
 [workspace.package]

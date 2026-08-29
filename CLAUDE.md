@@ -657,6 +657,29 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   unnoticed repairer. `--locked` proves the lock is
   CONSISTENT with the manifests, not that it is correct: a swapped-but-compatible version or a
   tampered checksum still passes.
+- `rs/Cargo.toml`'s `[workspace] members` entries must carry **at most ONE wildcard level each**
+  (`crates/libs/*`, not `crates/*/*`). Cargo reads both forms identically — the member set is the
+  same 13 crates, measured — but Dependabot's cargo file fetcher cannot expand the two-level form:
+  `expand_workspaces` (`cargo/lib/dependabot/cargo/file_fetcher.rb`) lists exactly ONE directory
+  level, so for `crates/*/*` it fetches `crates/` and gets `crates/libs`, `crates/services`,
+  `crates/bindings`, then drops all three because `File.fnmatch?("crates/*/*", "crates/libs")` is
+  false. It finds **zero** members and builds its sandbox from the only in-tree crates still
+  reachable — the five declared with `path =` in `[workspace.dependencies]`. Cargo then re-resolves
+  that 5-member workspace and rewrites the lock at **176 packages against 543**, which is the
+  recurring truncated `rs/Cargo.lock` the entry above describes: SMA-601 gates the SYMPTOM, this is
+  the CAUSE. It also reds the job outright — `cargo update -p serde:1.0.228` reports `Locking 0
+  packages` there, because serde 1.0.229 needs `serde_core =1.0.229` and `serde_core` is not in the
+  `-p` set, so Dependabot raises `Failed to update serde!` and every `cargo in /rs` run from
+  2026-08-17 on exited 1 (SMA-604). serde is not special: it is only the first dependency in the
+  group that needs a companion package unlocked with it. Nothing else in the repo can see this
+  regression — `cargo metadata` is identical either way, and so is every Moon task — so
+  `repo:affected-smoke`'s **A9** (`ci/affected-graph/cargo_moon_parity.py`) now asserts it by
+  TRANSCRIBING Dependabot's expander rather than restating the rule: it fails if a `members` entry
+  resolves to zero members, and separately if any crate directory no entry reaches. Reverting the
+  line to `crates/*/*` reds it with 14 rows (MEASURED). Adding a crate DIRECTORY (a fourth sibling
+  of `libs`/`services`/`bindings`) needs a new `members` entry; adding a crate inside an existing
+  one does not. A8 and A9 are the two halves of one story: A8 catches a truncated lock once it
+  exists, A9 removes the thing that writes one.
 
 ## Workflow
 
