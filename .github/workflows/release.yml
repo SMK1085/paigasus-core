@@ -181,8 +181,13 @@ jobs:
       # The action registers the token as a log mask and revokes it in its post-step, so it
       # does not outlive the run.
       #
-      # WHICH APP: the EXISTING Paigasus bot GitHub App. Do not create a second one. If this job
-      # skips, the cause is a missing `PAIGASUS_BOT_APP_ID` secret, not a missing App.
+      # WHICH APP: the EXISTING Paigasus bot GitHub App. Do not create a second one.
+      #
+      # TWO reasons this job can skip, and only the second is a misconfiguration:
+      #   1. The run was a `workflow_dispatch`. The job's `if:` is push-only (SMA-580), so it
+      #      skips BY DESIGN and the preflight step below never runs.
+      #   2. The run was a push and the preflight reported `configured=false` — then, and only
+      #      then, the cause is a missing `PAIGASUS_BOT_APP_ID` secret, not a missing App.
       - name: Mint the App installation token
         id: app_token
         if: steps.preflight.outputs.configured == 'true'
