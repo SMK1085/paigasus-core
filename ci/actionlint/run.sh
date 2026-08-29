@@ -54,7 +54,7 @@ infra() {
 usage() {
   echo "usage: $(basename "$0") [--self-test]" >&2
   echo "  (no argument)  run the full gate" >&2
-  echo "  --self-test    run the eleven fixture tables only — extractor, path-filter verdicts," >&2
+  echo "  --self-test    run the twelve fixture tables only — extractor, path-filter verdicts," >&2
   echo "                 branch-filter verdicts, config allowlist, ci-target floor, invocation" >&2
   echo "                 allowlist, affected-graph wiring, block execution, kill predicate," >&2
   echo "                 affected-smoke block, release guard, cargo-lock step. No actionlint" >&2
@@ -2483,10 +2483,24 @@ cargo_lock_step_verdict() { # $1 workflow file
     echo "out-of-order"
   fi
 
+  # YAML permits a QUOTED key, so `"if": …` and `'continue-on-error': …` name exactly the same
+  # keys as their bare forms and GitHub honours them identically. Normalise both spellings before
+  # the two key scans below; without this a quoted `"if":` is a complete bypass of the conditional
+  # rule — the rule that stops the step being switched off for `pull_request`, which is the event
+  # a Dependabot PR ships a truncated lock on. Found by CodeRabbit in SMA-601's local review.
+  # ERE with `()` alternation and two separate expressions, never a BRE `\|` or a backreference
+  # across the quote character: `\|` is a GNU extension BSD sed does not honour, and this file
+  # is authored on macOS but runs on Linux CI.
+  # Applied ONLY to the key scans, never to the T_CARGO_LOCK_STEP_REQUIRED matching above, whose
+  # pinned lines are exact text rather than keys.
+  keys="$(printf '%s\n' "$window" \
+    | sed -E -e 's/^"(if|continue-on-error)"[[:space:]]*:/\1:/' \
+             -e "s/^'(if|continue-on-error)'[[:space:]]*:/\1:/")"
+
   # Anything but the literal `false` suppresses the step's failure. Same rule check 8 applies to
   # the moon ci step. Scanned over the whole window rather than a fixed line count: the run block
   # is multi-line now, so continue-on-error legitimately sits several lines below the name.
-  coe="$(printf '%s\n' "$window" \
+  coe="$(printf '%s\n' "$keys" \
     | grep -m1 '^continue-on-error:' | sed 's/^continue-on-error:[[:space:]]*//')"
   if [ -n "$coe" ] && [ "$coe" != "false" ]; then
     echo "continue-on-error $coe"
@@ -2500,7 +2514,7 @@ cargo_lock_step_verdict() { # $1 workflow file
   #
   # An `if:` written BEFORE the `name:` key needs no separate rule: the step then opens with
   # `- if: ...` and its name line is no longer `- name: ...`, so entry 0 is reported missing.
-  cond="$(printf '%s\n' "$window" | grep -m1 '^if:' | sed 's/^if:[[:space:]]*//')"
+  cond="$(printf '%s\n' "$keys" | grep -m1 '^if:' | sed 's/^if:[[:space:]]*//')"
   if [ -n "$cond" ]; then
     echo "conditional $cond"
   fi
@@ -3598,6 +3612,23 @@ out-of-order-script bash ci/cargo-lock-integrity/run.sh --negative-control'
   if_elsewhere="${wired/      - name: moon ci (affected graph)/      - name: moon ci (affected graph)
         if: always()}"
   expect_step 'an if: on a later step is not attributed to this one' '' "$if_elsewhere"
+
+  # QUOTED KEYS. YAML lets a key be quoted, and GitHub honours `"if":` exactly as `if:`, so a
+  # scan anchored on the bare spelling alone is a complete bypass of both rules. Found by
+  # CodeRabbit in SMA-601's local review; before the normalisation these two fixtures were clean.
+  local q_if q_coe
+  # `always()` rather than a github.event_name comparison: the expression only has to be
+  # non-empty for the rule, and a quote-free one keeps the fixture readable inside a
+  # `${var/from/to}` replacement.
+  q_if="${wired/        run: |/        \"if\": always()
+        run: |}"
+  expect_step 'a double-quoted "if" key is still reported' \
+    'conditional always()' "$q_if"
+
+  q_coe="${wired/        run: |/        'continue-on-error': true
+        run: |}"
+  expect_step "a single-quoted 'continue-on-error' key is still reported" \
+    'continue-on-error true' "$q_coe"
 
   # ---- the script pin (T_CARGO_LOCK_SH_CALL_SITES) ----
   local script

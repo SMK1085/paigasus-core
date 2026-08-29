@@ -65,7 +65,10 @@ report() { # $1 rc
 # --self-test: drive classify_cargo_failure over a fixture table. Counted, never a bare pass.
 self_test() {
   local failures=0 cases=0 tmp rc
-  tmp="$(mktemp)"
+  # `|| return 2` rather than letting errexit carry mktemp's status: a scratch file this mode
+  # cannot create is an infrastructure failure, and rc 2 is what says "asserted nothing".
+  # Matches assert_lock_satisfies_manifests above.
+  tmp="$(mktemp)" || return 2
 
   expect_class() { # $1 name  $2 expected-rc  $3 stderr-text
     cases=$((cases + 1))
