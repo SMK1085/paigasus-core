@@ -274,13 +274,40 @@ jobs:
             --out-dir .wasmpack-release-out --out-name paigasus_wasm
           test -s .wasmpack-release-out/paigasus_wasm_bg.wasm \
             || { echo "::error::wasm-pack produced no binary"; exit 1; }
-          cp package.json .wasmpack-release-out/package.json
+
+      # STAGE INTO A NON-HIDDEN DIRECTORY, and do not "simplify" this away.
+      # `actions/upload-artifact` excludes hidden files by default (`include-hidden-files: false`),
+      # and `.wasmpack-release-out` is DOT-PREFIXED — it follows the convention its two sibling
+      # scratch dirs use (`.wasmpack-out`, `.wasmpack-test-out`) precisely because they are
+      # gitignored build output. Uploading that path directly therefore matched NOTHING and failed
+      # the job with "No files were found with the provided path" — MEASURED on this workflow's
+      # first CI run, after the build step above had already reported success.
+      #
+      # Staging is preferred over `include-hidden-files: true`: that flag would also ship the bare
+      # `*` .gitignore wasm-pack writes into its own --out-dir, which would then sit in the publish
+      # job's working directory. Copying out names exactly what ships instead.
+      #
+      # package.json comes from the CRATE ROOT, never from --out-dir: wasm-pack CLEANS its out-dir
+      # and DELETES package.json there even with --no-pack (see this crate's .gitignore), so the
+      # crate-root copy is the only one carrying publishConfig.access and the real metadata.
+      - name: Stage the wasm distribution for upload
+        run: |
+          set -euo pipefail
+          cd rs/crates/bindings/paigasus-wasm
+          rm -rf wasm-dist && mkdir wasm-dist
+          cp .wasmpack-release-out/paigasus_wasm* wasm-dist/
+          cp package.json wasm-dist/package.json
+          test -s wasm-dist/paigasus_wasm_bg.wasm \
+            || { echo "::error::no wasm binary staged for upload"; exit 1; }
+          test -s wasm-dist/package.json \
+            || { echo "::error::no package.json staged for upload"; exit 1; }
+          ls -la wasm-dist
 
       - name: Upload the wasm distribution
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: wasm-dist
-          path: rs/crates/bindings/paigasus-wasm/.wasmpack-release-out/
+          path: rs/crates/bindings/paigasus-wasm/wasm-dist/
           if-no-files-found: error
 
       # Dry-run prepublish: assert os/cpu/libc + main paths + optionalDependencies resolve, touching
