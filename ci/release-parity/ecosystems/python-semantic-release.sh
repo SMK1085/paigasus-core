@@ -46,11 +46,14 @@ _psr_fatal() { # line...
 _PSR_SELF="${BASH_SOURCE[0]:-$0}"
 _PSR_REPO_ROOT="$(cd "$(dirname "$_PSR_SELF")/../../.." && pwd)"
 PSR_BIN="$( (cd "$_PSR_REPO_ROOT/py" && uv run --frozen python -c 'import shutil,sys; sys.stdout.write(shutil.which("semantic-release") or "")') 2>/dev/null || true )"
-[ -x "$PSR_BIN" ] || _psr_fatal \
+# -f AND -x, for the same reason as release-plz.sh: `-x` alone passes for a
+# searchable directory, which then fails with status 126 at invocation.
+if [ ! -f "$PSR_BIN" ] || [ ! -x "$PSR_BIN" ]; then _psr_fatal \
   "python-semantic-release.sh: semantic-release did not resolve to an executable file." \
   "Got: ${PSR_BIN:-<empty>}" \
   "Run 'uv sync' in py/, and check py/uv.lock still carries python-semantic-release." \
   "There is deliberately no PATH fallback (SMA-596 D3.1)."
+fi
 
 # Real configs the fixture derives its classification settings from (F3). Both
 # packages must agree (both must honor the canonical contract).

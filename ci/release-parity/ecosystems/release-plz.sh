@@ -46,10 +46,14 @@ RELEASE_PLZ_BIN="$(cd "$_RP_REPO_ROOT" && proto --reporter text bin release-plz)
   "release-plz.sh: 'proto --reporter text bin release-plz' failed." \
   "Run 'proto install' from the repo root." \
   "An older proto without --reporter also lands here (SMA-596 D1)."
-[ -x "$RELEASE_PLZ_BIN" ] || _rp_fatal \
+# -f AND -x: `-x` alone is true for a searchable DIRECTORY, and invoking a
+# directory fails with status 126 further down — the late, confusing failure this
+# assertion exists to prevent.
+if [ ! -f "$RELEASE_PLZ_BIN" ] || [ ! -x "$RELEASE_PLZ_BIN" ]; then _rp_fatal \
   "release-plz.sh: release-plz did not resolve to an executable file." \
   "Got: ${RELEASE_PLZ_BIN:-<empty>}" \
   "If that looks like JSON, proto's agent-mode NDJSON leaked past --reporter text (SMA-596)."
+fi
 
 # release-plz shells out to `cargo metadata`; pass an explicit, CWD-independent
 # cargo (rustup proxy / real binary, not a CWD-sensitive shim). This fallback is
@@ -58,10 +62,11 @@ RELEASE_PLZ_BIN="$(cd "$_RP_REPO_ROOT" && proto --reporter text bin release-plz)
 # a confusing cargo error instead of a resolution error (SMA-596 D2.1).
 CARGO_BIN="$( command -v cargo 2>/dev/null || true )"
 [ -n "$CARGO_BIN" ] || CARGO_BIN="$HOME/.cargo/bin/cargo"
-[ -x "$CARGO_BIN" ] || _rp_fatal \
+if [ ! -f "$CARGO_BIN" ] || [ ! -x "$CARGO_BIN" ]; then _rp_fatal \
   "release-plz.sh: cargo did not resolve to an executable file." \
   "Got: ${CARGO_BIN:-<empty>}" \
   "Install Rust, or put cargo on PATH."
+fi
 
 ecosystem::_crate_dir() { # dir slot(a|b) -> path
   case "$2" in

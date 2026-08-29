@@ -175,9 +175,14 @@ finished code. `CARGO_BIN` gets the same `[ -x ]` assertion. Its fallback is **k
 unlike D3's, it is a real, reachable default rather than dead code, and cargo is not the
 tool under test.
 
-#### D2.2 — What `[ -x ]` does and does not assert
+#### D2.2 — What the assertion does and does not assert
 
-Executability, not identity. `[ -x ]` would pass for `~/.proto/shims/release-plz` too.
+The test is `-f` **and** `-x`, not `-x` alone. `-x` is true for a searchable
+DIRECTORY, and invoking a directory fails with status 126 further down — the late,
+confusing failure the assertion exists to prevent. Caught in review on PR 183 and
+proven by mutation: pointing the variable at `/tmp` now fails at resolution.
+
+It asserts executability, not identity. It would pass for `~/.proto/shims/release-plz` too.
 That is deliberate: D3 removes the fallbacks, so there is no path by which a substituted
 binary can be resolved — the assertion exists to catch a **malformed capture** (the JSON
 blob), not to authenticate the binary. Asserting the version against `.prototools:15`

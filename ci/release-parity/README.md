@@ -123,7 +123,8 @@ either re-runs this check.
 ## Tool resolution policy (SMA-596)
 
 Both `release-plz.sh` and `python-semantic-release.sh` resolve their tool binary once, at
-module top level, with **no fallback**, and assert `[ -x ]` on the result before use. A
+module top level, with **no fallback**, and assert the result is a regular executable file (`-f` **and** `-x` — `-x` alone is
+true for a searchable directory) before use. A
 failure exits 2 carrying the harness's `infrastructure error (rc=2)` classifier in the
 message. That wording is load-bearing: the module is sourced by `run.sh`, so an exit here
 fires *during* the source and `run.sh` never reaches its own abort lines — the classifier in
