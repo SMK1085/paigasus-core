@@ -247,9 +247,11 @@ _DRY_RUN_FLAG_RE = re.compile(r"--dry-run\b")
 # `--dry-run --dry-run=false` both really publish, but a per-occurrence scan that returns on the
 # first qualifying `--dry-run` never sees the later negation. Covers `--no-dry-run`,
 # `--dry-run=false`, `--dry-run false`, `--dry-run=0`, `--dry-run 0` — the space form needs its
-# own alternative here because `\s*=\s*` requires a literal `=`, and deliberately does NOT cover
-# `--dry-run=true` / `--dry-run true` for the same fail-closed-on-`=` reason _dry_run_exempts'
-# docstring gives.
+# own alternative here because `\s*=\s*` requires a literal `=`. This is deliberately NOT the
+# general `=`-value rule (see _dry_run_exempts below for that one): it only recognises the two
+# LITERAL falsey values this guard can prove are unsafe, and a bare `=` with any OTHER value
+# (a shell variable, a `${{ }}` workflow expression, `no`, `off`, ...) is caught downstream by
+# the general "any `=` form is unverified, so it fails closed" rule instead.
 _DRY_RUN_NEGATION_RE = re.compile(
     r"--no-dry-run\b|--dry-run\s*=\s*(?:false|0)\b|--dry-run\s+(?:false|0)\b"
 )
@@ -273,17 +275,31 @@ def _dry_run_exempts(segment: str, after: int) -> bool:
     on the first one that qualified as safe — so a LATER negating token, appended after an
     earlier bare `--dry-run`, was never examined. Measured, both real publishes: `npm publish
     --dry-run --no-dry-run` and `npm publish --dry-run --dry-run=false` (npm 11.11.0 and
-    clipanion 4.0.0-rc.4 are both last-flag-wins). Fixed by checking the WHOLE tail after the
-    marker for ANY negating form first — see _DRY_RUN_NEGATION_RE — before looking for a bare
-    positive `--dry-run` at all. This does not attempt true last-token-wins ordering for three or
-    more flags (e.g. `--dry-run --no-dry-run --dry-run`, where the final token really does mean
-    dry); it fails closed (NOT exempt) on any negation present, which is the safe direction and
-    not a shape either measurement covered.
+    clipanion 4.0.0-rc.4 are both last-flag-wins). This does not attempt true last-token-wins
+    ordering for three or more flags (e.g. `--dry-run --no-dry-run --dry-run`, where the final
+    token really does mean dry); it fails closed (NOT exempt) on any negation present, which is
+    the safe direction and not a shape either measurement covered.
+
+    V8 fix round 3, Critical 1. The round-2 rewrite replaced the whole per-occurrence loop —
+    including the round-1 `if tail.startswith("="): continue` fail-closed rule — with only the
+    negation scan above, which recognises exactly two LITERAL values (`false`/`0`). Every OTHER
+    `=` value — a shell variable (`--dry-run=$DRY_RUN`), a `${{ }}` workflow expression
+    (`--dry-run=${{ inputs.dry_run }}`), or a string this guard has no reason to trust (`=no`,
+    `=off`, a bare `=`) — fell through to the bare positive check and read as EXEMPT, reopening
+    the exact hole fix round 1 closed. Restored: after the negation scan finds nothing, walk each
+    remaining `--dry-run` occurrence and require it NOT be immediately followed by `=` (any
+    value, not only `false`/`0`) or by a bare `false`/`0` on the space form — mirroring the
+    negation regex's space-form check, since `\\s*=\\s*` only matches an `=`, not whitespace.
     """
     tail = segment[after:]
     if _DRY_RUN_NEGATION_RE.search(tail):
         return False
-    return bool(_DRY_RUN_FLAG_RE.search(tail))
+    for m in _DRY_RUN_FLAG_RE.finditer(tail):
+        rest = tail[m.end() :]
+        if rest.startswith("=") or re.match(r"\s+(false|0)\b", rest):
+            continue
+        return True
+    return False
 
 
 def job_publishes(job: dict) -> bool:
@@ -860,6 +876,19 @@ FIXTURES: list[tuple[str, str, str, str | None]] = [
      _OK_MAIN.replace("steps: [{run: echo build}]",
                       "steps: [{run: npm publish --dry-run --dry-run=false}]"), "V8b"),
 
+    # --- V8 fix round 3 addition (Critical 1) ------------------------------------------------
+    # The round-2 rewrite deleted the general `if tail.startswith("="): continue` fail-closed
+    # rule along with the per-occurrence loop it lived in, and nothing pinned that rule — the
+    # only existing `=`-form row (fix round 1's) uses the literal value `false`, which the
+    # negation regex still happens to cover on its own. A NON-LITERAL `=` value — a shell
+    # variable, or, worse, a `${{ }}` workflow expression this guard cannot evaluate at scan
+    # time — must still fail closed. Without this row, deleting the restored `=`-form check goes
+    # undetected exactly as it did the first time.
+    ("V8 fix3 C1: --dry-run=$DRY_RUN (a non-literal value) must fail closed, not read exempt",
+     "main",
+     _OK_MAIN.replace("steps: [{run: echo build}]",
+                      "steps: [{run: npm publish --dry-run=$DRY_RUN}]"), "V8b"),
+
     # --- Fix round 3 additions (Critical 2, Important 3, Important 4) ----------------------
     # Critical 2, both directions. The RED direction is the defect: this exact three-step job was
     # measured passing the whole guard at exit 0 before V7 existed. The two CLEAN directions are
@@ -1139,7 +1168,9 @@ def _v8d_dedup_shared_nested_target() -> str | None:
             "  inner-1:\n    uses: ./b.yml\n"
             "  inner-2:\n    uses: ./b.yml\n"
         ),
-        "main.yml": _OK_MAIN.replace("steps: [{run: echo build}]", "uses: ./a.yml"),
+        "main.yml": _OK_MAIN.replace(
+            "    runs-on: ubuntu-latest\n    steps: [{run: echo build}]", "    uses: ./a.yml"
+        ),
     }
     rc, out, err = _run_main_in_tempdir(files)
     matching = [ln for ln in out.splitlines() if "resolves only one level" in ln]
