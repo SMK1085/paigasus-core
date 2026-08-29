@@ -239,8 +239,39 @@ def command_segments(line: str) -> list[str]:
     return [seg.split("#", 1)[0] for seg in _COMMAND_SEPS.split(line)]
 
 
+_DRY_RUN_FLAG_RE = re.compile(r"--dry-run\b")
+
+
+def _dry_run_exempts(segment: str, after: int) -> bool:
+    """True if `segment` carries a `--dry-run` occurrence, at-or-after position `after` (the
+    publish marker's own match end), that actually disables the call.
+
+    V8 fix round 1, Important 2. Two measured false-cleans that genuinely publish:
+    `FLAGS=--dry-run cargo publish` (a shell ENVIRONMENT ASSIGNMENT — the flag never reaches
+    `cargo`, since it sits BEFORE the marker match, not after it) and `npm publish
+    --dry-run=false` / `npm publish --dry-run false` (npm honours either as NOT dry). The
+    position check mirrors napi_violations' `--no-gh-release` comparison against the match END,
+    applied in the opposite direction; the value check additionally refuses to exempt a
+    `--dry-run` immediately followed by `=` or a `false`/`0` argument, since this guard does not
+    parse arbitrary flag values and a `--dry-run=true` is rare enough that failing closed on any
+    `=` form costs nothing real.
+    """
+    for m in _DRY_RUN_FLAG_RE.finditer(segment):
+        if m.start() < after:
+            continue
+        tail = segment[m.end() :].lstrip()
+        if tail.startswith("="):
+            continue
+        if re.match(r"(false|0)\b", tail):
+            continue
+        return True
+    return False
+
+
 def job_publishes(job: dict) -> bool:
-    """V6 detection. Used ONLY for called workflows.
+    """V6 detection. Used for called workflows, and (fix round 1, Critical 1) as the shared
+    step-level primitive `approval_boundary_violations` and `callee_boundary_violations` both
+    build V8 on.
 
     Fix round 1, Important 3: evaluated per LINE, not per whole `run:` block. A `--dry-run`
     occurrence reaches no registry — `napi prepublish --dry-run --no-gh-release` (prebuild.yml)
@@ -251,6 +282,10 @@ def job_publishes(job: dict) -> bool:
     Fix round 2, Important 1: evaluated per COMMAND SEGMENT (see command_segments), not per whole
     line — `npm publish && echo "not --dry-run"` must still count as registry-reaching, since the
     marker and the `--dry-run` flag are in different chained commands on the same line.
+
+    Fix round 1, Important 2: the `--dry-run` exemption now requires ADJACENCY (see
+    _dry_run_exempts) — a bare `"--dry-run" in segment` test accepted a flag that never reached
+    the command at all.
     """
     for step in job.get("steps") or []:
         if not isinstance(step, dict):
@@ -258,10 +293,12 @@ def job_publishes(job: dict) -> bool:
         blob = f"{step.get('run', '')}\n{step.get('uses', '')}"
         for line in blob.splitlines():
             for segment in command_segments(line):
-                if "--dry-run" in segment:
+                m = _PUBLISH_RE.search(segment)
+                if not m:
                     continue
-                if _PUBLISH_RE.search(segment):
-                    return True
+                if _dry_run_exempts(segment, m.end()):
+                    continue
+                return True
     return False
 
 
@@ -309,25 +346,56 @@ def napi_violations(job: dict, job_id: str, name: str) -> list[str]:
     return out
 
 
+def _environment_name(job: dict) -> str | None:
+    """The environment's NAME — the field GitHub Actions actually gates on via required
+    reviewers. `environment:` may be a plain string (the name itself) or a mapping with `name:`
+    and `url:`. V8 fix round 1, Minor 4: a mapping with a `url:` but no `name:` (or an empty one)
+    is not a named environment at all — GitHub rejects it outright — so it must not satisfy V8a."""
+    env = job.get("environment")
+    if isinstance(env, str):
+        env = env.strip()
+        return env or None
+    if isinstance(env, dict):
+        raw_name = env.get("name")
+        if isinstance(raw_name, str) and raw_name.strip():
+            return raw_name.strip()
+    return None
+
+
 def approval_boundary_violations(jobs: dict, name: str) -> list[str]:
-    """V8. The approval gate is the ONE human checkpoint; everything downstream of it is
+    """V8a/b/c. The approval gate is the ONE human checkpoint; everything downstream of it is
     irreversible. V8a is the floor (without it the rest of V8 passes vacuously); V8b asserts
     nothing upstream of the gate may publish; V8c asserts every publisher IS downstream of it —
     the direction V8b alone cannot cover, since deleting `approve-release` from a publishing
-    job's needs: satisfies V8b trivially (there is nothing left upstream of the gate to check)."""
+    job's needs: satisfies V8b trivially (there is nothing left upstream of the gate to check).
+
+    Both V8b and V8c here are STEPS-shaped only (via job_publishes, which reads `steps:`). A
+    job-level `uses:` publisher — the shape `wheels` and `prebuild` already use — is invisible to
+    job_publishes and is covered separately by callee_boundary_violations (V8d), which needs the
+    filesystem this function deliberately does not touch (fix round 1, Critical 1)."""
     out: list[str] = []
     gate = jobs.get(APPROVAL_JOB)
     if not isinstance(gate, dict):
         return [f"{name}: V8a: no job named '{APPROVAL_JOB}' exists. Every other clause of V8 is "
                 f"defined relative to it, so without it this verdict would pass vacuously."]
-    if not gate.get("environment"):
-        out.append(f"{name}: V8a: job '{APPROVAL_JOB}' declares no environment:. The pause that "
-                   f"makes it a gate comes from the environment's required reviewers; without "
-                   f"the key it is an ordinary job that always succeeds.")
+    if not _environment_name(gate):
+        out.append(f"{name}: V8a: job '{APPROVAL_JOB}' declares no NAMED environment:. The pause "
+                   f"that makes it a gate comes from that named environment's required "
+                   f"reviewers; a missing environment:, or one with no name:, is an ordinary job "
+                   f"that always succeeds.")
 
     for jid in sorted(gated_path_jobs(APPROVAL_JOB, jobs)):
         job = jobs.get(jid)
-        if isinstance(job, dict) and job_publishes(job):
+        if not isinstance(job, dict) or not job_publishes(job):
+            continue
+        if jid == APPROVAL_JOB:
+            # Fix round 1, Minor 1: gated_path_jobs(APPROVAL_JOB, jobs) includes APPROVAL_JOB
+            # itself (trivially, on its own needs: path), so "runs upstream of 'approve-release'"
+            # about approve-release itself read as nonsense. Word this case on its own terms.
+            out.append(f"{name}: V8b: job '{APPROVAL_JOB}' IS the approval gate and contains a "
+                       f"step that can reach a registry. The gate itself must never publish — "
+                       f"move the step to a job downstream of it.")
+        else:
             out.append(f"{name}: V8b: job '{jid}' runs upstream of '{APPROVAL_JOB}' and contains "
                        f"a step that can reach a registry. That publishes before any human "
                        f"approves. Add --dry-run, or move the step downstream of the gate.")
@@ -342,7 +410,10 @@ def approval_boundary_violations(jobs: dict, name: str) -> list[str]:
 
 
 def check_main(doc: dict, name: str) -> list[str]:
-    """V1-V5 over the release workflow."""
+    """V1-V5, V7 and V8a-c over the release workflow. V6 applies to CALLED workflows (see
+    check_called) and V8d to every job's local callee (see callee_boundary_violations) — both
+    need the filesystem, which this function, driven purely off a parsed doc, deliberately does
+    not touch."""
     out: list[str] = []
     jobs = doc["jobs"]
 
@@ -450,27 +521,81 @@ def check_called(doc: dict, name: str) -> list[str]:
     return out
 
 
-def pre_approval_callees(doc: dict) -> list[Path]:
-    """Local reusable workflows called from a job upstream of the approval gate."""
-    jobs = doc.get("jobs") or {}
-    if APPROVAL_JOB not in jobs:
-        return []
-    out = []
-    for jid in gated_path_jobs(APPROVAL_JOB, jobs):
-        job = jobs.get(jid)
-        uses = str(job.get("uses") or "") if isinstance(job, dict) else ""
-        if uses.startswith("./"):
-            out.append(Path(uses.removeprefix("./")))
+# V8d fix round 1, Important 1. `callee_boundary_violations` below resolves exactly ONE level of
+# a LOCAL ("./...") `uses:`. A target it cannot resolve that way — a remote `org/repo/path@ref`
+# reference, or a second local hop nested inside an already-resolved callee — is reported as
+# unverifiable rather than silently treated as clean, fail-closed. An entry here is a reviewed
+# exception to that rule; state the reason in a comment beside it. Empty today.
+CALLEE_VERIFICATION_ALLOWLIST: frozenset[str] = frozenset()
+
+
+def callee_boundary_violations(jobs: dict, name: str) -> list[str]:
+    """V8d. `job_publishes` (and therefore V8b/V8c above) reads a job's `steps:` only, so a job
+    whose entire body IS a `uses: ./callee.yml` — the exact shape `wheels` and `prebuild` already
+    use — is invisible to them. For every job carrying a local `uses:`, resolve the callee and
+    apply the SAME boundary a direct publisher must: if anything in the callee can reach a
+    registry, the calling job itself must have `APPROVAL_JOB` on its own needs: path.
+
+    Fix round 1, Critical 1. This ONE rule replaces the original V8c/V8d split, and closes the
+    critical hole that split left open: a job neither on `APPROVAL_JOB`'s own needs: path (what
+    the old V8d walked) NOR carrying a `steps:`-shaped publish (what V8c's job_publishes call
+    could see) evaded V8 completely — e.g. a `sneak` job hanging off `build`, gated on V1, never
+    needed BY `approve-release` and never needing it either, calling a workflow_call-only local
+    callee that runs `cargo publish`. Scanning EVERY job's own `uses:` here, not only ones already
+    known to sit on the gate's path, closes that. It also subsumes the pre-approval-only case: a
+    caller upstream of the gate can never have the gate on its own needs: path (needs: walks
+    upstream, never down), so it still reds under this one rule.
+
+    Fail-closed (Important 1): see CALLEE_VERIFICATION_ALLOWLIST above.
+    """
+    out: list[str] = []
+    seen: set[tuple[str, str]] = set()
+
+    def _unverifiable(jid: str, target: str, reason: str) -> None:
+        key = (jid, target)
+        if key in seen or target in CALLEE_VERIFICATION_ALLOWLIST:
+            return
+        seen.add(key)
+        out.append(
+            f"{name}: V8d: job '{jid}' calls '{target}', {reason} Whether it can reach a "
+            f"registry is unknown, so it cannot be proven safe. Add a reviewed "
+            f"CALLEE_VERIFICATION_ALLOWLIST entry with a stated reason, or make it verifiable — "
+            f"a local './...' workflow, resolved to exactly one level."
+        )
+
+    for jid, job in jobs.items():
+        if not isinstance(job, dict):
+            continue
+        uses = str(job.get("uses") or "")
+        if not uses:
+            continue
+        if not uses.startswith("./"):
+            _unverifiable(jid, uses, "a reusable workflow this guard cannot read.")
+            continue
+        local_path = Path(uses.removeprefix("./"))
+        if not local_path.is_file():
+            _unverifiable(jid, uses, "a local workflow that does not exist on disk.")
+            continue
+
+        callee_jobs = load_workflow(local_path).get("jobs") or {}
+        publishes = False
+        for cjid, cjob in callee_jobs.items():
+            if not isinstance(cjob, dict):
+                continue
+            if job_publishes(cjob):
+                publishes = True
+            nested = str(cjob.get("uses") or "")
+            if nested:
+                _unverifiable(
+                    jid, f"{uses} -> {nested}",
+                    f"whose own job '{cjid}' calls a second workflow this guard resolves only "
+                    f"one level past — never two."
+                )
+        if publishes and APPROVAL_JOB not in gated_path_jobs(jid, jobs):
+            out.append(f"{name}: V8d: job '{jid}' calls local workflow '{uses}', which can reach "
+                       f"a registry, but '{APPROVAL_JOB}' is not on its needs: path. It would "
+                       f"publish without passing the gate.")
     return out
-
-
-def check_called_pre_approval(doc: dict, name: str) -> list[str]:
-    """V8d. V6 permits a publish step in a workflow_call-ONLY workflow. That permission predates
-    the approval gate and is unsafe for a callee invoked from upstream of it."""
-    return [f"{name}: V8d: job '{jid}' can reach a registry, and this workflow is called from a "
-            f"job upstream of '{APPROVAL_JOB}'. V6's workflow_call-only permission does not "
-            f"apply here — it would publish before any human approves."
-            for jid, j in doc["jobs"].items() if isinstance(j, dict) and job_publishes(j)]
 
 
 # --- Fixtures ----------------------------------------------------------------------------------
@@ -663,6 +788,28 @@ FIXTURES: list[tuple[str, str, str, str | None]] = [
     ("V8c: approve-release dropped from release's needs", "main",
      _OK_MAIN.replace("    needs: [build, approve-release]", "    needs: [build]"), "V8c"),
 
+    # --- V8 fix round 1 additions (Important 2, Minor 1, Minor 4) --------------------------
+    # Important 2: the --dry-run exemption needs adjacency, not a bare substring test. Both
+    # measured false-cleans genuinely publish.
+    ("V8 fix1 Important 2: FLAGS=--dry-run is a shell assignment, never reaches cargo", "main",
+     _OK_MAIN.replace("steps: [{run: echo build}]",
+                      "steps: [{run: FLAGS=--dry-run cargo publish}]"), "V8b"),
+    ("V8 fix1 Important 2: npm publish --dry-run=false still publishes for real", "main",
+     _OK_MAIN.replace("steps: [{run: echo build}]",
+                      "steps: [{run: npm publish --dry-run=false}]"), "V8b"),
+    # Minor 1: the V8b message for a publish step inside approve-release ITSELF used to read
+    # "runs upstream of 'approve-release'" about approve-release, which is nonsense.
+    ("V8 fix1 Minor 1: a publish step inside approve-release itself gets its own wording", "main",
+     _OK_MAIN.replace("steps: [{run: echo approved}]", "steps: [{run: cargo publish}]"),
+     "IS the approval gate"),
+    # Minor 4: an environment: mapping with a url: but no name: is not a NAMED environment —
+    # GitHub rejects it outright, so it must not satisfy V8a either.
+    ("V8 fix1 Minor 4: environment: {url: ...} with no name: is not a named gate", "main",
+     _OK_MAIN.replace("environment: release-approval", "environment: {url: 'https://x'}"), "V8a"),
+    ("V8 fix1 Minor 4 CONTROL: environment: {name: ..., url: ...} is accepted", "main",
+     _OK_MAIN.replace("environment: release-approval",
+                      "environment: {name: release-approval, url: 'https://x'}"), None),
+
     # --- Fix round 3 additions (Critical 2, Important 3, Important 4) ----------------------
     # Critical 2, both directions. The RED direction is the defect: this exact three-step job was
     # measured passing the whole guard at exit 0 before V7 existed. The two CLEAN directions are
@@ -779,23 +926,15 @@ def _critical2_end_to_end() -> str | None:
     return None
 
 
-def _v8d_pre_approval_callee_publish() -> str | None:
-    """Regression test for V8d: check_called's V6 deliberately permits a publish step in a
-    workflow_call-ONLY workflow, but that permission is unsafe for a callee invoked from a job
-    UPSTREAM of the approval gate. A (name, kind, yaml, want) row cannot express this — it needs
-    a two-file tree (a main workflow plus a real local callee) driven through main() end to end,
-    the same shape as _critical2_end_to_end above. `build` sits on approve-release's needs: path
-    (plan -> build -> approve-release -> release), so replacing its steps with a local `uses:`
-    puts the callee squarely upstream of the gate.
-    """
+def _run_main_in_tempdir(files: dict[str, str], entry: str = "main.yml") -> tuple[int, str, str]:
+    """Write `files` (relative-path -> content) into a fresh tempdir, chdir into it, drive
+    main([entry]) end to end, and return (rc, stdout, stderr). Shared by every V8d helper below —
+    all of them need main()'s filesystem-resolving callee walk, which check_main/check_called
+    (and therefore a plain FIXTURES row) never touch."""
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
-        (tmp_path / "called.yml").write_text(
-            "on:\n  workflow_call:\njobs:\n  build:\n    steps: [{run: cargo publish}]\n"
-        )
-        main_yaml = _OK_MAIN.replace("steps: [{run: echo build}]", "uses: ./called.yml")
-        (tmp_path / "main.yml").write_text(main_yaml)
-
+        for rel, content in files.items():
+            (tmp_path / rel).write_text(content)
         prev_cwd = Path.cwd()
         out_buf, err_buf = io.StringIO(), io.StringIO()
         rc: int
@@ -803,16 +942,138 @@ def _v8d_pre_approval_callee_publish() -> str | None:
             os.chdir(tmp_path)
             try:
                 with contextlib.redirect_stdout(out_buf), contextlib.redirect_stderr(err_buf):
-                    rc = main(["main.yml"])
+                    rc = main([entry])
             except SystemExit as exc:
                 rc = exc.code if isinstance(exc.code, int) else 2
         finally:
             os.chdir(prev_cwd)
+    return rc, out_buf.getvalue(), err_buf.getvalue()
 
-    out = out_buf.getvalue()
+
+_PUBLISHING_CALLEE = "on:\n  workflow_call:\njobs:\n  build:\n    steps: [{run: cargo publish}]\n"
+
+
+def _v8d_pre_approval_callee_publish() -> str | None:
+    """Regression test for V8d (retargeted, fix round 1, Critical 1): check_called's V6
+    deliberately permits a publish step in a workflow_call-ONLY workflow, but that permission is
+    unsafe for a callee invoked from a job that never passes the approval gate. A
+    (name, kind, yaml, want) row cannot express this — it needs a two-file tree (a main workflow
+    plus a real local callee) driven through main() end to end, the same shape as
+    _critical2_end_to_end above.
+
+    Proves BOTH directions, per the fix-round-1 ruling: without the CLEAN direction, the merged
+    callee_boundary_violations rule could be wired to always-red and no fixture would notice.
+    """
+    # Direction 1: `build` sits on approve-release's needs: path (plan -> build ->
+    # approve-release -> release), so replacing its steps with a local `uses:` puts the callee
+    # squarely upstream of the gate. Must RED.
+    pre_yaml = _OK_MAIN.replace("steps: [{run: echo build}]", "uses: ./called.yml")
+    rc, out, err = _run_main_in_tempdir({"called.yml": _PUBLISHING_CALLEE, "main.yml": pre_yaml})
     if rc != 1 or "V8d" not in out:
-        return (f"expected exit 1 with 'V8d' in output, got exit {rc!r}: "
-                f"stdout={out!r} stderr={err_buf.getvalue()!r}")
+        return (f"pre-approval caller: expected exit 1 with 'V8d' in output, got exit {rc!r}: "
+                f"stdout={out!r} stderr={err!r}")
+
+    # Direction 2: a new job whose OWN needs: chain includes approve-release calls the same
+    # publishing callee. It IS downstream of the gate, so it must stay CLEAN.
+    post_yaml = _OK_MAIN.replace(
+        "    steps: [{run: release-plz release}]\n",
+        "    steps: [{run: release-plz release}]\n"
+        "  post-publish:\n"
+        "    needs: [approve-release]\n"
+        "    runs-on: ubuntu-latest\n"
+        "    uses: ./called.yml\n",
+    )
+    rc2, out2, err2 = _run_main_in_tempdir({"called.yml": _PUBLISHING_CALLEE, "main.yml": post_yaml})
+    if rc2 != 0 or out2:
+        return (f"post-approval caller: expected exit 0 with no output, got exit {rc2!r}: "
+                f"stdout={out2!r} stderr={err2!r}")
+    return None
+
+
+def _v8d_sneak_shape() -> str | None:
+    """Regression test for C1 (fix round 1, Critical 1) — the exact CRITICAL hole reported
+    against the original brief. A job neither on `APPROVAL_JOB`'s own needs: path NOR itself
+    needed by it — `sneak`, hanging off `build` but never merging back into the approval-gated
+    chain — evaded V8 entirely under the original split: V8b only walked
+    `gated_path_jobs(APPROVAL_JOB, jobs)` (the gate's OWN needs: path, which a sibling branch is
+    never on), and V8c/V6 never looked at a job-level `uses:` at all. The merged
+    callee_boundary_violations rule catches it because it scans EVERY job's own `uses:`, not only
+    ones already known to sit on the gate's path.
+    """
+    main_yaml = _OK_MAIN.replace(
+        "  approve-release:\n",
+        "  sneak:\n    needs: [build]\n    runs-on: ubuntu-latest\n    uses: ./pub.yml\n"
+        "  approve-release:\n",
+    )
+    rc, out, err = _run_main_in_tempdir({"pub.yml": _PUBLISHING_CALLEE, "main.yml": main_yaml})
+    if rc != 1 or "V8d" not in out or "'sneak'" not in out:
+        return (f"expected exit 1 with a 'sneak'-naming V8d violation, got exit {rc!r}: "
+                f"stdout={out!r} stderr={err!r}")
+    return None
+
+
+def _v8d_unverifiable_remote_uses() -> str | None:
+    """Regression test for I1 (fix round 1, Important 1): a job-level `uses:` this guard cannot
+    read at all — a remote `org/repo/path@ref` reference — must be reported as an unverifiable
+    violation, never silently treated as clean. Fail-closed, not a resolver: this guard has no
+    network access and must never assume a remote workflow's shape.
+    """
+    main_yaml = _OK_MAIN.replace(
+        "steps: [{run: echo build}]", "uses: acme/evil/.github/workflows/pub.yml@main"
+    )
+    rc, out, err = _run_main_in_tempdir({"main.yml": main_yaml})
+    if rc != 1 or "V8d" not in out or "cannot be proven safe" not in out:
+        return (f"expected exit 1 with an unverifiable-remote V8d violation, got exit {rc!r}: "
+                f"stdout={out!r} stderr={err!r}")
+    return None
+
+
+def _v8d_unverifiable_nested_local_callee() -> str | None:
+    """Regression test for I1 (fix round 1, Important 1): callee_boundary_violations resolves
+    exactly ONE level of a LOCAL './' `uses:`. A second local hop nested inside an
+    already-resolved callee — main.yml -> ./a.yml -> ./b.yml, where the SECOND level publishes —
+    must be reported unverifiable, not silently treated as clean because the FIRST-level callee
+    itself contains no publish step. This is closed by DETECTION, not by building a resolver: the
+    guard never loads b.yml at all.
+    """
+    files = {
+        "a.yml": "on:\n  workflow_call:\njobs:\n  inner:\n    uses: ./b.yml\n",
+        "b.yml": "on:\n  workflow_call:\njobs:\n  deep:\n    steps: [{run: cargo publish}]\n",
+        "main.yml": _OK_MAIN.replace("steps: [{run: echo build}]", "uses: ./a.yml"),
+    }
+    rc, out, err = _run_main_in_tempdir(files)
+    if rc != 1 or "V8d" not in out or "resolves only one level" not in out:
+        return (f"expected exit 1 with an unverifiable-nested V8d violation, got exit {rc!r}: "
+                f"stdout={out!r} stderr={err!r}")
+    return None
+
+
+def _v8d_dedup_shared_callee() -> str | None:
+    """Regression test for M2 (fix round 1, Minor 2): two different callers pointing at the SAME
+    local callee must not emit the identical line twice. The old `pre_approval_callees` returned
+    a flat, unattributed list of callee paths, so two callers of one target callee doubled the
+    identical line; callee_boundary_violations instead names the CALLING job in every message, so
+    two distinct callers naturally produce two DISTINCT lines rather than one repeated one.
+    """
+    main_yaml = (
+        "on:\n  push:\n    branches: [main]\n"
+        "jobs:\n"
+        "  caller-a:\n"
+        "    if: vars.PAIGASUS_RELEASE_ENABLED == 'true'\n"
+        "    runs-on: ubuntu-latest\n"
+        "    uses: ./shared.yml\n"
+        "  caller-b:\n"
+        "    if: vars.PAIGASUS_RELEASE_ENABLED == 'true'\n"
+        "    runs-on: ubuntu-latest\n"
+        "    uses: ./shared.yml\n"
+    )
+    rc, out, err = _run_main_in_tempdir({"shared.yml": _PUBLISHING_CALLEE, "main.yml": main_yaml})
+    lines = [ln for ln in out.splitlines() if ln.strip()]
+    a_lines = [ln for ln in lines if "'caller-a'" in ln]
+    b_lines = [ln for ln in lines if "'caller-b'" in ln]
+    if rc != 1 or len(a_lines) != 1 or len(b_lines) != 1 or a_lines[0] == b_lines[0]:
+        return (f"expected exactly one distinct V8d line per caller, got exit {rc!r}: "
+                f"stdout={out!r} stderr={err!r}")
     return None
 
 
@@ -902,7 +1163,11 @@ def self_test() -> int:
     # infra() SystemExit rather than a returned violation list (Minor 9).
     for check_name, fn in (
         ("critical-2 uses: ./ prefix resolution", _critical2_end_to_end),
-        ("v8d pre-approval callee publish", _v8d_pre_approval_callee_publish),
+        ("v8d callee boundary, both directions", _v8d_pre_approval_callee_publish),
+        ("v8d C1 sneak shape (job off the gate's own needs: path)", _v8d_sneak_shape),
+        ("v8d I1 unverifiable remote uses:", _v8d_unverifiable_remote_uses),
+        ("v8d I1 unverifiable nested local callee", _v8d_unverifiable_nested_local_callee),
+        ("v8d M2 no duplicate line for a shared callee", _v8d_dedup_shared_callee),
         ("minor-9 empty jobs: {} floor", _minor9_empty_jobs_floor),
     ):
         err = fn()
@@ -944,10 +1209,10 @@ def main(argv: list[str]) -> int:
             p = Path(uses.removeprefix("./"))
             violations += check_called(load_workflow(p), p.name)
 
-    # V8d: a local callee invoked from a job UPSTREAM of the approval gate must never publish,
-    # even though V6 permits a publish step in a workflow_call-ONLY workflow generally.
-    for p in pre_approval_callees(main_doc):
-        violations += check_called_pre_approval(load_workflow(p), p.name)
+    # V8d: every job carrying a `uses:` — not only ones already known to sit on the approval
+    # gate's own needs: path — must be checked against the SAME boundary a direct publisher is
+    # (fix round 1, Critical 1). Fail-closed on anything it cannot resolve (Important 1).
+    violations += callee_boundary_violations(main_doc["jobs"], main_path.name)
 
     for v in violations:
         print(v)
