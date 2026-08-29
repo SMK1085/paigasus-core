@@ -1,0 +1,431 @@
+# RELEASE ACTIVATION RUNBOOK — the first publish to crates.io, PyPI and npm (SMA-580)
+
+Operator-facing procedure for activating the release path in
+[`.github/workflows/release.yml`](../../.github/workflows/release.yml). SMA-579 shipped that path
+complete but **inert**, gated behind `vars.PAIGASUS_RELEASE_ENABLED`. This runbook sets the
+credentials up, seeds crates.io, flips the variable, and verifies the result.
+
+**Two steps here are irreversible. Every other step is not.**
+
+| Registry | What a wrong publish costs |
+| --- | --- |
+| crates.io | `cargo yank` only. **Never delete, never reuse a version.** |
+| PyPI | Delete is allowed. **Reuse of a version is not.** |
+| npm | Unpublish within **72 hours** only. |
+
+The design rationale — why crates.io needs a seed at all, why the seed tree must not be a git
+repository, and what each measurement showed — lives in
+[`docs/superpowers/specs/2026-08-29-sma-580-release-activation-e-design.md`](../superpowers/specs/2026-08-29-sma-580-release-activation-e-design.md).
+This runbook does not repeat the reasoning. It carries the procedure.
+
+**Read §4 (step D) in full before you start.** It is the step that must not be paraphrased.
+
+---
+
+## 1. The sequence
+
+Steps **D** and **I** are irreversible. Work top to bottom. Do not reorder.
+
+| Step | Action | Trigger | Owner | Reversible |
+| --- | --- | --- | --- | --- |
+| **A** | Merge this issue's PR — runbook, `release.yml` comment + dispatch trigger, ADR draft | — | agent → owner merges | yes |
+| **B1** | Create both environments with the settings in §3 | — | agent or owner | yes |
+| **B2** | Add the required reviewer to `release-approval` | — | agent or owner | yes |
+| **B3** | Prove the App can push a tag and cut a Release | — | agent or owner | yes |
+| **C** | `@paigasus` npm scope, `NPM_TOKEN`, three PyPI pending publishers | — | owner | yes |
+| **D** | Publish the three `0.1.0-alpha.1` seeds | — | owner | **NO** |
+| **E** | Configure crates.io Trusted Publishing for the three crates | — | owner | yes |
+| **F** | Merge this issue's PR. **OBSERVATION GATE** | the merge in F | owner | yes |
+| **G** | Merge the release PR. Still gated, so nothing publishes | the merge in G | owner | yes |
+| **H** | **THE FLIP** — set `PAIGASUS_RELEASE_ENABLED` to `true` | — | owner | yes, until I |
+| **I** | Dispatch `release.yml`. Approve when it pauses | the dispatch | owner | **NO** |
+| **J** | Verify §7. **Then** yank the seeds and remove the dispatch trigger | — | owner | — |
+
+Steps C, D and E use this runbook **from the PR branch**, before step F merges it.
+
+---
+
+## 2. Steps A and B — already done when you read this
+
+**A** merged the pull request carrying this file, the `release.yml` comment naming the Paigasus bot
+App, and the temporary `workflow_dispatch` trigger.
+
+**B1 and B2** created the two environments. **B3** proved the App installation can push a tag and
+create a GitHub Release, using a throwaway tag that was then deleted. The absence of tag protection
+does not prove the App can push — that is why B3 exists.
+
+If any of B1–B3 was not performed, stop and perform it now. §3 has the settings.
+
+---
+
+## 3. The two GitHub environments
+
+**GitHub auto-creates a referenced environment on first use, with no protection rules.** So a
+missing environment and a misconfigured one produce the same outcome: `approve-release` walks
+straight through and the whole irreversible stage runs unattended. Verify both, do not assume.
+
+### `release-approval`
+
+| Setting | Value | Why |
+| --- | --- | --- |
+| Required reviewers | the repository owner | The one place a human can stop the run |
+| Prevent self-review | **OFF** | The owner dispatches the run at step I **and** must approve it |
+| Wait timer | 0 | Nothing to delay |
+| Deployment branch policy | must permit `main` | A policy excluding `main` fails the job |
+
+### `release-publish` — no reviewers, deliberately
+
+| Setting | Value | Why |
+| --- | --- | --- |
+| Required reviewers | **none** | See below |
+| Wait timer | **0** | A wait timer delays *each* of the three jobs independently |
+| Deployment branch policy | must permit `main` | Excluding `main` fails `release` **after** approval was given |
+
+GitHub pauses **each** job that enters an environment, and three enter this one: `release`,
+`publish-pypi` and `publish-npm`. A reviewer here would stop the run again between crates.io and
+PyPI. A rejected or timed-out second approval leaves crates.io published and PyPI empty — the split
+state the job order exists to prevent.
+
+The environment must still exist. Both PyPI's and crates.io's OIDC claims bind to it.
+
+---
+
+## 4. Step D — the crates.io seed. IRREVERSIBLE
+
+crates.io cannot pre-register a Trusted Publisher for a crate that does not exist (RFC 3691). The
+`release` job holds no other crates.io credential. So three crates must exist before step E can be
+performed at all.
+
+The seed publishes `0.1.0-alpha.1` of each. It is the `0.1.0` code with a different version string.
+Cargo never resolves a pre-release for a `0.1` requirement, so no consumer sees it.
+
+### 4.1 The API token
+
+Create a crates.io API token scoped to **`publish-new` and `yank` only**. Not `publish-update`, not
+`change-owners`. It lives on your machine, never in a repository or environment secret, and **you
+revoke it at step J**.
+
+### 4.2 Build the scratch tree — it must NOT be a git repository
+
+Cargo walks **upward** to find a repository. Extracting under a directory that is itself tracked
+reintroduces the fault this guards against. Use `git archive`. Do not use `git worktree add`, and do
+not clone.
+
+```bash
+rm -rf /tmp/seed && mkdir -p /tmp/seed
+git archive HEAD | tar -x -C /tmp/seed
+
+# MUST fail with "not a git repository". If it prints a path, STOP.
+git -C /tmp/seed rev-parse --show-toplevel
+```
+
+**Why this matters.** `cargo publish` embeds `.cargo_vcs_info.json` whenever it runs inside a git
+repository, recording the HEAD SHA1. release-plz reads that file from the published tarball and uses
+the SHA1 as the boundary for its commit walk. A seed carrying it would truncate the first release's
+changelog to "commits after the seed" — close to empty.
+
+### 4.3 The six edits
+
+Apply all six in `/tmp/seed`. Three package versions and **three** workspace dependency pins.
+
+| # | File | Change |
+| --- | --- | --- |
+| 1 | `rs/crates/libs/paigasus-kernel/Cargo.toml` | `version = "0.1.0-alpha.1"` |
+| 2 | `rs/crates/libs/paigasus-proto-derive/Cargo.toml` | `version = "0.1.0-alpha.1"` |
+| 3 | `rs/crates/libs/paigasus-proto/Cargo.toml` | `version = "0.1.0-alpha.1"` |
+| 4 | `rs/Cargo.toml:140` | `paigasus-proto-derive = { path = "crates/libs/paigasus-proto-derive", version = "=0.1.0-alpha.1" }` |
+| 5 | `rs/Cargo.toml:143` | `paigasus-kernel = { path = "crates/libs/paigasus-kernel", version = "=0.1.0-alpha.1" }` |
+| 6 | `rs/Cargo.toml:146` | `paigasus-proto = { path = "crates/libs/paigasus-proto", version = "=0.1.0-alpha.1" }` |
+
+**Edits 5 and 6 are not optional.** Ten workspace members consume `paigasus-kernel` or
+`paigasus-proto` through `[workspace.dependencies]`. A pre-release never satisfies a
+non-pre-release requirement, so leaving those pins at `"0.1.0"` makes **every** cargo command in
+`rs/` fail — including the derive publish, which touches neither crate. Measured: `cargo metadata`
+exits 101 with *"failed to select a version for the requirement `paigasus-kernel = "^0.1.0"`"*.
+
+Confirm the resolution before going further:
+
+```bash
+cd /tmp/seed/rs && cargo metadata --format-version 1 >/dev/null && echo "resolves OK"
+```
+
+`rs/Cargo.lock` is rewritten by the first cargo command. That is expected in a throwaway tree.
+**Do not pass `--locked`.**
+
+### 4.4 Assert no VCS info, before any upload
+
+Run this for all three crates. It turns an irreversible discovery into a free local red.
+
+```bash
+cd /tmp/seed/rs
+for c in paigasus-kernel paigasus-proto-derive paigasus-proto; do
+  cargo package -p "$c"
+  n=$(tar tzf "target/package/$c-0.1.0-alpha.1.crate" | grep -c cargo_vcs_info || true)
+  [ "$n" -eq 0 ] && echo "$c OK" || { echo "$c CARRIES VCS INFO — STOP"; exit 1; }
+done
+```
+
+Every crate must print `OK`. A non-zero count means the tree is inside a git repository. Go back to
+§4.2.
+
+### 4.5 Publish
+
+> **NEVER add `--allow-dirty` to any command in this section.**
+>
+> In the intended non-git tree the flag does nothing. In a git tree it is exactly what converts
+> cargo's hard error into a **silent success that embeds the SHA1** — measured, with
+> `"dirty": true` written into `.cargo_vcs_info.json`. The dirty-tree error is the guard. Removing
+> it removes the only automatic detector of the §4.2 fault.
+>
+> If cargo refuses because the tree is dirty, that means §4.2 was not followed. Fix the tree.
+
+```bash
+cd /tmp/seed/rs
+
+cargo publish -p paigasus-proto-derive
+
+# Wait for the index. cargo publish -p paigasus-proto verifies against the REGISTRY.
+until cargo info paigasus-proto-derive@0.1.0-alpha.1 >/dev/null 2>&1; do
+  echo "waiting for the index…"; sleep 10
+done
+
+cargo publish -p paigasus-proto
+cargo publish -p paigasus-kernel
+```
+
+`paigasus-kernel` declares no in-tree dependency, so its position does not matter. Only the proto
+pair is ordered.
+
+**Fallback if the poll does not converge within a few minutes.** Use the combined form, which
+resolves the order itself from the locally staged tarball and needs no poll:
+
+```bash
+cargo publish -p paigasus-proto-derive -p paigasus-proto
+```
+
+The sequential form is preferred because it is the **only rehearsal** the live derive→proto path
+gets before step I. If you use the fallback, record that the rehearsal was given up.
+
+**crates.io rate limits.** New crates are capped at a burst of 5 per account, then one per 10
+minutes. Three fits. If a publish is refused, wait and retry — the earlier seeds stay valid.
+
+---
+
+## 5. Steps C and E — the registry configurations
+
+### 5.1 npm — step C
+
+Confirm you own the `@paigasus` scope. A package 404 does not prove it. The org page returning 403
+does not prove it either. Check from your npm account.
+
+The first release creates **nine** packages under the scope: `@paigasus/node-bindings`, seven
+platform packages, and `@paigasus/wasm`.
+
+Create the token:
+
+| Property | Value |
+| --- | --- |
+| Type | **Automation** |
+| Scope | the `@paigasus` scope, read and write — **not** "only select packages", since nine packages do not exist yet |
+| Stored as | an **environment secret on `release-publish`**, not a repository secret |
+
+The type is not a free choice. A classic publish token fails with *"2FA required for publishing"* on
+an account with 2FA enforced.
+
+`publish-npm` already declares `environment: release-publish`, so an environment secret resolves
+with no workflow change, and the credential is not readable by every other workflow.
+
+### 5.2 PyPI — step C
+
+Create a **pending publisher** for each of the three project names. Pending publishers are PyPI's
+mechanism for a project that does not exist yet.
+
+| Field | Value |
+| --- | --- |
+| PyPI project name | `paigasus-py-bindings`, then `paigasus-kernel`, then `paigasus-proto` |
+| Repository owner and name | this repository |
+| Workflow filename | `release.yml` — **with the extension** |
+| Environment name | `release-publish` |
+
+**Confirm three slots are free**, not merely that a cap exists. PyPI caps pending publishers per
+account. Verify the field labels against the live form; a wrong field fails *after* crates.io has
+published.
+
+### 5.3 crates.io Trusted Publishing — step E, after the seed
+
+One configuration per crate: `paigasus-kernel`, `paigasus-proto`, `paigasus-proto-derive`.
+
+| Field | Value |
+| --- | --- |
+| Repository owner and name | this repository |
+| Workflow filename | `release.yml` — with the extension |
+| Environment | `release-publish` |
+
+The environment field matters. Leaving it blank makes the configuration broader than intended.
+Filling it with `release-approval` makes the OIDC exchange fail — after the human approval and after
+the full matrix build.
+
+---
+
+## 6. Steps F through I
+
+### 6.1 Step F — the observation gate
+
+Merging the SMA-580 pull request is a push to `main`, so `release-pr` runs automatically. That job
+only opens or updates a pull request. It publishes nothing, so this observation is free.
+
+**Read the `release-pr` job's `--output json` line in the run log. Do not judge by the visual state
+of the release PR, and do not identify it by number — use `.prs[0].number`.** release-plz opens a
+new pull request if the old one was ever closed.
+
+| Observation | Meaning | Action |
+| --- | --- | --- |
+| `.prs[0]` proposes `0.1.0` for all three crates | Confirmed | **Proceed** |
+| `.prs` is `[]`, or no PR is refreshed | The gate is **vacuous**, not passed | **Stop.** Diagnose before flipping |
+| Any other version proposed | The version model is wrong | **Stop. Do not flip** |
+
+Expect the log to say *"updating changelog for version 0.1.0"* rather than *"next version is …"*.
+That wording is correct for a package whose manifest version already exceeds the registry baseline.
+
+**Also read the changelog.** It should still cover the full history. A near-empty changelog means
+the seed embedded `.cargo_vcs_info.json` — see §4.2.
+
+**Record the run's wall-clock.** After the seed, release-plz's commit walk has no stopping boundary
+and must compare the package at each commit across `main`'s history. `release-pr` carries
+`timeout-minutes: 20`. If the margin looks thin, raise it before proceeding. The cost is
+self-limiting: tags exist after step I.
+
+### 6.2 Step G — merge the release PR
+
+Merge it while the path is still gated. Nothing publishes. This puts the `CHANGELOG.md` files on
+`main` so the two GitHub Releases carry real notes.
+
+The branch ruleset requires a pull request to be up to date with `main` (`strict = true`). Step F's
+merge leaves the release PR behind. This resolves itself: `release-pr` force-updates its branch on
+that same push, which is the refresh step F reads.
+
+### 6.3 Step H — the flip
+
+```bash
+gh variable set PAIGASUS_RELEASE_ENABLED --body true --repo SMK1085/paigasus-core
+gh variable list --repo SMK1085/paigasus-core
+```
+
+Nothing publishes yet. `release.yml` fires on a push to `main` or on a dispatch, and the flip is
+neither.
+
+### 6.4 Step I — dispatch and approve. IRREVERSIBLE
+
+```bash
+gh workflow run release.yml --ref main --repo SMK1085/paigasus-core
+gh run watch --repo SMK1085/paigasus-core
+```
+
+`wheels`, `prebuild` and `proto-dist` build every artifact. Then `approve-release` enters the
+`release-approval` environment and **pauses**.
+
+**Confirm it reaches the `waiting` state.** If the run walks straight through without pausing, step
+B2 was not performed — **cancel the run immediately**. That pause is the only human gate that
+exists.
+
+Approve it. Everything after the approval is irreversible:
+
+- `release` publishes three crates, cuts six tags, creates two GitHub Releases.
+- `publish-pypi` uploads three projects.
+- `publish-npm` publishes nine packages.
+
+A second release pull request may appear, proposing `0.1.0` again. **Do not merge it.** It resolves
+itself once `0.1.0` is on the registry.
+
+---
+
+## 7. Step J — verification, then cleanup
+
+### 7.1 Presence
+
+1. crates.io serves `paigasus-kernel`, `paigasus-proto`, `paigasus-proto-derive` at `0.1.0`.
+2. PyPI serves `paigasus-py-bindings`, `paigasus-kernel`, `paigasus-proto` at `0.1.0`.
+   `paigasus-py-bindings` carries seven wheels and one sdist.
+3. npm serves nine packages at `0.1.0`.
+4. Six git tags of the form `<package>-v0.1.0` exist.
+5. Exactly **two** GitHub Releases exist for the release commit, one per family head.
+6. `moon ci` stays green on `main`.
+
+### 7.2 Installability — inside the 72-hour npm window
+
+Presence is not correctness. `napi prepublish` publishes only the seven platform packages, and the
+main package's `optionalDependencies` name them. Wrong ordering leaves `npm install
+@paigasus/node-bindings` returning 404 forever while all nine packages read as "served at `0.1.0`".
+`paigasus-kernel` on PyPI pins `paigasus-py-bindings==0.1.0` exactly, so an upload-order fault is
+likewise invisible to a presence check.
+
+Run all three in a clean environment:
+
+```bash
+# PyPI. Installing the FACE pulls the bindings, so this exercises the dependency
+# edge, not just one package. The PRN is vector 0 of
+# rs/crates/libs/paigasus-kernel-parity/vectors/prn_canonical.json.
+python3 -m venv /tmp/v && /tmp/v/bin/pip install paigasus-kernel
+/tmp/v/bin/python -c "
+import paigasus_kernel as k
+p = 'prn:pgs:iam:::organization/0190a1e5-0000-7000-8000-000000000000'
+assert k.prn_canonicalize(p) == p, k.prn_canonicalize(p)
+assert k.sum_as_string(2, 3) == '5'
+print('PyPI face + bindings OK')
+"
+
+# npm
+mkdir -p /tmp/n && cd /tmp/n && npm init -y >/dev/null && npm i @paigasus/node-bindings
+node -e "console.log(Object.keys(require('@paigasus/node-bindings')))"
+
+# crates.io
+cargo new /tmp/c && cd /tmp/c && cargo add paigasus-kernel && cargo build
+```
+
+### 7.3 Recovery, if a stage failed partway
+
+| State | Recovery |
+| --- | --- |
+| `release` failed partway | Re-run it. release-plz's `is_published` and existing-tag short-circuits converge |
+| crates.io done, PyPI failed | Re-run `publish-pypi`. `skip-existing: true` converges |
+| crates.io done, npm main packages failed | Re-run `publish-npm`. The `npmstate` pre-check skips what landed |
+| npm platform loop failed partway | Re-run `publish-npm`. `napi prepublish` catches npm's 403 per target and continues the loop |
+
+The last row's guard lives in `@napi-rs/cli`, not in this repository, and it matches on npm's error
+**message text**. A napi upgrade or an npm wording change could remove it silently. Nothing gates
+that.
+
+### 7.4 Cleanup — only after §7.1 and §7.2 pass
+
+Verify first. A yank is cheap to do late and awkward to undo, and the seeds are the diagnostic
+baseline if verification fails.
+
+```bash
+cargo yank --version 0.1.0-alpha.1 paigasus-proto-derive
+cargo yank --version 0.1.0-alpha.1 paigasus-proto
+cargo yank --version 0.1.0-alpha.1 paigasus-kernel
+```
+
+Then **revoke the crates.io API token** from §4.1.
+
+---
+
+## 8. The two tracked removals
+
+Both are temporary by decision. **No gate enforces either.**
+
+| Item | Removal condition |
+| --- | --- |
+| `workflow_dispatch` on `release.yml` | The first release has published and §7 has passed. Remove it in the same pull request that records the outcome |
+| `NPM_TOKEN` | Every `@paigasus/*` package exists, so npm Trusted Publishing becomes configurable. **File a follow-up issue**, and set the token's expiry short enough to bound the gap |
+
+---
+
+## 9. What must never happen
+
+- **Never hand-place a `*-vX.Y.Z` tag** to seed release-plz's tracking. Manual tags lack the
+  metadata release-plz uses and silently stop all future bumps. The seed in §4 places **no tag**,
+  which is what separates it from that failure.
+- **Never add `--allow-dirty`** to any command in §4. See the warning there.
+- **Never give `release-publish` a reviewer or a wait timer.** See §3.
+- **Never add a `pull_request` or `pull_request_target` trigger to `release.yml`.**
