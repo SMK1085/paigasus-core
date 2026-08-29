@@ -171,6 +171,12 @@ CARGO_INVOCATION_RE = re.compile(
 # cargo cache, the same reason this gate refuses `--offline` elsewhere.
 LOCKED_FLAG = "--locked"
 
+# The `bash`/`sh` prefix is OPTIONAL. Measured: five of the eight invoked gate scripts are
+# called BARE (`ci/release-parity/run.sh --ecosystem semantic-release`), so a prefix-requiring
+# extractor sees 3 of 8 scripts — which is exactly the error the first draft of the SMA-599
+# spec made, and it invalidated its own "zero false positives" measurement.
+SCRIPT_REF_RE = re.compile(r"(?:^|[\s;&|(])(?:bash\s+|sh\s+)?(ci/[\w./-]+\.sh)\b")
+
 # SMA-599 — the shell-script cargo-line classifier shared by A8's script arm and A9.
 #
 # THE CONSERVATIVE RULE. Report every cargo invocation whose own command segment does not
@@ -249,6 +255,11 @@ REQUIRED_LOCKED_TASKS = (
     "paigasus-iam-rs:test",
     "repo:deny",
     "repo:wasm-getrandom-free",
+    # SMA-599 — these two reach cargo ONLY through a gate script, so they are the floor
+    # members that fail if script-following silently stops working. Without them a broken
+    # follower degrades the derived set in exactly the direction nothing else can see.
+    "repo:publish-metadata",
+    "repo:version-lockstep",
 )
 
 # SMA-528 — the tasks that must key on their crate's upstream sources. `fmt` is crate-local by
@@ -682,6 +693,56 @@ def script_cargo_lines(path):
             f"the rest of the file and report zero rows"
         )
     return rows
+
+
+def task_script_refs(projects, root, target):
+    """The `ci/**/*.sh` files a task's resolved invocation runs, as existing Paths.
+
+    Raises MoonOutputError when a referenced script does not resolve to a readable file: a
+    rename would otherwise silently empty the derived set.
+    """
+    pid, _, name = target.partition(":")
+    blob = (projects[pid].get("invocations") or {}).get(name)
+    if not blob:
+        return []
+    paths = []
+    for rel in sorted(set(SCRIPT_REF_RE.findall(blob))):
+        path = Path(root) / rel
+        if not path.is_file():
+            raise MoonOutputError(
+                f"{target} invokes {rel}, which does not resolve to a readable file — the "
+                f"derived set would silently shrink. If the script moved, update the task."
+            )
+        paths.append(path)
+    return paths
+
+
+def derive_cargo_tasks(projects, root):
+    """{target: kind} for every task reaching cargo. kind is wrapper | literal | script.
+
+    NOT a flat set, deliberately. check_cargo_locked records, as measured, that a wrapper
+    match and a literal match must not be treated alike: `paigasus-kernel-ts:build` runs an
+    unlocked `napi build` beside a `wasm-pack build ... -- --locked`, so a blob-level flag
+    test greens a task that still repairs the lock. Collapsing the kinds here would
+    reintroduce that measured-vacuous form one level down.
+
+    Precedence is wrapper > literal > script, matching check_cargo_locked's existing rule
+    that a task matching both kinds is governed by the stricter (wrapper) one.
+    """
+    kinds = {}
+    for pid in sorted(projects):
+        invocations = projects[pid].get("invocations") or {}
+        for name in sorted(invocations):
+            target, blob = f"{pid}:{name}", invocations[name]
+            if blob is None:
+                continue
+            if any(marker in blob for marker in FFI_MARKERS):
+                kinds[target] = "wrapper"
+            elif CARGO_INVOCATION_RE.search(blob):
+                kinds[target] = "literal"
+            elif any(script_cargo_lines(p) for p in task_script_refs(projects, root, target)):
+                kinds[target] = "script"
+    return kinds
 
 
 def check_cargo_locked(projects, allow=ALLOW_UNLOCKED_CARGO, floor=REQUIRED_LOCKED_TASKS):
@@ -2235,6 +2296,44 @@ def self_test():
                     f"script_cargo_lines did not skip the body of a real {label} "
                     f"heredoc: {rows}"
                 )
+
+    # SMA-599 — derive_cargo_tasks must keep the three kinds DISTINGUISHABLE at the
+    # derivation boundary. A8 measured that a wrapper match and a literal match cannot be
+    # treated alike (paigasus-kernel-ts:build carries a --locked belonging to a DIFFERENT
+    # command), so a flat set would silently reintroduce the vacuous form.
+    with tempfile.TemporaryDirectory() as tmp:
+        ci_dir = Path(tmp) / "ci" / "probe"
+        ci_dir.mkdir(parents=True)
+        (ci_dir / "run.sh").write_text("cd rs\ncargo build\n")
+        kinds_fixture = {
+            "p": {
+                "source_dir": ".", "deps": {}, "tasks": {},
+                "task_inputs": {}, "task_input_globs": {},
+                "invocations": {
+                    "lit": "cargo build --locked",
+                    "wrap": "pnpm exec napi build --platform",
+                    "scr": "bash ci/probe/run.sh --negative-control",
+                    "none": "echo hello",
+                },
+            },
+        }
+        got = derive_cargo_tasks(kinds_fixture, Path(tmp))
+        want = {"p:lit": "literal", "p:wrap": "wrapper", "p:scr": "script"}
+        if got != want:
+            failures.append(f"derive_cargo_tasks returned {got}, expected {want}")
+
+        # An unresolvable script path must ABORT, not silently shrink the derived set.
+        missing = json.loads(json.dumps(kinds_fixture))
+        missing["p"]["invocations"]["scr"] = "bash ci/gone/run.sh"
+        try:
+            derive_cargo_tasks(missing, Path(tmp))
+        except MoonOutputError:
+            pass
+        else:
+            failures.append("derive_cargo_tasks did not raise on a script path that does not exist")
+
+    if not REQUIRED_LOCKED_TASKS:
+        failures.append("REQUIRED_LOCKED_TASKS is empty — A8's floor would assert nothing")
 
     for f in failures:
         print(f"  FAIL {f}", file=sys.stderr)
