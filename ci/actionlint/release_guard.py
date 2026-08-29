@@ -500,6 +500,12 @@ def plan_contract_violations(jobs: dict, name: str) -> list[str]:
                 f"without this floor a rename would leave it asserting nothing."]
     out: list[str] = []
 
+    # V9b's subject is DIRECT consumers only — jobs naming PLAN_JOB in their OWN needs:. A
+    # transitive reader (a job two hops downstream that references needs.plan.outputs... without
+    # PLAN_JOB on its own needs: path) is a different bug, and one actionlint itself already
+    # catches: a `needs.X...` expression referencing a job X not in that job's own needs: reds
+    # actionlint on its own. Widening V9b to walk transitively would duplicate a check another
+    # tool already owns — fix round 1 review, SMA-603.
     consumers = [jid for jid, j in jobs.items()
                  if isinstance(j, dict) and PLAN_JOB in needs_of(j)]
     if not consumers:
@@ -510,10 +516,17 @@ def plan_contract_violations(jobs: dict, name: str) -> list[str]:
             out.append(f"{name}: V9b: job '{jid}' needs '{PLAN_JOB}' but its if: is "
                        f"{if_text(jobs[jid])!r}, not {PLAN_GATE_EXPR!r}. Only `!=` fails safe: "
                        f"`== 'true'` inverts the decision and `== 'false'` skips on an unset "
-                       f"output.")
+                       f"output. A whitespace variant of an accepted form (an extra space, a "
+                       f"different quote style) also reds here — literal pinning, exactly as V2 "
+                       f"pins GATE_EXPR.")
 
+    # V9c resolves the DECISION STEP: outputs.nothing_to_release must reference a
+    # steps.<id>.outputs... expression naming a step that actually exists in this job. `decision`
+    # is set only when every part of that chain resolves — used below by V9d, which must be
+    # scoped to THIS step alone (fix round 1, I1: see the comment above V9d).
     outs = plan.get("outputs")
     expr = outs.get(PLAN_OUTPUT) if isinstance(outs, dict) else None
+    decision: dict | None = None
     if not isinstance(expr, str):
         out.append(f"{name}: V9c: job '{PLAN_JOB}' declares no outputs.{PLAN_OUTPUT}. A STEP "
                    f"output is not a JOB output, so every consumer would read the empty string.")
@@ -523,17 +536,30 @@ def plan_contract_violations(jobs: dict, name: str) -> list[str]:
             out.append(f"{name}: V9c: outputs.{PLAN_OUTPUT} is {expr!r}, which names no "
                        f"steps.<id>.outputs.{PLAN_OUTPUT}.")
         else:
-            ids = {s.get("id") for s in (plan.get("steps") or []) if isinstance(s, dict)}
-            if m.group(1) not in ids:
+            steps_by_id = {s.get("id"): s for s in (plan.get("steps") or []) if isinstance(s, dict)}
+            if m.group(1) not in steps_by_id:
                 out.append(f"{name}: V9c: outputs.{PLAN_OUTPUT} names step id {m.group(1)!r}, "
                            f"which does not exist in '{PLAN_JOB}'. A typo here yields '' "
                            f"forever, silently.")
+            else:
+                decision = steps_by_id[m.group(1)]
 
-    runs = "\n".join(str(s.get("run") or "")
-                     for s in (plan.get("steps") or []) if isinstance(s, dict))
-    if PLAN_SCRIPT not in runs:
-        out.append(f"{name}: V9d: job '{PLAN_JOB}' never invokes {PLAN_SCRIPT}. Without this, "
-                   f"V9c passes on an inline `echo {PLAN_OUTPUT}=true`.")
+    # V9d, fix round 1 (I1). This used to join every step's `run:` in the job and search THAT for
+    # the checker invocation — decoupled from V9c, which resolves a specific step id. Three
+    # measured fail-green shapes: (1) the decision step runs an inline echo while an unrelated
+    # LATER step happens to invoke the script with an unrelated flag; (2) outputs maps to a
+    # DIFFERENT step id that hardcodes the answer, while the decision-looking step still runs the
+    # script; (3) the decision step is a `uses:` step with no `run:` at all, and the script runs
+    # in some other, anonymous step. All three silently drop every release with no red anywhere —
+    # exactly the class this verdict's own message claims to prevent. Scoping to the step V9c
+    # just resolved closes all three; when V9c could not resolve a decision step at all, there is
+    # nothing here to scope to and that failure is already reported by V9c.
+    if decision is not None:
+        run_text = str(decision.get("run") or "")
+        if PLAN_SCRIPT not in run_text:
+            out.append(f"{name}: V9d: step {decision.get('id')!r} in job '{PLAN_JOB}' never "
+                       f"invokes {PLAN_SCRIPT}. Without this, V9c passes on an inline `echo "
+                       f"{PLAN_OUTPUT}=true`.")
     return out
 
 
@@ -1094,6 +1120,19 @@ FIXTURES: list[tuple[str, str, str, str | None]] = [
      _OK_MAIN.replace("  plan:\n", "  planning:\n")
              .replace("needs: [plan]", "needs: [planning]")
              .replace("needs.plan.outputs", "needs.planning.outputs"), "V9a"),
+    # Fix round 1, I2. V9a is a conjunction — `plan` exists AND at least one job names it in
+    # needs: — and only the first conjunct had a row. `plan` stays present and correctly wired
+    # here; both consumers are re-gated DIRECTLY on the release flag instead of via needs: [plan],
+    # so V1 stays satisfied and this is the ONLY thing that reds.
+    ("V9a: plan exists but nothing reads it (every direct consumer re-gated on the flag instead)",
+     "main",
+     _OK_MAIN.replace(
+         "    needs: [plan]\n    if: needs.plan.outputs.nothing_to_release != 'true'\n",
+         "    if: vars.PAIGASUS_RELEASE_ENABLED == 'true'\n")
+             .replace(
+         "    needs: [plan]\n    if: ${{ needs.plan.outputs.nothing_to_release != 'true' }}\n",
+         "    if: vars.PAIGASUS_RELEASE_ENABLED == 'true'\n"),
+     "V9a: no job names 'plan' in needs:"),
     ("V9b: an INVERTED consumer condition", "main",
      _OK_MAIN.replace("if: needs.plan.outputs.nothing_to_release != 'true'",
                       "if: needs.plan.outputs.nothing_to_release == 'true'"), "V9b"),
@@ -1119,9 +1158,31 @@ FIXTURES: list[tuple[str, str, str, str | None]] = [
     ("V9c: the mapping names a step id that does not exist", "main",
      _OK_MAIN.replace("${{ steps.decide.outputs.nothing_to_release }}",
                       "${{ steps.decdie.outputs.nothing_to_release }}"), "V9c"),
+    # Fix round 1, I3. The "names no steps.<id>" branch — the one that catches a HARDCODED
+    # `outputs:` mapping, the most direct drop-every-release wiring there is — had no dedicated
+    # row. `plan` itself is otherwise untouched (still gated, `decide` still runs the real
+    # checker); only the mapping value is replaced with a literal.
+    ("V9c: outputs.nothing_to_release is a hardcoded literal, not a steps.<id> reference", "main",
+     _OK_MAIN.replace(
+         "nothing_to_release: ${{ steps.decide.outputs.nothing_to_release }}",
+         "nothing_to_release: 'false'"),
+     "which names no steps"),
     ("V9d: the decision step no longer invokes the checker", "main",
      _OK_MAIN.replace("run: ci/release-plan/run.sh --github-output",
                       "run: echo nothing_to_release=true >> \"$GITHUB_OUTPUT\""), "V9d"),
+    # Fix round 1, I1. V9d used to search the WHOLE job's `run:` text, not just the DECISION
+    # step (the one V9c resolves via outputs.nothing_to_release's steps.<id> reference). This row
+    # is the measured fail-green: `decide` runs an inline echo (never touches the real checker),
+    # and an unrelated LATER step happens to invoke the script with an unrelated flag. A
+    # whole-job scan finds the script text somewhere in the job and reports clean; scoped to the
+    # decision step alone, it must still red.
+    ("V9d fix1: decide runs an inline echo while an unrelated step invokes the checker", "main",
+     _OK_MAIN.replace(
+         "      - id: decide\n        run: ci/release-plan/run.sh --github-output\n",
+         "      - id: decide\n"
+         "        run: echo \"nothing_to_release=true\" >> \"$GITHUB_OUTPUT\"\n"
+         "      - run: ci/release-plan/run.sh --help\n"),
+     "V9d"),
 ]
 
 
