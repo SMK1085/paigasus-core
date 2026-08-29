@@ -2502,6 +2502,24 @@ cargo_lock_step_verdict() { # $1 workflow file
              -e "s/^'(if|continue-on-error)'[[:space:]]*:/\1:/" \
              -e 's/^(if|continue-on-error)[[:space:]]+:/\1:/')"
 
+  # YAML's EXPLICIT KEY form puts the key and its value on separate lines:
+  #
+  #     ? if
+  #     : always()
+  #
+  # MEASURED: that parses to a real `if` key (python yaml reports the step's keys as
+  # ['name', 'if', 'run']) and `actionlint` accepts the workflow at rc 0, so it would clear
+  # check 1 and then evade every same-line scan below. REJECTED rather than normalised: pairing
+  # `?` lines with their `:` lines means multi-line parsing for a construct nobody writes by
+  # accident, and refusing it is strictly safer than half-understanding it. Reported for either
+  # protected key (CodeRabbit, PR 185 full review).
+  while IFS= read -r line; do
+    case "$line" in
+      '? if'|'? if '*|'?	if') echo "explicit-key if" ;;
+      '? continue-on-error'|'? continue-on-error '*|'?	continue-on-error') echo "explicit-key continue-on-error" ;;
+    esac
+  done < <(printf '%s\n' "$window")
+
   # Anything but the literal `false` suppresses the step's failure. Same rule check 8 applies to
   # the moon ci step. Scanned over the whole window rather than a fixed line count: the run block
   # is multi-line now, so continue-on-error legitimately sits several lines below the name.
@@ -3646,6 +3664,20 @@ out-of-order-script bash ci/cargo-lock-integrity/run.sh --negative-control'
         run: |}"
   expect_step 'a spaced "continue-on-error :" key is still reported' \
     'continue-on-error true' "$sp_coe"
+
+  # EXPLICIT-KEY form. Measured: this parses to a real key and actionlint accepts it, so it
+  # would clear check 1 and evade every same-line scan. Rejected outright.
+  local ex_if ex_coe
+  ex_if="${wired/        run: |/        ? if
+        : always()
+        run: |}"
+  expect_step 'an explicit-key "? if" entry is rejected' 'explicit-key if' "$ex_if"
+
+  ex_coe="${wired/        run: |/        ? continue-on-error
+        : true
+        run: |}"
+  expect_step 'an explicit-key "? continue-on-error" entry is rejected' \
+    'explicit-key continue-on-error' "$ex_coe"
 
   # ---- the script pin (T_CARGO_LOCK_SH_CALL_SITES) ----
   local script
