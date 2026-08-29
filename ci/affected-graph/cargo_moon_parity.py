@@ -23,6 +23,7 @@
 # it stays inside the "never parse YAML" rule above.
 #
 # usage: cargo_moon_parity.py [--self-test]
+import collections
 import inspect
 import json
 import re
@@ -169,6 +170,34 @@ CARGO_INVOCATION_RE = re.compile(
 # `--locked` is accepted; `--frozen` is NOT — it implies `--offline`, which false-reds on a cold
 # cargo cache, the same reason this gate refuses `--offline` elsewhere.
 LOCKED_FLAG = "--locked"
+
+# SMA-599 — the shell-script line classifier shared by A8's script arm and A9.
+#
+# ORDER IS LOAD-BEARING, and self_test pins it:
+#   1 join backslash continuations   2 skip heredoc bodies
+#   3 strip quoted strings, THEN `#` 4 command-scope the flag tests
+#
+# Step 3 is the one that looks arbitrary and is not. Stripping `#` FIRST truncates a line at a
+# hash living inside a string, so `echo "a # b" && cargo build` loses its real invocation — a
+# FALSE NEGATIVE, the fatal direction for a default-deny gate. check_dockerfile_locked uses the
+# naive order legitimately, on its stated premise that the Dockerfile "holds one cargo line and
+# no prose"; a general shell scanner has no such premise. Both orders agree on today's corpus,
+# so the FIXTURE is what holds this, not the tree.
+HEREDOC_OPEN_RE = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
+SHELL_STRING_RE = re.compile(r"'[^']*'|\"[^\"]*\"")
+# A cargo invocation is USUALLY not inside a quoted string — but `bash -c "cargo build"`,
+# `sh -c '...'` and `eval "cargo ..."` all are. When string-stripping removes a cargo verb and
+# leaves one of these behind, the line is REPORTED as unclassifiable rather than passed over.
+# No live instance exists today; this is forward cover.
+SHELL_EXEC_RE = re.compile(r"\b(?:bash|sh|zsh)\s+-c\b|\beval\b")
+# Command separators. Both flag tests are scoped to the segment holding the cargo verb, so
+# `cargo build && cargo metadata --locked` does NOT count as locking `cargo build`.
+COMMAND_SPLIT_RE = re.compile(r"[;&|]+")
+CARGO_METADATA_RE = re.compile(r"\bcargo\s+(?:\+\S+\s+)?metadata\b")
+
+ScriptCargoLine = collections.namedtuple(
+    "ScriptCargoLine", "lineno raw segment resolves locked unclassifiable"
+)
 
 # A wrapper reaches cargo without the literal token, so A8 matches FFI_MARKERS too. Without this
 # the three wrapper tasks would be silently OUT of scope rather than visibly allowlisted.
@@ -394,6 +423,66 @@ def derive_ffi_tasks(projects):
             if any(marker in blob for marker in FFI_MARKERS):
                 matched.add(f"{pid}:{name}")
     return matched
+
+
+def _classify_shell_line(lineno, logical):
+    """Rows for one LOGICAL line (continuations already joined). See the constants above."""
+    code = SHELL_STRING_RE.sub(" ", logical).split("#", 1)[0]
+    # A cargo verb that existed before string-stripping and not after was inside a string. That
+    # is normally prose, but `bash -c`/`eval` make it an invocation — report, never skip.
+    if CARGO_INVOCATION_RE.search(logical) and not CARGO_INVOCATION_RE.search(code):
+        if SHELL_EXEC_RE.search(code):
+            return [ScriptCargoLine(lineno, logical, code, True, False, True)]
+        return []
+    rows = []
+    for segment in COMMAND_SPLIT_RE.split(code):
+        if not CARGO_INVOCATION_RE.search(segment):
+            continue
+        # MEASURED (SMA-599 §2.1): `cargo metadata --no-deps` does not resolve and never
+        # rewrites the lock, so --locked on it is INERT. Demanding the flag would be
+        # cargo-cult compliance a later reader would mistake for a guarantee.
+        resolves = not (
+            CARGO_METADATA_RE.search(segment) and re.search(r"--no-deps\b", segment)
+        )
+        rows.append(
+            ScriptCargoLine(
+                lineno, logical, segment, resolves, LOCKED_FLAG in segment, False
+            )
+        )
+    return rows
+
+
+def script_cargo_lines(path):
+    """Every cargo invocation in a shell script, with its flags classified.
+
+    Raises MoonOutputError on a heredoc still open at EOF: otherwise the scanner silently
+    skips the rest of the file and reports zero rows, which is a vacuous PASS. Same
+    "infrastructure, never a silent pass" contract check_dockerfile_locked uses.
+    """
+    rows, delim, pending = [], None, []
+    for lineno, raw in enumerate(Path(path).read_text().splitlines(), 1):
+        if delim is not None:
+            if raw.strip() == delim:
+                delim = None
+            continue
+        opener = HEREDOC_OPEN_RE.search(raw)
+        pending.append((lineno, raw))
+        if opener is None and raw.rstrip().endswith("\\"):
+            continue
+        logical = " ".join(p[1].rstrip().rstrip("\\") for p in pending)
+        rows.extend(_classify_shell_line(pending[0][0], logical))
+        pending = []
+        if opener is not None:
+            delim = opener.group(2)
+    if pending:
+        logical = " ".join(p[1].rstrip().rstrip("\\") for p in pending)
+        rows.extend(_classify_shell_line(pending[0][0], logical))
+    if delim is not None:
+        raise MoonOutputError(
+            f"{path}: heredoc `{delim}` is still open at EOF — the scan would silently skip "
+            f"the rest of the file and report zero rows"
+        )
+    return rows
 
 
 def check_cargo_locked(projects, allow=ALLOW_UNLOCKED_CARGO, floor=REQUIRED_LOCKED_TASKS):
@@ -1664,6 +1753,59 @@ def self_test():
             pass
         else:
             failures.append("a malformed Cargo.toml did not raise out of cargo_crates()")
+
+    # SMA-599 — script_cargo_lines. Each row pins ONE filter, and the ORDER rows are the
+    # point: both orderings agree on today's corpus, so only a fixture holds the rule.
+    with tempfile.TemporaryDirectory() as tmp:
+        def _lines(body):
+            p = Path(tmp) / "probe.sh"
+            p.write_text(body)
+            return script_cargo_lines(p)
+
+        # Filter order: strings BEFORE comments. Stripping `#` first truncates the line
+        # inside the string and deletes a real invocation — a false negative.
+        if not any(s.segment.strip().startswith("cargo build") for s in _lines(
+            'echo "a # b" && cargo build\n'
+        )):
+            failures.append("script_cargo_lines stripped a comment inside a string and lost `cargo build`")
+
+        # Backslash continuation: the flag is on the NEXT physical line.
+        rows = _lines("cargo build \\\n  --locked\n")
+        if len(rows) != 1 or not rows[0].locked or rows[0].lineno != 1:
+            failures.append(
+                f"script_cargo_lines did not join a backslash continuation: {rows}"
+            )
+
+        # Command scoping: --locked belongs to the SECOND command, not the first.
+        rows = _lines("cargo build && cargo metadata --locked\n")
+        if not any(r.segment.strip().startswith("cargo build") and not r.locked for r in rows):
+            failures.append("script_cargo_lines let a later command's --locked cover `cargo build`")
+
+        # --no-deps does not resolve (MEASURED: it never rewrites the lock).
+        rows = _lines("cargo metadata --format-version 1 --no-deps\n")
+        if not rows or rows[0].resolves:
+            failures.append("script_cargo_lines treated `cargo metadata --no-deps` as resolving")
+
+        # A cargo verb inside a heredoc body is DATA, not an invocation.
+        if _lines("cat <<'PY'\ncargo build\nPY\n"):
+            failures.append("script_cargo_lines read a cargo line inside a heredoc body")
+
+        # An unterminated heredoc would silently swallow the rest of the file.
+        try:
+            _lines("cat <<'PY'\ncargo build\n")
+        except MoonOutputError:
+            pass
+        else:
+            failures.append("script_cargo_lines did not raise on an unterminated heredoc")
+
+        # A cargo invocation CAN live inside a quoted string. Report it, never skip it.
+        rows = _lines('bash -c "cargo build"\n')
+        if not any(r.unclassifiable for r in rows):
+            failures.append("script_cargo_lines silently dropped a `bash -c \"cargo ...\"` invocation")
+
+        # Prose in a comment is not an invocation.
+        if _lines("# run cargo build here\n"):
+            failures.append("script_cargo_lines reported a cargo verb inside a comment")
 
     for f in failures:
         print(f"  FAIL {f}", file=sys.stderr)
