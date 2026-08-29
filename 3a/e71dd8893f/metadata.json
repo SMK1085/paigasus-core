@@ -3,7 +3,7 @@
   "checkpoint_id": "3ae71dd8893f",
   "strategy": "manual-commit",
   "branch": "feature/sma-dependabot-181-fix",
-  "checkpoints_count": 2,
+  "checkpoints_count": 3,
   "files_touched": [
     "rs/Cargo.lock"
   ],
@@ -21,13 +21,20 @@
       "compact_transcript": "/3a/e71dd8893f/1/transcript.jsonl",
       "content_hash": "/3a/e71dd8893f/1/content_hash.txt",
       "prompt": ""
+    },
+    {
+      "metadata": "/3a/e71dd8893f/2/metadata.json",
+      "transcript": "/3a/e71dd8893f/2/full.jsonl",
+      "compact_transcript": "/3a/e71dd8893f/2/transcript.jsonl",
+      "content_hash": "/3a/e71dd8893f/2/content_hash.txt",
+      "prompt": ""
     }
   ],
   "token_usage": {
-    "input_tokens": 16,
-    "cache_creation_tokens": 5654,
-    "cache_read_tokens": 876058,
-    "output_tokens": 3185,
-    "api_call_count": 8
+    "input_tokens": 706,
+    "cache_creation_tokens": 776000,
+    "cache_read_tokens": 151304289,
+    "output_tokens": 283407,
+    "api_call_count": 353
   }
 }
