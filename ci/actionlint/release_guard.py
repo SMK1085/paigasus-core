@@ -241,10 +241,23 @@ def command_segments(line: str) -> list[str]:
 
 _DRY_RUN_FLAG_RE = re.compile(r"--dry-run\b")
 
+# V8 fix round 2, Important 2 (N2). A negating form ANYWHERE after the publish marker's match end
+# — not only immediately after the FIRST `--dry-run` token — since every tool this guard has
+# measured (npm 11.11.0, clipanion 4.0.0-rc.4) is last-flag-wins: `--dry-run --no-dry-run` and
+# `--dry-run --dry-run=false` both really publish, but a per-occurrence scan that returns on the
+# first qualifying `--dry-run` never sees the later negation. Covers `--no-dry-run`,
+# `--dry-run=false`, `--dry-run false`, `--dry-run=0`, `--dry-run 0` — the space form needs its
+# own alternative here because `\s*=\s*` requires a literal `=`, and deliberately does NOT cover
+# `--dry-run=true` / `--dry-run true` for the same fail-closed-on-`=` reason _dry_run_exempts'
+# docstring gives.
+_DRY_RUN_NEGATION_RE = re.compile(
+    r"--no-dry-run\b|--dry-run\s*=\s*(?:false|0)\b|--dry-run\s+(?:false|0)\b"
+)
+
 
 def _dry_run_exempts(segment: str, after: int) -> bool:
-    """True if `segment` carries a `--dry-run` occurrence, at-or-after position `after` (the
-    publish marker's own match end), that actually disables the call.
+    """True if the text of `segment` AT OR AFTER position `after` (the publish marker's own
+    match end) carries an EFFECTIVE `--dry-run` that disables the call.
 
     V8 fix round 1, Important 2. Two measured false-cleans that genuinely publish:
     `FLAGS=--dry-run cargo publish` (a shell ENVIRONMENT ASSIGNMENT — the flag never reaches
@@ -255,17 +268,22 @@ def _dry_run_exempts(segment: str, after: int) -> bool:
     `--dry-run` immediately followed by `=` or a `false`/`0` argument, since this guard does not
     parse arbitrary flag values and a `--dry-run=true` is rare enough that failing closed on any
     `=` form costs nothing real.
+
+    V8 fix round 2, Important 2 (N2). The round-1 shape scanned occurrences in ORDER and RETURNED
+    on the first one that qualified as safe — so a LATER negating token, appended after an
+    earlier bare `--dry-run`, was never examined. Measured, both real publishes: `npm publish
+    --dry-run --no-dry-run` and `npm publish --dry-run --dry-run=false` (npm 11.11.0 and
+    clipanion 4.0.0-rc.4 are both last-flag-wins). Fixed by checking the WHOLE tail after the
+    marker for ANY negating form first — see _DRY_RUN_NEGATION_RE — before looking for a bare
+    positive `--dry-run` at all. This does not attempt true last-token-wins ordering for three or
+    more flags (e.g. `--dry-run --no-dry-run --dry-run`, where the final token really does mean
+    dry); it fails closed (NOT exempt) on any negation present, which is the safe direction and
+    not a shape either measurement covered.
     """
-    for m in _DRY_RUN_FLAG_RE.finditer(segment):
-        if m.start() < after:
-            continue
-        tail = segment[m.end() :].lstrip()
-        if tail.startswith("="):
-            continue
-        if re.match(r"(false|0)\b", tail):
-            continue
-        return True
-    return False
+    tail = segment[after:]
+    if _DRY_RUN_NEGATION_RE.search(tail):
+        return False
+    return bool(_DRY_RUN_FLAG_RE.search(tail))
 
 
 def job_publishes(job: dict) -> bool:
@@ -526,6 +544,11 @@ def check_called(doc: dict, name: str) -> list[str]:
 # reference, or a second local hop nested inside an already-resolved callee — is reported as
 # unverifiable rather than silently treated as clean, fail-closed. An entry here is a reviewed
 # exception to that rule; state the reason in a comment beside it. Empty today.
+#
+# The key for a REMOTE or missing-on-disk target is that `uses:` string verbatim. The key for a
+# NESTED (second-level) target is the composite `"{outer uses:} -> {inner uses:}"` form shown in
+# the violation message — copy it EXACTLY from that message, not just the inner `uses:` value, or
+# the entry will never match.
 CALLEE_VERIFICATION_ALLOWLIST: frozenset[str] = frozenset()
 
 
@@ -591,7 +614,17 @@ def callee_boundary_violations(jobs: dict, name: str) -> list[str]:
                     f"whose own job '{cjid}' calls a second workflow this guard resolves only "
                     f"one level past — never two."
                 )
-        if publishes and APPROVAL_JOB not in gated_path_jobs(jid, jobs):
+        if not publishes:
+            continue
+        if jid == APPROVAL_JOB:
+            # Fix round 2, Minor 4 (N4): gated_path_jobs(APPROVAL_JOB, jobs) trivially contains
+            # APPROVAL_JOB itself, so without this case the gate calling a publishing callee read
+            # as clean — symmetric with the M1 case already handled in
+            # approval_boundary_violations' V8b loop above.
+            out.append(f"{name}: V8d: job '{APPROVAL_JOB}' IS the approval gate and calls a "
+                       f"local workflow '{uses}' that can reach a registry. The gate itself must "
+                       f"never publish — move the call to a job downstream of it.")
+        elif APPROVAL_JOB not in gated_path_jobs(jid, jobs):
             out.append(f"{name}: V8d: job '{jid}' calls local workflow '{uses}', which can reach "
                        f"a registry, but '{APPROVAL_JOB}' is not on its needs: path. It would "
                        f"publish without passing the gate.")
@@ -810,6 +843,23 @@ FIXTURES: list[tuple[str, str, str, str | None]] = [
      _OK_MAIN.replace("environment: release-approval",
                       "environment: {name: release-approval, url: 'https://x'}"), None),
 
+    # --- V8 fix round 2 additions (N1, N2) ---------------------------------------------------
+    # N1: the SPACE-separated form of the false/0 negation had no dedicated fixture. Measured
+    # against real npm 11.11.0: `npm publish --dry-run false` resolves dry-run=false and really
+    # publishes.
+    ("V8 fix2 N1: npm publish --dry-run false (space form) still publishes for real", "main",
+     _OK_MAIN.replace("steps: [{run: echo build}]",
+                      "steps: [{run: npm publish --dry-run false}]"), "V8b"),
+    # N2: a LATER negating token was never seen — the old code exempted on the FIRST qualifying
+    # `--dry-run` and stopped scanning. Both measured against real npm 11.11.0 / clipanion
+    # 4.0.0-rc.4 (both last-flag-wins): the tool really publishes in both shapes.
+    ("V8 fix2 N2: a later --no-dry-run overrides an earlier --dry-run", "main",
+     _OK_MAIN.replace("steps: [{run: echo build}]",
+                      "steps: [{run: npm publish --dry-run --no-dry-run}]"), "V8b"),
+    ("V8 fix2 N2: a later --dry-run=false overrides an earlier --dry-run", "main",
+     _OK_MAIN.replace("steps: [{run: echo build}]",
+                      "steps: [{run: npm publish --dry-run --dry-run=false}]"), "V8b"),
+
     # --- Fix round 3 additions (Critical 2, Important 3, Important 4) ----------------------
     # Critical 2, both directions. The RED direction is the defect: this exact three-step job was
     # measured passing the whole guard at exit 0 before V7 existed. The two CLEAN directions are
@@ -980,7 +1030,6 @@ def _v8d_pre_approval_callee_publish() -> str | None:
         "    steps: [{run: release-plz release}]\n"
         "  post-publish:\n"
         "    needs: [approve-release]\n"
-        "    runs-on: ubuntu-latest\n"
         "    uses: ./called.yml\n",
     )
     rc2, out2, err2 = _run_main_in_tempdir({"called.yml": _PUBLISHING_CALLEE, "main.yml": post_yaml})
@@ -1002,7 +1051,7 @@ def _v8d_sneak_shape() -> str | None:
     """
     main_yaml = _OK_MAIN.replace(
         "  approve-release:\n",
-        "  sneak:\n    needs: [build]\n    runs-on: ubuntu-latest\n    uses: ./pub.yml\n"
+        "  sneak:\n    needs: [build]\n    uses: ./pub.yml\n"
         "  approve-release:\n",
     )
     rc, out, err = _run_main_in_tempdir({"pub.yml": _PUBLISHING_CALLEE, "main.yml": main_yaml})
@@ -1060,11 +1109,9 @@ def _v8d_dedup_shared_callee() -> str | None:
         "jobs:\n"
         "  caller-a:\n"
         "    if: vars.PAIGASUS_RELEASE_ENABLED == 'true'\n"
-        "    runs-on: ubuntu-latest\n"
         "    uses: ./shared.yml\n"
         "  caller-b:\n"
         "    if: vars.PAIGASUS_RELEASE_ENABLED == 'true'\n"
-        "    runs-on: ubuntu-latest\n"
         "    uses: ./shared.yml\n"
     )
     rc, out, err = _run_main_in_tempdir({"shared.yml": _PUBLISHING_CALLEE, "main.yml": main_yaml})
@@ -1074,6 +1121,84 @@ def _v8d_dedup_shared_callee() -> str | None:
     if rc != 1 or len(a_lines) != 1 or len(b_lines) != 1 or a_lines[0] == b_lines[0]:
         return (f"expected exactly one distinct V8d line per caller, got exit {rc!r}: "
                 f"stdout={out!r} stderr={err!r}")
+    return None
+
+
+def _v8d_dedup_shared_nested_target() -> str | None:
+    """Regression test for the `seen` de-duplication set inside callee_boundary_violations (fix
+    round 2, Minor 6). `_v8d_dedup_shared_callee` above proves that naming the CALLING job
+    removes a duplicate line across two DIFFERENT calling jobs — that is what actually does the
+    work in that case, not `seen`. `seen` earns its keep on a narrower shape: TWO jobs INSIDE THE
+    SAME resolved callee ('a.yml') that both nest the IDENTICAL unresolvable second-level target
+    ('./b.yml'). Without `seen`, the single outer caller ('build') would get the identical
+    unverifiable-nested line twice, once per inner job.
+    """
+    files = {
+        "a.yml": (
+            "on:\n  workflow_call:\njobs:\n"
+            "  inner-1:\n    uses: ./b.yml\n"
+            "  inner-2:\n    uses: ./b.yml\n"
+        ),
+        "main.yml": _OK_MAIN.replace("steps: [{run: echo build}]", "uses: ./a.yml"),
+    }
+    rc, out, err = _run_main_in_tempdir(files)
+    matching = [ln for ln in out.splitlines() if "resolves only one level" in ln]
+    if rc != 1 or len(matching) != 1:
+        return (f"expected exactly one de-duplicated unverifiable-nested line, got exit {rc!r}, "
+                f"{len(matching)} matching line(s): stdout={out!r} stderr={err!r}")
+    return None
+
+
+def _v8d_approval_gate_self_case() -> str | None:
+    """Regression test for N4 (fix round 2, Minor 4): a job literally named APPROVAL_JOB, itself
+    carrying `uses: ./pub.yml` where the callee publishes, used to read clean —
+    gated_path_jobs(APPROVAL_JOB, jobs) trivially contains APPROVAL_JOB, so the old
+    `APPROVAL_JOB not in gated_path_jobs(jid, jobs)` check could never fire for jid ==
+    APPROVAL_JOB itself. Symmetric with the Minor 1 case already handled in
+    approval_boundary_violations' V8b loop.
+
+    Not a live hole against the real repository — the pinned actionlint rejects `environment:` on
+    a `uses:` job, so such a job would red V8a's syntax instead — but V8d's own safety in this
+    corner should not rest on a DIFFERENT gate's check. Driven as a DIRECT call to
+    callee_boundary_violations (not through main()), since it only needs a `jobs` dict and the
+    filesystem for the one callee file — main()'s own `uses.startswith("./")` V6 loop has nothing
+    useful to say about a job named `approve-release` and would only add noise.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        (tmp_path / "pub.yml").write_text(_PUBLISHING_CALLEE)
+        prev_cwd = Path.cwd()
+        try:
+            os.chdir(tmp_path)
+            out = callee_boundary_violations({APPROVAL_JOB: {"uses": "./pub.yml"}}, "fixture")
+        finally:
+            os.chdir(prev_cwd)
+    blob = " | ".join(out)
+    if "V8d" not in blob or "IS the approval gate" not in blob:
+        return f"expected a self-case V8d violation, got: {blob or '(clean)'}"
+    return None
+
+
+def _v8d_missing_local_callee_direct() -> str | None:
+    """Direct-call regression test for the `is_file()` fail-closed arm inside
+    callee_boundary_violations (fix round 2, Minor 5). Unreachable through main() end to end:
+    main()'s earlier check_called loop already calls load_workflow on every local `./` callee
+    first, and load_workflow infra()s at exit 2 on a missing file before
+    callee_boundary_violations ever runs at all. Calling callee_boundary_violations directly,
+    bypassing that loop, is what actually exercises this arm — chosen over a defence-in-depth
+    comment so the arm stays a LIVE, tested rule rather than an assumed one.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        prev_cwd = Path.cwd()
+        try:
+            os.chdir(tmp)
+            jobs = {"caller": {"uses": "./does-not-exist.yml"}}
+            out = callee_boundary_violations(jobs, "fixture")
+        finally:
+            os.chdir(prev_cwd)
+    blob = " | ".join(out)
+    if "V8d" not in blob or "does not exist on disk" not in blob:
+        return f"expected a missing-callee V8d violation, got: {blob or '(clean)'}"
     return None
 
 
@@ -1168,6 +1293,9 @@ def self_test() -> int:
         ("v8d I1 unverifiable remote uses:", _v8d_unverifiable_remote_uses),
         ("v8d I1 unverifiable nested local callee", _v8d_unverifiable_nested_local_callee),
         ("v8d M2 no duplicate line for a shared callee", _v8d_dedup_shared_callee),
+        ("v8d N6 no duplicate line for a shared nested target", _v8d_dedup_shared_nested_target),
+        ("v8d N4 approval gate self-case", _v8d_approval_gate_self_case),
+        ("v8d N5 missing local callee (direct call)", _v8d_missing_local_callee_direct),
         ("minor-9 empty jobs: {} floor", _minor9_empty_jobs_floor),
     ):
         err = fn()
