@@ -2,7 +2,7 @@
 
 //! Tenancy value objects and entities (SMA-442, ADR-0014).
 
-use crate::value::{DomainError, PrincipalId};
+use crate::value::{DomainError, PrincipalId, Stamp};
 use chrono::{DateTime, Utc};
 use paigasus_kernel::Prn;
 use uuid::Uuid;
@@ -191,16 +191,23 @@ pub struct Organization {
     pub status: NodeStatus,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// Who created the row. `None` only for a row written before SMA-440's `m0011` — the
+    /// absent `Actor` that `actor.proto` defines as unknown-or-system.
+    pub created_by: Option<PrincipalId>,
+    /// Who last modified the row. Equals `created_by` on the first write.
+    pub modified_by: Option<PrincipalId>,
 }
 impl Organization {
-    pub fn new(id: OrganizationId, slug: Slug, name: &str, now: DateTime<Utc>) -> Result<Self, DomainError> {
+    pub fn new(id: OrganizationId, slug: Slug, name: &str, stamp: &Stamp) -> Result<Self, DomainError> {
         Ok(Self {
             id,
             slug,
             name: validate_name(name)?,
             status: NodeStatus::Active,
-            created_at: now,
-            updated_at: now,
+            created_at: stamp.at,
+            updated_at: stamp.at,
+            created_by: Some(stamp.by.clone()),
+            modified_by: Some(stamp.by.clone()),
         })
     }
 }
@@ -213,16 +220,23 @@ pub struct Team {
     pub status: NodeStatus,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// Who created the row. `None` only for a row written before SMA-440's `m0011` — the
+    /// absent `Actor` that `actor.proto` defines as unknown-or-system.
+    pub created_by: Option<PrincipalId>,
+    /// Who last modified the row. Equals `created_by` on the first write.
+    pub modified_by: Option<PrincipalId>,
 }
 impl Team {
-    pub fn new(id: TeamId, slug: Slug, name: &str, now: DateTime<Utc>) -> Result<Self, DomainError> {
+    pub fn new(id: TeamId, slug: Slug, name: &str, stamp: &Stamp) -> Result<Self, DomainError> {
         Ok(Self {
             id,
             slug,
             name: validate_name(name)?,
             status: NodeStatus::Active,
-            created_at: now,
-            updated_at: now,
+            created_at: stamp.at,
+            updated_at: stamp.at,
+            created_by: Some(stamp.by.clone()),
+            modified_by: Some(stamp.by.clone()),
         })
     }
 }
@@ -236,9 +250,14 @@ pub struct Project {
     pub status: NodeStatus,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// Who created the row. `None` only for a row written before SMA-440's `m0011` — the
+    /// absent `Actor` that `actor.proto` defines as unknown-or-system.
+    pub created_by: Option<PrincipalId>,
+    /// Who last modified the row. Equals `created_by` on the first write.
+    pub modified_by: Option<PrincipalId>,
 }
 impl Project {
-    pub fn new(id: ProjectId, team_id: TeamId, slug: Slug, name: &str, now: DateTime<Utc>) -> Result<Self, DomainError> {
+    pub fn new(id: ProjectId, team_id: TeamId, slug: Slug, name: &str, stamp: &Stamp) -> Result<Self, DomainError> {
         if id.org_uuid() != team_id.org_uuid() {
             return Err(DomainError::InvalidNodePrn(id.canonical()));
         }
@@ -248,8 +267,10 @@ impl Project {
             slug,
             name: validate_name(name)?,
             status: NodeStatus::Active,
-            created_at: now,
-            updated_at: now,
+            created_at: stamp.at,
+            updated_at: stamp.at,
+            created_by: Some(stamp.by.clone()),
+            modified_by: Some(stamp.by.clone()),
         })
     }
 }
@@ -271,9 +292,30 @@ impl Membership {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
 
     fn u(n: u128) -> Uuid {
         Uuid::from_u128(n)
+    }
+
+    /// Named `stamp_at_secs` rather than `test_stamp` deliberately: Task 3 adds a `pub
+    /// test_stamp(at: DateTime<Utc>, actor: u128)` to the service crate's `fakes.rs` with a
+    /// different first parameter, and two helpers sharing a name across crates invites a
+    /// wrong-argument mistake that still compiles.
+    fn stamp_at_secs(secs: i64, actor: u128) -> Stamp {
+        Stamp::new(Utc.timestamp_opt(secs, 0).unwrap(), PrincipalId::from_prn(Prn::build("iam", "", None, "principal", Uuid::from_u128(actor)).unwrap()))
+    }
+
+    /// SMA-440: the first write sets `modified_by` equal to `created_by`, mirroring the rule
+    /// `AuditMetadata` already states for `modified_at` vs `created_at`.
+    #[test]
+    fn a_new_org_records_its_creator_as_its_first_modifier() {
+        let stamp = stamp_at_secs(1_700_000_000, 1);
+        let org = Organization::new(OrganizationId::from_uuid(Uuid::from_u128(10)), Slug::parse("acme").unwrap(), "Acme", &stamp).unwrap();
+        assert_eq!(org.created_by.as_ref(), Some(&stamp.by));
+        assert_eq!(org.modified_by.as_ref(), Some(&stamp.by));
+        assert_eq!(org.created_at, stamp.at);
+        assert_eq!(org.updated_at, stamp.at);
     }
 
     #[test]
@@ -340,17 +382,17 @@ mod tests {
     }
     #[test]
     fn project_rejects_cross_org_team() {
-        let now = Utc::now();
+        let stamp = stamp_at_secs(1_700_000_000, 1);
         let team = TeamId::from_parts(u(7), u(2));
-        assert!(Project::new(ProjectId::from_parts(u(8), u(3)), team.clone(), Slug::parse("p").unwrap(), "P", now).is_err());
-        assert!(Project::new(ProjectId::from_parts(u(7), u(3)), team, Slug::parse("p").unwrap(), "P", now).is_ok());
+        assert!(Project::new(ProjectId::from_parts(u(8), u(3)), team.clone(), Slug::parse("p").unwrap(), "P", &stamp).is_err());
+        assert!(Project::new(ProjectId::from_parts(u(7), u(3)), team, Slug::parse("p").unwrap(), "P", &stamp).is_ok());
     }
     #[test]
     fn new_nodes_start_active() {
-        let now = Utc::now();
-        let org = Organization::new(OrganizationId::from_uuid(u(1)), Slug::parse("acme").unwrap(), "Acme", now).unwrap();
+        let stamp = stamp_at_secs(1_700_000_000, 1);
+        let org = Organization::new(OrganizationId::from_uuid(u(1)), Slug::parse("acme").unwrap(), "Acme", &stamp).unwrap();
         assert_eq!(org.status, NodeStatus::Active);
-        assert_eq!(org.created_at, now);
-        assert_eq!(org.updated_at, now);
+        assert_eq!(org.created_at, stamp.at);
+        assert_eq!(org.updated_at, stamp.at);
     }
 }
