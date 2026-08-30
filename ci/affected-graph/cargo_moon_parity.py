@@ -1143,16 +1143,23 @@ def task_script_closure(projects, root, target):
 
     Breadth-first with a visited set keyed on the RESOLVED path, so a cycle terminates and a
     module reached twice appears once. Depth is unbounded by design; the corpus is depth 2.
+
+    Every member is returned RESOLVED, and that is load-bearing. `task_script_refs` builds
+    `root / rel`, which keeps whatever form the caller passed, while `script_source_refs`
+    resolves. Mixing the two crashed a consumer: with a symlinked `root`, the closure held one
+    path in link form and one in real form, and `check_cargo_locked_scripts`'
+    `path.relative_to(root)` raised ValueError — which is NOT in INFRA_ERRORS, so it escaped as a
+    traceback instead of the rc-2 infrastructure classification (MEASURED, CodeRabbit PR review).
+    Consumers must therefore compare against a RESOLVED root.
     """
     queue, seen, out = list(task_script_refs(projects, root, target)), set(), []
     while queue:
-        path = queue.pop(0)
-        key = path.resolve()
+        key = queue.pop(0).resolve()
         if key in seen:
             continue
         seen.add(key)
-        out.append(path)
-        queue.extend(script_source_refs(path, root))
+        out.append(key)
+        queue.extend(script_source_refs(key, root))
     return out
 
 
@@ -1340,10 +1347,13 @@ def check_cargo_locked_scripts(projects, root, allow=None):
     by hand rather than trusting a row.
     """
     allow = ALLOW_UNLOCKED_CARGO_SCRIPT if allow is None else allow
+    # RESOLVED, to match task_script_closure's members. An unresolved root against a resolved
+    # member raises ValueError out of relative_to, and ValueError is not in INFRA_ERRORS.
+    root_resolved = Path(root).resolve()
     rows, seen = [], {}
     for target in sorted(derive_cargo_tasks(projects, root)):
         for path in task_script_closure(projects, root, target):
-            rel = path.relative_to(root).as_posix()
+            rel = path.relative_to(root_resolved).as_posix()
             if rel in seen:
                 continue
             lines = script_cargo_lines(path)
@@ -2846,6 +2856,38 @@ def self_test():
             failures.append("script_source_refs did not raise on a source resolving to nothing")
         except MoonOutputError:
             pass
+
+    # A SYMLINKED root must not crash the consumer. `task_script_refs` builds `root / rel` and
+    # keeps the caller's form; `script_source_refs` resolves. Before task_script_closure resolved
+    # every member, the closure held one path in link form and one in real form, and
+    # `path.relative_to(root)` raised ValueError — which is NOT in INFRA_ERRORS, so it escaped as
+    # a traceback rather than the rc-2 classification (MEASURED, CodeRabbit PR review). macOS
+    # makes this reachable in ordinary use: /tmp is a symlink to /private/tmp.
+    with tempfile.TemporaryDirectory() as tmp:
+        link_root, real_root = Path(tmp) / "link", Path(tmp) / "real"
+        (real_root / "ci" / "eco").mkdir(parents=True)
+        os.symlink(real_root, link_root)
+        (real_root / "ci" / "run.sh").write_text("source ./eco/a.sh\n")
+        (real_root / "ci" / "eco" / "a.sh").write_text("cargo build\n")
+        linked = {
+            "repo": {
+                "source_dir": ".", "deps": {}, "tasks": {},
+                "task_inputs": {"t": []}, "task_input_globs": {"t": []},
+                "invocations": {"t": "bash ci/run.sh"},
+            },
+        }
+        try:
+            link_rows = check_cargo_locked_scripts(linked, link_root, allow={})
+        except ValueError as exc:
+            link_rows = []
+            failures.append(
+                f"A8's script arm raised ValueError on a SYMLINKED root — the closure mixes path "
+                f"forms and ValueError is not in INFRA_ERRORS, so it escapes as a traceback: {exc}"
+            )
+        if not any("ci/eco/a.sh" in r for r in link_rows):
+            failures.append(
+                f"A8's script arm lost the sourced module under a symlinked root: {link_rows}"
+            )
 
     # The resolver's FLOOR: a rename must red, not silently empty the closure.
     _root = Path(__file__).resolve().parents[2]

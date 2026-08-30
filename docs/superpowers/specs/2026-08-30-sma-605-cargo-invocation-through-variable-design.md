@@ -419,8 +419,9 @@ going stale (see below).
 | M31 | drop `_executable_text`'s heredoc-open-at-EOF guard | KILLED |
 
 **SEVEN first-pass survivors, and what each bought.** A survivor is evidence about the FIXTURES,
-never a result to accept, so each one is recorded with the fixture that now kills it. All six
-were found during implementation or local review, not predicted by the design.
+never a result to accept, so each one is recorded with the fixture that now kills it. None was
+predicted by the design: six surfaced during implementation or local review, and M25 only in the
+PR review round.
 
 | First-pass survivor | Why it survived | Fixture added |
 |---|---|---|

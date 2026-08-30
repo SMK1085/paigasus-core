@@ -1035,8 +1035,9 @@ git commit -m "ci(repo): waive the measured CARGO= redirection in release-plz.sh
 - [ ] **Step 1: Re-run every mutation against the FINAL code**
 
 The results from Tasks 1-6 were measured against intermediate states. Re-run **every** mutation
-in the spec's §6.2 table — M1 through M28, the canonical final battery — against the finished
-file, one at a time, restoring between each with
+in the spec's §6.2 table — that table is the canonical final battery, and it GROWS as review
+rounds add fixes, so read the count from the table rather than from this sentence — against the
+finished file, one at a time, restoring between each with
 `git checkout -- ci/affected-graph/cargo_moon_parity.py`. Running only the subset a single task
 introduced leaves half the battery unverified.
 
