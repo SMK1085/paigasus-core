@@ -3155,8 +3155,15 @@ def self_test():
         ('CARGO_NET_OFFLINE=true tool update', []),
         # ...and it must still see a real CARGO= that follows one.
         ('CARGO_NET_OFFLINE=true CARGO=/p tool update', [("env", None)]),
-        # The lookahead's job: an assignment with nothing to run is not an invocation.
+        # An assignment with nothing to run is not an invocation. NOTE: this fixture does NOT
+        # distinguish the lookahead from a consuming `\\s+\\S` — both report zero here, measured.
+        # The row below is the one that does.
         ('export CARGO=/p', []),
+        # THE LOOKAHEAD'S PROOF, and the only shape that separates it from consumption
+        # (measured over eight candidate shapes). Consuming the trailing word eats the second
+        # prefix's leading separator, so `finditer` resumes mid-token and reports ONE match
+        # where there are two.
+        ('CARGO=/p CARGO=/q tool update', [("env", None), ("env", None)]),
         # A lowercase `$cargo build` is ALREADY matched by CARGO_INVOCATION_RE (measured), so
         # without de-duplication arm 1 double-reports one invocation.
         ('$cargo build', [("literal", "build")]),
