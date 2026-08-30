@@ -313,7 +313,10 @@ mod tests {
     /// different first parameter, and two helpers sharing a name across crates invites a
     /// wrong-argument mistake that still compiles.
     fn stamp_at_secs(secs: i64, actor: u128) -> Stamp {
-        Stamp::new(Utc.timestamp_opt(secs, 0).unwrap(), PrincipalId::from_prn(Prn::build("iam", "", None, "principal", Uuid::from_u128(actor)).unwrap()))
+        Stamp::new(
+            Utc.timestamp_opt(secs, 0).unwrap(),
+            PrincipalId::from_prn(Prn::build("iam", "", None, "principal", Uuid::from_u128(actor)).unwrap()),
+        )
     }
 
     /// SMA-440: the first write sets `modified_by` equal to `created_by`, mirroring the rule

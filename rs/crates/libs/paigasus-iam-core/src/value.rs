@@ -127,9 +127,7 @@ mod tests {
     fn stamp_carries_both_halves_of_a_write() {
         use chrono::TimeZone;
         let at = chrono::Utc.timestamp_opt(1_700_000_000, 0).unwrap();
-        let by = PrincipalId::from_prn(
-            paigasus_kernel::Prn::build("iam", "", None, "principal", Uuid::from_u128(1)).unwrap(),
-        );
+        let by = PrincipalId::from_prn(paigasus_kernel::Prn::build("iam", "", None, "principal", Uuid::from_u128(1)).unwrap());
         let stamp = Stamp::new(at, by.clone());
         assert_eq!(stamp.at, at);
         assert_eq!(stamp.by, by);
