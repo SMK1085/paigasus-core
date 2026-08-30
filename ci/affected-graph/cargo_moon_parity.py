@@ -220,6 +220,40 @@ CONFIG_SENSITIVE_RE = re.compile(
 )
 CARGO_CONFIG_INPUT = "rs/.cargo/config.toml"
 
+# SMA-605 — the two INDIRECT arms, beside CARGO_INVOCATION_RE's literal one.
+#
+# FORWARD COVER, NOT MEASURED COVERAGE — the same warning FFI_MARKERS carries for `maturin`.
+# Arm 1 reports ZERO rows on the real corpus and always has; arm 2 reports exactly one, at
+# ci/release-parity/ecosystems/release-plz.sh:152, and only once script_source_refs makes that
+# file reachable. Do not read a green run as proof either arm works — the self-test fixtures are
+# the proof.
+#
+# Arm 1 — a cargo-NAMED variable in command position. The NAME is the whole test (spec R1).
+# Value resolution was measured and rejected: VAR_ASSIGN_RE captures `$(` as the value of
+# CARGO_BIN="$( command -v cargo … )", so it cannot reach the real shape, and a value predicate
+# would fire on the three variables in ci/actionlint/run.sh whose literal values mention cargo —
+# the file SMA-599 L4 already names as one edit from a spurious row.
+CARGO_VAR_CMD_RE = re.compile(
+    r"""(?:^|[\s;&|(])["']?\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?["']?\s+"""
+    r"(?:\+\S+\s+)?(" + "|".join(LOCK_RESOLVING_VERBS) + r")\b"
+)
+CARGO_VAR_NAME = "cargo"
+
+# Arm 2 — the `CARGO=` environment prefix, the shape this repo actually uses
+# (ci/release-parity/ecosystems/release-plz.sh:152). The name is EXACTLY `CARGO`: CARGO_HOME,
+# CARGO_TERM_COLOR and CARGO_NET_OFFLINE configure cargo without redirecting it, and line 152
+# carries both `CARGO=` and `CARGO_NET_OFFLINE=` so a "name mentions cargo" predicate reports the
+# wrong one (spec M6).
+#
+# No verb requirement: the tool's verbs belong to the tool, not to cargo. The trailing word is a
+# LOOKAHEAD, never consumed — that is what makes `export CARGO=/p`, an assignment with nothing to
+# run, report nothing, and it keeps a second env prefix's leading separator intact.
+CARGO_ENV_PREFIX_RE = re.compile(
+    r"""(?:^|[\s;&|(])CARGO=(?:"[^"]*"|'[^']*'|[^\s;&|]*)(?=\s+\S)"""
+)
+
+CargoMatch = collections.namedtuple("CargoMatch", "start end verb kind")
+
 # Only these tokens confer a cwd. A bare `rs`-containing ARGUMENT must never do so:
 # `cargo deny --manifest-path rs/Cargo.toml` and `cargo machete rs` both mention `rs` and both
 # run from the repo ROOT. MEASURED on cargo 1.95.0 (SMA-599 §2.3): with rs/.cargo/config.toml
@@ -779,6 +813,50 @@ def _tail_end(segment, start, hard_stop):
         elif char == "`":
             return i
     return hard_stop
+
+
+def cargo_matches(text):
+    """Every cargo invocation in `text` — literal and indirect — sorted by start offset.
+
+    `verb` is carried because the `--no-deps` carve-out must key on it. CARGO_METADATA_RE needs a
+    literal lowercase `cargo`, so it never fires for `"$CARGO_BIN" metadata` and that call would
+    report despite not resolving, contradicting SMA-599 D4.
+
+    Arm 1's NAME FILTER RUNS HERE, before the list is merged. A rejected match left in the list
+    would still act as a `stop` boundary in `_classify_shell_line` and truncate the PRECEDING
+    invocation's tail — a silent false negative reached by the back door.
+
+    DE-DUPLICATED ON END OFFSET, literal first. MEASURED: `$cargo build` already matches
+    CARGO_INVOCATION_RE (`\\bcargo` needs only a word boundary, and `$` supplies one), so without
+    this the lowercase form reports twice for one invocation and any waiver for it is permanently
+    AMBIGUOUS — the SMA-599 L15 trap, reached by a new route.
+    """
+    found = [
+        CargoMatch(m.start(), m.end(), m.group(0).split()[-1], "literal")
+        for m in CARGO_INVOCATION_RE.finditer(text)
+    ]
+    found += [
+        CargoMatch(m.start(), m.end(), m.group(2), "var")
+        for m in CARGO_VAR_CMD_RE.finditer(text)
+        if CARGO_VAR_NAME in m.group(1).lower()
+    ]
+    found += [
+        CargoMatch(m.start(), m.end(), None, "env")
+        for m in CARGO_ENV_PREFIX_RE.finditer(text)
+    ]
+    # KIND FIRST, then position. Sorting by position first is WRONG and was measured: arm 1's
+    # match on `$cargo build` starts at the `$` (offset 0) while the literal match starts at the
+    # `c` (offset 1), so a position-first sort lets `var` claim the shared end offset and the
+    # invocation reports as indirect. The kinds must not be interchangeable here for the same
+    # reason check_cargo_locked keeps them apart.
+    rank = {"literal": 0, "var": 1, "env": 2}
+    out, claimed = [], set()
+    for match in sorted(found, key=lambda c: (rank[c.kind], c.start)):
+        if match.end in claimed:
+            continue
+        claimed.add(match.end)
+        out.append(match)
+    return sorted(out, key=lambda c: c.start)
 
 
 def _classify_shell_line(lineno, logical):
@@ -3056,6 +3134,37 @@ def self_test():
             "derive_cargo_tasks did not apply wrapper > literal precedence to a task matching "
             "BOTH kinds — the stricter rule must win"
         )
+
+    # SMA-605 — the merged match list. Both arms are FORWARD COVER: arm 1 reports zero rows on
+    # the real corpus and arm 2 exactly one, and only once the source resolver lands. These
+    # fixtures are the whole proof that either arm works.
+    def _kinds(text):
+        return [(c.kind, c.verb) for c in cargo_matches(text)]
+
+    for text, want in (
+        ('cargo build --locked', [("literal", "build")]),
+        ('"$CARGO_BIN" build', [("var", "build")]),
+        ('"${CARGO_BIN}" build', [("var", "build")]),
+        ('CARGO=/p release-plz update', [("env", None)]),
+        # Arm 1 must NOT fire on a variable whose name does not mention cargo. All three are
+        # live lines in this repo, and a naive widening reports all three (SMA-605 M4).
+        ('git -C "$dir" add -A', []),
+        ('echo "negative control: $failures check(s) failed to bite"', []),
+        ('"$RELEASE_PLZ_BIN" update', []),
+        # Arm 2 is EXACTLY `CARGO=`. CARGO_NET_OFFLINE configures cargo; it does not redirect it.
+        ('CARGO_NET_OFFLINE=true tool update', []),
+        # ...and it must still see a real CARGO= that follows one.
+        ('CARGO_NET_OFFLINE=true CARGO=/p tool update', [("env", None)]),
+        # The lookahead's job: an assignment with nothing to run is not an invocation.
+        ('export CARGO=/p', []),
+        # A lowercase `$cargo build` is ALREADY matched by CARGO_INVOCATION_RE (measured), so
+        # without de-duplication arm 1 double-reports one invocation.
+        ('$cargo build', [("literal", "build")]),
+    ):
+        if _kinds(text) != want:
+            failures.append(
+                f"cargo_matches({text!r}) is {_kinds(text)}, expected {want}"
+            )
 
     if not REQUIRED_LOCKED_TASKS:
         failures.append("REQUIRED_LOCKED_TASKS is empty — A8's floor would assert nothing")
