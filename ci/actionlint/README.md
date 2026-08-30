@@ -344,15 +344,31 @@ to `PUBLISH_MARKERS` with a fixture row.
 
 **L22 — a self-test helper's registration in `self_test`'s tuple is unpinned; deleting a helper's
 row leaves the suite green (SMA-603).** This is the pre-existing shape L4 and L15 already name
-for other tables. It is shared by ALL ELEVEN registered helpers, not by two: SMA-603 added nine
+for other tables. It is shared by ALL TWELVE registered helpers, not by two: SMA-603 added nine
 of them (`_v8d_pre_approval_callee_publish`, `_v8d_sneak_shape`,
 `_v8d_unverifiable_remote_uses`, `_v8d_unverifiable_nested_local_callee`,
 `_v8d_dedup_shared_callee`, `_v8d_dedup_shared_nested_target`, `_v8d_approval_gate_self_case`,
 `_v8d_missing_local_callee_direct` and `_v8_fix4_dry_run_boundary_cases`) alongside the two that
-were already there (`_critical2_end_to_end`, `_minor9_empty_jobs_floor`). The
+were already there (`_critical2_end_to_end`, `_minor9_empty_jobs_floor`), and SMA-602's fix round
+1 added a twelfth (`_v10_minor6_scalar_env_fails_closed`, V10 Minor 6 below). The
 `--fixture-count >= 20` floor counts fixture-table rows, not registered helpers, so it does not
-reach this table and cannot catch a deleted registration — and nine of the eleven now exposed
+reach this table and cannot catch a deleted registration — and nine of the twelve now exposed
 are the V8d controls this branch relies on.
+
+**L23 — V10 is a NAME-based scan, and `secrets: inherit` names nothing (SMA-602).** V10 bans
+`PYPI_API_TOKEN`, `NPM_TOKEN` and `NODE_AUTH_TOKEN` by literal name, plus an npmrc `_authToken`
+write, wherever any of them can appear: job env:, job container:/services: env:, job-level
+secrets:/with: (the reusable-workflow-call shape), the workflow-level env:, and step
+env:/run:/with:. Two things it deliberately does not, and cannot, close by scanning harder.
+`secrets: inherit` on a job that calls a reusable workflow forwards EVERY secret the caller holds
+— PYPI_API_TOKEN and NPM_TOKEN included, if either is ever reintroduced as a repository secret —
+without naming any of them; a name-based check has nothing to match. And any credential that
+reaches the workflow by a path carrying no literal name at all — an action that reads a value
+from a URL, a secret referenced only through an indirect expression, a credential baked into a
+third-party action's own defaults — is invisible the same way `PUBLISH_MARKERS` (L20/L21) cannot
+see a publish mechanism it does not name. V10 is a compensating control alongside OIDC trusted
+publishing, not a replacement for it: OIDC removes the credential from the workflow entirely,
+V10 makes its reintroduction loud rather than silent.
 
 ## Cost
 

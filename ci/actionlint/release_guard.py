@@ -495,11 +495,36 @@ def publish_credential_violations(job: dict, job_id: str, name: str) -> list[str
     SMA-579 V5 mistake, where a check living only in check_main left every CALLED workflow
     unguarded — main() runs check_main on argv[0] alone.
 
-    Scans job env, step env, step run: bodies and step with: blocks. YAML comments are not in
-    the parsed doc, so the explanatory comments in release.yml that NAME these tokens are
-    invisible here — which is what lets those comments keep explaining the history.
+    Scans job env, job container:/services: env (fix round 1, Minor 4), job-level secrets:/with:
+    (fix round 1, Minor 5 — the reusable-workflow-call shape, where a credential travels via the
+    job itself rather than a step), step env, step run: bodies and step with: blocks. YAML
+    comments are not in the parsed doc, so the explanatory comments in release.yml that NAME
+    these tokens are invisible here — which is what lets those comments keep explaining the
+    history.
+
+    Callers may pass a SYNTHETIC job carrying only an `env` key — check_main/check_called each do
+    this once, before their per-job loop, to scan the WORKFLOW-level `env:` block (fix round 1,
+    Important 3): that scope is reachable from every step via the `secrets` context, so a
+    credential lifted from a step env: to the workflow root would otherwise pass this check clean.
+
+    Fail-closed (fix round 1, Minor 6): a present-but-non-mapping env:/container:/services: value
+    is invalid GitHub Actions YAML this guard must not silently pass through as clean, or crash
+    on — every such shape now calls infra() (SystemExit(2)), the file's own convention, rather
+    than raising an uncaught AttributeError from calling .items() on a scalar.
+
+    `secrets: inherit` (a STRING, not a mapping) is a genuine GitHub Actions shape for a
+    reusable-workflow-call job and is deliberately NOT fail-closed here — a name-based check
+    cannot see what it forwards. Documented as a limitation (README L23), not fixed.
     """
     out: list[str] = []
+
+    def mapping_pairs(value: object, desc: str) -> list[tuple[str, object]]:
+        if value is None:
+            return []
+        if not isinstance(value, dict):
+            infra(f"{name}: job '{job_id}' has {desc} that is not a mapping "
+                  f"(got {type(value).__name__}: {value!r})")
+        return list(value.items())
 
     def scan(text: str, where: str) -> None:
         for banned in BANNED_PUBLISH_CREDENTIALS:
@@ -516,19 +541,48 @@ def publish_credential_violations(job: dict, job_id: str, name: str) -> list[str
                 f"exchange (SMA-602). Remove it."
             )
 
-    for key, value in (job.get("env") or {}).items():
+    for key, value in mapping_pairs(job.get("env"), "an env:"):
         scan(f"{key}: {value}", "the job env:")
+
+    container = job.get("container")
+    if container is not None:
+        if not isinstance(container, dict):
+            infra(f"{name}: job '{job_id}' has container: that is not a mapping "
+                  f"(got {type(container).__name__}: {container!r})")
+        for key, value in mapping_pairs(container.get("env"), "a container env:"):
+            scan(f"{key}: {value}", "the job container env:")
+
+    services = job.get("services")
+    if services is not None:
+        if not isinstance(services, dict):
+            infra(f"{name}: job '{job_id}' has services: that is not a mapping "
+                  f"(got {type(services).__name__}: {services!r})")
+        for svc_id, svc in services.items():
+            if not isinstance(svc, dict):
+                infra(f"{name}: job '{job_id}' has services.{svc_id} that is not a mapping "
+                      f"(got {type(svc).__name__}: {svc!r})")
+            for key, value in mapping_pairs(svc.get("env"), f"service '{svc_id}' env:"):
+                scan(f"{key}: {value}", f"the job services.{svc_id} env:")
+
+    # Minor 5: a reusable-workflow-call job (`uses: ./...`) passes credentials via its OWN
+    # job-level secrets:/with: mapping, not steps: — job_publishes and this scan's step-level
+    # code are both blind to that shape (V8d's own docstring names the same job_publishes gap).
+    # `secrets: inherit` is excluded deliberately — see the docstring above and README L23.
+    job_secrets = job.get("secrets")
+    if job_secrets != "inherit":
+        for key, value in mapping_pairs(job_secrets, "a secrets:"):
+            scan(f"{key}: {value}", "the job secrets:")
+    for key, value in mapping_pairs(job.get("with"), "a with:"):
+        scan(f"{key}: {value}", "the job with:")
 
     for step in job.get("steps") or []:
         if not isinstance(step, dict):
             continue
-        for key, value in (step.get("env") or {}).items():
+        for key, value in mapping_pairs(step.get("env"), "a step env:"):
             scan(f"{key}: {value}", "a step env:")
         scan(str(step.get("run") or ""), "a step run:")
-        with_block = step.get("with")
-        if isinstance(with_block, dict):
-            for key, value in with_block.items():
-                scan(f"{key}: {value}", "a step with:")
+        for key, value in mapping_pairs(step.get("with"), "a step with:"):
+            scan(f"{key}: {value}", "a step with:")
 
     return out
 
@@ -738,6 +792,12 @@ def check_main(doc: dict, name: str) -> list[str]:
     out: list[str] = []
     jobs = doc["jobs"]
 
+    # V10 fix round 1, Important 3: the WORKFLOW-level env: block, scanned via the same helper
+    # with a synthetic job carrying only `env`. That scope reaches every step through the
+    # `secrets` context, so a credential lifted from a step env: up to the workflow root would
+    # otherwise pass V10 clean.
+    out += publish_credential_violations({"env": doc.get("env") or {}}, "<workflow>", name)
+
     if not jobs:
         # Fix round 1, Minor 9: an empty `jobs: {}` mapping is a valid dict, so it sailed through
         # load_workflow's isinstance check, then the loop below examined zero jobs and returned
@@ -828,6 +888,11 @@ def check_called(doc: dict, name: str) -> list[str]:
     step added to one would run ungated on every PR while the caller's gate stayed green.
     """
     out: list[str] = []
+
+    # V10 fix round 1, Important 3: same workflow-level env: scan as check_main, for the same
+    # reason V5 and V10's per-job call both apply here — a called workflow escaping check_main
+    # must not escape this scan either.
+    out += publish_credential_violations({"env": doc.get("env") or {}}, "<workflow>", name)
 
     # V5 also applies here (fix round 3, Important 4). It used to be inlined in check_main, which
     # main() runs on argv[0] only, so every CALLED workflow escaped it — including prebuild.yml's
@@ -1468,6 +1533,94 @@ FIXTURES: list[tuple[str, str, str, str | None]] = [
          "          KEY: ${{ secrets.PAIGASUS_BOT_PRIVATE_KEY }}\n"
          "        run: release-plz release\n"),
      None),
+
+    # --- V10 fix round 1, Important 1: the check_called call site had no fixture coverage ------
+    # (all four original V10 rows were kind "main"), so deleting that call site left --self-test
+    # green — the exact SMA-579 V5 failure shape the brief warned about.
+    ("V10 called workflow with a step env NPM_TOKEN reds too", "called",
+     ("on:\n  workflow_call:\n  pull_request:\n    branches:\n      - main\n"
+      "jobs:\n  build:\n    steps:\n      - env:\n"
+      "          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}\n        run: echo hi\n"),
+     "references NPM_TOKEN"),
+
+    # --- V10 fix round 1, Important 2: NPM_TOKEN was an unasserted member of the ban list -------
+    # (the only fixture containing it also contained NODE_AUTH_TOKEN in the same scanned text, so
+    # `want` never actually pinned on the NPM_TOKEN verdict). Isolated so NPM_TOKEN is the ONLY
+    # banned string present.
+    ("V10 npm token alone in a step with:", "main",
+     _OK_MAIN.replace(
+         "    steps: [{run: release-plz release}]",
+         "    steps:\n"
+         "      - uses: some-org/some-publish-action@v1\n"
+         "        with:\n"
+         "          token: ${{ secrets.NPM_TOKEN }}\n"),
+     "references NPM_TOKEN"),
+
+    # --- V10 fix round 1, Important 3: the WORKFLOW-level env: block was unscanned -------------
+    # (the spec, §5.4, is unqualified — "no PYPI_API_TOKEN, NPM_TOKEN or NODE_AUTH_TOKEN
+    # reference" — so a credential lifted from a step env: to the workflow root must still red).
+    ("V10 workflow-level env: is scanned too", "main",
+     _OK_MAIN.replace(
+         "      - main\njobs:\n",
+         "      - main\nenv:\n  NPM_TOKEN: ${{ secrets.NPM_TOKEN }}\njobs:\n"),
+     "references NPM_TOKEN"),
+    ("V10 called workflow-level env: is scanned too", "called",
+     ("on:\n  workflow_call:\n  pull_request:\n    branches:\n      - main\n"
+      "env:\n  NPM_TOKEN: ${{ secrets.NPM_TOKEN }}\n"
+      "jobs:\n  build:\n    steps: [{run: echo hi}]\n"),
+     "references NPM_TOKEN"),
+
+    # --- V10 fix round 1, Minor 4: job container:/services: env: was unscanned -----------------
+    # (both accept the `secrets` context the same way a step env: does).
+    ("V10 job container env: is scanned", "main",
+     _OK_MAIN.replace(
+         "  release:\n    needs: [build, approve-release]\n    runs-on: ubuntu-latest\n"
+         "    steps: [{run: release-plz release}]\n",
+         "  release:\n    needs: [build, approve-release]\n    runs-on: ubuntu-latest\n"
+         "    container:\n      image: node:20\n      env:\n"
+         "        NPM_TOKEN: ${{ secrets.NPM_TOKEN }}\n"
+         "    steps: [{run: release-plz release}]\n"),
+     "references NPM_TOKEN"),
+    ("V10 job services.<id>.env: is scanned", "main",
+     _OK_MAIN.replace(
+         "  release:\n    needs: [build, approve-release]\n    runs-on: ubuntu-latest\n"
+         "    steps: [{run: release-plz release}]\n",
+         "  release:\n    needs: [build, approve-release]\n    runs-on: ubuntu-latest\n"
+         "    services:\n      registry:\n        image: verdaccio/verdaccio\n        env:\n"
+         "          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}\n"
+         "    steps: [{run: release-plz release}]\n"),
+     "references NPM_TOKEN"),
+
+    # --- V10 fix round 1, Minor 5: job-level secrets:/with: on a reusable-workflow-call job -----
+    # was unscanned (job_publishes and this scan's step-level code are both blind to that shape —
+    # V8d's own docstring names the same job_publishes gap for a different check).
+    ("V10 job-level secrets: on a reusable workflow call reds", "main",
+     _OK_MAIN.replace(
+         "  release:\n    needs: [build, approve-release]\n    runs-on: ubuntu-latest\n"
+         "    steps: [{run: release-plz release}]\n",
+         "  release:\n    needs: [build, approve-release]\n"
+         "    uses: ./.github/workflows/does-not-exist.yml\n"
+         "    secrets:\n      PYPI_API_TOKEN: ${{ secrets.PYPI_API_TOKEN }}\n"),
+     "references PYPI_API_TOKEN"),
+    ("V10 job-level with: on a reusable workflow call reds", "main",
+     _OK_MAIN.replace(
+         "  release:\n    needs: [build, approve-release]\n    runs-on: ubuntu-latest\n"
+         "    steps: [{run: release-plz release}]\n",
+         "  release:\n    needs: [build, approve-release]\n"
+         "    uses: ./.github/workflows/does-not-exist.yml\n"
+         "    with:\n      npm-token: ${{ secrets.NPM_TOKEN }}\n"),
+     "references NPM_TOKEN"),
+    # CONTROL, and the reason Minor 5 does not try to close `secrets: inherit` too: it is a
+    # STRING, not a mapping, and names nothing a name-based check can catch. Documented as a
+    # limitation (README L23), not fixed — this row proves it neither crashes nor false-positives.
+    ("V10 job-level secrets: inherit stays clean (documented limitation, README L23)", "main",
+     _OK_MAIN.replace(
+         "  release:\n    needs: [build, approve-release]\n    runs-on: ubuntu-latest\n"
+         "    steps: [{run: release-plz release}]\n",
+         "  release:\n    needs: [build, approve-release]\n"
+         "    uses: ./.github/workflows/does-not-exist.yml\n"
+         "    secrets: inherit\n"),
+     None),
 ]
 
 
@@ -1793,6 +1946,35 @@ def _minor9_empty_jobs_floor() -> str | None:
     return f"check_main returned normally on an empty jobs mapping instead of infra(2): {err_buf.getvalue()!r}"
 
 
+def _v10_minor6_scalar_env_fails_closed() -> str | None:
+    """Regression test for V10 fix round 1, Minor 6: a scalar `env:` (job level or step level)
+    must infra (exit 2 via SystemExit), never crash with an uncaught AttributeError from calling
+    .items() on a str. Expressed here, not as a FIXTURES row, because a FIXTURES row expects
+    check_main to RETURN a list — this scenario must instead raise.
+
+    Before this fix, `env: NODE_AUTH_TOKEN` failed safe only by accident, via run.sh's own
+    unreadable-file/bad-exit-code handling — not because release_guard.py itself failed closed.
+    """
+    cases = [
+        ("job-level env: scalar",
+         {"jobs": {"release": {"env": "NODE_AUTH_TOKEN", "steps": [{"run": "echo hi"}]}}}),
+        ("step-level env: scalar",
+         {"jobs": {"release": {"steps": [{"env": "NODE_AUTH_TOKEN", "run": "echo hi"}]}}}),
+    ]
+    for label, doc in cases:
+        err_buf = io.StringIO()
+        try:
+            with contextlib.redirect_stderr(err_buf):
+                check_main(doc, "fixture")
+        except SystemExit as exc:
+            if exc.code != 2:
+                return (f"{label}: expected SystemExit(2), got SystemExit({exc.code!r}): "
+                        f"{err_buf.getvalue()!r}")
+            continue
+        return f"{label}: check_main returned normally on a scalar env: instead of infra(2)"
+    return None
+
+
 def _important5_regressions() -> list[str]:
     """Regression tests for Important 5: a file that IS a readable path (`is_file()` True) but
     cannot actually be read must still infra (exit 2), never surface an unhandled traceback that
@@ -1870,6 +2052,7 @@ def self_test() -> int:
         ("v8 fix4 dry-run anchor and space-form boundary cases",
          _v8_fix4_dry_run_boundary_cases),
         ("minor-9 empty jobs: {} floor", _minor9_empty_jobs_floor),
+        ("v10 minor-6 scalar env: fails closed", _v10_minor6_scalar_env_fails_closed),
     ):
         err = fn()
         if err:
