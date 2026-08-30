@@ -4524,7 +4524,7 @@ release_guard_self_test() {
 
   n="$(release_guard_py --fixture-count)" || infra "check 10: release_guard.py --fixture-count failed"
   case "$n" in ''|*[!0-9]*) infra "check 10: --fixture-count printed '$n', expected an integer" ;; esac
-  [ "$n" -ge 105 ] || infra "check 10: release_guard.py reports $n fixtures, expected at least 105"
+  [ "$n" -ge 120 ] || infra "check 10: release_guard.py reports $n fixtures, expected at least 120"
 
   release_guard_py --self-test || { fail "check 10: release_guard.py --self-test reported a broken
       verdict. The release guard is not deciding what it is documented to decide."; rc=1; }
