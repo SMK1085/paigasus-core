@@ -46,11 +46,20 @@ on:
   #   * Keep the `environment:` key — that environment's deployment branch policy is restricted to
   #     `main` ONLY, so a job entering it from any other ref fails.
   #   * Remove it — the job loses its authorization. Since SMA-602 there is no publish token at
-  #     all: crates.io, PyPI and npm each authenticate through OIDC trusted publishing, and every
-  #     one of those publishers REQUIRES the `release-publish` environment claim. Dropping the
-  #     `environment:` key drops that claim, so all three registries reject the exchange. The
-  #     `PAIGASUS_BOT_*` App secrets remain ENVIRONMENT secrets on `release-pr` and
+  #     all: crates.io, PyPI and npm each authenticate through OIDC trusted publishing, and the
+  #     twelve publishers MUST BE CONFIGURED to require the `release-publish` environment claim.
+  #     Dropping the `environment:` key then drops that claim and the registries reject the
+  #     exchange. The `PAIGASUS_BOT_*` App secrets remain ENVIRONMENT secrets on `release-pr` and
   #     `release-publish`, so a job that leaves the environment cannot mint a token either.
+  #
+  #     READ "MUST BE CONFIGURED" LITERALLY (SMA-602 final review, Important 5). The environment
+  #     field is OPTIONAL on both registries — npm 11.13.0 defines it with `default: null` and no
+  #     `required: true` (lib/commands/trust/github.js), and PyPI's form accepts an empty
+  #     environment too. A publisher registered WITHOUT it accepts an exchange carrying no
+  #     environment claim, this file stays green, and NOTHING here detects it. The boundary
+  #     therefore rests on twelve external settings, verified by hand: `npm trust list` reads the
+  #     nine npm ones back, PyPI offers no read-back at all. RUNBOOK §5.1.2 owns that read-back
+  #     and its periodic re-check; §5.2 records that PyPI has none.
   #
   # That pair is the boundary, and it now covers EVERY job that touches a credential — `release-pr`
   # on `release-pr`, and `release`/`publish-pypi`/`publish-npm` on `release-publish`. There are no
@@ -714,9 +723,23 @@ jobs:
       # The constraint binds PENDING publishers only. So SMA-580 created all three projects with
       # an account-scoped token once, and SMA-602 then registered a NORMAL trusted publisher on
       # each — normal publishers may share a tuple, which is the ordinary monorepo case — and
-      # deleted the token. Do not reintroduce one: release_guard.py's V10 reds on it, because a
-      # token would MASK a broken exchange rather than fail. npm's OIDC helper never throws, so a
-      # failed exchange falls through to any configured credential and publishes silently.
+      # deleted the token. Do not reintroduce one: a token would MASK a broken exchange rather
+      # than fail. npm's OIDC helper never throws, so a failed exchange falls through to any
+      # configured credential and publishes silently.
+      #
+      # WHAT V10 ACTUALLY COVERS (corrected, SMA-602 final review, Important 1 — the earlier
+      # "V10 reds on it" was over-broad). release_guard.py's V10 is four rules, not a blanket
+      # ban on credentials:
+      #   1. a strict-equality allowlist of the secret NAMES this file may reference
+      #      (EXPECTED_RELEASE_SECRETS — currently the two `PAIGASUS_BOT_*` App credentials);
+      #   2. any `password:` inside the `with:` of a `pypa/gh-action-pypi-publish` step,
+      #      whatever the value is;
+      #   3. three credentials banned by literal name (PYPI_API_TOKEN, NPM_TOKEN,
+      #      NODE_AUTH_TOKEN);
+      #   4. an npm `_authToken` or `_auth` written anywhere the parsed document can reach.
+      # It reads the PARSED YAML, so it sees no comment — including this one. It cannot see a
+      # credential fetched at run time (a vault call, a decoded blob), and rule 1 covers only
+      # the `secrets` context, not a value smuggled in through `vars`.
       #
       # A consequence worth knowing: with no `password:`, the action's `attestations` input
       # (default 'true', and effective only under Trusted Publishing) becomes live, so all three
@@ -808,6 +831,57 @@ jobs:
       # it, and it is the one job that had never executed before the flag was flipped.
       - name: Install Moon-managed toolchains (node, pnpm, rust, python, uv)
         run: moon setup
+
+      # REQUIRED (SMA-602 final review, Critical 1), and its absence would repeat the SMA-580
+      # failure one registry over. `moonrepo/setup-toolchain` puts `~/.proto/bin` and
+      # `~/.proto/shims` on PATH, and proto DOES NOT SHIM npm — only node, pnpm, pnpx and the
+      # pinned CLIs. So a bare `npm` here resolves to the RUNNER IMAGE's npm, which on
+      # ubuntu-latest is npm 10.x. npm 10 has no `lib/utils/oidc.js` at all: there is no OIDC
+      # code path for it to enter. OIDC trusted publishing needs npm >= 11.5.1.
+      #
+      # With the credential removed, npm 10 would find nothing to authenticate with and die
+      # ENEEDAUTH — AFTER crates.io has published and the tags are cut, in the one job a fresh
+      # dispatch cannot repair (RUNBOOK §7.4).
+      #
+      # WHY THIS SHAPE, not a `.prototools` pin. `napi prepublish` spawns each per-platform
+      # child through execSync with `env: process.env`, resolving the tool from PATH — so the
+      # fix must move PATH, not one step's argv. `$GITHUB_PATH` is prepended for every LATER
+      # step, so it wins over `~/.proto/shims` and every child process inherits it. Pinning npm
+      # in `.prototools` would also work, but it edits a file the whole Moon graph keys on and
+      # it makes moon's node toolchain the arbiter of an npm version nothing else needs.
+      # `$RUNNER_TEMP` keeps it out of any cached tree.
+      #
+      # 11.13.0 is the npm that ships INSIDE the repo-pinned Node 24.16.0 — not an arbitrary
+      # version. It is over the 11.5.1 floor, and it is the npm every local `.proto` checkout
+      # already has.
+      - name: Install an npm that can exchange an OIDC token
+        run: |
+          set -euo pipefail
+          npm install -g --prefix "$RUNNER_TEMP/npm-global" npm@11.13.0
+          echo "$RUNNER_TEMP/npm-global/bin" >> "$GITHUB_PATH"
+
+      # Separate step ON PURPOSE: a `$GITHUB_PATH` write takes effect only from the NEXT step,
+      # so the assertion cannot live in the step that performs the install. It must FAIL LOUDLY
+      # and by version — a bare ENEEDAUTH later is the least recoverable failure in this
+      # repository. prebuild.yml's `assemble` job carries the identical assertion, and it runs
+      # BEFORE `release`: `release` needs [wheels, prebuild, proto-dist, approve-release], so a
+      # wrong npm reds while everything is still reversible. This copy is the backstop for the
+      # case where only this job's PATH is wrong.
+      - name: Assert npm is new enough for OIDC trusted publishing
+        run: |
+          set -euo pipefail
+          echo "npm resolves to: $(command -v npm)"
+          v="$(npm --version)"
+          floor=11.5.1
+          echo "npm version: $v (floor $floor)"
+          lowest="$(printf '%s\n%s\n' "$v" "$floor" | sort -V | head -n1)"
+          if [ "$lowest" != "$floor" ]; then
+            echo "::error::npm $v is below the $floor floor required for OIDC trusted publishing."
+            echo "::error::npm 10.x carries no lib/utils/oidc.js, so no token exchange happens at all."
+            echo "::error::With no credential configured this job would fail ENEEDAUTH after crates.io published."
+            exit 1
+          fi
+          echo "OK: npm $v can exchange an OIDC token"
 
       - name: Install JS workspace deps
         run: pnpm --dir ts install --frozen-lockfile
