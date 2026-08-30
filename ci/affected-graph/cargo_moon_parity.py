@@ -997,9 +997,13 @@ def derive_cargo_tasks(projects, root):
             target, blob = f"{pid}:{name}", invocations[name]
             if blob is None:
                 continue
-            if any(marker in blob for marker in FFI_MARKERS):
+            # Arm 2 folds into the WRAPPER kind rather than becoming a fourth one: `CARGO=<path>
+            # <tool>` reaches cargo through a tool that takes no --locked, which is exactly the
+            # FFI wrapper contract, and reusing it means the existing ALLOW_UNLOCKED_CARGO
+            # semantics apply unchanged (SMA-605 §5.4).
+            if any(marker in blob for marker in FFI_MARKERS) or CARGO_ENV_PREFIX_RE.search(blob):
                 kinds[target] = "wrapper"
-            elif CARGO_INVOCATION_RE.search(blob):
+            elif any(c.kind in ("literal", "var") for c in cargo_matches(blob)):
                 kinds[target] = "literal"
             elif any(script_cargo_lines(p) for p in task_script_refs(projects, root, target)):
                 kinds[target] = "script"
@@ -1060,8 +1064,11 @@ def check_cargo_locked(projects, root=None, allow=ALLOW_UNLOCKED_CARGO, floor=RE
                         f"moon's output shape changed, so A8 cannot be evaluated"
                     )
                 continue
-            is_wrapper = any(marker in blob for marker in FFI_MARKERS)
-            if not (is_wrapper or CARGO_INVOCATION_RE.search(blob)):
+            is_wrapper = bool(
+                any(marker in blob for marker in FFI_MARKERS)
+                or CARGO_ENV_PREFIX_RE.search(blob)
+            )
+            if not (is_wrapper or any(c.kind in ("literal", "var") for c in cargo_matches(blob))):
                 continue
             matched.add(target)
             if not is_wrapper and LOCKED_FLAG in blob:
@@ -3230,6 +3237,46 @@ def self_test():
         failures.append(
             "derive_cargo_tasks did not apply wrapper > literal precedence to a task matching "
             "BOTH kinds — the stricter rule must win"
+        )
+
+    # SMA-605 — the BLOB arm. Deliberately blob-only fixtures with NO script reference: every
+    # other indirect fixture reaches the code through a script, so without these, deleting the
+    # blob wiring survives the whole suite at rc 0 (SMA-605 review).
+    def _blob(cmd):
+        return {
+            "p": {
+                "source_dir": "rs/crates/libs/p", "deps": {}, "tasks": {},
+                "task_inputs": {"t": []}, "task_input_globs": {"t": []},
+                "invocations": {"t": cmd},
+            },
+        }
+
+    for cmd, want_kind in (
+        ('"$CARGO_BIN" build', "literal"),
+        ("CARGO=/p release-plz update", "wrapper"),
+    ):
+        got = derive_cargo_tasks(_blob(cmd), Path("."))
+        if got != {"p:t": want_kind}:
+            failures.append(
+                f"derive_cargo_tasks did not classify the blob {cmd!r} as {want_kind} — it "
+                f"returned {got}; the blob arm is not wired"
+            )
+
+    # ...and A8 must actually REPORT them, not merely derive them.
+    if not any(
+        "p:t" in r for r in check_cargo_locked(_blob('"$CARGO_BIN" build'), allow={}, floor=())
+    ):
+        failures.append("A8's blob arm did not report an unlocked indirect cargo invocation")
+    # Arm 2 in a blob is a WRAPPER: a --locked in the blob must NOT clear it.
+    if not any(
+        "p:t" in r
+        for r in check_cargo_locked(
+            _blob("CARGO=/p release-plz update --locked"), allow={}, floor=()
+        )
+    ):
+        failures.append(
+            "A8's blob arm let a --locked clear a CARGO= redirection — the flag reaches the "
+            "tool, never the cargo behind it"
         )
 
     # SMA-605 — the merged match list. Both arms are FORWARD COVER: arm 1 reports zero rows on
