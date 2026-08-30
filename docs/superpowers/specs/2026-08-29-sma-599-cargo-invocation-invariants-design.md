@@ -446,13 +446,13 @@ this change.
 | `SELF_SCHEDULED_GATES` | No — affected-smoke's invocation lines unchanged |
 | `SELF_TASK_EXPECTED_GLOBS` | No — affected-smoke's globs are pinned by check 8e |
 | `T_AFFECTED_SMOKE_REQUIRED_INPUTS` (check 8e) | **Yes** — add `ci/**/*` |
-| `EXPECTED_FINDING_KEYS` | **Yes** — add `a9` |
+| `EXPECTED_FINDING_KEYS` | **Yes** — add `a10`, after SMA-604's `a9` (§3.6) |
 | `SELF_TEST_COUNT` in `ci/actionlint/run.sh` | No — counts that file's own tables |
 | **CLAUDE.md prose** | **Yes** — three sentences become false (below) |
 | **`ci/affected-graph/README.md`** | **Yes** — add the A10 bullet; `:173-177` becomes false |
-| `cargo_moon_parity.py:1673` PASS string | **Yes** — "all eight assertions" → nine |
+| the PASS string and the self-test count | **Yes** — both now say **ten** assertions |
 
-CLAUDE.md's `rs/.cargo/config.toml` bullet currently states *"Only 16 of those 61
+Before this change, CLAUDE.md's `rs/.cargo/config.toml` bullet stated *"Only 16 of those 61
 declarations are asserted"*, *"delete one and CI stays green"*, and the follow-on bullet
 *"Nothing enforces that one rule."* A10 makes all three false. **No gate asserts this
 prose**, so it must be corrected by hand in the same PR. `README.md:173-177` states that

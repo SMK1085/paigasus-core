@@ -1041,9 +1041,9 @@ def check_cargo_locked_scripts(projects, root, allow=None):
     # as STALE, which is the correct verdict — the exemption is no longer earning its place.
     for (rel, text), _reason in sorted(allow.items()):
         hits = [
-            l
-            for l in seen.get(rel, [])
-            if l.segment.strip() == text and l.resolves and not l.locked
+            line
+            for line in seen.get(rel, [])
+            if line.segment.strip() == text and line.resolves and not line.locked
         ]
         if not hits:
             rows.append(
