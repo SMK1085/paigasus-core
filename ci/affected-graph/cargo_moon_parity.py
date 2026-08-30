@@ -3614,6 +3614,30 @@ def self_test():
             "A10 did not treat a CARGO= redirection as sensitive — the tool's inner cargo may "
             "compile, and A10 cannot know that it does not"
         )
+    # ...and the clause above is only LOAD-BEARING for a redirection that lives inside a FOLLOWED
+    # SCRIPT. A blob-level `CARGO=` is already `wrapper` by derivation, so the `kind == "wrapper"`
+    # branch covers it and dropping the clause survives (MEASURED). A script-level one derives as
+    # `script`, and then this clause is the only thing that sees it — SMA-599 L13's shape, where a
+    # wrapper hides one level down and CONFIG_SENSITIVE_RE cannot recognise it.
+    with tempfile.TemporaryDirectory() as tmp:
+        eco = Path(tmp) / "ci" / "probe"
+        eco.mkdir(parents=True)
+        (eco / "eco.sh").write_text("CARGO=/p release-plz update\n")
+        hidden = {
+            "q": {
+                "source_dir": "rs/crates/libs/q", "deps": {}, "tasks": {},
+                "task_inputs": {"t": []}, "task_input_globs": {"t": []},
+                "invocations": {"t": "bash ci/probe/eco.sh"},
+            },
+        }
+        if not any(
+            "q:t" in r and CARGO_CONFIG_INPUT in r
+            for r in check_cargo_config_inputs(hidden, Path(tmp), floor=())
+        ):
+            failures.append(
+                "A10 missed a CARGO= redirection hiding inside a followed script — the task "
+                "derives as `script`, so the wrapper branch does not cover it"
+            )
 
     if not CONFIG_SENSITIVE_VERBS:
         failures.append("CONFIG_SENSITIVE_VERBS is empty — A10 would examine nothing")
