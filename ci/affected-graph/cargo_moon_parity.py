@@ -1356,10 +1356,20 @@ def check_dockerfile_locked(root):
     seen = 0
     for lineno, line in enumerate(path.read_text().splitlines(), 1):
         stripped = line.split("#", 1)[0]
-        if not CARGO_INVOCATION_RE.search(stripped):
+        found = cargo_matches(stripped)
+        if not found:
             continue
-        seen += 1
-        if LOCKED_FLAG not in stripped:
+        # The FLOOR counts LITERAL matches only (SMA-605 review). `seen` exists to catch a
+        # Dockerfile that stopped compiling; an `ENV CARGO=…` line redirects cargo but invokes
+        # nothing, so letting it increment `seen` would keep the floor quiet after the real
+        # `RUN cargo build --locked` was deleted.
+        seen += sum(1 for c in found if c.kind == "literal")
+        if any(c.kind == "env" for c in found):
+            rows.append(
+                f"rs/Dockerfile:{lineno} sets CARGO= to redirect cargo through another tool, "
+                f"which cannot take {LOCKED_FLAG}: {stripped.strip()}"
+            )
+        elif LOCKED_FLAG not in stripped:
             rows.append(
                 f"rs/Dockerfile:{lineno} reaches cargo without {LOCKED_FLAG}: {stripped.strip()}"
             )
@@ -2319,6 +2329,22 @@ def self_test():
         rows = check_dockerfile_locked(Path(tmp))
         if not any("A8 examines rs/Dockerfile" in r for r in rows):
             failures.append("A8's Dockerfile floor did not fire on a file with no cargo call")
+        # SMA-605 — the Dockerfile takes the merged list too, but its FLOOR counts LITERAL
+        # matches only. Counting merged matches would let an ENV line satisfy `seen > 0` after
+        # the real `RUN cargo build --locked` was deleted, which is floor-satisfied-by-a-
+        # non-invocation — the vacuity mode this file guards against everywhere else.
+        (rs / "Dockerfile").write_text("ENV CARGO=/usr/local/bin/cargo CARGO_HOME=/cargo\n")
+        rows = check_dockerfile_locked(Path(tmp))
+        if not any("A8 examines rs/Dockerfile" in r for r in rows):
+            failures.append(
+                "A8's Dockerfile floor was satisfied by a CARGO= line — a redirection is not an "
+                "invocation, and the floor now covers nothing"
+            )
+        if not any("CARGO=" in r and "redirect" in r for r in rows):
+            failures.append("A8 did not report a CARGO= redirection in rs/Dockerfile")
+        (rs / "Dockerfile").write_text('RUN "$CARGO_BIN" build --release\n')
+        if not any("without --locked" in r for r in check_dockerfile_locked(Path(tmp))):
+            failures.append("A8 did not fire on an indirect unlocked Dockerfile cargo build")
         (rs / "Dockerfile").unlink()
         try:
             check_dockerfile_locked(Path(tmp))
