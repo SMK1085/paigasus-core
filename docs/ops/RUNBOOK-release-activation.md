@@ -166,9 +166,9 @@ The environment field is **optional** on both registries. npm defines it with `d
 no `required: true` (`trust/github.js:35-40` in npm 11.13.0), and PyPI's form accepts an empty
 environment. A publisher registered without it accepts an exchange carrying **no** environment
 claim: that package then publishes from any ref the workflow name matches, this repository stays
-green, and nothing here detects it. `npm trust list` (§8.1) reads back nine of the twelve; PyPI
+green, and nothing here detects it. `npm trust list` (§5.1.2) reads back nine of the twelve; PyPI
 offers no read-back at all. Verify all twelve at step C1, re-check the nine npm ones periodically
-per §8.1, and treat this as the one boundary with no automated control behind it.
+per §5.1.2, and treat this as the one boundary with no automated control behind it.
 
 **`release-pr` is now covered too, by the same shape.** It was the one gap: it entered no
 environment and minted its App token from **repository** secrets, which any run reaches regardless
