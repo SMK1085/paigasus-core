@@ -737,7 +737,12 @@ ACTIONLINT_SH_INDENTED_CALL_SITES = (
     # check 7's definition counter is bash-only, so an emptied FIXTURES table in
     # release_guard.py is invisible to every other check and this gate would pass having
     # asserted nothing.
-    '[ "$n" -ge 20 ] || infra "check 10: release_guard.py reports $n fixtures, expected at least 20"',
+    #
+    # THE NUMBER MUST TRACK THE TABLE (SMA-602 final review, Minor 1). It sat at 20 against an
+    # actual 98, so 78 rows — the whole V10 credential control among them — could be deleted with
+    # the gate still green. Raise it with the table, to just under the current `--fixture-count`,
+    # and re-pin it in all three places in this file.
+    '[ "$n" -ge 120 ] || infra "check 10: release_guard.py reports $n fixtures, expected at least 120"',
     # ...and the SELF-TEST invocation. Deleting it leaves the production call (in
     # ACTIONLINT_SH_CALL_SITES above) running against a verdict function nothing has proved
     # correct. This is also the one entry across every registry that is a MID-LINE FRAGMENT, not
@@ -1889,7 +1894,7 @@ def self_test():
         # ...and check 10's fixture-table arity floor and self-test invocation (SMA-579),
         # matched via ACTIONLINT_SH_INDENTED_CALL_SITES instead: both sit inside
         # release_guard_self_test(), so they carry real, executing leading whitespace.
-        '  [ "$n" -ge 20 ] || infra "check 10: release_guard.py reports $n fixtures, expected at least 20"\n'
+        '  [ "$n" -ge 120 ] || infra "check 10: release_guard.py reports $n fixtures, expected at least 120"\n'
         '  release_guard_py --self-test || { fail "check 10: release_guard.py --self-test reported a broken\n'
         # ...and check 11's invocation inside run_self_tests, its own self-test invocation, and
         # its negative-control invocation (SMA-603, the last added in fix round 1's I2), matched
@@ -2073,8 +2078,8 @@ def self_test():
             "(the done < <(...) swallow class, run.sh:2050)"
         )
     no_rg_arity_call = wired_actionlint.replace(
-        '  [ "$n" -ge 20 ] || infra "check 10: release_guard.py reports $n fixtures, '
-        'expected at least 20"\n',
+        '  [ "$n" -ge 120 ] || infra "check 10: release_guard.py reports $n fixtures, '
+        'expected at least 120"\n',
         "",
     )
     if not check_self_invocation(wired, scripts, no_rg_arity_call, wired_release_parity, wired_workflow_credentials, wired_release_plan):

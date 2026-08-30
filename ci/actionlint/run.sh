@@ -4503,6 +4503,11 @@ kill_predicate_self_test() {
 # lines inside run_self_tests — both see bash only. A Python fixture table is invisible to them,
 # so EMPTYING it would leave this gate passing having asserted nothing. The arity floor below is
 # what closes that, exactly as check 8e's two floors do for its own tables.
+#
+# THE FLOOR MUST TRACK THE TABLE (SMA-602 final review, Minor 1). It sat at 20 against an actual
+# 98, so 78 of the 98 rows — the whole V10 credential control among them — could be deleted with
+# the gate still green. FIXTURES is the ONLY pin on that control. Re-baseline the floor whenever
+# rows are added: set it just under the current `--fixture-count`, never far below it.
 # `--locked` (Minor 5, fix round 3): a bare `uv run --project py` RE-LOCKS py/uv.lock as a side
 # effect of running the gate. CLAUDE.md already records py/uv.lock as one of the two sites that
 # drift SILENTLY, and a lint gate that rewrites a lockfile it is not asserting is exactly that
@@ -4519,7 +4524,7 @@ release_guard_self_test() {
 
   n="$(release_guard_py --fixture-count)" || infra "check 10: release_guard.py --fixture-count failed"
   case "$n" in ''|*[!0-9]*) infra "check 10: --fixture-count printed '$n', expected an integer" ;; esac
-  [ "$n" -ge 20 ] || infra "check 10: release_guard.py reports $n fixtures, expected at least 20"
+  [ "$n" -ge 120 ] || infra "check 10: release_guard.py reports $n fixtures, expected at least 120"
 
   release_guard_py --self-test || { fail "check 10: release_guard.py --self-test reported a broken
       verdict. The release guard is not deciding what it is documented to decide."; rc=1; }

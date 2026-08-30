@@ -38,7 +38,7 @@ the required check. See SMA-540 and
 | 8e | `moon.yml`'s `repo:affected-smoke` task still declares every input that schedules a pin in `ci/affected-graph/ci_targets.py`, and still runs its `set -euo pipefail` / `--negative-control` / real-run script lines in the right order (SMA-572/SMA-573). Two tables: `T_AFFECTED_SMOKE_REQUIRED_INPUTS` (20 globs/files) is matched by **containment** — the block's `inputs:` sequence must be a superset, since the list legitimately grows every time a gate keys on a new directory — while `T_AFFECTED_SMOKE_REQUIRED_SCRIPT` (3 lines) is matched **whole-line, in order**: unlike the inputs table, a set-membership check would accept `set -euo pipefail` moved below the invocations, and Moon takes a `script:` block's status from its LAST command, so that reordering silently stops a failing `--negative-control` from propagating. Verdicts: `no-file`/`no-task`/`bad-task-form`/`bad-script-form`/`bad-inputs-form`/`duplicate-key <name>` (the block could not be parsed — `no-task` means the extractor saw no key at exactly two spaces of indentation whose name is `affected-smoke`; it identifies the task by INDENTATION AND NAME ONLY and never checks that the key is nested under a `tasks:` mapping, see L18), `missing-input <glob>`, `missing-script <line>` (a commented-out copy counts as absent), `out-of-order-script <line>`, `skip-without-reason <glob>`, `stale-skip <glob>`. Each table carries an `-ge` arity floor (20 / 3, pinned back from `ci_targets.py`'s `ACTIONLINT_SH_CALL_SITES`) so an EMPTIED table cannot pass by asserting nothing — `check_self_invocation` alone cannot buy this, since 8e's tables are not a dual copy of anything else the way check 8c's is. `REQUIRED_INPUT_SKIP` is the escape hatch for a legitimately-removed input, mirroring `COE_SKIP`/`SWALLOWED_SKIP`/`BRANCH_SKIP`: an entry with no stated reason is reported (`skip-without-reason`), and one naming a glob no longer required is reported too (`stale-skip`), so a waiver cannot outlive its glob. Unconditional, like check 8c — it reads `moon.yml`, not `ci.yml`, so gating it on `ci.yml`'s existence would switch it off for an unrelated reason — and COLUMN 0 for both floor lines, the same discipline as checks 8/8b/8c/8d's own call-site pins |
 | 8f | The `cargo-lock-integrity` step in `ci.yml` is still wired, and the script it invokes still asserts something (SMA-601). Two tables. `T_CARGO_LOCK_STEP_REQUIRED` (6 lines) pins the step: entry 0 is its `- name:` line, matched against the whole stripped file and used to LOCATE the step; the other five — `run: \|`, `set -euo pipefail`, and the `--self-test` / `--negative-control` / bare invocations — are matched **whole-line and in order, inside the step's own window only**, because `run: \|` and `set -euo pipefail` occur in other `ci.yml` steps and a whole-file match on them would be vacuous. The step must also PRECEDE the `moon ci` step (`out-of-order`), carry no `continue-on-error:` other than the literal `false` (`continue-on-error <value>`), and carry **no `if:` at all** (`conditional <expr>`). Both protected keys are matched after normalising the quoted (`"if":`) and spaced (`if :`) spellings, and YAML's explicit-key form (`? if` / `: always()`) is REJECTED outright (`explicit-key <key>`) rather than parsed — measured, that form yields a real `if` key and actionlint accepts it at rc 0, so it would clear check 1 and evade every same-line scan — a skipped step is a green step, so any `if:` switches the guarantee off for every event it excludes, `pull_request` included, which is exactly where a Dependabot PR ships a truncated lock. `T_CARGO_LOCK_SH_CALL_SITES` (6 lines) pins `ci/cargo-lock-integrity/run.sh` itself (`missing-site <text>`, `no-file`): the two flag-parse arms, the `cargo metadata --locked` line, the negative control's call into the real assertion, that control's rc=1 report arm, and the real run's own call. MEASURED: deleting `--locked` from that one line makes the command exit 0 **and repair the lock**, so the gate prints "satisfies every manifest" and becomes the first repairer — the SMA-530 "control that actively lies" shape. This file is the right home for both because `repo:actionlint` carries `inputs: ['**/*']`, so it is scheduled on every PR without a new input registration, and unlike a pin inside `ci/affected-graph/` it is not the sole judge of its own reachability |
 | 9 | A mutation battery, full-gate only: each of the thirteen self-test invocations inside `run_self_tests`, deleted one at a time, run concurrently against the real unmutated control — every mutant must die at the counter's own message (a kill predicate driven by its own fixture table, not merely "non-zero"), or the battery itself reds |
-| 10 | (SMA-579) The release guard, whose VERDICT lives in `ci/actionlint/release_guard.py` because it needs YAML structure (a job-level `if:` told apart from eight identical step-level ones, `needs:` chains walked) rather than line-oriented text scanning. Two parts: `release_guard_self_test`, in the battery above, asserts `release_guard.py --fixture-count` reports at least 20 fixtures and that `--self-test` itself reports a healthy verdict; the full-gate-only half runs `release_guard.py` over the real `.github/workflows/release.yml` and fails on anything it reports, capturing its output to a file first since a process substitution would silently discard its exit status. Fail-closed on EVERY status, not only the guard's own 2: an unreadable file or unparseable YAML gives 2, a missing `uv` gives **127 from the wrapper**, and a kill gives 137 — all three abort the gate. An earlier revision of this row claimed a missing `uv` was covered by the exit-2 routing; it was not, and a status the routing did not recognise left the gate passing having asserted nothing (measured at rc 127, SMA-579 fix round 3). rc 1 with no output aborts too, since that contradicts the guard's own contract |
+| 10 | (SMA-579) The release guard, whose VERDICT lives in `ci/actionlint/release_guard.py` because it needs YAML structure (a job-level `if:` told apart from eight identical step-level ones, `needs:` chains walked) rather than line-oriented text scanning. Two parts: `release_guard_self_test`, in the battery above, asserts `release_guard.py --fixture-count` reports at least 105 fixtures and that `--self-test` itself reports a healthy verdict; the full-gate-only half runs `release_guard.py` over the real `.github/workflows/release.yml` and fails on anything it reports, capturing its output to a file first since a process substitution would silently discard its exit status. Fail-closed on EVERY status, not only the guard's own 2: an unreadable file or unparseable YAML gives 2, a missing `uv` gives **127 from the wrapper**, and a kill gives 137 — all three abort the gate. An earlier revision of this row claimed a missing `uv` was covered by the exit-2 routing; it was not, and a status the routing did not recognise left the gate passing having asserted nothing (measured at rc 127, SMA-579 fix round 3). rc 1 with no output aborts too, since that contradicts the guard's own contract |
 | 11 | (SMA-603) The release-plan decision, whose VERDICT lives in `ci/release-plan/release_plan.py` — TAG EXISTENCE against the derived releasable set, not a `release-plz release --dry-run` read (see that project's own README for why the dry-run reading is silently, permanently wrong). Two parts: `release_plan_self_test`, in the battery above, reads `release_plan.py --fixture-count` directly rather than through `ci/release-plan/run.sh` (that wrapper's flag parser rejects `--fixture-count` outright), asserts it reports at least 8 fixtures (a floor against 9 actual — one row of headroom so a legitimate row removal does not abort the gate as infra), and asserts `ci/release-plan/run.sh --self-test` and `--negative-control` both report a healthy verdict; the full-gate-only half runs `ci/release-plan/run.sh --assert` over the real repository and fails on anything it reports. Fail-closed on every status the wrapper can produce, the same shape as check 10: exit 2 aborts the gate (uv or the interpreter failed, not an assertion), exit 1 fails it (the derived releasable set, a crate version, or the tag-name format changed), and anything else non-zero also aborts — this file is `set -uo pipefail` with **no** `-e`, so an unrouted status would finish the gate rc 0 having asserted nothing |
 
 Only a `paths:`/`paths-ignore:`/`branches:`/`branches-ignore:` key **two levels deep** inside
@@ -344,15 +344,86 @@ to `PUBLISH_MARKERS` with a fixture row.
 
 **L22 — a self-test helper's registration in `self_test`'s tuple is unpinned; deleting a helper's
 row leaves the suite green (SMA-603).** This is the pre-existing shape L4 and L15 already name
-for other tables. It is shared by ALL ELEVEN registered helpers, not by two: SMA-603 added nine
+for other tables. It is shared by ALL SIXTEEN registered helpers, not by two. SMA-603 added nine
 of them (`_v8d_pre_approval_callee_publish`, `_v8d_sneak_shape`,
 `_v8d_unverifiable_remote_uses`, `_v8d_unverifiable_nested_local_callee`,
 `_v8d_dedup_shared_callee`, `_v8d_dedup_shared_nested_target`, `_v8d_approval_gate_self_case`,
 `_v8d_missing_local_callee_direct` and `_v8_fix4_dry_run_boundary_cases`) alongside the two that
-were already there (`_critical2_end_to_end`, `_minor9_empty_jobs_floor`). The
-`--fixture-count >= 20` floor counts fixture-table rows, not registered helpers, so it does not
-reach this table and cannot catch a deleted registration — and nine of the eleven now exposed
+were already there (`_critical2_end_to_end`, `_minor9_empty_jobs_floor`). SMA-602 added five:
+fix round 1 added `_v10_minor6_scalar_env_fails_closed` (V10 Minor 6 below), the final review
+added `_v10_rule1_strict_equality`, and the fix wave added `_v11_id_token_write_required` (F2,
+L25), `_v12_npm_floor_pinned` (F3, L26) and `_non_list_steps_fails_closed` (F7). The
+`--fixture-count >= 120` floor counts fixture-table rows, not registered helpers, so it does not
+reach this table and cannot catch a deleted registration — and nine of the sixteen now exposed
 are the V8d controls this branch relies on.
+
+COUNT THIS BY HAND WHEN YOU ADD ONE. The number above is prose, and nothing asserts it: it read
+"ALL TWELVE" against an actual thirteen for the whole of SMA-602's final review, because
+`_v10_rule1_strict_equality` was registered without the sentence being updated. `self_test`'s
+tuple is the only authority.
+
+**L23 — V10 is a NAME-based scan, and `secrets: inherit` names nothing (SMA-602).** V10 bans
+`PYPI_API_TOKEN`, `NPM_TOKEN` and `NODE_AUTH_TOKEN` by literal name, plus an npmrc `_authToken`
+write, wherever any of them can appear: job env:, job container:/services: env:, job-level
+secrets:/with: (the reusable-workflow-call shape), the workflow-level env:, and step
+env:/run:/with:. Two things it deliberately does not, and cannot, close by scanning harder.
+`secrets: inherit` on a job that calls a reusable workflow forwards EVERY secret the caller holds
+— PYPI_API_TOKEN and NPM_TOKEN included, if either is ever reintroduced as a repository secret —
+without naming any of them; a name-based check has nothing to match. And any credential that
+reaches the workflow by a path carrying no literal name at all — an action that reads a value
+from a URL, a secret referenced only through an indirect expression, a credential baked into a
+third-party action's own defaults — is invisible the same way `PUBLISH_MARKERS` (L20/L21) cannot
+see a publish mechanism it does not name. V10 is a compensating control alongside OIDC trusted
+publishing, not a replacement for it: OIDC removes the credential from the workflow entirely,
+V10 makes its reintroduction loud rather than silent.
+
+Rule 1 is no longer bound to one SPELLING, and that was a real defect (SMA-602 fix wave, F1).
+`secrets.NAME` was the only form the extraction recognised; `secrets['NAME']`, `secrets["NAME"]`,
+`Secrets.NAME` and `SECRETS.NAME` — all accepted by GitHub Actions — each returned no name at
+all, and each was MEASURED as a live bypass at guard exit 0 against a copy of the real
+`release.yml`. The fix REUSES `ci/workflow-credentials/workflow_credentials.py`'s `EXPR_SPAN` /
+`STRING_LITERAL` / `SECRETS_CTX` machinery, where those same four spellings were already pinned
+as live fixtures, rather than inventing a second and weaker regex. A reference that names NO
+secret (`toJSON(secrets)`, `secrets[format(...)]`) now reds as unresolvable: a strict-equality
+pin of names cannot judge a name that does not exist until run time, so reporting it clean would
+be a lie.
+
+**L24 — V10 rule 2 is bound to ONE action name; rule 1 is what generalises (SMA-602).**
+`uses.startswith(PYPI_PUBLISH_ACTION)` matches `pypa/gh-action-pypi-publish` and nothing else, so
+a step running `uv run twine upload -u __token__ -p "$PYPI_CRED"` with
+`env: PYPI_CRED: ${{ secrets['PYPI_NEW'] }}` matches no rule 2 at all. It reds ANYWAY, through
+rule 1: the secret name is not in `EXPECTED_RELEASE_SECRETS`. That is the honest statement of the
+division of labour — rule 2 is a KEY-based rule for one action, rule 1 is the general one — and
+it is deliberately not fixed by enumerating upload tools, which would be `PUBLISH_MARKERS`' own
+closed-vocabulary problem (L20/L21) in a second place. The residual is the same one L23 already
+states: a credential that reaches the workflow with no literal secret name is invisible to both
+rules, whatever tool consumes it.
+
+**L25 — V11 asserts the OIDC grant exists, in `release.yml` only (SMA-602).** V10 bans the OLD
+mechanism; before V11 nothing asserted the NEW one was still wired. Deleting `id-token: write`
+from `publish-pypi` or `publish-npm` — or adding a narrower job-level `permissions:` block, which
+sets every scope it omits to `none` — left every gate green, while at run time the runner sets no
+`ACTIONS_ID_TOKEN_REQUEST_*` variables, npm's `oidc.js` returns undefined without throwing, and
+the publish dies `ENEEDAUTH` after crates.io has published. V11 is scoped to `release.yml` by
+name and to the two literal job names: a CALLED workflow legitimately declares no grant, and
+`repo:workflow-credentials` actively BANS one in any `pull_request`-triggered workflow, so a
+file-wide rule would red a correct repository. It asserts the GRANT, not that the token is
+usable: a repository-level or organisation-level setting that disables OIDC is out of reach here.
+
+**L26 — V12 pins the npm 11.5.1 floor across BOTH workflows that carry it (SMA-602).**
+`release.yml`'s `publish-npm` job and `prebuild.yml`'s `assemble` job each carry a copy of the
+same npm provisioning and floor assertion, and nothing cross-pinned them: `grep -rn '11.5.1' ci/`
+found nothing, so deleting both steps — or lowering only ONE copy — kept `moon ci` fully green.
+V12 pins seven discrete stripped whole lines, matched against the PARSED `run:` bodies so a copy
+living only in a comment cannot satisfy it. It lives in `release_guard.py` rather than
+`ci/affected-graph/ci_targets.py` for the reason check 8f records for its own choice
+(`repo:actionlint` carries `inputs: ['**/*']`, so the pin needs no new input registration and is
+not the sole judge of its own reachability), and because the guard already READS both files —
+check 10 runs it on `release.yml`, whose `prebuild` job carries
+`uses: ./.github/workflows/prebuild.yml`, so `check_called` reaches the second copy for free.
+Two limits. V12 pins TEXT, not behaviour: a line kept but reordered, or moved into a step that
+never runs, still satisfies it. And it says nothing about `wheels.yml` or any future third copy —
+a new subject must be added to `NPM_OIDC_FLOOR_SUBJECTS` by hand.
 
 ## Cost
 

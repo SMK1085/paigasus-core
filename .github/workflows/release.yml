@@ -45,10 +45,21 @@ on:
   #
   #   * Keep the `environment:` key — that environment's deployment branch policy is restricted to
   #     `main` ONLY, so a job entering it from any other ref fails.
-  #   * Remove it — the job loses every credential, because ALL of them are ENVIRONMENT secrets
-  #     rather than repository secrets: `NPM_TOKEN` and `PYPI_API_TOKEN` on `release-publish`, and
-  #     `PAIGASUS_BOT_*` on both `release-pr` and `release-publish`. An OIDC exchange loses its
-  #     environment claim too, which is what the crates.io trusted publishers require.
+  #   * Remove it — the job loses its authorization. Since SMA-602 there is no publish token at
+  #     all: crates.io, PyPI and npm each authenticate through OIDC trusted publishing, and the
+  #     twelve publishers MUST BE CONFIGURED to require the `release-publish` environment claim.
+  #     Dropping the `environment:` key then drops that claim and the registries reject the
+  #     exchange. The `PAIGASUS_BOT_*` App secrets remain ENVIRONMENT secrets on `release-pr` and
+  #     `release-publish`, so a job that leaves the environment cannot mint a token either.
+  #
+  #     READ "MUST BE CONFIGURED" LITERALLY (SMA-602 final review, Important 5). The environment
+  #     field is OPTIONAL on both registries — npm 11.13.0 defines it with `default: null` and no
+  #     `required: true` (lib/commands/trust/github.js), and PyPI's form accepts an empty
+  #     environment too. A publisher registered WITHOUT it accepts an exchange carrying no
+  #     environment claim, this file stays green, and NOTHING here detects it. The boundary
+  #     therefore rests on twelve external settings, verified by hand: `npm trust list` reads the
+  #     nine npm ones back, PyPI offers no read-back at all. RUNBOOK §5.1.2 owns that read-back
+  #     and its periodic re-check; §5.2 records that PyPI has none.
   #
   # That pair is the boundary, and it now covers EVERY job that touches a credential — `release-pr`
   # on `release-pr`, and `release`/`publish-pypi`/`publish-npm` on `release-publish`. There are no
@@ -699,8 +710,8 @@ jobs:
             || { echo "::error::missing dist-bindings/paigasus_py_bindings-$KERNEL_VERSION.tar.gz"; exit 1; }
           echo "OK: $found wheels + sdist at $KERNEL_VERSION"
 
-      # AUTH: a PyPI API TOKEN, temporarily, NOT the OIDC trusted publishing this job's
-      # `id-token: write` was added for (SMA-580).
+      # AUTH: OIDC trusted publishing. This job supplies no `password:`, so
+      # pypa/gh-action-pypi-publish mints an OIDC token instead (SMA-602).
       #
       # PyPI allows only ONE *pending* trusted publisher per (owner, repo, workflow, environment)
       # tuple, and all three projects below share that tuple exactly — same repo, same
@@ -709,13 +720,41 @@ jobs:
       # different project name". That is pypi/warehouse#16920, open since 2024-10, and it is the
       # documented monorepo limitation, not a misconfiguration.
       #
-      # The constraint binds PENDING publishers only. So: create all three projects with a token
-      # once, then register NORMAL trusted publishers on each — normal publishers may share a
-      # tuple, which is the ordinary monorepo case — then delete the token. Tracked in SMA-602
-      # alongside the identical npm bootstrap.
+      # The constraint binds PENDING publishers only. So SMA-580 created all three projects with
+      # an account-scoped token once, and SMA-602 then registered a NORMAL trusted publisher on
+      # each — normal publishers may share a tuple, which is the ordinary monorepo case — and
+      # deleted the token. Do not reintroduce one: a token would MASK a broken exchange rather
+      # than fail. npm's OIDC helper never throws, so a failed exchange falls through to any
+      # configured credential and publishes silently.
       #
-      # `id-token: write` stays on this job: it is what the normal publishers will use, and
-      # removing it now would just have to be added back.
+      # WHAT V10 ACTUALLY COVERS (corrected, SMA-602 final review, Important 1 — the earlier
+      # "V10 reds on it" was over-broad). release_guard.py's V10 is four rules, not a blanket
+      # ban on credentials:
+      #   1. a strict-equality allowlist of the secret NAMES this file may reference
+      #      (EXPECTED_RELEASE_SECRETS — currently the two `PAIGASUS_BOT_*` App credentials);
+      #   2. any `password:` inside the `with:` of a `pypa/gh-action-pypi-publish` step,
+      #      whatever the value is;
+      #   3. three credentials banned by literal name (PYPI_API_TOKEN, NPM_TOKEN,
+      #      NODE_AUTH_TOKEN);
+      #   4. an npm `_authToken` or `_auth` written anywhere the parsed document can reach.
+      # It reads the PARSED YAML, so it sees no comment — including this one. It cannot see a
+      # credential fetched at run time (a vault call, a decoded blob), and rule 1 covers only
+      # the `secrets` context, not a value smuggled in through `vars`.
+      #
+      # V10 is not the only rule guarding this file. V11 asserts that `id-token: write` must be
+      # present in the `permissions:` block of both `publish-pypi` and `publish-npm` jobs — without
+      # it, GitHub provides no OIDC token and npm's oidc.js silently falls through to a legacy
+      # credential (SMA-602 F2). V12 pins seven load-bearing lines of the npm OIDC floor check
+      # (`floor=11.5.1` and related assertions) across release.yml and prebuild.yml; deleting or
+      # lowering either copy keeps CI green while breaking publish (F3).
+      #
+      # A consequence worth knowing: with no `password:`, the action's `attestations` input
+      # (default 'true', and effective only under Trusted Publishing) becomes live, so all three
+      # projects now upload PEP 740 attestations. That needs no extra permission — they are
+      # Sigstore-signed with the same OIDC token, not through GitHub's attestations API.
+      #
+      # `id-token: write` stays on this job: it is what the normal publishers use, and removing
+      # it now would just have to be added back.
       #
       # ORDER IS LOAD-BEARING: bindings, then the face. skip-existing makes a partial failure
       # re-runnable — PyPI returns 400 "file already exists" otherwise, so an un-skipped retry can
@@ -726,7 +765,6 @@ jobs:
         with:
           packages-dir: dist-bindings
           skip-existing: true
-          password: ${{ secrets.PYPI_API_TOKEN }}
 
       - name: Publish paigasus-kernel
         if: steps.relinfo.outputs.kernel_release == 'true'
@@ -734,7 +772,6 @@ jobs:
         with:
           packages-dir: dist-face
           skip-existing: true
-          password: ${{ secrets.PYPI_API_TOKEN }}
 
       # Binds the proto distribution to the release, same reason as the wheel/sdist assertion
       # above: `PROTO_VERSION` was computed but never exported, so this upload shipped whatever
@@ -762,7 +799,6 @@ jobs:
         with:
           packages-dir: dist-proto
           skip-existing: true
-          password: ${{ secrets.PYPI_API_TOKEN }}
 
   publish-npm:
     name: publish to npm
@@ -802,6 +838,103 @@ jobs:
       # it, and it is the one job that had never executed before the flag was flipped.
       - name: Install Moon-managed toolchains (node, pnpm, rust, python, uv)
         run: moon setup
+
+      # REQUIRED (SMA-602 final review, Critical 1), and its absence would repeat the SMA-580
+      # failure one registry over. `moonrepo/setup-toolchain` puts `~/.proto/bin` and
+      # `~/.proto/shims` on PATH, and proto DOES NOT SHIM npm — only node, pnpm, pnpx and the
+      # pinned CLIs. So a bare `npm` here resolves to the RUNNER IMAGE's npm, which on
+      # ubuntu-latest is npm 10.x. npm 10 has no `lib/utils/oidc.js` at all: there is no OIDC
+      # code path for it to enter. OIDC trusted publishing needs npm >= 11.5.1.
+      #
+      # With the credential removed, npm 10 would find nothing to authenticate with and die
+      # ENEEDAUTH — AFTER crates.io has published and the tags are cut, in the one job a fresh
+      # dispatch cannot repair (RUNBOOK §7.4).
+      #
+      # WHY THIS SHAPE, not a `.prototools` pin. `napi prepublish` spawns each per-platform
+      # child through execSync with `env: process.env`, resolving the tool from PATH — so the
+      # fix must move PATH, not one step's argv. `$GITHUB_PATH` is prepended for every LATER
+      # step, so it wins over `~/.proto/shims` and every child process inherits it. Pinning npm
+      # in `.prototools` would also work, but it edits a file the whole Moon graph keys on and
+      # it makes moon's node toolchain the arbiter of an npm version nothing else needs.
+      #
+      # WHY NOT `npm install -g npm@<version>` (SMA-602 fix round 4, F9 + F10). That earlier
+      # shape put a REGISTRY ROUND-TRIP inside the irreversible job, and it ran UNCONDITIONALLY
+      # while every substantive step below is gated on `kernel_release == 'true'` — so on a
+      # proto-only release, which publishes no npm package at all, an npmjs.org hiccup or a
+      # yanked version still reds this job. It also decoupled the npm version from the node pin
+      # that justifies it.
+      #
+      # The Node version `.prototools` pins already ships npm INSIDE its own install, at
+      # `<node prefix>/bin/npm`; proto shims `node` but not `npm`, which is the only reason the
+      # binary is not already on PATH. `moon setup` above is what puts that install on disk.
+      # Prepending that directory is network-free, and the npm version is whatever the pinned
+      # node carries — a `.prototools` node bump moves both together instead of silently
+      # un-fixing this.
+      #
+      # `proto bin node` is what resolves the directory; DO NOT hardcode the version.
+      # `--reporter text` is REQUIRED on any captured proto call: proto answers in NDJSON when
+      # it detects an agent environment and still exits 0, so an unflagged capture yields a JSON
+      # blob rather than a path (SMA-596). `ci/release-parity/ecosystems/release-plz.sh` is the
+      # worked example, including the `-x` assertion that fails at the assignment.
+      - name: Put the pinned Node's npm on PATH
+        run: |
+          set -euo pipefail
+          node_bin="$(proto --reporter text bin node)"
+          if [ ! -f "$node_bin" ] || [ ! -x "$node_bin" ]; then
+            echo "::error::proto did not resolve node to an executable file. Got: ${node_bin:-<empty>}"
+            echo "::error::If that looks like JSON, proto agent-mode NDJSON leaked past --reporter text (SMA-596)."
+            exit 1
+          fi
+          node_dir="$(dirname "$node_bin")"
+          if [ ! -x "$node_dir/npm" ]; then
+            echo "::error::the pinned Node install at $node_dir ships no executable npm."
+            exit 1
+          fi
+          echo "pinned node: $node_bin"
+          echo "$node_dir" >> "$GITHUB_PATH"
+
+      # Separate step ON PURPOSE: a `$GITHUB_PATH` write takes effect only from the NEXT step,
+      # so the assertion cannot live in the step that performs the install. It must FAIL LOUDLY
+      # and by version — a bare ENEEDAUTH later is the least recoverable failure in this
+      # repository. prebuild.yml's `assemble` job carries the identical assertion, and it runs
+      # BEFORE `release`: `release` needs [wheels, prebuild, proto-dist, approve-release], so a
+      # wrong npm reds while everything is still reversible. This copy is the backstop for the
+      # case where only this job's PATH is wrong.
+      #
+      # The comparison is PURE SHELL on purpose (SMA-602 fix round 4, F11). The earlier form
+      # was `printf … | sort -V | head -n1` under `set -euo pipefail`: `head` closes the pipe
+      # after one line, so `sort` can die with SIGPIPE, the pipeline status becomes 141, and the
+      # step reds with NO `::error::` line at all — indistinguishable, to a reader of the run,
+      # from a real floor violation. Nothing here writes to a closed pipe, so a version verdict
+      # is the only thing that can fail this step. A version that is empty or not purely dotted
+      # digits also fails: this step guards the least recoverable failure in the repository, so
+      # "cannot parse" must never read as "above the floor".
+      - name: Assert npm is new enough for OIDC trusted publishing
+        run: |
+          set -euo pipefail
+          echo "npm resolves to: $(command -v npm)"
+          v="$(npm --version)"
+          floor=11.5.1
+          echo "npm version: ${v:-<empty>} (floor $floor)"
+          below() {
+            echo "::error::npm ${v:-<empty>} is below the $floor floor required for OIDC trusted publishing."
+            echo "::error::npm 10.x carries no lib/utils/oidc.js, so no token exchange happens at all."
+            echo "::error::With no credential configured this job would fail ENEEDAUTH after crates.io published."
+            exit 1
+          }
+          case "$v" in
+            ''|*[!0-9.]*|.*|*.|*..*) below ;;
+          esac
+          IFS=. read -r vmaj vmin vpat _ <<<"$v" || true
+          IFS=. read -r fmaj fmin fpat _ <<<"$floor" || true
+          vmaj=$((10#${vmaj:-0})); vmin=$((10#${vmin:-0})); vpat=$((10#${vpat:-0}))
+          fmaj=$((10#${fmaj:-0})); fmin=$((10#${fmin:-0})); fpat=$((10#${fpat:-0}))
+          if [ "$vmaj" -lt "$fmaj" ] \
+            || { [ "$vmaj" -eq "$fmaj" ] && [ "$vmin" -lt "$fmin" ]; } \
+            || { [ "$vmaj" -eq "$fmaj" ] && [ "$vmin" -eq "$fmin" ] && [ "$vpat" -lt "$fpat" ]; }; then
+            below
+          fi
+          echo "OK: npm $v can exchange an OIDC token"
 
       - name: Install JS workspace deps
         run: pnpm --dir ts install --frozen-lockfile
@@ -928,21 +1061,35 @@ jobs:
       # argument containing `#` placed BEFORE the flag would truncate the segment and produce a
       # false red — putting the flag first makes that unreachable.
       #
-      # Auth: npm Trusted Publishing (OIDC) cannot be configured before a package's first-ever
-      # publish, and all three @paigasus/* packages are unpublished (measured: `npm view` 404s
-      # for each) — so NPM_TOKEN stays for now, becoming unnecessary after the first release.
-      # Confined to this step's own env (never job- or workflow-level) and written to the HOME
-      # npmrc rather than the committed ts/.npmrc so every per-target `npm publish` napi shells
-      # out to, regardless of its own cwd under --npm-dir, resolves it.
+      # Auth: npm Trusted Publishing (OIDC), one configuration per package. npm cannot configure
+      # it before a package's first-ever publish (npm/cli#8544 is still open), which is why
+      # SMA-580 needed a token and SMA-602 could remove it only afterwards.
+      #
+      # `napi prepublish` shells out to `npm publish` once per platform directory, each with its
+      # own cwd. Those inherit OIDC correctly: @napi-rs/cli spawns them with `env: process.env`,
+      # so both ACTIONS_ID_TOKEN_REQUEST_* variables reach every child (measured, 3.7.2
+      # dist/index.js:3451-3455). The exchange is PER PACKAGE, so all nine @paigasus/* packages
+      # need their own trusted publisher.
+      #
+      # NPM_CONFIG_LOGLEVEL: verbose is load-bearing, not debug residue. npm's oidc.js reports
+      # every OIDC failure at verbose or silly and NEVER throws, so without it a misconfigured
+      # publisher surfaces as a bare ENEEDAUTH with no cause — in the one job a fresh dispatch
+      # cannot repair (see RUNBOOK §7.4).
+      #
+      # Know what it does NOT give you. napi runs each platform child with stdio: "pipe" and
+      # forwards only its STDOUT (dist/index.js:3452-3457), while npm logs to STDERR. So the
+      # FAILURE path works — Node folds the captured stderr into error.message and napi rethrows —
+      # but the positive "Successfully retrieved and set token" line is readable only for the two
+      # DIRECT npm publish steps, never for the seven platform children. Do not treat its absence
+      # there as evidence of anything.
       - name: Publish the node addon and its platform packages
         if: steps.npmstate.outputs.node == 'publish'
         working-directory: ts/packages/paigasus-kernel
         env:
           NPM_CONFIG_PROVENANCE: 'true'
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_CONFIG_LOGLEVEL: verbose
         run: |
           set -euo pipefail
-          echo "//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}" > "$HOME/.npmrc"
           pnpm exec napi prepublish --no-gh-release --npm-dir npm \
             --cwd ../../../rs/crates/bindings/paigasus-node-bindings
 
@@ -957,10 +1104,9 @@ jobs:
         if: steps.npmstate.outputs.node == 'publish'
         working-directory: rs/crates/bindings/paigasus-node-bindings
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_CONFIG_LOGLEVEL: verbose
         run: |
           set -euo pipefail
-          echo "//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}" > "$HOME/.npmrc"
           npm publish --provenance --access public
 
       # Assert the TARBALL, not the working tree: `files` membership is what npm actually ships.
@@ -984,8 +1130,7 @@ jobs:
         if: steps.npmstate.outputs.wasm == 'publish'
         working-directory: wasm-dist
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_CONFIG_LOGLEVEL: verbose
         run: |
           set -euo pipefail
-          echo "//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}" > "$HOME/.npmrc"
           npm publish --provenance --access public

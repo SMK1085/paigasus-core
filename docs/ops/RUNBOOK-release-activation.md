@@ -32,7 +32,7 @@ Steps **D** and **I** are irreversible. Work top to bottom. Do not reorder.
 | **B1** | ~~Create the three environments (§3)~~ **done** | — | owner | yes |
 | **B2** | ~~Add the required reviewer to `release-approval`~~ **done** | — | owner | yes |
 | **B3** | App tag/Release capability — evidenced, see §2 | — | owner | yes |
-| **C** | ~~npm scope, `NPM_TOKEN`, `PYPI_API_TOKEN`~~ **done** | — | owner | yes |
+| **C** | ~~npm scope, `NPM_TOKEN`, `PYPI_API_TOKEN`~~ **done** — the bootstrap tokens. SMA-602 replaces them; see C1–C4 below | — | owner | yes |
 | **D** | ~~Publish the three `0.1.0-alpha.1` seeds~~ **done 2026-08-29** | — | owner | **NO** |
 | **E** | Configure crates.io Trusted Publishing for the three crates | — | owner | yes |
 | **F** | Merge this issue's PR. **OBSERVATION GATE** | the merge in F | owner | yes |
@@ -40,6 +40,22 @@ Steps **D** and **I** are irreversible. Work top to bottom. Do not reorder.
 | **H** | **THE FLIP** — set `PAIGASUS_RELEASE_ENABLED` to `true` | — | owner | yes, until I |
 | **I** | Dispatch `release.yml`. Approve when it pauses | the dispatch | owner | **NO** |
 | **J** | Verify §7. **Then** yank the seeds | — | owner | — |
+
+**SMA-602's owner steps — the move to trusted publishing.** These are the ONLY ordering of them;
+the design spec is not an operations document. Nothing here is done until the owner confirms it.
+The order is the safety property: registering early is free, merging early breaks the next release.
+
+| Step | Action | When | Owner | Status |
+| --- | --- | --- | --- | --- |
+| **C1** | Register **twelve** trusted publishers — nine on npm (§5.1), three on PyPI (§5.2). Confirm the `environment` field on every one | **before** the SMA-602 PR merges | owner | **required before merge** |
+| **C2** | Verify the nine npm configurations with `npm trust list` (§5.1.2). It uploads nothing. PyPI has no read-back | **before** the SMA-602 PR merges | owner | **required before merge** |
+| **C3** | Confirm both token VALUES are stored outside GitHub, record where (§8), **then** delete `PYPI_API_TOKEN` and `NPM_TOKEN` from `release-publish` | **after** the SMA-602 PR merges | owner | **required after merge** |
+| **C4** | Revoke the PyPI token on PyPI | **only after** a release has actually published through OIDC | owner | **required after the first OIDC release** |
+
+C1 must precede the merge. C3 must follow it — the workflow stops reading the secrets at merge, so
+deleting them earlier breaks a release that starts in between. C4 must follow a proven OIDC
+release: the token is the only credential that can publish to PyPI by hand, and PyPI has no
+documented hand-recovery procedure (§8).
 
 Steps C, D and E use this runbook **from the PR branch**, before step F merges it.
 
@@ -58,11 +74,26 @@ while you work through steps C, D and E.
 | --- | --- | --- | --- |
 | `release-pr` | `main` only | none | `PAIGASUS_BOT_APP_ID`, `PAIGASUS_BOT_PRIVATE_KEY` |
 | `release-approval` | `main` only | `SMK1085`, self-review allowed | — |
-| `release-publish` | `main` only | none | `NPM_TOKEN`, `PAIGASUS_BOT_APP_ID`, `PAIGASUS_BOT_PRIVATE_KEY` |
+| `release-publish` | `main` only | none | `PAIGASUS_BOT_APP_ID`, `PAIGASUS_BOT_PRIVATE_KEY` |
 
-No wait timers. **The two repository secrets are deleted** (`gh api …/actions/secrets` returns an
-empty list), so the App credentials now live only on the two environments that need them, and §3.1's
-migration is live.
+**PENDING, not done (SMA-602, step C3).** The table above shows the state **after** step C3 runs.
+Until the owner confirms C3, `release-publish` also holds `NPM_TOKEN` and `PYPI_API_TOKEN` — the
+SMA-580 bootstrap tokens. An earlier revision of this section stated their removal as accomplished
+fact; it was not, and there is no way for a reader to check it from the repository. Read the live
+state instead:
+
+```bash
+gh api repos/SMK1085/paigasus-core/environments/release-publish/secrets \
+  --jq '.secrets[].name'
+```
+
+Expected after C3: `PAIGASUS_BOT_APP_ID` and `PAIGASUS_BOT_PRIVATE_KEY`, nothing else.
+
+No wait timers. **The two REPOSITORY secrets are deleted** — a separate, completed SMA-580 step
+(`gh api …/actions/secrets` returns an empty list), so the App credentials live only on the two
+environments that need them, and §3.1's migration is live. That is about the `PAIGASUS_BOT_*`
+pair; it says nothing about the two publish tokens, which are ENVIRONMENT secrets and are removed
+by C3.
 
 **B3 — the App's tag and Release capability — is satisfied by evidence already in hand, with one
 stated gap.** The App force-updates the release-plz branch on every push to `main` (that is how
@@ -121,12 +152,23 @@ this repository close that, and they hold in both directions:
 
 - If the edited copy **keeps** `environment: release-publish`, this branch policy fails the job on
   any ref but `main`.
-- If it **removes** the environment, the OIDC token carries no environment claim, and the crates.io
-  and PyPI trusted publishers — configured in §5.2 and §5.3 to require `release-publish` — reject
-  it. `NPM_TOKEN` is an environment secret on the same environment, so npm loses its credential.
+- If it **removes** the environment, the OIDC token carries no environment claim, and the npm,
+  crates.io and PyPI trusted publishers — which §5.1, §5.2 and §5.3 tell you to configure to
+  require `release-publish` — reject it. **Corrected 2026-08-30 (SMA-602):** this used to name
+  `NPM_TOKEN` as the npm-side control; once step C3 deletes that secret, npm uses the same OIDC
+  trusted-publishing rejection as PyPI and crates.io.
 
-**Do not relax the branch policy, and do not leave the environment field blank on any of the three
+**Do not relax the branch policy, and do not leave the environment field blank on any of the twelve
 registry configurations.** Together they are the boundary.
+
+**READ THE SECOND HALF LITERALLY — it rests on twelve external settings, not on this repository.**
+The environment field is **optional** on both registries. npm defines it with `default: null` and
+no `required: true` (`trust/github.js:35-40` in npm 11.13.0), and PyPI's form accepts an empty
+environment. A publisher registered without it accepts an exchange carrying **no** environment
+claim: that package then publishes from any ref the workflow name matches, this repository stays
+green, and nothing here detects it. `npm trust list` (§5.1.2) reads back nine of the twelve; PyPI
+offers no read-back at all. Verify all twelve at step C1, re-check the nine npm ones periodically
+per §5.1.2, and treat this as the one boundary with no automated control behind it.
 
 **`release-pr` is now covered too, by the same shape.** It was the one gap: it entered no
 environment and minted its App token from **repository** secrets, which any run reaches regardless
@@ -172,8 +214,12 @@ no repository secrets left, so a job sees only its own environment's.
 | --- | --- | --- | --- |
 | `release-pr` | `release-pr` | `PAIGASUS_BOT_APP_ID`, `PAIGASUS_BOT_PRIVATE_KEY` | OK |
 | `release` | `release-publish` | `PAIGASUS_BOT_APP_ID`, `PAIGASUS_BOT_PRIVATE_KEY` | OK |
-| `publish-pypi` | `release-publish` | `PYPI_API_TOKEN` | OK |
-| `publish-npm` | `release-publish` | `NPM_TOKEN` | OK |
+| `publish-pypi` | `release-publish` | none — OIDC trusted publishing | OK |
+| `publish-npm` | `release-publish` | none — OIDC trusted publishing | OK |
+
+The "Secrets needed" column reads the **workflow file**, which stops referencing the two publish
+tokens on this PR. It does **not** say the two secrets are gone from `release-publish`; that is
+step C3, and §2 has the command to check the live state.
 
 Worth re-running after any credential change. A miss is invisible at runtime for `release-pr`,
 whose preflight skips **green**.
@@ -359,48 +405,126 @@ minutes. Three fits. If a publish is refused, wait and retry — the earlier see
 
 ## 5. Steps C and E — the registry configurations
 
-### 5.1 npm — step C
+### 5.1 npm — the SMA-602 steady state. STEP C1, PENDING
+
+**REQUIRED BEFORE THE SMA-602 PR MERGES — this is step C1, and it is not done until you do it.**
+All nine `@paigasus/*` packages exist (published 2026-08-29 by the bootstrap token — history
+below), so npm Trusted Publishing is registrable. Register each of the nine packages with owner
+`SMK1085`, repository `paigasus-core`, workflow `release.yml` — with the extension — and
+environment `release-publish`.
+
+**Registration needs an OTP-capable login.** The npm trust commands wrap their registry call in
+`otplease`, and 2FA-bypass granular tokens already lost the ability to change trusted-publishing
+configuration (§5.1.1). The Automation token cannot do this. Use an interactive login or the web
+UI.
+
+`npm trust github <pkg> --file release.yml --repository SMK1085/paigasus-core \
+  --environment release-publish` registers one package. It also honours `--dry-run`.
+
+**`--environment` is OPTIONAL to npm, and mandatory to us.** npm defines it with `default: null`
+and no `required: true` (`trust/github.js:35-40`) — only `--file` is required. Omit it and the
+publisher accepts an exchange with no environment claim, which removes the §3 boundary for that
+package silently. Pass it on all nine, then read all nine back with `npm trust list`.
+
+**Which npm you run this from matters.** The flags above were measured against **npm 11.13.0**,
+the npm bundled with the repo-pinned Node 24.16.0. Use **npm >= 11.5.1** on your machine — that is
+the floor for trusted publishing, and `npm trust` does not exist below it. Newer npm documents
+`--allow-publish` and `--allow-stage-publish`; 11.13.0 has neither (`grep -r allow-publish` over
+its `lib/` returns nothing), so a publisher it creates carries whatever the registry defaults to.
+**If your npm offers those flags, check whether publish is default-on** before relying on the
+result — a publisher that cannot publish would fail the release at the same irreversible point a
+missing one would. Check your version first:
+
+```bash
+npm --version   # must be >= 11.5.1
+```
+
+**npm trust API version differences — measured 2026-08-30.** Reading publishers with `npm trust
+list` works on npm 11.11.0, but creating them via `npm trust github` fails with bare `400 Bad
+Request` and no message body. npm 11.11.0 defines only three trust params (`file`, `repository`,
+`environment`); newer npm adds `allow-publish` and `allow-stage-publish` to the payload. The trust
+create endpoint appears to require newer npm than the read endpoint — the server gave no message,
+so this is an inference. Practical consequence: reading a publisher works, but creating or changing
+one may need npm 12+. This affects registration only — CI derives npm from `.prototools` and only
+publishes, so it is unaffected. Registration requires an interactive 2FA-capable session (`npm
+login`); a dead credential or token-based `~/.npmrc` gives `401 Unauthorized`. Check `npm whoami`
+first — it is the fastest discriminator.
+
+**Do NOT enable npm's "Require two-factor authentication and disallow tokens" on these nine
+packages** (final review, Important 4). npm's Publishing-access settings offer it per package, and
+npm's own documentation recommends it after a trusted publisher is configured. It is real
+hardening and this repository deliberately declines it for now: enabling it revokes the Automation
+token's ability to publish these packages, which kills §7.4 — the ONLY npm hand-recovery path this
+repository has — immediately, rather than at its January 2027 expiry. `publish-npm` has never
+completed a real publish, so §7.4 is the live fallback, not a theoretical one. Revisit once a
+release has published through OIDC and a token-free recovery path exists.
+
+`NPM_TOKEN` is deleted from `release-publish` at **step C3, after the merge**. §8 tracks that
+removal, and its precondition: confirm the token value is stored outside GitHub first.
+
+#### 5.1.1 History — the bootstrap token, step C, done 2026-08-29
 
 **Already confirmed (2026-08-29):** `npm org ls paigasus` reports `smaschek - owner`, and
-`npm access list packages @paigasus` is empty. Nothing to do here unless that changed.
+`npm access list packages @paigasus` was empty before the first release.
 
-To re-check: `npm whoami` then `npm org ls paigasus`. Do **not** rely on an unauthenticated probe —
-`npmjs.com/org/paigasus` returns 403 and the registry org API 404 whether or not the org exists.
-
-The first release creates **nine** packages under the scope: `@paigasus/node-bindings`, seven
-platform packages, and `@paigasus/wasm`.
-
-Create the token:
+The first release created the **nine** packages under the scope: `@paigasus/node-bindings`, seven
+platform packages, and `@paigasus/wasm`. Trusted Publishing could not be configured before they
+existed, so the first release used a token instead:
 
 | Property | Value |
 | --- | --- |
 | Type | **Automation** |
-| Scope | the `@paigasus` scope, read and write — **not** "only select packages", since nine packages do not exist yet |
+| Scope | the `@paigasus` scope, read and write — **not** "only select packages", since nine packages did not exist yet |
 | Stored as | an **environment secret on `release-publish`**, not a repository secret |
 
-The type is not a free choice, and it is not hypothetical here: this account reports
-`two-factor auth: auth-and-writes` (measured 2026-08-29), so 2FA **is** enforced for writes and a
-classic publish token fails with *"2FA required for publishing"*.
+The type was not a free choice: this account reports `two-factor auth: auth-and-writes` (measured
+2026-08-29), so 2FA **is** enforced for writes and a classic publish token fails with *"2FA
+required for publishing"*.
 
-`publish-npm` already declares `environment: release-publish`, so an environment secret resolves
-with no workflow change, and the credential is not readable by every other workflow.
+**Why a token and not OIDC, at that time.** npm Trusted Publishing has the same first-publish
+constraint crates.io does: `npm trust` requires that *"the package you're configuring must already
+exist on the npm registry"*, and `npm/cli#8544`, the request to allow an initial OIDC publish, was
+still open. That constraint is now moot for this repository — the packages exist — but it still
+applies to any future `@paigasus/*` package that does not yet exist.
 
-**Why a token and not OIDC.** npm Trusted Publishing has the same first-publish constraint
-crates.io does: `npm trust` requires that *"the package you're configuring must already exist on
-the npm registry"*, and `npm/cli#8544`, the request to allow an initial OIDC publish, is still
-open. The nine packages do not exist yet.
+**The token's underlying Automation credential is kept, deliberately, outside CI.** §7.4 depends
+on it for hand recovery. GitHub's changelog of 2026-07-31 restricts npm 2FA-bypass granular access
+tokens: they have **already** lost the ability to change package access, maintainers and
+trusted-publishing configuration, and they lose **direct publish entirely in January 2027**. After
+that date §7.4's recovery path stops working and this repository has no npm hand-recovery path at
+all.
 
-**⚠️ This token expires as a MECHANISM, not just as a credential.** GitHub's changelog of
-2026-07-31 restricts npm 2FA-bypass granular access tokens. They have **already** lost the ability
-to change package access, maintainers and trusted-publishing configuration, and they lose **direct
-publish entirely in January 2027**. It works for this release. It will not work after that date.
+#### 5.1.2 Read the nine configurations back — step C2, and a PERIODIC re-check
 
-So §8's `NPM_TOKEN` removal is dated, not optional: once the nine packages exist, configure trusted
-publishing on each and delete the token, **before January 2027**. Tracked as **SMA-602** (due
-2026-12-15), unblocked the moment this release lands. Set the token's expiry to bound the gap
-rather than relying on memory.
+`npm trust list <pkg> --json` reads the configuration back — an authenticated
+`GET /-/package/<pkg>/trust` that needs **no** GitHub Actions context, so it verifies all nine from
+a laptop. Confirm three fields on every package: `repository` is `SMK1085/paigasus-core`,
+`workflow_ref.file` is `release.yml`, and **`environment` is `release-publish`**.
 
-### 5.2 PyPI — step C
+**Run this before the merge (step C2), and again on a schedule.** It is the only read-back this
+repository has, and it covers nine of the twelve configurations. Nothing in CI can see any of them:
+a registration that omitted `environment`, or a later web-UI edit that cleared it, leaves every
+check in this repository green while that package's boundary is gone. Put a calendar reminder on
+it — quarterly, and after any change to the npm scope, the workflow filename or the environment
+name. The three PyPI publishers cannot be read back at all (§5.2); their only proof is a green
+`publish-pypi`.
+
+### 5.2 PyPI — the SMA-602 steady state. STEP C1, PENDING
+
+**REQUIRED BEFORE THE SMA-602 PR MERGES — this is the PyPI half of step C1, and it is not done
+until you do it.** Register three normal trusted publishers, one for each of
+`paigasus-py-bindings`, `paigasus-kernel` and `paigasus-proto` — owner `SMK1085`, repository
+`paigasus-core`, workflow `release.yml` (with the extension), environment `release-publish` on
+each. **Set the environment on all three:** the field is optional on PyPI's form too, and PyPI
+offers **no read-back**, so this is the one configuration nobody can verify afterwards. Its only
+proof is a green `publish-pypi` on the next release.
+
+`PYPI_API_TOKEN` is deleted from `release-publish` at **step C3, after the merge**, and revoked on
+PyPI at **step C4, only after a release has published through OIDC**. §8 tracks both.
+
+The steps below are kept as the record of the token-era bootstrap (step C, done 2026-08-29) that
+made the three projects exist in the first place — a normal trusted publisher cannot be registered
+before its project does.
 
 **A token first, then trusted publishing. Pending publishers cannot work here.**
 
@@ -422,7 +546,8 @@ ordinary monorepo case. So:
    defeat §3's boundary.
 4. The first release creates all three projects with it.
 5. **Afterwards**, add a *normal* trusted publisher to each of the three projects, then delete
-   `PYPI_API_TOKEN` and re-scope. Tracked in **SMA-602** together with the identical npm bootstrap.
+   `PYPI_API_TOKEN` and re-scope. **This is SMA-602's steps C1, C3 and C4 — see the summary above.
+   Not done until the owner confirms each one.**
 
 `publish-pypi` keeps `id-token: write`: it is what the normal publishers will use at step 5, and
 removing it now would only have to be added back.
@@ -641,7 +766,23 @@ cp -R npm-dirs rs/crates/bindings/paigasus-node-bindings/npm
 **TRAP 1 — you cannot use your logged-in npm session.** `napi prepublish` shells out with
 `execSync(..., {stdio: 'pipe'})`, so npm's one-time-password prompt has nowhere to go. On a 2FA
 account (this one is `auth-and-writes`) it dies with `npm error code EOTP` on the **first** package.
-It needs a credential that bypasses 2FA — the **Automation** token, the same one in `NPM_TOKEN`.
+It needs a credential that bypasses 2FA — the **Automation** token. SMA-602 removes the
+`NPM_TOKEN` secret from `release-publish` (step C3), but the underlying npm Automation token is
+deliberately KEPT on the registry precisely so this recovery stays possible.
+
+**WHERE THE VALUE LIVES — fill this in at step C3, and do not delete the secret until you have.**
+A GitHub secret is write-only: deleting `NPM_TOKEN` does not reveal its value, and no one can read
+it back afterwards. "Kept outside CI" is true of the token on npm's side and says nothing about
+the value. If the only copy of the value was the GitHub secret, this whole procedure is dead the
+moment C3 runs.
+
+> **npm Automation token value:** _record the password-manager vault and entry name here at step
+> C3._ If it is not stored anywhere, mint a replacement Automation token on npm, store that, and
+> only then delete the secret.
+
+**That token class loses direct publish in January 2027**, after which this procedure stops
+working and this repository has no npm hand-recovery path at all. Enabling npm's *"disallow
+tokens"* setting on the nine packages ends it sooner — §5.1 says not to.
 Point npm at a throwaway rc so your login survives:
 
 ```bash
@@ -697,7 +838,48 @@ Then **revoke the crates.io API token** from §4.1.
 
 ## 8. The tracked removals
 
-**No gate enforces either.**
+**A gate now enforces both, and here is exactly what it covers.**
+`ci/actionlint/release_guard.py`'s V10 reds `release.yml` on four rules:
+
+1. **a strict-equality allowlist of secret NAMES.** `release.yml` may reference
+   `PAIGASUS_BOT_APP_ID` and `PAIGASUS_BOT_PRIVATE_KEY` and nothing else. A NEW secret name — the
+   fresh project-scoped PyPI token the rollback plan would mint, for instance — reds until someone
+   adds it to `EXPECTED_RELEASE_SECRETS` on purpose. All four spellings GitHub accepts are
+   recognised (`secrets.NAME`, `secrets['NAME']`, `secrets["NAME"]`, and a `Secrets.`/`SECRETS.`
+   context, which is case-insensitive). Until SMA-602's fix wave only the first was, and the other
+   three were MEASURED bypasses. A read that names NO secret — `toJSON(secrets)`,
+   `secrets[format(...)]` — reds as unresolvable rather than passing clean.
+2. **any `password:`** inside the `with:` of a `pypa/gh-action-pypi-publish` step, whatever the
+   value is. Under Trusted Publishing there is nothing legitimate to put there. This rule is bound
+   to that ONE action name: a hand-rolled `twine upload` matches no rule 2, and is caught by rule 1
+   instead, through the secret name it consumes.
+3. **three names on a denylist:** `PYPI_API_TOKEN`, `NPM_TOKEN`, `NODE_AUTH_TOKEN`.
+4. **an npm `_authToken` or `_auth`** written anywhere the parsed document reaches. `_auth` is a
+   live npm credential — `getCredentialsByURI` honours it exactly as it honours `_authToken`. The
+   `_auth` half requires a real key boundary: `GIT_AUTH`, `CRATES_AUTH` and a `steps.app_auth.*`
+   reference are ordinary identifiers and stay clean.
+
+**Two more gates guard the OTHER direction — that the replacement is still wired.**
+
+* **V11** asserts `publish-pypi` and `publish-npm` each still grant `id-token: write`. That is the
+  credential trusted publishing runs on. Without it the runner sets no `ACTIONS_ID_TOKEN_REQUEST_*`
+  variables, npm's `oidc.js` returns undefined without throwing, and the publish dies `ENEEDAUTH`
+  AFTER crates.io has published. A narrower job-level `permissions:` block is the same defect as
+  deleting the grant — such a block sets every scope it omits to `none`.
+* **V12** pins the npm >= 11.5.1 provisioning and floor block, which `release.yml` and
+  `prebuild.yml` each carry a copy of. Nothing cross-pinned the two before, so lowering ONE copy
+  kept CI fully green.
+
+It reads the PARSED YAML, so it sees no comment. It cannot see a credential fetched at run time (a
+vault call, a decoded blob), and rule 1 covers the `secrets` context only, not `vars`.
+`PAIGASUS_BOT_*` must keep working, and `ci/workflow-credentials/run.sh:84` separately asserts that
+release.yml still reads a secret.
+
+**Before deleting either secret (step C3), confirm the token VALUE is stored outside GitHub and
+record where.** GitHub secrets are write-only. Deleting one does not show you its value and nothing
+can read it back. The two rows below say the credentials stay usable by hand; that is true of the
+tokens on the REGISTRY side and false of their values, if the only copy was the GitHub secret.
+Record the npm value's location in §7.4 and the PyPI value's location in the row below.
 
 **WITHDRAWN (SMA-603): removing the `workflow_dispatch` trigger.** An earlier version of this
 runbook tracked removing that trigger once the first release published. That instruction is
@@ -706,10 +888,10 @@ dispatch is the "build anyway" lever for the state where release-plz has already
 registry is still missing an artifact, and `ci/release-plan/` deliberately always builds on a
 dispatch. Do not remove it.
 
-| Item | Removal condition |
+| Item | Status |
 | --- | --- |
-| `PYPI_API_TOKEN` | All three PyPI projects exist, so a *normal* trusted publisher can be added to each. Then delete the token. Tracked as **SMA-602** |
-| `NPM_TOKEN` | Every `@paigasus/*` package exists, so npm Trusted Publishing becomes configurable. **HARD DEADLINE: January 2027** — npm 2FA-bypass tokens lose direct publish then (GitHub changelog, 2026-07-31). Tracked as **SMA-602**, due 2026-12-15. Set the token's expiry to bound the gap |
+| `PYPI_API_TOKEN` | **Superseded by SMA-602; the owner steps are PENDING.** `release.yml` stops reading it on this PR. C1 registers three normal trusted publishers **before** the merge; C3 deletes the environment secret **after** it; C4 revokes the token on PyPI **only after** a release has published through OIDC — it is the only credential that can publish to PyPI by hand, and PyPI has no documented hand-recovery procedure. Record the value's storage location before C3: _fill in at step C3_ |
+| `NPM_TOKEN` | **Superseded by SMA-602; the owner steps are PENDING.** `release.yml` stops reading it on this PR. C1 registers nine trusted publishers **before** the merge; C3 deletes the environment secret **after** it. The underlying Automation token stays alive on npm as §7.4's recovery credential, until its January 2027 expiry — but only if its VALUE is stored somewhere. Record that location in §7.4 before C3 |
 
 ---
 

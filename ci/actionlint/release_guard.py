@@ -150,6 +150,209 @@ _PUBLISH_RE = re.compile("|".join(PUBLISH_MARKERS))
 # about (CodeRabbit round 1 finding 2).
 _NAPI_PREPUBLISH_RE = re.compile(r"napi\s+prepublish")
 
+# V10 (SMA-602): no registry publish credential anywhere in the release path. PyPI and npm
+# authenticate through OIDC trusted publishing; crates.io already did. A reintroduced token
+# publishes SILENTLY — npm's oidc.js never throws (its own doc comment says so), so a failed
+# exchange falls through to whatever credential is configured, and the publish succeeds having
+# used the token. Nothing else in this repository catches that: ci/workflow-credentials only
+# inspects pull_request-triggered workflows, and release.yml is not one.
+#
+# This bans PUBLISH credentials BY NAME, never the `secrets` context as a whole.
+# PAIGASUS_BOT_APP_ID and PAIGASUS_BOT_PRIVATE_KEY are legitimate and must keep working: an App
+# installation token cannot come from a registry trusted publisher. A blanket ban would also red
+# ci/workflow-credentials/run.sh's control row, which asserts release.yml still reads A secret.
+BANNED_PUBLISH_CREDENTIALS = ("PYPI_API_TOKEN", "NPM_TOKEN", "NODE_AUTH_TOKEN")
+
+# An `_authToken` written into any npmrc masks a broken OIDC exchange: npm's oidc.js sets its
+# exchanged token at the 'user' config level, and a file token at that level is what publish.js
+# falls back to when the exchange fails.
+NPMRC_AUTH_TOKEN = "_authToken"
+
+# Final-review Important 1. `_auth` is the OTHER live npm credential key at that same config
+# level: `getCredentialsByURI` honours `//registry/:_auth=<base64 user:pass>` exactly as it
+# honours `_authToken`, so it masks a failed exchange the same way. MEASURED as a V10 bypass
+# before this rule existed.
+#
+# The lookahead is load-bearing twice over. `_auth` is a PREFIX of `_authToken`, so a bare
+# substring test would report both rules on one string; `(?![A-Za-z0-9_])` keeps the two
+# messages disjoint. It also excludes `NODE_AUTH_TOKEN` (`_AUTH_` — an underscore follows),
+# which BANNED_PUBLISH_CREDENTIALS already covers by name.
+#
+# Case-insensitive on purpose: npm reads every npmrc key from the environment too, so
+# `NPM_CONFIG__AUTH` is the same credential spelled for a step `env:` block — the fourth
+# measured bypass.
+#
+# SMA-602 fix wave, F6. The LEADING boundary `(?<![A-Za-z0-9])` is as load-bearing as the
+# trailing one, and it was missing. MEASURED false positives against the bare `_auth(?![A-Za-z0-9_])`
+# form: `GIT_AUTH="x"`, `${{ steps.app_auth.outputs.token }}` and `CRATES_AUTH: 1` all matched,
+# and release.yml already carries a near-miss at `AUTH_REMOTE=` that escapes only because no
+# underscore precedes it. Each would have red this gate with a message about npm credentials on
+# a step touching no npm registry — blocking every PR behind a message naming the wrong
+# subsystem. The boundary rejects all three, because in every one the character before `_auth`
+# is a LETTER.
+#
+# It must NOT be `(?<![A-Za-z0-9_])`: an underscore is exactly what precedes the key in the
+# environment spelling `NPM_CONFIG__AUTH` (npm's own `NPM_CONFIG_` prefix plus the `_auth` key),
+# which is the measured bypass this rule was added for. `:` (the npmrc `//registry/:_auth=`
+# form) and start-of-string (a bare `_auth=` line in an npmrc) are both admitted too.
+#
+# Deliberately NOT tightened further with a trailing `[:=]` requirement: `npm config set _auth
+# "$X"` is a real credential write and carries neither.
+_NPMRC_AUTH_RE = re.compile(r"(?<![A-Za-z0-9])_auth(?![A-Za-z0-9_])", re.IGNORECASE)
+
+# Final-review Important 1, rule 2. A KEY-based rule, not a value-based one: red a `password:`
+# inside the `with:` of any pypa/gh-action-pypi-publish step whatever the value is. The two
+# measured bypasses were `${{ secrets.PYPI_PROJECT_TOKEN }}` (a NEW secret name — which is
+# exactly what design §9's rollback plan would mint) and `${{ env.PY_CRED }}` (no secret
+# reference at all). Neither can be caught by a denylist of names; the presence of the key is
+# the violation, because under Trusted Publishing there is nothing legitimate to put there.
+PYPI_PUBLISH_ACTION = "pypa/gh-action-pypi-publish"
+
+# Final-review Important 1, rule 1. The secret names `release.yml` may reference, pinned by
+# STRICT EQUALITY — the same shape, and for the same reason, as
+# ci/workflow-credentials/workflow_credentials.py's EXPECTED_PR_SUBJECTS. A denylist can only
+# ever ban names someone already thought of; this reds on EVERY new secret name until a human
+# adds it here on purpose.
+#
+# Both members are GitHub App credentials for the per-run installation token. An App token
+# cannot come from a registry trusted publisher, so neither is replaceable by OIDC, and
+# ci/workflow-credentials/run.sh's control row asserts release.yml still reads A secret.
+#
+# IF THIS REDS: re-baseline it DELIBERATELY — add the new name here with a comment saying why
+# that secret cannot be an OIDC exchange. Do not loosen the comparison to a subset test, and do
+# not delete the pin; either turns a strict gate into a decorative one.
+EXPECTED_RELEASE_SECRETS = (
+    "PAIGASUS_BOT_APP_ID",
+    "PAIGASUS_BOT_PRIVATE_KEY",
+)
+
+# Matched against PARSED scalars, never the raw file, so the YAML comments in release.yml that
+# NAME the removed tokens stay invisible here (the same property publish_credential_violations
+# relies on).
+#
+# SMA-602 fix wave, F1. The old form was `re.compile(r"secrets\.([A-Za-z_][A-Za-z0-9_]*)")`, one
+# spelling of four that GitHub Actions accepts. MEASURED against the real release.yml — each of
+# these returned `[]`, so each was a live V10 rule-1 bypass at guard exit 0:
+#
+#     ${{ secrets['PYPI_PROJECT_TOKEN'] }}     ${{ Secrets.PYPI_PROJECT_TOKEN }}
+#     ${{ secrets["PYPI_PROJECT_TOKEN"] }}     ${{ SECRETS.PYPI_PROJECT_TOKEN }}
+#
+# The machinery below is REUSED from ci/workflow-credentials/workflow_credentials.py rather than
+# reinvented weaker: EXPR_SPAN / STRING_LITERAL / SECRETS_CTX are transcribed from that file,
+# where all four spellings are already pinned as live fixtures. Every comment there applies here
+# — the literal-aware span (a `}}` can sit inside a string literal), the possessive `*+` for
+# cost, and the `(?<![\w.-])` boundary that rejects `inputs.secrets-file` and
+# `steps.x.outputs.secrets`.
+#
+# WHY SPAN-SCOPED, not a scan of every scalar. release.yml's own `run:` blocks contain the WORD
+# "secrets" in prose (`::notice::… App secrets (see release.yml)`), which the bare context regex
+# matches. Scanning only inside `${{ }}` — plus a bare `if:`, which GitHub evaluates as an
+# expression without the wrapper — is what keeps that prose invisible.
+_EXPR_SPAN = re.compile(r"\$\{\{((?:'[^']*'|\"[^\"]*\"|(?!\}\}).)*+)\}\}", re.S)
+_STRING_LITERAL = re.compile(r"'[^']*'|\"[^\"]*\"")
+_SECRETS_CTX = re.compile(r"(?<![\w.-])secrets(?![\w-])", re.IGNORECASE)
+# The bracket-index forms. The NAME sits INSIDE the literal here, so these must be extracted
+# BEFORE literals are stripped — the opposite order from workflow_credentials.py, which only
+# needs to know THAT the context was read, never which name.
+_SECRET_INDEX_RE = re.compile(
+    r"(?<![\w.-])secrets(?![\w-])\s*\[\s*(?:'([^']*)'|\"([^\"]*)\")\s*\]", re.IGNORECASE)
+# The property form, applied AFTER literals are stripped — which is what stops
+# `hashFiles('secrets.txt')` yielding the name "txt".
+_SECRET_DOT_RE = re.compile(
+    r"(?<![\w.-])secrets(?![\w-])\s*\.\s*([A-Za-z_][A-Za-z0-9_]*)", re.IGNORECASE)
+
+
+def secret_refs(text: str, *, bare_expression: bool = False) -> tuple[set[str], bool]:
+    """Every secret NAME `text` references, and whether some reference resolved to no name.
+
+    The second element is the FAIL-CLOSED half: `${{ toJSON(secrets) }}` or
+    `${{ secrets[format('{0}', x)] }}` reads the context without naming anything a
+    strict-equality allowlist can compare. Reporting that as a violation is the only honest
+    answer — a name-based pin cannot judge a reference whose name does not exist until run time.
+
+    `bare_expression=True` additionally evaluates the text OUTSIDE any `${{ }}` wrapper. GitHub
+    evaluates an `if:` value as an expression with or without the wrapper, so
+    `if: secrets.TOKEN != ''` references the context with no span to extract.
+    """
+    spans = list(_EXPR_SPAN.findall(text))
+    if bare_expression:
+        # The wrapped part is already in `spans`; blank it out so it is not counted twice.
+        spans.append(_EXPR_SPAN.sub(" ", text))
+
+    names: set[str] = set()
+    unresolved = False
+    for span in spans:
+        for m in _SECRET_INDEX_RE.finditer(span):
+            names.add(m.group(1) if m.group(1) is not None else m.group(2))
+        rest = _STRING_LITERAL.sub("", _SECRET_INDEX_RE.sub(" ", span))
+        for m in _SECRET_DOT_RE.finditer(rest):
+            names.add(m.group(1))
+        if _SECRETS_CTX.search(_SECRET_DOT_RE.sub(" ", rest)):
+            unresolved = True
+    return names, unresolved
+
+# The one workflow EXPECTED_RELEASE_SECRETS is a pin OF. The "unexpected name" half of the rule
+# applies to every workflow check_main sees; the "pinned name went missing" half can only apply
+# to the real file, because a synthetic fixture legitimately references no secret at all.
+RELEASE_WORKFLOW_NAME = "release.yml"
+
+# V11 (SMA-602 fix wave, F2). V10 bans the OLD mechanism; NOTHING asserted the NEW one is still
+# wired. `grep -n "id-token" release_guard.py` matched a docstring and nothing else, so deleting
+# `id-token: write` from either publish job — or adding a narrower job-level `permissions:` block
+# that simply omits it — left every gate in this repository green.
+#
+# The run-time consequence is the one this branch exists to prevent. With no OIDC grant the
+# runner sets no ACTIONS_ID_TOKEN_REQUEST_* variables; npm's lib/utils/oidc.js returns undefined
+# WITHOUT throwing (its own doc comment says so), and, the token now being gone too, the publish
+# dies ENEEDAUTH — after crates.io has published and the tags are cut, in the one job a fresh
+# dispatch cannot repair.
+#
+# Scoped to RELEASE_WORKFLOW_NAME. A CALLED workflow legitimately declares no `id-token: write`
+# (wheels.yml builds, it does not publish), and `repo:workflow-credentials` actively BANS the
+# grant in any pull_request-triggered workflow — so applying this rule file-wide would red a
+# correct repository.
+OIDC_PUBLISH_JOBS = ("publish-pypi", "publish-npm")
+ID_TOKEN_SCOPE = "id-token"
+
+# V12 (SMA-602 fix wave, F3). The npm OIDC floor is duplicated across release.yml's `publish-npm`
+# job and prebuild.yml's `assemble` job, and NOTHING cross-pinned the two: `grep -rn '11.5.1' ci/`
+# found nothing, so deleting both steps — or lowering only ONE copy — kept `moon ci` fully green.
+#
+# WHY THESE SIX LINES, each verified to occur EXACTLY ONCE in EACH workflow. They are the
+# distinct single-edit bypasses, not one span:
+#   1. `node_bin=…proto --reporter text bin node` — what RESOLVES the pinned Node. Drop it and
+#      the step falls back to the runner image's npm 10.x, which has no OIDC code path at all.
+#   2. `echo "$node_dir" >> "$GITHUB_PATH"` — the PATH move itself. Without it the resolution
+#      above is computed and discarded, and `napi prepublish` still spawns the runner's npm.
+#   3. `if [ ! -x "$node_dir/npm" ]` — the assertion that the pinned Node ships an npm at all.
+#   4. `v="$(npm --version)"` — the measurement the floor is compared against.
+#   5. `floor=11.5.1` — the floor VALUE. Lowering one copy is F3's exact reported bypass.
+#   6. the unparseable-version arm, which is what makes "cannot parse" fail rather than pass.
+#   7. the version comparison itself. Delete it and the step prints OK unconditionally.
+#
+# Matched as STRIPPED WHOLE LINES against the parsed `run:` scalars, the same rule
+# T_CARGO_LOCK_SH_CALL_SITES and RELEASE_PARITY_SH_CALL_SITES use, and for both of their
+# reasons: the real lines are indented inside a YAML block scalar, so a column-0 rule would
+# reject them, while a substring rule would let a COMMENTED-OUT copy satisfy the pin.
+#
+# WHY HERE AND NOT ci/affected-graph/ci_targets.py. Same reasoning ci/actionlint/run.sh's check 8f
+# records for its own choice: `repo:actionlint` carries `inputs: ['**/*']`, so it is scheduled on
+# every PR and this pin needs NO new input registration and no `SELF_TASK_EXPECTED_GLOBS` entry.
+# release_guard.py additionally already READS both files — check 10 runs it on release.yml, whose
+# `prebuild` job carries `uses: ./.github/workflows/prebuild.yml`, so check_called reaches the
+# second copy for free. A pin in ci_targets.py would need a seventh haystack parameter threaded
+# through check_self_invocation and its whole self-test matrix, for a strictly weaker guarantee.
+NPM_OIDC_FLOOR_SUBJECTS = ("release.yml", "prebuild.yml")
+NPM_OIDC_FLOOR_LINES = (
+    'node_bin="$(proto --reporter text bin node)"',
+    'echo "$node_dir" >> "$GITHUB_PATH"',
+    'if [ ! -x "$node_dir/npm" ]; then',
+    'v="$(npm --version)"',
+    "floor=11.5.1",
+    "''|*[!0-9.]*|.*|*.|*..*) below ;;",
+    'if [ "$vmaj" -lt "$fmaj" ] \\',
+)
+
 
 def infra(msg: str) -> NoReturn:
     print(f"release-guard: {msg}", file=sys.stderr)
@@ -219,6 +422,34 @@ def if_text(job: dict) -> str | None:
     if isinstance(raw, bool):
         return "true" if raw else "false"
     return str(raw).strip()
+
+
+def steps_of(job: dict, where: str) -> list:
+    """A job's `steps:`, FAIL-CLOSED on any shape that is not a list (SMA-602 fix wave, F7).
+
+    `for step in job.get("steps") or []` iterates a STRING's CHARACTERS. Each character is not a
+    dict, so the `continue` in every step loop fires, and the step `env:`/`run:`/`with:` scans,
+    the pypa `password:` rule, the `napi prepublish` rule and the publish DETECTOR all skip
+    silently — the job reads clean. MEASURED on `steps: publish`:
+    `publish_credential_violations` returned `[]`, `job_publishes` returned False and
+    `napi_violations` returned `[]`.
+
+    That is the PyYAML string-iteration pitfall the `needs:` scalar case already documents
+    (SMA-579), and it contradicts this file's stated convention: every abnormal condition exits
+    2, never a skip and never a pass. `env:`, `container:` and `services:` already fail closed
+    the same way in publish_credential_violations.
+
+    `None` (no `steps:` at all) is a legitimate shape — a reusable-workflow-call job carries
+    `uses:` instead — so it returns an empty list, not an infra abort.
+    """
+    raw = job.get("steps")
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        infra(f"{where} has steps: that is not a list "
+              f"(got {type(raw).__name__}: {raw!r}). A non-list steps: makes every step-level "
+              f"rule skip in silence, which would read as clean.")
+    return raw
 
 
 def coe_is_false(job_or_step: dict) -> bool:
@@ -392,7 +623,7 @@ def _dry_run_exempts(segment: str, after: int) -> bool:
     return False
 
 
-def job_publishes(job: dict) -> bool:
+def job_publishes(job: dict, where: str = "a job") -> bool:
     """V6 detection. Used for called workflows, and (fix round 1, Critical 1) as the shared
     step-level primitive `approval_boundary_violations` and `callee_boundary_violations` both
     build V8 on.
@@ -410,8 +641,11 @@ def job_publishes(job: dict) -> bool:
     Fix round 1, Important 2: the `--dry-run` exemption now requires ADJACENCY (see
     _dry_run_exempts) — a bare `"--dry-run" in segment` test accepted a flag that never reached
     the command at all.
+
+    SMA-602 fix wave, F7: `steps:` is read through `steps_of`, which fails closed on a non-list
+    shape rather than iterating a string's characters and reporting False.
     """
-    for step in job.get("steps") or []:
+    for step in steps_of(job, where):
         if not isinstance(step, dict):
             continue
         blob = f"{step.get('run', '')}\n{step.get('uses', '')}"
@@ -446,9 +680,12 @@ def napi_violations(job: dict, job_id: str, name: str) -> list[str]:
     check_called, which had no V5 at all. So `prebuild.yml:295`, the invocation whose own comment
     says the flag "IS REQUIRED", was unguarded, while CLAUDE.md claimed V5 asserts *every*
     invocation carries it. Calling this from both sites is what makes that sentence true.
+
+    SMA-602 fix wave, F7: `steps:` is read through `steps_of`, which fails closed on a non-list
+    shape — a `steps: publish` string used to make this rule skip in silence.
     """
     out: list[str] = []
-    for step in job.get("steps") or []:
+    for step in steps_of(job, f"{name}: job '{job_id}'"):
         if not isinstance(step, dict):
             continue
         run = str(step.get("run") or "")
@@ -468,6 +705,304 @@ def napi_violations(job: dict, job_id: str, name: str) -> list[str]:
                         f"must never cut one."
                     )
     return out
+
+
+def publish_credential_violations(job: dict, job_id: str, name: str) -> list[str]:
+    """V10: no registry publish credential anywhere in the release path.
+
+    Invoked from BOTH check_main and check_called. Scoping it to check_main would repeat the
+    SMA-579 V5 mistake, where a check living only in check_main left every CALLED workflow
+    unguarded — main() runs check_main on argv[0] alone.
+
+    Scans job env, job container:/services: env (fix round 1, Minor 4), job-level secrets:/with:
+    (fix round 1, Minor 5 — the reusable-workflow-call shape, where a credential travels via the
+    job itself rather than a step), step env, step run: bodies and step with: blocks. YAML
+    comments are not in the parsed doc, so the explanatory comments in release.yml that NAME
+    these tokens are invisible here — which is what lets those comments keep explaining the
+    history.
+
+    Callers may pass a SYNTHETIC job carrying only an `env` key — check_main/check_called each do
+    this once, before their per-job loop, to scan the WORKFLOW-level `env:` block (fix round 1,
+    Important 3): that scope is reachable from every step via the `secrets` context, so a
+    credential lifted from a step env: to the workflow root would otherwise pass this check clean.
+
+    Fail-closed (fix round 1, Minor 6; refined fix round 2): a present-but-non-mapping env:/
+    services:/services.<id>: value is invalid GitHub Actions YAML this guard must not silently
+    pass through as clean, or crash on — every such shape calls infra() (SystemExit(2)), the
+    file's own convention, rather than raising an uncaught AttributeError from calling .items()
+    on a scalar. `container:` is the ONE exception: GitHub Actions permits a bare string there as
+    an image-only shorthand (confirmed against the SchemaStore workflow schema, which types
+    `container` as `oneOf [string, object]` but types each `services.<id>` entry as an object
+    only, no string form) — fix round 2, Important. MEASURED before this fix: a bare-string
+    `container:` value aborted the entire guard at exit 2 on a workflow shape GitHub Actions
+    accepts. A string carries no `env:` to scan, so it is skipped rather than treated as
+    malformed.
+
+    `secrets: inherit` (a STRING, not a mapping) is a genuine GitHub Actions shape for a
+    reusable-workflow-call job and is deliberately NOT fail-closed here — a name-based check
+    cannot see what it forwards. Documented as a limitation (README L23), not fixed.
+    """
+    out: list[str] = []
+
+    def mapping_pairs(value: object, desc: str) -> list[tuple[str, object]]:
+        if value is None:
+            return []
+        if not isinstance(value, dict):
+            infra(f"{name}: job '{job_id}' has {desc} that is not a mapping "
+                  f"(got {type(value).__name__}: {value!r})")
+        return list(value.items())
+
+    def scan(text: str, where: str) -> None:
+        for banned in BANNED_PUBLISH_CREDENTIALS:
+            if banned in text:
+                out.append(
+                    f"{name}: job '{job_id}' references {banned} in {where}. PyPI and npm "
+                    f"publish through OIDC trusted publishing (SMA-602). A token here would "
+                    f"silently mask a broken exchange rather than fail. Remove it."
+                )
+        if NPMRC_AUTH_TOKEN in text:
+            out.append(
+                f"{name}: job '{job_id}' writes an npm {NPMRC_AUTH_TOKEN} in {where}. npm reads "
+                f"that at the 'user' config level, which is exactly what masks a failed OIDC "
+                f"exchange (SMA-602). Remove it."
+            )
+        if _NPMRC_AUTH_RE.search(text):
+            out.append(
+                f"{name}: job '{job_id}' sets an npm _auth credential in {where}. "
+                f"getCredentialsByURI honours `_auth` exactly as it honours {NPMRC_AUTH_TOKEN}, "
+                f"so it masks a failed OIDC exchange the same way (SMA-602). Remove it."
+            )
+
+    for key, value in mapping_pairs(job.get("env"), "an env:"):
+        scan(f"{key}: {value}", "the job env:")
+
+    # fix round 2: `container:` accepts a bare string (image-only shorthand) as well as a
+    # mapping — see the docstring above. A string carries no env: to scan; skip it. Only a
+    # value that is NEITHER a string NOR a mapping is malformed.
+    container = job.get("container")
+    if isinstance(container, dict):
+        for key, value in mapping_pairs(container.get("env"), "a container env:"):
+            scan(f"{key}: {value}", "the job container env:")
+    elif container is not None and not isinstance(container, str):
+        infra(f"{name}: job '{job_id}' has container: that is not a mapping or a string "
+              f"(got {type(container).__name__}: {container!r})")
+
+    # fix round 2: unlike `container:`, a `services.<id>` entry has NO string shorthand — the
+    # SchemaStore workflow schema types `services` as an object whose values are ALWAYS the
+    # object-only `serviceContainer` definition, never a bare string. A non-mapping value here
+    # (or a non-mapping `services:` itself) is therefore genuinely malformed, and stays
+    # fail-closed via infra(), unchanged from fix round 1.
+    services = job.get("services")
+    if services is not None:
+        if not isinstance(services, dict):
+            infra(f"{name}: job '{job_id}' has services: that is not a mapping "
+                  f"(got {type(services).__name__}: {services!r})")
+        for svc_id, svc in services.items():
+            if not isinstance(svc, dict):
+                infra(f"{name}: job '{job_id}' has services.{svc_id} that is not a mapping "
+                      f"(got {type(svc).__name__}: {svc!r})")
+            for key, value in mapping_pairs(svc.get("env"), f"service '{svc_id}' env:"):
+                scan(f"{key}: {value}", f"the job services.{svc_id} env:")
+
+    # Minor 5: a reusable-workflow-call job (`uses: ./...`) passes credentials via its OWN
+    # job-level secrets:/with: mapping, not steps: — job_publishes and this scan's step-level
+    # code are both blind to that shape (V8d's own docstring names the same job_publishes gap).
+    # `secrets: inherit` is excluded deliberately — see the docstring above and README L23.
+    job_secrets = job.get("secrets")
+    if job_secrets != "inherit":
+        for key, value in mapping_pairs(job_secrets, "a secrets:"):
+            scan(f"{key}: {value}", "the job secrets:")
+    for key, value in mapping_pairs(job.get("with"), "a with:"):
+        scan(f"{key}: {value}", "the job with:")
+
+    # SMA-602 fix wave, F7: fail closed on a non-list `steps:`, matching the env:/container:/
+    # services: convention above. `steps: publish` iterates the string's characters, every
+    # `continue` fires, and this whole scan — plus the pypa `password:` rule below — skips in
+    # silence (MEASURED).
+    for step in steps_of(job, f"{name}: job '{job_id}'"):
+        if not isinstance(step, dict):
+            continue
+        for key, value in mapping_pairs(step.get("env"), "a step env:"):
+            scan(f"{key}: {value}", "a step env:")
+        scan(str(step.get("run") or ""), "a step run:")
+        step_with = step.get("with")
+        for key, value in mapping_pairs(step_with, "a step with:"):
+            scan(f"{key}: {value}", "a step with:")
+
+        # Final-review Important 1, rule 2: the KEY, not the value. See PYPI_PUBLISH_ACTION.
+        # `startswith` (not equality) because the real steps carry an `@<sha>` pin, and the
+        # action may legitimately move to a new ref.
+        uses = str(step.get("uses") or "")
+        if uses.startswith(PYPI_PUBLISH_ACTION) and isinstance(step_with, dict) \
+                and "password" in step_with:
+            out.append(
+                f"{name}: job '{job_id}' passes a password: to {PYPI_PUBLISH_ACTION}. Under "
+                f"PyPI Trusted Publishing there is nothing legitimate to put there, and any "
+                f"value — a NEW secret name, an env: reference — masks a broken OIDC exchange "
+                f"(SMA-602). Remove the key."
+            )
+
+    return out
+
+
+def secret_reference_violations(doc: dict, name: str) -> list[str]:
+    """V10 rule 1 (final-review Important 1): the secret NAMES release.yml may reference,
+    pinned by strict equality against EXPECTED_RELEASE_SECRETS.
+
+    Strictly stronger than extending BANNED_PUBLISH_CREDENTIALS. The measured bypass was
+    `password: ${{ secrets.PYPI_PROJECT_TOKEN }}` — a name no denylist held, and precisely the
+    name design §9's rollback plan would create when it mints a fresh project-scoped token.
+
+    Walks the PARSED document, so YAML comments naming the removed tokens are invisible here.
+
+    THE WHOLE-DOCUMENT WALK IS THE RULE, not an implementation detail (SMA-602 fix wave, F4).
+    `publish_credential_violations` enumerates scopes; this one deliberately does not, because a
+    `secrets` reference can sit in a job `if:`, a `concurrency: group:`, a `run-name:`, a
+    `strategy:` matrix or a `defaults:` block, none of which that enumeration covers. MEASURED
+    before the F4 fixtures existed: replacing this walk with one over `jobs[*].env`,
+    `jobs[*].steps[*].{env,with,run}` and the workflow-level `env:` left `--self-test` at rc 0
+    and the real release.yml at rc 0 — every rule-1 fixture put its secret in a scope the
+    enumeration already covered. Three rows now pin the walk-only scopes; narrow it and they red.
+
+    Called from both check_main and check_called (fix round 2). The `missing` half runs only for
+    RELEASE_WORKFLOW_NAME: every other document — a check_main self-test fixture, or a real called
+    workflow like prebuild.yml or wheels.yml — legitimately references no secret at all. That half
+    is a liveness check on the pin itself, not a security rule — ci/workflow-credentials/run.sh's
+    control row independently asserts release.yml still reads a secret.
+    """
+    found: set[str] = set()
+    unresolved: list[str] = []
+
+    def walk(node: object, key: object = None) -> None:
+        if isinstance(node, dict):
+            for k, value in node.items():
+                walk(k)
+                walk(value, k)
+        elif isinstance(node, list):
+            for item in node:
+                # A list inherits its parent key, so `on.workflow_call.inputs` and a
+                # block-sequence `if:` are scanned under the same rule as a scalar one.
+                walk(item, key)
+        elif node is not None:
+            names, bad = secret_refs(str(node), bare_expression=(key == "if"))
+            found.update(names)
+            if bad:
+                unresolved.append(str(node).strip()[:120])
+
+    walk(doc)
+
+    out: list[str] = []
+    # FAIL-CLOSED, and it comes first: a reference that names no secret cannot be compared
+    # against a strict-equality allowlist at all, so reporting "clean" would be a lie.
+    for expr in sorted(set(unresolved)):
+        out.append(
+            f"{name}: reads the `secrets` context in a form that names no secret: {expr!r}. "
+            f"EXPECTED_RELEASE_SECRETS is a strict-equality pin of NAMES, and a dynamic or "
+            f"whole-context read (`toJSON(secrets)`, `secrets[format(...)]`) cannot be checked "
+            f"against it (SMA-602). Write `secrets.NAME` or `secrets['NAME']` instead."
+        )
+    for unexpected in sorted(found - set(EXPECTED_RELEASE_SECRETS)):
+        out.append(
+            f"{name}: references the secret {unexpected}, which is not in "
+            f"EXPECTED_RELEASE_SECRETS. PyPI and npm authenticate through OIDC trusted "
+            f"publishing (SMA-602); a secret here would mask a broken exchange rather than "
+            f"fail. If this credential genuinely cannot be an OIDC exchange, add it to "
+            f"EXPECTED_RELEASE_SECRETS deliberately, with a comment saying why."
+        )
+    if name == RELEASE_WORKFLOW_NAME:
+        for missing in sorted(set(EXPECTED_RELEASE_SECRETS) - found):
+            out.append(
+                f"{name}: no longer references {missing}, which EXPECTED_RELEASE_SECRETS pins. "
+                f"The pin has gone stale — re-baseline it deliberately."
+            )
+    return out
+
+
+def _grants_scope(block: object, scope: str) -> bool | None:
+    """Whether a `permissions:` block grants `scope` at `write`. None means "no block here".
+
+    Three shapes GitHub accepts, and one deliberate omission. `write-all` grants everything.
+    `read-all`, or any other string, grants nothing. A mapping grants exactly what it names —
+    and, crucially, sets every scope it does NOT name to `none`, which is the whole reason V11
+    exists. Anything else (a list, a number) is not a shape GitHub honours, so it grants
+    nothing and the caller reds: fail-closed, this file's convention.
+    """
+    if block is None:
+        return None
+    if isinstance(block, str):
+        return block.strip() == "write-all"
+    if isinstance(block, dict):
+        return str(block.get(scope, "")).strip() == "write"
+    return False
+
+
+def id_token_violations(doc: dict, name: str) -> list[str]:
+    """V11: both OIDC publish jobs must still hold `id-token: write` (SMA-602 fix wave, F2).
+
+    Scoped to RELEASE_WORKFLOW_NAME — see OIDC_PUBLISH_JOBS for why a called workflow must not
+    inherit this rule. A job-level `permissions:` block WINS over the workflow-level one and sets
+    every scope it omits to `none`, so the job block is consulted first and the workflow block is
+    only the fallback for a job that declares none at all.
+    """
+    if name != RELEASE_WORKFLOW_NAME:
+        return []
+    out: list[str] = []
+    jobs = doc.get("jobs") or {}
+    workflow_grant = _grants_scope(doc.get("permissions"), ID_TOKEN_SCOPE)
+    for jid in OIDC_PUBLISH_JOBS:
+        job = jobs.get(jid)
+        if not isinstance(job, dict):
+            out.append(
+                f"{name}: V11: no job named '{jid}' exists. V11 keys on that literal name, so "
+                f"without this floor a rename would leave the OIDC grant unasserted."
+            )
+            continue
+        grant = _grants_scope(job.get("permissions"), ID_TOKEN_SCOPE)
+        if grant is None:
+            grant = bool(workflow_grant)
+        if not grant:
+            out.append(
+                f"{name}: V11: job '{jid}' does not grant `{ID_TOKEN_SCOPE}: write`. That is the "
+                f"credential OIDC trusted publishing runs on (SMA-602). Without it the runner "
+                f"sets no ACTIONS_ID_TOKEN_REQUEST_* variables, npm's oidc.js returns undefined "
+                f"without throwing, and the publish dies ENEEDAUTH AFTER crates.io has "
+                f"published. A job-level permissions: block sets every scope it omits to none, "
+                f"so adding a narrower block is the same defect as deleting the grant."
+            )
+    return out
+
+
+def npm_floor_violations(doc: dict, name: str) -> list[str]:
+    """V12: the npm >= 11.5.1 OIDC floor, pinned in BOTH workflows that carry it.
+
+    See NPM_OIDC_FLOOR_LINES for what each pinned line closes and why this pin lives here rather
+    than in ci/affected-graph/ci_targets.py. Applies only to NPM_OIDC_FLOOR_SUBJECTS: no other
+    workflow provisions npm for a trusted-publishing exchange, and demanding these lines of one
+    that does not would red a correct repository.
+
+    Reads every job's step `run:` bodies from the PARSED document, so the pin is on EXECUTING
+    text: a copy of a pinned line living only in a YAML comment cannot satisfy it.
+    """
+    if name not in NPM_OIDC_FLOOR_SUBJECTS:
+        return []
+    present: set[str] = set()
+    for jid, job in (doc.get("jobs") or {}).items():
+        if not isinstance(job, dict):
+            continue
+        for step in steps_of(job, f"{name}: job '{jid}'"):
+            if not isinstance(step, dict):
+                continue
+            for line in str(step.get("run") or "").splitlines():
+                present.add(line.strip())
+    return [
+        f"{name}: V12: the npm OIDC floor line {site!r} is gone. Both {' and '.join(
+            NPM_OIDC_FLOOR_SUBJECTS)} carry this provisioning block, and nothing else pins "
+        f"them to each other — lowering or deleting one copy alone used to keep `moon ci` "
+        f"fully green (SMA-602). npm below 11.5.1 has no lib/utils/oidc.js at all, so the "
+        f"publish would die ENEEDAUTH after crates.io has published. Restore the line in BOTH "
+        f"workflows, or re-baseline NPM_OIDC_FLOOR_LINES deliberately."
+        for site in NPM_OIDC_FLOOR_LINES if site not in present
+    ]
 
 
 def _environment_name(job: dict) -> str | None:
@@ -510,7 +1045,7 @@ def approval_boundary_violations(jobs: dict, name: str) -> list[str]:
 
     for jid in sorted(gated_path_jobs(APPROVAL_JOB, jobs)):
         job = jobs.get(jid)
-        if not isinstance(job, dict) or not job_publishes(job):
+        if not isinstance(job, dict) or not job_publishes(job, f"{name}: job '{jid}'"):
             continue
         if jid == APPROVAL_JOB:
             # Fix round 1, Minor 1: gated_path_jobs(APPROVAL_JOB, jobs) includes APPROVAL_JOB
@@ -525,7 +1060,7 @@ def approval_boundary_violations(jobs: dict, name: str) -> list[str]:
                        f"approves. Add --dry-run, or move the step downstream of the gate.")
 
     for jid, job in jobs.items():
-        if not isinstance(job, dict) or not job_publishes(job):
+        if not isinstance(job, dict) or not job_publishes(job, f"{name}: job '{jid}'"):
             continue
         if APPROVAL_JOB not in gated_path_jobs(jid, jobs):
             out.append(f"{name}: V8c: job '{jid}' can reach a registry, but '{APPROVAL_JOB}' is "
@@ -610,7 +1145,9 @@ def plan_contract_violations(jobs: dict, name: str) -> list[str]:
                        f"'${{{{ steps.<id>.outputs.{PLAN_OUTPUT} || \\'true\\' }}}}' resolves "
                        f"to 'true' on an unset output, which SKIPS every consumer.")
         else:
-            steps_by_id = {s.get("id"): s for s in (plan.get("steps") or []) if isinstance(s, dict)}
+            steps_by_id = {s.get("id"): s
+                           for s in steps_of(plan, f"{name}: job '{PLAN_JOB}'")
+                           if isinstance(s, dict)}
             if m.group(1) not in steps_by_id:
                 out.append(f"{name}: V9c: outputs.{PLAN_OUTPUT} names step id {m.group(1)!r}, "
                            f"which does not exist in '{PLAN_JOB}'. A typo here yields '' "
@@ -675,6 +1212,25 @@ def check_main(doc: dict, name: str) -> list[str]:
     out: list[str] = []
     jobs = doc["jobs"]
 
+    # V10 fix round 1, Important 3: the WORKFLOW-level env: block, scanned via the same helper
+    # with a synthetic job carrying only `env`. That scope reaches every step through the
+    # `secrets` context, so a credential lifted from a step env: up to the workflow root would
+    # otherwise pass V10 clean.
+    out += publish_credential_violations({"env": doc.get("env") or {}}, "<workflow>", name)
+
+    # V10 rule 1 (final-review Important 1): the whole-document secret-name allowlist. Runs on
+    # the DOCUMENT, not per job, because a `secrets` reference can sit anywhere — a job `if:`,
+    # a `with:`, a `concurrency: group:` — and a per-job walk would have to enumerate scopes the
+    # way publish_credential_violations does. This one does not need to: it bans by name.
+    out += secret_reference_violations(doc, name)
+
+    # V11/V12 (SMA-602 fix wave, F2/F3). Both are scoped BY WORKFLOW NAME inside the functions
+    # themselves — V11 to release.yml, V12 to release.yml and prebuild.yml — so calling them
+    # unconditionally here and in check_called is what gives prebuild.yml its V12 coverage,
+    # while a fixture (named "fixture") and wheels.yml stay untouched by either.
+    out += id_token_violations(doc, name)
+    out += npm_floor_violations(doc, name)
+
     if not jobs:
         # Fix round 1, Minor 9: an empty `jobs: {}` mapping is a valid dict, so it sailed through
         # load_workflow's isinstance check, then the loop below examined zero jobs and returned
@@ -689,13 +1245,18 @@ def check_main(doc: dict, name: str) -> list[str]:
         # runs BEFORE the `continue` below. See napi_violations for the full rationale.
         out += napi_violations(job, job_id, name)
 
+        # V10: applies to EVERY job, UNGATED_JOBS members included, so it runs BEFORE the
+        # `continue` below. An exempt job with a publish token is the worst case, not an
+        # excused one.
+        out += publish_credential_violations(job, job_id, name)
+
         if job_id in UNGATED_JOBS:
             # V7 (fix round 3, Critical 2). The exemption above is from V1 (the gating rule) and
             # nothing else. Assert the premise that justifies it: a job allowed to run ungated on
             # every push to `main` must not be able to reach a registry. Without this, a
             # `release-pr` job carrying `cargo publish` + `npm publish` +
             # `pypa/gh-action-pypi-publish` passed the whole guard clean — measured, exit 0.
-            if job_publishes(job):
+            if job_publishes(job, f"{name}: job '{job_id}'"):
                 out.append(
                     f"{name}: job '{job_id}' is exempt from the gate (UNGATED_JOBS) but contains a "
                     f"step that can reach a registry. An exempt job runs on every push to main, "
@@ -735,7 +1296,7 @@ def check_main(doc: dict, name: str) -> list[str]:
                     f"{pjob.get('continue-on-error')!r}. A failed job then counts as success for "
                     f"needs:, so a failed publish still releases downstream."
                 )
-            for step in pjob.get("steps") or []:
+            for step in steps_of(pjob, f"{name}: job '{pid}'"):
                 if isinstance(step, dict) and not coe_is_false(step):
                     out.append(
                         f"{name}: job '{pid}' has a step with continue-on-error: "
@@ -761,14 +1322,41 @@ def check_called(doc: dict, name: str) -> list[str]:
     """
     out: list[str] = []
 
+    # V10 fix round 1, Important 3: same workflow-level env: scan as check_main, for the same
+    # reason V5 and V10's per-job call both apply here — a called workflow escaping check_main
+    # must not escape this scan either.
+    out += publish_credential_violations({"env": doc.get("env") or {}}, "<workflow>", name)
+
+    # V10 rule 1 (fix round 2, CodeRabbit + independent branch review): the unexpected-secret-name
+    # half of secret_reference_violations must reach a called workflow too, for the same reason
+    # every other V10 check does — prebuild.yml and wheels.yml are exactly the files a fresh
+    # PYPI_PROJECT_TOKEN-shaped credential would land in first. This was the one V10 rule that
+    # `check_main` ran and `check_called` did not; it is the same class of gap SMA-579's V5 left
+    # once, inlined in `check_main` alone. The `missing`/liveness half of the same function stays
+    # inert here: it fires only when `name == RELEASE_WORKFLOW_NAME`, and every called workflow's
+    # name is its own filename, never that constant — so a legitimate callee that references no
+    # secret at all still passes clean.
+    out += secret_reference_violations(doc, name)
+
+    # V11/V12 also apply here, for the same reason V5 and V10 do — a called workflow escaping
+    # check_main must not escape them either. V11 is inert on every callee (it keys on
+    # RELEASE_WORKFLOW_NAME); V12 is what reaches prebuild.yml's copy of the npm floor, which is
+    # the second half of the F3 pin and the only reason the two copies are held to each other.
+    out += id_token_violations(doc, name)
+    out += npm_floor_violations(doc, name)
+
     # V5 also applies here (fix round 3, Important 4). It used to be inlined in check_main, which
     # main() runs on argv[0] only, so every CALLED workflow escaped it — including prebuild.yml's
     # own `napi prepublish` invocation, the one whose comment says the flag "IS REQUIRED".
     for jid, j in doc["jobs"].items():
         if isinstance(j, dict):
             out += napi_violations(j, jid, name)
+            # V10 also applies here, for the same reason as V5 above: a called workflow that
+            # escapes check_main must not escape this check either.
+            out += publish_credential_violations(j, jid, name)
 
-    publishing = [jid for jid, j in doc["jobs"].items() if isinstance(j, dict) and job_publishes(j)]
+    publishing = [jid for jid, j in doc["jobs"].items()
+                  if isinstance(j, dict) and job_publishes(j, f"{name}: job '{jid}'")]
     if not publishing:
         return out
     trigs = set(triggers_of(doc))
@@ -848,7 +1436,7 @@ def callee_boundary_violations(jobs: dict, name: str) -> list[str]:
         for cjid, cjob in callee_jobs.items():
             if not isinstance(cjob, dict):
                 continue
-            if job_publishes(cjob):
+            if job_publishes(cjob, f"{name}: job '{jid}' callee '{uses}' job '{cjid}'"):
                 publishes = True
             nested = str(cjob.get("uses") or "")
             if nested:
@@ -1362,6 +1950,407 @@ FIXTURES: list[tuple[str, str, str, str | None]] = [
          "nothing_to_release: ${{ steps.decide.outputs.nothing_to_release }}",
          "nothing_to_release: ${{   steps.decide.outputs.nothing_to_release   }}"),
      None),
+
+    # --- V10 (SMA-602): no registry publish credential in the release path -----------------
+    ("V10 npm token in a step env", "main",
+     _OK_MAIN.replace(
+         "    steps: [{run: release-plz release}]",
+         "    steps:\n"
+         "      - env:\n"
+         "          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}\n"
+         "        run: npm publish\n"),
+     "references NODE_AUTH_TOKEN"),
+    ("V10 pypi token in a step with:", "main",
+     _OK_MAIN.replace(
+         "    steps: [{run: release-plz release}]",
+         "    steps:\n"
+         "      - uses: pypa/gh-action-pypi-publish@v1\n"
+         "        with:\n"
+         "          password: ${{ secrets.PYPI_API_TOKEN }}\n"),
+     "references PYPI_API_TOKEN"),
+    ("V10 npmrc authToken written in a run:", "main",
+     _OK_MAIN.replace(
+         "    steps: [{run: release-plz release}]",
+         '    steps: [{run: \'echo "//registry.npmjs.org/:_authToken=x" > "$HOME/.npmrc"\'}]'),
+     "writes an npm _authToken"),
+    # NEGATIVE CONTROL, and the most important row here. Without it, a future edit could ban the
+    # whole `secrets` context and every other V10 row would still pass — while breaking the App
+    # token mint and reding ci/workflow-credentials/run.sh's control row.
+    ("V10 App secrets stay clean", "main",
+     _OK_MAIN.replace(
+         "    steps: [{run: release-plz release}]",
+         "    steps:\n"
+         "      - env:\n"
+         "          APP_ID: ${{ secrets.PAIGASUS_BOT_APP_ID }}\n"
+         "          KEY: ${{ secrets.PAIGASUS_BOT_PRIVATE_KEY }}\n"
+         "        run: release-plz release\n"),
+     None),
+
+    # --- V10 fix round 1, Important 1: the check_called call site had no fixture coverage ------
+    # (all four original V10 rows were kind "main"), so deleting that call site left --self-test
+    # green — the exact SMA-579 V5 failure shape the brief warned about.
+    ("V10 called workflow with a step env NPM_TOKEN reds too", "called",
+     ("on:\n  workflow_call:\n  pull_request:\n    branches:\n      - main\n"
+      "jobs:\n  build:\n    steps:\n      - env:\n"
+      "          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}\n        run: echo hi\n"),
+     "references NPM_TOKEN"),
+
+    # --- V10 fix round 1, Important 2: NPM_TOKEN was an unasserted member of the ban list -------
+    # (the only fixture containing it also contained NODE_AUTH_TOKEN in the same scanned text, so
+    # `want` never actually pinned on the NPM_TOKEN verdict). Isolated so NPM_TOKEN is the ONLY
+    # banned string present.
+    ("V10 npm token alone in a step with:", "main",
+     _OK_MAIN.replace(
+         "    steps: [{run: release-plz release}]",
+         "    steps:\n"
+         "      - uses: some-org/some-publish-action@v1\n"
+         "        with:\n"
+         "          token: ${{ secrets.NPM_TOKEN }}\n"),
+     "references NPM_TOKEN"),
+
+    # --- V10 fix round 1, Important 3: the WORKFLOW-level env: block was unscanned -------------
+    # (the spec, §5.4, is unqualified — "no PYPI_API_TOKEN, NPM_TOKEN or NODE_AUTH_TOKEN
+    # reference" — so a credential lifted from a step env: to the workflow root must still red).
+    ("V10 workflow-level env: is scanned too", "main",
+     _OK_MAIN.replace(
+         "      - main\njobs:\n",
+         "      - main\nenv:\n  NPM_TOKEN: ${{ secrets.NPM_TOKEN }}\njobs:\n"),
+     "references NPM_TOKEN"),
+    ("V10 called workflow-level env: is scanned too", "called",
+     ("on:\n  workflow_call:\n  pull_request:\n    branches:\n      - main\n"
+      "env:\n  NPM_TOKEN: ${{ secrets.NPM_TOKEN }}\n"
+      "jobs:\n  build:\n    steps: [{run: echo hi}]\n"),
+     "references NPM_TOKEN"),
+
+    # --- V10 fix round 1, Minor 4: job container:/services: env: was unscanned -----------------
+    # (both accept the `secrets` context the same way a step env: does).
+    ("V10 job container env: is scanned", "main",
+     _OK_MAIN.replace(
+         "  release:\n    needs: [build, approve-release]\n    runs-on: ubuntu-latest\n"
+         "    steps: [{run: release-plz release}]\n",
+         "  release:\n    needs: [build, approve-release]\n    runs-on: ubuntu-latest\n"
+         "    container:\n      image: node:20\n      env:\n"
+         "        NPM_TOKEN: ${{ secrets.NPM_TOKEN }}\n"
+         "    steps: [{run: release-plz release}]\n"),
+     "references NPM_TOKEN"),
+    ("V10 job services.<id>.env: is scanned", "main",
+     _OK_MAIN.replace(
+         "  release:\n    needs: [build, approve-release]\n    runs-on: ubuntu-latest\n"
+         "    steps: [{run: release-plz release}]\n",
+         "  release:\n    needs: [build, approve-release]\n    runs-on: ubuntu-latest\n"
+         "    services:\n      registry:\n        image: verdaccio/verdaccio\n        env:\n"
+         "          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}\n"
+         "    steps: [{run: release-plz release}]\n"),
+     "references NPM_TOKEN"),
+
+    # --- V10 fix round 1, Minor 5: job-level secrets:/with: on a reusable-workflow-call job -----
+    # was unscanned (job_publishes and this scan's step-level code are both blind to that shape —
+    # V8d's own docstring names the same job_publishes gap for a different check).
+    ("V10 job-level secrets: on a reusable workflow call reds", "main",
+     _OK_MAIN.replace(
+         "  release:\n    needs: [build, approve-release]\n    runs-on: ubuntu-latest\n"
+         "    steps: [{run: release-plz release}]\n",
+         "  release:\n    needs: [build, approve-release]\n"
+         "    uses: ./.github/workflows/does-not-exist.yml\n"
+         "    secrets:\n      PYPI_API_TOKEN: ${{ secrets.PYPI_API_TOKEN }}\n"),
+     "references PYPI_API_TOKEN"),
+    ("V10 job-level with: on a reusable workflow call reds", "main",
+     _OK_MAIN.replace(
+         "  release:\n    needs: [build, approve-release]\n    runs-on: ubuntu-latest\n"
+         "    steps: [{run: release-plz release}]\n",
+         "  release:\n    needs: [build, approve-release]\n"
+         "    uses: ./.github/workflows/does-not-exist.yml\n"
+         "    with:\n      npm-token: ${{ secrets.NPM_TOKEN }}\n"),
+     "references NPM_TOKEN"),
+    # CONTROL, and the reason Minor 5 does not try to close `secrets: inherit` too: it is a
+    # STRING, not a mapping, and names nothing a name-based check can catch. Documented as a
+    # limitation (README L23), not fixed — this row proves it neither crashes nor false-positives.
+    ("V10 job-level secrets: inherit stays clean (documented limitation, README L23)", "main",
+     _OK_MAIN.replace(
+         "  release:\n    needs: [build, approve-release]\n    runs-on: ubuntu-latest\n"
+         "    steps: [{run: release-plz release}]\n",
+         "  release:\n    needs: [build, approve-release]\n"
+         "    uses: ./.github/workflows/does-not-exist.yml\n"
+         "    secrets: inherit\n"),
+     None),
+
+    # --- V10 fix round 2, Important: `container:` accepts a bare image-reference STRING as a
+    # documented GitHub Actions shorthand (SchemaStore schema: oneOf [string, object]) — a string
+    # carries no env: to scan, so the scan must SKIP it rather than infra() on it. MEASURED before
+    # this fix: `container: <image>` aborted the whole guard at exit 2 on this valid shape.
+    ("V10 job-level container: string shorthand is accepted, not aborted", "main",
+     _OK_MAIN.replace(
+         "  release:\n    needs: [build, approve-release]\n    runs-on: ubuntu-latest\n"
+         "    steps: [{run: release-plz release}]\n",
+         "  release:\n    needs: [build, approve-release]\n    runs-on: ubuntu-latest\n"
+         "    container: postgres:16\n"
+         "    steps: [{run: release-plz release}]\n"),
+     None),
+
+    # --- V10 final review, Important 1: three rules strictly stronger than the denylist -------
+    # Every row below was MEASURED as a V10 bypass (guard exit 0) against the real release.yml
+    # before the rule existed.
+
+    # Rule 1 — the secret-name allowlist. This is the rollback shape from design §9: a NEW
+    # project-scoped PyPI token gets a NEW secret name and sails past BANNED_PUBLISH_CREDENTIALS.
+    ("V10 rule 1: an unpinned secret name reds even though no denylist holds it", "main",
+     _OK_MAIN.replace(
+         "    steps: [{run: release-plz release}]",
+         "    steps:\n"
+         "      - uses: pypa/gh-action-pypi-publish@v1\n"
+         "        with:\n"
+         "          packages-dir: dist\n"
+         "          password: ${{ secrets.PYPI_PROJECT_TOKEN }}\n"),
+     "references the secret PYPI_PROJECT_TOKEN"),
+    # Rule 1 reaches scopes publish_credential_violations never walks — here a job-level `if:`.
+    # SMA-602 fix wave, F4: this row's LABEL said "job if:" and its BODY inserted a job `env:`,
+    # a scope publish_credential_violations already covers — so the walk-only claim it was
+    # written to pin was never exercised. It now uses a real job `if:`, in the BARE (unwrapped)
+    # form GitHub also evaluates as an expression, which no `${{ }}` span extraction can see.
+    ("V10 rule 1: a secret referenced from a bare job if: reds too", "main",
+     _OK_MAIN.replace(
+         "  release:\n    needs: [build, approve-release]\n",
+         "  release:\n    needs: [build, approve-release]\n"
+         "    if: secrets.SOME_OTHER_TOKEN != ''\n"),
+     "references the secret SOME_OTHER_TOKEN"),
+    # ...and a second walk-only scope, so narrowing the walk cannot survive by covering `if:`
+    # alone. A job-level `concurrency: group:` is reachable from no scope
+    # publish_credential_violations enumerates.
+    ("V10 rule 1: a secret in a job concurrency: group: reds (walk-only scope)", "main",
+     _OK_MAIN.replace(
+         "  release:\n    needs: [build, approve-release]\n",
+         "  release:\n    needs: [build, approve-release]\n"
+         "    concurrency:\n      group: ${{ secrets.CONCURRENCY_TOKEN }}\n"),
+     "references the secret CONCURRENCY_TOKEN"),
+    # ...and a third, at the WORKFLOW level rather than inside a job: `run-name:`.
+    ("V10 rule 1: a secret in the workflow run-name: reds (walk-only scope)", "main",
+     _OK_MAIN.replace(
+         "on:\n  push:",
+         "run-name: ${{ secrets.RUN_NAME_TOKEN }}\non:\n  push:"),
+     "references the secret RUN_NAME_TOKEN"),
+    # Rule 2 — the KEY, whatever the value. No secret is referenced at all here, so rule 1
+    # cannot see it; this is the second measured bypass.
+    ("V10 rule 2: password: from an env: reference on the PyPI action reds", "main",
+     _OK_MAIN.replace(
+         "    steps: [{run: release-plz release}]",
+         "    steps:\n"
+         "      - uses: pypa/gh-action-pypi-publish@v1\n"
+         "        with:\n"
+         "          password: ${{ env.PY_CRED }}\n"),
+     "passes a password: to pypa/gh-action-pypi-publish"),
+    # Rule 2 must survive the `@<sha>` pin the real steps carry, hence startswith, not equality.
+    ("V10 rule 2: a sha-pinned PyPI action is matched too", "main",
+     _OK_MAIN.replace(
+         "    steps: [{run: release-plz release}]",
+         "    steps:\n"
+         "      - uses: pypa/gh-action-pypi-publish"
+         "@dc37677b2e1c63e2034f94d8a5b11f265b73ba33\n"
+         "        with:\n"
+         "          password: hunter2\n"),
+     "passes a password: to pypa/gh-action-pypi-publish"),
+    # Rule 2 CONTROL: the real shape. A PyPI publish step with NO password: is the whole point
+    # of SMA-602 and must stay clean, or the rule would ban trusted publishing itself.
+    ("V10 rule 2 control: the PyPI action without a password: stays clean", "main",
+     _OK_MAIN.replace(
+         "    steps: [{run: release-plz release}]",
+         "    steps:\n"
+         "      - uses: pypa/gh-action-pypi-publish@v1\n"
+         "        with:\n"
+         "          packages-dir: dist\n"
+         "          skip-existing: true\n"),
+     None),
+    # Rule 3 — `_auth`, the other live npmrc credential key.
+    ("V10 rule 3: an npmrc _auth written in a run: reds", "main",
+     _OK_MAIN.replace(
+         "    steps: [{run: release-plz release}]",
+         '    steps: [{run: \'echo "//registry.npmjs.org/:_auth=$LEGACY" > "$HOME/.npmrc"\'}]'),
+     "sets an npm _auth credential"),
+    # Rule 3, the environment spelling of the same key. Case-insensitive matching is what makes
+    # this row work; `${{ secrets.NPM_LEGACY_AUTH }}` additionally trips rule 1, and the `want`
+    # substring test is satisfied by either — so assert the _auth message specifically.
+    ("V10 rule 3: NPM_CONFIG__AUTH in a step env: reds", "main",
+     _OK_MAIN.replace(
+         "    steps: [{run: release-plz release}]",
+         "    steps:\n"
+         "      - env:\n"
+         "          NPM_CONFIG__AUTH: ${{ secrets.NPM_LEGACY_AUTH }}\n"
+         "        run: release-plz release\n"),
+     "sets an npm _auth credential"),
+    # Rule 3 CONTROL: `_authToken` must keep producing its OWN message and not also trip rule 3,
+    # or the two rules would double-report every npmrc token. `_auth` is a prefix of
+    # `_authToken`; the negative lookahead is what keeps them disjoint.
+    ("V10 rule 3 control: _authToken does not also trip the _auth rule", "main",
+     _OK_MAIN.replace(
+         "    steps: [{run: release-plz release}]",
+         '    steps: [{run: \'echo "//registry.npmjs.org/:_authToken=x" > "$HOME/.npmrc"\'}]'),
+     "writes an npm _authToken"),
+    # Rule 3 CONTROL: NODE_AUTH_TOKEN keeps its BANNED_PUBLISH_CREDENTIALS message. `_AUTH_` is
+    # followed by an underscore, so the lookahead excludes it — one violation, not two.
+    ("V10 rule 3 control: NODE_AUTH_TOKEN stays a denylist hit", "main",
+     _OK_MAIN.replace(
+         "    steps: [{run: release-plz release}]",
+         "    steps:\n"
+         "      - env:\n"
+         "          NODE_AUTH_TOKEN: ${{ secrets.PAIGASUS_BOT_APP_ID }}\n"
+         "        run: release-plz release\n"),
+     "references NODE_AUTH_TOKEN"),
+    # THE CLEAN CONTROL for all three rules together. The two legitimate App secrets, referenced
+    # exactly as release.yml references them, must still pass. Without this row a future edit
+    # could ban the `secrets` context wholesale and every red row above would still pass — while
+    # breaking the App token mint and reding ci/workflow-credentials/run.sh's control row.
+    ("V10 rules 1-3 control: the two PAIGASUS_BOT_* secrets stay clean", "main",
+     _OK_MAIN.replace(
+         "    steps: [{run: release-plz release}]",
+         "    steps:\n"
+         "      - uses: actions/create-github-app-token@v2\n"
+         "        with:\n"
+         "          app-id: ${{ secrets.PAIGASUS_BOT_APP_ID }}\n"
+         "          private-key: ${{ secrets.PAIGASUS_BOT_PRIVATE_KEY }}\n"
+         "      - uses: pypa/gh-action-pypi-publish@v1\n"
+         "        with:\n"
+         "          packages-dir: dist\n"
+         "          skip-existing: true\n"),
+     None),
+
+    # --- V10 rule 1 fix round 2 (CodeRabbit + independent branch review): secret_reference_
+    # violations must reach check_called too --------------------------------------------------
+    ("V10 rule 1: a called workflow referencing an unpinned secret name reds", "called",
+     ("on:\n  workflow_call:\n  pull_request:\n    branches:\n      - main\n"
+      "jobs:\n  build:\n    steps:\n      - uses: pypa/gh-action-pypi-publish@v1\n"
+      "        with:\n          packages-dir: dist\n"
+      "          password: ${{ secrets.PYPI_PROJECT_TOKEN }}\n"),
+     "references the secret PYPI_PROJECT_TOKEN"),
+    # CONTROL: a legitimate callee that references no secret at all — the shape prebuild.yml and
+    # wheels.yml actually have — must stay clean. Without this row, calling
+    # secret_reference_violations from check_called with the wrong `name` (RELEASE_WORKFLOW_NAME,
+    # say, instead of the callee's own filename) would silently turn on the `missing`/liveness
+    # half for every callee and red this file on nothing.
+    ("V10 rule 1 control: a called workflow with no secrets stays clean", "called",
+     ("on:\n  workflow_call:\n  pull_request:\n    branches:\n      - main\n"
+      "jobs:\n  build:\n    steps: [{run: maturin build}]\n"), None),
+
+    # --- SMA-602 fix wave, F1: the secret-name allowlist matched ONE spelling of four ---------
+    # Every row below was MEASURED as a live V10 rule-1 bypass (guard exit 0) against a copy of
+    # the real release.yml before `secret_refs` replaced the old
+    # `re.compile(r"secrets\.([A-Za-z_][A-Za-z0-9_]*)")`. GitHub Actions accepts all four, and
+    # ci/workflow-credentials/workflow_credentials.py already pinned the same four as live
+    # fixtures — which is why that file's EXPR_SPAN / STRING_LITERAL / SECRETS_CTX machinery is
+    # reused here rather than a second, weaker regex being invented.
+    ("F1: secrets['NAME'] bracket index reds", "main",
+     _OK_MAIN.replace(
+         "    steps: [{run: release-plz release}]",
+         "    steps:\n"
+         "      - env:\n"
+         "          CRED: ${{ secrets['PYPI_PROJECT_TOKEN'] }}\n"
+         "        run: echo hi\n"),
+     "references the secret PYPI_PROJECT_TOKEN"),
+    ('F1: secrets["NAME"] double-quoted bracket index reds', "main",
+     _OK_MAIN.replace(
+         "    steps: [{run: release-plz release}]",
+         "    steps:\n"
+         "      - env:\n"
+         '          CRED: ${{ secrets["PYPI_PROJECT_TOKEN"] }}\n'
+         "        run: echo hi\n"),
+     "references the secret PYPI_PROJECT_TOKEN"),
+    ("F1: a capitalised Secrets. context reds (function/context names are case-insensitive)",
+     "main",
+     _OK_MAIN.replace(
+         "    steps: [{run: release-plz release}]",
+         "    steps:\n"
+         "      - env:\n"
+         "          CRED: ${{ Secrets.PYPI_PROJECT_TOKEN }}\n"
+         "        run: echo hi\n"),
+     "references the secret PYPI_PROJECT_TOKEN"),
+    ("F1: an uppercased SECRETS. context reds", "main",
+     _OK_MAIN.replace(
+         "    steps: [{run: release-plz release}]",
+         "    steps:\n"
+         "      - env:\n"
+         "          CRED: ${{ SECRETS.PYPI_PROJECT_TOKEN }}\n"
+         "        run: echo hi\n"),
+     "references the secret PYPI_PROJECT_TOKEN"),
+    # F12 — rule 2 is bound to ONE action name (`uses.startswith(PYPI_PUBLISH_ACTION)`), so a
+    # hand-rolled twine upload matches NO rule of its own. Fixing F1 is what closes it in
+    # practice: the unexpected secret name reds, whatever tool consumes it. This is the exact
+    # shape the reviewer measured passing, and it is NOT a claim that every upload tool is
+    # enumerated — see README L24.
+    ("F12: a hand-rolled twine upload reds through the NAME, not the action", "main",
+     _OK_MAIN.replace(
+         "    steps: [{run: release-plz release}]",
+         "    steps:\n"
+         "      - env:\n"
+         "          PYPI_CRED: ${{ secrets['PYPI_NEW'] }}\n"
+         '        run: uv run twine upload -u __token__ -p "$PYPI_CRED" dist/*\n'),
+     "references the secret PYPI_NEW"),
+    # FAIL-CLOSED: a read of the whole context names nothing a strict-equality pin can compare,
+    # so it must red rather than read clean.
+    ("F1: a whole-context toJSON(secrets) read names nothing and fails closed", "main",
+     _OK_MAIN.replace(
+         "    steps: [{run: release-plz release}]",
+         "    steps:\n"
+         "      - env:\n"
+         "          ALL: ${{ toJSON(secrets) }}\n"
+         "        run: echo hi\n"),
+     "names no secret"),
+    # CONTROL for the literal stripping the extraction depends on: the context name in
+    # `hashFiles('secrets.txt')` sits INSIDE a string literal and is not a context read at all.
+    ("F1 control: hashFiles('secrets.txt') is not a secrets read", "main",
+     _OK_MAIN.replace(
+         "    steps: [{run: release-plz release}]",
+         "    steps:\n"
+         "      - env:\n"
+         "          H: ${{ hashFiles('secrets.txt') }}\n"
+         "        run: echo hi\n"),
+     None),
+    # CONTROL for the context BOUNDARY: `steps.<id>.outputs.secrets` and `inputs.secrets-file`
+    # are ordinary expressions, not context reads. Both were measured false positives against a
+    # bare \bsecrets\b in ci/workflow-credentials, and the same boundary is reused here.
+    ("F1 control: an expression merely ENDING in .secrets is not a context read", "main",
+     _OK_MAIN.replace(
+         "    steps: [{run: release-plz release}]",
+         "    steps:\n"
+         "      - env:\n"
+         "          S: ${{ steps.decide.outputs.secrets }}\n"
+         "        run: echo hi\n"),
+     None),
+
+    # --- SMA-602 fix wave, F6: _NPMRC_AUTH_RE matched ordinary identifiers -------------------
+    # All three below were MEASURED matching the old `_auth(?![A-Za-z0-9_])` form. Each would
+    # have red this gate with a message about npm credentials on a step touching no npm
+    # registry, blocking every PR behind a message naming the wrong subsystem. release.yml
+    # already carries a near-miss (`AUTH_REMOTE=`), included in the first row.
+    ("F6: GIT_AUTH / AUTH_REMOTE in a run: are not npm credentials", "main",
+     _OK_MAIN.replace(
+         "    steps: [{run: release-plz release}]",
+         '    steps: [{run: \'GIT_AUTH="x"; AUTH_REMOTE=origin; echo "$GIT_AUTH$AUTH_REMOTE"\'}]'),
+     None),
+    ("F6: a steps.app_auth.outputs reference is not an npm credential", "main",
+     _OK_MAIN.replace(
+         "    steps: [{run: release-plz release}]",
+         "    steps:\n"
+         "      - env:\n"
+         "          TOKEN: ${{ steps.app_auth.outputs.token }}\n"
+         "        run: release-plz release\n"),
+     None),
+    ("F6: a CRATES_AUTH env key is not an npm credential", "main",
+     _OK_MAIN.replace(
+         "    steps: [{run: release-plz release}]",
+         "    steps:\n"
+         "      - env:\n"
+         "          CRATES_AUTH: 1\n"
+         "        run: release-plz release\n"),
+     None),
+    # ...and the TRUE positives must survive the tightening. Both spellings, both directions.
+    ("F6 control: //registry/:_auth= still reds after the boundary is tightened", "main",
+     _OK_MAIN.replace(
+         "    steps: [{run: release-plz release}]",
+         '    steps: [{run: \'echo "//registry.npmjs.org/:_auth=$LEGACY" >> "$HOME/.npmrc"\'}]'),
+     "sets an npm _auth credential"),
+    ("F6 control: a bare `npm config set _auth` still reds", "main",
+     _OK_MAIN.replace(
+         "    steps: [{run: release-plz release}]",
+         '    steps: [{run: \'npm config set _auth "$LEGACY"\'}]'),
+     "sets an npm _auth credential"),
 ]
 
 
@@ -1687,6 +2676,193 @@ def _minor9_empty_jobs_floor() -> str | None:
     return f"check_main returned normally on an empty jobs mapping instead of infra(2): {err_buf.getvalue()!r}"
 
 
+def _v10_minor6_scalar_env_fails_closed() -> str | None:
+    """Regression test for V10 fix round 1, Minor 6: a scalar `env:` (job level or step level)
+    must infra (exit 2 via SystemExit), never crash with an uncaught AttributeError from calling
+    .items() on a str. Expressed here, not as a FIXTURES row, because a FIXTURES row expects
+    check_main to RETURN a list — this scenario must instead raise.
+
+    Before this fix, `env: NODE_AUTH_TOKEN` failed safe only by accident, via run.sh's own
+    unreadable-file/bad-exit-code handling — not because release_guard.py itself failed closed.
+    """
+    cases = [
+        ("job-level env: scalar",
+         {"jobs": {"release": {"env": "NODE_AUTH_TOKEN", "steps": [{"run": "echo hi"}]}}}),
+        ("step-level env: scalar",
+         {"jobs": {"release": {"steps": [{"env": "NODE_AUTH_TOKEN", "run": "echo hi"}]}}}),
+    ]
+    for label, doc in cases:
+        err_buf = io.StringIO()
+        try:
+            with contextlib.redirect_stderr(err_buf):
+                check_main(doc, "fixture")
+        except SystemExit as exc:
+            if exc.code != 2:
+                return (f"{label}: expected SystemExit(2), got SystemExit({exc.code!r}): "
+                        f"{err_buf.getvalue()!r}")
+            continue
+        return f"{label}: check_main returned normally on a scalar env: instead of infra(2)"
+    return None
+
+
+def _v10_rule1_strict_equality() -> str | None:
+    """V10 rule 1, the `missing` half (final-review Important 1): EXPECTED_RELEASE_SECRETS is a
+    STRICT-EQUALITY pin, so a pinned name that release.yml stops referencing must red too.
+
+    Expressed here rather than as a FIXTURES row because self_test() calls check_main with the
+    name "fixture", and that half of the rule deliberately fires only for
+    RELEASE_WORKFLOW_NAME — every synthetic fixture legitimately references no secret at all.
+    Without this test the `missing` direction would be unasserted, and the pin could rot into a
+    subset test without anything reporting it.
+    """
+    doc = {"jobs": {"release": {"runs-on": "ubuntu-latest", "steps": [{"run": "echo hi"}]}}}
+
+    found = check_main(doc, RELEASE_WORKFLOW_NAME)
+    for pinned in EXPECTED_RELEASE_SECRETS:
+        if not any(f"no longer references {pinned}" in line for line in found):
+            return (f"a release.yml referencing no secret at all did not red for the pinned "
+                    f"{pinned}: {found or '(clean)'}")
+
+    # The same document under any OTHER name must stay clean on this rule — otherwise every
+    # fixture and every called workflow would inherit release.yml's pin.
+    other = [line for line in check_main(doc, "fixture") if "no longer references" in line]
+    if other:
+        return f"the missing-name half leaked past RELEASE_WORKFLOW_NAME: {other}"
+
+    # And the real referencing shape must satisfy it exactly.
+    ok = {"jobs": {"release": {"runs-on": "ubuntu-latest", "steps": [{
+        "uses": "actions/create-github-app-token@v2",
+        "with": {"app-id": "${{ secrets.PAIGASUS_BOT_APP_ID }}",
+                 "private-key": "${{ secrets.PAIGASUS_BOT_PRIVATE_KEY }}"},
+    }]}}}
+    leftover = [line for line in check_main(ok, RELEASE_WORKFLOW_NAME)
+                if "EXPECTED_RELEASE_SECRETS" in line or "no longer references" in line]
+    if leftover:
+        return f"the exact pinned secret set did not satisfy strict equality: {leftover}"
+    return None
+
+
+def _v11_id_token_write_required() -> str | None:
+    """V11 (SMA-602 fix wave, F2): both OIDC publish jobs must still grant `id-token: write`.
+
+    Expressed here rather than as a FIXTURES row because self_test() calls check_main with the
+    name "fixture", and V11 fires only for RELEASE_WORKFLOW_NAME — a called workflow legitimately
+    declares no OIDC grant, and repo:workflow-credentials actively BANS one in any
+    pull_request-triggered workflow. The same reason `_v10_rule1_strict_equality` lives here.
+
+    Both directions, and the NARROWED-block direction as well: a job-level `permissions:` block
+    sets every scope it omits to `none`, so ADDING one that names only `contents: read` is the
+    same defect as deleting the grant, and a rule that only tested for the literal absence of a
+    `permissions:` key would miss it.
+    """
+    def doc_with(pypi_perms, npm_perms, workflow_perms=None):
+        out = {"jobs": {
+            "publish-pypi": {"permissions": pypi_perms, "steps": [{"run": "echo hi"}]},
+            "publish-npm": {"permissions": npm_perms, "steps": [{"run": "echo hi"}]},
+        }}
+        for jid in ("publish-pypi", "publish-npm"):
+            if out["jobs"][jid]["permissions"] is None:
+                del out["jobs"][jid]["permissions"]
+        if workflow_perms is not None:
+            out["permissions"] = workflow_perms
+        return out
+
+    grant = {"id-token": "write", "contents": "read"}
+    narrowed = {"contents": "read"}
+
+    def v11(doc):
+        return [ln for ln in id_token_violations(doc, RELEASE_WORKFLOW_NAME) if ": V11:" in ln]
+
+    if v11(doc_with(grant, grant)):
+        return f"the correct shape red: {v11(doc_with(grant, grant))}"
+    for jid, bad in (("publish-pypi", (None, grant)), ("publish-npm", (grant, None))):
+        found = v11(doc_with(*bad))
+        if not any(f"job '{jid}'" in line for line in found):
+            return f"deleting {jid}'s permissions: block did not red: {found or '(clean)'}"
+    found = v11(doc_with(narrowed, grant))
+    if not any("publish-pypi" in line for line in found):
+        return f"a narrower permissions: block omitting id-token did not red: {found or '(clean)'}"
+    # A workflow-level grant covers a job that declares no block of its own; a job block always
+    # wins over it.
+    if v11(doc_with(None, None, workflow_perms=grant)):
+        return "a workflow-level id-token: write did not satisfy a job declaring no block"
+    if not v11(doc_with(narrowed, None, workflow_perms=grant)):
+        return "a job-level block omitting id-token was masked by the workflow-level grant"
+    # The floor: a renamed job must red rather than pass vacuously.
+    renamed = doc_with(grant, grant)
+    renamed["jobs"]["publish-pypi-v2"] = renamed["jobs"].pop("publish-pypi")
+    if not any("no job named 'publish-pypi'" in line for line in v11(renamed)):
+        return "renaming publish-pypi did not red the V11 floor"
+    # And the scoping: no other document may inherit release.yml's rule.
+    if id_token_violations(doc_with(None, None), "fixture"):
+        return "V11 leaked past RELEASE_WORKFLOW_NAME onto a fixture document"
+    return None
+
+
+def _v12_npm_floor_pinned() -> str | None:
+    """V12 (SMA-602 fix wave, F3): every NPM_OIDC_FLOOR_LINES entry, in BOTH subjects.
+
+    Here rather than in FIXTURES for the same reason as V11: the rule is scoped by workflow NAME,
+    and self_test() names every fixture "fixture". Driven against a synthetic document holding
+    exactly the pinned lines, so this asserts the RULE; the real two-file proof is check 10
+    running the guard on release.yml, which follows `uses: ./.github/workflows/prebuild.yml` into
+    the second copy.
+    """
+    def doc_with(lines):
+        return {"jobs": {"publish-npm": {"steps": [{"run": "\n".join(lines) + "\n"}]}}}
+
+    all_lines = list(NPM_OIDC_FLOOR_LINES)
+    for subject in NPM_OIDC_FLOOR_SUBJECTS:
+        found = npm_floor_violations(doc_with(all_lines), subject)
+        if found:
+            return f"{subject}: the complete floor block red: {found}"
+        for site in all_lines:
+            missing = [ln for ln in all_lines if ln != site]
+            found = npm_floor_violations(doc_with(missing), subject)
+            if not any(repr(site) in line for line in found):
+                return f"{subject}: deleting {site!r} did not red: {found or '(clean)'}"
+    # Indented lines must still satisfy the pin: the real ones sit inside a YAML block scalar.
+    if npm_floor_violations(doc_with([f"          {ln}" for ln in all_lines]),
+                            NPM_OIDC_FLOOR_SUBJECTS[0]):
+        return "an indented but complete floor block was reported missing"
+    # A workflow that is not a subject must not inherit the requirement.
+    if npm_floor_violations({"jobs": {"build": {"steps": [{"run": "echo hi"}]}}}, "wheels.yml"):
+        return "V12 leaked onto a workflow that is not in NPM_OIDC_FLOOR_SUBJECTS"
+    return None
+
+
+def _non_list_steps_fails_closed() -> str | None:
+    """SMA-602 fix wave, F7: a non-list `steps:` must infra (exit 2), never read as clean.
+
+    Here rather than as a FIXTURES row because a row expects check_main to RETURN a list; this
+    scenario must raise, exactly like `_v10_minor6_scalar_env_fails_closed`.
+
+    MEASURED before `steps_of` existed, on `steps: publish`: `publish_credential_violations`
+    returned `[]`, `job_publishes` returned False and `napi_violations` returned `[]` — the
+    string's characters were iterated, every `continue` fired, and the job read clean. That is
+    the PyYAML string-iteration pitfall the `needs:` scalar case already documents (SMA-579),
+    and it contradicts this file's own fail-closed convention.
+    """
+    for label, raw in (("string", "publish"), ("mapping", {"run": "echo hi"}), ("int", 3)):
+        err_buf = io.StringIO()
+        try:
+            with contextlib.redirect_stderr(err_buf):
+                check_main({"jobs": {"release": {"steps": raw}}}, "fixture")
+        except SystemExit as exc:
+            if exc.code != 2:
+                return (f"{label} steps:: expected SystemExit(2), got SystemExit({exc.code!r}): "
+                        f"{err_buf.getvalue()!r}")
+            continue
+        return f"{label} steps:: check_main returned normally instead of infra(2)"
+    # The two shapes that are NOT malformed must still be accepted: a real list, and a job with
+    # no `steps:` at all (a reusable-workflow-call job carries `uses:` instead).
+    if steps_of({"uses": "./x.yml"}, "fixture") != []:
+        return "a job with no steps: did not yield an empty list"
+    if steps_of({"steps": [{"run": "echo hi"}]}, "fixture") != [{"run": "echo hi"}]:
+        return "a genuine list steps: was not returned unchanged"
+    return None
+
+
 def _important5_regressions() -> list[str]:
     """Regression tests for Important 5: a file that IS a readable path (`is_file()` True) but
     cannot actually be read must still infra (exit 2), never surface an unhandled traceback that
@@ -1764,6 +2940,11 @@ def self_test() -> int:
         ("v8 fix4 dry-run anchor and space-form boundary cases",
          _v8_fix4_dry_run_boundary_cases),
         ("minor-9 empty jobs: {} floor", _minor9_empty_jobs_floor),
+        ("v10 minor-6 scalar env: fails closed", _v10_minor6_scalar_env_fails_closed),
+        ("v10 rule 1 strict equality (the missing-name half)", _v10_rule1_strict_equality),
+        ("v11 id-token: write on both OIDC publish jobs", _v11_id_token_write_required),
+        ("v12 npm OIDC floor pinned in both workflows", _v12_npm_floor_pinned),
+        ("f7 non-list steps: fails closed", _non_list_steps_fails_closed),
     ):
         err = fn()
         if err:

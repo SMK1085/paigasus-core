@@ -627,6 +627,18 @@ first, and the field labels should be checked against the live form.
 
 ### 5.2 npm — an Automation token, as an environment secret
 
+> **SUPERSEDED IN PART, 2026-08-30 (SMA-602).** The `NPM_TOKEN` this section specifies was a
+> bootstrap credential. All nine `@paigasus/*` packages now exist, so npm Trusted Publishing is
+> configurable and SMA-602 moves `release.yml` onto it. The text below is kept as the record of
+> the token-era decision, not as current instruction. See
+> `docs/superpowers/specs/2026-08-30-sma-602-trusted-publishing-design.md`.
+>
+> **Two OWNER steps are PENDING, not done** (corrected 2026-08-30 by SMA-602's final review).
+> Registering the nine npm publishers happens **before** the SMA-602 PR merges; deleting the
+> `NPM_TOKEN` secret from `release-publish` happens **after** it. Neither is done until the owner
+> confirms it, and nothing in the repository can tell you which. `RUNBOOK-release-activation.md`
+> §1 has the ordered steps (C1–C4) and §2 has the command that reads the live secret list.
+
 **The token type is not free choice.** SMA-579 §4.5 measured it: `NPM_TOKEN` must be an
 **Automation** token, because a classic publish token fails with *"2FA required for publishing"* on
 an account with 2FA enforced. Revision 1 of this spec said "granular" with no reason. That was a
@@ -886,6 +898,23 @@ permanent version burn in two of three registries.
 ## 9. Scope and tracked removals
 
 ### 9.1 The two tracked removals
+
+> **SUPERSEDED BY SMA-602, 2026-08-30. The repository half is done; the OWNER half is PENDING.**
+> (Corrected by SMA-602's final review — an earlier annotation here said "DISCHARGED", which
+> stated the owner's actions as accomplished fact and gave a reader no way to check.)
+>
+> Done in the repository: `release.yml` reads neither token, PyPI and npm authenticate through
+> OIDC trusted publishing, and `ci/actionlint/release_guard.py`'s V10 gates a credential's return
+> — by a strict-equality secret-name allowlist, a `password:` key rule on the PyPI action, a
+> three-name denylist and an npmrc `_authToken`/`_auth` rule.
+>
+> Pending on the owner, in this order: register twelve trusted publishers and verify the nine npm
+> ones with `npm trust list` **before** the SMA-602 PR merges; delete both environment secrets
+> **after** it, having first confirmed each token VALUE is stored outside GitHub; revoke the PyPI
+> token **only after** a release has actually published through OIDC — it is the only credential
+> that can publish to PyPI by hand, and PyPI has no documented hand-recovery procedure. See
+> `docs/superpowers/specs/2026-08-30-sma-602-trusted-publishing-design.md` §6 and §7, and
+> `docs/ops/RUNBOOK-release-activation.md` §1 steps C1–C4.
 
 Both are temporary by decision. Neither is enforced by any gate, which is why they are named here.
 
