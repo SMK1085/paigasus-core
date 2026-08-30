@@ -233,4 +233,86 @@ mod tests {
         assert_eq!(page2.len(), 1);
         assert_eq!(page2[0].node.id.uuid(), c.node.id.uuid());
     }
+
+    /// SMA-440 D5: a rename supplying the values the row already holds changes nothing, so it
+    /// must advance neither `updated_at` nor `modified_by`.
+    #[tokio::test]
+    async fn rename_to_identical_values_is_a_no_op() {
+        let store = TenancyStore::default();
+        let (_org, team) = seed_org_and_team(&store, 9600, 9601, &test_stamp(Utc::now(), 1));
+        let clock = FixedClock::default();
+        let t0 = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
+        clock.set(t0);
+        let svc = ProjectService::new(InMemoryProjects(store.clone()), InMemoryTeams(store.clone()), SeqIds::default(), clock.clone());
+
+        let created = svc.create(team, "web", "Web", &actor(1)).await.unwrap();
+        let id = created.node.id.uuid();
+
+        clock.set(t0 + Duration::seconds(10));
+        let same = svc.rename(id, Some("web"), Some("Web"), &actor(2)).await.unwrap();
+        assert_eq!(same.node.updated_at, t0, "a no-op rename must not advance updated_at");
+        assert_eq!(same.node.modified_by.as_ref(), Some(&actor(1)), "a no-op rename must not restamp the modifier");
+    }
+
+    /// The negative half, and the one that catches an over-broad no-op: a matching slug with a
+    /// DIFFERENT name is a real change and must restamp. Without this, a rename that compares
+    /// only the slug would pass the test above while silently dropping every rename.
+    #[tokio::test]
+    async fn rename_with_a_matching_slug_but_a_new_name_still_changes() {
+        let store = TenancyStore::default();
+        let (_org, team) = seed_org_and_team(&store, 9602, 9603, &test_stamp(Utc::now(), 1));
+        let clock = FixedClock::default();
+        let t0 = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
+        clock.set(t0);
+        let svc = ProjectService::new(InMemoryProjects(store.clone()), InMemoryTeams(store.clone()), SeqIds::default(), clock.clone());
+
+        let created = svc.create(team, "web", "Web", &actor(1)).await.unwrap();
+        let id = created.node.id.uuid();
+
+        let t1 = t0 + Duration::seconds(10);
+        clock.set(t1);
+        let renamed = svc.rename(id, Some("web"), Some("Web App"), &actor(2)).await.unwrap();
+        assert_eq!(renamed.node.name, "Web App");
+        assert_eq!(renamed.node.updated_at, t1);
+        assert_eq!(renamed.node.modified_by.as_ref(), Some(&actor(2)));
+        // Spec Testing case 2: an update moves the MODIFIER and leaves the CREATOR alone. An
+        // implementation that stamps both on every write passes every other assertion here.
+        assert_eq!(renamed.node.created_by.as_ref(), Some(&actor(1)), "an update must not rewrite created_by");
+        assert_eq!(renamed.node.created_at, t0, "an update must not rewrite created_at");
+    }
+
+    /// Guard order: the archived precondition runs BEFORE the no-op test, so renaming an
+    /// archived node to its own slug is still an error and not a silent Ok.
+    #[tokio::test]
+    async fn a_no_op_rename_on_an_archived_node_is_still_rejected() {
+        let store = TenancyStore::default();
+        let (_org, team) = seed_org_and_team(&store, 9604, 9605, &test_stamp(Utc::now(), 1));
+        let svc = new_service(store.clone());
+        let created = svc.create(team, "web", "Web", &actor(1)).await.unwrap();
+        let id = created.node.id.uuid();
+        svc.archive(id, &actor(1)).await.unwrap();
+        assert_eq!(svc.rename(id, Some("web"), None, &actor(2)).await.unwrap_err(), TenancyError::NodeArchived);
+    }
+
+    /// The `set_status` half of D5: an idempotent archive advances neither field.
+    #[tokio::test]
+    async fn an_idempotent_archive_does_not_restamp_the_modifier() {
+        let store = TenancyStore::default();
+        let (_org, team) = seed_org_and_team(&store, 9606, 9607, &test_stamp(Utc::now(), 1));
+        let clock = FixedClock::default();
+        let t0 = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
+        clock.set(t0);
+        let svc = ProjectService::new(InMemoryProjects(store.clone()), InMemoryTeams(store.clone()), SeqIds::default(), clock.clone());
+
+        let created = svc.create(team, "web", "Web", &actor(1)).await.unwrap();
+        let id = created.node.id.uuid();
+
+        clock.set(t0 + Duration::seconds(10));
+        svc.archive(id, &actor(2)).await.unwrap();
+
+        clock.set(t0 + Duration::seconds(20));
+        let again = svc.archive(id, &actor(3)).await.unwrap();
+        assert_eq!(again.node.updated_at, t0 + Duration::seconds(10));
+        assert_eq!(again.node.modified_by.as_ref(), Some(&actor(2)), "a no-op archive must not restamp");
+    }
 }

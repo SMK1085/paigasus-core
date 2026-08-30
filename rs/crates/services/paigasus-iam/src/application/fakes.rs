@@ -102,6 +102,16 @@ impl OrganizationRepository for InMemoryOrgs {
         }
 
         let org = orgs.get_mut(&id).expect("existence checked above");
+
+        // SMA-440 D5: every SUPPLIED field already equal to the stored one means this write
+        // changes nothing, so it stamps nothing. Placed AFTER the archived and conflict
+        // guards so a no-op on an archived node is still an error.
+        let slug_same = new_slug.is_none_or(|s| &org.slug == s);
+        let name_same = new_name.is_none_or(|n| org.name == n);
+        if slug_same && name_same {
+            return Ok(org_view(org));
+        }
+
         if let Some(slug) = new_slug {
             org.slug = slug.clone();
         }
@@ -188,6 +198,16 @@ impl TeamRepository for InMemoryTeams {
         }
 
         let team = teams.get_mut(&id).expect("existence checked above");
+
+        // SMA-440 D5: every SUPPLIED field already equal to the stored one means this write
+        // changes nothing, so it stamps nothing. Placed AFTER the archived and conflict
+        // guards so a no-op on an archived node is still an error.
+        let slug_same = new_slug.is_none_or(|s| &team.slug == s);
+        let name_same = new_name.is_none_or(|n| team.name == n);
+        if slug_same && name_same {
+            return Ok(team_view(&self.0, team));
+        }
+
         if let Some(slug) = new_slug {
             team.slug = slug.clone();
         }
@@ -282,6 +302,16 @@ impl ProjectRepository for InMemoryProjects {
         }
 
         let project = projects.get_mut(&id).expect("existence checked above");
+
+        // SMA-440 D5: every SUPPLIED field already equal to the stored one means this write
+        // changes nothing, so it stamps nothing. Placed AFTER the archived and conflict
+        // guards so a no-op on an archived node is still an error.
+        let slug_same = new_slug.is_none_or(|s| &project.slug == s);
+        let name_same = new_name.is_none_or(|n| project.name == n);
+        if slug_same && name_same {
+            return Ok(project_view(&self.0, project));
+        }
+
         if let Some(slug) = new_slug {
             project.slug = slug.clone();
         }

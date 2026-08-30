@@ -215,6 +215,17 @@ impl OrganizationRepository for PgOrganizationRepository {
             return Err(RepositoryError::Precondition(PreconditionKind::NodeArchived));
         }
 
+        // SMA-440 D5: a write that changes nothing stamps nothing. Placed after the archived
+        // guard (so a no-op on an archived node still errors) and before the slug-conflict
+        // check (a node cannot conflict with the slug it already holds).
+        let slug_same = new_slug.is_none_or(|s| model.slug == s.as_str());
+        let name_same = new_name.is_none_or(|n| model.name == n);
+        if slug_same && name_same {
+            txn.commit().await.map_err(map_err)?;
+            self.bump_entity_gen().await;
+            return Ok(org_view(model_to_org(model)?));
+        }
+
         let mut active = model.into_active_model();
         if let Some(slug) = new_slug {
             active.slug = Set(slug.as_str().to_string());

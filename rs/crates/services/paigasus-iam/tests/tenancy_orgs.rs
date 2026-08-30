@@ -132,6 +132,18 @@ async fn rename_and_lifecycle_contracts() {
         .unwrap();
     assert_eq!(renamed.node.slug.as_str(), "acme-renamed");
     assert_eq!(renamed.node.name, "Acme Renamed");
+
+    // SMA-440 D5: a rename to the values already stored changes nothing, so it advances
+    // neither updated_at nor modified_by. The fake and the adapter can disagree, so this
+    // asserts the Postgres half of the same rule the unit tests cover.
+    let before = repo.find(id).await.unwrap().expect("org exists");
+    let no_op_actor = ids.new_principal_id();
+    let noop = repo
+        .rename(id, Some(&Slug::parse("acme-renamed").unwrap()), Some("Acme Renamed"), &Stamp::new(clock.now(), no_op_actor))
+        .await
+        .unwrap();
+    assert_eq!(noop.node.updated_at, before.node.updated_at, "no-op rename must not advance updated_at");
+    assert_eq!(noop.node.modified_by, before.node.modified_by, "no-op rename must not restamp the modifier");
 }
 
 #[tokio::test]
