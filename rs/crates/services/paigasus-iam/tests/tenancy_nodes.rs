@@ -296,3 +296,147 @@ async fn rename_guards_and_lists_round_trip() {
     assert_eq!(found.node.name, "Project Renamed", "renamed project should have updated name");
     assert_eq!(found.effective_status, NodeStatus::Active, "project should remain effectively Active");
 }
+
+/// SMA-440 FINDING 1 (final review): the spec's Risks section named "the rename-as-A-then-as-B
+/// assertion per aggregate" as a control it never got. Before this test, deleting
+/// `active.modified_by = Set(Some(stamp.by.canonical()));` from `pg_organizations.rs`'s
+/// rename/set_status sites still left the whole suite green — a rename by one actor could leave
+/// a stale `modified_by` naming whoever created the row, forever, with nothing to catch it.
+///
+/// Uses three DISTINCT actors (A creates, B renames, C archives): reusing one actor would make
+/// the assertion unable to tell a stale modifier from a fresh one.
+#[tokio::test]
+async fn organization_rename_and_archive_restamp_distinct_actors() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let ids = KernelIdGenerator;
+    let clock = SystemClock;
+    let org_repo = PgOrganizationRepository::new(db.clone(), Generations::memory());
+
+    let actor_a = ids.new_principal_id();
+    let actor_b = ids.new_principal_id();
+    let actor_c = ids.new_principal_id();
+
+    let (org, default_team) = new_org_and_default_team(&ids, &clock, &actor_a, "acme", "Acme Corp.");
+    let grant = support::pg_owner_grant(&db, &actor_a, ids.new_membership_id(), &org.id).await;
+    org_repo.create(&org, &default_team, &grant, &Stamp::new(org.created_at, actor_a.clone())).await.unwrap();
+
+    // Rename stamped by actor B: created_by must stay A, modified_by must move to B.
+    let renamed = org_repo
+        .rename(org.id.uuid(), Some(&Slug::parse("acme-renamed").unwrap()), None, &Stamp::new(clock.now(), actor_b.clone()))
+        .await
+        .expect("rename should succeed");
+    assert_eq!(renamed.node.created_by.as_ref(), Some(&actor_a), "rename must not touch created_by");
+    assert_eq!(renamed.node.modified_by.as_ref(), Some(&actor_b), "rename must restamp modified_by to the renaming actor");
+
+    // set_status twin: archive stamped by actor C. created_by must still be A.
+    let archived = org_repo
+        .set_status(org.id.uuid(), NodeStatus::Archived, &Stamp::new(clock.now(), actor_c.clone()))
+        .await
+        .expect("archive should succeed");
+    assert_eq!(archived.node.created_by.as_ref(), Some(&actor_a), "set_status must not touch created_by");
+    assert_eq!(archived.node.modified_by.as_ref(), Some(&actor_c), "set_status must restamp modified_by to the archiving actor");
+}
+
+/// SMA-440 FINDING 1 + FINDING 2 (final review): the team twin of
+/// `organization_rename_and_archive_restamp_distinct_actors`. Also closes FINDING 2: before this
+/// test, `pg_teams.rs`'s `created_by`/`modified_by` columns never round-tripped through Postgres
+/// at all — swapping the two field reads in `model_to_team` compiled and passed the whole suite,
+/// transposing a team's creator and modifier on every read. Checking BOTH columns here catches
+/// that transposition, not only a stale modifier.
+#[tokio::test]
+async fn team_rename_and_archive_restamp_distinct_actors() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let ids = KernelIdGenerator;
+    let clock = SystemClock;
+    let org_repo = PgOrganizationRepository::new(db.clone(), Generations::memory());
+    let team_repo = PgTeamRepository::new(db.clone(), Generations::memory());
+
+    // The org itself is created by an unrelated owner: this test is about the TEAM's own
+    // actor columns, not the org's.
+    let owner = ids.new_principal_id();
+    let (org, default_team) = new_org_and_default_team(&ids, &clock, &owner, "acme", "Acme Corp.");
+    let grant = support::pg_owner_grant(&db, &owner, ids.new_membership_id(), &org.id).await;
+    org_repo.create(&org, &default_team, &grant, &Stamp::new(org.created_at, owner.clone())).await.unwrap();
+
+    let actor_a = ids.new_principal_id();
+    let actor_b = ids.new_principal_id();
+    let actor_c = ids.new_principal_id();
+
+    let team_id = ids.new_team_id(org.id.uuid());
+    let create_stamp = Stamp::new(clock.now(), actor_a.clone());
+    let team = Team::new(team_id, Slug::parse("eng").unwrap(), "Engineering", &create_stamp).unwrap();
+    team_repo.create(&team, &create_stamp).await.unwrap();
+
+    // Rename stamped by actor B: created_by must stay A, modified_by must move to B.
+    let renamed = team_repo
+        .rename(team.id.uuid(), Some(&Slug::parse("eng-renamed").unwrap()), None, &Stamp::new(clock.now(), actor_b.clone()))
+        .await
+        .expect("rename should succeed");
+    assert_eq!(renamed.node.created_by.as_ref(), Some(&actor_a), "rename must not touch created_by");
+    assert_eq!(renamed.node.modified_by.as_ref(), Some(&actor_b), "rename must restamp modified_by to the renaming actor");
+
+    // set_status twin: archive stamped by actor C. created_by must still be A.
+    let archived = team_repo
+        .set_status(team.id.uuid(), NodeStatus::Archived, &Stamp::new(clock.now(), actor_c.clone()))
+        .await
+        .expect("archive should succeed");
+    assert_eq!(archived.node.created_by.as_ref(), Some(&actor_a), "set_status must not touch created_by");
+    assert_eq!(archived.node.modified_by.as_ref(), Some(&actor_c), "set_status must restamp modified_by to the archiving actor");
+}
+
+/// SMA-440 FINDING 1 + FINDING 2 (final review): the project twin of
+/// `organization_rename_and_archive_restamp_distinct_actors`, and — like the team test above —
+/// also proves `pg_projects.rs`'s `created_by`/`modified_by` columns round-trip correctly and
+/// are not transposed on read-back.
+#[tokio::test]
+async fn project_rename_and_archive_restamp_distinct_actors() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let ids = KernelIdGenerator;
+    let clock = SystemClock;
+    let org_repo = PgOrganizationRepository::new(db.clone(), Generations::memory());
+    let team_repo = PgTeamRepository::new(db.clone(), Generations::memory());
+    let project_repo = PgProjectRepository::new(db.clone(), Generations::memory());
+
+    // The org and its team are created by an unrelated owner: this test is about the
+    // PROJECT's own actor columns, not the org's or team's.
+    let owner = ids.new_principal_id();
+    let (org, default_team) = new_org_and_default_team(&ids, &clock, &owner, "acme", "Acme Corp.");
+    let grant = support::pg_owner_grant(&db, &owner, ids.new_membership_id(), &org.id).await;
+    org_repo.create(&org, &default_team, &grant, &Stamp::new(org.created_at, owner.clone())).await.unwrap();
+
+    let team_id = ids.new_team_id(org.id.uuid());
+    let team_stamp = Stamp::new(clock.now(), owner.clone());
+    let team = Team::new(team_id, Slug::parse("eng").unwrap(), "Engineering", &team_stamp).unwrap();
+    team_repo.create(&team, &team_stamp).await.unwrap();
+
+    let actor_a = ids.new_principal_id();
+    let actor_b = ids.new_principal_id();
+    let actor_c = ids.new_principal_id();
+
+    let project_id = ids.new_project_id(org.id.uuid());
+    let create_stamp = Stamp::new(clock.now(), actor_a.clone());
+    let project = Project::new(project_id, team.id.clone(), Slug::parse("web").unwrap(), "Web", &create_stamp).unwrap();
+    project_repo.create(&project, &create_stamp).await.unwrap();
+
+    // Rename stamped by actor B: created_by must stay A, modified_by must move to B.
+    let renamed = project_repo
+        .rename(project.id.uuid(), None, Some("Web Renamed"), &Stamp::new(clock.now(), actor_b.clone()))
+        .await
+        .expect("rename should succeed");
+    assert_eq!(renamed.node.created_by.as_ref(), Some(&actor_a), "rename must not touch created_by");
+    assert_eq!(renamed.node.modified_by.as_ref(), Some(&actor_b), "rename must restamp modified_by to the renaming actor");
+
+    // set_status twin: archive stamped by actor C. created_by must still be A.
+    let archived = project_repo
+        .set_status(project.id.uuid(), NodeStatus::Archived, &Stamp::new(clock.now(), actor_c.clone()))
+        .await
+        .expect("archive should succeed");
+    assert_eq!(archived.node.created_by.as_ref(), Some(&actor_a), "set_status must not touch created_by");
+    assert_eq!(archived.node.modified_by.as_ref(), Some(&actor_c), "set_status must restamp modified_by to the archiving actor");
+}

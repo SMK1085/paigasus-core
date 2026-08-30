@@ -696,7 +696,7 @@ pub struct BulkReplayResponseDto {
 mod tests {
     use super::*;
     use chrono::TimeZone;
-    use paigasus_iam_core::{ApiKeyId, AuthnPrincipal, PrincipalKind, PrincipalStatus, Slug};
+    use paigasus_iam_core::{ApiKeyId, AuthnPrincipal, PrincipalKind, PrincipalStatus, ProjectId, Slug, TeamId};
     use paigasus_kernel::Prn;
 
     /// A deterministic `PrincipalId` for audit-actor test fields — mirrors the `principal`
@@ -718,6 +718,63 @@ mod tests {
                 id: OrganizationId::from_uuid(Uuid::from_u128(10)),
                 slug: Slug::parse("acme").unwrap(),
                 name: "Acme".to_string(),
+                status: NodeStatus::Active,
+                created_at: t,
+                updated_at: t,
+                created_by: Some(creator.clone()),
+                modified_by: Some(modifier.clone()),
+            },
+            effective_status: NodeStatus::Active,
+        });
+        assert_eq!(dto.created_by, Some(creator.canonical()));
+        assert_eq!(dto.modified_by, Some(modifier.canonical()));
+    }
+
+    /// SMA-440 FINDING 3 (final review): the same actor-projection contract as
+    /// `org_dto_carries_both_actors_as_prn_strings`, but for `TeamDto`. Before this test,
+    /// swapping `created_by`/`modified_by` in `From<NodeView<Team>> for TeamDto` compiled and
+    /// passed the whole suite — the gRPC side already carried this coverage for all four
+    /// projectors, but the HTTP side had it for `OrgDto` alone.
+    #[test]
+    fn team_dto_carries_both_actors_as_prn_strings() {
+        let t = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
+        let creator = principal(1);
+        let modifier = principal(2);
+        let org_id = Uuid::from_u128(10);
+        let dto = TeamDto::from(NodeView {
+            node: Team {
+                id: TeamId::from_parts(org_id, Uuid::from_u128(11)),
+                slug: Slug::parse("eng").unwrap(),
+                name: "Engineering".to_string(),
+                status: NodeStatus::Active,
+                created_at: t,
+                updated_at: t,
+                created_by: Some(creator.clone()),
+                modified_by: Some(modifier.clone()),
+            },
+            effective_status: NodeStatus::Active,
+        });
+        assert_eq!(dto.created_by, Some(creator.canonical()));
+        assert_eq!(dto.modified_by, Some(modifier.canonical()));
+    }
+
+    /// SMA-440 FINDING 3 (final review): the same actor-projection contract as
+    /// `org_dto_carries_both_actors_as_prn_strings`, but for `ProjectDto`. Before this test,
+    /// swapping `created_by`/`modified_by` in `From<NodeView<Project>> for ProjectDto` compiled
+    /// and passed the whole suite.
+    #[test]
+    fn project_dto_carries_both_actors_as_prn_strings() {
+        let t = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
+        let creator = principal(1);
+        let modifier = principal(2);
+        let org_id = Uuid::from_u128(10);
+        let team_id = TeamId::from_parts(org_id, Uuid::from_u128(11));
+        let dto = ProjectDto::from(NodeView {
+            node: Project {
+                id: ProjectId::from_parts(org_id, Uuid::from_u128(12)),
+                team_id,
+                slug: Slug::parse("web").unwrap(),
+                name: "Web".to_string(),
                 status: NodeStatus::Active,
                 created_at: t,
                 updated_at: t,
