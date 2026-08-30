@@ -11,11 +11,12 @@ mod support;
 
 use paigasus_iam::adapters::authz::Generations;
 use paigasus_iam::adapters::clock::SystemClock;
+use paigasus_iam::adapters::grpc::convert;
 use paigasus_iam::adapters::id::KernelIdGenerator;
 use paigasus_iam::adapters::persistence::PgOrganizationRepository;
 use paigasus_iam::adapters::persistence::entities::team;
 use paigasus_iam_core::{Clock, ConflictKind, IdGenerator, NodeStatus, Organization, OrganizationRepository, PreconditionKind, PrincipalId, RepositoryError, Slug, Stamp, Team};
-use sea_orm::EntityTrait;
+use sea_orm::{ConnectionTrait, EntityTrait};
 use uuid::Uuid;
 
 /// Builds an `Organization` + its auto-provisioned `"default"` `Team`, minted via the same
@@ -185,4 +186,39 @@ async fn list_orders_by_created_at_then_id() {
     let mut got: Vec<Organization> = page1.into_iter().map(|v| v.node).collect();
     got.extend(page2.into_iter().map(|v| v.node));
     assert_eq!(got, expected);
+}
+
+/// SMA-440 D4: no backfill runs, so a row predating `m0011` keeps NULL actor columns. NULL is
+/// the absent `Actor` that `actor.proto` already defines as unknown-or-system, which is why
+/// inventing a synthetic "system" PRN would have been worse than leaving these alone.
+///
+/// `start_migrated_postgres` runs the migrator to the tip, so a genuinely pre-`m0011` row is
+/// not constructible — a NULL row is inserted directly via SQL instead; the assertion is about
+/// NULL, not about migration history.
+#[tokio::test]
+async fn a_row_with_null_actor_columns_reads_back_as_unknown() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let ids = KernelIdGenerator;
+    let repo = PgOrganizationRepository::new(db.clone(), Generations::memory());
+
+    let org_id = ids.new_organization_id();
+    let id = org_id.uuid();
+    let prn = org_id.canonical();
+    db.execute_unprepared(&format!(
+        r#"INSERT INTO "organization" (id, prn, slug, name, status, created_at, updated_at)
+           VALUES ('{id}', '{prn}', 'legacy', 'Legacy', 'active', now(), now());"#
+    ))
+    .await
+    .unwrap();
+
+    let view = repo.find(id).await.unwrap().expect("legacy org exists");
+    assert_eq!(view.node.created_by, None);
+    assert_eq!(view.node.modified_by, None);
+
+    let wire = convert::to_proto_org(&view);
+    let meta = wire.audit.expect("audit is always present");
+    assert!(meta.creator.is_none(), "a NULL column must project as an ABSENT Actor, never Actor{{prn:\"\"}}");
+    assert!(meta.modifier.is_none());
 }
