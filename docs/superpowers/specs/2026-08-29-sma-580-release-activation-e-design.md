@@ -627,6 +627,12 @@ first, and the field labels should be checked against the live form.
 
 ### 5.2 npm — an Automation token, as an environment secret
 
+> **SUPERSEDED IN PART, 2026-08-30 (SMA-602).** The `NPM_TOKEN` this section specifies was a
+> bootstrap credential. All nine `@paigasus/*` packages now exist, so npm Trusted Publishing is
+> configurable and has replaced it. The secret is deleted from `release-publish`. The text below
+> is kept as the record of the token-era decision, not as current instruction. See
+> `docs/superpowers/specs/2026-08-30-sma-602-trusted-publishing-design.md`.
+
 **The token type is not free choice.** SMA-579 §4.5 measured it: `NPM_TOKEN` must be an
 **Automation** token, because a classic publish token fails with *"2FA required for publishing"* on
 an account with 2FA enforced. Revision 1 of this spec said "granular" with no reason. That was a
@@ -886,6 +892,12 @@ permanent version burn in two of three registries.
 ## 9. Scope and tracked removals
 
 ### 9.1 The two tracked removals
+
+> **DISCHARGED, 2026-08-30 (SMA-602).** Both tracked removals are done: PyPI and npm now publish
+> through OIDC trusted publishing, and `ci/actionlint/release_guard.py`'s V10 gates their return.
+> One caveat this section could not know: the PyPI token must be revoked only AFTER a release has
+> published through OIDC, because it is the only credential that can publish to PyPI by hand. See
+> `docs/superpowers/specs/2026-08-30-sma-602-trusted-publishing-design.md` §6.3.
 
 Both are temporary by decision. Neither is enforced by any gate, which is why they are named here.
 
