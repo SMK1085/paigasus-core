@@ -104,8 +104,12 @@ impl OrganizationRepository for InMemoryOrgs {
         let org = orgs.get_mut(&id).expect("existence checked above");
 
         // SMA-440 D5: every SUPPLIED field already equal to the stored one means this write
-        // changes nothing, so it stamps nothing. Placed AFTER the archived and conflict
-        // guards so a no-op on an archived node is still an error.
+        // changes nothing, so it stamps nothing. The mandated order (see pg_organizations.rs's
+        // `rename`) is archived -> no-op -> conflict; this no-op check instead runs AFTER the
+        // conflict guard above, not before it. That is equivalent only because the conflict scan
+        // just above excludes self by id, so a rename that resubmits the org's own current slug
+        // can never read as a conflict with itself. If that self-exclusion is ever removed, this
+        // fake would start rejecting a true no-op instead of silently matching production.
         let slug_same = new_slug.is_none_or(|s| &org.slug == s);
         let name_same = new_name.is_none_or(|n| org.name == n);
         if slug_same && name_same {
@@ -200,8 +204,12 @@ impl TeamRepository for InMemoryTeams {
         let team = teams.get_mut(&id).expect("existence checked above");
 
         // SMA-440 D5: every SUPPLIED field already equal to the stored one means this write
-        // changes nothing, so it stamps nothing. Placed AFTER the archived and conflict
-        // guards so a no-op on an archived node is still an error.
+        // changes nothing, so it stamps nothing. The mandated order (see pg_teams.rs's
+        // `rename`) is archived -> no-op -> conflict; this no-op check instead runs AFTER the
+        // conflict guard above, not before it. That is equivalent only because the conflict scan
+        // just above excludes self by id, so a rename that resubmits the team's own current slug
+        // can never read as a conflict with itself. If that self-exclusion is ever removed, this
+        // fake would start rejecting a true no-op instead of silently matching production.
         let slug_same = new_slug.is_none_or(|s| &team.slug == s);
         let name_same = new_name.is_none_or(|n| team.name == n);
         if slug_same && name_same {
@@ -304,8 +312,12 @@ impl ProjectRepository for InMemoryProjects {
         let project = projects.get_mut(&id).expect("existence checked above");
 
         // SMA-440 D5: every SUPPLIED field already equal to the stored one means this write
-        // changes nothing, so it stamps nothing. Placed AFTER the archived and conflict
-        // guards so a no-op on an archived node is still an error.
+        // changes nothing, so it stamps nothing. The mandated order (see pg_projects.rs's
+        // `rename`) is archived -> no-op -> conflict; this no-op check instead runs AFTER the
+        // conflict guard above, not before it. That is equivalent only because the conflict scan
+        // just above excludes self by id, so a rename that resubmits the project's own current
+        // slug can never read as a conflict with itself. If that self-exclusion is ever removed,
+        // this fake would start rejecting a true no-op instead of silently matching production.
         let slug_same = new_slug.is_none_or(|s| &project.slug == s);
         let name_same = new_name.is_none_or(|n| project.name == n);
         if slug_same && name_same {
