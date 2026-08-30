@@ -378,9 +378,9 @@ this widens A8 and A10 and adds no assertion.
 
 ### 6.2 Mutation proofs (AC 2)
 
-**MEASURED against the final code: 33 mutations, 33 killed, 0 survivors.** Each was applied to
+**MEASURED against the final code: 39 mutations, 39 killed, 0 survivors.** Each was applied to
 `cargo_moon_parity.py`, `--self-test` was run, and the file restored. Every mutation label below
-is the edit that was actually performed, not a paraphrase of it. M29-M33 were added by the
+is the edit that was actually performed, not a paraphrase of it. M29-M39 were added by the
 CodeRabbit PR review; re-running the whole battery after those fixes is what caught M25's fixture
 going stale (see below).
 
@@ -419,6 +419,12 @@ going stale (see below).
 | M31 | drop `_executable_text`'s heredoc-open-at-EOF guard | KILLED |
 | M32 | return UNRESOLVED closure members from `task_script_closure` | KILLED |
 | M33 | compare against an unresolved `root` in `check_cargo_locked_scripts` | KILLED |
+| M34 | let arm 1 span a newline (`[^\S\n]+` -> `\s+`) | KILLED |
+| M35 | let A10's arm 1 span a newline | KILLED |
+| M36 | accept an env prefix with no command after it | KILLED |
+| M37 | keep the redundant env row beside a literal cargo call | KILLED |
+| M38 | truncate the emitted waiver key to 100 chars again | KILLED |
+| M39 | drop the Dockerfile `ENV CARGO=` rule | KILLED |
 
 **SEVEN first-pass survivors, and what each bought.** A survivor is evidence about the FIXTURES,
 never a result to accept, so each one is recorded with the fixture that now kills it. None was
@@ -435,7 +441,22 @@ PR review round.
 | M28 | `resolve()` is a no-op at every current call site, so it was unasserted hardening. | `script_source_refs` on a RELATIVE path must resolve identically. |
 | M25 | it KILLED until M29's fix landed, then went stale. The fixture put the bare `ci/**/*.sh` mention in a COMMENT, and `_executable_text` strips comments — so after the heredoc fix the mutation had nothing left to find. Only re-running the WHOLE battery after a fix, rather than the mutations that fix introduced, exposed it. | an EXECUTABLE bare mention (a pin-array string constant), which is the real corpus shape: every one of the six measured prose edges is a comment **or a constant**, and a constant is executable text. |
 
-**Three entries were live defects before they were mutations.** M5 (below), M29 and M32.
+**Seven entries were live defects before they were mutations.** M5 (below), M29, M32 and
+M34-M37 — the round-4 batch, which is the one that found the sharpest bug in the design:
+
+**M37 made a correct line UNWAIVABLE.** `CARGO=/p cargo build` produced BOTH an env row and a
+literal row, because their end offsets differ so the de-duplication did not fire. The two rows
+carry the SAME segment text, so every `ALLOW_UNLOCKED_CARGO_SCRIPT` key for that line is
+permanently AMBIGUOUS — SMA-599 L15, reached by a route L15 did not anticipate. Measured on
+`CARGO=/p cargo build --locked`, a correctly locked call that reported twice and could not be
+cleared. An env prefix whose COMMAND is cargo itself is not indirection, and is now dropped.
+
+**M34/M35** are M5's defect in arm 1, on both A8's and A10's variants: `"$CARGO_BIN"` on one line
+and `build` on the next read as one invocation. **M36**: `CARGO=/p CARGO_HOME=/x` sets two
+variables and runs nothing, so it is not a wrapper — the lookahead now skips further assignments
+and demands a real command, which keeps `CARGO=/p CARGO_HOME=/x tool run` matched. **M39** is the
+counterpart: a Dockerfile `ENV CARGO=` carries no command yet redirects cargo for every later
+`RUN`, so it takes its own rule rather than the shell-prefix one.
 
 **M32** is the worst-behaved of the three: with a SYMLINKED `root`, `task_script_closure` mixed
 path forms — `task_script_refs` builds `root / rel` and keeps the caller's form, while
@@ -520,8 +541,10 @@ values mention cargo — the file SMA-599 L4 already names as one edit from a sp
 **R2 — `export CARGO=…` separated from its tool is invisible.** Arm 2 needs the prefix and the
 command in one segment.
 
-**R3 — `export CARGO=/p CARGO_HOME=/q` reports** though nothing is executed: the lookahead is
-satisfied by the second assignment. Waivable, and in the accepted false-positive direction.
+**R3 — CLOSED (M36).** `export CARGO=/p CARGO_HOME=/q` used to report though nothing is
+executed. The lookahead now skips a run of `NAME=value` assignments and demands a non-assignment
+command token after them, so an assignment-only line produces no row while
+`CARGO=/p CARGO_HOME=/x tool run` still does.
 
 **R4 — `"${CARGO_BIN:-cargo}" build` is invisible to all three arms.** Arm 1 dies at the `:`,
 and the literal arm misses it because `cargo}` is not `cargo\s+`. This is the idiomatic bash
