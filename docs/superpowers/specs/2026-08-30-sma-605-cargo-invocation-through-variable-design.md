@@ -378,9 +378,9 @@ this widens A8 and A10 and adds no assertion.
 
 ### 6.2 Mutation proofs (AC 2)
 
-**MEASURED against the final code: 31 mutations, 31 killed, 0 survivors.** Each was applied to
+**MEASURED against the final code: 33 mutations, 33 killed, 0 survivors.** Each was applied to
 `cargo_moon_parity.py`, `--self-test` was run, and the file restored. Every mutation label below
-is the edit that was actually performed, not a paraphrase of it. M29-M31 were added by the
+is the edit that was actually performed, not a paraphrase of it. M29-M33 were added by the
 CodeRabbit PR review; re-running the whole battery after those fixes is what caught M25's fixture
 going stale (see below).
 
@@ -417,6 +417,8 @@ going stale (see below).
 | M29 | scan RAW text for `source` statements (drop `_executable_text`) | KILLED |
 | M30 | blame `FFI_MARKERS` for every wrapper cause | KILLED |
 | M31 | drop `_executable_text`'s heredoc-open-at-EOF guard | KILLED |
+| M32 | return UNRESOLVED closure members from `task_script_closure` | KILLED |
+| M33 | compare against an unresolved `root` in `check_cargo_locked_scripts` | KILLED |
 
 **SEVEN first-pass survivors, and what each bought.** A survivor is evidence about the FIXTURES,
 never a result to accept, so each one is recorded with the fixture that now kills it. None was
@@ -433,7 +435,17 @@ PR review round.
 | M28 | `resolve()` is a no-op at every current call site, so it was unasserted hardening. | `script_source_refs` on a RELATIVE path must resolve identically. |
 | M25 | it KILLED until M29's fix landed, then went stale. The fixture put the bare `ci/**/*.sh` mention in a COMMENT, and `_executable_text` strips comments — so after the heredoc fix the mutation had nothing left to find. Only re-running the WHOLE battery after a fix, rather than the mutations that fix introduced, exposed it. | an EXECUTABLE bare mention (a pin-array string constant), which is the real corpus shape: every one of the six measured prose edges is a comment **or a constant**, and a constant is executable text. |
 
-**Two entries were live defects before they were mutations.** M5 (below) and M29: a `source`
+**Three entries were live defects before they were mutations.** M5 (below), M29 and M32.
+
+**M32** is the worst-behaved of the three: with a SYMLINKED `root`, `task_script_closure` mixed
+path forms — `task_script_refs` builds `root / rel` and keeps the caller's form, while
+`script_source_refs` resolves — so `check_cargo_locked_scripts`' `path.relative_to(root)` raised
+`ValueError`. That is NOT in `INFRA_ERRORS`, so it escaped as a TRACEBACK rather than the rc-2
+infrastructure classification the gate contracts for. macOS makes it reachable in ordinary use:
+`/tmp` is a symlink to `/private/tmp`. Every closure member is now returned resolved, and
+consumers compare against a resolved root.
+
+**M29:** a `source`
 inside a heredoc BODY matched, because `script_source_refs` scanned raw text while claiming to be
 execution-only. That one did not merely over-report — it raised `MoonOutputError` and **aborted
 the gate at rc 2** on a benign script. Found by the CodeRabbit PR review, fixed by reusing
