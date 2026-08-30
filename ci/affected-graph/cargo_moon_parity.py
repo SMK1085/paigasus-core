@@ -1124,8 +1124,16 @@ def _cwd_inside_rs(text, source_dir):
         return True
     env = dict(VAR_ASSIGN_RE.findall(text))
     ordered = sorted(env.items(), key=lambda kv: (-len(kv[0]), kv[0]))
-    scan_text = CMD_SUBST_RE.sub("", text)
-    for token in CWD_TOKEN_RE.findall(scan_text):
+    # Scan the text with substitutions REMOVED and each substitution's BODY, because a cd can
+    # live on either side and the two need opposite treatment (SMA-599, CodeRabbit round 2).
+    #   cd "$(git rev-parse --show-toplevel)/rs"   -> only the stripped form works: with the
+    #       substitution left in, CWD_TOKEN_RE stops at the space inside it and captures `"$(git`.
+    #   X="$(cd rs && cargo build)"                -> only the BODY works: stripping deletes the
+    #       `cd rs` outright, and the task then reads as running outside rs/ — a silent false
+    #       negative, which is the failure this assertion exists to prevent.
+    # Scanning both is what covers the pair; scanning either alone drops the other.
+    chunks = [CMD_SUBST_RE.sub("", text), *CMD_SUBST_RE.findall(text)]
+    for token in [tok for chunk in chunks for tok in CWD_TOKEN_RE.findall(chunk)]:
         resolved = token
         for name, value in ordered:
             resolved = resolved.replace(f"${{{name}}}", value).replace(f"${name}", value)
@@ -3246,6 +3254,22 @@ def self_test():
             failures.append(
                 f"{plugin!r} now matches CARGO_INVOCATION_RE — A10 can see it, so spec L11 and "
                 f"SMA-605 are stale; revisit them rather than deleting this row"
+            )
+
+    # SMA-599 (CodeRabbit round 2) — a `cd` INSIDE a command substitution must still confer
+    # scope. Stripping substitutions is what makes `cd "$(git rev-parse ...)/rs"` resolve, but
+    # applied alone it deleted the `cd rs` from `X="$(cd rs && cargo build)"` and the task read
+    # as running outside rs/: a silent false negative. Both shapes are pinned, because a fix for
+    # either one alone breaks the other.
+    for probe, want in (
+        ('X="$(cd rs && cargo build)"', True),
+        ('cd "$(git rev-parse --show-toplevel)/rs" && cargo build', True),
+        ('X="$(cd ts && cargo build)"', False),
+    ):
+        if _cwd_inside_rs(probe, ".") is not want:
+            failures.append(
+                f"_cwd_inside_rs({probe!r}) is not {want} — a cd inside a command substitution "
+                f"and one wrapping it need opposite handling, and both must hold"
             )
 
     if not REQUIRED_CARGO_CONFIG_TASKS:
