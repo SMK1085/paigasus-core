@@ -537,10 +537,12 @@ both exit 0. No expected-set movement in any case, including `lockfile->all-lint
   not, with M10's reason.
 * SMA-599 spec **L11** — a pointer: L10 is closed for the variable shape, while L11's subcommand
   shape (`cargo llvm-cov`, `insta`, `udeps`, `bloat`) stays open.
-* `cargo_moon_parity.py:3249,3256` — the self-test forward guard's message names SMA-605 as
-  pending. It must be re-worded once SMA-605 lands.
-* `cargo_moon_parity.py:147-175` — the `LOCK_RESOLVING_VERBS` / `CARGO_INVOCATION_RE` comment
-  block becomes partly false and needs the arms described.
+* `cargo_moon_parity.py` — the self-test's plugin forward guard no longer names SMA-605 as
+  pending; it records that SMA-605 closed L10 while L11's subcommand shape stays open, and its
+  message now says "a `cargo_matches` arm" rather than `CARGO_INVOCATION_RE`.
+* `cargo_moon_parity.py` — the `LOCK_RESOLVING_VERBS` / `CARGO_INVOCATION_RE` comment block now
+  says the literal regex is one arm of three, names `cargo_matches` as the entry point every
+  consumer reads, and points at A10's own sensitive variant.
 * `ci/affected-graph/README.md` — the A8 and A10 bullets, and the script-following description.
 * `CLAUDE.md` — the sentence "A10 shares `CARGO_INVOCATION_RE`, built from
   `LOCK_RESOLVING_VERBS`, with A8's derivation" becomes partly false.
