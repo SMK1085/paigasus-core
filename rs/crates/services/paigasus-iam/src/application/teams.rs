@@ -301,6 +301,75 @@ mod tests {
         assert_eq!(renamed.node.created_at, t0, "an update must not rewrite created_at");
     }
 
+    /// SMA-440 D5, single-field no-op: supplying ONLY a matching slug (name omitted) must
+    /// still be treated as a no-op. `new_slug.is_some_and(...)` instead of `is_none_or(...)`
+    /// would treat the omitted `new_name` as "differs" and wrongly restamp here.
+    #[tokio::test]
+    async fn rename_to_identical_slug_only_is_a_no_op() {
+        let store = TenancyStore::default();
+        let org = seed_org(&store, 9011, "acme", &test_stamp(Utc::now(), 1));
+        let clock = FixedClock::default();
+        let t0 = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
+        clock.set(t0);
+        let svc = TeamService::new(InMemoryTeams(store.clone()), SeqIds::default(), clock.clone());
+
+        let created = svc.create(org, "eng", "Engineering", &actor(1)).await.unwrap();
+        let id = created.node.id.uuid();
+
+        clock.set(t0 + Duration::seconds(10));
+        let same = svc.rename(id, Some("eng"), None, &actor(2)).await.unwrap();
+        assert_eq!(same.node.updated_at, t0, "a slug-only no-op rename must not advance updated_at");
+        assert_eq!(same.node.modified_by.as_ref(), Some(&actor(1)), "a slug-only no-op rename must not restamp the modifier");
+    }
+
+    /// The mirror of the above: supplying ONLY a matching name (slug omitted) must also be a
+    /// no-op.
+    #[tokio::test]
+    async fn rename_to_identical_name_only_is_a_no_op() {
+        let store = TenancyStore::default();
+        let org = seed_org(&store, 9012, "acme", &test_stamp(Utc::now(), 1));
+        let clock = FixedClock::default();
+        let t0 = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
+        clock.set(t0);
+        let svc = TeamService::new(InMemoryTeams(store.clone()), SeqIds::default(), clock.clone());
+
+        let created = svc.create(org, "eng", "Engineering", &actor(1)).await.unwrap();
+        let id = created.node.id.uuid();
+
+        clock.set(t0 + Duration::seconds(10));
+        let same = svc.rename(id, None, Some("Engineering"), &actor(2)).await.unwrap();
+        assert_eq!(same.node.updated_at, t0, "a name-only no-op rename must not advance updated_at");
+        assert_eq!(same.node.modified_by.as_ref(), Some(&actor(1)), "a name-only no-op rename must not restamp the modifier");
+    }
+
+    /// Spec case 4: a DIFFERENT slug paired with the SAME name is still a real change and
+    /// must restamp both fields. Complements
+    /// `rename_with_a_matching_slug_but_a_new_name_still_changes`, which covers the mirror
+    /// case (same slug, different name).
+    #[tokio::test]
+    async fn rename_with_a_new_slug_but_matching_name_still_changes() {
+        let store = TenancyStore::default();
+        let org = seed_org(&store, 9013, "acme", &test_stamp(Utc::now(), 1));
+        let clock = FixedClock::default();
+        let t0 = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
+        clock.set(t0);
+        let svc = TeamService::new(InMemoryTeams(store.clone()), SeqIds::default(), clock.clone());
+
+        let created = svc.create(org, "eng", "Engineering", &actor(1)).await.unwrap();
+        let id = created.node.id.uuid();
+
+        let t1 = t0 + Duration::seconds(10);
+        clock.set(t1);
+        let renamed = svc.rename(id, Some("eng-2"), Some("Engineering"), &actor(2)).await.unwrap();
+        assert_eq!(renamed.node.slug.as_str(), "eng-2");
+        assert_eq!(renamed.node.updated_at, t1, "a new-slug rename must advance updated_at even with a matching name");
+        assert_eq!(
+            renamed.node.modified_by.as_ref(),
+            Some(&actor(2)),
+            "a new-slug rename must restamp the modifier even with a matching name"
+        );
+    }
+
     /// Guard order: the archived precondition runs BEFORE the no-op test, so renaming an
     /// archived node to its own slug is still an error and not a silent Ok.
     #[tokio::test]
