@@ -94,7 +94,9 @@ never runs. Provenance is generated in every row.
 **A correction to revision 1.** Revision 1 claimed row 4 is "not detectable at all". That is false.
 `oidc.js:142` logs `Successfully retrieved and set token` at `log.verbose`. Setting
 `NPM_CONFIG_LOGLEVEL: verbose` and grepping for that line makes row 4 detectable with the token
-still in place.
+still in place — but only for the two direct `npm publish` steps. `napi prepublish` pipes each of
+the seven platform children's stdio and forwards only their stdout, so the verbose line, which npm
+writes to stderr, never surfaces there; only the failure path (row 2) is visible for those seven.
 
 **The staged alternative that follows, and why this design rejects it.** One could keep both
 tokens, add verbose logging, assert the OIDC line on a real release, then remove the tokens in a

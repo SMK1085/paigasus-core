@@ -45,10 +45,12 @@ on:
   #
   #   * Keep the `environment:` key — that environment's deployment branch policy is restricted to
   #     `main` ONLY, so a job entering it from any other ref fails.
-  #   * Remove it — the job loses every credential, because ALL of them are ENVIRONMENT secrets
-  #     rather than repository secrets: `NPM_TOKEN` and `PYPI_API_TOKEN` on `release-publish`, and
-  #     `PAIGASUS_BOT_*` on both `release-pr` and `release-publish`. An OIDC exchange loses its
-  #     environment claim too, which is what the crates.io trusted publishers require.
+  #   * Remove it — the job loses its authorization. Since SMA-602 there is no publish token at
+  #     all: crates.io, PyPI and npm each authenticate through OIDC trusted publishing, and every
+  #     one of those publishers REQUIRES the `release-publish` environment claim. Dropping the
+  #     `environment:` key drops that claim, so all three registries reject the exchange. The
+  #     `PAIGASUS_BOT_*` App secrets remain ENVIRONMENT secrets on `release-pr` and
+  #     `release-publish`, so a job that leaves the environment cannot mint a token either.
   #
   # That pair is the boundary, and it now covers EVERY job that touches a credential — `release-pr`
   # on `release-pr`, and `release`/`publish-pypi`/`publish-npm` on `release-publish`. There are no
@@ -699,8 +701,8 @@ jobs:
             || { echo "::error::missing dist-bindings/paigasus_py_bindings-$KERNEL_VERSION.tar.gz"; exit 1; }
           echo "OK: $found wheels + sdist at $KERNEL_VERSION"
 
-      # AUTH: a PyPI API TOKEN, temporarily, NOT the OIDC trusted publishing this job's
-      # `id-token: write` was added for (SMA-580).
+      # AUTH: OIDC trusted publishing. This job supplies no `password:`, so
+      # pypa/gh-action-pypi-publish mints an OIDC token instead (SMA-602).
       #
       # PyPI allows only ONE *pending* trusted publisher per (owner, repo, workflow, environment)
       # tuple, and all three projects below share that tuple exactly — same repo, same
@@ -709,13 +711,20 @@ jobs:
       # different project name". That is pypi/warehouse#16920, open since 2024-10, and it is the
       # documented monorepo limitation, not a misconfiguration.
       #
-      # The constraint binds PENDING publishers only. So: create all three projects with a token
-      # once, then register NORMAL trusted publishers on each — normal publishers may share a
-      # tuple, which is the ordinary monorepo case — then delete the token. Tracked in SMA-602
-      # alongside the identical npm bootstrap.
+      # The constraint binds PENDING publishers only. So SMA-580 created all three projects with
+      # an account-scoped token once, and SMA-602 then registered a NORMAL trusted publisher on
+      # each — normal publishers may share a tuple, which is the ordinary monorepo case — and
+      # deleted the token. Do not reintroduce one: release_guard.py's V10 reds on it, because a
+      # token would MASK a broken exchange rather than fail. npm's OIDC helper never throws, so a
+      # failed exchange falls through to any configured credential and publishes silently.
       #
-      # `id-token: write` stays on this job: it is what the normal publishers will use, and
-      # removing it now would just have to be added back.
+      # A consequence worth knowing: with no `password:`, the action's `attestations` input
+      # (default 'true', and effective only under Trusted Publishing) becomes live, so all three
+      # projects now upload PEP 740 attestations. That needs no extra permission — they are
+      # Sigstore-signed with the same OIDC token, not through GitHub's attestations API.
+      #
+      # `id-token: write` stays on this job: it is what the normal publishers use, and removing
+      # it now would just have to be added back.
       #
       # ORDER IS LOAD-BEARING: bindings, then the face. skip-existing makes a partial failure
       # re-runnable — PyPI returns 400 "file already exists" otherwise, so an un-skipped retry can
@@ -925,12 +934,27 @@ jobs:
       # argument containing `#` placed BEFORE the flag would truncate the segment and produce a
       # false red — putting the flag first makes that unreachable.
       #
-      # Auth: npm Trusted Publishing (OIDC) cannot be configured before a package's first-ever
-      # publish, and all three @paigasus/* packages are unpublished (measured: `npm view` 404s
-      # for each) — so NPM_TOKEN stays for now, becoming unnecessary after the first release.
-      # Confined to this step's own env (never job- or workflow-level) and written to the HOME
-      # npmrc rather than the committed ts/.npmrc so every per-target `npm publish` napi shells
-      # out to, regardless of its own cwd under --npm-dir, resolves it.
+      # Auth: npm Trusted Publishing (OIDC), one configuration per package. npm cannot configure
+      # it before a package's first-ever publish (npm/cli#8544 is still open), which is why
+      # SMA-580 needed a token and SMA-602 could remove it only afterwards.
+      #
+      # `napi prepublish` shells out to `npm publish` once per platform directory, each with its
+      # own cwd. Those inherit OIDC correctly: @napi-rs/cli spawns them with `env: process.env`,
+      # so both ACTIONS_ID_TOKEN_REQUEST_* variables reach every child (measured, 3.7.2
+      # dist/index.js:3451-3455). The exchange is PER PACKAGE, so all nine @paigasus/* packages
+      # need their own trusted publisher.
+      #
+      # NPM_CONFIG_LOGLEVEL: verbose is load-bearing, not debug residue. npm's oidc.js reports
+      # every OIDC failure at verbose or silly and NEVER throws, so without it a misconfigured
+      # publisher surfaces as a bare ENEEDAUTH with no cause — in the one job a fresh dispatch
+      # cannot repair (see RUNBOOK §7.4).
+      #
+      # Know what it does NOT give you. napi runs each platform child with stdio: "pipe" and
+      # forwards only its STDOUT (dist/index.js:3452-3457), while npm logs to STDERR. So the
+      # FAILURE path works — Node folds the captured stderr into error.message and napi rethrows —
+      # but the positive "Successfully retrieved and set token" line is readable only for the two
+      # DIRECT npm publish steps, never for the seven platform children. Do not treat its absence
+      # there as evidence of anything.
       - name: Publish the node addon and its platform packages
         if: steps.npmstate.outputs.node == 'publish'
         working-directory: ts/packages/paigasus-kernel
