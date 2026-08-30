@@ -204,8 +204,11 @@ It also runs several checks that the per-case project sets structurally **cannot
   claims it cannot have; `ci/actionlint/run.sh:3715` is the one live instance and is waived.
   Two limits remain. The scan is PATH-INSENSITIVE (spec L1) — it reports a line the task's
   arguments may never reach, which is why `repo:version-lockstep`'s `cargo update -w` is waived
-  rather than excluded. And following is one level deep and shell-only: a script invoking another
-  script, `ops/nats/check-subjects.sh`, and the three `.py` gate entrypoints are all unfollowed.
+  rather than excluded. And following is shell-only: `ops/nats/check-subjects.sh` and the three
+  `.py` gate entrypoints are unfollowed. Since SMA-605 a script invoking another through a
+  `source` / `.` statement IS followed — transitively, cycle-guarded, over executable text only
+  (a `source` in a heredoc body is not executed and does not resolve) — but a script invoked as a
+  plain command from another script still is not.
   Separately, the literal-cargo half still tests `--locked` PER BLOB, not per invocation: a
   task's own `command`/`args` field chaining two cargo calls with the flag on only one of them
   would pass — the same vacuity class the wrapper rule closes, left open here because a

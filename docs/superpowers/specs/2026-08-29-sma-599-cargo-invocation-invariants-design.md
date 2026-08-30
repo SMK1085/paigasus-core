@@ -726,8 +726,9 @@ in the code, the same warning `FFI_MARKERS` carries for `maturin`. Arm 2 reports
 **L11 — A10's `CONFIG_SENSITIVE_VERBS` split narrows only what's already derived; it does not
 widen A10's coverage to a new subcommand.** `CONFIG_SENSITIVE_VERBS` is a strict subset of
 `LOCK_RESOLVING_VERBS` (A8's list), and both `derive_cargo_tasks` and `script_cargo_lines`
-gate on `CARGO_INVOCATION_RE` — built from `LOCK_RESOLVING_VERBS`, not from
-`CONFIG_SENSITIVE_VERBS` — before A10 ever runs. So `cargo llvm-cov`, `insta`, `udeps`,
+gate on `LOCK_RESOLVING_VERBS`, not on `CONFIG_SENSITIVE_VERBS`, before A10 ever runs. (Until
+SMA-605 that gate was `CARGO_INVOCATION_RE` itself; it is now `cargo_matches`, whose indirect
+arms are built from the same verb list, so the conclusion is unchanged.) So `cargo llvm-cov`, `insta`, `udeps`,
 `bloat`, or `tarpaulin` yield an EMPTY derivation today, and A10 examines nothing for them —
 no row, and no `FLOOR:` row either, since the floor only sees what the derivation produced.
 An earlier version of the in-code comment overclaimed that A10's own verb list "covered" this

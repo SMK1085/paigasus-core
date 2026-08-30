@@ -2,9 +2,10 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Make A8 and A10 see a cargo invocation that reaches cargo through a variable, and follow a gate script's `source` statements one level so the one real such invocation becomes reachable.
+**Goal:** Make A8 and A10 see a cargo invocation that reaches cargo through a variable, and follow a gate script's `source` statements transitively (cycle-guarded) so the one real such invocation becomes reachable.
 
-**Architecture:** Two new regexes sit beside `CARGO_INVOCATION_RE` and merge into one start-sorted match list, so `_classify_shell_line`'s per-invocation tail arithmetic is unchanged. A separate execution-only `source` resolver extends the script closure one level. Everything lands in one file, `ci/affected-graph/cargo_moon_parity.py`, plus documentation.
+**Architecture:** Two new regexes sit beside `CARGO_INVOCATION_RE` and merge into one start-sorted match list, so `_classify_shell_line`'s per-invocation tail arithmetic is unchanged. A separate execution-only `source` resolver extends the script closure transitively, with cycle
+protection; today's corpus happens to be depth 2. Everything lands in one file, `ci/affected-graph/cargo_moon_parity.py`, plus documentation.
 
 **Tech Stack:** Python 3 (standard library only — no dependency may be added; the file is executed by `python3` directly from `ci/affected-graph/run.sh`), Moon 2.5.3, bash.
 
@@ -110,7 +111,7 @@ CARGO_VAR_NAME = "cargo"
 # LOOKAHEAD, never consumed — that is what makes `export CARGO=/p`, an assignment with nothing to
 # run, report nothing, and it keeps a second env prefix's leading separator intact.
 CARGO_ENV_PREFIX_RE = re.compile(
-    r"""(?:^|[\s;&|(])CARGO=(?:"[^"]*"|'[^']*'|[^\s;&|]*)(?=\s+\S)"""
+    r"""(?:^|[\s;&|(])CARGO=(?:"[^"]*"|'[^']*'|[^\s;&|]*)(?=[^\S\n]+\S)"""
 )
 
 CargoMatch = collections.namedtuple("CargoMatch", "start end verb kind")
@@ -181,7 +182,7 @@ git checkout -- ci/affected-graph/cargo_moon_parity.py
 
 Repeat for: arm 2 (`for m in CARGO_ENV_PREFIX_RE.finditer(text)` -> `for m in []`); the name
 filter (`if CARGO_VAR_NAME in m.group(1).lower()` -> `if True`); the lookahead
-(`(?=\s+\S)` -> `\s+\S`); and the de-duplication (`if match.end in claimed:` -> `if False:`).
+(`(?=[^\S\n]+\S)` -> `\s+\S`); and the de-duplication (`if match.end in claimed:` -> `if False:`).
 Each must red. Record the five results in a scratch file for Task 8.
 
 **IMPORTANT:** restore with `git checkout --` ONLY while there is nothing uncommitted you need.
@@ -794,7 +795,7 @@ Expected: FAIL with `NameError: name 'script_source_refs' is not defined`
 Insert directly after `task_script_refs`:
 
 ```python
-# SMA-605 — SMA-599's L2, closed one level. EXECUTION ONLY.
+# SMA-605 — SMA-599's L2, `source` half closed transitively. EXECUTION ONLY.
 #
 # A `source` / `.` statement is followed. A bare `ci/**/*.sh` mention in a script's text is NOT:
 # running SCRIPT_REF_RE over a followed script's own text was MEASURED at six new edges across
@@ -1033,9 +1034,11 @@ git commit -m "ci(repo): waive the measured CARGO= redirection in release-plz.sh
 
 - [ ] **Step 1: Re-run every mutation against the FINAL code**
 
-The results from Tasks 1-6 were measured against intermediate states. Re-run all fourteen
-mutations from the spec's §6.2 table against the finished file, one at a time, restoring between
-each with `git checkout -- ci/affected-graph/cargo_moon_parity.py`.
+The results from Tasks 1-6 were measured against intermediate states. Re-run **every** mutation
+in the spec's §6.2 table — M1 through M28, the canonical final battery — against the finished
+file, one at a time, restoring between each with
+`git checkout -- ci/affected-graph/cargo_moon_parity.py`. Running only the subset a single task
+introduced leaves half the battery unverified.
 
 **IMPORTANT:** commit everything first. `git checkout --` reverts the whole file, so an
 uncommitted fix is destroyed and the next mutation then runs against original code and prints a
@@ -1117,7 +1120,7 @@ resolver.
 
 In `CLAUDE.md`, the sentence "A10 shares `CARGO_INVOCATION_RE`, built from `LOCK_RESOLVING_VERBS`,
 with A8's derivation" is now partly false. Correct it, and add one sentence recording that a
-gate script's `source` statements are followed one level while bare mentions are not.
+gate script's `source` statements are followed transitively while bare mentions are not.
 
 **Do NOT add a second copy of the `ci-targets:begin` / `ci-targets:end` markers to CLAUDE.md, or
 even mention them inside backticks — a second occurrence makes the count 2 and reds

@@ -1012,7 +1012,7 @@ def task_script_refs(projects, root, target):
     return paths
 
 
-# SMA-605 - SMA-599's L2, closed one level. EXECUTION ONLY.
+# SMA-605 - SMA-599's L2, `source` half closed TRANSITIVELY (cycle-guarded). EXECUTION ONLY.
 #
 # A `source` / `.` statement is followed. A bare `ci/**/*.sh` mention in a script's text is NOT:
 # running SCRIPT_REF_RE over a followed script's own text was MEASURED at six new edges across

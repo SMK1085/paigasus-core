@@ -3,7 +3,7 @@
 Status: design, revision 2 (after adversarial review), 2026-08-30.
 Supersedes limitation **L10** of
 `docs/superpowers/specs/2026-08-29-sma-599-cargo-invocation-invariants-design.md`, and closes
-**L2** one level.
+**L2**'s `source` half with a transitive, cycle-guarded closure.
 
 ## 1. Problem
 
@@ -27,7 +27,9 @@ blob** (`command` + `script` + `args`, never the YAML) and, for a script, **logi
 comment, heredoc and operator-span regions already removed, split on `[;&|]+`.
 
 Every number in §3 is now produced by importing `cargo_moon_parity.py`, calling
-`moon_projects()`, `derive_cargo_tasks()`, `task_script_refs()` and `script_cargo_lines()`, and
+`moon_projects()`, `derive_cargo_tasks()`, `script_cargo_lines()` and — for anything measured
+AFTER the change — `task_script_closure()` rather than `task_script_refs()`, which returns only
+DIRECT references and cannot reach a sourced ecosystem module, and
 running the candidate regexes through the same `_line_regions` / `_join` /
 `COMMAND_SPLIT_RE` pipeline the production scanner uses. Where a number concerns the corpus at
 large rather than the reachable corpus, it says so.
@@ -176,8 +178,9 @@ Ship **three** things:
 
 1. **Arm 1** — a cargo-named variable in command position.
 2. **Arm 2** — the `CARGO=` environment prefix, with wrapper semantics.
-3. **An execution-only source resolver**, closing SMA-599 L2 one level, plus the derivation
-   reorder M11 requires.
+3. **An execution-only source resolver** — a transitive, cycle-guarded closure over `source` /
+   `.` statements — closing SMA-599 L2's `source` half, plus the derivation reorder M11
+   requires.
 
 Without (3), (1) and (2) measure at zero rows on the reachable corpus **by construction**, and
 the §6.3 differential cannot fail — cover that no corpus can validate and that will rot. With
@@ -277,7 +280,7 @@ Arm 2 carries **wrapper** semantics, the rule the three FFI tasks already carry.
   satisfy `seen > 0` after the real `RUN cargo build --locked` line was deleted — the
   floor-satisfied-by-a-non-invocation vacuity mode the file guards against everywhere else.
 
-### 5.5 The source resolver (SMA-599 L2, one level)
+### 5.5 The source resolver (SMA-599 L2, transitive)
 
 A new `script_source_refs(path)` returns the scripts a script **executes** through a
 `source`/`.` statement. Bare `ci/**/*.sh` mentions in script text are **not** followed: M10
@@ -291,9 +294,18 @@ Resolution rules, sized to M12's single statement:
   therefore yields all three ecosystem modules, not only the default one.
 * A `source` whose target resolves to nothing raises `MoonOutputError`, the
   infrastructure-never-a-silent-pass contract `task_script_refs` already uses.
+* The scan reads **executable text**, not raw text (`_executable_text`), reusing
+  `script_cargo_lines`' own `_line_regions` and heredoc walk. Without this, "execution only" was
+  false in a way that ABORTED the gate rather than merely over-reporting: a `source ./missing.sh`
+  inside a heredoc body matched, and the resolver raised on the absent target. Measured on the
+  CodeRabbit PR review, fixed with a fixture and a mutation.
 
-`task_script_closure(projects, root, target)` returns `task_script_refs` plus the transitive
-`script_source_refs` closure, guarded by a visited set. Every present caller of
+`task_script_closure(projects, root, target)` returns `task_script_refs` plus the full
+`script_source_refs` closure. It is a breadth-first **transitive** walk with no depth limit,
+guarded by a visited set keyed on the resolved path, so a mutual `source` terminates. Depth is a
+property of the CORPUS, not of the algorithm: today the corpus is depth 2 (one task blob, one
+`source` statement). Earlier drafts of this spec said "one level", which described the corpus and
+not the code. Every present caller of
 `task_script_refs` moves to it: `derive_cargo_tasks`' `script` branch (which is what M11's
 reorder needs), `check_cargo_locked_scripts`, and `check_cargo_config_inputs`.
 
@@ -454,7 +466,7 @@ both exit 0. No expected-set movement in any case, including `lockfile->all-lint
 ## 7. Documentation
 
 * SMA-599 spec **L10** — rewritten to record this decision and point here.
-* SMA-599 spec **L2** — updated: source statements are now followed one level; bare mentions are
+* SMA-599 spec **L2** — updated: source statements are now followed transitively; bare mentions are
   not, with M10's reason.
 * SMA-599 spec **L11** — a pointer: L10 is closed for the variable shape, while L11's subcommand
   shape (`cargo llvm-cov`, `insta`, `udeps`, `bloat`) stays open.
