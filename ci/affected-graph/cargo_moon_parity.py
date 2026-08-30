@@ -170,6 +170,10 @@ LOCK_RESOLVING_VERBS = (
     "run", "test", "tree", "update", "vendor",
 )
 
+# NOT the whole story since SMA-605: this is the LITERAL arm only. `cargo_matches` merges it with
+# two INDIRECT arms — a cargo-named variable in command position (CARGO_VAR_CMD_RE) and the
+# `CARGO=` environment prefix (CARGO_ENV_PREFIX_RE) — and every consumer reads that merged list,
+# not this regex. A10 has its own sensitive-verb variant, CARGO_VAR_CMD_SENSITIVE_RE.
 CARGO_INVOCATION_RE = re.compile(
     r"\bcargo\s+(?:\+\S+\s+)?(?:" + "|".join(LOCK_RESOLVING_VERBS) + r")\b"
 )
@@ -3777,16 +3781,17 @@ def self_test():
         failures.append("a nested cargo call lost its OWN --locked to the substitution bound")
 
     # SMA-599 L11, pinned rather than left as prose (CodeRabbit round 1). A compiling cargo
-    # PLUGIN is invisible to A10 because both derivations filter on CARGO_INVOCATION_RE, which
-    # is built from LOCK_RESOLVING_VERBS. That exclusion is INTENTIONAL and out of scope here —
-    # widening the regex repo-wide also changes A8 and is tracked as SMA-605 — but it must be
-    # a tested decision, not an accident, so this fixture fails the day the regex widens and
-    # nobody revisits L11.
+    # PLUGIN is invisible to A10 because every arm of `cargo_matches` filters on a VERB LIST, and
+    # A8's is LOCK_RESOLVING_VERBS. That exclusion is INTENTIONAL and still out of scope: SMA-605
+    # closed L10 by adding two arms for INDIRECTION — a cargo-named variable and a `CARGO=`
+    # prefix — WITHOUT widening the verb list, so L11's subcommand shape is untouched. It must
+    # stay a tested decision rather than an accident, so this fixture fails the day the verb list
+    # widens and nobody revisits L11.
     for plugin in ("cargo llvm-cov", "cargo insta test", "cargo udeps", "cargo bloat"):
         if _classify_shell_line(1, f"cd rs && {plugin}"):
             failures.append(
-                f"{plugin!r} now matches CARGO_INVOCATION_RE — A10 can see it, so spec L11 and "
-                f"SMA-605 are stale; revisit them rather than deleting this row"
+                f"{plugin!r} now matches a cargo_matches arm — A10 can see it, so spec L11 is "
+                f"stale; revisit it rather than deleting this row"
             )
 
     # SMA-599 (CodeRabbit round 2) — a `cd` INSIDE a command substitution must still confer
