@@ -53,7 +53,12 @@ generic-`C` claim is stated for the tenancy services only.)
 
 ## Scope
 
-**In scope:** `Organization`, `Team`, `Project`, `Membership`.
+This document covers **two PRs**. Part 1 — everything up to "Limitations" — is the stamping
+work and is what SMA-440 ships first. **Part 2**, below, is the audit-log and domain-event
+trail: required, designed here, implemented in a follow-up PR because it needs a
+transactional refactor of all four tenancy repositories that has nothing to do with columns.
+
+**In scope for Part 1:** `Organization`, `Team`, `Project`, `Membership`.
 
 **Out of scope:** `ServiceAccount` and `ApiKey` stamping. They keep an absent actor and a
 follow-up issue closes them. `ApiKey` needs its own thought first — it has no generic
@@ -452,19 +457,109 @@ authorization decision changes; and with no new crate, no new dependency and no 
 `repo:affected-smoke`, the codegen-drift step and `repo:error-code-single-site` are all
 unaffected.
 
+## Part 2 — the audit-log and domain-event trail (required, ships separately)
+
+An earlier draft listed "no tenancy mutation writes an `audit_log` row or a domain event"
+as an accepted limitation. **It is not accepted.** Every tenancy mutation must write an
+`AuditEntry` and raise a `DomainEvent`, `detach` included. Without it the stamped columns
+are IAM's only record of who touched a node — last-writer-wins, with no history — and a
+`detach` erases its actor completely.
+
+**It ships as a second PR, after this one.** The order is not merely convenient: Part 2's
+`AuditEntry.actor_prn`/`occurred_at` and `DomainEvent.actor_prn`/`occurred_at` are exactly
+`Stamp.by` and `Stamp.at`. Part 1 builds the value Part 2 consumes. The design decisions are
+recorded here so they are not re-litigated.
+
+### P2-D1 — the blocker is transactional, and it is a real refactor
+
+An outbox event must commit **atomically** with the mutation it describes; that is the whole
+point of the outbox. But all four tenancy repositories open and commit their **own**
+transaction internally (`pg_organizations.rs:153-171`, `:193-238`;
+`pg_memberships.rs:135-243`, `:251-269`), and the transaction is a local variable the caller
+never sees.
+
+The house pattern already exists for other aggregates: `PrincipalRepository::create_user_in`
+(`ports.rs:83`), `ServiceAccountRepository::create_in` (`:223`), `ApiKeyRepository::issue_in`
+(`:252`) and `revoke_in` (`:269`). **The four tenancy ports have no `_in` twins.** Adding
+them is required infrastructure, not optional — there is no precedent in this codebase for
+attaching an outbox write to a repository that insists on owning its commit.
+
+So Part 2 adds `create_in`, `rename_in`, `set_status_in`, `attach_in` and `detach_in`, with
+the existing methods becoming thin "open a one-shot UoW, delegate, commit" wrappers —
+exactly as `ApiKeyRepository::revoke` already wraps `revoke_in` (`ports.rs:255-259`).
+
+### P2-D2 — `bump_entity_gen` must move, and this is the sharp edge
+
+`bump_entity_gen()` and `bump_policy_gen()` are called **inside** the repository, after its
+own commit (`pg_organizations.rs:44-59`, `:168-170`). Once the service owns the commit, they
+must move to the service and run after `tx.commit()`.
+
+This is a Cedar **cache-invalidation** path, not bookkeeping. Left inside a repository that
+no longer commits, or called before the commit, it invalidates against a transaction that
+may still roll back — or fails to invalidate at all. It needs its own test.
+
+### P2-D3 — the service shape, copied from `ApiKeyService::issue`
+
+`api_keys.rs:204-283` is the reference. Per mutation: authorize; mint **one**
+`correlation_id` shared by the event and the entry; build both values before any I/O;
+`let tx = self.uow.begin()`; call the `_in` repo method; `outbox.enqueue(&*tx, &event)`;
+`audit.record(&*tx, &entry)`; `tx.commit()`; then the post-commit gen bump.
+
+The four tenancy services therefore gain `uow: Arc<dyn UnitOfWork>`,
+`outbox: Arc<dyn Outbox>` and `audit: Arc<dyn AuditLog>` fields, wired at the composition
+root in `adapters/http/mod.rs` alongside the existing `api_key_uow`/`role_uow` locals.
+
+**A no-op emits nothing.** `ApiKeyService::revoke` already models this: `revoke_in` returns a
+`bool`, and the outbox and audit writes are skipped when it is false. D5's no-op branches get
+the same treatment — a write that changes nothing writes no event and no audit row, for the
+same reason it does not restamp.
+
+### P2-D4 — new `EventType` variants are Rust-only
+
+Confirmed against the code: `EventType` has no proto twin. `DeadLetterEntry.event_type`
+(`iam.proto:616`) and `AuditEntry.action` are plain `string`s, and the NATS payload is
+CloudEvents **JSON** built in `adapters/events/cloud_event.rs`, never protobuf. So new
+variants touch no contract, trip no buf breaking-change check, and trip no codegen drift.
+
+Wire strings follow the enforced `iam.<noun>.<verb-past-tense>` convention — so
+`iam.organization.created`, `iam.organization.renamed`, `iam.organization.archived`,
+`iam.organization.restored`, and the team, project and membership equivalents
+(`iam.membership.attached`, `iam.membership.detached`).
+
+Three compile-time tripwires must be updated together, all of which **fail the build** until
+they agree: `EventType::ALL` is a fixed-size `[EventType; 8]`; `all_lists_every_event_type`
+matches exhaustively with no wildcard arm; and `cloud_event.rs`'s
+`type_matches_the_wire_string_for_every_variant` hand-lists every variant.
+
+**No NATS configuration changes.** `ops/nats/subjects.env:23` grants `PUBLISHER_PUB=("iam.>"
+…)`, a wildcard, and every wire string is required to start with `iam.`. `check-subjects.sh`
+asserts only that `subjects.env` and `accounts.conf.tmpl` agree with each other; it does not
+enumerate event types. `tests/nats_permissions.rs` iterates `EventType::ALL` in a loop, so a
+new variant is exercised automatically. (Adding a tenancy subject to
+`CONSUMER_FILTER_SUBJECTS` — so the gateway's decision cache reacts to, say, an org archive —
+is a separate downstream decision and is **not** part of this work.)
+
+### P2-D5 — a cascading detach emits one event per deleted row
+
+An org detach cascades to the principal's team and project memberships
+(`DETACH_CASCADE_SQL`, `pg_memberships.rs:128-131`). **Each deleted row gets its own
+`AuditEntry` and its own `DomainEvent`**, so "when did this principal lose access to project
+X" is answerable by filtering on that project's PRN. Recording only the org detach, with the
+cascaded nodes buried in a payload, would hide exactly the fact the trail exists to expose.
+
+All rows produced by one API call share **one** `correlation_id` — they are one operation —
+which is what lets a consumer regroup them.
+
+**`detach_in` must return what it deleted.** `MembershipService::detach` takes only a `Uuid`
+(`memberships.rs:83-88`), and the `membership` table stores no PRN columns at all — only FK
+UUIDs (`pg_memberships.rs:46-48`). So the PRNs needed for the entries exist only inside the
+repository, which resolves them by join. `detach_in` therefore returns the
+`MembershipRecord`s it actually removed, mirroring `attach`'s existing return shape
+(`ports.rs:146`). The service then builds its entries from what the repository
+authoritatively observed **inside** the transaction — which also sidesteps the TOCTOU gap a
+read-then-delete would open.
+
 ## Limitations, accepted
-
-**No tenancy mutation writes an `audit_log` row or a domain event.** `EventType` has eight
-variants (`domain_event.rs:118-128`) and none names an organization, team, project or
-membership; no tenancy repository calls `AuditLog::record`. So `created_by`/`modified_by`
-become IAM's **only** record of who touched a tenancy node: last-writer-wins, no history.
-
-**`detach` erases its actor entirely.** It deletes the row (`memberships.rs:86`,
-`pg_memberships.rs:251-269`), and an org detach cascades to team and project memberships
-(`:128-131`). "Who removed this principal from the organization" is arguably the
-highest-value tenancy audit fact, and it stays unrecoverable after this issue. Closing it
-needs an `AuditEntry` on `attach`/`detach`, which is event-trail work, not stamping work —
-it belongs in a follow-up issue, filed alongside the ServiceAccount/ApiKey one.
 
 **`Introspect` will expose membership creators.** `to_proto_membership` also feeds
 `to_introspect_response` (`convert.rs:376`) and `to_introspect_api_key_response` (`:458`),
