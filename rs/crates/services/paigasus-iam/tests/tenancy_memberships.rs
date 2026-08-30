@@ -77,8 +77,18 @@ async fn seed_chain(db: &DatabaseConnection) -> (Organization, Team, Project) {
 
 /// Builds a `Membership` domain value with an explicit `created_at` (bypassing the real
 /// clock) so ordering-sensitive tests get deterministic, strictly increasing timestamps.
+/// The actor stamped as creator is irrelevant to these callers (none assert `created_by`),
+/// so a freshly minted, unseeded id is fine — the column carries no FK (m0011).
 fn membership_at(ids: &KernelIdGenerator, principal_id: &PrincipalId, node: TenancyNodeRef, when: DateTime<Utc>) -> Membership {
-    Membership::new(ids.new_membership_id(), principal_id.clone(), node, when)
+    let stamp = Stamp::new(when, ids.new_principal_id());
+    Membership::new(ids.new_membership_id(), principal_id.clone(), node, &stamp)
+}
+
+/// Rebuilds the `Stamp` a `membership_at`-built `Membership` already carries, for
+/// `repo.attach`'s own `stamp` argument — `PgMembershipRepository::attach` writes
+/// `created_by` from this argument, not from `membership.created_by` (SMA-440).
+fn stamp_of(m: &Membership) -> Stamp {
+    Stamp::new(m.created_at, m.created_by.clone().expect("membership_at always stamps a creator"))
 }
 
 #[tokio::test]
@@ -93,16 +103,22 @@ async fn attach_happy_path_org_then_team_then_project() {
     let repo = PgMembershipRepository::new(db.clone());
 
     let org_membership = membership_at(&ids, &principal, TenancyNodeRef::Organization(org.id.clone()), clock.now());
-    let org_record = repo.attach(&org_membership).await.expect("org attach should succeed");
+    let org_record = repo.attach(&org_membership, &stamp_of(&org_membership)).await.expect("org attach should succeed");
     assert_eq!(org_record.principal_prn, principal.canonical());
     assert_eq!(org_record.node_prn, org.id.canonical());
 
     let team_membership = membership_at(&ids, &principal, TenancyNodeRef::Team(team.id.clone()), clock.now());
-    let team_record = repo.attach(&team_membership).await.expect("team attach should succeed once org membership exists");
+    let team_record = repo
+        .attach(&team_membership, &stamp_of(&team_membership))
+        .await
+        .expect("team attach should succeed once org membership exists");
     assert_eq!(team_record.node_prn, team.id.canonical());
 
     let project_membership = membership_at(&ids, &principal, TenancyNodeRef::Project(project.id.clone()), clock.now());
-    let project_record = repo.attach(&project_membership).await.expect("project attach should succeed (shares the org membership)");
+    let project_record = repo
+        .attach(&project_membership, &stamp_of(&project_membership))
+        .await
+        .expect("project attach should succeed (shares the org membership)");
     assert_eq!(project_record.node_prn, project.id.canonical());
 
     // `find` round-trips each attached membership.
@@ -122,7 +138,7 @@ async fn attach_team_without_org_membership_is_missing_org_membership() {
     let repo = PgMembershipRepository::new(db.clone());
 
     let team_membership = membership_at(&ids, &principal, TenancyNodeRef::Team(team.id.clone()), clock.now());
-    let result = repo.attach(&team_membership).await;
+    let result = repo.attach(&team_membership, &stamp_of(&team_membership)).await;
     assert!(
         matches!(result, Err(RepositoryError::Precondition(PreconditionKind::MissingOrgMembership))),
         "expected Precondition(MissingOrgMembership), got {result:?}"
@@ -141,10 +157,10 @@ async fn attach_duplicate_org_membership_is_conflict() {
     let repo = PgMembershipRepository::new(db.clone());
 
     let first = membership_at(&ids, &principal, TenancyNodeRef::Organization(org.id.clone()), clock.now());
-    repo.attach(&first).await.expect("first org attach should succeed");
+    repo.attach(&first, &stamp_of(&first)).await.expect("first org attach should succeed");
 
     let second = membership_at(&ids, &principal, TenancyNodeRef::Organization(org.id.clone()), clock.now());
-    let result = repo.attach(&second).await;
+    let result = repo.attach(&second, &stamp_of(&second)).await;
     assert!(
         matches!(result, Err(RepositoryError::Conflict(ConflictKind::DuplicateMembership))),
         "expected Conflict(DuplicateMembership) from uq_membership_principal_org, got {result:?}"
@@ -169,7 +185,7 @@ async fn attach_forged_team_prn_is_prn_mismatch() {
     let forged_team_id = TeamId::from_parts(wrong_org, team.id.uuid());
     let forged_membership = membership_at(&ids, &principal, TenancyNodeRef::Team(forged_team_id), clock.now());
 
-    let result = repo.attach(&forged_membership).await;
+    let result = repo.attach(&forged_membership, &stamp_of(&forged_membership)).await;
     assert!(matches!(result, Err(RepositoryError::PrnMismatch)), "expected PrnMismatch, got {result:?}");
 }
 
@@ -189,7 +205,7 @@ async fn attach_to_archived_team_is_node_archived() {
     team_repo.set_status(team.id.uuid(), NodeStatus::Archived, &Stamp::new(clock.now(), archiving_actor)).await.unwrap();
 
     let team_membership = membership_at(&ids, &principal, TenancyNodeRef::Team(team.id.clone()), clock.now());
-    let result = repo.attach(&team_membership).await;
+    let result = repo.attach(&team_membership, &stamp_of(&team_membership)).await;
     assert!(
         matches!(result, Err(RepositoryError::Precondition(PreconditionKind::NodeArchived))),
         "expected Precondition(NodeArchived) (should fire before the org-membership guard), got {result:?}"
@@ -208,7 +224,7 @@ async fn attach_unknown_principal_is_not_found() {
 
     let unknown_principal = PrincipalId::from_prn(Prn::build("iam", "", None, "principal", Uuid::from_u128(123_456)).unwrap());
     let membership = membership_at(&ids, &unknown_principal, TenancyNodeRef::Organization(org.id.clone()), clock.now());
-    let result = repo.attach(&membership).await;
+    let result = repo.attach(&membership, &stamp_of(&membership)).await;
     assert!(matches!(result, Err(RepositoryError::NotFound)), "expected NotFound, got {result:?}");
 }
 
@@ -226,15 +242,15 @@ async fn detach_org_cascades_but_leaves_other_principals_untouched() {
 
     // Principal 1: org + team + project memberships.
     let p1_org = membership_at(&ids, &principal1, TenancyNodeRef::Organization(org.id.clone()), clock.now());
-    let p1_org_record = repo.attach(&p1_org).await.unwrap();
+    let p1_org_record = repo.attach(&p1_org, &stamp_of(&p1_org)).await.unwrap();
     let p1_team = membership_at(&ids, &principal1, TenancyNodeRef::Team(team.id.clone()), clock.now());
-    repo.attach(&p1_team).await.unwrap();
+    repo.attach(&p1_team, &stamp_of(&p1_team)).await.unwrap();
     let p1_project = membership_at(&ids, &principal1, TenancyNodeRef::Project(project.id.clone()), clock.now());
-    repo.attach(&p1_project).await.unwrap();
+    repo.attach(&p1_project, &stamp_of(&p1_project)).await.unwrap();
 
     // Principal 2: org membership only, in the SAME org.
     let p2_org = membership_at(&ids, &principal2, TenancyNodeRef::Organization(org.id.clone()), clock.now());
-    let p2_org_record = repo.attach(&p2_org).await.unwrap();
+    let p2_org_record = repo.attach(&p2_org, &stamp_of(&p2_org)).await.unwrap();
 
     assert_eq!(repo.list_by_principal(principal1.uuid(), 10, 0).await.unwrap().len(), 3);
     assert_eq!(repo.list_by_principal(principal2.uuid(), 10, 0).await.unwrap().len(), 1);
@@ -273,11 +289,11 @@ async fn list_by_principal_orders_by_created_at_and_paginates() {
 
     let base = Utc::now().trunc_subsecs(6);
     let org_membership = membership_at(&ids, &principal, TenancyNodeRef::Organization(org.id.clone()), base);
-    let org_record = repo.attach(&org_membership).await.unwrap();
+    let org_record = repo.attach(&org_membership, &stamp_of(&org_membership)).await.unwrap();
     let team_membership = membership_at(&ids, &principal, TenancyNodeRef::Team(team.id.clone()), base + Duration::seconds(1));
-    let team_record = repo.attach(&team_membership).await.unwrap();
+    let team_record = repo.attach(&team_membership, &stamp_of(&team_membership)).await.unwrap();
     let project_membership = membership_at(&ids, &principal, TenancyNodeRef::Project(project.id.clone()), base + Duration::seconds(2));
-    let project_record = repo.attach(&project_membership).await.unwrap();
+    let project_record = repo.attach(&project_membership, &stamp_of(&project_membership)).await.unwrap();
 
     let page1 = repo.list_by_principal(principal.uuid(), 2, 0).await.unwrap();
     assert_eq!(page1.len(), 2);
@@ -302,9 +318,9 @@ async fn list_by_node_on_org_returns_its_members() {
     let repo = PgMembershipRepository::new(db.clone());
 
     let m1 = membership_at(&ids, &principal1, TenancyNodeRef::Organization(org.id.clone()), clock.now());
-    repo.attach(&m1).await.unwrap();
+    repo.attach(&m1, &stamp_of(&m1)).await.unwrap();
     let m2 = membership_at(&ids, &principal2, TenancyNodeRef::Organization(org.id.clone()), clock.now());
-    repo.attach(&m2).await.unwrap();
+    repo.attach(&m2, &stamp_of(&m2)).await.unwrap();
 
     let members = repo.list_by_node(&TenancyNodeRef::Organization(org.id.clone()), 10, 0).await.unwrap();
     assert_eq!(members.len(), 2);
@@ -312,4 +328,35 @@ async fn list_by_node_on_org_returns_its_members() {
     assert!(prns.contains(&principal1.canonical().as_str()));
     assert!(prns.contains(&principal2.canonical().as_str()));
     assert!(members.iter().all(|m| m.node_prn == org.id.canonical()));
+}
+
+/// SMA-440 D2: `MembershipRecord` is what BOTH wire surfaces project, and it is filled by
+/// nine hand-written SELECTs across five constants. A SELECT that omits `m.created_by`
+/// compiles and then disagrees with the others, which is exactly the "inconsistent across
+/// later reads" defect this issue exists to remove. This asserts all three read paths agree.
+#[tokio::test]
+async fn every_membership_read_path_agrees_on_the_creator() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let ids = KernelIdGenerator;
+    let clock = SystemClock;
+    let (org, _team, _project) = seed_chain(&db).await;
+    let principal = seed_user(&db, 11).await;
+    let actor = ids.new_principal_id();
+    let repo = PgMembershipRepository::new(db.clone());
+
+    let stamp = Stamp::new(clock.now(), actor.clone());
+    let membership = Membership::new(ids.new_membership_id(), principal.clone(), TenancyNodeRef::Organization(org.id.clone()), &stamp);
+    let attached = repo.attach(&membership, &stamp).await.unwrap();
+
+    let found = repo.find(attached.id).await.unwrap().expect("membership exists");
+    let by_principal = repo.list_by_principal(principal.uuid(), 50, 0).await.unwrap();
+    let by_node = repo.list_by_node(&TenancyNodeRef::Organization(org.id.clone()), 50, 0).await.unwrap();
+
+    let expected = Some(stamp.by.clone());
+    assert_eq!(attached.created_by, expected, "attach must return the creator it wrote");
+    assert_eq!(found.created_by, expected, "FIND_SQL must select created_by");
+    assert_eq!(by_principal[0].created_by, expected, "LIST_BY_PRINCIPAL_SQL must select created_by");
+    assert_eq!(by_node[0].created_by, expected, "LIST_BY_ORG_SQL must select created_by");
 }

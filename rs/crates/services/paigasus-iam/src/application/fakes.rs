@@ -344,6 +344,7 @@ fn to_record(m: &Membership) -> MembershipRecord {
         principal_prn: m.principal_id.canonical(),
         node_prn: m.node.canonical(),
         created_at: m.created_at,
+        created_by: m.created_by.clone(),
     }
 }
 
@@ -392,7 +393,7 @@ pub struct InMemoryMemberships(pub TenancyStore);
 
 #[async_trait]
 impl MembershipRepository for InMemoryMemberships {
-    async fn attach(&self, membership: &Membership) -> Result<MembershipRecord, RepositoryError> {
+    async fn attach(&self, membership: &Membership, _stamp: &Stamp) -> Result<MembershipRecord, RepositoryError> {
         let store = &self.0;
         let principal_uuid = membership.principal_id.uuid();
 
@@ -440,6 +441,7 @@ impl MembershipRepository for InMemoryMemberships {
             principal_prn: stored_principal_prn,
             node_prn: node_canonical,
             created_at: membership.created_at,
+            created_by: membership.created_by.clone(),
         })
     }
 

@@ -67,6 +67,7 @@ pub struct MembershipRecord {
     pub principal_prn: String,
     pub node_prn: String,
     pub created_at: DateTime<Utc>,
+    pub created_by: Option<PrincipalId>,
 }
 
 /// Persistence port for user-principals.
@@ -116,7 +117,6 @@ pub trait OrganizationRepository: Send + Sync {
 pub trait TeamRepository: Send + Sync {
     /// In-txn guards (D8): org row locked FOR SHARE; NotFound if org missing;
     /// Precondition(ParentArchived) if org effectively archived.
-    /// `stamp` also stamps rows this method writes that are not entities — the owner grant.
     async fn create(&self, team: &Team, stamp: &Stamp) -> Result<(), RepositoryError>;
     async fn find(&self, id: Uuid) -> Result<Option<NodeView<Team>>, RepositoryError>;
     async fn list_by_org(&self, org: Uuid, limit: u64, offset: u64) -> Result<Vec<NodeView<Team>>, RepositoryError>;
@@ -130,7 +130,6 @@ pub trait TeamRepository: Send + Sync {
 pub trait ProjectRepository: Send + Sync {
     /// In-txn guards: team+org locked FOR SHARE; NotFound if team missing; Precondition(ParentArchived)
     /// if team effectively archived; Backend if project.org != team.org (belt-and-braces, composite FK).
-    /// `stamp` also stamps rows this method writes that are not entities — the owner grant.
     async fn create(&self, project: &Project, stamp: &Stamp) -> Result<(), RepositoryError>;
     async fn find(&self, id: Uuid) -> Result<Option<NodeView<Project>>, RepositoryError>;
     async fn list_by_team(&self, team: Uuid, limit: u64, offset: u64) -> Result<Vec<NodeView<Project>>, RepositoryError>;
@@ -146,7 +145,7 @@ pub trait MembershipRepository: Send + Sync {
     /// node exists + stored-prn byte-match; node effectively active (else Precondition(NodeArchived));
     /// team/project targets: org membership exists, locked (else Precondition(MissingOrgMembership));
     /// duplicate -> Conflict(DuplicateMembership).
-    async fn attach(&self, membership: &Membership) -> Result<MembershipRecord, RepositoryError>;
+    async fn attach(&self, membership: &Membership, stamp: &Stamp) -> Result<MembershipRecord, RepositoryError>;
     async fn find(&self, id: Uuid) -> Result<Option<MembershipRecord>, RepositoryError>;
     /// NotFound if missing. Org memberships cascade: also deletes the principal's
     /// team/project memberships in that org, one transaction (rule 5).

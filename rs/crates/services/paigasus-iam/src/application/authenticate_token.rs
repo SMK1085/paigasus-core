@@ -214,7 +214,7 @@ mod tests {
     use crate::application::fakes::{FixedClock, SeqIds};
     use async_trait::async_trait;
     use chrono::{TimeZone, Utc};
-    use paigasus_iam_core::{Membership, MembershipRecord, TenancyNodeRef, TokenDefect, Transaction};
+    use paigasus_iam_core::{Membership, MembershipRecord, Stamp, TenancyNodeRef, TokenDefect, Transaction};
     use paigasus_kernel::Prn;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
@@ -363,6 +363,7 @@ mod tests {
                     principal_prn: format!("prn:pgs:iam:::principal/{principal}"),
                     node_prn: format!("prn:pgs:iam:::organization/{i}"),
                     created_at: now,
+                    created_by: None,
                 });
             }
         }
@@ -370,7 +371,7 @@ mod tests {
 
     #[async_trait]
     impl MembershipRepository for InMemoryMemberships {
-        async fn attach(&self, _membership: &Membership) -> Result<MembershipRecord, RepositoryError> {
+        async fn attach(&self, _membership: &Membership, _stamp: &Stamp) -> Result<MembershipRecord, RepositoryError> {
             unimplemented!("AuthenticateToken never calls attach")
         }
         async fn find(&self, _id: Uuid) -> Result<Option<MembershipRecord>, RepositoryError> {

@@ -11,10 +11,9 @@ use super::entities::{membership, organization, principal, project, team};
 use super::map_err;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use paigasus_iam_core::{Membership, MembershipRecord, MembershipRepository, NodeStatus, PreconditionKind, RepositoryError, TenancyNodeRef};
-use sea_orm::{
-    ActiveModelTrait, ActiveValue::NotSet, ColumnTrait, ConnectionTrait, DatabaseConnection, DbBackend, EntityTrait, FromQueryResult, QueryFilter, QuerySelect, Set, Statement, TransactionTrait,
-};
+use paigasus_iam_core::{Membership, MembershipRecord, MembershipRepository, NodeStatus, PreconditionKind, PrincipalId, RepositoryError, Stamp, TenancyNodeRef};
+use paigasus_kernel::Prn;
+use sea_orm::{ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseConnection, DbBackend, EntityTrait, FromQueryResult, QueryFilter, QuerySelect, Set, Statement, TransactionTrait};
 use uuid::Uuid;
 
 // `Clone` lets the composition root (`http::AppState::new`) hold a repo handle inside a
@@ -45,6 +44,13 @@ fn missing_ancestor(kind: &str, ancestor_id: Uuid, child_kind: &str, child_id: U
     RepositoryError::Backend(Box::new(std::io::Error::other(format!("{kind} {ancestor_id} missing for {child_kind} {child_id}"))))
 }
 
+/// Same shape as `pg_organizations.rs`/`pg_teams.rs`/`pg_projects.rs`'s helper of the same
+/// name: a malformed stored prn is dropped to `None` rather than failing the read, since a
+/// bad `created_by` must never make an otherwise-valid membership unreadable.
+fn model_to_actor(raw: Option<String>) -> Option<PrincipalId> {
+    raw.and_then(|s| Prn::parse(&s).ok()).map(PrincipalId::from_prn)
+}
+
 /// Row shape shared by every raw-SQL membership listing (`find`/`list_by_principal`/
 /// `list_by_node`): each variant of the union joins `membership` to its own target's table
 /// for that node's prn (D5: memberships carry no prn of their own, only the FK uuid).
@@ -54,6 +60,7 @@ struct MembershipRow {
     principal_prn: String,
     node_prn: String,
     created_at: DateTime<Utc>,
+    created_by: Option<String>,
 }
 
 impl From<MembershipRow> for MembershipRecord {
@@ -63,6 +70,7 @@ impl From<MembershipRow> for MembershipRecord {
             principal_prn: row.principal_prn,
             node_prn: row.node_prn,
             created_at: row.created_at,
+            created_by: model_to_actor(row.created_by),
         }
     }
 }
@@ -70,32 +78,32 @@ impl From<MembershipRow> for MembershipRecord {
 /// `find`'s UNION-ALL shape (binding SQL), filtered by `m.id = $1`: at most one row can match
 /// since `membership.id` is the primary key.
 const FIND_SQL: &str = r#"
-SELECT m.id, pr.prn AS principal_prn, o.prn AS node_prn, m.created_at
+SELECT m.id, pr.prn AS principal_prn, o.prn AS node_prn, m.created_at, m.created_by
   FROM "membership" m JOIN "principal" pr ON pr.id = m.principal_id
   JOIN "organization" o ON o.id = m.org_id
  WHERE m.id = $1
 UNION ALL
-SELECT m.id, pr.prn, t.prn, m.created_at FROM "membership" m
+SELECT m.id, pr.prn, t.prn, m.created_at, m.created_by FROM "membership" m
   JOIN "principal" pr ON pr.id = m.principal_id JOIN "team" t ON t.id = m.team_id
  WHERE m.id = $1
 UNION ALL
-SELECT m.id, pr.prn, pj.prn, m.created_at FROM "membership" m
+SELECT m.id, pr.prn, pj.prn, m.created_at, m.created_by FROM "membership" m
   JOIN "principal" pr ON pr.id = m.principal_id JOIN "project" pj ON pj.id = m.project_id
  WHERE m.id = $1"#;
 
 /// `list_by_principal`'s UNION-ALL shape (binding SQL), `ORDER BY created_at, id` (rule 9)
 /// with `LIMIT`/`OFFSET` bind params.
 const LIST_BY_PRINCIPAL_SQL: &str = r#"
-SELECT m.id, pr.prn AS principal_prn, o.prn AS node_prn, m.created_at
+SELECT m.id, pr.prn AS principal_prn, o.prn AS node_prn, m.created_at, m.created_by
   FROM "membership" m JOIN "principal" pr ON pr.id = m.principal_id
   JOIN "organization" o ON o.id = m.org_id
  WHERE m.principal_id = $1
 UNION ALL
-SELECT m.id, pr.prn, t.prn, m.created_at FROM "membership" m
+SELECT m.id, pr.prn, t.prn, m.created_at, m.created_by FROM "membership" m
   JOIN "principal" pr ON pr.id = m.principal_id JOIN "team" t ON t.id = m.team_id
  WHERE m.principal_id = $1
 UNION ALL
-SELECT m.id, pr.prn, pj.prn, m.created_at FROM "membership" m
+SELECT m.id, pr.prn, pj.prn, m.created_at, m.created_by FROM "membership" m
   JOIN "principal" pr ON pr.id = m.principal_id JOIN "project" pj ON pj.id = m.project_id
  WHERE m.principal_id = $1
 ORDER BY created_at, id LIMIT $2 OFFSET $3"#;
@@ -103,21 +111,21 @@ ORDER BY created_at, id LIMIT $2 OFFSET $3"#;
 /// `list_by_node`'s single-target-table shape (no UNION needed — the node kind is already
 /// known from the resolved ref), same ordering/pagination as `list_by_principal`.
 const LIST_BY_ORG_SQL: &str = r#"
-SELECT m.id, pr.prn AS principal_prn, o.prn AS node_prn, m.created_at
+SELECT m.id, pr.prn AS principal_prn, o.prn AS node_prn, m.created_at, m.created_by
   FROM "membership" m JOIN "principal" pr ON pr.id = m.principal_id
   JOIN "organization" o ON o.id = m.org_id
  WHERE m.org_id = $1
  ORDER BY m.created_at, m.id LIMIT $2 OFFSET $3"#;
 
 const LIST_BY_TEAM_SQL: &str = r#"
-SELECT m.id, pr.prn AS principal_prn, t.prn AS node_prn, m.created_at
+SELECT m.id, pr.prn AS principal_prn, t.prn AS node_prn, m.created_at, m.created_by
   FROM "membership" m JOIN "principal" pr ON pr.id = m.principal_id
   JOIN "team" t ON t.id = m.team_id
  WHERE m.team_id = $1
  ORDER BY m.created_at, m.id LIMIT $2 OFFSET $3"#;
 
 const LIST_BY_PROJECT_SQL: &str = r#"
-SELECT m.id, pr.prn AS principal_prn, pj.prn AS node_prn, m.created_at
+SELECT m.id, pr.prn AS principal_prn, pj.prn AS node_prn, m.created_at, m.created_by
   FROM "membership" m JOIN "principal" pr ON pr.id = m.principal_id
   JOIN "project" pj ON pj.id = m.project_id
  WHERE m.project_id = $1
@@ -134,7 +142,7 @@ const DETACH_CASCADE_SQL: &str = r#"DELETE FROM "membership" m
 
 #[async_trait]
 impl MembershipRepository for PgMembershipRepository {
-    async fn attach(&self, membership: &Membership) -> Result<MembershipRecord, RepositoryError> {
+    async fn attach(&self, membership: &Membership, stamp: &Stamp) -> Result<MembershipRecord, RepositoryError> {
         let txn = self.db.begin().await.map_err(map_err)?;
         let principal_uuid = membership.principal_id.uuid();
 
@@ -231,10 +239,7 @@ impl MembershipRepository for PgMembershipRepository {
             team_id: Set(team_id),
             project_id: Set(project_id),
             created_at: Set(membership.created_at),
-            // `created_by` is Task 5's job (SMA-440) — the domain/port surface for membership
-            // actor stamping isn't wired up yet, so the column is left NotSet and the DB
-            // default (NULL) applies, same as any pre-migration row.
-            created_by: NotSet,
+            created_by: Set(Some(stamp.by.canonical())),
         };
         active.insert(&txn).await.map_err(map_err)?;
 
@@ -245,6 +250,7 @@ impl MembershipRepository for PgMembershipRepository {
             principal_prn,
             node_prn,
             created_at: membership.created_at,
+            created_by: Some(stamp.by.clone()),
         })
     }
 

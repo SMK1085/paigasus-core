@@ -77,7 +77,7 @@ async fn create_membership(
         let resource = resolve_node(&s, &node).await?;
         s.authorize.check(&actor_prn(&ctx), Action::AttachMembership, &resource).await?;
     }
-    let record = s.memberships.attach(&b.principal_prn, &b.node_prn).await?;
+    let record = s.memberships.attach(&b.principal_prn, &b.node_prn, &ctx.principal_id).await?;
     Ok((StatusCode::CREATED, Json(record.into())))
 }
 

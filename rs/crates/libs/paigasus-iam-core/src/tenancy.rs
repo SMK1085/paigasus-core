@@ -282,10 +282,20 @@ pub struct Membership {
     pub principal_id: PrincipalId,
     pub node: TenancyNodeRef,
     pub created_at: DateTime<Utc>,
+    /// Memberships are immutable, so there is no `modified_by` — `iam.proto` marks
+    /// `modified_at == created_at`, and the wire projection reuses this for both.
+    pub created_by: Option<PrincipalId>,
 }
 impl Membership {
-    pub fn new(id: Uuid, principal_id: PrincipalId, node: TenancyNodeRef, created_at: DateTime<Utc>) -> Self {
-        Self { id, principal_id, node, created_at }
+    #[must_use]
+    pub fn new(id: Uuid, principal_id: PrincipalId, node: TenancyNodeRef, stamp: &Stamp) -> Self {
+        Self {
+            id,
+            principal_id,
+            node,
+            created_at: stamp.at,
+            created_by: Some(stamp.by.clone()),
+        }
     }
 }
 

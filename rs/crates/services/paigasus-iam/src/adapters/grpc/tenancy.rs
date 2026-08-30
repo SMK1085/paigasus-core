@@ -606,7 +606,8 @@ impl TenancyService for TenancyGrpc {
     async fn attach_membership(&self, request: Request<AttachMembershipRequest>) -> Result<Response<AttachMembershipResponse>, Status> {
         let started = Instant::now();
         let result: Result<Response<AttachMembershipResponse>, Status> = async {
-            let actor = actor_context(&request)?.principal_id.prn().clone();
+            let actor_principal = actor_context(&request)?.principal_id;
+            let actor = actor_principal.prn().clone();
             let req = request.into_inner();
             if self.state.enforce_tenancy {
                 let node = parse_node_prn(&req.node_prn).map_err(convert::status_to_grpc)?;
@@ -616,7 +617,12 @@ impl TenancyService for TenancyGrpc {
             // Unlike the node CRUD RPCs above, `MembershipService::attach` takes the raw wire PRN
             // strings directly — it parses/validates them itself (principal + node), so there is
             // no separate `node_uuid` step here.
-            let record = self.state.memberships.attach(&req.principal_prn, &req.node_prn).await.map_err(convert::status_to_grpc)?;
+            let record = self
+                .state
+                .memberships
+                .attach(&req.principal_prn, &req.node_prn, &actor_principal)
+                .await
+                .map_err(convert::status_to_grpc)?;
             Ok(Response::new(AttachMembershipResponse {
                 membership: Some(convert::to_proto_membership(&record)),
             }))
