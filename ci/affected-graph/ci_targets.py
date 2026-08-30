@@ -2639,7 +2639,8 @@ def main():
          "    moon.yml task script; or repo:actionlint's, from ci/actionlint/run.sh — so that\n"
          "    gate (or its negative control) would not run at all.\n"
          "    Fix: restore the exact line; see RUN_SH_CALL_SITES, SELF_SCHEDULED_GATES,\n"
-         "    ACTIONLINT_SH_CALL_SITES and RELEASE_PARITY_SH_CALL_SITES in\n"
+         "    ACTIONLINT_SH_CALL_SITES, RELEASE_PARITY_SH_CALL_SITES,\n"
+         "    WORKFLOW_CREDENTIALS_SH_CALL_SITES and RELEASE_PLAN_SH_CALL_SITES in\n"
          "    ci/affected-graph/ci_targets.py.\n"
          "    A row prefixed `ci/actionlint/run.sh:` means repo:actionlint would run its checks\n"
          "    while asserting nothing — its self-tests or its mutation battery are no longer\n"
@@ -2652,7 +2653,12 @@ def main():
          "    assertion or report arm breaks or misreports the control's own verdict).\n"
          "    A row prefixed `ci/workflow-credentials/run.sh:` means the same for that gate's\n"
          "    five pinned --negative-control lines — the flag parse, the dispatch arm, the\n"
-         "    failure guard, or the report line."),
+         "    failure guard, or the report line.\n"
+         "    A row prefixed `ci/release-plan/run.sh:` means one of the nine pinned lines in\n"
+         "    that wrapper is gone — a flag parse, a mode dispatch arm, the fail-safe guard or\n"
+         "    its write, or the negative control's assertions and report arm. The fail-safe\n"
+         "    lines are the load-bearing ones: without them an inconclusive decision stops\n"
+         "    reporting 'build' and the release path can be skipped silently."),
         (bad_invocation,
          "A `moon ci` invocation in .github/workflows/ci.yml does not hand it the WHOLE `T`\n"
          "    array. Every check above asserts what is IN `T`; this one asserts `T` is what runs.\n"

@@ -287,6 +287,13 @@ over `run:` only and would have missed `uses: pypa/gh-action-pypi-publish`.
   id yields `''` forever, silently.
 - **V9d:** `plan`'s decision step invokes `ci/release-plan/run.sh`. Without it V9c passes on an
   inline `echo nothing_to_release=true`.
+- **V9e:** that step runs **exactly one** command — the checker invocation and nothing else. A
+  second command in the same step can overwrite `$GITHUB_OUTPUT` after the checker has written
+  it, which passes both V9c and V9d and silently drops every release. This clause was added
+  during review: the shape was first parked as unreachable by any structural guard, and that
+  ruling was wrong — a segment count catches it. A `plan` job that legitimately needs setup work
+  does it in its own steps, which §3.1 asks for anyway. The residual is narrower and stated in §6:
+  a *later* step in `plan` can still overwrite the output.
 
 **Constraint on the invocation.** `command_segments` is per **physical line**
 (`release_guard.py:214`), so any command in this file must not be split across a backslash
@@ -377,7 +384,7 @@ SMA-603 fix wave — the 34-anchor figure was measured and is unchanged.)
 ## 4. Scope
 
 **In:** `ci/release-plan/`; the `plan` job and the gating change on
-`wheels`/`prebuild`/`proto-dist`; V8a–d and V9a–d; the `_OK_MAIN` restructure and 34 re-derived
+`wheels`/`prebuild`/`proto-dist`; V8a–d and V9a–e; the `_OK_MAIN` restructure and 34 re-derived
 fixture rows; check 11 with `SELF_TEST_COUNT` 12 → 13 and its `ACTIONLINT_SH_CALL_SITES` pins;
 the five documentation items.
 
