@@ -360,63 +360,65 @@ this widens A8 and A10 and adds no assertion.
 
 ### 6.2 Mutation proofs (AC 2)
 
-**MEASURED against the final code, 26 mutations, 26 killed.** Each was applied to
-`cargo_moon_parity.py`, `--self-test` was run, and the file restored. A mutation that survives
-means the fixture asserts nothing; three did survive on the first pass and each one bought a new
-fixture rather than being recorded as acceptable.
+**MEASURED against the final code: 28 mutations, 28 killed, 0 survivors.** Each was applied to
+`cargo_moon_parity.py`, `--self-test` was run, and the file restored. Every mutation label below
+is the edit that was actually performed, not a paraphrase of it.
 
 | # | Mutation | Result |
 |---|---|---|
 | M1 | delete arm 1 from the merged list | KILLED |
 | M2 | delete arm 2 from the merged list | KILLED |
 | M3 | relax arm 1's name filter to any name | KILLED |
-| M4 | delete arm 2's `(?=\s+\S)` lookahead | KILLED |
-| M5 | disable end-offset de-duplication | KILLED |
-| M6 | sort the merged list by position before kind | KILLED |
-| M7 | make `_row_reports` kind-blind | KILLED |
-| M8 | kind-blind, **emission loop only** | KILLED |
-| M9 | kind-blind, **waiver-health loop only** | KILLED |
-| M10 | revert the `--no-deps` carve-out to `CARGO_METADATA_RE` | KILLED |
-| M11 | revert `_classify_shell_line` to the literal regex | KILLED |
-| M12 | drop arm 2 from `derive_cargo_tasks`' blob branch | KILLED |
-| M13 | drop arm 1 from `derive_cargo_tasks`' blob branch | KILLED |
-| M14 | drop the arms from `check_cargo_locked`'s blob test | KILLED |
-| M15 | drop arm 2 from `check_cargo_locked`'s wrapper test | KILLED |
-| M16 | count merged matches in the Dockerfile floor | KILLED |
-| M17 | revert the Dockerfile to the literal-only scan | KILLED |
-| M18 | reuse A8's verb list for A10's arm | KILLED |
-| M19 | drop A10's arm 1 | KILLED |
-| M20 | drop arm 2's unconditional sensitivity | KILLED |
-| M21 | drop the transitive source closure | KILLED |
-| M22 | resolve a multiply-assigned variable instead of globbing | KILLED |
-| M23 | drop the source cycle guard | KILLED (by HANG — see below) |
-| M24 | follow bare `ci/**/*.sh` mentions too | KILLED |
-| M25 | silently skip a source resolving to nothing | KILLED |
-| M26 | drop the repo-containment guard on a resolved source | KILLED |
+| M4 | arm 2's lookahead -> a **consuming** tail (`(?=[^\S\n]+\S)` -> `[^\S\n]+\S`) | KILLED |
+| M5 | let arm 2's lookahead cross a **newline** (`[^\S\n]` -> `\s`) | KILLED |
+| M6 | disable end-offset de-duplication | KILLED |
+| M7 | sort the merged list by position before kind | KILLED |
+| M8 | make `_row_reports` kind-blind (both loops) | KILLED |
+| M9 | kind-blind, **emission loop only** | KILLED |
+| M10 | kind-blind, **waiver-health loop only** | KILLED |
+| M11 | revert the `--no-deps` carve-out to `CARGO_METADATA_RE` | KILLED |
+| M12 | revert `_classify_shell_line` to the literal regex | KILLED |
+| M13 | drop arm 2 from `derive_cargo_tasks`' blob branch | KILLED |
+| M14 | drop arm 1 from `derive_cargo_tasks`' blob branch | KILLED |
+| M15 | drop the arms from `check_cargo_locked`'s blob test | KILLED |
+| M16 | drop arm 2 from `check_cargo_locked`'s wrapper test | KILLED |
+| M17 | count merged matches in the Dockerfile floor | KILLED |
+| M18 | revert the Dockerfile to the literal-only scan | KILLED |
+| M19 | reuse A8's verb list for A10's arm | KILLED |
+| M20 | drop A10's arm 1 | KILLED |
+| M21 | drop arm 2's unconditional sensitivity | KILLED |
+| M22 | drop the transitive source closure | KILLED |
+| M23 | resolve a multiply-assigned variable instead of globbing | KILLED |
+| M24 | drop the source cycle guard | KILLED (by HANG — see below) |
+| M25 | follow bare `ci/**/*.sh` mentions too | KILLED |
+| M26 | silently skip a source resolving to nothing | KILLED |
+| M27 | drop the repo-containment guard on a resolved source | KILLED |
+| M28 | drop the resolver's entry `path.resolve()` | KILLED |
 
-**Three first-pass survivors, and what each bought.** They are recorded because a survivor is
-evidence about the FIXTURES, and the spec claimed coverage each did not have.
+**SIX first-pass survivors, and what each bought.** A survivor is evidence about the FIXTURES,
+never a result to accept, so each one is recorded with the fixture that now kills it. All six
+were found during implementation or local review, not predicted by the design.
 
-* **M4** survived because revision 1's justification for the lookahead was wrong (M6): under the
-  exact-`CARGO` predicate, `export CARGO=/p` reports nothing either way. Measured over eight
-  candidate shapes, exactly one separates the two — two consecutive `CARGO=` prefixes, where
-  consuming the trailing word eats the second prefix's leading separator. That is now the
-  fixture.
-* **M9 and M8** survived in turn. M9 is the BLOCKER the adversarial review predicted: the
-  waiver-health loop can be left kind-blind on its own, and then an honest waiver for an `env`
-  row reads as STALE. It bought the waiver round-trip fixture. M8 then survived because that
-  fixture only exercises the WAIVED path — the unwaived assertion is what pins the emission half.
-  Both halves are now killed independently.
-* **M20** survived because a blob-level `CARGO=` is already `wrapper` by derivation, so the
-  `kind == "wrapper"` branch covered it. The clause is load-bearing only for a redirection inside
-  a FOLLOWED SCRIPT — SMA-599 L13's shape — which is now its fixture.
-* **M26** survived because the containment guard was added during the plan's own self-review and
-  carried no fixture. It has one now.
+| First-pass survivor | Why it survived | Fixture added |
+|---|---|---|
+| M4 | §5.3's original justification for the lookahead was wrong. Under the exact-`CARGO` predicate, `export CARGO=/p` reports nothing whether the tail is consumed or looked ahead. Measured over eight candidate shapes, exactly ONE separates them. | `CARGO=/p CARGO=/q tool update` -> two `env` matches. Consuming eats the second prefix's leading separator, so `finditer` resumes mid-token and finds one. |
+| M10 | the adversarial review predicted this exactly. The waiver-health loop can be left kind-blind alone, and then an honest waiver for an `env` row reads as STALE — permanently red, unwaivable. | the waiver round trip: every `env` row waived -> **no rows at all**. |
+| M9 | that round-trip fixture only exercises the WAIVED path, so the emission half stayed unpinned. | the unwaived assertion: `CARGO=/p release-plz update --locked` must still report. |
+| M21 | a blob-level `CARGO=` is already `wrapper` by derivation, so `kind == "wrapper"` covered it. The clause is load-bearing only one level down. | a `CARGO=` inside a FOLLOWED SCRIPT — SMA-599 L13's shape, where the task derives as `script`. |
+| M27 | the repo-containment guard was added during the plan's own self-review and shipped with no fixture. | a `source` naming a file outside the repo must raise. |
+| M28 | `resolve()` is a no-op at every current call site, so it was unasserted hardening. | `script_source_refs` on a RELATIVE path must resolve identically. |
 
-**M23 kills by HANG, not by a red.** Removing the cycle guard makes `task_script_closure` loop
+**M5 was not a mutation first — it was a live defect**, found by the CodeRabbit local review and
+confirmed by measurement. `\s` in the trailing lookahead crosses a newline, so
+`export CARGO=/p` followed by an unrelated command on the NEXT line matched as a wrapper. That
+matters because **fifteen real moon blobs are multi-line `script:` blocks**, so it was a live
+false positive on the blob arm, not a hypothetical one. It is in the accepted false-positive
+direction — loud, not silent — but it would have fired on real input.
+
+**M24 kills by HANG, not by a red.** Removing the cycle guard makes `task_script_closure` loop
 forever on a mutual `source`; the harness reports TIMEOUT rather than rc 1. In CI that is a job
-timeout, which is loud rather than silent, so the guard is asserted — but it is asserted by
-liveness, not by an assertion message. Recorded rather than smoothed over.
+timeout, which is loud rather than silent, so the guard IS asserted — but by liveness, not by an
+assertion message. Recorded rather than smoothed over.
 
 ### 6.3 Corpus differential (AC 3, AC 4)
 
