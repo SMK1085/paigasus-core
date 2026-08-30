@@ -33,6 +33,7 @@ import collections
 import fnmatch
 import inspect
 import json
+import os
 import re
 import subprocess
 import sys
@@ -2716,6 +2717,25 @@ def self_test():
             failures.append(
                 "task_script_closure did not reach a script two levels down — the closure is "
                 "one level deep, so a cargo call in a sourced module stays invisible"
+            )
+
+        # A RELATIVE script path must resolve the same way an absolute one does. `$HERE` expands
+        # to `str(path.parent)`, so without the `resolve()` at entry the relative expansion made
+        # the `not candidate.is_absolute()` branch prepend the parent a SECOND time and every
+        # source resolved to nothing. It failed LOUD rather than quietly, but a guard with no
+        # fixture is a guard nobody notices deleting.
+        cwd = os.getcwd()
+        try:
+            os.chdir(sroot)
+            rel_got = sorted(x.name for x in script_source_refs(Path("ci/run.sh"), sroot))
+        except MoonOutputError:
+            rel_got = ["<raised>"]
+        finally:
+            os.chdir(cwd)
+        if rel_got != ["a.sh", "b.sh"]:
+            failures.append(
+                f"script_source_refs on a RELATIVE path resolved {rel_got}, expected "
+                f"['a.sh', 'b.sh'] — the entry `resolve()` is gone and `$HERE` expands relative"
             )
 
         # A source pointing OUTSIDE the repo resolves to nothing, by the containment filter.
