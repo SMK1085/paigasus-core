@@ -1,140 +1,241 @@
 # SMA-605 — a cargo invocation through a variable, seen by A8 and A10
 
-Status: design, approved 2026-08-30.
+Status: design, revision 2 (after adversarial review), 2026-08-30.
 Supersedes limitation **L10** of
-`docs/superpowers/specs/2026-08-29-sma-599-cargo-invocation-invariants-design.md`.
+`docs/superpowers/specs/2026-08-29-sma-599-cargo-invocation-invariants-design.md`, and closes
+**L2** one level.
 
 ## 1. Problem
 
-`ci/affected-graph/cargo_moon_parity.py` finds cargo through `CARGO_INVOCATION_RE`, which
-needs the literal word `cargo` followed by a lock-resolving verb. Two assertions read that
-regex:
+`ci/affected-graph/cargo_moon_parity.py` finds cargo through `CARGO_INVOCATION_RE`, which needs
+the literal word `cargo` followed by a lock-resolving verb. Two assertions read that regex:
 
-* **A8** (`check_cargo_locked`, `check_cargo_locked_scripts`) asserts `--locked`. An unlocked
-  cargo call re-resolves the graph and rewrites an inconsistent `rs/Cargo.lock` in place.
+* **A8** (`check_cargo_locked`, `check_cargo_locked_scripts`, `check_dockerfile_locked`) asserts
+  `--locked`. An unlocked cargo call re-resolves the graph and rewrites an inconsistent
+  `rs/Cargo.lock` in place.
 * **A10** (`check_cargo_config_inputs`) asserts the `rs/.cargo/config.toml` task input. Its
   derivation filters on the same regex.
 
 An invocation that reaches cargo through a variable carries no literal `cargo` token. Neither
 assertion sees it.
 
-## 2. Measurements
+## 2. Method
 
-Every number below comes from the real corpus (`ci/**/*.sh`, `moon.yml`,
-`.moon/tasks/*.yml`) on 2026-08-30. Reasoning about this classifier has produced two silent
-false negatives before (SMA-599 §7), so nothing here is argued from first principles.
+Revision 1 of this spec measured by grep over physical file text. That was wrong, and the
+adversarial review caught it. A8 and A10 do not read file text: they read moon's **resolved
+blob** (`command` + `script` + `args`, never the YAML) and, for a script, **logical lines** with
+comment, heredoc and operator-span regions already removed, split on `[;&|]+`.
 
-### M1 — the shape the issue names does not exist
+Every number in §3 is now produced by importing `cargo_moon_parity.py`, calling
+`moon_projects()`, `derive_cargo_tasks()`, `task_script_refs()` and `script_cargo_lines()`, and
+running the candidate regexes through the same `_line_regions` / `_join` /
+`COMMAND_SPLIT_RE` pipeline the production scanner uses. Where a number concerns the corpus at
+large rather than the reachable corpus, it says so.
+
+## 3. Measurements
+
+### M1 — no variable holding cargo is used in command position
+
+The repo holds **zero** instances of `"$VAR" <verb>` where the variable holds a cargo path.
+Instances of the *shape* do exist — `"$RELEASE_PLZ_BIN" update`, `git -C "$dir" add -A` — and M4
+lists them. Revision 1 said "zero instances of the shape", which M4 contradicted two paragraphs
+later.
 
 SMA-605 names `ci/release-parity/ecosystems/release-plz.sh:63` as the one call site. That line
 assigns `CARGO_BIN`, but no line runs `"$CARGO_BIN" <verb>`. Line 152 uses the value as an
-environment variable:
+environment variable instead:
 
 ```sh
 if ! out="$(cd "$1" && CARGO="$CARGO_BIN" CARGO_NET_OFFLINE=true "$RELEASE_PLZ_BIN" update …)"
 ```
-
-The repo holds **zero** instances of `"$VAR" <cargo-verb>`.
 
 ### M2 — a fourth indirection shape, not named in the issue
 
 `CARGO=<path> <tool>` reaches cargo through a tool that shells out to it. This is what the repo
 actually does. None of the three options in the issue covers it.
 
-### M3 — naive widening measures at three false positives and no true positives
+### M3 — only three scripts are followed today
 
-Accepting any variable in command position before a lock-resolving verb gives three rows:
+`task_script_refs` reads a task's own resolved blob. Across the whole derived set that yields
+**three** scripts: `ci/actionlint/run.sh`, `ci/publish-metadata/run.sh`,
+`ci/version-lockstep/run.sh`. Every claim about a "followed" corpus below is against those three.
 
-| Site | Text | Why it is wrong |
-|---|---|---|
-| `ci/publish-metadata/run.sh:1647` | `echo "negative control: $failures check(s) failed to bite"` | prose in an `echo`; the conservative rule does not strip strings (SMA-599 L8) |
-| `ci/release-parity/ecosystems/release-plz.sh:152` | `"$RELEASE_PLZ_BIN" update` | release-plz, not cargo |
-| `ci/release-plan/run.sh:149` | `git -C "$dir" add -A` | `git add`; `$dir` is an argument to `git -C` |
+### M4 — naive widening costs ONE waiver, not three
 
-The third is the expensive one. `ci/release-plan/run.sh` holds **zero** literal cargo
-invocations, so `repo:release-plan` is not derived at all today. That false positive makes it
-kind `script` and pulls a cargo-free task into **both** A8 and A10 scope.
+Accepting any variable in command position before a lock-resolving verb, measured through the
+production pipeline:
 
-### M4 — a name-constrained command-position arm measures at zero rows
+| Corpus | rows |
+|---|---|
+| the three **followed** scripts | **1** |
+| all `ci/**/*.sh` | 3 |
 
-If the variable's own name must contain `cargo` (case-insensitive), the corpus reports **0
-rows**: no false positives, and no true positives either. This arm is forward cover.
+The one reachable row is `ci/publish-metadata/run.sh:1647`,
+`echo "negative control: $failures check(s) failed to bite"` — prose in an `echo`, which the
+conservative rule does not strip (SMA-599 L8).
 
-### M5 — the environment arm must key on the exact name `CARGO`
+The two unreachable rows are `ci/release-parity/ecosystems/release-plz.sh:152`
+(`"$RELEASE_PLZ_BIN" update`) and `ci/release-plan/run.sh:149` (`git -C "$dir" add -A`).
+Revision 1 claimed the second "pulls a cargo-free task into both A8 and A10 scope". That was
+wrong twice: `moon.yml` names `ci/release-plan/**/*` only as an **input glob** (`:220`) and in a
+comment (`:215-216`), never as an invocation, so no task follows it; and `add` is absent from
+`CONFIG_SENSITIVE_VERBS`, so A10 could not have taken it either. This is the rows-vs-reachable
+conflation SMA-599 §2.2 already warns about.
+
+### M5 — a cargo-named command-position arm measures at zero rows
+
+If the variable's own name must contain `cargo`, case-insensitive: **0 rows** on the followed
+corpus and **0** across all `ci/**/*.sh`.
+
+### M6 — the environment arm must key on the exact name `CARGO`
 
 Line 152 carries two cargo-named prefixes: `CARGO="$CARGO_BIN"` and `CARGO_NET_OFFLINE=true`.
 Only the first names the cargo binary. `CARGO_NET_OFFLINE`, `CARGO_HOME` and `CARGO_TERM_COLOR`
 configure cargo; they do not redirect it. A "name mentions cargo" predicate reports them.
 
-Both predicates measure identically on today's corpus (1 candidate, in an unfollowed file), so
-this is decided on principle, not on the measurement.
+Both predicates measure identically on today's corpus, so this is decided on principle.
 
-A crude probe consuming the trailing word missed the second of two consecutive prefixes:
-`CARGO_NET_OFFLINE=true CARGO=/p tool` reports nothing, because the first prefix eats the
-separator the second needs. The arm therefore reads its trailing word through a lookahead.
+Revision 1 justified the arm's lookahead with a consecutive-prefix failure. That justification
+was wrong: it was measured against the **rejected** "mentions cargo" predicate. Under exact
+`CARGO=`, `CARGO_NET_OFFLINE=true` never matches, so nothing is consumed and the two variants
+behave alike. §6.2 states the lookahead's real job instead.
 
-### M6 — no substitution-body scan is needed in A8
+### M7 — no substitution-body scan is needed in A8
 
 `_classify_shell_line` splits a logical line on `[;&|]+` **before** matching, and that split
-already reaches inside a `$( … )` body. Measured on line 152 above:
+already reaches inside a `$( … )` body. Measured on line 152:
 
 ```
 seg[1] = ' CARGO="$CARGO_BIN" CARGO_NET_OFFLINE=true "$RELEASE_PLZ_BIN" update 2>'
 arm-2 match: ' CARGO="$CARGO_BIN"'
 ```
 
-An earlier draft of this design added a substitution-body scan to A8. That draft was wrong: it
-generalised from a probe that stripped substitutions, which the production scanner does not do.
-`_cwd_inside_rs` already scans both the stripped text and each substitution body, so A10 needs
-nothing either. The mechanism is dropped.
+An earlier draft added a substitution-body scan to A8. It generalised from a probe that stripped
+substitutions, which the production scanner does not do. `_cwd_inside_rs` already scans both the
+stripped text and each substitution body, so A10 needs nothing either. The mechanism is dropped.
 
-### M7 — no Moon task sets `CARGO`
+### M8 — the resolved blob excludes `env`
 
-No `moon.yml` or `.moon/tasks/*.yml` task declares `CARGO` in an `env:` block.
+`moon_projects()` joins `command` + `script` + `args` only. A Moon task declaring
+`env: {CARGO: /p}` beside a wrapper is invisible to the blob scan **whatever** arm 2 does. No
+task declares `CARGO` today, but that is a fact about the corpus, not about coverage. Recorded
+as R8.
 
-### M8 — the one real site is unfollowed
+### M9 — `SCRIPT_REF_RE` cannot match a shellcheck `source=` directive
 
-`ci/release-parity/ecosystems/release-plz.sh` is **sourced** by `ci/release-parity/run.sh`.
-`task_script_refs` reads a task's own blob, which names `ci/release-parity/run.sh` and nothing
-else, so the ecosystem module is never scanned (SMA-599 L2). The environment arm gives forward
-cover there; it does not give present coverage.
+The regex requires `^` or `[\s;&|(]` before the path. Measured:
 
-## 3. Decision
+```
+'# shellcheck source=ci/release-parity/ecosystems/release-plz.sh'  ->  []
+'source "$HERE/ecosystems/$ECOSYSTEM.sh"'                          ->  []
+'bash ci/release-parity/run.sh --ecosystem release-plz'            ->  ['ci/release-parity/run.sh']
+```
 
-Take option 1 from the issue, **narrowed**, and add an arm for the shape M2 found.
+### M10 — naive one-level-deeper following follows PROSE
+
+Running `SCRIPT_REF_RE` over a followed script's own text yields six new scripts, and **every
+edge is a comment or a string constant**:
+
+| Edge | Origin |
+|---|---|
+| `publish-metadata → osv`, `→ next-env` | comment, `:9-10` |
+| `publish-metadata → release-parity` | comments `:1686`, `:1726` |
+| `actionlint → affected-graph` | comments `:2016`, `:2041`, `:2046` |
+| `actionlint → cargo-lock-integrity` | the `T_CARGO_LOCK_STEP_REQUIRED` pin array, `:2152-2154` |
+| `actionlint → release-plan` | the same shape |
+
+Cost: six scripts into A8 scope on the strength of comments, one new waiver
+(`ci/cargo-lock-integrity/run.sh:60`, an `::error::` string), and **zero** true positives. It
+also still does not reach `release-plz.sh`. Rejected in §4.
+
+### M11 — `repo:release-parity` is not derived at all
+
+`derive_cargo_tasks` reports `{}` for every `release-parity*` task, because
+`ci/release-parity/run.sh` holds **0** cargo lines — the cargo lives one level down in the
+sourced module. So `task_script_refs` never runs for it, and no amount of source resolution helps
+unless the derivation also follows before deciding `kind`. Closing L2 is two coupled changes,
+not one.
+
+### M12 — the source corpus is one statement
+
+`ci/**/*.sh` holds exactly **one** `source`/`.` statement:
+
+```sh
+# ci/release-parity/run.sh
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"   # :7
+source "$HERE/ecosystems/$ECOSYSTEM.sh"                # :21
+```
+
+`ci/release-parity/ecosystems/` holds three modules. Under today's classifier they produce **0**
+reporting rows between them. With arm 2 shipped, `release-plz.sh:152` becomes **one** reporting
+row — the change's single live true positive, and its single new waiver.
+
+## 4. Decision
+
+Ship **three** things:
+
+1. **Arm 1** — a cargo-named variable in command position.
+2. **Arm 2** — the `CARGO=` environment prefix, with wrapper semantics.
+3. **An execution-only source resolver**, closing SMA-599 L2 one level, plus the derivation
+   reorder M11 requires.
+
+Without (3), (1) and (2) measure at zero rows on the reachable corpus **by construction**, and
+the §6.3 differential cannot fail — cover that no corpus can validate and that will rot. With
+(3), arm 2 has a live true positive to prove itself against.
 
 Rejected, with reasons:
 
-* **Naive widening (issue option 1, unmodified).** M3: three false positives, no true positives,
-  at least three new waivers, and one of them bootstraps a cargo-free task into two assertions.
+* **Naive widening (issue option 1, unmodified).** Its numeric cost is one waiver (M4), not the
+  three revision 1 claimed, so the numeric argument does not carry the decision. The argument
+  that does: `add`, `run`, `test`, `check`, `build` and `update` are ordinary English and CLI
+  words. In a repo whose gates are shell scripts full of prose diagnostics, the *future*
+  false-positive rate of an unconstrained variable-plus-verb match is unbounded, and each one
+  lands on a required check with a message no reviewer will immediately understand (SMA-599 L4).
 * **Ban the indirection (issue option 2).** A name-based ban on `CARGO=`-style assignment hits
-  three sites, two of which are unrelated array constants in `ci/actionlint/run.sh`
-  (`T_CARGO_LOCK_STEP_REQUIRED`, `T_CARGO_LOCK_SH_CALL_SITES`). It constrains how gate scripts
-  may name a constant, and it still misses M2.
-* **Accept and document (issue option 3).** It satisfies AC 2 vacuously and leaves the gap open.
+  three sites, two of which are unrelated pin arrays in `ci/actionlint/run.sh`. It constrains how
+  a gate script may name a constant, and it still misses M2.
+* **Accept and document (issue option 3).** Satisfies AC 2 vacuously.
+* **Naive one-level-deeper following.** M10: six prose edges, one waiver, zero true positives,
+  and it still misses the target.
+* **Resolve the shellcheck `source=` directive instead of globbing.** Reaches `release-plz.sh`
+  exactly and no other module, but coverage vanishes silently if the directive is deleted, and
+  it leaves `semantic-release.sh` and `python-semantic-release.sh` unscanned. Both are real code
+  a Moon task executes.
 
-## 4. Design
+## 5. Design
 
-`CARGO_INVOCATION_RE` is unchanged. Two new regexes sit beside it, merged into one
-start-sorted match list, so `_classify_shell_line`'s per-invocation tail arithmetic keeps
-working without modification.
+### 5.1 The merged match list
 
-### 4.1 Arm 1 — a cargo-named variable in command position
+`CARGO_INVOCATION_RE` is unchanged. Two new regexes sit beside it. A helper returns one
+start-sorted list of `CargoMatch(start, end, verb, kind)` records, where `kind` is `literal`,
+`var` or `env`. A namedtuple rather than a raw `re.Match`, for two reasons: `_classify_shell_line`
+needs `start`/`end` for its per-invocation tail arithmetic, and the `--no-deps` carve-out needs
+the **verb** (see 5.4).
+
+Arm 1's name filter runs **before** the list is merged. A rejected match left in the list would
+still act as a `stop` boundary and truncate the preceding invocation's tail.
+
+### 5.2 Arm 1 — a cargo-named variable in command position
 
 ```python
 CARGO_VAR_CMD_RE = re.compile(
     r"""(?:^|[\s;&|(])["']?\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?["']?\s+"""
-    r"(?:\+\S+\s+)?(?:" + "|".join(LOCK_RESOLVING_VERBS) + r")\b"
+    r"(?:\+\S+\s+)?(" + "|".join(LOCK_RESOLVING_VERBS) + r")\b"
 )
 ```
 
-The captured name is post-filtered on `"cargo" in name.lower()`. The predicate is a function,
-not a regex, so the filter reads plainly and the failing name appears in the row.
+The captured name is post-filtered on `"cargo" in name.lower()`. The predicate is a function, so
+the rejected name can appear in a diagnostic.
 
-This is a real invocation with a tail, so it behaves exactly like a literal match: a `--locked`
-in its own tail satisfies A8.
+This is a real invocation with a tail, so a `--locked` in its own tail satisfies A8 — with one
+stated exception, the `--no-deps` carve-out in 5.4.
 
-### 4.2 Arm 2 — the `CARGO=` environment prefix
+Arm 1 reports **zero** rows on the corpus even after the resolver lands (M5, M12): only arm 2
+gains a live true positive. Its constant therefore carries the same warning `FFI_MARKERS` already
+carries for `maturin` — that this is forward cover, and must not be mistaken for measured
+coverage.
+
+### 5.3 Arm 2 — the `CARGO=` environment prefix
 
 ```python
 CARGO_ENV_PREFIX_RE = re.compile(
@@ -142,128 +243,234 @@ CARGO_ENV_PREFIX_RE = re.compile(
 )
 ```
 
-The name is exactly `CARGO` (M5). The trailing word is read through a lookahead, never consumed
-(M5). There is no verb requirement: the tool's verbs belong to the tool.
+The name is exactly `CARGO` (M6). There is no verb requirement: the tool's verbs belong to the
+tool. The trailing word is read through a **lookahead** so that `export CARGO=/p` as the last
+token on a line — an assignment with nothing to run — produces no row. That is the lookahead's
+job; M6 records why revision 1's justification for it was wrong.
 
 Arm 2 carries **wrapper** semantics, the rule the three FFI tasks already carry. You cannot pass
-`--locked` through `CARGO=<path> <tool>`, so a task or line matching it always needs an
-`ALLOW_UNLOCKED_CARGO` or `ALLOW_UNLOCKED_CARGO_SCRIPT` entry. A flag never satisfies it.
+`--locked` through `CARGO=<path> <tool>`, so a match always needs an `ALLOW_UNLOCKED_CARGO` or
+`ALLOW_UNLOCKED_CARGO_SCRIPT` entry. A flag never satisfies it.
 
-### 4.3 Integration
+### 5.4 Integration — every producer and consumer of `kind`
 
-* `ScriptCargoLine` gains a `kind` field: `literal`, `var`, or `env`. Without it, arm 2's match
-  ends at the end of `CARGO=<value>` and a `--locked` belonging to the **tool** sits in its tail
-  and falsely satisfies the row.
-* `check_cargo_locked_scripts` reports every `env` row regardless of `line.locked`, with its own
-  message naming the wrapper rule.
-* `derive_cargo_tasks` treats an arm-1 or arm-2 blob match the way it treats a literal one, with
-  arm 2 mapped to kind `wrapper` so the existing precedence rule (wrapper > literal > script)
-  governs it.
-* `check_cargo_locked`'s blob arm applies the same split: arm 1 is satisfied by `--locked` in
-  the blob, arm 2 needs a waiver.
-* `check_dockerfile_locked` reads the merged match list too. `rs/Dockerfile` carries no such
-  line today, and its floor (`seen == 0`) still counts only what the merged list finds, so the
-  floor cannot be satisfied by an indirect match that a literal scan would have missed. Leaving
-  the Dockerfile on the literal-only regex would make it the one place the two arms do not
-  reach, for no stated reason.
+* **`_classify_shell_line`** builds rows from the merged list. `ScriptCargoLine` gains a `kind`
+  field.
+* **The report predicate is factored into one helper**, `_reports(line)`, defined as
+  `line.kind == "env" or (line.resolves and not line.locked)`. It is used by **both**
+  `check_cargo_locked_scripts`' emission loop **and** its waiver-health loop. Without this, an
+  `env` row whose tool carries `--locked` is emitted (kind-aware) but its waiver then reads as
+  stale (`hits == []`), so the row is permanently red and unwaivable. The adversarial review
+  found this against this spec's own fixture.
+* **The `--no-deps` carve-out keys on the matched verb**, not on `CARGO_METADATA_RE` over
+  `group(0)`. `CARGO_METADATA_RE` needs the literal lowercase `cargo`, so for an arm-1 match
+  `"$CARGO_BIN" metadata --no-deps` it never fires and the call reports — contradicting
+  SMA-599 D4, which argues that demanding `--locked` on a non-resolving call is cargo-cult
+  compliance.
+* **`derive_cargo_tasks`**: arm 2 folds into `is_wrapper` (it *is* wrapper semantics, and reuses
+  the existing allowlist contract); arm 1 joins the `literal` branch. Precedence stays
+  wrapper > literal > script.
+* **`check_cargo_locked`'s blob arm**: same split. Arm 1 is satisfied by `--locked` in the blob;
+  arm 2 needs a waiver.
+* **`check_dockerfile_locked`** emits rows from the merged list, but its floor counts **literal**
+  matches only. Counting merged matches would let an `ENV CARGO=/usr/local/bin/cargo …` line
+  satisfy `seen > 0` after the real `RUN cargo build --locked` line was deleted — the
+  floor-satisfied-by-a-non-invocation vacuity mode the file guards against everywhere else.
 
-### 4.4 A10 symmetry
+### 5.5 The source resolver (SMA-599 L2, one level)
 
-A10 gets the same two arms:
+A new `script_source_refs(path)` returns the scripts a script **executes** through a
+`source`/`.` statement. Bare `ci/**/*.sh` mentions in script text are **not** followed: M10
+measures that as six prose edges and zero true positives.
 
-* arm 1, restricted to `CONFIG_SENSITIVE_VERBS` rather than `LOCK_RESOLVING_VERBS`, matching
-  the split SMA-599 established;
-* arm 2, sensitive unconditionally — the tool's inner cargo may compile, and A10 cannot know.
+Resolution rules, sized to M12's single statement:
 
-The cwd rule is unchanged and still applies to both.
+* `$HERE` / `${HERE}` and the `$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)` idiom resolve to
+  the script's own directory.
+* A remaining unresolved `$VAR` segment becomes a glob. `"$HERE/ecosystems/$ECOSYSTEM.sh"`
+  therefore yields all three ecosystem modules, not only the default one.
+* A `source` whose target resolves to nothing raises `MoonOutputError`, the
+  infrastructure-never-a-silent-pass contract `task_script_refs` already uses.
 
-## 5. Verification
+`task_script_closure(projects, root, target)` returns `task_script_refs` plus the transitive
+`script_source_refs` closure, guarded by a visited set. Every present caller of
+`task_script_refs` moves to it: `derive_cargo_tasks`' `script` branch (which is what M11's
+reorder needs), `check_cargo_locked_scripts`, and `check_cargo_config_inputs`.
 
-### 5.1 Self-test fixtures
+A floor, `REQUIRED_SOURCED_SCRIPTS`, asserts that `ci/release-parity/run.sh` still resolves to
+the three ecosystem modules. Without it a rename empties the closure silently, which is the
+SMA-553 failure class.
 
-`self_test()` gains fixtures in both directions. The negative ones pin the narrowing itself, so
-a later "simplification" of either predicate reds the self-test rather than the corpus.
+### 5.6 A10 symmetry
+
+A10 does not use `_classify_shell_line`; it runs `CONFIG_SENSITIVE_RE` over raw blob-plus-file
+text. It therefore needs its **own** arm-1 regex, `CARGO_VAR_CMD_SENSITIVE_RE`, built from
+`CONFIG_SENSITIVE_VERBS` and not from `LOCK_RESOLVING_VERBS`. Reusing arm 1 would pull
+`"$CARGO_BIN" tree`, `deny` and `update` into A10 scope and nothing would red — the accident
+SMA-599 D9 spent a round removing.
+
+Arm 2 makes a task sensitive unconditionally: the tool's inner cargo may compile, and A10 cannot
+know. The cwd rule is unchanged and still applies to both arms.
+
+## 6. Verification
+
+### 6.1 Self-test fixtures
+
+Positive fixtures prove the arms fire. Negative fixtures pin the narrowing, so a later
+"simplification" of either predicate reds the self-test rather than the corpus. **Script** and
+**blob** fixtures are listed separately, because revision 1 had only script fixtures and the
+review showed that three of §5.4's integration points were therefore unasserted.
+
+Script fixtures, through `script_cargo_lines`:
 
 | Fixture | Expected |
 |---|---|
-| `"$CARGO_BIN" build` in a followed script | A8 row |
+| `"$CARGO_BIN" build` | A8 row |
 | `"$CARGO_BIN" build --locked` | no row |
-| the same task, cwd inside `rs/`, no `rs/.cargo/config.toml` | A10 row |
-| `CARGO=/p release-plz update` | A8 row, wrapper rule, needs a waiver |
-| `CARGO=/p release-plz update --locked` | A8 row (a flag never satisfies arm 2) |
-| the same inside `$( … )` | A8 row (M6 regression pin) |
+| `"$CARGO_BIN" metadata --no-deps` | no row (the D4 carve-out) |
+| `"$CARGO_BIN" tree` | A8 row, **no** A10 row |
+| `CARGO=/p release-plz update` | A8 row, wrapper rule |
+| `CARGO=/p release-plz update --locked` **plus a waiver** | **no rows at all** |
+| the same inside `$( … )` | A8 row (M7 pin) |
+| `export CARGO=/p` as the last token | no row (the lookahead) |
 | `CARGO_NET_OFFLINE=true tool update` | no row |
-| `CARGO_NET_OFFLINE=true CARGO=/p tool update` | A8 row |
 | `git -C "$dir" add -A` | no row |
-| `echo "negative control: $failures check(s) failed"` | no row |
+| `echo "… $failures check(s) …"` | no row |
 | `"$RELEASE_PLZ_BIN" update` | no row |
 
-The count in `self_test`'s closing line stays "all ten assertions", and
-`EXPECTED_FINDING_KEYS` is unchanged: this widens A8 and A10, it does not add an assertion.
+Blob fixtures, through a `projects` dict with **no** script reference:
 
-### 5.2 Mutation proofs (AC 2)
+| Fixture | Expected |
+|---|---|
+| blob `"$CARGO_BIN" build` | `derive_cargo_tasks` → `literal`; A8 row |
+| blob `CARGO=/p release-plz update` | `derive_cargo_tasks` → `wrapper`; A8 row |
+| the same, cwd inside `rs/`, no `rs/.cargo/config.toml` | A10 row |
+| `rs/Dockerfile` holding only `ENV CARGO=/p CARGO_HOME=/q` | A8 **floor** row |
 
-Five mutations. Each must red a named fixture. A mutation that survives means the fixture
-asserts nothing, and the fixture is wrong.
+Resolver fixtures:
+
+| Fixture | Expected |
+|---|---|
+| a script sourcing `"$HERE/sub/$X.sh"` with two matching files | both in the closure |
+| a source cycle | terminates, no repeat |
+| a source resolving to nothing | `MoonOutputError` |
+
+`self_test`'s closing line stays "all ten assertions", and `EXPECTED_FINDING_KEYS` is unchanged:
+this widens A8 and A10 and adds no assertion.
+
+### 6.2 Mutation proofs (AC 2)
+
+Each mutation must red a named fixture. A mutation that survives means the fixture asserts
+nothing, and the fixture is wrong.
 
 | Mutation | Must red |
 |---|---|
-| delete arm 1 | the `"$CARGO_BIN" build` A8 row and the A10 row |
-| delete arm 2 | the `CARGO=/p release-plz update` row |
+| delete arm 1 from the merged list | `"$CARGO_BIN" build` |
+| delete arm 2 from the merged list | `CARGO=/p release-plz update` |
+| delete arm 1 from `derive_cargo_tasks`' blob branch | the blob arm-1 fixture |
+| delete arm 2 from `derive_cargo_tasks`' blob branch | the blob arm-2 fixture |
+| delete the arms from `check_cargo_locked`'s blob test | the blob fixtures |
+| delete the merged list from `check_dockerfile_locked` | the Dockerfile fixture |
+| count merged matches in the Dockerfile floor | the Dockerfile floor fixture |
 | relax arm 1's name predicate to any name | the three false-positive fixtures |
-| relax arm 2's name from exact `CARGO` to "mentions cargo" | the `CARGO_NET_OFFLINE=true tool update` fixture |
-| consume arm 2's trailing word instead of looking ahead | the consecutive-prefix fixture |
+| relax arm 2's name to "mentions cargo" | `CARGO_NET_OFFLINE=true tool update` |
+| delete arm 2's `(?=\s+\S)` lookahead | `export CARGO=/p` as the last token |
+| revert the `--no-deps` carve-out to `CARGO_METADATA_RE` | `"$CARGO_BIN" metadata --no-deps` |
+| make `_reports` kind-blind in the waiver-health loop | the waived-`env`-row fixture |
+| reuse arm 1 for A10 instead of the sensitive variant | `"$CARGO_BIN" tree` |
+| delete `script_source_refs` from `task_script_closure` | `REQUIRED_SOURCED_SCRIPTS` floor |
 
 The measured result of each goes into this section before the branch merges.
 
-### 5.3 Corpus differential (AC 3, AC 4)
+### 6.3 Corpus differential (AC 3, AC 4)
 
-Run `cargo_moon_parity.py` against the real graph before and after, and diff three things:
+Diff four measures before and after. The "before" run is captured:
 
-1. the full row set;
-2. A8's `matched` size;
-3. A10's `in_scope` size (58 today).
+| Measure | Before |
+|---|---|
+| `derive_cargo_tasks` | 63 tasks |
+| A8 blob `matched` | 60 |
+| A10 `in_scope` | 58 |
+| findings a1–a10 | 0 rows |
 
-Then run `ci/affected-graph/run.sh` for expected-set movement. The prediction is no movement in
-any of the four. Movement gets explained here, never re-baselined.
+Predicted movement, and why it is not a tautology this time. The arms alone move nothing (M5,
+M12) — revision 1 predicted "no movement" and the review correctly called that unfalsifiable.
+The **resolver** is what moves the numbers: `repo:release-parity`, `-py` and `-ts` become
+derived, `ci/release-parity/ecosystems/release-plz.sh:152` becomes one reporting arm-2 row, and
+that row takes one new `ALLOW_UNLOCKED_CARGO_SCRIPT` entry. Whether A10's `in_scope` also moves
+depends on `_cwd_inside_rs` over the ecosystem modules and is **not yet measured**; it is
+measured during implementation and recorded here, never re-baselined.
 
-## 6. Documentation
+Then run `ci/affected-graph/run.sh` for expected-set movement.
 
-* SMA-599's spec L10 is rewritten to record this decision and point here.
-* SMA-599's spec L11 gains a pointer: L10 is closed for the variable shape, while L11's
-  subcommand shape (`cargo llvm-cov`, `insta`, `udeps`, `bloat`) stays open.
-* `ci/affected-graph/README.md`: the A8 and A10 bullets gain the two arms.
-* `CLAUDE.md`: one sentence in the A8/A10 paragraph.
+## 7. Documentation
 
-## 7. Limitations and residuals
+* SMA-599 spec **L10** — rewritten to record this decision and point here.
+* SMA-599 spec **L2** — updated: source statements are now followed one level; bare mentions are
+  not, with M10's reason.
+* SMA-599 spec **L11** — a pointer: L10 is closed for the variable shape, while L11's subcommand
+  shape (`cargo llvm-cov`, `insta`, `udeps`, `bloat`) stays open.
+* `cargo_moon_parity.py:3249,3256` — the self-test forward guard's message names SMA-605 as
+  pending. It must be re-worded once SMA-605 lands.
+* `cargo_moon_parity.py:147-175` — the `LOCK_RESOLVING_VERBS` / `CARGO_INVOCATION_RE` comment
+  block becomes partly false and needs the arms described.
+* `ci/affected-graph/README.md` — the A8 and A10 bullets, and the script-following description.
+* `CLAUDE.md` — the sentence "A10 shares `CARGO_INVOCATION_RE`, built from
+  `LOCK_RESOLVING_VERBS`, with A8's derivation" becomes partly false.
 
-**R1 — the variable's NAME is the whole test.** `BIN="$(command -v cargo)"; "$BIN" build`
-stays invisible. Resolving the assignment instead was measured and rejected: `VAR_ASSIGN_RE`
-captures `$(` as the value of `CARGO_BIN="$( command -v cargo … )"`, so value resolution does
-not reach the real shape, and a value predicate would fire on the three variables in
-`ci/actionlint/run.sh` whose literal values mention cargo — the file SMA-599 L4 already names
-as one edit from a spurious row.
+## 8. Limitations and residuals
+
+**R1 — the variable's NAME is the whole test for arm 1.** `BIN="$(command -v cargo)"; "$BIN"
+build` stays invisible. Value resolution was measured and rejected: `VAR_ASSIGN_RE` captures
+`$(` as the value of `CARGO_BIN="$( command -v cargo … )"`, so it does not reach the real shape,
+and a value predicate would fire on the three variables in `ci/actionlint/run.sh` whose literal
+values mention cargo — the file SMA-599 L4 already names as one edit from a spurious row.
 
 **R2 — `export CARGO=…` separated from its tool is invisible.** Arm 2 needs the prefix and the
-command on one segment. An `export` on one line and the tool on another needs environment
-tracking across a script, which is out of scope.
+command in one segment.
 
-**R3 — the environment arm covers `CARGO` only.** A tool reading its own variable for a cargo
-path (`FOO_CARGO_BIN`) is not covered.
+**R3 — `export CARGO=/p CARGO_HOME=/q` reports** though nothing is executed: the lookahead is
+satisfied by the second assignment. Waivable, and in the accepted false-positive direction.
 
-**R4 — SMA-599 L2 still holds.** `release-plz.sh` is sourced, not referenced, so the one real
-site stays unfollowed (M8). This is forward cover.
+**R4 — `"${CARGO_BIN:-cargo}" build` is invisible to all three arms.** Arm 1 dies at the `:`,
+and the literal arm misses it because `cargo}` is not `cargo\s+`. This is the idiomatic bash
+default-value form for a tool path. Not fixed here; recorded because it is the most likely shape
+a future author would write.
 
-**R5 — arm 1 reports prose the way the literal arm does.** The conservative rule does not strip
-strings (SMA-599 L8), so an `echo` naming a cargo-named variable before a verb reports. No such
-line exists today. The failure direction is a loud row and a waiver, never a silent pass.
+**R5 — a backtick boundary is not a start-of-command.** Arm 1's `(?:^|[\s;&|(])` excludes
+`` ` ``, so ``X=`$CARGO_BIN build` `` is missed while ``X=`cargo build` `` is caught. `_tail_end`
+already treats backticks as live substitutions, so the codebase considers the shape real.
 
-## 8. Acceptance criteria
+**R6 — a `PATH=` prefix redirects cargo just as `CARGO=` does.** `PATH="$MY/bin:$PATH" tool` is
+not covered.
+
+**R7 — arm 1 reports prose the way the literal arm does.** The conservative rule does not strip
+strings (SMA-599 L8). No such line exists today. The failure direction is a loud row and a
+waiver, never a silent pass.
+
+**R8 — the resolved blob excludes `env`** (M8). A Moon task declaring `env: {CARGO: /p}` beside
+a wrapper is invisible to the blob scan whatever arm 2 does.
+
+**R9 — arm 1's blob arm inherits the per-blob vacuity the README already records.** A blob
+`uv run --locked … && "$CARGO_BIN" build` passes, exactly as it does for a literal match today
+(`ci/affected-graph/README.md:198-202`). This is an extension of that residual, not a new one.
+
+**R10 — the resolver is path-insensitive, like the scan it feeds** (SMA-599 L1). Globbing
+`$ECOSYSTEM` puts all three modules in every `release-parity*` task's closure, including the two
+a given invocation never sources. Over-approximation only.
+
+**R11 — A10's arm 2 may force the first `ALLOW_MISSING_CARGO_CONFIG` entry.** The allowlist is
+empty by design, and SMA-599 L12 records that its stale-entry arm is therefore unasserted. Arm 2
+is sensitive unconditionally over raw text, so a `CARGO=` in any comment of a followed script
+would force an entry — and L12 closes at that moment. Whether this happens is settled by the
+§6.3 measurement.
+
+## 9. Acceptance criteria
 
 | AC | Where |
 |---|---|
-| 1 — the decision is explicit and recorded | §3 |
-| 2 — mutation-proven A8 and A10 rows | §5.1, §5.2 |
-| 3 — corpus re-measured, movement explained | §2, §5.3 |
-| 4 — `ci/affected-graph/run.sh` reports no expected-set movement | §5.3 |
-| 5 — SMA-599's L10 updated | §6 |
+| 1 — the decision is explicit and recorded | §4 |
+| 2 — mutation-proven A8 and A10 rows | §6.1, §6.2 |
+| 3 — corpus re-measured, movement explained | §3, §6.3 |
+| 4 — `ci/affected-graph/run.sh` reports no expected-set movement | §6.3 |
+| 5 — SMA-599's L10 updated | §7 |
