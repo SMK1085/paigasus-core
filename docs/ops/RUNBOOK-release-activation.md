@@ -39,7 +39,7 @@ Steps **D** and **I** are irreversible. Work top to bottom. Do not reorder.
 | **G** | Merge the release PR. Still gated, so nothing publishes | the merge in G | owner | yes |
 | **H** | **THE FLIP** — set `PAIGASUS_RELEASE_ENABLED` to `true` | — | owner | yes, until I |
 | **I** | Dispatch `release.yml`. Approve when it pauses | the dispatch | owner | **NO** |
-| **J** | Verify §7. **Then** yank the seeds and remove the dispatch trigger | — | owner | — |
+| **J** | Verify §7. **Then** yank the seeds | — | owner | — |
 
 Steps C, D and E use this runbook **from the PR branch**, before step F merges it.
 
@@ -48,8 +48,9 @@ Steps C, D and E use this runbook **from the PR branch**, before step F merges i
 ## 2. Steps A and B — already done when you read this
 
 **A** prepared the pull request carrying this file, the `release.yml` comment naming the Paigasus
-bot App, and the temporary `workflow_dispatch` trigger. **That pull request is merged at step F,
-not here** — you read this runbook from its branch while you work through steps C, D and E.
+bot App, and the `workflow_dispatch` trigger (permanent — see release.yml's own comment, SMA-603).
+**That pull request is merged at step F, not here** — you read this runbook from its branch
+while you work through steps C, D and E.
 
 **B1 and B2 are done — measured 2026-08-29:**
 
@@ -111,7 +112,7 @@ must stay on the `release` job.
 | --- | --- | --- |
 | Required reviewers | **none** | See below |
 | Wait timer | **0** | A wait timer delays *each* of the three jobs independently |
-| Deployment branch policy | **`main` only** | This is the authorization boundary for the temporary `workflow_dispatch` trigger. See below |
+| Deployment branch policy | **`main` only** | This is the authorization boundary for the `workflow_dispatch` trigger, which is permanent (SMA-603). See below |
 
 **The `main`-only branch policy is load-bearing, not hygiene.** A dispatch runs the workflow
 definition from the dispatched ref, so anyone with write access can dispatch an edited copy of
@@ -533,6 +534,13 @@ gh run watch --repo SMK1085/paigasus-core
 `wheels`, `prebuild` and `proto-dist` build every artifact. Then `approve-release` enters the
 `release-approval` environment and **pauses**.
 
+**That is guaranteed here because step I is a `workflow_dispatch`.** Since SMA-603, `release.yml`
+carries a `plan` job (`ci/release-plan/`) that decides whether anything is releasable, and it
+always builds on a `workflow_dispatch` — a dispatch is a deliberate act meaning "release now". The
+same guarantee does **not** hold for an ordinary push to `main` once the release path is live: a
+push with nothing new to release makes `plan` skip the whole matrix, `approve-release` included,
+so no human is asked to approve anything. See the `plan` job's comment in `release.yml`.
+
 **Confirm it reaches the `waiting` state.** If the run walks straight through without pausing, step
 B2 was not performed — **cancel the run immediately**. That pause is the only human gate that
 exists.
@@ -687,13 +695,19 @@ Then **revoke the crates.io API token** from §4.1.
 
 ---
 
-## 8. The two tracked removals
+## 8. The tracked removals
 
-Both are temporary by decision. **No gate enforces either.**
+**No gate enforces either.**
+
+**WITHDRAWN (SMA-603): removing the `workflow_dispatch` trigger.** An earlier version of this
+runbook tracked removing that trigger once the first release published. That instruction is
+withdrawn — the trigger is now permanent. See its own comment in `release.yml` for the reason: a
+dispatch is the "build anyway" lever for the state where release-plz has already cut tags but a
+registry is still missing an artifact, and `ci/release-plan/` deliberately always builds on a
+dispatch. Do not remove it.
 
 | Item | Removal condition |
 | --- | --- |
-| `workflow_dispatch` on `release.yml` | The first release has published and §7 has passed. Remove it in the same pull request that records the outcome |
 | `PYPI_API_TOKEN` | All three PyPI projects exist, so a *normal* trusted publisher can be added to each. Then delete the token. Tracked as **SMA-602** |
 | `NPM_TOKEN` | Every `@paigasus/*` package exists, so npm Trusted Publishing becomes configurable. **HARD DEADLINE: January 2027** — npm 2FA-bypass tokens lose direct publish then (GitHub changelog, 2026-07-31). Tracked as **SMA-602**, due 2026-12-15. Set the token's expiry to bound the gap |
 

@@ -37,9 +37,10 @@ FAILED=0
 # Deliberately NOT `readonly`: without `set -e` a reassignment only warns, so readonly buys no
 # protection and would break a future harness that sources this file twice (SMA-542 D3).
 SELF_TESTS_RAN=0
-SELF_TEST_COUNT=12  # extractor, path-filter, branch-filter, config, ci-target-floor,
+SELF_TEST_COUNT=13  # extractor, path-filter, branch-filter, config, ci-target-floor,
                     # invocation-allowlist, affected-graph-wiring, block-execution,
-                    # kill-predicate, affected-smoke-block, release-guard, cargo-lock-step
+                    # kill-predicate, affected-smoke-block, release-guard, cargo-lock-step,
+                    # release-plan
 
 fail() {
   echo "actionlint gate: $*" >&2
@@ -54,14 +55,16 @@ infra() {
 usage() {
   echo "usage: $(basename "$0") [--self-test]" >&2
   echo "  (no argument)  run the full gate" >&2
-  echo "  --self-test    run the twelve fixture tables only — extractor, path-filter verdicts," >&2
+  echo "  --self-test    run the thirteen fixture tables only — extractor, path-filter verdicts," >&2
   echo "                 branch-filter verdicts, config allowlist, ci-target floor, invocation" >&2
   echo "                 allowlist, affected-graph wiring, block execution, kill predicate," >&2
-  echo "                 affected-smoke block, release guard, cargo-lock step. No actionlint" >&2
-  echo "                 binary is required, but the branch-filter table needs a git repo" >&2
-  echo "                 carrying refs/remotes/origin/main, and the release-guard table shells" >&2
-  echo "                 out to 'uv run --locked --project py', so it needs uv on PATH and a py" >&2
-  echo "                 workspace whose uv.lock is up to date." >&2
+  echo "                 affected-smoke block, release guard, cargo-lock step, release-plan." >&2
+  echo "                 No actionlint binary is required, but the branch-filter table needs a" >&2
+  echo "                 git repo carrying refs/remotes/origin/main, and the release-guard table" >&2
+  echo "                 shells out to 'uv run --locked --project py', so it needs uv on PATH and" >&2
+  echo "                 a py workspace whose uv.lock is up to date. The release-plan table" >&2
+  echo "                 shells out to 'uv run --project ci/release-plan', which needs uv on" >&2
+  echo "                 PATH and that project's own uv.lock up to date." >&2
   echo "                 The check-9 mutation battery is NOT part of this — full gate only." >&2
   exit 2
 }
@@ -2118,6 +2121,9 @@ T_AFFECTED_SMOKE_REQUIRED_INPUTS=(
   'ci/release-parity/**/*'
   'ci/workflow-credentials/**/*'
   'ci/**/*'
+  # SMA-603 — floors the input that makes RELEASE_PLAN_SH_CALL_SITES reachable. Without it the
+  # PR deleting those nine lines is exactly the PR that does not schedule repo:affected-smoke.
+  'ci/release-plan/**/*'
   'CLAUDE.md'
   '.prototools'
 )
@@ -4522,9 +4528,48 @@ release_guard_self_test() {
 }
 
 # ---------------------------------------------------------------------------------------------
+# Check 11 (SMA-603) — the release-plan decision. Same bash-wrapper rationale as check 10: check
+# 7 counts bash `*_self_test` DEFINITIONS and check 9 mutates lines inside run_self_tests, so a
+# Python fixture table is invisible to both. Emptying it would leave this gate passing having
+# asserted nothing; the arity floor closes that.
+# ---------------------------------------------------------------------------------------------
+release_plan_sh() {
+  bash ci/release-plan/run.sh "$@"
+}
+
+release_plan_self_test() {
+  local rc=0 n
+  SELF_TESTS_RAN=$((SELF_TESTS_RAN + 1))
+
+  # Bypasses release_plan_sh (ci/release-plan/run.sh) on purpose: that wrapper's flag parser
+  # rejects anything but --self-test/--negative-control/--assert/--github-output, dying with
+  # `die_infra "unknown flag"` on --fixture-count. `--locked` mirrors check 10's release_guard_py
+  # wrapper (see the comment above it) — inert today since ci/release-plan is zero-dependency,
+  # live the moment that project gains one. Verified against the current lock: exits 0.
+  n="$(uv run --locked --project ci/release-plan --python '>=3.12' python3 \
+    ci/release-plan/release_plan.py --fixture-count)" \
+    || infra "check 11: release_plan.py --fixture-count failed"
+  case "$n" in ''|*[!0-9]*) infra "check 11: --fixture-count printed '$n', expected an integer" ;; esac
+  # Floor, not a count: it exists to catch an EMPTIED table, and one row of headroom keeps a
+  # legitimate row removal from aborting the gate as infra. Check 10's own floor is equally
+  # loose (20 against 84 actual — that citation read 44 until the SMA-603 fix wave; the table
+  # has grown with every V8/V9 round since).
+  [ "$n" -ge 8 ] || infra "check 11: release_plan.py reports $n fixtures, expected at least 8"
+
+  release_plan_sh --self-test || { fail "check 11: release_plan.py --self-test reported a broken
+      verdict. The release-plan decision is not deciding what it is documented to decide."; rc=1; }
+
+  release_plan_sh --negative-control || { fail "check 11: ci/release-plan/run.sh
+      --negative-control failed. The control that proves the checker can report each direction is
+      itself broken."; rc=1; }
+
+  return $rc
+}
+
+# ---------------------------------------------------------------------------------------------
 # Check 7 — the self-tests, and the counter that proves they were invoked.
 #
-# All ten are defined above so this block can run them from ONE call site, reached by both the
+# All THIRTEEN are defined above so this block can run them from ONE call site, reached by both the
 # --self-test path and the full gate. One call site rather than two is deliberate: ci_targets.py's
 # C4 pins this by whole stripped line, and two identical lines would let one be deleted while the
 # pin still matched (SMA-542 D2).
@@ -4554,6 +4599,7 @@ run_self_tests() {
   affected_smoke_block_self_test
   release_guard_self_test
   cargo_lock_step_self_test
+  release_plan_self_test
 
   assert_self_tests_ran "$SELF_TEST_COUNT"
 
@@ -5403,6 +5449,27 @@ while IFS= read -r v; do
   [ -n "$v" ] && fail "check 10: $v"
 done < "$RG_OUT"
 rm -f "$RG_OUT"
+
+# ---------------------------------------------------------------------------------------------
+# Check 11 — the release-plan decision, over the real repository. Runs here (not in --self-test)
+# because it reads the actual rs/ tree and the tag list, like checks 5/6/10.
+#
+# ROUTE EVERY STATUS, not just 2 — see check 10's comment for the measurement. run.sh maps the
+# checker's 3 to 1 and everything else to 2, so 0, 1 and 2 are the only documented statuses here.
+# ---------------------------------------------------------------------------------------------
+rp_rc=0
+release_plan_sh --assert || rp_rc=$?
+if [ "$rp_rc" -eq 2 ]; then
+  infra "check 11: ci/release-plan/run.sh --assert aborted (exit 2) — uv or the interpreter
+      failed, not an assertion."
+elif [ "$rp_rc" -eq 1 ]; then
+  fail "check 11: ci/release-plan/run.sh --assert reported the repository is wrong — its stderr
+      is above. The derived releasable set, a crate version, or the tag-name format changed."
+elif [ "$rp_rc" -ne 0 ]; then
+  infra "check 11: ci/release-plan/run.sh --assert exited $rp_rc, which is none of its three
+      documented statuses (0 clean, 1 repo wrong, 2 infra). This file is 'set -uo pipefail' with
+      NO -e, so an unrouted status would finish the gate rc 0 having asserted nothing."
+fi
 
 selftest_mutation_battery
 
