@@ -2390,7 +2390,7 @@ def self_test():
 
 
         # SMA-605 — the indirect arms, through the real script scanner.
-        indirect = Path(tmp) / "indirect.sh"
+        indirect = probe / "indirect.sh"
         indirect.write_text(
             '#!/usr/bin/env bash\n'
             '"$CARGO_BIN" build\n'                       # 2: reports
@@ -2414,6 +2414,35 @@ def self_test():
             failures.append(
                 "A8 treats `\"$CARGO_BIN\" metadata --no-deps` as resolving — the carve-out is "
                 "still keyed on CARGO_METADATA_RE rather than on the matched verb (SMA-599 D4)"
+            )
+
+        # THE WAIVER ROUND TRIP, and the only fixture that pins the waiver-health loop's half of
+        # the kind rule. MEASURED: with `_row_reports` used at emission but the hits predicate
+        # left kind-blind, every other fixture here still passes — the row is emitted, a reviewer
+        # adds a waiver, emission clears, and the health loop then finds no hits and calls the
+        # honest waiver STALE. The line is then permanently red with no escape but rewriting it.
+        indirect_fixture = {
+            "repo": {
+                "source_dir": ".", "deps": {}, "tasks": {},
+                "task_inputs": {}, "task_input_globs": {},
+                "invocations": {"i": "bash ci/probe/indirect.sh"},
+            },
+        }
+        waived = {
+            ("ci/probe/indirect.sh", "CARGO=/p release-plz update"): "reviewed redirection",
+            ("ci/probe/indirect.sh", "CARGO=/p release-plz update --locked"): "reviewed too",
+            ("ci/probe/indirect.sh", '"$CARGO_BIN" build'): "reviewed indirect build",
+            # Note the trailing `)"`: COMMAND_SPLIT_RE splits INSIDE the substitution, so the
+            # segment carries the closing bracket and quote. Copied from the gate's own output —
+            # a hand-typed approximation matches nothing and reads as a stale waiver.
+            ("ci/probe/indirect.sh", 'CARGO=/p tool update)"'): "reviewed substitution body",
+        }
+        rows = check_cargo_locked_scripts(indirect_fixture, Path(tmp), allow=waived)
+        if rows:
+            failures.append(
+                f"A8's script arm did not fully clear the indirect fixture under its waivers — "
+                f"the waiver-health loop and the emission loop disagree about which rows report: "
+                f"{rows}"
             )
     if not ALLOW_UNLOCKED_CARGO_SCRIPT:
         failures.append("ALLOW_UNLOCKED_CARGO_SCRIPT is empty — its stale-entry rule asserts nothing")
