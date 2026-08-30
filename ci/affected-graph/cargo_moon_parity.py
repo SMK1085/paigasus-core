@@ -33,6 +33,7 @@ import collections
 import fnmatch
 import inspect
 import json
+import os
 import re
 import subprocess
 import sys
@@ -170,6 +171,10 @@ LOCK_RESOLVING_VERBS = (
     "run", "test", "tree", "update", "vendor",
 )
 
+# NOT the whole story since SMA-605: this is the LITERAL arm only. `cargo_matches` merges it with
+# two INDIRECT arms — a cargo-named variable in command position (CARGO_VAR_CMD_RE) and the
+# `CARGO=` environment prefix (CARGO_ENV_PREFIX_RE) — and every consumer reads that merged list,
+# not this regex. A10 has its own sensitive-verb variant, CARGO_VAR_CMD_SENSITIVE_RE.
 CARGO_INVOCATION_RE = re.compile(
     r"\bcargo\s+(?:\+\S+\s+)?(?:" + "|".join(LOCK_RESOLVING_VERBS) + r")\b"
 )
@@ -218,7 +223,88 @@ CONFIG_SENSITIVE_VERBS = (
 CONFIG_SENSITIVE_RE = re.compile(
     r"\bcargo\s+(?:\+\S+\s+)?(?:" + "|".join(CONFIG_SENSITIVE_VERBS) + r")\b"
 )
+# SMA-605 — A10's OWN arm 1. Built from CONFIG_SENSITIVE_VERBS, never from
+# LOCK_RESOLVING_VERBS: A10 asks "can rs/.cargo/config.toml change this command's OUTPUT", and
+# reusing A8's list would pull `"$CARGO_BIN" tree` / `deny` / `update` into A10's scope with
+# nothing to red it — the coupling SMA-599 D9 removed for the literal arm, re-created for the
+# indirect one.
+CARGO_VAR_CMD_SENSITIVE_RE = re.compile(
+    r"""(?:^|[\s;&|(])["']?\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?["']?[^\S\n]+"""
+    r"(?:\+\S+[^\S\n]+)?(?:" + "|".join(CONFIG_SENSITIVE_VERBS) + r")\b"
+)
 CARGO_CONFIG_INPUT = "rs/.cargo/config.toml"
+
+# SMA-605 — the two INDIRECT arms, beside CARGO_INVOCATION_RE's literal one.
+#
+# FORWARD COVER, NOT MEASURED COVERAGE — the same warning FFI_MARKERS carries for `maturin`.
+# Arm 1 reports ZERO rows on the real corpus and always has; arm 2 reports exactly one, at
+# ci/release-parity/ecosystems/release-plz.sh:152, and only once script_source_refs makes that
+# file reachable. Do not read a green run as proof either arm works — the self-test fixtures are
+# the proof.
+#
+# Arm 1 — a cargo-NAMED variable in command position. The NAME is the whole test (spec R1).
+# Value resolution was measured and rejected: VAR_ASSIGN_RE captures `$(` as the value of
+# CARGO_BIN="$( command -v cargo … )", so it cannot reach the real shape, and a value predicate
+# would fire on the three variables in ci/actionlint/run.sh whose literal values mention cargo —
+# the file SMA-599 L4 already names as one edit from a spurious row.
+# HORIZONTAL whitespace between the variable and its verb, never `\s` — same reason as arm 2's
+# lookahead (M5): `\s` crosses a physical line, COMMAND_SPLIT_RE does not split on newlines, and a
+# blob is often a multi-line `script:` block, so `"$CARGO_BIN"` on one line and `build` on the
+# next would read as one invocation. The LEADING separator keeps `\s`: a newline really does start
+# a command.
+CARGO_VAR_CMD_RE = re.compile(
+    r"""(?:^|[\s;&|(])["']?\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?["']?[^\S\n]+"""
+    r"(?:\+\S+[^\S\n]+)?(" + "|".join(LOCK_RESOLVING_VERBS) + r")\b"
+)
+CARGO_VAR_NAME = "cargo"
+
+# Arm 2 — the `CARGO=` environment prefix, the shape this repo actually uses
+# (ci/release-parity/ecosystems/release-plz.sh:152). The name is EXACTLY `CARGO`: CARGO_HOME,
+# CARGO_TERM_COLOR and CARGO_NET_OFFLINE configure cargo without redirecting it, and line 152
+# carries both `CARGO=` and `CARGO_NET_OFFLINE=` so a "name mentions cargo" predicate reports the
+# wrong one (spec M6).
+#
+# No verb requirement: the tool's verbs belong to the tool, not to cargo. The trailing word is a
+# LOOKAHEAD, never consumed — that is what makes `export CARGO=/p`, an assignment with nothing to
+# run, report nothing, and it keeps a second env prefix's leading separator intact.
+# The trailing lookahead is HORIZONTAL whitespace only (`[^\S\n]`), never `\s`. MEASURED: with
+# `\s` it crosses a newline, so `export CARGO=/p` followed by an unrelated command on the NEXT
+# line matches — and fifteen real moon blobs are multi-line `script:` blocks, so that is a live
+# false positive on the blob arm, not a hypothetical one. The LEADING separator keeps `\s`
+# deliberately: a newline before `CARGO=` really does start a command.
+# The lookahead skips any further `NAME=value` assignments and then demands a NON-assignment
+# token: `CARGO=/p CARGO_HOME=/x` sets two variables and runs nothing, so it is not a wrapper.
+# Skipping rather than simply rejecting an assignment is what keeps `CARGO=/p CARGO_HOME=/x tool
+# run` matched — the tool is still reached with cargo redirected.
+_ENV_ASSIGN = r"""[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|[^\s;&|]*)"""
+CARGO_ENV_PREFIX_RE = re.compile(
+    r"""(?:^|[\s;&|(])CARGO=(?:"[^"]*"|'[^']*'|[^\s;&|]*)"""
+    r"(?=(?:[^\S\n]+" + _ENV_ASSIGN + r")*[^\S\n]+(?!" + _ENV_ASSIGN + r")\S)"
+)
+
+# A Dockerfile `ENV CARGO=…` is NOT a shell env prefix and deliberately does not go through
+# CARGO_ENV_PREFIX_RE: it carries no command on its own line, yet it redirects cargo for every
+# later RUN in the image. `\bCARGO=` does not match `CARGO_HOME=`, since the `=` there follows
+# `HOME` (CodeRabbit PR review asked for this case to be handled separately, and it is).
+DOCKERFILE_ENV_RE = re.compile(r"^\s*ENV\b", re.I)
+# `CARGO` must be an assignment KEY. Quoted spans are blanked first, so
+# `ENV LABEL="CARGO=/usr/bin/cargo"` — which sets no such variable — does not report. A bare
+# `\bCARGO=` over the raw line DID report it, and would have red CI on a benign Dockerfile
+# (MEASURED, CodeRabbit PR review).
+DOCKERFILE_ENV_CARGO_KEY_RE = re.compile(r"(?:^|\s)CARGO=")
+
+
+def _dockerfile_env_redirects_cargo(stripped):
+    """True when a Dockerfile ENV directive assigns CARGO itself."""
+    if not DOCKERFILE_ENV_RE.match(stripped):
+        return False
+    masked = SHELL_STRING_RE.sub(lambda m: " " * len(m.group(0)), stripped)
+    return bool(DOCKERFILE_ENV_CARGO_KEY_RE.search(masked))
+
+# Module level, not rebuilt per call: `cargo_matches` runs ~41k times on the real corpus.
+ENV_ONLY_GAP_RE = re.compile(r"^(?:[^\S\n]+" + _ENV_ASSIGN + r")*[^\S\n]*$")
+
+CargoMatch = collections.namedtuple("CargoMatch", "start end verb kind")
 
 # Only these tokens confer a cwd. A bare `rs`-containing ARGUMENT must never do so:
 # `cargo deny --manifest-path rs/Cargo.toml` and `cargo machete rs` both mention `rs` and both
@@ -308,7 +394,7 @@ COMMAND_SPLIT_RE = re.compile(r"[;&|]+")
 CARGO_METADATA_RE = re.compile(r"\bcargo\s+(?:\+\S+\s+)?metadata\b")
 
 ScriptCargoLine = collections.namedtuple(
-    "ScriptCargoLine", "lineno raw segment resolves locked"
+    "ScriptCargoLine", "lineno raw segment resolves locked kind"
 )
 
 # A wrapper reaches cargo without the literal token, so A8 matches FFI_MARKERS too. Without this
@@ -357,6 +443,21 @@ ALLOW_UNLOCKED_CARGO_SCRIPT = {
     ),
     ("ci/version-lockstep/run.sh", "cargo update -w >/dev/null )"): (
         "the un-offline fallback of the line above, same reason"
+    ),
+    (
+        "ci/release-parity/ecosystems/release-plz.sh",
+        'CARGO="$CARGO_BIN" CARGO_NET_OFFLINE=true "$RELEASE_PLZ_BIN" update 2>',
+    ): (
+        "MEASURED true positive, and correct as written (SMA-605). This is the arm-2 shape the "
+        "whole change exists to see, and it is the only one in the repo: release-plz shells out "
+        "to `cargo metadata`, and this line hands it an explicit CWD-independent cargo through "
+        "the CARGO env var (SMA-596 D2.1). No --locked can reach that inner cargo — the flag "
+        "would go to release-plz, which does not forward it, which is exactly why arm 2 carries "
+        "wrapper semantics. The call is SAFE because it runs against a DISPOSABLE FIXTURE "
+        "OUTSIDE the repo: ci/release-parity/run.sh:43 makes the dir with `mktemp -d` and :48 "
+        "passes it to ecosystem::run_update, which cd's into it. So it cannot rewrite "
+        "rs/Cargo.lock even though it resolves. If that fixture ever moves inside the workspace, "
+        "DELETE THIS WAIVER — the reason no longer holds."
     ),
     ("ci/version-lockstep/run.sh", 'die_infra "cargo update -w failed (site 16)"'): (
         "PROSE, not an invocation: the failure message for the two lines above. The "
@@ -781,6 +882,65 @@ def _tail_end(segment, start, hard_stop):
     return hard_stop
 
 
+def cargo_matches(text):
+    """Every cargo invocation in `text` — literal and indirect — sorted by start offset.
+
+    `verb` is carried because the `--no-deps` carve-out must key on it. CARGO_METADATA_RE needs a
+    literal lowercase `cargo`, so it never fires for `"$CARGO_BIN" metadata` and that call would
+    report despite not resolving, contradicting SMA-599 D4.
+
+    Arm 1's NAME FILTER RUNS HERE, before the list is merged. A rejected match left in the list
+    would still act as a `stop` boundary in `_classify_shell_line` and truncate the PRECEDING
+    invocation's tail — a silent false negative reached by the back door.
+
+    DE-DUPLICATED ON END OFFSET, literal first. MEASURED: `$cargo build` already matches
+    CARGO_INVOCATION_RE (`\\bcargo` needs only a word boundary, and `$` supplies one), so without
+    this the lowercase form reports twice for one invocation and any waiver for it is permanently
+    AMBIGUOUS — the SMA-599 L15 trap, reached by a new route.
+    """
+    found = [
+        CargoMatch(m.start(), m.end(), m.group(0).split()[-1], "literal")
+        for m in CARGO_INVOCATION_RE.finditer(text)
+    ]
+    found += [
+        CargoMatch(m.start(), m.end(), m.group(2), "var")
+        for m in CARGO_VAR_CMD_RE.finditer(text)
+        if CARGO_VAR_NAME in m.group(1).lower()
+    ]
+    found += [
+        CargoMatch(m.start(), m.end(), None, "env")
+        for m in CARGO_ENV_PREFIX_RE.finditer(text)
+    ]
+    # KIND FIRST, then position. Sorting by position first is WRONG and was measured: arm 1's
+    # match on `$cargo build` starts at the `$` (offset 0) while the literal match starts at the
+    # `c` (offset 1), so a position-first sort lets `var` claim the shared end offset and the
+    # invocation reports as indirect. The kinds must not be interchangeable here for the same
+    # reason check_cargo_locked keeps them apart.
+    rank = {"literal": 0, "var": 1, "env": 2}
+    out, claimed = [], set()
+    for match in sorted(found, key=lambda c: (rank[c.kind], c.start)):
+        if match.end in claimed:
+            continue
+        claimed.add(match.end)
+        out.append(match)
+    # An env prefix whose COMMAND is cargo itself is not indirection, and reporting both is worse
+    # than redundant: the two rows carry the SAME segment text, so every waiver for that line is
+    # permanently AMBIGUOUS and the line cannot be waived at all — SMA-599 L15, reached by a new
+    # route. MEASURED on `CARGO=/p cargo build --locked`, a correctly locked call that reported
+    # twice and could not be cleared (CodeRabbit PR review). The gap may hold further `NAME=value`
+    # assignments, which is why it is not a bare adjacency test.
+    real = [c for c in out if c.kind in ("literal", "var")]
+    out = [
+        c
+        for c in out
+        if c.kind != "env"
+        or not any(
+            m.start >= c.end and ENV_ONLY_GAP_RE.match(text[c.end : m.start]) for m in real
+        )
+    ]
+    return sorted(out, key=lambda c: c.start)
+
+
 def _classify_shell_line(lineno, logical):
     """Rows for one LOGICAL line (backslash continuations already joined).
 
@@ -813,21 +973,23 @@ def _classify_shell_line(lineno, logical):
     """
     rows = []
     for segment in COMMAND_SPLIT_RE.split(logical):
-        found = list(CARGO_INVOCATION_RE.finditer(segment))
+        found = cargo_matches(segment)
         for idx, match in enumerate(found):
-            stop = found[idx + 1].start() if idx + 1 < len(found) else len(segment)
-            tail = segment[match.end() : _tail_end(segment, match.end(), stop)]
+            stop = found[idx + 1].start if idx + 1 < len(found) else len(segment)
+            tail = segment[match.end : _tail_end(segment, match.end, stop)]
             # MEASURED (SMA-599 §2.1): `cargo metadata --no-deps` does not resolve and never
             # rewrites the lock, so --locked on it is INERT. Demanding the flag would be
             # cargo-cult compliance a later reader would mistake for a guarantee. Read from
             # THIS invocation's verb and tail, never the whole segment: a `--no-deps` on a
             # neighbouring call must not excuse a resolving one.
-            resolves = not (
-                CARGO_METADATA_RE.search(match.group(0))
-                and re.search(r"--no-deps\b", tail)
-            )
+            # Keyed on the matched VERB, not on CARGO_METADATA_RE over the match text: that
+            # regex needs a literal lowercase `cargo`, so an arm-1 `"$CARGO_BIN" metadata
+            # --no-deps` would report despite not resolving, contradicting D4 (SMA-605 review).
+            resolves = not (match.verb == "metadata" and re.search(r"--no-deps\b", tail))
             rows.append(
-                ScriptCargoLine(lineno, logical, segment, resolves, LOCKED_FLAG in tail)
+                ScriptCargoLine(
+                    lineno, logical, segment, resolves, LOCKED_FLAG in tail, match.kind
+                )
             )
     return rows
 
@@ -898,6 +1060,180 @@ def task_script_refs(projects, root, target):
     return paths
 
 
+# SMA-605 - SMA-599's L2, `source` half closed TRANSITIVELY (cycle-guarded). EXECUTION ONLY.
+#
+# A `source` / `.` statement is followed. A bare `ci/**/*.sh` mention in a script's text is NOT:
+# running SCRIPT_REF_RE over a followed script's own text was MEASURED at six new edges across
+# the real corpus, and every one of them is a comment or a pin-array string constant
+# (publish-metadata's :9-10, :1686, :1726; actionlint's :2016, :2041, :2046 and its
+# T_CARGO_LOCK_STEP_REQUIRED array at :2152-2154). That buys six scripts into A8's scope on the
+# strength of prose, one new waiver, and ZERO true positives - and it still does not reach
+# ci/release-parity/ecosystems/release-plz.sh, because SCRIPT_REF_RE cannot match a
+# `# shellcheck source=...` directive (the path is preceded by `=`, not by a separator).
+SOURCE_STMT_RE = re.compile(r"""(?m)^\s*(?:source|\.)\s+["']?([^"'\s;&|]+)["']?""")
+# A variable assigned from the `dirname "${BASH_SOURCE[0]}"` idiom IS the script's own directory.
+# VAR_ASSIGN_RE cannot capture it - it stops at the space inside `$(cd ...` - so this reads the
+# raw assignment line instead.
+HERE_IDIOM_ASSIGN_RE = re.compile(r"""(?m)^\s*([A-Za-z_][A-Za-z0-9_]*)="?\$\(cd .*BASH_SOURCE.*""")
+
+# The resolver's floor. Without it a rename empties the closure in silence - the SMA-553 class.
+REQUIRED_SOURCED_SCRIPTS = {
+    "ci/release-parity/run.sh": (
+        "ci/release-parity/ecosystems/python-semantic-release.sh",
+        "ci/release-parity/ecosystems/release-plz.sh",
+        "ci/release-parity/ecosystems/semantic-release.sh",
+    ),
+}
+
+
+def _executable_text(path):
+    """`path`'s text with heredoc BODIES and comment tails removed.
+
+    `script_cargo_lines` already refuses to classify a heredoc body, for the reason that the
+    shell never executes it. `script_source_refs` claimed to be EXECUTION ONLY while scanning
+    RAW text, so this valid script aborted the whole gate:
+
+        cat <<'EOF'
+        source ./missing.sh
+        EOF
+
+    `SOURCE_STMT_RE` matched the body line and the resolver raised MoonOutputError on the absent
+    target — an infrastructure failure on a benign file (MEASURED, CodeRabbit PR review). Reusing
+    `_line_regions` and the same heredoc walk keeps the two scanners' notion of "executed" in one
+    place instead of two that can drift.
+
+    Raises MoonOutputError on a heredoc still open at EOF, the contract `script_cargo_lines` uses:
+    otherwise the rest of the file is skipped in silence.
+    """
+    out, delim, held = [], None, None
+    for raw in Path(path).read_text().splitlines():
+        if delim is not None:
+            if raw.strip() == delim:
+                delim = None
+            continue
+        work, opener = _line_regions(raw)
+        out.append(work)
+        if opener is not None and held is None:
+            held = opener.group(2)
+        if work.rstrip().endswith("\\"):
+            continue
+        delim, held = held, None
+    if delim is not None:
+        raise MoonOutputError(
+            f"{path}: heredoc `{delim}` is still open at EOF — the source scan would silently "
+            f"skip the rest of the file"
+        )
+    return "\n".join(out)
+
+
+def script_source_refs(path, root):
+    """The scripts `path` EXECUTES through a `source` / `.` statement.
+
+    A variable assigned EXACTLY ONCE resolves to its value; one assigned more than once - or
+    never - becomes a glob. MEASURED on the one source statement in the tree
+    (ci/release-parity/run.sh:21): HERE is assigned once, at :7, so it resolves to the script's
+    directory, while ECOSYSTEM is assigned at :8 AND :13 (from `$2`), so it globs and yields all
+    three ecosystem modules rather than only the default release-plz. The other two are real code
+    a Moon task executes, and a resolver returning only the default would leave them unscanned.
+
+    Over-approximation in the same direction as the path-insensitive scan it feeds (SMA-599 L1):
+    all three modules land in every release-parity* task's closure, including the two a given
+    invocation never sources.
+
+    Raises MoonOutputError when a source resolves to nothing - a rename would otherwise shrink
+    the closure in silence, which is the failure this whole change exists to prevent.
+    """
+    # RESOLVED at entry, deliberately: `$HERE` expands to `str(path.parent)`, so a relative
+    # `path` produced a relative expansion, the `not candidate.is_absolute()` branch prepended
+    # the parent a SECOND time, and every source resolved to nothing (MEASURED — it raised
+    # rather than passing quietly, but the trap is real and one line removes it).
+    path = Path(path).resolve()
+    # EXECUTABLE text, never raw: a `source` inside a heredoc body is not executed, and treating
+    # it as one aborted the gate (see _executable_text).
+    text = _executable_text(path)
+    counts = collections.Counter(name for name, _ in VAR_ASSIGN_RE.findall(text))
+    env = {name: value for name, value in VAR_ASSIGN_RE.findall(text) if counts[name] == 1}
+    for name in HERE_IDIOM_ASSIGN_RE.findall(text):
+        if counts[name] <= 1:
+            env[name] = str(path.parent)
+    # Longest name first, for the reason _cwd_inside_rs records: `str.replace` on the bare $NAME
+    # form has no word boundary, so a short name that prefixes a longer one eats it.
+    ordered = sorted(env.items(), key=lambda kv: (-len(kv[0]), kv[0]))
+    root_resolved = Path(root).resolve()
+    out = []
+    for raw in SOURCE_STMT_RE.findall(text):
+        target = raw
+        for name, value in ordered:
+            target = target.replace("${" + name + "}", value).replace("$" + name, value)
+        # The `$(dirname ...)` form used inline rather than through a variable.
+        target = re.sub(r"\$\(dirname [^)]*\)", str(path.parent), target)
+        # Anything still unresolved becomes a glob.
+        target = re.sub(r"\$\{?[A-Za-z_][A-Za-z0-9_]*\}?", "*", target)
+        candidate = Path(target)
+        if not candidate.is_absolute():
+            candidate = path.parent / candidate
+        hits = sorted(Path(candidate.anchor or "/").glob(str(candidate).lstrip("/")))
+        # Files only, and never outside the repo: a `source /etc/profile` is not a gate script,
+        # and scanning one would put text nobody reviews into A8's corpus.
+        hits = [h for h in hits if h.is_file() and root_resolved in h.resolve().parents]
+        if not hits:
+            raise MoonOutputError(
+                f"{path}: `source {raw}` resolves to no readable file inside the repo - the "
+                f"script closure would silently shrink. If the module moved, update the source "
+                f"statement."
+            )
+        out.extend(hits)
+    return out
+
+
+def task_script_closure(projects, root, target):
+    """`task_script_refs` plus the transitive `source` closure, cycle-guarded.
+
+    Breadth-first with a visited set keyed on the RESOLVED path, so a cycle terminates and a
+    module reached twice appears once. Depth is unbounded by design; the corpus is depth 2.
+
+    Every member is returned RESOLVED, and that is load-bearing. `task_script_refs` builds
+    `root / rel`, which keeps whatever form the caller passed, while `script_source_refs`
+    resolves. Mixing the two crashed a consumer: with a symlinked `root`, the closure held one
+    path in link form and one in real form, and `check_cargo_locked_scripts`'
+    `path.relative_to(root)` raised ValueError — which is NOT in INFRA_ERRORS, so it escaped as a
+    traceback instead of the rc-2 infrastructure classification (MEASURED, CodeRabbit PR review).
+    Consumers must therefore compare against a RESOLVED root.
+    """
+    queue, seen, out = list(task_script_refs(projects, root, target)), set(), []
+    while queue:
+        key = queue.pop(0).resolve()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(key)
+        queue.extend(script_source_refs(key, root))
+    return out
+
+
+def check_sourced_scripts(root, required=None):
+    """REQUIRED_SOURCED_SCRIPTS, asserted. Rows join A8's bucket in collect_findings."""
+    required = REQUIRED_SOURCED_SCRIPTS if required is None else required
+    root_resolved = Path(root).resolve()
+    rows = []
+    for rel, expected in sorted(required.items()):
+        path = root_resolved / rel
+        if not path.is_file():
+            rows.append(f"{rel} is absent - the source resolver's floor cannot be evaluated")
+            continue
+        got = tuple(sorted(
+            x.resolve().relative_to(root_resolved).as_posix()
+            for x in script_source_refs(path, root_resolved)
+        ))
+        if got != tuple(sorted(expected)):
+            rows.append(
+                f"{rel} sources {got}, expected {tuple(sorted(expected))} - the source resolver "
+                f"has degraded and the script closure would silently shrink"
+            )
+    return rows
+
+
+
 def derive_cargo_tasks(projects, root):
     """{target: kind} for every task reaching cargo. kind is wrapper | literal | script.
 
@@ -917,11 +1253,25 @@ def derive_cargo_tasks(projects, root):
             target, blob = f"{pid}:{name}", invocations[name]
             if blob is None:
                 continue
-            if any(marker in blob for marker in FFI_MARKERS):
+            # Arm 2 folds into the WRAPPER kind rather than becoming a fourth one: `CARGO=<path>
+            # <tool>` reaches cargo through a tool that takes no --locked, which is exactly the
+            # FFI wrapper contract, and reusing it means the existing ALLOW_UNLOCKED_CARGO
+            # semantics apply unchanged (SMA-605 §5.4).
+            # MERGED matches, never the raw env regex: `cargo_matches` already drops an env
+            # prefix whose command IS cargo, so `CARGO=/p cargo build --locked` is one locked
+            # literal call. Searching CARGO_ENV_PREFIX_RE directly bypassed that and classified
+            # the same correct line as a wrapper needing a waiver — the blob arm and the script
+            # arm disagreeing about one string (MEASURED, CodeRabbit PR review).
+            blob_matches = cargo_matches(blob)
+            if any(marker in blob for marker in FFI_MARKERS) or any(
+                c.kind == "env" for c in blob_matches
+            ):
                 kinds[target] = "wrapper"
-            elif CARGO_INVOCATION_RE.search(blob):
+            elif any(c.kind in ("literal", "var") for c in blob_matches):
                 kinds[target] = "literal"
-            elif any(script_cargo_lines(p) for p in task_script_refs(projects, root, target)):
+            elif any(
+                script_cargo_lines(p) for p in task_script_closure(projects, root, target)
+            ):
                 kinds[target] = "script"
     return kinds
 
@@ -980,8 +1330,15 @@ def check_cargo_locked(projects, root=None, allow=ALLOW_UNLOCKED_CARGO, floor=RE
                         f"moon's output shape changed, so A8 cannot be evaluated"
                     )
                 continue
-            is_wrapper = any(marker in blob for marker in FFI_MARKERS)
-            if not (is_wrapper or CARGO_INVOCATION_RE.search(blob)):
+            blob_matches = cargo_matches(blob)
+            is_ffi = any(marker in blob for marker in FFI_MARKERS)
+            is_wrapper = bool(is_ffi or any(c.kind == "env" for c in blob_matches))
+            # Name the CAUSE. `is_wrapper` covers two shapes since SMA-605, and a row reading
+            # "(FFI_MARKERS)" for a `CARGO=` blob sends the reviewer hunting for a napi /
+            # wasm-pack / maturin call that is not there. The script arm already distinguishes
+            # them; this is the one place that did not (CodeRabbit PR review).
+            cause = "a wrapper (FFI_MARKERS)" if is_ffi else "a CARGO= redirection"
+            if not (is_wrapper or any(c.kind in ("literal", "var") for c in blob_matches)):
                 continue
             matched.add(target)
             if not is_wrapper and LOCKED_FLAG in blob:
@@ -990,7 +1347,7 @@ def check_cargo_locked(projects, root=None, allow=ALLOW_UNLOCKED_CARGO, floor=RE
             if reason is None:
                 if is_wrapper:
                     rows.append(
-                        f"{target} reaches cargo through a wrapper (FFI_MARKERS), whose own "
+                        f"{target} reaches cargo through {cause}, whose own "
                         f"cargo call cannot take {LOCKED_FLAG} — a {LOCKED_FLAG} elsewhere in "
                         f"the script does NOT cover it, so this task needs an "
                         f"ALLOW_UNLOCKED_CARGO entry: {blob[:120]}"
@@ -1015,6 +1372,25 @@ def check_cargo_locked(projects, root=None, allow=ALLOW_UNLOCKED_CARGO, floor=RE
     return rows
 
 
+def _row_reports(line):
+    """Whether this row is a violation. ONE definition, used by BOTH loops below.
+
+    Named `_row_reports`, not `_reports`: `self_test` already has a LOCAL helper called
+    `_reports`, and a nested `def` makes that name local for the whole enclosing function, so a
+    module-level `_reports` is unreachable from every fixture (UnboundLocalError, measured).
+
+    An `env` row is NEVER satisfied by a flag: `CARGO=<path> <tool>` reaches cargo through the
+    tool, and the tool takes no `--locked`. Reading `line.locked` for it lets the TOOL's own flag
+    clear the row, because that flag lands inside arm 2's tail.
+
+    Both loops must share this. With emission kind-aware and the waiver-health loop kind-blind,
+    an `env` row whose tool carries `--locked` is emitted, the reviewer adds a waiver, emission
+    clears, and the health loop then finds no hits and reports the honest waiver as STALE. The
+    row is permanently red with no escape but rewriting the shell line (SMA-605 review).
+    """
+    return line.kind == "env" or (line.resolves and not line.locked)
+
+
 def check_cargo_locked_scripts(projects, root, allow=None):
     """A8 rows for cargo invocations inside the gate scripts a Moon task runs.
 
@@ -1028,10 +1404,13 @@ def check_cargo_locked_scripts(projects, root, allow=None):
     by hand rather than trusting a row.
     """
     allow = ALLOW_UNLOCKED_CARGO_SCRIPT if allow is None else allow
+    # RESOLVED, to match task_script_closure's members. An unresolved root against a resolved
+    # member raises ValueError out of relative_to, and ValueError is not in INFRA_ERRORS.
+    root_resolved = Path(root).resolve()
     rows, seen = [], {}
     for target in sorted(derive_cargo_tasks(projects, root)):
-        for path in task_script_refs(projects, root, target):
-            rel = path.relative_to(root).as_posix()
+        for path in task_script_closure(projects, root, target):
+            rel = path.relative_to(root_resolved).as_posix()
             if rel in seen:
                 continue
             lines = script_cargo_lines(path)
@@ -1043,14 +1422,23 @@ def check_cargo_locked_scripts(projects, root, allow=None):
                 # Use `line.locked`, not `LOCKED_FLAG in text` — the classifier already scoped
                 # the flag to the segment tail AFTER the verb, and a bare substring test on the
                 # segment throws that scoping away.
-                if not line.resolves or line.locked:
+                if not _row_reports(line):
                     continue
                 reason = allow.get((rel, text))
                 if reason is None:
-                    rows.append(
-                        f"{rel}:{line.lineno} reaches cargo without {LOCKED_FLAG} — it will "
-                        f"re-resolve and REWRITE an inconsistent Cargo.lock in place: {text[:100]}"
-                    )
+                    if line.kind == "env":
+                        rows.append(
+                            f"{rel}:{line.lineno} sets CARGO= to redirect cargo through another "
+                            f"tool, which cannot take {LOCKED_FLAG} — a {LOCKED_FLAG} on the "
+                            f"tool does NOT cover it, so this line needs an "
+                            f"ALLOW_UNLOCKED_CARGO_SCRIPT entry: {text}"
+                        )
+                    else:
+                        rows.append(
+                            f"{rel}:{line.lineno} reaches cargo without {LOCKED_FLAG} — it will "
+                            f"re-resolve and REWRITE an inconsistent Cargo.lock in place: "
+                            f"{text}"
+                        )
                 elif not reason.strip():
                     rows.append(
                         f"{rel}:{line.lineno} is in ALLOW_UNLOCKED_CARGO_SCRIPT with an empty "
@@ -1070,7 +1458,7 @@ def check_cargo_locked_scripts(projects, root, allow=None):
         hits = [
             line
             for line in seen.get(rel, [])
-            if line.segment.strip() == text and line.resolves and not line.locked
+            if line.segment.strip() == text and _row_reports(line)
         ]
         if not hits:
             rows.append(
@@ -1142,6 +1530,14 @@ def _cwd_inside_rs(text, source_dir):
     return False
 
 
+def _var_sensitive(text):
+    """True when a cargo-NAMED variable runs a COMPILING subcommand in `text`."""
+    return any(
+        CARGO_VAR_NAME in m.group(1).lower()
+        for m in CARGO_VAR_CMD_SENSITIVE_RE.finditer(text)
+    )
+
+
 def check_cargo_config_inputs(projects, root, allow=None, floor=None):
     """A10: every task whose cargo can READ rs/.cargo/config.toml must key on it.
 
@@ -1176,11 +1572,18 @@ def check_cargo_config_inputs(projects, root, allow=None, floor=None):
         # switched A10 off for that gate. `task_script_refs` returns [] when a blob names no
         # script, so this costs nothing for a task that really is blob-only: MEASURED on the
         # real corpus, in_scope stays 58 and no row appears.
-        for path in task_script_refs(projects, root, target):
+        for path in task_script_closure(projects, root, target):
             text += "\n" + Path(path).read_text()
         # A wrapper reaches cargo without a literal verb, so the verb test cannot see it. The
         # three FFI tasks compile and link cdylibs and wasm32 by construction.
-        sensitive = kind == "wrapper" or bool(CONFIG_SENSITIVE_RE.search(text))
+        # Arm 2 makes a task sensitive UNCONDITIONALLY: `CARGO=<path> <tool>` reaches cargo
+        # through a tool whose subcommand A10 cannot read, so it cannot rule out a compile.
+        sensitive = (
+            kind == "wrapper"
+            or bool(CONFIG_SENSITIVE_RE.search(text))
+            or _var_sensitive(text)
+            or any(c.kind == "env" for c in cargo_matches(text))
+        )
         if not (sensitive and _cwd_inside_rs(text, projects[pid]["source_dir"])):
             continue
         in_scope.add(target)
@@ -1241,10 +1644,27 @@ def check_dockerfile_locked(root):
     seen = 0
     for lineno, line in enumerate(path.read_text().splitlines(), 1):
         stripped = line.split("#", 1)[0]
-        if not CARGO_INVOCATION_RE.search(stripped):
+        if _dockerfile_env_redirects_cargo(stripped):
+            rows.append(
+                f"rs/Dockerfile:{lineno} sets CARGO= in an ENV directive, redirecting cargo for "
+                f"every later RUN through a tool that cannot take {LOCKED_FLAG}: "
+                f"{stripped.strip()}"
+            )
             continue
-        seen += 1
-        if LOCKED_FLAG not in stripped:
+        found = cargo_matches(stripped)
+        if not found:
+            continue
+        # The FLOOR counts LITERAL matches only (SMA-605 review). `seen` exists to catch a
+        # Dockerfile that stopped compiling; an `ENV CARGO=…` line redirects cargo but invokes
+        # nothing, so letting it increment `seen` would keep the floor quiet after the real
+        # `RUN cargo build --locked` was deleted.
+        seen += sum(1 for c in found if c.kind == "literal")
+        if any(c.kind == "env" for c in found):
+            rows.append(
+                f"rs/Dockerfile:{lineno} sets CARGO= to redirect cargo through another tool, "
+                f"which cannot take {LOCKED_FLAG}: {stripped.strip()}"
+            )
+        elif LOCKED_FLAG not in stripped:
             rows.append(
                 f"rs/Dockerfile:{lineno} reaches cargo without {LOCKED_FLAG}: {stripped.strip()}"
             )
@@ -2204,6 +2624,32 @@ def self_test():
         rows = check_dockerfile_locked(Path(tmp))
         if not any("A8 examines rs/Dockerfile" in r for r in rows):
             failures.append("A8's Dockerfile floor did not fire on a file with no cargo call")
+        # SMA-605 — the Dockerfile takes the merged list too, but its FLOOR counts LITERAL
+        # matches only. Counting merged matches would let an ENV line satisfy `seen > 0` after
+        # the real `RUN cargo build --locked` was deleted, which is floor-satisfied-by-a-
+        # non-invocation — the vacuity mode this file guards against everywhere else.
+        (rs / "Dockerfile").write_text("ENV CARGO=/usr/local/bin/cargo CARGO_HOME=/cargo\n")
+        rows = check_dockerfile_locked(Path(tmp))
+        if not any("A8 examines rs/Dockerfile" in r for r in rows):
+            failures.append(
+                "A8's Dockerfile floor was satisfied by a CARGO= line — a redirection is not an "
+                "invocation, and the floor now covers nothing"
+            )
+        if not any("CARGO=" in r and "redirect" in r for r in rows):
+            failures.append("A8 did not report a CARGO= redirection in rs/Dockerfile")
+        # ...but `CARGO` must be an assignment KEY, not text inside a value. A bare `\bCARGO=`
+        # over the raw line reported this benign directive and would have red CI (CodeRabbit).
+        (rs / "Dockerfile").write_text(
+            'ENV LABEL="CARGO=/usr/bin/cargo"\nRUN cargo build --locked\n'
+        )
+        if check_dockerfile_locked(Path(tmp)):
+            failures.append(
+                "A8 reported `ENV LABEL=\"CARGO=...\"` — CARGO inside a quoted VALUE is not an "
+                "assignment key and redirects nothing"
+            )
+        (rs / "Dockerfile").write_text('RUN "$CARGO_BIN" build --release\n')
+        if not any("without --locked" in r for r in check_dockerfile_locked(Path(tmp))):
+            failures.append("A8 did not fire on an indirect unlocked Dockerfile cargo build")
         (rs / "Dockerfile").unlink()
         try:
             check_dockerfile_locked(Path(tmp))
@@ -2279,6 +2725,280 @@ def self_test():
                 f"A8's script arm called a waiver ambiguous because the segment ALSO holds a "
                 f"locked invocation, which needs no waiver: {rows}"
             )
+
+
+        # SMA-605 — the indirect arms, through the real script scanner.
+        indirect = probe / "indirect.sh"
+        indirect.write_text(
+            '#!/usr/bin/env bash\n'
+            '"$CARGO_BIN" build\n'                       # 2: reports
+            '"$CARGO_BIN" build --locked\n'              # 3: clean
+            '"$CARGO_BIN" metadata --no-deps\n'          # 4: clean, the D4 carve-out
+            'CARGO=/p release-plz update\n'              # 5: reports, wrapper rule
+            'CARGO=/p release-plz update --locked\n'     # 6: reports ANYWAY
+            'out="$(cd x && CARGO=/p tool update)"\n'    # 7: reports, inside $( )
+            'export CARGO=/p\n'                          # 8: clean, nothing to run
+        )
+        got = {
+            (line.lineno, line.kind)
+            for line in script_cargo_lines(indirect)
+            if _row_reports(line)
+        }
+        want = {(2, "var"), (5, "env"), (6, "env"), (7, "env")}
+        if got != want:
+            failures.append(
+                f"A8's script arm reports {sorted(got)} on the indirect fixture, expected "
+                f"{sorted(want)}"
+            )
+        # The `--no-deps` carve-out must key on the VERB, not on CARGO_METADATA_RE: the latter
+        # needs a literal lowercase `cargo` and never fires for `"$CARGO_BIN" metadata`.
+        if any(line.lineno == 4 and line.resolves for line in script_cargo_lines(indirect)):
+            failures.append(
+                "A8 treats `\"$CARGO_BIN\" metadata --no-deps` as resolving — the carve-out is "
+                "still keyed on CARGO_METADATA_RE rather than on the matched verb (SMA-599 D4)"
+            )
+
+        # THE WAIVER ROUND TRIP, and the only fixture that pins the waiver-health loop's half of
+        # the kind rule. MEASURED: with `_row_reports` used at emission but the hits predicate
+        # left kind-blind, every other fixture here still passes — the row is emitted, a reviewer
+        # adds a waiver, emission clears, and the health loop then finds no hits and calls the
+        # honest waiver STALE. The line is then permanently red with no escape but rewriting it.
+        indirect_fixture = {
+            "repo": {
+                "source_dir": ".", "deps": {}, "tasks": {},
+                "task_inputs": {}, "task_input_globs": {},
+                "invocations": {"i": "bash ci/probe/indirect.sh"},
+            },
+        }
+        # Unwaived first: the EMISSION loop must report every env row, including the one whose
+        # TOOL carries --locked. Without this the emission half can be made kind-blind on its own
+        # and every other fixture here still passes (MEASURED) — the `got`/`want` set above reads
+        # `_row_reports` directly and never runs check_cargo_locked_scripts.
+        # The emitted row must carry the EXACT waiver key. The waiver dict is keyed on the full
+        # stripped segment, so a truncated message means a long segment's key can never be copied
+        # out of the gate's own output and the line is unwaivable (CodeRabbit PR review).
+        long_seg = 'CARGO=/p tool update ' + '--flag-that-makes-this-segment-long ' * 4
+        long_sh = probe / "long.sh"
+        long_sh.write_text(long_seg + "\n")
+        long_rows = [
+            line for line in script_cargo_lines(long_sh) if _row_reports(line)
+        ]
+        if len(long_rows) != 1:
+            failures.append(f"the long-segment fixture did not produce one row: {long_rows}")
+        else:
+            key = long_rows[0].segment.strip()
+            long_fixture = {
+                "repo": {
+                    "source_dir": ".", "deps": {}, "tasks": {},
+                    "task_inputs": {}, "task_input_globs": {},
+                    "invocations": {"L": "bash ci/probe/long.sh"},
+                },
+            }
+            emitted = check_cargo_locked_scripts(long_fixture, Path(tmp), allow={})
+            if not any(key in r for r in emitted):
+                failures.append(
+                    f"A8's row truncates a {len(key)}-char segment, so its waiver key cannot be "
+                    f"copied from the gate output and the line is unwaivable: {emitted}"
+                )
+
+        rows = check_cargo_locked_scripts(indirect_fixture, Path(tmp), allow={})
+        if not any("indirect.sh:6" in r and "sets CARGO=" in r for r in rows):
+            failures.append(
+                f"A8's script arm did not report `CARGO=/p release-plz update --locked` — the "
+                f"tool's own --locked cleared an env row, which no flag can do: {rows}"
+            )
+
+        waived = {
+            ("ci/probe/indirect.sh", "CARGO=/p release-plz update"): "reviewed redirection",
+            ("ci/probe/indirect.sh", "CARGO=/p release-plz update --locked"): "reviewed too",
+            ("ci/probe/indirect.sh", '"$CARGO_BIN" build'): "reviewed indirect build",
+            # Note the trailing `)"`: COMMAND_SPLIT_RE splits INSIDE the substitution, so the
+            # segment carries the closing bracket and quote. Copied from the gate's own output —
+            # a hand-typed approximation matches nothing and reads as a stale waiver.
+            ("ci/probe/indirect.sh", 'CARGO=/p tool update)"'): "reviewed substitution body",
+        }
+        rows = check_cargo_locked_scripts(indirect_fixture, Path(tmp), allow=waived)
+        if rows:
+            failures.append(
+                f"A8's script arm did not fully clear the indirect fixture under its waivers — "
+                f"the waiver-health loop and the emission loop disagree about which rows report: "
+                f"{rows}"
+            )
+    # SMA-605 — the source resolver. EXECUTION ONLY: a bare `ci/**/*.sh` mention in script text
+    # is NOT followed, measured at six edges across the real corpus, every one a comment or a
+    # pin-array string constant, one new waiver and ZERO true positives (spec M10).
+    with tempfile.TemporaryDirectory() as tmp:
+        sroot = Path(tmp)
+        (sroot / "ci" / "eco").mkdir(parents=True)
+        (sroot / "ci" / "run.sh").write_text(
+            'HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"\n'
+            'ECO="a"\n'
+            'ECO="$2"\n'
+            "# see ci/other/run.sh for the idiom\n"
+            # ...and an EXECUTABLE bare mention, which is the real corpus shape: every one of the
+            # six measured prose edges is a comment or a pin-array string CONSTANT, and a
+            # constant is executable text. A comment-only fixture stopped asserting the rule the
+            # moment _executable_text started stripping comments (MEASURED — M25 survived).
+            "REQUIRED=('bash ci/other/run.sh --self-test')\n"
+            'source "$HERE/eco/$ECO.sh"\n'
+        )
+        (sroot / "ci" / "eco" / "a.sh").write_text("cargo build --locked\n")
+        (sroot / "ci" / "eco" / "b.sh").write_text("cargo build --locked\n")
+        got = sorted(x.name for x in script_source_refs(sroot / "ci" / "run.sh", sroot))
+        if got != ["a.sh", "b.sh"]:
+            failures.append(
+                f"script_source_refs resolved {got}, expected ['a.sh', 'b.sh'] — a variable "
+                f"reassigned more than once must GLOB, not resolve to its first value"
+            )
+        # The bare `ci/other/run.sh` mention in the comment must not appear. It does not exist,
+        # so following it would RAISE rather than pass quietly.
+        if any("other" in str(x) for x in script_source_refs(sroot / "ci" / "run.sh", sroot)):
+            failures.append("script_source_refs followed a bare mention in a comment")
+
+        # A cycle must terminate. Relative targets, deliberately: SOURCE_STMT_RE captures
+        # `([^"\'\\s;&|]+)`, so a `source "$(dirname "${BASH_SOURCE[0]}")/b.sh"` target is cut at
+        # the first space and never resolves. The one real statement in the tree has no space.
+        (sroot / "ci" / "eco" / "a.sh").write_text("source ./b.sh\n")
+        (sroot / "ci" / "eco" / "b.sh").write_text("source ./a.sh\ncargo build\n")
+        proj = {
+            "repo": {
+                "source_dir": ".", "deps": {}, "tasks": {},
+                "task_inputs": {"t": []}, "task_input_globs": {"t": []},
+                "invocations": {"t": "bash ci/run.sh"},
+            },
+        }
+        try:
+            closure = task_script_closure(proj, sroot, "repo:t")
+        except RecursionError:
+            failures.append("task_script_closure recursed on a source cycle")
+            closure = []
+        if len(closure) != len({x.resolve() for x in closure}):
+            failures.append("task_script_closure returned a duplicate on a source cycle")
+        if not any(x.name == "b.sh" for x in closure):
+            failures.append(
+                "task_script_closure did not reach a script two levels down — the closure is "
+                "one level deep, so a cargo call in a sourced module stays invisible"
+            )
+
+        # A `source` inside a HEREDOC BODY is not executed, so it must not resolve — and it must
+        # not abort the gate. MEASURED before the fix: `SOURCE_STMT_RE` over RAW text matched the
+        # body line and raised MoonOutputError on the absent target, an infrastructure failure on
+        # a benign script (CodeRabbit PR review).
+        (sroot / "ci" / "eco" / "real.sh").write_text("cargo build --locked\n")
+        (sroot / "ci" / "run.sh").write_text(
+            "cat <<'EOF'\n"
+            "source ./missing.sh\n"
+            "EOF\n"
+            "# source ./also-missing.sh\n"
+            "source ./eco/real.sh\n"
+        )
+        try:
+            heredoc_got = sorted(x.name for x in script_source_refs(sroot / "ci" / "run.sh", sroot))
+        except MoonOutputError:
+            heredoc_got = ["<raised>"]
+        if heredoc_got != ["real.sh"]:
+            failures.append(
+                f"script_source_refs resolved {heredoc_got} on a script whose only other "
+                f"`source` sits in a heredoc body — it is scanning RAW text, not executable text"
+            )
+        (sroot / "ci" / "run.sh").write_text(
+            'HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"\n'
+            'ECO="a"\n'
+            'ECO="$2"\n'
+            "# see ci/other/run.sh for the idiom\n"
+            # ...and an EXECUTABLE bare mention, which is the real corpus shape: every one of the
+            # six measured prose edges is a comment or a pin-array string CONSTANT, and a
+            # constant is executable text. A comment-only fixture stopped asserting the rule the
+            # moment _executable_text started stripping comments (MEASURED — M25 survived).
+            "REQUIRED=('bash ci/other/run.sh --self-test')\n"
+            'source "$HERE/eco/$ECO.sh"\n'
+        )
+        (sroot / "ci" / "eco" / "real.sh").unlink()
+
+        # A RELATIVE script path must resolve the same way an absolute one does. `$HERE` expands
+        # to `str(path.parent)`, so without the `resolve()` at entry the relative expansion made
+        # the `not candidate.is_absolute()` branch prepend the parent a SECOND time and every
+        # source resolved to nothing. It failed LOUD rather than quietly, but a guard with no
+        # fixture is a guard nobody notices deleting.
+        cwd = os.getcwd()
+        try:
+            os.chdir(sroot)
+            rel_got = sorted(x.name for x in script_source_refs(Path("ci/run.sh"), sroot))
+        except MoonOutputError:
+            rel_got = ["<raised>"]
+        finally:
+            os.chdir(cwd)
+        if rel_got != ["a.sh", "b.sh"]:
+            failures.append(
+                f"script_source_refs on a RELATIVE path resolved {rel_got}, expected "
+                f"['a.sh', 'b.sh'] — the entry `resolve()` is gone and `$HERE` expands relative"
+            )
+
+        # A source pointing OUTSIDE the repo resolves to nothing, by the containment filter.
+        # `/etc/profile` is not a gate script, and scanning one would put text nobody reviews
+        # into A8's corpus — and on a developer machine it would differ from CI.
+        with tempfile.TemporaryDirectory() as outside:
+            stray = Path(outside) / "stray.sh"
+            stray.write_text("cargo build\n")
+            (sroot / "ci" / "run.sh").write_text(f"source {stray}\n")
+            try:
+                script_source_refs(sroot / "ci" / "run.sh", sroot)
+                failures.append(
+                    "script_source_refs followed a source OUTSIDE the repo — the containment "
+                    "filter is gone, and A8's corpus now includes unreviewed text"
+                )
+            except MoonOutputError:
+                pass
+
+        # A source that resolves to nothing is infrastructure, never a silent skip.
+        (sroot / "ci" / "run.sh").write_text('source "$HERE/nope/absent.sh"\n')
+        try:
+            script_source_refs(sroot / "ci" / "run.sh", sroot)
+            failures.append("script_source_refs did not raise on a source resolving to nothing")
+        except MoonOutputError:
+            pass
+
+    # A SYMLINKED root must not crash the consumer. `task_script_refs` builds `root / rel` and
+    # keeps the caller's form; `script_source_refs` resolves. Before task_script_closure resolved
+    # every member, the closure held one path in link form and one in real form, and
+    # `path.relative_to(root)` raised ValueError — which is NOT in INFRA_ERRORS, so it escaped as
+    # a traceback rather than the rc-2 classification (MEASURED, CodeRabbit PR review). macOS
+    # makes this reachable in ordinary use: /tmp is a symlink to /private/tmp.
+    with tempfile.TemporaryDirectory() as tmp:
+        link_root, real_root = Path(tmp) / "link", Path(tmp) / "real"
+        (real_root / "ci" / "eco").mkdir(parents=True)
+        os.symlink(real_root, link_root)
+        (real_root / "ci" / "run.sh").write_text("source ./eco/a.sh\n")
+        (real_root / "ci" / "eco" / "a.sh").write_text("cargo build\n")
+        linked = {
+            "repo": {
+                "source_dir": ".", "deps": {}, "tasks": {},
+                "task_inputs": {"t": []}, "task_input_globs": {"t": []},
+                "invocations": {"t": "bash ci/run.sh"},
+            },
+        }
+        try:
+            link_rows = check_cargo_locked_scripts(linked, link_root, allow={})
+        except ValueError as exc:
+            link_rows = []
+            failures.append(
+                f"A8's script arm raised ValueError on a SYMLINKED root — the closure mixes path "
+                f"forms and ValueError is not in INFRA_ERRORS, so it escapes as a traceback: {exc}"
+            )
+        if not any("ci/eco/a.sh" in r for r in link_rows):
+            failures.append(
+                f"A8's script arm lost the sourced module under a symlinked root: {link_rows}"
+            )
+
+    # The resolver's FLOOR: a rename must red, not silently empty the closure.
+    _root = Path(__file__).resolve().parents[2]
+    if not check_sourced_scripts(_root, required={"ci/release-parity/run.sh": ("ci/nope.sh",)}):
+        failures.append("check_sourced_scripts did not fire on a wrong expected set")
+    if check_sourced_scripts(_root):
+        failures.append(
+            "check_sourced_scripts reports on the REAL corpus — REQUIRED_SOURCED_SCRIPTS no "
+            "longer matches what ci/release-parity/run.sh sources"
+        )
 
     if not ALLOW_UNLOCKED_CARGO_SCRIPT:
         failures.append("ALLOW_UNLOCKED_CARGO_SCRIPT is empty — its stale-entry rule asserts nothing")
@@ -3057,6 +3777,134 @@ def self_test():
             "BOTH kinds — the stricter rule must win"
         )
 
+    # SMA-605 — the BLOB arm. Deliberately blob-only fixtures with NO script reference: every
+    # other indirect fixture reaches the code through a script, so without these, deleting the
+    # blob wiring survives the whole suite at rc 0 (SMA-605 review).
+    def _blob(cmd):
+        return {
+            "p": {
+                "source_dir": "rs/crates/libs/p", "deps": {}, "tasks": {},
+                "task_inputs": {"t": []}, "task_input_globs": {"t": []},
+                "invocations": {"t": cmd},
+            },
+        }
+
+    for cmd, want_kind in (
+        ('"$CARGO_BIN" build', "literal"),
+        ("CARGO=/p release-plz update", "wrapper"),
+    ):
+        got = derive_cargo_tasks(_blob(cmd), Path("."))
+        if got != {"p:t": want_kind}:
+            failures.append(
+                f"derive_cargo_tasks did not classify the blob {cmd!r} as {want_kind} — it "
+                f"returned {got}; the blob arm is not wired"
+            )
+
+    # ...and A8 must actually REPORT them, not merely derive them.
+    if not any(
+        "p:t" in r for r in check_cargo_locked(_blob('"$CARGO_BIN" build'), allow={}, floor=())
+    ):
+        failures.append("A8's blob arm did not report an unlocked indirect cargo invocation")
+    # Arm 2 in a blob is a WRAPPER: a --locked in the blob must NOT clear it.
+    if not any(
+        "p:t" in r
+        for r in check_cargo_locked(
+            _blob("CARGO=/p release-plz update --locked"), allow={}, floor=()
+        )
+    ):
+        failures.append(
+            "A8's blob arm let a --locked clear a CARGO= redirection — the flag reaches the "
+            "tool, never the cargo behind it"
+        )
+    # The row must name the CAUSE it actually matched. `is_wrapper` covers two shapes, and a
+    # "(FFI_MARKERS)" row for a `CARGO=` blob sends the reviewer looking for a napi/wasm-pack
+    # call that does not exist (CodeRabbit PR review).
+    env_rows = check_cargo_locked(_blob("CARGO=/p release-plz update"), allow={}, floor=())
+    if not any("CARGO= redirection" in r for r in env_rows):
+        failures.append(f"A8's blob row does not name the CARGO= cause: {env_rows}")
+    if any("FFI_MARKERS" in r for r in env_rows):
+        failures.append(
+            f"A8's blob row blames FFI_MARKERS for a CARGO= redirection it never matched: "
+            f"{env_rows}"
+        )
+    # The blob arm must use MERGED-match semantics, exactly like the script arm: an env prefix
+    # whose command IS cargo is one locked literal call, not a wrapper needing a waiver. Searching
+    # the raw env regex made the two arms disagree about one string (CodeRabbit PR review).
+    locked_env = _blob("CARGO=/p cargo build --locked")
+    if derive_cargo_tasks(locked_env, Path(".")) != {"p:t": "literal"}:
+        failures.append(
+            "derive_cargo_tasks classified `CARGO=/p cargo build --locked` as a wrapper — the "
+            "blob arm bypasses cargo_matches' env suppression"
+        )
+    if check_cargo_locked(locked_env, allow={}, floor=()):
+        failures.append(
+            "A8's blob arm demanded a waiver for `CARGO=/p cargo build --locked`, a correctly "
+            "locked literal call"
+        )
+    ffi_rows = check_cargo_locked(_blob("pnpm exec napi build --platform"), allow={}, floor=())
+    if not any("FFI_MARKERS" in r for r in ffi_rows):
+        failures.append(f"A8's blob row lost the FFI_MARKERS cause: {ffi_rows}")
+
+    # SMA-605 — the merged match list. Both arms are FORWARD COVER: arm 1 reports zero rows on
+    # the real corpus and arm 2 exactly one, and only once the source resolver lands. These
+    # fixtures are the whole proof that either arm works.
+    def _kinds(text):
+        return [(c.kind, c.verb) for c in cargo_matches(text)]
+
+    for text, want in (
+        ('cargo build --locked', [("literal", "build")]),
+        ('"$CARGO_BIN" build', [("var", "build")]),
+        ('"${CARGO_BIN}" build', [("var", "build")]),
+        ('CARGO=/p release-plz update', [("env", None)]),
+        # Arm 1 must NOT fire on a variable whose name does not mention cargo. All three are
+        # live lines in this repo, and a naive widening reports all three (SMA-605 M4).
+        ('git -C "$dir" add -A', []),
+        ('echo "negative control: $failures check(s) failed to bite"', []),
+        ('"$RELEASE_PLZ_BIN" update', []),
+        # Arm 2 is EXACTLY `CARGO=`. CARGO_NET_OFFLINE configures cargo; it does not redirect it.
+        ('CARGO_NET_OFFLINE=true tool update', []),
+        # ...and it must still see a real CARGO= that follows one.
+        ('CARGO_NET_OFFLINE=true CARGO=/p tool update', [("env", None)]),
+        # An assignment with nothing to run is not an invocation. NOTE: this fixture does NOT
+        # distinguish the lookahead from a consuming `\\s+\\S` — both report zero here, measured.
+        # The row below is the one that does.
+        ('export CARGO=/p', []),
+        # ...and the lookahead must not cross a NEWLINE to find one. Fifteen real moon blobs are
+        # multi-line `script:` blocks, so a `\s`-based lookahead makes an unrelated next line
+        # into a wrapper match (MEASURED, CodeRabbit local review).
+        ("export CARGO=/p\necho hi", []),
+        # ARM 1 MUST NOT SPAN A NEWLINE either (CodeRabbit PR review). COMMAND_SPLIT_RE does not
+        # split on newlines and a blob is often a multi-line `script:` block, so a `\s` between
+        # the variable and its verb reads two separate commands as one invocation.
+        ('"$CARGO_BIN"\nbuild', []),
+        # An env prefix followed only by MORE ASSIGNMENTS runs nothing, so it is not a wrapper...
+        ("CARGO=/p CARGO_HOME=/x", []),
+        # ...but one followed by assignments AND a command still is: the tool is reached with
+        # cargo redirected, so skipping the assignments matters more than rejecting them.
+        ("CARGO=/p CARGO_HOME=/x tool run", [("env", None)]),
+        # An env prefix whose COMMAND IS CARGO is not indirection. Reporting both kinds gives two
+        # rows with the SAME segment text, which makes every waiver for that line permanently
+        # ambiguous — the line becomes unwaivable (SMA-599 L15, MEASURED on the locked form).
+        ("CARGO=/p cargo build", [("literal", "build")]),
+        ("CARGO=/p cargo build --locked", [("literal", "build")]),
+        ("CARGO=/p CARGO_HOME=/x cargo build", [("literal", "build")]),
+        # ...but a SEPARATE command after it keeps both: the redirection governs `tool`, not the
+        # cargo call that follows the `&&`.
+        ("CARGO=/p tool update && cargo build", [("env", None), ("literal", "build")]),
+        # THE LOOKAHEAD'S PROOF, and the only shape that separates it from consumption
+        # (measured over eight candidate shapes). Consuming the trailing word eats the second
+        # prefix's leading separator, so `finditer` resumes mid-token and reports ONE match
+        # where there are two.
+        ('CARGO=/p CARGO=/q tool update', [("env", None), ("env", None)]),
+        # A lowercase `$cargo build` is ALREADY matched by CARGO_INVOCATION_RE (measured), so
+        # without de-duplication arm 1 double-reports one invocation.
+        ('$cargo build', [("literal", "build")]),
+    ):
+        if _kinds(text) != want:
+            failures.append(
+                f"cargo_matches({text!r}) is {_kinds(text)}, expected {want}"
+            )
+
     if not REQUIRED_LOCKED_TASKS:
         failures.append("REQUIRED_LOCKED_TASKS is empty — A8's floor would assert nothing")
 
@@ -3244,16 +4092,17 @@ def self_test():
         failures.append("a nested cargo call lost its OWN --locked to the substitution bound")
 
     # SMA-599 L11, pinned rather than left as prose (CodeRabbit round 1). A compiling cargo
-    # PLUGIN is invisible to A10 because both derivations filter on CARGO_INVOCATION_RE, which
-    # is built from LOCK_RESOLVING_VERBS. That exclusion is INTENTIONAL and out of scope here —
-    # widening the regex repo-wide also changes A8 and is tracked as SMA-605 — but it must be
-    # a tested decision, not an accident, so this fixture fails the day the regex widens and
-    # nobody revisits L11.
+    # PLUGIN is invisible to A10 because every arm of `cargo_matches` filters on a VERB LIST, and
+    # A8's is LOCK_RESOLVING_VERBS. That exclusion is INTENTIONAL and still out of scope: SMA-605
+    # closed L10 by adding two arms for INDIRECTION — a cargo-named variable and a `CARGO=`
+    # prefix — WITHOUT widening the verb list, so L11's subcommand shape is untouched. It must
+    # stay a tested decision rather than an accident, so this fixture fails the day the verb list
+    # widens and nobody revisits L11.
     for plugin in ("cargo llvm-cov", "cargo insta test", "cargo udeps", "cargo bloat"):
         if _classify_shell_line(1, f"cd rs && {plugin}"):
             failures.append(
-                f"{plugin!r} now matches CARGO_INVOCATION_RE — A10 can see it, so spec L11 and "
-                f"SMA-605 are stale; revisit them rather than deleting this row"
+                f"{plugin!r} now matches a cargo_matches arm — A10 can see it, so spec L11 is "
+                f"stale; revisit it rather than deleting this row"
             )
 
     # SMA-599 (CodeRabbit round 2) — a `cd` INSIDE a command substitution must still confer
@@ -3274,6 +4123,85 @@ def self_test():
 
     if not REQUIRED_CARGO_CONFIG_TASKS:
         failures.append("REQUIRED_CARGO_CONFIG_TASKS is empty — A10's floor would assert nothing")
+    # SMA-605 — A10's arms are its OWN, built from CONFIG_SENSITIVE_VERBS. Reusing arm 1
+    # (LOCK_RESOLVING_VERBS) pulls `tree`, `deny` and `update` into A10's scope and NOTHING
+    # reds — the accident SMA-599 D9 spent a round removing.
+    def _a10(cmd):
+        return {
+            "q": {
+                "source_dir": "rs/crates/libs/q", "deps": {}, "tasks": {},
+                "task_inputs": {"t": []}, "task_input_globs": {"t": []},
+                "invocations": {"t": cmd},
+            },
+        }
+
+    if not any(
+        "q:t" in r and CARGO_CONFIG_INPUT in r
+        for r in check_cargo_config_inputs(_a10('"$CARGO_BIN" build'), Path("."), floor=())
+    ):
+        failures.append("A10 did not demand .cargo/config.toml for an indirect compiling call")
+    if check_cargo_config_inputs(_a10('"$CARGO_BIN" tree'), Path("."), floor=()):
+        failures.append(
+            "A10 examined `\"$CARGO_BIN\" tree` — its arm is built from LOCK_RESOLVING_VERBS "
+            "rather than CONFIG_SENSITIVE_VERBS (SMA-599 D9)"
+        )
+    if not any(
+        "q:t" in r
+        for r in check_cargo_config_inputs(_a10("CARGO=/p release-plz update"), Path("."), floor=())
+    ):
+        failures.append(
+            "A10 did not treat a CARGO= redirection as sensitive — the tool's inner cargo may "
+            "compile, and A10 cannot know that it does not"
+        )
+    # ...and the clause above is only LOAD-BEARING for a redirection that lives inside a FOLLOWED
+    # SCRIPT. A blob-level `CARGO=` is already `wrapper` by derivation, so the `kind == "wrapper"`
+    # branch covers it and dropping the clause survives (MEASURED). A script-level one derives as
+    # `script`, and then this clause is the only thing that sees it — SMA-599 L13's shape, where a
+    # wrapper hides one level down and CONFIG_SENSITIVE_RE cannot recognise it.
+    with tempfile.TemporaryDirectory() as tmp:
+        eco = Path(tmp) / "ci" / "probe"
+        eco.mkdir(parents=True)
+        (eco / "eco.sh").write_text("CARGO=/p release-plz update\n")
+        hidden = {
+            "q": {
+                "source_dir": "rs/crates/libs/q", "deps": {}, "tasks": {},
+                "task_inputs": {"t": []}, "task_input_globs": {"t": []},
+                "invocations": {"t": "bash ci/probe/eco.sh"},
+            },
+        }
+        if not any(
+            "q:t" in r and CARGO_CONFIG_INPUT in r
+            for r in check_cargo_config_inputs(hidden, Path(tmp), floor=())
+        ):
+            failures.append(
+                "A10 missed a CARGO= redirection hiding inside a followed script — the task "
+                "derives as `script`, so the wrapper branch does not cover it"
+            )
+
+    # A10's arm 1, exercised DIRECTLY — the way _cwd_inside_rs is. Going through
+    # check_cargo_config_inputs cannot isolate it: a blob the arm rejects is not derived at all,
+    # so A10 never examines it and the row is absent for the wrong reason. Only a direct call
+    # separates "the arm said no" from "the derivation said no" (MEASURED: the newline row
+    # survived as a mutation until this table existed).
+    for probe, want in (
+        ('"$CARGO_BIN" build', True),
+        ('"$CARGO_BIN" +nightly build', True),
+        # ...but never ACROSS a newline: COMMAND_SPLIT_RE does not split there, and a blob is
+        # often a multi-line `script:` block.
+        ('"$CARGO_BIN"\nbuild', False),
+        ('"$CARGO_BIN" +nightly\nbuild', False),
+        # A8's verb, not A10's: `tree` resolves the graph and never compiles (SMA-599 D9).
+        ('"$CARGO_BIN" tree', False),
+        ('"$CARGO_BIN" update', False),
+        # The NAME is the whole test.
+        ('"$RELEASE_PLZ_BIN" build', False),
+    ):
+        if _var_sensitive(probe) is not want:
+            failures.append(
+                f"_var_sensitive({probe!r}) is {not want} — A10's arm 1 is wrong in the "
+                f"{'false-negative' if want else 'false-positive'} direction"
+            )
+
     if not CONFIG_SENSITIVE_VERBS:
         failures.append("CONFIG_SENSITIVE_VERBS is empty — A10 would examine nothing")
 
@@ -3320,6 +4248,9 @@ def collect_findings(projects, crates, root):
         + check_dockerfile_locked(root)
         + check_cargo_locked_scripts(projects, root)
         + check_version_lockstep_no_write(projects)
+        # SMA-605. Joins A8's bucket rather than becoming an eleventh key: the resolver widens
+        # what A8 scans, it is not a new assertion, so EXPECTED_FINDING_KEYS is unchanged.
+        + check_sourced_scripts(root)
     )
     # SMA-594. Derived, never hand-listed, for the same reason `self_test`'s `complete_inputs` is:
     # these two hints named three files while the checks already demanded four, so a developer who
