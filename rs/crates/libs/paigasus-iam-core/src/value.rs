@@ -2,6 +2,7 @@
 
 //! Domain value objects: `Email` and `PrincipalId`.
 
+use chrono::{DateTime, Utc};
 use paigasus_kernel::Prn;
 use uuid::Uuid;
 
@@ -74,6 +75,29 @@ impl PrincipalId {
     }
 }
 
+/// The who+when of a single write (SMA-440).
+///
+/// Carried as one value so a mutation cannot advance a timestamp without naming the actor.
+/// Every mutating repository port takes one, and the application service is the only place
+/// that constructs one — from its `Clock` port plus the actor the transport handed it.
+///
+/// `by` is a [`PrincipalId`] rather than a bare `Prn` because that is the type asserting the
+/// PRN names a principal, and every caller already holds one. The *stored* columns are
+/// `Option<PrincipalId>` instead, which models a row written before the columns existed —
+/// not a missing actor at write time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Stamp {
+    pub at: DateTime<Utc>,
+    pub by: PrincipalId,
+}
+
+impl Stamp {
+    #[must_use]
+    pub fn new(at: DateTime<Utc>, by: PrincipalId) -> Self {
+        Stamp { at, by }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -97,5 +121,17 @@ mod tests {
         let id = PrincipalId::from_prn(prn);
         assert_eq!(id.uuid(), uuid);
         assert_eq!(id.canonical(), format!("prn:pgs:iam:::principal/{uuid}"));
+    }
+
+    #[test]
+    fn stamp_carries_both_halves_of_a_write() {
+        use chrono::TimeZone;
+        let at = chrono::Utc.timestamp_opt(1_700_000_000, 0).unwrap();
+        let by = PrincipalId::from_prn(
+            paigasus_kernel::Prn::build("iam", "", None, "principal", Uuid::from_u128(1)).unwrap(),
+        );
+        let stamp = Stamp::new(at, by.clone());
+        assert_eq!(stamp.at, at);
+        assert_eq!(stamp.by, by);
     }
 }
