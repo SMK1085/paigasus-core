@@ -298,8 +298,10 @@ Arm 2 carries **wrapper** semantics, the rule the three FFI tasks already carry.
 
 ### 5.5 The source resolver (SMA-599 L2, transitive)
 
-A new `script_source_refs(path)` returns the scripts a script **executes** through a
-`source`/`.` statement. Bare `ci/**/*.sh` mentions in script text are **not** followed: M10
+A new `script_source_refs(path, root)` returns the scripts a script **executes** through a
+`source`/`.` statement. `root` is not optional: it bounds resolution to files inside the
+repository, so a `source /etc/profile` resolves to nothing rather than pulling unreviewed text
+into A8's corpus (M27). Bare `ci/**/*.sh` mentions in script text are **not** followed: M10
 measures that as six prose edges and zero true positives.
 
 Resolution rules, sized to M12's single statement:
