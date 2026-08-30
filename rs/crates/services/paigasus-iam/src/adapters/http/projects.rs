@@ -45,7 +45,7 @@ async fn rename_project(State(s): State<AppState>, Extension(ctx): Extension<Aut
         let view = s.projects.get(id).await?;
         s.authorize.check(&actor_prn(&ctx), Action::RenameProject, view.node.id.prn()).await?;
     }
-    let view = s.projects.rename(id, b.slug.as_deref(), b.name.as_deref()).await?;
+    let view = s.projects.rename(id, b.slug.as_deref(), b.name.as_deref(), &ctx.principal_id).await?;
     Ok(Json(view.into()))
 }
 
@@ -55,7 +55,7 @@ async fn archive_project(State(s): State<AppState>, Extension(ctx): Extension<Au
         let view = s.projects.get(id).await?;
         s.authorize.check(&actor_prn(&ctx), Action::ArchiveProject, view.node.id.prn()).await?;
     }
-    let view = s.projects.archive(id).await?;
+    let view = s.projects.archive(id, &ctx.principal_id).await?;
     Ok(Json(view.into()))
 }
 
@@ -65,6 +65,6 @@ async fn restore_project(State(s): State<AppState>, Extension(ctx): Extension<Au
         let view = s.projects.get(id).await?;
         s.authorize.check(&actor_prn(&ctx), Action::RestoreProject, view.node.id.prn()).await?;
     }
-    let view = s.projects.restore(id).await?;
+    let view = s.projects.restore(id, &ctx.principal_id).await?;
     Ok(Json(view.into()))
 }

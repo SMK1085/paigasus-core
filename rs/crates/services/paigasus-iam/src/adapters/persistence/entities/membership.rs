@@ -17,6 +17,7 @@ pub struct Model {
     pub team_id: Option<Uuid>,
     pub project_id: Option<Uuid>,
     pub created_at: DateTimeUtc,
+    pub created_by: Option<String>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

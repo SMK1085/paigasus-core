@@ -12,8 +12,7 @@ use super::entities::{organization, team};
 use super::map_err;
 use crate::adapters::authz::Generations;
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
-use paigasus_iam_core::{NodeStatus, NodeView, PreconditionKind, RepositoryError, Slug, Team, TeamId, TeamRepository};
+use paigasus_iam_core::{NodeStatus, NodeView, PreconditionKind, PrincipalId, RepositoryError, Slug, Stamp, Team, TeamId, TeamRepository};
 use paigasus_kernel::Prn;
 use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, IntoActiveModel, QueryFilter, QueryOrder, QuerySelect, Set, TransactionTrait};
 use uuid::Uuid;
@@ -42,6 +41,13 @@ impl PgTeamRepository {
     }
 }
 
+/// Parses a stored actor PRN. A malformed value reads as `None` rather than erroring:
+/// `actor.proto` binds consumers to treat an unparseable actor as unknown, never as a
+/// failure. New writes are guarded by m0011's CHECK.
+fn model_to_actor(raw: Option<String>) -> Option<PrincipalId> {
+    raw.and_then(|s| Prn::parse(&s).ok()).map(PrincipalId::from_prn)
+}
+
 /// Builds the insertable `team` row from a domain `Team`.
 fn team_to_model(team: &Team) -> team::ActiveModel {
     team::ActiveModel {
@@ -53,6 +59,8 @@ fn team_to_model(team: &Team) -> team::ActiveModel {
         status: Set(team.status.as_str().to_string()),
         created_at: Set(team.created_at),
         updated_at: Set(team.updated_at),
+        created_by: Set(team.created_by.as_ref().map(PrincipalId::canonical)),
+        modified_by: Set(team.modified_by.as_ref().map(PrincipalId::canonical)),
     }
 }
 
@@ -73,6 +81,8 @@ fn model_to_team(model: team::Model) -> Result<Team, RepositoryError> {
         status,
         created_at: model.created_at,
         updated_at: model.updated_at,
+        created_by: model_to_actor(model.created_by),
+        modified_by: model_to_actor(model.modified_by),
     })
 }
 
@@ -96,7 +106,8 @@ fn missing_ancestor(kind: &str, ancestor_id: Uuid, child_kind: &str, child_id: U
 
 #[async_trait]
 impl TeamRepository for PgTeamRepository {
-    async fn create(&self, team: &Team) -> Result<(), RepositoryError> {
+    async fn create(&self, team: &Team, stamp: &Stamp) -> Result<(), RepositoryError> {
+        debug_assert_eq!(team.created_at, stamp.at, "the service must pass the same Stamp it built the entity from");
         let txn = self.db.begin().await.map_err(map_err)?;
 
         // D8: the org row is locked FOR SHARE for the duration of this txn so a concurrent
@@ -152,7 +163,7 @@ impl TeamRepository for PgTeamRepository {
         models.into_iter().map(|m| model_to_team(m).map(|t| team_view(t, org_status))).collect()
     }
 
-    async fn rename(&self, id: Uuid, new_slug: Option<&Slug>, new_name: Option<&str>, now: DateTime<Utc>) -> Result<NodeView<Team>, RepositoryError> {
+    async fn rename(&self, id: Uuid, new_slug: Option<&Slug>, new_name: Option<&str>, stamp: &Stamp) -> Result<NodeView<Team>, RepositoryError> {
         let txn = self.db.begin().await.map_err(map_err)?;
 
         let Some(model) = team::Entity::find_by_id(id).lock_exclusive().one(&txn).await.map_err(map_err)? else {
@@ -170,6 +181,17 @@ impl TeamRepository for PgTeamRepository {
             return Err(RepositoryError::Precondition(PreconditionKind::NodeArchived));
         }
 
+        // SMA-440 D5: a write that changes nothing stamps nothing. Placed after the archived
+        // guard (so a no-op on an archived node still errors) and before the slug-conflict
+        // check (a node cannot conflict with the slug it already holds).
+        let slug_same = new_slug.is_none_or(|s| model.slug == s.as_str());
+        let name_same = new_name.is_none_or(|n| model.name == n);
+        if slug_same && name_same {
+            txn.commit().await.map_err(map_err)?;
+            self.bump_entity_gen().await;
+            return Ok(team_view(model_to_team(model)?, org_status));
+        }
+
         let mut active = model.into_active_model();
         if let Some(slug) = new_slug {
             active.slug = Set(slug.as_str().to_string());
@@ -177,7 +199,8 @@ impl TeamRepository for PgTeamRepository {
         if let Some(name) = new_name {
             active.name = Set(name.to_owned());
         }
-        active.updated_at = Set(now);
+        active.updated_at = Set(stamp.at);
+        active.modified_by = Set(Some(stamp.by.canonical()));
         let updated = active.update(&txn).await.map_err(map_err)?;
 
         txn.commit().await.map_err(map_err)?;
@@ -185,7 +208,7 @@ impl TeamRepository for PgTeamRepository {
         Ok(team_view(model_to_team(updated)?, org_status))
     }
 
-    async fn set_status(&self, id: Uuid, status: NodeStatus, now: DateTime<Utc>) -> Result<NodeView<Team>, RepositoryError> {
+    async fn set_status(&self, id: Uuid, status: NodeStatus, stamp: &Stamp) -> Result<NodeView<Team>, RepositoryError> {
         let txn = self.db.begin().await.map_err(map_err)?;
 
         let Some(model) = team::Entity::find_by_id(id).lock_exclusive().one(&txn).await.map_err(map_err)? else {
@@ -199,7 +222,8 @@ impl TeamRepository for PgTeamRepository {
         } else {
             let mut active = model.into_active_model();
             active.status = Set(status.as_str().to_owned());
-            active.updated_at = Set(now);
+            active.updated_at = Set(stamp.at);
+            active.modified_by = Set(Some(stamp.by.canonical()));
             active.update(&txn).await.map_err(map_err)?
         };
 

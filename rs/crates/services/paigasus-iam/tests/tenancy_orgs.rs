@@ -11,22 +11,23 @@ mod support;
 
 use paigasus_iam::adapters::authz::Generations;
 use paigasus_iam::adapters::clock::SystemClock;
+use paigasus_iam::adapters::grpc::convert;
 use paigasus_iam::adapters::id::KernelIdGenerator;
 use paigasus_iam::adapters::persistence::PgOrganizationRepository;
 use paigasus_iam::adapters::persistence::entities::team;
-use paigasus_iam_core::{Clock, ConflictKind, IdGenerator, NodeStatus, Organization, OrganizationRepository, PreconditionKind, RepositoryError, Slug, Team};
-use sea_orm::EntityTrait;
+use paigasus_iam_core::{Clock, ConflictKind, IdGenerator, NodeStatus, Organization, OrganizationRepository, PreconditionKind, PrincipalId, RepositoryError, Slug, Stamp, Team};
+use sea_orm::{ConnectionTrait, EntityTrait};
 use uuid::Uuid;
 
 /// Builds an `Organization` + its auto-provisioned `"default"` `Team`, minted via the same
 /// `KernelIdGenerator`/`SystemClock` adapters the composition root will eventually wire in
 /// (M0's `roundtrip.rs` precedent for building real, non-fake domain values).
-fn new_org_and_default_team(ids: &KernelIdGenerator, clock: &SystemClock, slug: &str, name: &str) -> (Organization, Team) {
-    let now = clock.now();
+fn new_org_and_default_team(ids: &KernelIdGenerator, clock: &SystemClock, actor: &PrincipalId, slug: &str, name: &str) -> (Organization, Team) {
+    let stamp = Stamp::new(clock.now(), actor.clone());
     let org_id = ids.new_organization_id();
-    let org = Organization::new(org_id, Slug::parse(slug).unwrap(), name, now).unwrap();
+    let org = Organization::new(org_id, Slug::parse(slug).unwrap(), name, &stamp).unwrap();
     let team_id = ids.new_team_id(org.id.uuid());
-    let default_team = Team::new(team_id, Slug::parse("default").unwrap(), "Default", now).unwrap();
+    let default_team = Team::new(team_id, Slug::parse("default").unwrap(), "Default", &stamp).unwrap();
     (org, default_team)
 }
 
@@ -40,9 +41,9 @@ async fn create_is_transactional_and_provisions_default_team() {
     let repo = PgOrganizationRepository::new(db.clone(), Generations::memory());
     let owner = ids.new_principal_id();
 
-    let (org, default_team) = new_org_and_default_team(&ids, &clock, "acme", "Acme Corp.");
+    let (org, default_team) = new_org_and_default_team(&ids, &clock, &owner, "acme", "Acme Corp.");
     let grant = support::pg_owner_grant(&db, &owner, ids.new_membership_id(), &org.id).await;
-    repo.create(&org, &default_team, &grant).await.unwrap();
+    repo.create(&org, &default_team, &grant, &Stamp::new(org.created_at, owner.clone())).await.unwrap();
 
     // Both rows exist: the org row via the repo's own `find`, the team row via a direct
     // entity query (the repo has no team-lookup method yet — that's Task 11).
@@ -55,9 +56,9 @@ async fn create_is_transactional_and_provisions_default_team() {
 
     // A second org with the same slug must fail atomically: Conflict(SlugTaken), AND no
     // orphan team row is left behind for the failed org's auto-provisioned default team.
-    let (org2, default_team2) = new_org_and_default_team(&ids, &clock, "acme", "Acme Duplicate");
+    let (org2, default_team2) = new_org_and_default_team(&ids, &clock, &owner, "acme", "Acme Duplicate");
     let grant2 = support::pg_owner_grant(&db, &owner, ids.new_membership_id(), &org2.id).await;
-    let result = repo.create(&org2, &default_team2, &grant2).await;
+    let result = repo.create(&org2, &default_team2, &grant2, &Stamp::new(org2.created_at, owner.clone())).await;
     assert!(
         matches!(result, Err(RepositoryError::Conflict(ConflictKind::SlugTaken))),
         "expected Conflict(SlugTaken), got {result:?}"
@@ -78,55 +79,72 @@ async fn rename_and_lifecycle_contracts() {
     let owner = ids.new_principal_id();
 
     // rename missing id -> NotFound.
-    let missing = repo.rename(Uuid::from_u128(999), None, Some("x"), clock.now()).await;
+    let missing = repo.rename(Uuid::from_u128(999), None, Some("x"), &Stamp::new(clock.now(), owner.clone())).await;
     assert!(matches!(missing, Err(RepositoryError::NotFound)), "expected NotFound, got {missing:?}");
 
-    let (org, default_team) = new_org_and_default_team(&ids, &clock, "acme", "Acme Corp.");
+    let (org, default_team) = new_org_and_default_team(&ids, &clock, &owner, "acme", "Acme Corp.");
     let grant = support::pg_owner_grant(&db, &owner, ids.new_membership_id(), &org.id).await;
-    repo.create(&org, &default_team, &grant).await.unwrap();
+    repo.create(&org, &default_team, &grant, &Stamp::new(org.created_at, owner.clone())).await.unwrap();
     let id = org.id.uuid();
     let created_at = org.updated_at;
 
     // archive -> Archived + updated_at advanced.
-    let archived = repo.set_status(id, NodeStatus::Archived, clock.now()).await.unwrap();
+    let archived = repo.set_status(id, NodeStatus::Archived, &Stamp::new(clock.now(), owner.clone())).await.unwrap();
     assert_eq!(archived.node.status, NodeStatus::Archived);
     assert_eq!(archived.effective_status, NodeStatus::Archived);
     assert!(archived.node.updated_at > created_at, "updated_at must advance on archive");
     let archived_at = archived.node.updated_at;
 
     // archive again -> no-op (updated_at unchanged).
-    let archived_again = repo.set_status(id, NodeStatus::Archived, clock.now()).await.unwrap();
+    let archived_again = repo.set_status(id, NodeStatus::Archived, &Stamp::new(clock.now(), owner.clone())).await.unwrap();
     assert_eq!(archived_again.node.status, NodeStatus::Archived);
     assert_eq!(archived_again.node.updated_at, archived_at, "re-archiving must be a no-op");
 
     // rename archived -> Precondition(NodeArchived).
-    let rename_archived = repo.rename(id, Some(&Slug::parse("acme2").unwrap()), None, clock.now()).await;
+    let rename_archived = repo.rename(id, Some(&Slug::parse("acme2").unwrap()), None, &Stamp::new(clock.now(), owner.clone())).await;
     assert!(
         matches!(rename_archived, Err(RepositoryError::Precondition(PreconditionKind::NodeArchived))),
         "expected Precondition(NodeArchived), got {rename_archived:?}"
     );
 
     // restore -> Active.
-    let restored = repo.set_status(id, NodeStatus::Active, clock.now()).await.unwrap();
+    let restored = repo.set_status(id, NodeStatus::Active, &Stamp::new(clock.now(), owner.clone())).await.unwrap();
     assert_eq!(restored.node.status, NodeStatus::Active);
     assert_eq!(restored.effective_status, NodeStatus::Active);
     assert!(restored.node.updated_at > archived_at, "updated_at must advance on restore");
 
     // rename slug to another org's slug -> Conflict(SlugTaken).
-    let (other_org, other_default_team) = new_org_and_default_team(&ids, &clock, "other", "Other Corp.");
+    let (other_org, other_default_team) = new_org_and_default_team(&ids, &clock, &owner, "other", "Other Corp.");
     let other_grant = support::pg_owner_grant(&db, &owner, ids.new_membership_id(), &other_org.id).await;
-    repo.create(&other_org, &other_default_team, &other_grant).await.unwrap();
+    repo.create(&other_org, &other_default_team, &other_grant, &Stamp::new(other_org.created_at, owner.clone()))
+        .await
+        .unwrap();
 
-    let slug_conflict = repo.rename(id, Some(&Slug::parse("other").unwrap()), None, clock.now()).await;
+    let slug_conflict = repo.rename(id, Some(&Slug::parse("other").unwrap()), None, &Stamp::new(clock.now(), owner.clone())).await;
     assert!(
         matches!(slug_conflict, Err(RepositoryError::Conflict(ConflictKind::SlugTaken))),
         "expected Conflict(SlugTaken), got {slug_conflict:?}"
     );
 
     // A legitimate rename succeeds and updates both slug and name.
-    let renamed = repo.rename(id, Some(&Slug::parse("acme-renamed").unwrap()), Some("Acme Renamed"), clock.now()).await.unwrap();
+    let renamed = repo
+        .rename(id, Some(&Slug::parse("acme-renamed").unwrap()), Some("Acme Renamed"), &Stamp::new(clock.now(), owner.clone()))
+        .await
+        .unwrap();
     assert_eq!(renamed.node.slug.as_str(), "acme-renamed");
     assert_eq!(renamed.node.name, "Acme Renamed");
+
+    // SMA-440 D5: a rename to the values already stored changes nothing, so it advances
+    // neither updated_at nor modified_by. The fake and the adapter can disagree, so this
+    // asserts the Postgres half of the same rule the unit tests cover.
+    let before = repo.find(id).await.unwrap().expect("org exists");
+    let no_op_actor = ids.new_principal_id();
+    let noop = repo
+        .rename(id, Some(&Slug::parse("acme-renamed").unwrap()), Some("Acme Renamed"), &Stamp::new(clock.now(), no_op_actor))
+        .await
+        .unwrap();
+    assert_eq!(noop.node.updated_at, before.node.updated_at, "no-op rename must not advance updated_at");
+    assert_eq!(noop.node.modified_by, before.node.modified_by, "no-op rename must not restamp the modifier");
 }
 
 #[tokio::test]
@@ -144,9 +162,9 @@ async fn list_orders_by_created_at_then_id() {
     // inserts make a tie astronomically unlikely — no artificial sleep needed).
     let mut created = Vec::new();
     for (slug, name) in [("alpha", "Alpha"), ("beta", "Beta"), ("gamma", "Gamma")] {
-        let (org, default_team) = new_org_and_default_team(&ids, &clock, slug, name);
+        let (org, default_team) = new_org_and_default_team(&ids, &clock, &owner, slug, name);
         let grant = support::pg_owner_grant(&db, &owner, ids.new_membership_id(), &org.id).await;
-        repo.create(&org, &default_team, &grant).await.unwrap();
+        repo.create(&org, &default_team, &grant, &Stamp::new(org.created_at, owner.clone())).await.unwrap();
         created.push(org);
     }
 
@@ -168,4 +186,39 @@ async fn list_orders_by_created_at_then_id() {
     let mut got: Vec<Organization> = page1.into_iter().map(|v| v.node).collect();
     got.extend(page2.into_iter().map(|v| v.node));
     assert_eq!(got, expected);
+}
+
+/// SMA-440 D4: no backfill runs, so a row predating `m0011` keeps NULL actor columns. NULL is
+/// the absent `Actor` that `actor.proto` already defines as unknown-or-system, which is why
+/// inventing a synthetic "system" PRN would have been worse than leaving these alone.
+///
+/// `start_migrated_postgres` runs the migrator to the tip, so a genuinely pre-`m0011` row is
+/// not constructible — a NULL row is inserted directly via SQL instead; the assertion is about
+/// NULL, not about migration history.
+#[tokio::test]
+async fn a_row_with_null_actor_columns_reads_back_as_unknown() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let ids = KernelIdGenerator;
+    let repo = PgOrganizationRepository::new(db.clone(), Generations::memory());
+
+    let org_id = ids.new_organization_id();
+    let id = org_id.uuid();
+    let prn = org_id.canonical();
+    db.execute_unprepared(&format!(
+        r#"INSERT INTO "organization" (id, prn, slug, name, status, created_at, updated_at)
+           VALUES ('{id}', '{prn}', 'legacy', 'Legacy', 'active', now(), now());"#
+    ))
+    .await
+    .unwrap();
+
+    let view = repo.find(id).await.unwrap().expect("legacy org exists");
+    assert_eq!(view.node.created_by, None);
+    assert_eq!(view.node.modified_by, None);
+
+    let wire = convert::to_proto_org(&view);
+    let meta = wire.audit.expect("audit is always present");
+    assert!(meta.creator.is_none(), "a NULL column must project as an ABSENT Actor, never Actor{{prn:\"\"}}");
+    assert!(meta.modifier.is_none());
 }

@@ -53,7 +53,7 @@ async fn rename_team(State(s): State<AppState>, Extension(ctx): Extension<AuthCo
         let view = s.teams.get(id).await?;
         s.authorize.check(&actor_prn(&ctx), Action::RenameTeam, view.node.id.prn()).await?;
     }
-    let view = s.teams.rename(id, b.slug.as_deref(), b.name.as_deref()).await?;
+    let view = s.teams.rename(id, b.slug.as_deref(), b.name.as_deref(), &ctx.principal_id).await?;
     Ok(Json(view.into()))
 }
 
@@ -63,7 +63,7 @@ async fn archive_team(State(s): State<AppState>, Extension(ctx): Extension<AuthC
         let view = s.teams.get(id).await?;
         s.authorize.check(&actor_prn(&ctx), Action::ArchiveTeam, view.node.id.prn()).await?;
     }
-    let view = s.teams.archive(id).await?;
+    let view = s.teams.archive(id, &ctx.principal_id).await?;
     Ok(Json(view.into()))
 }
 
@@ -73,7 +73,7 @@ async fn restore_team(State(s): State<AppState>, Extension(ctx): Extension<AuthC
         let view = s.teams.get(id).await?;
         s.authorize.check(&actor_prn(&ctx), Action::RestoreTeam, view.node.id.prn()).await?;
     }
-    let view = s.teams.restore(id).await?;
+    let view = s.teams.restore(id, &ctx.principal_id).await?;
     Ok(Json(view.into()))
 }
 
@@ -88,7 +88,7 @@ async fn create_project(
         let team_view = s.teams.get(team_id).await?;
         s.authorize.check(&actor_prn(&ctx), Action::CreateProject, team_view.node.id.prn()).await?;
     }
-    let view = s.projects.create(team_id, &b.slug, &b.name).await?;
+    let view = s.projects.create(team_id, &b.slug, &b.name, &ctx.principal_id).await?;
     Ok((StatusCode::CREATED, Json(view.into())))
 }
 

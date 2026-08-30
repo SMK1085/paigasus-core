@@ -35,7 +35,7 @@ use paigasus_iam::adapters::authz::Generations;
 use paigasus_iam::adapters::clock::SystemClock;
 use paigasus_iam::adapters::id::KernelIdGenerator;
 use paigasus_iam::adapters::persistence::{PgOrganizationRepository, PgTeamRepository};
-use paigasus_iam_core::{Clock, GrantScope, IdGenerator, Organization, OrganizationRepository, Slug, Team, TeamId, TeamRepository, TenancyNodeRef};
+use paigasus_iam_core::{Clock, GrantScope, IdGenerator, Organization, OrganizationRepository, Slug, Stamp, Team, TeamId, TeamRepository, TenancyNodeRef};
 use sea_orm::DatabaseConnection;
 use serde_json::json;
 use support::{app_with_state, seed_org_admin, send};
@@ -49,15 +49,17 @@ async fn seed_org_with_team(db: &DatabaseConnection, org_slug: &str, team_slug: 
     let org_repo = PgOrganizationRepository::new(db.clone(), Generations::memory());
     let team_repo = PgTeamRepository::new(db.clone(), Generations::memory());
 
-    let org_id = ids.new_organization_id();
-    let org = Organization::new(org_id.clone(), Slug::parse(org_slug).unwrap(), "Org", clock.now()).unwrap();
-    let default_team = Team::new(ids.new_team_id(org.id.uuid()), Slug::parse("default").unwrap(), "Default", clock.now()).unwrap();
     let owner = ids.new_principal_id();
+    let org_id = ids.new_organization_id();
+    let create_stamp = Stamp::new(clock.now(), owner.clone());
+    let org = Organization::new(org_id.clone(), Slug::parse(org_slug).unwrap(), "Org", &create_stamp).unwrap();
+    let default_team = Team::new(ids.new_team_id(org.id.uuid()), Slug::parse("default").unwrap(), "Default", &create_stamp).unwrap();
     let owner_grant = support::pg_owner_grant(db, &owner, ids.new_membership_id(), &org.id).await;
-    org_repo.create(&org, &default_team, &owner_grant).await.unwrap();
+    org_repo.create(&org, &default_team, &owner_grant, &create_stamp).await.unwrap();
 
-    let team = Team::new(ids.new_team_id(org.id.uuid()), Slug::parse(team_slug).unwrap(), "Team", clock.now()).unwrap();
-    team_repo.create(&team).await.unwrap();
+    let team_stamp = Stamp::new(clock.now(), owner.clone());
+    let team = Team::new(ids.new_team_id(org.id.uuid()), Slug::parse(team_slug).unwrap(), "Team", &team_stamp).unwrap();
+    team_repo.create(&team, &team_stamp).await.unwrap();
 
     (org, team)
 }

@@ -12,7 +12,7 @@ use crate::principal::{Principal, PrincipalStatus};
 use crate::service_account::{ServiceAccount, ServiceAccountRecord};
 use crate::tenancy::{Membership, NodeStatus, Organization, OrganizationId, Project, ProjectId, Slug, Team, TeamId, TenancyNodeRef};
 use crate::user::User;
-use crate::value::PrincipalId;
+use crate::value::{PrincipalId, Stamp};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
@@ -67,6 +67,7 @@ pub struct MembershipRecord {
     pub principal_prn: String,
     pub node_prn: String,
     pub created_at: DateTime<Utc>,
+    pub created_by: Option<PrincipalId>,
 }
 
 /// Persistence port for user-principals.
@@ -100,14 +101,15 @@ pub trait OrganizationRepository: Send + Sync {
     /// principal's `org_admin` owner grant, scoped to the new org (spec D8) — a grant is a
     /// policy change, so implementations must also bump `policy_gen` (in addition to the
     /// usual `entity_gen` bump every tenancy mutation gets).
-    async fn create(&self, org: &Organization, default_team: &Team, owner_grant: &RoleGrant) -> Result<(), RepositoryError>;
+    /// `stamp` also stamps rows this method writes that are not entities — the owner grant.
+    async fn create(&self, org: &Organization, default_team: &Team, owner_grant: &RoleGrant, stamp: &Stamp) -> Result<(), RepositoryError>;
     async fn find(&self, id: Uuid) -> Result<Option<NodeView<Organization>>, RepositoryError>;
     /// ORDER BY created_at, id (rule 9).
     async fn list(&self, limit: u64, offset: u64) -> Result<Vec<NodeView<Organization>>, RepositoryError>;
     /// In-txn guard: NotFound if missing; Precondition(NodeArchived) if own status archived.
-    async fn rename(&self, id: Uuid, new_slug: Option<&Slug>, new_name: Option<&str>, now: DateTime<Utc>) -> Result<NodeView<Organization>, RepositoryError>;
+    async fn rename(&self, id: Uuid, new_slug: Option<&Slug>, new_name: Option<&str>, stamp: &Stamp) -> Result<NodeView<Organization>, RepositoryError>;
     /// Sets own status (D10). Idempotent: no-op (updated_at untouched) when already `status`.
-    async fn set_status(&self, id: Uuid, status: NodeStatus, now: DateTime<Utc>) -> Result<NodeView<Organization>, RepositoryError>;
+    async fn set_status(&self, id: Uuid, status: NodeStatus, stamp: &Stamp) -> Result<NodeView<Organization>, RepositoryError>;
 }
 
 /// Persistence port for teams.
@@ -115,12 +117,12 @@ pub trait OrganizationRepository: Send + Sync {
 pub trait TeamRepository: Send + Sync {
     /// In-txn guards (D8): org row locked FOR SHARE; NotFound if org missing;
     /// Precondition(ParentArchived) if org effectively archived.
-    async fn create(&self, team: &Team) -> Result<(), RepositoryError>;
+    async fn create(&self, team: &Team, stamp: &Stamp) -> Result<(), RepositoryError>;
     async fn find(&self, id: Uuid) -> Result<Option<NodeView<Team>>, RepositoryError>;
     async fn list_by_org(&self, org: Uuid, limit: u64, offset: u64) -> Result<Vec<NodeView<Team>>, RepositoryError>;
     /// Guard: Precondition(NodeArchived) if team is EFFECTIVELY archived (own or org).
-    async fn rename(&self, id: Uuid, new_slug: Option<&Slug>, new_name: Option<&str>, now: DateTime<Utc>) -> Result<NodeView<Team>, RepositoryError>;
-    async fn set_status(&self, id: Uuid, status: NodeStatus, now: DateTime<Utc>) -> Result<NodeView<Team>, RepositoryError>;
+    async fn rename(&self, id: Uuid, new_slug: Option<&Slug>, new_name: Option<&str>, stamp: &Stamp) -> Result<NodeView<Team>, RepositoryError>;
+    async fn set_status(&self, id: Uuid, status: NodeStatus, stamp: &Stamp) -> Result<NodeView<Team>, RepositoryError>;
 }
 
 /// Persistence port for projects.
@@ -128,11 +130,11 @@ pub trait TeamRepository: Send + Sync {
 pub trait ProjectRepository: Send + Sync {
     /// In-txn guards: team+org locked FOR SHARE; NotFound if team missing; Precondition(ParentArchived)
     /// if team effectively archived; Backend if project.org != team.org (belt-and-braces, composite FK).
-    async fn create(&self, project: &Project) -> Result<(), RepositoryError>;
+    async fn create(&self, project: &Project, stamp: &Stamp) -> Result<(), RepositoryError>;
     async fn find(&self, id: Uuid) -> Result<Option<NodeView<Project>>, RepositoryError>;
     async fn list_by_team(&self, team: Uuid, limit: u64, offset: u64) -> Result<Vec<NodeView<Project>>, RepositoryError>;
-    async fn rename(&self, id: Uuid, new_slug: Option<&Slug>, new_name: Option<&str>, now: DateTime<Utc>) -> Result<NodeView<Project>, RepositoryError>;
-    async fn set_status(&self, id: Uuid, status: NodeStatus, now: DateTime<Utc>) -> Result<NodeView<Project>, RepositoryError>;
+    async fn rename(&self, id: Uuid, new_slug: Option<&Slug>, new_name: Option<&str>, stamp: &Stamp) -> Result<NodeView<Project>, RepositoryError>;
+    async fn set_status(&self, id: Uuid, status: NodeStatus, stamp: &Stamp) -> Result<NodeView<Project>, RepositoryError>;
 }
 
 /// Persistence port for memberships.
@@ -143,7 +145,7 @@ pub trait MembershipRepository: Send + Sync {
     /// node exists + stored-prn byte-match; node effectively active (else Precondition(NodeArchived));
     /// team/project targets: org membership exists, locked (else Precondition(MissingOrgMembership));
     /// duplicate -> Conflict(DuplicateMembership).
-    async fn attach(&self, membership: &Membership) -> Result<MembershipRecord, RepositoryError>;
+    async fn attach(&self, membership: &Membership, stamp: &Stamp) -> Result<MembershipRecord, RepositoryError>;
     async fn find(&self, id: Uuid) -> Result<Option<MembershipRecord>, RepositoryError>;
     /// NotFound if missing. Org memberships cascade: also deletes the principal's
     /// team/project memberships in that org, one transaction (rule 5).

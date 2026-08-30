@@ -410,6 +410,7 @@ mod tests {
                     principal_prn: format!("prn:pgs:iam:::principal/{principal}"),
                     node_prn: format!("prn:pgs:iam:::organization/{i}"),
                     created_at: now,
+                    created_by: None,
                 });
             }
         }
@@ -417,7 +418,7 @@ mod tests {
 
     #[async_trait]
     impl MembershipRepository for InMemoryMemberships {
-        async fn attach(&self, _membership: &paigasus_iam_core::Membership) -> Result<MembershipRecord, RepositoryError> {
+        async fn attach(&self, _membership: &paigasus_iam_core::Membership, _stamp: &paigasus_iam_core::Stamp) -> Result<MembershipRecord, RepositoryError> {
             unimplemented!("AuthenticateApiKey never calls attach")
         }
         async fn find(&self, _id: Uuid) -> Result<Option<MembershipRecord>, RepositoryError> {

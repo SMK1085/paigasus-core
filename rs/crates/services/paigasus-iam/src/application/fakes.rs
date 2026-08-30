@@ -13,7 +13,7 @@ use paigasus_iam_core::{
     AccessRequest, Action, ApiKey, ApiKeyId, ApiKeyRepository, ApiKeyStatus, AuditEntry, AuditFilter, AuditLog, Authorizer, AuthzError, BulkReplayRequest, Clock, ConflictKind, DeadLetterEntry,
     DeadLetterFilter, DeadLetters, Decision, DomainEvent, Effect, IdGenerator, KeyEntropy, Membership, MembershipRecord, MembershipRepository, NodeStatus, NodeView, Organization, OrganizationId,
     OrganizationRepository, Outbox, PolicyDocument, PolicyGenBumper, PolicyStore, PreconditionKind, Principal, PrincipalId, PrincipalStatus, Project, ProjectId, ProjectRepository, PutOutcome,
-    RepositoryError, RoleGrant, RoleGrantStore, Savepoint, SecretHasher, ServiceAccount, ServiceAccountRecord, ServiceAccountRepository, Slug, Team, TeamId, TeamRepository, TenancyNodeRef,
+    RepositoryError, RoleGrant, RoleGrantStore, Savepoint, SecretHasher, ServiceAccount, ServiceAccountRecord, ServiceAccountRepository, Slug, Stamp, Team, TeamId, TeamRepository, TenancyNodeRef,
     Transaction, UnitOfWork,
 };
 use paigasus_kernel::Prn;
@@ -22,6 +22,12 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
+
+/// Builds a deterministic `Stamp` for tests: `at` from the clock, `by` from a u128 seed.
+#[must_use]
+pub fn test_stamp(at: DateTime<Utc>, actor: u128) -> Stamp {
+    Stamp::new(at, PrincipalId::from_prn(Prn::build("iam", "", None, "principal", Uuid::from_u128(actor)).unwrap()))
+}
 
 /// Shared backing store for all tenancy in-memory fakes. Cloning is cheap (shares the
 /// `Arc` innards), so e.g. an `InMemoryTeams` fake sees the same org rows an
@@ -59,7 +65,7 @@ fn org_view(org: &Organization) -> NodeView<Organization> {
 
 #[async_trait]
 impl OrganizationRepository for InMemoryOrgs {
-    async fn create(&self, org: &Organization, default_team: &Team, owner_grant: &RoleGrant) -> Result<(), RepositoryError> {
+    async fn create(&self, org: &Organization, default_team: &Team, owner_grant: &RoleGrant, _stamp: &Stamp) -> Result<(), RepositoryError> {
         let mut orgs = self.0.orgs.lock().unwrap();
         if orgs.values().any(|existing| existing.slug == org.slug) {
             return Err(RepositoryError::Conflict(ConflictKind::SlugTaken));
@@ -82,7 +88,7 @@ impl OrganizationRepository for InMemoryOrgs {
         Ok(items.into_iter().skip(offset as usize).take(limit as usize).map(org_view).collect())
     }
 
-    async fn rename(&self, id: Uuid, new_slug: Option<&Slug>, new_name: Option<&str>, now: DateTime<Utc>) -> Result<NodeView<Organization>, RepositoryError> {
+    async fn rename(&self, id: Uuid, new_slug: Option<&Slug>, new_name: Option<&str>, stamp: &Stamp) -> Result<NodeView<Organization>, RepositoryError> {
         let mut orgs = self.0.orgs.lock().unwrap();
 
         let current_status = orgs.get(&id).map(|o| o.status).ok_or(RepositoryError::NotFound)?;
@@ -96,22 +102,38 @@ impl OrganizationRepository for InMemoryOrgs {
         }
 
         let org = orgs.get_mut(&id).expect("existence checked above");
+
+        // SMA-440 D5: every SUPPLIED field already equal to the stored one means this write
+        // changes nothing, so it stamps nothing. The mandated order (see pg_organizations.rs's
+        // `rename`) is archived -> no-op -> conflict; this no-op check instead runs AFTER the
+        // conflict guard above, not before it. That is equivalent only because the conflict scan
+        // just above excludes self by id, so a rename that resubmits the org's own current slug
+        // can never read as a conflict with itself. If that self-exclusion is ever removed, this
+        // fake would start rejecting a true no-op instead of silently matching production.
+        let slug_same = new_slug.is_none_or(|s| &org.slug == s);
+        let name_same = new_name.is_none_or(|n| org.name == n);
+        if slug_same && name_same {
+            return Ok(org_view(org));
+        }
+
         if let Some(slug) = new_slug {
             org.slug = slug.clone();
         }
         if let Some(name) = new_name {
             org.name = name.to_owned();
         }
-        org.updated_at = now;
+        org.updated_at = stamp.at;
+        org.modified_by = Some(stamp.by.clone());
         Ok(org_view(org))
     }
 
-    async fn set_status(&self, id: Uuid, status: NodeStatus, now: DateTime<Utc>) -> Result<NodeView<Organization>, RepositoryError> {
+    async fn set_status(&self, id: Uuid, status: NodeStatus, stamp: &Stamp) -> Result<NodeView<Organization>, RepositoryError> {
         let mut orgs = self.0.orgs.lock().unwrap();
         let org = orgs.get_mut(&id).ok_or(RepositoryError::NotFound)?;
         if org.status != status {
             org.status = status;
-            org.updated_at = now;
+            org.updated_at = stamp.at;
+            org.modified_by = Some(stamp.by.clone());
         }
         Ok(org_view(org))
     }
@@ -140,7 +162,7 @@ fn team_view(store: &TenancyStore, team: &Team) -> NodeView<Team> {
 
 #[async_trait]
 impl TeamRepository for InMemoryTeams {
-    async fn create(&self, team: &Team) -> Result<(), RepositoryError> {
+    async fn create(&self, team: &Team, _stamp: &Stamp) -> Result<(), RepositoryError> {
         let org = team.id.org_uuid();
         let status = org_status(&self.0, org).ok_or(RepositoryError::NotFound)?;
         if status == NodeStatus::Archived {
@@ -166,7 +188,7 @@ impl TeamRepository for InMemoryTeams {
         Ok(items.into_iter().skip(offset as usize).take(limit as usize).map(|t| team_view(&self.0, t)).collect())
     }
 
-    async fn rename(&self, id: Uuid, new_slug: Option<&Slug>, new_name: Option<&str>, now: DateTime<Utc>) -> Result<NodeView<Team>, RepositoryError> {
+    async fn rename(&self, id: Uuid, new_slug: Option<&Slug>, new_name: Option<&str>, stamp: &Stamp) -> Result<NodeView<Team>, RepositoryError> {
         let mut teams = self.0.teams.lock().unwrap();
 
         let current = teams.get(&id).cloned().ok_or(RepositoryError::NotFound)?;
@@ -180,22 +202,38 @@ impl TeamRepository for InMemoryTeams {
         }
 
         let team = teams.get_mut(&id).expect("existence checked above");
+
+        // SMA-440 D5: every SUPPLIED field already equal to the stored one means this write
+        // changes nothing, so it stamps nothing. The mandated order (see pg_teams.rs's
+        // `rename`) is archived -> no-op -> conflict; this no-op check instead runs AFTER the
+        // conflict guard above, not before it. That is equivalent only because the conflict scan
+        // just above excludes self by id, so a rename that resubmits the team's own current slug
+        // can never read as a conflict with itself. If that self-exclusion is ever removed, this
+        // fake would start rejecting a true no-op instead of silently matching production.
+        let slug_same = new_slug.is_none_or(|s| &team.slug == s);
+        let name_same = new_name.is_none_or(|n| team.name == n);
+        if slug_same && name_same {
+            return Ok(team_view(&self.0, team));
+        }
+
         if let Some(slug) = new_slug {
             team.slug = slug.clone();
         }
         if let Some(name) = new_name {
             team.name = name.to_owned();
         }
-        team.updated_at = now;
+        team.updated_at = stamp.at;
+        team.modified_by = Some(stamp.by.clone());
         Ok(team_view(&self.0, team))
     }
 
-    async fn set_status(&self, id: Uuid, status: NodeStatus, now: DateTime<Utc>) -> Result<NodeView<Team>, RepositoryError> {
+    async fn set_status(&self, id: Uuid, status: NodeStatus, stamp: &Stamp) -> Result<NodeView<Team>, RepositoryError> {
         let mut teams = self.0.teams.lock().unwrap();
         let team = teams.get_mut(&id).ok_or(RepositoryError::NotFound)?;
         if team.status != status {
             team.status = status;
-            team.updated_at = now;
+            team.updated_at = stamp.at;
+            team.modified_by = Some(stamp.by.clone());
         }
         Ok(team_view(&self.0, team))
     }
@@ -229,7 +267,7 @@ fn project_view(store: &TenancyStore, project: &Project) -> NodeView<Project> {
 
 #[async_trait]
 impl ProjectRepository for InMemoryProjects {
-    async fn create(&self, project: &Project) -> Result<(), RepositoryError> {
+    async fn create(&self, project: &Project, _stamp: &Stamp) -> Result<(), RepositoryError> {
         let team_uuid = project.team_id.uuid();
         let team = self.0.teams.lock().unwrap().get(&team_uuid).cloned().ok_or(RepositoryError::NotFound)?;
         if team_view(&self.0, &team).effective_status == NodeStatus::Archived {
@@ -258,7 +296,7 @@ impl ProjectRepository for InMemoryProjects {
         Ok(items.into_iter().skip(offset as usize).take(limit as usize).map(|p| project_view(&self.0, p)).collect())
     }
 
-    async fn rename(&self, id: Uuid, new_slug: Option<&Slug>, new_name: Option<&str>, now: DateTime<Utc>) -> Result<NodeView<Project>, RepositoryError> {
+    async fn rename(&self, id: Uuid, new_slug: Option<&Slug>, new_name: Option<&str>, stamp: &Stamp) -> Result<NodeView<Project>, RepositoryError> {
         let mut projects = self.0.projects.lock().unwrap();
 
         let current = projects.get(&id).cloned().ok_or(RepositoryError::NotFound)?;
@@ -272,22 +310,38 @@ impl ProjectRepository for InMemoryProjects {
         }
 
         let project = projects.get_mut(&id).expect("existence checked above");
+
+        // SMA-440 D5: every SUPPLIED field already equal to the stored one means this write
+        // changes nothing, so it stamps nothing. The mandated order (see pg_projects.rs's
+        // `rename`) is archived -> no-op -> conflict; this no-op check instead runs AFTER the
+        // conflict guard above, not before it. That is equivalent only because the conflict scan
+        // just above excludes self by id, so a rename that resubmits the project's own current
+        // slug can never read as a conflict with itself. If that self-exclusion is ever removed,
+        // this fake would start rejecting a true no-op instead of silently matching production.
+        let slug_same = new_slug.is_none_or(|s| &project.slug == s);
+        let name_same = new_name.is_none_or(|n| project.name == n);
+        if slug_same && name_same {
+            return Ok(project_view(&self.0, project));
+        }
+
         if let Some(slug) = new_slug {
             project.slug = slug.clone();
         }
         if let Some(name) = new_name {
             project.name = name.to_owned();
         }
-        project.updated_at = now;
+        project.updated_at = stamp.at;
+        project.modified_by = Some(stamp.by.clone());
         Ok(project_view(&self.0, project))
     }
 
-    async fn set_status(&self, id: Uuid, status: NodeStatus, now: DateTime<Utc>) -> Result<NodeView<Project>, RepositoryError> {
+    async fn set_status(&self, id: Uuid, status: NodeStatus, stamp: &Stamp) -> Result<NodeView<Project>, RepositoryError> {
         let mut projects = self.0.projects.lock().unwrap();
         let project = projects.get_mut(&id).ok_or(RepositoryError::NotFound)?;
         if project.status != status {
             project.status = status;
-            project.updated_at = now;
+            project.updated_at = stamp.at;
+            project.modified_by = Some(stamp.by.clone());
         }
         Ok(project_view(&self.0, project))
     }
@@ -302,6 +356,7 @@ fn to_record(m: &Membership) -> MembershipRecord {
         principal_prn: m.principal_id.canonical(),
         node_prn: m.node.canonical(),
         created_at: m.created_at,
+        created_by: m.created_by.clone(),
     }
 }
 
@@ -350,7 +405,7 @@ pub struct InMemoryMemberships(pub TenancyStore);
 
 #[async_trait]
 impl MembershipRepository for InMemoryMemberships {
-    async fn attach(&self, membership: &Membership) -> Result<MembershipRecord, RepositoryError> {
+    async fn attach(&self, membership: &Membership, _stamp: &Stamp) -> Result<MembershipRecord, RepositoryError> {
         let store = &self.0;
         let principal_uuid = membership.principal_id.uuid();
 
@@ -398,6 +453,7 @@ impl MembershipRepository for InMemoryMemberships {
             principal_prn: stored_principal_prn,
             node_prn: node_canonical,
             created_at: membership.created_at,
+            created_by: membership.created_by.clone(),
         })
     }
 
@@ -1101,8 +1157,8 @@ mod tests {
     use super::*;
     use chrono::TimeZone;
 
-    fn org(uuid: Uuid, slug: &str, now: DateTime<Utc>) -> Organization {
-        Organization::new(OrganizationId::from_uuid(uuid), Slug::parse(slug).unwrap(), "Name", now).unwrap()
+    fn org(uuid: Uuid, slug: &str, stamp: &Stamp) -> Organization {
+        Organization::new(OrganizationId::from_uuid(uuid), Slug::parse(slug).unwrap(), "Name", stamp).unwrap()
     }
 
     fn principal(n: u128) -> PrincipalId {
@@ -1127,12 +1183,13 @@ mod tests {
         let store = TenancyStore::default();
         let repo = InMemoryOrgs(store.clone());
         let now = Utc.timestamp_opt(0, 0).unwrap();
-        let organization = org(Uuid::from_u128(1), "acme", now);
-        let team = Team::new(TeamId::from_parts(organization.id.uuid(), Uuid::from_u128(2)), Slug::parse("default").unwrap(), "Default", now).unwrap();
+        let stamp = test_stamp(now, 1);
+        let organization = org(Uuid::from_u128(1), "acme", &stamp);
+        let team = Team::new(TeamId::from_parts(organization.id.uuid(), Uuid::from_u128(2)), Slug::parse("default").unwrap(), "Default", &stamp).unwrap();
         let owner = principal(3);
         let grant = owner_grant(Uuid::from_u128(4), &owner, &organization.id);
 
-        repo.create(&organization, &team, &grant).await.unwrap();
+        repo.create(&organization, &team, &grant, &stamp).await.unwrap();
 
         assert!(store.teams.lock().unwrap().contains_key(&team.id.uuid()));
         assert_eq!(store.role_grants.lock().unwrap().get(&grant.id), Some(&grant));
@@ -1147,6 +1204,7 @@ mod tests {
         let store = TenancyStore::default();
         let repo = InMemoryProjects(store.clone());
         let now = Utc.timestamp_opt(0, 0).unwrap();
+        let stamp = test_stamp(now, 1);
 
         let org_id = Uuid::from_u128(1);
         let team_id = Uuid::from_u128(2);
@@ -1155,23 +1213,26 @@ mod tests {
             TeamId::from_parts(org_id, team_id),
             Slug::parse("web").unwrap(),
             "Web",
-            now,
+            &stamp,
         )
         .unwrap();
-        assert!(matches!(repo.create(&missing_project).await.unwrap_err(), RepositoryError::NotFound));
+        assert!(matches!(repo.create(&missing_project, &stamp).await.unwrap_err(), RepositoryError::NotFound));
 
-        let team = Team::new(TeamId::from_parts(org_id, team_id), Slug::parse("eng").unwrap(), "Eng", now).unwrap();
+        let team = Team::new(TeamId::from_parts(org_id, team_id), Slug::parse("eng").unwrap(), "Eng", &stamp).unwrap();
         store.teams.lock().unwrap().insert(team_id, team);
-        InMemoryTeams(store.clone()).set_status(team_id, NodeStatus::Archived, now).await.unwrap();
+        InMemoryTeams(store.clone()).set_status(team_id, NodeStatus::Archived, &stamp).await.unwrap();
 
         let project = Project::new(
             ProjectId::from_parts(org_id, Uuid::from_u128(4)),
             TeamId::from_parts(org_id, team_id),
             Slug::parse("web").unwrap(),
             "Web",
-            now,
+            &stamp,
         )
         .unwrap();
-        assert!(matches!(repo.create(&project).await.unwrap_err(), RepositoryError::Precondition(PreconditionKind::ParentArchived)));
+        assert!(matches!(
+            repo.create(&project, &stamp).await.unwrap_err(),
+            RepositoryError::Precondition(PreconditionKind::ParentArchived)
+        ));
     }
 }

@@ -20,16 +20,16 @@ use paigasus_iam::adapters::authz::Generations;
 use paigasus_iam::adapters::clock::SystemClock;
 use paigasus_iam::adapters::id::KernelIdGenerator;
 use paigasus_iam::adapters::persistence::{PgOrganizationRepository, PgProjectRepository, PgTeamRepository};
-use paigasus_iam_core::{Clock, IdGenerator, NodeStatus, Organization, OrganizationRepository, Project, ProjectRepository, Slug, Team, TeamRepository};
+use paigasus_iam_core::{Clock, IdGenerator, NodeStatus, Organization, OrganizationRepository, PrincipalId, Project, ProjectRepository, Slug, Stamp, Team, TeamRepository};
 
 /// Builds an `Organization` + its auto-provisioned `"default"` `Team`, mirroring
 /// `tenancy_orgs.rs`'s helper of the same shape.
-fn new_org_and_default_team(ids: &KernelIdGenerator, clock: &SystemClock, slug: &str, name: &str) -> (Organization, Team) {
-    let now = clock.now();
+fn new_org_and_default_team(ids: &KernelIdGenerator, clock: &SystemClock, actor: &PrincipalId, slug: &str, name: &str) -> (Organization, Team) {
+    let stamp = Stamp::new(clock.now(), actor.clone());
     let org_id = ids.new_organization_id();
-    let org = Organization::new(org_id, Slug::parse(slug).unwrap(), name, now).unwrap();
+    let org = Organization::new(org_id, Slug::parse(slug).unwrap(), name, &stamp).unwrap();
     let team_id = ids.new_team_id(org.id.uuid());
-    let default_team = Team::new(team_id, Slug::parse("default").unwrap(), "Default", now).unwrap();
+    let default_team = Team::new(team_id, Slug::parse("default").unwrap(), "Default", &stamp).unwrap();
     (org, default_team)
 }
 
@@ -51,39 +51,48 @@ async fn tenancy_writes_bump_the_shared_entity_gen_across_org_team_project() {
     assert_eq!(gens.entity_gen().await.unwrap(), 0, "starts at zero");
 
     let owner = ids.new_principal_id();
-    let (org, default_team) = new_org_and_default_team(&ids, &clock, "acme-gen", "Acme Gen");
+    let (org, default_team) = new_org_and_default_team(&ids, &clock, &owner, "acme-gen", "Acme Gen");
     let grant = support::pg_owner_grant(&db, &owner, ids.new_membership_id(), &org.id).await;
-    org_repo.create(&org, &default_team, &grant).await.unwrap();
+    let create_stamp = Stamp::new(org.created_at, owner.clone());
+    org_repo.create(&org, &default_team, &grant, &create_stamp).await.unwrap();
     assert_eq!(gens.entity_gen().await.unwrap(), 1, "org create must bump entity_gen");
 
     let team_id = ids.new_team_id(org.id.uuid());
-    let team = Team::new(team_id, Slug::parse("eng-gen").unwrap(), "Engineering", clock.now()).unwrap();
-    team_repo.create(&team).await.unwrap();
+    let team_stamp = Stamp::new(clock.now(), owner.clone());
+    let team = Team::new(team_id, Slug::parse("eng-gen").unwrap(), "Engineering", &team_stamp).unwrap();
+    team_repo.create(&team, &team_stamp).await.unwrap();
     assert_eq!(gens.entity_gen().await.unwrap(), 2, "team create must bump entity_gen");
 
     let project_id = ids.new_project_id(org.id.uuid());
-    let project = Project::new(project_id, team.id.clone(), Slug::parse("web-gen").unwrap(), "Web", clock.now()).unwrap();
-    project_repo.create(&project).await.unwrap();
+    let project_stamp = Stamp::new(clock.now(), owner.clone());
+    let project = Project::new(project_id, team.id.clone(), Slug::parse("web-gen").unwrap(), "Web", &project_stamp).unwrap();
+    project_repo.create(&project, &project_stamp).await.unwrap();
     assert_eq!(gens.entity_gen().await.unwrap(), 3, "project create must bump entity_gen");
 
-    org_repo.rename(org.id.uuid(), None, Some("Acme Gen Renamed"), clock.now()).await.unwrap();
+    org_repo.rename(org.id.uuid(), None, Some("Acme Gen Renamed"), &Stamp::new(clock.now(), owner.clone())).await.unwrap();
     assert_eq!(gens.entity_gen().await.unwrap(), 4, "org rename must bump entity_gen");
 
-    team_repo.rename(team.id.uuid(), None, Some("Engineering Renamed"), clock.now()).await.unwrap();
+    team_repo
+        .rename(team.id.uuid(), None, Some("Engineering Renamed"), &Stamp::new(clock.now(), owner.clone()))
+        .await
+        .unwrap();
     assert_eq!(gens.entity_gen().await.unwrap(), 5, "team rename must bump entity_gen");
 
-    project_repo.rename(project.id.uuid(), None, Some("Web Renamed"), clock.now()).await.unwrap();
+    project_repo
+        .rename(project.id.uuid(), None, Some("Web Renamed"), &Stamp::new(clock.now(), owner.clone()))
+        .await
+        .unwrap();
     assert_eq!(gens.entity_gen().await.unwrap(), 6, "project rename must bump entity_gen");
 
     // Project/team set_status first (D10: always permitted, no ancestor guard), org last —
     // avoids any ordering dependency on ancestor-archived preconditions above.
-    project_repo.set_status(project.id.uuid(), NodeStatus::Archived, clock.now()).await.unwrap();
+    project_repo.set_status(project.id.uuid(), NodeStatus::Archived, &Stamp::new(clock.now(), owner.clone())).await.unwrap();
     assert_eq!(gens.entity_gen().await.unwrap(), 7, "project set_status must bump entity_gen");
 
-    team_repo.set_status(team.id.uuid(), NodeStatus::Archived, clock.now()).await.unwrap();
+    team_repo.set_status(team.id.uuid(), NodeStatus::Archived, &Stamp::new(clock.now(), owner.clone())).await.unwrap();
     assert_eq!(gens.entity_gen().await.unwrap(), 8, "team set_status must bump entity_gen");
 
-    org_repo.set_status(org.id.uuid(), NodeStatus::Archived, clock.now()).await.unwrap();
+    org_repo.set_status(org.id.uuid(), NodeStatus::Archived, &Stamp::new(clock.now(), owner.clone())).await.unwrap();
     assert_eq!(gens.entity_gen().await.unwrap(), 9, "org set_status must bump entity_gen");
 }
 
@@ -105,12 +114,13 @@ async fn only_creates_owner_grant_bumps_policy_gen_not_plain_tenancy_writes() {
 
     assert_eq!(gens.policy_gen().await.unwrap(), 0);
 
-    let (org, default_team) = new_org_and_default_team(&ids, &clock, "acme-policy-gen", "Acme Policy Gen");
+    let (org, default_team) = new_org_and_default_team(&ids, &clock, &owner, "acme-policy-gen", "Acme Policy Gen");
     let grant = support::pg_owner_grant(&db, &owner, ids.new_membership_id(), &org.id).await;
-    org_repo.create(&org, &default_team, &grant).await.unwrap();
+    let create_stamp = Stamp::new(org.created_at, owner.clone());
+    org_repo.create(&org, &default_team, &grant, &create_stamp).await.unwrap();
     assert_eq!(gens.policy_gen().await.unwrap(), 1, "create's owner grant must bump policy_gen exactly once");
 
-    org_repo.set_status(org.id.uuid(), NodeStatus::Archived, clock.now()).await.unwrap();
+    org_repo.set_status(org.id.uuid(), NodeStatus::Archived, &Stamp::new(clock.now(), owner.clone())).await.unwrap();
 
     assert_eq!(gens.policy_gen().await.unwrap(), 1, "a plain tenancy write (set_status) must never bump policy_gen further");
     assert_eq!(gens.entity_gen().await.unwrap(), 2, "sanity: entity_gen did move for the same two writes");

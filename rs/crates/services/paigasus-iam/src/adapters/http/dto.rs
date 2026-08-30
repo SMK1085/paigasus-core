@@ -8,8 +8,8 @@
 use chrono::{DateTime, Utc};
 use paigasus_iam_core::authz::model::PolicyKind;
 use paigasus_iam_core::{
-    ApiKey, AuditEntry, Credential, DeadLetterEntry, MembershipRecord, NewApiKey, NodeStatus, NodeView, Organization, OrganizationId, PolicyDocument, PrincipalContext, Project, RoleGrant,
-    RoleGrantRef, ServiceAccountRecord, Team,
+    ApiKey, AuditEntry, Credential, DeadLetterEntry, MembershipRecord, NewApiKey, NodeStatus, NodeView, Organization, OrganizationId, PolicyDocument, PrincipalContext, PrincipalId, Project,
+    RoleGrant, RoleGrantRef, ServiceAccountRecord, Team,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -49,6 +49,8 @@ pub struct OrgDto {
     pub effective_status: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    pub created_by: Option<String>,
+    pub modified_by: Option<String>,
 }
 
 impl From<NodeView<Organization>> for OrgDto {
@@ -61,6 +63,8 @@ impl From<NodeView<Organization>> for OrgDto {
             effective_status: view.effective_status.as_str().to_string(),
             created_at: view.node.created_at,
             updated_at: view.node.updated_at,
+            created_by: view.node.created_by.as_ref().map(PrincipalId::canonical),
+            modified_by: view.node.modified_by.as_ref().map(PrincipalId::canonical),
         }
     }
 }
@@ -75,6 +79,8 @@ pub struct TeamDto {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub org_prn: String,
+    pub created_by: Option<String>,
+    pub modified_by: Option<String>,
 }
 
 impl From<NodeView<Team>> for TeamDto {
@@ -88,6 +94,8 @@ impl From<NodeView<Team>> for TeamDto {
             effective_status: view.effective_status.as_str().to_string(),
             created_at: view.node.created_at,
             updated_at: view.node.updated_at,
+            created_by: view.node.created_by.as_ref().map(PrincipalId::canonical),
+            modified_by: view.node.modified_by.as_ref().map(PrincipalId::canonical),
         }
     }
 }
@@ -103,6 +111,8 @@ pub struct ProjectDto {
     pub updated_at: DateTime<Utc>,
     pub team_prn: String,
     pub org_prn: String,
+    pub created_by: Option<String>,
+    pub modified_by: Option<String>,
 }
 
 impl From<NodeView<Project>> for ProjectDto {
@@ -117,6 +127,8 @@ impl From<NodeView<Project>> for ProjectDto {
             effective_status: view.effective_status.as_str().to_string(),
             created_at: view.node.created_at,
             updated_at: view.node.updated_at,
+            created_by: view.node.created_by.as_ref().map(PrincipalId::canonical),
+            modified_by: view.node.modified_by.as_ref().map(PrincipalId::canonical),
         }
     }
 }
@@ -156,6 +168,7 @@ pub struct MembershipDto {
     pub principal_prn: String,
     pub node_prn: String,
     pub created_at: DateTime<Utc>,
+    pub created_by: Option<String>,
 }
 
 impl From<MembershipRecord> for MembershipDto {
@@ -165,6 +178,7 @@ impl From<MembershipRecord> for MembershipDto {
             principal_prn: record.principal_prn,
             node_prn: record.node_prn,
             created_at: record.created_at,
+            created_by: record.created_by.as_ref().map(PrincipalId::canonical),
         }
     }
 }
@@ -681,8 +695,97 @@ pub struct BulkReplayResponseDto {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use paigasus_iam_core::{ApiKeyId, AuthnPrincipal, PrincipalId, PrincipalKind, PrincipalStatus};
+    use chrono::TimeZone;
+    use paigasus_iam_core::{ApiKeyId, AuthnPrincipal, PrincipalKind, PrincipalStatus, ProjectId, Slug, TeamId};
     use paigasus_kernel::Prn;
+
+    /// A deterministic `PrincipalId` for audit-actor test fields — mirrors the `principal`
+    /// helper in `grpc::convert`'s own test module.
+    fn principal(n: u128) -> PrincipalId {
+        PrincipalId::from_prn(Prn::build("iam", "", None, "principal", Uuid::from_u128(n)).unwrap())
+    }
+
+    /// SMA-440 D7: the HTTP surface flattens rather than embedding `AuditMetadata`, so it
+    /// carries `created_by`/`modified_by` as optional PRN strings. Leaving HTTP out would make
+    /// the two surfaces disagree about the same row.
+    #[test]
+    fn org_dto_carries_both_actors_as_prn_strings() {
+        let t = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
+        let creator = principal(1);
+        let modifier = principal(2);
+        let dto = OrgDto::from(NodeView {
+            node: Organization {
+                id: OrganizationId::from_uuid(Uuid::from_u128(10)),
+                slug: Slug::parse("acme").unwrap(),
+                name: "Acme".to_string(),
+                status: NodeStatus::Active,
+                created_at: t,
+                updated_at: t,
+                created_by: Some(creator.clone()),
+                modified_by: Some(modifier.clone()),
+            },
+            effective_status: NodeStatus::Active,
+        });
+        assert_eq!(dto.created_by, Some(creator.canonical()));
+        assert_eq!(dto.modified_by, Some(modifier.canonical()));
+    }
+
+    /// SMA-440 FINDING 3 (final review): the same actor-projection contract as
+    /// `org_dto_carries_both_actors_as_prn_strings`, but for `TeamDto`. Before this test,
+    /// swapping `created_by`/`modified_by` in `From<NodeView<Team>> for TeamDto` compiled and
+    /// passed the whole suite — the gRPC side already carried this coverage for all four
+    /// projectors, but the HTTP side had it for `OrgDto` alone.
+    #[test]
+    fn team_dto_carries_both_actors_as_prn_strings() {
+        let t = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
+        let creator = principal(1);
+        let modifier = principal(2);
+        let org_id = Uuid::from_u128(10);
+        let dto = TeamDto::from(NodeView {
+            node: Team {
+                id: TeamId::from_parts(org_id, Uuid::from_u128(11)),
+                slug: Slug::parse("eng").unwrap(),
+                name: "Engineering".to_string(),
+                status: NodeStatus::Active,
+                created_at: t,
+                updated_at: t,
+                created_by: Some(creator.clone()),
+                modified_by: Some(modifier.clone()),
+            },
+            effective_status: NodeStatus::Active,
+        });
+        assert_eq!(dto.created_by, Some(creator.canonical()));
+        assert_eq!(dto.modified_by, Some(modifier.canonical()));
+    }
+
+    /// SMA-440 FINDING 3 (final review): the same actor-projection contract as
+    /// `org_dto_carries_both_actors_as_prn_strings`, but for `ProjectDto`. Before this test,
+    /// swapping `created_by`/`modified_by` in `From<NodeView<Project>> for ProjectDto` compiled
+    /// and passed the whole suite.
+    #[test]
+    fn project_dto_carries_both_actors_as_prn_strings() {
+        let t = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
+        let creator = principal(1);
+        let modifier = principal(2);
+        let org_id = Uuid::from_u128(10);
+        let team_id = TeamId::from_parts(org_id, Uuid::from_u128(11));
+        let dto = ProjectDto::from(NodeView {
+            node: Project {
+                id: ProjectId::from_parts(org_id, Uuid::from_u128(12)),
+                team_id,
+                slug: Slug::parse("web").unwrap(),
+                name: "Web".to_string(),
+                status: NodeStatus::Active,
+                created_at: t,
+                updated_at: t,
+                created_by: Some(creator.clone()),
+                modified_by: Some(modifier.clone()),
+            },
+            effective_status: NodeStatus::Active,
+        });
+        assert_eq!(dto.created_by, Some(creator.canonical()));
+        assert_eq!(dto.modified_by, Some(modifier.canonical()));
+    }
 
     /// SMA-446: the HTTP `IntrospectApiKeyResponseDto` surfaces the credential's `scope_prn`
     /// (D11), and — paired with `convert.rs`'s twin gRPC test — deterministically guarantees the

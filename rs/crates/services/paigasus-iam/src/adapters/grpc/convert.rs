@@ -16,13 +16,13 @@ use chrono::{DateTime, Utc};
 use paigasus_iam_core::authz::model::PolicyKind;
 use paigasus_iam_core::authz::reconcile::policy_kind_str;
 use paigasus_iam_core::{
-    ApiKey, ApiKeyStatus, AuthnError, Credential, MembershipRecord, NewApiKey, NodeStatus, NodeView, Organization, OrganizationId, PolicyDocument, PrincipalContext, Project, RetireOutcome, RoleGrant,
-    RoleGrantRef, ServiceAccountRecord, Team,
+    ApiKey, ApiKeyStatus, AuthnError, Credential, MembershipRecord, NewApiKey, NodeStatus, NodeView, Organization, OrganizationId, PolicyDocument, PrincipalContext, PrincipalId, Project,
+    RetireOutcome, RoleGrant, RoleGrantRef, ServiceAccountRecord, Team,
 };
 use paigasus_kernel::Prn;
 use paigasus_observability::{Retryable, current_ids};
 use paigasus_proto::error::IAM_DOMAIN;
-use paigasus_proto::paigasus::common::v1::{AuditMetadata, ErrorReason};
+use paigasus_proto::paigasus::common::v1::{Actor, AuditMetadata, ErrorReason};
 use paigasus_proto::paigasus::iam::v1::{
     ApiKey as ProtoApiKey, ApiKeyStatus as ProtoApiKeyStatus, DeadLetterEntry as ProtoDeadLetterEntry, IntrospectApiKeyResponse, IntrospectResponse, IssueApiKeyResponse, Membership,
     NodeStatus as ProtoNodeStatus, Organization as ProtoOrganization, Policy as ProtoPolicy, Project as ProtoProject, RetireSystemPolicyResponse, RetiredPolicy, RetirementBlocked,
@@ -242,17 +242,25 @@ pub(crate) fn require_present<'a>(raw: &'a str, field: &'static str) -> Result<&
     Ok(raw)
 }
 
-/// Builds `AuditMetadata` from created/modified timestamps. `creator`/`modifier` stay ABSENT —
-/// the canonical "unknown/system" (SMA-439) — until the actor is PERSISTED. The acting
-/// principal is already available at every mutation (`actor_prn(&AuthContext)`), but no
-/// tenancy aggregate stores a creator and no migration defines the column, so writing it on
-/// create only would leave the field inconsistent across later reads (M2, task-16 brief).
-pub fn audit(created: DateTime<Utc>, updated: DateTime<Utc>) -> AuditMetadata {
+/// The four inputs `audit` needs, named rather than positional: two `DateTime<Utc>` and two
+/// `Option<&PrincipalId>` in a row would let a swapped pair compile silently, and two of the
+/// six call sites pass `None` deliberately, so "it compiles" proves nothing there.
+pub struct AuditFields<'a> {
+    pub created: DateTime<Utc>,
+    pub modified: DateTime<Utc>,
+    pub creator: Option<&'a PrincipalId>,
+    pub modifier: Option<&'a PrincipalId>,
+}
+
+/// Builds `AuditMetadata`. A present `PrincipalId` becomes `Some(Actor { prn })`; `None` stays
+/// absent — the canonical "unknown/system" of `actor.proto`, which is what a row written
+/// before SMA-440's `m0011` reads back as.
+pub fn audit(f: AuditFields<'_>) -> AuditMetadata {
     AuditMetadata {
-        created_at: Some(ts(created)),
-        modified_at: Some(ts(updated)),
-        creator: None,
-        modifier: None,
+        created_at: Some(ts(f.created)),
+        modified_at: Some(ts(f.modified)),
+        creator: f.creator.map(|p| Actor { prn: p.canonical() }),
+        modifier: f.modifier.map(|p| Actor { prn: p.canonical() }),
     }
 }
 
@@ -271,7 +279,12 @@ pub fn to_proto_org(v: &NodeView<Organization>) -> ProtoOrganization {
         name: v.node.name.clone(),
         status: to_proto_status(v.node.status),
         effective_status: to_proto_status(v.effective_status),
-        audit: Some(audit(v.node.created_at, v.node.updated_at)),
+        audit: Some(audit(AuditFields {
+            created: v.node.created_at,
+            modified: v.node.updated_at,
+            creator: v.node.created_by.as_ref(),
+            modifier: v.node.modified_by.as_ref(),
+        })),
     }
 }
 
@@ -284,7 +297,12 @@ pub fn to_proto_team(v: &NodeView<Team>) -> ProtoTeam {
         name: v.node.name.clone(),
         status: to_proto_status(v.node.status),
         effective_status: to_proto_status(v.effective_status),
-        audit: Some(audit(v.node.created_at, v.node.updated_at)),
+        audit: Some(audit(AuditFields {
+            created: v.node.created_at,
+            modified: v.node.updated_at,
+            creator: v.node.created_by.as_ref(),
+            modifier: v.node.modified_by.as_ref(),
+        })),
     }
 }
 
@@ -298,18 +316,28 @@ pub fn to_proto_project(v: &NodeView<Project>) -> ProtoProject {
         name: v.node.name.clone(),
         status: to_proto_status(v.node.status),
         effective_status: to_proto_status(v.effective_status),
-        audit: Some(audit(v.node.created_at, v.node.updated_at)),
+        audit: Some(audit(AuditFields {
+            created: v.node.created_at,
+            modified: v.node.updated_at,
+            creator: v.node.created_by.as_ref(),
+            modifier: v.node.modified_by.as_ref(),
+        })),
     }
 }
 
 /// Projects a membership record into its wire message. Memberships are immutable (D5), so
-/// `modified_at` mirrors `created_at`.
+/// `modified_at` mirrors `created_at`, and its single `created_by` fills both audit slots.
 pub fn to_proto_membership(r: &MembershipRecord) -> Membership {
     Membership {
         id: r.id.to_string(),
         principal_prn: r.principal_prn.clone(),
         node_prn: r.node_prn.clone(),
-        audit: Some(audit(r.created_at, r.created_at)),
+        audit: Some(audit(AuditFields {
+            created: r.created_at,
+            modified: r.created_at,
+            creator: r.created_by.as_ref(),
+            modifier: r.created_by.as_ref(),
+        })),
     }
 }
 
@@ -397,7 +425,14 @@ pub fn to_proto_service_account(record: &ServiceAccountRecord) -> ProtoServiceAc
         owner_prn: sa.owner.canonical(),
         name: sa.name.clone(),
         status: record.status.as_str().to_string(),
-        audit: Some(audit(sa.created_at, sa.updated_at)),
+        // ServiceAccount/ApiKey stamping is out of SMA-440's scope; these literal `None`s
+        // document the remaining gap rather than hiding it behind a default.
+        audit: Some(audit(AuditFields {
+            created: sa.created_at,
+            modified: sa.updated_at,
+            creator: None,
+            modifier: None,
+        })),
     }
 }
 
@@ -418,7 +453,14 @@ pub fn to_proto_api_key(key: &ApiKey) -> ProtoApiKey {
         last_used_at: key.last_used_at.map(ts),
         scope_actions: key.scope_actions.iter().map(|a| a.as_wire().to_string()).collect(),
         scope_roles: key.scope_roles.clone(),
-        audit: Some(audit(key.created_at, key.revoked_at.unwrap_or(key.created_at))),
+        // ServiceAccount/ApiKey stamping is out of SMA-440's scope; these literal `None`s
+        // document the remaining gap rather than hiding it behind a default.
+        audit: Some(audit(AuditFields {
+            created: key.created_at,
+            modified: key.revoked_at.unwrap_or(key.created_at),
+            creator: None,
+            modifier: None,
+        })),
     }
 }
 
@@ -525,22 +567,128 @@ pub fn to_proto_retire_response(outcome: RetireOutcome) -> RetireSystemPolicyRes
 #[cfg(test)]
 mod tests {
     use super::*;
+    use paigasus_iam_core::{ProjectId, Slug, TeamId};
 
+    /// A deterministic `PrincipalId` for audit-actor test fields — mirrors the `actor`/`principal`
+    /// helpers used throughout `application::*`'s own test modules.
+    fn principal(n: u128) -> PrincipalId {
+        PrincipalId::from_prn(paigasus_kernel::Prn::build("iam", "", None, "principal", Uuid::from_u128(n)).unwrap())
+    }
+
+    /// SMA-440 supersedes `audit_leaves_the_actor_unset`, which pinned the absence this issue
+    /// removes. The `None` half still matters: `to_proto_service_account` and
+    /// `to_proto_api_key` are out of scope and pass `None` deliberately.
     #[test]
-    fn audit_leaves_the_actor_unset() {
+    fn audit_maps_a_present_actor_and_preserves_absence() {
         let t = DateTime::from_timestamp(1_700_000_000, 0).unwrap();
-        let meta = audit(t, t);
+        let creator = principal(1);
+        let modifier = principal(2);
 
-        // IAM cannot name the actor: no tenancy aggregate persists a creator and no
-        // migration defines the column (SMA-439 spec D8). Absent is the canonical
-        // "unknown" — a synthetic "system" PRN here would violate Actor's contract,
-        // and writing the request's actor on create only would make the field
-        // inconsistent across later reads of the same entity.
-        assert!(meta.creator.is_none());
-        assert!(meta.modifier.is_none());
-        // The timestamps are what this builder DOES know.
+        let meta = audit(AuditFields {
+            created: t,
+            modified: t,
+            creator: Some(&creator),
+            modifier: Some(&modifier),
+        });
+        assert_eq!(meta.creator.as_ref().map(|a| a.prn.as_str()), Some(creator.canonical().as_str()));
+        assert_eq!(meta.modifier.as_ref().map(|a| a.prn.as_str()), Some(modifier.canonical().as_str()));
         assert_eq!(meta.created_at, Some(ts(t)));
         assert_eq!(meta.modified_at, Some(ts(t)));
+
+        let unknown = audit(AuditFields {
+            created: t,
+            modified: t,
+            creator: None,
+            modifier: None,
+        });
+        assert!(unknown.creator.is_none(), "an absent actor stays absent — the out-of-scope call sites rely on it");
+        assert!(unknown.modifier.is_none());
+    }
+
+    /// The swap catcher. Testing `audit` alone cannot see a projector that passes its creator
+    /// into the modifier slot, so each in-scope projector gets a DISTINCT pair.
+    #[test]
+    fn each_projector_puts_the_creator_and_modifier_in_their_own_fields() {
+        let t = DateTime::from_timestamp(1_700_000_000, 0).unwrap();
+        let creator = principal(1);
+        let modifier = principal(2);
+
+        let org = Organization {
+            id: OrganizationId::from_uuid(Uuid::from_u128(10)),
+            slug: Slug::parse("acme").unwrap(),
+            name: "Acme".to_string(),
+            status: NodeStatus::Active,
+            created_at: t,
+            updated_at: t,
+            created_by: Some(creator.clone()),
+            modified_by: Some(modifier.clone()),
+        };
+        let wire = to_proto_org(&NodeView {
+            node: org,
+            effective_status: NodeStatus::Active,
+        });
+        let a = wire.audit.expect("audit is always present");
+        assert_eq!(a.creator.unwrap().prn, creator.canonical());
+        assert_eq!(a.modifier.unwrap().prn, modifier.canonical());
+
+        let org_uuid = Uuid::from_u128(10);
+        let team = Team {
+            id: TeamId::from_parts(org_uuid, Uuid::from_u128(11)),
+            slug: Slug::parse("eng").unwrap(),
+            name: "Engineering".to_string(),
+            status: NodeStatus::Active,
+            created_at: t,
+            updated_at: t,
+            created_by: Some(creator.clone()),
+            modified_by: Some(modifier.clone()),
+        };
+        let wire = to_proto_team(&NodeView {
+            node: team,
+            effective_status: NodeStatus::Active,
+        });
+        let a = wire.audit.expect("audit is always present");
+        assert_eq!(a.creator.unwrap().prn, creator.canonical());
+        assert_eq!(a.modifier.unwrap().prn, modifier.canonical());
+
+        let team_id = TeamId::from_parts(org_uuid, Uuid::from_u128(11));
+        let project = Project {
+            id: ProjectId::from_parts(org_uuid, Uuid::from_u128(12)),
+            team_id,
+            slug: Slug::parse("core").unwrap(),
+            name: "Core".to_string(),
+            status: NodeStatus::Active,
+            created_at: t,
+            updated_at: t,
+            created_by: Some(creator.clone()),
+            modified_by: Some(modifier.clone()),
+        };
+        let wire = to_proto_project(&NodeView {
+            node: project,
+            effective_status: NodeStatus::Active,
+        });
+        let a = wire.audit.expect("audit is always present");
+        assert_eq!(a.creator.unwrap().prn, creator.canonical());
+        assert_eq!(a.modifier.unwrap().prn, modifier.canonical());
+    }
+
+    /// Memberships are immutable and store no `modified_by` — the single `created_by` fills
+    /// both audit slots (mirrors `to_proto_membership`'s existing `created_at` passed twice).
+    #[test]
+    fn to_proto_membership_uses_created_by_for_both_creator_and_modifier() {
+        let t = DateTime::from_timestamp(1_700_000_000, 0).unwrap();
+        let creator = principal(1);
+
+        let record = MembershipRecord {
+            id: Uuid::from_u128(20),
+            principal_prn: "prn:pgs:iam:::principal/0192f1c0-0000-7000-8000-000000000001".to_string(),
+            node_prn: "prn:pgs:iam:::organization/0192f1c0-0000-7000-8000-000000000002".to_string(),
+            created_at: t,
+            created_by: Some(creator.clone()),
+        };
+        let wire = to_proto_membership(&record);
+        let a = wire.audit.expect("audit is always present");
+        assert_eq!(a.creator.unwrap().prn, creator.canonical());
+        assert_eq!(a.modifier.unwrap().prn, creator.canonical());
     }
 
     #[test]
