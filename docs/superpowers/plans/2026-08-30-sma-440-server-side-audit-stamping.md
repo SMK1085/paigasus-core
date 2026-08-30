@@ -248,7 +248,7 @@ In `ports.rs`, replace the `now: DateTime<Utc>` parameter with `stamp: &Stamp` o
 
 Keep every existing doc comment. Add this sentence to each `create`'s doc comment:
 
-```
+```rust
     /// `stamp` also stamps rows this method writes that are not entities — the owner grant.
 ```
 
