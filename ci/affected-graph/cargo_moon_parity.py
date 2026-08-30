@@ -2701,6 +2701,22 @@ def self_test():
                 "one level deep, so a cargo call in a sourced module stays invisible"
             )
 
+        # A source pointing OUTSIDE the repo resolves to nothing, by the containment filter.
+        # `/etc/profile` is not a gate script, and scanning one would put text nobody reviews
+        # into A8's corpus — and on a developer machine it would differ from CI.
+        with tempfile.TemporaryDirectory() as outside:
+            stray = Path(outside) / "stray.sh"
+            stray.write_text("cargo build\n")
+            (sroot / "ci" / "run.sh").write_text(f"source {stray}\n")
+            try:
+                script_source_refs(sroot / "ci" / "run.sh", sroot)
+                failures.append(
+                    "script_source_refs followed a source OUTSIDE the repo — the containment "
+                    "filter is gone, and A8's corpus now includes unreviewed text"
+                )
+            except MoonOutputError:
+                pass
+
         # A source that resolves to nothing is infrastructure, never a silent skip.
         (sroot / "ci" / "run.sh").write_text('source "$HERE/nope/absent.sh"\n')
         try:
