@@ -614,11 +614,20 @@ records the residual.
 arguments never reach (§2.4). Today that costs one waiver. A reviewer must check
 reachability by hand rather than trusting the row.
 
-**L2 — script-following is one level deep, and shell-only.** A script invoking another
-script is not followed. Nor are non-`ci/**/*.sh` entrypoints: `repo:nats-permissions`
-invokes `bash ops/nats/check-subjects.sh` (`moon.yml:271`), and three gates invoke `.py`
-files directly (`moon.yml:503-504, :709-710, :739-740`). A cargo call in any of those
-shapes is unfollowed.
+**L2 — the `source` half is CLOSED by SMA-605; the rest stands.** A `source` / `.` statement is
+now followed transitively, with a cycle guard and a repo-containment filter, so
+`ci/release-parity/ecosystems/*.sh` is scanned and the three `release-parity*` tasks are derived
+(63 -> 66 derived tasks, measured).
+
+Bare `ci/**/*.sh` MENTIONS in a script's text are still **not** followed, and deliberately so:
+running `SCRIPT_REF_RE` over a followed script's own text was measured at six new edges, every
+one a comment or a pin-array string constant, costing one waiver and yielding **zero** true
+positives. It also would not have reached the target, because `SCRIPT_REF_RE` cannot match a
+`# shellcheck source=…` directive — the path there is preceded by `=`, not by a separator.
+
+Non-`ci/**/*.sh` entrypoints are still unfollowed: `repo:nats-permissions` invokes
+`bash ops/nats/check-subjects.sh` (`moon.yml:271`), and three gates invoke `.py` files directly
+(`moon.yml:503-504, :709-710, :739-740`). A cargo call in any of those shapes is unfollowed.
 
 **L3 — the `cargo tree` exclusion rests on file content.** If `rs/.cargo/config.toml`
 gains a `[source]` replacement or a `[build]` key, `cargo tree`'s output becomes
@@ -698,24 +707,38 @@ direction that keeps today's corpus honest. The heredoc decision, where a wrong 
 whole blocks rather than one line, does count them. No instance of this shape exists in
 `ci/**/*.sh`.
 
-**L10 — cargo invoked through a variable is not seen, and this is DEFERRED, not covered.**
-`$CARGO build`, `"$cargo_bin" build`, and any other indirection past a literal `cargo` token
-produce no row at all. The gap is pre-existing and shared with A8's own literal-token match,
-which merged under SMA-601, so closing it means widening `CARGO_INVOCATION_RE` repo-wide —
-a spec decision with its own blast radius, parked for a follow-up issue rather than taken
-here. Until then, neither A8's blob arm nor its script arm can see a variable-driven cargo
-call, and the spec claims no coverage of one.
+**L10 — CLOSED for two shapes by SMA-605; open for the rest.** `"$CARGO_BIN" build` (a
+cargo-NAMED variable in command position) and `CARGO=<path> <tool>` (the environment prefix) are
+now reported by both A8 and A10, through two arms merged into `cargo_matches`. The literal regex
+was NOT widened, so L11 below is untouched.
+
+Five shapes stay uncovered, recorded as R1 and R4-R8 of
+`docs/superpowers/specs/2026-08-30-sma-605-cargo-invocation-through-variable-design.md`: a
+variable holding a cargo path but not NAMED for it (the name is the whole test); the bash
+default-value form `"${CARGO_BIN:-cargo}"`; a backtick command boundary; a `PATH=` prefix; and a
+Moon task `env:` block, which the resolved blob excludes entirely.
+
+Measured honestly: arm 1 reports **zero** rows on the real corpus and is labelled forward cover
+in the code, the same warning `FFI_MARKERS` carries for `maturin`. Arm 2 reports exactly one —
+`ci/release-parity/ecosystems/release-plz.sh:152` — and only because SMA-605 also closed L2's
+`source` half.
 
 **L11 — A10's `CONFIG_SENSITIVE_VERBS` split narrows only what's already derived; it does not
 widen A10's coverage to a new subcommand.** `CONFIG_SENSITIVE_VERBS` is a strict subset of
 `LOCK_RESOLVING_VERBS` (A8's list), and both `derive_cargo_tasks` and `script_cargo_lines`
-gate on `CARGO_INVOCATION_RE` — built from `LOCK_RESOLVING_VERBS`, not from
-`CONFIG_SENSITIVE_VERBS` — before A10 ever runs. So `cargo llvm-cov`, `insta`, `udeps`,
+gate on `LOCK_RESOLVING_VERBS`, not on `CONFIG_SENSITIVE_VERBS`, before A10 ever runs. (Until
+SMA-605 that gate was `CARGO_INVOCATION_RE` itself; it is now `cargo_matches`, whose indirect
+arms are built from the same verb list, so the conclusion is unchanged.) So `cargo llvm-cov`, `insta`, `udeps`,
 `bloat`, or `tarpaulin` yield an EMPTY derivation today, and A10 examines nothing for them —
 no row, and no `FLOOR:` row either, since the floor only sees what the derivation produced.
 An earlier version of the in-code comment overclaimed that A10's own verb list "covered" this
 case; it does not (SMA-599 review, corrected in-code alongside this entry). Closing this
-properly means widening `CARGO_INVOCATION_RE` itself, the same class of change L10 defers.
+properly means widening the VERB LIST itself.
+
+SMA-605 closed L10 without doing that: its two arms add INDIRECTION (a cargo-named variable, a
+`CARGO=` prefix) while still filtering on `LOCK_RESOLVING_VERBS`. So L11 is unchanged and stays
+open, and the self-test fixture that pins it now reads "a `cargo_matches` arm" rather than
+`CARGO_INVOCATION_RE`.
 
 **L12 — the stale-waiver check is unasserted, by construction.** `check_cargo_config_inputs`
 reports a row when `ALLOW_MISSING_CARGO_CONFIG` names a task A10 does not examine (`set(allow) -
