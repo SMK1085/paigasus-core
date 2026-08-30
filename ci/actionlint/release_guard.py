@@ -168,6 +168,57 @@ BANNED_PUBLISH_CREDENTIALS = ("PYPI_API_TOKEN", "NPM_TOKEN", "NODE_AUTH_TOKEN")
 # falls back to when the exchange fails.
 NPMRC_AUTH_TOKEN = "_authToken"
 
+# Final-review Important 1. `_auth` is the OTHER live npm credential key at that same config
+# level: `getCredentialsByURI` honours `//registry/:_auth=<base64 user:pass>` exactly as it
+# honours `_authToken`, so it masks a failed exchange the same way. MEASURED as a V10 bypass
+# before this rule existed.
+#
+# The lookahead is load-bearing twice over. `_auth` is a PREFIX of `_authToken`, so a bare
+# substring test would report both rules on one string; `(?![A-Za-z0-9_])` keeps the two
+# messages disjoint. It also excludes `NODE_AUTH_TOKEN` (`_AUTH_` — an underscore follows),
+# which BANNED_PUBLISH_CREDENTIALS already covers by name.
+#
+# Case-insensitive on purpose: npm reads every npmrc key from the environment too, so
+# `NPM_CONFIG__AUTH` is the same credential spelled for a step `env:` block — the fourth
+# measured bypass.
+_NPMRC_AUTH_RE = re.compile(r"_auth(?![A-Za-z0-9_])", re.IGNORECASE)
+
+# Final-review Important 1, rule 2. A KEY-based rule, not a value-based one: red a `password:`
+# inside the `with:` of any pypa/gh-action-pypi-publish step whatever the value is. The two
+# measured bypasses were `${{ secrets.PYPI_PROJECT_TOKEN }}` (a NEW secret name — which is
+# exactly what design §9's rollback plan would mint) and `${{ env.PY_CRED }}` (no secret
+# reference at all). Neither can be caught by a denylist of names; the presence of the key is
+# the violation, because under Trusted Publishing there is nothing legitimate to put there.
+PYPI_PUBLISH_ACTION = "pypa/gh-action-pypi-publish"
+
+# Final-review Important 1, rule 1. The secret names `release.yml` may reference, pinned by
+# STRICT EQUALITY — the same shape, and for the same reason, as
+# ci/workflow-credentials/workflow_credentials.py's EXPECTED_PR_SUBJECTS. A denylist can only
+# ever ban names someone already thought of; this reds on EVERY new secret name until a human
+# adds it here on purpose.
+#
+# Both members are GitHub App credentials for the per-run installation token. An App token
+# cannot come from a registry trusted publisher, so neither is replaceable by OIDC, and
+# ci/workflow-credentials/run.sh's control row asserts release.yml still reads A secret.
+#
+# IF THIS REDS: re-baseline it DELIBERATELY — add the new name here with a comment saying why
+# that secret cannot be an OIDC exchange. Do not loosen the comparison to a subset test, and do
+# not delete the pin; either turns a strict gate into a decorative one.
+EXPECTED_RELEASE_SECRETS = (
+    "PAIGASUS_BOT_APP_ID",
+    "PAIGASUS_BOT_PRIVATE_KEY",
+)
+
+# `${{ secrets.NAME }}` — matched against PARSED scalars, never the raw file, so the YAML
+# comments in release.yml that NAME the removed tokens stay invisible here (the same property
+# publish_credential_violations relies on).
+_SECRET_REF_RE = re.compile(r"secrets\.([A-Za-z_][A-Za-z0-9_]*)")
+
+# The one workflow EXPECTED_RELEASE_SECRETS is a pin OF. The "unexpected name" half of the rule
+# applies to every workflow check_main sees; the "pinned name went missing" half can only apply
+# to the real file, because a synthetic fixture legitimately references no secret at all.
+RELEASE_WORKFLOW_NAME = "release.yml"
+
 
 def infra(msg: str) -> NoReturn:
     print(f"release-guard: {msg}", file=sys.stderr)
@@ -547,6 +598,12 @@ def publish_credential_violations(job: dict, job_id: str, name: str) -> list[str
                 f"that at the 'user' config level, which is exactly what masks a failed OIDC "
                 f"exchange (SMA-602). Remove it."
             )
+        if _NPMRC_AUTH_RE.search(text):
+            out.append(
+                f"{name}: job '{job_id}' sets an npm _auth credential in {where}. "
+                f"getCredentialsByURI honours `_auth` exactly as it honours {NPMRC_AUTH_TOKEN}, "
+                f"so it masks a failed OIDC exchange the same way (SMA-602). Remove it."
+            )
 
     for key, value in mapping_pairs(job.get("env"), "an env:"):
         scan(f"{key}: {value}", "the job env:")
@@ -596,9 +653,71 @@ def publish_credential_violations(job: dict, job_id: str, name: str) -> list[str
         for key, value in mapping_pairs(step.get("env"), "a step env:"):
             scan(f"{key}: {value}", "a step env:")
         scan(str(step.get("run") or ""), "a step run:")
-        for key, value in mapping_pairs(step.get("with"), "a step with:"):
+        step_with = step.get("with")
+        for key, value in mapping_pairs(step_with, "a step with:"):
             scan(f"{key}: {value}", "a step with:")
 
+        # Final-review Important 1, rule 2: the KEY, not the value. See PYPI_PUBLISH_ACTION.
+        # `startswith` (not equality) because the real steps carry an `@<sha>` pin, and the
+        # action may legitimately move to a new ref.
+        uses = str(step.get("uses") or "")
+        if uses.startswith(PYPI_PUBLISH_ACTION) and isinstance(step_with, dict) \
+                and "password" in step_with:
+            out.append(
+                f"{name}: job '{job_id}' passes a password: to {PYPI_PUBLISH_ACTION}. Under "
+                f"PyPI Trusted Publishing there is nothing legitimate to put there, and any "
+                f"value — a NEW secret name, an env: reference — masks a broken OIDC exchange "
+                f"(SMA-602). Remove the key."
+            )
+
+    return out
+
+
+def secret_reference_violations(doc: dict, name: str) -> list[str]:
+    """V10 rule 1 (final-review Important 1): the secret NAMES release.yml may reference,
+    pinned by strict equality against EXPECTED_RELEASE_SECRETS.
+
+    Strictly stronger than extending BANNED_PUBLISH_CREDENTIALS. The measured bypass was
+    `password: ${{ secrets.PYPI_PROJECT_TOKEN }}` — a name no denylist held, and precisely the
+    name design §9's rollback plan would create when it mints a fresh project-scoped token.
+
+    Walks the PARSED document, so YAML comments naming the removed tokens are invisible here.
+
+    The `missing` half runs only for RELEASE_WORKFLOW_NAME: every other document check_main sees
+    is a synthetic self-test fixture that legitimately references no secret. That half is a
+    liveness check on the pin itself, not a security rule — ci/workflow-credentials/run.sh's
+    control row independently asserts release.yml still reads a secret.
+    """
+    found: set[str] = set()
+
+    def walk(node: object) -> None:
+        if isinstance(node, dict):
+            for key, value in node.items():
+                walk(key)
+                walk(value)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item)
+        elif node is not None:
+            found.update(_SECRET_REF_RE.findall(str(node)))
+
+    walk(doc)
+
+    out: list[str] = []
+    for unexpected in sorted(found - set(EXPECTED_RELEASE_SECRETS)):
+        out.append(
+            f"{name}: references the secret {unexpected}, which is not in "
+            f"EXPECTED_RELEASE_SECRETS. PyPI and npm authenticate through OIDC trusted "
+            f"publishing (SMA-602); a secret here would mask a broken exchange rather than "
+            f"fail. If this credential genuinely cannot be an OIDC exchange, add it to "
+            f"EXPECTED_RELEASE_SECRETS deliberately, with a comment saying why."
+        )
+    if name == RELEASE_WORKFLOW_NAME:
+        for missing in sorted(set(EXPECTED_RELEASE_SECRETS) - found):
+            out.append(
+                f"{name}: no longer references {missing}, which EXPECTED_RELEASE_SECRETS pins. "
+                f"The pin has gone stale — re-baseline it deliberately."
+            )
     return out
 
 
@@ -812,6 +931,12 @@ def check_main(doc: dict, name: str) -> list[str]:
     # `secrets` context, so a credential lifted from a step env: up to the workflow root would
     # otherwise pass V10 clean.
     out += publish_credential_violations({"env": doc.get("env") or {}}, "<workflow>", name)
+
+    # V10 rule 1 (final-review Important 1): the whole-document secret-name allowlist. Runs on
+    # the DOCUMENT, not per job, because a `secrets` reference can sit anywhere — a job `if:`,
+    # a `with:`, a `concurrency: group:` — and a per-job walk would have to enumerate scopes the
+    # way publish_credential_violations does. This one does not need to: it bans by name.
+    out += secret_reference_violations(doc, name)
 
     if not jobs:
         # Fix round 1, Minor 9: an empty `jobs: {}` mapping is a valid dict, so it sailed through
@@ -1649,6 +1774,112 @@ FIXTURES: list[tuple[str, str, str, str | None]] = [
          "    container: postgres:16\n"
          "    steps: [{run: release-plz release}]\n"),
      None),
+
+    # --- V10 final review, Important 1: three rules strictly stronger than the denylist -------
+    # Every row below was MEASURED as a V10 bypass (guard exit 0) against the real release.yml
+    # before the rule existed.
+
+    # Rule 1 — the secret-name allowlist. This is the rollback shape from design §9: a NEW
+    # project-scoped PyPI token gets a NEW secret name and sails past BANNED_PUBLISH_CREDENTIALS.
+    ("V10 rule 1: an unpinned secret name reds even though no denylist holds it", "main",
+     _OK_MAIN.replace(
+         "    steps: [{run: release-plz release}]",
+         "    steps:\n"
+         "      - uses: pypa/gh-action-pypi-publish@v1\n"
+         "        with:\n"
+         "          packages-dir: dist\n"
+         "          password: ${{ secrets.PYPI_PROJECT_TOKEN }}\n"),
+     "references the secret PYPI_PROJECT_TOKEN"),
+    # Rule 1 reaches scopes publish_credential_violations never walks — here a job-level `if:`.
+    ("V10 rule 1: a secret referenced from a job if: reds too", "main",
+     _OK_MAIN.replace(
+         "  build:\n    needs: [plan]\n",
+         "  build:\n    needs: [plan]\n"
+         "    env:\n      GATE: ${{ secrets.SOME_OTHER_TOKEN }}\n"),
+     "references the secret SOME_OTHER_TOKEN"),
+    # Rule 2 — the KEY, whatever the value. No secret is referenced at all here, so rule 1
+    # cannot see it; this is the second measured bypass.
+    ("V10 rule 2: password: from an env: reference on the PyPI action reds", "main",
+     _OK_MAIN.replace(
+         "    steps: [{run: release-plz release}]",
+         "    steps:\n"
+         "      - uses: pypa/gh-action-pypi-publish@v1\n"
+         "        with:\n"
+         "          password: ${{ env.PY_CRED }}\n"),
+     "passes a password: to pypa/gh-action-pypi-publish"),
+    # Rule 2 must survive the `@<sha>` pin the real steps carry, hence startswith, not equality.
+    ("V10 rule 2: a sha-pinned PyPI action is matched too", "main",
+     _OK_MAIN.replace(
+         "    steps: [{run: release-plz release}]",
+         "    steps:\n"
+         "      - uses: pypa/gh-action-pypi-publish"
+         "@dc37677b2e1c63e2034f94d8a5b11f265b73ba33\n"
+         "        with:\n"
+         "          password: hunter2\n"),
+     "passes a password: to pypa/gh-action-pypi-publish"),
+    # Rule 2 CONTROL: the real shape. A PyPI publish step with NO password: is the whole point
+    # of SMA-602 and must stay clean, or the rule would ban trusted publishing itself.
+    ("V10 rule 2 control: the PyPI action without a password: stays clean", "main",
+     _OK_MAIN.replace(
+         "    steps: [{run: release-plz release}]",
+         "    steps:\n"
+         "      - uses: pypa/gh-action-pypi-publish@v1\n"
+         "        with:\n"
+         "          packages-dir: dist\n"
+         "          skip-existing: true\n"),
+     None),
+    # Rule 3 — `_auth`, the other live npmrc credential key.
+    ("V10 rule 3: an npmrc _auth written in a run: reds", "main",
+     _OK_MAIN.replace(
+         "    steps: [{run: release-plz release}]",
+         '    steps: [{run: \'echo "//registry.npmjs.org/:_auth=$LEGACY" > "$HOME/.npmrc"\'}]'),
+     "sets an npm _auth credential"),
+    # Rule 3, the environment spelling of the same key. Case-insensitive matching is what makes
+    # this row work; `${{ secrets.NPM_LEGACY_AUTH }}` additionally trips rule 1, and the `want`
+    # substring test is satisfied by either — so assert the _auth message specifically.
+    ("V10 rule 3: NPM_CONFIG__AUTH in a step env: reds", "main",
+     _OK_MAIN.replace(
+         "    steps: [{run: release-plz release}]",
+         "    steps:\n"
+         "      - env:\n"
+         "          NPM_CONFIG__AUTH: ${{ secrets.NPM_LEGACY_AUTH }}\n"
+         "        run: release-plz release\n"),
+     "sets an npm _auth credential"),
+    # Rule 3 CONTROL: `_authToken` must keep producing its OWN message and not also trip rule 3,
+    # or the two rules would double-report every npmrc token. `_auth` is a prefix of
+    # `_authToken`; the negative lookahead is what keeps them disjoint.
+    ("V10 rule 3 control: _authToken does not also trip the _auth rule", "main",
+     _OK_MAIN.replace(
+         "    steps: [{run: release-plz release}]",
+         '    steps: [{run: \'echo "//registry.npmjs.org/:_authToken=x" > "$HOME/.npmrc"\'}]'),
+     "writes an npm _authToken"),
+    # Rule 3 CONTROL: NODE_AUTH_TOKEN keeps its BANNED_PUBLISH_CREDENTIALS message. `_AUTH_` is
+    # followed by an underscore, so the lookahead excludes it — one violation, not two.
+    ("V10 rule 3 control: NODE_AUTH_TOKEN stays a denylist hit", "main",
+     _OK_MAIN.replace(
+         "    steps: [{run: release-plz release}]",
+         "    steps:\n"
+         "      - env:\n"
+         "          NODE_AUTH_TOKEN: ${{ secrets.PAIGASUS_BOT_APP_ID }}\n"
+         "        run: release-plz release\n"),
+     "references NODE_AUTH_TOKEN"),
+    # THE CLEAN CONTROL for all three rules together. The two legitimate App secrets, referenced
+    # exactly as release.yml references them, must still pass. Without this row a future edit
+    # could ban the `secrets` context wholesale and every red row above would still pass — while
+    # breaking the App token mint and reding ci/workflow-credentials/run.sh's control row.
+    ("V10 rules 1-3 control: the two PAIGASUS_BOT_* secrets stay clean", "main",
+     _OK_MAIN.replace(
+         "    steps: [{run: release-plz release}]",
+         "    steps:\n"
+         "      - uses: actions/create-github-app-token@v2\n"
+         "        with:\n"
+         "          app-id: ${{ secrets.PAIGASUS_BOT_APP_ID }}\n"
+         "          private-key: ${{ secrets.PAIGASUS_BOT_PRIVATE_KEY }}\n"
+         "      - uses: pypa/gh-action-pypi-publish@v1\n"
+         "        with:\n"
+         "          packages-dir: dist\n"
+         "          skip-existing: true\n"),
+     None),
 ]
 
 
@@ -2003,6 +2234,43 @@ def _v10_minor6_scalar_env_fails_closed() -> str | None:
     return None
 
 
+def _v10_rule1_strict_equality() -> str | None:
+    """V10 rule 1, the `missing` half (final-review Important 1): EXPECTED_RELEASE_SECRETS is a
+    STRICT-EQUALITY pin, so a pinned name that release.yml stops referencing must red too.
+
+    Expressed here rather than as a FIXTURES row because self_test() calls check_main with the
+    name "fixture", and that half of the rule deliberately fires only for
+    RELEASE_WORKFLOW_NAME — every synthetic fixture legitimately references no secret at all.
+    Without this test the `missing` direction would be unasserted, and the pin could rot into a
+    subset test without anything reporting it.
+    """
+    doc = {"jobs": {"release": {"runs-on": "ubuntu-latest", "steps": [{"run": "echo hi"}]}}}
+
+    found = check_main(doc, RELEASE_WORKFLOW_NAME)
+    for pinned in EXPECTED_RELEASE_SECRETS:
+        if not any(f"no longer references {pinned}" in line for line in found):
+            return (f"a release.yml referencing no secret at all did not red for the pinned "
+                    f"{pinned}: {found or '(clean)'}")
+
+    # The same document under any OTHER name must stay clean on this rule — otherwise every
+    # fixture and every called workflow would inherit release.yml's pin.
+    other = [line for line in check_main(doc, "fixture") if "no longer references" in line]
+    if other:
+        return f"the missing-name half leaked past RELEASE_WORKFLOW_NAME: {other}"
+
+    # And the real referencing shape must satisfy it exactly.
+    ok = {"jobs": {"release": {"runs-on": "ubuntu-latest", "steps": [{
+        "uses": "actions/create-github-app-token@v2",
+        "with": {"app-id": "${{ secrets.PAIGASUS_BOT_APP_ID }}",
+                 "private-key": "${{ secrets.PAIGASUS_BOT_PRIVATE_KEY }}"},
+    }]}}}
+    leftover = [line for line in check_main(ok, RELEASE_WORKFLOW_NAME)
+                if "EXPECTED_RELEASE_SECRETS" in line or "no longer references" in line]
+    if leftover:
+        return f"the exact pinned secret set did not satisfy strict equality: {leftover}"
+    return None
+
+
 def _important5_regressions() -> list[str]:
     """Regression tests for Important 5: a file that IS a readable path (`is_file()` True) but
     cannot actually be read must still infra (exit 2), never surface an unhandled traceback that
@@ -2081,6 +2349,7 @@ def self_test() -> int:
          _v8_fix4_dry_run_boundary_cases),
         ("minor-9 empty jobs: {} floor", _minor9_empty_jobs_floor),
         ("v10 minor-6 scalar env: fails closed", _v10_minor6_scalar_env_fails_closed),
+        ("v10 rule 1 strict equality (the missing-name half)", _v10_rule1_strict_equality),
     ):
         err = fn()
         if err:
