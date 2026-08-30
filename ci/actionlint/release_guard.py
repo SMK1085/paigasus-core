@@ -150,6 +150,24 @@ _PUBLISH_RE = re.compile("|".join(PUBLISH_MARKERS))
 # about (CodeRabbit round 1 finding 2).
 _NAPI_PREPUBLISH_RE = re.compile(r"napi\s+prepublish")
 
+# V10 (SMA-602): no registry publish credential anywhere in the release path. PyPI and npm
+# authenticate through OIDC trusted publishing; crates.io already did. A reintroduced token
+# publishes SILENTLY — npm's oidc.js never throws (its own doc comment says so), so a failed
+# exchange falls through to whatever credential is configured, and the publish succeeds having
+# used the token. Nothing else in this repository catches that: ci/workflow-credentials only
+# inspects pull_request-triggered workflows, and release.yml is not one.
+#
+# This bans PUBLISH credentials BY NAME, never the `secrets` context as a whole.
+# PAIGASUS_BOT_APP_ID and PAIGASUS_BOT_PRIVATE_KEY are legitimate and must keep working: an App
+# installation token cannot come from a registry trusted publisher. A blanket ban would also red
+# ci/workflow-credentials/run.sh's control row, which asserts release.yml still reads A secret.
+BANNED_PUBLISH_CREDENTIALS = ("PYPI_API_TOKEN", "NPM_TOKEN", "NODE_AUTH_TOKEN")
+
+# An `_authToken` written into any npmrc masks a broken OIDC exchange: npm's oidc.js sets its
+# exchanged token at the 'user' config level, and a file token at that level is what publish.js
+# falls back to when the exchange fails.
+NPMRC_AUTH_TOKEN = "_authToken"
+
 
 def infra(msg: str) -> NoReturn:
     print(f"release-guard: {msg}", file=sys.stderr)
@@ -470,6 +488,51 @@ def napi_violations(job: dict, job_id: str, name: str) -> list[str]:
     return out
 
 
+def publish_credential_violations(job: dict, job_id: str, name: str) -> list[str]:
+    """V10: no registry publish credential anywhere in the release path.
+
+    Invoked from BOTH check_main and check_called. Scoping it to check_main would repeat the
+    SMA-579 V5 mistake, where a check living only in check_main left every CALLED workflow
+    unguarded — main() runs check_main on argv[0] alone.
+
+    Scans job env, step env, step run: bodies and step with: blocks. YAML comments are not in
+    the parsed doc, so the explanatory comments in release.yml that NAME these tokens are
+    invisible here — which is what lets those comments keep explaining the history.
+    """
+    out: list[str] = []
+
+    def scan(text: str, where: str) -> None:
+        for banned in BANNED_PUBLISH_CREDENTIALS:
+            if banned in text:
+                out.append(
+                    f"{name}: job '{job_id}' references {banned} in {where}. PyPI and npm "
+                    f"publish through OIDC trusted publishing (SMA-602). A token here would "
+                    f"silently mask a broken exchange rather than fail. Remove it."
+                )
+        if NPMRC_AUTH_TOKEN in text:
+            out.append(
+                f"{name}: job '{job_id}' writes an npm {NPMRC_AUTH_TOKEN} in {where}. npm reads "
+                f"that at the 'user' config level, which is exactly what masks a failed OIDC "
+                f"exchange (SMA-602). Remove it."
+            )
+
+    for key, value in (job.get("env") or {}).items():
+        scan(f"{key}: {value}", "the job env:")
+
+    for step in job.get("steps") or []:
+        if not isinstance(step, dict):
+            continue
+        for key, value in (step.get("env") or {}).items():
+            scan(f"{key}: {value}", "a step env:")
+        scan(str(step.get("run") or ""), "a step run:")
+        with_block = step.get("with")
+        if isinstance(with_block, dict):
+            for key, value in with_block.items():
+                scan(f"{key}: {value}", "a step with:")
+
+    return out
+
+
 def _environment_name(job: dict) -> str | None:
     """The environment's NAME — the field GitHub Actions actually gates on via required
     reviewers. `environment:` may be a plain string (the name itself) or a mapping with `name:`
@@ -689,6 +752,11 @@ def check_main(doc: dict, name: str) -> list[str]:
         # runs BEFORE the `continue` below. See napi_violations for the full rationale.
         out += napi_violations(job, job_id, name)
 
+        # V10: applies to EVERY job, UNGATED_JOBS members included, so it runs BEFORE the
+        # `continue` below. An exempt job with a publish token is the worst case, not an
+        # excused one.
+        out += publish_credential_violations(job, job_id, name)
+
         if job_id in UNGATED_JOBS:
             # V7 (fix round 3, Critical 2). The exemption above is from V1 (the gating rule) and
             # nothing else. Assert the premise that justifies it: a job allowed to run ungated on
@@ -767,6 +835,9 @@ def check_called(doc: dict, name: str) -> list[str]:
     for jid, j in doc["jobs"].items():
         if isinstance(j, dict):
             out += napi_violations(j, jid, name)
+            # V10 also applies here, for the same reason as V5 above: a called workflow that
+            # escapes check_main must not escape this check either.
+            out += publish_credential_violations(j, jid, name)
 
     publishing = [jid for jid, j in doc["jobs"].items() if isinstance(j, dict) and job_publishes(j)]
     if not publishing:
@@ -1361,6 +1432,41 @@ FIXTURES: list[tuple[str, str, str, str | None]] = [
      _OK_MAIN.replace(
          "nothing_to_release: ${{ steps.decide.outputs.nothing_to_release }}",
          "nothing_to_release: ${{   steps.decide.outputs.nothing_to_release   }}"),
+     None),
+
+    # --- V10 (SMA-602): no registry publish credential in the release path -----------------
+    ("V10 npm token in a step env", "main",
+     _OK_MAIN.replace(
+         "    steps: [{run: release-plz release}]",
+         "    steps:\n"
+         "      - env:\n"
+         "          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}\n"
+         "        run: npm publish\n"),
+     "references NODE_AUTH_TOKEN"),
+    ("V10 pypi token in a step with:", "main",
+     _OK_MAIN.replace(
+         "    steps: [{run: release-plz release}]",
+         "    steps:\n"
+         "      - uses: pypa/gh-action-pypi-publish@v1\n"
+         "        with:\n"
+         "          password: ${{ secrets.PYPI_API_TOKEN }}\n"),
+     "references PYPI_API_TOKEN"),
+    ("V10 npmrc authToken written in a run:", "main",
+     _OK_MAIN.replace(
+         "    steps: [{run: release-plz release}]",
+         '    steps: [{run: \'echo "//registry.npmjs.org/:_authToken=x" > "$HOME/.npmrc"\'}]'),
+     "writes an npm _authToken"),
+    # NEGATIVE CONTROL, and the most important row here. Without it, a future edit could ban the
+    # whole `secrets` context and every other V10 row would still pass — while breaking the App
+    # token mint and reding ci/workflow-credentials/run.sh's control row.
+    ("V10 App secrets stay clean", "main",
+     _OK_MAIN.replace(
+         "    steps: [{run: release-plz release}]",
+         "    steps:\n"
+         "      - env:\n"
+         "          APP_ID: ${{ secrets.PAIGASUS_BOT_APP_ID }}\n"
+         "          KEY: ${{ secrets.PAIGASUS_BOT_PRIVATE_KEY }}\n"
+         "        run: release-plz release\n"),
      None),
 ]
 
