@@ -278,6 +278,12 @@ In `_classify_shell_line`, replace the body of the `for segment` loop:
 
 - [ ] **Step 4: Add `_reports` and use it in BOTH loops**
 
+**NAME CHANGE, discovered during implementation:** call it `_row_reports`, not `_reports`.
+`self_test` already has a LOCAL helper named `_reports`, and a nested `def` makes that name local
+for the whole enclosing function, so a module-level `_reports` is unreachable from every fixture
+(`UnboundLocalError`, measured). The shipped code and the spec both use `_row_reports`; the
+occurrences below keep the original name because this document records what was planned.
+
 Insert directly before `def check_cargo_locked_scripts`:
 
 ```python

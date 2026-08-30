@@ -272,12 +272,15 @@ Arm 2 carries **wrapper** semantics, the rule the three FFI tasks already carry.
 
 * **`_classify_shell_line`** builds rows from the merged list. `ScriptCargoLine` gains a `kind`
   field.
-* **The report predicate is factored into one helper**, `_reports(line)`, defined as
+* **The report predicate is factored into one helper**, `_row_reports(line)`, defined as
   `line.kind == "env" or (line.resolves and not line.locked)`. It is used by **both**
   `check_cargo_locked_scripts`' emission loop **and** its waiver-health loop. Without this, an
   `env` row whose tool carries `--locked` is emitted (kind-aware) but its waiver then reads as
   stale (`hits == []`), so the row is permanently red and unwaivable. The adversarial review
-  found this against this spec's own fixture.
+  found this against this spec's own fixture. It is `_row_reports`, not `_reports`: `self_test`
+  already has a LOCAL helper called `_reports`, and a nested `def` makes that name local for the
+  whole enclosing function, so a module-level `_reports` is unreachable from every fixture
+  (UnboundLocalError, measured during implementation).
 * **The `--no-deps` carve-out keys on the matched verb**, not on `CARGO_METADATA_RE` over
   `group(0)`. `CARGO_METADATA_RE` needs the literal lowercase `cargo`, so for an arm-1 match
   `"$CARGO_BIN" metadata --no-deps` it never fires and the call reports — contradicting
