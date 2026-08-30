@@ -4130,6 +4130,30 @@ def self_test():
                 "derives as `script`, so the wrapper branch does not cover it"
             )
 
+    # A10's arm 1, exercised DIRECTLY — the way _cwd_inside_rs is. Going through
+    # check_cargo_config_inputs cannot isolate it: a blob the arm rejects is not derived at all,
+    # so A10 never examines it and the row is absent for the wrong reason. Only a direct call
+    # separates "the arm said no" from "the derivation said no" (MEASURED: the newline row
+    # survived as a mutation until this table existed).
+    for probe, want in (
+        ('"$CARGO_BIN" build', True),
+        ('"$CARGO_BIN" +nightly build', True),
+        # ...but never ACROSS a newline: COMMAND_SPLIT_RE does not split there, and a blob is
+        # often a multi-line `script:` block.
+        ('"$CARGO_BIN"\nbuild', False),
+        ('"$CARGO_BIN" +nightly\nbuild', False),
+        # A8's verb, not A10's: `tree` resolves the graph and never compiles (SMA-599 D9).
+        ('"$CARGO_BIN" tree', False),
+        ('"$CARGO_BIN" update', False),
+        # The NAME is the whole test.
+        ('"$RELEASE_PLZ_BIN" build', False),
+    ):
+        if _var_sensitive(probe) is not want:
+            failures.append(
+                f"_var_sensitive({probe!r}) is {not want} — A10's arm 1 is wrong in the "
+                f"{'false-negative' if want else 'false-positive'} direction"
+            )
+
     if not CONFIG_SENSITIVE_VERBS:
         failures.append("CONFIG_SENSITIVE_VERBS is empty — A10 would examine nothing")
 
