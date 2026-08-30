@@ -90,27 +90,47 @@ PRN be stored as `created_by` and still compile — and with no FK (D4) and leni
 (Error handling), nothing downstream would catch it. Using the narrower type keeps the
 check the codebase already has at the exact point where a wrong value becomes permanent.
 
-**`Stamp` enters the write path through two different doors, and this must be stated
-because the port methods are not symmetric.** Measured: `OrganizationRepository::create`
-(`ports.rs:103`), `TeamRepository::create` (`:118`), `ProjectRepository::create` (`:131`)
-and `MembershipRepository::attach` (`:146`) take **no `now` parameter at all** — the
-timestamp already rides inside the entity. Only the six `rename`/`set_status` methods
-(`:108, :110, :122, :123, :134, :135`) take `now`.
+**Every mutating port method takes `&Stamp`. There are no exceptions, and the uniformity is
+the point.** The ten methods are not symmetric today, so they change in two ways. Measured:
+`OrganizationRepository::create` (`ports.rs:103`), `TeamRepository::create` (`:118`),
+`ProjectRepository::create` (`:131`) and `MembershipRepository::attach` (`:146`) take **no
+`now` parameter at all** — the timestamp currently rides inside the entity. The six
+`rename`/`set_status` methods (`:108, :110, :122, :123, :134, :135`) do take `now`.
 
-Therefore:
+- **create / attach** — **gain** a `stamp: &Stamp` parameter they did not have.
+- **rename / set_status** — `stamp: &Stamp` **replaces** `now: DateTime<Utc>`.
 
-- **create / attach** — the stamp reaches persistence *inside the entity*.
-  `Organization::new`, `Team::new`, `Project::new` and `Membership::new` take `&Stamp` in
-  place of `now`. The port signatures do not change.
-- **rename / set_status** — the stamp replaces the `now: DateTime<Utc>` port parameter.
+The four entity constructors — `Organization::new`, `Team::new`, `Project::new`,
+`Membership::new` — also take `&Stamp` in place of `now`, because the entity is the read
+model too (D2) and must carry `created_by` back to the caller. `create_organization` builds
+its gRPC response from the returned entity directly (`grpc/tenancy.rs:142-152`), not from a
+re-read, so an entity that did not carry the creator would emit an absent one on the create
+response.
 
-The application service builds the `Stamp` once, from `self.clock.now()` plus the actor it
-was handed, and is the only place that constructs one.
+**The application service constructs exactly one `Stamp`** — from `self.clock.now()` plus
+the actor it was handed — and passes that same binding to both the entity constructor and
+the port call. Adapters never construct one. Because there is a single binding per
+operation, the entity's fields and the port's `stamp` cannot disagree; the redundancy is
+deliberate, and it is what lets the adapter stamp rows that are **not** represented by an
+entity at all.
 
-**Correction to the earlier draft.** That draft argued `Stamp` prevents drift because "one
-parameter cannot" be forgotten where two can. That argument holds only for the six
-`rename`/`set_status` methods. It does not apply to the four create paths, which never had
-a `now` to replace. The honest defence is narrower and is stated in Risks.
+That last point is not hypothetical. `OrganizationRepository::create` writes three rows in
+one transaction — the org, the auto-provisioned default team, and the owner `RoleGrant`
+(`organizations.rs:47-65`). Only two of them are entities. Passing the stamp to the port is
+what gives the adapter an authoritative time and actor for the third, and for any row a
+future implementation adds.
+
+It also resolves D2's `MembershipRecord` problem cleanly:
+`PgMembershipRepository::attach` builds that record itself (`pg_memberships.rs:237-242`) and
+can now read `created_by` straight off `stamp.by`, rather than reaching back into the
+entity it was handed.
+
+**Correction to the earlier draft.** That draft gave create and attach a different door —
+the stamp travelled only inside the entity, and the port signatures were left alone. It then
+had to concede that the anti-drift argument covered only six of the ten methods. Taking the
+stamp on every mutating port method removes the concession: a new mutating method cannot be
+added without deciding what stamps it, and a new adapter implementation cannot silently
+forget the actor for a row it writes.
 
 ### D2 — entities keep flat fields; `MembershipRecord` gains one
 
@@ -220,26 +240,52 @@ This answers the `convert::audit` doc comment's objection. It worried that writi
 "on create only" leaves the field "inconsistent across later reads". Stamping every
 mutation, not only create, is what removes that inconsistency.
 
-### D5 — the idempotent no-op must not restamp, and it applies to `set_status` only
+### D5 — a write that changes nothing must not restamp, on any method
 
-`set_status` on a node already at the target status is a documented no-op that leaves
-`updated_at` untouched (`pg_organizations.rs:225-233`, with an existing test at
-`organizations.rs:154-159`). It must leave `modified_by` untouched too. If the modifier is
-written before the status comparison, a no-op silently records a principal who changed
-nothing.
+**The rule is general.** A mutation that changes no stored value leaves `updated_at` and
+`modified_by` untouched. Restamping a no-op records a principal who changed nothing, which
+is worse than recording no one: it is a false statement about who last touched the row, and
+this issue exists to make that field trustworthy.
 
-**Six sites implement this branch, not one**: `pg_organizations.rs:225-233`,
-`pg_teams.rs:196-204`, `pg_projects.rs` (`set_status`), and the three in-memory fakes
-(`application/fakes.rs:109-117` for `InMemoryOrgs::set_status` plus its team and project
-twins). The fakes matter because the unit tests measure the fakes; a fake and its adapter
-can disagree, so both tiers need the assertion.
+`set_status` already implements the branch for the timestamp
+(`pg_organizations.rs:225-233`, tested at `organizations.rs:154-159`). It must leave
+`modified_by` untouched too — so `modified_by` is set only in the `else` arm, next to
+`updated_at`, never before the status comparison.
 
-**`rename` keeps its current behaviour and gets no no-op.** Measured:
-`PgOrganizationRepository::rename` (`pg_organizations.rs:203-211`) sets `updated_at = now`
-unconditionally, even when the supplied slug and name equal the stored ones;
-`NothingToRename` (`organizations.rs:81`) rejects only the both-*absent* case. D5's
-principle is deliberately **not** generalised to `rename` — adding a value-equality no-op
-there would change tested behaviour that no one asked to change, and it is out of scope.
+**`rename` does not have the branch today and gains one.** Measured:
+`PgOrganizationRepository::rename` (`pg_organizations.rs:203-211`) sets
+`updated_at = Set(now)` unconditionally, even when the supplied slug and name equal the
+stored values. `NothingToRename` (`organizations.rs:81`) rejects only the both-*absent*
+case, never the both-*identical* one.
+
+The no-op test is: **every supplied field equals its stored value.** A `new_slug` that
+matches with `new_name` absent is a no-op; a matching slug with a differing name is a real
+change. Both-absent stays `NothingToRename`, unchanged.
+
+**Guard order matters and must not change.** The existing checks run first — `NotFound`,
+then the archived precondition — then the no-op test, then the slug-conflict check, then the
+update. Testing for a no-op *before* the archived guard would turn
+`rename(archived_node, same_slug)` from `Precondition(NodeArchived)` into a silent `Ok`.
+Placing it *after* the conflict check would be harmless but pointless; placing it before also
+fixes a latent oddity, since renaming a node to the slug it already holds cannot be a
+`SlugTaken` conflict with itself.
+
+**Twelve sites implement these two branches**: three `set_status` and three `rename` bodies
+in `pg_organizations.rs`, `pg_teams.rs` and `pg_projects.rs`, and their six twins in the
+in-memory fakes (`application/fakes.rs:109-117` for `InMemoryOrgs::set_status`, and so on).
+The fakes matter because the unit tier measures the fakes; a fake and its adapter can
+disagree, so both need the assertion.
+
+**`bump_entity_gen()` stays unconditional.** It is already called on the existing
+`set_status` no-op path (`pg_organizations.rs:236-238`), and the `rename` no-op follows the
+same shape. Making it conditional would change Cedar cache-invalidation behaviour, which is
+a separate concern from audit correctness and is not part of this issue.
+
+**This supersedes the previous draft**, which kept `rename` restamping on the grounds that a
+no-op would "change tested behaviour that no one asked to change". That reason was wrong.
+Measured: of the 22 `rename` call sites across `tests/` and the application unit tests, **not
+one** passes a value equal to the stored one — every case either uses a genuinely new value
+or exercises an error path. Adding the no-op breaks no existing test.
 
 ### D6 — `convert::audit` takes a struct, not four positional arguments
 
@@ -289,21 +335,25 @@ shape. Leaving HTTP out would make the two surfaces disagree about the same row.
 The actor parameter is `actor: &PrincipalId`, added to every entry point that lacks one. The
 service builds the `Stamp`; adapters never construct one.
 
-| Service method | Line | Has actor today | Stamp reaches persistence via |
-|---|---|---|---|
-| `OrganizationService::create` | `organizations.rs:42` | **yes** | `Organization::new` + `Team::new` |
-| `OrganizationService::rename` | `:80` | no | port param |
-| `OrganizationService::archive` | `:91` | no | port param |
-| `OrganizationService::restore` | `:97` | no | port param |
-| `TeamService::create` | `teams.rs:34` | no | `Team::new` |
-| `TeamService::rename` | `:57` | no | port param |
-| `TeamService::archive` | `:69` | no | port param |
-| `TeamService::restore` | `:76` | no | port param |
-| `ProjectService::create` | `projects.rs:38` | no | `Project::new` |
-| `ProjectService::rename` | `:67` | no | port param |
-| `ProjectService::archive` | `:78` | no | port param |
-| `ProjectService::restore` | `:84` | no | port param |
-| `MembershipService::attach` | `memberships.rs:63` | no | `Membership::new` |
+Every row passes the stamp to its port method. The `create`/`attach` rows pass the **same**
+`Stamp` binding to an entity constructor as well (D1), because the entity is the read model
+returned to the caller.
+
+| Service method | Line | Has actor today | Port param | Also into |
+|---|---|---|---|---|
+| `OrganizationService::create` | `organizations.rs:42` | **yes** | added | `Organization::new` + `Team::new` |
+| `OrganizationService::rename` | `:80` | no | replaces `now` | — |
+| `OrganizationService::archive` | `:91` | no | replaces `now` | — |
+| `OrganizationService::restore` | `:97` | no | replaces `now` | — |
+| `TeamService::create` | `teams.rs:34` | no | added | `Team::new` |
+| `TeamService::rename` | `:57` | no | replaces `now` | — |
+| `TeamService::archive` | `:69` | no | replaces `now` | — |
+| `TeamService::restore` | `:76` | no | replaces `now` | — |
+| `ProjectService::create` | `projects.rs:38` | no | added | `Project::new` |
+| `ProjectService::rename` | `:67` | no | replaces `now` | — |
+| `ProjectService::archive` | `:78` | no | replaces `now` | — |
+| `ProjectService::restore` | `:84` | no | replaces `now` | — |
+| `MembershipService::attach` | `memberships.rs:63` | no | added | `Membership::new` |
 
 `MembershipService::detach` (`memberships.rs:86`) is **not** stamped — it deletes the row.
 See Limitations.
@@ -329,8 +379,11 @@ For a rename, end to end:
    in-transaction guards.
 6. `convert::to_proto_org` builds `AuditFields` from the entity and calls `convert::audit`.
 
-`create` differs at steps 3–4: the service puts the stamp into the entity constructor, which
-sets `created_by` and `modified_by` to the same value, and the port signature is unchanged.
+`create` differs at steps 3–4 only in that the one `Stamp` goes to **two** places: the entity
+constructor, which sets `created_by` and `modified_by` to the same value, and the port call,
+which now also takes it (D1). For `OrganizationRepository::create` the adapter uses the
+port's stamp for the owner `RoleGrant` row, which is not an entity and would otherwise have
+no stamped source.
 
 ## Error handling
 
@@ -347,11 +400,19 @@ guarded by D4's `CHECK`.
 1. A first write sets `modified_by == created_by`.
 2. An update advances `modified_by` and leaves `created_by` unchanged.
 3. An idempotent `set_status` no-op advances **neither** `updated_at` nor `modified_by`
-   (D5). Asserted against both the fake and Postgres, because the fake is what the unit
-   tier measures.
-4. `OrganizationService::create` gives the default team the org creator (D8).
-5. The same membership read back through `find`, `list_by_principal` and `list_by_node`
+   (D5).
+4. A `rename` supplying values **identical** to the stored ones advances neither either
+   (D5). This is new behaviour, so it needs both a positive case (identical → no-op) and a
+   negative one (matching slug, differing name → a real change that *does* restamp),
+   otherwise an over-broad no-op that swallows genuine renames passes.
+5. Renaming an **archived** node to its own current slug still returns
+   `Precondition(NodeArchived)`, not a silent `Ok` — the guard-order rule in D5.
+6. `OrganizationService::create` gives the default team the org creator (D8).
+7. The same membership read back through `find`, `list_by_principal` and `list_by_node`
    agrees on the creator — the nine-`SELECT` hazard in D2.
+
+Cases 3, 4 and 5 are asserted against **both** the fake and Postgres, because the fake is
+what the unit tier measures and the two can disagree (D5's twelve sites).
 
 **`convert` unit tests.** The superseded `audit_leaves_the_actor_unset`, rewritten per D6,
 plus **one test per in-scope projector** (`to_proto_org`, `to_proto_team`,
@@ -420,17 +481,31 @@ it.** In `PgOrganizationRepository::rename` (`pg_organizations.rs:203-211`) the 
 edit is one line, `active.modified_by = Set(...)`, beside the existing
 `active.updated_at = Set(now)`. Omitting it **compiles**, and SeaORM leaves a `NotSet` field
 out of the `UPDATE`, so the previous `modified_by` survives — naming a principal who did not
-make the change. Six sites have this shape: three `rename` bodies and the three `set_status`
-else-branches.
+make the change. **Six Postgres assignment sites** have this shape: the update arm of three
+`rename` bodies and of three `set_status` bodies. (These six are the *lines that write the
+column*. D5's twelve are the *no-op branches*, counted across both the adapters and the
+fakes. The two counts measure different things and are both right.)
 
 The earlier draft claimed "a missed site does not compile". **That claim was wrong** and is
 withdrawn. The real controls are behavioural, not structural: the rename-as-A-then-as-B
-assertion per aggregate (Testing), and the nine-`SELECT` read-agreement test. An
-implementation that sets `updated_at` and `modified_by` through one shared helper, so that
-neither can be set alone, would make the guarantee structural — worth doing if it fits the
-existing adapter shape, but the tests are the requirement.
+assertion per aggregate (Testing), and the nine-`SELECT` read-agreement test.
+
+There is now a stronger structural option than there was, and it is **recommended**. After
+D5 both `rename` and `set_status` have the same shape — a no-op arm and an update arm — so a
+single private helper on each adapter that takes the `&Stamp` and sets `updated_at` and
+`modified_by` **together**, called only from the update arm, makes it impossible to write one
+without the other. That collapses this risk and D5's into one reviewed place per aggregate.
+The tests remain the requirement; the helper is how to stop needing them to catch it.
 
 **Second risk: partial threading.** Thirteen service methods and five adapter modules across
-two transports. Here the type system *does* help — the six `rename`/`set_status` port
-signatures change, and the four entity constructors change, so a missed call site fails to
+two transports. Here the type system does help, and after D1's revision it helps everywhere:
+**all ten mutating port methods change signature** — six replacing `now`, four gaining a
+parameter — and all four entity constructors change too. A missed call site fails to
 compile. The gap is only the assignment-line risk above.
+
+**Third risk: an over-broad `rename` no-op.** D5 adds a value-equality branch that does not
+exist today. Written too greedily — comparing only the slug, say, or treating an absent
+`new_name` as "matching" when a name was in fact supplied — it would swallow real renames
+and silently stop updating rows. That is a data-correctness bug, not merely an audit one.
+Testing case 4's negative half is the control, and it is why that case is specified as a
+pair rather than a single assertion.
