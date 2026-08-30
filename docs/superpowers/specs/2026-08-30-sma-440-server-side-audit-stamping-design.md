@@ -459,6 +459,8 @@ unaffected.
 
 ## Part 2 — the audit-log and domain-event trail (required, ships separately)
 
+**Tracked as [SMA-606](https://linear.app/smaschek/issue/SMA-606/tenancy-audit-log-entries-and-domain-events-on-every-mutation-incl).**
+
 An earlier draft listed "no tenancy mutation writes an `audit_log` row or a domain event"
 as an accepted limitation. **It is not accepted.** Every tenancy mutation must write an
 `AuditEntry` and raise a `DomainEvent`, `detach` included. Without it the stamped columns
