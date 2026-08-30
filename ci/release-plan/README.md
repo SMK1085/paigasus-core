@@ -52,7 +52,8 @@ no literal `[package] version`, a `git tag -l` failure — builds.
 
 ## What counts as releasable
 
-`releasable_packages()` walks `rs/crates/*/*/Cargo.toml` and pairs it with
+`releasable_packages()` resolves manifests from `rs/Cargo.toml`'s `[workspace] members` and pairs
+them with
 `rs/release-plz.toml`. A package is releasable, and therefore expected to be tagged, when its
 Cargo manifest does not say `publish = false` **and** its `rs/release-plz.toml` entry says
 neither `release = false` nor `publish = false`. A package with no `rs/release-plz.toml`
