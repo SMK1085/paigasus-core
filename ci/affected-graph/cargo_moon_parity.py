@@ -301,6 +301,9 @@ def _dockerfile_env_redirects_cargo(stripped):
     masked = SHELL_STRING_RE.sub(lambda m: " " * len(m.group(0)), stripped)
     return bool(DOCKERFILE_ENV_CARGO_KEY_RE.search(masked))
 
+# Module level, not rebuilt per call: `cargo_matches` runs ~41k times on the real corpus.
+ENV_ONLY_GAP_RE = re.compile(r"^(?:[^\S\n]+" + _ENV_ASSIGN + r")*[^\S\n]*$")
+
 CargoMatch = collections.namedtuple("CargoMatch", "start end verb kind")
 
 # Only these tokens confer a cwd. A bare `rs`-containing ARGUMENT must never do so:
@@ -927,13 +930,12 @@ def cargo_matches(text):
     # twice and could not be cleared (CodeRabbit PR review). The gap may hold further `NAME=value`
     # assignments, which is why it is not a bare adjacency test.
     real = [c for c in out if c.kind in ("literal", "var")]
-    gap_is_env_only = re.compile(r"^(?:[^\S\n]+" + _ENV_ASSIGN + r")*[^\S\n]*$")
     out = [
         c
         for c in out
         if c.kind != "env"
         or not any(
-            m.start >= c.end and gap_is_env_only.match(text[c.end : m.start]) for m in real
+            m.start >= c.end and ENV_ONLY_GAP_RE.match(text[c.end : m.start]) for m in real
         )
     ]
     return sorted(out, key=lambda c: c.start)

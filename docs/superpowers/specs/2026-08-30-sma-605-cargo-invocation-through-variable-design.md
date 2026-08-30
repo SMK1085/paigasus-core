@@ -572,6 +572,16 @@ not covered.
 strings (SMA-599 L8). No such line exists today. The failure direction is a loud row and a
 waiver, never a silent pass.
 
+**R12 — the LITERAL arm still spans a newline; the two indirect arms no longer do.** MEASURED:
+`cargo` + newline + `build` matches `CARGO_INVOCATION_RE`, while `"$CARGO_BIN"` + newline +
+`build` does not match arm 1 and `CARGO=/p` + newline + `tool` does not match arm 2 (M34-M36).
+The inconsistency is deliberate and NOT fixed here, for three reasons: the corpus holds **zero**
+instances of the shape (measured across every resolved blob and every `ci/**/*.sh`); the regex
+belongs to SMA-601, and changing an established assertion's behaviour needs its own measurement
+of what it stops reporting; and the direction is a FALSE POSITIVE, the direction this design
+accepts. Backslash continuations are unaffected either way — `_join` collapses them to a single
+space before any arm sees the text, verified for all three arms.
+
 **R8 — the resolved blob excludes `env`** (M8). A Moon task declaring `env: {CARGO: /p}` beside
 a wrapper is invisible to the blob scan whatever arm 2 does.
 
