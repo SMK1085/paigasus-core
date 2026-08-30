@@ -163,7 +163,7 @@ for s in sorted(Path("ci").rglob("*.sh")):
 PY
 ```
 
-Measured — five would-report rows, and Task 3 waives all five:
+Measured at the time this task was written — five would-report rows. **The shipped set differs; see the note below the table.**
 
 | file:line | segment | what it is |
 | --- | --- | --- |
@@ -171,14 +171,14 @@ Measured — five would-report rows, and Task 3 waives all five:
 | `ci/version-lockstep/run.sh:583` | `cargo update -w >/dev/null )` | real call |
 | `ci/version-lockstep/run.sh:583` | `die_infra "cargo update -w failed (site 16)"` | prose in an error string |
 | `ci/publish-metadata/run.sh:1663` | ``die_infra "FATAL: \`cargo metadata\` failed in $RS_DIR …"`` | prose in an error string |
-| `ci/cargo-lock-integrity/run.sh:60` | `1) echo "::error::rs/Cargo.lock does not satisfy … run 'cargo metadata' in rs/ …"` | prose in an error string |
+| `ci/cargo-lock-integrity/run.sh:60` | `1) echo "::error::rs/Cargo.lock does not satisfy … run 'cargo metadata' in rs/ …"` | prose — but NOT waived, see below |
 
 All three `ci/version-lockstep/run.sh` rows carry line **583**, not 583/584/585: `:583-585` is ONE
 logical line joined by backslash continuations, and a row is reported against the FIRST physical
 line. `ci/publish-metadata/run.sh:1663-1664` is the same shape.
 
-Every other `ci/**/*.sh` reports 0. `ci/actionlint/run.sh` needs nothing: its cargo matches are 3
-full-line comments (excluded) and 5 fixture strings that all carry `--locked`.
+**Corrected after implementation.** `ci/cargo-lock-integrity/run.sh` is an unconditional `ci.yml` step that no Moon task invokes, so A8's script arm never follows it and its row needs no waiver — an entry would be stale on arrival. Conversely the final fix wave's per-invocation scoping surfaced a sixth row at `ci/actionlint/run.sh:3715` (the parameter expansion that builds check 8f's own negative control), which IS waived. The shipped `ALLOW_UNLOCKED_CARGO_SCRIPT` therefore holds five entries: three for `version-lockstep`, one for `publish-metadata`, one for `actionlint`.
+
 
 - [x] **Step 5: Commit**
 

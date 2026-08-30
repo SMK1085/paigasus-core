@@ -754,6 +754,33 @@ def _join(pending):
     return " ".join(text.rstrip().rstrip("\\") for _, text in pending)
 
 
+def _tail_end(segment, start, hard_stop):
+    """Where THIS invocation's flag scope ends.
+
+    Bounded by whichever comes first: the next invocation (`hard_stop`), or the close of a
+    command substitution this invocation sits INSIDE. Without the second bound a nested call
+    inherits a flag that belongs to the enclosing one — measured on
+    `cargo build --features "$(cargo test)" --locked`, where the nested `cargo test` read the
+    outer `--locked` from its tail, was marked locked, and reported nothing. That is a SILENT
+    FALSE NEGATIVE, the one failure this scanner exists to prevent (SMA-599, CodeRabbit round 1).
+
+    A `)` at depth 0 closes an enclosing `$( )`; a backtick closes an enclosing legacy
+    substitution. Either way the invocation ended there and later flags are not its own.
+    """
+    depth = 0
+    for i in range(start, hard_stop):
+        char = segment[i]
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            if depth == 0:
+                return i
+            depth -= 1
+        elif char == "`":
+            return i
+    return hard_stop
+
+
 def _classify_shell_line(lineno, logical):
     """Rows for one LOGICAL line (backslash continuations already joined).
 
@@ -789,7 +816,7 @@ def _classify_shell_line(lineno, logical):
         found = list(CARGO_INVOCATION_RE.finditer(segment))
         for idx, match in enumerate(found):
             stop = found[idx + 1].start() if idx + 1 < len(found) else len(segment)
-            tail = segment[match.end() : stop]
+            tail = segment[match.end() : _tail_end(segment, match.end(), stop)]
             # MEASURED (SMA-599 §2.1): `cargo metadata --no-deps` does not resolve and never
             # rewrites the lock, so --locked on it is INERT. Demanding the flag would be
             # cargo-cult compliance a later reader would mistake for a guarantee. Read from
@@ -3191,6 +3218,35 @@ def self_test():
                     f"A10 did not report {task}, which reaches a compiling cargo from rs/ "
                     f"through its script — a benign `echo` in the blob must not change scope"
                 )
+
+    # SMA-599 (CodeRabbit round 1) — a nested invocation must NOT inherit the enclosing
+    # command's flag. Before _tail_end, `cargo test` here read the outer `--locked` from its
+    # tail and reported nothing: a silent false negative, which is the one failure this
+    # scanner exists to prevent. Both invocations are genuinely unlocked, so both must report.
+    nested = _classify_shell_line(1, 'cargo build --features "$(cargo test)" --locked')
+    if len(nested) != 2 or any(r.locked for r in nested):
+        failures.append(
+            f"a nested cargo call inherited the enclosing --locked: "
+            f"{[(r.segment.strip()[:30], r.locked) for r in nested]}"
+        )
+    # The converse, so the bound is not simply 'ignore every flag': a nested call that carries
+    # its OWN --locked inside the substitution must still read locked.
+    own = _classify_shell_line(1, 'X="$(cargo build --locked)"')
+    if len(own) != 1 or not own[0].locked:
+        failures.append("a nested cargo call lost its OWN --locked to the substitution bound")
+
+    # SMA-599 L11, pinned rather than left as prose (CodeRabbit round 1). A compiling cargo
+    # PLUGIN is invisible to A10 because both derivations filter on CARGO_INVOCATION_RE, which
+    # is built from LOCK_RESOLVING_VERBS. That exclusion is INTENTIONAL and out of scope here —
+    # widening the regex repo-wide also changes A8 and is tracked as SMA-605 — but it must be
+    # a tested decision, not an accident, so this fixture fails the day the regex widens and
+    # nobody revisits L11.
+    for plugin in ("cargo llvm-cov", "cargo insta test", "cargo udeps", "cargo bloat"):
+        if _classify_shell_line(1, f"cd rs && {plugin}"):
+            failures.append(
+                f"{plugin!r} now matches CARGO_INVOCATION_RE — A10 can see it, so spec L11 and "
+                f"SMA-605 are stale; revisit them rather than deleting this row"
+            )
 
     if not REQUIRED_CARGO_CONFIG_TASKS:
         failures.append("REQUIRED_CARGO_CONFIG_TASKS is empty — A10's floor would assert nothing")

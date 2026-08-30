@@ -133,12 +133,26 @@ columns, and the distinction is load-bearing: a *row* is a cargo invocation the 
 found, a *would-report* row is one that resolves and lacks `--locked`. Only the second
 column produces a finding.
 
-| Script | rows | would-report |
-| -- | -- | -- |
-| `ci/version-lockstep/run.sh` | 3 | **3** — two real `cargo update -w`, one `die_infra` prose |
-| `ci/publish-metadata/run.sh` | 4 | **1** — a `die_infra` prose row; the two real calls carry `--locked`, one is `--no-deps` |
-| `ci/actionlint/run.sh` | 5 | **0** — all five carry `--locked` |
-| the other five | 0 | 0 |
+| Script | rows | would-report | followed by A8? |
+| -- | -- | -- | -- |
+| `ci/version-lockstep/run.sh` | 3 | 3 | yes — 3 waivers |
+| `ci/publish-metadata/run.sh` | 4 | 1 | yes — 1 waiver |
+| `ci/actionlint/run.sh` | 6 | 1 | yes — 1 waiver |
+| `ci/cargo-lock-integrity/run.sh` | 2 | 1 | **no** — see below |
+| the other nine | 0 | 0 | — |
+
+Two columns of the four are about different questions, and conflating them is how an earlier
+draft of this table went stale. `rows` and `would-report` come from scanning the file DIRECTLY.
+Whether A8 ever sees those rows is separate: its script arm follows only scripts named in a
+Moon task's resolved blob. `ci/cargo-lock-integrity/run.sh` is an unconditional `ci.yml` step
+that no Moon task invokes, so its one would-report row is unreachable and needs no waiver — do
+not add one, it would be stale on arrival and the gate reports a stale entry as a row.
+
+`ALLOW_UNLOCKED_CARGO_SCRIPT` therefore holds **five** entries, not the four an earlier draft
+described: three for `version-lockstep` (two real `cargo update -w` calls plus the `die_infra`
+diagnostic that quotes one), one for `publish-metadata`'s `die_infra`, and one for
+`ci/actionlint/run.sh:3715`, the parameter expansion that BUILDS check 8f's own negative
+control by stripping `--locked` from a pinned string.
 
 **These numbers changed when the classifier changed, and the earlier draft of this
 section was measured against a design that no longer ships.** The four-layer classifier
