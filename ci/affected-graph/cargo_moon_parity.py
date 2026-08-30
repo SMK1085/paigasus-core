@@ -401,6 +401,21 @@ ALLOW_UNLOCKED_CARGO_SCRIPT = {
     ("ci/version-lockstep/run.sh", "cargo update -w >/dev/null )"): (
         "the un-offline fallback of the line above, same reason"
     ),
+    (
+        "ci/release-parity/ecosystems/release-plz.sh",
+        'CARGO="$CARGO_BIN" CARGO_NET_OFFLINE=true "$RELEASE_PLZ_BIN" update 2>',
+    ): (
+        "MEASURED true positive, and correct as written (SMA-605). This is the arm-2 shape the "
+        "whole change exists to see, and it is the only one in the repo: release-plz shells out "
+        "to `cargo metadata`, and this line hands it an explicit CWD-independent cargo through "
+        "the CARGO env var (SMA-596 D2.1). No --locked can reach that inner cargo — the flag "
+        "would go to release-plz, which does not forward it, which is exactly why arm 2 carries "
+        "wrapper semantics. The call is SAFE because it runs against a DISPOSABLE FIXTURE "
+        "OUTSIDE the repo: ci/release-parity/run.sh:43 makes the dir with `mktemp -d` and :48 "
+        "passes it to ecosystem::run_update, which cd's into it. So it cannot rewrite "
+        "rs/Cargo.lock even though it resolves. If that fixture ever moves inside the workspace, "
+        "DELETE THIS WAIVER — the reason no longer holds."
+    ),
     ("ci/version-lockstep/run.sh", 'die_infra "cargo update -w failed (site 16)"'): (
         "PROSE, not an invocation: the failure message for the two lines above. The "
         "conservative rule does not strip quoted strings — that stripping is exactly what "

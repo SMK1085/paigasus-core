@@ -393,15 +393,25 @@ Diff four measures before and after. The "before" run is captured:
 | A10 `in_scope` | 58 |
 | findings a1–a10 | 0 rows |
 
-Predicted movement, and why it is not a tautology this time. The arms alone move nothing (M5,
-M12) — revision 1 predicted "no movement" and the review correctly called that unfalsifiable.
-The **resolver** is what moves the numbers: `repo:release-parity`, `-py` and `-ts` become
-derived, `ci/release-parity/ecosystems/release-plz.sh:152` becomes one reporting arm-2 row, and
-that row takes one new `ALLOW_UNLOCKED_CARGO_SCRIPT` entry. Whether A10's `in_scope` also moves
-depends on `_cwd_inside_rs` over the ecosystem modules and is **not yet measured**; it is
-measured during implementation and recorded here, never re-baselined.
+MEASURED after, and every movement explained:
 
-Then run `ci/affected-graph/run.sh` for expected-set movement.
+| Measure | Before | After | Why |
+|---|---|---|---|
+| `derive_cargo_tasks` | 63 | **66** | the three `release-parity*` tasks become derived, kind `script`. Before the resolver, `ci/release-parity/run.sh` held 0 cargo lines and the cargo lived one level down (M11), so no task followed it. |
+| A8 blob `matched` | 60 | 60 | unchanged, and correctly so: none of the three carries a cargo verb or a `CARGO=` in its OWN blob. The blob arm is not what found them. |
+| A10 `in_scope` | 58 | 58 | unchanged. This was the spec's one open question. The three new tasks are NOT in A10's scope, because `_cwd_inside_rs` is False for them: the ecosystem modules `cd` into a `mktemp -d` fixture, never into `rs/`. The cwd rule excluded them without a waiver, which is the outcome A10's design intends. |
+| findings a1–a10 | 0 rows | 0 rows | one new reporting row appeared and one new waiver clears it — see below. |
+
+The one row is `ci/release-parity/ecosystems/release-plz.sh:152`, the arm-2 shape this whole
+change exists to see, and the only one in the repo. It takes one new
+`ALLOW_UNLOCKED_CARGO_SCRIPT` entry. The waiver's reason is measured, not argued: the call runs
+against a disposable fixture OUTSIDE the repo (`ci/release-parity/run.sh:43` makes it with
+`mktemp -d`, `:48` passes it to `ecosystem::run_update`, which `cd`s into it), so it resolves but
+cannot rewrite `rs/Cargo.lock`.
+
+**AC 4, measured.** `ci/affected-graph/run.sh --negative-control` and `ci/affected-graph/run.sh`
+both exit 0. No expected-set movement in any case, including `lockfile->all-lint` and
+`kernel->consumer-tasks`.
 
 ## 7. Documentation
 
