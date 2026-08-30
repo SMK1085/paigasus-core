@@ -222,8 +222,8 @@ still act as a `stop` boundary and truncate the preceding invocation's tail.
 
 ```python
 CARGO_VAR_CMD_RE = re.compile(
-    r"""(?:^|[\s;&|(])["']?\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?["']?\s+"""
-    r"(?:\+\S+\s+)?(" + "|".join(LOCK_RESOLVING_VERBS) + r")\b"
+    r"""(?:^|[\s;&|(])["']?\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?["']?[^\S\n]+"""
+    r"(?:\+\S+[^\S\n]+)?(" + "|".join(LOCK_RESOLVING_VERBS) + r")\b"
 )
 ```
 
@@ -241,8 +241,10 @@ coverage.
 ### 5.3 Arm 2 — the `CARGO=` environment prefix
 
 ```python
+_ENV_ASSIGN = r"""[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|[^\s;&|]*)"""
 CARGO_ENV_PREFIX_RE = re.compile(
-    r"""(?:^|[\s;&|(])CARGO=(?:"[^"]*"|'[^']*'|[^\s;&|]*)(?=[^\S\n]+\S)"""
+    r"""(?:^|[\s;&|(])CARGO=(?:"[^"]*"|'[^']*'|[^\s;&|]*)"""
+    r"(?=(?:[^\S\n]+" + _ENV_ASSIGN + r")*[^\S\n]+(?!" + _ENV_ASSIGN + r")\S)"
 )
 ```
 
@@ -250,6 +252,11 @@ The name is exactly `CARGO` (M6). There is no verb requirement: the tool's verbs
 tool. The trailing word is read through a **lookahead** so that `export CARGO=/p` as the last
 token on a line — an assignment with nothing to run — produces no row. That is the lookahead's
 job; M6 records why revision 1's justification for it was wrong.
+
+The lookahead skips a run of further `NAME=value` assignments and then demands a
+**non-assignment** command token, so `CARGO=/p CARGO_HOME=/x` — which runs nothing — produces no
+row, while `CARGO=/p CARGO_HOME=/x tool run` still does (M36). Arm 1's separators are bounded the
+same way arm 2's lookahead is.
 
 The lookahead's character class is **horizontal whitespace only** (`[^\S\n]`), never `\s`. `\s`
 crosses a physical line, and fifteen real moon blobs are multi-line `script:` blocks, so a
@@ -378,9 +385,9 @@ this widens A8 and A10 and adds no assertion.
 
 ### 6.2 Mutation proofs (AC 2)
 
-**MEASURED against the final code: 39 mutations, 39 killed, 0 survivors.** Each was applied to
+**MEASURED against the final code: 42 mutations, 42 killed, 0 survivors.** Each was applied to
 `cargo_moon_parity.py`, `--self-test` was run, and the file restored. Every mutation label below
-is the edit that was actually performed, not a paraphrase of it. M29-M39 were added by the
+is the edit that was actually performed, not a paraphrase of it. M29-M42 were added by the
 CodeRabbit PR review; re-running the whole battery after those fixes is what caught M25's fixture
 going stale (see below).
 
@@ -425,6 +432,9 @@ going stale (see below).
 | M37 | keep the redundant env row beside a literal cargo call | KILLED |
 | M38 | truncate the emitted waiver key to 100 chars again | KILLED |
 | M39 | drop the Dockerfile `ENV CARGO=` rule | KILLED |
+| M40 | match `CARGO=` inside a quoted ENV **value** | KILLED |
+| M41 | blob arm: raw env regex instead of merged matches | KILLED |
+| M42 | `check_cargo_locked`: raw env regex instead of merged matches | KILLED |
 
 **SEVEN first-pass survivors, and what each bought.** A survivor is evidence about the FIXTURES,
 never a result to accept, so each one is recorded with the fixture that now kills it. None was
