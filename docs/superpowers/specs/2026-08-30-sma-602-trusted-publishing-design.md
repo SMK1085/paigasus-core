@@ -466,8 +466,9 @@ the Automation token until January 2027.
 
 ## 10. Acceptance criteria
 
-1. `.github/workflows/release.yml` contains no `PYPI_API_TOKEN`, no `NPM_TOKEN`, no
-   `NODE_AUTH_TOKEN` and no `_authToken` write.
+1. `.github/workflows/release.yml`'s active configuration — the parsed workflow document, not its
+   comments — references no `PYPI_API_TOKEN`, `NPM_TOKEN` or `NODE_AUTH_TOKEN` secret, and writes
+   no npm `_auth` or `_authToken` credential.
 2. Both jobs keep `id-token: write`. All three npm publish steps carry `NPM_CONFIG_LOGLEVEL: verbose`.
 3. The three comment blocks in §5.3 state the current reason, and the keep-ranges are untouched.
 4. `ci/actionlint/release_guard.py` reds on a reintroduced publish credential, proved by new
