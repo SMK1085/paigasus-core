@@ -2120,6 +2120,7 @@ T_AFFECTED_SMOKE_REQUIRED_INPUTS=(
   'ci/actionlint/**/*'
   'ci/release-parity/**/*'
   'ci/workflow-credentials/**/*'
+  'ci/**/*'
   # SMA-603 — floors the input that makes RELEASE_PLAN_SH_CALL_SITES reachable. Without it the
   # PR deleting those nine lines is exactly the PR that does not schedule repo:affected-smoke.
   'ci/release-plan/**/*'

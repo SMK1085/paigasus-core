@@ -519,11 +519,26 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   gates that shell out to cargo (`repo:parity-corpus-drift`, `repo:observability-drift`,
   `repo:nats-permissions`). Editing it selects 61 tasks against 3 before — the 52 crate tasks, the
   3 FFI tasks, and 6 `repo:*` gates (those three, plus `repo:actionlint`, `repo:input-liveness`
-  and `repo:publish-metadata`, which select on everything). **Only 16 of those 61 declarations are
-  asserted**: A4 (via `WORKSPACE_LINT_INPUTS`) covers the thirteen `lint` declarations and A5 (via
-  the `FFI_TASK_INPUTS` splat) the three FFI tasks, because `check_task_inputs` is called for
-  `lint` and `fmt` only. The 39 `build`/`build-release`/`test` declarations and the three gates
-  are declared by hand and asserted by nothing — delete one and CI stays green. It is deliberately
+  and `repo:publish-metadata`, which select on everything). **59 of those declarations are now
+  asserted**: 58 by `repo:affected-smoke`'s A10 (`ci/affected-graph/cargo_moon_parity.py`,
+  SMA-599, findings key `a10`), and `paigasus-kernel-py:test` by **A5**, not A10 — it is an FFI
+  wrapper task, so the `FFI_TASK_INPUTS` splat already demands the file. A10 DOES derive it (as
+  `wrapper`, so the verb test passes); what excludes it is the CWD rule — its blob is
+  `uv sync --reinstall-package …` with no cd, and its source dir is `py/packages/paigasus-kernel`. A task is in A10's scope when its cargo subcommand COMPILES or LINKS
+  (`CONFIG_SENSITIVE_VERBS`, deliberately NOT A8's `LOCK_RESOLVING_VERBS`) AND its cwd resolves
+  inside `rs/` — crate tasks and the `repo:*` gates that reach cargo through their own
+  `ci/**/run.sh` alike. `repo:deny` and `repo:machete` are out of scope BY VERB, not on the cwd
+  half: `deny` is in `LOCK_RESOLVING_VERBS` and IS derived, but is absent from
+  `CONFIG_SENSITIVE_VERBS`, so `_cwd_inside_rs` is never called for it; `machete` is absent from
+  `LOCK_RESOLVING_VERBS` entirely and is never derived at all. (`repo:machete` also runs
+  `cargo machete rs`, a bare path ARGUMENT, not `--manifest-path`.) The `--manifest-path` fact
+  belongs to `repo:deny`, and it is still load-bearing for A10's design decision D2 — MEASURED on
+  cargo 1.95.0, a malformed `rs/.cargo/config.toml` fails cwd=rs/ at rc 101 but leaves
+  cwd=root+`--manifest-path` at rc 0, so `--manifest-path` does not move cargo's config walk and
+  a bare `rs`-containing argument must never confer a cwd. A10 reads moon's RESOLVED inputs, so
+  its four inherited lines in `.moon/tasks/rust.yml` (`build`/`build-release`/`test`/`lint`) each
+  cover thirteen crates — deleting one reds thirteen tasks. A10 ships with an EMPTY allowlist;
+  every exclusion is structural. It is deliberately
   NOT on `fmt`: `cargo fmt --check` neither compiles nor links, so rustflags cannot change its result.
   `repo:wasm-getrandom-free` is excluded for the same kind of reason — it runs `cargo tree`, which
   resolves the dependency graph and never applies rustflags. This REVERSES SMA-546's deliberate
@@ -533,11 +548,16 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   `-undefined dynamic_lookup` args ITSELF (SMA-578), so the py wheel does not NEED the file — it
   is keyed on it anyway, under the same one rule, which is why `REQUIRED_FFI_TASKS` needs no
   carve-out.
-- **Nothing enforces that one rule.** A4 covers each crate's `lint`/`fmt`, A5 the three derived FFI
-  tasks, and `repo:input-liveness` proves DECLARED inputs are live — never that NEEDED ones are
-  declared. A future `repo:*` task that runs cargo from `rs/` can omit `rs/.cargo/config.toml` and
-  nothing reds. That is exactly how the three gates named above were missed until SMA-594; assume
-  the next one will be missed the same way, and check by hand when adding a cargo-invoking gate.
+- **A10 enforces the cargo-config rule; nothing enforces the GENERAL one.** A10
+  (`ci/affected-graph/cargo_moon_parity.py`, SMA-599) closes the `rs/.cargo/config.toml` case
+  specifically, including for a gate that reaches cargo only through its own `ci/**/run.sh` —
+  that whole class was outside A8 too until SMA-599. It does not close the general problem: A10
+  shares `CARGO_INVOCATION_RE`, built from `LOCK_RESOLVING_VERBS`, with A8's derivation, so a
+  subcommand outside that list (`cargo llvm-cov`, `insta`, `udeps`, `bloat`) yields an empty
+  derivation and stays invisible to A10 too (spec L11). What is still true: A4 covers each
+  crate's `lint`/`fmt`, A5 the three derived FFI tasks, and `repo:input-liveness` proves
+  DECLARED inputs are live, never that NEEDED ones are declared. A future `repo:*` task can omit
+  some OTHER input it reads and nothing reds — check by hand when adding a cargo-invoking gate.
 - A hand-written `.pyi` next to a PyO3 crate is an interface contract that basedpyright reads
   INSTEAD of the Rust, and it lives at the crate ROOT where `src/**/*` does not match it. A7 now
   demands every `{upstream}/*.pyi` found on disk, disk-conditional exactly like its `build.rs`

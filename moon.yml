@@ -194,6 +194,14 @@ tasks:
       # nothing. Same reasoning as the CLAUDE.md entry below — repo:actionlint's own `**/*` cannot
       # green a different task.
       - 'ci/actionlint/**/*'
+      # SMA-599 — A8's script arm and A10 both READ the gate scripts a Moon task invokes
+      # (ci/publish-metadata/run.sh, ci/version-lockstep/run.sh today, any future one
+      # tomorrow). Without a glob covering them the assertions are real but unreachable: the
+      # PR that drops a `--locked` from a gate script does not schedule this task. The four
+      # narrower ci/ globs above are KEPT rather than replaced — check 8e in
+      # ci/actionlint/run.sh asserts containment over a 21-entry array and floors it at
+      # `-ge 20`, so replacing four with one would take it to 18 and force loosening a floor.
+      - 'ci/**/*'
       # SMA-530 — this task now pins ci/release-parity/run.sh's --negative-control BLOCK
       # (RELEASE_PARITY_SH_CALL_SITES), so a change under ci/release-parity/ MUST re-key it.
       # Without this the pin is real but unreachable: the PR that deletes the block does not
