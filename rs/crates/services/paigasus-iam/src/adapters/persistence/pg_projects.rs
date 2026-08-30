@@ -12,8 +12,7 @@ use super::entities::{organization, project, team};
 use super::map_err;
 use crate::adapters::authz::Generations;
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
-use paigasus_iam_core::{NodeStatus, NodeView, PreconditionKind, Project, ProjectId, ProjectRepository, RepositoryError, Slug, TeamId};
+use paigasus_iam_core::{NodeStatus, NodeView, PreconditionKind, PrincipalId, Project, ProjectId, ProjectRepository, RepositoryError, Slug, Stamp, TeamId};
 use paigasus_kernel::Prn;
 use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, IntoActiveModel, QueryFilter, QueryOrder, QuerySelect, Set, TransactionTrait};
 use uuid::Uuid;
@@ -42,6 +41,13 @@ impl PgProjectRepository {
     }
 }
 
+/// Parses a stored actor PRN. A malformed value reads as `None` rather than erroring:
+/// `actor.proto` binds consumers to treat an unparseable actor as unknown, never as a
+/// failure. New writes are guarded by m0011's CHECK.
+fn model_to_actor(raw: Option<String>) -> Option<PrincipalId> {
+    raw.and_then(|s| Prn::parse(&s).ok()).map(PrincipalId::from_prn)
+}
+
 /// Builds the insertable `project` row from a domain `Project`.
 fn project_to_model(project: &Project) -> project::ActiveModel {
     project::ActiveModel {
@@ -54,6 +60,8 @@ fn project_to_model(project: &Project) -> project::ActiveModel {
         status: Set(project.status.as_str().to_string()),
         created_at: Set(project.created_at),
         updated_at: Set(project.updated_at),
+        created_by: Set(project.created_by.as_ref().map(PrincipalId::canonical)),
+        modified_by: Set(project.modified_by.as_ref().map(PrincipalId::canonical)),
     }
 }
 
@@ -77,6 +85,8 @@ fn model_to_project(model: project::Model) -> Result<Project, RepositoryError> {
         status,
         created_at: model.created_at,
         updated_at: model.updated_at,
+        created_by: model_to_actor(model.created_by),
+        modified_by: model_to_actor(model.modified_by),
     })
 }
 
@@ -100,7 +110,8 @@ fn missing_ancestor(kind: &str, ancestor_id: Uuid, child_kind: &str, child_id: U
 
 #[async_trait]
 impl ProjectRepository for PgProjectRepository {
-    async fn create(&self, project: &Project) -> Result<(), RepositoryError> {
+    async fn create(&self, project: &Project, stamp: &Stamp) -> Result<(), RepositoryError> {
+        debug_assert_eq!(project.created_at, stamp.at, "the service must pass the same Stamp it built the entity from");
         let txn = self.db.begin().await.map_err(map_err)?;
 
         // D8: the team row is locked FOR SHARE for the duration of this txn so a concurrent
@@ -178,7 +189,7 @@ impl ProjectRepository for PgProjectRepository {
         models.into_iter().map(|m| model_to_project(m).map(|p| project_view(p, team_status, org_status))).collect()
     }
 
-    async fn rename(&self, id: Uuid, new_slug: Option<&Slug>, new_name: Option<&str>, now: DateTime<Utc>) -> Result<NodeView<Project>, RepositoryError> {
+    async fn rename(&self, id: Uuid, new_slug: Option<&Slug>, new_name: Option<&str>, stamp: &Stamp) -> Result<NodeView<Project>, RepositoryError> {
         let txn = self.db.begin().await.map_err(map_err)?;
 
         let Some(model) = project::Entity::find_by_id(id).lock_exclusive().one(&txn).await.map_err(map_err)? else {
@@ -210,7 +221,8 @@ impl ProjectRepository for PgProjectRepository {
         if let Some(name) = new_name {
             active.name = Set(name.to_owned());
         }
-        active.updated_at = Set(now);
+        active.updated_at = Set(stamp.at);
+        active.modified_by = Set(Some(stamp.by.canonical()));
         let updated = active.update(&txn).await.map_err(map_err)?;
 
         txn.commit().await.map_err(map_err)?;
@@ -218,7 +230,7 @@ impl ProjectRepository for PgProjectRepository {
         Ok(project_view(model_to_project(updated)?, team_status, org_status))
     }
 
-    async fn set_status(&self, id: Uuid, status: NodeStatus, now: DateTime<Utc>) -> Result<NodeView<Project>, RepositoryError> {
+    async fn set_status(&self, id: Uuid, status: NodeStatus, stamp: &Stamp) -> Result<NodeView<Project>, RepositoryError> {
         let txn = self.db.begin().await.map_err(map_err)?;
 
         let Some(model) = project::Entity::find_by_id(id).lock_exclusive().one(&txn).await.map_err(map_err)? else {
@@ -232,7 +244,8 @@ impl ProjectRepository for PgProjectRepository {
         } else {
             let mut active = model.into_active_model();
             active.status = Set(status.as_str().to_owned());
-            active.updated_at = Set(now);
+            active.updated_at = Set(stamp.at);
+            active.modified_by = Set(Some(stamp.by.canonical()));
             active.update(&txn).await.map_err(map_err)?
         };
 

@@ -5,7 +5,7 @@
 
 use crate::application::error::TenancyError;
 use crate::application::pagination::Page;
-use paigasus_iam_core::{Clock, GrantScope, IdGenerator, NodeStatus, NodeView, Organization, OrganizationRepository, PrincipalId, RoleGrant, Slug, Team, TenancyNodeRef};
+use paigasus_iam_core::{Clock, GrantScope, IdGenerator, NodeStatus, NodeView, Organization, OrganizationRepository, PrincipalId, RoleGrant, Slug, Stamp, Team, TenancyNodeRef};
 use uuid::Uuid;
 
 /// Output of [`OrganizationService::create`]: the new org plus its auto-provisioned
@@ -41,14 +41,16 @@ where
     /// (ADR-0014, spec D8) — the creating principal becomes the owner of what it creates.
     pub async fn create(&self, actor: &PrincipalId, slug: &str, name: &str) -> Result<CreateOrgOutput, TenancyError> {
         let slug = Slug::parse(slug)?;
-        let now = self.clock.now();
+        let stamp = Stamp::new(self.clock.now(), actor.clone());
 
         let org_id = self.ids.new_organization_id();
-        let organization = Organization::new(org_id, slug, name, now)?;
+        let organization = Organization::new(org_id, slug, name, &stamp)?;
 
         let team_id = self.ids.new_team_id(organization.id.uuid());
         let default_slug = Slug::parse("default").expect("\"default\" is a valid slug");
-        let default_team = Team::new(team_id, default_slug, "Default", now)?;
+        // The auto-provisioned default team records the ORG's creator (spec D8) — the same
+        // Stamp, so the two rows cannot disagree.
+        let default_team = Team::new(team_id, default_slug, "Default", &stamp)?;
 
         let grant_id = self.ids.new_membership_id();
         let owner_grant = RoleGrant {
@@ -57,10 +59,10 @@ where
             role_key: "org_admin".to_string(),
             scope: GrantScope::Node(TenancyNodeRef::Organization(organization.id.clone())),
             linked_policy_id: format!("grant:{grant_id}"),
-            created_at: now,
+            created_at: stamp.at,
         };
 
-        self.repo.create(&organization, &default_team, &owner_grant).await?;
+        self.repo.create(&organization, &default_team, &owner_grant, &stamp).await?;
         Ok(CreateOrgOutput { organization, default_team })
     }
 
@@ -77,26 +79,26 @@ where
     /// Renames the slug and/or display name. Requires at least one field
     /// (`NothingToRename` otherwise); rejected on an (effectively) archived org
     /// (`NodeArchived`).
-    pub async fn rename(&self, id: Uuid, new_slug: Option<&str>, new_name: Option<&str>) -> Result<NodeView<Organization>, TenancyError> {
+    pub async fn rename(&self, id: Uuid, new_slug: Option<&str>, new_name: Option<&str>, actor: &PrincipalId) -> Result<NodeView<Organization>, TenancyError> {
         if new_slug.is_none() && new_name.is_none() {
             return Err(TenancyError::NothingToRename);
         }
         let slug = new_slug.map(Slug::parse).transpose()?;
-        let now = self.clock.now();
-        Ok(self.repo.rename(id, slug.as_ref(), new_name, now).await?)
+        let stamp = Stamp::new(self.clock.now(), actor.clone());
+        Ok(self.repo.rename(id, slug.as_ref(), new_name, &stamp).await?)
     }
 
     /// Sets the org's own status to `Archived`. Idempotent: a no-op leaves `updated_at`
     /// untouched if already archived (D10).
-    pub async fn archive(&self, id: Uuid) -> Result<NodeView<Organization>, TenancyError> {
-        let now = self.clock.now();
-        Ok(self.repo.set_status(id, NodeStatus::Archived, now).await?)
+    pub async fn archive(&self, id: Uuid, actor: &PrincipalId) -> Result<NodeView<Organization>, TenancyError> {
+        let stamp = Stamp::new(self.clock.now(), actor.clone());
+        Ok(self.repo.set_status(id, NodeStatus::Archived, &stamp).await?)
     }
 
     /// Sets the org's own status to `Active`. Idempotent, mirroring `archive`.
-    pub async fn restore(&self, id: Uuid) -> Result<NodeView<Organization>, TenancyError> {
-        let now = self.clock.now();
-        Ok(self.repo.set_status(id, NodeStatus::Active, now).await?)
+    pub async fn restore(&self, id: Uuid, actor: &PrincipalId) -> Result<NodeView<Organization>, TenancyError> {
+        let stamp = Stamp::new(self.clock.now(), actor.clone());
+        Ok(self.repo.set_status(id, NodeStatus::Active, &stamp).await?)
     }
 }
 
@@ -146,7 +148,7 @@ mod tests {
 
         let t1 = t0 + Duration::seconds(10);
         clock.set(t1);
-        let archived = svc.archive(id).await.unwrap();
+        let archived = svc.archive(id, &actor(1)).await.unwrap();
         assert_eq!(archived.node.status, NodeStatus::Archived);
         assert_eq!(archived.effective_status, NodeStatus::Archived);
         assert_eq!(archived.node.updated_at, t1);
@@ -154,13 +156,13 @@ mod tests {
         // Archiving an already-archived org is a no-op: updated_at does not advance.
         let t2 = t1 + Duration::seconds(10);
         clock.set(t2);
-        let archived_again = svc.archive(id).await.unwrap();
+        let archived_again = svc.archive(id, &actor(1)).await.unwrap();
         assert_eq!(archived_again.node.status, NodeStatus::Archived);
         assert_eq!(archived_again.node.updated_at, t1);
 
         let t3 = t2 + Duration::seconds(10);
         clock.set(t3);
-        let restored = svc.restore(id).await.unwrap();
+        let restored = svc.restore(id, &actor(1)).await.unwrap();
         assert_eq!(restored.node.status, NodeStatus::Active);
         assert_eq!(restored.effective_status, NodeStatus::Active);
         assert_eq!(restored.node.updated_at, t3);
@@ -168,7 +170,7 @@ mod tests {
         // Restoring an already-active org is a no-op: updated_at does not advance.
         let t4 = t3 + Duration::seconds(10);
         clock.set(t4);
-        let restored_again = svc.restore(id).await.unwrap();
+        let restored_again = svc.restore(id, &actor(1)).await.unwrap();
         assert_eq!(restored_again.node.status, NodeStatus::Active);
         assert_eq!(restored_again.node.updated_at, t3);
     }
@@ -179,10 +181,10 @@ mod tests {
         let created = svc.create(&actor(1), "acme", "Acme").await.unwrap();
         let id = created.organization.id.uuid();
 
-        assert_eq!(svc.rename(id, None, None).await.unwrap_err(), TenancyError::NothingToRename);
+        assert_eq!(svc.rename(id, None, None, &actor(1)).await.unwrap_err(), TenancyError::NothingToRename);
 
-        svc.archive(id).await.unwrap();
-        assert_eq!(svc.rename(id, Some("x"), None).await.unwrap_err(), TenancyError::NodeArchived);
+        svc.archive(id, &actor(1)).await.unwrap();
+        assert_eq!(svc.rename(id, Some("x"), None, &actor(1)).await.unwrap_err(), TenancyError::NodeArchived);
     }
 
     #[tokio::test]

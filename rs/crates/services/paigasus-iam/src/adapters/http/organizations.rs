@@ -85,7 +85,7 @@ async fn rename_org(State(s): State<AppState>, Extension(ctx): Extension<AuthCon
         let view = s.orgs.get(id).await?;
         s.authorize.check(&actor_prn(&ctx), Action::RenameOrganization, view.node.id.prn()).await?;
     }
-    let view = s.orgs.rename(id, b.slug.as_deref(), b.name.as_deref()).await?;
+    let view = s.orgs.rename(id, b.slug.as_deref(), b.name.as_deref(), &ctx.principal_id).await?;
     Ok(Json(view.into()))
 }
 
@@ -95,7 +95,7 @@ async fn archive_org(State(s): State<AppState>, Extension(ctx): Extension<AuthCo
         let view = s.orgs.get(id).await?;
         s.authorize.check(&actor_prn(&ctx), Action::ArchiveOrganization, view.node.id.prn()).await?;
     }
-    let view = s.orgs.archive(id).await?;
+    let view = s.orgs.archive(id, &ctx.principal_id).await?;
     Ok(Json(view.into()))
 }
 
@@ -105,7 +105,7 @@ async fn restore_org(State(s): State<AppState>, Extension(ctx): Extension<AuthCo
         let view = s.orgs.get(id).await?;
         s.authorize.check(&actor_prn(&ctx), Action::RestoreOrganization, view.node.id.prn()).await?;
     }
-    let view = s.orgs.restore(id).await?;
+    let view = s.orgs.restore(id, &ctx.principal_id).await?;
     Ok(Json(view.into()))
 }
 
@@ -120,7 +120,7 @@ async fn create_team(
         let org_view = s.orgs.get(org_id).await?;
         s.authorize.check(&actor_prn(&ctx), Action::CreateTeam, org_view.node.id.prn()).await?;
     }
-    let view = s.teams.create(org_id, &b.slug, &b.name).await?;
+    let view = s.teams.create(org_id, &b.slug, &b.name, &ctx.principal_id).await?;
     Ok((StatusCode::CREATED, Json(view.into())))
 }
 

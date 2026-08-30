@@ -106,7 +106,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::application::fakes::{FixedClock, InMemoryMemberships, SeqIds, TenancyStore};
+    use crate::application::fakes::{FixedClock, InMemoryMemberships, SeqIds, TenancyStore, test_stamp};
     use chrono::{DateTime, TimeZone, Utc};
     use paigasus_iam_core::{NodeStatus, Organization, OrganizationId, Project, ProjectId, Slug, Team, TeamId};
 
@@ -125,12 +125,13 @@ mod tests {
 
     /// Seeds an org + a team under it directly into the shared store.
     fn seed_org_and_team(store: &TenancyStore, org_n: u128, team_n: u128, now: DateTime<Utc>) -> (Uuid, Uuid) {
+        let stamp = test_stamp(now, 1);
         let org_id = Uuid::from_u128(org_n);
-        let org = Organization::new(OrganizationId::from_uuid(org_id), Slug::parse("acme").unwrap(), "Acme", now).unwrap();
+        let org = Organization::new(OrganizationId::from_uuid(org_id), Slug::parse("acme").unwrap(), "Acme", &stamp).unwrap();
         store.orgs.lock().unwrap().insert(org_id, org);
 
         let team_id = Uuid::from_u128(team_n);
-        let team = Team::new(TeamId::from_parts(org_id, team_id), Slug::parse("eng").unwrap(), "Engineering", now).unwrap();
+        let team = Team::new(TeamId::from_parts(org_id, team_id), Slug::parse("eng").unwrap(), "Engineering", &stamp).unwrap();
         store.teams.lock().unwrap().insert(team_id, team);
 
         (org_id, team_id)
@@ -202,7 +203,14 @@ mod tests {
         let (org, team) = seed_org_and_team(&store, 300, 301, now);
 
         let project_id = Uuid::from_u128(302);
-        let project = Project::new(ProjectId::from_parts(org, project_id), TeamId::from_parts(org, team), Slug::parse("web").unwrap(), "Web", now).unwrap();
+        let project = Project::new(
+            ProjectId::from_parts(org, project_id),
+            TeamId::from_parts(org, team),
+            Slug::parse("web").unwrap(),
+            "Web",
+            &test_stamp(now, 1),
+        )
+        .unwrap();
         store.projects.lock().unwrap().insert(project_id, project);
 
         let svc = new_service(store.clone());

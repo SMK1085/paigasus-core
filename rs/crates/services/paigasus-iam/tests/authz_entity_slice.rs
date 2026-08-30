@@ -20,7 +20,8 @@ use paigasus_iam::adapters::id::KernelIdGenerator;
 use paigasus_iam::adapters::persistence::{PgEntitySliceLoader, PgOrganizationRepository, PgProjectRepository, PgServiceAccountRepository, PgTeamRepository};
 use paigasus_iam_core::authz::model::{ContextValue, ROOT_ENTITY, root_prn};
 use paigasus_iam_core::{
-    Clock, EntitySliceLoader, IdGenerator, NodeStatus, Organization, OrganizationRepository, Project, ProjectRepository, ServiceAccountRepository, Slug, Team, TeamId, TeamRepository,
+    Clock, EntitySliceLoader, IdGenerator, NodeStatus, Organization, OrganizationRepository, PrincipalId, Project, ProjectRepository, ServiceAccountRepository, Slug, Stamp, Team, TeamId,
+    TeamRepository,
 };
 use paigasus_kernel::{Prn, mint_uuid7, to_cedar_uid};
 use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, Statement};
@@ -29,12 +30,12 @@ use uuid::Uuid;
 
 /// Builds an `Organization` + its auto-provisioned `"default"` `Team`, mirroring
 /// `tenancy_orgs.rs`'s helper of the same shape.
-fn new_org_and_default_team(ids: &KernelIdGenerator, clock: &SystemClock, slug: &str, name: &str) -> (Organization, Team) {
-    let now = clock.now();
+fn new_org_and_default_team(ids: &KernelIdGenerator, clock: &SystemClock, actor: &PrincipalId, slug: &str, name: &str) -> (Organization, Team) {
+    let stamp = Stamp::new(clock.now(), actor.clone());
     let org_id = ids.new_organization_id();
-    let org = Organization::new(org_id, Slug::parse(slug).unwrap(), name, now).unwrap();
+    let org = Organization::new(org_id, Slug::parse(slug).unwrap(), name, &stamp).unwrap();
     let team_id = ids.new_team_id(org.id.uuid());
-    let default_team = Team::new(team_id, Slug::parse("default").unwrap(), "Default", now).unwrap();
+    let default_team = Team::new(team_id, Slug::parse("default").unwrap(), "Default", &stamp).unwrap();
     (org, default_team)
 }
 
@@ -48,18 +49,21 @@ async fn seed_chain(db: &DatabaseConnection) -> (Organization, Team, Project) {
     let team_repo = PgTeamRepository::new(db.clone(), Generations::memory());
     let project_repo = PgProjectRepository::new(db.clone(), Generations::memory());
 
-    let (org, default_team) = new_org_and_default_team(&ids, &clock, "acme", "Acme Corp.");
     let owner = ids.new_principal_id();
+    let (org, default_team) = new_org_and_default_team(&ids, &clock, &owner, "acme", "Acme Corp.");
     let grant = support::pg_owner_grant(db, &owner, ids.new_membership_id(), &org.id).await;
-    org_repo.create(&org, &default_team, &grant).await.unwrap();
+    let create_stamp = Stamp::new(org.created_at, owner.clone());
+    org_repo.create(&org, &default_team, &grant, &create_stamp).await.unwrap();
 
     let team_id = ids.new_team_id(org.id.uuid());
-    let team = Team::new(team_id, Slug::parse("eng").unwrap(), "Engineering", clock.now()).unwrap();
-    team_repo.create(&team).await.unwrap();
+    let team_stamp = Stamp::new(clock.now(), owner.clone());
+    let team = Team::new(team_id, Slug::parse("eng").unwrap(), "Engineering", &team_stamp).unwrap();
+    team_repo.create(&team, &team_stamp).await.unwrap();
 
     let project_id = ids.new_project_id(org.id.uuid());
-    let project = Project::new(project_id, team.id.clone(), Slug::parse("web").unwrap(), "Web", clock.now()).unwrap();
-    project_repo.create(&project).await.unwrap();
+    let project_stamp = Stamp::new(clock.now(), owner.clone());
+    let project = Project::new(project_id, team.id.clone(), Slug::parse("web").unwrap(), "Web", &project_stamp).unwrap();
+    project_repo.create(&project, &project_stamp).await.unwrap();
 
     (org, team, project)
 }
@@ -203,7 +207,8 @@ async fn authz_slice_archiving_the_org_flips_effective_status_on_the_whole_subtr
     // asserts the read side folds the new status).
     let org_repo = PgOrganizationRepository::new(db.clone(), Generations::memory());
     let clock = SystemClock;
-    org_repo.set_status(org.id.uuid(), NodeStatus::Archived, clock.now()).await.unwrap();
+    let archiving_actor = KernelIdGenerator.new_principal_id();
+    org_repo.set_status(org.id.uuid(), NodeStatus::Archived, &Stamp::new(clock.now(), archiving_actor)).await.unwrap();
 
     let after = loader.load(project.id.prn(), &principal).await.unwrap();
     assert_eq!(root_count(&after), 1, "exactly one Root entity even after archiving");
@@ -308,18 +313,25 @@ async fn authz_slice_team_with_a_forged_org_slot_parents_on_its_real_org_not_the
 
     // Two independent orgs. `real_team` genuinely lives under `real_org`, NEVER under
     // `wrong_org` — `wrong_org` only ever appears in the forged resource PRN below.
-    let (wrong_org, wrong_default_team) = new_org_and_default_team(&ids, &clock, "wrong-org", "Wrong Org");
     let wrong_owner = ids.new_principal_id();
+    let (wrong_org, wrong_default_team) = new_org_and_default_team(&ids, &clock, &wrong_owner, "wrong-org", "Wrong Org");
     let wrong_grant = support::pg_owner_grant(&db, &wrong_owner, ids.new_membership_id(), &wrong_org.id).await;
-    org_repo.create(&wrong_org, &wrong_default_team, &wrong_grant).await.unwrap();
+    org_repo
+        .create(&wrong_org, &wrong_default_team, &wrong_grant, &Stamp::new(wrong_org.created_at, wrong_owner.clone()))
+        .await
+        .unwrap();
 
-    let (real_org, real_default_team) = new_org_and_default_team(&ids, &clock, "real-org", "Real Org");
     let real_owner = ids.new_principal_id();
+    let (real_org, real_default_team) = new_org_and_default_team(&ids, &clock, &real_owner, "real-org", "Real Org");
     let real_grant = support::pg_owner_grant(&db, &real_owner, ids.new_membership_id(), &real_org.id).await;
-    org_repo.create(&real_org, &real_default_team, &real_grant).await.unwrap();
+    org_repo
+        .create(&real_org, &real_default_team, &real_grant, &Stamp::new(real_org.created_at, real_owner.clone()))
+        .await
+        .unwrap();
 
-    let real_team = Team::new(ids.new_team_id(real_org.id.uuid()), Slug::parse("eng").unwrap(), "Engineering", clock.now()).unwrap();
-    team_repo.create(&real_team).await.unwrap();
+    let real_team_stamp = Stamp::new(clock.now(), real_owner.clone());
+    let real_team = Team::new(ids.new_team_id(real_org.id.uuid()), Slug::parse("eng").unwrap(), "Engineering", &real_team_stamp).unwrap();
+    team_repo.create(&real_team, &real_team_stamp).await.unwrap();
 
     let principal_uuid = mint_uuid7(1_700_000_000_105, [15u8; 10]);
     seed_principal(&db, principal_uuid).await;

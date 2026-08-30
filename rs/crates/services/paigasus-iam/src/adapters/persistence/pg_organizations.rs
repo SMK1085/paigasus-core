@@ -16,8 +16,9 @@ use super::entities::{organization, role_grant, team};
 use super::map_err;
 use crate::adapters::authz::Generations;
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
-use paigasus_iam_core::{GrantScope, NodeStatus, NodeView, Organization, OrganizationId, OrganizationRepository, PreconditionKind, RepositoryError, RoleGrant, Slug, Team, TenancyNodeRef};
+use paigasus_iam_core::{
+    GrantScope, NodeStatus, NodeView, Organization, OrganizationId, OrganizationRepository, PreconditionKind, PrincipalId, RepositoryError, RoleGrant, Slug, Stamp, Team, TenancyNodeRef,
+};
 use paigasus_kernel::Prn;
 use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait, IntoActiveModel, QueryOrder, QuerySelect, Set, TransactionTrait};
 use uuid::Uuid;
@@ -59,6 +60,13 @@ impl PgOrganizationRepository {
     }
 }
 
+/// Parses a stored actor PRN. A malformed value reads as `None` rather than erroring:
+/// `actor.proto` binds consumers to treat an unparseable actor as unknown, never as a
+/// failure. New writes are guarded by m0011's CHECK.
+fn model_to_actor(raw: Option<String>) -> Option<PrincipalId> {
+    raw.and_then(|s| Prn::parse(&s).ok()).map(PrincipalId::from_prn)
+}
+
 /// Builds the insertable `organization` row from a domain `Organization`.
 fn org_to_model(org: &Organization) -> organization::ActiveModel {
     organization::ActiveModel {
@@ -69,6 +77,8 @@ fn org_to_model(org: &Organization) -> organization::ActiveModel {
         status: Set(org.status.as_str().to_string()),
         created_at: Set(org.created_at),
         updated_at: Set(org.updated_at),
+        created_by: Set(org.created_by.as_ref().map(PrincipalId::canonical)),
+        modified_by: Set(org.modified_by.as_ref().map(PrincipalId::canonical)),
     }
 }
 
@@ -83,6 +93,8 @@ fn team_to_model(team: &Team) -> team::ActiveModel {
         status: Set(team.status.as_str().to_string()),
         created_at: Set(team.created_at),
         updated_at: Set(team.updated_at),
+        created_by: Set(team.created_by.as_ref().map(PrincipalId::canonical)),
+        modified_by: Set(team.modified_by.as_ref().map(PrincipalId::canonical)),
     }
 }
 
@@ -138,6 +150,8 @@ fn model_to_org(model: organization::Model) -> Result<Organization, RepositoryEr
         status,
         created_at: model.created_at,
         updated_at: model.updated_at,
+        created_by: model_to_actor(model.created_by),
+        modified_by: model_to_actor(model.modified_by),
     })
 }
 
@@ -150,7 +164,8 @@ fn org_view(org: Organization) -> NodeView<Organization> {
 
 #[async_trait]
 impl OrganizationRepository for PgOrganizationRepository {
-    async fn create(&self, org: &Organization, default_team: &Team, owner_grant: &RoleGrant) -> Result<(), RepositoryError> {
+    async fn create(&self, org: &Organization, default_team: &Team, owner_grant: &RoleGrant, stamp: &Stamp) -> Result<(), RepositoryError> {
+        debug_assert_eq!(org.created_at, stamp.at, "the service must pass the same Stamp it built the entity from");
         // Org + its auto-provisioned default team + the creating principal's owner grant
         // must commit-or-rollback together (ADR-0014, spec D8): a lone org row without its
         // default team would violate the tenancy invariant that every org has at least one
@@ -190,7 +205,7 @@ impl OrganizationRepository for PgOrganizationRepository {
         models.into_iter().map(|m| model_to_org(m).map(org_view)).collect()
     }
 
-    async fn rename(&self, id: Uuid, new_slug: Option<&Slug>, new_name: Option<&str>, now: DateTime<Utc>) -> Result<NodeView<Organization>, RepositoryError> {
+    async fn rename(&self, id: Uuid, new_slug: Option<&Slug>, new_name: Option<&str>, stamp: &Stamp) -> Result<NodeView<Organization>, RepositoryError> {
         let txn = self.db.begin().await.map_err(map_err)?;
 
         let Some(model) = organization::Entity::find_by_id(id).lock_exclusive().one(&txn).await.map_err(map_err)? else {
@@ -207,7 +222,8 @@ impl OrganizationRepository for PgOrganizationRepository {
         if let Some(name) = new_name {
             active.name = Set(name.to_owned());
         }
-        active.updated_at = Set(now);
+        active.updated_at = Set(stamp.at);
+        active.modified_by = Set(Some(stamp.by.canonical()));
         let updated = active.update(&txn).await.map_err(map_err)?;
 
         txn.commit().await.map_err(map_err)?;
@@ -215,7 +231,7 @@ impl OrganizationRepository for PgOrganizationRepository {
         Ok(org_view(model_to_org(updated)?))
     }
 
-    async fn set_status(&self, id: Uuid, status: NodeStatus, now: DateTime<Utc>) -> Result<NodeView<Organization>, RepositoryError> {
+    async fn set_status(&self, id: Uuid, status: NodeStatus, stamp: &Stamp) -> Result<NodeView<Organization>, RepositoryError> {
         let txn = self.db.begin().await.map_err(map_err)?;
 
         let Some(model) = organization::Entity::find_by_id(id).lock_exclusive().one(&txn).await.map_err(map_err)? else {
@@ -228,7 +244,8 @@ impl OrganizationRepository for PgOrganizationRepository {
         } else {
             let mut active = model.into_active_model();
             active.status = Set(status.as_str().to_owned());
-            active.updated_at = Set(now);
+            active.updated_at = Set(stamp.at);
+            active.modified_by = Set(Some(stamp.by.canonical()));
             active.update(&txn).await.map_err(map_err)?
         };
 

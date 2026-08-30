@@ -17,7 +17,7 @@ use paigasus_iam::adapters::id::KernelIdGenerator;
 use paigasus_iam::adapters::persistence::{PgMembershipRepository, PgOrganizationRepository, PgPrincipalRepository, PgProjectRepository, PgTeamRepository};
 use paigasus_iam_core::{
     Clock, ConflictKind, Email, IdGenerator, Membership, MembershipRepository, NodeStatus, Organization, OrganizationRepository, PreconditionKind, Principal, PrincipalId, PrincipalKind,
-    PrincipalRepository, PrincipalStatus, Project, ProjectRepository, RepositoryError, Slug, Team, TeamId, TeamRepository, TenancyNodeRef, User,
+    PrincipalRepository, PrincipalStatus, Project, ProjectRepository, RepositoryError, Slug, Stamp, Team, TeamId, TeamRepository, TenancyNodeRef, User,
 };
 use paigasus_kernel::{Prn, mint_uuid7};
 use sea_orm::DatabaseConnection;
@@ -37,12 +37,12 @@ async fn seed_user(db: &DatabaseConnection, seed: u8) -> PrincipalId {
 
 /// Builds an `Organization` + its auto-provisioned `"default"` `Team`, mirroring
 /// `tenancy_nodes.rs`'s helper of the same shape.
-fn new_org_and_default_team(ids: &KernelIdGenerator, clock: &SystemClock, slug: &str, name: &str) -> (Organization, Team) {
-    let now = clock.now();
+fn new_org_and_default_team(ids: &KernelIdGenerator, clock: &SystemClock, actor: &PrincipalId, slug: &str, name: &str) -> (Organization, Team) {
+    let stamp = Stamp::new(clock.now(), actor.clone());
     let org_id = ids.new_organization_id();
-    let org = Organization::new(org_id, Slug::parse(slug).unwrap(), name, now).unwrap();
+    let org = Organization::new(org_id, Slug::parse(slug).unwrap(), name, &stamp).unwrap();
     let team_id = ids.new_team_id(org.id.uuid());
-    let default_team = Team::new(team_id, Slug::parse("default").unwrap(), "Default", now).unwrap();
+    let default_team = Team::new(team_id, Slug::parse("default").unwrap(), "Default", &stamp).unwrap();
     (org, default_team)
 }
 
@@ -57,18 +57,20 @@ async fn seed_chain(db: &DatabaseConnection) -> (Organization, Team, Project) {
     let team_repo = PgTeamRepository::new(db.clone(), Generations::memory());
     let project_repo = PgProjectRepository::new(db.clone(), Generations::memory());
 
-    let (org, default_team) = new_org_and_default_team(&ids, &clock, "acme", "Acme Corp.");
     let owner = ids.new_principal_id();
+    let (org, default_team) = new_org_and_default_team(&ids, &clock, &owner, "acme", "Acme Corp.");
     let grant = support::pg_owner_grant(db, &owner, ids.new_membership_id(), &org.id).await;
-    org_repo.create(&org, &default_team, &grant).await.unwrap();
+    org_repo.create(&org, &default_team, &grant, &Stamp::new(org.created_at, owner.clone())).await.unwrap();
 
     let team_id = ids.new_team_id(org.id.uuid());
-    let team = Team::new(team_id, Slug::parse("eng").unwrap(), "Engineering", clock.now()).unwrap();
-    team_repo.create(&team).await.unwrap();
+    let team_stamp = Stamp::new(clock.now(), owner.clone());
+    let team = Team::new(team_id, Slug::parse("eng").unwrap(), "Engineering", &team_stamp).unwrap();
+    team_repo.create(&team, &team_stamp).await.unwrap();
 
     let project_id = ids.new_project_id(org.id.uuid());
-    let project = Project::new(project_id, team.id.clone(), Slug::parse("web").unwrap(), "Web", clock.now()).unwrap();
-    project_repo.create(&project).await.unwrap();
+    let project_stamp = Stamp::new(clock.now(), owner.clone());
+    let project = Project::new(project_id, team.id.clone(), Slug::parse("web").unwrap(), "Web", &project_stamp).unwrap();
+    project_repo.create(&project, &project_stamp).await.unwrap();
 
     (org, team, project)
 }
@@ -182,8 +184,9 @@ async fn attach_to_archived_team_is_node_archived() {
     let principal = seed_user(&db, 5).await;
     let team_repo = PgTeamRepository::new(db.clone(), Generations::memory());
     let repo = PgMembershipRepository::new(db.clone());
+    let archiving_actor = ids.new_principal_id();
 
-    team_repo.set_status(team.id.uuid(), NodeStatus::Archived, clock.now()).await.unwrap();
+    team_repo.set_status(team.id.uuid(), NodeStatus::Archived, &Stamp::new(clock.now(), archiving_actor)).await.unwrap();
 
     let team_membership = membership_at(&ids, &principal, TenancyNodeRef::Team(team.id.clone()), clock.now());
     let result = repo.attach(&team_membership).await;

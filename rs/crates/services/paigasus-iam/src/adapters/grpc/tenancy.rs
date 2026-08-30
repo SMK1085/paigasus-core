@@ -207,7 +207,8 @@ impl TenancyService for TenancyGrpc {
     async fn rename_organization(&self, request: Request<RenameOrganizationRequest>) -> Result<Response<RenameOrganizationResponse>, Status> {
         let started = Instant::now();
         let result: Result<Response<RenameOrganizationResponse>, Status> = async {
-            let actor = actor_context(&request)?.principal_id.prn().clone();
+            let actor_principal = actor_context(&request)?.principal_id;
+            let actor = actor_principal.prn().clone();
             let req = request.into_inner();
             let (id, canonical) = convert::node_uuid(&req.prn, "organization")?;
             if self.state.enforce_tenancy {
@@ -218,7 +219,12 @@ impl TenancyService for TenancyGrpc {
                     .await
                     .map_err(convert::status_to_grpc)?;
             }
-            let view = self.state.orgs.rename(id, req.new_slug.as_deref(), req.new_name.as_deref()).await.map_err(convert::status_to_grpc)?;
+            let view = self
+                .state
+                .orgs
+                .rename(id, req.new_slug.as_deref(), req.new_name.as_deref(), &actor_principal)
+                .await
+                .map_err(convert::status_to_grpc)?;
             if view.node.id.canonical() != canonical {
                 return Err(convert::status_to_grpc(TenancyError::PrnMismatch));
             }
@@ -234,7 +240,8 @@ impl TenancyService for TenancyGrpc {
     async fn archive_organization(&self, request: Request<ArchiveOrganizationRequest>) -> Result<Response<ArchiveOrganizationResponse>, Status> {
         let started = Instant::now();
         let result: Result<Response<ArchiveOrganizationResponse>, Status> = async {
-            let actor = actor_context(&request)?.principal_id.prn().clone();
+            let actor_principal = actor_context(&request)?.principal_id;
+            let actor = actor_principal.prn().clone();
             let (id, canonical) = convert::node_uuid(&request.get_ref().prn, "organization")?;
             if self.state.enforce_tenancy {
                 let existing = self.state.orgs.get(id).await.map_err(convert::status_to_grpc)?;
@@ -244,7 +251,7 @@ impl TenancyService for TenancyGrpc {
                     .await
                     .map_err(convert::status_to_grpc)?;
             }
-            let view = self.state.orgs.archive(id).await.map_err(convert::status_to_grpc)?;
+            let view = self.state.orgs.archive(id, &actor_principal).await.map_err(convert::status_to_grpc)?;
             if view.node.id.canonical() != canonical {
                 return Err(convert::status_to_grpc(TenancyError::PrnMismatch));
             }
@@ -260,7 +267,8 @@ impl TenancyService for TenancyGrpc {
     async fn restore_organization(&self, request: Request<RestoreOrganizationRequest>) -> Result<Response<RestoreOrganizationResponse>, Status> {
         let started = Instant::now();
         let result: Result<Response<RestoreOrganizationResponse>, Status> = async {
-            let actor = actor_context(&request)?.principal_id.prn().clone();
+            let actor_principal = actor_context(&request)?.principal_id;
+            let actor = actor_principal.prn().clone();
             let (id, canonical) = convert::node_uuid(&request.get_ref().prn, "organization")?;
             if self.state.enforce_tenancy {
                 let existing = self.state.orgs.get(id).await.map_err(convert::status_to_grpc)?;
@@ -270,7 +278,7 @@ impl TenancyService for TenancyGrpc {
                     .await
                     .map_err(convert::status_to_grpc)?;
             }
-            let view = self.state.orgs.restore(id).await.map_err(convert::status_to_grpc)?;
+            let view = self.state.orgs.restore(id, &actor_principal).await.map_err(convert::status_to_grpc)?;
             if view.node.id.canonical() != canonical {
                 return Err(convert::status_to_grpc(TenancyError::PrnMismatch));
             }
@@ -288,7 +296,8 @@ impl TenancyService for TenancyGrpc {
     async fn create_team(&self, request: Request<CreateTeamRequest>) -> Result<Response<CreateTeamResponse>, Status> {
         let started = Instant::now();
         let result: Result<Response<CreateTeamResponse>, Status> = async {
-            let actor = actor_context(&request)?.principal_id.prn().clone();
+            let actor_principal = actor_context(&request)?.principal_id;
+            let actor = actor_principal.prn().clone();
             let req = request.into_inner();
             let (org_id, _) = convert::node_uuid(&req.org_prn, "organization")?;
             if self.state.enforce_tenancy {
@@ -300,7 +309,7 @@ impl TenancyService for TenancyGrpc {
                 let org_view = self.state.orgs.get(org_id).await.map_err(convert::status_to_grpc)?;
                 self.state.authorize.check(&actor, Action::CreateTeam, org_view.node.id.prn()).await.map_err(convert::status_to_grpc)?;
             }
-            let view = self.state.teams.create(org_id, &req.slug, &req.name).await.map_err(convert::status_to_grpc)?;
+            let view = self.state.teams.create(org_id, &req.slug, &req.name, &actor_principal).await.map_err(convert::status_to_grpc)?;
             Ok(Response::new(CreateTeamResponse {
                 team: Some(convert::to_proto_team(&view)),
             }))
@@ -355,14 +364,20 @@ impl TenancyService for TenancyGrpc {
     async fn rename_team(&self, request: Request<RenameTeamRequest>) -> Result<Response<RenameTeamResponse>, Status> {
         let started = Instant::now();
         let result: Result<Response<RenameTeamResponse>, Status> = async {
-            let actor = actor_context(&request)?.principal_id.prn().clone();
+            let actor_principal = actor_context(&request)?.principal_id;
+            let actor = actor_principal.prn().clone();
             let req = request.into_inner();
             let (id, canonical) = convert::node_uuid(&req.prn, "team")?;
             if self.state.enforce_tenancy {
                 let existing = self.state.teams.get(id).await.map_err(convert::status_to_grpc)?;
                 self.state.authorize.check(&actor, Action::RenameTeam, existing.node.id.prn()).await.map_err(convert::status_to_grpc)?;
             }
-            let view = self.state.teams.rename(id, req.new_slug.as_deref(), req.new_name.as_deref()).await.map_err(convert::status_to_grpc)?;
+            let view = self
+                .state
+                .teams
+                .rename(id, req.new_slug.as_deref(), req.new_name.as_deref(), &actor_principal)
+                .await
+                .map_err(convert::status_to_grpc)?;
             if view.node.id.canonical() != canonical {
                 return Err(convert::status_to_grpc(TenancyError::PrnMismatch));
             }
@@ -378,13 +393,14 @@ impl TenancyService for TenancyGrpc {
     async fn archive_team(&self, request: Request<ArchiveTeamRequest>) -> Result<Response<ArchiveTeamResponse>, Status> {
         let started = Instant::now();
         let result: Result<Response<ArchiveTeamResponse>, Status> = async {
-            let actor = actor_context(&request)?.principal_id.prn().clone();
+            let actor_principal = actor_context(&request)?.principal_id;
+            let actor = actor_principal.prn().clone();
             let (id, canonical) = convert::node_uuid(&request.get_ref().prn, "team")?;
             if self.state.enforce_tenancy {
                 let existing = self.state.teams.get(id).await.map_err(convert::status_to_grpc)?;
                 self.state.authorize.check(&actor, Action::ArchiveTeam, existing.node.id.prn()).await.map_err(convert::status_to_grpc)?;
             }
-            let view = self.state.teams.archive(id).await.map_err(convert::status_to_grpc)?;
+            let view = self.state.teams.archive(id, &actor_principal).await.map_err(convert::status_to_grpc)?;
             if view.node.id.canonical() != canonical {
                 return Err(convert::status_to_grpc(TenancyError::PrnMismatch));
             }
@@ -400,13 +416,14 @@ impl TenancyService for TenancyGrpc {
     async fn restore_team(&self, request: Request<RestoreTeamRequest>) -> Result<Response<RestoreTeamResponse>, Status> {
         let started = Instant::now();
         let result: Result<Response<RestoreTeamResponse>, Status> = async {
-            let actor = actor_context(&request)?.principal_id.prn().clone();
+            let actor_principal = actor_context(&request)?.principal_id;
+            let actor = actor_principal.prn().clone();
             let (id, canonical) = convert::node_uuid(&request.get_ref().prn, "team")?;
             if self.state.enforce_tenancy {
                 let existing = self.state.teams.get(id).await.map_err(convert::status_to_grpc)?;
                 self.state.authorize.check(&actor, Action::RestoreTeam, existing.node.id.prn()).await.map_err(convert::status_to_grpc)?;
             }
-            let view = self.state.teams.restore(id).await.map_err(convert::status_to_grpc)?;
+            let view = self.state.teams.restore(id, &actor_principal).await.map_err(convert::status_to_grpc)?;
             if view.node.id.canonical() != canonical {
                 return Err(convert::status_to_grpc(TenancyError::PrnMismatch));
             }
@@ -424,7 +441,8 @@ impl TenancyService for TenancyGrpc {
     async fn create_project(&self, request: Request<CreateProjectRequest>) -> Result<Response<CreateProjectResponse>, Status> {
         let started = Instant::now();
         let result: Result<Response<CreateProjectResponse>, Status> = async {
-            let actor = actor_context(&request)?.principal_id.prn().clone();
+            let actor_principal = actor_context(&request)?.principal_id;
+            let actor = actor_principal.prn().clone();
             let req = request.into_inner();
             let (team_id, _) = convert::node_uuid(&req.team_prn, "team")?;
             if self.state.enforce_tenancy {
@@ -440,7 +458,7 @@ impl TenancyService for TenancyGrpc {
                     .await
                     .map_err(convert::status_to_grpc)?;
             }
-            let view = self.state.projects.create(team_id, &req.slug, &req.name).await.map_err(convert::status_to_grpc)?;
+            let view = self.state.projects.create(team_id, &req.slug, &req.name, &actor_principal).await.map_err(convert::status_to_grpc)?;
             Ok(Response::new(CreateProjectResponse {
                 project: Some(convert::to_proto_project(&view)),
             }))
@@ -499,7 +517,8 @@ impl TenancyService for TenancyGrpc {
     async fn rename_project(&self, request: Request<RenameProjectRequest>) -> Result<Response<RenameProjectResponse>, Status> {
         let started = Instant::now();
         let result: Result<Response<RenameProjectResponse>, Status> = async {
-            let actor = actor_context(&request)?.principal_id.prn().clone();
+            let actor_principal = actor_context(&request)?.principal_id;
+            let actor = actor_principal.prn().clone();
             let req = request.into_inner();
             let (id, canonical) = convert::node_uuid(&req.prn, "project")?;
             if self.state.enforce_tenancy {
@@ -513,7 +532,7 @@ impl TenancyService for TenancyGrpc {
             let view = self
                 .state
                 .projects
-                .rename(id, req.new_slug.as_deref(), req.new_name.as_deref())
+                .rename(id, req.new_slug.as_deref(), req.new_name.as_deref(), &actor_principal)
                 .await
                 .map_err(convert::status_to_grpc)?;
             if view.node.id.canonical() != canonical {
@@ -531,7 +550,8 @@ impl TenancyService for TenancyGrpc {
     async fn archive_project(&self, request: Request<ArchiveProjectRequest>) -> Result<Response<ArchiveProjectResponse>, Status> {
         let started = Instant::now();
         let result: Result<Response<ArchiveProjectResponse>, Status> = async {
-            let actor = actor_context(&request)?.principal_id.prn().clone();
+            let actor_principal = actor_context(&request)?.principal_id;
+            let actor = actor_principal.prn().clone();
             let (id, canonical) = convert::node_uuid(&request.get_ref().prn, "project")?;
             if self.state.enforce_tenancy {
                 let existing = self.state.projects.get(id).await.map_err(convert::status_to_grpc)?;
@@ -541,7 +561,7 @@ impl TenancyService for TenancyGrpc {
                     .await
                     .map_err(convert::status_to_grpc)?;
             }
-            let view = self.state.projects.archive(id).await.map_err(convert::status_to_grpc)?;
+            let view = self.state.projects.archive(id, &actor_principal).await.map_err(convert::status_to_grpc)?;
             if view.node.id.canonical() != canonical {
                 return Err(convert::status_to_grpc(TenancyError::PrnMismatch));
             }
@@ -557,7 +577,8 @@ impl TenancyService for TenancyGrpc {
     async fn restore_project(&self, request: Request<RestoreProjectRequest>) -> Result<Response<RestoreProjectResponse>, Status> {
         let started = Instant::now();
         let result: Result<Response<RestoreProjectResponse>, Status> = async {
-            let actor = actor_context(&request)?.principal_id.prn().clone();
+            let actor_principal = actor_context(&request)?.principal_id;
+            let actor = actor_principal.prn().clone();
             let (id, canonical) = convert::node_uuid(&request.get_ref().prn, "project")?;
             if self.state.enforce_tenancy {
                 let existing = self.state.projects.get(id).await.map_err(convert::status_to_grpc)?;
@@ -567,7 +588,7 @@ impl TenancyService for TenancyGrpc {
                     .await
                     .map_err(convert::status_to_grpc)?;
             }
-            let view = self.state.projects.restore(id).await.map_err(convert::status_to_grpc)?;
+            let view = self.state.projects.restore(id, &actor_principal).await.map_err(convert::status_to_grpc)?;
             if view.node.id.canonical() != canonical {
                 return Err(convert::status_to_grpc(TenancyError::PrnMismatch));
             }

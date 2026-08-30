@@ -12,7 +12,9 @@ use super::map_err;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use paigasus_iam_core::{Membership, MembershipRecord, MembershipRepository, NodeStatus, PreconditionKind, RepositoryError, TenancyNodeRef};
-use sea_orm::{ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseConnection, DbBackend, EntityTrait, FromQueryResult, QueryFilter, QuerySelect, Set, Statement, TransactionTrait};
+use sea_orm::{
+    ActiveModelTrait, ActiveValue::NotSet, ColumnTrait, ConnectionTrait, DatabaseConnection, DbBackend, EntityTrait, FromQueryResult, QueryFilter, QuerySelect, Set, Statement, TransactionTrait,
+};
 use uuid::Uuid;
 
 // `Clone` lets the composition root (`http::AppState::new`) hold a repo handle inside a
@@ -229,6 +231,10 @@ impl MembershipRepository for PgMembershipRepository {
             team_id: Set(team_id),
             project_id: Set(project_id),
             created_at: Set(membership.created_at),
+            // `created_by` is Task 5's job (SMA-440) — the domain/port surface for membership
+            // actor stamping isn't wired up yet, so the column is left NotSet and the DB
+            // default (NULL) applies, same as any pre-migration row.
+            created_by: NotSet,
         };
         active.insert(&txn).await.map_err(map_err)?;
 

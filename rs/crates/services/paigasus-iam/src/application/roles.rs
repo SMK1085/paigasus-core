@@ -323,7 +323,7 @@ where
 mod tests {
     use super::*;
     use crate::application::fakes::{
-        FakeAuditLog, FakeAuthorizer, FakeOutbox, FakePolicyGenBumper, FakeUnitOfWork, FixedClock, InMemoryOrgs, InMemoryProjects, InMemoryRoleGrants, InMemoryTeams, SeqIds, TenancyStore,
+        FakeAuditLog, FakeAuthorizer, FakeOutbox, FakePolicyGenBumper, FakeUnitOfWork, FixedClock, InMemoryOrgs, InMemoryProjects, InMemoryRoleGrants, InMemoryTeams, SeqIds, TenancyStore, test_stamp,
     };
     use async_trait::async_trait;
     use chrono::{TimeZone, Utc};
@@ -577,6 +577,7 @@ mod tests {
     async fn grant_rejects_a_team_scope_with_a_forged_org_slot_even_when_the_authorizer_would_allow() {
         let store = TenancyStore::default();
         let now = Utc.timestamp_opt(0, 0).unwrap();
+        let stamp = test_stamp(now, 1);
         let real_org = Uuid::from_u128(500);
         let wrong_org = Uuid::from_u128(501);
         let team_uuid = Uuid::from_u128(502);
@@ -584,12 +585,12 @@ mod tests {
             .orgs
             .lock()
             .unwrap()
-            .insert(real_org, Organization::new(OrganizationId::from_uuid(real_org), Slug::parse("acme").unwrap(), "Acme", now).unwrap());
+            .insert(real_org, Organization::new(OrganizationId::from_uuid(real_org), Slug::parse("acme").unwrap(), "Acme", &stamp).unwrap());
         store
             .teams
             .lock()
             .unwrap()
-            .insert(team_uuid, Team::new(TeamId::from_parts(real_org, team_uuid), Slug::parse("eng").unwrap(), "Eng", now).unwrap());
+            .insert(team_uuid, Team::new(TeamId::from_parts(real_org, team_uuid), Slug::parse("eng").unwrap(), "Eng", &stamp).unwrap());
 
         // The forged scope PRN the caller submits: `team_uuid`'s REAL uuid, but `wrong_org`'s
         // uuid in the org slot (the team really lives under `real_org`).
