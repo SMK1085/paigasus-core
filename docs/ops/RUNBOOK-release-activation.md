@@ -439,6 +439,17 @@ missing one would. Check your version first:
 npm --version   # must be >= 11.5.1
 ```
 
+**npm trust API version differences — measured 2026-08-30.** Reading publishers with `npm trust
+list` works on npm 11.11.0, but creating them via `npm trust github` fails with bare `400 Bad
+Request` and no message body. npm 11.11.0 defines only three trust params (`file`, `repository`,
+`environment`); newer npm adds `allow-publish` and `allow-stage-publish` to the payload. The trust
+create endpoint appears to require newer npm than the read endpoint — the server gave no message,
+so this is an inference. Practical consequence: reading a publisher works, but creating or changing
+one may need npm 12+. This affects registration only — CI derives npm from `.prototools` and only
+publishes, so it is unaffected. Registration requires an interactive 2FA-capable session (`npm
+login`); a dead credential or token-based `~/.npmrc` gives `401 Unauthorized`. Check `npm whoami`
+first — it is the fastest discriminator.
+
 **Do NOT enable npm's "Require two-factor authentication and disallow tokens" on these nine
 packages** (final review, Important 4). npm's Publishing-access settings offer it per package, and
 npm's own documentation recommends it after a trusted publisher is configured. It is real
