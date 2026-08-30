@@ -833,12 +833,31 @@ Then **revoke the crates.io API token** from §4.1.
 1. **a strict-equality allowlist of secret NAMES.** `release.yml` may reference
    `PAIGASUS_BOT_APP_ID` and `PAIGASUS_BOT_PRIVATE_KEY` and nothing else. A NEW secret name — the
    fresh project-scoped PyPI token the rollback plan would mint, for instance — reds until someone
-   adds it to `EXPECTED_RELEASE_SECRETS` on purpose.
+   adds it to `EXPECTED_RELEASE_SECRETS` on purpose. All four spellings GitHub accepts are
+   recognised (`secrets.NAME`, `secrets['NAME']`, `secrets["NAME"]`, and a `Secrets.`/`SECRETS.`
+   context, which is case-insensitive). Until SMA-602's fix wave only the first was, and the other
+   three were MEASURED bypasses. A read that names NO secret — `toJSON(secrets)`,
+   `secrets[format(...)]` — reds as unresolvable rather than passing clean.
 2. **any `password:`** inside the `with:` of a `pypa/gh-action-pypi-publish` step, whatever the
-   value is. Under Trusted Publishing there is nothing legitimate to put there.
+   value is. Under Trusted Publishing there is nothing legitimate to put there. This rule is bound
+   to that ONE action name: a hand-rolled `twine upload` matches no rule 2, and is caught by rule 1
+   instead, through the secret name it consumes.
 3. **three names on a denylist:** `PYPI_API_TOKEN`, `NPM_TOKEN`, `NODE_AUTH_TOKEN`.
 4. **an npm `_authToken` or `_auth`** written anywhere the parsed document reaches. `_auth` is a
-   live npm credential — `getCredentialsByURI` honours it exactly as it honours `_authToken`.
+   live npm credential — `getCredentialsByURI` honours it exactly as it honours `_authToken`. The
+   `_auth` half requires a real key boundary: `GIT_AUTH`, `CRATES_AUTH` and a `steps.app_auth.*`
+   reference are ordinary identifiers and stay clean.
+
+**Two more gates guard the OTHER direction — that the replacement is still wired.**
+
+* **V11** asserts `publish-pypi` and `publish-npm` each still grant `id-token: write`. That is the
+  credential trusted publishing runs on. Without it the runner sets no `ACTIONS_ID_TOKEN_REQUEST_*`
+  variables, npm's `oidc.js` returns undefined without throwing, and the publish dies `ENEEDAUTH`
+  AFTER crates.io has published. A narrower job-level `permissions:` block is the same defect as
+  deleting the grant — such a block sets every scope it omits to `none`.
+* **V12** pins the npm >= 11.5.1 provisioning and floor block, which `release.yml` and
+  `prebuild.yml` each carry a copy of. Nothing cross-pinned the two before, so lowering ONE copy
+  kept CI fully green.
 
 It reads the PARSED YAML, so it sees no comment. It cannot see a credential fetched at run time (a
 vault call, a decoded blob), and rule 1 covers the `secrets` context only, not `vars`.

@@ -741,6 +741,13 @@ jobs:
       # credential fetched at run time (a vault call, a decoded blob), and rule 1 covers only
       # the `secrets` context, not a value smuggled in through `vars`.
       #
+      # V10 is not the only rule guarding this file. V11 asserts that `id-token: write` must be
+      # present in the `permissions:` block of both `publish-pypi` and `publish-npm` jobs — without
+      # it, GitHub provides no OIDC token and npm's oidc.js silently falls through to a legacy
+      # credential (SMA-602 F2). V12 pins seven load-bearing lines of the npm OIDC floor check
+      # (`floor=11.5.1` and related assertions) across release.yml and prebuild.yml; deleting or
+      # lowering either copy keeps CI green while breaking publish (F3).
+      #
       # A consequence worth knowing: with no `password:`, the action's `attestations` input
       # (default 'true', and effective only under Trusted Publishing) becomes live, so all three
       # projects now upload PEP 740 attestations. That needs no extra permission — they are

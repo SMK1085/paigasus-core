@@ -344,16 +344,23 @@ to `PUBLISH_MARKERS` with a fixture row.
 
 **L22 — a self-test helper's registration in `self_test`'s tuple is unpinned; deleting a helper's
 row leaves the suite green (SMA-603).** This is the pre-existing shape L4 and L15 already name
-for other tables. It is shared by ALL TWELVE registered helpers, not by two: SMA-603 added nine
+for other tables. It is shared by ALL SIXTEEN registered helpers, not by two. SMA-603 added nine
 of them (`_v8d_pre_approval_callee_publish`, `_v8d_sneak_shape`,
 `_v8d_unverifiable_remote_uses`, `_v8d_unverifiable_nested_local_callee`,
 `_v8d_dedup_shared_callee`, `_v8d_dedup_shared_nested_target`, `_v8d_approval_gate_self_case`,
 `_v8d_missing_local_callee_direct` and `_v8_fix4_dry_run_boundary_cases`) alongside the two that
-were already there (`_critical2_end_to_end`, `_minor9_empty_jobs_floor`), and SMA-602's fix round
-1 added a twelfth (`_v10_minor6_scalar_env_fails_closed`, V10 Minor 6 below). The
-`--fixture-count >= 105` floor counts fixture-table rows, not registered helpers, so it does not
-reach this table and cannot catch a deleted registration — and nine of the twelve now exposed
+were already there (`_critical2_end_to_end`, `_minor9_empty_jobs_floor`). SMA-602 added five:
+fix round 1 added `_v10_minor6_scalar_env_fails_closed` (V10 Minor 6 below), the final review
+added `_v10_rule1_strict_equality`, and the fix wave added `_v11_id_token_write_required` (F2,
+L25), `_v12_npm_floor_pinned` (F3, L26) and `_non_list_steps_fails_closed` (F7). The
+`--fixture-count >= 120` floor counts fixture-table rows, not registered helpers, so it does not
+reach this table and cannot catch a deleted registration — and nine of the sixteen now exposed
 are the V8d controls this branch relies on.
+
+COUNT THIS BY HAND WHEN YOU ADD ONE. The number above is prose, and nothing asserts it: it read
+"ALL TWELVE" against an actual thirteen for the whole of SMA-602's final review, because
+`_v10_rule1_strict_equality` was registered without the sentence being updated. `self_test`'s
+tuple is the only authority.
 
 **L23 — V10 is a NAME-based scan, and `secrets: inherit` names nothing (SMA-602).** V10 bans
 `PYPI_API_TOKEN`, `NPM_TOKEN` and `NODE_AUTH_TOKEN` by literal name, plus an npmrc `_authToken`
@@ -369,6 +376,54 @@ third-party action's own defaults — is invisible the same way `PUBLISH_MARKERS
 see a publish mechanism it does not name. V10 is a compensating control alongside OIDC trusted
 publishing, not a replacement for it: OIDC removes the credential from the workflow entirely,
 V10 makes its reintroduction loud rather than silent.
+
+Rule 1 is no longer bound to one SPELLING, and that was a real defect (SMA-602 fix wave, F1).
+`secrets.NAME` was the only form the extraction recognised; `secrets['NAME']`, `secrets["NAME"]`,
+`Secrets.NAME` and `SECRETS.NAME` — all accepted by GitHub Actions — each returned no name at
+all, and each was MEASURED as a live bypass at guard exit 0 against a copy of the real
+`release.yml`. The fix REUSES `ci/workflow-credentials/workflow_credentials.py`'s `EXPR_SPAN` /
+`STRING_LITERAL` / `SECRETS_CTX` machinery, where those same four spellings were already pinned
+as live fixtures, rather than inventing a second and weaker regex. A reference that names NO
+secret (`toJSON(secrets)`, `secrets[format(...)]`) now reds as unresolvable: a strict-equality
+pin of names cannot judge a name that does not exist until run time, so reporting it clean would
+be a lie.
+
+**L24 — V10 rule 2 is bound to ONE action name; rule 1 is what generalises (SMA-602).**
+`uses.startswith(PYPI_PUBLISH_ACTION)` matches `pypa/gh-action-pypi-publish` and nothing else, so
+a step running `uv run twine upload -u __token__ -p "$PYPI_CRED"` with
+`env: PYPI_CRED: ${{ secrets['PYPI_NEW'] }}` matches no rule 2 at all. It reds ANYWAY, through
+rule 1: the secret name is not in `EXPECTED_RELEASE_SECRETS`. That is the honest statement of the
+division of labour — rule 2 is a KEY-based rule for one action, rule 1 is the general one — and
+it is deliberately not fixed by enumerating upload tools, which would be `PUBLISH_MARKERS`' own
+closed-vocabulary problem (L20/L21) in a second place. The residual is the same one L23 already
+states: a credential that reaches the workflow with no literal secret name is invisible to both
+rules, whatever tool consumes it.
+
+**L25 — V11 asserts the OIDC grant exists, in `release.yml` only (SMA-602).** V10 bans the OLD
+mechanism; before V11 nothing asserted the NEW one was still wired. Deleting `id-token: write`
+from `publish-pypi` or `publish-npm` — or adding a narrower job-level `permissions:` block, which
+sets every scope it omits to `none` — left every gate green, while at run time the runner sets no
+`ACTIONS_ID_TOKEN_REQUEST_*` variables, npm's `oidc.js` returns undefined without throwing, and
+the publish dies `ENEEDAUTH` after crates.io has published. V11 is scoped to `release.yml` by
+name and to the two literal job names: a CALLED workflow legitimately declares no grant, and
+`repo:workflow-credentials` actively BANS one in any `pull_request`-triggered workflow, so a
+file-wide rule would red a correct repository. It asserts the GRANT, not that the token is
+usable: a repository-level or organisation-level setting that disables OIDC is out of reach here.
+
+**L26 — V12 pins the npm 11.5.1 floor across BOTH workflows that carry it (SMA-602).**
+`release.yml`'s `publish-npm` job and `prebuild.yml`'s `assemble` job each carry a copy of the
+same npm provisioning and floor assertion, and nothing cross-pinned them: `grep -rn '11.5.1' ci/`
+found nothing, so deleting both steps — or lowering only ONE copy — kept `moon ci` fully green.
+V12 pins seven discrete stripped whole lines, matched against the PARSED `run:` bodies so a copy
+living only in a comment cannot satisfy it. It lives in `release_guard.py` rather than
+`ci/affected-graph/ci_targets.py` for the reason check 8f records for its own choice
+(`repo:actionlint` carries `inputs: ['**/*']`, so the pin needs no new input registration and is
+not the sole judge of its own reachability), and because the guard already READS both files —
+check 10 runs it on `release.yml`, whose `prebuild` job carries
+`uses: ./.github/workflows/prebuild.yml`, so `check_called` reaches the second copy for free.
+Two limits. V12 pins TEXT, not behaviour: a line kept but reordered, or moved into a step that
+never runs, still satisfies it. And it says nothing about `wheels.yml` or any future third copy —
+a new subject must be added to `NPM_OIDC_FLOOR_SUBJECTS` by hand.
 
 ## Cost
 
