@@ -260,8 +260,8 @@ over `run:` only and would have missed `uses: pypa/gh-action-pypi-publish`.
   V1, V3, V4, V7 and V8a/V8b.
 - **V8d, callees (superseded by fix round 1, Critical 1 — the shipped rule is broader and
   simpler than what this paragraph originally described):** `check_called`
-  (`release_guard.py:381`) *permits* a publish step in a `workflow_call`-only workflow, and the
-  fixture at `:477` asserts that is clean. The rule is not scoped to jobs already known to sit
+  (`release_guard.py:657`) *permits* a publish step in a `workflow_call`-only workflow, and the
+  fixture at `:884` asserts that is clean. The rule is not scoped to jobs already known to sit
   upstream of the approval gate — it is ONE rule over every job's own callee, implemented in
   `callee_boundary_violations`: for every job carrying `uses: ./X`, the callee `X` is loaded and,
   if any job inside it publishes, `approve-release` must be on the CALLING job's own `needs:`

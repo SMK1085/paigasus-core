@@ -48,8 +48,9 @@ Steps C, D and E use this runbook **from the PR branch**, before step F merges i
 ## 2. Steps A and B — already done when you read this
 
 **A** prepared the pull request carrying this file, the `release.yml` comment naming the Paigasus
-bot App, and the temporary `workflow_dispatch` trigger. **That pull request is merged at step F,
-not here** — you read this runbook from its branch while you work through steps C, D and E.
+bot App, and the `workflow_dispatch` trigger (permanent — see release.yml's own comment, SMA-603).
+**That pull request is merged at step F, not here** — you read this runbook from its branch
+while you work through steps C, D and E.
 
 **B1 and B2 are done — measured 2026-08-29:**
 
@@ -111,7 +112,7 @@ must stay on the `release` job.
 | --- | --- | --- |
 | Required reviewers | **none** | See below |
 | Wait timer | **0** | A wait timer delays *each* of the three jobs independently |
-| Deployment branch policy | **`main` only** | This is the authorization boundary for the temporary `workflow_dispatch` trigger. See below |
+| Deployment branch policy | **`main` only** | This is the authorization boundary for the `workflow_dispatch` trigger, which is permanent (SMA-603). See below |
 
 **The `main`-only branch policy is load-bearing, not hygiene.** A dispatch runs the workflow
 definition from the dispatched ref, so anyone with write access can dispatch an edited copy of

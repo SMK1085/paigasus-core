@@ -611,8 +611,10 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   none — so it cannot distinguish "nothing to release" from "a release is pending", and reading
   it would silently skip every kernel-group release. `ci/release-plan/` replaces it: it decides
   on TAG EXISTENCE instead, the same thing release-plz itself short-circuits on before touching a
-  registry or running cargo. This measurement and the one above are pinned to release-plz
-  0.3.158 and must be re-measured on a version bump.
+  registry or running cargo. This measurement (spec M6) is pinned to release-plz 0.3.158 and
+  must be re-measured on a version bump. The derive-crate bullet above (spec M3) was measured
+  against the same 0.3.158, but its validity turns on whether `paigasus-proto-derive` has been
+  published, not on a release-plz version — do not read it as sharing this re-measure caveat.
 - `release-plz release --output json` is `{"releases":[{package_name,prs,tag,version}]}` — key
   `releases`, field `package_name`. This is **not** `release-pr`'s `prs`/`package` shape. A
   package with Cargo `publish = false` never appears in `releases`, which is why any version
