@@ -286,7 +286,20 @@ CARGO_ENV_PREFIX_RE = re.compile(
 # CARGO_ENV_PREFIX_RE: it carries no command on its own line, yet it redirects cargo for every
 # later RUN in the image. `\bCARGO=` does not match `CARGO_HOME=`, since the `=` there follows
 # `HOME` (CodeRabbit PR review asked for this case to be handled separately, and it is).
-DOCKERFILE_ENV_CARGO_RE = re.compile(r"^\s*ENV\b.*\bCARGO=")
+DOCKERFILE_ENV_RE = re.compile(r"^\s*ENV\b", re.I)
+# `CARGO` must be an assignment KEY. Quoted spans are blanked first, so
+# `ENV LABEL="CARGO=/usr/bin/cargo"` — which sets no such variable — does not report. A bare
+# `\bCARGO=` over the raw line DID report it, and would have red CI on a benign Dockerfile
+# (MEASURED, CodeRabbit PR review).
+DOCKERFILE_ENV_CARGO_KEY_RE = re.compile(r"(?:^|\s)CARGO=")
+
+
+def _dockerfile_env_redirects_cargo(stripped):
+    """True when a Dockerfile ENV directive assigns CARGO itself."""
+    if not DOCKERFILE_ENV_RE.match(stripped):
+        return False
+    masked = SHELL_STRING_RE.sub(lambda m: " " * len(m.group(0)), stripped)
+    return bool(DOCKERFILE_ENV_CARGO_KEY_RE.search(masked))
 
 CargoMatch = collections.namedtuple("CargoMatch", "start end verb kind")
 
@@ -1242,9 +1255,17 @@ def derive_cargo_tasks(projects, root):
             # <tool>` reaches cargo through a tool that takes no --locked, which is exactly the
             # FFI wrapper contract, and reusing it means the existing ALLOW_UNLOCKED_CARGO
             # semantics apply unchanged (SMA-605 §5.4).
-            if any(marker in blob for marker in FFI_MARKERS) or CARGO_ENV_PREFIX_RE.search(blob):
+            # MERGED matches, never the raw env regex: `cargo_matches` already drops an env
+            # prefix whose command IS cargo, so `CARGO=/p cargo build --locked` is one locked
+            # literal call. Searching CARGO_ENV_PREFIX_RE directly bypassed that and classified
+            # the same correct line as a wrapper needing a waiver — the blob arm and the script
+            # arm disagreeing about one string (MEASURED, CodeRabbit PR review).
+            blob_matches = cargo_matches(blob)
+            if any(marker in blob for marker in FFI_MARKERS) or any(
+                c.kind == "env" for c in blob_matches
+            ):
                 kinds[target] = "wrapper"
-            elif any(c.kind in ("literal", "var") for c in cargo_matches(blob)):
+            elif any(c.kind in ("literal", "var") for c in blob_matches):
                 kinds[target] = "literal"
             elif any(
                 script_cargo_lines(p) for p in task_script_closure(projects, root, target)
@@ -1307,14 +1328,15 @@ def check_cargo_locked(projects, root=None, allow=ALLOW_UNLOCKED_CARGO, floor=RE
                         f"moon's output shape changed, so A8 cannot be evaluated"
                     )
                 continue
+            blob_matches = cargo_matches(blob)
             is_ffi = any(marker in blob for marker in FFI_MARKERS)
-            is_wrapper = bool(is_ffi or CARGO_ENV_PREFIX_RE.search(blob))
+            is_wrapper = bool(is_ffi or any(c.kind == "env" for c in blob_matches))
             # Name the CAUSE. `is_wrapper` covers two shapes since SMA-605, and a row reading
             # "(FFI_MARKERS)" for a `CARGO=` blob sends the reviewer hunting for a napi /
             # wasm-pack / maturin call that is not there. The script arm already distinguishes
             # them; this is the one place that did not (CodeRabbit PR review).
             cause = "a wrapper (FFI_MARKERS)" if is_ffi else "a CARGO= redirection"
-            if not (is_wrapper or any(c.kind in ("literal", "var") for c in cargo_matches(blob))):
+            if not (is_wrapper or any(c.kind in ("literal", "var") for c in blob_matches)):
                 continue
             matched.add(target)
             if not is_wrapper and LOCKED_FLAG in blob:
@@ -1558,7 +1580,7 @@ def check_cargo_config_inputs(projects, root, allow=None, floor=None):
             kind == "wrapper"
             or bool(CONFIG_SENSITIVE_RE.search(text))
             or _var_sensitive(text)
-            or bool(CARGO_ENV_PREFIX_RE.search(text))
+            or any(c.kind == "env" for c in cargo_matches(text))
         )
         if not (sensitive and _cwd_inside_rs(text, projects[pid]["source_dir"])):
             continue
@@ -1620,7 +1642,7 @@ def check_dockerfile_locked(root):
     seen = 0
     for lineno, line in enumerate(path.read_text().splitlines(), 1):
         stripped = line.split("#", 1)[0]
-        if DOCKERFILE_ENV_CARGO_RE.search(stripped):
+        if _dockerfile_env_redirects_cargo(stripped):
             rows.append(
                 f"rs/Dockerfile:{lineno} sets CARGO= in an ENV directive, redirecting cargo for "
                 f"every later RUN through a tool that cannot take {LOCKED_FLAG}: "
@@ -2613,6 +2635,16 @@ def self_test():
             )
         if not any("CARGO=" in r and "redirect" in r for r in rows):
             failures.append("A8 did not report a CARGO= redirection in rs/Dockerfile")
+        # ...but `CARGO` must be an assignment KEY, not text inside a value. A bare `\bCARGO=`
+        # over the raw line reported this benign directive and would have red CI (CodeRabbit).
+        (rs / "Dockerfile").write_text(
+            'ENV LABEL="CARGO=/usr/bin/cargo"\nRUN cargo build --locked\n'
+        )
+        if check_dockerfile_locked(Path(tmp)):
+            failures.append(
+                "A8 reported `ENV LABEL=\"CARGO=...\"` — CARGO inside a quoted VALUE is not an "
+                "assignment key and redirects nothing"
+            )
         (rs / "Dockerfile").write_text('RUN "$CARGO_BIN" build --release\n')
         if not any("without --locked" in r for r in check_dockerfile_locked(Path(tmp))):
             failures.append("A8 did not fire on an indirect unlocked Dockerfile cargo build")
@@ -2747,7 +2779,7 @@ def self_test():
         long_sh = probe / "long.sh"
         long_sh.write_text(long_seg + "\n")
         long_rows = [
-            l for l in script_cargo_lines(long_sh) if _row_reports(l)
+            line for line in script_cargo_lines(long_sh) if _row_reports(line)
         ]
         if len(long_rows) != 1:
             failures.append(f"the long-segment fixture did not produce one row: {long_rows}")
@@ -3792,6 +3824,20 @@ def self_test():
         failures.append(
             f"A8's blob row blames FFI_MARKERS for a CARGO= redirection it never matched: "
             f"{env_rows}"
+        )
+    # The blob arm must use MERGED-match semantics, exactly like the script arm: an env prefix
+    # whose command IS cargo is one locked literal call, not a wrapper needing a waiver. Searching
+    # the raw env regex made the two arms disagree about one string (CodeRabbit PR review).
+    locked_env = _blob("CARGO=/p cargo build --locked")
+    if derive_cargo_tasks(locked_env, Path(".")) != {"p:t": "literal"}:
+        failures.append(
+            "derive_cargo_tasks classified `CARGO=/p cargo build --locked` as a wrapper — the "
+            "blob arm bypasses cargo_matches' env suppression"
+        )
+    if check_cargo_locked(locked_env, allow={}, floor=()):
+        failures.append(
+            "A8's blob arm demanded a waiver for `CARGO=/p cargo build --locked`, a correctly "
+            "locked literal call"
         )
     ffi_rows = check_cargo_locked(_blob("pnpm exec napi build --platform"), allow={}, floor=())
     if not any("FFI_MARKERS" in r for r in ffi_rows):
