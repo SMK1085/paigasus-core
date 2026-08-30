@@ -1038,6 +1038,46 @@ REQUIRED_SOURCED_SCRIPTS = {
 }
 
 
+def _executable_text(path):
+    """`path`'s text with heredoc BODIES and comment tails removed.
+
+    `script_cargo_lines` already refuses to classify a heredoc body, for the reason that the
+    shell never executes it. `script_source_refs` claimed to be EXECUTION ONLY while scanning
+    RAW text, so this valid script aborted the whole gate:
+
+        cat <<'EOF'
+        source ./missing.sh
+        EOF
+
+    `SOURCE_STMT_RE` matched the body line and the resolver raised MoonOutputError on the absent
+    target — an infrastructure failure on a benign file (MEASURED, CodeRabbit PR review). Reusing
+    `_line_regions` and the same heredoc walk keeps the two scanners' notion of "executed" in one
+    place instead of two that can drift.
+
+    Raises MoonOutputError on a heredoc still open at EOF, the contract `script_cargo_lines` uses:
+    otherwise the rest of the file is skipped in silence.
+    """
+    out, delim, held = [], None, None
+    for raw in Path(path).read_text().splitlines():
+        if delim is not None:
+            if raw.strip() == delim:
+                delim = None
+            continue
+        work, opener = _line_regions(raw)
+        out.append(work)
+        if opener is not None and held is None:
+            held = opener.group(2)
+        if work.rstrip().endswith("\\"):
+            continue
+        delim, held = held, None
+    if delim is not None:
+        raise MoonOutputError(
+            f"{path}: heredoc `{delim}` is still open at EOF — the source scan would silently "
+            f"skip the rest of the file"
+        )
+    return "\n".join(out)
+
+
 def script_source_refs(path, root):
     """The scripts `path` EXECUTES through a `source` / `.` statement.
 
@@ -1060,7 +1100,9 @@ def script_source_refs(path, root):
     # the parent a SECOND time, and every source resolved to nothing (MEASURED — it raised
     # rather than passing quietly, but the trap is real and one line removes it).
     path = Path(path).resolve()
-    text = path.read_text()
+    # EXECUTABLE text, never raw: a `source` inside a heredoc body is not executed, and treating
+    # it as one aborted the gate (see _executable_text).
+    text = _executable_text(path)
     counts = collections.Counter(name for name, _ in VAR_ASSIGN_RE.findall(text))
     env = {name: value for name, value in VAR_ASSIGN_RE.findall(text) if counts[name] == 1}
     for name in HERE_IDIOM_ASSIGN_RE.findall(text):
@@ -1225,10 +1267,13 @@ def check_cargo_locked(projects, root=None, allow=ALLOW_UNLOCKED_CARGO, floor=RE
                         f"moon's output shape changed, so A8 cannot be evaluated"
                     )
                 continue
-            is_wrapper = bool(
-                any(marker in blob for marker in FFI_MARKERS)
-                or CARGO_ENV_PREFIX_RE.search(blob)
-            )
+            is_ffi = any(marker in blob for marker in FFI_MARKERS)
+            is_wrapper = bool(is_ffi or CARGO_ENV_PREFIX_RE.search(blob))
+            # Name the CAUSE. `is_wrapper` covers two shapes since SMA-605, and a row reading
+            # "(FFI_MARKERS)" for a `CARGO=` blob sends the reviewer hunting for a napi /
+            # wasm-pack / maturin call that is not there. The script arm already distinguishes
+            # them; this is the one place that did not (CodeRabbit PR review).
+            cause = "a wrapper (FFI_MARKERS)" if is_ffi else "a CARGO= redirection"
             if not (is_wrapper or any(c.kind in ("literal", "var") for c in cargo_matches(blob))):
                 continue
             matched.add(target)
@@ -1238,7 +1283,7 @@ def check_cargo_locked(projects, root=None, allow=ALLOW_UNLOCKED_CARGO, floor=RE
             if reason is None:
                 if is_wrapper:
                     rows.append(
-                        f"{target} reaches cargo through a wrapper (FFI_MARKERS), whose own "
+                        f"{target} reaches cargo through {cause}, whose own "
                         f"cargo call cannot take {LOCKED_FLAG} — a {LOCKED_FLAG} elsewhere in "
                         f"the script does NOT cover it, so this task needs an "
                         f"ALLOW_UNLOCKED_CARGO entry: {blob[:120]}"
@@ -2719,6 +2764,36 @@ def self_test():
                 "one level deep, so a cargo call in a sourced module stays invisible"
             )
 
+        # A `source` inside a HEREDOC BODY is not executed, so it must not resolve — and it must
+        # not abort the gate. MEASURED before the fix: `SOURCE_STMT_RE` over RAW text matched the
+        # body line and raised MoonOutputError on the absent target, an infrastructure failure on
+        # a benign script (CodeRabbit PR review).
+        (sroot / "ci" / "eco" / "real.sh").write_text("cargo build --locked\n")
+        (sroot / "ci" / "run.sh").write_text(
+            "cat <<'EOF'\n"
+            "source ./missing.sh\n"
+            "EOF\n"
+            "# source ./also-missing.sh\n"
+            "source ./eco/real.sh\n"
+        )
+        try:
+            heredoc_got = sorted(x.name for x in script_source_refs(sroot / "ci" / "run.sh", sroot))
+        except MoonOutputError:
+            heredoc_got = ["<raised>"]
+        if heredoc_got != ["real.sh"]:
+            failures.append(
+                f"script_source_refs resolved {heredoc_got} on a script whose only other "
+                f"`source` sits in a heredoc body — it is scanning RAW text, not executable text"
+            )
+        (sroot / "ci" / "run.sh").write_text(
+            'HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"\n'
+            'ECO="a"\n'
+            'ECO="$2"\n'
+            "# see ci/other/run.sh for the idiom\n"
+            'source "$HERE/eco/$ECO.sh"\n'
+        )
+        (sroot / "ci" / "eco" / "real.sh").unlink()
+
         # A RELATIVE script path must resolve the same way an absolute one does. `$HERE` expands
         # to `str(path.parent)`, so without the `resolve()` at entry the relative expansion made
         # the `not candidate.is_absolute()` branch prepend the parent a SECOND time and every
@@ -3588,6 +3663,20 @@ def self_test():
             "A8's blob arm let a --locked clear a CARGO= redirection — the flag reaches the "
             "tool, never the cargo behind it"
         )
+    # The row must name the CAUSE it actually matched. `is_wrapper` covers two shapes, and a
+    # "(FFI_MARKERS)" row for a `CARGO=` blob sends the reviewer looking for a napi/wasm-pack
+    # call that does not exist (CodeRabbit PR review).
+    env_rows = check_cargo_locked(_blob("CARGO=/p release-plz update"), allow={}, floor=())
+    if not any("CARGO= redirection" in r for r in env_rows):
+        failures.append(f"A8's blob row does not name the CARGO= cause: {env_rows}")
+    if any("FFI_MARKERS" in r for r in env_rows):
+        failures.append(
+            f"A8's blob row blames FFI_MARKERS for a CARGO= redirection it never matched: "
+            f"{env_rows}"
+        )
+    ffi_rows = check_cargo_locked(_blob("pnpm exec napi build --platform"), allow={}, floor=())
+    if not any("FFI_MARKERS" in r for r in ffi_rows):
+        failures.append(f"A8's blob row lost the FFI_MARKERS cause: {ffi_rows}")
 
     # SMA-605 — the merged match list. Both arms are FORWARD COVER: arm 1 reports zero rows on
     # the real corpus and arm 2 exactly one, and only once the source resolver lands. These
