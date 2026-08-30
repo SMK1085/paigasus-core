@@ -95,8 +95,13 @@ PRN be stored as `created_by` and still compile — and with no FK (D4) and leni
 (Error handling), nothing downstream would catch it. Using the narrower type keeps the
 check the codebase already has at the exact point where a wrong value becomes permanent.
 
-**Every mutating port method takes `&Stamp`. There are no exceptions, and the uniformity is
-the point.** The ten methods are not symmetric today, so they change in two ways. Measured:
+**Every *row-preserving* mutating port method takes `&Stamp` — all ten of them — and the
+uniformity is the point.** The one mutating method that does **not** is
+`MembershipRepository::detach`: it deletes the row, so there is nothing left to stamp.
+Recording who removed a membership is event-trail work and is tracked as SMA-606 (P2-D5), not
+Part 1. Read "every mutating method" below as "every method that leaves a row behind".
+
+The ten methods are not symmetric today, so they change in two ways. Measured:
 `OrganizationRepository::create` (`ports.rs:103`), `TeamRepository::create` (`:118`),
 `ProjectRepository::create` (`:131`) and `MembershipRepository::attach` (`:146`) take **no
 `now` parameter at all** — the timestamp currently rides inside the entity. The six
@@ -529,9 +534,10 @@ Wire strings follow the enforced `iam.<noun>.<verb-past-tense>` convention — s
 (`iam.membership.attached`, `iam.membership.detached`).
 
 Three compile-time tripwires must be updated together, all of which **fail the build** until
-they agree: `EventType::ALL` is a fixed-size `[EventType; 8]`; `all_lists_every_event_type`
-matches exhaustively with no wildcard arm; and `cloud_event.rs`'s
-`type_matches_the_wire_string_for_every_variant` hand-lists every variant.
+they agree: `EventType::ALL` is a fixed-size array, `[EventType; 8]` **today** and
+`[EventType; 22]` once the fourteen tenancy variants above land — bump the length or it will
+not compile; `all_lists_every_event_type` matches exhaustively with no wildcard arm; and
+`cloud_event.rs`'s `type_matches_the_wire_string_for_every_variant` hand-lists every variant.
 
 **No NATS configuration changes.** `ops/nats/subjects.env:23` grants `PUBLISHER_PUB=("iam.>"
 …)`, a wildcard, and every wire string is required to start with `iam.`. `check-subjects.sh`
