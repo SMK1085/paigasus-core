@@ -400,6 +400,11 @@ the five documentation items.
 | The guard against the real `release.yml` | `moon run repo:actionlint` | every affected PR |
 | Check 11 is actually invoked and defined | `SELF_TEST_COUNT`, `ACTIONLINT_SH_CALL_SITES` | `repo:affected-smoke` |
 
+Running any of the `moon` or `uv` commands above by hand needs
+`export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"` first, shims before bin. Without it a
+shell resolves a global binary rather than the repo-pinned one, which CLAUDE.md records as a
+standing trap — the versions differ and the gate's result is then not the one CI would get.
+
 Fixture rows must cover, at minimum: every tag present → `true`; one tag missing → `false`; zero
 tags in the repo → `false`; `version.workspace = true` → `false`; a `git_tag_name` override →
 `false`; a package name resolving to no manifest → `false`; to two manifests → `false`;
