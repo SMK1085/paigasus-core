@@ -360,27 +360,63 @@ this widens A8 and A10 and adds no assertion.
 
 ### 6.2 Mutation proofs (AC 2)
 
-Each mutation must red a named fixture. A mutation that survives means the fixture asserts
-nothing, and the fixture is wrong.
+**MEASURED against the final code, 26 mutations, 26 killed.** Each was applied to
+`cargo_moon_parity.py`, `--self-test` was run, and the file restored. A mutation that survives
+means the fixture asserts nothing; three did survive on the first pass and each one bought a new
+fixture rather than being recorded as acceptable.
 
-| Mutation | Must red |
-|---|---|
-| delete arm 1 from the merged list | `"$CARGO_BIN" build` |
-| delete arm 2 from the merged list | `CARGO=/p release-plz update` |
-| delete arm 1 from `derive_cargo_tasks`' blob branch | the blob arm-1 fixture |
-| delete arm 2 from `derive_cargo_tasks`' blob branch | the blob arm-2 fixture |
-| delete the arms from `check_cargo_locked`'s blob test | the blob fixtures |
-| delete the merged list from `check_dockerfile_locked` | the Dockerfile fixture |
-| count merged matches in the Dockerfile floor | the Dockerfile floor fixture |
-| relax arm 1's name predicate to any name | the three false-positive fixtures |
-| relax arm 2's name to "mentions cargo" | `CARGO_NET_OFFLINE=true tool update` |
-| delete arm 2's `(?=\s+\S)` lookahead | `export CARGO=/p` as the last token |
-| revert the `--no-deps` carve-out to `CARGO_METADATA_RE` | `"$CARGO_BIN" metadata --no-deps` |
-| make `_reports` kind-blind in the waiver-health loop | the waived-`env`-row fixture |
-| reuse arm 1 for A10 instead of the sensitive variant | `"$CARGO_BIN" tree` |
-| delete `script_source_refs` from `task_script_closure` | `REQUIRED_SOURCED_SCRIPTS` floor |
+| # | Mutation | Result |
+|---|---|---|
+| M1 | delete arm 1 from the merged list | KILLED |
+| M2 | delete arm 2 from the merged list | KILLED |
+| M3 | relax arm 1's name filter to any name | KILLED |
+| M4 | delete arm 2's `(?=\s+\S)` lookahead | KILLED |
+| M5 | disable end-offset de-duplication | KILLED |
+| M6 | sort the merged list by position before kind | KILLED |
+| M7 | make `_row_reports` kind-blind | KILLED |
+| M8 | kind-blind, **emission loop only** | KILLED |
+| M9 | kind-blind, **waiver-health loop only** | KILLED |
+| M10 | revert the `--no-deps` carve-out to `CARGO_METADATA_RE` | KILLED |
+| M11 | revert `_classify_shell_line` to the literal regex | KILLED |
+| M12 | drop arm 2 from `derive_cargo_tasks`' blob branch | KILLED |
+| M13 | drop arm 1 from `derive_cargo_tasks`' blob branch | KILLED |
+| M14 | drop the arms from `check_cargo_locked`'s blob test | KILLED |
+| M15 | drop arm 2 from `check_cargo_locked`'s wrapper test | KILLED |
+| M16 | count merged matches in the Dockerfile floor | KILLED |
+| M17 | revert the Dockerfile to the literal-only scan | KILLED |
+| M18 | reuse A8's verb list for A10's arm | KILLED |
+| M19 | drop A10's arm 1 | KILLED |
+| M20 | drop arm 2's unconditional sensitivity | KILLED |
+| M21 | drop the transitive source closure | KILLED |
+| M22 | resolve a multiply-assigned variable instead of globbing | KILLED |
+| M23 | drop the source cycle guard | KILLED (by HANG — see below) |
+| M24 | follow bare `ci/**/*.sh` mentions too | KILLED |
+| M25 | silently skip a source resolving to nothing | KILLED |
+| M26 | drop the repo-containment guard on a resolved source | KILLED |
 
-The measured result of each goes into this section before the branch merges.
+**Three first-pass survivors, and what each bought.** They are recorded because a survivor is
+evidence about the FIXTURES, and the spec claimed coverage each did not have.
+
+* **M4** survived because revision 1's justification for the lookahead was wrong (M6): under the
+  exact-`CARGO` predicate, `export CARGO=/p` reports nothing either way. Measured over eight
+  candidate shapes, exactly one separates the two — two consecutive `CARGO=` prefixes, where
+  consuming the trailing word eats the second prefix's leading separator. That is now the
+  fixture.
+* **M9 and M8** survived in turn. M9 is the BLOCKER the adversarial review predicted: the
+  waiver-health loop can be left kind-blind on its own, and then an honest waiver for an `env`
+  row reads as STALE. It bought the waiver round-trip fixture. M8 then survived because that
+  fixture only exercises the WAIVED path — the unwaived assertion is what pins the emission half.
+  Both halves are now killed independently.
+* **M20** survived because a blob-level `CARGO=` is already `wrapper` by derivation, so the
+  `kind == "wrapper"` branch covered it. The clause is load-bearing only for a redirection inside
+  a FOLLOWED SCRIPT — SMA-599 L13's shape — which is now its fixture.
+* **M26** survived because the containment guard was added during the plan's own self-review and
+  carried no fixture. It has one now.
+
+**M23 kills by HANG, not by a red.** Removing the cycle guard makes `task_script_closure` loop
+forever on a mutual `source`; the harness reports TIMEOUT rather than rc 1. In CI that is a job
+timeout, which is loud rather than silent, so the guard is asserted — but it is asserted by
+liveness, not by an assertion message. Recorded rather than smoothed over.
 
 ### 6.3 Corpus differential (AC 3, AC 4)
 
