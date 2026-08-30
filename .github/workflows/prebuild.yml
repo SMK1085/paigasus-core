@@ -227,32 +227,67 @@ jobs:
       # THE EARLY COPY of release.yml's npm floor (SMA-602 final review, Critical 1). This job
       # is upstream of the irreversible one: release.yml's `release` job declares
       # `needs: [wheels, prebuild, proto-dist, approve-release]`, and `prebuild` is this
-      # workflow — so a wrong npm reds HERE, before crates.io publishes anything. This workflow
-      # also runs on pull_request, so the same red arrives on the PR.
+      # workflow.
+      #
+      # WHAT THIS COPY CAN AND CANNOT DETECT (SMA-602 fix round 4, F5). It asserts THIS job's
+      # own npm, on THIS runner. It cannot observe release.yml's copy, so it catches a failure
+      # of the SHARED RECIPE — a `.prototools` node bump to a version whose bundled npm is
+      # under the floor, or a proto/Moon change that stops the pinned node install resolving —
+      # and nothing else. It does NOT catch an edit made to release.yml alone.
+      # `pull_request.paths` above does not list `.github/workflows/release.yml` either, so a
+      # PR that touches only release.yml never starts this workflow at all; that gap is
+      # deliberate (a macOS matrix on every such PR buys nothing here, because this job would
+      # still be asserting its own npm rather than release.yml's).
       #
       # Full rationale for the shape lives beside release.yml's copy: proto shims node and pnpm
       # but NOT npm, so a bare `npm` is the runner image's npm 10.x, which has no OIDC code path
       # at all. The `napi prepublish --dry-run` below spawns its children through PATH, so this
-      # must move PATH rather than one step's argv.
-      - name: Install an npm that can exchange an OIDC token
+      # must move PATH rather than one step's argv, and the directory is DERIVED from the
+      # `.prototools` node pin (`proto bin node`, `--reporter text` per SMA-596) rather than
+      # installed from the registry.
+      - name: Put the pinned Node's npm on PATH
         run: |
           set -euo pipefail
-          npm install -g --prefix "$RUNNER_TEMP/npm-global" npm@11.13.0
-          echo "$RUNNER_TEMP/npm-global/bin" >> "$GITHUB_PATH"
+          node_bin="$(proto --reporter text bin node)"
+          if [ ! -f "$node_bin" ] || [ ! -x "$node_bin" ]; then
+            echo "::error::proto did not resolve node to an executable file. Got: ${node_bin:-<empty>}"
+            echo "::error::If that looks like JSON, proto agent-mode NDJSON leaked past --reporter text (SMA-596)."
+            exit 1
+          fi
+          node_dir="$(dirname "$node_bin")"
+          if [ ! -x "$node_dir/npm" ]; then
+            echo "::error::the pinned Node install at $node_dir ships no executable npm."
+            exit 1
+          fi
+          echo "pinned node: $node_bin"
+          echo "$node_dir" >> "$GITHUB_PATH"
 
-      # Separate step: a `$GITHUB_PATH` write takes effect only from the NEXT step.
+      # Separate step: a `$GITHUB_PATH` write takes effect only from the NEXT step. The
+      # comparison is pure shell for the reason release.yml's copy records: `sort -V | head -n1`
+      # under `pipefail` can red at status 141 on SIGPIPE with no `::error::` line at all.
       - name: Assert npm is new enough for OIDC trusted publishing
         run: |
           set -euo pipefail
           echo "npm resolves to: $(command -v npm)"
           v="$(npm --version)"
           floor=11.5.1
-          echo "npm version: $v (floor $floor)"
-          lowest="$(printf '%s\n%s\n' "$v" "$floor" | sort -V | head -n1)"
-          if [ "$lowest" != "$floor" ]; then
-            echo "::error::npm $v is below the $floor floor required for OIDC trusted publishing."
+          echo "npm version: ${v:-<empty>} (floor $floor)"
+          below() {
+            echo "::error::npm ${v:-<empty>} is below the $floor floor required for OIDC trusted publishing."
             echo "::error::release.yml's publish-npm job would fail ENEEDAUTH after crates.io published."
             exit 1
+          }
+          case "$v" in
+            ''|*[!0-9.]*|.*|*.|*..*) below ;;
+          esac
+          IFS=. read -r vmaj vmin vpat _ <<<"$v" || true
+          IFS=. read -r fmaj fmin fpat _ <<<"$floor" || true
+          vmaj=$((10#${vmaj:-0})); vmin=$((10#${vmin:-0})); vpat=$((10#${vpat:-0}))
+          fmaj=$((10#${fmaj:-0})); fmin=$((10#${fmin:-0})); fpat=$((10#${fpat:-0}))
+          if [ "$vmaj" -lt "$fmaj" ] \
+            || { [ "$vmaj" -eq "$fmaj" ] && [ "$vmin" -lt "$fmin" ]; } \
+            || { [ "$vmaj" -eq "$fmaj" ] && [ "$vmin" -eq "$fmin" ] && [ "$vpat" -lt "$fpat" ]; }; then
+            below
           fi
           echo "OK: npm $v can exchange an OIDC token"
 

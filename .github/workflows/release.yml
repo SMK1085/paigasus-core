@@ -849,16 +849,42 @@ jobs:
       # step, so it wins over `~/.proto/shims` and every child process inherits it. Pinning npm
       # in `.prototools` would also work, but it edits a file the whole Moon graph keys on and
       # it makes moon's node toolchain the arbiter of an npm version nothing else needs.
-      # `$RUNNER_TEMP` keeps it out of any cached tree.
       #
-      # 11.13.0 is the npm that ships INSIDE the repo-pinned Node 24.16.0 — not an arbitrary
-      # version. It is over the 11.5.1 floor, and it is the npm every local `.proto` checkout
-      # already has.
-      - name: Install an npm that can exchange an OIDC token
+      # WHY NOT `npm install -g npm@<version>` (SMA-602 fix round 4, F9 + F10). That earlier
+      # shape put a REGISTRY ROUND-TRIP inside the irreversible job, and it ran UNCONDITIONALLY
+      # while every substantive step below is gated on `kernel_release == 'true'` — so on a
+      # proto-only release, which publishes no npm package at all, an npmjs.org hiccup or a
+      # yanked version still reds this job. It also decoupled the npm version from the node pin
+      # that justifies it.
+      #
+      # The Node version `.prototools` pins already ships npm INSIDE its own install, at
+      # `<node prefix>/bin/npm`; proto shims `node` but not `npm`, which is the only reason the
+      # binary is not already on PATH. `moon setup` above is what puts that install on disk.
+      # Prepending that directory is network-free, and the npm version is whatever the pinned
+      # node carries — a `.prototools` node bump moves both together instead of silently
+      # un-fixing this.
+      #
+      # `proto bin node` is what resolves the directory; DO NOT hardcode the version.
+      # `--reporter text` is REQUIRED on any captured proto call: proto answers in NDJSON when
+      # it detects an agent environment and still exits 0, so an unflagged capture yields a JSON
+      # blob rather than a path (SMA-596). `ci/release-parity/ecosystems/release-plz.sh` is the
+      # worked example, including the `-x` assertion that fails at the assignment.
+      - name: Put the pinned Node's npm on PATH
         run: |
           set -euo pipefail
-          npm install -g --prefix "$RUNNER_TEMP/npm-global" npm@11.13.0
-          echo "$RUNNER_TEMP/npm-global/bin" >> "$GITHUB_PATH"
+          node_bin="$(proto --reporter text bin node)"
+          if [ ! -f "$node_bin" ] || [ ! -x "$node_bin" ]; then
+            echo "::error::proto did not resolve node to an executable file. Got: ${node_bin:-<empty>}"
+            echo "::error::If that looks like JSON, proto agent-mode NDJSON leaked past --reporter text (SMA-596)."
+            exit 1
+          fi
+          node_dir="$(dirname "$node_bin")"
+          if [ ! -x "$node_dir/npm" ]; then
+            echo "::error::the pinned Node install at $node_dir ships no executable npm."
+            exit 1
+          fi
+          echo "pinned node: $node_bin"
+          echo "$node_dir" >> "$GITHUB_PATH"
 
       # Separate step ON PURPOSE: a `$GITHUB_PATH` write takes effect only from the NEXT step,
       # so the assertion cannot live in the step that performs the install. It must FAIL LOUDLY
@@ -867,19 +893,39 @@ jobs:
       # BEFORE `release`: `release` needs [wheels, prebuild, proto-dist, approve-release], so a
       # wrong npm reds while everything is still reversible. This copy is the backstop for the
       # case where only this job's PATH is wrong.
+      #
+      # The comparison is PURE SHELL on purpose (SMA-602 fix round 4, F11). The earlier form
+      # was `printf … | sort -V | head -n1` under `set -euo pipefail`: `head` closes the pipe
+      # after one line, so `sort` can die with SIGPIPE, the pipeline status becomes 141, and the
+      # step reds with NO `::error::` line at all — indistinguishable, to a reader of the run,
+      # from a real floor violation. Nothing here writes to a closed pipe, so a version verdict
+      # is the only thing that can fail this step. A version that is empty or not purely dotted
+      # digits also fails: this step guards the least recoverable failure in the repository, so
+      # "cannot parse" must never read as "above the floor".
       - name: Assert npm is new enough for OIDC trusted publishing
         run: |
           set -euo pipefail
           echo "npm resolves to: $(command -v npm)"
           v="$(npm --version)"
           floor=11.5.1
-          echo "npm version: $v (floor $floor)"
-          lowest="$(printf '%s\n%s\n' "$v" "$floor" | sort -V | head -n1)"
-          if [ "$lowest" != "$floor" ]; then
-            echo "::error::npm $v is below the $floor floor required for OIDC trusted publishing."
+          echo "npm version: ${v:-<empty>} (floor $floor)"
+          below() {
+            echo "::error::npm ${v:-<empty>} is below the $floor floor required for OIDC trusted publishing."
             echo "::error::npm 10.x carries no lib/utils/oidc.js, so no token exchange happens at all."
             echo "::error::With no credential configured this job would fail ENEEDAUTH after crates.io published."
             exit 1
+          }
+          case "$v" in
+            ''|*[!0-9.]*|.*|*.|*..*) below ;;
+          esac
+          IFS=. read -r vmaj vmin vpat _ <<<"$v" || true
+          IFS=. read -r fmaj fmin fpat _ <<<"$floor" || true
+          vmaj=$((10#${vmaj:-0})); vmin=$((10#${vmin:-0})); vpat=$((10#${vpat:-0}))
+          fmaj=$((10#${fmaj:-0})); fmin=$((10#${fmin:-0})); fpat=$((10#${fpat:-0}))
+          if [ "$vmaj" -lt "$fmaj" ] \
+            || { [ "$vmaj" -eq "$fmaj" ] && [ "$vmin" -lt "$fmin" ]; } \
+            || { [ "$vmaj" -eq "$fmaj" ] && [ "$vmin" -eq "$fmin" ] && [ "$vpat" -lt "$fpat" ]; }; then
+            below
           fi
           echo "OK: npm $v can exchange an OIDC token"
 
