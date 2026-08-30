@@ -21,6 +21,8 @@ runner time; a false skip silently drops a release. Nothing here may invert that
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
 import shutil
 import subprocess
 import sys
@@ -100,19 +102,68 @@ def assert_default_tag_format(cfg: dict) -> None:
                                f"{pkg.get('name')!r}; tag_for() assumes the default format")
 
 
+def workspace_members(rs_root: Path) -> list[str]:
+    """`[workspace] members` from rs/Cargo.toml, verbatim.
+
+    THE MEMBER SET IS DERIVED, NOT GUESSED. This used to be a hardcoded `crates/*/*/Cargo.toml`
+    glob, which is what the workspace happens to declare today. A publishable member outside that
+    exact shape — `tools/x`, or one directory deeper — was invisible: no tag was ever demanded for
+    it, so a release with its tag still uncut read as "every releasable package is already tagged"
+    and SKIPPED. `--assert`'s strict-equality pin could not catch it either, because both sides of
+    that comparison derive from this one function.
+
+    Every failure here is `Inconclusive`, which BUILDS.
+    """
+    cfg = load_toml(rs_root / "Cargo.toml")
+    ws = cfg.get("workspace")
+    if not isinstance(ws, dict):
+        raise Inconclusive(f"{rs_root}/Cargo.toml declares no [workspace] table")
+    # `exclude` SHRINKS the member set, and this function does not model it. Reading it as absent
+    # would over-derive — demanding a tag for a non-member, which only ever BUILDS, so it is
+    # fail-safe at runtime — but it would also make the skip permanently unreachable, silently.
+    # Refusing loudly is the conscious-re-baseline direction this repo prefers: at runtime it
+    # builds, and under --assert it exits 3 and reds check 11 until somebody teaches this
+    # function about exclusion.
+    excluded = ws.get("exclude")
+    if isinstance(excluded, list) and excluded:
+        raise Inconclusive(f"{rs_root}/Cargo.toml sets [workspace] exclude={excluded!r}; "
+                           "workspace_members() does not model member exclusion")
+    members = ws.get("members")
+    if not isinstance(members, list) or not members or \
+            not all(isinstance(m, str) and m for m in members):
+        raise Inconclusive(f"{rs_root}/Cargo.toml has no usable [workspace] members list "
+                           f"(got {members!r})")
+    return members
+
+
 def crate_manifests(rs_root: Path) -> dict[str, Path]:
-    """Map package name -> Cargo.toml. Walks rs/crates/**, so it needs no cargo and no network."""
+    """Map package name -> Cargo.toml, over every `[workspace] members` entry.
+
+    Needs no cargo and no network: Cargo's member patterns are plain path globs, so `Path.glob`
+    expands them. A pattern that matches no manifest, or a literal member with no manifest on
+    disk, is Inconclusive — the tree moved, and guessing would under-derive.
+    """
     found: dict[str, Path] = {}
-    for manifest in sorted(rs_root.glob("crates/*/*/Cargo.toml")):
-        pkg = load_toml(manifest).get("package") or {}
-        name = pkg.get("name")
-        if not isinstance(name, str) or not name:
-            continue
-        if name in found:
-            raise Inconclusive(f"two manifests declare package {name!r}: {found[name]}, {manifest}")
-        found[name] = manifest
+    for pattern in workspace_members(rs_root):
+        if any(ch in pattern for ch in "*?["):
+            hits = sorted(rs_root.glob(f"{pattern}/Cargo.toml"))
+        else:
+            literal = rs_root / pattern / "Cargo.toml"
+            hits = [literal] if literal.is_file() else []
+        if not hits:
+            raise Inconclusive(f"workspace member {pattern!r} matched no Cargo.toml under "
+                               f"{rs_root} — the tree moved")
+        for manifest in hits:
+            pkg = load_toml(manifest).get("package") or {}
+            name = pkg.get("name")
+            if not isinstance(name, str) or not name:
+                continue
+            if name in found and found[name] != manifest:
+                raise Inconclusive(
+                    f"two manifests declare package {name!r}: {found[name]}, {manifest}")
+            found[name] = manifest
     if not found:
-        raise Inconclusive(f"no crate manifests under {rs_root}/crates — the tree moved")
+        raise Inconclusive(f"no crate manifests under {rs_root} — the tree moved")
     return found
 
 
@@ -244,6 +295,7 @@ def _workspace_version_is_inconclusive() -> str | None:
         rs_root = Path(tmp) / "rs"
         (rs_root).mkdir()
         (rs_root / "release-plz.toml").write_text("")
+        (rs_root / "Cargo.toml").write_text('[workspace]\nmembers = ["crates/*/*"]\n')
         crate_dir = rs_root / "crates" / "libs" / "a"
         crate_dir.mkdir(parents=True)
         (crate_dir / "Cargo.toml").write_text(
@@ -291,6 +343,93 @@ def _tag_name_override_is_inconclusive() -> str | None:
         shutil.rmtree(tmp)
 
 
+def _member_outside_crates_is_seen() -> str | None:
+    """A publishable workspace member OUTSIDE `crates/*/*` must still be demanded a tag.
+
+    This is the SMA-603 fix-wave finding 2e, as a fixture. `crate_manifests` used to glob a
+    hardcoded `crates/*/*/Cargo.toml`; a member declared anywhere else was invisible, its tag was
+    never demanded, and a real release read as "everything is tagged" — a SILENT SKIP, the one
+    failure direction this checker exists to prevent. `--assert`'s strict-equality pin cannot
+    catch that, because both sides of its comparison come from this same function.
+    """
+    tmp = tempfile.mkdtemp()
+    try:
+        rs_root = Path(tmp) / "rs"
+        rs_root.mkdir()
+        (rs_root / "release-plz.toml").write_text("")
+        (rs_root / "Cargo.toml").write_text(
+            '[workspace]\nmembers = ["crates/*/*", "tools/*"]\n')
+        for rel, name in (("crates/libs/a", "a"), ("tools/t", "t")):
+            d = rs_root / rel
+            d.mkdir(parents=True)
+            (d / "Cargo.toml").write_text(
+                f'[package]\nname = "{name}"\nversion = "1.0.0"\npublish = true\n')
+        got = releasable_packages(rs_root)
+        if got != {"a": "1.0.0", "t": "1.0.0"}:
+            return (f"releasable_packages returned {got!r}; the `tools/*` member is missing, so "
+                    f"its tag would never be demanded and a release would read as complete")
+        return None
+    except Inconclusive as exc:  # pragma: no cover - a regression would surface here
+        return f"releasable_packages raised Inconclusive for a valid tree: {exc!r}"
+    finally:
+        shutil.rmtree(tmp)
+
+
+def _unresolvable_member_is_inconclusive() -> str | None:
+    """A `[workspace] members` entry that matches no Cargo.toml must be Inconclusive.
+
+    Inconclusive BUILDS, which is the fail-safe direction. The alternative — quietly deriving a
+    smaller package set — is exactly the silent skip `_member_outside_crates_is_seen` describes.
+    """
+    tmp = tempfile.mkdtemp()
+    try:
+        rs_root = Path(tmp) / "rs"
+        rs_root.mkdir()
+        (rs_root / "release-plz.toml").write_text("")
+        (rs_root / "Cargo.toml").write_text(
+            '[workspace]\nmembers = ["crates/*/*", "tools/*"]\n')
+        d = rs_root / "crates" / "libs" / "a"
+        d.mkdir(parents=True)
+        (d / "Cargo.toml").write_text('[package]\nname = "a"\nversion = "1.0.0"\n')
+        try:
+            releasable_packages(rs_root)
+        except Inconclusive as exc:
+            if "matched no Cargo.toml" in str(exc):
+                return None
+            return (f"releasable_packages raised Inconclusive for the wrong reason: {exc!r} "
+                    f"(expected a message naming 'matched no Cargo.toml')")
+        return "releasable_packages did not raise Inconclusive for an unresolvable member"
+    finally:
+        shutil.rmtree(tmp)
+
+
+def _malformed_config_asserts_three() -> str | None:
+    """A malformed `rs/release-plz.toml` must make `--assert` exit 3, not 1.
+
+    MEASURED before the SMA-603 fix wave: `workspace = 3` raised a bare `TypeError` out of
+    `assert_default_tag_format`, `_assert_repo`'s `except Inconclusive` did not catch it, the
+    interpreter exited 1 with a traceback, and `run.sh`'s `run_checker` mapped that 1 onto
+    `die_infra` (2). Check 11 then reported "uv or the interpreter failed" for what is plainly a
+    broken repository file, and README.md's "never 1" claim was false.
+    """
+    tmp = tempfile.mkdtemp()
+    try:
+        rs_root = Path(tmp) / "rs"
+        crate_dir = rs_root / "crates" / "libs" / "a"
+        crate_dir.mkdir(parents=True)
+        (rs_root / "Cargo.toml").write_text('[workspace]\nmembers = ["crates/*/*"]\n')
+        (rs_root / "release-plz.toml").write_text("workspace = 3\n")
+        (crate_dir / "Cargo.toml").write_text('[package]\nname = "a"\nversion = "1.0.0"\n')
+        # _assert_repo prints its diagnosis to stderr; a passing self-test must stay quiet.
+        with contextlib.redirect_stderr(io.StringIO()):
+            rc = _assert_repo(Path(tmp))
+        if rc != 3:
+            return f"_assert_repo returned {rc} for a malformed release-plz.toml, expected 3"
+        return None
+    finally:
+        shutil.rmtree(tmp)
+
+
 def self_test() -> int:
     rc = 0
     # An emptied FIXTURES list makes the loop below run zero times and return 0 — a self-test
@@ -313,6 +452,11 @@ def self_test() -> int:
         ("a missing release-plz.toml is inconclusive", _missing_config_is_inconclusive),
         ("a workspace-inherited version is inconclusive", _workspace_version_is_inconclusive),
         ("a git_tag_name override is inconclusive", _tag_name_override_is_inconclusive),
+        ("a member outside crates/*/* is still demanded a tag", _member_outside_crates_is_seen),
+        ("an unresolvable workspace member is inconclusive",
+         _unresolvable_member_is_inconclusive),
+        ("a malformed release-plz.toml makes --assert exit 3, not 1",
+         _malformed_config_asserts_three),
     ):
         err = fn()
         if err:
@@ -329,13 +473,23 @@ def _assert_repo(repo_root: Path) -> int:
     failed `git tag -l`), and if that call sat outside the try, that Inconclusive would escape
     uncaught, the interpreter would exit 1 with a traceback, and `run_checker` would then map
     that 1 onto its `die_infra` branch (2) — silently breaking the documented contract.
+
+    SMA-603 fix wave, Group 3: the `except` is BROAD for the same reason `run()`'s is, and the
+    documented contract is why. MEASURED: `workspace = 3` in `rs/release-plz.toml` raises a bare
+    `TypeError` from inside `assert_default_tag_format`'s membership test, which an
+    `except Inconclusive` does not catch — so `--assert` exited 1 with a traceback, `run_checker`
+    mapped that onto `die_infra` (2), and a malformed repository file was reported as
+    "infrastructure failed" rather than "the repository is wrong". The README claimed the checker
+    could never exit 1; the code, not the doc, was wrong. Collection reads only repository files,
+    so any failure of it IS a statement about the repository. `--self-test` deliberately keeps no
+    such catch: it tests this module, not the tree.
     """
     problems: list[str] = []
     try:
         packages = releasable_packages(repo_root / "rs")
         tags = repo_tags(repo_root)
-    except Inconclusive as exc:
-        print(f"release-plan: {exc}", file=sys.stderr)
+    except Exception as exc:  # noqa: BLE001 - deliberately broad; see the docstring above.
+        print(f"release-plan: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 3
     derived = frozenset(packages)
     if derived != EXPECTED_RELEASABLE:

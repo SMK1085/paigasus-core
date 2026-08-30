@@ -2120,6 +2120,9 @@ T_AFFECTED_SMOKE_REQUIRED_INPUTS=(
   'ci/actionlint/**/*'
   'ci/release-parity/**/*'
   'ci/workflow-credentials/**/*'
+  # SMA-603 — floors the input that makes RELEASE_PLAN_SH_CALL_SITES reachable. Without it the
+  # PR deleting those nine lines is exactly the PR that does not schedule repo:affected-smoke.
+  'ci/release-plan/**/*'
   'CLAUDE.md'
   '.prototools'
 )
@@ -4548,7 +4551,8 @@ release_plan_self_test() {
   case "$n" in ''|*[!0-9]*) infra "check 11: --fixture-count printed '$n', expected an integer" ;; esac
   # Floor, not a count: it exists to catch an EMPTIED table, and one row of headroom keeps a
   # legitimate row removal from aborting the gate as infra. Check 10's own floor is equally
-  # loose (20 against 44 actual).
+  # loose (20 against 84 actual — that citation read 44 until the SMA-603 fix wave; the table
+  # has grown with every V8/V9 round since).
   [ "$n" -ge 8 ] || infra "check 11: release_plan.py reports $n fixtures, expected at least 8"
 
   release_plan_sh --self-test || { fail "check 11: release_plan.py --self-test reported a broken
@@ -4564,7 +4568,7 @@ release_plan_self_test() {
 # ---------------------------------------------------------------------------------------------
 # Check 7 — the self-tests, and the counter that proves they were invoked.
 #
-# All ten are defined above so this block can run them from ONE call site, reached by both the
+# All THIRTEEN are defined above so this block can run them from ONE call site, reached by both the
 # --self-test path and the full gate. One call site rather than two is deliberate: ci_targets.py's
 # C4 pins this by whole stripped line, and two identical lines would let one be deleted while the
 # pin still matched (SMA-542 D2).

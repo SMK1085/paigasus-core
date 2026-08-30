@@ -346,7 +346,7 @@ forgotten. The pin exists to force that re-baseline to be conscious, not to driv
 
 Not additive. `_OK_MAIN` (`release_guard.py:416`) already contains a `plan` job, contains **no**
 `approve-release` job, and its `release` job carries `needs: [plan]` with no `if:` — so V8a reds
-every `kind == "main"` row and V9b reds the *healthy control*. **34 of the 44 `FIXTURES` rows are
+every `kind == "main"` row and V9b reds the *healthy control*. **34 of the 45 `FIXTURES` rows are
 `.replace()` calls anchored to `_OK_MAIN`'s exact text**, plus `_critical2_end_to_end`
 (`release_guard.py:621`), which builds its YAML from it.
 
@@ -354,7 +354,8 @@ every `kind == "main"` row and V9b reds the *healthy control*. **34 of the 44 `F
 with `outputs:`), `build` (`needs: [plan]` + the accepted `if:`), `approve-release` (with
 `environment:`), `release` (`needs: [build, approve-release]`) — and all 34 anchors are
 re-derived. This is the largest single piece of work in the change and the plan must budget for
-it.
+it. (The row count read 44 in the first revision; the measured base was 45. Corrected in the
+SMA-603 fix wave — the 34-anchor figure was measured and is unchanged.)
 
 ### 3.7 Documentation
 

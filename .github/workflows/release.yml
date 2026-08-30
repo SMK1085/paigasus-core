@@ -409,8 +409,37 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      # ONE PHYSICAL LINE. release_guard.py's command_segments is per physical line, so a
-      # backslash continuation would be judged without its flags.
+      # LOAD-BEARING, and the reason is measured (SMA-603 C1). `ci/release-plan/run.sh` runs the
+      # checker through `uv`, which is a proto-managed shim and is NOT on `ubuntu-latest`. Without
+      # these two steps the Decide step died, the `plan` job failed, and because every consumer
+      # carries a status-function-free `if:` — GitHub applies an implicit `success()` — `wheels`,
+      # `prebuild` and `proto-dist` SKIPPED, and `approve-release`, `release`, `publish-pypi` and
+      # `publish-npm` skipped down the `needs:` chain. The whole publish path was dropped on every
+      # push. This file's own header records the same class of fault once already: SMA-580's
+      # `publish-npm` died on `pnpm: command not found`, and the conclusion there was "the actual
+      # fault was a missing toolchain".
+      #
+      # `run.sh` now ALSO fails safe when `uv` is absent (it writes nothing_to_release=false and
+      # exits 0). Both halves are needed: without the toolchain the job would build every time and
+      # the feature would never fire; without the fail-safe a future toolchain regression would
+      # drop the release path again.
+      - name: Set up proto + Moon
+        uses: moonrepo/setup-toolchain@261c62cb5b0f580c7be7c8cd0f023a2e96756095  # v0
+        with:
+          # Don't cache the proto/Moon toolchain dir: a restored ~/.proto carries stale
+          # setup-state that makes `moon setup` skip installing toolchains (their shims then
+          # don't exist). Reinstall fresh each run — same reason the release-pr job above gives.
+          cache: false
+
+      # NARROW install, like the release-pr job's `proto install release-plz`: this job needs
+      # none of actionlint/buf/deny/machete/nextest/promtool/wasm-pack, only `uv`.
+      - name: Install pinned uv
+        run: proto install uv
+
+      # ONE PHYSICAL LINE, AND ONE COMMAND. release_guard.py's command_segments is per physical
+      # line, so a backslash continuation would be judged without its flags; V9e additionally
+      # requires this step to run exactly the invocation and nothing else, because a second
+      # command here could overwrite $GITHUB_OUTPUT after the checker wrote it.
       - name: Decide
         id: decide
         env:

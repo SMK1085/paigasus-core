@@ -344,9 +344,15 @@ to `PUBLISH_MARKERS` with a fixture row.
 
 **L22 — a self-test helper's registration in `self_test`'s tuple is unpinned; deleting a helper's
 row leaves the suite green (SMA-603).** This is the pre-existing shape L4 and L15 already name
-for other tables, shared here by `_critical2_end_to_end` and `_minor9_empty_jobs_floor`: the
+for other tables. It is shared by ALL ELEVEN registered helpers, not by two: SMA-603 added nine
+of them (`_v8d_pre_approval_callee_publish`, `_v8d_sneak_shape`,
+`_v8d_unverifiable_remote_uses`, `_v8d_unverifiable_nested_local_callee`,
+`_v8d_dedup_shared_callee`, `_v8d_dedup_shared_nested_target`, `_v8d_approval_gate_self_case`,
+`_v8d_missing_local_callee_direct` and `_v8_fix4_dry_run_boundaries`) alongside the two that
+were already there (`_critical2_end_to_end`, `_minor9_empty_jobs_floor`). The
 `--fixture-count >= 20` floor counts fixture-table rows, not registered helpers, so it does not
-reach this table and cannot catch a deleted registration.
+reach this table and cannot catch a deleted registration — and nine of the eleven now exposed
+are the V8d controls this branch relies on.
 
 ## Cost
 

@@ -19,9 +19,18 @@ HERE="$REPO_ROOT/ci/release-plan"
 
 die_infra() { printf 'release-plan: %s\n' "$*" >&2; exit 2; }
 
-# Preflight. `uv` absent yields 127 from the shell, which is neither 0/1/2 nor actionable.
-command -v uv >/dev/null 2>&1 \
-  || die_infra "uv is not on PATH — run 'proto install', or add ~/.proto/shims to PATH"
+# The `uv` preflight. It is a FUNCTION called from the mode dispatch at the bottom of this file,
+# NOT a top-level statement, and that placement is load-bearing (SMA-603 fix wave, C1).
+#
+# It used to run above the dispatch, so it applied to `--github-output` too. `uv` is a
+# proto-managed shim and is absent from a bare `ubuntu-latest` runner, so the RUNTIME arm exited
+# 2 and wrote nothing at all. A failed `plan` job SKIPS its dependents — see the comment on
+# `github_output` below — so a missing toolchain dropped the entire publish path silently. The
+# three CI modes keep the loud exit-2 contract: they are assertions and must fail visibly.
+require_uv() {
+  command -v uv >/dev/null 2>&1 \
+    || die_infra "uv is not on PATH — run 'proto install', or add ~/.proto/shims to PATH"
+}
 
 # `--locked` on all four `uv run` calls below (SMA-603 fix round 2, ruled in): mirrors
 # ci/actionlint/run.sh's release_guard_py() wrapper for check 10, and the rationale applies MORE
@@ -50,6 +59,12 @@ run_checker() {
 # exited non-zero would stop the release entirely. Fail-safe here means: write false, warn
 # loudly, exit 0, and let the matrix build. The --self-test/--negative-control/--assert modes
 # keep the normal contract, and CI runs those.
+#
+# THIS ARM CALLS NO PREFLIGHT, deliberately. An ABSENT `uv` makes the command substitution below
+# exit 127, which `|| rc=$?` catches like any other failure, so a missing toolchain lands on the
+# fail-safe branch instead of aborting the job. `set -e` does not fire on it: the assignment is
+# the left operand of an `||` list. Negative-control row 6 asserts exactly this, because the
+# `require_uv` call is one line away from being moved back above the dispatch.
 github_output() {
   local rc=0 out
   out="$(uv run --locked --project "$HERE" --python '>=3.12' python3 \
@@ -120,6 +135,9 @@ negative_control() {
   _build_synthetic_tree() {
     local dir="$1"
     mkdir -p "$dir/rs/crates/libs/a"
+    # The member list is what crate_manifests() globs — it derives the package set from
+    # `[workspace] members` rather than a hardcoded `crates/*/*` glob (SMA-603 fix wave, 2e).
+    printf '[workspace]\nmembers = ["crates/*/*"]\n' > "$dir/rs/Cargo.toml"
     printf '[[package]]\nname = "a"\nrelease = true\n' > "$dir/rs/release-plz.toml"
     printf '[package]\nname = "a"\nversion = "1.0.0"\npublish = true\n' \
       > "$dir/rs/crates/libs/a/Cargo.toml"
@@ -209,6 +227,76 @@ negative_control() {
   fi
   rm -f "$gh_out_tmp"
 
+  # Row 6 — THE C1 REGRESSION ROW. `--github-output` must still write nothing_to_release=false
+  # and exit 0 when `uv` cannot be found at all. The `uv` preflight lived above the mode dispatch
+  # until the SMA-603 fix wave, so the runtime arm exited 2 and wrote NOTHING on a runner with no
+  # proto toolchain — the `plan` job then failed, and because every consumer carries a
+  # status-function-free `if:` (implicit success()), the whole publish path skipped. Reordering
+  # this file re-arms that trap in one edit, which is why the row exists.
+  #
+  # A hermetic PATH, not a guessed one. `PATH=/usr/bin:/bin` would be a silent no-op on any host
+  # that installs uv system-wide; a directory holding symlinks to exactly the externals this arm
+  # needs cannot. The precondition is asserted rather than assumed.
+  local nouv_dir nouv_out rc6=0 t tpath
+  nouv_dir="$tmp/nouv-path"
+  mkdir -p "$nouv_dir"
+  for t in bash dirname grep tail; do
+    tpath="$(command -v "$t" || true)"
+    if [ -z "$tpath" ]; then
+      printf '  FAIL row 6 cannot build its restricted PATH: %s is not on PATH\n' "$t" >&2
+      failures=$((failures + 1))
+    else
+      ln -s "$tpath" "$nouv_dir/$t"
+    fi
+  done
+  if ( PATH="$nouv_dir"; export PATH; command -v uv >/dev/null 2>&1 ); then
+    printf '  FAIL row 6 proves nothing: uv is still reachable under the restricted PATH\n' >&2
+    failures=$((failures + 1))
+  fi
+  nouv_out="$(mktemp)"
+  PATH="$nouv_dir" GITHUB_EVENT_NAME=push GITHUB_OUTPUT="$nouv_out" \
+    "$nouv_dir/bash" "$0" --github-output >/dev/null 2>&1 || rc6=$?
+  if [ "$rc6" -ne 0 ]; then
+    printf '  FAIL --github-output exited %s with uv unreachable, expected 0 (the fail-safe arm)\n' \
+      "$rc6" >&2
+    failures=$((failures + 1))
+  fi
+  if ! grep -qx 'nothing_to_release=false' "$nouv_out"; then
+    printf '  FAIL --github-output with uv unreachable did not write nothing_to_release=false\n' >&2
+    printf '  --- %s contents ---\n' "$nouv_out" >&2
+    cat "$nouv_out" >&2
+    failures=$((failures + 1))
+  fi
+  rm -f "$nouv_out"
+
+  # Row 7 — the FIXTURES verdict loop in release_plan.py:self_test(). The loop is deletable in
+  # silence: with it gone, `--self-test` still returns 0 and every other control here still
+  # passes, so the fixture table would guard nothing. The arity floor in ci/actionlint/run.sh
+  # check 11 does not close this — it counts ROWS, not whether any row is EVALUATED.
+  #
+  # The row mutates a COPY of the checker: it inverts the first fixture's expected verdict
+  # (`True` -> `False` on the "every releasable package is tagged -> skip" row) and asserts the
+  # mutated copy's --self-test reports the broken verdict (exit 3). Deleting the loop, or
+  # dropping its `rc = 3`, makes the mutant pass and this row red. The mutation is asserted to
+  # have actually changed the file, so a renamed fixture cannot make this row vacuous.
+  local mut_dir mut_rc=0
+  mut_dir="$tmp/fixture-mutant"
+  mkdir -p "$mut_dir"
+  sed 's/{"a-v1\.0\.0", "b-v1\.0\.0"}, True)/{"a-v1.0.0", "b-v1.0.0"}, False)/' \
+    "$HERE/release_plan.py" > "$mut_dir/release_plan.py"
+  if cmp -s "$HERE/release_plan.py" "$mut_dir/release_plan.py"; then
+    printf '  FAIL row 7 is vacuous: the fixture mutation matched nothing in release_plan.py\n' >&2
+    failures=$((failures + 1))
+  fi
+  uv run --locked --project "$HERE" --python '>=3.12' python3 "$mut_dir/release_plan.py" \
+    --self-test >/dev/null 2>&1 || mut_rc=$?
+  if [ "$mut_rc" != "3" ]; then
+    printf '  FAIL a fixture with an INVERTED expected verdict exited %s, expected 3 — the\n' \
+      "$mut_rc" >&2
+    printf '       FIXTURES loop in self_test() no longer evaluates its rows\n' >&2
+    failures=$((failures + 1))
+  fi
+
   rm -rf "$tmp"
   if [ "$failures" -gt 0 ]; then
     printf 'release-plan negative control: %d row(s) failed\n' "$failures" >&2
@@ -230,8 +318,8 @@ done
 
 case "$MODE" in
   output)   github_output ;;
-  selftest) run_checker --self-test ;;
-  negctl)   negative_control ;;
-  assert)   run_checker --assert "$REPO_ROOT" ;;
+  selftest) require_uv; run_checker --self-test ;;
+  negctl)   require_uv; negative_control ;;
+  assert)   require_uv; run_checker --assert "$REPO_ROOT" ;;
   *)        die_infra "one mode is required: --github-output | --self-test | --negative-control | --assert" ;;
 esac

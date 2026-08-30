@@ -64,11 +64,45 @@ APPROVAL_JOB = "approve-release"
 PLAN_JOB = "plan"
 PLAN_OUTPUT = "nothing_to_release"
 PLAN_SCRIPT = "ci/release-plan/run.sh"
+# The flag the decision step must pass. `ci/release-plan/run.sh --self-test` in the decision step
+# would satisfy a bare "does it invoke the script" test while writing no output at all.
+PLAN_SCRIPT_FLAG = "--github-output"
 # Literal pinning, exactly as V2 pins GATE_EXPR, and for the same reason: a structural test would
 # admit `== 'false'`, which is NOT equivalent — it fails closed on an unset output.
 PLAN_GATE_EXPR = f"needs.{PLAN_JOB}.outputs.{PLAN_OUTPUT} != 'true'"
 ACCEPTED_PLAN_FORMS = frozenset({PLAN_GATE_EXPR, "${{ " + PLAN_GATE_EXPR + " }}"})
-_PLAN_STEP_RE = re.compile(r"steps\.([A-Za-z0-9_-]+)\.outputs\." + re.escape(PLAN_OUTPUT))
+# SMA-603 fix wave, 2d. FULL-MATCH, not `search`. The old regex only had to occur SOMEWHERE in
+# the outputs expression, so any expression that merely CONTAINED the step reference passed —
+# including ones that resolve to a constant. The measured shape is
+# `${{ steps.decide.outputs.nothing_to_release || 'true' }}`: GitHub's `||` yields its right
+# operand when the left is the empty string, so an unset step output becomes the literal 'true'
+# and EVERY consumer skips. That inverts the branch's central fail-safe property in one edit and
+# reds nothing. Literal pinning, exactly as ACCEPTED_PLAN_FORMS pins the consumer `if:` above:
+# the expression must be the reference and nothing else. Surrounding whitespace is tolerated
+# because YAML and the `${{ }}` syntax both allow it; anything else is not.
+_PLAN_STEP_RE = re.compile(
+    r"^\$\{\{\s*steps\.([A-Za-z0-9_-]+)\.outputs\." + re.escape(PLAN_OUTPUT) + r"\s*\}\}$")
+
+
+# SMA-603 fix wave, 2c. V9d used to be `PLAN_SCRIPT not in run_text` — a raw substring test over
+# the decision step's whole `run:` block. A COMMENT naming the script satisfied it, so a step
+# whose real command hardcodes the answer read as clean:
+#     run: |
+#       # ci/release-plan/run.sh --github-output decides this
+#       echo "nothing_to_release=true" >> "$GITHUB_OUTPUT"
+# This tests the COMMAND WORD instead, per command segment, reusing command_segments (which
+# strips a trailing `#` comment from each segment, so a comment leaves an empty segment behind).
+# It also demands PLAN_SCRIPT_FLAG in the SAME segment: a step running the script with any other
+# flag writes no output.
+#
+# NOT a shell parser, the same deliberate scope limit command_segments records: leading
+# `VAR=value` assignments and one `env`/`bash`/`sh` prefix are skipped, and nothing else is
+# modelled. A more exotic invocation (`eval`, a variable holding the path) reports missing, which
+# fails CLOSED — the gate reds and a human looks.
+_ENV_ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+_CMD_PREFIXES = ("env", "bash", "sh", "/bin/bash", "/bin/sh", "/usr/bin/env")
+
+
 
 # V3: the real bypass class is any status-check function, not two literal spellings.
 # `success() || failure()`, `!failure()` and `${{ ! cancelled() }}` all evade a two-string test.
@@ -499,6 +533,35 @@ def approval_boundary_violations(jobs: dict, name: str) -> list[str]:
     return out
 
 
+def plan_run_segments(run_text: str) -> list[str]:
+    """Every non-empty command segment of a `run:` block, comments already stripped."""
+    return [seg.strip()
+            for line in run_text.splitlines()
+            for seg in command_segments(line)
+            if seg.strip()]
+
+
+def _is_plan_invocation(segment: str) -> bool:
+    tokens = segment.split()
+    i = 0
+    while i < len(tokens) and _ENV_ASSIGN_RE.match(tokens[i]):
+        i += 1
+    if i < len(tokens) and tokens[i] in _CMD_PREFIXES:
+        i += 1
+        while i < len(tokens) and _ENV_ASSIGN_RE.match(tokens[i]):
+            i += 1
+    if i >= len(tokens):
+        return False
+    word = tokens[i]
+    if word != PLAN_SCRIPT and not word.endswith("/" + PLAN_SCRIPT):
+        return False
+    return PLAN_SCRIPT_FLAG in tokens[i + 1:]
+
+
+def invokes_plan_script(run_text: str) -> bool:
+    """True when some command segment of `run_text` really RUNS PLAN_SCRIPT with its flag."""
+    return any(_is_plan_invocation(seg) for seg in plan_run_segments(run_text))
+
 def plan_contract_violations(jobs: dict, name: str) -> list[str]:
     plan = jobs.get(PLAN_JOB)
     if not isinstance(plan, dict):
@@ -537,10 +600,15 @@ def plan_contract_violations(jobs: dict, name: str) -> list[str]:
         out.append(f"{name}: V9c: job '{PLAN_JOB}' declares no outputs.{PLAN_OUTPUT}. A STEP "
                    f"output is not a JOB output, so every consumer would read the empty string.")
     else:
-        m = _PLAN_STEP_RE.search(expr)
+        m = _PLAN_STEP_RE.match(expr.strip())
         if not m:
             out.append(f"{name}: V9c: outputs.{PLAN_OUTPUT} is {expr!r}, which names no "
-                       f"steps.<id>.outputs.{PLAN_OUTPUT}.")
+                       f"steps.<id>.outputs.{PLAN_OUTPUT} — or names one inside a LARGER "
+                       f"expression. It must be exactly "
+                       f"'${{{{ steps.<id>.outputs.{PLAN_OUTPUT} }}}}': anything else can "
+                       f"resolve to a constant, and "
+                       f"'${{{{ steps.<id>.outputs.{PLAN_OUTPUT} || \\'true\\' }}}}' resolves "
+                       f"to 'true' on an unset output, which SKIPS every consumer.")
         else:
             steps_by_id = {s.get("id"): s for s in (plan.get("steps") or []) if isinstance(s, dict)}
             if m.group(1) not in steps_by_id:
@@ -562,10 +630,40 @@ def plan_contract_violations(jobs: dict, name: str) -> list[str]:
     # nothing here to scope to and that failure is already reported by V9c.
     if decision is not None:
         run_text = str(decision.get("run") or "")
-        if PLAN_SCRIPT not in run_text:
+        # SMA-603 fix wave, 2c: a COMMAND-WORD test, not a substring one. See
+        # invokes_plan_script's own comment for the comment-satisfies-the-pin shape it closes.
+        segments = plan_run_segments(run_text)
+        if not invokes_plan_script(run_text):
             out.append(f"{name}: V9d: step {decision.get('id')!r} in job '{PLAN_JOB}' never "
-                       f"invokes {PLAN_SCRIPT}. Without this, V9c passes on an inline `echo "
-                       f"{PLAN_OUTPUT}=true`.")
+                       f"invokes {PLAN_SCRIPT} {PLAN_SCRIPT_FLAG} as a command. Without this, "
+                       f"V9c passes on an inline `echo {PLAN_OUTPUT}=true` — and a COMMENT "
+                       f"naming the script does not count.")
+        # V9e (SMA-603 fix wave, 2g — the RE-JUDGED parked finding B2). V9d asks whether the
+        # decision step invokes the checker; it cannot ask what ELSE the step does. The measured
+        # bypass is one appended line:
+        #     run: |
+        #       ci/release-plan/run.sh --github-output
+        #       echo "nothing_to_release=true" > "$GITHUB_OUTPUT"
+        # The checker really runs, V9c and V9d both pass, and the second line overwrites the
+        # verdict — every release silently dropped. B2 was parked as "out of reach for any
+        # structural workflow guard". That was WRONG: the step can be required to be EXACTLY the
+        # invocation, which is a strict-equality pin of the same family as ACCEPTED_PLAN_FORMS,
+        # and which the real step already satisfies (release.yml's own comment calls it ONE
+        # PHYSICAL LINE, for command_segments' sake).
+        #
+        # SCOPE, stated honestly. This bounds what the DECISION STEP may do; it does not bound
+        # the job. A LATER step in `plan` can still overwrite $GITHUB_OUTPUT, and no structural
+        # check in this file forbids that — the residual stays recorded, one step narrower than
+        # B2 was. The cost of the rule if it is ever wrong is small and visible: a plan job that
+        # legitimately needs setup work does it in its OWN steps, which is what the spec asks for
+        # anyway.
+        elif len(segments) != 1:
+            out.append(f"{name}: V9e: step {decision.get('id')!r} in job '{PLAN_JOB}' runs "
+                       f"{len(segments)} commands; it must run EXACTLY one, the "
+                       f"{PLAN_SCRIPT} {PLAN_SCRIPT_FLAG} invocation. A second command in the "
+                       f"same step can overwrite $GITHUB_OUTPUT after the checker wrote it, "
+                       f"which passes V9c and V9d and silently drops every release. Move setup "
+                       f"work into its own step.")
     return out
 
 
@@ -1189,6 +1287,81 @@ FIXTURES: list[tuple[str, str, str, str | None]] = [
          "        run: echo \"nothing_to_release=true\" >> \"$GITHUB_OUTPUT\"\n"
          "      - run: ci/release-plan/run.sh --help\n"),
      "V9d"),
+    # SMA-603 fix wave, 2c. V9d was a raw substring test over the decision step's `run:` text, so
+    # a COMMENT naming the script satisfied it while the step hardcoded the answer. This is the
+    # measured bypass, in the exact shape a reader would write it.
+    ("V9d fix-wave: a COMMENT naming the script does not count as invoking it", "main",
+     _OK_MAIN.replace(
+         "      - id: decide\n        run: ci/release-plan/run.sh --github-output\n",
+         "      - id: decide\n"
+         "        run: |\n"
+         "          # ci/release-plan/run.sh --github-output decides this\n"
+         "          echo \"nothing_to_release=true\" >> \"$GITHUB_OUTPUT\"\n"),
+     "V9d"),
+    # ...and the same class one step further: the script really RUNS, but with a flag that writes
+    # no output at all. `--self-test` exits 0 and appends nothing, so the job output stays unset.
+    ("V9d fix-wave: the decision step runs the script with the wrong flag", "main",
+     _OK_MAIN.replace("run: ci/release-plan/run.sh --github-output",
+                      "run: ci/release-plan/run.sh --self-test"), "V9d"),
+    # ...and a trailing-comment CONTROL: a real invocation carrying a comment must stay accepted,
+    # or the fix above would red the legitimate form it is meant to allow.
+    ("V9d fix-wave CONTROL: a real invocation with a trailing comment is accepted", "main",
+     _OK_MAIN.replace("run: ci/release-plan/run.sh --github-output",
+                      "run: ci/release-plan/run.sh --github-output  # the decision"), None),
+    # ...and an env-prefixed CONTROL, the shape a `GITHUB_EVENT_NAME=... ` prefix would take.
+    ("V9d fix-wave CONTROL: a leading env assignment and a bash prefix are accepted", "main",
+     _OK_MAIN.replace("run: ci/release-plan/run.sh --github-output",
+                      "run: GITHUB_EVENT_NAME=push bash ./ci/release-plan/run.sh --github-output"),
+     None),
+    # SMA-603 fix wave, 2d. V9c used `_PLAN_STEP_RE.search`, so ANY expression merely CONTAINING
+    # the step reference passed — including one that resolves to a constant. GitHub's `||` yields
+    # its right operand when the left is the empty string, so an unset step output becomes the
+    # literal 'true' and every consumer SKIPS. That is the branch's central property, inverted in
+    # one edit, and nothing red before this row.
+    ("V9c fix-wave: the outputs expression defaults to 'true' via ||", "main",
+     _OK_MAIN.replace(
+         "nothing_to_release: ${{ steps.decide.outputs.nothing_to_release }}",
+         "nothing_to_release: ${{ steps.decide.outputs.nothing_to_release || 'true' }}"),
+     "V9c"),
+    # ...and the concatenation shape, which the `search` form also accepted.
+    ("V9c fix-wave: the outputs expression is a concatenation, not the bare reference", "main",
+     _OK_MAIN.replace(
+         "nothing_to_release: ${{ steps.decide.outputs.nothing_to_release }}",
+         "nothing_to_release: true${{ steps.decide.outputs.nothing_to_release }}"),
+     "V9c"),
+    # SMA-603 fix wave, 2g — the re-judged parked finding B2, verbatim. The checker really runs;
+    # the next line in the SAME step overwrites its verdict. V9c and V9d both pass on this shape.
+    ("V9e fix-wave: the decision step overwrites $GITHUB_OUTPUT after running the checker", "main",
+     _OK_MAIN.replace(
+         "      - id: decide\n        run: ci/release-plan/run.sh --github-output\n",
+         "      - id: decide\n"
+         "        run: |\n"
+         "          ci/release-plan/run.sh --github-output\n"
+         "          echo \"nothing_to_release=true\" > \"$GITHUB_OUTPUT\"\n"),
+     "V9e"),
+    # ...and the same class on ONE line, via a `;` chain, which command_segments splits.
+    ("V9e fix-wave: a `;`-chained overwrite in the decision step's one line", "main",
+     _OK_MAIN.replace(
+         "run: ci/release-plan/run.sh --github-output",
+         "run: ci/release-plan/run.sh --github-output; "
+         "echo nothing_to_release=true > \"$GITHUB_OUTPUT\""),
+     "V9e"),
+    # ...and the CONTROL: a block-scalar `run:` holding ONLY the invocation stays clean, so V9e
+    # pins the command COUNT rather than the YAML scalar style.
+    ("V9e fix-wave CONTROL: a block scalar holding only the invocation is accepted", "main",
+     _OK_MAIN.replace(
+         "      - id: decide\n        run: ci/release-plan/run.sh --github-output\n",
+         "      - id: decide\n"
+         "        run: |\n"
+         "          # the decision\n"
+         "          ci/release-plan/run.sh --github-output\n"),
+     None),
+    # ...and the CONTROL for the whitespace tolerance the strict form deliberately keeps.
+    ("V9c fix-wave CONTROL: extra whitespace inside ${{ }} is accepted", "main",
+     _OK_MAIN.replace(
+         "nothing_to_release: ${{ steps.decide.outputs.nothing_to_release }}",
+         "nothing_to_release: ${{   steps.decide.outputs.nothing_to_release   }}"),
+     None),
 ]
 
 

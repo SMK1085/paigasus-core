@@ -1,6 +1,8 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 
-# `repo:release-plan`
+# `ci/release-plan`
+
+**There is no `repo:release-plan` Moon target.** This suite runs as check 11 of `repo:actionlint`, and the release workflow's `plan` job runs `--github-output` directly. The heading said `repo:release-plan` until the SMA-603 fix wave; a reader who went looking for that task found nothing.
 
 Decides whether a push to `main` has anything to release. The release workflow's `plan` job
 runs this decision first, so a push that changes nothing releasable can skip its ~15-minute
@@ -26,6 +28,15 @@ call — and it can be fixture-tested in-process, which the dry-run reading coul
 The decision, `decide(event_name, packages, tags)`, returns `True` ("nothing to release, skip
 the build") only when every package release-plz would tag already has that tag. Any other
 state builds.
+
+The package set is DERIVED from `rs/Cargo.toml`'s `[workspace] members`, not from a hardcoded
+`crates/*/*` glob. That glob matched today's layout and nothing else: a publishable member
+declared anywhere outside it was invisible, no tag was ever demanded for it, and a release with
+its tag still uncut read as "every releasable package is already tagged" — a silent skip.
+`--assert`'s strict-equality pin could not catch that, because both sides of its comparison come
+from the same function. An unresolvable member pattern is `Inconclusive`, which builds. A
+`[workspace] exclude` list is refused outright rather than ignored: this function does not model
+exclusion, and reading it as absent would make the skip permanently unreachable in silence.
 
 ## Fail-safe direction
 
@@ -71,9 +82,12 @@ tag template; it refuses to guess and builds instead.
 `run.sh` has four modes, and one of them is required:
 
 - `--self-test` — runs `release_plan.py --self-test` in-process: the pure `decide()` fixture
-  table (nine rows) plus three collection-layer rows that build throwaway trees under
-  `tempfile.mkdtemp()` to exercise `Inconclusive` paths a pure-function fixture cannot reach.
-- `--negative-control` — five rows against real and throwaway trees. Row 1 proves the checker's
+  table (nine rows) plus six collection-layer rows that build throwaway trees under
+  `tempfile.mkdtemp()` to exercise paths a pure-function fixture cannot reach: a missing
+  `release-plz.toml`, a `version.workspace = true` inheritance, a `git_tag_name` override, a
+  publishable member declared OUTSIDE `crates/*/*`, an unresolvable `[workspace] members`
+  entry, and a malformed `release-plz.toml` (which must exit 3, not 1).
+- `--negative-control` — seven rows against real and throwaway trees. Row 1 proves the checker's
   exit-3-to-1 translation; row 2 proves `--self-test` still notices a broken table. Rows 3 and 4
   each build their own throwaway git repository — one crate, one commit, tags added by the row
   — and invoke `release_plan.py` directly against it, asserting `nothing_to_release=true` when
@@ -89,7 +103,13 @@ tag template; it refuses to guess and builds instead.
   `::warning::` annotation, and its `$GITHUB_OUTPUT` append all still work. Row 5 asserts nothing
   about *which* verdict comes back, for the same reason rows 3/4 no longer touch the real
   repository directionally: the real repository's tag state is not a safe thing for this control
-  to depend on.
+  to depend on. **Row 6** is the C1 regression row: it runs `--github-output` under a
+  hermetic `PATH` holding symlinks to `bash`, `dirname`, `grep` and `tail` and nothing else,
+  asserts `uv` is genuinely unreachable under it, and then asserts the wrapper still exits
+  `0` and writes `nothing_to_release=false`. **Row 7** mutates a COPY of `release_plan.py`,
+  inverting the first fixture's expected verdict, and asserts the mutant's `--self-test`
+  exits 3 — which is what proves `self_test()`'s FIXTURES loop still evaluates its rows
+  rather than having been deleted in silence.
 - `--assert` — runs `release_plan.py --assert` against the real repository: the derived
   releasable set must equal `EXPECTED_RELEASABLE`, and the repository must report at least one
   tag (a shallow checkout with no tags cannot exercise the real decision).
@@ -116,7 +136,14 @@ scratch file) and by the release workflow itself at runtime.
 ## The checker's own exit codes, and why 3
 
 `release_plan.py` exits `0` pass, `2` its own infrastructure failure (an argument error is the
-only case today), and `3` for an assertion failure — never `1`. `uv` itself exits `1` on a
+only case today), and `3` for an assertion failure — never `1`. That was FALSE until the
+SMA-603 fix wave, and the code was fixed rather than the sentence: `workspace = 3` in
+`rs/release-plz.toml` raised a bare `TypeError` out of `assert_default_tag_format`, which
+`_assert_repo`'s `except Inconclusive` did not catch, so `--assert` exited 1 with a traceback
+and `run_checker` mapped that onto `die_infra` (2) — reporting a broken repository file as
+"infrastructure failed". `_assert_repo` now catches `Exception`, because collection reads
+only repository files, so any failure of it is a statement about the repository. A self-test
+row asserts it. `uv` itself exits `1` on a
 failed resolution. A shared code would let a `uv`/PyPI-mirror hiccup during `uv run` read as
 "the repo is wrong" instead of "the tool failed." `run.sh`'s `run_checker()` owns the
 translation: checker `0` -> wrapper `0`; checker `3` -> wrapper `1`; anything else -> wrapper
