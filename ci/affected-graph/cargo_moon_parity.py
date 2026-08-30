@@ -987,6 +987,127 @@ def task_script_refs(projects, root, target):
     return paths
 
 
+# SMA-605 - SMA-599's L2, closed one level. EXECUTION ONLY.
+#
+# A `source` / `.` statement is followed. A bare `ci/**/*.sh` mention in a script's text is NOT:
+# running SCRIPT_REF_RE over a followed script's own text was MEASURED at six new edges across
+# the real corpus, and every one of them is a comment or a pin-array string constant
+# (publish-metadata's :9-10, :1686, :1726; actionlint's :2016, :2041, :2046 and its
+# T_CARGO_LOCK_STEP_REQUIRED array at :2152-2154). That buys six scripts into A8's scope on the
+# strength of prose, one new waiver, and ZERO true positives - and it still does not reach
+# ci/release-parity/ecosystems/release-plz.sh, because SCRIPT_REF_RE cannot match a
+# `# shellcheck source=...` directive (the path is preceded by `=`, not by a separator).
+SOURCE_STMT_RE = re.compile(r"""(?m)^\s*(?:source|\.)\s+["']?([^"'\s;&|]+)["']?""")
+# A variable assigned from the `dirname "${BASH_SOURCE[0]}"` idiom IS the script's own directory.
+# VAR_ASSIGN_RE cannot capture it - it stops at the space inside `$(cd ...` - so this reads the
+# raw assignment line instead.
+HERE_IDIOM_ASSIGN_RE = re.compile(r"""(?m)^\s*([A-Za-z_][A-Za-z0-9_]*)="?\$\(cd .*BASH_SOURCE.*""")
+
+# The resolver's floor. Without it a rename empties the closure in silence - the SMA-553 class.
+REQUIRED_SOURCED_SCRIPTS = {
+    "ci/release-parity/run.sh": (
+        "ci/release-parity/ecosystems/python-semantic-release.sh",
+        "ci/release-parity/ecosystems/release-plz.sh",
+        "ci/release-parity/ecosystems/semantic-release.sh",
+    ),
+}
+
+
+def script_source_refs(path, root):
+    """The scripts `path` EXECUTES through a `source` / `.` statement.
+
+    A variable assigned EXACTLY ONCE resolves to its value; one assigned more than once - or
+    never - becomes a glob. MEASURED on the one source statement in the tree
+    (ci/release-parity/run.sh:21): HERE is assigned once, at :7, so it resolves to the script's
+    directory, while ECOSYSTEM is assigned at :8 AND :13 (from `$2`), so it globs and yields all
+    three ecosystem modules rather than only the default release-plz. The other two are real code
+    a Moon task executes, and a resolver returning only the default would leave them unscanned.
+
+    Over-approximation in the same direction as the path-insensitive scan it feeds (SMA-599 L1):
+    all three modules land in every release-parity* task's closure, including the two a given
+    invocation never sources.
+
+    Raises MoonOutputError when a source resolves to nothing - a rename would otherwise shrink
+    the closure in silence, which is the failure this whole change exists to prevent.
+    """
+    path = Path(path)
+    text = path.read_text()
+    counts = collections.Counter(name for name, _ in VAR_ASSIGN_RE.findall(text))
+    env = {name: value for name, value in VAR_ASSIGN_RE.findall(text) if counts[name] == 1}
+    for name in HERE_IDIOM_ASSIGN_RE.findall(text):
+        if counts[name] <= 1:
+            env[name] = str(path.parent)
+    # Longest name first, for the reason _cwd_inside_rs records: `str.replace` on the bare $NAME
+    # form has no word boundary, so a short name that prefixes a longer one eats it.
+    ordered = sorted(env.items(), key=lambda kv: (-len(kv[0]), kv[0]))
+    root_resolved = Path(root).resolve()
+    out = []
+    for raw in SOURCE_STMT_RE.findall(text):
+        target = raw
+        for name, value in ordered:
+            target = target.replace("${" + name + "}", value).replace("$" + name, value)
+        # The `$(dirname ...)` form used inline rather than through a variable.
+        target = re.sub(r"\$\(dirname [^)]*\)", str(path.parent), target)
+        # Anything still unresolved becomes a glob.
+        target = re.sub(r"\$\{?[A-Za-z_][A-Za-z0-9_]*\}?", "*", target)
+        candidate = Path(target)
+        if not candidate.is_absolute():
+            candidate = path.parent / candidate
+        hits = sorted(Path(candidate.anchor or "/").glob(str(candidate).lstrip("/")))
+        # Files only, and never outside the repo: a `source /etc/profile` is not a gate script,
+        # and scanning one would put text nobody reviews into A8's corpus.
+        hits = [h for h in hits if h.is_file() and root_resolved in h.resolve().parents]
+        if not hits:
+            raise MoonOutputError(
+                f"{path}: `source {raw}` resolves to no readable file inside the repo - the "
+                f"script closure would silently shrink. If the module moved, update the source "
+                f"statement."
+            )
+        out.extend(hits)
+    return out
+
+
+def task_script_closure(projects, root, target):
+    """`task_script_refs` plus the transitive `source` closure, cycle-guarded.
+
+    Breadth-first with a visited set keyed on the RESOLVED path, so a cycle terminates and a
+    module reached twice appears once. Depth is unbounded by design; the corpus is depth 2.
+    """
+    queue, seen, out = list(task_script_refs(projects, root, target)), set(), []
+    while queue:
+        path = queue.pop(0)
+        key = path.resolve()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(path)
+        queue.extend(script_source_refs(path, root))
+    return out
+
+
+def check_sourced_scripts(root, required=None):
+    """REQUIRED_SOURCED_SCRIPTS, asserted. Rows join A8's bucket in collect_findings."""
+    required = REQUIRED_SOURCED_SCRIPTS if required is None else required
+    root_resolved = Path(root).resolve()
+    rows = []
+    for rel, expected in sorted(required.items()):
+        path = root_resolved / rel
+        if not path.is_file():
+            rows.append(f"{rel} is absent - the source resolver's floor cannot be evaluated")
+            continue
+        got = tuple(sorted(
+            x.resolve().relative_to(root_resolved).as_posix()
+            for x in script_source_refs(path, root_resolved)
+        ))
+        if got != tuple(sorted(expected)):
+            rows.append(
+                f"{rel} sources {got}, expected {tuple(sorted(expected))} - the source resolver "
+                f"has degraded and the script closure would silently shrink"
+            )
+    return rows
+
+
+
 def derive_cargo_tasks(projects, root):
     """{target: kind} for every task reaching cargo. kind is wrapper | literal | script.
 
@@ -1014,7 +1135,9 @@ def derive_cargo_tasks(projects, root):
                 kinds[target] = "wrapper"
             elif any(c.kind in ("literal", "var") for c in cargo_matches(blob)):
                 kinds[target] = "literal"
-            elif any(script_cargo_lines(p) for p in task_script_refs(projects, root, target)):
+            elif any(
+                script_cargo_lines(p) for p in task_script_closure(projects, root, target)
+            ):
                 kinds[target] = "script"
     return kinds
 
@@ -1145,7 +1268,7 @@ def check_cargo_locked_scripts(projects, root, allow=None):
     allow = ALLOW_UNLOCKED_CARGO_SCRIPT if allow is None else allow
     rows, seen = [], {}
     for target in sorted(derive_cargo_tasks(projects, root)):
-        for path in task_script_refs(projects, root, target):
+        for path in task_script_closure(projects, root, target):
             rel = path.relative_to(root).as_posix()
             if rel in seen:
                 continue
@@ -1308,7 +1431,7 @@ def check_cargo_config_inputs(projects, root, allow=None, floor=None):
         # switched A10 off for that gate. `task_script_refs` returns [] when a blob names no
         # script, so this costs nothing for a task that really is blob-only: MEASURED on the
         # real corpus, in_scope stays 58 and no row appears.
-        for path in task_script_refs(projects, root, target):
+        for path in task_script_closure(projects, root, target):
             text += "\n" + Path(path).read_text()
         # A wrapper reaches cargo without a literal verb, so the verb test cannot see it. The
         # three FFI tasks compile and link cdylibs and wasm32 by construction.
@@ -2512,6 +2635,75 @@ def self_test():
                 f"the waiver-health loop and the emission loop disagree about which rows report: "
                 f"{rows}"
             )
+    # SMA-605 — the source resolver. EXECUTION ONLY: a bare `ci/**/*.sh` mention in script text
+    # is NOT followed, measured at six edges across the real corpus, every one a comment or a
+    # pin-array string constant, one new waiver and ZERO true positives (spec M10).
+    with tempfile.TemporaryDirectory() as tmp:
+        sroot = Path(tmp)
+        (sroot / "ci" / "eco").mkdir(parents=True)
+        (sroot / "ci" / "run.sh").write_text(
+            'HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"\n'
+            'ECO="a"\n'
+            'ECO="$2"\n'
+            "# see ci/other/run.sh for the idiom\n"
+            'source "$HERE/eco/$ECO.sh"\n'
+        )
+        (sroot / "ci" / "eco" / "a.sh").write_text("cargo build --locked\n")
+        (sroot / "ci" / "eco" / "b.sh").write_text("cargo build --locked\n")
+        got = sorted(x.name for x in script_source_refs(sroot / "ci" / "run.sh", sroot))
+        if got != ["a.sh", "b.sh"]:
+            failures.append(
+                f"script_source_refs resolved {got}, expected ['a.sh', 'b.sh'] — a variable "
+                f"reassigned more than once must GLOB, not resolve to its first value"
+            )
+        # The bare `ci/other/run.sh` mention in the comment must not appear. It does not exist,
+        # so following it would RAISE rather than pass quietly.
+        if any("other" in str(x) for x in script_source_refs(sroot / "ci" / "run.sh", sroot)):
+            failures.append("script_source_refs followed a bare mention in a comment")
+
+        # A cycle must terminate. Relative targets, deliberately: SOURCE_STMT_RE captures
+        # `([^"\'\\s;&|]+)`, so a `source "$(dirname "${BASH_SOURCE[0]}")/b.sh"` target is cut at
+        # the first space and never resolves. The one real statement in the tree has no space.
+        (sroot / "ci" / "eco" / "a.sh").write_text("source ./b.sh\n")
+        (sroot / "ci" / "eco" / "b.sh").write_text("source ./a.sh\ncargo build\n")
+        proj = {
+            "repo": {
+                "source_dir": ".", "deps": {}, "tasks": {},
+                "task_inputs": {"t": []}, "task_input_globs": {"t": []},
+                "invocations": {"t": "bash ci/run.sh"},
+            },
+        }
+        try:
+            closure = task_script_closure(proj, sroot, "repo:t")
+        except RecursionError:
+            failures.append("task_script_closure recursed on a source cycle")
+            closure = []
+        if len(closure) != len({x.resolve() for x in closure}):
+            failures.append("task_script_closure returned a duplicate on a source cycle")
+        if not any(x.name == "b.sh" for x in closure):
+            failures.append(
+                "task_script_closure did not reach a script two levels down — the closure is "
+                "one level deep, so a cargo call in a sourced module stays invisible"
+            )
+
+        # A source that resolves to nothing is infrastructure, never a silent skip.
+        (sroot / "ci" / "run.sh").write_text('source "$HERE/nope/absent.sh"\n')
+        try:
+            script_source_refs(sroot / "ci" / "run.sh", sroot)
+            failures.append("script_source_refs did not raise on a source resolving to nothing")
+        except MoonOutputError:
+            pass
+
+    # The resolver's FLOOR: a rename must red, not silently empty the closure.
+    _root = Path(__file__).resolve().parents[2]
+    if not check_sourced_scripts(_root, required={"ci/release-parity/run.sh": ("ci/nope.sh",)}):
+        failures.append("check_sourced_scripts did not fire on a wrong expected set")
+    if check_sourced_scripts(_root):
+        failures.append(
+            "check_sourced_scripts reports on the REAL corpus — REQUIRED_SOURCED_SCRIPTS no "
+            "longer matches what ci/release-parity/run.sh sources"
+        )
+
     if not ALLOW_UNLOCKED_CARGO_SCRIPT:
         failures.append("ALLOW_UNLOCKED_CARGO_SCRIPT is empty — its stale-entry rule asserts nothing")
 
@@ -3685,6 +3877,9 @@ def collect_findings(projects, crates, root):
         + check_dockerfile_locked(root)
         + check_cargo_locked_scripts(projects, root)
         + check_version_lockstep_no_write(projects)
+        # SMA-605. Joins A8's bucket rather than becoming an eleventh key: the resolver widens
+        # what A8 scans, it is not a new assertion, so EXPECTED_FINDING_KEYS is unchanged.
+        + check_sourced_scripts(root)
     )
     # SMA-594. Derived, never hand-listed, for the same reason `self_test`'s `complete_inputs` is:
     # these two hints named three files while the checks already demanded four, so a developer who
