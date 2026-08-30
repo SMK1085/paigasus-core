@@ -372,9 +372,11 @@ this widens A8 and A10 and adds no assertion.
 
 ### 6.2 Mutation proofs (AC 2)
 
-**MEASURED against the final code: 28 mutations, 28 killed, 0 survivors.** Each was applied to
+**MEASURED against the final code: 31 mutations, 31 killed, 0 survivors.** Each was applied to
 `cargo_moon_parity.py`, `--self-test` was run, and the file restored. Every mutation label below
-is the edit that was actually performed, not a paraphrase of it.
+is the edit that was actually performed, not a paraphrase of it. M29-M31 were added by the
+CodeRabbit PR review; re-running the whole battery after those fixes is what caught M25's fixture
+going stale (see below).
 
 | # | Mutation | Result |
 |---|---|---|
@@ -406,8 +408,11 @@ is the edit that was actually performed, not a paraphrase of it.
 | M26 | silently skip a source resolving to nothing | KILLED |
 | M27 | drop the repo-containment guard on a resolved source | KILLED |
 | M28 | drop the resolver's entry `path.resolve()` | KILLED |
+| M29 | scan RAW text for `source` statements (drop `_executable_text`) | KILLED |
+| M30 | blame `FFI_MARKERS` for every wrapper cause | KILLED |
+| M31 | drop `_executable_text`'s heredoc-open-at-EOF guard | KILLED |
 
-**SIX first-pass survivors, and what each bought.** A survivor is evidence about the FIXTURES,
+**SEVEN first-pass survivors, and what each bought.** A survivor is evidence about the FIXTURES,
 never a result to accept, so each one is recorded with the fixture that now kills it. All six
 were found during implementation or local review, not predicted by the design.
 
@@ -419,6 +424,13 @@ were found during implementation or local review, not predicted by the design.
 | M21 | a blob-level `CARGO=` is already `wrapper` by derivation, so `kind == "wrapper"` covered it. The clause is load-bearing only one level down. | a `CARGO=` inside a FOLLOWED SCRIPT — SMA-599 L13's shape, where the task derives as `script`. |
 | M27 | the repo-containment guard was added during the plan's own self-review and shipped with no fixture. | a `source` naming a file outside the repo must raise. |
 | M28 | `resolve()` is a no-op at every current call site, so it was unasserted hardening. | `script_source_refs` on a RELATIVE path must resolve identically. |
+| M25 | it KILLED until M29's fix landed, then went stale. The fixture put the bare `ci/**/*.sh` mention in a COMMENT, and `_executable_text` strips comments — so after the heredoc fix the mutation had nothing left to find. Only re-running the WHOLE battery after a fix, rather than the mutations that fix introduced, exposed it. | an EXECUTABLE bare mention (a pin-array string constant), which is the real corpus shape: every one of the six measured prose edges is a comment **or a constant**, and a constant is executable text. |
+
+**Two entries were live defects before they were mutations.** M5 (below) and M29: a `source`
+inside a heredoc BODY matched, because `script_source_refs` scanned raw text while claiming to be
+execution-only. That one did not merely over-report — it raised `MoonOutputError` and **aborted
+the gate at rc 2** on a benign script. Found by the CodeRabbit PR review, fixed by reusing
+`script_cargo_lines`' own heredoc walk (`_executable_text`) rather than by documenting it.
 
 **M5 was not a mutation first — it was a live defect**, found by the CodeRabbit local review and
 confirmed by measurement. `\s` in the trailing lookahead crosses a newline, so
