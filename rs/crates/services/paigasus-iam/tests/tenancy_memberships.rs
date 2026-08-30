@@ -333,7 +333,17 @@ async fn list_by_node_on_org_returns_its_members() {
 /// SMA-440 D2: `MembershipRecord` is what BOTH wire surfaces project, and it is filled by
 /// nine hand-written SELECTs across five constants. A SELECT that omits `m.created_by`
 /// compiles and then disagrees with the others, which is exactly the "inconsistent across
-/// later reads" defect this issue exists to remove. This asserts all three read paths agree.
+/// later reads" defect this issue exists to remove.
+///
+/// Covers all nine arms: attaches an org, a team AND a project membership for the same
+/// principal (so `list_by_principal` exercises every arm of `LIST_BY_PRINCIPAL_SQL` in one
+/// call), then for each of the three node kinds asserts `find` (one `FIND_SQL` arm),
+/// `list_by_principal` (one `LIST_BY_PRINCIPAL_SQL` arm) and `list_by_node` (which routes to
+/// `LIST_BY_ORG_SQL`/`LIST_BY_TEAM_SQL`/`LIST_BY_PROJECT_SQL` respectively) all agree on the
+/// creator. Each membership is stamped by a DISTINCT actor: three memberships sharing one
+/// actor would still pass even if a `created_by` column were swapped with another `text`
+/// column in one arm (a same-type reorder — Postgres only rejects a `UNION` column COUNT
+/// mismatch, not a same-typed column in the wrong position).
 #[tokio::test]
 async fn every_membership_read_path_agrees_on_the_creator() {
     let Some((_node, db)) = support::start_migrated_postgres().await else {
@@ -341,22 +351,52 @@ async fn every_membership_read_path_agrees_on_the_creator() {
     };
     let ids = KernelIdGenerator;
     let clock = SystemClock;
-    let (org, _team, _project) = seed_chain(&db).await;
+    let (org, team, project) = seed_chain(&db).await;
     let principal = seed_user(&db, 11).await;
-    let actor = ids.new_principal_id();
     let repo = PgMembershipRepository::new(db.clone());
 
-    let stamp = Stamp::new(clock.now(), actor.clone());
-    let membership = Membership::new(ids.new_membership_id(), principal.clone(), TenancyNodeRef::Organization(org.id.clone()), &stamp);
-    let attached = repo.attach(&membership, &stamp).await.unwrap();
+    let org_actor = PrincipalId::from_prn(Prn::build("iam", "", None, "principal", Uuid::from_u128(90_001)).unwrap());
+    let team_actor = PrincipalId::from_prn(Prn::build("iam", "", None, "principal", Uuid::from_u128(90_002)).unwrap());
+    let project_actor = PrincipalId::from_prn(Prn::build("iam", "", None, "principal", Uuid::from_u128(90_003)).unwrap());
+    assert_ne!(org_actor, team_actor);
+    assert_ne!(team_actor, project_actor);
+    assert_ne!(org_actor, project_actor);
 
-    let found = repo.find(attached.id).await.unwrap().expect("membership exists");
+    // Org membership must exist before the team/project attaches (D8's org-membership
+    // invariant) — but each attach is stamped by its OWN distinct actor.
+    let org_stamp = Stamp::new(clock.now(), org_actor.clone());
+    let org_membership = Membership::new(ids.new_membership_id(), principal.clone(), TenancyNodeRef::Organization(org.id.clone()), &org_stamp);
+    let org_attached = repo.attach(&org_membership, &org_stamp).await.unwrap();
+
+    let team_stamp = Stamp::new(clock.now(), team_actor.clone());
+    let team_membership = Membership::new(ids.new_membership_id(), principal.clone(), TenancyNodeRef::Team(team.id.clone()), &team_stamp);
+    let team_attached = repo.attach(&team_membership, &team_stamp).await.unwrap();
+
+    let project_stamp = Stamp::new(clock.now(), project_actor.clone());
+    let project_membership = Membership::new(ids.new_membership_id(), principal.clone(), TenancyNodeRef::Project(project.id.clone()), &project_stamp);
+    let project_attached = repo.attach(&project_membership, &project_stamp).await.unwrap();
+
+    // One `list_by_principal` call exercises all three `LIST_BY_PRINCIPAL_SQL` UNION arms at
+    // once, since all three memberships belong to this same principal.
     let by_principal = repo.list_by_principal(principal.uuid(), 50, 0).await.unwrap();
-    let by_node = repo.list_by_node(&TenancyNodeRef::Organization(org.id.clone()), 50, 0).await.unwrap();
 
-    let expected = Some(stamp.by.clone());
-    assert_eq!(attached.created_by, expected, "attach must return the creator it wrote");
-    assert_eq!(found.created_by, expected, "FIND_SQL must select created_by");
-    assert_eq!(by_principal[0].created_by, expected, "LIST_BY_PRINCIPAL_SQL must select created_by");
-    assert_eq!(by_node[0].created_by, expected, "LIST_BY_ORG_SQL must select created_by");
+    let cases: [(&paigasus_iam_core::MembershipRecord, TenancyNodeRef, &PrincipalId, &str); 3] = [
+        (&org_attached, TenancyNodeRef::Organization(org.id.clone()), &org_actor, "LIST_BY_ORG_SQL"),
+        (&team_attached, TenancyNodeRef::Team(team.id.clone()), &team_actor, "LIST_BY_TEAM_SQL"),
+        (&project_attached, TenancyNodeRef::Project(project.id.clone()), &project_actor, "LIST_BY_PROJECT_SQL"),
+    ];
+    for (attached, node, actor, node_list_label) in cases {
+        let expected = Some(actor.clone());
+        assert_eq!(attached.created_by, expected, "attach must return the creator it wrote ({node_list_label})");
+
+        let found = repo.find(attached.id).await.unwrap().expect("membership exists");
+        assert_eq!(found.created_by, expected, "FIND_SQL must select created_by ({node_list_label})");
+
+        let from_principal_list = by_principal.iter().find(|r| r.id == attached.id).expect("membership present in list_by_principal");
+        assert_eq!(from_principal_list.created_by, expected, "LIST_BY_PRINCIPAL_SQL must select created_by ({node_list_label})");
+
+        let by_node = repo.list_by_node(&node, 50, 0).await.unwrap();
+        let from_node_list = by_node.iter().find(|r| r.id == attached.id).expect("membership present in list_by_node");
+        assert_eq!(from_node_list.created_by, expected, "{node_list_label} must select created_by");
+    }
 }
