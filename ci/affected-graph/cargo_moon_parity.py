@@ -261,8 +261,13 @@ CARGO_VAR_NAME = "cargo"
 # No verb requirement: the tool's verbs belong to the tool, not to cargo. The trailing word is a
 # LOOKAHEAD, never consumed — that is what makes `export CARGO=/p`, an assignment with nothing to
 # run, report nothing, and it keeps a second env prefix's leading separator intact.
+# The trailing lookahead is HORIZONTAL whitespace only (`[^\S\n]`), never `\s`. MEASURED: with
+# `\s` it crosses a newline, so `export CARGO=/p` followed by an unrelated command on the NEXT
+# line matches — and fifteen real moon blobs are multi-line `script:` blocks, so that is a live
+# false positive on the blob arm, not a hypothetical one. The LEADING separator keeps `\s`
+# deliberately: a newline before `CARGO=` really does start a command.
 CARGO_ENV_PREFIX_RE = re.compile(
-    r"""(?:^|[\s;&|(])CARGO=(?:"[^"]*"|'[^']*'|[^\s;&|]*)(?=\s+\S)"""
+    r"""(?:^|[\s;&|(])CARGO=(?:"[^"]*"|'[^']*'|[^\s;&|]*)(?=[^\S\n]+\S)"""
 )
 
 CargoMatch = collections.namedtuple("CargoMatch", "start end verb kind")
@@ -1049,7 +1054,11 @@ def script_source_refs(path, root):
     Raises MoonOutputError when a source resolves to nothing - a rename would otherwise shrink
     the closure in silence, which is the failure this whole change exists to prevent.
     """
-    path = Path(path)
+    # RESOLVED at entry, deliberately: `$HERE` expands to `str(path.parent)`, so a relative
+    # `path` produced a relative expansion, the `not candidate.is_absolute()` branch prepended
+    # the parent a SECOND time, and every source resolved to nothing (MEASURED — it raised
+    # rather than passing quietly, but the trap is real and one line removes it).
+    path = Path(path).resolve()
     text = path.read_text()
     counts = collections.Counter(name for name, _ in VAR_ASSIGN_RE.findall(text))
     env = {name: value for name, value in VAR_ASSIGN_RE.findall(text) if counts[name] == 1}
@@ -2600,7 +2609,11 @@ def self_test():
             'out="$(cd x && CARGO=/p tool update)"\n'    # 7: reports, inside $( )
             'export CARGO=/p\n'                          # 8: clean, nothing to run
         )
-        got = {(l.lineno, l.kind) for l in script_cargo_lines(indirect) if _row_reports(l)}
+        got = {
+            (line.lineno, line.kind)
+            for line in script_cargo_lines(indirect)
+            if _row_reports(line)
+        }
         want = {(2, "var"), (5, "env"), (6, "env"), (7, "env")}
         if got != want:
             failures.append(
@@ -2609,7 +2622,7 @@ def self_test():
             )
         # The `--no-deps` carve-out must key on the VERB, not on CARGO_METADATA_RE: the latter
         # needs a literal lowercase `cargo` and never fires for `"$CARGO_BIN" metadata`.
-        if any(l.lineno == 4 and l.resolves for l in script_cargo_lines(indirect)):
+        if any(line.lineno == 4 and line.resolves for line in script_cargo_lines(indirect)):
             failures.append(
                 "A8 treats `\"$CARGO_BIN\" metadata --no-deps` as resolving — the carve-out is "
                 "still keyed on CARGO_METADATA_RE rather than on the matched verb (SMA-599 D4)"
@@ -3580,6 +3593,10 @@ def self_test():
         # distinguish the lookahead from a consuming `\\s+\\S` — both report zero here, measured.
         # The row below is the one that does.
         ('export CARGO=/p', []),
+        # ...and the lookahead must not cross a NEWLINE to find one. Fifteen real moon blobs are
+        # multi-line `script:` blocks, so a `\s`-based lookahead makes an unrelated next line
+        # into a wrapper match (MEASURED, CodeRabbit local review).
+        ("export CARGO=/p\necho hi", []),
         # THE LOOKAHEAD'S PROOF, and the only shape that separates it from consumption
         # (measured over eight candidate shapes). Consuming the trailing word eats the second
         # prefix's leading separator, so `finditer` resumes mid-token and reports ONE match
