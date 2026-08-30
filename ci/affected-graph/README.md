@@ -154,6 +154,17 @@ It also runs several checks that the per-case project sets structurally **cannot
   `moon.yml`/`.moon/tasks/*.yml`/`rs/Dockerfile`/`ci/**/*.sh` was measured at 45 matches of which
   only ~14 were real invocations (`moon.yml`'s `echo "cargo tree failed …"` sits on an EXECUTING
   line), while the resolved blob measured 60 matches with 0 false positives.
+  Since SMA-605 the match is not literal-only. `cargo_matches` merges three arms: the literal
+  `cargo <verb>`, a cargo-NAMED variable in command position (`"$CARGO_BIN" build`), and the
+  `CARGO=<path> <tool>` environment prefix. The first two are cleared by `--locked`; the third
+  NEVER is, because the flag would reach the tool and not the cargo behind it, so it carries the
+  same wrapper rule `FFI_MARKERS` does. Arm 1 reports **zero** rows on the corpus and is labelled
+  forward cover in the code; arm 2 reports exactly one, at
+  `ci/release-parity/ecosystems/release-plz.sh:152`, waived with a measured reason.
+  Script-following is now transitive over `source` / `.` statements, cycle-guarded and confined
+  to the repo (`script_source_refs`, `task_script_closure`, floored by
+  `REQUIRED_SOURCED_SCRIPTS`). Bare `ci/**/*.sh` MENTIONS are deliberately not followed:
+  measured at six edges, all comments or pin-array constants, one waiver, zero true positives.
   The two match kinds are NOT treated alike, and conflating them is measurably vacuous. A literal
   `cargo <verb>` match (`CARGO_INVOCATION_RE`) is cleared by `--locked` in the blob, because the
   blob IS the invocation. An `FFI_MARKERS` match is a WRAPPER whose own cargo call takes no flag,
@@ -250,9 +261,14 @@ It also runs several checks that the per-case project sets structurally **cannot
   EMPTY; every exclusion is structural. Counts on today's corpus: 59 tasks declare the file, A10
   examines 58 of them, and the one it does not — `paigasus-kernel-py:test` — is asserted by **A5**
   instead, whose `FFI_TASK_INPUTS` splat already demands it. A10 does NOT close the general problem: it shares
-  `derive_cargo_tasks`/`CARGO_INVOCATION_RE` with A8, built from `LOCK_RESOLVING_VERBS`, so a
+  `derive_cargo_tasks`'s VERB LIST with A8, `LOCK_RESOLVING_VERBS`, so a
   subcommand outside that list (`cargo llvm-cov`, `insta`, `udeps`, `bloat`) yields an empty
-  derivation and stays invisible to A10 too (spec L11).
+  derivation and stays invisible to A10 too (spec L11). SMA-605 added two INDIRECTION arms
+  without touching that verb list, so L11 is unchanged. A10 carries its own sensitive variants
+  of both: `CARGO_VAR_CMD_SENSITIVE_RE`, built from `CONFIG_SENSITIVE_VERBS` rather than reused
+  from A8 — reusing A8's would pull `"$CARGO_BIN" tree` into A10's scope with nothing to red it
+  — and the `CARGO=` prefix, which makes a task sensitive UNCONDITIONALLY, since A10 cannot read
+  the subcommand the redirected tool will run.
 - **`ci-targets`** (`ci_targets.py`, SMA-541) asserts `ci.yml`'s hand-written `moon ci` target array
   is complete and live: **C1** every CI-eligible `repo:*` task appears in `T=(…)` and — strict
   equality, not a subset — nothing in `T` names a `repo` task that is switched off; **C2** every `T`

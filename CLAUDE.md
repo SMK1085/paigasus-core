@@ -552,9 +552,20 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   (`ci/affected-graph/cargo_moon_parity.py`, SMA-599) closes the `rs/.cargo/config.toml` case
   specifically, including for a gate that reaches cargo only through its own `ci/**/run.sh` —
   that whole class was outside A8 too until SMA-599. It does not close the general problem: A10
-  shares `CARGO_INVOCATION_RE`, built from `LOCK_RESOLVING_VERBS`, with A8's derivation, so a
+  shares `derive_cargo_tasks`'s VERB LIST, `LOCK_RESOLVING_VERBS`, with A8's derivation, so a
   subcommand outside that list (`cargo llvm-cov`, `insta`, `udeps`, `bloat`) yields an empty
-  derivation and stays invisible to A10 too (spec L11). What is still true: A4 covers each
+  derivation and stays invisible to A10 too (spec L11). **SMA-605** widened what counts as an
+  INVOCATION without touching that verb list: `cargo_matches` merges the literal arm with a
+  cargo-NAMED variable in command position (`"$CARGO_BIN" build`) and the `CARGO=<path> <tool>`
+  env prefix, the latter carrying wrapper semantics — no flag can ever clear it, since the flag
+  reaches the tool and not the cargo behind it. SMA-605 also made script-following TRANSITIVE
+  over `source`/`.` statements (cycle-guarded, repo-confined, floored by
+  `REQUIRED_SOURCED_SCRIPTS`), which is what finally reaches
+  `ci/release-parity/ecosystems/*.sh`; bare `ci/**/*.sh` MENTIONS stay unfollowed, measured at
+  six prose edges (comments and pin arrays) and zero true positives. Arm 1 reports ZERO rows on
+  the corpus and is labelled forward cover in the code; arm 2 reports one, at
+  `ci/release-parity/ecosystems/release-plz.sh:152`, waived because it runs against a
+  `mktemp -d` fixture outside the repo. What is still true: A4 covers each
   crate's `lint`/`fmt`, A5 the three derived FFI tasks, and `repo:input-liveness` proves
   DECLARED inputs are live, never that NEEDED ones are declared. A future `repo:*` task can omit
   some OTHER input it reads and nothing reds — check by hand when adding a cargo-invoking gate.
