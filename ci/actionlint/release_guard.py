@@ -507,10 +507,17 @@ def publish_credential_violations(job: dict, job_id: str, name: str) -> list[str
     Important 3): that scope is reachable from every step via the `secrets` context, so a
     credential lifted from a step env: to the workflow root would otherwise pass this check clean.
 
-    Fail-closed (fix round 1, Minor 6): a present-but-non-mapping env:/container:/services: value
-    is invalid GitHub Actions YAML this guard must not silently pass through as clean, or crash
-    on — every such shape now calls infra() (SystemExit(2)), the file's own convention, rather
-    than raising an uncaught AttributeError from calling .items() on a scalar.
+    Fail-closed (fix round 1, Minor 6; refined fix round 2): a present-but-non-mapping env:/
+    services:/services.<id>: value is invalid GitHub Actions YAML this guard must not silently
+    pass through as clean, or crash on — every such shape calls infra() (SystemExit(2)), the
+    file's own convention, rather than raising an uncaught AttributeError from calling .items()
+    on a scalar. `container:` is the ONE exception: GitHub Actions permits a bare string there as
+    an image-only shorthand (confirmed against the SchemaStore workflow schema, which types
+    `container` as `oneOf [string, object]` but types each `services.<id>` entry as an object
+    only, no string form) — fix round 2, Important. MEASURED before this fix: a bare-string
+    `container:` value aborted the entire guard at exit 2 on a workflow shape GitHub Actions
+    accepts. A string carries no `env:` to scan, so it is skipped rather than treated as
+    malformed.
 
     `secrets: inherit` (a STRING, not a mapping) is a genuine GitHub Actions shape for a
     reusable-workflow-call job and is deliberately NOT fail-closed here — a name-based check
@@ -544,14 +551,22 @@ def publish_credential_violations(job: dict, job_id: str, name: str) -> list[str
     for key, value in mapping_pairs(job.get("env"), "an env:"):
         scan(f"{key}: {value}", "the job env:")
 
+    # fix round 2: `container:` accepts a bare string (image-only shorthand) as well as a
+    # mapping — see the docstring above. A string carries no env: to scan; skip it. Only a
+    # value that is NEITHER a string NOR a mapping is malformed.
     container = job.get("container")
-    if container is not None:
-        if not isinstance(container, dict):
-            infra(f"{name}: job '{job_id}' has container: that is not a mapping "
-                  f"(got {type(container).__name__}: {container!r})")
+    if isinstance(container, dict):
         for key, value in mapping_pairs(container.get("env"), "a container env:"):
             scan(f"{key}: {value}", "the job container env:")
+    elif container is not None and not isinstance(container, str):
+        infra(f"{name}: job '{job_id}' has container: that is not a mapping or a string "
+              f"(got {type(container).__name__}: {container!r})")
 
+    # fix round 2: unlike `container:`, a `services.<id>` entry has NO string shorthand — the
+    # SchemaStore workflow schema types `services` as an object whose values are ALWAYS the
+    # object-only `serviceContainer` definition, never a bare string. A non-mapping value here
+    # (or a non-mapping `services:` itself) is therefore genuinely malformed, and stays
+    # fail-closed via infra(), unchanged from fix round 1.
     services = job.get("services")
     if services is not None:
         if not isinstance(services, dict):
@@ -1620,6 +1635,19 @@ FIXTURES: list[tuple[str, str, str, str | None]] = [
          "  release:\n    needs: [build, approve-release]\n"
          "    uses: ./.github/workflows/does-not-exist.yml\n"
          "    secrets: inherit\n"),
+     None),
+
+    # --- V10 fix round 2, Important: `container:` accepts a bare image-reference STRING as a
+    # documented GitHub Actions shorthand (SchemaStore schema: oneOf [string, object]) — a string
+    # carries no env: to scan, so the scan must SKIP it rather than infra() on it. MEASURED before
+    # this fix: `container: <image>` aborted the whole guard at exit 2 on this valid shape.
+    ("V10 job-level container: string shorthand is accepted, not aborted", "main",
+     _OK_MAIN.replace(
+         "  release:\n    needs: [build, approve-release]\n    runs-on: ubuntu-latest\n"
+         "    steps: [{run: release-plz release}]\n",
+         "  release:\n    needs: [build, approve-release]\n    runs-on: ubuntu-latest\n"
+         "    container: postgres:16\n"
+         "    steps: [{run: release-plz release}]\n"),
      None),
 ]
 
