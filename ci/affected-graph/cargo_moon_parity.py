@@ -229,8 +229,8 @@ CONFIG_SENSITIVE_RE = re.compile(
 # nothing to red it — the coupling SMA-599 D9 removed for the literal arm, re-created for the
 # indirect one.
 CARGO_VAR_CMD_SENSITIVE_RE = re.compile(
-    r"""(?:^|[\s;&|(])["']?\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?["']?\s+"""
-    r"(?:\+\S+\s+)?(?:" + "|".join(CONFIG_SENSITIVE_VERBS) + r")\b"
+    r"""(?:^|[\s;&|(])["']?\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?["']?[^\S\n]+"""
+    r"(?:\+\S+[^\S\n]+)?(?:" + "|".join(CONFIG_SENSITIVE_VERBS) + r")\b"
 )
 CARGO_CONFIG_INPUT = "rs/.cargo/config.toml"
 
@@ -247,9 +247,14 @@ CARGO_CONFIG_INPUT = "rs/.cargo/config.toml"
 # CARGO_BIN="$( command -v cargo … )", so it cannot reach the real shape, and a value predicate
 # would fire on the three variables in ci/actionlint/run.sh whose literal values mention cargo —
 # the file SMA-599 L4 already names as one edit from a spurious row.
+# HORIZONTAL whitespace between the variable and its verb, never `\s` — same reason as arm 2's
+# lookahead (M5): `\s` crosses a physical line, COMMAND_SPLIT_RE does not split on newlines, and a
+# blob is often a multi-line `script:` block, so `"$CARGO_BIN"` on one line and `build` on the
+# next would read as one invocation. The LEADING separator keeps `\s`: a newline really does start
+# a command.
 CARGO_VAR_CMD_RE = re.compile(
-    r"""(?:^|[\s;&|(])["']?\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?["']?\s+"""
-    r"(?:\+\S+\s+)?(" + "|".join(LOCK_RESOLVING_VERBS) + r")\b"
+    r"""(?:^|[\s;&|(])["']?\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?["']?[^\S\n]+"""
+    r"(?:\+\S+[^\S\n]+)?(" + "|".join(LOCK_RESOLVING_VERBS) + r")\b"
 )
 CARGO_VAR_NAME = "cargo"
 
@@ -267,9 +272,21 @@ CARGO_VAR_NAME = "cargo"
 # line matches — and fifteen real moon blobs are multi-line `script:` blocks, so that is a live
 # false positive on the blob arm, not a hypothetical one. The LEADING separator keeps `\s`
 # deliberately: a newline before `CARGO=` really does start a command.
+# The lookahead skips any further `NAME=value` assignments and then demands a NON-assignment
+# token: `CARGO=/p CARGO_HOME=/x` sets two variables and runs nothing, so it is not a wrapper.
+# Skipping rather than simply rejecting an assignment is what keeps `CARGO=/p CARGO_HOME=/x tool
+# run` matched — the tool is still reached with cargo redirected.
+_ENV_ASSIGN = r"""[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|[^\s;&|]*)"""
 CARGO_ENV_PREFIX_RE = re.compile(
-    r"""(?:^|[\s;&|(])CARGO=(?:"[^"]*"|'[^']*'|[^\s;&|]*)(?=[^\S\n]+\S)"""
+    r"""(?:^|[\s;&|(])CARGO=(?:"[^"]*"|'[^']*'|[^\s;&|]*)"""
+    r"(?=(?:[^\S\n]+" + _ENV_ASSIGN + r")*[^\S\n]+(?!" + _ENV_ASSIGN + r")\S)"
 )
+
+# A Dockerfile `ENV CARGO=…` is NOT a shell env prefix and deliberately does not go through
+# CARGO_ENV_PREFIX_RE: it carries no command on its own line, yet it redirects cargo for every
+# later RUN in the image. `\bCARGO=` does not match `CARGO_HOME=`, since the `=` there follows
+# `HOME` (CodeRabbit PR review asked for this case to be handled separately, and it is).
+DOCKERFILE_ENV_CARGO_RE = re.compile(r"^\s*ENV\b.*\bCARGO=")
 
 CargoMatch = collections.namedtuple("CargoMatch", "start end verb kind")
 
@@ -890,6 +907,22 @@ def cargo_matches(text):
             continue
         claimed.add(match.end)
         out.append(match)
+    # An env prefix whose COMMAND is cargo itself is not indirection, and reporting both is worse
+    # than redundant: the two rows carry the SAME segment text, so every waiver for that line is
+    # permanently AMBIGUOUS and the line cannot be waived at all — SMA-599 L15, reached by a new
+    # route. MEASURED on `CARGO=/p cargo build --locked`, a correctly locked call that reported
+    # twice and could not be cleared (CodeRabbit PR review). The gap may hold further `NAME=value`
+    # assignments, which is why it is not a bare adjacency test.
+    real = [c for c in out if c.kind in ("literal", "var")]
+    gap_is_env_only = re.compile(r"^(?:[^\S\n]+" + _ENV_ASSIGN + r")*[^\S\n]*$")
+    out = [
+        c
+        for c in out
+        if c.kind != "env"
+        or not any(
+            m.start >= c.end and gap_is_env_only.match(text[c.end : m.start]) for m in real
+        )
+    ]
     return sorted(out, key=lambda c: c.start)
 
 
@@ -1374,13 +1407,13 @@ def check_cargo_locked_scripts(projects, root, allow=None):
                             f"{rel}:{line.lineno} sets CARGO= to redirect cargo through another "
                             f"tool, which cannot take {LOCKED_FLAG} — a {LOCKED_FLAG} on the "
                             f"tool does NOT cover it, so this line needs an "
-                            f"ALLOW_UNLOCKED_CARGO_SCRIPT entry: {text[:100]}"
+                            f"ALLOW_UNLOCKED_CARGO_SCRIPT entry: {text}"
                         )
                     else:
                         rows.append(
                             f"{rel}:{line.lineno} reaches cargo without {LOCKED_FLAG} — it will "
                             f"re-resolve and REWRITE an inconsistent Cargo.lock in place: "
-                            f"{text[:100]}"
+                            f"{text}"
                         )
                 elif not reason.strip():
                     rows.append(
@@ -1587,6 +1620,13 @@ def check_dockerfile_locked(root):
     seen = 0
     for lineno, line in enumerate(path.read_text().splitlines(), 1):
         stripped = line.split("#", 1)[0]
+        if DOCKERFILE_ENV_CARGO_RE.search(stripped):
+            rows.append(
+                f"rs/Dockerfile:{lineno} sets CARGO= in an ENV directive, redirecting cargo for "
+                f"every later RUN through a tool that cannot take {LOCKED_FLAG}: "
+                f"{stripped.strip()}"
+            )
+            continue
         found = cargo_matches(stripped)
         if not found:
             continue
@@ -2700,6 +2740,33 @@ def self_test():
         # TOOL carries --locked. Without this the emission half can be made kind-blind on its own
         # and every other fixture here still passes (MEASURED) — the `got`/`want` set above reads
         # `_row_reports` directly and never runs check_cargo_locked_scripts.
+        # The emitted row must carry the EXACT waiver key. The waiver dict is keyed on the full
+        # stripped segment, so a truncated message means a long segment's key can never be copied
+        # out of the gate's own output and the line is unwaivable (CodeRabbit PR review).
+        long_seg = 'CARGO=/p tool update ' + '--flag-that-makes-this-segment-long ' * 4
+        long_sh = probe / "long.sh"
+        long_sh.write_text(long_seg + "\n")
+        long_rows = [
+            l for l in script_cargo_lines(long_sh) if _row_reports(l)
+        ]
+        if len(long_rows) != 1:
+            failures.append(f"the long-segment fixture did not produce one row: {long_rows}")
+        else:
+            key = long_rows[0].segment.strip()
+            long_fixture = {
+                "repo": {
+                    "source_dir": ".", "deps": {}, "tasks": {},
+                    "task_inputs": {}, "task_input_globs": {},
+                    "invocations": {"L": "bash ci/probe/long.sh"},
+                },
+            }
+            emitted = check_cargo_locked_scripts(long_fixture, Path(tmp), allow={})
+            if not any(key in r for r in emitted):
+                failures.append(
+                    f"A8's row truncates a {len(key)}-char segment, so its waiver key cannot be "
+                    f"copied from the gate output and the line is unwaivable: {emitted}"
+                )
+
         rows = check_cargo_locked_scripts(indirect_fixture, Path(tmp), allow={})
         if not any("indirect.sh:6" in r and "sets CARGO=" in r for r in rows):
             failures.append(
@@ -3758,6 +3825,24 @@ def self_test():
         # multi-line `script:` blocks, so a `\s`-based lookahead makes an unrelated next line
         # into a wrapper match (MEASURED, CodeRabbit local review).
         ("export CARGO=/p\necho hi", []),
+        # ARM 1 MUST NOT SPAN A NEWLINE either (CodeRabbit PR review). COMMAND_SPLIT_RE does not
+        # split on newlines and a blob is often a multi-line `script:` block, so a `\s` between
+        # the variable and its verb reads two separate commands as one invocation.
+        ('"$CARGO_BIN"\nbuild', []),
+        # An env prefix followed only by MORE ASSIGNMENTS runs nothing, so it is not a wrapper...
+        ("CARGO=/p CARGO_HOME=/x", []),
+        # ...but one followed by assignments AND a command still is: the tool is reached with
+        # cargo redirected, so skipping the assignments matters more than rejecting them.
+        ("CARGO=/p CARGO_HOME=/x tool run", [("env", None)]),
+        # An env prefix whose COMMAND IS CARGO is not indirection. Reporting both kinds gives two
+        # rows with the SAME segment text, which makes every waiver for that line permanently
+        # ambiguous — the line becomes unwaivable (SMA-599 L15, MEASURED on the locked form).
+        ("CARGO=/p cargo build", [("literal", "build")]),
+        ("CARGO=/p cargo build --locked", [("literal", "build")]),
+        ("CARGO=/p CARGO_HOME=/x cargo build", [("literal", "build")]),
+        # ...but a SEPARATE command after it keeps both: the redirection governs `tool`, not the
+        # cargo call that follows the `&&`.
+        ("CARGO=/p tool update && cargo build", [("env", None), ("literal", "build")]),
         # THE LOOKAHEAD'S PROOF, and the only shape that separates it from consumption
         # (measured over eight candidate shapes). Consuming the trailing word eats the second
         # prefix's leading separator, so `finditer` resumes mid-token and reports ONE match
