@@ -256,10 +256,16 @@ def command_segments(line: str) -> list[str]:
 # 11.11.0: `--dry-run-x` warns `Unknown cli config`, sets `dry-run-x`, leaves `dry-run` UNSET,
 # and really publishes. The idiom PUBLISH_MARKERS uses for the same job (`release-plz
 # release(?![-\w])`) is not enough here: `.` is neither `-` nor a word character, so
-# `--dry-run.x` still matched under it (measured EXEMPT). A command-line flag token ends at
-# whitespace, so the anchor is `(?!\S)` — "followed by whitespace or by nothing" — which
-# subsumes `(?![-\w])` and also rejects `--dry-run.x`. The `=` form is NOT reachable here: the
-# value scan below returns before this regex is ever applied.
+# `--dry-run.x` still matched under it (measured EXEMPT). The anchor is `(?!\S)` — "not
+# immediately followed by a Python \S character" — which subsumes `(?![-\w])` and also rejects
+# `--dry-run.x`. This is a description of what the code does, not a claim that it matches shell
+# word-splitting in general: Python's `\S` is Unicode-aware and excludes some whitespace a shell
+# does NOT treat as a token separator. KNOWN LIMITATION: `--dry-run` followed by U+00A0 (a
+# non-breaking space) satisfies `(?!\S)` here and reads exempt, but bash does not split on NBSP,
+# so the real invocation receives one token, `--dry-run` immediately followed by an NBSP
+# and more text, that the underlying tool does not recognize as a dry-run flag: it really
+# publishes. Not closed here; see the spec's limitations. The `=` form is NOT reachable here:
+# the value scan below returns before this regex is ever applied.
 _DRY_RUN_FLAG_RE = re.compile(r"--dry-run(?!\S)")
 
 # V8 fix round 4, Important 1. The general "any `=` value is unverified, so fail closed" rule,

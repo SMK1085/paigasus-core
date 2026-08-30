@@ -258,11 +258,21 @@ over `run:` only and would have missed `uses: pypa/gh-action-pypi-publish`.
   its own `gated_path_jobs(job_id, jobs)`. Without this, deleting `approve-release` from
   `release`'s `needs:` at `release.yml:409` removes the only human gate in the file and passes
   V1, V3, V4, V7 and V8a/V8b.
-- **V8d, callees:** `check_called` (`release_guard.py:381`) *permits* a publish step in a
-  `workflow_call`-only workflow, and the fixture at `:477` asserts that is clean. But `wheels`
-  and `prebuild` are `uses:` jobs **upstream of the approval gate**. So for a `uses: ./…` job in
-  the pre-approval set, the callee is loaded and publishing is forbidden there regardless of its
-  triggers. This closes a live publish-before-approval path that predates this change.
+- **V8d, callees (superseded by fix round 1, Critical 1 — the shipped rule is broader and
+  simpler than what this paragraph originally described):** `check_called`
+  (`release_guard.py:381`) *permits* a publish step in a `workflow_call`-only workflow, and the
+  fixture at `:477` asserts that is clean. The rule is not scoped to jobs already known to sit
+  upstream of the approval gate — it is ONE rule over every job's own callee, implemented in
+  `callee_boundary_violations`: for every job carrying `uses: ./X`, the callee `X` is loaded and,
+  if any job inside it publishes, `approve-release` must be on the CALLING job's own `needs:`
+  path. Restricting the check to a pre-approval SET, as the original wording implied, would miss
+  a job that sits neither on `approve-release`'s needs: path nor needs `approve-release` itself —
+  e.g. a `sneak` job hanging off `build`, gated on V1, calling a `workflow_call`-only local
+  callee that publishes — which the general rule still catches because it scans every job's
+  `uses:`, not only ones already known to be upstream of the gate. The pre-approval case (`wheels`
+  and `prebuild`) is a special case of this general rule, not a separate mechanism: a caller
+  upstream of the gate can never have the gate on its own `needs:` path, since `needs:` walks
+  upstream, never down, so it reds under the same one rule.
 
 **V9 — the plan job's contract.**
 

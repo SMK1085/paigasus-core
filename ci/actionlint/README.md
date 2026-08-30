@@ -329,6 +329,25 @@ Callee resolution follows local `uses: ./` calls ONE level out of the main workf
 workflow in this repository calls a second local workflow; if one ever does, its callee is
 unguarded until this is extended.
 
+**L21 — `PUBLISH_MARKERS` is a closed vocabulary, and V8b/V8c are only as complete as that list
+(SMA-603).** L20 already states this for V7; the same blind spot applies to `job_publishes()`
+everywhere it is used, V8b and V8c included. Measured: each of the following reads clean in a
+pre-approval job — `uses: JS-DevTools/npm-publish@v3`, a composite action, a shell script that
+publishes, a raw `curl` to the crates.io API, and `gh release create` — because none of them
+matches an entry in `PUBLISH_MARKERS`. The two checks are not equally exposed. V1's inverted
+design (every job is gated unless pinned in `UNGATED_JOBS`) is a compensating control for V8b:
+an unrecognized publish step in a job that is not gated at all still reds V1, independent of
+whether `PUBLISH_MARKERS` ever saw it. V8c has no such compensating control — a publish step
+`PUBLISH_MARKERS` cannot see, added to a job that IS gated but sits off `approve-release`'s own
+`needs:` path, passes both checks clean. A new publishing tool or mechanism must still be added
+to `PUBLISH_MARKERS` with a fixture row.
+
+**L22 — a self-test helper's registration in `self_test`'s tuple is unpinned; deleting a helper's
+row leaves the suite green (SMA-603).** This is the pre-existing shape L4 and L15 already name
+for other tables, shared here by `_critical2_end_to_end` and `_minor9_empty_jobs_floor`: the
+`--fixture-count >= 20` floor counts fixture-table rows, not registered helpers, so it does not
+reach this table and cannot catch a deleted registration.
+
 ## Cost
 
 `inputs: ['**/*']` is deliberate (see the WHY comment on the `actionlint:` task in `moon.yml`),
