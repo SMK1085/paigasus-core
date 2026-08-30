@@ -242,7 +242,7 @@ coverage.
 
 ```python
 CARGO_ENV_PREFIX_RE = re.compile(
-    r"""(?:^|[\s;&|(])CARGO=(?:"[^"]*"|'[^']*'|[^\s;&|]*)(?=\s+\S)"""
+    r"""(?:^|[\s;&|(])CARGO=(?:"[^"]*"|'[^']*'|[^\s;&|]*)(?=[^\S\n]+\S)"""
 )
 ```
 
@@ -250,6 +250,12 @@ The name is exactly `CARGO` (M6). There is no verb requirement: the tool's verbs
 tool. The trailing word is read through a **lookahead** so that `export CARGO=/p` as the last
 token on a line — an assignment with nothing to run — produces no row. That is the lookahead's
 job; M6 records why revision 1's justification for it was wrong.
+
+The lookahead's character class is **horizontal whitespace only** (`[^\S\n]`), never `\s`. `\s`
+crosses a physical line, and fifteen real moon blobs are multi-line `script:` blocks, so a
+`\s`-based lookahead makes `export CARGO=/p` match an unrelated command on the NEXT line — a
+live false positive on the blob arm, pinned by M5. The LEADING separator keeps `\s` deliberately:
+a newline before `CARGO=` really does start a command.
 
 Arm 2 carries **wrapper** semantics, the rule the three FFI tasks already carry. You cannot pass
 `--locked` through `CARGO=<path> <tool>`, so a match always needs an `ALLOW_UNLOCKED_CARGO` or
