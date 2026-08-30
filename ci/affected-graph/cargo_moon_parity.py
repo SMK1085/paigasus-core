@@ -342,7 +342,7 @@ COMMAND_SPLIT_RE = re.compile(r"[;&|]+")
 CARGO_METADATA_RE = re.compile(r"\bcargo\s+(?:\+\S+\s+)?metadata\b")
 
 ScriptCargoLine = collections.namedtuple(
-    "ScriptCargoLine", "lineno raw segment resolves locked"
+    "ScriptCargoLine", "lineno raw segment resolves locked kind"
 )
 
 # A wrapper reaches cargo without the literal token, so A8 matches FFI_MARKERS too. Without this
@@ -891,21 +891,23 @@ def _classify_shell_line(lineno, logical):
     """
     rows = []
     for segment in COMMAND_SPLIT_RE.split(logical):
-        found = list(CARGO_INVOCATION_RE.finditer(segment))
+        found = cargo_matches(segment)
         for idx, match in enumerate(found):
-            stop = found[idx + 1].start() if idx + 1 < len(found) else len(segment)
-            tail = segment[match.end() : _tail_end(segment, match.end(), stop)]
+            stop = found[idx + 1].start if idx + 1 < len(found) else len(segment)
+            tail = segment[match.end : _tail_end(segment, match.end, stop)]
             # MEASURED (SMA-599 §2.1): `cargo metadata --no-deps` does not resolve and never
             # rewrites the lock, so --locked on it is INERT. Demanding the flag would be
             # cargo-cult compliance a later reader would mistake for a guarantee. Read from
             # THIS invocation's verb and tail, never the whole segment: a `--no-deps` on a
             # neighbouring call must not excuse a resolving one.
-            resolves = not (
-                CARGO_METADATA_RE.search(match.group(0))
-                and re.search(r"--no-deps\b", tail)
-            )
+            # Keyed on the matched VERB, not on CARGO_METADATA_RE over the match text: that
+            # regex needs a literal lowercase `cargo`, so an arm-1 `"$CARGO_BIN" metadata
+            # --no-deps` would report despite not resolving, contradicting D4 (SMA-605 review).
+            resolves = not (match.verb == "metadata" and re.search(r"--no-deps\b", tail))
             rows.append(
-                ScriptCargoLine(lineno, logical, segment, resolves, LOCKED_FLAG in tail)
+                ScriptCargoLine(
+                    lineno, logical, segment, resolves, LOCKED_FLAG in tail, match.kind
+                )
             )
     return rows
 
@@ -1093,6 +1095,25 @@ def check_cargo_locked(projects, root=None, allow=ALLOW_UNLOCKED_CARGO, floor=RE
     return rows
 
 
+def _row_reports(line):
+    """Whether this row is a violation. ONE definition, used by BOTH loops below.
+
+    Named `_row_reports`, not `_reports`: `self_test` already has a LOCAL helper called
+    `_reports`, and a nested `def` makes that name local for the whole enclosing function, so a
+    module-level `_reports` is unreachable from every fixture (UnboundLocalError, measured).
+
+    An `env` row is NEVER satisfied by a flag: `CARGO=<path> <tool>` reaches cargo through the
+    tool, and the tool takes no `--locked`. Reading `line.locked` for it lets the TOOL's own flag
+    clear the row, because that flag lands inside arm 2's tail.
+
+    Both loops must share this. With emission kind-aware and the waiver-health loop kind-blind,
+    an `env` row whose tool carries `--locked` is emitted, the reviewer adds a waiver, emission
+    clears, and the health loop then finds no hits and reports the honest waiver as STALE. The
+    row is permanently red with no escape but rewriting the shell line (SMA-605 review).
+    """
+    return line.kind == "env" or (line.resolves and not line.locked)
+
+
 def check_cargo_locked_scripts(projects, root, allow=None):
     """A8 rows for cargo invocations inside the gate scripts a Moon task runs.
 
@@ -1121,14 +1142,23 @@ def check_cargo_locked_scripts(projects, root, allow=None):
                 # Use `line.locked`, not `LOCKED_FLAG in text` — the classifier already scoped
                 # the flag to the segment tail AFTER the verb, and a bare substring test on the
                 # segment throws that scoping away.
-                if not line.resolves or line.locked:
+                if not _row_reports(line):
                     continue
                 reason = allow.get((rel, text))
                 if reason is None:
-                    rows.append(
-                        f"{rel}:{line.lineno} reaches cargo without {LOCKED_FLAG} — it will "
-                        f"re-resolve and REWRITE an inconsistent Cargo.lock in place: {text[:100]}"
-                    )
+                    if line.kind == "env":
+                        rows.append(
+                            f"{rel}:{line.lineno} sets CARGO= to redirect cargo through another "
+                            f"tool, which cannot take {LOCKED_FLAG} — a {LOCKED_FLAG} on the "
+                            f"tool does NOT cover it, so this line needs an "
+                            f"ALLOW_UNLOCKED_CARGO_SCRIPT entry: {text[:100]}"
+                        )
+                    else:
+                        rows.append(
+                            f"{rel}:{line.lineno} reaches cargo without {LOCKED_FLAG} — it will "
+                            f"re-resolve and REWRITE an inconsistent Cargo.lock in place: "
+                            f"{text[:100]}"
+                        )
                 elif not reason.strip():
                     rows.append(
                         f"{rel}:{line.lineno} is in ALLOW_UNLOCKED_CARGO_SCRIPT with an empty "
@@ -1148,7 +1178,7 @@ def check_cargo_locked_scripts(projects, root, allow=None):
         hits = [
             line
             for line in seen.get(rel, [])
-            if line.segment.strip() == text and line.resolves and not line.locked
+            if line.segment.strip() == text and _row_reports(line)
         ]
         if not hits:
             rows.append(
@@ -2358,6 +2388,33 @@ def self_test():
                 f"locked invocation, which needs no waiver: {rows}"
             )
 
+
+        # SMA-605 — the indirect arms, through the real script scanner.
+        indirect = Path(tmp) / "indirect.sh"
+        indirect.write_text(
+            '#!/usr/bin/env bash\n'
+            '"$CARGO_BIN" build\n'                       # 2: reports
+            '"$CARGO_BIN" build --locked\n'              # 3: clean
+            '"$CARGO_BIN" metadata --no-deps\n'          # 4: clean, the D4 carve-out
+            'CARGO=/p release-plz update\n'              # 5: reports, wrapper rule
+            'CARGO=/p release-plz update --locked\n'     # 6: reports ANYWAY
+            'out="$(cd x && CARGO=/p tool update)"\n'    # 7: reports, inside $( )
+            'export CARGO=/p\n'                          # 8: clean, nothing to run
+        )
+        got = {(l.lineno, l.kind) for l in script_cargo_lines(indirect) if _row_reports(l)}
+        want = {(2, "var"), (5, "env"), (6, "env"), (7, "env")}
+        if got != want:
+            failures.append(
+                f"A8's script arm reports {sorted(got)} on the indirect fixture, expected "
+                f"{sorted(want)}"
+            )
+        # The `--no-deps` carve-out must key on the VERB, not on CARGO_METADATA_RE: the latter
+        # needs a literal lowercase `cargo` and never fires for `"$CARGO_BIN" metadata`.
+        if any(l.lineno == 4 and l.resolves for l in script_cargo_lines(indirect)):
+            failures.append(
+                "A8 treats `\"$CARGO_BIN\" metadata --no-deps` as resolving — the carve-out is "
+                "still keyed on CARGO_METADATA_RE rather than on the matched verb (SMA-599 D4)"
+            )
     if not ALLOW_UNLOCKED_CARGO_SCRIPT:
         failures.append("ALLOW_UNLOCKED_CARGO_SCRIPT is empty — its stale-entry rule asserts nothing")
 
