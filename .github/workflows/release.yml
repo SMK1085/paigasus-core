@@ -726,7 +726,6 @@ jobs:
         with:
           packages-dir: dist-bindings
           skip-existing: true
-          password: ${{ secrets.PYPI_API_TOKEN }}
 
       - name: Publish paigasus-kernel
         if: steps.relinfo.outputs.kernel_release == 'true'
@@ -734,7 +733,6 @@ jobs:
         with:
           packages-dir: dist-face
           skip-existing: true
-          password: ${{ secrets.PYPI_API_TOKEN }}
 
       # Binds the proto distribution to the release, same reason as the wheel/sdist assertion
       # above: `PROTO_VERSION` was computed but never exported, so this upload shipped whatever
@@ -762,7 +760,6 @@ jobs:
         with:
           packages-dir: dist-proto
           skip-existing: true
-          password: ${{ secrets.PYPI_API_TOKEN }}
 
   publish-npm:
     name: publish to npm
@@ -939,10 +936,9 @@ jobs:
         working-directory: ts/packages/paigasus-kernel
         env:
           NPM_CONFIG_PROVENANCE: 'true'
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_CONFIG_LOGLEVEL: verbose
         run: |
           set -euo pipefail
-          echo "//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}" > "$HOME/.npmrc"
           pnpm exec napi prepublish --no-gh-release --npm-dir npm \
             --cwd ../../../rs/crates/bindings/paigasus-node-bindings
 
@@ -957,10 +953,9 @@ jobs:
         if: steps.npmstate.outputs.node == 'publish'
         working-directory: rs/crates/bindings/paigasus-node-bindings
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_CONFIG_LOGLEVEL: verbose
         run: |
           set -euo pipefail
-          echo "//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}" > "$HOME/.npmrc"
           npm publish --provenance --access public
 
       # Assert the TARBALL, not the working tree: `files` membership is what npm actually ships.
@@ -984,8 +979,7 @@ jobs:
         if: steps.npmstate.outputs.wasm == 'publish'
         working-directory: wasm-dist
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_CONFIG_LOGLEVEL: verbose
         run: |
           set -euo pipefail
-          echo "//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}" > "$HOME/.npmrc"
           npm publish --provenance --access public
