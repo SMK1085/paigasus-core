@@ -291,10 +291,11 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   `run_self_tests` and `selftest_mutation_battery` as **whole lines** in `run.sh` (a substring
   match would survive deleting the call, since the name is a prefix of its own definition). That
   pin only works because `repo:affected-smoke` lists `ci/actionlint/**/*` in its `inputs` — remove
-  that and the pin stays green on exactly the PR that breaks it. Adding a thirteenth-and-later
-  `*_self_test` table means bumping `SELF_TEST_COUNT` (currently 12 — SMA-579 added the eleventh,
-  `release_guard_self_test` at check 10, and SMA-601 the twelfth, `cargo_lock_step_self_test` at
-  check 8f): the gate asserts invocations AND definitions. The cycle's
+  that and the pin stays green on exactly the PR that breaks it. Adding a fourteenth-and-later
+  `*_self_test` table means bumping `SELF_TEST_COUNT` (currently 13 — SMA-579 added the eleventh,
+  `release_guard_self_test` at check 10, SMA-601 the twelfth, `cargo_lock_step_self_test` at
+  check 8f, and SMA-603 the thirteenth, `release_plan_self_test` at check 11): the gate asserts
+  invocations AND definitions. The cycle's
   second half is now closed too (SMA-542 residual closure): check 8c
   in `ci/actionlint/run.sh` pins `ci/affected-graph/run.sh`'s own two call sites into
   `ci_targets.py`, mirroring `ci_targets.py`'s `RUN_SH_CALL_SITES` from the other, independently
@@ -590,14 +591,30 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   release-PR proposal; `publish = false` is what `release-plz release` itself checks — the two
   settings govern different phases, and neither substitutes for the other (SMA-579).
 - `release-plz release --dry-run` creates **no** tags: `create_git_tag_and_release` is reachable
-  only from the non-dry-run arm (`release_plz_core` 0.36.14, `release.rs:888` and `:959`) — but it
-  still **requires a git token**, because `get_git_client()` runs unconditionally at
-  `release.rs:543`. `git_release_enable = false` does not remove that requirement (SMA-579).
+  only from the non-dry-run arm (`release_plz_core` 0.36.14, `release.rs:888` and `:959`) — but
+  `get_git_client()` still runs unconditionally at `release.rs:543` (SMA-579 wording corrected
+  SMA-603: this is not merely "requires a token" — it makes a LIVE authenticated
+  `GET /repos/{owner}/{repo}/commits/{sha}/pulls` call, and dies 401 on a bad token).
+  `git_release_enable = false` does not remove that call.
 - The dry-run cannot pass until `paigasus-proto-derive` is published on crates.io: a per-package
-  `cargo publish --dry-run` cannot resolve a workspace sibling absent from the index. This is why
-  the release job graph carries no `plan`-stage dry-run. A live run is expected to work, since
-  derive publishes before proto — which makes the first live release the first genuine test of
-  that path (SMA-579).
+  `cargo publish --dry-run` cannot resolve a workspace sibling absent from the index. This is
+  true, and permanent, but it applies to the `proto` version group ONLY —
+  `paigasus-kernel` is a publish group of one with no in-tree dependency, so its dry-run resolves
+  fine — and it is no longer the operative reason the release job graph carries no dry-run-based
+  `plan` stage; see the entry below (SMA-603) for the reason that generalizes. A live run is
+  expected to work, since derive publishes before proto — which makes the first live release the
+  first genuine test of that path (SMA-579).
+- `release-plz release --dry-run --output json` prints `{"releases":[]}` at exit 0 **even when it
+  would publish** (SMA-603, spec M6). Measured with only the `kernel` version group bumped:
+  release-plz logged that it would publish `paigasus-kernel` and cut `paigasus-kernel-v0.1.1`,
+  and still reported an empty array. The array records PERFORMED releases, and a dry run performs
+  none — so it cannot distinguish "nothing to release" from "a release is pending", and reading
+  it would silently skip every kernel-group release. `ci/release-plan/` replaces it: it decides
+  on TAG EXISTENCE instead, the same thing release-plz itself short-circuits on before touching a
+  registry or running cargo. This measurement (spec M6) is pinned to release-plz 0.3.158 and
+  must be re-measured on a version bump. The derive-crate bullet above (spec M3) was measured
+  against the same 0.3.158, but its validity turns on whether `paigasus-proto-derive` has been
+  published, not on a release-plz version — do not read it as sharing this re-measure caveat.
 - `release-plz release --output json` is `{"releases":[{package_name,prs,tag,version}]}` — key
   `releases`, field `package_name`. This is **not** `release-pr`'s `prs`/`package` shape. A
   package with Cargo `publish = false` never appears in `releases`, which is why any version

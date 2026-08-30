@@ -52,6 +52,58 @@ ACCEPTED_GATE_FORMS = frozenset({GATE_EXPR, "${{ " + GATE_EXPR + " }}"})
 # asserted rather than assumed.
 UNGATED_JOBS = frozenset({"release-pr"})
 
+# V8: the approval gate is the ONE human checkpoint in release.yml, and everything downstream of
+# it is irreversible. Two directions, and BOTH are needed: V8b says nothing upstream may publish,
+# V8c says every publisher must be downstream. Without V8c, deleting `approve-release` from the
+# `release` job's needs: removes the only gate in the file and passes V1, V3, V4, V7 and V8a/b.
+APPROVAL_JOB = "approve-release"
+
+# V9. The plan job decides whether a release happens at all, and it sits upstream of the approval
+# gate — so a wrong polarity here fails GREEN, silently dropping every release. The producer side
+# is covered by ci/release-plan's fixture table; this pins the WIRING, which no fixture can reach.
+PLAN_JOB = "plan"
+PLAN_OUTPUT = "nothing_to_release"
+PLAN_SCRIPT = "ci/release-plan/run.sh"
+# The flag the decision step must pass. `ci/release-plan/run.sh --self-test` in the decision step
+# would satisfy a bare "does it invoke the script" test while writing no output at all.
+PLAN_SCRIPT_FLAG = "--github-output"
+# Literal pinning, exactly as V2 pins GATE_EXPR, and for the same reason: a structural test would
+# admit `== 'false'`, which is NOT equivalent — it fails closed on an unset output.
+PLAN_GATE_EXPR = f"needs.{PLAN_JOB}.outputs.{PLAN_OUTPUT} != 'true'"
+ACCEPTED_PLAN_FORMS = frozenset({PLAN_GATE_EXPR, "${{ " + PLAN_GATE_EXPR + " }}"})
+# SMA-603 fix wave, 2d. FULL-MATCH, not `search`. The old regex only had to occur SOMEWHERE in
+# the outputs expression, so any expression that merely CONTAINED the step reference passed —
+# including ones that resolve to a constant. The measured shape is
+# `${{ steps.decide.outputs.nothing_to_release || 'true' }}`: GitHub's `||` yields its right
+# operand when the left is the empty string, so an unset step output becomes the literal 'true'
+# and EVERY consumer skips. That inverts the branch's central fail-safe property in one edit and
+# reds nothing. Literal pinning, exactly as ACCEPTED_PLAN_FORMS pins the consumer `if:` above:
+# the expression must be the reference and nothing else. Surrounding whitespace is tolerated
+# because YAML and the `${{ }}` syntax both allow it; anything else is not.
+_PLAN_STEP_RE = re.compile(
+    r"^\$\{\{\s*steps\.([A-Za-z0-9_-]+)\.outputs\." + re.escape(PLAN_OUTPUT) + r"\s*\}\}$")
+
+
+# SMA-603 fix wave, 2c. V9d used to be `PLAN_SCRIPT not in run_text` — a raw substring test over
+# the decision step's whole `run:` block. A COMMENT naming the script satisfied it, so a step
+# whose real command hardcodes the answer read as clean:
+#     run: |
+#       # ci/release-plan/run.sh --github-output decides this
+#       echo "nothing_to_release=true" >> "$GITHUB_OUTPUT"
+# This tests the COMMAND WORD instead, per command segment, reusing command_segments (which
+# strips a trailing `#` comment from each segment, so a comment leaves an empty segment behind).
+# It also demands PLAN_SCRIPT_FLAG in the SAME segment: a step running the script with any other
+# flag writes no output.
+#
+# NOT a shell parser, the same deliberate scope limit command_segments records: leading
+# `VAR=value` assignments and one `env`/`bash`/`sh` prefix are skipped, and nothing else is
+# modelled. A more exotic invocation (`eval`, a variable holding the path) reports missing, which
+# fails CLOSED — the gate reds and a human looks.
+_ENV_ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+_CMD_PREFIXES = ("env", "bash", "sh", "/bin/bash", "/bin/sh", "/usr/bin/env")
+
+
+
 # V3: the real bypass class is any status-check function, not two literal spellings.
 # `success() || failure()`, `!failure()` and `${{ ! cancelled() }}` all evade a two-string test.
 STATUS_FUNCS = ("always", "cancelled", "success", "failure")
@@ -233,8 +285,117 @@ def command_segments(line: str) -> list[str]:
     return [seg.split("#", 1)[0] for seg in _COMMAND_SEPS.split(line)]
 
 
+# V8 fix round 4, Important 2. The anchor was `\b`, and `-` is a NON-word character, so
+# `--dry-run-x` satisfied `--dry-run\b` and read as an effective dry-run flag. Measured on npm
+# 11.11.0: `--dry-run-x` warns `Unknown cli config`, sets `dry-run-x`, leaves `dry-run` UNSET,
+# and really publishes. The idiom PUBLISH_MARKERS uses for the same job (`release-plz
+# release(?![-\w])`) is not enough here: `.` is neither `-` nor a word character, so
+# `--dry-run.x` still matched under it (measured EXEMPT). The anchor is `(?!\S)` — "not
+# immediately followed by a Python \S character" — which subsumes `(?![-\w])` and also rejects
+# `--dry-run.x`. This is a description of what the code does, not a claim that it matches shell
+# word-splitting in general: Python's `\S` is Unicode-aware and excludes some whitespace a shell
+# does NOT treat as a token separator. KNOWN LIMITATION: `--dry-run` followed by U+00A0 (a
+# non-breaking space) satisfies `(?!\S)` here and reads exempt, but bash does not split on NBSP,
+# so the real invocation receives one token, `--dry-run` immediately followed by an NBSP
+# and more text, that the underlying tool does not recognize as a dry-run flag: it really
+# publishes. Not closed here; see the spec's limitations. The `=` form is NOT reachable here:
+# the value scan below returns before this regex is ever applied.
+_DRY_RUN_FLAG_RE = re.compile(r"--dry-run(?!\S)")
+
+# V8 fix round 4, Important 1. The general "any `=` value is unverified, so fail closed" rule,
+# hoisted out of _dry_run_exempts' per-occurrence loop and applied to the WHOLE tail beside the
+# negation scan. Inside the loop it was unreachable behind an earlier bare `--dry-run`, because
+# the loop returns True on the first occurrence it accepts. Deliberately NOT `--dry-run\s*=`:
+# `--dry-run = $DRY_RUN` is a bare flag followed by an unrelated positional argument, which npm
+# resolves to dry-run=true (see _dry_run_exempts' docstring), so a space-tolerant regex here
+# would produce a false red on a segment that really is dry.
+_DRY_RUN_VALUE_RE = re.compile(r"--dry-run=")
+
+# V8 fix round 2, Important 2 (N2). A negating form ANYWHERE after the publish marker's match end
+# — not only immediately after the FIRST `--dry-run` token — since every tool this guard has
+# measured (npm 11.11.0, clipanion 4.0.0-rc.4) is last-flag-wins: `--dry-run --no-dry-run` and
+# `--dry-run --dry-run=false` both really publish, but a per-occurrence scan that returns on the
+# first qualifying `--dry-run` never sees the later negation. Covers `--no-dry-run`,
+# `--dry-run=false`, `--dry-run false`, `--dry-run=0`, `--dry-run 0` — the space form needs its
+# own alternative here because `\s*=\s*` requires a literal `=`. This is deliberately NOT the
+# general `=`-value rule (_DRY_RUN_VALUE_RE below): it only recognises the two LITERAL falsey
+# values this guard can prove are unsafe. A bare `=` with any OTHER value (a shell variable, a
+# `${{ }}` workflow expression, `no`, `off`, ...) is caught by _DRY_RUN_VALUE_RE, which since fix
+# round 4 scans the whole tail alongside this one. Before that hoist the two rules were NOT
+# interchangeable: the general rule ran per occurrence, so it saw an `=` value only when no
+# earlier bare `--dry-run` had already ended the scan.
+_DRY_RUN_NEGATION_RE = re.compile(
+    r"--no-dry-run\b|--dry-run\s*=\s*(?:false|0)\b|--dry-run\s+(?:false|0)\b"
+)
+
+
+def _dry_run_exempts(segment: str, after: int) -> bool:
+    """True if the text of `segment` AT OR AFTER position `after` (the publish marker's own
+    match end) carries an EFFECTIVE `--dry-run` that disables the call.
+
+    V8 fix round 1, Important 2. Two measured false-cleans that genuinely publish:
+    `FLAGS=--dry-run cargo publish` (a shell ENVIRONMENT ASSIGNMENT — the flag never reaches
+    `cargo`, since it sits BEFORE the marker match, not after it) and `npm publish
+    --dry-run=false` / `npm publish --dry-run false` (npm honours either as NOT dry). The
+    position check mirrors napi_violations' `--no-gh-release` comparison against the match END,
+    applied in the opposite direction; the value check additionally refuses to exempt a
+    `--dry-run` immediately followed by `=` or a `false`/`0` argument, since this guard does not
+    parse arbitrary flag values and a `--dry-run=true` is rare enough that failing closed on any
+    `=` form costs nothing real.
+
+    V8 fix round 2, Important 2 (N2). The round-1 shape scanned occurrences in ORDER and RETURNED
+    on the first one that qualified as safe — so a LATER negating token, appended after an
+    earlier bare `--dry-run`, was never examined. Measured, both real publishes: `npm publish
+    --dry-run --no-dry-run` and `npm publish --dry-run --dry-run=false` (npm 11.11.0 and
+    clipanion 4.0.0-rc.4 are both last-flag-wins). This does not attempt true last-token-wins
+    ordering for three or more flags (e.g. `--dry-run --no-dry-run --dry-run`, where the final
+    token really does mean dry); it fails closed (NOT exempt) on any negation present, which is
+    the safe direction and not a shape either measurement covered.
+
+    V8 fix round 3, Critical 1. The round-2 rewrite replaced the whole per-occurrence loop —
+    including the round-1 `if tail.startswith("="): continue` fail-closed rule — with only the
+    negation scan above, which recognises exactly two LITERAL values (`false`/`0`). Every OTHER
+    `=` value — a shell variable (`--dry-run=$DRY_RUN`), a `${{ }}` workflow expression
+    (`--dry-run=${{ inputs.dry_run }}`), or a string this guard has no reason to trust (`=no`,
+    `=off`, a bare `=`) — fell through to the bare positive check and read as EXEMPT, reopening
+    the exact hole fix round 1 closed. Restored: refuse to exempt a `--dry-run` followed by `=`
+    (any value, not only `false`/`0`) or by a bare `false`/`0` on the space form — mirroring the
+    negation regex's space-form check, since `\\s*=\\s*` only matches an `=`, not whitespace.
+
+    V8 fix round 4, Important 1. Round 3 put that restored rule INSIDE the per-occurrence loop,
+    and the loop returns True on the FIRST occurrence it accepts — so one bare `--dry-run` token
+    in front of the `=` form ended the scan before the rule was ever applied, and the negation
+    scan sees only the two literal falsey values. Measured through main(): `npm publish
+    --dry-run=$DRY_RUN` red, but `npm publish --dry-run --dry-run=$DRY_RUN` read EXEMPT, and on
+    npm 11.11.0 `--dry-run --dry-run=false` resolves dry-run=false and really publishes. The `=`
+    rule is therefore now a WHOLE-TAIL scan (_DRY_RUN_VALUE_RE) beside the negation scan, not a
+    per-occurrence one, so the loop below no longer tests for `=` at all. Important 2 of the same
+    round narrowed the flag anchor; see _DRY_RUN_FLAG_RE.
+
+    V8 fix round 4, Minor 4 — a behaviour change round 3 shipped as a "restore" without saying
+    so. Fix round 1 lstripped the tail before testing `startswith("=")`, so it ALSO failed closed
+    on the space-separated `npm publish --dry-run = $DRY_RUN`; round 3 did not lstrip, which
+    moved that form from red to exempt. The round-3 behaviour is the CORRECT one and is kept:
+    measured on npm 11.11.0, `--dry-run = $DRY_RUN` resolves dry-run=true and the `=` is an
+    unrelated positional argument, so round 1's red was a false one. That is why
+    _DRY_RUN_VALUE_RE is `--dry-run=` and not `--dry-run\\s*=`.
+    """
+    tail = segment[after:]
+    if _DRY_RUN_NEGATION_RE.search(tail):
+        return False
+    if _DRY_RUN_VALUE_RE.search(tail):
+        return False
+    for m in _DRY_RUN_FLAG_RE.finditer(tail):
+        if re.match(r"\s+(false|0)\b", tail[m.end() :]):
+            continue
+        return True
+    return False
+
+
 def job_publishes(job: dict) -> bool:
-    """V6 detection. Used ONLY for called workflows.
+    """V6 detection. Used for called workflows, and (fix round 1, Critical 1) as the shared
+    step-level primitive `approval_boundary_violations` and `callee_boundary_violations` both
+    build V8 on.
 
     Fix round 1, Important 3: evaluated per LINE, not per whole `run:` block. A `--dry-run`
     occurrence reaches no registry — `napi prepublish --dry-run --no-gh-release` (prebuild.yml)
@@ -245,6 +406,10 @@ def job_publishes(job: dict) -> bool:
     Fix round 2, Important 1: evaluated per COMMAND SEGMENT (see command_segments), not per whole
     line — `npm publish && echo "not --dry-run"` must still count as registry-reaching, since the
     marker and the `--dry-run` flag are in different chained commands on the same line.
+
+    Fix round 1, Important 2: the `--dry-run` exemption now requires ADJACENCY (see
+    _dry_run_exempts) — a bare `"--dry-run" in segment` test accepted a flag that never reached
+    the command at all.
     """
     for step in job.get("steps") or []:
         if not isinstance(step, dict):
@@ -252,10 +417,12 @@ def job_publishes(job: dict) -> bool:
         blob = f"{step.get('run', '')}\n{step.get('uses', '')}"
         for line in blob.splitlines():
             for segment in command_segments(line):
-                if "--dry-run" in segment:
+                m = _PUBLISH_RE.search(segment)
+                if not m:
                     continue
-                if _PUBLISH_RE.search(segment):
-                    return True
+                if _dry_run_exempts(segment, m.end()):
+                    continue
+                return True
     return False
 
 
@@ -303,8 +470,208 @@ def napi_violations(job: dict, job_id: str, name: str) -> list[str]:
     return out
 
 
+def _environment_name(job: dict) -> str | None:
+    """The environment's NAME — the field GitHub Actions actually gates on via required
+    reviewers. `environment:` may be a plain string (the name itself) or a mapping with `name:`
+    and `url:`. V8 fix round 1, Minor 4: a mapping with a `url:` but no `name:` (or an empty one)
+    is not a named environment at all — GitHub rejects it outright — so it must not satisfy V8a."""
+    env = job.get("environment")
+    if isinstance(env, str):
+        env = env.strip()
+        return env or None
+    if isinstance(env, dict):
+        raw_name = env.get("name")
+        if isinstance(raw_name, str) and raw_name.strip():
+            return raw_name.strip()
+    return None
+
+
+def approval_boundary_violations(jobs: dict, name: str) -> list[str]:
+    """V8a/b/c. The approval gate is the ONE human checkpoint; everything downstream of it is
+    irreversible. V8a is the floor (without it the rest of V8 passes vacuously); V8b asserts
+    nothing upstream of the gate may publish; V8c asserts every publisher IS downstream of it —
+    the direction V8b alone cannot cover, since deleting `approve-release` from a publishing
+    job's needs: satisfies V8b trivially (there is nothing left upstream of the gate to check).
+
+    Both V8b and V8c here are STEPS-shaped only (via job_publishes, which reads `steps:`). A
+    job-level `uses:` publisher — the shape `wheels` and `prebuild` already use — is invisible to
+    job_publishes and is covered separately by callee_boundary_violations (V8d), which needs the
+    filesystem this function deliberately does not touch (fix round 1, Critical 1)."""
+    out: list[str] = []
+    gate = jobs.get(APPROVAL_JOB)
+    if not isinstance(gate, dict):
+        return [f"{name}: V8a: no job named '{APPROVAL_JOB}' exists. Every other clause of V8 is "
+                f"defined relative to it, so without it this verdict would pass vacuously."]
+    if not _environment_name(gate):
+        out.append(f"{name}: V8a: job '{APPROVAL_JOB}' declares no NAMED environment:. The pause "
+                   f"that makes it a gate comes from that named environment's required "
+                   f"reviewers; a missing environment:, or one with no name:, is an ordinary job "
+                   f"that always succeeds.")
+
+    for jid in sorted(gated_path_jobs(APPROVAL_JOB, jobs)):
+        job = jobs.get(jid)
+        if not isinstance(job, dict) or not job_publishes(job):
+            continue
+        if jid == APPROVAL_JOB:
+            # Fix round 1, Minor 1: gated_path_jobs(APPROVAL_JOB, jobs) includes APPROVAL_JOB
+            # itself (trivially, on its own needs: path), so "runs upstream of 'approve-release'"
+            # about approve-release itself read as nonsense. Word this case on its own terms.
+            out.append(f"{name}: V8b: job '{APPROVAL_JOB}' IS the approval gate and contains a "
+                       f"step that can reach a registry. The gate itself must never publish — "
+                       f"move the step to a job downstream of it.")
+        else:
+            out.append(f"{name}: V8b: job '{jid}' runs upstream of '{APPROVAL_JOB}' and contains "
+                       f"a step that can reach a registry. That publishes before any human "
+                       f"approves. Add --dry-run, or move the step downstream of the gate.")
+
+    for jid, job in jobs.items():
+        if not isinstance(job, dict) or not job_publishes(job):
+            continue
+        if APPROVAL_JOB not in gated_path_jobs(jid, jobs):
+            out.append(f"{name}: V8c: job '{jid}' can reach a registry, but '{APPROVAL_JOB}' is "
+                       f"not on its needs: path. It would publish without passing the gate.")
+    return out
+
+
+def plan_run_segments(run_text: str) -> list[str]:
+    """Every non-empty command segment of a `run:` block, comments already stripped."""
+    return [seg.strip()
+            for line in run_text.splitlines()
+            for seg in command_segments(line)
+            if seg.strip()]
+
+
+def _is_plan_invocation(segment: str) -> bool:
+    tokens = segment.split()
+    i = 0
+    while i < len(tokens) and _ENV_ASSIGN_RE.match(tokens[i]):
+        i += 1
+    if i < len(tokens) and tokens[i] in _CMD_PREFIXES:
+        i += 1
+        while i < len(tokens) and _ENV_ASSIGN_RE.match(tokens[i]):
+            i += 1
+    if i >= len(tokens):
+        return False
+    word = tokens[i]
+    if word != PLAN_SCRIPT and not word.endswith("/" + PLAN_SCRIPT):
+        return False
+    return PLAN_SCRIPT_FLAG in tokens[i + 1:]
+
+
+def invokes_plan_script(run_text: str) -> bool:
+    """True when some command segment of `run_text` really RUNS PLAN_SCRIPT with its flag."""
+    return any(_is_plan_invocation(seg) for seg in plan_run_segments(run_text))
+
+def plan_contract_violations(jobs: dict, name: str) -> list[str]:
+    plan = jobs.get(PLAN_JOB)
+    if not isinstance(plan, dict):
+        return [f"{name}: V9a: no job named '{PLAN_JOB}' exists. V9 keys on that literal name, so "
+                f"without this floor a rename would leave it asserting nothing."]
+    out: list[str] = []
+
+    # V9b's subject is DIRECT consumers only — jobs naming PLAN_JOB in their OWN needs:. A
+    # transitive reader (a job two hops downstream that references needs.plan.outputs... without
+    # PLAN_JOB on its own needs: path) is a different bug, and one actionlint itself already
+    # catches: a `needs.X...` expression referencing a job X not in that job's own needs: reds
+    # actionlint on its own. Widening V9b to walk transitively would duplicate a check another
+    # tool already owns — fix round 1 review, SMA-603.
+    consumers = [jid for jid, j in jobs.items()
+                 if isinstance(j, dict) and PLAN_JOB in needs_of(j)]
+    if not consumers:
+        out.append(f"{name}: V9a: no job names '{PLAN_JOB}' in needs:. The decision is computed "
+                   f"and then read by nothing.")
+    for jid in sorted(consumers):
+        if if_text(jobs[jid]) not in ACCEPTED_PLAN_FORMS:
+            out.append(f"{name}: V9b: job '{jid}' needs '{PLAN_JOB}' but its if: is "
+                       f"{if_text(jobs[jid])!r}, not {PLAN_GATE_EXPR!r}. Only `!=` fails safe: "
+                       f"`== 'true'` inverts the decision and `== 'false'` skips on an unset "
+                       f"output. A whitespace variant of an accepted form (an extra space, a "
+                       f"different quote style) also reds here — literal pinning, exactly as V2 "
+                       f"pins GATE_EXPR.")
+
+    # V9c resolves the DECISION STEP: outputs.nothing_to_release must reference a
+    # steps.<id>.outputs... expression naming a step that actually exists in this job. `decision`
+    # is set only when every part of that chain resolves — used below by V9d, which must be
+    # scoped to THIS step alone (fix round 1, I1: see the comment above V9d).
+    outs = plan.get("outputs")
+    expr = outs.get(PLAN_OUTPUT) if isinstance(outs, dict) else None
+    decision: dict | None = None
+    if not isinstance(expr, str):
+        out.append(f"{name}: V9c: job '{PLAN_JOB}' declares no outputs.{PLAN_OUTPUT}. A STEP "
+                   f"output is not a JOB output, so every consumer would read the empty string.")
+    else:
+        m = _PLAN_STEP_RE.match(expr.strip())
+        if not m:
+            out.append(f"{name}: V9c: outputs.{PLAN_OUTPUT} is {expr!r}, which names no "
+                       f"steps.<id>.outputs.{PLAN_OUTPUT} — or names one inside a LARGER "
+                       f"expression. It must be exactly "
+                       f"'${{{{ steps.<id>.outputs.{PLAN_OUTPUT} }}}}': anything else can "
+                       f"resolve to a constant, and "
+                       f"'${{{{ steps.<id>.outputs.{PLAN_OUTPUT} || \\'true\\' }}}}' resolves "
+                       f"to 'true' on an unset output, which SKIPS every consumer.")
+        else:
+            steps_by_id = {s.get("id"): s for s in (plan.get("steps") or []) if isinstance(s, dict)}
+            if m.group(1) not in steps_by_id:
+                out.append(f"{name}: V9c: outputs.{PLAN_OUTPUT} names step id {m.group(1)!r}, "
+                           f"which does not exist in '{PLAN_JOB}'. A typo here yields '' "
+                           f"forever, silently.")
+            else:
+                decision = steps_by_id[m.group(1)]
+
+    # V9d, fix round 1 (I1). This used to join every step's `run:` in the job and search THAT for
+    # the checker invocation — decoupled from V9c, which resolves a specific step id. Three
+    # measured fail-green shapes: (1) the decision step runs an inline echo while an unrelated
+    # LATER step happens to invoke the script with an unrelated flag; (2) outputs maps to a
+    # DIFFERENT step id that hardcodes the answer, while the decision-looking step still runs the
+    # script; (3) the decision step is a `uses:` step with no `run:` at all, and the script runs
+    # in some other, anonymous step. All three silently drop every release with no red anywhere —
+    # exactly the class this verdict's own message claims to prevent. Scoping to the step V9c
+    # just resolved closes all three; when V9c could not resolve a decision step at all, there is
+    # nothing here to scope to and that failure is already reported by V9c.
+    if decision is not None:
+        run_text = str(decision.get("run") or "")
+        # SMA-603 fix wave, 2c: a COMMAND-WORD test, not a substring one. See
+        # invokes_plan_script's own comment for the comment-satisfies-the-pin shape it closes.
+        segments = plan_run_segments(run_text)
+        if not invokes_plan_script(run_text):
+            out.append(f"{name}: V9d: step {decision.get('id')!r} in job '{PLAN_JOB}' never "
+                       f"invokes {PLAN_SCRIPT} {PLAN_SCRIPT_FLAG} as a command. Without this, "
+                       f"V9c passes on an inline `echo {PLAN_OUTPUT}=true` — and a COMMENT "
+                       f"naming the script does not count.")
+        # V9e (SMA-603 fix wave, 2g — the RE-JUDGED parked finding B2). V9d asks whether the
+        # decision step invokes the checker; it cannot ask what ELSE the step does. The measured
+        # bypass is one appended line:
+        #     run: |
+        #       ci/release-plan/run.sh --github-output
+        #       echo "nothing_to_release=true" > "$GITHUB_OUTPUT"
+        # The checker really runs, V9c and V9d both pass, and the second line overwrites the
+        # verdict — every release silently dropped. B2 was parked as "out of reach for any
+        # structural workflow guard". That was WRONG: the step can be required to be EXACTLY the
+        # invocation, which is a strict-equality pin of the same family as ACCEPTED_PLAN_FORMS,
+        # and which the real step already satisfies (release.yml's own comment calls it ONE
+        # PHYSICAL LINE, for command_segments' sake).
+        #
+        # SCOPE, stated honestly. This bounds what the DECISION STEP may do; it does not bound
+        # the job. A LATER step in `plan` can still overwrite $GITHUB_OUTPUT, and no structural
+        # check in this file forbids that — the residual stays recorded, one step narrower than
+        # B2 was. The cost of the rule if it is ever wrong is small and visible: a plan job that
+        # legitimately needs setup work does it in its OWN steps, which is what the spec asks for
+        # anyway.
+        elif len(segments) != 1:
+            out.append(f"{name}: V9e: step {decision.get('id')!r} in job '{PLAN_JOB}' runs "
+                       f"{len(segments)} commands; it must run EXACTLY one, the "
+                       f"{PLAN_SCRIPT} {PLAN_SCRIPT_FLAG} invocation. A second command in the "
+                       f"same step can overwrite $GITHUB_OUTPUT after the checker wrote it, "
+                       f"which passes V9c and V9d and silently drops every release. Move setup "
+                       f"work into its own step.")
+    return out
+
+
 def check_main(doc: dict, name: str) -> list[str]:
-    """V1-V5 over the release workflow."""
+    """V1-V5, V7, V8a-c and V9 over the release workflow. V6 applies to CALLED workflows (see
+    check_called) and V8d to every job's local callee (see callee_boundary_violations) — both
+    need the filesystem, which this function, driven purely off a parsed doc, deliberately does
+    not touch."""
     out: list[str] = []
     jobs = doc["jobs"]
 
@@ -375,6 +742,13 @@ def check_main(doc: dict, name: str) -> list[str]:
                         f"{step.get('continue-on-error')!r}. That hides a failed publish inside a "
                         f"job that still reports success."
                     )
+
+    # V8: the approval boundary, both directions. Called once, outside the per-job loop above —
+    # that loop has `continue` statements that would skip a call placed inside it.
+    out += approval_boundary_violations(jobs, name)
+    # V9: the plan job's output wiring and fail-safe polarity. Same reason as V8: called once,
+    # outside the per-job loop, which the loop's `continue` statements would otherwise skip.
+    out += plan_contract_violations(jobs, name)
     return out
 
 
@@ -408,6 +782,98 @@ def check_called(doc: dict, name: str) -> list[str]:
     return out
 
 
+# V8d fix round 1, Important 1. `callee_boundary_violations` below resolves exactly ONE level of
+# a LOCAL ("./...") `uses:`. A target it cannot resolve that way — a remote `org/repo/path@ref`
+# reference, or a second local hop nested inside an already-resolved callee — is reported as
+# unverifiable rather than silently treated as clean, fail-closed. An entry here is a reviewed
+# exception to that rule; state the reason in a comment beside it. Empty today.
+#
+# The key for a REMOTE or missing-on-disk target is that `uses:` string verbatim. The key for a
+# NESTED (second-level) target is the composite `"{outer uses:} -> {inner uses:}"` form shown in
+# the violation message — copy it EXACTLY from that message, not just the inner `uses:` value, or
+# the entry will never match.
+CALLEE_VERIFICATION_ALLOWLIST: frozenset[str] = frozenset()
+
+
+def callee_boundary_violations(jobs: dict, name: str) -> list[str]:
+    """V8d. `job_publishes` (and therefore V8b/V8c above) reads a job's `steps:` only, so a job
+    whose entire body IS a `uses: ./callee.yml` — the exact shape `wheels` and `prebuild` already
+    use — is invisible to them. For every job carrying a local `uses:`, resolve the callee and
+    apply the SAME boundary a direct publisher must: if anything in the callee can reach a
+    registry, the calling job itself must have `APPROVAL_JOB` on its own needs: path.
+
+    Fix round 1, Critical 1. This ONE rule replaces the original V8c/V8d split, and closes the
+    critical hole that split left open: a job neither on `APPROVAL_JOB`'s own needs: path (what
+    the old V8d walked) NOR carrying a `steps:`-shaped publish (what V8c's job_publishes call
+    could see) evaded V8 completely — e.g. a `sneak` job hanging off `build`, gated on V1, never
+    needed BY `approve-release` and never needing it either, calling a workflow_call-only local
+    callee that runs `cargo publish`. Scanning EVERY job's own `uses:` here, not only ones already
+    known to sit on the gate's path, closes that. It also subsumes the pre-approval-only case: a
+    caller upstream of the gate can never have the gate on its own needs: path (needs: walks
+    upstream, never down), so it still reds under this one rule.
+
+    Fail-closed (Important 1): see CALLEE_VERIFICATION_ALLOWLIST above.
+    """
+    out: list[str] = []
+    seen: set[tuple[str, str]] = set()
+
+    def _unverifiable(jid: str, target: str, reason: str) -> None:
+        key = (jid, target)
+        if key in seen or target in CALLEE_VERIFICATION_ALLOWLIST:
+            return
+        seen.add(key)
+        out.append(
+            f"{name}: V8d: job '{jid}' calls '{target}', {reason} Whether it can reach a "
+            f"registry is unknown, so it cannot be proven safe. Add a reviewed "
+            f"CALLEE_VERIFICATION_ALLOWLIST entry with a stated reason, or make it verifiable — "
+            f"a local './...' workflow, resolved to exactly one level."
+        )
+
+    for jid, job in jobs.items():
+        if not isinstance(job, dict):
+            continue
+        uses = str(job.get("uses") or "")
+        if not uses:
+            continue
+        if not uses.startswith("./"):
+            _unverifiable(jid, uses, "a reusable workflow this guard cannot read.")
+            continue
+        local_path = Path(uses.removeprefix("./"))
+        if not local_path.is_file():
+            _unverifiable(jid, uses, "a local workflow that does not exist on disk.")
+            continue
+
+        callee_jobs = load_workflow(local_path).get("jobs") or {}
+        publishes = False
+        for cjid, cjob in callee_jobs.items():
+            if not isinstance(cjob, dict):
+                continue
+            if job_publishes(cjob):
+                publishes = True
+            nested = str(cjob.get("uses") or "")
+            if nested:
+                _unverifiable(
+                    jid, f"{uses} -> {nested}",
+                    f"whose own job '{cjid}' calls a second workflow this guard resolves only "
+                    f"one level past — never two."
+                )
+        if not publishes:
+            continue
+        if jid == APPROVAL_JOB:
+            # Fix round 2, Minor 4 (N4): gated_path_jobs(APPROVAL_JOB, jobs) trivially contains
+            # APPROVAL_JOB itself, so without this case the gate calling a publishing callee read
+            # as clean — symmetric with the M1 case already handled in
+            # approval_boundary_violations' V8b loop above.
+            out.append(f"{name}: V8d: job '{APPROVAL_JOB}' IS the approval gate and calls a "
+                       f"local workflow '{uses}' that can reach a registry. The gate itself must "
+                       f"never publish — move the call to a job downstream of it.")
+        elif APPROVAL_JOB not in gated_path_jobs(jid, jobs):
+            out.append(f"{name}: V8d: job '{jid}' calls local workflow '{uses}', which can reach "
+                       f"a registry, but '{APPROVAL_JOB}' is not on its needs: path. It would "
+                       f"publish without passing the gate.")
+    return out
+
+
 # --- Fixtures ----------------------------------------------------------------------------------
 # Each row: (name, kind, yaml, expected_substring | None). None means "must be clean".
 # The arity floor in ci/actionlint/run.sh pins len(FIXTURES) — emptying this table would
@@ -425,9 +891,28 @@ jobs:
   plan:
     if: vars.PAIGASUS_RELEASE_ENABLED == 'true'
     runs-on: ubuntu-latest
-    steps: [{run: echo plan}]
-  release:
+    outputs:
+      nothing_to_release: ${{ steps.decide.outputs.nothing_to_release }}
+    steps:
+      - id: decide
+        run: ci/release-plan/run.sh --github-output
+  build:
     needs: [plan]
+    if: needs.plan.outputs.nothing_to_release != 'true'
+    runs-on: ubuntu-latest
+    steps: [{run: echo build}]
+  wheels:
+    needs: [plan]
+    if: ${{ needs.plan.outputs.nothing_to_release != 'true' }}
+    runs-on: ubuntu-latest
+    steps: [{run: echo wheels}]
+  approve-release:
+    needs: [build]
+    environment: release-approval
+    runs-on: ubuntu-latest
+    steps: [{run: echo approved}]
+  release:
+    needs: [build, approve-release]
     runs-on: ubuntu-latest
     steps: [{run: release-plz release}]
 """
@@ -437,35 +922,54 @@ FIXTURES: list[tuple[str, str, str, str | None]] = [
     ("ungated job", "main", _OK_MAIN.replace("    if: vars.PAIGASUS_RELEASE_ENABLED == 'true'\n", ""),
      "is not gated"),
     ("gate expression weakened to !=", "main",
-     _OK_MAIN.replace("== 'true'", "!= 'disabled'"), "is not gated"),
+     _OK_MAIN.replace("vars.PAIGASUS_RELEASE_ENABLED == 'true'",
+                      "vars.PAIGASUS_RELEASE_ENABLED != 'disabled'"), "is not gated"),
     ("gate expression widened with ||", "main",
-     _OK_MAIN.replace("== 'true'", "== 'true' || github.actor == 'x'"), "is not gated"),
+     _OK_MAIN.replace("vars.PAIGASUS_RELEASE_ENABLED == 'true'",
+                      "vars.PAIGASUS_RELEASE_ENABLED == 'true' || github.actor == 'x'"),
+     "is not gated"),
     ("wrapped gate form is accepted", "main",
      _OK_MAIN.replace("if: vars.PAIGASUS_RELEASE_ENABLED == 'true'",
                       "if: ${{ vars.PAIGASUS_RELEASE_ENABLED == 'true' }}"), None),
     ("always() on the gated job", "main",
-     _OK_MAIN.replace("    needs: [plan]", "    needs: [plan]\n    if: always()"), "status function"),
+     _OK_MAIN.replace("    needs: [build, approve-release]",
+                      "    needs: [build, approve-release]\n    if: always()"), "status function"),
     ("!cancelled() with spacing", "main",
-     _OK_MAIN.replace("    needs: [plan]", "    needs: [plan]\n    if: ${{ ! cancelled() }}"),
+     _OK_MAIN.replace("    needs: [build, approve-release]",
+                      "    needs: [build, approve-release]\n    if: ${{ ! cancelled() }}"),
      "status function"),
     ("success() || failure()", "main",
-     _OK_MAIN.replace("    needs: [plan]", "    needs: [plan]\n    if: success() || failure()"),
+     _OK_MAIN.replace("    needs: [build, approve-release]",
+                      "    needs: [build, approve-release]\n    if: success() || failure()"),
      "status function"),
     ("job-level continue-on-error: true", "main",
-     _OK_MAIN.replace("    needs: [plan]", "    needs: [plan]\n    continue-on-error: true"),
+     _OK_MAIN.replace("    needs: [build, approve-release]",
+                      "    needs: [build, approve-release]\n    continue-on-error: true"),
      "continue-on-error"),
     ("step-level continue-on-error: true", "main",
      _OK_MAIN.replace("steps: [{run: release-plz release}]",
                       "steps: [{run: release-plz release, continue-on-error: true}]"),
      "step with continue-on-error"),
     ("continue-on-error: false (bool) is accepted", "main",
-     _OK_MAIN.replace("    needs: [plan]", "    needs: [plan]\n    continue-on-error: false"), None),
+     _OK_MAIN.replace("    needs: [build, approve-release]",
+                      "    needs: [build, approve-release]\n    continue-on-error: false"), None),
     ('continue-on-error: "false" (str) is accepted', "main",
-     _OK_MAIN.replace("    needs: [plan]", '    needs: [plan]\n    continue-on-error: "false"'), None),
+     _OK_MAIN.replace("    needs: [build, approve-release]",
+                      '    needs: [build, approve-release]\n    continue-on-error: "false"'), None),
+    # These two anchor on `build`'s "    needs: [plan]" line (the release job's own needs is now
+    # the two-item "[build, approve-release]", which a scalar cannot represent losslessly).
+    # `build` still carries a genuine single-item needs list, so retargeting these rows onto
+    # `release` would either drop a dependency or require inventing new semantics; leaving them on
+    # `build` preserves the original list-to-scalar test exactly, and adding no `if:`/`needs:`
+    # collision (build's own `if:` line is untouched by either mutation).
+    # Both rows below now name an explicit `1` count: since V9's `wheels` consumer (added below)
+    # shares the identical "    needs: [plan]" text with `build`, an unbounded .replace() would
+    # rewrite BOTH jobs' needs: here, which is not what either row is testing. `1` pins these back
+    # to their original, single-consumer meaning — `build` is always the first occurrence.
     ("needs: as a SCALAR string still walks", "main",
-     _OK_MAIN.replace("    needs: [plan]", "    needs: plan"), None),
+     _OK_MAIN.replace("    needs: [plan]", "    needs: plan", 1), None),
     ("needs: scalar pointing at an ungated job reds", "main",
-     _OK_MAIN.replace("    needs: [plan]", "    needs: release-pr"), "is not gated"),
+     _OK_MAIN.replace("    needs: [plan]", "    needs: release-pr", 1), "is not gated"),
     ("napi prepublish without --no-gh-release", "main",
      _OK_MAIN.replace("run: release-plz release", "run: napi prepublish --npm-dir npm"),
      "without --no-gh-release"),
@@ -473,7 +977,8 @@ FIXTURES: list[tuple[str, str, str, str | None]] = [
      _OK_MAIN.replace("run: release-plz release",
                       "run: napi prepublish --no-gh-release --npm-dir npm"), None),
     ("job-level if: false is MORE restrictive, so clean", "main",
-     _OK_MAIN.replace("    needs: [plan]", "    needs: [plan]\n    if: false"), None),
+     _OK_MAIN.replace("    needs: [build, approve-release]",
+                      "    needs: [build, approve-release]\n    if: false"), None),
     ("called workflow that is workflow_call-only may publish", "called",
      "on:\n  workflow_call:\njobs:\n  build:\n    steps: [{run: twine upload dist/*}]\n", None),
     ("called workflow with pull_request may NOT publish", "called",
@@ -485,13 +990,16 @@ FIXTURES: list[tuple[str, str, str, str | None]] = [
 
     # --- Fix round 1 additions -------------------------------------------------------------
     ("Critical 1: case-insensitive Always() bypass", "main",
-     _OK_MAIN.replace("    needs: [plan]", "    needs: [plan]\n    if: Always()"),
+     _OK_MAIN.replace("    needs: [build, approve-release]",
+                      "    needs: [build, approve-release]\n    if: Always()"),
      "status function"),
     ("Critical 1: case-insensitive ALWAYS() wrapped form", "main",
-     _OK_MAIN.replace("    needs: [plan]", "    needs: [plan]\n    if: ${{ ALWAYS() }}"),
+     _OK_MAIN.replace("    needs: [build, approve-release]",
+                      "    needs: [build, approve-release]\n    if: ${{ ALWAYS() }}"),
      "status function"),
     ("Critical 1: case-insensitive !Cancelled() bypass", "main",
-     _OK_MAIN.replace("    needs: [plan]", "    needs: [plan]\n    if: ${{ !Cancelled() }}"),
+     _OK_MAIN.replace("    needs: [build, approve-release]",
+                      "    needs: [build, approve-release]\n    if: ${{ !Cancelled() }}"),
      "status function"),
     ("Important 3: napi prepublish --dry-run in a called workflow is not a publish", "called",
      ("on:\n  workflow_call:\n  pull_request:\n    branches:\n      - main\n"
@@ -545,6 +1053,96 @@ FIXTURES: list[tuple[str, str, str, str | None]] = [
       "jobs:\n  build:\n    steps:\n      - run: |\n          "
       'npm publish && echo "not --dry-run"\n'),
      "workflow_call-ONLY"),
+
+    # --- V8 additions (the approval boundary, both directions) -----------------------------
+    ("V8a: no approve-release job at all", "main",
+     _OK_MAIN.replace("  approve-release:\n    needs: [build]\n"
+                      "    environment: release-approval\n    runs-on: ubuntu-latest\n"
+                      "    steps: [{run: echo approved}]\n", ""),
+     "V8a"),
+    ("V8a: approve-release without an environment", "main",
+     _OK_MAIN.replace("    environment: release-approval\n", ""), "V8a"),
+    ("V8b: a real publish upstream of approval", "main",
+     _OK_MAIN.replace("steps: [{run: echo build}]", "steps: [{run: cargo publish}]"), "V8b"),
+    ("V8b CONTROL: a --dry-run publish upstream of approval is clean", "main",
+     _OK_MAIN.replace("steps: [{run: echo build}]",
+                      "steps: [{run: cargo publish --dry-run}]"), None),
+    ("V8b: a uses:-shaped publish upstream of approval", "main",
+     _OK_MAIN.replace("steps: [{run: echo build}]",
+                      "steps: [{uses: pypa/gh-action-pypi-publish@v1}]"), "V8b"),
+    ("V8c: approve-release dropped from release's needs", "main",
+     _OK_MAIN.replace("    needs: [build, approve-release]", "    needs: [build]"), "V8c"),
+
+    # --- V8 fix round 1 additions (Important 2, Minor 1, Minor 4) --------------------------
+    # Important 2: the --dry-run exemption needs adjacency, not a bare substring test. Both
+    # measured false-cleans genuinely publish.
+    ("V8 fix1 Important 2: FLAGS=--dry-run is a shell assignment, never reaches cargo", "main",
+     _OK_MAIN.replace("steps: [{run: echo build}]",
+                      "steps: [{run: FLAGS=--dry-run cargo publish}]"), "V8b"),
+    ("V8 fix1 Important 2: npm publish --dry-run=false still publishes for real", "main",
+     _OK_MAIN.replace("steps: [{run: echo build}]",
+                      "steps: [{run: npm publish --dry-run=false}]"), "V8b"),
+    # Minor 1: the V8b message for a publish step inside approve-release ITSELF used to read
+    # "runs upstream of 'approve-release'" about approve-release, which is nonsense.
+    ("V8 fix1 Minor 1: a publish step inside approve-release itself gets its own wording", "main",
+     _OK_MAIN.replace("steps: [{run: echo approved}]", "steps: [{run: cargo publish}]"),
+     "IS the approval gate"),
+    # Minor 4: an environment: mapping with a url: but no name: is not a NAMED environment —
+    # GitHub rejects it outright, so it must not satisfy V8a either.
+    ("V8 fix1 Minor 4: environment: {url: ...} with no name: is not a named gate", "main",
+     _OK_MAIN.replace("environment: release-approval", "environment: {url: 'https://x'}"), "V8a"),
+    ("V8 fix1 Minor 4 CONTROL: environment: {name: ..., url: ...} is accepted", "main",
+     _OK_MAIN.replace("environment: release-approval",
+                      "environment: {name: release-approval, url: 'https://x'}"), None),
+
+    # --- V8 fix round 2 additions (N1, N2) ---------------------------------------------------
+    # N1: the SPACE-separated form of the false/0 negation had no dedicated fixture. Measured
+    # against real npm 11.11.0: `npm publish --dry-run false` resolves dry-run=false and really
+    # publishes.
+    ("V8 fix2 N1: npm publish --dry-run false (space form) still publishes for real", "main",
+     _OK_MAIN.replace("steps: [{run: echo build}]",
+                      "steps: [{run: npm publish --dry-run false}]"), "V8b"),
+    # N2: a LATER negating token was never seen — the old code exempted on the FIRST qualifying
+    # `--dry-run` and stopped scanning. Both measured against real npm 11.11.0 / clipanion
+    # 4.0.0-rc.4 (both last-flag-wins): the tool really publishes in both shapes.
+    ("V8 fix2 N2: a later --no-dry-run overrides an earlier --dry-run", "main",
+     _OK_MAIN.replace("steps: [{run: echo build}]",
+                      "steps: [{run: npm publish --dry-run --no-dry-run}]"), "V8b"),
+    ("V8 fix2 N2: a later --dry-run=false overrides an earlier --dry-run", "main",
+     _OK_MAIN.replace("steps: [{run: echo build}]",
+                      "steps: [{run: npm publish --dry-run --dry-run=false}]"), "V8b"),
+
+    # --- V8 fix round 3 addition (Critical 1) ------------------------------------------------
+    # The round-2 rewrite deleted the general `if tail.startswith("="): continue` fail-closed
+    # rule along with the per-occurrence loop it lived in, and nothing pinned that rule — the
+    # only existing `=`-form row (fix round 1's) uses the literal value `false`, which the
+    # negation regex still happens to cover on its own. A NON-LITERAL `=` value — a shell
+    # variable, or, worse, a `${{ }}` workflow expression this guard cannot evaluate at scan
+    # time — must still fail closed. Without this row, deleting the restored `=`-form check goes
+    # undetected exactly as it did the first time.
+    ("V8 fix3 C1: --dry-run=$DRY_RUN (a non-literal value) must fail closed, not read exempt",
+     "main",
+     _OK_MAIN.replace("steps: [{run: echo build}]",
+                      "steps: [{run: npm publish --dry-run=$DRY_RUN}]"), "V8b"),
+
+    # --- V8 fix round 4 additions (Important 1, Important 2) ---------------------------------
+    # Important 1. The round-3 rule above lived INSIDE the per-occurrence loop, and that loop
+    # returns on the FIRST occurrence it accepts. So one bare `--dry-run` token in front of the
+    # `=` form made the guard stop scanning before it ever reached the `=` form, and the
+    # negation scan sees only the two literal falsey values. Measured on npm 11.11.0:
+    # `--dry-run --dry-run=false` resolves dry-run=false, so a `--dry-run=<value>` this guard
+    # cannot evaluate must fail closed even when a bare `--dry-run` precedes it. Without this
+    # row, hoisting the `=` rule back into the loop goes undetected.
+    ("V8 fix4 I1: a bare --dry-run in front of --dry-run=$DRY_RUN must not exempt", "main",
+     _OK_MAIN.replace("steps: [{run: echo build}]",
+                      "steps: [{run: npm publish --dry-run --dry-run=$DRY_RUN}]"), "V8b"),
+    # Important 2. The flag regex used `--dry-run\b`, and `-` is a non-word character, so a
+    # SUFFIXED flag satisfied it. Measured on npm 11.11.0: `--dry-run-x` warns `Unknown cli
+    # config`, sets `dry-run-x`, leaves `dry-run` UNSET, and really publishes. Nothing pinned the
+    # anchor: removing it outright survived the whole self-test.
+    ("V8 fix4 I2: --dry-run-x is a different flag and does not exempt", "main",
+     _OK_MAIN.replace("steps: [{run: echo build}]",
+                      "steps: [{run: npm publish --dry-run-x}]"), "V8b"),
 
     # --- Fix round 3 additions (Critical 2, Important 3, Important 4) ----------------------
     # Critical 2, both directions. The RED direction is the defect: this exact three-step job was
@@ -615,6 +1213,155 @@ FIXTURES: list[tuple[str, str, str, str | None]] = [
      _OK_MAIN.replace("run: release-plz release",
                       "run: napi prepublish --no-gh-release --npm-dir npm"),
      None),
+
+    # --- V9 additions (the plan job's output wiring and fail-safe polarity) ----------------
+    # `_OK_MAIN` now carries TWO consumers of `plan` — `build` (bare `if:` form) and `wheels`
+    # (wrapped `${{ }}` form, added deliberately to disambiguate: it keeps every row below from
+    # accidentally mutating both consumers at once via a shared anchor string). Real release.yml
+    # has three (wheels, prebuild, proto-dist); two is enough to prove "EVERY consumer", not "SOME
+    # consumer".
+    ("V9a: the plan job renamed out from under V9", "main",
+     _OK_MAIN.replace("  plan:\n", "  planning:\n")
+             .replace("needs: [plan]", "needs: [planning]")
+             .replace("needs.plan.outputs", "needs.planning.outputs"), "V9a"),
+    # Fix round 1, I2. V9a is a conjunction — `plan` exists AND at least one job names it in
+    # needs: — and only the first conjunct had a row. `plan` stays present and correctly wired
+    # here; both consumers are re-gated DIRECTLY on the release flag instead of via needs: [plan],
+    # so V1 stays satisfied and this is the ONLY thing that reds.
+    ("V9a: plan exists but nothing reads it (every direct consumer re-gated on the flag instead)",
+     "main",
+     _OK_MAIN.replace(
+         "    needs: [plan]\n    if: needs.plan.outputs.nothing_to_release != 'true'\n",
+         "    if: vars.PAIGASUS_RELEASE_ENABLED == 'true'\n")
+             .replace(
+         "    needs: [plan]\n    if: ${{ needs.plan.outputs.nothing_to_release != 'true' }}\n",
+         "    if: vars.PAIGASUS_RELEASE_ENABLED == 'true'\n"),
+     "V9a: no job names 'plan' in needs:"),
+    ("V9b: an INVERTED consumer condition", "main",
+     _OK_MAIN.replace("if: needs.plan.outputs.nothing_to_release != 'true'",
+                      "if: needs.plan.outputs.nothing_to_release == 'true'"), "V9b"),
+    ("V9b: == 'false' fails closed and is not accepted", "main",
+     _OK_MAIN.replace("if: needs.plan.outputs.nothing_to_release != 'true'",
+                      "if: needs.plan.outputs.nothing_to_release == 'false'"), "V9b"),
+    ("V9b: a consumer with no if: at all", "main",
+     _OK_MAIN.replace("    if: needs.plan.outputs.nothing_to_release != 'true'\n", ""), "V9b"),
+    ("V9b CONTROL: the ${{ }} wrapping is accepted", "main",
+     _OK_MAIN.replace("if: needs.plan.outputs.nothing_to_release != 'true'",
+                      "if: ${{ needs.plan.outputs.nothing_to_release != 'true' }}"), None),
+    # This is the required addition: `build`'s bare-form `if:` is untouched here, and only
+    # `wheels`'s wrapped-form `if:` is inverted (the anchor below matches wheels's exact literal
+    # text and nothing else in `_OK_MAIN`). A `plan_contract_violations` that stops at the FIRST
+    # bad consumer, rather than checking EVERY one, would pass this row for the wrong reason
+    # (build's `if:` alone is fine) — it must still red, naming 'wheels'.
+    ("V9b: EVERY consumer must be checked, not just one — wheels alone goes bad", "main",
+     _OK_MAIN.replace("if: ${{ needs.plan.outputs.nothing_to_release != 'true' }}",
+                      "if: ${{ needs.plan.outputs.nothing_to_release == 'true' }}"), "V9b"),
+    ("V9c: the outputs mapping is missing", "main",
+     _OK_MAIN.replace("    outputs:\n      nothing_to_release: "
+                      "${{ steps.decide.outputs.nothing_to_release }}\n", ""), "V9c"),
+    ("V9c: the mapping names a step id that does not exist", "main",
+     _OK_MAIN.replace("${{ steps.decide.outputs.nothing_to_release }}",
+                      "${{ steps.decdie.outputs.nothing_to_release }}"), "V9c"),
+    # Fix round 1, I3. The "names no steps.<id>" branch — the one that catches a HARDCODED
+    # `outputs:` mapping, the most direct drop-every-release wiring there is — had no dedicated
+    # row. `plan` itself is otherwise untouched (still gated, `decide` still runs the real
+    # checker); only the mapping value is replaced with a literal.
+    ("V9c: outputs.nothing_to_release is a hardcoded literal, not a steps.<id> reference", "main",
+     _OK_MAIN.replace(
+         "nothing_to_release: ${{ steps.decide.outputs.nothing_to_release }}",
+         "nothing_to_release: 'false'"),
+     "which names no steps"),
+    ("V9d: the decision step no longer invokes the checker", "main",
+     _OK_MAIN.replace("run: ci/release-plan/run.sh --github-output",
+                      "run: echo nothing_to_release=true >> \"$GITHUB_OUTPUT\""), "V9d"),
+    # Fix round 1, I1. V9d used to search the WHOLE job's `run:` text, not just the DECISION
+    # step (the one V9c resolves via outputs.nothing_to_release's steps.<id> reference). This row
+    # is the measured fail-green: `decide` runs an inline echo (never touches the real checker),
+    # and an unrelated LATER step happens to invoke the script with an unrelated flag. A
+    # whole-job scan finds the script text somewhere in the job and reports clean; scoped to the
+    # decision step alone, it must still red.
+    ("V9d fix1: decide runs an inline echo while an unrelated step invokes the checker", "main",
+     _OK_MAIN.replace(
+         "      - id: decide\n        run: ci/release-plan/run.sh --github-output\n",
+         "      - id: decide\n"
+         "        run: echo \"nothing_to_release=true\" >> \"$GITHUB_OUTPUT\"\n"
+         "      - run: ci/release-plan/run.sh --help\n"),
+     "V9d"),
+    # SMA-603 fix wave, 2c. V9d was a raw substring test over the decision step's `run:` text, so
+    # a COMMENT naming the script satisfied it while the step hardcoded the answer. This is the
+    # measured bypass, in the exact shape a reader would write it.
+    ("V9d fix-wave: a COMMENT naming the script does not count as invoking it", "main",
+     _OK_MAIN.replace(
+         "      - id: decide\n        run: ci/release-plan/run.sh --github-output\n",
+         "      - id: decide\n"
+         "        run: |\n"
+         "          # ci/release-plan/run.sh --github-output decides this\n"
+         "          echo \"nothing_to_release=true\" >> \"$GITHUB_OUTPUT\"\n"),
+     "V9d"),
+    # ...and the same class one step further: the script really RUNS, but with a flag that writes
+    # no output at all. `--self-test` exits 0 and appends nothing, so the job output stays unset.
+    ("V9d fix-wave: the decision step runs the script with the wrong flag", "main",
+     _OK_MAIN.replace("run: ci/release-plan/run.sh --github-output",
+                      "run: ci/release-plan/run.sh --self-test"), "V9d"),
+    # ...and a trailing-comment CONTROL: a real invocation carrying a comment must stay accepted,
+    # or the fix above would red the legitimate form it is meant to allow.
+    ("V9d fix-wave CONTROL: a real invocation with a trailing comment is accepted", "main",
+     _OK_MAIN.replace("run: ci/release-plan/run.sh --github-output",
+                      "run: ci/release-plan/run.sh --github-output  # the decision"), None),
+    # ...and an env-prefixed CONTROL, the shape a `GITHUB_EVENT_NAME=... ` prefix would take.
+    ("V9d fix-wave CONTROL: a leading env assignment and a bash prefix are accepted", "main",
+     _OK_MAIN.replace("run: ci/release-plan/run.sh --github-output",
+                      "run: GITHUB_EVENT_NAME=push bash ./ci/release-plan/run.sh --github-output"),
+     None),
+    # SMA-603 fix wave, 2d. V9c used `_PLAN_STEP_RE.search`, so ANY expression merely CONTAINING
+    # the step reference passed — including one that resolves to a constant. GitHub's `||` yields
+    # its right operand when the left is the empty string, so an unset step output becomes the
+    # literal 'true' and every consumer SKIPS. That is the branch's central property, inverted in
+    # one edit, and nothing red before this row.
+    ("V9c fix-wave: the outputs expression defaults to 'true' via ||", "main",
+     _OK_MAIN.replace(
+         "nothing_to_release: ${{ steps.decide.outputs.nothing_to_release }}",
+         "nothing_to_release: ${{ steps.decide.outputs.nothing_to_release || 'true' }}"),
+     "V9c"),
+    # ...and the concatenation shape, which the `search` form also accepted.
+    ("V9c fix-wave: the outputs expression is a concatenation, not the bare reference", "main",
+     _OK_MAIN.replace(
+         "nothing_to_release: ${{ steps.decide.outputs.nothing_to_release }}",
+         "nothing_to_release: true${{ steps.decide.outputs.nothing_to_release }}"),
+     "V9c"),
+    # SMA-603 fix wave, 2g — the re-judged parked finding B2, verbatim. The checker really runs;
+    # the next line in the SAME step overwrites its verdict. V9c and V9d both pass on this shape.
+    ("V9e fix-wave: the decision step overwrites $GITHUB_OUTPUT after running the checker", "main",
+     _OK_MAIN.replace(
+         "      - id: decide\n        run: ci/release-plan/run.sh --github-output\n",
+         "      - id: decide\n"
+         "        run: |\n"
+         "          ci/release-plan/run.sh --github-output\n"
+         "          echo \"nothing_to_release=true\" > \"$GITHUB_OUTPUT\"\n"),
+     "V9e"),
+    # ...and the same class on ONE line, via a `;` chain, which command_segments splits.
+    ("V9e fix-wave: a `;`-chained overwrite in the decision step's one line", "main",
+     _OK_MAIN.replace(
+         "run: ci/release-plan/run.sh --github-output",
+         "run: ci/release-plan/run.sh --github-output; "
+         "echo nothing_to_release=true > \"$GITHUB_OUTPUT\""),
+     "V9e"),
+    # ...and the CONTROL: a block-scalar `run:` holding ONLY the invocation stays clean, so V9e
+    # pins the command COUNT rather than the YAML scalar style.
+    ("V9e fix-wave CONTROL: a block scalar holding only the invocation is accepted", "main",
+     _OK_MAIN.replace(
+         "      - id: decide\n        run: ci/release-plan/run.sh --github-output\n",
+         "      - id: decide\n"
+         "        run: |\n"
+         "          # the decision\n"
+         "          ci/release-plan/run.sh --github-output\n"),
+     None),
+    # ...and the CONTROL for the whitespace tolerance the strict form deliberately keeps.
+    ("V9c fix-wave CONTROL: extra whitespace inside ${{ }} is accepted", "main",
+     _OK_MAIN.replace(
+         "nothing_to_release: ${{ steps.decide.outputs.nothing_to_release }}",
+         "nothing_to_release: ${{   steps.decide.outputs.nothing_to_release   }}"),
+     None),
 ]
 
 
@@ -659,6 +1406,264 @@ def _critical2_end_to_end() -> str | None:
     if rc != 1 or "workflow_call-ONLY" not in out:
         return (f"expected exit 1 with 'workflow_call-ONLY' in output, got exit {rc!r}: "
                 f"stdout={out!r} stderr={err_buf.getvalue()!r}")
+    return None
+
+
+def _run_main_in_tempdir(files: dict[str, str], entry: str = "main.yml") -> tuple[int, str, str]:
+    """Write `files` (relative-path -> content) into a fresh tempdir, chdir into it, drive
+    main([entry]) end to end, and return (rc, stdout, stderr). Shared by every V8d helper below —
+    all of them need main()'s filesystem-resolving callee walk, which check_main/check_called
+    (and therefore a plain FIXTURES row) never touch."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        for rel, content in files.items():
+            (tmp_path / rel).write_text(content)
+        prev_cwd = Path.cwd()
+        out_buf, err_buf = io.StringIO(), io.StringIO()
+        rc: int
+        try:
+            os.chdir(tmp_path)
+            try:
+                with contextlib.redirect_stdout(out_buf), contextlib.redirect_stderr(err_buf):
+                    rc = main([entry])
+            except SystemExit as exc:
+                rc = exc.code if isinstance(exc.code, int) else 2
+        finally:
+            os.chdir(prev_cwd)
+    return rc, out_buf.getvalue(), err_buf.getvalue()
+
+
+_PUBLISHING_CALLEE = "on:\n  workflow_call:\njobs:\n  build:\n    steps: [{run: cargo publish}]\n"
+
+
+def _v8d_pre_approval_callee_publish() -> str | None:
+    """Regression test for V8d (retargeted, fix round 1, Critical 1): check_called's V6
+    deliberately permits a publish step in a workflow_call-ONLY workflow, but that permission is
+    unsafe for a callee invoked from a job that never passes the approval gate. A
+    (name, kind, yaml, want) row cannot express this — it needs a two-file tree (a main workflow
+    plus a real local callee) driven through main() end to end, the same shape as
+    _critical2_end_to_end above.
+
+    Proves BOTH directions, per the fix-round-1 ruling: without the CLEAN direction, the merged
+    callee_boundary_violations rule could be wired to always-red and no fixture would notice.
+    """
+    # Direction 1: `build` sits on approve-release's needs: path (plan -> build ->
+    # approve-release -> release), so replacing its steps with a local `uses:` puts the callee
+    # squarely upstream of the gate. Must RED.
+    pre_yaml = _OK_MAIN.replace("steps: [{run: echo build}]", "uses: ./called.yml")
+    rc, out, err = _run_main_in_tempdir({"called.yml": _PUBLISHING_CALLEE, "main.yml": pre_yaml})
+    if rc != 1 or "V8d" not in out:
+        return (f"pre-approval caller: expected exit 1 with 'V8d' in output, got exit {rc!r}: "
+                f"stdout={out!r} stderr={err!r}")
+
+    # Direction 2: a new job whose OWN needs: chain includes approve-release calls the same
+    # publishing callee. It IS downstream of the gate, so it must stay CLEAN.
+    post_yaml = _OK_MAIN.replace(
+        "    steps: [{run: release-plz release}]\n",
+        "    steps: [{run: release-plz release}]\n"
+        "  post-publish:\n"
+        "    needs: [approve-release]\n"
+        "    uses: ./called.yml\n",
+    )
+    rc2, out2, err2 = _run_main_in_tempdir({"called.yml": _PUBLISHING_CALLEE, "main.yml": post_yaml})
+    if rc2 != 0 or out2:
+        return (f"post-approval caller: expected exit 0 with no output, got exit {rc2!r}: "
+                f"stdout={out2!r} stderr={err2!r}")
+    return None
+
+
+def _v8d_sneak_shape() -> str | None:
+    """Regression test for C1 (fix round 1, Critical 1) — the exact CRITICAL hole reported
+    against the original brief. A job neither on `APPROVAL_JOB`'s own needs: path NOR itself
+    needed by it — `sneak`, hanging off `build` but never merging back into the approval-gated
+    chain — evaded V8 entirely under the original split: V8b only walked
+    `gated_path_jobs(APPROVAL_JOB, jobs)` (the gate's OWN needs: path, which a sibling branch is
+    never on), and V8c/V6 never looked at a job-level `uses:` at all. The merged
+    callee_boundary_violations rule catches it because it scans EVERY job's own `uses:`, not only
+    ones already known to sit on the gate's path.
+    """
+    main_yaml = _OK_MAIN.replace(
+        "  approve-release:\n",
+        "  sneak:\n    needs: [build]\n    uses: ./pub.yml\n"
+        "  approve-release:\n",
+    )
+    rc, out, err = _run_main_in_tempdir({"pub.yml": _PUBLISHING_CALLEE, "main.yml": main_yaml})
+    if rc != 1 or "V8d" not in out or "'sneak'" not in out:
+        return (f"expected exit 1 with a 'sneak'-naming V8d violation, got exit {rc!r}: "
+                f"stdout={out!r} stderr={err!r}")
+    return None
+
+
+def _v8d_unverifiable_remote_uses() -> str | None:
+    """Regression test for I1 (fix round 1, Important 1): a job-level `uses:` this guard cannot
+    read at all — a remote `org/repo/path@ref` reference — must be reported as an unverifiable
+    violation, never silently treated as clean. Fail-closed, not a resolver: this guard has no
+    network access and must never assume a remote workflow's shape.
+    """
+    main_yaml = _OK_MAIN.replace(
+        "steps: [{run: echo build}]", "uses: acme/evil/.github/workflows/pub.yml@main"
+    )
+    rc, out, err = _run_main_in_tempdir({"main.yml": main_yaml})
+    if rc != 1 or "V8d" not in out or "cannot be proven safe" not in out:
+        return (f"expected exit 1 with an unverifiable-remote V8d violation, got exit {rc!r}: "
+                f"stdout={out!r} stderr={err!r}")
+    return None
+
+
+def _v8d_unverifiable_nested_local_callee() -> str | None:
+    """Regression test for I1 (fix round 1, Important 1): callee_boundary_violations resolves
+    exactly ONE level of a LOCAL './' `uses:`. A second local hop nested inside an
+    already-resolved callee — main.yml -> ./a.yml -> ./b.yml, where the SECOND level publishes —
+    must be reported unverifiable, not silently treated as clean because the FIRST-level callee
+    itself contains no publish step. This is closed by DETECTION, not by building a resolver: the
+    guard never loads b.yml at all.
+    """
+    files = {
+        "a.yml": "on:\n  workflow_call:\njobs:\n  inner:\n    uses: ./b.yml\n",
+        "b.yml": "on:\n  workflow_call:\njobs:\n  deep:\n    steps: [{run: cargo publish}]\n",
+        "main.yml": _OK_MAIN.replace("steps: [{run: echo build}]", "uses: ./a.yml"),
+    }
+    rc, out, err = _run_main_in_tempdir(files)
+    if rc != 1 or "V8d" not in out or "resolves only one level" not in out:
+        return (f"expected exit 1 with an unverifiable-nested V8d violation, got exit {rc!r}: "
+                f"stdout={out!r} stderr={err!r}")
+    return None
+
+
+def _v8d_dedup_shared_callee() -> str | None:
+    """Regression test for M2 (fix round 1, Minor 2): two different callers pointing at the SAME
+    local callee must not emit the identical line twice. The old `pre_approval_callees` returned
+    a flat, unattributed list of callee paths, so two callers of one target callee doubled the
+    identical line; callee_boundary_violations instead names the CALLING job in every message, so
+    two distinct callers naturally produce two DISTINCT lines rather than one repeated one.
+    """
+    main_yaml = (
+        "on:\n  push:\n    branches: [main]\n"
+        "jobs:\n"
+        "  caller-a:\n"
+        "    if: vars.PAIGASUS_RELEASE_ENABLED == 'true'\n"
+        "    uses: ./shared.yml\n"
+        "  caller-b:\n"
+        "    if: vars.PAIGASUS_RELEASE_ENABLED == 'true'\n"
+        "    uses: ./shared.yml\n"
+    )
+    rc, out, err = _run_main_in_tempdir({"shared.yml": _PUBLISHING_CALLEE, "main.yml": main_yaml})
+    lines = [ln for ln in out.splitlines() if ln.strip()]
+    a_lines = [ln for ln in lines if "'caller-a'" in ln]
+    b_lines = [ln for ln in lines if "'caller-b'" in ln]
+    if rc != 1 or len(a_lines) != 1 or len(b_lines) != 1 or a_lines[0] == b_lines[0]:
+        return (f"expected exactly one distinct V8d line per caller, got exit {rc!r}: "
+                f"stdout={out!r} stderr={err!r}")
+    return None
+
+
+def _v8d_dedup_shared_nested_target() -> str | None:
+    """Regression test for the `seen` de-duplication set inside callee_boundary_violations (fix
+    round 2, Minor 6). `_v8d_dedup_shared_callee` above proves that naming the CALLING job
+    removes a duplicate line across two DIFFERENT calling jobs — that is what actually does the
+    work in that case, not `seen`. `seen` earns its keep on a narrower shape: TWO jobs INSIDE THE
+    SAME resolved callee ('a.yml') that both nest the IDENTICAL unresolvable second-level target
+    ('./b.yml'). Without `seen`, the single outer caller ('build') would get the identical
+    unverifiable-nested line twice, once per inner job.
+    """
+    files = {
+        "a.yml": (
+            "on:\n  workflow_call:\njobs:\n"
+            "  inner-1:\n    uses: ./b.yml\n"
+            "  inner-2:\n    uses: ./b.yml\n"
+        ),
+        "main.yml": _OK_MAIN.replace(
+            "    runs-on: ubuntu-latest\n    steps: [{run: echo build}]", "    uses: ./a.yml"
+        ),
+    }
+    rc, out, err = _run_main_in_tempdir(files)
+    matching = [ln for ln in out.splitlines() if "resolves only one level" in ln]
+    if rc != 1 or len(matching) != 1:
+        return (f"expected exactly one de-duplicated unverifiable-nested line, got exit {rc!r}, "
+                f"{len(matching)} matching line(s): stdout={out!r} stderr={err!r}")
+    return None
+
+
+def _v8d_approval_gate_self_case() -> str | None:
+    """Regression test for N4 (fix round 2, Minor 4): a job literally named APPROVAL_JOB, itself
+    carrying `uses: ./pub.yml` where the callee publishes, used to read clean —
+    gated_path_jobs(APPROVAL_JOB, jobs) trivially contains APPROVAL_JOB, so the old
+    `APPROVAL_JOB not in gated_path_jobs(jid, jobs)` check could never fire for jid ==
+    APPROVAL_JOB itself. Symmetric with the Minor 1 case already handled in
+    approval_boundary_violations' V8b loop.
+
+    Not a live hole against the real repository — the pinned actionlint rejects `environment:` on
+    a `uses:` job, so such a job would red V8a's syntax instead — but V8d's own safety in this
+    corner should not rest on a DIFFERENT gate's check. Driven as a DIRECT call to
+    callee_boundary_violations (not through main()), since it only needs a `jobs` dict and the
+    filesystem for the one callee file — main()'s own `uses.startswith("./")` V6 loop has nothing
+    useful to say about a job named `approve-release` and would only add noise.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        (tmp_path / "pub.yml").write_text(_PUBLISHING_CALLEE)
+        prev_cwd = Path.cwd()
+        try:
+            os.chdir(tmp_path)
+            out = callee_boundary_violations({APPROVAL_JOB: {"uses": "./pub.yml"}}, "fixture")
+        finally:
+            os.chdir(prev_cwd)
+    blob = " | ".join(out)
+    if "V8d" not in blob or "IS the approval gate" not in blob:
+        return f"expected a self-case V8d violation, got: {blob or '(clean)'}"
+    return None
+
+
+def _v8d_missing_local_callee_direct() -> str | None:
+    """Direct-call regression test for the `is_file()` fail-closed arm inside
+    callee_boundary_violations (fix round 2, Minor 5). Unreachable through main() end to end:
+    main()'s earlier check_called loop already calls load_workflow on every local `./` callee
+    first, and load_workflow infra()s at exit 2 on a missing file before
+    callee_boundary_violations ever runs at all. Calling callee_boundary_violations directly,
+    bypassing that loop, is what actually exercises this arm — chosen over a defence-in-depth
+    comment so the arm stays a LIVE, tested rule rather than an assumed one.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        prev_cwd = Path.cwd()
+        try:
+            os.chdir(tmp)
+            jobs = {"caller": {"uses": "./does-not-exist.yml"}}
+            out = callee_boundary_violations(jobs, "fixture")
+        finally:
+            os.chdir(prev_cwd)
+    blob = " | ".join(out)
+    if "V8d" not in blob or "does not exist on disk" not in blob:
+        return f"expected a missing-callee V8d violation, got: {blob or '(clean)'}"
+    return None
+
+
+def _v8_fix4_dry_run_boundary_cases() -> str | None:
+    """V8 fix round 4. Two properties of _dry_run_exempts that the two new FIXTURES rows do NOT
+    pin, kept here rather than as rows so the fixture count stays the reviewed 62. Both were
+    MEASURED as mutation survivors before this helper existed: narrowing the flag anchor from
+    `(?!\\S)` to PUBLISH_MARKERS' `(?![-\\w])` idiom, and widening the value scan from
+    `--dry-run=` to `--dry-run\\s*=`, each left the whole self-test green.
+
+    1. `--dry-run.x` is a DIFFERENT flag, like `--dry-run-x`, and must not exempt. `.` is neither
+       `-` nor a word character, so `(?![-\\w])` admits it; only an anchor that ends the token at
+       whitespace rejects it.
+    2. `--dry-run = $DRY_RUN` IS an effective dry-run and must stay exempt. npm 11.11.0 resolves
+       it to dry-run=true, the `=` being an unrelated positional argument. Fix round 1 red it
+       (it lstripped before testing for `=`) and round 3 silently stopped doing so; this pins
+       the current, correct behaviour so the next reader cannot restore round 1's false red by
+       adding `\\s*` to the value scan.
+    """
+    cases = (
+        ("npm publish --dry-run.x", True,
+         "a suffixed flag is a different flag and must not exempt"),
+        ("npm publish --dry-run = $DRY_RUN", False,
+         "a bare flag followed by an unrelated = argument must still exempt"),
+    )
+    for command, want_publish, why in cases:
+        got = job_publishes({"steps": [{"run": command}]})
+        if got is not want_publish:
+            return (f"job_publishes({command!r}) returned {got}, expected {want_publish}: "
+                    f"{why}")
     return None
 
 
@@ -748,6 +1753,16 @@ def self_test() -> int:
     # infra() SystemExit rather than a returned violation list (Minor 9).
     for check_name, fn in (
         ("critical-2 uses: ./ prefix resolution", _critical2_end_to_end),
+        ("v8d callee boundary, both directions", _v8d_pre_approval_callee_publish),
+        ("v8d C1 sneak shape (job off the gate's own needs: path)", _v8d_sneak_shape),
+        ("v8d I1 unverifiable remote uses:", _v8d_unverifiable_remote_uses),
+        ("v8d I1 unverifiable nested local callee", _v8d_unverifiable_nested_local_callee),
+        ("v8d M2 no duplicate line for a shared callee", _v8d_dedup_shared_callee),
+        ("v8d N6 no duplicate line for a shared nested target", _v8d_dedup_shared_nested_target),
+        ("v8d N4 approval gate self-case", _v8d_approval_gate_self_case),
+        ("v8d N5 missing local callee (direct call)", _v8d_missing_local_callee_direct),
+        ("v8 fix4 dry-run anchor and space-form boundary cases",
+         _v8_fix4_dry_run_boundary_cases),
         ("minor-9 empty jobs: {} floor", _minor9_empty_jobs_floor),
     ):
         err = fn()
@@ -788,6 +1803,11 @@ def main(argv: list[str]) -> int:
             # `removeprefix` strips exactly the literal "./" and nothing more.
             p = Path(uses.removeprefix("./"))
             violations += check_called(load_workflow(p), p.name)
+
+    # V8d: every job carrying a `uses:` — not only ones already known to sit on the approval
+    # gate's own needs: path — must be checked against the SAME boundary a direct publisher is
+    # (fix round 1, Critical 1). Fail-closed on anything it cannot resolve (Important 1).
+    violations += callee_boundary_violations(main_doc["jobs"], main_path.name)
 
     for v in violations:
         print(v)

@@ -694,6 +694,29 @@ ACTIONLINT_SH_CALL_SITES = (
     # this arm existed and exits 2 after it. Deleting this one line restores that fail-open while
     # every other entry here stays green, which is exactly the shape this registry exists to catch.
     'elif [ "$rg_rc" -ne 0 ] && [ "$rg_rc" -ne 1 ]; then',
+    # SMA-603 — check 11's production call site, at run.sh's top level (verified: not nested in
+    # a function, if, or loop) — column 0 like every other entry above. Deleting it stops
+    # ci/release-plan/run.sh from ever being invoked against the real repository.
+    "release_plan_sh --assert || rp_rc=$?",
+    # SMA-603 fix round 1 (review I1) — check 11's exit-status ROUTING, the same shape as check
+    # 10's own `if`/catch-all-`elif` pair pinned above. MEASURED on a copy: deleting the whole
+    # `if [ "$rp_rc" -eq 2 ]; then … elif … elif … fi` block leaves every OTHER pin in both
+    # tuples satisfied, `repo:affected-smoke` green, and a `release_plan_sh` forced to return 1
+    # silently swallowed — the gate exits 0 printing nothing about check 11. With the block
+    # intact the same mutation correctly exits 1. `rp_rc=0` needs NO pin of its own: deleting
+    # that line leaves `$rp_rc` unbound when `release_plan_sh` is later read under `set -u`,
+    # which aborts the script outright — it already fails closed without help, so do not add a
+    # fourth pin for it thinking this is an oversight.
+    'if [ "$rp_rc" -eq 2 ]; then',
+    'elif [ "$rp_rc" -ne 0 ]; then',
+    # SMA-603 fix round 2 (re-review, new finding) — check 11's MIDDLE routing branch, the one
+    # that calls `fail()` on a real detected violation (rc 1). NOT a repeat of the silent-green
+    # shape above: the gate still exits non-zero without this branch, since rc 1 falls through to
+    # the `-ne 0` catch-all and that arm calls `infra`. It is a MISCLASSIFICATION gap instead — a
+    # genuine "the repository is wrong" verdict gets announced as "infrastructure broke", exactly
+    # the split ci/release-plan/run.sh's own header says nothing may collapse. MEASURED: deleting
+    # only this branch fires no other pin here.
+    'elif [ "$rp_rc" -eq 1 ]; then',
 )
 
 # SMA-579 — check 10's two remaining call sites, pinned SEPARATELY from ACTIONLINT_SH_CALL_SITES
@@ -706,6 +729,8 @@ ACTIONLINT_SH_CALL_SITES = (
 # residual it does NOT close (a dead copy at the SAME indentation, e.g. wrapped in
 # `if false; then … fi`) is the same accepted gap already recorded for
 # RELEASE_PARITY_SH_CALL_SITES and SELF_SCHEDULED_GATES.
+# SMA-603 adds check 11's own two: both sit INSIDE `run_self_tests() { ... }` or
+# `release_plan_self_test() { ... }` for the same reason, and are pinned here rather than above.
 ACTIONLINT_SH_INDENTED_CALL_SITES = (
     # check 10's FIXTURE TABLE arity floor. Same shape as the two check-8e floors in
     # ACTIONLINT_SH_CALL_SITES, one language over: release_guard.py's verdict is Python and
@@ -720,6 +745,35 @@ ACTIONLINT_SH_INDENTED_CALL_SITES = (
     # physical lines — but it is still this file's own complete physical line, so whole-line
     # matching still applies cleanly.
     'release_guard_py --self-test || { fail "check 10: release_guard.py --self-test reported a broken',
+    # SMA-603 — check 11's invocation inside run_self_tests. `release_plan_self_test` alone is a
+    # PREFIX of its own definition (`release_plan_self_test() {`), so a substring-over-the-whole-
+    # text match would be satisfied by the definition line and survive deleting this exact call —
+    # the same prefix hazard RUN_SH_CALL_SITES' own comment records for `run_self_tests` and
+    # `task_inputs.py`. Whole-line matching, stripped for the leading whitespace this call carries
+    # inside run_self_tests(), is what closes it. Deleting this line would still be caught by
+    # assert_self_tests_ran (SELF_TESTS_RAN would fall to 12 against SELF_TEST_COUNT=13), but that
+    # is a run.sh-internal control; this entry is the INDEPENDENT, cross-file pin the same way
+    # every other production call site above is — a single edit to run.sh alone cannot silence
+    # both at once.
+    "release_plan_self_test",
+    # ...and check 11's SELF-TEST invocation, the same shape as check 10's entry immediately
+    # above: deleting it leaves the production call (in ACTIONLINT_SH_CALL_SITES above) running
+    # against a verdict function nothing has proved correct.
+    'release_plan_sh --self-test || { fail "check 11: release_plan.py --self-test reported a broken',
+    # SMA-603 fix round 1 (review I2) — check 11's --negative-control invocation. Deleting it
+    # reds nothing else: SELF_TESTS_RAN and the definition count are unaffected (the function
+    # still runs and still increments once), check 9 mutates only the bare invocations inside
+    # run_self_tests, and no other entry in either tuple names this line. This repo pins a
+    # negative-control invocation everywhere else one exists (RELEASE_PARITY_SH_CALL_SITES,
+    # WORKFLOW_CREDENTIALS_SH_CALL_SITES); this closes the same gap for check 11.
+    'release_plan_sh --negative-control || { fail "check 11: ci/release-plan/run.sh',
+    # SMA-603 fix wave (C2) — `release_plan_sh`'s one-line BODY. Every entry above pins a CALL to
+    # that wrapper; the wrapper itself was pinned by nothing, so replacing its body with `true`
+    # (or `:`) disabled ALL of check 11 — the arity floor, both self-test invocations and the
+    # --assert run — while every pin here stayed byte-identical and the gate exited 0. Pinned
+    # here rather than in ACTIONLINT_SH_CALL_SITES because the line carries real, executing
+    # leading whitespace inside the function body, which the column-0 haystack rejects outright.
+    'bash ci/release-plan/run.sh "$@"',
 )
 
 # SMA-530. The moon.yml pins above prove the CONTROL IS INVOKED; these prove it still DOES
@@ -803,6 +857,56 @@ WORKFLOW_CREDENTIALS_SH_CALL_SITES = (
     "if bash \"$0\" 2>/dev/null | grep '^workflow-credentials: subjects:' | grep -q 'release.yml'; then",
     'if [ "$failures" -gt 0 ]; then',
     "printf 'workflow-credentials negative control: %d row(s) failed\\n' \"$failures\" >&2",
+)
+
+
+# SMA-603 fix wave (C2/2a/2b) — the same class a third time, for ci/release-plan/run.sh. Before
+# this tuple, NOTHING pinned a single line inside that file: SELF_SCHEDULED_GATES cannot see it
+# (release-plan is not a Moon task at all — it runs as ci/actionlint/run.sh check 11), and
+# ACTIONLINT_SH_INDENTED_CALL_SITES pins only the CALLS, in the other file. So every line below
+# could be deleted with every existing pin still green.
+#
+# What each entry closes, all of it in the ONE direction that matters — a silent SKIP:
+#   1. The `--github-output` flag parse. Neuter it and MODE stays empty, the dispatch falls to
+#      `die_infra`, and the runtime arm exits 2 — the plan job fails and every consumer SKIPS.
+#   2. The `--negative-control` flag parse, for the reason RELEASE_PARITY_SH_CALL_SITES' own
+#      comment measured: without it the control falls through to a mode that proves nothing.
+#   3. `output)   github_output ;;` — a WHOLE line, and that is the point. `require_uv` sits on
+#      the other three arms and MUST NOT sit on this one: putting it back
+#      (`output)   require_uv; github_output ;;`) is exactly the SMA-603 C1 defect, where a
+#      runner without the proto toolchain made the plan job fail and dropped the whole publish
+#      path. Any edit to this line reds here as well as in run.sh's own row 6.
+#   4. The negative control's dispatch arm, so the control cannot be disconnected.
+#   5. The fail-safe GUARD, and 6. the fail-safe WRITE. These two are the branch's central
+#      property. Delete the write and an undecidable run appends nothing, which leaves the job
+#      output unset — that still builds today, but it also removes the only thing that makes the
+#      documented "always exits 0, always writes false" contract true.
+#   7. Row 6's assertion (the C1 regression row) and 8. row 7's assertion (the FIXTURES-loop
+#      mutant). Both are ASSERTION lines, not report lines, for the reason
+#      WORKFLOW_CREDENTIALS_SH_CALL_SITES measured: deleting every assertion left its four
+#      structural pins byte-identical and the control exited 0 having asserted nothing.
+#   9. The control's own failure report arm, so a control that counted failures cannot swallow
+#      them.
+#
+# REACHABILITY IS NOT AUTOMATIC. moon.yml lists `ci/release-plan/**/*` among repo:affected-smoke's
+# inputs and ci/actionlint/run.sh's T_AFFECTED_SMOKE_REQUIRED_INPUTS floors that entry. Without
+# them the PR deleting these lines is exactly the PR that does not schedule this gate.
+#
+# Matched as stripped WHOLE LINES, like the release-parity and workflow-credentials haystacks and
+# for both of their reasons: the `case` arms and the `if` bodies are indented, so a column-0 rule
+# would reject the real executing lines, while a substring rule would let a COMMENTED-OUT copy
+# satisfy the pin. Every entry was verified to occur EXACTLY ONCE in run.sh before it was written
+# here.
+RELEASE_PLAN_SH_CALL_SITES = (
+    "--github-output)     MODE=output; shift ;;",
+    "--negative-control)  MODE=negctl; shift ;;",
+    "output)   github_output ;;",
+    "negctl)   require_uv; negative_control ;;",
+    'if [ "$rc" -ne 0 ] || ! printf \'%s\\n\' "$out" | grep -qE \'^nothing_to_release=(true|false)$\'; then',
+    "printf 'nothing_to_release=false\\n' >> \"${GITHUB_OUTPUT:-/dev/stdout}\"",
+    "if ! grep -qx 'nothing_to_release=false' \"$nouv_out\"; then",
+    'if [ "$mut_rc" != "3" ]; then',
+    "printf 'release-plan negative control: %d row(s) failed\\n' \"$failures\" >&2",
 )
 
 
@@ -1137,12 +1241,12 @@ def _scripts(projects):
 
 def check_self_invocation(
     run_sh_text, scripts, actionlint_sh_text, release_parity_sh_text,
-    workflow_credentials_sh_text,
+    workflow_credentials_sh_text, release_plan_sh_text,
 ):
-    """Call sites of the affected-graph, actionlint, release-parity and workflow-credentials
-    gates missing from where they must appear.
+    """Call sites of the affected-graph, actionlint, release-parity, workflow-credentials and
+    release-plan gates missing from where they must appear.
 
-    Six haystacks, matched THREE different ways. run.sh sites are substrings, because they are
+    Seven haystacks, matched THREE different ways. run.sh sites are substrings, because they are
     indented and one is a mid-line fragment, and their `|| RC=1` suffixes already make them
     unambiguous. Everything else is matched as a whole LINE — membership is checked against the
     set of a line's OWN full text, not "does this substring appear anywhere in the file" — and
@@ -1150,7 +1254,8 @@ def check_self_invocation(
     task-script and actionlint, a required token is a strict PREFIX of something else in the file
     — `task_inputs.py` of `task_inputs.py --self-test`, and `run_self_tests` of
     `run_self_tests() {` — so a substring-over-the-whole-text match would be satisfied by the
-    wrong occurrence. Release-parity and workflow-credentials have no such prefix hazard; there,
+    wrong occurrence. Release-parity, workflow-credentials and release-plan have no such
+    prefix hazard; there,
     whole-line matching is what makes a COMMENTED-OUT copy of a pinned line
     (e.g. `# if [ "$NEGATIVE" = 1 ]; then`) report missing rather than silently satisfy the pin —
     a substring version would still find the required text inside the commented line and accept
@@ -1163,14 +1268,14 @@ def check_self_invocation(
     entries sit inside `release_guard_self_test() { ... }` and carry real, executing leading
     whitespace that a column-0 rule would reject outright. Splitting it into its own tuple, rather
     than loosening the column-0 haystack wholesale, is what keeps the stronger guarantee intact
-    for the entries that can hold it. Task-script, release-parity and workflow-credentials are
-    stripped for the same reason — their real lines are indented inside `case` arms and `if`
-    bodies.
-    The five texts are checked SEPARATELY rather than against one concatenated haystack, so a call
+    for the entries that can hold it. Task-script, release-parity, workflow-credentials and
+    release-plan are stripped for the same reason — their real lines are indented inside
+    `case` arms and `if` bodies.
+    The six texts are checked SEPARATELY rather than against one concatenated haystack, so a call
     site living in the wrong file cannot satisfy another's requirement.
 
-    `actionlint_sh_text`, `release_parity_sh_text` and `workflow_credentials_sh_text` are REQUIRED
-    positional parameters, deliberately. An optional one defaulting to "" would make every existing
+    `actionlint_sh_text`, `release_parity_sh_text`, `workflow_credentials_sh_text` and
+    `release_plan_sh_text` are REQUIRED positional parameters, deliberately. An optional one defaulting to "" would make every existing
     caller pass vacuously — re-creating the class of hole this check exists to close.
     """
     missing = [site for site in RUN_SH_CALL_SITES if site not in run_sh_text]
@@ -1178,7 +1283,7 @@ def check_self_invocation(
         present = {line.strip() for line in scripts.get(task, "").splitlines()}
         missing.extend(f"{task} script: {site}" for site in required if site not in present)
     # COLUMN 0 only (rstrip, no lstrip) — see the comment at ACTIONLINT_SH_CALL_SITES above for why
-    # this one haystack, alone of the six, requires the line to carry NO leading whitespace: an
+    # this one haystack, alone of the seven, requires the line to carry NO leading whitespace: an
     # indented copy (e.g. wrapped in `if false; then … fi`) must not satisfy the pin.
     actionlint_lines = {
         line.rstrip() for line in actionlint_sh_text.splitlines() if line == line.lstrip()
@@ -1216,6 +1321,14 @@ def check_self_invocation(
         f"ci/workflow-credentials/run.sh: {site}"
         for site in WORKFLOW_CREDENTIALS_SH_CALL_SITES
         if site not in workflow_credentials_lines
+    )
+    # SMA-603 fix wave — stripped whole lines too, for both of the release-parity haystack's
+    # reasons. See RELEASE_PLAN_SH_CALL_SITES' own comment for what each entry closes.
+    release_plan_lines = {line.strip() for line in release_plan_sh_text.splitlines()}
+    missing.extend(
+        f"ci/release-plan/run.sh: {site}"
+        for site in RELEASE_PLAN_SH_CALL_SITES
+        if site not in release_plan_lines
     )
     return missing
 
@@ -1763,11 +1876,29 @@ def self_test():
         'rg_rc=$?\n'
         'if [ "$rg_rc" -eq 2 ]; then\n'
         'elif [ "$rg_rc" -ne 0 ] && [ "$rg_rc" -ne 1 ]; then\n'
+        # Check 11's production call site (SMA-603) — same shape: at run.sh's top level, outside
+        # any function.
+        "release_plan_sh --assert || rp_rc=$?\n"
+        # ...and check 11's exit-status routing (SMA-603 fix round 1, I1) — the `if`/catch-all
+        # `elif` pair, same shape as check 10's pair immediately above.
+        'if [ "$rp_rc" -eq 2 ]; then\n'
+        # ...and its MIDDLE branch (SMA-603 fix round 2), the one that calls fail() on a real
+        # detected violation rather than misclassifying it as infra.
+        'elif [ "$rp_rc" -eq 1 ]; then\n'
+        'elif [ "$rp_rc" -ne 0 ]; then\n'
         # ...and check 10's fixture-table arity floor and self-test invocation (SMA-579),
         # matched via ACTIONLINT_SH_INDENTED_CALL_SITES instead: both sit inside
         # release_guard_self_test(), so they carry real, executing leading whitespace.
         '  [ "$n" -ge 20 ] || infra "check 10: release_guard.py reports $n fixtures, expected at least 20"\n'
         '  release_guard_py --self-test || { fail "check 10: release_guard.py --self-test reported a broken\n'
+        # ...and check 11's invocation inside run_self_tests, its own self-test invocation, and
+        # its negative-control invocation (SMA-603, the last added in fix round 1's I2), matched
+        # via ACTIONLINT_SH_INDENTED_CALL_SITES for the same reason: all three carry real,
+        # executing leading whitespace inside run_self_tests()/release_plan_self_test().
+        "  release_plan_self_test\n"
+        '  release_plan_sh --self-test || { fail "check 11: release_plan.py --self-test reported a broken\n'
+        '  release_plan_sh --negative-control || { fail "check 11: ci/release-plan/run.sh\n'
+        '  bash ci/release-plan/run.sh "$@"\n'
     )
     wired_release_parity = (
         '    --negative-control) NEGATIVE=1; shift ;;\n'
@@ -1802,19 +1933,26 @@ def self_test():
         '  negctl)   negative_control ;;\n'
         'esac\n'
     )
-    if check_self_invocation(wired, scripts, wired_actionlint, wired_release_parity, wired_workflow_credentials):
+    # SMA-603 fix wave — the same shape again for ci/release-plan/run.sh, built by joining the
+    # registry itself with the indentation the real file carries. Deriving it from the tuple keeps
+    # the fixture from drifting out of sync with the pin it exercises; the deletion battery below
+    # is what proves each individual entry is checked.
+    wired_release_plan = "".join(
+        f"    {site}\n" for site in RELEASE_PLAN_SH_CALL_SITES
+    )
+    if check_self_invocation(wired, scripts, wired_actionlint, wired_release_parity, wired_workflow_credentials, wired_release_plan):
         failures.append(
             "check_self_invocation: fired on a wired tree: "
-            f"{check_self_invocation(wired, scripts, wired_actionlint, wired_release_parity, wired_workflow_credentials)}"
+            f"{check_self_invocation(wired, scripts, wired_actionlint, wired_release_parity, wired_workflow_credentials, wired_release_plan)}"
         )
     no_call = wired.replace("  assert_ci_targets || SUITE_RC=1\n", "")
-    if not check_self_invocation(no_call, scripts, wired_actionlint, wired_release_parity, wired_workflow_credentials):
+    if not check_self_invocation(no_call, scripts, wired_actionlint, wired_release_parity, wired_workflow_credentials, wired_release_plan):
         failures.append("check_self_invocation: missed a deleted run_suite call")
     no_selftest = wired.replace('  python3 "$HERE/ci_targets.py" --self-test || NEG_RC=1\n', "")
-    if not check_self_invocation(no_selftest, scripts, wired_actionlint, wired_release_parity, wired_workflow_credentials):
+    if not check_self_invocation(no_selftest, scripts, wired_actionlint, wired_release_parity, wired_workflow_credentials, wired_release_plan):
         failures.append("check_self_invocation: missed a deleted --self-test call")
     silenced = wired.replace("--self-test || NEG_RC=1", "--self-test || true")
-    if not check_self_invocation(silenced, scripts, wired_actionlint, wired_release_parity, wired_workflow_credentials):
+    if not check_self_invocation(silenced, scripts, wired_actionlint, wired_release_parity, wired_workflow_credentials, wired_release_plan):
         failures.append("check_self_invocation: missed a --self-test whose failure is swallowed")
     # SMA-553 D10 + review finding 1, generalised (SMA-530). These three named fixtures used
     # to be spelled out for input-liveness only: the deleted REAL RUN (a strict PREFIX of the
@@ -1829,13 +1967,13 @@ def self_test():
         for _line in _lines:
             if not check_self_invocation(
                 wired, wired_scripts(**{_task: broken_script(_task, _line)}), wired_actionlint,
-                wired_release_parity, wired_workflow_credentials,
+                wired_release_parity, wired_workflow_credentials, wired_release_plan,
             ):
                 failures.append(
                     f"check_self_invocation: missed {_line!r} deleted from repo:{_task}'s script"
                 )
     if not check_self_invocation(
-        wired, wired_scripts(**{"input-liveness": ""}), wired_actionlint, wired_release_parity, wired_workflow_credentials
+        wired, wired_scripts(**{"input-liveness": ""}), wired_actionlint, wired_release_parity, wired_workflow_credentials, wired_release_plan
     ):
         failures.append("check_self_invocation: missed an absent input-liveness script entirely")
     # SMA-576, generalised. A registered gate whose script is missing from the payload
@@ -1846,7 +1984,7 @@ def self_test():
     for _task in sorted(SELF_SCHEDULED_GATES):
         if not check_self_invocation(
             wired, {k: v for k, v in wired_scripts().items() if k != _task}, wired_actionlint,
-            wired_release_parity, wired_workflow_credentials,
+            wired_release_parity, wired_workflow_credentials, wired_release_plan,
         ):
             failures.append(
                 f"check_self_invocation: missed an absent repo:{_task} script entirely"
@@ -1855,14 +1993,14 @@ def self_test():
     # other's requirement, which a concatenated haystack would allow.
     if not check_self_invocation(
         wired_script, wired_scripts(**{"input-liveness": wired}), wired_actionlint,
-        wired_release_parity, wired_workflow_credentials,
+        wired_release_parity, wired_workflow_credentials, wired_release_plan,
     ):
         failures.append("check_self_invocation: accepted the two texts swapped")
     # ...and the reverse direction, which the swap fixture above does not reach: script text must
     # not satisfy a run.sh requirement either.
     if not check_self_invocation(
         no_call, wired_scripts(**{"input-liveness": wired + wired_script}), wired_actionlint,
-        wired_release_parity, wired_workflow_credentials,
+        wired_release_parity, wired_workflow_credentials, wired_release_plan,
     ):
         failures.append("check_self_invocation: a run.sh call site was satisfied by script text")
     # The "fired on a wired tree" positive control above already covers all four haystacks
@@ -1870,10 +2008,10 @@ def self_test():
     # would only ever fire alongside that one and add no coverage (SMA-542 review, smaller
     # correction 2).
     no_actionlint_call = wired_actionlint.replace("\nrun_self_tests\n", "\n")
-    if not check_self_invocation(wired, scripts, no_actionlint_call, wired_release_parity, wired_workflow_credentials):
+    if not check_self_invocation(wired, scripts, no_actionlint_call, wired_release_parity, wired_workflow_credentials, wired_release_plan):
         failures.append("check_self_invocation: missed a deleted run_self_tests call")
     no_battery = wired_actionlint.replace("selftest_mutation_battery\n", "")
-    if not check_self_invocation(wired, scripts, no_battery, wired_release_parity, wired_workflow_credentials):
+    if not check_self_invocation(wired, scripts, no_battery, wired_release_parity, wired_workflow_credentials, wired_release_plan):
         failures.append("check_self_invocation: missed a deleted mutation-battery call")
     # SMA-542 fix-wave I1 — the reviewer deleted this exact block from run.sh and measured: full
     # gate rc 0, this gate PASS, with check 8's T floor/swallowed/continue-on-error verdicts
@@ -1881,7 +2019,7 @@ def self_test():
     no_floor_call = wired_actionlint.replace(
         "done < <(ci_target_floor_verdict .github/workflows/ci.yml)\n", ""
     )
-    if not check_self_invocation(wired, scripts, no_floor_call, wired_release_parity, wired_workflow_credentials):
+    if not check_self_invocation(wired, scripts, no_floor_call, wired_release_parity, wired_workflow_credentials, wired_release_plan):
         failures.append(
             "check_self_invocation: missed a deleted check-8 production call site (fix-wave I1)"
         )
@@ -1892,7 +2030,7 @@ def self_test():
     no_check8b_call = wired_actionlint.replace(
         'done < <(invocation_allowlist_verdict .github/workflows/ci.yml "$REPORTED_LINENOS")\n', ""
     )
-    if not check_self_invocation(wired, scripts, no_check8b_call, wired_release_parity, wired_workflow_credentials):
+    if not check_self_invocation(wired, scripts, no_check8b_call, wired_release_parity, wired_workflow_credentials, wired_release_plan):
         failures.append(
             "check_self_invocation: missed a deleted check-8b production call site "
             "(CodeRabbit round 4, finding C1)"
@@ -1903,7 +2041,7 @@ def self_test():
     no_check8c_call = wired_actionlint.replace(
         "done < <(affected_graph_wiring_verdict ci/affected-graph/run.sh)\n", ""
     )
-    if not check_self_invocation(wired, scripts, no_check8c_call, wired_release_parity, wired_workflow_credentials):
+    if not check_self_invocation(wired, scripts, no_check8c_call, wired_release_parity, wired_workflow_credentials, wired_release_plan):
         failures.append(
             "check_self_invocation: missed a deleted check-8c production call site "
             "(SMA-542 residual closure)"
@@ -1914,7 +2052,7 @@ def self_test():
     no_check8d_call = wired_actionlint.replace(
         "done < <(block_execution_verdict .github/workflows/ci.yml)\n", ""
     )
-    if not check_self_invocation(wired, scripts, no_check8d_call, wired_release_parity, wired_workflow_credentials):
+    if not check_self_invocation(wired, scripts, no_check8d_call, wired_release_parity, wired_workflow_credentials, wired_release_plan):
         failures.append(
             "check_self_invocation: missed a deleted check-8d production call site "
             "(SMA-542 residual closure, README L12)"
@@ -1924,12 +2062,12 @@ def self_test():
     no_rg_production_call = wired_actionlint.replace(
         'release_guard_py .github/workflows/release.yml > "$RG_OUT"\n', ""
     )
-    if not check_self_invocation(wired, scripts, no_rg_production_call, wired_release_parity, wired_workflow_credentials):
+    if not check_self_invocation(wired, scripts, no_rg_production_call, wired_release_parity, wired_workflow_credentials, wired_release_plan):
         failures.append(
             "check_self_invocation: missed a deleted check-10 production call site"
         )
     no_rg_rc_check = wired_actionlint.replace('if [ "$rg_rc" -eq 2 ]; then\n', "")
-    if not check_self_invocation(wired, scripts, no_rg_rc_check, wired_release_parity, wired_workflow_credentials):
+    if not check_self_invocation(wired, scripts, no_rg_rc_check, wired_release_parity, wired_workflow_credentials, wired_release_plan):
         failures.append(
             "check_self_invocation: missed a deleted check-10 fail-closed exit-2 routing "
             "(the done < <(...) swallow class, run.sh:2050)"
@@ -1939,14 +2077,14 @@ def self_test():
         'expected at least 20"\n',
         "",
     )
-    if not check_self_invocation(wired, scripts, no_rg_arity_call, wired_release_parity, wired_workflow_credentials):
+    if not check_self_invocation(wired, scripts, no_rg_arity_call, wired_release_parity, wired_workflow_credentials, wired_release_plan):
         failures.append("check_self_invocation: missed a deleted check-10 fixture arity floor")
     no_rg_selftest_call = wired_actionlint.replace(
         '  release_guard_py --self-test || { fail "check 10: release_guard.py --self-test '
         "reported a broken\n",
         "",
     )
-    if not check_self_invocation(wired, scripts, no_rg_selftest_call, wired_release_parity, wired_workflow_credentials):
+    if not check_self_invocation(wired, scripts, no_rg_selftest_call, wired_release_parity, wired_workflow_credentials, wired_release_plan):
         failures.append(
             "check_self_invocation: missed a deleted check-10 --self-test invocation"
         )
@@ -1960,14 +2098,14 @@ def self_test():
     # wired tree" assertion above already proves the real, column-0 tree keeps passing under this
     # tighter rule.
     indented_run_self_tests = wired_actionlint.replace("run_self_tests\n", "  run_self_tests\n", 1)
-    if not check_self_invocation(wired, scripts, indented_run_self_tests, wired_release_parity, wired_workflow_credentials):
+    if not check_self_invocation(wired, scripts, indented_run_self_tests, wired_release_parity, wired_workflow_credentials, wired_release_plan):
         failures.append(
             "check_self_invocation: an INDENTED run_self_tests call satisfied the column-0 pin"
         )
     indented_battery = wired_actionlint.replace(
         "selftest_mutation_battery\n", "  selftest_mutation_battery\n"
     )
-    if not check_self_invocation(wired, scripts, indented_battery, wired_release_parity, wired_workflow_credentials):
+    if not check_self_invocation(wired, scripts, indented_battery, wired_release_parity, wired_workflow_credentials, wired_release_plan):
         failures.append(
             "check_self_invocation: an INDENTED selftest_mutation_battery call satisfied the "
             "column-0 pin"
@@ -1976,7 +2114,7 @@ def self_test():
         "done < <(ci_target_floor_verdict .github/workflows/ci.yml)\n",
         "  done < <(ci_target_floor_verdict .github/workflows/ci.yml)\n",
     )
-    if not check_self_invocation(wired, scripts, indented_floor_call, wired_release_parity, wired_workflow_credentials):
+    if not check_self_invocation(wired, scripts, indented_floor_call, wired_release_parity, wired_workflow_credentials, wired_release_plan):
         failures.append(
             "check_self_invocation: an INDENTED check-8 call site satisfied the column-0 pin"
         )
@@ -1984,7 +2122,7 @@ def self_test():
         'done < <(invocation_allowlist_verdict .github/workflows/ci.yml "$REPORTED_LINENOS")\n',
         '  done < <(invocation_allowlist_verdict .github/workflows/ci.yml "$REPORTED_LINENOS")\n',
     )
-    if not check_self_invocation(wired, scripts, indented_check8b_call, wired_release_parity, wired_workflow_credentials):
+    if not check_self_invocation(wired, scripts, indented_check8b_call, wired_release_parity, wired_workflow_credentials, wired_release_plan):
         failures.append(
             "check_self_invocation: an INDENTED check-8b call site satisfied the column-0 pin"
         )
@@ -1992,7 +2130,7 @@ def self_test():
         "done < <(affected_graph_wiring_verdict ci/affected-graph/run.sh)\n",
         "  done < <(affected_graph_wiring_verdict ci/affected-graph/run.sh)\n",
     )
-    if not check_self_invocation(wired, scripts, indented_check8c_call, wired_release_parity, wired_workflow_credentials):
+    if not check_self_invocation(wired, scripts, indented_check8c_call, wired_release_parity, wired_workflow_credentials, wired_release_plan):
         failures.append(
             "check_self_invocation: an INDENTED check-8c call site satisfied the column-0 pin"
         )
@@ -2000,7 +2138,7 @@ def self_test():
         "done < <(block_execution_verdict .github/workflows/ci.yml)\n",
         "  done < <(block_execution_verdict .github/workflows/ci.yml)\n",
     )
-    if not check_self_invocation(wired, scripts, indented_check8d_call, wired_release_parity, wired_workflow_credentials):
+    if not check_self_invocation(wired, scripts, indented_check8d_call, wired_release_parity, wired_workflow_credentials, wired_release_plan):
         failures.append(
             "check_self_invocation: an INDENTED check-8d call site satisfied the column-0 pin"
         )
@@ -2009,7 +2147,7 @@ def self_test():
         'release_guard_py .github/workflows/release.yml > "$RG_OUT"\n',
         '  release_guard_py .github/workflows/release.yml > "$RG_OUT"\n',
     )
-    if not check_self_invocation(wired, scripts, indented_rg_production_call, wired_release_parity, wired_workflow_credentials):
+    if not check_self_invocation(wired, scripts, indented_rg_production_call, wired_release_parity, wired_workflow_credentials, wired_release_plan):
         failures.append(
             "check_self_invocation: an INDENTED check-10 production call site satisfied the "
             "column-0 pin"
@@ -2017,7 +2155,7 @@ def self_test():
     indented_rg_rc_check = wired_actionlint.replace(
         'if [ "$rg_rc" -eq 2 ]; then\n', '  if [ "$rg_rc" -eq 2 ]; then\n'
     )
-    if not check_self_invocation(wired, scripts, indented_rg_rc_check, wired_release_parity, wired_workflow_credentials):
+    if not check_self_invocation(wired, scripts, indented_rg_rc_check, wired_release_parity, wired_workflow_credentials, wired_release_plan):
         failures.append(
             "check_self_invocation: an INDENTED check-10 exit-2 routing satisfied the column-0 pin"
         )
@@ -2033,14 +2171,14 @@ def self_test():
     # the task-script pairing is a DISTINCT haystack combination neither of them exercises, so a
     # check that concatenated task-script and actionlint text would have survived undetected.
     if not check_self_invocation(
-        wired + wired_actionlint, scripts, no_actionlint_call, wired_release_parity, wired_workflow_credentials
+        wired + wired_actionlint, scripts, no_actionlint_call, wired_release_parity, wired_workflow_credentials, wired_release_plan
     ):
         failures.append("check_self_invocation: an actionlint site was satisfied by run.sh text")
-    if not check_self_invocation(no_call, scripts, wired_actionlint + wired, wired_release_parity, wired_workflow_credentials):
+    if not check_self_invocation(no_call, scripts, wired_actionlint + wired, wired_release_parity, wired_workflow_credentials, wired_release_plan):
         failures.append("check_self_invocation: a run.sh site was satisfied by actionlint text")
     if not check_self_invocation(
         wired, wired_scripts(**{"input-liveness": wired_script + wired_actionlint}),
-        no_actionlint_call, wired_release_parity, wired_workflow_credentials,
+        no_actionlint_call, wired_release_parity, wired_workflow_credentials, wired_release_plan,
     ):
         failures.append(
             "check_self_invocation: an actionlint site was satisfied by task-script text"
@@ -2054,6 +2192,7 @@ def self_test():
     # names so the SMA-530 addition gets the same guarantee, not just the pre-existing one).
     for _param_name in (
         "actionlint_sh_text", "release_parity_sh_text", "workflow_credentials_sh_text",
+        "release_plan_sh_text",
     ):
         _default = inspect.signature(check_self_invocation).parameters[_param_name].default
         if _default is not inspect.Parameter.empty:
@@ -2068,7 +2207,7 @@ def self_test():
     )
     if check_self_invocation(
         wired, wired_scripts(**{"input-liveness": indented_task_script}), wired_actionlint,
-        wired_release_parity, wired_workflow_credentials,
+        wired_release_parity, wired_workflow_credentials, wired_release_plan,
     ):
         failures.append("check_self_invocation: an indented but fully wired script was reported missing")
 
@@ -2079,7 +2218,7 @@ def self_test():
             line for line in wired_release_parity.splitlines(keepends=True)
             if line.strip() != _site
         )
-        if not check_self_invocation(wired, scripts, wired_actionlint, _broken, wired_workflow_credentials):
+        if not check_self_invocation(wired, scripts, wired_actionlint, _broken, wired_workflow_credentials, wired_release_plan):
             failures.append(
                 f"check_self_invocation: missed {_site!r} deleted from ci/release-parity/run.sh"
             )
@@ -2087,7 +2226,7 @@ def self_test():
     if not check_self_invocation(
         wired + wired_release_parity, scripts, wired_actionlint,
         "".join(line for line in wired_release_parity.splitlines(keepends=True)
-                if line.strip() != RELEASE_PARITY_SH_CALL_SITES[0]), wired_workflow_credentials
+                if line.strip() != RELEASE_PARITY_SH_CALL_SITES[0]), wired_workflow_credentials, wired_release_plan
     ):
         failures.append(
             "check_self_invocation: a release-parity site was satisfied by run.sh text"
@@ -2103,7 +2242,7 @@ def self_test():
     commented_out = wired_release_parity.replace(
         'if [ "$NEGATIVE" = 1 ]; then\n', '# if [ "$NEGATIVE" = 1 ]; then\n'
     )
-    if not check_self_invocation(wired, scripts, wired_actionlint, commented_out, wired_workflow_credentials):
+    if not check_self_invocation(wired, scripts, wired_actionlint, commented_out, wired_workflow_credentials, wired_release_plan):
         failures.append(
             "check_self_invocation: a COMMENTED-OUT release-parity line satisfied the pin "
             "(widened to substring matching)"
@@ -2118,7 +2257,7 @@ def self_test():
             if line.strip() != _wc_site
         )
         if not check_self_invocation(
-            wired, scripts, wired_actionlint, wired_release_parity, _wc_broken
+            wired, scripts, wired_actionlint, wired_release_parity, _wc_broken, wired_release_plan
         ):
             failures.append(
                 f"check_self_invocation: missed {_wc_site!r} deleted from "
@@ -2131,7 +2270,7 @@ def self_test():
     if not check_self_invocation(
         wired + wired_workflow_credentials, scripts, wired_actionlint, wired_release_parity,
         "".join(line for line in wired_workflow_credentials.splitlines(keepends=True)
-                if line.strip() != WORKFLOW_CREDENTIALS_SH_CALL_SITES[0])
+                if line.strip() != WORKFLOW_CREDENTIALS_SH_CALL_SITES[0]), wired_release_plan
     ):
         failures.append(
             "check_self_invocation: a workflow-credentials site was satisfied by run.sh text"
@@ -2140,7 +2279,7 @@ def self_test():
         wired, scripts, wired_actionlint,
         "".join(line for line in wired_release_parity.splitlines(keepends=True)
                 if line.strip() != RELEASE_PARITY_SH_CALL_SITES[0]),
-        wired_workflow_credentials + wired_release_parity,
+        wired_workflow_credentials + wired_release_parity, wired_release_plan,
     ):
         failures.append(
             "check_self_invocation: a release-parity site was satisfied by "
@@ -2151,11 +2290,74 @@ def self_test():
         '  negctl)   negative_control ;;\n', '  # negctl)   negative_control ;;\n'
     )
     if not check_self_invocation(
-        wired, scripts, wired_actionlint, wired_release_parity, _wc_commented
+        wired, scripts, wired_actionlint, wired_release_parity, _wc_commented, wired_release_plan
     ):
         failures.append(
             "check_self_invocation: a COMMENTED-OUT workflow-credentials line satisfied the pin "
             "(widened to substring matching)"
+        )
+
+    # SMA-603 fix wave — the workflow-credentials battery above, repeated for the release-plan
+    # haystack. One row per pinned line, so a mutant that widened the match back to "matches
+    # anywhere" is caught regardless of which entry it is tested against.
+    for _rp_site in RELEASE_PLAN_SH_CALL_SITES:
+        _rp_broken = "".join(
+            line for line in wired_release_plan.splitlines(keepends=True)
+            if line.strip() != _rp_site
+        )
+        if not check_self_invocation(
+            wired, scripts, wired_actionlint, wired_release_parity, wired_workflow_credentials,
+            _rp_broken,
+        ):
+            failures.append(
+                f"check_self_invocation: missed {_rp_site!r} deleted from ci/release-plan/run.sh"
+            )
+    # Contamination, both directions, exactly as the workflow-credentials pair does it: a
+    # release-plan site must not be satisfiable from another haystack, and a workflow-credentials
+    # site must not be satisfiable from this one.
+    if not check_self_invocation(
+        wired + wired_release_plan, scripts, wired_actionlint, wired_release_parity,
+        wired_workflow_credentials,
+        "".join(line for line in wired_release_plan.splitlines(keepends=True)
+                if line.strip() != RELEASE_PLAN_SH_CALL_SITES[0]),
+    ):
+        failures.append(
+            "check_self_invocation: a release-plan site was satisfied by run.sh text"
+        )
+    if not check_self_invocation(
+        wired, scripts, wired_actionlint, wired_release_parity,
+        "".join(line for line in wired_workflow_credentials.splitlines(keepends=True)
+                if line.strip() != WORKFLOW_CREDENTIALS_SH_CALL_SITES[0]),
+        wired_release_plan + wired_workflow_credentials,
+    ):
+        failures.append(
+            "check_self_invocation: a workflow-credentials site was satisfied by release-plan text"
+        )
+    # Whole-LINE, not substring: a commented-out copy of a pinned line must report missing.
+    _rp_commented = wired_release_plan.replace(
+        "    output)   github_output ;;\n", "    # output)   github_output ;;\n"
+    )
+    if not check_self_invocation(
+        wired, scripts, wired_actionlint, wired_release_parity, wired_workflow_credentials,
+        _rp_commented,
+    ):
+        failures.append(
+            "check_self_invocation: a COMMENTED-OUT release-plan line satisfied the pin "
+            "(widened to substring matching)"
+        )
+    # The C1 pin, stated as its own row because it is the one entry whose VALUE — not merely its
+    # presence — carries the fix. Putting `require_uv` back on the `output)` arm is the SMA-603 C1
+    # defect verbatim, and a whole-line comparison is what makes that edit report missing.
+    _rp_c1_rearmed = wired_release_plan.replace(
+        "    output)   github_output ;;\n", "    output)   require_uv; github_output ;;\n"
+    )
+    if not check_self_invocation(
+        wired, scripts, wired_actionlint, wired_release_parity, wired_workflow_credentials,
+        _rp_c1_rearmed,
+    ):
+        failures.append(
+            "check_self_invocation: re-arming the C1 trap (require_uv on the --github-output "
+            "arm) did not report the pinned line missing"
         )
 
     # _scripts (SMA-553 D10) — a second pure extractor, so _eligibility's shape is untouched.
@@ -2347,6 +2549,9 @@ def main():
         workflow_credentials_sh = read_input(
             root / "ci" / "workflow-credentials" / "run.sh", "ci/workflow-credentials/run.sh"
         )
+        release_plan_sh = read_input(
+            root / "ci" / "release-plan" / "run.sh", "ci/release-plan/run.sh"
+        )
         floor = check_floor(tasks)
         missing, unexpected, bad_exempt, stale_exempt = check_forward(tasks, t_targets)
         # SMA-553 review finding 1 — these two also raise MoonOutputError (INFRA_ERRORS), so their
@@ -2369,7 +2574,8 @@ def main():
     dead = check_reverse(tasks, t_targets)
     doc_problems = check_docs(t_targets, doc_targets, region)
     missing_sites = check_self_invocation(
-        run_sh, scripts, actionlint_sh, release_parity_sh, workflow_credentials_sh
+        run_sh, scripts, actionlint_sh, release_parity_sh, workflow_credentials_sh,
+        release_plan_sh,
     )
     bad_invocation = check_invocation(ci_yml)
 
@@ -2433,7 +2639,8 @@ def main():
          "    moon.yml task script; or repo:actionlint's, from ci/actionlint/run.sh — so that\n"
          "    gate (or its negative control) would not run at all.\n"
          "    Fix: restore the exact line; see RUN_SH_CALL_SITES, SELF_SCHEDULED_GATES,\n"
-         "    ACTIONLINT_SH_CALL_SITES and RELEASE_PARITY_SH_CALL_SITES in\n"
+         "    ACTIONLINT_SH_CALL_SITES, RELEASE_PARITY_SH_CALL_SITES,\n"
+         "    WORKFLOW_CREDENTIALS_SH_CALL_SITES and RELEASE_PLAN_SH_CALL_SITES in\n"
          "    ci/affected-graph/ci_targets.py.\n"
          "    A row prefixed `ci/actionlint/run.sh:` means repo:actionlint would run its checks\n"
          "    while asserting nothing — its self-tests or its mutation battery are no longer\n"
@@ -2446,7 +2653,12 @@ def main():
          "    assertion or report arm breaks or misreports the control's own verdict).\n"
          "    A row prefixed `ci/workflow-credentials/run.sh:` means the same for that gate's\n"
          "    five pinned --negative-control lines — the flag parse, the dispatch arm, the\n"
-         "    failure guard, or the report line."),
+         "    failure guard, or the report line.\n"
+         "    A row prefixed `ci/release-plan/run.sh:` means one of the nine pinned lines in\n"
+         "    that wrapper is gone — a flag parse, a mode dispatch arm, the fail-safe guard or\n"
+         "    its write, or the negative control's assertions and report arm. The fail-safe\n"
+         "    lines are the load-bearing ones: without them an inconclusive decision stops\n"
+         "    reporting 'build' and the release path can be skipped silently."),
         (bad_invocation,
          "A `moon ci` invocation in .github/workflows/ci.yml does not hand it the WHOLE `T`\n"
          "    array. Every check above asserts what is IN `T`; this one asserts `T` is what runs.\n"

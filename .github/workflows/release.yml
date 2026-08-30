@@ -5,28 +5,34 @@ name: release
 # (SMA-579), but INERT until `vars.PAIGASUS_RELEASE_ENABLED` is `'true'`. SMA-580 is what flips
 # that variable, after its own pre-flight. Nothing publishes until then.
 #
-# HOW THE GATE REACHES EACH JOB — three ways, not one (fix round 3, Minor 1; an earlier wording
-# here said "each job is gated on `if: …`", which is true of three of the seven jobs). The
-# authoritative statement is the "NO `plan` JOB EXISTS" note below; this is its summary:
-#   * `wheels`, `prebuild` and `proto-dist` carry `if: vars.PAIGASUS_RELEASE_ENABLED == 'true'`
-#     literally.
-#   * `approve-release`, `release`, `publish-pypi` and `publish-npm` carry NO `if:` of their own.
-#     They are gated TRANSITIVELY, through an unbroken `needs:` chain back to those three.
+# HOW THE GATE REACHES EACH JOB — two ways, not three (SMA-603 correction of fix round 3, Minor
+# 1; that earlier wording said three of the seven jobs carried the literal `if:`, which was true
+# then and is false now that `plan` exists). The authoritative statement is the "THE `plan` JOB
+# DECIDES WHETHER TO BUILD" note below; this is its summary:
+#   * `plan` ALONE carries `if: vars.PAIGASUS_RELEASE_ENABLED == 'true'` literally.
+#   * Every other gated job — `wheels`, `prebuild`, `proto-dist`, `approve-release`, `release`,
+#     `publish-pypi` and `publish-npm` — carries NO `if:` on the flag itself. They are gated
+#     TRANSITIVELY, through an unbroken `needs:` chain back to `plan`: `wheels`, `prebuild` and
+#     `proto-dist` depend on `plan` directly (and also skip on `plan`'s `nothing_to_release`
+#     output), and the rest depend on those.
 #   * `release-pr` is not gated on the FLAG, by design — it must keep proposing the release PR
 #     while the flag is off. That is only safe because it cannot reach a registry, which
 #     `ci/actionlint/release_guard.py`'s V7 now ASSERTS (it is in that guard's `UNGATED_JOBS`,
 #     and a member of that set carrying a publish step fails the gate).
 #     It DOES carry `if: github.event_name == 'push'` (SMA-580), which is an event filter, not a
 #     flag gate and not a security boundary — see the job's own comment.
-# `release_guard.py` V1 accepts all three shapes and rejects a fourth.
+# `release_guard.py` V1 still recognizes three shapes at the code level — an UNGATED_JOBS
+# exemption, a literal gate, and a transitive gate — and rejects a job that fits none of them.
+# That is a property of the checker, not a count of how many jobs use each shape today.
 on:
   push:
     branches:
       - main
-  # TEMPORARY (SMA-580). Step I of the activation sequence dispatches this workflow explicitly
-  # rather than re-running a run whose jobs skipped, which removes two premises about re-run
-  # semantics that SMA-580's design never measured: that a re-run re-reads repository variables,
-  # and that it re-executes jobs that previously skipped.
+  # PERMANENT (SMA-580; corrected SMA-603 — this trigger is no longer scheduled for removal, see
+  # the note at the end of this block). Step I of the activation sequence dispatches this workflow
+  # explicitly rather than re-running a run whose jobs skipped, which removes two premises about
+  # re-run semantics that SMA-580's design never measured: that a re-run re-reads repository
+  # variables, and that it re-executes jobs that previously skipped.
   #
   # THE AUTHORIZATION BOUNDARY IS NOT IN THIS FILE, and must not be moved into it. A dispatch runs
   # the workflow definition FROM THE DISPATCHED REF, so anyone with write access can push a branch
@@ -56,8 +62,17 @@ on:
   # The `if: github.event_name == 'push'` on `release-pr` is NOT part of this boundary — an edited
   # copy of this file on the dispatched ref deletes it. It closes the accidental case only.
   #
-  # REMOVE this trigger once the first release has published and its verification has passed — see
-  # that runbook's step J. NO GATE ENFORCES THAT REMOVAL.
+  # THIS TRIGGER IS PERMANENT (SMA-603 — withdraws the earlier "remove after the first release"
+  # instruction, and the runbook's step J row that repeated it). `ci/release-plan/` decides on TAG
+  # EXISTENCE, and it deliberately always builds on a `workflow_dispatch` — so a manual dispatch
+  # is the "build anyway" lever for the state where release-plz has already cut the tags but a
+  # registry is still missing the artifact (the SMA-580 npm half, published by hand the first
+  # time because a fresh dispatch found the tags already present and skipped every publish step).
+  # Removing the trigger would remove that lever with no replacement.
+  #
+  # This does NOT touch the authorization argument above: the boundary is still the environments
+  # and their branch policies, never the trigger itself, so keeping this trigger permanently
+  # changes nothing about who can make it publish.
   workflow_dispatch:
 
 # Least privilege for the auto GITHUB_TOKEN, matching every other workflow here: it is never
@@ -121,18 +136,32 @@ permissions:
 # in the one path where a mistake cannot be undone — a worse trade than the narrow, re-runnable
 # failure window it would close.
 #
-# NO `plan` JOB EXISTS (SMA-579 Task 6+7 decision). The original design had a `plan` job run
-# `release-plz release --dry-run` first, so a push with nothing to release could skip the 12-leg
-# matrix. Measured against the real repository: the dry-run FAILS every time, with `no matching
-# package named paigasus-proto-derive` — a dry run never publishes the derive crate to crates.io,
-# so the dependent `paigasus-proto` dry-run can never resolve it. That failure is permanent until
-# a LIVE release publishes the derive crate first. A `plan` job built on that dry-run would red
-# the whole graph on every push to main. So `wheels`, `prebuild` and `proto-dist` each carry
-# `if: vars.PAIGASUS_RELEASE_ENABLED == 'true'` directly, and `approve-release`/`release` are
-# gated only TRANSITIVELY through their `needs:` chain. The accepted cost: once the flag is on,
-# every push to main builds the full wheel and napi matrices even when nothing is releasable. Do
-# not "fix" this by reintroducing a dry-run-based `plan` job without first re-verifying that
-# release-plz's dry-run can resolve the derive-crate dependency.
+# THE `plan` JOB DECIDES WHETHER TO BUILD (SMA-579 Task 6+7 decision, superseded by SMA-603). The
+# original design considered a `plan` job that ran `release-plz release --dry-run` first, so a
+# push with nothing to release could skip the 12-leg matrix. That approach does not work, for a
+# more general reason than the one first recorded here.
+#
+# The first reason found was narrow: measured against the real repository, the dry-run FAILED
+# every time, with `no matching package named paigasus-proto-derive` — a dry run never publishes
+# the derive crate to crates.io, so the dependent `paigasus-proto` dry-run can never resolve it.
+# That failure is real and permanent until a LIVE release publishes the derive crate first, but it
+# applies to the `proto` version group ONLY — `paigasus-kernel` is a publish group of one with no
+# in-tree dependency, so its dry-run resolves fine. It is no longer the operative reason.
+#
+# The reason that generalizes (SMA-603, spec M6): `release-plz release --dry-run --output json`
+# prints `{"releases":[]}` at exit 0 EVEN WHEN it would publish. Measured with only the `kernel`
+# version group bumped: release-plz logged that it would publish `paigasus-kernel` and cut
+# `paigasus-kernel-v0.1.1`, and still reported an empty array. The array records PERFORMED
+# releases, and a dry run performs none — so it cannot distinguish "nothing to release" from "a
+# release is pending". A `plan` job that read it would silently skip every kernel-group release.
+#
+# What replaced it is `ci/release-plan/`, which decides on TAG EXISTENCE instead — the same thing
+# release-plz itself short-circuits on before it touches a registry or runs cargo. The `plan` job
+# below is the ONLY holder of the literal flag gate; `wheels`, `prebuild` and `proto-dist` gate on
+# it transitively through `needs: [plan]` AND on its `nothing_to_release` output, and
+# `approve-release`/`release`/`publish-pypi`/`publish-npm` are gated only TRANSITIVELY through
+# their own `needs:` chain. Do not "fix" this by reintroducing a dry-run-based decision — the
+# `releases`-array blindness above is not specific to the derive crate and would recur.
 
 jobs:
   release-pr:
@@ -347,20 +376,105 @@ jobs:
           git commit -m "chore(rs): stamp the non-Cargo manifests to the release version"
           git push "$AUTH_REMOTE" "HEAD:$BRANCH"
 
+  # THE SKIP DECISION (SMA-603). Without this, every push to `main` with the flag on builds the
+  # full 12-leg matrix and then waits at `approve-release` for a human, indefinitely, even when
+  # there is nothing to release — observed on run 33265567805.
+  #
+  # WHY NOT `release-plz release --dry-run`. Measured (spec M6): with only the `kernel` version
+  # group bumped, release-plz logs that it WOULD publish paigasus-kernel and cut
+  # `paigasus-kernel-v0.1.1`, and still prints `{"releases":[]}` at exit 0. That array records
+  # PERFORMED releases and a dry run performs none, so it cannot tell "nothing to release" from
+  # "a release is pending". Reading it would silently skip every kernel-group release. Do not
+  # reintroduce it.
+  #
+  # This job is the ONLY holder of the literal flag gate now. `wheels`, `prebuild` and
+  # `proto-dist` gate transitively through `needs: [plan]` — with the flag off this job skips,
+  # and a job whose needs: dependency skipped is itself skipped.
+  plan:
+    name: decide whether anything is releasable
+    if: vars.PAIGASUS_RELEASE_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      # A STEP output is not a JOB output. Without this mapping every
+      # `needs.plan.outputs.nothing_to_release` below is the empty string — which builds, so it
+      # fails safe, but the feature would never fire. release_guard.py V9c asserts this key AND
+      # that `steps.decide` names a step that exists in this job.
+      nothing_to_release: ${{ steps.decide.outputs.nothing_to_release }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          # LOAD-BEARING. The tags ARE the signal, and a shallow checkout has none.
+          fetch-depth: 0
+          persist-credentials: false
+
+      # LOAD-BEARING, and the reason is measured (SMA-603 C1). `ci/release-plan/run.sh` runs the
+      # checker through `uv`, which is a proto-managed shim and is NOT on `ubuntu-latest`. Without
+      # these two steps the Decide step died, the `plan` job failed, and because every consumer
+      # carries a status-function-free `if:` — GitHub applies an implicit `success()` — `wheels`,
+      # `prebuild` and `proto-dist` SKIPPED, and `approve-release`, `release`, `publish-pypi` and
+      # `publish-npm` skipped down the `needs:` chain. The whole publish path was dropped on every
+      # push. This file's own header records the same class of fault once already: SMA-580's
+      # `publish-npm` died on `pnpm: command not found`, and the conclusion there was "the actual
+      # fault was a missing toolchain".
+      #
+      # `run.sh` now ALSO fails safe when `uv` is absent (it writes nothing_to_release=false and
+      # exits 0). Both halves are needed: without the toolchain the job would build every time and
+      # the feature would never fire; without the fail-safe a future toolchain regression would
+      # drop the release path again.
+      - name: Set up proto + Moon
+        uses: moonrepo/setup-toolchain@261c62cb5b0f580c7be7c8cd0f023a2e96756095  # v0
+        with:
+          # Don't cache the proto/Moon toolchain dir: a restored ~/.proto carries stale
+          # setup-state that makes `moon setup` skip installing toolchains (their shims then
+          # don't exist). Reinstall fresh each run — same reason the release-pr job above gives.
+          cache: false
+
+      # NARROW install, like the release-pr job's `proto install release-plz`: this job needs
+      # none of actionlint/buf/deny/machete/nextest/promtool/wasm-pack, only `uv`.
+      - name: Install pinned uv
+        run: proto install uv
+
+      # ONE PHYSICAL LINE, AND ONE COMMAND. release_guard.py's command_segments is per physical
+      # line, so a backslash continuation would be judged without its flags; V9e additionally
+      # requires this step to run exactly the invocation and nothing else, because a second
+      # command here could overwrite $GITHUB_OUTPUT after the checker wrote it.
+      - name: Decide
+        id: decide
+        env:
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+        run: ci/release-plan/run.sh --github-output
+
   # THE REVERSIBLE STAGE. Everything below `release` only downloads what these produce.
   wheels:
     name: build wheels
-    if: vars.PAIGASUS_RELEASE_ENABLED == 'true'
+    needs: [plan]
+    # FAIL-SAFE POLARITY, and it is carried by the operator. The output is named for the SKIP
+    # condition and tested with `!=`, so anything but the literal 'true' builds — 'false', the
+    # empty string, an unset output. `== 'true'` would invert it; `== 'false'` would fail closed
+    # on an unset output. release_guard.py V9b pins both accepted forms.
+    if: needs.plan.outputs.nothing_to_release != 'true'
     uses: ./.github/workflows/wheels.yml
 
   prebuild:
     name: build node addons and wasm
-    if: vars.PAIGASUS_RELEASE_ENABLED == 'true'
+    needs: [plan]
+    # FAIL-SAFE POLARITY, and it is carried by the operator. The output is named for the SKIP
+    # condition and tested with `!=`, so anything but the literal 'true' builds — 'false', the
+    # empty string, an unset output. `== 'true'` would invert it; `== 'false'` would fail closed
+    # on an unset output. release_guard.py V9b pins both accepted forms.
+    if: needs.plan.outputs.nothing_to_release != 'true'
     uses: ./.github/workflows/prebuild.yml
 
   proto-dist:
     name: build the Python proto distribution
-    if: vars.PAIGASUS_RELEASE_ENABLED == 'true'
+    needs: [plan]
+    # FAIL-SAFE POLARITY, and it is carried by the operator. The output is named for the SKIP
+    # condition and tested with `!=`, so anything but the literal 'true' builds — 'false', the
+    # empty string, an unset output. `== 'true'` would invert it; `== 'false'` would fail closed
+    # on an unset output. release_guard.py V9b pins both accepted forms.
+    if: needs.plan.outputs.nothing_to_release != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -471,9 +585,10 @@ jobs:
           echo "$OUT"
           echo "json=$OUT" >> "$GITHUB_OUTPUT"
 
-  # THE THIRD AND FOURTH IRREVERSIBLE STAGES. There is no `plan` job (see the file-header
-  # decision) — the version and per-family flags are read straight out of `release`'s own
-  # `released` output rather than from a job that does not exist. Both jobs only download,
+  # THE THIRD AND FOURTH IRREVERSIBLE STAGES. The `plan` job (see the file-header decision)
+  # decides WHETHER to build at all — it is not consulted again here. The version and per-family
+  # flags for these two jobs still come straight out of `release`'s own `released` output, not
+  # from `plan`, which carries no version information of its own. Both jobs only download,
   # assert and upload; the corollary above forbids anything that compiles, fetches or
   # generates here.
   publish-pypi:

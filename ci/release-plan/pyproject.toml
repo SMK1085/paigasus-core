@@ -1,0 +1,13 @@
+# SPDX-License-Identifier: Apache-2.0
+# A DEDICATED zero-dependency project, deliberately not the py/ workspace. py/ is a
+# [tool.uv.workspace] root whose member paigasus-kernel depends on paigasus-py-bindings by
+# path, and that crate builds with maturin — so `uv run --project py` compiles a PyO3 cdylib.
+# This checker needs only `tomllib`, which is stdlib from 3.11, so it needs no dependency at
+# all. The project exists to pin the interpreter floor, nothing more. (SMA-593 spec §3
+# Decision A is the precedent; ci/workflow-credentials/pyproject.toml is the sibling.)
+[project]
+name = "paigasus-release-plan"
+version = "0.0.0"
+description = "Decides whether a push to main has anything to release"
+requires-python = ">=3.12"
+dependencies = []
