@@ -662,11 +662,6 @@ present, staleness induced by a member manifest gaining a dependency. Not measur
 no lockfile, nor with a new workspace member. D4 generalises beyond what was measured;
 re-measure on a cargo bump.
 
-**L14 — an outer flag written AFTER a nested call lands in the nested call's tail.**
-`cargo build --features "$(cargo test)" --locked` reports the outer invocation correctly, but
-marks the nested `cargo test` `locked=True`. Strictly better than the pre-SMA-599 behaviour,
-which reported neither — but a waiver keyed on that segment would then silence both rows.
-
 **L15 — two UNLOCKED calls in one segment cannot be waived.** They produce two reporting rows
 with identical segment text, so any `ALLOW_UNLOCKED_CARGO_SCRIPT` entry for that text is
 permanently AMBIGUOUS. Reproducer: `cargo build "$(cargo test)"`. It fails SAFE (the gate reds),
