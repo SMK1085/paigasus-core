@@ -40,7 +40,10 @@ Each row below is a measurement made on 2026-08-30.
 | The pinned npm is **11.13.0** | `~/.proto/tools/node/24.16.0/lib/node_modules/npm/package.json:2`. The floor for trusted publishing is 11.5.1 |
 | `pypa/gh-action-pypi-publish` v1.14.2 takes no `password` | `action.yml:9-11` — `required: false`, no default |
 | That action enables PEP 740 attestations **by default** | `action.yml:83-87` — `default: 'true'`, and *"Only works with PyPI and TestPyPI via Trusted Publishing"* |
-| npm offers no registry-side enforcement | `npm/lib/commands/trust/index.js:9-13` exposes only `github`, `gitlab`, `circleci`, `list`, `revoke` |
+| The npm **CLI** exposes no registry-side enforcement setting | `npm/lib/commands/trust/index.js:9-13` exposes only `github`, `gitlab`, `circleci`, `list`, `revoke` |
+| npm's **web UI** does offer one | A package's Publishing-access settings carry *"Require two-factor authentication and disallow tokens"*, and npm's own documentation recommends enabling it after a trusted publisher is configured |
+| The environment claim is **optional** on npm | `trust/github.js:35-40` defines `environment` with `default: null` and **no** `required: true` — unlike `file`, which carries `required: true` at `:23-28`. A publisher registered without it accepts an exchange carrying no environment claim. PyPI's form accepts an empty environment too |
+| npm 11.13.0 has **no** `--allow-publish` / `--allow-stage-publish` | `grep -r allow-publish` over `npm/lib/` returns nothing. Newer npm documents these flags; this version predates them |
 | `release.yml` triggers on `push` to `main` | `.github/workflows/release.yml:27-30` |
 
 **A measurement trap worth recording.** `proto` shims `node` but **not** `npm`. A bare
@@ -155,7 +158,7 @@ Sigstore-signed with the same OIDC token, not through GitHub's attestations API,
 | # | Decision | Reason |
 | --- | --- | --- |
 | D1 | Remove both tokens in one change | The owner's choice. §3.2 records the staged alternative and the bounded residual risk |
-| D2 | Extend `ci/actionlint/release_guard.py` with a static check | It already parses `release.yml`, already runs in `repo:actionlint`, and is already in the `T` array, so it carries none of the five registry obligations a new `repo:*` gate would. npm offers no registry-side enforcement (§2), so the repository is the only place |
+| D2 | Extend `ci/actionlint/release_guard.py` with a static check | It already parses `release.yml`, already runs in `repo:actionlint`, and is already in the `T` array, so it carries none of the five registry obligations a new `repo:*` gate would. **The decision stands; its premise is corrected (final review, Important 4).** Revision 1 said "the repository is the only place", citing the npm CLI. That is wrong: npm's web UI does offer *"Require two-factor authentication and disallow tokens"* per package (§2). So the repository is the only place **the CLI can reach**, and the only place a control can be version-controlled, reviewed and re-run on every PR — a registry setting is invisible to CI and readable only by hand. It is not the only place enforcement exists. **And that npm setting is not free here:** enabling it kills `RUNBOOK` §7.4 immediately, and D9's reason for keeping the Automation token with it (§9, R8) |
 | D3 | Rewrite the runbook; annotate the SMA-580 spec | The runbook is a live operations document. The spec is a dated record of a past decision |
 | D4 | Keep `id-token: write` on both jobs | It is what the trusted publishers use |
 | D5 | Keep `NPM_CONFIG_PROVENANCE` and both `--provenance` flags | Provenance is orthogonal to authentication and uses the same ID token |
@@ -305,6 +308,18 @@ same way the pending ones did, **stop** and re-plan the PyPI half. Do not procee
 
 Do this **after** the PR merges. The workflow no longer reads them, so they are inert.
 
+**BEFORE you delete either secret, confirm the token VALUE exists outside GitHub, and record
+where** (final review, Important 2). GitHub secrets are write-only: deleting `NPM_TOKEN` does not
+show you its value first, and there is no way to read it back afterwards. D9 keeps "the npm
+Automation token alive" and §6.3 calls the PyPI token "the only credential that can publish to
+PyPI by hand" — both statements are about the credential on the REGISTRY side, and both become
+false if the only copy of the VALUE was the GitHub secret. A live token whose value nobody holds
+recovers nothing.
+
+For each of the two: open your password manager, confirm the value is stored there, and note the
+entry name in `RUNBOOK` §7.4 (npm) and §8 (PyPI). If a value is not stored anywhere, do **not**
+delete the secret. Mint a replacement on the registry first, store it, then delete.
+
 Delete `PYPI_API_TOKEN` and `NPM_TOKEN` from the `release-publish` environment.
 
 ### 6.3 Revoke the PyPI token — only after acceptance
@@ -350,6 +365,13 @@ skips. `approve-release` gates the path in any case. No release starts from the 
 (`trust/github.js:83-94`). It needs **no** GitHub Actions context.
 
 Run it for each of the nine packages and confirm all three fields.
+
+**Confirm `environment` specifically, and re-run this periodically** (final review, Important 5).
+The field is optional at registration (§2, R9), and it is the entire trigger-security boundary now
+that no publish secret remains. A registration that silently omits it, or a later edit through the
+web UI that clears it, is invisible to CI. `npm trust list` is the only read-back this repository
+has, it needs nothing but a laptop login, and it covers nine of the twelve configurations. The
+three PyPI publishers cannot be read back at all.
 
 **Why not a dry-run publish.** Revision 1 proposed `npm publish --dry-run` inside a scratch-branch
 job. That cannot work. `release-publish`'s deployment branch policy is `main` only
@@ -405,7 +427,33 @@ follow-up issue.
 
 **R7 — PyPI attestations are new output.** §3.5. All three projects begin uploading PEP 740
 attestations on the first OIDC release. The interaction with `skip-existing: true` is not measured:
-a skipped file uploads no attestation.
+a skipped file uploads no attestation. **A second, larger failure mode (final review, Minor 3):
+attestations are now LIVE on all three uploads, and a failed attestation fails the UPLOAD.** The
+Sigstore signing step runs before the upload, so a Sigstore outage, a rejected certificate, or an
+attestation PyPI declines takes the whole `publish-pypi` job down — a failure class that did not
+exist while `password:` was set, because the `attestations` input is effective only under Trusted
+Publishing. It lands after crates.io has published (R1), and R2 says a re-dispatch cannot repair
+it. Setting `attestations: false` on the three steps is the escape hatch if that happens.
+
+**R8 — enabling npm's "disallow tokens" would kill §7.4 immediately.** §2 records that npm's web
+UI offers *"Require two-factor authentication and disallow tokens"* per package, and npm's
+documentation recommends it after a trusted publisher is configured. It is a real hardening
+option, and this design does **not** take it: turning it on for the nine packages revokes the
+Automation token's ability to publish them, so `RUNBOOK` §7.4's hand recovery dies **now** rather
+than in January 2027, and D9's whole reason for keeping that token goes with it. The runbook says
+so at §5.1. Revisit only once npm has a hand-recovery path that does not need a token, or once
+R6's January 2027 deadline removes the choice anyway.
+
+**R9 — the environment claim is an OPTIONAL field on twelve external configurations.** With no
+publish secret left, the `release-publish` environment claim is the entire trigger-security
+boundary for the npm and PyPI halves (`release.yml:44-60`). But the field is optional on both
+registries: npm defines `environment` with `default: null` and no `required: true` (§2), and
+PyPI's form accepts an empty environment. If ONE of the twelve registrations omits it, that
+package's exchange succeeds with no environment claim, the repository stays green, and nothing
+detects it. §8.1's `npm trust list` (RUNBOOK §5.1.2) catches an npm omission **once, by hand, before merge**; PyPI
+has no read-back at all (§8.2). So the boundary rests on twelve external settings verified once.
+The runbook adds a periodic `npm trust list` re-check (§8.1) for the nine npm ones; the three PyPI
+ones remain unverifiable after registration.
 
 ### Rollback
 
