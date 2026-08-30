@@ -2724,6 +2724,11 @@ def self_test():
             'ECO="a"\n'
             'ECO="$2"\n'
             "# see ci/other/run.sh for the idiom\n"
+            # ...and an EXECUTABLE bare mention, which is the real corpus shape: every one of the
+            # six measured prose edges is a comment or a pin-array string CONSTANT, and a
+            # constant is executable text. A comment-only fixture stopped asserting the rule the
+            # moment _executable_text started stripping comments (MEASURED — M25 survived).
+            "REQUIRED=('bash ci/other/run.sh --self-test')\n"
             'source "$HERE/eco/$ECO.sh"\n'
         )
         (sroot / "ci" / "eco" / "a.sh").write_text("cargo build --locked\n")
@@ -2790,6 +2795,11 @@ def self_test():
             'ECO="a"\n'
             'ECO="$2"\n'
             "# see ci/other/run.sh for the idiom\n"
+            # ...and an EXECUTABLE bare mention, which is the real corpus shape: every one of the
+            # six measured prose edges is a comment or a pin-array string CONSTANT, and a
+            # constant is executable text. A comment-only fixture stopped asserting the rule the
+            # moment _executable_text started stripping comments (MEASURED — M25 survived).
+            "REQUIRED=('bash ci/other/run.sh --self-test')\n"
             'source "$HERE/eco/$ECO.sh"\n'
         )
         (sroot / "ci" / "eco" / "real.sh").unlink()
