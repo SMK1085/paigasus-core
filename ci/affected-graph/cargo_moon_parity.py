@@ -218,6 +218,15 @@ CONFIG_SENSITIVE_VERBS = (
 CONFIG_SENSITIVE_RE = re.compile(
     r"\bcargo\s+(?:\+\S+\s+)?(?:" + "|".join(CONFIG_SENSITIVE_VERBS) + r")\b"
 )
+# SMA-605 — A10's OWN arm 1. Built from CONFIG_SENSITIVE_VERBS, never from
+# LOCK_RESOLVING_VERBS: A10 asks "can rs/.cargo/config.toml change this command's OUTPUT", and
+# reusing A8's list would pull `"$CARGO_BIN" tree` / `deny` / `update` into A10's scope with
+# nothing to red it — the coupling SMA-599 D9 removed for the literal arm, re-created for the
+# indirect one.
+CARGO_VAR_CMD_SENSITIVE_RE = re.compile(
+    r"""(?:^|[\s;&|(])["']?\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?["']?\s+"""
+    r"(?:\+\S+\s+)?(?:" + "|".join(CONFIG_SENSITIVE_VERBS) + r")\b"
+)
 CARGO_CONFIG_INPUT = "rs/.cargo/config.toml"
 
 # SMA-605 — the two INDIRECT arms, beside CARGO_INVOCATION_RE's literal one.
@@ -1257,6 +1266,14 @@ def _cwd_inside_rs(text, source_dir):
     return False
 
 
+def _var_sensitive(text):
+    """True when a cargo-NAMED variable runs a COMPILING subcommand in `text`."""
+    return any(
+        CARGO_VAR_NAME in m.group(1).lower()
+        for m in CARGO_VAR_CMD_SENSITIVE_RE.finditer(text)
+    )
+
+
 def check_cargo_config_inputs(projects, root, allow=None, floor=None):
     """A10: every task whose cargo can READ rs/.cargo/config.toml must key on it.
 
@@ -1295,7 +1312,14 @@ def check_cargo_config_inputs(projects, root, allow=None, floor=None):
             text += "\n" + Path(path).read_text()
         # A wrapper reaches cargo without a literal verb, so the verb test cannot see it. The
         # three FFI tasks compile and link cdylibs and wasm32 by construction.
-        sensitive = kind == "wrapper" or bool(CONFIG_SENSITIVE_RE.search(text))
+        # Arm 2 makes a task sensitive UNCONDITIONALLY: `CARGO=<path> <tool>` reaches cargo
+        # through a tool whose subcommand A10 cannot read, so it cannot rule out a compile.
+        sensitive = (
+            kind == "wrapper"
+            or bool(CONFIG_SENSITIVE_RE.search(text))
+            or _var_sensitive(text)
+            or bool(CARGO_ENV_PREFIX_RE.search(text))
+        )
         if not (sensitive and _cwd_inside_rs(text, projects[pid]["source_dir"])):
             continue
         in_scope.add(target)
@@ -3560,6 +3584,37 @@ def self_test():
 
     if not REQUIRED_CARGO_CONFIG_TASKS:
         failures.append("REQUIRED_CARGO_CONFIG_TASKS is empty — A10's floor would assert nothing")
+    # SMA-605 — A10's arms are its OWN, built from CONFIG_SENSITIVE_VERBS. Reusing arm 1
+    # (LOCK_RESOLVING_VERBS) pulls `tree`, `deny` and `update` into A10's scope and NOTHING
+    # reds — the accident SMA-599 D9 spent a round removing.
+    def _a10(cmd):
+        return {
+            "q": {
+                "source_dir": "rs/crates/libs/q", "deps": {}, "tasks": {},
+                "task_inputs": {"t": []}, "task_input_globs": {"t": []},
+                "invocations": {"t": cmd},
+            },
+        }
+
+    if not any(
+        "q:t" in r and CARGO_CONFIG_INPUT in r
+        for r in check_cargo_config_inputs(_a10('"$CARGO_BIN" build'), Path("."), floor=())
+    ):
+        failures.append("A10 did not demand .cargo/config.toml for an indirect compiling call")
+    if check_cargo_config_inputs(_a10('"$CARGO_BIN" tree'), Path("."), floor=()):
+        failures.append(
+            "A10 examined `\"$CARGO_BIN\" tree` — its arm is built from LOCK_RESOLVING_VERBS "
+            "rather than CONFIG_SENSITIVE_VERBS (SMA-599 D9)"
+        )
+    if not any(
+        "q:t" in r
+        for r in check_cargo_config_inputs(_a10("CARGO=/p release-plz update"), Path("."), floor=())
+    ):
+        failures.append(
+            "A10 did not treat a CARGO= redirection as sensitive — the tool's inner cargo may "
+            "compile, and A10 cannot know that it does not"
+        )
+
     if not CONFIG_SENSITIVE_VERBS:
         failures.append("CONFIG_SENSITIVE_VERBS is empty — A10 would examine nothing")
 
