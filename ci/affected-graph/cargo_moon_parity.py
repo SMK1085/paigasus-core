@@ -2428,6 +2428,17 @@ def self_test():
                 "invocations": {"i": "bash ci/probe/indirect.sh"},
             },
         }
+        # Unwaived first: the EMISSION loop must report every env row, including the one whose
+        # TOOL carries --locked. Without this the emission half can be made kind-blind on its own
+        # and every other fixture here still passes (MEASURED) — the `got`/`want` set above reads
+        # `_row_reports` directly and never runs check_cargo_locked_scripts.
+        rows = check_cargo_locked_scripts(indirect_fixture, Path(tmp), allow={})
+        if not any("indirect.sh:6" in r and "sets CARGO=" in r for r in rows):
+            failures.append(
+                f"A8's script arm did not report `CARGO=/p release-plz update --locked` — the "
+                f"tool's own --locked cleared an env row, which no flag can do: {rows}"
+            )
+
         waived = {
             ("ci/probe/indirect.sh", "CARGO=/p release-plz update"): "reviewed redirection",
             ("ci/probe/indirect.sh", "CARGO=/p release-plz update --locked"): "reviewed too",
