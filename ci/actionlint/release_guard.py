@@ -683,9 +683,10 @@ def secret_reference_violations(doc: dict, name: str) -> list[str]:
 
     Walks the PARSED document, so YAML comments naming the removed tokens are invisible here.
 
-    The `missing` half runs only for RELEASE_WORKFLOW_NAME: every other document check_main sees
-    is a synthetic self-test fixture that legitimately references no secret. That half is a
-    liveness check on the pin itself, not a security rule — ci/workflow-credentials/run.sh's
+    Called from both check_main and check_called (fix round 2). The `missing` half runs only for
+    RELEASE_WORKFLOW_NAME: every other document — a check_main self-test fixture, or a real called
+    workflow like prebuild.yml or wheels.yml — legitimately references no secret at all. That half
+    is a liveness check on the pin itself, not a security rule — ci/workflow-credentials/run.sh's
     control row independently asserts release.yml still reads a secret.
     """
     found: set[str] = set()
@@ -1033,6 +1034,17 @@ def check_called(doc: dict, name: str) -> list[str]:
     # reason V5 and V10's per-job call both apply here — a called workflow escaping check_main
     # must not escape this scan either.
     out += publish_credential_violations({"env": doc.get("env") or {}}, "<workflow>", name)
+
+    # V10 rule 1 (fix round 2, CodeRabbit + independent branch review): the unexpected-secret-name
+    # half of secret_reference_violations must reach a called workflow too, for the same reason
+    # every other V10 check does — prebuild.yml and wheels.yml are exactly the files a fresh
+    # PYPI_PROJECT_TOKEN-shaped credential would land in first. This was the one V10 rule that
+    # `check_main` ran and `check_called` did not; it is the same class of gap SMA-579's V5 left
+    # once, inlined in `check_main` alone. The `missing`/liveness half of the same function stays
+    # inert here: it fires only when `name == RELEASE_WORKFLOW_NAME`, and every called workflow's
+    # name is its own filename, never that constant — so a legitimate callee that references no
+    # secret at all still passes clean.
+    out += secret_reference_violations(doc, name)
 
     # V5 also applies here (fix round 3, Important 4). It used to be inlined in check_main, which
     # main() runs on argv[0] only, so every CALLED workflow escaped it — including prebuild.yml's
@@ -1880,6 +1892,23 @@ FIXTURES: list[tuple[str, str, str, str | None]] = [
          "          packages-dir: dist\n"
          "          skip-existing: true\n"),
      None),
+
+    # --- V10 rule 1 fix round 2 (CodeRabbit + independent branch review): secret_reference_
+    # violations must reach check_called too --------------------------------------------------
+    ("V10 rule 1: a called workflow referencing an unpinned secret name reds", "called",
+     ("on:\n  workflow_call:\n  pull_request:\n    branches:\n      - main\n"
+      "jobs:\n  build:\n    steps:\n      - uses: pypa/gh-action-pypi-publish@v1\n"
+      "        with:\n          packages-dir: dist\n"
+      "          password: ${{ secrets.PYPI_PROJECT_TOKEN }}\n"),
+     "references the secret PYPI_PROJECT_TOKEN"),
+    # CONTROL: a legitimate callee that references no secret at all — the shape prebuild.yml and
+    # wheels.yml actually have — must stay clean. Without this row, calling
+    # secret_reference_violations from check_called with the wrong `name` (RELEASE_WORKFLOW_NAME,
+    # say, instead of the callee's own filename) would silently turn on the `missing`/liveness
+    # half for every callee and red this file on nothing.
+    ("V10 rule 1 control: a called workflow with no secrets stays clean", "called",
+     ("on:\n  workflow_call:\n  pull_request:\n    branches:\n      - main\n"
+      "jobs:\n  build:\n    steps: [{run: maturin build}]\n"), None),
 ]
 
 
