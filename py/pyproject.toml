@@ -42,5 +42,5 @@ dev = [
     "pytest>=9.1.1,<10",
     "python-semantic-release>=10.6.1,<11",
     "pyyaml==6.0.3",
-    "ruff>=0.16.4,<0.17",
+    "ruff>=0.16.5,<0.17",
 ]
