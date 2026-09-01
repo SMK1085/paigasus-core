@@ -25,10 +25,10 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use axum::http::StatusCode;
-use paigasus_iam::adapters::events::OutboxRelay;
+use paigasus_iam::adapters::events::{CloudEvent, OutboxRelay};
 use paigasus_iam::adapters::persistence::entities::{audit_log, event_outbox, role_grant};
 use paigasus_iam_core::authz::model::root_prn;
-use paigasus_iam_core::{DomainEvent, EventPublisher, PublishError};
+use paigasus_iam_core::{DomainEvent, EventPublisher, EventType, PublishError};
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 use serde_json::json;
 use support::{app_with_state, provision, provision_platform_admin, send};
@@ -140,4 +140,64 @@ async fn mutation_emits_correlated_outbox_and_audit_rows_and_the_relay_publishes
         .expect("query event_outbox")
         .expect("row still present after the relay tick");
     assert!(outbox_row_after.published_at.is_some(), "a successfully published row must have published_at set");
+}
+
+/// A publisher that captures every `DomainEvent` it sees (rather than merely counting, like
+/// `CountingPublisher` above), so a test can render the exact CloudEvent the relay would hand a
+/// real broker and assert on its wire `type` — SMA-606 Task 10 step 4.
+#[derive(Default)]
+struct CapturingPublisher {
+    events: std::sync::Mutex<Vec<DomainEvent>>,
+}
+
+#[async_trait]
+impl EventPublisher for CapturingPublisher {
+    async fn publish(&self, ev: &DomainEvent) -> Result<(), PublishError> {
+        self.events.lock().unwrap().push(ev.clone());
+        Ok(())
+    }
+}
+
+/// SMA-606 Task 10 step 4: the SAME HTTP -> row -> relay chain the B10 test above proves for a
+/// role grant, but for a TENANCY mutation — `OrganizationService::create` (`application/
+/// organizations.rs`) writes an `event_outbox` row with `event_type = 'iam.organization.created'`
+/// among its three writes (org/team/grant, all one correlation id) — and asserts the CloudEvent
+/// [`CloudEvent::from_domain_event`] renders from that row's `DomainEvent` carries
+/// `"type": "iam.organization.created"` on the wire (`adapters/events/cloud_event.rs`'s public
+/// CloudEvents 1.0 contract), proven end to end rather than by unit-testing the envelope builder
+/// alone.
+#[tokio::test]
+async fn tenancy_mutation_publishes_a_cloudevent_typed_organization_created() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let (app, state, idp) = app_with_state(db).await;
+
+    let admin_token = idp.bearer("t10-admin", Some("t10-admin@example.com"), "paigasus", 3600);
+    provision_platform_admin(&state, &admin_token).await;
+
+    let (status, created) = send(&app, "POST", "/v1/organizations", Some(json!({"slug": "t10-org", "name": "Task 10 Org"})), Some(admin_token.as_str())).await;
+    assert_eq!(status, StatusCode::CREATED, "the authorized org create must succeed: {created}");
+
+    let outbox_row = event_outbox::Entity::find()
+        .filter(event_outbox::Column::EventType.eq(EventType::OrganizationCreated.as_wire()))
+        .one(&state.db)
+        .await
+        .expect("query event_outbox")
+        .expect("an event_outbox row for the org create must exist");
+
+    let relay = OutboxRelay::new(state.db.clone(), Duration::from_secs(60), 100, 5);
+    let publisher = Arc::new(CapturingPublisher::default());
+    let report = relay.tick(publisher.as_ref()).await.expect("relay tick succeeds");
+    assert!(report.drained >= 1, "the tick must drain at least the org-create events");
+
+    let captured = publisher.events.lock().unwrap();
+    let org_created = captured
+        .iter()
+        .find(|ev| ev.id == outbox_row.id)
+        .expect("the relay must have published the org-create event this test seeded");
+
+    let cloud_event = CloudEvent::from_domain_event(org_created, "urn:paigasus:iam");
+    let rendered = serde_json::to_value(&cloud_event).expect("cloud event serializes");
+    assert_eq!(rendered["type"], "iam.organization.created", "the published CloudEvent's type must be iam.organization.created");
 }
