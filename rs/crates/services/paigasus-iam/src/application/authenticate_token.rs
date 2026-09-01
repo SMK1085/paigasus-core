@@ -374,11 +374,17 @@ mod tests {
         async fn attach(&self, _membership: &Membership, _stamp: &Stamp) -> Result<MembershipRecord, RepositoryError> {
             unimplemented!("AuthenticateToken never calls attach")
         }
+        async fn attach_in(&self, _tx: &dyn Transaction, _membership: &Membership, _stamp: &Stamp) -> Result<MembershipRecord, RepositoryError> {
+            unimplemented!("AuthenticateToken never calls attach_in")
+        }
         async fn find(&self, _id: Uuid) -> Result<Option<MembershipRecord>, RepositoryError> {
             unimplemented!("AuthenticateToken never calls find")
         }
         async fn detach(&self, _id: Uuid) -> Result<(), RepositoryError> {
             unimplemented!("AuthenticateToken never calls detach")
+        }
+        async fn detach_in(&self, _tx: &dyn Transaction, _id: Uuid) -> Result<Vec<MembershipRecord>, RepositoryError> {
+            unimplemented!("AuthenticateToken never calls detach_in")
         }
         async fn list_by_principal(&self, principal: Uuid, limit: u64, offset: u64) -> Result<Vec<MembershipRecord>, RepositoryError> {
             let rows = self.rows.lock().unwrap();

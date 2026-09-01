@@ -203,10 +203,22 @@ pub trait MembershipRepository: Send + Sync {
     /// team/project targets: org membership exists, locked (else Precondition(MissingOrgMembership));
     /// duplicate -> Conflict(DuplicateMembership).
     async fn attach(&self, membership: &Membership, stamp: &Stamp) -> Result<MembershipRecord, RepositoryError>;
+    /// Txn-scoped twin of [`MembershipRepository::attach`] (SMA-606 D1). The returned record
+    /// carries the **stored** PRNs, which is what the caller must put in the event — never
+    /// the caller's own input (D2's security corollary): this method byte-matches the
+    /// supplied PRN against the stored one and answers `PrnMismatch`, and echoing the input
+    /// would route a forged org slot straight past that check into the event stream.
+    async fn attach_in(&self, tx: &dyn Transaction, membership: &Membership, stamp: &Stamp) -> Result<MembershipRecord, RepositoryError>;
     async fn find(&self, id: Uuid) -> Result<Option<MembershipRecord>, RepositoryError>;
     /// NotFound if missing. Org memberships cascade: also deletes the principal's
     /// team/project memberships in that org, one transaction (rule 5).
     async fn detach(&self, id: Uuid) -> Result<(), RepositoryError>;
+    /// Txn-scoped twin of [`MembershipRepository::detach`], returning **every record it
+    /// deleted** — the target row plus, for an org membership, each row the cascade removed
+    /// (SMA-606 D6). The service holds only a `Uuid` and the `membership` table stores no PRN
+    /// columns, so these records are the only place the cascaded PRNs exist; each becomes one
+    /// audit entry and one event, all sharing the call's single correlation id.
+    async fn detach_in(&self, tx: &dyn Transaction, id: Uuid) -> Result<Vec<MembershipRecord>, RepositoryError>;
     async fn list_by_principal(&self, principal: Uuid, limit: u64, offset: u64) -> Result<Vec<MembershipRecord>, RepositoryError>;
     /// Resolves node by uuid; PrnMismatch if the supplied ref's canonical != stored prn; NotFound if absent.
     async fn list_by_node(&self, node: &TenancyNodeRef, limit: u64, offset: u64) -> Result<Vec<MembershipRecord>, RepositoryError>;

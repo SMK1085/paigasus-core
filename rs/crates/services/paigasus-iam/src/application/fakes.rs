@@ -477,7 +477,12 @@ pub struct InMemoryMemberships(pub TenancyStore);
 
 #[async_trait]
 impl MembershipRepository for InMemoryMemberships {
-    async fn attach(&self, membership: &Membership, _stamp: &Stamp) -> Result<MembershipRecord, RepositoryError> {
+    async fn attach(&self, membership: &Membership, stamp: &Stamp) -> Result<MembershipRecord, RepositoryError> {
+        let tx: Box<dyn Transaction> = Box::new(CountingTransaction::detached());
+        self.attach_in(&*tx, membership, stamp).await
+    }
+
+    async fn attach_in(&self, _tx: &dyn Transaction, membership: &Membership, _stamp: &Stamp) -> Result<MembershipRecord, RepositoryError> {
         let store = &self.0;
         let principal_uuid = membership.principal_id.uuid();
 
@@ -534,16 +539,33 @@ impl MembershipRepository for InMemoryMemberships {
     }
 
     async fn detach(&self, id: Uuid) -> Result<(), RepositoryError> {
+        let tx: Box<dyn Transaction> = Box::new(CountingTransaction::detached());
+        self.detach_in(&*tx, id).await?;
+        Ok(())
+    }
+
+    async fn detach_in(&self, _tx: &dyn Transaction, id: Uuid) -> Result<Vec<MembershipRecord>, RepositoryError> {
         let mut memberships = self.0.memberships.lock().unwrap();
         let membership = memberships.get(&id).cloned().ok_or(RepositoryError::NotFound)?;
         memberships.remove(&id);
+        let mut deleted = vec![to_record(&membership)];
 
+        // NOTE (SMA-606 D6): this fake cascades on `parent_org_uuid(&m.node)` — the org slot
+        // embedded in the caller's PRN — while Postgres resolves the STORED `org_id` by
+        // subquery. The two can disagree. That makes this a third statement in the drift set
+        // the spec's Risk 3 tracks; the agreement control is Postgres test case 11.
         if let TenancyNodeRef::Organization(org_id) = &membership.node {
             let org_uuid = org_id.uuid();
             let principal_uuid = membership.principal_id.uuid();
-            memberships.retain(|_, m| !(m.principal_id.uuid() == principal_uuid && parent_org_uuid(&m.node) == Some(org_uuid)));
+            memberships.retain(|_, m| {
+                let cascaded = m.principal_id.uuid() == principal_uuid && parent_org_uuid(&m.node) == Some(org_uuid);
+                if cascaded {
+                    deleted.push(to_record(m));
+                }
+                !cascaded
+            });
         }
-        Ok(())
+        Ok(deleted)
     }
 
     async fn list_by_principal(&self, principal: Uuid, limit: u64, offset: u64) -> Result<Vec<MembershipRecord>, RepositoryError> {
