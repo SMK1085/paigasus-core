@@ -291,7 +291,16 @@ where
         let out = self.repo.rename_in(&*tx, id, slug.as_ref(), new_name, &stamp).await?;
         if out.changed {
             let ev = self.org_event(EventType::OrganizationRenamed, &out.value, &stamp, corr);
-            let entry = self.org_entry(Action::RenameOrganization, &out.value, &stamp, corr, serde_json::json!({}));
+            // fix-round-1 finding 3 (spec D5): the detail must carry the same payload shape as
+            // the event, not an empty object — else the audit row records THAT a rename
+            // happened but not WHAT it changed to, recoverable only by joining the outbox event
+            // on `correlation_id`.
+            let detail = serde_json::json!({
+                "node_prn": out.value.node.id.prn().canonical(),
+                "slug": out.value.node.slug.as_str(),
+                "name": out.value.node.name,
+            });
+            let entry = self.org_entry(Action::RenameOrganization, &out.value, &stamp, corr, detail);
             self.outbox.enqueue(&*tx, &ev).await?;
             self.audit.record(&*tx, &entry).await?;
         }
@@ -312,7 +321,13 @@ where
         let out = self.repo.set_status_in(&*tx, id, NodeStatus::Archived, &stamp).await?;
         if out.changed {
             let ev = self.org_event(EventType::OrganizationArchived, &out.value, &stamp, corr);
-            let entry = self.org_entry(Action::ArchiveOrganization, &out.value, &stamp, corr, serde_json::json!({}));
+            // fix-round-1 finding 3 (spec D5): same payload shape as the event.
+            let detail = serde_json::json!({
+                "node_prn": out.value.node.id.prn().canonical(),
+                "status": out.value.node.status.as_str(),
+                "effective_status": out.value.effective_status.as_str(),
+            });
+            let entry = self.org_entry(Action::ArchiveOrganization, &out.value, &stamp, corr, detail);
             self.outbox.enqueue(&*tx, &ev).await?;
             self.audit.record(&*tx, &entry).await?;
         }
@@ -331,7 +346,13 @@ where
         let out = self.repo.set_status_in(&*tx, id, NodeStatus::Active, &stamp).await?;
         if out.changed {
             let ev = self.org_event(EventType::OrganizationRestored, &out.value, &stamp, corr);
-            let entry = self.org_entry(Action::RestoreOrganization, &out.value, &stamp, corr, serde_json::json!({}));
+            // fix-round-1 finding 3 (spec D5): same payload shape as the event.
+            let detail = serde_json::json!({
+                "node_prn": out.value.node.id.prn().canonical(),
+                "status": out.value.node.status.as_str(),
+                "effective_status": out.value.effective_status.as_str(),
+            });
+            let entry = self.org_entry(Action::RestoreOrganization, &out.value, &stamp, corr, detail);
             self.outbox.enqueue(&*tx, &ev).await?;
             self.audit.record(&*tx, &entry).await?;
         }
@@ -345,19 +366,28 @@ where
 mod tests {
     use super::*;
     use crate::application::fakes::{CountingGenBumper, FakeAuditLog, FakeOutbox, FakePolicyGenBumper, FakeUnitOfWork, FixedClock, InMemoryOrgs, SeqIds};
+    use async_trait::async_trait;
     use chrono::{Duration, TimeZone, Utc};
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// Bundles an `OrganizationService` together with every fake it was built over (SMA-606,
     /// mirrors `api_keys.rs`'s `ServiceWithFakes`/`new_service_with_fakes`, `:393-434`), so a
     /// test can assert on exactly what `create`/`rename`/`archive`/`restore` emitted through the
-    /// outbox/audit ports, and how many times the post-commit `entity_gen` bump ran.
-    fn service_with_fakes_and_clock(clock: FixedClock) -> (OrganizationService<InMemoryOrgs, SeqIds, FixedClock>, FakeOutbox, FakeAuditLog, CountingGenBumper) {
+    /// outbox/audit ports, how many times the post-commit `entity_gen` bump ran, AND (fix-round-1
+    /// finding 2) that the transaction actually committed — `fakes.rs:1082-1088`'s own doc warns
+    /// that every other fake mutates its state regardless of whether `commit` is ever called, so
+    /// a deleted `tx.commit().await?` would otherwise pass unnoticed. The `FakeUnitOfWork`
+    /// handle is returned (not just consumed) so a test can assert `commits()` directly, mirrring
+    /// `dead_letters.rs:467,489,508`/`system_retirement.rs:781,831,904`.
+    fn service_with_fakes_and_clock(clock: FixedClock) -> (OrganizationService<InMemoryOrgs, SeqIds, FixedClock>, FakeOutbox, FakeAuditLog, CountingGenBumper, FakeUnitOfWork) {
         let outbox = FakeOutbox::default();
         let audit = FakeAuditLog::default();
         let gen_bumper = CountingGenBumper::default();
+        let uow = FakeUnitOfWork::default();
         let svc = OrganizationService::new(OrganizationServiceDeps {
             repo: InMemoryOrgs::default(),
-            uow: Arc::new(FakeUnitOfWork::default()),
+            uow: Arc::new(uow.clone()),
             outbox: Arc::new(outbox.clone()),
             audit: Arc::new(audit.clone()),
             gen_bumper: Arc::new(gen_bumper.clone()),
@@ -365,15 +395,56 @@ mod tests {
             ids: SeqIds::default(),
             clock,
         });
-        (svc, outbox, audit, gen_bumper)
+        (svc, outbox, audit, gen_bumper, uow)
     }
 
-    fn service_with_fakes() -> (OrganizationService<InMemoryOrgs, SeqIds, FixedClock>, FakeOutbox, FakeAuditLog, CountingGenBumper) {
+    fn service_with_fakes() -> (OrganizationService<InMemoryOrgs, SeqIds, FixedClock>, FakeOutbox, FakeAuditLog, CountingGenBumper, FakeUnitOfWork) {
         service_with_fakes_and_clock(FixedClock::default())
     }
 
     fn new_service() -> OrganizationService<InMemoryOrgs, SeqIds, FixedClock> {
         service_with_fakes().0
+    }
+
+    /// An `EntityGenBumper` that snapshots a SHARED `FakeUnitOfWork`'s own commit counter the
+    /// instant `bump()` runs (SMA-606 D7, fix-round-1 finding 1 — mirrors
+    /// `system_retirement.rs`'s `BumpSnapshotBumper`). `CountingGenBumper` alone cannot
+    /// distinguish "the bump ran after the commit" from "the bump ran instead of/before the
+    /// commit": moving `self.gen_bumper.bump().await` above `tx.commit().await?` leaves its call
+    /// count identical either way. This bumper instead reads `uow.commits()` — which only
+    /// advances inside `Transaction::commit` — the moment `bump()` fires: if `bump()` ran BEFORE
+    /// the commit, the snapshot it captures is the PRE-commit count, not the post-commit one.
+    #[derive(Clone)]
+    struct BumpSnapshotBumper {
+        uow: FakeUnitOfWork,
+        snapshot_at_bump: Arc<Mutex<Option<usize>>>,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl BumpSnapshotBumper {
+        fn new(uow: FakeUnitOfWork) -> Self {
+            BumpSnapshotBumper {
+                uow,
+                snapshot_at_bump: Arc::new(Mutex::new(None)),
+                calls: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+
+        fn snapshot_at_bump(&self) -> Option<usize> {
+            *self.snapshot_at_bump.lock().unwrap()
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait]
+    impl EntityGenBumper for BumpSnapshotBumper {
+        async fn bump(&self) {
+            *self.snapshot_at_bump.lock().unwrap() = Some(self.uow.commits());
+            self.calls.fetch_add(1, Ordering::SeqCst);
+        }
     }
 
     /// A deterministic `PrincipalId` for `create`'s `actor` argument — the tests below don't
@@ -606,10 +677,11 @@ mod tests {
     /// one that actually passed `RoleService::grant`'s anti-escalation check.
     #[tokio::test]
     async fn create_emits_three_events_on_one_correlation_id() {
-        let (svc, outbox, audit, _bumper) = service_with_fakes();
+        let (svc, outbox, audit, _bumper, uow) = service_with_fakes();
         let actor = PrincipalId::from_prn(principal_prn(1));
 
         svc.create(&actor, "acme", "Acme").await.unwrap();
+        assert_eq!(uow.commits(), 1, "create must commit its one transaction (fix-round-1 finding 2)");
 
         let events = outbox.0.lock().unwrap().clone();
         assert_eq!(events.len(), 3, "org create writes three rows, so it emits three events");
@@ -633,6 +705,12 @@ mod tests {
         assert_eq!(entries.len(), 3);
         assert!(entries.iter().all(|e| e.correlation_id == Some(corr)));
         assert_eq!(entries[0].action, Action::CreateOrganization.as_wire());
+        // fix-round-1 finding 3: pin the team/grant entries' own action AND source too, so a
+        // wrong `Action` variant on either — or a dropped/renamed "source" key — cannot pass.
+        assert_eq!(entries[1].action, Action::CreateTeam.as_wire());
+        assert_eq!(entries[1].detail["source"], "organization_create");
+        assert_eq!(entries[2].action, Action::GrantRole.as_wire());
+        assert_eq!(entries[2].detail["source"], "organization_create");
     }
 
     /// SMA-440 D5 + SMA-606 D2: a rename whose every supplied field already equals the stored
@@ -640,9 +718,10 @@ mod tests {
     /// it an over-broad no-op that swallows real renames passes.
     #[tokio::test]
     async fn a_no_op_rename_emits_nothing_but_a_real_one_emits() {
-        let (svc, outbox, audit, _bumper) = service_with_fakes();
+        let (svc, outbox, audit, _bumper, uow) = service_with_fakes();
         let actor = PrincipalId::from_prn(principal_prn(1));
         let out = svc.create(&actor, "acme", "Acme").await.unwrap();
+        assert_eq!(uow.commits(), 1, "create must commit (fix-round-1 finding 2)");
         let id = out.organization.id.uuid();
         outbox.0.lock().unwrap().clear();
         audit.0.lock().unwrap().clear();
@@ -650,19 +729,33 @@ mod tests {
         svc.rename(id, Some("acme"), Some("Acme"), &actor).await.unwrap();
         assert!(outbox.0.lock().unwrap().is_empty(), "a no-op rename emits no event");
         assert!(audit.0.lock().unwrap().is_empty(), "a no-op rename writes no audit entry");
+        assert_eq!(uow.commits(), 2, "a no-op rename still commits its transaction, it just emits nothing on it");
 
         svc.rename(id, Some("acme"), Some("Acme Inc"), &actor).await.unwrap();
         let events = outbox.0.lock().unwrap().clone();
         assert_eq!(events.len(), 1, "a matching slug with a differing name is a real rename");
         assert_eq!(events[0].event_type, EventType::OrganizationRenamed);
         assert_eq!(events[0].payload["name"], "Acme Inc", "the payload carries the POST-change name");
+        assert_eq!(uow.commits(), 3, "the real rename commits its own transaction too");
+
+        let entries = audit.0.lock().unwrap().clone();
+        assert_eq!(entries.len(), 1);
+        // fix-round-1 finding 3: the audit entry must carry the same payload shape as its
+        // event, not an empty detail — else the audit row records that something changed but
+        // not what it changed to.
+        assert_eq!(entries[0].detail["slug"], "acme");
+        assert_eq!(entries[0].detail["name"], "Acme Inc", "the audit detail carries the POST-change name too");
     }
 
-    /// SMA-606 D7: the bump is post-commit, awaited, and unconditional — it still runs for a
-    /// no-op, preserving SMA-440 D5's deliberate choice to leave cache invalidation alone.
+    /// SMA-606 D7: the bump is unconditional — it still runs for a no-op, preserving SMA-440
+    /// D5's deliberate choice to leave cache invalidation alone. This does NOT prove the bump
+    /// runs AFTER the commit (fix-round-1 finding 1): `CountingGenBumper`'s call count is
+    /// identical whether `gen_bumper.bump().await` sits before or after `tx.commit().await?`.
+    /// See `the_post_commit_bump_runs_strictly_after_the_transaction_commits` below for the
+    /// ordering proof.
     #[tokio::test]
     async fn the_gen_bump_runs_after_commit_and_even_for_a_no_op() {
-        let (svc, _outbox, _audit, bumper) = service_with_fakes();
+        let (svc, _outbox, _audit, bumper, _uow) = service_with_fakes();
         let actor = PrincipalId::from_prn(principal_prn(1));
         let out = svc.create(&actor, "acme", "Acme").await.unwrap();
         let before = bumper.bumps();
@@ -670,5 +763,32 @@ mod tests {
         svc.rename(out.organization.id.uuid(), Some("acme"), Some("Acme"), &actor).await.unwrap();
 
         assert_eq!(bumper.bumps(), before + 1, "a no-op still bumps entity_gen");
+    }
+
+    /// SMA-606 D7, fix-round-1 finding 1: `the_gen_bump_runs_after_commit_and_even_for_a_no_op`
+    /// above proves the bump is UNCONDITIONAL, not that it runs AFTER the commit — moving
+    /// `self.gen_bumper.bump().await` above `tx.commit().await?` in `create` would leave that
+    /// test, and all the others, green. `BumpSnapshotBumper` instead snapshots the
+    /// `FakeUnitOfWork`'s own commit counter the instant `bump()` fires: if the bump ran before
+    /// the commit, the snapshot reads the PRE-commit count (0), not the post-commit one (1).
+    #[tokio::test]
+    async fn the_post_commit_bump_runs_strictly_after_the_transaction_commits() {
+        let uow = FakeUnitOfWork::default();
+        let bumper = BumpSnapshotBumper::new(uow.clone());
+        let svc = OrganizationService::new(OrganizationServiceDeps {
+            repo: InMemoryOrgs::default(),
+            uow: Arc::new(uow.clone()),
+            outbox: Arc::new(FakeOutbox::default()),
+            audit: Arc::new(FakeAuditLog::default()),
+            gen_bumper: Arc::new(bumper.clone()),
+            policy_gen_bumper: Arc::new(FakePolicyGenBumper::default()),
+            ids: SeqIds::default(),
+            clock: FixedClock::default(),
+        });
+
+        svc.create(&PrincipalId::from_prn(principal_prn(1)), "acme", "Acme").await.unwrap();
+
+        assert_eq!(bumper.calls(), 1);
+        assert_eq!(bumper.snapshot_at_bump(), Some(1), "the commit counter must already read 1 (committed) at the instant bump() runs");
     }
 }
