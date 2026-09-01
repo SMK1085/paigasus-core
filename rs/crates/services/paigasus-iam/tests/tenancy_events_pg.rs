@@ -201,7 +201,7 @@ async fn org_create_commits_organization_outbox_and_audit_atomically_and_rolls_b
         .unwrap()
         .expect("committed audit row must be visible");
     assert_eq!(outbox_row.correlation_id, Some(corr));
-    assert_eq!(audit_row.correlation_id, Some(corr), "the org, outbox and audit rows must share one correlation id");
+    assert_eq!(audit_row.correlation_id, Some(corr), "the outbox and audit rows share the correlation id of the committed org create");
 
     // --- rollback path: a second, distinct org create, txn dropped without commit ---
     let owner2 = ids.new_principal_id();
@@ -312,11 +312,12 @@ async fn a_cascading_detach_writes_exactly_one_audit_row_per_deleted_membership(
     let deleted_count = before - after;
     assert_eq!(deleted_count, 5, "the org row plus its four cascaded team/project rows");
 
-    let audit_row_count = audit_log::Entity::find()
+    let audit_rows = audit_log::Entity::find()
         .filter(audit_log::Column::Action.eq(Action::DetachMembership.as_wire()))
-        .count(&db)
+        .all(&db)
         .await
         .unwrap();
+    let audit_row_count = audit_rows.len() as u64;
     let event_row_count = event_outbox::Entity::find()
         .filter(event_outbox::Column::EventType.eq(EventType::MembershipDetached.as_wire()))
         .count(&db)
@@ -325,12 +326,24 @@ async fn a_cascading_detach_writes_exactly_one_audit_row_per_deleted_membership(
 
     assert_eq!(audit_row_count, deleted_count, "the audit row count must equal the deleted row count, not merely be nonzero");
     assert_eq!(event_row_count, deleted_count, "the outbox row count must equal the deleted row count too");
+
+    // Cardinality agreement alone would still pass a projection that reported one node twice
+    // and omitted another — the audit rows must name exactly the five deleted nodes, not merely
+    // five of them. `AuditEntry.resource_prn` is `record.node_prn` (`application/
+    // memberships.rs`'s detach loop), so this is an identity check on the same field the row
+    // count above only counted.
+    let audit_resource_prns: std::collections::HashSet<String> = audit_rows.into_iter().filter_map(|r| r.resource_prn).collect();
+    let expected_prns: std::collections::HashSet<String> = [org.id.canonical(), team1.id.canonical(), team2.id.canonical(), project1.id.canonical(), project2.id.canonical()]
+        .into_iter()
+        .collect();
+    assert_eq!(audit_resource_prns, expected_prns, "the audit rows must name exactly the five deleted nodes, not merely five of them");
 }
 
 /// Scenario 3 — SMA-606 D6 step 1, Testing case 12. Without the `FOR UPDATE` lock the
 /// projection can see a cascade row that a concurrent detach then removes first, and this call
-/// reports a detach it never performed. Two transactions: this one locks and projects, the peer
-/// commits its own detach of a cascade row, then this one deletes and commits.
+/// reports a detach it never performed. The peer detaches a cascade row and holds it
+/// uncommitted; this call blocks at its `FOR UPDATE` step until the peer commits, then projects
+/// and deletes post-commit truth.
 ///
 /// **This test was verified to fail with `FOR UPDATE` removed from `DETACH_LOCK_SQL`** — see
 /// the Task 10 report for the exact output; the removal was reverted before this commit.

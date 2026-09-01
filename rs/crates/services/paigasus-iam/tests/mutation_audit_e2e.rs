@@ -178,13 +178,17 @@ async fn tenancy_mutation_publishes_a_cloudevent_typed_organization_created() {
 
     let (status, created) = send(&app, "POST", "/v1/organizations", Some(json!({"slug": "t10-org", "name": "Task 10 Org"})), Some(admin_token.as_str())).await;
     assert_eq!(status, StatusCode::CREATED, "the authorized org create must succeed: {created}");
+    let org_prn = created["organization"]["prn"].as_str().expect("organization.prn").to_string();
 
+    // Filtered on `AggregatePrn` too, not `EventType` alone — a bug emitting the right type for
+    // the wrong aggregate would otherwise still pass this lookup.
     let outbox_row = event_outbox::Entity::find()
         .filter(event_outbox::Column::EventType.eq(EventType::OrganizationCreated.as_wire()))
+        .filter(event_outbox::Column::AggregatePrn.eq(org_prn.clone()))
         .one(&state.db)
         .await
         .expect("query event_outbox")
-        .expect("an event_outbox row for the org create must exist");
+        .expect("an event_outbox row for this test's org create must exist");
 
     let relay = OutboxRelay::new(state.db.clone(), Duration::from_secs(60), 100, 5);
     let publisher = Arc::new(CapturingPublisher::default());
