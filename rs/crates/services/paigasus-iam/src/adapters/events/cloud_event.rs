@@ -155,21 +155,17 @@ mod tests {
         assert_eq!(rendered, ev.id.to_string(), "must match what publish uses for Nats-Msg-Id");
     }
 
+    /// SMA-606 D8: iterates `EventType::ALL` rather than a hand-listed array. The previous
+    /// form hard-coded eight variants, so a new one compiled cleanly and went uncovered —
+    /// P2-D4 called this a compile-time tripwire and it was not one. `ALL` is kept exhaustive
+    /// by `all_lists_every_event_type`'s wildcard-free match, so this now transitively fails
+    /// to compile for a variant with no wire string.
     #[test]
     fn type_matches_the_wire_string_for_every_variant() {
-        for et in [
-            EventType::PrincipalCreated,
-            EventType::PrincipalArchived,
-            EventType::RoleGranted,
-            EventType::RoleRevoked,
-            EventType::ApiKeyIssued,
-            EventType::ApiKeyRevoked,
-            EventType::PolicyPut,
-            EventType::PolicyDeleted,
-        ] {
+        for et in EventType::ALL {
             let mut ev = sample(None, None, "prn:x");
             ev.event_type = et;
-            assert_eq!(render(&ev)["type"], et.as_wire());
+            assert_eq!(render(&ev)["type"], et.as_wire(), "rendered `type` must equal the wire string for {et:?}");
         }
     }
 
