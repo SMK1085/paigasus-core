@@ -128,10 +128,21 @@ tenancy actions: `CreateOrganization`, `RenameOrganization`, `ArchiveOrganizatio
 `RestoreOrganization`, and the `…Team` / `…Project` quartets, plus `AttachMembership` and
 `DetachMembership`.
 
-`AuditEntry.action` convention is a **string literal matching the variant name** —
-`"GrantRole"` (`roles.rs:236`), `"RevokeRole"` (`:285`), `"PutPolicy"` (`policies.rs:137`),
-`"IssueApiKey"` (`api_keys.rs:264`). There is no `Action::as_str`; the only rendering method
-is `cedar_uid` (`action.rs:225`).
+**CORRECTED 2026-09-01, after adversarial review.** The original text of this paragraph read:
+"There is no `Action::as_str`; the only rendering method is `cedar_uid` (`action.rs:225`)."
+**That is false, and it was a measurement error, not a judgement call** — the grep behind it
+searched for `as_str`, `name`, `Display` and `cedar`, and never for `as_wire`.
+
+`Action::as_wire()` exists at `libs/paigasus-iam-core/src/authz/action.rs:114-158` and returns
+exactly the strings in question — `"RenameTeam"`, `"AttachMembership"`, `"CreateOrganization"`.
+`cedar_uid` (`:225-228`) is built on top of it, and `pg_api_keys.rs:103` already uses it for
+this class of purpose. Its match is wildcard-free.
+
+The existing audit call sites do hand-write the literal — `"GrantRole"` (`roles.rs:236`),
+`"RevokeRole"` (`:285`), `"PutPolicy"` (`policies.rs:137`), `"IssueApiKey"`
+(`api_keys.rs:264`) — but that is the older habit, not the only option. The design's D5 uses
+`as_wire()` instead: `AuditEntry.action` is a free `String` and `AuditFilter.action` is how
+operators query it, so a typo in a literal makes rows permanently unfindable and nothing reds.
 
 `EventType::ALL` therefore goes `[EventType; 8]` → `[EventType; 22]`.
 
@@ -139,8 +150,12 @@ is `cedar_uid` (`action.rs:225`).
 
 - **No contract change.** `EventType` has no proto twin; the NATS payload is CloudEvents
   JSON via `adapters/events/cloud_event.rs`.
-- **No NATS config change.** `ops/nats/subjects.env` grants `PUBLISHER_PUB=("iam.>" …)`, a
-  wildcard.
+- **No NATS *publisher permission* change.** `ops/nats/subjects.env` grants
+  `PUBLISHER_PUB=("iam.>" …)`, a wildcard. **Narrowed 2026-09-01:** this does NOT mean no
+  consumer is affected. `CONSUMER_FILTER_SUBJECTS` (`subjects.env:64-71`) lists
+  `iam.role.granted`, which `provision.sh:139-142` turns into the `gateway-cache-invalidator`
+  durable's filter — so the design's decision to emit that variant from org create does reach
+  an in-tree consumer. See the design's Limitations.
 - **No `repo:*` gate change.** `ci/error-registry/check.py`'s `MANIFEST` lists no tenancy
   service file, and no new error code is introduced. `repo:observability-drift` keys on metric
   families (`ops/observability/**`, `paigasus-observability/**`), not event types.
