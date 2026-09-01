@@ -670,6 +670,12 @@ mod tests {
         assert_eq!(entries.len(), 3);
         assert!(entries.iter().all(|e| e.correlation_id == Some(corr)));
         assert_eq!(entries[0].action, Action::CreateOrganization.as_wire());
+        // SMA-606 Task 7 fix-round-2 finding 1: the org create entry's own detail must carry
+        // the event's payload shape too, not go unverified — `org_detail` (organizations.rs)
+        // could otherwise lose a field or carry a typo and every test would still pass.
+        assert_eq!(entries[0].detail["node_prn"], events[0].payload["node_prn"]);
+        assert_eq!(entries[0].detail["slug"], "acme");
+        assert_eq!(entries[0].detail["name"], "Acme");
         // fix-round-1 finding 3: pin the team/grant entries' own action AND source too, so a
         // wrong `Action` variant on either — or a dropped/renamed "source" key — cannot pass.
         assert_eq!(entries[1].action, Action::CreateTeam.as_wire());
