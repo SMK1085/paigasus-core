@@ -178,6 +178,15 @@ mod tests {
             serde_json::json!({"key_id": "k", "prefix": "pgs_live_ab", "scope": "s", "status": "active", "expires_at": "2026-01-01T00:00:00Z"}),
             serde_json::json!({"grant_id": "g", "role_key": "admin", "scope": "prn:pgs:iam:::org/o"}),
             serde_json::json!({"policy_id": "pol", "policy_key": "starter"}),
+            // SMA-606 D9: the tenancy shapes. Hand-listed because this test scans sample
+            // values by substring — it cannot see runtime content, so it proves the SHAPE
+            // carries no banned key, not that an operator's `name` is free of PII (see the
+            // spec's Limitations and the ADR-0016 amendment).
+            serde_json::json!({"node_prn": "prn:pgs:iam:::org/o", "slug": "acme", "name": "Acme", "status": "active", "effective_status": "active"}),
+            serde_json::json!({"node_prn": "prn:pgs:iam:::org/o", "slug": "acme", "name": "Acme"}),
+            serde_json::json!({"node_prn": "prn:pgs:iam:::org/o", "status": "archived", "effective_status": "archived"}),
+            serde_json::json!({"membership_id": "m", "principal_prn": "prn:pgs:iam:::principal/p", "node_prn": "prn:pgs:iam:::org/o"}),
+            serde_json::json!({"grant_id": "g", "role_key": "org_admin", "scope": "prn:pgs:iam:::org/o", "source": "organization_create"}),
         ];
         let banned = ["hash", "secret", "plaintext", "email", "pepper", "token", "password"];
         for payload in payloads {
