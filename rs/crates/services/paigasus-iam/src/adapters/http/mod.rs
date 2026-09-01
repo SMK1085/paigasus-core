@@ -80,11 +80,11 @@ use crate::application::dead_letters::{DeadLetterDeps, DeadLetterService};
 use crate::application::memberships::MembershipService;
 use crate::application::organizations::{OrganizationService, OrganizationServiceDeps};
 use crate::application::policies::{PolicyService, PolicyServiceDeps};
-use crate::application::projects::ProjectService;
+use crate::application::projects::{ProjectService, ProjectServiceDeps};
 use crate::application::roles::{RoleService, RoleServiceDeps};
 use crate::application::service_accounts::{ServiceAccountService, ServiceAccountServiceDeps};
 use crate::application::system_retirement::{SystemRetirementDeps, SystemRetirementService};
-use crate::application::teams::TeamService;
+use crate::application::teams::{TeamService, TeamServiceDeps};
 use crate::config::{ApiKeyCacheBackend, AuthnConfig, AuthzCacheBackend, IamConfig, JwksCacheBackend, RedactedUrl};
 use paigasus_iam_core::{
     ApiKeyRepository, AuditLog, AuditSink, DecisionCache, EntityGenBumper, EntitySliceLoader, OrganizationRepository, Outbox, PolicyGenBumper, PolicyStore, ProjectRepository, RoleGrantStore,
@@ -392,9 +392,9 @@ impl AppState {
         let tenancy_outbox: Arc<dyn Outbox> = Arc::new(PgOutbox::new(cfg.outbox.wake_on_commit));
         let tenancy_gen_bumper: Arc<dyn EntityGenBumper> = Arc::new(GenerationsEntityGenBumper::new(gens.clone()));
         // SMA-606 Task 6: `orgs` is the first tenancy service converted to the deps-struct +
-        // UoW-reference-pattern shape — `teams`/`projects`/`memberships` stay on their
-        // positional constructors until Tasks 7/8 convert them too. `policy_gen_bumper` reuses
-        // `role_gen_bumper`'s pattern (a fresh `GenerationsPolicyGenBumper` over the same
+        // UoW-reference-pattern shape; Task 7 converts `teams`/`projects` the same way below —
+        // `memberships` stays on its positional constructor until Task 8. `policy_gen_bumper`
+        // reuses `role_gen_bumper`'s pattern (a fresh `GenerationsPolicyGenBumper` over the same
         // `gens` handle) since `create` writes a policy-changing owner grant.
         let orgs = OrganizationService::new(OrganizationServiceDeps {
             repo: PgOrganizationRepository::new(db.clone(), gens.clone()),
@@ -406,13 +406,29 @@ impl AppState {
             ids: KernelIdGenerator,
             clock: SystemClock,
         });
-        let teams = TeamService::new(PgTeamRepository::new(db.clone(), gens.clone()), KernelIdGenerator, SystemClock);
-        let projects = ProjectService::new(
-            PgProjectRepository::new(db.clone(), gens.clone()),
-            PgTeamRepository::new(db.clone(), gens.clone()),
-            KernelIdGenerator,
-            SystemClock,
-        );
+        // SMA-606 Task 7: `teams`/`projects` converted to the same deps-struct +
+        // UoW-reference-pattern shape as `orgs` above, sharing the SAME `tenancy_uow`/
+        // `tenancy_outbox`/`audit_log`/`tenancy_gen_bumper` instances — neither writes a
+        // policy-changing row, so neither carries a `policy_gen_bumper`.
+        let teams = TeamService::new(TeamServiceDeps {
+            repo: PgTeamRepository::new(db.clone(), gens.clone()),
+            uow: tenancy_uow.clone(),
+            outbox: tenancy_outbox.clone(),
+            audit: audit_log.clone(),
+            gen_bumper: tenancy_gen_bumper.clone(),
+            ids: KernelIdGenerator,
+            clock: SystemClock,
+        });
+        let projects = ProjectService::new(ProjectServiceDeps {
+            projects: PgProjectRepository::new(db.clone(), gens.clone()),
+            teams: PgTeamRepository::new(db.clone(), gens.clone()),
+            uow: tenancy_uow.clone(),
+            outbox: tenancy_outbox.clone(),
+            audit: audit_log.clone(),
+            gen_bumper: tenancy_gen_bumper.clone(),
+            ids: KernelIdGenerator,
+            clock: SystemClock,
+        });
         let memberships = MembershipService::new(PgMembershipRepository::new(db.clone()), KernelIdGenerator, SystemClock);
 
         // SMA-477: a SECOND `PgPolicyStore` value, deliberately — the reconciler needs
