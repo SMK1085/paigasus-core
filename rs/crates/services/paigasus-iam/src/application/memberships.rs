@@ -561,6 +561,12 @@ mod tests {
         assert_eq!(events[0].event_type, EventType::MembershipAttached);
         assert_eq!(events[0].payload["node_prn"], record.node_prn, "the event's node_prn is the record's, which the repository resolved");
         assert_ne!(events[0].payload["node_prn"], caller_input_prn, "must never equal the caller's raw, differing input");
+        // Fix round 1 (Important): `aggregate_prn` is what a subscriber actually routes/filters
+        // on — a `payload["node_prn"]`-only assertion misses an `aggregate_prn: node.canonical()`
+        // echo bug entirely, since `node` (the service's own locally-parsed value) is exactly
+        // what `StoredPrnDiffersRepo` exists to diverge from `record.node_prn`.
+        assert_eq!(events[0].aggregate_prn, record.node_prn, "aggregate_prn must be the repository-resolved prn too");
+        assert_ne!(events[0].aggregate_prn, caller_input_prn, "aggregate_prn must never equal the caller's raw, differing input");
 
         let entries = audit.0.lock().unwrap().clone();
         assert_eq!(entries.len(), 1);
@@ -613,7 +619,17 @@ mod tests {
         assert!(events.iter().all(|e| e.event_type == EventType::MembershipDetached));
         let corr = events[0].correlation_id.unwrap();
         assert!(events.iter().all(|e| e.correlation_id == Some(corr)), "one operation, one correlation id");
-        assert!(events.iter().any(|e| e.payload["node_prn"] == project_prn), "the project row has its own event, filterable by its PRN");
+        // Fix round 1 (Important): a completeness assertion on `aggregate_prn`, not a
+        // `.any(...)` on `payload["node_prn"]` — the latter is satisfied even if all three
+        // events wrongly named the same node (e.g. the org), which is exactly the per-row
+        // routing failure this fan-out exists to prevent. Collecting the set proves each row
+        // got ITS OWN aggregate_prn, not merely that one of the three happened to be right.
+        let aggregate_prns: std::collections::HashSet<String> = events.iter().map(|e| e.aggregate_prn.clone()).collect();
+        assert_eq!(
+            aggregate_prns,
+            std::collections::HashSet::from([org_prn.clone(), team_prn.clone(), project_prn.clone()]),
+            "each event's aggregate_prn must name its OWN node — one org row event, one team row event, one project row event"
+        );
 
         let entries = audit.0.lock().unwrap().clone();
         assert_eq!(entries.len(), 3);
