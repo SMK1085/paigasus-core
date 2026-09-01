@@ -143,12 +143,20 @@ where
         let project = Project::new(id, team_view.node.id.clone(), slug, name, &stamp)?;
 
         let corr = self.ids.new_correlation_id();
+        // See the `effective_status` rationale in this method's doc comment above.
         let view = NodeView {
             node: project.clone(),
             effective_status: project.status,
         };
         let ev = self.project_event(EventType::ProjectCreated, &view, &stamp, corr);
-        let entry = self.project_entry(Action::CreateProject, &view, &stamp, corr, serde_json::json!({}));
+        // SMA-606 Task 7 fix-round-1 finding 1: the detail must carry the event's payload shape, not
+        // an empty object — slug and name are the entire content of a create.
+        let detail = serde_json::json!({
+            "node_prn": view.node.id.prn().canonical(),
+            "slug": view.node.slug.as_str(),
+            "name": view.node.name,
+        });
+        let entry = self.project_entry(Action::CreateProject, &view, &stamp, corr, detail);
 
         let tx = self.uow.begin().await?;
         self.projects.create_in(&*tx, &project, &stamp).await?;
@@ -268,12 +276,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::application::fakes::{CountingGenBumper, FakeAuditLog, FakeOutbox, FakeUnitOfWork, FixedClock, InMemoryProjects, InMemoryTeams, SeqIds, TenancyStore, test_stamp};
-    use async_trait::async_trait;
+    use crate::application::fakes::{BumpSnapshotBumper, CountingGenBumper, FakeAuditLog, FakeOutbox, FakeUnitOfWork, FixedClock, InMemoryProjects, InMemoryTeams, SeqIds, TenancyStore, test_stamp};
     use chrono::{Duration, TimeZone, Utc};
     use paigasus_iam_core::{Organization, OrganizationId, Team, TeamId};
-    use std::sync::Mutex;
-    use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// Builds a `ProjectService` over `store` with fresh, unobserved fakes for every dependency
     /// this SMA-606 conversion added — mirrors `teams.rs`'s own `new_service_with_clock`.
@@ -323,42 +328,6 @@ mod tests {
             clock: FixedClock::default(),
         });
         (svc, outbox, audit, gen_bumper, uow, team)
-    }
-
-    /// An `EntityGenBumper` that snapshots a SHARED `FakeUnitOfWork`'s own commit counter the
-    /// instant `bump()` runs (SMA-606 D7) — mirrors `organizations.rs`'s/`teams.rs`'s own
-    /// `BumpSnapshotBumper` verbatim.
-    #[derive(Clone)]
-    struct BumpSnapshotBumper {
-        uow: FakeUnitOfWork,
-        snapshot_at_bump: Arc<Mutex<Option<usize>>>,
-        calls: Arc<AtomicUsize>,
-    }
-
-    impl BumpSnapshotBumper {
-        fn new(uow: FakeUnitOfWork) -> Self {
-            BumpSnapshotBumper {
-                uow,
-                snapshot_at_bump: Arc::new(Mutex::new(None)),
-                calls: Arc::new(AtomicUsize::new(0)),
-            }
-        }
-
-        fn snapshot_at_bump(&self) -> Option<usize> {
-            *self.snapshot_at_bump.lock().unwrap()
-        }
-
-        fn calls(&self) -> usize {
-            self.calls.load(Ordering::SeqCst)
-        }
-    }
-
-    #[async_trait]
-    impl EntityGenBumper for BumpSnapshotBumper {
-        async fn bump(&self) {
-            *self.snapshot_at_bump.lock().unwrap() = Some(self.uow.commits());
-            self.calls.fetch_add(1, Ordering::SeqCst);
-        }
     }
 
     /// A deterministic `PrincipalId` for service-call `actor` arguments — mirrors
@@ -660,6 +629,24 @@ mod tests {
 
         let view = svc.create(team, "web", "Web", &actor).await.unwrap();
         assert_eq!(uow.commits(), 1, "create must commit its one transaction");
+
+        // SMA-606 Task 7 fix-round-1 finding 1: create's own detail must carry the event's
+        // payload shape too, not an empty object. Task 7 finding 3: `effective_status` is the
+        // one value in `create`'s event that is SYNTHESISED rather than read back from the
+        // repository (see the doc comment on `create` above), so it is the only one that can
+        // be wrong without a repository bug — assert it here, before the buffers are cleared
+        // below.
+        let create_events = outbox.0.lock().unwrap().clone();
+        assert_eq!(create_events.len(), 1);
+        assert_eq!(create_events[0].event_type, EventType::ProjectCreated);
+        assert_eq!(create_events[0].payload["status"], "active");
+        assert_eq!(create_events[0].payload["effective_status"], "active");
+        let create_entries = audit.0.lock().unwrap().clone();
+        assert_eq!(create_entries.len(), 1);
+        assert_eq!(create_entries[0].action, Action::CreateProject.as_wire());
+        assert_eq!(create_entries[0].detail["slug"], "web");
+        assert_eq!(create_entries[0].detail["name"], "Web");
+
         outbox.0.lock().unwrap().clear();
         audit.0.lock().unwrap().clear();
 

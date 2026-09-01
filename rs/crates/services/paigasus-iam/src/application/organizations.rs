@@ -172,7 +172,16 @@ where
             effective_status: organization.status,
         };
         let org_event = self.org_event(EventType::OrganizationCreated, &org_view, &stamp, corr);
-        let org_entry = self.org_entry(Action::CreateOrganization, &org_view, &stamp, corr, serde_json::json!({}));
+        // SMA-606 Task 7 fix-round-1 finding 1: the detail must carry the event's payload shape, not
+        // an empty object — slug and name are the entire content of a create. (Task 6's own
+        // code; folded into Task 7's fix round per coordinator ruling, so Task 8 copies the
+        // correct shape.)
+        let org_detail = serde_json::json!({
+            "node_prn": org_view.node.id.prn().canonical(),
+            "slug": org_view.node.slug.as_str(),
+            "name": org_view.node.name,
+        });
+        let org_entry = self.org_entry(Action::CreateOrganization, &org_view, &stamp, corr, org_detail);
 
         let team_event = DomainEvent {
             id: self.ids.new_event_id(),
@@ -365,11 +374,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::application::fakes::{CountingGenBumper, FakeAuditLog, FakeOutbox, FakePolicyGenBumper, FakeUnitOfWork, FixedClock, InMemoryOrgs, SeqIds};
-    use async_trait::async_trait;
+    use crate::application::fakes::{BumpSnapshotBumper, CountingGenBumper, FakeAuditLog, FakeOutbox, FakePolicyGenBumper, FakeUnitOfWork, FixedClock, InMemoryOrgs, SeqIds};
     use chrono::{Duration, TimeZone, Utc};
-    use std::sync::Mutex;
-    use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// Bundles an `OrganizationService` together with every fake it was built over (SMA-606,
     /// mirrors `api_keys.rs`'s `ServiceWithFakes`/`new_service_with_fakes`, `:393-434`), so a
@@ -404,47 +410,6 @@ mod tests {
 
     fn new_service() -> OrganizationService<InMemoryOrgs, SeqIds, FixedClock> {
         service_with_fakes().0
-    }
-
-    /// An `EntityGenBumper` that snapshots a SHARED `FakeUnitOfWork`'s own commit counter the
-    /// instant `bump()` runs (SMA-606 D7, fix-round-1 finding 1 — mirrors
-    /// `system_retirement.rs`'s `BumpSnapshotBumper`). `CountingGenBumper` alone cannot
-    /// distinguish "the bump ran after the commit" from "the bump ran instead of/before the
-    /// commit": moving `self.gen_bumper.bump().await` above `tx.commit().await?` leaves its call
-    /// count identical either way. This bumper instead reads `uow.commits()` — which only
-    /// advances inside `Transaction::commit` — the moment `bump()` fires: if `bump()` ran BEFORE
-    /// the commit, the snapshot it captures is the PRE-commit count, not the post-commit one.
-    #[derive(Clone)]
-    struct BumpSnapshotBumper {
-        uow: FakeUnitOfWork,
-        snapshot_at_bump: Arc<Mutex<Option<usize>>>,
-        calls: Arc<AtomicUsize>,
-    }
-
-    impl BumpSnapshotBumper {
-        fn new(uow: FakeUnitOfWork) -> Self {
-            BumpSnapshotBumper {
-                uow,
-                snapshot_at_bump: Arc::new(Mutex::new(None)),
-                calls: Arc::new(AtomicUsize::new(0)),
-            }
-        }
-
-        fn snapshot_at_bump(&self) -> Option<usize> {
-            *self.snapshot_at_bump.lock().unwrap()
-        }
-
-        fn calls(&self) -> usize {
-            self.calls.load(Ordering::SeqCst)
-        }
-    }
-
-    #[async_trait]
-    impl EntityGenBumper for BumpSnapshotBumper {
-        async fn bump(&self) {
-            *self.snapshot_at_bump.lock().unwrap() = Some(self.uow.commits());
-            self.calls.fetch_add(1, Ordering::SeqCst);
-        }
     }
 
     /// A deterministic `PrincipalId` for `create`'s `actor` argument — the tests below don't

@@ -1282,6 +1282,52 @@ impl EntityGenBumper for CountingGenBumper {
     }
 }
 
+/// An `EntityGenBumper` that snapshots a SHARED `FakeUnitOfWork`'s own commit counter the
+/// instant `bump()` runs (SMA-606 D7; hoisted here from three
+/// byte-identical per-module copies in `organizations.rs`/`teams.rs`/`projects.rs` by
+/// Task 7 fix-round-1 finding 2 — this module is already `#[cfg(test)]`-gated at the `pub mod fakes`
+/// declaration in `application/mod.rs`, so hoisting changes no visibility or shipping
+/// posture). `CountingGenBumper` alone cannot distinguish "the bump ran after the commit" from
+/// "the bump ran instead of/before the commit": moving `self.gen_bumper.bump().await` above
+/// `tx.commit().await?` leaves its call count identical either way. This bumper instead reads
+/// `uow.commits()` — which only advances inside `Transaction::commit` — the moment `bump()`
+/// fires: if `bump()` ran BEFORE the commit, the snapshot it captures is the PRE-commit count,
+/// not the post-commit one. Not to be confused with `system_retirement.rs`'s own
+/// `BumpSnapshotBumper`, which implements a different trait (`PolicyGenBumper`) over a
+/// different source (a bare `Arc<AtomicUsize>`, not a `FakeUnitOfWork`) — that one stays put.
+#[derive(Clone)]
+pub struct BumpSnapshotBumper {
+    uow: FakeUnitOfWork,
+    snapshot_at_bump: Arc<Mutex<Option<usize>>>,
+    calls: Arc<AtomicUsize>,
+}
+
+impl BumpSnapshotBumper {
+    pub fn new(uow: FakeUnitOfWork) -> Self {
+        BumpSnapshotBumper {
+            uow,
+            snapshot_at_bump: Arc::new(Mutex::new(None)),
+            calls: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    pub fn snapshot_at_bump(&self) -> Option<usize> {
+        *self.snapshot_at_bump.lock().unwrap()
+    }
+
+    pub fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl EntityGenBumper for BumpSnapshotBumper {
+    async fn bump(&self) {
+        *self.snapshot_at_bump.lock().unwrap() = Some(self.uow.commits());
+        self.calls.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
