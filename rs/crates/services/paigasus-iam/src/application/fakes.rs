@@ -11,10 +11,10 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use paigasus_iam_core::{
     AccessRequest, Action, ApiKey, ApiKeyId, ApiKeyRepository, ApiKeyStatus, AuditEntry, AuditFilter, AuditLog, Authorizer, AuthzError, BulkReplayRequest, Clock, ConflictKind, DeadLetterEntry,
-    DeadLetterFilter, DeadLetters, Decision, DomainEvent, Effect, IdGenerator, KeyEntropy, Membership, MembershipRecord, MembershipRepository, Mutated, NodeStatus, NodeView, Organization,
-    OrganizationId, OrganizationRepository, Outbox, PolicyDocument, PolicyGenBumper, PolicyStore, PreconditionKind, Principal, PrincipalId, PrincipalStatus, Project, ProjectId, ProjectRepository,
-    PutOutcome, RepositoryError, RoleGrant, RoleGrantStore, Savepoint, SecretHasher, ServiceAccount, ServiceAccountRecord, ServiceAccountRepository, Slug, Stamp, Team, TeamId, TeamRepository,
-    TenancyNodeRef, Transaction, UnitOfWork,
+    DeadLetterFilter, DeadLetters, Decision, DomainEvent, Effect, EntityGenBumper, IdGenerator, KeyEntropy, Membership, MembershipRecord, MembershipRepository, Mutated, NodeStatus, NodeView,
+    Organization, OrganizationId, OrganizationRepository, Outbox, PolicyDocument, PolicyGenBumper, PolicyStore, PreconditionKind, Principal, PrincipalId, PrincipalStatus, Project, ProjectId,
+    ProjectRepository, PutOutcome, RepositoryError, RoleGrant, RoleGrantStore, Savepoint, SecretHasher, ServiceAccount, ServiceAccountRecord, ServiceAccountRepository, Slug, Stamp, Team, TeamId,
+    TeamRepository, TenancyNodeRef, Transaction, UnitOfWork,
 };
 use paigasus_kernel::Prn;
 use std::any::Any;
@@ -1258,6 +1258,25 @@ impl FakePolicyGenBumper {
 
 #[async_trait]
 impl PolicyGenBumper for FakePolicyGenBumper {
+    async fn bump(&self) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+/// Counts `bump()` calls so a test can assert the post-commit `entity_gen` bump ran, and ran
+/// after the commit (SMA-606 Testing case 7) — the `EntityGenBumper` twin of
+/// [`FakePolicyGenBumper`] above.
+#[derive(Clone, Default)]
+pub struct CountingGenBumper(pub Arc<AtomicUsize>);
+
+impl CountingGenBumper {
+    pub fn bumps(&self) -> usize {
+        self.0.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl EntityGenBumper for CountingGenBumper {
     async fn bump(&self) {
         self.0.fetch_add(1, Ordering::SeqCst);
     }
