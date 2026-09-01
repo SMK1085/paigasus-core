@@ -60,6 +60,26 @@ pub struct NodeView<T> {
     pub effective_status: NodeStatus,
 }
 
+/// A mutation's result plus whether it actually changed anything (SMA-606 D1).
+///
+/// `changed == false` is a no-op: SMA-440 D5 established that a write changing no stored
+/// value must not restamp, and SMA-606 extends that to "and must not emit" — the service
+/// skips the outbox and audit writes, exactly as `ApiKeyService::revoke` gates on
+/// `revoke_in`'s bool. The post-commit generation bump still runs, because cache
+/// invalidation is a separate concern from audit correctness (SMA-440 D5, preserved).
+///
+/// A named struct rather than a `(T, bool)` tuple: `.changed` states intent at the ten
+/// implementations that construct it and the two services that read it, where `.1` would
+/// not. The fields are public because ten implementations set them by hand — an accessor
+/// would not make a wrong `changed` any less wrong. The control is behavioural, not
+/// structural (spec Testing case 2).
+#[must_use]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Mutated<T> {
+    pub value: T,
+    pub changed: bool,
+}
+
 /// A persisted membership row (D5: plain UUIDv7 id, no PRN).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MembershipRecord {
@@ -366,6 +386,25 @@ pub trait EventPublisher: Send + Sync {
 /// `PgRoleGrantStore::bump_policy_gen_best_effort` this port's adapter impl is lifted from).
 #[async_trait]
 pub trait PolicyGenBumper: Send + Sync {
+    async fn bump(&self);
+}
+
+/// Post-commit `entity_gen` bump port (SMA-606 D7), the entity-cache twin of
+/// [`PolicyGenBumper`].
+///
+/// It exists because there was no way for a service to bump `entity_gen` at all:
+/// `bump_entity_gen` is a *private inherent* method on each Pg tenancy repository, and
+/// ADR-0005 keeps `crate::adapters::authz::Generations` out of the application layer. Once
+/// the service owns the commit (D1), the bump has to move with it — left inside a repository
+/// that no longer commits, it would invalidate the Cedar caches against a transaction that
+/// may still roll back.
+///
+/// Implementations swallow and log their own errors and return nothing, for the same reason
+/// [`PolicyGenBumper`] does: the mutation has already committed by the time `bump` runs, so a
+/// failed invalidation must never surface as a use-case error — the caches self-heal on their
+/// next TTL expiry instead.
+#[async_trait]
+pub trait EntityGenBumper: Send + Sync {
     async fn bump(&self);
 }
 
