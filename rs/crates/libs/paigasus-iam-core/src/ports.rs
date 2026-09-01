@@ -123,13 +123,26 @@ pub trait OrganizationRepository: Send + Sync {
     /// usual `entity_gen` bump every tenancy mutation gets).
     /// `stamp` also stamps rows this method writes that are not entities — the owner grant.
     async fn create(&self, org: &Organization, default_team: &Team, owner_grant: &RoleGrant, stamp: &Stamp) -> Result<(), RepositoryError>;
+    /// Txn-scoped twin of [`OrganizationRepository::create`] (SMA-606 D1): writes the org, its
+    /// default team and the owner grant on the caller's own `tx`, so the service can enqueue
+    /// the outbox rows and audit entries in the same transaction. Does **not** bump any
+    /// generation — that moves to the service, post-commit, through
+    /// [`EntityGenBumper`]/[`PolicyGenBumper`] (D7).
+    async fn create_in(&self, tx: &dyn Transaction, org: &Organization, default_team: &Team, owner_grant: &RoleGrant, stamp: &Stamp) -> Result<(), RepositoryError>;
     async fn find(&self, id: Uuid) -> Result<Option<NodeView<Organization>>, RepositoryError>;
     /// ORDER BY created_at, id (rule 9).
     async fn list(&self, limit: u64, offset: u64) -> Result<Vec<NodeView<Organization>>, RepositoryError>;
     /// In-txn guard: NotFound if missing; Precondition(NodeArchived) if own status archived.
     async fn rename(&self, id: Uuid, new_slug: Option<&Slug>, new_name: Option<&str>, stamp: &Stamp) -> Result<NodeView<Organization>, RepositoryError>;
+    /// Txn-scoped twin of [`OrganizationRepository::rename`]. `Mutated::changed` is `false`
+    /// when every supplied field already equalled the stored one — the SMA-440 D5 no-op — and
+    /// the caller then writes no event and no audit entry (SMA-606 D2).
+    async fn rename_in(&self, tx: &dyn Transaction, id: Uuid, new_slug: Option<&Slug>, new_name: Option<&str>, stamp: &Stamp) -> Result<Mutated<NodeView<Organization>>, RepositoryError>;
     /// Sets own status (D10). Idempotent: no-op (updated_at untouched) when already `status`.
     async fn set_status(&self, id: Uuid, status: NodeStatus, stamp: &Stamp) -> Result<NodeView<Organization>, RepositoryError>;
+    /// Txn-scoped twin of [`OrganizationRepository::set_status`]. `Mutated::changed` is
+    /// `false` for the idempotent case (already at `status`).
+    async fn set_status_in(&self, tx: &dyn Transaction, id: Uuid, status: NodeStatus, stamp: &Stamp) -> Result<Mutated<NodeView<Organization>>, RepositoryError>;
 }
 
 /// Persistence port for teams.
@@ -138,11 +151,23 @@ pub trait TeamRepository: Send + Sync {
     /// In-txn guards (D8): org row locked FOR SHARE; NotFound if org missing;
     /// Precondition(ParentArchived) if org effectively archived.
     async fn create(&self, team: &Team, stamp: &Stamp) -> Result<(), RepositoryError>;
+    /// Txn-scoped twin of [`TeamRepository::create`] (SMA-606 D1): writes the team on the
+    /// caller's own `tx`, so the service can enqueue the outbox rows and audit entries in the
+    /// same transaction. Does **not** bump any generation — that moves to the service,
+    /// post-commit, through [`EntityGenBumper`] (D7).
+    async fn create_in(&self, tx: &dyn Transaction, team: &Team, stamp: &Stamp) -> Result<(), RepositoryError>;
     async fn find(&self, id: Uuid) -> Result<Option<NodeView<Team>>, RepositoryError>;
     async fn list_by_org(&self, org: Uuid, limit: u64, offset: u64) -> Result<Vec<NodeView<Team>>, RepositoryError>;
     /// Guard: Precondition(NodeArchived) if team is EFFECTIVELY archived (own or org).
     async fn rename(&self, id: Uuid, new_slug: Option<&Slug>, new_name: Option<&str>, stamp: &Stamp) -> Result<NodeView<Team>, RepositoryError>;
+    /// Txn-scoped twin of [`TeamRepository::rename`]. `Mutated::changed` is `false`
+    /// when every supplied field already equalled the stored one — the SMA-440 D5 no-op — and
+    /// the caller then writes no event and no audit entry (SMA-606 D2).
+    async fn rename_in(&self, tx: &dyn Transaction, id: Uuid, new_slug: Option<&Slug>, new_name: Option<&str>, stamp: &Stamp) -> Result<Mutated<NodeView<Team>>, RepositoryError>;
     async fn set_status(&self, id: Uuid, status: NodeStatus, stamp: &Stamp) -> Result<NodeView<Team>, RepositoryError>;
+    /// Txn-scoped twin of [`TeamRepository::set_status`]. `Mutated::changed` is
+    /// `false` for the idempotent case (already at `status`).
+    async fn set_status_in(&self, tx: &dyn Transaction, id: Uuid, status: NodeStatus, stamp: &Stamp) -> Result<Mutated<NodeView<Team>>, RepositoryError>;
 }
 
 /// Persistence port for projects.
@@ -151,10 +176,22 @@ pub trait ProjectRepository: Send + Sync {
     /// In-txn guards: team+org locked FOR SHARE; NotFound if team missing; Precondition(ParentArchived)
     /// if team effectively archived; Backend if project.org != team.org (belt-and-braces, composite FK).
     async fn create(&self, project: &Project, stamp: &Stamp) -> Result<(), RepositoryError>;
+    /// Txn-scoped twin of [`ProjectRepository::create`] (SMA-606 D1): writes the project on
+    /// the caller's own `tx`, so the service can enqueue the outbox rows and audit entries in
+    /// the same transaction. Does **not** bump any generation — that moves to the service,
+    /// post-commit, through [`EntityGenBumper`] (D7).
+    async fn create_in(&self, tx: &dyn Transaction, project: &Project, stamp: &Stamp) -> Result<(), RepositoryError>;
     async fn find(&self, id: Uuid) -> Result<Option<NodeView<Project>>, RepositoryError>;
     async fn list_by_team(&self, team: Uuid, limit: u64, offset: u64) -> Result<Vec<NodeView<Project>>, RepositoryError>;
     async fn rename(&self, id: Uuid, new_slug: Option<&Slug>, new_name: Option<&str>, stamp: &Stamp) -> Result<NodeView<Project>, RepositoryError>;
+    /// Txn-scoped twin of [`ProjectRepository::rename`]. `Mutated::changed` is `false`
+    /// when every supplied field already equalled the stored one — the SMA-440 D5 no-op — and
+    /// the caller then writes no event and no audit entry (SMA-606 D2).
+    async fn rename_in(&self, tx: &dyn Transaction, id: Uuid, new_slug: Option<&Slug>, new_name: Option<&str>, stamp: &Stamp) -> Result<Mutated<NodeView<Project>>, RepositoryError>;
     async fn set_status(&self, id: Uuid, status: NodeStatus, stamp: &Stamp) -> Result<NodeView<Project>, RepositoryError>;
+    /// Txn-scoped twin of [`ProjectRepository::set_status`]. `Mutated::changed` is
+    /// `false` for the idempotent case (already at `status`).
+    async fn set_status_in(&self, tx: &dyn Transaction, id: Uuid, status: NodeStatus, stamp: &Stamp) -> Result<Mutated<NodeView<Project>>, RepositoryError>;
 }
 
 /// Persistence port for memberships.

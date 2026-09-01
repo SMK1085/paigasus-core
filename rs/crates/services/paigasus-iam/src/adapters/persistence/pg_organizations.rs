@@ -14,10 +14,12 @@
 
 use super::entities::{organization, role_grant, team};
 use super::map_err;
+use super::uow::{SeaOrmTransaction, recover_txn};
 use crate::adapters::authz::Generations;
 use async_trait::async_trait;
 use paigasus_iam_core::{
-    GrantScope, NodeStatus, NodeView, Organization, OrganizationId, OrganizationRepository, PreconditionKind, PrincipalId, RepositoryError, RoleGrant, Slug, Stamp, Team, TenancyNodeRef,
+    GrantScope, Mutated, NodeStatus, NodeView, Organization, OrganizationId, OrganizationRepository, PreconditionKind, PrincipalId, RepositoryError, RoleGrant, Slug, Stamp, Team, TenancyNodeRef,
+    Transaction,
 };
 use paigasus_kernel::Prn;
 use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait, IntoActiveModel, QueryOrder, QuerySelect, Set, TransactionTrait};
@@ -165,23 +167,35 @@ fn org_view(org: Organization) -> NodeView<Organization> {
 #[async_trait]
 impl OrganizationRepository for PgOrganizationRepository {
     async fn create(&self, org: &Organization, default_team: &Team, owner_grant: &RoleGrant, stamp: &Stamp) -> Result<(), RepositoryError> {
+        // SMA-606 D1: a thin one-shot-`UnitOfWork` wrapper over `create_in`, mirroring
+        // `PgApiKeyRepository::issue`. There is exactly ONE body — this method owns the
+        // transaction and the post-commit bumps, nothing else. Do not inline any of
+        // `create_in`'s logic here: the wrapper is exercised only by test fixtures and
+        // `create_in` only by the service, so a divergence would be invisible on both paths.
+        let txn = self.db.begin().await.map_err(map_err)?;
+        let tx: Box<dyn Transaction> = Box::new(SeaOrmTransaction { txn });
+        self.create_in(&*tx, org, default_team, owner_grant, stamp).await?;
+        tx.commit().await?;
+        // `entity_gen` for the tenancy write (org + default team), `policy_gen` for the
+        // owner grant (a policy change) — both counters move, spec §7/D11.
+        self.bump_entity_gen().await;
+        self.bump_policy_gen().await;
+        Ok(())
+    }
+
+    async fn create_in(&self, tx: &dyn Transaction, org: &Organization, default_team: &Team, owner_grant: &RoleGrant, stamp: &Stamp) -> Result<(), RepositoryError> {
         debug_assert_eq!(org.created_at, stamp.at, "the service must pass the same Stamp it built the entity from");
         // Org + its auto-provisioned default team + the creating principal's owner grant
         // must commit-or-rollback together (ADR-0014, spec D8): a lone org row without its
         // default team would violate the tenancy invariant that every org has at least one
         // team, and an org without its owner grant would leave nobody authorized to manage
         // what they just created.
-        let txn = self.db.begin().await.map_err(map_err)?;
+        let txn = recover_txn(tx)?;
 
-        org_to_model(org).insert(&txn).await.map_err(map_err)?;
-        team_to_model(default_team).insert(&txn).await.map_err(map_err)?;
-        owner_grant_to_model(owner_grant).insert(&txn).await.map_err(map_err)?;
+        org_to_model(org).insert(txn).await.map_err(map_err)?;
+        team_to_model(default_team).insert(txn).await.map_err(map_err)?;
+        owner_grant_to_model(owner_grant).insert(txn).await.map_err(map_err)?;
 
-        txn.commit().await.map_err(map_err)?;
-        // `entity_gen` for the tenancy write (org + default team), `policy_gen` for the
-        // owner grant (a policy change) — both counters move, spec §7/D11.
-        self.bump_entity_gen().await;
-        self.bump_policy_gen().await;
         Ok(())
     }
 
@@ -207,8 +221,17 @@ impl OrganizationRepository for PgOrganizationRepository {
 
     async fn rename(&self, id: Uuid, new_slug: Option<&Slug>, new_name: Option<&str>, stamp: &Stamp) -> Result<NodeView<Organization>, RepositoryError> {
         let txn = self.db.begin().await.map_err(map_err)?;
+        let tx: Box<dyn Transaction> = Box::new(SeaOrmTransaction { txn });
+        let out = self.rename_in(&*tx, id, new_slug, new_name, stamp).await?;
+        tx.commit().await?;
+        self.bump_entity_gen().await;
+        Ok(out.value)
+    }
 
-        let Some(model) = organization::Entity::find_by_id(id).lock_exclusive().one(&txn).await.map_err(map_err)? else {
+    async fn rename_in(&self, tx: &dyn Transaction, id: Uuid, new_slug: Option<&Slug>, new_name: Option<&str>, stamp: &Stamp) -> Result<Mutated<NodeView<Organization>>, RepositoryError> {
+        let txn = recover_txn(tx)?;
+
+        let Some(model) = organization::Entity::find_by_id(id).lock_exclusive().one(txn).await.map_err(map_err)? else {
             return Err(RepositoryError::NotFound);
         };
         if model.status == NodeStatus::Archived.as_str() {
@@ -217,13 +240,15 @@ impl OrganizationRepository for PgOrganizationRepository {
 
         // SMA-440 D5: a write that changes nothing stamps nothing. Placed after the archived
         // guard (so a no-op on an archived node still errors) and before the slug-conflict
-        // check (a node cannot conflict with the slug it already holds).
+        // check (a node cannot conflict with the slug it already holds). SMA-606 D2 extends
+        // it: `changed: false` also means the caller emits no event and no audit entry.
         let slug_same = new_slug.is_none_or(|s| model.slug == s.as_str());
         let name_same = new_name.is_none_or(|n| model.name == n);
         if slug_same && name_same {
-            txn.commit().await.map_err(map_err)?;
-            self.bump_entity_gen().await;
-            return Ok(org_view(model_to_org(model)?));
+            return Ok(Mutated {
+                value: org_view(model_to_org(model)?),
+                changed: false,
+            });
         }
 
         let mut active = model.into_active_model();
@@ -235,33 +260,46 @@ impl OrganizationRepository for PgOrganizationRepository {
         }
         active.updated_at = Set(stamp.at);
         active.modified_by = Set(Some(stamp.by.canonical()));
-        let updated = active.update(&txn).await.map_err(map_err)?;
+        let updated = active.update(txn).await.map_err(map_err)?;
 
-        txn.commit().await.map_err(map_err)?;
-        self.bump_entity_gen().await;
-        Ok(org_view(model_to_org(updated)?))
+        Ok(Mutated {
+            value: org_view(model_to_org(updated)?),
+            changed: true,
+        })
     }
 
     async fn set_status(&self, id: Uuid, status: NodeStatus, stamp: &Stamp) -> Result<NodeView<Organization>, RepositoryError> {
         let txn = self.db.begin().await.map_err(map_err)?;
+        let tx: Box<dyn Transaction> = Box::new(SeaOrmTransaction { txn });
+        let out = self.set_status_in(&*tx, id, status, stamp).await?;
+        tx.commit().await?;
+        self.bump_entity_gen().await;
+        Ok(out.value)
+    }
 
-        let Some(model) = organization::Entity::find_by_id(id).lock_exclusive().one(&txn).await.map_err(map_err)? else {
+    async fn set_status_in(&self, tx: &dyn Transaction, id: Uuid, status: NodeStatus, stamp: &Stamp) -> Result<Mutated<NodeView<Organization>>, RepositoryError> {
+        let txn = recover_txn(tx)?;
+
+        let Some(model) = organization::Entity::find_by_id(id).lock_exclusive().one(txn).await.map_err(map_err)? else {
             return Err(RepositoryError::NotFound);
         };
 
-        let final_model = if model.status == status.as_str() {
-            // Idempotent: already at the target status — no-op, `updated_at` untouched.
-            model
-        } else {
-            let mut active = model.into_active_model();
-            active.status = Set(status.as_str().to_owned());
-            active.updated_at = Set(stamp.at);
-            active.modified_by = Set(Some(stamp.by.canonical()));
-            active.update(&txn).await.map_err(map_err)?
-        };
+        if model.status == status.as_str() {
+            return Ok(Mutated {
+                value: org_view(model_to_org(model)?),
+                changed: false,
+            });
+        }
 
-        txn.commit().await.map_err(map_err)?;
-        self.bump_entity_gen().await;
-        Ok(org_view(model_to_org(final_model)?))
+        let mut active = model.into_active_model();
+        active.status = Set(status.as_str().to_string());
+        active.updated_at = Set(stamp.at);
+        active.modified_by = Set(Some(stamp.by.canonical()));
+        let updated = active.update(txn).await.map_err(map_err)?;
+
+        Ok(Mutated {
+            value: org_view(model_to_org(updated)?),
+            changed: true,
+        })
     }
 }

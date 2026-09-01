@@ -11,10 +11,10 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use paigasus_iam_core::{
     AccessRequest, Action, ApiKey, ApiKeyId, ApiKeyRepository, ApiKeyStatus, AuditEntry, AuditFilter, AuditLog, Authorizer, AuthzError, BulkReplayRequest, Clock, ConflictKind, DeadLetterEntry,
-    DeadLetterFilter, DeadLetters, Decision, DomainEvent, Effect, IdGenerator, KeyEntropy, Membership, MembershipRecord, MembershipRepository, NodeStatus, NodeView, Organization, OrganizationId,
-    OrganizationRepository, Outbox, PolicyDocument, PolicyGenBumper, PolicyStore, PreconditionKind, Principal, PrincipalId, PrincipalStatus, Project, ProjectId, ProjectRepository, PutOutcome,
-    RepositoryError, RoleGrant, RoleGrantStore, Savepoint, SecretHasher, ServiceAccount, ServiceAccountRecord, ServiceAccountRepository, Slug, Stamp, Team, TeamId, TeamRepository, TenancyNodeRef,
-    Transaction, UnitOfWork,
+    DeadLetterFilter, DeadLetters, Decision, DomainEvent, Effect, IdGenerator, KeyEntropy, Membership, MembershipRecord, MembershipRepository, Mutated, NodeStatus, NodeView, Organization,
+    OrganizationId, OrganizationRepository, Outbox, PolicyDocument, PolicyGenBumper, PolicyStore, PreconditionKind, Principal, PrincipalId, PrincipalStatus, Project, ProjectId, ProjectRepository,
+    PutOutcome, RepositoryError, RoleGrant, RoleGrantStore, Savepoint, SecretHasher, ServiceAccount, ServiceAccountRecord, ServiceAccountRepository, Slug, Stamp, Team, TeamId, TeamRepository,
+    TenancyNodeRef, Transaction, UnitOfWork,
 };
 use paigasus_kernel::Prn;
 use std::any::Any;
@@ -65,7 +65,12 @@ fn org_view(org: &Organization) -> NodeView<Organization> {
 
 #[async_trait]
 impl OrganizationRepository for InMemoryOrgs {
-    async fn create(&self, org: &Organization, default_team: &Team, owner_grant: &RoleGrant, _stamp: &Stamp) -> Result<(), RepositoryError> {
+    async fn create(&self, org: &Organization, default_team: &Team, owner_grant: &RoleGrant, stamp: &Stamp) -> Result<(), RepositoryError> {
+        let tx: Box<dyn Transaction> = Box::new(CountingTransaction::detached());
+        self.create_in(&*tx, org, default_team, owner_grant, stamp).await
+    }
+
+    async fn create_in(&self, _tx: &dyn Transaction, org: &Organization, default_team: &Team, owner_grant: &RoleGrant, _stamp: &Stamp) -> Result<(), RepositoryError> {
         let mut orgs = self.0.orgs.lock().unwrap();
         if orgs.values().any(|existing| existing.slug == org.slug) {
             return Err(RepositoryError::Conflict(ConflictKind::SlugTaken));
@@ -89,6 +94,12 @@ impl OrganizationRepository for InMemoryOrgs {
     }
 
     async fn rename(&self, id: Uuid, new_slug: Option<&Slug>, new_name: Option<&str>, stamp: &Stamp) -> Result<NodeView<Organization>, RepositoryError> {
+        let tx: Box<dyn Transaction> = Box::new(CountingTransaction::detached());
+        let out = self.rename_in(&*tx, id, new_slug, new_name, stamp).await?;
+        Ok(out.value)
+    }
+
+    async fn rename_in(&self, _tx: &dyn Transaction, id: Uuid, new_slug: Option<&Slug>, new_name: Option<&str>, stamp: &Stamp) -> Result<Mutated<NodeView<Organization>>, RepositoryError> {
         let mut orgs = self.0.orgs.lock().unwrap();
 
         let current_status = orgs.get(&id).map(|o| o.status).ok_or(RepositoryError::NotFound)?;
@@ -113,7 +124,7 @@ impl OrganizationRepository for InMemoryOrgs {
         let slug_same = new_slug.is_none_or(|s| &org.slug == s);
         let name_same = new_name.is_none_or(|n| org.name == n);
         if slug_same && name_same {
-            return Ok(org_view(org));
+            return Ok(Mutated { value: org_view(org), changed: false });
         }
 
         if let Some(slug) = new_slug {
@@ -124,18 +135,25 @@ impl OrganizationRepository for InMemoryOrgs {
         }
         org.updated_at = stamp.at;
         org.modified_by = Some(stamp.by.clone());
-        Ok(org_view(org))
+        Ok(Mutated { value: org_view(org), changed: true })
     }
 
     async fn set_status(&self, id: Uuid, status: NodeStatus, stamp: &Stamp) -> Result<NodeView<Organization>, RepositoryError> {
+        let tx: Box<dyn Transaction> = Box::new(CountingTransaction::detached());
+        let out = self.set_status_in(&*tx, id, status, stamp).await?;
+        Ok(out.value)
+    }
+
+    async fn set_status_in(&self, _tx: &dyn Transaction, id: Uuid, status: NodeStatus, stamp: &Stamp) -> Result<Mutated<NodeView<Organization>>, RepositoryError> {
         let mut orgs = self.0.orgs.lock().unwrap();
         let org = orgs.get_mut(&id).ok_or(RepositoryError::NotFound)?;
-        if org.status != status {
+        let changed = org.status != status;
+        if changed {
             org.status = status;
             org.updated_at = stamp.at;
             org.modified_by = Some(stamp.by.clone());
         }
-        Ok(org_view(org))
+        Ok(Mutated { value: org_view(org), changed })
     }
 }
 
@@ -162,7 +180,12 @@ fn team_view(store: &TenancyStore, team: &Team) -> NodeView<Team> {
 
 #[async_trait]
 impl TeamRepository for InMemoryTeams {
-    async fn create(&self, team: &Team, _stamp: &Stamp) -> Result<(), RepositoryError> {
+    async fn create(&self, team: &Team, stamp: &Stamp) -> Result<(), RepositoryError> {
+        let tx: Box<dyn Transaction> = Box::new(CountingTransaction::detached());
+        self.create_in(&*tx, team, stamp).await
+    }
+
+    async fn create_in(&self, _tx: &dyn Transaction, team: &Team, _stamp: &Stamp) -> Result<(), RepositoryError> {
         let org = team.id.org_uuid();
         let status = org_status(&self.0, org).ok_or(RepositoryError::NotFound)?;
         if status == NodeStatus::Archived {
@@ -189,6 +212,12 @@ impl TeamRepository for InMemoryTeams {
     }
 
     async fn rename(&self, id: Uuid, new_slug: Option<&Slug>, new_name: Option<&str>, stamp: &Stamp) -> Result<NodeView<Team>, RepositoryError> {
+        let tx: Box<dyn Transaction> = Box::new(CountingTransaction::detached());
+        let out = self.rename_in(&*tx, id, new_slug, new_name, stamp).await?;
+        Ok(out.value)
+    }
+
+    async fn rename_in(&self, _tx: &dyn Transaction, id: Uuid, new_slug: Option<&Slug>, new_name: Option<&str>, stamp: &Stamp) -> Result<Mutated<NodeView<Team>>, RepositoryError> {
         let mut teams = self.0.teams.lock().unwrap();
 
         let current = teams.get(&id).cloned().ok_or(RepositoryError::NotFound)?;
@@ -213,7 +242,10 @@ impl TeamRepository for InMemoryTeams {
         let slug_same = new_slug.is_none_or(|s| &team.slug == s);
         let name_same = new_name.is_none_or(|n| team.name == n);
         if slug_same && name_same {
-            return Ok(team_view(&self.0, team));
+            return Ok(Mutated {
+                value: team_view(&self.0, team),
+                changed: false,
+            });
         }
 
         if let Some(slug) = new_slug {
@@ -224,18 +256,31 @@ impl TeamRepository for InMemoryTeams {
         }
         team.updated_at = stamp.at;
         team.modified_by = Some(stamp.by.clone());
-        Ok(team_view(&self.0, team))
+        Ok(Mutated {
+            value: team_view(&self.0, team),
+            changed: true,
+        })
     }
 
     async fn set_status(&self, id: Uuid, status: NodeStatus, stamp: &Stamp) -> Result<NodeView<Team>, RepositoryError> {
+        let tx: Box<dyn Transaction> = Box::new(CountingTransaction::detached());
+        let out = self.set_status_in(&*tx, id, status, stamp).await?;
+        Ok(out.value)
+    }
+
+    async fn set_status_in(&self, _tx: &dyn Transaction, id: Uuid, status: NodeStatus, stamp: &Stamp) -> Result<Mutated<NodeView<Team>>, RepositoryError> {
         let mut teams = self.0.teams.lock().unwrap();
         let team = teams.get_mut(&id).ok_or(RepositoryError::NotFound)?;
-        if team.status != status {
+        let changed = team.status != status;
+        if changed {
             team.status = status;
             team.updated_at = stamp.at;
             team.modified_by = Some(stamp.by.clone());
         }
-        Ok(team_view(&self.0, team))
+        Ok(Mutated {
+            value: team_view(&self.0, team),
+            changed,
+        })
     }
 }
 
@@ -267,7 +312,12 @@ fn project_view(store: &TenancyStore, project: &Project) -> NodeView<Project> {
 
 #[async_trait]
 impl ProjectRepository for InMemoryProjects {
-    async fn create(&self, project: &Project, _stamp: &Stamp) -> Result<(), RepositoryError> {
+    async fn create(&self, project: &Project, stamp: &Stamp) -> Result<(), RepositoryError> {
+        let tx: Box<dyn Transaction> = Box::new(CountingTransaction::detached());
+        self.create_in(&*tx, project, stamp).await
+    }
+
+    async fn create_in(&self, _tx: &dyn Transaction, project: &Project, _stamp: &Stamp) -> Result<(), RepositoryError> {
         let team_uuid = project.team_id.uuid();
         let team = self.0.teams.lock().unwrap().get(&team_uuid).cloned().ok_or(RepositoryError::NotFound)?;
         if team_view(&self.0, &team).effective_status == NodeStatus::Archived {
@@ -297,6 +347,12 @@ impl ProjectRepository for InMemoryProjects {
     }
 
     async fn rename(&self, id: Uuid, new_slug: Option<&Slug>, new_name: Option<&str>, stamp: &Stamp) -> Result<NodeView<Project>, RepositoryError> {
+        let tx: Box<dyn Transaction> = Box::new(CountingTransaction::detached());
+        let out = self.rename_in(&*tx, id, new_slug, new_name, stamp).await?;
+        Ok(out.value)
+    }
+
+    async fn rename_in(&self, _tx: &dyn Transaction, id: Uuid, new_slug: Option<&Slug>, new_name: Option<&str>, stamp: &Stamp) -> Result<Mutated<NodeView<Project>>, RepositoryError> {
         let mut projects = self.0.projects.lock().unwrap();
 
         let current = projects.get(&id).cloned().ok_or(RepositoryError::NotFound)?;
@@ -321,7 +377,10 @@ impl ProjectRepository for InMemoryProjects {
         let slug_same = new_slug.is_none_or(|s| &project.slug == s);
         let name_same = new_name.is_none_or(|n| project.name == n);
         if slug_same && name_same {
-            return Ok(project_view(&self.0, project));
+            return Ok(Mutated {
+                value: project_view(&self.0, project),
+                changed: false,
+            });
         }
 
         if let Some(slug) = new_slug {
@@ -332,18 +391,31 @@ impl ProjectRepository for InMemoryProjects {
         }
         project.updated_at = stamp.at;
         project.modified_by = Some(stamp.by.clone());
-        Ok(project_view(&self.0, project))
+        Ok(Mutated {
+            value: project_view(&self.0, project),
+            changed: true,
+        })
     }
 
     async fn set_status(&self, id: Uuid, status: NodeStatus, stamp: &Stamp) -> Result<NodeView<Project>, RepositoryError> {
+        let tx: Box<dyn Transaction> = Box::new(CountingTransaction::detached());
+        let out = self.set_status_in(&*tx, id, status, stamp).await?;
+        Ok(out.value)
+    }
+
+    async fn set_status_in(&self, _tx: &dyn Transaction, id: Uuid, status: NodeStatus, stamp: &Stamp) -> Result<Mutated<NodeView<Project>>, RepositoryError> {
         let mut projects = self.0.projects.lock().unwrap();
         let project = projects.get_mut(&id).ok_or(RepositoryError::NotFound)?;
-        if project.status != status {
+        let changed = project.status != status;
+        if changed {
             project.status = status;
             project.updated_at = stamp.at;
             project.modified_by = Some(stamp.by.clone());
         }
-        Ok(project_view(&self.0, project))
+        Ok(Mutated {
+            value: project_view(&self.0, project),
+            changed,
+        })
     }
 }
 
@@ -941,6 +1013,19 @@ impl KeyEntropy for SeqKeyEntropy {
 /// through a `UnitOfWork`, but the "was this ever actually committed" guarantee this type gives
 /// is exactly what its refusal tests need too. Reused, not re-derived — do not clone this type.
 pub(crate) struct CountingTransaction(pub(crate) Arc<AtomicUsize>);
+
+impl CountingTransaction {
+    /// A `CountingTransaction` with no shared owner (SMA-606 Task 4): its commit counter is a
+    /// throwaway `Arc`, for the node-repository fakes' `create`/`rename`/`set_status` wrappers,
+    /// which need SOME `Transaction` to hand their `_in` twin but have no `FakeUnitOfWork`/
+    /// caller to share a counter with (unlike `FakeUnitOfWork::begin`, which hands out a
+    /// `CountingTransaction` sharing ITS OWN counter so `FakeUnitOfWork::commits` can assert on
+    /// it). `pub(crate)` — not private to one impl — so Task 5's membership fake can reuse it
+    /// too.
+    pub(crate) fn detached() -> Self {
+        CountingTransaction(Arc::new(AtomicUsize::new(0)))
+    }
+}
 
 #[async_trait]
 impl Transaction for CountingTransaction {
