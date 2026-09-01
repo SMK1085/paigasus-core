@@ -565,6 +565,10 @@ impl MembershipRepository for InMemoryMemberships {
                 !cascaded
             });
         }
+        // `memberships` is a `HashMap`, so `retain`'s iteration order is unspecified — sort to
+        // match `DETACH_PROJECT_SQL`'s `ORDER BY created_at, id` (same key `list_by_principal`
+        // already sorts on below), so the fake agrees with Postgres and with itself run to run.
+        deleted.sort_by_key(|r| (r.created_at, r.id));
         Ok(deleted)
     }
 
