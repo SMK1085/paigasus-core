@@ -55,7 +55,24 @@ So: `iam-publisher` is asymmetric, not write-only — it may publish to `iam.>` 
 `gateway-consumer` is only supposed to see a handful of event types — the six subjects in
 `subjects.env`'s `CONSUMER_FILTER_SUBJECTS` (`iam.role.granted`, `iam.role.revoked`,
 `iam.api_key.revoked`, `iam.principal.archived`, `iam.policy.put`, `iam.policy.deleted`) — out of
-everything published to `iam.>`. The intuitive way to enforce that would be a `subscribe.allow`
+everything published to `iam.>`.
+
+> **The publishable surface is 22 subjects, not 8 (SMA-606, ADR-0016 amendment 2026-09-01).**
+> SMA-606 added fourteen tenancy event types —
+> `iam.{organization,team,project}.{created,renamed,archived,restored}` and
+> `iam.membership.{attached,detached}`. Nothing in this document changes: they all sit under
+> `iam.>`, so `iam-publisher`'s publish grant and `IAM_EVENTS`'s filter already cover them, and
+> the reasoning below about why a filter cannot live in a permission applies to the wider space
+> unaltered. `CONSUMER_FILTER_SUBJECTS` is still those same six — the thirteen genuinely new
+> tenancy subjects reach no consumer, deliberately.
+>
+> The one behavioural change is on a subject already in the list. **`iam.role.granted` now has a
+> third emitter:** besides `RoleService::grant` and `BootstrapAdminSeeder::seed_grant`,
+> organization create emits it for the `org_admin` owner grant it writes in the same transaction.
+> So every organization create now delivers a message to the `gateway-cache-invalidator` durable.
+> That is intended — a new `org_admin` grant does change authorization decisions — but it is
+> traffic SMA-492 did not size for. The event carries `"source": "organization_create"` so a
+> future consumer can tell it from a user-requested grant. The intuitive way to enforce that would be a `subscribe.allow`
 naming just those event subjects. That does not work, for a structural reason: a JetStream pull
 consumer's deliveries do not arrive on the event's original subject at all — they arrive on the
 requesting client's inbox, via `$JS.API.CONSUMER.MSG.NEXT.<stream>.<consumer>` triggering a reply
