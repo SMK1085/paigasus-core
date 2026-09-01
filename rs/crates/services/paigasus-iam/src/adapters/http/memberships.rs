@@ -93,7 +93,7 @@ async fn delete_membership(State(s): State<AppState>, Extension(ctx): Extension<
         let node_prn = Prn::parse(&record.node_prn).map_err(|e| TenancyError::InvalidPrn(e.kind().to_owned()))?;
         s.authorize.check(&actor_prn(&ctx), Action::DetachMembership, &node_prn).await?;
     }
-    s.memberships.detach(id).await?;
+    s.memberships.detach(id, &ctx.principal_id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

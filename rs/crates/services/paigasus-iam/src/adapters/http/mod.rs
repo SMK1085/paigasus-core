@@ -77,7 +77,7 @@ use crate::application::bootstrap;
 use crate::application::bootstrap_admin::{BootstrapAdminSeeder, BootstrapAdminSeederDeps};
 use crate::application::create_user::{CreateUser, CreateUserDeps};
 use crate::application::dead_letters::{DeadLetterDeps, DeadLetterService};
-use crate::application::memberships::MembershipService;
+use crate::application::memberships::{MembershipService, MembershipServiceDeps};
 use crate::application::organizations::{OrganizationService, OrganizationServiceDeps};
 use crate::application::policies::{PolicyService, PolicyServiceDeps};
 use crate::application::projects::{ProjectService, ProjectServiceDeps};
@@ -429,7 +429,19 @@ impl AppState {
             ids: KernelIdGenerator,
             clock: SystemClock,
         });
-        let memberships = MembershipService::new(PgMembershipRepository::new(db.clone()), KernelIdGenerator, SystemClock);
+        // SMA-606 Task 8: `memberships` is the last tenancy service converted to the
+        // deps-struct + UoW-reference-pattern shape — sharing the SAME `tenancy_uow`/
+        // `tenancy_outbox`/`audit_log` instances `orgs`/`teams`/`projects` above do. Unlike
+        // those three, there is deliberately no `gen_bumper` field at all: memberships never
+        // feed the entity slice, so a membership change invalidates nothing (D7).
+        let memberships = MembershipService::new(MembershipServiceDeps {
+            repo: PgMembershipRepository::new(db.clone()),
+            uow: tenancy_uow.clone(),
+            outbox: tenancy_outbox.clone(),
+            audit: audit_log.clone(),
+            ids: KernelIdGenerator,
+            clock: SystemClock,
+        });
 
         // SMA-477: a SECOND `PgPolicyStore` value, deliberately — the reconciler needs
         // `SystemPolicyReconciler` and `policy_store` above is typed as `Arc<dyn PolicyStore>`,
