@@ -157,6 +157,49 @@ impl OrganizationRepository for InMemoryOrgs {
     }
 }
 
+/// Wraps an `OrganizationRepository` and fails `rename_in` after the caller has begun its
+/// transaction, so a test can prove the outbox and audit writes roll back with the mutation
+/// (SMA-606 Testing case 6) — mirrors `FailingRevokeApiKeys` (`api_keys.rs:465-493`) and
+/// `FailingGrantStore` (`roles.rs`): every other method delegates to the wrapped
+/// `InMemoryOrgs` so a test can still seed/read normally.
+#[derive(Clone, Default)]
+pub struct FailingRenameOrgs(pub InMemoryOrgs);
+
+#[async_trait]
+impl OrganizationRepository for FailingRenameOrgs {
+    async fn create(&self, org: &Organization, default_team: &Team, owner_grant: &RoleGrant, stamp: &Stamp) -> Result<(), RepositoryError> {
+        self.0.create(org, default_team, owner_grant, stamp).await
+    }
+
+    async fn create_in(&self, tx: &dyn Transaction, org: &Organization, default_team: &Team, owner_grant: &RoleGrant, stamp: &Stamp) -> Result<(), RepositoryError> {
+        self.0.create_in(tx, org, default_team, owner_grant, stamp).await
+    }
+
+    async fn find(&self, id: Uuid) -> Result<Option<NodeView<Organization>>, RepositoryError> {
+        self.0.find(id).await
+    }
+
+    async fn list(&self, limit: u64, offset: u64) -> Result<Vec<NodeView<Organization>>, RepositoryError> {
+        self.0.list(limit, offset).await
+    }
+
+    async fn rename(&self, id: Uuid, new_slug: Option<&Slug>, new_name: Option<&str>, stamp: &Stamp) -> Result<NodeView<Organization>, RepositoryError> {
+        self.0.rename(id, new_slug, new_name, stamp).await
+    }
+
+    async fn rename_in(&self, _tx: &dyn Transaction, _id: Uuid, _new_slug: Option<&Slug>, _new_name: Option<&str>, _stamp: &Stamp) -> Result<Mutated<NodeView<Organization>>, RepositoryError> {
+        Err(simulated_backend_failure())
+    }
+
+    async fn set_status(&self, id: Uuid, status: NodeStatus, stamp: &Stamp) -> Result<NodeView<Organization>, RepositoryError> {
+        self.0.set_status(id, status, stamp).await
+    }
+
+    async fn set_status_in(&self, tx: &dyn Transaction, id: Uuid, status: NodeStatus, stamp: &Stamp) -> Result<Mutated<NodeView<Organization>>, RepositoryError> {
+        self.0.set_status_in(tx, id, status, stamp).await
+    }
+}
+
 /// Looks up an org's own status (orgs have no ancestors of their own).
 fn org_status(store: &TenancyStore, org: Uuid) -> Option<NodeStatus> {
     store.orgs.lock().unwrap().get(&org).map(|o| o.status)

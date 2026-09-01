@@ -374,7 +374,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::application::fakes::{BumpSnapshotBumper, CountingGenBumper, FakeAuditLog, FakeOutbox, FakePolicyGenBumper, FakeUnitOfWork, FixedClock, InMemoryOrgs, SeqIds};
+    use crate::application::fakes::{BumpSnapshotBumper, CountingGenBumper, FailingRenameOrgs, FakeAuditLog, FakeOutbox, FakePolicyGenBumper, FakeUnitOfWork, FixedClock, InMemoryOrgs, SeqIds};
     use chrono::{Duration, TimeZone, Utc};
 
     /// Bundles an `OrganizationService` together with every fake it was built over (SMA-606,
@@ -410,6 +410,30 @@ mod tests {
 
     fn new_service() -> OrganizationService<InMemoryOrgs, SeqIds, FixedClock> {
         service_with_fakes().0
+    }
+
+    /// Mirrors `service_with_fakes_and_clock`, but wires `FailingRenameOrgs` in place of
+    /// `InMemoryOrgs` (SMA-606 Testing case 6) so a test can prove `rename`'s outbox/audit
+    /// writes never survive a `rename_in` failure — the brief for this task specifies only the
+    /// fake, not this helper; it is modelled on `service_with_fakes`'s own return shape,
+    /// `FakeUnitOfWork` handle included, mirroring `roles.rs`'s `a_store_error_mid_txn_...`
+    /// helper wiring in `FailingGrantStore`.
+    fn service_with_failing_rename() -> (OrganizationService<FailingRenameOrgs, SeqIds, FixedClock>, FakeOutbox, FakeAuditLog, CountingGenBumper, FakeUnitOfWork) {
+        let outbox = FakeOutbox::default();
+        let audit = FakeAuditLog::default();
+        let gen_bumper = CountingGenBumper::default();
+        let uow = FakeUnitOfWork::default();
+        let svc = OrganizationService::new(OrganizationServiceDeps {
+            repo: FailingRenameOrgs(InMemoryOrgs::default()),
+            uow: Arc::new(uow.clone()),
+            outbox: Arc::new(outbox.clone()),
+            audit: Arc::new(audit.clone()),
+            gen_bumper: Arc::new(gen_bumper.clone()),
+            policy_gen_bumper: Arc::new(FakePolicyGenBumper::default()),
+            ids: SeqIds::default(),
+            clock: FixedClock::default(),
+        });
+        (svc, outbox, audit, gen_bumper, uow)
     }
 
     /// A deterministic `PrincipalId` for `create`'s `actor` argument — the tests below don't
@@ -761,5 +785,20 @@ mod tests {
 
         assert_eq!(bumper.calls(), 1);
         assert_eq!(bumper.snapshot_at_bump(), Some(1), "the commit counter must already read 1 (committed) at the instant bump() runs");
+    }
+
+    /// SMA-606 Risk 1: an event must never outlive a mutation that rolled back. Paired with
+    /// `a_no_op_rename_emits_nothing_but_a_real_one_emits`: either test alone passes an
+    /// implementation that emits nothing at all, or one that always emits.
+    #[tokio::test]
+    async fn a_failure_mid_transaction_leaves_no_event_and_no_entry() {
+        let (svc, outbox, audit, _bumper, _uow) = service_with_failing_rename();
+        let actor = PrincipalId::from_prn(principal_prn(1));
+
+        let err = svc.rename(Uuid::from_u128(1), Some("acme2"), None, &actor).await.unwrap_err();
+
+        assert_eq!(err, TenancyError::Internal, "RepositoryError::Backend from a mid-txn store failure maps to Internal");
+        assert!(outbox.0.lock().unwrap().is_empty(), "the event must not survive a failed mutation");
+        assert!(audit.0.lock().unwrap().is_empty(), "nor the audit entry");
     }
 }
