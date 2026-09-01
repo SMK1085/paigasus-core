@@ -188,12 +188,18 @@ where
         let tx = self.uow.begin().await?;
         let deleted = self.repo.detach_in(&*tx, id).await?;
         for record in &deleted {
+            // SMA-606 fix wave (D9/D5): `cascade_of` is provenance, not payload — D9's table
+            // pins the detached payload at exactly `{membership_id, principal_prn, node_prn}`,
+            // so it must never appear on the wire event. It belongs on the audit entry's
+            // `detail` only. A consumer that wants the grouping already has the shared
+            // `correlation_id`.
+            let payload = serde_json::json!({
+                "membership_id": record.id,
+                "principal_prn": record.principal_prn,
+                "node_prn": record.node_prn,
+            });
             let detail = if record.id == id {
-                serde_json::json!({
-                    "membership_id": record.id,
-                    "principal_prn": record.principal_prn,
-                    "node_prn": record.node_prn,
-                })
+                payload.clone()
             } else {
                 serde_json::json!({
                     "membership_id": record.id,
@@ -209,7 +215,7 @@ where
                 aggregate_prn: record.node_prn.clone(),
                 actor_prn: Some(actor.canonical()),
                 occurred_at: now,
-                payload: detail.clone(),
+                payload,
                 correlation_id: Some(corr),
             };
             let entry = AuditEntry {

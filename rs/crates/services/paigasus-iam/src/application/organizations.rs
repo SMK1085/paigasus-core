@@ -172,14 +172,14 @@ where
             effective_status: organization.status,
         };
         let org_event = self.org_event(EventType::OrganizationCreated, &org_view, &stamp, corr);
-        // SMA-606 Task 7 fix-round-1 finding 1: the detail must carry the event's payload shape, not
-        // an empty object — slug and name are the entire content of a create. (Task 6's own
-        // code; folded into Task 7's fix round per coordinator ruling, so Task 8 copies the
-        // correct shape.)
+        // SMA-606 Task 7 fix-round-1 finding 1, extended by the fix wave (D5): the detail must
+        // equal the event's payload shape in full, including status/effective_status.
         let org_detail = serde_json::json!({
             "node_prn": org_view.node.id.prn().canonical(),
             "slug": org_view.node.slug.as_str(),
             "name": org_view.node.name,
+            "status": org_view.node.status.as_str(),
+            "effective_status": org_view.effective_status.as_str(),
         });
         let org_entry = self.org_entry(Action::CreateOrganization, &org_view, &stamp, corr, org_detail);
 
@@ -208,7 +208,18 @@ where
             resource_prn: Some(default_team.id.prn().canonical()),
             outcome: AuditOutcome::Committed,
             determining_policies: vec![],
-            detail: serde_json::json!({"source": "organization_create"}),
+            // SMA-606 fix wave (D5): detail must equal the event's payload shape plus the
+            // provenance key, not the provenance key alone — this escaped two earlier fix
+            // rounds because both inspected the org's own create entry and neither looked at
+            // this sibling team entry.
+            detail: serde_json::json!({
+                "node_prn": default_team.id.prn().canonical(),
+                "slug": default_team.slug.as_str(),
+                "name": default_team.name,
+                "status": default_team.status.as_str(),
+                "effective_status": default_team.status.as_str(),
+                "source": "organization_create",
+            }),
             correlation_id: Some(corr),
         };
 
@@ -708,6 +719,112 @@ mod tests {
         assert_eq!(entries[2].detail["source"], "organization_create");
     }
 
+    /// SMA-606 fix wave finding 4: `OrganizationService` never got the per-mutation emission
+    /// tests its two siblings (`TeamService`, `ProjectService`) have —
+    /// `each_team_mutation_emits_one_event_and_one_entry` (`teams.rs:635`) is the model. `create`'s
+    /// own three-event shape is already covered by `create_emits_three_events_on_one_correlation_id`
+    /// above, so this covers archive/restore, the two mutations `EventType::OrganizationArchived`/
+    /// `EventType::OrganizationRestored` and `Action::ArchiveOrganization`/
+    /// `Action::RestoreOrganization` had NO assertion anywhere in the repository before this.
+    #[tokio::test]
+    async fn each_org_mutation_emits_one_event_and_one_entry() {
+        let (svc, outbox, audit, _bumper, uow) = service_with_fakes();
+        let actor = PrincipalId::from_prn(principal_prn(1));
+        let out = svc.create(&actor, "acme", "Acme").await.unwrap();
+        assert_eq!(uow.commits(), 1, "create must commit its one transaction");
+        let id = out.organization.id.uuid();
+
+        outbox.0.lock().unwrap().clear();
+        audit.0.lock().unwrap().clear();
+
+        svc.archive(id, &actor).await.unwrap();
+        assert_eq!(uow.commits(), 2, "archive must commit its own transaction too");
+
+        let events = outbox.0.lock().unwrap().clone();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_type, EventType::OrganizationArchived);
+        assert_eq!(
+            events[0].aggregate_prn,
+            out.organization.id.prn().canonical(),
+            "SMA-606 fix wave: pin aggregate_prn once per service (orgs/teams/projects)"
+        );
+        assert_eq!(events[0].payload["status"], "archived");
+        assert_eq!(
+            events[0].payload["effective_status"], "archived",
+            "D9: both statuses, since a node's own status and its effective one can differ"
+        );
+
+        let entries = audit.0.lock().unwrap().clone();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].action, Action::ArchiveOrganization.as_wire());
+        assert_eq!(entries[0].correlation_id, events[0].correlation_id);
+        assert_eq!(entries[0].detail["node_prn"], events[0].payload["node_prn"]);
+        assert_eq!(entries[0].detail["status"], "archived");
+        assert_eq!(entries[0].detail["effective_status"], "archived");
+
+        outbox.0.lock().unwrap().clear();
+        audit.0.lock().unwrap().clear();
+
+        svc.restore(id, &actor).await.unwrap();
+        assert_eq!(uow.commits(), 3, "restore must commit its own transaction too");
+
+        let events = outbox.0.lock().unwrap().clone();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_type, EventType::OrganizationRestored);
+        assert_eq!(events[0].payload["status"], "active");
+        assert_eq!(events[0].payload["effective_status"], "active");
+
+        let entries = audit.0.lock().unwrap().clone();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].action, Action::RestoreOrganization.as_wire());
+        assert_eq!(entries[0].correlation_id, events[0].correlation_id);
+    }
+
+    /// SMA-606 D5: every emitted action string comes from `Action::as_wire()`. A hand-typed
+    /// literal would be a free `String` nothing checks, and `AuditFilter.action` is how
+    /// operators query — a typo makes rows permanently unfindable. SMA-606 fix wave finding 4:
+    /// also pins the EVENT TYPE for restore — `EventType::OrganizationRestored` was asserted
+    /// nowhere in the repository before this — mirroring `TeamService`/`ProjectService`'s own
+    /// `the_emitted_actions_match_the_action_vocabulary` (`teams.rs:717`).
+    #[tokio::test]
+    async fn the_emitted_actions_match_the_action_vocabulary() {
+        let (svc, outbox, audit, _bumper, uow) = service_with_fakes();
+        let actor = PrincipalId::from_prn(principal_prn(1));
+        let out = svc.create(&actor, "acme", "Acme").await.unwrap();
+        let id = out.organization.id.uuid();
+        svc.rename(id, Some("acme2"), None, &actor).await.unwrap();
+        svc.archive(id, &actor).await.unwrap();
+        svc.restore(id, &actor).await.unwrap();
+        assert_eq!(uow.commits(), 4, "all four mutating calls commit their own transaction");
+
+        // create emits three entries (org/team/grant); rename/archive/restore emit one each.
+        let actions: Vec<String> = audit.0.lock().unwrap().iter().map(|e| e.action.clone()).collect();
+        assert_eq!(
+            actions,
+            vec![
+                Action::CreateOrganization.as_wire(),
+                Action::CreateTeam.as_wire(),
+                Action::GrantRole.as_wire(),
+                Action::RenameOrganization.as_wire(),
+                Action::ArchiveOrganization.as_wire(),
+                Action::RestoreOrganization.as_wire(),
+            ]
+        );
+
+        let event_types: Vec<EventType> = outbox.0.lock().unwrap().iter().map(|e| e.event_type).collect();
+        assert_eq!(
+            event_types,
+            vec![
+                EventType::OrganizationCreated,
+                EventType::TeamCreated,
+                EventType::RoleGranted,
+                EventType::OrganizationRenamed,
+                EventType::OrganizationArchived,
+                EventType::OrganizationRestored,
+            ]
+        );
+    }
+
     /// SMA-440 D5 + SMA-606 D2: a rename whose every supplied field already equals the stored
     /// one changes nothing, so it emits nothing. The negative half is the control — without
     /// it an over-broad no-op that swallows real renames passes.
@@ -740,6 +857,41 @@ mod tests {
         // not what it changed to.
         assert_eq!(entries[0].detail["slug"], "acme");
         assert_eq!(entries[0].detail["name"], "Acme Inc", "the audit detail carries the POST-change name too");
+    }
+
+    /// SMA-606 fix wave finding 5 (spec Testing case 3): an idempotent `set_status` no-op
+    /// emits nothing. Six `if out.changed` sites gate the `set_status` path and no test at
+    /// either tier read a `Mutated` from `set_status_in` before this — a `set_status_in` that
+    /// wrote nothing yet returned `changed: true` would pass every existing test and emit a
+    /// spurious archive event plus a false audit row on every repeat archive. Modelled on
+    /// `a_no_op_rename_emits_nothing_but_a_real_one_emits`: archive, clear the buffers, archive
+    /// again (no-op — the negative half), then restore (a real transition — the positive half
+    /// that stops an over-broad no-op passing).
+    #[tokio::test]
+    async fn a_no_op_archive_emits_nothing_but_a_real_restore_emits() {
+        let (svc, outbox, audit, _bumper, uow) = service_with_fakes();
+        let actor = PrincipalId::from_prn(principal_prn(1));
+        let out = svc.create(&actor, "acme", "Acme").await.unwrap();
+        let id = out.organization.id.uuid();
+        assert_eq!(uow.commits(), 1, "create must commit");
+
+        svc.archive(id, &actor).await.unwrap();
+        assert_eq!(uow.commits(), 2, "archive must commit its own transaction");
+        outbox.0.lock().unwrap().clear();
+        audit.0.lock().unwrap().clear();
+
+        svc.archive(id, &actor).await.unwrap();
+        assert!(outbox.0.lock().unwrap().is_empty(), "an idempotent archive emits no event");
+        assert!(audit.0.lock().unwrap().is_empty(), "an idempotent archive writes no audit entry");
+        assert_eq!(uow.commits(), 3, "a no-op archive still commits its transaction, it just emits nothing on it");
+
+        svc.restore(id, &actor).await.unwrap();
+        let events = outbox.0.lock().unwrap().clone();
+        assert_eq!(events.len(), 1, "restoring an archived org is a real transition");
+        assert_eq!(events[0].event_type, EventType::OrganizationRestored);
+        let entries = audit.0.lock().unwrap().clone();
+        assert_eq!(entries.len(), 1, "the real restore writes a real audit entry");
+        assert_eq!(uow.commits(), 4, "the real restore commits its own transaction too");
     }
 
     /// SMA-606 D7: the bump is unconditional — it still runs for a no-op, preserving SMA-440

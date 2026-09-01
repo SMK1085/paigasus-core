@@ -72,7 +72,9 @@ everything published to `iam.>`.
 > So every organization create now delivers a message to the `gateway-cache-invalidator` durable.
 > That is intended — a new `org_admin` grant does change authorization decisions — but it is
 > traffic SMA-492 did not size for. The event carries `"source": "organization_create"` so a
-> future consumer can tell it from a user-requested grant. The intuitive way to enforce that would be a `subscribe.allow`
+> future consumer can tell it from a user-requested grant.
+
+The intuitive way to enforce that would be a `subscribe.allow`
 naming just those event subjects. That does not work, for a structural reason: a JetStream pull
 consumer's deliveries do not arrive on the event's original subject at all — they arrive on the
 requesting client's inbox, via `$JS.API.CONSUMER.MSG.NEXT.<stream>.<consumer>` triggering a reply

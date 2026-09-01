@@ -149,12 +149,14 @@ where
             effective_status: project.status,
         };
         let ev = self.project_event(EventType::ProjectCreated, &view, &stamp, corr);
-        // SMA-606 Task 7 fix-round-1 finding 1: the detail must carry the event's payload shape, not
-        // an empty object — slug and name are the entire content of a create.
+        // SMA-606 Task 7 fix-round-1 finding 1, extended by the fix wave (D5): the detail must
+        // equal the event's payload shape in full, including status/effective_status.
         let detail = serde_json::json!({
             "node_prn": view.node.id.prn().canonical(),
             "slug": view.node.slug.as_str(),
             "name": view.node.name,
+            "status": view.node.status.as_str(),
+            "effective_status": view.effective_status.as_str(),
         });
         let entry = self.project_entry(Action::CreateProject, &view, &stamp, corr, detail);
 
@@ -656,6 +658,7 @@ mod tests {
         let events = outbox.0.lock().unwrap().clone();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].event_type, EventType::ProjectArchived);
+        assert_eq!(events[0].aggregate_prn, view.node.id.prn().canonical(), "SMA-606 fix wave: pin aggregate_prn once per service");
         assert_eq!(events[0].payload["status"], "archived");
         assert_eq!(
             events[0].payload["effective_status"], "archived",
@@ -706,7 +709,7 @@ mod tests {
     /// operators query — a typo makes rows permanently unfindable.
     #[tokio::test]
     async fn the_emitted_actions_match_the_action_vocabulary() {
-        let (svc, _outbox, audit, _bumper, uow, team) = service_with_fakes();
+        let (svc, outbox, audit, _bumper, uow, team) = service_with_fakes();
         let actor = actor(1);
         let view = svc.create(team, "web", "Web", &actor).await.unwrap();
         let id = view.node.id.uuid();
@@ -724,6 +727,15 @@ mod tests {
                 Action::ArchiveProject.as_wire(),
                 Action::RestoreProject.as_wire(),
             ]
+        );
+
+        // SMA-606 fix wave: the action-vocabulary assertion above pins the audit ACTION for
+        // restore but never the EVENT TYPE — `EventType::ProjectRestored` was asserted nowhere
+        // in the repository before this. Pin it here too.
+        let event_types: Vec<EventType> = outbox.0.lock().unwrap().iter().map(|e| e.event_type).collect();
+        assert_eq!(
+            event_types,
+            vec![EventType::ProjectCreated, EventType::ProjectRenamed, EventType::ProjectArchived, EventType::ProjectRestored,]
         );
     }
 
@@ -751,6 +763,41 @@ mod tests {
         assert_eq!(events.len(), 1, "a matching slug with a differing name is a real rename");
         assert_eq!(events[0].event_type, EventType::ProjectRenamed);
         assert_eq!(uow.commits(), 3, "the real rename commits its own transaction too");
+    }
+
+    /// SMA-606 fix wave finding 5 (spec Testing case 3): an idempotent `set_status` no-op
+    /// emits nothing. Six `if out.changed` sites gate the `set_status` path and no test at
+    /// either tier read a `Mutated` from `set_status_in` before this — a `set_status_in` that
+    /// wrote nothing yet returned `changed: true` would pass every existing test and emit a
+    /// spurious archive event plus a false audit row on every repeat archive. Modelled on
+    /// `a_no_op_rename_emits_nothing_but_a_real_one_emits`: archive, clear the buffers, archive
+    /// again (no-op — the negative half), then restore (a real transition — the positive half
+    /// that stops an over-broad no-op passing).
+    #[tokio::test]
+    async fn a_no_op_archive_emits_nothing_but_a_real_restore_emits() {
+        let (svc, outbox, audit, _bumper, uow, team) = service_with_fakes();
+        let actor = actor(1);
+        let view = svc.create(team, "web", "Web", &actor).await.unwrap();
+        let id = view.node.id.uuid();
+        assert_eq!(uow.commits(), 1, "create must commit");
+
+        svc.archive(id, &actor).await.unwrap();
+        assert_eq!(uow.commits(), 2, "archive must commit its own transaction");
+        outbox.0.lock().unwrap().clear();
+        audit.0.lock().unwrap().clear();
+
+        svc.archive(id, &actor).await.unwrap();
+        assert!(outbox.0.lock().unwrap().is_empty(), "an idempotent archive emits no event");
+        assert!(audit.0.lock().unwrap().is_empty(), "an idempotent archive writes no audit entry");
+        assert_eq!(uow.commits(), 3, "a no-op archive still commits its transaction, it just emits nothing on it");
+
+        svc.restore(id, &actor).await.unwrap();
+        let events = outbox.0.lock().unwrap().clone();
+        assert_eq!(events.len(), 1, "restoring an archived project is a real transition");
+        assert_eq!(events[0].event_type, EventType::ProjectRestored);
+        let entries = audit.0.lock().unwrap().clone();
+        assert_eq!(entries.len(), 1, "the real restore writes a real audit entry");
+        assert_eq!(uow.commits(), 4, "the real restore commits its own transaction too");
     }
 
     /// SMA-606 D7: the bump is unconditional — it still runs for a no-op.

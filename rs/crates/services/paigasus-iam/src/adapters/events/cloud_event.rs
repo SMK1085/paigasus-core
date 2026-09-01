@@ -185,7 +185,17 @@ mod tests {
             serde_json::json!({"node_prn": "prn:pgs:iam:::org/o", "slug": "acme", "name": "Acme", "status": "active", "effective_status": "active"}),
             serde_json::json!({"node_prn": "prn:pgs:iam:::org/o", "slug": "acme", "name": "Acme"}),
             serde_json::json!({"node_prn": "prn:pgs:iam:::org/o", "status": "archived", "effective_status": "archived"}),
+            // SMA-606 fix wave finding 8: the auto-provisioned default team's `TeamCreated`
+            // payload (`organizations.rs:186-201`) carries a `"source"` key an explicit
+            // `TeamService::create` does not — its own shape, not a substring of the plain
+            // create shape above.
+            serde_json::json!({"node_prn": "prn:pgs:iam:::team/o/t", "slug": "default", "name": "Default", "status": "active", "effective_status": "active", "source": "organization_create"}),
             serde_json::json!({"membership_id": "m", "principal_prn": "prn:pgs:iam:::principal/p", "node_prn": "prn:pgs:iam:::org/o"}),
+            // SMA-606 fix wave finding 8: `MembershipDetached`'s payload — same shape as
+            // `MembershipAttached` above (fix wave finding 3 moved `cascade_of` off the wire
+            // payload entirely, onto the audit entry's `detail` only), listed explicitly so the
+            // inventory names every emitter rather than leaving detach's coverage implicit.
+            serde_json::json!({"membership_id": "m", "principal_prn": "prn:pgs:iam:::principal/p", "node_prn": "prn:pgs:iam:::project/o/t/p"}),
             serde_json::json!({"grant_id": "g", "role_key": "org_admin", "scope": "prn:pgs:iam:::org/o", "source": "organization_create"}),
         ];
         let banned = ["hash", "secret", "plaintext", "email", "pepper", "token", "password"];

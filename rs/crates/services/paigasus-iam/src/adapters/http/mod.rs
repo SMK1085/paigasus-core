@@ -392,8 +392,8 @@ impl AppState {
         let tenancy_outbox: Arc<dyn Outbox> = Arc::new(PgOutbox::new(cfg.outbox.wake_on_commit));
         let tenancy_gen_bumper: Arc<dyn EntityGenBumper> = Arc::new(GenerationsEntityGenBumper::new(gens.clone()));
         // SMA-606 Task 6: `orgs` is the first tenancy service converted to the deps-struct +
-        // UoW-reference-pattern shape; Task 7 converts `teams`/`projects` the same way below —
-        // `memberships` stays on its positional constructor until Task 8. `policy_gen_bumper`
+        // UoW-reference-pattern shape; Task 7 converts `teams`/`projects` the same way below,
+        // and Task 8 converts `memberships` the same way further down. `policy_gen_bumper`
         // reuses `role_gen_bumper`'s pattern (a fresh `GenerationsPolicyGenBumper` over the same
         // `gens` handle) since `create` writes a policy-changing owner grant.
         let orgs = OrganizationService::new(OrganizationServiceDeps {
