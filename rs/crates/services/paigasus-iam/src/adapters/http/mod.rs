@@ -55,8 +55,8 @@ use tower_http::trace::TraceLayer;
 
 use crate::adapters::api_keys::{ApiKeyValidationCache, HmacSecretHasher, MemoryApiKeyCache, OsRngKeyEntropy, RedisApiKeyCache};
 use crate::adapters::authz::{
-    BufferedDenialAuditSink, CedarAuthorizer, DenialAuditBuffer, DenialAuditDrain, FanOutAuditSink, Generations, GenerationsPolicyGenBumper, GenerationsReader, MemoryDecisionCache, PolicySnapshot,
-    RedisDecisionCache, SliceCache, TracingAuditSink,
+    BufferedDenialAuditSink, CedarAuthorizer, DenialAuditBuffer, DenialAuditDrain, FanOutAuditSink, Generations, GenerationsEntityGenBumper, GenerationsPolicyGenBumper, GenerationsReader,
+    MemoryDecisionCache, PolicySnapshot, RedisDecisionCache, SliceCache, TracingAuditSink,
 };
 use crate::adapters::clock::SystemClock;
 use crate::adapters::id::KernelIdGenerator;
@@ -77,18 +77,18 @@ use crate::application::bootstrap;
 use crate::application::bootstrap_admin::{BootstrapAdminSeeder, BootstrapAdminSeederDeps};
 use crate::application::create_user::{CreateUser, CreateUserDeps};
 use crate::application::dead_letters::{DeadLetterDeps, DeadLetterService};
-use crate::application::memberships::MembershipService;
-use crate::application::organizations::OrganizationService;
+use crate::application::memberships::{MembershipService, MembershipServiceDeps};
+use crate::application::organizations::{OrganizationService, OrganizationServiceDeps};
 use crate::application::policies::{PolicyService, PolicyServiceDeps};
-use crate::application::projects::ProjectService;
+use crate::application::projects::{ProjectService, ProjectServiceDeps};
 use crate::application::roles::{RoleService, RoleServiceDeps};
 use crate::application::service_accounts::{ServiceAccountService, ServiceAccountServiceDeps};
 use crate::application::system_retirement::{SystemRetirementDeps, SystemRetirementService};
-use crate::application::teams::TeamService;
+use crate::application::teams::{TeamService, TeamServiceDeps};
 use crate::config::{ApiKeyCacheBackend, AuthnConfig, AuthzCacheBackend, IamConfig, JwksCacheBackend, RedactedUrl};
 use paigasus_iam_core::{
-    ApiKeyRepository, AuditLog, AuditSink, DecisionCache, EntitySliceLoader, OrganizationRepository, Outbox, PolicyGenBumper, PolicyStore, ProjectRepository, RoleGrantStore, SystemPolicyReconciler,
-    SystemRoleReconciler, TeamRepository, UnitOfWork,
+    ApiKeyRepository, AuditLog, AuditSink, DecisionCache, EntityGenBumper, EntitySliceLoader, OrganizationRepository, Outbox, PolicyGenBumper, PolicyStore, ProjectRepository, RoleGrantStore,
+    SystemPolicyReconciler, SystemRoleReconciler, TeamRepository, UnitOfWork,
 };
 
 pub type OrgSvc = OrganizationService<PgOrganizationRepository, KernelIdGenerator, SystemClock>;
@@ -352,15 +352,6 @@ impl AppState {
             }
         };
 
-        let orgs = OrganizationService::new(PgOrganizationRepository::new(db.clone(), gens.clone()), KernelIdGenerator, SystemClock);
-        let teams = TeamService::new(PgTeamRepository::new(db.clone(), gens.clone()), KernelIdGenerator, SystemClock);
-        let projects = ProjectService::new(
-            PgProjectRepository::new(db.clone(), gens.clone()),
-            PgTeamRepository::new(db.clone(), gens.clone()),
-            KernelIdGenerator,
-            SystemClock,
-        );
-        let memberships = MembershipService::new(PgMembershipRepository::new(db.clone()), KernelIdGenerator, SystemClock);
         // SMA-446 Task B7 (copies Task B4-B6's `roles`/`policies`/`api_keys` wiring below):
         // `users` drives its principal+user insert + outbox event through its OWN
         // `SeaOrmUnitOfWork` transaction (`user_uow` — a fresh instance is fine, `db.clone()` is
@@ -392,6 +383,65 @@ impl AppState {
         // rather than a second, windowless one — `with_query_window` takes `mut self` and
         // returns `Self`, so there is no way to build it twice and still share one `Arc`.
         let audit_log: Arc<dyn AuditLog> = Arc::new(PgAuditLog::new(db.clone()).with_query_window(cfg.audit.query_default_window_days, cfg.audit.query_max_window_days));
+
+        // SMA-606 D2/D7: the tenancy services now drive mutation + outbox + audit on one
+        // transaction and bump post-commit, so they need `audit_log` and must be constructed
+        // after it. `tenancy_gen_bumper` is over the SAME `gens` handle every other authz
+        // invalidation uses — the services never import `Generations` (ADR-0005).
+        let tenancy_uow: Arc<dyn UnitOfWork> = Arc::new(SeaOrmUnitOfWork::new(db.clone()));
+        let tenancy_outbox: Arc<dyn Outbox> = Arc::new(PgOutbox::new(cfg.outbox.wake_on_commit));
+        let tenancy_gen_bumper: Arc<dyn EntityGenBumper> = Arc::new(GenerationsEntityGenBumper::new(gens.clone()));
+        // SMA-606 Task 6: `orgs` is the first tenancy service converted to the deps-struct +
+        // UoW-reference-pattern shape; Task 7 converts `teams`/`projects` the same way below,
+        // and Task 8 converts `memberships` the same way further down. `policy_gen_bumper`
+        // reuses `role_gen_bumper`'s pattern (a fresh `GenerationsPolicyGenBumper` over the same
+        // `gens` handle) since `create` writes a policy-changing owner grant.
+        let orgs = OrganizationService::new(OrganizationServiceDeps {
+            repo: PgOrganizationRepository::new(db.clone(), gens.clone()),
+            uow: tenancy_uow.clone(),
+            outbox: tenancy_outbox.clone(),
+            audit: audit_log.clone(),
+            gen_bumper: tenancy_gen_bumper.clone(),
+            policy_gen_bumper: Arc::new(GenerationsPolicyGenBumper::new(gens.clone())),
+            ids: KernelIdGenerator,
+            clock: SystemClock,
+        });
+        // SMA-606 Task 7: `teams`/`projects` converted to the same deps-struct +
+        // UoW-reference-pattern shape as `orgs` above, sharing the SAME `tenancy_uow`/
+        // `tenancy_outbox`/`audit_log`/`tenancy_gen_bumper` instances — neither writes a
+        // policy-changing row, so neither carries a `policy_gen_bumper`.
+        let teams = TeamService::new(TeamServiceDeps {
+            repo: PgTeamRepository::new(db.clone(), gens.clone()),
+            uow: tenancy_uow.clone(),
+            outbox: tenancy_outbox.clone(),
+            audit: audit_log.clone(),
+            gen_bumper: tenancy_gen_bumper.clone(),
+            ids: KernelIdGenerator,
+            clock: SystemClock,
+        });
+        let projects = ProjectService::new(ProjectServiceDeps {
+            projects: PgProjectRepository::new(db.clone(), gens.clone()),
+            teams: PgTeamRepository::new(db.clone(), gens.clone()),
+            uow: tenancy_uow.clone(),
+            outbox: tenancy_outbox.clone(),
+            audit: audit_log.clone(),
+            gen_bumper: tenancy_gen_bumper.clone(),
+            ids: KernelIdGenerator,
+            clock: SystemClock,
+        });
+        // SMA-606 Task 8: `memberships` is the last tenancy service converted to the
+        // deps-struct + UoW-reference-pattern shape — sharing the SAME `tenancy_uow`/
+        // `tenancy_outbox`/`audit_log` instances `orgs`/`teams`/`projects` above do. Unlike
+        // those three, there is deliberately no `gen_bumper` field at all: memberships never
+        // feed the entity slice, so a membership change invalidates nothing (D7).
+        let memberships = MembershipService::new(MembershipServiceDeps {
+            repo: PgMembershipRepository::new(db.clone()),
+            uow: tenancy_uow.clone(),
+            outbox: tenancy_outbox.clone(),
+            audit: audit_log.clone(),
+            ids: KernelIdGenerator,
+            clock: SystemClock,
+        });
 
         // SMA-477: a SECOND `PgPolicyStore` value, deliberately — the reconciler needs
         // `SystemPolicyReconciler` and `policy_store` above is typed as `Arc<dyn PolicyStore>`,

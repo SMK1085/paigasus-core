@@ -11,10 +11,10 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use paigasus_iam_core::{
     AccessRequest, Action, ApiKey, ApiKeyId, ApiKeyRepository, ApiKeyStatus, AuditEntry, AuditFilter, AuditLog, Authorizer, AuthzError, BulkReplayRequest, Clock, ConflictKind, DeadLetterEntry,
-    DeadLetterFilter, DeadLetters, Decision, DomainEvent, Effect, IdGenerator, KeyEntropy, Membership, MembershipRecord, MembershipRepository, NodeStatus, NodeView, Organization, OrganizationId,
-    OrganizationRepository, Outbox, PolicyDocument, PolicyGenBumper, PolicyStore, PreconditionKind, Principal, PrincipalId, PrincipalStatus, Project, ProjectId, ProjectRepository, PutOutcome,
-    RepositoryError, RoleGrant, RoleGrantStore, Savepoint, SecretHasher, ServiceAccount, ServiceAccountRecord, ServiceAccountRepository, Slug, Stamp, Team, TeamId, TeamRepository, TenancyNodeRef,
-    Transaction, UnitOfWork,
+    DeadLetterFilter, DeadLetters, Decision, DomainEvent, Effect, EntityGenBumper, IdGenerator, KeyEntropy, Membership, MembershipRecord, MembershipRepository, Mutated, NodeStatus, NodeView,
+    Organization, OrganizationId, OrganizationRepository, Outbox, PolicyDocument, PolicyGenBumper, PolicyStore, PreconditionKind, Principal, PrincipalId, PrincipalStatus, Project, ProjectId,
+    ProjectRepository, PutOutcome, RepositoryError, RoleGrant, RoleGrantStore, Savepoint, SecretHasher, ServiceAccount, ServiceAccountRecord, ServiceAccountRepository, Slug, Stamp, Team, TeamId,
+    TeamRepository, TenancyNodeRef, Transaction, UnitOfWork,
 };
 use paigasus_kernel::Prn;
 use std::any::Any;
@@ -65,7 +65,12 @@ fn org_view(org: &Organization) -> NodeView<Organization> {
 
 #[async_trait]
 impl OrganizationRepository for InMemoryOrgs {
-    async fn create(&self, org: &Organization, default_team: &Team, owner_grant: &RoleGrant, _stamp: &Stamp) -> Result<(), RepositoryError> {
+    async fn create(&self, org: &Organization, default_team: &Team, owner_grant: &RoleGrant, stamp: &Stamp) -> Result<(), RepositoryError> {
+        let tx: Box<dyn Transaction> = Box::new(CountingTransaction::detached());
+        self.create_in(&*tx, org, default_team, owner_grant, stamp).await
+    }
+
+    async fn create_in(&self, _tx: &dyn Transaction, org: &Organization, default_team: &Team, owner_grant: &RoleGrant, _stamp: &Stamp) -> Result<(), RepositoryError> {
         let mut orgs = self.0.orgs.lock().unwrap();
         if orgs.values().any(|existing| existing.slug == org.slug) {
             return Err(RepositoryError::Conflict(ConflictKind::SlugTaken));
@@ -89,6 +94,12 @@ impl OrganizationRepository for InMemoryOrgs {
     }
 
     async fn rename(&self, id: Uuid, new_slug: Option<&Slug>, new_name: Option<&str>, stamp: &Stamp) -> Result<NodeView<Organization>, RepositoryError> {
+        let tx: Box<dyn Transaction> = Box::new(CountingTransaction::detached());
+        let out = self.rename_in(&*tx, id, new_slug, new_name, stamp).await?;
+        Ok(out.value)
+    }
+
+    async fn rename_in(&self, _tx: &dyn Transaction, id: Uuid, new_slug: Option<&Slug>, new_name: Option<&str>, stamp: &Stamp) -> Result<Mutated<NodeView<Organization>>, RepositoryError> {
         let mut orgs = self.0.orgs.lock().unwrap();
 
         let current_status = orgs.get(&id).map(|o| o.status).ok_or(RepositoryError::NotFound)?;
@@ -113,7 +124,7 @@ impl OrganizationRepository for InMemoryOrgs {
         let slug_same = new_slug.is_none_or(|s| &org.slug == s);
         let name_same = new_name.is_none_or(|n| org.name == n);
         if slug_same && name_same {
-            return Ok(org_view(org));
+            return Ok(Mutated { value: org_view(org), changed: false });
         }
 
         if let Some(slug) = new_slug {
@@ -124,18 +135,68 @@ impl OrganizationRepository for InMemoryOrgs {
         }
         org.updated_at = stamp.at;
         org.modified_by = Some(stamp.by.clone());
-        Ok(org_view(org))
+        Ok(Mutated { value: org_view(org), changed: true })
     }
 
     async fn set_status(&self, id: Uuid, status: NodeStatus, stamp: &Stamp) -> Result<NodeView<Organization>, RepositoryError> {
+        let tx: Box<dyn Transaction> = Box::new(CountingTransaction::detached());
+        let out = self.set_status_in(&*tx, id, status, stamp).await?;
+        Ok(out.value)
+    }
+
+    async fn set_status_in(&self, _tx: &dyn Transaction, id: Uuid, status: NodeStatus, stamp: &Stamp) -> Result<Mutated<NodeView<Organization>>, RepositoryError> {
         let mut orgs = self.0.orgs.lock().unwrap();
         let org = orgs.get_mut(&id).ok_or(RepositoryError::NotFound)?;
-        if org.status != status {
+        let changed = org.status != status;
+        if changed {
             org.status = status;
             org.updated_at = stamp.at;
             org.modified_by = Some(stamp.by.clone());
         }
-        Ok(org_view(org))
+        Ok(Mutated { value: org_view(org), changed })
+    }
+}
+
+/// Wraps an `OrganizationRepository` and fails `rename_in` after the caller has begun its
+/// transaction, so a test can prove the outbox and audit writes roll back with the mutation
+/// (SMA-606 Testing case 6) — mirrors `FailingRevokeApiKeys` (`api_keys.rs:465-493`) and
+/// `FailingGrantStore` (`roles.rs`): every other method delegates to the wrapped
+/// `InMemoryOrgs` so a test can still seed/read normally.
+#[derive(Clone, Default)]
+pub struct FailingRenameOrgs(pub InMemoryOrgs);
+
+#[async_trait]
+impl OrganizationRepository for FailingRenameOrgs {
+    async fn create(&self, org: &Organization, default_team: &Team, owner_grant: &RoleGrant, stamp: &Stamp) -> Result<(), RepositoryError> {
+        self.0.create(org, default_team, owner_grant, stamp).await
+    }
+
+    async fn create_in(&self, tx: &dyn Transaction, org: &Organization, default_team: &Team, owner_grant: &RoleGrant, stamp: &Stamp) -> Result<(), RepositoryError> {
+        self.0.create_in(tx, org, default_team, owner_grant, stamp).await
+    }
+
+    async fn find(&self, id: Uuid) -> Result<Option<NodeView<Organization>>, RepositoryError> {
+        self.0.find(id).await
+    }
+
+    async fn list(&self, limit: u64, offset: u64) -> Result<Vec<NodeView<Organization>>, RepositoryError> {
+        self.0.list(limit, offset).await
+    }
+
+    async fn rename(&self, id: Uuid, new_slug: Option<&Slug>, new_name: Option<&str>, stamp: &Stamp) -> Result<NodeView<Organization>, RepositoryError> {
+        self.0.rename(id, new_slug, new_name, stamp).await
+    }
+
+    async fn rename_in(&self, _tx: &dyn Transaction, _id: Uuid, _new_slug: Option<&Slug>, _new_name: Option<&str>, _stamp: &Stamp) -> Result<Mutated<NodeView<Organization>>, RepositoryError> {
+        Err(simulated_backend_failure())
+    }
+
+    async fn set_status(&self, id: Uuid, status: NodeStatus, stamp: &Stamp) -> Result<NodeView<Organization>, RepositoryError> {
+        self.0.set_status(id, status, stamp).await
+    }
+
+    async fn set_status_in(&self, tx: &dyn Transaction, id: Uuid, status: NodeStatus, stamp: &Stamp) -> Result<Mutated<NodeView<Organization>>, RepositoryError> {
+        self.0.set_status_in(tx, id, status, stamp).await
     }
 }
 
@@ -162,7 +223,12 @@ fn team_view(store: &TenancyStore, team: &Team) -> NodeView<Team> {
 
 #[async_trait]
 impl TeamRepository for InMemoryTeams {
-    async fn create(&self, team: &Team, _stamp: &Stamp) -> Result<(), RepositoryError> {
+    async fn create(&self, team: &Team, stamp: &Stamp) -> Result<(), RepositoryError> {
+        let tx: Box<dyn Transaction> = Box::new(CountingTransaction::detached());
+        self.create_in(&*tx, team, stamp).await
+    }
+
+    async fn create_in(&self, _tx: &dyn Transaction, team: &Team, _stamp: &Stamp) -> Result<(), RepositoryError> {
         let org = team.id.org_uuid();
         let status = org_status(&self.0, org).ok_or(RepositoryError::NotFound)?;
         if status == NodeStatus::Archived {
@@ -189,6 +255,12 @@ impl TeamRepository for InMemoryTeams {
     }
 
     async fn rename(&self, id: Uuid, new_slug: Option<&Slug>, new_name: Option<&str>, stamp: &Stamp) -> Result<NodeView<Team>, RepositoryError> {
+        let tx: Box<dyn Transaction> = Box::new(CountingTransaction::detached());
+        let out = self.rename_in(&*tx, id, new_slug, new_name, stamp).await?;
+        Ok(out.value)
+    }
+
+    async fn rename_in(&self, _tx: &dyn Transaction, id: Uuid, new_slug: Option<&Slug>, new_name: Option<&str>, stamp: &Stamp) -> Result<Mutated<NodeView<Team>>, RepositoryError> {
         let mut teams = self.0.teams.lock().unwrap();
 
         let current = teams.get(&id).cloned().ok_or(RepositoryError::NotFound)?;
@@ -213,7 +285,10 @@ impl TeamRepository for InMemoryTeams {
         let slug_same = new_slug.is_none_or(|s| &team.slug == s);
         let name_same = new_name.is_none_or(|n| team.name == n);
         if slug_same && name_same {
-            return Ok(team_view(&self.0, team));
+            return Ok(Mutated {
+                value: team_view(&self.0, team),
+                changed: false,
+            });
         }
 
         if let Some(slug) = new_slug {
@@ -224,18 +299,31 @@ impl TeamRepository for InMemoryTeams {
         }
         team.updated_at = stamp.at;
         team.modified_by = Some(stamp.by.clone());
-        Ok(team_view(&self.0, team))
+        Ok(Mutated {
+            value: team_view(&self.0, team),
+            changed: true,
+        })
     }
 
     async fn set_status(&self, id: Uuid, status: NodeStatus, stamp: &Stamp) -> Result<NodeView<Team>, RepositoryError> {
+        let tx: Box<dyn Transaction> = Box::new(CountingTransaction::detached());
+        let out = self.set_status_in(&*tx, id, status, stamp).await?;
+        Ok(out.value)
+    }
+
+    async fn set_status_in(&self, _tx: &dyn Transaction, id: Uuid, status: NodeStatus, stamp: &Stamp) -> Result<Mutated<NodeView<Team>>, RepositoryError> {
         let mut teams = self.0.teams.lock().unwrap();
         let team = teams.get_mut(&id).ok_or(RepositoryError::NotFound)?;
-        if team.status != status {
+        let changed = team.status != status;
+        if changed {
             team.status = status;
             team.updated_at = stamp.at;
             team.modified_by = Some(stamp.by.clone());
         }
-        Ok(team_view(&self.0, team))
+        Ok(Mutated {
+            value: team_view(&self.0, team),
+            changed,
+        })
     }
 }
 
@@ -267,7 +355,12 @@ fn project_view(store: &TenancyStore, project: &Project) -> NodeView<Project> {
 
 #[async_trait]
 impl ProjectRepository for InMemoryProjects {
-    async fn create(&self, project: &Project, _stamp: &Stamp) -> Result<(), RepositoryError> {
+    async fn create(&self, project: &Project, stamp: &Stamp) -> Result<(), RepositoryError> {
+        let tx: Box<dyn Transaction> = Box::new(CountingTransaction::detached());
+        self.create_in(&*tx, project, stamp).await
+    }
+
+    async fn create_in(&self, _tx: &dyn Transaction, project: &Project, _stamp: &Stamp) -> Result<(), RepositoryError> {
         let team_uuid = project.team_id.uuid();
         let team = self.0.teams.lock().unwrap().get(&team_uuid).cloned().ok_or(RepositoryError::NotFound)?;
         if team_view(&self.0, &team).effective_status == NodeStatus::Archived {
@@ -297,6 +390,12 @@ impl ProjectRepository for InMemoryProjects {
     }
 
     async fn rename(&self, id: Uuid, new_slug: Option<&Slug>, new_name: Option<&str>, stamp: &Stamp) -> Result<NodeView<Project>, RepositoryError> {
+        let tx: Box<dyn Transaction> = Box::new(CountingTransaction::detached());
+        let out = self.rename_in(&*tx, id, new_slug, new_name, stamp).await?;
+        Ok(out.value)
+    }
+
+    async fn rename_in(&self, _tx: &dyn Transaction, id: Uuid, new_slug: Option<&Slug>, new_name: Option<&str>, stamp: &Stamp) -> Result<Mutated<NodeView<Project>>, RepositoryError> {
         let mut projects = self.0.projects.lock().unwrap();
 
         let current = projects.get(&id).cloned().ok_or(RepositoryError::NotFound)?;
@@ -321,7 +420,10 @@ impl ProjectRepository for InMemoryProjects {
         let slug_same = new_slug.is_none_or(|s| &project.slug == s);
         let name_same = new_name.is_none_or(|n| project.name == n);
         if slug_same && name_same {
-            return Ok(project_view(&self.0, project));
+            return Ok(Mutated {
+                value: project_view(&self.0, project),
+                changed: false,
+            });
         }
 
         if let Some(slug) = new_slug {
@@ -332,18 +434,31 @@ impl ProjectRepository for InMemoryProjects {
         }
         project.updated_at = stamp.at;
         project.modified_by = Some(stamp.by.clone());
-        Ok(project_view(&self.0, project))
+        Ok(Mutated {
+            value: project_view(&self.0, project),
+            changed: true,
+        })
     }
 
     async fn set_status(&self, id: Uuid, status: NodeStatus, stamp: &Stamp) -> Result<NodeView<Project>, RepositoryError> {
+        let tx: Box<dyn Transaction> = Box::new(CountingTransaction::detached());
+        let out = self.set_status_in(&*tx, id, status, stamp).await?;
+        Ok(out.value)
+    }
+
+    async fn set_status_in(&self, _tx: &dyn Transaction, id: Uuid, status: NodeStatus, stamp: &Stamp) -> Result<Mutated<NodeView<Project>>, RepositoryError> {
         let mut projects = self.0.projects.lock().unwrap();
         let project = projects.get_mut(&id).ok_or(RepositoryError::NotFound)?;
-        if project.status != status {
+        let changed = project.status != status;
+        if changed {
             project.status = status;
             project.updated_at = stamp.at;
             project.modified_by = Some(stamp.by.clone());
         }
-        Ok(project_view(&self.0, project))
+        Ok(Mutated {
+            value: project_view(&self.0, project),
+            changed,
+        })
     }
 }
 
@@ -405,7 +520,12 @@ pub struct InMemoryMemberships(pub TenancyStore);
 
 #[async_trait]
 impl MembershipRepository for InMemoryMemberships {
-    async fn attach(&self, membership: &Membership, _stamp: &Stamp) -> Result<MembershipRecord, RepositoryError> {
+    async fn attach(&self, membership: &Membership, stamp: &Stamp) -> Result<MembershipRecord, RepositoryError> {
+        let tx: Box<dyn Transaction> = Box::new(CountingTransaction::detached());
+        self.attach_in(&*tx, membership, stamp).await
+    }
+
+    async fn attach_in(&self, _tx: &dyn Transaction, membership: &Membership, _stamp: &Stamp) -> Result<MembershipRecord, RepositoryError> {
         let store = &self.0;
         let principal_uuid = membership.principal_id.uuid();
 
@@ -462,16 +582,37 @@ impl MembershipRepository for InMemoryMemberships {
     }
 
     async fn detach(&self, id: Uuid) -> Result<(), RepositoryError> {
+        let tx: Box<dyn Transaction> = Box::new(CountingTransaction::detached());
+        self.detach_in(&*tx, id).await?;
+        Ok(())
+    }
+
+    async fn detach_in(&self, _tx: &dyn Transaction, id: Uuid) -> Result<Vec<MembershipRecord>, RepositoryError> {
         let mut memberships = self.0.memberships.lock().unwrap();
         let membership = memberships.get(&id).cloned().ok_or(RepositoryError::NotFound)?;
         memberships.remove(&id);
+        let mut deleted = vec![to_record(&membership)];
 
+        // NOTE (SMA-606 D6): this fake cascades on `parent_org_uuid(&m.node)` — the org slot
+        // embedded in the caller's PRN — while Postgres resolves the STORED `org_id` by
+        // subquery. The two can disagree. That makes this a third statement in the drift set
+        // the spec's Risk 3 tracks; the agreement control is Postgres test case 11.
         if let TenancyNodeRef::Organization(org_id) = &membership.node {
             let org_uuid = org_id.uuid();
             let principal_uuid = membership.principal_id.uuid();
-            memberships.retain(|_, m| !(m.principal_id.uuid() == principal_uuid && parent_org_uuid(&m.node) == Some(org_uuid)));
+            memberships.retain(|_, m| {
+                let cascaded = m.principal_id.uuid() == principal_uuid && parent_org_uuid(&m.node) == Some(org_uuid);
+                if cascaded {
+                    deleted.push(to_record(m));
+                }
+                !cascaded
+            });
         }
-        Ok(())
+        // `memberships` is a `HashMap`, so `retain`'s iteration order is unspecified — sort to
+        // match `DETACH_PROJECT_SQL`'s `ORDER BY created_at, id` (same key `list_by_principal`
+        // already sorts on below), so the fake agrees with Postgres and with itself run to run.
+        deleted.sort_by_key(|r| (r.created_at, r.id));
+        Ok(deleted)
     }
 
     async fn list_by_principal(&self, principal: Uuid, limit: u64, offset: u64) -> Result<Vec<MembershipRecord>, RepositoryError> {
@@ -942,6 +1083,19 @@ impl KeyEntropy for SeqKeyEntropy {
 /// is exactly what its refusal tests need too. Reused, not re-derived — do not clone this type.
 pub(crate) struct CountingTransaction(pub(crate) Arc<AtomicUsize>);
 
+impl CountingTransaction {
+    /// A `CountingTransaction` with no shared owner (SMA-606 Task 4): its commit counter is a
+    /// throwaway `Arc`, for the node-repository fakes' `create`/`rename`/`set_status` wrappers,
+    /// which need SOME `Transaction` to hand their `_in` twin but have no `FakeUnitOfWork`/
+    /// caller to share a counter with (unlike `FakeUnitOfWork::begin`, which hands out a
+    /// `CountingTransaction` sharing ITS OWN counter so `FakeUnitOfWork::commits` can assert on
+    /// it). `pub(crate)` — not private to one impl — so Task 5's membership fake can reuse it
+    /// too.
+    pub(crate) fn detached() -> Self {
+        CountingTransaction(Arc::new(AtomicUsize::new(0)))
+    }
+}
+
 #[async_trait]
 impl Transaction for CountingTransaction {
     async fn commit(self: Box<Self>) -> Result<(), RepositoryError> {
@@ -1149,6 +1303,71 @@ impl FakePolicyGenBumper {
 impl PolicyGenBumper for FakePolicyGenBumper {
     async fn bump(&self) {
         self.0.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+/// Counts `bump()` calls so a test can assert the post-commit `entity_gen` bump ran, and ran
+/// after the commit (SMA-606 Testing case 7) — the `EntityGenBumper` twin of
+/// [`FakePolicyGenBumper`] above.
+#[derive(Clone, Default)]
+pub struct CountingGenBumper(pub Arc<AtomicUsize>);
+
+impl CountingGenBumper {
+    pub fn bumps(&self) -> usize {
+        self.0.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl EntityGenBumper for CountingGenBumper {
+    async fn bump(&self) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+/// An `EntityGenBumper` that snapshots a SHARED `FakeUnitOfWork`'s own commit counter the
+/// instant `bump()` runs (SMA-606 D7; hoisted here from three
+/// byte-identical per-module copies in `organizations.rs`/`teams.rs`/`projects.rs` by
+/// Task 7 fix-round-1 finding 2 — this module is already `#[cfg(test)]`-gated at the `pub mod fakes`
+/// declaration in `application/mod.rs`, so hoisting changes no visibility or shipping
+/// posture). `CountingGenBumper` alone cannot distinguish "the bump ran after the commit" from
+/// "the bump ran instead of/before the commit": moving `self.gen_bumper.bump().await` above
+/// `tx.commit().await?` leaves its call count identical either way. This bumper instead reads
+/// `uow.commits()` — which only advances inside `Transaction::commit` — the moment `bump()`
+/// fires: if `bump()` ran BEFORE the commit, the snapshot it captures is the PRE-commit count,
+/// not the post-commit one. Not to be confused with `system_retirement.rs`'s own
+/// `BumpSnapshotBumper`, which implements a different trait (`PolicyGenBumper`) over a
+/// different source (a bare `Arc<AtomicUsize>`, not a `FakeUnitOfWork`) — that one stays put.
+#[derive(Clone)]
+pub struct BumpSnapshotBumper {
+    uow: FakeUnitOfWork,
+    snapshot_at_bump: Arc<Mutex<Option<usize>>>,
+    calls: Arc<AtomicUsize>,
+}
+
+impl BumpSnapshotBumper {
+    pub fn new(uow: FakeUnitOfWork) -> Self {
+        BumpSnapshotBumper {
+            uow,
+            snapshot_at_bump: Arc::new(Mutex::new(None)),
+            calls: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    pub fn snapshot_at_bump(&self) -> Option<usize> {
+        *self.snapshot_at_bump.lock().unwrap()
+    }
+
+    pub fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl EntityGenBumper for BumpSnapshotBumper {
+    async fn bump(&self) {
+        *self.snapshot_at_bump.lock().unwrap() = Some(self.uow.commits());
+        self.calls.fetch_add(1, Ordering::SeqCst);
     }
 }
 
