@@ -102,7 +102,7 @@ jsonwebtoken = "10"
 # base64 — already an indirect dep via jsonwebtoken; the validator (SMA-443 Task 7) uses it
 # directly (URL_SAFE_NO_PAD engine) to base64url-decode a token's payload segment for the
 # UNVERIFIED `iss` read that picks which issuer's JWKS to check against.
-base64 = "0.22"
+base64 = "0.23"
 # PyO3 — Rust↔Python FFI for the bindings crates (ADR-0005). `abi3-py312` builds one
 # stable-ABI wheel for CPython >=3.12 (matches the py workspace's requires-python); the
 # `extension-module` feature omits the libpython link so plain `cargo build` works without
