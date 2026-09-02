@@ -38,6 +38,12 @@ overrides:
   # .prototools pins 24.16.0). Nothing resolves to 4.x today; this
   # selector exists so a future 4.x consumer is migrated rather than left unpatched.
   'brace-expansion@>=4.0.0 <5.0.9': '>=5.0.9 <6'
+  # GHSA-73wf-gq98-2v4g / GHSA-c83g-rgw3-j3cx — browserslist. normalizeStats() walks an
+  # untrusted browserslist-stats.json with an unguarded for...in, so an inherited
+  # Object.prototype key (e.g. "toString") crashes it and a literal "__proto__" key reaches
+  # the real prototype setter; separately its two result caches never evict. Reaches the
+  # graph only through @babel/core (styled-jsx -> next, and eslint-plugin-react-hooks).
+  'browserslist@>=4.0.0 <4.28.7': '>=4.28.7 <5'
   # GHSA-v2hh-gcrm-f6hx / GHSA-7p8r-x3mc-p8w7 — fast-uri. Transitive via ajv@8.
   'fast-uri@>=3.0.0 <3.1.5': '>=3.1.5 <4'
   # GHSA-h67p-54hq-rp68 / GHSA-52cp-r559-cp3m / GHSA-5p4m-2wfm-xmqj — js-yaml
