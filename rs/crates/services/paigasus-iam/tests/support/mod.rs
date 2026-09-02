@@ -283,7 +283,11 @@ pub async fn start_mock_idp() -> MockIdp {
         );
 
     let handle = tokio::spawn(async move {
-        axum_server::from_tcp_rustls(listener, tls).expect("server from tcp listener").serve(idp_routes.into_make_service()).await.expect("mock idp server");
+        axum_server::from_tcp_rustls(listener, tls)
+            .expect("server from tcp listener")
+            .serve(idp_routes.into_make_service())
+            .await
+            .expect("mock idp server");
     });
 
     MockIdp { issuer, sign, kid, jwks_body, handle }
@@ -362,7 +366,11 @@ pub async fn start_mock_idp_private_ca() -> (MockIdp, String) {
         );
 
     let handle = tokio::spawn(async move {
-        axum_server::from_tcp_rustls(listener, tls).expect("server from tcp listener").serve(idp_routes.into_make_service()).await.expect("mock idp server");
+        axum_server::from_tcp_rustls(listener, tls)
+            .expect("server from tcp listener")
+            .serve(idp_routes.into_make_service())
+            .await
+            .expect("mock idp server");
     });
 
     (MockIdp { issuer, sign, kid, jwks_body, handle }, ca_pem)
@@ -420,7 +428,11 @@ pub async fn start_mock_idp_self_signed() -> (MockIdp, String) {
         );
 
     let handle = tokio::spawn(async move {
-        axum_server::from_tcp_rustls(listener, tls).expect("server from tcp listener").serve(idp_routes.into_make_service()).await.expect("mock idp server");
+        axum_server::from_tcp_rustls(listener, tls)
+            .expect("server from tcp listener")
+            .serve(idp_routes.into_make_service())
+            .await
+            .expect("mock idp server");
     });
 
     (MockIdp { issuer, sign, kid, jwks_body, handle }, leaf_pem)
