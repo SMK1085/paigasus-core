@@ -228,6 +228,72 @@ def _find_attribute_sites(text):
         yield m.start(), text[m.start():i + 1]
 
 
+def _walk_back_attributes(text, start, where):
+    """Walk BACKWARDS from a `#[pyfunction]` site over the attributes written ABOVE it.
+
+    FIX C1 (final review, SMA-600), part 1 of 2. The forward window walk in `rust_declarations`
+    only ever looked DOWN from `#[pyfunction]` towards the `fn`, which left the attributes written
+    ABOVE it completely invisible. That is the wrong half to be blind to: for a `#[cfg]` the
+    upward order is the ONLY one that actually works in Rust, because cfg is evaluated before the
+    proc macro runs, so `#[cfg(...)]` under `#[pyfunction]` never gates anything while
+    `#[cfg(...)]` over it does. MEASURED at the `analyze()` level before this fix:
+
+        #[cfg(feature="extra")]
+        #[pyfunction]
+        fn gated(s: &str) -> String {}
+
+    reported CLEAN — under `--no-default-features` the real export set differs from what the stub
+    promises and the gate said green, which is precisely the "believed guarded" outcome this gate
+    exists to prevent. The same blindness applies to `#[pyo3(name = "x")]`, which renames the
+    export from above just as effectively as from below.
+
+    Symmetry with the forward walk is the point: the SAME `PERMITTED_INTERVENING_ATTRS` allowlist,
+    the same default-deny, the same refusal message shape. Widening or narrowing that one constant
+    therefore still moves both windows at once, as the README promises.
+
+    `text` is already `strip_noise`d, so `///` doc comments are blank lines by the time we get
+    here (they need no allowlist entry, exactly as in the forward walk) and no bracket inside a
+    string or comment can unbalance the scan. The walk stops — cleanly, not by refusing — at the
+    first preceding non-whitespace character that is not the `]` of an attribute: that is the end
+    of the previous item (`;`, `}`, ...), i.e. the top of this item's attribute run.
+    """
+    i = start - 1
+    while i >= 0:
+        while i >= 0 and text[i].isspace():
+            i -= 1
+        if i < 0 or text[i] != "]":
+            return  # the attribute run above this #[pyfunction] is exhausted
+        # Bracket-balanced backwards to the matching `[`. Depth-counted rather than a reverse
+        # `rfind`, because an attribute may legitimately nest brackets (`#[foo(bar[0])]`).
+        depth, j = 0, i
+        while j >= 0:
+            if text[j] == "]":
+                depth += 1
+            elif text[j] == "[":
+                depth -= 1
+                if depth == 0:
+                    break
+            j -= 1
+        else:
+            raise Refused(f"{where}: unbalanced `]` above #[pyfunction] (§4.3)")
+        # An attribute is `#[`; an INNER attribute is `#![`. Anything else (an array expression,
+        # an index) is not an attribute and ends the run.
+        k = j - 1
+        if k >= 0 and text[k] == "!":
+            k -= 1
+        if k < 0 or text[k] != "#":
+            return
+        m = re.match(r"#!?\[\s*(\w+)", text[k:])
+        if not m:
+            # A bracket attribute whose name we cannot even read. Refuse rather than skip: an
+            # unreadable attribute is exactly the case where guessing "it changes nothing" is
+            # unjustified.
+            raise Refused(f"{where}: an unreadable attribute sits above #[pyfunction] (§4.3)")
+        if m.group(1) not in PERMITTED_INTERVENING_ATTRS:
+            raise Refused(f"{where}: attribute #[{m.group(1)}...] sits above #[pyfunction] (§4.3)")
+        i = k - 1
+
+
 def rust_declarations(sources):
     """Set A. `sources` maps display path -> file text. Raises Refused on any §4 shape."""
     out = {}
@@ -240,6 +306,37 @@ def rust_declarations(sources):
         # refuses outright.
         if re.search(r"\bmacro_rules!", text):
             raise Refused(f"{path}: macro_rules! is in scope — a source scanner cannot see what it emits (§4.2)")
+
+        # §4.3 / FIX C2 (final review, SMA-600) — a `#[pyclass]`-only crate used to report CLEAN
+        # even with a real export and no stub, and the mechanism is worth spelling out because it
+        # is the gate's own bearing test turning against it. `rust_declarations` matches only
+        # `#[pyfunction]`, so a class-only crate yielded `{}`; `analyze` then short-circuited at
+        # `if not decls: continue` BEFORE `rust_registrations` ever ran, so the module-body
+        # default-deny never saw `m.add_class::<Foo>()?`. And because "PyO3-bearing" is defined as
+        # "declares any #[pyfunction]", the crate was classified not-PyO3-bearing and the whole
+        # "declares exports but has no .pyi" arm was bypassed. MEASURED before this fix: a crate
+        # exporting `Foo` with NO stub returned []. A file-global refusal — deliberately shaped
+        # like the macro_rules! one above, because it closes the same class of hole — means the
+        # bearing test cannot be dodged by declaring a class instead of a function.
+        if re.search(r"#!?\[\s*py(class|methods)\b", text):
+            raise Refused(f"{path}: #[pyclass]/#[pymethods] is in scope — a class surface is not modelled (§4.3)")
+
+        # §4.3 / FIX C1 (final review, SMA-600), part 2 of 2 — see `_walk_back_attributes` for
+        # part 1. The backward walk catches a `#[cfg]` sitting directly above a `#[pyfunction]`,
+        # which is the shape that measured CLEAN. It cannot catch the OTHER cfg shape §4.3 and the
+        # README both promise a refusal for: a `#[cfg(...)]` on an ENCLOSING `mod foo;`
+        # declaration, which lives in the parent file with no `#[pyfunction]` beneath it to walk
+        # back from. A `#![cfg(...)]` inner attribute at the top of a file gates the whole module
+        # and is equally out of the walk's reach. Both make the exported set
+        # configuration-dependent, so one static answer is wrong — and this gate's rule is that an
+        # unmodelled shape REDS rather than being silently skipped. Hence a file-global refusal
+        # too, coarse but fail-closed. It costs nothing on the real tree: MEASURED, no `#[cfg`,
+        # `#[cfg_attr`, `#[pyclass]` or `#[pymethods]` appears anywhere under
+        # rs/crates/bindings/*/src/. Note this does NOT make the backward walk redundant — the
+        # walk's real prize is `#[pyo3(name = "x")]` written ABOVE `#[pyfunction]`, which renames
+        # the export and which no cfg check would ever see.
+        if re.search(r"#!?\[\s*cfg(_attr)?\b", text):
+            raise Refused(f"{path}: #[cfg]/#[cfg_attr] is in scope — the exported set becomes configuration-dependent (§4.3)")
 
         # §4.3 — an inline `mod { ... }` is unmodelled, and a #[cfg] on one makes the exported set
         # configuration-dependent, so one static answer is wrong. The visibility group mirrors
@@ -259,6 +356,11 @@ def rust_declarations(sources):
             # §4.3 — `#[pyfunction(...)]` with arguments may carry name= or signature=.
             if attr.strip() != "#[pyfunction]":
                 raise Refused(f"{where}: {attr.strip()!r} carries arguments — it may rename or reshape the export (§4.3)")
+
+            # FIX C1 — the attributes ABOVE this one, default-deny (see the helper's docstring).
+            # Runs before the forward walk so an upward `#[cfg]`/`#[pyo3(...)]` is reported at the
+            # same `where` and with the same message shape as its downward twin.
+            _walk_back_attributes(text, start, where)
 
             cursor = start + len(attr)
             # §4.3 item 1 — walk the attribute window, default-deny.
@@ -283,6 +385,16 @@ def rust_declarations(sources):
             # §4.3 item 2 — pub/pub(crate)/pub(super) accepted and ignored; the rest refused.
             head = re.match(r"\s*(pub(\s*\([^)]*\))?\s+)?", rest)
             after_vis = rest[head.end():]
+            # FIX I4(a) (final review, SMA-600) — this loop is deliberately ordered BEFORE the
+            # `fn NAME(` regex below, so an `async fn` refuses for the STATED reason ("`async fn`
+            # is refused") rather than incidentally, via the generic "no parsable `fn NAME(`"
+            # message the regex would otherwise produce. Both are rc 1 and both are correct
+            # verdicts, so the ordering is invisible from outside — which is exactly why the
+            # self-test now asserts the MESSAGE, not merely the exception type (FIX I4(b)).
+            # Without that assertion `_REFUSED_ITEM_MODIFIERS = ()` was MEASURED to leave the
+            # self-test fully green: the constant only changed a message nothing looked at, which
+            # made five refusal rows unfalsifiable and contradicted `_expect_refused`'s own
+            # docstring. Do not reorder this below the regex.
             for bad in _REFUSED_ITEM_MODIFIERS:
                 if after_vis.startswith(bad):
                     raise Refused(f"{where}: `{bad.strip()} fn` is refused — PyO3 handling is not modelled (§4.3)")
@@ -528,33 +640,25 @@ STUB_GLOB = "rs/crates/bindings/*/*.pyi"
 SENTINEL = "sum_as_string"
 SENTINEL_CRATE = "paigasus-py-bindings"
 
-# §4.5 — ships EMPTY. (crate, marker) -> why. A waiver naming a shape no longer present is
-# itself rc 1, so the table cannot rot into a silent blanket.
-ALLOW_UNPARSED_SHAPE = {}
+# FIX I3 (final review, SMA-600) — there is deliberately NO waiver table here, and the deletion
+# of the one that used to sit on this line is a correctness fix, not a simplification. The old
+# `ALLOW_UNPARSED_SHAPE` was INERT: MEASURED, a live waiver row did not suppress the `macro_rules!`
+# refusal, or any other §4 refusal, because nothing on the refusal path ever consulted the table —
+# only the staleness report read it. An inert table is strictly WORSE than no table, because it
+# documents an escape hatch that does not exist and invites a future author to add a row and
+# believe the shape is now excused.
+#
+# It was deleted rather than implemented. A §4 shape is fixed at the SOURCE — the commit that
+# introduced it can remove it, which is the whole reason every refusal here is rc 1 and not rc 2 —
+# so a waiver would be a way to keep an unreadable shape AND a green gate, which is the
+# "believed guarded" outcome this file exists to prevent. Implementing it properly would also mean
+# threading a lookup through every refusal site in this file for a table with no known use case.
+# This mirrors §3.2's standing decision to ship no divergence table until a genuine entry appears.
 
 # rust: dict[str, str] display-path -> text, mirroring the `sources` shape every extractor above
 # already takes. stub_path/stub_text/pyproject are all `| None` — a crate can legitimately have
 # no stub (§5.1, itself a problem) or no pyproject.toml (§5.4, itself a Refused).
 Crate = NamedTuple("Crate", [("name", str), ("rust", dict), ("stub_path", object), ("stub_text", object), ("pyproject", object)])
-
-
-def stale_waivers(table=None, live=None):
-    """Waiver keys naming a crate that is no longer present. §4.5.
-
-    A waiver that has outlived the shape it excused would otherwise become a silent
-    blanket, so a stale row is itself an error rather than a no-op.
-
-    `live` is injectable so the self-test can assert this against a fixed set rather than
-    the real tree — `analyze`/this function must stay pure and filesystem-free for Task 4's
-    `--negative-control` to hold; only `check()` (via the default `live=None`) touches disk.
-    """
-    table = ALLOW_UNPARSED_SHAPE if table is None else table
-    if live is None:
-        live = {
-            Path(p).relative_to(REPO).parts[3]
-            for p in glob.glob(str(REPO / SCAN_GLOB), recursive=True)
-        }
-    return sorted(k for k in table if k[0] not in live)
 
 
 def _maturin_module_name(pyproject_text, crate):
@@ -743,9 +847,7 @@ def check():
     if not (SENTINEL in a and SENTINEL in b and SENTINEL in c):
         raise InfraError(f"the sentinel {SENTINEL!r} is missing from A/B/C — the extractors are not reading the real crate")
 
-    stale = stale_waivers()
-    problems = [f"ALLOW_UNPARSED_SHAPE{k!r} names a crate that no longer exists (§4.5)" for k in stale]
-    problems += analyze(crates)
+    problems = analyze(crates)
 
     print(f"pyo3-stub: crates: {' '.join(sorted(names))}", file=sys.stderr)
     if problems:
@@ -762,7 +864,7 @@ def check():
 # --------------------------------------------------------------------------------------------
 
 
-def _expect_refused(label, sources):
+def _expect_refused(label, sources, expect=None):
     """Self-test helper: `sources` must make rust_declarations() raise Refused.
 
     Returns a FAIL message string if it did not (either it returned cleanly, or it raised
@@ -770,10 +872,22 @@ def _expect_refused(label, sources):
     pass is worse than no row (review finding 3) — every case fed through this helper was
     confirmed to actually go red when its corresponding check was disabled in a scratch copy of
     this file; see task-1-report.md's fix-round-1 section for that transcript.
+
+    FIX I4(b) (final review, SMA-600) — `expect` is a required substring of the refusal MESSAGE,
+    and the docstring paragraph above was, for five rows, false when written. Asserting only "a
+    Refused was raised" cannot distinguish the check under test from any OTHER check that happens
+    to refuse the same fixture first, so a row can be structurally unable to fail. MEASURED: with
+    `_REFUSED_ITEM_MODIFIERS = ()` the four modifier rows stayed green, because the `fn NAME(`
+    regex then failed and raised its own generic refusal instead. Passing `expect` binds a row to
+    the check it is named for. The `where-boundary-refuse` row already did exactly this inline
+    (`if "'Anywhere'" not in exc.message`); this parameter is that pattern, hoisted so the table
+    rows can use it too. Rows with no ambiguity about which check fires may still omit `expect`.
     """
     try:
         got = rust_declarations(sources)
-    except Refused:
+    except Refused as exc:
+        if expect is not None and expect not in exc.message:
+            return f"  FAIL [{label}] refused for the WRONG reason: expected {expect!r} in {exc.message!r}"
         return None
     return f"  FAIL [{label}] expected Refused, got {got!r}"
 
@@ -842,11 +956,44 @@ def self_test():
         # An un-permitted attribute in the window between #[pyfunction] and `fn` — #[pyo3(...)]
         # can rename the export, so the window walk is default-deny.
         ("attr-window", {"<t>": '#[pyfunction]\n#[pyo3(name = "x")]\nfn f(s: &str) -> String {}\n'}),
-        # Refused item modifiers (§4.3 item 2) — PyO3 handling of each is not modelled.
-        ("async-fn", {"<t>": "#[pyfunction]\nasync fn f(s: &str) -> String {}\n"}),
-        ("unsafe-fn", {"<t>": "#[pyfunction]\nunsafe fn f(s: &str) -> String {}\n"}),
-        ("const-fn", {"<t>": "#[pyfunction]\nconst fn f(s: &str) -> String {}\n"}),
-        ("extern-fn", {"<t>": '#[pyfunction]\nextern "C" fn f(s: &str) -> String {}\n'}),
+        # Refused item modifiers (§4.3 item 2) — PyO3 handling of each is not modelled. The third
+        # element pins the MESSAGE (FIX I4(b)): without it these four rows were MEASURED to stay
+        # green with `_REFUSED_ITEM_MODIFIERS = ()`, refusing instead on the generic "no parsable
+        # `fn NAME(`" path and asserting nothing about the modifier check at all.
+        ("async-fn", {"<t>": "#[pyfunction]\nasync fn f(s: &str) -> String {}\n"}, "`async fn` is refused"),
+        ("unsafe-fn", {"<t>": "#[pyfunction]\nunsafe fn f(s: &str) -> String {}\n"}, "`unsafe fn` is refused"),
+        ("const-fn", {"<t>": "#[pyfunction]\nconst fn f(s: &str) -> String {}\n"}, "`const fn` is refused"),
+        ("extern-fn", {"<t>": '#[pyfunction]\nextern "C" fn f(s: &str) -> String {}\n'}, "`extern fn` is refused"),
+        # FIX C1 (final review, SMA-600) — the attribute run ABOVE #[pyfunction], which the
+        # forward-only window walk could not see. Three rows, deliberately isolating the two
+        # independent checks that now close this so neither can hide the other's regression:
+        #
+        #   attr-above-window   caught ONLY by `_walk_back_attributes` — no cfg anywhere, so the
+        #                       file-global cfg refusal cannot fire. This is the renaming shape,
+        #                       and the more dangerous of the two: #[pyo3(name = "x")] above the
+        #                       attribute puts a WRONG NAME in set A while A/B/C still agree.
+        #   cfg-above-pyfunction  the exact reproduction from the review. Covered by BOTH checks
+        #                       (the file-global one runs first); each alone reds it.
+        #   cfg-enclosing-mod   caught ONLY by the file-global cfg refusal — the `#[cfg]` sits on
+        #                       a `mod foo;` DECLARATION with no #[pyfunction] beneath it, so
+        #                       there is nothing for the backward walk to walk back from. This is
+        #                       the "on an enclosing mod" half §4.3 and the README both promise.
+        ("attr-above-window", {"<t>": '#[pyo3(name = "x")]\n#[pyfunction]\nfn f(s: &str) -> String {}\n'},
+         "sits above #[pyfunction]"),
+        ("cfg-above-pyfunction", {"<t>": '#[cfg(feature="extra")]\n#[pyfunction]\nfn gated(s: &str) -> String {}\n'},
+         "configuration-dependent"),
+        ("cfg-below-pyfunction", {"<t>": '#[pyfunction]\n#[cfg(feature="extra")]\nfn gated(s: &str) -> String {}\n'},
+         "configuration-dependent"),
+        ("cfg-enclosing-mod", {"<t>": '#[cfg(feature="extra")]\nmod other;\n\n#[pyfunction]\nfn f(s: &str) -> String {}\n'},
+         "configuration-dependent"),
+        ("cfg-attr", {"<t>": '#[cfg_attr(test, allow(dead_code))]\nmod other;\n\n#[pyfunction]\nfn f(s: &str) -> String {}\n'},
+         "configuration-dependent"),
+        # FIX C2 — the file-global class refusal, both spellings. `#[pymethods]` alone is a real
+        # shape (an impl block for a class declared in another file), so it gets its own row
+        # rather than riding on the `#[pyclass]` one.
+        ("pyclass", {"<t>": "#[pyclass]\nstruct Foo {}\n"}, "#[pyclass]/#[pymethods] is in scope"),
+        ("pymethods", {"<t>": "#[pymethods]\nimpl Foo {\n    fn bar(&self) -> i64 { 1 }\n}\n"},
+         "#[pyclass]/#[pymethods] is in scope"),
         # A raw identifier — PyO3 strips the `r#` prefix from the exported name.
         ("raw-ident", {"<t>": "#[pyfunction]\nfn r#type(s: &str) -> String {}\n"}),
         # The same name declared twice across two different `sources` entries.
@@ -861,8 +1008,10 @@ def self_test():
         # callers must never pass.
         ("python-injected", {"<t>": "#[pyfunction]\nfn f(py: Python<'_>, s: &str) -> String {}\n"}),
     ]
-    for label, sources in refusal_cases:
-        fail = _expect_refused(label, sources)
+    # Rows are (label, sources) or (label, sources, expected_message_substring) — see
+    # `_expect_refused`'s FIX I4(b) note for why the third element exists and when to supply it.
+    for row in refusal_cases:
+        fail = _expect_refused(*row)
         if fail:
             print(fail, file=sys.stderr)
             rc = 1
@@ -880,6 +1029,31 @@ def self_test():
     else:
         if got != {"f": ((("s", "str"),), "str")}:
             print(f"  FAIL [attr-window-permitted] wrong signature: {got}", file=sys.stderr)
+            rc = 1
+
+    # FIX C1 — the positive half of the BACKWARD walk, mirroring the forward one above. Without
+    # this row `_walk_back_attributes` could refuse every attribute above a #[pyfunction] — which
+    # would "pass" all three of its refusal rows — and still be wrong: `#[allow]`, `#[doc = "…"]`
+    # and `#[inline]` above the attribute are ordinary Rust and, per the shared allowlist, cannot
+    # change what PyO3 exports. Two attributes stacked, plus a `///` doc comment (blanked by
+    # strip_noise before the walk ever runs, so it needs no allowlist entry), plus a preceding
+    # item whose `;` must STOP the walk cleanly rather than refuse.
+    back_permitted = {"<t>": (
+        "const OTHER: i64 = 1;\n"
+        "/// docs above the attributes\n"
+        "#[allow(dead_code)]\n"
+        "#[inline]\n"
+        "#[pyfunction]\n"
+        "fn f(s: &str) -> String {}\n"
+    )}
+    try:
+        got = rust_declarations(back_permitted)
+    except Refused as exc:
+        print(f"  FAIL [attr-above-permitted] permitted attributes above #[pyfunction] refused: {exc.message}", file=sys.stderr)
+        rc = 1
+    else:
+        if got != {"f": ((("s", "str"),), "str")}:
+            print(f"  FAIL [attr-above-permitted] wrong signature: {got}", file=sys.stderr)
             rc = 1
 
     # Review finding 2 — the return-type regex must stop at a STANDALONE `where`, not any place
@@ -1010,22 +1184,32 @@ def self_test():
     # Set C — §4.3 stub side. Every one of these is refused, because the Rust side has nothing
     # to compare against and a silent skip would leave the symbol unchecked.
     # --------------------------------------------------------------------------------------
-    for label, stub in [
+    # The optional third element pins the refusal MESSAGE (FIX I4(b), stub side). The `async` row
+    # needed it for the same reason the four Rust modifier rows did: MEASURED, `if False:`-ing the
+    # `ast.AsyncFunctionDef` branch left this row GREEN, because `ast.AsyncFunctionDef` is not a
+    # subclass of `ast.FunctionDef` and the generic "top-level X is not a `def`" branch caught it
+    # instead — a different check, a different message, and a row that could not fail for its own
+    # stated reason.
+    for row in [
         ("varargs",    "def f(*args) -> str: ...\n"),
         ("kwargs",     "def f(**kw) -> str: ...\n"),
         ("default",    "def f(a: int = 1) -> str: ...\n"),
         ("kwonly",     "def f(*, a: int) -> str: ...\n"),
         ("posonly",    "def f(a: int, /) -> str: ...\n"),
         ("decorated",  "@overload\ndef f(a: int) -> str: ...\n"),
-        ("async",      "async def f(a: int) -> str: ...\n"),
+        ("async",      "async def f(a: int) -> str: ...\n", "`async def f`"),
         ("no_ann",     "def f(a) -> str: ...\n"),
         ("no_return",  "def f(a: int): ...\n"),
         ("class",      "class C: ...\n"),
     ]:
+        label, stub = row[0], row[1]
+        expect = row[2] if len(row) > 2 else None
         try:
             stub_definitions("<stub>", stub)
-        except Refused:
-            pass
+        except Refused as exc:
+            if expect is not None and expect not in exc.message:
+                print(f"  FAIL [stub] {label} refused for the WRONG reason: expected {expect!r} in {exc.message!r}", file=sys.stderr)
+                rc = 1
         else:
             print(f"  FAIL [stub] {label} was accepted; it must be refused (§4.3)", file=sys.stderr)
             rc = 1
@@ -1117,24 +1301,36 @@ def self_test():
         print(f"  FAIL [attr window] #[allow] was refused; it is permitted: {analyze(allowed)}", file=sys.stderr)
         rc = 1
 
-    # §5.1 — a PyO3-bearing crate with no stub, and two stubs in one crate, are both rc 1.
+    # §5.1 — a PyO3-bearing crate with no stub is rc 1, and this row asserts it.
+    #
+    # FIX I5(c) (final review, SMA-600): this comment used to claim "...and two stubs in one
+    # crate, are both rc 1". Neither half was true. There is no assertion here for the two-stub
+    # case at all, and there cannot be: two stubs is a SCAN-SHAPE ambiguity that `discover()`
+    # raises as an `InfraError` (rc 2, not rc 1) after reading the filesystem, while everything in
+    # this block asserts `analyze()`, which is pure and never sees a directory listing. The
+    # comment now says only what the code below actually checks.
     if analyze([Crate("c", {"lib.rs": _fixture()[0].rust["lib.rs"]}, None, None, '[tool.maturin]\nmodule-name = "mod_x"\n')]) == []:
         print("  FAIL [no stub] a PyO3-bearing crate with no .pyi reported clean (§5.1)", file=sys.stderr)
         rc = 1
 
-    # §4.5 — a waiver naming a shape that is not present is itself an error, so the table
-    # cannot silently rot. `live` is passed explicitly (see stale_waivers' docstring): this must
-    # not depend on what the real tree happens to contain right now.
-    if not stale_waivers({("nonexistent-crate", "macro_rules"): "reason"}, live={"paigasus-py-bindings"}):
-        print("  FAIL [waiver] a stale ALLOW_UNPARSED_SHAPE row was not reported (§4.5)", file=sys.stderr)
+    # FIX C2 (final review, SMA-600) — a `#[pyclass]`-only crate with a real `m.add_class::<Foo>()?`
+    # export and NO stub. MEASURED before the fix: analyze() returned [] — the crate declares no
+    # `#[pyfunction]`, so it was classified not-PyO3-bearing, `analyze` short-circuited at
+    # `if not decls: continue`, and the module-body default-deny that would have caught
+    # `add_class` never ran. The file-global `#[pyclass]`/`#[pymethods]` refusal is what makes the
+    # bearing test undodgeable. Asserted on the MESSAGE, not merely on non-emptiness: a fixture
+    # this shape could otherwise start reporting for some unrelated reason and the row would keep
+    # passing while the refusal itself was gone.
+    pyclass_only = [Crate("c", {"lib.rs":
+        "#[pyclass]\nstruct Foo {}\n"
+        "#[pymodule]\nfn mod_x(m: &Bound<'_, PyModule>) -> PyResult<()> {\n"
+        "    m.add_class::<Foo>()?;\n    Ok(())\n}\n"},
+        None, None, '[tool.maturin]\nmodule-name = "mod_x"\n')]
+    problems = analyze(pyclass_only)
+    if not any("#[pyclass]/#[pymethods] is in scope" in p for p in problems):
+        print(f"  FAIL [pyclass-only] a class-only crate with no stub was not reported: {problems}", file=sys.stderr)
         rc = 1
 
-    # ...and a waiver naming a crate that IS live must NOT be reported stale — otherwise every
-    # legitimate waiver would also fail this check, and the row above could pass for the wrong
-    # reason (stale_waivers reporting everything, live or not).
-    if stale_waivers({("paigasus-py-bindings", "macro_rules"): "reason"}, live={"paigasus-py-bindings"}):
-        print("  FAIL [waiver] a live crate's waiver was reported stale (§4.5)", file=sys.stderr)
-        rc = 1
 
     # --------------------------------------------------------------------------------------
     # Fix round 1 (controller ruling, SMA-600): three `analyze()` branches disclosed as
@@ -1211,7 +1407,7 @@ def self_test():
 
 
 def negative_control():
-    """Mutate a COPY of the real crate three ways and assert each reds. §7.2 / AC 4.
+    """Mutate a COPY of the real crate four ways and assert each reds. §7.2 / AC 4.
 
     A self-test (above) asserts `analyze()` against synthetic fixtures built entirely in memory;
     it never touches the real tree, so it cannot prove the gate actually bites on THIS crate's
@@ -1219,11 +1415,12 @@ def negative_control():
     output and mutates the STRINGS it carries (`Crate.rust`, `Crate.stub_text`) via `._replace()`
     — never a file on disk. `analyze()` is documented pure over in-memory text (see its own
     docstring), so this works without a tempdir: no mutated bytes are ever written anywhere, so a
-    process death mid-run leaves the working tree exactly as it was. Each of the three mutations
-    below reproduces one of AC 1-3's drift shapes directly against `paigasus-py-bindings`'
-    real lib.rs/pyi, and a fourth row re-asserts the UNMUTATED crate is clean — without that row,
-    a bug that made `analyze()` red on everything would make all three mutation rows pass for the
-    wrong reason.
+    process death mid-run leaves the working tree exactly as it was. The first three mutations
+    below reproduce AC 1-3's drift shapes directly against `paigasus-py-bindings`' real lib.rs/pyi;
+    a fourth (AC 4b, added in the final review) retypes a stub annotation, which is the only one
+    of the four that reaches the full-signature comparison rather than a set-membership check; and
+    a final row re-asserts the UNMUTATED crate is clean — without that row, a bug that made
+    `analyze()` red on everything would make all four mutation rows pass for the wrong reason.
     """
     crates = discover()
     base = next(c for c in crates if c.name == SENTINEL_CRATE)
@@ -1259,7 +1456,24 @@ def negative_control():
     kept = "\n".join(l for l in base.stub_text.splitlines() if not l.startswith(f"def {SENTINEL}(")) + "\n"
     _expect_red("AC3 deleted stub def", base._replace(stub_text=kept))
 
-    # ...and the UNMUTATED crate must still be clean, or the three rows above prove nothing.
+    # AC 4b (final review, SMA-600) — a RETYPED stub annotation. The three rows above are all
+    # set-MEMBERSHIP drift (a name present on one side and absent on the other), so MEASURED,
+    # neutering `if decls[name] != stub[name]:` in `analyze` left this whole control GREEN — the
+    # full-signature comparison, which is §3's headline decision and the reason `RUST_TO_PY`
+    # exists at all, was the one thing the real-tree control did not exercise. `mint_uuid7`'s
+    # `unix_ms: float` is the anchor: it is the stub's only non-`str`/non-`int` annotation, so the
+    # replacement below cannot collide with another line, and `float` -> `int` is exactly the
+    # silent class §3 cites (a Rust `f64` change against a stub still claiming `float`, and its
+    # inverse).
+    retyped = base.stub_text.replace("def mint_uuid7(unix_ms: float,", "def mint_uuid7(unix_ms: int,", 1)
+    if retyped == base.stub_text:
+        # An anchor that no longer matches would make this row assert nothing while still
+        # "passing" — the same unfalsifiable shape the self-test's own fix round removed. rc 2:
+        # the control's fixture is broken, which is a checker problem, not a repo regression.
+        raise InfraError("negative control AC4b: the `mint_uuid7(unix_ms: float,` anchor is absent from the stub")
+    _expect_red("AC4b retyped stub annotation", base._replace(stub_text=retyped))
+
+    # ...and the UNMUTATED crate must still be clean, or the rows above prove nothing.
     if analyze([base]) != []:
         print(f"  FAIL negative control: the unmutated crate is not clean: {analyze([base])}", file=sys.stderr)
         failures += 1

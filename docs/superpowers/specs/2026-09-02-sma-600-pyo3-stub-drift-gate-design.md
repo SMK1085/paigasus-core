@@ -244,7 +244,8 @@ close this, which is one of the two reasons arm 2 exists (§4.4). Arm 1 refuses 
 | `#[pyfunction(…)]` / `#[pyo3(…)]` carrying arguments, **on any attribute line in the window** | may carry `name = "…"` or `signature = (…)`, renaming or reshaping the exported symbol |
 | `#[pyclass]`, `#[pymethods]` | a whole class surface the stub would describe and the scanner does not model |
 | `#[pymodule_export]`, a declarative module, a second `#[pymodule]`, **zero** `#[pymodule]` | changes where registrations come from; set **B** would be extracted from the wrong place or not at all |
-| `#[cfg(…)]` on a `#[pyfunction]` **or on an enclosing `mod`** | the exported set becomes configuration-dependent, so one static answer is wrong |
+| `#[cfg(…)]` on a `#[pyfunction]` **or on an enclosing `mod`** | the exported set becomes configuration-dependent, so one static answer is wrong. Closed twice over: the backward attribute walk (item 1 below) catches the attribute sitting directly above a `#[pyfunction]`, and a **file-global** refusal for any `#[cfg`/`#[cfg_attr` — shaped like the `macro_rules!` one — catches the enclosing-`mod` and `#![cfg(...)]` shapes, which have no `#[pyfunction]` beneath them to walk back from |
+| `#[pyclass]`, `#[pymethods]` — **file-global**, like `macro_rules!` | a class-only crate used to report CLEAN even with a real `m.add_class::<Foo>()?` export and no `.pyi`: it declares no `#[pyfunction]`, so it was classified not-PyO3-bearing and `analyze` short-circuited before the module-body default-deny ever ran. A file-global refusal is what makes the bearing test undodgeable |
 | a `fn` signature the scanner cannot parse | never silently dropped from set **A** |
 | the same function name declared twice across the scanned files | a `{name: Signature}` map would silently overwrite |
 
@@ -255,7 +256,14 @@ docstring.
 
 **The parse contract, stated so two implementers build the same scanner:**
 
-1. **The attribute window** is every attribute line between `#[pyfunction]` and the `fn` item.
+1. **The attribute window** is every attribute line between `#[pyfunction]` and the `fn` item —
+   **and, since the final review, every attribute line ABOVE `#[pyfunction]` too.** Rev 2 described
+   only the downward half and the implementation built only that, which was the wrong half to be
+   blind to: for a `#[cfg]` the UPWARD order is the only one that works in Rust, because cfg is
+   evaluated before the proc macro runs. MEASURED at `analyze()` level before the fix,
+   `#[cfg(feature="extra")]` above `#[pyfunction] fn gated(...)` reported CLEAN. The same
+   blindness applied to `#[pyo3(name = "x")]`, which renames the export from above just as well as
+   from below. Both directions now use the same allowlist and the same default-deny.
    Intervening attributes are **default-deny with an allowlist**: `#[allow(…)]`, `#[expect(…)]`,
    `#[doc = …]`, `#[inline]`, `#[must_use]` and `///` doc comments are permitted and ignored;
    anything else is rc 1. This is what makes a `#[pyo3(name = "x")]` on its own line refused
@@ -298,14 +306,26 @@ Arm 1 handles both by refusing to run, which is safe but means the repo simply c
 constructs. Arm 2 (§6) makes them *checkable* instead, because it asks the compiled module what it
 actually exports.
 
-### 4.5 One waiver table
+### 4.5 No waiver table — amended in the final review
 
-`ALLOW_UNPARSED_SHAPE` **ships empty** and requires a non-empty reason string per entry — the
-repo's universal idiom (`T_EXEMPT`, `ALLOW_DEAD_INPUT`, `REQUIRED_INPUT_SKIP`, `BRANCH_SKIP`,
-`COE_SKIP`, `ALLOW_NO_CARGO_BACKING` all ship empty or reasoned). A waiver naming a shape that is
-no longer present is itself rc 1, so the table cannot silently rot. It waives *shapes the scanner
-cannot read* and nothing else — per §3.2 there is deliberately no waiver for a comparison the
-author disagrees with.
+**Rev 2 specified an `ALLOW_UNPARSED_SHAPE` table. It shipped INERT, and the final review deleted
+it rather than implementing it.**
+
+What was measured: a live waiver row did not suppress the `macro_rules!` refusal, or any other §4
+refusal. Nothing on any refusal path ever consulted the table — only the staleness report read it.
+So the escape hatch §4.5 documented did not exist, while the documentation of it invited a future
+author to add a row and believe the shape was excused. An inert table is strictly worse than no
+table.
+
+**Decided: there is deliberately NO waiver for an unreadable shape.** A §4 shape is fixed at the
+*source*. That is the same reasoning that makes every refusal here rc 1 rather than rc 2 — a
+commit introduced the shape and a commit can remove it — and a waiver would be a way to keep both
+the unreadable shape *and* a green gate, which is the "believed guarded" outcome this whole gate
+exists to prevent. Implementing it properly would also have meant threading a lookup through every
+refusal site in `check.py` for a table with no known use case.
+
+This mirrors §3.2's standing decision: ship no exemption table until a genuine entry appears, then
+add it with a reason column like every other in the repo.
 
 ---
 
@@ -343,11 +363,11 @@ Both **byte-identical** to the Moon task's `inputs` entries, as `repo:http-extra
 `repo:workflow-credentials` each require of themselves — scheduling and scanning must not be able
 to drift apart. A bindings crate is **PyO3-bearing** if it declares any `#[pyfunction]`; such a
 crate with **no** `.pyi` is rc 1, and a `.pyi` with no PyO3-bearing crate is rc 1. Exactly one
-`.pyi` per crate: zero or two is rc 1 naming what was found. `paigasus-node-bindings` and
+`.pyi` per crate. **Zero** is rc 1 (the crate exports something the stub does not describe). **Two** is rc **2**, not rc 1 — amended in the final review to match the code. Two stubs make the SCAN SHAPE ambiguous: `discover()` cannot pick one without guessing, which is the exact thing this gate refuses to do, and every other ambiguity `discover()` hits (a glob matching nothing, a scan root that moved) is already rc 2. The docs said rc 1 and the code said rc 2; the code is right and the docs were aligned to it. `paigasus-node-bindings` and
 `paigasus-wasm` declare no `#[pyfunction]` and are correctly out of scope, disk-conditionally —
 the same idiom as A7's `{upstream}/*.pyi` clause.
 
-Constants: `RUST_TO_PY` (§3), `ALLOW_UNPARSED_SHAPE` (§4.5), `PERMITTED_MODULE_STATEMENTS` (§4.1),
+Constants: `RUST_TO_PY` (§3), `PERMITTED_MODULE_STATEMENTS` (§4.1),
 `PERMITTED_INTERVENING_ATTRS` (§4.3).
 
 ### 5.2 Extractors
@@ -503,8 +523,12 @@ An in-process table of synthetic `(rust_src, pyi_src)` pairs with expected verdi
 | §4.3 | each refused stub shape — one row each | rc 1 |
 | §4.3 | `strip_noise`'s two inherited rows (lifetime-vs-char-literal, line offset) | rc 0 |
 | §4.3 | `#[pyfunction]` inside a `///` comment or a raw string | rc 0 — no phantom |
-| §4.5 | a waiver naming a shape not present | rc 1 |
-| §5.1 | a PyO3-bearing crate with no `.pyi`; two `.pyi` in one crate | rc 1 |
+| §4.3 | `#[cfg]`/`#[cfg_attr]` ABOVE a `#[pyfunction]`, below it, and on an enclosing `mod` | rc 1 |
+| §4.3 | `#[pyo3(name = "x")]` written ABOVE `#[pyfunction]` | rc 1 |
+| §4.3 | permitted attributes (`#[allow]`, `#[inline]`, `///`) ABOVE `#[pyfunction]` | rc 0 — permitted |
+| §4.3 | `#[pyclass]` / `#[pymethods]` anywhere in scope, incl. a class-only crate with no `.pyi` | rc 1 |
+| §5.1 | a PyO3-bearing crate with no `.pyi` | rc 1 |
+| §5.1 | two `.pyi` in one crate — `discover()`, not `analyze()`, so not asserted in `--self-test` | rc 2 |
 | §5.4 | `#[pymodule]` ident, `module-name` and stub basename disagree | rc 1 |
 
 ### 7.2 `--negative-control` — the real tree, permanent
@@ -519,13 +543,18 @@ lesson that "the bare mode alone is a gate that can lie". `ci/http-extractor` ge
 control, but it is the weakest precedent in the repo on this axis and should not have been cited
 as settled.
 
-So `--negative-control` copies the real crate into a `mktemp -d`, applies each of the three AC
-mutations in turn to that copy, and asserts each reds. This **discharges AC 4 permanently** rather
+So `--negative-control` takes `discover()`'s real-tree output, applies each mutation in turn to
+the in-memory strings it carries (no `mktemp -d` and no file on disk is needed, because `analyze()`
+is pure over in-memory text), and asserts each reds. **Four** mutations, not three: the final
+review added AC 4b, a RETYPED stub annotation (`mint_uuid7(unix_ms: float)` -> `int`), because
+AC 1-3 are all set-MEMBERSHIP drift and neutering `if decls[name] != stub[name]` was MEASURED to
+leave the control green — the full-signature comparison of §3, this gate's headline decision, was
+the one thing the real-tree control did not exercise. This **discharges AC 4 permanently** rather
 than as a one-time transcript that decays the moment someone edits the checker.
 
 ### 7.3 AC 4's by-hand run, once
 
-AC 4 asks for the three mutations proven red on a scratch copy and restored. §7.2 automates
+AC 4 asks for the three mutations proven red on a scratch copy and restored (§7.2 now runs four). §7.2 automates
 exactly that, but the run is also performed by hand during implementation and its transcript
 recorded in the PR — the automation's first execution is not itself evidence that the automation
 is right.

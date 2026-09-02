@@ -200,7 +200,8 @@ tasks:
       # PR that drops a `--locked` from a gate script does not schedule this task. The four
       # narrower ci/ globs above are KEPT rather than replaced — check 8e in
       # ci/actionlint/run.sh asserts containment over a 23-entry array and floors it at
-      # `-ge 20`, so replacing four with one would take it to 18 and force loosening a floor.
+      # `-ge 20`, so replacing four with one would take it to 20 — the floor exactly, with no
+      # headroom left for the next narrow glob to be collapsed the same way.
       - 'ci/**/*'
       # SMA-530 — this task now pins ci/release-parity/run.sh's --negative-control BLOCK
       # (RELEASE_PARITY_SH_CALL_SITES), so a change under ci/release-parity/ MUST re-key it.

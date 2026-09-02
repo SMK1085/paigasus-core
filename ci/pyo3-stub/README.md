@@ -84,8 +84,12 @@ non-goals:
    this crate's real signatures is already 116 characters — a sixth parameter would push rustfmt
    to one parameter per line. The parse walks from `fn` to its matching `)`, then `->` to the
    opening `{`, across newlines, never line-oriented and never a single-line regex.
-3. **The attribute window** is every attribute line between `#[pyfunction]` and the `fn` item,
-   and it is **default-deny with an allowlist**: `PERMITTED_INTERVENING_ATTRS` in `check.py`
+3. **The attribute window** is every attribute line between `#[pyfunction]` and the `fn` item —
+   **and every attribute line above it**, walked backwards over the contiguous run of preceding
+   attributes to the end of the previous item. Both halves are needed and the upward one is the
+   less obvious: for a `#[cfg]` the upward order is the *only* one that works in Rust, since cfg
+   is evaluated before the proc macro runs, and a `#[pyo3(name = "x")]` renames the export from
+   above just as effectively as from below. It is **default-deny with an allowlist**: `PERMITTED_INTERVENING_ATTRS` in `check.py`
    names exactly five bracket attributes — `allow`, `expect`, `doc`, `inline`, `must_use` — every
    one a codegen or lint hint that cannot rename or reshape what PyO3 exports. `inline` and
    `must_use` are idiomatic on an ordinary function, so admitting them costs nothing and refusing
@@ -96,8 +100,8 @@ non-goals:
    reaches the allowlist check at all. Anything else — including a bare `#[pyo3(name = "x")]` on
    its own line, which *can* rename the export — is refused rather than skipped past. The same
    window walk, and the same constant, gates both the `#[pyfunction]` window
-   (`rust_declarations`) and the `#[pymodule]` window (`_pymodule_body`), so a change to the
-   allowlist widens or narrows both at once.
+   (`rust_declarations`) and the `#[pymodule]` window (`_pymodule_body`), and the same constant gates the backward walk too,
+   so a change to the allowlist moves all three at once.
 4. **The `#[pymodule]` body is default-deny, not a refusal list.** Exactly two statement shapes
    are permitted: `m.add_function(wrap_pyfunction!(<bare-ident>, m)?)?;` and
    `m.add_wrapped(wrap_pyfunction!(<bare-ident>))?;`, plus the trailing `Ok(())`. Anything else is
@@ -122,10 +126,19 @@ noted; a handful of infrastructure-only failures are `InfraError` at **rc 2**.
   two reasons arm 2 exists.
 * `#[pyfunction(…)]` / `#[pyo3(…)]` carrying arguments, on any line in the attribute window — may
   rename or reshape the exported symbol.
-* `#[pyclass]`, `#[pymethods]` — a whole class surface this scanner does not model.
+* `#[pyclass]`, `#[pymethods]` — a whole class surface this scanner does not model. Refused
+  **file-globally**, like `macro_rules!`, and for the same fail-closed reason: a class-only crate
+  declares no `#[pyfunction]`, so without this it was classified not-PyO3-bearing, `analyze`
+  short-circuited before the module-body default-deny could see `m.add_class::<Foo>()?`, and a
+  crate with a real export and **no stub at all** reported clean (measured).
 * `#[pymodule_export]`, a declarative module, a second `#[pymodule]`, or **zero** `#[pymodule]`.
-* `#[cfg(…)]` on a `#[pyfunction]` or on an enclosing `mod` — the exported set becomes
-  configuration-dependent, so one static answer would be wrong.
+* `#[cfg(…)]` / `#[cfg_attr(…)]` on a `#[pyfunction]` (above it or below it) or on an enclosing
+  `mod` — the exported set becomes configuration-dependent, so one static answer would be wrong.
+  Closed twice over: the backward attribute walk names the attribute and its line, and a
+  **file-global** `#[cfg`/`#[cfg_attr` refusal covers the shapes that have no `#[pyfunction]`
+  beneath them to walk back from (a `#[cfg]` on a `mod foo;` declaration, a `#![cfg(...)]` inner
+  attribute). Coarse but fail-closed, and free on the real tree: no `#[cfg`, `#[cfg_attr`,
+  `#[pyclass]` or `#[pymethods]` appears anywhere under `rs/crates/bindings/*/src/`.
 * A `fn` signature the scanner cannot parse, or the same function name declared twice across the
   scanned files (a `{name: Signature}` map would silently overwrite the first).
 * `async fn`, `unsafe fn`, `const fn`, `extern`, and a raw identifier `fn r#type` (PyO3 strips the
@@ -138,31 +151,45 @@ noted; a handful of infrastructure-only failures are `InfraError` at **rc 2**.
 **Infra (rc 2) — the checker itself, or its environment:**
 
 * `SCAN_GLOB` or `STUB_GLOB` matching no file (the scan root moved).
-* More than one `.pyi` matching `STUB_GLOB` for a single crate.
+* More than one `.pyi` matching `STUB_GLOB` for a single crate. rc **2**, not rc 1 — two stubs
+  make the *scan shape* ambiguous and `discover()` cannot pick one without guessing, which is the
+  principle this gate rests on; every other ambiguity that stage hits is rc 2 for the same reason.
+  (The design doc said rc 1 until the final review aligned it to the code.) **Zero** stubs beside
+  a PyO3-bearing crate is a different verdict — rc 1, reported by `analyze()`.
 * Either of the three real-tree sets (A, B, C) being empty, or the sentinel function
   (`sum_as_string` in `paigasus-py-bindings`) missing from any of them — a gate that parses
   nothing reports clean, so "no problems found" must be backed by "the thing I know is there was
   actually found". These are this gate's positive controls (§5.3).
-* A stale `ALLOW_UNPARSED_SHAPE` entry naming a crate that no longer exists.
 
 `--self-test` and `--negative-control` run **first**, in the same `script:` block, before
 `--check` ever touches the real tree. `set -euo pipefail` is required: Moon does not enable
 errexit for `script:` blocks and takes the block's status from its **last** command, so without
 it a failing self-test or control would be masked by a passing real run. `--self-test` asserts
 `analyze()` against synthetic in-memory fixtures (never touches the real tree); `--negative-control`
-takes `discover()`'s real-tree output and mutates the in-memory strings three ways — an unstubbed
-`#[pyfunction]` (AC 1), a removed registration (AC 2), a deleted stub `def` (AC 3) — asserting
-each reds, plus a fourth row re-asserting the **unmutated** crate stays clean. Neither mode proves
+takes `discover()`'s real-tree output and mutates the in-memory strings four ways — an unstubbed
+`#[pyfunction]` (AC 1), a removed registration (AC 2), a deleted stub `def` (AC 3), and a retyped
+stub annotation, `mint_uuid7(unix_ms: float)` -> `int` (AC 4b) — asserting each reds, plus a fifth
+row re-asserting the **unmutated** crate stays clean. AC 4b was added in the final review: AC 1-3
+are all set-*membership* drift, so neutering `if decls[name] != stub[name]` was measured to leave
+the control green, and the full-signature comparison — this gate's headline decision — was the one
+thing the real-tree control never exercised. Neither mode proves
 the other can report red; both are required.
 
-## The `ALLOW_UNPARSED_SHAPE` table
+## There is deliberately no waiver table
 
-Ships **empty**, and requires a non-empty reason string per entry — the repo's universal idiom
-(`T_EXEMPT`, `ALLOW_DEAD_INPUT`, `BRANCH_SKIP`, `COE_SKIP` and others all ship empty or reasoned).
-It waives *shapes the scanner cannot read*, and nothing else — there is deliberately no waiver for
-a comparison result the author simply disagrees with (see §3.2 of the design doc). A row naming a
-crate that no longer exists is itself reported as an `InfraError`, so the table cannot silently
-rot into a set of dead exemptions.
+Not an omission — a decision, and a correction. `check.py` shipped an `ALLOW_UNPARSED_SHAPE` table
+that this README and the design doc both presented as a working escape hatch. It was **inert**:
+measured, a live waiver row did not suppress the `macro_rules!` refusal or any other §4 refusal,
+because nothing on any refusal path consulted the table — only its own staleness report read it.
+The final review deleted the table rather than implementing it.
+
+**A §4 shape is fixed at the source, not waived.** That is the same reasoning that makes every
+refusal here rc 1 rather than rc 2: a commit introduced the shape and a commit can remove it. A
+waiver would be a way to keep the unreadable shape *and* a green gate — "believed guarded", the
+one outcome worse than no gate at all. An inert table was worse still, because it documented an
+escape hatch that did not exist. This matches the design doc's §3.2 decision to ship no divergence
+table until a genuine entry appears; if an unreadable shape ever genuinely has to stay, add the
+table then, wired to the refusal path, with a reason column like every other in the repo.
 
 ## Limitations
 
