@@ -13,9 +13,17 @@
 # usage: check.py [--self-test | --negative-control | --check]
 #   rc 0 clean · rc 1 the repo is wrong (every §4 refusal included) · rc 2 the checker is broken
 import ast
+import glob
 import re
 import sys
+import tomllib
 from pathlib import Path
+from typing import NamedTuple
+
+# Repo root — three levels up from ci/pyo3-stub/check.py (ci/pyo3-stub -> ci -> repo root).
+# Anchors SCAN_GLOB/STUB_GLOB so this file behaves the same run from any cwd, matching the
+# convention `repo:*` gates use elsewhere in this repo.
+REPO = Path(__file__).resolve().parents[2]
 
 # --------------------------------------------------------------------------------------------
 # Copied from ci/http-extractor/check.py — infrastructure signal and the lexical pre-pass
@@ -505,6 +513,201 @@ def stub_definitions(path, text):
 
 
 # --------------------------------------------------------------------------------------------
+# Comparison, module identity, discovery, and the real-tree gate (SMA-600)
+# --------------------------------------------------------------------------------------------
+
+# Byte-identical to the Moon task's `inputs` entries — scheduling and scanning must not be able
+# to drift apart, the same requirement repo:http-extractor-envelope and repo:workflow-credentials
+# each state of themselves. Crate-generic rather than hard-coded: a gate whose whole job is to
+# notice a NEW crate must not be scoped to today's one.
+SCAN_GLOB = "rs/crates/bindings/*/src/**/*.rs"
+STUB_GLOB = "rs/crates/bindings/*/*.pyi"
+
+# §5.3 — a positive control. A gate that parses nothing reports clean, so `--check` proves it
+# still sees a known-present symbol before believing a green.
+SENTINEL = "sum_as_string"
+SENTINEL_CRATE = "paigasus-py-bindings"
+
+# §4.5 — ships EMPTY. (crate, marker) -> why. A waiver naming a shape no longer present is
+# itself rc 1, so the table cannot rot into a silent blanket.
+ALLOW_UNPARSED_SHAPE = {}
+
+# rust: dict[str, str] display-path -> text, mirroring the `sources` shape every extractor above
+# already takes. stub_path/stub_text/pyproject are all `| None` — a crate can legitimately have
+# no stub (§5.1, itself a problem) or no pyproject.toml (§5.4, itself a Refused).
+Crate = NamedTuple("Crate", [("name", str), ("rust", dict), ("stub_path", object), ("stub_text", object), ("pyproject", object)])
+
+
+def stale_waivers(table=None, live=None):
+    """Waiver keys naming a crate that is no longer present. §4.5.
+
+    A waiver that has outlived the shape it excused would otherwise become a silent
+    blanket, so a stale row is itself an error rather than a no-op.
+
+    `live` is injectable so the self-test can assert this against a fixed set rather than
+    the real tree — `analyze`/this function must stay pure and filesystem-free for Task 4's
+    `--negative-control` to hold; only `check()` (via the default `live=None`) touches disk.
+    """
+    table = ALLOW_UNPARSED_SHAPE if table is None else table
+    if live is None:
+        live = {
+            Path(p).relative_to(REPO).parts[3]
+            for p in glob.glob(str(REPO / SCAN_GLOB), recursive=True)
+        }
+    return sorted(k for k in table if k[0] not in live)
+
+
+def _maturin_module_name(pyproject_text, crate):
+    """§5.4 — the module name maturin actually builds, read from [tool.maturin] module-name."""
+    if pyproject_text is None:
+        raise Refused(f"{crate}: no pyproject.toml, so [tool.maturin] module-name cannot be read (§5.4)")
+    data = tomllib.loads(pyproject_text)
+    name = data.get("tool", {}).get("maturin", {}).get("module-name")
+    if not name:
+        raise Refused(f"{crate}: [tool.maturin] module-name is absent (§5.4)")
+    return name
+
+
+def analyze(crates):
+    """The pure core. `crates` is a list[Crate]; returns a list of problem strings ([] = clean).
+
+    PURE over in-memory text — no filesystem access here, ever. Task 4's `--negative-control`
+    and the whole self-test above depend on that: this function must behave identically whether
+    its `Crate.rust`/`stub_text` came from `discover()` reading real files or from a self-test
+    fixture built in memory.
+
+    Every §4 refusal a sub-extractor raises arrives here as `Refused` and becomes ONE problem
+    string — rc 1, because a commit introduced the shape and a commit can remove it (§5.1).
+    `InfraError` is NOT caught here: it means the checker's own environment is broken and must
+    propagate to `main()` as rc 2, never fold into "the repo has N problems".
+
+    Every disagreement is reported, not just the first — a single run should surface the whole
+    drift, not make the fixer re-run the gate once per symbol.
+    """
+    problems = []
+    for crate in crates:
+        try:
+            decls = rust_declarations(crate.rust)
+
+            # A crate with no #[pyfunction] at all is simply not PyO3-bearing. A stub sitting
+            # beside it anyway is a leftover (a crate that shed its last binding but not its
+            # .pyi) and must be reported, not silently ignored.
+            if not decls:
+                if crate.stub_path:
+                    problems.append(f"{crate.name}: {crate.stub_path} exists but the crate declares no #[pyfunction] (§5.1)")
+                continue
+
+            if crate.stub_path is None:
+                problems.append(f"{crate.name}: declares {len(decls)} #[pyfunction] but has no .pyi stub (§5.1)")
+                continue
+
+            regs = rust_registrations(crate.rust)
+            stub = stub_definitions(crate.stub_path, crate.stub_text)
+
+            # §5.4 — bind the stub's FILENAME to the module it claims to describe. lib.rs's own
+            # comment says the module name is provisional; without this check a rename of the
+            # #[pymodule] fn (or of [tool.maturin] module-name) orphans the stub file while every
+            # OTHER set still agrees on the function names inside it.
+            ident = pymodule_ident(crate.rust)
+            declared = _maturin_module_name(crate.pyproject, crate.name)
+            basename = crate.stub_path.rsplit("/", 1)[-1][:-4]
+            if not (ident == declared == basename):
+                problems.append(
+                    f"{crate.name}: module identity disagrees — #[pymodule] fn {ident!r}, "
+                    f"[tool.maturin] module-name {declared!r}, stub basename {basename!r} (§5.4)")
+
+            # A vs B, on names — an unregistered #[pyfunction] is an AttributeError at import
+            # time; a registration with no matching declaration cannot exist under normal
+            # compilation, but is reported anyway rather than assumed impossible.
+            for name in sorted(set(decls) - regs):
+                problems.append(f"{crate.name}: `{name}` is declared #[pyfunction] but never registered — an AttributeError at import")
+            for name in sorted(regs - set(decls)):
+                problems.append(f"{crate.name}: `{name}` is registered but has no #[pyfunction] declaration")
+
+            # A vs C, on FULL SIGNATURES (§3) — name, arity, parameter names IN ORDER, parameter
+            # types, and return type all have to agree; a mere name match is not enough.
+            for name in sorted(set(decls) - set(stub)):
+                problems.append(f"{crate.name}: `{name}` is exported but absent from {crate.stub_path} — invisible to type checkers")
+            for name in sorted(set(stub) - set(decls)):
+                problems.append(f"{crate.name}: `{name}` is in {crate.stub_path} but is not a #[pyfunction]")
+            for name in sorted(set(decls) & set(stub)):
+                if decls[name] != stub[name]:
+                    problems.append(
+                        f"{crate.name}: `{name}` signature drift — Rust says {decls[name]}, "
+                        f"{crate.stub_path} says {stub[name]}")
+        except Refused as exc:
+            problems.append(f"{crate.name}: {exc.message}")
+    return problems
+
+
+def discover():
+    """Build the Crate list from the real tree. Raises InfraError on a §5.3 scope failure.
+
+    This is the ONLY function in this file (besides `check()`, which calls it) that touches the
+    filesystem for `analyze`'s purposes — `analyze` itself stays pure per its own docstring.
+    """
+    rust_files = sorted(glob.glob(str(REPO / SCAN_GLOB), recursive=True))
+    stub_files = sorted(glob.glob(str(REPO / STUB_GLOB), recursive=True))
+    if not rust_files:
+        raise InfraError(f"{SCAN_GLOB} matched no file — the scan root moved and the gate is scanning nothing")
+    if not stub_files:
+        raise InfraError(f"{STUB_GLOB} matched no file — the scan root moved and the gate is scanning nothing")
+
+    by_crate = {}
+    for p in rust_files:
+        crate = Path(p).relative_to(REPO).parts[3]
+        by_crate.setdefault(crate, {})[str(Path(p).relative_to(REPO))] = Path(p).read_text()
+
+    stubs = {}
+    for p in stub_files:
+        crate = Path(p).relative_to(REPO).parts[3]
+        stubs.setdefault(crate, []).append(p)
+
+    crates = []
+    for name, rust in sorted(by_crate.items()):
+        found = stubs.get(name, [])
+        if len(found) > 1:
+            raise InfraError(f"{name}: {len(found)} .pyi files match {STUB_GLOB}; exactly one is expected (§5.1)")
+        stub_path = str(Path(found[0]).relative_to(REPO)) if found else None
+        stub_text = Path(found[0]).read_text() if found else None
+        pp = REPO / "rs/crates/bindings" / name / "pyproject.toml"
+        crates.append(Crate(name, rust, stub_path, stub_text, pp.read_text() if pp.exists() else None))
+    return crates
+
+
+def check():
+    """Real-tree entry point. rc 0 clean, rc 1 the repo is wrong, rc 2 the checker is broken."""
+    crates = discover()
+
+    # §5.3 — real-tree positive controls. Each is rc 2: a gate that parses nothing reports
+    # clean, so "I found no problems" must be backed by "I found the thing I know is there".
+    names = {c.name for c in crates}
+    if SENTINEL_CRATE not in names:
+        raise InfraError(f"{SENTINEL_CRATE} is not among the discovered crates {sorted(names)} — the scan root moved")
+    sentinel_crate = next(c for c in crates if c.name == SENTINEL_CRATE)
+    a = rust_declarations(sentinel_crate.rust)
+    b = rust_registrations(sentinel_crate.rust)
+    c = stub_definitions(sentinel_crate.stub_path, sentinel_crate.stub_text)
+    if not (a and b and c):
+        raise InfraError(f"one of the three sets is empty (A={len(a)} B={len(b)} C={len(c)}) — two empty sets compare equal")
+    if not (SENTINEL in a and SENTINEL in b and SENTINEL in c):
+        raise InfraError(f"the sentinel {SENTINEL!r} is missing from A/B/C — the extractors are not reading the real crate")
+
+    stale = stale_waivers()
+    problems = [f"ALLOW_UNPARSED_SHAPE{k!r} names a crate that no longer exists (§4.5)" for k in stale]
+    problems += analyze(crates)
+
+    print(f"pyo3-stub: crates: {' '.join(sorted(names))}", file=sys.stderr)
+    if problems:
+        for p in problems:
+            print(f"  FAIL {p}", file=sys.stderr)
+        print(f"pyo3-stub: {len(problems)} problem(s)", file=sys.stderr)
+        return 1
+    print(f"pyo3-stub: {len(a)} function(s) agree across declarations, registrations and the stub", file=sys.stderr)
+    return 0
+
+
+# --------------------------------------------------------------------------------------------
 # Self-test and CLI
 # --------------------------------------------------------------------------------------------
 
@@ -783,6 +986,106 @@ def self_test():
         print(f"  FAIL [stub] permitted nodes did not parse: {got}", file=sys.stderr)
         rc = 1
 
+    # --------------------------------------------------------------------------------------
+    # Comparison, module identity, and the AC mutations (Task 3, SMA-600). `_fixture` returns a
+    # one-crate list whose Rust and stub agree unless a kwarg overrides one.
+    # --------------------------------------------------------------------------------------
+    def _fixture(rust_extra="", regs="    m.add_function(wrap_pyfunction!(f, m)?)?;", stub="def f(a: int) -> str: ...\n", pyproject='[tool.maturin]\nmodule-name = "mod_x"\n'):
+        rust = (
+            "#[pyfunction]\nfn f(a: i64) -> String {}\n" + rust_extra +
+            "#[pymodule]\nfn mod_x(m: &Bound<'_, PyModule>) -> PyResult<()> {\n" + regs + "\n    Ok(())\n}\n"
+        )
+        return [Crate("c", {"lib.rs": rust}, "mod_x.pyi", stub, pyproject)]
+
+    if analyze(_fixture()) != []:
+        print(f"  FAIL [baseline] a clean fixture reported problems: {analyze(_fixture())}", file=sys.stderr)
+        rc = 1
+
+    cases = [
+        ("AC1 unstubbed pyfunction", _fixture(
+            rust_extra="#[pyfunction]\nfn g(a: i64) -> String {}\n",
+            regs="    m.add_function(wrap_pyfunction!(f, m)?)?;\n    m.add_function(wrap_pyfunction!(g, m)?)?;")),
+        ("AC2 missing registration", _fixture(regs="    ")),
+        ("AC3 deleted stub def", _fixture(stub="")),
+        ("type drift", _fixture(stub="def f(a: float) -> str: ...\n")),
+        ("param rename", _fixture(stub="def f(b: int) -> str: ...\n")),
+        ("arity drift", _fixture(stub="def f(a: int, b: int) -> str: ...\n")),
+        ("return drift", _fixture(stub="def f(a: int) -> int: ...\n")),
+        ("identity drift", _fixture(pyproject='[tool.maturin]\nmodule-name = "other"\n')),
+    ]
+    for label, crates in cases:
+        if analyze(crates) == []:
+            print(f"  FAIL [{label}] reported clean; it must red", file=sys.stderr)
+            rc = 1
+
+    # Param ORDER, not just the name set — a transposition breaks every keyword call site while
+    # the stub keeps describing the old order (§3).
+    swapped = [Crate("c", {"lib.rs":
+        "#[pyfunction]\nfn f(a: i64, b: &str) -> String {}\n"
+        "#[pymodule]\nfn mod_x(m: &Bound<'_, PyModule>) -> PyResult<()> {\n"
+        "    m.add_function(wrap_pyfunction!(f, m)?)?;\n    Ok(())\n}\n"},
+        "mod_x.pyi", "def f(b: str, a: int) -> str: ...\n", '[tool.maturin]\nmodule-name = "mod_x"\n')]
+    if analyze(swapped) == []:
+        print("  FAIL [param order] a transposition reported clean (§3)", file=sys.stderr)
+        rc = 1
+
+    # §3.1 — an injected Python<'_> must REFUSE, never resolve. Mapping it would make the gate
+    # demand a stub parameter callers must never pass.
+    injected = _fixture(rust_extra="#[pyfunction]\nfn g(py: Python<'_>) -> String {}\n",
+                        regs="    m.add_function(wrap_pyfunction!(f, m)?)?;\n    m.add_function(wrap_pyfunction!(g, m)?)?;")
+    problems = analyze(injected)
+    if not any("Python<'_>" in p or "RUST_TO_PY" in p for p in problems):
+        print(f"  FAIL [injected] Python<'_> did not refuse: {problems}", file=sys.stderr)
+        rc = 1
+
+    # §3 — PyResult<()>, bare (), and an absent return all normalize to None, consistently.
+    for ret, decl in [("PyResult<()>", "-> PyResult<()> "), ("()", "-> () "), ("absent", "")]:
+        crates = [Crate("c", {"lib.rs":
+            f"#[pyfunction]\nfn f(a: i64) {decl}{{}}\n"
+            "#[pymodule]\nfn mod_x(m: &Bound<'_, PyModule>) -> PyResult<()> {\n"
+            "    m.add_function(wrap_pyfunction!(f, m)?)?;\n    Ok(())\n}\n"},
+            "mod_x.pyi", "def f(a: int) -> None: ...\n", '[tool.maturin]\nmodule-name = "mod_x"\n')]
+        if analyze(crates) != []:
+            print(f"  FAIL [return {ret}] did not normalize to None: {analyze(crates)}", file=sys.stderr)
+            rc = 1
+
+    # §4.3 item 3 — layout-blind. rustfmt splits a long signature one parameter per line.
+    split = [Crate("c", {"lib.rs":
+        "#[pyfunction]\nfn f(\n    a: i64,\n    b: &str,\n) -> String {}\n"
+        "#[pymodule]\nfn mod_x(m: &Bound<'_, PyModule>) -> PyResult<()> {\n"
+        "    m.add_function(wrap_pyfunction!(f, m)?)?;\n    Ok(())\n}\n"},
+        "mod_x.pyi", "def f(a: int, b: str) -> str: ...\n", '[tool.maturin]\nmodule-name = "mod_x"\n')]
+    if analyze(split) != []:
+        print(f"  FAIL [layout] a rustfmt-split signature did not parse: {analyze(split)}", file=sys.stderr)
+        rc = 1
+
+    # §4.3 item 1 — #[allow(...)] between the attribute and the fn is PERMITTED.
+    allowed = _fixture(rust_extra="")
+    allowed[0].rust["lib.rs"] = allowed[0].rust["lib.rs"].replace(
+        "#[pyfunction]\nfn f", "#[pyfunction]\n#[allow(clippy::needless_pass_by_value)]\nfn f")
+    if analyze(allowed) != []:
+        print(f"  FAIL [attr window] #[allow] was refused; it is permitted: {analyze(allowed)}", file=sys.stderr)
+        rc = 1
+
+    # §5.1 — a PyO3-bearing crate with no stub, and two stubs in one crate, are both rc 1.
+    if analyze([Crate("c", {"lib.rs": _fixture()[0].rust["lib.rs"]}, None, None, '[tool.maturin]\nmodule-name = "mod_x"\n')]) == []:
+        print("  FAIL [no stub] a PyO3-bearing crate with no .pyi reported clean (§5.1)", file=sys.stderr)
+        rc = 1
+
+    # §4.5 — a waiver naming a shape that is not present is itself an error, so the table
+    # cannot silently rot. `live` is passed explicitly (see stale_waivers' docstring): this must
+    # not depend on what the real tree happens to contain right now.
+    if not stale_waivers({("nonexistent-crate", "macro_rules"): "reason"}, live={"paigasus-py-bindings"}):
+        print("  FAIL [waiver] a stale ALLOW_UNPARSED_SHAPE row was not reported (§4.5)", file=sys.stderr)
+        rc = 1
+
+    # ...and a waiver naming a crate that IS live must NOT be reported stale — otherwise every
+    # legitimate waiver would also fail this check, and the row above could pass for the wrong
+    # reason (stale_waivers reporting everything, live or not).
+    if stale_waivers({("paigasus-py-bindings", "macro_rules"): "reason"}, live={"paigasus-py-bindings"}):
+        print("  FAIL [waiver] a live crate's waiver was reported stale (§4.5)", file=sys.stderr)
+        rc = 1
+
     print("self-test: OK" if rc == 0 else "self-test: FAILED", file=sys.stderr)
     return rc
 
@@ -792,6 +1095,8 @@ def main():
     try:
         if args == ["--self-test"]:
             return self_test()
+        if args == ["--check"]:
+            return check()
     except Refused as exc:
         # A refusal means the REPO is wrong (a §4 shape the scanner won't guess at), not that the
         # checker is broken — rc 1, never rc 2. Left uncaught this escapes as a raw traceback:
