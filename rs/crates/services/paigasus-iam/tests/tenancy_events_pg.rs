@@ -27,6 +27,17 @@
 //!    performed. Proven by racing a peer transaction against one cascade row and asserting this
 //!    call's own report stays correct regardless.
 //!
+//! 4. **The ancestor-lock control on `set_status_in`**
+//!    (`a_concurrent_org_archive_is_reflected_in_a_racing_team_set_status_event`): PR 203
+//!    review finding 1. `pg_teams.rs`'s `set_status_in` fetches the org ancestor purely to
+//!    compute the returned `effective_status` — and since SMA-606 that value ships on the
+//!    outbox event and the audit entry, an unlocked read can ship a value the org's own
+//!    concurrent archive/restore has already invalidated by commit time. A peer archives the
+//!    org and holds it uncommitted while a racing `TeamService::restore` call (whose own row
+//!    change carries no "archived" information at all — it flips the team from `Archived` back
+//!    to `Active`) blocks on the org row until the peer commits, then must emit
+//!    `effective_status: "archived"`, not the stale `"active"`.
+//!
 //! Runs against an ephemeral Postgres in Docker. In CI (`CI` env set) a missing Docker daemon is
 //! a HARD FAILURE; on a Docker-less laptop each test skips (returns) with a note — same gating
 //! pattern as every other `tests/*_pg.rs` file (`tests/support/mod.rs`, SMA-538).
@@ -37,15 +48,16 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use paigasus_iam::adapters::authz::Generations;
+use paigasus_iam::adapters::authz::{Generations, GenerationsEntityGenBumper};
 use paigasus_iam::adapters::clock::SystemClock;
 use paigasus_iam::adapters::id::KernelIdGenerator;
 use paigasus_iam::adapters::persistence::entities::{audit_log, event_outbox, membership, organization};
 use paigasus_iam::adapters::persistence::{PgAuditLog, PgMembershipRepository, PgOrganizationRepository, PgOutbox, PgPrincipalRepository, PgProjectRepository, PgTeamRepository, SeaOrmUnitOfWork};
 use paigasus_iam::application::memberships::{MembershipService, MembershipServiceDeps};
+use paigasus_iam::application::teams::{TeamService, TeamServiceDeps};
 use paigasus_iam_core::{
-    Action, AuditEntry, AuditLog, AuditOutcome, Clock, DomainEvent, Email, EventType, IdGenerator, Membership, MembershipRepository, Organization, OrganizationRepository, Outbox, Principal,
-    PrincipalId, PrincipalKind, PrincipalRepository, PrincipalStatus, Project, ProjectRepository, RepositoryError, Slug, Stamp, Team, TeamRepository, TenancyNodeRef, UnitOfWork, User,
+    Action, AuditEntry, AuditLog, AuditOutcome, Clock, DomainEvent, Email, EventType, IdGenerator, Membership, MembershipRepository, NodeStatus, Organization, OrganizationRepository, Outbox,
+    Principal, PrincipalId, PrincipalKind, PrincipalRepository, PrincipalStatus, Project, ProjectRepository, RepositoryError, Slug, Stamp, Team, TeamRepository, TenancyNodeRef, UnitOfWork, User,
 };
 use paigasus_kernel::{Prn, mint_uuid7};
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter};
@@ -413,4 +425,109 @@ async fn a_concurrent_detach_of_a_cascade_row_does_not_make_this_call_over_repor
 
     let remaining = membership::Entity::find().filter(membership::Column::PrincipalId.eq(principal.uuid())).count(&db).await.unwrap();
     assert_eq!(remaining, 0, "both rows must be gone in the end, whichever call actually deleted the cascade one");
+}
+
+/// Scenario 4 — PR 203 review finding 1: `pg_teams.rs::set_status_in` must lock its org
+/// ancestor read, not merely fetch it, because since SMA-606 the derived `effective_status`
+/// it computes ships on the outbox event and the audit entry — a value knowingly stale under
+/// READ COMMITTED would then be the audit trail's own recorded truth, not merely a stale
+/// return value.
+///
+/// The peer archives the ORG and holds it uncommitted. The racing call is `TeamService::restore`
+/// on a team that was PRE-archived (uncontested, before the peer starts): flipping the team's
+/// own status `Archived` -> `Active` carries no "archived" information of its own, so any
+/// "archived" surfacing in the racing call's emitted payload can only have come from the org
+/// ancestor. With `.lock_shared()` in place, the racing call blocks on the org row until the
+/// peer commits, then reads the post-commit `Archived` org and must emit
+/// `effective_status: "archived"` — not the stale `"active"` an unlocked read could see while
+/// racing ahead of the peer's commit.
+///
+/// **This test was verified to FAIL with `.lock_shared()` removed from
+/// `pg_teams.rs::set_status_in`'s ancestor read** — see the PR 203 round-1 report for the exact
+/// output; the removal was reverted before this commit.
+#[tokio::test]
+async fn a_concurrent_org_archive_is_reflected_in_a_racing_team_set_status_event() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let ids = KernelIdGenerator;
+    let clock = SystemClock;
+    let (org, team) = seed_org_and_team(&db, "race-status-co").await;
+    let actor = ids.new_principal_id();
+
+    let gens = Generations::memory();
+    let svc = TeamService::new(TeamServiceDeps {
+        repo: PgTeamRepository::new(db.clone(), gens.clone()),
+        uow: Arc::new(SeaOrmUnitOfWork::new(db.clone())),
+        outbox: Arc::new(PgOutbox::new(true)),
+        audit: Arc::new(PgAuditLog::new(db.clone())),
+        gen_bumper: Arc::new(GenerationsEntityGenBumper::new(gens)),
+        ids,
+        clock,
+    });
+
+    // Put the team into Archived first, uncontested — so the racing call's own `restore` below
+    // is a real status CHANGE (Archived -> Active), isolating the org ancestor as the ONLY
+    // possible source of "archived" in the emitted payload.
+    svc.archive(team.id.uuid(), &actor).await.expect("uncontested pre-archive");
+
+    // The peer: begins, archives the ORG directly, but does NOT commit yet — its uncommitted
+    // update holds the org row's exclusive lock this call's own ancestor read must respect.
+    let org_repo = PgOrganizationRepository::new(db.clone(), Generations::memory());
+    let peer_uow = SeaOrmUnitOfWork::new(db.clone());
+    let peer_tx = peer_uow.begin().await.unwrap();
+    let org_stamp = Stamp::new(clock.now(), actor.clone());
+    let peer_out = org_repo.set_status_in(&*peer_tx, org.id.uuid(), NodeStatus::Archived, &org_stamp).await.unwrap();
+    assert!(peer_out.changed, "sanity: the peer's own org archive must be a real change");
+
+    // This call: spawned, since — with the lock fix in place — it must BLOCK on the peer's
+    // held org-row lock until the peer commits; awaiting it inline here would deadlock the test.
+    let team_id = team.id.uuid();
+    let actor2 = actor.clone();
+    let handle = tokio::spawn(async move { svc.restore(team_id, &actor2).await });
+
+    // Give the spawned call real wall-clock time to reach (and block on) its own conflicting
+    // ancestor read against the peer's uncommitted org update — a generous budget, not a
+    // fragile one: on a warm connection the block happens in well under this window.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!handle.is_finished(), "sanity: this call must still be blocked on the peer's uncommitted org archive");
+
+    peer_tx.commit().await.expect("peer commit");
+
+    let restored = handle
+        .await
+        .expect("this call's task must not panic")
+        .expect("restore must still succeed once the peer releases its lock");
+    assert_eq!(restored.node.status, NodeStatus::Active, "the team's own status is the only thing this call actually changed");
+    assert_eq!(
+        restored.effective_status,
+        NodeStatus::Archived,
+        "the effective status must reflect the org's post-commit archive, not a stale pre-commit read"
+    );
+
+    let event_row = event_outbox::Entity::find()
+        .filter(event_outbox::Column::AggregatePrn.eq(team.id.canonical()))
+        .filter(event_outbox::Column::EventType.eq(EventType::TeamRestored.as_wire()))
+        .one(&db)
+        .await
+        .unwrap()
+        .expect("the restore must have enqueued exactly one outbox event");
+    let event_payload: serde_json::Value = serde_json::from_str(&event_row.payload).unwrap();
+    assert_eq!(
+        event_payload["effective_status"], "archived",
+        "the emitted event's payload must carry the post-commit truth, not the stale 'active': {event_payload}"
+    );
+
+    let audit_row = audit_log::Entity::find()
+        .filter(audit_log::Column::ResourcePrn.eq(team.id.canonical()))
+        .filter(audit_log::Column::Action.eq(Action::RestoreTeam.as_wire()))
+        .one(&db)
+        .await
+        .unwrap()
+        .expect("the restore must have recorded exactly one audit entry");
+    let audit_detail: serde_json::Value = serde_json::from_str(&audit_row.detail).unwrap();
+    assert_eq!(
+        audit_detail["effective_status"], "archived",
+        "the audit entry's detail must carry the post-commit truth too: {audit_detail}"
+    );
 }

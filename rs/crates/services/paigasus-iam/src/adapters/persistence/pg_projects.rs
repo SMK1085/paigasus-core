@@ -291,11 +291,16 @@ impl ProjectRepository for PgProjectRepository {
             (active.update(txn).await.map_err(map_err)?, true)
         };
 
-        // Ancestors fetched after the update (no lock) purely to compute the returned view.
-        let Some(team) = team::Entity::find_by_id(final_model.team_id).one(txn).await.map_err(map_err)? else {
+        // Both ancestors are locked FOR SHARE even though they only feed the returned view:
+        // since SMA-606 that view's `effective_status` is emitted on the outbox event and the
+        // audit entry, so it must not be computed from a snapshot a concurrent team/org
+        // archive/restore can invalidate before this transaction commits (a stale value would
+        // then ship as the audit trail's recorded truth, not merely as a stale in-memory return
+        // value).
+        let Some(team) = team::Entity::find_by_id(final_model.team_id).lock_shared().one(txn).await.map_err(map_err)? else {
             return Err(missing_ancestor("team", final_model.team_id, "project", id));
         };
-        let Some(org) = organization::Entity::find_by_id(final_model.org_id).one(txn).await.map_err(map_err)? else {
+        let Some(org) = organization::Entity::find_by_id(final_model.org_id).lock_shared().one(txn).await.map_err(map_err)? else {
             return Err(missing_ancestor("organization", final_model.org_id, "project", id));
         };
         let team_status = parse_status(&team.status)?;

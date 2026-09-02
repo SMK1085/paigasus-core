@@ -316,7 +316,7 @@ async fn provision(fixture: &Fixture) {
 /// variant, and (b) a variant that ever renders OUTSIDE the `iam.` prefix — the one case the
 /// wildcard does not absorb, and the one that would otherwise ship silently unpublishable. Read it
 /// as cheap breadth, not as the guarantee that a specific event type is permitted — `EventType::ALL`
-/// is 22 variants now (SMA-606), not the nine it was when this note was first written.
+/// is 22 variants now (SMA-606), not the eight it was when this note was first written.
 ///
 /// The ack path is the substantive assertion here, and it is why a "write-only" publisher still
 /// needs a `subscribe` grant at all: `publish` returns `Ok` only after JetStream's ack lands on the
