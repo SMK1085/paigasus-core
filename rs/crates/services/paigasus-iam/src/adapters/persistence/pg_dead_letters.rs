@@ -179,7 +179,7 @@ impl DeadLetters for PgDeadLetters {
     async fn replay_in(&self, tx: &dyn paigasus_iam_core::Transaction, id: Uuid) -> Result<Option<DeadLetterEntry>, RepositoryError> {
         let txn = recover_txn(tx)?;
         let stmt = Statement::from_sql_and_values(DbBackend::Postgres, REPLAY_ONE_SQL, [Value::from(id)]);
-        match txn.query_one(stmt).await.map_err(map_err)? {
+        match txn.query_one_raw(stmt).await.map_err(map_err)? {
             Some(row) => Ok(Some(row_to_entry(&row)?)),
             None => Ok(None),
         }
@@ -193,14 +193,14 @@ impl DeadLetters for PgDeadLetters {
         let predicate = filter_clauses(&r.event_type, &r.parked_from, &r.parked_to, &mut params);
         params.push(Value::from(r.capped_max_rows() as i64));
         let sql = bulk_replay_sql(&predicate, params.len());
-        let res = txn.execute(Statement::from_sql_and_values(DbBackend::Postgres, &sql, params)).await.map_err(map_err)?;
+        let res = txn.execute_raw(Statement::from_sql_and_values(DbBackend::Postgres, &sql, params)).await.map_err(map_err)?;
         Ok(res.rows_affected())
     }
 
     async fn discard_in(&self, tx: &dyn paigasus_iam_core::Transaction, id: Uuid) -> Result<Option<DeadLetterEntry>, RepositoryError> {
         let txn = recover_txn(tx)?;
         let stmt = Statement::from_sql_and_values(DbBackend::Postgres, DISCARD_ONE_SQL, [Value::from(id)]);
-        match txn.query_one(stmt).await.map_err(map_err)? {
+        match txn.query_one_raw(stmt).await.map_err(map_err)? {
             Some(row) => Ok(Some(row_to_entry(&row)?)),
             None => Ok(None),
         }

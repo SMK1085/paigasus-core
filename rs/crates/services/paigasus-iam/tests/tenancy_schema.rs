@@ -30,7 +30,7 @@ async fn tenancy_schema_has_named_constraints_and_indexes() {
     ];
     for n in constraint_names {
         let row = db
-            .query_one(Statement::from_sql_and_values(DbBackend::Postgres, "SELECT 1 AS one FROM pg_constraint WHERE conname = $1", [n.into()]))
+            .query_one_raw(Statement::from_sql_and_values(DbBackend::Postgres, "SELECT 1 AS one FROM pg_constraint WHERE conname = $1", [n.into()]))
             .await
             .unwrap();
         assert!(row.is_some(), "missing constraint {n}");
@@ -49,7 +49,7 @@ async fn tenancy_schema_has_named_constraints_and_indexes() {
         "ix_membership_project",
     ] {
         let row = db
-            .query_one(Statement::from_sql_and_values(DbBackend::Postgres, "SELECT 1 AS one FROM pg_indexes WHERE indexname = $1", [n.into()]))
+            .query_one_raw(Statement::from_sql_and_values(DbBackend::Postgres, "SELECT 1 AS one FROM pg_indexes WHERE indexname = $1", [n.into()]))
             .await
             .unwrap();
         assert!(row.is_some(), "missing index {n}");
@@ -64,7 +64,7 @@ async fn membership_check_rejects_multi_target_rows() {
 
     // Seed one `principal` row (raw SQL — this test only needs a valid FK target, not the
     // domain layer) and one `organization` row.
-    db.execute(Statement::from_sql_and_values(
+    db.execute_raw(Statement::from_sql_and_values(
         DbBackend::Postgres,
         r#"INSERT INTO "principal" (id, prn, kind, status, created_at, updated_at)
            VALUES ('11111111-1111-1111-1111-111111111111', 'prn:pgs:iam:::principal/11111111-1111-1111-1111-111111111111', 'user', 'active', now(), now())"#,
@@ -73,7 +73,7 @@ async fn membership_check_rejects_multi_target_rows() {
     .await
     .unwrap();
 
-    db.execute(Statement::from_sql_and_values(
+    db.execute_raw(Statement::from_sql_and_values(
         DbBackend::Postgres,
         r#"INSERT INTO "organization" (id, prn, slug, name, status, created_at, updated_at)
            VALUES ('22222222-2222-2222-2222-222222222222', 'prn:pgs:iam:::organization/22222222-2222-2222-2222-222222222222', 'acme', 'Acme', 'active', now(), now())"#,
@@ -87,7 +87,7 @@ async fn membership_check_rejects_multi_target_rows() {
     // constraints (part of ExecConstraints, before the row is written) ahead of the FK's
     // AFTER-ROW trigger, so the CHECK violation fires first regardless.
     let result = db
-        .execute(Statement::from_sql_and_values(
+        .execute_raw(Statement::from_sql_and_values(
             DbBackend::Postgres,
             r#"INSERT INTO "membership" (id, principal_id, org_id, team_id, created_at)
                VALUES ('33333333-3333-3333-3333-333333333333', '11111111-1111-1111-1111-111111111111',

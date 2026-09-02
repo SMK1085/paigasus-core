@@ -52,7 +52,7 @@ async fn service_accounts_schema_has_named_constraints_and_indexes() {
     ];
     for n in constraint_names {
         let row = db
-            .query_one(Statement::from_sql_and_values(DbBackend::Postgres, "SELECT 1 AS one FROM pg_constraint WHERE conname = $1", [n.into()]))
+            .query_one_raw(Statement::from_sql_and_values(DbBackend::Postgres, "SELECT 1 AS one FROM pg_constraint WHERE conname = $1", [n.into()]))
             .await
             .unwrap();
         assert!(row.is_some(), "missing constraint {n}");
@@ -65,7 +65,7 @@ async fn service_accounts_schema_has_named_constraints_and_indexes() {
         "ix_api_key_service_account",
     ] {
         let row = db
-            .query_one(Statement::from_sql_and_values(DbBackend::Postgres, "SELECT 1 AS one FROM pg_indexes WHERE indexname = $1", [n.into()]))
+            .query_one_raw(Statement::from_sql_and_values(DbBackend::Postgres, "SELECT 1 AS one FROM pg_indexes WHERE indexname = $1", [n.into()]))
             .await
             .unwrap();
         assert!(row.is_some(), "missing index {n}");
@@ -78,7 +78,7 @@ async fn service_accounts_schema_has_named_constraints_and_indexes() {
 async fn service_account_check_rejects_non_single_owner_rows() {
     let Some((_pg, db)) = support::start_migrated_postgres().await else { return };
 
-    db.execute(Statement::from_sql_and_values(
+    db.execute_raw(Statement::from_sql_and_values(
         DbBackend::Postgres,
         r#"INSERT INTO "principal" (id, prn, kind, status, created_at, updated_at)
            VALUES ('11111111-1111-1111-1111-111111111111', 'prn:pgs:iam:::principal/11111111-1111-1111-1111-111111111111', 'service_account', 'active', now(), now())"#,
@@ -89,7 +89,7 @@ async fn service_account_check_rejects_non_single_owner_rows() {
 
     // Zero owner targets set.
     let result = db
-        .execute(Statement::from_sql_and_values(
+        .execute_raw(Statement::from_sql_and_values(
             DbBackend::Postgres,
             r#"INSERT INTO "service_account" (principal_id, name, created_at, updated_at)
                VALUES ('11111111-1111-1111-1111-111111111111', 'ci-bot', now(), now())"#,
@@ -102,7 +102,7 @@ async fn service_account_check_rejects_non_single_owner_rows() {
     // Two owner targets set (org + team) — arbitrary uuids, not real rows; the CHECK fires
     // before Postgres would ever evaluate the (absent) FK targets.
     let result = db
-        .execute(Statement::from_sql_and_values(
+        .execute_raw(Statement::from_sql_and_values(
             DbBackend::Postgres,
             r#"INSERT INTO "service_account" (principal_id, owner_org_id, owner_team_id, name, created_at, updated_at)
                VALUES ('11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222',
@@ -120,7 +120,7 @@ async fn service_account_check_rejects_non_single_owner_rows() {
 async fn api_key_check_rejects_non_single_scope_rows() {
     let Some((_pg, db)) = support::start_migrated_postgres().await else { return };
 
-    db.execute(Statement::from_sql_and_values(
+    db.execute_raw(Statement::from_sql_and_values(
         DbBackend::Postgres,
         r#"INSERT INTO "principal" (id, prn, kind, status, created_at, updated_at)
            VALUES ('11111111-1111-1111-1111-111111111111', 'prn:pgs:iam:::principal/11111111-1111-1111-1111-111111111111', 'service_account', 'active', now(), now())"#,
@@ -128,7 +128,7 @@ async fn api_key_check_rejects_non_single_scope_rows() {
     ))
     .await
     .unwrap();
-    db.execute(Statement::from_sql_and_values(
+    db.execute_raw(Statement::from_sql_and_values(
         DbBackend::Postgres,
         r#"INSERT INTO "organization" (id, prn, slug, name, status, created_at, updated_at)
            VALUES ('22222222-2222-2222-2222-222222222222', 'prn:pgs:iam:::organization/22222222-2222-2222-2222-222222222222', 'acme', 'Acme', 'active', now(), now())"#,
@@ -136,7 +136,7 @@ async fn api_key_check_rejects_non_single_scope_rows() {
     ))
     .await
     .unwrap();
-    db.execute(Statement::from_sql_and_values(
+    db.execute_raw(Statement::from_sql_and_values(
         DbBackend::Postgres,
         r#"INSERT INTO "service_account" (principal_id, owner_org_id, name, created_at, updated_at)
            VALUES ('11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222', 'ci-bot', now(), now())"#,
@@ -147,7 +147,7 @@ async fn api_key_check_rejects_non_single_scope_rows() {
 
     // Zero scope targets set.
     let result = db
-        .execute(Statement::from_sql_and_values(
+        .execute_raw(Statement::from_sql_and_values(
             DbBackend::Postgres,
             r#"INSERT INTO "api_key" (id, service_account_id, prefix, key_hash, status, created_at)
                VALUES ('44444444-4444-4444-4444-444444444444', '11111111-1111-1111-1111-111111111111', 'pgs_sk_abc', 'hash-a', 'active', now())"#,
@@ -162,7 +162,7 @@ async fn api_key_check_rejects_non_single_scope_rows() {
     // the row is written) ahead of the scope FK's AFTER-ROW trigger, so `ck_api_key_scope`
     // fires first regardless.
     let result = db
-        .execute(Statement::from_sql_and_values(
+        .execute_raw(Statement::from_sql_and_values(
             DbBackend::Postgres,
             r#"INSERT INTO "api_key" (id, service_account_id, scope_org_id, scope_team_id, prefix, key_hash, status, created_at)
                VALUES ('55555555-5555-5555-5555-555555555555', '11111111-1111-1111-1111-111111111111',

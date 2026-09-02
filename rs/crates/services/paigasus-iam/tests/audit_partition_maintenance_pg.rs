@@ -12,7 +12,7 @@ use sea_orm::{ConnectionTrait, Statement};
 
 async fn leaf_exists(db: &impl ConnectionTrait, name: &str) -> bool {
     let stmt = Statement::from_string(sea_orm::DatabaseBackend::Postgres, format!("SELECT 1 FROM pg_class WHERE relname = '{name}' AND relkind = 'r'"));
-    db.query_one(stmt).await.unwrap().is_some()
+    db.query_one_raw(stmt).await.unwrap().is_some()
 }
 
 #[tokio::test]

@@ -288,7 +288,7 @@ async fn published_sweep_query_does_not_resort_to_a_sequential_scan() {
 
     let stmt = Statement::from_sql_and_values(DbBackend::Postgres, format!("EXPLAIN {}", published_sweep_sql()), [Value::from(now), Value::from(1000i64)]);
     let plan = db
-        .query_all(stmt)
+        .query_all_raw(stmt)
         .await
         .unwrap()
         .iter()

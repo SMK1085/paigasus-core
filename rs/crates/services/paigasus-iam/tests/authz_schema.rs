@@ -30,7 +30,7 @@ const ROOT_PRN: &str = "prn:pgs:iam:::root/00000000-0000-0000-0000-000000000000"
 /// inline literal is coerced from Postgres's "unknown"-typed constant the same way
 /// `tenancy_schema.rs`'s seeding does.
 async fn seed_principal_and_org(db: &sea_orm::DatabaseConnection) {
-    db.execute(Statement::from_sql_and_values(
+    db.execute_raw(Statement::from_sql_and_values(
         DbBackend::Postgres,
         format!(
             r#"INSERT INTO "principal" (id, prn, kind, status, created_at, updated_at)
@@ -41,7 +41,7 @@ async fn seed_principal_and_org(db: &sea_orm::DatabaseConnection) {
     .await
     .unwrap();
 
-    db.execute(Statement::from_sql_and_values(
+    db.execute_raw(Statement::from_sql_and_values(
         DbBackend::Postgres,
         format!(
             r#"INSERT INTO "organization" (id, prn, slug, name, status, created_at, updated_at)
@@ -72,7 +72,7 @@ async fn authz_schema_has_named_constraints_and_indexes() {
     ];
     for n in constraint_names {
         let row = db
-            .query_one(Statement::from_sql_and_values(DbBackend::Postgres, "SELECT 1 AS one FROM pg_constraint WHERE conname = $1", [n.into()]))
+            .query_one_raw(Statement::from_sql_and_values(DbBackend::Postgres, "SELECT 1 AS one FROM pg_constraint WHERE conname = $1", [n.into()]))
             .await
             .unwrap();
         assert!(row.is_some(), "missing constraint {n}");
@@ -80,7 +80,7 @@ async fn authz_schema_has_named_constraints_and_indexes() {
 
     for n in ["ix_role_grant_principal", "ix_role_grant_org", "ix_role_grant_team", "ix_role_grant_project"] {
         let row = db
-            .query_one(Statement::from_sql_and_values(DbBackend::Postgres, "SELECT 1 AS one FROM pg_indexes WHERE indexname = $1", [n.into()]))
+            .query_one_raw(Statement::from_sql_and_values(DbBackend::Postgres, "SELECT 1 AS one FROM pg_indexes WHERE indexname = $1", [n.into()]))
             .await
             .unwrap();
         assert!(row.is_some(), "missing index {n}");
@@ -216,7 +216,7 @@ async fn role_grant_check_rejects_scope_kind_mismatch() {
     // `text` parameter against a `uuid` column needs an explicit cast; an inline literal is
     // coerced from Postgres's "unknown"-typed constant.
     let result = db
-        .execute(Statement::from_sql_and_values(
+        .execute_raw(Statement::from_sql_and_values(
             DbBackend::Postgres,
             format!(
                 r#"INSERT INTO "role_grant"
@@ -233,7 +233,7 @@ async fn role_grant_check_rejects_scope_kind_mismatch() {
 
     // Case B: `scope_kind = 'root'` but `scope_org_id` is set (non-NULL).
     let result = db
-        .execute(Statement::from_sql_and_values(
+        .execute_raw(Statement::from_sql_and_values(
             DbBackend::Postgres,
             format!(
                 r#"INSERT INTO "role_grant"

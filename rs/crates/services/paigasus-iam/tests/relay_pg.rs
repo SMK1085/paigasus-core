@@ -179,7 +179,7 @@ async fn skip_locked_leaves_a_row_held_by_another_transaction_untouched() {
     // mid-tick on that row.
     let locking_txn = db.begin().await.expect("begin locking txn");
     locking_txn
-        .query_one(Statement::from_sql_and_values(
+        .query_one_raw(Statement::from_sql_and_values(
             DbBackend::Postgres,
             r#"SELECT id FROM "event_outbox" WHERE id = $1 FOR UPDATE"#,
             [row_a.into()],
@@ -299,12 +299,13 @@ async fn tick_and_record_emits_ticks_total_with_ok_result() {
 /// SMA-465: the run-loop tick-error branch emits `iam_outbox_relay_ticks_total{result="error"}`.
 /// `tick()` only returns `Err(DbErr)` on a DB-level fault (per-row publish failures are folded
 /// into attempts/parked bookkeeping, never surfacing here), so we fault the DB deterministically
-/// with `DatabaseConnection::Disconnected` — whose `begin()` returns `Err` synchronously — rather
+/// with a disconnected `DatabaseConnection` (`DatabaseConnection::default()`) — whose `begin()`
+/// returns `Err` synchronously — rather
 /// than a failing publisher. No Docker, no pool, no seeded row.
 #[tokio::test]
 async fn tick_and_record_emits_ticks_total_with_error_result_on_db_fault() {
     let handle = paigasus_observability::init("test-iam-relay-tick-error");
-    let relay = OutboxRelay::new(DatabaseConnection::Disconnected, Duration::from_secs(60), 10, 5);
+    let relay = OutboxRelay::new(DatabaseConnection::default(), Duration::from_secs(60), 10, 5);
     let publisher = CountingPublisher::default();
 
     let _ = relay.tick_and_record(&publisher, TickMode::All).await;
@@ -324,7 +325,7 @@ async fn tick_and_record_emits_ticks_total_with_error_result_on_db_fault() {
 /// the `timeout` turns such a regression into a fast, explicit failure instead of a hang.
 #[tokio::test]
 async fn run_terminates_on_shutdown() {
-    let relay = OutboxRelay::new(DatabaseConnection::Disconnected, Duration::from_secs(60), 10, 5);
+    let relay = OutboxRelay::new(DatabaseConnection::default(), Duration::from_secs(60), 10, 5);
     let publisher: Arc<dyn EventPublisher> = Arc::new(CountingPublisher::default());
 
     tokio::time::timeout(Duration::from_secs(5), relay.run(publisher, std::sync::Arc::new(tokio::sync::Notify::new()), std::future::ready(())))
@@ -369,7 +370,7 @@ fn poll_wakeups_total_from(rendered: &str) -> u64 {
 async fn a_notify_permit_wakes_the_run_loop_before_the_poll_interval() {
     let handle = paigasus_observability::init("test-iam-relay-wake-notify");
     let wake = Arc::new(tokio::sync::Notify::new());
-    let relay = OutboxRelay::new(DatabaseConnection::Disconnected, Duration::from_secs(600), 10, 5).with_wake_debounce(Duration::from_millis(1));
+    let relay = OutboxRelay::new(DatabaseConnection::default(), Duration::from_secs(600), 10, 5).with_wake_debounce(Duration::from_millis(1));
     let publisher: Arc<dyn EventPublisher> = Arc::new(CountingPublisher::default());
     let (tx, rx) = tokio::sync::oneshot::channel::<()>();
 
@@ -401,7 +402,7 @@ async fn a_notify_permit_wakes_the_run_loop_before_the_poll_interval() {
 async fn the_debounce_bounds_the_nudge_driven_tick_rate() {
     let handle = paigasus_observability::init("test-iam-relay-wake-debounce");
     let wake = Arc::new(tokio::sync::Notify::new());
-    let relay = OutboxRelay::new(DatabaseConnection::Disconnected, Duration::from_secs(600), 10, 5).with_wake_debounce(Duration::from_millis(100));
+    let relay = OutboxRelay::new(DatabaseConnection::default(), Duration::from_secs(600), 10, 5).with_wake_debounce(Duration::from_millis(100));
     let publisher: Arc<dyn EventPublisher> = Arc::new(CountingPublisher::default());
     let (tx, rx) = tokio::sync::oneshot::channel::<()>();
 
@@ -455,7 +456,7 @@ async fn a_pending_permit_does_not_win_a_race_against_a_resolved_shutdown() {
         // trials are independent rather than 20 polls of one already-consumed permit.
         let wake = Arc::new(tokio::sync::Notify::new());
         wake.notify_one(); // permit stored BEFORE run starts
-        let relay = OutboxRelay::new(DatabaseConnection::Disconnected, Duration::from_secs(600), 10, 5);
+        let relay = OutboxRelay::new(DatabaseConnection::default(), Duration::from_secs(600), 10, 5);
         let publisher: Arc<dyn EventPublisher> = Arc::new(CountingPublisher::default());
 
         tokio::time::timeout(Duration::from_secs(5), relay.run(publisher, wake, std::future::ready(())))
@@ -484,7 +485,7 @@ async fn a_pending_permit_does_not_win_a_race_against_a_resolved_shutdown() {
 async fn a_continuous_nudge_stream_does_not_starve_the_poll_arm() {
     let handle = paigasus_observability::init("test-iam-relay-poll-starvation");
     let wake = Arc::new(tokio::sync::Notify::new());
-    let relay = OutboxRelay::new(DatabaseConnection::Disconnected, Duration::from_millis(200), 10, 5).with_wake_debounce(Duration::from_millis(1));
+    let relay = OutboxRelay::new(DatabaseConnection::default(), Duration::from_millis(200), 10, 5).with_wake_debounce(Duration::from_millis(1));
     let publisher: Arc<dyn EventPublisher> = Arc::new(CountingPublisher::default());
     let (tx, rx) = tokio::sync::oneshot::channel::<()>();
 
@@ -532,7 +533,7 @@ async fn a_continuous_nudge_stream_does_not_starve_the_poll_arm() {
 async fn a_saturating_nudge_stream_does_not_starve_the_poll_arm() {
     let handle = paigasus_observability::init("test-iam-relay-poll-starvation-saturating");
     let wake = Arc::new(tokio::sync::Notify::new());
-    let relay = OutboxRelay::new(DatabaseConnection::Disconnected, Duration::from_millis(200), 10, 5).with_wake_debounce(Duration::from_millis(1));
+    let relay = OutboxRelay::new(DatabaseConnection::default(), Duration::from_millis(200), 10, 5).with_wake_debounce(Duration::from_millis(1));
     let publisher: Arc<dyn EventPublisher> = Arc::new(CountingPublisher::default());
     let (tx, rx) = tokio::sync::oneshot::channel::<()>();
 

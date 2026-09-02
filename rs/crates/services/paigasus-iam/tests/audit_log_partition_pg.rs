@@ -20,7 +20,7 @@ async fn audit_log_is_partitioned(db: &impl ConnectionTrait) -> bool {
         sea_orm::DatabaseBackend::Postgres,
         "SELECT 1 FROM pg_partitioned_table WHERE partrelid = 'audit_log'::regclass".to_string(),
     );
-    db.query_one(stmt).await.unwrap().is_some()
+    db.query_one_raw(stmt).await.unwrap().is_some()
 }
 
 /// The physical partition leaf a row with `id` ACTUALLY landed in, via `tableoid`. This is the
@@ -29,7 +29,7 @@ async fn audit_log_is_partitioned(db: &impl ConnectionTrait) -> bool {
 /// wrong partition (the gap this closes — SMA-467 Task 1 review finding).
 async fn physical_leaf(db: &impl ConnectionTrait, id: Uuid) -> String {
     let stmt = Statement::from_sql_and_values(sea_orm::DatabaseBackend::Postgres, "SELECT tableoid::regclass::text AS leaf FROM audit_log WHERE id = $1", [id.into()]);
-    db.query_one(stmt)
+    db.query_one_raw(stmt)
         .await
         .unwrap()
         .expect("row must exist to read its physical leaf")
@@ -165,7 +165,7 @@ async fn routing_is_correct_under_a_non_utc_session_timezone() {
         "INSERT INTO audit_log (id, occurred_at, action, outcome) VALUES ($1, $2, 'GetProject', $3)",
         [id.into(), ts.into(), "denied".into()],
     );
-    db.execute(stmt).await.expect("raw historical insert into the plain (pre-m0008) audit_log");
+    db.execute_raw(stmt).await.expect("raw historical insert into the plain (pre-m0008) audit_log");
 
     // Apply m0008 — the leaf-creating + copy/swap migration — UNDER a non-UTC session. This is
     // the actual regression surface: both `existing_month_span`'s bounds query and the leaf DDL's
@@ -229,7 +229,7 @@ async fn down_migration_restores_the_plain_m0006_shape_and_preserves_rows() {
         sea_orm::DatabaseBackend::Postgres,
         "SELECT indexname FROM pg_indexes WHERE tablename = 'audit_log' ORDER BY indexname".to_string(),
     );
-    let rows = db.query_all(idx_stmt).await.unwrap();
+    let rows = db.query_all_raw(idx_stmt).await.unwrap();
     let names: Vec<String> = rows.iter().map(|r| r.try_get::<String>("", "indexname").unwrap()).collect();
     for expected in [
         "ix_audit_log_occurred_at",
@@ -304,7 +304,7 @@ async fn historical_rows_seeded_before_m0008_survive_the_swap_and_route_to_their
             "INSERT INTO audit_log (id, occurred_at, action, outcome) VALUES ($1, $2, 'GetProject', $3)",
             [seed.id.into(), seed.occurred_at.into(), seed.outcome.into()],
         );
-        db.execute(stmt).await.expect("raw historical insert into the plain (pre-m0008) audit_log");
+        db.execute_raw(stmt).await.expect("raw historical insert into the plain (pre-m0008) audit_log");
     }
 
     // Now apply m0008: the swap must copy every pre-existing row into the new partitioned tree,

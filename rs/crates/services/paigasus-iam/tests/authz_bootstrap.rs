@@ -58,7 +58,7 @@ use uuid::Uuid;
 /// coerced from Postgres's "unknown"-typed constant, whereas a bound `text` parameter
 /// against a `uuid` column needs an explicit cast).
 async fn seed_principal(db: &DatabaseConnection, id: Uuid) {
-    db.execute(Statement::from_sql_and_values(
+    db.execute_raw(Statement::from_sql_and_values(
         DbBackend::Postgres,
         format!(r#"INSERT INTO "principal" (id, prn, kind, status, created_at, updated_at) VALUES ('{id}', 'prn:pgs:iam:::principal/{id}', 'user', 'active', now(), now())"#),
         [],
@@ -69,7 +69,7 @@ async fn seed_principal(db: &DatabaseConnection, id: Uuid) {
 
 /// Seeds an `organization` row via raw SQL.
 async fn seed_org(db: &DatabaseConnection, id: Uuid) {
-    db.execute(Statement::from_sql_and_values(
+    db.execute_raw(Statement::from_sql_and_values(
         DbBackend::Postgres,
         format!(r#"INSERT INTO "organization" (id, prn, slug, name, status, created_at, updated_at) VALUES ('{id}', 'prn:pgs:iam:::organization/{id}', 'acme', 'Acme', 'active', now(), now())"#),
         [],
@@ -244,7 +244,7 @@ async fn seeded_starter_set_plus_a_real_grant_enforces_end_to_end() {
 /// stale — the difference between "a release changed the code" and "somebody edited the row".
 async fn tamper_policy(db: &DatabaseConnection, policy_id: &str, source: &str, fingerprint: Option<&str>) {
     let fp = fingerprint.map_or("NULL".to_string(), |f| format!("'{f}'"));
-    db.execute(Statement::from_string(
+    db.execute_raw(Statement::from_string(
         DbBackend::Postgres,
         format!(r#"UPDATE "policy" SET source = '{source}', content_fingerprint = {fp} WHERE policy_id = '{policy_id}'"#),
     ))
@@ -305,7 +305,7 @@ async fn reconcile_system_converges_a_code_change_without_reporting_an_edit() {
     let old = "forbid(principal, action, resource) when { resource has effective_status };";
     let old_fp = content_fingerprint(doc.kind, old, &doc.description);
     tamper_policy(&db, &doc.policy_id, old, Some(&old_fp)).await;
-    db.execute(Statement::from_string(
+    db.execute_raw(Statement::from_string(
         DbBackend::Postgres,
         format!(
             r#"UPDATE "policy" SET starter_revision = {}, created_at = TIMESTAMPTZ '2020-01-01 00:00:00+00' WHERE policy_id = '{}'"#,
@@ -375,7 +375,7 @@ async fn reconcile_system_restores_a_cleared_system_flag() {
     // mismatch alone and this test would stay green with `reconcile.rs`'s `!stored.system ||`
     // guard deleted, which is precisely the bypass an adversarial spec review called the
     // cheapest way to exempt a starter policy from convergence forever.
-    db.execute(Statement::from_string(
+    db.execute_raw(Statement::from_string(
         DbBackend::Postgres,
         format!(r#"UPDATE "policy" SET system = false WHERE policy_id = '{}'"#, doc.policy_id),
     ))
@@ -407,7 +407,7 @@ async fn reconcile_system_defers_to_a_newer_revision() {
     let newer = "permit(principal, action, resource);";
     let newer_fp = content_fingerprint(doc.kind, newer, &doc.description);
     tamper_policy(&db, &doc.policy_id, newer, Some(&newer_fp)).await;
-    db.execute(Statement::from_string(
+    db.execute_raw(Statement::from_string(
         DbBackend::Postgres,
         format!(r#"UPDATE "policy" SET starter_revision = {} WHERE policy_id = '{}'"#, STARTER_POLICY_REVISION + 5, doc.policy_id),
     ))
@@ -443,7 +443,7 @@ async fn reconcile_system_flags_a_forged_revision_it_cannot_repair() {
     // fingerprint left exactly as the seed wrote it — the forger has no reason to recompute it,
     // and recomputing it would not help them here anyway.
     let weakened = "permit(principal, action, resource);";
-    db.execute(Statement::from_string(
+    db.execute_raw(Statement::from_string(
         DbBackend::Postgres,
         format!(r#"UPDATE "policy" SET source = '{weakened}', starter_revision = 2147483647 WHERE policy_id = '{}'"#, doc.policy_id),
     ))
@@ -512,7 +512,7 @@ async fn reconcile_system_reports_a_cleared_system_flag_even_with_no_fingerprint
 
     // CONTENT IS LEFT ALONE on purpose: with content also rewritten the row would classify
     // `ExternallyModified` on the mismatch alone and prove nothing about the branch order.
-    db.execute(Statement::from_string(
+    db.execute_raw(Statement::from_string(
         DbBackend::Postgres,
         format!(
             r#"UPDATE "policy" SET system = false, content_fingerprint = NULL, starter_revision = NULL WHERE policy_id = '{}'"#,
@@ -547,7 +547,7 @@ async fn reconcile_system_adopts_a_pre_m0010_row() {
 
     let old = "forbid(principal, action, resource) when { resource has effective_status };";
     tamper_policy(&db, &doc.policy_id, old, None).await;
-    db.execute(Statement::from_string(
+    db.execute_raw(Statement::from_string(
         DbBackend::Postgres,
         format!(r#"UPDATE "policy" SET starter_revision = NULL WHERE policy_id = '{}'"#, doc.policy_id),
     ))
@@ -580,7 +580,7 @@ async fn a_fingerprint_only_stamp_does_not_bump_policy_gen_but_a_content_change_
     // `starter_revision` stamped, which classifies as a deliberately cleared column, not an
     // unknowable-provenance row. Same pattern as `reconcile_system_adopts_a_pre_m0010_row`.
     tamper_policy(&db, &doc.policy_id, &doc.source, None).await;
-    db.execute(Statement::from_string(
+    db.execute_raw(Statement::from_string(
         DbBackend::Postgres,
         format!(r#"UPDATE "policy" SET starter_revision = NULL WHERE policy_id = '{}'"#, doc.policy_id),
     ))
@@ -636,7 +636,7 @@ async fn orphaned_system_policy_ids_reports_retired_starter_policies_only() {
         store.reconcile_system(&doc, STARTER_POLICY_REVISION).await.unwrap();
     }
     // A system row for a role this build no longer defines.
-    db.execute(Statement::from_string(
+    db.execute_raw(Statement::from_string(
         DbBackend::Postgres,
         r#"INSERT INTO "policy" (policy_id, kind, source, description, system, created_at, updated_at)
            VALUES ('retired_role', 'template', 'permit(principal == ?principal, action, resource in ?resource);', NULL, true, now(), now())"#
@@ -645,7 +645,7 @@ async fn orphaned_system_policy_ids_reports_retired_starter_policies_only() {
     .await
     .unwrap();
     // An operator's own (non-system) policy must NOT be reported.
-    db.execute(Statement::from_string(
+    db.execute_raw(Statement::from_string(
         DbBackend::Postgres,
         r#"INSERT INTO "policy" (policy_id, kind, source, description, system, created_at, updated_at)
            VALUES ('operator-policy', 'static', 'permit(principal, action, resource);', NULL, false, now(), now())"#
@@ -700,7 +700,7 @@ async fn reconcile_role_inserts_then_converges_a_drifted_row() {
     // "the UPDATE branch preserved the stored created_at" from "it silently reset created_at to
     // Utc::now() on every converge" — both read back as approximately-now either way.
     let backdated: DateTime<Utc> = "2020-01-01T00:00:00Z".parse().expect("static timestamp literal is valid RFC 3339");
-    db.execute(Statement::from_string(
+    db.execute_raw(Statement::from_string(
         DbBackend::Postgres,
         r#"UPDATE "role" SET description = 'stale wording', scope_kinds = '["team"]', created_at = TIMESTAMPTZ '2020-01-01 00:00:00+00' WHERE key = 'org_admin'"#.to_string(),
     ))
@@ -734,7 +734,7 @@ async fn orphaned_system_role_keys_reports_retired_roles_only() {
     // order, so without the `ORDER BY key` this asserts `["z_retired_role", "a_retired_role"]`
     // and reddens — which is the only way a single-orphan fixture's ordering claim can be
     // falsified at all.
-    db.execute(Statement::from_string(
+    db.execute_raw(Statement::from_string(
         DbBackend::Postgres,
         r#"INSERT INTO "role" (key, template_id, scope_kinds, description, system, created_at)
            VALUES ('z_retired_role', 'org_admin', '["organization"]', NULL, true, now()),
@@ -750,7 +750,7 @@ async fn orphaned_system_role_keys_reports_retired_roles_only() {
     // in `orphaned_system_role_keys` could be dropped or inverted and this test would still
     // pass (`retired_role` would still be the only key absent from `known`). `template_id`
     // points at `org_admin`, a starter policy id seeded above — `fk_role_template`.
-    db.execute(Statement::from_string(
+    db.execute_raw(Statement::from_string(
         DbBackend::Postgres,
         r#"INSERT INTO "role" (key, template_id, scope_kinds, description, system, created_at)
            VALUES ('operator_role', 'org_admin', '["organization"]', NULL, false, now())"#

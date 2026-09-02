@@ -28,7 +28,7 @@ async fn m0009_adds_columns_and_partial_indexes() {
     };
 
     let cols = db
-        .query_all(Statement::from_string(
+        .query_all_raw(Statement::from_string(
             DbBackend::Postgres,
             "SELECT column_name FROM information_schema.columns WHERE table_name = 'event_outbox'".to_string(),
         ))
@@ -41,7 +41,7 @@ async fn m0009_adds_columns_and_partial_indexes() {
     assert!(cols.contains(&"last_error".to_string()), "missing last_error: {cols:?}");
 
     let idx = db
-        .query_all(Statement::from_string(
+        .query_all_raw(Statement::from_string(
             DbBackend::Postgres,
             "SELECT indexname FROM pg_indexes WHERE tablename = 'event_outbox'".to_string(),
         ))
@@ -75,7 +75,7 @@ async fn backfill_stamps_parked_at_from_now_not_occurred_at() {
 
     let id = Uuid::from_u128(1);
     let occurred_at = Utc::now() - chrono::Duration::days(90);
-    db.execute(Statement::from_sql_and_values(
+    db.execute_raw(Statement::from_sql_and_values(
         DbBackend::Postgres,
         "INSERT INTO event_outbox (id, occurred_at, event_type, aggregate_prn, payload, parked) VALUES ($1, $2, $3, $4, $5, true)",
         [
@@ -93,7 +93,7 @@ async fn backfill_stamps_parked_at_from_now_not_occurred_at() {
     Migrator::up(&db, None).await.expect("m0009 must apply and backfill parked_at for the pre-existing parked row");
 
     let seeded = db
-        .query_one(Statement::from_sql_and_values(
+        .query_one_raw(Statement::from_sql_and_values(
             DbBackend::Postgres,
             "SELECT parked_at, occurred_at FROM event_outbox WHERE id = $1",
             [id.into()],

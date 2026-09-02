@@ -73,7 +73,7 @@ async fn seed_chain(db: &DatabaseConnection) -> (Organization, Team, Project) {
 /// (email/user row) — mirroring `authz_role_grants.rs`'s `seed_principal_and_org` (see its
 /// doc comment for why an inline UUID literal, not a bind param).
 async fn seed_principal(db: &DatabaseConnection, principal_id: Uuid) {
-    db.execute(Statement::from_sql_and_values(
+    db.execute_raw(Statement::from_sql_and_values(
         DbBackend::Postgres,
         format!(
             r#"INSERT INTO "principal" (id, prn, kind, status, created_at, updated_at)

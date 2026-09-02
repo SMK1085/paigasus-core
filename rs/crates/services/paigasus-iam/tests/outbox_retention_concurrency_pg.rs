@@ -70,7 +70,7 @@ async fn a_sweep_neither_blocks_on_nor_deletes_a_row_the_relay_holds_locked() {
     let port = support::docker::mapped_port(&node, 5432, "postgres (lock holder)").await;
     let holder = Database::connect(format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres")).await.unwrap();
     let held = holder.begin().await.unwrap();
-    held.execute(Statement::from_string(DbBackend::Postgres, format!(r#"SELECT id FROM "event_outbox" WHERE id = '{live}' FOR UPDATE"#)))
+    held.execute_raw(Statement::from_string(DbBackend::Postgres, format!(r#"SELECT id FROM "event_outbox" WHERE id = '{live}' FOR UPDATE"#)))
         .await
         .unwrap();
 

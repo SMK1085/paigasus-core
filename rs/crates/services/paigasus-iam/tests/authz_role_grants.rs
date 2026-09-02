@@ -35,7 +35,7 @@ use uuid::Uuid;
 /// column needs an explicit cast, whereas an inline literal is coerced from Postgres's
 /// "unknown"-typed constant (same reasoning as `authz_schema.rs`).
 async fn seed_principal_and_org(db: &DatabaseConnection, principal_id: Uuid, org_id: Uuid) {
-    db.execute(Statement::from_sql_and_values(
+    db.execute_raw(Statement::from_sql_and_values(
         DbBackend::Postgres,
         format!(
             r#"INSERT INTO "principal" (id, prn, kind, status, created_at, updated_at)
@@ -46,7 +46,7 @@ async fn seed_principal_and_org(db: &DatabaseConnection, principal_id: Uuid, org
     .await
     .unwrap();
 
-    db.execute(Statement::from_sql_and_values(
+    db.execute_raw(Statement::from_sql_and_values(
         DbBackend::Postgres,
         format!(
             r#"INSERT INTO "organization" (id, prn, slug, name, status, created_at, updated_at)
@@ -62,7 +62,7 @@ async fn seed_principal_and_org(db: &DatabaseConnection, principal_id: Uuid, org
 /// `fk_team_org`/`fk_role_grant_team` needs. Mirrors `seed_principal_and_org`'s
 /// inline-literal convention (see its doc comment for why literals, not bind params).
 async fn seed_team(db: &DatabaseConnection, org_id: Uuid, team_id: Uuid) {
-    db.execute(Statement::from_sql_and_values(
+    db.execute_raw(Statement::from_sql_and_values(
         DbBackend::Postgres,
         format!(
             r#"INSERT INTO "team" (id, org_id, prn, slug, name, status, created_at, updated_at)
@@ -77,7 +77,7 @@ async fn seed_team(db: &DatabaseConnection, org_id: Uuid, team_id: Uuid) {
 /// Seeds a `project` row under an already-seeded team (which must itself already be under
 /// `org_id`) — the FK target `fk_project_team`/`fk_role_grant_project` needs.
 async fn seed_project(db: &DatabaseConnection, org_id: Uuid, team_id: Uuid, project_id: Uuid) {
-    db.execute(Statement::from_sql_and_values(
+    db.execute_raw(Statement::from_sql_and_values(
         DbBackend::Postgres,
         format!(
             r#"INSERT INTO "project" (id, team_id, org_id, prn, slug, name, status, created_at, updated_at)

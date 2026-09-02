@@ -341,7 +341,7 @@ impl MembershipRepository for PgMembershipRepository {
         let org_id = model.org_id;
 
         // D6 step 1 — lock the whole set, cascade included, before reading it.
-        txn.execute(Statement::from_sql_and_values(DbBackend::Postgres, DETACH_LOCK_SQL, [principal_id.into(), org_id.into(), id.into()]))
+        txn.execute_raw(Statement::from_sql_and_values(DbBackend::Postgres, DETACH_LOCK_SQL, [principal_id.into(), org_id.into(), id.into()]))
             .await
             .map_err(map_err)?;
 
@@ -357,7 +357,7 @@ impl MembershipRepository for PgMembershipRepository {
         // org row itself is deleted below.
         if let Some(org_id) = org_id {
             let stmt = Statement::from_sql_and_values(DbBackend::Postgres, DETACH_CASCADE_SQL, [principal_id.into(), org_id.into()]);
-            txn.execute(stmt).await.map_err(map_err)?;
+            txn.execute_raw(stmt).await.map_err(map_err)?;
         }
         membership::Entity::delete_by_id(id).exec(txn).await.map_err(map_err)?;
 

@@ -189,7 +189,7 @@ async fn row(db: &DatabaseConnection, id: Uuid) -> event_outbox::Model {
 /// in the pool. `application_name` identifies exactly this component, independent of what it is
 /// doing right now or which other backends are momentarily also `LISTEN`ing.
 async fn listening_backends(db: &DatabaseConnection) -> i64 {
-    db.query_one(sea_orm::Statement::from_string(
+    db.query_one_raw(sea_orm::Statement::from_string(
         sea_orm::DbBackend::Postgres,
         "SELECT count(*)::bigint AS n FROM pg_stat_activity WHERE application_name = 'paigasus-iam-outbox-listener' AND pid <> pg_backend_pid()",
     ))
