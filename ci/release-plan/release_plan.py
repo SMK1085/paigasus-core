@@ -53,7 +53,7 @@ def tag_for(name: str, version: str) -> str:
     return f"{name}-v{version}"
 
 
-class Inconclusive(Exception):
+class InconclusiveError(Exception):
     """Collection failed. Every raise site must end in nothing_to_release=false."""
 
 
@@ -89,16 +89,16 @@ def load_toml(path: Path) -> dict:
         with path.open("rb") as fh:
             return tomllib.load(fh)
     except (OSError, tomllib.TOMLDecodeError) as exc:
-        raise Inconclusive(f"cannot read {path}: {exc}") from exc
+        raise InconclusiveError(f"cannot read {path}: {exc}") from exc
 
 
 def assert_default_tag_format(cfg: dict) -> None:
     if "git_tag_name" in (cfg.get("workspace") or {}):
-        raise Inconclusive("rs/release-plz.toml sets [workspace] git_tag_name; tag_for() assumes "
+        raise InconclusiveError("rs/release-plz.toml sets [workspace] git_tag_name; tag_for() assumes "
                            "release-plz's default <package>-v<version>")
     for pkg in cfg.get("package") or []:
         if isinstance(pkg, dict) and "git_tag_name" in pkg:
-            raise Inconclusive(f"rs/release-plz.toml sets git_tag_name on "
+            raise InconclusiveError(f"rs/release-plz.toml sets git_tag_name on "
                                f"{pkg.get('name')!r}; tag_for() assumes the default format")
 
 
@@ -112,12 +112,12 @@ def workspace_members(rs_root: Path) -> list[str]:
     and SKIPPED. `--assert`'s strict-equality pin could not catch it either, because both sides of
     that comparison derive from this one function.
 
-    Every failure here is `Inconclusive`, which BUILDS.
+    Every failure here is `InconclusiveError`, which BUILDS.
     """
     cfg = load_toml(rs_root / "Cargo.toml")
     ws = cfg.get("workspace")
     if not isinstance(ws, dict):
-        raise Inconclusive(f"{rs_root}/Cargo.toml declares no [workspace] table")
+        raise InconclusiveError(f"{rs_root}/Cargo.toml declares no [workspace] table")
     # `exclude` SHRINKS the member set, and this function does not model it. Reading it as absent
     # would over-derive — demanding a tag for a non-member, which only ever BUILDS, so it is
     # fail-safe at runtime — but it would also make the skip permanently unreachable, silently.
@@ -126,12 +126,12 @@ def workspace_members(rs_root: Path) -> list[str]:
     # function about exclusion.
     excluded = ws.get("exclude")
     if isinstance(excluded, list) and excluded:
-        raise Inconclusive(f"{rs_root}/Cargo.toml sets [workspace] exclude={excluded!r}; "
+        raise InconclusiveError(f"{rs_root}/Cargo.toml sets [workspace] exclude={excluded!r}; "
                            "workspace_members() does not model member exclusion")
     members = ws.get("members")
     if not isinstance(members, list) or not members or \
             not all(isinstance(m, str) and m for m in members):
-        raise Inconclusive(f"{rs_root}/Cargo.toml has no usable [workspace] members list "
+        raise InconclusiveError(f"{rs_root}/Cargo.toml has no usable [workspace] members list "
                            f"(got {members!r})")
     return members
 
@@ -141,7 +141,7 @@ def crate_manifests(rs_root: Path) -> dict[str, Path]:
 
     Needs no cargo and no network: Cargo's member patterns are plain path globs, so `Path.glob`
     expands them. A pattern that matches no manifest, or a literal member with no manifest on
-    disk, is Inconclusive — the tree moved, and guessing would under-derive.
+    disk, is InconclusiveError — the tree moved, and guessing would under-derive.
     """
     found: dict[str, Path] = {}
     for pattern in workspace_members(rs_root):
@@ -151,7 +151,7 @@ def crate_manifests(rs_root: Path) -> dict[str, Path]:
             literal = rs_root / pattern / "Cargo.toml"
             hits = [literal] if literal.is_file() else []
         if not hits:
-            raise Inconclusive(f"workspace member {pattern!r} matched no Cargo.toml under "
+            raise InconclusiveError(f"workspace member {pattern!r} matched no Cargo.toml under "
                                f"{rs_root} — the tree moved")
         for manifest in hits:
             pkg = load_toml(manifest).get("package") or {}
@@ -159,11 +159,11 @@ def crate_manifests(rs_root: Path) -> dict[str, Path]:
             if not isinstance(name, str) or not name:
                 continue
             if name in found and found[name] != manifest:
-                raise Inconclusive(
+                raise InconclusiveError(
                     f"two manifests declare package {name!r}: {found[name]}, {manifest}")
             found[name] = manifest
     if not found:
-        raise Inconclusive(f"no crate manifests under {rs_root} — the tree moved")
+        raise InconclusiveError(f"no crate manifests under {rs_root} — the tree moved")
     return found
 
 
@@ -191,7 +191,7 @@ def releasable_packages(rs_root: Path) -> dict[str, str]:
         version = pkg.get("version")
         if not isinstance(version, str):
             # `version.workspace = true` parses as a dict. There is no literal to tag against.
-            raise Inconclusive(f"{name} has no literal [package] version in {manifest}")
+            raise InconclusiveError(f"{name} has no literal [package] version in {manifest}")
         out[name] = version
     return out
 
@@ -201,13 +201,13 @@ def repo_tags(repo_root: Path) -> set[str]:
         proc = subprocess.run(["git", "-C", str(repo_root), "tag", "-l"],
                               capture_output=True, text=True, check=True)
     except (OSError, subprocess.CalledProcessError) as exc:
-        raise Inconclusive(f"git tag -l failed: {exc}") from exc
+        raise InconclusiveError(f"git tag -l failed: {exc}") from exc
     return {line.strip() for line in proc.stdout.splitlines() if line.strip()}
 
 
 def run(repo_root: Path, event_name: str) -> tuple[bool, str]:
     """The runtime path. It must NEVER traceback: `--github-output` wraps this call and its
-    fail-safe is "warn and build", not "crash and let the caller decide". `Inconclusive` is the
+    fail-safe is "warn and build", not "crash and let the caller decide". `InconclusiveError` is the
     expected collection failure, but a malformed manifest can raise something else entirely —
     measured: `workspace = 3` in `rs/release-plz.toml` raises a bare `TypeError` from inside
     `assert_default_tag_format`'s `"git_tag_name" in (...)` membership test. Catching `Exception`
@@ -217,7 +217,7 @@ def run(repo_root: Path, event_name: str) -> tuple[bool, str]:
     try:
         packages = releasable_packages(repo_root / "rs")
         tags = repo_tags(repo_root)
-    except Exception as exc:  # noqa: BLE001 - deliberately broad; see the docstring above.
+    except Exception as exc:  # deliberately broad; see the docstring above.
         return False, f"inconclusive ({type(exc).__name__}: {exc}) — build"
     return decide(event_name, packages, tags)
 
@@ -250,15 +250,15 @@ FIXTURES: list[tuple[str, str, dict[str, str], set[str], bool]] = [
 
 
 def _missing_config_is_inconclusive() -> str | None:
-    """A tree with crate manifests but no rs/release-plz.toml must be Inconclusive.
+    """A tree with crate manifests but no rs/release-plz.toml must be InconclusiveError.
 
     `load_toml` is the first thing `releasable_packages` calls, and a missing file raises
     `FileNotFoundError`, an `OSError` subclass, which `load_toml` already converts.
 
     The `except` below matches the SPECIFIC message `load_toml` raises for an unreadable file
-    ("cannot read ... release-plz.toml"), not any `Inconclusive` whatsoever. A bare
-    `except Inconclusive: return None` would also accept `crate_manifests`' unrelated "no crate
-    manifests" Inconclusive, which this tree cannot even reach — this crate dir exists — but a
+    ("cannot read ... release-plz.toml"), not any `InconclusiveError` whatsoever. A bare
+    `except InconclusiveError: return None` would also accept `crate_manifests`' unrelated "no crate
+    manifests" InconclusiveError, which this tree cannot even reach — this crate dir exists — but a
     future refactor could make it reachable, and a helper that accepts any cause proves nothing
     about the ONE cause it claims to test (MEASURED — see I2 in the fix-round report: this is
     exactly the shape that let a neutered `assert_default_tag_format` pass unnoticed in the
@@ -272,23 +272,23 @@ def _missing_config_is_inconclusive() -> str | None:
         (crate_dir / "Cargo.toml").write_text('[package]\nname = "a"\nversion = "1.0.0"\n')
         try:
             releasable_packages(rs_root)
-        except Inconclusive as exc:
+        except InconclusiveError as exc:
             if "cannot read" in str(exc) and "release-plz.toml" in str(exc):
                 return None
-            return (f"releasable_packages raised Inconclusive for the wrong reason: {exc!r} "
+            return (f"releasable_packages raised InconclusiveError for the wrong reason: {exc!r} "
                     f"(expected a 'cannot read ... release-plz.toml' message)")
-        return "releasable_packages did not raise Inconclusive for a missing release-plz.toml"
+        return "releasable_packages did not raise InconclusiveError for a missing release-plz.toml"
     finally:
         shutil.rmtree(tmp)
 
 
 def _workspace_version_is_inconclusive() -> str | None:
     """`version.workspace = true` parses as a dict, not a literal string, and must be
-    Inconclusive rather than silently treated as absent.
+    InconclusiveError rather than silently treated as absent.
 
     Matches on the specific "no literal [package] version" message `releasable_packages` raises
     for this exact cause, for the same reason `_missing_config_is_inconclusive` does: a bare
-    `except Inconclusive` proves only that SOMETHING failed, not that THIS check fired.
+    `except InconclusiveError` proves only that SOMETHING failed, not that THIS check fired.
     """
     tmp = tempfile.mkdtemp()
     try:
@@ -302,25 +302,25 @@ def _workspace_version_is_inconclusive() -> str | None:
             '[package]\nname = "a"\nversion.workspace = true\npublish = true\n')
         try:
             releasable_packages(rs_root)
-        except Inconclusive as exc:
+        except InconclusiveError as exc:
             if "no literal [package] version" in str(exc):
                 return None
-            return (f"releasable_packages raised Inconclusive for the wrong reason: {exc!r} "
+            return (f"releasable_packages raised InconclusiveError for the wrong reason: {exc!r} "
                     f"(expected a message naming 'no literal [package] version')")
-        return "releasable_packages did not raise Inconclusive for a workspace-inherited version"
+        return "releasable_packages did not raise InconclusiveError for a workspace-inherited version"
     finally:
         shutil.rmtree(tmp)
 
 
 def _tag_name_override_is_inconclusive() -> str | None:
     """A `[workspace] git_tag_name` override invalidates `tag_for`'s default-format assumption,
-    and must be Inconclusive rather than silently tagged the usual way.
+    and must be InconclusiveError rather than silently tagged the usual way.
 
     This tree deliberately has NO `rs/crates/` directory at all — `assert_default_tag_format`
     must raise before `releasable_packages` ever reaches `crate_manifests`. MEASURED: with a
-    bare `except Inconclusive: return None`, neutering `assert_default_tag_format`'s body to a
+    bare `except InconclusiveError: return None`, neutering `assert_default_tag_format`'s body to a
     no-op `return` made THIS helper keep passing, because `crate_manifests` then raised its own,
-    unrelated "no crate manifests under .../crates — the tree moved" Inconclusive, and the bare
+    unrelated "no crate manifests under .../crates — the tree moved" InconclusiveError, and the bare
     except accepted that too. Matching on "git_tag_name" specifically is what makes that
     mutation visible: neutering the function under test now removes the ONLY source of a
     "git_tag_name" message, so this helper reports the wrong-reason string instead of None.
@@ -333,12 +333,12 @@ def _tag_name_override_is_inconclusive() -> str | None:
             '[workspace]\ngit_tag_name = "v{{ version }}"\n')
         try:
             releasable_packages(rs_root)
-        except Inconclusive as exc:
+        except InconclusiveError as exc:
             if "git_tag_name" in str(exc):
                 return None
-            return (f"releasable_packages raised Inconclusive for the wrong reason: {exc!r} "
+            return (f"releasable_packages raised InconclusiveError for the wrong reason: {exc!r} "
                     f"(expected a message naming git_tag_name)")
-        return "releasable_packages did not raise Inconclusive for a git_tag_name override"
+        return "releasable_packages did not raise InconclusiveError for a git_tag_name override"
     finally:
         shutil.rmtree(tmp)
 
@@ -369,16 +369,16 @@ def _member_outside_crates_is_seen() -> str | None:
             return (f"releasable_packages returned {got!r}; the `tools/*` member is missing, so "
                     f"its tag would never be demanded and a release would read as complete")
         return None
-    except Inconclusive as exc:  # pragma: no cover - a regression would surface here
-        return f"releasable_packages raised Inconclusive for a valid tree: {exc!r}"
+    except InconclusiveError as exc:  # pragma: no cover - a regression would surface here
+        return f"releasable_packages raised InconclusiveError for a valid tree: {exc!r}"
     finally:
         shutil.rmtree(tmp)
 
 
 def _unresolvable_member_is_inconclusive() -> str | None:
-    """A `[workspace] members` entry that matches no Cargo.toml must be Inconclusive.
+    """A `[workspace] members` entry that matches no Cargo.toml must be InconclusiveError.
 
-    Inconclusive BUILDS, which is the fail-safe direction. The alternative — quietly deriving a
+    InconclusiveError BUILDS, which is the fail-safe direction. The alternative — quietly deriving a
     smaller package set — is exactly the silent skip `_member_outside_crates_is_seen` describes.
     """
     tmp = tempfile.mkdtemp()
@@ -393,12 +393,12 @@ def _unresolvable_member_is_inconclusive() -> str | None:
         (d / "Cargo.toml").write_text('[package]\nname = "a"\nversion = "1.0.0"\n')
         try:
             releasable_packages(rs_root)
-        except Inconclusive as exc:
+        except InconclusiveError as exc:
             if "matched no Cargo.toml" in str(exc):
                 return None
-            return (f"releasable_packages raised Inconclusive for the wrong reason: {exc!r} "
+            return (f"releasable_packages raised InconclusiveError for the wrong reason: {exc!r} "
                     f"(expected a message naming 'matched no Cargo.toml')")
-        return "releasable_packages did not raise Inconclusive for an unresolvable member"
+        return "releasable_packages did not raise InconclusiveError for an unresolvable member"
     finally:
         shutil.rmtree(tmp)
 
@@ -407,7 +407,7 @@ def _malformed_config_asserts_three() -> str | None:
     """A malformed `rs/release-plz.toml` must make `--assert` exit 3, not 1.
 
     MEASURED before the SMA-603 fix wave: `workspace = 3` raised a bare `TypeError` out of
-    `assert_default_tag_format`, `_assert_repo`'s `except Inconclusive` did not catch it, the
+    `assert_default_tag_format`, `_assert_repo`'s `except InconclusiveError` did not catch it, the
     interpreter exited 1 with a traceback, and `run.sh`'s `run_checker` mapped that 1 onto
     `die_infra` (2). Check 11 then reported "uv or the interpreter failed" for what is plainly a
     broken repository file, and README.md's "never 1" claim was false.
@@ -469,15 +469,15 @@ def _assert_repo(repo_root: Path) -> int:
     """--assert. The CI-side assertions; the runtime path uses none of them.
 
     Both collection calls sit inside the ONE try below, on purpose: `README.md` documents that
-    this checker exits 0, 2, or 3 and never 1. `repo_tags()` can raise `Inconclusive` too (a
-    failed `git tag -l`), and if that call sat outside the try, that Inconclusive would escape
+    this checker exits 0, 2, or 3 and never 1. `repo_tags()` can raise `InconclusiveError` too (a
+    failed `git tag -l`), and if that call sat outside the try, that InconclusiveError would escape
     uncaught, the interpreter would exit 1 with a traceback, and `run_checker` would then map
     that 1 onto its `die_infra` branch (2) — silently breaking the documented contract.
 
     SMA-603 fix wave, Group 3: the `except` is BROAD for the same reason `run()`'s is, and the
     documented contract is why. MEASURED: `workspace = 3` in `rs/release-plz.toml` raises a bare
     `TypeError` from inside `assert_default_tag_format`'s membership test, which an
-    `except Inconclusive` does not catch — so `--assert` exited 1 with a traceback, `run_checker`
+    `except InconclusiveError` does not catch — so `--assert` exited 1 with a traceback, `run_checker`
     mapped that onto `die_infra` (2), and a malformed repository file was reported as
     "infrastructure failed" rather than "the repository is wrong". The README claimed the checker
     could never exit 1; the code, not the doc, was wrong. Collection reads only repository files,
@@ -488,7 +488,7 @@ def _assert_repo(repo_root: Path) -> int:
     try:
         packages = releasable_packages(repo_root / "rs")
         tags = repo_tags(repo_root)
-    except Exception as exc:  # noqa: BLE001 - deliberately broad; see the docstring above.
+    except Exception as exc:  # deliberately broad; see the docstring above.
         print(f"release-plan: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 3
     derived = frozenset(packages)

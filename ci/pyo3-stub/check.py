@@ -30,7 +30,7 @@ REPO = Path(__file__).resolve().parents[2]
 # --------------------------------------------------------------------------------------------
 
 # Copied VERBATIM from ci/http-extractor/check.py:84-90 (SMA-587). rc-2 signal for the checker's
-# own infrastructure failures, never for "the repo is wrong" — that is Refused, below. Copy
+# own infrastructure failures, never for "the repo is wrong" — that is RefusedError, below. Copy
 # rather than import — ci/ gates are standalone by design (SMA-600).
 class InfraError(RuntimeError):
     """The inputs or environment are broken, NOT 'the tree regressed'.
@@ -147,11 +147,11 @@ def strip_noise(text):
 # here rather than declared as a TypeAlias so this file needs no `typing` import for it alone.
 
 
-class Refused(Exception):
+class RefusedError(Exception):
     """A §4 shape the scanner will not guess at. Collected into the rc-1 problem list.
 
     NOT an InfraError: a commit introduced this shape and a commit can remove it, so the repo is
-    wrong, not the tool (design §5.1). Never downgrade a Refused into a skip — that converts
+    wrong, not the tool (design §5.1). Never downgrade a RefusedError into a skip — that converts
     "unguarded" into "believed guarded", which is the one outcome worse than no gate.
     """
 
@@ -182,7 +182,7 @@ _PYRESULT = re.compile(r"^PyResult<(.+)>$", re.S)
 
 
 def map_rust_type(rust_type, where):
-    """Normalize a Rust type to its Python spelling, or raise Refused.
+    """Normalize a Rust type to its Python spelling, or raise RefusedError.
 
     `PyResult<T>` unwraps to T: it is an error channel, not a value type, and PyO3 raises rather
     than returning it. So PyResult<()>, a bare (), and an absent return all normalize to "None".
@@ -192,7 +192,7 @@ def map_rust_type(rust_type, where):
     if m:
         t = m.group(1).strip()
     if t not in RUST_TO_PY:
-        raise Refused(
+        raise RefusedError(
             f"{where}: Rust type {t!r} is not in RUST_TO_PY. Add a row ONLY if PyO3 exports this "
             f"parameter and the correspondence is 1:1 (see §3.1); otherwise it is a refusal."
         )
@@ -224,7 +224,7 @@ def _find_attribute_sites(text):
                     break
             i += 1
         else:
-            raise Refused("unterminated #[pyfunction] attribute")
+            raise RefusedError("unterminated #[pyfunction] attribute")
         yield m.start(), text[m.start():i + 1]
 
 
@@ -275,7 +275,7 @@ def _walk_back_attributes(text, start, where):
                     break
             j -= 1
         else:
-            raise Refused(f"{where}: unbalanced `]` above #[pyfunction] (§4.3)")
+            raise RefusedError(f"{where}: unbalanced `]` above #[pyfunction] (§4.3)")
         # An attribute is `#[`; an INNER attribute is `#![`. Anything else (an array expression,
         # an index) is not an attribute and ends the run.
         k = j - 1
@@ -288,14 +288,14 @@ def _walk_back_attributes(text, start, where):
             # A bracket attribute whose name we cannot even read. Refuse rather than skip: an
             # unreadable attribute is exactly the case where guessing "it changes nothing" is
             # unjustified.
-            raise Refused(f"{where}: an unreadable attribute sits above #[pyfunction] (§4.3)")
+            raise RefusedError(f"{where}: an unreadable attribute sits above #[pyfunction] (§4.3)")
         if m.group(1) not in PERMITTED_INTERVENING_ATTRS:
-            raise Refused(f"{where}: attribute #[{m.group(1)}...] sits above #[pyfunction] (§4.3)")
+            raise RefusedError(f"{where}: attribute #[{m.group(1)}...] sits above #[pyfunction] (§4.3)")
         i = k - 1
 
 
 def rust_declarations(sources):
-    """Set A. `sources` maps display path -> file text. Raises Refused on any §4 shape."""
+    """Set A. `sources` maps display path -> file text. Raises RefusedError on any §4 shape."""
     out = {}
     for path, raw in sorted(sources.items()):
         text = strip_noise(raw)
@@ -305,7 +305,7 @@ def rust_declarations(sources):
         # stub omitting them (the exact drift hunted) would pass green. Arm 2 covers this; arm 1
         # refuses outright.
         if re.search(r"\bmacro_rules!", text):
-            raise Refused(f"{path}: macro_rules! is in scope — a source scanner cannot see what it emits (§4.2)")
+            raise RefusedError(f"{path}: macro_rules! is in scope — a source scanner cannot see what it emits (§4.2)")
 
         # §4.3 / FIX C2 (final review, SMA-600) — a `#[pyclass]`-only crate used to report CLEAN
         # even with a real export and no stub, and the mechanism is worth spelling out because it
@@ -319,7 +319,7 @@ def rust_declarations(sources):
         # like the macro_rules! one above, because it closes the same class of hole — means the
         # bearing test cannot be dodged by declaring a class instead of a function.
         if re.search(r"#!?\[\s*py(class|methods)\b", text):
-            raise Refused(f"{path}: #[pyclass]/#[pymethods] is in scope — a class surface is not modelled (§4.3)")
+            raise RefusedError(f"{path}: #[pyclass]/#[pymethods] is in scope — a class surface is not modelled (§4.3)")
 
         # §4.3 / FIX C1 (final review, SMA-600), part 2 of 2 — see `_walk_back_attributes` for
         # part 1. The backward walk catches a `#[cfg]` sitting directly above a `#[pyfunction]`,
@@ -336,7 +336,7 @@ def rust_declarations(sources):
         # walk's real prize is `#[pyo3(name = "x")]` written ABOVE `#[pyfunction]`, which renames
         # the export and which no cfg check would ever see.
         if re.search(r"#!?\[\s*cfg(_attr)?\b", text):
-            raise Refused(f"{path}: #[cfg]/#[cfg_attr] is in scope — the exported set becomes configuration-dependent (§4.3)")
+            raise RefusedError(f"{path}: #[cfg]/#[cfg_attr] is in scope — the exported set becomes configuration-dependent (§4.3)")
 
         # §4.3 — an inline `mod { ... }` is unmodelled, and a #[cfg] on one makes the exported set
         # configuration-dependent, so one static answer is wrong. The visibility group mirrors
@@ -347,7 +347,7 @@ def rust_declarations(sources):
         # their nested #[pyfunction]s were silently extracted as if top-level — the exact
         # unmodelled-shape-treated-as-modelled failure this gate exists to prevent.
         if re.search(r"^\s*(pub(\s*\([^)]*\))?\s+)?mod\s+\w+\s*\{", text, re.M):
-            raise Refused(f"{path}: an inline `mod {{ … }}` block is in scope — nesting is not modelled (§4.3)")
+            raise RefusedError(f"{path}: an inline `mod {{ … }}` block is in scope — nesting is not modelled (§4.3)")
 
         for start, attr in _find_attribute_sites(text):
             line = raw[:start].count("\n") + 1
@@ -355,7 +355,7 @@ def rust_declarations(sources):
 
             # §4.3 — `#[pyfunction(...)]` with arguments may carry name= or signature=.
             if attr.strip() != "#[pyfunction]":
-                raise Refused(f"{where}: {attr.strip()!r} carries arguments — it may rename or reshape the export (§4.3)")
+                raise RefusedError(f"{where}: {attr.strip()!r} carries arguments — it may rename or reshape the export (§4.3)")
 
             # FIX C1 — the attributes ABOVE this one, default-deny (see the helper's docstring).
             # Runs before the forward walk so an upward `#[cfg]`/`#[pyo3(...)]` is reported at the
@@ -369,7 +369,7 @@ def rust_declarations(sources):
                 if not m:
                     break
                 if m.group(1) not in PERMITTED_INTERVENING_ATTRS:
-                    raise Refused(f"{where}: attribute #[{m.group(1)}...] sits between #[pyfunction] and the fn (§4.3)")
+                    raise RefusedError(f"{where}: attribute #[{m.group(1)}...] sits between #[pyfunction] and the fn (§4.3)")
                 depth, i = 0, cursor + m.start() + len(m.group(0)) - len(m.group(1)) - 2
                 while i < len(text):
                     if text[i] == "[":
@@ -397,12 +397,12 @@ def rust_declarations(sources):
             # docstring. Do not reorder this below the regex.
             for bad in _REFUSED_ITEM_MODIFIERS:
                 if after_vis.startswith(bad):
-                    raise Refused(f"{where}: `{bad.strip()} fn` is refused — PyO3 handling is not modelled (§4.3)")
+                    raise RefusedError(f"{where}: `{bad.strip()} fn` is refused — PyO3 handling is not modelled (§4.3)")
             fn = re.match(r"fn\s+(r#)?(\w+)\s*\(", after_vis)
             if not fn:
-                raise Refused(f"{where}: no parsable `fn NAME(` follows #[pyfunction] (§4.3)")
+                raise RefusedError(f"{where}: no parsable `fn NAME(` follows #[pyfunction] (§4.3)")
             if fn.group(1):
-                raise Refused(f"{where}: a raw identifier `fn r#{fn.group(2)}` is refused — PyO3 strips the r# (§4.3)")
+                raise RefusedError(f"{where}: a raw identifier `fn r#{fn.group(2)}` is refused — PyO3 strips the r# (§4.3)")
             name = fn.group(2)
 
             # §4.3 item 3 — paren-balanced across newlines. rustfmt's max_width is 200 and
@@ -419,7 +419,7 @@ def rust_declarations(sources):
                         break
                 i += 1
             else:
-                raise Refused(f"{where}: unbalanced parameter list (§4.3)")
+                raise RefusedError(f"{where}: unbalanced parameter list (§4.3)")
             params_src = text[open_at + 1:i]
             tail = text[i + 1:]
             # `\bwhere\b`, not `where\b` (review finding 2): a plain `where\b` has no boundary
@@ -435,12 +435,12 @@ def rust_declarations(sources):
                 if not piece.strip():
                     continue
                 if ":" not in piece:
-                    raise Refused(f"{where}: parameter {piece.strip()!r} has no type annotation (§4.3)")
+                    raise RefusedError(f"{where}: parameter {piece.strip()!r} has no type annotation (§4.3)")
                 pname, pty = piece.split(":", 1)
                 params.append((pname.strip(), map_rust_type(pty, f"{where} parameter {pname.strip()!r}")))
 
             if name in out:
-                raise Refused(f"{where}: `{name}` is declared more than once across the scanned files (§4.3)")
+                raise RefusedError(f"{where}: `{name}` is declared more than once across the scanned files (§4.3)")
             out[name] = (tuple(params), map_rust_type(ret_ty, f"{where} return type"))
     return out
 
@@ -504,7 +504,7 @@ def _pymodule_body(sources):
         text = strip_noise(raw)
         for m in re.finditer(r"#\[\s*pymodule[^\]]*\]", text):
             if m.group(0).strip() != "#[pymodule]":
-                raise Refused(f"{path}: {m.group(0)!r} carries arguments — it may rename the module (§4.3)")
+                raise RefusedError(f"{path}: {m.group(0)!r} carries arguments — it may rename the module (§4.3)")
 
             # Bounded attribute-window walk, default-deny — see the ruling above.
             cursor = m.end()
@@ -513,7 +513,7 @@ def _pymodule_body(sources):
                 if not am:
                     break
                 if am.group(1) not in PERMITTED_INTERVENING_ATTRS:
-                    raise Refused(f"{path}: attribute #[{am.group(1)}...] sits between #[pymodule] and the fn (§4.3)")
+                    raise RefusedError(f"{path}: attribute #[{am.group(1)}...] sits between #[pymodule] and the fn (§4.3)")
                 depth, i = 0, cursor + am.start() + len(am.group(0)) - len(am.group(1)) - 2
                 while i < len(text):
                     if text[i] == "[":
@@ -527,7 +527,7 @@ def _pymodule_body(sources):
 
             fn = re.match(r"\s*fn\s+(\w+)\s*\([^)]*\)[^{]*\{", text[cursor:])
             if not fn:
-                raise Refused(f"{path}: no parsable `fn` follows #[pymodule] (§4.3)")
+                raise RefusedError(f"{path}: no parsable `fn` follows #[pymodule] (§4.3)")
             open_at = cursor + fn.end() - 1
             depth, i = 0, open_at
             while i < len(text):
@@ -539,10 +539,10 @@ def _pymodule_body(sources):
                         break
                 i += 1
             else:
-                raise Refused(f"{path}: unbalanced #[pymodule] body (§4.3)")
+                raise RefusedError(f"{path}: unbalanced #[pymodule] body (§4.3)")
             found.append((fn.group(1), text[open_at + 1:i]))
     if len(found) != 1:
-        raise Refused(f"expected exactly one #[pymodule], found {len(found)} — set B would come from the wrong place (§4.3)")
+        raise RefusedError(f"expected exactly one #[pymodule], found {len(found)} — set B would come from the wrong place (§4.3)")
     # FIX (controller review round 1, finding 1) — guard the access itself so this ONE check
     # above is the only path to a wrong answer. Before this line existed alone, disabling just
     # the check above crashed `found = []` with an uncaught IndexError (a Python traceback, not
@@ -550,7 +550,7 @@ def _pymodule_body(sources):
     # exception at all — dropping every OTHER module's registrations, the exact "silently
     # dropping a name from set B" failure this whole gate exists to prevent. The fallback below
     # makes both of those consequences observable (a clean, empty-but-successful return) rather
-    # than one of them crashing past the self-test's own `except Refused` and the other being
+    # than one of them crashing past the self-test's own `except RefusedError` and the other being
     # invisible.
     return found[0] if found else (None, "")
 
@@ -571,11 +571,11 @@ def rust_registrations(sources):
             m = pat.match(s)
             if m:
                 if m.group(1) in names:
-                    raise Refused(f"`{m.group(1)}` is registered twice (§4.1)")
+                    raise RefusedError(f"`{m.group(1)}` is registered twice (§4.1)")
                 names.add(m.group(1))
                 break
         else:
-            raise Refused(
+            raise RefusedError(
                 f"statement {s!r} in the #[pymodule] body is not a permitted registration form. "
                 f"Only `m.add_function(wrap_pyfunction!(NAME, m)?)?` and "
                 f"`m.add_wrapped(wrap_pyfunction!(NAME))?` are allowed — anything else can export "
@@ -590,11 +590,11 @@ def rust_registrations(sources):
 
 
 def stub_definitions(path, text):
-    """Set C, via the standard library's own parser. Raises Refused on any §4.3 stub shape."""
+    """Set C, via the standard library's own parser. Raises RefusedError on any §4.3 stub shape."""
     try:
         tree = ast.parse(text, filename=path)
     except SyntaxError as exc:
-        raise Refused(f"{path}: the stub does not parse: {exc}") from exc
+        raise RefusedError(f"{path}: the stub does not parse: {exc}") from exc
 
     out = {}
     for node in tree.body:
@@ -603,23 +603,23 @@ def stub_definitions(path, text):
         if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
             continue  # module docstring
         if isinstance(node, ast.AsyncFunctionDef):
-            raise Refused(f"{path}:{node.lineno}: `async def {node.name}` — PyO3 exports no coroutines here (§4.3)")
+            raise RefusedError(f"{path}:{node.lineno}: `async def {node.name}` — PyO3 exports no coroutines here (§4.3)")
         if not isinstance(node, ast.FunctionDef):
-            raise Refused(f"{path}:{node.lineno}: top-level {type(node).__name__} is not a `def`, an import or the docstring (§4.3)")
+            raise RefusedError(f"{path}:{node.lineno}: top-level {type(node).__name__} is not a `def`, an import or the docstring (§4.3)")
         a = node.args
         if node.decorator_list:
-            raise Refused(f"{path}:{node.lineno}: `{node.name}` is decorated — @overload and friends are not modelled (§4.3)")
+            raise RefusedError(f"{path}:{node.lineno}: `{node.name}` is decorated — @overload and friends are not modelled (§4.3)")
         if a.vararg or a.kwarg or a.kwonlyargs or a.posonlyargs or a.defaults or a.kw_defaults:
-            raise Refused(f"{path}:{node.lineno}: `{node.name}` uses *args/**kwargs/defaults/pos- or kw-only params (§4.3)")
+            raise RefusedError(f"{path}:{node.lineno}: `{node.name}` uses *args/**kwargs/defaults/pos- or kw-only params (§4.3)")
         if node.returns is None:
-            raise Refused(f"{path}:{node.lineno}: `{node.name}` has no return annotation (§4.3)")
+            raise RefusedError(f"{path}:{node.lineno}: `{node.name}` has no return annotation (§4.3)")
         params = []
         for arg in a.args:
             if arg.annotation is None:
-                raise Refused(f"{path}:{node.lineno}: `{node.name}` parameter {arg.arg!r} has no annotation (§4.3)")
+                raise RefusedError(f"{path}:{node.lineno}: `{node.name}` parameter {arg.arg!r} has no annotation (§4.3)")
             params.append((arg.arg, ast.unparse(arg.annotation)))
         if node.name in out:
-            raise Refused(f"{path}:{node.lineno}: `{node.name}` is defined twice (§4.3)")
+            raise RefusedError(f"{path}:{node.lineno}: `{node.name}` is defined twice (§4.3)")
         out[node.name] = (tuple(params), ast.unparse(node.returns))
     return out
 
@@ -657,18 +657,23 @@ SENTINEL_CRATE = "paigasus-py-bindings"
 
 # rust: dict[str, str] display-path -> text, mirroring the `sources` shape every extractor above
 # already takes. stub_path/stub_text/pyproject are all `| None` — a crate can legitimately have
-# no stub (§5.1, itself a problem) or no pyproject.toml (§5.4, itself a Refused).
-Crate = NamedTuple("Crate", [("name", str), ("rust", dict), ("stub_path", object), ("stub_text", object), ("pyproject", object)])
+# no stub (§5.1, itself a problem) or no pyproject.toml (§5.4, itself a RefusedError).
+class Crate(NamedTuple):
+    name: str
+    rust: dict
+    stub_path: object
+    stub_text: object
+    pyproject: object
 
 
 def _maturin_module_name(pyproject_text, crate):
     """§5.4 — the module name maturin actually builds, read from [tool.maturin] module-name."""
     if pyproject_text is None:
-        raise Refused(f"{crate}: no pyproject.toml, so [tool.maturin] module-name cannot be read (§5.4)")
+        raise RefusedError(f"{crate}: no pyproject.toml, so [tool.maturin] module-name cannot be read (§5.4)")
     data = tomllib.loads(pyproject_text)
     name = data.get("tool", {}).get("maturin", {}).get("module-name")
     if not name:
-        raise Refused(f"{crate}: [tool.maturin] module-name is absent (§5.4)")
+        raise RefusedError(f"{crate}: [tool.maturin] module-name is absent (§5.4)")
     return name
 
 
@@ -680,7 +685,7 @@ def analyze(crates):
     its `Crate.rust`/`stub_text` came from `discover()` reading real files or from a self-test
     fixture built in memory.
 
-    Every §4 refusal a sub-extractor raises arrives here as `Refused` and becomes ONE problem
+    Every §4 refusal a sub-extractor raises arrives here as `RefusedError` and becomes ONE problem
     string — rc 1, because a commit introduced the shape and a commit can remove it (§5.1).
     `InfraError` is NOT caught here: it means the checker's own environment is broken and must
     propagate to `main()` as rc 2, never fold into "the repo has N problems".
@@ -691,21 +696,21 @@ def analyze(crates):
 
     RESTRUCTURE (fix round 1, SMA-600 controller ruling): the first cut of this function ran
     the whole per-crate pipeline — decls -> regs -> stub -> identity -> A/B -> A/C — inside ONE
-    try/except, so a `Refused` from an early stage (say, an unpermitted `#[pymodule]` statement)
+    try/except, so a `RefusedError` from an early stage (say, an unpermitted `#[pymodule]` statement)
     silently swallowed every LATER check for that crate, even ones with no dependency on the
     stage that refused (a module-identity mismatch, an unrelated A-vs-C signature drift). That
     is exactly what §5.2's "report every disagreement" rules out. Each extraction stage below is
-    now attempted INDEPENDENTLY — a `Refused` from one becomes a problem string and leaves that
+    now attempted INDEPENDENTLY — a `RefusedError` from one becomes a problem string and leaves that
     stage's result as `None` (extraction failed), without aborting the others — and each
     comparison runs only when BOTH of its inputs are known (not `None`). `decls` stays the one
     exception: nothing else can be decided without knowing whether the crate is even PyO3-bearing
-    and, if so, what it exports, so a `Refused` there still short-circuits the rest of this crate.
+    and, if so, what it exports, so a `RefusedError` there still short-circuits the rest of this crate.
     """
     problems = []
     for crate in crates:
         try:
             decls = rust_declarations(crate.rust)
-        except Refused as exc:
+        except RefusedError as exc:
             # Nothing downstream can be attempted without `decls`: whether a stub is a leftover
             # (§5.1) and whether a stub is even expected both depend on knowing what — if
             # anything — the crate exports. Report the refusal and move to the next crate.
@@ -731,25 +736,25 @@ def analyze(crates):
         regs = None
         try:
             regs = rust_registrations(crate.rust)
-        except Refused as exc:
+        except RefusedError as exc:
             problems.append(f"{crate.name}: {exc.message}")
 
         stub = None
         try:
             stub = stub_definitions(crate.stub_path, crate.stub_text)
-        except Refused as exc:
+        except RefusedError as exc:
             problems.append(f"{crate.name}: {exc.message}")
 
         ident = None
         try:
             ident = pymodule_ident(crate.rust)
-        except Refused as exc:
+        except RefusedError as exc:
             problems.append(f"{crate.name}: {exc.message}")
 
         declared = None
         try:
             declared = _maturin_module_name(crate.pyproject, crate.name)
-        except Refused as exc:
+        except RefusedError as exc:
             problems.append(f"{crate.name}: {exc.message}")
 
         # §5.4 — bind the stub's FILENAME to the module it claims to describe. lib.rs's own
@@ -872,17 +877,17 @@ def check():
 
 
 def _expect_refused(label, sources, expect=None):
-    """Self-test helper: `sources` must make rust_declarations() raise Refused.
+    """Self-test helper: `sources` must make rust_declarations() raise RefusedError.
 
     Returns a FAIL message string if it did not (either it returned cleanly, or it raised
-    something other than Refused), or None if the expectation held. A row that can only ever
+    something other than RefusedError), or None if the expectation held. A row that can only ever
     pass is worse than no row (review finding 3) — every case fed through this helper was
     confirmed to actually go red when its corresponding check was disabled in a scratch copy of
     this file; see task-1-report.md's fix-round-1 section for that transcript.
 
     FIX I4(b) (final review, SMA-600) — `expect` is a required substring of the refusal MESSAGE,
     and the docstring paragraph above was, for five rows, false when written. Asserting only "a
-    Refused was raised" cannot distinguish the check under test from any OTHER check that happens
+    RefusedError was raised" cannot distinguish the check under test from any OTHER check that happens
     to refuse the same fixture first, so a row can be structurally unable to fail. MEASURED: with
     `_REFUSED_ITEM_MODIFIERS = ()` the four modifier rows stayed green, because the `fn NAME(`
     regex then failed and raised its own generic refusal instead. Passing `expect` binds a row to
@@ -892,11 +897,11 @@ def _expect_refused(label, sources, expect=None):
     """
     try:
         got = rust_declarations(sources)
-    except Refused as exc:
+    except RefusedError as exc:
         if expect is not None and expect not in exc.message:
             return f"  FAIL [{label}] refused for the WRONG reason: expected {expect!r} in {exc.message!r}"
         return None
-    return f"  FAIL [{label}] expected Refused, got {got!r}"
+    return f"  FAIL [{label}] expected RefusedError, got {got!r}"
 
 
 def self_test():
@@ -963,7 +968,7 @@ def self_test():
         # An un-permitted attribute in the window between #[pyfunction] and `fn` — #[pyo3(...)]
         # can rename the export, so the window walk is default-deny.
         ("attr-window", {"<t>": '#[pyfunction]\n#[pyo3(name = "x")]\nfn f(s: &str) -> String {}\n'}),
-        # Refused item modifiers (§4.3 item 2) — PyO3 handling of each is not modelled. The third
+        # RefusedError item modifiers (§4.3 item 2) — PyO3 handling of each is not modelled. The third
         # element pins the MESSAGE (FIX I4(b)): without it these four rows were MEASURED to stay
         # green with `_REFUSED_ITEM_MODIFIERS = ()`, refusing instead on the generic "no parsable
         # `fn NAME(`" path and asserting nothing about the modifier check at all.
@@ -1030,7 +1035,7 @@ def self_test():
     permitted = {"<t>": "#[pyfunction]\n#[allow(dead_code)]\nfn f(s: &str) -> String {}\n"}
     try:
         got = rust_declarations(permitted)
-    except Refused as exc:
+    except RefusedError as exc:
         print(f"  FAIL [attr-window-permitted] #[allow(...)] should not refuse: {exc.message}", file=sys.stderr)
         rc = 1
     else:
@@ -1055,7 +1060,7 @@ def self_test():
     )}
     try:
         got = rust_declarations(back_permitted)
-    except Refused as exc:
+    except RefusedError as exc:
         print(f"  FAIL [attr-above-permitted] permitted attributes above #[pyfunction] refused: {exc.message}", file=sys.stderr)
         rc = 1
     else:
@@ -1064,15 +1069,15 @@ def self_test():
             rc = 1
 
     # Review finding 2 — the return-type regex must stop at a STANDALONE `where`, not any place
-    # the substring appears inside an identifier. Both the buggy and fixed regex raise Refused
-    # here (neither "Any" nor "Anywhere" is in RUST_TO_PY), so asserting Refused alone cannot
+    # the substring appears inside an identifier. Both the buggy and fixed regex raise RefusedError
+    # here (neither "Any" nor "Anywhere" is in RUST_TO_PY), so asserting RefusedError alone cannot
     # catch a regression of this specific bug — assert the un-truncated identifier by name.
     anywhere = {"<t>": "#[pyfunction]\nfn f(s: &str) -> Anywhere {}\n"}
     try:
         rust_declarations(anywhere)
-        print("  FAIL [where-boundary-refuse] 'Anywhere' unexpectedly mapped, no Refused raised", file=sys.stderr)
+        print("  FAIL [where-boundary-refuse] 'Anywhere' unexpectedly mapped, no RefusedError raised", file=sys.stderr)
         rc = 1
-    except Refused as exc:
+    except RefusedError as exc:
         if "'Anywhere'" not in exc.message:
             print(f"  FAIL [where-boundary-refuse] return type truncated before reaching the map check: {exc.message}", file=sys.stderr)
             rc = 1
@@ -1082,7 +1087,7 @@ def self_test():
     where_ok = {"<t>": "#[pyfunction]\nfn f(s: &str) -> String where T: Clone {}\n"}
     try:
         got = rust_declarations(where_ok)
-    except Refused as exc:
+    except RefusedError as exc:
         print(f"  FAIL [where-boundary-ok] a real where clause misparsed: {exc.message}", file=sys.stderr)
         rc = 1
     else:
@@ -1094,7 +1099,7 @@ def self_test():
     # Set B — §4.1 the #[pymodule] body is DEFAULT-DENY. Each row below is a channel that would
     # otherwise make all three sets agree over a module exporting something ELSE.
     # --------------------------------------------------------------------------------------
-    _MOD = "#[pymodule]\nfn m(m: &Bound<'_, PyModule>) -> PyResult<()> {\n%s\n    Ok(())\n}\n"
+    _mod_tmpl = "#[pymodule]\nfn m(m: &Bound<'_, PyModule>) -> PyResult<()> {\n%s\n    Ok(())\n}\n"
     for label, body in [
         ("alias",       '    m.add("alias", wrap_pyfunction!(f, m)?)?;'),
         ("submodule",   "    let c = PyModule::new(py, \"c\")?;\n    m.add_submodule(&c)?;"),
@@ -1102,27 +1107,27 @@ def self_test():
         ("qualified",   "    m.add_function(wrap_pyfunction!(a::b, m)?)?;"),
     ]:
         try:
-            rust_registrations({"<x>": _MOD % body})
-        except Refused:
+            rust_registrations({"<x>": _mod_tmpl % body})
+        except RefusedError:
             pass
         else:
             print(f"  FAIL [module body] {label} was accepted; it must be refused (§4.1)", file=sys.stderr)
             rc = 1
 
     # ...and the two PERMITTED forms must still parse.
-    ok = rust_registrations({"<x>": _MOD % "    m.add_function(wrap_pyfunction!(f, m)?)?;\n    m.add_wrapped(wrap_pyfunction!(g))?;"})
+    ok = rust_registrations({"<x>": _mod_tmpl % "    m.add_function(wrap_pyfunction!(f, m)?)?;\n    m.add_wrapped(wrap_pyfunction!(g))?;"})
     if ok != {"f", "g"}:
         print(f"  FAIL [module body] permitted forms did not parse: {ok}", file=sys.stderr)
         rc = 1
 
     # §4.1 — the same name registered twice in one module body (controller review round 1,
     # finding 2). Both statements are individually well-formed and individually permitted; only
-    # the explicit `if m.group(1) in names: raise Refused(...)` guard catches the collision, since
+    # the explicit `if m.group(1) in names: raise RefusedError(...)` guard catches the collision, since
     # a bare `set.add` would silently accept a repeat with no error at all.
-    dup_reg = _MOD % '    m.add_function(wrap_pyfunction!(f, m)?)?;\n    m.add_wrapped(wrap_pyfunction!(f))?;'
+    dup_reg = _mod_tmpl % '    m.add_function(wrap_pyfunction!(f, m)?)?;\n    m.add_wrapped(wrap_pyfunction!(f))?;'
     try:
         rust_registrations({"<x>": dup_reg})
-    except Refused:
+    except RefusedError:
         pass
     else:
         print("  FAIL [module body] duplicate registration of the same name was accepted (§4.1)", file=sys.stderr)
@@ -1134,7 +1139,7 @@ def self_test():
     # for their own stated reason. "zero" used a source with no #[pymodule] at all, which is
     # right, but on disabling only the count check `_pymodule_body` used to fall straight into
     # `found[0]` on an EMPTY list — an uncaught IndexError, not the graceful red this row's own
-    # print claims. "two" built each module body from `_MOD % "    Ok(())"`, and `_MOD`'s own
+    # print claims. "two" built each module body from `_mod_tmpl % "    Ok(())"`, and `_mod_tmpl`'s own
     # template already appends a second, unterminated `Ok(())` with no separating `;` — so the
     # body text was the malformed statement `"Ok(()) Ok(())"`, which the UNRELATED default-deny
     # statement check also refuses. That masked the count check entirely: disabling ONLY it left
@@ -1143,21 +1148,21 @@ def self_test():
     # Fixed: "zero" now uses a syntactically ordinary (non-pymodule) fn, so nothing else in scope
     # can raise. "two" now uses TWO well-formed #[pymodule] fns, each with a real, individually
     # permitted registration under a DIFFERENT name (`f`, `g`) — a body the default-deny check has
-    # no reason to touch. With the count check active both must still raise Refused. With it
+    # no reason to touch. With the count check active both must still raise RefusedError. With it
     # disabled (see neuter-test table in task-2-report.md), `_pymodule_body`'s new `found[0] if
     # found else (None, "")` fallback (see its docstring) makes "zero" return an empty, unraising
     # set, and "two" silently return only `{"f"}` — the second module's `g` dropped with no error
     # at all, which is the exact realistic bug this pair of rows exists to catch.
     zero_src = "fn helper(m: &Bound<'_, PyModule>) -> PyResult<()> {\n    Ok(())\n}\n"
     two_src = (
-        _MOD % "    m.add_function(wrap_pyfunction!(f, m)?)?;"
+        _mod_tmpl % "    m.add_function(wrap_pyfunction!(f, m)?)?;"
         + ("#[pymodule]\nfn m2(m: &Bound<'_, PyModule>) -> PyResult<()> {\n"
            "    m.add_function(wrap_pyfunction!(g, m)?)?;\n    Ok(())\n}\n")
     )
     for label, src in [("zero", zero_src), ("two", two_src)]:
         try:
             rust_registrations({"<x>": src})
-        except Refused:
+        except RefusedError:
             pass
         else:
             print(f"  FAIL [pymodule] {label} #[pymodule] was accepted (§4.3)", file=sys.stderr)
@@ -1169,7 +1174,7 @@ def self_test():
     # LATER, unrelated `fn` as the module body and reporting success over the wrong extraction.
     try:
         bad = rust_registrations({"<x>": '#[pymodule]\n#[pyo3(name = "x")]\nfn m(m: &Bound<\'_, PyModule>) -> PyResult<()> {\n    m.add_function(wrap_pyfunction!(f, m)?)?;\n    Ok(())\n}\n'})
-    except Refused:
+    except RefusedError:
         pass
     else:
         print(f"  FAIL [pymodule-window] unexpected intervening item was accepted, got {bad!r} (ruling)", file=sys.stderr)
@@ -1179,7 +1184,7 @@ def self_test():
     # uses) must still parse, so the window walk is not simply refusing everything.
     try:
         got = rust_registrations({"<x>": "#[pymodule]\n#[allow(dead_code)]\nfn m(m: &Bound<'_, PyModule>) -> PyResult<()> {\n    m.add_function(wrap_pyfunction!(f, m)?)?;\n    Ok(())\n}\n"})
-    except Refused as exc:
+    except RefusedError as exc:
         print(f"  FAIL [pymodule-window] #[allow(...)] should not refuse: {exc.message}", file=sys.stderr)
         rc = 1
     else:
@@ -1213,7 +1218,7 @@ def self_test():
         expect = row[2] if len(row) > 2 else None
         try:
             stub_definitions("<stub>", stub)
-        except Refused as exc:
+        except RefusedError as exc:
             if expect is not None and expect not in exc.message:
                 print(f"  FAIL [stub] {label} refused for the WRONG reason: expected {expect!r} in {exc.message!r}", file=sys.stderr)
                 rc = 1
@@ -1388,7 +1393,7 @@ def self_test():
     # registration-form refusal (unrelated to sets A/C) AND an independent module-identity
     # mismatch AND an independent A-vs-C signature drift must report ALL THREE — not just the
     # refusal. Before the restructure, the single enclosing try/except stopped at the first
-    # Refused (from `rust_registrations`) and the identity mismatch and signature drift were
+    # RefusedError (from `rust_registrations`) and the identity mismatch and signature drift were
     # never reached at all. Asserting the exact count (3), not just "at least one of each",
     # is deliberate: it also catches a future regression that reintroduces a duplicate report
     # (e.g. from `pymodule_ident` and `rust_registrations` sharing `_pymodule_body`) without
@@ -1501,7 +1506,7 @@ def main():
             return negative_control()
         if args == ["--check"]:
             return check()
-    except Refused as exc:
+    except RefusedError as exc:
         # A refusal means the REPO is wrong (a §4 shape the scanner won't guess at), not that the
         # checker is broken — rc 1, never rc 2. Left uncaught this escapes as a raw traceback:
         # right exit code by accident (Python exits 1 on an uncaught exception too), unreadable

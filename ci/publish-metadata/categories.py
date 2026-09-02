@@ -24,6 +24,18 @@ import time
 import urllib.error
 import urllib.request
 
+# SMA-539 §5.3 — this file runs under the SYSTEM python3 (ci/publish-metadata/run.sh invokes it
+# bare, and the Moon task is toolchain: 'system'), not a uv-pinned interpreter. `datetime.UTC`
+# below is 3.11+, and py/pyproject.toml's target-version is py312, so every future UP rule can
+# ratchet this floor further. State it rather than failing with an AttributeError mid-run.
+if (sys.version_info.major, sys.version_info.minor) < (3, 12):
+    print(
+        f"publish-metadata: needs Python >= 3.12, got {sys.version_info.major}."
+        f"{sys.version_info.minor}. Run it under the proto-pinned interpreter.",
+        file=sys.stderr,
+    )
+    raise SystemExit(2)
+
 API_URL = "https://crates.io/api/v1/category_slugs"
 
 # crates.io returns 403 to any request without a User-Agent (measured). Pinned here so the
@@ -65,7 +77,7 @@ def _today_utc() -> datetime.date:
     """UTC, not local. render_snapshot stamps `# fetched:` and parse_snapshot compares
     against it from a DIFFERENT machine — a developer west or east of UTC would otherwise
     stamp a date CI reads as the future, which the future-date guard rejects as corrupt."""
-    return datetime.datetime.now(datetime.timezone.utc).date()
+    return datetime.datetime.now(datetime.UTC).date()
 
 
 class SnapshotError(Exception):
@@ -317,7 +329,7 @@ def _self_test() -> int:
         try:
             fn()
             print(f"  ok — {label}")
-        except Exception as exc:  # noqa: BLE001 - the point is to catch everything
+        except Exception as exc:  # the point is to catch everything
             print(f"  FAILED — {label}: {exc}", file=sys.stderr)
             failures += 1
 
@@ -329,7 +341,7 @@ def _self_test() -> int:
         except SnapshotError:
             print(f"  ok — {label} raises SnapshotError")
             return
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             print(f"  FAILED — {label}: wrong exception {exc!r}", file=sys.stderr)
             failures += 1
             return
@@ -344,7 +356,7 @@ def _self_test() -> int:
         except FetchError:
             print(f"  ok — {label} raises FetchError")
             return
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             print(f"  FAILED — {label}: wrong exception {exc!r}", file=sys.stderr)
             failures += 1
             return
@@ -444,7 +456,7 @@ def _self_test() -> int:
         "check for that slug (proves the hatch itself still works)",
         lambda: _with_allow_slug_shape(
             {"Weird-Slug": "crates.io shipped this mixed-case slug, see SMA-000"},
-            lambda: parse_snapshot(body(good + ["Weird-Slug"]), today),
+            lambda: parse_snapshot(body([*good, "Weird-Slug"]), today),
         ),
     )
     expect_ok(
@@ -453,7 +465,7 @@ def _self_test() -> int:
         "or it cannot rescue exactly the case it exists for)",
         lambda: _with_allow_slug_shape(
             {("a" * (MAX_SLUG_LEN + 1)): "crates.io shipped an over-length slug, see SMA-000"},
-            lambda: parse_snapshot(body(good + ["a" * (MAX_SLUG_LEN + 1)]), today),
+            lambda: parse_snapshot(body([*good, "a" * (MAX_SLUG_LEN + 1)]), today),
         ),
     )
     expect_snapshot_error(
@@ -504,9 +516,9 @@ def _self_test() -> int:
         # twice (once for the expectation, once inside _today_utc()) is flaky across a
         # UTC-midnight rollover, where the two samples land on different dates even
         # though _today_utc() is correct both times. [before, after] tolerates that.
-        before = datetime.datetime.now(datetime.timezone.utc).date()
+        before = datetime.datetime.now(datetime.UTC).date()
         got = _today_utc()
-        after = datetime.datetime.now(datetime.timezone.utc).date()
+        after = datetime.datetime.now(datetime.UTC).date()
         _assert(
             isinstance(got, datetime.date) and before <= got <= after,
             "_today_utc basis",
@@ -656,7 +668,7 @@ def _self_test() -> int:
     expect_ok(
         "diff_slug_sets reports an upstream addition",
         lambda: _assert(
-            diff_slug_sets(good + ["brand-new"], good) == (["brand-new"], []), "added"
+            diff_slug_sets([*good, "brand-new"], good) == (["brand-new"], []), "added"
         ),
     )
     expect_ok(

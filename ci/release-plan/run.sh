@@ -153,7 +153,7 @@ negative_control() {
   tmp="$(mktemp -d)"
 
   # Row 1 — the 3 -> 1 translation itself. A tree with no `rs/` at all cannot resolve any crate
-  # manifest, so releasable_packages() raises Inconclusive, --assert exits 3, and run_checker
+  # manifest, so releasable_packages() raises InconclusiveError, --assert exits 3, and run_checker
   # must map that onto the repo contract's 1, not pass the 3 through and not silently mask it
   # as an infra failure.
   mkdir -p "$tmp/empty"
