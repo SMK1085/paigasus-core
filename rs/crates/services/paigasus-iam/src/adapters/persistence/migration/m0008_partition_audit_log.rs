@@ -181,7 +181,7 @@ async fn is_partitioned(db: &impl sea_orm::ConnectionTrait) -> Result<bool, DbEr
         sea_orm::DatabaseBackend::Postgres,
         "SELECT 1 FROM pg_partitioned_table WHERE partrelid = 'audit_log'::regclass".to_string(),
     );
-    Ok(db.query_one(stmt).await?.is_some())
+    Ok(db.query_one_raw(stmt).await?.is_some())
 }
 
 /// `(start, end)` = ((year, month) of `min(occurred_at)`, (year, month) of `max(now, now)+1mo`).
@@ -189,7 +189,7 @@ async fn is_partitioned(db: &impl sea_orm::ConnectionTrait) -> Result<bool, DbEr
 async fn existing_month_span(db: &impl sea_orm::ConnectionTrait) -> Result<((i32, u32), (i32, u32)), DbErr> {
     let now = Utc::now();
     let row = db
-        .query_one(sea_orm::Statement::from_string(
+        .query_one_raw(sea_orm::Statement::from_string(
             sea_orm::DatabaseBackend::Postgres,
             "SELECT min(occurred_at) AS lo, max(occurred_at) AS hi FROM audit_log".to_string(),
         ))
@@ -203,7 +203,7 @@ async fn existing_month_span(db: &impl sea_orm::ConnectionTrait) -> Result<((i32
     };
     let start_dt = lo.unwrap_or(now);
     // end = one month past the later of (max existing row, now).
-    let hi_dt = hi.unwrap_or(now).max(now);
+    let hi_dt = Ord::max(hi.unwrap_or(now), now);
     let end = add_one_month((hi_dt.year(), hi_dt.month()));
     Ok(((start_dt.year(), start_dt.month()), end))
 }

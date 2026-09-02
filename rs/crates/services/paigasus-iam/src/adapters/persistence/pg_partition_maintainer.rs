@@ -142,7 +142,7 @@ impl PgPartitionMaintainer {
         txn.execute_unprepared(&format!("SELECT pg_advisory_xact_lock({AUDIT_PARTITION_LOCK_KEY});")).await?;
 
         let stmt = Statement::from_string(sea_orm::DatabaseBackend::Postgres, format!("SELECT to_regclass('public.{leaf}')::text AS name"));
-        let exists = txn.query_one(stmt).await?.and_then(|r| r.try_get::<String>("", "name").ok()).is_some();
+        let exists = txn.query_one_raw(stmt).await?.and_then(|r| r.try_get::<String>("", "name").ok()).is_some();
 
         let created = if exists {
             false
@@ -184,7 +184,7 @@ impl PgPartitionMaintainer {
             sea_orm::DatabaseBackend::Postgres,
             format!("SELECT c.relname AS name FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid WHERE i.inhparent = 'audit_log_{sub}'::regclass"),
         );
-        let rows = self.db.query_all(stmt).await?;
+        let rows = self.db.query_all_raw(stmt).await?;
         Ok(rows.iter().filter_map(|r| r.try_get::<String>("", "name").ok()).collect())
     }
 
@@ -193,7 +193,7 @@ impl PgPartitionMaintainer {
             sea_orm::DatabaseBackend::Postgres,
             "SELECT (SELECT count(*) FROM audit_log_committed_default) + (SELECT count(*) FROM audit_log_denied_default) + (SELECT count(*) FROM audit_log_other) AS n".to_string(),
         );
-        Ok(self.db.query_one(stmt).await?.and_then(|r| r.try_get::<i64>("", "n").ok()).unwrap_or(0))
+        Ok(self.db.query_one_raw(stmt).await?.and_then(|r| r.try_get::<i64>("", "n").ok()).unwrap_or(0))
     }
 
     /// Run one DDL statement in its own transaction under the advisory lock + a bounded

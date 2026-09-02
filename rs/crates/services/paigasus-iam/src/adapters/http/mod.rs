@@ -989,7 +989,7 @@ pub fn traced_app_routes(state: AppState, request_timeout: Duration) -> Router {
 /// The database-ping half of readiness, split out of [`readyz`] so `adapters::boot`'s
 /// slot-aware handler can reuse it rather than duplicate the ping and its logging (SMA-571).
 pub async fn ping_readiness(state: &AppState) -> (StatusCode, Json<serde_json::Value>) {
-    match state.db.execute(Statement::from_string(state.db.get_database_backend(), "SELECT 1")).await {
+    match state.db.execute_raw(Statement::from_string(state.db.get_database_backend(), "SELECT 1")).await {
         Ok(_) => (StatusCode::OK, Json(json!({ "status": "ready" }))),
         Err(e) => {
             tracing::warn!(error = %e, "readiness check failed: database ping error");

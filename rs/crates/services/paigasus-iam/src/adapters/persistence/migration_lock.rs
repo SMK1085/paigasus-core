@@ -97,7 +97,7 @@ pub enum MigrationLockError {
 /// where `Migrator::up`'s own `install()` has not run yet.
 async fn applied_count<C: ConnectionTrait>(db: &C) -> Result<u64, DbErr> {
     let present = db
-        .query_one(Statement::from_string(
+        .query_one_raw(Statement::from_string(
             DatabaseBackend::Postgres,
             "SELECT to_regclass('public.seaql_migrations') IS NOT NULL AS present".to_string(),
         ))
@@ -108,7 +108,7 @@ async fn applied_count<C: ConnectionTrait>(db: &C) -> Result<u64, DbErr> {
         return Ok(0);
     }
     let row = db
-        .query_one(Statement::from_string(DatabaseBackend::Postgres, "SELECT count(*)::bigint AS n FROM seaql_migrations".to_string()))
+        .query_one_raw(Statement::from_string(DatabaseBackend::Postgres, "SELECT count(*)::bigint AS n FROM seaql_migrations".to_string()))
         .await?;
     Ok(row.and_then(|r| r.try_get::<i64>("", "n").ok()).unwrap_or(0).max(0) as u64)
 }
@@ -137,7 +137,7 @@ pub async fn migrate_under_lock(db: &DatabaseConnection, wait: Duration) -> Resu
         // (sea-orm-migration drops its own inner savepoint transaction on error; that residual
         // is not ours.)
         let acquired = match txn
-            .query_one(Statement::from_string(
+            .query_one_raw(Statement::from_string(
                 DatabaseBackend::Postgres,
                 format!("SELECT pg_try_advisory_xact_lock({MIGRATION_LOCK_KEY}) AS locked"),
             ))

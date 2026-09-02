@@ -847,7 +847,7 @@ async fn a_starter_row_below_the_current_revision_still_refuses() {
     seed_orphan_chain(&db, "legacy_auditor").await;
 
     // Simulate an older replica having last written one starter row.
-    db.execute(Statement::from_string(
+    db.execute_raw(Statement::from_string(
         DbBackend::Postgres,
         format!(r#"UPDATE "policy" SET starter_revision = {ORPHAN_REVISION} WHERE policy_id = '{FORBID_ARCHIVED_WRITES_ID}'"#),
     ))

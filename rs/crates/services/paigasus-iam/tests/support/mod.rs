@@ -776,7 +776,7 @@ pub async fn pg_owner_grant(db: &DatabaseConnection, owner: &PrincipalId, grant_
 pub async fn seed_org_ref(db: &DatabaseConnection) -> TenancyNodeRef {
     let id = KernelIdGenerator.new_organization_id();
     let uuid = id.uuid();
-    db.execute(Statement::from_sql_and_values(
+    db.execute_raw(Statement::from_sql_and_values(
         DbBackend::Postgres,
         format!(
             r#"INSERT INTO "organization" (id, prn, slug, name, status, created_at, updated_at)

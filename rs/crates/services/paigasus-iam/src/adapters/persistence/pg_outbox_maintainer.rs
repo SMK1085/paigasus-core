@@ -333,7 +333,7 @@ impl PgOutboxMaintainer {
     async fn sweep_pass(&self, sql: &str, cutoff: DateTime<Utc>, batch_limit: i64) -> Result<u64, DbErr> {
         let txn = self.begin_timeout_scoped_txn().await?;
         let stmt = Statement::from_sql_and_values(DbBackend::Postgres, sql, [Value::from(cutoff), Value::from(batch_limit)]);
-        let affected = txn.execute(stmt).await?.rows_affected();
+        let affected = txn.execute_raw(stmt).await?.rows_affected();
         txn.commit().await?;
         Ok(affected)
     }
@@ -350,7 +350,7 @@ impl PgOutboxMaintainer {
     async fn parked_row_count(&self) -> Result<u64, DbErr> {
         let txn = self.begin_timeout_scoped_txn().await?;
         let stmt = Statement::from_string(DbBackend::Postgres, r#"SELECT count(*) AS n FROM "event_outbox" WHERE parked = true"#.to_string());
-        let row = txn.query_one(stmt).await?;
+        let row = txn.query_one_raw(stmt).await?;
         txn.commit().await?;
         // `count(*)` always returns exactly one row, so `row` being `None` is unreachable in
         // practice — but a genuine column-decode failure MUST be propagated, not swallowed. The

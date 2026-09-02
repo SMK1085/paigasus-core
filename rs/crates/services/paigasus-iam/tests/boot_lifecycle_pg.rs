@@ -81,7 +81,7 @@ impl Child {
 }
 
 async fn scalar_bool(db: &DatabaseConnection, sql: &str) -> bool {
-    db.query_one(Statement::from_string(DatabaseBackend::Postgres, sql.to_string()))
+    db.query_one_raw(Statement::from_string(DatabaseBackend::Postgres, sql.to_string()))
         .await
         .expect("query")
         .expect("row")

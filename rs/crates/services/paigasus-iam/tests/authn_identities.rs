@@ -134,14 +134,14 @@ async fn constraint_names_are_stable() {
 
     for n in ["uq_external_identity_issuer_subject", "fk_external_identity_principal"] {
         let row = db
-            .query_one(Statement::from_sql_and_values(DbBackend::Postgres, "SELECT 1 AS one FROM pg_constraint WHERE conname = $1", [n.into()]))
+            .query_one_raw(Statement::from_sql_and_values(DbBackend::Postgres, "SELECT 1 AS one FROM pg_constraint WHERE conname = $1", [n.into()]))
             .await
             .unwrap();
         assert!(row.is_some(), "missing constraint {n}");
     }
 
     let row = db
-        .query_one(Statement::from_sql_and_values(
+        .query_one_raw(Statement::from_sql_and_values(
             DbBackend::Postgres,
             "SELECT 1 AS one FROM pg_indexes WHERE indexname = $1",
             ["ix_external_identity_principal".into()],

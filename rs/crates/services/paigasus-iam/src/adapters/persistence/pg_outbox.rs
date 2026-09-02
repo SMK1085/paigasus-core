@@ -88,7 +88,7 @@ impl Outbox for PgOutbox {
             // here — the transaction fails at COMMIT instead, surfacing from
             // `SeaOrmTransaction::commit` as an opaque backend error. That is why
             // `[outbox].wake_on_commit` gates this writer and not only the listener.
-            txn.execute(Statement::from_string(DbBackend::Postgres, format!("SELECT pg_notify('{WAKE_CHANNEL}', '')")))
+            txn.execute_raw(Statement::from_string(DbBackend::Postgres, format!("SELECT pg_notify('{WAKE_CHANNEL}', '')")))
                 .await
                 .map_err(map_err)?;
             // SMA-495. AFTER the `?`, so a `pg_notify` that failed to execute is never counted.

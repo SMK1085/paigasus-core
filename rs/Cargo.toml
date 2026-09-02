@@ -170,7 +170,7 @@ sea-orm = { version = "2", default-features = false, features = [
 ] }
 # sea-orm-migration — the migration runner (`MigratorTrait`/`SchemaManager`) for the m0001
 # DDL. Same backend posture as `sea-orm` above (sqlx-postgres + rustls).
-sea-orm-migration = { version = "1", default-features = false, features = [
+sea-orm-migration = { version = "2", default-features = false, features = [
   "sqlx-postgres", "runtime-tokio-rustls",
 ] }
 # redis — external, shared `JwksCache` backend (paigasus-iam's `RedisJwksCache`, SMA-443

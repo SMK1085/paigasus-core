@@ -347,7 +347,7 @@ impl ApiKeyRepository for PgApiKeyRepository {
     async fn touch_last_used(&self, id: ApiKeyId, now: DateTime<Utc>, throttle_secs: u64) -> Result<(), RepositoryError> {
         let threshold = now - chrono::Duration::seconds(throttle_secs as i64);
         let stmt = Statement::from_sql_and_values(DbBackend::Postgres, TOUCH_LAST_USED_SQL, [id.uuid().into(), now.into(), threshold.into()]);
-        self.db.execute(stmt).await.map_err(map_err)?;
+        self.db.execute_raw(stmt).await.map_err(map_err)?;
         Ok(())
     }
 }

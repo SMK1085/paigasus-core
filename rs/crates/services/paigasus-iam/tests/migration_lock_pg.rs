@@ -34,7 +34,7 @@ async fn connect_pinned(url: &str) -> DatabaseConnection {
 }
 
 async fn scalar_bool(db: &DatabaseConnection, sql: &str) -> bool {
-    db.query_one(Statement::from_string(DatabaseBackend::Postgres, sql.to_string()))
+    db.query_one_raw(Statement::from_string(DatabaseBackend::Postgres, sql.to_string()))
         .await
         .expect("query")
         .and_then(|r| r.try_get::<bool>("", "v").ok())
@@ -46,7 +46,7 @@ async fn migrations_table_exists(db: &DatabaseConnection) -> bool {
 }
 
 async fn applied_migrations(db: &DatabaseConnection) -> i64 {
-    db.query_one(Statement::from_string(DatabaseBackend::Postgres, "SELECT count(*)::bigint AS n FROM seaql_migrations".to_string()))
+    db.query_one_raw(Statement::from_string(DatabaseBackend::Postgres, "SELECT count(*)::bigint AS n FROM seaql_migrations".to_string()))
         .await
         .expect("query")
         .and_then(|r| r.try_get::<i64>("", "n").ok())
