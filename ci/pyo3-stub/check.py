@@ -1210,11 +1210,74 @@ def self_test():
     return rc
 
 
+def negative_control():
+    """Mutate a COPY of the real crate three ways and assert each reds. §7.2 / AC 4.
+
+    A self-test (above) asserts `analyze()` against synthetic fixtures built entirely in memory;
+    it never touches the real tree, so it cannot prove the gate actually bites on THIS crate's
+    real source. This function is the complementary proof: it takes `discover()`'s real-tree
+    output and mutates the STRINGS it carries (`Crate.rust`, `Crate.stub_text`) via `._replace()`
+    — never a file on disk. `analyze()` is documented pure over in-memory text (see its own
+    docstring), so this works without a tempdir: no mutated bytes are ever written anywhere, so a
+    process death mid-run leaves the working tree exactly as it was. Each of the three mutations
+    below reproduces one of AC 1-3's drift shapes directly against `paigasus-py-bindings`'
+    real lib.rs/pyi, and a fourth row re-asserts the UNMUTATED crate is clean — without that row,
+    a bug that made `analyze()` red on everything would make all three mutation rows pass for the
+    wrong reason.
+    """
+    crates = discover()
+    base = next(c for c in crates if c.name == SENTINEL_CRATE)
+    lib = next(p for p in base.rust if p.endswith("/lib.rs"))
+    failures = 0
+
+    def _expect_red(label, crate):
+        nonlocal failures
+        if analyze([crate]) == []:
+            print(f"  FAIL negative control [{label}] reported CLEAN against a mutated tree", file=sys.stderr)
+            failures += 1
+
+    # AC 1 — a #[pyfunction] added and registered, absent from the stub. Anchors verified against
+    # the real file before this was written (task-4 brief): `#[pymodule]` and `    Ok(())` each
+    # occur exactly once in lib.rs, so `.replace(..., 1)` is guaranteed to hit the real site, not
+    # a coincidental later occurrence.
+    rust = dict(base.rust)
+    rust[lib] = base.rust[lib].replace(
+        "#[pymodule]",
+        "#[pyfunction]\nfn negative_control_probe(s: &str) -> String {}\n\n#[pymodule]", 1
+    ).replace(
+        "    Ok(())",
+        "    m.add_function(wrap_pyfunction!(negative_control_probe, m)?)?;\n    Ok(())", 1)
+    _expect_red("AC1 unstubbed pyfunction", base._replace(rust=rust))
+
+    # AC 2 — a registration removed while the declaration and the stub stay.
+    rust = dict(base.rust)
+    rust[lib] = base.rust[lib].replace(
+        f"    m.add_function(wrap_pyfunction!({SENTINEL}, m)?)?;\n", "", 1)
+    _expect_red("AC2 missing registration", base._replace(rust=rust))
+
+    # AC 3 — a def deleted from the stub while the Rust keeps the function.
+    kept = "\n".join(l for l in base.stub_text.splitlines() if not l.startswith(f"def {SENTINEL}(")) + "\n"
+    _expect_red("AC3 deleted stub def", base._replace(stub_text=kept))
+
+    # ...and the UNMUTATED crate must still be clean, or the three rows above prove nothing.
+    if analyze([base]) != []:
+        print(f"  FAIL negative control: the unmutated crate is not clean: {analyze([base])}", file=sys.stderr)
+        failures += 1
+
+    if failures:
+        print(f"pyo3-stub negative control: {failures} row(s) failed", file=sys.stderr)
+        return 1
+    print("== pyo3-stub negative control passed ==", file=sys.stderr)
+    return 0
+
+
 def main():
     args = sys.argv[1:]
     try:
         if args == ["--self-test"]:
             return self_test()
+        if args == ["--negative-control"]:
+            return negative_control()
         if args == ["--check"]:
             return check()
     except Refused as exc:
