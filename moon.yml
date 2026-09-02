@@ -219,6 +219,11 @@ tasks:
       # the `uv` preflight back on the --github-output arm, does not schedule this task. Same
       # reasoning as the ci/release-parity/**/* entry above.
       - 'ci/release-plan/**/*'
+      # SMA-539 — this task now pins load-bearing lines inside ci/ruff/run.sh, so a change under
+      # ci/ruff/ MUST re-key it. Without this the pin is real but unreachable: the PR that
+      # deletes the pinned lines does not schedule this task. Same reasoning as the
+      # ci/release-parity/**/* entry above.
+      - 'ci/ruff/**/*'
       # SMA-541 — this task now asserts that CLAUDE.md's documented full-graph command mirrors
       # ci.yml's `T=(...)` array, so a docs-only edit MUST re-key it; without this the assertion is
       # real but unreachable behind a cached PASS. (repo:actionlint's `**/*` already covers
@@ -844,3 +849,41 @@ tasks:
       - 'rs/crates/bindings/*/pyproject.toml'
       - 'rs/Cargo.lock'
       - 'ci/pyo3-stub/**/*'
+
+  ruff-ci:
+    description: 'Lint ci/**/*.py against py/pyproject.toml''s Ruff rule set (SMA-539).'
+    # WHY THIS EXISTS — .moon/tasks/python.yml runs `uv run ruff check .` scoped to the py
+    # project, and ci/**/*.py is outside it. Nothing else lints it. ci_targets.py merged through
+    # a full review carrying three RUF005 violations (SMA-541), found only because a CodeRabbit
+    # learning mentioned the convention in passing.
+    #
+    # WHY --project py AND NOT A DEDICATED uv PROJECT — the ci/workflow-credentials precedent
+    # avoids `--project py` because it compiles a PyO3 cdylib. That premise does not hold here:
+    # repo:actionlint's `inputs: ['**/*']` strictly supersets this task's, so this gate can never
+    # be a cache miss while repo:actionlint is a hit, and the py environment is materialised once
+    # per CI run by whichever reaches it first. One lockfile means ONE ruff version, so py:lint
+    # and this gate cannot silently diverge — which is half of AC B5.
+    #
+    # `--self-test` and `--negative-control` run FIRST and in the SAME block: a gate that cannot
+    # report red is worse than no gate. `set -euo pipefail` is REQUIRED — Moon does not enable
+    # errexit for `script:` blocks and takes the block's status from its LAST command, so without
+    # it a failing control is masked by the passing real run. These four lines are pinned by
+    # SELF_SCHEDULED_GATES.
+    script: |
+      set -euo pipefail
+      bash ci/ruff/run.sh --self-test
+      bash ci/ruff/run.sh --negative-control
+      bash ci/ruff/run.sh
+    toolchain: 'system'
+    inputs:
+      # .moon/tasks/python.yml is listed so a change to HOW py:lint invokes ruff re-keys this
+      # gate: AC B5 is one rule set AND one tool version, and that file is where they diverge.
+      - '.moon/tasks/python.yml'
+      - '.prototools'
+      # This formally reaches under **/.venv/**, which .moon/workspace.yml:41-43 asks tasks not
+      # to declare. Benign — the hasher's ignorePatterns filters those trees and ruff's default
+      # exclude skips them — so a stray venv under ci/ cannot false-trigger or slow this gate.
+      - 'ci/**/*.py'
+      - 'ci/ruff/**/*'
+      - 'py/pyproject.toml'
+      - 'py/uv.lock'
