@@ -10,9 +10,10 @@
 
 use super::entities::{organization, team};
 use super::map_err;
+use super::uow::{SeaOrmTransaction, recover_txn};
 use crate::adapters::authz::Generations;
 use async_trait::async_trait;
-use paigasus_iam_core::{NodeStatus, NodeView, PreconditionKind, PrincipalId, RepositoryError, Slug, Stamp, Team, TeamId, TeamRepository};
+use paigasus_iam_core::{Mutated, NodeStatus, NodeView, PreconditionKind, PrincipalId, RepositoryError, Slug, Stamp, Team, TeamId, TeamRepository, Transaction};
 use paigasus_kernel::Prn;
 use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, IntoActiveModel, QueryFilter, QueryOrder, QuerySelect, Set, TransactionTrait};
 use uuid::Uuid;
@@ -107,21 +108,30 @@ fn missing_ancestor(kind: &str, ancestor_id: Uuid, child_kind: &str, child_id: U
 #[async_trait]
 impl TeamRepository for PgTeamRepository {
     async fn create(&self, team: &Team, stamp: &Stamp) -> Result<(), RepositoryError> {
-        debug_assert_eq!(team.created_at, stamp.at, "the service must pass the same Stamp it built the entity from");
+        // SMA-606 D1: a thin one-shot-`UnitOfWork` wrapper over `create_in`, mirroring
+        // `PgOrganizationRepository::create`/`PgApiKeyRepository::issue`.
         let txn = self.db.begin().await.map_err(map_err)?;
+        let tx: Box<dyn Transaction> = Box::new(SeaOrmTransaction { txn });
+        self.create_in(&*tx, team, stamp).await?;
+        tx.commit().await?;
+        self.bump_entity_gen().await;
+        Ok(())
+    }
+
+    async fn create_in(&self, tx: &dyn Transaction, team: &Team, stamp: &Stamp) -> Result<(), RepositoryError> {
+        debug_assert_eq!(team.created_at, stamp.at, "the service must pass the same Stamp it built the entity from");
+        let txn = recover_txn(tx)?;
 
         // D8: the org row is locked FOR SHARE for the duration of this txn so a concurrent
         // archive/delete can't race the guard below.
-        let Some(org) = organization::Entity::find_by_id(team.id.org_uuid()).lock_shared().one(&txn).await.map_err(map_err)? else {
+        let Some(org) = organization::Entity::find_by_id(team.id.org_uuid()).lock_shared().one(txn).await.map_err(map_err)? else {
             return Err(RepositoryError::NotFound);
         };
         if parse_status(&org.status)? == NodeStatus::Archived {
             return Err(RepositoryError::Precondition(PreconditionKind::ParentArchived));
         }
 
-        team_to_model(team).insert(&txn).await.map_err(map_err)?;
-        txn.commit().await.map_err(map_err)?;
-        self.bump_entity_gen().await;
+        team_to_model(team).insert(txn).await.map_err(map_err)?;
         Ok(())
     }
 
@@ -165,12 +175,21 @@ impl TeamRepository for PgTeamRepository {
 
     async fn rename(&self, id: Uuid, new_slug: Option<&Slug>, new_name: Option<&str>, stamp: &Stamp) -> Result<NodeView<Team>, RepositoryError> {
         let txn = self.db.begin().await.map_err(map_err)?;
+        let tx: Box<dyn Transaction> = Box::new(SeaOrmTransaction { txn });
+        let out = self.rename_in(&*tx, id, new_slug, new_name, stamp).await?;
+        tx.commit().await?;
+        self.bump_entity_gen().await;
+        Ok(out.value)
+    }
 
-        let Some(model) = team::Entity::find_by_id(id).lock_exclusive().one(&txn).await.map_err(map_err)? else {
+    async fn rename_in(&self, tx: &dyn Transaction, id: Uuid, new_slug: Option<&Slug>, new_name: Option<&str>, stamp: &Stamp) -> Result<Mutated<NodeView<Team>>, RepositoryError> {
+        let txn = recover_txn(tx)?;
+
+        let Some(model) = team::Entity::find_by_id(id).lock_exclusive().one(txn).await.map_err(map_err)? else {
             return Err(RepositoryError::NotFound);
         };
         let org_id = model.org_id;
-        let Some(org) = organization::Entity::find_by_id(org_id).lock_shared().one(&txn).await.map_err(map_err)? else {
+        let Some(org) = organization::Entity::find_by_id(org_id).lock_shared().one(txn).await.map_err(map_err)? else {
             return Err(missing_ancestor("organization", org_id, "team", id));
         };
         let org_status = parse_status(&org.status)?;
@@ -183,13 +202,15 @@ impl TeamRepository for PgTeamRepository {
 
         // SMA-440 D5: a write that changes nothing stamps nothing. Placed after the archived
         // guard (so a no-op on an archived node still errors) and before the slug-conflict
-        // check (a node cannot conflict with the slug it already holds).
+        // check (a node cannot conflict with the slug it already holds). SMA-606 D2 extends
+        // it: `changed: false` also means the caller emits no event and no audit entry.
         let slug_same = new_slug.is_none_or(|s| model.slug == s.as_str());
         let name_same = new_name.is_none_or(|n| model.name == n);
         if slug_same && name_same {
-            txn.commit().await.map_err(map_err)?;
-            self.bump_entity_gen().await;
-            return Ok(team_view(model_to_team(model)?, org_status));
+            return Ok(Mutated {
+                value: team_view(model_to_team(model)?, org_status),
+                changed: false,
+            });
         }
 
         let mut active = model.into_active_model();
@@ -201,40 +222,55 @@ impl TeamRepository for PgTeamRepository {
         }
         active.updated_at = Set(stamp.at);
         active.modified_by = Set(Some(stamp.by.canonical()));
-        let updated = active.update(&txn).await.map_err(map_err)?;
+        let updated = active.update(txn).await.map_err(map_err)?;
 
-        txn.commit().await.map_err(map_err)?;
-        self.bump_entity_gen().await;
-        Ok(team_view(model_to_team(updated)?, org_status))
+        Ok(Mutated {
+            value: team_view(model_to_team(updated)?, org_status),
+            changed: true,
+        })
     }
 
     async fn set_status(&self, id: Uuid, status: NodeStatus, stamp: &Stamp) -> Result<NodeView<Team>, RepositoryError> {
         let txn = self.db.begin().await.map_err(map_err)?;
+        let tx: Box<dyn Transaction> = Box::new(SeaOrmTransaction { txn });
+        let out = self.set_status_in(&*tx, id, status, stamp).await?;
+        tx.commit().await?;
+        self.bump_entity_gen().await;
+        Ok(out.value)
+    }
 
-        let Some(model) = team::Entity::find_by_id(id).lock_exclusive().one(&txn).await.map_err(map_err)? else {
+    async fn set_status_in(&self, tx: &dyn Transaction, id: Uuid, status: NodeStatus, stamp: &Stamp) -> Result<Mutated<NodeView<Team>>, RepositoryError> {
+        let txn = recover_txn(tx)?;
+
+        let Some(model) = team::Entity::find_by_id(id).lock_exclusive().one(txn).await.map_err(map_err)? else {
             return Err(RepositoryError::NotFound);
         };
 
         // D10: no ancestor guard — setting a team's own status is always permitted.
-        let final_model = if model.status == status.as_str() {
+        let (final_model, changed) = if model.status == status.as_str() {
             // Idempotent: already at the target status — no-op, `updated_at` untouched.
-            model
+            (model, false)
         } else {
             let mut active = model.into_active_model();
             active.status = Set(status.as_str().to_owned());
             active.updated_at = Set(stamp.at);
             active.modified_by = Set(Some(stamp.by.canonical()));
-            active.update(&txn).await.map_err(map_err)?
+            (active.update(txn).await.map_err(map_err)?, true)
         };
 
-        // Ancestor fetched after the update (no lock) purely to compute the returned view.
-        let Some(org) = organization::Entity::find_by_id(final_model.org_id).one(&txn).await.map_err(map_err)? else {
+        // The ancestor is locked FOR SHARE even though it only feeds the returned view: since
+        // SMA-606 that view's `effective_status` is emitted on the outbox event and the audit
+        // entry, so it must not be computed from a snapshot a concurrent org archive/restore
+        // can invalidate before this transaction commits (a stale value would then ship as the
+        // audit trail's recorded truth, not merely as a stale in-memory return value).
+        let Some(org) = organization::Entity::find_by_id(final_model.org_id).lock_shared().one(txn).await.map_err(map_err)? else {
             return Err(missing_ancestor("organization", final_model.org_id, "team", id));
         };
         let org_status = parse_status(&org.status)?;
 
-        txn.commit().await.map_err(map_err)?;
-        self.bump_entity_gen().await;
-        Ok(team_view(model_to_team(final_model)?, org_status))
+        Ok(Mutated {
+            value: team_view(model_to_team(final_model)?, org_status),
+            changed,
+        })
     }
 }

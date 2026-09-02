@@ -23,7 +23,7 @@
 
 use async_trait::async_trait;
 use metrics::counter;
-use paigasus_iam_core::{AuthzError, PolicyGenBumper};
+use paigasus_iam_core::{AuthzError, EntityGenBumper, PolicyGenBumper};
 use paigasus_observability::names;
 use redis::AsyncCommands;
 use std::sync::Arc;
@@ -463,6 +463,30 @@ impl PolicyGenBumper for GenerationsPolicyGenBumper {
     async fn bump(&self) {
         if let Err(err) = self.gens.bump_policy_gen().await {
             tracing::warn!(error = %err, "GenerationsPolicyGenBumper: policy_gen bump failed after a committed write — authz decisions may be stale until the policy snapshot's TTL backstop reloads");
+        }
+    }
+}
+
+/// [`EntityGenBumper`] over the same shared `Generations` handle every other tenancy
+/// invalidation uses (SMA-606 D7). Swallow-and-log, exactly like
+/// [`GenerationsPolicyGenBumper`]: the mutation has already committed.
+#[derive(Clone)]
+pub struct GenerationsEntityGenBumper {
+    gens: Generations,
+}
+
+impl GenerationsEntityGenBumper {
+    #[must_use]
+    pub fn new(gens: Generations) -> Self {
+        GenerationsEntityGenBumper { gens }
+    }
+}
+
+#[async_trait]
+impl EntityGenBumper for GenerationsEntityGenBumper {
+    async fn bump(&self) {
+        if let Err(err) = self.gens.bump_entity_gen().await {
+            tracing::warn!(error = %err, "GenerationsEntityGenBumper: entity_gen bump failed after a committed write — authz caches may serve stale data until TTL");
         }
     }
 }

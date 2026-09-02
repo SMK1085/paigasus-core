@@ -155,21 +155,17 @@ mod tests {
         assert_eq!(rendered, ev.id.to_string(), "must match what publish uses for Nats-Msg-Id");
     }
 
+    /// SMA-606 D8: iterates `EventType::ALL` rather than a hand-listed array. The previous
+    /// form hard-coded eight variants, so a new one compiled cleanly and went uncovered —
+    /// P2-D4 called this a compile-time tripwire and it was not one. `ALL` is kept exhaustive
+    /// by `all_lists_every_event_type`'s wildcard-free match, so this now transitively fails
+    /// to compile for a variant with no wire string.
     #[test]
     fn type_matches_the_wire_string_for_every_variant() {
-        for et in [
-            EventType::PrincipalCreated,
-            EventType::PrincipalArchived,
-            EventType::RoleGranted,
-            EventType::RoleRevoked,
-            EventType::ApiKeyIssued,
-            EventType::ApiKeyRevoked,
-            EventType::PolicyPut,
-            EventType::PolicyDeleted,
-        ] {
+        for et in EventType::ALL {
             let mut ev = sample(None, None, "prn:x");
             ev.event_type = et;
-            assert_eq!(render(&ev)["type"], et.as_wire());
+            assert_eq!(render(&ev)["type"], et.as_wire(), "rendered `type` must equal the wire string for {et:?}");
         }
     }
 
@@ -182,6 +178,25 @@ mod tests {
             serde_json::json!({"key_id": "k", "prefix": "pgs_live_ab", "scope": "s", "status": "active", "expires_at": "2026-01-01T00:00:00Z"}),
             serde_json::json!({"grant_id": "g", "role_key": "admin", "scope": "prn:pgs:iam:::org/o"}),
             serde_json::json!({"policy_id": "pol", "policy_key": "starter"}),
+            // SMA-606 D9: the tenancy shapes. Hand-listed because this test scans sample
+            // values by substring — it cannot see runtime content, so it proves the SHAPE
+            // carries no banned key, not that an operator's `name` is free of PII (see the
+            // spec's Limitations and the ADR-0016 amendment).
+            serde_json::json!({"node_prn": "prn:pgs:iam:::org/o", "slug": "acme", "name": "Acme", "status": "active", "effective_status": "active"}),
+            serde_json::json!({"node_prn": "prn:pgs:iam:::org/o", "slug": "acme", "name": "Acme"}),
+            serde_json::json!({"node_prn": "prn:pgs:iam:::org/o", "status": "archived", "effective_status": "archived"}),
+            // SMA-606 fix wave finding 8: the auto-provisioned default team's `TeamCreated`
+            // payload (`organizations.rs:186-201`) carries a `"source"` key an explicit
+            // `TeamService::create` does not — its own shape, not a substring of the plain
+            // create shape above.
+            serde_json::json!({"node_prn": "prn:pgs:iam:::team/o/t", "slug": "default", "name": "Default", "status": "active", "effective_status": "active", "source": "organization_create"}),
+            serde_json::json!({"membership_id": "m", "principal_prn": "prn:pgs:iam:::principal/p", "node_prn": "prn:pgs:iam:::org/o"}),
+            // SMA-606 fix wave finding 8: `MembershipDetached`'s payload — same shape as
+            // `MembershipAttached` above (fix wave finding 3 moved `cascade_of` off the wire
+            // payload entirely, onto the audit entry's `detail` only), listed explicitly so the
+            // inventory names every emitter rather than leaving detach's coverage implicit.
+            serde_json::json!({"membership_id": "m", "principal_prn": "prn:pgs:iam:::principal/p", "node_prn": "prn:pgs:iam:::project/o/t/p"}),
+            serde_json::json!({"grant_id": "g", "role_key": "org_admin", "scope": "prn:pgs:iam:::org/o", "source": "organization_create"}),
         ];
         let banned = ["hash", "secret", "plaintext", "email", "pepper", "token", "password"];
         for payload in payloads {
