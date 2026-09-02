@@ -24,9 +24,9 @@ the required check. See SMA-540 and
 
 | # | Check |
 |---|---|
-| 1 | `actionlint` over the auto-discovered workflow set |
+| 1 | `actionlint` over the auto-discovered workflow set, with shellcheck wired in (`-shellcheck=$SHELLCHECK_BIN`) so every `run:` block's inline bash is inspected too (SMA-539) — see "shellcheck provenance" below |
 | 2 | `.github/actionlint.{yaml,yml}` declares nothing but `self-hosted-runner`, and no `ignore` key in any style (either would neuter check 1 invisibly) |
-| 3 | Four stdin fixtures, one per defect class, each must fail **with its expected rule tag** |
+| 3 | Five stdin fixtures, one per defect class, each must fail **with its expected rule tag** |
 | 4 | A healthy stdin fixture must pass — the control for check 3 |
 | 5 | Every `paths:` glob is in the supported vocabulary and matches the tracked tree, and every `branches:` entry resolves as a ref or is skip-listed |
 | 6 | Every extracted filter key carries at least one sequence entry; a `paths:`/`branches:` key must also have at least one of them positive (the `-ignore` variants are exempt) |
@@ -109,6 +109,28 @@ workflow run *more* often, which is the fail-safe direction.
   also be removed from the CLAUDE.md `ci-targets` block, since `repo:affected-smoke` asserts the
   two agree — **and** needs a `T_EXEMPT` entry in `ci/affected-graph/ci_targets.py` with a stated
   reason, or C1's strict equality reds on the now-missing entry (true since SMA-541 shipped).
+
+## shellcheck provenance
+
+SMA-525 shipped check 1 with `-shellcheck=` and `-pyflakes=` both empty, refusing an opportunistic
+`PATH` lookup because it would make the gate's strictness a property of the host — a dev box with
+shellcheck installed catches an `SC2086` a clean CI runner never sees. SMA-539 turns shellcheck
+back on, sourced instead from a **hash-pinned PyPI package**: `shellcheck-py`, added to
+`py/pyproject.toml`'s `[dependency-groups] dev`. `run.sh` resolves the binary via `uv run --locked
+--project py`, after the `--self-test` early exit (see the SMA-539 comment beside the `command -v
+actionlint` guard) — never on `PATH` — so a dev box and CI always run the exact same shellcheck.
+Resolution is fail-closed: there is no fallback to a bare `-shellcheck=`, and an unresolvable
+binary aborts the gate at rc 2 rather than silently linting nothing.
+
+`shellcheck-py` was chosen over a `proto` plugin because upstream shellcheck's own GitHub release
+ships 13 platform archives and **no checksums asset** (re-measured 2026-09-02), which SMA-525's
+own D2 decision already refused as a supply-chain shape. `shellcheck-py` republishes shellcheck as
+checksummed wheels: `uv.lock` pins a `sha256` per wheel and sdist, and three of the republisher's
+digests were verified by hand against koalaman/shellcheck's own release assets at the pinned
+version. **A version bump re-opens that verification — it is not a one-time check.** `-pyflakes=`
+stays disabled: actionlint only ever applies pyflakes to a step declaring `shell: python`, and
+`wheels.yml`'s Python-shaped blocks are actually bash heredocs, so nothing in this repository would
+be covered by turning it on.
 
 ## Limitations
 
@@ -424,6 +446,23 @@ check 10 runs it on `release.yml`, whose `prebuild` job carries
 Two limits. V12 pins TEXT, not behaviour: a line kept but reordered, or moved into a step that
 never runs, still satisfies it. And it says nothing about `wheels.yml` or any future third copy —
 a new subject must be added to `NPM_OIDC_FLOOR_SUBJECTS` by hand.
+
+**L27 — shellcheck never sees a `${{ }}` expression (SMA-539).** actionlint substitutes every
+`${{ ... }}` GitHub Actions expression with an inert placeholder BEFORE handing a `run:` block to
+shellcheck, so an unquoted expression can never trigger `SC2086` — only an unquoted **shell**
+variable can. Measured A/B on check 3's fixture: `- run: rm -rf $TARGET` fails with `[shellcheck]`
+as expected, while the same fixture rewritten as `- run: rm -rf ${{ github.workspace }}` (unquoted,
+and a real, defined expression) passes cleanly at rc 0, asserting nothing. This is why the check-3 fixture and step 5's `images.yml`
+mutation both use a shell variable — an expression-shaped fixture would be silently decorative —
+and why a real workflow with an unquoted, attacker-influenced `${{ }}` expression in a `run:` block
+is a gap this gate does not close; that is a job-injection concern outside this gate's scope.
+
+**L28 — `SC2148`/`SC2164` cannot fire here, structurally.** actionlint always supplies the shell
+(there is no missing shebang for `SC2148` to complain about) and always wraps a `run:` block's
+script in its own generated harness, which sets `-e` — so `cd` failures that `SC2164` warns about
+are already fatal by construction rather than silently ignored. Neither rule is disabled by
+configuration; both are simply unreachable given how actionlint constructs the script it hands to
+shellcheck.
 
 ## Cost
 
