@@ -257,8 +257,13 @@ docstring.
 
 1. **The attribute window** is every attribute line between `#[pyfunction]` and the `fn` item.
    Intervening attributes are **default-deny with an allowlist**: `#[allow(…)]`, `#[expect(…)]`,
-   `#[doc = …]` and `///` doc comments are permitted and ignored; anything else is rc 1. This is
-   what makes a `#[pyo3(name = "x")]` on its own line refused rather than skipped past.
+   `#[doc = …]`, `#[inline]`, `#[must_use]` and `///` doc comments are permitted and ignored;
+   anything else is rc 1. This is what makes a `#[pyo3(name = "x")]` on its own line refused
+   rather than skipped past. The allowlist's criterion is what matters more than its membership:
+   every member is a codegen or lint hint that cannot affect the exported surface, while anything
+   that could rename or reshape the export is refused. `#[inline]` and `#[must_use]` were added
+   during implementation on that criterion — this rev-2 text named only four, and refusing two
+   idiomatic no-effect attributes would have rejected ordinary Rust for no safety gain.
 2. **Item modifiers** `pub`, `pub(crate)`, `pub(super)` are accepted and ignored. `async fn`,
    `unsafe fn`, `const fn` and `extern` are rc 1. A raw identifier `fn r#type` is rc 1 — PyO3
    strips the `r#` from the exported name and the scanner must not guess at that.
