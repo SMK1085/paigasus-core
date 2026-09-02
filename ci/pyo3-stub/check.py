@@ -582,50 +582,102 @@ def analyze(crates):
     propagate to `main()` as rc 2, never fold into "the repo has N problems".
 
     Every disagreement is reported, not just the first — a single run should surface the whole
-    drift, not make the fixer re-run the gate once per symbol.
+    drift, not make the fixer re-run the gate once per symbol. §5.2 states this explicitly:
+    a run that fixes one drift and hides the next behind it wastes a CI round.
+
+    RESTRUCTURE (fix round 1, SMA-600 controller ruling): the first cut of this function ran
+    the whole per-crate pipeline — decls -> regs -> stub -> identity -> A/B -> A/C — inside ONE
+    try/except, so a `Refused` from an early stage (say, an unpermitted `#[pymodule]` statement)
+    silently swallowed every LATER check for that crate, even ones with no dependency on the
+    stage that refused (a module-identity mismatch, an unrelated A-vs-C signature drift). That
+    is exactly what §5.2's "report every disagreement" rules out. Each extraction stage below is
+    now attempted INDEPENDENTLY — a `Refused` from one becomes a problem string and leaves that
+    stage's result as `None` (extraction failed), without aborting the others — and each
+    comparison runs only when BOTH of its inputs are known (not `None`). `decls` stays the one
+    exception: nothing else can be decided without knowing whether the crate is even PyO3-bearing
+    and, if so, what it exports, so a `Refused` there still short-circuits the rest of this crate.
     """
     problems = []
     for crate in crates:
         try:
             decls = rust_declarations(crate.rust)
+        except Refused as exc:
+            # Nothing downstream can be attempted without `decls`: whether a stub is a leftover
+            # (§5.1) and whether a stub is even expected both depend on knowing what — if
+            # anything — the crate exports. Report the refusal and move to the next crate.
+            problems.append(f"{crate.name}: {exc.message}")
+            continue
 
-            # A crate with no #[pyfunction] at all is simply not PyO3-bearing. A stub sitting
-            # beside it anyway is a leftover (a crate that shed its last binding but not its
-            # .pyi) and must be reported, not silently ignored.
-            if not decls:
-                if crate.stub_path:
-                    problems.append(f"{crate.name}: {crate.stub_path} exists but the crate declares no #[pyfunction] (§5.1)")
-                continue
+        # A crate with no #[pyfunction] at all is simply not PyO3-bearing. A stub sitting
+        # beside it anyway is a leftover (a crate that shed its last binding but not its
+        # .pyi) and must be reported, not silently ignored.
+        if not decls:
+            if crate.stub_path:
+                problems.append(f"{crate.name}: {crate.stub_path} exists but the crate declares no #[pyfunction] (§5.1)")
+            continue
 
-            if crate.stub_path is None:
-                problems.append(f"{crate.name}: declares {len(decls)} #[pyfunction] but has no .pyi stub (§5.1)")
-                continue
+        if crate.stub_path is None:
+            problems.append(f"{crate.name}: declares {len(decls)} #[pyfunction] but has no .pyi stub (§5.1)")
+            continue
 
+        # From here `decls` is known-good and non-empty, and a stub file exists. Every remaining
+        # extraction is attempted independently — see the restructure note above — so each is
+        # `None` (failed, already reported) or its real result, never a reason to skip a sibling
+        # stage's own attempt.
+        regs = None
+        try:
             regs = rust_registrations(crate.rust)
+        except Refused as exc:
+            problems.append(f"{crate.name}: {exc.message}")
+
+        stub = None
+        try:
             stub = stub_definitions(crate.stub_path, crate.stub_text)
+        except Refused as exc:
+            problems.append(f"{crate.name}: {exc.message}")
 
-            # §5.4 — bind the stub's FILENAME to the module it claims to describe. lib.rs's own
-            # comment says the module name is provisional; without this check a rename of the
-            # #[pymodule] fn (or of [tool.maturin] module-name) orphans the stub file while every
-            # OTHER set still agrees on the function names inside it.
+        ident = None
+        try:
             ident = pymodule_ident(crate.rust)
-            declared = _maturin_module_name(crate.pyproject, crate.name)
-            basename = crate.stub_path.rsplit("/", 1)[-1][:-4]
-            if not (ident == declared == basename):
-                problems.append(
-                    f"{crate.name}: module identity disagrees — #[pymodule] fn {ident!r}, "
-                    f"[tool.maturin] module-name {declared!r}, stub basename {basename!r} (§5.4)")
+        except Refused as exc:
+            problems.append(f"{crate.name}: {exc.message}")
 
-            # A vs B, on names — an unregistered #[pyfunction] is an AttributeError at import
-            # time; a registration with no matching declaration cannot exist under normal
-            # compilation, but is reported anyway rather than assumed impossible.
+        declared = None
+        try:
+            declared = _maturin_module_name(crate.pyproject, crate.name)
+        except Refused as exc:
+            problems.append(f"{crate.name}: {exc.message}")
+
+        # §5.4 — bind the stub's FILENAME to the module it claims to describe. lib.rs's own
+        # comment says the module name is provisional; without this check a rename of the
+        # #[pymodule] fn (or of [tool.maturin] module-name) orphans the stub file while every
+        # OTHER set still agrees on the function names inside it. `basename` needs only
+        # `crate.stub_path`, already known non-None above, so it is read directly rather than
+        # stage-guarded; the comparison itself runs only once BOTH `ident` and `declared` are
+        # known — an unknown side must never be silently treated as "agrees".
+        basename = crate.stub_path.rsplit("/", 1)[-1][:-4]
+        if ident is not None and declared is not None and not (ident == declared == basename):
+            problems.append(
+                f"{crate.name}: module identity disagrees — #[pymodule] fn {ident!r}, "
+                f"[tool.maturin] module-name {declared!r}, stub basename {basename!r} (§5.4)")
+
+        # A vs B, on names — runs only once `regs` extracted cleanly (`is not None`, not merely
+        # truthy: an empty-but-VALID registration set, e.g. AC2's "nothing registered", must
+        # still be compared, not mistaken for an extraction failure). An unregistered
+        # #[pyfunction] is an AttributeError at import time; a registration with no matching
+        # declaration cannot exist under normal compilation, but is reported anyway rather than
+        # assumed impossible.
+        if regs is not None:
             for name in sorted(set(decls) - regs):
                 problems.append(f"{crate.name}: `{name}` is declared #[pyfunction] but never registered — an AttributeError at import")
             for name in sorted(regs - set(decls)):
                 problems.append(f"{crate.name}: `{name}` is registered but has no #[pyfunction] declaration")
 
-            # A vs C, on FULL SIGNATURES (§3) — name, arity, parameter names IN ORDER, parameter
-            # types, and return type all have to agree; a mere name match is not enough.
+        # A vs C, on FULL SIGNATURES (§3) — runs only once `stub` extracted cleanly (`is not
+        # None`; AC3's "stub deleted every def" leaves a valid, empty `{}` that must still be
+        # compared). Name, arity, parameter names IN ORDER, parameter types, and return type all
+        # have to agree; a mere name match is not enough.
+        if stub is not None:
             for name in sorted(set(decls) - set(stub)):
                 problems.append(f"{crate.name}: `{name}` is exported but absent from {crate.stub_path} — invisible to type checkers")
             for name in sorted(set(stub) - set(decls)):
@@ -635,8 +687,6 @@ def analyze(crates):
                     problems.append(
                         f"{crate.name}: `{name}` signature drift — Rust says {decls[name]}, "
                         f"{crate.stub_path} says {stub[name]}")
-        except Refused as exc:
-            problems.append(f"{crate.name}: {exc.message}")
     return problems
 
 
@@ -1084,6 +1134,76 @@ def self_test():
     # reason (stale_waivers reporting everything, live or not).
     if stale_waivers({("paigasus-py-bindings", "macro_rules"): "reason"}, live={"paigasus-py-bindings"}):
         print("  FAIL [waiver] a live crate's waiver was reported stale (§4.5)", file=sys.stderr)
+        rc = 1
+
+    # --------------------------------------------------------------------------------------
+    # Fix round 1 (controller ruling, SMA-600): three `analyze()` branches disclosed as
+    # untested in the task-3 report, plus the regression test for the try/except restructure
+    # itself. Each below builds a fixture that lands ONLY in the named branch and asserts the
+    # exact problem string it must produce.
+    # --------------------------------------------------------------------------------------
+
+    # `regs - decls` — a name registered via wrap_pyfunction! that has no matching
+    # #[pyfunction] declaration. Not reachable from valid, compiling Rust (wrap_pyfunction!
+    # requires the function to exist), but the branch exists and must still fire correctly if
+    # it is ever reached — e.g. by a declaration this scanner separately refuses to see.
+    reg_only = [Crate("c", {"lib.rs":
+        "#[pyfunction]\nfn f(a: i64) -> String {}\n"
+        "#[pymodule]\nfn mod_x(m: &Bound<'_, PyModule>) -> PyResult<()> {\n"
+        "    m.add_function(wrap_pyfunction!(f, m)?)?;\n"
+        "    m.add_function(wrap_pyfunction!(ghost, m)?)?;\n    Ok(())\n}\n"},
+        "mod_x.pyi", "def f(a: int) -> str: ...\n", '[tool.maturin]\nmodule-name = "mod_x"\n')]
+    problems = analyze(reg_only)
+    if not any("`ghost` is registered but has no #[pyfunction] declaration" in p for p in problems):
+        print(f"  FAIL [regs-decls] extra registration was not reported: {problems}", file=sys.stderr)
+        rc = 1
+
+    # `stub - decls` — a `def` in the stub with no matching #[pyfunction]. A hand-written stub
+    # can drift ahead of the Rust (someone typed a def for a function not yet wired up), and
+    # that must be visible, not silently accepted as "the stub knows more than the code".
+    stub_only = [Crate("c", {"lib.rs":
+        "#[pyfunction]\nfn f(a: i64) -> String {}\n"
+        "#[pymodule]\nfn mod_x(m: &Bound<'_, PyModule>) -> PyResult<()> {\n"
+        "    m.add_function(wrap_pyfunction!(f, m)?)?;\n    Ok(())\n}\n"},
+        "mod_x.pyi", "def f(a: int) -> str: ...\ndef ghost(x: int) -> str: ...\n", '[tool.maturin]\nmodule-name = "mod_x"\n')]
+    problems = analyze(stub_only)
+    if not any("`ghost` is in" in p and "is not a #[pyfunction]" in p for p in problems):
+        print(f"  FAIL [stub-decls] extra stub def was not reported: {problems}", file=sys.stderr)
+        rc = 1
+
+    # Leftover stub beside a crate with NO #[pyfunction] at all (§5.1's "not decls" arm) — a
+    # crate that shed its last binding but kept its .pyi. `pyproject` is deliberately `None`
+    # here: this branch `continue`s before ever needing it, so a valid pyproject is not a
+    # precondition for reaching it.
+    leftover_stub = [Crate("c", {"lib.rs": "fn helper() -> i64 { 1 }\n"}, "mod_x.pyi", "def ghost() -> None: ...\n", None)]
+    problems = analyze(leftover_stub)
+    if not any("exists but the crate declares no #[pyfunction]" in p for p in problems):
+        print(f"  FAIL [leftover-stub] orphaned stub was not reported: {problems}", file=sys.stderr)
+        rc = 1
+
+    # Regression test for the try/except restructure (FINDING 1): one crate carrying a
+    # registration-form refusal (unrelated to sets A/C) AND an independent module-identity
+    # mismatch AND an independent A-vs-C signature drift must report ALL THREE — not just the
+    # refusal. Before the restructure, the single enclosing try/except stopped at the first
+    # Refused (from `rust_registrations`) and the identity mismatch and signature drift were
+    # never reached at all. Asserting the exact count (3), not just "at least one of each",
+    # is deliberate: it also catches a future regression that reintroduces a duplicate report
+    # (e.g. from `pymodule_ident` and `rust_registrations` sharing `_pymodule_body`) without
+    # anyone noticing the count creep.
+    multi = [Crate("c", {"lib.rs":
+        "#[pyfunction]\nfn f(a: i64) -> String {}\n"
+        "#[pymodule]\nfn mod_x(m: &Bound<'_, PyModule>) -> PyResult<()> {\n"
+        "    m.add_class::<Thing>()?;\n    Ok(())\n}\n"},
+        "mod_x.pyi", "def f(a: int) -> int: ...\n", '[tool.maturin]\nmodule-name = "other"\n')]
+    problems = analyze(multi)
+    has_refusal = any("not a permitted registration form" in p for p in problems)
+    has_identity = any("module identity disagrees" in p for p in problems)
+    has_drift = any("signature drift" in p for p in problems)
+    if not (has_refusal and has_identity and has_drift):
+        print(f"  FAIL [restructure] a refusal hid an independent problem: {problems}", file=sys.stderr)
+        rc = 1
+    if len(problems) != 3:
+        print(f"  FAIL [restructure] expected exactly 3 problems, got {len(problems)}: {problems}", file=sys.stderr)
         rc = 1
 
     print("self-test: OK" if rc == 0 else "self-test: FAILED", file=sys.stderr)
