@@ -165,6 +165,11 @@ REQUIRED_REPO_TASKS = (
     # dropped from `T` and made CI-ineligible in the same edit, so without a floor entry the
     # whole gate — control included — could be switched off with every check green.
     "workflow-credentials",
+    # SMA-539. Same reasoning as the release-parity* and workflow-credentials entries: this gate
+    # carries a --negative-control, and check_forward's `want`/`got` shrink CONSISTENTLY when a
+    # task is dropped from `T` and made CI-ineligible in the same edit — so without a floor entry
+    # the whole gate, control included, could be switched off with every check green.
+    "ruff-ci",
 )
 
 # SMA-553 D13 — repo:input-liveness's `inputs: ['**/*']` is load-bearing, and asserting it ONLY
@@ -297,6 +302,19 @@ SELF_TASK_EXPECTED_GLOBS = {
         "rs/crates/bindings/*/pyproject.toml",
         "rs/crates/bindings/*/src/**/*.rs",
         "rs/Cargo.lock",
+    ),
+    # SMA-539. Two globs then four literals, in check_gate_inputs' comparison order. The two py/
+    # entries are the rule set and the ruff version pin; .moon/tasks/python.yml is what makes a
+    # divergence between py:lint's invocation and this gate's re-key the gate (AC B5). Order
+    # MEASURED against moon 2.5.3's `moon query tasks`: `ci/**/*.py` and `ci/ruff/**/*` are
+    # reported as inputGlobs (sorted first), the other four as inputFiles (sorted after).
+    "ruff-ci": (
+        "ci/**/*.py",
+        "ci/ruff/**/*",
+        ".moon/tasks/python.yml",
+        ".prototools",
+        "py/pyproject.toml",
+        "py/uv.lock",
     ),
 }
 
@@ -531,6 +549,15 @@ SELF_SCHEDULED_GATES = {
         "python3 ci/pyo3-stub/check.py --negative-control",
         "python3 ci/pyo3-stub/check.py --check",
     ),
+    # SMA-539. Four lines, like the other self-scheduled gates: `set -euo pipefail` is what makes
+    # a failing control propagate, since Moon takes a `script:` block's status from its LAST
+    # command.
+    "ruff-ci": (
+        "set -euo pipefail",
+        "bash ci/ruff/run.sh --self-test",
+        "bash ci/ruff/run.sh --negative-control",
+        "bash ci/ruff/run.sh",
+    ),
 }
 
 # SMA-530. A script-pinned gate whose `inputs` are NOT separately pinned must say so here,
@@ -566,6 +593,25 @@ SELF_TASK_GLOBS_EXEMPT = {
         "floor so the delegation cannot rot (SMA-572/SMA-573)"
     ),
 }
+
+# SMA-539. task name -> reason a `repo:*` task whose RESOLVED `script:` mentions `--self-test`
+# or `--negative-control` is deliberately absent from SELF_SCHEDULED_GATES above.
+#
+# SHIPS EMPTY, and that is the point: it is the sanctioned escape, not a live exemption. It exists
+# because Task 4 registered `repo:ruff-ci` in moon.yml, ci.yml's `T` and CLAUDE.md — three correct
+# edits — while leaving it out of SELF_SCHEDULED_GATES entirely, and `repo:affected-smoke` still
+# passed at rc 0: the three self-scheduled-gate registries in this file (SELF_SCHEDULED_GATES,
+# SELF_TASK_EXPECTED_GLOBS, T_EXEMPT-shaped tables) only validate entries already present as KEYS,
+# never the completeness of the key set itself against what moon actually reports running. Nothing
+# short of a human noticing caught it. check_self_scheduled_coverage below closes that gap by
+# deriving the "must be registered" set from moon's own resolved script text instead of from
+# another hand-maintained list, so the next `ruff-ci` reds instead of shipping silent.
+#
+# An entry here is a RECORDED DECISION, mirroring T_EXEMPT/ALLOW_DEAD_INPUT/BRANCH_SKIP: the
+# reason string is required (a blank one is itself an assertion failure), and an entry naming a
+# task whose script no longer mentions either flag is reported stale — the same "a typo is loud,
+# a leftover is silent" reasoning T_EXEMPT's stale_exempt row and check_forward's docstring give.
+SELF_SCHEDULED_COVERAGE_EXEMPT = {}
 
 # C4, actionlint half (SMA-542). repo:actionlint's self-tests, mutation battery, and the check-8,
 # check-8b, check-8c AND check-8d production call sites are each invoked from ONE call site inside
@@ -1482,6 +1528,48 @@ def check_registry_pairing(scheduled=None, globs=None, exempt=None):
     )
 
 
+def check_self_scheduled_coverage(scripts, exempt=None):
+    """SMA-539. A `repo:*` task whose RESOLVED script runs `--self-test`/`--negative-control`
+    but has no SELF_SCHEDULED_GATES entry.
+
+    check_registry_pairing above proves the three registries agree WITH EACH OTHER; nothing
+    proved either of them agrees with what moon actually reports running. `repo:ruff-ci` shipped
+    (Task 4) correctly wired into moon.yml, ci.yml's `T` and CLAUDE.md, running a `--self-test`
+    and a `--negative-control` exactly like every other self-scheduled gate — and
+    `repo:affected-smoke` still passed at rc 0, because SELF_SCHEDULED_GATES only validates
+    entries already present as KEYS. This derives the "must be a key" set from `scripts` (the
+    same {task: resolved script} mapping `_scripts()` builds for check_self_invocation) instead
+    of from a second hand-maintained list, so a future gate of this shape reds here rather than
+    needing a human to notice a second time.
+
+    Deliberately narrower than a general "every registry is complete" rule — see
+    SELF_SCHEDULED_COVERAGE_EXEMPT's own comment for why SELF_TASK_EXPECTED_GLOBS and
+    REQUIRED_REPO_TASKS are NOT given the same treatment: both have legitimate,
+    already-documented absences (SELF_TASK_GLOBS_EXEMPT's `affected-smoke` delegates to check 8e
+    instead of a table entry here; several CI-eligible gates are simply not yet floor-worthy), so
+    a strict completeness rule for either would red the real, correctly-configured repository.
+    SELF_SCHEDULED_GATES carries no such legitimate absence: a task whose own script runs a
+    negative control belongs in the one table that proves the control still propagates.
+
+    Returns (unregistered, bad_exempt, stale_exempt), all sorted name lists — the same shape
+    check_forward returns for T_EXEMPT, for the same reasons: a typo'd exemption is already loud
+    (the real task shows up under `unregistered`), so `stale_exempt` exists for the silent case,
+    an exemption that outlived the thing it exempted.
+    """
+    exempt = SELF_SCHEDULED_COVERAGE_EXEMPT if exempt is None else exempt
+    qualifying = {
+        task for task, script in scripts.items()
+        if "--self-test" in script or "--negative-control" in script
+    }
+    unregistered = sorted(
+        task for task in qualifying
+        if task not in SELF_SCHEDULED_GATES and task not in exempt
+    )
+    bad_exempt = sorted(task for task, reason in exempt.items() if not (reason or "").strip())
+    stale_exempt = sorted(set(exempt) - qualifying)
+    return unregistered, bad_exempt, stale_exempt
+
+
 def self_test():
     """Negative control: every assertion must FIRE on a synthetic violation.
 
@@ -1621,12 +1709,14 @@ def self_test():
                  "release-parity": True, "release-parity-py": True,
                  "release-parity-ts": True,
                  # SMA-593 — a floor member too, for the same reason.
-                 "workflow-credentials": True},
+                 "workflow-credentials": True,
+                 # SMA-539 — a floor member too, for the same reason.
+                 "ruff-ci": True},
         "some-crate-rs": {"build": True, "test": True, "build-release": True},
     }
     aligned_t = ["build", "test", "deny", "promtool", "affected-smoke", "publish-metadata",
                  "release-parity", "release-parity-py", "release-parity-ts",
-                 "workflow-credentials"]
+                 "workflow-credentials", "ruff-ci"]
 
     def forward(label, tasks, t, exempt, want_missing, want_unexpected, want_bad_exempt=(),
                 want_stale_exempt=()):
@@ -2419,6 +2509,78 @@ def self_test():
     pairing("exempt-and-pinned", {"g": ()}, {"g": ("**/*",)}, {"g": "r"}, ([], [], [], ["g"], []))
     pairing("orphan-globs", {}, {"ghost": ("**/*",)}, {}, ([], [], [], [], ["ghost"]))
 
+    # SMA-539. check_self_scheduled_coverage: a `repo:*` task whose resolved script runs
+    # --self-test/--negative-control must be a SELF_SCHEDULED_GATES key. `coverage_scripts()`
+    # is built from the LIVE registry, for the same reason `wired_scripts()` above is: a literal
+    # one-key fixture would start passing for the wrong reason the moment a second gate is
+    # registered.
+    def coverage_scripts(**overrides):
+        built = {
+            task: "".join(f"{line}\n" for line in lines)
+            for task, lines in SELF_SCHEDULED_GATES.items()
+        }
+        built.update(overrides)
+        return built
+
+    def coverage(label, scripts, exempt, want):
+        got = check_self_scheduled_coverage(scripts, exempt)
+        if got != want:
+            failures.append(f"check_self_scheduled_coverage[{label}]: got {got}, want {want}")
+
+    # A fully-wired tree: every task in `scripts` is already a SELF_SCHEDULED_GATES key, so
+    # nothing can be reported unregistered no matter what its script mentions.
+    coverage("wired-tree", coverage_scripts(), None, ([], [], []))
+    # The SMA-539 shape itself: a task outside the registry whose script runs a negative
+    # control. Uses a name that is not a real registry key so this fixture cannot be defeated by
+    # `ruff-ci` graduating into SELF_SCHEDULED_GATES later.
+    coverage(
+        "unregistered-negative-control",
+        coverage_scripts(**{"mystery-gate": "bash ci/mystery/run.sh --negative-control\n"}),
+        None,
+        (["mystery-gate"], [], []),
+    )
+    # ...and the --self-test spelling alone must qualify it too — the check reads either flag.
+    coverage(
+        "unregistered-self-test",
+        coverage_scripts(**{"mystery-gate": "python3 ci/mystery/check.py --self-test\n"}),
+        None,
+        (["mystery-gate"], [], []),
+    )
+    # A qualifying task that IS exempted must not be reported unregistered.
+    coverage(
+        "exempted",
+        coverage_scripts(**{"mystery-gate": "bash ci/mystery/run.sh --negative-control\n"}),
+        {"mystery-gate": "reason"},
+        ([], [], []),
+    )
+    # An exemption with a blank reason is itself an assertion failure, mirroring T_EXEMPT.
+    coverage(
+        "empty-reason",
+        coverage_scripts(**{"mystery-gate": "bash ci/mystery/run.sh --negative-control\n"}),
+        {"mystery-gate": "   "},
+        ([], ["mystery-gate"], []),
+    )
+    # An exemption naming a task whose script no longer mentions either flag has outlived what
+    # it exempted, and must be reported stale rather than silently doing nothing forever.
+    coverage(
+        "stale-exemption",
+        coverage_scripts(**{"mystery-gate": "bash ci/mystery/run.sh\n"}),
+        {"mystery-gate": "reason"},
+        ([], [], ["mystery-gate"]),
+    )
+    # ...and a task absent from `scripts` altogether is the same staleness, not a KeyError.
+    coverage("stale-exemption-absent-task", coverage_scripts(), {"ghost": "reason"}, ([], [], ["ghost"]))
+    # `exempt` OMITTED entirely must still resolve to the LIVE SELF_SCHEDULED_COVERAGE_EXEMPT, the
+    # same "default must reach the real table, not a stub" property check_gate_inputs' own
+    # signature-default row asserts below — called positionally, the way main() calls it.
+    if check_self_scheduled_coverage(
+        coverage_scripts(**{"mystery-gate": "bash ci/mystery/run.sh --negative-control\n"})
+    ) != (["mystery-gate"], [], []):
+        failures.append(
+            "check_self_scheduled_coverage: omitting `exempt` did not resolve to the live "
+            "SELF_SCHEDULED_COVERAGE_EXEMPT"
+        )
+
     # SMA-553 D13, mirrored here so repo:input-liveness is not the sole judge of its own inputs.
     # The wired row carries the implicit .moon glob moon injects into every task, which must be
     # tolerated rather than counted as drift.
@@ -2610,10 +2772,14 @@ def main():
         release_plan_sh,
     )
     bad_invocation = check_invocation(ci_yml)
+    unregistered_self_scheduled, bad_coverage_exempt, stale_coverage_exempt = (
+        check_self_scheduled_coverage(scripts)
+    )
 
     if not (floor or missing or unexpected or bad_exempt or stale_exempt or dead or doc_problems
             or missing_sites or bad_invocation or bad_gate_inputs
-            or bad_generate_inputs):
+            or bad_generate_inputs or unregistered_self_scheduled or bad_coverage_exempt
+            or stale_coverage_exempt):
         print(
             f"PASS  {'ci-targets':<18} -> {len(t_targets)} targets: every CI-eligible repo task is "
             "in ci.yml's T, every entry resolves, CLAUDE.md mirrors it"
@@ -2715,6 +2881,23 @@ def main():
          "    Fix: restore the inputs in contracts/moon.yml, or update\n"
          "    CONTRACTS_GENERATE_INPUTS in ci/affected-graph/ci_targets.py if the change is\n"
          "    intended."),
+        ([":" + name for name in unregistered_self_scheduled],
+         "A `repo:*` task's own resolved script runs `--self-test` or `--negative-control`, but\n"
+         "    it has no SELF_SCHEDULED_GATES entry (SMA-539) — so nothing here proves that gate's\n"
+         "    control can still report red.\n"
+         "    Fix: add the task's four (or three) script lines to SELF_SCHEDULED_GATES in\n"
+         "    ci/affected-graph/ci_targets.py, or add a reasoned SELF_SCHEDULED_COVERAGE_EXEMPT\n"
+         "    entry if it is genuinely not meant to be pinned there."),
+        (bad_coverage_exempt,
+         "A SELF_SCHEDULED_COVERAGE_EXEMPT entry has no reason string. An exemption is a recorded\n"
+         "    decision, so the record is what earns it.\n"
+         "    Fix: give it a non-empty reason in ci/affected-graph/ci_targets.py, or delete it."),
+        (stale_coverage_exempt,
+         "A SELF_SCHEDULED_COVERAGE_EXEMPT entry names a task whose resolved script no longer\n"
+         "    mentions --self-test or --negative-control — the exemption has outlived what it\n"
+         "    exempted.\n"
+         "    Fix: delete the entry from SELF_SCHEDULED_COVERAGE_EXEMPT in\n"
+         "    ci/affected-graph/ci_targets.py."),
     ):
         if rows:
             print(f"  {title}", file=sys.stderr)

@@ -2131,6 +2131,11 @@ T_AFFECTED_SMOKE_REQUIRED_INPUTS=(
   # SMA-603 — floors the input that makes RELEASE_PLAN_SH_CALL_SITES reachable. Without it the
   # PR deleting those nine lines is exactly the PR that does not schedule repo:affected-smoke.
   'ci/release-plan/**/*'
+  # SMA-539 (Task 6's pin) — floors the input that makes ci_targets.py's
+  # check_self_scheduled_coverage exercisable against repo:ruff-ci's own registry entries.
+  # Without it, a PR editing ci/ruff/** does not schedule repo:affected-smoke, and neither the
+  # SELF_SCHEDULED_GATES nor the SELF_TASK_EXPECTED_GLOBS pin for that gate can fire.
+  'ci/ruff/**/*'
   'CLAUDE.md'
   '.prototools'
 )
