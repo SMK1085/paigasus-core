@@ -1113,7 +1113,23 @@ def test_parameter_names_and_order_match_the_stub():
     assert not drift, f"parameter names/order drift (live vs stub): {drift}"
 ```
 
-- [ ] **Step 2: Run it and verify it passes**
+- [ ] **Step 2: Satisfy the py workspace's own gates**
+
+Unlike `ci/`, the `py/` tree IS scanned by basedpyright (`typeCheckingMode = "all"`) and ruff, and
+both `:typecheck` and `:fmt` are in `ci.yml`'s `T=(…)` array — so an unannotated test file reds a
+required check. The sibling `test_parity.py` is written to satisfy exactly this config; read it for
+the idiom. Annotate honestly; do not add `# pyright: ignore`, relax `py/pyproject.toml`, or
+exclude the file.
+
+```bash
+export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
+cd py
+uv run basedpyright packages/paigasus-kernel/tests/test_stub_surface.py   # must be 0 errors
+uv run ruff format packages/paigasus-kernel/tests/test_stub_surface.py
+uv run ruff check packages/paigasus-kernel/tests/test_stub_surface.py
+```
+
+- [ ] **Step 3: Run it and verify it passes**
 
 ```bash
 export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
@@ -1121,7 +1137,7 @@ cd py && uv run pytest packages/paigasus-kernel/tests/test_stub_surface.py -v; c
 ```
 Expected: 3 passed. If `test_exported_names_match_the_stub` reports a 13th name, the `ModuleType` filter is wrong — fix the filter, not the assertion.
 
-- [ ] **Step 3: Prove it can fail**
+- [ ] **Step 4: Prove it can fail**
 
 ```bash
 export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
@@ -1133,7 +1149,7 @@ git diff --stat rs/crates/bindings/paigasus-py-bindings/paigasus_py_bindings.pyi
 ```
 Expected: the mutated run fails naming `sum_as_string` as exported-but-unstubbed; the restore leaves an empty `git diff --stat`.
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
 git add py/packages/paigasus-kernel/tests/test_stub_surface.py
