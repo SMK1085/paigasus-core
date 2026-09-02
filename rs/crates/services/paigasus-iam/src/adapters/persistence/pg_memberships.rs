@@ -9,9 +9,10 @@
 
 use super::entities::{membership, organization, principal, project, team};
 use super::map_err;
+use super::uow::{SeaOrmTransaction, recover_txn};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use paigasus_iam_core::{Membership, MembershipRecord, MembershipRepository, NodeStatus, PreconditionKind, PrincipalId, RepositoryError, Stamp, TenancyNodeRef};
+use paigasus_iam_core::{Membership, MembershipRecord, MembershipRepository, NodeStatus, PreconditionKind, PrincipalId, RepositoryError, Stamp, TenancyNodeRef, Transaction};
 use paigasus_kernel::Prn;
 use sea_orm::{ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseConnection, DbBackend, EntityTrait, FromQueryResult, QueryFilter, QuerySelect, Set, Statement, TransactionTrait};
 use uuid::Uuid;
@@ -140,15 +141,78 @@ const DETACH_CASCADE_SQL: &str = r#"DELETE FROM "membership" m
    AND (m.team_id    IN (SELECT id FROM "team"    WHERE org_id = $2)
      OR m.project_id IN (SELECT id FROM "project" WHERE org_id = $2))"#;
 
+/// SMA-606 D6 step 1: locks every row `detach_in` is about to delete, before the projection
+/// reads them. `lock_exclusive()` on the target row alone is NOT enough — a concurrent
+/// transaction detaching one of the CASCADE rows (its own target, a different row) is not
+/// blocked by it, so under READ COMMITTED the projection would see a row that the later
+/// DELETE then re-evaluates away, and the trail would report a detach this call never
+/// performed. Single table, no UNION, so `FOR UPDATE` is legal here where it is not on
+/// `DETACH_PROJECT_SQL` below.
+///
+/// `$2` is `model.org_id`, an `Option<Uuid>`: for a team or project detach it binds NULL,
+/// `org_id = NULL` is never true, and only the `m.id = $3` term matches. That is correct, but
+/// it is correct by arithmetic rather than by construction — do not "simplify" the OR away.
+const DETACH_LOCK_SQL: &str = r#"SELECT m.id FROM "membership" m
+ WHERE m.id = $3
+    OR (m.principal_id = $1
+        AND (m.team_id    IN (SELECT id FROM "team"    WHERE org_id = $2)
+          OR m.project_id IN (SELECT id FROM "project" WHERE org_id = $2)))
+ FOR UPDATE"#;
+
+/// SMA-606 D6 step 2: the same row set, projected through `LIST_BY_PRINCIPAL_SQL`'s PRN joins
+/// so it fills `MembershipRow` by the mapping every read path already uses. Reusing that
+/// projection is the point — a sixth hand-written projection is the hazard SMA-440 D2
+/// documents across the existing five, where a statement omitting a column compiles and goes
+/// wrong on one path only.
+///
+/// The `OR` disjunct is neutralised per arm only by the INNER joins: a project row has
+/// `team_id IS NULL`, so the team arm's `JOIN "team" t ON t.id = m.team_id` drops it. Correct,
+/// but it breaks silently if any arm is ever changed to a LEFT JOIN.
+const DETACH_PROJECT_SQL: &str = r#"
+SELECT m.id, pr.prn AS principal_prn, o.prn AS node_prn, m.created_at, m.created_by
+  FROM "membership" m JOIN "principal" pr ON pr.id = m.principal_id
+  JOIN "organization" o ON o.id = m.org_id
+ WHERE m.id = $3
+    OR (m.principal_id = $1
+        AND (m.team_id    IN (SELECT id FROM "team"    WHERE org_id = $2)
+          OR m.project_id IN (SELECT id FROM "project" WHERE org_id = $2)))
+UNION ALL
+SELECT m.id, pr.prn, t.prn, m.created_at, m.created_by FROM "membership" m
+  JOIN "principal" pr ON pr.id = m.principal_id JOIN "team" t ON t.id = m.team_id
+ WHERE m.id = $3
+    OR (m.principal_id = $1
+        AND (m.team_id    IN (SELECT id FROM "team"    WHERE org_id = $2)
+          OR m.project_id IN (SELECT id FROM "project" WHERE org_id = $2)))
+UNION ALL
+SELECT m.id, pr.prn, pj.prn, m.created_at, m.created_by FROM "membership" m
+  JOIN "principal" pr ON pr.id = m.principal_id JOIN "project" pj ON pj.id = m.project_id
+ WHERE m.id = $3
+    OR (m.principal_id = $1
+        AND (m.team_id    IN (SELECT id FROM "team"    WHERE org_id = $2)
+          OR m.project_id IN (SELECT id FROM "project" WHERE org_id = $2)))
+ORDER BY created_at, id"#;
+
 #[async_trait]
 impl MembershipRepository for PgMembershipRepository {
     async fn attach(&self, membership: &Membership, stamp: &Stamp) -> Result<MembershipRecord, RepositoryError> {
+        // SMA-606 D1: a thin one-shot-UoW wrapper over `attach_in`, mirroring
+        // `PgOrganizationRepository::create`/`rename`. There is exactly ONE body —
+        // `PgMembershipRepository` has no `gens` field and has never bumped one (`detach_in`'s
+        // own doc comment states why), so this wrapper has no post-commit step beyond `commit`.
         let txn = self.db.begin().await.map_err(map_err)?;
+        let tx: Box<dyn Transaction> = Box::new(SeaOrmTransaction { txn });
+        let out = self.attach_in(&*tx, membership, stamp).await?;
+        tx.commit().await?;
+        Ok(out)
+    }
+
+    async fn attach_in(&self, tx: &dyn Transaction, membership: &Membership, stamp: &Stamp) -> Result<MembershipRecord, RepositoryError> {
+        let txn = recover_txn(tx)?;
         let principal_uuid = membership.principal_id.uuid();
 
         // 1. Principal exists (no lock — principals aren't archived in M1; the FK backstops
         // referential integrity), and the caller's prn byte-matches the stored one.
-        let Some(principal_model) = principal::Entity::find_by_id(principal_uuid).one(&txn).await.map_err(map_err)? else {
+        let Some(principal_model) = principal::Entity::find_by_id(principal_uuid).one(txn).await.map_err(map_err)? else {
             return Err(RepositoryError::NotFound);
         };
         if principal_model.prn != membership.principal_id.canonical() {
@@ -162,7 +226,7 @@ impl MembershipRepository for PgMembershipRepository {
         // `Some` for team/project targets — step 4's org-membership invariant is scoped to it.
         let (node_prn, effective_status, parent_org) = match &membership.node {
             TenancyNodeRef::Organization(node_id) => {
-                let Some(org) = organization::Entity::find_by_id(node_id.uuid()).lock_shared().one(&txn).await.map_err(map_err)? else {
+                let Some(org) = organization::Entity::find_by_id(node_id.uuid()).lock_shared().one(txn).await.map_err(map_err)? else {
                     return Err(RepositoryError::NotFound);
                 };
                 if org.prn != membership.node.canonical() {
@@ -172,13 +236,13 @@ impl MembershipRepository for PgMembershipRepository {
                 (org.prn, NodeStatus::effective(status, &[]), None)
             }
             TenancyNodeRef::Team(node_id) => {
-                let Some(team_model) = team::Entity::find_by_id(node_id.uuid()).lock_shared().one(&txn).await.map_err(map_err)? else {
+                let Some(team_model) = team::Entity::find_by_id(node_id.uuid()).lock_shared().one(txn).await.map_err(map_err)? else {
                     return Err(RepositoryError::NotFound);
                 };
                 if team_model.prn != membership.node.canonical() {
                     return Err(RepositoryError::PrnMismatch);
                 }
-                let Some(org) = organization::Entity::find_by_id(team_model.org_id).lock_shared().one(&txn).await.map_err(map_err)? else {
+                let Some(org) = organization::Entity::find_by_id(team_model.org_id).lock_shared().one(txn).await.map_err(map_err)? else {
                     return Err(missing_ancestor("organization", team_model.org_id, "team", team_model.id));
                 };
                 let team_status = parse_status(&team_model.status)?;
@@ -186,16 +250,16 @@ impl MembershipRepository for PgMembershipRepository {
                 (team_model.prn, NodeStatus::effective(team_status, &[org_status]), Some(team_model.org_id))
             }
             TenancyNodeRef::Project(node_id) => {
-                let Some(project_model) = project::Entity::find_by_id(node_id.uuid()).lock_shared().one(&txn).await.map_err(map_err)? else {
+                let Some(project_model) = project::Entity::find_by_id(node_id.uuid()).lock_shared().one(txn).await.map_err(map_err)? else {
                     return Err(RepositoryError::NotFound);
                 };
                 if project_model.prn != membership.node.canonical() {
                     return Err(RepositoryError::PrnMismatch);
                 }
-                let Some(team_model) = team::Entity::find_by_id(project_model.team_id).lock_shared().one(&txn).await.map_err(map_err)? else {
+                let Some(team_model) = team::Entity::find_by_id(project_model.team_id).lock_shared().one(txn).await.map_err(map_err)? else {
                     return Err(missing_ancestor("team", project_model.team_id, "project", project_model.id));
                 };
-                let Some(org) = organization::Entity::find_by_id(project_model.org_id).lock_shared().one(&txn).await.map_err(map_err)? else {
+                let Some(org) = organization::Entity::find_by_id(project_model.org_id).lock_shared().one(txn).await.map_err(map_err)? else {
                     return Err(missing_ancestor("organization", project_model.org_id, "project", project_model.id));
                 };
                 let project_status = parse_status(&project_model.status)?;
@@ -216,7 +280,7 @@ impl MembershipRepository for PgMembershipRepository {
                 .filter(membership::Column::PrincipalId.eq(principal_uuid))
                 .filter(membership::Column::OrgId.eq(org_uuid))
                 .lock_shared()
-                .one(&txn)
+                .one(txn)
                 .await
                 .map_err(map_err)?
                 .is_some();
@@ -241,9 +305,7 @@ impl MembershipRepository for PgMembershipRepository {
             created_at: Set(membership.created_at),
             created_by: Set(Some(stamp.by.canonical())),
         };
-        active.insert(&txn).await.map_err(map_err)?;
-
-        txn.commit().await.map_err(map_err)?;
+        active.insert(txn).await.map_err(map_err)?;
 
         Ok(MembershipRecord {
             id: membership.id,
@@ -262,22 +324,44 @@ impl MembershipRepository for PgMembershipRepository {
 
     async fn detach(&self, id: Uuid) -> Result<(), RepositoryError> {
         let txn = self.db.begin().await.map_err(map_err)?;
+        let tx: Box<dyn Transaction> = Box::new(SeaOrmTransaction { txn });
+        self.detach_in(&*tx, id).await?;
+        tx.commit().await?;
+        Ok(())
+    }
 
-        let Some(model) = membership::Entity::find_by_id(id).lock_exclusive().one(&txn).await.map_err(map_err)? else {
+    async fn detach_in(&self, tx: &dyn Transaction, id: Uuid) -> Result<Vec<MembershipRecord>, RepositoryError> {
+        let txn = recover_txn(tx)?;
+
+        let Some(model) = membership::Entity::find_by_id(id).lock_exclusive().one(txn).await.map_err(map_err)? else {
             return Err(RepositoryError::NotFound);
         };
 
-        // An org membership cascades onto the same principal's team/project memberships in
-        // that org (rule 5) before the org row itself is deleted below.
-        if let Some(org_id) = model.org_id {
-            let stmt = Statement::from_sql_and_values(DbBackend::Postgres, DETACH_CASCADE_SQL, [model.principal_id.into(), org_id.into()]);
+        let principal_id = model.principal_id;
+        let org_id = model.org_id;
+
+        // D6 step 1 — lock the whole set, cascade included, before reading it.
+        txn.execute(Statement::from_sql_and_values(DbBackend::Postgres, DETACH_LOCK_SQL, [principal_id.into(), org_id.into(), id.into()]))
+            .await
+            .map_err(map_err)?;
+
+        // D6 step 2 — project the locked set into records the service can build entries from.
+        let rows = MembershipRow::find_by_statement(Statement::from_sql_and_values(DbBackend::Postgres, DETACH_PROJECT_SQL, [principal_id.into(), org_id.into(), id.into()]))
+            .all(txn)
+            .await
+            .map_err(map_err)?;
+        let deleted: Vec<MembershipRecord> = rows.into_iter().map(MembershipRecord::from).collect();
+
+        // D6 step 3 — the delete, unchanged from before SMA-606. An org membership cascades
+        // onto the same principal's team/project memberships in that org (rule 5) before the
+        // org row itself is deleted below.
+        if let Some(org_id) = org_id {
+            let stmt = Statement::from_sql_and_values(DbBackend::Postgres, DETACH_CASCADE_SQL, [principal_id.into(), org_id.into()]);
             txn.execute(stmt).await.map_err(map_err)?;
         }
+        membership::Entity::delete_by_id(id).exec(txn).await.map_err(map_err)?;
 
-        membership::Entity::delete_by_id(id).exec(&txn).await.map_err(map_err)?;
-
-        txn.commit().await.map_err(map_err)?;
-        Ok(())
+        Ok(deleted)
     }
 
     async fn list_by_principal(&self, principal: Uuid, limit: u64, offset: u64) -> Result<Vec<MembershipRecord>, RepositoryError> {

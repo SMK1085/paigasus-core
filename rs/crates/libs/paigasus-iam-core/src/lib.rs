@@ -28,9 +28,9 @@ pub use authz::{
 pub use dead_letter::{BulkReplayRequest, DeadLetterEntry, DeadLetterFilter, DeadLetters};
 pub use domain_event::{DomainEvent, EventType};
 pub use ports::{
-    ApiKeyRepository, AuditLog, Authenticator, Clock, ConflictKind, EventPublisher, ExternalIdentityRepository, IdGenerator, KeyEntropy, MembershipRecord, MembershipRepository, NodeView,
-    OrganizationRepository, Outbox, PolicyGenBumper, PreconditionKind, PrincipalRepository, ProjectRepository, PublishError, RepositoryError, Savepoint, SecretHasher, ServiceAccountRepository,
-    TeamRepository, Transaction, UnitOfWork,
+    ApiKeyRepository, AuditLog, Authenticator, Clock, ConflictKind, EntityGenBumper, EventPublisher, ExternalIdentityRepository, IdGenerator, KeyEntropy, MembershipRecord, MembershipRepository,
+    Mutated, NodeView, OrganizationRepository, Outbox, PolicyGenBumper, PreconditionKind, PrincipalRepository, ProjectRepository, PublishError, RepositoryError, Savepoint, SecretHasher,
+    ServiceAccountRepository, TeamRepository, Transaction, UnitOfWork,
 };
 pub use principal::{Principal, PrincipalKind, PrincipalStatus};
 pub use service_account::{ServiceAccount, ServiceAccountRecord};
