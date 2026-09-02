@@ -85,9 +85,19 @@ non-goals:
    to one parameter per line. The parse walks from `fn` to its matching `)`, then `->` to the
    opening `{`, across newlines, never line-oriented and never a single-line regex.
 3. **The attribute window** is every attribute line between `#[pyfunction]` and the `fn` item,
-   and it is **default-deny with an allowlist**: `#[allow(…)]`, `#[expect(…)]`, `#[doc = …]` and
-   `///` doc comments are permitted and ignored; anything else — including a bare
-   `#[pyo3(name = "x")]` on its own line — is refused rather than skipped past.
+   and it is **default-deny with an allowlist**: `PERMITTED_INTERVENING_ATTRS` in `check.py`
+   names exactly five bracket attributes — `allow`, `expect`, `doc`, `inline`, `must_use` — every
+   one a codegen or lint hint that cannot rename or reshape what PyO3 exports. `inline` and
+   `must_use` are idiomatic on an ordinary function, so admitting them costs nothing and refusing
+   them would reject correct Rust for no safety gain. A bare `///` doc comment is not a member of
+   this list and needs none: `strip_noise`'s lexical pre-pass (item 1 above) blanks every `//`
+   line, `///` included, before the attribute-window walk ever runs, so a doc comment is simply
+   gone by the time the walk looks for `#[…]` — only the explicit `#[doc = "…"]` attribute form
+   reaches the allowlist check at all. Anything else — including a bare `#[pyo3(name = "x")]` on
+   its own line, which *can* rename the export — is refused rather than skipped past. The same
+   window walk, and the same constant, gates both the `#[pyfunction]` window
+   (`rust_declarations`) and the `#[pymodule]` window (`_pymodule_body`), so a change to the
+   allowlist widens or narrows both at once.
 4. **The `#[pymodule]` body is default-deny, not a refusal list.** Exactly two statement shapes
    are permitted: `m.add_function(wrap_pyfunction!(<bare-ident>, m)?)?;` and
    `m.add_wrapped(wrap_pyfunction!(<bare-ident>))?;`, plus the trailing `Ok(())`. Anything else is
