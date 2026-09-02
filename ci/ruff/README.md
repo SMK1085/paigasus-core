@@ -21,6 +21,21 @@ resolution all come from `py/pyproject.toml` + `py/uv.lock`. There is no
 exact file list. Nothing else. It does not lint `py/` (already gated by
 `.moon/tasks/python.yml`), and it does not run `ruff format` (see below).
 
+## `REPO_ROOT` is computed unconditionally, with no override
+
+`run.sh` derives `REPO_ROOT` from `BASH_SOURCE` alone, matching every other
+`ci/*/run.sh` in this repo. It does not honour a pre-set `REPO_ROOT` environment
+variable. An earlier draft of this script did honour one, meant only to let
+`self_test`/`negative_control` point the whole script at a throwaway tree — but the
+override applied unconditionally, so `REPO_ROOT=<some other worktree> bash
+ci/ruff/run.sh`, with no flag at all, silently linted that other tree and reported a
+clean "10 files clean" at rc 0 for the real one. A gate that lints the wrong tree and
+exits 0 is exactly the failure this issue exists to prevent, so the override was
+removed rather than narrowed. `self_test` and `negative_control` instead copy this
+script into their fixture directories and invoke that copy directly; the copy's own
+`BASH_SOURCE` then resolves `REPO_ROOT` to the fixture naturally, with no environment
+surface at all.
+
 ## Exit codes, and why 1 and 2 must not collapse into each other
 
 `0` pass, `1` the repo is wrong, `2` infrastructure failed — the repo's usual contract.
@@ -59,22 +74,26 @@ and passed as an explicit argument list. It is not asserted against ruff's own
 discovery after the fact — the list **is** what ruff is given, so the two cannot drift
 apart.
 
-**The `:(glob)` pathspec magic is required, and easy to get backwards.** Git's default
-pathspec matching does not set `FNM_PATHNAME`, so `**` behaves like two `*`s and the
-literal `/` in the pattern must still line up with a `/` in the path:
+**The pathspec fact, measured across all three forms.** Git's default pathspec matching
+does not set `FNM_PATHNAME`, so `*` spans `/` on its own:
 
-- `'ci/**/*.py'` **without** `:(glob)` matches `ci/pyo3-stub/check.py` but **not** a
-  top-level `ci/foo.py` — the pattern's own `/` after `ci` has nothing to match against
-  a path with no further `/` before the last component.
-- With the `:(glob)` prefix, git turns on `FNM_PATHNAME`-style matching and the same
-  pattern reaches nested files as expected, but a top-level file needs its own
-  pathspec: `'ci/*.py'`.
+- `'ci/*.py'` **alone, with no `:(glob)` magic at all**, already matches every depth —
+  `*` spans `/`, so it reaches a nested file like `ci/pyo3-stub/check.py` just as well
+  as a top-level one.
+- `':(glob)ci/**/*.py'` **alone** also matches every depth, for a different reason:
+  `**/` matches zero directories too, so the pattern still reaches a top-level file.
+- `'ci/**/*.py'` **with no magic at all** is the one broken form: it misses a top-level
+  `ci/foo.py`, because the literal `/` after `ci` has nothing left to match once there
+  is no further `/` before the last path component.
 
-Both pathspecs are passed to every `git ls-files` call in this script
-(`ruff_corpus`). Measured on a temporary `ci/_probe.py`: dropping either one drops a
-real, moon-schedulable file out of the corpus silently — the gate would still report
-"N files clean" for a smaller, wrong N. `run.sh --self-test` pins this with `ci/top.py`
-(a top-level file) and `ci/sub/nested.py` (a nested one), both required present.
+So the two pathspecs `run.sh` passes to `git ls-files` — `':(glob)ci/**/*.py'` and
+`'ci/*.py'` — are **mutually redundant**: either one alone already covers the whole
+corpus. Both are kept anyway because the explicit `':(glob)ci/**/*.py'` form documents
+the nested-file intent that `'ci/*.py'` alone does not make obvious to a reader. What
+the self-test's `ci/top.py` row actually guards against is not a dropped `:(glob)` —
+either pathspec alone already covers a top-level file — but a *reduction* of the pair
+down to the bare, unmagicked `'ci/**/*.py'`, which is the likeliest simplification of a
+two-pathspec line that looks redundant, and the one form that is actually broken.
 
 **The corpus floor.** `run_check` refuses to proceed if the derived file list has fewer
 than 10 entries — the tracked count at the time this gate was written. This is what
@@ -84,17 +103,30 @@ ls-files` returning zero rows is not a lint pass, it is the corpus collapsing, a
 that *declared* Moon task inputs are live — it has no view of what a gate's own script
 derives at runtime).
 
-## Why the negative control runs inside the worktree, not a bare `mktemp -d`
+## Why the negative control runs OUTSIDE the worktree, in a bare `mktemp -d`
 
-`negative_control` builds its fixture at `$REPO_ROOT/.ruff-negctl-XXXXXX` — nested
-inside the repository, not off in `/tmp` — and initializes it as its own git repo, then
-copies the real `ci/` tree into it and plants a `RUF005` violation
-(`ci/probe/violation.py`). A bare `mktemp -d` outside any git repository would make
-`git ls-files` return nothing at all, and ruff's own exclusion handling (`.gitignore`,
-`respect-gitignore`) behaves differently outside a repo too — a fixture built that way
-would exercise a different code path than the real run and prove nothing about it.
+`negative_control` builds its fixture with a plain `mktemp -d` — not nested under
+`$REPO_ROOT`, and not off in a fixed named path either — then initializes it as its own
+git repo, copies the real `ci/` tree into it (which, incidentally, is what puts a copy
+of `ci/ruff/run.sh` itself in the fixture — see the `REPO_ROOT` section above), and
+plants a `RUF005` violation (`ci/probe/violation.py`). Location does not matter for
+correctness here: the fixture is `git init`-ed by the script itself, and `py`/`rs`
+(below) are pulled in by **absolute** symlink, so `git ls-files` and ruff see the same
+thing regardless of where the directory sits.
 
-Two pieces of the real tree are pulled in without being copied:
+An earlier version of this script nested the fixture under `$REPO_ROOT` on the theory
+that being outside *any* git repository, not merely outside this one, was the risk to
+avoid. That theory doesn't hold — the fixture is always `git init`-ed regardless of
+location — and nesting it in-tree instead created a real cost: `.moon/workspace.yml`'s
+`hasher.ignorePatterns` is a fixed, short list, not `.gitignore`-aware, so a concurrent
+`moon ci` task with `inputs: ['**/*']` (`repo:actionlint`, `repo:input-liveness`) could
+hash-walk a live `.ruff-negctl-*` directory mid-run — the same class of interaction
+CLAUDE.md records behind a twice-observed, never-fully-explained `affected-smoke`
+abort under a concurrent `moon ci`. A `SIGKILL` before the fixture's `EXIT` trap fires
+would also leave cruft in the real tree instead of in `$TMPDIR`. The fixture is
+out-of-tree now for both reasons.
+
+Several pieces of the real tree are pulled in without being copied wholesale:
 
 - **`py/` and `rs/` are symlinked in**, not copied. `resolve_ruff` and the `--config`
   path both resolve `py` relative to the current directory, and the control needs the
@@ -104,6 +136,11 @@ Two pieces of the real tree are pulled in without being copied:
   textually against the symlink's own location, not the real directory it points to, so
   without a sibling `rs/` next to the symlinked `py/`, `uv` fails with "Distribution not
   found" (measured while building this gate).
+- **`.prototools` is copied in.** `uv` runs behind a proto shim, and proto resolves
+  which pinned version to run by walking *up* from the current directory looking for
+  this file. Once the fixture moved outside `$REPO_ROOT`, there was nothing above it
+  for proto to find, and the control failed at rc 2 with `proto::detect::failed`
+  (measured) until this copy was added.
 - **The root `.gitignore` is copied in, and `git add` is not forced.** The real
   repository has untracked `.venv` trees under `ci/release-plan/` and
   `ci/workflow-credentials/`. Copying the root `.gitignore` into the fixture and adding
@@ -116,12 +153,12 @@ Two pieces of the real tree are pulled in without being copied:
 The control's own cleanup uses an `EXIT` trap, not a `RETURN` trap: its failure branch
 calls `exit 1` directly, which ends the process without ever returning from the
 `negative_control` function, and a `RETURN` trap does not fire on that path (measured —
-an earlier version of this script left a stray `.ruff-negctl-*` directory on disk
-whenever the control itself failed). The trap references a variable set at file scope
-(`tmp=""` near the top of the script), not a function-local one, because by the time an
-`EXIT` trap actually runs — after the whole script's `case` dispatch has completed —
-a `local` binding from inside the function is already out of scope, and referencing it
-under `set -euo pipefail` would itself be an unbound-variable error.
+an earlier version of this script left a stray fixture directory on disk whenever the
+control itself failed). The trap references a variable set at file scope (`tmp=""` near
+the top of the script), not a function-local one, because by the time an `EXIT` trap
+actually runs — after the whole script's `case` dispatch has completed — a `local`
+binding from inside the function is already out of scope, and referencing it under
+`set -euo pipefail` would itself be an unbound-variable error.
 
 ## `ruff format` is deliberately not gated (spec AC B7)
 

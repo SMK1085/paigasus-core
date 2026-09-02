@@ -16,11 +16,13 @@
 # and a contributor "fixes" it by re-locking.
 set -euo pipefail
 
-# REPO_ROOT honours a pre-set override (used by self_test/negative_control below to point the
-# whole script at a throwaway tree) and otherwise computes itself from BASH_SOURCE as usual. A
-# plain recomputation here would silently ignore the override those two callers rely on and let
-# their subshells exercise the REAL repo while appearing to test a fixture.
-REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+# REPO_ROOT is computed unconditionally from BASH_SOURCE, with no env override — matching every
+# other ci/*/run.sh in this repo. An override here would let `REPO_ROOT=<anywhere> bash
+# ci/ruff/run.sh` — no flag, the ordinary check path — silently lint a stale tree and report a
+# clean pass at rc 0, which is exactly the failure this gate exists to prevent. self_test and
+# negative_control below instead point a COPY of this file at their fixture directories, so
+# BASH_SOURCE resolves there naturally.
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 # CWD is pinned: `--config` resolves relative to CWD and ruff resolves src/exclude relative to the
 # config's directory, so an unpinned CWD gives different answers from different directories.
 cd "$REPO_ROOT"
@@ -39,10 +41,14 @@ die_assert() { printf 'ruff-ci: %s\n' "$*" >&2; exit 1; }
 # Corpus derivation. Structural equality with what ruff inspects, because the list IS what ruff
 # is given — rev 1 of the spec asserted the two matched after the fact, which could drift.
 #
-# ':(glob)' IS REQUIRED. Without it git matches without FNM_PATHNAME, so `**` is two `*`s and the
-# literal `/` still has to be there: 'ci/**/*.py' matches ci/pyo3-stub/check.py but NOT a
-# top-level ci/foo.py — which moon's own matcher, and this gate's declared input, WOULD schedule.
-# Measured on a temporary ci/_probe.py. The second pathspec is not redundant with the first.
+# Measured, all combinations: 'ci/*.py' ALONE (no magic) already matches every depth — git's `*`
+# spans `/` without FNM_PATHNAME turned on — and ':(glob)ci/**/*.py' ALONE also matches every
+# depth, since `**/` matches zero directories too. The ONLY broken form is 'ci/**/*.py' with NO
+# magic: the literal `/` after `ci` has nothing to match once there is no further `/` before the
+# last path component, so it misses a top-level ci/foo.py — which moon's own matcher, and this
+# gate's declared input, WOULD schedule. The two pathspecs below are therefore mutually
+# redundant; both are kept anyway because the explicit ':(glob)ci/**/*.py' form documents the
+# nested-file intent that 'ci/*.py' alone does not make obvious.
 ruff_corpus() {
   local root="${1:-$REPO_ROOT}"
   git -C "$root" ls-files -- ':(glob)ci/**/*.py' 'ci/*.py' | sort
@@ -95,19 +101,24 @@ self_test() {
       failures=$((failures + 1))
     fi
   }
-  # THE regression this table exists for: the pathspec trap above. A top-level ci/foo.py is
-  # exactly the file 'ci/**/*.py' without :(glob) silently drops.
+  # This row does NOT catch a dropped ':(glob)' — either pathspec alone already covers a
+  # top-level file (measured, see the comment above ruff_corpus). What it catches is a
+  # reduction to the bare 'ci/**/*.py' with no magic at all — the likeliest simplification of
+  # the two-pathspec line above — which is the one form that drops a top-level ci/foo.py.
   _row 'top-level .py is found'   0 'ci/top.py'
   _row 'nested .py is found'      0 'ci/sub/nested.py'
   _row 'non-.py is not found'     1 'ci/sub/notes.md'
   _row 'a .venv tree is excluded' 1 'ci/sub/.venv/vendored.py'
 
-  # The floor must trip on an empty corpus, or a moved ci/ passes vacuously. REPO_ROOT is
-  # overridden and the script honours it (see the REPO_ROOT assignment above), so this actually
-  # runs run_check against the empty tree rather than the real repo.
-  local empty rc=0 script="$REPO_ROOT/ci/ruff/run.sh"
+  # The floor must trip on an empty corpus, or a moved ci/ passes vacuously. There is no
+  # REPO_ROOT override to lean on (see the REPO_ROOT assignment above), so a COPY of this
+  # script is placed inside the empty fixture at the same ci/ruff/run.sh relative path — its own
+  # BASH_SOURCE-based computation then resolves REPO_ROOT to $empty naturally.
+  local empty rc=0
   empty="$(mktemp -d)"; git -C "$empty" init -q
-  ( cd "$empty" && REPO_ROOT="$empty" bash "$script" ) >/dev/null 2>&1 || rc=$?
+  mkdir -p "$empty/ci/ruff"
+  cp "$REPO_ROOT/ci/ruff/run.sh" "$empty/ci/ruff/run.sh"
+  ( cd "$empty" && bash "$empty/ci/ruff/run.sh" ) >/dev/null 2>&1 || rc=$?
   if [ "$rc" != 1 ]; then
     printf '  FAIL empty corpus: expected rc 1 from the floor, got %s\n' "$rc" >&2
     failures=$((failures + 1))
@@ -122,34 +133,47 @@ self_test() {
 }
 
 negative_control() {
-  # Runs against a COPY OF THE REAL TREE INSIDE the worktree, not a bare `mktemp -d`: outside a
-  # git repo `git ls-files` returns nothing and ruff's exclusion handling differs, so a tempdir
-  # control would exercise a different code path than the real run and prove nothing about it.
+  # Uses a bare `mktemp -d`, OUTSIDE the working tree — not nested under $REPO_ROOT. This
+  # fixture is `git init`-ed itself, and `py`/`rs` below are pulled in by ABSOLUTE symlink, so
+  # its location changes nothing about what `git ls-files` or ruff sees. Nesting it inside
+  # REPO_ROOT instead would only expose it to every concurrent 'inputs: [**/*]' repo:* task
+  # (repo:actionlint, repo:input-liveness) that hash-walks the whole tree during `moon ci` —
+  # `.moon/workspace.yml`'s hasher.ignorePatterns is a fixed short list, NOT .gitignore-aware, so
+  # it would not skip a transient in-tree directory — and a SIGKILL before the EXIT trap below
+  # fires would leave cruft in the real repo instead of in $TMPDIR.
   #
   # `py/` and `rs/` are SYMLINKED in rather than copied: resolve_ruff and CONFIG both resolve
-  # `py` relative to CWD once REPO_ROOT is overridden below, and the control needs the real
-  # venv/lock rather than a duplicate one built on every invocation. `rs/` has to come along too
-  # — py/packages/paigasus-kernel's `path = "../../../rs/..."` source dependency is resolved
-  # textually against the symlink's location, not its target, so without a sibling `rs/` uv
-  # fails with "Distribution not found" (measured). The root .gitignore is copied in (not the
-  # untracked .venv trees under ci/release-plan and ci/workflow-credentials) so a plain `git add`
-  # excludes them exactly as the real repo does — force-adding them would pull vendored
-  # third-party code into the corpus this control lints, which is not what it exists to prove.
-  local rc=0 script="$REPO_ROOT/ci/ruff/run.sh"
-  tmp="$(mktemp -d "$REPO_ROOT/.ruff-negctl-XXXXXX")"
+  # `py` relative to CWD once the copied script (below) recomputes REPO_ROOT as $tmp, and the
+  # control needs the real venv/lock rather than a duplicate one built on every invocation. `rs/`
+  # has to come along too — py/packages/paigasus-kernel's `path = "../../../rs/..."` source
+  # dependency is resolved textually against the symlink's location, not its target, so without
+  # a sibling `rs/` uv fails with "Distribution not found" (measured). The root .gitignore is
+  # copied in (not the untracked .venv trees under ci/release-plan and ci/workflow-credentials)
+  # so a plain `git add` excludes them exactly as the real repo does — force-adding them would
+  # pull vendored third-party code into the corpus this control lints, which is not what it
+  # exists to prove.
+  local rc=0
+  tmp="$(mktemp -d)"
   # EXIT, not RETURN: the failure branch below calls `exit 1` directly, which terminates the
   # process without ever returning from this function — a RETURN trap would silently skip
   # cleanup on exactly the path that most needs it (measured: it left a stray dir on disk).
   trap 'rm -rf "$tmp"' EXIT
   git init -q "$tmp"
   cp "$REPO_ROOT/.gitignore" "$tmp/.gitignore"
+  # .prototools is copied in too: proto (behind the uv shim) resolves its pinned tool version by
+  # walking UP from CWD looking for this file, and once the fixture lives outside REPO_ROOT
+  # there is nothing above it to find — measured as `proto::detect::failed` without this copy.
+  cp "$REPO_ROOT/.prototools" "$tmp/.prototools"
   mkdir -p "$tmp/ci/probe"
   cp -R "$REPO_ROOT/ci/." "$tmp/ci/" 2>/dev/null || true
   ln -s "$REPO_ROOT/py" "$tmp/py"
   ln -s "$REPO_ROOT/rs" "$tmp/rs"
   printf 'x = [1]\ny = x + [2]\n' >"$tmp/ci/probe/violation.py"
   git -C "$tmp" add -A >/dev/null 2>&1
-  ( cd "$tmp" && REPO_ROOT="$tmp" bash "$script" ) >/dev/null 2>&1 || rc=$?
+  # No REPO_ROOT override: the cp -R above already placed a copy of this script at
+  # $tmp/ci/ruff/run.sh, and invoking THAT copy makes its own BASH_SOURCE resolve REPO_ROOT to
+  # $tmp naturally.
+  ( cd "$tmp" && bash "$tmp/ci/ruff/run.sh" ) >/dev/null 2>&1 || rc=$?
   if [ "$rc" != 1 ]; then
     printf '  FAIL a planted RUF005 did not red the gate: expected rc 1, got %s\n' "$rc" >&2
     exit 1
