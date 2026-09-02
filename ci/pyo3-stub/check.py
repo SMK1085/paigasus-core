@@ -12,6 +12,7 @@
 #
 # usage: check.py [--self-test | --negative-control | --check]
 #   rc 0 clean · rc 1 the repo is wrong (every §4 refusal included) · rc 2 the checker is broken
+import ast
 import re
 import sys
 from pathlib import Path
@@ -352,6 +353,149 @@ def declaration_line(raw, name):
 
 
 # --------------------------------------------------------------------------------------------
+# Set B — `wrap_pyfunction!` registrations (§4.1)
+# --------------------------------------------------------------------------------------------
+
+# §4.1 — a PERMISSION list, not a refusal list. The ways to register a function under a name
+# other than its own are open-ended (PyModule::add takes an arbitrary string, a submodule
+# relocates the export), so anything not matched here is refused by construction.
+_PERMITTED_MODULE_STATEMENTS = (
+    re.compile(r"^m\.add_function\(\s*wrap_pyfunction!\(\s*(\w+)\s*,\s*m\s*\)\?\s*\)\?$"),
+    re.compile(r"^m\.add_wrapped\(\s*wrap_pyfunction!\(\s*(\w+)\s*\)\s*\)\?$"),
+)
+
+
+def _pymodule_body(sources):
+    """Return (ident, body_text). Exactly one #[pymodule] fn must exist across all sources.
+
+    RULING (task-2 controller amendment, SMA-600): a first draft located the module `fn` with an
+    UNBOUNDED `re.search` starting right after the `#[pymodule]` attribute. `re.search` scans
+    forward without limit, so if anything unexpected sat between the attribute and its `fn` —
+    another attribute, a stray earlier `fn` — that scan would silently bind a LATER, UNRELATED
+    function's body as "the" module body, and set B would then be extracted from the wrong place
+    while reporting success. That is the same silent-wrong-extraction class review caught as a
+    Critical in Task 1 (the mod-visibility regex). The fix mirrors `rust_declarations`' own
+    attribute-window walk (§4.3 item 1) exactly: only whitespace and
+    `PERMITTED_INTERVENING_ATTRS` may sit between `#[pymodule]` and `fn`; anything else refuses by
+    construction instead of being silently skipped past.
+    """
+    found = []
+    for path, raw in sorted(sources.items()):
+        text = strip_noise(raw)
+        for m in re.finditer(r"#\[\s*pymodule[^\]]*\]", text):
+            if m.group(0).strip() != "#[pymodule]":
+                raise Refused(f"{path}: {m.group(0)!r} carries arguments — it may rename the module (§4.3)")
+
+            # Bounded attribute-window walk, default-deny — see the ruling above.
+            cursor = m.end()
+            while True:
+                am = re.match(r"\s*#\[\s*(\w+)", text[cursor:])
+                if not am:
+                    break
+                if am.group(1) not in PERMITTED_INTERVENING_ATTRS:
+                    raise Refused(f"{path}: attribute #[{am.group(1)}...] sits between #[pymodule] and the fn (§4.3)")
+                depth, i = 0, cursor + am.start() + len(am.group(0)) - len(am.group(1)) - 2
+                while i < len(text):
+                    if text[i] == "[":
+                        depth += 1
+                    elif text[i] == "]":
+                        depth -= 1
+                        if depth == 0:
+                            break
+                    i += 1
+                cursor = i + 1
+
+            fn = re.match(r"\s*fn\s+(\w+)\s*\([^)]*\)[^{]*\{", text[cursor:])
+            if not fn:
+                raise Refused(f"{path}: no parsable `fn` follows #[pymodule] (§4.3)")
+            open_at = cursor + fn.end() - 1
+            depth, i = 0, open_at
+            while i < len(text):
+                if text[i] == "{":
+                    depth += 1
+                elif text[i] == "}":
+                    depth -= 1
+                    if depth == 0:
+                        break
+                i += 1
+            else:
+                raise Refused(f"{path}: unbalanced #[pymodule] body (§4.3)")
+            found.append((fn.group(1), text[open_at + 1:i]))
+    if len(found) != 1:
+        raise Refused(f"expected exactly one #[pymodule], found {len(found)} — set B would come from the wrong place (§4.3)")
+    return found[0]
+
+
+def pymodule_ident(sources):
+    return _pymodule_body(sources)[0]
+
+
+def rust_registrations(sources):
+    """Set B, default-deny over the single #[pymodule] body (§4.1)."""
+    _ident, body = _pymodule_body(sources)
+    names = set()
+    for stmt in body.split(";"):
+        s = " ".join(stmt.split())
+        if not s or s == "Ok(())":
+            continue
+        for pat in _PERMITTED_MODULE_STATEMENTS:
+            m = pat.match(s)
+            if m:
+                if m.group(1) in names:
+                    raise Refused(f"`{m.group(1)}` is registered twice (§4.1)")
+                names.add(m.group(1))
+                break
+        else:
+            raise Refused(
+                f"statement {s!r} in the #[pymodule] body is not a permitted registration form. "
+                f"Only `m.add_function(wrap_pyfunction!(NAME, m)?)?` and "
+                f"`m.add_wrapped(wrap_pyfunction!(NAME))?` are allowed — anything else can export "
+                f"under a different name or from a submodule (§4.1)."
+            )
+    return names
+
+
+# --------------------------------------------------------------------------------------------
+# Set C — the stub's `def`s (§4.3)
+# --------------------------------------------------------------------------------------------
+
+
+def stub_definitions(path, text):
+    """Set C, via the standard library's own parser. Raises Refused on any §4.3 stub shape."""
+    try:
+        tree = ast.parse(text, filename=path)
+    except SyntaxError as exc:
+        raise Refused(f"{path}: the stub does not parse: {exc}") from exc
+
+    out = {}
+    for node in tree.body:
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            continue
+        if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
+            continue  # module docstring
+        if isinstance(node, ast.AsyncFunctionDef):
+            raise Refused(f"{path}:{node.lineno}: `async def {node.name}` — PyO3 exports no coroutines here (§4.3)")
+        if not isinstance(node, ast.FunctionDef):
+            raise Refused(f"{path}:{node.lineno}: top-level {type(node).__name__} is not a `def`, an import or the docstring (§4.3)")
+        a = node.args
+        if node.decorator_list:
+            raise Refused(f"{path}:{node.lineno}: `{node.name}` is decorated — @overload and friends are not modelled (§4.3)")
+        if a.vararg or a.kwarg or a.kwonlyargs or a.posonlyargs or a.defaults or a.kw_defaults:
+            raise Refused(f"{path}:{node.lineno}: `{node.name}` uses *args/**kwargs/defaults/pos- or kw-only params (§4.3)")
+        if node.returns is None:
+            raise Refused(f"{path}:{node.lineno}: `{node.name}` has no return annotation (§4.3)")
+        params = []
+        for arg in a.args:
+            if arg.annotation is None:
+                raise Refused(f"{path}:{node.lineno}: `{node.name}` parameter {arg.arg!r} has no annotation (§4.3)")
+            params.append((arg.arg, ast.unparse(arg.annotation)))
+        if node.name in out:
+            raise Refused(f"{path}:{node.lineno}: `{node.name}` is defined twice (§4.3)")
+        out[node.name] = (tuple(params), ast.unparse(node.returns))
+    return out
+
+
+# --------------------------------------------------------------------------------------------
 # Self-test and CLI
 # --------------------------------------------------------------------------------------------
 
@@ -502,6 +646,95 @@ def self_test():
         if got != {"f": ((("s", "str"),), "str")}:
             print(f"  FAIL [where-boundary-ok] wrong signature: {got}", file=sys.stderr)
             rc = 1
+
+    # --------------------------------------------------------------------------------------
+    # Set B — §4.1 the #[pymodule] body is DEFAULT-DENY. Each row below is a channel that would
+    # otherwise make all three sets agree over a module exporting something ELSE.
+    # --------------------------------------------------------------------------------------
+    _MOD = "#[pymodule]\nfn m(m: &Bound<'_, PyModule>) -> PyResult<()> {\n%s\n    Ok(())\n}\n"
+    for label, body in [
+        ("alias",       '    m.add("alias", wrap_pyfunction!(f, m)?)?;'),
+        ("submodule",   "    let c = PyModule::new(py, \"c\")?;\n    m.add_submodule(&c)?;"),
+        ("add_class",   "    m.add_class::<Thing>()?;"),
+        ("qualified",   "    m.add_function(wrap_pyfunction!(a::b, m)?)?;"),
+    ]:
+        try:
+            rust_registrations({"<x>": _MOD % body})
+        except Refused:
+            pass
+        else:
+            print(f"  FAIL [module body] {label} was accepted; it must be refused (§4.1)", file=sys.stderr)
+            rc = 1
+
+    # ...and the two PERMITTED forms must still parse.
+    ok = rust_registrations({"<x>": _MOD % "    m.add_function(wrap_pyfunction!(f, m)?)?;\n    m.add_wrapped(wrap_pyfunction!(g))?;"})
+    if ok != {"f", "g"}:
+        print(f"  FAIL [module body] permitted forms did not parse: {ok}", file=sys.stderr)
+        rc = 1
+
+    # §4.3 — zero or two #[pymodule] fns is refused; set B would come from the wrong place.
+    for label, src in [("zero", "fn m() {}"), ("two", _MOD % "    Ok(())" + _MOD % "    Ok(())")]:
+        try:
+            rust_registrations({"<x>": src})
+        except Refused:
+            pass
+        else:
+            print(f"  FAIL [pymodule] {label} #[pymodule] was accepted (§4.3)", file=sys.stderr)
+            rc = 1
+
+    # RULING (task-2 controller amendment, SMA-600) — the #[pymodule]-to-`fn` window walk must be
+    # BOUNDED like rust_declarations' own (§4.3 item 1), not an unbounded re.search: an unexpected
+    # intervening item (here, a renaming #[pyo3(...)]) must refuse rather than silently binding a
+    # LATER, unrelated `fn` as the module body and reporting success over the wrong extraction.
+    try:
+        bad = rust_registrations({"<x>": '#[pymodule]\n#[pyo3(name = "x")]\nfn m(m: &Bound<\'_, PyModule>) -> PyResult<()> {\n    m.add_function(wrap_pyfunction!(f, m)?)?;\n    Ok(())\n}\n'})
+    except Refused:
+        pass
+    else:
+        print(f"  FAIL [pymodule-window] unexpected intervening item was accepted, got {bad!r} (ruling)", file=sys.stderr)
+        rc = 1
+
+    # ...and a PERMITTED intervening attribute (#[allow(dead_code)], same list rust_declarations
+    # uses) must still parse, so the window walk is not simply refusing everything.
+    try:
+        got = rust_registrations({"<x>": "#[pymodule]\n#[allow(dead_code)]\nfn m(m: &Bound<'_, PyModule>) -> PyResult<()> {\n    m.add_function(wrap_pyfunction!(f, m)?)?;\n    Ok(())\n}\n"})
+    except Refused as exc:
+        print(f"  FAIL [pymodule-window] #[allow(...)] should not refuse: {exc.message}", file=sys.stderr)
+        rc = 1
+    else:
+        if got != {"f"}:
+            print(f"  FAIL [pymodule-window] permitted-window signature wrong: {got}", file=sys.stderr)
+            rc = 1
+
+    # --------------------------------------------------------------------------------------
+    # Set C — §4.3 stub side. Every one of these is refused, because the Rust side has nothing
+    # to compare against and a silent skip would leave the symbol unchecked.
+    # --------------------------------------------------------------------------------------
+    for label, stub in [
+        ("varargs",    "def f(*args) -> str: ...\n"),
+        ("kwargs",     "def f(**kw) -> str: ...\n"),
+        ("default",    "def f(a: int = 1) -> str: ...\n"),
+        ("kwonly",     "def f(*, a: int) -> str: ...\n"),
+        ("posonly",    "def f(a: int, /) -> str: ...\n"),
+        ("decorated",  "@overload\ndef f(a: int) -> str: ...\n"),
+        ("async",      "async def f(a: int) -> str: ...\n"),
+        ("no_ann",     "def f(a) -> str: ...\n"),
+        ("no_return",  "def f(a: int): ...\n"),
+        ("class",      "class C: ...\n"),
+    ]:
+        try:
+            stub_definitions("<stub>", stub)
+        except Refused:
+            pass
+        else:
+            print(f"  FAIL [stub] {label} was accepted; it must be refused (§4.3)", file=sys.stderr)
+            rc = 1
+
+    # ...and the permitted top-level nodes must parse.
+    got = stub_definitions("<stub>", '"""doc."""\nimport typing\nfrom typing import Any\ndef f(a: int) -> str: ...\n')
+    if got != {"f": ((("a", "int"),), "str")}:
+        print(f"  FAIL [stub] permitted nodes did not parse: {got}", file=sys.stderr)
+        rc = 1
 
     print("self-test: OK" if rc == 0 else "self-test: FAILED", file=sys.stderr)
     return rc
