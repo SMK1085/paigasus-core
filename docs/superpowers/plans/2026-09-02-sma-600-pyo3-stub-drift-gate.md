@@ -100,7 +100,10 @@ def self_test():
         "#[pyfunction]\n"
         "fn a(s: &str) -> String {}\n"
     )
-    if declaration_line(numbered, "a") != 5:
+    # Line 4, not 5: the fixture's literal newlines put #[pyfunction] on 4 and `fn a` on 5,
+    # and both declaration_line and rust_declarations report the ATTRIBUTE's line. A collapsed
+    # block comment would report < 4, which is the property this row exists to test.
+    if declaration_line(numbered, "a") != 4:
         print(f"  FAIL [strip_noise] line numbers shifted after stripping", file=sys.stderr)
         rc = 1
 
