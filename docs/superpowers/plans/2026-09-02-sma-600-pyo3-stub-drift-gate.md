@@ -10,6 +10,16 @@
 
 **Spec:** `docs/superpowers/specs/2026-09-02-sma-600-pyo3-stub-drift-gate-design.md` (rev 2). The plan argues from the spec; read both. Section references below (§3, §4.1, …) are to that file.
 
+> **Superseded during execution — `ALLOW_UNPARSED_SHAPE` does not exist.** Task 3 below directs
+> you to build a waiver table, a `stale_waivers()` helper, and self-test rows for them. The final
+> whole-branch review found that table **inert**: nothing in `analyze`, `rust_declarations`,
+> `rust_registrations` or `stub_definitions` ever consulted it, so a live waiver suppressed
+> nothing while the docs presented it as a working escape hatch. It was DELETED rather than
+> implemented — an inert table is worse than none, because it documents an escape hatch that is
+> not there. **There is deliberately no waiver: a §4 shape is fixed at the source.** The spec
+> (§4.5) carries the amendment; this plan is left as the dated record of what was planned, so
+> read every `ALLOW_UNPARSED_SHAPE` / `stale_waivers` instruction below as withdrawn.
+
 ## Global Constraints
 
 - **SPDX header** on every new source file, first line: `# SPDX-License-Identifier: Apache-2.0`.

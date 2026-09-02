@@ -817,8 +817,15 @@ def discover():
         crate = Path(p).relative_to(REPO).parts[3]
         stubs.setdefault(crate, []).append(p)
 
+    # The UNION, not by_crate alone (SMA-600, CodeRabbit round 1). A `.pyi` in a bindings
+    # directory with NO matching src/**/*.rs would otherwise never reach analyze(), so the
+    # leftover-stub rule below could never fire on it and the gate would report clean over a
+    # stale stub — a silent drop, which is the one outcome this gate exists to prevent. A
+    # stub-only directory gets an empty Rust map, so rust_declarations yields {} and analyze()
+    # takes the not-PyO3-bearing branch and reports the leftover.
     crates = []
-    for name, rust in sorted(by_crate.items()):
+    for name in sorted(set(by_crate) | set(stubs)):
+        rust = by_crate.get(name, {})
         found = stubs.get(name, [])
         if len(found) > 1:
             raise InfraError(f"{name}: {len(found)} .pyi files match {STUB_GLOB}; exactly one is expected (§5.1)")
@@ -921,7 +928,7 @@ def self_test():
     # ATTRIBUTE's line, not the `fn`'s, so 4 is the value consistent with the rest of this file.
     # Verified independently with strip_noise + _find_attribute_sites before changing this constant.
     if declaration_line(numbered, "a") != 4:
-        print(f"  FAIL [strip_noise] line numbers shifted after stripping", file=sys.stderr)
+        print("  FAIL [strip_noise] line numbers shifted after stripping", file=sys.stderr)
         rc = 1
 
     # A `#[pyfunction]` inside a doc comment or a raw string must mint NO phantom declaration.
@@ -1118,7 +1125,7 @@ def self_test():
     except Refused:
         pass
     else:
-        print(f"  FAIL [module body] duplicate registration of the same name was accepted (§4.1)", file=sys.stderr)
+        print("  FAIL [module body] duplicate registration of the same name was accepted (§4.1)", file=sys.stderr)
         rc = 1
 
     # §4.3 — zero or two #[pymodule] fns is refused; set B would come from the wrong place.
@@ -1453,7 +1460,7 @@ def negative_control():
     _expect_red("AC2 missing registration", base._replace(rust=rust))
 
     # AC 3 — a def deleted from the stub while the Rust keeps the function.
-    kept = "\n".join(l for l in base.stub_text.splitlines() if not l.startswith(f"def {SENTINEL}(")) + "\n"
+    kept = "\n".join(ln for ln in base.stub_text.splitlines() if not ln.startswith(f"def {SENTINEL}(")) + "\n"
     _expect_red("AC3 deleted stub def", base._replace(stub_text=kept))
 
     # AC 4b (final review, SMA-600) — a RETYPED stub annotation. The three rows above are all
