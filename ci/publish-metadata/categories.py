@@ -28,6 +28,10 @@ import urllib.request
 # bare, and the Moon task is toolchain: 'system'), not a uv-pinned interpreter. `datetime.UTC`
 # below is 3.11+, and py/pyproject.toml's target-version is py312, so every future UP rule can
 # ratchet this floor further. State it rather than failing with an AttributeError mid-run.
+#
+# Tuple compare, not `sys.version_info < (3, 12)`: ruff's target-version above is py312, so
+# the plain form reads to ruff as an always-false UP036 dead branch — even though it is live
+# on the unpinned system python3 this file runs under. Do not "simplify" this back.
 if (sys.version_info.major, sys.version_info.minor) < (3, 12):
     print(
         f"publish-metadata: needs Python >= 3.12, got {sys.version_info.major}."

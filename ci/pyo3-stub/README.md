@@ -126,8 +126,8 @@ noted; a handful of infrastructure-only failures are `InfraError` at **rc 2**.
   two reasons arm 2 exists.
 * `#[pyfunction(…)]` / `#[pyo3(…)]` carrying arguments, on any line in the attribute window — may
   rename or reshape the exported symbol.
-* `#[pyclass]`, `#[pymethods]` — a whole class surface this scanner does not model. RefusedError
-  **file-globally**, like `macro_rules!`, and for the same fail-closed reason: a class-only crate
+* `#[pyclass]`, `#[pymethods]` — a whole class surface this scanner does not model. This is
+  refused **file-globally**, like `macro_rules!`, and for the same fail-closed reason: a class-only crate
   declares no `#[pyfunction]`, so without this it was classified not-PyO3-bearing, `analyze`
   short-circuited before the module-body default-deny could see `m.add_class::<Foo>()?`, and a
   crate with a real export and **no stub at all** reported clean (measured).
