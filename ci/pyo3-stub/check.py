@@ -233,8 +233,14 @@ def rust_declarations(sources):
             raise Refused(f"{path}: macro_rules! is in scope — a source scanner cannot see what it emits (§4.2)")
 
         # §4.3 — an inline `mod { ... }` is unmodelled, and a #[cfg] on one makes the exported set
-        # configuration-dependent, so one static answer is wrong.
-        if re.search(r"^\s*(pub\s+(\([^)]*\)\s+)?)?mod\s+\w+\s*\{", text, re.M):
+        # configuration-dependent, so one static answer is wrong. The visibility group mirrors
+        # the `fn` visibility regex below (`pub(\s*\([^)]*\))?\s+`) — review finding 1: the
+        # earlier `pub\s+(\([^)]*\)\s+)?` ordering required `pub` then whitespace BEFORE the
+        # optional paren, so it matched bare `mod` and space-separated `pub mod` only. Idiomatic
+        # `pub(crate) mod`, `pub(super) mod`, and `pub(in path) mod` fell through unmatched and
+        # their nested #[pyfunction]s were silently extracted as if top-level — the exact
+        # unmodelled-shape-treated-as-modelled failure this gate exists to prevent.
+        if re.search(r"^\s*(pub(\s*\([^)]*\))?\s+)?mod\s+\w+\s*\{", text, re.M):
             raise Refused(f"{path}: an inline `mod {{ … }}` block is in scope — nesting is not modelled (§4.3)")
 
         for start, attr in _find_attribute_sites(text):
@@ -295,7 +301,12 @@ def rust_declarations(sources):
                 raise Refused(f"{where}: unbalanced parameter list (§4.3)")
             params_src = text[open_at + 1:i]
             tail = text[i + 1:]
-            ret = re.match(r"\s*->\s*(.+?)\s*(?:where\b|\{)", tail, re.S)
+            # `\bwhere\b`, not `where\b` (review finding 2): a plain `where\b` has no boundary
+            # BEFORE the literal, so it matches the substring "where" inside an identifier —
+            # `-> Anywhere { }` used to stop at "Any" (`.+?` lazy-matches up to the first
+            # "where"-then-boundary it finds, which sits mid-word at "Any|where"). `\bwhere\b`
+            # requires a boundary on both sides, so it only fires on a standalone `where` token.
+            ret = re.match(r"\s*->\s*(.+?)\s*(?:\bwhere\b|\{)", tail, re.S)
             ret_ty = ret.group(1).strip() if ret else "()"
 
             params = []
@@ -345,6 +356,22 @@ def declaration_line(raw, name):
 # --------------------------------------------------------------------------------------------
 
 
+def _expect_refused(label, sources):
+    """Self-test helper: `sources` must make rust_declarations() raise Refused.
+
+    Returns a FAIL message string if it did not (either it returned cleanly, or it raised
+    something other than Refused), or None if the expectation held. A row that can only ever
+    pass is worse than no row (review finding 3) — every case fed through this helper was
+    confirmed to actually go red when its corresponding check was disabled in a scratch copy of
+    this file; see task-1-report.md's fix-round-1 section for that transcript.
+    """
+    try:
+        got = rust_declarations(sources)
+    except Refused:
+        return None
+    return f"  FAIL [{label}] expected Refused, got {got!r}"
+
+
 def self_test():
     rc = 0
 
@@ -388,6 +415,93 @@ def self_test():
     if got != ["real"]:
         print(f"  FAIL [phantom] comment/raw-string minted a declaration: {got}", file=sys.stderr)
         rc = 1
+
+    # --------------------------------------------------------------------------------------
+    # §4.3 refusal coverage (review finding 3). The spec (§7.1) requires a row per refused
+    # shape; their absence is what let review finding 1 (the mod-visibility regex) ship. Each
+    # of these was independently confirmed to go red when its corresponding check was disabled
+    # in a scratch copy of this file — see task-1-report.md's fix-round-1 section.
+    # --------------------------------------------------------------------------------------
+    refusal_cases = [
+        # Inline `mod { ... }`, all four visibility spellings (finding 1's own bug: the old
+        # regex refused only "bare" and "pub" — "pub(crate)" and "pub(in ...)" fell through).
+        ("mod-bare", {"<t>": "mod inner {\n    #[pyfunction]\n    fn nested(s: &str) -> String {}\n}\n"}),
+        ("mod-pub", {"<t>": "pub mod inner {\n    #[pyfunction]\n    fn nested(s: &str) -> String {}\n}\n"}),
+        ("mod-pub-crate", {"<t>": "pub(crate) mod inner {\n    #[pyfunction]\n    fn nested(s: &str) -> String {}\n}\n"}),
+        ("mod-pub-in", {"<t>": "pub(in crate::x) mod inner {\n    #[pyfunction]\n    fn nested(s: &str) -> String {}\n}\n"}),
+        # macro_rules! anywhere in scope (§4.2) — invisible expansions, refused outright.
+        ("macro_rules", {"<t>": "macro_rules! foo { () => {}; }\n"}),
+        # #[pyfunction(...)] carrying arguments may rename/reshape the export.
+        ("attr-args", {"<t>": '#[pyfunction(name = "x")]\nfn f(s: &str) -> String {}\n'}),
+        # An un-permitted attribute in the window between #[pyfunction] and `fn` — #[pyo3(...)]
+        # can rename the export, so the window walk is default-deny.
+        ("attr-window", {"<t>": '#[pyfunction]\n#[pyo3(name = "x")]\nfn f(s: &str) -> String {}\n'}),
+        # Refused item modifiers (§4.3 item 2) — PyO3 handling of each is not modelled.
+        ("async-fn", {"<t>": "#[pyfunction]\nasync fn f(s: &str) -> String {}\n"}),
+        ("unsafe-fn", {"<t>": "#[pyfunction]\nunsafe fn f(s: &str) -> String {}\n"}),
+        ("const-fn", {"<t>": "#[pyfunction]\nconst fn f(s: &str) -> String {}\n"}),
+        ("extern-fn", {"<t>": '#[pyfunction]\nextern "C" fn f(s: &str) -> String {}\n'}),
+        # A raw identifier — PyO3 strips the `r#` prefix from the exported name.
+        ("raw-ident", {"<t>": "#[pyfunction]\nfn r#type(s: &str) -> String {}\n"}),
+        # The same name declared twice across two different `sources` entries.
+        ("dup-name", {
+            "<a>": "#[pyfunction]\nfn dup(s: &str) -> String {}\n",
+            "<b>": "#[pyfunction]\nfn dup(s: &str) -> String {}\n",
+        }),
+        # A Rust type absent from RUST_TO_PY, general case.
+        ("unmapped-type", {"<t>": "#[pyfunction]\nfn f(s: i32) -> String {}\n"}),
+        # Python<'_> specifically (§3.1): PyO3 injects it and does not export it to Python, so
+        # it must REFUSE, never map — a row here would make the gate demand a stub parameter
+        # callers must never pass.
+        ("python-injected", {"<t>": "#[pyfunction]\nfn f(py: Python<'_>, s: &str) -> String {}\n"}),
+    ]
+    for label, sources in refusal_cases:
+        fail = _expect_refused(label, sources)
+        if fail:
+            print(fail, file=sys.stderr)
+            rc = 1
+
+    # The positive half of the attribute-window walk: a PERMITTED intervening attribute must
+    # NOT raise, and the resulting signature must still be exactly right. Without this row the
+    # window walk could refuse every single-attribute case above (a bug that "passes" every
+    # refusal row) and still look correct.
+    permitted = {"<t>": "#[pyfunction]\n#[allow(dead_code)]\nfn f(s: &str) -> String {}\n"}
+    try:
+        got = rust_declarations(permitted)
+    except Refused as exc:
+        print(f"  FAIL [attr-window-permitted] #[allow(...)] should not refuse: {exc.message}", file=sys.stderr)
+        rc = 1
+    else:
+        if got != {"f": ((("s", "str"),), "str")}:
+            print(f"  FAIL [attr-window-permitted] wrong signature: {got}", file=sys.stderr)
+            rc = 1
+
+    # Review finding 2 — the return-type regex must stop at a STANDALONE `where`, not any place
+    # the substring appears inside an identifier. Both the buggy and fixed regex raise Refused
+    # here (neither "Any" nor "Anywhere" is in RUST_TO_PY), so asserting Refused alone cannot
+    # catch a regression of this specific bug — assert the un-truncated identifier by name.
+    anywhere = {"<t>": "#[pyfunction]\nfn f(s: &str) -> Anywhere {}\n"}
+    try:
+        rust_declarations(anywhere)
+        print("  FAIL [where-boundary-refuse] 'Anywhere' unexpectedly mapped, no Refused raised", file=sys.stderr)
+        rc = 1
+    except Refused as exc:
+        if "'Anywhere'" not in exc.message:
+            print(f"  FAIL [where-boundary-refuse] return type truncated before reaching the map check: {exc.message}", file=sys.stderr)
+            rc = 1
+
+    # ...and a genuine `where` clause must still cut the return type correctly — the fix must
+    # not break the legitimate case it exists to preserve.
+    where_ok = {"<t>": "#[pyfunction]\nfn f(s: &str) -> String where T: Clone {}\n"}
+    try:
+        got = rust_declarations(where_ok)
+    except Refused as exc:
+        print(f"  FAIL [where-boundary-ok] a real where clause misparsed: {exc.message}", file=sys.stderr)
+        rc = 1
+    else:
+        if got != {"f": ((("s", "str"),), "str")}:
+            print(f"  FAIL [where-boundary-ok] wrong signature: {got}", file=sys.stderr)
+            rc = 1
 
     print("self-test: OK" if rc == 0 else "self-test: FAILED", file=sys.stderr)
     return rc
