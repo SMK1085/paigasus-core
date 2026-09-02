@@ -251,7 +251,7 @@ def rust_declarations(sources):
 
         # §4.3 — an inline `mod { ... }` is unmodelled, and a #[cfg] on one makes the exported set
         # configuration-dependent, so one static answer is wrong.
-        if re.search(r"^\s*(pub\s+(\([^)]*\)\s+)?)?mod\s+\w+\s*\{", text, re.M):
+        if re.search(r"^\s*(pub(\s*\([^)]*\))?\s+)?mod\s+\w+\s*\{", text, re.M):
             raise Refused(f"{path}: an inline `mod {{ … }}` block is in scope — nesting is not modelled (§4.3)")
 
         for start, attr in _find_attribute_sites(text):
@@ -312,7 +312,7 @@ def rust_declarations(sources):
                 raise Refused(f"{where}: unbalanced parameter list (§4.3)")
             params_src = text[open_at + 1:i]
             tail = text[i + 1:]
-            ret = re.match(r"\s*->\s*(.+?)\s*(?:where\b|\{)", tail, re.S)
+            ret = re.match(r"\s*->\s*(.+?)\s*(?:\bwhere\b|\{)", tail, re.S)
             ret_ty = ret.group(1).strip() if ret else "()"
 
             params = []
