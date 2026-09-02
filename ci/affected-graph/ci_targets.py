@@ -284,6 +284,20 @@ SELF_TASK_EXPECTED_GLOBS = {
         # this input a uv bump could not invalidate a cached PASS.
         ".prototools",
     ),
+    # SMA-600. Five globs then one literal, in check_gate_inputs' comparison order (globs sorted,
+    # then files sorted) — NOT the authored order in moon.yml. The first two are deliberately
+    # identical to check.py's SCAN_GLOB and STUB_GLOB, which moon.yml's own comment on this task
+    # records: scheduling and scanning must not be able to drift apart, so narrowing either one
+    # silently reopens the gap the gate exists to close. The three manifest entries are what make
+    # a cfg-gated #[pyfunction], a module-name rename, or a pyo3 bump re-key the gate.
+    "pyo3-stub-drift": (
+        "ci/pyo3-stub/**/*",
+        "rs/crates/bindings/*/*.pyi",
+        "rs/crates/bindings/*/Cargo.toml",
+        "rs/crates/bindings/*/pyproject.toml",
+        "rs/crates/bindings/*/src/**/*.rs",
+        "rs/Cargo.lock",
+    ),
 }
 
 # SMA-592. contracts:generate's inputs, pinned to exact equality. This task is not a repo:* gate,
@@ -503,6 +517,19 @@ SELF_SCHEDULED_GATES = {
     # `.github/workflows/**` was a green edit that silently switched all five off.
     "actionlint": (
         "ci/actionlint/run.sh",
+    ),
+    # SMA-600 — repo:pyo3-stub-drift. FOUR lines, like version-lockstep and workflow-credentials:
+    # a --self-test (a synthetic fixture table) AND a --negative-control (the REAL tree, three
+    # mutations), because neither proves the other can report red. `set -euo pipefail` is exactly
+    # as load-bearing as any invocation — Moon takes a `script:` block's status from its LAST
+    # command, so without it a failing self-test or control is masked by the passing real run.
+    # Whole-line matched: `python3 ci/pyo3-stub/check.py` is a strict PREFIX of all three, so a
+    # substring test would report the gate fully wired after any one had been deleted.
+    "pyo3-stub-drift": (
+        "set -euo pipefail",
+        "python3 ci/pyo3-stub/check.py --self-test",
+        "python3 ci/pyo3-stub/check.py --negative-control",
+        "python3 ci/pyo3-stub/check.py --check",
     ),
 }
 

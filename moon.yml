@@ -199,7 +199,7 @@ tasks:
       # tomorrow). Without a glob covering them the assertions are real but unreachable: the
       # PR that drops a `--locked` from a gate script does not schedule this task. The four
       # narrower ci/ globs above are KEPT rather than replaced — check 8e in
-      # ci/actionlint/run.sh asserts containment over a 21-entry array and floors it at
+      # ci/actionlint/run.sh asserts containment over a 23-entry array and floors it at
       # `-ge 20`, so replacing four with one would take it to 18 and force loosening a floor.
       - 'ci/**/*'
       # SMA-530 — this task now pins ci/release-parity/run.sh's --negative-control BLOCK
@@ -799,3 +799,47 @@ tasks:
       # The gate shells out to `uv`, whose version is pinned here — without this input a uv
       # bump would not invalidate a cached PASS, exactly as the release-parity tasks list it.
       - '.prototools'
+
+  pyo3-stub-drift:
+    description: 'Assert the hand-written PyO3 stubs agree with the Rust they describe (SMA-600).'
+    # WHY THIS EXISTS — paigasus_py_bindings.pyi is hand-written and is basedpyright's ENTIRE
+    # view of the PyO3 surface, so a signature change with no stub update leaves the stub
+    # self-consistent and the type checker passes. Measured on SMA-600's branch: editing the
+    # stub selects four tasks and editing lib.rs selects eleven, and not one of those fifteen
+    # compares the two.
+    #
+    # WHY NOT py:typecheck INPUTS (SMA-535's filed fix) — basedpyright reads the stub and never
+    # the Rust, so no input list changes what it reads; and `uv run basedpyright` is measured
+    # in-repo to serve a CACHED wheel, so even the stub it reads is the installed copy.
+    #
+    # ARM 2 is py/packages/paigasus-kernel/tests/test_stub_surface.py, which asks the COMPILED
+    # module what it exports. This arm reads source text and refuses shapes it cannot model
+    # (macro_rules!, aliased registrations, submodules); that one sees through all of them but
+    # carries no types. Neither replaces the other.
+    #
+    # The first two globs are IDENTICAL to check.py's SCAN_GLOB and STUB_GLOB on purpose:
+    # scheduling and scanning must not be able to drift apart. Crate-generic, not scoped to
+    # today's one crate — a gate whose job is to notice a NEW crate must not be blind to it.
+    #
+    # `--self-test` and `--negative-control` run FIRST and in the SAME block: a gate that cannot
+    # report red is worse than no gate. `set -euo pipefail` is REQUIRED — Moon does not enable
+    # errexit for `script:` blocks and takes the block's status from its LAST command, so without
+    # it a failing control is masked by the passing real run. These four lines are pinned by
+    # SELF_SCHEDULED_GATES.
+    script: |
+      set -euo pipefail
+      python3 ci/pyo3-stub/check.py --self-test
+      python3 ci/pyo3-stub/check.py --negative-control
+      python3 ci/pyo3-stub/check.py --check
+    toolchain: 'system'
+    inputs:
+      - 'rs/crates/bindings/*/src/**/*.rs'
+      - 'rs/crates/bindings/*/*.pyi'
+      # The manifests are load-bearing, not padding. A [features] toggle in Cargo.toml can
+      # cfg-gate a #[pyfunction] (which the checker must then REFUSE), pyproject.toml carries the
+      # [tool.maturin] module-name the identity assertion reads, and rs/Cargo.lock pins the pyo3
+      # version whose macros decide what is emitted. Same rule as SMA-560's for the FFI wrappers.
+      - 'rs/crates/bindings/*/Cargo.toml'
+      - 'rs/crates/bindings/*/pyproject.toml'
+      - 'rs/Cargo.lock'
+      - 'ci/pyo3-stub/**/*'
