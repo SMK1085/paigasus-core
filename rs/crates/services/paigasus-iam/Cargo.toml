@@ -154,7 +154,7 @@ p256 = { version = "0.14", features = ["pkcs8", "pem"] }
 # auto-selection everywhere AND adding a native cmake build dep (see the jsonwebtoken
 # note above for the workspace's pure-Rust posture).
 rcgen = { version = "0.13", default-features = false, features = ["crypto", "pem", "ring"] }
-axum-server = { version = "0.7", default-features = false, features = ["tls-rustls-no-provider"] }
+axum-server = { version = "0.8", default-features = false, features = ["tls-rustls-no-provider"] }
 # `adapters::authz::denial_audit` tests — `#[tokio::test(start_paused = true)]` deterministically
 # fast-forwards past `AUDIT_PERSIST_TIMEOUT` instead of a real multi-second sleep (feature-only
 # addition: `tokio` is already a normal dependency above, unified with this for test builds).
