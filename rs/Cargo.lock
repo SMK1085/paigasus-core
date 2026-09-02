@@ -2615,7 +2615,7 @@ dependencies = [
  "async-trait",
  "axum",
  "axum-server",
- "base64 0.22.1",
+ "base64 0.23.1",
  "blake3",
  "cedar-policy",
  "chrono",
@@ -2664,7 +2664,7 @@ name = "paigasus-iam-core"
 version = "0.0.0"
 dependencies = [
  "async-trait",
- "base64 0.22.1",
+ "base64 0.23.1",
  "blake3",
  "cedar-policy",
  "chrono",

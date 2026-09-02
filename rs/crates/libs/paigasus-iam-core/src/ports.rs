@@ -60,6 +60,26 @@ pub struct NodeView<T> {
     pub effective_status: NodeStatus,
 }
 
+/// A mutation's result plus whether it actually changed anything (SMA-606 D1).
+///
+/// `changed == false` is a no-op: SMA-440 D5 established that a write changing no stored
+/// value must not restamp, and SMA-606 extends that to "and must not emit" — the service
+/// skips the outbox and audit writes, exactly as `ApiKeyService::revoke` gates on
+/// `revoke_in`'s bool. The post-commit generation bump still runs, because cache
+/// invalidation is a separate concern from audit correctness (SMA-440 D5, preserved).
+///
+/// A named struct rather than a `(T, bool)` tuple: `.changed` states intent at the ten
+/// implementations that construct it and the two services that read it, where `.1` would
+/// not. The fields are public because ten implementations set them by hand — an accessor
+/// would not make a wrong `changed` any less wrong. The control is behavioural, not
+/// structural (spec Testing case 2).
+#[must_use]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Mutated<T> {
+    pub value: T,
+    pub changed: bool,
+}
+
 /// A persisted membership row (D5: plain UUIDv7 id, no PRN).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MembershipRecord {
@@ -103,13 +123,26 @@ pub trait OrganizationRepository: Send + Sync {
     /// usual `entity_gen` bump every tenancy mutation gets).
     /// `stamp` also stamps rows this method writes that are not entities — the owner grant.
     async fn create(&self, org: &Organization, default_team: &Team, owner_grant: &RoleGrant, stamp: &Stamp) -> Result<(), RepositoryError>;
+    /// Txn-scoped twin of [`OrganizationRepository::create`] (SMA-606 D1): writes the org, its
+    /// default team and the owner grant on the caller's own `tx`, so the service can enqueue
+    /// the outbox rows and audit entries in the same transaction. Does **not** bump any
+    /// generation — that moves to the service, post-commit, through
+    /// [`EntityGenBumper`]/[`PolicyGenBumper`] (D7).
+    async fn create_in(&self, tx: &dyn Transaction, org: &Organization, default_team: &Team, owner_grant: &RoleGrant, stamp: &Stamp) -> Result<(), RepositoryError>;
     async fn find(&self, id: Uuid) -> Result<Option<NodeView<Organization>>, RepositoryError>;
     /// ORDER BY created_at, id (rule 9).
     async fn list(&self, limit: u64, offset: u64) -> Result<Vec<NodeView<Organization>>, RepositoryError>;
     /// In-txn guard: NotFound if missing; Precondition(NodeArchived) if own status archived.
     async fn rename(&self, id: Uuid, new_slug: Option<&Slug>, new_name: Option<&str>, stamp: &Stamp) -> Result<NodeView<Organization>, RepositoryError>;
+    /// Txn-scoped twin of [`OrganizationRepository::rename`]. `Mutated::changed` is `false`
+    /// when every supplied field already equalled the stored one — the SMA-440 D5 no-op — and
+    /// the caller then writes no event and no audit entry (SMA-606 D2).
+    async fn rename_in(&self, tx: &dyn Transaction, id: Uuid, new_slug: Option<&Slug>, new_name: Option<&str>, stamp: &Stamp) -> Result<Mutated<NodeView<Organization>>, RepositoryError>;
     /// Sets own status (D10). Idempotent: no-op (updated_at untouched) when already `status`.
     async fn set_status(&self, id: Uuid, status: NodeStatus, stamp: &Stamp) -> Result<NodeView<Organization>, RepositoryError>;
+    /// Txn-scoped twin of [`OrganizationRepository::set_status`]. `Mutated::changed` is
+    /// `false` for the idempotent case (already at `status`).
+    async fn set_status_in(&self, tx: &dyn Transaction, id: Uuid, status: NodeStatus, stamp: &Stamp) -> Result<Mutated<NodeView<Organization>>, RepositoryError>;
 }
 
 /// Persistence port for teams.
@@ -118,11 +151,23 @@ pub trait TeamRepository: Send + Sync {
     /// In-txn guards (D8): org row locked FOR SHARE; NotFound if org missing;
     /// Precondition(ParentArchived) if org effectively archived.
     async fn create(&self, team: &Team, stamp: &Stamp) -> Result<(), RepositoryError>;
+    /// Txn-scoped twin of [`TeamRepository::create`] (SMA-606 D1): writes the team on the
+    /// caller's own `tx`, so the service can enqueue the outbox rows and audit entries in the
+    /// same transaction. Does **not** bump any generation — that moves to the service,
+    /// post-commit, through [`EntityGenBumper`] (D7).
+    async fn create_in(&self, tx: &dyn Transaction, team: &Team, stamp: &Stamp) -> Result<(), RepositoryError>;
     async fn find(&self, id: Uuid) -> Result<Option<NodeView<Team>>, RepositoryError>;
     async fn list_by_org(&self, org: Uuid, limit: u64, offset: u64) -> Result<Vec<NodeView<Team>>, RepositoryError>;
     /// Guard: Precondition(NodeArchived) if team is EFFECTIVELY archived (own or org).
     async fn rename(&self, id: Uuid, new_slug: Option<&Slug>, new_name: Option<&str>, stamp: &Stamp) -> Result<NodeView<Team>, RepositoryError>;
+    /// Txn-scoped twin of [`TeamRepository::rename`]. `Mutated::changed` is `false`
+    /// when every supplied field already equalled the stored one — the SMA-440 D5 no-op — and
+    /// the caller then writes no event and no audit entry (SMA-606 D2).
+    async fn rename_in(&self, tx: &dyn Transaction, id: Uuid, new_slug: Option<&Slug>, new_name: Option<&str>, stamp: &Stamp) -> Result<Mutated<NodeView<Team>>, RepositoryError>;
     async fn set_status(&self, id: Uuid, status: NodeStatus, stamp: &Stamp) -> Result<NodeView<Team>, RepositoryError>;
+    /// Txn-scoped twin of [`TeamRepository::set_status`]. `Mutated::changed` is
+    /// `false` for the idempotent case (already at `status`).
+    async fn set_status_in(&self, tx: &dyn Transaction, id: Uuid, status: NodeStatus, stamp: &Stamp) -> Result<Mutated<NodeView<Team>>, RepositoryError>;
 }
 
 /// Persistence port for projects.
@@ -131,10 +176,22 @@ pub trait ProjectRepository: Send + Sync {
     /// In-txn guards: team+org locked FOR SHARE; NotFound if team missing; Precondition(ParentArchived)
     /// if team effectively archived; Backend if project.org != team.org (belt-and-braces, composite FK).
     async fn create(&self, project: &Project, stamp: &Stamp) -> Result<(), RepositoryError>;
+    /// Txn-scoped twin of [`ProjectRepository::create`] (SMA-606 D1): writes the project on
+    /// the caller's own `tx`, so the service can enqueue the outbox rows and audit entries in
+    /// the same transaction. Does **not** bump any generation — that moves to the service,
+    /// post-commit, through [`EntityGenBumper`] (D7).
+    async fn create_in(&self, tx: &dyn Transaction, project: &Project, stamp: &Stamp) -> Result<(), RepositoryError>;
     async fn find(&self, id: Uuid) -> Result<Option<NodeView<Project>>, RepositoryError>;
     async fn list_by_team(&self, team: Uuid, limit: u64, offset: u64) -> Result<Vec<NodeView<Project>>, RepositoryError>;
     async fn rename(&self, id: Uuid, new_slug: Option<&Slug>, new_name: Option<&str>, stamp: &Stamp) -> Result<NodeView<Project>, RepositoryError>;
+    /// Txn-scoped twin of [`ProjectRepository::rename`]. `Mutated::changed` is `false`
+    /// when every supplied field already equalled the stored one — the SMA-440 D5 no-op — and
+    /// the caller then writes no event and no audit entry (SMA-606 D2).
+    async fn rename_in(&self, tx: &dyn Transaction, id: Uuid, new_slug: Option<&Slug>, new_name: Option<&str>, stamp: &Stamp) -> Result<Mutated<NodeView<Project>>, RepositoryError>;
     async fn set_status(&self, id: Uuid, status: NodeStatus, stamp: &Stamp) -> Result<NodeView<Project>, RepositoryError>;
+    /// Txn-scoped twin of [`ProjectRepository::set_status`]. `Mutated::changed` is
+    /// `false` for the idempotent case (already at `status`).
+    async fn set_status_in(&self, tx: &dyn Transaction, id: Uuid, status: NodeStatus, stamp: &Stamp) -> Result<Mutated<NodeView<Project>>, RepositoryError>;
 }
 
 /// Persistence port for memberships.
@@ -146,10 +203,22 @@ pub trait MembershipRepository: Send + Sync {
     /// team/project targets: org membership exists, locked (else Precondition(MissingOrgMembership));
     /// duplicate -> Conflict(DuplicateMembership).
     async fn attach(&self, membership: &Membership, stamp: &Stamp) -> Result<MembershipRecord, RepositoryError>;
+    /// Txn-scoped twin of [`MembershipRepository::attach`] (SMA-606 D1). The returned record
+    /// carries the **stored** PRNs, which is what the caller must put in the event — never
+    /// the caller's own input (D2's security corollary): this method byte-matches the
+    /// supplied PRN against the stored one and answers `PrnMismatch`, and echoing the input
+    /// would route a forged org slot straight past that check into the event stream.
+    async fn attach_in(&self, tx: &dyn Transaction, membership: &Membership, stamp: &Stamp) -> Result<MembershipRecord, RepositoryError>;
     async fn find(&self, id: Uuid) -> Result<Option<MembershipRecord>, RepositoryError>;
     /// NotFound if missing. Org memberships cascade: also deletes the principal's
     /// team/project memberships in that org, one transaction (rule 5).
     async fn detach(&self, id: Uuid) -> Result<(), RepositoryError>;
+    /// Txn-scoped twin of [`MembershipRepository::detach`], returning **every record it
+    /// deleted** — the target row plus, for an org membership, each row the cascade removed
+    /// (SMA-606 D6). The service holds only a `Uuid` and the `membership` table stores no PRN
+    /// columns, so these records are the only place the cascaded PRNs exist; each becomes one
+    /// audit entry and one event, all sharing the call's single correlation id.
+    async fn detach_in(&self, tx: &dyn Transaction, id: Uuid) -> Result<Vec<MembershipRecord>, RepositoryError>;
     async fn list_by_principal(&self, principal: Uuid, limit: u64, offset: u64) -> Result<Vec<MembershipRecord>, RepositoryError>;
     /// Resolves node by uuid; PrnMismatch if the supplied ref's canonical != stored prn; NotFound if absent.
     async fn list_by_node(&self, node: &TenancyNodeRef, limit: u64, offset: u64) -> Result<Vec<MembershipRecord>, RepositoryError>;
@@ -366,6 +435,25 @@ pub trait EventPublisher: Send + Sync {
 /// `PgRoleGrantStore::bump_policy_gen_best_effort` this port's adapter impl is lifted from).
 #[async_trait]
 pub trait PolicyGenBumper: Send + Sync {
+    async fn bump(&self);
+}
+
+/// Post-commit `entity_gen` bump port (SMA-606 D7), the entity-cache twin of
+/// [`PolicyGenBumper`].
+///
+/// It exists because there was no way for a service to bump `entity_gen` at all:
+/// `bump_entity_gen` is a *private inherent* method on each Pg tenancy repository, and
+/// ADR-0005 keeps `crate::adapters::authz::Generations` out of the application layer. Once
+/// the service owns the commit (D1), the bump has to move with it — left inside a repository
+/// that no longer commits, it would invalidate the Cedar caches against a transaction that
+/// may still roll back.
+///
+/// Implementations swallow and log their own errors and return nothing, for the same reason
+/// [`PolicyGenBumper`] does: the mutation has already committed by the time `bump` runs, so a
+/// failed invalidation must never surface as a use-case error — the caches self-heal on their
+/// next TTL expiry instead.
+#[async_trait]
+pub trait EntityGenBumper: Send + Sync {
     async fn bump(&self);
 }
 
