@@ -33,8 +33,8 @@ use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use chrono::Utc;
 use jsonwebtoken::jwk::{AlgorithmParameters, CommonParameters, EllipticCurve, EllipticCurveKeyParameters, EllipticCurveKeyType, Jwk, JwkSet, KeyAlgorithm};
 use jsonwebtoken::{Algorithm, EncodingKey, Header};
-use p256::elliptic_curve::rand_core::OsRng;
-use p256::elliptic_curve::sec1::ToEncodedPoint;
+use p256::elliptic_curve::Generate;
+use p256::elliptic_curve::sec1::ToSec1Point;
 use p256::pkcs8::{EncodePrivateKey, LineEnding};
 use paigasus_iam::adapters::clock::SystemClock;
 use paigasus_iam::adapters::http::{AppState, router};
@@ -215,11 +215,11 @@ impl Drop for MockIdp {
 /// no `rsa` crate). Returns the signing key and the corresponding public JWK, both tagged
 /// with `kid`. The caller owns `kid` so `rotate` can mint a distinct one per rotation.
 fn es256_keypair(kid: &str) -> (EncodingKey, Jwk) {
-    let secret_key = p256::SecretKey::random(&mut OsRng);
+    let secret_key = p256::SecretKey::generate();
     let pem = secret_key.to_pkcs8_pem(LineEnding::LF).expect("valid pkcs8 pem");
     let encoding_key = EncodingKey::from_ec_pem(pem.as_bytes()).expect("valid ec pem");
 
-    let encoded_point = secret_key.public_key().to_encoded_point(false);
+    let encoded_point = secret_key.public_key().to_sec1_point(false);
     let x = URL_SAFE_NO_PAD.encode(encoded_point.x().expect("uncompressed point has x"));
     let y = URL_SAFE_NO_PAD.encode(encoded_point.y().expect("uncompressed point has y"));
 
