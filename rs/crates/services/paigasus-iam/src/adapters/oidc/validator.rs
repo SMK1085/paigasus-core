@@ -226,8 +226,8 @@ mod tests {
     use crate::adapters::oidc::jwks::{CachedJwks, InMemoryJwksCache};
     use jsonwebtoken::EncodingKey;
     use jsonwebtoken::jwk::{CommonParameters, EllipticCurve, EllipticCurveKeyParameters, EllipticCurveKeyType, JwkSet, KeyAlgorithm};
-    use p256::elliptic_curve::rand_core::OsRng;
-    use p256::elliptic_curve::sec1::ToEncodedPoint;
+    use p256::elliptic_curve::Generate;
+    use p256::elliptic_curve::sec1::ToSec1Point;
     use p256::pkcs8::{EncodePrivateKey, LineEnding};
     use serde::Serialize;
     use std::sync::Arc;
@@ -239,11 +239,11 @@ mod tests {
     /// Keycloak integration test instead). Returns the signing key, the corresponding
     /// public JWK, and a fixed `kid` tying the two together.
     fn es256_keypair() -> (EncodingKey, Jwk, String) {
-        let secret_key = p256::SecretKey::random(&mut OsRng);
+        let secret_key = p256::SecretKey::generate();
         let pem = secret_key.to_pkcs8_pem(LineEnding::LF).expect("valid pkcs8 pem");
         let encoding_key = EncodingKey::from_ec_pem(pem.as_bytes()).expect("valid ec pem");
 
-        let encoded_point = secret_key.public_key().to_encoded_point(false);
+        let encoded_point = secret_key.public_key().to_sec1_point(false);
         let x = URL_SAFE_NO_PAD.encode(encoded_point.x().expect("uncompressed point has x"));
         let y = URL_SAFE_NO_PAD.encode(encoded_point.y().expect("uncompressed point has y"));
 
