@@ -21,5 +21,5 @@ pub use cedar_authorizer::{CedarAuthorizer, GenerationsReader};
 pub use decision_cache::{MemoryDecisionCache, RedisDecisionCache, decision_key};
 pub use denial_audit::{BufferedDenialAuditSink, DenialAuditBuffer, DenialAuditDrain};
 pub use entity_cache::SliceCache;
-pub use generation::{Generations, GenerationsPolicyGenBumper};
+pub use generation::{Generations, GenerationsEntityGenBumper, GenerationsPolicyGenBumper};
 pub use policy_snapshot::PolicySnapshot;

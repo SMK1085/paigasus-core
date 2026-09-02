@@ -421,11 +421,22 @@ mod tests {
         async fn attach(&self, _membership: &paigasus_iam_core::Membership, _stamp: &paigasus_iam_core::Stamp) -> Result<MembershipRecord, RepositoryError> {
             unimplemented!("AuthenticateApiKey never calls attach")
         }
+        async fn attach_in(
+            &self,
+            _tx: &dyn paigasus_iam_core::Transaction,
+            _membership: &paigasus_iam_core::Membership,
+            _stamp: &paigasus_iam_core::Stamp,
+        ) -> Result<MembershipRecord, RepositoryError> {
+            unimplemented!("AuthenticateApiKey never calls attach_in")
+        }
         async fn find(&self, _id: Uuid) -> Result<Option<MembershipRecord>, RepositoryError> {
             unimplemented!("AuthenticateApiKey never calls find")
         }
         async fn detach(&self, _id: Uuid) -> Result<(), RepositoryError> {
             unimplemented!("AuthenticateApiKey never calls detach")
+        }
+        async fn detach_in(&self, _tx: &dyn paigasus_iam_core::Transaction, _id: Uuid) -> Result<Vec<MembershipRecord>, RepositoryError> {
+            unimplemented!("AuthenticateApiKey never calls detach_in")
         }
         async fn list_by_principal(&self, principal: Uuid, limit: u64, offset: u64) -> Result<Vec<MembershipRecord>, RepositoryError> {
             let rows = self.rows.lock().unwrap();
