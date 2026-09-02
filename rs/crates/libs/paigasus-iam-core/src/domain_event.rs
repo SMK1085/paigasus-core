@@ -20,6 +20,20 @@ pub enum EventType {
     ApiKeyRevoked,
     PolicyPut,
     PolicyDeleted,
+    OrganizationCreated,
+    OrganizationRenamed,
+    OrganizationArchived,
+    OrganizationRestored,
+    TeamCreated,
+    TeamRenamed,
+    TeamArchived,
+    TeamRestored,
+    ProjectCreated,
+    ProjectRenamed,
+    ProjectArchived,
+    ProjectRestored,
+    MembershipAttached,
+    MembershipDetached,
 }
 
 impl EventType {
@@ -29,7 +43,7 @@ impl EventType {
     /// test cannot see a `#[cfg(test)]` constant. Kept exhaustive by
     /// `all_lists_every_event_type`, whose wildcard-free match stops compiling when a variant is
     /// added.
-    pub const ALL: [EventType; 8] = [
+    pub const ALL: [EventType; 22] = [
         Self::PrincipalCreated,
         Self::PrincipalArchived,
         Self::RoleGranted,
@@ -38,6 +52,20 @@ impl EventType {
         Self::ApiKeyRevoked,
         Self::PolicyPut,
         Self::PolicyDeleted,
+        Self::OrganizationCreated,
+        Self::OrganizationRenamed,
+        Self::OrganizationArchived,
+        Self::OrganizationRestored,
+        Self::TeamCreated,
+        Self::TeamRenamed,
+        Self::TeamArchived,
+        Self::TeamRestored,
+        Self::ProjectCreated,
+        Self::ProjectRenamed,
+        Self::ProjectArchived,
+        Self::ProjectRestored,
+        Self::MembershipAttached,
+        Self::MembershipDetached,
     ];
 
     pub fn as_wire(&self) -> &'static str {
@@ -50,6 +78,20 @@ impl EventType {
             Self::ApiKeyRevoked => "iam.api_key.revoked",
             Self::PolicyPut => "iam.policy.put",
             Self::PolicyDeleted => "iam.policy.deleted",
+            Self::OrganizationCreated => "iam.organization.created",
+            Self::OrganizationRenamed => "iam.organization.renamed",
+            Self::OrganizationArchived => "iam.organization.archived",
+            Self::OrganizationRestored => "iam.organization.restored",
+            Self::TeamCreated => "iam.team.created",
+            Self::TeamRenamed => "iam.team.renamed",
+            Self::TeamArchived => "iam.team.archived",
+            Self::TeamRestored => "iam.team.restored",
+            Self::ProjectCreated => "iam.project.created",
+            Self::ProjectRenamed => "iam.project.renamed",
+            Self::ProjectArchived => "iam.project.archived",
+            Self::ProjectRestored => "iam.project.restored",
+            Self::MembershipAttached => "iam.membership.attached",
+            Self::MembershipDetached => "iam.membership.detached",
         }
     }
 
@@ -63,6 +105,20 @@ impl EventType {
             "iam.api_key.revoked" => Some(Self::ApiKeyRevoked),
             "iam.policy.put" => Some(Self::PolicyPut),
             "iam.policy.deleted" => Some(Self::PolicyDeleted),
+            "iam.organization.created" => Some(Self::OrganizationCreated),
+            "iam.organization.renamed" => Some(Self::OrganizationRenamed),
+            "iam.organization.archived" => Some(Self::OrganizationArchived),
+            "iam.organization.restored" => Some(Self::OrganizationRestored),
+            "iam.team.created" => Some(Self::TeamCreated),
+            "iam.team.renamed" => Some(Self::TeamRenamed),
+            "iam.team.archived" => Some(Self::TeamArchived),
+            "iam.team.restored" => Some(Self::TeamRestored),
+            "iam.project.created" => Some(Self::ProjectCreated),
+            "iam.project.renamed" => Some(Self::ProjectRenamed),
+            "iam.project.archived" => Some(Self::ProjectArchived),
+            "iam.project.restored" => Some(Self::ProjectRestored),
+            "iam.membership.attached" => Some(Self::MembershipAttached),
+            "iam.membership.detached" => Some(Self::MembershipDetached),
             _ => None,
         }
     }
@@ -122,10 +178,24 @@ mod tests {
                 | EventType::ApiKeyIssued
                 | EventType::ApiKeyRevoked
                 | EventType::PolicyPut
-                | EventType::PolicyDeleted => {}
+                | EventType::PolicyDeleted
+                | EventType::OrganizationCreated
+                | EventType::OrganizationRenamed
+                | EventType::OrganizationArchived
+                | EventType::OrganizationRestored
+                | EventType::TeamCreated
+                | EventType::TeamRenamed
+                | EventType::TeamArchived
+                | EventType::TeamRestored
+                | EventType::ProjectCreated
+                | EventType::ProjectRenamed
+                | EventType::ProjectArchived
+                | EventType::ProjectRestored
+                | EventType::MembershipAttached
+                | EventType::MembershipDetached => {}
             }
         }
-        assert_eq!(EventType::ALL.len(), 8);
+        assert_eq!(EventType::ALL.len(), 22);
     }
 
     #[test]

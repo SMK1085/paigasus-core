@@ -635,7 +635,8 @@ impl TenancyService for TenancyGrpc {
     async fn detach_membership(&self, request: Request<DetachMembershipRequest>) -> Result<Response<DetachMembershipResponse>, Status> {
         let started = Instant::now();
         let result: Result<Response<DetachMembershipResponse>, Status> = async {
-            let actor = actor_context(&request)?.principal_id.prn().clone();
+            let actor_principal = actor_context(&request)?.principal_id;
+            let actor = actor_principal.prn().clone();
             let req = request.into_inner();
             // `DetachMembershipRequest.id` is a bare uuid, not a PRN, so a malformed value is
             // `InvalidUuid` naming the segment (SMA-586). The field name reaches the client in
@@ -650,7 +651,7 @@ impl TenancyService for TenancyGrpc {
                 let node_prn = Prn::parse(&record.node_prn).map_err(|e| convert::status_to_grpc(TenancyError::InvalidPrn(e.kind().to_owned())))?;
                 self.state.authorize.check(&actor, Action::DetachMembership, &node_prn).await.map_err(convert::status_to_grpc)?;
             }
-            self.state.memberships.detach(id).await.map_err(convert::status_to_grpc)?;
+            self.state.memberships.detach(id, &actor_principal).await.map_err(convert::status_to_grpc)?;
             Ok(Response::new(DetachMembershipResponse {}))
         }
         .await;
