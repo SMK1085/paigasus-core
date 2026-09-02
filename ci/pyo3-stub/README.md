@@ -139,6 +139,16 @@ noted; a handful of infrastructure-only failures are `InfraError` at **rc 2**.
   beneath them to walk back from (a `#[cfg]` on a `mod foo;` declaration, a `#![cfg(...)]` inner
   attribute). Coarse but fail-closed, and free on the real tree: no `#[cfg`, `#[cfg_attr`,
   `#[pyclass]` or `#[pymethods]` appears anywhere under `rs/crates/bindings/*/src/`.
+
+  Two things to know when this one reds, because neither is obvious from the message. The
+  **file-global refusal runs first**, so a `#[cfg]` reports the whole-file message and you will
+  never see the backward walk's attribute-and-line form for it — that form surfaces only for the
+  other refused attributes (`#[pyo3(...)]` and friends). And `SCAN_GLOB` covers **all three**
+  bindings crates, so a `#[cfg]` added to `paigasus-node-bindings` or `paigasus-wasm` — neither of
+  which is a PyO3 crate or has a `.pyi` — reds this gate too, with a message about an exported set
+  that means nothing for those crates. `#[cfg(target_arch = "wasm32")]` is ordinary in a wasm shim,
+  so this is the likeliest way to meet this refusal without having touched PyO3 at all. The
+  `macro_rules!` and inline-`mod` refusals share the property; `#[cfg]` is just far commoner.
 * A `fn` signature the scanner cannot parse, or the same function name declared twice across the
   scanned files (a `{name: Signature}` map would silently overwrite the first).
 * `async fn`, `unsafe fn`, `const fn`, `extern`, and a raw identifier `fn r#type` (PyO3 strips the
