@@ -366,11 +366,23 @@ Two facts forced this, both measured:
 
 * **`git ls-files 'ci/**/*.py'` does not mean what rev 1 assumed.** Without `:(glob)` magic git
   matches without `FNM_PATHNAME`, so `**` is just two `*`s and the literal `/` is still required:
-  it matches `ci/pyo3-stub/check.py` but **not** a future top-level `ci/foo.py`. Moon's matcher and
-  Python's `glob(recursive=True)` both *do* match `ci/foo.py` for the same pattern. Verified by
-  probe: a temporary `ci/_probe.py` is seen by `':(glob)ci/**/*.py'` and by `'ci/*.py'`, and
-  **not** by `'ci/**/*.py'`. So the gate's declared input would schedule it for a file its own
-  corpus derivation could not see.
+  it matches `ci/pyo3-stub/check.py` but **not** a top-level `ci/foo.py`. Moon's matcher and
+  Python's `glob(recursive=True)` both *do* match `ci/foo.py` for the same pattern, so the gate's
+  declared input would schedule it for a file its own corpus derivation could not see.
+
+  **Rev 2 correction (all six forms measured).** Rev 1 added the `'ci/*.py'` companion and claimed
+  it "is not redundant with the first". That is backwards, and the two pathspecs are in fact
+  *mutually* redundant — each alone is sufficient:
+
+  | pathspec | matches a top-level `ci/foo.py`? |
+  |---|---|
+  | `'ci/*.py'` (no magic) | **yes** — `*` spans `/`, so it matches at every depth |
+  | `':(glob)ci/**/*.py'` | **yes** — under `:(glob)`, `**/` matches zero directories |
+  | `'ci/**/*.py'` (no magic) | **no** — the one broken form |
+
+  Both are kept, because the explicit pair documents the intent and costs nothing. What the
+  self-test row actually guards is a reduction to the bare `'ci/**/*.py'` — the likeliest
+  "simplification" — not the dropping of `:(glob)`, which changes nothing.
 * Rev 1's premise that ruff cannot report its inspected set was **wrong** — `ruff check --show-files`
   exists in 0.16.5 and, filtered to `*.py`, returns a set identical to the tracked corpus. The
   inversion is adopted anyway because structural equality cannot drift, and because `--show-files`
@@ -620,7 +632,11 @@ repo before folding in; the challenge's one incorrect premise is recorded too.
    inspected set — was **wrong**: `--show-files` exists in 0.16.5 and was verified to match the
    corpus. The inversion is adopted anyway: structural equality cannot drift, and `--show-files`
    also emits `pyproject.toml` files, which rev 1's stated equality would have failed on.)
-2. **`git ls-files 'ci/**/*.py'` pathspec trap.** Verified by probe: it misses a top-level
+2. **`git ls-files 'ci/**/*.py'` pathspec trap** — and, amended during implementation, the
+   *reason* for the companion pathspec. All six forms are now measured in §4.3: the two pathspecs
+   are mutually redundant, each alone sufficient, and only the bare `'ci/**/*.py'` is broken. The
+   claim that the companion "is not redundant with the first" was backwards.
+   The original finding stands: Verified by probe: it misses a top-level
    `ci/foo.py` that Moon's own matcher would schedule the gate for. Now `':(glob)ci/**/*.py' 'ci/*.py'`.
 3. **Half B exit-code disambiguation.** Resolve the ruff binary, then invoke it directly, so rc 1
    is unambiguously ruff's and a uv/PyPI failure cannot read as "the CI tooling has lint
