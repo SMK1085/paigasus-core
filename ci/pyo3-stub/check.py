@@ -423,7 +423,16 @@ def _pymodule_body(sources):
             found.append((fn.group(1), text[open_at + 1:i]))
     if len(found) != 1:
         raise Refused(f"expected exactly one #[pymodule], found {len(found)} — set B would come from the wrong place (§4.3)")
-    return found[0]
+    # FIX (controller review round 1, finding 1) — guard the access itself so this ONE check
+    # above is the only path to a wrong answer. Before this line existed alone, disabling just
+    # the check above crashed `found = []` with an uncaught IndexError (a Python traceback, not
+    # a graceful red) while a `found` of length 2 silently returned its first element with NO
+    # exception at all — dropping every OTHER module's registrations, the exact "silently
+    # dropping a name from set B" failure this whole gate exists to prevent. The fallback below
+    # makes both of those consequences observable (a clean, empty-but-successful return) rather
+    # than one of them crashing past the self-test's own `except Refused` and the other being
+    # invisible.
+    return found[0] if found else (None, "")
 
 
 def pymodule_ident(sources):
@@ -672,8 +681,46 @@ def self_test():
         print(f"  FAIL [module body] permitted forms did not parse: {ok}", file=sys.stderr)
         rc = 1
 
+    # §4.1 — the same name registered twice in one module body (controller review round 1,
+    # finding 2). Both statements are individually well-formed and individually permitted; only
+    # the explicit `if m.group(1) in names: raise Refused(...)` guard catches the collision, since
+    # a bare `set.add` would silently accept a repeat with no error at all.
+    dup_reg = _MOD % '    m.add_function(wrap_pyfunction!(f, m)?)?;\n    m.add_wrapped(wrap_pyfunction!(f))?;'
+    try:
+        rust_registrations({"<x>": dup_reg})
+    except Refused:
+        pass
+    else:
+        print(f"  FAIL [module body] duplicate registration of the same name was accepted (§4.1)", file=sys.stderr)
+        rc = 1
+
     # §4.3 — zero or two #[pymodule] fns is refused; set B would come from the wrong place.
-    for label, src in [("zero", "fn m() {}"), ("two", _MOD % "    Ok(())" + _MOD % "    Ok(())")]:
+    #
+    # FIX (controller review round 1, finding 1): the original fixtures here were unfalsifiable
+    # for their own stated reason. "zero" used a source with no #[pymodule] at all, which is
+    # right, but on disabling only the count check `_pymodule_body` used to fall straight into
+    # `found[0]` on an EMPTY list — an uncaught IndexError, not the graceful red this row's own
+    # print claims. "two" built each module body from `_MOD % "    Ok(())"`, and `_MOD`'s own
+    # template already appends a second, unterminated `Ok(())` with no separating `;` — so the
+    # body text was the malformed statement `"Ok(()) Ok(())"`, which the UNRELATED default-deny
+    # statement check also refuses. That masked the count check entirely: disabling ONLY it left
+    # "two" still red, for the wrong reason, proving nothing about the count check itself.
+    #
+    # Fixed: "zero" now uses a syntactically ordinary (non-pymodule) fn, so nothing else in scope
+    # can raise. "two" now uses TWO well-formed #[pymodule] fns, each with a real, individually
+    # permitted registration under a DIFFERENT name (`f`, `g`) — a body the default-deny check has
+    # no reason to touch. With the count check active both must still raise Refused. With it
+    # disabled (see neuter-test table in task-2-report.md), `_pymodule_body`'s new `found[0] if
+    # found else (None, "")` fallback (see its docstring) makes "zero" return an empty, unraising
+    # set, and "two" silently return only `{"f"}` — the second module's `g` dropped with no error
+    # at all, which is the exact realistic bug this pair of rows exists to catch.
+    zero_src = "fn helper(m: &Bound<'_, PyModule>) -> PyResult<()> {\n    Ok(())\n}\n"
+    two_src = (
+        _MOD % "    m.add_function(wrap_pyfunction!(f, m)?)?;"
+        + ("#[pymodule]\nfn m2(m: &Bound<'_, PyModule>) -> PyResult<()> {\n"
+           "    m.add_function(wrap_pyfunction!(g, m)?)?;\n    Ok(())\n}\n")
+    )
+    for label, src in [("zero", zero_src), ("two", two_src)]:
         try:
             rust_registrations({"<x>": src})
         except Refused:
