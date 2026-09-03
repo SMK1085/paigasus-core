@@ -152,7 +152,12 @@ negative_control() {
   # so a plain `git add` excludes them exactly as the real repo does — force-adding them would
   # pull vendored third-party code into the corpus this control lints, which is not what it
   # exists to prove.
-  local rc=0
+  # negctl_rc, not rc: self_test() above ALSO uses `rc` for its own empty-corpus check, and
+  # `if [ "$rc" != 1 ]; then` is therefore not a line unique to this function — a haystack that
+  # pinned it would be satisfied by self_test()'s copy even with THIS guard neutered. The distinct
+  # name is what makes the guard uniquely pinnable at all, exactly as ci/release-plan/run.sh's
+  # `mut_rc` (vs. its own unrelated `rc` uses) does for the same reason.
+  local negctl_rc=0
   tmp="$(mktemp -d)"
   # EXIT, not RETURN: the failure branch below calls `exit 1` directly, which terminates the
   # process without ever returning from this function — a RETURN trap would silently skip
@@ -173,9 +178,9 @@ negative_control() {
   # No REPO_ROOT override: the cp -R above already placed a copy of this script at
   # $tmp/ci/ruff/run.sh, and invoking THAT copy makes its own BASH_SOURCE resolve REPO_ROOT to
   # $tmp naturally.
-  ( cd "$tmp" && bash "$tmp/ci/ruff/run.sh" ) >/dev/null 2>&1 || rc=$?
-  if [ "$rc" != 1 ]; then
-    printf '  FAIL a planted RUF005 did not red the gate: expected rc 1, got %s\n' "$rc" >&2
+  ( cd "$tmp" && bash "$tmp/ci/ruff/run.sh" ) >/dev/null 2>&1 || negctl_rc=$?
+  if [ "$negctl_rc" != 1 ]; then
+    printf '  FAIL a planted RUF005 did not red the gate: expected rc 1, got %s\n' "$negctl_rc" >&2
     exit 1
   fi
   printf '== ruff-ci negative control passed ==\n'

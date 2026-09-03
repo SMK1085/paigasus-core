@@ -988,12 +988,30 @@ RELEASE_PLAN_SH_CALL_SITES = (
 )
 
 
-# SMA-539. Five discrete lines rather than one span, for the reason CLAUDE.md records against
+# SMA-539. Seven discrete lines rather than one span, for the reason CLAUDE.md records against
 # ci/release-parity/run.sh: neutering the flag parse alone lets --negative-control fall through
 # to the real suite (which then just runs twice and proves nothing), and gutting the assertion
 # body alone leaves a control that prints "passed" having called nothing. The corpus-derivation
 # and real-invocation lines are pinned too, because a control that survives while the thing it
 # controls has been rewritten is worth nothing.
+#
+# The fixture-invocation line and the comparison GUARD (entries 5 and 6 below) were added after
+# a review measured the gap the first five left open: pinning only the diagnostic `printf`
+# (entry 7) does not pin the `if` that decides whether it ever fires. Changing
+# `if [ "$negctl_rc" != 1 ]; then` to an always-false comparison (e.g.
+# `if [ "$negctl_rc" != "$negctl_rc" ]; then`) leaves the printf byte-identical, and
+# negative_control() unconditionally reports "passed" — the same "control that actively lies"
+# shape WORKFLOW_CREDENTIALS_SH_CALL_SITES' own comment names, closed there by pinning its
+# report-arm `if` and here by pinning this one.
+#
+# The guard is pinnable at all only because ci/ruff/run.sh renamed negative_control()'s local
+# from `rc` to `negctl_rc`: self_test() has its own, unrelated `if [ "$rc" != 1 ]; then` for its
+# empty-corpus check, so the un-renamed guard line would have been satisfied by THAT copy even
+# with negative_control()'s own guard neutered — a pin that looks present and asserts nothing,
+# one level down from the bug it exists to close. `ci/release-plan/run.sh`'s `mut_rc` (kept
+# distinct from that file's own unrelated `rc` uses) is the precedent for this same rename.
+# The fixture-invocation line needed no rename to become unique — self_test()'s twin invokes
+# `$empty`, not `$tmp`.
 #
 # REACHABILITY IS NOT AUTOMATIC, same as the three tuples above: this check only runs when
 # repo:affected-smoke is scheduled, so moon.yml lists `ci/ruff/**/*` among its inputs and
@@ -1010,7 +1028,9 @@ RUFF_SH_CALL_SITES = (
     "negctl)   negative_control ;;",
     "git -C \"$root\" ls-files -- ':(glob)ci/**/*.py' 'ci/*.py' | sort",
     "\"$ruff\" check --config \"$CONFIG\" -- \"${files[@]}\" || rc=$?",
-    "printf '  FAIL a planted RUF005 did not red the gate: expected rc 1, got %s\\n' \"$rc\" >&2",
+    "( cd \"$tmp\" && bash \"$tmp/ci/ruff/run.sh\" ) >/dev/null 2>&1 || negctl_rc=$?",
+    "if [ \"$negctl_rc\" != 1 ]; then",
+    "printf '  FAIL a planted RUF005 did not red the gate: expected rc 1, got %s\\n' \"$negctl_rc\" >&2",
 )
 
 
@@ -2568,6 +2588,23 @@ def self_test():
         failures.append(
             "check_self_invocation: a COMMENTED-OUT ruff line satisfied the pin "
             "(widened to substring matching)"
+        )
+    # The C1-shaped pin, stated as its own row because it is the one entry whose VALUE — not
+    # merely its presence — carries the fix, mirroring RELEASE_PLAN_SH_CALL_SITES' own
+    # `_rp_c1_rearmed` row. This reproduces the review-caught bypass verbatim: neutering the
+    # guard's comparison to something always-false leaves every OTHER pinned line — the
+    # diagnostic printf included — byte-identical, so negative_control() would unconditionally
+    # report "passed" while this whole-line comparison is what makes the rewritten `if` report
+    # missing.
+    _ruff_guard_neutered = wired_ruff.replace(
+        'if [ "$negctl_rc" != 1 ]; then\n', 'if [ "$negctl_rc" != "$negctl_rc" ]; then\n'
+    )
+    if not check_self_invocation(
+        wired, scripts, wired_actionlint, wired_release_parity, wired_workflow_credentials,
+        wired_release_plan, _ruff_guard_neutered,
+    ):
+        failures.append(
+            "check_self_invocation: a NEUTERED comparison (always-false guard) satisfied the pin"
         )
 
     # _scripts (SMA-553 D10) — a second pure extractor, so _eligibility's shape is untouched.
