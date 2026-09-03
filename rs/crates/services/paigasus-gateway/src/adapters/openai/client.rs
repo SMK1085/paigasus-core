@@ -127,7 +127,7 @@ impl OpenAiError {
 /// The `source` of a `CaBundle` error raised when the bundle's certificates parse as PEM but not
 /// as DER. Holds the original `reqwest::Error` as its own `source`, so anyhow renders the whole
 /// chain and callers keep the ability to downcast — a pre-rendered `String` would discard both.
-#[derive(thiserror::Error)]
+#[derive(Debug, thiserror::Error)]
 #[error(
     "contains a structurally invalid certificate: it decodes as base64 but is not valid DER. \
      A control client built without it succeeded, so the platform trust store is not the cause"
@@ -135,17 +135,6 @@ impl OpenAiError {
 struct InvalidBundleCertificate {
     #[source]
     source: reqwest::Error,
-}
-
-impl std::fmt::Debug for InvalidBundleCertificate {
-    // Manual, not derived: a derived Debug would print only the struct's field, never this
-    // type's own `#[error(...)]` message — and this struct is boxed as a trait object elsewhere
-    // (`OpenAiError::CaBundle`'s derived `Debug` dispatches to whatever `Debug` this type has), so
-    // a bare `{err:?}` on that outer error needs this type's message + cause chain reachable
-    // without going through anyhow.
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&describe_error(self))
-    }
 }
 
 /// What a failed `reqwest::Client` build can be attributed to. Mirrors
@@ -486,7 +475,10 @@ mod tests {
         let f = tmp_file_with(INVALID_DER_PEM);
         let err = client_with_bundle_and_control(Some(f.path().to_str().unwrap().to_string()), true).expect_err("a structurally invalid certificate must fail the build");
 
-        let rendered = format!("{err:?}");
+        // Renders the chain the way anyhow's Debug does at the boot call site (main.rs), which is
+        // what an operator actually reads — a bare `{err:?}` would show `InvalidBundleCertificate`'s
+        // derived struct fields, never its `#[error(...)]` message.
+        let rendered = describe_error(&err);
         assert!(matches!(err, OpenAiError::CaBundle { .. }), "expected CaBundle, got {err:?}");
         assert!(err.to_string().contains("upstream.openai.extra_ca_bundle_path"), "the error must name the config key: {err}");
         assert!(rendered.contains("not valid DER"), "the error must say what is wrong with it: {rendered}");
@@ -497,7 +489,7 @@ mod tests {
         let f = tmp_file_with(INVALID_DER_PEM);
         let err = client_with_bundle_and_control(Some(f.path().to_str().unwrap().to_string()), false).expect_err("a structurally invalid certificate must fail the build");
 
-        let rendered = format!("{err:?}");
+        let rendered = describe_error(&err);
         assert!(matches!(err, OpenAiError::CaBundle { .. }), "expected CaBundle, got {err:?}");
         assert!(rendered.contains("platform trust store"), "the store is the primary fault: {rendered}");
         assert!(rendered.contains("fix that first"), "the operator needs an order of operations: {rendered}");
