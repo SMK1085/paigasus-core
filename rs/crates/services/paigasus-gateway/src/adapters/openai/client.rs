@@ -492,10 +492,7 @@ mod tests {
         let rendered = describe_error(&err);
         assert!(matches!(err, OpenAiError::CaBundle { .. }), "expected CaBundle, got {err:?}");
         assert!(rendered.contains("platform trust store"), "the store is the primary fault: {rendered}");
-        assert!(
-            rendered.contains("upstream.openai.extra_ca_bundle_path"),
-            "the bundle must still be named: {rendered}"
-        );
+        assert!(rendered.contains("upstream.openai.extra_ca_bundle_path"), "the bundle must still be named: {rendered}");
         assert!(rendered.contains("fix that first"), "the operator needs an order of operations: {rendered}");
     }
 
