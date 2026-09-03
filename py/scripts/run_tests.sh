@@ -26,5 +26,8 @@ if [ "$#" -eq 0 ]; then
   # exported into their shell. Left set, `PYTEST_ADDOPTS=-k foo` filters the collection too and
   # the floor reds on a tree that is perfectly intact (measured: exit 2). Clearing it here keeps
   # the real run above honouring the developer's filter while the floor stays authoritative.
-  PYTEST_ADDOPTS= uv run pytest --collect-only -q | uv run python scripts/assert_test_floor.py
+  # Explicitly '' rather than a bare `PYTEST_ADDOPTS=`: shellcheck 0.11.0 (the version this repo
+  # pins for repo:actionlint) reports SC1007 on the bare form, since it cannot tell a deliberate
+  # empty assignment from a typo'd one. Same semantics, no warning.
+  PYTEST_ADDOPTS='' uv run pytest --collect-only -q | uv run python scripts/assert_test_floor.py
 fi
