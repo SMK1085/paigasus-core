@@ -2668,6 +2668,28 @@ def self_test():
     pairing("exempt-and-pinned", {"g": ()}, {"g": ("**/*",)}, {"g": "r"}, ([], [], [], ["g"], []))
     pairing("orphan-globs", {}, {"ghost": ("**/*",)}, {}, ([], [], [], [], ["ghost"]))
 
+    # The five fixtures above prove check_registry_pairing() itself fires; nothing proves
+    # main() actually SURFACES its rows. main() cannot be called directly here — it shells out
+    # to `moon query tasks` — so this reads its own SOURCE instead, the same way this file
+    # already pins textual wiring elsewhere (RUN_SH_CALL_SITES and friends). Each of the five
+    # result names must appear at least three times: once where main() unpacks
+    # check_registry_pairing()'s return, once inside the `if not (...)` pass/fail condition, and
+    # once in the printed-rows tuple below it. A name appearing only twice means one of those
+    # three wires is missing — collected but never folded into pass/fail, or folded in but never
+    # printed, both silent regressions a reader would only find by tracing the diff by hand.
+    main_src = inspect.getsource(main)
+    for _name in (
+        "pairing_unpinned", "pairing_bad_exempt", "pairing_stale_exempt", "pairing_both",
+        "pairing_orphan_globs",
+    ):
+        _count = main_src.count(_name)
+        if _count < 3:
+            failures.append(
+                f"main() wiring[{_name}]: found {_count} occurrence(s) in main()'s source, "
+                "want at least 3 (unpack, pass/fail condition, printed rows) — a "
+                "check_registry_pairing row is collected but not fully wired into main()"
+            )
+
     # SMA-539. check_self_scheduled_coverage: a `repo:*` task whose resolved script runs
     # --self-test/--negative-control must be a SELF_SCHEDULED_GATES key. `coverage_scripts()`
     # is built from the LIVE registry, for the same reason `wired_scripts()` above is: a literal
@@ -2937,11 +2959,15 @@ def main():
     unregistered_self_scheduled, bad_coverage_exempt, stale_coverage_exempt = (
         check_self_scheduled_coverage(scripts)
     )
+    pairing_unpinned, pairing_bad_exempt, pairing_stale_exempt, pairing_both, pairing_orphan_globs = (
+        check_registry_pairing()
+    )
 
     if not (floor or missing or unexpected or bad_exempt or stale_exempt or dead or doc_problems
             or missing_sites or bad_invocation or bad_gate_inputs
             or bad_generate_inputs or unregistered_self_scheduled or bad_coverage_exempt
-            or stale_coverage_exempt):
+            or stale_coverage_exempt or pairing_unpinned or pairing_bad_exempt
+            or pairing_stale_exempt or pairing_both or pairing_orphan_globs):
         print(
             f"PASS  {'ci-targets':<18} -> {len(t_targets)} targets: every CI-eligible repo task is "
             "in ci.yml's T, every entry resolves, CLAUDE.md mirrors it"
@@ -3085,6 +3111,34 @@ def main():
          "    mentions --self-test or --negative-control — the exemption has outlived what it\n"
          "    exempted.\n"
          "    Fix: delete the entry from SELF_SCHEDULED_COVERAGE_EXEMPT in\n"
+         "    ci/affected-graph/ci_targets.py."),
+        ([":" + name for name in pairing_unpinned],
+         "SMA-530. A SELF_SCHEDULED_GATES entry is in neither SELF_TASK_EXPECTED_GLOBS nor\n"
+         "    SELF_TASK_GLOBS_EXEMPT, so this gate's own `inputs` are unpinned — they can drift\n"
+         "    and nothing here would notice.\n"
+         "    Fix: add the task to SELF_TASK_EXPECTED_GLOBS with its exact authored `inputs`, or\n"
+         "    to SELF_TASK_GLOBS_EXEMPT with a reasoned waiver, in\n"
+         "    ci/affected-graph/ci_targets.py."),
+        (pairing_bad_exempt,
+         "SMA-530. A SELF_TASK_GLOBS_EXEMPT entry has no reason string. An exemption is a\n"
+         "    recorded decision, so the record is what earns it.\n"
+         "    Fix: give it a non-empty reason in ci/affected-graph/ci_targets.py, or delete it."),
+        (pairing_stale_exempt,
+         "SMA-530. A SELF_TASK_GLOBS_EXEMPT entry names a task that is no longer in\n"
+         "    SELF_SCHEDULED_GATES — the waiver has outlived the thing it waived.\n"
+         "    Fix: delete the entry from SELF_TASK_GLOBS_EXEMPT in\n"
+         "    ci/affected-graph/ci_targets.py."),
+        ([":" + name for name in pairing_both],
+         "SMA-530. A task holds BOTH a SELF_TASK_EXPECTED_GLOBS entry and a\n"
+         "    SELF_TASK_GLOBS_EXEMPT entry — pinned and waived at the same time, which is\n"
+         "    contradictory.\n"
+         "    Fix: keep whichever of the two is correct and delete the task's entry from the\n"
+         "    other one in ci/affected-graph/ci_targets.py."),
+        ([":" + name for name in pairing_orphan_globs],
+         "SMA-530. A SELF_TASK_EXPECTED_GLOBS entry names a task with no SELF_SCHEDULED_GATES\n"
+         "    entry, so its pinned `inputs` have no gate behind them.\n"
+         "    Fix: add the task to SELF_SCHEDULED_GATES with its script's invocation lines, or\n"
+         "    delete the stale entry from SELF_TASK_EXPECTED_GLOBS, in\n"
          "    ci/affected-graph/ci_targets.py."),
     ):
         if rows:
