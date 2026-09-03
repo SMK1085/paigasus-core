@@ -4649,6 +4649,11 @@ doc_diagnosis_verdict() {
     for entry in "${CIREPORT_MENTIONS_ALLOWED[@]}"; do
       path="${entry%%|*}"
       reason="${entry#*|}"
+      # A row carrying NO `|` at all: both expansions return the whole string, so `reason` becomes
+      # a copy of the path — non-empty, and the blank-reason arm below could therefore never fire
+      # for the one row shape most likely to be malformed. A path is not a justification.
+      # Normalising to an empty reason routes it through the existing verdict (SMA-597 round 1).
+      case "$entry" in *'|'*) ;; *) reason="" ;; esac
       if [ "$path" = "$f" ]; then
         found=1
         # A blank reason is an assertion failure in its own right — the same rule T_EXEMPT and
@@ -4754,6 +4759,39 @@ doc_diagnosis_self_test() {
   # A missing list is infrastructure, not a clean repo.
   got="$(doc_diagnosis_verdict "$tmpd/nope" | grep -v '^stale-allowlist ')"
   expect_doc 'a missing list reports no-list' 'no-list'
+
+  # --- the allowlist's own row shapes (SMA-597 round 1) -------------------------------------
+  # The override is scoped INSIDE the command substitution deliberately. Saving and restoring the
+  # real table around these cases would add a `"${CIREPORT_MENTIONS_ALLOWED[@]}"` expansion in the
+  # MAIN shell, and that is an unbound-variable abort on bash 3.2 the moment the table is empty —
+  # it would kill the whole gate, at rc 1, instead of letting the arity floor exit 2.
+  printf 'see ciReport.json\n' > "$tmpd/waived.md"
+  printf '%s\n' "$tmpd/waived.md" > "$list"
+
+  # A stated reason waives the file silently — the clean path the two malformed rows are read
+  # against, and the proof these three cases differ only in the row's shape.
+  got="$(CIREPORT_MENTIONS_ALLOWED=("$tmpd/waived.md|a stated reason")
+         doc_diagnosis_verdict "$list" | grep -v '^stale-allowlist ')"
+  expect_doc 'an allowlist row with a reason waives its file' ''
+
+  # An EMPTY reason after the pipe.
+  got="$(CIREPORT_MENTIONS_ALLOWED=("$tmpd/waived.md|")
+         doc_diagnosis_verdict "$list" | grep -v '^stale-allowlist ')"
+  expect_doc 'an allowlist row with an empty reason fires' "blank-reason $tmpd/waived.md"
+
+  # NO pipe at all — see the `case` in doc_diagnosis_verdict. Before round 1 this waived the file
+  # in silence, because the path became its own reason.
+  got="$(CIREPORT_MENTIONS_ALLOWED=("$tmpd/waived.md")
+         doc_diagnosis_verdict "$list" | grep -v '^stale-allowlist ')"
+  expect_doc 'an allowlist row with no pipe fires' "blank-reason $tmpd/waived.md"
+
+  # The arity floor's premise, asserted here AS WELL AS at the production call site. The
+  # production floor cannot run under --self-test (it lives in the block that reads the real
+  # tree), and on bash 4.4+ an emptied table leaves --self-test entirely green — so without this
+  # case the floor's own regression would be invisible to the fast path. Phrased as the floor's
+  # predicate rather than an exact count, so a justified fourth row needs no re-baseline here.
+  if [ "${#CIREPORT_MENTIONS_ALLOWED[@]}" -ge 3 ]; then got='ok'; else got="${#CIREPORT_MENTIONS_ALLOWED[@]}"; fi
+  expect_doc 'the allowlist meets its arity floor' 'ok'
 
   # --- claude_md_block_verdict -------------------------------------------------------------
   # ONE required literal per line, deliberately. The deletion loop below strips whole lines with
@@ -5805,6 +5843,17 @@ DD_N="$(wc -l < "$DD_LIST" | tr -d '[:space:]')"
 
 [ "$DD_N" -ge 60 ] || infra "check 12: the corpus command found $DD_N files carrying the token, expected at least 60 — it has probably stopped matching, and an empty corpus would pass this check having asserted nothing"
 [ "${#DOC_DIAGNOSIS_REQUIRED_LITERALS[@]}" -ge 5 ] || infra "check 12: DOC_DIAGNOSIS_REQUIRED_LITERALS has ${#DOC_DIAGNOSIS_REQUIRED_LITERALS[@]} entries, expected at least 5"
+# The THIRD table of the same shape, and the one that shipped without a floor. MEASURED on bash
+# 3.2.57 — the macOS system bash, this repo's stated compat target: with CIREPORT_MENTIONS_ALLOWED
+# emptied, `for entry in "${CIREPORT_MENTIONS_ALLOWED[@]}"` is an unbound-variable error under
+# `set -u`. That kills the PROCESS SUBSTITUTION below rather than the gate, so doc_diagnosis_verdict
+# emits zero rows, the while loop's unrouted status hides it, and assertion A passes having asserted
+# nothing — the `∅ ⊆ allowlist` shape the block comment above describes, arriving by a second route.
+# bash 4.4+ reds instead (measured at 5.3.15), so the hole is specifically on the platform this gate
+# runs on locally. `-ge 3`, not `-ge 1`: the allowlist is fixed at exactly the three structural rows
+# (this file, its README, CLAUDE.md), and check 8e's precedent is a meaningful floor, not a nominal
+# one. A fourth row is a deliberate re-baseline, the same as the other two floors (SMA-597 round 1).
+[ "${#CIREPORT_MENTIONS_ALLOWED[@]}" -ge 3 ] || infra "check 12: CIREPORT_MENTIONS_ALLOWED has ${#CIREPORT_MENTIONS_ALLOWED[@]} entries, expected at least 3"
 
 while IFS= read -r verdict; do
   case "$verdict" in
