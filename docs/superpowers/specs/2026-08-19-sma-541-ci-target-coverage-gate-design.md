@@ -449,8 +449,12 @@ README, since D1 rejects a standalone task partly on cost grounds.
 
   **Still open after SMA-554** — and load-bearing, so do not read the exact-literal pin as closing
   it. A step-level `if: ${{ false }}` leaves all eight pinned lines byte-identical and the
-  invocation count at 2, so neither of C5's assertions can see it. `repo:actionlint`'s check 8d is
-  the control that does, by executing the block; see L12 in `ci/actionlint/README.md`.
+  invocation count at 2, so neither of C5's assertions can see it. `repo:actionlint`'s check 8d
+  does **not** close this either: its `extract_moon_step_block` skips every step key that is not
+  `run:` while seeking the block, so a step-level `if:` leaves the extracted text unchanged and 8d
+  reports clean on all four event paths. Nothing in this repo closes a step-level `if:` today —
+  see L12 in `ci/actionlint/README.md` and L2 in the SMA-554 spec. (8d does close the related but
+  distinct in-bash `if false; then … fi` wrap — a different construction, not this one.)
 - **L11 — `internal: true` is a second way to switch a gate off, and C1 is blind to it.** Per E3,
   `moon query tasks` omits an internal task entirely, so the forward comparison never considers it
   and reports nothing. C2 catches the resulting dead `T` entry, but only incidentally — the entry is

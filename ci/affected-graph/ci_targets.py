@@ -76,19 +76,25 @@ T_ARRAY_RE = re.compile(r"^[ \t]*T=\((.*?)\)[ \t]*$", re.MULTILINE)
 # thing someone wrote". There is no clever spelling of a string that is not that string.
 #
 # Copied VERBATIM from .github/workflows/ci.yml, indentation included — re-verify against the real
-# file (`awk 'NR>=235 && NR<=242' .github/workflows/ci.yml`) before editing this tuple; do not
-# hand-format an entry. Same rule ci/actionlint/run.sh's T_INVOCATION_ALLOWLIST states for itself,
-# and keeping both pins on that one rule is what makes co-updating them mechanical.
+# file (`awk '/^ *T=\(/{f=1;next} f&&c<8{print;c++}' .github/workflows/ci.yml`, anchored on the
+# `T=(…)` line rather than a hardcoded line range so it cannot rot when the file shifts) before
+# editing this tuple; do not hand-format an entry. Same rule ci/actionlint/run.sh's
+# T_INVOCATION_ALLOWLIST states for itself, and keeping both pins on that one rule is what makes
+# co-updating them mechanical.
 #
 # CO-UPDATE SITES (SMA-554 §6). An edit to these lines touches FOUR places, not one:
-#   1. .github/workflows/ci.yml:235-242                      — the block itself
+#   1. .github/workflows/ci.yml:236-243                      — the block itself
 #   2. ci/actionlint/run.sh, T_INVOCATION_ALLOWLIST          — check 8b's exact-literal pin
 #   3. ci/actionlint/run.sh, block_execution_verdict         — check 8d's derived expectation
 #   4. this tuple
 # Checks 8b and 8d are NOT redundant with this one and must not be deleted on the grounds that
 # ci_targets.py now pins the same lines: 8d EXECUTES the block against a stubbed `moon` on four
-# GitHub event paths, which is the only control that sees a step-level `if: false` or an
-# `if false; then … fi` wrap (L2). This tuple is a second, independently-scheduled opinion.
+# GitHub event paths, which is the control that closes an in-bash `if false; then … fi` wrap (it
+# carries a fixture for that construction). It does NOT see a step-level `if: ${{ false }}` on the
+# step itself: `extract_moon_step_block` skips every step key that is not `run:` while seeking the
+# block, so a step-level `if:` leaves the extracted block byte-identical and 8d reports clean on
+# all four event paths. Nothing in this repo closes that case today (L2). This tuple is a second,
+# independently-scheduled opinion.
 #
 # The `T=(…)` line directly above the block is deliberately NOT part of this tuple: every new
 # `repo:*` gate appends to it, so including it would red this gate on the single most routine edit
@@ -111,12 +117,16 @@ MOON_CI_BRANCH_BLOCK = (
 #
 # That demotion is what makes its known false negatives tolerable rather than holes. `$MOON ci …`,
 # a `FOO=1 moon ci …` env-assignment prefix, a `moon()` shell-function shadow and a `\`-continued
-# invocation are all uncounted (L1) — but check 8d in ci/actionlint/run.sh catches every one of
-# them behaviourally, by executing the block and counting real `moon` invocations.
+# invocation are all uncounted (L1). Check 8d in ci/actionlint/run.sh catches three of the four
+# behaviourally, by executing the block and counting real `moon` invocations — the env-assignment
+# prefix, the shell-function shadow, and the `\`-continued invocation. Measured false for
+# `$MOON ci …` specifically: 8d logs exactly one correct invocation and reports clean (the `set -u`
+# abort on the undefined `$MOON` happens after the real call is already counted), so that one form
+# is uncaught by any control in the repo.
 #
 # Anchored at COMMAND POSITION — `moon` must be the line's first token — with `[ \t]+` between the
 # two words, so neither a `#` comment nor a `name:` field is mistaken for an invocation. Verified
-# against the real ci.yml: it matches exactly the two invocation lines, and none of the eight prose
+# against the real ci.yml: it matches exactly the two invocation lines, and none of the prose
 # comments or two `name:` fields that mention `moon ci`.
 MOON_CI_LINE_RE = re.compile(r"^[ \t]*moon[ \t]+ci\b.*$", re.MULTILINE)
 
@@ -1415,11 +1425,15 @@ def check_invocation(ci_yml_text):
     so a reordered or multi-space invocation is red in this repository today. What changes here is
     one gate's fixtures, not the repo's behaviour (SMA-554 E3).
 
-    What this does NOT prove is that the block EXECUTES. A step-level `if: ${{ false }}`, or an
-    `if false; then … fi` wrap, leaves all eight lines byte-identical and the count at 2. Check 8d
-    (ci/actionlint/run.sh, block_execution_verdict) is the control that closes those, by executing
-    the block against a stubbed `moon` on four GitHub event paths — see L2 in the spec and L12 in
-    ci/actionlint/README.md. Do not delete 8d on the grounds that this function pins the same lines.
+    What this does NOT prove is that the block EXECUTES. An `if false; then … fi` wrap leaves all
+    eight lines byte-identical and the count at 2; check 8d (ci/actionlint/run.sh,
+    block_execution_verdict) is the control that closes it, by executing the block against a
+    stubbed `moon` on four GitHub event paths. A step-level `if: ${{ false }}` on the step itself
+    leaves the block byte-identical too, but 8d does NOT see it: its `extract_moon_step_block`
+    skips every step key that is not `run:` while seeking the block, so the extracted text is
+    unchanged and 8d reports clean on all four event paths. Nothing in this repo closes that case
+    today — see L2 in the spec and L10 in the SMA-541 spec. Do not delete 8d on the grounds that
+    this function pins the same lines; it remains the control for the in-bash wrap.
 
     Lines are split on "\\n" rather than with .splitlines(), which also splits on \\x0b, \\x0c,
     \\x1c-\\x1e, \\x85, U+2028 and U+2029 — MOON_CI_LINE_RE's re.MULTILINE anchors split only on "\\n", so
@@ -2101,7 +2115,9 @@ def self_test():
         )
 
     # 19 — prose comments and `name:` fields mentioning `moon ci` must not be counted. The real
-    # ci.yml carries eight of the former and two of the latter.
+    # ci.yml carries nine of the former and two of the latter (SMA-601 added two more prose
+    # comments; re-verify this count if it drifts again — it is not load-bearing for the regex,
+    # which is anchored at command position).
     clean("prose-and-name-fields", step(
         canonical_block,
         prologue="          # `moon ci` is affected-only, so a PR touching no Rust never rebuilds\n",
@@ -2110,8 +2126,11 @@ def self_test():
 
     # 20 — documents L1 in the both-directions style this file already uses. `$MOON ci` is NOT at
     # command position for MOON_CI_LINE_RE, so an added invocation spelled that way is invisible
-    # here. Check 8d catches it behaviourally by executing the block; this gate does not, and the
-    # fixture says so out loud rather than leaving it to be rediscovered.
+    # here. Check 8d does not catch it either — measured: with `$MOON ci "${T[@]:0:1}"` appended
+    # after the block's `fi`, 8d logs exactly one correct invocation and reports clean, since the
+    # `set -u` abort on the undefined `$MOON` happens after the real call is already counted. This
+    # form is uncaught by any control in the repo, and the fixture says so out loud rather than
+    # leaving it to be rediscovered.
     clean("L1-uncounted-indirection",
           step(canonical_block, epilogue='          $MOON ci "${T[@]:0:5}"\n'))
 

@@ -320,10 +320,13 @@ It also runs several checks that the per-case project sets structurally **cannot
   >
   > C5 is a **second opinion, not the primary guard**. `ci/actionlint/run.sh`'s check 8b already
   > pins the same three invocation lines as exact literals, and check 8d **executes** the block
-  > against a stubbed `moon` on four GitHub event paths — which is the only control that sees a
-  > step-level `if: false` or an `if false; then … fi` wrap, since both leave every line
-  > byte-identical. C5's value is that it is scheduled independently of `repo:actionlint`. Editing
-  > those eight lines therefore has **four** co-update sites; C5's failure message lists them all.
+  > against a stubbed `moon` on four GitHub event paths — which closes an in-bash
+  > `if false; then … fi` wrap of the block, since that leaves every line byte-identical. It does
+  > **not** see a step-level `if: false` on the step itself: 8d's block extractor skips every step
+  > key that is not `run:` while seeking the block, so a step-level `if:` leaves the extracted text
+  > unchanged and 8d reports clean regardless — nothing in this repo closes that case today. C5's
+  > value is that it is scheduled independently of `repo:actionlint`. Editing those eight lines
+  > therefore has **four** co-update sites; C5's failure message lists them all.
 
   Maintenance: adding a `repo:*` task means adding `:<name>` to `T` **and** to the command between
   `<!-- ci-targets:begin -->` / `<!-- ci-targets:end -->` in CLAUDE.md. A task that must stay out of

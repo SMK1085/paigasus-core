@@ -174,7 +174,7 @@ duplicate what C1–C3 already assert about the array's contents.
   strictly weaker than the block, reds on the same edits, and duplicates 8b exactly rather than
   adding a different kind of assertion.
 - **Set-equality against an allowlist of every `ci.yml` line mentioning `moon ci`.** Rejected:
-  `ci.yml` carries eight prose comments and two `name:` fields mentioning it, so every comment
+  `ci.yml` carries several prose comments and two `name:` fields mentioning it, so every comment
   reword would red the gate.
 
 ## 4. Design decisions
@@ -348,15 +348,45 @@ scaffolding — is what reds it.
 - **L1 — B's recogniser still has false negatives.** `$MOON ci "${T[@]:0:5}"`, a `FOO=1 moon ci …`
   env-assignment prefix, a `moon()` shell-function shadow, and a `\`-continued invocation are not
   counted, so such an *added* invocation is invisible to B. Unchanged from today; what changes is
-  that it no longer affects a shape rule. **Check 8d catches all of them behaviourally** — it
-  executes the block and counts real `moon` invocations.
-- **L2 — A proves the block is present at the anchor, not that it executes.** Two constructions
-  defeat both A and B, and both are known: a **step-level `if: ${{ false }}`** on the
-  `- name: moon ci (affected graph)` step (SMA-541's own L10; `ci/actionlint/README.md:296-304`),
-  and an **`if false; then … fi` wrap** of the block with an L1-invisible invocation added. Both
-  leave all eight lines byte-identical and the count at 2. **Check 8d is what closes them**, and
-  fixtures them in both directions. *(The first draft claimed no such construction was known. It
-  was wrong, and the correction is the main reason §3 reframes A as defence in depth.)*
+  that it no longer affects a shape rule. **Check 8d catches three of the four behaviourally** —
+  the `FOO=1 moon ci …` prefix, the `moon()` shadow, and the `\`-continued invocation — by
+  executing the block and counting real `moon` invocations. Measured false for `$MOON ci …`
+  specifically: appended after the block's `fi`, 8d logs exactly one correct invocation and
+  reports clean (the `set -u` abort on the undefined `$MOON` happens after the real call is
+  already counted). `$MOON ci` is uncaught by any control in the repo.
+- **L2 — A proves the block is present at the anchor, not that it executes.** At least three
+  constructions defeat both A and B; this list is not exhaustive. A **step-level
+  `if: ${{ false }}`** on the `- name: moon ci (affected graph)` step (SMA-541's own L10;
+  `ci/actionlint/README.md:296-304`) and an **`if false; then … fi` wrap** of the block with an
+  L1-invisible invocation added both leave all eight lines byte-identical and the count at 2. Only
+  the wrap is closed: check 8d executes the block against a stubbed `moon` and catches it,
+  fixtured in both directions. The step-level `if:` is closed by **nothing** — 8d's
+  `extract_moon_step_block` skips every step key that is not `run:` while seeking the block, so a
+  step-level `if:` leaves the extracted text unchanged and 8d reports clean on all four event
+  paths regardless.
+
+  A third construction, independently verified with real bash, defeats every control in the repo,
+  this one included:
+
+  ```yaml
+        run: |
+          set -euo pipefail
+          trap 'exit 0' ERR          # inserted ABOVE the T=(…) anchor
+          T=(:build … :ruff-ci)
+          if [ "$EVENT" = "pull_request" ]; then
+          …
+  ```
+
+  `set -euo pipefail` plus `trap 'exit 0' ERR` makes a failing command exit **0** (without the
+  trap line the same script exits 1). It defeats C5's A (the trap sits above the anchor, so the
+  eight pinned lines still start at anchor+1, byte-identical), C5's B (still 2 invocations), check
+  8's `swallowed`/`block-swallowed` (need a `||`/`&&`/`;`/`|` tail) and `wrapped` (its token
+  vocabulary — `command|env|time|eval|exec|if|while|until|!` — has no `trap`), 8b (no `"${T[@]}"`
+  on the trap line), and 8d (its stub exits 0, so the trap never fires). A two-line variant is
+  `set -uo pipefail` plus a trailing `exit 0` after `fi`. This is a **pre-existing repo hole, not
+  introduced by this branch**, and it remains unclosed today. *(The first draft claimed no such
+  construction was known. It was wrong, and the correction is the main reason §3 reframes A as
+  defence in depth.)*
 - **L3 — nothing pins `check_invocation`'s own call site.** `ci_targets.py:2958` calls it and
   `:3074` reports it; deleting both in one edit leaves the gate green. This is the same shape as
   L6 in `ci/actionlint/README.md` and is not addressed here.
