@@ -124,6 +124,83 @@ impl OpenAiError {
     }
 }
 
+/// The `source` of a `CaBundle` error raised when the bundle's certificates parse as PEM but not
+/// as DER. Holds the original `reqwest::Error` as its own `source`, so anyhow renders the whole
+/// chain and callers keep the ability to downcast — a pre-rendered `String` would discard both.
+#[derive(thiserror::Error)]
+#[error(
+    "contains a structurally invalid certificate: it decodes as base64 but is not valid DER. \
+     A control client built without it succeeded, so the platform trust store is not the cause"
+)]
+struct InvalidBundleCertificate {
+    #[source]
+    source: reqwest::Error,
+}
+
+impl std::fmt::Debug for InvalidBundleCertificate {
+    // Manual, not derived: a derived Debug would print only the struct's field, never this
+    // type's own `#[error(...)]` message — and this struct is boxed as a trait object elsewhere
+    // (`OpenAiError::CaBundle`'s derived `Debug` dispatches to whatever `Debug` this type has), so
+    // a bare `{err:?}` on that outer error needs this type's message + cause chain reachable
+    // without going through anyhow.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&describe_error(self))
+    }
+}
+
+/// What a failed `reqwest::Client` build can be attributed to. Mirrors
+/// `paigasus-iam/src/adapters/oidc/jwks.rs`'s copy; see SMA-558 D7 for why the two services'
+/// bundle handling is duplicated rather than extracted.
+///
+/// Only three combinations are reachable, and the type says so.
+#[derive(Debug)]
+enum Attribution<'a> {
+    NoBundle,
+    Bundle { path: &'a str },
+    BundleAndStore { path: &'a str },
+}
+
+/// Decides what a `build()` failure should be blamed on (SMA-570 D1). `control_build_ok` builds a
+/// client with the SAME options but no added anchors, and is called ONLY when a bundle is
+/// configured.
+///
+/// Success proves the store did not cause THIS failure — not that it is healthy, since reqwest
+/// errors on the native store only when `valid_count == 0 && invalid_count > 0`, so an absent or
+/// empty store builds fine. Failure names BOTH, because reqwest adds user roots first and
+/// `?`-returns on the first bad one before reaching the native store block: with both broken, the
+/// real build dies on the bundle while the control dies on the store.
+fn attribute_build_failure<'a>(bundle: Option<&'a str>, control_build_ok: impl FnOnce() -> bool) -> Attribution<'a> {
+    match bundle {
+        None => Attribution::NoBundle,
+        Some(path) => {
+            if control_build_ok() {
+                Attribution::Bundle { path }
+            } else {
+                Attribution::BundleAndStore { path }
+            }
+        }
+    }
+}
+
+/// Renders `err` and its full `source()` chain as `"outer: middle: inner"`. reqwest's build error
+/// `Display` is the bare string `"builder error"`, so the cause is only reachable this way.
+/// IAM has its own copy at `adapters/error_chain.rs` (SMA-558 D7: duplicated, not extracted).
+fn describe_error(err: &(dyn std::error::Error + 'static)) -> String {
+    let mut parts = vec![err.to_string()];
+    let mut source = err.source();
+    while let Some(e) = source {
+        parts.push(e.to_string());
+        source = e.source();
+    }
+    parts.join(": ")
+}
+
+/// The client's non-TLS options, in ONE place so the control build differs from the real one by
+/// exactly the added anchors (SMA-570 D6). `ClientBuilder` is not `Clone`, hence a function.
+fn base_builder(connect_timeout: Duration, stream_idle_timeout: Duration) -> reqwest::ClientBuilder {
+    reqwest::Client::builder().connect_timeout(connect_timeout).read_timeout(stream_idle_timeout)
+}
+
 /// The outbound OpenAI client: a shared `reqwest::Client` (connection-pooled; cheap to clone),
 /// the upstream base URL, the real API key, and the first-byte budget applied per non-stream
 /// request.
@@ -147,7 +224,22 @@ impl OpenAiClient {
     /// underlying `reqwest::Client`; `first_byte_timeout` is stored and applied per non-stream
     /// request. NO global client `.timeout()` is set (it would cap a legitimate long stream).
     pub fn new(cfg: &OpenAiConfig, connect_timeout: Duration, first_byte_timeout: Duration, stream_idle_timeout: Duration) -> Result<Self, OpenAiError> {
-        let mut builder = reqwest::Client::builder().connect_timeout(connect_timeout).read_timeout(stream_idle_timeout);
+        Self::new_with_control_build(cfg, connect_timeout, first_byte_timeout, stream_idle_timeout, || {
+            base_builder(connect_timeout, stream_idle_timeout).build().is_ok()
+        })
+    }
+
+    /// `new` with the control build injected, so both attribution arms are reachable in tests
+    /// without mutating `SSL_CERT_FILE` (`unsafe` in edition 2024) or depending on the host's
+    /// trust store.
+    pub(crate) fn new_with_control_build(
+        cfg: &OpenAiConfig,
+        connect_timeout: Duration,
+        first_byte_timeout: Duration,
+        stream_idle_timeout: Duration,
+        control_build_ok: impl FnOnce() -> bool,
+    ) -> Result<Self, OpenAiError> {
+        let mut builder = base_builder(connect_timeout, stream_idle_timeout);
 
         if let Some(path) = cfg.extra_ca_bundle_path.as_deref() {
             let ca_bundle = |source: Box<dyn std::error::Error + Send + Sync>| OpenAiError::CaBundle { path: path.to_string(), source };
@@ -172,7 +264,28 @@ impl OpenAiClient {
             }
         }
 
-        let http = builder.build().map_err(OpenAiError::Build)?;
+        let http = builder.build().map_err(|e| match attribute_build_failure(cfg.extra_ca_bundle_path.as_deref(), control_build_ok) {
+            Attribution::NoBundle => OpenAiError::Build(e),
+            Attribution::Bundle { path } => {
+                tracing::error!(path = %path, attribution = "bundle", "OpenAI HTTP client build failed");
+                OpenAiError::CaBundle {
+                    path: path.to_string(),
+                    source: Box::new(InvalidBundleCertificate { source: e }),
+                }
+            }
+            Attribution::BundleAndStore { path } => {
+                tracing::error!(path = %path, attribution = "bundle_and_store", "OpenAI HTTP client build failed");
+                let chain = describe_error(&e);
+                OpenAiError::CaBundle {
+                    path: path.to_string(),
+                    source: format!(
+                        "the platform trust store also contains no parseable certificates, which is the more \
+                         likely cause — fix that first, then re-verify this bundle ({chain})"
+                    )
+                    .into(),
+                }
+            }
+        })?;
         Ok(Self {
             http,
             // Trim a trailing slash so `{base_url}/v1/chat/completions` never doubles up.
@@ -309,6 +422,85 @@ mod tests {
         let err = client_with_bundle("sk-x", Some(f.path().to_str().unwrap().to_string())).expect_err("an undecodable bundle must fail");
         assert!(matches!(err, OpenAiError::CaBundle { .. }), "expected CaBundle, got {err:?}");
         assert!(format!("{err:?}").contains("invalid certificate encoding"), "the error must say the bundle failed to decode: {err:?}");
+    }
+
+    // ---- build-failure attribution (SMA-570) --------------------------------------------------
+    // `AAAAAAAA` is valid base64 (six zero bytes) but not valid DER, so unlike the
+    // `!!!not base64!!!` fixture above it PASSES from_pem_bundle and fails later in
+    // builder.build() — a different reqwest code path, hence its own tests.
+    const INVALID_DER_PEM: &[u8] = b"-----BEGIN CERTIFICATE-----\nAAAAAAAA\n-----END CERTIFICATE-----\n";
+
+    fn client_with_bundle_and_control(extra_ca_bundle_path: Option<String>, control_build_ok: bool) -> Result<OpenAiClient, OpenAiError> {
+        let cfg = OpenAiConfig {
+            base_url: "https://api.openai.com/".to_string(),
+            api_key: SecretString::from("sk-x".to_string()),
+            extra_ca_bundle_path,
+        };
+        OpenAiClient::new_with_control_build(&cfg, Duration::from_secs(10), Duration::from_secs(30), Duration::from_secs(300), || control_build_ok)
+    }
+
+    #[test]
+    fn attribution_without_a_bundle_never_runs_the_control_build() {
+        let probed = std::cell::Cell::new(false);
+        let attribution = attribute_build_failure(None, || {
+            probed.set(true);
+            true
+        });
+
+        assert!(matches!(attribution, Attribution::NoBundle));
+        assert!(!probed.get(), "a bundle-less failure must not pay for a second load_native_certs()");
+    }
+
+    #[test]
+    fn attribution_blames_the_bundle_when_the_control_build_succeeds() {
+        let attribution = attribute_build_failure(Some("/etc/paigasus/corp-ca.pem"), || true);
+        assert!(matches!(attribution, Attribution::Bundle { path } if path == "/etc/paigasus/corp-ca.pem"));
+    }
+
+    #[test]
+    fn attribution_names_both_when_the_control_build_also_fails() {
+        let attribution = attribute_build_failure(Some("/etc/paigasus/corp-ca.pem"), || false);
+        assert!(matches!(attribution, Attribution::BundleAndStore { path } if path == "/etc/paigasus/corp-ca.pem"));
+    }
+
+    #[test]
+    fn the_build_variant_message_is_byte_unchanged() {
+        // AC4. The no-bundle path still returns OpenAiError::Build, whose #[error] attribute is
+        // untouched by SMA-570. Minted from a real failed build so the variant is exercised, not
+        // just quoted.
+        let bad = reqwest::Certificate::from_pem_bundle(INVALID_DER_PEM).expect("parses as one cert");
+        let mut b = reqwest::Client::builder();
+        for c in bad {
+            b = b.add_root_certificate(c);
+        }
+        let reqwest_err = b.build().expect_err("an invalid-DER anchor must fail the build");
+
+        assert_eq!(
+            OpenAiError::Build(reqwest_err).to_string(),
+            "failed to build the OpenAI HTTP client — this can also mean the platform trust store contains no parseable certificates"
+        );
+    }
+
+    #[test]
+    fn der_invalid_ca_bundle_names_the_config_key() {
+        let f = tmp_file_with(INVALID_DER_PEM);
+        let err = client_with_bundle_and_control(Some(f.path().to_str().unwrap().to_string()), true).expect_err("a structurally invalid certificate must fail the build");
+
+        let rendered = format!("{err:?}");
+        assert!(matches!(err, OpenAiError::CaBundle { .. }), "expected CaBundle, got {err:?}");
+        assert!(err.to_string().contains("upstream.openai.extra_ca_bundle_path"), "the error must name the config key: {err}");
+        assert!(rendered.contains("not valid DER"), "the error must say what is wrong with it: {rendered}");
+    }
+
+    #[test]
+    fn der_invalid_ca_bundle_with_a_broken_store_names_both() {
+        let f = tmp_file_with(INVALID_DER_PEM);
+        let err = client_with_bundle_and_control(Some(f.path().to_str().unwrap().to_string()), false).expect_err("a structurally invalid certificate must fail the build");
+
+        let rendered = format!("{err:?}");
+        assert!(matches!(err, OpenAiError::CaBundle { .. }), "expected CaBundle, got {err:?}");
+        assert!(rendered.contains("platform trust store"), "the store is the primary fault: {rendered}");
+        assert!(rendered.contains("fix that first"), "the operator needs an order of operations: {rendered}");
     }
 
     /// A throwaway CA certificate, minted fresh per test run. Used ONLY to prove the bundle path
