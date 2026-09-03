@@ -94,6 +94,9 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   `MOON_BASE` was tested and ruled out (the gate passes with it set). The gate is otherwise green
   everywhere. If you see a sub-3s `affected-smoke` failure, capture the full task output before
   re-running, because a re-run passes and destroys the evidence.
+  (SMA-597 measured the mechanism: it is OVERWRITE, not discard. A passing re-run rewrites
+  `stdout.log`, truncates `stderr.log`, rewrites `lastRun.json` and flips the `ciReport.json` row
+  to `passed`. See the diagnosis procedure entry below.)
   **The mechanism below is measured on the ONE session that captured output (SMA-592), not on
   both.** In that occurrence the failure is an infrastructure ABORT, not a red verdict: the gate's
   own nested `moon query projects` dies with `Error: proto-shim:
@@ -111,6 +114,52 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   does not explain your failure — diagnose it on its own terms.
   The NDJSON entry above is the same root tool, a different symptom; both mean a `moon`/`proto`
   call inside a gate is the fragile part of an agent-driven local run, never in CI.
+- **Diagnosing an unattributed `moon ci` failure.** The procedure below is MEASURED on moon 2.5.3
+  (SMA-597); re-take it on a bump. It is for **local** runs — in CI see the note at the end.
+  <!-- moon-diagnosis:begin -->
+  **Step 0 — capture before you re-run anything.** A re-run overwrites every artifact holding the
+  evidence, and a PASSING re-run is just as destructive as another failing one: it rewrites
+  `stdout.log`, truncates `stderr.log` to zero bytes, rewrites `lastRun.json`, and flips the
+  action to `passed` in `ciReport.json` (all four measured). Copy `.moon/cache/ciReport.json` and
+  `.moon/cache/states/<project>/<task>/` somewhere outside the repo first.
+
+  **Step 1 — which task, what command, what exit code.**
+  ```bash
+  jq '.actions[] | select(.status=="failed")
+      | {label, error,
+         exec: (.operations[] | select(.meta.type=="task-execution") | {command, exitCode})}' \
+     .moon/cache/ciReport.json
+  ```
+  There is **no action-level `exitCode` key** — `has("exitCode")` is `false`. The widely copied
+  query projects `{label, status, exitCode}` and so reports `null` for a key moon never writes,
+  which is why this file has a reputation for being empty. It is not: the real exit code and the
+  full command are in `operations[]`, on the entry whose `meta.type` is `task-execution`.
+
+  **Step 2 — why.** `cat .moon/cache/states/<project>/<task>/stdout.log` and `stderr.log`. This is
+  the only place task output exists. It works for a task that never started: a missing binary
+  leaves `stdout.log` empty and `stderr.log` holding `command not found` (exit 127).
+
+  **Step 2a — prove the logs belong to this run. Mandatory.** Compare the report action's
+  `finishedAt` against `lastRun.json`'s `lastRunTime`. **If they disagree, stop** — the logs are
+  from a different run and pairing them with step 1's command yields a confident wrong answer.
+  Two measured causes: `moon run` writes `runReport.json` and does NOT touch `ciReport.json`, so a
+  `moon run` re-run desynchronises them; and a cache HIT rewrites neither, so a log can be
+  arbitrarily older than the run you are looking at.
+
+  **Step 3 — if it still does not reproduce.** `moon run <target> --force`. Note that
+  `buffer-only-failure` prints a FAILING task's output but discards a PASSING one's, and that this
+  re-run desynchronises the report and the logs per step 2a.
+
+  **What cannot work:** no `--summary` level (`none`/`minimal`/`normal`/`detailed`) and no
+  `outputStyle` (`stream`/`buffer`/`none`) puts stdout or stderr into `ciReport.json`; all seven
+  cells are byte-identical, and a key walk over the whole failing action finds no output field at
+  any depth. `--log-file` captures moon's own tracing, not a task's stdio. Do not re-litigate this.
+
+  **In CI this procedure does not apply as written.** There is no shell and the runner is
+  destroyed, so step 0 is unexecutable; and `ci.yml` restores `.moon/cache` across runs, so a
+  cache-hit task's logs may be from an older commit entirely. Use the `moon-diagnostics` artifact
+  that `ci.yml` uploads on failure.
+  <!-- moon-diagnosis:end -->
 - `cargo nextest` exits non-zero on a workspace with **no tests** — use `--no-tests=pass`.
 - `.github/CODEOWNERS` is Moon-generated — don't hand-edit.
 - `vcs.hooks` is intentionally empty; lefthook will own `.git/hooks` (SMA-371).
