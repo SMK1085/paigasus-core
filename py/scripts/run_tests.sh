@@ -21,5 +21,10 @@ uv run pytest "$@"
 # nothing gates it (SMA-610 residual 1/7) — CI never passes args, so a permanent `args:` entry on
 # the Moon task is the edit a reviewer has to catch.
 if [ "$#" -eq 0 ]; then
-  uv run pytest --collect-only -q | uv run python scripts/assert_test_floor.py
+  # PYTEST_ADDOPTS is cleared deliberately. The floor's question is "does every pinned package
+  # still contribute tests", which is about the TREE, not about whatever filter a developer has
+  # exported into their shell. Left set, `PYTEST_ADDOPTS=-k foo` filters the collection too and
+  # the floor reds on a tree that is perfectly intact (measured: exit 2). Clearing it here keeps
+  # the real run above honouring the developer's filter while the floor stays authoritative.
+  PYTEST_ADDOPTS= uv run pytest --collect-only -q | uv run python scripts/assert_test_floor.py
 fi

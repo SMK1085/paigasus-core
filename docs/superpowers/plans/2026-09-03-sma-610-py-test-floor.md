@@ -18,7 +18,9 @@
 - The guard is pure stdlib. No new dependency, no change to `py/uv.lock`.
 - The guard is ruff-linted (`line-length = 200`, rule set `E,F,W,I,N,UP,B,A,C4,SIM,TCH,RUF`) but NOT type-checked — `tool.basedpyright.include` does not reach `py/scripts`. Same posture as `py/scripts/assert_typecheck_coverage.py`.
 - Do NOT add a `repo:*` gate, and do NOT touch `ci/affected-graph/ci_targets.py`, `moon.yml`, or `ci/actionlint/run.sh`. The invocation pin was considered and declined (spec, "Placement" + residual 1).
-- Do NOT "fix" `py:typecheck`'s identical missing `pipefail` (`.moon/tasks/python.yml:38`) — explicitly out of scope.
+- ~~Do NOT "fix" `py:typecheck`'s identical missing `pipefail`.~~ **Amended mid-execution:** the
+  reviewer directed it be folded into this PR, so `.moon/tasks/python.yml`'s `typecheck` now
+  carries `set -euo pipefail` too. See the spec's amended out-of-scope entry.
 - Run every measurement from `py/` unless stated otherwise. Restore any moved directory before finishing a step; `git status --short` must be empty.
 
 ---
@@ -68,6 +70,7 @@ filterwarnings = ["error::pytest.PytestConfigWarning"]
 
 ```bash
 cd py
+export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
 mv packages/paigasus-kernel/tests /tmp/k-tests && mv packages/paigasus-proto/tests /tmp/p-tests
 uv run pytest -q; echo "EXIT=$?"
 mv /tmp/k-tests packages/paigasus-kernel/tests && mv /tmp/p-tests packages/paigasus-proto/tests
@@ -79,9 +82,10 @@ Expected: `EXIT=1`, output ending in `pytest.PytestConfigWarning: No files were 
 
 ```bash
 cd py
+export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
 uv run pytest -q | tail -1                       # expect: 134 passed
 mv packages/paigasus-kernel/tests /tmp/k-tests
-uv run pytest -q | tail -1; echo "EXIT=${PIPESTATUS[0]}"   # expect: 7 passed, EXIT=0
+out=$(uv run pytest -q); rc=$?; echo "$out" | tail -1; echo "EXIT=$rc"   # expect: 7 passed, EXIT=0
 mv /tmp/k-tests packages/paigasus-kernel/tests
 ```
 
@@ -434,14 +438,18 @@ Expected: 19 `PASS` lines, `19/19 self-test cases passed`, `EXIT=0`. If any case
 
 ```bash
 cd py
+export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
 uv run pytest --collect-only -q | uv run python scripts/assert_test_floor.py; echo "0? EXIT=$?"
 printf '' | uv run python scripts/assert_test_floor.py; echo "2? EXIT=$?"
 printf 'packages/paigasus-kernel/tests/t.py::a\n\n1 test collected in 0.0s\n' \
   | uv run python scripts/assert_test_floor.py; echo "1? EXIT=$?"
 printf 'x\n\n9 tests collected in 0.0s\n' | uv run python scripts/assert_test_floor.py; echo "2? EXIT=$?"
+R="$(git rev-parse --show-toplevel)"
+# The venv python directly, NOT `uv run`: from /tmp there is no .prototools, so proto cannot
+# resolve uv and dies with `proto::detect::failed` -- an exit 1 that looks like the guard reding
+# (measured during execution; it briefly fooled the implementer).
 cd /tmp && printf 'packages/paigasus-kernel/tests/t.py::a\n\n1 test collected in 0.0s\n' \
-  | uv run --project /Users/sven/dev/paigasus/paigasus-core/py python \
-    /Users/sven/dev/paigasus/paigasus-core/py/scripts/assert_test_floor.py; echo "cwd-independent? EXIT=$?"
+  | "$R/py/.venv/bin/python" "$R/py/scripts/assert_test_floor.py"; echo "cwd-independent? EXIT=$?"
 ```
 
 Expected in order: `EXIT=0`; `EXIT=2`; `EXIT=1` naming `paigasus-proto` as having contributed no tests; `EXIT=2` (count mismatch); `EXIT=1` from `/tmp` — the guard resolves its root from `__file__`, not the cwd, so it still finds the packages and still reds the floor. Record all outputs.
@@ -452,6 +460,7 @@ Exit codes **3** and **4** are covered by the self-test rather than by stdin: bo
 
 ```bash
 cd py
+export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
 uv run ruff format scripts/assert_test_floor.py
 uv run ruff check scripts/assert_test_floor.py
 ```
@@ -482,6 +491,7 @@ git commit -m "ci(py): add a per-package pytest collection floor (SMA-610)"
 Create `py/scripts/run_tests.sh` with exactly this content:
 
 ```bash
+export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
 #
@@ -569,9 +579,9 @@ declaration outlived the file — a dead input, invisible because `repo:input-li
 
 ```bash
 export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
-cd /Users/sven/dev/paigasus/paigasus-core
+cd "$(git rev-parse --show-toplevel)"
 moon run py:test --force; echo "intact EXIT=$?"
-moon run py:test --force -- -k parity 2>&1 | grep -E 'deselected|passed'
+out=$(moon run py:test --force -- -k parity 2>&1); rc=$?; echo "$out" | grep -E 'deselected|passed'; echo "EXIT=$rc"
 cd py && mv packages/paigasus-kernel/tests /tmp/k-tests && cd ..
 moon run py:test --force; echo "partial-loss EXIT=$?"
 cd py && mv /tmp/k-tests packages/paigasus-kernel/tests && cd ..
@@ -583,7 +593,8 @@ Expected: intact `EXIT=0`; filtered shows `10 deselected` (passthrough survived)
 - [ ] **Step 5: Verify the `scripts/**` input actually re-runs the task**
 
 ```bash
-cd /Users/sven/dev/paigasus/paigasus-core
+cd "$(git rev-parse --show-toplevel)"
+export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
 moon run py:test            # warm; expect a cached/fast pass
 touch py/scripts/assert_test_floor.py
 moon run py:test            # must RE-RUN, not report a cache hit
@@ -594,7 +605,8 @@ Expected: the second run executes the task rather than serving a cached result. 
 - [ ] **Step 6: Verify lint/fmt now select on a scripts edit**
 
 ```bash
-cd /Users/sven/dev/paigasus/paigasus-core
+cd "$(git rev-parse --show-toplevel)"
+export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
 moon query tasks --affected --json 2>/dev/null | head -1 >/dev/null   # warm the graph
 touch py/scripts/assert_test_floor.py
 moon run py:lint py:fmt --force; echo "EXIT=$?"
@@ -653,16 +665,16 @@ Tasks 2-3's floor are both in place, i.e. the tree as it now stands.
 
 ```bash
 export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
-cd /Users/sven/dev/paigasus/paigasus-core/py
+cd "$(git rev-parse --show-toplevel)/py"
 echo "--- intact ---";        bash scripts/run_tests.sh >/dev/null 2>&1; echo "EXIT=$?"
 mv packages/paigasus-kernel/tests /tmp/k
-echo "--- kernel lost ---";   bash scripts/run_tests.sh 2>&1 | tail -2; echo "EXIT=${PIPESTATUS[0]}"
+echo "--- kernel lost ---";   out=$(bash scripts/run_tests.sh 2>&1); rc=$?; echo "$out" | tail -2; echo "EXIT=$rc"
 mv /tmp/k packages/paigasus-kernel/tests
 mv packages/paigasus-proto/tests /tmp/p
-echo "--- proto lost ---";    bash scripts/run_tests.sh 2>&1 | tail -2; echo "EXIT=${PIPESTATUS[0]}"
+echo "--- proto lost ---";    out=$(bash scripts/run_tests.sh 2>&1); rc=$?; echo "$out" | tail -2; echo "EXIT=$rc"
 mv /tmp/p packages/paigasus-proto/tests
 mv packages/paigasus-kernel/tests /tmp/k && mv packages/paigasus-proto/tests /tmp/p
-echo "--- total loss ---";    bash scripts/run_tests.sh 2>&1 | tail -2; echo "EXIT=${PIPESTATUS[0]}"
+echo "--- total loss ---";    out=$(bash scripts/run_tests.sh 2>&1); rc=$?; echo "$out" | tail -2; echo "EXIT=$rc"
 mv /tmp/k packages/paigasus-kernel/tests && mv /tmp/p packages/paigasus-proto/tests
 cd .. && git status --short
 ```
@@ -675,7 +687,8 @@ non-zero via the floor naming `paigasus-proto` (a different shape — 127 tests 
 - [ ] **Step 4: Run the full py gate set**
 
 ```bash
-cd /Users/sven/dev/paigasus/paigasus-core
+cd "$(git rev-parse --show-toplevel)"
+export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
 moon run py:lint py:fmt py:typecheck py:test --force; echo "EXIT=$?"
 ```
 

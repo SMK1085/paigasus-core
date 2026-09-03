@@ -59,6 +59,12 @@ NODE_ID_RE = re.compile(r"^packages/([^/]+)/tests/[^:]+\.py::")
 
 # "134 tests collected in 0.04s", "7 tests collected in 0.03s", "1 test collected in 0.01s".
 COLLECTED_RE = re.compile(r"^(\d+) tests? collected")
+# "124/134 tests collected (10 deselected) in 0.04s" -- pytest switches to this shape as soon as
+# anything deselects. run_tests.sh clears PYTEST_ADDOPTS so the floor never sees it, but a hand-run
+# `pytest --collect-only -q -k foo | assert_test_floor.py` does, and without this the guard reports
+# "no collection summary line" -- a confusing false red instead of an honest floor breach. The
+# first number is the SELECTED count, which is what the node-id lines actually enumerate.
+DESELECTED_RE = re.compile(r"^(\d+)/\d+ tests? collected")
 # "no tests collected (134 deselected) in 0.06s" -- only reachable with -k/-m, which the wrapper
 # never passes. Parsed as zero rather than treated as a missing summary, so the two stay distinct.
 NONE_COLLECTED_RE = re.compile(r"^no tests collected")
@@ -79,7 +85,7 @@ def parse_collected(text: str) -> tuple[set[str], int, int | None]:
             packages.add(match.group(1))
             node_ids += 1
             continue
-        match = COLLECTED_RE.match(line)
+        match = COLLECTED_RE.match(line) or DESELECTED_RE.match(line)
         if match:
             reported = int(match.group(1))
             continue
@@ -234,6 +240,7 @@ def self_test() -> int:
         ("summary-only stream is a count mismatch", check_stream("5 tests collected in 0.1s") is not None),
         ("node ids without a summary are unreadable", check_stream(SELF_TEST_STREAM.split("\n")[0]) is not None),
         ("no-tests-collected parses as zero", parse_collected("no tests collected (134 deselected) in 0.06s")[2] == 0),
+        ("a deselected summary parses as the selected count", parse_collected("124/134 tests collected (10 deselected) in 0.04s")[2] == 124),
         ("a warning-summary line is not a node id", parse_collected(warn_line)[0] == set()),
         ("a traceback line is not a node id", parse_collected(trace_line)[0] == set()),
         ("root sanity holds on the real tree", check_root(disk) is None),

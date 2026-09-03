@@ -292,7 +292,7 @@ AC 3 of the issue is therefore satisfied vacuously — no `repo:*` gate is added
 
 ## Out of scope
 
-* Any change to `repo:input-liveness`'s project scoping (residual 3).
+* Any change to `repo:input-liveness`'s project scoping (residual 4).
 * A `repo:*` gate of any kind.
 * A `ci_targets.py` pin over `py:test`'s invocation, and the widening of
   `repo:affected-smoke`'s inputs it would require (see "Placement" and residual 1).
