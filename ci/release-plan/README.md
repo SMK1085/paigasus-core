@@ -34,7 +34,7 @@ The package set is DERIVED from `rs/Cargo.toml`'s `[workspace] members`, not fro
 declared anywhere outside it was invisible, no tag was ever demanded for it, and a release with
 its tag still uncut read as "every releasable package is already tagged" — a silent skip.
 `--assert`'s strict-equality pin could not catch that, because both sides of its comparison come
-from the same function. An unresolvable member pattern is `Inconclusive`, which builds. A
+from the same function. An unresolvable member pattern is `InconclusiveError`, which builds. A
 `[workspace] exclude` list is refused outright rather than ignored: this function does not model
 exclusion, and reading it as absent would make the skip permanently unreachable in silence.
 
@@ -73,7 +73,7 @@ consciously, on a gate (`--assert`) CI runs, never to drive the actual decision.
 ## The tag-format assumption
 
 `tag_for(name, version)` assumes release-plz's default tag format, `<package>-v<version>`.
-`assert_default_tag_format()` raises `Inconclusive` — and only `Inconclusive`, so the
+`assert_default_tag_format()` raises `InconclusiveError` — and only `InconclusiveError`, so the
 fail-safe direction still applies — if `rs/release-plz.toml` sets `git_tag_name` anywhere,
 workspace-wide or on an individual package. This checker does not attempt to parse a custom
 tag template; it refuses to guess and builds instead.
@@ -140,7 +140,7 @@ scratch file) and by the release workflow itself at runtime.
 only case today), and `3` for an assertion failure — never `1`. That was FALSE until the
 SMA-603 fix wave, and the code was fixed rather than the sentence: `workspace = 3` in
 `rs/release-plz.toml` raised a bare `TypeError` out of `assert_default_tag_format`, which
-`_assert_repo`'s `except Inconclusive` did not catch, so `--assert` exited 1 with a traceback
+`_assert_repo`'s `except InconclusiveError` did not catch, so `--assert` exited 1 with a traceback
 and `run_checker` mapped that onto `die_infra` (2) — reporting a broken repository file as
 "infrastructure failed". `_assert_repo` now catches `Exception`, because collection reads
 only repository files, so any failure of it is a statement about the repository. A self-test

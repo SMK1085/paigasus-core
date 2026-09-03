@@ -43,4 +43,12 @@ dev = [
     "python-semantic-release>=10.6.1,<11",
     "pyyaml==6.0.3",
     "ruff>=0.16.5,<0.17",
+    # SMA-539 — shellcheck for actionlint's `run:` blocks. Sourced from PyPI, not a proto plugin,
+    # because shellcheck's own release ships 13 archives and NO checksums asset (re-measured
+    # 2026-09-02), which SMA-525 D2 refused. shellcheck-py is checksummed on both supported
+    # hosts: uv.lock pins a sha256 per wheel, and three of the republisher's digests were
+    # verified by hand against koalaman's own release assets. A BUMP RE-OPENS THAT — re-verify
+    # rather than assume (spec L1). The sdist path (linux aarch64/riscv64/armv6hf, no wheel)
+    # additionally builds through setuptools-download, which uv.lock does NOT pin (spec L3).
+    "shellcheck-py>=0.11.0.1,<0.12",
 ]

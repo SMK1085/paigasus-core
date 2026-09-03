@@ -2319,7 +2319,7 @@ def self_test():
             if c["source_dir"].startswith("rs/")
         )
         (tmp_rs / "Cargo.toml").write_text(
-            "[workspace]\nmembers = [%s]\n" % ", ".join(f'"{d}"' for d in member_dirs)
+            f"""[workspace]\nmembers = [{", ".join(f'"{d}"' for d in member_dirs)}]\n"""
         )
         collected = collect_findings(ok, crates, Path(tmp))
     if len(collected) != len(EXPECTED_FINDING_KEYS):
@@ -2469,7 +2469,7 @@ def self_test():
         broken = json.loads(json.dumps(wrap))
         broken["k-ts"]["task_input_globs"]["test"] = ["rs/crates/bindings/nb/src/**/*"]
         rows = check_wrapper_upstream_inputs(broken, bare, floor=wrap_floor)
-        if not any("k-ts:test inputs omit rs/crates/libs/kern/src/**/*" == row for row in rows):
+        if not any(row == "k-ts:test inputs omit rs/crates/libs/kern/src/**/*" for row in rows):
             failures.append(
                 "A7 did not report a per-task under-declaration against the task that carries it "
                 "— it may be unioning inputs across the wrapper's tasks"
@@ -3029,7 +3029,7 @@ def self_test():
 
         def write_members(entries):
             (rs9 / "Cargo.toml").write_text(
-                "[workspace]\nmembers = [%s]\n" % ", ".join(f'"{e}"' for e in entries)
+                f"""[workspace]\nmembers = [{", ".join(f'"{e}"' for e in entries)}]\n"""
             )
 
         # The expander itself, on the two forms that matter. This is the measurement the whole

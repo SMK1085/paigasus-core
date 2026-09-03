@@ -62,7 +62,7 @@ negative_control() {
   # A tree with no `.github/` at all is infrastructure, not a pass: the scan root moved.
   # The mkdir deliberately creates NOTHING under it. Since SMA-593 F9 the discriminator is
   # `.github/`, so `mkdir -p .../.github` — or `.../.github/workflows` — would make this an
-  # AssertionFailure (rc 3), not the InfraError (rc 2) this row's label and _expect require.
+  # AssertionFailureError (rc 3), not the InfraError (rc 2) this row's label and _expect require.
   mkdir -p "$tmp/empty"
   _expect 2 "a tree with no .github/ is INFRA, not a vacuous pass" \
     uv run --project "$HERE" --python '>=3.12' python3 \

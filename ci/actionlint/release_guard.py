@@ -30,7 +30,7 @@ try:
 except ImportError:  # pragma: no cover - exercised by the missing-interpreter path
     print("release-guard: PyYAML is not importable. This gate needs the pinned pyyaml from "
           "py/pyproject.toml — invoke via `uv run --project py`.", file=sys.stderr)
-    raise SystemExit(2)
+    raise SystemExit(2) from None
 
 # --- The pinned vocabulary ---------------------------------------------------------------------
 
@@ -394,7 +394,7 @@ def triggers_of(doc: dict) -> dict:
     if isinstance(raw, str):
         return {raw: None}
     if isinstance(raw, list):
-        return {k: None for k in raw}
+        return dict.fromkeys(raw)
     if isinstance(raw, dict):
         return raw
     infra("'on:' is missing or of an unexpected type")

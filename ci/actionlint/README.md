@@ -24,9 +24,9 @@ the required check. See SMA-540 and
 
 | # | Check |
 |---|---|
-| 1 | `actionlint` over the auto-discovered workflow set |
+| 1 | `actionlint` over the auto-discovered workflow set, with shellcheck wired in (`-shellcheck=$SHELLCHECK_BIN`) so every `run:` block's inline bash is inspected too (SMA-539) — see "shellcheck provenance" below |
 | 2 | `.github/actionlint.{yaml,yml}` declares nothing but `self-hosted-runner`, and no `ignore` key in any style (either would neuter check 1 invisibly) |
-| 3 | Four stdin fixtures, one per defect class, each must fail **with its expected rule tag** |
+| 3 | Five stdin fixtures, one per defect class, each must fail **with its expected rule tag** |
 | 4 | A healthy stdin fixture must pass — the control for check 3 |
 | 5 | Every `paths:` glob is in the supported vocabulary and matches the tracked tree, and every `branches:` entry resolves as a ref or is skip-listed |
 | 6 | Every extracted filter key carries at least one sequence entry; a `paths:`/`branches:` key must also have at least one of them positive (the `-ignore` variants are exempt) |
@@ -109,6 +109,57 @@ workflow run *more* often, which is the fail-safe direction.
   also be removed from the CLAUDE.md `ci-targets` block, since `repo:affected-smoke` asserts the
   two agree — **and** needs a `T_EXEMPT` entry in `ci/affected-graph/ci_targets.py` with a stated
   reason, or C1's strict equality reds on the now-missing entry (true since SMA-541 shipped).
+
+## shellcheck provenance
+
+SMA-525 shipped check 1 with `-shellcheck=` and `-pyflakes=` both empty, refusing an opportunistic
+`PATH` lookup because it would make the gate's strictness a property of the host — a dev box with
+shellcheck installed catches an `SC2086` a clean CI runner never sees. SMA-539 turns shellcheck
+back on, sourced instead from a **hash-pinned PyPI package**: `shellcheck-py`, added to
+`py/pyproject.toml`'s `[dependency-groups] dev`. `run.sh` resolves the binary via `uv run --locked
+--project py`, after the `--self-test` early exit (see the SMA-539 comment beside the `command -v
+actionlint` guard) — never on `PATH` — so a dev box and CI always run the exact same shellcheck.
+Resolution is fail-closed: there is no fallback to a bare `-shellcheck=`, and an unresolvable
+binary aborts the gate at rc 2 rather than silently linting nothing.
+
+**Provenance, not just presence (whole-branch review, I1).** "Fail-closed" above was
+incomplete on its own: `shutil.which` is `PATH`-based, so if the `py` uv project does
+not actually contain `shellcheck` — a `[dependency-groups]` rename, a `[tool.uv]
+default-groups` change, or `UV_NO_DEV=1` at invocation time, none of which trips `uv
+run`'s own exit status — `which` would silently fall through to whatever `shellcheck`
+is first on the OUTER host `PATH`, and `[ -x ]` would pass on that impostor. MEASURED:
+with `shellcheck` removed from `py/.venv/bin` and a host impostor earlier on `PATH`, the
+bare `shutil.which` resolver printed the impostor's path at exit 0 — precisely the
+strictness-is-a-property-of-the-host failure this whole section exists to refuse, now
+green. The resolver now also requires the resolved path to start with `sys.prefix`,
+which under `uv run --project py` IS `py/.venv` (measured) — a same-process check no
+outer-`PATH` manipulation can spoof. The same setup now exits 1 from the `-c` program
+(routed to `infra`, rc 2) instead of printing the impostor's path.
+
+**shellcheck findings at `info` severity still red this gate.** actionlint hands
+shellcheck's full output straight through; nothing here filters by severity. A rule
+that shellcheck reports at `info` (e.g. `SC2250`) fails check 1 exactly the same as a
+`warning`- or `error`-level one — do not assume only warnings-and-above are covered.
+
+**Waiving a shellcheck finding.** `.github/actionlint.yaml`'s `ignore:` key is banned
+outright by check 2 (a repo-wide `ignore` would neuter check 1 invisibly for every
+workflow, not just the one with the false positive). The one hatch that works is an
+inline `# shellcheck disable=SCxxxx` comment inside the offending `run:` block itself —
+verified live: actionlint passes such a comment straight through to shellcheck, and the
+disabled rule is then silent for that block only, leaving every other workflow and rule
+covered. Prefer the narrowest form (`# shellcheck disable=SC2086` on the one line, not a
+file-wide directive) and state the reason next to it, the same discipline as this
+repo's other escape hatches.
+
+`shellcheck-py` was chosen over a `proto` plugin because upstream shellcheck's own GitHub release
+ships 13 platform archives and **no checksums asset** (re-measured 2026-09-02), which SMA-525's
+own D2 decision already refused as a supply-chain shape. `shellcheck-py` republishes shellcheck as
+checksummed wheels: `uv.lock` pins a `sha256` per wheel and sdist, and three of the republisher's
+digests were verified by hand against koalaman/shellcheck's own release assets at the pinned
+version. **A version bump re-opens that verification — it is not a one-time check.** `-pyflakes=`
+stays disabled: actionlint only ever applies pyflakes to a step declaring `shell: python`, and
+`wheels.yml`'s Python-shaped blocks are actually bash heredocs, so nothing in this repository would
+be covered by turning it on.
 
 ## Limitations
 
@@ -425,6 +476,27 @@ Two limits. V12 pins TEXT, not behaviour: a line kept but reordered, or moved in
 never runs, still satisfies it. And it says nothing about `wheels.yml` or any future third copy —
 a new subject must be added to `NPM_OIDC_FLOOR_SUBJECTS` by hand.
 
+**L27 — shellcheck never sees a `${{ }}` expression (SMA-539).** actionlint substitutes every
+`${{ ... }}` GitHub Actions expression with an inert placeholder BEFORE handing a `run:` block to
+shellcheck, so an unquoted expression can never trigger `SC2086` — only an unquoted **shell**
+variable can. Measured A/B on check 3's fixture: `- run: rm -rf $TARGET` fails with `[shellcheck]`
+as expected, while the same fixture rewritten as `- run: rm -rf ${{ github.workspace }}` (unquoted,
+and a real, defined expression) passes cleanly at rc 0, asserting nothing. The same A/B was
+repeated against a real workflow, not just the check-3 fixture: mutating an unquoted shell
+variable into `images.yml` reds this gate, while the same mutation expressed as an unquoted
+`${{ }}` expression passes at rc 0. Both measurements land on the same conclusion — this is why
+the check-3 fixture uses a shell variable rather than an expression, an expression-shaped fixture
+would be silently decorative — and why a real workflow with an unquoted, attacker-influenced
+`${{ }}` expression in a `run:` block is a gap this gate does not close; that is a job-injection
+concern outside this gate's scope.
+
+**L28 — `SC2148`/`SC2164` cannot fire here, structurally.** actionlint always supplies the shell
+(there is no missing shebang for `SC2148` to complain about) and always wraps a `run:` block's
+script in its own generated harness, which sets `-e` — so `cd` failures that `SC2164` warns about
+are already fatal by construction rather than silently ignored. Neither rule is disabled by
+configuration; both are simply unreachable given how actionlint constructs the script it hands to
+shellcheck.
+
 ## Cost
 
 `inputs: ['**/*']` is deliberate (see the WHY comment on the `actionlint:` task in `moon.yml`),
@@ -608,6 +680,16 @@ runs ~3.6-4.7s; the full gate runs ~15.4-20.3s, the same ~17-19s band this secti
 ordinary for it. The toolchain also moved moon 2.3.2 -> 2.5.3 under this branch (SMA-595), so this
 is a fresh measurement, not a delta against the prior ~17-19s figure — that number is treated as
 an unusable baseline, not a value to compare against.
+
+**SMA-539 added shellcheck to check 1, one `uv run` on the full-gate path plus a shellcheck pass
+over six workflows.** CLAUDE.md's re-measured baseline for `moon run repo:actionlint --force` on
+2.5.3 is **35.1s**; `moon run repo:actionlint --force` with this gate's shellcheck integration
+wired in measures **33.7-35.6s** — inside the pre-change figure's own spread, not a step change.
+(Independently re-measured in the whole-branch review at **34.0s**, the same band.) The `uv run`
+that resolves the `shellcheck` binary is paid once, on the full-gate path only — `--self-test`
+shells out to neither `uv` nor `shellcheck`, by the same "must stay runnable with neither binary
+installed" placement rule the actionlint-binary guard already follows (see "shellcheck
+provenance" above).
 
 ## Running it
 

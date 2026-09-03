@@ -115,10 +115,10 @@ non-goals:
 ## Fail-closed properties
 
 A gate that fails open is worse than no gate — it converts "unguarded" into "believed guarded".
-Every shape below is `Refused` at **rc 1** (a repo problem to fix, not a broken checker) unless
+Every shape below is `RefusedError` at **rc 1** (a repo problem to fix, not a broken checker) unless
 noted; a handful of infrastructure-only failures are `InfraError` at **rc 2**.
 
-**Refused (rc 1) — the parser will not guess:**
+**RefusedError (rc 1) — the parser will not guess:**
 
 * `macro_rules!` anywhere in scope. Its expansions are invisible to a source scanner — real
   exports would be silently absent from sets A *and* B, and a stub that also omits them (the
@@ -126,8 +126,8 @@ noted; a handful of infrastructure-only failures are `InfraError` at **rc 2**.
   two reasons arm 2 exists.
 * `#[pyfunction(…)]` / `#[pyo3(…)]` carrying arguments, on any line in the attribute window — may
   rename or reshape the exported symbol.
-* `#[pyclass]`, `#[pymethods]` — a whole class surface this scanner does not model. Refused
-  **file-globally**, like `macro_rules!`, and for the same fail-closed reason: a class-only crate
+* `#[pyclass]`, `#[pymethods]` — a whole class surface this scanner does not model. This is
+  refused **file-globally**, like `macro_rules!`, and for the same fail-closed reason: a class-only crate
   declares no `#[pyfunction]`, so without this it was classified not-PyO3-bearing, `analyze`
   short-circuited before the module-body default-deny could see `m.add_class::<Foo>()?`, and a
   crate with a real export and **no stub at all** reported clean (measured).

@@ -9,7 +9,13 @@ maps 3 -> 1 and everything else -> 2. (SMA-593 spec §6.)
 
 from __future__ import annotations
 
+import glob
+import os
+import re
 import sys
+import tempfile
+
+import yaml
 
 RC_OK = 0
 RC_INFRA = 2
@@ -19,13 +25,6 @@ RC_ASSERT = 3
 class InfraError(Exception):
     """The check could not run. Maps to RC_INFRA."""
 
-
-import glob
-import os
-import re
-import tempfile
-
-import yaml
 
 SCAN_GLOB = ".github/workflows/*.y*ml"
 
@@ -56,7 +55,7 @@ STRING_LITERAL = re.compile(r"'[^']*'|\"[^\"]*\"")
 SECRETS_CTX = re.compile(r"(?<![\w.-])secrets(?![\w-])", re.IGNORECASE)
 
 
-class AssertionFailure(Exception):
+class AssertionFailureError(Exception):
     """The repo is wrong. Maps to RC_ASSERT."""
 
 
@@ -113,10 +112,10 @@ def load_documents(path: str) -> list:
         # not UTF-8 is an authorial mistake, and ci_targets.py:28-36 states the repo's rule for
         # those: "a red with a fix, not a broken tool". Same misclassification the zero-match
         # split fixed, in a second place (SMA-593, CodeRabbit pass 2).
-        raise AssertionFailure(
+        raise AssertionFailureError(
             f"{os.path.basename(path)} is not valid UTF-8: {exc}") from exc
     except yaml.YAMLError as exc:
-        raise AssertionFailure(f"{os.path.basename(path)} is not valid YAML: {exc}") from exc
+        raise AssertionFailureError(f"{os.path.basename(path)} is not valid YAML: {exc}") from exc
 
 
 def _mapping_entries(node, path="$"):
@@ -236,10 +235,10 @@ def _self_test() -> int:
     # Driven through the PRODUCTION entry point, discover(), not a bare yaml.load_all (SMA-593
     # F5). The old loop called yaml.load_all then isinstance, which is not where any of this
     # handling lives: the "top-level sequence" row passed with discover()'s non-mapping check
-    # DELETED, and "malformed yaml" passed with load_documents()' YAMLError -> AssertionFailure
+    # DELETED, and "malformed yaml" passed with load_documents()' YAMLError -> AssertionFailureError
     # mapping gutted, because a bare `except yaml.YAMLError: continue` made any raising row an
     # automatic pass. There is no such catch now — every row must reach discover() and every row
-    # must come back as AssertionFailure, the class that means "the repo is wrong", never
+    # must come back as AssertionFailureError, the class that means "the repo is wrong", never
     # InfraError and never a silent accept.
     for label, source in PARSE_CASES:
         with tempfile.TemporaryDirectory() as root:
@@ -252,10 +251,10 @@ def _self_test() -> int:
                 print(f"  FAIL parse/{label}: discover() accepted a document that must be "
                       "rejected", file=sys.stderr)
                 failures += 1
-            except AssertionFailure:
+            except AssertionFailureError:
                 pass
             except Exception as exc:
-                print(f"  FAIL parse/{label}: expected AssertionFailure, got "
+                print(f"  FAIL parse/{label}: expected AssertionFailureError, got "
                       f"{type(exc).__name__}: {exc}", file=sys.stderr)
                 failures += 1
 
@@ -354,7 +353,7 @@ def discover(root: str) -> list[str]:
         if not os.path.isdir(github_dir):
             raise InfraError(
                 f"{github_dir} does not exist — the checker was given the wrong repo root")
-        raise AssertionFailure(
+        raise AssertionFailureError(
             f"{SCAN_GLOB} matched no file under {root}, but .github/ exists — the workflows "
             "were removed or renamed, and this gate would assert nothing")
     subjects = []
@@ -362,7 +361,7 @@ def discover(root: str) -> list[str]:
         docs = load_documents(path)
         for doc in docs:
             if doc is not None and not isinstance(doc, dict):
-                raise AssertionFailure(
+                raise AssertionFailureError(
                     f"{os.path.basename(path)}: top-level YAML is not a mapping")
         if any(triggers(d) & PR_TRIGGERS for d in docs if isinstance(d, dict)):
             subjects.append(os.path.basename(path))
@@ -374,13 +373,13 @@ def check(root: str) -> int:
     # Compared BEFORE any allowlist: the allowlist suppresses rule verdicts, never
     # membership. Counting after it would let "allowlist everything" pass. (spec §5.2)
     if tuple(subjects) != EXPECTED_PR_SUBJECTS:
-        raise AssertionFailure(
+        raise AssertionFailureError(
             f"pull-request-triggered workflows are {subjects}, expected "
             f"{list(EXPECTED_PR_SUBJECTS)} — re-baseline EXPECTED_PR_SUBJECTS deliberately")
 
     stale = [name for (name, _rule) in PR_CREDENTIAL_ALLOWED if name not in subjects]
     if stale:
-        raise AssertionFailure(
+        raise AssertionFailureError(
             f"PR_CREDENTIAL_ALLOWED names workflows that are not subjects: {sorted(set(stale))}")
 
     reds: list[str] = []
@@ -395,7 +394,7 @@ def check(root: str) -> int:
                     continue
                 reds.append(f"  {name} [{rule}] at {where}: {message}")
     if reds:
-        raise AssertionFailure(
+        raise AssertionFailureError(
             "a pull-request-triggered workflow can obtain a repository credential:\n"
             + "\n".join(reds)
             + "\n  A same-repo pull request receives repository secrets, so this is readable "
@@ -414,14 +413,14 @@ def check(root: str) -> int:
 # Six rows exercised against a real filesystem, not a YAML string, so they cannot live in
 # RULE_CASES/TRIGGER_CASES/PARSE_CASES. Four cover the zero-match SPLIT (Finding 1, SMA-593
 # controller ruling 10, discriminator corrected by F9): discover() must raise InfraError when
-# .github/ itself is absent (the checker was handed the wrong root) but AssertionFailure in
+# .github/ itself is absent (the checker was handed the wrong root) but AssertionFailureError in
 # BOTH authorial shapes — .github/ present with the workflows dir deleted along with its files
 # (row 2a, the shape a PR deleting every workflow actually produces, since git tracks no empty
 # directory) and .github/workflows/ present but empty (row 2b, reachable only in a working
 # tree). A `.yaml` (not `.yml`) workflow must still be discovered, proving SCAN_GLOB's `*.y*ml`
 # covers both extensions. Two cover the stale-allowlist guard (Finding 2): PR_CREDENTIAL_ALLOWED
 # is this gate's only escape hatch and was otherwise untested — an entry naming a workflow that
-# is not a subject must raise AssertionFailure, and an empty allowlist must not.
+# is not a subject must raise AssertionFailureError, and an empty allowlist must not.
 FILESYSTEM_CASES = 8
 
 
@@ -448,7 +447,7 @@ def _self_test_filesystem() -> tuple[int, int]:
                   f"got {type(exc).__name__}", file=sys.stderr)
             failures += 1
 
-    # 2a. .github/ present, .github/workflows/ GONE -> workflows deleted: AssertionFailure.
+    # 2a. .github/ present, .github/workflows/ GONE -> workflows deleted: AssertionFailureError.
     # This is the reachable authorial shape. A PR deleting every workflow removes the directory
     # too, because git cannot track it empty — before F9 this landed on InfraError (rc 2) and
     # told the author to re-run a job that could never go green.
@@ -457,30 +456,30 @@ def _self_test_filesystem() -> tuple[int, int]:
         os.makedirs(os.path.join(root, ".github"))
         try:
             discover(root)
-            print("  FAIL discover/no workflows dir under .github: expected AssertionFailure, "
+            print("  FAIL discover/no workflows dir under .github: expected AssertionFailureError, "
                   "got no exception", file=sys.stderr)
             failures += 1
-        except AssertionFailure:
+        except AssertionFailureError:
             pass
         except Exception as exc:
-            print(f"  FAIL discover/no workflows dir under .github: expected AssertionFailure, "
+            print(f"  FAIL discover/no workflows dir under .github: expected AssertionFailureError, "
                   f"got {type(exc).__name__}", file=sys.stderr)
             failures += 1
 
-    # 2b. .github/workflows/ present but empty -> same verdict, AssertionFailure. Reachable in a
+    # 2b. .github/workflows/ present but empty -> same verdict, AssertionFailureError. Reachable in a
     # working tree rather than a checkout, and kept so the two shapes cannot diverge.
     rows += 1
     with tempfile.TemporaryDirectory() as root:
         os.makedirs(os.path.join(root, ".github", "workflows"))
         try:
             discover(root)
-            print("  FAIL discover/empty workflows dir: expected AssertionFailure, "
+            print("  FAIL discover/empty workflows dir: expected AssertionFailureError, "
                   "got no exception", file=sys.stderr)
             failures += 1
-        except AssertionFailure:
+        except AssertionFailureError:
             pass
         except Exception as exc:
-            print(f"  FAIL discover/empty workflows dir: expected AssertionFailure, "
+            print(f"  FAIL discover/empty workflows dir: expected AssertionFailureError, "
                   f"got {type(exc).__name__}", file=sys.stderr)
             failures += 1
 
@@ -516,18 +515,18 @@ def _self_test_filesystem() -> tuple[int, int]:
 
         saved_allowed = dict(PR_CREDENTIAL_ALLOWED)
         try:
-            # 4. An allowlist entry naming a workflow that is NOT a subject: AssertionFailure.
+            # 4. An allowlist entry naming a workflow that is NOT a subject: AssertionFailureError.
             PR_CREDENTIAL_ALLOWED.clear()
             PR_CREDENTIAL_ALLOWED[("release.yml", "R1")] = "test: not a subject"
             try:
                 check(root)
-                print("  FAIL check/stale allowlist entry: expected AssertionFailure, "
+                print("  FAIL check/stale allowlist entry: expected AssertionFailureError, "
                       "got no exception", file=sys.stderr)
                 failures += 1
-            except AssertionFailure:
+            except AssertionFailureError:
                 pass
             except Exception as exc:
-                print(f"  FAIL check/stale allowlist entry: expected AssertionFailure, "
+                print(f"  FAIL check/stale allowlist entry: expected AssertionFailureError, "
                       f"got {type(exc).__name__}", file=sys.stderr)
                 failures += 1
 
@@ -547,7 +546,7 @@ def _self_test_filesystem() -> tuple[int, int]:
             PR_CREDENTIAL_ALLOWED.clear()
             PR_CREDENTIAL_ALLOWED.update(saved_allowed)
 
-    # 7. A workflow that is not UTF-8 -> authorial, so AssertionFailure (rc 1), never rc 2.
+    # 7. A workflow that is not UTF-8 -> authorial, so AssertionFailureError (rc 1), never rc 2.
     rows += 1
     with tempfile.TemporaryDirectory() as root:
         wf = os.path.join(root, ".github", "workflows")
@@ -556,13 +555,13 @@ def _self_test_filesystem() -> tuple[int, int]:
             handle.write(b'on:\n  pull_request:\njobs:\n  a:\n    name: "\xff\xfe"\n')
         try:
             discover(root)
-            print("  FAIL discover/non-utf8: expected AssertionFailure, got no exception",
+            print("  FAIL discover/non-utf8: expected AssertionFailureError, got no exception",
                   file=sys.stderr)
             failures += 1
-        except AssertionFailure:
+        except AssertionFailureError:
             pass
         except Exception as exc:
-            print(f"  FAIL discover/non-utf8: expected AssertionFailure, "
+            print(f"  FAIL discover/non-utf8: expected AssertionFailureError, "
                   f"got {type(exc).__name__}", file=sys.stderr)
             failures += 1
 
@@ -579,7 +578,7 @@ def _self_test_filesystem() -> tuple[int, int]:
         # returning, which would abort the whole run instead of reporting THIS row.
         try:
             found = discover(root)
-        except (AssertionFailure, InfraError) as exc:
+        except (AssertionFailureError, InfraError) as exc:
             print(f"  FAIL discover/hidden workflow: expected ['.credentials.yml'], "
                   f"got {type(exc).__name__} — a dot-prefixed workflow was not scanned",
                   file=sys.stderr)
@@ -695,12 +694,12 @@ PARSE_CASES: tuple[tuple[str, str], ...] = (
 if __name__ == "__main__":
     try:
         raise SystemExit(main(sys.argv))
-    except AssertionFailure as exc:
+    except AssertionFailureError as exc:
         print(f"workflow-credentials FAILED: {exc}", file=sys.stderr)
         raise SystemExit(RC_ASSERT) from exc
     except InfraError as exc:
         print(f"workflow-credentials: {exc}", file=sys.stderr)
         raise SystemExit(RC_INFRA) from exc
-    except Exception as exc:  # noqa: BLE001 — an unexpected crash is INFRA, never an assertion
+    except Exception as exc:  # an unexpected crash is INFRA, never an assertion
         print(f"workflow-credentials: unexpected {type(exc).__name__}: {exc}", file=sys.stderr)
         raise SystemExit(RC_INFRA) from exc

@@ -72,11 +72,18 @@ usage() {
 # ONE shared flag array for checks 1, 3 and 4. Written twice, an `-ignore` added to check 1
 # would be invisible to check 3 BY CONSTRUCTION and the self-test would be decorative.
 #
-# ShellCheck/pyflakes are disabled DELIBERATELY (spec D2): actionlint shells out to them when
-# it finds them on PATH, which would make this gate's strictness a property of the host.
+# `-shellcheck=` here is a PLACEHOLDER, deliberately left empty: SMA-539 resolves the real
+# `-shellcheck=$SHELLCHECK_BIN` value later, after the --self-test early exit, beside the
+# `command -v actionlint` guard (see the SMA-539 comment there) — never here, since a
+# hash-pinned `uv run` resolution at file-load time would run once per --self-test mutant too.
+#
+# `-pyflakes=` stays DISABLED DELIBERATELY (spec D2/L4): actionlint shells out to pyflakes when
+# it finds it on PATH, which would make this gate's strictness a property of the host, and
+# pyflakes only ever applies to a step declaring `shell: python` — `wheels.yml`'s bash heredocs
+# are invisible to it regardless, so there is nothing here for a pinned pyflakes to buy.
 # (Capital "ShellCheck" above is intentional — a lowercase "# shellcheck/..." comment is parsed
 # by ShellCheck itself as a malformed inline directive and aborts analysis of this whole file.)
-ARGS=(-shellcheck= -pyflakes=)
+ARGS=(-pyflakes=)
 
 # Workflow discovery for checks 5-7. Non-recursive, both extensions — matching GitHub's own
 # execution semantics. Check 1 does NOT use this list (see below).
@@ -2124,6 +2131,11 @@ T_AFFECTED_SMOKE_REQUIRED_INPUTS=(
   # SMA-603 — floors the input that makes RELEASE_PLAN_SH_CALL_SITES reachable. Without it the
   # PR deleting those nine lines is exactly the PR that does not schedule repo:affected-smoke.
   'ci/release-plan/**/*'
+  # SMA-539 (Task 6's pin) — floors the input that makes ci_targets.py's
+  # check_self_scheduled_coverage exercisable against repo:ruff-ci's own registry entries.
+  # Without it, a PR editing ci/ruff/** does not schedule repo:affected-smoke, and neither the
+  # SELF_SCHEDULED_GATES nor the SELF_TASK_EXPECTED_GLOBS pin for that gate can fire.
+  'ci/ruff/**/*'
   'CLAUDE.md'
   '.prototools'
 )
@@ -5152,6 +5164,41 @@ while IFS= read -r verdict; do
   esac
 done < <(cargo_lock_script_verdict ci/cargo-lock-integrity/run.sh)
 
+# SMA-539 — shellcheck for check 1's `run:` blocks. SMA-525 disabled the integration because an
+# opportunistic PATH lookup made the gate's strictness a property of the host; this resolves ONE
+# hash-pinned binary from py/uv.lock instead, so a dev box and CI agree.
+#
+# PLACEMENT IS LOAD-BEARING. This sits AFTER the --self-test early exit at :4765, beside the
+# actionlint guard, for the same reason that guard does: --self-test must stay runnable on a
+# machine with neither binary installed. It also keeps check 9's mutant fan-out — one --self-test
+# subprocess per self-test — from paying 15 `uv run` invocations against one py/.venv.
+#
+# FAIL CLOSED. There is deliberately NO fallback to `-shellcheck=`: a silent downgrade to
+# "whatever this host has" is exactly the failure SMA-525 refused, and it would be invisible on
+# a green. `[ -x ]` is the ci/release-parity/ecosystems/release-plz.sh idiom — assert the
+# resolution rather than discovering it 80 lines later.
+#
+# PROVENANCE, NOT JUST PRESENCE. `shutil.which` is PATH-based, so "FAIL CLOSED" above was
+# incomplete: if the `py` uv project does not itself contain shellcheck (a `[dependency-groups]`
+# rename, a `[tool.uv] default-groups` change, or `UV_NO_DEV=1` at invocation time — real,
+# documented uv knobs, none of which trips `uv run`'s own exit status), `uv run` still exits 0
+# and `which` silently returns whatever `shellcheck` is first on the OUTER host PATH — `[ -x ]`
+# passes on that impostor, reproducing the exact "strictness is a property of the host" failure
+# this whole block exists to refuse, now green. MEASURED: with shellcheck removed from
+# py/.venv/bin and a host impostor earlier on PATH, the bare `shutil.which` resolver printed the
+# impostor's path at exit 0. `sys.prefix` under `uv run --project py` IS `py/.venv` (measured),
+# so requiring the resolved path to live under it is a same-process check no outer-PATH
+# manipulation can spoof — a host binary now routes to `infra` (rc 2) instead of a silent pass.
+# Containment is COMPONENT-WISE (`is_relative_to` on resolved paths), not a string prefix.
+# `p.startswith(sys.prefix)` accepts a SIBLING directory — `py/.venv-host/bin/shellcheck` starts with
+# `py/.venv` and is outside it (MEASURED: startswith True, is_relative_to False). Resolving both
+# sides also means a symlinked venv compares by its real location rather than by spelling.
+SHELLCHECK_BIN="$(uv run --locked --project py python3 -c \
+  'import pathlib, shutil, sys; p = shutil.which("shellcheck"); sys.exit(1) if not p or not pathlib.Path(p).resolve().is_relative_to(pathlib.Path(sys.prefix).resolve()) else print(p)')" \
+  || infra "could not resolve shellcheck via 'uv run --locked --project py' — run 'uv sync --project py'"
+[ -x "$SHELLCHECK_BIN" ] || infra "resolved shellcheck is not executable: $SHELLCHECK_BIN"
+ARGS+=("-shellcheck=$SHELLCHECK_BIN")
+
 # Guard lives here, AFTER the --self-test early exit: --self-test never shells out to actionlint,
 # so it must not infra-exit on a machine that simply doesn't have the binary on PATH yet.
 command -v actionlint >/dev/null 2>&1 || infra "actionlint not on PATH — run 'proto install actionlint'"
@@ -5265,6 +5312,22 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - run: echo ${{ steps.nope.outputs.x }}
+'
+
+# SMA-539 — the shellcheck integration itself. Without this, a regression that leaves
+# SHELLCHECK_BIN unset (or reinstates `-shellcheck=`) leaves every other check green while the
+# 648 lines of inline bash go uninspected — the SMA-525 failure re-created inside its own fix.
+# A SHELL variable, deliberately: actionlint replaces ${{ }} with inert placeholders before
+# the ShellCheck scanner sees them, so an expression fixture passes and asserts nothing
+# (spec §1.8). Capitalised deliberately: a comment line opening with the lowercase word is
+# parsed as a directive and reds SC1072/SC1073 — the same trap this file records at its top.
+selftest_expect_tag 'unquoted shell variable' 'shellcheck' 'name: selftest
+on: [push]
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - run: rm -rf $TARGET
 '
 
 # ---------------------------------------------------------------------------------------------
