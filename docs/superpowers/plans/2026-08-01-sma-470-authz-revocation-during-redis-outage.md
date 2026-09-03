@@ -1704,3 +1704,9 @@ Task 4.
 **Known gaps deliberately left:** the `entity_gen` counter has the identical missing-key→`0`
 defect and is scoped out (documented in Task 8's RUNBOOK text, filed as a follow-up); booting
 with Redis down is unchanged (D6).
+
+<!-- moon-diagnosis:superseded -->
+> **Superseded (SMA-597).** The `ciReport.json` diagnosis advice above does not work as written:
+> there is no action-level `exitCode` key, and the file carries no stdout/stderr at all. The
+> measured procedure is in CLAUDE.md between the `moon-diagnosis` markers. This document is left
+> otherwise unedited as a record of what was believed when it was written.

@@ -503,3 +503,9 @@ gateway is not a `kernel->bindings` crate, so `:affected-smoke` should not trip.
   same-port merge, but the compiler sees all three references). This mirrors IAM and is
   clippy-clean.
 - Do not run cargo from the repo root — run it from the worktree's `rs/` directory.
+
+<!-- moon-diagnosis:superseded -->
+> **Superseded (SMA-597).** The `ciReport.json` diagnosis advice above does not work as written:
+> there is no action-level `exitCode` key, and the file carries no stdout/stderr at all. The
+> measured procedure is in CLAUDE.md between the `moon-diagnosis` markers. This document is left
+> otherwise unedited as a record of what was believed when it was written.

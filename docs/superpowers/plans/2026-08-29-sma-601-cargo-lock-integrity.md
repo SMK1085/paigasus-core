@@ -993,3 +993,9 @@ Expected: all green. `repo:affected-smoke` is the one most likely to red — rea
 git add CLAUDE.md
 git commit -m "docs(repo): record the mid-run Cargo.lock repair mechanism (SMA-601)"
 ```
+
+<!-- moon-diagnosis:superseded -->
+> **Superseded (SMA-597).** The `ciReport.json` diagnosis advice above does not work as written:
+> there is no action-level `exitCode` key, and the file carries no stdout/stderr at all. The
+> measured procedure is in CLAUDE.md between the `moon-diagnosis` markers. This document is left
+> otherwise unedited as a record of what was believed when it was written.

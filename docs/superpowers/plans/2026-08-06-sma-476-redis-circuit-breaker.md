@@ -1981,3 +1981,9 @@ No gaps.
 - Task 4 Step 1 — the `started` shadowing is called out with the fix.
 - Task 8 Step 2 — `metrics-util`'s snapshot API varies by version; the assertions that matter are stated separately from the destructuring.
 - Task 10 Step 3 — `exp_annotations` must match rendered output exactly.
+
+<!-- moon-diagnosis:superseded -->
+> **Superseded (SMA-597).** The `ciReport.json` diagnosis advice above does not work as written:
+> there is no action-level `exitCode` key, and the file carries no stdout/stderr at all. The
+> measured procedure is in CLAUDE.md between the `moon-diagnosis` markers. This document is left
+> otherwise unedited as a record of what was believed when it was written.

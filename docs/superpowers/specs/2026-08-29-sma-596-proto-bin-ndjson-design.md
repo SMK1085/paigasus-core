@@ -505,3 +505,9 @@ Two residuals were renumbered rather than dropped: the old L6 (no continuous cov
 is now L5, and a new L6 records that `semantic-release.sh`'s different resolution style
 was never reviewed for an equivalent hazard — two of three modules now share a policy and
 the third was not brought into it.
+
+<!-- moon-diagnosis:superseded -->
+> **Superseded (SMA-597).** The `ciReport.json` diagnosis advice above does not work as written:
+> there is no action-level `exitCode` key, and the file carries no stdout/stderr at all. The
+> measured procedure is in CLAUDE.md between the `moon-diagnosis` markers. This document is left
+> otherwise unedited as a record of what was believed when it was written.

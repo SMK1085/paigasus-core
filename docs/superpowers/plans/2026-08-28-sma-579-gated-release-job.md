@@ -1850,3 +1850,9 @@ git commit -m "docs(claude): record the release-path gotchas and re-measure the 
 **Type consistency:** `release_guard_py` is the bash helper in Tasks 4 and 5; `check_main`/`check_called`/`is_gated`/`needs_of`/`if_text`/`coe_is_false`/`FIXTURES` are Task 3's names, used unchanged in Task 4's floor (`--fixture-count`) and Task 5's pins. `plan`'s five outputs are declared in Task 6 and consumed by name in Tasks 8 and 9 (`kernel_version`, `proto_release`). Artifact names are consistent across Tasks 7-9: `wheel-*`, `sdist`, `face-paigasus-kernel`, `proto-dist-py`, `prebuild-*`, `npm-dirs`, `wasm-dist`.
 
 **One known gap, stated rather than hidden:** Task 1's M1 can delete the `plan` job, which changes Task 6 Step 3 and every `needs: plan` in Tasks 7-9 to a direct `if:` gate. The fallback is specified in spec §1.3b and repeated at Task 6 Step 3, so no re-design is required — but Tasks 6-9 must be read after M1 is known, not before.
+
+<!-- moon-diagnosis:superseded -->
+> **Superseded (SMA-597).** The `ciReport.json` diagnosis advice above does not work as written:
+> there is no action-level `exitCode` key, and the file carries no stdout/stderr at all. The
+> measured procedure is in CLAUDE.md between the `moon-diagnosis` markers. This document is left
+> otherwise unedited as a record of what was believed when it was written.

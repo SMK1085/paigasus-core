@@ -959,3 +959,9 @@ in Step 1 and used in Steps 2 and 5.
 **One ordering constraint.** Task 1 Step 2 (self-test rows) references `check_ffi_inputs` and
 `MoonOutputError` before Steps 4-6 define them. That is intentional TDD — Step 3 exists to observe
 the `NameError`. Do not reorder.
+
+<!-- moon-diagnosis:superseded -->
+> **Superseded (SMA-597).** The `ciReport.json` diagnosis advice above does not work as written:
+> there is no action-level `exitCode` key, and the file carries no stdout/stderr at all. The
+> measured procedure is in CLAUDE.md between the `moon-diagnosis` markers. This document is left
+> otherwise unedited as a record of what was believed when it was written.

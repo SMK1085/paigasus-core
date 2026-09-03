@@ -1247,3 +1247,9 @@ Step 3 and called with that signature in Step 4 (`main()`) and Step 6 (self-test
 
 **One deliberate ordering dependency:** Task 5 Step 5 extends the self-test fixture *before* Step 6
 adds A6 cases to it, so A1–A5 are re-verified against the extended fixture before A6 relies on it.
+
+<!-- moon-diagnosis:superseded -->
+> **Superseded (SMA-597).** The `ciReport.json` diagnosis advice above does not work as written:
+> there is no action-level `exitCode` key, and the file carries no stdout/stderr at all. The
+> measured procedure is in CLAUDE.md between the `moon-diagnosis` markers. This document is left
+> otherwise unedited as a record of what was believed when it was written.

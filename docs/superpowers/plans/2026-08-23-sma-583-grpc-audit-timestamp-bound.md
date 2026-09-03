@@ -742,3 +742,9 @@ No gaps.
 **Type consistency:** `convert::parse_opt_ts(Option<prost_types::Timestamp>, &str) -> Result<Option<DateTime<Utc>>, TenancyError>` is used identically in Tasks 1 and 3. `convert::ts(DateTime<Utc>) -> prost_types::Timestamp` (Task 1's valid-bound test) matches `convert.rs:186`. `to_filter`'s signature is unchanged throughout. `from_ts` is referenced as private only from Task 5 onward, after both its outside callers are gone.
 
 **Ordering hazard, restated:** Task 5 depends on Tasks 1 **and** 3. Task 4 Step 2 must precede Task 5 or rustdoc emits a private-intra-doc-link warning. Task 6 is independent and may run any time after Task 1.
+
+<!-- moon-diagnosis:superseded -->
+> **Superseded (SMA-597).** The `ciReport.json` diagnosis advice above does not work as written:
+> there is no action-level `exitCode` key, and the file carries no stdout/stderr at all. The
+> measured procedure is in CLAUDE.md between the `moon-diagnosis` markers. This document is left
+> otherwise unedited as a record of what was believed when it was written.

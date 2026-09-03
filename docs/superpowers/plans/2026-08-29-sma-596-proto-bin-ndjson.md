@@ -595,3 +595,9 @@ README text.
 machine, not on a CI runner. The changed line has never executed on CI (spec L4), and which
 proto binary a runner executes is unmeasured (spec L3). The first CI run of this branch is the
 first execution of that path anywhere.
+
+<!-- moon-diagnosis:superseded -->
+> **Superseded (SMA-597).** The `ciReport.json` diagnosis advice above does not work as written:
+> there is no action-level `exitCode` key, and the file carries no stdout/stderr at all. The
+> measured procedure is in CLAUDE.md between the `moon-diagnosis` markers. This document is left
+> otherwise unedited as a record of what was believed when it was written.

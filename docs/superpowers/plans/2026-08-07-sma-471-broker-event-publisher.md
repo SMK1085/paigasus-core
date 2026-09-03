@@ -1846,3 +1846,9 @@ git commit -m "docs(rs): document the nats outbox publisher and its local setup 
 **Known unknowns, each with a step that resolves rather than skips it.** `async-nats` 0.50's concrete error types and `connection_state()` signature (Task 3 Step 4, Task 4 Step 3 — read the vendored source); whether `testcontainers-modules`' `Nats` needs `-js` (Task 3 Step 3); whether JetStream dedup survives a restart (Task 3 Step 2's test — if it fails, narrow the claim in the spec/ADR rather than deleting the test); the exact figment env-var spelling (Task 6 Step 5).
 
 **Deliberately deferred**, recorded in the spec's §8: per-row commit in the relay, `PublishError::Permanent`, the post-commit latency nudge, dashboard panels, `/readyz` NATS health, and a dev-stack compose file.
+
+<!-- moon-diagnosis:superseded -->
+> **Superseded (SMA-597).** The `ciReport.json` diagnosis advice above does not work as written:
+> there is no action-level `exitCode` key, and the file carries no stdout/stderr at all. The
+> measured procedure is in CLAUDE.md between the `moon-diagnosis` markers. This document is left
+> otherwise unedited as a record of what was believed when it was written.

@@ -1,3 +1,5 @@
+<!-- moon-diagnosis:ok -->
+
 # SMA-597 — Diagnosing an unattributed `moon ci` failure
 
 **Status:** design (rev 2 — reworked after adversarial challenge; see §8 for the changelog)

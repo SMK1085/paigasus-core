@@ -545,3 +545,9 @@ that assumption is wrong, say so before implementation, because it inverts the d
 - The measured cold CI cost is recorded in this spec.
 - SMA-376's version-floor and release-tooling ACs are moved onto SMA-407 in Linear.
 - The full `moon ci ...` graph is green.
+
+<!-- moon-diagnosis:superseded -->
+> **Superseded (SMA-597).** The `ciReport.json` diagnosis advice above does not work as written:
+> there is no action-level `exitCode` key, and the file carries no stdout/stderr at all. The
+> measured procedure is in CLAUDE.md between the `moon-diagnosis` markers. This document is left
+> otherwise unedited as a record of what was believed when it was written.

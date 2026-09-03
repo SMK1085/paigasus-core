@@ -1185,3 +1185,9 @@ git commit -m "docs(repo): record the version-lockstep and per-package releasabi
 
 - **The `ci/actionlint/run.sh` assertion guarding the release job's `if:` guard.** The SMA-576 issue lists it, but 576 ships **no `release` job** — there is nothing to guard. It must land with the issue that introduces that job (SMA-580), together with its guard-the-guard obligations: a new verdict function + self-test table, `SELF_TEST_COUNT` 9 → 10, and a whole-line `ACTIONLINT_SH_CALL_SITES` entry.
 - The ADR-0011 amendment (spec §13) — it records decisions spanning all five children; it lands with the last one that settles them.
+
+<!-- moon-diagnosis:superseded -->
+> **Superseded (SMA-597).** The `ciReport.json` diagnosis advice above does not work as written:
+> there is no action-level `exitCode` key, and the file carries no stdout/stderr at all. The
+> measured procedure is in CLAUDE.md between the `moon-diagnosis` markers. This document is left
+> otherwise unedited as a record of what was believed when it was written.

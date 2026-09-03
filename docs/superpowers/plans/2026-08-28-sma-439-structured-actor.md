@@ -665,3 +665,9 @@ git commit -m "fix(repo): satisfy <gate name> for the Actor change (SMA-439)"
 **Type consistency.** `creator()` / `modifier()` returning `Option<&Actor>` are defined in Task 2 and used under those exact names in Tasks 3 and 5. `actor(n) -> Actor` is defined once in Task 3 Step 1 and used by Step 2's macro table. `audit()`'s signature is unchanged, so Task 5 touches no call site. The Task 3 macro's added `$n` argument is introduced and consumed in the same step.
 
 **One deliberate ordering property.** Task 1 leaves the tree uncompilable, which is unavoidable: the proto retype and the Rust/Py/TS fixes cannot land in one commit without also merging four independently reviewable changes. Each later task restores a language to green, and Task 5 Step 5 is the first whole-workspace build.
+
+<!-- moon-diagnosis:superseded -->
+> **Superseded (SMA-597).** The `ciReport.json` diagnosis advice above does not work as written:
+> there is no action-level `exitCode` key, and the file carries no stdout/stderr at all. The
+> measured procedure is in CLAUDE.md between the `moon-diagnosis` markers. This document is left
+> otherwise unedited as a record of what was believed when it was written.

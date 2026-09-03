@@ -1188,3 +1188,9 @@ git commit -m "docs(rs): add observability RUNBOOK (SMA-446)"
 - `docker compose up` in `ops/observability` renders both dashboards against locally-run services.
 - Full `moon ci` gate list green on both PRs.
 - The RUNBOOK documents every metric + every alert's remediation.
+
+<!-- moon-diagnosis:superseded -->
+> **Superseded (SMA-597).** The `ciReport.json` diagnosis advice above does not work as written:
+> there is no action-level `exitCode` key, and the file carries no stdout/stderr at all. The
+> measured procedure is in CLAUDE.md between the `moon-diagnosis` markers. This document is left
+> otherwise unedited as a record of what was believed when it was written.

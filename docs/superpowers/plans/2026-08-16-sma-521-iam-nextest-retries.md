@@ -787,3 +787,9 @@ Expected: `clean`, and the changed-file list matches this plan's File Structure 
 **Placeholders.** The only intentionally unfilled values are Task 4's `<t0a>`/`<N>` measurement placeholders, which that task's own steps fill with real numbers — the procedure is fully specified.
 
 **Type consistency.** `PortSource::host_port(&self, port: u16) -> impl Future<Output = Result<u16, String>> + Send` is defined in Task 2 Step 3 and used unchanged in Task 2 Step 1's stub and all of Task 3's call sites. `mapped_port(src: &impl PortSource, port: u16, what: &str) -> u16` is called with three arguments everywhere.
+
+<!-- moon-diagnosis:superseded -->
+> **Superseded (SMA-597).** The `ciReport.json` diagnosis advice above does not work as written:
+> there is no action-level `exitCode` key, and the file carries no stdout/stderr at all. The
+> measured procedure is in CLAUDE.md between the `moon-diagnosis` markers. This document is left
+> otherwise unedited as a record of what was believed when it was written.

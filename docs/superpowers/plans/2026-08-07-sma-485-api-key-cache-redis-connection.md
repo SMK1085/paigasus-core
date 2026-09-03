@@ -855,3 +855,9 @@ Spec §7 requires this in the PR body, not only in the RUNBOOK. Record the text 
 **On the metrics recorder.** `paigasus_observability::init` is a process-global `OnceLock`. Installing it after the first `AppState::new` silently drops every gauge set before it, and the negative assertions in Task 2 would then pass while proving nothing. It must be the first statement in the test.
 
 **On running only part of the suite.** Per-project Moon tasks do not run the repo-level gates. `cargo nextest run -p paigasus-iam` passing is necessary, not sufficient — Task 6 is what CI actually runs.
+
+<!-- moon-diagnosis:superseded -->
+> **Superseded (SMA-597).** The `ciReport.json` diagnosis advice above does not work as written:
+> there is no action-level `exitCode` key, and the file carries no stdout/stderr at all. The
+> measured procedure is in CLAUDE.md between the `moon-diagnosis` markers. This document is left
+> otherwise unedited as a record of what was believed when it was written.

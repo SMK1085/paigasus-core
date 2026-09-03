@@ -856,3 +856,9 @@ git commit -m "docs(repo): implementation plan for the redis retry budget bound 
 **The 28.4 s is the headline evidence.** `api_keys::cache::tests::redis_cache_fails_open_when_the_backend_is_unreachable` takes a measured 28.403 s on `main` and should drop to well under 1 s after Task 2. If it does not, the config is not reaching the manager — stop and investigate rather than proceeding.
 
 **What must NOT change.** Every converted function keeps its exact signature and error mapping. The JWKS path stays fail-closed (`AuthnError::Unavailable`) — SMA-473 makes it fail *fast*, never *open*. The authz caches stay fail-open. `AppState::new` still fails fast at boot.
+
+<!-- moon-diagnosis:superseded -->
+> **Superseded (SMA-597).** The `ciReport.json` diagnosis advice above does not work as written:
+> there is no action-level `exitCode` key, and the file carries no stdout/stderr at all. The
+> measured procedure is in CLAUDE.md between the `moon-diagnosis` markers. This document is left
+> otherwise unedited as a record of what was believed when it was written.

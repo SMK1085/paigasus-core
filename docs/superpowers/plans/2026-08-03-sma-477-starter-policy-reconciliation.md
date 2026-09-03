@@ -2418,3 +2418,9 @@ git commit -m "fix(rs): satisfy the repo CI gates for starter policy reconciliat
 **Type consistency.** `existing_policy_ids` is declared on the port in Task 4, implemented on `PgPolicyStore` in Task 4, faked in Task 7 — one name throughout. `content_fingerprint(kind, source, description)` has the same three-argument shape in Tasks 1, 2, and 4. `StarterPolicyOutcome`'s variants and `metric_label()` strings match between Task 1's definition, Task 6's documented label set, and Task 7's match arms. `map_db_err` is introduced by renaming `pg_policies.rs`'s private `map_err` in Task 5 — Task 4's code still says `map_err` because it is written before that rename, which is correct in sequence.
 
 **Ordering constraint that must not be reordered.** Task 9 (the reserved-namespace guard in `put_in`) MUST land after Task 8. Before Task 8, boot still seeds through `PolicyStore::put`, and the guard would reject the seed itself — no replica would start.
+
+<!-- moon-diagnosis:superseded -->
+> **Superseded (SMA-597).** The `ciReport.json` diagnosis advice above does not work as written:
+> there is no action-level `exitCode` key, and the file carries no stdout/stderr at all. The
+> measured procedure is in CLAUDE.md between the `moon-diagnosis` markers. This document is left
+> otherwise unedited as a record of what was believed when it was written.

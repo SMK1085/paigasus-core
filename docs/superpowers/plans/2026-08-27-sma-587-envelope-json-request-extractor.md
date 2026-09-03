@@ -1135,3 +1135,9 @@ guarded by a runnable expected-output check in the next step.
 `support::send_bytes`'s signature in Task 3 Step 1 matches its call sites in Task 3 Step 2 and
 Task 5. `every_request_extractor_code_is_in_the_registry` is the same name in Task 2 Step 1 and
 Task 2 Step 11's MANIFEST row. Wire codes match the Global Constraints block verbatim throughout.
+
+<!-- moon-diagnosis:superseded -->
+> **Superseded (SMA-597).** The `ciReport.json` diagnosis advice above does not work as written:
+> there is no action-level `exitCode` key, and the file carries no stdout/stderr at all. The
+> measured procedure is in CLAUDE.md between the `moon-diagnosis` markers. This document is left
+> otherwise unedited as a record of what was believed when it was written.

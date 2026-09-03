@@ -2022,3 +2022,9 @@ the account model (D1), the rotation question moved from open to answered (§1.3
 permissions moved from "a deployment requirement" to "provisioned and tested here", and the
 residual absence of an account-JWT revocation and operator-key-rotation story. This is a Notion
 edit, not a repo change, and it is the one deliverable no CI gate can catch.
+
+<!-- moon-diagnosis:superseded -->
+> **Superseded (SMA-597).** The `ciReport.json` diagnosis advice above does not work as written:
+> there is no action-level `exitCode` key, and the file carries no stdout/stderr at all. The
+> measured procedure is in CLAUDE.md between the `moon-diagnosis` markers. This document is left
+> otherwise unedited as a record of what was believed when it was written.

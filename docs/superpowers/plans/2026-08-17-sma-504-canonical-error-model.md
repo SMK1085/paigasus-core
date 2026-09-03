@@ -2046,3 +2046,9 @@ Skip this step if the tree is clean.
 **Numbering deviation from the spec.** The spec put `missing-auth-context` at 33 in the IAM range; Task 1 puts it at 903 in the shared range alongside `capability-disabled` at 904, with the reasoning inline. Neither condition is IAM-specific.
 
 **Type consistency.** `Retryable::as_wire` returns `&'static str` at every use, which is what `HeaderValue::from_static` requires. `current_ids() -> Option<RequestIds>` is consumed identically in Tasks 4, 7 and 8. `iam_status`'s signature gained a `retryable: Retryable` parameter relative to the spec's sketch, and every call site in Task 4 passes it. `scope_for_test` is introduced in Task 2 Step 4, where the module is created, and consumed by Tasks 7 and 8 — no task adds it twice.
+
+<!-- moon-diagnosis:superseded -->
+> **Superseded (SMA-597).** The `ciReport.json` diagnosis advice above does not work as written:
+> there is no action-level `exitCode` key, and the file carries no stdout/stderr at all. The
+> measured procedure is in CLAUDE.md between the `moon-diagnosis` markers. This document is left
+> otherwise unedited as a record of what was believed when it was written.

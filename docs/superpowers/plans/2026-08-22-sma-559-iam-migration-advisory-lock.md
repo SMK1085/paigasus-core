@@ -1164,3 +1164,9 @@ If the graph required changes, commit them with a `fix(rs):` or `fix(repo):` sco
 **Not covered by design:** the Linear comment on SMA-513 pointing at the runbook block — a controller action after merge, not a task.
 
 **Type consistency.** `migrations_applied` is `u64` in `MigrationLockOutcome` and compared against `Migrator::migrations().len()` (`usize`) only after an `as usize` cast on the SQL count. `next_poll(elapsed, wait)` takes `(Duration, Duration)` in Task 1 and is called as `next_poll(start.elapsed(), wait)` in Task 3. `lock_wait()` returns `Duration` in Task 2 and is passed as `wait` in Task 3. `MIGRATION_BUDGET_SECS`/`IMAGE_START_PERIOD_SECS` are `u64` in Task 1 and compared against `config.migration.lock_wait_secs` (`u64`) in Task 3.
+
+<!-- moon-diagnosis:superseded -->
+> **Superseded (SMA-597).** The `ciReport.json` diagnosis advice above does not work as written:
+> there is no action-level `exitCode` key, and the file carries no stdout/stderr at all. The
+> measured procedure is in CLAUDE.md between the `moon-diagnosis` markers. This document is left
+> otherwise unedited as a record of what was believed when it was written.

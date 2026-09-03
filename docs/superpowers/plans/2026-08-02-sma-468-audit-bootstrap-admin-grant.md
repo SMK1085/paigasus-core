@@ -846,3 +846,9 @@ Expected files only: `bootstrap_admin.rs`, `http/mod.rs`, `names.rs`, `iam.json`
 **The single highest-risk line is `self.gen_bumper.bump().await`.** Everything else in this change is additive; that one line replaces behavior `RoleGrantStore::grant` used to provide. Omit it and every test still passes except Task 3's test 4, while a freshly seeded platform admin is silently denied for ~31 seconds.
 
 **What must NOT change.** `ensure_platform_admin` keeps its signature and its `()` return; every failure stays logged-and-swallowed; the `HashSet` fast path still returns before any store or transaction work; and the seeder is still never called from the `introspect` path.
+
+<!-- moon-diagnosis:superseded -->
+> **Superseded (SMA-597).** The `ciReport.json` diagnosis advice above does not work as written:
+> there is no action-level `exitCode` key, and the file carries no stdout/stderr at all. The
+> measured procedure is in CLAUDE.md between the `moon-diagnosis` markers. This document is left
+> otherwise unedited as a record of what was believed when it was written.

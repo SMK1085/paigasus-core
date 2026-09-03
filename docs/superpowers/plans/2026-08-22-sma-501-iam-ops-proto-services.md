@@ -1730,3 +1730,9 @@ Expected: green. If Moon reports an unattributed failure, diagnose it with
 git add -A
 git commit -m "docs(rs): record that the dead-letter surface now has a grpc mirror (SMA-501)"
 ```
+
+<!-- moon-diagnosis:superseded -->
+> **Superseded (SMA-597).** The `ciReport.json` diagnosis advice above does not work as written:
+> there is no action-level `exitCode` key, and the file carries no stdout/stderr at all. The
+> measured procedure is in CLAUDE.md between the `moon-diagnosis` markers. This document is left
+> otherwise unedited as a record of what was believed when it was written.

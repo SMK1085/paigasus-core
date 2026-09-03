@@ -770,3 +770,9 @@ Confirm: seven source files touched plus the spec and this plan; no debug prints
 **Type consistency.** `RedactedUrl::as_str` as a path, never a closure, at all five read sites and all four assertion sites. `From<String>` used where the source is owned (`redis_url.into()`, `fixture.url.clone().into()`, `.replace(…).into()`); `From<&str>` where borrowed (`authz_url.into()`, `url.into()`, string literals); `RedactedUrl::from` as a function only at `api_key_cache_connection.rs:60`, where it maps over an `Option<&str>`. The test renamed in Task 2 Step 1 is referenced by its new name everywhere after that point.
 
 **Known ordering hazard.** Task 1 must land complete before Task 2 begins: the crate does not compile between a field's type change and its readers being fixed, so neither task may be split further or interleaved.
+
+<!-- moon-diagnosis:superseded -->
+> **Superseded (SMA-597).** The `ciReport.json` diagnosis advice above does not work as written:
+> there is no action-level `exitCode` key, and the file carries no stdout/stderr at all. The
+> measured procedure is in CLAUDE.md between the `moon-diagnosis` markers. This document is left
+> otherwise unedited as a record of what was believed when it was written.

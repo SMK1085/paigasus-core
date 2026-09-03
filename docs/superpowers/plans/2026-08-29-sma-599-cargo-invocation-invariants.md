@@ -1309,3 +1309,9 @@ git commit -m "ci(repo): reconcile the affected-graph expected sets with A10 (SM
 | 6 — proven with the staleness experiment, not a bogus-flag test | Spec §2.1 (already committed); bounded by L6 |
 | 7 — n/a, the behavioural change was taken, not declined | Spec §6 D6 |
 | 8 — `ci/affected-graph/run.sh` reports no expected-set movement | Task 7 (Steps 1, 2) |
+
+<!-- moon-diagnosis:superseded -->
+> **Superseded (SMA-597).** The `ciReport.json` diagnosis advice above does not work as written:
+> there is no action-level `exitCode` key, and the file carries no stdout/stderr at all. The
+> measured procedure is in CLAUDE.md between the `moon-diagnosis` markers. This document is left
+> otherwise unedited as a record of what was believed when it was written.

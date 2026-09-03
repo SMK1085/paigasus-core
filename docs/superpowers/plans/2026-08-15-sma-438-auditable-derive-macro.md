@@ -1122,3 +1122,9 @@ impl would actually be the defect this check is looking for.
 **Deliberately not in this plan**, per spec §10: server-side stamping, TS/Python equivalents, trait-shape changes, making a consumer call the accessors, and flipping `publish = true`.
 
 **Ordering constraint.** Task 3 Steps 1 and 5 must land in **one commit** — between them the crate does not compile (`E0119`). This is the `warnings = "deny"` staging trap in a different guise, and the plan's step ordering is what avoids leaving a broken commit on the branch.
+
+<!-- moon-diagnosis:superseded -->
+> **Superseded (SMA-597).** The `ciReport.json` diagnosis advice above does not work as written:
+> there is no action-level `exitCode` key, and the file carries no stdout/stderr at all. The
+> measured procedure is in CLAUDE.md between the `moon-diagnosis` markers. This document is left
+> otherwise unedited as a record of what was believed when it was written.

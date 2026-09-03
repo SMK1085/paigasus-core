@@ -1299,3 +1299,9 @@ Expected: all green. Diagnose any unattributed "N failed" via `.moon/cache/ciRep
 - **Type consistency:** `RetentionPolicy` fields (`ahead_months`/`denied_months`/`committed_months`) match between Task 4 (def) and Task 6 (construction); `with_query_window(default_days, max_days)` matches between Task 5 def and its http/mod.rs call + config field names (`query_default_window_days`/`query_max_window_days`); `AUDIT_PARTITION_LOCK_KEY` defined in Task 1, consumed in Task 4.
 - **Known verify-against-real-PG points (surfaced by tests, not assumptions):** exact composite-PK column set (Task 1 test inserts/reads); partitioned-parent `INSERT … RETURNING` routing via SeaORM (Task 1 regression suites); `CREATE TABLE IF NOT EXISTS … PARTITION OF` syntax (Task 4 idempotency test). If PG rejects any exact DDL string, fix the string — the topology/decision doesn't change.
 ```
+
+<!-- moon-diagnosis:superseded -->
+> **Superseded (SMA-597).** The `ciReport.json` diagnosis advice above does not work as written:
+> there is no action-level `exitCode` key, and the file carries no stdout/stderr at all. The
+> measured procedure is in CLAUDE.md between the `moon-diagnosis` markers. This document is left
+> otherwise unedited as a record of what was believed when it was written.

@@ -1711,3 +1711,9 @@ Expected: **empty**. Any change here means `sqlx` was added directly, contrary t
 ```bash
 git push -u origin feature/sma-489-iam-wake-the-outbox-relay-on-commit-so-delivery-is-not-gated
 ```
+
+<!-- moon-diagnosis:superseded -->
+> **Superseded (SMA-597).** The `ciReport.json` diagnosis advice above does not work as written:
+> there is no action-level `exitCode` key, and the file carries no stdout/stderr at all. The
+> measured procedure is in CLAUDE.md between the `moon-diagnosis` markers. This document is left
+> otherwise unedited as a record of what was believed when it was written.

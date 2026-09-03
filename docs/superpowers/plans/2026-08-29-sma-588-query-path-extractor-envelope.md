@@ -1712,3 +1712,9 @@ Expected: clean.
 **Two ordering constraints that are not optional:**
 - Task 1 before Task 2 — the `TenancyError` membership guard enumerates the enum and cross-checks it against the registry.
 - Tasks 5 and 9 before Task 10 — enabling a gate row against unconverted handlers reds the build on real code.
+
+<!-- moon-diagnosis:superseded -->
+> **Superseded (SMA-597).** The `ciReport.json` diagnosis advice above does not work as written:
+> there is no action-level `exitCode` key, and the file carries no stdout/stderr at all. The
+> measured procedure is in CLAUDE.md between the `moon-diagnosis` markers. This document is left
+> otherwise unedited as a record of what was believed when it was written.

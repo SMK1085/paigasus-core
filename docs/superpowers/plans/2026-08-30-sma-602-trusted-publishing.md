@@ -675,3 +675,9 @@ If the **second** PyPI registration fails the way the pending ones did, **stop a
 **Type consistency.** `publish_credential_violations(job, job_id, name) -> list[str]` matches `napi_violations`' shape and is called identically in both call sites. `BANNED_PUBLISH_CREDENTIALS` and `NPMRC_AUTH_TOKEN` are used only inside the helper. The fixture tuple shape `(name, kind, yaml, expected | None)` matches the existing `FIXTURES` declaration.
 
 **One known ordering property.** Task 1 ends with the guard **red** against the real `release.yml`, by design — that is the proof it bites. Task 2 clears it. Do not "fix" Task 1's red by weakening the check.
+
+<!-- moon-diagnosis:superseded -->
+> **Superseded (SMA-597).** The `ciReport.json` diagnosis advice above does not work as written:
+> there is no action-level `exitCode` key, and the file carries no stdout/stderr at all. The
+> measured procedure is in CLAUDE.md between the `moon-diagnosis` markers. This document is left
+> otherwise unedited as a record of what was believed when it was written.

@@ -1252,3 +1252,9 @@ identically everywhere it appears, including inside the `sed` addresses and the 
 **Ordering.** `SELF_TEST_COUNT` is `4` from Task 2 and `5` from Task 4; the battery derives its
 mutant list from `run_self_tests`' body, so Task 4 extends it with no edit to Task 3's code.
 Task 1 must land first — Task 5's pin is unreachable without it.
+
+<!-- moon-diagnosis:superseded -->
+> **Superseded (SMA-597).** The `ciReport.json` diagnosis advice above does not work as written:
+> there is no action-level `exitCode` key, and the file carries no stdout/stderr at all. The
+> measured procedure is in CLAUDE.md between the `moon-diagnosis` markers. This document is left
+> otherwise unedited as a record of what was believed when it was written.

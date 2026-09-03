@@ -1434,3 +1434,9 @@ No gaps.
 **Type consistency:** `guard(observed: u64, high_water: u64) -> GuardOutcome` (Task 1) is called only in `settle` (Task 3). `GuardOutcome::Repair { delta }` (Task 1) is destructured as `delta` in Task 3. `Which::{key,label,memory,redis}` (Task 2) are used with those exact names in Tasks 2 and 3. `settle(&self, which, observed, reason) -> u64` and `repair(&self, which, delta, reason) -> u64` are consistent between their definition and both call sites. `Generations::from_connection` is defined in Task 2 step 3d and used in 3f, plus Tasks 3 and 4 tests. `names::IAM_AUTHZ_GENERATION_REWINDS_TOTAL` is spelled identically in Tasks 2, 3, 5 and 6.
 
 **One adjacent gap found, deliberately NOT in scope.** `IAM_AUTHZ_POLICY_SNAPSHOT_RELOADS_TOTAL` (SMA-470) is in `names::ALL` but has **no** `describe_counter!` in `describe_iam_metrics` — it ships with no `# HELP`/`# TYPE` text. That is a pre-existing SMA-470 oversight in the exact function Task 2 edits. Fixing it is a 4-line addition (and would make the doc-comment count 26, not 25), but it is not SMA-474's defect. Flagged for a separate decision rather than folded in silently.
+
+<!-- moon-diagnosis:superseded -->
+> **Superseded (SMA-597).** The `ciReport.json` diagnosis advice above does not work as written:
+> there is no action-level `exitCode` key, and the file carries no stdout/stderr at all. The
+> measured procedure is in CLAUDE.md between the `moon-diagnosis` markers. This document is left
+> otherwise unedited as a record of what was believed when it was written.

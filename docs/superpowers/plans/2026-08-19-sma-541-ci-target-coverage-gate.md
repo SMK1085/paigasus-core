@@ -1280,3 +1280,9 @@ the final whole-branch review, not by a numbered task here. §5's mutation batte
 **Type consistency.** `parse_t` and `parse_doc_targets` both return **bare** names (no leading colon) throughout, and every consumer (`check_forward`, `check_reverse`, `check_docs`) treats them that way; only rendered messages re-add the `:`. `moon_tasks()`'s `dict[str, dict[str, bool]]` shape is what `tasks_fixture` in Task 3 mirrors and what `check_floor`/`check_forward`/`check_reverse` all consume. `check_forward` returns a 3-tuple in Tasks 3 and 5 alike. `RUN_SH_CALL_SITES` (Task 5) matches the exact strings Task 6 writes into `run.sh` — flagged in both tasks.
 
 **Known intentional intermediate state.** After Task 5, `python3 ci_targets.py` exits **1** on the real tree because `run.sh` is not yet wired (C4). Task 5 Step 5 states this explicitly and Task 6 Step 4 resolves it.
+
+<!-- moon-diagnosis:superseded -->
+> **Superseded (SMA-597).** The `ciReport.json` diagnosis advice above does not work as written:
+> there is no action-level `exitCode` key, and the file carries no stdout/stderr at all. The
+> measured procedure is in CLAUDE.md between the `moon-diagnosis` markers. This document is left
+> otherwise unedited as a record of what was believed when it was written.
