@@ -692,9 +692,11 @@ git commit -m "docs(py): document the per-package collection floor (SMA-610)"
 
 ## Notes for the implementer
 
+<!-- moon-diagnosis:ok -->
 - **A passing re-run destroys evidence.** If a Moon task fails unexpectedly, copy
   `.moon/cache/ciReport.json` and `.moon/cache/states/<project>/<task>/` out of the repo BEFORE
-  re-running — see CLAUDE.md's `moon-diagnosis` block.
+  re-running — see CLAUDE.md's `moon-diagnosis` block, which is the authority here. This note
+  deliberately does not restate the procedure: it points at it, so the two cannot drift.
 - **`py/scripts/run_tests.sh` is not shellchecked by anything.** `repo:actionlint`'s shellcheck
   integration covers workflow `run:` blocks only, not repo shell scripts. Read the wrapper
   carefully rather than relying on a gate to catch a quoting bug.
