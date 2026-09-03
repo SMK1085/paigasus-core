@@ -134,8 +134,13 @@ pub struct AuthnConfig {
     /// against `REQUESTS_CA_BUNDLE`, which is not).
     ///
     /// **ROOTS ONLY.** Every certificate here becomes an UNCONSTRAINED trust anchor for every
-    /// HTTPS call this process makes — rustls performs no `cA` basic-constraints check on an
-    /// anchor. An intermediate placed here is silently promoted to a root.
+    /// request this client makes, to any host it reaches — rustls performs no `cA`
+    /// basic-constraints check on an anchor. An intermediate placed here is silently promoted to
+    /// a root.
+    ///
+    /// The anchors go onto the JWKS fetcher's own `reqwest::ClientBuilder`, NOT the whole
+    /// process: the gRPC (`tonic`), NATS and Redis links each build their own TLS config and
+    /// never consult them (SMA-570).
     ///
     /// Read ONCE at boot, so a rotated bundle needs a restart (unlike `root_ca_bundle`, which is
     /// re-read per connection attempt). An unreadable, malformed, or certificate-FREE bundle is a

@@ -135,7 +135,7 @@ impl HttpJwksFetcher {
                 // reads only the first. This is NOT an invitation to add intermediates — every
                 // certificate here becomes an UNCONSTRAINED trust anchor (rustls performs no `cA`
                 // basic-constraints check on an anchor), so an intermediate would be promoted to a
-                // root for every HTTPS call this process makes.
+                // root for every request THIS CLIENT makes, to any host it reaches (SMA-570).
                 let certs = reqwest::Certificate::from_pem_bundle(&pem).map_err(|e| backend(format!("authn.extra_ca_bundle_path {path:?} is not a valid PEM certificate bundle: {e}")))?;
 
                 // `from_pem_bundle` returns Ok(vec![]) — not an error — for any file with no PEM

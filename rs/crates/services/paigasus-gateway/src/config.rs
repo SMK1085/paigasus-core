@@ -114,8 +114,10 @@ pub struct OpenAiConfig {
     /// For a self-hosted vLLM/LiteLLM upstream behind a corporate CA (SMA-558).
     ///
     /// **ROOTS ONLY** — every certificate here becomes an unconstrained trust anchor for every
-    /// HTTPS call this process makes. Read once at boot; an unreadable, malformed or
-    /// certificate-free bundle is a hard boot failure. Mirrors
+    /// request this client makes, to any host it reaches. The anchors go onto the OpenAI egress
+    /// client's own `reqwest::ClientBuilder`, NOT the whole process: the IAM `tonic` link builds
+    /// its own TLS config and never consults them (SMA-570). Read once at boot; an unreadable,
+    /// malformed or certificate-free bundle is a hard boot failure. Mirrors
     /// `paigasus-iam`'s `authn.extra_ca_bundle_path`.
     #[serde(default)]
     pub extra_ca_bundle_path: Option<String>,

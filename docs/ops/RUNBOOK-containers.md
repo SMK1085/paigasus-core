@@ -255,8 +255,11 @@ build itself — they bite the first operator who deploys without reading this s
      no boot error, no request error against public hosts, and a still-broken private IdP.
 
   **Put roots in the bundle, never intermediates.** Every certificate in it becomes an
-  unconstrained trust anchor for every outbound HTTPS call the process makes — TLS performs no
-  `cA` check on an anchor, so an intermediate is silently promoted to a root.
+  unconstrained trust anchor for every request the client that loaded it makes, to any host it
+  reaches — TLS performs no `cA` check on an anchor, so an intermediate is silently promoted to a
+  root. The bundle is scoped to one client, not the whole process: IAM's is the JWKS fetcher's and
+  the gateway's is the OpenAI egress client's, while the gRPC, NATS and Redis links each build
+  their own TLS config and never consult it.
 
   **A self-signed *leaf* works too.** rustls applies no `cA` check to a trust anchor, so an IdP
   presenting a bare self-signed certificate validates once that certificate's own PEM is in the
