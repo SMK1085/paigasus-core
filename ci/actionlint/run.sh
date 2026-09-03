@@ -45,10 +45,10 @@ FAILED=0
 # Deliberately NOT `readonly`: without `set -e` a reassignment only warns, so readonly buys no
 # protection and would break a future harness that sources this file twice (SMA-542 D3).
 SELF_TESTS_RAN=0
-SELF_TEST_COUNT=13  # extractor, path-filter, branch-filter, config, ci-target-floor,
+SELF_TEST_COUNT=14  # extractor, path-filter, branch-filter, config, ci-target-floor,
                     # invocation-allowlist, affected-graph-wiring, block-execution,
                     # kill-predicate, affected-smoke-block, release-guard, cargo-lock-step,
-                    # release-plan
+                    # release-plan, doc-diagnosis
 
 fail() {
   echo "actionlint gate: $*" >&2
@@ -63,10 +63,11 @@ infra() {
 usage() {
   echo "usage: $(basename "$0") [--self-test]" >&2
   echo "  (no argument)  run the full gate" >&2
-  echo "  --self-test    run the thirteen fixture tables only — extractor, path-filter verdicts," >&2
+  echo "  --self-test    run the fourteen fixture tables only — extractor, path-filter verdicts," >&2
   echo "                 branch-filter verdicts, config allowlist, ci-target floor, invocation" >&2
   echo "                 allowlist, affected-graph wiring, block execution, kill predicate," >&2
-  echo "                 affected-smoke block, release guard, cargo-lock step, release-plan." >&2
+  echo "                 affected-smoke block, release guard, cargo-lock step, release-plan," >&2
+  echo "                 doc-diagnosis." >&2
   echo "                 No actionlint binary is required, but the branch-filter table needs a" >&2
   echo "                 git repo carrying refs/remotes/origin/main, and the release-guard table" >&2
   echo "                 shells out to 'uv run --locked --project py', so it needs uv on PATH and" >&2
@@ -4701,10 +4702,105 @@ claude_md_block_verdict() {
   done
 }
 
+doc_diagnosis_self_test() {
+  SELF_TESTS_RAN=$((SELF_TESTS_RAN + 1))
+  local rc=0 tmpd list got
+
+  expect_doc() {
+    local name="$1" expected="$2"
+    if [ "$got" != "$expected" ]; then
+      fail "doc-diagnosis self-test '$name': got '$got', expected '$expected'. Check 12 is not
+      deciding what it is documented to decide."
+      rc=1
+    fi
+  }
+
+  tmpd="$(mktemp -d)"
+  list="$tmpd/list"
+
+  # --- doc_diagnosis_verdict ---------------------------------------------------------------
+  # A file carrying the token and NO marker is the violation this check exists for.
+  printf 'see ciReport.json for details\n' > "$tmpd/new-plan.md"
+  printf '%s\n' "$tmpd/new-plan.md" > "$list"
+  got="$(doc_diagnosis_verdict "$list" | grep -v '^stale-allowlist ')"
+  expect_doc 'an unmarked mention fires' "unmarked-mention $tmpd/new-plan.md"
+
+  # A superseded marker clears it — the 67 historical documents.
+  printf 'see ciReport.json\n<!-- moon-diagnosis:superseded -->\n' > "$tmpd/old-plan.md"
+  printf '%s\n' "$tmpd/old-plan.md" > "$list"
+  got="$(doc_diagnosis_verdict "$list" | grep -v '^stale-allowlist ')"
+  expect_doc 'a superseded marker clears it' ''
+
+  # An ok marker clears it — a deliberate reference to the corrected procedure.
+  printf 'see ciReport.json\n<!-- moon-diagnosis:ok -->\n' > "$tmpd/correct.md"
+  printf '%s\n' "$tmpd/correct.md" > "$list"
+  got="$(doc_diagnosis_verdict "$list" | grep -v '^stale-allowlist ')"
+  expect_doc 'an ok marker clears it' ''
+
+  # A removed offender is NOT a failure — subset, not equality. The set should only ever shrink,
+  # and making a cleanup red the gate that authorised it pushes people toward loosening the gate.
+  : > "$list"
+  got="$(doc_diagnosis_verdict "$list" | grep -v '^stale-allowlist ')"
+  expect_doc 'an empty corpus emits no violation rows' ''
+
+  # A missing list is infrastructure, not a clean repo.
+  got="$(doc_diagnosis_verdict "$tmpd/nope" | grep -v '^stale-allowlist ')"
+  expect_doc 'a missing list reports no-list' 'no-list'
+
+  # --- claude_md_block_verdict -------------------------------------------------------------
+  # ONE required literal per line, deliberately. The deletion loop below strips whole lines with
+  # `grep -vF`, so two literals sharing a line would make deleting either one report BOTH as
+  # missing — the fixture would then be asserting a conjunction rather than the single literal the
+  # case is named for, and a genuinely absent literal could hide behind its line-mate.
+  local good="prose
+<!-- moon-diagnosis:begin -->
+read the run's operations[] array
+and pick the task-execution entry
+output lives under .moon/cache/states/
+the captured stream is stderr.log
+cross-check lastRunTime
+<!-- moon-diagnosis:end -->
+more prose"
+
+  printf '%s\n' "$good" > "$tmpd/claude.md"
+  got="$(claude_md_block_verdict "$tmpd/claude.md")"
+  expect_doc 'a complete block is clean' ''
+
+  got="$(claude_md_block_verdict "$tmpd/absent.md")"
+  expect_doc 'a missing file reports no-file' 'no-file'
+
+  # A duplicated marker: CLAUDE.md's own ci-targets entry warns that a second copy anywhere in the
+  # file — even inside backticks in prose — breaks the count. Same hazard here.
+  printf '%s\n<!-- moon-diagnosis:begin -->\n' "$good" > "$tmpd/dup.md"
+  got="$(claude_md_block_verdict "$tmpd/dup.md")"
+  expect_doc 'a duplicated begin marker fires' 'marker-count begin 2'
+
+  printf '<!-- moon-diagnosis:end -->\nx\n<!-- moon-diagnosis:begin -->\n' > "$tmpd/order.md"
+  got="$(claude_md_block_verdict "$tmpd/order.md")"
+  expect_doc 'markers out of order fire' 'marker-order'
+
+  printf '<!-- moon-diagnosis:begin -->\n   \n<!-- moon-diagnosis:end -->\n' > "$tmpd/empty.md"
+  got="$(claude_md_block_verdict "$tmpd/empty.md")"
+  expect_doc 'a whitespace-only block fires' 'empty-block'
+
+  # Each required literal deleted in turn — driven from the array, so a sixth entry is covered
+  # automatically rather than needing a new fixture.
+  local lit stripped
+  for lit in "${DOC_DIAGNOSIS_REQUIRED_LITERALS[@]}"; do
+    stripped="$(printf '%s\n' "$good" | grep -vF -- "$lit")"
+    printf '%s\n' "$stripped" > "$tmpd/miss.md"
+    got="$(claude_md_block_verdict "$tmpd/miss.md")"
+    expect_doc "required literal '$lit' deleted fires" "missing-literal $lit"
+  done
+
+  rm -rf "$tmpd"
+  return "$rc"
+}
+
 # ---------------------------------------------------------------------------------------------
 # Check 7 — the self-tests, and the counter that proves they were invoked.
 #
-# All THIRTEEN are defined above so this block can run them from ONE call site, reached by both the
+# All FOURTEEN are defined above so this block can run them from ONE call site, reached by both the
 # --self-test path and the full gate. One call site rather than two is deliberate: ci_targets.py's
 # C4 pins this by whole stripped line, and two identical lines would let one be deleted while the
 # pin still matched (SMA-542 D2).
@@ -4735,6 +4831,7 @@ run_self_tests() {
   release_guard_self_test
   cargo_lock_step_self_test
   release_plan_self_test
+  doc_diagnosis_self_test
 
   assert_self_tests_ran "$SELF_TEST_COUNT"
 
