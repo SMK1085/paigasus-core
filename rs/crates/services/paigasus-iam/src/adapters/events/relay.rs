@@ -30,13 +30,12 @@ use std::time::Duration;
 
 use chrono::Utc;
 use metrics::{counter, gauge, histogram};
-#[cfg(test)]
-use paigasus_iam_core::PublishError;
 use paigasus_iam_core::{DomainEvent, EventPublisher, EventType};
 use paigasus_observability::names;
 use sea_orm::sea_query::{LockBehavior, LockType};
 use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseConnection, DbErr, EntityTrait, IntoActiveModel, QueryFilter, QueryOrder, QuerySelect, Set, TransactionTrait};
 
+use crate::adapters::error_chain::describe_error;
 use crate::adapters::persistence::entities::event_outbox;
 
 /// Per-tick telemetry, both logged (`tracing::info!`) and returned so callers/tests can assert
@@ -54,22 +53,6 @@ pub struct TickReport {
     pub oldest_unpublished_age_secs: Option<i64>,
 }
 
-/// Renders `err` and its full `source()` chain as `"outer: middle: inner"`.
-///
-/// `PublishError::Backend`'s `Display` is the static string `"backend error"` — thiserror's
-/// `#[from]` makes the boxed cause the variant's `source()` rather than part of its message
-/// (`paigasus_iam_core::ports`), so `to_string()` alone tells an operator nothing about WHY a
-/// publish failed. Since the parked row's `last_error` (SMA-469) and the `error!`/`warn!` lines
-/// below all render this string, the chain walk is what makes any of them informative.
-fn describe_error(err: &(dyn std::error::Error + 'static)) -> String {
-    let mut parts = vec![err.to_string()];
-    let mut source = err.source();
-    while let Some(e) = source {
-        parts.push(e.to_string());
-        source = e.source();
-    }
-    parts.join(": ")
-}
 
 /// Byte bound on a stored `last_error` (SMA-469). Deliberately a BYTE bound, not a char count:
 /// 1024 four-byte chars would be 4KB, past Postgres's ~2KB TOAST threshold, so a pathological
@@ -450,30 +433,6 @@ mod tests {
         assert_eq!(ev.correlation_id, row.correlation_id);
     }
 
-    /// A publish failure must carry its whole `source()` chain into the reason string —
-    /// `PublishError::Backend`'s own `Display` is the static "backend error" and renders
-    /// nothing about what actually failed (`ports.rs`).
-    #[test]
-    fn describe_error_walks_the_full_source_chain_without_duplicating_levels() {
-        #[derive(Debug, thiserror::Error)]
-        #[error("transport closed")]
-        struct Inner;
-
-        #[derive(Debug, thiserror::Error)]
-        #[error("publish failed")]
-        struct Outer(#[source] Inner);
-
-        let err = PublishError::from(Box::new(Outer(Inner)) as Box<dyn std::error::Error + Send + Sync>);
-        assert_eq!(describe_error(&err), "backend error: publish failed: transport closed");
-    }
-
-    #[test]
-    fn describe_error_of_a_sourceless_error_is_just_its_display() {
-        #[derive(Debug, thiserror::Error)]
-        #[error("nope")]
-        struct Bare;
-        assert_eq!(describe_error(&Bare), "nope");
-    }
 
     #[test]
     fn truncate_error_leaves_a_short_string_untouched() {
