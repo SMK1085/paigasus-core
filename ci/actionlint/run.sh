@@ -5853,12 +5853,22 @@ DD_LIST="$(mktemp)"
 # below, and check 12 would then inspect an incomplete corpus with nothing to say so — the same
 # vacuous-pass class the floor exists to close. Capture it instead and route it explicitly.
 # `set -uo pipefail` (no `-e`) makes this the RIGHTMOST non-zero status in the pipeline, which is
-# what lets status 1 mean "grep matched nothing" rather than "git ls-files or sort broke".
+# what lets a no-match status mean "grep matched nothing" rather than "git ls-files or sort broke".
+#
+# TWO no-match statuses, and the split is a PLATFORM one — both MEASURED, because getting this
+# wrong makes an empty corpus read as broken infrastructure on exactly one of the two platforms
+# this gate runs on. `grep -l` exits 1 when it matches nothing, but the status `pipefail` reports
+# is `xargs`'s, not grep's, and the two implementations disagree:
+#   BSD xargs (macOS, local runs)   -> 1    (measured on Darwin)
+#   GNU xargs (Linux, CI)           -> 123  ("a command exited 1-125")
+# Accept both. Treating only 1 as no-match is correct locally and wrong in CI, where the arity
+# floor's precise message would be pre-empted by the generic pipeline-status one below — the exact
+# substitution of a vague diagnosis for a sharp one that SMA-597 exists to stop.
 git ls-files -z | xargs -0 grep -l 'ciReport' 2>/dev/null | sort > "$DD_LIST"
 DD_PIPELINE_RC=$?
-if [ "$DD_PIPELINE_RC" -eq 1 ]; then
-  : # grep's legitimate "no files matched" — let the arity floor below turn this into a clear
-    # infra message instead of pre-empting it with a confusing pipeline-status one.
+if [ "$DD_PIPELINE_RC" -eq 1 ] || [ "$DD_PIPELINE_RC" -eq 123 ]; then
+  : # grep's legitimate "no files matched", via either xargs — let the arity floor below turn this
+    # into a clear infra message instead of pre-empting it with a confusing pipeline-status one.
 elif [ "$DD_PIPELINE_RC" -ne 0 ]; then
   infra "check 12: the corpus discovery pipeline (git ls-files | xargs grep -l 'ciReport' | sort)
       exited $DD_PIPELINE_RC — check 12 cannot know whether the corpus it read is complete."
