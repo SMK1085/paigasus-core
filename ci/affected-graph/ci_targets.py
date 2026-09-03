@@ -60,20 +60,14 @@ T_ASSIGN_RE = re.compile(r"^[ \t]*T[ \t]*\+?=", re.MULTILINE)
 
 # The canonical single-line array. `[ \t]*$` rather than `\s*$` is DEFENSIVE, not load-bearing:
 # `(.*?)` cannot cross a newline without re.DOTALL, so `\s*$` would not in fact accept a multi-line
-# array either. The one behaviour the stricter anchor really changes is CRLF — on a checkout with
-# CRLF endings (this repo ships no .gitattributes) `T=(…)\r\n` matches `\s*$` but NOT `[ \t]*$`, so
-# the gate reds with the "must stay on one line" message, which is misleading but red rather than
-# silently unexamined. Kept as-is: the alternative to a misleading red is a parser that has to
-# reason about line endings.
+# array either.
+#
+# An earlier version of this comment claimed the stricter anchor changes CRLF behaviour, reddening
+# with a misleading "must stay on one line" message on a CRLF checkout. That state is UNREACHABLE
+# and the claim is withdrawn (measured, SMA-554 E6): read_input uses Path.read_text(), i.e. text
+# mode with newline=None, so universal-newline translation has already turned "\r\n" into "\n"
+# before this regex — or any other check in this file — sees the text.
 T_ARRAY_RE = re.compile(r"^[ \t]*T=\((.*?)\)[ \t]*$", re.MULTILINE)
-
-# The literal invocation `T` must actually be fed to. C1-C3 assert the array's CONTENTS; nothing
-# asserted the array is what `moon ci` is HANDED. Rewriting the call to `moon ci "${T[@]:0:5}"`
-# leaves every entry of `T` correct (C1/C2/C3 green), keeps `assert_include_relations` matching —
-# its grep is `moon ci +"`, and the flag is still there — and stops eighteen gates from running,
-# all green. Deliberately fixed HERE and not by narrowing that grep: its job is "EVERY `moon ci`
-# invocation carries the flag", so narrowing it would blind it to a future second invocation.
-MOON_CI_INVOCATION = 'moon ci "${T[@]}"'
 
 # The `moon ci` step's whole branch block, pinned as an EXACT LITERAL rather than matched by
 # shape. SMA-541's regex-based predecessor was bypassed four times during its own review — a
@@ -1428,7 +1422,7 @@ def check_invocation(ci_yml_text):
     ci/actionlint/README.md. Do not delete 8d on the grounds that this function pins the same lines.
 
     Lines are split on "\\n" rather than with .splitlines(), which also splits on \\x0b, \\x0c,
-    \\x1c-\\x1e, U+2028 and U+2029 — MOON_CI_LINE_RE's re.MULTILINE anchors split only on "\\n", so
+    \\x1c-\\x1e, \\x85, U+2028 and U+2029 — MOON_CI_LINE_RE's re.MULTILINE anchors split only on "\\n", so
     the two halves of this one check would otherwise disagree about what a line is. CRLF needs no
     handling: read_input uses Path.read_text(), whose universal-newline translation has already
     turned "\\r\\n" into "\\n" before any check sees the text (measured, SMA-554 E6).
@@ -3199,18 +3193,19 @@ def main():
          "    negative_control() lines untouched; these three close that gap the same way the\n"
          "    seven above close it for negative_control()."),
         (bad_invocation,
-         "A `moon ci` invocation in .github/workflows/ci.yml does not hand it the WHOLE `T`\n"
-         "    array. Every check above asserts what is IN `T`; this one asserts `T` is what runs.\n"
-         "    A subsetted or rewritten expansion (`\"${T[@]:0:5}\"`, an unquoted `$T`) leaves the\n"
-         "    array perfectly correct, keeps run.sh's --include-relations grep matching, and\n"
-         "    silently stops most of the graph from running.\n"
-         "    Fix depends on which row this is. A line below that IS a real invocation: make it\n"
-         "    read `" + MOON_CI_INVOCATION + "` verbatim. A `(no ... invocation anywhere in the\n"
-         "    file)` line: nothing below names a line to fix — restore one. A line below that is\n"
-         "    actually a YAML comment matched by the quote-gated regex, not a real invocation:\n"
-         "    that is a false positive, so reword the COMMENT instead. If a second,\n"
-         "    deliberately-different invocation is genuinely wanted, extend check_invocation in\n"
-         "    ci/affected-graph/ci_targets.py rather than loosening it."),
+         "`.github/workflows/ci.yml`'s `moon ci` branch block no longer matches the exact literal\n"
+         "    pinned as `MOON_CI_BRANCH_BLOCK` in ci/affected-graph/ci_targets.py, or the file\n"
+         "    carries a `moon ci` invocation outside it. Every other check asserts what is IN `T`;\n"
+         "    this one asserts `T` is what runs.\n"
+         "    If the edit was DELIBERATE, it has FOUR co-update sites and all four must move\n"
+         "    together (SMA-554):\n"
+         "      1. .github/workflows/ci.yml               — the block itself\n"
+         "      2. ci/actionlint/run.sh                   — T_INVOCATION_ALLOWLIST (check 8b)\n"
+         "      3. ci/actionlint/run.sh                   — block_execution_verdict (check 8d)\n"
+         "      4. ci/affected-graph/ci_targets.py        — MOON_CI_BRANCH_BLOCK\n"
+         "    Copy the lines VERBATIM from ci.yml, indentation included; do not hand-format them.\n"
+         "    If instead this is an added invocation, `EXPECTED_MOON_CI_INVOCATIONS` is the\n"
+         "    constant to review — deliberately, not reflexively."),
         (bad_gate_inputs,
          "A self-scheduled gate's own `inputs` no longer match what it needs to see. This is the\n"
          "    second, independently-scheduled copy of an assertion that gate also makes about\n"
