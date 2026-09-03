@@ -820,6 +820,18 @@ ACTIONLINT_SH_CALL_SITES = (
     # structural rows (this file, its README, CLAUDE.md), so a fourth row is a deliberate
     # re-baseline, the same as the other two floors.
     '[ "${#CIREPORT_MENTIONS_ALLOWED[@]}" -ge 3 ] || infra "check 12: CIREPORT_MENTIONS_ALLOWED has ${#CIREPORT_MENTIONS_ALLOWED[@]} entries, expected at least 3"',
+    # ...and Assertion B's OWN production call site (fix-wave Finding 1, review of SMA-597) — a
+    # SEPARATE application of doc_diagnosis_verdict's shape one function over:
+    # `claude_md_block_verdict` is likewise called from inside its own self-test fixtures, so a
+    # substring test would be satisfied by those and survive deleting this exact production line.
+    # MEASURED: deleting run.sh's whole Assertion B read loop (the block ending in this line)
+    # left `python3 ci/affected-graph/ci_targets.py` at rc 0 and `ci/actionlint/run.sh` at rc 0 —
+    # check 7's counter, check 9's battery and SELF_TEST_COUNT=14 all stayed green, because
+    # `claude_md_block_verdict` is still exercised from its own fixtures. Without this entry,
+    # Assertion B stops being applied to the real CLAUDE.md while every gate in the repo reports
+    # PASS, and the moon-diagnosis procedure this check exists to protect could then be deleted
+    # from CLAUDE.md with nothing to notice.
+    "done < <(claude_md_block_verdict CLAUDE.md)",
 )
 
 # SMA-579 — check 10's two remaining call sites, pinned SEPARATELY from ACTIONLINT_SH_CALL_SITES
@@ -2146,6 +2158,8 @@ def self_test():
         '[ "$DD_N" -ge 60 ] || infra "check 12: the corpus command found $DD_N files carrying the token, expected at least 60 — it has probably stopped matching, and an empty corpus would pass this check having asserted nothing"\n'
         '[ "${#DOC_DIAGNOSIS_REQUIRED_LITERALS[@]}" -ge 5 ] || infra "check 12: DOC_DIAGNOSIS_REQUIRED_LITERALS has ${#DOC_DIAGNOSIS_REQUIRED_LITERALS[@]} entries, expected at least 5"\n'
         '[ "${#CIREPORT_MENTIONS_ALLOWED[@]}" -ge 3 ] || infra "check 12: CIREPORT_MENTIONS_ALLOWED has ${#CIREPORT_MENTIONS_ALLOWED[@]} entries, expected at least 3"\n'
+        # ...and Assertion B's own production call site (fix-wave Finding 1, review of SMA-597).
+        'done < <(claude_md_block_verdict CLAUDE.md)\n'
     )
     wired_release_parity = (
         '    --negative-control) NEGATIVE=1; shift ;;\n'

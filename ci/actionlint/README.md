@@ -516,6 +516,16 @@ source is invisible to it.
 **L31 (SMA-597).** The corpus reads the git INDEX (`git ls-files`), so a file written but not yet
 `git add`ed is invisible. A local run can be green where CI is red.
 
+**L32 (SMA-597).** Check 12 keys on which files carry the token `ciReport`, not on what those
+files say about it. A file already marked or allowlisted can gain a fresh paragraph of broken
+diagnosis advice right next to the token and still pass — the same class of gap L29 already names
+for CLAUDE.md's own procedure, generalised to every file the corpus covers. The adjacent, and
+more likely, escape is the inverse: writing that same broken advice while paraphrasing around the
+literal token — describing a `ciReport` field, a captured task output, or a moon failure diagnosis
+step without ever spelling the four characters — passes the corpus scan cleanly, since Assertion A
+never reads for meaning, only for the token's presence. Closing either needs the same
+procedure-execution gate L29 defers to a follow-up issue, not a bigger token list.
+
 ## Cost
 
 `inputs: ['**/*']` is deliberate (see the WHY comment on the `actionlint:` task in `moon.yml`),

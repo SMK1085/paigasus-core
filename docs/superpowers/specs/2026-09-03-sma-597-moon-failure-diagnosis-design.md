@@ -2,7 +2,9 @@
 
 # SMA-597 — Diagnosing an unattributed `moon ci` failure
 
-**Status:** design (rev 2 — reworked after adversarial challenge; see §8 for the changelog)
+**Status:** design (rev 3 — §7's both review decisions accepted: the `ci.yml` failure-artifact
+upload and the 67-document supersession marker; see §8 for the rev 1 → rev 2 changelog and §7 for
+the rev 3 decisions)
 **Issue:** SMA-597
 **Branch:** `feature/sma-597-ci-cireport-moon-failure-diagnosis`
 **Verified against `main` @ `87b9dfc` (moon 2.5.3, proto 0.61.1, actionlint 1.7.12).**
@@ -503,21 +505,28 @@ rc 0 and this gate PASSing, because `invocation_allowlist_self_test` still calls
 only this line proves it is also applied to the real ci.yml."* Checks 8c, 8d, 8e, 10 and 11 each
 carry the same pin for the same reason, and 8e additionally pins **both** its tables' arity floors.
 
-Check 12 has exactly that shape — a pure verdict function driven by a fixture table plus one
-production call. Without the pin, deleting the single line that applies `doc_diagnosis_verdict` to
-the real tree leaves check 7's counter, check 9's battery and `SELF_TEST_COUNT` all green while the
-corpus stops being guarded. So `ACTIONLINT_SH_CALL_SITES` gains three whole-line, column-0 entries:
+Check 12 has exactly that shape — two pure verdict functions, each driven by its own fixture
+table(s) plus one production call. Without the pin, deleting either verdict's single production
+call site leaves check 7's counter, check 9's battery and `SELF_TEST_COUNT` all green while the
+assertion it drove stops being applied to the real tree. So `ACTIONLINT_SH_CALL_SITES` gains five
+whole-line, column-0 entries:
 
-1. the production call, `done < <(doc_diagnosis_verdict)`;
+1. Assertion A's production call, `done < <(doc_diagnosis_verdict "$DD_LIST")`;
 2. the corpus arity floor from §3.2;
-3. Assertion B's required-content arity floor from §3.3.
+3. Assertion B's required-literals arity floor from §3.3;
+4. the `CIREPORT_MENTIONS_ALLOWED` arity floor from §3.2;
+5. Assertion B's OWN production call, `done < <(claude_md_block_verdict CLAUDE.md)` — added in
+   the post-ship fix wave (fix-wave Finding 1) after review found it absent: without it, deleting
+   Assertion B's whole read loop left every gate in the repo green, because
+   `claude_md_block_verdict` is still exercised from its own self-test fixtures and nothing else
+   proves it is also applied to the real CLAUDE.md.
 
 Column 0 matters: the table is matched with `rstrip` and no `lstrip`, deliberately, so that a copy
 indented inside `if false; then … fi` does not satisfy it.
 
 Reachability is already satisfied — `moon.yml:196` lists `ci/actionlint/**/*` among
 `repo:affected-smoke`'s inputs, floored by `T_AFFECTED_SMOKE_REQUIRED_INPUTS` — so this is a
-three-tuple edit, not a new registration obligation. But it is an edit to `ci_targets.py`, and §4
+five-tuple edit, not a new registration obligation. But it is an edit to `ci_targets.py`, and §4
 now says so.
 
 ### 3.6 A stale allowlist entry is reported
