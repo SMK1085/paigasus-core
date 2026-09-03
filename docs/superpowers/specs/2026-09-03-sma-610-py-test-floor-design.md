@@ -240,58 +240,62 @@ test:
   never runs on the PR that breaks it and reds an unrelated PR later. `repo:affected-smoke` already
   carries this path (`moon.yml:185`) for the same reason.
 
-### 5. Pinning the invocation
-
-`ci/affected-graph/ci_targets.py` gains `check_py_test_invocation`, a sibling of
-`check_contracts_generate_inputs` (`:1609-1621`, constant at `:339-346`), which already pins a
-**non-`repo:*`** task's configuration from inside `repo:affected-smoke`. It asserts
-`projects["py"]["test"]["command"]` as a strict-equality whole line, plus
-`PY_RUN_TESTS_SH_CALL_SITES` pinning the four load-bearing lines of `run_tests.sh` — the
-`set -euo pipefail`, the pytest call, the `[ "$#" -eq 0 ]` guard, and the piped floor invocation —
-the same five-line idiom `RELEASE_PARITY_SH_CALL_SITES` uses, and for the same measured reason:
-pinning a span as one block leaves the neutered-condition bypass open.
-
-**This costs two registrations, not zero and not seven.** `repo:affected-smoke` must list
-`py/scripts/**/*` among its own `inputs`, floored by a `T_AFFECTED_SMOKE_REQUIRED_INPUTS` entry in
-`ci/actionlint/run.sh` — the reachability pair CLAUDE.md names for `repo:ruff-ci` and
-`repo:workflow-credentials`. Without it the pin stays green on exactly the PR that breaks it.
-
-### Placement: why not a `repo:*` gate
+### Placement: why not a `repo:*` gate, and why no pin
 
 The issue assumed closing this meant a `repo:*` gate with all seven registration obligations, and
-that premise is what made deferring the floor look reasonable. Two cheaper shapes exist:
-`py/scripts/` helpers chained into the task they guard (SMA-436), and `ci_targets.py` pins over a
-non-`repo:*` task's config (SMA-592). Together they give the guard and a pin on its invocation for
-two registrations. AC 3 of the issue is satisfied vacuously — no `repo:*` gate is added.
+that premise is what made deferring the floor look reasonable. The SMA-436 shape — a `py/scripts/`
+helper chained into the task it guards — carries none of them, which is what makes the floor cheap
+enough to build now.
+
+A third shape exists and is **deliberately declined**: `check_contracts_generate_inputs`
+(`ci/affected-graph/ci_targets.py:1609-1621`, constant at `:339-346`) pins a **non-`repo:*`** task's
+configuration from inside `repo:affected-smoke`, and a sibling could pin `py:test`'s `command:` line
+and `run_tests.sh`'s load-bearing lines the same way. It is declined here because it is not free:
+`repo:affected-smoke` would have to list `py/scripts/**/*` among its own `inputs`, floored by a
+`T_AFFECTED_SMOKE_REQUIRED_INPUTS` entry in `ci/actionlint/run.sh` — the reachability pair CLAUDE.md
+names for `repo:ruff-ci` and `repo:workflow-credentials` — or the pin stays green on exactly the PR
+that breaks it. Two registrations, three extra files, and a second gate's inputs widened, to guard a
+file whose only edits are deliberate. See residual 1, which states the cost of declining.
+
+AC 3 of the issue is therefore satisfied vacuously — no `repo:*` gate is added.
 
 ## Residual risks
 
-1. **Presence, not counts.** Moving 126 of `paigasus-kernel`'s 127 tests aside leaves one collected
+1. **Nothing pins the invocation.** Deleting the floor call from `py/scripts/run_tests.sh`, or
+   reverting `py:test` to a bare `uv run pytest`, reds nothing. This residual is inherited from the
+   SMA-436 guard, which has carried it since 2026-06-20 — but it is **worse here**, and that should
+   be recorded plainly: deleting SMA-436's guard invocation degrades a second-order vacuity check,
+   whereas deleting this one restores exactly the SMA-610 defect this spec exists to close. The
+   cheap `ci_targets.py` pin described under "Placement" would close it; it is declined on cost, not
+   because the risk is small. Revisit if `run_tests.sh` ever acquires a second editor or an `args:`
+   entry.
+2. **Presence, not counts.** Moving 126 of `paigasus-kernel`'s 127 tests aside leaves one collected
    test and stays green. A count pin would catch it, at the cost of re-baselining on every test
    deletion. Rejected. A per-file variant — every tracked `packages/*/tests/**/test_*.py`
    contributes at least one node id — was considered as a middle ground and is **deferred, not
    rejected**: it is disk-derived, so it is circular for the deleted-file case in the same way the
    count pin is, and it earns its keep only once a package has enough test files for partial
    in-package loss to be plausible.
-2. **The guard is not type-checked.** `tool.basedpyright.include` does not reach `py/scripts`. It is
+3. **The guard is not type-checked.** `tool.basedpyright.include` does not reach `py/scripts`. It is
    ruff-linted by `py:lint`, which this spec makes continuously true by adding `scripts/**` to its
    inputs.
-3. **`repo:input-liveness` still cannot reach py.** This fixes one dead-input instance, not the
+4. **`repo:input-liveness` still cannot reach py.** This fixes one dead-input instance, not the
    class. A future `py:*` task can still declare a dead input and nothing reds.
-4. **No unit tests for the guard beyond `--self-test`.** The self-test proves the pure functions
+5. **No unit tests for the guard beyond `--self-test`.** The self-test proves the pure functions
    behave; it does not prove the wrapper wires them correctly.
-5. **`filterwarnings` is not itself guarded.** Once the floor exists, deleting the ini line would
+6. **`filterwarnings` is not itself guarded.** Once the floor exists, deleting the ini line would
    still leave total loss red (via the floor), so nothing would notice the loss of the earlier,
    clearer config-time error. Accepted as cosmetic.
-6. **The `[ "$#" -eq 0 ]` branch is a deliberate no-op path.** A task definition that grew a
-   permanent `args:` entry would silently switch the floor off. `PY_RUN_TESTS_SH_CALL_SITES` pins
-   the condition line and `check_py_test_invocation` pins the command line, so both halves of that
-   edit are pinned — but a reviewer, not a gate, is what would catch a deliberate `args:` addition.
+7. **The `[ "$#" -eq 0 ]` branch is a deliberate no-op path.** A task definition that grew a
+   permanent `args:` entry would silently switch the floor off. Nothing pins that, per residual 1;
+   a reviewer is what catches it. The condition is one line and carries a comment saying so.
 
 ## Out of scope
 
 * Any change to `repo:input-liveness`'s project scoping (residual 3).
 * A `repo:*` gate of any kind.
+* A `ci_targets.py` pin over `py:test`'s invocation, and the widening of
+  `repo:affected-smoke`'s inputs it would require (see "Placement" and residual 1).
 * Restoring `py/conftest.py`. A `pytest_collection_finish` hook was considered and rejected:
   measured, the scoped `paigasus-kernel-py:test` invocation resolves rootdir to `py/` — node ids
   come back as `packages/paigasus-kernel/tests/...` — so a py-root conftest is loaded there too and
@@ -316,8 +320,6 @@ two registrations. AC 3 of the issue is satisfied vacuously — no `repo:*` gate
 6. A warm-cache `moon run py:test` after touching only `py/scripts/assert_test_floor.py` re-runs
    the task, proving the `scripts/**` input works.
 7. `py:lint` and `py:fmt` pass over both new files and select on a `py/scripts` edit.
-8. `repo:affected-smoke` passes with the new pin, and reds when `run_tests.sh`'s `pipefail` line or
-   the `command:` line is mutated.
 
 ## Files touched
 
@@ -327,7 +329,4 @@ two registrations. AC 3 of the issue is satisfied vacuously — no `repo:*` gate
 | `py/scripts/run_tests.sh` | Create — `pipefail` wrapper, passthrough, conditional floor |
 | `py/scripts/assert_test_floor.py` | Create — the floor guard, with `--self-test` |
 | `.moon/tasks/python.yml` | `test` -> wrapper; input edits on `test`, `lint`, `fmt` |
-| `ci/affected-graph/ci_targets.py` | `check_py_test_invocation` + `PY_RUN_TESTS_SH_CALL_SITES` |
-| `moon.yml` | `repo:affected-smoke` inputs gain `py/scripts/**/*` |
-| `ci/actionlint/run.sh` | `T_AFFECTED_SMOKE_REQUIRED_INPUTS` floor for `py/scripts/**/*` |
 | `py/README.md` | Document the floor and its tables; fix `moon run py:format` -> `fmt` |
