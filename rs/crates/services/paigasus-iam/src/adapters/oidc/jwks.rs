@@ -19,6 +19,7 @@ use std::time::Duration;
 use tokio::sync::{Mutex, RwLock};
 
 use crate::adapters::clock::SystemClock;
+use crate::adapters::error_chain::describe_error;
 
 /// A cached JWKS payload plus fetch bookkeeping (spec §4.3). The discovery doc's `jwks_uri`
 /// is cached alongside the keys since discovery + JWKS share one TTL/refresh cycle.
@@ -104,6 +105,80 @@ pub enum IdpTls<'a> {
     Verify { extra_bundle: Option<&'a str> },
 }
 
+/// What a failed `reqwest::Client` build can be attributed to.
+///
+/// Only three combinations are reachable, and the type says so: a build with no configured bundle
+/// can never be blamed on a bundle, so that state is unrepresentable rather than merely untested.
+#[derive(Debug)]
+enum Attribution<'a> {
+    /// No bundle configured. Nothing to attribute; the operator gets the platform-store wording.
+    NoBundle,
+    /// A bundle is configured and a control build with no added anchors SUCCEEDED.
+    Bundle { path: &'a str },
+    /// A bundle is configured and the control build ALSO failed.
+    BundleAndStore { path: &'a str },
+}
+
+/// Decides what a `build()` failure should be blamed on (SMA-570 D1).
+///
+/// `control_build_ok` builds a client with the SAME options but no added anchors. It is called
+/// ONLY when a bundle is configured — a bundle-less failure has nothing to attribute, and probing
+/// would cost a second `load_native_certs()` for nothing.
+///
+/// The inference on success is narrow and deliberately so: the control build succeeding does NOT
+/// prove the platform store is healthy — reqwest errors on the native store only when
+/// `valid_count == 0 && invalid_count > 0`, so an ABSENT or EMPTY store builds fine. What it
+/// proves is that the store did not cause THIS failure, and since the two builds differ only in
+/// the added anchors (guaranteed by both going through `base_builder`), the anchors did.
+///
+/// On failure the disjunction is genuinely incomplete, which is why that arm names both: reqwest
+/// adds USER roots first and `?`-returns on the first bad one, before it ever reaches the native
+/// store block. So a run where both are broken fails on the bundle, while the control fails on the
+/// store — and telling the operator only about the store would send them to fix it and then fail
+/// boot again on the still-invalid bundle.
+fn attribute_build_failure<'a>(bundle: Option<&'a str>, control_build_ok: impl FnOnce() -> bool) -> Attribution<'a> {
+    match bundle {
+        None => Attribution::NoBundle,
+        Some(path) => {
+            if control_build_ok() {
+                Attribution::Bundle { path }
+            } else {
+                Attribution::BundleAndStore { path }
+            }
+        }
+    }
+}
+
+/// Renders an attribution as the operator-facing message. `chain` is `describe_error` of the
+/// underlying `reqwest::Error` — its own `Display` is the bare, useless string `"builder error"`.
+fn build_failure_message(attribution: &Attribution<'_>, chain: &str) -> String {
+    match attribution {
+        Attribution::NoBundle => format!(
+            "failed to build the IdP HTTP client: {chain} — this can also mean the platform trust \
+             store contains no parseable certificates"
+        ),
+        Attribution::Bundle { path } => format!(
+            "authn.extra_ca_bundle_path {path:?} contains a structurally invalid certificate: it \
+             decodes as base64 but is not valid DER ({chain}). A control client built without it \
+             succeeded, so the platform trust store is not the cause."
+        ),
+        Attribution::BundleAndStore { path } => format!(
+            "failed to build the IdP HTTP client: {chain}. A control client built WITHOUT \
+             authn.extra_ca_bundle_path {path:?} also failed, so the platform trust store contains \
+             no parseable certificates — fix that first, then re-check the bundle, which may also \
+             be invalid."
+        ),
+    }
+}
+
+/// The client's non-TLS options, in ONE place so the control build differs from the real one by
+/// exactly the added anchors — by construction rather than by inspection, and still true when a
+/// future option is added here (SMA-570 D6). `ClientBuilder` is not `Clone`, so this must be a
+/// function rather than a shared value.
+fn base_builder(timeout: Duration) -> reqwest::ClientBuilder {
+    reqwest::Client::builder().timeout(timeout)
+}
+
 /// Live `JwksFetcher`: `GET {issuer}/.well-known/openid-configuration`, verify the document's
 /// `issuer` field exactly matches and its `jwks_uri` is `https`, then `GET` the JWKS itself
 /// (spec §4.2).
@@ -122,12 +197,22 @@ impl HttpJwksFetcher {
     /// `AuthnError::Backend`, never `Unavailable`: a misconfigured bundle path must be
     /// diagnosable, not indistinguishable from the IdP being down.
     pub fn new(timeout: Duration, tls: IdpTls<'_>) -> Result<Self, AuthnError> {
-        let mut builder = reqwest::Client::builder().timeout(timeout);
+        Self::new_with_control_build(timeout, tls, || base_builder(timeout).build().is_ok())
+    }
+
+    /// `new` with the control build injected, so both attribution arms are reachable in tests
+    /// without mutating `SSL_CERT_FILE` (which is `unsafe` in edition 2024) or depending on the
+    /// host's trust store.
+    pub(crate) fn new_with_control_build(timeout: Duration, tls: IdpTls<'_>, control_build_ok: impl FnOnce() -> bool) -> Result<Self, AuthnError> {
+        let mut builder = base_builder(timeout);
+        let mut configured_bundle: Option<&str> = None;
 
         match tls {
             IdpTls::AcceptInvalid => builder = builder.danger_accept_invalid_certs(true),
             IdpTls::Verify { extra_bundle: None } => {}
             IdpTls::Verify { extra_bundle: Some(path) } => {
+                configured_bundle = Some(path);
+
                 let pem = std::fs::read(path).map_err(|e| backend(format!("failed to read authn.extra_ca_bundle_path {path:?}: {e}")))?;
 
                 // `from_pem_bundle`, NOT `from_pem`: a bundle may legitimately carry more than one
@@ -162,10 +247,17 @@ impl HttpJwksFetcher {
         }
 
         let client = builder.build().map_err(|e| {
-            backend(format!(
-                "failed to build the IdP HTTP client: {e} — this can also mean the platform trust store \
-                 contains no parseable certificates"
-            ))
+            let attribution = attribute_build_failure(configured_bundle, control_build_ok);
+            match &attribution {
+                Attribution::NoBundle => {}
+                Attribution::Bundle { path } => {
+                    tracing::error!(path = %path, attribution = "bundle", "IdP HTTP client build failed");
+                }
+                Attribution::BundleAndStore { path } => {
+                    tracing::error!(path = %path, attribution = "bundle_and_store", "IdP HTTP client build failed");
+                }
+            }
+            backend(build_failure_message(&attribution, &describe_error(&e)))
         })?;
         Ok(Self { client, clock: SystemClock })
     }
@@ -659,6 +751,94 @@ mod tests {
         // The two non-bundle postures must still construct a client.
         HttpJwksFetcher::new(Duration::from_secs(5), IdpTls::Verify { extra_bundle: None }).expect("verify without a bundle builds");
         HttpJwksFetcher::new(Duration::from_secs(5), IdpTls::AcceptInvalid).expect("accept-invalid builds");
+    }
+
+    // ---- build-failure attribution (SMA-570) --------------------------------------------------
+    // A certificate body of `AAAAAAAA` is valid base64 (six zero bytes) but not valid DER. Unlike
+    // the `!!!not base64!!!` fixture above, it PASSES `from_pem_bundle` and only fails later
+    // inside `builder.build()` — a genuinely different code path (reqwest's `read_pem_certs`
+    // against `RootCertStore::add`), which is why this needs its own tests.
+    const INVALID_DER_PEM: &[u8] = b"-----BEGIN CERTIFICATE-----\nAAAAAAAA\n-----END CERTIFICATE-----\n";
+
+    #[test]
+    fn attribution_without_a_bundle_never_runs_the_control_build() {
+        let probed = std::cell::Cell::new(false);
+        let attribution = attribute_build_failure(None, || {
+            probed.set(true);
+            true
+        });
+
+        assert!(matches!(attribution, Attribution::NoBundle), "no bundle means nothing to attribute");
+        assert!(!probed.get(), "a bundle-less failure must not pay for a second load_native_certs()");
+    }
+
+    #[test]
+    fn attribution_blames_the_bundle_when_the_control_build_succeeds() {
+        let attribution = attribute_build_failure(Some("/etc/paigasus/corp-ca.pem"), || true);
+        assert!(
+            matches!(attribution, Attribution::Bundle { path } if path == "/etc/paigasus/corp-ca.pem"),
+            "a control build with no added anchors succeeding leaves the anchors as the only cause"
+        );
+    }
+
+    #[test]
+    fn attribution_names_both_when_the_control_build_also_fails() {
+        let attribution = attribute_build_failure(Some("/etc/paigasus/corp-ca.pem"), || false);
+        assert!(
+            matches!(attribution, Attribution::BundleAndStore { path } if path == "/etc/paigasus/corp-ca.pem"),
+            "reqwest adds user roots FIRST and short-circuits, so the bundle may also be invalid"
+        );
+    }
+
+    #[test]
+    fn the_no_bundle_message_is_byte_unchanged() {
+        // AC4. The sentence is the one SMA-558 shipped; only the interpolated cause is now the
+        // full source chain rather than reqwest's useless bare "builder error" (SMA-570 D9).
+        assert_eq!(
+            build_failure_message(&Attribution::NoBundle, "builder error: invalid peer certificate: BadEncoding"),
+            "failed to build the IdP HTTP client: builder error: invalid peer certificate: BadEncoding — \
+             this can also mean the platform trust store contains no parseable certificates"
+        );
+    }
+
+    #[test]
+    fn der_invalid_bundle_names_the_config_key() {
+        let f = tmp_file_with(INVALID_DER_PEM);
+        let err = HttpJwksFetcher::new_with_control_build(
+            Duration::from_secs(5),
+            IdpTls::Verify {
+                extra_bundle: Some(f.path().to_str().unwrap()),
+            },
+            || true, // the platform store is healthy
+        )
+        .expect_err("a structurally invalid certificate must fail the build");
+
+        let rendered = format!("{err:?}");
+        assert!(matches!(err, AuthnError::Backend(_)), "expected Backend, got {err:?}");
+        assert!(rendered.contains("authn.extra_ca_bundle_path"), "the error must name the config key: {rendered}");
+        assert!(rendered.contains("not valid DER"), "the error must say what is wrong with it: {rendered}");
+        assert!(
+            !rendered.contains("this can also mean the platform trust store"),
+            "a definitively-attributed failure must NOT send the operator to the trust store: {rendered}"
+        );
+    }
+
+    #[test]
+    fn der_invalid_bundle_with_a_broken_store_names_both() {
+        let f = tmp_file_with(INVALID_DER_PEM);
+        let err = HttpJwksFetcher::new_with_control_build(
+            Duration::from_secs(5),
+            IdpTls::Verify {
+                extra_bundle: Some(f.path().to_str().unwrap()),
+            },
+            || false, // the platform store is broken too
+        )
+        .expect_err("a structurally invalid certificate must fail the build");
+
+        let rendered = format!("{err:?}");
+        assert!(rendered.contains("platform trust store"), "the store is the primary fault: {rendered}");
+        assert!(rendered.contains("authn.extra_ca_bundle_path"), "the bundle must still be named: {rendered}");
+        assert!(rendered.contains("fix that first"), "the operator needs an order of operations: {rendered}");
     }
 
     #[tokio::test]
