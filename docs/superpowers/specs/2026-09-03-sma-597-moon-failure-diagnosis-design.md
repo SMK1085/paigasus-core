@@ -381,19 +381,25 @@ fall into and no `docs/anything.md` bypass. It reads the **index**, so a file th
 not yet `git add`ed is invisible: a local run can be green where CI is red. §3.2's "the gate reds
 until the entry is added" is true only post-`git add`, and the README says so.
 
-Every tracked file containing the token `ciReport` must appear in `CIREPORT_MENTIONS_ALLOWED`, a
-table of path → reason, with a **non-empty** reason — a blank one is itself an assertion failure,
-matching `T_EXEMPT` (`ci_targets.py:139-145`) and `ALLOW_NO_CARGO_BACKING`. Seeded with:
+Every tracked file containing the token `ciReport` must satisfy **one** of three conditions
+(§7 — the marker route was accepted at review, which is what keeps the table small):
 
-- the 67 files from §1.6, reason `historical record, pre-SMA-597`;
-- `CLAUDE.md`, reason `carries the corrected procedure`;
-- `docs/superpowers/specs/2026-09-03-sma-597-moon-failure-diagnosis-design.md` and the
-  implementation plan written from it, reason `documents the defect itself`. The plan's exact
-  path is known only once `superpowers:writing-plans` has produced it, so it is added to the
-  table in the same commit that adds the plan — the gate reds until it is, which is the intended
-  behaviour;
-- `ci/actionlint/run.sh` and `ci/actionlint/README.md`, reason `the gate's own search pattern / its
-  documentation` (§1.9).
+1. it carries `<!-- moon-diagnosis:superseded -->` — a historical record, annotated;
+2. it carries `<!-- moon-diagnosis:ok -->` — a deliberate reference to the corrected procedure;
+3. it appears in `CIREPORT_MENTIONS_ALLOWED`, a table of path → reason with a **non-empty**
+   reason (a blank one is itself an assertion failure, matching `T_EXEMPT` at
+   `ci_targets.py:139-145` and `ALLOW_NO_CARGO_BACKING`).
+
+The allowlist is deliberately tiny — **three entries**, for the files where a markdown comment
+does not belong or where self-certification would be circular:
+
+- `ci/actionlint/run.sh`, reason `the gate's own search pattern` (§1.9);
+- `ci/actionlint/README.md`, reason `the gate's own documentation` (§1.9);
+- `CLAUDE.md`, reason `the corrected procedure itself — the authority does not self-certify`.
+
+The 67 historical documents take route 1. This spec and its plan take route 2, so neither needs an
+allowlist row and the plan's path — unknown until `superpowers:writing-plans` runs — stops being a
+bootstrap problem.
 
 Any other tracked file containing the token reds the gate.
 
@@ -549,8 +555,11 @@ but the file is **not** byte-identical to `main`, because of the comment block a
 
 ## 5. Non-goals and limitations
 
-1. **The 67 existing documents are not edited.** They are dated records of what was believed when
-   written, and the issue argues this explicitly. The gate grandfathers them.
+1. **The 67 existing documents keep their advice; they gain an annotation** (§7, accepted at
+   review). Each receives an appended `<!-- moon-diagnosis:superseded -->` marker and one pointer
+   sentence. The broken text itself is left exactly as written, so the documents remain accurate
+   records of what was believed at the time — which was the issue's actual objection to editing
+   them. Nothing else about them changes.
 2. **L1 — the gate keys on files, not content.** A grandfathered file that gains a *new*
    paragraph of broken advice passes. Closing this needs content analysis of prose, which is the
    pattern-matching approach §3.2 rejected on SMA-554's evidence. Accepted, and recorded in the
@@ -594,7 +603,30 @@ is not forgotten.
 
 ---
 
-## 7. Open decision carried to review
+## 7. Decision taken at review: both accepted
+
+**Resolved 2026-09-03 — approved.** Both the `ci.yml` artifact upload (§1.10) and the supersession
+marker below are in scope. The consequences for the design are folded into §3.2 and §5.1, and are
+summarised here because they simplify the gate substantially:
+
+- The 67 historical documents each gain `<!-- moon-diagnosis:superseded -->` plus one pointer
+  sentence, appended by a single scripted edit. They are **not** otherwise modified — the broken
+  advice stays on the page, annotated rather than rewritten, which is what preserves them as dated
+  records.
+- **Assertion A becomes the stronger rule:** a tracked file carrying the token must carry
+  `<!-- moon-diagnosis:superseded -->` (a historical record) or `<!-- moon-diagnosis:ok -->` (a
+  deliberate correct reference), or appear in `CIREPORT_MENTIONS_ALLOWED`.
+- **The allowlist collapses from 69 entries to three:** `ci/actionlint/run.sh`,
+  `ci/actionlint/README.md` (§1.9, neither being markdown prose a marker belongs in), and
+  `CLAUDE.md` (the authority itself, which should not have to self-certify). This spec and its
+  plan carry `:ok` markers instead of allowlist rows.
+- The `-ge 60` corpus floor of §3.2 is **unaffected**: a marker does not remove the token, so
+  discovery still finds ~72 files and then partitions them. The floor still catches a corpus
+  command that stopped matching.
+
+The original framing of the decision follows, for the record.
+
+### 7.1 The decision as put
 
 **Should the 67 grandfathered documents receive an appended supersession marker?**
 
@@ -618,6 +650,8 @@ document is still an edit to a historical document.
 answers is weaker than it first appears. But it reverses an explicit earlier decision, so it is
 carried to review rather than taken here. If accepted, §3.2's seed and §5.1 change; nothing else
 in this spec does.
+
+**→ Accepted at review. See §7's header for what changed.**
 
 ---
 
