@@ -790,6 +790,36 @@ ACTIONLINT_SH_CALL_SITES = (
     # the split ci/release-plan/run.sh's own header says nothing may collapse. MEASURED: deleting
     # only this branch fires no other pin here.
     'elif [ "$rp_rc" -eq 1 ]; then',
+    # SMA-597 — check 12's production call site, at run.sh's top level (verified: not nested in
+    # a function, if, or loop) — column 0 like every other entry above. Same shape as checks
+    # 8b-8e: `doc_diagnosis_verdict` is also called from inside its own self-test fixtures, so a
+    # substring test would be satisfied by those and survive deleting this exact production line,
+    # leaving check 7's counter, check 9's battery and SELF_TEST_COUNT all green while the corpus
+    # stops being guarded.
+    'done < <(doc_diagnosis_verdict "$DD_LIST")',
+    # ...and the CORPUS arity floor, the vacuous-pass guard. doc_diagnosis_verdict iterates a
+    # corpus, so an empty one emits zero rows and check 12 passes having asserted nothing —
+    # `∅ ⊆ allowlist`. Check 12 uses a SUBSET rule deliberately (the corpus should only ever
+    # shrink), which removes the strict-equality control that would otherwise catch this, so the
+    # floor is the only thing standing in its place. Same reasoning as check 8e's two floors above.
+    '[ "$DD_N" -ge 60 ] || infra "check 12: the corpus command found $DD_N files carrying the token, expected at least 60 — it has probably stopped matching, and an empty corpus would pass this check having asserted nothing"',
+    # ...and the REQUIRED-LITERALS floor. Assertion B iterates its table too: empty it and the
+    # CLAUDE.md block passes on "markers present and non-empty" alone, which a single space
+    # satisfies — the likeliest real failure being an unrelated CLAUDE.md trim that leaves the
+    # markers behind.
+    '[ "${#DOC_DIAGNOSIS_REQUIRED_LITERALS[@]}" -ge 5 ] || infra "check 12: DOC_DIAGNOSIS_REQUIRED_LITERALS has ${#DOC_DIAGNOSIS_REQUIRED_LITERALS[@]} entries, expected at least 5"',
+    # ...and the ALLOWLIST arity floor — the third table of the same shape, and the one that
+    # shipped without a floor in round 1. MEASURED on bash 3.2.57, the macOS system bash this
+    # repo's stated compat target: with CIREPORT_MENTIONS_ALLOWED emptied,
+    # `for entry in "${CIREPORT_MENTIONS_ALLOWED[@]}"` is an unbound-variable error under `set -u`.
+    # That kills the process substitution below rather than the gate, so doc_diagnosis_verdict
+    # emits zero rows, the while loop's unrouted status hides it, and assertion A passes having
+    # asserted nothing — the `∅ ⊆ allowlist` shape two entries up, arriving by a second route.
+    # bash 4.4+ reds instead (measured at 5.3.15), so the hole is specifically on the platform
+    # this gate runs on locally. `-ge 3`, not `-ge 1`: the allowlist is fixed at exactly the three
+    # structural rows (this file, its README, CLAUDE.md), so a fourth row is a deliberate
+    # re-baseline, the same as the other two floors.
+    '[ "${#CIREPORT_MENTIONS_ALLOWED[@]}" -ge 3 ] || infra "check 12: CIREPORT_MENTIONS_ALLOWED has ${#CIREPORT_MENTIONS_ALLOWED[@]} entries, expected at least 3"',
 )
 
 # SMA-579 — check 10's two remaining call sites, pinned SEPARATELY from ACTIONLINT_SH_CALL_SITES
@@ -2110,6 +2140,12 @@ def self_test():
         '  release_plan_sh --self-test || { fail "check 11: release_plan.py --self-test reported a broken\n'
         '  release_plan_sh --negative-control || { fail "check 11: ci/release-plan/run.sh\n'
         '  bash ci/release-plan/run.sh "$@"\n'
+        # SMA-597 — check 12's production call site and its three arity floors, at run.sh's top
+        # level, outside any function — column 0 like every other entry above.
+        'done < <(doc_diagnosis_verdict "$DD_LIST")\n'
+        '[ "$DD_N" -ge 60 ] || infra "check 12: the corpus command found $DD_N files carrying the token, expected at least 60 — it has probably stopped matching, and an empty corpus would pass this check having asserted nothing"\n'
+        '[ "${#DOC_DIAGNOSIS_REQUIRED_LITERALS[@]}" -ge 5 ] || infra "check 12: DOC_DIAGNOSIS_REQUIRED_LITERALS has ${#DOC_DIAGNOSIS_REQUIRED_LITERALS[@]} entries, expected at least 5"\n'
+        '[ "${#CIREPORT_MENTIONS_ALLOWED[@]}" -ge 3 ] || infra "check 12: CIREPORT_MENTIONS_ALLOWED has ${#CIREPORT_MENTIONS_ALLOWED[@]} entries, expected at least 3"\n'
     )
     wired_release_parity = (
         '    --negative-control) NEGATIVE=1; shift ;;\n'
