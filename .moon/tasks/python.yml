@@ -24,10 +24,10 @@ fileGroups:
 tasks:
   lint:
     command: 'uv run ruff check .'
-    inputs: ['@group(sources)', '@group(tests)', 'pyproject.toml', '/py/uv.lock']
+    inputs: ['@group(sources)', '@group(tests)', 'pyproject.toml', '/py/uv.lock', 'scripts/**']
   fmt:
     command: 'uv run ruff format --check .'
-    inputs: ['@group(sources)', '@group(tests)', 'pyproject.toml', '/py/uv.lock']
+    inputs: ['@group(sources)', '@group(tests)', 'pyproject.toml', '/py/uv.lock', 'scripts/**']
   typecheck:
     # `script` (not `command`) because we chain two steps. First run: basedpyright's native
     # output, which fails on real type errors. Second run: --outputjson piped to the coverage
@@ -38,5 +38,29 @@ tasks:
     script: 'uv run basedpyright && uv run basedpyright --outputjson | uv run python scripts/assert_typecheck_coverage.py'
     inputs: ['@group(sources)', '@group(tests)', 'pyproject.toml', '/py/uv.lock', 'scripts/**']
   test:
-    command: 'uv run pytest'
-    inputs: ['@group(sources)', '@group(tests)', 'pyproject.toml', '/py/uv.lock', 'conftest.py']
+    # `command` (not `script`) deliberately: Moon forwards `moon run py:test -- -k foo` to a
+    # command, and SILENTLY DROPS it for a script -- measured, `-k parity` gave 124 passed /
+    # 10 deselected as a command and 134 passed as a script. A filtered run that quietly executes
+    # the whole suite and reports success is the same silent lie SMA-610 exists to close, so the
+    # two steps live in run_tests.sh, which also supplies the `set -euo pipefail` a `script:`
+    # block would not have.
+    command: 'bash scripts/run_tests.sh'
+    inputs:
+      - '@group(sources)'
+      - '@group(tests)'
+      - 'pyproject.toml'
+      - '/py/uv.lock'
+      # The guard and the wrapper. Without this, editing either would not re-run the task and a
+      # broken guard would serve a cached pass.
+      - 'scripts/**'
+      # assert_test_floor.py's registry assertion reads these, so a PR adding a scaffold package
+      # that has only a pyproject.toml must select this task -- otherwise the assertion never runs
+      # on the PR that breaks it, and reds an unrelated PR later. repo:affected-smoke lists this
+      # same path (moon.yml:185) for the same reason.
+      - 'packages/*/pyproject.toml'
+      #
+      # NOTE: 'conftest.py' was removed here (SMA-610). SMA-379 deleted py/conftest.py and the
+      # input declaration outlived the file -- a dead input, invisible because repo:input-liveness
+      # reaches only repo:* tasks (ci/affected-graph/task_inputs.py's _repo_tasks is keyed to
+      # projects.get("repo") by exact project id). That is the same blind spot that let this
+      # issue's own defect go unnoticed.
