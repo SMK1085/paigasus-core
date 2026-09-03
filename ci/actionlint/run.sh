@@ -4592,6 +4592,116 @@ release_plan_self_test() {
 }
 
 # ---------------------------------------------------------------------------------------------
+# Check 12 (definitions) — the ciReport corpus freeze and the CLAUDE.md procedure block (SMA-597).
+#
+# WHY A FILE-SET RULE AND NOT A PATTERN. SMA-554 records the controlled comparison: this file's
+# pattern-matched check was bypassed FOUR times in review, the exact-literal one next to it once.
+# A literal has no tail to enumerate. The token `ciReport` appears in zero tracked files outside
+# docs/ (measured), which is what makes a bare-token rule viable.
+#
+# THREE WAYS TO BE CLEAN, and the order matters for the error message: a `superseded` marker (a
+# dated record, annotated in place by SMA-597), an `ok` marker (a deliberate reference to the
+# CORRECTED procedure), or an allowlist row. The markers are what keep this table at three
+# entries: without them every future document referencing the corrected procedure would need a
+# row here, the gate's false-positive rate for correct mentions would be 100%, and the habit that
+# trains — "red, add a row, move on" — admits the broken advice just as readily.
+#
+# `path|reason` strings, NOT an associative array: macOS ships bash 3.2, which has no `declare -A`,
+# and this gate runs locally as often as in CI.
+CIREPORT_MENTIONS_ALLOWED=(
+  # The gate's own two files: run.sh must contain the token because it IS the search pattern, and
+  # the README must contain it to document check 12. Consequence, recorded in the README's
+  # Limitations: check 12 is structurally blind to the token in these two files. The alternatives
+  # were worse — obfuscating the pattern (`ci''Report`) defeats the literal-set argument and is
+  # the fragile-comment class run.sh:92-93 already warns about, and excluding ci/** creates a free
+  # bypass via any ci/**/README.md.
+  "ci/actionlint/run.sh|the gate's own search pattern"
+  "ci/actionlint/README.md|the gate's own documentation"
+  # CLAUDE.md carries the corrected procedure itself. A marker here would be the authority
+  # self-certifying; assertion B (claude_md_block_verdict) is what actually guards this file.
+  "CLAUDE.md|the corrected procedure itself — the authority does not self-certify"
+)
+
+# The five load-bearing elements of the CLAUDE.md block. Presence only — this cannot tell a
+# correct jq from a subtly wrong one (README Limitations L2). Each earns its place: the first two
+# are the finding (the real exit code is in operations[], on the task-execution entry), the next
+# two are where the output actually lives, and lastRunTime is the cross-check that stops a reader
+# pairing one run's command with another run's output.
+DOC_DIAGNOSIS_REQUIRED_LITERALS=(
+  'operations[]'
+  'task-execution'
+  '.moon/cache/states/'
+  'stderr.log'
+  'lastRunTime'
+)
+
+# Emits one row per violation, nothing when clean. Takes a FILE listing candidate paths, one per
+# line, rather than running `git ls-files` itself — that split is what lets the self-test drive it
+# against temp fixtures with no git repo (SMA-597).
+doc_diagnosis_verdict() {
+  local list="$1" f entry path reason found
+  [ -f "$list" ] && [ -r "$list" ] || { echo "no-list"; return; }
+
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    found=0
+    for entry in "${CIREPORT_MENTIONS_ALLOWED[@]}"; do
+      path="${entry%%|*}"
+      reason="${entry#*|}"
+      if [ "$path" = "$f" ]; then
+        found=1
+        # A blank reason is an assertion failure in its own right — the same rule T_EXEMPT and
+        # ALLOW_NO_CARGO_BACKING carry in ci_targets.py. An unexplained waiver is not a waiver.
+        [ -n "$reason" ] || echo "blank-reason $f"
+        break
+      fi
+    done
+    [ "$found" -eq 1 ] && continue
+    if [ -r "$f" ] && grep -q 'moon-diagnosis:superseded\|moon-diagnosis:ok' "$f"; then
+      continue
+    fi
+    echo "unmarked-mention $f"
+  done < "$list"
+
+  # Stale entries: an allowlist row naming a file that is gone, or no longer carries the token.
+  # Non-fatal — the table should shrink, and reporting is what prompts that. Check 8e's
+  # `stale-skip` and COE_SKIP's line+text keying are the precedents for not letting a hatch rot.
+  for entry in "${CIREPORT_MENTIONS_ALLOWED[@]}"; do
+    path="${entry%%|*}"
+    if [ ! -r "$path" ] || ! grep -q 'ciReport' "$path" 2>/dev/null; then
+      echo "stale-allowlist $path"
+    fi
+  done
+}
+
+# Assertion B. Marker integrity AND required content — non-empty alone is satisfied by a single
+# space or a TODO, which is exactly the likeliest real failure (someone trims CLAUDE.md and leaves
+# the markers). ci-targets does not stop at markers either: parse_doc_targets enforces
+# count/order/non-empty and compare_doc_targets then asserts the region mirrors T verbatim. This
+# is the same shape, one notch weaker (containment, not verbatim), because the block is prose.
+claude_md_block_verdict() {
+  local file="$1" nb ne lb le block lit
+  [ -f "$file" ] && [ -r "$file" ] || { echo "no-file"; return; }
+
+  nb="$(grep -c 'moon-diagnosis:begin' "$file" || true)"
+  ne="$(grep -c 'moon-diagnosis:end' "$file" || true)"
+  [ "$nb" -eq 1 ] || echo "marker-count begin $nb"
+  [ "$ne" -eq 1 ] || echo "marker-count end $ne"
+  [ "$nb" -eq 1 ] && [ "$ne" -eq 1 ] || return
+
+  lb="$(grep -n 'moon-diagnosis:begin' "$file" | cut -d: -f1)"
+  le="$(grep -n 'moon-diagnosis:end' "$file" | cut -d: -f1)"
+  if [ "$lb" -ge "$le" ]; then echo "marker-order"; return; fi
+
+  block="$(sed -n "$((lb + 1)),$((le - 1))p" "$file")"
+  if [ -z "$(printf '%s' "$block" | tr -d '[:space:]')" ]; then echo "empty-block"; return; fi
+
+  for lit in "${DOC_DIAGNOSIS_REQUIRED_LITERALS[@]}"; do
+    printf '%s' "$block" | grep -qF -- "$lit" || echo "missing-literal $lit"
+  done
+}
+
+# ---------------------------------------------------------------------------------------------
 # Check 7 — the self-tests, and the counter that proves they were invoked.
 #
 # All THIRTEEN are defined above so this block can run them from ONE call site, reached by both the
