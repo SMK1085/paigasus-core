@@ -269,6 +269,19 @@ def main(argv: list[str]) -> int:
         print(error, file=sys.stderr)
         return EXIT_NO_PACKAGES
 
+    # Fail fast rather than block. The guard is a filter and its stdin is normally a pipe, but
+    # invoked bare from a terminal `sys.stdin.read()` waits for EOF forever -- a hang is a worse
+    # failure than a red, and an agent or CI step that reaches this by mistake would stall rather
+    # than report (measured: still waiting after 5s).
+    if sys.stdin.isatty():
+        print(
+            "py:test floor: stdin is a terminal. This guard reads `pytest --collect-only -q` from "
+            "a pipe; run it as `uv run pytest --collect-only -q | uv run python "
+            "scripts/assert_test_floor.py`, or use --self-test (SMA-610).",
+            file=sys.stderr,
+        )
+        return EXIT_UNREADABLE
+
     text = sys.stdin.read()
 
     error = check_stream(text)
