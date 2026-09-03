@@ -80,42 +80,73 @@ MOON_CI_INVOCATION = 'moon ci "${T[@]}"'
 # the property worth pinning, passing the whole array is.
 T_ARRAY_EXPANSION = '"${T[@]}"'
 
-# Which lines count as an invocation. Checked per LINE, not once over the whole file, because
-# ci.yml carries TWO invocations (the PR path and the push path) — a whole-file substring test
-# would pass with the PR one, the one every gate actually runs under, subsetted.
+# The `moon ci` step's whole branch block, pinned as an EXACT LITERAL rather than matched by
+# shape. SMA-541's regex-based predecessor was bypassed four times during its own review — a
+# subsetted array, a subset behind a leading flag, an `echo` prefix, multiple spaces, and a
+# trailing comment supplying the expansion — and every one was "the pattern did not describe the
+# thing someone wrote". There is no clever spelling of a string that is not that string.
 #
-# This is DELIBERATELY BROADER than assert_include_relations' `moon ci +"` grep (run.sh:126), which
-# an earlier version of this constant mirrored so the two would "agree on what they are looking
-# at". That agreement was a shared BLIND SPOT, not a feature: `moon ci +"` requires the quote to
-# follow `moon ci` immediately, so simply putting a flag first —
+# Copied VERBATIM from .github/workflows/ci.yml, indentation included — re-verify against the real
+# file (`awk 'NR>=235 && NR<=242' .github/workflows/ci.yml`) before editing this tuple; do not
+# hand-format an entry. Same rule ci/actionlint/run.sh's T_INVOCATION_ALLOWLIST states for itself,
+# and keeping both pins on that one rule is what makes co-updating them mechanical.
 #
-#     moon ci --base origin/main "${T[@]:0:5}" --include-relations
+# CO-UPDATE SITES (SMA-554 §6). An edit to these lines touches FOUR places, not one:
+#   1. .github/workflows/ci.yml:235-242                      — the block itself
+#   2. ci/actionlint/run.sh, T_INVOCATION_ALLOWLIST          — check 8b's exact-literal pin
+#   3. ci/actionlint/run.sh, block_execution_verdict         — check 8d's derived expectation
+#   4. this tuple
+# Checks 8b and 8d are NOT redundant with this one and must not be deleted on the grounds that
+# ci_targets.py now pins the same lines: 8d EXECUTES the block against a stubbed `moon` on four
+# GitHub event paths, which is the only control that sees a step-level `if: false` or an
+# `if false; then … fi` wrap (L2). This tuple is a second, independently-scheduled opinion.
 #
-# — is seen by NEITHER check. The array is subsetted, eighteen gates stop running, C1/C2/C3 stay
-# green because `T` itself is still correct, and the flag grep matches nothing so it does not red
-# either (measured; CodeRabbit CLI). Matching the command rather than its first argument closes it.
+# The `T=(…)` line directly above the block is deliberately NOT part of this tuple: every new
+# `repo:*` gate appends to it, so including it would red this gate on the single most routine edit
+# in the repo, and C1-C3 already assert the array's contents. It is used as the ANCHOR instead.
+MOON_CI_BRANCH_BLOCK = (
+    '          if [ "$EVENT" = "pull_request" ]; then',
+    '            moon ci "${T[@]}" --base origin/main --include-relations',
+    "          elif [ -n \"${BEFORE:-}\" ] && ! printf '%s' \"$BEFORE\" | grep -qE '^0+$'; then",
+    '            moon ci "${T[@]}" --base "$BEFORE" --include-relations',
+    "          else",
+    "            # Initial push with no usable base — run the whole graph to warm caches.",
+    '            moon run "${T[@]}"',
+    "          fi",
+)
+
+# DEMOTED (SMA-554): this regex no longer defines any SHAPE rule — MOON_CI_BRANCH_BLOCK above does,
+# by exact literal. Its only remaining job is CARDINALITY: count command-position `moon ci` lines
+# and require exactly EXPECTED_MOON_CI_INVOCATIONS, which is the one thing an exact-literal pin
+# cannot see (a THIRD invocation added elsewhere in the file, or a duplicate of the block).
+#
+# That demotion is what makes its known false negatives tolerable rather than holes. `$MOON ci …`,
+# a `FOO=1 moon ci …` env-assignment prefix, a `moon()` shell-function shadow and a `\`-continued
+# invocation are all uncounted (L1) — but check 8d in ci/actionlint/run.sh catches every one of
+# them behaviourally, by executing the block and counting real `moon` invocations.
 #
 # Anchored at COMMAND POSITION — `moon` must be the line's first token — with `[ \t]+` between the
-# two words. Two more holes, both measured, drove this (CodeRabbit round 2):
-#
-#   echo moon ci "${T[@]}" …     a substring match accepts it; nothing runs, and the line even
-#                                carries the expansion, so it looked canonical
-#   moon    ci "${T[@]:0:5}" …   a literal single space misses it entirely, so the subsetted array
-#                                was never examined
-#
-# The anchor also makes the old `#`/`name:` lookaheads unnecessary: a comment starts with `#` and
-# the job/step titles start with `name:`/`- name:`, so none of them is at command position. Verified
-# against the real ci.yml — matches exactly the two invocation lines, and none of the six prose
-# comments or two `name:` fields (the `CI / moon ci` required check is keyed on those titles).
+# two words, so neither a `#` comment nor a `name:` field is mistaken for an invocation. Verified
+# against the real ci.yml: it matches exactly the two invocation lines, and none of the eight prose
+# comments or two `name:` fields that mention `moon ci`.
 MOON_CI_LINE_RE = re.compile(r"^[ \t]*moon[ \t]+ci\b.*$", re.MULTILINE)
 
-# ...and a FLOOR on how many there are, which is the half that actually closes the `echo` case. A
-# form this regex stops recognising drops out of `lines` silently, and a per-line rule can say
-# nothing about a line it never matched — the derived-set-shrinks-to-empty failure that
-# cargo_moon_parity.py's REQUIRED_FFI_TASKS exists to prevent, in miniature. Pinning the count turns
-# "the gate no longer understands the invocation" into a red. A genuinely new third invocation reds
-# too, which is intended: it must be reviewed, the same default-deny stance D10 takes.
+# How many command-position `moon ci` lines the whole file may carry. A genuinely new third
+# invocation reds and must be reviewed — the same default-deny stance D10 takes on a
+# project-scoped `T` entry.
 EXPECTED_MOON_CI_INVOCATIONS = 2
+
+# The two constants above must agree, and nothing else asserts it (SMA-554 D8). B's "exactly 2 in
+# the file" only means "the block's two and none outside it" because MOON_CI_BRANCH_BLOCK happens
+# to contribute exactly two matching lines. A future edit changing the block's invocation count
+# while updating only one constant would leave B silently meaning something else — the same
+# two-derived-things-drift-apart class the floors elsewhere in this file guard against. Asserted at
+# MODULE SCOPE so it fires on import, before any check runs, rather than only under --self-test.
+_BLOCK_INVOCATIONS = sum(1 for line in MOON_CI_BRANCH_BLOCK if MOON_CI_LINE_RE.match(line))
+assert _BLOCK_INVOCATIONS == EXPECTED_MOON_CI_INVOCATIONS, (
+    f"MOON_CI_BRANCH_BLOCK carries {_BLOCK_INVOCATIONS} `moon ci` line(s) but "
+    f"EXPECTED_MOON_CI_INVOCATIONS is {EXPECTED_MOON_CI_INVOCATIONS}; update both together"
+)
 
 # The docs command is delimited EXPLICITLY, not recognised by prose shape. Prose-shape matching was
 # fragile in both directions against ordinary doc edits: converting the command to a fenced code
