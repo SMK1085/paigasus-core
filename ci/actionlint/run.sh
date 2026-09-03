@@ -22,6 +22,14 @@
 # status. Each check captures status explicitly and sets FAILED instead.
 set -uo pipefail
 
+# proto prints an NDJSON preamble on STDOUT when it detects an agent environment (AI_AGENT /
+# CLAUDECODE / CLAUDE_CODE_ENTRYPOINT), which poisons every `$(...)` capture in this file.
+# MEASURED on the uv SHIM: default reporter yields `{"type":"message",...}` on stdout, and
+# PROTO_REPORTER=text yields none. CLAUDE.md's NDJSON entry had carved shims out as "not proven
+# generally"; a captured shim call leaking the preamble is the counterexample that closes it.
+# Exported once here rather than prefixed per call site, so a future capture inherits it (SMA-609).
+export PROTO_REPORTER=text
+
 # Absolute path to THIS file, captured BEFORE the cd below. `$0` is not usable after it: invoked
 # as `cd ci/actionlint && ./run.sh`, `$0` is './run.sh', which stops resolving the moment we move
 # to the repo root. Check 9 copies this file, and run_self_tests greps it (SMA-542 D11).
@@ -5193,8 +5201,16 @@ done < <(cargo_lock_script_verdict ci/cargo-lock-integrity/run.sh)
 # `p.startswith(sys.prefix)` accepts a SIBLING directory — `py/.venv-host/bin/shellcheck` starts with
 # `py/.venv` and is outside it (MEASURED: startswith True, is_relative_to False). Resolving both
 # sides also means a symlinked venv compares by its real location rather than by spelling.
+# PROTO_REPORTER=text AND `tail -n1`, deliberately both. proto prints an NDJSON preamble on
+# STDOUT when it detects an agent environment (AI_AGENT / CLAUDECODE / CLAUDE_CODE_ENTRYPOINT),
+# and MEASURED on merged main: the proto-managed `uv` SHIM leaked that preamble into this very
+# capture, so the variable held a JSON blob and the gate died with "not executable: {...}".
+# CLAUDE.md's NDJSON entry had carved shims out as "not proven generally" — this is the
+# counterexample that closes the carve-out (SMA-609). The env var suppresses it at source; the
+# `tail -n1` survives a future reporter change, since the path is always the LAST line. Neither
+# weakens the `[ -x ]` below: a preamble-only capture still fails it and still aborts.
 SHELLCHECK_BIN="$(uv run --locked --project py python3 -c \
-  'import pathlib, shutil, sys; p = shutil.which("shellcheck"); sys.exit(1) if not p or not pathlib.Path(p).resolve().is_relative_to(pathlib.Path(sys.prefix).resolve()) else print(p)')" \
+  'import pathlib, shutil, sys; p = shutil.which("shellcheck"); sys.exit(1) if not p or not pathlib.Path(p).resolve().is_relative_to(pathlib.Path(sys.prefix).resolve()) else print(p)' | tail -n1)" \
   || infra "could not resolve shellcheck via 'uv run --locked --project py' — run 'uv sync --project py'"
 [ -x "$SHELLCHECK_BIN" ] || infra "resolved shellcheck is not executable: $SHELLCHECK_BIN"
 ARGS+=("-shellcheck=$SHELLCHECK_BIN")

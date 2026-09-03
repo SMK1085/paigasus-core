@@ -58,8 +58,20 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   `ci/release-parity/ecosystems/release-plz.sh` is the worked example, and it also asserts
   `[ -x ]` on the result so a future regression fails at the assignment rather than 87 lines later
   (SMA-596). This is NOT new in proto 0.61.1; 0.58.1 behaves identically (measured both, SMA-595).
-  A proto-**shimmed** tool (`uv`, `node`, `release-plz`) is a different case: the shim execs the
-  tool, so captured stdout is the tool's — measured for the two cases below, not proven generally.
+  A proto-**shimmed** tool (`uv`, `node`, `release-plz`) was recorded here as a different case —
+  the shim execs the tool, so captured stdout is the tool's — "measured for the two cases below,
+  not proven generally". **That carve-out is now DISPROVEN and must not be relied on** (SMA-609).
+  A captured `uv` shim call leaked the preamble into `$(...)` twice on merged `main`: once from
+  `repo:ruff-ci`'s binary resolver, once from `repo:actionlint` check 10's `--fixture-count`. Both
+  died with a JSON blob where a path or an integer belonged. It is INTERMITTENT — the same command
+  succeeds on the next run — so a green does not clear a captured shim call. Directly measured on
+  the shim: the default reporter yields `{"type":"message",…}` on stdout, `PROTO_REPORTER=text`
+  yields none. Every gate script that captures shim output therefore **exports
+  `PROTO_REPORTER=text` once at the top** (`ci/actionlint/`, `ci/ruff/`, `ci/release-plan/`,
+  `ci/release-parity/`), rather than prefixing each call site, so a future capture inherits it.
+  The two binary resolvers additionally pipe through `tail -n1`; note that alone is NOT
+  sufficient — on the multi-line NDJSON error the last line is still JSON, and what preserves
+  fail-closed there is the `[ -x ]` assertion, not the tail.
   **Scope, corrected.** Only `repo:release-parity` was ever affected — NOT all three.
   `ci/release-parity/run.sh` sources exactly ONE ecosystem module per invocation, and only
   `release-plz.sh` invoked the proto CLI; `-py` resolves through `uv run` and `-ts` through `node`,
