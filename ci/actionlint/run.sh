@@ -4689,8 +4689,10 @@ claude_md_block_verdict() {
   local file="$1" nb ne lb le block lit
   [ -f "$file" ] && [ -r "$file" ] || { echo "no-file"; return; }
 
-  nb="$(grep -c 'moon-diagnosis:begin' "$file" || true)"
-  ne="$(grep -c 'moon-diagnosis:end' "$file" || true)"
+  # `grep -c` counts MATCHING LINES, not occurrences — two markers on one line would count as 1
+  # and pass the exactly-one check below. Count occurrences instead.
+  nb="$(grep -o 'moon-diagnosis:begin' "$file" 2>/dev/null | wc -l | tr -d '[:space:]')"
+  ne="$(grep -o 'moon-diagnosis:end' "$file" 2>/dev/null | wc -l | tr -d '[:space:]')"
   [ "$nb" -eq 1 ] || echo "marker-count begin $nb"
   [ "$ne" -eq 1 ] || echo "marker-count end $ne"
   [ "$nb" -eq 1 ] && [ "$ne" -eq 1 ] || return
@@ -4820,6 +4822,14 @@ more prose"
   printf '%s\n<!-- moon-diagnosis:begin -->\n' "$good" > "$tmpd/dup.md"
   got="$(claude_md_block_verdict "$tmpd/dup.md")"
   expect_doc 'a duplicated begin marker fires' 'marker-count begin 2'
+
+  # Same hazard, one line: `grep -c` counts MATCHING LINES, so two markers sharing a line would
+  # count as 1 and pass — this is the fixture for the fix that switched the count to `grep -o | wc
+  # -l`. Without it, this case reported 'marker-count begin 1' (MEASURED against the old `grep -c`
+  # form).
+  printf '<!-- moon-diagnosis:begin --><!-- moon-diagnosis:begin -->\n<!-- moon-diagnosis:end -->\n' > "$tmpd/same-line-dup.md"
+  got="$(claude_md_block_verdict "$tmpd/same-line-dup.md")"
+  expect_doc 'two begin markers on one line fire' 'marker-count begin 2'
 
   printf '<!-- moon-diagnosis:end -->\nx\n<!-- moon-diagnosis:begin -->\n' > "$tmpd/order.md"
   got="$(claude_md_block_verdict "$tmpd/order.md")"
@@ -5838,7 +5848,21 @@ fi
 # whitespace, so indenting any of them reds that pin rather than silently satisfying it.
 # ---------------------------------------------------------------------------------------------
 DD_LIST="$(mktemp)"
-git ls-files -z | xargs -0 grep -l 'ciReport' 2>/dev/null | sort > "$DD_LIST" || true
+# `|| true` used to sit on this line and discard the pipeline's status outright: a mid-pipeline
+# failure AFTER at least 60 paths had already been written would still satisfy the arity floor
+# below, and check 12 would then inspect an incomplete corpus with nothing to say so — the same
+# vacuous-pass class the floor exists to close. Capture it instead and route it explicitly.
+# `set -uo pipefail` (no `-e`) makes this the RIGHTMOST non-zero status in the pipeline, which is
+# what lets status 1 mean "grep matched nothing" rather than "git ls-files or sort broke".
+git ls-files -z | xargs -0 grep -l 'ciReport' 2>/dev/null | sort > "$DD_LIST"
+DD_PIPELINE_RC=$?
+if [ "$DD_PIPELINE_RC" -eq 1 ]; then
+  : # grep's legitimate "no files matched" — let the arity floor below turn this into a clear
+    # infra message instead of pre-empting it with a confusing pipeline-status one.
+elif [ "$DD_PIPELINE_RC" -ne 0 ]; then
+  infra "check 12: the corpus discovery pipeline (git ls-files | xargs grep -l 'ciReport' | sort)
+      exited $DD_PIPELINE_RC — check 12 cannot know whether the corpus it read is complete."
+fi
 DD_N="$(wc -l < "$DD_LIST" | tr -d '[:space:]')"
 
 [ "$DD_N" -ge 60 ] || infra "check 12: the corpus command found $DD_N files carrying the token, expected at least 60 — it has probably stopped matching, and an empty corpus would pass this check having asserted nothing"
