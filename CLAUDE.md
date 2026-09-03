@@ -765,7 +765,7 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   narrower than it first looks, though: `orphan_globs` is not "a key with no task" (nothing there
   needs a task) but a `SELF_TASK_EXPECTED_GLOBS` KEY with no matching `SELF_SCHEDULED_GATES`
   entry — i.e. the reverse-pairing direction — and `check_registry_pairing` (called with all-`None`
-  at `ci_targets.py:2628`, which resolves to the LIVE registries) genuinely IS exercised in
+  at `ci_targets.py:2647`, which resolves to the LIVE registries) genuinely IS exercised in
   production: it runs on the `--self-test` path that `repo:affected-smoke`'s own
   `--negative-control` invokes (`ci/affected-graph/run.sh:413`), so deleting only
   `SELF_SCHEDULED_GATES["ruff-ci"]` reds it. Obligation 4 (`SELF_TASK_EXPECTED_GLOBS`) is
