@@ -254,7 +254,7 @@ Any legitimate edit to those eight lines reds the gate until someone updates
 
 **That edit already touches three sites; this makes it four:**
 
-1. `.github/workflows/ci.yml:235-242` — the block itself.
+1. `.github/workflows/ci.yml:236-243` — the block itself.
 2. `T_INVOCATION_ALLOWLIST`, `ci/actionlint/run.sh:1692-1696` — up to three entries.
 3. Check 8d's derived expectation, `ci/actionlint/run.sh:4093-4104`, plus its
    `healthy`/`subset`/`branch_swap` fixtures.
@@ -337,9 +337,13 @@ scaffolding — is what reds it.
 - `ci/affected-graph/ci_targets.py:60-66` — `T_ARRAY_RE`'s CRLF comment, corrected per E6.
 - `docs/…/2026-08-19-sma-541-ci-target-coverage-gate-design.md` — the C5 entry (`:257-286`) and the
   fixture rows (`:356-358`) annotated as **superseded**; L10 (`:432`) annotated as **still open**
-  and cross-referenced to `ci/actionlint/README.md` L12 and check 8d. *(Corrected: L10 says C5
-  cannot see a step-level `if: false`, which remains true after this change — annotating it
-  superseded would delete a live limitation.)*
+  and cross-referenced to `ci/actionlint/README.md` L12. That cross-reference is to the LIMITATION,
+  not to a control that closes it: check 8d closes the related in-bash `if false; then … fi` wrap,
+  but its `extract_moon_step_block` skips every step key that is not `run:` while seeking the
+  block, so a step-level `if: ${{ false }}` leaves the extracted text unchanged and 8d reports
+  clean regardless — nothing in this repo closes that case. *(Corrected: L10 says C5 cannot see a
+  step-level `if: ${{ false }}`, which remains true after this change — annotating it superseded
+  would delete a live limitation.)*
 - `CLAUDE.md` — **no change needed.** Measured: it names neither C5 nor `check_invocation` nor any
   deleted constant. Its marker-delimited command and `T`-array bullets are untouched.
 

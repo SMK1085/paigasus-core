@@ -322,7 +322,7 @@ It also runs several checks that the per-case project sets structurally **cannot
   > pins the same three invocation lines as exact literals, and check 8d **executes** the block
   > against a stubbed `moon` on four GitHub event paths — which closes an in-bash
   > `if false; then … fi` wrap of the block, since that leaves every line byte-identical. It does
-  > **not** see a step-level `if: false` on the step itself: 8d's block extractor skips every step
+  > **not** see a step-level `if: ${{ false }}` on the step itself: 8d's block extractor skips every step
   > key that is not `run:` while seeking the block, so a step-level `if:` leaves the extracted text
   > unchanged and 8d reports clean regardless — nothing in this repo closes that case today. C5's
   > value is that it is scheduled independently of `repo:actionlint`. Editing those eight lines
