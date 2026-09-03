@@ -927,3 +927,9 @@ defined in T2 S3c and called with that exact name in T2 S1 (five self-test rows)
 and read in T2 S3c and the T2 S1 fixtures, all as lists — matching the JSON-round-trip constraint in
 Global Constraints. `WORKSPACE_LINT_INPUTS` is defined in T2 S3a and referenced in T2 S3c and S3d.
 The thirteen crate ids in T1's CSV match the Global Constraints list exactly.
+
+<!-- moon-diagnosis:superseded -->
+> **Superseded (SMA-597).** The `ciReport.json` diagnosis advice above does not work as written:
+> there is no action-level `exitCode` key, and the file carries no stdout/stderr at all. The
+> measured procedure is in CLAUDE.md between the `moon-diagnosis` markers. This document is left
+> otherwise unedited as a record of what was believed when it was written.

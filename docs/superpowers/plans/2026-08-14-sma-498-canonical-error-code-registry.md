@@ -1023,3 +1023,9 @@ Expected: no output. Any leftover probe file (`zz_probe.proto`, `zz_probe.rs`) o
 - Adding `tonic-types` to the workspace — SMA-504 needs it. (This branch does add one dependency of
   its own: `strum`, `cfg(test)`-gated, dev-only — see Task 4 Step 1. `tonic-types` would be a
   *production* dependency, a different story.)
+
+<!-- moon-diagnosis:superseded -->
+> **Superseded (SMA-597).** The `ciReport.json` diagnosis advice above does not work as written:
+> there is no action-level `exitCode` key, and the file carries no stdout/stderr at all. The
+> measured procedure is in CLAUDE.md between the `moon-diagnosis` markers. This document is left
+> otherwise unedited as a record of what was believed when it was written.

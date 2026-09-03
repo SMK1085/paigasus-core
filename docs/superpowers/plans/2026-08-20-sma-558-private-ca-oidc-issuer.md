@@ -1246,3 +1246,9 @@ Skip if nothing changed.
 **Type consistency:** `IdpTls::Verify { extra_bundle }` is spelled identically in Tasks 2, 3 and 4. `extra_ca_bundle_path` is the field name in both services throughout. `OpenAiError::CaBundle { path, source }` is constructed in Task 5 Step 4 and matched in Step 5 with the same field names.
 
 **Known ordering coupling:** Task 2 Step 4 references `authn_cfg.extra_ca_bundle_path`, which Task 3 Step 3 creates. Flagged inline in Task 2 Step 4 — an implementer hitting a compile error there should pull Task 3 Step 3 forward rather than inventing a placeholder.
+
+<!-- moon-diagnosis:superseded -->
+> **Superseded (SMA-597).** The `ciReport.json` diagnosis advice above does not work as written:
+> there is no action-level `exitCode` key, and the file carries no stdout/stderr at all. The
+> measured procedure is in CLAUDE.md between the `moon-diagnosis` markers. This document is left
+> otherwise unedited as a record of what was believed when it was written.

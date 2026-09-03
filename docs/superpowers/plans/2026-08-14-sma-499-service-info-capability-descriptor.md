@@ -921,3 +921,9 @@ The spec's D10 requires an **ADR-0020 amendment** in Notion recording D1 (a gene
 **Type consistency.** `as_wire_key` returns `Option<String>` in Task 3's tests, its implementation, and the Interfaces block. `from_wire_key` takes `&str` and returns `Option<Capability>` throughout. `capabilityWireKey` returns `string | undefined` in Task 4's test, implementation and Interfaces block. Rust variants are CamelCase (`IamApikeys`), TypeScript and Python members are UPPER_SNAKE with the prefix stripped (`IAM_APIKEYS`) — the asymmetry is called out in both places it matters.
 
 **Verified during planning, so the plan does not rest on assumption:** the `common/v1` tonic include compiles; `Capability::default()` is `Unspecified`; `TryFrom<i32>` exists and errors on 5; deleting the placeholder reds `contracts:breaking`; `option deprecated` passes all four buf gates with the per-language asymmetry described; and the exact generated symbol names in all three languages.
+
+<!-- moon-diagnosis:superseded -->
+> **Superseded (SMA-597).** The `ciReport.json` diagnosis advice above does not work as written:
+> there is no action-level `exitCode` key, and the file carries no stdout/stderr at all. The
+> measured procedure is in CLAUDE.md between the `moon-diagnosis` markers. This document is left
+> otherwise unedited as a record of what was believed when it was written.

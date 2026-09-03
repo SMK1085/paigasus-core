@@ -885,3 +885,9 @@ edited — the splat carries the change, stated in Task 2's Interfaces block.
 against `git checkout --` to undo a probe, because the file also carries an uncommitted fix from
 an earlier step. Task 3's Interfaces block notes that Task 2 already edited
 `py/packages/paigasus-kernel/moon.yml`.
+
+<!-- moon-diagnosis:superseded -->
+> **Superseded (SMA-597).** The `ciReport.json` diagnosis advice above does not work as written:
+> there is no action-level `exitCode` key, and the file carries no stdout/stderr at all. The
+> measured procedure is in CLAUDE.md between the `moon-diagnosis` markers. This document is left
+> otherwise unedited as a record of what was believed when it was written.

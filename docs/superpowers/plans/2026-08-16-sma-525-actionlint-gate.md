@@ -1249,3 +1249,9 @@ present in `ci.yml`'s `T=(…)`.
 `ARGS`, `fail`, `infra`, `FAILED` and `WORKFLOW_FILES` are defined in Task 2 and used unchanged
 in Tasks 3–5. `SKIP_PATTERNS`, `is_skipped`, `globstars_are_components`, `tracked_exact` and
 `check_pattern` are all defined and used within Task 5.
+
+<!-- moon-diagnosis:superseded -->
+> **Superseded (SMA-597).** The `ciReport.json` diagnosis advice above does not work as written:
+> there is no action-level `exitCode` key, and the file carries no stdout/stderr at all. The
+> measured procedure is in CLAUDE.md between the `moon-diagnosis` markers. This document is left
+> otherwise unedited as a record of what was believed when it was written.

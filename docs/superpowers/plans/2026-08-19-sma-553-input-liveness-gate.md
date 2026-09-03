@@ -1274,3 +1274,9 @@ git commit -m "docs(repo): record the input-liveness gate's measured cost and mu
 **Type consistency.** `classify` returns `str` everywhere. `_repo_tasks` returns `{name: (globs, files)}` and Tasks 3-5 destructure it that way. `check(tasks, tracked, matcher, allow)` — T4's fixtures pass `allow` positionally as the 4th argument and `main` relies on the `ALLOW_DEAD_INPUT` default; both are consistent. `check_canaries(matcher)` takes one argument in both its fixture and `main`. In `ci_targets.py`, `check_self_invocation` becomes two-argument at every call site (`main` and all fixtures), and `_scripts`/`moon_payload`/`check_gate_inputs` are new names not colliding with anything existing.
 
 **One known wrinkle, flagged deliberately:** Task 6, Step 3 gives the `run.sh` half as a substring test and the script half as whole-line. That asymmetry is intentional — `run.sh`'s two required lines are indented and one is a mid-line fragment, while the prefix hole exists only among the task-script lines. The implementer must keep both behaviours; the fixtures pin them.
+
+<!-- moon-diagnosis:superseded -->
+> **Superseded (SMA-597).** The `ciReport.json` diagnosis advice above does not work as written:
+> there is no action-level `exitCode` key, and the file carries no stdout/stderr at all. The
+> measured procedure is in CLAUDE.md between the `moon-diagnosis` markers. This document is left
+> otherwise unedited as a record of what was believed when it was written.

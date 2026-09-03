@@ -45,10 +45,10 @@ FAILED=0
 # Deliberately NOT `readonly`: without `set -e` a reassignment only warns, so readonly buys no
 # protection and would break a future harness that sources this file twice (SMA-542 D3).
 SELF_TESTS_RAN=0
-SELF_TEST_COUNT=13  # extractor, path-filter, branch-filter, config, ci-target-floor,
+SELF_TEST_COUNT=14  # extractor, path-filter, branch-filter, config, ci-target-floor,
                     # invocation-allowlist, affected-graph-wiring, block-execution,
                     # kill-predicate, affected-smoke-block, release-guard, cargo-lock-step,
-                    # release-plan
+                    # release-plan, doc-diagnosis
 
 fail() {
   echo "actionlint gate: $*" >&2
@@ -63,10 +63,11 @@ infra() {
 usage() {
   echo "usage: $(basename "$0") [--self-test]" >&2
   echo "  (no argument)  run the full gate" >&2
-  echo "  --self-test    run the thirteen fixture tables only — extractor, path-filter verdicts," >&2
+  echo "  --self-test    run the fourteen fixture tables only — extractor, path-filter verdicts," >&2
   echo "                 branch-filter verdicts, config allowlist, ci-target floor, invocation" >&2
   echo "                 allowlist, affected-graph wiring, block execution, kill predicate," >&2
-  echo "                 affected-smoke block, release guard, cargo-lock step, release-plan." >&2
+  echo "                 affected-smoke block, release guard, cargo-lock step, release-plan," >&2
+  echo "                 doc-diagnosis." >&2
   echo "                 No actionlint binary is required, but the branch-filter table needs a" >&2
   echo "                 git repo carrying refs/remotes/origin/main, and the release-guard table" >&2
   echo "                 shells out to 'uv run --locked --project py', so it needs uv on PATH and" >&2
@@ -4592,9 +4593,277 @@ release_plan_self_test() {
 }
 
 # ---------------------------------------------------------------------------------------------
+# Check 12 (definitions) — the ciReport corpus freeze and the CLAUDE.md procedure block (SMA-597).
+#
+# WHY A FILE-SET RULE AND NOT A PATTERN. SMA-554 records the controlled comparison: this file's
+# pattern-matched check was bypassed FOUR times in review, the exact-literal one next to it once.
+# A literal has no tail to enumerate. The token `ciReport` appears in zero tracked files outside
+# docs/ (measured), which is what makes a bare-token rule viable.
+#
+# THREE WAYS TO BE CLEAN, and the order matters for the error message: a `superseded` marker (a
+# dated record, annotated in place by SMA-597), an `ok` marker (a deliberate reference to the
+# CORRECTED procedure), or an allowlist row. The markers are what keep this table at three
+# entries: without them every future document referencing the corrected procedure would need a
+# row here, the gate's false-positive rate for correct mentions would be 100%, and the habit that
+# trains — "red, add a row, move on" — admits the broken advice just as readily.
+#
+# `path|reason` strings, NOT an associative array: macOS ships bash 3.2, which has no `declare -A`,
+# and this gate runs locally as often as in CI.
+CIREPORT_MENTIONS_ALLOWED=(
+  # The gate's own two files: run.sh must contain the token because it IS the search pattern, and
+  # the README must contain it to document check 12. Consequence, recorded in the README's
+  # Limitations: check 12 is structurally blind to the token in these two files. The alternatives
+  # were worse — obfuscating the pattern (`ci''Report`) defeats the literal-set argument and is
+  # the fragile-comment class run.sh:92-93 already warns about, and excluding ci/** creates a free
+  # bypass via any ci/**/README.md.
+  "ci/actionlint/run.sh|the gate's own search pattern"
+  "ci/actionlint/README.md|the gate's own documentation"
+  # CLAUDE.md carries the corrected procedure itself. A marker here would be the authority
+  # self-certifying; assertion B (claude_md_block_verdict) is what actually guards this file.
+  "CLAUDE.md|the corrected procedure itself — the authority does not self-certify"
+)
+
+# The five load-bearing elements of the CLAUDE.md block. Presence only — this cannot tell a
+# correct jq from a subtly wrong one (README Limitations L2). Each earns its place: the first two
+# are the finding (the real exit code is in operations[], on the task-execution entry), the next
+# two are where the output actually lives, and lastRunTime is the cross-check that stops a reader
+# pairing one run's command with another run's output.
+DOC_DIAGNOSIS_REQUIRED_LITERALS=(
+  'operations[]'
+  'task-execution'
+  '.moon/cache/states/'
+  'stderr.log'
+  'lastRunTime'
+)
+
+# Emits one row per violation, nothing when clean. Takes a FILE listing candidate paths, one per
+# line, rather than running `git ls-files` itself — that split is what lets the self-test drive it
+# against temp fixtures with no git repo (SMA-597).
+doc_diagnosis_verdict() {
+  local list="$1" f entry path reason found
+  [ -f "$list" ] && [ -r "$list" ] || { echo "no-list"; return; }
+
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    found=0
+    for entry in "${CIREPORT_MENTIONS_ALLOWED[@]}"; do
+      path="${entry%%|*}"
+      reason="${entry#*|}"
+      # A row carrying NO `|` at all: both expansions return the whole string, so `reason` becomes
+      # a copy of the path — non-empty, and the blank-reason arm below could therefore never fire
+      # for the one row shape most likely to be malformed. A path is not a justification.
+      # Normalising to an empty reason routes it through the existing verdict (SMA-597 round 1).
+      case "$entry" in *'|'*) ;; *) reason="" ;; esac
+      if [ "$path" = "$f" ]; then
+        found=1
+        # A blank reason is an assertion failure in its own right — the same rule T_EXEMPT and
+        # ALLOW_NO_CARGO_BACKING carry in ci_targets.py. An unexplained waiver is not a waiver.
+        [ -n "$reason" ] || echo "blank-reason $f"
+        break
+      fi
+    done
+    [ "$found" -eq 1 ] && continue
+    if [ -r "$f" ] && grep -q 'moon-diagnosis:superseded\|moon-diagnosis:ok' "$f"; then
+      continue
+    fi
+    echo "unmarked-mention $f"
+  done < "$list"
+
+  # Stale entries: an allowlist row naming a file that is gone, or no longer carries the token.
+  # Non-fatal — the table should shrink, and reporting is what prompts that. Check 8e's
+  # `stale-skip` and COE_SKIP's line+text keying are the precedents for not letting a hatch rot.
+  for entry in "${CIREPORT_MENTIONS_ALLOWED[@]}"; do
+    path="${entry%%|*}"
+    if [ ! -r "$path" ] || ! grep -q 'ciReport' "$path" 2>/dev/null; then
+      echo "stale-allowlist $path"
+    fi
+  done
+}
+
+# Assertion B. Marker integrity AND required content — non-empty alone is satisfied by a single
+# space or a TODO, which is exactly the likeliest real failure (someone trims CLAUDE.md and leaves
+# the markers). ci-targets does not stop at markers either: parse_doc_targets enforces
+# count/order/non-empty and compare_doc_targets then asserts the region mirrors T verbatim. This
+# is the same shape, one notch weaker (containment, not verbatim), because the block is prose.
+claude_md_block_verdict() {
+  local file="$1" nb ne lb le block lit
+  [ -f "$file" ] && [ -r "$file" ] || { echo "no-file"; return; }
+
+  # `grep -c` counts MATCHING LINES, not occurrences — two markers on one line would count as 1
+  # and pass the exactly-one check below. Count occurrences instead.
+  nb="$(grep -o 'moon-diagnosis:begin' "$file" 2>/dev/null | wc -l | tr -d '[:space:]')"
+  ne="$(grep -o 'moon-diagnosis:end' "$file" 2>/dev/null | wc -l | tr -d '[:space:]')"
+  [ "$nb" -eq 1 ] || echo "marker-count begin $nb"
+  [ "$ne" -eq 1 ] || echo "marker-count end $ne"
+  [ "$nb" -eq 1 ] && [ "$ne" -eq 1 ] || return
+
+  lb="$(grep -n 'moon-diagnosis:begin' "$file" | cut -d: -f1)"
+  le="$(grep -n 'moon-diagnosis:end' "$file" | cut -d: -f1)"
+  if [ "$lb" -ge "$le" ]; then echo "marker-order"; return; fi
+
+  # ADJACENT MARKERS, handled before the sed. With nothing between them, `$((lb+1)),$((le-1))p`
+  # is an INVERTED range, and sed prints its addr1 line rather than nothing — so the end marker
+  # itself lands in $block, the emptiness test below never fires, and a deleted procedure is
+  # reported as five missing-literal rows instead of the one empty-block row the caller is told
+  # to expect. MEASURED on the SMA-597 acceptance probe (the whole block removed by regex);
+  # sed behaves this way on BSD and GNU alike, so it is not a macOS-only quirk.
+  if [ "$le" -le "$((lb + 1))" ]; then echo "empty-block"; return; fi
+
+  block="$(sed -n "$((lb + 1)),$((le - 1))p" "$file")"
+  if [ -z "$(printf '%s' "$block" | tr -d '[:space:]')" ]; then echo "empty-block"; return; fi
+
+  for lit in "${DOC_DIAGNOSIS_REQUIRED_LITERALS[@]}"; do
+    printf '%s' "$block" | grep -qF -- "$lit" || echo "missing-literal $lit"
+  done
+}
+
+doc_diagnosis_self_test() {
+  SELF_TESTS_RAN=$((SELF_TESTS_RAN + 1))
+  local rc=0 tmpd list got
+
+  expect_doc() {
+    local name="$1" expected="$2"
+    if [ "$got" != "$expected" ]; then
+      fail "doc-diagnosis self-test '$name': got '$got', expected '$expected'. Check 12 is not
+      deciding what it is documented to decide."
+      rc=1
+    fi
+  }
+
+  tmpd="$(mktemp -d)"
+  list="$tmpd/list"
+
+  # --- doc_diagnosis_verdict ---------------------------------------------------------------
+  # A file carrying the token and NO marker is the violation this check exists for.
+  printf 'see ciReport.json for details\n' > "$tmpd/new-plan.md"
+  printf '%s\n' "$tmpd/new-plan.md" > "$list"
+  got="$(doc_diagnosis_verdict "$list" | grep -v '^stale-allowlist ')"
+  expect_doc 'an unmarked mention fires' "unmarked-mention $tmpd/new-plan.md"
+
+  # A superseded marker clears it — the 67 historical documents.
+  printf 'see ciReport.json\n<!-- moon-diagnosis:superseded -->\n' > "$tmpd/old-plan.md"
+  printf '%s\n' "$tmpd/old-plan.md" > "$list"
+  got="$(doc_diagnosis_verdict "$list" | grep -v '^stale-allowlist ')"
+  expect_doc 'a superseded marker clears it' ''
+
+  # An ok marker clears it — a deliberate reference to the corrected procedure.
+  printf 'see ciReport.json\n<!-- moon-diagnosis:ok -->\n' > "$tmpd/correct.md"
+  printf '%s\n' "$tmpd/correct.md" > "$list"
+  got="$(doc_diagnosis_verdict "$list" | grep -v '^stale-allowlist ')"
+  expect_doc 'an ok marker clears it' ''
+
+  # A removed offender is NOT a failure — subset, not equality. The set should only ever shrink,
+  # and making a cleanup red the gate that authorised it pushes people toward loosening the gate.
+  : > "$list"
+  got="$(doc_diagnosis_verdict "$list" | grep -v '^stale-allowlist ')"
+  expect_doc 'an empty corpus emits no violation rows' ''
+
+  # A missing list is infrastructure, not a clean repo.
+  got="$(doc_diagnosis_verdict "$tmpd/nope" | grep -v '^stale-allowlist ')"
+  expect_doc 'a missing list reports no-list' 'no-list'
+
+  # --- the allowlist's own row shapes (SMA-597 round 1) -------------------------------------
+  # The override is scoped INSIDE the command substitution deliberately. Saving and restoring the
+  # real table around these cases would add a `"${CIREPORT_MENTIONS_ALLOWED[@]}"` expansion in the
+  # MAIN shell, and that is an unbound-variable abort on bash 3.2 the moment the table is empty —
+  # it would kill the whole gate, at rc 1, instead of letting the arity floor exit 2.
+  printf 'see ciReport.json\n' > "$tmpd/waived.md"
+  printf '%s\n' "$tmpd/waived.md" > "$list"
+
+  # A stated reason waives the file silently — the clean path the two malformed rows are read
+  # against, and the proof these three cases differ only in the row's shape.
+  got="$(CIREPORT_MENTIONS_ALLOWED=("$tmpd/waived.md|a stated reason")
+         doc_diagnosis_verdict "$list" | grep -v '^stale-allowlist ')"
+  expect_doc 'an allowlist row with a reason waives its file' ''
+
+  # An EMPTY reason after the pipe.
+  got="$(CIREPORT_MENTIONS_ALLOWED=("$tmpd/waived.md|")
+         doc_diagnosis_verdict "$list" | grep -v '^stale-allowlist ')"
+  expect_doc 'an allowlist row with an empty reason fires' "blank-reason $tmpd/waived.md"
+
+  # NO pipe at all — see the `case` in doc_diagnosis_verdict. Before round 1 this waived the file
+  # in silence, because the path became its own reason.
+  got="$(CIREPORT_MENTIONS_ALLOWED=("$tmpd/waived.md")
+         doc_diagnosis_verdict "$list" | grep -v '^stale-allowlist ')"
+  expect_doc 'an allowlist row with no pipe fires' "blank-reason $tmpd/waived.md"
+
+  # The arity floor's premise, asserted here AS WELL AS at the production call site. The
+  # production floor cannot run under --self-test (it lives in the block that reads the real
+  # tree), and on bash 4.4+ an emptied table leaves --self-test entirely green — so without this
+  # case the floor's own regression would be invisible to the fast path. Phrased as the floor's
+  # predicate rather than an exact count, so a justified fourth row needs no re-baseline here.
+  if [ "${#CIREPORT_MENTIONS_ALLOWED[@]}" -ge 3 ]; then got='ok'; else got="${#CIREPORT_MENTIONS_ALLOWED[@]}"; fi
+  expect_doc 'the allowlist meets its arity floor' 'ok'
+
+  # --- claude_md_block_verdict -------------------------------------------------------------
+  # ONE required literal per line, deliberately. The deletion loop below strips whole lines with
+  # `grep -vF`, so two literals sharing a line would make deleting either one report BOTH as
+  # missing — the fixture would then be asserting a conjunction rather than the single literal the
+  # case is named for, and a genuinely absent literal could hide behind its line-mate.
+  local good="prose
+<!-- moon-diagnosis:begin -->
+read the run's operations[] array
+and pick the task-execution entry
+output lives under .moon/cache/states/
+the captured stream is stderr.log
+cross-check lastRunTime
+<!-- moon-diagnosis:end -->
+more prose"
+
+  printf '%s\n' "$good" > "$tmpd/claude.md"
+  got="$(claude_md_block_verdict "$tmpd/claude.md")"
+  expect_doc 'a complete block is clean' ''
+
+  got="$(claude_md_block_verdict "$tmpd/absent.md")"
+  expect_doc 'a missing file reports no-file' 'no-file'
+
+  # A duplicated marker: CLAUDE.md's own ci-targets entry warns that a second copy anywhere in the
+  # file — even inside backticks in prose — breaks the count. Same hazard here.
+  printf '%s\n<!-- moon-diagnosis:begin -->\n' "$good" > "$tmpd/dup.md"
+  got="$(claude_md_block_verdict "$tmpd/dup.md")"
+  expect_doc 'a duplicated begin marker fires' 'marker-count begin 2'
+
+  # Same hazard, one line: `grep -c` counts MATCHING LINES, so two markers sharing a line would
+  # count as 1 and pass — this is the fixture for the fix that switched the count to `grep -o | wc
+  # -l`. Without it, this case reported 'marker-count begin 1' (MEASURED against the old `grep -c`
+  # form).
+  printf '<!-- moon-diagnosis:begin --><!-- moon-diagnosis:begin -->\n<!-- moon-diagnosis:end -->\n' > "$tmpd/same-line-dup.md"
+  got="$(claude_md_block_verdict "$tmpd/same-line-dup.md")"
+  expect_doc 'two begin markers on one line fire' 'marker-count begin 2'
+
+  printf '<!-- moon-diagnosis:end -->\nx\n<!-- moon-diagnosis:begin -->\n' > "$tmpd/order.md"
+  got="$(claude_md_block_verdict "$tmpd/order.md")"
+  expect_doc 'markers out of order fire' 'marker-order'
+
+  printf '<!-- moon-diagnosis:begin -->\n   \n<!-- moon-diagnosis:end -->\n' > "$tmpd/empty.md"
+  got="$(claude_md_block_verdict "$tmpd/empty.md")"
+  expect_doc 'a whitespace-only block fires' 'empty-block'
+
+  # Nothing between the markers at all — the shape a deleted procedure actually leaves, and a
+  # DIFFERENT code path from the whitespace-only case above: see the inverted-range guard in
+  # claude_md_block_verdict. Without it this reported five missing-literal rows (MEASURED).
+  printf '<!-- moon-diagnosis:begin -->\n<!-- moon-diagnosis:end -->\n' > "$tmpd/adjacent.md"
+  got="$(claude_md_block_verdict "$tmpd/adjacent.md")"
+  expect_doc 'markers with nothing between them fire' 'empty-block'
+
+  # Each required literal deleted in turn — driven from the array, so a sixth entry is covered
+  # automatically rather than needing a new fixture.
+  local lit stripped
+  for lit in "${DOC_DIAGNOSIS_REQUIRED_LITERALS[@]}"; do
+    stripped="$(printf '%s\n' "$good" | grep -vF -- "$lit")"
+    printf '%s\n' "$stripped" > "$tmpd/miss.md"
+    got="$(claude_md_block_verdict "$tmpd/miss.md")"
+    expect_doc "required literal '$lit' deleted fires" "missing-literal $lit"
+  done
+
+  rm -rf "$tmpd"
+  return "$rc"
+}
+
+# ---------------------------------------------------------------------------------------------
 # Check 7 — the self-tests, and the counter that proves they were invoked.
 #
-# All THIRTEEN are defined above so this block can run them from ONE call site, reached by both the
+# All FOURTEEN are defined above so this block can run them from ONE call site, reached by both the
 # --self-test path and the full gate. One call site rather than two is deliberate: ci_targets.py's
 # C4 pins this by whole stripped line, and two identical lines would let one be deleted while the
 # pin still matched (SMA-542 D2).
@@ -4625,6 +4894,7 @@ run_self_tests() {
   release_guard_self_test
   cargo_lock_step_self_test
   release_plan_self_test
+  doc_diagnosis_self_test
 
   assert_self_tests_ran "$SELF_TEST_COUNT"
 
@@ -5554,6 +5824,117 @@ elif [ "$rp_rc" -ne 0 ]; then
       documented statuses (0 clean, 1 repo wrong, 2 infra). This file is 'set -uo pipefail' with
       NO -e, so an unrouted status would finish the gate rc 0 having asserted nothing."
 fi
+
+# ---------------------------------------------------------------------------------------------
+# Check 12 — the ciReport corpus freeze and the CLAUDE.md procedure block (SMA-597). Runs here,
+# not in --self-test, because it reads the real tracked tree, like checks 5/6/10/11.
+#
+# THE ARITY FLOORS ARE PART OF THE CHECK. doc_diagnosis_verdict iterates a corpus, so an EMPTY
+# corpus emits zero rows and the gate passes having asserted nothing — `∅ ⊆ allowlist`. That is
+# the same class ci_targets.py records as MEASURED for check 8e's emptied table, and the subset
+# rule (deliberate: the corpus should only ever shrink) removes the control that would otherwise
+# catch it. `infra`, not `fail`: a corpus that vanished is a broken gate, not a clean repo.
+#
+# `-ge 60` rather than `-eq 67` so genuine cleanup of a handful of documents needs no re-baseline.
+#
+# CORPUS COMMAND: unfiltered `git ls-files`, no pathspec. `git ls-files -- 'docs/**/*.md'` matches
+# ZERO top-level docs/*.md files — git matches `**` without FNM_PATHNAME, so the literal `/` is
+# still required (MEASURED: docs/dev-setup.md is tracked and unmatched). CLAUDE.md records the
+# same trap for repo:ruff-ci's corpus. Scanning the whole tracked tree has no pathspec to get
+# wrong and closes the docs/anything.md bypass at the same time. It reads the INDEX, so a file
+# written but not yet `git add`ed is invisible — a local run can be green where CI is red.
+#
+# COLUMN 0 for the two floors and the read loop: ACTIONLINT_SH_CALL_SITES matches with no leading
+# whitespace, so indenting any of them reds that pin rather than silently satisfying it.
+# ---------------------------------------------------------------------------------------------
+DD_LIST="$(mktemp)"
+# `|| true` used to sit on this line and discard the pipeline's status outright: a mid-pipeline
+# failure AFTER at least 60 paths had already been written would still satisfy the arity floor
+# below, and check 12 would then inspect an incomplete corpus with nothing to say so — the same
+# vacuous-pass class the floor exists to close. Capture it instead and route it explicitly.
+# `set -uo pipefail` (no `-e`) makes this the RIGHTMOST non-zero status in the pipeline, which is
+# what lets a no-match status mean "grep matched nothing" rather than "git ls-files or sort broke".
+#
+# TWO no-match statuses, and the split is a PLATFORM one — both MEASURED, because getting this
+# wrong makes an empty corpus read as broken infrastructure on exactly one of the two platforms
+# this gate runs on. `grep -l` exits 1 when it matches nothing, but the status `pipefail` reports
+# is `xargs`'s, not grep's, and the two implementations disagree:
+#   BSD xargs (macOS, local runs)   -> 1    (measured on Darwin)
+#   GNU xargs (Linux, CI)           -> 123  ("a command exited 1-125")
+# Accept both. Treating only 1 as no-match is correct locally and wrong in CI, where the arity
+# floor's precise message would be pre-empted by the generic pipeline-status one below — the exact
+# substitution of a vague diagnosis for a sharp one that SMA-597 exists to stop.
+git ls-files -z | xargs -0 grep -l 'ciReport' 2>/dev/null | sort > "$DD_LIST"
+DD_PIPELINE_RC=$?
+if [ "$DD_PIPELINE_RC" -eq 1 ] || [ "$DD_PIPELINE_RC" -eq 123 ]; then
+  : # grep's legitimate "no files matched", via either xargs — let the arity floor below turn this
+    # into a clear infra message instead of pre-empting it with a confusing pipeline-status one.
+elif [ "$DD_PIPELINE_RC" -ne 0 ]; then
+  infra "check 12: the corpus discovery pipeline (git ls-files | xargs grep -l 'ciReport' | sort)
+      exited $DD_PIPELINE_RC — check 12 cannot know whether the corpus it read is complete."
+fi
+DD_N="$(wc -l < "$DD_LIST" | tr -d '[:space:]')"
+
+[ "$DD_N" -ge 60 ] || infra "check 12: the corpus command found $DD_N files carrying the token, expected at least 60 — it has probably stopped matching, and an empty corpus would pass this check having asserted nothing"
+[ "${#DOC_DIAGNOSIS_REQUIRED_LITERALS[@]}" -ge 5 ] || infra "check 12: DOC_DIAGNOSIS_REQUIRED_LITERALS has ${#DOC_DIAGNOSIS_REQUIRED_LITERALS[@]} entries, expected at least 5"
+# The THIRD table of the same shape, and the one that shipped without a floor. MEASURED on bash
+# 3.2.57 — the macOS system bash, this repo's stated compat target: with CIREPORT_MENTIONS_ALLOWED
+# emptied, `for entry in "${CIREPORT_MENTIONS_ALLOWED[@]}"` is an unbound-variable error under
+# `set -u`. That kills the PROCESS SUBSTITUTION below rather than the gate, so doc_diagnosis_verdict
+# emits zero rows, the while loop's unrouted status hides it, and assertion A passes having asserted
+# nothing — the `∅ ⊆ allowlist` shape the block comment above describes, arriving by a second route.
+# bash 4.4+ reds instead (measured at 5.3.15), so the hole is specifically on the platform this gate
+# runs on locally. `-ge 3`, not `-ge 1`: the allowlist is fixed at exactly the three structural rows
+# (this file, its README, CLAUDE.md), and check 8e's precedent is a meaningful floor, not a nominal
+# one. A fourth row is a deliberate re-baseline, the same as the other two floors (SMA-597 round 1).
+[ "${#CIREPORT_MENTIONS_ALLOWED[@]}" -ge 3 ] || infra "check 12: CIREPORT_MENTIONS_ALLOWED has ${#CIREPORT_MENTIONS_ALLOWED[@]} entries, expected at least 3"
+
+while IFS= read -r verdict; do
+  case "$verdict" in
+    '') ;;
+    no-list)
+      infra "check 12: could not build the corpus list — git ls-files failed." ;;
+    unmarked-mention\ *)
+      fail "check 12: ${verdict#unmarked-mention } mentions ciReport.json but carries neither
+      <!-- moon-diagnosis:superseded --> nor <!-- moon-diagnosis:ok -->, and is not in
+      CIREPORT_MENTIONS_ALLOWED. If it reproduces the broken advice (no action-level exitCode; the
+      file has no stdout/stderr), fix it against CLAUDE.md's moon-diagnosis block. If it is a
+      correct reference, add the :ok marker. If it is a historical record, add :superseded." ;;
+    blank-reason\ *)
+      fail "check 12: the CIREPORT_MENTIONS_ALLOWED entry for ${verdict#blank-reason } has an
+      empty reason. An unexplained waiver is not a waiver." ;;
+    stale-allowlist\ *)
+      echo "actionlint gate: check 12 NOTE: CIREPORT_MENTIONS_ALLOWED names ${verdict#stale-allowlist }, which is gone or no longer carries the token — drop the row." >&2 ;;
+    *)
+      infra "check 12: unrecognised verdict '$verdict'" ;;
+  esac
+done < <(doc_diagnosis_verdict "$DD_LIST")
+
+rm -f "$DD_LIST"
+
+while IFS= read -r verdict; do
+  case "$verdict" in
+    '') ;;
+    no-file)
+      fail "check 12: CLAUDE.md does not exist or is unreadable, so the corrected diagnosis
+      procedure cannot be confirmed present." ;;
+    marker-count\ *)
+      fail "check 12: CLAUDE.md has the wrong number of moon-diagnosis markers ($verdict).
+      Exactly one begin and one end are required — a second copy anywhere in the file, even
+      inside backticks in prose, breaks this the same way it breaks ci-targets." ;;
+    marker-order)
+      fail "check 12: CLAUDE.md's moon-diagnosis:end precedes its begin." ;;
+    empty-block)
+      fail "check 12: CLAUDE.md's moon-diagnosis block is empty. Deleting the procedure would
+      switch off the correction this gate exists to protect." ;;
+    missing-literal\ *)
+      fail "check 12: CLAUDE.md's moon-diagnosis block no longer contains
+      '${verdict#missing-literal }'. Every entry in DOC_DIAGNOSIS_REQUIRED_LITERALS is a
+      load-bearing element of the measured procedure." ;;
+    *)
+      infra "check 12: unrecognised block verdict '$verdict'" ;;
+  esac
+done < <(claude_md_block_verdict CLAUDE.md)
 
 selftest_mutation_battery
 

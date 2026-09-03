@@ -919,3 +919,9 @@ contract. `$HERE` is defined at `run.sh:19` and is in scope for both new helpers
 **One residual risk, flagged not hidden:** Task 3.5 places `run_task_case`/`assert_cargo_moon_parity`
 after `run_case`; Bash resolves functions at call time, so definition order relative to `run_suite`
 does not matter — but both must be defined before `run_suite` is *invoked* at line ~180. They are.
+
+<!-- moon-diagnosis:superseded -->
+> **Superseded (SMA-597).** The `ciReport.json` diagnosis advice above does not work as written:
+> there is no action-level `exitCode` key, and the file carries no stdout/stderr at all. The
+> measured procedure is in CLAUDE.md between the `moon-diagnosis` markers. This document is left
+> otherwise unedited as a record of what was believed when it was written.

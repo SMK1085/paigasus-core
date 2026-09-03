@@ -796,3 +796,9 @@ Expected: no modified tracked files; five commits (Tasks 1-5). `.claude/settings
 **Type consistency.** `IAM_OUTBOX_NOTIFYING_ENQUEUES_TOTAL` and the literal `"iam_outbox_notifying_enqueues_total"` agree across Tasks 1-5. `PgOutbox::new(bool)`, `SeaOrmUnitOfWork::new(DatabaseConnection)`, `uow.begin()`, `outbox.enqueue(&*tx, &DomainEvent)`, `PgDeadLetters::new(db)`, `dead.replay_in(&*tx, Uuid) -> Result<Option<_>, _>`, `OutboxRelay::new(db, Duration, usize, u32).tick(&dyn EventPublisher) -> Result<report, _>` with `.drained`, and `support::sum_metric_from(&str, &str) -> f64` all match the signatures read from the existing tests. Task 3's `DeadLetters` trait import is required for `replay_in` to resolve and is added in its Step 1.
 
 **One ordering constraint made explicit:** Task 4 reds `:observability-drift` unless Task 1 has landed. Tasks 2, 3 and 5 are independent of each other.
+
+<!-- moon-diagnosis:superseded -->
+> **Superseded (SMA-597).** The `ciReport.json` diagnosis advice above does not work as written:
+> there is no action-level `exitCode` key, and the file carries no stdout/stderr at all. The
+> measured procedure is in CLAUDE.md between the `moon-diagnosis` markers. This document is left
+> otherwise unedited as a record of what was believed when it was written.

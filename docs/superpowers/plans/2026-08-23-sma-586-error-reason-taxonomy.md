@@ -1600,3 +1600,9 @@ where a layer-based one could silently report a wrong name at runtime.
 each other and could run in parallel if their files do not overlap — but 4 and 5 both touch
 `grpc/`, and 6 and 7 both touch `http/`, so run them in order to avoid conflicts. Task 8
 requires 4-7. Task 9 requires 5-7. Task 10 requires all.
+
+<!-- moon-diagnosis:superseded -->
+> **Superseded (SMA-597).** The `ciReport.json` diagnosis advice above does not work as written:
+> there is no action-level `exitCode` key, and the file carries no stdout/stderr at all. The
+> measured procedure is in CLAUDE.md between the `moon-diagnosis` markers. This document is left
+> otherwise unedited as a record of what was believed when it was written.

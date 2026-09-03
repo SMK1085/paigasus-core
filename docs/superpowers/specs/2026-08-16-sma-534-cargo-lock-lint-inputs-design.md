@@ -337,3 +337,9 @@ lint that has been latent since the last time that crate was linted — the bump
 have to grow source changes across up to thirteen crates. The intended policy is: fix it in a
 separate PR and rebase the bump onto it, rather than widening the bump. Recorded here so the first
 occurrence is not resolved ad hoc.
+
+<!-- moon-diagnosis:superseded -->
+> **Superseded (SMA-597).** The `ciReport.json` diagnosis advice above does not work as written:
+> there is no action-level `exitCode` key, and the file carries no stdout/stderr at all. The
+> measured procedure is in CLAUDE.md between the `moon-diagnosis` markers. This document is left
+> otherwise unedited as a record of what was believed when it was written.

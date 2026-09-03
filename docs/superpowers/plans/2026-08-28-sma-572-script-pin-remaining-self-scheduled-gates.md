@@ -1304,3 +1304,9 @@ transcription if they disagree.
 are spelled identically in Tasks 2, 3 and 4 and in the two `ACTIONLINT_SH_CALL_SITES` strings.
 The arity-floor line appears three times — Task 3 Step 2 (the source), Step 5 (the pin) and
 Step 6 (the fixture) — and must stay byte-identical in all three; Task 3 Step 8 is what proves it.
+
+<!-- moon-diagnosis:superseded -->
+> **Superseded (SMA-597).** The `ciReport.json` diagnosis advice above does not work as written:
+> there is no action-level `exitCode` key, and the file carries no stdout/stderr at all. The
+> measured procedure is in CLAUDE.md between the `moon-diagnosis` markers. This document is left
+> otherwise unedited as a record of what was believed when it was written.

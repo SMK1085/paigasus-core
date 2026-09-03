@@ -1343,3 +1343,9 @@ Only if Step 2 surfaced real breakage. Otherwise nothing to commit — the gate 
 **Placeholder scan:** no TBD/TODO; every code step carries real content; Task 4 Step 5 explicitly says to repeat the lint tables verbatim rather than write "same as above".
 
 **Type consistency:** `assert_lint_table`, `assert_include_allowlist`, `check_package_list`, `check_publish_group`, `publish_groups`, `assert_check2_covered_everything`, `CHECK2_INVOKED`, `LOCK_MEMBERS`, `lock_reader_self_test` — each defined once and referenced with the same name and arity throughout. `check_package` is fully replaced in Task 3 Step 2 and never referenced afterwards.
+
+<!-- moon-diagnosis:superseded -->
+> **Superseded (SMA-597).** The `ciReport.json` diagnosis advice above does not work as written:
+> there is no action-level `exitCode` key, and the file carries no stdout/stderr at all. The
+> measured procedure is in CLAUDE.md between the `moon-diagnosis` markers. This document is left
+> otherwise unedited as a record of what was believed when it was written.

@@ -1385,3 +1385,9 @@ git commit -m "docs(repo): correct the sdist premise and record the wheel-matrix
 **Type consistency.** `EXPECTED_PYPI_PUBLISHABLE`, `PYPI_SCAN`, `PYPI_REQUIRED_FIELDS`, `SDIST_SHIPPED_CRATES`, `assert_pypi_metadata`, `assert_sdist_lint_tables`, `assert_wheels_has_no_credentials` are defined in Task 6 Steps 1–3 and called in Step 4 under exactly those names. `assert_lint_table` and `_expect_rc` are pre-existing (`run.sh:293`, `run.sh:~800`) and reused, not redefined. Artifact names `wheel-<platform>`, `sdist`, `face-paigasus-kernel` are produced in Tasks 4–5 and are what SMA-579 will download. The matrix keys `platform`, `target`, `runner`, `zig`, `compat`, `expect_tag`, `extra_*` are declared in Task 4 Step 2 and used consistently in Steps 3–8.
 
 **Three deliberate measure-then-pin points**, flagged in place rather than guessed: the maturin asset filenames (Task 3 Step 1), the wheel tag sets and the max-GLIBC value (Task 4 Steps 5–6), and the `rustup target add` handling of the `.2.17` triple suffix (Task 4 Step 3). Each says explicitly: read what the tool produced, confirm it is correct, pin that — never loosen the comparison to make a red go away.
+
+<!-- moon-diagnosis:superseded -->
+> **Superseded (SMA-597).** The `ciReport.json` diagnosis advice above does not work as written:
+> there is no action-level `exitCode` key, and the file carries no stdout/stderr at all. The
+> measured procedure is in CLAUDE.md between the `moon-diagnosis` markers. This document is left
+> otherwise unedited as a record of what was believed when it was written.

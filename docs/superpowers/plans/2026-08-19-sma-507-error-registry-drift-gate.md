@@ -923,3 +923,9 @@ Expected: clean. If `contracts:generate` or a revert left anything, restore it b
 **Type consistency.** `derive_codes`/`mirror_codes`/`code_pattern`/`scan`/`guard_exists`/`_matches`/`check_single_site`/`self_test`/`main`/`InfraError`/`MANIFEST`/`REPO`/`SCAN_ROOT`/`SCAN_GLOB` are spelled identically in Tasks 3 and 4. The four test names in `MANIFEST` match the ones `nextest list` reported, and the fifth is the one Task 1 creates.
 
 **One deliberate deviation from the spec.** Spec §7 says the derivation control should assert set equality against `EXPECTED_REASONS` "and number 46". The plan asserts set equality but does **not** hardcode 46 in Python: that count already lives in `paigasus-proto/src/error.rs:217` and runs in `paigasus-proto-rs:test`, so a third copy would be one more thing to update on every registry addition while adding no coverage — set equality against the mirror already pins the count transitively. Flagged rather than silently dropped.
+
+<!-- moon-diagnosis:superseded -->
+> **Superseded (SMA-597).** The `ciReport.json` diagnosis advice above does not work as written:
+> there is no action-level `exitCode` key, and the file carries no stdout/stderr at all. The
+> measured procedure is in CLAUDE.md between the `moon-diagnosis` markers. This document is left
+> otherwise unedited as a record of what was believed when it was written.

@@ -1504,3 +1504,9 @@ git commit -m "test(rs): prove a retired role stops granting and pin the fleet-s
 **Placeholder scan.** The `/* … */` markers in Tasks 5, 6 and 9 mark bodies whose exact shape must be copied from a named existing file (`authz_bootstrap.rs`'s harness, `dead_letters.rs`'s deps bag, `pg_role_grants.rs::model_to_grant`) rather than invented — each says which file. Every signature, const, error variant, JSON key and test assertion is written out.
 
 **Type consistency.** `SurvivingGrants { grants, total }` with `truncated(cap)` as a method is used identically in Tasks 4, 5 and 6. `RetireOutcome::Blocked` carries `total`, not `total_surviving`; only the HTTP body (Task 7) renames it to `total_surviving`, which is deliberate and stated. `retire(&self, actor, id, ack)` matches between Tasks 6 and 7. `GRANT_LIST_CAP: u64` matches `surviving_grants_in`'s `cap: u64`. `StoredPolicy.description` is `String` (not `Option<String>`), so the adapter maps the nullable column with `unwrap_or_default`, as `model_to_doc` already does.
+
+<!-- moon-diagnosis:superseded -->
+> **Superseded (SMA-597).** The `ciReport.json` diagnosis advice above does not work as written:
+> there is no action-level `exitCode` key, and the file carries no stdout/stderr at all. The
+> measured procedure is in CLAUDE.md between the `moon-diagnosis` markers. This document is left
+> otherwise unedited as a record of what was believed when it was written.

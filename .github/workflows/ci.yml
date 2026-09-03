@@ -226,6 +226,7 @@ jobs:
           bash ci/cargo-lock-integrity/run.sh
 
       - name: moon ci (affected graph)
+        id: moon_ci
         env:
           EVENT: ${{ github.event_name }}
           BEFORE: ${{ github.event.before }}
@@ -240,6 +241,45 @@ jobs:
             # Initial push with no usable base — run the whole graph to warm caches.
             moon run "${T[@]}"
           fi
+
+      # moon-diagnosis:ok
+      # SMA-597: ciReport.json carries the failing task's command and real exit code, and the
+      # per-task logs under states/ carry the only copy of its output. Neither survives the
+      # runner. Without this, the documented diagnosis procedure is unusable for a red CI check —
+      # the case it most needs to serve.
+      #
+      # Bare `if: failure()` is wrong here: it is true after ANY earlier failed step in the job,
+      # not just this one — and "Cache Moon task cache" above RESTORES .moon/cache from a
+      # previous run several steps before "moon ci (affected graph)" runs. If `moon setup`, the
+      # component/dependency install, commitlint, the config-only TS guard, or the cargo lockfile
+      # integrity gate failed first, `failure()` would still be true and this step would upload
+      # the RESTORED cache from a previous run on a DIFFERENT commit, presented as this run's
+      # diagnostics — exactly the report/log skew hazard this file exists to prevent. Scope to
+      # the named step's own outcome instead.
+      #
+      # `failure() &&` is required alongside the outcome check, not redundant with it: a step
+      # `if:` with no status-check function gets an implicit `&& success()`, and `success()` is
+      # false once ANY earlier step (moon_ci included) has failed — so a bare
+      # `if: steps.moon_ci.outcome == 'failure'` would never actually run, the exact case this
+      # step exists for. `failure()` overrides that implicit default; the outcome check then
+      # narrows it to moon_ci specifically.
+      - name: Upload moon diagnostics
+        if: failure() && steps.moon_ci.outcome == 'failure'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: moon-diagnostics
+          path: |
+            .moon/cache/ciReport.json
+            .moon/cache/states/**/stdout.log
+            .moon/cache/states/**/stderr.log
+            .moon/cache/states/**/lastRun.json
+          # `.moon` is dot-prefixed and actions/upload-artifact excludes hidden files by
+          # default — see prebuild.yml:344-355 for the measured failure mode this avoids.
+          # Staging is not warranted here: we name four specific file patterns, not a whole
+          # scratch dir, so there is nothing incidental for the flag to pull in.
+          include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 7
 
       # `.moon/tasks.yml` sets outputStyle: 'buffer-only-failure', so a test task that goes
       # green-WITH-FLAKES prints nothing at all — the only signal that the SMA-521 retry budget

@@ -489,3 +489,9 @@ Recorded so the reasoning is visible rather than silently dropped:
   follow-up issue, not silently assumed away** — this PR is already at the edge of a safe change
   size, and the fix has its own cost profile in the ts/py stacks.
 - **Splitting CI into parallel jobs.** Triggered by §5's acceptance threshold if needed.
+
+<!-- moon-diagnosis:superseded -->
+> **Superseded (SMA-597).** The `ciReport.json` diagnosis advice above does not work as written:
+> there is no action-level `exitCode` key, and the file carries no stdout/stderr at all. The
+> measured procedure is in CLAUDE.md between the `moon-diagnosis` markers. This document is left
+> otherwise unedited as a record of what was believed when it was written.

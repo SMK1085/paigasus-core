@@ -1604,3 +1604,9 @@ git commit -m "docs(ops): record that a migrating iam answers on a live socket (
 | AC 4 | 5 |
 | AC 5 | 7 |
 | AC 6 | 8 |
+
+<!-- moon-diagnosis:superseded -->
+> **Superseded (SMA-597).** The `ciReport.json` diagnosis advice above does not work as written:
+> there is no action-level `exitCode` key, and the file carries no stdout/stderr at all. The
+> measured procedure is in CLAUDE.md between the `moon-diagnosis` markers. This document is left
+> otherwise unedited as a record of what was believed when it was written.

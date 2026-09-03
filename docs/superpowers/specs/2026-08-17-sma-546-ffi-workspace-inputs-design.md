@@ -456,3 +456,9 @@ answer is the same and is still unwritten; this spec does not invent one.
 Revert the two `moon.yml` input edits, the `run.sh` expected set, A5 and the three
 documentation touch-ups. Nothing depends on them beyond those files; there is no data migration and
 no published artifact. The pre-change state is the SMA-534 state, whose residual risk is documented.
+
+<!-- moon-diagnosis:superseded -->
+> **Superseded (SMA-597).** The `ciReport.json` diagnosis advice above does not work as written:
+> there is no action-level `exitCode` key, and the file carries no stdout/stderr at all. The
+> measured procedure is in CLAUDE.md between the `moon-diagnosis` markers. This document is left
+> otherwise unedited as a record of what was believed when it was written.

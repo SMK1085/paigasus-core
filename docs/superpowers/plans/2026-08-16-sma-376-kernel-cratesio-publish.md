@@ -1145,3 +1145,9 @@ EOF
 **Type consistency.** `metadata_checks` (3 args: metadata json, release-plz toml, comma-separated expected) and `assert_package_list` (2 args: listing file, package name) are defined in Task 3 and called with those exact signatures in Task 4's negative control. `EXPECTED_PUBLISHABLE`, `REQUIRED_PACKAGED`, `FORBIDDEN_PACKAGED`, `REPO_ROOT`, `RS_DIR` are declared once in Task 3 and referenced consistently. The tab-separated `name\tmanifest-dir` contract printed by `metadata_checks` matches the `while IFS=$'\t' read -r name dir` consumer in `main`.
 
 **Known trap flagged inline.** Task 3 Step 3 restores a `.bak` file, which rolls mtime *backwards* and makes cargo reuse output built from the temporary edit — hence the `touch` after every restore. The same `touch` appears in Steps 4 and 5.
+
+<!-- moon-diagnosis:superseded -->
+> **Superseded (SMA-597).** The `ciReport.json` diagnosis advice above does not work as written:
+> there is no action-level `exitCode` key, and the file carries no stdout/stderr at all. The
+> measured procedure is in CLAUDE.md between the `moon-diagnosis` markers. This document is left
+> otherwise unedited as a record of what was believed when it was written.

@@ -1266,3 +1266,9 @@ Before opening the PR, confirm each spec decision has a live assertion:
 - **D6** — `audit` takes a named struct; each in-scope projector has a distinct-pair test (Task 6).
 - **D7** — HTTP DTOs carry flat actor fields (Task 7).
 - **D8** — the default team records the org creator (Task 3, Step 6; assert it in `application/organizations.rs`'s existing `create_provisions_default_team` test).
+
+<!-- moon-diagnosis:superseded -->
+> **Superseded (SMA-597).** The `ciReport.json` diagnosis advice above does not work as written:
+> there is no action-level `exitCode` key, and the file carries no stdout/stderr at all. The
+> measured procedure is in CLAUDE.md between the `moon-diagnosis` markers. This document is left
+> otherwise unedited as a record of what was believed when it was written.
