@@ -241,6 +241,24 @@ jobs:
             moon run "${T[@]}"
           fi
 
+      # moon-diagnosis:ok
+      # SMA-597: ciReport.json carries the failing task's command and real exit code, and the
+      # per-task logs under states/ carry the only copy of its output. Neither survives the
+      # runner. Without this, the documented diagnosis procedure is unusable for a red CI check —
+      # the case it most needs to serve. `if: failure()` so green runs upload nothing.
+      - name: Upload moon diagnostics
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: moon-diagnostics
+          path: |
+            .moon/cache/ciReport.json
+            .moon/cache/states/**/stdout.log
+            .moon/cache/states/**/stderr.log
+            .moon/cache/states/**/lastRun.json
+          if-no-files-found: ignore
+          retention-days: 7
+
       # `.moon/tasks.yml` sets outputStyle: 'buffer-only-failure', so a test task that goes
       # green-WITH-FLAKES prints nothing at all — the only signal that the SMA-521 retry budget
       # absorbed something. Without this artifact there is no way to notice a test degrading from
