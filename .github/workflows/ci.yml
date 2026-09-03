@@ -256,7 +256,12 @@ jobs:
             .moon/cache/states/**/stdout.log
             .moon/cache/states/**/stderr.log
             .moon/cache/states/**/lastRun.json
-          if-no-files-found: ignore
+          # `.moon` is dot-prefixed and actions/upload-artifact excludes hidden files by
+          # default — see prebuild.yml:344-355 for the measured failure mode this avoids.
+          # Staging is not warranted here: we name four specific file patterns, not a whole
+          # scratch dir, so there is nothing incidental for the flag to pull in.
+          include-hidden-files: true
+          if-no-files-found: warn
           retention-days: 7
 
       # `.moon/tasks.yml` sets outputStyle: 'buffer-only-failure', so a test task that goes
