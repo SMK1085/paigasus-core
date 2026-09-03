@@ -471,6 +471,10 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   `T_AFFECTED_SMOKE_REQUIRED_INPUTS` in `ci/actionlint/run.sh`, which floors
   `ci/workflow-credentials/**/*` among `:affected-smoke`'s own inputs — without that last one
   the script pin below stays green on exactly the PR that breaks it.
+  (Correction, SMA-539: "missing any one of them reds `:affected-smoke`" overstates it —
+  `SELF_SCHEDULED_GATES` and `SELF_TASK_EXPECTED_GLOBS` validate only entries already present as
+  KEYS, so omitting either one was never self-enforcing on its own; see the `repo:ruff-ci` entry
+  below for the measurement and the partial fix.)
   `WORKFLOW_CREDENTIALS_SH_CALL_SITES` pins **five** lines in `run.sh`, and the fifth is an
   ASSERTION line: with only the flag parse, the dispatch arm and the two report lines pinned,
   deleting every `_expect` and `grep` row left all four byte-identical and the control exited 0
@@ -729,6 +733,54 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   of `libs`/`services`/`bindings`) needs a new `members` entry; adding a crate inside an existing
   one does not. A8 and A9 are the two halves of one story: A8 catches a truncated lock once it
   exists, A9 removes the thing that writes one.
+- `repo:ruff-ci` (SMA-539) lints `ci/**/*.py` against `py/pyproject.toml`'s rule set — a new `ci/`
+  Python file must pass it. It routes through `uv run --locked --project py` rather than a
+  dedicated uv project: `repo:actionlint`'s `inputs: ['**/*']` strictly supersets `repo:ruff-ci`'s,
+  so the `py` environment is materialised once per CI run regardless of which task reaches it
+  first — one lockfile therefore means one ruff version, shared with `py:lint`, with no second
+  lockfile to drift out of step. `ruff format` is deliberately NOT gated over `ci/`: MEASURED,
+  `line-length = 200` would rewrite 2,998 of ~15,600 existing lines, joining hand-wrapped lines and
+  collapsing hand-aligned fixture tables in files that are roughly 60% comment by design. The
+  corpus is derived with `git ls-files -- ':(glob)ci/**/*.py' 'ci/*.py'`, not the bare
+  `'ci/**/*.py'` alone: git matches a pathspec's `**` without `FNM_PATHNAME`, so the literal `/` is
+  still required and a top-level `ci/foo.py` would be missed — `'ci/*.py'` (its `*` spans `/`) and
+  the `:(glob)`-magic form each independently fix it, and the gate keeps both, which is mutually
+  redundant and deliberately so.
+  **Registration is six obligations, not five** — `ci.yml`'s `T=(…)` array, the CLAUDE.md
+  marker-delimited command, `SELF_SCHEDULED_GATES`, `SELF_TASK_EXPECTED_GLOBS`, a script pin
+  (`RUFF_SH_CALL_SITES`, seven lines), and `REQUIRED_REPO_TASKS` — the last because this gate
+  carries a `--negative-control`, the same reasoning that put the three `release-parity*` tasks
+  and `workflow-credentials` on that floor.
+  **This also corrects a belief this repo has been operating on.** MEASURED: `repo:affected-smoke`
+  does NOT red when a brand-new `repo:*` gate is added to `ci.yml`'s `T` array with none of the
+  other five obligations done at all. `SELF_SCHEDULED_GATES`, `SELF_TASK_EXPECTED_GLOBS` and
+  `REQUIRED_REPO_TASKS` are hand-maintained tables that validate only entries already present as
+  KEYS, and `orphan_globs` catches only the reverse direction (a key with no task) — so of the six,
+  only T-membership and the CLAUDE.md mirror were ever self-enforcing; the `workflow-credentials`
+  entry above overstated this ("missing any one of them reds `:affected-smoke`") and is corrected
+  there. SMA-539 closes part of the gap with `check_self_scheduled_coverage` in `ci_targets.py`:
+  every `repo:*` task whose resolved `script:` mentions `--self-test` or `--negative-control` must
+  now have a `SELF_SCHEDULED_GATES` entry, with a reasoned `SELF_SCHEDULED_COVERAGE_EXEMPT` table
+  that ships EMPTY. It is deliberately scoped to that ONE registry — the same treatment for
+  `SELF_TASK_EXPECTED_GLOBS` or `REQUIRED_REPO_TASKS` would red the real repo, since several tasks
+  legitimately lack those (`affected-smoke`'s own globs are pinned by check 8e instead; the three
+  `release-parity*` tasks route through `SELF_TASK_GLOBS_EXEMPT`).
+- `repo:actionlint` now runs shellcheck over every workflow `run:` block, sourced from
+  `shellcheck-py` pinned in `py/uv.lock` (bounded specifier `>=0.11.0.1,<0.12`), resolved via
+  `uv run --locked --project py` and asserted with `[ -x ]`. It FAILS CLOSED at rc 2 — there is
+  deliberately no fallback to whatever `shellcheck` a host happens to have, the silent-downgrade
+  failure SMA-525 refused. shellcheck's own GitHub release ships 13 platform archives and no
+  checksums asset (re-measured 2026-09-02), which is why it is not a proto plugin; three of
+  `shellcheck-py`'s pinned digests were verified by hand against koalaman's release assets, and a
+  version bump re-opens that check.
+  **Coverage limit, stated plainly so "the inline bash is linted now" isn't read as more than it
+  is.** MEASURED: actionlint replaces `${{ }}` expressions with inert placeholders before handing
+  the script to shellcheck. `rm -rf $TARGET` fires `SC2086`; the structurally identical
+  `rm -rf ${{ github.event.inputs.target }}` fires nothing. So the entire GitHub-expression
+  interpolation class — the dominant quoting/injection hazard in `release.yml` and `wheels.yml` —
+  is uncovered by this gate. zizmor is the tool for that class and runs nowhere in this repo. Also
+  structural, not a configuration gap: `SC2148` and `SC2164` can never fire, because actionlint
+  supplies the shell itself and injects `set -e`.
 
 ## Workflow
 
