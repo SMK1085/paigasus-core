@@ -5189,8 +5189,12 @@ done < <(cargo_lock_script_verdict ci/cargo-lock-integrity/run.sh)
 # impostor's path at exit 0. `sys.prefix` under `uv run --project py` IS `py/.venv` (measured),
 # so requiring the resolved path to live under it is a same-process check no outer-PATH
 # manipulation can spoof — a host binary now routes to `infra` (rc 2) instead of a silent pass.
+# Containment is COMPONENT-WISE (`is_relative_to` on resolved paths), not a string prefix.
+# `p.startswith(sys.prefix)` accepts a SIBLING directory — `py/.venv-host/bin/shellcheck` starts with
+# `py/.venv` and is outside it (MEASURED: startswith True, is_relative_to False). Resolving both
+# sides also means a symlinked venv compares by its real location rather than by spelling.
 SHELLCHECK_BIN="$(uv run --locked --project py python3 -c \
-  'import shutil, sys; p = shutil.which("shellcheck"); sys.exit(1) if not p or not p.startswith(sys.prefix) else print(p)')" \
+  'import pathlib, shutil, sys; p = shutil.which("shellcheck"); sys.exit(1) if not p or not pathlib.Path(p).resolve().is_relative_to(pathlib.Path(sys.prefix).resolve()) else print(p)')" \
   || infra "could not resolve shellcheck via 'uv run --locked --project py' — run 'uv sync --project py'"
 [ -x "$SHELLCHECK_BIN" ] || infra "resolved shellcheck is not executable: $SHELLCHECK_BIN"
 ARGS+=("-shellcheck=$SHELLCHECK_BIN")

@@ -65,10 +65,14 @@ ruff_corpus() {
 # `sys.prefix` under `uv run --project py` IS `py/.venv` (measured), so requiring the resolved
 # path to live under it is a same-process check that no amount of outer-PATH manipulation can
 # spoof — a host binary now routes to `die_infra` (rc 2) instead of a silent pass.
+# Containment is COMPONENT-WISE (`is_relative_to` on resolved paths), not a string prefix.
+# `p.startswith(sys.prefix)` accepts a SIBLING directory — `py/.venv-host/bin/ruff` starts with
+# `py/.venv` and is outside it (MEASURED: startswith True, is_relative_to False). Resolving both
+# sides also means a symlinked venv compares by its real location rather than by spelling.
 resolve_ruff() {
   local p
   p="$(uv run --locked --project py python3 -c \
-    'import shutil, sys; p = shutil.which("ruff"); sys.exit(1) if not p or not p.startswith(sys.prefix) else print(p)')" \
+    'import pathlib, shutil, sys; p = shutil.which("ruff"); sys.exit(1) if not p or not pathlib.Path(p).resolve().is_relative_to(pathlib.Path(sys.prefix).resolve()) else print(p)')" \
     || die_infra "could not resolve ruff via 'uv run --locked --project py' — run 'uv sync --project py'"
   [ -x "$p" ] || die_infra "resolved ruff is not executable: $p"
   printf '%s' "$p"
