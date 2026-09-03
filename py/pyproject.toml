@@ -27,6 +27,18 @@ ignore = ["E501"]
 
 [tool.pytest.ini_options]
 testpaths = ["packages/*/tests"]
+# Promote pytest's config-time warnings to errors so a TOTAL loss of packages/*/tests fails
+# loudly at config time, naming testpaths, instead of exiting 5 because the recursive fallback
+# happened to find nothing (SMA-610, measured: exit 5 -> exit 1). This does NOT cover PARTIAL
+# loss -- pytest emits no warning at all when the glob still matches something, measured -- which
+# is what scripts/assert_test_floor.py exists for.
+#
+# This promotes SEVEN emission sites in pytest 9.1.1, not one (config/__init__.py:563, :1431,
+# :1506, :1613, :2058, :2065, :2235/:2244). Two carry real collateral and are accepted
+# deliberately: :1506 makes `Unknown config option: X` a hard error for the whole py workspace
+# AND for the scoped paigasus-kernel-py:test, which reads this same inipath; :2065 turns a
+# self-skipping third-party plugin into a hard failure. A pytest bump re-opens that measurement.
+filterwarnings = ["error::pytest.PytestConfigWarning"]
 markers = [
   "integration: integration tests that may hit real infrastructure",
   "slow: tests that take more than 1s",
