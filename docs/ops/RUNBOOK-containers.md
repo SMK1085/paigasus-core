@@ -261,6 +261,15 @@ build itself — they bite the first operator who deploys without reading this s
   the gateway's is the OpenAI egress client's, while the gRPC, NATS and Redis links each build
   their own TLS config and never consult it.
 
+  **Reading a CA-bundle boot failure.** All four failure modes name the config key. A bundle whose
+  PEM decodes as base64 but is not valid DER is the subtle one — it passes the PEM parse and fails
+  only when the TLS client is built, so boot reports it against the config key rather than against
+  the platform trust store. If instead you see *"a control client built WITHOUT ... also failed,
+  so the platform trust store contains no parseable certificates"*, the store is the primary
+  fault: fix it first, then re-check the bundle, which may also be invalid. The plain *"this can
+  also mean the platform trust store contains no parseable certificates"* wording appears only
+  when no bundle is configured at all.
+
   **A self-signed *leaf* works too.** rustls applies no `cA` check to a trust anchor, so an IdP
   presenting a bare self-signed certificate validates once that certificate's own PEM is in the
   bundle — no `accept_invalid_tls` needed. A small private CA is still the tidier posture once
