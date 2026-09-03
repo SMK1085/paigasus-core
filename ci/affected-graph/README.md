@@ -298,24 +298,32 @@ It also runs several checks that the per-case project sets structurally **cannot
   entries); and
   `ci/release-parity/run.sh`'s own `--negative-control` logic — the flag parse, the guard,
   the assertion and the two report arms (`RELEASE_PARITY_SH_CALL_SITES`, whole-line-matched
-  — SMA-530); **C5** every
-  `moon ci` invocation in `ci.yml` is handed the WHOLE array — C1-C4 assert what is *in* `T`,
-  and a subsetted `"${T[@]:0:5}"` leaves all four green while switching most of the graph
-  off; **C6** (SMA-592) `contracts:generate`'s authored `inputs` still equal
+  — SMA-530); **C6** (SMA-592) `contracts:generate`'s authored `inputs` still equal
   `CONTRACTS_GENERATE_INPUTS` exactly — strict equality, both moon input buckets, the injected
   `.moon/*` glob filtered first. That task is not a `repo:*` task, so C1 and C2 never look at it,
   but `ci.yml`'s codegen-drift step delegates its freshness to that task's cache key: the step
   runs `moon run contracts:generate` and diffs the three generated dirs, so an input dropped from
   the task makes the step regenerate nothing and diff the committed output against itself — a
   vacuous PASS. Exact equality, not containment: an edit to how the repo's codegen is keyed
-  should stop a human, and the constant is cheap to update deliberately. C5's line matcher is
-  deliberately BROADER than
-  `assert_include_relations`' `moon ci +"` grep: mirroring it left both blind to a subsetted array
-  behind a leading flag (`moon ci --base origin/main "${T[@]:0:5}"`). `moon ci` exits **0** on a target that resolves to nothing —
+  should stop a human, and the constant is cheap to update deliberately. `moon ci` exits **0** on a target that resolves to nothing —
   measured, including the mixed case — so without C2 a renamed or mistyped entry is a silent no-op
   on every PR. Standalone cost is ~2.5s wall-clock (measured, mostly `moon query` subprocess
   startup, not CPU) — cheap enough to run inline inside `repo:affected-smoke` rather than justify a
   dedicated Moon task.
+
+  > **C5** the `moon ci` branch block in `ci.yml` matches `MOON_CI_BRANCH_BLOCK` verbatim — eight
+  > lines, indentation included — beginning immediately after the sole `T=(…)` line, and the file
+  > carries exactly two command-position `moon ci` lines. Exact literals replaced a regex-based
+  > shape rule in SMA-554, after that rule was bypassed four times during SMA-541's own review;
+  > an exact comparison has no tail to enumerate. The anchor closes the decoy case: a verbatim copy
+  > pasted elsewhere cannot bring its own `T=` line, because `parse_t` rejects a second one.
+  >
+  > C5 is a **second opinion, not the primary guard**. `ci/actionlint/run.sh`'s check 8b already
+  > pins the same three invocation lines as exact literals, and check 8d **executes** the block
+  > against a stubbed `moon` on four GitHub event paths — which is the only control that sees a
+  > step-level `if: false` or an `if false; then … fi` wrap, since both leave every line
+  > byte-identical. C5's value is that it is scheduled independently of `repo:actionlint`. Editing
+  > those eight lines therefore has **four** co-update sites; C5's failure message lists them all.
 
   Maintenance: adding a `repo:*` task means adding `:<name>` to `T` **and** to the command between
   `<!-- ci-targets:begin -->` / `<!-- ci-targets:end -->` in CLAUDE.md. A task that must stay out of

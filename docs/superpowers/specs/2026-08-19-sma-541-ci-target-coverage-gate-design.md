@@ -254,6 +254,14 @@ mitigation, not a closure — deleting the `assert_ci_targets` call removes C4 a
   the first divergence by position and prints both lists.
 - **C4 — self-invocation (D13).** `run.sh` contains both the `assert_ci_targets` call and the
   `--self-test` call.
+> **Superseded by [SMA-554](https://linear.app/smaschek/issue/SMA-554) (2026-09-03).** The line
+> matcher described below was replaced by an exact-literal, anchored block pin
+> (`MOON_CI_BRANCH_BLOCK`). The reasoning is kept verbatim because it records *why* pattern
+> matching was tried and how each of its four bypasses was found — that history is the evidence
+> for the replacement. One decision below is explicitly reversed: "argument order is not the
+> property worth pinning" no longer holds, and SMA-554 E3 records that `repo:actionlint`'s check
+> 8b already behaved the new way when this was written.
+
 - **C5 — invocation shape.** Every `moon ci` invocation in `ci.yml` is handed the whole array
   (`"${T[@]}"` appears on the line). C1-C4 assert `T`'s *contents*; none of them asserts `T` is what
   `moon ci` actually receives. Rewriting the call to `moon ci "${T[@]:0:5}"` keeps `T` perfectly
@@ -365,6 +373,10 @@ exists to close (the first implementation shipped an `options`/rc-2 row with no 
 | an input file that raises `PermissionError` | **rc 2** — the other half of that split |
 | everything aligned | **green** — catches a permanently-red harness |
 
+> **SMA-554:** the last two rows now read *C5 red* rather than green — reordered-but-canonical and
+> multi-space-intact invocations are red under an exact literal. See SMA-554 E3 for why that costs
+> less than it reads.
+
 The three `MoonOutputError` raises are reachable from fixtures because the shape rules live in a
 pure `_eligibility(projects)` that `moon_tasks()` wraps with the subprocess and `json.loads` — the
 same split `cargo_moon_parity.py` uses to fixture its own infra raise. The two `read_input` rows
@@ -434,6 +446,11 @@ README, since D1 rejects a standalone task partly on cost grounds.
   some other command has not been added alongside it that does the real work. The workflow's own
   structure — `if` branches, `continue-on-error`, a step-level `if: false` — is outside this gate;
   `repo:actionlint` is the gate that reads workflow structure.
+
+  **Still open after SMA-554** — and load-bearing, so do not read the exact-literal pin as closing
+  it. A step-level `if: ${{ false }}` leaves all eight pinned lines byte-identical and the
+  invocation count at 2, so neither of C5's assertions can see it. `repo:actionlint`'s check 8d is
+  the control that does, by executing the block; see L12 in `ci/actionlint/README.md`.
 - **L11 — `internal: true` is a second way to switch a gate off, and C1 is blind to it.** Per E3,
   `moon query tasks` omits an internal task entirely, so the forward comparison never considers it
   and reports nothing. C2 catches the resulting dead `T` entry, but only incidentally — the entry is
