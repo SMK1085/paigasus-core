@@ -12,12 +12,10 @@ orchestrated by [Moon](https://moonrepo.dev).
   workspace venv on the project's Python, whether invoked directly or via Moon.
 - `packages/*` — one package per bounded context; each is a uv workspace member and a Moon project
   (id `paigasus-<name>-py`, suffixed to avoid colliding with the same-named Rust crates):
-  - `paigasus-proto` — generated protobuf types (post-MVP).
-  - `paigasus-kernel` — thin re-export wrapper over the PyO3 binding (post-MVP).
+  - `paigasus-proto` — generated protobuf types.
+  - `paigasus-kernel` — thin re-export wrapper over the PyO3 binding.
   - `paigasus-ml` — ML lifecycle code.
   - `paigasus-workflows` — Python-native workflows.
-- `conftest.py` — keeps `pytest` green on the empty workspace (0 tests collected); removed once
-  real tests land (SMA-379).
 
 ## Commands
 
@@ -39,4 +37,5 @@ Notes:
   codegen pipelines; `reportMissingTypeStubs = "warning"` is for third-party ML libraries, not a
   license to skip first-party stubs.
 
-**Status:** workspace bootstrapped in SMA-358; packages are empty stubs.
+**Status:** workspace bootstrapped in SMA-358. `paigasus-proto` and `paigasus-kernel` ship code
+and test suites; `paigasus-ml` and `paigasus-workflows` are still empty stubs.
