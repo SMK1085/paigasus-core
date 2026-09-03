@@ -664,12 +664,13 @@ tasks:
     # ~17-19s figure predated the eleventh self-test AND the moon 2.3.2 -> 2.5.3 bump (SMA-595)
     # under this branch, so it is treated as an unusable baseline, not a value this re-measurement
     # is compared against: six actionlint invocations — one over the real workflows, five stdin
-    # fixtures — and THIRTEEN fixture tables (extractor,
+    # fixtures — and FOURTEEN fixture tables (extractor,
     # path-filter verdicts, branch-filter verdicts, config allowlist, ci-target floor, invocation
     # allowlist, affected-graph wiring, block execution, kill predicate, affected-smoke block,
-    # release guard, cargo-lock step, release plan). The list said eleven until SMA-603 corrected
-    # it: SMA-601 added the twelfth (`cargo_lock_step_self_test`) and SMA-603 the thirteenth
-    # (`release_plan_self_test`), and neither updated this count.
+    # release guard, cargo-lock step, release plan, doc-diagnosis). The list said eleven until
+    # SMA-603 corrected it: SMA-601 added the twelfth (`cargo_lock_step_self_test`) and SMA-603
+    # the thirteenth (`release_plan_self_test`), and SMA-597 the fourteenth
+    # (`doc_diagnosis_self_test`, check 12).
     # TWO DIFFERENT `git ls-files` counts, for two different walks, are worth keeping distinct
     # rather than merging into one number (measured via `bash -x`, CodeRabbit PR 150 finding F2 —
     # a merged "26" here previously read as the SAME walk check 9 re-runs, when it is not): the
@@ -682,11 +683,11 @@ tasks:
     # 9's mutation battery re-runs the SECOND of those — the whole of `--self-test`, 9
     # `git ls-files` calls included — PLUS check 8d's own dynamic execution of the
     # moon-ci-affected-graph step's `run:` block against a stubbed `moon`, once per event path, all
-    # once per self-test invocation plus once unmutated, FOURTEEN concurrent subprocesses
-    # (thirteen mutants — check 9 builds one per `$SELF_TEST_COUNT` invocation — plus the
+    # once per self-test invocation plus once unmutated, FIFTEEN concurrent subprocesses
+    # (fourteen mutants — check 9 builds one per `$SELF_TEST_COUNT` invocation — plus the
     # unmutated control; the figure read twelve until SMA-603 corrected it for SMA-601's and
-    # SMA-603's own tables). That dynamic
-    # execution is most of check 8d's OWN standalone cost (~1.5s of the ~2.01s -> ~3.52s
+    # SMA-603's own tables, and thirteen until SMA-597 corrected it again for check 12). That
+    # dynamic execution is most of check 8d's OWN standalone cost (~1.5s of the ~2.01s -> ~3.52s
     # `--self-test` jump): each of the EIGHT fixtures that reach the per-event-path loop (the
     # healthy control, the if-false mutant, two healthy rechecks, the subset mutant, the
     # branch-swap mutant, the duplicate-invocation mutant, and the final aggregate re-run — every
