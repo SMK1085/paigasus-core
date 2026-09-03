@@ -33,9 +33,24 @@ tasks:
     # output, which fails on real type errors. Second run: --outputjson piped to the coverage
     # guard, which fails if basedpyright analyzed fewer files than the source tree contains --
     # so an include/layout regression can't silently re-darken the gate, totally or partially
-    # (SMA-436). If the first run fails, the && short-circuits before the guard runs; otherwise the
-    # guard is the last command in the pipe, so its exit status is the pipeline's.
-    script: 'uv run basedpyright && uv run basedpyright --outputjson | uv run python scripts/assert_typecheck_coverage.py'
+    # (SMA-436).
+    #
+    # `set -euo pipefail` is REQUIRED (SMA-610). Moon does not enable errexit for `script:` blocks
+    # and a pipeline's status is its LAST command's -- moon.yml:68-74 documents the same trap, and
+    # every repo:* gate with a script block carries this line. Without it the SECOND basedpyright's
+    # exit status is discarded and the guard's alone decides. MEASURED: a producer that emits valid,
+    # sufficient JSON and still exits 3 yields pipeline exit 0 without pipefail and 3 with it.
+    #
+    # No live false green is known here today, and the claim is deliberately not made: the guard
+    # parses JSON, so a truncated or empty stream fails json.loads and returns EXIT_UNREADABLE (2),
+    # which is truncation-intolerant by construction -- measured. This line removes the dependence
+    # on that happy accident, so a future guard made tolerant of partial JSON cannot silently open
+    # the hole. `command` is not an option here: this task genuinely chains two steps, and unlike
+    # py:test it needs no passthrough.
+    script: |
+      set -euo pipefail
+      uv run basedpyright
+      uv run basedpyright --outputjson | uv run python scripts/assert_typecheck_coverage.py
     inputs: ['@group(sources)', '@group(tests)', 'pyproject.toml', '/py/uv.lock', 'scripts/**']
   test:
     # `command` (not `script`) deliberately: Moon forwards `moon run py:test -- -k foo` to a

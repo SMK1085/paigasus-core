@@ -301,9 +301,13 @@ AC 3 of the issue is therefore satisfied vacuously — no `repo:*` gate is added
   come back as `packages/paigasus-kernel/tests/...` — so a py-root conftest is loaded there too and
   a floor hook would red that task. Avoiding it needs a condition that silently no-ops the guard
   when it mis-evaluates.
-* Fixing the identical missing `pipefail` in `py:typecheck` (`.moon/tasks/python.yml:38`). Real, and
-  the same trap, but pre-existing and independent — it belongs in its own issue rather than riding
-  a floor PR.
+* ~~Fixing the identical missing `pipefail` in `py:typecheck` (`.moon/tasks/python.yml:38`).~~
+  **Amended after review:** folded into this PR at the reviewer's direction. Measured while doing
+  so — a producer emitting valid, sufficient JSON while exiting 3 gives pipeline exit 0 without
+  `pipefail` and 3 with it — but **no live false green is claimed**: `assert_typecheck_coverage.py`
+  parses JSON, so a truncated or empty stream already fails `json.loads` and returns
+  `EXIT_UNREADABLE`. The line removes the dependence on that happy accident rather than closing a
+  demonstrated hole.
 * Adding tests to `paigasus-ml` or `paigasus-workflows`.
 
 ## Acceptance criteria
