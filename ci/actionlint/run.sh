@@ -4694,6 +4694,14 @@ claude_md_block_verdict() {
   le="$(grep -n 'moon-diagnosis:end' "$file" | cut -d: -f1)"
   if [ "$lb" -ge "$le" ]; then echo "marker-order"; return; fi
 
+  # ADJACENT MARKERS, handled before the sed. With nothing between them, `$((lb+1)),$((le-1))p`
+  # is an INVERTED range, and sed prints its addr1 line rather than nothing — so the end marker
+  # itself lands in $block, the emptiness test below never fires, and a deleted procedure is
+  # reported as five missing-literal rows instead of the one empty-block row the caller is told
+  # to expect. MEASURED on the SMA-597 acceptance probe (the whole block removed by regex);
+  # sed behaves this way on BSD and GNU alike, so it is not a macOS-only quirk.
+  if [ "$le" -le "$((lb + 1))" ]; then echo "empty-block"; return; fi
+
   block="$(sed -n "$((lb + 1)),$((le - 1))p" "$file")"
   if [ -z "$(printf '%s' "$block" | tr -d '[:space:]')" ]; then echo "empty-block"; return; fi
 
@@ -4782,6 +4790,13 @@ more prose"
   printf '<!-- moon-diagnosis:begin -->\n   \n<!-- moon-diagnosis:end -->\n' > "$tmpd/empty.md"
   got="$(claude_md_block_verdict "$tmpd/empty.md")"
   expect_doc 'a whitespace-only block fires' 'empty-block'
+
+  # Nothing between the markers at all — the shape a deleted procedure actually leaves, and a
+  # DIFFERENT code path from the whitespace-only case above: see the inverted-range guard in
+  # claude_md_block_verdict. Without it this reported five missing-literal rows (MEASURED).
+  printf '<!-- moon-diagnosis:begin -->\n<!-- moon-diagnosis:end -->\n' > "$tmpd/adjacent.md"
+  got="$(claude_md_block_verdict "$tmpd/adjacent.md")"
+  expect_doc 'markers with nothing between them fire' 'empty-block'
 
   # Each required literal deleted in turn — driven from the array, so a sixth entry is covered
   # automatically rather than needing a new fixture.
@@ -5761,6 +5776,82 @@ elif [ "$rp_rc" -ne 0 ]; then
       documented statuses (0 clean, 1 repo wrong, 2 infra). This file is 'set -uo pipefail' with
       NO -e, so an unrouted status would finish the gate rc 0 having asserted nothing."
 fi
+
+# ---------------------------------------------------------------------------------------------
+# Check 12 — the ciReport corpus freeze and the CLAUDE.md procedure block (SMA-597). Runs here,
+# not in --self-test, because it reads the real tracked tree, like checks 5/6/10/11.
+#
+# THE ARITY FLOORS ARE PART OF THE CHECK. doc_diagnosis_verdict iterates a corpus, so an EMPTY
+# corpus emits zero rows and the gate passes having asserted nothing — `∅ ⊆ allowlist`. That is
+# the same class ci_targets.py records as MEASURED for check 8e's emptied table, and the subset
+# rule (deliberate: the corpus should only ever shrink) removes the control that would otherwise
+# catch it. `infra`, not `fail`: a corpus that vanished is a broken gate, not a clean repo.
+#
+# `-ge 60` rather than `-eq 67` so genuine cleanup of a handful of documents needs no re-baseline.
+#
+# CORPUS COMMAND: unfiltered `git ls-files`, no pathspec. `git ls-files -- 'docs/**/*.md'` matches
+# ZERO top-level docs/*.md files — git matches `**` without FNM_PATHNAME, so the literal `/` is
+# still required (MEASURED: docs/dev-setup.md is tracked and unmatched). CLAUDE.md records the
+# same trap for repo:ruff-ci's corpus. Scanning the whole tracked tree has no pathspec to get
+# wrong and closes the docs/anything.md bypass at the same time. It reads the INDEX, so a file
+# written but not yet `git add`ed is invisible — a local run can be green where CI is red.
+#
+# COLUMN 0 for the two floors and the read loop: ACTIONLINT_SH_CALL_SITES matches with no leading
+# whitespace, so indenting any of them reds that pin rather than silently satisfying it.
+# ---------------------------------------------------------------------------------------------
+DD_LIST="$(mktemp)"
+git ls-files -z | xargs -0 grep -l 'ciReport' 2>/dev/null | sort > "$DD_LIST" || true
+DD_N="$(wc -l < "$DD_LIST" | tr -d '[:space:]')"
+
+[ "$DD_N" -ge 60 ] || infra "check 12: the corpus command found $DD_N files carrying the token, expected at least 60 — it has probably stopped matching, and an empty corpus would pass this check having asserted nothing"
+[ "${#DOC_DIAGNOSIS_REQUIRED_LITERALS[@]}" -ge 5 ] || infra "check 12: DOC_DIAGNOSIS_REQUIRED_LITERALS has ${#DOC_DIAGNOSIS_REQUIRED_LITERALS[@]} entries, expected at least 5"
+
+while IFS= read -r verdict; do
+  case "$verdict" in
+    '') ;;
+    no-list)
+      infra "check 12: could not build the corpus list — git ls-files failed." ;;
+    unmarked-mention\ *)
+      fail "check 12: ${verdict#unmarked-mention } mentions ciReport.json but carries neither
+      <!-- moon-diagnosis:superseded --> nor <!-- moon-diagnosis:ok -->, and is not in
+      CIREPORT_MENTIONS_ALLOWED. If it reproduces the broken advice (no action-level exitCode; the
+      file has no stdout/stderr), fix it against CLAUDE.md's moon-diagnosis block. If it is a
+      correct reference, add the :ok marker. If it is a historical record, add :superseded." ;;
+    blank-reason\ *)
+      fail "check 12: the CIREPORT_MENTIONS_ALLOWED entry for ${verdict#blank-reason } has an
+      empty reason. An unexplained waiver is not a waiver." ;;
+    stale-allowlist\ *)
+      echo "actionlint gate: check 12 NOTE: CIREPORT_MENTIONS_ALLOWED names ${verdict#stale-allowlist }, which is gone or no longer carries the token — drop the row." >&2 ;;
+    *)
+      infra "check 12: unrecognised verdict '$verdict'" ;;
+  esac
+done < <(doc_diagnosis_verdict "$DD_LIST")
+
+rm -f "$DD_LIST"
+
+while IFS= read -r verdict; do
+  case "$verdict" in
+    '') ;;
+    no-file)
+      fail "check 12: CLAUDE.md does not exist or is unreadable, so the corrected diagnosis
+      procedure cannot be confirmed present." ;;
+    marker-count\ *)
+      fail "check 12: CLAUDE.md has the wrong number of moon-diagnosis markers ($verdict).
+      Exactly one begin and one end are required — a second copy anywhere in the file, even
+      inside backticks in prose, breaks this the same way it breaks ci-targets." ;;
+    marker-order)
+      fail "check 12: CLAUDE.md's moon-diagnosis:end precedes its begin." ;;
+    empty-block)
+      fail "check 12: CLAUDE.md's moon-diagnosis block is empty. Deleting the procedure would
+      switch off the correction this gate exists to protect." ;;
+    missing-literal\ *)
+      fail "check 12: CLAUDE.md's moon-diagnosis block no longer contains
+      '${verdict#missing-literal }'. Every entry in DOC_DIAGNOSIS_REQUIRED_LITERALS is a
+      load-bearing element of the measured procedure." ;;
+    *)
+      infra "check 12: unrecognised block verdict '$verdict'" ;;
+  esac
+done < <(claude_md_block_verdict CLAUDE.md)
 
 selftest_mutation_battery
 
