@@ -53,7 +53,6 @@ pub struct TickReport {
     pub oldest_unpublished_age_secs: Option<i64>,
 }
 
-
 /// Byte bound on a stored `last_error` (SMA-469). Deliberately a BYTE bound, not a char count:
 /// 1024 four-byte chars would be 4KB, past Postgres's ~2KB TOAST threshold, so a pathological
 /// publisher error string could bloat the row it is meant to describe.
@@ -432,7 +431,6 @@ mod tests {
         assert_eq!(ev.payload, serde_json::json!({"kind": "user"}));
         assert_eq!(ev.correlation_id, row.correlation_id);
     }
-
 
     #[test]
     fn truncate_error_leaves_a_short_string_untouched() {

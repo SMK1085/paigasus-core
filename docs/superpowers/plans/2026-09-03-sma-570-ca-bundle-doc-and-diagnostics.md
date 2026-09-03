@@ -21,6 +21,12 @@
 - Narrowing phrase, used verbatim at every site: **"for every request this client makes, to any host it reaches"**. Never narrow to "the IdP connection" — that under-claims (the client follows redirects and dials whatever `jwks_uri` names).
 - Every "ROOTS ONLY" / unconstrained-anchor warning stays. Only the *scope* changes.
 - Run all cargo commands with `export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"` first.
+- **Run cargo from `rs/`, never from the worktree root with `--manifest-path`.** rustup reads
+  `rust-toolchain.toml` from the **current working directory**, so a `--manifest-path rs/Cargo.toml`
+  invocation launched at the root silently resolves the host default toolchain (measured: rustc
+  1.98.0) instead of the pinned `channel = "1.95.0"`. That yields phantom clippy findings from
+  lints that do not exist in 1.95, and is the same build-vs-lint skew SMA-389 recorded. `moon ci`
+  is the exception — it runs from the repo root.
 
 ---
 
@@ -198,7 +204,8 @@ Expected: `1` for each of the four files.
 
 ```bash
 export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
-cargo check --manifest-path rs/Cargo.toml -p paigasus-iam -p paigasus-gateway
+cd rs   # MANDATORY: rustup reads rust-toolchain.toml from the CWD, not from --manifest-path
+cargo check -p paigasus-iam -p paigasus-gateway
 ```
 
 Expected: `Finished`, no warnings (the workspace sets `warnings = "deny"`).
@@ -325,7 +332,8 @@ Leave the call site at `relay.rs:198` untouched.
 
 ```bash
 export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
-cargo nextest run --manifest-path rs/Cargo.toml -p paigasus-iam --lib -E 'test(describe_error)'
+cd rs   # MANDATORY: rustup reads rust-toolchain.toml from the CWD, not from --manifest-path
+cargo nextest run -p paigasus-iam --lib -E 'test(describe_error)'
 ```
 
 Expected: PASS, **2 tests run**. If it reports 0 tests, the move dropped them — go back to Step 1.
@@ -334,7 +342,8 @@ Expected: PASS, **2 tests run**. If it reports 0 tests, the move dropped them �
 
 ```bash
 export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
-cargo clippy --manifest-path rs/Cargo.toml -p paigasus-iam --all-targets -- -D warnings
+cd rs   # MANDATORY: rustup reads rust-toolchain.toml from the CWD, not from --manifest-path
+cargo clippy -p paigasus-iam --all-targets -- -D warnings
 ```
 
 Expected: `Finished`, no warnings. A leftover unused import in relay.rs fails here.
@@ -465,7 +474,8 @@ Add to `mod tests` in `jwks.rs`, after the existing `undecodable_bundle_is_a_boo
 
 ```bash
 export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
-cargo nextest run --manifest-path rs/Cargo.toml -p paigasus-iam --lib -E 'test(attribution) or test(der_invalid) or test(no_bundle_message)'
+cd rs   # MANDATORY: rustup reads rust-toolchain.toml from the CWD, not from --manifest-path
+cargo nextest run -p paigasus-iam --lib -E 'test(attribution) or test(der_invalid) or test(no_bundle_message)'
 ```
 
 Expected: FAIL to **compile**, with `cannot find function attribute_build_failure`,
@@ -607,7 +617,8 @@ memory; leave the existing lines in place.
 
 ```bash
 export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
-cargo nextest run --manifest-path rs/Cargo.toml -p paigasus-iam --lib -E 'test(attribution) or test(der_invalid) or test(no_bundle_message)'
+cd rs   # MANDATORY: rustup reads rust-toolchain.toml from the CWD, not from --manifest-path
+cargo nextest run -p paigasus-iam --lib -E 'test(attribution) or test(der_invalid) or test(no_bundle_message)'
 ```
 
 Expected: PASS, 6 tests.
@@ -616,7 +627,8 @@ Expected: PASS, 6 tests.
 
 ```bash
 export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
-cargo nextest run --manifest-path rs/Cargo.toml -p paigasus-iam --lib -E 'test(bundle) or test(accept_invalid)'
+cd rs   # MANDATORY: rustup reads rust-toolchain.toml from the CWD, not from --manifest-path
+cargo nextest run -p paigasus-iam --lib -E 'test(bundle) or test(accept_invalid)'
 ```
 
 Expected: PASS. `missing_bundle_path_is_a_boot_error`, `certificate_free_bundle_is_a_boot_error`,
@@ -627,7 +639,8 @@ be there and green — they cover paths this change does not touch.
 
 ```bash
 export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
-cargo clippy --manifest-path rs/Cargo.toml -p paigasus-iam --all-targets -- -D warnings
+cd rs   # MANDATORY: rustup reads rust-toolchain.toml from the CWD, not from --manifest-path
+cargo clippy -p paigasus-iam --all-targets -- -D warnings
 ```
 
 Expected: `Finished`, no warnings.
@@ -766,7 +779,8 @@ Add to `mod tests` in `client.rs`, after `undecodable_ca_bundle_is_a_build_error
 
 ```bash
 export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
-cargo nextest run --manifest-path rs/Cargo.toml -p paigasus-gateway --lib -E 'test(attribution) or test(der_invalid) or test(build_variant)'
+cd rs   # MANDATORY: rustup reads rust-toolchain.toml from the CWD, not from --manifest-path
+cargo nextest run -p paigasus-gateway --lib -E 'test(attribution) or test(der_invalid) or test(build_variant)'
 ```
 
 Expected: FAIL to compile — `cannot find function attribute_build_failure`, `cannot find type
@@ -910,7 +924,8 @@ Keep the existing bundle-loading block byte-for-byte — do not retype it.
 
 ```bash
 export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
-cargo nextest run --manifest-path rs/Cargo.toml -p paigasus-gateway --lib -E 'test(attribution) or test(der_invalid) or test(build_variant)'
+cd rs   # MANDATORY: rustup reads rust-toolchain.toml from the CWD, not from --manifest-path
+cargo nextest run -p paigasus-gateway --lib -E 'test(attribution) or test(der_invalid) or test(build_variant)'
 ```
 
 Expected: PASS, 6 tests.
@@ -919,7 +934,8 @@ Expected: PASS, 6 tests.
 
 ```bash
 export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
-cargo nextest run --manifest-path rs/Cargo.toml -p paigasus-gateway
+cd rs   # MANDATORY: rustup reads rust-toolchain.toml from the CWD, not from --manifest-path
+cargo nextest run -p paigasus-gateway
 ```
 
 Expected: PASS. In particular `undecodable_ca_bundle_is_a_build_error`,
@@ -931,7 +947,8 @@ Expected: PASS. In particular `undecodable_ca_bundle_is_a_build_error`,
 
 ```bash
 export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
-cargo clippy --manifest-path rs/Cargo.toml -p paigasus-gateway --all-targets -- -D warnings
+cd rs   # MANDATORY: rustup reads rust-toolchain.toml from the CWD, not from --manifest-path
+cargo clippy -p paigasus-gateway --all-targets -- -D warnings
 ```
 
 Expected: `Finished`, no warnings.
@@ -991,7 +1008,8 @@ the code, not the other way round.
 
 ```bash
 export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
-cargo fmt --manifest-path rs/Cargo.toml --all
+cd rs   # MANDATORY: rustup reads rust-toolchain.toml from the CWD, not from --manifest-path
+cargo fmt --all
 git diff --stat
 ```
 
@@ -1001,7 +1019,8 @@ Expected: either no diff, or formatting-only changes to the two files touched. R
 
 ```bash
 export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
-env -u CI PAIGASUS_SKIP_DOCKER=1 cargo nextest run --manifest-path rs/Cargo.toml -p paigasus-iam -p paigasus-gateway --no-tests=pass
+cd rs   # MANDATORY: rustup reads rust-toolchain.toml from the CWD, not from --manifest-path
+env -u CI PAIGASUS_SKIP_DOCKER=1 cargo nextest run -p paigasus-iam -p paigasus-gateway --no-tests=pass
 ```
 
 Expected: PASS. `PAIGASUS_SKIP_DOCKER=1` is used because this change touches no Docker-backed
@@ -1012,8 +1031,9 @@ presence-based, not value-based. Note this leaves a cached PASS — Step 6 force
 
 ```bash
 export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
-cargo fmt --manifest-path rs/Cargo.toml --all --check
-cargo clippy --manifest-path rs/Cargo.toml --workspace --all-targets -- -D warnings
+cd rs   # MANDATORY: rustup reads rust-toolchain.toml from the CWD, not from --manifest-path
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
 ```
 
 Expected: both clean.
@@ -1047,10 +1067,11 @@ Expected: PASS. Two notes from CLAUDE.md that apply here:
 grep -rn "process makes" rs/crates/services docs/ops/RUNBOOK-containers.md    # expect: no output
 # AC2/AC3 — the new tests exist and pass in both services
 export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
-cargo nextest run --manifest-path rs/Cargo.toml -p paigasus-iam -p paigasus-gateway \
+cd rs   # MANDATORY: rustup reads rust-toolchain.toml from the CWD, not from --manifest-path
+cargo nextest run -p paigasus-iam -p paigasus-gateway \
   --lib -E 'test(der_invalid)'                                                # expect: 4 tests, PASS
 # AC4 — the unchanged-message assertions
-cargo nextest run --manifest-path rs/Cargo.toml -p paigasus-iam -p paigasus-gateway \
+cargo nextest run -p paigasus-iam -p paigasus-gateway \
   --lib -E 'test(byte_unchanged)'                                             # expect: 2 tests, PASS
 ```
 

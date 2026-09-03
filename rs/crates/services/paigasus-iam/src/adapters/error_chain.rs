@@ -26,6 +26,9 @@ mod tests {
     use super::*;
     use paigasus_iam_core::PublishError;
 
+    /// An error must carry its whole `source()` chain into the rendered string —
+    /// some error types' own `Display` is static and renders nothing about the actual cause.
+    /// For those, `describe_error` is what makes the error informative.
     #[test]
     fn describe_error_walks_the_full_source_chain_without_duplicating_levels() {
         #[derive(Debug, thiserror::Error)]
