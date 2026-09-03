@@ -5318,7 +5318,9 @@ jobs:
 # SHELLCHECK_BIN unset (or reinstates `-shellcheck=`) leaves every other check green while the
 # 648 lines of inline bash go uninspected — the SMA-525 failure re-created inside its own fix.
 # A SHELL variable, deliberately: actionlint replaces ${{ }} with inert placeholders before
-# shellcheck sees them, so an expression fixture would pass and assert nothing (spec §1.8).
+# the ShellCheck scanner sees them, so an expression fixture passes and asserts nothing
+# (spec §1.8). Capitalised deliberately: a comment line opening with the lowercase word is
+# parsed as a directive and reds SC1072/SC1073 — the same trap this file records at its top.
 selftest_expect_tag 'unquoted shell variable' 'shellcheck' 'name: selftest
 on: [push]
 jobs:
