@@ -810,9 +810,17 @@ At `:432`, append to the L10 bullet:
 Run:
 ```bash
 cd /Users/sven/dev/paigasus/paigasus-core
-grep -rn "MOON_CI_INVOCATION\|T_ARRAY_EXPANSION\|_strip_comment" --include=*.py --include=*.md --include=*.sh . || echo "NONE — clean"
+grep -rnw "MOON_CI_INVOCATION\|T_ARRAY_EXPANSION\|_strip_comment" ci/ || echo "NONE — clean"
 ```
-Expected: `NONE — clean`, except for occurrences inside the SMA-541 and SMA-554 spec documents, which are historical records and stay.
+Expected: `NONE — clean`.
+
+Two things make this command actually able to print that, and both are load-bearing.
+`-w` is required because `MOON_CI_INVOCATION` is a proper **substring** of the still-live
+`EXPECTED_MOON_CI_INVOCATIONS`, so an unanchored pattern matches ten surviving lines and can never
+report clean. And the search is scoped to `ci/` rather than the whole tree because
+`docs/superpowers/` legitimately keeps all three names — this plan quotes them in its own task
+text, and the SMA-541 and SMA-554 specs record them as history. What the check is really asserting
+is that no **live code** reference survives.
 
 - [ ] **Step 7: Commit**
 
