@@ -42,10 +42,13 @@ override applied unconditionally, so `REPO_ROOT=<some other worktree> bash
 ci/ruff/run.sh`, with no flag at all, silently linted that other tree and reported a
 clean "10 files clean" at rc 0 for the real one. A gate that lints the wrong tree and
 exits 0 is exactly the failure this issue exists to prevent, so the override was
-removed rather than narrowed. `self_test` and `negative_control` instead copy this
-script into their fixture directories and invoke that copy directly; the copy's own
-`BASH_SOURCE` then resolves `REPO_ROOT` to the fixture naturally, with no environment
-surface at all.
+removed rather than narrowed. `self_test`'s empty-corpus check still needs this trick —
+it copies this script into a throwaway tree and invokes that copy directly, so the
+copy's own `BASH_SOURCE` resolves `REPO_ROOT` to the fixture naturally, with no
+environment surface at all. `negative_control` no longer uses it: since PR 206 (see
+"Why the negative control never calls `uv`" below) it never re-executes any copy of
+this script — it resolves `ruff` once in the real repo and invokes that binary
+directly against its fixture's files, so there is no second `REPO_ROOT` to resolve.
 
 ## Exit codes, and why 1 and 2 must not collapse into each other
 
@@ -58,6 +61,10 @@ exits 1 on a failed dependency resolution and on `--locked` finding a stale lock
 single piped invocation cannot tell "`ci/` has lint violations" apart from "PyPI is
 down" — both would read as the same rc 1. CLAUDE.md records this exact lesson for
 `repo:workflow-credentials`, which hit it first.
+
+`negative_control` resolves `ruff` the same way, but only ONCE, up front, in the real
+repo — see "Why the negative control never calls `uv`" below for why calling it a
+second time, from inside the fixture, is itself a bug this gate used to have.
 
 `resolve_ruff` isolates the `uv`-shaped failure: it resolves the `ruff` executable's
 path via `uv run --locked --project py python3 -c '...shutil.which("ruff")...'`, and any
@@ -140,52 +147,58 @@ exit-code contract this gate documents for itself. `run_check` now captures
 `ruff_corpus`'s output through a plain command substitution and checks its exit status
 explicitly, routing a `git` failure to `die_infra` (**rc 2**) instead.
 
-## Why the negative control runs OUTSIDE the worktree, in a bare `mktemp -d`
+## Why the negative control never calls `uv` (PR 206)
 
-`negative_control` builds its fixture with a plain `mktemp -d` — not nested under
+An earlier version of `negative_control` built its fixture with `py/` and `rs/` pulled
+in by **absolute symlink** and `.prototools` copied alongside them, then re-executed a
+**copy of this script** inside the fixture (the same copy-and-invoke trick `self_test`
+still uses for its own empty-corpus check — see the `REPO_ROOT` section above). That
+copy recomputed `REPO_ROOT` as the fixture directory and called `resolve_ruff()` there,
+which runs `uv run --locked --project py …` — so the control ran a **second, real** `uv`
+invocation, reached through the symlink from a directory outside the actual repo.
+
+`uv` resolves a project by the symlink's *target*, not its location, so that second
+call landed on the exact same `py/.venv` every other `py` Moon task depends on — not a
+throwaway copy. A lone run of this gate never showed a problem, because nothing else
+touched the venv at the same moment. Under a concurrent `moon ci`, it did: the extra
+`uv run` from inside the fixture raced `contracts:generate`, `py:typecheck`, `py:test`,
+`paigasus-kernel-py:test` and `repo:release-parity-py`, and lost — those tasks then
+failed with `ModuleNotFoundError`, `Failed to spawn: basedpyright`/`pytest`, and
+`semantic-release: cannot execute`, all traceable to a `uv`-driven reinstall
+(`Uninstalled 9 packages`) landing mid-run. This reproduced only in CI, under real
+concurrency; it does not reproduce running the gate alone (measured, PR 206).
+
+The fix removes `uv` from the fixture entirely, rather than trying to make its second
+invocation safe. `resolve_ruff` is now called exactly **once**, from the real repo root,
+before the fixture is built — the same one call `run_check` already makes. The fixture
+itself no longer needs `py/`, `rs/`, or `.prototools`, since nothing under it ever runs
+`uv`, or indeed any code at all: `negative_control` derives the fixture's corpus with
+`ruff_corpus` (pure `git -C`, no uv) and invokes the already-resolved `ruff` binary
+**directly** against those files, with `--config` pointing at the real
+`py/pyproject.toml` by absolute path. There is no second `REPO_ROOT` to resolve and
+nothing left to race.
+
+One consequence of invoking the binary directly: `ruff_corpus` returns paths relative to
+the fixture directory (`git -C`'s own convention), so the invocation runs with
+`CWD=$tmp`. Skipping that `cd` doesn't make the control silently pass — ruff still exits
+**rc 1** — but for the wrong reason: `E902` (file not found), not the planted `RUF005`.
+Since that's the same exit code a real lint violation produces, a control that dropped
+the `cd` would report "passed" without ever having linted the file it planted (measured
+while fixing this).
+
+`negative_control` still builds its fixture with a plain `mktemp -d` — not nested under
 `$REPO_ROOT`, and not off in a fixed named path either — then initializes it as its own
-git repo, copies the real `ci/` tree into it (which, incidentally, is what puts a copy
-of `ci/ruff/run.sh` itself in the fixture — see the `REPO_ROOT` section above), and
-plants a `RUF005` violation (`ci/probe/violation.py`). Location does not matter for
-correctness here: the fixture is `git init`-ed by the script itself, and `py`/`rs`
-(below) are pulled in by **absolute** symlink, so `git ls-files` and ruff see the same
-thing regardless of where the directory sits.
-
-An earlier version of this script nested the fixture under `$REPO_ROOT` on the theory
-that being outside *any* git repository, not merely outside this one, was the risk to
-avoid. That theory doesn't hold — the fixture is always `git init`-ed regardless of
-location — and nesting it in-tree instead created a real cost: `.moon/workspace.yml`'s
-`hasher.ignorePatterns` is a fixed, short list, not `.gitignore`-aware, so a concurrent
-`moon ci` task with `inputs: ['**/*']` (`repo:actionlint`, `repo:input-liveness`) could
-hash-walk a live `.ruff-negctl-*` directory mid-run — the same class of interaction
-CLAUDE.md records behind a twice-observed, never-fully-explained `affected-smoke`
-abort under a concurrent `moon ci`. A `SIGKILL` before the fixture's `EXIT` trap fires
-would also leave cruft in the real tree instead of in `$TMPDIR`. The fixture is
-out-of-tree now for both reasons.
-
-Several pieces of the real tree are pulled in without being copied wholesale:
-
-- **`py/` and `rs/` are symlinked in**, not copied. `resolve_ruff` and the `--config`
-  path both resolve `py` relative to the current directory, and the control needs the
-  real, already-synced venv and lock — not a second one built from scratch on every
-  run. `rs/` has to come along too: `py/packages/paigasus-kernel`'s `path =
-  "../../../rs/crates/bindings/paigasus-py-bindings"` source dependency is resolved
-  textually against the symlink's own location, not the real directory it points to, so
-  without a sibling `rs/` next to the symlinked `py/`, `uv` fails with "Distribution not
-  found" (measured while building this gate).
-- **`.prototools` is copied in.** `uv` runs behind a proto shim, and proto resolves
-  which pinned version to run by walking *up* from the current directory looking for
-  this file. Once the fixture moved outside `$REPO_ROOT`, there was nothing above it
-  for proto to find, and the control failed at rc 2 with `proto::detect::failed`
-  (measured) until this copy was added.
-- **The root `.gitignore` is copied in, and `git add` is not forced.** The real
-  repository has untracked `.venv` trees under `ci/release-plan/` and
-  `ci/workflow-credentials/`. Copying the root `.gitignore` into the fixture and adding
-  files without `-f` means those directories are excluded from the fixture's own index
-  exactly the way they are excluded from the real one — by tracking, not by a pattern
-  this script owns. Force-adding them would pull vendored third-party code into the
-  corpus the control lints, which is not what the control exists to prove and would
-  make it slower and noisier for no reason.
+git repo, copies in the root `.gitignore`, and plants a `RUF005` violation
+(`ci/probe/violation.py`). That part of the design is unchanged and unrelated to the
+`uv` fix: `.moon/workspace.yml`'s `hasher.ignorePatterns` is a fixed, short list, not
+`.gitignore`-aware, so a concurrent `moon ci` task with `inputs: ['**/*']`
+(`repo:actionlint`, `repo:input-liveness`) could hash-walk a live in-tree fixture
+mid-run, and a `SIGKILL` before the fixture's `EXIT` trap fires would leave cruft in the
+real tree instead of in `$TMPDIR`. The root `.gitignore` copy is kept for the same
+reason it was added originally — a defensive floor, so a plain `git add -A` would still
+exclude a vendored `.venv` tree the way the real repo does, if the fixture's
+construction ever grows one again — even though today's minimal fixture contains
+nothing to exclude.
 
 The control's own cleanup uses an `EXIT` trap, not a `RETURN` trap: its failure branch
 calls `exit 1` directly, which ends the process without ever returning from the
@@ -249,11 +262,11 @@ calls, and the pin would keep passing while asserting nothing about what `run_ch
 actually does. This is the same residual shape `ci/release-parity/README.md`'s L5
 records for its own pinned-but-orphanable line.
 
-**L13 — the negative control's rc-1 check cannot distinguish "ruff caught it" from
-"the floor tripped."** `negative_control()` asserts only that the gate exits **rc 1** on
-its planted `RUF005` violation — and the corpus floor (`CORPUS_FLOOR`) also exits rc 1
-on its own, unrelated failure. If the control's fixture corpus ever shrank below the
-floor (it does not today: the fixture copies the real `ci/` tree, which is always well
-above 10 files), the control would report "passed" at rc 1 without the planted
-violation having been reached by ruff at all. Not reachable today, and noted here so a
-future change to the fixture's construction re-checks this.
+**L13 — RESOLVED by PR 206.** `negative_control()` used to re-enter the whole gate
+(`run_check`, via a copy of this script), so its rc-1 check could not distinguish "ruff
+caught the planted violation" from "the corpus floor (`CORPUS_FLOOR`) tripped for an
+unrelated reason" — both exit rc 1. Since PR 206, `negative_control()` invokes the
+already-resolved `ruff` binary directly and never goes through `run_check` or its floor
+check at all, so that ambiguity no longer exists structurally: an empty fixture corpus
+now makes `ruff check` itself exit rc 2 (`error: a value is required for '[FILES]...'`,
+measured), which the control's `!= 1` guard already treats as a failure, not a pass.

@@ -1004,6 +1004,19 @@ RELEASE_PLAN_SH_CALL_SITES = (
 # shape WORKFLOW_CREDENTIALS_SH_CALL_SITES' own comment names, closed there by pinning its
 # report-arm `if` and here by pinning this one.
 #
+# PR 206 fix. negative_control() no longer re-enters a COPY of this script inside its fixture —
+# that re-entry called resolve_ruff() a second time from a foreign root reached through an
+# absolute `py` symlink, and `uv run --locked --project py` there mutated the ONE SHARED
+# `py/.venv` every other py Moon task depends on, invisible until a concurrent `moon ci` raced
+# it (measured in CI: `contracts:generate`, `py:typecheck`, `py:test`,
+# `paigasus-kernel-py:test` and `repo:release-parity-py` all failed). ruff is now resolved
+# EXACTLY ONCE, in the real repo, before the fixture is built; the fixture carries no `py`, `rs`
+# or `.prototools`, and entry 5 below is now the DIRECT invocation of that already-resolved
+# binary against the fixture's own corpus, run with CWD=$tmp (ruff resolves its file ARGUMENTS
+# relative to CWD, so this cd is load-bearing — without it every invocation reports E902 file-
+# not-found at rc 1, the same exit code a real RUF005 finding produces, and the control would
+# "pass" without ever having linted anything, which is exactly what MEASURING this fix caught).
+#
 # The guard is pinnable at all only because ci/ruff/run.sh renamed negative_control()'s local
 # from `rc` to `negctl_rc`: self_test() has its own, unrelated `if [ "$rc" != 1 ]; then` for its
 # empty-corpus check, so the un-renamed guard line would have been satisfied by THAT copy even
@@ -1011,7 +1024,8 @@ RELEASE_PLAN_SH_CALL_SITES = (
 # one level down from the bug it exists to close. `ci/release-plan/run.sh`'s `mut_rc` (kept
 # distinct from that file's own unrelated `rc` uses) is the precedent for this same rename.
 # The fixture-invocation line needed no rename to become unique — self_test()'s twin invokes
-# `$empty`, not `$tmp`.
+# `bash "$empty/ci/ruff/run.sh"`, a subshell over a SCRIPT, not this line's direct binary
+# invocation over `$tmp`.
 #
 # REACHABILITY IS NOT AUTOMATIC, same as the three tuples above: this check only runs when
 # repo:affected-smoke is scheduled, so moon.yml lists `ci/ruff/**/*` among its inputs and
@@ -1044,7 +1058,8 @@ RUFF_SH_CALL_SITES = (
     "negctl)   negative_control ;;",
     "git -C \"$root\" ls-files -- ':(glob)ci/**/*.py' 'ci/*.py' | sort",
     "\"$ruff\" check --config \"$CONFIG\" -- \"${files[@]}\" || rc=$?",
-    "( cd \"$tmp\" && bash \"$tmp/ci/ruff/run.sh\" ) >/dev/null 2>&1 || negctl_rc=$?",
+    "( cd \"$tmp\" && \"$ruff\" check --config \"$REPO_ROOT/$CONFIG\" -- \"${files[@]}\" ) "
+    ">/dev/null 2>&1 || negctl_rc=$?",
     "if [ \"$negctl_rc\" != 1 ]; then",
     "printf '  FAIL a planted RUF005 did not red the gate: expected rc 1, got %s\\n' \"$negctl_rc\" >&2",
     "CORPUS_FLOOR=10",
@@ -3005,12 +3020,17 @@ def main():
          "    lines are the load-bearing ones: without them an inconclusive decision stops\n"
          "    reporting 'build' and the release path can be skipped silently.\n"
          "    A row prefixed `ci/ruff/run.sh:` means one of the ten pinned lines in run.sh is\n"
-         "    gone. Seven live in negative_control(): the flag parse, the dispatch arm, the\n"
-         "    corpus-derivation line, the real ruff invocation, the fixture-invocation line,\n"
-         "    the assertion guard, or the report line. Losing the flag parse or dispatch arm\n"
-         "    means the control never runs at all; losing the corpus-derivation or ruff-\n"
-         "    invocation line means the real check the control validates is no longer doing\n"
-         "    what was pinned. The guard is the load-bearing one there: the release-parity\n"
+         "    gone. Seven are the negative-control set: the flag parse, the dispatch arm, the\n"
+         "    corpus-derivation line, the real (run_check) ruff invocation, the negative\n"
+         "    control's own direct ruff invocation against its fixture (run with CWD=$tmp so\n"
+         "    ruff's file arguments resolve — PR 206 dropped the prior re-entry of a script\n"
+         "    copy inside the fixture, which is what corrupted the shared py/.venv under a\n"
+         "    concurrent moon ci; skipping the cd instead reports a false rc-1 from a\n"
+         "    file-not-found error rather than a real lint verdict), the assertion guard, or\n"
+         "    the report line. Losing the flag parse or dispatch arm means the control never\n"
+         "    runs at all; losing the corpus-derivation or either ruff-invocation line means\n"
+         "    the real check the control validates is no longer doing what was pinned. The\n"
+         "    guard is the load-bearing one there: the release-parity\n"
          "    precedent above is a control that prints 'passed' having asserted nothing, and\n"
          "    a neutered guard (e.g. comparing $negctl_rc to itself) reproduces exactly that\n"
          "    here while leaving the report line byte-identical. The guard's variable is\n"

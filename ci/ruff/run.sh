@@ -167,52 +167,62 @@ self_test() {
 }
 
 negative_control() {
-  # Uses a bare `mktemp -d`, OUTSIDE the working tree — not nested under $REPO_ROOT. This
-  # fixture is `git init`-ed itself, and `py`/`rs` below are pulled in by ABSOLUTE symlink, so
-  # its location changes nothing about what `git ls-files` or ruff sees. Nesting it inside
-  # REPO_ROOT instead would only expose it to every concurrent 'inputs: [**/*]' repo:* task
-  # (repo:actionlint, repo:input-liveness) that hash-walks the whole tree during `moon ci` —
-  # `.moon/workspace.yml`'s hasher.ignorePatterns is a fixed short list, NOT .gitignore-aware, so
-  # it would not skip a transient in-tree directory — and a SIGKILL before the EXIT trap below
-  # fires would leave cruft in the real repo instead of in $TMPDIR.
-  #
-  # `py/` and `rs/` are SYMLINKED in rather than copied: resolve_ruff and CONFIG both resolve
-  # `py` relative to CWD once the copied script (below) recomputes REPO_ROOT as $tmp, and the
-  # control needs the real venv/lock rather than a duplicate one built on every invocation. `rs/`
-  # has to come along too — py/packages/paigasus-kernel's `path = "../../../rs/..."` source
-  # dependency is resolved textually against the symlink's location, not its target, so without
-  # a sibling `rs/` uv fails with "Distribution not found" (measured). The root .gitignore is
-  # copied in (not the untracked .venv trees under ci/release-plan and ci/workflow-credentials)
-  # so a plain `git add` excludes them exactly as the real repo does — force-adding them would
-  # pull vendored third-party code into the corpus this control lints, which is not what it
-  # exists to prove.
+  # uv is resolved EXACTLY ONCE here, from the REAL repo root, via the same resolve_ruff() the
+  # real check uses — never from inside the fixture. The prior shape re-entered a COPY of this
+  # script inside the fixture, which recomputed REPO_ROOT as the fixture dir and called
+  # resolve_ruff() there too, so `uv run --locked --project py` ran a second time with `py`
+  # reached through an ABSOLUTE SYMLINK from a foreign root. That mutated the ONE SHARED
+  # `py/.venv` every other py Moon task depends on (uv treats the symlink's target, not its
+  # location, as the project root, so it still resolved to the real venv and reinstalled into
+  # it) — invisible in a lone run of this gate, but under a concurrent `moon ci` it raced and
+  # broke `contracts:generate`, `py:typecheck`, `py:test`, `paigasus-kernel-py:test` and
+  # `repo:release-parity-py` (measured in CI, PR 206). Resolving ruff once, up front, in the real
+  # repo removes every uv call from the fixture, so there is nothing left inside it to race.
+  # Since no code under the fixture is ever executed, `py/`, `rs/` and `.prototools` are no
+  # longer needed there either.
+  local ruff
+  ruff="$(resolve_ruff)"
+
   # negctl_rc, not rc: self_test() above ALSO uses `rc` for its own empty-corpus check, and
   # `if [ "$rc" != 1 ]; then` is therefore not a line unique to this function — a haystack that
   # pinned it would be satisfied by self_test()'s copy even with THIS guard neutered. The distinct
   # name is what makes the guard uniquely pinnable at all, exactly as ci/release-plan/run.sh's
   # `mut_rc` (vs. its own unrelated `rc` uses) does for the same reason.
   local negctl_rc=0
+  # Uses a bare `mktemp -d`, OUTSIDE the working tree — not nested under $REPO_ROOT, so it is
+  # invisible to every concurrent 'inputs: [**/*]' repo:* task (repo:actionlint,
+  # repo:input-liveness) that hash-walks the whole tree during `moon ci`, and a SIGKILL before
+  # the EXIT trap below fires leaves cruft in $TMPDIR rather than in the real repo.
   tmp="$(mktemp -d)"
   # EXIT, not RETURN: the failure branch below calls `exit 1` directly, which terminates the
   # process without ever returning from this function — a RETURN trap would silently skip
   # cleanup on exactly the path that most needs it (measured: it left a stray dir on disk).
   trap 'rm -rf "$tmp"' EXIT
   git init -q "$tmp"
+  # The root .gitignore is copied in so a plain `git add` would exclude a vendored .venv tree
+  # exactly as the real repo does, if one ever showed up here — defensive, since this fixture no
+  # longer contains anything but the planted violation below.
   cp "$REPO_ROOT/.gitignore" "$tmp/.gitignore"
-  # .prototools is copied in too: proto (behind the uv shim) resolves its pinned tool version by
-  # walking UP from CWD looking for this file, and once the fixture lives outside REPO_ROOT
-  # there is nothing above it to find — measured as `proto::detect::failed` without this copy.
-  cp "$REPO_ROOT/.prototools" "$tmp/.prototools"
   mkdir -p "$tmp/ci/probe"
-  cp -R "$REPO_ROOT/ci/." "$tmp/ci/" 2>/dev/null || true
-  ln -s "$REPO_ROOT/py" "$tmp/py"
-  ln -s "$REPO_ROOT/rs" "$tmp/rs"
   printf 'x = [1]\ny = x + [2]\n' >"$tmp/ci/probe/violation.py"
   git -C "$tmp" add -A >/dev/null 2>&1
-  # No REPO_ROOT override: the cp -R above already placed a copy of this script at
-  # $tmp/ci/ruff/run.sh, and invoking THAT copy makes its own BASH_SOURCE resolve REPO_ROOT to
-  # $tmp naturally.
-  ( cd "$tmp" && bash "$tmp/ci/ruff/run.sh" ) >/dev/null 2>&1 || negctl_rc=$?
+
+  # Corpus derivation is pure `git -C` (ruff_corpus), no uv anywhere in this path. The resolved
+  # ruff binary is then invoked DIRECTLY against those files, with --config pointing at the REAL
+  # py/pyproject.toml by absolute path — not the fixture's (nonexistent) copy — so the rule set
+  # under test is the one the real check actually uses. ruff_corpus returns paths relative to
+  # $tmp (git -C's own convention), so the invocation below runs WITH CWD=$tmp — without that,
+  # ruff resolves "ci/probe/violation.py" against $REPO_ROOT, finds nothing, and reports E902
+  # (file not found) at rc 1 — the SAME exit code a real RUF005 finding produces, so a control
+  # that skipped this cd would still print "passed" without ever having linted the file
+  # (measured: it did, silently, before this comment was written).
+  local corpus
+  corpus="$(ruff_corpus "$tmp")"
+  local -a files=()
+  if [ -n "$corpus" ]; then
+    mapfile -t files <<< "$corpus"
+  fi
+  ( cd "$tmp" && "$ruff" check --config "$REPO_ROOT/$CONFIG" -- "${files[@]}" ) >/dev/null 2>&1 || negctl_rc=$?
   if [ "$negctl_rc" != 1 ]; then
     printf '  FAIL a planted RUF005 did not red the gate: expected rc 1, got %s\n' "$negctl_rc" >&2
     exit 1
