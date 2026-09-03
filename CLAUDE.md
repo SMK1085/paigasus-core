@@ -746,25 +746,42 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   still required and a top-level `ci/foo.py` would be missed — `'ci/*.py'` (its `*` spans `/`) and
   the `:(glob)`-magic form each independently fix it, and the gate keeps both, which is mutually
   redundant and deliberately so.
-  **Registration is six obligations, not five** — `ci.yml`'s `T=(…)` array, the CLAUDE.md
+  **Registration is seven obligations, not six** — `ci.yml`'s `T=(…)` array, the CLAUDE.md
   marker-delimited command, `SELF_SCHEDULED_GATES`, `SELF_TASK_EXPECTED_GLOBS`, a script pin
-  (`RUFF_SH_CALL_SITES`, seven lines), and `REQUIRED_REPO_TASKS` — the last because this gate
+  (`RUFF_SH_CALL_SITES`, ten lines), `REQUIRED_REPO_TASKS` — the last because this gate
   carries a `--negative-control`, the same reasoning that put the three `release-parity*` tasks
-  and `workflow-credentials` on that floor.
+  and `workflow-credentials` on that floor — and `moon.yml`'s `repo:affected-smoke` task listing
+  `ci/ruff/**/*` among its own `inputs` (`moon.yml:222-226`), floored by a
+  `T_AFFECTED_SMOKE_REQUIRED_INPUTS` entry in `ci/actionlint/run.sh` (`:2134-2138`) — the same
+  reachability pair the `workflow-credentials` entry above names for that gate: without it, a PR
+  editing `ci/ruff/**` does not schedule `repo:affected-smoke` at all, so none of the other six
+  obligations' pins can ever fire on the PR that breaks them.
   **This also corrects a belief this repo has been operating on.** MEASURED: `repo:affected-smoke`
   does NOT red when a brand-new `repo:*` gate is added to `ci.yml`'s `T` array with none of the
-  other five obligations done at all. `SELF_SCHEDULED_GATES`, `SELF_TASK_EXPECTED_GLOBS` and
+  other obligations done at all. `SELF_SCHEDULED_GATES`, `SELF_TASK_EXPECTED_GLOBS` and
   `REQUIRED_REPO_TASKS` are hand-maintained tables that validate only entries already present as
-  KEYS, and `orphan_globs` catches only the reverse direction (a key with no task) — so of the six,
-  only T-membership and the CLAUDE.md mirror were ever self-enforcing; the `workflow-credentials`
-  entry above overstated this ("missing any one of them reds `:affected-smoke`") and is corrected
-  there. SMA-539 closes part of the gap with `check_self_scheduled_coverage` in `ci_targets.py`:
-  every `repo:*` task whose resolved `script:` mentions `--self-test` or `--negative-control` must
-  now have a `SELF_SCHEDULED_GATES` entry, with a reasoned `SELF_SCHEDULED_COVERAGE_EXEMPT` table
-  that ships EMPTY. It is deliberately scoped to that ONE registry — the same treatment for
-  `SELF_TASK_EXPECTED_GLOBS` or `REQUIRED_REPO_TASKS` would red the real repo, since several tasks
-  legitimately lack those (`affected-smoke`'s own globs are pinned by check 8e instead; the three
-  `release-parity*` tasks route through `SELF_TASK_GLOBS_EXEMPT`).
+  KEYS — so a brand-new gate with NO entries at all in any of the three still passes, the same
+  true statement the `workflow-credentials` entry above makes for its own registration. That is
+  narrower than it first looks, though: `orphan_globs` is not "a key with no task" (nothing there
+  needs a task) but a `SELF_TASK_EXPECTED_GLOBS` KEY with no matching `SELF_SCHEDULED_GATES`
+  entry — i.e. the reverse-pairing direction — and `check_registry_pairing` (called with all-`None`
+  at `ci_targets.py:2628`, which resolves to the LIVE registries) genuinely IS exercised in
+  production: it runs on the `--self-test` path that `repo:affected-smoke`'s own
+  `--negative-control` invokes (`ci/affected-graph/run.sh:413`), so deleting only
+  `SELF_SCHEDULED_GATES["ruff-ci"]` reds it. Obligation 4 (`SELF_TASK_EXPECTED_GLOBS`) is
+  therefore transitively self-enforcing once obligation 3 (`SELF_SCHEDULED_GATES`) is in place —
+  it is `REQUIRED_REPO_TASKS` and the reachability pair above that remain unpaired, so of the
+  seven, T-membership, the CLAUDE.md mirror, and (once `SELF_SCHEDULED_GATES` exists)
+  `SELF_TASK_EXPECTED_GLOBS` are self-enforcing; the `workflow-credentials` entry above overstated
+  the ORIGINAL claim ("missing any one of them reds `:affected-smoke`") and is corrected there.
+  SMA-539 closes part of the remaining gap with `check_self_scheduled_coverage` in
+  `ci_targets.py`: every `repo:*` task whose resolved `script:` mentions `--self-test` or
+  `--negative-control` must now have a `SELF_SCHEDULED_GATES` entry, with a reasoned
+  `SELF_SCHEDULED_COVERAGE_EXEMPT` table that ships EMPTY. It is deliberately scoped to that ONE
+  registry — the same treatment for `SELF_TASK_EXPECTED_GLOBS` or `REQUIRED_REPO_TASKS` would red
+  the real repo, since several tasks legitimately lack those (`affected-smoke`'s own globs are
+  pinned by check 8e instead; the three `release-parity*` tasks route through
+  `SELF_TASK_GLOBS_EXEMPT`).
 - `repo:actionlint` now runs shellcheck over every workflow `run:` block, sourced from
   `shellcheck-py` pinned in `py/uv.lock` (bounded specifier `>=0.11.0.1,<0.12`), resolved via
   `uv run --locked --project py` and asserted with `[ -x ]`. It FAILS CLOSED at rc 2 — there is

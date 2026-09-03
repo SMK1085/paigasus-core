@@ -54,10 +54,21 @@ ruff_corpus() {
   git -C "$root" ls-files -- ':(glob)ci/**/*.py' 'ci/*.py' | sort
 }
 
+# PROVENANCE, NOT JUST PRESENCE. `shutil.which` is PATH-based: if the `py` uv project does not
+# actually contain ruff (a `[dependency-groups]` rename, a `[tool.uv] default-groups` change, or
+# simply `UV_NO_DEV=1` at invocation time — all real, documented uv knobs, none of which trips
+# `uv run`'s own exit status), `uv run` still exits 0 and `which` silently returns whatever `ruff`
+# is first on the OUTER host PATH. `[ -x ]` then passes on that impostor, and the gate lints with
+# a binary this repo never pinned — exactly the "strictness is a property of the host" failure
+# SMA-525 refused, now green. MEASURED: with ruff removed from py/.venv/bin and a host impostor
+# earlier on PATH, the bare `shutil.which` resolver printed the impostor's path at exit 0.
+# `sys.prefix` under `uv run --project py` IS `py/.venv` (measured), so requiring the resolved
+# path to live under it is a same-process check that no amount of outer-PATH manipulation can
+# spoof — a host binary now routes to `die_infra` (rc 2) instead of a silent pass.
 resolve_ruff() {
   local p
   p="$(uv run --locked --project py python3 -c \
-    'import shutil, sys; p = shutil.which("ruff"); sys.exit(1) if not p else print(p)')" \
+    'import shutil, sys; p = shutil.which("ruff"); sys.exit(1) if not p or not p.startswith(sys.prefix) else print(p)')" \
     || die_infra "could not resolve ruff via 'uv run --locked --project py' — run 'uv sync --project py'"
   [ -x "$p" ] || die_infra "resolved ruff is not executable: $p"
   printf '%s' "$p"
@@ -66,11 +77,30 @@ resolve_ruff() {
 run_check() {
   local root="${1:-$REPO_ROOT}" ruff rc=0
   local -a files
-  mapfile -t files < <(ruff_corpus "$root")
+  # `mapfile ... < <(ruff_corpus "$root")` (the prior form) reads from a process substitution,
+  # whose exit status bash discards — a `git ls-files` failure inside ruff_corpus would silently
+  # yield zero lines and fall straight into the floor check below, reporting "the repo is wrong"
+  # (rc 1) for what is actually an infrastructure failure, violating the exit-code contract at
+  # the top of this file. Route through a plain command substitution instead, so the `||` below
+  # can see ruff_corpus's real exit status (ruff_corpus's own `| sort` runs under this script's
+  # `set -o pipefail`, so a `git` failure already propagates through the pipe).
+  local corpus grc=0
+  corpus="$(ruff_corpus "$root")" || grc=$?
+  [ "$grc" -eq 0 ] || die_infra "git ls-files failed while deriving the ci/**/*.py corpus (rc $grc)"
+  # An empty corpus is a legitimate (if floor-tripping) result, not an error — `mapfile <<<
+  # "$corpus"` on an empty string would otherwise produce one bogus empty-string element instead
+  # of a zero-length array, undercounting the floor message below by one.
+  if [ -n "$corpus" ]; then
+    mapfile -t files <<< "$corpus"
+  fi
   # The floor is what stops a moved directory silently emptying the gate — the SMA-553 class,
   # which repo:input-liveness cannot reach here (task_inputs.py only proves DECLARED inputs live).
+  # Deleting a single ci/**/*.py file is a legitimate change that can trip this too, so the
+  # message names the re-baseline action rather than only describing the symptom.
   [ "${#files[@]}" -ge "$CORPUS_FLOOR" ] \
-    || die_assert "corpus collapsed to ${#files[@]} files (floor $CORPUS_FLOOR) — did ci/ move?"
+    || die_assert "corpus collapsed to ${#files[@]} files (floor $CORPUS_FLOOR) — did ci/ move? If \
+this is a legitimate shrink (e.g. a file was deleted on purpose), lower CORPUS_FLOOR in \
+ci/ruff/run.sh to match the new corpus size instead of raising it back later."
   ruff="$(resolve_ruff)"
   "$ruff" check --config "$CONFIG" -- "${files[@]}" || rc=$?
   case "$rc" in

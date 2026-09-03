@@ -5177,8 +5177,20 @@ done < <(cargo_lock_script_verdict ci/cargo-lock-integrity/run.sh)
 # "whatever this host has" is exactly the failure SMA-525 refused, and it would be invisible on
 # a green. `[ -x ]` is the ci/release-parity/ecosystems/release-plz.sh idiom — assert the
 # resolution rather than discovering it 80 lines later.
+#
+# PROVENANCE, NOT JUST PRESENCE. `shutil.which` is PATH-based, so "FAIL CLOSED" above was
+# incomplete: if the `py` uv project does not itself contain shellcheck (a `[dependency-groups]`
+# rename, a `[tool.uv] default-groups` change, or `UV_NO_DEV=1` at invocation time — real,
+# documented uv knobs, none of which trips `uv run`'s own exit status), `uv run` still exits 0
+# and `which` silently returns whatever `shellcheck` is first on the OUTER host PATH — `[ -x ]`
+# passes on that impostor, reproducing the exact "strictness is a property of the host" failure
+# this whole block exists to refuse, now green. MEASURED: with shellcheck removed from
+# py/.venv/bin and a host impostor earlier on PATH, the bare `shutil.which` resolver printed the
+# impostor's path at exit 0. `sys.prefix` under `uv run --project py` IS `py/.venv` (measured),
+# so requiring the resolved path to live under it is a same-process check no outer-PATH
+# manipulation can spoof — a host binary now routes to `infra` (rc 2) instead of a silent pass.
 SHELLCHECK_BIN="$(uv run --locked --project py python3 -c \
-  'import shutil, sys; p = shutil.which("shellcheck"); sys.exit(1) if not p else print(p)')" \
+  'import shutil, sys; p = shutil.which("shellcheck"); sys.exit(1) if not p or not p.startswith(sys.prefix) else print(p)')" \
   || infra "could not resolve shellcheck via 'uv run --locked --project py' — run 'uv sync --project py'"
 [ -x "$SHELLCHECK_BIN" ] || infra "resolved shellcheck is not executable: $SHELLCHECK_BIN"
 ARGS+=("-shellcheck=$SHELLCHECK_BIN")

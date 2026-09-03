@@ -403,10 +403,21 @@ does not enable errexit for `script:` blocks and takes the block's status from i
   git repo): a top-level `ci/foo.py` **must** be found (the §4.3 pathspec trap), a file under
   `ci/x/.venv/` must not, a non-`.py` file must not, and an empty corpus must trip the floor. This
   is the logic worth testing; it needs no ruff and no network.
-* **`--negative-control`** plants a known violation and asserts the gate reports **rc 1**. It runs
-  against a **copy of the real tree inside the repo** (a temp dir under the worktree, cleaned up),
-  not a bare `mktemp -d`: outside a git repo `git ls-files` cannot run and ruff's gitignore
-  handling changes, so a bare tempdir would exercise a different code path than the real run.
+* **`--negative-control`** plants a known violation and asserts the gate reports **rc 1**.
+
+  **Post-rev-2 correction (whole-branch review, I3).** This bullet originally said the control
+  must run against "a copy of the real tree inside the repo... not a bare `mktemp -d`", reasoning
+  that "outside a git repo `git ls-files` cannot run". That reason is **false** — `git init` makes
+  any directory a git repo, tempdir or not, and `git ls-files` runs fine in one — and the shipped
+  `negative_control()` does the opposite of what this bullet mandated: a bare, **out-of-tree**
+  `mktemp -d`, `git init`-ed itself, with `py/` and `rs/` pulled in by absolute symlink so the
+  control reuses the real venv/lock rather than building a duplicate one on every invocation. The
+  actual reason for keeping the fixture out-of-tree is the reverse of the withdrawn claim: an
+  **in**-tree transient directory would be visible to the hash walk of the two `inputs: ['**/*']`
+  `repo:*` tasks (`repo:actionlint`, `repo:input-liveness`) that run concurrently under `moon ci`,
+  since `.moon/workspace.yml`'s `hasher.ignorePatterns` is a fixed short list, not
+  `.gitignore`-aware — nesting the fixture under `REPO_ROOT` would make its hash nondeterministic
+  for both gates. `ci/ruff/run.sh`'s `negative_control()` carries the full, measured reasoning.
 
 ```yaml
   ruff-ci:
@@ -680,6 +691,15 @@ repo before folding in; the challenge's one incorrect premise is recorded too.
 18. **Minor:** CWD pinning; glob-sorted `inputs`; `.moon/tasks/python.yml` as an input; bounded
     version specifier; `.venv` exclusion attributed to ruff's default `exclude`; §1.3 led with the
     empirical probe; AC numbering unified on the A/B/C scheme; L9/L10 added.
+
+**Post-rev-2 corrections (whole-branch review)**
+
+19. **§4.4's negative-control rationale was backwards (I3).** It said the control runs against an
+    in-tree copy "not a bare `mktemp -d`" because "outside a git repo `git ls-files` cannot run" —
+    false, since `git init` makes any directory a git repo. The shipped `negative_control()` uses
+    exactly the bare, out-of-tree `mktemp -d` this bullet forbade, for the opposite reason: an
+    in-tree fixture would be visible to `repo:actionlint`'s and `repo:input-liveness`'s
+    `inputs: ['**/*']` hash walk during a concurrent `moon ci`. §4.4 is corrected in place.
 
 ---
 

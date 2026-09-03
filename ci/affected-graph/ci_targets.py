@@ -1023,6 +1023,22 @@ RELEASE_PLAN_SH_CALL_SITES = (
 # indented, so a column-0 rule would reject the real executing lines, while a substring rule
 # would let a COMMENTED-OUT copy satisfy the pin. Every entry was verified to occur EXACTLY ONCE
 # in run.sh before this tuple was written.
+#
+# WHOLE-BRANCH REVIEW ADDITION (I2). The seven entries above pin negative_control() only —
+# self_test() itself was entirely unpinned, and a combined edit (neutering _row's comparison,
+# replacing the empty-corpus invocation with a bare `rc=1`, and lowering CORPUS_FLOOR to 1) made
+# `--self-test` print "passed" at rc 0 with all seven original lines byte-identical — the same
+# "control that asserts nothing" shape this whole tuple exists to close, one function over. Three
+# more entries close that gap: the floor itself (dropping it below the real corpus size is what
+# the self-test's empty-corpus row exists to catch — a lowered floor makes that row pass
+# vacuously), the empty-corpus fixture invocation (replacing it with `rc=1` fakes the row's
+# result without ever invoking the fixture), and the `if` that decides whether a self-test
+# failure is ever reported (the same "neutered guard reports passed regardless" shape closed for
+# negative_control() by entry 6 above). Verified unique in run.sh (unlike negative_control()'s
+# `rc=$?`/`if [ "$rc" != 1 ]` pair, self_test()'s own copies of those tokens do not collide with
+# ANY other line once matched whole — `rc=$?` also appears in run_check() and negative_control(),
+# but only self_test()'s invocation targets `$empty`, and only self_test()'s guard reads
+# `$failures`, not `$negctl_rc` or `$rc`).
 RUFF_SH_CALL_SITES = (
     "--negative-control) MODE=negctl;   shift ;;",
     "negctl)   negative_control ;;",
@@ -1031,6 +1047,9 @@ RUFF_SH_CALL_SITES = (
     "( cd \"$tmp\" && bash \"$tmp/ci/ruff/run.sh\" ) >/dev/null 2>&1 || negctl_rc=$?",
     "if [ \"$negctl_rc\" != 1 ]; then",
     "printf '  FAIL a planted RUF005 did not red the gate: expected rc 1, got %s\\n' \"$negctl_rc\" >&2",
+    "CORPUS_FLOOR=10",
+    "( cd \"$empty\" && bash \"$empty/ci/ruff/run.sh\" ) >/dev/null 2>&1 || rc=$?",
+    "if [ \"$failures\" -gt 0 ]; then",
 )
 
 
@@ -2985,19 +3004,27 @@ def main():
          "    its write, or the negative control's assertions and report arm. The fail-safe\n"
          "    lines are the load-bearing ones: without them an inconclusive decision stops\n"
          "    reporting 'build' and the release path can be skipped silently.\n"
-         "    A row prefixed `ci/ruff/run.sh:` means one of the seven pinned lines in\n"
-         "    negative_control() is gone — the flag parse, the dispatch arm, the corpus-\n"
-         "    derivation line, the real ruff invocation, the fixture-invocation line, the\n"
-         "    assertion guard, or the report line. Losing the flag parse or dispatch arm\n"
+         "    A row prefixed `ci/ruff/run.sh:` means one of the ten pinned lines in run.sh is\n"
+         "    gone. Seven live in negative_control(): the flag parse, the dispatch arm, the\n"
+         "    corpus-derivation line, the real ruff invocation, the fixture-invocation line,\n"
+         "    the assertion guard, or the report line. Losing the flag parse or dispatch arm\n"
          "    means the control never runs at all; losing the corpus-derivation or ruff-\n"
          "    invocation line means the real check the control validates is no longer doing\n"
-         "    what was pinned. The guard is the load-bearing one: the release-parity\n"
+         "    what was pinned. The guard is the load-bearing one there: the release-parity\n"
          "    precedent above is a control that prints 'passed' having asserted nothing, and\n"
          "    a neutered guard (e.g. comparing $negctl_rc to itself) reproduces exactly that\n"
          "    here while leaving the report line byte-identical. The guard's variable is\n"
          "    deliberately named negctl_rc, not rc — self_test() has its own unrelated rc\n"
          "    guard, so an un-renamed guard line would not be unique in the file and could\n"
-         "    not be pinned at all; do not 'tidy' the name back."),
+         "    not be pinned at all; do not 'tidy' the name back.\n"
+         "    The other three live in self_test(): the corpus floor (CORPUS_FLOOR=10), the\n"
+         "    empty-corpus fixture invocation, and that function's own report guard\n"
+         "    (`if [ \"$failures\" -gt 0 ]; then`). A whole-branch review found self_test()\n"
+         "    entirely unpinned and demonstrated one combined edit — gutting _row's\n"
+         "    comparison, faking the empty-corpus row with a bare `rc=1`, and lowering the\n"
+         "    floor to 1 — that made `--self-test` report 'passed' at rc 0 with the seven\n"
+         "    negative_control() lines untouched; these three close that gap the same way the\n"
+         "    seven above close it for negative_control()."),
         (bad_invocation,
          "A `moon ci` invocation in .github/workflows/ci.yml does not hand it the WHOLE `T`\n"
          "    array. Every check above asserts what is IN `T`; this one asserts `T` is what runs.\n"

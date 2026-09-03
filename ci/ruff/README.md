@@ -11,8 +11,19 @@ linted by anything, and it merged through a full review carrying three RUF005
 violations before Task 1 of this issue cleared them (SMA-541). This gate closes that
 gap without introducing a second Ruff configuration: the rule set, its version, and its
 resolution all come from `py/pyproject.toml` + `py/uv.lock`. There is no
-`ci/ruff/pyproject.toml`, no second lockfile, and no `per-file-ignores` carve-out for
-`ci/` — a violation here is the same violation it would be in `py/`.
+`ci/ruff/pyproject.toml` and no second lockfile — a violation here is the same violation
+it would be in `py/`.
+
+**`per-file-ignores` is not banned — it ships unused.** An earlier draft of this gate
+banned `[tool.ruff.lint.per-file-ignores]` outright, which contradicted this repo's own
+idiom: `T_EXEMPT`, `ALLOW_DEAD_INPUT`, `BRANCH_SKIP`, `COE_SKIP`, `ALLOW_UNLOCKED_CARGO`
+and every other exemption table in this repo ships a *reasoned* exception, not a
+blanket refusal. The mechanism is available the same way, requiring a stated reason for
+any entry; it simply has none today. Every violation this gate found when it was first
+run over `ci/` (the three `RUF005`s above, and every finding from the full-corpus review
+that followed) was fixed rather than exempted, so there is nothing latent this hatch is
+hiding — a future genuine exception (a fixture file that must contain deliberately bad
+style, say) has a documented way in instead of forcing a hack or a spec amendment.
 
 ## What it asserts
 
@@ -58,14 +69,28 @@ ruff check .` is not reused here: `py/uv.lock` can genuinely be stale in a worki
 and without the split that reds this gate for a reason a contributor would "fix" by
 re-locking a file this gate has no business touching.
 
-Verified live (Step 5 of the implementation task): temporarily pointing `resolve_ruff`
-at a `uv` project with no `ruff` installed (`--project ci/release-plan`) produces
+Verified live: temporarily pointing `resolve_ruff` at a `uv` project with no `ruff`
+installed (`--project ci/release-plan`) produces
 
 ```
 ruff-ci: could not resolve ruff via 'uv run --locked --project py' — run 'uv sync --project py'
 ```
 
 at **rc 2**, never rc 1.
+
+**Provenance, not just presence (whole-branch review, I1).** `shutil.which` is
+PATH-based, and that opened a gap "resolve, then assert `[ -x ]`" alone didn't close:
+if the `py` uv project does not actually contain `ruff` — a `[dependency-groups]`
+rename, a `[tool.uv] default-groups` change, or `UV_NO_DEV=1` at invocation time, all
+real uv knobs that leave `uv run`'s own exit status at 0 — `which` silently falls
+through to whatever `ruff` is first on the OUTER host PATH, and `[ -x ]` passes on that
+impostor. MEASURED: with `ruff` removed from `py/.venv/bin` and a host impostor earlier
+on `PATH`, the bare `shutil.which` resolver printed the impostor's path at exit 0 —
+exactly the "strictness is a property of the host" failure SMA-525 refused, now green.
+The fix requires the resolved path to live under `sys.prefix`, which under `uv run
+--project py` IS `py/.venv` (measured) — a same-process check no outer-`PATH`
+manipulation can spoof. Re-run with the fix in place, the same setup now exits 1 from
+the `-c` program (routed to `die_infra`, rc 2) instead of printing the impostor's path.
 
 ## Corpus derivation: `git ls-files`, not a glob ruff walks itself
 
@@ -101,7 +126,19 @@ stops a moved or renamed `ci/` directory from silently emptying the gate: `git
 ls-files` returning zero rows is not a lint pass, it is the corpus collapsing, and
 `repo:input-liveness` cannot see this (`ci/affected-graph/task_inputs.py` only proves
 that *declared* Moon task inputs are live — it has no view of what a gate's own script
-derives at runtime).
+derives at runtime). Deleting a single `ci/**/*.py` file is a legitimate change that can
+still trip this floor, so the die message names the fix (lower `CORPUS_FLOOR` to match
+the new, smaller, legitimate corpus) rather than only describing the symptom.
+
+**A `git` failure while deriving the corpus is an infrastructure failure, not a lint
+verdict (whole-branch review, M4).** The corpus used to be read with `mapfile -t files <
+<(ruff_corpus "$root")` — a process substitution, whose exit status bash discards. A
+`git ls-files` failure inside `ruff_corpus` (run outside any git repository, say) would
+silently read as zero lines and fall straight into the floor check, reporting **rc 1**
+("the repo is wrong") for what is actually an environmental fault, in violation of the
+exit-code contract this gate documents for itself. `run_check` now captures
+`ruff_corpus`'s output through a plain command substitution and checks its exit status
+explicitly, routing a `git` failure to `die_infra` (**rc 2**) instead.
 
 ## Why the negative control runs OUTSIDE the worktree, in a bare `mktemp -d`
 
@@ -191,3 +228,32 @@ latent rather than active. Fixing it properly would mean giving `ci/` its own `s
 entry (or its own Ruff section) without turning that into the second-configuration
 problem this gate exists to avoid — left as a follow-up if and when a `ci/` file
 actually needs a sibling import.
+
+## Further limitations (whole-branch review)
+
+**L11 — `check_self_scheduled_coverage` reads only a task's `script:` key.** It derives
+its "must have a `SELF_SCHEDULED_GATES` entry" set from `_scripts()`, which reads the
+resolved `script:` block of a `repo:*` moon task. A future self-scheduled gate written
+as `command:` + `args:` instead of a `script:` block would be invisible to this check —
+it would carry a `--self-test`/`--negative-control`-shaped invocation that
+`check_self_scheduled_coverage` never sees, and could ship with no
+`SELF_SCHEDULED_GATES` entry undetected. Not reachable today: every `repo:*` gate in
+this repo is written as a `script:` block.
+
+**L12 — the pinned corpus-derivation line can go dead without reddening.**
+`RUFF_SH_CALL_SITES` pins the `git -C "$root" ls-files -- ...` line *inside*
+`ruff_corpus()`, but `run_check`'s own *call* to `ruff_corpus` is not itself pinned. A
+rewrite of `run_check` that stopped calling `ruff_corpus` altogether (inlining a
+different derivation, say) would leave the pinned line intact in a function nothing
+calls, and the pin would keep passing while asserting nothing about what `run_check`
+actually does. This is the same residual shape `ci/release-parity/README.md`'s L5
+records for its own pinned-but-orphanable line.
+
+**L13 — the negative control's rc-1 check cannot distinguish "ruff caught it" from
+"the floor tripped."** `negative_control()` asserts only that the gate exits **rc 1** on
+its planted `RUF005` violation — and the corpus floor (`CORPUS_FLOOR`) also exits rc 1
+on its own, unrelated failure. If the control's fixture corpus ever shrank below the
+floor (it does not today: the fixture copies the real `ci/` tree, which is always well
+above 10 files), the control would report "passed" at rc 1 without the planted
+violation having been reached by ruff at all. Not reachable today, and noted here so a
+future change to the fixture's construction re-checks this.
