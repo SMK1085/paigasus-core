@@ -29,6 +29,10 @@ import sys
 import tempfile
 import tomllib
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 # --- The pinned vocabulary ---------------------------------------------------------------------
 
@@ -430,6 +434,21 @@ def _malformed_config_asserts_three() -> str | None:
         shutil.rmtree(tmp)
 
 
+# The collection-layer rows: paths a pure-function fixture cannot reach, because they need a
+# filesystem. Module-level so `--collection-count` can count them and so self_test()'s floor
+# below has something to floor; the FIXTURES floor's own comment explains why a countable
+# table matters.
+COLLECTION_ROWS: tuple[tuple[str, Callable[[], str | None]], ...] = (
+    ("a missing release-plz.toml is inconclusive", _missing_config_is_inconclusive),
+    ("a workspace-inherited version is inconclusive", _workspace_version_is_inconclusive),
+    ("a git_tag_name override is inconclusive", _tag_name_override_is_inconclusive),
+    ("a member outside crates/*/* is still demanded a tag", _member_outside_crates_is_seen),
+    ("an unresolvable workspace member is inconclusive", _unresolvable_member_is_inconclusive),
+    ("a malformed release-plz.toml makes --assert exit 3, not 1",
+     _malformed_config_asserts_three),
+)
+
+
 def self_test() -> int:
     rc = 0
     # An emptied FIXTURES list makes the loop below run zero times and return 0 — a self-test
@@ -447,18 +466,17 @@ def self_test() -> int:
             print(f"FAIL {label!r}: expected {want}, got {got} ({reason})", file=sys.stderr)
             rc = 3
 
-    # Collection-layer rows, which need the filesystem rather than the pure function.
-    for label, fn in (
-        ("a missing release-plz.toml is inconclusive", _missing_config_is_inconclusive),
-        ("a workspace-inherited version is inconclusive", _workspace_version_is_inconclusive),
-        ("a git_tag_name override is inconclusive", _tag_name_override_is_inconclusive),
-        ("a member outside crates/*/* is still demanded a tag", _member_outside_crates_is_seen),
-        ("an unresolvable workspace member is inconclusive",
-         _unresolvable_member_is_inconclusive),
-        ("a malformed release-plz.toml makes --assert exit 3, not 1",
-         _malformed_config_asserts_three),
-    ):
-        err = fn()
+    # EVERY call is wrapped. A helper that raises anything other than a returned error string
+    # would otherwise escape main() and exit the interpreter at 1 — which README.md's "0, 2 or 3,
+    # never 1" contract forbids, and which run_checker would then map onto die_infra (2),
+    # reporting "uv or the interpreter failed" for a broken repository file. Tasks 2-4 add
+    # fixtures whose mutations raise AttributeError and KeyError, so this is load-bearing, not
+    # defensive decoration.
+    for label, fn in COLLECTION_ROWS:
+        try:
+            err = fn()
+        except Exception as exc:  # deliberately broad; see the comment above
+            err = f"raised {type(exc).__name__}: {exc}"
         if err:
             print(f"FAIL {label!r}: {err}", file=sys.stderr)
             rc = 3
@@ -509,12 +527,16 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--self-test", action="store_true")
     ap.add_argument("--assert", dest="do_assert", action="store_true")
     ap.add_argument("--fixture-count", action="store_true")
+    ap.add_argument("--collection-count", action="store_true")
     ap.add_argument("--event-name", default="")
     ap.add_argument("repo_root", nargs="?", default=".")
     args = ap.parse_args(argv)
 
     if args.fixture_count:
         print(len(FIXTURES))
+        return 0
+    if args.collection_count:
+        print(len(COLLECTION_ROWS))
         return 0
     if args.self_test:
         return self_test()
