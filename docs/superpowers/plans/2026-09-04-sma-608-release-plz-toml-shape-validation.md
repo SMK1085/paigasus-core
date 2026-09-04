@@ -292,7 +292,18 @@ uv run --locked --project ci/release-plan --python '>=3.12' python3 \
   ci/release-plan/release_plan.py --self-test; echo "rc=$?"
 ```
 
-Expected: `rc=3` with four `FAIL` lines. The two `[workspace]` rows and the table-valued `package` row report *"did not raise InconclusiveError"* (today's bypasses — this is the bug reproduced). The `package = ["a"]` row reports *wrong reason* or *raised AttributeError*: record which, verbatim.
+Expected: `rc=3` with four `FAIL` lines. The `package = ["a"]` row reports *wrong reason* or *raised AttributeError*: record which, verbatim.
+
+**Corrected during execution (Task 8, found by running it).** This step originally predicted the
+two `[workspace]` rows and the table-valued `package` row would each report *"did not raise
+InconclusiveError"*. MEASURED, they do not: today's `or {}`/`or []` fallback lets each malformed
+shape pass `assert_default_tag_format` without raising, and the fixture tree carries no
+`rs/Cargo.toml` (§3.4's E9b fall-through), so collection falls through to `load_toml`'s own
+`InconclusiveError("cannot read …/rs/Cargo.toml: …")` further down. `_shape_fixture` reports that
+as a *wrong-reason* `InconclusiveError` (the marker string is absent from the message), not "did
+not raise". The bypass is still genuinely demonstrated — a wrong-reason report means the guard did
+not raise for the shape it was supposed to catch — only the stated failure MODE was wrong, not the
+fact of the bypass.
 
 - [ ] **Step 3: Write `config_sections`**
 
@@ -380,6 +391,16 @@ Replace its first three statements:
                if isinstance(p, dict) and isinstance(p.get("name"), str)}
 ```
 
+**Corrected during execution (Task 8, found by running it — see Task 3 Step 5/M9).** The comment
+above predicts `p["name"]` raises `KeyError` when the name check is neutered. MEASURED, it does
+not: the retained `isinstance(p.get("name"), str)` filter short-circuits the comprehension before
+`p["name"]` is ever evaluated, dropping the bad entry silently, and `releasable_packages` falls
+through to an unrelated `InconclusiveError` further down (`crate_manifests` can't find
+`rs/Cargo.toml` in the fixture tree). Only the element-check mutation actually raises
+(`AttributeError`, from `config_sections`'s own `entry.get("name")`, before either belt runs). The
+shipped comment (commit `b92a3bb`) says so; this plan's inline snippet is left as originally
+written for the historical record, corrected here rather than silently.
+
 - [ ] **Step 7: Run to verify all four pass**
 
 ```bash
@@ -413,8 +434,10 @@ run_mut() { # $1 sed expr, $2 label
   sed "$1" ci/release-plan/release_plan.py > "$T/m.py"
   cmp -s ci/release-plan/release_plan.py "$T/m.py" && { echo "$2: VACUOUS - sed matched nothing"; return; }
   echo "--- $2 ---"
-  uv run --locked --project ci/release-plan --python '>=3.12' python3 "$T/m.py" --self-test 2>&1 | head -6
-  echo "rc=${PIPESTATUS[0]}"
+  local out rc=0
+  out="$(uv run --locked --project ci/release-plan --python '>=3.12' python3 "$T/m.py" --self-test 2>&1)" || rc=$?
+  printf '%s\n' "$out" | head -6
+  echo "rc=$rc"
 }
 run_mut 's/if not isinstance(workspace, dict):/if False and not isinstance(workspace, dict):/' M1
 run_mut 's/if not isinstance(packages, list):/if False and not isinstance(packages, list):/'   M2
@@ -423,6 +446,8 @@ rm -rf "$T"
 ```
 
 Expected: each prints `rc=3`. M1 reds rows 7 and 8; M2 reds row 9; M3 reds row 10. **M3's mechanism is expected to differ from the spec's §3.1 prediction** — with the element check neutered, `entry.get("name")` (added in Task 3) or the comprehension raises `AttributeError`, so the row reports `raised AttributeError` via Task 1's wrapper rather than its marker's wrong-reason string. Either is a red; record which occurred.
+
+**Corrected during execution (Task 8, found by running it).** `run_mut`'s original `rc=${PIPESTATUS[0]}` read is empty under this environment's `/bin/zsh` — MEASURED: `false | true; echo "${PIPESTATUS[0]}"` prints nothing (zsh's array is `$pipestatus`, lowercase, not bash's `PIPESTATUS`). Every mutation step used this pattern; `run_mut` above now captures the command's own exit status directly via `|| rc=$?` before piping the already-captured output through `head`, which works under both shells.
 
 - [ ] **Step 10: Lint and commit**
 
@@ -553,15 +578,19 @@ T=$(mktemp -d)
 sed 's/if not isinstance(name, str) or not name:/if False:/' \
   ci/release-plan/release_plan.py > "$T/m.py"
 cmp -s ci/release-plan/release_plan.py "$T/m.py" && echo "VACUOUS"
-uv run --locked --project ci/release-plan --python '>=3.12' python3 "$T/m.py" --self-test 2>&1 | head -4
-echo "rc=${PIPESTATUS[0]}"
+rc=0
+out="$(uv run --locked --project ci/release-plan --python '>=3.12' python3 "$T/m.py" --self-test 2>&1)" || rc=$?
+printf '%s\n' "$out" | head -4
+echo "rc=$rc"
 sed 's/if name in seen:/if False:/' ci/release-plan/release_plan.py > "$T/d.py"
-uv run --locked --project ci/release-plan --python '>=3.12' python3 "$T/d.py" --self-test 2>&1 | head -4
-echo "rc=${PIPESTATUS[0]}"
+rc=0
+out="$(uv run --locked --project ci/release-plan --python '>=3.12' python3 "$T/d.py" --self-test 2>&1)" || rc=$?
+printf '%s\n' "$out" | head -4
+echo "rc=$rc"
 rm -rf "$T"
 ```
 
-Expected: both `rc=3`. Confirm the nameless mutation reports a **typed** failure (the retained `isinstance(p.get("name"), str)` belt keeps `p["name"]` from raising `KeyError`) — record which of the two shapes occurred.
+Expected: both `rc=3`. Confirm the nameless mutation reports a **typed** failure (the retained `isinstance(p.get("name"), str)` belt keeps `p["name"]` from raising `KeyError`) — record which of the two shapes occurred. MEASURED (Task 8, found by running it): the belt prevents any exception at all — not a caught `KeyError`, a silent filter — and the nameless mutation reports the generic `cannot read …/rs/Cargo.toml` fall-through (§3.4's E9b) rather than a marker-specific wrong-reason string; see the corrected comment note after Task 2 Step 6 and spec §3.1.
 
 - [ ] **Step 6: Lint and commit**
 
@@ -738,8 +767,10 @@ awk -v k="$K" '$0 ~ k{n++; if(n==2){sub(/except Exception/,"except InconclusiveE
 for f in run assert; do
   cmp -s ci/release-plan/release_plan.py "$T/$f.py" && { echo "$f: VACUOUS"; continue; }
   echo "--- narrowed $f() catch ---"
-  uv run --locked --project ci/release-plan --python '>=3.12' python3 "$T/$f.py" --self-test 2>&1 | head -4
-  echo "rc=${PIPESTATUS[0]}"
+  rc=0
+  out="$(uv run --locked --project ci/release-plan --python '>=3.12' python3 "$T/$f.py" --self-test 2>&1)" || rc=$?
+  printf '%s\n' "$out" | head -4
+  echo "rc=$rc"
 done
 rm -rf "$T"
 ```
@@ -755,8 +786,10 @@ T=$(mktemp -d)
 sed 's/f"rs\/release-plz.toml.s \[\[package\]\] entry at index {i} has no string name")/f"rs\/release-plz.toml is not a table {i}")/' \
   ci/release-plan/release_plan.py > "$T/m.py"
 cmp -s ci/release-plan/release_plan.py "$T/m.py" && echo "VACUOUS - adjust the sed to match the real line"
-uv run --locked --project ci/release-plan --python '>=3.12' python3 "$T/m.py" --self-test 2>&1 | head -4
-echo "rc=${PIPESTATUS[0]}"
+rc=0
+out="$(uv run --locked --project ci/release-plan --python '>=3.12' python3 "$T/m.py" --self-test 2>&1)" || rc=$?
+printf '%s\n' "$out" | head -4
+echo "rc=$rc"
 rm -rf "$T"
 ```
 
@@ -909,10 +942,19 @@ export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
 cd /Users/sven/dev/paigasus/paigasus-core
 grep -n "nine load-bearing lines" moon.yml
 grep -n "those nine lines" ci/actionlint/run.sh
-grep -n "pins nine" ci/affected-graph/ci_targets.py
+grep -n "nine pinned lines in" ci/affected-graph/ci_targets.py
 ```
 
-Change each "nine" to "ten" in: `moon.yml:216-217`, `ci/actionlint/run.sh:2140-2141`, and the `ci_targets.py` header comment. Re-run the greps to confirm zero remaining.
+**Corrected during execution (Task 8, found by running it).** The third grep above originally read
+`grep -n "pins nine" ci/affected-graph/ci_targets.py`, a string that never occurs in the file — the
+real third prose site reads *"one of the nine pinned lines in"* (`ci_targets.py`, in the
+`missing_sites` diagnostic's `ci/release-plan/run.sh:` "Fix:" guidance text, near `:3235`/`:3240`),
+so the original grep matched nothing even before the fix and gave false confidence that this site
+did not need updating. Use the grep above instead.
+
+Change each "nine" to "ten" in: `moon.yml:216-217`, `ci/actionlint/run.sh:2140-2141`, and both
+occurrences of "one of the nine pinned lines in" in `ci_targets.py`. Re-run the greps to confirm
+zero remaining.
 
 - [ ] **Step 7: Verify the pin gate**
 

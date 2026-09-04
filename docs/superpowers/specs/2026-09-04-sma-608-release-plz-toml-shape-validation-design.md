@@ -185,16 +185,32 @@ entries = {p["name"]: p for p in package_entries
 **The comprehension's two filters are RETAINED VERBATIM, reversing the first draft.** They no
 longer function as validation — `config_sections` now asserts both properties and raises — so what
 they are is *typed-failure belts*, and that is the only reason to keep them. E2 called it
-duplication worth removing. Removing it is what makes M3 fail: MEASURED, with the element check
-neutered and `package = ["a"]`, `"git_tag_name" in "a"` is `False` (string containment, no raise)
-and the comprehension then evaluates `"a".get` -> `AttributeError: 'str' object has no attribute
-'get'`. `self_test()` calls each helper bare (`:461`), so that escapes and the interpreter exits
-**1 with a traceback** — breaking `README.md:139-141`'s "0, 2 or 3, never 1" contract and routing
-a repo-shape failure onto `die_infra` (2). The `isinstance(p.get("name"), str)` filter is retained
-for the identical reason one step over: with the name check in `config_sections` neutered, a
-nameless entry reaches `p["name"]` and raises an untyped `KeyError`. Each belt costs one
-`isinstance` and keeps the mutated failure **typed**, so the fixture reports its designed
-wrong-reason string instead of a traceback.
+duplication worth removing.
+
+**Correction (Task 8, M3/M9): the two belts do NOT both work the way the paragraph originally
+argued.** The claim above was that removing a belt is what makes its paired mutation (M3 for the
+`dict` belt, M9 for the `name` belt) fall through untyped. MEASURED on the shipped code — belts
+retained, only the paired mutation applied — this holds for one belt and not the other:
+
+* **`isinstance(p, dict)` does not intercept M3.** With `config_sections`'s element check neutered
+  and a non-`dict` package entry present, the failure fires **inside `config_sections` itself**,
+  before either comprehension belt is ever reached: the function's own name check calls
+  `entry.get("name")` unconditionally, and on a non-`dict` entry that raises
+  `AttributeError: 'str' object has no attribute 'get'` there, not in `releasable_packages`'s
+  comprehension. The gate still reds — §3.5's `self_test()` wrapper (added by this spec) catches
+  any escaping exception and reports it as a failure at rc 3, so the "0, 2 or 3, never 1" contract
+  still holds — but the mechanism is "the wrapper caught an exception `config_sections` raised",
+  not "the belt kept the mutated failure typed". The belt is retained as defense-in-depth against a
+  package entry reaching `releasable_packages` some other way, not because it is what saves M3.
+* **`isinstance(p.get("name"), str)` does intercept M9, as originally claimed.** With the name
+  check in `config_sections` neutered, a nameless entry no longer raises there — it comes back as a
+  `dict` with `name` missing or non-`str` — and this belt is what filters it out of `entries`,
+  stopping the untyped `KeyError` a bare `p["name"]` would raise. Collection then falls through to
+  the generic `cannot read …/rs/Cargo.toml` message (§3.4's E9b fall-through — the fixture tree
+  carries no `rs/Cargo.toml` by design), a typed wrong-reason report rather than a traceback.
+
+Both belts are still justified — one as a defense-in-depth belt that happens not to be what saves
+M3, the other as the actual mechanism M9 depends on — but for different reasons than first argued.
 
 The consolidation this spec delivers is therefore of the *validation predicate* — written twice
 today and wrong both times, now asserted once in `config_sections`. The comprehension defends; it
@@ -241,7 +257,13 @@ Every new raise is `InconclusiveError`. `run()` converts it to `nothing_to_relea
 `_assert_repo()` converts it to exit 3. E7's duplicate-name raise **removes** a SKIP path. No shape
 reachable through `config_sections` can produce a skip.
 
-### 3.4 Fixtures: eight new rows, taking the tuple to fourteen
+### 3.4 Fixtures: nine new rows, taking the tuple to fifteen
+
+**Corrected during implementation (Task 8).** This section originally specified eight new rows
+(7-14), taking the tuple to fourteen. A ninth new row was added, `_markers_are_mutually_exclusive`
+(row 15, described below), implementing M10 as a permanent fixture rather than a one-time
+measurement — see §7's measured-outcomes note. The counts below are corrected accordingly; the
+floor stays 12 (§3.6).
 
 * **7. `_workspace_not_a_table_is_inconclusive`** — `workspace = []`, the falsy shape.
   (`workspace = 3`, the truthy-scalar shape, stays covered by `_malformed_config_asserts_three`,
@@ -266,6 +288,12 @@ reachable through `config_sections` can produce a skip.
   `(False, ...)` with a reason naming `AttributeError`, never raise. Row 12 covers `_assert_repo`'s
   catch; this covers `run()`'s, which E8 found had **no** coverage at all, before or after this
   change. Together they make §4's "neither broad catch is narrowed" enforceable on both catches.
+* **15. `_markers_are_mutually_exclusive`** — implements M10 as a **permanent fixture**, not a
+  one-time measurement (deviation from this section's original wording, corrected here — see §7).
+  For each of the five §3.2 markers, calls `config_sections` directly against a minimal TOML
+  fixture built to trigger exactly that shape error, then asserts the marker matches its own raised
+  message and no other marker's. Distinctness (§3.2) is easy to break by rewording a message; this
+  row makes a future reword fail CI instead of silently drifting.
 
 **Each fixture's fall-through, stated correctly (E9b).** A crate-less tree does **not** reach
 `crate_manifests`' "no crate manifests" branch. It dies at `load_toml`'s
@@ -299,7 +327,8 @@ under `if TYPE_CHECKING:`; with `from __future__ import annotations` already at 
 `from collections.abc import Callable` used only in an annotation trips ruff `TC003` under
 `repo:ruff-ci` (`py/pyproject.toml:25`).
 
-`self_test()` floors it at **12** against fourteen actual rows. Critically, the floor gets the twin
+`self_test()` floors it at **12** against fifteen actual rows (corrected during implementation,
+Task 8 — this section originally said fourteen; see §3.4). Critically, the floor gets the twin
 the `FIXTURES` floor has and the first draft's did not: a new `--collection-count` flag prints the
 tuple's length, and `release_plan_self_test` in `ci/actionlint/run.sh` floors it at 10 alongside the
 existing `--fixture-count` check, floored at 12. **Do not widen `--fixture-count`** — its consumer at
@@ -435,3 +464,16 @@ Each must be run and recorded; none may be argued from the code.
   retained `isinstance(p.get("name"), str)` belt keeps it from becoming a `KeyError` traceback.
 * **M10** — confirm the five match substrings in §3.2 are mutually non-overlapping against the five
   real emitted messages, by assertion rather than by reading.
+
+**Measured outcomes (recorded during implementation, Task 8).** M1-M10 all passed. One mechanism
+differed from its prediction: **M3**'s bullet above predicts that retaining `isinstance(p, dict)`
+produces "a clean wrong-reason report, not the `AttributeError` traceback". MEASURED, the
+`AttributeError` is real, but it fires **inside `config_sections`** (its own name check calls
+`entry.get("name")` unconditionally) before the retained belt is ever reached, not in the
+comprehension the belt guards — and it is still caught and reported at rc 3 by §3.5's
+`self_test()` wrapper rather than escaping as a traceback, so the never-1 contract holds by a
+different mechanism than the one this section originally named. See §3.1's corrected belt
+paragraph for the full account, including the contrasting M9 measurement (where the retained
+`isinstance(p.get("name"), str)` belt is what actually fires as predicted). M10 was additionally
+implemented as the permanent fixture `_markers_are_mutually_exclusive` (row 15, §3.4) rather than
+a one-time check-and-discard measurement.
