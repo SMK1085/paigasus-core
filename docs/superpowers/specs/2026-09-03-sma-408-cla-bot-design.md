@@ -150,9 +150,11 @@ exist to prevent.
   red rather than green-and-silent.
 - **Trigger:** `issue_comment: types: [created]` only. Never `pull_request_target`.
 - **Permissions:** `permissions: {}`. The endpoint is unauthenticated; the job needs no token.
-- **Guard:** `if: github.event.issue.pull_request && startsWith(trim(github.event.comment.body), '/check-cla')`.
-  `startsWith(trim(...))` rather than `contains()`, because `contains()` self-triggers on any
-  comment that merely quotes the CONTRIBUTING instruction.
+- **Guard:** `if: github.event.issue.pull_request && startsWith(github.event.comment.body, '/check-cla')`.
+  `startsWith` rather than `contains`, because `contains` self-triggers on any comment that
+  merely quotes the CONTRIBUTING instruction. **No `trim()`** — GitHub Actions expressions have
+  no such function (the string set is contains/startsWith/endsWith/format/join), so calling one
+  is an actionlint error. The cost is that leading whitespace in the body does not match.
 - **`concurrency: { group: cla-retrigger-${{ github.event.issue.number }}, cancel-in-progress: true }`
   and `timeout-minutes: 5`.** Any GitHub account can comment on a public repo, so this trigger is
   world-reachable. Actions minutes are free on public repos, but the account-level concurrent-job
