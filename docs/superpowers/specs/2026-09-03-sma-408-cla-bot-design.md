@@ -40,8 +40,11 @@ This issue is **not fully automatable**, and the AC reads as if it were. Two hal
 | Service linking | **Sven, in a browser** | Authorize cla-assistant.io's OAuth app, link `paigasus-core`, point it at the CLA document, set the allowlist |
 | Repo artifacts | This PR | The CLA text, the retrigger workflow, the CONTRIBUTING rewrite |
 
-The PR cannot verify the first half. AC-4 ("CLA flow verified end-to-end") is therefore
-satisfied by its own documented-path fallback, not by a live test — see Verification.
+The PR cannot verify the first half. AC-4 ("CLA flow verified end-to-end") is therefore **not
+closed by this PR at all**: it needs a second GitHub account and a live signing round-trip, and
+it is filed as SMA-611 rather than satisfied by the issue's documented-path fallback. SMA-611
+also carries the two measurements that gate the required-check rollout — a passing status for an
+allowlisted author, and the exact check context name. See Verification.
 
 ## Design
 
@@ -403,8 +406,8 @@ All four questions raised by the adversarial review are now settled:
       `repo:publish-metadata`, which select on everything, only run once the PR opens — CI
       there is the authority for this criterion)**
 - [x] Handoff note in the PR description stating exactly what Sven must do in the browser
-      (drafted at `.superpowers/sdd/2026-09-04-sma-408-cla-bot/handoff.md`, to be pasted
-      verbatim into the PR description when it is opened)
+      (published in PR #213's description, under "Manual steps"; the drafting copy lives in the
+      git-ignored `.superpowers/sdd/` scratch and is deliberately not part of the repository)
 - [ ] Post-merge: `/check-cla` smoke run recorded on the issue **(open — requires a merged PR)**
 
 ## Files touched

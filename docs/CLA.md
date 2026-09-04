@@ -95,7 +95,9 @@ interest in and to Your Contributions.
 ## How to accept
 
 Signing through [cla-assistant.io](https://cla-assistant.io/) on your first pull request
-constitutes your acceptance of this Agreement. You only need to do this once.
+constitutes your acceptance of this Agreement. You accept once per version of this Agreement:
+one signature covers all of your Contributions while that version is in force, and you will be
+asked to accept again only if a substantive revision bumps the version (see Versioning below).
 
 ## Versioning
 
