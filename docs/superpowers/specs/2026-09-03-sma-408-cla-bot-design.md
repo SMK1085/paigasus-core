@@ -249,12 +249,26 @@ Two findings from doing this properly:
 
 **A latent defect in `release.yml`.** `.github/workflows/release.yml:384-385` configures the
 version-lockstep stamping commit as `paigasus-release[bot]` /
-`paigasus-release[bot]@users.noreply.github.com`. That address lacks the `<id>+<login>@` form
-every resolvable bot identity above uses, so GitHub returns `author: null` for such a commit and
-the allowlist cannot name it. It has produced **zero** commits to date — the step is conditional
-on there being something to stamp — so nothing is broken today. But the first time it fires on a
-release PR, that PR gets an unresolvable commit author and the CLA check blocks it. **Fix
-`release.yml` to use the resolvable form** rather than allowlisting an unresolvable identity.
+`paigasus-release[bot]@users.noreply.github.com`. It has produced **zero** commits to date — the
+step is conditional on there being drift to stamp — so nothing is broken today. But the first
+time it fires on a release PR, that PR gets a commit author the allowlist cannot name and, once
+the CLA check is required, the PR blocks.
+
+**The obvious fix is wrong, so state the right one.** The problem is not only the missing
+`<id>+` prefix: **the login `paigasus-release[bot]` does not exist.** It appears in exactly two
+places in this repo — `release.yml:384-385`, and
+`docs/superpowers/plans/2026-08-22-sma-576-kernel-floor-and-lockstep-gate.md:1098`, which is
+where it was invented and copied from. It has never authored a commit and resolves to no
+account, so prefixing it (`<id>+paigasus-release[bot]@…`) yields something equally
+unresolvable — there is no id for a login that does not exist.
+
+The App's real bot user is **`paigasusbot[bot]`, id 285361405**. It authored both release
+commits on `main` (`1d2d0e9`, `64c9624`) as
+`285361405+paigasusbot[bot]@users.noreply.github.com`, via release-plz's own git config under
+the App token rather than via line 384. So the correct values are name `paigasusbot[bot]` and
+email `285361405+paigasusbot[bot]@users.noreply.github.com` — an identity already on the
+allowlist, which is why fixing `release.yml` is the whole fix and no allowlist change follows
+from it.
 
 **The author-email trap is already in this repo's history.** One commit on `main` is authored
 `Sven Maschek <smaschek@outlook.com>`, which resolves to no login. It predates the CLA and is
