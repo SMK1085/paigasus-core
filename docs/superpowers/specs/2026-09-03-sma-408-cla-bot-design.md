@@ -415,6 +415,8 @@ All four questions raised by the adversarial review are now settled:
 | `.github/workflows/cla-retrigger.yml` | new |
 | `ci/workflow-credentials/workflow_credentials.py` | D4: trigger set, subject pin, control rows |
 | `ci/workflow-credentials/README.md` | D4: headline, Discovery and Non-goals rewritten |
+| `ci/workflow-credentials/run.sh` | D4: gate description no longer says pull-request-only |
+| `moon.yml` | D4: the `repo:workflow-credentials` task description moon prints |
 | `CONTRIBUTING.md` | rewrite `:212-217` |
 | `docs/superpowers/specs/2026-09-03-sma-408-cla-bot-design.md` | this spec |
 | `docs/superpowers/plans/2026-09-04-sma-408-cla-bot.md` | implementation plan |
