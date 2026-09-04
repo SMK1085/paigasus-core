@@ -709,9 +709,10 @@ def self_test() -> int:
     rc = 0
     # An emptied FIXTURES list makes the loop below run zero times and return 0 — a self-test
     # that silently stops testing anything still reads as a pass. This floor is IN-PROCESS and
-    # deliberately duplicated by a second, independent floor in ci/release-plan/run.sh's own
-    # negative control (this repo's usual idiom for a self-scheduled gate: two copies in two
-    # files, not one shared helper, so deleting either one leaves the other standing).
+    # deliberately duplicated by a second, independent floor in ci/actionlint/run.sh's check 11
+    # (`--fixture-count`), which is scheduled separately from this file — this repo's usual idiom
+    # for a self-scheduled gate: two copies in two files, not one shared helper, so deleting
+    # either one leaves the other standing.
     if len(FIXTURES) < 8:
         print(f"FAIL FIXTURES has only {len(FIXTURES)} row(s); the floor is 8 — "
               "something emptied or gutted the fixture table", file=sys.stderr)
@@ -733,6 +734,15 @@ def self_test() -> int:
     # nothing — releasable_packages's own belt filters the bad entry out instead — so this
     # wrapper is load-bearing for the checks that DO raise, not a blanket guarantee that every
     # mutation does.
+    # The same reasoning as the FIXTURES floor above, for the collection rows. Deleting a helper
+    # from COLLECTION_ROWS otherwise reds nothing: check 11's --fixture-count floor counts
+    # FIXTURES only. Floored below the actual count so a legitimate row removal does not abort
+    # the gate as infra. Twinned by check 11's --collection-count floor in ci/actionlint/run.sh,
+    # in a separately scheduled file, so one edit cannot remove both.
+    if len(COLLECTION_ROWS) < 12:
+        print(f"FAIL COLLECTION_ROWS has only {len(COLLECTION_ROWS)} row(s); the floor is 12 — "
+              "something emptied or gutted the collection-layer table", file=sys.stderr)
+        rc = 3
     for label, fn in COLLECTION_ROWS:
         try:
             err = fn()
