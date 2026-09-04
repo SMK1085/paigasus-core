@@ -168,7 +168,10 @@ outside its scope, by decision, not by oversight:
 - **The `workflow_run` and `merge_group` triggers.** Both run with repository secrets,
   and `workflow_run` is a known attack path. Neither is used in this repository today.
   Adding either is a one-line change to the trigger set plus two new control rows, not
-  a redesign.
+  a redesign. `issue_comment` WAS in this list by omission until SMA-408; it is now
+  covered, following exactly that recipe, because SMA-408 introduced the repo's first
+  workflow using it. The precedent to draw: this list is a to-do, not a boundary — when
+  a workflow starts using one of these triggers, cover it in the same change.
 - **`${{ github.token }}` itself.** R5 does not look at token reads. A workflow may read
   `${{ github.token }}` freely — `.github/workflows/ci.yml:58` does so deliberately, and
   that use is correct. What R5 forbids is the WRITE SCOPE that would make such a read

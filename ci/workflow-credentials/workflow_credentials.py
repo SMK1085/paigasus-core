@@ -275,7 +275,7 @@ def _self_test() -> int:
     return RC_OK
 
 
-PR_TRIGGERS = frozenset({"pull_request", "pull_request_target"})
+PR_TRIGGERS = frozenset({"pull_request", "pull_request_target", "issue_comment"})
 
 # The subject set, pinned by STRICT EQUALITY. run.sh's sibling gate holds two discovered sets
 # the same way (EXPECTED_PUBLISHABLE, EXPECTED_PYPI_PUBLISHABLE) and Check P0 states the
@@ -283,6 +283,7 @@ PR_TRIGGERS = frozenset({"pull_request", "pull_request_target"})
 # pull-request-triggered workflow reds here until someone adds it, deliberately. (spec §5.2)
 EXPECTED_PR_SUBJECTS = (
     "ci.yml",
+    "cla-retrigger.yml",
     "images.yml",
     "prebuild.yml",
     "security-scan.yml",
@@ -374,7 +375,7 @@ def check(root: str) -> int:
     # membership. Counting after it would let "allowlist everything" pass. (spec §5.2)
     if tuple(subjects) != EXPECTED_PR_SUBJECTS:
         raise AssertionFailureError(
-            f"pull-request-triggered workflows are {subjects}, expected "
+            f"credential-bearing-trigger workflows are {subjects}, expected "
             f"{list(EXPECTED_PR_SUBJECTS)} — re-baseline EXPECTED_PR_SUBJECTS deliberately")
 
     stale = [name for (name, _rule) in PR_CREDENTIAL_ALLOWED if name not in subjects]
@@ -397,7 +398,8 @@ def check(root: str) -> int:
         raise AssertionFailureError(
             "a pull-request-triggered workflow can obtain a repository credential:\n"
             + "\n".join(reds)
-            + "\n  A same-repo pull request receives repository secrets, so this is readable "
+            + "\n  A same-repo pull request, and any issue comment, receives repository "
+              "secrets, so this is readable "
               "by any code the PR introduces. Publishing belongs in a workflow with no "
               "pull_request trigger (SMA-407 §7 review M2)."
         )
@@ -676,6 +678,11 @@ TRIGGER_CASES: tuple[tuple[str, str, bool], ...] = (
     # the strict loader has no duplicate to reject. The old `.get("on", .get(True))` returned
     # {'push'} here and the workflow silently left the subject set.
     ("dual on keys",    '"on": push\non:\n  pull_request:\njobs: {}\n', True),
+    # SMA-408. `issue_comment` runs in base-repo context with repository secrets, and on a
+    # public repo ANY account can trigger it. Same privileged class as pull_request_target.
+    ("issue_comment", "on:\n  issue_comment:\n    types: [created]\njobs: {}\n", True),
+    # Still false: a trigger that carries no repository secrets stays out of the subject set.
+    ("workflow_dispatch only", "on:\n  workflow_dispatch:\njobs: {}\n", False),
 )
 
 # Documents that must not reach the rules at all. Each must raise, and raise the RIGHT class:
