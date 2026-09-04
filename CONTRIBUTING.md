@@ -211,10 +211,42 @@ message if a config-only package is added without it.
 
 ## Contributor License Agreement
 
-Before your first contribution can be merged you'll be asked to sign a CLA
-(automated via a bot — currently being set up). The CLA preserves the project's
-ability to relicense and dual-license contributed code; external contributions
+Before your first contribution can be merged you'll be asked to sign our
+[Contributor License Agreement](./docs/CLA.md). You only need to do this once —
+[cla-assistant](https://cla-assistant.io/) comments on your first pull request with a
+link, and signing takes a click. The CLA preserves the project's ability to relicense
+and dual-license contributed code, and the check is required, so external contributions
 can't be merged without it.
+
+Maintainer and bot accounts (`SMK1085`, `dependabot[bot]`, `paigasusbot[bot]`) are
+allowlisted and never see the prompt.
+
+### If the CLA check stays red after you sign
+
+Two known causes, in the order you should check them.
+
+**The check is stuck.** cla-assistant has a long-standing bug where the check does not
+re-run after signing. Comment `/check-cla` on your pull request to ask it to re-check.
+That runs a workflow which — being comment-triggered — reports only in this repository's
+Actions tab, not on your pull request, so wait a few seconds and refresh the checks list
+rather than looking for a new check to appear. If it is still red after that, open an
+issue.
+
+**Your commits aren't attributed to your GitHub account.** cla-assistant matches the
+*commit author* email, not the account that opened the pull request. If your commits
+carry an email that isn't linked to your GitHub account, signing will never clear the
+check. Fix it with:
+
+```bash
+git config user.email "YOUR_GITHUB_EMAIL"
+git rebase --exec "git commit --amend --no-edit --reset-author" origin/main
+```
+
+### What we record
+
+Signing records your GitHub username, your commit email address, and a timestamp. Those
+records are held by cla-assistant.io, operated by SAP SE as processor. See the
+[CLA](./docs/CLA.md) for the retention position.
 
 ## Internal references
 
