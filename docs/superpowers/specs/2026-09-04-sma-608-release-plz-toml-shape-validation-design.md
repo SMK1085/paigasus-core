@@ -118,6 +118,22 @@ Cargo.toml-less tree the branch is unreachable anyway, because `crate_manifests`
 `cannot read …/rs/Cargo.toml`. (c) `ci/actionlint/run.sh:2140-2141` says "those **nine** lines",
 a third prose site counting `RELEASE_PLAN_SH_CALL_SITES`.
 
+**E10 — a nameless `[[package]]` entry loses its author's intent silently, and the file's own
+policy for that shape is to refuse.** `isinstance(p.get("name"), str)` drops an entry with no
+string `name`, so a `[[package]]` block carrying `release = false` but no `name` is discarded: the
+crate it meant to exempt stays in `out`, is permanently demanded a tag release-plz will never cut,
+and the skip becomes unreachable — silently. The direction is fail-safe (it BUILDS), which is why
+the first draft carved it out. But `workspace_members:121-130` refuses `[workspace] exclude`
+outright for the structurally identical reason, in this same file, and states the principle:
+"reading it as absent would over-derive … but it would also make the skip permanently unreachable,
+silently. Refusing loudly is the conscious-re-baseline direction this repo prefers." Two shapes
+with one structure should not get two policies.
+
+**E11 — the real config satisfies all five new assertions.** MEASURED against
+`rs/release-plz.toml`: `[workspace]` is a `dict`; `package` is a `list` of 13 entries; every entry
+is a table; every entry carries a non-empty string `name`; no name repeats. AC4 is safe against the
+duplicate-name and nameless-entry assertions as well as the three shape ones.
+
 ## 3. Design
 
 ### 3.1 One validator, consumed once
@@ -132,6 +148,7 @@ def config_sections(cfg: dict) -> tuple[dict, list[dict]]:
 * `workspace` absent -> `{}`. Present and not a `dict` -> `InconclusiveError`.
 * `package` absent -> `[]`. Present and not a `list` -> `InconclusiveError`. A `list` holding a
   non-`dict` element -> `InconclusiveError` naming the element's index.
+* An entry with no string `name` -> `InconclusiveError` naming its index (E10).
 * A `name` repeated across entries -> `InconclusiveError` naming it (E7).
 
 `cfg.get(key, default)` replaces `cfg.get(key) or default` **for these two `release-plz.toml`
@@ -165,24 +182,34 @@ entries = {p["name"]: p for p in package_entries
            if isinstance(p, dict) and isinstance(p.get("name"), str)}
 ```
 
-**`isinstance(p, dict)` is deliberately RETAINED, reversing the first draft.** E2 called it
+**The comprehension's two filters are RETAINED VERBATIM, reversing the first draft.** They no
+longer function as validation — `config_sections` now asserts both properties and raises — so what
+they are is *typed-failure belts*, and that is the only reason to keep them. E2 called it
 duplication worth removing. Removing it is what makes M3 fail: MEASURED, with the element check
 neutered and `package = ["a"]`, `"git_tag_name" in "a"` is `False` (string containment, no raise)
 and the comprehension then evaluates `"a".get` -> `AttributeError: 'str' object has no attribute
 'get'`. `self_test()` calls each helper bare (`:461`), so that escapes and the interpreter exits
 **1 with a traceback** — breaking `README.md:139-141`'s "0, 2 or 3, never 1" contract and routing
-a repo-shape failure onto `die_infra` (2). The guard costs one `isinstance` and keeps the mutated
-failure **typed**, so the fixture reports its designed wrong-reason string. The consolidation this
-spec delivers is of the *validation predicate*, which was genuinely written twice and wrongly both
-times; the comprehension's type guard is a belt, and §3.9 says so in the code.
+a repo-shape failure onto `die_infra` (2). The `isinstance(p.get("name"), str)` filter is retained
+for the identical reason one step over: with the name check in `config_sections` neutered, a
+nameless entry reaches `p["name"]` and raises an untyped `KeyError`. Each belt costs one
+`isinstance` and keeps the mutated failure **typed**, so the fixture reports its designed
+wrong-reason string instead of a traceback.
 
-**Deliberately out of scope: a nameless `[[package]]` entry.** The surviving
-`isinstance(p.get("name"), str)` filter still drops an entry with no string `name`. Adversarial
-review argued this is inconsistent with `workspace_members`' loud refusal of `[workspace] exclude`
-(`:121-130`), which rejects the same "intent silently lost" shape. The counter-argument is
-direction: a dropped entry only ever *grows* the demanded-tag set, so it BUILDS, whereas a dropped
-`exclude` makes the skip permanently unreachable. It is left out because it is outside the AC and
-fail-safe — **flagged at the gate as a live question, not settled.**
+The consolidation this spec delivers is therefore of the *validation predicate* — written twice
+today and wrong both times, now asserted once in `config_sections`. The comprehension defends; it
+does not decide. §3.9 requires the code to say so, so a future reader does not delete a filter that
+looks unreachable.
+
+**A nameless `[[package]]` entry is now an error (E10), reversing the first draft's carve-out.**
+The draft left it silently dropped on the grounds that the direction is fail-safe — a dropped entry
+only ever *grows* the demanded-tag set, so it BUILDS. Adversarial review argued that this is
+inconsistent with `workspace_members`' loud refusal of `[workspace] exclude` (`:121-130`), whose
+stated reason is that silently over-deriving "would also make the skip permanently unreachable,
+silently. Refusing loudly is the conscious-re-baseline direction this repo prefers." The shapes are
+structurally identical: the config author's intent is lost, the crate is permanently demanded a tag
+release-plz will never cut, and the skip becomes unreachable without anybody being told. The
+`exclude` precedent decides it — refuse loudly.
 
 ### 3.2 Markers, and the substrings fixtures match on
 
@@ -191,10 +218,17 @@ Each raise carries a marker no other raise in this module produces, and each nam
 
 | Shape | Emitted message contains | Fixture matches on |
 |---|---|---|
-| non-table `workspace` | `rs/release-plz.toml's [workspace] is not a table` | `[workspace] is not a table` |
-| non-array `package` | `rs/release-plz.toml's [[package]] is not an array of tables` | `[[package]] is not an array of tables` |
-| non-table element | `rs/release-plz.toml's [[package]] entry 0 is not a table` | `[[package]] entry` |
+| non-table `workspace` | `rs/release-plz.toml's [workspace] is not a table (got list)` | `[workspace] is not a table` |
+| non-array `package` | `rs/release-plz.toml's [[package]] is not an array of tables (got dict)` | `is not an array of tables` |
+| non-table element | `rs/release-plz.toml's [[package]] entry at index 0 is not a table (got str)` | `entry at index 0 is not a table` |
+| nameless entry | `rs/release-plz.toml's [[package]] entry at index 0 has no string name` | `has no string name` |
 | duplicate name | `rs/release-plz.toml declares [[package]] name 'k' twice` | `declares [[package]] name` |
+
+The five matched substrings are **mutually non-overlapping** — verified, not assumed: no one of
+them is a substring of any other emitted message. The obvious choices are not: matching the element
+row on `is not a table` would accept the `[workspace]` error, and matching it on `[[package]] entry`
+would accept the nameless-entry error. The fixture controls the index, so pinning `index 0` is
+stable.
 
 The **matched substrings** are pinned here, not just the emitted strings: matching row 3 on the
 obvious `"is not a table"` would accept a `[workspace]`-caused error as its own. Distinctness is
@@ -207,7 +241,7 @@ Every new raise is `InconclusiveError`. `run()` converts it to `nothing_to_relea
 `_assert_repo()` converts it to exit 3. E7's duplicate-name raise **removes** a SKIP path. No shape
 reachable through `config_sections` can produce a skip.
 
-### 3.4 Fixtures: six new rows, taking the tuple to twelve
+### 3.4 Fixtures: eight new rows, taking the tuple to fourteen
 
 * **7. `_workspace_not_a_table_is_inconclusive`** — `workspace = []`, the falsy shape.
   (`workspace = 3`, the truthy-scalar shape, stays covered by `_malformed_config_asserts_three`,
@@ -225,6 +259,14 @@ reachable through `config_sections` can produce a skip.
   `_malformed_config_asserts_three` loses, and it is what keeps §4's "neither broad catch is
   narrowed" enforceable rather than merely promised.
 
+* **13. `_nameless_package_entry_is_inconclusive`** — E10's shape: a `[[package]]` entry carrying
+  `release = false` and no `name`.
+* **14. `_untyped_collection_failure_builds`** — the `run()` half of E8. Same `package = 3` tree as
+  row 12, asserted through `run(tree, "push")` rather than `_assert_repo`: it must return
+  `(False, ...)` with a reason naming `AttributeError`, never raise. Row 12 covers `_assert_repo`'s
+  catch; this covers `run()`'s, which E8 found had **no** coverage at all, before or after this
+  change. Together they make §4's "neither broad catch is narrowed" enforceable on both catches.
+
 **Each fixture's fall-through, stated correctly (E9b).** A crate-less tree does **not** reach
 `crate_manifests`' "no crate manifests" branch. It dies at `load_toml`'s
 `cannot read …/rs/Cargo.toml`. That is still a *different* error, so the wrong-reason property the
@@ -232,11 +274,6 @@ fixtures need holds — but an implementer following the first draft's wording m
 `rs/Cargo.toml` chasing the named branch and change what M1-M3 observe. Each fixture builds a tree
 with **no `rs/Cargo.toml` and no `rs/crates/`**, and the expected fall-through is the `cannot read`
 message.
-
-**`run()`'s untested broad catch (E8) stays untested.** Closing it needs a row asserting
-`run(broken_tree, "push") == (False, "inconclusive (AttributeError: …) — build")`. That is cheap
-and in-theme, but it is a *new* control rather than a restoration, so it is **flagged at the gate**
-rather than assumed.
 
 ### 3.5 `self_test()`'s collection loop must not be able to exit 1
 
@@ -262,10 +299,10 @@ under `if TYPE_CHECKING:`; with `from __future__ import annotations` already at 
 `from collections.abc import Callable` used only in an annotation trips ruff `TC003` under
 `repo:ruff-ci` (`py/pyproject.toml:25`).
 
-`self_test()` floors it at **10** against twelve actual rows. Critically, the floor gets the twin
+`self_test()` floors it at **12** against fourteen actual rows. Critically, the floor gets the twin
 the `FIXTURES` floor has and the first draft's did not: a new `--collection-count` flag prints the
 tuple's length, and `release_plan_self_test` in `ci/actionlint/run.sh` floors it at 10 alongside the
-existing `--fixture-count` check. **Do not widen `--fixture-count`** — its consumer at
+existing `--fixture-count` check, floored at 12. **Do not widen `--fixture-count`** — its consumer at
 `ci/actionlint/run.sh:4578` validates the output is a single integer.
 
 ### 3.7 Row 8 of the negative control (E5)
@@ -342,10 +379,8 @@ pin references that signature — the only caller is `releasable_packages:179`.
 
 * It does not parse a custom `git_tag_name` template. The checker still refuses and builds.
 * It does not model `[workspace] exclude`.
-* It does not make a nameless `[[package]]` entry an error (§3.1) — gate question.
-* It does not add a `run()`-path fixture (§3.4) — gate question.
-* It does not narrow either broad `except Exception`, and after row 12 that is *enforced* rather
-  than merely stated.
+* It does not narrow either broad `except Exception`, and after rows 12 and 14 that is *enforced*
+  on both catches rather than merely stated.
 * It does not floor the other four `*_SH_CALL_SITES` tuples (§3.8).
 
 ## 5. Acceptance criteria mapping
@@ -357,8 +392,9 @@ pin references that signature — the only caller is `releasable_packages:179`.
 | 3. both have `--self-test` fixtures, proven to red by mutation | §3.4 (fixtures), §3.7 (continuous proof in CI), M1-M3 (one-time measurements) |
 | 4. the real `rs/release-plz.toml` still passes unchanged | E6, verified by M4 |
 
-Beyond the AC, justified by the fail-safe invariant: E7's SKIP path (fixture 11) and E8's lost
-broad-catch coverage (fixture 12).
+Beyond the AC, all three approved at the gate on 2026-09-04: E7's SKIP path (fixture 11), E8's
+broad-catch coverage for `_assert_repo` and for `run()` (fixtures 12 and 14), and E10's nameless
+entry (fixture 13).
 
 ## 6. Risks
 
@@ -393,4 +429,9 @@ Each must be run and recorded; none may be argued from the code.
 * **M7** — re-measure `--self-test` and full-gate wall time; update `ci/actionlint/README.md`'s
   subprocess count and timings.
 * **M8** — narrow `_assert_repo`'s `except Exception` to `except InconclusiveError` and confirm
-  fixture 12 reds. This is what proves E8's hole is actually closed rather than just described.
+  fixture 12 reds; narrow `run()`'s and confirm fixture 14 reds. This is what proves E8's hole is
+  actually closed on both catches rather than just described.
+* **M9** — neuter the name check; confirm fixture 13 reports its wrong-reason string and that the
+  retained `isinstance(p.get("name"), str)` belt keeps it from becoming a `KeyError` traceback.
+* **M10** — confirm the five match substrings in §3.2 are mutually non-overlapping against the five
+  real emitted messages, by assertion rather than by reading.
