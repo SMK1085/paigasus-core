@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
 #
-# repo:workflow-credentials — assert no pull-request-triggered workflow DECLARES a repository
-# credential. Same-repo pull requests receive repository secrets, so a credential in such a
-# workflow is readable by any code the pull request introduces (SMA-407 §7 M2). "Declares" is
-# the true claim and the narrower one: README.md's Non-goals section lists the paths by which a
-# credential could still reach such a workflow without this gate seeing it.
+# repo:workflow-credentials — assert no credential-bearing-trigger workflow (`pull_request`,
+# `pull_request_target`, or `issue_comment`) DECLARES a repository credential. Same-repo pull
+# requests receive repository secrets, so a credential in such a workflow is readable by any
+# code the pull request introduces (SMA-407 §7 M2); `issue_comment` carries the same secrets in
+# base-repo context while being triggerable by any comment on a public repo (SMA-408). "Declares"
+# is the true claim and the narrower one: README.md's Non-goals section lists the paths by which
+# a credential could still reach such a workflow without this gate seeing it.
 #
 # Exit codes: 0 pass | 1 the repo is wrong | 2 infrastructure failed.
 #

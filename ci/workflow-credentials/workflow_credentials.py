@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Assert no pull-request-triggered workflow can obtain a repository credential.
+"""Assert no credential-bearing-trigger workflow can obtain a repository credential.
 
 Exit codes are DELIBERATELY not the repo's usual 0/1/2. This process exits 3 for an
 assertion failure so that `uv`'s own rc 1 — measured on a failed resolution, online and
@@ -160,7 +160,7 @@ def rule_findings(doc) -> list[tuple[str, str, str]]:
             out.append(("R2", where, "grants `id-token: write`"))
         if key == "permissions" and _lower(value) == "write-all":
             out.append(("R3", where, "grants `permissions: write-all`, which includes id-token"))
-        # R5. Any INDIVIDUAL write scope, not just write-all. A pull-request-triggered
+        # R5. Any INDIVIDUAL write scope, not just write-all. A credential-bearing-trigger
         # workflow granting e.g. `contents: write` can push to the repository using the
         # workflow's own `${{ github.token }}` — a real credential, obtained without any
         # `secrets` key or context read, so R1-R4 never see it. Nothing else in this repo
@@ -275,14 +275,15 @@ def _self_test() -> int:
     return RC_OK
 
 
-PR_TRIGGERS = frozenset({"pull_request", "pull_request_target"})
+PR_TRIGGERS = frozenset({"pull_request", "pull_request_target", "issue_comment"})
 
 # The subject set, pinned by STRICT EQUALITY. run.sh's sibling gate holds two discovered sets
 # the same way (EXPECTED_PUBLISHABLE, EXPECTED_PYPI_PUBLISHABLE) and Check P0 states the
 # reason: a stale list silently SHRINKS the gate rather than reporting red. A new
-# pull-request-triggered workflow reds here until someone adds it, deliberately. (spec §5.2)
+# credential-bearing-trigger workflow reds here until someone adds it, deliberately. (spec §5.2)
 EXPECTED_PR_SUBJECTS = (
     "ci.yml",
+    "cla-retrigger.yml",
     "images.yml",
     "prebuild.yml",
     "security-scan.yml",
@@ -374,7 +375,7 @@ def check(root: str) -> int:
     # membership. Counting after it would let "allowlist everything" pass. (spec §5.2)
     if tuple(subjects) != EXPECTED_PR_SUBJECTS:
         raise AssertionFailureError(
-            f"pull-request-triggered workflows are {subjects}, expected "
+            f"credential-bearing-trigger workflows are {subjects}, expected "
             f"{list(EXPECTED_PR_SUBJECTS)} — re-baseline EXPECTED_PR_SUBJECTS deliberately")
 
     stale = [name for (name, _rule) in PR_CREDENTIAL_ALLOWED if name not in subjects]
@@ -395,17 +396,21 @@ def check(root: str) -> int:
                 reds.append(f"  {name} [{rule}] at {where}: {message}")
     if reds:
         raise AssertionFailureError(
-            "a pull-request-triggered workflow can obtain a repository credential:\n"
+            "a credential-bearing-trigger workflow can obtain a repository credential:\n"
             + "\n".join(reds)
             + "\n  A same-repo pull request receives repository secrets, so this is readable "
-              "by any code the PR introduces. Publishing belongs in a workflow with no "
-              "pull_request trigger (SMA-407 §7 review M2)."
+              "by any code the PR introduces — publishing belongs in a workflow carrying "
+              "none of the credential-bearing triggers: no pull_request, no "
+              "pull_request_target, no issue_comment (SMA-407 §7 review M2). An "
+              "issue_comment run gets those same secrets in base-repo context while being "
+              "triggerable by any comment on a public repo; the reader there is not code the "
+              "PR introduces, but the exposure is the same (SMA-408)."
         )
     # The NAMES, not just a count. ci/workflow-credentials/run.sh --negative-control greps
     # this line to assert release.yml is absent from the subject set; a count alone would
     # make that row match nothing and assert nothing. (Pre-flight ruling 2.)
     print(f"workflow-credentials: subjects: {' '.join(subjects)}")
-    print(f"workflow-credentials: {len(subjects)} pull-request-triggered workflow(s) "
+    print(f"workflow-credentials: {len(subjects)} credential-bearing-trigger workflow(s) "
           "carry no credential")
     return RC_OK
 
@@ -676,6 +681,11 @@ TRIGGER_CASES: tuple[tuple[str, str, bool], ...] = (
     # the strict loader has no duplicate to reject. The old `.get("on", .get(True))` returned
     # {'push'} here and the workflow silently left the subject set.
     ("dual on keys",    '"on": push\non:\n  pull_request:\njobs: {}\n', True),
+    # SMA-408. `issue_comment` runs in base-repo context with repository secrets, and on a
+    # public repo ANY account can trigger it. Same privileged class as pull_request_target.
+    ("issue_comment", "on:\n  issue_comment:\n    types: [created]\njobs: {}\n", True),
+    # Still false: a trigger that carries no repository secrets stays out of the subject set.
+    ("workflow_dispatch only", "on:\n  workflow_dispatch:\njobs: {}\n", False),
 )
 
 # Documents that must not reach the rules at all. Each must raise, and raise the RIGHT class:

@@ -211,10 +211,62 @@ message if a config-only package is added without it.
 
 ## Contributor License Agreement
 
-Before your first contribution can be merged you'll be asked to sign a CLA
-(automated via a bot — currently being set up). The CLA preserves the project's
-ability to relicense and dual-license contributed code; external contributions
-can't be merged without it.
+Before your first contribution can be merged you'll be asked to sign our
+[Contributor License Agreement](./docs/CLA.md). One signature covers all of your
+contributions while that version of the agreement is in force; you'll only be asked again if a
+substantive revision bumps its version. Once the CLA
+service is linked to this repository, [cla-assistant](https://cla-assistant.io/) comments on
+your first pull request with a link, and signing takes a click. The CLA preserves the project's
+ability to relicense and dual-license contributed code. Signing is required: we don't merge
+external contributions without it.
+
+Once linked, the maintainer and bot accounts that open pull requests against this repository are
+allowlisted and do not see the prompt.
+
+### If the CLA check stays red after you sign
+
+Two known causes, in the order you should check them.
+
+**The check is stuck.** cla-assistant has a long-standing bug where the check does not
+re-run after signing. Comment `/check-cla` on your pull request to ask cla-assistant to
+re-check it. That runs a workflow which — being comment-triggered — reports only in this
+repository's Actions tab, not on your pull request, so wait a few seconds and refresh the
+checks list rather than looking for a new check to appear. A green run there only confirms
+the request reached cla-assistant.io, not that the recheck actually cleared your PR — if the
+check is still red after refreshing, open an issue.
+
+**Your commits aren't attributed to your GitHub account.** cla-assistant matches the
+*commit author* email, not the account that opened the pull request. If your commits
+carry an email that isn't linked to your GitHub account, signing will never clear the
+check. Fix it with (replace `<upstream>` with the remote you forked from, e.g. `upstream`
+or `origin` depending on how you cloned):
+
+```bash
+git config user.email "YOUR_GITHUB_EMAIL"
+git rebase --exec "git commit --amend --no-edit --reset-author" <upstream>/main
+git push --force-with-lease
+```
+
+**Only run that if every commit on your branch is yours.** `--reset-author` rewrites the
+author of *each* commit the rebase replays to whoever runs the command — it does not
+re-attribute only the ones that were mis-addressed. If your branch carries a commit written
+by someone else, that command silently reassigns their authorship to you, which is the
+opposite of what a CLA needs: authorship is what determines who has to sign. On a mixed
+branch, amend only your own commits instead — for a single one,
+`git commit --amend --reset-author` while it is checked out, or an interactive
+`git rebase -i <upstream>/main` where you `edit` just the commits that are yours.
+
+This rewrites commit history, so your next push must be a force push — `--force-with-lease`
+rejects it if someone else pushed to your branch in the meantime, which a bare `--force`
+would silently overwrite.
+
+### What we record
+
+Signing records your GitHub username, your commit email address, the IP address of the
+signing request, and a timestamp. Those records are held by cla-assistant.io, a service
+operated by SAP SE. See the [CLA](./docs/CLA.md) for the retention position and what that
+does and doesn't obligate the Project to — deletion or export of any given record is
+subject to cla-assistant.io as the service operator, not to us.
 
 ## Internal references
 
