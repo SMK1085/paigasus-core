@@ -89,15 +89,16 @@ unchecked.
 
 ### `EXPECTED_PR_SUBJECTS`, and how to re-baseline it
 
-Discovery must match `EXPECTED_PR_SUBJECTS` by strict equality: `ci.yml`, `images.yml`,
-`prebuild.yml`, `security-scan.yml`, `wheels.yml`. A mismatch in either direction exits
+Discovery must match `EXPECTED_PR_SUBJECTS` by strict equality: `ci.yml`,
+`cla-retrigger.yml`, `images.yml`, `prebuild.yml`, `security-scan.yml`, `wheels.yml`. A
+mismatch in either direction exits
 1. This is deliberate — a stale list would silently shrink the gate instead of turning
 red, the same reasoning `ci/publish-metadata/run.sh`'s `EXPECTED_PUBLISHABLE` and
 `EXPECTED_PYPI_PUBLISHABLE` already use.
 
-To add a workflow, first confirm that it must carry a pull-request trigger at all. Then
-add its filename to `EXPECTED_PR_SUBJECTS` in `workflow_credentials.py`, in sorted
-order.
+To add a workflow, first confirm that it must carry a credential-bearing trigger at all —
+`pull_request`, `pull_request_target` or `issue_comment`. Then add its filename to
+`EXPECTED_PR_SUBJECTS` in `workflow_credentials.py`, in sorted order.
 
 ## The allowlist — `PR_CREDENTIAL_ALLOWED`
 

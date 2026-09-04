@@ -399,8 +399,9 @@ def check(root: str) -> int:
             "a credential-bearing-trigger workflow can obtain a repository credential:\n"
             + "\n".join(reds)
             + "\n  A same-repo pull request receives repository secrets, so this is readable "
-              "by any code the PR introduces — publishing belongs in a workflow with no "
-              "pull_request or pull_request_target trigger (SMA-407 §7 review M2). An "
+              "by any code the PR introduces — publishing belongs in a workflow carrying "
+              "none of the credential-bearing triggers: no pull_request, no "
+              "pull_request_target, no issue_comment (SMA-407 §7 review M2). An "
               "issue_comment run gets those same secrets in base-repo context while being "
               "triggerable by any comment on a public repo; the reader there is not code the "
               "PR introduces, but the exposure is the same (SMA-408)."
