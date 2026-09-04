@@ -123,11 +123,22 @@ def config_sections(cfg: dict) -> tuple[dict, list[dict]]:
             f"rs/release-plz.toml's [[package]] is not an array of tables "
             f"(got {type(packages).__name__})")
 
+    seen: dict[str, int] = {}
     for i, entry in enumerate(packages):
         if not isinstance(entry, dict):
             raise InconclusiveError(
                 f"rs/release-plz.toml's [[package]] entry at index {i} is not a table "
                 f"(got {type(entry).__name__})")
+        name = entry.get("name")
+        if not isinstance(name, str) or not name:
+            raise InconclusiveError(
+                f"rs/release-plz.toml's [[package]] entry at index {i} has no string name")
+        if name in seen:
+            raise InconclusiveError(
+                f"rs/release-plz.toml declares [[package]] name {name!r} twice "
+                f"(entries {seen[name]} and {i}); the entry map keeps the LAST, so a duplicate "
+                f"carrying release = false silently drops that crate and SKIPS its release")
+        seen[name] = i
 
     return workspace, packages
 
@@ -537,6 +548,34 @@ def _package_entry_not_a_table_is_inconclusive() -> str | None:
                           "a non-table [[package]] entry")
 
 
+def _nameless_package_entry_is_inconclusive() -> str | None:
+    """A `[[package]]` entry with no `name` loses its author's intent SILENTLY.
+
+    The old filter dropped it, so a block meaning `release = false` was discarded: the crate it
+    meant to exempt stayed in `out`, was permanently demanded a tag release-plz will never cut,
+    and the skip became unreachable without anybody being told. The direction is fail-safe (it
+    BUILDS), which is why this was nearly carved out — but workspace_members refuses
+    `[workspace] exclude` outright for the structurally identical reason, in this same file.
+    Two shapes with one structure do not get two policies (SMA-608).
+    """
+    return _shape_fixture('[[package]]\nrelease = false\n', "has no string name",
+                          "a [[package]] entry with no name")
+
+
+def _duplicate_package_name_is_inconclusive() -> str | None:
+    """A repeated `[[package]] name` is the ONE shape found whose direction is a SKIP.
+
+    MEASURED: `{p["name"]: p for p in entries}` keeps the LAST entry, so a duplicate carrying
+    `release = false` drops that crate from `out`. No tag is ever demanded for it, and if the
+    other packages' tags exist, decide() returns True — a real release skipped, silently.
+    crate_manifests raises on duplicate MANIFESTS; nothing raised on duplicate release-plz
+    ENTRIES, and the runtime path never consults EXPECTED_RELEASABLE (SMA-608).
+    """
+    return _shape_fixture(
+        '[[package]]\nname = "a"\nrelease = true\n[[package]]\nname = "a"\nrelease = false\n',
+        "declares [[package]] name", "a duplicated [[package]] name")
+
+
 # The collection-layer rows: paths a pure-function fixture cannot reach, because they need a
 # filesystem. Module-level so `--collection-count` can count them and so self_test()'s floor
 # below has something to floor; the FIXTURES floor's own comment explains why a countable
@@ -556,6 +595,8 @@ COLLECTION_ROWS: tuple[tuple[str, Callable[[], str | None]], ...] = (
      _package_not_an_array_of_tables_is_inconclusive),
     ("a non-table [[package]] entry is inconclusive",
      _package_entry_not_a_table_is_inconclusive),
+    ("a nameless [[package]] entry is inconclusive", _nameless_package_entry_is_inconclusive),
+    ("a duplicated [[package]] name is inconclusive", _duplicate_package_name_is_inconclusive),
 )
 
 
