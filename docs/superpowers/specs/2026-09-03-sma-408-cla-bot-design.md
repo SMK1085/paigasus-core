@@ -375,7 +375,7 @@ All four questions raised by the adversarial review are now settled:
       address, successors-and-assigns clause, `Version:` and `Effective:` headers, ICLA clause 4
       employer representation retained
 - [ ] `.github/workflows/cla-retrigger.yml` exists: `issue_comment` trigger, `permissions: {}`,
-      pinned endpoint with `curl --fail-with-body -sS`, `startsWith(trim(...))` guard,
+      pinned endpoint with `curl --fail-with-body -sS`, `startsWith(...)` guard (no `trim()` — no such function),
       `concurrency` group and `timeout-minutes`
 - [ ] D4 applied: `issue_comment` in `PR_TRIGGERS`, `EXPECTED_PR_SUBJECTS` re-baselined to six,
       control rows and self-test count updated, README Non-goals corrected
