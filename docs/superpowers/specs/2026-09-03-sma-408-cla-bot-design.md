@@ -62,8 +62,26 @@ reasoned waiver. Do not write D1 before checking this in the browser.
 Source: the Apache Individual Contributor License Agreement, clauses 1–8, adapted. **Three
 substantive changes**, not two structural ones — an earlier draft of this spec understated it:
 
-1. **"the Foundation" → a named legal person: Sven Maschek, personally.** Apache's template
-   names the ASF throughout. Decided on this issue. The adapted text names him with an address.
+1. **"the Foundation" → a named natural person: Sven Maschek, personally.** Apache's template
+   names the ASF throughout. Decided on this issue.
+
+   **No postal address, and that is consistent with the template rather than a shortcut.**
+   MEASURED against primary sources: the ASF ICLA v2.2 identifies its recipient as "The Apache
+   Software Foundation (the 'Foundation')" and carries no recipient address anywhere; its
+   `Residence Address` field belongs to the CONTRIBUTOR (and we capture GitHub login only, so we
+   do not collect it either). Grafana's adapted CLA does the same — "Raintank, Inc. dba Grafana
+   Labs" — as do Google's, GitLab's and OASIS's individual CLAs. The requirement is an
+   identifiable counterparty, not an addressable one.
+
+   A personal name is not inherently unique the way a company name is, so identification is by
+   name plus a stable public identifier: **"Sven Maschek, maintainer of the Paigasus project
+   (GitHub: `SMK1085`)"**. Publicly verifiable, discloses nothing not already public.
+
+   **Not resolved here, and out of this spec's competence:** German Impressum duties (DDG/TMG §5)
+   can require a physical address for certain commercial online offerings, and whether a public
+   repository triggers them is contested. That is a site-disclosure question rather than a CLA
+   question, so it does not change this design; if it ever applies, a business address satisfies
+   it, as would a future GmbH/UG's Handelsregister address.
    Because the counterparty is a natural person rather than the eventual operating company,
    change 2 below stops being boilerplate and becomes the clause the whole arrangement rests on.
 2. **A successors-and-assigns clause, which the ASF ICLA does not contain. Load-bearing here.**
@@ -299,11 +317,11 @@ is recorded here rather than left to be rediscovered.
 
 All four questions raised by the adversarial review are now settled:
 
-1. **Counterparty: Sven Maschek, personally.** Not a company. This makes D1's
-   successors-and-assigns clause load-bearing rather than boilerplate — see D1.
-   **Still needed before `docs/CLA.md` can be written:** the postal address to name him by.
-   A contract identifying a natural person should identify them; this spec will not ship a
-   placeholder into a legal document.
+1. **Counterparty: Sven Maschek, personally**, identified as "Sven Maschek, maintainer of the
+   Paigasus project (GitHub: `SMK1085`)". Not a company, and **no postal address** — the ASF
+   ICLA and every comparable adapted CLA name their recipient without one; see D1 for the
+   measurement. This makes D1's successors-and-assigns clause load-bearing rather than
+   boilerplate. Nothing further is needed before `docs/CLA.md` can be written.
 2. **Identity captured: GitHub login only** — account, email, timestamp, as cla-assistant
    captures by default. No custom name/address fields. Accepted trade-off: a pseudonymous
    account is harder to bind to a real person, so enforceability is weaker than the ASF
@@ -327,9 +345,10 @@ All four questions raised by the adversarial review are now settled:
 
 ## Acceptance criteria
 
-- [ ] `docs/CLA.md` exists: adapted Apache ICLA, operative grants unmodified, Sven Maschek named
-      as counterparty with address, successors-and-assigns clause, `Version:` and `Effective:`
-      headers, ICLA clause 4 employer representation retained
+- [ ] `docs/CLA.md` exists: adapted Apache ICLA, operative grants unmodified, counterparty named
+      as "Sven Maschek, maintainer of the Paigasus project (GitHub: `SMK1085`)" with no postal
+      address, successors-and-assigns clause, `Version:` and `Effective:` headers, ICLA clause 4
+      employer representation retained
 - [ ] `.github/workflows/cla-retrigger.yml` exists: `issue_comment` trigger, `permissions: {}`,
       pinned endpoint with `curl --fail-with-body -sS`, `startsWith(trim(...))` guard,
       `concurrency` group and `timeout-minutes`
