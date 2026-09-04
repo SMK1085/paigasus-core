@@ -2,13 +2,16 @@
 
 # `repo:workflow-credentials`
 
-Asserts that no pull-request-triggered GitHub Actions workflow **declares** a repository
-credential. The Non-goals section below states what "declares" does not cover.
+Asserts that no GitHub Actions workflow triggered by `pull_request`, `pull_request_target`,
+or `issue_comment` **declares** a repository credential. The Non-goals section below states
+what "declares" does not cover.
 
-A same-repo pull request runs with repository secrets. Any code the pull request
-introduces can read them. SMA-407 §7 review M2 forbids a credential in a
-pull-request-triggered workflow for this reason. Publishing must happen in a workflow
-with no `pull_request` or `pull_request_target` trigger instead.
+A same-repo pull request runs with repository secrets, and any code the pull request
+introduces can read them. SMA-407 §7 review M2 forbids a credential in such a workflow for
+this reason. On a public repository, an `issue_comment` is triggerable by any account while
+still running in base-repo context with those same secrets — which is why it belongs in the
+same set. Publishing must happen in a workflow carrying none of these three triggers
+instead.
 
 `run.sh` runs the checker, `workflow_credentials.py`, in three modes:
 
@@ -67,9 +70,11 @@ refuse.
 The checker globs `.github/workflows/*.y*ml`. The pattern covers both `.yml` and
 `.yaml`, because Actions accepts both extensions.
 
-A workflow is a subject when its `on:` block names `pull_request` or
-`pull_request_target`. `pull_request_target` runs with the base repository's secrets
-even on a fork pull request, so it counts too.
+A workflow is a subject when its `on:` block names `pull_request`, `pull_request_target`,
+or `issue_comment`. `pull_request_target` runs with the base repository's secrets even on a
+fork pull request, and `issue_comment` runs in that same base-repo context while being
+triggerable by any account on a public repository — both count for the same reason
+`pull_request` does.
 
 **The `on:` → `True` trap.** PyYAML parses a bare `on:` key as the YAML 1.1 boolean
 `True`, not the string `"on"`. `doc.get("on")` then returns nothing, and a naive reader
