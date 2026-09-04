@@ -13,7 +13,7 @@ your protection as a Contributor as well as the protection of the Maintainer and
 users. It does not change your rights to use your own Contributions for any other purpose.
 
 You accept and agree to the following terms and conditions for Your Contributions (present and
-future) that you submit to the Project. Except for the license granted herein to the Maintainer
+future) that you submit to the Maintainer. Except for the license granted herein to the Maintainer
 and recipients of software distributed by the Maintainer, You reserve all right, title, and
 interest in and to Your Contributions.
 
@@ -89,7 +89,8 @@ interest in and to Your Contributions.
    granted under it, in whole or in part, to a successor entity or to any person or entity that
    acquires all or substantially all of the assets of the Project, without Your further consent.
    This Agreement binds and benefits the parties and their respective successors and permitted
-   assigns.
+   assigns. References in this Agreement to the Maintainer include the Maintainer's successors
+   and permitted assigns.
 
 ## How to accept
 
@@ -105,7 +106,11 @@ recoverable from this file's git history.
 
 ## Data protection
 
-Signing records your GitHub username, the email address associated with your commits, and a
-timestamp. Those records are stored by cla-assistant.io, a service operated by SAP SE, acting as
-processor. They are retained for as long as the Project distributes code containing Your
-Contributions, because they are the record of the license under which that code was contributed.
+Signing records your GitHub username, the email address associated with your commits, the IP
+address of the signing request, and a timestamp. Those records are stored by cla-assistant.io, a
+service operated by SAP SE. Our intent is for the Project to remain the controller of this data
+and for SAP SE to hold it only as processor, but confirming that relationship under SAP's DPA and
+privacy terms has not yet been done. They are meant to be retained for as long as the Project
+distributes code containing Your Contributions, because they are the record of the license under
+which that code was contributed — but deletion or export of any given record is subject to
+cla-assistant.io as the operator of the database that actually holds it, not to the Project.

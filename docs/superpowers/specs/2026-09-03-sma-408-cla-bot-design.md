@@ -137,17 +137,27 @@ worth a second read before merge.
 Modeled on Langfuse's published workaround. Commenting `/check-cla` on a PR re-runs the
 stuck check.
 
-**The request contract is pinned here, because a vague `curl` is a control that lies.** A
-`curl` that 404s or reaches a down service still exits 0, the job goes green, and CONTRIBUTING
-has told the contributor the check will re-run when nothing happened. That is the same failure
-shape `ci/release-parity`'s five-line pin and `ci/cargo-lock-integrity`'s three-mode invocation
-exist to prevent.
+**The request contract is pinned here, because a vague `curl` is a control that lies — and,
+measured directly, this endpoint is a control that can still lie even with the flag.** A `curl`
+that reaches a down service or gets a 5xx still exits 0 without `--fail-with-body`, so the flag
+is worth keeping for that. But measured directly against the live endpoint (2026-09-03, three
+cases: this repo, a nonexistent owner/repo, and a real repo cla-assistant has never linked), it
+answers EVERY request — right or wrong — with an unconditional `302` redirect to
+`https://github.com/`. `--fail-with-body` only turns a non-2xx response into a non-zero exit,
+and 302 is never that, so a correct request, a wrong repo slug, and an unlinked repo are
+indistinguishable and the job goes green in all three. That is the same failure shape
+`ci/release-parity`'s five-line pin and `ci/cargo-lock-integrity`'s three-mode invocation exist
+to prevent, and this one is NOT closed by adding the flag — CONTRIBUTING.md and the workflow's
+own comments must say so plainly.
 
 - **Endpoint:** `GET https://cla-assistant.io/check/SMK1085/paigasus-core?pullRequest=<n>`
   (the form Langfuse uses, with our owner/repo). **Verify this responds as expected during the
   browser half before relying on it.**
-- **Invocation:** `curl --fail-with-body -sS`, so a non-2xx is a non-zero exit and the job goes
-  red rather than green-and-silent.
+- **Invocation:** `curl --fail-with-body -sS`. This catches a 5xx, a DNS failure, or a TLS
+  failure. It does NOT catch a wrong repo slug or an unlinked repo — the endpoint answers both
+  with the same 302 it returns on success, so a green run proves the request left the runner
+  and nothing more. Do not describe this flag as making the job "red rather than
+  green-and-silent" for the case that actually matters.
 - **Trigger:** `issue_comment: types: [created]` only. Never `pull_request_target`.
 - **Permissions:** `permissions: {}`. The endpoint is unauthenticated; the job needs no token.
 - **Guard:** `if: github.event.issue.pull_request && startsWith(github.event.comment.body, '/check-cla')`.
@@ -404,6 +414,7 @@ All four questions raised by the adversarial review are now settled:
 | `docs/CLA.md` | new |
 | `.github/workflows/cla-retrigger.yml` | new |
 | `ci/workflow-credentials/workflow_credentials.py` | D4: trigger set, subject pin, control rows |
-| `ci/workflow-credentials/README.md` | D4: Non-goals corrected |
+| `ci/workflow-credentials/README.md` | D4: headline, Discovery and Non-goals rewritten |
 | `CONTRIBUTING.md` | rewrite `:212-217` |
 | `docs/superpowers/specs/2026-09-03-sma-408-cla-bot-design.md` | this spec |
+| `docs/superpowers/plans/2026-09-04-sma-408-cla-bot.md` | implementation plan |
