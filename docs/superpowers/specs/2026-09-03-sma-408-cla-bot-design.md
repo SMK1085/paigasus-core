@@ -70,8 +70,11 @@ substantive changes**, not two structural ones — an earlier draft of this spec
    Software Foundation (the 'Foundation')" and carries no recipient address anywhere; its
    `Residence Address` field belongs to the CONTRIBUTOR (and we capture GitHub login only, so we
    do not collect it either). Grafana's adapted CLA does the same — "Raintank, Inc. dba Grafana
-   Labs" — as do Google's, GitLab's and OASIS's individual CLAs. The requirement is an
-   identifiable counterparty, not an addressable one.
+   Labs" — with no address anywhere in the document. Those two were read directly; Google's,
+   GitLab's, OASIS's and NASA's individual CLAs were surfaced as further examples but NOT
+   opened, so they are not evidence here. Two primary sources, one of them the template this
+   document adapts, are enough: the requirement is an identifiable counterparty, not an
+   addressable one.
 
    A personal name is not inherently unique the way a company name is, so identification is by
    name plus a stable public identifier: **"Sven Maschek, maintainer of the Paigasus project
