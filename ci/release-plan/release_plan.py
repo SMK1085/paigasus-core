@@ -582,6 +582,101 @@ def _duplicate_package_name_is_inconclusive() -> str | None:
         "declares [[package]] name", "a duplicated [[package]] name")
 
 
+def _broken_crate_manifest_tree(tmp: str) -> Path:
+    """A tree whose collection fails with an UNTYPED exception.
+
+    MEASURED: crate_manifests reads `load_toml(manifest).get("package") or {}`, which yields the
+    int 3, then calls `3.get("name")` -> AttributeError: 'int' object has no attribute 'get'.
+    Only a broad `except Exception` converts that. Everything else here is well-formed, so the
+    failure is unambiguously the one this fixture names.
+    """
+    rs_root = Path(tmp) / "rs"
+    crate_dir = rs_root / "crates" / "libs" / "a"
+    crate_dir.mkdir(parents=True)
+    (rs_root / "Cargo.toml").write_text('[workspace]\nmembers = ["crates/*/*"]\n')
+    (rs_root / "release-plz.toml").write_text("")
+    (crate_dir / "Cargo.toml").write_text("package = 3\n")
+    return rs_root
+
+
+def _untyped_collection_failure_asserts_three() -> str | None:
+    """_assert_repo's broad `except Exception` must convert an untyped collection failure to 3.
+
+    This REPLACES the coverage _malformed_config_asserts_three used to provide. That fixture
+    exists because `workspace = 3` raised a bare TypeError; SMA-608 types that shape, so after
+    the fix NO fixture produced a non-InconclusiveError through collection and the broad catch
+    could have been narrowed with --self-test still green.
+    """
+    tmp = tempfile.mkdtemp()
+    try:
+        _broken_crate_manifest_tree(tmp)
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            rc = _assert_repo(Path(tmp))
+        if rc != 3:
+            return f"_assert_repo returned {rc} for an untyped collection failure, expected 3"
+        if "AttributeError" not in err.getvalue():
+            return (f"_assert_repo returned 3 but did not name AttributeError: "
+                    f"{err.getvalue()!r} — the broad catch may not be what produced this")
+        return None
+    finally:
+        shutil.rmtree(tmp)
+
+
+def _untyped_collection_failure_builds() -> str | None:
+    """run()'s broad `except Exception` must BUILD rather than raise.
+
+    E8: this catch had NO fixture coverage before or after SMA-608 — no helper called run()
+    against a broken tree, and run.sh rows 3/4 point it at well-formed synthetic trees. It is
+    the runtime path, so an escape here is a traceback in the release workflow's plan job.
+    """
+    tmp = tempfile.mkdtemp()
+    try:
+        _broken_crate_manifest_tree(tmp)
+        try:
+            nothing, reason = run(Path(tmp), "push")
+        except Exception as exc:  # deliberately broad; catching it IS the fixture
+            return f"run() raised {type(exc).__name__}: {exc} instead of returning a build verdict"
+        if nothing:
+            return f"run() reported nothing_to_release for a broken tree: {reason!r} — THIS IS A SKIP"
+        if "AttributeError" not in reason:
+            return (f"run() built, but its reason {reason!r} does not name AttributeError — "
+                    f"the broad catch may not be what produced this")
+        return None
+    finally:
+        shutil.rmtree(tmp)
+
+
+def _markers_are_mutually_exclusive() -> str | None:
+    """Every fixture marker must match exactly ONE of the five malformed-shape messages.
+
+    §3.2's distinctness is load-bearing and easy to break by rewording a message: matching the
+    element row on "is not a table" would accept the [workspace] error, and matching it on
+    "[[package]] entry" would accept the nameless-entry error. Asserted, not read (M10).
+    """
+    cases = {
+        "[workspace] is not a table": "workspace = []\n",
+        "is not an array of tables": 'package = { name = "a" }\n',
+        "entry at index 0 is not a table": 'package = ["a"]\n',
+        "has no string name": "[[package]]\nrelease = false\n",
+        "declares [[package]] name":
+            '[[package]]\nname = "a"\n[[package]]\nname = "a"\n',
+    }
+    messages: dict[str, str] = {}
+    for marker, text in cases.items():
+        try:
+            config_sections(tomllib.loads(text))
+        except InconclusiveError as exc:
+            messages[marker] = str(exc)
+            continue
+        return f"config_sections did not raise for the {marker!r} case"
+    problems = []
+    for marker in cases:
+        hits = [m for m, msg in messages.items() if marker in msg]
+        if hits != [marker]:
+            problems.append(f"{marker!r} also matches {[h for h in hits if h != marker]}")
+    return "; ".join(problems) or None
+
+
 # The collection-layer rows: paths a pure-function fixture cannot reach, because they need a
 # filesystem. Module-level so `--collection-count` can count them and so self_test()'s floor
 # below has something to floor; the FIXTURES floor's own comment explains why a countable
@@ -603,6 +698,10 @@ COLLECTION_ROWS: tuple[tuple[str, Callable[[], str | None]], ...] = (
      _package_entry_not_a_table_is_inconclusive),
     ("a nameless [[package]] entry is inconclusive", _nameless_package_entry_is_inconclusive),
     ("a duplicated [[package]] name is inconclusive", _duplicate_package_name_is_inconclusive),
+    ("an untyped collection failure makes --assert exit 3",
+     _untyped_collection_failure_asserts_three),
+    ("an untyped collection failure makes run() build", _untyped_collection_failure_builds),
+    ("the five shape markers are mutually exclusive", _markers_are_mutually_exclusive),
 )
 
 
