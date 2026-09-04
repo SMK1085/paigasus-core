@@ -40,7 +40,7 @@ require_uv() {
     || die_infra "uv is not on PATH — run 'proto install', or add ~/.proto/shims to PATH"
 }
 
-# `--locked` on all six `uv run` calls below (:56, 78, 183, 198, 299, 331) (SMA-603 fix round 2,
+# `--locked` on all six `uv run` calls below (SMA-603 fix round 2,
 # ruled in; widened to six as rows 3/4/7/8 of the negative control gained their own direct
 # calls): mirrors ci/actionlint/run.sh's release_guard_py() wrapper for check 10, and the
 # rationale applies MORE strongly here — these six calls run across EVERY invocation of the four
