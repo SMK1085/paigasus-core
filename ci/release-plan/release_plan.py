@@ -236,11 +236,17 @@ def releasable_packages(rs_root: Path) -> dict[str, str]:
     workspace, package_entries = config_sections(cfg)
     assert_default_tag_format(workspace, package_entries)
     # BOTH filters are retained verbatim even though config_sections now asserts both
-    # properties. They are typed-failure BELTS, not validation: MEASURED, with the element
-    # check neutered, `"a".get` raises AttributeError, and with the name check neutered
-    # `p["name"]` raises KeyError. Keeping the mutated failure typed is what lets a fixture
-    # report its designed wrong-reason string instead of a traceback. Do not "simplify" these
-    # away because config_sections looks like it makes them unreachable — that is the point.
+    # properties, but MEASURED (SMA-608 Task 3), the two belts do not fail the same way when
+    # their config_sections check is neutered. With the ELEMENT check neutered, a non-dict entry
+    # reaches config_sections's own `entry.get("name")` first and raises AttributeError there
+    # (e.g. `"a".get` for `package = ["a"]`) — before this comprehension ever runs. With the NAME
+    # check neutered, this comprehension's `isinstance(p.get("name"), str)` clause filters the
+    # nameless/duplicate entry OUT before `p["name"]` is evaluated: no exception here at all: the
+    # entry is silently dropped, and releasable_packages falls through to an unrelated
+    # InconclusiveError further down (crate_manifests can't find rs/Cargo.toml in the fixture
+    # tree). So this comprehension's own typed-failure belt is real only for the element check;
+    # for the name check it is a silent filter, not a raise. Do not "simplify" either filter away
+    # because config_sections looks like it makes them unreachable — that is the point.
     entries = {p["name"]: p for p in package_entries
                if isinstance(p, dict) and isinstance(p.get("name"), str)}
 
@@ -620,9 +626,14 @@ def self_test() -> int:
     # EVERY call is wrapped. A helper that raises anything other than a returned error string
     # would otherwise escape main() and exit the interpreter at 1 — which README.md's "0, 2 or 3,
     # never 1" contract forbids, and which run_checker would then map onto die_infra (2),
-    # reporting "uv or the interpreter failed" for a broken repository file. Tasks 2-4 add
-    # fixtures whose mutations raise AttributeError and KeyError, so this is load-bearing, not
-    # defensive decoration.
+    # reporting "uv or the interpreter failed" for a broken repository file. MEASURED (SMA-608
+    # Task 3, M3 re-run): with config_sections's element-not-a-table check neutered, its own
+    # `entry.get("name")` raises AttributeError on a non-dict entry — this wrapper is what turns
+    # that into a reported FAIL instead of an interpreter exit at 1. Not every neutered check
+    # raises, though: the same task's M9 measurement found neutering the name check raises
+    # nothing — releasable_packages's own belt filters the bad entry out instead — so this
+    # wrapper is load-bearing for the checks that DO raise, not a blanket guarantee that every
+    # mutation does.
     for label, fn in COLLECTION_ROWS:
         try:
             err = fn()
