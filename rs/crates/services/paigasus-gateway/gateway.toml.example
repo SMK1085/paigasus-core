@@ -52,7 +52,9 @@
 #
 # Extra trust anchors for the upstream calls — a path to a PEM bundle, for a self-hosted
 # vLLM/LiteLLM endpoint behind a corporate CA. ADDS to the trust store; the OPPOSITE of
-# [iam.tls] ca_cert_path, which PINS. ROOTS ONLY. Read once at boot. A bare self-signed leaf
+# [iam.tls] ca_cert_path, which PINS. ROOTS ONLY: every certificate here becomes an unconstrained
+# trust anchor for every request the upstream egress client makes, to any host it reaches — not
+# for the whole process. Read once at boot. A bare self-signed leaf
 # also works when this bundle holds that leaf's own PEM, though a private CA is tidier once
 # more than one host is involved.
 # extra_ca_bundle_path = "/etc/paigasus/corp-ca.pem"

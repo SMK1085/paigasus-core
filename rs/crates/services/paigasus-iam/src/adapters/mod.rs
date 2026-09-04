@@ -7,6 +7,7 @@ pub mod auth;
 pub mod authz;
 pub mod boot;
 pub mod clock;
+pub(crate) mod error_chain;
 pub mod events;
 pub mod grpc;
 pub mod http;
