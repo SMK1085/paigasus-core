@@ -398,13 +398,14 @@ All four questions raised by the adversarial review are now settled:
 - [ ] Verified that cla-assistant posts a passing status for an allowlisted author, THEN the
       real context name added to the `Protect main` ruleset as a required check
       **(open — browser-only step; see handoff note)**
-- [ ] `moon ci` green over the affected graph, including `repo:workflow-credentials`'
+- [x] `moon ci` green over the affected graph, including `repo:workflow-credentials`'
       self-test and negative control
-      **(open here — no PR exists yet; the three gates that can see this diff in the worktree
-      are green (`actionlint` on the added workflow, `repo:workflow-credentials`,
-      `repo:ruff-ci`), but `repo:affected-smoke`, `repo:input-liveness` and
-      `repo:publish-metadata`, which select on everything, only run once the PR opens — CI
-      there is the authority for this criterion)**
+      (**green in CI on PR #213.** Local verification was deliberately targeted to the three
+      gates that can see this diff in a dependency-free worktree — `actionlint` on the added
+      workflow, `repo:workflow-credentials`, `repo:ruff-ci` — because the branch contains no
+      compiled code. The gates that select on everything, `repo:affected-smoke`,
+      `repo:input-liveness` and `repo:publish-metadata`, run on the PR, and CI is the authority
+      for this criterion.)
 - [x] Handoff note in the PR description stating exactly what Sven must do in the browser
       (published in PR #213's description, under "Manual steps"; the drafting copy lives in the
       git-ignored `.superpowers/sdd/` scratch and is deliberately not part of the repository)
