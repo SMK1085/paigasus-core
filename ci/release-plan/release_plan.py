@@ -239,14 +239,16 @@ def releasable_packages(rs_root: Path) -> dict[str, str]:
     # properties, but MEASURED (SMA-608 Task 3), the two belts do not fail the same way when
     # their config_sections check is neutered. With the ELEMENT check neutered, a non-dict entry
     # reaches config_sections's own `entry.get("name")` first and raises AttributeError there
-    # (e.g. `"a".get` for `package = ["a"]`) — before this comprehension ever runs. With the NAME
-    # check neutered, this comprehension's `isinstance(p.get("name"), str)` clause filters the
-    # nameless/duplicate entry OUT before `p["name"]` is evaluated: no exception here at all: the
-    # entry is silently dropped, and releasable_packages falls through to an unrelated
+    # (e.g. `"a".get` for `package = ["a"]`) — before this comprehension ever runs, so its own
+    # `isinstance(p, dict)` clause never fires for that mutation; it is kept as defense-in-depth.
+    # With the NAME check neutered, this comprehension's `isinstance(p.get("name"), str)` clause
+    # filters the nameless entry OUT before `p["name"]` is evaluated: no exception here at all:
+    # the entry is silently dropped, and releasable_packages falls through to an unrelated
     # InconclusiveError further down (crate_manifests can't find rs/Cargo.toml in the fixture
-    # tree). So this comprehension's own typed-failure belt is real only for the element check;
-    # for the name check it is a silent filter, not a raise. Do not "simplify" either filter away
-    # because config_sections looks like it makes them unreachable — that is the point.
+    # tree). So this comprehension's own typed-failure belt is real only for the name check; for
+    # the element check the failure is raised inside config_sections before the comprehension
+    # ever runs. Do not "simplify" either filter away because config_sections looks like it makes
+    # them unreachable — that is the point.
     entries = {p["name"]: p for p in package_entries
                if isinstance(p, dict) and isinstance(p.get("name"), str)}
 
@@ -518,8 +520,10 @@ def _shape_fixture(toml_text: str, marker: str, what: str) -> str | None:
     Matching the SPECIFIC marker, never a bare `except InconclusiveError`, is the lesson
     _tag_name_override_is_inconclusive's docstring records as MEASURED: a bare except also
     accepts an unrelated InconclusiveError raised further down the call chain, so neutering the
-    function under test leaves the helper passing. Each marker below is verified mutually
-    non-overlapping by _markers_are_mutually_exclusive.
+    function under test leaves the helper passing. Every marker and TOML text passed in below is
+    drawn from SHAPE_FIXTURES — the same mapping _markers_are_mutually_exclusive iterates — so the
+    two checks cannot drift apart the way a hand-typed second copy could (SMA-608 final fix wave,
+    Important 2).
     """
     tmp = tempfile.mkdtemp()
     try:
@@ -538,32 +542,66 @@ def _shape_fixture(toml_text: str, marker: str, what: str) -> str | None:
         shutil.rmtree(tmp)
 
 
+# Single source for every malformed-shape fixture below AND for _markers_are_mutually_exclusive's
+# distinctness check (SMA-608 final fix wave, Important 2). Before this, the two only coincided:
+# _markers_are_mutually_exclusive held its own hand-typed `cases` dict, so shortening a fixture's
+# marker (e.g. "entry at index 0 is not a table" to "is not a table") left the fixture AND that
+# check both green while the fixture became satisfiable by an unrelated [workspace] error. Keyed
+# by marker; each value is the ordered tuple of (malformed TOML text, description) fixtures that
+# marker covers. Two entries share the "[workspace] is not a table" marker on purpose — a
+# non-table and an array-of-tables [workspace] both fail the same isinstance check with the same
+# message, so config_sections()'s five ASSERTIONS map onto six shape FIXTURES below.
+SHAPE_FIXTURES: dict[str, tuple[tuple[str, str], ...]] = {
+    "[workspace] is not a table": (
+        ("workspace = []\n", "a non-table [workspace]"),
+        ("[[workspace]]\ngit_tag_name = 'v{{ version }}'\n", "an array-of-tables [workspace]"),
+    ),
+    "is not an array of tables": (
+        ('package = { name = "a" }\n', "a table-valued package section"),
+    ),
+    "entry at index 0 is not a table": (
+        ('package = ["a"]\n', "a non-table [[package]] entry"),
+    ),
+    "has no string name": (
+        ('[[package]]\nrelease = false\n', "a [[package]] entry with no name"),
+    ),
+    "declares [[package]] name": (
+        ('[[package]]\nname = "a"\nrelease = true\n[[package]]\nname = "a"\nrelease = false\n',
+         "a duplicated [[package]] name"),
+    ),
+}
+
+
 def _workspace_not_a_table_is_inconclusive() -> str | None:
     """`workspace = []` — the FALSY shape. `or {}` substituted a fresh dict and the membership
     test was vacuously false, so the guard passed having asserted nothing (SMA-608)."""
-    return _shape_fixture("workspace = []\n", "[workspace] is not a table",
-                          "a non-table [workspace]")
+    marker = "[workspace] is not a table"
+    toml_text, what = SHAPE_FIXTURES[marker][0]
+    return _shape_fixture(toml_text, marker, what)
 
 
 def _workspace_array_of_tables_is_inconclusive() -> str | None:
     """`[[workspace]]` — the TRUTHY wrong container. MEASURED: `[{'git_tag_name': 'x'}]` is
     truthy so `or {}` did not substitute, and `'git_tag_name' in [{...}]` compares against the
     dict as an ELEMENT and is False. The issue named two bypasses; this is the third."""
-    return _shape_fixture("[[workspace]]\ngit_tag_name = 'v{{ version }}'\n",
-                          "[workspace] is not a table", "an array-of-tables [workspace]")
+    marker = "[workspace] is not a table"
+    toml_text, what = SHAPE_FIXTURES[marker][1]
+    return _shape_fixture(toml_text, marker, what)
 
 
 def _package_not_an_array_of_tables_is_inconclusive() -> str | None:
     """`package = { ... }` — a table, not an array of tables. Iterating a dict yields its KEYS
     as strings, so the old `isinstance(pkg, dict)` guard skipped every one (SMA-608)."""
-    return _shape_fixture('package = { name = "a" }\n', "is not an array of tables",
-                          "a table-valued package section")
+    marker = "is not an array of tables"
+    toml_text, what = SHAPE_FIXTURES[marker][0]
+    return _shape_fixture(toml_text, marker, what)
 
 
 def _package_entry_not_a_table_is_inconclusive() -> str | None:
     """An array of tables holding something that is not a table."""
-    return _shape_fixture('package = ["a"]\n', "entry at index 0 is not a table",
-                          "a non-table [[package]] entry")
+    marker = "entry at index 0 is not a table"
+    toml_text, what = SHAPE_FIXTURES[marker][0]
+    return _shape_fixture(toml_text, marker, what)
 
 
 def _nameless_package_entry_is_inconclusive() -> str | None:
@@ -576,8 +614,9 @@ def _nameless_package_entry_is_inconclusive() -> str | None:
     `[workspace] exclude` outright for the structurally identical reason, in this same file.
     Two shapes with one structure do not get two policies (SMA-608).
     """
-    return _shape_fixture('[[package]]\nrelease = false\n', "has no string name",
-                          "a [[package]] entry with no name")
+    marker = "has no string name"
+    toml_text, what = SHAPE_FIXTURES[marker][0]
+    return _shape_fixture(toml_text, marker, what)
 
 
 def _duplicate_package_name_is_inconclusive() -> str | None:
@@ -589,9 +628,9 @@ def _duplicate_package_name_is_inconclusive() -> str | None:
     crate_manifests raises on duplicate MANIFESTS; nothing raised on duplicate release-plz
     ENTRIES, and the runtime path never consults EXPECTED_RELEASABLE (SMA-608).
     """
-    return _shape_fixture(
-        '[[package]]\nname = "a"\nrelease = true\n[[package]]\nname = "a"\nrelease = false\n',
-        "declares [[package]] name", "a duplicated [[package]] name")
+    marker = "declares [[package]] name"
+    toml_text, what = SHAPE_FIXTURES[marker][0]
+    return _shape_fixture(toml_text, marker, what)
 
 
 def _broken_crate_manifest_tree(tmp: str) -> Path:
@@ -659,40 +698,41 @@ def _untyped_collection_failure_builds() -> str | None:
 
 
 def _markers_are_mutually_exclusive() -> str | None:
-    """Every fixture marker must match exactly ONE of the five malformed-shape messages.
+    """Every marker in SHAPE_FIXTURES must match exactly ONE of the five malformed-shape
+    messages config_sections raises.
 
     §3.2's distinctness is load-bearing and easy to break by rewording a message: matching the
     element row on "is not a table" would accept the [workspace] error, and matching it on
     "[[package]] entry" would accept the nameless-entry error. Asserted, not read (M10).
+
+    Reads SHAPE_FIXTURES — the same mapping every _shape_fixture() call above draws its marker
+    and TOML text from — rather than a second, hand-typed copy. A hand-typed copy is what let
+    this check pass while a fixture's marker had already drifted (SMA-608 final fix wave,
+    Important 2): the two vocabularies coincided by construction, not by assertion, until now.
     """
-    cases = {
-        "[workspace] is not a table": "workspace = []\n",
-        "is not an array of tables": 'package = { name = "a" }\n',
-        "entry at index 0 is not a table": 'package = ["a"]\n',
-        "has no string name": "[[package]]\nrelease = false\n",
-        "declares [[package]] name":
-            '[[package]]\nname = "a"\n[[package]]\nname = "a"\n',
-    }
     messages: dict[str, str] = {}
-    for marker, text in cases.items():
+    for marker, variants in SHAPE_FIXTURES.items():
+        toml_text, _what = variants[0]
         try:
-            config_sections(tomllib.loads(text))
+            config_sections(tomllib.loads(toml_text))
         except InconclusiveError as exc:
             messages[marker] = str(exc)
             continue
         return f"config_sections did not raise for the {marker!r} case"
     problems = []
-    for marker in cases:
+    for marker in SHAPE_FIXTURES:
         hits = [m for m, msg in messages.items() if marker in msg]
         if hits != [marker]:
             problems.append(f"{marker!r} also matches {[h for h in hits if h != marker]}")
     return "; ".join(problems) or None
 
 
-# The collection-layer rows: paths a pure-function fixture cannot reach, because they need a
-# filesystem. Module-level so `--collection-count` can count them and so self_test()'s floor
-# below has something to floor; the FIXTURES floor's own comment explains why a countable
-# table matters.
+# The collection-layer rows: paths a pure-function fixture cannot reach. Fourteen of the fifteen
+# need a filesystem (they build throwaway trees under tempfile.mkdtemp()); row 15
+# (_markers_are_mutually_exclusive) needs none, but still cannot be expressed as a decide()-only
+# FIXTURES row, since it asserts a property of config_sections' own error messages. Module-level
+# so `--collection-count` can count them and so self_test()'s floor below has something to floor;
+# the FIXTURES floor's own comment explains why a countable table matters.
 COLLECTION_ROWS: tuple[tuple[str, Callable[[], str | None]], ...] = (
     ("a missing release-plz.toml is inconclusive", _missing_config_is_inconclusive),
     ("a workspace-inherited version is inconclusive", _workspace_version_is_inconclusive),
@@ -751,14 +791,14 @@ def self_test() -> int:
     # FIXTURES only. Floored below the actual count so a legitimate row removal does not abort
     # the gate as infra. Twinned by check 11's --collection-count floor in ci/actionlint/run.sh,
     # in a separately scheduled file, so one edit cannot remove both.
-    if len(COLLECTION_ROWS) < 12:
-        print(f"FAIL COLLECTION_ROWS has only {len(COLLECTION_ROWS)} row(s); the floor is 12 — "
+    if len(COLLECTION_ROWS) < 14:
+        print(f"FAIL COLLECTION_ROWS has only {len(COLLECTION_ROWS)} row(s); the floor is 14 — "
               "something emptied or gutted the collection-layer table", file=sys.stderr)
         rc = 3
     for label, fn in COLLECTION_ROWS:
         try:
             err = fn()
-        except Exception as exc:  # deliberately broad; see the comment above
+        except Exception as exc:  # deliberately broad; see "EVERY call is wrapped" above
             err = f"raised {type(exc).__name__}: {exc}"
         if err:
             print(f"FAIL {label!r}: {err}", file=sys.stderr)

@@ -952,9 +952,14 @@ real third prose site reads *"one of the nine pinned lines in"* (`ci_targets.py`
 so the original grep matched nothing even before the fix and gave false confidence that this site
 did not need updating. Use the grep above instead.
 
-Change each "nine" to "ten" in: `moon.yml:216-217`, `ci/actionlint/run.sh:2140-2141`, and both
-occurrences of "one of the nine pinned lines in" in `ci_targets.py`. Re-run the greps to confirm
-zero remaining.
+Change each "nine" to "ten" in: `moon.yml:216-217`, `ci/actionlint/run.sh:2140-2141`, and the one
+occurrence of "one of the nine pinned lines in" in `ci_targets.py` (the `ci/release-plan/run.sh:`
+"Fix:" guidance text, near `:3235`). **Correction (SMA-608 final fix wave, Minor 10):** this was
+never "both occurrences" — `ci_targets.py`'s other "one of the … pinned lines in" line, the
+`ci/ruff/run.sh:` guidance text near `:3240`, belongs to `RUFF_SH_CALL_SITES`, a different
+registry with its own unrelated ten-line count, and already read "ten" before this task touched
+anything. Re-run the greps to confirm zero remaining in the one line that does belong to this
+change.
 
 - [ ] **Step 7: Verify the pin gate**
 
@@ -989,6 +994,18 @@ MSG
 ---
 
 ### Task 6: The arity floor and its twin
+
+**Amended, SMA-608 final fix wave (Important 4).** The steps below implemented both floors at
+**12**, and that is what commit `6e4d313` actually contains. MEASURED after the fact: a floor of
+12 has slack wide enough to hide a real regression — deleting
+`_untyped_collection_failure_asserts_three` and `_untyped_collection_failure_builds` from
+`COLLECTION_ROWS` leaves 13 rows, which clears both floors, so `--self-test` and
+`--negative-control` row 8 (which greps only for the `[workspace]` label, not for those two rows)
+both stay green while the E8 hole those two rows exist to close re-opens. The final fix wave
+raises both floors to **14**, one row of headroom against the real fifteen — matching the
+`--fixture-count` floor's own precedent (8 against 9) — in a follow-up commit. Do not read the
+`12`s in the historical steps and diffs below as the current value; they are what Task 6 actually
+committed, not what ships.
 
 E4. `FIXTURES`' floor is deliberately duplicated in a second, independently-scheduled file so one edit cannot remove both. `COLLECTION_ROWS` gets the same treatment.
 
@@ -1255,4 +1272,5 @@ MSG
 **Deviation from the spec, deliberate:** M10 is implemented as a permanent fixture
 (`_markers_are_mutually_exclusive`, row 15) rather than a one-time measurement. The spec says
 "by assertion rather than by reading"; a fixture is the stronger reading and costs ~20 lines.
-This makes the final count **15** collection rows, not 14, with the floor at 12.
+This makes the final count **15** collection rows, not 14, with the floor at **14** (raised from
+12 in the SMA-608 final fix wave, Important 4 — see the amendment note at the top of Task 6).

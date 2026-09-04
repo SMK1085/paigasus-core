@@ -4588,7 +4588,7 @@ release_plan_self_test() {
     ci/release-plan/release_plan.py --collection-count)" \
     || infra "check 11: release_plan.py --collection-count failed"
   case "$c" in ''|*[!0-9]*) infra "check 11: --collection-count printed '$c', expected an integer" ;; esac
-  [ "$c" -ge 12 ] || infra "check 11: release_plan.py reports $c collection rows, expected at least 12"
+  [ "$c" -ge 14 ] || infra "check 11: release_plan.py reports $c collection rows, expected at least 14"
 
   release_plan_sh --self-test || { fail "check 11: release_plan.py --self-test reported a broken
       verdict. The release-plan decision is not deciding what it is documented to decide."; rc=1; }

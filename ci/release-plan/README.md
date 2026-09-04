@@ -93,8 +93,10 @@ refuses to guess and builds instead.
 `run.sh` has four modes, and one of them is required:
 
 - `--self-test` — runs `release_plan.py --self-test` in-process: the pure `decide()` fixture
-  table (nine rows) plus fifteen collection-layer rows that build throwaway trees under
-  `tempfile.mkdtemp()` to exercise paths a pure-function fixture cannot reach. The original six: a
+  table (nine rows) plus fifteen collection-layer rows, fourteen of which build throwaway trees
+  under `tempfile.mkdtemp()` to exercise paths a pure-function fixture cannot reach — the
+  fifteenth (the marker mutual-exclusivity check) needs no filesystem, but still cannot be
+  expressed as a `decide()`-only fixture. The original six: a
   missing `release-plz.toml`, a `version.workspace = true` inheritance, a `git_tag_name` override,
   a publishable member declared OUTSIDE `crates/*/*`, an unresolvable `[workspace] members`
   entry, and a malformed `release-plz.toml` (which must exit 3, not 1). SMA-608 adds nine more:

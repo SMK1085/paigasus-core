@@ -40,14 +40,16 @@ require_uv() {
     || die_infra "uv is not on PATH — run 'proto install', or add ~/.proto/shims to PATH"
 }
 
-# `--locked` on all four `uv run` calls below (SMA-603 fix round 2, ruled in): mirrors
-# ci/actionlint/run.sh's release_guard_py() wrapper for check 10, and the rationale applies MORE
-# strongly here — these four calls run on EVERY invocation of --self-test, --negative-control,
-# --assert and --github-output, where ci/actionlint/run.sh's own uv call is only the
-# --fixture-count bypass path. It is inert today because this project is zero-dependency (see
-# pyproject.toml's own comment) and becomes live the moment it gains one — without it, any of
-# these four modes could silently re-lock py/uv.lock's sibling here as a side effect of deciding
-# whether to release. Verified against the current lock: all four exit clean.
+# `--locked` on all six `uv run` calls below (:56, 78, 183, 198, 299, 331) (SMA-603 fix round 2,
+# ruled in; widened to six as rows 3/4/7/8 of the negative control gained their own direct
+# calls): mirrors ci/actionlint/run.sh's release_guard_py() wrapper for check 10, and the
+# rationale applies MORE strongly here — these six calls run across EVERY invocation of the four
+# CI modes (--self-test, --negative-control, --assert, --github-output), where
+# ci/actionlint/run.sh's own uv call is only the --fixture-count bypass path. It is inert today
+# because this project is zero-dependency (see pyproject.toml's own comment) and becomes live the
+# moment it gains one — without it, any of these six calls could silently re-lock py/uv.lock's
+# sibling here as a side effect of deciding whether to release. Verified against the current
+# lock: all six exit clean.
 
 # $@ is forwarded to the checker. Returns 0, returns 1 for a real assertion failure, and
 # EXITS 2 for anything else.

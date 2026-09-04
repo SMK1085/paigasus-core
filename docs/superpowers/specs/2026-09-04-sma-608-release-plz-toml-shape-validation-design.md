@@ -263,7 +263,7 @@ reachable through `config_sections` can produce a skip.
 (7-14), taking the tuple to fourteen. A ninth new row was added, `_markers_are_mutually_exclusive`
 (row 15, described below), implementing M10 as a permanent fixture rather than a one-time
 measurement — see §7's measured-outcomes note. The counts below are corrected accordingly; the
-floor stays 12 (§3.6).
+floor was 12 at the time (§3.6), later raised to 14 in the SMA-608 final fix wave (Important 4).
 
 * **7. `_workspace_not_a_table_is_inconclusive`** — `workspace = []`, the falsy shape.
   (`workspace = 3`, the truthy-scalar shape, stays covered by `_malformed_config_asserts_three`,
@@ -327,12 +327,23 @@ under `if TYPE_CHECKING:`; with `from __future__ import annotations` already at 
 `from collections.abc import Callable` used only in an annotation trips ruff `TC003` under
 `repo:ruff-ci` (`py/pyproject.toml:25`).
 
-`self_test()` floors it at **12** against fifteen actual rows (corrected during implementation,
-Task 8 — this section originally said fourteen; see §3.4). Critically, the floor gets the twin
-the `FIXTURES` floor has and the first draft's did not: a new `--collection-count` flag prints the
-tuple's length, and `release_plan_self_test` in `ci/actionlint/run.sh` floors it at 10 alongside the
-existing `--fixture-count` check, floored at 12. **Do not widen `--fixture-count`** — its consumer at
-`ci/actionlint/run.sh:4578` validates the output is a single integer.
+`self_test()` floors it at **14** against fifteen actual rows. (Historical note, Task 8: this
+section originally said the table held fourteen rows, not fifteen — a correction to the row
+*count*, unrelated to the floor *value* below; see §3.4.) Critically, the floor gets the twin the
+`FIXTURES` floor has and the first draft's did not: a new `--collection-count` flag prints the
+tuple's length, and `release_plan_self_test` in `ci/actionlint/run.sh` floors it at **14**
+alongside the existing `--fixture-count` check, floored at **8**. **Do not widen
+`--fixture-count`** — its consumer at `ci/actionlint/run.sh:4578` validates the output is a
+single integer.
+
+**The floor was raised from 12 to 14 in the SMA-608 final fix wave (Important 4).** MEASURED at a
+floor of 12: deleting `_untyped_collection_failure_asserts_three` and
+`_untyped_collection_failure_builds` left 13 rows — both floors still passed, `--self-test` stayed
+green, and negative-control row 8 stayed green too, since it greps only for the `[workspace]`
+label — which re-opens exactly the E8 hole those two rows exist to close, because both broad
+`except Exception` catches become narrowable again with every control green. Fourteen against
+fifteen matches the one-row-of-headroom precedent the sibling `--fixture-count` floor already
+sets (8 against 9).
 
 ### 3.7 Row 8 of the negative control (E5)
 
