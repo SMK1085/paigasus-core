@@ -305,6 +305,44 @@ negative_control() {
     failures=$((failures + 1))
   fi
 
+  # Row 8 — the COLLECTION-LAYER loop and the shape validation, the same class row 7 closes for
+  # the FIXTURES loop. Delete the collection loop, delete the new fixtures, or neuter
+  # config_sections, and --self-test still returns 0 with every other row here passing.
+  #
+  # The mutation is a CONDITION neutering, not a line deletion. Every `raise InconclusiveError(...)`
+  # in release_plan.py spans two physical lines, so a sed that deletes the raise leaves an empty
+  # `if` body -> IndentationError -> the mutant exits 1, and this row would red with a diagnostic
+  # pointing at the wrong thing while `cmp -s` passed.
+  #
+  # It asserts on STDERR as well as rc. rc 3 alone is satisfiable by the arity floor in
+  # self_test(): delete two rows from COLLECTION_ROWS and the floor fires, self_test() returns 3
+  # FOR THE FLOOR, and an rc-only assertion goes green while the neutered check went undetected —
+  # the two controls covering for each other's absence. Rows 3/4 grep for a specific verdict line
+  # for the same reason.
+  local mut8_dir mut8_rc=0 mut8_out
+  mut8_dir="$tmp/shape-mutant"
+  mkdir -p "$mut8_dir"
+  sed 's/if not isinstance(workspace, dict):/if False and not isinstance(workspace, dict):/' \
+    "$HERE/release_plan.py" > "$mut8_dir/release_plan.py"
+  if cmp -s "$HERE/release_plan.py" "$mut8_dir/release_plan.py"; then
+    printf '  FAIL row 8 is vacuous: the shape mutation matched nothing in release_plan.py\n' >&2
+    failures=$((failures + 1))
+  fi
+  mut8_out="$(uv run --locked --project "$HERE" --python '>=3.12' python3 \
+    "$mut8_dir/release_plan.py" --self-test 2>&1)" || mut8_rc=$?
+  if [ "$mut8_rc" != "3" ]; then
+    printf '  FAIL a neutered [workspace] shape check exited %s, expected 3 — the collection\n' \
+      "$mut8_rc" >&2
+    printf '       loop in self_test() no longer evaluates its rows\n' >&2
+    failures=$((failures + 1))
+  fi
+  if ! printf '%s\n' "$mut8_out" | grep -q "a non-table \[workspace\] is inconclusive"; then
+    printf '  FAIL the mutant exited 3 without reporting the non-table [workspace] row — the\n' >&2
+    printf '       exit code came from somewhere else (the arity floor, most likely)\n' >&2
+    printf '  --- mutant output ---\n%s\n' "$mut8_out" >&2
+    failures=$((failures + 1))
+  fi
+
   rm -rf "$tmp"
   if [ "$failures" -gt 0 ]; then
     printf 'release-plan negative control: %d row(s) failed\n' "$failures" >&2

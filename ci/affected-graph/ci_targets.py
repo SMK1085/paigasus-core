@@ -1037,6 +1037,10 @@ WORKFLOW_CREDENTIALS_SH_CALL_SITES = (
 #      structural pins byte-identical and the control exited 0 having asserted nothing.
 #   9. The control's own failure report arm, so a control that counted failures cannot swallow
 #      them.
+#  10. Row 8's assertion (the collection-layer loop + shape-validation mutant), an ASSERTION
+#      line for the same reason as 7 and 8: WORKFLOW_CREDENTIALS_SH_CALL_SITES measured that
+#      deleting every assertion left its structural pins byte-identical and the control exited 0
+#      having asserted nothing.
 #
 # REACHABILITY IS NOT AUTOMATIC. moon.yml lists `ci/release-plan/**/*` among repo:affected-smoke's
 # inputs and ci/actionlint/run.sh's T_AFFECTED_SMOKE_REQUIRED_INPUTS floors that entry. Without
@@ -1057,6 +1061,7 @@ RELEASE_PLAN_SH_CALL_SITES = (
     "if ! grep -qx 'nothing_to_release=false' \"$nouv_out\"; then",
     'if [ "$mut_rc" != "3" ]; then',
     "printf 'release-plan negative control: %d row(s) failed\\n' \"$failures\" >&2",
+    'if [ "$mut8_rc" != "3" ]; then',
 )
 
 
@@ -3227,7 +3232,7 @@ def main():
          "    A row prefixed `ci/workflow-credentials/run.sh:` means the same for that gate's\n"
          "    five pinned --negative-control lines — the flag parse, the dispatch arm, the\n"
          "    failure guard, or the report line.\n"
-         "    A row prefixed `ci/release-plan/run.sh:` means one of the nine pinned lines in\n"
+         "    A row prefixed `ci/release-plan/run.sh:` means one of the ten pinned lines in\n"
          "    that wrapper is gone — a flag parse, a mode dispatch arm, the fail-safe guard or\n"
          "    its write, or the negative control's assertions and report arm. The fail-safe\n"
          "    lines are the load-bearing ones: without them an inconclusive decision stops\n"
