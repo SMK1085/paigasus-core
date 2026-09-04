@@ -29,6 +29,10 @@ import sys
 import tempfile
 import tomllib
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 # --- The pinned vocabulary ---------------------------------------------------------------------
 
@@ -92,12 +96,65 @@ def load_toml(path: Path) -> dict:
         raise InconclusiveError(f"cannot read {path}: {exc}") from exc
 
 
-def assert_default_tag_format(cfg: dict) -> None:
-    if "git_tag_name" in (cfg.get("workspace") or {}):
+def config_sections(cfg: dict) -> tuple[dict, list[dict]]:
+    """Validate rs/release-plz.toml's two sections and return them as ([workspace], [[package]]).
+
+    `cfg.get(key, default)`, NOT `cfg.get(key) or default`. TOML has no null, so a present key
+    always carries a non-None value; the explicit default is what routes `workspace = []` to the
+    isinstance check below instead of silently substituting `{}` past it. That substitution was
+    the whole defect (SMA-608).
+
+    The list check and the element loop are DELIBERATELY separate statements. Fused as
+    `isinstance(packages, list) and all(...)`, neutering the list half would also disable the
+    element half, and the negative control's mutation would land on a different failure than the
+    one it names.
+
+    Every raise is InconclusiveError, which BUILDS. Nothing here may produce a skip.
+    """
+    workspace = cfg.get("workspace", {})
+    if not isinstance(workspace, dict):
+        raise InconclusiveError(
+            f"rs/release-plz.toml's [workspace] is not a table "
+            f"(got {type(workspace).__name__})")
+
+    packages = cfg.get("package", [])
+    if not isinstance(packages, list):
+        raise InconclusiveError(
+            f"rs/release-plz.toml's [[package]] is not an array of tables "
+            f"(got {type(packages).__name__})")
+
+    seen: dict[str, int] = {}
+    for i, entry in enumerate(packages):
+        if not isinstance(entry, dict):
+            raise InconclusiveError(
+                f"rs/release-plz.toml's [[package]] entry at index {i} is not a table "
+                f"(got {type(entry).__name__})")
+        name = entry.get("name")
+        if not isinstance(name, str) or not name:
+            raise InconclusiveError(
+                f"rs/release-plz.toml's [[package]] entry at index {i} has no string name")
+        if name in seen:
+            raise InconclusiveError(
+                f"rs/release-plz.toml declares [[package]] name {name!r} twice "
+                f"(entries {seen[name]} and {i}); the entry map keeps the LAST, so a duplicate "
+                f"carrying release = false silently drops that crate and SKIPS its release")
+        seen[name] = i
+
+    return workspace, packages
+
+
+def assert_default_tag_format(workspace: dict, packages: list[dict]) -> None:
+    """Refuse a `git_tag_name` override anywhere: tag_for() assumes release-plz's default.
+
+    Takes ALREADY-VALIDATED sections from config_sections(). It carries no `or {}` and no
+    isinstance guard of its own, because those were the bypasses — a guard that substitutes a
+    default for a malformed value cannot tell "absent" from "wrong shape" (SMA-608).
+    """
+    if "git_tag_name" in workspace:
         raise InconclusiveError("rs/release-plz.toml sets [workspace] git_tag_name; tag_for() assumes "
                            "release-plz's default <package>-v<version>")
-    for pkg in cfg.get("package") or []:
-        if isinstance(pkg, dict) and "git_tag_name" in pkg:
+    for pkg in packages:
+        if "git_tag_name" in pkg:
             raise InconclusiveError(f"rs/release-plz.toml sets git_tag_name on "
                                f"{pkg.get('name')!r}; tag_for() assumes the default format")
 
@@ -176,8 +233,23 @@ def releasable_packages(rs_root: Path) -> dict[str, str]:
     counts as releasable and its missing tag makes us BUILD. That is the fail-safe direction.
     """
     cfg = load_toml(rs_root / "release-plz.toml")
-    assert_default_tag_format(cfg)
-    entries = {p["name"]: p for p in (cfg.get("package") or [])
+    workspace, package_entries = config_sections(cfg)
+    assert_default_tag_format(workspace, package_entries)
+    # BOTH filters are retained verbatim even though config_sections now asserts both
+    # properties, but MEASURED (SMA-608 Task 3), the two belts do not fail the same way when
+    # their config_sections check is neutered. With the ELEMENT check neutered, a non-dict entry
+    # reaches config_sections's own `entry.get("name")` first and raises AttributeError there
+    # (e.g. `"a".get` for `package = ["a"]`) — before this comprehension ever runs, so its own
+    # `isinstance(p, dict)` clause never fires for that mutation; it is kept as defense-in-depth.
+    # With the NAME check neutered, this comprehension's `isinstance(p.get("name"), str)` clause
+    # filters the nameless entry OUT before `p["name"]` is evaluated: no exception here at all:
+    # the entry is silently dropped, and releasable_packages falls through to an unrelated
+    # InconclusiveError further down (crate_manifests can't find rs/Cargo.toml in the fixture
+    # tree). So this comprehension's own typed-failure belt is real only for the name check; for
+    # the element check the failure is raised inside config_sections before the comprehension
+    # ever runs. Do not "simplify" either filter away because config_sections looks like it makes
+    # them unreachable — that is the point.
+    entries = {p["name"]: p for p in package_entries
                if isinstance(p, dict) and isinstance(p.get("name"), str)}
 
     out: dict[str, str] = {}
@@ -208,11 +280,15 @@ def repo_tags(repo_root: Path) -> set[str]:
 def run(repo_root: Path, event_name: str) -> tuple[bool, str]:
     """The runtime path. It must NEVER traceback: `--github-output` wraps this call and its
     fail-safe is "warn and build", not "crash and let the caller decide". `InconclusiveError` is the
-    expected collection failure, but a malformed manifest can raise something else entirely —
-    measured: `workspace = 3` in `rs/release-plz.toml` raises a bare `TypeError` from inside
-    `assert_default_tag_format`'s `"git_tag_name" in (...)` membership test. Catching `Exception`
-    here, and ONLY here, is what keeps that a "build" instead of a traceback. `--assert` and
-    `--self-test` deliberately do not call `run()` and must keep surfacing errors loudly.
+    expected collection failure. `workspace = 3` in `rs/release-plz.toml` USED TO raise a bare
+    `TypeError` from inside `assert_default_tag_format`'s `"git_tag_name" in (...)` membership
+    test; SMA-608 types that shape — `config_sections`'s `isinstance(workspace, dict)` check now
+    raises `InconclusiveError` for it before `assert_default_tag_format` is ever reached. Catching
+    `Exception` here, and ONLY here, is what still stands as the floor for the RESIDUAL: shapes
+    this module does not model. It is not decoration — `_untyped_collection_failure_builds` is a
+    fixture, MEASURED against a crate manifest holding `package = 3`, that reds if this catch is
+    narrowed to `except InconclusiveError`. `--assert` and `--self-test` deliberately do not call
+    `run()` and must keep surfacing errors loudly.
     """
     try:
         packages = releasable_packages(repo_root / "rs")
@@ -316,12 +392,13 @@ def _tag_name_override_is_inconclusive() -> str | None:
     """A `[workspace] git_tag_name` override invalidates `tag_for`'s default-format assumption,
     and must be InconclusiveError rather than silently tagged the usual way.
 
-    This tree deliberately has NO `rs/crates/` directory at all — `assert_default_tag_format`
+    This tree deliberately has NO `rs/Cargo.toml` at all — `assert_default_tag_format`
     must raise before `releasable_packages` ever reaches `crate_manifests`. MEASURED: with a
     bare `except InconclusiveError: return None`, neutering `assert_default_tag_format`'s body to a
-    no-op `return` made THIS helper keep passing, because `crate_manifests` then raised its own,
-    unrelated "no crate manifests under .../crates — the tree moved" InconclusiveError, and the bare
-    except accepted that too. Matching on "git_tag_name" specifically is what makes that
+    no-op `return` made THIS helper keep passing, because `crate_manifests` then calls
+    `workspace_members` -> `load_toml(rs_root / "Cargo.toml")` on a tree with no such file, and
+    that raises its own, unrelated "cannot read .../rs/Cargo.toml: ..." InconclusiveError — which
+    the bare except accepted too. Matching on "git_tag_name" specifically is what makes that
     mutation visible: neutering the function under test now removes the ONLY source of a
     "git_tag_name" message, so this helper reports the wrong-reason string instead of None.
     """
@@ -411,6 +488,13 @@ def _malformed_config_asserts_three() -> str | None:
     interpreter exited 1 with a traceback, and `run.sh`'s `run_checker` mapped that 1 onto
     `die_infra` (2). Check 11 then reported "uv or the interpreter failed" for what is plainly a
     broken repository file, and README.md's "never 1" claim was false.
+
+    SMA-608 types the `workspace = 3` shape itself: `config_sections` now raises
+    `InconclusiveError` for it before `assert_default_tag_format` runs, so this row's own fixture
+    no longer exercises the untyped path it was written against. It still asserts the 3 contract
+    end to end (a malformed config -> `_assert_repo` -> exit 3) and is kept for that. The
+    untyped-failure coverage this row used to be the only source of moved to two new rows,
+    `_untyped_collection_failure_asserts_three` and `_untyped_collection_failure_builds`.
     """
     tmp = tempfile.mkdtemp()
     try:
@@ -430,13 +514,257 @@ def _malformed_config_asserts_three() -> str | None:
         shutil.rmtree(tmp)
 
 
+def _shape_fixture(toml_text: str, marker: str, what: str) -> str | None:
+    """Assert releasable_packages raises InconclusiveError whose message carries `marker`.
+
+    Matching the SPECIFIC marker, never a bare `except InconclusiveError`, is the lesson
+    _tag_name_override_is_inconclusive's docstring records as MEASURED: a bare except also
+    accepts an unrelated InconclusiveError raised further down the call chain, so neutering the
+    function under test leaves the helper passing. Every marker and TOML text passed in below is
+    drawn from SHAPE_FIXTURES — the same mapping _markers_are_mutually_exclusive iterates — so the
+    two checks cannot drift apart the way a hand-typed second copy could (SMA-608 final fix wave,
+    Important 2).
+    """
+    tmp = tempfile.mkdtemp()
+    try:
+        rs_root = Path(tmp) / "rs"
+        rs_root.mkdir()
+        (rs_root / "release-plz.toml").write_text(toml_text)
+        try:
+            releasable_packages(rs_root)
+        except InconclusiveError as exc:
+            if marker in str(exc):
+                return None
+            return (f"releasable_packages raised InconclusiveError for the wrong reason: {exc!r} "
+                    f"(expected a message naming {marker!r})")
+        return f"releasable_packages did not raise InconclusiveError for {what}"
+    finally:
+        shutil.rmtree(tmp)
+
+
+# Single source for every malformed-shape fixture below AND for _markers_are_mutually_exclusive's
+# distinctness check (SMA-608 final fix wave, Important 2). Before this, the two only coincided:
+# _markers_are_mutually_exclusive held its own hand-typed `cases` dict, so shortening a fixture's
+# marker (e.g. "entry at index 0 is not a table" to "is not a table") left the fixture AND that
+# check both green while the fixture became satisfiable by an unrelated [workspace] error. Keyed
+# by marker; each value is the ordered tuple of (malformed TOML text, description) fixtures that
+# marker covers. Two entries share the "[workspace] is not a table" marker on purpose — a
+# non-table and an array-of-tables [workspace] both fail the same isinstance check with the same
+# message, so config_sections()'s five ASSERTIONS map onto six shape FIXTURES below.
+SHAPE_FIXTURES: dict[str, tuple[tuple[str, str], ...]] = {
+    "[workspace] is not a table": (
+        ("workspace = []\n", "a non-table [workspace]"),
+        ("[[workspace]]\ngit_tag_name = 'v{{ version }}'\n", "an array-of-tables [workspace]"),
+    ),
+    "is not an array of tables": (
+        ('package = { name = "a" }\n', "a table-valued package section"),
+    ),
+    "entry at index 0 is not a table": (
+        ('package = ["a"]\n', "a non-table [[package]] entry"),
+    ),
+    "has no string name": (
+        ('[[package]]\nrelease = false\n', "a [[package]] entry with no name"),
+    ),
+    "declares [[package]] name": (
+        ('[[package]]\nname = "a"\nrelease = true\n[[package]]\nname = "a"\nrelease = false\n',
+         "a duplicated [[package]] name"),
+    ),
+}
+
+
+def _workspace_not_a_table_is_inconclusive() -> str | None:
+    """`workspace = []` — the FALSY shape. `or {}` substituted a fresh dict and the membership
+    test was vacuously false, so the guard passed having asserted nothing (SMA-608)."""
+    marker = "[workspace] is not a table"
+    toml_text, what = SHAPE_FIXTURES[marker][0]
+    return _shape_fixture(toml_text, marker, what)
+
+
+def _workspace_array_of_tables_is_inconclusive() -> str | None:
+    """`[[workspace]]` — the TRUTHY wrong container. MEASURED: `[{'git_tag_name': 'x'}]` is
+    truthy so `or {}` did not substitute, and `'git_tag_name' in [{...}]` compares against the
+    dict as an ELEMENT and is False. The issue named two bypasses; this is the third."""
+    marker = "[workspace] is not a table"
+    toml_text, what = SHAPE_FIXTURES[marker][1]
+    return _shape_fixture(toml_text, marker, what)
+
+
+def _package_not_an_array_of_tables_is_inconclusive() -> str | None:
+    """`package = { ... }` — a table, not an array of tables. Iterating a dict yields its KEYS
+    as strings, so the old `isinstance(pkg, dict)` guard skipped every one (SMA-608)."""
+    marker = "is not an array of tables"
+    toml_text, what = SHAPE_FIXTURES[marker][0]
+    return _shape_fixture(toml_text, marker, what)
+
+
+def _package_entry_not_a_table_is_inconclusive() -> str | None:
+    """An array of tables holding something that is not a table."""
+    marker = "entry at index 0 is not a table"
+    toml_text, what = SHAPE_FIXTURES[marker][0]
+    return _shape_fixture(toml_text, marker, what)
+
+
+def _nameless_package_entry_is_inconclusive() -> str | None:
+    """A `[[package]]` entry with no `name` loses its author's intent SILENTLY.
+
+    The old filter dropped it, so a block meaning `release = false` was discarded: the crate it
+    meant to exempt stayed in `out`, was permanently demanded a tag release-plz will never cut,
+    and the skip became unreachable without anybody being told. The direction is fail-safe (it
+    BUILDS), which is why this was nearly carved out — but workspace_members refuses
+    `[workspace] exclude` outright for the structurally identical reason, in this same file.
+    Two shapes with one structure do not get two policies (SMA-608).
+    """
+    marker = "has no string name"
+    toml_text, what = SHAPE_FIXTURES[marker][0]
+    return _shape_fixture(toml_text, marker, what)
+
+
+def _duplicate_package_name_is_inconclusive() -> str | None:
+    """A repeated `[[package]] name` is the ONE shape found whose direction is a SKIP.
+
+    MEASURED: `{p["name"]: p for p in entries}` keeps the LAST entry, so a duplicate carrying
+    `release = false` drops that crate from `out`. No tag is ever demanded for it, and if the
+    other packages' tags exist, decide() returns True — a real release skipped, silently.
+    crate_manifests raises on duplicate MANIFESTS; nothing raised on duplicate release-plz
+    ENTRIES, and the runtime path never consults EXPECTED_RELEASABLE (SMA-608).
+    """
+    marker = "declares [[package]] name"
+    toml_text, what = SHAPE_FIXTURES[marker][0]
+    return _shape_fixture(toml_text, marker, what)
+
+
+def _broken_crate_manifest_tree(tmp: str) -> Path:
+    """A tree whose collection fails with an UNTYPED exception.
+
+    MEASURED: crate_manifests reads `load_toml(manifest).get("package") or {}`, which yields the
+    int 3, then calls `3.get("name")` -> AttributeError: 'int' object has no attribute 'get'.
+    Only a broad `except Exception` converts that. Everything else here is well-formed, so the
+    failure is unambiguously the one this fixture names.
+    """
+    rs_root = Path(tmp) / "rs"
+    crate_dir = rs_root / "crates" / "libs" / "a"
+    crate_dir.mkdir(parents=True)
+    (rs_root / "Cargo.toml").write_text('[workspace]\nmembers = ["crates/*/*"]\n')
+    (rs_root / "release-plz.toml").write_text("")
+    (crate_dir / "Cargo.toml").write_text("package = 3\n")
+    return rs_root
+
+
+def _untyped_collection_failure_asserts_three() -> str | None:
+    """_assert_repo's broad `except Exception` must convert an untyped collection failure to 3.
+
+    This REPLACES the coverage _malformed_config_asserts_three used to provide. That fixture
+    exists because `workspace = 3` raised a bare TypeError; SMA-608 types that shape, so after
+    the fix NO fixture produced a non-InconclusiveError through collection and the broad catch
+    could have been narrowed with --self-test still green.
+    """
+    tmp = tempfile.mkdtemp()
+    try:
+        _broken_crate_manifest_tree(tmp)
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            rc = _assert_repo(Path(tmp))
+        if rc != 3:
+            return f"_assert_repo returned {rc} for an untyped collection failure, expected 3"
+        if "AttributeError" not in err.getvalue():
+            return (f"_assert_repo returned 3 but did not name AttributeError: "
+                    f"{err.getvalue()!r} — the broad catch may not be what produced this")
+        return None
+    finally:
+        shutil.rmtree(tmp)
+
+
+def _untyped_collection_failure_builds() -> str | None:
+    """run()'s broad `except Exception` must BUILD rather than raise.
+
+    E8: this catch had NO fixture coverage before or after SMA-608 — no helper called run()
+    against a broken tree, and run.sh rows 3/4 point it at well-formed synthetic trees. It is
+    the runtime path, so an escape here is a traceback in the release workflow's plan job.
+    """
+    tmp = tempfile.mkdtemp()
+    try:
+        _broken_crate_manifest_tree(tmp)
+        try:
+            nothing, reason = run(Path(tmp), "push")
+        except Exception as exc:  # deliberately broad; catching it IS the fixture
+            return f"run() raised {type(exc).__name__}: {exc} instead of returning a build verdict"
+        if nothing:
+            return f"run() reported nothing_to_release for a broken tree: {reason!r} — THIS IS A SKIP"
+        if "AttributeError" not in reason:
+            return (f"run() built, but its reason {reason!r} does not name AttributeError — "
+                    f"the broad catch may not be what produced this")
+        return None
+    finally:
+        shutil.rmtree(tmp)
+
+
+def _markers_are_mutually_exclusive() -> str | None:
+    """Every marker in SHAPE_FIXTURES must match exactly ONE of the five malformed-shape
+    messages config_sections raises.
+
+    §3.2's distinctness is load-bearing and easy to break by rewording a message: matching the
+    element row on "is not a table" would accept the [workspace] error, and matching it on
+    "[[package]] entry" would accept the nameless-entry error. Asserted, not read (M10).
+
+    Reads SHAPE_FIXTURES — the same mapping every _shape_fixture() call above draws its marker
+    and TOML text from — rather than a second, hand-typed copy. A hand-typed copy is what let
+    this check pass while a fixture's marker had already drifted (SMA-608 final fix wave,
+    Important 2): the two vocabularies coincided by construction, not by assertion, until now.
+    """
+    messages: dict[str, str] = {}
+    for marker, variants in SHAPE_FIXTURES.items():
+        toml_text, _what = variants[0]
+        try:
+            config_sections(tomllib.loads(toml_text))
+        except InconclusiveError as exc:
+            messages[marker] = str(exc)
+            continue
+        return f"config_sections did not raise for the {marker!r} case"
+    problems = []
+    for marker in SHAPE_FIXTURES:
+        hits = [m for m, msg in messages.items() if marker in msg]
+        if hits != [marker]:
+            problems.append(f"{marker!r} also matches {[h for h in hits if h != marker]}")
+    return "; ".join(problems) or None
+
+
+# The collection-layer rows: paths a pure-function fixture cannot reach. Fourteen of the fifteen
+# need a filesystem (they build throwaway trees under tempfile.mkdtemp()); row 15
+# (_markers_are_mutually_exclusive) needs none, but still cannot be expressed as a decide()-only
+# FIXTURES row, since it asserts a property of config_sections' own error messages. Module-level
+# so `--collection-count` can count them and so self_test()'s floor below has something to floor;
+# the FIXTURES floor's own comment explains why a countable table matters.
+COLLECTION_ROWS: tuple[tuple[str, Callable[[], str | None]], ...] = (
+    ("a missing release-plz.toml is inconclusive", _missing_config_is_inconclusive),
+    ("a workspace-inherited version is inconclusive", _workspace_version_is_inconclusive),
+    ("a git_tag_name override is inconclusive", _tag_name_override_is_inconclusive),
+    ("a member outside crates/*/* is still demanded a tag", _member_outside_crates_is_seen),
+    ("an unresolvable workspace member is inconclusive", _unresolvable_member_is_inconclusive),
+    ("a malformed release-plz.toml makes --assert exit 3, not 1",
+     _malformed_config_asserts_three),
+    ("a non-table [workspace] is inconclusive", _workspace_not_a_table_is_inconclusive),
+    ("an array-of-tables [workspace] is inconclusive",
+     _workspace_array_of_tables_is_inconclusive),
+    ("a table-valued package section is inconclusive",
+     _package_not_an_array_of_tables_is_inconclusive),
+    ("a non-table [[package]] entry is inconclusive",
+     _package_entry_not_a_table_is_inconclusive),
+    ("a nameless [[package]] entry is inconclusive", _nameless_package_entry_is_inconclusive),
+    ("a duplicated [[package]] name is inconclusive", _duplicate_package_name_is_inconclusive),
+    ("an untyped collection failure makes --assert exit 3",
+     _untyped_collection_failure_asserts_three),
+    ("an untyped collection failure makes run() build", _untyped_collection_failure_builds),
+    ("the five shape markers are mutually exclusive", _markers_are_mutually_exclusive),
+)
+
+
 def self_test() -> int:
     rc = 0
     # An emptied FIXTURES list makes the loop below run zero times and return 0 — a self-test
     # that silently stops testing anything still reads as a pass. This floor is IN-PROCESS and
-    # deliberately duplicated by a second, independent floor in ci/release-plan/run.sh's own
-    # negative control (this repo's usual idiom for a self-scheduled gate: two copies in two
-    # files, not one shared helper, so deleting either one leaves the other standing).
+    # deliberately duplicated by a second, independent floor in ci/actionlint/run.sh's check 11
+    # (`--fixture-count`), which is scheduled separately from this file — this repo's usual idiom
+    # for a self-scheduled gate: two copies in two files, not one shared helper, so deleting
+    # either one leaves the other standing.
     if len(FIXTURES) < 8:
         print(f"FAIL FIXTURES has only {len(FIXTURES)} row(s); the floor is 8 — "
               "something emptied or gutted the fixture table", file=sys.stderr)
@@ -447,18 +775,31 @@ def self_test() -> int:
             print(f"FAIL {label!r}: expected {want}, got {got} ({reason})", file=sys.stderr)
             rc = 3
 
-    # Collection-layer rows, which need the filesystem rather than the pure function.
-    for label, fn in (
-        ("a missing release-plz.toml is inconclusive", _missing_config_is_inconclusive),
-        ("a workspace-inherited version is inconclusive", _workspace_version_is_inconclusive),
-        ("a git_tag_name override is inconclusive", _tag_name_override_is_inconclusive),
-        ("a member outside crates/*/* is still demanded a tag", _member_outside_crates_is_seen),
-        ("an unresolvable workspace member is inconclusive",
-         _unresolvable_member_is_inconclusive),
-        ("a malformed release-plz.toml makes --assert exit 3, not 1",
-         _malformed_config_asserts_three),
-    ):
-        err = fn()
+    # EVERY call is wrapped. A helper that raises anything other than a returned error string
+    # would otherwise escape main() and exit the interpreter at 1 — which README.md's "0, 2 or 3,
+    # never 1" contract forbids, and which run_checker would then map onto die_infra (2),
+    # reporting "uv or the interpreter failed" for a broken repository file. MEASURED (SMA-608
+    # Task 3, M3 re-run): with config_sections's element-not-a-table check neutered, its own
+    # `entry.get("name")` raises AttributeError on a non-dict entry — this wrapper is what turns
+    # that into a reported FAIL instead of an interpreter exit at 1. Not every neutered check
+    # raises, though: the same task's M9 measurement found neutering the name check raises
+    # nothing — releasable_packages's own belt filters the bad entry out instead — so this
+    # wrapper is load-bearing for the checks that DO raise, not a blanket guarantee that every
+    # mutation does.
+    # The same reasoning as the FIXTURES floor above, for the collection rows. Deleting a helper
+    # from COLLECTION_ROWS otherwise reds nothing: check 11's --fixture-count floor counts
+    # FIXTURES only. Floored below the actual count so a legitimate row removal does not abort
+    # the gate as infra. Twinned by check 11's --collection-count floor in ci/actionlint/run.sh,
+    # in a separately scheduled file, so one edit cannot remove both.
+    if len(COLLECTION_ROWS) < 14:
+        print(f"FAIL COLLECTION_ROWS has only {len(COLLECTION_ROWS)} row(s); the floor is 14 — "
+              "something emptied or gutted the collection-layer table", file=sys.stderr)
+        rc = 3
+    for label, fn in COLLECTION_ROWS:
+        try:
+            err = fn()
+        except Exception as exc:  # deliberately broad; see "EVERY call is wrapped" above
+            err = f"raised {type(exc).__name__}: {exc}"
         if err:
             print(f"FAIL {label!r}: {err}", file=sys.stderr)
             rc = 3
@@ -475,14 +816,21 @@ def _assert_repo(repo_root: Path) -> int:
     that 1 onto its `die_infra` branch (2) — silently breaking the documented contract.
 
     SMA-603 fix wave, Group 3: the `except` is BROAD for the same reason `run()`'s is, and the
-    documented contract is why. MEASURED: `workspace = 3` in `rs/release-plz.toml` raises a bare
-    `TypeError` from inside `assert_default_tag_format`'s membership test, which an
-    `except InconclusiveError` does not catch — so `--assert` exited 1 with a traceback, `run_checker`
+    documented contract is why. MEASURED before that fix: `workspace = 3` in `rs/release-plz.toml`
+    raised a bare `TypeError` from inside `assert_default_tag_format`'s membership test, which an
+    `except InconclusiveError` did not catch — so `--assert` exited 1 with a traceback, `run_checker`
     mapped that onto `die_infra` (2), and a malformed repository file was reported as
     "infrastructure failed" rather than "the repository is wrong". The README claimed the checker
-    could never exit 1; the code, not the doc, was wrong. Collection reads only repository files,
-    so any failure of it IS a statement about the repository. `--self-test` deliberately keeps no
-    such catch: it tests this module, not the tree.
+    could never exit 1; the code, not the doc, was wrong.
+
+    `workspace = 3` no longer raises `TypeError`: SMA-608 types that shape, and `config_sections`
+    now raises `InconclusiveError` for it before `assert_default_tag_format` is ever reached. This
+    catch stays broad regardless — it is the floor for the RESIDUAL, shapes the validator does not
+    model — and it is covered, not decorative: `_untyped_collection_failure_asserts_three`
+    (MEASURED against a crate manifest holding `package = 3`) reds if it is narrowed to
+    `except InconclusiveError`. Collection reads only repository files, so any failure of it IS a
+    statement about the repository. `--self-test` deliberately keeps no such catch: it tests this
+    module, not the tree.
     """
     problems: list[str] = []
     try:
@@ -509,12 +857,16 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--self-test", action="store_true")
     ap.add_argument("--assert", dest="do_assert", action="store_true")
     ap.add_argument("--fixture-count", action="store_true")
+    ap.add_argument("--collection-count", action="store_true")
     ap.add_argument("--event-name", default="")
     ap.add_argument("repo_root", nargs="?", default=".")
     args = ap.parse_args(argv)
 
     if args.fixture_count:
         print(len(FIXTURES))
+        return 0
+    if args.collection_count:
+        print(len(COLLECTION_ROWS))
         return 0
     if args.self_test:
         return self_test()

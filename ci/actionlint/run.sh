@@ -2138,7 +2138,7 @@ T_AFFECTED_SMOKE_REQUIRED_INPUTS=(
   'ci/workflow-credentials/**/*'
   'ci/**/*'
   # SMA-603 — floors the input that makes RELEASE_PLAN_SH_CALL_SITES reachable. Without it the
-  # PR deleting those nine lines is exactly the PR that does not schedule repo:affected-smoke.
+  # PR deleting those eleven lines is exactly the PR that does not schedule repo:affected-smoke.
   'ci/release-plan/**/*'
   # SMA-539 (Task 6's pin) — floors the input that makes ci_targets.py's
   # check_self_scheduled_coverage exercisable against repo:ruff-ci's own registry entries.
@@ -4564,7 +4564,7 @@ release_plan_sh() {
 }
 
 release_plan_self_test() {
-  local rc=0 n
+  local rc=0 n c
   SELF_TESTS_RAN=$((SELF_TESTS_RAN + 1))
 
   # Bypasses release_plan_sh (ci/release-plan/run.sh) on purpose: that wrapper's flag parser
@@ -4581,6 +4581,14 @@ release_plan_self_test() {
   # loose (20 against 84 actual — that citation read 44 until the SMA-603 fix wave; the table
   # has grown with every V8/V9 round since).
   [ "$n" -ge 8 ] || infra "check 11: release_plan.py reports $n fixtures, expected at least 8"
+
+  # The COLLECTION_ROWS twin. Separate flag, not a widened --fixture-count: that flag's consumer
+  # above validates a single integer, and one number cannot floor two tables.
+  c="$(uv run --locked --project ci/release-plan --python '>=3.12' python3 \
+    ci/release-plan/release_plan.py --collection-count)" \
+    || infra "check 11: release_plan.py --collection-count failed"
+  case "$c" in ''|*[!0-9]*) infra "check 11: --collection-count printed '$c', expected an integer" ;; esac
+  [ "$c" -ge 14 ] || infra "check 11: release_plan.py reports $c collection rows, expected at least 14"
 
   release_plan_sh --self-test || { fail "check 11: release_plan.py --self-test reported a broken
       verdict. The release-plan decision is not deciding what it is documented to decide."; rc=1; }

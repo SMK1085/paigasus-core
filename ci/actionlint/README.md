@@ -703,6 +703,20 @@ single before/after pair on one host, not the five-pair interleaved method above
 a single-host measurement, not a statistically robust one: `run.sh --self-test` moved 4.22s ->
 4.71s; the full gate moved 17.64s -> 20.31s.
 
+**SMA-608 added an eighth row to `negative_control()`** (check 11's own negative control, not a
+new self-test), a shape-validation mutation that neuters `config_sections`'s `[workspace]`
+type check. It raises `negative_control()`'s own `uv run` subprocess count from six to seven per
+invocation: four direct `uv run` calls in the function body (rows 3, 4, 7, 8) plus three indirect
+ones reached through `run_checker`/`github_output` (rows 1, 2, 5). Measured standalone — this
+project's own `--self-test` and `--negative-control`, bypassing `ci/actionlint/run.sh` and Moon
+entirely — min-of-3 on this session's sandbox host: `ci/release-plan/run.sh --self-test` ~0.10s,
+`ci/release-plan/run.sh --negative-control` ~0.81s. Check 9's battery re-invokes the whole of
+`ci/actionlint/run.sh --self-test` (which calls `release_plan_self_test`, which calls both of
+these) roughly fifteen times per full gate run — fourteen mutants plus the unmutated control — so
+the new row's `uv run` is paid roughly 15x per `moon run repo:actionlint`, not once. This does not
+change check 9's own fixture-table or mutant count (still fourteen and fourteen, below); it only
+grows the per-invocation subprocess count nested inside check 11.
+
 **SMA-597 added a FOURTEENTH self-test.** `doc_diagnosis_self_test` (check 12) is a fixture-table
 check at the same `grep`/`sed` level as checks 1-8f, not a real-subprocess check like 10 and 11 —
 it drives `doc_diagnosis_verdict` and `claude_md_block_verdict` against `mktemp -d` fixtures, with
@@ -712,7 +726,11 @@ noticeably slower overall (`--self-test` 6.47-6.48s, full gate 37.2-38.0s) — s
 counts below are asserted from this measurement, not a delta against any prior figure.
 
 State: CURRENT — fourteen fixture tables, fourteen mutants (fifteen concurrent `--self-test`
-subprocesses in check 9's battery: fourteen mutants plus the unmutated control). `--self-test` and
+subprocesses in check 9's battery: fourteen mutants plus the unmutated control). Nested one level
+in, check 11's own `negative_control()` now runs seven `uv run` subprocesses per invocation
+(SMA-608, above), not six, so the battery's fifteen concurrent `--self-test` subprocesses each pay
+that extra `uv run` too — check 9's fixture-table and mutant counts are unchanged by this, only the
+subprocess count nested inside check 11 grew. `--self-test` and
 full-gate timings continue to vary by host and load, as the notes above already establish; see the
 SMA-597 paragraph immediately above for the most recent measurement. The toolchain also moved moon
 2.3.2 -> 2.5.3 earlier under this branch (SMA-595), so no figure in this section should be read as

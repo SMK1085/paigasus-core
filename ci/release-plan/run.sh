@@ -40,14 +40,16 @@ require_uv() {
     || die_infra "uv is not on PATH — run 'proto install', or add ~/.proto/shims to PATH"
 }
 
-# `--locked` on all four `uv run` calls below (SMA-603 fix round 2, ruled in): mirrors
-# ci/actionlint/run.sh's release_guard_py() wrapper for check 10, and the rationale applies MORE
-# strongly here — these four calls run on EVERY invocation of --self-test, --negative-control,
-# --assert and --github-output, where ci/actionlint/run.sh's own uv call is only the
-# --fixture-count bypass path. It is inert today because this project is zero-dependency (see
-# pyproject.toml's own comment) and becomes live the moment it gains one — without it, any of
-# these four modes could silently re-lock py/uv.lock's sibling here as a side effect of deciding
-# whether to release. Verified against the current lock: all four exit clean.
+# `--locked` on all six `uv run` calls below (SMA-603 fix round 2,
+# ruled in; widened to six as rows 3/4/7/8 of the negative control gained their own direct
+# calls): mirrors ci/actionlint/run.sh's release_guard_py() wrapper for check 10, and the
+# rationale applies MORE strongly here — these six calls run across EVERY invocation of the four
+# CI modes (--self-test, --negative-control, --assert, --github-output), where
+# ci/actionlint/run.sh's own uv call is only the --fixture-count bypass path. It is inert today
+# because this project is zero-dependency (see pyproject.toml's own comment) and becomes live the
+# moment it gains one — without it, any of these six calls could silently re-lock py/uv.lock's
+# sibling here as a side effect of deciding whether to release. Verified against the current
+# lock: all six exit clean.
 
 # $@ is forwarded to the checker. Returns 0, returns 1 for a real assertion failure, and
 # EXITS 2 for anything else.
@@ -302,6 +304,44 @@ negative_control() {
     printf '  FAIL a fixture with an INVERTED expected verdict exited %s, expected 3 — the\n' \
       "$mut_rc" >&2
     printf '       FIXTURES loop in self_test() no longer evaluates its rows\n' >&2
+    failures=$((failures + 1))
+  fi
+
+  # Row 8 — the COLLECTION-LAYER loop and the shape validation, the same class row 7 closes for
+  # the FIXTURES loop. Delete the collection loop, delete the new fixtures, or neuter
+  # config_sections, and --self-test still returns 0 with every other row here passing.
+  #
+  # The mutation is a CONDITION neutering, not a line deletion. Every `raise InconclusiveError(...)`
+  # in release_plan.py spans two physical lines, so a sed that deletes the raise leaves an empty
+  # `if` body -> IndentationError -> the mutant exits 1, and this row would red with a diagnostic
+  # pointing at the wrong thing while `cmp -s` passed.
+  #
+  # It asserts on STDERR as well as rc. rc 3 alone is satisfiable by the arity floor in
+  # self_test(): delete two rows from COLLECTION_ROWS and the floor fires, self_test() returns 3
+  # FOR THE FLOOR, and an rc-only assertion goes green while the neutered check went undetected —
+  # the two controls covering for each other's absence. Rows 3/4 grep for a specific verdict line
+  # for the same reason.
+  local mut8_dir mut8_rc=0 mut8_out
+  mut8_dir="$tmp/shape-mutant"
+  mkdir -p "$mut8_dir"
+  sed 's/if not isinstance(workspace, dict):/if False and not isinstance(workspace, dict):/' \
+    "$HERE/release_plan.py" > "$mut8_dir/release_plan.py"
+  if cmp -s "$HERE/release_plan.py" "$mut8_dir/release_plan.py"; then
+    printf '  FAIL row 8 is vacuous: the shape mutation matched nothing in release_plan.py\n' >&2
+    failures=$((failures + 1))
+  fi
+  mut8_out="$(uv run --locked --project "$HERE" --python '>=3.12' python3 \
+    "$mut8_dir/release_plan.py" --self-test 2>&1)" || mut8_rc=$?
+  if [ "$mut8_rc" != "3" ]; then
+    printf '  FAIL a neutered [workspace] shape check exited %s, expected 3 — the collection\n' \
+      "$mut8_rc" >&2
+    printf '       loop in self_test() no longer evaluates its rows\n' >&2
+    failures=$((failures + 1))
+  fi
+  if ! printf '%s\n' "$mut8_out" | grep -q "a non-table \[workspace\] is inconclusive"; then
+    printf '  FAIL the mutant exited 3 without reporting the non-table [workspace] row — the\n' >&2
+    printf '       exit code came from somewhere else (the arity floor, most likely)\n' >&2
+    printf '  --- mutant output ---\n%s\n' "$mut8_out" >&2
     failures=$((failures + 1))
   fi
 
