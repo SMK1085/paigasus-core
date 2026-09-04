@@ -217,8 +217,8 @@ contributions while that version of the agreement is in force; you'll only be as
 substantive revision bumps its version. Once the CLA
 service is linked to this repository, [cla-assistant](https://cla-assistant.io/) comments on
 your first pull request with a link, and signing takes a click. The CLA preserves the project's
-ability to relicense and dual-license contributed code. Signing is required — external
-contributions can't be merged without it.
+ability to relicense and dual-license contributed code. Signing is required: we don't merge
+external contributions without it.
 
 Once linked, the maintainer and bot accounts that open pull requests against this repository are
 allowlisted and do not see the prompt.
@@ -246,6 +246,15 @@ git config user.email "YOUR_GITHUB_EMAIL"
 git rebase --exec "git commit --amend --no-edit --reset-author" <upstream>/main
 git push --force-with-lease
 ```
+
+**Only run that if every commit on your branch is yours.** `--reset-author` rewrites the
+author of *each* commit the rebase replays to whoever runs the command — it does not
+re-attribute only the ones that were mis-addressed. If your branch carries a commit written
+by someone else, that command silently reassigns their authorship to you, which is the
+opposite of what a CLA needs: authorship is what determines who has to sign. On a mixed
+branch, amend only your own commits instead — for a single one,
+`git commit --amend --reset-author` while it is checked out, or an interactive
+`git rebase -i <upstream>/main` where you `edit` just the commits that are yours.
 
 This rewrites commit history, so your next push must be a force push — `--force-with-lease`
 rejects it if someone else pushed to your branch in the meantime, which a bare `--force`
