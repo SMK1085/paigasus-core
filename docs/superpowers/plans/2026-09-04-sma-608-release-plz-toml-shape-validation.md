@@ -113,7 +113,7 @@ Replace `self_test()`'s inline `for label, fn in (...)` block (including the tem
     for label, fn in COLLECTION_ROWS:
         try:
             err = fn()
-        except Exception as exc:  # noqa: BLE001 - see the comment above; nothing may exit 1 here
+        except Exception as exc:  # deliberately broad; see the comment above
             err = f"raised {type(exc).__name__}: {exc}"
         if err:
             print(f"FAIL {label!r}: {err}", file=sys.stderr)
@@ -656,7 +656,7 @@ def _untyped_collection_failure_builds() -> str | None:
         _broken_crate_manifest_tree(tmp)
         try:
             nothing, reason = run(Path(tmp), "push")
-        except Exception as exc:  # noqa: BLE001 - the point of the fixture
+        except Exception as exc:  # deliberately broad; catching it IS the fixture
             return f"run() raised {type(exc).__name__}: {exc} instead of returning a build verdict"
         if nothing:
             return f"run() reported nothing_to_release for a broken tree: {reason!r} — THIS IS A SKIP"
@@ -726,9 +726,14 @@ export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
 cd /Users/sven/dev/paigasus/paigasus-core
 T=$(mktemp -d)
 # _assert_repo's catch is the SECOND `except Exception` in the file; run()'s is the first.
-awk '/except Exception as exc:  # deliberately broad/{n++; if(n==1){sub(/except Exception/,"except InconclusiveError")}} {print}' \
+# Key on the FULL comment. Task 1 and this task each add another `# deliberately broad`
+# comment, so the short prefix now matches four lines, not two. `see the docstring above.`
+# is unique to run() and _assert_repo -- verify with:
+#   grep -c 'deliberately broad; see the docstring above\.' ci/release-plan/release_plan.py  # must be 2
+K='except Exception as exc:  # deliberately broad; see the docstring above\.'
+awk -v k="$K" '$0 ~ k{n++; if(n==1){sub(/except Exception/,"except InconclusiveError")}} {print}' \
   ci/release-plan/release_plan.py > "$T/run.py"
-awk '/except Exception as exc:  # deliberately broad/{n++; if(n==2){sub(/except Exception/,"except InconclusiveError")}} {print}' \
+awk -v k="$K" '$0 ~ k{n++; if(n==2){sub(/except Exception/,"except InconclusiveError")}} {print}' \
   ci/release-plan/release_plan.py > "$T/assert.py"
 for f in run assert; do
   cmp -s ci/release-plan/release_plan.py "$T/$f.py" && { echo "$f: VACUOUS"; continue; }
