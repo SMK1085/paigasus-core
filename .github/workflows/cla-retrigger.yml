@@ -1,0 +1,58 @@
+name: CLA retrigger
+
+# Works around a known cla-assistant bug where the CLA check gets stuck and never re-runs
+# after a contributor signs (cla-assistant/cla-assistant#520, #528). Commenting `/check-cla`
+# on a pull request asks the service to re-check it.
+#
+# WHY `issue_comment` AND NOT `pull_request_target` — this job needs no repository write
+# access and no token; it calls one unauthenticated endpoint. `pull_request_target` would
+# hand it a privileged context it has no use for.
+#
+# WHY `permissions: {}` — the endpoint is unauthenticated. Declaring the empty set means a
+# later edit that needs a scope has to add one deliberately, where `repo:workflow-credentials`
+# will see it: this workflow IS a subject of that gate (SMA-408 extended the gate's trigger
+# set to cover `issue_comment`, which is world-reachable on a public repo).
+#
+# WHY THE RUN CAN STILL FAIL LOUDLY — `curl --fail-with-body` turns a non-2xx into a non-zero
+# exit. Without it a 404 or a down service exits 0 and the job goes green while nothing has
+# been retriggered, which is worse than no workaround at all: CONTRIBUTING.md tells the
+# contributor the check has been re-run.
+#
+# KNOWN LIMITATION — an `issue_comment` run attaches no check to the pull request, so it is
+# visible only in this repository's Actions tab. CONTRIBUTING.md documents that.
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions: {}
+
+concurrency:
+  # Any GitHub account can comment on a public repository, so this trigger is world-reachable.
+  # Actions minutes are free here, but the account-level concurrent-job limit is shared with
+  # ci.yml, so an uncapped comment flood would starve the required checks.
+  group: cla-retrigger-${{ github.event.issue.number }}
+  cancel-in-progress: true
+
+jobs:
+  retrigger:
+    # `startsWith`, not `contains`: a comment that merely QUOTES the CONTRIBUTING.md
+    # instruction would self-trigger under `contains`, because the command appears somewhere
+    # in the body. With `startsWith` it has to be the first thing typed.
+    #
+    # There is deliberately NO trim() here: GitHub Actions expressions have no such function
+    # (the complete string set is contains/startsWith/endsWith/format/join), so calling one
+    # is an actionlint error, not a nicety. The cost is that a body with leading whitespace
+    # does not match; a contributor following CONTRIBUTING.md types the command first.
+    if: >-
+      github.event.issue.pull_request &&
+      startsWith(github.event.comment.body, '/check-cla')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Ask cla-assistant to re-check this pull request
+        env:
+          PR_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          curl --fail-with-body -sS \
+            "https://cla-assistant.io/check/SMK1085/paigasus-core?pullRequest=${PR_NUMBER}"
