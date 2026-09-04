@@ -370,24 +370,32 @@ All four questions raised by the adversarial review are now settled:
 
 ## Acceptance criteria
 
-- [ ] `docs/CLA.md` exists: adapted Apache ICLA, operative grants unmodified, counterparty named
+- [x] `docs/CLA.md` exists: adapted Apache ICLA, operative grants unmodified, counterparty named
       as "Sven Maschek, maintainer of the Paigasus project (GitHub: `SMK1085`)" with no postal
       address, successors-and-assigns clause, `Version:` and `Effective:` headers, ICLA clause 4
       employer representation retained
-- [ ] `.github/workflows/cla-retrigger.yml` exists: `issue_comment` trigger, `permissions: {}`,
+- [x] `.github/workflows/cla-retrigger.yml` exists: `issue_comment` trigger, `permissions: {}`,
       pinned endpoint with `curl --fail-with-body -sS`, `startsWith(...)` guard (no `trim()` — no such function),
       `concurrency` group and `timeout-minutes`
-- [ ] D4 applied: `issue_comment` in `PR_TRIGGERS`, `EXPECTED_PR_SUBJECTS` re-baselined to six,
+- [x] D4 applied: `issue_comment` in `PR_TRIGGERS`, `EXPECTED_PR_SUBJECTS` re-baselined to six,
       control rows and self-test count updated, README Non-goals corrected
-- [ ] `CONTRIBUTING.md` CLA section: live flow, both traps, retrigger-silence note, link to
+- [x] `CONTRIBUTING.md` CLA section: live flow, both traps, retrigger-silence note, link to
       `docs/CLA.md`, corrected enforcement wording, privacy note
-- [ ] Allowlist recorded as `SMK1085`, `dependabot[bot]`, `paigasusbot[bot]`
+- [x] Allowlist recorded as `SMK1085`, `dependabot[bot]`, `paigasusbot[bot]`
 - [ ] Verified that cla-assistant posts a passing status for an allowlisted author, THEN the
       real context name added to the `Protect main` ruleset as a required check
+      **(open — browser-only step; see handoff note)**
 - [ ] `moon ci` green over the affected graph, including `repo:workflow-credentials`'
       self-test and negative control
-- [ ] Handoff note in the PR description stating exactly what Sven must do in the browser
-- [ ] Post-merge: `/check-cla` smoke run recorded on the issue
+      **(open here — no PR exists yet; the three gates that can see this diff in the worktree
+      are green (`actionlint` on the added workflow, `repo:workflow-credentials`,
+      `repo:ruff-ci`), but `repo:affected-smoke`, `repo:input-liveness` and
+      `repo:publish-metadata`, which select on everything, only run once the PR opens — CI
+      there is the authority for this criterion)**
+- [x] Handoff note in the PR description stating exactly what Sven must do in the browser
+      (drafted at `.superpowers/sdd/2026-09-04-sma-408-cla-bot/handoff.md`, to be pasted
+      verbatim into the PR description when it is opened)
+- [ ] Post-merge: `/check-cla` smoke run recorded on the issue **(open — requires a merged PR)**
 
 ## Files touched
 
