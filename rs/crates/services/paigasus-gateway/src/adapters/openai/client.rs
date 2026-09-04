@@ -137,6 +137,20 @@ struct InvalidBundleCertificate {
     source: reqwest::Error,
 }
 
+/// The `source` of a `CaBundle` error raised when the control build ALSO failed, so the platform
+/// trust store is broken too. Typed for the same reason as [`InvalidBundleCertificate`]: flattening
+/// the `reqwest::Error` into the message would leave the anyhow chain holding rendered text only,
+/// so nothing downstream could traverse to it or downcast it.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "the platform trust store also contains no parseable certificates, which is the more likely \
+     cause — fix that first, then re-verify this bundle"
+)]
+struct BundleAndStoreUnusable {
+    #[source]
+    source: reqwest::Error,
+}
+
 /// What a failed `reqwest::Client` build can be attributed to. Mirrors
 /// `paigasus-iam/src/adapters/oidc/jwks.rs`'s copy; see SMA-558 D7 for why the two services'
 /// bundle handling is duplicated rather than extracted.
@@ -256,22 +270,20 @@ impl OpenAiClient {
         let http = builder.build().map_err(|e| match attribute_build_failure(cfg.extra_ca_bundle_path.as_deref(), control_build_ok) {
             Attribution::NoBundle => OpenAiError::Build(e),
             Attribution::Bundle { path } => {
-                tracing::error!(path = %path, attribution = "bundle", "OpenAI HTTP client build failed");
+                // `cause` carries the rendered chain because reqwest's build-error `Display` is the
+                // bare, useless string "builder error" — the identifying token (`BadEncoding`) is
+                // only reachable through `source()`, and a log aggregator indexes this field.
+                tracing::error!(path = %path, attribution = "bundle", cause = %describe_error(&e), "OpenAI HTTP client build failed");
                 OpenAiError::CaBundle {
                     path: path.to_string(),
                     source: Box::new(InvalidBundleCertificate { source: e }),
                 }
             }
             Attribution::BundleAndStore { path } => {
-                tracing::error!(path = %path, attribution = "bundle_and_store", "OpenAI HTTP client build failed");
-                let chain = describe_error(&e);
+                tracing::error!(path = %path, attribution = "bundle_and_store", cause = %describe_error(&e), "OpenAI HTTP client build failed");
                 OpenAiError::CaBundle {
                     path: path.to_string(),
-                    source: format!(
-                        "the platform trust store also contains no parseable certificates, which is the more \
-                         likely cause — fix that first, then re-verify this bundle ({chain})"
-                    )
-                    .into(),
+                    source: Box::new(BundleAndStoreUnusable { source: e }),
                 }
             }
         })?;

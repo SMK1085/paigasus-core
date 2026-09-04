@@ -261,7 +261,8 @@ build itself — they bite the first operator who deploys without reading this s
   the gateway's is the OpenAI egress client's, while the gRPC, NATS and Redis links each build
   their own TLS config and never consult it.
 
-  **Reading a CA-bundle boot failure.** All four failure modes name the config key. A bundle whose
+  **Reading a CA-bundle boot failure.** Every failure attributed to a bundle names the config key —
+  the no-bundle case below is the one that does not, because there is no key to name. A bundle whose
   PEM decodes as base64 but is not valid DER is the subtle one — it passes the PEM parse and fails
   only when the TLS client is built, so boot reports it against the config key rather than against
   the platform trust store. If the message instead says the platform trust store contains no
