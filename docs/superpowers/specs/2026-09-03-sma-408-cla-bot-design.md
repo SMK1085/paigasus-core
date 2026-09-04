@@ -59,7 +59,7 @@ version lockstep and 26 napi version guards. **Contingency:** if gist-only, `doc
 carry a pointer to the gist revision it mirrors, plus either a drift assertion or a written,
 reasoned waiver. Do not write D1 before checking this in the browser.
 
-Source: the Apache Individual Contributor License Agreement, clauses 1–8, adapted. **Three
+Source: the Apache Individual Contributor License Agreement, clauses 1–8, adapted. **Four
 substantive changes**, not two structural ones — an earlier draft of this spec understated it:
 
 1. **"the Foundation" → a named natural person: Sven Maschek, personally.** Apache's template
@@ -102,6 +102,12 @@ substantive changes**, not two structural ones — an earlier draft of this spec
 3. **Wet-signature block → click-through acceptance.** The ICLA ends with
    `Please sign: ______ Date: ______`, written for a fax/scan flow. That is replaced by a
    statement that signing via cla-assistant.io constitutes acceptance.
+4. **The ASF's reciprocal nonprofit covenant is removed, not reworded.** The template promises
+   the contributor that the Foundation will not use Contributions "in a way that is contrary to
+   the public benefit or inconsistent with its nonprofit status". Paigasus is not a nonprofit and
+   ADR-0007's purpose is commercial optionality, so the promise cannot be honoured and must not be
+   made. Removing a promise made TO the contributor is substantive, and is called out here so it
+   is a decision rather than an editing accident.
 
 **Versioning is mandatory, not optional.** The "recoverable from git history" property above is
 only true if a signature pins a version. `docs/CLA.md` carries `Version:` and `Effective:`
