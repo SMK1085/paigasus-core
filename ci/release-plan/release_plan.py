@@ -96,12 +96,54 @@ def load_toml(path: Path) -> dict:
         raise InconclusiveError(f"cannot read {path}: {exc}") from exc
 
 
-def assert_default_tag_format(cfg: dict) -> None:
-    if "git_tag_name" in (cfg.get("workspace") or {}):
+def config_sections(cfg: dict) -> tuple[dict, list[dict]]:
+    """Validate rs/release-plz.toml's two sections and return them as ([workspace], [[package]]).
+
+    `cfg.get(key, default)`, NOT `cfg.get(key) or default`. TOML has no null, so a present key
+    always carries a non-None value; the explicit default is what routes `workspace = []` to the
+    isinstance check below instead of silently substituting `{}` past it. That substitution was
+    the whole defect (SMA-608).
+
+    The list check and the element loop are DELIBERATELY separate statements. Fused as
+    `isinstance(packages, list) and all(...)`, neutering the list half would also disable the
+    element half, and the negative control's mutation would land on a different failure than the
+    one it names.
+
+    Every raise is InconclusiveError, which BUILDS. Nothing here may produce a skip.
+    """
+    workspace = cfg.get("workspace", {})
+    if not isinstance(workspace, dict):
+        raise InconclusiveError(
+            f"rs/release-plz.toml's [workspace] is not a table "
+            f"(got {type(workspace).__name__})")
+
+    packages = cfg.get("package", [])
+    if not isinstance(packages, list):
+        raise InconclusiveError(
+            f"rs/release-plz.toml's [[package]] is not an array of tables "
+            f"(got {type(packages).__name__})")
+
+    for i, entry in enumerate(packages):
+        if not isinstance(entry, dict):
+            raise InconclusiveError(
+                f"rs/release-plz.toml's [[package]] entry at index {i} is not a table "
+                f"(got {type(entry).__name__})")
+
+    return workspace, packages
+
+
+def assert_default_tag_format(workspace: dict, packages: list[dict]) -> None:
+    """Refuse a `git_tag_name` override anywhere: tag_for() assumes release-plz's default.
+
+    Takes ALREADY-VALIDATED sections from config_sections(). It carries no `or {}` and no
+    isinstance guard of its own, because those were the bypasses — a guard that substitutes a
+    default for a malformed value cannot tell "absent" from "wrong shape" (SMA-608).
+    """
+    if "git_tag_name" in workspace:
         raise InconclusiveError("rs/release-plz.toml sets [workspace] git_tag_name; tag_for() assumes "
                            "release-plz's default <package>-v<version>")
-    for pkg in cfg.get("package") or []:
-        if isinstance(pkg, dict) and "git_tag_name" in pkg:
+    for pkg in packages:
+        if "git_tag_name" in pkg:
             raise InconclusiveError(f"rs/release-plz.toml sets git_tag_name on "
                                f"{pkg.get('name')!r}; tag_for() assumes the default format")
 
@@ -180,8 +222,15 @@ def releasable_packages(rs_root: Path) -> dict[str, str]:
     counts as releasable and its missing tag makes us BUILD. That is the fail-safe direction.
     """
     cfg = load_toml(rs_root / "release-plz.toml")
-    assert_default_tag_format(cfg)
-    entries = {p["name"]: p for p in (cfg.get("package") or [])
+    workspace, package_entries = config_sections(cfg)
+    assert_default_tag_format(workspace, package_entries)
+    # BOTH filters are retained verbatim even though config_sections now asserts both
+    # properties. They are typed-failure BELTS, not validation: MEASURED, with the element
+    # check neutered, `"a".get` raises AttributeError, and with the name check neutered
+    # `p["name"]` raises KeyError. Keeping the mutated failure typed is what lets a fixture
+    # report its designed wrong-reason string instead of a traceback. Do not "simplify" these
+    # away because config_sections looks like it makes them unreachable — that is the point.
+    entries = {p["name"]: p for p in package_entries
                if isinstance(p, dict) and isinstance(p.get("name"), str)}
 
     out: dict[str, str] = {}
@@ -434,6 +483,60 @@ def _malformed_config_asserts_three() -> str | None:
         shutil.rmtree(tmp)
 
 
+def _shape_fixture(toml_text: str, marker: str, what: str) -> str | None:
+    """Assert releasable_packages raises InconclusiveError whose message carries `marker`.
+
+    Matching the SPECIFIC marker, never a bare `except InconclusiveError`, is the lesson
+    _tag_name_override_is_inconclusive's docstring records as MEASURED: a bare except also
+    accepts an unrelated InconclusiveError raised further down the call chain, so neutering the
+    function under test leaves the helper passing. Each marker below is verified mutually
+    non-overlapping by _markers_are_mutually_exclusive.
+    """
+    tmp = tempfile.mkdtemp()
+    try:
+        rs_root = Path(tmp) / "rs"
+        rs_root.mkdir()
+        (rs_root / "release-plz.toml").write_text(toml_text)
+        try:
+            releasable_packages(rs_root)
+        except InconclusiveError as exc:
+            if marker in str(exc):
+                return None
+            return (f"releasable_packages raised InconclusiveError for the wrong reason: {exc!r} "
+                    f"(expected a message naming {marker!r})")
+        return f"releasable_packages did not raise InconclusiveError for {what}"
+    finally:
+        shutil.rmtree(tmp)
+
+
+def _workspace_not_a_table_is_inconclusive() -> str | None:
+    """`workspace = []` — the FALSY shape. `or {}` substituted a fresh dict and the membership
+    test was vacuously false, so the guard passed having asserted nothing (SMA-608)."""
+    return _shape_fixture("workspace = []\n", "[workspace] is not a table",
+                          "a non-table [workspace]")
+
+
+def _workspace_array_of_tables_is_inconclusive() -> str | None:
+    """`[[workspace]]` — the TRUTHY wrong container. MEASURED: `[{'git_tag_name': 'x'}]` is
+    truthy so `or {}` did not substitute, and `'git_tag_name' in [{...}]` compares against the
+    dict as an ELEMENT and is False. The issue named two bypasses; this is the third."""
+    return _shape_fixture("[[workspace]]\ngit_tag_name = 'v{{ version }}'\n",
+                          "[workspace] is not a table", "an array-of-tables [workspace]")
+
+
+def _package_not_an_array_of_tables_is_inconclusive() -> str | None:
+    """`package = { ... }` — a table, not an array of tables. Iterating a dict yields its KEYS
+    as strings, so the old `isinstance(pkg, dict)` guard skipped every one (SMA-608)."""
+    return _shape_fixture('package = { name = "a" }\n', "is not an array of tables",
+                          "a table-valued package section")
+
+
+def _package_entry_not_a_table_is_inconclusive() -> str | None:
+    """An array of tables holding something that is not a table."""
+    return _shape_fixture('package = ["a"]\n', "entry at index 0 is not a table",
+                          "a non-table [[package]] entry")
+
+
 # The collection-layer rows: paths a pure-function fixture cannot reach, because they need a
 # filesystem. Module-level so `--collection-count` can count them and so self_test()'s floor
 # below has something to floor; the FIXTURES floor's own comment explains why a countable
@@ -446,6 +549,13 @@ COLLECTION_ROWS: tuple[tuple[str, Callable[[], str | None]], ...] = (
     ("an unresolvable workspace member is inconclusive", _unresolvable_member_is_inconclusive),
     ("a malformed release-plz.toml makes --assert exit 3, not 1",
      _malformed_config_asserts_three),
+    ("a non-table [workspace] is inconclusive", _workspace_not_a_table_is_inconclusive),
+    ("an array-of-tables [workspace] is inconclusive",
+     _workspace_array_of_tables_is_inconclusive),
+    ("a table-valued package section is inconclusive",
+     _package_not_an_array_of_tables_is_inconclusive),
+    ("a non-table [[package]] entry is inconclusive",
+     _package_entry_not_a_table_is_inconclusive),
 )
 
 
