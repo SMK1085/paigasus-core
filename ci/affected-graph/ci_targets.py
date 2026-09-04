@@ -1062,6 +1062,7 @@ RELEASE_PLAN_SH_CALL_SITES = (
     'if [ "$mut_rc" != "3" ]; then',
     "printf 'release-plan negative control: %d row(s) failed\\n' \"$failures\" >&2",
     'if [ "$mut8_rc" != "3" ]; then',
+    "if ! printf '%s\\n' \"$mut8_out\" | grep -q \"a non-table \\[workspace\\] is inconclusive\"; then",
 )
 
 
@@ -3232,7 +3233,7 @@ def main():
          "    A row prefixed `ci/workflow-credentials/run.sh:` means the same for that gate's\n"
          "    five pinned --negative-control lines — the flag parse, the dispatch arm, the\n"
          "    failure guard, or the report line.\n"
-         "    A row prefixed `ci/release-plan/run.sh:` means one of the ten pinned lines in\n"
+         "    A row prefixed `ci/release-plan/run.sh:` means one of the eleven pinned lines in\n"
          "    that wrapper is gone — a flag parse, a mode dispatch arm, the fail-safe guard or\n"
          "    its write, or the negative control's assertions and report arm. The fail-safe\n"
          "    lines are the load-bearing ones: without them an inconclusive decision stops\n"

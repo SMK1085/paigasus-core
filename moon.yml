@@ -213,7 +213,7 @@ tasks:
       # re-key it. Without this the pin is real but unreachable: the PR that deletes the block
       # does not schedule this task. Same reasoning as the ci/release-parity/**/* entry above.
       - 'ci/workflow-credentials/**/*'
-      # SMA-603 — this task now pins ten load-bearing lines inside ci/release-plan/run.sh
+      # SMA-603 — this task now pins eleven load-bearing lines inside ci/release-plan/run.sh
       # (RELEASE_PLAN_SH_CALL_SITES), so a change under ci/release-plan/ MUST re-key it. Without
       # this the pin is real but unreachable: the PR that deletes the fail-safe write, or puts
       # the `uv` preflight back on the --github-output arm, does not schedule this task. Same
