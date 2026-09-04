@@ -215,7 +215,7 @@ Before your first contribution can be merged you'll be asked to sign our
 [Contributor License Agreement](./docs/CLA.md). You only need to do this once —
 [cla-assistant](https://cla-assistant.io/) comments on your first pull request with a
 link, and signing takes a click. The CLA preserves the project's ability to relicense
-and dual-license contributed code, and the check is required, so external contributions
+and dual-license contributed code. Signing is required — external contributions
 can't be merged without it.
 
 Maintainer and bot accounts (`SMK1085`, `dependabot[bot]`, `paigasusbot[bot]`) are
