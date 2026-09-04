@@ -73,22 +73,37 @@ consciously, on a gate (`--assert`) CI runs, never to drive the actual decision.
 ## The tag-format assumption
 
 `tag_for(name, version)` assumes release-plz's default tag format, `<package>-v<version>`.
-`assert_default_tag_format()` raises `InconclusiveError` — and only `InconclusiveError`, so the
-fail-safe direction still applies — if `rs/release-plz.toml` sets `git_tag_name` anywhere,
-workspace-wide or on an individual package. This checker does not attempt to parse a custom
-tag template; it refuses to guess and builds instead.
+`config_sections()` reads `rs/release-plz.toml`'s two sections and validates five properties
+before anything else runs: `[workspace]` is a table, `package` is an array of tables, each entry
+in it is a table, each entry has a non-empty string `name`, and no `name` repeats. Any other
+shape is now **refused** with `InconclusiveError` rather than silently ignored — a malformed
+`[workspace]`, a malformed `[[package]]` entry, or a nameless entry used to fall through a
+`... or {}`/`isinstance` guard that substituted a harmless-looking default past it (SMA-608). The
+duplicate-`name` case is the one whose old direction was a silent **skip**, not a build: the
+entry map kept the LAST entry for a repeated name, so a duplicate carrying `release = false`
+dropped that crate from the demanded-tag set entirely, with nothing raised.
+`assert_default_tag_format()` then receives these already-validated sections — it no longer reads
+the file itself — and raises `InconclusiveError`, and only `InconclusiveError`, so the fail-safe
+direction still applies, if `rs/release-plz.toml` sets `git_tag_name` anywhere, workspace-wide or
+on an individual package. This checker does not attempt to parse a custom tag template; it
+refuses to guess and builds instead.
 
 ## Modes
 
 `run.sh` has four modes, and one of them is required:
 
 - `--self-test` — runs `release_plan.py --self-test` in-process: the pure `decide()` fixture
-  table (nine rows) plus six collection-layer rows that build throwaway trees under
-  `tempfile.mkdtemp()` to exercise paths a pure-function fixture cannot reach: a missing
-  `release-plz.toml`, a `version.workspace = true` inheritance, a `git_tag_name` override, a
-  publishable member declared OUTSIDE `crates/*/*`, an unresolvable `[workspace] members`
-  entry, and a malformed `release-plz.toml` (which must exit 3, not 1).
-- `--negative-control` — seven rows against real and throwaway trees. Row 1 proves the checker's
+  table (nine rows) plus fifteen collection-layer rows that build throwaway trees under
+  `tempfile.mkdtemp()` to exercise paths a pure-function fixture cannot reach. The original six: a
+  missing `release-plz.toml`, a `version.workspace = true` inheritance, a `git_tag_name` override,
+  a publishable member declared OUTSIDE `crates/*/*`, an unresolvable `[workspace] members`
+  entry, and a malformed `release-plz.toml` (which must exit 3, not 1). SMA-608 adds nine more:
+  a non-table `[workspace]`, an array-of-tables `[workspace]`, a table-valued `package` section, a
+  non-table `[[package]]` entry, a nameless `[[package]]` entry, a duplicated `[[package]] name`,
+  an untyped collection failure making `--assert` exit 3, an untyped collection failure making
+  `run()` build rather than raise, and a check that the five shape-validation error markers above
+  are mutually exclusive (so a reworded message cannot silently start matching the wrong fixture).
+- `--negative-control` — eight rows against real and throwaway trees. Row 1 proves the checker's
   exit-3-to-1 translation; row 2 proves `--self-test` still notices a broken table. Rows 3 and 4
   each build their own throwaway git repository — one crate, one commit, tags added by the row
   — and invoke `release_plan.py` directly against it, asserting `nothing_to_release=true` when
@@ -110,7 +125,18 @@ tag template; it refuses to guess and builds instead.
   `0` and writes `nothing_to_release=false`. **Row 7** mutates a COPY of `release_plan.py`,
   inverting the first fixture's expected verdict, and asserts the mutant's `--self-test`
   exits 3 — which is what proves `self_test()`'s FIXTURES loop still evaluates its rows
-  rather than having been deleted in silence.
+  rather than having been deleted in silence. **Row 8** does the same for the
+  COLLECTION_ROWS loop and the `[workspace]` shape check specifically: it mutates a COPY of
+  `release_plan.py`, neutering `config_sections`'s `isinstance(workspace, dict)` guard with a
+  `if False and ...` condition (a condition neutering, not a line deletion — every
+  `raise InconclusiveError(...)` spans two physical lines, so deleting the raise leaves an empty
+  `if` body and an `IndentationError`, which would red this row for the wrong reason), asserts via
+  `cmp -s` that the mutation actually changed the file (so a renamed check cannot make the row
+  vacuous), asserts the mutant's `--self-test` exits 3, and then greps the mutant's stderr for the
+  specific `"a non-table [workspace] is inconclusive"` fixture label. The stderr assertion exists
+  because rc 3 alone is not sufficient: `self_test()`'s own arity floor also returns 3 if
+  `COLLECTION_ROWS` is short two or more rows, so an rc-only check would go green whether the
+  shape check fired or the floor did — the two controls covering for each other's absence.
 - `--assert` — runs `release_plan.py --assert` against the real repository: the derived
   releasable set must equal `EXPECTED_RELEASABLE`, and the repository must report at least one
   tag (a shallow checkout with no tags cannot exercise the real decision).
@@ -139,12 +165,16 @@ scratch file) and by the release workflow itself at runtime.
 `release_plan.py` exits `0` pass, `2` its own infrastructure failure (an argument error is the
 only case today), and `3` for an assertion failure — never `1`. That was FALSE until the
 SMA-603 fix wave, and the code was fixed rather than the sentence: `workspace = 3` in
-`rs/release-plz.toml` raised a bare `TypeError` out of `assert_default_tag_format`, which
+`rs/release-plz.toml` used to raise a bare `TypeError` out of `assert_default_tag_format`, which
 `_assert_repo`'s `except InconclusiveError` did not catch, so `--assert` exited 1 with a traceback
 and `run_checker` mapped that onto `die_infra` (2) — reporting a broken repository file as
 "infrastructure failed". `_assert_repo` now catches `Exception`, because collection reads
-only repository files, so any failure of it is a statement about the repository. A self-test
-row asserts it. `uv` itself exits `1` on a
+only repository files, so any failure of it is a statement about the repository. SMA-608 has
+since typed the `workspace = 3` shape itself — `config_sections` now raises `InconclusiveError`
+for it before `assert_default_tag_format` runs — but the broad catch stays as the floor for
+shapes this module does not model, and two self-test rows (`_untyped_collection_failure_asserts_three`
+and `_untyped_collection_failure_builds`, MEASURED against a crate manifest holding
+`package = 3`) red if it is narrowed to `except InconclusiveError`. `uv` itself exits `1` on a
 failed resolution. A shared code would let a `uv`/PyPI-mirror hiccup during `uv run` read as
 "the repo is wrong" instead of "the tool failed." `run.sh`'s `run_checker()` owns the
 translation: checker `0` -> wrapper `0`; checker `3` -> wrapper `1`; anything else -> wrapper

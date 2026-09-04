@@ -278,11 +278,15 @@ def repo_tags(repo_root: Path) -> set[str]:
 def run(repo_root: Path, event_name: str) -> tuple[bool, str]:
     """The runtime path. It must NEVER traceback: `--github-output` wraps this call and its
     fail-safe is "warn and build", not "crash and let the caller decide". `InconclusiveError` is the
-    expected collection failure, but a malformed manifest can raise something else entirely —
-    measured: `workspace = 3` in `rs/release-plz.toml` raises a bare `TypeError` from inside
-    `assert_default_tag_format`'s `"git_tag_name" in (...)` membership test. Catching `Exception`
-    here, and ONLY here, is what keeps that a "build" instead of a traceback. `--assert` and
-    `--self-test` deliberately do not call `run()` and must keep surfacing errors loudly.
+    expected collection failure. `workspace = 3` in `rs/release-plz.toml` USED TO raise a bare
+    `TypeError` from inside `assert_default_tag_format`'s `"git_tag_name" in (...)` membership
+    test; SMA-608 types that shape — `config_sections`'s `isinstance(workspace, dict)` check now
+    raises `InconclusiveError` for it before `assert_default_tag_format` is ever reached. Catching
+    `Exception` here, and ONLY here, is what still stands as the floor for the RESIDUAL: shapes
+    this module does not model. It is not decoration — `_untyped_collection_failure_builds` is a
+    fixture, MEASURED against a crate manifest holding `package = 3`, that reds if this catch is
+    narrowed to `except InconclusiveError`. `--assert` and `--self-test` deliberately do not call
+    `run()` and must keep surfacing errors loudly.
     """
     try:
         packages = releasable_packages(repo_root / "rs")
@@ -386,12 +390,13 @@ def _tag_name_override_is_inconclusive() -> str | None:
     """A `[workspace] git_tag_name` override invalidates `tag_for`'s default-format assumption,
     and must be InconclusiveError rather than silently tagged the usual way.
 
-    This tree deliberately has NO `rs/crates/` directory at all — `assert_default_tag_format`
+    This tree deliberately has NO `rs/Cargo.toml` at all — `assert_default_tag_format`
     must raise before `releasable_packages` ever reaches `crate_manifests`. MEASURED: with a
     bare `except InconclusiveError: return None`, neutering `assert_default_tag_format`'s body to a
-    no-op `return` made THIS helper keep passing, because `crate_manifests` then raised its own,
-    unrelated "no crate manifests under .../crates — the tree moved" InconclusiveError, and the bare
-    except accepted that too. Matching on "git_tag_name" specifically is what makes that
+    no-op `return` made THIS helper keep passing, because `crate_manifests` then calls
+    `workspace_members` -> `load_toml(rs_root / "Cargo.toml")` on a tree with no such file, and
+    that raises its own, unrelated "cannot read .../rs/Cargo.toml: ..." InconclusiveError — which
+    the bare except accepted too. Matching on "git_tag_name" specifically is what makes that
     mutation visible: neutering the function under test now removes the ONLY source of a
     "git_tag_name" message, so this helper reports the wrong-reason string instead of None.
     """
@@ -481,6 +486,13 @@ def _malformed_config_asserts_three() -> str | None:
     interpreter exited 1 with a traceback, and `run.sh`'s `run_checker` mapped that 1 onto
     `die_infra` (2). Check 11 then reported "uv or the interpreter failed" for what is plainly a
     broken repository file, and README.md's "never 1" claim was false.
+
+    SMA-608 types the `workspace = 3` shape itself: `config_sections` now raises
+    `InconclusiveError` for it before `assert_default_tag_format` runs, so this row's own fixture
+    no longer exercises the untyped path it was written against. It still asserts the 3 contract
+    end to end (a malformed config -> `_assert_repo` -> exit 3) and is kept for that. The
+    untyped-failure coverage this row used to be the only source of moved to two new rows,
+    `_untyped_collection_failure_asserts_three` and `_untyped_collection_failure_builds`.
     """
     tmp = tempfile.mkdtemp()
     try:
@@ -764,14 +776,21 @@ def _assert_repo(repo_root: Path) -> int:
     that 1 onto its `die_infra` branch (2) — silently breaking the documented contract.
 
     SMA-603 fix wave, Group 3: the `except` is BROAD for the same reason `run()`'s is, and the
-    documented contract is why. MEASURED: `workspace = 3` in `rs/release-plz.toml` raises a bare
-    `TypeError` from inside `assert_default_tag_format`'s membership test, which an
-    `except InconclusiveError` does not catch — so `--assert` exited 1 with a traceback, `run_checker`
+    documented contract is why. MEASURED before that fix: `workspace = 3` in `rs/release-plz.toml`
+    raised a bare `TypeError` from inside `assert_default_tag_format`'s membership test, which an
+    `except InconclusiveError` did not catch — so `--assert` exited 1 with a traceback, `run_checker`
     mapped that onto `die_infra` (2), and a malformed repository file was reported as
     "infrastructure failed" rather than "the repository is wrong". The README claimed the checker
-    could never exit 1; the code, not the doc, was wrong. Collection reads only repository files,
-    so any failure of it IS a statement about the repository. `--self-test` deliberately keeps no
-    such catch: it tests this module, not the tree.
+    could never exit 1; the code, not the doc, was wrong.
+
+    `workspace = 3` no longer raises `TypeError`: SMA-608 types that shape, and `config_sections`
+    now raises `InconclusiveError` for it before `assert_default_tag_format` is ever reached. This
+    catch stays broad regardless — it is the floor for the RESIDUAL, shapes the validator does not
+    model — and it is covered, not decorative: `_untyped_collection_failure_asserts_three`
+    (MEASURED against a crate manifest holding `package = 3`) reds if it is narrowed to
+    `except InconclusiveError`. Collection reads only repository files, so any failure of it IS a
+    statement about the repository. `--self-test` deliberately keeps no such catch: it tests this
+    module, not the tree.
     """
     problems: list[str] = []
     try:
