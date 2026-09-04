@@ -62,11 +62,16 @@ reasoned waiver. Do not write D1 before checking this in the browser.
 Source: the Apache Individual Contributor License Agreement, clauses 1–8, adapted. **Three
 substantive changes**, not two structural ones — an earlier draft of this spec understated it:
 
-1. **"the Foundation" → a named legal person.** Apache's template names the ASF throughout.
-   "The Paigasus copyright holder" is not a legal person: Sven Maschek personally and a future
-   GmbH/UG are different counterparties. The adapted text must name one explicitly, with an
-   address. This is an open question below.
-2. **A successors-and-assigns clause, which the ASF ICLA does not contain.** A non-exclusive
+1. **"the Foundation" → a named legal person: Sven Maschek, personally.** Apache's template
+   names the ASF throughout. Decided on this issue. The adapted text names him with an address.
+   Because the counterparty is a natural person rather than the eventual operating company,
+   change 2 below stops being boilerplate and becomes the clause the whole arrangement rests on.
+2. **A successors-and-assigns clause, which the ASF ICLA does not contain. Load-bearing here.**
+   With Sven as the personal counterparty, every contribution is licensed to an individual, and
+   the expected end state is a GmbH/UG operating `paigasus-cloud`. Without an assignment right,
+   moving those licenses to that company later needs each contributor's consent — the exact
+   retroactive-permission problem ADR-0007 exists to avoid, reintroduced through the back door.
+   A non-exclusive
    copyright license is presumptively not assignable without the licensor's consent (*Gardner
    v. Nike*, 9th Cir. 2002, and comparable reasoning elsewhere). Clause 2's sublicense right
    mitigates but does not cleanly substitute for transferring the head license. Since
@@ -267,16 +272,26 @@ is recorded here rather than left to be rediscovered.
    lawful basis, no named processor relationship and no retention position today. D3 adds a short
    notice; confirming SAP's DPA / privacy terms is part of the browser half. This is a compliance
    and contributor-trust exposure, not merely a legal-custody one.
-3. **The check is advisory, so the deliverable does not fully deliver the requirement.** Stated
-   plainly because it is a real tension: the Problem section justifies this issue by ADR-0007's
-   "in place *before* the first external PR is accepted", and an advisory status can be merged
-   past. The decision to stay advisory was taken deliberately on this issue, on the grounds that
-   the stuck-check bug would otherwise block legitimately-signed PRs. **The actual control is
-   therefore maintainer discipline — reading the status before merging — not automation.** Saying
-   "revisit once the flow has been exercised" would dress that up as a plan; it is not one. The
-   adversarial review disputes this choice and recommends making the check required now, noting
-   that D2 is precisely the stuck-check mitigation and that `Protect main` already has an admin
-   bypass. That recommendation is recorded for the decision-maker rather than silently overridden.
+3. **A required check can deadlock the repo, and the ordering of the browser half prevents it.**
+   Decided on this issue: the cla-assistant status **is** added to the `Protect main` ruleset's
+   required-checks list, on the grounds that the ruleset carries an admin `bypass_actors` entry,
+   so a stuck check is escapable by the one person who needs to escape it. Two constraints follow
+   and they are not optional:
+
+   - **The exact check context name is unknown until the service posts its first status.** You
+     cannot add a required check by guessing its name; a wrong name blocks every PR forever
+     while waiting for a context that never reports. Link the service, open a throwaway PR,
+     read the real context name, *then* add it to the ruleset.
+   - **Unverified and blocking: does cla-assistant post a passing status for an allowlisted
+     author, or no status at all?** If it stays silent for allowlisted accounts, then making it
+     required blocks every PR by Sven, `dependabot[bot]` and `paigasusbot[bot]` — i.e. all
+     traffic this repo actually has. **Verify this on a real allowlisted PR before adding the
+     required check**, not after. The admin bypass makes this recoverable, not harmless: every
+     Dependabot PR would need manual bypass until it was undone.
+
+   With those two ordered correctly, the deliverable does deliver ADR-0007's requirement that
+   the CLA be in place before an external contribution is accepted, and the control is
+   automation rather than maintainer discipline.
 4. **The service may be sunset.** Dormant codebase; the migration path (an in-house action on the
    n8n model) is recorded in the ADR.
 
@@ -284,9 +299,8 @@ is recorded here rather than left to be rediscovered.
 
 These need Sven, not implementation:
 
-1. **Who is the CLA counterparty?** Sven Maschek personally, or a company? A name and address go
-   into `docs/CLA.md`. If personal, the successors-and-assigns clause (D1 change 2) is what makes
-   a later transfer to a GmbH/UG possible, and it becomes load-bearing rather than boilerplate.
+1. ~~Who is the CLA counterparty?~~ **Answered: Sven Maschek personally.** The postal address
+   for the document is still needed.
 2. **Does the click-through capture a real-world identity** (name, and optionally address), or
    only a GitHub login? An agreement whose "You" cannot be identified is hard to enforce, and
    enforceability is the asset ADR-0007 wants.
@@ -299,7 +313,6 @@ These need Sven, not implementation:
 
 ## Out of scope
 
-- Making the CLA check a required status check (deliberate; residual risk 3).
 - A Corporate CLA (CCLA), subject to open question 4.
 - Migrating to a self-hosted action (ADR-0007 Amendment 1 records when to revisit).
 - Signature-export automation.
@@ -318,6 +331,8 @@ These need Sven, not implementation:
 - [ ] `CONTRIBUTING.md` CLA section: live flow, both traps, retrigger-silence note, link to
       `docs/CLA.md`, corrected enforcement wording, privacy note
 - [ ] Allowlist recorded as `SMK1085`, `dependabot[bot]`, `paigasusbot[bot]`
+- [ ] Verified that cla-assistant posts a passing status for an allowlisted author, THEN the
+      real context name added to the `Protect main` ruleset as a required check
 - [ ] `moon ci` green over the affected graph, including `repo:workflow-credentials`'
       self-test and negative control
 - [ ] Handoff note in the PR description stating exactly what Sven must do in the browser
