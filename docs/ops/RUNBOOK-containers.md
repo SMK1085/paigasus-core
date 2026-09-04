@@ -264,11 +264,13 @@ build itself — they bite the first operator who deploys without reading this s
   **Reading a CA-bundle boot failure.** All four failure modes name the config key. A bundle whose
   PEM decodes as base64 but is not valid DER is the subtle one — it passes the PEM parse and fails
   only when the TLS client is built, so boot reports it against the config key rather than against
-  the platform trust store. If instead you see *"a control client built WITHOUT ... also failed,
-  so the platform trust store contains no parseable certificates"*, the store is the primary
-  fault: fix it first, then re-check the bundle, which may also be invalid. The plain *"this can
-  also mean the platform trust store contains no parseable certificates"* wording appears only
-  when no bundle is configured at all.
+  the platform trust store. If the message instead says the platform trust store contains no
+  parseable certificates **and tells you to "fix that first"**, the store is the primary fault:
+  repair it, then re-check the bundle, which may also be invalid. The two services word that case
+  differently — only the "fix that first" instruction is common to both, so match on that rather
+  than on a full sentence. The plain *"this can also mean the platform trust store contains no
+  parseable certificates"* wording, carrying no "fix that first", appears only when no bundle is
+  configured at all.
 
   **A self-signed *leaf* works too.** rustls applies no `cA` check to a trust anchor, so an IdP
   presenting a bare self-signed certificate validates once that certificate's own PEM is in the
