@@ -295,25 +295,31 @@ is recorded here rather than left to be rediscovered.
 4. **The service may be sunset.** Dormant codebase; the migration path (an in-house action on the
    n8n model) is recorded in the ADR.
 
-## Open questions
+## Decisions taken on this issue
 
-These need Sven, not implementation:
+All four questions raised by the adversarial review are now settled:
 
-1. ~~Who is the CLA counterparty?~~ **Answered: Sven Maschek personally.** The postal address
-   for the document is still needed.
-2. **Does the click-through capture a real-world identity** (name, and optionally address), or
-   only a GitHub login? An agreement whose "You" cannot be identified is hard to enforce, and
-   enforceability is the asset ADR-0007 wants.
-3. **AC-4:** file the second-account end-to-end test as a linked follow-up issue, or renegotiate
-   AC-4 in Linear?
-4. **Employer IP:** ICLA clause 4 requires a contributor to represent they have employer
-   permission. A CCLA is out of scope here, but an employee contributing under an existing
-   employment IP assignment is not covered by that exclusion. Accept clause 4's representation as
-   sufficient for now?
+1. **Counterparty: Sven Maschek, personally.** Not a company. This makes D1's
+   successors-and-assigns clause load-bearing rather than boilerplate — see D1.
+   **Still needed before `docs/CLA.md` can be written:** the postal address to name him by.
+   A contract identifying a natural person should identify them; this spec will not ship a
+   placeholder into a legal document.
+2. **Identity captured: GitHub login only** — account, email, timestamp, as cla-assistant
+   captures by default. No custom name/address fields. Accepted trade-off: a pseudonymous
+   account is harder to bind to a real person, so enforceability is weaker than the ASF
+   signature block contemplates. Judged proportionate for a project of this size, and it is
+   what LiteLLM and Langfuse accept. It also keeps the GDPR surface (residual risk 2) to the
+   minimum the mechanism requires.
+3. **AC-4: filed as a linked follow-up issue** rather than downgraded in place, so the
+   renegotiation is on the record in Linear.
+4. **Employer IP: ICLA clause 4's representation only.** The contributor represents they have
+   employer permission or that the employer waived its rights. No CCLA now; a corporate
+   contributor population does not exist yet, and a second document plus a second signing flow
+   is cost without a payer.
 
 ## Out of scope
 
-- A Corporate CLA (CCLA), subject to open question 4.
+- A Corporate CLA (CCLA); see decision 4.
 - Migrating to a self-hosted action (ADR-0007 Amendment 1 records when to revisit).
 - Signature-export automation.
 - Fixing `release.yml:384-385`'s identity — identified here, but it is a separate defect with a
@@ -321,8 +327,9 @@ These need Sven, not implementation:
 
 ## Acceptance criteria
 
-- [ ] `docs/CLA.md` exists: adapted Apache ICLA, operative grants unmodified, named counterparty,
-      successors-and-assigns clause, `Version:` and `Effective:` headers
+- [ ] `docs/CLA.md` exists: adapted Apache ICLA, operative grants unmodified, Sven Maschek named
+      as counterparty with address, successors-and-assigns clause, `Version:` and `Effective:`
+      headers, ICLA clause 4 employer representation retained
 - [ ] `.github/workflows/cla-retrigger.yml` exists: `issue_comment` trigger, `permissions: {}`,
       pinned endpoint with `curl --fail-with-body -sS`, `startsWith(trim(...))` guard,
       `concurrency` group and `timeout-minutes`
