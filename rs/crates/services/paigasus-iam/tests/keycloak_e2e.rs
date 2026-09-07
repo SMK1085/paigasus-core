@@ -66,7 +66,7 @@ async fn keycloak_end_to_end_config_only_oidc() {
     // `KC_HTTPS_CERTIFICATE_*` expect.
     let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_string(), "127.0.0.1".to_string()]).expect("self-signed cert");
     let cert_pem = cert.cert.pem().into_bytes();
-    let key_pem = cert.key_pair.serialize_pem().into_bytes();
+    let key_pem = cert.signing_key.serialize_pem().into_bytes();
     let realm_json = include_bytes!("fixtures/keycloak-realm.json").to_vec();
 
     let image = GenericImage::new(KEYCLOAK_IMAGE, KEYCLOAK_TAG)
