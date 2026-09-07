@@ -39,7 +39,7 @@ proptest.workspace = true
 # baseline since this crate is the sole consumer today; versions match what's already
 # resolved transitively in Cargo.lock (hmac 0.12.x, sha2 0.10.x).
 hmac = "0.12"
-sha2 = "0.10"
+sha2 = "0.11"
 
 [lints]
 workspace = true
