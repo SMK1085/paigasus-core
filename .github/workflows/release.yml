@@ -381,8 +381,16 @@ jobs:
             echo "version-lockstep: nothing to stamp"
             exit 0
           fi
-          git config user.name  "paigasus-release[bot]"
-          git config user.email "paigasus-release[bot]@users.noreply.github.com"
+          # The App's bot user, in the resolvable `<id>+<login>@` form. Both halves matter.
+          # `paigasus-release[bot]` was used here until SMA-620 and is not a real account —
+          # GET /users/paigasus-release[bot] is a 404 — so commits it authored resolved to
+          # `author: null`. That is unfixable downstream: cla-assistant matches commit authors
+          # against a login allowlist, and a null author has no login to allowlist. It never
+          # surfaced because this step is conditional on there being drift to stamp and has
+          # never run. Verified: id 285361405, type Bot, and the author of both release commits
+          # on main.
+          git config user.name  "paigasusbot[bot]"
+          git config user.email "285361405+paigasusbot[bot]@users.noreply.github.com"
           git add -A
           git commit -m "chore(rs): stamp the non-Cargo manifests to the release version"
           git push "$AUTH_REMOTE" "HEAD:$BRANCH"

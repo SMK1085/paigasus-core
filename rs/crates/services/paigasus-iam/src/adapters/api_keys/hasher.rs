@@ -10,7 +10,7 @@
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use paigasus_iam_core::SecretHasher;
 use sha2::Sha256;
 
@@ -103,6 +103,21 @@ mod tests {
         let tag = h.hash(b"secret-bytes");
         assert!(h.verify(b"secret-bytes", &tag));
         assert!(!h.verify(b"other", &tag));
+    }
+
+    /// A KNOWN-ANSWER test, not a roundtrip. Every other test here hashes and verifies with the
+    /// same code, so all of them would still pass if a `sha2`/`hmac` upgrade changed the digest
+    /// output — and every API key secret already stored in the database would stop verifying.
+    /// The expected tag is HMAC-SHA-256 over the fixed pepper and message, computed independently
+    /// (Python `hmac.new(b'\x5a' * 32, msg, hashlib.sha256)`), so it pins the wire format rather
+    /// than the current implementation. If a dependency bump reds this, the bump changes stored
+    /// credentials: do not re-baseline the constant.
+    #[test]
+    fn hmac_sha256_output_matches_an_independent_known_answer() {
+        let h = HmacSecretHasher::new(Pepper::from_config(&test_pepper_b64()).unwrap());
+        let tag = h.hash(b"paigasus-known-answer-vector");
+        let hex: String = tag.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(hex, "f7459e728cab108a9c963e1bc8d831944b52a226d0b5a3da8f86b0975f399084");
     }
 
     #[test]

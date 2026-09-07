@@ -8,7 +8,7 @@
 //! dependencies (ADR-0005 keeps the domain crate pure; `hmac`/`sha2` are dev-dependencies
 //! only, never shipped).
 
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use paigasus_iam_core::{ApiKeyId, SecretHasher, format_token, parse_token};
 use proptest::prelude::*;
 use sha2::Sha256;
