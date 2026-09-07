@@ -248,7 +248,7 @@ pub async fn start_mock_idp() -> MockIdp {
     let (sign, jwk) = es256_keypair(&kid);
 
     let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_string(), "127.0.0.1".to_string()]).expect("self-signed cert");
-    let tls = axum_server::tls_rustls::RustlsConfig::from_pem(cert.cert.pem().into_bytes(), cert.key_pair.serialize_pem().into_bytes())
+    let tls = axum_server::tls_rustls::RustlsConfig::from_pem(cert.cert.pem().into_bytes(), cert.signing_key.serialize_pem().into_bytes())
         .await
         .expect("rustls config from generated pem");
 
@@ -309,11 +309,13 @@ pub async fn start_mock_idp() -> MockIdp {
 ///     DN and path building has nothing to match on;
 ///   - the leaf carries both `localhost` and `127.0.0.1` SANs, since the server binds an
 ///     ephemeral `127.0.0.1` port and the issuer URL is `https://127.0.0.1:<port>`;
-///   - `CertificateParams::signed_by` CONSUMES `self`, so the params must be built and passed by
-///     value.
+///   - the CA's params and key are moved into an `rcgen::Issuer`, which is what
+///     `CertificateParams::signed_by` takes since rcgen 0.14 (it replaced the old
+///     `(&Certificate, &KeyPair)` pair). Self-sign the CA BEFORE building the `Issuer`, because
+///     `Issuer::new` consumes both the params and the key.
 #[allow(dead_code)]
 pub async fn start_mock_idp_private_ca() -> (MockIdp, String) {
-    use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, KeyPair};
+    use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, Issuer, KeyPair};
 
     // --- the private CA ---
     // `DistinguishedName::push` takes `impl Into<DnValue>` and rcgen has a blanket
@@ -325,12 +327,14 @@ pub async fn start_mock_idp_private_ca() -> (MockIdp, String) {
     let ca_key = KeyPair::generate().expect("ca keypair");
     let ca_cert = ca_params.self_signed(&ca_key).expect("self-signed ca");
     let ca_pem = ca_cert.pem();
+    // Consumes `ca_params` and `ca_key`; the self-signed CA certificate above is already minted.
+    let ca_issuer = Issuer::new(ca_params, ca_key);
 
     // --- the leaf, signed BY the CA ---
     let mut leaf_params = CertificateParams::new(vec!["localhost".to_string(), "127.0.0.1".to_string()]).expect("leaf params");
     leaf_params.distinguished_name.push(DnType::CommonName, "paigasus-mock-idp");
     let leaf_key = KeyPair::generate().expect("leaf keypair");
-    let leaf_cert = leaf_params.signed_by(&leaf_key, &ca_cert, &ca_key).expect("ca-signed leaf");
+    let leaf_cert = leaf_params.signed_by(&leaf_key, &ca_issuer).expect("ca-signed leaf");
 
     let kid = "mock-idp-es256-initial".to_string();
     let (sign, jwk) = es256_keypair(&kid);
@@ -397,7 +401,7 @@ pub async fn start_mock_idp_self_signed() -> (MockIdp, String) {
 
     let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_string(), "127.0.0.1".to_string()]).expect("self-signed cert");
     let leaf_pem = cert.cert.pem();
-    let tls = axum_server::tls_rustls::RustlsConfig::from_pem(cert.cert.pem().into_bytes(), cert.key_pair.serialize_pem().into_bytes())
+    let tls = axum_server::tls_rustls::RustlsConfig::from_pem(cert.cert.pem().into_bytes(), cert.signing_key.serialize_pem().into_bytes())
         .await
         .expect("rustls config from generated pem");
 
