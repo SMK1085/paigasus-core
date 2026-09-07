@@ -98,7 +98,7 @@ futures = "0.3"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "rustls-tls-native-roots", "json"] }
 # jsonwebtoken — JWT decode/verify + the `jwk` module (`JwkSet`/`Jwk`, `DecodingKey::from_jwk`)
 # for the OIDC adapter's JWKS cache (SMA-443 Task 6) and validator (Task 7). MIT-licensed.
-jsonwebtoken = "10"
+jsonwebtoken = "11"
 # base64 — already an indirect dep via jsonwebtoken; the validator (SMA-443 Task 7) uses it
 # directly (URL_SAFE_NO_PAD engine) to base64url-decode a token's payload segment for the
 # UNVERIFIED `iss` read that picks which issuer's JWKS to check against.
