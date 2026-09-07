@@ -1,0 +1,9 @@
+<task-notification>
+<task-id>bpm56qn90</task-id>
+<summary>Monitor event: "CI status of PR 221 (and 222,223)"</summary>
+<event>PR 221: RUNNING(1) ms=UNKNOWN
+PR 222: FAILED[moon ci] ms=UNKNOWN
+PR 223: PASS ms=UNKNOWN
+---</event>
+If this event is something the user would act on now, send a PushNotification. Routine or benign output doesn't need one.
+</task-notification>
