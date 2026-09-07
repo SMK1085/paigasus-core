@@ -116,3 +116,40 @@ privacy terms has not yet been done. They are meant to be retained for as long a
 distributes code containing Your Contributions, because they are the record of the license under
 which that code was contributed — but deletion or export of any given record is subject to
 cla-assistant.io as the operator of the database that actually holds it, not to the Project.
+
+---
+
+## Repository provenance — not part of the Agreement
+
+Everything above this line is the Agreement, and is exactly what the gist below serves.
+This section is repository bookkeeping and confers nothing.
+
+**Where contributors actually sign.** cla-assistant.io accepts only a **gist** as its CLA
+document — a repository file URL is not an option, which was verified during setup and
+falsifies this design's original assumption. The Agreement is therefore published at:
+
+- Gist: <https://gist.github.com/SMK1085/c13983ee548b07824f003b9828207f3a>
+- Revision corresponding to **Version 1.0**: `a4821c70359351b2cbe935f3c9bbd91233aef980`
+
+Gist revisions are immutable, so that revision URL will always serve the exact text a
+Version 1.0 signature was given against, even if the gist is later updated.
+
+**Which one is the source.** This file is. The gist is a published copy of it, and exists
+because the service requires that form. If the two ever disagree, this file plus its git
+history is the record of what was intended, and the discrepancy is a bug to be corrected by
+republishing the gist — not resolved in the gist's favour.
+
+**Changing the Agreement.** Substantive edits follow this order, and skipping a step is how
+the two artifacts drift apart:
+
+1. Edit this file and bump `Version:` and `Effective:` at the top.
+2. Update the gist so its content matches this file's Agreement text.
+3. Record the new gist revision SHA here, replacing the one above.
+4. Contributors are asked to accept the new version, per Versioning.
+
+**Why no automated drift check.** A CI gate comparing the two would need to fetch the gist on
+every run, putting a network dependency and an outage-handling decision into a gate for a
+document that changes almost never. The control is instead the `Version:` header, which appears
+in *both* artifacts and is shown to a contributor at signing time — so a mismatch is visible at
+the one moment it matters. This is a deliberate, reasoned waiver rather than an oversight; if
+CLA edits ever become frequent enough that the manual step is unreliable, automate it then.

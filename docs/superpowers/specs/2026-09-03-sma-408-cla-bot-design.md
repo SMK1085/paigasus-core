@@ -54,13 +54,30 @@ The CLA text lives **in the repo**, not only in a gist. Version-controlling it m
 text a contributor agreed to on a given date is recoverable from git history. Under the hosted service the *signature records* live in
 SAP's database; the *agreement text* must not also live somewhere we do not control.
 
-**Premise to verify before writing this file.** D1 assumes cla-assistant.io accepts a
-**repository file URL** as the CLA document. The hosted linking flow may be gist-only. If it
-is, the authoritative text becomes a mutable gist in a personal account and `docs/CLA.md`
-becomes an ungated mirror — a two-artifact drift problem in a repo that gates codegen drift,
-version lockstep and 26 napi version guards. **Contingency:** if gist-only, `docs/CLA.md` must
-carry a pointer to the gist revision it mirrors, plus either a drift assertion or a written,
-reasoned waiver. Do not write D1 before checking this in the browser.
+**Premise RESOLVED — and it was false.** D1 originally assumed cla-assistant.io accepts a
+**repository file URL** as the CLA document. Verified during setup on 2026-09-07: **it does
+not. The service accepts a gist only.** The contingency this spec wrote for that case is
+therefore in force, and D1's shape changed accordingly.
+
+The Agreement is published at gist `c13983ee548b07824f003b9828207f3a`, revision
+`a4821c70359351b2cbe935f3c9bbd91233aef980` for Version 1.0. `docs/CLA.md` remains the
+**source**; the gist is a published copy that exists because the service requires that form.
+The file carries a "Repository provenance" section, explicitly marked as not part of the
+Agreement, recording the gist URL, the revision matching the current version, which artifact
+wins on disagreement, and the four-step change procedure.
+
+**Drift control: a reasoned waiver, not a gate** (decided on this issue). An automated
+comparison would need to fetch the gist on every CI run, putting a network dependency and an
+outage-handling decision into a gate for a document that changes almost never — and it would
+carry all seven registration obligations of a new `repo:*` task. The control is instead the
+`Version:` header, which appears in *both* artifacts and is displayed to a contributor at
+signing time, so a mismatch surfaces at the one moment it matters. Revisit if CLA edits ever
+become frequent enough for the manual step to be unreliable.
+
+**Residual, stated rather than hidden:** nothing mechanically prevents the gist being edited
+without a corresponding commit here. The exposure is bounded by the gist being writable only by
+the Maintainer, and by gist revisions being immutable, so a Version 1.0 signature remains
+verifiable against `a4821c70…` regardless of later edits.
 
 Source: the Apache Individual Contributor License Agreement, clauses 1–8, adapted. **Four
 substantive changes**, not two structural ones — an earlier draft of this spec understated it:
