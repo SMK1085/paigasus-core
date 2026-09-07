@@ -69,10 +69,15 @@ wins on disagreement, and the four-step change procedure.
 **Drift control: a reasoned waiver, not a gate** (decided on this issue). An automated
 comparison would need to fetch the gist on every CI run, putting a network dependency and an
 outage-handling decision into a gate for a document that changes almost never — and it would
-carry all seven registration obligations of a new `repo:*` task. The control is instead the
-`Version:` header, which appears in *both* artifacts and is displayed to a contributor at
-signing time, so a mismatch surfaces at the one moment it matters. Revisit if CLA edits ever
-become frequent enough for the manual step to be unreliable.
+carry all seven registration obligations of a new `repo:*` task. The control is instead a
+**pre-publication byte comparison**, described in the next paragraph and specified as steps 2-4
+of the change procedure in `docs/CLA.md`. Revisit if CLA edits ever become frequent enough for
+the manual step to be unreliable.
+
+An earlier draft of this paragraph named the `Version:` header as the control. That was wrong
+and is corrected below; there is exactly one enforcement rule, and it is the byte comparison.
+The wrong version is recorded rather than deleted because an operator who had read it would
+otherwise believe the header alone was sufficient.
 
 **The `Version:` header is NOT the control it first looked like.** cla-assistant binds a
 signature to the **gist revision served at signing** — it stores the gist's history `version`
@@ -82,10 +87,21 @@ label, and revision immutability protects only signatures *already given*, not t
 label's meaning going forward. An earlier draft of this spec and of `docs/CLA.md` claimed
 otherwise; both are corrected.
 
-**The actual control is a pre-publication byte comparison** (step 3 of the change procedure in
-`docs/CLA.md`): the gist's content must match this repo's Agreement text exactly before a
-revision becomes the signing target, because the service compares nothing itself. Verified for
-Version 1.0 — 8161 characters on both sides, identical.
+**The actual control is a pre-publication byte comparison** (steps 2-4 of the change procedure
+in `docs/CLA.md`): the candidate is generated from this repo as bytes and verified *before* the
+live gist is updated, because the service compares nothing itself and serves whatever the gist
+currently holds — anything published unverified is signable in the interval before it is
+checked. Verified for Version 1.0 on 2026-09-07: 8164 bytes on both sides, SHA-256
+`bcf796fa76ffb20e…`, true byte equality. The comparison reads **bytes**, not decoded text: an
+earlier revision used `Path.read_text()` with a trailing-newline `rstrip`, which can report a
+match for files differing in line endings or final byte — it reported 8161 characters for what
+are in fact 8164 bytes.
+
+**Two ordering rules make that hold** (both in `docs/CLA.md`): the gist is never hand-edited,
+only regenerated from this repo; and it is never changed without a `Version:` bump, because
+cla-assistant requests a fresh signature on *any* new revision. Without the second rule an
+unversioned gist edit would force every contributor to re-sign while the Agreement says
+re-acceptance follows only a substantive version bump.
 
 **Residual, stated rather than hidden:** that check is pre-publication only. It catches a
 mismatch at the moment of change and never afterwards, and cannot detect a later edit made

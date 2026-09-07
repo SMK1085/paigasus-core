@@ -147,46 +147,74 @@ because the service requires that form. If the two ever disagree, this file plus
 history is the record of what was intended, and the discrepancy is a bug to be corrected by
 republishing the gist — not resolved in the gist's favour.
 
-**Changing the Agreement.** Substantive edits follow this order, and skipping a step is how
-the two artifacts drift apart:
+**Changing the Agreement.** Two rules first, because they constrain the order of everything
+below.
+
+*Never hand-edit the gist.* Its content is always generated from this file, so the published
+text cannot diverge by transcription.
+
+*Never change the gist without bumping `Version:`.* cla-assistant requests a fresh signature on
+**any** new gist revision — it keys on the revision, not on our version field. So an unversioned
+gist edit would force every contributor to re-sign while this document tells them re-acceptance
+follows only a substantive version bump. Keeping the two in step means the rule holds as written:
+one gist revision per version, and every revision change is a real re-acceptance event.
+
+Substantive edits then follow this order. **Verification comes before publication**, because
+cla-assistant serves whatever the gist currently holds — anything published unverified is
+signable in the interval before you check it.
 
 1. Edit this file and bump `Version:` and `Effective:` at the top.
-2. Update the gist so its content matches this file's Agreement text.
-3. **Verify an exact match before the revision becomes the signing target** — compare the
-   gist's content byte-for-byte against everything in this file above the provenance
-   separator, and do not point cla-assistant at a revision that does not match:
+2. Extract the candidate — everything in this file above the provenance separator — as **bytes**:
 
    ```bash
-   gh api /gists/c13983ee548b07824f003b9828207f3a \
-     --jq '.files["paigasus-cla.md"].content' > /tmp/gist-cla.md
+   python3 -c 'import pathlib; d=pathlib.Path("docs/CLA.md").read_bytes(); \
+     pathlib.Path("/tmp/cla-candidate.md").write_bytes(
+       d.split(b"\n---\n\n## Repository provenance")[0])'
+   sha256sum /tmp/cla-candidate.md
+   ```
+
+3. Publish `/tmp/cla-candidate.md` to the gist as `paigasus-cla.md`.
+4. Confirm the live revision landed intact — fetch the **raw** URL and compare bytes, not text:
+
+   ```bash
+   curl -fsSL "https://gist.githubusercontent.com/SMK1085/c13983ee548b07824f003b9828207f3a/raw/paigasus-cla.md" \
+     -o /tmp/cla-live.md
    python3 - <<'CHECK'
-   import pathlib
-   body = pathlib.Path("docs/CLA.md").read_text().split(
-       "\n---\n\n## Repository provenance")[0].rstrip("\n")
-   gist = pathlib.Path("/tmp/gist-cla.md").read_text().rstrip("\n")
-   print("IDENTICAL" if body == gist else "DIVERGED — do not publish")
+   import pathlib, hashlib
+   cand = pathlib.Path("/tmp/cla-candidate.md").read_bytes()
+   live = pathlib.Path("/tmp/cla-live.md").read_bytes()
+   print("candidate", len(cand), hashlib.sha256(cand).hexdigest())
+   print("live     ", len(live), hashlib.sha256(live).hexdigest())
+   print("IDENTICAL" if cand == live else "DIVERGED — the gist is wrong, fix before announcing")
    CHECK
    ```
 
-   This step is not optional bookkeeping: it is the only thing standing between this file and
-   the text a contributor actually signs, because the service compares nothing.
-4. Record the new gist revision SHA here, replacing the one above.
-5. Contributors are asked to accept the new version, per Versioning.
+   Compare **bytes**, never decoded text. `Path.read_text()` applies newline translation, and a
+   trailing-newline `rstrip` discards real differences — a text comparison can report a match for
+   files that differ in line endings or final byte. An earlier revision of this section made
+   exactly that mistake.
+
+5. Record the new gist revision SHA here, replacing the one above.
+6. Contributors are asked to accept the new version, per Versioning — which cla-assistant will
+   require automatically, since the revision changed.
+
+Verified for Version 1.0 on 2026-09-07: 8164 bytes on both sides, SHA-256
+`bcf796fa76ffb20e…`, true byte equality.
 
 **Why no automated drift check, stated honestly.** A CI gate comparing the two would need to
-fetch the gist on every run, putting a network dependency and an outage-handling decision into
-a gate for a document that changes almost never. The control is instead step 3 above — a
-byte comparison performed by a human before a revision becomes the signing target.
+fetch the gist on every run, putting a network dependency and an outage-handling decision into a
+gate for a document that changes almost never. The control is instead steps 2-4 above: a byte
+comparison performed by a human, before the revision becomes the signing target.
 
-Be clear about what that does and does not buy. It is a **pre-publication** check, so it
+Be clear about what that does and does not buy. It is a **pre-publication** control, so it
 catches a mismatch at the moment of change and never afterwards. It does **not** detect a later
-edit made directly to the gist, and the `Version:` header is not a backstop for that, because
+edit made directly to the gist, and the `Version:` header is no backstop for that, because
 cla-assistant never reads this file. Anyone with write access to the gist can change what
 contributors sign without touching this repository, and nothing here would notice.
 
 That residual is accepted deliberately, on two grounds: the gist is writable only by the
-Maintainer, who is also the counterparty the Agreement names, so an undetected edit requires
-the one party the control exists to protect to act against their own interest; and CLA text
-changes are expected to be rare enough that a per-change manual step is reliable. If either
-stops holding — a second person gains write access, or edits become frequent — replace this
-with the automated comparison.
+Maintainer, who is also the counterparty the Agreement names, so an undetected edit requires the
+one party the control exists to protect to act against their own interest; and CLA text changes
+are expected to be rare enough that a per-change manual step is reliable. If either stops
+holding — a second person gains write access, or edits become frequent — replace this with the
+automated comparison.
