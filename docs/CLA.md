@@ -131,8 +131,16 @@ falsifies this design's original assumption. The Agreement is therefore publishe
 - Gist: <https://gist.github.com/SMK1085/c13983ee548b07824f003b9828207f3a>
 - Revision corresponding to **Version 1.0**: `a4821c70359351b2cbe935f3c9bbd91233aef980`
 
-Gist revisions are immutable, so that revision URL will always serve the exact text a
-Version 1.0 signature was given against, even if the gist is later updated.
+Gist revisions are immutable, so that revision URL keeps serving the exact text it served
+when it was recorded. Read that narrowly: **it protects a signature already given against
+that revision; it does not stop the gist changing underneath a version.**
+
+cla-assistant binds a signature to the **gist revision served at signing** — it stores the
+gist's history `version` and asks for a new signature when the gist changes. It does not read
+this file and knows nothing about the `Version:` field above. So an edit to the gist that
+leaves `Version:` untouched presents different Agreement text to new contributors under the
+same version label, and the recorded SHA below identifies only the *intended* revision — it
+does not constrain what the service actually serves.
 
 **Which one is the source.** This file is. The gist is a published copy of it, and exists
 because the service requires that form. If the two ever disagree, this file plus its git
@@ -144,12 +152,41 @@ the two artifacts drift apart:
 
 1. Edit this file and bump `Version:` and `Effective:` at the top.
 2. Update the gist so its content matches this file's Agreement text.
-3. Record the new gist revision SHA here, replacing the one above.
-4. Contributors are asked to accept the new version, per Versioning.
+3. **Verify an exact match before the revision becomes the signing target** — compare the
+   gist's content byte-for-byte against everything in this file above the provenance
+   separator, and do not point cla-assistant at a revision that does not match:
 
-**Why no automated drift check.** A CI gate comparing the two would need to fetch the gist on
-every run, putting a network dependency and an outage-handling decision into a gate for a
-document that changes almost never. The control is instead the `Version:` header, which appears
-in *both* artifacts and is shown to a contributor at signing time — so a mismatch is visible at
-the one moment it matters. This is a deliberate, reasoned waiver rather than an oversight; if
-CLA edits ever become frequent enough that the manual step is unreliable, automate it then.
+   ```bash
+   gh api /gists/c13983ee548b07824f003b9828207f3a \
+     --jq '.files["paigasus-cla.md"].content' > /tmp/gist-cla.md
+   python3 - <<'CHECK'
+   import pathlib
+   body = pathlib.Path("docs/CLA.md").read_text().split(
+       "\n---\n\n## Repository provenance")[0].rstrip("\n")
+   gist = pathlib.Path("/tmp/gist-cla.md").read_text().rstrip("\n")
+   print("IDENTICAL" if body == gist else "DIVERGED — do not publish")
+   CHECK
+   ```
+
+   This step is not optional bookkeeping: it is the only thing standing between this file and
+   the text a contributor actually signs, because the service compares nothing.
+4. Record the new gist revision SHA here, replacing the one above.
+5. Contributors are asked to accept the new version, per Versioning.
+
+**Why no automated drift check, stated honestly.** A CI gate comparing the two would need to
+fetch the gist on every run, putting a network dependency and an outage-handling decision into
+a gate for a document that changes almost never. The control is instead step 3 above — a
+byte comparison performed by a human before a revision becomes the signing target.
+
+Be clear about what that does and does not buy. It is a **pre-publication** check, so it
+catches a mismatch at the moment of change and never afterwards. It does **not** detect a later
+edit made directly to the gist, and the `Version:` header is not a backstop for that, because
+cla-assistant never reads this file. Anyone with write access to the gist can change what
+contributors sign without touching this repository, and nothing here would notice.
+
+That residual is accepted deliberately, on two grounds: the gist is writable only by the
+Maintainer, who is also the counterparty the Agreement names, so an undetected edit requires
+the one party the control exists to protect to act against their own interest; and CLA text
+changes are expected to be rare enough that a per-change manual step is reliable. If either
+stops holding — a second person gains write access, or edits become frequent — replace this
+with the automated comparison.

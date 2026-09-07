@@ -74,10 +74,26 @@ carry all seven registration obligations of a new `repo:*` task. The control is 
 signing time, so a mismatch surfaces at the one moment it matters. Revisit if CLA edits ever
 become frequent enough for the manual step to be unreliable.
 
-**Residual, stated rather than hidden:** nothing mechanically prevents the gist being edited
-without a corresponding commit here. The exposure is bounded by the gist being writable only by
-the Maintainer, and by gist revisions being immutable, so a Version 1.0 signature remains
-verifiable against `a4821c70…` regardless of later edits.
+**The `Version:` header is NOT the control it first looked like.** cla-assistant binds a
+signature to the **gist revision served at signing** — it stores the gist's history `version`
+and re-asks when the gist changes — and it never reads `docs/CLA.md`. So a gist edit that
+leaves `Version:` untouched serves different Agreement text to new contributors under the same
+label, and revision immutability protects only signatures *already given*, not the version
+label's meaning going forward. An earlier draft of this spec and of `docs/CLA.md` claimed
+otherwise; both are corrected.
+
+**The actual control is a pre-publication byte comparison** (step 3 of the change procedure in
+`docs/CLA.md`): the gist's content must match this repo's Agreement text exactly before a
+revision becomes the signing target, because the service compares nothing itself. Verified for
+Version 1.0 — 8161 characters on both sides, identical.
+
+**Residual, stated rather than hidden:** that check is pre-publication only. It catches a
+mismatch at the moment of change and never afterwards, and cannot detect a later edit made
+directly to the gist. Accepted on two grounds: the gist is writable only by the Maintainer, who
+is also the counterparty the Agreement names, so an undetected edit requires the party the
+control protects to act against their own interest; and CLA edits are expected to be rare
+enough for a per-change manual step to be reliable. If a second person gains write access to
+the gist, or edits become frequent, replace this with the automated comparison.
 
 Source: the Apache Individual Contributor License Agreement, clauses 1–8, adapted. **Four
 substantive changes**, not two structural ones — an earlier draft of this spec understated it:
