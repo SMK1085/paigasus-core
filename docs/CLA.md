@@ -1,7 +1,7 @@
 # Paigasus Individual Contributor License Agreement
 
 **Version:** 1.0
-**Effective:** 2026-09-04
+**Effective:** 2026-09-07
 
 Thank you for your interest in the Paigasus project (the "Project"), maintained by
 Sven Maschek, maintainer of the Paigasus project (GitHub: `SMK1085`) (the "Maintainer").
@@ -102,9 +102,15 @@ asked to accept again only if a substantive revision bumps the version (see Vers
 ## Versioning
 
 This Agreement is versioned. The version and effective date at the top of this file identify the
-revision in force. Any substantive change bumps the version, and contributors are asked to accept
-the new revision; a signature refers to the revision in force when it was given, which is
-recoverable from this file's git history.
+revision in force. **Re-acceptance follows a version change, not a judgement about how
+substantive the edit was** — cla-assistant requests a fresh signature on every published gist
+revision and cannot weigh significance, so tying the rule to "substantive" changes would promise
+contributors something the mechanism does not deliver.
+
+The two are kept in step by never publishing a revision that does not bump the version: an edit
+to this file too small to justify asking everyone to re-sign simply is not published to the gist
+on its own, and rides along with the next version instead. A signature refers to the version in
+force when it was given, recoverable from this file's git history.
 
 ## Data protection
 
@@ -129,7 +135,15 @@ document — a repository file URL is not an option, which was verified during s
 falsifies this design's original assumption. The Agreement is therefore published at:
 
 - Gist: <https://gist.github.com/SMK1085/c13983ee548b07824f003b9828207f3a>
-- Revision corresponding to **Version 1.0**: `a4821c70359351b2cbe935f3c9bbd91233aef980`
+- Revision corresponding to **Version 1.0**: `769474f2e2fe4ea8e8a519593243553eeed1a110`
+
+Version 1.0 was amended once **before the Agreement entered force** — on 2026-09-07, while
+cla-assistant was still unconfigured and no signature existed — to align the Versioning section
+with how the service actually triggers re-acceptance. The version was not bumped because 1.0 had
+never been in force, so there was no signature to supersede and a 1.1 would imply a superseded
+version that never existed. The superseded gist revision was
+`a4821c70359351b2cbe935f3c9bbd91233aef980`; it is immutable and remains fetchable. Once the
+service is live this amendment path closes, and every published revision bumps the version.
 
 Gist revisions are immutable, so that revision URL keeps serving the exact text it served
 when it was recorded. Read that narrowly: **it protects a signature already given against
@@ -167,11 +181,24 @@ signable in the interval before you check it.
 2. Extract the candidate — everything in this file above the provenance separator — as **bytes**:
 
    ```bash
-   python3 -c 'import pathlib; d=pathlib.Path("docs/CLA.md").read_bytes(); \
-     pathlib.Path("/tmp/cla-candidate.md").write_bytes(
-       d.split(b"\n---\n\n## Repository provenance")[0])'
-   sha256sum /tmp/cla-candidate.md
+   python3 - <<'EXTRACT'
+   import pathlib, sys, hashlib
+   SEP = b"\n---\n\n## Repository provenance"
+   data = pathlib.Path("docs/CLA.md").read_bytes()
+   n = data.count(SEP)
+   if n != 1:                                    # fail closed, never publish on a bad split
+       sys.exit(f"ABORT: provenance separator appears {n} times, expected exactly 1")
+   body = data.split(SEP)[0]
+   pathlib.Path("/tmp/cla-candidate.md").write_bytes(body)
+   print(len(body), hashlib.sha256(body).hexdigest())
+   EXTRACT
    ```
+
+   The count check is not defensive padding. A bare `split(...)[0]` **fails open**: with the
+   marker absent it returns the entire file, so the repository bookkeeping would be published as
+   part of the Agreement; with the marker duplicated it silently truncates at the first one. In
+   both cases step 4 would then compare a wrong candidate against a matching gist and report
+   `IDENTICAL`. Abort instead — a control over a legal document must not fail toward publishing.
 
 3. Publish `/tmp/cla-candidate.md` to the gist as `paigasus-cla.md`.
 4. Confirm the live revision landed intact — fetch the **raw** URL and compare bytes, not text:
@@ -194,9 +221,22 @@ signable in the interval before you check it.
    files that differ in line endings or final byte. An earlier revision of this section made
    exactly that mistake.
 
-5. Record the new gist revision SHA here, replacing the one above.
-6. Contributors are asked to accept the new version, per Versioning — which cla-assistant will
-   require automatically, since the revision changed.
+5. Record the new gist revision SHA here, replacing the one above — and **assert it differs
+   from the revision you just superseded**:
+
+   ```bash
+   gh api /gists/c13983ee548b07824f003b9828207f3a --jq '.history[0].version'
+   ```
+
+   Read it *after* step 4 passes, never straight after the edit: the API can still return the
+   previous revision for a few seconds, and a stale read silently records the superseded SHA as
+   current. That happened on the 2026-09-07 amendment and was caught only because the value was
+   unchanged. If the SHA you read equals the one you are replacing, wait and re-read.
+6. Contributors are asked to accept the new version, per Versioning. Once the cla-assistant
+   integration is configured for this repository, the service requests that signature itself,
+   because the gist revision changed. Until then the requirement is repository policy that a
+   maintainer applies by hand — the obligation is the same either way, only its enforcement
+   differs.
 
 Verified for Version 1.0 on 2026-09-07: 8164 bytes on both sides, SHA-256
 `bcf796fa76ffb20e…`, true byte equality.

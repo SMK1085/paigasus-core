@@ -213,8 +213,8 @@ message if a config-only package is added without it.
 
 Before your first contribution can be merged you'll be asked to sign our
 [Contributor License Agreement](./docs/CLA.md). One signature covers all of your
-contributions while that version of the agreement is in force; you'll only be asked again if a
-substantive revision bumps its version. Once the CLA
+contributions while that version of the agreement is in force; you'll be asked again only when
+its version changes. Once the CLA
 service is linked to this repository, [cla-assistant](https://cla-assistant.io/) comments on
 your first pull request with a link, and signing takes a click. The CLA preserves the project's
 ability to relicense and dual-license contributed code. Signing is required: we don't merge

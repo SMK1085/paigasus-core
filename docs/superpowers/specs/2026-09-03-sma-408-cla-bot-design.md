@@ -60,7 +60,7 @@ not. The service accepts a gist only.** The contingency this spec wrote for that
 therefore in force, and D1's shape changed accordingly.
 
 The Agreement is published at gist `c13983ee548b07824f003b9828207f3a`, revision
-`a4821c70359351b2cbe935f3c9bbd91233aef980` for Version 1.0. `docs/CLA.md` remains the
+`769474f2e2fe4ea8e8a519593243553eeed1a110` for Version 1.0. `docs/CLA.md` remains the
 **source**; the gist is a published copy that exists because the service requires that form.
 The file carries a "Repository provenance" section, explicitly marked as not part of the
 Agreement, recording the gist URL, the revision matching the current version, which artifact
@@ -91,8 +91,23 @@ otherwise; both are corrected.
 in `docs/CLA.md`): the candidate is generated from this repo as bytes and verified *before* the
 live gist is updated, because the service compares nothing itself and serves whatever the gist
 currently holds — anything published unverified is signable in the interval before it is
-checked. Verified for Version 1.0 on 2026-09-07: 8164 bytes on both sides, SHA-256
-`bcf796fa76ffb20e…`, true byte equality. The comparison reads **bytes**, not decoded text: an
+checked. Verified for Version 1.0 on 2026-09-07: 8626 bytes on both sides, SHA-256
+`0609755ffe379fac…`, true byte equality, with the recorded revision asserted equal to the live
+one.
+
+**The procedure earned its keep immediately.** Applying the round-7 fixes edited the Versioning
+section, which sits *above* the provenance separator and is therefore Agreement text — the check
+caught the divergence (8626 candidate against an 8164 gist) before anything shipped, which would
+otherwise have left contributors signing text this repo no longer contained. Version 1.0 was
+amended in place rather than bumped to 1.1, because 1.0 had never been in force: cla-assistant
+was unconfigured and no signature existed, so there was nothing to supersede and a 1.1 would
+imply a version that never applied. That amendment path closes once the service is live.
+
+**A second defect the run exposed:** reading `.history[0].version` immediately after a gist edit
+can return the *superseded* revision, because the API lags. It did here, and the wrong SHA was
+briefly recorded as current — caught only because the value was unchanged. Step 5 of the
+procedure now reads the revision after the byte check passes and asserts it differs from the one
+being replaced. The comparison reads **bytes**, not decoded text: an
 earlier revision used `Path.read_text()` with a trailing-newline `rstrip`, which can report a
 match for files differing in line endings or final byte — it reported 8161 characters for what
 are in fact 8164 bytes.
