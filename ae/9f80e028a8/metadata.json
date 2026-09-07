@@ -1,0 +1,30 @@
+{
+  "cli_version": "0.10.3",
+  "checkpoint_id": "ae9f80e028a8",
+  "strategy": "manual-commit",
+  "branch": "dependabot/cargo/rs/sha2-0.11.0",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "rs/Cargo.lock",
+    "rs/crates/libs/paigasus-iam-core/Cargo.toml",
+    "rs/crates/libs/paigasus-iam-core/tests/api_key_props.rs",
+    "rs/crates/services/paigasus-iam/Cargo.toml",
+    "rs/crates/services/paigasus-iam/src/adapters/api_keys/hasher.rs"
+  ],
+  "sessions": [
+    {
+      "metadata": "/ae/9f80e028a8/0/metadata.json",
+      "transcript": "/ae/9f80e028a8/0/full.jsonl",
+      "compact_transcript": "/ae/9f80e028a8/0/transcript.jsonl",
+      "content_hash": "/ae/9f80e028a8/0/content_hash.txt",
+      "prompt": "/ae/9f80e028a8/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 36,
+    "cache_creation_tokens": 18572,
+    "cache_read_tokens": 3562613,
+    "output_tokens": 11039,
+    "api_call_count": 18
+  }
+}

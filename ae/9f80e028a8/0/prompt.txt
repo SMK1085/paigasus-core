@@ -1,0 +1,23 @@
+<task-notification>
+<task-id>bvhw52pkv</task-id>
+<summary>Monitor event: "Live CI status of green dependabot PRs 216,217,221,222,223"</summary>
+<event>PR 216: MERGED
+PR 217: MERGED
+PR 221: RUNNING (1 left)
+PR 222: RUNNING (1 left)
+PR 223: PASS
+---</event>
+If this event is something the user would act on now, send a PushNotification. Routine or benign output doesn't need one.
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>bpm56qn90</task-id>
+<summary>Monitor event: "CI status of PR 221 (and 222,223)"</summary>
+<event>PR 221: RUNNING(1) ms=BEHIND
+PR 222: RUNNING(1) ms=BEHIND
+PR 223: PASS ms=BEHIND
+---</event>
+If this event is something the user would act on now, send a PushNotification. Routine or benign output doesn't need one.
+</task-notification>
