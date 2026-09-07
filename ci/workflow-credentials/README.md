@@ -2,18 +2,21 @@
 
 # `repo:workflow-credentials`
 
-Asserts that no pull-request-triggered GitHub Actions workflow **declares** a repository
-credential. The Non-goals section below states what "declares" does not cover.
+Asserts that no GitHub Actions workflow triggered by `pull_request`, `pull_request_target`,
+or `issue_comment` **declares** a repository credential. The Non-goals section below states
+what "declares" does not cover.
 
-A same-repo pull request runs with repository secrets. Any code the pull request
-introduces can read them. SMA-407 §7 review M2 forbids a credential in a
-pull-request-triggered workflow for this reason. Publishing must happen in a workflow
-with no `pull_request` or `pull_request_target` trigger instead.
+A same-repo pull request runs with repository secrets, and any code the pull request
+introduces can read them. SMA-407 §7 review M2 forbids a credential in such a workflow for
+this reason. On a public repository, an `issue_comment` is triggerable by any account while
+still running in base-repo context with those same secrets — which is why it belongs in the
+same set. Publishing must happen in a workflow carrying none of these three triggers
+instead.
 
 `run.sh` runs the checker, `workflow_credentials.py`, in three modes:
 
 - a bare check of the real tree;
-- `--self-test`, an in-process table of 63 rows;
+- `--self-test`, an in-process table of 65 rows;
 - `--negative-control`, which asserts against the real tree. It covers the `release.yml`
   exclusion and the exit-code mapping below.
 
@@ -67,9 +70,11 @@ refuse.
 The checker globs `.github/workflows/*.y*ml`. The pattern covers both `.yml` and
 `.yaml`, because Actions accepts both extensions.
 
-A workflow is a subject when its `on:` block names `pull_request` or
-`pull_request_target`. `pull_request_target` runs with the base repository's secrets
-even on a fork pull request, so it counts too.
+A workflow is a subject when its `on:` block names `pull_request`, `pull_request_target`,
+or `issue_comment`. `pull_request_target` runs with the base repository's secrets even on a
+fork pull request, and `issue_comment` runs in that same base-repo context while being
+triggerable by any account on a public repository — both count for the same reason
+`pull_request` does.
 
 **The `on:` → `True` trap.** PyYAML parses a bare `on:` key as the YAML 1.1 boolean
 `True`, not the string `"on"`. `doc.get("on")` then returns nothing, and a naive reader
@@ -84,15 +89,16 @@ unchecked.
 
 ### `EXPECTED_PR_SUBJECTS`, and how to re-baseline it
 
-Discovery must match `EXPECTED_PR_SUBJECTS` by strict equality: `ci.yml`, `images.yml`,
-`prebuild.yml`, `security-scan.yml`, `wheels.yml`. A mismatch in either direction exits
+Discovery must match `EXPECTED_PR_SUBJECTS` by strict equality: `ci.yml`,
+`cla-retrigger.yml`, `images.yml`, `prebuild.yml`, `security-scan.yml`, `wheels.yml`. A
+mismatch in either direction exits
 1. This is deliberate — a stale list would silently shrink the gate instead of turning
 red, the same reasoning `ci/publish-metadata/run.sh`'s `EXPECTED_PUBLISHABLE` and
 `EXPECTED_PYPI_PUBLISHABLE` already use.
 
-To add a workflow, first confirm that it must carry a pull-request trigger at all. Then
-add its filename to `EXPECTED_PR_SUBJECTS` in `workflow_credentials.py`, in sorted
-order.
+To add a workflow, first confirm that it must carry a credential-bearing trigger at all —
+`pull_request`, `pull_request_target` or `issue_comment`. Then add its filename to
+`EXPECTED_PR_SUBJECTS` in `workflow_credentials.py`, in sorted order.
 
 ## The allowlist — `PR_CREDENTIAL_ALLOWED`
 
@@ -168,7 +174,10 @@ outside its scope, by decision, not by oversight:
 - **The `workflow_run` and `merge_group` triggers.** Both run with repository secrets,
   and `workflow_run` is a known attack path. Neither is used in this repository today.
   Adding either is a one-line change to the trigger set plus two new control rows, not
-  a redesign.
+  a redesign. `issue_comment` WAS in this list by omission until SMA-408; it is now
+  covered, following exactly that recipe, because SMA-408 introduced the repo's first
+  workflow using it. The precedent to draw: this list is a to-do, not a boundary — when
+  a workflow starts using one of these triggers, cover it in the same change.
 - **`${{ github.token }}` itself.** R5 does not look at token reads. A workflow may read
   `${{ github.token }}` freely — `.github/workflows/ci.yml:58` does so deliberately, and
   that use is correct. What R5 forbids is the WRITE SCOPE that would make such a read
