@@ -52,9 +52,9 @@ dev = [
     "basedpyright>=1.39.10,<2",
     "betterproto2-compiler>=0.10,<0.11",
     "pytest>=9.1.1,<10",
-    "python-semantic-release>=10.6.1,<11",
+    "python-semantic-release>=10.6.2,<11",
     "pyyaml==6.0.3",
-    "ruff>=0.16.5,<0.17",
+    "ruff>=0.16.6,<0.17",
     # SMA-539 — shellcheck for actionlint's `run:` blocks. Sourced from PyPI, not a proto plugin,
     # because shellcheck's own release ships 13 archives and NO checksums asset (re-measured
     # 2026-09-02), which SMA-525 D2 refused. shellcheck-py is checksummed on both supported
