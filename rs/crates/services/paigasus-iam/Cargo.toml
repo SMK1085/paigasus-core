@@ -111,7 +111,7 @@ url = { workspace = true }
 # dep, at the same versions `paigasus-iam-core`'s dev-dependencies already resolve in
 # Cargo.lock (hmac 0.12.x, sha2 0.10.x) — see that crate's Cargo.toml for the test-local
 # `TestHasher` this mirrors.
-hmac = "0.12"
+hmac = "0.13"
 sha2 = "0.11"
 # `adapters::events::nats_publisher::NatsEventPublisher` — the production outbox sink
 # (SMA-471, ADR-0016): connects to NATS, ensures/verifies the JetStream stream, and publishes
