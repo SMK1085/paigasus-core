@@ -1,0 +1,28 @@
+{
+  "cli_version": "0.10.3",
+  "checkpoint_id": "03001ad54370",
+  "strategy": "manual-commit",
+  "branch": "dependabot/cargo/rs/rcgen-0.14.10",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "rs/crates/services/paigasus-iam/tests/keycloak_e2e.rs",
+    "rs/crates/services/paigasus-iam/tests/nats_permissions.rs",
+    "rs/crates/services/paigasus-iam/tests/support/mod.rs"
+  ],
+  "sessions": [
+    {
+      "metadata": "/03/001ad54370/0/metadata.json",
+      "transcript": "/03/001ad54370/0/full.jsonl",
+      "compact_transcript": "/03/001ad54370/0/transcript.jsonl",
+      "content_hash": "/03/001ad54370/0/content_hash.txt",
+      "prompt": "/03/001ad54370/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 46,
+    "cache_creation_tokens": 30321,
+    "cache_read_tokens": 3548091,
+    "output_tokens": 12283,
+    "api_call_count": 23
+  }
+}
