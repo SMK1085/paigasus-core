@@ -97,7 +97,7 @@ tempfile = "3"
 # the convention paigasus-iam records in tests/support/mod.rs ("no committed PEM/JWK fixtures").
 # Only the cert minter — deliberately NOT axum-server, since no gateway test starts a TLS
 # listener (SMA-558 D6).
-rcgen = { version = "0.13", default-features = false, features = ["crypto", "pem", "ring"] }
+rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "ring"] }
 
 [lints]
 workspace = true

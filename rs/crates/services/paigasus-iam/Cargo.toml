@@ -111,8 +111,8 @@ url = { workspace = true }
 # dep, at the same versions `paigasus-iam-core`'s dev-dependencies already resolve in
 # Cargo.lock (hmac 0.12.x, sha2 0.10.x) — see that crate's Cargo.toml for the test-local
 # `TestHasher` this mirrors.
-hmac = "0.12"
-sha2 = "0.10"
+hmac = "0.13"
+sha2 = "0.11"
 # `adapters::events::nats_publisher::NatsEventPublisher` — the production outbox sink
 # (SMA-471, ADR-0016): connects to NATS, ensures/verifies the JetStream stream, and publishes
 # each `event_outbox` row as a CloudEvent, waiting for the JetStream ack.
@@ -153,7 +153,7 @@ p256 = { version = "0.14", features = ["pkcs8", "pem"] }
 # `aws-lc-rs` in as a SECOND rustls CryptoProvider, breaking rustls's sole-provider
 # auto-selection everywhere AND adding a native cmake build dep (see the jsonwebtoken
 # note above for the workspace's pure-Rust posture).
-rcgen = { version = "0.13", default-features = false, features = ["crypto", "pem", "ring"] }
+rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "ring"] }
 axum-server = { version = "0.8", default-features = false, features = ["tls-rustls-no-provider"] }
 # `adapters::authz::denial_audit` tests — `#[tokio::test(start_paused = true)]` deterministically
 # fast-forwards past `AUDIT_PERSIST_TIMEOUT` instead of a real multi-second sleep (feature-only

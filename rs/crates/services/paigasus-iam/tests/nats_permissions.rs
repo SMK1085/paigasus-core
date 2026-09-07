@@ -502,7 +502,7 @@ async fn neither_service_identity_can_subscribe_to_the_others_inbox() {
 /// a mapped host port). Nothing is committed: `rcgen` is already a dev-dependency here for the
 /// mock IdP, and a per-run key pair keeps certificate material out of git entirely.
 fn mint_tls(dir: &std::path::Path) -> (Vec<u8>, Vec<u8>, PathBuf) {
-    use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, KeyPair, SanType};
+    use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, Issuer, KeyPair, SanType};
     use std::net::{IpAddr, Ipv4Addr};
 
     let mut ca_params = CertificateParams::new(Vec::new()).expect("ca params");
@@ -510,11 +510,14 @@ fn mint_tls(dir: &std::path::Path) -> (Vec<u8>, Vec<u8>, PathBuf) {
     ca_params.distinguished_name.push(DnType::CommonName, "paigasus-nats-test-ca");
     let ca_key = KeyPair::generate().expect("ca key");
     let ca_cert = ca_params.self_signed(&ca_key).expect("self-signed ca");
+    // rcgen 0.14 takes an `Issuer` instead of a `(&Certificate, &KeyPair)` pair. `Issuer::new`
+    // consumes both the params and the key, so the CA must be self-signed first.
+    let ca_issuer = Issuer::new(ca_params, ca_key);
 
     let mut srv_params = CertificateParams::new(vec!["localhost".to_string()]).expect("server params");
     srv_params.subject_alt_names.push(SanType::IpAddress(IpAddr::V4(Ipv4Addr::LOCALHOST)));
     let srv_key = KeyPair::generate().expect("server key");
-    let srv_cert = srv_params.signed_by(&srv_key, &ca_cert, &ca_key).expect("server cert signed by the ca");
+    let srv_cert = srv_params.signed_by(&srv_key, &ca_issuer).expect("server cert signed by the ca");
 
     let ca_path = dir.join("ca.pem");
     std::fs::write(&ca_path, ca_cert.pem()).expect("write ca pem");
