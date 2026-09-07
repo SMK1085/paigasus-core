@@ -1,0 +1,27 @@
+{
+  "cli_version": "0.10.3",
+  "checkpoint_id": "191ed07804bb",
+  "strategy": "manual-commit",
+  "branch": "dependabot/uv/py/uv-minor-patch-7375cc8c0b",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "py/pyproject.toml",
+    "py/uv.lock"
+  ],
+  "sessions": [
+    {
+      "metadata": "/19/1ed07804bb/0/metadata.json",
+      "transcript": "/19/1ed07804bb/0/full.jsonl",
+      "compact_transcript": "/19/1ed07804bb/0/transcript.jsonl",
+      "content_hash": "/19/1ed07804bb/0/content_hash.txt",
+      "prompt": "/19/1ed07804bb/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 76,
+    "cache_creation_tokens": 113928,
+    "cache_read_tokens": 4272868,
+    "output_tokens": 26012,
+    "api_call_count": 38
+  }
+}
