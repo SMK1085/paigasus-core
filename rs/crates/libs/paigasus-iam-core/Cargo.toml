@@ -38,7 +38,7 @@ proptest.workspace = true
 # dependencies (the real adapter lands in a later SMA-445 task). Not in the workspace
 # baseline since this crate is the sole consumer today; versions match what's already
 # resolved transitively in Cargo.lock (hmac 0.12.x, sha2 0.10.x).
-hmac = "0.12"
+hmac = "0.13"
 sha2 = "0.10"
 
 [lints]
