@@ -1,0 +1,109 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// Package-boundary rules for the ts workspace (Frontend Architecture Scoping § 6, SMA-502).
+//
+//   apps → app-shell → { ui, auth/client }
+//   apps → { sdk, auth/server, next-config }
+//   sdk  → proto
+//   ui   → React only
+//
+// DELIBERATE DEVIATION: an app may import @paigasus/ui directly. The diagram shows layering, not
+// exclusivity, and forcing every component through an app-shell re-export barrel buys no safety.
+// The four rules below are the ones that carry real safety.
+//
+// EVERY GROUP CARRIES BOTH FORMS. `no-restricted-imports` matches `patterns[].group` with
+// gitignore-style globs, where `*` does not cross `/`. So '@paigasus/*' alone matches
+// '@paigasus/sdk' and NOT '@paigasus/sdk/client' — which would silently permit every subpath
+// import these rules exist to ban. Negations are doubled for the same reason.
+//
+// Type imports are banned alongside value imports: an `import type` of @paigasus/sdk from
+// @paigasus/ui still couples the packages. That is the core rule's default behaviour, which is
+// why @typescript-eslint/no-restricted-imports (whose added feature here is `allowTypeImports`)
+// is not used.
+//
+// Written as plain ESM rather than TypeScript: ts/eslint.config.js is loaded by ESLint's own
+// resolver, and configuration data gains little from types (spec § 13 M5).
+//
+// The app-shell and auth entries are INERT until SMA-506 and SMA-508 land. They are written now,
+// tested against synthetic paths, and covered by a liveness assertion so a package landing under
+// a different directory name reds instead of silently disabling its rule.
+
+/**
+ * Package directories these rules expect, mapped to a status string. `'exists'` means the
+ * directory is on disk today; anything else is the stated reason it is not, which the liveness
+ * test requires so an inert rule cannot go unnoticed.
+ *
+ * @type {Record<string, string>}
+ */
+export const BOUNDARY_SCOPES = {
+  'packages/paigasus-ui': 'exists',
+  'packages/paigasus-sdk': 'exists',
+  'packages/paigasus-app-shell': 'SMA-506 has not landed yet; the rule is inert until it does',
+  apps: 'exists',
+};
+
+const restrict = (patterns) => ({ 'no-restricted-imports': ['error', { patterns }] });
+
+/**
+ * The boundary blocks, as an ESLint flat-config array.
+ *
+ * The `@type` annotation is load-bearing for the consumer, not decoration: `tests/boundaries.test.ts`
+ * is TypeScript with `noUncheckedIndexedAccess` and the typed-ESLint `no-unsafe-*` rules on, and an
+ * unannotated export from a `.mjs` gives it loosely-inferred types that trip those rules. Fix the
+ * typing here rather than adding an eslint-disable in the one test that proves these rules are wired.
+ *
+ * @type {Array<{ name: string, files: string[], rules: Record<string, unknown> }>}
+ */
+export const boundaryRules = [
+  {
+    name: 'paigasus/boundaries/ui',
+    files: ['packages/paigasus-ui/**/*.{ts,tsx,mts,cts,js,jsx,mjs,cjs}'],
+    rules: restrict([
+      {
+        group: ['next', 'next/*', 'next/**'],
+        message:
+          '@paigasus/ui is plain React and must not import next/* — it has to test in jsdom with no Next runtime and stay usable from the docs app (§ 6 rule 1). Inject navigation instead of reaching for next/link.',
+      },
+      {
+        group: ['@paigasus/*', '@paigasus/*/**'],
+        message: '@paigasus/ui depends on React only. Nothing in the workspace may be imported here (§ 6 rule 1).',
+      },
+    ]),
+  },
+  {
+    name: 'paigasus/boundaries/sdk',
+    files: ['packages/paigasus-sdk/**/*.{ts,tsx,mts,cts,js,jsx,mjs,cjs}'],
+    rules: restrict([
+      {
+        group: ['@paigasus/*', '@paigasus/*/**', '!@paigasus/proto', '!@paigasus/proto/**'],
+        message: '@paigasus/sdk depends on @paigasus/proto only (§ 6: sdk → proto).',
+      },
+      {
+        group: ['react', 'react-dom', 'react-dom/*', 'next', 'next/*', 'next/**'],
+        message: '@paigasus/sdk is server-only. It attaches bearer tokens, so it must never be reachable from a client bundle (§ 6 rule 2).',
+      },
+    ]),
+  },
+  {
+    name: 'paigasus/boundaries/app-shell',
+    files: ['packages/paigasus-app-shell/**/*.{ts,tsx,mts,cts,js,jsx,mjs,cjs}'],
+    rules: restrict([
+      {
+        group: ['@paigasus/sdk', '@paigasus/sdk/**', '@paigasus/auth/server', '@paigasus/auth/server/**'],
+        message: '@paigasus/app-shell is client-reachable. It may use @paigasus/auth/client, never /server, and never the sdk (§ 6 rule 3).',
+      },
+    ]),
+  },
+  {
+    name: 'paigasus/boundaries/apps',
+    files: ['apps/**/*.{ts,tsx,mts,cts,js,jsx,mjs,cjs}'],
+    rules: restrict([
+      {
+        group: ['@paigasus/proto', '@paigasus/proto/**'],
+        message: 'Apps reach the contract through @paigasus/sdk, never @paigasus/proto directly (§ 6).',
+      },
+    ]),
+  },
+];
+
+export default boundaryRules;

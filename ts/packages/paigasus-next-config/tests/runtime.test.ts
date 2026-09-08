@@ -135,4 +135,16 @@ describe('defineRuntimeConfig', () => {
       expect(String(err)).toContain('PAIGASUS_ZONE');
     }
   });
+
+  it('names the secret variable but never its value when the secret itself fails validation', () => {
+    setEnv({ SECRET_TOKEN: 'sk-live-x' });
+    const { getRuntimeConfig } = defineRuntimeConfig({ SECRET_TOKEN: z.string().min(20) });
+    try {
+      getRuntimeConfig();
+      throw new Error('expected a validation failure');
+    } catch (err) {
+      expect(String(err)).not.toContain('sk-live-x');
+      expect(String(err)).toContain('SECRET_TOKEN');
+    }
+  });
 });

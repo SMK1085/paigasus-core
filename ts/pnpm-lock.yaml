@@ -113,6 +113,9 @@ importers:
       '@paigasus/commitlint-config':
         specifier: workspace:*
         version: link:packages/commitlint-config
+      '@paigasus/next-config':
+        specifier: workspace:*
+        version: link:packages/paigasus-next-config
       '@semantic-release/commit-analyzer':
         specifier: 'catalog:'
         version: 13.0.1(semantic-release@25.0.9(typescript@6.0.3))
