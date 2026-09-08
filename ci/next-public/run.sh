@@ -29,6 +29,13 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$REPO_ROOT"
 
 BANNED='NEXT_PUBLIC_'
+# The actual match requires an identifier character after the prefix (grep -E). The hazard is a
+# REAL env var — NEXT_PUBLIC_API_URL — never the bare prefix on its own, which is not a valid env
+# var name and cannot be read by anything. Matching the bare prefix banned it from being NAMED,
+# which broke the one place it is most useful to name: an error message explaining the ban (fix
+# round 1, SMA-502). This narrows nothing about evasion — a computed name
+# (process.env['NEXT_PUBLIC_' + x]) already defeated a literal text scan either way; see README L2.
+BANNED_RE="${BANNED}[A-Za-z0-9]"
 # The floor is what stops a moved or renamed ts/ silently emptying the gate — the SMA-553 class,
 # which repo:input-liveness cannot reach here because it proves a DECLARED glob is live, never
 # that the scan still sees anything.
@@ -81,7 +88,7 @@ size instead of raising it back later."
   local hits=0 f
   for f in "${files[@]}"; do
     allowed_path "$f" && continue
-    if grep -q -- "$BANNED" "$root/$f" 2>/dev/null; then
+    if grep -qE -- "$BANNED_RE" "$root/$f" 2>/dev/null; then
       printf '  %s uses %s\n' "$f" "$BANNED" >&2
       hits=$((hits + 1))
     fi
@@ -128,7 +135,7 @@ make_fixture() {
 }
 
 self_test() {
-  local failures=0 clean violating markdown lockfile shrunk nofactory rc
+  local failures=0 clean violating markdown lockfile shrunk nofactory bareprefix realvar rc
 
   clean="$(mktemp -d)"; make_fixture "$clean"
   rc=0; ( cd "$clean" && check_prefix "$clean" && check_factory "$clean" ) >/dev/null 2>&1 || rc=$?
@@ -175,7 +182,29 @@ self_test() {
     printf '  FAIL hand-written app config: expected rc 1, got %s\n' "$rc" >&2; failures=$((failures + 1))
   fi
 
-  rm -rf "$clean" "$violating" "$markdown" "$lockfile" "$shrunk" "$nofactory"
+  # These two rows pin the fix-round-1 refinement (SMA-502): the scan must match a REAL env var
+  # name, never the bare prefix on its own. Without the first row, someone "simplifying" BANNED_RE
+  # back to the bare BANNED literal reintroduces the false positive that broke naming the prefix
+  # in an error message — with every other row still green, since none of them names the bare
+  # prefix in a non-Markdown file.
+  bareprefix="$(mktemp -d)"; make_fixture "$bareprefix"
+  printf '// Refuses env because it inlines exactly as NEXT_PUBLIC_ does.\nexport const ok = 1;\n' \
+    >"$bareprefix/ts/packages/probe/src/comment.ts"
+  git -C "$bareprefix" add -A >/dev/null 2>&1
+  rc=0; ( cd "$bareprefix" && check_prefix "$bareprefix" ) >/dev/null 2>&1 || rc=$?
+  if [ "$rc" != 0 ]; then
+    printf '  FAIL bare-prefix-in-comment fixture: expected rc 0, got %s\n' "$rc" >&2; failures=$((failures + 1))
+  fi
+
+  realvar="$(mktemp -d)"; make_fixture "$realvar"
+  printf 'export const url = process.env.NEXT_PUBLIC_API_URL;\n' >"$realvar/ts/packages/probe/src/real.ts"
+  git -C "$realvar" add -A >/dev/null 2>&1
+  rc=0; ( cd "$realvar" && check_prefix "$realvar" ) >/dev/null 2>&1 || rc=$?
+  if [ "$rc" != 1 ]; then
+    printf '  FAIL real-env-var fixture: expected rc 1, got %s\n' "$rc" >&2; failures=$((failures + 1))
+  fi
+
+  rm -rf "$clean" "$violating" "$markdown" "$lockfile" "$shrunk" "$nofactory" "$bareprefix" "$realvar"
   if [ "$failures" -gt 0 ]; then
     printf 'next-public-free self-test: %d row(s) failed\n' "$failures" >&2
     exit 1

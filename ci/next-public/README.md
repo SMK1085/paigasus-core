@@ -29,6 +29,19 @@ Two independent checks, both against **tracked** files only (`git ls-files`, so
 Both checks run on every invocation with no flags (`bash ci/next-public/run.sh`).
 Nothing else in `ts/` is inspected.
 
+**The match requires an identifier character after the prefix (fix round 1, SMA-502).**
+`check_prefix` scans for `NEXT_PUBLIC_[A-Za-z0-9]` (`grep -E`), not the bare literal
+`NEXT_PUBLIC_`. The hazard this gate exists to catch is always a real environment
+variable — `NEXT_PUBLIC_API_URL`, say — and the bare prefix on its own is not a valid
+env var name; nothing can read it. An earlier version of this gate matched the bare
+prefix, which meant the one place in the codebase where naming `NEXT_PUBLIC_`
+explicitly is most useful — the error message explaining why `extend.env` is refused —
+tripped the same rule it was written to describe, and had to be reworded around it.
+That was a defect in the gate, not in the source file: a check that forbids its own
+subject from being named in the message explaining it is mis-specified. The refinement
+closes that without widening the evasion surface — see L2 below, unchanged by this
+fix.
+
 ## Exit codes, and why 1 and 2 must not collapse into each other
 
 `0` pass, `1` the repo is wrong, `2` infrastructure failed — the repo's usual
@@ -84,8 +97,11 @@ check.
 
 **L2 — a split literal evades any text scan.** `'NEXT_' + 'PUBLIC_'`, or any other
 construction that assembles the string at runtime instead of writing it as one
-literal, defeats `grep -q -- "$BANNED"` entirely. No text gate closes this; it would
-need something that reasons about the built output, not the source text.
+literal, defeats `grep -qE -- "$BANNED_RE"` entirely. No text gate closes this; it
+would need something that reasons about the built output, not the source text. The
+fix-round-1 identifier-character refinement (above) does not change this: it narrows
+what counts as a match among *literal* occurrences, and a computed name was never a
+literal occurrence in the first place.
 
 **L3 — the `**/*.md` exclusion is safe only while no app compiles Markdown.** The
 exclusion rests on the fact that a Markdown file compiles into nothing today. An MDX
@@ -119,3 +135,16 @@ silently escaping the guard — does not occur on this repo's measured Next vers
 `await connection()` remains the documented discipline for code that must defer a read
 to request time regardless, but it is not required merely to make a module-scope
 mistake visible; the build already fails loudly on its own.
+
+**L7 — the identifier-character requirement lets prose name the bare prefix, and
+still cannot see a computed name (fix round 1, SMA-502).** `check_prefix` matches
+`NEXT_PUBLIC_[A-Za-z0-9]`, not the bare `NEXT_PUBLIC_` literal, so a comment or string
+that names only the prefix itself — `"...exactly as NEXT_PUBLIC_ does"` — passes. That
+is deliberate: the earlier bare-literal match caught real usages and this kind of
+prose in the same net, and the one non-Markdown place where naming the prefix is most
+useful — the `extend.env` refusal message in
+`ts/packages/paigasus-next-config/src/index.ts` — was exactly the casualty. This
+refinement does not narrow the evasion surface recorded in L2: a computed name such as
+`process.env['NEXT_PUBLIC_' + suffix]` still defeats the scan, exactly as it did
+before, because no literal `NEXT_PUBLIC_<identifier char>` run ever appears in the
+source text either way.
