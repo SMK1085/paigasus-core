@@ -633,6 +633,47 @@ The § 7.1 landmine in the design document — strict equality redding when
 The console gets a `.env.local.example` documenting both variables. `next dev`
 reads `.env.local`, which stays untracked.
 
+### 8.7 The tsconfig preset's one adoption cost
+
+`@paigasus/next-config/tsconfig-app` (§ 4, `tsconfig.app.json`) gives every
+console zone app one preset: the shared `lib`, `jsx`, `plugins`, and the rest of
+the workspace base, all from a single `extends`. Every future console zone app is
+meant to adopt it the same way.
+
+An app that adopts the preset AND runs vitest (§ 8.4's runtime smoke is the first
+case) also needs its own `tests/tsconfig.json`, extending
+`ts/tsconfig.base.json` directly by relative path — the same one-line-extends
+pattern every non-Next package in the workspace already uses. MEASURED, not
+inferred: renaming `paigasus-console`'s `tests/tsconfig.json` away and
+re-running `vitest run` reproduces the failure below on demand.
+
+The reason is a resolver mismatch, not a config mistake. `tsconfig.app.json`
+extends the workspace base by relative path (`../../tsconfig.base.json`), which
+is only correct because pnpm symlinks the package into `node_modules` and the
+resolver is expected to follow that symlink to its real path before applying the
+`../../`. `tsc` does exactly that — `tsc -p tsconfig.json --noEmit` exits 0.
+Vitest's oxc-based transform does not: it applies the `../../` relative to the
+symlink's own location inside `node_modules`, misses, and fails hard rather than
+degrading, with:
+
+```
+[TSCONFIG_ERROR] Failed to load tsconfig for '<file>': Tsconfig not found
+```
+
+That text is what a future author will see in a stack trace; it is named here so
+it is greppable back to this section.
+
+**Rejected alternative: inline the base options into `tsconfig.app.json` and drop
+the `extends`.** This would remove the symlink hazard entirely, and was the
+reviewer's first suggestion on the PR that found this. It was rejected anyway: it
+would duplicate roughly fourteen compiler options across `tsconfig.base.json` and
+`tsconfig.app.json`, two files that must then agree, with nothing gating that
+agreement — an ungated drift surface, which this repo treats as a serious failure
+mode (see the version-lockstep and cargo-config-input entries in the root
+CLAUDE.md for the same reasoning applied elsewhere). The chosen cost — one small
+per-app file, and a failure mode that is loud and documented rather than a
+config pair that can silently drift apart — was judged cheaper.
+
 ## 9. Testing
 
 ### 9.1 Factory
