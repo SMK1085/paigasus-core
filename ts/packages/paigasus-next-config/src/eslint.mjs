@@ -11,10 +11,19 @@
 // exclusivity, and forcing every component through an app-shell re-export barrel buys no safety.
 // The four rules below are the ones that carry real safety.
 //
-// EVERY GROUP CARRIES BOTH FORMS. `no-restricted-imports` matches `patterns[].group` with
-// gitignore-style globs, where `*` does not cross `/`. So '@paigasus/*' alone matches
-// '@paigasus/sdk' and NOT '@paigasus/sdk/client' — which would silently permit every subpath
-// import these rules exist to ban. Negations are doubled for the same reason.
+// EVERY GROUP CARRIES BOTH THE BARE AND THE `/**` FORM, WITH NEGATIONS DOUBLED TOO. An earlier
+// revision of this comment claimed `*` does not cross `/`, so the bare form alone would miss a
+// subpath — that claim is DISPROVEN. `no-restricted-imports` matches `patterns[].group` through
+// the `ignore` package's gitignore-style semantics, which recurse into a matched prefix: '@paigasus/*'
+// ALREADY matches '@paigasus/sdk/client' and '@paigasus/proto/gen/iam' on its own. Measured by
+// dropping the `/**` variants from the ui and apps groups and re-running tests/boundaries.test.ts —
+// every subpath row (including the SUBPATH-labelled ones) stayed green. The `/**` positives are
+// kept anyway as belt-and-braces and to document intent, but they are not what makes subpaths get
+// caught.
+//
+// What IS load-bearing is the doubled NEGATION. Also measured: dropping '!@paigasus/proto/**' from
+// the sdk group's negation makes 'permits: sdk may import a proto SUBPATH' fail, i.e. it starts
+// banning a legitimate import. Do not remove either negation form.
 //
 // Type imports are banned alongside value imports: an `import type` of @paigasus/sdk from
 // @paigasus/ui still couples the packages. That is the core rule's default behaviour, which is

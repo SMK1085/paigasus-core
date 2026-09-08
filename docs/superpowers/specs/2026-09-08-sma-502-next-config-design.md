@@ -463,24 +463,37 @@ rule's behaviour is what is wanted and `@typescript-eslint/no-restricted-imports
 | `packages/paigasus-app-shell/**` | `@paigasus/sdk`, `@paigasus/auth/server` | the shell is client-reachable |
 | `apps/**` | `@paigasus/proto` | apps reach the contract through `sdk` |
 
-### 7.1 Every group entry carries both forms
+### 7.1 Negations must be doubled; positives are belt-and-braces
 
-`no-restricted-imports` matches `patterns[].group` with gitignore-style globs,
-where `*` does not cross `/`. So `@paigasus/*` matches `@paigasus/sdk` and **not**
-`@paigasus/sdk/client`, and `next/*` matches `next/link` and not `next/dist/x`.
-
-The table's own `app-shell` row denies `@paigasus/auth/server`, a subpath, so the
-design already assumes subpaths exist. Written naively, the `ui` and `apps` rows
-would silently permit every subpath import they intend to ban.
-
-Every group therefore carries both forms, with negations doubled too:
+Every group carries both the bare and the `/**` form, with negations doubled:
 
 ```js
 group: ['@paigasus/*', '@paigasus/*/**', '!@paigasus/proto', '!@paigasus/proto/**']
 ```
 
+**Revision 2 justified this with a claim that is now DISPROVEN.** It argued that
+`no-restricted-imports` matches `patterns[].group` with gitignore-style globs
+where `*` does not cross `/`, so `@paigasus/*` would match `@paigasus/sdk` but
+not `@paigasus/sdk/client`, and the `ui` and `apps` rows would silently permit
+every subpath import they exist to ban.
+
+Measured against the `ignore` package directly, and by dropping the `/**`
+variants from the `ui` and `apps` groups and re-running the suite: `@paigasus/*`
+**alone already matches** `@paigasus/sdk/client` and `@paigasus/proto/gen/iam`.
+Both mutated runs stayed green. `ignore`'s directory-boundary semantics recurse
+into a matched prefix, unlike a plain glob.
+
+**What is load-bearing is the doubled NEGATION**, and that was measured too:
+dropping `!@paigasus/proto/**` from the `sdk` group makes the "sdk may import a
+proto subpath" row fail, which would ban a legitimate import.
+
+The `/**` positives are kept as belt-and-braces — harmless, and they document
+the intent — but nobody should add a new group believing the bare form is
+insufficient.
+
 § 9.3 asserts a **subpath** import is reported for every scope, not only a bare
-specifier.
+specifier. That assertion is still worth having: it pins the behaviour against a
+future `ignore` version changing its recursion rule.
 
 ### 7.2 Package existence, corrected
 
@@ -493,9 +506,20 @@ written now and are inert until SMA-506 and SMA-508 land.
 
 **Inert globs need a liveness check.** If SMA-506 lands the package under a
 different directory name, the rule silently never applies, and every § 9.3 test
-still passes because those use synthetic paths. So one test asserts each `files:`
-glob either matches an existing package directory or carries a stated
-forward-guard reason, mirroring `ALLOW_DEAD_INPUT`.
+still passes because those use synthetic paths.
+
+A stated-reason check alone does **not** close this, and revision 2 wrongly
+claimed it did. A reason string is never re-validated, so once
+`packages/paigasus-app-shell` is permanently absent the stale reason keeps the
+test green forever — exactly the outcome the check was supposed to prevent.
+
+The test therefore also maps **package name to directory**: it reads every
+`ts/packages/*/package.json` and asserts that no package declaring the
+corresponding `@paigasus/<x>` name exists under any other directory. While the
+package does not exist at all, the stated reason carries it. The moment it lands
+under any directory name, the check reds unless the boundary scope's directory
+matches. The expected package name is derived from the scope path rather than
+held in a second hand-maintained list, because two lists drift.
 
 ### 7.3 Deviation from the § 6 diagram
 

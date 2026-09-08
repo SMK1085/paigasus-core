@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ESLint } from 'eslint';
 import { describe, expect, it } from 'vitest';
@@ -7,6 +8,37 @@ import { BOUNDARY_SCOPES, boundaryRules } from '../src/eslint.mjs';
 
 /** The ts workspace root — `files` globs in the preset are relative to it. */
 const TS_ROOT = fileURLToPath(new URL('../../..', import.meta.url));
+
+/**
+ * Map every `ts/packages/*` package's declared `package.json` `name` to its directory. Used to
+ * catch a package landing under a directory name the boundary preset does not expect — see
+ * `expectedPackageName` below.
+ */
+function packageDirsByName(): Map<string, string> {
+  const packagesDir = path.join(TS_ROOT, 'packages');
+  const map = new Map<string, string>();
+  for (const entry of readdirSync(packagesDir, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const pkgJsonPath = path.join(packagesDir, entry.name, 'package.json');
+    if (!existsSync(pkgJsonPath)) continue;
+    const pkg: unknown = JSON.parse(readFileSync(pkgJsonPath, 'utf8'));
+    const name = typeof pkg === 'object' && pkg !== null && 'name' in pkg ? pkg.name : undefined;
+    if (typeof name === 'string') {
+      map.set(name, `packages/${entry.name}`);
+    }
+  }
+  return map;
+}
+
+/**
+ * The `@paigasus/<x>` package name a `packages/paigasus-<x>` boundary scope expects, derived from
+ * the scope path itself rather than hand-maintained as a second list — two lists drift. A scope
+ * outside `packages/` (e.g. `apps`) is not a single package, so there is nothing to derive.
+ */
+function expectedPackageName(scopeDir: string): string | undefined {
+  const suffix = /^packages\/paigasus-(.+)$/.exec(scopeDir)?.[1];
+  return suffix === undefined ? undefined : `@paigasus/${suffix}`;
+}
 
 async function restrictedImportsFor(filePath: string, source: string): Promise<string[]> {
   const eslint = new ESLint({ cwd: TS_ROOT, overrideConfigFile: true, overrideConfig: boundaryRules });
@@ -48,11 +80,27 @@ describe('boundary preset', () => {
   });
 
   it('every scope either exists on disk or states why it does not yet', () => {
+    const packagesByName = packageDirsByName();
     for (const [dir, note] of Object.entries(BOUNDARY_SCOPES)) {
       const present = existsSync(new URL(`../../../${dir}`, import.meta.url));
       if (!present) {
         expect(note, `${dir} is absent, so BOUNDARY_SCOPES must state why`).not.toBe('exists');
         expect(note.trim().length, `${dir} needs a real reason, not a blank one`).toBeGreaterThan(0);
+
+        // The reason string alone never re-validates itself: if the package this scope expects
+        // lands under a DIFFERENT directory name, `dir` stays permanently absent and the stale
+        // reason keeps the checks above green forever while the rule silently never applies. So
+        // also assert that no package anywhere under ts/packages declares the name this scope
+        // expects — the moment it does, this fails until the scope (and the rule's files glob)
+        // is updated to the real directory.
+        const expectedName = expectedPackageName(dir);
+        if (expectedName !== undefined) {
+          const foundAt = packagesByName.get(expectedName);
+          expect(
+            foundAt,
+            `${expectedName} now exists at ${String(foundAt)}, but BOUNDARY_SCOPES still expects ${dir} — update the scope (and its rule's files glob) to match, or the rule stays permanently inert`,
+          ).toBeUndefined();
+        }
       }
     }
   });
