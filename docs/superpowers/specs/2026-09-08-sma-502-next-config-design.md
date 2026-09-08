@@ -416,11 +416,28 @@ every comparable gate does:
 
 `NEXT_PUBLIC_FREE_SH_CALL_SITES` is **not** a new table entry. Measured:
 `check_self_invocation` (`ci_targets.py:1516-1519`) takes seven **required**
-positional parameters, and the identifier appears 51 times in the file. Adding an
-eighth haystack means a new required parameter, a new haystack block, `main()`
-wiring, help text, a self-test battery (per-line deletion, contamination in both
-directions, a commented-out fixture), and an updated argument list at every
-existing call site.
+positional parameters, and there are **47 call sites** — one production call at
+`:3147`, one f-string field access at `:2357`, and 45 self-test assertions. Every
+one gains an argument.
+
+Adding an eighth haystack also means: a new required parameter, a new haystack
+block (mirroring `:1607-1615`), an entry in the required-parameter loop
+(`:2605-2613`), `main()` disk read and wiring (`:3123-3125`, `:3147-3150`),
+three docstring counts (`:1523`, `:1548`, `:1560`), and a self-test battery.
+
+**The battery is four fixtures, not three** (`:2782-2835`): the per-line deletion
+loop, a contamination fixture, a commented-out fixture, and a **neutered-guard**
+fixture. The fourth reproduces a review-caught bypass — rewriting the control's
+comparison to something always-false leaves every other pinned line
+byte-identical, so the control reports "passed" unconditionally. This gate's
+control has such a comparison, so it needs the fourth fixture.
+
+Two things this measurement makes easier than feared. There is **no argparse and
+no `--help` text** in the file, so nothing to update there. And
+`check_self_scheduled_coverage` (`:1736-1775`) derives the "must be registered"
+set from Moon's own resolved script text, so a missing `SELF_SCHEDULED_GATES`
+entry reds automatically — `repo:ruff-ci` is the namesake incident that function
+exists to prevent (`:627-638`).
 
 `repo:ruff-ci` (SMA-539) and `repo:workflow-credentials` (SMA-593) were each
 their own Linear issue for this reason. § 15 puts the scope question explicitly.
