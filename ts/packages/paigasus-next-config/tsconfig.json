@@ -1,10 +1,9 @@
 {
   "extends": "../../tsconfig.base.json",
+  "_comment_rootDir": "No rootDir/outDir here, unlike sibling packages: both are inert under noEmit, but rootDir still enforces a containment check, and tests/boundaries.test.ts deliberately imports ../../../eslint.config.js (outside this package) to prove the boundary preset is actually applied to the real workspace config — rootDir would reject that one import, which is exactly the assertion this package exists to make possible.",
   "compilerOptions": {
     "lib": ["ES2022"],
     "types": ["node"],
-    "outDir": "./dist",
-    "rootDir": ".",
     "noEmit": true,
     "allowJs": true
   },

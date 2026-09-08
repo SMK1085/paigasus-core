@@ -61,7 +61,13 @@ const restrict = (patterns) => ({ 'no-restricted-imports': ['error', { patterns 
  * unannotated export from a `.mjs` gives it loosely-inferred types that trip those rules. Fix the
  * typing here rather than adding an eslint-disable in the one test that proves these rules are wired.
  *
- * @type {Array<{ name: string, files: string[], rules: Record<string, unknown> }>}
+ * Annotated with ESLint's OWN exported config type rather than a hand-rolled shape: a
+ * `rules: Record<string, unknown>` approximation is not assignable to ESLint's real
+ * `rules?: Partial<RulesConfig>` (`unknown` is not a `RuleConfig`), which is exactly what
+ * `paigasus-next-config-ts:typecheck` caught. Consumers get ESLint's real typings this way — a
+ * hand-rolled shape can diverge from them again on any future ESLint upgrade.
+ *
+ * @type {import('eslint').Linter.Config[]}
  */
 export const boundaryRules = [
   {

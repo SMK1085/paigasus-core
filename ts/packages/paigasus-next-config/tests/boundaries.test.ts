@@ -107,12 +107,17 @@ describe('boundary preset', () => {
 
   it('every rule scope has a matching entry in the preset', () => {
     // Indexed through a typed local rather than a chained member access: `noUncheckedIndexedAccess`
-    // makes `entry.files[0]` `string | undefined`, and chaining `.split()` straight off it is both
-    // a type error and an unsafe-member-access finding under the typed ESLint rules.
+    // makes `entry.files?.[0]` `string | string[] | undefined` — `boundaryRules` is typed as
+    // ESLint's own `Linter.Config[]`, whose `files` entries can themselves be a nested `string[]`,
+    // not only a plain glob string. Narrowed with a `typeof` guard rather than a cast, so a config
+    // entry that actually used the nested-array form would fail loudly here instead of being
+    // silently coerced.
     const scoped = boundaryRules.map((entry) => {
-      const first: string | undefined = entry.files[0];
-      expect(first, `${entry.name} declares no files glob`).toBeDefined();
-      return (first ?? '').split('/**')[0];
+      const label = entry.name ?? '(unnamed boundary entry)';
+      const first: string | string[] | undefined = entry.files?.[0];
+      expect(first, `${label} declares no files glob`).toBeDefined();
+      expect(typeof first === 'string', `${label} files[0] is a nested string[], not a plain glob — this test does not handle that shape`).toBe(true);
+      return typeof first === 'string' ? first.split('/**')[0] : '';
     });
     for (const dir of Object.keys(BOUNDARY_SCOPES)) {
       expect(scoped).toContain(dir);
