@@ -9,7 +9,7 @@
 // arriving through a different door (spec § 5). This module is Node-runtime only.
 import 'server-only';
 import { z, type ZodRawShape } from 'zod';
-import { canonicalBasePath } from './base-path.js';
+import { canonicalBasePath } from './base-path';
 
 /** Keys this package owns. An extra shape declaring one of them is a hard error. */
 const OWNED_KEYS = ['PAIGASUS_ZONE', 'PAIGASUS_ZONES'] as const;

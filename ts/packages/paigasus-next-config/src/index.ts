@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 import type { NextConfig } from 'next';
-import { canonicalBasePath } from './base-path.js';
+import { canonicalBasePath } from './base-path';
 
-export { canonicalBasePath } from './base-path.js';
+export { canonicalBasePath } from './base-path';
 
 /**
  * Workspace packages that export TypeScript source rather than built JS. Next must transpile

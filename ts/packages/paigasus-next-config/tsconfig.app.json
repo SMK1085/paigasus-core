@@ -1,0 +1,11 @@
+{
+  "_comment": "Shared Next-app TypeScript preset (SMA-502). It extends the workspace base by relative path: pnpm symlinks this package into node_modules, and `extends` resolves through the symlink's real path, so ../../tsconfig.base.json lands on ts/tsconfig.base.json. An app extends '@paigasus/next-config/tsconfig-app' and adds only what is app-specific.",
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["DOM", "DOM.Iterable", "ES2022"],
+    "jsx": "preserve",
+    "incremental": true,
+    "plugins": [{ "name": "next" }],
+    "noEmit": true
+  }
+}

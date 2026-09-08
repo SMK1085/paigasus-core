@@ -146,6 +146,9 @@ importers:
 
   apps/paigasus-console:
     dependencies:
+      '@paigasus/next-config':
+        specifier: workspace:*
+        version: link:../../packages/paigasus-next-config
       next:
         specifier: 'catalog:'
         version: 16.3.4(@babel/core@7.29.7)(@types/node@24.13.3)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
