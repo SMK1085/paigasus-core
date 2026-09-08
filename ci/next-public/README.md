@@ -78,13 +78,19 @@ is not compiled either.
 fewer than `CORPUS_FLOOR` (48) entries. This is what stops a moved or renamed `ts/`
 from silently emptying the gate — the SMA-553 class, which `repo:input-liveness`
 cannot reach here: it proves a *declared* Moon task input glob is live, never that
-this script's own runtime scan still sees anything. 48 is two thirds of the corpus
-size measured when this gate's floor was set, the same proportion `ci/ruff/run.sh`'s
-floor uses against its own corpus. A floor set far below the real count would let
-`ts/` collapse most of the way before the gate noticed, which defeats the point of
-having one. `check_factory`'s corpus (`ts/apps/*/next.config.ts`) carries no floor —
-zero app configs is a legitimate state for this repo today, so a floor there would
-have nothing meaningful to guard.
+this script's own runtime scan still sees anything. 48 was set as two thirds of 72,
+the corpus size measured when this gate was first written — the same proportion
+`ci/ruff/run.sh`'s floor uses against its own corpus. **The floor is a collapse
+detector, not a proportion of the current corpus** (fix round 2): it answers "does
+`ts/` still exist," not "is `ts/` still N-sized," and stays fixed at 48 as the corpus
+grows. Re-measured at fix round 2, the real corpus is **90** tracked files, grown from
+72 as later tasks in this issue added files — 48 is comfortably below that, and is
+left unchanged rather than re-tied to a ratio that would need re-deriving on every
+future addition. A floor set far below the real count would let `ts/` collapse most of
+the way before the gate noticed, which defeats the point of having one.
+`check_factory`'s corpus (`ts/apps/*/next.config.ts`) carries no floor — zero app
+configs is a legitimate state for this repo today, so a floor there would have nothing
+meaningful to guard.
 
 ## Limitations
 
@@ -137,14 +143,30 @@ to request time regardless, but it is not required merely to make a module-scope
 mistake visible; the build already fails loudly on its own.
 
 **L7 — the identifier-character requirement lets prose name the bare prefix, and
-still cannot see a computed name (fix round 1, SMA-502).** `check_prefix` matches
-`NEXT_PUBLIC_[A-Za-z0-9]`, not the bare `NEXT_PUBLIC_` literal, so a comment or string
-that names only the prefix itself — `"...exactly as NEXT_PUBLIC_ does"` — passes. That
-is deliberate: the earlier bare-literal match caught real usages and this kind of
-prose in the same net, and the one non-Markdown place where naming the prefix is most
-useful — the `extend.env` refusal message in
-`ts/packages/paigasus-next-config/src/index.ts` — was exactly the casualty. This
-refinement does not narrow the evasion surface recorded in L2: a computed name such as
-`process.env['NEXT_PUBLIC_' + suffix]` still defeats the scan, exactly as it did
-before, because no literal `NEXT_PUBLIC_<identifier char>` run ever appears in the
-source text either way.
+still cannot see a computed name (fix rounds 1-2, SMA-502).** `check_prefix` matches
+`NEXT_PUBLIC_[A-Za-z0-9_]`, not the bare `NEXT_PUBLIC_` literal, so a comment or string
+that names only the prefix itself, followed by `.`, a space, or a backtick — none of
+which are in the class — passes: `"...exactly as NEXT_PUBLIC_ does"` is not a match.
+That is the entire purpose of the refinement, and nothing more: the earlier
+bare-literal match caught real usages and this kind of prose in the same net, and the
+one non-Markdown place where naming the prefix is most useful — the `extend.env`
+refusal message in `ts/packages/paigasus-next-config/src/index.ts` — was exactly the
+casualty.
+
+**The character class itself went through two attempts, and the first was wrong in
+the unsafe direction.** Fix round 1 shipped `[A-Za-z0-9]`, which was verified to pass
+prose but was never checked against every valid env-var character —
+`echo 'NEXT_PUBLIC__FOO' | grep -qE 'NEXT_PUBLIC_[A-Za-z0-9]'` finds nothing, so a
+double-underscore name such as `NEXT_PUBLIC__DEBUG` (a perfectly valid env var) was
+silently missed. That traded a false positive (prose naming the bare prefix) for a
+false negative (a real banned variable going undetected) — the wrong direction for a
+gate whose only job is to catch this prefix. Fix round 2 corrected the class to
+`[A-Za-z0-9_]`, which catches the underscore case again while still not matching the
+bare prefix followed by `.`, space, or backtick, so the original fix-round-1 goal
+still holds.
+
+**This refinement exists only to let prose name the bare prefix. It does not narrow
+the evasion surface recorded in L2, in either of its forms.** A computed name such as
+`process.env['NEXT_PUBLIC_' + suffix]` defeats the scan exactly as it did before any
+of this — no literal `NEXT_PUBLIC_<identifier char>` run ever appears in the source
+text either way, so neither character class changes what a computed name can evade.

@@ -35,15 +35,30 @@ BANNED='NEXT_PUBLIC_'
 # which broke the one place it is most useful to name: an error message explaining the ban (fix
 # round 1, SMA-502). This narrows nothing about evasion — a computed name
 # (process.env['NEXT_PUBLIC_' + x]) already defeated a literal text scan either way; see README L2.
-BANNED_RE="${BANNED}[A-Za-z0-9]"
+#
+# The class is [A-Za-z0-9_], WITH the underscore (fix round 2). [A-Za-z0-9] alone MISSES
+# NEXT_PUBLIC__DEBUG — a double-underscore name is a perfectly valid env var, and the class without
+# `_` does not match the character after the prefix in that case
+# (`echo 'NEXT_PUBLIC__FOO' | grep -qE 'NEXT_PUBLIC_[A-Za-z0-9]'` finds nothing — MEASURED). The
+# original bare-literal check caught that name; the fix-round-1 narrowing silently traded one false
+# positive (naming the bare prefix in prose) for a false NEGATIVE (missing a real double-underscore
+# variable), which is the wrong direction for a gate whose only job is to catch this prefix. Adding
+# `_` back to the class closes that miss while still not matching the bare prefix on its own —
+# `NEXT_PUBLIC_` followed by `.`, a space, or a backtick (the three ways this file's own restored
+# prose follows it) is still not in the class, so the fix-round-1 goal (prose may name the bare
+# prefix) still holds.
+BANNED_RE="${BANNED}[A-Za-z0-9_]"
 # The floor is what stops a moved or renamed ts/ silently emptying the gate — the SMA-553 class,
 # which repo:input-liveness cannot reach here because it proves a DECLARED glob is live, never
 # that the scan still sees anything.
 #
-# MEASURED: the real corpus is 72 tracked ts/ files after the lockfile and Markdown exclusions.
-# 48 is two thirds of that, the same proportion ci/ruff/run.sh's floor of 10 uses against its own
-# corpus. A floor set far below the real count would let ts/ collapse most of the way before the
-# gate noticed, which defeats the point of having one.
+# MEASURED (fix round 2): the real corpus is 90 tracked ts/ files after the lockfile and Markdown
+# exclusions — grown from 72 as Tasks 2-6 added files; a stale count is exactly the kind of comment
+# this branch keeps correcting, so read this as a snapshot, not a fixed ratio. CORPUS_FLOOR is a
+# COLLAPSE detector, not a proportion of the current corpus: it answers "does ts/ still exist",
+# not "is ts/ still N-sized". 48 was set once, from 72's two-thirds, and stays fixed at 48 as the
+# corpus grows — raising it to track growth would turn a collapse detector into a size assertion
+# that reds on every legitimate deletion, which is not this floor's job.
 CORPUS_FLOOR=48
 
 # GLOBAL, not function-local: negative_control's EXIT trap fires after the function that sets this
@@ -135,7 +150,7 @@ make_fixture() {
 }
 
 self_test() {
-  local failures=0 clean violating markdown lockfile shrunk nofactory bareprefix realvar rc
+  local failures=0 clean violating markdown lockfile shrunk nofactory bareprefix realvar underscorevar rc
 
   clean="$(mktemp -d)"; make_fixture "$clean"
   rc=0; ( cd "$clean" && check_prefix "$clean" && check_factory "$clean" ) >/dev/null 2>&1 || rc=$?
@@ -204,7 +219,19 @@ self_test() {
     printf '  FAIL real-env-var fixture: expected rc 1, got %s\n' "$rc" >&2; failures=$((failures + 1))
   fi
 
-  rm -rf "$clean" "$violating" "$markdown" "$lockfile" "$shrunk" "$nofactory" "$bareprefix" "$realvar"
+  # Pins the fix-round-2 correction: [A-Za-z0-9] alone MISSES a double-underscore name, which is a
+  # perfectly valid env var (NEXT_PUBLIC__DEBUG) the original bare-literal check caught. Without
+  # this row, narrowing the class back to [A-Za-z0-9] reintroduces that false negative with every
+  # other row still green — bareprefix/realvar do not exercise an underscore right after the prefix.
+  underscorevar="$(mktemp -d)"; make_fixture "$underscorevar"
+  printf 'export const debug = process.env.NEXT_PUBLIC__DEBUG;\n' >"$underscorevar/ts/packages/probe/src/underscore.ts"
+  git -C "$underscorevar" add -A >/dev/null 2>&1
+  rc=0; ( cd "$underscorevar" && check_prefix "$underscorevar" ) >/dev/null 2>&1 || rc=$?
+  if [ "$rc" != 1 ]; then
+    printf '  FAIL double-underscore env var fixture: expected rc 1, got %s\n' "$rc" >&2; failures=$((failures + 1))
+  fi
+
+  rm -rf "$clean" "$violating" "$markdown" "$lockfile" "$shrunk" "$nofactory" "$bareprefix" "$realvar" "$underscorevar"
   if [ "$failures" -gt 0 ]; then
     printf 'next-public-free self-test: %d row(s) failed\n' "$failures" >&2
     exit 1
