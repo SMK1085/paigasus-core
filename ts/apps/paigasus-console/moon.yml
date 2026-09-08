@@ -45,3 +45,19 @@ tasks:
       - '!.next/cache/**/*'
     options:
       merge: replace
+
+  test:
+    # The smoke boots the BUILT standalone server, so the build must have run. `~:build` is this
+    # project's own build, not an upstream's.
+    deps:
+      - '~:build'
+    inputs:
+      - 'app/**/*'
+      - 'tests/**/*'
+      - 'vitest.config.ts'
+      - 'next.config.ts'
+      - 'package.json'
+      - '/ts/packages/paigasus-next-config/src/**/*'
+      - '/ts/pnpm-lock.yaml'
+    options:
+      merge: replace
