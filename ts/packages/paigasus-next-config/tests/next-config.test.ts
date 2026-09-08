@@ -55,4 +55,9 @@ describe('createNextConfig', () => {
   it('preserves other extend keys', () => {
     expect(createNextConfig({ ...base, extend: { poweredByHeader: false } }).poweredByHeader).toBe(false);
   });
+
+  it('rejects an empty or whitespace-only zone', () => {
+    expect(() => createNextConfig({ ...base, zone: '' })).toThrow(/zone/);
+    expect(() => createNextConfig({ ...base, zone: '   ' })).toThrow(/zone/);
+  });
 });
