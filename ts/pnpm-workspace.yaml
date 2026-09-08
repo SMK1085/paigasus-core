@@ -95,6 +95,15 @@ catalog:
   prettier: ^3.9.6
   # Test runner
   vitest: ^5.0.0
+  # Runtime env validation for @paigasus/next-config (SMA-502). zod 4 semantics are assumed
+  # throughout that package: unknown object keys are stripped by default, z.record takes
+  # (keyType, valueType), and errors surface as error.issues[]. The runtime formats messages from
+  # .path and .code and never renders an input value, so a validation failure cannot log a secret.
+  zod: ^4.5.4
+  # Build-time guard that @paigasus/next-config/runtime never reaches a client or edge bundle.
+  # The edge runtime has no dynamic process.env, so an edge import would read inlined or
+  # undefined values rather than deployment values (spec § 5).
+  'server-only': ^0.0.1
   # Type declarations
   '@types/react': ^19.2.18
   '@types/react-dom': ^19.2.7
