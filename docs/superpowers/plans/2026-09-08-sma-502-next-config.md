@@ -248,6 +248,10 @@ Expected: rc 0 and no loader error. Record `TS_LOADABLE_FROM_ESLINT_CONFIG`. If 
 ```bash
 git checkout -- ts/eslint.config.js ts/apps/paigasus-console/next.config.ts ts/apps/paigasus-console/package.json ts/pnpm-lock.yaml
 rm -rf ts/apps/paigasus-console/app/probe ts/packages/paigasus-next-config ts/apps/paigasus-console/.next
+# Restore the pnpm store. The rm -rf above leaves it holding a link to a workspace package that no
+# longer exists, and Task 2's install is the next thing to touch it.
+export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
+pnpm -C ts install
 git status --short
 ```
 
@@ -1122,7 +1126,13 @@ git commit -m "feat(ts): add request-time runtime config to @paigasus/next-confi
 // tested against synthetic paths, and covered by a liveness assertion so a package landing under
 // a different directory name reds instead of silently disabling its rule.
 
-/** Package directories these rules expect. `null` means "does not exist yet, and that is expected". */
+/**
+ * Package directories these rules expect, mapped to a status string. `'exists'` means the
+ * directory is on disk today; anything else is the stated reason it is not, which the liveness
+ * test requires so an inert rule cannot go unnoticed.
+ *
+ * @type {Record<string, string>}
+ */
 export const BOUNDARY_SCOPES = {
   'packages/paigasus-ui': 'exists',
   'packages/paigasus-sdk': 'exists',
@@ -1132,6 +1142,16 @@ export const BOUNDARY_SCOPES = {
 
 const restrict = (patterns) => ({ 'no-restricted-imports': ['error', { patterns }] });
 
+/**
+ * The boundary blocks, as an ESLint flat-config array.
+ *
+ * The `@type` annotation is load-bearing for the consumer, not decoration: `tests/boundaries.test.ts`
+ * is TypeScript with `noUncheckedIndexedAccess` and the typed-ESLint `no-unsafe-*` rules on, and an
+ * unannotated export from a `.mjs` gives it loosely-inferred types that trip those rules. Fix the
+ * typing here rather than adding an eslint-disable in the one test that proves these rules are wired.
+ *
+ * @type {Array<{ name: string, files: string[], rules: Record<string, unknown> }>}
+ */
 export const boundaryRules = [
   {
     name: 'paigasus/boundaries/ui',
@@ -1251,7 +1271,14 @@ describe('boundary preset', () => {
   });
 
   it('every rule scope has a matching entry in the preset', () => {
-    const scoped = boundaryRules.map((entry) => entry.files[0].split('/**')[0]);
+    // Indexed through a typed local rather than a chained member access: `noUncheckedIndexedAccess`
+    // makes `entry.files[0]` `string | undefined`, and chaining `.split()` straight off it is both
+    // a type error and an unsafe-member-access finding under the typed ESLint rules.
+    const scoped = boundaryRules.map((entry) => {
+      const first: string | undefined = entry.files[0];
+      expect(first, `${entry.name} declares no files glob`).toBeDefined();
+      return (first ?? '').split('/**')[0];
+    });
     for (const dir of Object.keys(BOUNDARY_SCOPES)) {
       expect(scoped).toContain(dir);
     }
@@ -1840,7 +1867,18 @@ BANNED='NEXT_PUBLIC_'
 # The floor is what stops a moved or renamed ts/ silently emptying the gate — the SMA-553 class,
 # which repo:input-liveness cannot reach here because it proves a DECLARED glob is live, never
 # that the scan still sees anything.
-CORPUS_FLOOR=20
+#
+# MEASURED: the real corpus is 72 tracked ts/ files after the lockfile and Markdown exclusions.
+# 48 is two thirds of that, the same proportion ci/ruff/run.sh's floor of 10 uses against its own
+# corpus. A floor set far below the real count would let ts/ collapse most of the way before the
+# gate noticed, which defeats the point of having one.
+CORPUS_FLOOR=48
+
+# GLOBAL, not function-local: negative_control's EXIT trap fires after the function that sets this
+# has already returned (including via the `exit 1` on its own failure path), and a `local` binding
+# is gone by then — referencing it under `set -u` would itself be an unbound-variable error. This
+# is MEASURED in this repo; see ci/ruff/run.sh:40-44.
+tmp=""
 
 die_infra()  { printf 'next-public-free: %s\n' "$*" >&2; exit 2; }
 die_assert() { printf 'next-public-free: %s\n' "$*" >&2; exit 1; }
@@ -1978,7 +2016,8 @@ self_test() {
 }
 
 negative_control() {
-  local tmp negctl_rc=0
+  local negctl_rc=0
+  # `tmp` is the FILE-SCOPE global declared above — deliberately not `local`. See its comment.
   tmp="$(mktemp -d)"
   trap 'rm -rf "$tmp"' EXIT
   make_fixture "$tmp"
@@ -2019,9 +2058,15 @@ bash ci/next-public/run.sh; echo "check rc=$?"
 
 Expected: all three rc 0. The real check must report at least `CORPUS_FLOOR` files.
 
-**If the real check reds**, an existing `ts/` file uses the prefix — fix the file, do not add an allowlist entry.
+**If the real check reds on the floor**, re-measure the corpus and set `CORPUS_FLOOR` to two thirds of the real count:
 
-**If the corpus count is close to 20**, raise `CORPUS_FLOOR` to roughly two thirds of the real count and re-run.
+```bash
+git ls-files -- 'ts/' | grep -v -e '^ts/pnpm-lock\.yaml$' -e '\.md$' | wc -l
+```
+
+At the time this plan was written that printed **72**, which is why the floor is 48. The count grows as this issue adds files, so it should only ever be comfortably above the floor.
+
+**If the real check reds on a prefix hit**, an existing `ts/` file uses `NEXT_PUBLIC_` — fix the file, do not add an allowlist entry. Measured at plan time: zero files use it.
 
 - [ ] **Step 3: Prove each mode bites**
 
@@ -2206,7 +2251,7 @@ sed -n '5310p' ci/actionlint/run.sh
 
 Expected: the check-8e line reads `-ge 20`, and the array now has 24 entries — comfortably above.
 
-- [ ] **Step 7: Verify the graph loads and the task resolves**
+- [ ] **Step 7: Verify the graph loads, and write `SELF_TASK_EXPECTED_GLOBS` from what Moon REPORTS**
 
 ```bash
 export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
@@ -2215,6 +2260,24 @@ moon run repo:next-public-free --force
 ```
 
 Expected: graph rc 0, and the task runs all three modes green. A rejected input glob surfaces here as a graph-load error naming the glob.
+
+Now read the task's **resolved** inputs, because `check_gate_inputs` compares against what Moon reports, not what `moon.yml` authored:
+
+```bash
+export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
+moon query projects | python3 -c "
+import json, sys
+p = json.load(sys.stdin)['projects']
+repo = next(x for x in p if x['id'] == 'repo')
+t = repo['tasks']['next-public-free']
+print('inputGlobs:', sorted(g for g in (t.get('inputGlobs') or {}) if g != '.moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}'))
+print('inputFiles:', sorted(t.get('inputFiles') or {}))
+"
+```
+
+**Write the `SELF_TASK_EXPECTED_GLOBS["next-public-free"]` entry to match this output exactly** — globs sorted first, then files sorted, which is `check_gate_inputs`' comparison order (`ci_targets.py:1659-1674`). Moon may drop, rewrite, or re-sort the negated glob. If what it reports differs from what `moon.yml` authored, record the entry in **Moon's** form and add a comment stating the divergence. Guessing this entry is how it silently mismatches.
+
+Note `moon query projects --json` **errors** on Moon 2.5.3 — bare `moon query projects` already emits JSON. Measure any exit status UNPIPED: `jq` and `python3` both return 0 on empty input, so a piped failure reads as "the reader found nothing" rather than "the command was invalid".
 
 - [ ] **Step 8: Prove the self-enforcing registrations actually fire**
 
@@ -2271,7 +2334,7 @@ for line in \
   '--negative-control) MODE=negctl;   shift ;;' \
   'negctl)   negative_control ;;' \
   'check)    check_prefix; check_factory ;;' \
-  'CORPUS_FLOOR=20' \
+  'CORPUS_FLOOR=48' \
   'if [ "$negctl_rc" != 1 ]; then' ; do
   printf '%s -> %s\n' "$line" "$(grep -cxF "  $line" ci/next-public/run.sh 2>/dev/null || grep -cF "$line" ci/next-public/run.sh)"
 done
@@ -2305,7 +2368,7 @@ NEXT_PUBLIC_FREE_SH_CALL_SITES = (
     "selftest) self_test ;;",
     "check)    check_prefix; check_factory ;;",
     "negctl)   negative_control ;;",
-    "CORPUS_FLOOR=20",
+    "CORPUS_FLOOR=48",
     '( cd "$tmp" && check_prefix "$tmp" ) >/dev/null 2>&1 || negctl_rc=$?',
     'if [ "$negctl_rc" != 1 ]; then',
     "printf '  FAIL a planted NEXT_PUBLIC_ did not red the gate: expected rc 1, got %s\\n' \"$negctl_rc\" >&2",

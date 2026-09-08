@@ -141,15 +141,19 @@ Revision 1 defaulted `assetPrefix` to `basePath`, justified as preventing
 static-chunk collisions between zones. **That justification was wrong.** With
 `basePath: '/iam'`, Next already serves chunks under `/iam/_next/`, so `basePath`
 alone prevents the collision. `assetPrefix` exists for CDN offload, which is a
-different axis.
+different axis. The default was redundant.
 
-Worse, if Next composes the two keys, the default produces `/iam/iam/_next/…`
-and every chunk 404s at runtime. A unit test asserting `assetPrefix === basePath`
-is true in both the working and the broken case, so it cannot tell them apart.
+`assetPrefix` is therefore passed through only when the caller supplies it.
 
-`assetPrefix` is therefore passed through only when the caller supplies it. § 13
-M3 measures the composition rule; if Next does compose them, the pass-through
-gains a documented warning rather than a silent double prefix.
+**Revision 2 also feared a double prefix, and that fear is now DISPROVEN.**
+Revision 2 argued that if Next composed the two keys, the default would produce
+`/iam/iam/_next/…` and every chunk would 404. Measured on Next 16.3.4
+(§ 13 M3): with `basePath: '/iam'` alone the emitted asset URL is
+`/iam/_next/static/…`, and with `basePath` **and** `assetPrefix` both set to
+`/iam` it is still `/iam/_next/static/…`. The two do not concatenate;
+`assetPrefix` is an independent override of where static assets are fetched
+from. So the redundancy argument stands on its own and the 404 hazard does not
+exist. The measurement is recorded rather than the prediction.
 
 ## 5. The `/runtime` entry
 
@@ -703,37 +707,47 @@ Each item is owned elsewhere.
 | 3. The boundary rule fails a deliberately-wrong import | § 7, § 9.3 | real preset via ESLint's Node API |
 | 4. Moon `build` outputs exclude `.next/cache` | § 8.1 | § 13 M4 |
 
-## 13. Measurements the plan takes first
+## 13. Measurements — TAKEN
 
-Each is a plan task with a stated fallback, so implementation never stalls. All
-are taken on Next 16.3.4 with Turbopack, the default `next build` bundler in
-Next 16.
+All five were measured on 2026-09-08 against Next 16.3.4 with Turbopack (the
+default `next build` bundler in Next 16) and Moon 2.5.3. Full commands and
+literal outputs: `docs/superpowers/specs/2026-09-08-sma-502-measurements.md`.
+**Re-take them on a Next or Moon bump.**
 
-**M1 — does the build-phase throw actually fire?** Add a throwaway page calling
-`getRuntimeConfig()` at module scope and assert `next build` fails. This proves
-the premise § 5.3 rests on, including whether prerender workers inherit
-`NEXT_PHASE`. *Fallback:* `connection()` from `next/server`.
+**M1 — does the build-phase throw actually fire, including in prerender
+workers? YES.** A page calling a `NEXT_PHASE` guard at module scope fails
+`next build` at rc 1, and the throw appears twice in the log. So workers do
+inherit the assignment, and § 5.3's premise holds end to end rather than only in
+the main process. The `connection()` fallback is not needed.
 
-**M2 — what is the real standalone entry-point path?** Build the console and
-record it, with `outputFileTracingRoot` set. Confirm at the same time that
-`next build` clears `.next` except `cache` (§ 8.3). *Fallback:* none needed; the
-measurement sets the asserted path.
+**M2 — the real standalone entry point is
+`.next/standalone/apps/paigasus-console/server.js`**, with
+`outputFileTracingRoot` pinned to `ts/`. This confirms § 4.3: the bare
+`.next/standalone/server.js` the design first assumed would have been wrong.
+`next build` also clears `.next` except `cache`, so § 8.3's assertion cannot
+pass on a stale artifact.
 
-**M3 — how do `basePath` and `assetPrefix` compose?** Build with `basePath`
-alone, then with both, and read the emitted `/_next/` asset URL. *Fallback:* if
-they compose, the pass-through gains a documented warning.
+**M3 — `basePath` and `assetPrefix` do NOT compose.** See § 4.4; the double-prefix
+hazard is disproven.
 
-**M4 — does Moon 2.5.3 honour negated `inputs` and `outputs` globs, and how does
-a glob list treat dot-prefixed entries?** *Fallback:* enumerate subdirectories
-explicitly.
+**M4 — Moon 2.5.3 honours negated `inputs` and `outputs` globs.** So § 6.5's
+input list and § 8.1's `!.next/cache/**/*` stand as written, and neither
+fallback is needed.
 
-**M5 — can `next.config.ts` and `ts/eslint.config.js` import TypeScript source
-from the workspace package?** *Fallback:* that entry ships as `.mjs`. Its
-`.d.mts` is **generated** with `tsc --emitDeclarationOnly` and drift-checked, not
-hand-written — a hand-written declaration file is read by `tsc` instead of the
-implementation, the same shape as `repo:pyo3-stub-drift` (SMA-600) and the
-still-open SMA-535. The preset is written as `.mjs` by default for this reason:
-it is configuration data, and TypeScript buys little there.
+**M5 — both `next.config.ts` and `ts/eslint.config.js` can import TypeScript
+source from the workspace package**, with one packaging condition: the consuming
+`package.json` must declare the dependency itself. `ts/eslint.config.js` is owned
+by `ts/package.json`, so that root manifest needs the devDependency;
+`workspace:*` resolution does not fall through to a sibling app's
+`node_modules`.
+
+The `.mjs` fallback is therefore **not forced**. The eslint preset still ships as
+`.mjs` by choice — it is configuration data and TypeScript buys little there —
+but it does so with no `.d.mts` and no drift surface. Had the fallback been
+forced, the declaration file would have had to be **generated** with
+`tsc --emitDeclarationOnly` and drift-checked rather than hand-written: a
+hand-written declaration is read by `tsc` instead of the implementation, the same
+shape as `repo:pyo3-stub-drift` (SMA-600) and the still-open SMA-535.
 
 ## 14. What changed in revision 2
 
