@@ -699,6 +699,7 @@ If `ts:fmt` reports files it would rewrite, run `cd ts && pnpm exec prettier --w
 **Files:**
 - Create: `ts/packages/paigasus-next-config/src/runtime.ts`
 - Create: `ts/packages/paigasus-next-config/tests/runtime.test.ts`
+- Modify: `ts/packages/paigasus-next-config/vitest.config.ts` — see Step 0, which is mandatory
 
 **Interfaces:**
 - Consumes: `canonicalBasePath` from Task 2.
@@ -707,6 +708,45 @@ If `ts:fmt` reports files it would rewrite, run `cd ts && pnpm exec prettier --w
   - `defineRuntimeConfig<T extends ZodRawShape>(extraShape?: T): { getRuntimeConfig(): RuntimeConfig<T>; getPublicConfig(): PublicConfig }`
   - `PUBLIC_CONFIG_KEYS: readonly ['zone', 'zones']`
   - `interface PublicConfig { zone: string; zones: Record<string, string> }`
+
+- [ ] **Step 0: Set the `react-server` resolve condition — mandatory, not a contingency**
+
+`src/runtime.ts` opens with `import 'server-only'`. **Measured** on the installed `server-only@0.0.1`: its `exports` map is `{ "react-server": "./empty.js", "default": "./index.js" }`, and `index.js` is nothing but an unconditional `throw new Error("This module cannot be imported from a Client Component module. …")`. Vitest does not set the `react-server` condition, so without this step **every test in this task fails at import time**.
+
+Edit `ts/packages/paigasus-next-config/vitest.config.ts` to read:
+
+```ts
+// SPDX-License-Identifier: Apache-2.0
+import { defineConfig } from 'vitest/config';
+
+export default defineConfig({
+  test: {
+    environment: 'node',
+    include: ['tests/**/*.test.ts'],
+  },
+  // `src/runtime.ts` imports `server-only`, whose exports map resolves to a module that throws
+  // unconditionally under every condition except `react-server` (measured on server-only@0.0.1:
+  // "." -> { "react-server": "./empty.js", "default": "./index.js" }, and index.js is one throw).
+  // Vitest does not set that condition, so without this the whole suite fails at import.
+  //
+  // The remaining three conditions are the additive module-resolution defaults. Listing
+  // `react-server` ALONE would drop `import`/`default` and break source-exports `.ts` resolution
+  // for the workspace packages — the same trap ts/packages/paigasus-kernel/vitest.config.ts
+  // records for its browser project.
+  resolve: {
+    conditions: ['react-server', 'node', 'import', 'default'],
+  },
+});
+```
+
+Verify the guard still does its real job — it must throw for a client-condition import:
+
+```bash
+export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
+cd ts && node --input-type=module -e "import('server-only').then(() => console.log('RESOLVED (wrong)'), (e) => console.log('THREW (correct):', e.message.slice(0, 40)))"; cd ..
+```
+
+Expected: `THREW (correct): …`. This proves the condition change makes the module testable without disarming the protection it provides in a real client bundle.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1066,7 +1106,7 @@ cd ts && pnpm --filter @paigasus/next-config exec vitest run tests/runtime.test.
 
 Expected: 19 passed.
 
-If `import 'server-only'` makes vitest fail with "This module cannot be imported from a Client Component", add `resolve: { conditions: ['react-server', 'node', 'import', 'default'] }` to `vitest.config.ts` — the `server-only` package resolves to a throwing module under the browser condition by design, and the `react-server` condition is what selects the harmless one.
+If you see "This module cannot be imported from a Client Component", Step 0 was skipped or its `resolve.conditions` list is wrong. Fix Step 0 — do **not** remove `import 'server-only'` from `src/runtime.ts` to make the suite pass. That line is the structural guard that keeps this module out of a client or edge bundle, where `process.env` is not dynamic and the whole runtime-config contract silently breaks.
 
 - [ ] **Step 5: Typecheck and commit**
 
