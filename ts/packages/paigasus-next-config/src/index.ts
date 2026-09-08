@@ -34,17 +34,17 @@ export interface CreateNextConfigOptions {
  * chunks under `/iam/_next/`, so the default would buy nothing — and if Next composes the two
  * keys it produces `/iam/iam/_next/…` and every chunk 404s at runtime (spec § 4.4).
  *
- * `env` is refused from `extend` because `env` inlines values at build time exactly as
- * `NEXT_PUBLIC_` does. The factory owns it, and writes only the two values that describe the
- * IMAGE: which zone this image is, and where it is mounted. Everything that varies per
- * DEPLOYMENT belongs in `@paigasus/next-config/runtime`.
+ * `env` is refused from `extend` because `env` inlines values at build time — the same
+ * single-image hazard Next's public-prefixed env vars create. The factory owns it, and writes
+ * only the two values that describe the IMAGE: which zone this image is, and where it is
+ * mounted. Everything that varies per DEPLOYMENT belongs in `@paigasus/next-config/runtime`.
  */
 export function createNextConfig(options: CreateNextConfigOptions): NextConfig {
   const { zone, basePath, assetPrefix, outputFileTracingRoot, extend } = options;
 
   if (extend && Object.prototype.hasOwnProperty.call(extend, 'env')) {
     throw new Error(
-      'createNextConfig: `extend.env` is not allowed. `env` inlines values at build time, so it is the same single-image hazard as NEXT_PUBLIC_. ' +
+      'createNextConfig: `extend.env` is not allowed. `env` inlines values at build time, so it carries the same single-image hazard as a public-prefixed env var. ' +
         'The factory owns `env`; deployment-varying values belong in @paigasus/next-config/runtime.',
     );
   }
