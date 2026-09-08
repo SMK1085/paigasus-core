@@ -741,11 +741,20 @@ it.
 
 Rejected: deleting `.next` before each build (§ 8.3 states why).
 
-## 15. One open scope question
+## 15. The scope decision, settled
 
 § 6.6 measures obligation 5 as surgery on `check_self_invocation`, not a table
 entry. `repo:ruff-ci` and `repo:workflow-credentials` were each their own issue
 on that basis. AC2 nonetheless asks for the gate in SMA-502.
 
-This is a scope decision, not a technical one, and it is recorded here unresolved
-rather than settled unilaterally.
+**Decision (2026-09-08): the gate stays in SMA-502, with all seven obligations,
+the script pin included.** Two alternatives were put and rejected: splitting the
+gate into a follow-up issue, which leaves the single-image rule unguarded until
+that issue lands; and keeping the gate but dropping the script pin, which leaves
+its own production call site deletable while green — the failure § 9.4 argues
+against elsewhere.
+
+So the plan carries the `ci_targets.py` work explicitly: a new required
+positional parameter on `check_self_invocation`, a new haystack block, `main()`
+wiring, help text, a self-test battery, and an updated argument list at every
+existing call site.
