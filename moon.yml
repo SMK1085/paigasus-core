@@ -224,6 +224,14 @@ tasks:
       # deletes the pinned lines does not schedule this task. Same reasoning as the
       # ci/release-parity/**/* entry above.
       - 'ci/ruff/**/*'
+      # SMA-502 — this task pins load-bearing lines inside ci/next-public/run.sh
+      # (NEXT_PUBLIC_FREE_SH_CALL_SITES), so a change under ci/next-public/ MUST re-key it.
+      # Without this the pin is real but unreachable: the PR that deletes the pinned lines does
+      # not schedule this task. Same reasoning as the ci/ruff/**/* entry above. Note the broad
+      # 'ci/**/*' entry already covers it for SCHEDULING; the narrow entry is kept because
+      # check 8e in ci/actionlint/run.sh floors this array's length and the file's own policy is
+      # to keep narrow globs rather than collapse them into the broad one.
+      - 'ci/next-public/**/*'
       # SMA-541 — this task now asserts that CLAUDE.md's documented full-graph command mirrors
       # ci.yml's `T=(...)` array, so a docs-only edit MUST re-key it; without this the assertion is
       # real but unreachable behind a cached PASS. (repo:actionlint's `**/*` already covers
@@ -891,3 +899,32 @@ tasks:
       - 'ci/ruff/**/*'
       - 'py/pyproject.toml'
       - 'py/uv.lock'
+
+  next-public-free:
+    description: 'Ban NEXT_PUBLIC_ across ts/ and require every app to use the next-config factory (SMA-502).'
+    # WHY THIS EXISTS — Next inlines every NEXT_PUBLIC_* value at `next build` time, so one OCI
+    # image cannot serve two self-hosters with different IdP issuers or API URLs. That is the
+    # whole premise of @paigasus/next-config; a grep enforces it mechanically instead of by review.
+    #
+    # THE BAN COVERS PACKAGES, NOT ONLY APPS. A source-only package is transpiled by the app and
+    # inlines the same way, so an apps-only ban leaves a hole.
+    #
+    # INPUTS ARE NOT ts/**/*. .moon/workspace.yml deliberately omits '**/.next/**' from
+    # hasher.ignorePatterns, so a ts/**/* glob would hash the whole built .next tree — output this
+    # gate never scans — and re-key on every console build.
+    #
+    # `--self-test` and `--negative-control` run FIRST and in the SAME block. `set -euo pipefail`
+    # is REQUIRED: Moon does not enable errexit for `script:` blocks and takes the block's status
+    # from its LAST command, so without it a failing control is masked by the passing real run.
+    # These four lines are pinned by SELF_SCHEDULED_GATES.
+    script: |
+      set -euo pipefail
+      bash ci/next-public/run.sh --self-test
+      bash ci/next-public/run.sh --negative-control
+      bash ci/next-public/run.sh
+    toolchain: 'system'
+    inputs:
+      - '!ts/apps/*/.next/**'
+      - 'ci/next-public/**/*'
+      - 'ts/apps/**/*'
+      - 'ts/packages/**/*'

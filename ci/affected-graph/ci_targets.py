@@ -200,6 +200,11 @@ REQUIRED_REPO_TASKS = (
     # task is dropped from `T` and made CI-ineligible in the same edit — so without a floor entry
     # the whole gate, control included, could be switched off with every check green.
     "ruff-ci",
+    # SMA-502. Same reasoning as the release-parity*, workflow-credentials and ruff-ci entries:
+    # this gate carries a --negative-control, and check_forward's `want`/`got` shrink CONSISTENTLY
+    # when a task is dropped from `T` and made CI-ineligible in the same edit — so without a floor
+    # entry the whole gate, control included, could be switched off with every check green.
+    "next-public-free",
 )
 
 # SMA-553 D13 — repo:input-liveness's `inputs: ['**/*']` is load-bearing, and asserting it ONLY
@@ -345,6 +350,19 @@ SELF_TASK_EXPECTED_GLOBS = {
         ".prototools",
         "py/pyproject.toml",
         "py/uv.lock",
+    ),
+    # SMA-502. Four globs, no literal files, in check_gate_inputs' comparison order (globs sorted
+    # first, then files sorted — there are none here). The negated entry keeps the built .next
+    # tree out of the hash walk: .moon/workspace.yml deliberately omits '**/.next/**' from
+    # hasher.ignorePatterns, so a ts/**/* glob alone would re-key this gate on every console build
+    # while scanning nothing it hashed. Confirmed against `moon query projects`' resolved
+    # inputGlobs/inputFiles for repo:next-public-free (moon 2.5.3): reported verbatim as authored,
+    # no drop, rewrite or re-sort of the negated glob.
+    "next-public-free": (
+        "!ts/apps/*/.next/**",
+        "ci/next-public/**/*",
+        "ts/apps/**/*",
+        "ts/packages/**/*",
     ),
 }
 
@@ -587,6 +605,15 @@ SELF_SCHEDULED_GATES = {
         "bash ci/ruff/run.sh --self-test",
         "bash ci/ruff/run.sh --negative-control",
         "bash ci/ruff/run.sh",
+    ),
+    # SMA-502. Four lines, like the other self-scheduled gates: `set -euo pipefail` is what makes
+    # a failing control propagate, since Moon takes a `script:` block's status from its LAST
+    # command.
+    "next-public-free": (
+        "set -euo pipefail",
+        "bash ci/next-public/run.sh --self-test",
+        "bash ci/next-public/run.sh --negative-control",
+        "bash ci/next-public/run.sh",
     ),
 }
 
@@ -1916,12 +1943,14 @@ def self_test():
                  # SMA-593 — a floor member too, for the same reason.
                  "workflow-credentials": True,
                  # SMA-539 — a floor member too, for the same reason.
-                 "ruff-ci": True},
+                 "ruff-ci": True,
+                 # SMA-502 — a floor member too, for the same reason.
+                 "next-public-free": True},
         "some-crate-rs": {"build": True, "test": True, "build-release": True},
     }
     aligned_t = ["build", "test", "deny", "promtool", "affected-smoke", "publish-metadata",
                  "release-parity", "release-parity-py", "release-parity-ts",
-                 "workflow-credentials", "ruff-ci"]
+                 "workflow-credentials", "ruff-ci", "next-public-free"]
 
     def forward(label, tasks, t, exempt, want_missing, want_unexpected, want_bad_exempt=(),
                 want_stale_exempt=()):

@@ -190,6 +190,7 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   :http-extractor-envelope :input-liveness :promtool :observability-drift
   :nats-permissions :release-parity :release-parity-py :release-parity-ts
   :publish-metadata :version-lockstep :workflow-credentials :pyo3-stub-drift :ruff-ci
+  :next-public-free
   --base origin/main
   --include-relations`
   <!-- ci-targets:end -->
