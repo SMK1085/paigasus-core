@@ -417,7 +417,7 @@ it, and it is stated here as a configuration invariant that
 
 ### 7.2 Redis unavailability
 
-node-redis v5's default reconnect strategy retries indefinitely and **queues
+node-redis v6's default reconnect strategy retries indefinitely and **queues
 commands**, so an outage becomes hung requests rather than fast failures — every
 page in the console stalls instead of erroring.
 
@@ -1135,7 +1135,7 @@ are **assumptions** and must be measured during implementation, recorded in
 | # | Claim |
 |---|---|
 | M1 | `openid-client` v6's API for discovery, `authorizationCodeGrant`, refresh, revocation, and where clock tolerance is set. §§ 8.3 and 9 assume a shape. |
-| M2 | node-redis v5's `SET … NX PX` option object, `GETDEL`, Lua `EVAL` for CAS, and that `disableOfflineQueue` behaves as § 7.2 needs. |
+| M2 | node-redis **v6**'s `SET … NX PX` option object, `GETDEL`, Lua `EVAL` for CAS, and that `disableOfflineQueue` behaves as § 7.2 needs. v6 changed the client API surface from v5, so none of this carries over from prior knowledge. |
 | M3 | `NODE_EXTRA_CA_CERTS` + Playwright `ignoreHTTPSErrors` suffice for the self-signed cert on both sides. |
 | M4 | `moon ci :test-e2e` resolves to a real task and `ci_targets.py`'s assertion passes. A `T` entry resolving to nothing exits **0**. |
 | M5 | **The AC 2 test can fail.** Delete the lock acquisition; the refresh counter must exceed 1. |
