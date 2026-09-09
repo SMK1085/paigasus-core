@@ -6,6 +6,7 @@
 import { readdirSync, readFileSync, writeFileSync, unlinkSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import ts from 'typescript';
 import { describe, expect, it } from 'vitest';
 
 const PKG_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -57,19 +58,18 @@ describe('AC 1 — every guarded entry point imports the server guard first', ()
   });
 });
 
-describe("AC 1 — 'server-only' is imported at exactly one site", () => {
-  // Matches a side-effect import of `server-only` in either quote style. Deliberately NOT anchored
-  // at end-of-line, and deliberately permissive about what sits between `import` and the specifier:
-  // `import "server-only"; // boundary` and `import /* boundary */ "server-only";` are both real
-  // import statements, and an end-anchored pattern misses both — which would let the package's
-  // one-site guarantee break while this test stayed green.
-  //
-  // `[^'"\n]*` cannot cross a quote, so this still does NOT match a mere mention: a line comment
-  // (`// see 'server-only'`) does not start with `import`, and an unrelated import
-  // (`import { x } from './y'; // 'server-only'`) fails because the first quote it reaches
-  // belongs to './y', not to the specifier.
-  const SERVER_ONLY_IMPORT = /^\s*import\b[^'"\n]*(['"])server-only\1/m;
+// Parse rather than pattern-match. Three review rounds each found a different VALID import that a
+// regex missed — a double-quoted specifier, a trailing line comment, and a block comment carrying
+// a line terminator. Each fix invited the next evasion, because "does this file import
+// server-only" is a question about syntax, not about text. `typescript` is already a devDependency
+// here, so the exact answer is cheap: the parser sees through every quote style, comment
+// placement and line break by construction.
+function importsServerOnly(source: string, fileName: string): boolean {
+  const parsed = ts.createSourceFile(fileName, source, ts.ScriptTarget.ESNext, true);
+  return parsed.statements.some((statement) => ts.isImportDeclaration(statement) && ts.isStringLiteral(statement.moduleSpecifier) && statement.moduleSpecifier.text === 'server-only');
+}
 
+describe("AC 1 — 'server-only' is imported at exactly one site", () => {
   it('server-guard.ts imports it first', () => {
     const source = readFileSync(resolve(PKG_ROOT, 'src/server-guard.ts'), 'utf8');
     expect(firstImportStatement(source)).toBe("import 'server-only';");
@@ -77,7 +77,7 @@ describe("AC 1 — 'server-only' is imported at exactly one site", () => {
 
   it('no other file in src/ imports it', () => {
     const others = globSourceFiles().filter((f) => f !== resolve(PKG_ROOT, 'src/server-guard.ts'));
-    const offenders = others.filter((f) => SERVER_ONLY_IMPORT.test(readFileSync(f, 'utf8')));
+    const offenders = others.filter((f) => importsServerOnly(readFileSync(f, 'utf8'), f));
     expect(offenders).toEqual([]);
   });
 
@@ -90,7 +90,7 @@ import "server-only";
       writeFileSync(probeFile, content, 'utf8');
 
       const others = globSourceFiles().filter((f) => f !== resolve(PKG_ROOT, 'src/server-guard.ts'));
-      const offenders = others.filter((f) => SERVER_ONLY_IMPORT.test(readFileSync(f, 'utf8')));
+      const offenders = others.filter((f) => importsServerOnly(readFileSync(f, 'utf8'), f));
       expect(offenders).toContain(probeFile);
     } finally {
       try {
@@ -111,7 +111,7 @@ export const guard = true;
       writeFileSync(probeFile, content, 'utf8');
 
       const others = globSourceFiles().filter((f) => f !== resolve(PKG_ROOT, 'src/server-guard.ts'));
-      const offenders = others.filter((f) => SERVER_ONLY_IMPORT.test(readFileSync(f, 'utf8')));
+      const offenders = others.filter((f) => importsServerOnly(readFileSync(f, 'utf8'), f));
       expect(offenders).not.toContain(probeFile);
     } finally {
       try {
@@ -131,7 +131,7 @@ import "server-only"; // boundary
       writeFileSync(probeFile, content, 'utf8');
 
       const others = globSourceFiles().filter((f) => f !== resolve(PKG_ROOT, 'src/server-guard.ts'));
-      const offenders = others.filter((f) => SERVER_ONLY_IMPORT.test(readFileSync(f, 'utf8')));
+      const offenders = others.filter((f) => importsServerOnly(readFileSync(f, 'utf8'), f));
       expect(offenders).toContain(probeFile);
     } finally {
       try {
@@ -151,7 +151,31 @@ import /* boundary */ "server-only";
       writeFileSync(probeFile, content, 'utf8');
 
       const others = globSourceFiles().filter((f) => f !== resolve(PKG_ROOT, 'src/server-guard.ts'));
-      const offenders = others.filter((f) => SERVER_ONLY_IMPORT.test(readFileSync(f, 'utf8')));
+      const offenders = others.filter((f) => importsServerOnly(readFileSync(f, 'utf8'), f));
+      expect(offenders).toContain(probeFile);
+    } finally {
+      try {
+        unlinkSync(probeFile);
+      } catch {
+        // Ignore cleanup errors
+      }
+    }
+  });
+
+  it('detects server-only import with a multiline block comment as offender', () => {
+    const probeFile = resolve(PKG_ROOT, 'src/__multiline-block-comment-probe.ts');
+    try {
+      // The block comment carries a REAL line terminator (not an escaped "\\n" inside one
+      // source line) — this is the case a regex anchored on `[^'"\n]*` cannot see, since the
+      // comment crosses a newline before the specifier is reached.
+      const content = `// SPDX-License-Identifier: Apache-2.0
+import /* boundary
+*/ "server-only";
+`;
+      writeFileSync(probeFile, content, 'utf8');
+
+      const others = globSourceFiles().filter((f) => f !== resolve(PKG_ROOT, 'src/server-guard.ts'));
+      const offenders = others.filter((f) => importsServerOnly(readFileSync(f, 'utf8'), f));
       expect(offenders).toContain(probeFile);
     } finally {
       try {
@@ -171,7 +195,7 @@ import { readFileSync } from 'node:fs'; // not a server-only import
       writeFileSync(probeFile, content, 'utf8');
 
       const others = globSourceFiles().filter((f) => f !== resolve(PKG_ROOT, 'src/server-guard.ts'));
-      const offenders = others.filter((f) => SERVER_ONLY_IMPORT.test(readFileSync(f, 'utf8')));
+      const offenders = others.filter((f) => importsServerOnly(readFileSync(f, 'utf8'), f));
       expect(offenders).not.toContain(probeFile);
     } finally {
       try {
