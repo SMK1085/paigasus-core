@@ -560,4 +560,4 @@ remains (confirmed no other tracked file changed).
 - No other measurement triggered a fallback: `STANDALONE_ENTRY`, `MOON_NEGATED_OUTPUT_GLOBS`, `MOON_NEGATED_INPUT_GLOBS`,
   `TS_LOADABLE_FROM_NEXT_CONFIG`, and `NEXT_PHASE_REACHES_WORKERS` all matched their expected /
   predicted values, so Tasks 2, 4, 5, 7 and 8 can proceed on the spec's original assumptions for
-  those four.
+  those five.
