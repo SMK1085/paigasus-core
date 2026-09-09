@@ -1419,6 +1419,16 @@ There is no action-level `exitCode` key — the real exit code and the full comm
 command, compare the action's `finishedAt` against `lastRun.json`'s `lastRunTime`; if they disagree
 the logs are from a different run.
 
+<!-- moon-diagnosis:ok -->
+
+The marker above is what `repo:actionlint`'s check 12 requires of any file mentioning
+`ciReport.json` (SMA-597). It is `:ok` rather than `:superseded` because the two paragraphs above
+reproduce CLAUDE.md's moon-diagnosis block correctly rather than the advice it replaced: they say
+the action-level `exitCode` key does not exist, point at `operations[]` for the real exit code and
+command, and require the `finishedAt` / `lastRunTime` comparison before a log is paired with a run.
+Re-check that this still holds before editing either passage — the marker asserts agreement, so a
+drift here makes it a lie rather than merely stale.
+
 Three gates are expected to be unaffected by this change and are worth naming so a red there is read
 as a real finding rather than noise: `repo:release-parity*` abort **INCONCLUSIVE at rc=2** inside an
 agent session because `proto` emits NDJSON on stdout — that is not a pass. `repo:input-liveness`
