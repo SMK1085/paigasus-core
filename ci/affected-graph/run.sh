@@ -390,6 +390,24 @@ run_suite() {
   # Strict equality: re-baseline deliberately when the set legitimately changes.
   run_task_case_ci "proto->sdk" "ts/packages/paigasus-proto/src/generated/paigasus/common/v1/error_pb.ts" \
     "paigasus-proto-ts:build,paigasus-proto-ts:test,paigasus-sdk-ts:build,paigasus-sdk-ts:test,ts:lint"
+  # SMA-508 final review fix — the SECOND anchor, and it is not redundant. MEASURED: narrowing all
+  # three of paigasus-sdk-ts's `inputs` globs from `/ts/packages/paigasus-proto/src/**/*` to
+  # `/ts/packages/paigasus-proto/src/generated/paigasus/common/**/*` still yields `PASS proto->sdk`
+  # at rc 0 — yet that narrowed glob cannot match src/generated/paigasus/iam/v1/iam_pb.ts, the only
+  # proto path src/iam.ts actually imports today. The case above alone would stay green while the
+  # SDK stopped being selected by a regeneration of the file it depends on.
+  # This repo's own precedent for a two-anchor pair is the `ui->console` /
+  # `ui-components->console` pair above: "a single anchor leaves the input narrowable to the other
+  # subtree while the case stays green." The two anchors here sit on opposite sides of the
+  # `/ts/packages/paigasus-proto/src/**/*` glob — one under generated/paigasus/common, one under
+  # generated/paigasus/iam — so together they prove the glob's WIDTH rather than one path inside
+  # it. Keep the error_pb.ts case above too: SMA-625 keys on that path.
+  # The expected set is DERIVED with the same no-flag `moon query tasks --affected` traversal
+  # `_assert_task_case_impl` uses (see task-5-measurement-commands.md § B), not copied from the
+  # case above; it happens to match, because both files sit inside the same declared input glob.
+  # Strict equality: re-baseline deliberately when the set legitimately changes.
+  run_task_case_ci "proto-iam->sdk" "ts/packages/paigasus-proto/src/generated/paigasus/iam/v1/iam_pb.ts" \
+    "paigasus-proto-ts:build,paigasus-proto-ts:test,paigasus-sdk-ts:build,paigasus-sdk-ts:test,ts:lint"
   # Generic Cargo<->Moon parity: catches a MISSING case, which is how SMA-524's bug survived review.
   assert_cargo_moon_parity || SUITE_RC=1
   # assert_include_relations returns only 0/1 (no infra code), so collapsing is correct here.

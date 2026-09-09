@@ -37,23 +37,32 @@ describe('transport cache identity (spec § 7.1)', () => {
 });
 
 describe('stableTransportKey (spec § 7.1)', () => {
-  it('is insensitive to property order', () => {
-    // Cast: TransportOptions holds ONE field today. The key function is written for the whole
-    // options object because spec § 7.1's rule is about the SECOND field — nodeOptions, the TLS
-    // trust material — and this assertion is what keeps the rule honest before that field exists.
-    const one = stableTransportKey({ baseUrl: 'https://a.invalid', z: 1, a: 2 } as never);
-    const two = stableTransportKey({ a: 2, z: 1, baseUrl: 'https://a.invalid' } as never);
-    expect(one).toBe(two);
-  });
-
-  it('separates two option sets that differ only in a nested field', () => {
-    const one = stableTransportKey({ baseUrl: 'https://a.invalid', nodeOptions: { ca: 'X' } } as never);
-    const two = stableTransportKey({ baseUrl: 'https://a.invalid', nodeOptions: { ca: 'Y' } } as never);
-    expect(one).not.toBe(two);
-  });
-
   it('does not collide two distinct base URLs', () => {
     expect(stableTransportKey({ baseUrl: 'https://a.invalid' })).not.toBe(stableTransportKey({ baseUrl: 'https://b.invalid' }));
+  });
+
+  // The two tests below used to exercise `serialize`'s order-insensitivity and nested-field
+  // handling by smuggling extra, undeclared keys (`z`/`a`, then a hypothetical `nodeOptions`)
+  // past the type system via `as never`. Final review (SMA-508) MEASURED that the same trick
+  // works with NO cast at all against a variable typed wider than `TransportOptions` — TypeScript's
+  // excess-property check only fires on an object literal — and that `serialize` folded the extra
+  // key into the cache key regardless, silently forking a transport (and an HTTP/2 session) per
+  // distinct value. `TRANSPORT_OPTION_KEYS` now closes that: an undeclared own key throws instead
+  // of joining the key. That supersedes both tests, since their premise — an undeclared key
+  // reaching `serialize` at all — is exactly what is now refused. `serialize`'s recursive,
+  // order-insensitive sort still exists (see the comment above `stableTransportKey`) and will be
+  // re-exercised through a real multi-field `TransportOptions` the day a second field is added.
+  it('throws for an own key outside TRANSPORT_OPTION_KEYS, so an undeclared option cannot silently join the cache key', () => {
+    // `as never`: TypeScript's excess-property check only fires on an object LITERAL passed
+    // directly to a typed parameter, never on a wider-typed variable — so this reproduces the
+    // exact gap `getTransport(wider)` has at a real call site, rather than hiding it.
+    const wider = { baseUrl: 'https://a.invalid', bearer: 'SECRET' } as never;
+    expect(() => stableTransportKey(wider)).toThrow(/bearer/);
+  });
+
+  it('throws for a future nodeOptions field until TRANSPORT_OPTION_KEYS is extended for it', () => {
+    const wider = { baseUrl: 'https://a.invalid', nodeOptions: { ca: 'X' } } as never;
+    expect(() => stableTransportKey(wider)).toThrow(/nodeOptions/);
   });
 });
 
@@ -98,5 +107,17 @@ describe('authInterceptor (spec § 7.4)', () => {
     const req = fakeUnaryRequest();
     await authInterceptor(noopNext)(req);
     expect(req.header.get('authorization')).toBeNull();
+  });
+
+  it('throws, naming the cause, for an empty bearer rather than sending it', async () => {
+    const req = fakeUnaryRequest();
+    req.contextValues.set(authContextKey, { bearer: '' });
+    await expect(authInterceptor(noopNext)(req)).rejects.toThrow(/empty|whitespace/);
+  });
+
+  it('throws for a whitespace-only bearer', async () => {
+    const req = fakeUnaryRequest();
+    req.contextValues.set(authContextKey, { bearer: '   ' });
+    await expect(authInterceptor(noopNext)(req)).rejects.toThrow(/empty|whitespace/);
   });
 });

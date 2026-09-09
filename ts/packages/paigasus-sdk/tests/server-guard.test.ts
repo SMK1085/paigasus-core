@@ -38,6 +38,14 @@ describe('AC 1 — every guarded entry point imports the server guard first', ()
     expect(entries.length).toBeGreaterThan(0);
   });
 
+  // `entries.length > 0` above protects the whole map, not the GUARDED partition specifically:
+  // moving every entry into UNGUARDED_ENTRIES would leave that assertion green with the `it.each`
+  // below iterating zero cases — a suite that reports all-pass while checking nothing. This
+  // assertion pins the partition itself, not only the map it is drawn from.
+  it('finds at least one GUARDED entry to check', () => {
+    expect(entries.filter(([name]) => !UNGUARDED_ENTRIES.has(name)).length).toBeGreaterThan(0);
+  });
+
   it.each(entries.filter(([name]) => !UNGUARDED_ENTRIES.has(name)))('entry %s imports the guard as its first import statement', (_name, target) => {
     const source = readFileSync(resolve(PKG_ROOT, target), 'utf8');
     expect(firstImportStatement(source)).toBe(GUARD_IMPORT);

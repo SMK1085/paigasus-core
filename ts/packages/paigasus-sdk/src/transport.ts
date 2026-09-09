@@ -49,10 +49,33 @@ export const authContextKey = createContextKey<Auth>({ anonymous: true }, { desc
 export const authInterceptor: Interceptor = (next) => async (req) => {
   const auth = req.contextValues.get(authContextKey);
   if ('bearer' in auth) {
+    // An empty or whitespace-only bearer is refused here, at the point it would be BOUND into the
+    // outgoing header, rather than sent as `Authorization: Bearer `. A caller that reads an unset
+    // environment variable into `bearer` gets a clear local error naming the cause, instead of a
+    // confusing server-side parse failure on the other end of the call.
+    if (auth.bearer.trim() === '') {
+      throw new Error(
+        '@paigasus/sdk: refusing to send an empty or whitespace-only bearer token. This usually means an unset environment variable; use { anonymous: true } for an intentionally unauthenticated call.',
+      );
+    }
     req.header.set('authorization', `Bearer ${auth.bearer}`);
   }
   return next(req);
 };
+
+/**
+ * The complete set of keys `TransportOptions` is allowed to carry. `serialize` below walks
+ * whatever OWN keys an options object happens to have, and TypeScript's excess-property check
+ * only fires against an object LITERAL — a variable typed wider than `TransportOptions` (or built
+ * up with `Object.assign`, or read from `JSON.parse`) passes `getTransport` with no cast at all.
+ * MEASURED: `const wider = { baseUrl: '...', bearer: 'SECRET' }; getTransport(wider);` typechecks
+ * at rc 0. Without this list, `stableTransportKey` would then silently fold `bearer` into the
+ * cache key — forking a brand-new `Http2SessionManager` and HTTP/2 session per distinct token,
+ * with no eviction (the cache is deliberately unbounded, spec § 7.3), and retaining every bearer
+ * string as a Map key for the process's lifetime. Extend this set, in lockstep with
+ * `TransportOptions`, the day a real second field (`nodeOptions`) is added.
+ */
+const TRANSPORT_OPTION_KEYS: ReadonlySet<string> = new Set(['baseUrl']);
 
 /**
  * A stable serialization of the whole options object: keys sorted at every depth, `undefined`
@@ -67,8 +90,18 @@ export const authInterceptor: Interceptor = (next) => async (req) => {
  * different trust configurations onto one cached transport — precisely the failure this
  * whole-object key exists to prevent. A future option that is not plain JSON data needs its own
  * identity contribution rather than this function's default handling.
+ *
+ * A THIRD, separate risk — an option TypeScript never rejects at all, because excess-property
+ * checking only applies to an object literal — is closed by `TRANSPORT_OPTION_KEYS` above: an own
+ * key outside that set throws here rather than silently joining the cache key. This also catches
+ * the opposite mistake, a future field added to `TransportOptions` but forgotten in that list.
  */
 export function stableTransportKey(options: TransportOptions): string {
+  for (const key of Object.keys(options)) {
+    if (!TRANSPORT_OPTION_KEYS.has(key)) {
+      throw new Error(`@paigasus/sdk: TransportOptions carries an undeclared key "${key}". Add it to TRANSPORT_OPTION_KEYS in transport.ts if it is meant to be part of the transport's identity.`);
+    }
+  }
   return serialize(options);
 }
 
