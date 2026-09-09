@@ -154,7 +154,11 @@ export async function startOidcFixture(): Promise<OidcFixture> {
           refresh_token: `rt_${b64url(randomUUID())}`,
           token_type: 'bearer',
         };
+        // ONE-SHOT, as setNextExpiresIn's name promises. Left set, the override would also apply
+        // to the refresh-token request a later test makes against the same fixture, so a test
+        // asserting the normal path would silently run against the previous test's override.
         const expiresIn = expiresInOverride !== undefined ? expiresInOverride.value : 3600;
+        expiresInOverride = undefined;
         if (expiresIn !== undefined) {
           body['expires_in'] = expiresIn;
         }
