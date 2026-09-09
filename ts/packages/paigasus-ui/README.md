@@ -37,8 +37,15 @@ second zone app.
 
 Every new consumer must add, to its own global stylesheet:
 
-- its own `@source` line pointing at `ts/packages/paigasus-ui/src` (see
-  `ts/apps/paigasus-console/app/globals.css` for the working example), and
+- its own `@source` line resolving to `ts/packages/paigasus-ui/src`. **Tailwind resolves an
+  `@source` path relative to the stylesheet that declares it, not to the repository root**, so
+  each consumer must work out its own relative path rather than copying another app's. The
+  console's stylesheet sits at `ts/apps/paigasus-console/app/globals.css` and therefore writes
+  `@source '../../../packages/paigasus-ui/src';` — an app at a different depth needs a different
+  number of `../` segments. Copying that line verbatim points Tailwind at a path that does not
+  exist, and a non-existent `@source` is not an error: it scans nothing and the package's classes
+  are silently absent from the production build, which is the exact failure this section exists to
+  prevent.
 - its own `@import '@paigasus/ui/styles.css'`, and
 - its own probe assertion (a copy of, or a task wired the same way as,
   `ci/tailwind-source/run.mjs` against that app's own build output).
