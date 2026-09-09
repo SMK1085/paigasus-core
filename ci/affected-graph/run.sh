@@ -351,6 +351,30 @@ run_suite() {
   # hand (SMA-420/546) rather than through @group(upstreams), which is Rust-only.
   run_task_case_ci "kernel->consumer-tasks" "rs/crates/libs/paigasus-kernel/src/lib.rs" \
     "paigasus-gateway-rs:build,paigasus-gateway-rs:test,paigasus-gateway-rs:lint,paigasus-iam-core-rs:build,paigasus-iam-core-rs:test,paigasus-iam-core-rs:lint,paigasus-iam-rs:build,paigasus-iam-rs:test,paigasus-iam-rs:lint,paigasus-kernel-parity-rs:build,paigasus-kernel-parity-rs:test,paigasus-kernel-parity-rs:lint,paigasus-node-bindings-rs:build,paigasus-node-bindings-rs:test,paigasus-node-bindings-rs:lint,paigasus-observability-rs:build,paigasus-observability-rs:test,paigasus-observability-rs:lint,paigasus-py-bindings-rs:build,paigasus-py-bindings-rs:test,paigasus-py-bindings-rs:lint,paigasus-wasm-rs:build,paigasus-wasm-rs:test,paigasus-wasm-rs:lint,paigasus-kernel-rs:build,paigasus-kernel-rs:test,paigasus-kernel-rs:lint,paigasus-kernel-ts:build,paigasus-kernel-ts:test,paigasus-kernel-py:test"
+  # SMA-503 — a @paigasus/ui SOURCE edit must select the console's build and test.
+  # `paigasus-console-ts:test` runs the Tailwind @source guard against the build's output, and
+  # the ONLY thing making that proof real is `/ts/packages/paigasus-ui/src/**/*` sitting in
+  # both tasks' `inputs`. Remove it and the guard reads a cached .next produced before the
+  # change — a green that means nothing. Nothing else in the repo notices, so this case is the
+  # control. Strict equality: re-baseline deliberately when the set legitimately changes.
+  # LIMITATION: the console's `typecheck` task carries this same input, but
+  # `_assert_task_case_impl` filters `moon query tasks` to build/test/lint by name, so
+  # `typecheck` is structurally invisible here — this case does NOT cover it.
+  run_task_case_ci "ui->console" "ts/packages/paigasus-ui/src/styles/tokens.css" \
+    "paigasus-console-ts:build,paigasus-console-ts:test,paigasus-ui-ts:build,paigasus-ui-ts:test,ts:lint"
+  # SMA-503 fix round 2, item 4 — the SECOND anchor, and it is not redundant. The case above
+  # anchors only on src/styles/tokens.css, so narrowing either console task's
+  # `/ts/packages/paigasus-ui/src/**/*` input to `/ts/packages/paigasus-ui/src/styles/**/*`
+  # leaves it green while an edit to a COMPONENT stops selecting the console — and
+  # src/components/table.tsx is where sentinel A lives, so that is precisely the file the
+  # tailwind-source guard's assertion 1 depends on being able to invalidate the build.
+  # Two anchors on opposite sides of the glob are what make the strict-equality set a real
+  # proof of the glob's WIDTH rather than of one path inside it.
+  # The expected set is DERIVED, with the same no-flag `moon query tasks --affected` traversal
+  # `_assert_task_case_impl` uses, not copied from the case above; it happens to match, because
+  # both files sit inside the same declared input glob.
+  run_task_case_ci "ui-components->console" "ts/packages/paigasus-ui/src/components/table.tsx" \
+    "paigasus-console-ts:build,paigasus-console-ts:test,paigasus-ui-ts:build,paigasus-ui-ts:test,ts:lint"
   # Generic Cargo<->Moon parity: catches a MISSING case, which is how SMA-524's bug survived review.
   assert_cargo_moon_parity || SUITE_RC=1
   # assert_include_relations returns only 0/1 (no infra code), so collapsing is correct here.
