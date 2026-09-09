@@ -9,6 +9,8 @@ import nextPlugin from '@next/eslint-plugin-next';
 import { boundaryRules } from '@paigasus/next-config/eslint';
 
 export default tseslint.config(
+  // NOTE: adding 'packages/**' or 'apps/**' here switches every boundary block off for real code.
+  // `tests/boundaries.test.ts` lints through THIS file with no config override for that reason.
   { ignores: ['**/dist/**', '**/.next/**', '**/node_modules/**', '**/*.d.ts', '**/generated/**'] },
   js.configs.recommended,
   // Node CLI tooling scripts (e.g. the SMA-406 semantic-release parity helpers under

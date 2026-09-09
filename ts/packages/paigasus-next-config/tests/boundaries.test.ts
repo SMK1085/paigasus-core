@@ -122,10 +122,54 @@ describe('boundary preset', () => {
     for (const dir of Object.keys(BOUNDARY_SCOPES)) {
       expect(scoped).toContain(dir);
     }
+    // And the REVERSE. The loop above proves every declared scope has a rule; on its own it says
+    // nothing about a rule added WITHOUT a scope entry, which would get no liveness coverage at
+    // all — the package could land under a different directory name and the rule would sit
+    // permanently inert with nothing to notice.
+    for (const dir of scoped) {
+      expect(Object.keys(BOUNDARY_SCOPES), `the ${dir} rule has no BOUNDARY_SCOPES entry, so nothing proves its files glob still matches a real directory`).toContain(dir);
+    }
   });
 });
 
+/**
+ * Lint through the REAL `ts/eslint.config.js` — no `overrideConfigFile`, no `overrideConfig`.
+ *
+ * Every other row in this file passes `overrideConfigFile: true`, which bypasses the shipped
+ * config entirely. That is right for testing the preset in isolation and wrong as the ONLY
+ * coverage: adding `'packages/**'` to `ts/eslint.config.js`'s global `ignores` array switches all
+ * four boundary blocks off for real code, and leaves every other assertion here green — the
+ * structural comparison below inspects `files` arrays and never lints.
+ *
+ * The probe paths end in `.mjs`, not `.tsx`. MEASURED: the shipped config turns on typed linting
+ * for every ts/tsx/mts/cts path with `projectService: true`, and lintText on a TypeScript path
+ * that no tsconfig includes returns one FATAL parsing error and runs no rules at all — so a `.tsx`
+ * probe would report zero restricted imports whether or not the boundary rules applied, and this
+ * row would be permanently red for the wrong reason. The boundary rules' own `files` globs cover
+ * `mjs` alongside `tsx`, and the global `ignores` array this row exists to police is applied
+ * before any of that, so the `.mjs` path tests exactly the same thing.
+ */
+async function realConfigRestrictedImportsFor(filePath: string, source: string): Promise<string[]> {
+  const eslint = new ESLint({ cwd: TS_ROOT });
+  const [result] = await eslint.lintText(source, { filePath, warnIgnored: false });
+  return (result?.messages ?? []).filter((m) => m.ruleId === 'no-restricted-imports').map((m) => m.message);
+}
+
 describe('the workspace eslint config actually applies the preset', () => {
+  // The file need not exist on disk — lintText takes the source and the path it is to be judged
+  // as. A path under packages/ is what an `ignores: ['packages/**']` entry would silence.
+  it('lints a denied packages/ import through the REAL config, not an override', async () => {
+    const messages = await realConfigRestrictedImportsFor('packages/paigasus-ui/src/probe.mjs', "import { x } from '@paigasus/sdk';\nexport const y = x;\n");
+    expect(messages, 'ts/eslint.config.js did not apply the ui boundary rule to a packages/ path — check its global `ignores` array').not.toHaveLength(0);
+  });
+
+  // The apps/ half, because a single `ignores` entry silences one tree at a time: `'packages/**'`
+  // leaves the row above red and this one green, and `'apps/**'` does the reverse.
+  it('lints a denied apps/ import through the REAL config, not an override', async () => {
+    const messages = await realConfigRestrictedImportsFor('apps/paigasus-console/app/probe.mjs', "import { x } from '@paigasus/proto';\nexport const y = x;\n");
+    expect(messages, 'ts/eslint.config.js did not apply the apps boundary rule to an apps/ path — check its global `ignores` array').not.toHaveLength(0);
+  });
+
   it('carries every boundary entry in its EXPORTED array, not merely as an import', async () => {
     // Importing the real config is what makes this an assertion rather than a text scan: a dead
     // `import` statement satisfies a grep, and deleting only the spread would leave every test
