@@ -183,7 +183,10 @@ jobs:
       # browser instead of a red on a green PR being merely wasted CI time. Runs before the
       # `moon ci` step so the browser exists before the task can run.
       - name: Install Playwright Chromium (for @paigasus/auth's test-e2e)
-        run: pnpm --dir ts exec playwright install --with-deps chromium
+        # Run from the PACKAGE, not the ts workspace root: @playwright/test is a devDependency of
+        # @paigasus/auth, so `playwright` is only on that package's node_modules/.bin. From ts/ it
+        # fails with ERR_PNPM_RECURSIVE_EXEC_FIRST_FAIL, "Command playwright not found" (MEASURED).
+        run: pnpm --dir ts/packages/paigasus-auth exec playwright install --with-deps chromium
 
       - name: Validate commit messages (commitlint parity gate)
         # PRs only: commitlint gates commits BEFORE they merge (SMA-371 AC-E, "on every PR").
