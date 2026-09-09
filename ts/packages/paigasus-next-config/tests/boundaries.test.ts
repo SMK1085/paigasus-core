@@ -95,8 +95,20 @@ const DENIED: ReadonlyArray<readonly [string, string, string]> = [
   ['auth/middleware must not import the store', 'packages/paigasus-auth/src/middleware.ts', "import { x } from './adapters/redis-store.js';"],
   ['auth/middleware must not import single-flight', 'packages/paigasus-auth/src/middleware.ts', "import { x } from './core/single-flight.js';"],
   ['auth/middleware must not import the session store port', 'packages/paigasus-auth/src/middleware.ts', "import { x } from './ports/session-store.js';"],
+  // Four dead entries survived earlier in this branch because a bare './runtime' does not match
+  // the '.js'-suffixed specifier a real file would write — these use the `.js` form a real file
+  // in this codebase always writes, the same lesson the auth/client rows above already record.
+  ['auth/middleware must not reach the session type module', 'packages/paigasus-auth/src/middleware.ts', "import { x } from './core/session.js';"],
+  ['auth/middleware must not reach the http composition-root surface', 'packages/paigasus-auth/src/middleware.ts', "import { x } from './http/routes.js';"],
+  ['auth/middleware must not reach runtime.ts (the composition root)', 'packages/paigasus-auth/src/middleware.ts', "import { x } from './runtime.js';"],
+  ['auth/middleware must not reach config.ts', 'packages/paigasus-auth/src/middleware.ts', "import { x } from './config.js';"],
   ['an app middleware must not import auth/server', 'apps/paigasus-console/middleware.ts', "import { getSession } from '@paigasus/auth/server';"],
   ['an app middleware must not import the sdk', 'apps/paigasus-console/middleware.ts', "import { x } from '@paigasus/sdk';"],
+  // Reverse-direction proof for the new `paigasus/boundaries/auth-server` rule (fix round,
+  // finding 6): without a `files` glob matching src/server.ts, the two ALLOWED rows below passed
+  // vacuously — no rule applied to that path at all, so any import would have reported []. This
+  // row proves the new rule actually applies and actually denies something.
+  ['auth/server must not reach the client-only surface', 'packages/paigasus-auth/src/server.ts', "import { x } from './client.js';"],
 ];
 
 const ALLOWED: ReadonlyArray<readonly [string, string, string]> = [
@@ -113,9 +125,18 @@ const ALLOWED: ReadonlyArray<readonly [string, string, string]> = [
   // no server machinery, one directory level above core/adapters/ports, so client.ts can reach it
   // without a `./core/**`-shaped specifier ever appearing in its import list.
   ['auth/client may import the shared session-view module', 'packages/paigasus-auth/src/client.ts', "import type { SessionView } from './session-view.js';"],
+  // Fix round, finding 6: these two rows used to pass VACUOUSLY — no `boundaryRules` entry's
+  // `files` glob matched src/server.ts at all, so `restrictedImportsFor` returned [] for ANY
+  // import, proving nothing. The new `paigasus/boundaries/auth-server` rule above now covers this
+  // path (denying only a reach back into ./client.js — see the DENIED row of the same name), so
+  // these rows genuinely exercise "the rule that covers this file does not ban this import."
   ['auth/server may import openid-client', 'packages/paigasus-auth/src/server.ts', "import * as c from 'openid-client';"],
   ['auth/server may reach its own adapters', 'packages/paigasus-auth/src/server.ts', "import { x } from './adapters/redis-store.js';"],
   ['an app middleware may import auth/middleware', 'apps/paigasus-console/middleware.ts', "import { createAuthMiddleware } from '@paigasus/auth/middleware';"],
+  // Proves the finding-5 widening stayed precise: src/middleware.ts's real, legitimate import of
+  // cookie NAME constants (ADR-0017 decision 7's cookie-presence check) must keep working — only
+  // the composition-root file, './http/routes.js', is banned, not the whole './http/**' directory.
+  ['auth/middleware may still import cookie constants', 'packages/paigasus-auth/src/middleware.ts', "import { SESSION_COOKIE } from './http/cookies.js';"],
 ];
 
 describe('boundary preset', () => {

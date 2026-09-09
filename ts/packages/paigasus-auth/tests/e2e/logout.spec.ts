@@ -53,6 +53,17 @@ test('AC 3: a stolen cookie is dead immediately after logout', async ({ page, co
   if (baseURL === undefined) throw new Error('playwright.config.ts must configure use.baseURL');
   const attackerContext = await browser.newContext({ baseURL, ignoreHTTPSErrors: true });
   await attackerContext.addCookies([stolen]);
+
+  // Guard the guard: `__Host-` prefixed cookies carry strict rules (secure, no `Domain`
+  // attribute, `Path=/`), so `addCookies` can silently drop the cookie rather than accept it. If
+  // that happened, the guarded page below would redirect to login for lack of ANY cookie, and the
+  // test would pass without ever exercising server-side revocation. Assert the attacker context
+  // genuinely holds the replayed cookie, with its original value, before navigating.
+  const attackerCookies = await attackerContext.cookies();
+  const replayed = attackerCookies.find((c) => c.name === SESSION_COOKIE_NAME);
+  expect(replayed, 'the attacker context must actually hold the replayed session cookie').toBeDefined();
+  expect(replayed?.value, 'the replayed cookie must carry the original stolen value').toBe(stolen.value);
+
   const attackerPage = await attackerContext.newPage();
   await attackerPage.goto(`${ZONE_BASE_PATH}/guarded`);
 

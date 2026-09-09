@@ -176,13 +176,42 @@ export const boundaryRules = [
           './adapters/**',
           './core/single-flight',
           './core/single-flight.js',
+          './core/session',
+          './core/session.js',
           './ports/session-store',
           './ports/session-store.js',
           './next/**',
+          // NOT './http/**' — src/middleware.ts legitimately imports './http/cookies.js' for
+          // the cookie-presence check ADR-0017 decision 7 actually authorizes. What must stay
+          // banned is the composition-root surface, './http/routes.js', which pulls in the full
+          // session-resolution machinery (openid-client, the store) that middleware must never
+          // reach.
+          './http/routes',
+          './http/routes.js',
+          './runtime',
+          './runtime.js',
+          './config',
+          './config.js',
           '../adapters/**',
           '../ports/**',
+          '../http/routes',
+          '../http/routes.js',
         ],
         message: 'Next middleware does cookie-presence checks only (ADR-0017 decision 7; CVE-2025-29927 was a middleware auth bypass). Resolve the session in a server component or route handler.',
+      },
+    ]),
+  },
+  {
+    // Mirrors `paigasus/boundaries/auth-client` in reverse: that rule stops the client surface
+    // reaching the server surface (AC 5); this one stops the server composition root reaching
+    // back into the client-only module, which would be the same coupling from the other side and
+    // a path for `react` to leak into node-only code.
+    name: 'paigasus/boundaries/auth-server',
+    files: ['packages/paigasus-auth/**/server.ts'],
+    rules: restrict([
+      {
+        group: ['./client', './client.js'],
+        message: '@paigasus/auth/server is the server composition root and must never reach the client-only surface (the reverse of AC 5).',
       },
     ]),
   },

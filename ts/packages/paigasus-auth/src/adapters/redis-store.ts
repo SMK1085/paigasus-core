@@ -139,7 +139,17 @@ class RedisSessionStore implements SessionStore {
     return this.#guarded(async () => {
       const raw = await this.#client.get(sessKey(this.#keyPrefix, sid));
       if (raw === null) return null;
-      const parsed = JSON.parse(raw) as SessionRecord;
+      let parsed: SessionRecord;
+      try {
+        parsed = JSON.parse(raw) as SessionRecord;
+      } catch {
+        // An unparseable stored value is treated as ABSENT, matching the version-mismatch
+        // handling below and the memory adapter's own absent-and-deleted behaviour. Without
+        // this, JSON.parse throwing surfaces as SessionStoreUnavailable through #guarded's
+        // catch-all, which turns one poisoned key into a permanent sign-out loop for that user.
+        await this.#client.del(sessKey(this.#keyPrefix, sid));
+        return null;
+      }
       // A version mismatch is treated as ABSENT, matching the memory adapter.
       if (parsed.version !== 1) {
         await this.#client.del(sessKey(this.#keyPrefix, sid));

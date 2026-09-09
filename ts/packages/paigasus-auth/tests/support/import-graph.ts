@@ -75,6 +75,21 @@ export function moduleSpecifiers(file: string): string[] {
   return specifiers;
 }
 
+/**
+ * Thrown by `collectImportGraph` when a relative specifier cannot be resolved to a file on disk —
+ * a distinct, named failure instead of silently dropping the specifier into `packages` and
+ * stopping traversal there. This walker enforces AC 4 and AC 5 (see tests/middleware.test.ts and
+ * tests/structure/import-graph.test.ts): a silent truncation would make both assertions weaker
+ * than they read, since a banned directory reached only through an unresolvable relative import
+ * would never show up in `files` at all.
+ */
+export class UnresolvedRelativeImportError extends Error {
+  constructor(fromFile: string, specifier: string) {
+    super(`cannot resolve relative import "${specifier}" from "${fromFile}"`);
+    this.name = 'UnresolvedRelativeImportError';
+  }
+}
+
 /** BFS over the relative-import closure starting at `entry`, recording every bare specifier found. */
 export function collectImportGraph(entry: string): ImportGraph {
   const files = new Set<string>();
@@ -87,12 +102,13 @@ export function collectImportGraph(entry: string): ImportGraph {
     files.add(file);
 
     for (const specifier of moduleSpecifiers(file)) {
-      const resolved = resolveRelative(file, specifier);
-      if (resolved !== null) {
-        stack.push(resolved);
-      } else {
+      if (!specifier.startsWith('.')) {
         packages.add(specifier);
+        continue;
       }
+      const resolved = resolveRelative(file, specifier);
+      if (resolved === null) throw new UnresolvedRelativeImportError(file, specifier);
+      stack.push(resolved);
     }
   }
 

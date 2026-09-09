@@ -496,7 +496,7 @@ object. This belongs in the release note for any such change.
 ```ts
 interface SessionStore {
   get(sid: string): Promise<SessionRecord | null>;
-  set(sid: string, rec: SessionRecord, ttlMs: number, expectedRev: number): Promise<boolean>;
+  set(sid: string, rec: SessionRecord, ttlMs: number, expectedRev: number | null): Promise<boolean>;
   delete(sid: string): Promise<void>;
 
   tryAcquireLock(sid: string, token: string, ttlMs: number): Promise<boolean>;
@@ -665,9 +665,14 @@ Accepted only as a same-origin relative path: must start with `/`, must not star
 with `//`, must not contain a scheme or a backslash. Table-tested with
 `//evil.com`, `/\evil.com`, and percent-encoded variants.
 
-CR/LF is not validated here: the Web `Headers` API rejects it, so the mitigation
-is the API rather than the validator. Stated so nobody adds a hand-rolled header
-writer later without re-checking.
+CR/LF **in a header value** is caught by the Web `Headers` API, which rejects
+it — but that API does not cover a bare TAB, which is a legal header value
+character. A browser strips ASCII tab, LF and CR while parsing a URL, so an
+interior tab in `returnTo` (for example `/\t/evil.com`) normalises to
+`//evil.com`, a protocol-relative, off-origin redirect. The validator therefore
+rejects any interior tab, LF or CR directly, rather than relying on the
+`Headers` API for this class. Stated so nobody removes that check believing the
+API already covers it.
 
 ### 9.2 The login transaction must be bound to the browser
 

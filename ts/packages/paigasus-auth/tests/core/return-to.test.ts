@@ -32,6 +32,9 @@ describe('validateReturnTo', () => {
     ['whitespace only', '   '],
     ['a leading-whitespace protocol-relative URL', '  //evil.com'],
     ['a tab-prefixed absolute URL', '\thttps://evil.com'],
+    ['an interior tab before a protocol-relative URL', '/\t/evil.com'],
+    ['an interior LF before a protocol-relative URL', '/\n/evil.com'],
+    ['an interior CR before a protocol-relative URL', '/\r/evil.com'],
   ])('rejects %s and falls back', (_l, input) => {
     expect(validateReturnTo(input, FALLBACK)).toBe(FALLBACK);
   });

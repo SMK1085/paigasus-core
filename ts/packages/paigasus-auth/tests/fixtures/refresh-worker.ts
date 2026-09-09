@@ -18,7 +18,19 @@ import { resolveSession } from '../../src/core/single-flight.js';
 const ARRIVE_KEY_SUFFIX = 'rendezvous:arrive';
 const REFRESH_COUNTER_KEY_SUFFIX = 'refresh:count';
 const RENDEZVOUS_POLL_MS = 10;
+const RENDEZVOUS_DEADLINE_MS = 30_000;
 const EXPECTED_WORKERS = 2;
+
+/**
+ * Thrown by `waitForRendezvous` when the sibling worker never arrives — a distinct, named
+ * failure instead of a poll loop that hangs the test suite forever.
+ */
+class RendezvousTimeoutError extends Error {
+  constructor(key: string, deadlineMs: number) {
+    super(`waitForRendezvous timed out after ${deadlineMs}ms waiting on key "${key}"`);
+    this.name = 'RendezvousTimeoutError';
+  }
+}
 
 // Duck-typed, not `ReturnType<typeof createClient>`: node-redis's client type's concrete generic
 // instantiation depends on the exact options object passed to `createClient` at the call site
@@ -38,9 +50,11 @@ interface RendezvousClient {
  * after both are fully started, so a genuine race is what produces the outcome.
  */
 async function waitForRendezvous(client: RendezvousClient, key: string): Promise<void> {
+  const deadline = Date.now() + RENDEZVOUS_DEADLINE_MS;
   for (;;) {
     const value = await client.get(key);
     if (value !== null && Number(value) >= EXPECTED_WORKERS) return;
+    if (Date.now() >= deadline) throw new RendezvousTimeoutError(key, RENDEZVOUS_DEADLINE_MS);
     await new Promise((r) => setTimeout(r, RENDEZVOUS_POLL_MS));
   }
 }
