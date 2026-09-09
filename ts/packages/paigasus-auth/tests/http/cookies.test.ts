@@ -21,10 +21,13 @@ describe('cookie names', () => {
 describe('serializeCookie', () => {
   it('sets HttpOnly, Secure, SameSite=Lax and Path=/', () => {
     const cookie = serializeCookie(SESSION_COOKIE, 'sid-value');
-    expect(cookie).toContain('HttpOnly');
-    expect(cookie).toContain('Secure');
-    expect(cookie).toContain('SameSite=Lax');
-    expect(cookie).toContain('Path=/');
+    // Exact attribute match, not a substring (review round 1): `toContain('Path=/')` would pass
+    // on `Path=/iam` too — a value a browser REFUSES for a `__Host-`-prefixed cookie.
+    const attributes = cookie.split('; ');
+    expect(attributes).toContain('HttpOnly');
+    expect(attributes).toContain('Secure');
+    expect(attributes).toContain('SameSite=Lax');
+    expect(attributes).toContain('Path=/');
   });
 
   it('never carries a Domain attribute', () => {
@@ -51,10 +54,11 @@ describe('clearCookie', () => {
 
   it('still carries the security attributes', () => {
     const cookie = clearCookie(SESSION_COOKIE);
-    expect(cookie).toContain('HttpOnly');
-    expect(cookie).toContain('Secure');
-    expect(cookie).toContain('SameSite=Lax');
-    expect(cookie).toContain('Path=/');
+    const attributes = cookie.split('; ');
+    expect(attributes).toContain('HttpOnly');
+    expect(attributes).toContain('Secure');
+    expect(attributes).toContain('SameSite=Lax');
+    expect(attributes).toContain('Path=/');
   });
 });
 
@@ -73,5 +77,21 @@ describe('readCookies', () => {
 
   it('returns an empty map for an empty header', () => {
     expect(readCookies('').size).toBe(0);
+  });
+
+  // Review round 1, M6: a duplicate name is exactly the "cookie tossing" hazard the file header
+  // describes — a sibling host writing a second, competing value under the same name. Guessing
+  // which of the two is legitimate (by keeping either the first or the last) is unsafe, so both
+  // occurrences are dropped and the name reads as absent.
+  it('treats a duplicate cookie name as absent, not as the first or the last value', () => {
+    const cookies = readCookies('a=1; dup=legit; dup=tossed; b=2');
+    expect(cookies.has('dup')).toBe(false);
+    expect(cookies.get('a')).toBe('1');
+    expect(cookies.get('b')).toBe('2');
+  });
+
+  it('drops a name duplicated three or more times the same way', () => {
+    const cookies = readCookies('dup=1; dup=2; dup=3');
+    expect(cookies.has('dup')).toBe(false);
   });
 });

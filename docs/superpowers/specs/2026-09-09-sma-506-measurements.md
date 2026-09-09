@@ -592,3 +592,59 @@ the review predicted.
 Restored by deleting the `M5-MUTATION2-START`/`M5-MUTATION2-END` markers and
 the commented-out line (never `git checkout --`), and re-ran: 20 of 20
 tests passed again.
+
+## M6 — PKCE: proving Task 8's callback tests actually witness the exchange
+
+Task 8's review round 1 (Important 2) found that `tests/fixtures/jwks.ts`'s
+`/token` handler drained the token request body without inspecting it, so
+neither of these was reachable by any test:
+
+- Replacing `codeVerifier: tx.codeVerifier` in `src/http/routes.ts` with any
+  constant.
+- Omitting `pkceCodeVerifier` from the `authorizationCodeGrant` call in
+  `src/adapters/oidc.ts` entirely.
+
+ADR-0017 decision 4 delegates PKCE to `openid-client` specifically so it
+cannot be got wrong — a guard nothing tests is not delegated, it is assumed.
+
+**Fix.** The fixture now exposes `setNextCodeChallenge(challenge)` and
+`s256CodeChallenge(codeVerifier)` (both exported from `tests/fixtures/jwks.ts`).
+When a challenge is armed, `/token` recomputes `BASE64URL(SHA256(code_verifier))`
+from the request body and 400s (`invalid_grant`) on a mismatch or an absent
+verifier; when no challenge is armed (every OTHER caller of the fixture —
+`tests/adapters/oidc.test.ts`, the containers suites), the check is skipped
+entirely, so nothing else changed behaviour. `tests/http/callback.test.ts`
+arms a FRESH `codeVerifier` (`crypto.randomUUID()`) per test in `beforeEach`,
+so no single hardcoded mutation constant could coincidentally satisfy it.
+
+**Mutation 1 — `src/adapters/oidc.ts`, Important 2's own repro.**
+`pkceCodeVerifier: params.codeVerifier` was deleted from the
+`client.authorizationCodeGrant` call (bounded by `M6-MUTATION-START`/`-END`
+markers).
+
+`pnpm -C ts/packages/paigasus-auth exec vitest run tests/http/callback.test.ts tests/adapters/oidc.test.ts`
+against the mutated file: **7 of 17 `callback.test.ts` tests failed** — all
+six success-path tests, plus the replay test (whose first attempt is itself a
+success). Every failure was `Error: callback rejected: code_exchange_failed`,
+thrown from `routes.ts`'s `reject`, because the fixture's `/token` handler
+received no `code_verifier` at all and 400'd. `tests/adapters/oidc.test.ts`'s
+13 tests stayed green, unaffected — confirming it does not, and did not
+before this fix, exercise PKCE either (it never calls
+`setNextCodeChallenge`).
+
+Restored by deleting the `M6-MUTATION-START`/`-END` markers and the omitted
+line, and re-ran: 17 of 17 `callback.test.ts` tests passed again.
+
+**Mutation 2 — `src/http/routes.ts`, the brief's own repro.**
+`codeVerifier: tx.codeVerifier` was replaced with
+`codeVerifier: 'a-constant-verifier'` (bounded by the same marker names).
+
+`pnpm -C ts/packages/paigasus-auth exec vitest run tests/http/callback.test.ts`
+against the mutated file: **the same 7 of 17 tests failed**, same reason —
+the constant verifier's S256 hash cannot match a challenge computed from a
+fresh `crypto.randomUUID()` generated after the mutation was made.
+
+Restored by reverting to `codeVerifier: tx.codeVerifier` and re-ran: 17 of 17
+passed again. Both mutations were reverted with `Edit`, never `git checkout
+--`, and the full suite (`pnpm -C ts/packages/paigasus-auth exec vitest run`)
+was re-run clean afterward: 161 of 161.

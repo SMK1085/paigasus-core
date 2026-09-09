@@ -12,7 +12,17 @@
 // DELIBERATELY wrong iss/aud/nonce/exp/iat, and SignJWT's claim setters exist
 // to make that hard to get wrong by accident. CompactSign signs whatever byte
 // payload it is given.
-import { randomUUID } from 'node:crypto';
+//
+// PKCE ENFORCEMENT (review round 1, Important 2): the /token handler recomputes the S256
+// challenge from the request body's `code_verifier` and compares it against whatever
+// `setNextCodeChallenge` last set, failing the exchange on a mismatch or an absent verifier.
+// This is what makes it possible for a caller (routes.ts's callback tests) to prove it sends the
+// verifier IT STORED, rather than a constant or nothing — before this, dropping PKCE from the
+// grant call entirely still passed every test, because this handler drained the body without
+// looking at it. When `setNextCodeChallenge` has not been called (undefined), the check is
+// skipped, so every OTHER caller of this fixture (oidc.test.ts, single-flight's containers tests)
+// is unaffected.
+import { createHash, randomUUID } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { CompactSign, exportJWK, generateKeyPair } from 'jose';
@@ -52,12 +62,23 @@ export interface OidcFixture {
   mintIdToken(overrides?: MintIdTokenOptions): Promise<string>;
   /** The next authorization_code or refresh_token grant's /token response uses this ID token. */
   setNextIdToken(idToken: string | undefined): void;
+  /**
+   * The S256 challenge the NEXT /token request's `code_verifier` must hash to — see the file
+   * header. `undefined` (the default) disables the check entirely.
+   */
+  setNextCodeChallenge(challenge: string | undefined): void;
   close(): Promise<void>;
 }
 
 function b64url(input: Uint8Array | string): string {
   const buf = typeof input === 'string' ? Buffer.from(input, 'utf8') : Buffer.from(input);
   return buf.toString('base64url');
+}
+
+/** RFC 7636 S256: `BASE64URL(SHA256(code_verifier))`. Exported so tests can compute the matching
+ * challenge for whatever `codeVerifier` they seed into a `LoginTransaction`. */
+export function s256CodeChallenge(codeVerifier: string): string {
+  return createHash('sha256').update(codeVerifier).digest('base64url');
 }
 
 async function readBody(req: IncomingMessage): Promise<string> {
@@ -75,6 +96,7 @@ export async function startOidcFixture(): Promise<OidcFixture> {
   const primaryJwk = { ...(await exportJWK(primary.publicKey)), kid: PRIMARY_KID, use: 'sig', alg: 'RS256' };
 
   let nextIdToken: string | undefined;
+  let nextCodeChallenge: string | undefined;
   let issuer = '';
 
   const server: Server = createServer((req, res) => {
@@ -104,7 +126,17 @@ export async function startOidcFixture(): Promise<OidcFixture> {
         return;
       }
       if (req.method === 'POST' && url.pathname === '/token') {
-        await readBody(req); // drain — the fixture does not need to inspect the grant params
+        const rawBody = await readBody(req);
+        if (nextCodeChallenge !== undefined) {
+          const params = new URLSearchParams(rawBody);
+          const verifier = params.get('code_verifier');
+          const computed = verifier !== null ? s256CodeChallenge(verifier) : undefined;
+          if (computed === undefined || computed !== nextCodeChallenge) {
+            res.writeHead(400, { 'content-type': 'application/json' });
+            res.end(JSON.stringify({ error: 'invalid_grant', error_description: 'PKCE verification failed' }));
+            return;
+          }
+        }
         const idToken = nextIdToken;
         const body: Record<string, unknown> = {
           access_token: `at_${b64url(randomUUID())}`,
@@ -170,6 +202,9 @@ export async function startOidcFixture(): Promise<OidcFixture> {
     mintIdToken,
     setNextIdToken(idToken: string | undefined) {
       nextIdToken = idToken;
+    },
+    setNextCodeChallenge(challenge: string | undefined) {
+      nextCodeChallenge = challenge;
     },
     close(): Promise<void> {
       return new Promise<void>((resolve, reject) => {

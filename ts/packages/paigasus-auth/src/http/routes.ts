@@ -43,17 +43,23 @@ export interface AuthRoutes {
 }
 
 export function createAuthRoutes(runtime: AuthRuntime): AuthRoutes {
+  // Exact match against THIS runtime's own zone base path (review round 1, M5) — `endsWith`
+  // previously matched `/anything/auth/login` too, harmless only by accident (the redirect URI is
+  // fixed elsewhere) rather than by the route table actually saying what it serves.
+  const loginPath = `${runtime.basePath}/auth/login`;
+  const callbackPath = `${runtime.basePath}/auth/callback`;
+
   return {
     async handle(req: Request): Promise<Response> {
       const url = new URL(req.url);
       const { pathname } = url;
 
-      if (pathname.endsWith('/auth/login')) {
+      if (pathname === loginPath) {
         if (req.method !== 'GET') return new Response(null, { status: 405 });
         return handleLogin(runtime, req, url);
       }
 
-      if (pathname.endsWith('/auth/callback')) {
+      if (pathname === callbackPath) {
         if (req.method !== 'GET') return new Response(null, { status: 405 });
         return handleCallback(runtime, req, url);
       }
@@ -64,6 +70,23 @@ export function createAuthRoutes(runtime: AuthRuntime): AuthRoutes {
 }
 
 async function handleLogin(runtime: AuthRuntime, req: Request, url: URL): Promise<Response> {
+  // /auth/login unconditionally clears __Host-pgs_sid (design doc § 10.1's stale-cookie recovery
+  // depends on that staying unconditional), which is exactly what makes a cross-site
+  // `<img src=".../auth/login">` able to force a logout wherever third-party cookie writes are
+  // still permitted — the same class of hazard that made logout a POST. A GET can't be made a
+  // POST here (the browser must be redirected, and only a top-level navigation can carry that),
+  // so the control instead requires the request itself to BE a top-level navigation:
+  // `Sec-Fetch-Mode` is `navigate` for exactly that, and browsers set it on every request since
+  // support shipped (an <img>, fetch(), or XHR sends `no-cors`/`cors`, never `navigate`). Absence
+  // is allowed rather than rejected: a browser that predates Fetch Metadata support, or a
+  // non-browser caller (curl, a test harness), sends no such header at all, and this route has no
+  // other way to authenticate that class of caller — failing them closed would break login there
+  // entirely, not just the forced-logout attack this exists to close.
+  const fetchMode = req.headers.get('sec-fetch-mode');
+  if (fetchMode !== null && fetchMode !== 'navigate') {
+    return new Response(null, { status: 403 });
+  }
+
   const returnTo = validateReturnTo(url.searchParams.get('returnTo'), runtime.basePath);
 
   const txnId = newTransactionId();
@@ -113,10 +136,27 @@ async function handleCallback(runtime: AuthRuntime, req: Request, url: URL): Pro
 
   // Atomic get-and-delete: this is what makes a transaction single-use, so a replayed callback
   // (the same state twice) fails here on its second attempt regardless of the cookie it presents.
+  //
+  // TRADE-OFF (review round 1, M1): this consumes the transaction BEFORE the secret check below,
+  // so anyone who merely learns a victim's `state` (it is not a secret — it travels in the URL)
+  // can burn that transaction with a curl request carrying any cookie value, and the victim's own
+  // genuine callback then gets `state_unknown`. That is a one-shot denial of ONE login attempt; it
+  // grants the attacker nothing (they still don't have the secret, so they cannot complete the
+  // flow themselves) and breaks no security property this file exists to hold. It is not fixed
+  // because the `SessionStore` port deliberately offers no peek — `takeTransaction` is atomic
+  // get-and-delete by design (ports/session-store.ts), and adding one back would reopen exactly
+  // the race it exists to prevent.
   const tx = await runtime.store.takeTransaction(state);
   if (tx === null) return reject('state_unknown');
 
   if (!secretMatchesHash(cookieSecret, tx.secretHash)) return reject('txn_mismatch');
+
+  // The identity provider itself declining (e.g. the user clicked Cancel) is distinct from a
+  // genuine exchange failure (review round 1, Important 1): it carries no `code`, burns nothing
+  // at the token endpoint, and is an expected, benign outcome an operator must be able to tell
+  // apart from an outage. Checked here, after the CSRF checks above (this must still be a
+  // request this browser's own flow produced) but before any token-endpoint call.
+  if (url.searchParams.get('error') !== null) return reject('idp_error');
 
   let tokens: OidcTokens;
   try {
@@ -152,7 +192,13 @@ async function handleCallback(runtime: AuthRuntime, req: Request, url: URL): Pro
     idTokenClaims: tokens.idTokenClaims,
     principal,
   };
-  await runtime.store.set(sid, record, runtime.ttlMs, null);
+  // expectedRev: null means "insert only if absent" — a `false` here means a record already
+  // exists at this freshly-minted, 256-bit random sid (review round 1, M2). Astronomically
+  // unlikely, but an unchecked write on the session-creation path is still an unchecked write.
+  const stored = await runtime.store.set(sid, record, runtime.ttlMs, null);
+  if (!stored) {
+    throw new Error('failed to persist a newly minted session: a record already exists at this sid');
+  }
 
   runtime.logger.event('session.created', { sid: sidTag(sid), zone: runtime.zone });
 

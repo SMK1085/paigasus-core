@@ -4,7 +4,7 @@
 // transaction cookie is per transaction (design doc § 9.2): a single fixed name at Path=/ would
 // let the second tab overwrite the first tab's secret, and the first tab's callback would then
 // fail its own security check.
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { claimsPrincipalResolver } from '../../src/adapters/claims-resolver.js';
 import { MemorySessionStore } from '../../src/adapters/memory-store.js';
 import { createOidcClient } from '../../src/adapters/oidc.js';
@@ -14,7 +14,10 @@ import type { AuthEventFields, AuthEventName, AuthLogger } from '../../src/ports
 import type { AuthRuntime } from '../../src/runtime.js';
 import { startOidcFixture, type OidcFixture } from '../fixtures/jwks.js';
 
-const REDIRECT_URI = 'https://rp.example.com/auth/callback';
+const ZONE_BASE_PATH = '/iam';
+const REDIRECT_URI = 'https://rp.example.com/iam/auth/callback';
+const LOGIN_URL = 'https://rp.example.com/iam/auth/login';
+const CALLBACK_URL = 'https://rp.example.com/iam/auth/callback';
 
 let fixture: OidcFixture;
 let store: MemorySessionStore;
@@ -50,22 +53,34 @@ beforeEach(async () => {
     ttlMs: 28_800_000,
     absoluteTtlMs: 86_400_000,
     zone: 'iam',
-    basePath: '/iam',
+    basePath: ZONE_BASE_PATH,
     scopes: 'openid profile email',
   };
 });
 
 afterEach(async () => {
   await fixture.close();
+  vi.useRealTimers();
 });
 
-function loginRequest(search = '', cookieHeader?: string): Request {
-  const init = cookieHeader !== undefined ? { headers: { cookie: cookieHeader } } : undefined;
-  return new Request(`https://rp.example.com/auth/login${search}`, init);
+function loginRequest(search = '', headers?: Record<string, string>): Request {
+  return new Request(`${LOGIN_URL}${search}`, headers !== undefined ? { headers } : undefined);
+}
+
+function callbackRequest(state: string, cookieHeader?: string): Request {
+  const url = `${CALLBACK_URL}?code=test-code&state=${state}`;
+  return new Request(url, cookieHeader !== undefined ? { headers: { cookie: cookieHeader } } : undefined);
 }
 
 function setCookiesOf(res: Response): string[] {
   return res.headers.getSetCookie();
+}
+
+/** Extracts a Set-Cookie's `name=value` pair, ignoring its attributes. */
+function nameValueOf(setCookie: string): { name: string; value: string } {
+  const pair = setCookie.split(';')[0] ?? '';
+  const eq = pair.indexOf('=');
+  return { name: pair.slice(0, eq), value: pair.slice(eq + 1) };
 }
 
 describe('GET /auth/login', () => {
@@ -124,7 +139,7 @@ describe('GET /auth/login', () => {
     const names = ['t1', 't2', 't3', 't4'].map((id) => txnCookieName(id));
     const cookieHeader = names.map((name) => `${name}=some-secret-value`).join('; ');
 
-    const res = await createAuthRoutes(runtime).handle(loginRequest('', cookieHeader));
+    const res = await createAuthRoutes(runtime).handle(loginRequest('', { cookie: cookieHeader }));
     const setCookies = setCookiesOf(res);
 
     const firstName = names[0];
@@ -164,16 +179,130 @@ describe('GET /auth/login', () => {
     expect(events).toContainEqual(['login.started', { zone: 'iam' }]);
   });
 
-  it('two concurrent login flows both succeed independently', async () => {
+  // Review round 1: the previous version of this test asserted only two distinct states and two
+  // stored transactions — a property that holds even under a SINGLE fixed cookie name, since the
+  // two Request objects never shared a cookie jar. This version simulates a real shared jar
+  // receiving both responses, then completes BOTH flows through it — which a fixed cookie name
+  // would break, because the second write would silently overwrite the first tab's secret.
+  it('uses a per-transaction cookie name: two tabs sharing one cookie jar can both complete', async () => {
     const routes = createAuthRoutes(runtime);
-    const [res1, res2] = await Promise.all([routes.handle(loginRequest()), routes.handle(loginRequest())]);
+
+    const res1 = await routes.handle(loginRequest());
+    const res2 = await routes.handle(loginRequest());
+
+    const txnCookie1 = setCookiesOf(res1)
+      .filter((c) => c.startsWith(TXN_COOKIE_PREFIX))
+      .map(nameValueOf);
+    const txnCookie2 = setCookiesOf(res2)
+      .filter((c) => c.startsWith(TXN_COOKIE_PREFIX))
+      .map(nameValueOf);
+    expect(txnCookie1.length).toBe(1);
+    expect(txnCookie2.length).toBe(1);
+    const cookie1 = txnCookie1[0];
+    const cookie2 = txnCookie2[0];
+    expect(cookie1).toBeDefined();
+    expect(cookie2).toBeDefined();
+
+    // THE property under test: the two logins used DIFFERENT cookie names. Under a single fixed
+    // name this assertion fails immediately, before either flow is even attempted.
+    expect(cookie1?.name).not.toBe(cookie2?.name);
+
+    // A real browser jar receiving both Set-Cookie headers, in order — with per-transaction
+    // names both entries survive; with one shared name the second would overwrite the first.
+    const jar = new Map<string, string>();
+    if (cookie1 !== undefined) jar.set(cookie1.name, cookie1.value);
+    if (cookie2 !== undefined) jar.set(cookie2.name, cookie2.value);
+    expect(jar.size).toBe(2);
+
     const state1 = new URL(res1.headers.get('location') ?? '').searchParams.get('state') ?? '';
     const state2 = new URL(res2.headers.get('location') ?? '').searchParams.get('state') ?? '';
-    expect(state1).not.toBe(state2);
+    const nonce1 = new URL(res1.headers.get('location') ?? '').searchParams.get('nonce') ?? '';
+    const nonce2 = new URL(res2.headers.get('location') ?? '').searchParams.get('nonce') ?? '';
 
-    const tx1 = await store.takeTransaction(state1);
-    const tx2 = await store.takeTransaction(state2);
-    expect(tx1).not.toBeNull();
-    expect(tx2).not.toBeNull();
+    // Tab 1 completes using ONLY the jar's entry for its own cookie name.
+    fixture.setNextIdToken(await fixture.mintIdToken({ nonce: nonce1 }));
+    const cookieHeader1 = cookie1 !== undefined ? `${cookie1.name}=${jar.get(cookie1.name) ?? ''}` : '';
+    const cb1 = await routes.handle(callbackRequest(state1, cookieHeader1));
+    expect(cb1.status).toBe(302);
+
+    // Tab 2 completes independently, using ONLY its own jar entry — proving tab 1's completion
+    // (which clears every outstanding txn cookie) did not need, and did not depend on, tab 2's.
+    fixture.setNextIdToken(await fixture.mintIdToken({ nonce: nonce2 }));
+    const cookieHeader2 = cookie2 !== undefined ? `${cookie2.name}=${jar.get(cookie2.name) ?? ''}` : '';
+    const cb2 = await routes.handle(callbackRequest(state2, cookieHeader2));
+    expect(cb2.status).toBe(302);
+  });
+
+  describe('the transaction TTL', () => {
+    // Review round 1: TXN_TTL_MS reaches both `putTransaction` and the cookie's `Max-Age`, and
+    // neither was previously asserted. Pinned at the documented 10 minutes (design doc § 9.3).
+    it('the txn cookie Max-Age is exactly 600 seconds', async () => {
+      const res = await createAuthRoutes(runtime).handle(loginRequest());
+      const state = new URL(res.headers.get('location') ?? '').searchParams.get('state') ?? '';
+      const txnCookie = setCookiesOf(res).find((c) => c.startsWith(`${txnCookieName(state)}=`));
+      expect(txnCookie).toMatch(/(^|; )Max-Age=600(;|$)/);
+    });
+
+    it('the stored transaction is still live just under 10 minutes later', async () => {
+      vi.useFakeTimers();
+      const res = await createAuthRoutes(runtime).handle(loginRequest());
+      const state = new URL(res.headers.get('location') ?? '').searchParams.get('state') ?? '';
+      vi.advanceTimersByTime(10 * 60 * 1000 - 1);
+      await expect(store.takeTransaction(state)).resolves.not.toBeNull();
+    });
+
+    it('the stored transaction has expired just over 10 minutes later', async () => {
+      vi.useFakeTimers();
+      const res = await createAuthRoutes(runtime).handle(loginRequest());
+      const state = new URL(res.headers.get('location') ?? '').searchParams.get('state') ?? '';
+      vi.advanceTimersByTime(10 * 60 * 1000 + 1);
+      await expect(store.takeTransaction(state)).resolves.toBeNull();
+    });
+  });
+
+  describe('the top-level-navigation guard (login-forcing via a cross-site cookie write)', () => {
+    // /auth/login unconditionally clears __Host-pgs_sid, so a cross-site <img src="…/auth/login">
+    // could otherwise force a logout wherever third-party cookie writes are permitted. Requiring
+    // Sec-Fetch-Mode: navigate closes that without breaking legitimate top-level navigations.
+    it('allows a request with Sec-Fetch-Mode: navigate', async () => {
+      const res = await createAuthRoutes(runtime).handle(loginRequest('', { 'sec-fetch-mode': 'navigate' }));
+      expect(res.status).toBe(302);
+    });
+
+    it('allows a request with no Sec-Fetch-Mode header at all (older browsers, non-browser callers)', async () => {
+      const res = await createAuthRoutes(runtime).handle(loginRequest());
+      expect(res.status).toBe(302);
+    });
+
+    it('rejects a request whose Sec-Fetch-Mode is not navigate (e.g. an <img> or fetch())', async () => {
+      const res = await createAuthRoutes(runtime).handle(loginRequest('', { 'sec-fetch-mode': 'no-cors' }));
+      expect(res.status).toBe(403);
+      // No cookie is cleared or set for a rejected request.
+      expect(setCookiesOf(res).length).toBe(0);
+    });
+
+    it('rejects Sec-Fetch-Mode: cors too', async () => {
+      const res = await createAuthRoutes(runtime).handle(loginRequest('', { 'sec-fetch-mode': 'cors' }));
+      expect(res.status).toBe(403);
+    });
+  });
+});
+
+describe('route dispatch', () => {
+  it('responds 405 to a non-GET /auth/login', async () => {
+    const res = await createAuthRoutes(runtime).handle(new Request(LOGIN_URL, { method: 'POST' }));
+    expect(res.status).toBe(405);
+  });
+
+  it('responds 404 to an unrelated path', async () => {
+    const res = await createAuthRoutes(runtime).handle(new Request('https://rp.example.com/not-auth-at-all'));
+    expect(res.status).toBe(404);
+  });
+
+  it("responds 404 to /auth/login under a DIFFERENT zone's base path", async () => {
+    // Review round 1, M5: pathname matching is now exact against THIS runtime's own base path,
+    // not a suffix match — `/anything/auth/login` no longer matches.
+    const res = await createAuthRoutes(runtime).handle(new Request('https://rp.example.com/other-zone/auth/login'));
+    expect(res.status).toBe(404);
   });
 });

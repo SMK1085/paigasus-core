@@ -9,6 +9,14 @@
 // called: a test that only checks the rejection would still pass against an implementation that
 // exchanges the code and THEN rejects, which leaks a code use to the IdP and defeats the point of
 // rejecting early.
+//
+// PKCE (review round 1, Important 2): `fixture.setNextCodeChallenge` is armed in `beforeEach` with
+// the S256 challenge for a freshly-generated `codeVerifier`, used as `seedTransaction`'s default.
+// Every success test therefore exercises real PKCE enforcement — replacing `tx.codeVerifier` in
+// `routes.ts` with any constant now fails every one of them, since the constant cannot match a
+// value generated fresh per test. See the mutation record in
+// docs/superpowers/specs/2026-09-09-sma-506-measurements.md, "M6 — PKCE".
+import { randomUUID } from 'node:crypto';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { claimsPrincipalResolver } from '../../src/adapters/claims-resolver.js';
 import { MemorySessionStore } from '../../src/adapters/memory-store.js';
@@ -22,9 +30,9 @@ import type { AuthEventFields, AuthEventName, AuthLogger } from '../../src/ports
 import type { LoginTransaction } from '../../src/ports/session-store.js';
 import type { ResolvedPrincipal } from '../../src/ports/principal-resolver.js';
 import type { AuthRuntime } from '../../src/runtime.js';
-import { startOidcFixture, type OidcFixture } from '../fixtures/jwks.js';
+import { s256CodeChallenge, startOidcFixture, type OidcFixture } from '../fixtures/jwks.js';
 
-const REDIRECT_URI = 'https://rp.example.com/auth/callback';
+const CALLBACK_URL = 'https://rp.example.com/iam/auth/callback';
 const NONCE = 'expected-nonce';
 const RETURN_TO = '/iam/dashboard';
 const CORRECT_SECRET = 'correct-secret-value-32-bytes-ok';
@@ -34,6 +42,7 @@ let store: MemorySessionStore;
 let events: Array<[AuthEventName, AuthEventFields]>;
 let grantCalls: number;
 let runtime: AuthRuntime;
+let codeVerifier: string;
 
 function recordingLogger(): AuthLogger {
   return { event: (name, fields) => void events.push([name, { ...fields }]) };
@@ -63,6 +72,10 @@ beforeEach(async () => {
   store = new MemorySessionStore();
   events = [];
   grantCalls = 0;
+  // A fresh verifier per test (never a fixed literal): a mutation replacing routes.ts's
+  // `codeVerifier: tx.codeVerifier` with any constant cannot coincidentally match this.
+  codeVerifier = randomUUID();
+  fixture.setNextCodeChallenge(s256CodeChallenge(codeVerifier));
   runtime = {
     store,
     resolver: claimsPrincipalResolver,
@@ -77,7 +90,7 @@ beforeEach(async () => {
         allowInsecureRequests: true, // the fixture is plain http on localhost — never set in production
       }),
     ),
-    redirectUri: REDIRECT_URI,
+    redirectUri: CALLBACK_URL,
     postLogoutRedirectUri: 'https://rp.example.com/',
     cookieDomainless: true,
     skewMs: 30_000,
@@ -97,7 +110,7 @@ afterEach(async () => {
 
 async function seedTransaction(state: string, overrides: Partial<LoginTransaction> = {}): Promise<void> {
   const tx: LoginTransaction = {
-    codeVerifier: 'test-code-verifier',
+    codeVerifier,
     nonce: NONCE,
     returnTo: RETURN_TO,
     secretHash: hashSecret(CORRECT_SECRET),
@@ -107,10 +120,11 @@ async function seedTransaction(state: string, overrides: Partial<LoginTransactio
   await store.putTransaction(state, tx, 600_000);
 }
 
-function callbackRequest(state: string, cookieHeader?: string): Request {
-  const url = `${REDIRECT_URI}?code=test-code&state=${state}`;
+function callbackRequest(state: string | null, cookieHeader?: string, extraParams?: Record<string, string>): Request {
+  const params = new URLSearchParams({ code: 'test-code', ...extraParams });
+  if (state !== null) params.set('state', state);
   const init = cookieHeader !== undefined ? { headers: { cookie: cookieHeader } } : undefined;
-  return new Request(url, init);
+  return new Request(`${CALLBACK_URL}?${params.toString()}`, init);
 }
 
 function cookieHeaderFor(state: string, secret: string, extra?: string): string {
@@ -191,6 +205,13 @@ describe('GET /auth/callback — rejection (login-CSRF defence)', () => {
     expect(grantCalls).toBe(0);
   });
 
+  it('rejects with state_unknown when the callback carries no state at all', async () => {
+    const routes = createAuthRoutes(runtime);
+    const req = callbackRequest(null);
+    await expectRejected(routes.handle(req), 'state_unknown');
+    expect(grantCalls).toBe(0);
+  });
+
   it('rejects a replayed callback: the same state twice, the second failing because takeTransaction is single-use', async () => {
     const state = 'state-replay';
     await seedTransaction(state);
@@ -214,6 +235,55 @@ describe('GET /auth/callback — rejection (login-CSRF defence)', () => {
     const routes = createAuthRoutes(runtime);
     await expectRejected(routes.handle(callbackRequest(state)), 'txn_missing');
     expect(events).toContainEqual(['login.callback_rejected', { reason: 'txn_missing', zone: 'iam' }]);
+  });
+
+  // Review round 1, Important 1: the identity provider declining (the user clicked Cancel) must
+  // be distinguishable from a genuine token-endpoint failure, and must not burn the code endpoint.
+  it('rejects with idp_error when the callback carries an IdP error response, without calling the token endpoint', async () => {
+    const state = 'state-idp-error';
+    await seedTransaction(state);
+
+    const routes = createAuthRoutes(runtime);
+    const req = callbackRequest(state, cookieHeaderFor(state, CORRECT_SECRET), { error: 'access_denied' });
+    await expectRejected(routes.handle(req), 'idp_error');
+
+    expect(grantCalls).toBe(0);
+    expect(events).toContainEqual(['login.callback_rejected', { reason: 'idp_error', zone: 'iam' }]);
+  });
+
+  // Review round 1, Important 1: `code_exchange_failed` is reserved for a GENUINE exchange
+  // failure (as opposed to idp_error above, or the CSRF-defence reasons, which never reach the
+  // token endpoint at all). A nonce mismatch is a real, independent way the exchange can fail.
+  it('rejects with code_exchange_failed when the exchange itself fails (e.g. a nonce mismatch)', async () => {
+    const state = 'state-exchange-fail';
+    await seedTransaction(state, { nonce: 'the-expected-nonce' });
+    // Minted with a DIFFERENT nonce than the transaction expects.
+    fixture.setNextIdToken(await fixture.mintIdToken({ nonce: 'a-different-nonce' }));
+
+    const routes = createAuthRoutes(runtime);
+    const req = callbackRequest(state, cookieHeaderFor(state, CORRECT_SECRET));
+    await expectRejected(routes.handle(req), 'code_exchange_failed');
+
+    // The token endpoint WAS called (this is a genuine exchange failure, not a CSRF rejection).
+    expect(grantCalls).toBe(1);
+  });
+
+  // Review round 1, Important 2 (PKCE): a code_verifier that does not match the challenge
+  // presented at authorization must fail the exchange — this is the property that, before the
+  // fixture enforced it, could be silently dropped from routes.ts with all 31 tests still green.
+  it('rejects with code_exchange_failed when the PKCE verifier does not match the authorization-time challenge', async () => {
+    const state = 'state-pkce-mismatch';
+    // `codeVerifier` here does NOT match what `fixture.setNextCodeChallenge` was armed with in
+    // beforeEach (which used the module-level `codeVerifier`), so the token endpoint's own S256
+    // recomputation fails it.
+    await seedTransaction(state, { codeVerifier: 'a-verifier-that-does-not-match-the-challenge' });
+    fixture.setNextIdToken(await fixture.mintIdToken({ nonce: NONCE }));
+
+    const routes = createAuthRoutes(runtime);
+    const req = callbackRequest(state, cookieHeaderFor(state, CORRECT_SECRET));
+    await expectRejected(routes.handle(req), 'code_exchange_failed');
+
+    expect(grantCalls).toBe(1);
   });
 });
 
@@ -305,5 +375,32 @@ describe('GET /auth/callback — success', () => {
     expect(created).toBeDefined();
     expect(created?.[1]['sid']).toBe(sid.slice(0, 8));
     expect(created?.[1]['zone']).toBe('iam');
+  });
+
+  // Review round 1: nothing previously pinned the Set-Cookie string at the CALL SITE — the
+  // helper's own defaults being correct (proven in cookies.test.ts) does not mean the call site
+  // in routes.ts actually uses them. Adding a Max-Age here, or dropping HttpOnly, reds nothing
+  // without this. The expected string is hand-written, not derived by calling `serializeCookie`
+  // ourselves, so a regression in the helper AND its call site would still be caught by one of
+  // the two test files.
+  it('emits the exact __Host-pgs_sid Set-Cookie string: no Max-Age, all four security attributes', async () => {
+    const state = 'state-success-6';
+    await seedTransaction(state);
+    fixture.setNextIdToken(await fixture.mintIdToken({ nonce: NONCE }));
+
+    const routes = createAuthRoutes(runtime);
+    const res = await routes.handle(callbackRequest(state, cookieHeaderFor(state, CORRECT_SECRET)));
+    const setCookie = res.headers.getSetCookie().find((c) => c.startsWith(`${SESSION_COOKIE}=`));
+    expect(setCookie).toBeDefined();
+    const sid = setCookie?.split(';')[0]?.split('=')[1] ?? '';
+
+    expect(setCookie).toBe(`${SESSION_COOKIE}=${sid}; HttpOnly; Secure; SameSite=Lax; Path=/`);
+  });
+});
+
+describe('route dispatch', () => {
+  it('responds 405 to a non-GET /auth/callback', async () => {
+    const res = await createAuthRoutes(runtime).handle(new Request(CALLBACK_URL, { method: 'POST' }));
+    expect(res.status).toBe(405);
   });
 });
