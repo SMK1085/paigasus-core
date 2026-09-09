@@ -9,7 +9,8 @@
   },
   "license": "Apache-2.0",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./iam": "./src/iam.ts"
   },
   "scripts": {
     "typecheck": "tsc -p tsconfig.json --noEmit"

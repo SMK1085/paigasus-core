@@ -644,11 +644,20 @@ SMA-503 fixed on the console.
    root barrel (`src/index.ts`) gains, through the existing single `"."` export:
    `ErrorReason`, `ErrorReasonSchema`, `ErrorDomain`, `ErrorDomainSchema`, `ErrorInfoSchema`
    (re-exported from the generated googleapis module), `asWireReason`, `fromWireReason`,
-   `asWireDomain`, `fromWireDomain`, and the seven `iam/v1` service descriptors —
-   `TenancyService`, `AuthnService`, `AuthorizationService`, `ServiceAccountService`, `AuditService`,
-   `UserService`, `OutboxService` — with their request/response types. No `./generated/*` subpath is
-   added: that would make the generated layout public API, so a codegen reshuffle would become a
-   breaking change for consumers.
+   `asWireDomain`, `fromWireDomain`. **Corrected during Task 3:** the seven `iam/v1` service
+   descriptors — `TenancyService`, `AuthnService`, `AuthorizationService`, `ServiceAccountService`,
+   `AuditService`, `UserService`, `OutboxService` — with their request/response types do **not**
+   join the root barrel as this obligation originally said. `iam_pb.ts` retains a **deprecated**
+   `ServiceInfo` message (`iam.proto:22-33`, kept only because buf forbids message deletion) whose
+   runtime `ServiceInfoSchema` and type `ServiceInfo` both collide with the live
+   `paigasus.common.v1` pair the root barrel already re-exports; a blanket `export *` is therefore
+   a duplicate-export compile error, and hand-enumerating roughly a hundred message names to dodge
+   it would need editing on every proto change. Instead they ship through a new curated `./iam`
+   subpath (`src/iam.ts`, added to `package.json`'s `exports` map as `"./iam": "./src/iam.ts"`),
+   which puts the two `ServiceInfo` names in separate modules that never collide.
+   No `./generated/*` subpath is added, for `./iam` or for anything else: that would make the
+   generated layout public API, so a codegen reshuffle would become a breaking change for
+   consumers — `./iam` is a hand-written barrel file, not a passthrough, so this still holds.
 5. **`ts/packages/paigasus-sdk/package.json`** — `dependencies`: `@paigasus/proto` (`workspace:*`),
    `@connectrpc/connect`, `@connectrpc/connect-node`, `@bufbuild/protobuf`, `server-only` (all
    `catalog:`). `devDependencies`: `typescript`, `vitest`, `@types/node`.
