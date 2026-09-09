@@ -1,0 +1,32 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# The SECOND of two templates run by contracts:generate (SMA-624). It exists
+# because Connect-ES can only read error details through
+# `ConnectError.findDetails(desc)`, which requires a generated descriptor —
+# there is no schema-free overload (@connectrpc/connect@2.2.0,
+# connect-error.d.ts:84-85). This closes ADR-0019 amendment A1.4's open item.
+#
+# TypeScript ONLY, deliberately. A1.4 records that *referencing* google.rpc
+# from a local proto makes `buf generate` exit 0 while emitting Rust and Python
+# that point at modules the run never produces. That is avoided here two ways:
+# error.proto still imports nothing, and this template runs against a DIFFERENT
+# input module (buf.build/googleapis/googleapis, already declared in buf.yaml
+# with a buf.lock entry) with only the es plugin.
+#
+# `clean: false` is REQUIRED and load-bearing. buf.gen.yaml sets `clean: true`
+# over the SAME out: tree, so it must run FIRST and this one second. Reversed,
+# the main template wipes this output. Nothing pins that ordering — no gate
+# reads a task's script: — so the control is the codegen-drift step in ci.yml,
+# which is unconditional and reports the deleted file (spec § 5.1).
+version: v2
+clean: false
+
+plugins:
+  # Pinned to the SAME version as buf.gen.yaml's es plugin. If one moves, both
+  # move: two protoc-gen-es versions writing into one tree would produce output
+  # that neither template alone reproduces, and the drift gate would flap.
+  - remote: buf.build/bufbuild/es:v2.13.0
+    out: ../ts/packages/paigasus-proto/src/generated
+    opt:
+      - target=ts
+      - import_extension=.js

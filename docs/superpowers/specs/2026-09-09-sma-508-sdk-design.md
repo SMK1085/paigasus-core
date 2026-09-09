@@ -704,7 +704,7 @@ waiting is the fix.
 | M9 | Every `buf generate` already contacts the BSR (three `remote:` plugins, empty plugin cache); `ci.yml` caches nothing buf-related | **TAKEN** |
 | M11 | An `error_pb.ts` edit selects **no** `paigasus-sdk-ts` task today | **TAKEN** |
 | M11b | With § 11.1's inputs it selects all three | **TAKEN** |
-| M5 | Reversing the two `buf generate` calls leaves `error_details_pb.ts` deleted, and the **drift step** reds | pending |
+| M5 | Reversing the two `buf generate` calls leaves `error_details_pb.ts` deleted, and the **drift step** reds | **TAKEN** |
 | M6 | Equal transport options return one object; differing options return two; two `Auth` values give two headers | pending |
 | M10 | A client component `import type`-ing from the guarded `./errors` entry builds | pending |
 | M12 | Cold-`~/.cache/buf` cost of the second invocation in CI | pending |

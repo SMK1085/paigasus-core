@@ -5,7 +5,27 @@ layer: 'tool'
 
 tasks:
   generate:
-    command: 'buf generate'
+    # TWO invocations, and the ORDER is load-bearing (SMA-624). buf.gen.yaml sets
+    # `clean: true`, which wipes ts/packages/paigasus-proto/src/generated before it
+    # writes. buf.gen.googleapis.yaml writes google/rpc/ into that SAME tree with
+    # `clean: false`. Run them the other way round and the googleapis output is
+    # deleted by the main template.
+    #
+    # `set -euo pipefail` is REQUIRED. Moon does not enable errexit for `script:`
+    # blocks and takes the block's status from its LAST command, so without it a
+    # failed first `buf generate` followed by a successful second one exits 0 —
+    # and the codegen-drift gate would then diff a half-regenerated tree.
+    #
+    # RECOVERY: if the second invocation fails (a BSR outage is the realistic
+    # cause), the tree is left with google/rpc/error_details_pb.ts DELETED,
+    # because `clean: true` already ran. Re-run `moon run contracts:generate
+    # --force`. Do NOT commit the deletion.
+    script: |
+      set -euo pipefail
+      buf generate
+      buf generate --template buf.gen.googleapis.yaml \
+        buf.build/googleapis/googleapis \
+        --path google/rpc/error_details.proto
     toolchain: 'system'
     # SMA-592. The three REMOTE plugin versions live in buf.gen.yaml, already listed below. The
     # other two generators do not, and without them this task's cache key is a lie:
@@ -21,6 +41,9 @@ tasks:
       - 'proto/**/*'
       - 'buf.yaml'
       - 'buf.gen.yaml'
+      # SMA-624. Without this the second template's version and its `--path`
+      # narrowing are outside the cache key, and an edit here serves a cached pass.
+      - 'buf.gen.googleapis.yaml'
       - 'buf.lock'
       - '/.prototools'
       - '/py/uv.lock'

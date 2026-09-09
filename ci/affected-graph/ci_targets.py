@@ -393,6 +393,7 @@ SELF_TASK_EXPECTED_GLOBS = {
 CONTRACTS_GENERATE_INPUTS = (
     "contracts/proto/**/*",
     ".prototools",
+    "contracts/buf.gen.googleapis.yaml",
     "contracts/buf.gen.yaml",
     "contracts/buf.lock",
     "contracts/buf.yaml",
