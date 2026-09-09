@@ -15,18 +15,19 @@
   },
   "devDependencies": {
     "@commitlint/cli": "catalog:",
-    "@paigasus/commitlint-config": "workspace:*",
-    "@semantic-release/commit-analyzer": "catalog:",
-    "typescript": "catalog:",
-    "eslint": "catalog:",
-    "@eslint/js": "catalog:",
     "@eslint-react/eslint-plugin": "catalog:",
-    "eslint-plugin-react-hooks": "catalog:",
+    "@eslint/js": "catalog:",
+    "@next/eslint-plugin-next": "catalog:",
+    "@paigasus/commitlint-config": "workspace:*",
+    "@paigasus/next-config": "workspace:*",
+    "@semantic-release/commit-analyzer": "catalog:",
+    "eslint": "catalog:",
     "eslint-plugin-jsx-a11y": "catalog:",
-    "typescript-eslint": "catalog:",
+    "eslint-plugin-react-hooks": "catalog:",
     "prettier": "catalog:",
     "semantic-release": "catalog:",
-    "vitest": "catalog:",
-    "@next/eslint-plugin-next": "catalog:"
+    "typescript": "catalog:",
+    "typescript-eslint": "catalog:",
+    "vitest": "catalog:"
   }
 }

@@ -52,11 +52,13 @@ overrides:
   # percent-decoding. All four are fixed in 3.1.6 on the 3.x line (upstream also shipped 2.4.5
   # and 4.1.3 for the other two majors; only 3.x is in this graph).
   'fast-uri@>=3.0.0 <3.1.6': '>=3.1.6 <4'
-  # GHSA-h67p-54hq-rp68 / GHSA-52cp-r559-cp3m / GHSA-5p4m-2wfm-xmqj — js-yaml
-  # quadratic-complexity DoS in merge-key handling, plus two later parser advisories.
-  # Reaches the graph via cosmiconfig (under @commitlint/cli + semantic-release) and
-  # @napi-rs/cli.
-  'js-yaml@>=4.0.0 <4.3.1': '>=4.3.1 <5'
+  # GHSA-h67p-54hq-rp68 / GHSA-52cp-r559-cp3m / GHSA-5p4m-2wfm-xmqj / GHSA-2883-xcg3-v3hh —
+  # js-yaml quadratic-complexity DoS in merge-key handling, plus three later parser
+  # advisories. Reaches the graph via cosmiconfig (under @commitlint/cli +
+  # semantic-release) and @napi-rs/cli. The floor has moved twice: the first three were
+  # fixed in 4.3.1, and GHSA-2883-xcg3-v3hh (CVSS 7.5) then landed AGAINST 4.3.1 itself
+  # and is fixed in 4.3.2 on the 4.x line.
+  'js-yaml@>=4.0.0 <4.3.2': '>=4.3.2 <5'
   # GHSA-28wg-ghj8-5hjv / GHSA-2v37-7h3g-55p8 — nanoid. Pulled in by postcss, so it needs
   # its own floor even after postcss is bumped: postcss@8.5.23 still ships nanoid@3.3.17.
   'nanoid@>=3.0.0 <3.3.18': '>=3.3.18 <4'
@@ -95,6 +97,17 @@ catalog:
   prettier: ^3.9.6
   # Test runner
   vitest: ^5.0.0
+  # Runtime env validation for @paigasus/next-config (SMA-502). zod 4 semantics are assumed
+  # throughout that package: unknown object keys are stripped by default, z.record takes
+  # (keyType, valueType), and errors surface as error.issues[]. The runtime formats messages from
+  # .path and .code and never renders an input value, so a validation failure cannot log a secret.
+  zod: ^4.5.4
+  # Build-time guard that @paigasus/next-config/runtime never reaches a CLIENT bundle. It is that
+  # and only that: server-only throws when the `react-server` export condition is ABSENT, and Next
+  # sets that condition for the middleware layer too, so an edge import resolves to server-only's
+  # own empty.js and is a no-op there (MEASURED on Next 16.3.4 — measurements document M6). The
+  # EDGE case is covered separately, by the NEXT_RUNTIME check in runtime.ts (M6b).
+  'server-only': ^0.0.1
   # Type declarations
   '@types/react': ^19.2.18
   '@types/react-dom': ^19.2.7

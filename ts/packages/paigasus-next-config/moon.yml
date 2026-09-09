@@ -1,0 +1,20 @@
+$schema: 'https://moonrepo.dev/schemas/project.json'
+
+id: 'paigasus-next-config-ts'
+layer: 'library'
+language: 'typescript'
+
+tasks:
+  # `/ts/eslint.config.js` is added to the INHERITED test inputs, not merged away: tests/boundaries
+  # asserts that the workspace eslint config actually applies this package's preset, and the
+  # inherited input list (.moon/tasks/typescript-project.yml) does not name that file. Without it
+  # Moon replays a cached PASS on exactly the PR that deletes the import — the guard-the-guard
+  # hole the assertion exists to close (spec § 9.4).
+  test:
+    inputs:
+      - '@group(sources)'
+      - '@group(tests)'
+      - 'vitest.config.ts'
+      - 'package.json'
+      - '/ts/eslint.config.js'
+      - '/ts/pnpm-lock.yaml'

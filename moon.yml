@@ -224,6 +224,14 @@ tasks:
       # deletes the pinned lines does not schedule this task. Same reasoning as the
       # ci/release-parity/**/* entry above.
       - 'ci/ruff/**/*'
+      # SMA-502 — this task pins load-bearing lines inside ci/next-public/run.sh
+      # (NEXT_PUBLIC_FREE_SH_CALL_SITES), so a change under ci/next-public/ MUST re-key it.
+      # Without this the pin is real but unreachable: the PR that deletes the pinned lines does
+      # not schedule this task. Same reasoning as the ci/ruff/**/* entry above. Note the broad
+      # 'ci/**/*' entry already covers it for SCHEDULING; the narrow entry is kept because
+      # check 8e in ci/actionlint/run.sh floors this array's length and the file's own policy is
+      # to keep narrow globs rather than collapse them into the broad one.
+      - 'ci/next-public/**/*'
       # SMA-541 — this task now asserts that CLAUDE.md's documented full-graph command mirrors
       # ci.yml's `T=(...)` array, so a docs-only edit MUST re-key it; without this the assertion is
       # real but unreachable behind a cached PASS. (repo:actionlint's `**/*` already covers
@@ -891,3 +899,43 @@ tasks:
       - 'ci/ruff/**/*'
       - 'py/pyproject.toml'
       - 'py/uv.lock'
+
+  next-public-free:
+    description: 'Ban NEXT_PUBLIC_ across ts/ and require every app to use the next-config factory (SMA-502).'
+    # WHY THIS EXISTS — Next inlines every NEXT_PUBLIC_* value at `next build` time, so one OCI
+    # image cannot serve two self-hosters with different IdP issuers or API URLs. That is the
+    # whole premise of @paigasus/next-config; a grep enforces it mechanically instead of by review.
+    #
+    # THE BAN COVERS PACKAGES, NOT ONLY APPS. A source-only package is transpiled by the app and
+    # inlines the same way, so an apps-only ban leaves a hole.
+    #
+    # INPUTS MUST COVER THE WHOLE SCANNED CORPUS, and 'ts/apps/**/*' + 'ts/packages/**/*' did NOT.
+    # The scan is `git ls-files -- 'ts/'` minus the lockfile and Markdown, so twelve tracked,
+    # SCANNED files sat outside the declared inputs — ts/eslint.config.js, ts/package.json,
+    # ts/moon.yml, ts/pnpm-workspace.yaml, ts/tsconfig.base.json, ts/.npmrc, ts/.prettierignore,
+    # ts/.prettierrc.js, ts/commitlint.config.cjs, ts/scripts/check-config-only.mjs and both
+    # ts/tooling/*.mjs. A PR adding, say, ts/scripts/build-env.mjs that reads a banned prefix would
+    # never have scheduled this gate and would have merged green. The inputs are therefore the same
+    # shape as the corpus expression: everything under ts/.
+    #
+    # THE .next NEGATION IS WHAT KEEPS THAT AFFORDABLE. .moon/workspace.yml deliberately omits
+    # '**/.next/**' from hasher.ignorePatterns (it is a declared `outputs:` of
+    # paigasus-console-ts:build), so a bare 'ts/**/*' would hash the whole built .next tree —
+    # output this gate never scans — and re-key on every console build. Moon 2.5.3 honours a
+    # negated input glob (spec § 13 M4), which is what makes the broad form usable here.
+    # 'ts/node_modules/**' needs no entry: hasher.ignorePatterns already covers it.
+    #
+    # `--self-test` and `--negative-control` run FIRST and in the SAME block. `set -euo pipefail`
+    # is REQUIRED: Moon does not enable errexit for `script:` blocks and takes the block's status
+    # from its LAST command, so without it a failing control is masked by the passing real run.
+    # These four lines are pinned by SELF_SCHEDULED_GATES.
+    script: |
+      set -euo pipefail
+      bash ci/next-public/run.sh --self-test
+      bash ci/next-public/run.sh --negative-control
+      bash ci/next-public/run.sh
+    toolchain: 'system'
+    inputs:
+      - '!ts/apps/*/.next/**'
+      - 'ci/next-public/**/*'
+      - 'ts/**/*'

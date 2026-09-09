@@ -2145,6 +2145,10 @@ T_AFFECTED_SMOKE_REQUIRED_INPUTS=(
   # Without it, a PR editing ci/ruff/** does not schedule repo:affected-smoke, and neither the
   # SELF_SCHEDULED_GATES nor the SELF_TASK_EXPECTED_GLOBS pin for that gate can fire.
   'ci/ruff/**/*'
+  # SMA-502 — floors the input that makes NEXT_PUBLIC_FREE_SH_CALL_SITES reachable. Without it, a
+  # PR editing ci/next-public/** does not schedule repo:affected-smoke, and neither the
+  # SELF_SCHEDULED_GATES nor the SELF_TASK_EXPECTED_GLOBS pin for that gate can fire.
+  'ci/next-public/**/*'
   'CLAUDE.md'
   '.prototools'
 )

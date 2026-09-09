@@ -1,0 +1,36 @@
+{
+  "name": "@paigasus/next-config",
+  "_comment_exports": "Source-only exports. Bundler-aware consumers only (Next/Vitest/tsc walk through TS via moduleResolution: bundler). Switch to ./dist/index.js when tsup wiring lands — must happen IN LOCKSTEP with flipping `private: false` for publishable packages.",
+  "_comment_eslint": "./eslint is plain ESM, not TypeScript: ts/eslint.config.js is loaded by ESLint's own resolver and configuration data gains little from types. See the spec § 13 M5.",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "license": "Apache-2.0",
+  "description": "Next.js config factory, request-time runtime configuration, and shared eslint/tsconfig presets for Paigasus console zones.",
+  "exports": {
+    ".": "./src/index.ts",
+    "./runtime": "./src/runtime.ts",
+    "./eslint": "./src/eslint.mjs",
+    "./tsconfig-app": "./tsconfig.app.json"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "server-only": "catalog:",
+    "zod": "catalog:"
+  },
+  "peerDependencies": {
+    "next": "catalog:"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:",
+    "eslint": "catalog:",
+    "next": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  }
+}

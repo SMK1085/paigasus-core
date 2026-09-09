@@ -6,8 +6,11 @@ import reactPlugin from '@eslint-react/eslint-plugin';
 import reactHooks from 'eslint-plugin-react-hooks';
 import jsxA11y from 'eslint-plugin-jsx-a11y';
 import nextPlugin from '@next/eslint-plugin-next';
+import { boundaryRules } from '@paigasus/next-config/eslint';
 
 export default tseslint.config(
+  // NOTE: adding 'packages/**' or 'apps/**' here switches every boundary block off for real code.
+  // `tests/boundaries.test.ts` lints through THIS file with no config override for that reason.
   { ignores: ['**/dist/**', '**/.next/**', '**/node_modules/**', '**/*.d.ts', '**/generated/**'] },
   js.configs.recommended,
   // Node CLI tooling scripts (e.g. the SMA-406 semantic-release parity helpers under
@@ -59,4 +62,11 @@ export default tseslint.config(
     plugins: { '@next/next': nextPlugin },
     rules: { ...nextPlugin.configs.recommended.rules },
   },
+  // Package dependency direction (Frontend Architecture Scoping § 6, SMA-502). The rules live in
+  // @paigasus/next-config/eslint so they ship with the package that owns the boundary, and are
+  // unit-tested there against synthetic paths — including the app-shell and auth scopes, which do
+  // not exist on disk yet. paigasus-next-config-ts:test asserts this spread is still here, and
+  // that package's moon.yml lists /ts/eslint.config.js among its test inputs so the assertion is
+  // reachable on the PR that removes it.
+  ...boundaryRules,
 );

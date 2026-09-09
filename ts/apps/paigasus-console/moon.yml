@@ -6,8 +6,58 @@ language: 'typescript'
 
 tasks:
   build:
-    command: 'pnpm exec next build'
-    inputs: ['@group(sources)', 'tsconfig.json', 'package.json', 'next.config.ts']
-    outputs: ['.next']
+    # `set -euo pipefail` is REQUIRED. Moon does not enable errexit for `script:` blocks and takes
+    # a block's status from its LAST command, so without it a failed `next build` followed by a
+    # satisfied file check exits 0 — a false green on this issue's headline acceptance criterion.
+    #
+    # The assertion is what proves AC1. A unit test on the object createNextConfig() returns shows
+    # `output: 'standalone'` is SET; it cannot show Next HONOURED it. A Next version that renames
+    # or ignores the key would pass that unit test and ship an image carrying all of node_modules.
+    #
+    # The asserted path is measured, not assumed: with outputFileTracingRoot pinned to ts/, Next
+    # writes the entry point under the app's own subpath. See
+    # docs/superpowers/specs/2026-09-08-sma-502-measurements.md.
+    script: |
+      set -euo pipefail
+      pnpm exec next build
+      if [ ! -f .next/standalone/apps/paigasus-console/server.js ]; then
+        echo "paigasus-console: standalone entry point missing — output: 'standalone' did not take effect" >&2
+        exit 1
+      fi
+    inputs:
+      # `@group(sources)` resolves to src/**/* for an application-layer project, and this app has
+      # NO src/ — its pages live in app/. So the inherited group matches nothing and the group
+      # alone would never re-key this task. `app/**/*` is what actually confers affectedness.
+      # repo:next-env-drift already works around the same hole from its own side (moon.yml).
+      - '@group(sources)'
+      - 'app/**/*'
+      - 'tsconfig.json'
+      - 'package.json'
+      - 'next.config.ts'
+      # next.config.ts now imports the factory, so this task READS the package's sources. Without
+      # this input, editing the factory serves a cached build — the staleness class SMA-519 paid
+      # for. ts/pnpm-lock.yaml is deliberately NOT added: repo:next-env-drift keys on the lockfile
+      # precisely because this task does not, and its comment records why.
+      - '/ts/packages/paigasus-next-config/src/**/*'
+    outputs:
+      # AC4 — the cache archive must not carry .next/cache, which grows without bound.
+      - '.next/**/*'
+      - '!.next/cache/**/*'
+    options:
+      merge: replace
+
+  test:
+    # The smoke boots the BUILT standalone server, so the build must have run. `~:build` is this
+    # project's own build, not an upstream's.
+    deps:
+      - '~:build'
+    inputs:
+      - 'app/**/*'
+      - 'tests/**/*'
+      - 'vitest.config.ts'
+      - 'next.config.ts'
+      - 'package.json'
+      - '/ts/packages/paigasus-next-config/src/**/*'
+      - '/ts/pnpm-lock.yaml'
     options:
       merge: replace

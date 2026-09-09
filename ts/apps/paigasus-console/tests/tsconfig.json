@@ -1,0 +1,8 @@
+{
+  "_comment": "vitest's oxc-based TS transform resolves the nearest tsconfig.json by WALKING UP from the test file's own directory (not via `tsc -p`), and does not dereference a symlink before applying a relative `extends` found through it. The parent tsconfig.json extends '@paigasus/next-config/tsconfig-app' — a package.json `exports` subpath resolved through pnpm's node_modules symlink — whose own `../../tsconfig.base.json` extends then resolve relative to the SYMLINK path rather than its real target, landing on a nonexistent 'node_modules/tsconfig.base.json' (measured: tsc itself resolves this chain correctly, since it follows symlinks; oxc's native resolver does not). This tsconfig stops the walk at this directory with a plain relative extends only, matching the pattern every other package in this workspace already uses. It does not affect `tsc -p tsconfig.json --noEmit`, which is invoked against the parent config directly and never auto-discovers this file.",
+  "extends": "../../../tsconfig.base.json",
+  "compilerOptions": {
+    "types": ["node"]
+  },
+  "include": ["**/*.ts"]
+}
