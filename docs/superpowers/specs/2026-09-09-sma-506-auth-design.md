@@ -844,9 +844,37 @@ right expectations** — `expectedNonce`, `expectedState`, the audience, and the
 clock tolerance — so a token that should be rejected is. The negative cases are
 the point.
 
-Includes a **clock-skew** case: a token minted 45 s in the future is accepted
+**Two corrections, both MEASURED during implementation. Revision 2 was wrong on
+each.** See the measurements document, § M1 and its addenda.
+
+**(a) `openid-client` does NOT verify the ID token's signature on this path.**
+The paragraph above is true in general and false for the authorization-code
+grant specifically. `oauth4webapi`'s `validateIdTokenClaims` checks claims only
+— issuer, audience, subject presence, `exp`/`nbf`/`nonce`/`auth_time` — and never
+calls `validateJwsSignature`. This is deliberate and spec-compliant: OIDC Core
+allows TLS to the token endpoint to authenticate the issuer in place of a
+signature check. Measured: a token signed by a key never published in the JWKS,
+under a `kid` impersonating a published one, was **accepted**.
+
+So this package opts in, passing `enableNonRepudiationChecks` to `discovery()`
+unconditionally. Four costs follow, and they are accepted rather than unnoticed:
+a JWKS outage now fails login **and** refresh where before it failed neither;
+key rotation opens a failure window of up to 60 s; HS256 ID tokens become fatal;
+and one refresh becomes two bounded calls, which is why § 8.4's timing invariant
+is `2 × httpTimeout < lockTtl` rather than the single-timeout bound revision 2
+assumed. HS256 is ruled out of scope rather than made configurable, because
+ADR-0015 already pins IAM to RS256/ES256 for access tokens.
+
+**(b) The clock-skew figures below are unreachable.** `exp`'s tolerance bounds
+only the past, and `nbf` is the only future-direction tolerance-gated check, so
+a 45 s and a 120 s future skew both reject under a 30 s tolerance. The test uses
+`nbf` skews that straddle the boundary instead — and must use a **non-default**
+tolerance, because `getClockTolerance` returns 30 when none is set, so a test at
+30 cannot distinguish a wired tolerance from an absent one.
+
+~~Includes a clock-skew case: a token minted 45 s in the future is accepted
 under a 30 s tolerance only if the tolerance is wired, and a 120 s skew is
-rejected.
+rejected.~~ Superseded by (b).
 
 ### 11.4 AC 2's test
 
