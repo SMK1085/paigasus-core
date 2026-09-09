@@ -211,10 +211,21 @@ export function createOidcClient(opts: CreateOidcClientOptions): OidcClient {
         if (claims === undefined) {
           throw new Error('no id_token in the token response');
         }
+        // RFC 6749 § 5.1 marks `expires_in` RECOMMENDED, not REQUIRED, but this package requires
+        // it deliberately: `tokens.expiresIn()` returning `undefined` used to fall back to `0`,
+        // which the login path (routes.ts) turns straight into `accessExpiresAt: now`. Every
+        // later read would then see the token as already due for refresh — an immediate refresh
+        // on read, or an outright session delete when no refresh token exists — a silent login
+        // loop. Failing loudly here beats minting a session that expires the instant it is
+        // created.
+        const expiresIn = tokens.expiresIn();
+        if (expiresIn === undefined) {
+          throw new Error('token response is missing expires_in');
+        }
         return {
           accessToken: tokens.access_token,
           ...(tokens.refresh_token !== undefined ? { refreshToken: tokens.refresh_token } : {}),
-          expiresIn: tokens.expiresIn() ?? 0,
+          expiresIn,
           idTokenClaims: toIdTokenClaims(claims),
         };
       } catch (err) {
@@ -226,10 +237,16 @@ export function createOidcClient(opts: CreateOidcClientOptions): OidcClient {
       const config = await getConfig();
       try {
         const tokens = await client.refreshTokenGrant(config, refreshToken);
+        // See the identical check and comment in authorizationCodeGrant above — the same silent
+        // login-loop risk applies to a refresh response missing `expires_in`.
+        const expiresIn = tokens.expiresIn();
+        if (expiresIn === undefined) {
+          throw new Error('token response is missing expires_in');
+        }
         return {
           accessToken: tokens.access_token,
           ...(tokens.refresh_token !== undefined ? { refreshToken: tokens.refresh_token } : {}),
-          expiresIn: tokens.expiresIn() ?? 0,
+          expiresIn,
         };
       } catch (err) {
         throw wrapError('refresh_token_grant', err);

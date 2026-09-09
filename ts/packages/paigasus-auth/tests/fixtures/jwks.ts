@@ -63,6 +63,13 @@ export interface OidcFixture {
   /** The next authorization_code or refresh_token grant's /token response uses this ID token. */
   setNextIdToken(idToken: string | undefined): void;
   /**
+   * Overrides the NEXT /token response's `expires_in` field, which otherwise defaults to `3600`.
+   * Pass `undefined` to OMIT the field entirely — oidc.test.ts's missing-`expires_in` cases. Each
+   * fixture instance is fresh per test (see `beforeEach`), so there is no "reset to default"
+   * need: a test that wants the default simply never calls this.
+   */
+  setNextExpiresIn(expiresIn: number | undefined): void;
+  /**
    * The S256 challenge the NEXT /token request's `code_verifier` must hash to — see the file
    * header. `undefined` (the default) disables the check entirely.
    */
@@ -97,6 +104,10 @@ export async function startOidcFixture(): Promise<OidcFixture> {
 
   let nextIdToken: string | undefined;
   let nextCodeChallenge: string | undefined;
+  // A boxed override, distinct from `undefined`-meaning-"not set": `setNextExpiresIn(undefined)`
+  // must be distinguishable from never calling it at all, since the former omits the response
+  // field and the latter keeps the normal 3600 default.
+  let expiresInOverride: { value: number | undefined } | undefined;
   let issuer = '';
 
   const server: Server = createServer((req, res) => {
@@ -142,8 +153,11 @@ export async function startOidcFixture(): Promise<OidcFixture> {
           access_token: `at_${b64url(randomUUID())}`,
           refresh_token: `rt_${b64url(randomUUID())}`,
           token_type: 'bearer',
-          expires_in: 3600,
         };
+        const expiresIn = expiresInOverride !== undefined ? expiresInOverride.value : 3600;
+        if (expiresIn !== undefined) {
+          body['expires_in'] = expiresIn;
+        }
         if (idToken !== undefined) {
           body['id_token'] = idToken;
         }
@@ -202,6 +216,9 @@ export async function startOidcFixture(): Promise<OidcFixture> {
     mintIdToken,
     setNextIdToken(idToken: string | undefined) {
       nextIdToken = idToken;
+    },
+    setNextExpiresIn(expiresIn: number | undefined) {
+      expiresInOverride = { value: expiresIn };
     },
     setNextCodeChallenge(challenge: string | undefined) {
       nextCodeChallenge = challenge;

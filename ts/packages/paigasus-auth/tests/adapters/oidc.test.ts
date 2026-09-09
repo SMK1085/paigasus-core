@@ -134,6 +134,29 @@ describe('createOidcClient — the rest of the surface', () => {
     expect(refreshed.expiresIn).toBeGreaterThan(0);
   });
 
+  // CodeRabbit finding (PR 230): `expires_in` is RFC 6749 § 5.1 RECOMMENDED, not required. A
+  // response omitting it used to fall back to `expiresIn: 0`, which the login/refresh paths turn
+  // into an access token that is already due for refresh the instant it is stored — a silent
+  // login loop. Both grant paths must reject instead, with an error carrying no token material.
+  it('rejects a code-grant response missing expires_in', async () => {
+    fixture.setNextIdToken(await fixture.mintIdToken({ nonce: NONCE }));
+    fixture.setNextExpiresIn(undefined);
+    const err: unknown = await grant(makeClient()).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toMatch(/oidc authorization_code_grant failed/);
+    // No access/refresh/id token leaked into the error message.
+    expect((err as Error).message).not.toMatch(/at_|rt_|ey[A-Za-z0-9_-]{10}/);
+  });
+
+  it('rejects a refresh response missing expires_in', async () => {
+    const oidc = makeClient();
+    fixture.setNextExpiresIn(undefined);
+    const err: unknown = await oidc.refresh('some-refresh-token').catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toMatch(/oidc refresh_token_grant failed/);
+    expect((err as Error).message).not.toMatch(/at_|rt_|ey[A-Za-z0-9_-]{10}/);
+  });
+
   it('revoke resolves without throwing against a reachable revocation endpoint', async () => {
     const oidc = makeClient();
     await expect(oidc.revoke('some-token')).resolves.toBeUndefined();

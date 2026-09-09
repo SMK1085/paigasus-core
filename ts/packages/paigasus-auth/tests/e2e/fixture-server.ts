@@ -160,7 +160,15 @@ async function main(): Promise<void> {
               ttlMs: runtime.ttlMs,
             },
             sid,
-          ).catch(() => null);
+          ).catch((err: unknown) => {
+            // A redacted diagnostic, never the raw error: node-redis's own connection errors
+            // embed the DSN, and openid-client's can embed a URL. Without this line a store or
+            // IdP failure here is indistinguishable from "no session" — the guarded page just
+            // redirects to login and hides which system actually failed.
+            const kind = err instanceof Error ? err.name : typeof err;
+            console.error(`fixture guarded page: session resolution failed (${kind})`);
+            return null;
+          });
 
     if (resolved === null) {
       const returnTo = validateReturnTo(guardedPath, rootPath);

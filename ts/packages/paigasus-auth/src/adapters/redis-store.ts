@@ -47,7 +47,21 @@ return v`;
 // number that tostring() can print as a float (e.g. `3.0`), so a string comparison against
 // ARGV[3] (always a string) would reject a legitimate match.
 
-const MAX_RECONNECT_RETRIES = 10;
+const MAX_RECONNECT_DELAY_MS = 2000;
+
+// The backoff DELAY is bounded; the RETRY COUNT never is, and this function never returns an
+// `Error`. In node-redis, a `reconnectStrategy` that returns an `Error` stops automatic
+// reconnection PERMANENTLY — `RedisSessionStore` holds one client with no reconnect or recreate
+// path, so a bounded retry count would make every later call raise `SessionStoreUnavailable`
+// forever, even long after Redis itself recovers. A brief outage would then kill the store for
+// the rest of the process lifetime.
+//
+// Capping only the delay still gets fast failure during the outage: `disableOfflineQueue: true`
+// plus the per-command timeout already reject in-flight calls quickly, so the retry cap added
+// nothing but that permanent-death risk. Do not reintroduce a retry cap here.
+export function reconnectStrategy(retries: number): number {
+  return Math.min(retries * 100, MAX_RECONNECT_DELAY_MS);
+}
 
 /**
  * A marker for "this value is a Redis connection string, never print it." Both `toString` and
@@ -228,14 +242,7 @@ export async function createRedisSessionStore(opts: CreateRedisSessionStoreOptio
     commandOptions: { timeout: opts.commandTimeoutMs },
     socket: {
       connectTimeout: opts.commandTimeoutMs,
-      // Bounded: return an Error past the retry cap so the client stops instead of retrying
-      // forever. The returned number is a backoff delay in ms before the next attempt.
-      reconnectStrategy: (retries: number): number | Error => {
-        if (retries > MAX_RECONNECT_RETRIES) {
-          return new Error('redis reconnect retry cap exceeded');
-        }
-        return Math.min(retries * 100, 2000);
-      },
+      reconnectStrategy,
     },
   });
 
