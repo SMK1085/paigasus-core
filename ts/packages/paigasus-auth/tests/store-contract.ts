@@ -83,8 +83,11 @@ export function runStoreContract(name: string, makeStore: () => Promise<SessionS
     it('expires a record after its ttl', async () => {
       const s = await makeStore();
       try {
-        await s.set('a', makeRecord(), 30, null);
-        await sleep(80);
+        // 100 ms / 250 ms, not 30 ms / 80 ms: against Redis a network round trip on both the
+        // write and the post-sleep read eats the smaller buffer, and setTimeout guarantees only
+        // a minimum delay.
+        await s.set('a', makeRecord(), 100, null);
+        await sleep(250);
         expect(await s.get('a')).toBeNull();
       } finally {
         await s.close();
@@ -117,8 +120,9 @@ export function runStoreContract(name: string, makeStore: () => Promise<SessionS
     it('frees a lock when its ttl expires', async () => {
       const s = await makeStore();
       try {
-        await s.tryAcquireLock('a', 'tok1', 30);
-        await sleep(80);
+        // 100 ms / 250 ms — see the same-shaped comment on the record-TTL case above.
+        await s.tryAcquireLock('a', 'tok1', 100);
+        await sleep(250);
         expect(await s.tryAcquireLock('a', 'tok2', 5_000)).toBe(true);
       } finally {
         await s.close();
