@@ -68,7 +68,15 @@ BANNED='NEXT_PUBLIC_'
 # Prose keeps passing because the two mentions in ts/ follow the prefix with `.` or a backtick and
 # are preceded by neither `env.` nor a quote. Form 3 requires a quote on BOTH sides, so an error
 # message that merely ENDS with the prefix inside a single-quoted string is not a match either.
-BANNED_RE="${BANNED}[A-Za-z0-9_]|env\.${BANNED}|['\"]${BANNED}['\"]|${BANNED}="
+#
+# Form 2 tolerates whitespace around the dot (`env . NEXT_PUBLIC_`, `env  .  NEXT_PUBLIC_`), because
+# `process.env . NEXT_PUBLIC_` is valid JavaScript — whitespace is legal around a member-access dot
+# — and a bare `env\.` alternative misses it (CodeRabbit round 2, SMA-502). This is defence in
+# depth, not a live hole: `ts:fmt` runs Prettier over the whole ts/ tree as its own CI gate, and
+# Prettier normalizes `process.env . NEXT_PUBLIC_` to `process.env.NEXT_PUBLIC_`, so the spaced form
+# cannot survive in this repo today. It is still worth matching, because this gate should not
+# depend on a DIFFERENT gate's formatting pass for its own correctness.
+BANNED_RE="${BANNED}[A-Za-z0-9_]|env[[:space:]]*\.[[:space:]]*${BANNED}|['\"]${BANNED}['\"]|${BANNED}="
 # The floor is what stops a moved or renamed ts/ silently emptying the gate — the SMA-553 class,
 # which repo:input-liveness cannot reach here because it proves a DECLARED glob is live, never
 # that the scan still sees anything.
@@ -229,7 +237,7 @@ make_fixture() {
 
 self_test() {
   local failures=0 clean violating markdown lockfile shrunk nofactory bareprefix realvar underscorevar rc
-  local noapps mjsconfig mjsok propaccess quotedkey dotenvkey backtickprose realprose emptyts brokengit
+  local noapps mjsconfig mjsok propaccess spacedprop quotedkey dotenvkey backtickprose realprose emptyts brokengit
 
   clean="$(mktemp -d)"; make_fixture "$clean"
   rc=0; ( cd "$clean" && check_prefix "$clean" && check_factory "$clean" ) >/dev/null 2>&1 || rc=$?
@@ -366,6 +374,19 @@ self_test() {
     printf '  FAIL bare prefix via property access: expected rc 1, got %s\n' "$rc" >&2; failures=$((failures + 1))
   fi
 
+  # Form 2, whitespace variant (fix round 4, CodeRabbit round 2, SMA-502). Whitespace around a
+  # member-access dot is valid JavaScript — `process.env . NEXT_PUBLIC_FOO` compiles — and the
+  # round-3 rule's bare `env\.` alternative missed it. Without this row, collapsing the class back
+  # to `env\.` reintroduces that miss with every other row still green, since none of them puts
+  # whitespace around the dot.
+  spacedprop="$(mktemp -d)"; make_fixture "$spacedprop"
+  printf 'export const bare = process.env . NEXT_PUBLIC_FOO;\n' >"$spacedprop/ts/packages/probe/src/spaced.ts"
+  git -C "$spacedprop" add -A >/dev/null 2>&1
+  rc=0; ( cd "$spacedprop" && check_prefix "$spacedprop" ) >/dev/null 2>&1 || rc=$?
+  if [ "$rc" != 1 ]; then
+    printf '  FAIL spaced property access (process.env . NEXT_PUBLIC_FOO): expected rc 1, got %s\n' "$rc" >&2; failures=$((failures + 1))
+  fi
+
   # Form 3 — quoted string key. Bracket notation with a literal reaches the same variable.
   quotedkey="$(mktemp -d)"; make_fixture "$quotedkey"
   printf 'export const bare = process.env["NEXT_PUBLIC_"];\n' >"$quotedkey/ts/packages/probe/src/quoted.ts"
@@ -439,7 +460,7 @@ self_test() {
   fi
 
   rm -rf "$clean" "$violating" "$markdown" "$lockfile" "$shrunk" "$nofactory" "$bareprefix" "$realvar" "$underscorevar" "$noapps" "$mjsconfig" "$mjsok"
-  rm -rf "$propaccess" "$quotedkey" "$dotenvkey" "$backtickprose" "$realprose" "$emptyts" "$brokengit"
+  rm -rf "$propaccess" "$spacedprop" "$quotedkey" "$dotenvkey" "$backtickprose" "$realprose" "$emptyts" "$brokengit"
   if [ "$failures" -gt 0 ]; then
     printf 'next-public-free self-test: %d row(s) failed\n' "$failures" >&2
     exit 1
