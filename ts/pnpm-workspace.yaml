@@ -129,9 +129,14 @@ catalog:
   # ADR-0018). `@connectrpc/connect` is the protocol-independent client half (createClient,
   # ContextValues, Interceptor); `@connectrpc/connect-node` supplies createGrpcTransport, which is
   # HTTP/2 ONLY — it has no `httpVersion` option, unlike createConnectTransport and
-  # createGrpcWebTransport. Both are pinned at the same minor on purpose: connect-node declares a
-  # peer range on connect, and a split would let the two drift across a protocol change.
-  # connect-node's `@bufbuild/protobuf` peer range is ^2.7.0, which the entry above satisfies.
+  # createGrpcWebTransport.
+  #
+  # The two entries must move TOGETHER. MEASURED on connect-node@2.2.0: its peer dependency on
+  # `@connectrpc/connect` is the EXACT string "2.2.0", not a range — so bumping one caret entry
+  # without the other makes pnpm's peer resolution fail rather than silently drift. Note the
+  # carets here are NOT what keeps them aligned; that exact peer requirement and the resolution
+  # recorded in pnpm-lock.yaml are. connect-node's `@bufbuild/protobuf` peer range IS a range,
+  # ^2.7.0, which the entry above satisfies.
   '@connectrpc/connect': ^2.2.0
   '@connectrpc/connect-node': ^2.2.0
   # napi-rs CLI — drives `napi build --platform` for the Node FFI binding (SMA-420).
