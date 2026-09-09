@@ -190,4 +190,54 @@ describe('defineRuntimeConfig', () => {
       expect(String(err)).toContain('SECRET_TOKEN');
     }
   });
+
+  // ── prototype pollution and prototype LEAKAGE in the zone map ──
+  //
+  // The map was built on `{}`, which broke in two directions at once. See runtime.ts's comment on
+  // `Object.create(null)` for the mechanism of each.
+
+  it('preserves a __proto__ zone id instead of silently dropping it', () => {
+    setEnv({ PAIGASUS_ZONES: '{"iam":"/iam","__proto__":"/evil"}' });
+    const { zones } = defineRuntimeConfig().getPublicConfig();
+    // On an object literal this assignment hits the inherited setter, is ignored, and the entry
+    // vanishes from the public projection with no error at all.
+    expect(Object.prototype.hasOwnProperty.call(zones, '__proto__')).toBe(true);
+    expect(zones['__proto__']).toBe('/evil');
+    // And it must not have polluted anything on the way through.
+    expect(Object.getPrototypeOf({})).toBe(Object.prototype);
+    expect(({} as Record<string, unknown>)['/evil']).toBeUndefined();
+  });
+
+  it('resolves a missing zone id as absent even when it names an Object.prototype member', () => {
+    setEnv({ PAIGASUS_ZONES: '{"iam":"/iam"}' });
+    const { zones } = defineRuntimeConfig().getPublicConfig();
+    // Indexed through a VARIABLE key, exactly as assertCompiledAgreement does. A literal key would
+    // make TypeScript resolve `toString` to Object.prototype's declared method rather than to the
+    // index signature, which both changes the type and trips @typescript-eslint/unbound-method —
+    // and would assert something other than the runtime lookup this test is about.
+    const lookup = (id: string): string | undefined => zones[id];
+    // On an object literal each of these is an inherited FUNCTION, so `zones[zone] === undefined`
+    // reads as "declared" and assertCompiledAgreement skips the base-path cross-check.
+    expect(lookup('toString')).toBeUndefined();
+    expect(lookup('constructor')).toBeUndefined();
+    expect(lookup('hasOwnProperty')).toBeUndefined();
+  });
+
+  it("fails closed when the app's own zone id only resolves through the prototype", () => {
+    setEnv({ PAIGASUS_ZONE: 'toString', PAIGASUS_COMPILED_ZONE: 'toString', PAIGASUS_ZONES: '{"iam":"/iam"}' });
+    expect(() => defineRuntimeConfig().getRuntimeConfig()).toThrow(/no entry for this app/);
+  });
+
+  // The runtime half of createNextConfig's build-time rule. Without it a padded PAIGASUS_ZONE is
+  // reported as a zone MISMATCH, whose two sides render identically in a container log.
+  it('rejects a PAIGASUS_ZONE with surrounding whitespace, naming the variable', () => {
+    setEnv({ PAIGASUS_ZONE: ' iam ' });
+    expect(() => defineRuntimeConfig().getRuntimeConfig()).toThrow(/PAIGASUS_ZONE/);
+    expect(() => defineRuntimeConfig().getRuntimeConfig()).toThrow(/whitespace/);
+  });
+
+  it('rejects a padded zone id in the zone map, rather than reporting it as missing', () => {
+    setEnv({ PAIGASUS_ZONES: '{" iam ":"/iam"}' });
+    expect(() => defineRuntimeConfig().getRuntimeConfig()).toThrow(/whitespace/);
+  });
 });

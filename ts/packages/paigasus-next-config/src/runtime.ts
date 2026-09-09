@@ -60,8 +60,27 @@ const zoneMapFromJson = z.string().transform((raw, ctx): Record<string, string> 
     ctx.addIssue({ code: 'custom', message: 'must be a JSON object mapping zone id to base path' });
     return z.NEVER;
   }
-  const out: Record<string, string> = {};
+  // `Object.create(null)`, NOT `{}`. Two distinct defects came from the object literal, and both
+  // are silent.
+  //
+  // WRITING. `JSON.parse` makes `__proto__` an OWN property, so `Object.entries` yields it and the
+  // loop below reaches `out['__proto__'] = …`. On an object literal that assignment hits the
+  // INHERITED setter on Object.prototype, which ignores a string value — the entry is dropped with
+  // no error, and getPublicConfig() then hands the browser a map that is quietly missing a zone.
+  //
+  // READING. `assertCompiledAgreement` decides a zone is undeclared with `zones[zone] === undefined`.
+  // On an object literal `zones['toString']` returns an inherited FUNCTION, so a missing zone id
+  // that happens to name an Object.prototype member reads as present and skips the base-path
+  // cross-check entirely. A null-prototype object has nothing to inherit, so both go away.
+  const out: Record<string, string> = Object.create(null) as Record<string, string>;
   for (const [id, value] of Object.entries(parsed as Record<string, unknown>)) {
+    // The same rule createNextConfig applies to `zone`, applied to this map's KEYS. A padded key
+    // would otherwise fail the lookup in assertCompiledAgreement and report "no entry for zone
+    // \"iam\"" while the operator is looking at a map that visibly contains iam.
+    if (id !== id.trim() || id === '') {
+      ctx.addIssue({ code: 'custom', message: `entry ${JSON.stringify(id)} must be a zone id with no leading or trailing whitespace` });
+      return z.NEVER;
+    }
     if (typeof value !== 'string') {
       ctx.addIssue({ code: 'custom', message: `entry ${JSON.stringify(id)} must be a string` });
       return z.NEVER;
@@ -76,9 +95,21 @@ const zoneMapFromJson = z.string().transform((raw, ctx): Record<string, string> 
   return out;
 });
 
-/** The variables this package owns. Neither has a default — a default hides a misconfiguration. */
+/**
+ * The variables this package owns. Neither has a default — a default hides a misconfiguration.
+ *
+ * `PAIGASUS_ZONE` refuses surrounding whitespace, matching `createNextConfig`'s rule for the same
+ * id at build time. Without it, `PAIGASUS_ZONE=' iam '` reaches `assertCompiledAgreement` and is
+ * reported as a zone MISMATCH — an error whose two sides render identically in a container log,
+ * and which points the operator at the image rather than at the variable. Refusing it here names
+ * the actual fault. The message is authored in this file and value-free, so `describeIssues`
+ * renders it (it is a `custom` issue on an owned key).
+ */
 export const coreEnvShape = {
-  PAIGASUS_ZONE: z.string().min(1),
+  PAIGASUS_ZONE: z
+    .string()
+    .min(1)
+    .refine((value) => value === value.trim(), { error: 'must have no leading or trailing whitespace' }),
   PAIGASUS_ZONES: zoneMapFromJson,
 };
 

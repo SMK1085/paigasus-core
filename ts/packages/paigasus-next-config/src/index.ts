@@ -49,8 +49,18 @@ export function createNextConfig(options: CreateNextConfigOptions): NextConfig {
         'The factory owns `env`; deployment-varying values belong in @paigasus/next-config/runtime.',
     );
   }
-  if (zone.trim() === '') {
-    throw new Error('createNextConfig: `zone` must be a non-empty zone id');
+  // REJECTED, NOT TRIMMED — and the difference is a whole deployment class. `zone` is written
+  // verbatim into PAIGASUS_COMPILED_ZONE, and runtime.ts compares that string to `PAIGASUS_ZONE`
+  // with `!==`. So `zone: ' iam '` used to pass this check (it is not whitespace-ONLY), compile as
+  // ' iam ', and then fail every request of a CORRECTLY configured deployment that sets
+  // PAIGASUS_ZONE=iam — with a mismatch message whose two sides look identical in a log.
+  //
+  // Trimming would hide that instead of fixing it. A zone id is also a KEY in the PAIGASUS_ZONES
+  // map that Helm generates, and nothing trims those keys, so accepting ' iam ' here would make
+  // ' iam ' and 'iam' two spellings of one zone that agree in the image and disagree in the map.
+  // One spelling, refused loudly at build time, is the only version with no silent half.
+  if (zone !== zone.trim() || zone === '') {
+    throw new Error('createNextConfig: `zone` must be a non-empty zone id with no leading or trailing whitespace');
   }
 
   const canonical = canonicalBasePath(basePath, 'createNextConfig: basePath');

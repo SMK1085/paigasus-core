@@ -60,4 +60,21 @@ describe('createNextConfig', () => {
     expect(() => createNextConfig({ ...base, zone: '' })).toThrow(/zone/);
     expect(() => createNextConfig({ ...base, zone: '   ' })).toThrow(/zone/);
   });
+
+  // The padded zone is NOT the whitespace-only case, and it used to pass. `zone: ' iam '` is not
+  // whitespace-only, so the old `zone.trim() === ''` check accepted it and compiled ' iam ' into
+  // PAIGASUS_COMPILED_ZONE. A deployment that then set PAIGASUS_ZONE=iam — the correct value —
+  // failed every request on a mismatch whose two sides look identical in a log.
+  it('rejects a zone with leading or trailing whitespace, rather than trimming it', () => {
+    expect(() => createNextConfig({ ...base, zone: ' iam ' })).toThrow(/whitespace/);
+    expect(() => createNextConfig({ ...base, zone: 'iam ' })).toThrow(/whitespace/);
+    expect(() => createNextConfig({ ...base, zone: '\tiam' })).toThrow(/whitespace/);
+  });
+
+  // The other half of that decision: refusing must not turn into trimming later. If a future
+  // revision trims instead, this assertion fails rather than the one above.
+  it('does not silently trim — a padded zone never reaches the compiled env', () => {
+    expect(() => createNextConfig({ ...base, zone: ' iam ' })).toThrow();
+    expect(createNextConfig({ ...base, zone: 'iam' }).env?.PAIGASUS_COMPILED_ZONE).toBe('iam');
+  });
 });
