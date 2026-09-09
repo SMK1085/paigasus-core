@@ -1208,6 +1208,15 @@ are **assumptions** and must be measured during implementation, recorded in
 | M9 | Whether a `@paigasus/proto` dependency would in fact red `contracts->proto` (§ 14) — asserted by reasoning today. |
 | M10 | Peak CI disk and whether `test-e2e` must be serialised against `paigasus-iam-rs:test` (§ 16.2). |
 | M11 | `__Host-`-prefixed cookies work over `http://localhost` in Chromium under Playwright (§ 9.3). |
+| M12 | Whether Keycloak 26.4 honours `post_logout_redirect_uri` on `client_id` alone, with no `id_token_hint` and no confirmation interstitial (§ 9.5). Added during implementation. |
+| M13 | That the PKCE `code_verifier` is genuinely bound — the fixture recomputes the S256 challenge from the received body (§ 9.2). Added during implementation; **originally numbered M6**, which collided with this table's own M6, and renumbered. |
+
+**Outcome, recorded after the fact.** Eleven of the thirteen were taken. **M10 was
+not** — peak CI disk and container contention are properties of a CI runner, not of
+a development machine, so the measurements document records it as NOT TAKEN with
+what would be needed, rather than a plausible-sounding value. M9, which this table
+marks as "asserted by reasoning today", **was** taken empirically in the end: a
+`dependsOn` edge was added, observed to red `contracts->proto`, and reverted.
 
 **M5 is the one that matters most.** An AC 2 test that cannot fail with the lock
 deleted proves nothing.
