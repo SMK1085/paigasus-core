@@ -5,3 +5,7 @@ pnpm-lock.yaml
 coverage
 next-env.d.ts
 generated
+# Playwright's own run artifacts (packages/paigasus-auth's E2E tier, task 13) — never committed,
+# see the root .gitignore entry.
+test-results
+playwright-report

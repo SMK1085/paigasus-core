@@ -17,3 +17,38 @@ tasks:
       - 'package.json'
       - '/ts/eslint.config.js'
       - '/ts/pnpm-lock.yaml'
+
+  # Container-backed tests. A task whose ONLY purpose is container tests has no reason to skip:
+  # if Docker is unreachable this FAILS. That is why there is no PAIGASUS_SKIP_DOCKER-style hatch
+  # and no canary test here — there is no code path that decides whether to run.
+  #
+  # CORRECTED FROM THE BRIEF (task 13): the vitest half runs `--config vitest.containers.config.ts`,
+  # not `--config vitest.config.ts tests/containers/`. A CLI positional path is a filter applied
+  # AFTER `exclude`, and vitest.config.ts's own `exclude` already drops `tests/containers/**` — so
+  # the brief's form matches ZERO files and passes vacuously. vitest.containers.config.ts exists
+  # specifically so this task can select those suites without that trap (see that file's header).
+  #
+  # `inputs` are declared in full because this is a NEW TASK NAME, not an override of `test`, so
+  # it inherits nothing. Task inputs are the only thing conferring affectedness in Moon 2.5.3, and
+  # an undeclared input means an edit to the realm fixture or the Playwright config serves a
+  # cached PASS.
+  #
+  # `script` (not `command`), because this chains two steps and Moon's `command` setting rejects
+  # shell syntax outright (`task_builder::unsupported_command_syntax`, measured). `set -euo
+  # pipefail` mirrors every other `script:` task in this repo (py:typecheck's own comment records
+  # why it is required — Moon does not enable errexit for `script:` blocks on its own).
+  test-e2e:
+    script: |
+      set -euo pipefail
+      pnpm exec vitest run --config vitest.containers.config.ts
+      pnpm exec playwright test
+    inputs:
+      - '@group(sources)'
+      - '@group(tests)'
+      - 'playwright.config.ts'
+      - 'vitest.config.ts'
+      - 'vitest.containers.config.ts'
+      - 'package.json'
+      - '/ts/pnpm-lock.yaml'
+    options:
+      cache: false

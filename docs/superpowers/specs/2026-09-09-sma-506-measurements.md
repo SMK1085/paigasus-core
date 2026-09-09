@@ -648,3 +648,30 @@ Restored by reverting to `codeVerifier: tx.codeVerifier` and re-ran: 17 of 17
 passed again. Both mutations were reverted with `Edit`, never `git checkout
 --`, and the full suite (`pnpm -C ts/packages/paigasus-auth exec vitest run`)
 was re-run clean afterward: 161 of 161.
+
+## M12 — does Keycloak honour `client_id`-only end-session, with no `id_token_hint`?
+
+Task 9's `src/http/routes.ts` deliberately omits `id_token_hint` from the
+end-session redirect (the raw ID token JWT is never stored in
+`SessionRecord`) and relies on `openid-client@6.8.8` appending `client_id`
+unconditionally instead. The design doc and the task 9 report both name this
+a real, untested-until-now question: does an actual identity provider accept
+that combination, or does it interpose a confirmation page first?
+
+**Measured against Keycloak 26.4** (the `paigasus-e2e-rp` confidential
+client, `tests/e2e/keycloak-realm.json`), via task 13's `logout.spec.ts`: a
+real browser logs in, clicks the real logout form (`POST /auth/logout`), and
+the test asserts `page.getByTestId('public-heading')` becomes visible — i.e.
+Keycloak's own end-session endpoint redirects the browser straight back to
+`post_logout_redirect_uri` with no further interaction. This assertion is a
+genuine, timing-sensitive check: if Keycloak had shown a confirmation
+interstitial instead, `waitFor`'s default timeout would have expired and the
+test would have failed, not passed by accident.
+
+**Result: Keycloak 26.4 completes the redirect immediately.** No
+confirmation page, no error, no additional prompt. `client_id` plus a
+registered `post_logout_redirect_uri` is sufficient — `id_token_hint` is not
+needed against this provider. This confirms task 9's design decision holds
+for Keycloak; it says nothing about Okta or any other provider that may
+mandate `id_token_hint` (see routes.ts's own "NAMED RESIDUAL" comment on
+`handleLogout`).
