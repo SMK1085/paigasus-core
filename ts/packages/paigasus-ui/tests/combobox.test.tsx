@@ -17,9 +17,9 @@ describe('Combobox', () => {
     const onValueChange = vi.fn();
     render(<Combobox items={ITEMS} placeholder="Select a service" onValueChange={onValueChange} />);
 
-    // Clear first: the input already shows 'IAM', and typing appends rather than replaces.
+    // Uncontrolled and nothing selected yet, so the input starts empty — no clear needed here.
+    // The controlled tests below do need one, and say so at their own call sites.
     await user.click(screen.getByRole('combobox'));
-    await user.clear(screen.getByRole('combobox'));
     await user.type(screen.getByRole('combobox'), 'gate');
     await user.click(screen.getByRole('option', { name: 'Gateway' }));
 

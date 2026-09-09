@@ -46,9 +46,12 @@ export function useLinkComponent(): LinkComponent {
  * `Resolved` below is a component READ OUT OF CONTEXT, not one defined during this render. Its
  * identity is owned by whoever called `LinkProvider` — or, with no provider, by the
  * module-level `AnchorLink` — so it does not change between renders, and the state-resetting
- * remount that `static-components` exists to catch cannot happen here. Two rules
- * (`@eslint-react/static-components` and `react-hooks/static-components`) report the same
- * pattern, at both the assignment and the JSX tag, so all four sites are disabled explicitly.
+ * remount that `static-components` exists to catch cannot happen here. Two rules report this
+ * pattern, but not both in both places: `@eslint-react/static-components` fires at the
+ * assignment, and both it and `react-hooks/static-components` fire at the JSX tag. That is three
+ * disables across the two lines below, and every one of them is load-bearing — the config reports
+ * unused disable directives, so a stale entry here would surface as a lint warning rather than
+ * sit unnoticed.
  *
  * This is a SCOPED disable carrying its rebuttal, matching form.tsx's handling of
  * `@eslint-react/no-clone-element` (SMA-503 fix round 2, item 10). The previous spelling,
