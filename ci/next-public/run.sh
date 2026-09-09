@@ -29,25 +29,46 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$REPO_ROOT"
 
 BANNED='NEXT_PUBLIC_'
-# The actual match requires an identifier character after the prefix (grep -E). The hazard is a
-# REAL env var — NEXT_PUBLIC_API_URL — never the bare prefix on its own, which is not a valid env
-# var name and cannot be read by anything. Matching the bare prefix banned it from being NAMED,
-# which broke the one place it is most useful to name: an error message explaining the ban (fix
-# round 1, SMA-502). This narrows nothing about evasion — a computed name
-# (process.env['NEXT_PUBLIC_' + x]) already defeated a literal text scan either way; see README L2.
+# THE MATCH IS CONTEXT-AWARE, NOT A BARE LITERAL AND NOT A SUFFIX RULE ALONE (fix round 3,
+# SMA-502). The rule went wrong in BOTH directions before this, so read the history before
+# widening or narrowing it again.
 #
-# The class is [A-Za-z0-9_], WITH the underscore (fix round 2). [A-Za-z0-9] alone MISSES
-# NEXT_PUBLIC__DEBUG — a double-underscore name is a perfectly valid env var, and the class without
-# `_` does not match the character after the prefix in that case
-# (`echo 'NEXT_PUBLIC__FOO' | grep -qE 'NEXT_PUBLIC_[A-Za-z0-9]'` finds nothing — MEASURED). The
-# original bare-literal check caught that name; the fix-round-1 narrowing silently traded one false
-# positive (naming the bare prefix in prose) for a false NEGATIVE (missing a real double-underscore
-# variable), which is the wrong direction for a gate whose only job is to catch this prefix. Adding
-# `_` back to the class closes that miss while still not matching the bare prefix on its own —
-# `NEXT_PUBLIC_` followed by `.`, a space, or a backtick (the three ways this file's own restored
-# prose follows it) is still not in the class, so the fix-round-1 goal (prose may name the bare
-# prefix) still holds.
-BANNED_RE="${BANNED}[A-Za-z0-9_]"
+# Round 0 matched the bare literal. That banned the prefix from being NAMED, and the casualty was
+# the one non-Markdown place where naming it is most useful: createNextConfig's `extend.env`
+# refusal message, the best site in the codebase to explain the ban.
+#
+# Round 1 required an identifier character after the prefix, `[A-Za-z0-9]`. That freed the prose
+# and introduced a false NEGATIVE: `NEXT_PUBLIC__DEBUG` is a perfectly valid env var and
+# `[A-Za-z0-9]` does not match the `_` that follows the prefix there (MEASURED:
+# `echo 'NEXT_PUBLIC__FOO' | grep -qE 'NEXT_PUBLIC_[A-Za-z0-9]'` finds nothing).
+#
+# Round 2 restored the `_` to the class. That closed the double-underscore miss and left a
+# DIFFERENT false negative, which is what this round fixes: the EXACT key `NEXT_PUBLIC_` is itself
+# inlinable. Next collects every environment key for which `key.startsWith('NEXT_PUBLIC_')` holds
+# (`packages/next/src/lib/static-env.ts`, `getNextPublicEnvironmentVariables`), and a prefix is a
+# prefix of itself — so `process.env.NEXT_PUBLIC_` reads a real inlined value while sailing past a
+# rule that demands one more identifier character.
+#
+# Reverting to the bare literal to close that would just re-break the prose, so the two are
+# separated by CONTEXT instead of by suffix. Four forms match, and each one is a way the string
+# reaches an executable or configuration position:
+#
+#   1. followed by an identifier character  — NEXT_PUBLIC_API_URL, NEXT_PUBLIC__DEBUG (round 2)
+#   2. as a property access                 — process.env.NEXT_PUBLIC_
+#   3. as a quoted string key               — process.env["NEXT_PUBLIC_"], zod key 'NEXT_PUBLIC_'
+#   4. as a dotenv-style assignment         — NEXT_PUBLIC_=https://…
+#
+# BACKTICKS ARE DELIBERATELY NOT QUOTES in form 3. A doc comment writes the prefix as
+# `NEXT_PUBLIC_`, and admitting the backtick would false-positive on exactly the prose round 1
+# existed to free — including this repo's own factory doc comment. A backtick is a template
+# literal in TypeScript, so this leaves a real evasion open (`process.env[`NEXT_PUBLIC_`]`), and
+# that is a deliberate trade: a template literal with no interpolation is a form nobody writes by
+# accident, and README L2 already records that any COMPUTED name defeats a text scan outright.
+#
+# Prose keeps passing because the two mentions in ts/ follow the prefix with `.` or a backtick and
+# are preceded by neither `env.` nor a quote. Form 3 requires a quote on BOTH sides, so an error
+# message that merely ENDS with the prefix inside a single-quoted string is not a match either.
+BANNED_RE="${BANNED}[A-Za-z0-9_]|env\.${BANNED}|['\"]${BANNED}['\"]|${BANNED}="
 # The floor is what stops a moved or renamed ts/ silently emptying the gate — the SMA-553 class,
 # which repo:input-liveness cannot reach here because it proves a DECLARED glob is live, never
 # that the scan still sees anything.
@@ -85,9 +106,25 @@ die_assert() { printf 'next-public-free: %s\n' "$*" >&2; exit 1; }
 # nothing. The lockfile is excluded because a dependency NAME can contain the prefix and a
 # lockfile is not compiled either. Untracked paths are out of scope entirely, so node_modules
 # needs no rule and a third-party dependency using the prefix is unaffected.
+#
+# `git ls-files` runs ON ITS OWN, and the exclusions are applied by `sed` rather than by `grep -v`
+# in the same pipeline (fix round 3, SMA-502). Both halves of that matter.
+#
+# `grep -v` exits 1 when it selects NO lines, and `set -o pipefail` hands that status to the whole
+# pipeline. So a ts/ that had collapsed to nothing returned 1 here, check_prefix read any non-zero
+# as a broken git and routed it to die_infra, and the gate exited 2 (infrastructure) instead of
+# tripping CORPUS_FLOOR and exiting 1 (the repo is wrong). A moved or renamed ts/ is PRECISELY the
+# case the floor exists for, and it was the one case the floor could not report.
+#
+# Swallowing the pipeline's status generally would have been the wrong fix: a genuinely broken git
+# must still reach die_infra. So the two facts are separated at the source — git's own status is
+# measured before anything else runs, and `sed` exits 0 whether it deletes every line or none, so
+# an empty result flows through as an EMPTY corpus and reaches the floor.
 next_public_corpus() {
-  local root="${1:-$REPO_ROOT}"
-  git -C "$root" ls-files -- 'ts/' | grep -v -e '^ts/pnpm-lock\.yaml$' -e '\.md$' | sort
+  local root="${1:-$REPO_ROOT}" listing
+  listing="$(git -C "$root" ls-files -- 'ts/')" || return 2
+  [ -n "$listing" ] || return 0
+  printf '%s\n' "$listing" | sed -e '/^ts\/pnpm-lock\.yaml$/d' -e '/\.md$/d' | sort
 }
 
 # An allowlist entry is a RECORDED DECISION: path<TAB>reason. Ships empty.
@@ -192,7 +229,7 @@ make_fixture() {
 
 self_test() {
   local failures=0 clean violating markdown lockfile shrunk nofactory bareprefix realvar underscorevar rc
-  local noapps mjsconfig mjsok
+  local noapps mjsconfig mjsok propaccess quotedkey dotenvkey backtickprose realprose emptyts brokengit
 
   clean="$(mktemp -d)"; make_fixture "$clean"
   rc=0; ( cd "$clean" && check_prefix "$clean" && check_factory "$clean" ) >/dev/null 2>&1 || rc=$?
@@ -313,7 +350,96 @@ self_test() {
     printf '  FAIL factory-using next.config.mjs: expected rc 0, got %s\n' "$rc" >&2; failures=$((failures + 1))
   fi
 
+  # ── fix round 3: the three context forms, each of which the round-2 suffix rule let through ──
+  #
+  # The EXACT key NEXT_PUBLIC_ is inlinable, because Next selects on startsWith() and a prefix is
+  # a prefix of itself. Each row below is a way that key reaches an executable or configuration
+  # position, and each one passed the round-2 rule at rc 0 (MEASURED before the fix).
+
+  # Form 2 — property access. This is the form the round-2 rule most obviously missed:
+  # `process.env.NEXT_PUBLIC_` is a live read of an inlined value with no further identifier char.
+  propaccess="$(mktemp -d)"; make_fixture "$propaccess"
+  printf 'export const bare = process.env.NEXT_PUBLIC_;\n' >"$propaccess/ts/packages/probe/src/prop.ts"
+  git -C "$propaccess" add -A >/dev/null 2>&1
+  rc=0; ( cd "$propaccess" && check_prefix "$propaccess" ) >/dev/null 2>&1 || rc=$?
+  if [ "$rc" != 1 ]; then
+    printf '  FAIL bare prefix via property access: expected rc 1, got %s\n' "$rc" >&2; failures=$((failures + 1))
+  fi
+
+  # Form 3 — quoted string key. Bracket notation with a literal reaches the same variable.
+  quotedkey="$(mktemp -d)"; make_fixture "$quotedkey"
+  printf 'export const bare = process.env["NEXT_PUBLIC_"];\n' >"$quotedkey/ts/packages/probe/src/quoted.ts"
+  git -C "$quotedkey" add -A >/dev/null 2>&1
+  rc=0; ( cd "$quotedkey" && check_prefix "$quotedkey" ) >/dev/null 2>&1 || rc=$?
+  if [ "$rc" != 1 ]; then
+    printf '  FAIL bare prefix as a quoted key: expected rc 1, got %s\n' "$rc" >&2; failures=$((failures + 1))
+  fi
+
+  # Form 4 — dotenv-style assignment. A tracked .env under ts/ SETS the variable rather than
+  # reading it, and Next inlines whatever is set.
+  dotenvkey="$(mktemp -d)"; make_fixture "$dotenvkey"
+  printf 'NEXT_PUBLIC_=https://issuer.example\n' >"$dotenvkey/ts/apps/probe/.env.production"
+  git -C "$dotenvkey" add -A >/dev/null 2>&1
+  rc=0; ( cd "$dotenvkey" && check_prefix "$dotenvkey" ) >/dev/null 2>&1 || rc=$?
+  if [ "$rc" != 1 ]; then
+    printf '  FAIL bare prefix as a dotenv assignment: expected rc 1, got %s\n' "$rc" >&2; failures=$((failures + 1))
+  fi
+
+  # The other half of the same trade, and the row that stops form 3 from being widened to admit a
+  # backtick. A doc comment writes the prefix as `NEXT_PUBLIC_`; adding the backtick to the quote
+  # class reds this row.
+  backtickprose="$(mktemp -d)"; make_fixture "$backtickprose"
+  printf '/** Refuses env: it inlines exactly as `NEXT_PUBLIC_` does. */\nexport const ok = 1;\n' \
+    >"$backtickprose/ts/packages/probe/src/backtick.ts"
+  git -C "$backtickprose" add -A >/dev/null 2>&1
+  rc=0; ( cd "$backtickprose" && check_prefix "$backtickprose" ) >/dev/null 2>&1 || rc=$?
+  if [ "$rc" != 0 ]; then
+    printf '  FAIL backtick-quoted prefix in a doc comment: expected rc 0, got %s\n' "$rc" >&2; failures=$((failures + 1))
+  fi
+
+  # The REAL file, not a paraphrase of it. ts/packages/paigasus-next-config/src/index.ts holds
+  # both legitimate prose mentions in the whole tracked corpus — one backtick-quoted in a doc
+  # comment, one followed by `.` inside the extend.env refusal message. Copying the actual file in
+  # is what makes this row track the source instead of a transcription that can silently drift out
+  # of step with it.
+  realprose="$(mktemp -d)"; make_fixture "$realprose"
+  if [ -f "$REPO_ROOT/ts/packages/paigasus-next-config/src/index.ts" ]; then
+    cp "$REPO_ROOT/ts/packages/paigasus-next-config/src/index.ts" "$realprose/ts/packages/probe/src/factory.ts"
+    git -C "$realprose" add -A >/dev/null 2>&1
+    rc=0; ( cd "$realprose" && check_prefix "$realprose" ) >/dev/null 2>&1 || rc=$?
+    if [ "$rc" != 0 ]; then
+      printf '  FAIL the real factory source: expected rc 0, got %s\n' "$rc" >&2; failures=$((failures + 1))
+    fi
+  else
+    printf '  FAIL the real factory source is missing, so its prose cannot be checked\n' >&2
+    failures=$((failures + 1))
+  fi
+
+  # ── fix round 3: an EMPTY corpus is the repo being wrong, not the infrastructure failing ──
+  #
+  # `shrunk` above leaves ONE ts/ file, so the corpus is non-empty and the floor reports it. This
+  # row leaves ZERO, which used to take a different path entirely: `grep -v` selected no lines,
+  # exited 1 under pipefail, and check_prefix read that as a broken git and exited 2. A moved ts/
+  # is the exact case CORPUS_FLOOR exists for, so it must be rc 1.
+  emptyts="$(mktemp -d)"; git -C "$emptyts" init -q
+  mkdir -p "$emptyts/rs"; printf 'x\n' >"$emptyts/rs/only.rs"; git -C "$emptyts" add -A >/dev/null 2>&1
+  rc=0; ( cd "$emptyts" && check_prefix "$emptyts" ) >/dev/null 2>&1 || rc=$?
+  if [ "$rc" != 1 ]; then
+    printf '  FAIL fully collapsed ts/: expected rc 1 from the floor, got %s\n' "$rc" >&2; failures=$((failures + 1))
+  fi
+
+  # The other side of that separation, and the row that stops it being "fixed" by swallowing every
+  # error. A directory that is not a git repository at all must still reach die_infra at rc 2 —
+  # collapsing 1 and 2 here would let an environmental fault read as a real finding, or the
+  # reverse.
+  brokengit="$(mktemp -d)"
+  rc=0; ( cd "$brokengit" && check_prefix "$brokengit" ) >/dev/null 2>&1 || rc=$?
+  if [ "$rc" != 2 ]; then
+    printf '  FAIL non-repository root: expected rc 2 from die_infra, got %s\n' "$rc" >&2; failures=$((failures + 1))
+  fi
+
   rm -rf "$clean" "$violating" "$markdown" "$lockfile" "$shrunk" "$nofactory" "$bareprefix" "$realvar" "$underscorevar" "$noapps" "$mjsconfig" "$mjsok"
+  rm -rf "$propaccess" "$quotedkey" "$dotenvkey" "$backtickprose" "$realprose" "$emptyts" "$brokengit"
   if [ "$failures" -gt 0 ]; then
     printf 'next-public-free self-test: %d row(s) failed\n' "$failures" >&2
     exit 1

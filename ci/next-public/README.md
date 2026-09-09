@@ -22,25 +22,54 @@ Two independent checks, both against **tracked** files only (`git ls-files`, so
 `node_modules` and any other untracked path are out of scope by construction):
 
 1. **`check_prefix`** — no tracked `ts/` file (minus the pnpm lockfile and any
-   Markdown) contains the literal string `NEXT_PUBLIC_`.
+   Markdown) uses `NEXT_PUBLIC_` in an executable or configuration context. The four
+   matched forms are tabulated below; naming the prefix in prose is not one of them.
 2. **`check_factory`** — every tracked `ts/apps/*/next.config.{ts,js,mjs,cjs}` calls
    `createNextConfig`, and there is at least `APP_CONFIG_FLOOR` of them.
 
 Both checks run on every invocation with no flags (`bash ci/next-public/run.sh`).
 Nothing else in `ts/` is inspected.
 
-**The match requires an identifier character after the prefix (fix round 1, SMA-502).**
-`check_prefix` scans for `NEXT_PUBLIC_[A-Za-z0-9]` (`grep -E`), not the bare literal
-`NEXT_PUBLIC_`. The hazard this gate exists to catch is always a real environment
-variable — `NEXT_PUBLIC_API_URL`, say — and the bare prefix on its own is not a valid
-env var name; nothing can read it. An earlier version of this gate matched the bare
-prefix, which meant the one place in the codebase where naming `NEXT_PUBLIC_`
-explicitly is most useful — the error message explaining why `extend.env` is refused —
-tripped the same rule it was written to describe, and had to be reworded around it.
-That was a defect in the gate, not in the source file: a check that forbids its own
-subject from being named in the message explaining it is mis-specified. The refinement
-closes that without widening the evasion surface — see L2 below, unchanged by this
-fix.
+**The match is CONTEXT-AWARE, not a bare literal and not a suffix rule (fix round 3,
+SMA-502).** `check_prefix` runs one `grep -E` alternation. It matches `NEXT_PUBLIC_` in
+four forms, and each form is a way the string reaches an executable or configuration
+position:
+
+| # | Form | Matched by | Example |
+|---|------|-----------|---------|
+| 1 | followed by an identifier character | `NEXT_PUBLIC_[A-Za-z0-9_]` | `NEXT_PUBLIC_API_URL`, `NEXT_PUBLIC__DEBUG` |
+| 2 | property access | `env\.NEXT_PUBLIC_` | `process.env.NEXT_PUBLIC_` |
+| 3 | quoted string key | `['"]NEXT_PUBLIC_['"]` | `process.env["NEXT_PUBLIC_"]` |
+| 4 | dotenv-style assignment | `NEXT_PUBLIC_=` | `NEXT_PUBLIC_=https://issuer.example` |
+
+Anything else — the bare prefix in prose, in a comment, or inside a longer sentence in
+an error message — passes. **A backtick is deliberately NOT a quote in form 3**, so a
+doc comment may write `` `NEXT_PUBLIC_` `` freely. That is the one thing form 3 is
+carefully NOT allowed to do, and a self-test row holds it: adding the backtick to the
+quote class reds both the synthetic doc-comment row and the row that copies the real
+`ts/packages/paigasus-next-config/src/index.ts` into a fixture (measured).
+
+**Why the rule has this shape, in three corrections.** The history matters, because the
+trade has now been made wrong in both directions.
+
+- **Round 0** matched the bare literal `NEXT_PUBLIC_`. That banned the prefix from being
+  *named*, and the casualty was the one non-Markdown place where naming it is most
+  useful: the `extend.env` refusal message in `createNextConfig`. A check that forbids
+  its own subject from being named in the message explaining it is mis-specified.
+- **Round 1** required an identifier character, `[A-Za-z0-9]`. That freed the prose and
+  bought a false *negative*: `NEXT_PUBLIC__DEBUG` is a valid env var and the class
+  without `_` does not match the character following the prefix there.
+- **Round 2** restored the `_`. That closed the double-underscore miss and left a
+  different false negative, which round 3 fixes: **the exact key `NEXT_PUBLIC_` is
+  itself inlinable.** Next collects every environment key for which
+  `key.startsWith('NEXT_PUBLIC_')` holds
+  (`packages/next/src/lib/static-env.ts`, `getNextPublicEnvironmentVariables`), and a
+  prefix is a prefix of itself — so `process.env.NEXT_PUBLIC_` is a live read of an
+  inlined value, and it sailed past a rule demanding one more identifier character.
+
+Reverting to the bare literal to close that would simply re-break the prose, which is
+why round 3 separates the two by **context** rather than by suffix. The evasion surface
+recorded in L2 is unchanged: a *computed* name still defeats the scan entirely.
 
 ## Exit codes, and why 1 and 2 must not collapse into each other
 
@@ -52,6 +81,20 @@ as "a file uses the banned prefix," or the reverse, let a real finding read as m
 inconclusive. An unknown flag is also rc 2: passing `--nonsense-flag` must not be
 readable as "the repo is clean" or "the repo is wrong," since the gate never actually
 ran the check it was asked to run.
+
+**A fully collapsed `ts/` is rc 1, and it was rc 2 (fix round 3, SMA-502).** The
+separation above was stated but not implemented. `next_public_corpus` piped
+`git ls-files` through `grep -v`, and `grep -v` exits **1** when it selects no lines;
+`set -o pipefail` then handed that status to the whole pipeline. So a `ts/` that had
+moved or been renamed — precisely the case `CORPUS_FLOOR` exists to catch — returned 1
+from the corpus function, `check_prefix` read any non-zero as a broken `git`, and the
+gate exited **2** instead of tripping the floor at **1**. The floor could report every
+collapse except the total one. The fix keeps both facts distinct at the source rather
+than swallowing errors: `git ls-files` is measured on its own and a real failure still
+returns 2, while the exclusions are applied with `sed`, which exits 0 whether it
+deletes every line or none. Two self-test rows hold the pair — a zero-`ts/`-file
+repository must be rc 1, and a directory that is not a git repository at all must be
+rc 2.
 
 ## Why check 2 exists
 
@@ -67,8 +110,10 @@ the one factory that already refuses it.
 
 ## Corpus derivation
 
-`next_public_corpus` is `git -C "$root" ls-files -- 'ts/'`, filtered to drop
-`ts/pnpm-lock.yaml` and any `*.md` file. Markdown is excluded so a document — this
+`next_public_corpus` is `git -C "$root" ls-files -- 'ts/'`, filtered with `sed` to drop
+`ts/pnpm-lock.yaml` and any `*.md` file. (`sed`, not `grep -v`, and not in the same
+pipeline as `git` — see the exit-codes section above for why that is load-bearing
+rather than stylistic.) Markdown is excluded so a document — this
 README included — can name the string it bans; a document compiles into nothing, so
 naming it in prose creates no image-inlining hazard. The lockfile is excluded because
 a third-party dependency's *name* can legitimately contain the prefix, and a lockfile
@@ -107,13 +152,22 @@ of them. That scope is a decision, not an oversight: `ts/` is where a Next build
 actually reads the prefix from, so it is where a source-level ban has something to
 check.
 
-**L2 — a split literal evades any text scan.** `'NEXT_' + 'PUBLIC_'`, or any other
-construction that assembles the string at runtime instead of writing it as one
-literal, defeats `grep -qE -- "$BANNED_RE"` entirely. No text gate closes this; it
-would need something that reasons about the built output, not the source text. The
-fix-round-1 identifier-character refinement (above) does not change this: it narrows
-what counts as a match among *literal* occurrences, and a computed name was never a
-literal occurrence in the first place.
+**L2 — a computed or split name evades any text scan.** `'NEXT_' + 'PUBLIC_'`,
+`process.env['NEXT_PUBLIC_' + suffix]`, or any other construction that assembles the
+string at runtime instead of writing it as one literal, defeats
+`grep -qE -- "$BANNED_RE"` entirely. No text gate closes this; it would need something
+that reasons about the built output, not the source text. **This residual is unchanged
+by fix round 3, and by rounds 1 and 2 before it.** Every one of those rounds moved the
+boundary between *literal* occurrences — which ones count as a match — and a computed
+name was never a literal occurrence to begin with. Round 3's context forms add three
+new literal shapes to the matched set; they take nothing away from what a computed name
+could already evade.
+
+The backtick carve-out in form 3 is a narrower case of the same thing: a TypeScript
+template literal is a quote, so `` process.env[`NEXT_PUBLIC_`] `` is a real read this
+gate does not match. That is a deliberate trade against false-positiving on every doc
+comment that names the prefix — and a template literal with no interpolation is not a
+form anyone writes by accident.
 
 **L3 — the `**/*.md` exclusion is safe only while no app compiles Markdown.** The
 exclusion rests on the fact that a Markdown file compiles into nothing today. An MDX
@@ -170,31 +224,23 @@ silently escaping the guard — does not occur on this repo's measured Next vers
 to request time regardless, but it is not required merely to make a module-scope
 mistake visible; the build already fails loudly on its own.
 
-**L7 — the identifier-character requirement lets prose name the bare prefix, and
-still cannot see a computed name (fix rounds 1-2, SMA-502).** `check_prefix` matches
-`NEXT_PUBLIC_[A-Za-z0-9_]`, not the bare `NEXT_PUBLIC_` literal, so a comment or string
-that names only the prefix itself, followed by `.`, a space, or a backtick — none of
-which are in the class — passes: `"...exactly as NEXT_PUBLIC_ does"` is not a match.
-That is the entire purpose of the refinement, and nothing more: the earlier
-bare-literal match caught real usages and this kind of prose in the same net, and the
-one non-Markdown place where naming the prefix is most useful — the `extend.env`
-refusal message in `ts/packages/paigasus-next-config/src/index.ts` — was exactly the
-casualty.
+**L7 — prose may name the bare prefix, and the rule that allows it went through three
+attempts (SMA-502).** Recorded here because each attempt looked correct and two were
+wrong in a way no row caught at the time.
 
-**The character class itself went through two attempts, and the first was wrong in
-the unsafe direction.** Fix round 1 shipped `[A-Za-z0-9]`, which was verified to pass
-prose but was never checked against every valid env-var character —
-`echo 'NEXT_PUBLIC__FOO' | grep -qE 'NEXT_PUBLIC_[A-Za-z0-9]'` finds nothing, so a
-double-underscore name such as `NEXT_PUBLIC__DEBUG` (a perfectly valid env var) was
-silently missed. That traded a false positive (prose naming the bare prefix) for a
-false negative (a real banned variable going undetected) — the wrong direction for a
-gate whose only job is to catch this prefix. Fix round 2 corrected the class to
-`[A-Za-z0-9_]`, which catches the underscore case again while still not matching the
-bare prefix followed by `.`, space, or backtick, so the original fix-round-1 goal
-still holds.
+Round 0 matched the bare literal and false-positived on the `extend.env` refusal
+message. Round 1 required `[A-Za-z0-9]` after the prefix and silently stopped matching
+`NEXT_PUBLIC__DEBUG`, a valid env var — a false positive traded for a false negative,
+the wrong direction for a gate whose only job is to catch this prefix. Round 2 restored
+the `_` to the class. Round 3 found that the **exact key** `NEXT_PUBLIC_` is inlinable
+in its own right, because Next selects keys with `startsWith('NEXT_PUBLIC_')` and a
+prefix is a prefix of itself, and replaced the suffix-only rule with the four context
+forms tabulated above.
 
-**This refinement exists only to let prose name the bare prefix. It does not narrow
-the evasion surface recorded in L2, in either of its forms.** A computed name such as
-`process.env['NEXT_PUBLIC_' + suffix]` defeats the scan exactly as it did before any
-of this — no literal `NEXT_PUBLIC_<identifier char>` run ever appears in the source
-text either way, so neither character class changes what a computed name can evade.
+**What holds the shape now is rows, not the comment.** Each context form has a
+self-test row that must FAIL the gate, the backtick carve-out has two rows that must
+PASS it — one synthetic, one a copy of the real
+`ts/packages/paigasus-next-config/src/index.ts` — and reverting `BANNED_RE` to the
+round-2 suffix rule reds the property-access row (measured). Before round 3 none of
+that existed: the two prose rows passed and no row exercised the bare key at all, so
+the miss was invisible.
