@@ -58,13 +58,17 @@ describe('AC 1 — every guarded entry point imports the server guard first', ()
 });
 
 describe("AC 1 — 'server-only' is imported at exactly one site", () => {
-  // Matches a side-effect import of `server-only` in EITHER quote style, and only as an actual
-  // import statement. A raw `.includes("'server-only'")` had two holes: `import "server-only";`
-  // evaded it entirely (so the one-site guarantee could break while this test stayed green), and
-  // the package name appearing inside a comment produced a false positive. Prettier enforces single
-  // quotes in this repo, which is why the first hole never bit — but a guard defeated by a quote
-  // style is not a guard.
-  const SERVER_ONLY_IMPORT = /^\s*import\s+(['"])server-only\1\s*;?\s*$/m;
+  // Matches a side-effect import of `server-only` in either quote style. Deliberately NOT anchored
+  // at end-of-line, and deliberately permissive about what sits between `import` and the specifier:
+  // `import "server-only"; // boundary` and `import /* boundary */ "server-only";` are both real
+  // import statements, and an end-anchored pattern misses both — which would let the package's
+  // one-site guarantee break while this test stayed green.
+  //
+  // `[^'"\n]*` cannot cross a quote, so this still does NOT match a mere mention: a line comment
+  // (`// see 'server-only'`) does not start with `import`, and an unrelated import
+  // (`import { x } from './y'; // 'server-only'`) fails because the first quote it reaches
+  // belongs to './y', not to the specifier.
+  const SERVER_ONLY_IMPORT = /^\s*import\b[^'"\n]*(['"])server-only\1/m;
 
   it('server-guard.ts imports it first', () => {
     const source = readFileSync(resolve(PKG_ROOT, 'src/server-guard.ts'), 'utf8');
@@ -103,6 +107,66 @@ import "server-only";
       const content = `// SPDX-License-Identifier: Apache-2.0
 // This mentions server-only in prose, not as an import.
 export const guard = true;
+`;
+      writeFileSync(probeFile, content, 'utf8');
+
+      const others = globSourceFiles().filter((f) => f !== resolve(PKG_ROOT, 'src/server-guard.ts'));
+      const offenders = others.filter((f) => SERVER_ONLY_IMPORT.test(readFileSync(f, 'utf8')));
+      expect(offenders).not.toContain(probeFile);
+    } finally {
+      try {
+        unlinkSync(probeFile);
+      } catch {
+        // Ignore cleanup errors
+      }
+    }
+  });
+
+  it('detects server-only import with trailing comment as offender', () => {
+    const probeFile = resolve(PKG_ROOT, 'src/__trailing-comment-probe.ts');
+    try {
+      const content = `// SPDX-License-Identifier: Apache-2.0
+import "server-only"; // boundary
+`;
+      writeFileSync(probeFile, content, 'utf8');
+
+      const others = globSourceFiles().filter((f) => f !== resolve(PKG_ROOT, 'src/server-guard.ts'));
+      const offenders = others.filter((f) => SERVER_ONLY_IMPORT.test(readFileSync(f, 'utf8')));
+      expect(offenders).toContain(probeFile);
+    } finally {
+      try {
+        unlinkSync(probeFile);
+      } catch {
+        // Ignore cleanup errors
+      }
+    }
+  });
+
+  it('detects server-only import with block comment noise as offender', () => {
+    const probeFile = resolve(PKG_ROOT, 'src/__block-comment-probe.ts');
+    try {
+      const content = `// SPDX-License-Identifier: Apache-2.0
+import /* boundary */ "server-only";
+`;
+      writeFileSync(probeFile, content, 'utf8');
+
+      const others = globSourceFiles().filter((f) => f !== resolve(PKG_ROOT, 'src/server-guard.ts'));
+      const offenders = others.filter((f) => SERVER_ONLY_IMPORT.test(readFileSync(f, 'utf8')));
+      expect(offenders).toContain(probeFile);
+    } finally {
+      try {
+        unlinkSync(probeFile);
+      } catch {
+        // Ignore cleanup errors
+      }
+    }
+  });
+
+  it('does not flag unrelated import with server-only in comment as offender', () => {
+    const probeFile = resolve(PKG_ROOT, 'src/__unrelated-import-probe.ts');
+    try {
+      const content = `// SPDX-License-Identifier: Apache-2.0
+import { readFileSync } from 'node:fs'; // not a server-only import
 `;
       writeFileSync(probeFile, content, 'utf8');
 
