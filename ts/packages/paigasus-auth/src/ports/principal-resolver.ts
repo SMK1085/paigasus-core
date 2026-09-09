@@ -6,12 +6,14 @@
 // putting paigasus-auth-ts into ci/affected-graph's strict-equality contracts->proto set.
 //
 // When IntrospectPrincipalResolver lands in SMA-508, the ADAPTER maps proto to these types.
+//
+// RoleGrantRef is DEFINED in ../session-view.ts, not here, and re-exported below: src/client.ts
+// needs the type (SessionView.grants is a RoleGrantRef[]) but must never reach ./ports/**, so the
+// one definition lives in the leaf module both sides can import.
 
-/** A role grant, flattened from IAM's RoleGrantRef { scope_prn, role_key }. */
-export interface RoleGrantRef {
-  scopePrn: string;
-  roleKey: string;
-}
+import type { RoleGrantRef } from '../session-view.js';
+
+export type { RoleGrantRef };
 
 /** A membership, flattened from IAM's Membership { id, principal_prn, node_prn }. */
 export interface Membership {

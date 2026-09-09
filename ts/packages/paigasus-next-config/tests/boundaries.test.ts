@@ -2,9 +2,22 @@
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { ESLint } from 'eslint';
+import { ESLint, type Linter } from 'eslint';
+import tseslint from 'typescript-eslint';
 import { describe, expect, it } from 'vitest';
 import { BOUNDARY_SCOPES, boundaryRules } from '../src/eslint.mjs';
+
+/**
+ * A TypeScript-aware parser, with no type-checked rules attached. `boundaryRules` on its own
+ * carries no `languageOptions`, so `overrideConfigFile: true` falls back to ESLint's default
+ * (espree) parser — fine for the plain-ESM rows below, but espree cannot parse TypeScript-only
+ * syntax such as `import type { X } from 'y'`, and fails CLOSED with a fatal parse error rather
+ * than a `no-restricted-imports` message. A DENIED row built on that syntax would then report an
+ * empty message array for the wrong reason — proving the parser choked, not that the rule passed
+ * — and read as a false ALLOW. `tseslint.parser` alone (no `parserOptions.project`) is enough:
+ * this only needs to PARSE the syntax, not type-check it.
+ */
+const TS_PARSER_CONFIG: Linter.Config = { languageOptions: { parser: tseslint.parser } };
 
 /** The ts workspace root — `files` globs in the preset are relative to it. */
 const TS_ROOT = fileURLToPath(new URL('../../..', import.meta.url));
@@ -41,7 +54,7 @@ function expectedPackageName(scopeDir: string): string | undefined {
 }
 
 async function restrictedImportsFor(filePath: string, source: string): Promise<string[]> {
-  const eslint = new ESLint({ cwd: TS_ROOT, overrideConfigFile: true, overrideConfig: boundaryRules });
+  const eslint = new ESLint({ cwd: TS_ROOT, overrideConfigFile: true, overrideConfig: [TS_PARSER_CONFIG, ...boundaryRules] });
   const [result] = await eslint.lintText(source, { filePath, warnIgnored: false });
   return (result?.messages ?? []).filter((m) => m.ruleId === 'no-restricted-imports').map((m) => m.message);
 }
@@ -65,6 +78,13 @@ const DENIED: ReadonlyArray<readonly [string, string, string]> = [
   // ../-only group is inert on the one file this rule exists to protect.
   ['auth/client must not reach adapters via ./', 'packages/paigasus-auth/src/client.ts', "import { x } from './adapters/redis-store.js';"],
   ['auth/client must not reach core via ./', 'packages/paigasus-auth/src/client.ts', "import { x } from './core/single-flight.js';"],
+  // TYPE-ONLY, on purpose. This is the exact import that started the fix-round-1 investigation:
+  // `import type` is erased at compile time, but the preset bans type imports alongside value
+  // ones everywhere (eslint.mjs:28-31) because a type import still couples the two sides. The
+  // fix was to move the shared vocabulary OUT of core/ into ./session-view.js, not to carve a
+  // `./core/session.js` exception into this rule — so a type-only reach into core/ must stay
+  // rejected, deliberately, rather than by accident.
+  ['auth/client must not reach core via ./, even a TYPE-ONLY import', 'packages/paigasus-auth/src/client.ts', "import type { SessionView } from './core/session.js';"],
   ['auth/middleware must not import the store', 'packages/paigasus-auth/src/middleware.ts', "import { x } from './adapters/redis-store.js';"],
   ['an app middleware must not import auth/server', 'apps/paigasus-console/middleware.ts', "import { getSession } from '@paigasus/auth/server';"],
   ['an app middleware must not import the sdk', 'apps/paigasus-console/middleware.ts', "import { x } from '@paigasus/sdk';"],
@@ -80,6 +100,10 @@ const ALLOWED: ReadonlyArray<readonly [string, string, string]> = [
   ['apps may import ui directly — the deliberate § 7.3 deviation', 'apps/paigasus-console/app/page.tsx', "import { x } from '@paigasus/ui';"],
   ['apps may import next', 'apps/paigasus-console/app/page.tsx', "import Link from 'next/link';"],
   ['auth/client may import react', 'packages/paigasus-auth/src/client.ts', "import { createContext } from 'react';"],
+  // The fix for the type-only-import finding above: SessionView now lives in a leaf module with
+  // no server machinery, one directory level above core/adapters/ports, so client.ts can reach it
+  // without a `./core/**`-shaped specifier ever appearing in its import list.
+  ['auth/client may import the shared session-view module', 'packages/paigasus-auth/src/client.ts', "import type { SessionView } from './session-view.js';"],
   ['auth/server may import openid-client', 'packages/paigasus-auth/src/server.ts', "import * as c from 'openid-client';"],
   ['auth/server may reach its own adapters', 'packages/paigasus-auth/src/server.ts', "import { x } from './adapters/redis-store.js';"],
   ['an app middleware may import auth/middleware', 'apps/paigasus-console/middleware.ts', "import { createAuthMiddleware } from '@paigasus/auth/middleware';"],

@@ -158,7 +158,8 @@ export const boundaryRules = [
           '../http/**',
           '../next/**',
         ],
-        message: '@paigasus/auth/client is React-only and must never reach the server surface — it would put a token in a browser bundle (AC 5). Import types from ./core/session.js only.',
+        message:
+          '@paigasus/auth/client is React-only and must never reach the server surface — it would put a token in a browser bundle (AC 5). Import the shared vocabulary from ./session-view.js only.',
       },
     ]),
   },

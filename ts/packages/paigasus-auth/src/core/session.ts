@@ -1,5 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
-import type { IdTokenClaims, ResolvedPrincipal, RoleGrantRef } from '../ports/principal-resolver.js';
+//
+// SessionView, SESSION_VIEW_KEYS, and SessionViewKey are DEFINED in ../session-view.ts, not here,
+// and re-exported below so existing importers of this module keep working. That module holds no
+// server machinery, which is what lets src/client.ts import it directly; this file (and anything
+// under core/**, adapters/**, ports/**) is banned from the client boundary by eslint.mjs's
+// paigasus/boundaries/auth-client rule, including for type-only imports — moving the shared
+// vocabulary out of core/ closes the gap rather than carving an exception into that rule.
+import type { IdTokenClaims, ResolvedPrincipal } from '../ports/principal-resolver.js';
+import { SESSION_VIEW_KEYS, type SessionView, type SessionViewKey } from '../session-view.js';
+
+export { SESSION_VIEW_KEYS };
+export type { SessionView, SessionViewKey };
 
 export interface SessionRecord {
   /**
@@ -22,22 +33,6 @@ export interface SessionRecord {
   absoluteExpiresAt: number;
   idTokenClaims: IdTokenClaims;
   principal: ResolvedPrincipal;
-}
-
-/**
- * Everything /client may ever see. A runtime tuple, not just a type: an interface has no runtime
- * key set, so a strict-equality assertion needs something to compare against.
- */
-export const SESSION_VIEW_KEYS = ['principalPrn', 'displayName', 'email', 'grants', 'grantsAvailable'] as const;
-
-export type SessionViewKey = (typeof SESSION_VIEW_KEYS)[number];
-
-export interface SessionView {
-  principalPrn: string | null;
-  displayName: string | null;
-  email: string | null;
-  grants: RoleGrantRef[];
-  grantsAvailable: boolean;
 }
 
 /** The ONLY function that may construct what crosses to the browser. */
