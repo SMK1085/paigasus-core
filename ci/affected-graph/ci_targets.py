@@ -358,11 +358,17 @@ SELF_TASK_EXPECTED_GLOBS = {
     # while scanning nothing it hashed. Confirmed against `moon query projects`' resolved
     # inputGlobs/inputFiles for repo:next-public-free (moon 2.5.3): reported verbatim as authored,
     # no drop, rewrite or re-sort of the negated glob.
+    # SMA-502 fix wave. Re-baselined from what `moon query projects` REPORTS, not from what was
+    # authored: 'ts/apps/**/*' + 'ts/packages/**/*' left twelve tracked, SCANNED files outside the
+    # declared inputs (ts/eslint.config.js, ts/package.json, ts/moon.yml, ts/pnpm-workspace.yaml,
+    # ts/tsconfig.base.json, ts/.npmrc, ts/.prettierignore, ts/.prettierrc.js,
+    # ts/commitlint.config.cjs, ts/scripts/check-config-only.mjs, both ts/tooling/*.mjs), so a PR
+    # touching only one of those never scheduled the gate. 'ts/**/*' matches the gate's own corpus
+    # expression; the '!' entry keeps the built .next tree out of the hash walk.
     "next-public-free": (
         "!ts/apps/*/.next/**",
         "ci/next-public/**/*",
-        "ts/apps/**/*",
-        "ts/packages/**/*",
+        "ts/**/*",
     ),
 }
 
@@ -1188,6 +1194,13 @@ RUFF_SH_CALL_SITES = (
 # suite, which then proves nothing), the corpus floor (lowering it makes the collapsed-corpus row
 # pass vacuously), the two check invocations that ARE the production call site, and the control's
 # guard comparison — whose VALUE, not merely its presence, carries the fix.
+#
+# APP_CONFIG_FLOOR and APP_CONFIG_GLOB are pinned for the SAME reason CORPUS_FLOOR is, and they
+# close the finding that added them: check 2 iterated app configs and printed its success line on
+# an EMPTY list, so renaming ts/apps — or adding an app using next.config.mjs, which the old
+# `.ts`-only glob did not match — silently dropped that app while CORPUS_FLOOR, which counts ts/
+# FILES and not app configs, stayed satisfied. Lowering the floor to 0 or narrowing the glob back
+# to `.ts` reinstates that hole, and each mutation is caught by a self-test row (both MEASURED).
 NEXT_PUBLIC_FREE_SH_CALL_SITES = (
     "--self-test)        MODE=selftest; shift ;;",
     "--negative-control) MODE=negctl;   shift ;;",
@@ -1195,6 +1208,8 @@ NEXT_PUBLIC_FREE_SH_CALL_SITES = (
     "check)    check_prefix; check_factory ;;",
     "negctl)   negative_control ;;",
     "CORPUS_FLOOR=48",
+    "APP_CONFIG_FLOOR=1",
+    "APP_CONFIG_GLOB='ts/apps/*/next.config.[tjmc][sj]*'",
     '( cd "$tmp" && check_prefix "$tmp" ) >/dev/null 2>&1 || negctl_rc=$?',
     'if [ "$negctl_rc" != 1 ]; then',
     "printf '  FAIL a planted NEXT_PUBLIC_ did not red the gate: expected rc 1, got %s\\n' \"$negctl_rc\" >&2",

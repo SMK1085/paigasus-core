@@ -2,7 +2,7 @@
 
 # `repo:next-public-free`
 
-Bans `NEXT_PUBLIC_` across `ts/`, and requires every app's `next.config.ts` to build
+Bans `NEXT_PUBLIC_` across `ts/`, and requires every app's Next config to build
 through `@paigasus/next-config`'s factory (SMA-502).
 
 ## Why
@@ -23,8 +23,8 @@ Two independent checks, both against **tracked** files only (`git ls-files`, so
 
 1. **`check_prefix`** — no tracked `ts/` file (minus the pnpm lockfile and any
    Markdown) contains the literal string `NEXT_PUBLIC_`.
-2. **`check_factory`** — every tracked `ts/apps/*/next.config.ts` calls
-   `createNextConfig`.
+2. **`check_factory`** — every tracked `ts/apps/*/next.config.{ts,js,mjs,cjs}` calls
+   `createNextConfig`, and there is at least `APP_CONFIG_FLOOR` of them.
 
 Both checks run on every invocation with no flags (`bash ci/next-public/run.sh`).
 Nothing else in `ts/` is inspected.
@@ -59,7 +59,7 @@ Check 1 alone is not sufficient. `env:` in a `next.config` is a build-time inlin
 channel exactly equivalent to `NEXT_PUBLIC_` — Next compiles whatever it names into
 the bundle at `next build` time, the same as the banned prefix does.
 `createNextConfig()` refuses an `extend.env` key, so any app that goes through the
-factory cannot reintroduce this channel. But a hand-written `next.config.ts` that
+factory cannot reintroduce this channel. But a hand-written Next config that
 never calls the factory at all contains no `NEXT_PUBLIC_` literal — it passes check 1
 cleanly — and can still bake a deployment-varying value into the image through its own
 `env:` block. Check 2 closes that gap by requiring every app config to route through
@@ -88,9 +88,15 @@ grows. Re-measured at fix round 2, the real corpus is **90** tracked files, grow
 left unchanged rather than re-tied to a ratio that would need re-deriving on every
 future addition. A floor set far below the real count would let `ts/` collapse most of
 the way before the gate noticed, which defeats the point of having one.
-`check_factory`'s corpus (`ts/apps/*/next.config.ts`) carries no floor — zero app
-configs is a legitimate state for this repo today, so a floor there would have nothing
-meaningful to guard.
+**`check_factory` carries its OWN floor, `APP_CONFIG_FLOOR` (1 today).** It did not, and
+that was a hole: the check iterated app configs and printed its success line when the
+list was **empty**, so renaming `ts/apps` — or adding an app that used
+`next.config.mjs`, which the old `.ts`-only glob did not match — silently dropped that
+app from the check while `CORPUS_FLOOR` stayed satisfied, because the corpus counts
+`ts/` **files** and not app configs. Two fixes, together: the glob now matches all four
+valid Next config extensions (`ts`, `js`, `mjs`, `cjs`), and the floor asserts the list
+is non-empty before the loop runs. Re-baseline `APP_CONFIG_FLOOR` deliberately when a
+second console zone app lands, in the same style as `CORPUS_FLOOR`.
 
 ## Limitations
 
@@ -116,17 +122,39 @@ file ends in `.md` (or `.mdx`, which this gate does not even list) and would be
 skipped by the same rule that lets this README name the banned string safely.
 
 **L4 — `repo:input-liveness` catches a dead input glob, not a too-narrow one.** A
-future edit that narrowed this gate's own declared Moon task `inputs` (once Task 8
-registers it) would switch the gate off for whatever it stopped watching, and nothing
-but `CORPUS_FLOOR` would notice — and only for the `ts/`-rename case, not a narrowing
-that still leaves 48-plus files in view. The alternative, an unconditional `ci.yml`
+future edit that narrowed this gate's own declared Moon task `inputs` would switch the
+gate off for whatever it stopped watching, and nothing but `CORPUS_FLOOR` would notice
+— and only for the `ts/`-rename case, not a narrowing that still leaves 48-plus files
+in view. This is not hypothetical: the gate SHIPPED narrow. Its first `inputs` were
+`ts/apps/**/*` and `ts/packages/**/*`, which left twelve tracked, scanned files
+(`ts/eslint.config.js`, `ts/package.json`, `ts/moon.yml`, `ts/scripts/*.mjs`,
+`ts/tooling/*.mjs` among them) outside the declared set, so a PR touching only one of
+them never scheduled the gate at all. The inputs are now `ts/**/*` with the built
+`.next` tree negated — the same shape as the scanned corpus — and
+`SELF_TASK_EXPECTED_GLOBS["next-public-free"]` in `ci/affected-graph/ci_targets.py`
+pins that by strict equality. The alternative, an unconditional `ci.yml`
 step that always runs regardless of Moon's affected-graph, closes that residual but
 loses local `moon ci` coverage for the gate. That trade was made deliberately (spec
 § 6.5), the same way the codegen-drift gate is deliberately unconditional and this one
 is not.
 
+**L4b — neither read uses a here-string, deliberately.** `check_prefix` and `check_factory`
+both fill their arrays with `mapfile -t … < <(printf …)`, not `mapfile -t … <<< "$var"`.
+On bash 5.3.15 (macOS/homebrew) the here-string form **deadlocks**: bash writes the
+here-string into a pipe from `do_redirections` *before* the builtin that would drain it
+starts, so anything past the pipe's capacity blocks on `write()` forever. Measured on
+that host: 10 lines (330 bytes) passes, 20 lines (670 bytes) hangs; `/bin/bash` 3.2 never
+hangs, and process substitution — which forks a writer — passes at 200 lines. It is
+**intermittent**, because macOS can hand back a 512-byte pipe under memory pressure
+instead of the usual 16K, so the same command can pass and then hang minutes later in the
+same session. The real corpus is 90 paths, well past the small-pipe threshold, and the
+symptom is `moon run repo:next-public-free` hanging with no output and no failure. Do not
+simplify either read back to `<<<`. `ci/ruff/run.sh:114` and `:239` carry the same
+pattern and are not changed here — that gate is outside this issue's scope, but the same
+hang applies to it.
+
 **L5 — check 2 proves the call is present, not that it is load-bearing.** It asserts
-an app's `next.config.ts` *mentions* `createNextConfig`; it does not prove the call's
+an app's Next config *mentions* `createNextConfig`; it does not prove the call's
 result reaches the file's default export. A config that imports the factory, calls it,
 and then exports something else entirely — a literal object, say — passes check 2
 while shipping a config the factory never actually built.

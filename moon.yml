@@ -909,9 +909,21 @@ tasks:
     # THE BAN COVERS PACKAGES, NOT ONLY APPS. A source-only package is transpiled by the app and
     # inlines the same way, so an apps-only ban leaves a hole.
     #
-    # INPUTS ARE NOT ts/**/*. .moon/workspace.yml deliberately omits '**/.next/**' from
-    # hasher.ignorePatterns, so a ts/**/* glob would hash the whole built .next tree — output this
-    # gate never scans — and re-key on every console build.
+    # INPUTS MUST COVER THE WHOLE SCANNED CORPUS, and 'ts/apps/**/*' + 'ts/packages/**/*' did NOT.
+    # The scan is `git ls-files -- 'ts/'` minus the lockfile and Markdown, so twelve tracked,
+    # SCANNED files sat outside the declared inputs — ts/eslint.config.js, ts/package.json,
+    # ts/moon.yml, ts/pnpm-workspace.yaml, ts/tsconfig.base.json, ts/.npmrc, ts/.prettierignore,
+    # ts/.prettierrc.js, ts/commitlint.config.cjs, ts/scripts/check-config-only.mjs and both
+    # ts/tooling/*.mjs. A PR adding, say, ts/scripts/build-env.mjs that reads a banned prefix would
+    # never have scheduled this gate and would have merged green. The inputs are therefore the same
+    # shape as the corpus expression: everything under ts/.
+    #
+    # THE .next NEGATION IS WHAT KEEPS THAT AFFORDABLE. .moon/workspace.yml deliberately omits
+    # '**/.next/**' from hasher.ignorePatterns (it is a declared `outputs:` of
+    # paigasus-console-ts:build), so a bare 'ts/**/*' would hash the whole built .next tree —
+    # output this gate never scans — and re-key on every console build. Moon 2.5.3 honours a
+    # negated input glob (spec § 13 M4), which is what makes the broad form usable here.
+    # 'ts/node_modules/**' needs no entry: hasher.ignorePatterns already covers it.
     #
     # `--self-test` and `--negative-control` run FIRST and in the SAME block. `set -euo pipefail`
     # is REQUIRED: Moon does not enable errexit for `script:` blocks and takes the block's status
@@ -926,5 +938,4 @@ tasks:
     inputs:
       - '!ts/apps/*/.next/**'
       - 'ci/next-public/**/*'
-      - 'ts/apps/**/*'
-      - 'ts/packages/**/*'
+      - 'ts/**/*'

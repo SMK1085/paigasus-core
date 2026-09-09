@@ -61,6 +61,15 @@ BANNED_RE="${BANNED}[A-Za-z0-9_]"
 # that reds on every legitimate deletion, which is not this floor's job.
 CORPUS_FLOOR=48
 
+# The SAME collapse-detector idea, applied to check 2's own list. Check 2 iterated app configs and
+# printed its success line when the list was EMPTY, so renaming ts/apps — or adding an app that
+# uses next.config.mjs, which check 2 did not match — silently dropped that app while CORPUS_FLOOR
+# stayed satisfied, because the corpus counts ts/ FILES and not app configs. One app today.
+#
+# Deliberate re-baseline, exactly like CORPUS_FLOOR: raise this when a second console zone app
+# lands, and lower it only for a real removal.
+APP_CONFIG_FLOOR=1
+
 # GLOBAL, not function-local: negative_control's EXIT trap fires after the function that sets this
 # has already returned (including via the `exit 1` on its own failure path), and a `local` binding
 # is gone by then — referencing it under `set -u` would itself be an unbound-variable error. This
@@ -94,7 +103,17 @@ check_prefix() {
   corpus="$(next_public_corpus "$root")" || rc=$?
   [ "$rc" -eq 0 ] || die_infra "git ls-files failed while deriving the ts/ corpus (rc $rc)"
   if [ -n "$corpus" ]; then
-    mapfile -t files <<< "$corpus"
+    # PROCESS SUBSTITUTION, NOT A HERE-STRING. `mapfile -t files <<< "$corpus"` DEADLOCKS on
+    # bash 5.3.15 (macOS/homebrew): bash writes a here-string into a pipe from `do_redirections`
+    # BEFORE the builtin that would drain it starts, so anything past the pipe's capacity blocks
+    # on write() forever. MEASURED on this host: 10 lines (330 bytes) passes, 20 lines (670 bytes)
+    # hangs; /bin/bash 3.2 never hangs, and neither does process substitution at 200 lines, which
+    # forks a writer. It is INTERMITTENT — the same command completed minutes earlier in the same
+    # session — because macOS can hand back a 512-byte pipe under memory pressure instead of the
+    # usual 16K. The gate's real corpus is 90 paths, well past that, so this hung `moon run
+    # repo:next-public-free` with no output and no failure. Do not "simplify" either of these
+    # two reads back to `<<<`.
+    mapfile -t files < <(printf '%s\n' "$corpus")
   fi
   [ "${#files[@]}" -ge "$CORPUS_FLOOR" ] \
     || die_assert "corpus collapsed to ${#files[@]} files (floor $CORPUS_FLOOR) — did ts/ move? If \
@@ -114,19 +133,41 @@ size instead of raising it back later."
   printf 'next-public-free: %d tracked ts/ files free of %s\n' "${#files[@]}" "$BANNED"
 }
 
+# ALL FOUR Next config extensions, not just .ts. `next.config.{js,mjs,cjs}` are equally valid Next
+# config names, and an app using one was invisible to this check while the corpus floor — which
+# counts ts/ files, not app configs — stayed happily satisfied.
+APP_CONFIG_GLOB='ts/apps/*/next.config.[tjmc][sj]*'
+
+app_configs() {
+  local root="${1:-$REPO_ROOT}"
+  git -C "$root" ls-files -- "$APP_CONFIG_GLOB" \
+    | grep -E '/next\.config\.(ts|js|mjs|cjs)$' || true
+}
+
 check_factory() {
-  local root="${1:-$REPO_ROOT}" missing=0 cfg
-  while IFS= read -r cfg; do
-    [ -n "$cfg" ] || continue
+  local root="${1:-$REPO_ROOT}" missing=0 cfg listing
+  local -a configs=()
+  listing="$(app_configs "$root")"
+  if [ -n "$listing" ]; then
+    # Process substitution, for the bash 5.3.15 here-string deadlock documented in check_prefix.
+    mapfile -t configs < <(printf '%s\n' "$listing")
+  fi
+  # The floor runs BEFORE the loop, because an empty list makes the loop a no-op and the success
+  # line below then reports a check that examined nothing.
+  [ "${#configs[@]}" -ge "$APP_CONFIG_FLOOR" ] \
+    || die_assert "found ${#configs[@]} app Next config(s) (floor $APP_CONFIG_FLOOR) — did ts/apps \
+move, or did an app land under a config name this gate does not match? If an app was legitimately \
+removed, lower APP_CONFIG_FLOOR in ci/next-public/run.sh to match instead of raising it back later."
+  for cfg in "${configs[@]}"; do
     if ! grep -q 'createNextConfig' "$root/$cfg" 2>/dev/null; then
       printf '  %s does not call createNextConfig()\n' "$cfg" >&2
       missing=$((missing + 1))
     fi
-  done <<< "$(git -C "$root" ls-files -- 'ts/apps/*/next.config.ts')"
+  done
   if [ "$missing" -gt 0 ]; then
     die_assert "$missing app config(s) bypass @paigasus/next-config. A hand-written \`env:\` block inlines exactly as $BANNED does, so the prefix scan alone cannot see it."
   fi
-  printf 'next-public-free: every ts/apps/*/next.config.ts uses the factory\n'
+  printf 'next-public-free: all %d app Next config(s) use the factory\n' "${#configs[@]}"
 }
 
 # Build a git fixture tree. Each fixture IS a git repository, because the scan reads git ls-files:
@@ -151,6 +192,7 @@ make_fixture() {
 
 self_test() {
   local failures=0 clean violating markdown lockfile shrunk nofactory bareprefix realvar underscorevar rc
+  local noapps mjsconfig mjsok
 
   clean="$(mktemp -d)"; make_fixture "$clean"
   rc=0; ( cd "$clean" && check_prefix "$clean" && check_factory "$clean" ) >/dev/null 2>&1 || rc=$?
@@ -231,7 +273,47 @@ self_test() {
     printf '  FAIL double-underscore env var fixture: expected rc 1, got %s\n' "$rc" >&2; failures=$((failures + 1))
   fi
 
-  rm -rf "$clean" "$violating" "$markdown" "$lockfile" "$shrunk" "$nofactory" "$bareprefix" "$realvar" "$underscorevar"
+  # Pins APP_CONFIG_FLOOR. Without this row, check 2 goes SILENT for free: renaming ts/apps leaves
+  # `git ls-files` empty, the loop never runs, and the success line prints having examined nothing
+  # — with every other row still green, since the corpus floor counts ts/ FILES, not app configs.
+  noapps="$(mktemp -d)"; make_fixture "$noapps"
+  git -C "$noapps" rm -q --cached 'ts/apps/probe/next.config.ts' >/dev/null 2>&1
+  rm -f "$noapps/ts/apps/probe/next.config.ts"
+  rc=0; ( cd "$noapps" && check_factory "$noapps" ) >/dev/null 2>&1 || rc=$?
+  if [ "$rc" != 1 ]; then
+    printf '  FAIL zero app configs: expected rc 1 from APP_CONFIG_FLOOR, got %s\n' "$rc" >&2; failures=$((failures + 1))
+  fi
+
+  # Pins the extension widening. `next.config.mjs` is as valid a Next config name as `.ts`, so an
+  # app using one must still be required to call the factory. With the old `next.config.ts`-only
+  # glob this fixture passed at rc 0 while bypassing @paigasus/next-config entirely.
+  mjsconfig="$(mktemp -d)"; make_fixture "$mjsconfig"
+  git -C "$mjsconfig" rm -q --cached 'ts/apps/probe/next.config.ts' >/dev/null 2>&1
+  rm -f "$mjsconfig/ts/apps/probe/next.config.ts"
+  printf 'export default { env: { ISSUER: process.env.ISSUER } };\n' >"$mjsconfig/ts/apps/probe/next.config.mjs"
+  git -C "$mjsconfig" add -A >/dev/null 2>&1
+  rc=0; ( cd "$mjsconfig" && check_factory "$mjsconfig" ) >/dev/null 2>&1 || rc=$?
+  if [ "$rc" != 1 ]; then
+    printf '  FAIL hand-written next.config.mjs: expected rc 1, got %s\n' "$rc" >&2; failures=$((failures + 1))
+  fi
+
+  # The positive half of the same widening, and it is the row that actually DETECTS a narrowing.
+  # MEASURED: reverting APP_CONFIG_GLOB to `next.config.ts` leaves the row above green — with no
+  # config matched, APP_CONFIG_FLOOR reds it at rc 1 for a different reason, which is the right
+  # verdict but not the reason the row asserts. This row fails on that mutation (expected rc 0,
+  # got 1), so the two rows are kept as a pair rather than either one alone.
+  mjsok="$(mktemp -d)"; make_fixture "$mjsok"
+  git -C "$mjsok" rm -q --cached 'ts/apps/probe/next.config.ts' >/dev/null 2>&1
+  rm -f "$mjsok/ts/apps/probe/next.config.ts"
+  printf 'import { createNextConfig } from "@paigasus/next-config";\nexport default createNextConfig({ zone: "probe", basePath: "/probe", outputFileTracingRoot: "/x" });\n' \
+    >"$mjsok/ts/apps/probe/next.config.mjs"
+  git -C "$mjsok" add -A >/dev/null 2>&1
+  rc=0; ( cd "$mjsok" && check_factory "$mjsok" ) >/dev/null 2>&1 || rc=$?
+  if [ "$rc" != 0 ]; then
+    printf '  FAIL factory-using next.config.mjs: expected rc 0, got %s\n' "$rc" >&2; failures=$((failures + 1))
+  fi
+
+  rm -rf "$clean" "$violating" "$markdown" "$lockfile" "$shrunk" "$nofactory" "$bareprefix" "$realvar" "$underscorevar" "$noapps" "$mjsconfig" "$mjsok"
   if [ "$failures" -gt 0 ]; then
     printf 'next-public-free self-test: %d row(s) failed\n' "$failures" >&2
     exit 1
