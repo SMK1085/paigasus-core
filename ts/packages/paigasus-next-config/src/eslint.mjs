@@ -33,9 +33,12 @@
 // Written as plain ESM rather than TypeScript: ts/eslint.config.js is loaded by ESLint's own
 // resolver, and configuration data gains little from types (spec § 13 M5).
 //
-// The app-shell and auth entries are INERT until SMA-506 and SMA-508 land. They are written now,
-// tested against synthetic paths, and covered by a liveness assertion so a package landing under
-// a different directory name reds instead of silently disabling its rule.
+// The app-shell BLOCK is INERT until SMA-506 lands: `packages/paigasus-app-shell` does not exist
+// yet, so its files glob matches nothing. There is no separate "auth" scope — @paigasus/auth
+// appears only as a DENIED TARGET inside that same app-shell rule ('@paigasus/auth/server'), so
+// it needs no scope entry of its own and gains nothing when SMA-508 lands. The block is written
+// now, tested against synthetic paths, and covered by a liveness assertion so a package landing
+// under a different directory name reds instead of silently disabling its rule.
 
 /**
  * Package directories these rules expect, mapped to a status string. `'exists'` means the

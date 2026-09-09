@@ -100,9 +100,11 @@ catalog:
   # (keyType, valueType), and errors surface as error.issues[]. The runtime formats messages from
   # .path and .code and never renders an input value, so a validation failure cannot log a secret.
   zod: ^4.5.4
-  # Build-time guard that @paigasus/next-config/runtime never reaches a client or edge bundle.
-  # The edge runtime has no dynamic process.env, so an edge import would read inlined or
-  # undefined values rather than deployment values (spec § 5).
+  # Build-time guard that @paigasus/next-config/runtime never reaches a CLIENT bundle. It is that
+  # and only that: server-only throws when the `react-server` export condition is ABSENT, and Next
+  # sets that condition for the middleware layer too, so an edge import resolves to server-only's
+  # own empty.js and is a no-op there (MEASURED on Next 16.3.4 — measurements document M6). The
+  # EDGE case is covered separately, by the NEXT_RUNTIME check in runtime.ts (M6b).
   'server-only': ^0.0.1
   # Type declarations
   '@types/react': ^19.2.18

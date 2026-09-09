@@ -31,8 +31,9 @@ export interface CreateNextConfigOptions {
  * image ships all of `node_modules`, which defeats the self-hosting story outright.
  *
  * `assetPrefix` is NOT defaulted to `basePath`. With `basePath: '/iam'` Next already serves
- * chunks under `/iam/_next/`, so the default would buy nothing — and if Next composes the two
- * keys it produces `/iam/iam/_next/…` and every chunk 404s at runtime (spec § 4.4).
+ * chunks under `/iam/_next/`, so the default would buy nothing. `assetPrefix` exists for CDN
+ * offload, a different axis. (The double-prefix 404 an earlier revision feared is DISPROVEN —
+ * measured on Next 16.3.4, the two keys do not concatenate. Spec § 4.4, § 13 M3.)
  *
  * `env` is refused from `extend` because `env` inlines values at build time exactly as
  * `NEXT_PUBLIC_` does. The factory owns it, and writes only the two values that describe the

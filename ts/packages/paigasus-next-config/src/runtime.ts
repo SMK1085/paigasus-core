@@ -2,11 +2,22 @@
 //
 // Deployment configuration, read and validated at FIRST REQUEST — never at module scope.
 //
-// `server-only` is the structural guard. In the edge runtime Next does not provide a dynamic
-// `process.env`: values must be known at build time, so an edge route or middleware importing
-// this module would read inlined or undefined values rather than deployment values. That is the
-// same silent-wrong-value class the compiled-versus-deployed cross-check below exists to catch,
-// arriving through a different door (spec § 5). This module is Node-runtime only.
+// TWO GUARDS, COVERING TWO DIFFERENT DOORS. This module is Node-runtime only, because the edge
+// runtime has no dynamic `process.env` — values are inlined at build time there, so an edge
+// consumer would read the BUILDER's values rather than the deployment's. That is the same
+// silent-wrong-value class the compiled-versus-deployed cross-check below exists to catch.
+//
+// 1. `server-only` is a CLIENT-BUNDLE guard, and only that. It throws when the `react-server`
+//    export condition is ABSENT, i.e. in a client component. It does NOT stop a middleware or
+//    edge route: Next sets `react-server` for the middleware layer too
+//    (`next/dist/build/webpack-config.js` — `reactServerConditionNames` at :557, applied to
+//    `issuerLayer: WEBPACK_LAYERS.middleware` at :1404-1408), so the import resolves to
+//    server-only's own `empty.js` there and is a no-op. MEASURED on Next 16.3.4: a middleware.ts
+//    importing this module builds at exit 0 and this file lands in `.next/server/edge/chunks/`.
+//    See docs/superpowers/specs/2026-09-08-sma-502-measurements.md M6.
+// 2. The NEXT_RUNTIME check in getRuntimeConfig() is what covers the edge door. Next defines
+//    `process.env.NEXT_RUNTIME` as the literal `'edge'` for the edge compilation
+//    (`next/dist/build/define-env.js:80`), so the branch is statically true in an edge bundle.
 import 'server-only';
 import { z, type ZodRawShape } from 'zod';
 import { canonicalBasePath } from './base-path';
@@ -24,9 +35,15 @@ export interface PublicConfig {
 
 /**
  * `PAIGASUS_ZONES` arrives as a JSON string. Each value is validated as a canonical base path,
- * which is what closes the one hole in "zod strips unknown keys": zod constrains an OBJECT's key
- * set, never a RECORD's, so without this a secret pasted into the operator's JSON would ride
- * through the public projection inside an allowed key (spec § 5.4).
+ * which NARROWS the one hole in "zod strips unknown keys": zod constrains an OBJECT's key set,
+ * never a RECORD's, so without this any secret pasted into the operator's JSON would ride through
+ * the public projection inside an allowed key (spec § 5.4).
+ *
+ * It does not CLOSE that hole. A path-shaped secret — `{"x": "/sk-live-abc123"}` — is a valid
+ * canonical base path and still reaches the browser. What is removed is every non-path value
+ * (a URL, a token with a `.` or a `/`-free string); what remains is the narrower "secret that
+ * looks like a path" class, whose real control is that Helm GENERATES this map from the same
+ * values block as the ingress rules rather than anyone hand-writing it.
  *
  * Issue messages name the zone id but never the value. A zone id is a public routing label; a
  * value might be a mis-pasted secret.
@@ -68,14 +85,30 @@ export const coreEnvShape = {
 /**
  * Format a validation failure without ever rendering an input value.
  *
- * Custom issues carry messages authored in this file, which are provably value-free. Built-in
- * issues are rendered as their `code` alone rather than their message, because a future zod
- * version could start echoing the input into a built-in message and nothing would notice.
+ * A `message` is rendered ONLY for an issue whose path root is a key this package owns, because
+ * those messages are authored in this file and are provably value-free. Everything else — a
+ * built-in issue, and every issue raised by an `extraShape` — is rendered as its `code` alone.
+ *
+ * The extra-shape half is the load-bearing part. `extraShape` exists so `@paigasus/auth` and
+ * `@paigasus/sdk` can supply their own zod shapes, and a `.refine()` there may interpolate the
+ * input into its message. That produces `code: 'custom'` and would otherwise put a secret
+ * straight into the thrown error and the container log. An owner check is the only filter that
+ * holds once this file stops authoring every custom issue.
+ *
+ * MEASURED on the pinned zod 4.5.4, because the two `.refine()` message forms do NOT behave the
+ * same and only one leaks. zod 3's second-argument FUNCTION form,
+ * `.refine(fn, (v) => ({ message: `${v} …` }))`, is ignored by zod 4 — the issue message comes
+ * back as the generic `Invalid input`. The zod 4 form, `.refine(fn, { error: (iss) => `${iss.input} …` })`,
+ * renders the input verbatim. The test pins the second form; pinning the first would assert
+ * nothing, since it cannot leak on this zod version.
  */
 function describeIssues(error: z.ZodError): string {
+  const owned: readonly string[] = OWNED_KEYS;
   const parts = error.issues.map((issue) => {
+    const root = issue.path.length > 0 ? issue.path[0] : undefined;
     const where = issue.path.length > 0 ? issue.path.join('.') : '(root)';
-    return issue.code === 'custom' ? `${where}: ${issue.message}` : `${where}: ${issue.code}`;
+    const trusted = issue.code === 'custom' && typeof root === 'string' && owned.includes(root);
+    return trusted ? `${where}: ${issue.message}` : `${where}: ${issue.code}`;
   });
   return [...new Set(parts)].join('; ');
 }
@@ -139,6 +172,17 @@ export function defineRuntimeConfig<T extends ZodRawShape = Record<never, never>
   let cached: Parsed | undefined;
 
   function getRuntimeConfig(): Parsed {
+    // The EDGE door. `server-only` does not close it — Next sets the `react-server` condition for
+    // the middleware layer too, so that import is a no-op there (MEASURED; see this file's header
+    // and § M6 of the measurements document). Next defines `process.env.NEXT_RUNTIME` as the
+    // literal 'edge' for the edge compilation, so this branch is statically true in an edge
+    // bundle and the failure is loud rather than silent.
+    if (process.env.NEXT_RUNTIME === 'edge') {
+      throw new Error(
+        'getRuntimeConfig() was called in the EDGE runtime. The edge runtime has no dynamic `process.env` — values are inlined at build time there, so config read here would be the ' +
+          "builder's values or undefined, never the deployment's. Read configuration in a Node-runtime server component or route handler instead; ADR-0017 keeps middleware to cookie-presence checks for exactly this reason.",
+      );
+    }
     // A module-scope read from a prerendered page would bake the BUILDER's values into the image
     // and hand them to every self-hoster. Failing the build with an actionable message is the
     // only outcome that cannot ship silently.
