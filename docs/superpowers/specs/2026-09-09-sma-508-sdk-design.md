@@ -144,6 +144,11 @@ exits 0 and emits exactly **one** file, `google/rpc/error_details_pb.ts` (662 li
 non-generated import is `Duration` from `@bufbuild/protobuf/wkt`, which is runtime, not a second
 generated module. It exports `ErrorInfoSchema` alongside thirteen sibling `google.rpc` schemas.
 
+**The command above is the measurement as taken, and it is NOT the form to ship.** It names the
+module without a commit, which resolves to BSR HEAD. What `contracts/moon.yml` runs pins the
+commit — `buf.build/googleapis/googleapis:c17df5b2beca46928cc87d5656bd5343` — for the reason
+§ 5.2 gives. Do not copy this block into a task.
+
 A1.4's fear was that referencing `ErrorInfo` from `error.proto` would emit Rust and Python pointing
 at modules the run never produced. That fear was correct and this approach does not trigger it:
 `error.proto` still imports nothing, and the second template runs **only** the TypeScript plugin
