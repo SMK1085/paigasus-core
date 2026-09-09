@@ -1,6 +1,6 @@
 {
   "name": "@paigasus/auth",
-  "_comment_exports": "THREE subpath exports and deliberately NO \".\". The app-shell boundary rule denies @paigasus/auth/server; a root export re-exporting the server surface would let `import { getSession } from '@paigasus/auth'` walk around it. tests/exports.test.ts pins this key set.",
+  "_comment_exports": "THREE subpath exports and deliberately NO \".\". The app-shell boundary rule denies @paigasus/auth/server; a root export re-exporting the server surface would let `import { getSession } from '@paigasus/auth'` walk around it. tests/structure/exports.test.ts pins this key set.",
   "version": "0.0.0",
   "private": true,
   "type": "module",

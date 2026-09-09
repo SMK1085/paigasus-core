@@ -3,15 +3,15 @@
 // AC 4: middleware checks cookie PRESENCE only, never validity, and cannot even import anything
 // that knows how to validate one — CVE-2025-29927 was exactly a middleware auth bypass.
 import { randomUUID } from 'node:crypto';
-import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import ts from 'typescript';
 import { NextRequest } from 'next/server';
 import { createAuthMiddleware } from '../src/middleware.js';
 import { SESSION_COOKIE } from '../src/http/cookies.js';
+import { collectImportGraph, filesWithDynamicImportOrRequire } from './support/import-graph.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SRC = resolve(HERE, '../src');
@@ -59,90 +59,13 @@ describe('createAuthMiddleware', () => {
 // ---------------------------------------------------------------------------------------------
 // AC 4's structural assertion: src/middleware.ts's transitive import graph reaches no store, no
 // resolver, and no openid-client module. A doc comment saying so is not a control; this is.
-// ---------------------------------------------------------------------------------------------
-
-interface ImportGraph {
-  /** Every relative-import file reached, as absolute paths, INCLUDING the entry file itself. */
-  files: Set<string>;
-  /** Every bare (non-relative) module specifier encountered — recorded, never walked into. */
-  packages: Set<string>;
-}
-
-// WHAT THIS WALKER SEES, AND WHAT IT DOES NOT (review round 1). `moduleSpecifiers` below reads
-// only STATIC `ImportDeclaration`/`ExportDeclaration` nodes — the ones ECMAScript requires to sit
-// at a module's top level, which is exactly why a single-level `forEachChild` (not a recursive
-// visit) is enough to find every one of them. It is blind to a DYNAMIC `import(...)` call or a
-// `require(...)` call: both are ordinary call expressions, legal anywhere in a function body, and
-// invisible to a walk that only looks for import/export declaration nodes. A future edit that
-// swapped a static `import { redisStore } from './adapters/redis-store.js'` for
-// `await import('./adapters/redis-store.js')` would satisfy the declaration-based check while
-// still giving middleware.ts a real, working path to the store at runtime.
 //
-// The regex below is a deliberately blunt BACKSTOP for that gap, not a replacement for the
-// declaration walk: it fails the whole graph if ANY walked file contains the text `import(` or
-// `require(` at all, without trying to resolve what it points at. That is conservative by design —
-// a legitimate dynamic import would also fail it — but nothing in this package's `src/` uses one
-// today (asserted by the positive control below, which would need updating the day one is added
-// deliberately), and "middleware.ts's graph must not even ATTEMPT a dynamic escape hatch" is
-// exactly AC 4's shape.
-const DYNAMIC_IMPORT_OR_REQUIRE = /\b(?:import|require)\s*\(/;
-
-/** Every walked file whose raw source contains a dynamic `import(...)` or `require(...)` call. */
-function filesWithDynamicImportOrRequire(files: Set<string>): string[] {
-  return [...files].filter((file) => DYNAMIC_IMPORT_OR_REQUIRE.test(readFileSync(file, 'utf8')));
-}
-
-/** Resolve a relative import specifier (repo convention: `.js` extension, real file is `.ts`/`.tsx`) to a file on disk. */
-function resolveRelative(fromFile: string, specifier: string): string | null {
-  if (!specifier.startsWith('.')) return null;
-  let base = resolve(dirname(fromFile), specifier);
-  if (base.endsWith('.js')) base = base.slice(0, -'.js'.length);
-  for (const ext of ['.ts', '.tsx']) {
-    const candidate = `${base}${ext}`;
-    if (existsSync(candidate)) return candidate;
-  }
-  return null;
-}
-
-/** Every module specifier an `import`/`export ... from` declaration in this file names. */
-function moduleSpecifiers(file: string): string[] {
-  const source = readFileSync(file, 'utf8');
-  const sourceFile = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true);
-  const specifiers: string[] = [];
-  sourceFile.forEachChild((node) => {
-    const hasModuleSpecifier = ts.isImportDeclaration(node) || ts.isExportDeclaration(node);
-    if (!hasModuleSpecifier) return;
-    const moduleSpecifier = node.moduleSpecifier;
-    if (moduleSpecifier !== undefined && ts.isStringLiteral(moduleSpecifier)) {
-      specifiers.push(moduleSpecifier.text);
-    }
-  });
-  return specifiers;
-}
-
-/** BFS over the relative-import closure starting at `entry`, recording every bare specifier found. */
-function collectImportGraph(entry: string): ImportGraph {
-  const files = new Set<string>();
-  const packages = new Set<string>();
-  const stack = [entry];
-
-  while (stack.length > 0) {
-    const file = stack.pop();
-    if (file === undefined || files.has(file)) continue;
-    files.add(file);
-
-    for (const specifier of moduleSpecifiers(file)) {
-      const resolved = resolveRelative(file, specifier);
-      if (resolved !== null) {
-        stack.push(resolved);
-      } else {
-        packages.add(specifier);
-      }
-    }
-  }
-
-  return { files, packages };
-}
+// The walker itself (ImportGraph, resolveRelative, moduleSpecifiers, collectImportGraph, and the
+// DYNAMIC_IMPORT_OR_REQUIRE backstop) now lives in tests/support/import-graph.ts (task 12), so
+// tests/structure/import-graph.test.ts's client-entry walk reuses this exact, already-reviewed
+// implementation instead of a second copy that could drift from it. Only the middleware-specific
+// forbidden-path predicate stays local, since the client walk's forbidden set is different.
+// ---------------------------------------------------------------------------------------------
 
 /** True if any reached file is a store, resolver, or single-flight module — see AC 4. */
 function reachesStoreOrResolver(files: Set<string>): string[] {
