@@ -131,3 +131,40 @@ embed the connection DSN.
 `redis:8-alpine` (as named in the task-4 brief and in
 `tests/containers/redis-store.test.ts`) exists and was used directly — no fallback
 to `redis:7-alpine` was needed.
+
+## M5 — single-flight refresh: proving AC 2's test can fail
+
+Task 5's Step 8 is mandatory: an AC 2 test that cannot fail proves nothing. The
+guard was mutated in `src/core/single-flight.ts` by commenting out
+`if (await store.tryAcquireLock(sid, lockToken, lockTtlMs))` and replacing it
+with an unconditional `if (true)`, so every caller enters the refresh critical
+section instead of contending for the per-session lock. Markers
+`M5-MUTATION-START` / `M5-MUTATION-END` bounded the change during the run and
+were deleted afterward — never reverted with `git checkout --`, since that
+would also have discarded the (uncommitted, at the time) Task 5 implementation.
+
+`pnpm -C ts/packages/paigasus-auth exec vitest run tests/core/single-flight.test.ts`
+against the mutated file: **5 of 13 tests failed.**
+
+The two tests this step exists to break both failed on the refresh counter,
+which is the AC 2 claim itself:
+
+- `TWO CONCURRENT CALLERS ON AN EXPIRED TOKEN TRIGGER EXACTLY ONE REFRESH` —
+  `expected 2 to be 1`. **Observed refresh count: 2.**
+- `TWENTY concurrent callers still trigger exactly one refresh` —
+  `expected 20 to be 1`. **Observed refresh count: 20** (one call per
+  concurrent caller — the lock was providing zero exclusion).
+
+Three further tests failed as a side effect of the same mutation, for a
+different reason: `returns null when the record is deleted between the read
+and the lock`, `returns the stale-but-live record when the lock cannot be won
+in time`, and `returns null when the lock cannot be won and the token is
+genuinely expired` all threw `Error: must not refresh`, because their fixtures
+rely on losing the lock race and removing the guard makes every caller "win"
+it. This is expected collateral damage of this specific mutation, not a
+separate defect — it is further evidence the guard is load-bearing, not an
+additional AC 2 finding.
+
+After confirming the failure, the guard was restored by deleting the two
+marker comments and the `if (true)` line (never `git checkout --`), and
+`tests/core/single-flight.test.ts` was re-run: 13 of 13 tests passed again.
