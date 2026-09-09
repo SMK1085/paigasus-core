@@ -52,6 +52,16 @@ describe('toSessionView', () => {
     expect(toSessionView({ ...RECORD, idTokenClaims: claims }).displayName).toBe('a');
   });
 
+  it('copies roleGrants rather than handing out the record array by reference', () => {
+    // Task 10: a client surface now holds a SessionView in-process, so mutating the view's
+    // `grants` array must never reach back into the SessionRecord (or a shared array between two
+    // views built from the same record).
+    const v = toSessionView(RECORD);
+    expect(v.grants).not.toBe(RECORD.principal.roleGrants);
+    v.grants.push({ scopePrn: 'prn:pgs:iam::org1:org/injected', roleKey: 'intruder' });
+    expect(RECORD.principal.roleGrants).toHaveLength(1);
+  });
+
   it('a SessionRecord is not assignable to a SessionView', () => {
     // Enforced by `tsc --noEmit` in the build/typecheck tasks, NOT by `vitest run` — the inherited
     // test task passes no --typecheck, so expectTypeOf is a runtime no-op there. It works only
