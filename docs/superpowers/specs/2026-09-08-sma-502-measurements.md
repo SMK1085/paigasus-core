@@ -184,7 +184,7 @@ the main process. No fallback triggered — Task 3's `getRuntimeConfig()` guard 
 module-scope `NEXT_PHASE` throw) works as designed; Task 3's "residual not covered by the gate"
 concern about workers not inheriting the variable does not apply.
 
-## M4 — MOON_NEGATED_GLOBS
+## M4 — MOON_NEGATED_OUTPUT_GLOBS
 
 `ts/apps/paigasus-console/moon.yml`'s `build` task `outputs` temporarily changed from `['.next']`
 to `['.next/**/*', '!.next/cache/**/*']`.
@@ -218,12 +218,67 @@ $ tar -tzf .moon/cache/outputs/f7d725d9....tar.gz | grep -c '\.next/cache/'
 0
 ```
 
-**Derived value: `MOON_NEGATED_GLOBS = true`.** Moon 2.5.3 honours `!`-prefixed negated globs in
-task `outputs`: the graph loads cleanly, the build runs, dot-prefixed entries such as
+**Derived value: `MOON_NEGATED_OUTPUT_GLOBS = true`.** Moon 2.5.3 honours `!`-prefixed negated
+globs in task **`outputs`**: the graph loads cleanly, the build runs, dot-prefixed entries such as
 `.next/BUILD_ID` ARE captured in the cached output archive, and everything under `.next/cache/`
 (0 matching entries in the tarball) is correctly excluded by the negation. No fallback triggered.
 
 `ts/apps/paigasus-console/moon.yml` was reverted to `outputs: ['.next']` after this measurement.
+
+### M4b — negated INPUT globs (added at CodeRabbit round 1)
+
+**Why this exists.** The measurement above changed only `outputs` and inspected the output archive.
+It was nevertheless cited as evidence for the negated **input** glob in
+`repo:next-public-free`'s `inputs` (`moon.yml`, spec § 6.5), which it does not support: an output
+negation controls what the cache ARCHIVES, an input negation controls what the cache KEYS ON, and
+Moon implements those separately. Nothing had compared task hashes across a change to an excluded
+path. This probe does.
+
+**Method.** `repo:next-public-free` declares
+`inputs: ['!ts/apps/*/.next/**', 'ci/next-public/**/*', 'ts/**/*']`. The task hash is read from
+Moon's own completion line:
+
+```
+$ moon run repo:next-public-free 2>&1 \
+    | grep -oE 'repo:next-public-free \(.*, [0-9a-f]{8}\)' | tail -n1 \
+    | grep -oE '[0-9a-f]{8}\)' | tr -d ')'
+```
+
+Three arms, because two are not enough. Arm A alone cannot tell "the negation excluded the file"
+from "the probe cannot detect anything"; arm B is the positive control that rules the second out.
+Arms A and B together still cannot tell "the negation excluded it" from "that path would not have
+been hashed anyway", so arm C repeats arm A with the negation line deleted from `moon.yml`.
+
+```
+## arm A — excluded path, negation present
+  baseline                 hash=cae69cf0
+  with .next/probe file    hash=cae69cf0        (ts/apps/paigasus-console/.next/probe-excluded.txt)
+  RESULT: unchanged
+
+## arm B — positive control, an included ts/ path
+  baseline                 hash=cae69cf0
+  with new tracked ts file hash=8867aa6f        (ts/packages/paigasus-next-config/src/probe-included.ts)
+  RESULT: CHANGED
+
+## arm C — same excluded path, negation REMOVED from moon.yml
+  baseline (no negation)   hash=acfd6118
+  with .next/probe file    hash=59cd599f
+  RESULT: CHANGED
+```
+
+**Derived value: `MOON_NEGATED_INPUT_GLOBS = true`.** An excluded `.next` file does not move the
+task hash (A); an included `ts/` file does, so the probe is live rather than inert (B); and the
+same excluded file DOES move the hash once the negation is removed, so the negation is what
+excluded it (C). No fallback triggered.
+
+**Arm C also corrects a plausible wrong reading.** The `.next` tree is gitignored, so one might
+assume Moon never hashes it and the negation is decorative. It is not: arm C shows Moon hashes an
+untracked, gitignored file when a declared input glob covers it. That is consistent with
+`.moon/workspace.yml`'s `hasher.ignorePatterns`, which deliberately omits `'**/.next/**'` — and it
+is exactly why `moon.yml`'s comment says the negation is what keeps the broad `ts/**/*` form
+affordable. Both halves of that comment are now measured rather than assumed.
+
+The probe files were removed and `moon.yml` restored; `git status --short` was empty afterwards.
 
 ## M5b — TS_LOADABLE_FROM_ESLINT_CONFIG
 
@@ -485,7 +540,8 @@ remains (confirmed no other tracked file changed).
 |---|---|---|
 | `STANDALONE_ENTRY` | `.next/standalone/apps/paigasus-console/server.js` | No — matches spec prediction |
 | `ASSET_PREFIX_COMPOSES` | `false` | **Yes** — affects any task setting `assetPrefix` relative to `basePath` |
-| `MOON_NEGATED_GLOBS` | `true` | No |
+| `MOON_NEGATED_OUTPUT_GLOBS` (M4) | `true` | No |
+| `MOON_NEGATED_INPUT_GLOBS` (M4b) | `true` | No |
 | `TS_LOADABLE_FROM_NEXT_CONFIG` | `true` | No |
 | `TS_LOADABLE_FROM_ESLINT_CONFIG` | `true`, with a packaging caveat (see M5b) | No fallback triggered, but Task 2 must declare the dependency on every direct-import consumer's `package.json` |
 | `NEXT_PHASE_REACHES_WORKERS` | `true` | No — Task 3's guard design works as-is |
@@ -501,7 +557,7 @@ remains (confirmed no other tracked file changed).
   directly by a TypeScript config file (not only via the `src/eslint.mjs` preset path the plan
   already defaults to), the importing file's own nearest `package.json` declares the dependency —
   `workspace:*` linking is per-package, not workspace-wide.
-- No other measurement triggered a fallback: `STANDALONE_ENTRY`, `MOON_NEGATED_GLOBS`,
+- No other measurement triggered a fallback: `STANDALONE_ENTRY`, `MOON_NEGATED_OUTPUT_GLOBS`, `MOON_NEGATED_INPUT_GLOBS`,
   `TS_LOADABLE_FROM_NEXT_CONFIG`, and `NEXT_PHASE_REACHES_WORKERS` all matched their expected /
   predicted values, so Tasks 2, 4, 5, 7 and 8 can proceed on the spec's original assumptions for
   those four.

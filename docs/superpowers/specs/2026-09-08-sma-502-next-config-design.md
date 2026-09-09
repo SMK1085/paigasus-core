@@ -426,10 +426,12 @@ ci/next-public/**/*
 `.moon/workspace.yml:59-60` deliberately omits `'**/.next/**'` from
 `hasher.ignorePatterns`, so a bare `ts/**/*` would hash the whole built `.next`
 tree — output this gate never scans — and re-key on every console build. The
-negated entry is what keeps the broad form affordable, and § 13 M4 measures that
-Moon 2.5.3 honours a negated **input** glob (alongside the negated **output**
-glob § 8.1 needs). `ts/node_modules/**` needs no entry: `hasher.ignorePatterns`
-already covers it.
+negated entry is what keeps the broad form affordable, and § 13 **M4b** measures
+that Moon 2.5.3 honours a negated **input** glob — by task hash, with a positive
+control, and with a third arm confirming the same `.next` file DOES re-key the
+task once the negation is removed. (§ 13 M4 measures the negated **output** glob
+§ 8.1 needs; it is a separate mechanism and was never evidence for this one.)
+`ts/node_modules/**` needs no entry: `hasher.ignorePatterns` already covers it.
 
 **Revision 2 declared `ts/apps/**/*` and `ts/packages/**/*` instead, and claimed
 the divergence from the corpus "is one-directional: the gate may run when
@@ -852,9 +854,23 @@ pass on a stale artifact.
 **M3 — `basePath` and `assetPrefix` do NOT compose.** See § 4.4; the double-prefix
 hazard is disproven.
 
-**M4 — Moon 2.5.3 honours negated `inputs` and `outputs` globs.** So § 6.5's
-input list and § 8.1's `!.next/cache/**/*` stand as written, and neither
-fallback is needed.
+**M4 — Moon 2.5.3 honours negated `outputs` globs**, measured against the cached
+output archive: `.next/BUILD_ID` is captured and `.next/cache/**` is not. So
+§ 8.1's `!.next/cache/**/*` stands as written and its fallback is not needed.
+
+**M4 originally claimed the `inputs` half too, and had not measured it** — it
+changed only `outputs` and inspected only the output archive. An output negation
+controls what the cache ARCHIVES; an input negation controls what the cache KEYS
+ON, and Moon implements those separately, so the one was never evidence for the
+other. **M4b** (added at CodeRabbit round 1) supplies the missing measurement:
+three arms comparing `repo:next-public-free`'s task hash. An excluded `.next`
+file leaves it unchanged (`cae69cf0` -> `cae69cf0`); a new tracked `ts/` file
+changes it, which is the positive control proving the probe is live
+(`cae69cf0` -> `8867aa6f`); and with the negation line deleted from `moon.yml`
+the same excluded file DOES change it (`acfd6118` -> `59cd599f`), so the
+negation is causally responsible rather than the path being unhashed anyway.
+So § 6.5's input list now stands on its own measurement, and its fallback is
+not needed either.
 
 **M5 — both `next.config.ts` and `ts/eslint.config.js` can import TypeScript
 source from the workspace package**, with one packaging condition: the consuming
