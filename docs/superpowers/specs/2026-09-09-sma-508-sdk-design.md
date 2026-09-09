@@ -65,7 +65,7 @@ ts/packages/paigasus-sdk/
     server-guard.ts     the single `import 'server-only'` site (§ 6.2)
     transport.ts        per-key transport cache (§ 7)
     iam.ts              typed client factories over the seven IAM services
-    chat.ts             the OpenAI-compatible chat client + parseTerminalFrame (§ 8)
+    chat.ts             the OpenAI-compatible chat client + createTerminalFrameParser (§ 8)
     errors/
       types.ts          PaigasusError, Presentation — NO server guard (§ 6.3)
       presentation.ts   the reason -> presentation override table (§ 9.3)
@@ -344,6 +344,9 @@ The key is therefore a stable serialization of the **whole options object**, and
 that object rather than a bare string. Today it holds one field; the rule is written down now so
 adding the second does not silently alias two transports.
 
+This is also why `Auth` (§ 7.4) is a parameter of the client factory and never of `getTransport`: the
+transport identity — and therefore this cache key — must stay token-free.
+
 ### 7.2 A default deadline is mandatory
 
 `defaultTimeoutMs` is set — **10 s** — rather than left unset. An unset deadline lets a gRPC call in
@@ -380,6 +383,19 @@ The token is a parameter to the **client**, never to `getTransport`, so it is st
 cached object. `Auth` is a union rather than an optional so that an unauthenticated call — the health
 check is the real case — is a written decision rather than an omission.
 
+### 7.5 A client is request-scoped; the transport is not
+
+The transport is cached and shared deliberately (§ 7.1–§ 7.3). The **client** returned by
+`createIamClient` is not cacheable: it holds a bearer, so its lifetime is one request.
+
+A module-scope `const client = createIamClient(...)` is a cross-request token leak — the same leak
+§ 7 exists to prevent, moved one level up from the transport to the client. The rule is stated here
+because the type system cannot express it: nothing about `Client<S>`'s shape marks it request-scoped.
+
+The test tier gains a **cross-request token-isolation test** (§ 10): two clients built from the same
+cached transport with different `Auth` values must produce two different `authorization` headers, and
+neither request may carry the other's token.
+
 ## 8. The chat client
 
 `POST /v1/chat/completions` on the gateway, the one hand-written surface (§ 4.1).
@@ -399,13 +415,49 @@ Two facts the passthrough forces into the API, both from the gateway's own code:
   one terminal SSE frame carrying `code: "upstream-error"` and ends the stream (`chat.rs:63`).
 
 **Mid-stream errors are not surfaced by this client, and the arm that maps them is a caller tool.**
-The SDK never scans the stream, because scanning means buffering. So `parseTerminalFrame(chunk:
-string): PaigasusError | null` is **exported** — a caller consuming its own stream calls it — rather
-than being an internal arm no code path reaches. Its test is driven by a fixture holding the exact
-frame from `chat.rs:63`, with a drift check asserting the fixture still matches that Rust constant
-(the `repo:parity-corpus-drift` precedent). Without the fixture the test would hand-build the object
-it expects and could not fail when the gateway's frame changes — which is the one drift it exists to
-absorb.
+The SDK never scans the stream, because scanning means buffering. So a terminal-frame parser is
+**exported** — a caller consuming its own stream drives it — rather than being an internal arm no
+code path reaches.
+
+A `ReadableStream` chunk is not guaranteed to contain one complete SSE record. An SSE record is
+delimited by a blank line, and a chunk boundary can fall anywhere, so a parser that reads a bare
+chunk is not merely lossy — it is lossy precisely on the split-frame case, the terminal error frame
+split across two chunks. `parseTerminalFrame(chunk: string)` would silently miss the terminal error
+in exactly the case it exists to catch. The exported shape is therefore a stateful incremental
+parser, not a function over one chunk:
+
+```ts
+// Feed it chunks as they arrive; it buffers across boundaries and yields
+// each complete SSE record it can form.
+export function createTerminalFrameParser(): {
+  push(chunk: string): PaigasusError | null;
+};
+```
+
+The parser holds only the trailing partial record, so it does not reintroduce the buffering the
+passthrough exists to avoid. The SDK still never reads the stream itself; the caller drives the
+parser with chunks it is already reading.
+
+Its test is driven by a fixture holding the exact frame from `chat.rs:63`, with a drift check
+asserting the fixture still matches that Rust constant (the `repo:parity-corpus-drift` precedent).
+Without the fixture the test would hand-build the object it expects and could not fail when the
+gateway's frame changes — which is the one drift it exists to absorb.
+
+### 8.1 Deadlines and cancellation
+
+§ 7.2 gives the gRPC transport a 10 s default deadline. § 8's chat client had no timeout contract at
+all — no `AbortSignal`, no pre-header timeout, no statement of what happens when a caller abandons
+the stream. That asymmetry is an oversight, not a decision, so the chat client gets the same rules:
+
+- The client accepts an optional `AbortSignal` and forwards it to `fetch`.
+- A **pre-header timeout** bounds the wait for response headers, at the same **10 s** default as the
+  gRPC transport, so the two surfaces agree.
+- **After headers, no wall-clock timeout applies.** A long chat completion is a correct slow response,
+  not a stalled one. What applies instead is an **idle timeout**: the stream fails if no bytes arrive
+  for the idle window. A wall-clock cap on an active stream would abort exactly the requests the
+  streaming surface exists to serve.
+- If the caller abandons the returned stream, cancellation must propagate to the upstream connection
+  rather than leaking it.
 
 ## 9. The error model
 
@@ -417,6 +469,7 @@ interface PaigasusError {
   domain: ErrorDomain | null;
   reason: ErrorReason | null;              // null === unmapped
   rawReason: string | null;                // what the wire actually said
+  rawDomain: string | null;                // what the wire actually said, for domain
   message: string;                         // human-readable. NEVER branched on.
   correlationId: string | null;
   requestId: string | null;
@@ -432,6 +485,12 @@ type Presentation =
 
 `message` is carried for display and logging and is never an input to a branch. AC 2 is satisfied
 structurally: no function in `src/errors/` reads `message`.
+
+`rawDomain` exists for the same reason as `rawReason`: if a newer service sends an unregistered
+domain, `domain` is `null` and the wire value would otherwise be lost. ADR-0019 decision 9 makes the
+whole `(domain, reason)` pair the basis of consumer branching, so keeping half the pair loggable and
+half of it discarded would be worse than keeping neither. `rawDomain` keeps the wire value
+loggable and user-reportable even when `domain` cannot be resolved.
 
 `retryable` is tri-state deliberately. The wire's values are `"true" | "false" | "unknown"`, and
 collapsing `unknown` to `false` would assert a non-retryability the service declined to assert.
@@ -539,11 +598,22 @@ decision is revisited rather than inherited.
 
 `mapError` accepts:
 
-1. **A `ConnectError`** — `err.findDetails(ErrorInfoSchema)[0]` gives `(reason, domain, metadata)`.
-   `metadata` carries `retryable`, and `correlation_id`/`request_id` **when the error was raised
-   inside a request scope** (`convert.rs:59-74`) — omitted, not nulled, outside one. `err.code` gives
-   the gRPC `Code`; `err.metadata` is *"a union of response headers and trailers"*
-   (`connect-error.d.ts:22-24`), the fallback for the correlation id.
+1. **A `ConnectError`.** `err.findDetails(ErrorInfoSchema)[0]` can be `undefined` — a `ConnectError`
+   raised by a network failure, a proxy, or a connection reset carries a gRPC status and no
+   `ErrorInfo` detail at all. This is a reachable path, not a defensive hypothetical, so arm 1
+   branches before reading the detail:
+   - **Detail present:** `err.findDetails(ErrorInfoSchema)[0]` gives `(reason, domain, metadata)`.
+     `metadata` carries `retryable`, and `correlation_id`/`request_id` **when the error was raised
+     inside a request scope** (`convert.rs:59-74`) — omitted, not nulled, outside one. `err.code`
+     gives the gRPC `Code`; `err.metadata` is *"a union of response headers and trailers"*
+     (`connect-error.d.ts:22-24`), the fallback for the correlation id.
+   - **Detail absent:** `domain`, `reason`, `rawReason` and `rawDomain` are `null`. `retryable` is
+     `null` — the wire asserted nothing. `metadata` is empty and `requestId` is `null`.
+     `correlationId` is still read from `err.metadata` when present, since that is a union of
+     response headers and trailers and may still carry it. `message` is the `ConnectError`'s
+     message, preserved. `presentation` is derived from the gRPC status table in § 9.2, including
+     its `generic` fallback. Without this branch the SDK throws while mapping an error, which turns
+     a recoverable upstream failure into an unhandled exception in the BFF.
 2. **An IAM HTTP response** — `{ status, headers, body }` where body is `{error:{code,message}}`. The
    body carries **no** correlation id and **no** retryable; both are headers
    (`paigasus-correlation-id`, `paigasus-request-id`, `paigasus-retryable`,
@@ -552,7 +622,7 @@ decision is revisited rather than inherited.
 3. **A gateway HTTP response** — same envelope plus `{message,type,param,code}`. `code` is drawn from
    the same registry (asserted `gateway/adapters/http/error.rs:296-309`). `type` is **not** read: it
    takes two values and both are coarser than `code`. `param` enters `metadata` when present.
-4. **A parsed terminal SSE frame**, via the exported `parseTerminalFrame` (§ 8). `transport` is
+4. **A parsed terminal SSE frame**, via the exported terminal-frame parser (§ 8). `transport` is
    `{ kind: 'http', status: 200 }` because the head was already committed; `retryable` is `null`,
    since that frame deliberately carries no retryable signal (`chat.rs:56-62`).
 
@@ -566,10 +636,12 @@ the arm is not mistaken for a code path the SDK exercises.
 `request_id` are removed after being read into their typed fields, so a caller cannot branch on a raw
 duplicate that disagrees with the parsed one. `capability`, `field` and `param` survive.
 
-**Unknown reason handling (AC 2).** `rawReason` always holds what the wire said. When `fromWireReason`
-rejects it, `reason` is `null`, `presentation` falls back to the transport-derived value, and
-`correlationId` is preserved. An unrecognized code degrades to a generic presentation plus a
-user-reportable id — never a throw, never an empty message.
+**Unknown reason and domain handling (AC 2).** `rawReason` always holds what the wire said. When
+`fromWireReason` rejects it, `reason` is `null`, `presentation` falls back to the transport-derived
+value, and `correlationId` is preserved. An unrecognized code degrades to a generic presentation plus
+a user-reportable id — never a throw, never an empty message. `rawDomain` is populated from
+`ErrorInfo.domain` verbatim, whether or not `fromWireDomain` resolves it — the same "keep the wire
+value even when it cannot be mapped" rule, applied to the other half of the pair.
 
 **The two system-retirement 409s are not special-cased.** They add sibling keys next to the standard
 `error` object rather than replacing it (`system_retirement.rs:111-126`). `mapError` reads
@@ -582,15 +654,17 @@ user-reportable id — never a throw, never an empty message.
 | Wire-reason codec parity | Both directions over all 57 reasons; the ten malformed inputs the Rust test rejects |
 | Presentation totality (AC 3) | Every descriptor value has an entry; `INVALID_REQUEST_SCHEMA` and `CAPABILITY_DISABLED` resolve as § 9.4 states |
 | Transport-status tables (§ 9.2) | Both tables, including the `generic` fall-through |
-| `mapError` — gRPC | A `ConnectError` carrying a real `ErrorInfo` detail round-trips; `correlation_id`/`retryable` read from `metadata`; the three lifted keys are absent from `metadata` |
+| `mapError` — gRPC | A `ConnectError` carrying a real `ErrorInfo` detail round-trips; `correlation_id`/`retryable` read from `metadata`; the three lifted keys are absent from `metadata`; a `ConnectError` with no `ErrorInfo` detail falls back to the gRPC status table with a message-only object |
 | `mapError` — HTTP | Both envelopes; correlation id from **headers**; tri-state retryable |
-| `mapError` — degradation (AC 2) | Unknown reason yields `reason: null`, keeps `rawReason` and `correlationId` |
+| `mapError` — degradation (AC 2) | Unknown reason yields `reason: null`, keeps `rawReason` and `correlationId`; unknown domain yields `domain: null`, keeps `rawDomain` |
 | AC 4 mapping | Each of the four codes yields its state |
 | Message-independence (AC 2) | One wire error with three different `message` strings maps to three identical objects modulo `message` |
-| Transport cache | Equal options return the same object; differing options do not; two `Auth` values on one cached transport produce two `authorization` headers; `disposeTransports()` lets vitest exit |
+| Transport cache | Equal options return the same object; differing options do not; two clients built from the same cached transport with different `Auth` values produce two different `authorization` headers and neither request carries the other's token; `disposeTransports()` lets vitest exit |
 | Server-only structure (AC 1) | Every guarded `exports` entry imports the guard as its first import statement, driven off `package.json` |
-| Chat | Non-streaming maps a non-2xx; streaming returns the identical `ReadableStream` object; `parseTerminalFrame` against the pinned fixture |
+| Chat | Non-streaming maps a non-2xx; streaming returns the identical `ReadableStream` object; the terminal-frame parser against the pinned fixture, a frame split across two chunks, two frames in one chunk, and a partial trailing record that never completes |
 | Terminal-frame drift | The fixture still matches `chat.rs:63` |
+| Chat deadlines (§ 8.1) | A stalled-header request fails at the pre-header deadline |
+| Chat cancellation (§ 8.1) | An abandoned stream propagates cancellation to the upstream connection |
 
 **Two coverage gaps, stated rather than implied.**
 

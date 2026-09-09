@@ -168,11 +168,17 @@ In `contracts/moon.yml`, replace the `generate` task's `command:` line with a `s
     # cause), the tree is left with google/rpc/error_details_pb.ts DELETED,
     # because `clean: true` already ran. Re-run `moon run contracts:generate
     # --force`. Do NOT commit the deletion.
+    #
+    # The module reference below carries a COMMIT PIN, not a bare module name.
+    # `buf.lock` governs `deps:` resolution in buf.yaml; it is not consulted
+    # when a remote module is passed as the generation input on the command
+    # line, so an unpinned reference here floats to whatever googleapis
+    # publishes next, unpinned and silently.
     script: |
       set -euo pipefail
       buf generate
       buf generate --template buf.gen.googleapis.yaml \
-        buf.build/googleapis/googleapis \
+        buf.build/googleapis/googleapis:c17df5b2beca46928cc87d5656bd5343 \
         --path google/rpc/error_details.proto
     toolchain: 'system'
     # SMA-592. The three REMOTE plugin versions live in buf.gen.yaml, already listed below. The
