@@ -125,6 +125,15 @@ catalog:
   '@semantic-release/commit-analyzer': ^13.0.1
   # Protobuf-ES v2 runtime (SMA-389)
   '@bufbuild/protobuf': ^2.14.1
+  # Connect-ES v2 — the gRPC transport and typed clients @paigasus/sdk builds on (SMA-508,
+  # ADR-0018). `@connectrpc/connect` is the protocol-independent client half (createClient,
+  # ContextValues, Interceptor); `@connectrpc/connect-node` supplies createGrpcTransport, which is
+  # HTTP/2 ONLY — it has no `httpVersion` option, unlike createConnectTransport and
+  # createGrpcWebTransport. Both are pinned at the same minor on purpose: connect-node declares a
+  # peer range on connect, and a split would let the two drift across a protocol change.
+  # connect-node's `@bufbuild/protobuf` peer range is ^2.7.0, which the entry above satisfies.
+  '@connectrpc/connect': ^2.2.0
+  '@connectrpc/connect-node': ^2.2.0
   # napi-rs CLI — drives `napi build --platform` for the Node FFI binding (SMA-420).
   # It is a devDependency of @paigasus/node-bindings, but that crate is reached via a `file:`
   # specifier (not a workspace member), and pnpm does NOT install a dependency's devDeps — so
