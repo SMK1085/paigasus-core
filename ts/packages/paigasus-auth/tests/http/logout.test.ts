@@ -13,11 +13,18 @@
 // forged POST arrives with no session and does nothing — asserted here so the reasoning is
 // recorded rather than assumed (matching the omission comment in routes.ts's dispatcher).
 //
-// KNOWN GAP, carried from routes.ts: `id_token_hint` is never sent to `buildEndSessionUrl`.
-// `SessionRecord` stores only decoded `idTokenClaims`, never the raw ID token JWT the parameter
-// needs, and `OidcTokens` (adapters/oidc.ts) does not surface it either. The test below for the
-// end-session redirect therefore asserts `post_logout_redirect_uri` and `state` only — see the
-// task 9 report for the full DONE_WITH_CONCERNS writeup.
+// `id_token_hint` IS DELIBERATELY OMITTED, not a known gap left to close later (final fix wave,
+// finding 7: this comment previously called it a "KNOWN GAP" — superseded). `SessionRecord`
+// stores only decoded `idTokenClaims`, never the raw ID token JWT the parameter needs, and
+// `OidcTokens` (adapters/oidc.ts) does not surface it either — storing the raw token would add a
+// THIRD bearer credential to `SessionRecord` for no benefit to either provider this design
+// targets (design doc § 9.5, routes.ts's own "NAMED RESIDUAL" comment on `handleLogout`).
+// M12 (docs/superpowers/specs/2026-09-09-sma-506-measurements.md) measured Keycloak 26.4 on the
+// wire: it completes the end-session redirect immediately on `client_id` alone, with no
+// `id_token_hint` and no confirmation interstitial — `openid-client@6.8.8` appends `client_id`
+// unconditionally when the caller supplies none. The test below for the end-session redirect
+// therefore asserts `post_logout_redirect_uri` and `state`, and explicitly that `id_token_hint`
+// is absent — a positive assertion of the design, not a placeholder for missing coverage.
 import { beforeEach, describe, expect, it } from 'vitest';
 import { claimsPrincipalResolver } from '../../src/adapters/claims-resolver.js';
 import { MemorySessionStore } from '../../src/adapters/memory-store.js';
@@ -310,8 +317,10 @@ describe('POST /auth/logout — end-session redirect', () => {
     const call = oidc.buildEndSessionUrlCalls[0];
     expect(call?.postLogoutRedirectUri).toBe(POST_LOGOUT_REDIRECT_URI);
     expect(call?.state).toBeTruthy();
-    // Known gap (see routes.ts and the task 9 report): SessionRecord never carries the raw ID
-    // token JWT, only its decoded claims, so id_token_hint cannot be populated here.
+    // DELIBERATE, not a gap (see routes.ts's "NAMED RESIDUAL" comment and design doc § 9.5):
+    // SessionRecord never carries the raw ID token JWT, only its decoded claims, and M12 measured
+    // Keycloak 26.4 completing the end-session redirect on `client_id` alone with no
+    // `id_token_hint` needed.
     expect(call?.idTokenHint).toBeUndefined();
   });
 

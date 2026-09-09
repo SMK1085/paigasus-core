@@ -50,19 +50,18 @@ return v`;
 const MAX_RECONNECT_RETRIES = 10;
 
 /**
- * Holds a connection string without ever printing it. Both `toString` and `toJSON` return a
- * fixed redacted form, so an accidental `console.log(store)` or `JSON.stringify` on anything
- * holding this value cannot leak the DSN — which node-redis's OWN connection errors do embed,
- * which is exactly why this package never re-throws or logs a caught node-redis error object.
+ * A marker for "this value is a Redis connection string, never print it." Both `toString` and
+ * `toJSON` return a fixed redacted literal, so an accidental `console.log(store)` or
+ * `JSON.stringify` on anything holding one cannot leak a DSN — which node-redis's OWN connection
+ * errors do embed, which is exactly why this package never re-throws or logs a caught node-redis
+ * error object.
+ *
+ * DOES NOT STORE THE RAW VALUE (final fix wave, finding 7). It used to, only so a since-deleted
+ * `reveal()` method could hand it back out — `reveal()` was dead code, never called anywhere in
+ * this package, so holding a secret in memory for a method nothing used bought nothing. Deleting
+ * `reveal()` removed the only reason to store it at all.
  */
 class RedactedDsn {
-  readonly #value: string;
-  constructor(value: string) {
-    this.#value = value;
-  }
-  reveal(): string {
-    return this.#value;
-  }
   toString(): string {
     return 'redis://<redacted>';
   }
@@ -77,6 +76,17 @@ class RedactedDsn {
 // parameters), so naming "the" return type of createClient and using it for a value created
 // with different options does not typecheck. This adapter only ever calls five methods, so it
 // only needs to agree on those five.
+//
+// METHOD SHORTHAND, DELIBERATELY (final fix wave, finding 7). Writing these as method signatures
+// (`get(key: string): ...`) rather than property arrow types (`get: (key: string) => ...`) makes
+// TypeScript check each parameter BIVARIANTLY instead of contravariantly — the assignability
+// check accepts a real `RedisClientType`'s method whose parameter types are a strict subtype OR
+// supertype of this interface's, where a property-typed field would only accept a subtype. This
+// is an accepted trade-off, not an oversight: the alternative (property syntax) is measurably
+// stricter but repeatedly fights the real client's own generic, overload-heavy method signatures
+// for no bug this adapter has ever hit — the five methods above are simple enough (string/number
+// primitives, no covariant return position that bivariance could silently mismatch) that the
+// soundness hole costs nothing in practice here.
 interface RedisClient {
   get(key: string): Promise<string | null>;
   set(key: string, value: string, options?: SetOptions): Promise<string | null>;
@@ -107,9 +117,12 @@ class RedisSessionStore implements SessionStore {
   }
 
   // Every command runs through here. A connection or timeout error becomes
-  // SessionStoreUnavailable with a FIXED message — never the node-redis error object, which
-  // embeds the connection DSN, and never even the redacted DSN interpolated per-call, since a
-  // fixed message is simpler to test and cannot vary in a way that leaks anything.
+  // SessionStoreUnavailable with a message built from the REDACTED DSN — never the raw
+  // node-redis error object, which embeds the real connection DSN. `this.#dsn.toString()` IS
+  // interpolated per call below (finding 8, final fix wave: this comment previously claimed
+  // otherwise), but that is safe, not a leak: `RedactedDsn#toString` always returns the fixed
+  // literal `'redis://<redacted>'` — it holds no state to vary it with (see the class doc) — so
+  // the interpolation can never expose anything.
   async #guarded<T>(op: () => Promise<T>): Promise<T> {
     try {
       return await op();
@@ -195,7 +208,7 @@ export interface CreateRedisSessionStoreOptions {
 }
 
 export async function createRedisSessionStore(opts: CreateRedisSessionStoreOptions): Promise<SessionStore> {
-  const dsn = new RedactedDsn(opts.url);
+  const dsn = new RedactedDsn();
   const client = createClient({
     url: opts.url,
     // LOAD-BEARING: node-redis queues commands while disconnected by default, so an outage

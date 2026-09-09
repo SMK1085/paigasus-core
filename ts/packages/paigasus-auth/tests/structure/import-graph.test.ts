@@ -74,3 +74,23 @@ describe('client import graph (AC 5)', () => {
     expect(graph.packages.has('openid-client')).toBe(true);
   });
 });
+
+// I1 (final fix wave). `import 'server-only'` at the top of src/server.ts (design doc § 4.3 layer
+// 2) had ZERO coverage: both vitest configs alias `server-only` to an empty stub and
+// tests/e2e/e2e-loader.mjs intercepts it, so no test, lint rule, or typecheck reads that
+// statement — deleting it left every gate green while making @paigasus/auth/server importable
+// from a client component, shipping the Redis adapter into a browser bundle.
+//
+// This does not newly RUN the statement (that would need the real `server-only` package under a
+// non-`react-server` condition, which the client-boundary graph above already forbids reaching).
+// It asserts the STATEMENT IS THERE, the same way the rest of this file asserts the shape of an
+// import graph rather than executing one — `collectImportGraph`'s `packages` set records every
+// bare specifier `server.ts`'s own module graph reaches, `server-only` included, since it is a
+// real `import 'server-only'` declaration at the top of the entry file itself.
+describe('server entry point carries the server-only guard (I1)', () => {
+  it("src/server.ts's import graph reaches the bare 'server-only' specifier", () => {
+    const graph = collectImportGraph(resolve(SRC, 'server.ts'));
+
+    expect(graph.packages.has('server-only')).toBe(true);
+  });
+});

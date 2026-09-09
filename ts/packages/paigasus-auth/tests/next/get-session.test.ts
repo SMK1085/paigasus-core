@@ -140,6 +140,30 @@ describe('getSession', () => {
 
     expect(events).toEqual([['store.unavailable', { sid: sidTag('some-sid'), stage: 'get_session' }]]);
   });
+
+  // I4 (final fix wave): before this, an IdP outage during refresh surfaced here as ONLY
+  // `store.unavailable` with `stage: 'get_session'` — the SAME event a genuine Redis outage
+  // produces, so an operator investigating a mass sign-out during an IdP incident chased a
+  // perfectly healthy store. This file's catch is generic by design (§ 10.1: any resolveSession
+  // failure degrades to signed-out, never a 500) and still fires `store.unavailable` here for
+  // every such failure — but a refresh failure now ALSO carries `session.refresh_failed`, emitted
+  // where it actually happens (core/single-flight.ts, tested directly there), which is the signal
+  // that was missing and is what makes the two causes distinguishable at all.
+  it('also logs session.refresh_failed (in addition to store.unavailable) when the IdP refresh call fails', async () => {
+    cookiesMock.mockResolvedValue(cookieJar('sid-needs-refresh'));
+    const store = new MemorySessionStore();
+    await store.set('sid-needs-refresh', { ...liveRecord(), accessExpiresAt: Date.now() - 1, refreshToken: 'RT' }, 999_000, null);
+    const { logger, events } = recordingLogger();
+    const runtime = {
+      ...baseRuntime(store),
+      logger,
+      oidc: { ...unusedOidc(), refresh: () => Promise.reject(new Error('token endpoint returned 503')) },
+    };
+
+    await expect(getSession(runtime)).resolves.toBeNull();
+
+    expect(events).toContainEqual(['session.refresh_failed', { sid: sidTag('sid-needs-refresh') }]);
+  });
 });
 
 describe('requireSession', () => {

@@ -117,7 +117,21 @@ export async function resolveSession(deps: ResolveDeps, sid: string): Promise<Re
         }
         const refreshToken = fresh.refreshToken;
 
-        const tokens = await refresh(refreshToken);
+        // I4 (final fix wave): a thrown `refresh` (e.g. the IdP token endpoint returning 503)
+        // used to propagate all the way to `get-session.ts`'s catch, which logs `store.unavailable`
+        // with `stage: 'get_session'` — a store failure and an IdP outage then produce the
+        // IDENTICAL event, so an operator investigating a healthy Redis chases the wrong system.
+        // Log the distinguishing event HERE, at the point that actually knows which call failed,
+        // then rethrow unchanged so every existing caller contract (get-session.ts's degrade to
+        // signed-out, this function's own lock release in `finally`) is untouched. Same field
+        // discipline as the rest: no token, no URL, no raw error object — only the truncated sid.
+        let tokens: RefreshedTokens;
+        try {
+          tokens = await refresh(refreshToken);
+        } catch (err) {
+          logger.event('session.refresh_failed', { sid: sidTag(sid) });
+          throw err;
+        }
         const accessTtlMs = Math.max(tokens.expiresIn * 1000, skewMs + MIN_ACCESS_TTL_BUFFER_MS); // F7
         const next: SessionRecord = {
           ...fresh,

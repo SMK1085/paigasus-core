@@ -398,6 +398,41 @@ describe('GET /auth/callback — success', () => {
   });
 });
 
+// I3 (final fix wave): the root-zone round trip deferred at task 7 and never written. Before the
+// fix, a root-mounted zone (`basePath === ''`) stored `returnTo: ''` on a login with no explicit
+// `returnTo`, the callback then redirected to `Location: ''`, and the browser resolved that
+// against the CURRENT url — re-requesting the callback with its txn cookies already cleared,
+// looping through `txn_missing` back to `/auth/login` forever. This drives a REAL login+callback
+// round trip through a root-mounted runtime and asserts the redirect lands on `/`, not `''`.
+describe('GET /auth/callback — root-mounted zone (I3)', () => {
+  it('redirects to "/" (not "") after a login with no explicit returnTo on a root-mounted zone', async () => {
+    // This drives a REAL `/auth/login`, which mints its OWN PKCE verifier internally — different
+    // from the module-level `codeVerifier` `beforeEach` armed the fixture with for `seedTransaction`
+    // callers. PKCE correctness is covered elsewhere (see the file header); disarm the check here
+    // so this test can focus on the returnTo fallback alone.
+    fixture.setNextCodeChallenge(undefined);
+    const rootRuntime: AuthRuntime = { ...runtime, basePath: '' };
+    const routes = createAuthRoutes(rootRuntime);
+
+    const loginRes = await routes.handle(new Request('https://rp.example.com/auth/login'));
+    expect(loginRes.status).toBe(302);
+    const state = new URL(loginRes.headers.get('location') ?? '').searchParams.get('state') ?? '';
+    const cookieName = txnCookieName(state);
+    const setCookie = loginRes.headers.getSetCookie().find((c) => c.startsWith(`${cookieName}=`));
+    const secret = setCookie?.split(';')[0]?.split('=')[1] ?? '';
+
+    fixture.setNextIdToken(await fixture.mintIdToken({ nonce: new URL(loginRes.headers.get('location') ?? '').searchParams.get('nonce') ?? '' }));
+    // NOT the `callbackRequest` helper: it hard-codes CALLBACK_URL under `/iam`, but this
+    // runtime's callback path (routes.ts's exact-match dispatch) is `/auth/callback` — no zone
+    // prefix — since basePath is ''.
+    const callbackReq = new Request(`https://rp.example.com/auth/callback?code=test-code&state=${state}`, { headers: { cookie: `${cookieName}=${secret}` } });
+    const callbackRes = await routes.handle(callbackReq);
+
+    expect(callbackRes.status).toBe(302);
+    expect(callbackRes.headers.get('location')).toBe('/');
+  });
+});
+
 describe('route dispatch', () => {
   it('responds 405 to a non-GET /auth/callback', async () => {
     const res = await createAuthRoutes(runtime).handle(new Request(CALLBACK_URL, { method: 'POST' }));

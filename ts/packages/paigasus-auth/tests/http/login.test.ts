@@ -157,21 +157,38 @@ describe('GET /auth/login', () => {
     expect(newTxnCookies.length).toBe(1);
   });
 
-  it('validates returnTo through validateReturnTo, falling back to the zone base path', async () => {
+  it('validates returnTo through validateReturnTo, falling back to the zone base path with a trailing slash', async () => {
     const res1 = await createAuthRoutes(runtime).handle(loginRequest('?returnTo=%2Fiam%2Fdashboard'));
     const state1 = new URL(res1.headers.get('location') ?? '').searchParams.get('state') ?? '';
     const tx1 = await store.takeTransaction(state1);
     expect(tx1?.returnTo).toBe('/iam/dashboard');
 
+    // I3 (final fix wave): the fallback is `${basePath}/`, never bare `basePath` — a bare
+    // fallback stores an empty `returnTo` on a root-mounted zone (see the next test), and this
+    // assertion previously pinned that buggy form.
     const res2 = await createAuthRoutes(runtime).handle(loginRequest('?returnTo=https%3A%2F%2Fevil.com'));
     const state2 = new URL(res2.headers.get('location') ?? '').searchParams.get('state') ?? '';
     const tx2 = await store.takeTransaction(state2);
-    expect(tx2?.returnTo).toBe(runtime.basePath);
+    expect(tx2?.returnTo).toBe(`${runtime.basePath}/`);
 
     const res3 = await createAuthRoutes(runtime).handle(loginRequest('?returnTo=%2F%2Fevil.com'));
     const state3 = new URL(res3.headers.get('location') ?? '').searchParams.get('state') ?? '';
     const tx3 = await store.takeTransaction(state3);
-    expect(tx3?.returnTo).toBe(runtime.basePath);
+    expect(tx3?.returnTo).toBe(`${runtime.basePath}/`);
+  });
+
+  // I3 (final fix wave): this is the root-zone test deferred at task 7 and never written — the
+  // deferral is what let the bug through. `PAIGASUS_ZONES={"console":"/"}` gives `basePath === ''`
+  // (`@paigasus/next-config`'s `canonicalBasePath` collapses `"/"` to `''`), so a bare `basePath`
+  // fallback would have stored `returnTo: ''`, which resolves in the browser to the CURRENT url
+  // and breaks login on a root-mounted zone forever (see routes.ts's comment on the fix).
+  it('falls back to "/" (not "") on a root-mounted zone, i.e. basePath === ""', async () => {
+    const rootRuntime: AuthRuntime = { ...runtime, basePath: '' };
+
+    const res = await createAuthRoutes(rootRuntime).handle(new Request('https://rp.example.com/auth/login?returnTo=https%3A%2F%2Fevil.com'));
+    const state = new URL(res.headers.get('location') ?? '').searchParams.get('state') ?? '';
+    const tx = await store.takeTransaction(state);
+    expect(tx?.returnTo).toBe('/');
   });
 
   it('emits a login.started event', async () => {
@@ -285,6 +302,49 @@ describe('GET /auth/login', () => {
       const res = await createAuthRoutes(runtime).handle(loginRequest('', { 'sec-fetch-mode': 'cors' }));
       expect(res.status).toBe(403);
     });
+  });
+});
+
+// I6 (final fix wave): `tests/http/callback.test.ts`'s "deletes any pre-existing record for the
+// old sid" test hand-builds a Cookie header pairing a LIVE sid with a txn cookie in one request —
+// a header a real single-tab re-login can never produce, since `handleLogin`'s own 302 clears the
+// sid cookie in the SAME response that starts the new flow. This drives the REAL sequence
+// instead: login, callback (session 1), then a second login carrying session 1's cookie, and
+// asserts session 1's record is gone — WITHOUT a second callback ever running.
+describe('re-login invalidates the previous session (I6)', () => {
+  it('a second login deletes the first session even though the browser never re-presents it to a callback', async () => {
+    const routes = createAuthRoutes(runtime);
+
+    // First login + callback: establishes session 1.
+    const login1 = await routes.handle(loginRequest());
+    const location1 = new URL(login1.headers.get('location') ?? '');
+    const state1 = location1.searchParams.get('state') ?? '';
+    const nonce1 = location1.searchParams.get('nonce') ?? '';
+    const txnCookie1 = setCookiesOf(login1)
+      .find((c) => c.startsWith(TXN_COOKIE_PREFIX))
+      ?.split(';')[0];
+    expect(txnCookie1).toBeDefined();
+
+    fixture.setNextIdToken(await fixture.mintIdToken({ nonce: nonce1 }));
+    const callback1 = await routes.handle(callbackRequest(state1, txnCookie1));
+    expect(callback1.status).toBe(302);
+    const sid1 = setCookiesOf(callback1)
+      .find((c) => c.startsWith(`${SESSION_COOKIE}=`))
+      ?.split(';')[0]
+      ?.split('=')[1];
+    expect(sid1).toBeTruthy();
+    expect(await store.get(sid1 ?? '')).not.toBeNull();
+
+    // Second login, carrying session 1's cookie — exactly what a real browser sends on a
+    // single-tab re-login (captured here as the Set-Cookie clear `handleLogin` also issues).
+    const login2 = await routes.handle(loginRequest('', { cookie: `${SESSION_COOKIE}=${sid1}` }));
+    expect(login2.status).toBe(302);
+    const clearedSid = setCookiesOf(login2).find((c) => c.startsWith(`${SESSION_COOKIE}=`));
+    expect(clearedSid).toMatch(/Max-Age=0/);
+
+    // Session 1's record is gone — deleted by the SECOND login itself, before any second
+    // callback ever ran.
+    expect(await store.get(sid1 ?? '')).toBeNull();
   });
 });
 

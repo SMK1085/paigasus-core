@@ -63,9 +63,17 @@ Without `offline_access`, some identity providers (Keycloak, for example) never 
 token for the code flow. This package deletes the session and logs the user out the moment the
 access token expires if no refresh token is available — which, on some providers, is as often as
 every five minutes. Keep `offline_access` in `PAIGASUS_OIDC_SCOPES` unless you have verified your
-IdP issues refresh tokens without it. `createAuthRuntime` also fails loudly on the very first
-login if no refresh token comes back, rather than waiting for the first silent logout to reveal
-the misconfiguration.
+IdP issues refresh tokens without it.
+
+**`createAuthRuntime` does not check this at startup, and there is no first-login assertion.**
+`handleCallback` (`src/http/routes.ts`) writes the session record with `refreshToken` simply
+absent when the token response carries none — nothing fails loudly at that point. The actual
+failure surfaces later and silently: `resolveSession` (`src/core/single-flight.ts`) deletes the
+record the first time it needs to refresh and finds no `refreshToken`, logging
+`session.deleted` with `reason: 'no_refresh_token'` and signing the user out. Dropping
+`offline_access` against an IdP that then issues no refresh token therefore produces **mass
+logouts at first access-token expiry**, not a startup error — every active session on that
+deployment signs out together, at whatever interval the IdP's access-token lifetime is.
 
 ### The session store: `redis` vs `memory`
 
@@ -131,6 +139,22 @@ the middleware and is rejected downstream, by the real store lookup inside
 `getSession()`/`requireSession()`. This split is what keeps a future edit from turning the
 middleware into an authorizer (the CVE-2025-29927 middleware-auth-bypass shape); see
 `src/middleware.ts`'s own header and `tests/middleware.test.ts`'s import-graph assertion.
+
+### `publicPaths` must list every route this package serves
+
+`createAuthMiddleware({ publicPaths, loginPath })` requires `publicPaths` to name every route
+`createAuthRoutes` dispatches on for this zone: the login, callback, logout, and logout-callback
+paths. **Do not hand-copy this list.** Build it with `authRoutePaths(runtime)`
+(`@paigasus/auth/middleware`) instead — a pure derivation from `runtime.basePath` that always
+matches the real route table.
+
+If a path is missing — the callback path is the easy one to miss — the failure has no error
+anywhere: `/auth/login` clears the session cookie, the identity provider's redirect back to
+`/auth/callback` arrives with no cookie, middleware sees a non-public path with no cookie and
+bounces it back to `/auth/login`, which clears the cookie again and redirects again. The visitor
+loops forever between the two paths. This is the default outcome of copying a middleware example
+without reading this section, which is why `authRoutePaths` exists instead of a documentation
+comment alone.
 
 ## `/client` never sees a token (AC 5)
 

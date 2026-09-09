@@ -5,7 +5,15 @@ import { noopLogger } from '../../src/adapters/noop-logger.js';
 import { shouldRefresh } from '../../src/core/refresh-policy.js';
 import { resolveSession } from '../../src/core/single-flight.js';
 import { makeRecord } from '../store-contract.js';
+import type { AuthEventFields, AuthEventName, AuthLogger } from '../../src/ports/logger.js';
+import { sidTag } from '../../src/ports/logger.js';
 import type { SessionStore } from '../../src/ports/session-store.js';
+
+/** Records every event emitted, so a test can assert on WHICH event fired, not just that one did. */
+function recordingLogger(): { logger: AuthLogger; events: Array<[AuthEventName, AuthEventFields]> } {
+  const events: Array<[AuthEventName, AuthEventFields]> = [];
+  return { logger: { event: (name, fields) => void events.push([name, { ...fields }]) }, events };
+}
 
 // REAL TIMERS THROUGHOUT. The waiter backs off with setTimeout; under vi.useFakeTimers() that
 // never fires unless the test advances timers by hand, so the failure mode is a HANG rather than
@@ -193,6 +201,38 @@ describe('resolveSession', () => {
     ).rejects.toThrow('idp down');
     // If the lock leaked, this would be false.
     expect(await store.tryAcquireLock('s', 'next', 5_000)).toBe(true);
+  });
+
+  // I4 (final fix wave): before this, a thrown `refresh` (an IdP outage) propagated all the way
+  // to get-session.ts's catch, which logs `store.unavailable` — the SAME event a genuine Redis
+  // outage produces, so an operator investigating a healthy store chased the wrong system. This
+  // asserts the two stay distinguishable: an IdP failure logs `session.refresh_failed`, not
+  // `store.unavailable`, with the redaction discipline intact (only a truncated sid, never the
+  // caught error object — which could embed a token endpoint URL).
+  it('emits session.refresh_failed, not store.unavailable, when the refresh call throws (I4)', async () => {
+    const store = new MemorySessionStore();
+    await store.set('s', makeRecord({ accessExpiresAt: Date.now() - 1 }), 60_000, null);
+    const { logger, events } = recordingLogger();
+
+    await expect(resolveSession({ ...deps(store, () => Promise.reject(new Error('token endpoint returned 503'))), logger }, 's')).rejects.toThrow('token endpoint returned 503');
+
+    expect(events).toContainEqual(['session.refresh_failed', { sid: sidTag('s') }]);
+    expect(events.some(([name]) => name === 'store.unavailable')).toBe(false);
+  });
+
+  // The contrasting case, distinguished from the one above: a genuine STORE failure (as opposed
+  // to an IdP one) must never be misreported as session.refresh_failed either. `store.get` is the
+  // very first call `resolveSession` makes, so it throws before `refresh` is ever reached — this
+  // documents that `session.refresh_failed` is scoped to the refresh call specifically, not to
+  // "anything failed during a refresh-eligible resolve".
+  it('does not emit session.refresh_failed when the failure is the STORE, not the IdP', async () => {
+    const store = new MemorySessionStore();
+    store.get = () => Promise.reject(new Error('redis unavailable'));
+    const { logger, events } = recordingLogger();
+
+    await expect(resolveSession({ ...deps(store, () => Promise.resolve({ accessToken: 'AT', expiresIn: 300 })), logger }, 's')).rejects.toThrow('redis unavailable');
+
+    expect(events.some(([name]) => name === 'session.refresh_failed')).toBe(false);
   });
 
   // F1a — reviewer-identified: the ORIGINAL persist-failure branch treated "record now absent"

@@ -104,7 +104,15 @@ async function handleLogin(runtime: AuthRuntime, req: Request, url: URL): Promis
     return new Response(null, { status: 403 });
   }
 
-  const returnTo = validateReturnTo(url.searchParams.get('returnTo'), runtime.basePath);
+  // The fallback must be `${basePath}/`, never bare `basePath` (final fix wave, I3). A
+  // root-mounted zone (`PAIGASUS_ZONES={"console":"/"}`) has `basePath === ''`
+  // (`@paigasus/next-config`'s `canonicalBasePath` collapses `"/"` to `''`), so a bare `basePath`
+  // fallback stores `returnTo: ''`. The callback then redirects to `Location: ''`, the browser
+  // resolves that as the CURRENT url and re-requests the callback, the txn cookies are already
+  // gone, and the retry loops through `txn_missing` back to `/auth/login` forever — login never
+  // completes on a root-mounted zone. `src/next/get-session.ts:94` and `src/runtime.ts:123` both
+  // already use the trailing-slash form; this call is the one place that had drifted from it.
+  const returnTo = validateReturnTo(url.searchParams.get('returnTo'), `${runtime.basePath}/`);
 
   const txnId = newTransactionId();
   const secret = newTransactionSecret();
@@ -118,6 +126,17 @@ async function handleLogin(runtime: AuthRuntime, req: Request, url: URL): Promis
   });
 
   await runtime.store.putTransaction(txnId, { codeVerifier: authorization.codeVerifier, nonce: authorization.nonce, returnTo, secretHash: hashSecret(secret), createdAt: Date.now() }, TXN_TTL_MS);
+
+  // I6 (final fix wave): delete the OLD session record here, not only clear its cookie. A
+  // single-tab re-login browser-clears __Host-pgs_sid in THIS same 302, so the browser never
+  // sends it again — the callback's own `presentedSid` delete (below) therefore never runs for
+  // the common case, and a copied cookie stayed live for the full session TTL after the user
+  // signed in again. Reading it from the REQUEST (before it is cleared in the response) is what
+  // makes this reachable; clearing the browser cookie alone was never enough.
+  const presentedSid = readCookies(req.headers.get('cookie')).get(SESSION_COOKIE);
+  if (presentedSid !== undefined) {
+    await runtime.store.delete(presentedSid);
+  }
 
   const headers = new Headers({ Location: authorization.url });
   // Kills a stale __Host-pgs_sid cookie pointing at a deleted record — this is the one place
@@ -192,6 +211,13 @@ async function handleCallback(runtime: AuthRuntime, req: Request, url: URL): Pro
   // Session fixation guard (design doc § 9.4): whatever the browser presented as its CURRENT
   // session is discarded before a new one is minted, regardless of whether the sid the browser
   // holds still resolves to a live record.
+  //
+  // I6 (final fix wave): `handleLogin` above ALSO deletes the old record, from the REQUEST cookie
+  // it sees before clearing it in its own response — that is what covers the common, single-tab
+  // re-login, where the browser never sends the old cookie again once `handleLogin`'s 302 clears
+  // it. This delete stays for the case that leaves reachable: two tabs sharing one cookie jar,
+  // where a second tab's callback can still present the old sid if its request raced ahead of the
+  // first tab's clearing response.
   const presentedSid = cookies.get(SESSION_COOKIE);
   if (presentedSid !== undefined) {
     await runtime.store.delete(presentedSid);

@@ -9,8 +9,10 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { NextRequest } from 'next/server';
-import { createAuthMiddleware } from '../src/middleware.js';
+import { authRoutePaths, createAuthMiddleware } from '../src/middleware.js';
 import { SESSION_COOKIE } from '../src/http/cookies.js';
+import { createAuthRoutes } from '../src/http/routes.js';
+import type { AuthRuntime } from '../src/runtime.js';
 import { collectImportGraph, filesWithDynamicImportOrRequire } from './support/import-graph.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -53,6 +55,36 @@ describe('createAuthMiddleware', () => {
 
     expect(res.headers.get('location')).toBeNull();
     expect(res.headers.get('x-middleware-next')).toBe('1');
+  });
+});
+
+// I5 (final fix wave). `publicPaths` used to be the caller's own hand-copied list, bound to
+// `http/routes.ts`'s route table by nothing — omit one path there (the callback path is the easy
+// one to miss) and a signed-out visitor loops between `/auth/login` and `/auth/callback` forever,
+// with no error anywhere. `authRoutePaths(runtime)` replaces the hand copy with a derivation; this
+// cross-checks it against the REAL route table in `http/routes.ts`, not a second hand-written list
+// that could drift the same way the original did.
+describe('authRoutePaths (I5)', () => {
+  it('derives the four paths createAuthRoutes dispatches on for this zone', () => {
+    expect(authRoutePaths({ basePath: '/iam' })).toEqual(['/iam/auth/login', '/iam/auth/callback', '/iam/auth/logout', '/iam/auth/logout/callback']);
+  });
+
+  // Cross-checked against createAuthRoutes ITSELF: each derived path must be recognised (a 405 on
+  // the wrong method, never a 404 — this proves recognition without needing a full OIDC round
+  // trip), and a lookalike path outside the list must still 404. Only `runtime.basePath` is read
+  // before routes.ts's method dispatch, so a partial fixture is enough here.
+  it('every derived path is recognised by createAuthRoutes, and a lookalike path outside the list is not', async () => {
+    const fakeRuntime = { basePath: '/iam' } as unknown as AuthRuntime;
+    const routes = createAuthRoutes(fakeRuntime);
+
+    for (const path of authRoutePaths({ basePath: '/iam' })) {
+      const wrongMethod = path.endsWith('/logout') ? 'GET' : 'POST';
+      const res = await routes.handle(new Request(`https://rp.example.com${path}`, { method: wrongMethod }));
+      expect(res.status).toBe(405);
+    }
+
+    const res = await routes.handle(new Request('https://rp.example.com/iam/auth/not-a-real-route'));
+    expect(res.status).toBe(404);
   });
 });
 
