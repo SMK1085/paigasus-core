@@ -123,11 +123,11 @@ describe('AC 5 — two clients over ONE transport do not share a token (spec § 
 });
 
 describe('D2 — a caller-supplied contextValues is refused, not silently dropped', () => {
-  it('throws, naming the reason', async () => {
+  it('throws, naming the reason', () => {
     const { transport } = recordingTransport();
     const client = bindAuth(createClient(TenancyService, transport), { bearer: 'alice-token' });
 
-    await expect(client.getOrganization({}, { contextValues: createContextValues() })).rejects.toThrow(/contextValues/);
+    expect(() => client.getOrganization({}, { contextValues: createContextValues() })).toThrow(/contextValues/);
   });
 });
 

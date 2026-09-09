@@ -24,6 +24,10 @@ export type { Auth, TransportOptions } from './transport.js';
  * Exported for the test suite, which proves two clients over ONE transport keep their tokens apart.
  */
 export function bindAuth<S extends DescService>(client: Client<S>, auth: Auth): Client<S> {
+  // One ContextValues, reused for every call this client makes: correct because every call of one
+  // client shares one Auth by design, so no per-call state is lost. It also means an interceptor
+  // that ever WRITES to `req.contextValues` would affect other in-flight calls of this same
+  // client — none of this package's interceptors do, but a future one must not either.
   const contextValues = createContextValues().set(authContextKey, auth);
 
   return new Proxy(client, {
@@ -38,12 +42,9 @@ export function bindAuth<S extends DescService>(client: Client<S>, auth: Auth): 
           // an object the CALLER holds, which they could then reuse against another client — the
           // cross-request leak spec § 7.5 exists to prevent. Dropping it silently is worse still.
           //
-          // Returned as a rejected promise, not thrown synchronously: every Client<S> method is
-          // async, so a caller awaits the call. A synchronous throw here would escape that await
-          // entirely and surface as an unhandled exception instead of a rejection.
-          return Promise.reject(
-            new Error('@paigasus/sdk: a caller-supplied `contextValues` is not supported, because the ' + 'client binds its own to carry the bearer token. Remove it from the CallOptions.'),
-          );
+          // Thrown synchronously. A caller wrapping the call in try/catch — with or without
+          // `await` — catches it either way.
+          throw new Error('@paigasus/sdk: a caller-supplied `contextValues` is not supported, because the ' + 'client binds its own to carry the bearer token. Remove it from the CallOptions.');
         }
         return (value as (r: unknown, o: CallOptions) => unknown)(request, {
           ...options,
