@@ -3192,11 +3192,17 @@ def self_test():
     # gate goes vacuous while still printing green.
     # The fixture carries the workspace-relative forms `moon query tasks` actually emits — the
     # project-relative entries prefixed with the project source, the `/`-prefixed ones bare.
+    # SMA-624 added contracts/buf.gen.googleapis.yaml, the TS-only template that emits the
+    # google.rpc.ErrorInfo descriptor. This fixture is a THIRD copy of the expected input set,
+    # after the task's own `inputs:` and CONTRACTS_GENERATE_INPUTS — and it is the only one the
+    # real-run path cannot catch, because that path reads moon's live output while this one is
+    # frozen here. A change to the pin must be made in all three places or this self-test reds.
     cg_ok = {"contracts": {"generate": {
         "inputGlobs": {"contracts/proto/**/*": {},
                        ".moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}": {}},
-        "inputFiles": {"contracts/buf.gen.yaml": {}, "contracts/buf.lock": {},
-                       "contracts/buf.yaml": {}, ".prototools": {}, "py/uv.lock": {}},
+        "inputFiles": {"contracts/buf.gen.googleapis.yaml": {}, "contracts/buf.gen.yaml": {},
+                       "contracts/buf.lock": {}, "contracts/buf.yaml": {}, ".prototools": {},
+                       "py/uv.lock": {}},
     }}}
     if check_contracts_generate_inputs(cg_ok):
         failures.append("contracts:generate pin reported drift on the clean fixture")

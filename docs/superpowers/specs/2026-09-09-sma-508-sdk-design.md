@@ -640,9 +640,21 @@ SMA-503 fixed on the console.
    control on § 11.1's input list — without it, a future edit dropping that input leaves AC 3
    vacuous again and nothing reds. The `ui->console` pair (`run.sh:354-377`) is the precedent, and
    its comment says exactly why such a case is the control.
-3. **`ci/affected-graph/ci_targets.py:393-400`** — `CONTRACTS_GENERATE_INPUTS` is a strict-equality
-   pin. Adding `contracts/buf.gen.googleapis.yaml` to `contracts:generate` reds
-   `repo:affected-smoke` until this tuple is updated.
+3. **`ci/affected-graph/ci_targets.py`** — the expected input set for `contracts:generate` exists
+   in **THREE** places, and all three must move together:
+   - the task's own `inputs:` in `contracts/moon.yml`;
+   - `CONTRACTS_GENERATE_INPUTS` (`:393-400`), the strict-equality pin;
+   - the `cg_ok` **self-test fixture** (`:3200-3207`), a frozen copy of the same set.
+
+   The third was missed on the first attempt and reds CI on its own, with
+   `ci-targets self-test FAILED: contracts:generate pin reported drift on the clean fixture`
+   plus a cascading `negative-control FAILED` — `run.sh:437` runs the same self-test inside its
+   negative control, so one defect prints two messages.
+
+   **It cannot be caught locally by the obvious check.** `python3 ci_targets.py` (the real-run
+   path) reads Moon's live output and passes, because the live inputs and the tuple agree. Only
+   `--self-test` compares the tuple against the frozen fixture. Run **both** paths before pushing
+   a change to this pin.
 
 ### 11.3 The packages
 
