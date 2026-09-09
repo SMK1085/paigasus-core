@@ -64,6 +64,37 @@ describe('stableTransportKey (spec § 7.1)', () => {
     const wider = { baseUrl: 'https://a.invalid', nodeOptions: { ca: 'X' } } as never;
     expect(() => stableTransportKey(wider)).toThrow(/nodeOptions/);
   });
+
+  // SMA-508: `Object.keys`/`Object.entries` see only own enumerable properties, but `getTransport`
+  // reads `options.baseUrl` through ordinary property access, which resolves the prototype chain
+  // and ignores enumerability. Each case below is a shape where the key check and `serialize` see
+  // nothing, while `getTransport` would still read a real `baseUrl` off it.
+  it('throws for an inherited baseUrl', () => {
+    const inherited = Object.create({ baseUrl: 'https://iam.invalid' }) as never;
+    expect(() => stableTransportKey(inherited)).toThrow(/own, enumerable string property/);
+  });
+
+  it('throws for an own but non-enumerable baseUrl', () => {
+    const nonEnumerable = Object.defineProperty({}, 'baseUrl', {
+      value: 'https://iam.invalid',
+      enumerable: false,
+    }) as never;
+    expect(() => stableTransportKey(nonEnumerable)).toThrow(/own, enumerable string property/);
+  });
+
+  it('throws for an accessor baseUrl, since a getter could return a different value on a later read', () => {
+    const accessor = {
+      get baseUrl() {
+        return 'https://iam.invalid';
+      },
+    } as never;
+    expect(() => stableTransportKey(accessor)).toThrow(/own, enumerable string property/);
+  });
+
+  it('throws for a non-string baseUrl', () => {
+    const nonString = { baseUrl: 42 } as never;
+    expect(() => stableTransportKey(nonString)).toThrow(/own, enumerable string property/);
+  });
 });
 
 function fakeUnaryRequest(): UnaryRequest {

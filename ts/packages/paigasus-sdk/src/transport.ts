@@ -95,8 +95,29 @@ const TRANSPORT_OPTION_KEYS: ReadonlySet<string> = new Set(['baseUrl']);
  * checking only applies to an object literal — is closed by `TRANSPORT_OPTION_KEYS` above: an own
  * key outside that set throws here rather than silently joining the cache key. This also catches
  * the opposite mistake, a future field added to `TransportOptions` but forgotten in that list.
+ *
+ * A FOURTH risk: `Object.keys` and `Object.entries` see only OWN ENUMERABLE properties, but
+ * `getTransport` reads `options.baseUrl` through ordinary property access, which resolves the
+ * PROTOTYPE CHAIN and ignores enumerability. An inherited `baseUrl` (an object built with
+ * `Object.create`, or a config class exposing `get baseUrl()` on its prototype) or a non-enumerable
+ * own `baseUrl` is invisible to both functions above and so never reaches the cache key, while
+ * `getTransport` still reads it to build the transport — so two different base URLs can silently
+ * key to the same `{}` and share one cached transport. The own/enumerable/string-data check below
+ * closes that gap. It also rejects an ACCESSOR property outright: `Object.getOwnPropertyDescriptor`
+ * reports `value: undefined` for a getter, so the `typeof` check fails it too — deliberately, since
+ * a getter could return a different string on a later read than the one baked into the key.
  */
 export function stableTransportKey(options: TransportOptions): string {
+  const baseUrl = Object.getOwnPropertyDescriptor(options, 'baseUrl');
+  if (baseUrl?.enumerable !== true || typeof baseUrl.value !== 'string') {
+    throw new Error(
+      '@paigasus/sdk: TransportOptions.baseUrl must be an own, enumerable string property. ' +
+        'An inherited, non-enumerable or accessor baseUrl is invisible to Object.keys and so never ' +
+        'reaches the cache key, while getTransport still reads it — so two different base URLs ' +
+        'would silently share one cached transport.',
+    );
+  }
+
   for (const key of Object.keys(options)) {
     if (!TRANSPORT_OPTION_KEYS.has(key)) {
       throw new Error(`@paigasus/sdk: TransportOptions carries an undeclared key "${key}". Add it to TRANSPORT_OPTION_KEYS in transport.ts if it is meant to be part of the transport's identity.`);
