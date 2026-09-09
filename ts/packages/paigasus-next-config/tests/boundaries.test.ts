@@ -85,7 +85,16 @@ const DENIED: ReadonlyArray<readonly [string, string, string]> = [
   // `./core/session.js` exception into this rule — so a type-only reach into core/ must stay
   // rejected, deliberately, rather than by accident.
   ['auth/client must not reach core via ./, even a TYPE-ONLY import', 'packages/paigasus-auth/src/client.ts', "import type { SessionView } from './core/session.js';"],
+  // EXTENSION-BEARING. This codebase always suffixes relative imports with `.js` (a real file
+  // never writes `from './runtime'` — it writes `from './runtime.js'`), and no-restricted-imports
+  // matches the specifier AS WRITTEN. A bare `'./runtime'` pattern with no `.js` sibling and no
+  // glob matches nothing a real file would ever import — these four rows are what proved that
+  // (fix round 2).
+  ['auth/client must not reach runtime.ts (the composition root)', 'packages/paigasus-auth/src/client.ts', "import { x } from './runtime.js';"],
+  ['auth/client must not reach config.ts', 'packages/paigasus-auth/src/client.ts', "import { x } from './config.js';"],
   ['auth/middleware must not import the store', 'packages/paigasus-auth/src/middleware.ts', "import { x } from './adapters/redis-store.js';"],
+  ['auth/middleware must not import single-flight', 'packages/paigasus-auth/src/middleware.ts', "import { x } from './core/single-flight.js';"],
+  ['auth/middleware must not import the session store port', 'packages/paigasus-auth/src/middleware.ts', "import { x } from './ports/session-store.js';"],
   ['an app middleware must not import auth/server', 'apps/paigasus-console/middleware.ts', "import { getSession } from '@paigasus/auth/server';"],
   ['an app middleware must not import the sdk', 'apps/paigasus-console/middleware.ts', "import { x } from '@paigasus/sdk';"],
 ];
