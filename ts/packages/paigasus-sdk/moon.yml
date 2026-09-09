@@ -3,3 +3,28 @@ $schema: 'https://moonrepo.dev/schemas/project.json'
 id: 'paigasus-sdk-ts'
 layer: 'library'
 language: 'typescript'
+
+# BOTH are required and neither implies the other. `dependsOn` is what `moon query projects
+# --affected` follows and what orders the upstream's build; task `inputs` are the ONLY thing that
+# confers affectedness on a DOWNSTREAM. MEASURED (spec § 11.1, M11): without the inputs below, an
+# edit to paigasus-proto's generated error_pb.ts selects no paigasus-sdk-ts task at all.
+dependsOn: ['paigasus-proto-ts']
+
+tasks:
+  # APPEND, never `options.merge: replace`. The inherited definitions in
+  # .moon/tasks/typescript-project.yml supply @group(sources), tsconfig.json, package.json,
+  # /ts/tsconfig.base.json and /ts/pnpm-lock.yaml; replacing would silently drop all of them —
+  # the defect SMA-503 fixed on paigasus-console-ts:build.
+  build:
+    inputs:
+      - '/ts/packages/paigasus-proto/src/**/*'
+  typecheck:
+    inputs:
+      - '/ts/packages/paigasus-proto/src/**/*'
+  test:
+    # vitest.config.ts matches neither src/**/* nor tests/**/*, so without this line an edit to the
+    # resolution conditions serves a cached PASS — and those conditions are the only thing keeping
+    # `server-only`'s unconditional throw from failing the whole suite.
+    inputs:
+      - '/ts/packages/paigasus-proto/src/**/*'
+      - 'vitest.config.ts'
