@@ -18,6 +18,18 @@
 // NEVER LOG A CAUGHT LIBRARY ERROR OBJECT. `openid-client` errors may embed a URL (the discovery
 // document location, a token endpoint). Every method here catches and rethrows through
 // `wrapError`, which keeps only the error's `name`.
+//
+// NON-REPUDIATION CHECKS ARE ALWAYS ENABLED, AND THAT IS NOT FREE. `authorizationCodeGrant` does
+// NOT verify the id_token's JWS signature by default (M1 addendum) — enabling it is the right
+// call and stays unconditional, but it changes JWKS from "a cache openid-client refreshes
+// opportunistically" into a dependency every login AND every refresh now has, with real edge
+// cases (M1 records the four measured costs in full: an unreachable jwks_uri fails every login
+// AND refresh, not just login as before this change; a rotated, unknown `kid` can 60-second-stall
+// a legitimate login before oauth4webapi refetches; an HS256-signed id_token is now fatal — ruled
+// acceptable here since ADR-0015 pins IAM to RS256/ES256 for access tokens). JWKS rotation itself
+// is handled by oauth4webapi's own keystore/cache, NOT by re-running discovery — but "handled"
+// means "cached for 300s and retried at 60s", not "invisible", which is the caveat this paragraph
+// exists to state.
 import * as client from 'openid-client';
 import type { IdTokenClaims } from '../ports/principal-resolver.js';
 
@@ -119,17 +131,30 @@ export function createOidcClient(opts: CreateOidcClientOptions): OidcClient {
   let configPromise: Promise<client.Configuration> | undefined;
 
   function getConfig(): Promise<client.Configuration> {
+    // M1: openid-client does NOT verify the id_token's JWS signature by default for a plain
+    // authorizationCodeGrant — it follows OIDC Core's allowance that TLS to the token endpoint
+    // already authenticates the issuer, and leaves signature verification an opt-in
+    // ("non-repudiation") extra. Measured directly: without this, a token signed by a key never
+    // published in the JWKS document is ACCEPTED. Always enabled, unconditionally — this is
+    // exactly what makes the "signed by a different key" rejection in tests/adapters/oidc.test.ts
+    // (and the design doc's own requirement) true. It is NOT free — see this file's header
+    // comment and the M1 addendum for the four measured costs.
+    //
+    // ONE ARRAY, BUILT ONCE — deliberately, not `allowInsecureRequests === true ? [a, b] : [b]`.
+    // Review round 1 found that shape puts `enableNonRepudiationChecks` in TWO separate literals,
+    // one per ternary arm, and every test sets `allowInsecureRequests: true` — so only the test
+    // arm ever ran, and deleting the term from the PRODUCTION arm alone would red nothing. A
+    // single array with a conditional `unshift` has exactly one occurrence of the term, so there
+    // is no unexercised arm left for a future edit to silently break.
+    const execute: Array<(config: client.Configuration) => void> = [client.enableNonRepudiationChecks];
+    if (opts.allowInsecureRequests === true) {
+      execute.unshift(client.allowInsecureRequests);
+    }
+
     configPromise ??= client
       .discovery(new URL(opts.issuer), opts.clientId, { client_secret: secret.reveal(), [client.clockTolerance]: opts.clockToleranceSeconds }, undefined, {
         timeout: opts.httpTimeoutMs / 1000,
-        // M1: openid-client does NOT verify the id_token's JWS signature by default for a
-        // plain authorizationCodeGrant — it follows OIDC Core's allowance that TLS to the
-        // token endpoint already authenticates the issuer, and leaves signature verification
-        // an opt-in ("non-repudiation") extra. Measured directly: without this, a token signed
-        // by a key never published in the JWKS document is ACCEPTED. Always enabled — this is
-        // exactly what makes the "signed by a different key" rejection in
-        // tests/adapters/oidc.test.ts (and the design doc's own requirement) true.
-        execute: opts.allowInsecureRequests === true ? [client.allowInsecureRequests, client.enableNonRepudiationChecks] : [client.enableNonRepudiationChecks],
+        execute,
       })
       .catch((err: unknown) => {
         // Let the NEXT call retry discovery instead of replaying this rejection forever.
@@ -152,18 +177,25 @@ export function createOidcClient(opts: CreateOidcClientOptions): OidcClient {
   return {
     async buildAuthorizationUrl(params): Promise<AuthorizationRequest> {
       const config = await getConfig();
-      const codeVerifier = client.randomPKCECodeVerifier();
-      const codeChallenge = await client.calculatePKCECodeChallenge(codeVerifier);
-      const nonce = client.randomNonce();
-      const url = client.buildAuthorizationUrl(config, {
-        redirect_uri: params.redirectUri,
-        scope: params.scopes,
-        code_challenge: codeChallenge,
-        code_challenge_method: 'S256',
-        state: params.state,
-        nonce,
-      });
-      return { url: url.toString(), codeVerifier, nonce };
+      try {
+        const codeVerifier = client.randomPKCECodeVerifier();
+        const codeChallenge = await client.calculatePKCECodeChallenge(codeVerifier);
+        const nonce = client.randomNonce();
+        const url = client.buildAuthorizationUrl(config, {
+          redirect_uri: params.redirectUri,
+          scope: params.scopes,
+          code_challenge: codeChallenge,
+          code_challenge_method: 'S256',
+          state: params.state,
+          nonce,
+        });
+        return { url: url.toString(), codeVerifier, nonce };
+      } catch (err) {
+        // client.buildAuthorizationUrl throws (synchronously, inside this try) when the
+        // discovered server metadata has no authorization_endpoint — the no-raw-library-error
+        // rule is unconditional, so this path is wrapped exactly like every network-calling one.
+        throw wrapError('build_authorization_url', err);
+      }
     },
 
     async authorizationCodeGrant(params): Promise<OidcTokens> {
@@ -215,12 +247,17 @@ export function createOidcClient(opts: CreateOidcClientOptions): OidcClient {
 
     async buildEndSessionUrl(params): Promise<string> {
       const config = await getConfig();
-      const url = client.buildEndSessionUrl(config, {
-        post_logout_redirect_uri: params.postLogoutRedirectUri,
-        ...(params.idTokenHint !== undefined ? { id_token_hint: params.idTokenHint } : {}),
-        ...(params.state !== undefined ? { state: params.state } : {}),
-      });
-      return url.toString();
+      try {
+        const url = client.buildEndSessionUrl(config, {
+          post_logout_redirect_uri: params.postLogoutRedirectUri,
+          ...(params.idTokenHint !== undefined ? { id_token_hint: params.idTokenHint } : {}),
+          ...(params.state !== undefined ? { state: params.state } : {}),
+        });
+        return url.toString();
+      } catch (err) {
+        // Throws (synchronously) when the discovered server metadata has no end_session_endpoint.
+        throw wrapError('build_end_session_url', err);
+      }
     },
   };
 }

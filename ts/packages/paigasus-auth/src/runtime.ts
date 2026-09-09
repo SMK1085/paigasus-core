@@ -20,6 +20,17 @@
 // login/refresh/logout triggers `openid-client`'s discovery call. That is what lets every
 // cross-field-rule check below reject synchronously-fast, before any network call, even against
 // an issuer URL that resolves to nothing (exactly what tests/runtime.test.ts's BASE fixture is).
+//
+// ONE RUNTIME PER PROCESS — THE CALLER'S CONTRACT. `createAuthRuntime` itself builds a FRESH
+// OidcClient, a fresh store, and (for the redis backend) a fresh Redis connection on every
+// invocation — that is deliberate, since tests call it repeatedly with different configs and
+// expect independent validation each time. A real app must NOT call it per request: doing so
+// would re-run `openid-client` discovery and open a new Redis connection on every request, never
+// closing the old one. `getAuthRuntime` below is the process-wide singleton every other caller
+// (task 8's routes, the Next binding) uses instead — it memoises the FIRST successful call behind
+// a module-level promise, keyed on nothing (there is exactly one configuration per process), and
+// resets on failure so a misconfigured-at-boot process can recover once the config is fixed and
+// the container is asked to try again.
 import { createOidcClient, type OidcClient } from './adapters/oidc.js';
 import { claimsPrincipalResolver } from './adapters/claims-resolver.js';
 import { MemorySessionStore } from './adapters/memory-store.js';
@@ -63,6 +74,8 @@ export interface AuthRuntime {
   absoluteTtlMs: number;
   zone: string;
   basePath: string;
+  /** Parsed but otherwise unreachable before this — task 8 needs it to build the authorization URL. */
+  scopes: string;
 }
 
 /** Invariant 1. Called once for validation and again (cheaply) when the store is actually built. */
@@ -93,10 +106,17 @@ export async function createAuthRuntime(cfg: ComposedConfig, deps: CreateAuthRun
   }
 
   // Invariant 3: core/single-flight.ts's write-fencing (its own invariant 5) depends on the
-  // refresh HTTP call completing inside the lock's lifetime. "At or above" — not just "above" —
-  // because a refresh that takes exactly the lock's TTL still races a second holder.
-  if (cfg.PAIGASUS_OIDC_HTTP_TIMEOUT_MS >= cfg.PAIGASUS_SESSION_LOCK_TTL_MS) {
-    throw new AuthConfigError('PAIGASUS_OIDC_HTTP_TIMEOUT_MS must be strictly below PAIGASUS_SESSION_LOCK_TTL_MS');
+  // refresh completing inside the lock's lifetime. The bound is 2x, not 1x, because
+  // adapters/oidc.ts's `refresh()` makes TWO sequential calls under the lock, each individually
+  // bounded by PAIGASUS_OIDC_HTTP_TIMEOUT_MS: the token endpoint (refreshTokenGrant), then —
+  // because non-repudiation checks are always enabled (M1 addendum) and most IdPs return an
+  // id_token on refresh — a JWKS fetch to verify its signature. A 1x bound (the review-round-1
+  // shape) let a cold-cache refresh take up to 2x the timeout while holding a 1x-sized lock,
+  // which is exactly the "a refresh outlives its lock" case invariant 5 exists to prevent.
+  // "At or above" — not just "above" — because a refresh taking exactly the bound still races a
+  // second holder.
+  if (2 * cfg.PAIGASUS_OIDC_HTTP_TIMEOUT_MS >= cfg.PAIGASUS_SESSION_LOCK_TTL_MS) {
+    throw new AuthConfigError('2x PAIGASUS_OIDC_HTTP_TIMEOUT_MS must be strictly below PAIGASUS_SESSION_LOCK_TTL_MS');
   }
 
   const redirectUri = cfg.PAIGASUS_OIDC_REDIRECT_URI ?? `${cfg.PAIGASUS_PUBLIC_ORIGIN}${basePath}/auth/callback`;
@@ -136,5 +156,29 @@ export async function createAuthRuntime(cfg: ComposedConfig, deps: CreateAuthRun
     absoluteTtlMs: cfg.PAIGASUS_SESSION_ABSOLUTE_TTL_SECONDS * 1000,
     zone: cfg.PAIGASUS_ZONE,
     basePath,
+    scopes: cfg.PAIGASUS_OIDC_SCOPES,
   };
+}
+
+let sharedRuntime: Promise<AuthRuntime> | undefined;
+
+/**
+ * The process-wide singleton. Every real caller — task 8's routes, the Next binding — uses this,
+ * never `createAuthRuntime` directly, so discovery, the store adapter, and (for redis) the Redis
+ * connection are built exactly ONCE per process. The promise is cached after the first call and
+ * every later call's arguments are ignored, matching "one runtime per process" — this is
+ * deliberate, not an oversight: a second, differently-configured call in the same process would
+ * indicate a bug upstream (there is exactly one deployment configuration per running container),
+ * not a legitimate need for a second runtime. A failed first call clears the cache, so a
+ * misconfigured-at-boot process can recover once its config is fixed and it is asked to try again.
+ *
+ * `createAuthRuntime` itself is NOT memoised and stays directly callable — this package's own
+ * tests (tests/runtime.test.ts) rely on that to validate many independent configurations.
+ */
+export function getAuthRuntime(cfg: ComposedConfig, deps?: CreateAuthRuntimeDeps): Promise<AuthRuntime> {
+  sharedRuntime ??= createAuthRuntime(cfg, deps).catch((err: unknown) => {
+    sharedRuntime = undefined;
+    throw err;
+  });
+  return sharedRuntime;
 }

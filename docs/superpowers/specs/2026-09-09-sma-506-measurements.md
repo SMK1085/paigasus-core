@@ -428,17 +428,96 @@ Consequences, both verified by direct arithmetic against the code above:
   equal to 30 makes 45 accepted and 120 rejected, because both figures sit on
   the same side of a 30-second boundary.
 
-**Resolution taken:** `tests/adapters/oidc.test.ts` tests the same underlying
-property the brief's case exists to protect — that
-`PAIGASUS_OIDC_CLOCK_TOLERANCE_SECONDS` is actually wired into
-`[client.clockTolerance]` and enforced by the library — using `nbf` values
-that correctly straddle a 30 s tolerance: `now + 20` (inside tolerance,
-accepted) and `now + 45` (outside tolerance, rejected). This is the real,
-measured mechanism exercised with figures that are actually true statements
-about it, in place of the brief's 45 s/120 s pair, which described a claim
-comparison the installed library does not implement. Reported per the task's
-own instruction to name a requirement that cannot be met against the real API
-rather than inventing a workaround that fakes it.
+**Resolution taken (original, review round 1 superseded this — see below):**
+`tests/adapters/oidc.test.ts` tested the same underlying property the brief's
+case exists to protect — that `PAIGASUS_OIDC_CLOCK_TOLERANCE_SECONDS` is
+actually wired into `[client.clockTolerance]` and enforced by the library —
+using `nbf` values that correctly straddle a 30 s tolerance: `now + 20`
+(inside tolerance, accepted) and `now + 45` (outside tolerance, rejected).
+This is the real, measured mechanism exercised with figures that are actually
+true statements about it, in place of the brief's 45 s/120 s pair, which
+described a claim comparison the installed library does not implement.
+Reported per the task's own instruction to name a requirement that cannot be
+met against the real API rather than inventing a workaround that fakes it.
+
+### Review round 1, Important 3 — the original pair still didn't isolate the wiring
+
+The review that followed task 7 found a real hole in the resolution above:
+**both tests used `clockToleranceSeconds: 30` — `oauth4webapi`'s own default**
+(`getClockTolerance`, `index.js:435-440`, returns `30` whenever
+`[clockTolerance]` is absent from the client metadata). So deleting
+`[client.clockTolerance]: opts.clockToleranceSeconds` from `oidc.ts` entirely
+— i.e. never wiring the configured value at all — left BOTH tests passing
+unchanged: `nbf = now + 20` is still `<= 30` and `nbf = now + 45` is still
+`> 30`, regardless of whether the number 30 came from configuration or from
+the library falling back to its own default. The tests could not distinguish
+"we passed 30" from "we passed nothing," which was the one property they
+existed to prove.
+
+**Fix:** replaced the pair with one test that mints a SINGLE token
+(`nbf = now + 45`) and runs it through TWO clients configured with two
+DIFFERENT, both non-default tolerances — `60` (expected: accepted, since
+`45 <= 60`) and `30` (expected: rejected, since `45 > 30`). This verdict can
+only flip between the two calls if the `clockToleranceSeconds` argument
+actually reaches `[client.clockTolerance]`; if the line were deleted, both
+calls would fall back to the library's default 30 and BOTH would reject,
+failing the "accepted under 60" half.
+
+**Mutation-tested, as this repository's convention requires (see M5 below for
+the precedent).** `[client.clockTolerance]: opts.clockToleranceSeconds` was
+removed from `src/adapters/oidc.ts`'s `discovery()` call (bounded by
+`IMPORTANT-3-MUTATION-START`/`END` markers), and
+`pnpm -C ts/packages/paigasus-auth exec vitest run tests/adapters/oidc.test.ts`
+was re-run against the mutated file: **1 of 13 tests failed** — exactly the
+new test, with:
+
+```
+AssertionError: promise rejected "Error: oidc authorization_code_grant fail…" instead of resolving
+Caused by: Error: oidc authorization_code_grant failed: ClientError
+```
+
+— i.e. the `makeClient(60)` call, expected to ACCEPT `nbf = now + 45` under an
+explicit 60 s tolerance, instead rejected it, because with the line removed
+`getConfig()` requests no tolerance and the library silently falls back to its
+own default of 30 (under which 45 exceeds tolerance regardless of the `60`
+argument the test believed it was configuring). All 12 other tests, including
+the six other ID-token cases, stayed green — confirming the mutation is
+isolated to exactly the property this test exists to check. Restored by
+deleting the two marker comments and the disabled clause (never
+`git checkout --`), and re-ran: 13 of 13 passed again, and the full suite
+(112 tests) was re-run clean afterward.
+
+### Review round 1, Important 1 — the four costs of always-enabled non-repudiation checks
+
+Enabling `client.enableNonRepudiationChecks` unconditionally (the M1 addendum
+above) is the right call and stays unconditional — reported here are its
+costs, not a reason to revert it.
+
+1. **Latency.** JWKS is cached in a `WeakMap` for 300 s per `AuthorizationServer`
+   object (`oauth4webapi` `index.js:1005-1037`), so the added cost is
+   approximately one extra round trip per five minutes per process — small.
+2. **Availability.** Before this change, an unreachable `jwks_uri` did not
+   affect login at all (nothing in the plain `authorizationCodeGrant` path
+   reads it). After, with a cold or stale cache, an unreachable `jwks_uri`
+   fails EVERY login and EVERY refresh — JWKS moved from "unused" to "a
+   dependency of both paths."
+3. **Key rotation.** On an unknown `kid`, `getPublicSigKeyFromIssuerJwksUri`
+   (`index.js:1025-1096`) only refetches the JWKS if the cached copy is
+   already at least 60 s old; otherwise it throws `KEY_SELECTION` immediately.
+   A legitimate login can therefore fail for up to 60 s immediately after an
+   IdP rotates its signing key.
+4. **HS256 becomes fatal.** `validateApplicationLevelSignature` throws
+   `UnsupportedOperationError` for any `alg` starting with `HS`
+   (`index.js:1206-1209`, `header.alg.startsWith('HS')`). An IdP configured to
+   sign ID tokens with a client-secret HMAC would log in successfully before
+   this change and cannot after.
+
+**Ruling on point 4, recorded so it is not re-opened blind:** kept
+unconditional. ADR-0015 already pins IAM to RS256/ES256 for access tokens, so
+an asymmetric ID token is consistent with the deployments this package
+actually serves — an HS256 IdP is not a configuration this package is
+expected to support, and failing loudly on one is preferable to silently
+skipping signature verification for everyone to accommodate it.
 
 ## M5 — single-flight refresh: proving AC 2's test can fail
 

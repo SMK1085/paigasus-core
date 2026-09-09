@@ -26,13 +26,23 @@ const httpsUrl = z
   .refine((v) => URL.canParse(v) && new URL(v).protocol === 'https:', { error: 'must be an absolute https URL' })
   .refine((v) => !v.endsWith('/'), { error: 'must not end with a slash' });
 
+/**
+ * An overridden redirect URI. A well-formed absolute URL, but NOT scheme-restricted to https like
+ * `httpsUrl` above — an operator overriding this is typically pointing at a reverse proxy or a
+ * non-default hostname, and the scheme is that deployment's call, not this package's. Without
+ * this check the override was a bare `z.string()`, so a malformed value (a stray space, a path
+ * with no scheme) was accepted in silence and only surfaced later as an opaque failure inside
+ * `openid-client`.
+ */
+const overrideUrl = z.url();
+
 export const authEnvShape = {
   PAIGASUS_OIDC_ISSUER: httpsUrl,
   PAIGASUS_OIDC_CLIENT_ID: z.string().min(1),
   PAIGASUS_OIDC_CLIENT_SECRET: z.string().min(1),
   PAIGASUS_PUBLIC_ORIGIN: httpsUrl,
-  PAIGASUS_OIDC_REDIRECT_URI: z.string().optional(),
-  PAIGASUS_OIDC_POST_LOGOUT_REDIRECT_URI: z.string().optional(),
+  PAIGASUS_OIDC_REDIRECT_URI: overrideUrl.optional(),
+  PAIGASUS_OIDC_POST_LOGOUT_REDIRECT_URI: overrideUrl.optional(),
   PAIGASUS_OIDC_SCOPES: z.string().min(1).default('openid profile email offline_access'),
   PAIGASUS_OIDC_CLOCK_TOLERANCE_SECONDS: seconds(30),
   PAIGASUS_OIDC_HTTP_TIMEOUT_MS: millis(3500),
@@ -42,7 +52,12 @@ export const authEnvShape = {
   PAIGASUS_SESSION_TTL_SECONDS: seconds(28800),
   PAIGASUS_SESSION_ABSOLUTE_TTL_SECONDS: seconds(86400),
   PAIGASUS_SESSION_REFRESH_SKEW_SECONDS: seconds(30),
-  PAIGASUS_SESSION_LOCK_TTL_MS: millis(5000),
+  // Default raised 5000 -> 10000 (SMA-506 task-7 review, Important 2): a refresh now makes TWO
+  // sequential bounded calls under the lock — the token endpoint, then (with non-repudiation
+  // checks enabled, see adapters/oidc.ts) a JWKS fetch — so createAuthRuntime asserts
+  // `2 * PAIGASUS_OIDC_HTTP_TIMEOUT_MS < PAIGASUS_SESSION_LOCK_TTL_MS`. The shipped defaults must
+  // themselves satisfy that: 3500 * 2 = 7000 < 10000.
+  PAIGASUS_SESSION_LOCK_TTL_MS: millis(10000),
   PAIGASUS_SESSION_LOCK_WAIT_MS: millis(3000),
 } as const;
 

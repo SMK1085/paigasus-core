@@ -93,15 +93,24 @@ describe('createOidcClient — authorizationCodeGrant ID Token validation', () =
 
   // The clock-skew pair. See the file header and the M1 addendum: `nbf` is the one claim
   // oauth4webapi validates against [client.clockTolerance] in the FUTURE direction.
-  it('accepts a token whose nbf is inside a 30s clock tolerance', async () => {
+  //
+  // Review round 1 (Important 3) found the original pair — both at tolerance 30, the library's
+  // OWN default (oauth4webapi's getClockTolerance returns 30 when [clockTolerance] is absent) —
+  // proved nothing about OUR wiring: it passes identically whether or not
+  // `[client.clockTolerance]: opts.clockToleranceSeconds` is ever set. This version uses the
+  // SAME minted token (same nbf value) against TWO clients configured with DIFFERENT, both
+  // non-default tolerances, so the verdict flips only if the configured value actually reaches
+  // the library. Mutation-tested: deleting the `[client.clockTolerance]` line from oidc.ts made
+  // the "accepts" half of this test fail (both clients then fall back to the library's default
+  // 30, and nbf +45 exceeds 30 under both) — see the M1 addendum for the exact failure output.
+  it('the configured clock tolerance — not the library default — decides accept vs reject for the same token', async () => {
     const now = Math.floor(Date.now() / 1000);
-    fixture.setNextIdToken(await fixture.mintIdToken({ nonce: NONCE, nbf: now + 20 }));
-    await expect(grant(makeClient(30))).resolves.toBeDefined();
-  });
+    const token = await fixture.mintIdToken({ nonce: NONCE, nbf: now + 45 });
+    fixture.setNextIdToken(token);
 
-  it('rejects a token whose nbf is outside a 30s clock tolerance', async () => {
-    const now = Math.floor(Date.now() / 1000);
-    fixture.setNextIdToken(await fixture.mintIdToken({ nonce: NONCE, nbf: now + 45 }));
+    // 45 <= 60: accepted under the LARGER, explicitly-configured tolerance.
+    await expect(grant(makeClient(60))).resolves.toBeDefined();
+    // The identical token, 45 > 30: rejected under the SMALLER tolerance.
     await expect(grant(makeClient(30))).rejects.toThrow();
   });
 });

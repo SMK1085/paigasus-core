@@ -28,7 +28,7 @@ describe('authEnvShape', () => {
     expect(parsed.PAIGASUS_SESSION_TTL_SECONDS).toBe(28800);
     expect(parsed.PAIGASUS_SESSION_ABSOLUTE_TTL_SECONDS).toBe(86400);
     expect(parsed.PAIGASUS_SESSION_REFRESH_SKEW_SECONDS).toBe(30);
-    expect(parsed.PAIGASUS_SESSION_LOCK_TTL_MS).toBe(5000);
+    expect(parsed.PAIGASUS_SESSION_LOCK_TTL_MS).toBe(10000);
     expect(parsed.PAIGASUS_SESSION_LOCK_WAIT_MS).toBe(3000);
   });
 
@@ -54,5 +54,20 @@ describe('authEnvShape', () => {
   it('declares neither zone key — defineRuntimeConfig throws if an extra shape does', () => {
     expect(Object.keys(authEnvShape)).not.toContain('PAIGASUS_ZONE');
     expect(Object.keys(authEnvShape)).not.toContain('PAIGASUS_ZONES');
+  });
+
+  // Review round 1, smaller fix: these were a bare z.string().optional(), so a malformed
+  // override was accepted in silence and only surfaced later as an opaque openid-client failure.
+  it('rejects a malformed redirect URI override', () => {
+    expect(() => schema.parse({ ...VALID, PAIGASUS_OIDC_REDIRECT_URI: 'not a url' })).toThrow();
+  });
+
+  it('accepts a well-formed redirect URI override', () => {
+    const parsed = schema.parse({ ...VALID, PAIGASUS_OIDC_REDIRECT_URI: 'https://proxy.example.com/cb' });
+    expect(parsed.PAIGASUS_OIDC_REDIRECT_URI).toBe('https://proxy.example.com/cb');
+  });
+
+  it('rejects a malformed post-logout redirect URI override', () => {
+    expect(() => schema.parse({ ...VALID, PAIGASUS_OIDC_POST_LOGOUT_REDIRECT_URI: 'not a url' })).toThrow();
   });
 });
