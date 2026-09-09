@@ -421,7 +421,7 @@ coupling, and revision 1 did not answer it.
 |---|---|---|
 | OIDC discovery | `PAIGASUS_OIDC_HTTP_TIMEOUT_MS` | login fails, 503 page |
 | token exchange | same | callback fails, § 10 error page |
-| refresh | same, and **strictly below `LOCK_TTL_MS`** | § 8.4 |
+| refresh | same, and **`2 × timeout < LOCK_TTL_MS`** — § 6.2 | § 8.4 |
 | revocation | same | logged, logout continues |
 | Redis command | `PAIGASUS_SESSION_REDIS_TIMEOUT_MS` | § 7.2 |
 
@@ -576,8 +576,12 @@ Two controls, both required:
 1. `set` is a compare-and-set on `rev`. A's write carries
    `expectedRev = fresh.rev`, which B already incremented, so A's write is
    rejected and A re-reads B's record.
-2. The refresh HTTP timeout is asserted **strictly below** `LOCK_TTL_MS` at
-   startup (§ 7.1), so the overlap is rare rather than routine.
+2. The refresh HTTP timeout is asserted at **`2 × timeout < LOCK_TTL_MS`** at
+   startup (§ 6.2), so the overlap is rare rather than routine. The factor of two
+   is not padding: enabling `enableNonRepudiationChecks` (§ 11.3) makes one
+   refresh **two** sequential bounded calls — the token endpoint, then JWKS — so
+   the single-timeout bound this paragraph originally carried stopped bounding
+   the refresh against its lock.
 
 **(b) `store.set` fails after a successful `oidc.refresh`.** The rotated token is
 lost, the store keeps the revoked one, and every later refresh fails — a brief
