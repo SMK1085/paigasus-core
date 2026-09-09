@@ -239,17 +239,28 @@ async function handleCallback(runtime: AuthRuntime, req: Request, url: URL): Pro
 // is against the IdP specifically, and it is what step 1's own record-lookup needs to find a
 // refresh token worth revoking in step 3.
 //
-// KNOWN GAP — id_token_hint is never sent (flagged in the task 9 report, not silently dropped).
-// RFC 7009 revocation (step 3) and the end-session redirect (step 4) both accept identifying
-// material about the session being torn down; step 4's `id_token_hint` specifically wants the raw
-// ID TOKEN JWT, not its decoded claims. `SessionRecord` (core/session.ts) stores only
-// `idTokenClaims` — the DECODED claims — and adapters/oidc.ts's `OidcTokens` (produced by
-// `authorizationCodeGrant`) never surfaces the raw token string either, so there is nothing here
-// to pass. Threading the raw token through would mean widening `OidcTokens` and `SessionRecord`
-// and changing the task-8 callback path above — three files outside this task's declared scope
-// (`src/http/routes.ts` only) and each already through its own implement/review cycle. Rather than
-// fake a value or reach past scope unreviewed, `buildEndSessionUrl` is called with `idTokenHint`
-// omitted — it is optional in `BuildEndSessionUrlParams` for exactly this reason.
+// `id_token_hint` IS DELIBERATELY OMITTED, and the redirect is NOT identity-free without it.
+// `openid-client@6.8.8` appends `client_id` to the end-session parameters UNCONDITIONALLY
+// whenever the caller does not supply one (`build/index.js:1129-1141` — `if
+// (!parameters.has('client_id')) parameters.set('client_id', c.client_id);`), so the redirect
+// built below already carries `client_id` today, asserted in
+// tests/adapters/oidc.test.ts's "buildEndSessionUrl carries client_id ..." test. `client_id` plus
+// a registered `post_logout_redirect_uri` is enough for both providers this design names —
+// Keycloak (this package's own e2e fixture) and Entra ID — to skip the confirmation interstitial
+// and honour the redirect, with no `id_token_hint` needed.
+//
+// The reason `id_token_hint` itself is never sent: it needs the raw, signed ID TOKEN JWT, not
+// decoded claims. `SessionRecord` (core/session.ts) stores only the DECODED `idTokenClaims`, and
+// adapters/oidc.ts's `OidcTokens` (produced by `authorizationCodeGrant`) never surfaces the raw
+// token string either. Storing it would add a THIRD bearer credential to `SessionRecord` beside
+// the access and refresh tokens, widening the blast radius of a Redis compromise, for no benefit
+// to either provider this design targets — a deliberate trade-off, not an oversight (see the task
+// 9 report and design doc § 9.5).
+//
+// NAMED RESIDUAL: this is insufficient for an identity provider that MANDATES `id_token_hint` and
+// does not accept `client_id` as a substitute — Okta documents it as required. Logging out against
+// such a provider still succeeds server-side (step 1 already deleted the record), but the
+// end-session redirect will not complete: a UX failure there, not a security one.
 async function handleLogout(runtime: AuthRuntime, req: Request): Promise<Response> {
   const cookies = readCookies(req.headers.get('cookie'));
   const sid = cookies.get(SESSION_COOKIE);
@@ -287,25 +298,31 @@ async function handleLogout(runtime: AuthRuntime, req: Request): Promise<Respons
     }
   }
 
-  runtime.logger.event('logout.completed', {
-    zone: runtime.zone,
-    ...(sid !== undefined ? { sid: sidTag(sid) } : {}),
-    revoked,
-  });
-
   // STEP 4: redirect to end_session_endpoint with post_logout_redirect_uri and a state bound to
   // this logout. `newTransactionId` is reused as a generic opaque-random-id generator (the same
   // function already backs the login flow's own `state`) — logout's `state` carries no secret and
   // needs no separate generator. If the identity provider advertises no end_session_endpoint, or
   // discovery itself fails, the user is still logged out server-side (step 1 already ran), so this
   // degrades to the zone root rather than surfacing a 500 for what is inherently a courtesy step.
+  // The degradation is recorded below via `endSessionRedirected: false` — an operator otherwise
+  // gets no signal that this happened, unlike step 3's revocation outcome.
   const state = newTransactionId();
+  let endSessionRedirected = true;
   try {
     const endSessionUrl = await runtime.oidc.buildEndSessionUrl({ postLogoutRedirectUri: runtime.postLogoutRedirectUri, state });
     headers.set('Location', endSessionUrl);
   } catch {
+    // Never rethrown and never logged as a raw caught error object — same rule as step 3's catch.
+    endSessionRedirected = false;
     headers.set('Location', runtime.postLogoutRedirectUri);
   }
+
+  runtime.logger.event('logout.completed', {
+    zone: runtime.zone,
+    ...(sid !== undefined ? { sid: sidTag(sid) } : {}),
+    revoked,
+    endSessionRedirected,
+  });
 
   return new Response(null, { status: 302, headers });
 }

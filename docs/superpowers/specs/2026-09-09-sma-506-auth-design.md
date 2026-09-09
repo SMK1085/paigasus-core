@@ -740,11 +740,32 @@ the cookie, so nothing needs to write one from a server component.
 1. delete the record server-side,
 2. clear `__Host-pgs_sid` and any outstanding txn cookies,
 3. revoke the refresh token at the IdP if advertised (RFC 7009), best-effort,
-4. redirect to `end_session_endpoint` with `id_token_hint`,
-   `post_logout_redirect_uri` and a `state` bound to this logout.
+4. redirect to `end_session_endpoint` with `post_logout_redirect_uri` and a
+   `state` bound to this logout.
 
 **Order matters.** Deletion precedes every network call, so a slow or unreachable
 IdP cannot leave a live session behind.
+
+**`id_token_hint` is deliberately omitted from step 4 (task 9 review).** It needs
+the raw, signed ID token JWT, not decoded claims — `SessionRecord` stores only
+`idTokenClaims`, and `OidcTokens` (the OIDC adapter's `authorizationCodeGrant`
+result) never surfaces the raw token either. Storing it would add a THIRD bearer
+credential to `SessionRecord` beside the access and refresh tokens, widening the
+blast radius of a Redis compromise, for no benefit to either provider this design
+targets.
+
+Identification is carried instead by `client_id`: `openid-client@6.8.8` appends
+it to the end-session parameters unconditionally whenever the caller does not
+supply one (`build/index.js:1129-1141`). `client_id` plus a registered
+`post_logout_redirect_uri` is enough for Keycloak (this package's own e2e
+fixture) and Entra ID to skip the confirmation interstitial and honour the
+redirect, with no `id_token_hint` needed.
+
+**Named residual.** This is insufficient for an identity provider that MANDATES
+`id_token_hint` and does not accept `client_id` as a substitute — Okta documents
+it as required. Logging out against such a provider still succeeds server-side
+(step 1 already deleted the record), but the end-session redirect will not
+complete: a UX failure there, not a security one.
 
 `/auth/logout/callback` — unspecified in revision 1 — validates the `state`,
 clears any residual cookie, and redirects to the zone root. **If the IdP never

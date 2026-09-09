@@ -338,6 +338,7 @@ describe('POST /auth/logout — end-session redirect', () => {
     expect(completed?.[1]['zone']).toBe('iam');
     expect(completed?.[1]['revoked']).toBe(true);
     expect(completed?.[1]['sid']).toBe(sid.slice(0, 8));
+    expect(completed?.[1]['endSessionRedirected']).toBe(true);
   });
 
   it('emits logout.completed with revoked: false when revocation rejected', async () => {
@@ -359,6 +360,19 @@ describe('POST /auth/logout — end-session redirect', () => {
     const res = await createAuthRoutes(runtime).handle(logoutRequest());
     expect(res.status).toBe(302);
     expect(res.headers.get('location')).toBe(POST_LOGOUT_REDIRECT_URI);
+  });
+
+  // Review round 1: the step-4 degradation above previously logged nothing, unlike step 3's
+  // revocation outcome — an operator had no signal the end-session redirect ever fell back.
+  it('logs endSessionRedirected: false when buildEndSessionUrl throws', async () => {
+    const oidc = fakeOidc();
+    oidc.buildEndSessionUrl = (): Promise<string> => Promise.reject(new Error('no end_session_endpoint'));
+    runtime = baseRuntime(oidc);
+
+    await createAuthRoutes(runtime).handle(logoutRequest());
+
+    const completed = events.find(([name]) => name === 'logout.completed');
+    expect(completed?.[1]['endSessionRedirected']).toBe(false);
   });
 });
 

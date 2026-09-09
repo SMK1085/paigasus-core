@@ -147,6 +147,21 @@ describe('createOidcClient — the rest of the surface', () => {
     expect(parsed.searchParams.get('id_token_hint')).toBe('idtok');
   });
 
+  // WITNESS TEST (task 9 review): openid-client@6.8.8 appends `client_id` to the end-session
+  // parameters UNCONDITIONALLY whenever the caller does not supply one
+  // (build/index.js:1129-1141 — `if (!parameters.has('client_id')) parameters.set('client_id',
+  // c.client_id);`). This is load-bearing: task 9's logout route never sets `idTokenHint`, and
+  // `client_id` plus a registered `post_logout_redirect_uri` is what lets Keycloak and Entra ID
+  // skip the confirmation interstitial in its absence (routes.ts's handleLogout doc comment).
+  // Nothing else in this package would notice a future major version silently dropping this
+  // default, so it is asserted here directly.
+  it('buildEndSessionUrl carries client_id even when the caller does not supply one', async () => {
+    const oidc = makeClient();
+    const url = await oidc.buildEndSessionUrl({ postLogoutRedirectUri: 'https://rp.example.com/' });
+    const parsed = new URL(url);
+    expect(parsed.searchParams.get('client_id')).toBe(fixture.clientId);
+  });
+
   it('wraps a discovery failure without leaking the underlying error object', async () => {
     const oidc = createOidcClient({
       issuer: 'http://127.0.0.1:1', // nothing listens here
