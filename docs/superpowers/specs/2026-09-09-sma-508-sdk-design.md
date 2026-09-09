@@ -6,11 +6,11 @@
 **ADR:** ADR-0018 (Connect-ES over gRPC; no OpenAPI surface), ADR-0019 (Canonical error model, incl. Amendment A1)
 **Design source:** Frontend Architecture Scoping §§ 6, 7
 **Date:** 2026-09-09
-**Revision:** 1 — pre-challenge.
+**Revision:** 2 — after the adversarial spec challenge. § 15 records what changed and what was rejected.
 
 **Versions this spec is written against.** `@connectrpc/connect` 2.2.0, `@connectrpc/connect-node`
 2.2.0, `@bufbuild/protobuf` 2.14.1, protoc-gen-es v2.13.0 (pinned in `buf.gen.yaml`), buf 1.70.0,
-TypeScript 6.0.3, vitest 5.0.0, Moon 2.5.3, pnpm 11.3.0.
+TypeScript 6.0.3, vitest 5.0.0, Node 24.16.0, Moon 2.5.3, pnpm 11.3.0.
 
 ---
 
@@ -37,44 +37,50 @@ client, and that is the whole hand-written surface.
 
 ## 3. Scope
 
-A real `@paigasus/sdk` (`ts/packages/paigasus-sdk`, already scaffolded: `package.json`, `moon.yml`,
-`tsconfig.json`, `.releaserc.json`, a stub `src/index.ts`). Plus:
-
-- a widened public surface on `@paigasus/proto`;
-- a second, TypeScript-only `buf generate` invocation producing the `google.rpc.ErrorInfo`
-  descriptor;
-- three registration edits (§ 11).
+A real `@paigasus/sdk` (`ts/packages/paigasus-sdk`, already scaffolded), plus a widened public
+surface on `@paigasus/proto`, plus a second TypeScript-only `buf generate` invocation producing the
+`google.rpc.ErrorInfo` descriptor, plus eight registration edits (§ 11).
 
 Every new source file carries an SPDX header. `private: true` and source-only, matching
 `@paigasus/ui` and `@paigasus/next-config`.
 
+**§ 14.1 recommends splitting this into three PRs.** The section boundaries below are drawn so that
+split is clean.
+
 ### 3.1 Layout
 
 ```
+ts/packages/paigasus-proto/          (existing package, widened)
+  src/error.ts                       asWireReason / fromWireReason — the codec (§ 9.2)
+  src/error.test.ts                  parity with the Rust rejection set
+  src/generated/google/rpc/error_details_pb.ts   NEW, generated (§ 5)
+
 ts/packages/paigasus-sdk/
-  package.json          exports ".", "./iam", "./chat", "./errors"
-  moon.yml              dependsOn: ['paigasus-proto-ts']
-  tsconfig.json
+  package.json          exports ".", "./iam", "./chat", "./errors", "./errors/types"
+  moon.yml              dependsOn + the inputs that actually confer affectedness (§ 11.1)
+  tsconfig.json         types: ["node"]  (§ 6.4)
   vitest.config.ts      node env; ssr.resolve.conditions for server-only
   src/
-    index.ts            `import 'server-only'`; re-exports the three entries
+    index.ts            server-guarded; re-exports "./iam", "./chat", "./errors"
     server-guard.ts     the single `import 'server-only'` site (§ 6.2)
-    transport.ts        per-base-URL transport cache + the auth interceptor
-    auth.ts             the bearer ContextKey and its accessors
+    transport.ts        per-key transport cache (§ 7)
     iam.ts              typed client factories over the seven IAM services
-    chat.ts             the OpenAI-compatible chat client (§ 8)
+    chat.ts             the OpenAI-compatible chat client + parseTerminalFrame (§ 8)
     errors/
-      types.ts          PaigasusError and the presentation union
-      presentation.ts   the reason -> presentation table (AC 3)
-      from-connect.ts   ConnectError  -> PaigasusError
-      from-http.ts      IAM + gateway envelopes -> PaigasusError
-      map-error.ts      the public mapError() entry
+      types.ts          PaigasusError, Presentation — NO server guard (§ 6.3)
+      presentation.ts   the reason -> presentation override table (§ 9.3)
+      transport-status.ts  gRPC Code and HTTP status -> Presentation (§ 9.2)
+      map-error.ts      mapError() — server-guarded
   tests/
 ```
 
+Tests live in `tests/`, matching `@paigasus/ui` and `@paigasus/next-config`. The two files added to
+`@paigasus/proto` follow *that* package's colocated `*.test.ts` convention instead — a package keeps
+its own habit.
+
 ## 4. Three corrections this spec makes to its own inputs
 
-These are stated up front because two of them change the acceptance criteria.
+Stated up front because two of them change the acceptance criteria.
 
 ### 4.1 ADR-0018 decision 5's premise is stale — the HTTP slice is one endpoint
 
@@ -90,220 +96,310 @@ gRPC router (`rs/crates/services/paigasus-iam/src/adapters/grpc/mod.rs:80-109`):
 | gateway chat | none, and never will have one | — |
 
 So those three are reached over gRPC like everything else, and `@paigasus/sdk/chat` is the entire
-hand-written surface. This *shrinks* the drift risk ADR-0018 names as its own main downside, rather
-than accepting it for three surfaces that no longer need it.
+hand-written surface. This *shrinks* the drift risk ADR-0018 names as its own main downside.
 
-**This needs an ADR-0018 amendment**, recording that decision 5's list was overtaken by
-implementation. The decision itself — "HTTP-only surfaces get a small hand-written fetch client" —
-stands unchanged; only its membership shrinks. Filed as part of this issue's Linear comment, not as
-a silent divergence.
+**This needs an ADR-0018 amendment.** Decision 5 itself — "HTTP-only surfaces get a small
+hand-written fetch client" — stands unchanged; only its membership shrinks. Whether that Notion edit
+precedes or follows this PR is an open decision (§ 16 Q1); a Linear comment is not an ADR edit.
 
 ### 4.2 AC 5 quotes a stale expected set, and "every downstream app" is empty
 
 AC 5 quotes the `contracts->proto` expected set as six ids. It has **seven** — it gained
-`paigasus-service-info-rs` (SMA-505/SMA-524) after the issue was written
-(`ci/affected-graph/run.sh:258-259`).
+`paigasus-service-info-rs` after the issue was written (`ci/affected-graph/run.sh:258-259`).
 
-More consequentially: **MEASURED**, `moon query projects` reports `paigasus-console-ts` depending on
-`paigasus-next-config-ts` and `paigasus-ui-ts` only, and no project in `ts/` declares a `dependsOn`
-on `paigasus-sdk-ts` or lists `@paigasus/sdk` in a `package.json`. The case uses
-`--downstream deep` over the **project** graph (`run.sh:32-36`), so the delta is exactly one id:
-
-```
-+ paigasus-sdk-ts
-```
-
-AC 5's "and every downstream app" is vacuous today. This spec does **not** wire the console to the
-SDK — that is SMA-509/SMA-510's work — so no app is added. § 13 M4 records the measurement that
-proves it, and the case is re-measured rather than transcribed.
+**MEASURED (M4).** With the `sdk -> proto` edge in place, the set is exactly those seven plus
+`paigasus-sdk-ts`. No app enters, because no project in `ts/` declares a `dependsOn` on
+`paigasus-sdk-ts` or lists `@paigasus/sdk` in a `package.json`. AC 5's "and every downstream app" is
+vacuous today, and this spec does not wire the console to the SDK — that is SMA-509/SMA-510's work.
 
 Also measured: TypeScript project edges are **not** auto-derived. `.moon/toolchains.yml` and
 `.moon/workspace.yml` carry no node dependency-sync setting, and every TS `dependsOn` in the repo is
-hand-authored. Adding `"@paigasus/proto": "workspace:*"` to the SDK's `package.json` alone creates
-no project edge — `moon.yml` must gain `dependsOn: ['paigasus-proto-ts']` by hand. This is the
-opposite of the Rust toolchain's behaviour for `path =` deps (CLAUDE.md).
+hand-authored. This is the opposite of the Rust toolchain's behaviour for `path =` deps.
 
 ### 4.3 The registry is 57 reasons, not 46
 
-SMA-507's handoff comment on this issue says "the registry currently holds 46 reasons". It holds
-**57** plus the `UNSPECIFIED` sentinel (`error.proto:59-262`; the Rust mirror test asserts 57 at
-`rs/crates/libs/paigasus-proto/src/error.rs:230`). The number matters only because AC 3's table must
-cover all of them; deriving the table's key set from the descriptor rather than hand-listing it
-makes the count self-correcting.
+SMA-507's handoff comment says "the registry currently holds 46 reasons". It holds **57** plus the
+`UNSPECIFIED` sentinel (`error.proto:59-262`; the Rust mirror test asserts 57 at
+`rs/crates/libs/paigasus-proto/src/error.rs:230`).
 
 ## 5. `google.rpc.ErrorInfo` in TypeScript — ADR-0019 A1.4 resolved
 
 A1.4 left this open: *"the TypeScript path is unverified — if Connect-ES requires a generated
 `ErrorInfo` descriptor, that module has to be generated after all."*
 
-**It does.** `ConnectError.findDetails` is
+**It does (M3).** `ConnectError.findDetails` is
 `findDetails<Desc extends DescMessage>(desc: Desc): MessageShape<Desc>[]`
-(`@connectrpc/connect@2.2.0`, `connect-error.d.ts:84-85`). There is no schema-free path: the second
-overload takes a `Registry`, which is also built from descriptors.
+(`connect-error.d.ts:84-85`). The second overload takes a `Registry`, also built from descriptors.
+There is no schema-free path.
 
-**MEASURED** (§ 13 M1): `contracts/buf.yaml` already declares `buf.build/googleapis/googleapis` as a
-dep with a `buf.lock` entry, and
+**MEASURED (M1).** `contracts/buf.yaml:6-9` already declares `buf.build/googleapis/googleapis` with
+a `buf.lock` entry, and
 
 ```
 buf generate --template buf.gen.googleapis.yaml \
   buf.build/googleapis/googleapis --path google/rpc/error_details.proto
 ```
 
-exits 0 and emits exactly **one** file, `google/rpc/error_details_pb.ts` (662 lines). It is
-self-contained: its only non-generated import is `Duration` from `@bufbuild/protobuf/wkt`, which is
-runtime, not a second generated module. It exports `ErrorInfoSchema` alongside thirteen other
-`google.rpc` detail schemas, all tree-shakeable.
+exits 0 and emits exactly **one** file, `google/rpc/error_details_pb.ts` (662 lines). Its only
+non-generated import is `Duration` from `@bufbuild/protobuf/wkt`, which is runtime, not a second
+generated module. It exports `ErrorInfoSchema` alongside thirteen sibling `google.rpc` schemas.
 
 A1.4's fear was that referencing `ErrorInfo` from `error.proto` would emit Rust and Python pointing
 at modules the run never produced. That fear was correct and this approach does not trigger it:
 `error.proto` still imports nothing, and the second template runs **only** the TypeScript plugin
-against a different input module. Rust and Python are untouched.
+against a different input module.
 
-### 5.1 The ordering constraint is load-bearing
+**`--path`, not `--type`.** `--type google.rpc.ErrorInfo` would emit a smaller file. `--path` is
+chosen because the fourteen schemas are one tree-shakeable module, and because a future consumer of
+`RetryInfo` or `BadRequest` — both plausible for this error model — then needs no codegen change.
+The cost is 662 generated lines nobody reads.
 
-`contracts/buf.gen.yaml` sets `clean: true`, which wipes each `out:` directory before regeneration.
-The googleapis template writes into the *same* tree
-(`ts/packages/paigasus-proto/src/generated/`). So:
+### 5.1 The ordering constraint, and what actually controls it
 
-- the main template must run **first** (wipes the tree, writes `paigasus/**`);
-- the googleapis template must run **second**, with `clean: false` (writes `google/rpc/**`).
+`contracts/buf.gen.yaml:3` sets `clean: true`, which wipes each `out:` directory before
+regeneration. The googleapis template writes into the *same* tree
+(`ts/packages/paigasus-proto/src/generated/`). So the main template must run **first**, and the
+googleapis template **second** with `clean: false`. Reversed, the second run's output is destroyed.
 
-Reversed, the second run's output is destroyed by the first. `contracts:generate` therefore becomes
-a `script:` block with an explicit `set -euo pipefail` — Moon does not enable errexit for `script:`
-blocks and takes the block's status from its last command, so without it a failed first `buf
-generate` followed by a successful second one exits 0 (the same latent defect
-`paigasus-console-ts:build` documents).
+`contracts:generate` therefore becomes a `script:` block with an explicit `set -euo pipefail` — Moon
+does not enable errexit for `script:` blocks and takes the block's status from its last command, so
+without it a failed first `buf generate` followed by a successful second exits 0.
 
-The ordering is asserted, not just commented: a test in `@paigasus/proto` imports `ErrorInfoSchema`
-and asserts `typeName === 'google.rpc.ErrorInfo'`. If the ordering regresses, the file is absent and
-the test fails at import — before the codegen-drift gate would even run.
+**Revision 1 named the wrong control and is corrected here.** It claimed a `@paigasus/proto` test
+would catch an ordering regression "before the codegen-drift gate would even run". That is false in
+CI. The ordering lives in `contracts/moon.yml`, which is **not** among `contracts:generate`'s own
+inputs, so a `moon.yml`-only edit selects neither `contracts:generate` nor `paigasus-proto-ts:test`.
+
+The real control is the **codegen-drift step**, `.github/workflows/ci.yml:309-322`. It carries no
+`if:`, so it runs on every CI run, and it is `moon run contracts:generate` followed by
+`git diff --exit-code` over the three generated dirs. A reversed order leaves
+`error_details_pb.ts` deleted from the working tree, and `git diff` reports the deletion against the
+index. A `@paigasus/proto` test asserting `ErrorInfoSchema.typeName === 'google.rpc.ErrorInfo'` is
+kept as a fast local signal, but it is not the control and this spec no longer claims it is.
+
+**Nothing pins the ordering itself.** `CONTRACTS_GENERATE_INPUTS` (`ci_targets.py:393-400`) pins
+`contracts:generate`'s *inputs*; `check_contracts_generate_inputs` (`ci_targets.py:1773-1786`) reads
+`inputGlobs` and `inputFiles` and nothing else. No gate reads the task's `script:`. So the ordering,
+the `set -euo pipefail`, and the `--path` narrowing are comments, and a dropped `--path` would
+silently generate all of googleapis. Adding a script pin means a new registry obligation and is
+**out of scope** (§ 14); this is recorded as a stated limitation, in the repo's own habit of naming
+a residual rather than implying it is closed.
+
+**The drift step has a known vacuity.** On a Moon task-cache hit `buf generate` never re-runs and
+the diff compares the committed output against itself — the hole SMA-592 closed for the generator
+pins. That is exactly why `contracts/buf.gen.googleapis.yaml` must join `contracts:generate`'s
+inputs, and hence `CONTRACTS_GENERATE_INPUTS` (§ 11.2).
+
+### 5.2 The BSR network dependency is not new
+
+**MEASURED (M9).** `buf.gen.yaml` already declares three `remote:` plugins (lines 8, 30, 39). A
+`remote:` plugin executes server-side on the BSR, so every `buf generate` already makes a live
+network call, and `~/.cache/buf/v3/plugins` is **empty** — remote plugin execution is not cached
+locally. `ci.yml` caches cargo, `.moon/cache`, the pnpm store and uv (`:81-120`, `:155-169`), and
+nothing buf-related. Separately, `~/.cache/buf/v3/modules/b5/buf.build/googleapis/googleapis/`
+is already populated from `buf.yaml`'s existing `deps:` resolution.
+
+So the second invocation adds one more BSR round-trip to a step that already cannot run offline. It
+does not introduce a new class of dependency, and a BSR outage already reds every CI run today.
+
+**The vendored alternative is therefore rejected**, and the reason is recorded rather than left
+implicit: committing `error_details_pb.ts` by hand would remove the ordering constraint and the
+`CONTRACTS_GENERATE_INPUTS` edit, but it would put a wire contract outside the codegen-drift gate —
+the one thing ADR-0019 built the registry to avoid — to buy back an offline capability the repo does
+not have and does not claim.
+
+### 5.3 Recovery from a phase-2 failure
+
+`clean: true` wipes the tree before phase 1. If phase 2 fails, `set -euo pipefail` aborts with
+`google/rpc/error_details_pb.ts` deleted from the working tree, and later tasks in the same
+`moon ci` read that tree. The recovery is `moon run contracts:generate --force`; **do not commit the
+deletion**. This is written into `contracts/moon.yml`'s comment beside the script, because the
+failure presents as an unrelated multi-task failure and the recovery is not obvious.
+
+Generating into a scratch directory and moving on success would remove the window. It is not done
+here because it makes the task's `outputs:` and the drift step's `git diff` disagree about where
+files live, and the window is a transient-BSR-failure window on a step that already cannot run
+offline (§ 5.2). Stated as a deliberate trade, not an oversight.
 
 ## 6. Package shape
 
-### 6.1 Four entry points
+### 6.1 Five entry points
 
 ```json
 "exports": {
-  ".":        "./src/index.ts",
-  "./iam":    "./src/iam.ts",
-  "./chat":   "./src/chat.ts",
-  "./errors": "./src/errors/map-error.ts"
+  ".":              "./src/index.ts",
+  "./iam":          "./src/iam.ts",
+  "./chat":         "./src/chat.ts",
+  "./errors":       "./src/errors/map-error.ts",
+  "./errors/types": "./src/errors/types.ts"
 }
 ```
 
-Subpaths exist so a caller that only renders an error does not pull `@connectrpc/connect-node` and
-its HTTP/2 stack into its module graph. The root re-exports all three, matching `@paigasus/ui`'s
-single-barrel habit for the common case.
+Subpaths exist so a caller that only maps an error does not pull `@connectrpc/connect-node` and its
+HTTP/2 stack into its module graph.
 
 ### 6.2 `server-only` — AC 1
 
-`src/server-guard.ts` holds the single `import 'server-only';` and nothing else. Every other entry
-imports it first. One site, so a future entry point that forgets the guard is a visible omission
-rather than a copied line that drifted.
+`src/server-guard.ts` holds the single `import 'server-only';` and nothing else. One site, so a
+future entry that forgets it is a visible omission rather than a copied line that drifted.
 
-Four layers hold AC 1, mirroring SMA-506 § 4.3:
+Four layers, and the honest limits of each:
 
 1. **`import 'server-only'`.** Its exports map is `{ "react-server": "./empty.js", "default":
-   "./index.js" }` and `index.js` is one unconditional `throw`. A client component importing the SDK
-   fails the build.
+   "./index.js" }` and `index.js` is one unconditional `throw`. A client component that takes a
+   **value** import of a guarded entry fails the build.
 2. **The eslint boundary rule**, already live and already naming this package
    (`ts/packages/paigasus-next-config/src/eslint.mjs:91-104`): the SDK may import `@paigasus/proto`
-   and nothing else in the `@paigasus/*` namespace, and `react`/`react-dom`/`next` are banned
-   outright. This is why the SDK cannot import `@paigasus/auth` (§ 9) and cannot reach
-   `next/headers`.
-3. **A structural test** asserting every file named in the `exports` map imports `./server-guard.js`
-   on its first line, driven off `package.json` rather than a hand-listed array — so a fifth entry
-   point is covered the day it is added.
-4. **No React, no JSX, no DOM types** in `tsconfig.json`'s `lib`/`types`.
+   and nothing else in the `@paigasus/*` namespace, and `react`/`react-dom`/`next` are banned. This
+   is why the SDK cannot import `@paigasus/auth` (§ 14) and cannot reach `next/headers`. **It
+   covers static imports only** — `no-restricted-imports` does not see a dynamic
+   `import('next/headers')`.
+3. **A structural test** asserting every guarded entry named in the `exports` map imports the guard
+   as its **first import statement** (not its first line — every file opens with the SPDX header),
+   resolving the path relative to each entry. Driven off `package.json`, so a sixth entry point is
+   covered the day it is added.
+4. **`tsconfig.json` excludes DOM types** (§ 6.4).
+
+**AC 1 is enforced structurally and is not proven by a build.** No test in this package runs a
+client-side Next build, so no test observes the throw. The sibling package has the same shape and
+the same gap (`ts/packages/paigasus-next-config/tests/runtime.test.ts:63-68` covers the edge runtime,
+not the client bundle). A console-side failing-build fixture would prove it and is deliberately left
+to SMA-510, which will have a console consuming the SDK. Stated plainly rather than implied, in the
+same spirit as § 10's live-service paragraph.
 
 `server-only` guards the **client bundle only**. Next sets the `react-server` condition for the
-middleware layer too, so it resolves to `empty.js` there and is a no-op — the trap SMA-502 measured
-(M6). The SDK is not middleware-reachable by design, but this is noted so a future edge-runtime
-caller is not surprised. No `NEXT_RUNTIME` check is added here: unlike
-`@paigasus/next-config/runtime`, the SDK reads no environment.
+middleware layer too, so it resolves to `empty.js` there and is a no-op — the trap SMA-502 measured.
+The SDK is not middleware-reachable by design and reads no environment, so no `NEXT_RUNTIME` check is
+added.
 
-### 6.3 vitest
+### 6.3 Types cross the boundary; values do not
+
+Revision 1 made every entry server-only while also saying `presentation` is what a client error
+boundary switches on. Those contradict: a Next `error.tsx` is `'use client'`.
+
+The resolution rests on a configuration fact. `ts/tsconfig.base.json:9` sets
+`verbatimModuleSyntax: true`, so `import type` emits **nothing** and a value import of a type is a
+compile error. A client component can therefore write
+
+```ts
+import type { PaigasusError, Presentation } from '@paigasus/sdk/errors/types';
+```
+
+with no runtime import and no `server-only` evaluation.
+
+`errors/types.ts` carries **no guard**, because it holds only types and its `./errors/types` subpath
+exists to make the client-safe surface explicit rather than a subtlety about erasure. `mapError`
+stays behind the guarded `./errors`: it runs in the BFF, and the client receives an already-mapped
+`PaigasusError` as a serializable prop. That is also what AC 4's "raw gRPC statuses never reach the
+browser" requires — `PaigasusError` holds no `ConnectError` and no `Headers`.
+
+M10 measures that a client component `import type`-ing from the **guarded** `./errors` entry also
+builds, which is the belt-and-braces case.
+
+### 6.4 `tsconfig.json` needs `types: ["node"]`
+
+`ts/tsconfig.base.json:6` sets `lib: ["ES2022"]` and no `types`. § 8 uses `fetch`, `Response` and
+`ReadableStream`; § 9.4 takes `Headers`. None exists under that configuration. The package therefore
+sets `"types": ["node"]` and adds `@types/node` as a devDependency, matching
+`ts/packages/paigasus-next-config/tsconfig.json:4-9`.
+
+§ 6.2 layer 4 bans **DOM** types specifically. It does not ban node types, which are required.
+
+### 6.5 vitest
 
 `environment: 'node'`, `include: ['tests/**/*.test.ts']`, and **both** `resolve.conditions` and
 `ssr.resolve.conditions` set to `['react-server', 'node', 'import', 'default']`. Vitest 5 resolves a
-node-environment test's imports through `ssr.resolve.conditions`, not the top-level key — measured
-on SMA-502 and recorded in CLAUDE.md. Listing `react-server` alone would drop `import`/`default` and
-break source-exports `.ts` resolution for `@paigasus/proto`.
+node-environment test's imports through `ssr.resolve.conditions`, not the top-level key — measured on
+SMA-502. Listing `react-server` alone would drop `import`/`default` and break source-exports `.ts`
+resolution for `@paigasus/proto`.
+
+`vitest.config.ts` matches neither `src/**/*` nor `tests/**/*`, so it must be **appended** to the
+`test` task's inputs or an edit to this block serves a cached PASS — the reason
+`ts/packages/paigasus-ui/moon.yml:14-17` gives for the identical line.
 
 ## 7. Transport, caching and per-call auth
 
 ADR-0018 decision 6: *"Transports are cached per base URL; authorization is attached per call via an
 interceptor reading the request-scoped session. No token ever lives in a cached object."*
 
-The interceptor lives on the transport, and the transport is cached — so the interceptor cannot
-close over a token. Connect-ES v2's `ContextValues` is exactly the mechanism (**MEASURED**, § 13 M2):
-`CallOptions.contextValues?: ContextValues` (`call-options.d.ts:30-34`) and the interceptor's request
+The interceptor lives on the transport and the transport is cached, so the interceptor cannot close
+over a token. Connect-ES v2's `ContextValues` is the mechanism (**MEASURED, M2**):
+`CallOptions.contextValues?: ContextValues` (`call-options.d.ts:30-34`) and the interceptor request
 carries `readonly contextValues: ContextValues` (`interceptor.d.ts:143`).
 
+### 7.1 The cache key is the full transport identity, not the base URL
+
+`createGrpcTransport` also takes `nodeOptions` (TLS trust material), `defaultTimeoutMs` and
+`httpVersion`. Keying on the base URL alone would let two different trust configurations share one
+transport — and this repo already carries four CA-bundle knobs with divergent semantics, so a second
+option is a question of when, not whether.
+
+The key is therefore a stable serialization of the **whole options object**, and the factory takes
+that object rather than a bare string. Today it holds one field; the rule is written down now so
+adding the second does not silently alias two transports.
+
+### 7.2 A default deadline is mandatory
+
+`defaultTimeoutMs` is set — **10 s** — rather than left unset. An unset deadline lets a gRPC call in
+a Next server component hang the request forever, which is a production hazard and not a default
+worth inheriting. Callers override per call via `CallOptions.timeoutMs`.
+
+### 7.3 Nothing evicts, and that is stated
+
+The cache is a module-level `Map` that never evicts and never closes an HTTP/2 session. Under a
+Next server this is correct — a handful of long-lived transports to a fixed set of in-cluster
+services is the intended shape. It has one consequence worth naming: an open HTTP/2 session keeps a
+Node process alive, so the package exports `disposeTransports()` and the vitest suite calls it in
+`afterAll`. Without it `vitest run` can hang after the assertions pass.
+
+### 7.4 A forgotten token is a type error, not a 401
+
+Revision 1 read the token from `contextValues` with a `null` default, so a caller that forgot it
+sent an unauthenticated request and got a runtime 401 — the most likely mistake, in a package whose
+stated purpose is attaching bearer tokens.
+
+Instead the client factory takes the token and binds it into the per-call `contextValues`:
+
 ```ts
-// auth.ts
-export const bearerToken = createContextKey<string | null>(null);
+export function createIamClient<S extends DescService>(
+  service: S,
+  opts: TransportOptions,
+  auth: Auth,                     // required — omission is a compile error
+): Client<S>;
 
-// transport.ts
-const transports = new Map<string, Transport>();
-
-export function getTransport(baseUrl: string): Transport {
-  let t = transports.get(baseUrl);
-  if (t === undefined) {
-    t = createGrpcTransport({ baseUrl, interceptors: [attachBearer] });
-    transports.set(baseUrl, t);
-  }
-  return t;
-}
-
-const attachBearer: Interceptor = (next) => (req) => {
-  const token = req.contextValues.get(bearerToken);
-  if (token !== null) req.header.set('authorization', `Bearer ${token}`);
-  return next(req);
-};
+type Auth = { bearer: string } | { anonymous: true };  // opting out is explicit
 ```
 
-The cache is a module-level `Map` keyed by base URL. It holds transports only — the token is never
-an argument to `getTransport`, which is what makes the "no token in a cached object" rule structural
-rather than a convention. A test asserts two calls with the same base URL return the same object and
-two different tokens on that shared transport produce two different `authorization` headers.
-
-`createGrpcTransport` from `@connectrpc/connect-node` speaks gRPC over HTTP/2, matching the
-gateway's existing h2c channel to IAM. ADR-0018 consequence 4 already records that a deployment
-terminating HTTP/1.1 in front of IAM breaks this.
-
-### 7.1 Why the token is not read from a session here
-
-The SDK's boundary rule bans `@paigasus/auth` and `next`. It therefore cannot call `getSession()`
-and cannot reach `next/headers`. The *caller* — a server component or route handler in an app —
-reads the session and passes the token into `contextValues`. That keeps the SDK a pure transport
-layer with no ambient state, and it is what makes it testable without a Redis fixture.
+The token is a parameter to the **client**, never to `getTransport`, so it is still absent from the
+cached object. `Auth` is a union rather than an optional so that an unauthenticated call — the health
+check is the real case — is a written decision rather than an omission.
 
 ## 8. The chat client
 
 `POST /v1/chat/completions` on the gateway, the one hand-written surface (§ 4.1).
 
-- **Non-streaming:** `fetch`, JSON in, JSON out. On a non-2xx, the body is the OpenAI envelope and
-  is handed to `mapError` (§ 9.4).
-- **Streaming:** the upstream `Response.body` is returned as a `ReadableStream` **passthrough** — the
-  SDK does not read, buffer, decode or re-encode it. The gateway itself forwards upstream SSE chunks
-  unbuffered (`chat.rs:128-137`), and buffering here would undo that.
+- **Non-streaming:** `fetch`, JSON in, JSON out. A non-2xx body is the OpenAI envelope and goes to
+  `mapError` (§ 9.4 arm 3).
+- **Streaming:** the upstream `Response.body` is returned as a `ReadableStream` **passthrough**. The
+  SDK does not read, buffer, decode or re-encode it. The gateway forwards upstream SSE chunks
+  unbuffered (`chat.rs:128-137`); buffering here would undo that.
 
-Two facts the passthrough forces into the error model, both from the gateway's own code:
+Two facts the passthrough forces into the API, both from the gateway's own code:
 
-- A `stream: true` request that fails **before** the head is committed answers as plain JSON, not
-  SSE (`chat.rs:139-141`). So the caller must branch on `content-type`, not on the request's
-  `stream` flag. The client returns a discriminated result — `{ kind: 'json', … }` or
-  `{ kind: 'stream', body }` — rather than making the caller guess.
-- A failure **after** the head is committed cannot change the HTTP status, so the gateway injects
-  exactly one terminal SSE frame carrying `code: "upstream-error"` and ends the stream
-  (`chat.rs:63`). That frame is *inside* the stream the SDK passes through untouched. `mapError`
-  accepts a parsed terminal frame (§ 9.4) so a caller that chooses to inspect its own stream can map
-  it, but the SDK does not scan the stream to find it. Scanning would mean buffering.
+- A `stream: true` request that fails **before** the head is committed answers as plain JSON, not SSE
+  (`chat.rs:139-141`). The caller must branch on `content-type`, not on its own `stream` flag, so the
+  client returns `{ kind: 'json', … } | { kind: 'stream', body }` rather than making the caller guess.
+- A failure **after** the head is committed cannot change the status, so the gateway injects exactly
+  one terminal SSE frame carrying `code: "upstream-error"` and ends the stream (`chat.rs:63`).
 
-That last point is a deliberate limitation and is written into the module's doc comment: **a
-mid-stream error is not surfaced by this client.** It is the caller's, because only the caller knows
-whether it is proxying the stream onward or consuming it.
+**Mid-stream errors are not surfaced by this client, and the arm that maps them is a caller tool.**
+The SDK never scans the stream, because scanning means buffering. So `parseTerminalFrame(chunk:
+string): PaigasusError | null` is **exported** — a caller consuming its own stream calls it — rather
+than being an internal arm no code path reaches. Its test is driven by a fixture holding the exact
+frame from `chat.rs:63`, with a drift check asserting the fixture still matches that Rust constant
+(the `repo:parity-corpus-drift` precedent). Without the fixture the test would hand-build the object
+it expects and could not fail when the gateway's frame changes — which is the one drift it exists to
+absorb.
 
 ## 9. The error model
 
@@ -311,9 +407,9 @@ whether it is proxying the stream onward or consuming it.
 
 ```ts
 interface PaigasusError {
-  presentation: Presentation;              // AC 4 — what the UI does
-  domain: ErrorDomain | null;              // parsed; null when absent/unknown
-  reason: ErrorReason | null;              // parsed; null when unmapped
+  presentation: Presentation;
+  domain: ErrorDomain | null;
+  reason: ErrorReason | null;              // null === unmapped
   rawReason: string | null;                // what the wire actually said
   message: string;                         // human-readable. NEVER branched on.
   correlationId: string | null;
@@ -324,210 +420,367 @@ interface PaigasusError {
 }
 
 type Presentation =
-  | 'relogin'        // UNAUTHENTICATED
-  | 'forbidden'      // PERMISSION_DENIED
-  | 'not-found'      // NOT_FOUND
-  | 'degraded'       // UNAVAILABLE
-  | 'invalid-input'  // INVALID_ARGUMENT / 400
-  | 'conflict'       // ALREADY_EXISTS / FAILED_PRECONDITION / 409
-  | 'generic';       // everything else, incl. every unmapped reason
+  | 'relogin' | 'forbidden' | 'not-found' | 'degraded'
+  | 'invalid-input' | 'conflict' | 'disabled' | 'generic';
 ```
 
-Two structured discriminants, and both are data:
-
-- `presentation` is coarse and derives from the **transport status** — the gRPC `Code` or the HTTP
-  status. It is what AC 4 asks for and what a page-level boundary switches on.
-- `reason` is fine and derives from the **registry**. It is what a specific message or a field
-  highlight uses.
-
-`message` is carried for display and logging and is never an input to any branch. AC 2 is satisfied
+`message` is carried for display and logging and is never an input to a branch. AC 2 is satisfied
 structurally: no function in `src/errors/` reads `message`.
 
-`retryable` is tri-state deliberately. The wire's three values are `"true" | "false" | "unknown"`
-(`Retryable::as_wire`), and collapsing `unknown` to `false` would silently assert non-retryability
-the service declined to assert. ADR-0019 decision 7 exists precisely so clients stop inferring.
+`retryable` is tri-state deliberately. The wire's values are `"true" | "false" | "unknown"`, and
+collapsing `unknown` to `false` would assert a non-retryability the service declined to assert.
+ADR-0019 decision 7 exists so clients stop inferring.
 
-### 9.2 The wire-reason codec lives in `@paigasus/proto`, not the SDK
+`transport` carries the raw code for logging. It is a number or a `Code`, never a `ConnectError` and
+never `Headers`, so AC 4's "raw gRPC statuses never reach the browser" holds when the whole object is
+serialized to a client component.
 
-The TypeScript twin of `ErrorReason::{as_wire_reason, from_wire_reason}` goes next to
-`capabilityWireKey` in `ts/packages/paigasus-proto/src/error.ts`. That is where the existing
-precedent lives, it is a contract concern rather than a transport one, and it keeps the codec
-available to any future consumer that is not the SDK.
+### 9.2 Two total mappings from transport status
 
-Both directions are **derived from the descriptor**, never hand-tabulated:
-`ErrorReasonSchema.values` yields `DescEnumValue[]` carrying `.name` — the raw proto name, e.g.
-`ERROR_REASON_SLUG_CONFLICT`. `capabilityWireKey`'s doc comment already records why `.name` and not
-`.localName`: protobuf-es's shared-prefix heuristic (`findEnumSharedPrefix`) degrades for the whole
-enum if any value's short name is empty or starts with a digit, and `.name` cannot be affected by
-it.
+Revision 1 gave gRPC codes only, while three of § 9.4's four arms are HTTP. Both tables are written,
+and both are total by falling through to `generic`:
 
-`fromWireReason` reproduces the Rust `is_wire_token` **allow-list** exactly:
+| gRPC `Code` | Presentation | | HTTP status | Presentation |
+|---|---|---|---|---|
+| `Unauthenticated` | `relogin` | | 401 | `relogin` |
+| `PermissionDenied` | `forbidden` | | 403 | `forbidden` |
+| `NotFound` | `not-found` | | 404 | `not-found` |
+| `Unavailable` | `degraded` | | 502, 503, 504 | `degraded` |
+| `DeadlineExceeded` | `degraded` | | 408 | `degraded` |
+| `InvalidArgument` | `invalid-input` | | 400, 413, 415, 422 | `invalid-input` |
+| `AlreadyExists`, `FailedPrecondition`, `Aborted` | `conflict` | | 409 | `conflict` |
+| `Unimplemented` | `disabled` | | 501 | `disabled` |
+| `ResourceExhausted` | `degraded` | | 429 | `degraded` |
+| everything else | `generic` | | everything else | `generic` |
 
+429 and 504 map to `degraded` rather than getting their own states: a gateway proxying OpenAI
+produces both routinely, and both mean "try later", which is what `degraded` renders. `retryable`
+carries the finer signal for a caller that wants it. This is a stated decision, not an omission.
+
+`ResourceExhausted`/429 sitting under `degraded` is the one row a reviewer may want to revisit; it is
+called out here rather than buried.
+
+### 9.3 The wire-reason codec lives in `@paigasus/proto`
+
+The TypeScript twin of `ErrorReason::{as_wire_reason, from_wire_reason}` goes in
+`ts/packages/paigasus-proto/src/error.ts`, next to `capabilityWireKey`. That is where the precedent
+lives, it is a contract concern rather than a transport one, and it stays available to a future
+consumer that is not the SDK.
+
+Both directions are **derived from the descriptor**: `ErrorReasonSchema.values` yields
+`DescEnumValue[]` carrying `.name` — the raw proto name. `capabilityWireKey`'s doc comment records
+why `.name` and not `.localName`: protobuf-es's shared-prefix heuristic (`findEnumSharedPrefix`)
+degrades for the whole enum if any value's short name is empty or starts with a digit.
+
+`fromWireReason` reproduces the Rust `is_wire_token` **allow-list** exactly —
+`^[a-z][a-z0-9]*(-[a-z0-9]+)*$` — checked *before* any case transform.
+
+**MEASURED (M7), on Node 24.16.0:** `"ınternal".toUpperCase() === "INTERNAL"` is `true`, and
+`"ſlug-conflict"` folds to `SLUG_CONFLICT`. JavaScript folds U+0131 and U+017F exactly as
+`str::to_uppercase` does, so a deny-list check would let both reconstruct valid proto names. The
+allow-list is load-bearing, not decoration. A parity test asserts the TS parser rejects the same ten
+inputs the Rust test rejects (`error.rs:287-302`).
+
+### 9.4 The presentation override table — AC 3
+
+`src/errors/presentation.ts` holds
+
+```ts
+type Entry = Presentation | 'from-transport';
+const PRESENTATION: Record<Exclude<ErrorReason, ErrorReason.UNSPECIFIED>, Entry> = { … };
 ```
-^[a-z][a-z0-9]*(-[a-z0-9]+)*$
-```
 
-checked *before* any case transform. This is not defensive decoration. `String.prototype
-.toUpperCase()` folds `ı` (U+0131) to `I` and `ſ` (U+017F) to `S` in JavaScript just as
-`str::to_uppercase` does in Rust, so a deny-list check would let `ınternal` and `ſlug-conflict`
-reconstruct valid proto names. A lenient TypeScript parser would be laxer than the Rust one and
-would weaken AC 3's table test — the exact warning in this issue's handoff comment.
+**MEASURED (M8), on TypeScript 6.0.3:** omitting a member yields
+`TS2741: Property '[ErrorReason.INTERNAL]' is missing`, naming it. Revision 1 declared
+`Record<ErrorReason, Presentation>`, which was unwritable twice over — it demanded an entry for the
+`UNSPECIFIED` sentinel the test skips, making the table 58 keys rather than 57, and `'from-transport'`
+is not a `Presentation`. The corrected type is 57 keys.
 
-A parity test asserts the TS parser rejects the same ten inputs the Rust test rejects
-(`error.rs:287-302`): `slug_conflict`, `SLUG-CONFLICT`, `Slug-Conflict`, `""`, `-slug`, `slug-`,
-`slug--conflict`, `no-such-code`, `ınternal`, `ſlug-conflict`.
+Two mechanisms, both required:
 
-### 9.3 The presentation table — AC 3
+1. **The total `Record`** makes a missing reason a compile error.
+2. **A table test** iterates `ErrorReasonSchema.values`, skips the sentinel, and asserts each reason
+   round-trips through `fromWireReason(asWireReason(r))` and has an entry. This is AC 3 verbatim.
 
-`src/errors/presentation.ts` maps every `ErrorReason` to a `Presentation`, as a
-`Record<ErrorReason, Presentation>`. Two things make it self-maintaining:
+The type check alone is not enough — a refactor to `Partial<Record<…>>` would silently switch it off,
+and the test notices. The test alone is not enough — it runs later. Both are kept.
 
-1. **The type.** A total `Record` over the enum makes a missing reason a **compile** error, not just
-   a test failure. Adding a value to `error.proto` and regenerating breaks `tsc` in this file.
-2. **The test.** A table test iterates `ErrorReasonSchema.values`, skips the `UNSPECIFIED` sentinel,
-   and asserts each remaining reason resolves through `fromWireReason(asWireReason(r))` and has a
-   presentation entry. This is AC 3 verbatim: an unmapped code fails a test rather than rendering an
-   empty toast.
+**What the table is for, with two real examples.** Revision 1 justified it with `MISSING_SCOPE`,
+which was a bad example: it is a 500, 500 is already `generic`, and the entry changed nothing. The
+genuine cases:
 
-The type check alone is not enough — a future refactor to `Partial<Record<…>>` or an index signature
-would silently switch it off, and the test is what notices. The test alone is not enough either — it
-runs late. Both are kept, deliberately.
+- **`INVALID_REQUEST_SCHEMA` (906) — the cross-service divergence.** IAM answers **422**, the gateway
+  answers **400**, for the identical wire code. `error.proto:239-247` says so in the registry itself
+  and warns that *"a consumer mapping code -> status must not assume it is one-to-one"*. Under § 9.2
+  both already land on `invalid-input`, so the table's job here is to **pin** that agreement: an
+  explicit entry means a future change to either status cannot silently split the presentation of one
+  code across two services.
+- **`CAPABILITY_DISABLED` (904)** is gRPC `Code::Unimplemented` with no HTTP form at all
+  (`convert.rs:96-104`). `Unimplemented` reads as "this build cannot do that", but the product meaning
+  is "this deployment turned that capability off" — a different screen. `disabled` exists in § 9.1
+  for it, and the entry is what selects it.
 
-`presentation` is derived from the transport status (§ 9.1), so what is this table *for*? It is the
-override channel: a reason whose transport code is coarser than its meaning. `MISSING_SCOPE` is the
-worked example — it is a **500** (`GatewayError::MissingScope`, an internal invariant violation)
-despite a name that reads like a client error, a hazard ADR-0019 A1.3 and SMA-504 both flag. The
-table maps it to `generic`, not `forbidden`. Where a reason needs no override its entry is the
-literal `'from-transport'`, so every one of the 57 is a deliberate, reviewed decision rather than a
-default.
+Every other reason takes the literal `'from-transport'`, so all 57 are a reviewed decision rather
+than a default.
 
-### 9.4 Four inputs, one output
+**The table is keyed on `reason`, not `(domain, reason)`.** Q1's sweep found exactly one reason whose
+transport status differs by site, `INVALID_REQUEST_SCHEMA`, and both sites resolve to the same
+presentation. Keying on the pair would double the table to normalize nothing. If a second divergence
+appears where the presentations genuinely differ, the key must become the pair — recorded here so the
+decision is revisited rather than inherited.
 
-`mapError(e: unknown): PaigasusError` accepts:
+### 9.5 Four inputs, one output
+
+`mapError` accepts:
 
 1. **A `ConnectError`** — `err.findDetails(ErrorInfoSchema)[0]` gives `(reason, domain, metadata)`.
    `metadata` carries `retryable`, and `correlation_id`/`request_id` **when the error was raised
-   inside a request scope** (`convert.rs:59-74`) — they are omitted, not nulled, outside one.
-   `err.code` gives the gRPC `Code`. `err.metadata` is *"a union of response headers and trailers"*
-   (`connect-error.d.ts:22-24`), which is the fallback for the correlation id.
-2. **An IAM HTTP response** — body `{error:{code,message}}`. It carries **no** correlation id and
-   **no** retryable; both are response *headers*: `paigasus-correlation-id`, `paigasus-request-id`,
-   `paigasus-retryable` (`paigasus-observability/src/correlation.rs:20,31-33`). The issue's AC 2
-   asks for "a generic fallback plus correlation id", so `mapError` must be handed the headers, not
-   only the body. Its HTTP arm therefore takes `{ status, headers, body }`.
-3. **A gateway HTTP response** — body `{error:{message,type,param,code}}`. `code` is drawn from the
-   same registry (asserted `gateway/adapters/http/error.rs:296-309`). `type` keeps its OpenAI
-   semantics and is **not** read: it takes only two values and both are coarser than `code`.
-   `param` is carried into `metadata` under the key `param` when present — it is `null` in every
-   case except `StreamingDisabled`.
-4. **A parsed terminal SSE frame** — the same gateway envelope shape, with no status and no headers.
-   `transport` is reported as `{ kind: 'http', status: 200 }`, because the head was already
-   committed with 200 when the failure happened. `retryable` is `null`: that frame deliberately
-   carries no retryable signal (`chat.rs:56-62`).
+   inside a request scope** (`convert.rs:59-74`) — omitted, not nulled, outside one. `err.code` gives
+   the gRPC `Code`; `err.metadata` is *"a union of response headers and trailers"*
+   (`connect-error.d.ts:22-24`), the fallback for the correlation id.
+2. **An IAM HTTP response** — `{ status, headers, body }` where body is `{error:{code,message}}`. The
+   body carries **no** correlation id and **no** retryable; both are headers
+   (`paigasus-correlation-id`, `paigasus-request-id`, `paigasus-retryable`,
+   `paigasus-observability/src/correlation.rs:20,31-33`). AC 2 asks for "a generic fallback plus
+   correlation id", so the headers are not optional input.
+3. **A gateway HTTP response** — same envelope plus `{message,type,param,code}`. `code` is drawn from
+   the same registry (asserted `gateway/adapters/http/error.rs:296-309`). `type` is **not** read: it
+   takes two values and both are coarser than `code`. `param` enters `metadata` when present.
+4. **A parsed terminal SSE frame**, via the exported `parseTerminalFrame` (§ 8). `transport` is
+   `{ kind: 'http', status: 200 }` because the head was already committed; `retryable` is `null`,
+   since that frame deliberately carries no retryable signal (`chat.rs:56-62`).
 
-**Unknown reason handling (AC 2).** `rawReason` always holds what the wire said. When
-`fromWireReason` rejects it, `reason` is `null`, `presentation` falls back to the transport-derived
-value, and `correlationId` is preserved. An unrecognized code degrades to a generic presentation
-plus a user-reportable id — never to a thrown error and never to an empty message. ADR-0019's own
-Consequences call the correlation id "the single highest-value item here for a self-hosted product",
-so it survives every fallback path.
+**Arm 2 has no in-SDK caller, and that is deliberate.** § 4.1 moves every IAM HTTP surface to gRPC,
+so nothing in this package constructs arm 2's argument. It is kept as a **public helper** because
+IAM's REST surface still exists and is the external customer-facing API (ADR-0018 consequence 6); an
+app calling it directly should map its errors the same way. Its test drives it directly. Stated so
+the arm is not mistaken for a code path the SDK exercises.
+
+**`metadata` is the ErrorInfo map minus the three lifted keys.** `retryable`, `correlation_id` and
+`request_id` are removed after being read into their typed fields, so a caller cannot branch on a raw
+duplicate that disagrees with the parsed one. `capability`, `field` and `param` survive.
+
+**Unknown reason handling (AC 2).** `rawReason` always holds what the wire said. When `fromWireReason`
+rejects it, `reason` is `null`, `presentation` falls back to the transport-derived value, and
+`correlationId` is preserved. An unrecognized code degrades to a generic presentation plus a
+user-reportable id — never a throw, never an empty message.
 
 **The two system-retirement 409s are not special-cased.** They add sibling keys next to the standard
-`error` object (`grants`, `total_surviving`, `truncated`; or `kind`, `source`, `description`) rather
-than replacing it (`system_retirement.rs:111-126`). `mapError` reads `error.code` and ignores the
-siblings, so it works unchanged; a caller that wants the surviving-grants list reads the body
-itself. Inventing a union arm for two endpoint-specific payloads would put endpoint knowledge in the
-error mapper.
+`error` object rather than replacing it (`system_retirement.rs:111-126`). `mapError` reads
+`error.code` and ignores the siblings; a caller wanting the surviving-grants list reads the body.
 
 ## 10. Testing
 
 | Tier | What it proves |
 |---|---|
-| Wire-reason codec parity | Both directions against all 57 reasons; the ten malformed inputs the Rust test rejects |
-| Presentation totality (AC 3) | Every descriptor value has an entry; `MISSING_SCOPE` maps to `generic` |
-| `mapError` — gRPC | A synthetic `ConnectError` carrying a real `ErrorInfo` detail round-trips to the right `(domain, reason)`; `correlation_id`/`retryable` are read from `metadata` |
-| `mapError` — HTTP | Both envelopes; the correlation id comes from **headers**, not the body; tri-state retryable |
-| `mapError` — degradation (AC 2) | An unknown reason yields `reason: null`, keeps `rawReason` and `correlationId`, and picks a transport-derived presentation |
-| AC 4 mapping | Each of `UNAUTHENTICATED`/`PERMISSION_DENIED`/`NOT_FOUND`/`UNAVAILABLE` yields its state |
-| Message-independence (AC 2) | The same wire error with three different `message` strings maps to three identical `PaigasusError`s modulo `message` |
-| Transport cache | Same base URL returns the same object; two tokens on one cached transport produce two `authorization` headers and neither is retained |
-| Server-only structure (AC 1) | Every `exports` entry imports `./server-guard.js` first, driven off `package.json` |
-| Chat | Non-streaming maps a non-2xx; streaming returns the identical `ReadableStream` object it was given |
+| Wire-reason codec parity | Both directions over all 57 reasons; the ten malformed inputs the Rust test rejects |
+| Presentation totality (AC 3) | Every descriptor value has an entry; `INVALID_REQUEST_SCHEMA` and `CAPABILITY_DISABLED` resolve as § 9.4 states |
+| Transport-status tables (§ 9.2) | Both tables, including the `generic` fall-through |
+| `mapError` — gRPC | A `ConnectError` carrying a real `ErrorInfo` detail round-trips; `correlation_id`/`retryable` read from `metadata`; the three lifted keys are absent from `metadata` |
+| `mapError` — HTTP | Both envelopes; correlation id from **headers**; tri-state retryable |
+| `mapError` — degradation (AC 2) | Unknown reason yields `reason: null`, keeps `rawReason` and `correlationId` |
+| AC 4 mapping | Each of the four codes yields its state |
+| Message-independence (AC 2) | One wire error with three different `message` strings maps to three identical objects modulo `message` |
+| Transport cache | Equal options return the same object; differing options do not; two `Auth` values on one cached transport produce two `authorization` headers; `disposeTransports()` lets vitest exit |
+| Server-only structure (AC 1) | Every guarded `exports` entry imports the guard as its first import statement, driven off `package.json` |
+| Chat | Non-streaming maps a non-2xx; streaming returns the identical `ReadableStream` object; `parseTerminalFrame` against the pinned fixture |
+| Terminal-frame drift | The fixture still matches `chat.rs:63` |
 
-**No live-service tier.** The SDK has no server to talk to in CI, and standing one up is
-SMA-509/SMA-510's integration surface. Transport behaviour is tested through interceptors and a stub
-`fetch`, which is honest about what is and is not covered: this suite proves the SDK *forms* correct
-requests and *interprets* correct responses. It does not prove IAM accepts them. That gap is stated
-rather than papered over.
+**Two coverage gaps, stated rather than implied.**
+
+*No live-service tier.* The SDK has no server to talk to in CI. Transport behaviour is tested through
+interceptors and a stub `fetch`. This suite proves the SDK *forms* correct requests and *interprets*
+correct responses; it does not prove IAM accepts them. Standing a service up is SMA-509/SMA-510's
+integration surface.
+
+*AC 1 is not proven by a build.* See § 6.2.
 
 ## 11. Registration obligations
 
-Four edits, three of them gate-enforced:
+Eight edits. Revision 1 listed four and missed the three that matter most.
+
+### 11.1 The SDK's task inputs — this is what makes AC 3 real
+
+**MEASURED (M11).** Editing `ts/packages/paigasus-proto/src/generated/paigasus/common/v1/error_pb.ts`
+today selects `paigasus-proto-ts:{build,test,typecheck}`, `ts:lint`, `ts:fmt` and three `repo:*`
+gates — and **no `paigasus-sdk-ts` task**. So both AC 3 mechanisms would run on a later, unrelated
+PR, and an unmapped code would not fail a test. AC 3 would be vacuous.
+
+`dependsOn` does not fix this: it schedules an upstream and never selects a downstream, as
+`ts/apps/paigasus-console/moon.yml:7-10` says in the repo's own words. Task `inputs` are the only
+thing that confers affectedness.
+
+`ts/packages/paigasus-sdk/moon.yml` therefore carries **both**:
+
+```yaml
+dependsOn: ['paigasus-proto-ts']
+tasks:
+  build:     { inputs: ['/ts/packages/paigasus-proto/src/**/*'] }
+  typecheck: { inputs: ['/ts/packages/paigasus-proto/src/**/*'] }
+  test:      { inputs: ['/ts/packages/paigasus-proto/src/**/*', 'vitest.config.ts'] }
+```
+
+appended, never `options.merge: replace` — replacing would drop the four inherited inputs, the defect
+SMA-503 fixed on the console.
+
+**MEASURED (M11b):** with those inputs, the same edit selects `paigasus-sdk-ts:{build,test,typecheck}`.
+
+### 11.2 The gates
 
 1. **`ci/affected-graph/run.sh:258-259`** — the `contracts->proto` expected set gains
-   `paigasus-sdk-ts`. Strict equality; re-measured, not transcribed (§ 4.2, § 13 M4).
-2. **`ci/affected-graph/ci_targets.py:393-400`** — `CONTRACTS_GENERATE_INPUTS` is a **strict-equality**
-   pin of `contracts:generate`'s inputs. Adding `contracts/buf.gen.googleapis.yaml` to that task
-   reds `repo:affected-smoke` until this tuple is updated. The issue does not mention this; it is a
-   real obligation.
-3. **`ts/packages/paigasus-sdk/moon.yml`** — `dependsOn: ['paigasus-proto-ts']`, hand-declared,
-   because TS edges are not auto-derived (§ 4.2).
-4. **`ts/pnpm-workspace.yaml`** — two catalog entries, `@connectrpc/connect` and
+   `paigasus-sdk-ts`. Strict equality; re-measured (M4), not transcribed.
+2. **A new `run_task_case_ci "proto->sdk"`** in the same file, anchored on
+   `ts/packages/paigasus-proto/src/generated/paigasus/common/v1/error_pb.ts`. This is the only
+   control on § 11.1's input list — without it, a future edit dropping that input leaves AC 3
+   vacuous again and nothing reds. The `ui->console` pair (`run.sh:354-377`) is the precedent, and
+   its comment says exactly why such a case is the control.
+3. **`ci/affected-graph/ci_targets.py:393-400`** — `CONTRACTS_GENERATE_INPUTS` is a strict-equality
+   pin. Adding `contracts/buf.gen.googleapis.yaml` to `contracts:generate` reds
+   `repo:affected-smoke` until this tuple is updated.
+
+### 11.3 The packages
+
+4. **`@paigasus/proto`'s public surface** — § 3 promised it and Revision 1 never specified it. The
+   root barrel (`src/index.ts`) gains, through the existing single `"."` export:
+   `ErrorReason`, `ErrorReasonSchema`, `ErrorDomain`, `ErrorDomainSchema`, `ErrorInfoSchema`
+   (re-exported from the generated googleapis module), `asWireReason`, `fromWireReason`,
+   `asWireDomain`, `fromWireDomain`, and the seven `iam/v1` service descriptors —
+   `TenancyService`, `AuthnService`, `AuthorizationService`, `ServiceAccountService`, `AuditService`,
+   `UserService`, `OutboxService` — with their request/response types. No `./generated/*` subpath is
+   added: that would make the generated layout public API, so a codegen reshuffle would become a
+   breaking change for consumers.
+5. **`ts/packages/paigasus-sdk/package.json`** — `dependencies`: `@paigasus/proto` (`workspace:*`),
+   `@connectrpc/connect`, `@connectrpc/connect-node`, `@bufbuild/protobuf`, `server-only` (all
+   `catalog:`). `devDependencies`: `typescript`, `vitest`, `@types/node`.
+6. **`ts/pnpm-workspace.yaml`** — two new catalog entries, `@connectrpc/connect` and
    `@connectrpc/connect-node`, both `^2.2.0`, each with the header comment every existing entry
-   carries. `@bufbuild/protobuf` is already catalogued at `^2.14.1` and satisfies connect-node's
-   `^2.7.0` peer range.
+   carries. `@bufbuild/protobuf` (`^2.14.1`) and `server-only` (`^0.0.1`) are already catalogued;
+   `@bufbuild/protobuf` satisfies connect-node's `^2.7.0` peer range.
+7. **`contracts/buf.gen.googleapis.yaml`** — new file, TS-only, `clean: false`.
+8. **`contracts/moon.yml`** — `generate` becomes a `script:` with `set -euo pipefail`, both
+   invocations in order, plus `buf.gen.googleapis.yaml` in its `inputs`.
 
-Not required, and checked: none of `SELF_SCHEDULED_GATES`, `SELF_TASK_EXPECTED_GLOBS`,
-`REQUIRED_REPO_TASKS`, `T_EXEMPT`, `cargo_moon_parity.py` or `task_inputs.py` holds a Moon
-project-id list that a new TS package perturbs — they are keyed on `repo:*` gate names and Rust
-crates. This package adds no `repo:*` gate, so `ci.yml`'s `T=(…)` array and the CLAUDE.md
-marker-delimited command are untouched.
+**Checked and not required:** none of `SELF_SCHEDULED_GATES`, `SELF_TASK_EXPECTED_GLOBS`,
+`REQUIRED_REPO_TASKS`, `T_EXEMPT`, `cargo_moon_parity.py` or `task_inputs.py` holds a Moon project-id
+list a new TS package perturbs — they are keyed on `repo:*` gate names and Rust crates. This package
+adds no `repo:*` gate, so `ci.yml`'s `T=(…)` array and the CLAUDE.md marker command are untouched.
+`repo:input-liveness` scans `repo:*` tasks only, so it does not see the SDK's inputs — which is
+precisely why obligation 2 exists.
 
-`ts/pnpm-lock.yaml` changes (two catalog entries plus the workspace edge). No `run.sh` case anchors
-on it, so no expected set moves; it re-keys TS tasks generically, which is correct.
+### 11.4 Concurrency with SMA-506
 
-### 11.1 Dependency cooldown
+`run.sh:258-259` is a single-line CSV, so a concurrent branch editing it would collide. **SMA-506
+does not.** Its § 14 is titled *"The package does not depend on `@paigasus/proto`"* and avoids the
+edge deliberately, routing `RoleGrantRef` through locally-defined domain types. No collision exists.
+Whichever branch merges second still rebases under `main`'s strict up-to-date rule and should
+**re-measure** the expected set rather than transcribe it.
 
-`@connectrpc/connect` 2.2.0 published **2026-09-07**, two days ago. pnpm 11's default 24-hour
-`minimumReleaseAge` is satisfied, but only just — and npm Dependabot has a 3-day cooldown. If CI
-reds on release age, that is the cause and waiting is the fix, not a version change.
+### 11.5 Dependency cooldown
+
+`@connectrpc/connect` 2.2.0 published **2026-09-07**. pnpm 11's 24-hour `minimumReleaseAge` is
+satisfied, but npm Dependabot has a 3-day cooldown. If CI reds on release age, that is the cause and
+waiting is the fix.
 
 ## 12. Acceptance criteria mapping
 
 | AC | Where |
 |---|---|
-| 1 — `import 'server-only'`; a client import fails the build | § 6.2, four layers |
-| 2 — branch on `(domain, reason)` only; unknown → generic + correlation id | § 9.1, § 9.4; two tests |
-| 3 — table test driven off the registry | § 9.3; total `Record` **and** a descriptor-driven test |
-| 4 — the four gRPC codes map to four states; raw statuses never reach the browser | § 9.1 `Presentation`; `PaigasusError` carries no `ConnectError` |
-| 5 — `ci/affected-graph/run.sh` updated in the same change | § 4.2, § 11 item 1 — **corrected**: one id, not "every downstream app" |
+| 1 — `import 'server-only'`; a client import fails the build | § 6.2 — four layers, **and a stated gap**: enforced structurally, not proven by a build |
+| 2 — branch on `(domain, reason)` only; unknown → generic + correlation id | § 9.1, § 9.5; message-independence and degradation both tested |
+| 3 — table test driven off the registry | § 9.4 — total `Record` (M8) **plus** a descriptor-driven test, made reachable by § 11.1 (M11) |
+| 4 — four codes → four states; raw statuses never reach the browser | § 9.2 both tables; `PaigasusError` carries no `ConnectError` (§ 6.3, § 9.1) |
+| 5 — `ci/affected-graph/run.sh` updated in the same change | § 4.2, § 11.2 — **corrected**: one id, measured (M4) |
 
 ## 13. Measurements
 
-M1, M2 and M3 are **taken**; M4–M7 are taken during implementation.
-
 | # | Measurement | Status |
 |---|---|---|
-| M1 | A TS-only template against `buf.build/googleapis/googleapis --path google/rpc/error_details.proto` exits 0 and emits exactly one self-contained file exporting `ErrorInfoSchema` | **TAKEN** — buf 1.70.0, es v2.13.0 |
-| M2 | `@connectrpc/connect@2.2.0` exports `createContextKey`/`createContextValues`; `CallOptions.contextValues` exists; the interceptor request carries `readonly contextValues` | **TAKEN** |
-| M3 | `findDetails` requires a descriptor — there is no schema-free overload | **TAKEN** |
-| M4 | The `contracts->proto` affected set after the edge lands is exactly the seven existing ids plus `paigasus-sdk-ts` — no app enters | pending |
-| M5 | Reversing the two `buf generate` calls destroys `google/rpc/error_details_pb.ts`, and the assertion test catches it | pending |
-| M6 | Two `getTransport` calls with one base URL return the same object; two tokens on it produce two `authorization` headers | pending |
-| M7 | `String.prototype.toUpperCase()` folds `ı`→`I` and `ſ`→`S` in Node 24, so the allow-list is load-bearing in TS exactly as in Rust | pending |
+| M1 | A TS-only template against googleapis `--path google/rpc/error_details.proto` exits 0 and emits one self-contained file exporting `ErrorInfoSchema` | **TAKEN** |
+| M2 | connect 2.2.0 exports `createContextKey`/`createContextValues`; `CallOptions.contextValues` and `req.contextValues` exist | **TAKEN** |
+| M3 | `findDetails` requires a descriptor — no schema-free overload | **TAKEN** |
+| M4 | `contracts->proto` with the edge is the seven existing ids plus `paigasus-sdk-ts`; no app enters | **TAKEN** |
+| M7 | Node 24 folds `ı`→`I` and `ſ`→`S`, so the allow-list is load-bearing in TS as in Rust | **TAKEN** |
+| M8 | `Record<Exclude<ErrorReason, UNSPECIFIED>, Entry>` yields TS2741 naming the missing member on tsc 6.0.3 | **TAKEN** |
+| M9 | Every `buf generate` already contacts the BSR (three `remote:` plugins, empty plugin cache); `ci.yml` caches nothing buf-related | **TAKEN** |
+| M11 | An `error_pb.ts` edit selects **no** `paigasus-sdk-ts` task today | **TAKEN** |
+| M11b | With § 11.1's inputs it selects all three | **TAKEN** |
+| M5 | Reversing the two `buf generate` calls leaves `error_details_pb.ts` deleted, and the **drift step** reds | pending |
+| M6 | Equal transport options return one object; differing options return two; two `Auth` values give two headers | pending |
+| M10 | A client component `import type`-ing from the guarded `./errors` entry builds | pending |
+| M12 | Cold-`~/.cache/buf` cost of the second invocation in CI | pending |
+
+M2, M3 and M8 were taken outside the workspace install tree — `npm pack` of the exact version, and a
+standalone `tsc` invocation — because `@connectrpc` is not yet in `ts/pnpm-lock.yaml`. **They must be
+re-confirmed once the catalog entries land**, since pnpm catalog resolution is what CI will use.
+M1, M4, M9, M11 and M11b were taken in this worktree against the pinned toolchain.
 
 ## 14. Out of scope
 
-- **Wiring any app to the SDK.** No `package.json` in `ts/apps/` gains `@paigasus/sdk`. That is
-  SMA-509 (capability discovery) and SMA-510 (app shell).
-- **`IntrospectPrincipalResolver`.** SMA-506 § 17 names this issue as where it lands, but the SDK's
-  boundary rule bans importing `@paigasus/auth`, and SMA-506 is unmerged. The SDK exports the typed
-  `AuthnService` client; the *app* wires it into `@paigasus/auth`'s structurally-typed
-  `PrincipalResolver` port. Neither package imports the other. Flagged for SMA-506's author rather
-  than resolved unilaterally here.
+- **Wiring any app to the SDK.** SMA-509 and SMA-510.
+- **`IntrospectPrincipalResolver`.** SMA-506 § 14 names this issue as where the adapter lands, but the
+  SDK's live boundary rule bans importing `@paigasus/auth`, and SMA-506 is unmerged. The SDK exports
+  the typed `AuthnService` client and a mapper returning `{ scopePrn, roleKey }` objects; SMA-506's
+  port is structurally typed, so the *app* wires them and neither package imports the other. Flagged
+  for SMA-506's author rather than resolved unilaterally.
+- **A script pin on `contracts:generate`'s ordering** (§ 5.1). It needs a new registry obligation.
+  The residual is stated instead.
 - **Widening `ci/error-registry/check.py` to TypeScript.** It is Rust-only and scoped to `rs/crates`.
-  AC 3's descriptor-driven test covers the consumed side for this package. A repo-wide two-way TS
-  gate is SMA-507's deferred AC 2 and deserves its own issue.
-- **A retry or backoff policy.** `retryable` is carried, not acted on. Deciding *when* to retry is
-  a caller policy and belongs with the caller that knows whether the operation is idempotent.
-- **grpc-web or any browser-direct transport.** ADR-0018 decision 2, explicitly.
+  AC 3's descriptor-driven test covers the consumed side for this package; a repo-wide two-way TS gate
+  is SMA-507's deferred AC 2.
+- **A retry or backoff policy.** `retryable` is carried, not acted on.
+- **grpc-web or any browser-direct transport.** ADR-0018 decision 2.
+
+### 14.1 Recommended split into three PRs
+
+The challenge argued this is two or three issues and the argument holds: the codegen change has the
+widest blast radius in the repo — it touches a step that runs on every CI run — and is coupled to
+none of the SDK work.
+
+| PR | Contents | Why it stands alone |
+|---|---|---|
+| **A** | § 5 codegen, `@paigasus/proto`'s widened surface, the wire-reason codec (§ 9.3), obligations 3–4, 7–8 | Ships a tested contract surface with no SDK. Its blast radius is CI-wide, so it merges and settles first. |
+| **B** | § 6 package shape, § 7 transport and auth, § 11.1 inputs, obligations 1–2, 5–6 | Needs A's exports. Adds the affected-graph edge and its control case. |
+| **C** | § 8 chat, § 9 error model and tables | Needs A's `ErrorInfoSchema` and B's package. Holds AC 2/3/4. |
+
+AC 5 lands in **B**, which is where the dependency edge is created. This is a recommendation for the
+Linear breakdown, not a decision this spec takes.
+
+## 15. What the adversarial challenge changed
+
+**Folded in — three BLOCKERs.**
+
+1. **AC 3 was vacuous.** The SDK's inherited task inputs never reach `@paigasus/proto`, so neither AC
+   3 mechanism ran on the PR that adds a reason. Confirmed by measurement (M11) and fixed in § 11.1,
+   with a new affected-graph case (obligation 2) as its control.
+2. **`./errors` was server-only while `presentation` was called a client concern.** Resolved in
+   § 6.3 by a `./errors/types` entry plus the `verbatimModuleSyntax` erasure fact.
+3. **The widened `@paigasus/proto` surface was promised and never specified.** Now obligation 4.
+
+**Folded in — MAJORs.** § 5.1's control corrected from a package test to the codegen-drift step, with
+the ordering left explicitly unpinned; § 5.3's recovery note; § 6.4's `types: ["node"]`; § 6.5's
+`vitest.config.ts` input; § 7.1's cache key; § 7.2's deadline; § 7.3's dispose path; § 7.4's
+compile-time token; § 8's exported `parseTerminalFrame` plus fixture drift; § 9.2's HTTP table; § 9.4's
+corrected `Record` type and its two real override examples; § 10's two stated coverage gaps; § 9.5's
+arm-2 justification and metadata stripping; § 3.1's test-location convention; § 6.2 layer 3's "first
+import statement" and layer 2's static-only caveat; § 13's measurement provenance.
+
+**Rejected, with evidence.**
+
+- *A merge collision with SMA-506 on `run.sh:258-259`.* SMA-506 § 14 deliberately avoids depending on
+  `@paigasus/proto`. No collision (§ 11.4).
+- *The second `buf generate` adds a new CI network dependency, so vendoring should be considered.*
+  M9 shows every `buf generate` already contacts the BSR through three `remote:` plugins, with an
+  empty local plugin cache, and that the googleapis module is already resolved and cached. The
+  marginal cost is one round-trip; the vendored alternative would put a wire contract outside the
+  codegen-drift gate (§ 5.2).
+- *`MISSING_SCOPE` demonstrates nothing.* Accepted as a critique of the example, rejected as a
+  critique of the table — § 9.4 now carries two examples where the override changes the answer.
+
+**Deferred to the reader.** The three-PR split (§ 14.1) and the ADR-0018 amendment's timing (§ 16 Q1)
+are decisions for the issue owner, not for this spec.
+
+## 16. Open questions for review
+
+1. **ADR-0018's amendment (§ 4.1)** — precondition of merging, or follow-up? The ADRs live in Notion.
+2. **The three-PR split (§ 14.1)** — adopt, and re-cut the Linear issues?
+3. **`ResourceExhausted`/429 → `degraded`** (§ 9.2) — the one presentation row worth a second opinion.
