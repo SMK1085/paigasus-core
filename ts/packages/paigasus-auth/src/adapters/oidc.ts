@@ -1,0 +1,226 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// Written against the measured `openid-client@6.8.8` API — see
+// docs/superpowers/specs/2026-09-09-sma-506-measurements.md § M1 — not v5-era examples.
+// v6 exports FUNCTIONS taking a `Configuration`, not a `Client` class.
+//
+// DISCOVERY IS LAZY. `createOidcClient` performs no I/O; the first call to any method below
+// triggers `client.discovery(...)` once and caches the resulting `Configuration` for every later
+// call. This is what lets `createAuthRuntime` validate configuration and fail fast on a bad
+// cross-field rule (§ runtime.ts) WITHOUT making a network call — discovery only happens when a
+// login, refresh, or logout actually occurs. On a discovery failure the cached promise is
+// cleared, so the NEXT call retries rather than replaying the same rejection forever.
+//
+// CLOCK TOLERANCE IS SYMBOL-KEYED (M1). `[client.clockTolerance]` on the client metadata object,
+// not a string option and not a `Configuration` property — `Configuration` only exposes a plain
+// `timeout` accessor (also M1), which is what carries PAIGASUS_OIDC_HTTP_TIMEOUT_MS.
+//
+// NEVER LOG A CAUGHT LIBRARY ERROR OBJECT. `openid-client` errors may embed a URL (the discovery
+// document location, a token endpoint). Every method here catches and rethrows through
+// `wrapError`, which keeps only the error's `name`.
+import * as client from 'openid-client';
+import type { IdTokenClaims } from '../ports/principal-resolver.js';
+
+export interface RefreshedTokens {
+  accessToken: string;
+  refreshToken?: string;
+  expiresIn: number; // seconds
+}
+
+export interface OidcTokens extends RefreshedTokens {
+  idTokenClaims: IdTokenClaims;
+}
+
+export interface AuthorizationRequest {
+  url: string;
+  codeVerifier: string;
+  nonce: string;
+}
+
+export interface BuildAuthorizationUrlParams {
+  redirectUri: string;
+  scopes: string;
+  /** The caller's CSRF state value — task 8 binds this to the stored login transaction id. */
+  state: string;
+}
+
+export interface AuthorizationCodeGrantParams {
+  /** The full callback URL the IdP redirected to, including `code` and `state`. */
+  currentUrl: URL;
+  codeVerifier: string;
+  expectedState: string;
+  expectedNonce: string;
+}
+
+export interface BuildEndSessionUrlParams {
+  idTokenHint?: string;
+  postLogoutRedirectUri: string;
+  state?: string;
+}
+
+export interface OidcClient {
+  buildAuthorizationUrl(params: BuildAuthorizationUrlParams): Promise<AuthorizationRequest>;
+  authorizationCodeGrant(params: AuthorizationCodeGrantParams): Promise<OidcTokens>;
+  /** Matches core/single-flight.ts's `ResolveDeps.refresh` signature exactly. */
+  refresh(refreshToken: string): Promise<RefreshedTokens>;
+  /** Best-effort (design doc § 9.5) — callers decide whether a rejection blocks logout. */
+  revoke(token: string): Promise<void>;
+  buildEndSessionUrl(params: BuildEndSessionUrlParams): Promise<string>;
+}
+
+export interface CreateOidcClientOptions {
+  issuer: string;
+  clientId: string;
+  clientSecret: string;
+  httpTimeoutMs: number;
+  clockToleranceSeconds: number;
+  /**
+   * Lifts the HTTPS-only restriction for discovery and every later call on the resulting
+   * Configuration (M1). Defaults to false. `authEnvShape.PAIGASUS_OIDC_ISSUER` is a strict
+   * `httpsUrl`, so no production configuration can set this — it exists only so
+   * tests/adapters/oidc.test.ts can point the adapter at the local plain-http JWKS fixture.
+   */
+  allowInsecureRequests?: boolean;
+}
+
+/**
+ * Holds the client secret without ever printing it. `toString`/`toJSON` both return a fixed
+ * redacted form, matching redis-store.ts's `RedactedDsn` pattern for the same reason: an
+ * accidental `console.log`/`JSON.stringify` on anything holding this must not leak the secret.
+ */
+class RedactedSecret {
+  readonly #value: string;
+  constructor(value: string) {
+    this.#value = value;
+  }
+  reveal(): string {
+    return this.#value;
+  }
+  toString(): string {
+    return '<redacted>';
+  }
+  toJSON(): string {
+    return '<redacted>';
+  }
+}
+
+/**
+ * Never rethrow a caught openid-client/oauth4webapi error object — several of its error classes
+ * (`ResponseBodyError`, `OperationProcessingError`, ...) can carry the request URL. Keep only the
+ * error's `name`, which identifies the failure class without any request or response content.
+ */
+function wrapError(stage: string, cause: unknown): Error {
+  const name = cause instanceof Error ? cause.name : 'unknown_error';
+  return new Error(`oidc ${stage} failed: ${name}`);
+}
+
+export function createOidcClient(opts: CreateOidcClientOptions): OidcClient {
+  const secret = new RedactedSecret(opts.clientSecret);
+  let configPromise: Promise<client.Configuration> | undefined;
+
+  function getConfig(): Promise<client.Configuration> {
+    configPromise ??= client
+      .discovery(new URL(opts.issuer), opts.clientId, { client_secret: secret.reveal(), [client.clockTolerance]: opts.clockToleranceSeconds }, undefined, {
+        timeout: opts.httpTimeoutMs / 1000,
+        // M1: openid-client does NOT verify the id_token's JWS signature by default for a
+        // plain authorizationCodeGrant — it follows OIDC Core's allowance that TLS to the
+        // token endpoint already authenticates the issuer, and leaves signature verification
+        // an opt-in ("non-repudiation") extra. Measured directly: without this, a token signed
+        // by a key never published in the JWKS document is ACCEPTED. Always enabled — this is
+        // exactly what makes the "signed by a different key" rejection in
+        // tests/adapters/oidc.test.ts (and the design doc's own requirement) true.
+        execute: opts.allowInsecureRequests === true ? [client.allowInsecureRequests, client.enableNonRepudiationChecks] : [client.enableNonRepudiationChecks],
+      })
+      .catch((err: unknown) => {
+        // Let the NEXT call retry discovery instead of replaying this rejection forever.
+        configPromise = undefined;
+        throw wrapError('discovery', err);
+      });
+    return configPromise;
+  }
+
+  function toIdTokenClaims(claims: client.IDToken): IdTokenClaims {
+    const { iss, sub, email, name } = claims;
+    return {
+      iss,
+      sub,
+      ...(typeof email === 'string' ? { email } : {}),
+      ...(typeof name === 'string' ? { name } : {}),
+    };
+  }
+
+  return {
+    async buildAuthorizationUrl(params): Promise<AuthorizationRequest> {
+      const config = await getConfig();
+      const codeVerifier = client.randomPKCECodeVerifier();
+      const codeChallenge = await client.calculatePKCECodeChallenge(codeVerifier);
+      const nonce = client.randomNonce();
+      const url = client.buildAuthorizationUrl(config, {
+        redirect_uri: params.redirectUri,
+        scope: params.scopes,
+        code_challenge: codeChallenge,
+        code_challenge_method: 'S256',
+        state: params.state,
+        nonce,
+      });
+      return { url: url.toString(), codeVerifier, nonce };
+    },
+
+    async authorizationCodeGrant(params): Promise<OidcTokens> {
+      const config = await getConfig();
+      try {
+        const tokens = await client.authorizationCodeGrant(config, params.currentUrl, {
+          pkceCodeVerifier: params.codeVerifier,
+          expectedState: params.expectedState,
+          expectedNonce: params.expectedNonce,
+          idTokenExpected: true,
+        });
+        const claims = tokens.claims();
+        if (claims === undefined) {
+          throw new Error('no id_token in the token response');
+        }
+        return {
+          accessToken: tokens.access_token,
+          ...(tokens.refresh_token !== undefined ? { refreshToken: tokens.refresh_token } : {}),
+          expiresIn: tokens.expiresIn() ?? 0,
+          idTokenClaims: toIdTokenClaims(claims),
+        };
+      } catch (err) {
+        throw wrapError('authorization_code_grant', err);
+      }
+    },
+
+    async refresh(refreshToken): Promise<RefreshedTokens> {
+      const config = await getConfig();
+      try {
+        const tokens = await client.refreshTokenGrant(config, refreshToken);
+        return {
+          accessToken: tokens.access_token,
+          ...(tokens.refresh_token !== undefined ? { refreshToken: tokens.refresh_token } : {}),
+          expiresIn: tokens.expiresIn() ?? 0,
+        };
+      } catch (err) {
+        throw wrapError('refresh_token_grant', err);
+      }
+    },
+
+    async revoke(token): Promise<void> {
+      const config = await getConfig();
+      try {
+        await client.tokenRevocation(config, token);
+      } catch (err) {
+        throw wrapError('token_revocation', err);
+      }
+    },
+
+    async buildEndSessionUrl(params): Promise<string> {
+      const config = await getConfig();
+      const url = client.buildEndSessionUrl(config, {
+        post_logout_redirect_uri: params.postLogoutRedirectUri,
+        ...(params.idTokenHint !== undefined ? { id_token_hint: params.idTokenHint } : {}),
+        ...(params.state !== undefined ? { state: params.state } : {}),
+      });
+      return url.toString();
+    },
+  };
+}
