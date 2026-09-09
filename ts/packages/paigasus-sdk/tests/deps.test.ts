@@ -31,6 +31,6 @@ describe('M3 — the node transport and the typed client resolve from the worksp
   it('builds a typed client over the TenancyService descriptor', () => {
     const transport = createGrpcTransport({ baseUrl: 'https://iam.invalid' });
     const client = createClient(TenancyService, transport);
-    expect(typeof client.createTenant).toBe('function');
+    expect(typeof client.createOrganization).toBe('function');
   });
 });
