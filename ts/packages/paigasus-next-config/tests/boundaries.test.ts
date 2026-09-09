@@ -57,6 +57,17 @@ const DENIED: ReadonlyArray<readonly [string, string, string]> = [
   ['app-shell must not import auth/server', 'packages/paigasus-app-shell/src/header.tsx', "import { x } from '@paigasus/auth/server';"],
   ['apps must not import proto', 'apps/paigasus-console/app/page.tsx', "import { x } from '@paigasus/proto';"],
   ['apps must not import a proto SUBPATH', 'apps/paigasus-console/app/page.tsx', "import { x } from '@paigasus/proto/gen/iam';"],
+  ['auth/client must not import openid-client', 'packages/paigasus-auth/src/client.ts', "import * as c from 'openid-client';"],
+  ['auth/client must not import redis', 'packages/paigasus-auth/src/client.ts', "import { createClient } from 'redis';"],
+  ['auth/client must not import a node builtin', 'packages/paigasus-auth/src/client.ts', "import { randomBytes } from 'node:crypto';"],
+  ['auth/client must not import a BARE node builtin', 'packages/paigasus-auth/src/client.ts', "import { randomBytes } from 'crypto';"],
+  // SIBLING-RELATIVE. src/client.ts reaches src/adapters as './adapters/…', never '../'. A
+  // ../-only group is inert on the one file this rule exists to protect.
+  ['auth/client must not reach adapters via ./', 'packages/paigasus-auth/src/client.ts', "import { x } from './adapters/redis-store.js';"],
+  ['auth/client must not reach core via ./', 'packages/paigasus-auth/src/client.ts', "import { x } from './core/single-flight.js';"],
+  ['auth/middleware must not import the store', 'packages/paigasus-auth/src/middleware.ts', "import { x } from './adapters/redis-store.js';"],
+  ['an app middleware must not import auth/server', 'apps/paigasus-console/middleware.ts', "import { getSession } from '@paigasus/auth/server';"],
+  ['an app middleware must not import the sdk', 'apps/paigasus-console/middleware.ts', "import { x } from '@paigasus/sdk';"],
 ];
 
 const ALLOWED: ReadonlyArray<readonly [string, string, string]> = [
@@ -68,6 +79,10 @@ const ALLOWED: ReadonlyArray<readonly [string, string, string]> = [
   ['apps may import the sdk', 'apps/paigasus-console/app/page.tsx', "import { x } from '@paigasus/sdk';"],
   ['apps may import ui directly — the deliberate § 7.3 deviation', 'apps/paigasus-console/app/page.tsx', "import { x } from '@paigasus/ui';"],
   ['apps may import next', 'apps/paigasus-console/app/page.tsx', "import Link from 'next/link';"],
+  ['auth/client may import react', 'packages/paigasus-auth/src/client.ts', "import { createContext } from 'react';"],
+  ['auth/server may import openid-client', 'packages/paigasus-auth/src/server.ts', "import * as c from 'openid-client';"],
+  ['auth/server may reach its own adapters', 'packages/paigasus-auth/src/server.ts', "import { x } from './adapters/redis-store.js';"],
+  ['an app middleware may import auth/middleware', 'apps/paigasus-console/middleware.ts', "import { createAuthMiddleware } from '@paigasus/auth/middleware';"],
 ];
 
 describe('boundary preset', () => {
