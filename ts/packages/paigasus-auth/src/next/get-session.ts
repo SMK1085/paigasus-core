@@ -34,6 +34,7 @@ import { redirect } from 'next/navigation';
 import { validateReturnTo } from '../core/return-to.js';
 import { resolveSession, type ResolvedSession } from '../core/single-flight.js';
 import { SESSION_COOKIE } from '../http/cookies.js';
+import { sidTag } from '../ports/logger.js';
 import type { AuthRuntime } from '../runtime.js';
 
 /**
@@ -61,7 +62,12 @@ export async function getSession(runtime: AuthRuntime): Promise<ResolvedSession 
     );
   } catch {
     // A Redis blip (or any other store failure) is a redirect to login via requireSession(), not
-    // a 500 — see the file header.
+    // a 500 — see the file header. That degrade must not also be SILENT: without this event, a
+    // store outage looks identical to a user simply logging out en masse, and this package exists
+    // partly so "users randomly logged out" stops being a mystery. Same field discipline as
+    // core/single-flight.ts's own 'store.unavailable' emission — a truncated sid, a fixed stage
+    // name, never the caught error object (it may embed a DSN).
+    runtime.logger.event('store.unavailable', { sid: sidTag(sid), stage: 'get_session' });
     return null;
   }
 }

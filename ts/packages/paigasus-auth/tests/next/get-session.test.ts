@@ -24,8 +24,30 @@ import { noopLogger } from '../../src/adapters/noop-logger.js';
 import { SessionStoreUnavailable } from '../../src/core/errors.js';
 import type { SessionRecord } from '../../src/core/session.js';
 import { SESSION_COOKIE } from '../../src/http/cookies.js';
+import type { AuthEventFields, AuthEventName, AuthLogger } from '../../src/ports/logger.js';
+import { sidTag } from '../../src/ports/logger.js';
 import type { SessionStore } from '../../src/ports/session-store.js';
 import type { AuthRuntime } from '../../src/runtime.js';
+
+/** A store whose `get` always rejects with `SessionStoreUnavailable` — a Redis blip. */
+function unavailableStore(): SessionStore {
+  return {
+    get: () => Promise.reject(new SessionStoreUnavailable('session store unavailable (redis://<redacted>)')),
+    set: () => Promise.resolve(false),
+    delete: () => Promise.resolve(),
+    tryAcquireLock: () => Promise.resolve(false),
+    releaseLock: () => Promise.resolve(),
+    putTransaction: () => Promise.resolve(),
+    takeTransaction: () => Promise.resolve(null),
+    close: () => Promise.resolve(),
+  };
+}
+
+/** Records every event emitted, so a test can assert a store outage is logged, not silent. */
+function recordingLogger(): { logger: AuthLogger; events: Array<[AuthEventName, AuthEventFields]> } {
+  const events: Array<[AuthEventName, AuthEventFields]> = [];
+  return { logger: { event: (name, fields) => void events.push([name, { ...fields }]) }, events };
+}
 
 /** A cookie jar shaped like Next's `ReadonlyRequestCookies` — only the `.get` method is used. */
 function cookieJar(sid?: string): { get(name: string): { name: string; value: string } | undefined } {
@@ -101,20 +123,22 @@ describe('getSession', () => {
 
   it('returns null, not a throw, when the store is unavailable', async () => {
     cookiesMock.mockResolvedValue(cookieJar('some-sid'));
-    const unavailableStore: SessionStore = {
-      get: () => Promise.reject(new SessionStoreUnavailable('session store unavailable (redis://<redacted>)')),
-      set: () => Promise.resolve(false),
-      delete: () => Promise.resolve(),
-      tryAcquireLock: () => Promise.resolve(false),
-      releaseLock: () => Promise.resolve(),
-      putTransaction: () => Promise.resolve(),
-      takeTransaction: () => Promise.resolve(null),
-      close: () => Promise.resolve(),
-    };
-    const runtime = baseRuntime(unavailableStore);
+    const runtime = baseRuntime(unavailableStore());
 
     await expect(getSession(runtime)).resolves.toBeNull();
     expect(redirectMock).not.toHaveBeenCalled();
+  });
+
+  // Review round 1: the degrade to "signed out" was silent — a store outage looked identical to
+  // every user simply logging out, with nothing in the auth log to tell the two apart.
+  it('logs store.unavailable rather than staying silent when the store is unavailable', async () => {
+    cookiesMock.mockResolvedValue(cookieJar('some-sid'));
+    const { logger, events } = recordingLogger();
+    const runtime = { ...baseRuntime(unavailableStore()), logger };
+
+    await getSession(runtime);
+
+    expect(events).toEqual([['store.unavailable', { sid: sidTag('some-sid'), stage: 'get_session' }]]);
   });
 });
 

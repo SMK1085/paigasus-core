@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import { fileURLToPath } from 'node:url';
 import { defineConfig } from 'vitest/config';
 
 // NO `react-server` CONDITION HERE (task 10 correction). An earlier revision of this file carried
@@ -16,16 +17,22 @@ import { defineConfig } from 'vitest/config';
 // needs the condition PRESENT, everything reachable from `next/navigation` or `react-dom/client`
 // needs it ABSENT.
 //
-// The fix is to stop resolving `server-only` for real at all: tests/server.test.ts mocks it
-// (`vi.mock('server-only', () => ({}))`) instead. That is strictly narrower than a global
-// resolve condition — it affects only the one test file that imports `src/server.ts` — and it
-// means every other test, including the Next-navigation and React-DOM ones, resolves `react`
-// and `react-dom` normally.
+// The fix (task 10 review round 1) is a permanent ALIAS, not a per-file mock: `server-only` always
+// resolves to `tests/support/server-only-stub.ts`, an empty module, for every test in this package.
+// A per-file `vi.mock('server-only', ...)` in only the test that happened to need it was strictly
+// narrower than the condition it replaced, but it left a trap of its own — any FUTURE test that
+// imports `src/server.ts` and forgets that one-line mock dies at import with the real package's
+// opaque "cannot be imported from a Client Component" throw. The alias makes the stub apply to
+// every test unconditionally, so there is nothing left to forget, and it touches nothing else:
+// `react`, `react-dom`, and `next/navigation` all resolve completely normally, exactly as they
+// would in a real Node process.
 //
 // The list below is kept ADDITIVE (not just `['node']`) for the same reason the original comment
 // gave: dropping `import`/`default` breaks source-exports `.ts` resolution for every @paigasus/*
 // package. `react-server` is simply no longer a member.
 const conditions = ['node', 'import', 'default'];
+
+const serverOnlyStub = fileURLToPath(new URL('./tests/support/server-only-stub.ts', import.meta.url));
 
 export default defineConfig({
   test: {
@@ -34,6 +41,6 @@ export default defineConfig({
     // The container-backed suites live under tests/containers/ and run only in the test-e2e task.
     exclude: ['tests/containers/**', 'tests/e2e/**', '**/node_modules/**'],
   },
-  resolve: { conditions },
+  resolve: { conditions, alias: { 'server-only': serverOnlyStub } },
   ssr: { resolve: { conditions } },
 });

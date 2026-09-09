@@ -48,11 +48,15 @@ export function toSessionView(rec: SessionRecord): SessionView {
     principalPrn: rec.principal.principalPrn,
     displayName: name ?? (email === null ? null : (email.split('@')[0] ?? null)),
     email,
-    // A DEFENSIVE COPY, not `rec.principal.roleGrants` by reference. The record crosses the JSON
+    // A DEEP COPY, not `rec.principal.roleGrants` by reference. The record crosses the JSON
     // boundary in every real caller, so aliasing was harmless there — but a client surface
     // (src/client.ts) now holds this array in-process, and a caller mutating the returned view
     // must never reach back into the SessionRecord still held by core/single-flight.ts.
-    grants: [...rec.principal.roleGrants],
+    // `RoleGrantRef` is a flat `{ scopePrn, roleKey }` with no nested objects, so a shallow spread
+    // of each element is a genuine deep copy here — a shallow `[...roleGrants]` alone still hands
+    // out the same grant OBJECTS by reference (review round 1: `v.grants[0].roleKey = 'x'` reached
+    // back into the record), which is exactly the hazard this copy exists to close.
+    grants: rec.principal.roleGrants.map((grant) => ({ ...grant })),
     grantsAvailable: rec.principal.grantsAvailable,
   };
 }

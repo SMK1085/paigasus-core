@@ -2,8 +2,10 @@
 //
 // AC 4: middleware checks cookie PRESENCE only, never validity, and cannot even import anything
 // that knows how to validate one — CVE-2025-29927 was exactly a middleware auth bypass.
-import { existsSync, readFileSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import { randomUUID } from 'node:crypto';
+import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import ts from 'typescript';
@@ -64,6 +66,30 @@ interface ImportGraph {
   files: Set<string>;
   /** Every bare (non-relative) module specifier encountered — recorded, never walked into. */
   packages: Set<string>;
+}
+
+// WHAT THIS WALKER SEES, AND WHAT IT DOES NOT (review round 1). `moduleSpecifiers` below reads
+// only STATIC `ImportDeclaration`/`ExportDeclaration` nodes — the ones ECMAScript requires to sit
+// at a module's top level, which is exactly why a single-level `forEachChild` (not a recursive
+// visit) is enough to find every one of them. It is blind to a DYNAMIC `import(...)` call or a
+// `require(...)` call: both are ordinary call expressions, legal anywhere in a function body, and
+// invisible to a walk that only looks for import/export declaration nodes. A future edit that
+// swapped a static `import { redisStore } from './adapters/redis-store.js'` for
+// `await import('./adapters/redis-store.js')` would satisfy the declaration-based check while
+// still giving middleware.ts a real, working path to the store at runtime.
+//
+// The regex below is a deliberately blunt BACKSTOP for that gap, not a replacement for the
+// declaration walk: it fails the whole graph if ANY walked file contains the text `import(` or
+// `require(` at all, without trying to resolve what it points at. That is conservative by design —
+// a legitimate dynamic import would also fail it — but nothing in this package's `src/` uses one
+// today (asserted by the positive control below, which would need updating the day one is added
+// deliberately), and "middleware.ts's graph must not even ATTEMPT a dynamic escape hatch" is
+// exactly AC 4's shape.
+const DYNAMIC_IMPORT_OR_REQUIRE = /\b(?:import|require)\s*\(/;
+
+/** Every walked file whose raw source contains a dynamic `import(...)` or `require(...)` call. */
+function filesWithDynamicImportOrRequire(files: Set<string>): string[] {
+  return [...files].filter((file) => DYNAMIC_IMPORT_OR_REQUIRE.test(readFileSync(file, 'utf8')));
 }
 
 /** Resolve a relative import specifier (repo convention: `.js` extension, real file is `.ts`/`.tsx`) to a file on disk. */
@@ -131,6 +157,10 @@ describe('middleware import graph (AC 4)', () => {
     expect(graph.packages.has('openid-client')).toBe(false);
     expect(graph.packages.has('redis')).toBe(false);
     expect(reachesStoreOrResolver(graph.files)).toEqual([]);
+    // Backstop (review round 1): no file the STATIC walk reached may itself contain a dynamic
+    // `import(...)`/`require(...)` call — see the comment above `DYNAMIC_IMPORT_OR_REQUIRE` for
+    // why the declaration-only walk above cannot see those on its own.
+    expect(filesWithDynamicImportOrRequire(graph.files)).toEqual([]);
   });
 
   // POSITIVE CONTROL. Without this, a broken walker (e.g. one that silently resolves nothing)
@@ -143,5 +173,39 @@ describe('middleware import graph (AC 4)', () => {
 
     expect(graph.packages.has('openid-client')).toBe(true);
     expect(reachesStoreOrResolver(graph.files).length).toBeGreaterThan(0);
+  });
+});
+
+// The backstop's own positive control — otherwise a typo in DYNAMIC_IMPORT_OR_REQUIRE (or a
+// filter predicate that always returns false) would pass every assertion above vacuously, exactly
+// the failure shape the rest of this file's positive control exists to rule out for the walker
+// itself.
+describe('the dynamic-import/require backstop is not vacuous', () => {
+  function withTempFile(contents: string, run: (path: string) => void): void {
+    const path = join(tmpdir(), `middleware-backstop-${randomUUID()}.ts`);
+    writeFileSync(path, contents);
+    try {
+      run(path);
+    } finally {
+      rmSync(path);
+    }
+  }
+
+  it('flags a file containing a dynamic import() call', () => {
+    withTempFile("export const x = await import('./whatever.js');\n", (path) => {
+      expect(filesWithDynamicImportOrRequire(new Set([path]))).toEqual([path]);
+    });
+  });
+
+  it('flags a file containing a require() call', () => {
+    withTempFile("const x = require('./whatever.js');\n", (path) => {
+      expect(filesWithDynamicImportOrRequire(new Set([path]))).toEqual([path]);
+    });
+  });
+
+  it('does not flag a file with only static imports', () => {
+    withTempFile("import { foo } from './foo.js';\nexport { foo };\n", (path) => {
+      expect(filesWithDynamicImportOrRequire(new Set([path]))).toEqual([]);
+    });
   });
 });

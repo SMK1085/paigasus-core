@@ -52,14 +52,23 @@ describe('toSessionView', () => {
     expect(toSessionView({ ...RECORD, idTokenClaims: claims }).displayName).toBe('a');
   });
 
-  it('copies roleGrants rather than handing out the record array by reference', () => {
+  it('deep-copies roleGrants rather than handing out the record array or its elements by reference', () => {
     // Task 10: a client surface now holds a SessionView in-process, so mutating the view's
-    // `grants` array must never reach back into the SessionRecord (or a shared array between two
-    // views built from the same record).
+    // `grants` array — or a field on one of its elements — must never reach back into the
+    // SessionRecord (or a shared array/element between two views built from the same record).
     const v = toSessionView(RECORD);
     expect(v.grants).not.toBe(RECORD.principal.roleGrants);
+    expect(v.grants[0]).not.toBe(RECORD.principal.roleGrants[0]);
+
     v.grants.push({ scopePrn: 'prn:pgs:iam::org1:org/injected', roleKey: 'intruder' });
     expect(RECORD.principal.roleGrants).toHaveLength(1);
+
+    // Review round 1: a shallow `[...roleGrants]` still passes the array-identity checks above
+    // while leaving each ELEMENT aliased — this is the check that catches that specifically.
+    const grant = v.grants[0];
+    if (grant === undefined) throw new Error('expected the seeded grant to survive the copy');
+    grant.roleKey = 'tampered';
+    expect(RECORD.principal.roleGrants[0]?.roleKey).toBe('admin');
   });
 
   it('a SessionRecord is not assignable to a SessionView', () => {

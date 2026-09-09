@@ -9,12 +9,12 @@
 import { describe, expect, it, vi } from 'vitest';
 import { CallbackRejected } from '../src/core/errors.js';
 
-// `src/server.ts` opens with `import 'server-only'` (AC 5), whose real module throws
-// unconditionally outside a `react-server`-conditioned resolution — and that condition cannot be
-// turned on globally for this package's vitest config without also breaking `next/navigation`'s
-// and `react-dom/client`'s OWN conditional exports (see vitest.config.ts). Mocking the guard
-// package directly, only for this file, sidesteps that conflict entirely.
-vi.mock('server-only', () => ({}));
+// `src/server.ts` opens with `import 'server-only'` (AC 5). Its real module throws
+// unconditionally outside a `react-server`-conditioned resolution, which this package's vitest
+// config cannot turn on globally without also breaking `next/navigation`'s and
+// `react-dom/client`'s OWN conditional exports — see vitest.config.ts's `resolve.alias`, which
+// aliases `server-only` to an empty stub for every test in this package. No per-file mock needed
+// here (task 10 review round 1 replaced one that used to live in this file).
 
 const handleMock = vi.fn<(req: Request) => Promise<Response>>();
 
