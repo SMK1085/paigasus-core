@@ -156,6 +156,18 @@ async function isReachable(env: RuntimeEnv): Promise<boolean> {
 
 let started: ReturnType<typeof adoptOrStartContainers> | undefined;
 
+/**
+ * DEFERRED, NAMED KNOWN LIMIT (review round 1): this check-then-adopt is a TOCTOU — two processes
+ * could both observe "no existing env" and both proceed to `startContainers()`, recreating the
+ * exact double-start this function exists to prevent. It is safe TODAY not because of anything in
+ * this function, but because of two external facts about how this suite actually runs: Playwright
+ * always finishes the main/runner process's config-evaluation (which publishes the env) before
+ * any worker process is spawned at all, and `playwright.config.ts` pins `workers: 1`, so there is
+ * only ever ONE worker process to race against the main process, and it starts strictly after.
+ * Neither fact is enforced BY this file — a future change to `workers` or to Playwright's own
+ * task-scheduling order could reopen the race silently. A real fix (a file lock, or a
+ * separate "claim" step) is out of scope for this task.
+ */
 async function adoptOrStartContainers(): Promise<{ env: RuntimeEnv; teardown: () => Promise<void> }> {
   const existing = tryReadRuntimeEnv();
   if (existing !== undefined && (await isReachable(existing))) {

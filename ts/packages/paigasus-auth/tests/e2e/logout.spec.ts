@@ -7,7 +7,7 @@
 // record the cookie named is actually gone. A stolen cookie is exactly a copy living somewhere
 // else; this test is that somewhere else.
 import { expect, test } from '@playwright/test';
-import { KEYCLOAK_PASSWORD, KEYCLOAK_USERNAME, SESSION_COOKIE_NAME, ZONE_BASE_PATH } from './constants.js';
+import { KEYCLOAK_CLIENT_ID, KEYCLOAK_PASSWORD, KEYCLOAK_USERNAME, SESSION_COOKIE_NAME, ZONE_BASE_PATH } from './constants.js';
 
 test('AC 3: a stolen cookie is dead immediately after logout', async ({ page, context, browser, baseURL }) => {
   await page.goto(`${ZONE_BASE_PATH}/guarded`);
@@ -21,17 +21,31 @@ test('AC 3: a stolen cookie is dead immediately after logout', async ({ page, co
   expect(stolen, 'must capture a live session cookie before logging out').toBeDefined();
   if (stolen === undefined) throw new Error('unreachable');
 
-  // POST /auth/logout via the real logout form (routes.ts requires POST specifically — see that
-  // file's own header on why logout is never a GET).
-  await page.getByTestId('logout-button').click();
-
   // M12: routes.ts's handleLogout deliberately omits `id_token_hint` from the end-session
   // redirect (the raw ID token JWT is never stored — see that function's own doc comment) and
   // relies on openid-client appending `client_id` unconditionally instead. Does Keycloak 26.4
-  // honour that combination, or does it interpose a confirmation page first? Asserted here as a
-  // real, timing-sensitive check, not inferred from the test merely finishing: if Keycloak showed
-  // a confirmation interstitial instead of completing the redirect, this would time out waiting
-  // for the public page rather than silently passing.
+  // actually receive that combination, and does it honour it without a confirmation page?
+  //
+  // Asserting `public-heading` becomes visible afterward is NOT sufficient on its own (fix round
+  // 1, Important 1): `routes.ts`'s handleLogout has a DEGRADED arm — if `buildEndSessionUrl`
+  // throws (e.g. discovery failing, or no `end_session_endpoint` advertised), it redirects
+  // straight to `runtime.postLogoutRedirectUri` WITHOUT ever contacting Keycloak, and that URI
+  // defaults to the public page too (`runtime.ts`'s `${PAIGASUS_PUBLIC_ORIGIN}${basePath}/`). A
+  // browser landing on `public-heading` is therefore consistent with BOTH "Keycloak was reached
+  // and honoured the redirect" and "Keycloak was never contacted at all" — the assertion alone
+  // cannot tell the measured case from the never-happened case.
+  //
+  // The fix: capture the actual navigation to Keycloak's end-session endpoint and assert on ITS
+  // query string directly, so this rests on the wire rather than on inference from `oidc.ts` and
+  // `tests/adapters/oidc.test.ts`.
+  const [endSessionRequest] = await Promise.all([page.waitForRequest((req) => req.url().includes('/protocol/openid-connect/logout')), page.getByTestId('logout-button').click()]);
+  const endSessionUrl = new URL(endSessionRequest.url());
+  expect(endSessionUrl.searchParams.get('client_id'), 'Keycloak must actually receive client_id on the end-session request').toBe(KEYCLOAK_CLIENT_ID);
+  expect(endSessionUrl.searchParams.has('id_token_hint'), 'id_token_hint must be absent — this package never stores the raw ID token JWT').toBe(false);
+
+  // Only now does completing the redirect chain confirm Keycloak honoured that request rather
+  // than interposing a confirmation page — the request-capture above already ruled out the
+  // degraded no-Keycloak-contact path, so this assertion means what it says.
   await expect(page.getByTestId('public-heading')).toBeVisible();
 
   // The attacker's browser: a FRESH context (its own cookie jar), seeded with nothing but the

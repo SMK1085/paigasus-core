@@ -69,12 +69,20 @@ test('AC 1: the full authorization-code round trip works with config only', asyn
   const debugBody = await page.evaluate(async (path) => {
     const res = await fetch(path);
     if (!res.ok) throw new Error(`debug endpoint returned ${String(res.status)}`);
-    return (await res.json()) as { accessToken: string };
+    return (await res.json()) as { accessToken: string; refreshToken: string | null };
   }, `${ZONE_BASE_PATH}/__test__/session`);
   expect(sessionCookie.value).not.toContain(debugBody.accessToken);
   // The sid is 32 random bytes (base64url) with none of a JWT's structure (three dot-separated
   // segments) — an independent structural check alongside the direct containment check above.
   expect(sessionCookie.value).not.toMatch(/^[\w-]+\.[\w-]+\.[\w-]+$/);
+
+  // M6 part 3 / fix round 1, Important 3: `offline_access` being present in the realm fixture's
+  // defaultClientScopes was previously proven only by the ABSENCE of a failure (Keycloak rejects
+  // the whole exchange with `error: 'not_allowed'` without it — see the M6 measurement). Nothing
+  // asserted a refresh token was actually ISSUED, and a provider silently returning none is
+  // exactly the named failure mode (design doc): the single-flight refresh would then have
+  // nothing to refresh. Asserted here against the real token response.
+  expect(debugBody.refreshToken, 'Keycloak must actually issue a refresh_token for offline_access to mean anything').not.toBeNull();
 });
 
 test('§ 9.2: two tabs starting a login concurrently both complete', async ({ context }) => {
@@ -87,6 +95,12 @@ test('§ 9.2: two tabs starting a login concurrently both complete', async ({ co
   // other's secret. Asserted directly below, against real Keycloak, rather than inferred.
   await Promise.all([tab1.goto(`${ZONE_BASE_PATH}/guarded`), tab2.goto(`${ZONE_BASE_PATH}/guarded`)]);
 
+  // m1 (fix round 1): this is the SINGLE assertion in this test that reds if routes.ts regressed
+  // to a fixed transaction-cookie name instead of `txnCookieName(txnId)` — a fixed name would
+  // still let one tab's login complete (the second /auth/login would just overwrite the first
+  // cookie, and whichever transaction is left standing can still finish), so the completion
+  // logic below this point does NOT independently catch that regression. Do not "simplify" this
+  // count away believing the rest of the test covers it.
   const txnCookiesAfterBothStarted = (await context.cookies()).filter((c) => c.name.startsWith('__Host-pgs_txn_'));
   expect(txnCookiesAfterBothStarted, 'two concurrent /auth/login calls must mint two DISTINCT txn cookies, not one overwriting the other').toHaveLength(2);
 

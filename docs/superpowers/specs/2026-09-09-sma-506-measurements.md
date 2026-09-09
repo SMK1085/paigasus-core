@@ -593,7 +593,128 @@ Restored by deleting the `M5-MUTATION2-START`/`M5-MUTATION2-END` markers and
 the commented-out line (never `git checkout --`), and re-ran: 20 of 20
 tests passed again.
 
-## M6 — PKCE: proving Task 8's callback tests actually witness the exchange
+## M3 — `NODE_EXTRA_CA_CERTS` + `ignoreHTTPSErrors` suffice for the self-signed cert on both sides
+
+Task 13's E2E tier has TWO parties that must trust Keycloak's runtime-generated self-signed
+certificate (SAN `127.0.0.1`/`localhost`, minted by `tests/e2e/tls-fixture.ts` via `openssl`):
+
+- The **browser** (Chromium via Playwright), which navigates to Keycloak's own hosted pages
+  (the authorization endpoint, the login form, the end-session endpoint) directly.
+- The **fixture server** (`tests/e2e/fixture-server.ts`), a plain `node` process that talks to
+  Keycloak itself for OIDC discovery, the token exchange, and (best-effort) revocation.
+
+**Measured: both assumptions hold, but they are two DIFFERENT mechanisms, not one.**
+`playwright.config.ts`'s `use.ignoreHTTPSErrors: true` covers the browser side — verified by the
+browser successfully rendering and submitting Keycloak's login form over `https://127.0.0.1:<port>`
+with no certificate-warning interstitial blocking it. `NODE_EXTRA_CA_CERTS`, set in
+`playwright.config.ts`'s `webServer.env` to the cert file `tls-fixture.ts` generates, covers the
+fixture server side — verified by `roundtrip.spec.ts`'s AC 1 test completing a real token exchange
+(`POST /protocol/openid-connect/token`) against that same self-signed listener. Before this was
+wired correctly, the fixture server's own `authorizationCodeGrant` call failed with a TLS
+certificate-verification error; setting `NODE_EXTRA_CA_CERTS` to the exact cert file Keycloak was
+started with (not merely "a" self-signed cert) resolved it. The two settings do not substitute for
+each other — dropping either one reproduces the corresponding party's own TLS failure.
+
+## M6 — the Keycloak realm JSON for a confidential code-flow client on tag 26.4
+
+**Renumbered from an earlier draft slot.** This is the design doc's own M6 (§ 20's table); see the
+M13 section below for the collision this resolves.
+
+Started from `rs/crates/services/paigasus-iam/tests/fixtures/keycloak-realm.json`. Its one client,
+`paigasus-cli`, cannot be reused for an authorization-code round trip: `publicClient: true` and
+`standardFlowEnabled: false` make it a password-grant-only client with no secret. Added a second,
+CONFIDENTIAL client, `paigasus-e2e-rp` (`publicClient: false`, `standardFlowEnabled: true`, a fixed
+`secret`, `redirectUris`/`webOrigins` pointed at the fixed fixture-server port), plus
+`offline_access` promoted from Keycloak's default OPTIONAL client scope to a DEFAULT one. Working
+file: `ts/packages/paigasus-auth/tests/e2e/keycloak-realm.json`.
+
+**Three things Keycloak 26.4's realm importer rejected, measured directly against the running
+container's logs (`docker logs <id>`) — the next person will hit these too if they hand-edit this
+file:**
+
+1. **Any unrecognised field on a `ClientRepresentation` hard-fails the ENTIRE realm import**, not
+   just that client. A `_comment` string field (an attempt to document the client inline, since
+   JSON has no comment syntax) produced:
+   `ERROR: Unrecognized field "_comment" (class org.keycloak.representations.idm.ClientRepresentation), not marked as ignorable`,
+   followed by `ERROR: Failed to run import` / `ERROR: Failed to start server in (development)
+   mode` — the container's realm never loaded and Keycloak's discovery endpoint never came up.
+   Fix: no inline JSON comments; the client's rationale lives in
+   `ts/packages/paigasus-auth/tests/e2e/constants.ts`'s doc comment instead.
+2. **`postLogoutRedirectUris` is not a top-level `ClientRepresentation` field** in this schema
+   version either — same class of error
+   (`Unrecognized field "postLogoutRedirectUris"`, with the same 44-property list Keycloak reports
+   as everything it DOES recognise). The correct location is the client ATTRIBUTE
+   `post.logout.redirect.uris`, nested under `"attributes": {...}`.
+3. **`offline_access` in `defaultClientScopes` alone does not make a refresh token issuable.**
+   Once the realm imported cleanly, the token exchange itself failed with a 400:
+   `error: 'not_allowed', error_description: 'Offline tokens not allowed for the user or client'`
+   (captured via a temporary `console.error` in `src/adapters/oidc.ts`'s
+   `authorizationCodeGrant` catch block, reverted after diagnosis). Keycloak auto-creates the
+   `offline_access` REALM ROLE for every realm, but does not auto-assign it to a user declared in
+   a realm-import JSON — the fix was adding `"realmRoles": ["offline_access"]` to `alice`'s user
+   object.
+
+After all three fixes, `waitForKeycloakReady`'s discovery poll (`tests/e2e/global-setup.ts`)
+succeeds and the full round trip in `roundtrip.spec.ts` completes — see M3's own successful
+token-exchange observation above, and the M6-part-3 result is now also directly verified by AC 1's
+`expect(debugBody.refreshToken).not.toBeNull()` assertion (fix round 1, Important 3).
+
+## M8 — does the fixture server start under `--conditions=react-server`?
+
+**No — measured, not assumed, and the brief's own plan (mirrored from the design doc's original
+M8 assumption) does not survive task 10.** `src/server.ts` opens with `import 'server-only'`,
+whose exports map resolves to a no-op only under the `react-server` condition — the design doc's
+M8 assumed setting that condition via `NODE_OPTIONS=--conditions=react-server` would be enough to
+start the fixture server, which mounts `createAuthRouteHandler` (`src/server.ts`).
+
+**First measurement (reproducing the brief's plan).** Ran, from
+`ts/packages/paigasus-auth`, with the shared `.js`-to-`.ts` loader
+(`tests/fixtures/ts-esm-loader.mjs`) and a probe script importing `./src/server.js`:
+
+```
+NODE_OPTIONS="--conditions=react-server" node --experimental-transform-types \
+  --import "file://.../tests/fixtures/ts-esm-loader.mjs" probe.mjs
+```
+
+Result: `IMPORT_FAILED`, `Error [ERR_MODULE_NOT_FOUND]: Cannot find module
+'.../node_modules/next/headers' imported from '.../src/next/get-session.ts'`. This is a DIFFERENT
+concrete symptom than vitest.config.ts's own comment predicts (a `React.createContext` crash at
+module scope in `next/navigation`'s react-server build) — but the same underlying incompatibility:
+setting `react-server` breaks the resolution of `next/headers`/`next/navigation`, which
+`src/server.ts` re-exports through `src/next/get-session.ts`, exactly as vitest.config.ts's header
+comment already documented for the vitest case.
+
+**Second measurement (isolating the cause).** Removing `--conditions=react-server` entirely did
+**not** fix the import — the identical `next/headers` resolution error reproduced with no
+conditions flag at all. Isolated with a minimal repro (`node --experimental-transform-types
+--input-type=module -e "import('next/headers')..."`, run from the package directory, no custom
+loaders): same `ERR_MODULE_NOT_FOUND`, with Node's own hint `Did you mean to import
+"next/headers.js"?`. Confirmed `next`'s `package.json` has no `exports` field at all
+(`grep -n '"exports"' node_modules/next/package.json` — no match), so Node's ESM resolver falls
+back to legacy extensionless resolution for a bare deep import and — unlike Vite's resolver, which
+is what makes this work under vitest — does NOT probe `.js`/`.mjs`/`index.js` on its own.
+`import('next/headers.js')` (the literal suggested fix) resolved successfully in the same probe.
+This second problem is unrelated to `server-only`/`react-server` and reproduces identically with
+either condition-list setting.
+
+**Fix, mirroring task 10's actual solution rather than the design doc's original plan:** a Node
+module customization hook, `tests/e2e/e2e-loader.mjs`, that (1) redirects the bare specifier
+`server-only` to `tests/support/server-only-stub.ts` (the same permanent alias vitest.config.ts
+uses, applied here via `module.register`'s `resolve` hook instead of Vite's `resolve.alias`), and
+(2) retries any OTHER `ERR_MODULE_NOT_FOUND` bare-specifier resolution with a literal `.js`
+extension appended before giving up. No `--conditions` flag is set at all. Verified working: the
+fixture server starts and completes a full login (`roundtrip.spec.ts`'s AC 1), which requires
+`src/server.ts`'s entire import graph — `next/headers`, `next/navigation`, `server-only` included —
+to resolve and execute successfully.
+
+## M13 — PKCE: proving Task 8's callback tests actually witness the exchange
+
+**Renumbered from M6 to M13 (task 13, fix round 1).** The design doc's § 20 measurement table
+(`docs/superpowers/specs/2026-09-09-sma-506-auth-design.md`) is the authority on M-numbers, and it
+already defines M6 as "the Keycloak realm JSON for a confidential code-flow client on tag 26.4" —
+task 13's own measurement. This section (Task 8's PKCE proof) took the M6 label first, before that
+collision was noticed, and is renumbered here so the design doc's table and this file agree. Any
+earlier reference to "M6" meaning PKCE should now read M13.
 
 Task 8's review round 1 (Important 2) found that `tests/fixtures/jwks.ts`'s
 `/token` handler drained the token request body without inspecting it, so
@@ -656,22 +777,84 @@ end-session redirect (the raw ID token JWT is never stored in
 `SessionRecord`) and relies on `openid-client@6.8.8` appending `client_id`
 unconditionally instead. The design doc and the task 9 report both name this
 a real, untested-until-now question: does an actual identity provider accept
-that combination, or does it interpose a confirmation page first?
+that combination, or does it interpose a confirmation page first? Task 9's
+ruling that omitting `id_token_hint` was acceptable rested on the assumption
+that Keycloak would honour `client_id` alone — this measurement is what is
+supposed to convert that ruling from reasoning into evidence.
 
-**Measured against Keycloak 26.4** (the `paigasus-e2e-rp` confidential
-client, `tests/e2e/keycloak-realm.json`), via task 13's `logout.spec.ts`: a
-real browser logs in, clicks the real logout form (`POST /auth/logout`), and
-the test asserts `page.getByTestId('public-heading')` becomes visible — i.e.
-Keycloak's own end-session endpoint redirects the browser straight back to
-`post_logout_redirect_uri` with no further interaction. This assertion is a
-genuine, timing-sensitive check: if Keycloak had shown a confirmation
-interstitial instead, `waitFor`'s default timeout would have expired and the
-test would have failed, not passed by accident.
+**CORRECTED (fix round 1, Important 1).** The first version of this
+measurement asserted only that `page.getByTestId('public-heading')` becomes
+visible after clicking logout, and argued that a confirmation interstitial
+would have timed that assertion out. True for the interstitial hypothesis,
+but insufficient in general: `routes.ts`'s `handleLogout` has a DEGRADED arm
+— if `buildEndSessionUrl` throws (discovery failing, or no
+`end_session_endpoint` advertised), it redirects straight to
+`runtime.postLogoutRedirectUri` WITHOUT contacting Keycloak at all, and
+`runtime.ts` defaults that URI to `${PAIGASUS_PUBLIC_ORIGIN}${basePath}/` —
+the public page. `public-heading` becoming visible is therefore consistent
+with BOTH "Keycloak was reached and honoured the redirect" and "Keycloak was
+never contacted at all"; the original assertion could not tell those apart.
+There was also a narrower gap even setting that aside: nothing in the
+original version observed the end-session request's QUERY STRING directly —
+that `client_id` is present and `id_token_hint` absent rested on reading
+`oidc.ts` plus `tests/adapters/oidc.test.ts`, an inferred link inside a
+measurement whose entire point is to replace inference with observation.
 
-**Result: Keycloak 26.4 completes the redirect immediately.** No
-confirmation page, no error, no additional prompt. `client_id` plus a
-registered `post_logout_redirect_uri` is sufficient — `id_token_hint` is not
-needed against this provider. This confirms task 9's design decision holds
-for Keycloak; it says nothing about Okta or any other provider that may
-mandate `id_token_hint` (see routes.ts's own "NAMED RESIDUAL" comment on
-`handleLogout`).
+**Fix: capture the navigation to Keycloak's own end-session endpoint and
+assert on it directly.** `logout.spec.ts` now does:
+
+```ts
+const [endSessionRequest] = await Promise.all([
+  page.waitForRequest((req) => req.url().includes('/protocol/openid-connect/logout')),
+  page.getByTestId('logout-button').click(),
+]);
+const endSessionUrl = new URL(endSessionRequest.url());
+expect(endSessionUrl.searchParams.get('client_id')).toBe(KEYCLOAK_CLIENT_ID);
+expect(endSessionUrl.searchParams.has('id_token_hint')).toBe(false);
+```
+
+This rests on the wire: `page.waitForRequest` observes the actual outgoing
+HTTP request the browser makes, which can only happen if Keycloak's
+end-session endpoint was actually reached — the degraded no-Keycloak-contact
+path in `handleLogout` would never produce this request at all, so this
+assertion (unlike the original one) DOES distinguish the measured case from
+the never-happened case. Only after this passes does the test go on to
+assert `public-heading` becomes visible, which now genuinely means "Keycloak
+was reached AND honoured the redirect", not "the redirect landed on the
+public page for some reason".
+
+**Observed, captured directly from the request (task 13, fix round 1):**
+
+```
+GET /realms/paigasus-test/protocol/openid-connect/logout
+    ?post_logout_redirect_uri=http%3A%2F%2F127.0.0.1%3A4319%2Fe2e%2F
+    &state=JodFdrSoRDpw
+    &client_id=paigasus-e2e-rp
+```
+
+(line-wrapped here for readability; the real request is one query string).
+`client_id=paigasus-e2e-rp` is present, `id_token_hint` is absent, and the
+browser's subsequent navigation lands on `public-heading` with no
+confirmation interstitial.
+
+**Result: Keycloak 26.4 completes the redirect immediately, with `client_id`
+alone.** This confirms task 9's design decision holds for Keycloak, now on
+the wire rather than by inference; it says nothing about Okta or any other
+provider that may mandate `id_token_hint` (see routes.ts's own "NAMED
+RESIDUAL" comment on `handleLogout`).
+
+**Mutation proof that the fix actually catches what the original version could not.**
+`src/http/routes.ts`'s `handleLogout` was mutated (bounded by
+`M12-MUTATION-START`/`-END` markers) to unconditionally throw before calling
+`runtime.oidc.buildEndSessionUrl`, forcing the degraded, never-contacts-Keycloak
+arm on every logout. `pnpm -C ts/packages/paigasus-auth exec playwright test
+logout.spec.ts` against the mutated file: **the test failed** —
+`page.waitForRequest: Test timeout of 30000ms exceeded`, because the
+end-session request this assertion waits for never happens when Keycloak is
+never contacted. This is exactly the case the original `public-heading`-only
+assertion could NOT distinguish from a genuine success (both would have
+shown the public page — the mutated one via the degraded redirect, the real
+one via the real end-session flow). Restored by deleting the two marker
+lines and the injected `throw` (never `git checkout --`, though in this case
+the edit and its revert left `git diff` on `routes.ts` empty); re-ran
+`logout.spec.ts` afterward: 1 of 1 passed again.
