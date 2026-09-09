@@ -2533,7 +2533,8 @@ moon ci :build :test :lint :fmt :deny :osv :machete :actionlint :typecheck :brea
 
 If `repo:actionlint` or `repo:affected-smoke` hangs at zero CPU, that is this machine's bash here-string deadlock, **not** a gate failure. Re-run without those two targets and let CI judge them.
 
-Diagnose any other failure with `.moon/cache/ciReport.json` — copy it and the task's state directory **before** re-running, because a passing re-run overwrites every artifact.
+<!-- moon-diagnosis:ok -->
+Diagnose any other failure with `.moon/cache/ciReport.json` — copy it and the task's state directory **before** re-running, because a passing re-run overwrites every artifact. There is no action-level `exitCode` key; the real exit code and the command live in `operations[]`, on the entry whose `meta.type` is `task-execution`. Task output is only in `stdout.log`/`stderr.log` under the state directory, never in the report. See CLAUDE.md's moon-diagnosis block.
 
 - [ ] **Step 8: Commit**
 
