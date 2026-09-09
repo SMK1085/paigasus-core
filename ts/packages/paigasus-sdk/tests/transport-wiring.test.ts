@@ -10,14 +10,18 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 // in the file, so a factory closing over a plain `const` throws a TDZ ReferenceError at mock time.
 // vi.hoisted runs its initializer in that same hoisted phase, which is what makes the spy reachable
 // from the factory.
-// The mock implementation is typed with an explicit (unused) `_options?: unknown` parameter
-// rather than `()`: vi.fn() infers the Mock's call-signature arity from the implementation
-// passed to it, so a zero-arg implementation makes `.mock.calls[0]` a zero-length tuple and
-// `.mock.calls[0]?.[0]` below a compile error (measured against vitest@5.0.0's Mock<T> typing —
-// TS2493, "Tuple type '[]' of length '0' has no element at index '0'"). Runtime behavior is
-// unchanged: the mock already ignored its argument either way.
+// The mock is given an explicit call-signature type argument, `(options: unknown) => {...}`,
+// rather than inferring one from a zero-arg implementation: vi.fn() otherwise infers the Mock's
+// call-signature arity from the implementation function passed to it, so `() => ({...})` makes
+// `.mock.calls[0]` a zero-length tuple and `.mock.calls[0]?.[0]` below a compile error (measured
+// against vitest@5.0.0's Mock<T> typing — TS2493, "Tuple type '[]' of length '0' has no element
+// at index '0'"). A named-but-unused parameter (`_options`) would dodge that error but trip
+// @typescript-eslint/no-unused-vars instead, since this repo's eslint config carries no
+// `argsIgnorePattern: '^_'` (measured: `moon run ts:lint` reds on exactly that rule). The explicit
+// type argument gets the 1-tuple without introducing a binding at all. Runtime behavior is
+// unchanged: the mock implementation still ignores its argument.
 const { createGrpcTransport } = vi.hoisted(() => ({
-  createGrpcTransport: vi.fn((_options?: unknown) => ({ unary: vi.fn(), stream: vi.fn() })),
+  createGrpcTransport: vi.fn<(options: unknown) => { unary: ReturnType<typeof vi.fn>; stream: ReturnType<typeof vi.fn> }>(() => ({ unary: vi.fn(), stream: vi.fn() })),
 }));
 
 vi.mock('@connectrpc/connect-node', async (importOriginal) => {
@@ -27,9 +31,7 @@ vi.mock('@connectrpc/connect-node', async (importOriginal) => {
   return { ...actual, createGrpcTransport };
 });
 
-const { DEFAULT_TIMEOUT_MS, authInterceptor, disposeTransports, getTransport } = await import(
-  '../src/transport.js'
-);
+const { DEFAULT_TIMEOUT_MS, authInterceptor, disposeTransports, getTransport } = await import('../src/transport.js');
 
 afterEach(() => {
   disposeTransports();
@@ -38,9 +40,13 @@ afterEach(() => {
 
 describe('what getTransport builds (spec § 7.2, § 7.4)', () => {
   it('passes the auth interceptor', () => {
+    // Pinned to the exact array, not `.toContain`: MEASURED that `expect(undefined).toContain(fn)`
+    // PASSES in vitest 5, so a `.toContain` version of this assertion stays green even if the
+    // whole `interceptors` key is deleted from the `createGrpcTransport` call in src/transport.ts
+    // — see the fix report for the before/after proof.
     getTransport({ baseUrl: 'https://iam.invalid' });
     const options = createGrpcTransport.mock.calls[0]?.[0] as { interceptors?: unknown[] };
-    expect(options.interceptors).toContain(authInterceptor);
+    expect(options.interceptors).toEqual([authInterceptor]);
   });
 
   it('sets an explicit 10 s default deadline', () => {
@@ -53,9 +59,7 @@ describe('what getTransport builds (spec § 7.2, § 7.4)', () => {
   it('passes NO token-shaped argument — the transport identity stays token-free', () => {
     getTransport({ baseUrl: 'https://iam.invalid' });
     const options = createGrpcTransport.mock.calls[0]?.[0] as Record<string, unknown>;
-    expect(Object.keys(options).sort()).toEqual(
-      ['baseUrl', 'defaultTimeoutMs', 'interceptors', 'sessionManager'].sort(),
-    );
+    expect(Object.keys(options).sort()).toEqual(['baseUrl', 'defaultTimeoutMs', 'interceptors', 'sessionManager'].sort());
   });
 
   it('builds the transport once per distinct options object', () => {

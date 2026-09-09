@@ -44,10 +44,7 @@ export const DEFAULT_TIMEOUT_MS = 10_000;
  * Auth sends NO credential rather than a stale one. In practice the default is unreachable:
  * `createIamClient` takes `Auth` as a required parameter (spec § 7.4).
  */
-export const authContextKey = createContextKey<Auth>(
-  { anonymous: true },
-  { description: '@paigasus/sdk per-call authorization' },
-);
+export const authContextKey = createContextKey<Auth>({ anonymous: true }, { description: '@paigasus/sdk per-call authorization' });
 
 export const authInterceptor: Interceptor = (next) => async (req) => {
   const auth = req.contextValues.get(authContextKey);
@@ -61,10 +58,15 @@ export const authInterceptor: Interceptor = (next) => async (req) => {
  * A stable serialization of the whole options object: keys sorted at every depth, `undefined`
  * dropped so an explicitly-absent option keys the same as an omitted one.
  *
- * `TransportOptions` is deliberately restricted to JSON-serializable data. A function-valued option
- * would serialize identically for two different functions and silently alias two transports, so a
- * future option that is not plain data needs its own identity contribution rather than this
- * function's default handling.
+ * `TransportOptions` is deliberately restricted to JSON-serializable data — not merely "not a
+ * function". MEASURED: `serialize` collapses ANY object with no own enumerable keys to the
+ * literal string `{}`, regardless of its actual identity or content — a `Date`, a `Map`, a `Set`,
+ * or a class instance all alias to that same `{}`. The concrete future risk is a `nodeOptions`
+ * with a `secureContext` (a `tls.SecureContext` object) or a `checkServerIdentity` (a callback
+ * function): two different values there would serialize identically and silently alias two
+ * different trust configurations onto one cached transport — precisely the failure this
+ * whole-object key exists to prevent. A future option that is not plain JSON data needs its own
+ * identity contribution rather than this function's default handling.
  */
 export function stableTransportKey(options: TransportOptions): string {
   return serialize(options);

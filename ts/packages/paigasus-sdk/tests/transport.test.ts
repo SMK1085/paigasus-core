@@ -2,13 +2,7 @@
 import { afterAll, afterEach, describe, expect, it } from 'vitest';
 import { createContextValues } from '@connectrpc/connect';
 import type { UnaryRequest, UnaryResponse } from '@connectrpc/connect';
-import {
-  authContextKey,
-  authInterceptor,
-  disposeTransports,
-  getTransport,
-  stableTransportKey,
-} from '../src/transport.js';
+import { authContextKey, authInterceptor, disposeTransports, getTransport, stableTransportKey } from '../src/transport.js';
 
 // An open HTTP/2 session keeps the Node process alive, so without this `vitest run` can hang after
 // the assertions pass (spec § 7.3). Nothing here opens a socket — createGrpcTransport is lazy — but
@@ -59,9 +53,7 @@ describe('stableTransportKey (spec § 7.1)', () => {
   });
 
   it('does not collide two distinct base URLs', () => {
-    expect(stableTransportKey({ baseUrl: 'https://a.invalid' })).not.toBe(
-      stableTransportKey({ baseUrl: 'https://b.invalid' }),
-    );
+    expect(stableTransportKey({ baseUrl: 'https://a.invalid' })).not.toBe(stableTransportKey({ baseUrl: 'https://b.invalid' }));
   });
 });
 
@@ -80,8 +72,12 @@ function fakeUnaryRequest(): UnaryRequest {
 // (measured against @connectrpc/connect@2.2.0's strict function-parameter variance). The runtime
 // behavior is unchanged; only the static type of this stand-in `next` moved to match what
 // `authInterceptor` actually requires.
-const noopNext: Parameters<typeof authInterceptor>[0] = async (req) =>
-  ({ stream: false, header: req.header } as unknown as UnaryResponse);
+//
+// Not `async`: this stand-in never awaits anything, and this repo's eslint config enforces
+// @typescript-eslint/require-await (measured: `moon run ts:lint` reds an `async` arrow with no
+// `await` expression). `Promise.resolve(...)` returns the same `Promise<UnaryResponse |
+// StreamResponse>` shape without the keyword.
+const noopNext: Parameters<typeof authInterceptor>[0] = (req) => Promise.resolve({ stream: false, header: req.header } as unknown as UnaryResponse);
 
 describe('authInterceptor (spec § 7.4)', () => {
   it('sets an Authorization header from a bearer Auth', async () => {

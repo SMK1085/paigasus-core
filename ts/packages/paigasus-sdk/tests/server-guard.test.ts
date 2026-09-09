@@ -38,21 +38,15 @@ describe('AC 1 — every guarded entry point imports the server guard first', ()
     expect(entries.length).toBeGreaterThan(0);
   });
 
-  it.each(entries.filter(([name]) => !UNGUARDED_ENTRIES.has(name)))(
-    'entry %s imports the guard as its first import statement',
-    (_name, target) => {
-      const source = readFileSync(resolve(PKG_ROOT, target), 'utf8');
-      expect(firstImportStatement(source)).toBe(GUARD_IMPORT);
-    },
-  );
+  it.each(entries.filter(([name]) => !UNGUARDED_ENTRIES.has(name)))('entry %s imports the guard as its first import statement', (_name, target) => {
+    const source = readFileSync(resolve(PKG_ROOT, target), 'utf8');
+    expect(firstImportStatement(source)).toBe(GUARD_IMPORT);
+  });
 
-  it.each(entries.filter(([name]) => UNGUARDED_ENTRIES.has(name)))(
-    'entry %s deliberately carries no guard',
-    (_name, target) => {
-      const source = readFileSync(resolve(PKG_ROOT, target), 'utf8');
-      expect(source).not.toContain(GUARD_IMPORT);
-    },
-  );
+  it.each(entries.filter(([name]) => UNGUARDED_ENTRIES.has(name)))('entry %s deliberately carries no guard', (_name, target) => {
+    const source = readFileSync(resolve(PKG_ROOT, target), 'utf8');
+    expect(source).not.toContain(GUARD_IMPORT);
+  });
 });
 
 describe("AC 1 — 'server-only' is imported at exactly one site", () => {
