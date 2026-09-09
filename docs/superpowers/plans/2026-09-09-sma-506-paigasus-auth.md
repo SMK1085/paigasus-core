@@ -1346,7 +1346,10 @@ if ARGV[3] == '' then
 else
   if not cur then return 0 end
   local ok, parsed = pcall(cjson.decode, cur)
-  if not ok or tostring(parsed.rev) ~= ARGV[3] then return 0 end
+  -- tonumber on BOTH sides, never tostring. cjson.decode may render an integer rev as a Lua
+  -- float, so tostring(3) yields "3.0" and a string compare against ARGV[3] = "3" fails --
+  -- the CAS then rejects every legitimate write. MEASURED against redis:8-alpine.
+  if not ok or tonumber(parsed.rev) ~= tonumber(ARGV[3]) then return 0 end
 end
 redis.call('SET', KEYS[1], ARGV[1], 'PX', tonumber(ARGV[2]))
 return 1`;
