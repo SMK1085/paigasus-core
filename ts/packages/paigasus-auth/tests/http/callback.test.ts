@@ -15,7 +15,7 @@
 // Every success test therefore exercises real PKCE enforcement — replacing `tx.codeVerifier` in
 // `routes.ts` with any constant now fails every one of them, since the constant cannot match a
 // value generated fresh per test. See the mutation record in
-// docs/superpowers/specs/2026-09-09-sma-506-measurements.md, "M6 — PKCE".
+// docs/superpowers/specs/2026-09-09-sma-506-measurements.md, "M13 — PKCE".
 import { randomUUID } from 'node:crypto';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { claimsPrincipalResolver } from '../../src/adapters/claims-resolver.js';

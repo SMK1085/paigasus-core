@@ -858,3 +858,150 @@ one via the real end-session flow). Restored by deleting the two marker
 lines and the injected `throw` (never `git checkout --`, though in this case
 the edit and its revert left `git diff` on `routes.ts` empty); re-ran
 `logout.spec.ts` afterward: 1 of 1 passed again.
+
+## M11 — `__Host-`-prefixed cookies work over `http://127.0.0.1` in Chromium under Playwright
+
+**Recorded here for the first time.** Task 13 took this measurement and stated the result in its
+own report (`task-13-report.md`, "M3 / M6 / M8 / M11 / M12 results"), but did not transcribe it
+into this file — an oversight this task closes, not a new measurement.
+
+`roundtrip.spec.ts` logs in over the fixture server's plain-`http://127.0.0.1:<port>` origin (no
+TLS on that side — only the Keycloak listener is HTTPS) and asserts the resulting session cookie
+carries `secure: true` as `sessionCookie` (a real `page.context().cookies()` read, not an
+assumption). It is present and marked `secure`. Loopback addresses are a "potentially trustworthy
+origin" under the Secure Contexts spec, so Chromium's own "insecure but trustworthy" allowance
+extends to writing and later re-sending a `Secure`, `__Host-`-prefixed cookie — direct,
+non-inferred proof of that for a `__Host-` name specifically, not merely for a plain `Secure` one.
+
+This holds for the exact cookie this package writes (`__Host-pgs_sid`, `src/http/cookies.ts`), not
+a synthetic stand-in, and confirms design doc § 9.3's cookie-hardening choice does not silently
+break the E2E tier's own loopback fixture.
+
+## M4 — `moon ci :test-e2e` resolves to a real task and `ci_targets.py`'s assertion passes
+
+Task 14's own registration work (§ 16 of the design doc). Two things had to be true: the `T` entry
+this task added resolves to a genuine, CI-eligible task rather than a typo that `moon ci` would
+silently no-op on, and `ci/affected-graph/ci_targets.py`'s resolution assertion — the one control
+that would catch that typo — actually passes with the entry in place.
+
+**Measured directly**, after adding `:test-e2e` to both `.github/workflows/ci.yml`'s `T=(…)` array
+and the marker-delimited command in `CLAUDE.md`:
+
+```
+$ python3 ci/affected-graph/ci_targets.py; echo "EXIT: $?"
+PASS  ci-targets         -> 32 targets: every CI-eligible repo task is in ci.yml's T, every entry
+resolves, CLAUDE.md mirrors it
+EXIT: 0
+```
+
+32 is the prior 31-entry `T` array plus `:test-e2e` — confirmed by hand-counting the array before
+this task's edit. This is the exact invocation `ci/affected-graph/run.sh`'s `assert_ci_targets`
+runs (bare `python3 ci_targets.py`, no flags), so this is the real gate, not a proxy for it.
+
+Separately, `moon query tasks` confirms `paigasus-auth-ts:test-e2e` carries `"runInCI": true` in
+its resolved `options`, which is `_eligibility()`'s CI-eligibility test — so the entry is not just
+present in `T`, it resolves to a task `moon ci` will actually schedule.
+
+## M7 — `server-only` is still a no-op in the middleware layer on the Next version in use
+
+An earlier task (SMA-502, for `@paigasus/next-config`) measured this on Next 16.3.4: a
+`middleware.ts` importing `server-only` builds at exit 0, and Next's webpack config applies its
+`reactServerConditionNames` list to the middleware layer (`issuerLayer:
+WEBPACK_LAYERS.middleware`), so the import resolves to `server-only`'s own `empty.js` there
+instead of throwing — recorded in `ts/packages/paigasus-next-config/src/runtime.ts:10-17` and
+`docs/superpowers/specs/2026-09-08-sma-502-measurements.md` M6.
+
+**Confirmed it still holds, by re-checking the exact resolved package versions and citation this
+task's own toolchain installs, not by re-running the SMA-502 build.**
+`ts/pnpm-workspace.yaml`'s catalog pins `next: ^16.3.4`, and the installed copy resolves to the
+identical `16.3.4` (`ts/node_modules/.pnpm/next@16.3.4_...`) the SMA-502 measurement was taken
+against — not merely a compatible range. The cited line numbers in that installed copy are
+unchanged: `next/dist/build/webpack-config.js:557` still defines `reactServerConditionNames`, and
+it is still applied at `:1404` and `:1408` with `issuerLayer: WEBPACK_LAYERS.middleware`. The
+installed `server-only` package is also unchanged: `server-only@0.0.1`'s `package.json` still maps
+`"react-server": "./empty.js"` in its `exports` field. Since the mechanism is entirely a property
+of these two packages' resolved versions (not of which package imports `server-only`, or how), and
+both are byte-for-byte the versions the original measurement used, the conclusion carries over
+without rebuilding a Next app.
+
+**This package's own `src/middleware.ts` does not import `server-only` at all** — it relies
+instead on being a separate package entry point with no import path to a store, a resolver, or
+`openid-client` (design doc § 4.2, `tests/middleware.test.ts`'s import-graph assertion), precisely
+because `server-only` would be silently neutered here. M7's relevance to this package is therefore
+about the *boundary rule* named in the design doc's § 5.2 block 3 (denying `@paigasus/auth/server`
+inside an app's own `apps/*/middleware.*`) rather than about this package's own middleware file,
+which never relied on `server-only` to begin with.
+
+## M9 — whether a `@paigasus/proto` dependency would in fact red `ci/affected-graph`'s strict-equality `contracts->proto` case
+
+Design doc § 14 asserted this **by reasoning, not measurement**: importing `RoleGrantRef`/
+`Membership` from `@paigasus/proto` would make `@paigasus/auth` a dependent of `@paigasus/proto`,
+and since `ci/affected-graph/run.sh`'s `contracts->proto` case queries
+`moon query projects --affected --downstream deep` under strict equality (any extra project present
+fails the case), a new dependent not in that case's expected list should turn it red.
+
+**Measured directly, by reproducing the mechanism rather than asserting it.** Baseline, before any
+change — a contracts proto edit's affected set matches the existing case's expected list exactly:
+
+```
+$ printf '%s\n' contracts/proto/paigasus/gateway/v1/health.proto \
+    | moon query projects --affected --downstream deep | <extract ids, minus repo>
+contracts
+paigasus-gateway-rs
+paigasus-iam-rs
+paigasus-proto-py
+paigasus-proto-rs
+paigasus-proto-ts
+paigasus-service-info-rs
+```
+
+A temporary `dependsOn: ['paigasus-proto-ts']` was added to
+`ts/packages/paigasus-auth/moon.yml` — the same kind of project edge a real
+`@paigasus/proto` import would require — and the identical query re-run:
+
+```
+contracts
+paigasus-auth-ts        <- NEW
+paigasus-gateway-rs
+paigasus-iam-rs
+paigasus-proto-py
+paigasus-proto-rs
+paigasus-proto-ts
+paigasus-service-info-rs
+```
+
+`paigasus-auth-ts` newly appears, and it is not in the `contracts->proto` case's expected CSV — so
+`assert_case` would report it as `unexpected` and return a red (rc 1), exactly the "reds
+`contracts->proto`" claim in § 14. The temporary edge was reverted immediately after this
+measurement; `git diff --stat ts/packages/paigasus-auth/moon.yml` shows no change, and re-running
+the query afterward reproduces the baseline set exactly.
+
+**Scope of what this measures.** It confirms the *project-graph edge* half of the design doc's
+claim (a `dependsOn` from `paigasus-auth-ts` to `paigasus-proto-ts`, which any real import of
+`@paigasus/proto` would need in Moon's TS toolchain — TS project edges are hand-declared, not
+auto-inferred from `package.json`, the same as the Rust `path`-dependency case CLAUDE.md records).
+It does not additionally prove that adding the *npm dependency* alone (with no `dependsOn` entry)
+would be caught — Moon's TS toolchain requires the edge to be declared for affectedness to follow
+it at all, so an import without the edge would be a separate, worse bug (an invisible dependency),
+not a counterexample to this measurement.
+
+## M10 — peak CI disk and whether `test-e2e` must be serialised against `paigasus-iam-rs:test`
+
+**NOT TAKEN.** This measures a property of the GitHub Actions `ubuntu-latest` runner under a real
+`moon ci` run — peak disk usage while `paigasus-auth-ts:test-e2e` (Keycloak + Redis + Chromium, via
+testcontainers and Playwright) and `paigasus-iam-rs:test` (its own Keycloak + Postgres containers,
+per `rs/.config/nextest.toml`) may execute concurrently — not a property this development machine
+can stand in for. CLAUDE.md already records this exact class of failure for the Rust side alone
+(cedar-policy's dependency tree exhausting the runner's ~14 GB disk mid-link), and `test-e2e` adds
+a second, independent set of containers plus a downloaded Chromium to whatever is already running
+when `moon ci` schedules both tasks in parallel.
+
+What would be needed: a real CI run (or a disposable `ubuntu-latest`-equivalent runner) with `df -h
+/` sampled before, during, and after the `moon ci` step, ideally with both tasks forced to overlap
+(they are independently scheduled by `moon ci`'s own parallelism, so a single local run cannot
+guarantee they coincide even if this machine were disk-comparable to the runner, which it is not
+— this machine is not the CI image and does not share its available disk). Absent that
+measurement, no serialisation decision should be made: neither "no change needed" nor "must
+serialise" is asserted here. If a future CI run exhausts disk with `test-e2e` in the mix, the
+existing "Reclaim runner disk" step in `ci.yml` and/or an explicit task dependency forcing
+sequential execution are the two documented remedies to reach for first.
