@@ -861,6 +861,26 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   is uncovered by this gate. zizmor is the tool for that class and runs nowhere in this repo. Also
   structural, not a configuration gap: `SC2148` and `SC2164` can never fire, because actionlint
   supplies the shell itself and injects `set -e`.
+- **vitest 5 resolves a Node-environment test's imports through `ssr.resolve.conditions`, NOT the
+  top-level `resolve.conditions`** (MEASURED on 5.0.0, SMA-502). Setting only the top-level key has
+  no effect on an `environment: 'node'` project, so a package whose source depends on a resolution
+  condition fails at import with the top-level block present and apparently correct. Set BOTH —
+  `ts/packages/paigasus-next-config/vitest.config.ts` is the worked example. vitest moved 4.1.11 ->
+  5.0.0 in `29c03977`, so nothing in the repo had exercised this before.
+  The case that surfaced it: `@paigasus/next-config/runtime` opens with `import 'server-only'`,
+  whose exports map is `{ "react-server": "./empty.js", "default": "./index.js" }` — and `index.js`
+  is nothing but an unconditional `throw`. Without the `react-server` condition every test in the
+  package dies at import. **The fix is the condition, never deleting the import**: that line is the
+  structural guard keeping the module out of client bundles, and removing it greens the suite while
+  destroying the protection.
+  List the additive module-resolution defaults alongside it — `['react-server', 'node', 'import',
+  'default']`, not a bare `['react-server']`. A single-entry list drops `import`/`default` and
+  breaks source-exports `.ts` resolution for every `@paigasus/*` package, which is the same trap
+  `ts/packages/paigasus-kernel/vitest.config.ts` already records for its browser project.
+  Note `server-only` guards the CLIENT bundle only. Next sets the `react-server` condition for the
+  middleware layer too, so it resolves to `empty.js` there and is a no-op — an explicit
+  `process.env.NEXT_RUNTIME === 'edge'` check is what covers the edge runtime (measured: the guard
+  compiles to an unconditional throw in the edge chunk and is absent from the node chunk).
 
 ## Workflow
 
