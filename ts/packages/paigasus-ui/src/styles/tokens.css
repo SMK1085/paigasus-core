@@ -1,0 +1,151 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+
+/*
+ * The whole theming model for @paigasus/ui (ADR-0021 decision 2).
+ *
+ * Light is the bare :root. Dark redefines ONLY the same custom properties, in two places:
+ * the system preference, and an explicit [data-theme] choice. No component names a raw
+ * colour; every component names a token. That is what makes the product brandable by
+ * configuration rather than by fighting a vendor theme.
+ *
+ * A consumer imports this file from its own stylesheet AND must add its own Tailwind
+ * `@source` line covering this package's src/ — see README.md. Importing this file alone
+ * does not make Tailwind scan the components.
+ */
+
+@import 'tw-animate-css';
+
+/*
+ * Tailwind v4's built-in `dark:` variant keys on prefers-color-scheme ALONE, so an explicit
+ * [data-theme="light"] could not override a `dark:` utility — and shadcn's copy-in components
+ * ship `dark:` classes. Redefining the variant routes those classes through the same mechanism
+ * as the tokens below, so the two never disagree.
+ *
+ * BOTH arms are needed, and the second one was missing (SMA-503 local review, finding E). The
+ * token blocks below activate dark in TWO cases: an explicit [data-theme="dark"], and the
+ * system preference under a `:root:not([data-theme='light'])` guard. A single-arm variant
+ * covering only the explicit case left a viewer on system dark with no explicit choice holding
+ * the dark TOKENS and no `dark:` utilities — the exact disagreement the paragraph above says
+ * cannot happen. The second arm repeats the media query and the same `:not([data-theme='light'])`
+ * guard, so the variant and the tokens now switch on identical conditions.
+ *
+ * LATENT: no `dark:` class exists anywhere in this package today, so nothing here exercises
+ * either arm. It is defined for the consumers and copy-in components that will.
+ */
+@custom-variant dark {
+  &:where([data-theme='dark'], [data-theme='dark'] *) {
+    @slot;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    &:where(:root:not([data-theme='light']), :root:not([data-theme='light']) *) {
+      @slot;
+    }
+  }
+}
+
+@theme {
+  --color-background: var(--pgs-background);
+  --color-foreground: var(--pgs-foreground);
+  --color-muted: var(--pgs-muted);
+  --color-muted-foreground: var(--pgs-muted-foreground);
+  --color-border: var(--pgs-border);
+  --color-input: var(--pgs-input);
+  --color-ring: var(--pgs-ring);
+  --color-primary: var(--pgs-primary);
+  --color-primary-foreground: var(--pgs-primary-foreground);
+  --color-destructive: var(--pgs-destructive);
+  --color-destructive-foreground: var(--pgs-destructive-foreground);
+  --color-popover: var(--pgs-popover);
+  --color-popover-foreground: var(--pgs-popover-foreground);
+  --color-overlay: var(--pgs-overlay);
+  /*
+   * The SURFACE radius — the one every panel, card, field and button uses. `rounded-pgs` is
+   * the package's only radius token, and `rounded-md` (core Tailwind) must not appear: it was
+   * a single stray in command.tsx and is now `rounded-pgs` (SMA-503 fix round 2, item 9).
+   *
+   * `rounded-xs` is DELIBERATELY left untokenised, in the three places it appears — the row
+   * items of Command and DropdownMenu, and Dialog's close button. Those are small elements
+   * sitting INSIDE a `rounded-pgs` surface, where a hairline radius is the point: scaling them
+   * with the surface radius would make a menu row's corners as round as the menu that contains
+   * it. They are a fixed inner-element idiom, not a second theme axis, so they take core
+   * Tailwind's value rather than a token nobody would ever rebrand independently. Add a second
+   * radius token only when a consumer actually needs to move these two values apart.
+   */
+  --radius-pgs: var(--pgs-radius);
+}
+
+:root {
+  /*
+   * Sentinel B (SMA-503 spec §10.2). Sentinel A proves Tailwind SCANNED the package's source.
+   * This one proves the `@import '@paigasus/ui/styles.css'` in the consuming app actually
+   * resolved — without it, that import could fail, the whole token layer could be absent from
+   * the built CSS, and sentinel A would still pass. ci/tailwind-source/run.mjs asserts both.
+   * Do not remove, and do not reference it from anywhere else.
+   */
+  --paigasus-token-probe: 1;
+
+  --pgs-radius: 0.5rem;
+
+  --pgs-background: oklch(1 0 0);
+  --pgs-foreground: oklch(0.21 0.006 285.9);
+  --pgs-muted: oklch(0.967 0.001 286.4);
+  --pgs-muted-foreground: oklch(0.552 0.016 285.9);
+  --pgs-border: oklch(0.92 0.004 286.3);
+  --pgs-input: oklch(0.92 0.004 286.3);
+  --pgs-ring: oklch(0.705 0.015 286.1);
+  --pgs-primary: oklch(0.21 0.006 285.9);
+  --pgs-primary-foreground: oklch(0.985 0 0);
+  --pgs-destructive: oklch(0.577 0.245 27.3);
+  --pgs-destructive-foreground: oklch(0.985 0 0);
+  --pgs-popover: oklch(1 0 0);
+  --pgs-popover-foreground: oklch(0.21 0.006 285.9);
+  /*
+   * Modal/overlay scrim (Dialog, AlertDialog). A scrim dims whatever is behind it regardless
+   * of the surface theme, so — unlike every other token above — it deliberately does NOT
+   * change between light and dark: all three blocks below carry the same value. Black at 50%
+   * alpha matches the visual this replaces (`bg-black/50`) and is still overridable as one
+   * token instead of a hard-coded Tailwind colour.
+   */
+  --pgs-overlay: oklch(0 0 0 / 50%);
+}
+
+/* The viewer's system setting, unless an explicit light choice overrides it. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    --pgs-background: oklch(0.141 0.005 285.8);
+    --pgs-foreground: oklch(0.985 0 0);
+    --pgs-muted: oklch(0.274 0.006 286);
+    --pgs-muted-foreground: oklch(0.705 0.015 286.1);
+    --pgs-border: oklch(1 0 0 / 10%);
+    --pgs-input: oklch(1 0 0 / 15%);
+    --pgs-ring: oklch(0.552 0.016 285.9);
+    --pgs-primary: oklch(0.985 0 0);
+    --pgs-primary-foreground: oklch(0.21 0.006 285.9);
+    --pgs-destructive: oklch(0.704 0.191 22.2);
+    --pgs-destructive-foreground: oklch(0.985 0 0);
+    --pgs-popover: oklch(0.21 0.006 285.9);
+    --pgs-popover-foreground: oklch(0.985 0 0);
+    /* See the :root block's comment — the scrim intentionally does not vary by theme. */
+    --pgs-overlay: oklch(0 0 0 / 50%);
+  }
+}
+
+/* An explicit dark choice, so the toggle wins in both directions. */
+:root[data-theme='dark'] {
+  --pgs-background: oklch(0.141 0.005 285.8);
+  --pgs-foreground: oklch(0.985 0 0);
+  --pgs-muted: oklch(0.274 0.006 286);
+  --pgs-muted-foreground: oklch(0.705 0.015 286.1);
+  --pgs-border: oklch(1 0 0 / 10%);
+  --pgs-input: oklch(1 0 0 / 15%);
+  --pgs-ring: oklch(0.552 0.016 285.9);
+  --pgs-primary: oklch(0.985 0 0);
+  --pgs-primary-foreground: oklch(0.21 0.006 285.9);
+  --pgs-destructive: oklch(0.704 0.191 22.2);
+  --pgs-destructive-foreground: oklch(0.985 0 0);
+  --pgs-popover: oklch(0.21 0.006 285.9);
+  --pgs-popover-foreground: oklch(0.985 0 0);
+  /* See the :root block's comment — the scrim intentionally does not vary by theme. */
+  --pgs-overlay: oklch(0 0 0 / 50%);
+}

@@ -881,6 +881,39 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   middleware layer too, so it resolves to `empty.js` there and is a no-op — an explicit
   `process.env.NEXT_RUNTIME === 'edge'` check is what covers the edge runtime (measured: the guard
   compiles to an unconditional throw in the edge chunk and is absent from the node chunk).
+- Tailwind v4's automatic scan root is the **current working directory**, and Moon runs `next
+  build` from the app's own directory — not the repo root. So every consumer of `@paigasus/ui`
+  needs its own `@source` line covering `ts/packages/paigasus-ui/src`; forgetting it drops the
+  package's classes silently, and only in a PRODUCTION build (`ts/apps/paigasus-console/app/globals.css:23`
+  is the first copy). Next 16.3.4 builds with Turbopack and writes CSS to
+  `.next/static/chunks/`, not `.next/static/css/`, and there is **no**
+  `.next/app-build-manifest.json` at all — so `ci/tailwind-source/run.mjs` walks `.next/static`
+  recursively instead of reading a manifest, and `paigasus-console-ts:build` removes
+  `.next/static` before every build so a stale chunk from an earlier build cannot satisfy that
+  walk. The guard script lives at `ci/tailwind-source/` and must **never** move under
+  `ts/apps/paigasus-console/`, because that directory is Tailwind's scan root and a script
+  holding the sentinel literal (`--paigasus-ui-source-probe`) would make Tailwind generate the
+  very utility it asserts on — and the guard's assertion-3 scan is a **full walk of the console
+  directory**, not an allowlist, because the old `['app'] + four config files` list missed
+  `moon.yml`, `next-env.d.ts` and `.prettierignore`, all of which Tailwind reads.
+  `paigasus-console-ts:build` also uses `options.merge: replace`, so
+  it inherits nothing from `.moon/tasks/typescript-project.yml` and lists `/ts/pnpm-lock.yaml`
+  **and `/ts/tsconfig.base.json`** by hand in its own `inputs` (`test` replaces too and needs
+  both; `typecheck` merges and inherits them). `repo:affected-smoke`'s **two** `ui->console`
+  cases (`ci/affected-graph/run.sh`) are the only control on the input list that makes the guard
+  real — they assert a `@paigasus/ui` source edit selects both `paigasus-console-ts:build` and
+  `paigasus-console-ts:test`; without them, an input dropped from either task's `inputs` serves a
+  cached `.next` and the guard passes against stale CSS. There are two because one anchors on
+  `src/styles/tokens.css` and one on `src/components/table.tsx`: a single anchor leaves the
+  console's `src/**/*` input narrowable to the other subtree while the case stays green. Note a
+  residual the guard does NOT close: `rm -rf .next/static` lives inside the build task's own
+  `script:`, so a Moon **cache hit** hydrates `.next` without running it and the walk can satisfy
+  both sentinels from a stale chunk (`ci/tailwind-source/README.md`, Limitations). And **the
+  shadcn CLI is unusable in this package** — measured, it adds an unrelated npm package literally
+  named `cn` to the manifest and the lockfile of a public repository, on top of writing to a
+  literal `./@/components/` directory; every component here is hand-written. Read
+  `ts/packages/paigasus-ui/README.md`'s "The `shadcn` CLI is not usable in this package" before
+  running it. (SMA-503)
 
 ## Workflow
 

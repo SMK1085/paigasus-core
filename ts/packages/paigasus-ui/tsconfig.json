@@ -1,10 +1,18 @@
 {
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
+    // tsconfig.base.json's lib is ES2022-only. This package's tests render into jsdom via
+    // @testing-library/react and read DOM types back (e.g. HTMLElement.className), so DOM must
+    // be added here — same override as ts/apps/paigasus-console/tsconfig.json. MEASURED
+    // (SMA-503 task 2): tests/table.test.tsx fails `tsc` with TS2812 on `className` without it.
+    "lib": ["DOM", "DOM.Iterable", "ES2022"],
     "jsx": "react-jsx",
-    "outDir": "./dist",
-    "rootDir": "./src",
     "noEmit": true
   },
-  "include": ["src/**/*"]
+  // tests/ and vitest.config.ts must be in the program: ts/eslint.config.js applies
+  // type-checked rules with projectService:true to every **/*.{ts,tsx}, and `ts:lint` runs
+  // `eslint .` over the whole tree — a file in no program errors there. No rootDir: it
+  // rejects files outside src/, and it is inert under noEmit. Same shape and same reason as
+  // ts/packages/paigasus-kernel/tsconfig.json.
+  "include": ["src/**/*", "tests/**/*", "vitest.config.ts"]
 }
