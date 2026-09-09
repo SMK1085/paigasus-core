@@ -45,8 +45,10 @@ describe('the ./iam subpath', () => {
     // iam.proto:22-33 keeps a DEPRECATED ServiceInfo message that buf forbids
     // deleting. The live one is paigasus.common.v1.ServiceInfo, re-exported
     // from the root. BOTH generated modules export a runtime `ServiceInfoSchema`
-    // AND a `ServiceInfo` type, so re-exporting both from one module is a
-    // duplicate-export error. They must never meet.
+    // AND a `ServiceInfo` type, but re-exporting both from one module does NOT
+    // error: the root barrel's explicit `ServiceInfoSchema` export would
+    // silently SHADOW the star-exported iam/v1 one, serving the wrong
+    // `ServiceInfo` with no diagnostic at all. They must never meet.
     //
     // Asserted on the SCHEMA, not the message type: `ServiceInfo` is a type and
     // is erased at runtime, so an `in` check against the namespace object would

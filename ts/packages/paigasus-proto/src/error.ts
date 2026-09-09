@@ -1,10 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import {
-  ErrorDomain,
-  ErrorDomainSchema,
-  ErrorReason,
-  ErrorReasonSchema,
-} from './generated/paigasus/common/v1/error_pb.js';
+import { ErrorDomain, ErrorDomainSchema, ErrorReason, ErrorReasonSchema } from './generated/paigasus/common/v1/error_pb.js';
 
 const REASON_PREFIX = 'ERROR_REASON_';
 const DOMAIN_PREFIX = 'ERROR_DOMAIN_';
@@ -33,12 +28,8 @@ const WIRE_TOKEN = /^[a-z][a-z0-9]*(-[a-z0-9]+)*$/;
  * protobuf-es's prefix-stripping heuristic (`findEnumSharedPrefix`) cannot
  * affect the transform, which keeps exact parity with the Rust side.
  */
-const REASON_BY_PROTO_NAME = new Map<string, ErrorReason>(
-  ErrorReasonSchema.values.map((v) => [v.name, v.number as ErrorReason]),
-);
-const DOMAIN_BY_PROTO_NAME = new Map<string, ErrorDomain>(
-  ErrorDomainSchema.values.map((v) => [v.name, v.number as ErrorDomain]),
-);
+const REASON_BY_PROTO_NAME = new Map<string, ErrorReason>(ErrorReasonSchema.values.map((v) => [v.name, v.number]));
+const DOMAIN_BY_PROTO_NAME = new Map<string, ErrorDomain>(ErrorDomainSchema.values.map((v) => [v.name, v.number]));
 
 /** The kebab wire spelling of a reason, or `undefined` for the zero sentinel. */
 export function asWireReason(reason: ErrorReason): string | undefined {

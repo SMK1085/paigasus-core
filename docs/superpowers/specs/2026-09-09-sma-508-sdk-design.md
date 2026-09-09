@@ -177,13 +177,19 @@ The real control is the **codegen-drift step**, `.github/workflows/ci.yml:309-32
 index. A `@paigasus/proto` test asserting `ErrorInfoSchema.typeName === 'google.rpc.ErrorInfo'` is
 kept as a fast local signal, but it is not the control and this spec no longer claims it is.
 
-**Nothing pins the ordering itself.** `CONTRACTS_GENERATE_INPUTS` (`ci_targets.py:393-400`) pins
-`contracts:generate`'s *inputs*; `check_contracts_generate_inputs` (`ci_targets.py:1773-1786`) reads
-`inputGlobs` and `inputFiles` and nothing else. No gate reads the task's `script:`. So the ordering,
-the `set -euo pipefail`, and the `--path` narrowing are comments, and a dropped `--path` would
-silently generate all of googleapis. Adding a script pin means a new registry obligation and is
-**out of scope** (§ 14); this is recorded as a stated limitation, in the repo's own habit of naming
-a residual rather than implying it is closed.
+**Measured, and corrected here: the residual is real but narrower than a prior draft of this
+section stated.** `CONTRACTS_GENERATE_INPUTS` (`ci_targets.py:393-400`) pins `contracts:generate`'s
+*inputs*; `check_contracts_generate_inputs` (`ci_targets.py:1773-1786`) reads `inputGlobs` and
+`inputFiles` and nothing else, and no gate asserts the task's `script:` *content*. But Moon's task
+hash DOES include the script — `.moon/cache/hashes/<hash>.json` carries a `script` key holding the
+block verbatim — so any script edit, accidental or not, is a cache miss: `buf` re-runs, and the
+unconditional codegen-drift step catches a reversed order (the googleapis file deleted) or a dropped
+`--path` (extra generated files) through its `git diff`. What is unpinned is narrower: no gate
+asserts the script says what it should say, so a human could still change the ordering, drop
+`set -euo pipefail`, or narrow `--path` further, and ship it deliberately with the drift step
+passing on the new, self-consistent output. Adding a script-content pin means a new registry
+obligation and is **out of scope** (§ 14); this is recorded as a stated limitation, in the repo's
+own habit of naming a residual rather than implying it is closed.
 
 **The drift step has a known vacuity.** On a Moon task-cache hit `buf generate` never re-runs and
 the diff compares the committed output against itself — the hole SMA-592 closed for the generator
@@ -650,9 +656,13 @@ SMA-503 fixed on the console.
    join the root barrel as this obligation originally said. `iam_pb.ts` retains a **deprecated**
    `ServiceInfo` message (`iam.proto:22-33`, kept only because buf forbids message deletion) whose
    runtime `ServiceInfoSchema` and type `ServiceInfo` both collide with the live
-   `paigasus.common.v1` pair the root barrel already re-exports; a blanket `export *` is therefore
-   a duplicate-export compile error, and hand-enumerating roughly a hundred message names to dodge
-   it would need editing on every proto change. Instead they ship through a new curated `./iam`
+   `paigasus.common.v1` pair the root barrel already re-exports. **Measured, and corrected here:** a
+   blanket `export *` does **not** error — the root barrel's explicit `ServiceInfoSchema` export
+   shadows the star-exported iam/v1 one silently under the ES semantics TypeScript follows, so the
+   root barrel would quietly serve the wrong `ServiceInfo` to anyone reaching for the iam one. That
+   is a worse failure mode than a compile error, and it is the real argument for the split — not the
+   duplicate-export error this section previously claimed. Hand-enumerating roughly a hundred message
+   names to dodge the shadowing would need editing on every proto change. Instead they ship through a new curated `./iam`
    subpath (`src/iam.ts`, added to `package.json`'s `exports` map as `"./iam": "./src/iam.ts"`),
    which puts the two `ServiceInfo` names in separate modules that never collide.
    No `./generated/*` subpath is added, for `./iam` or for anything else: that would make the

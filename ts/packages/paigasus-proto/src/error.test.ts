@@ -1,11 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { describe, expect, it } from 'vitest';
 import { asWireDomain, asWireReason, fromWireDomain, fromWireReason } from './error.js';
-import {
-  ErrorDomain,
-  ErrorReason,
-  ErrorReasonSchema,
-} from './generated/paigasus/common/v1/error_pb.js';
+import { ErrorDomain, ErrorDomainSchema, ErrorReason, ErrorReasonSchema } from './generated/paigasus/common/v1/error_pb.js';
 
 describe('asWireReason', () => {
   it('spells the registry codes exactly', () => {
@@ -48,18 +44,7 @@ describe('fromWireReason', () => {
     // JavaScript folds U+0131 and U+017F just as Rust's str::to_uppercase does.
     // A deny-list check applied after uppercasing would resolve both to real
     // registry values.
-    for (const bad of [
-      'slug_conflict',
-      'SLUG-CONFLICT',
-      'Slug-Conflict',
-      '',
-      '-slug',
-      'slug-',
-      'slug--conflict',
-      'no-such-code',
-      'ınternal',
-      'ſlug-conflict',
-    ]) {
+    for (const bad of ['slug_conflict', 'SLUG-CONFLICT', 'Slug-Conflict', '', '-slug', 'slug-', 'slug--conflict', 'no-such-code', 'ınternal', 'ſlug-conflict']) {
       expect(fromWireReason(bad), bad).toBeUndefined();
     }
   });
@@ -75,7 +60,7 @@ describe('the reason codec round-trips the whole registry', () => {
     expect(values).toHaveLength(57);
 
     for (const value of values) {
-      const reason = value.number as ErrorReason;
+      const reason = value.number;
       const wire = asWireReason(reason);
       expect(wire, value.name).toBeDefined();
       expect(wire).toMatch(/^[a-z][a-z0-9]*(-[a-z0-9]+)*$/);
@@ -94,14 +79,31 @@ describe('the domain codec', () => {
     expect(asWireDomain(ErrorDomain.UNSPECIFIED)).toBeUndefined();
   });
 
+  it('has no wire spelling for a number the enum does not know', () => {
+    // A newer service can emit a code this build's generated enum predates.
+    expect(asWireDomain(999 as ErrorDomain)).toBeUndefined();
+  });
+
   it('round-trips both domains', () => {
     expect(fromWireDomain('iam.paigasus.io')).toBe(ErrorDomain.IAM);
     expect(fromWireDomain('gateway.paigasus.io')).toBe(ErrorDomain.GATEWAY);
   });
 
   it('requires the suffix and rejects a malformed label', () => {
-    for (const bad of ['iam', 'iam.example.com', 'IAM.paigasus.io', '.paigasus.io', 'ıam.paigasus.io']) {
+    for (const bad of ['iam', 'iam.example.com', 'IAM.paigasus.io', '.paigasus.io', 'ıam.paigasus.io', 'unspecified.paigasus.io']) {
       expect(fromWireDomain(bad), bad).toBeUndefined();
+    }
+  });
+
+  it('round-trips every non-sentinel domain the registry declares', () => {
+    const values = ErrorDomainSchema.values.filter((v) => v.name !== 'ERROR_DOMAIN_UNSPECIFIED');
+    expect(values).toHaveLength(2);
+    for (const value of values) {
+      const domain = value.number;
+      const wire = asWireDomain(domain);
+      expect(wire, value.name).toBeDefined();
+      expect(wire).toMatch(/^[a-z][a-z0-9]*(-[a-z0-9]+)*\.paigasus\.io$/);
+      expect(fromWireDomain(wire as string)).toBe(domain);
     }
   });
 });

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import { describe, expect, it } from 'vitest';
-import { create } from '@bufbuild/protobuf';
+import { create, fromBinary, toBinary } from '@bufbuild/protobuf';
 import { ErrorInfoSchema } from './generated/google/rpc/error_details_pb.js';
 
 // This file is a fast local signal that the two-invocation codegen ordering in
@@ -25,8 +25,10 @@ describe('generated google.rpc.ErrorInfo', () => {
       domain: 'iam.paigasus.io',
       metadata: { retryable: 'false', correlation_id: 'abc' },
     });
-    expect(info.reason).toBe('slug-conflict');
-    expect(info.domain).toBe('iam.paigasus.io');
-    expect(info.metadata['retryable']).toBe('false');
+    const decoded = fromBinary(ErrorInfoSchema, toBinary(ErrorInfoSchema, info));
+    expect(decoded.reason).toBe('slug-conflict');
+    expect(decoded.domain).toBe('iam.paigasus.io');
+    expect(decoded.metadata['retryable']).toBe('false');
+    expect(decoded.metadata['correlation_id']).toBe('abc');
   });
 });
