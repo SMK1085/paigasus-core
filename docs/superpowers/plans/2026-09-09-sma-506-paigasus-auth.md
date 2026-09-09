@@ -626,7 +626,10 @@ export function validateReturnTo(raw: string | undefined | null, fallback: strin
   if (!raw.startsWith('/')) return fallback;
   if (raw.startsWith('//')) return fallback;
   if (raw.includes('\\')) return fallback;
-  if (/%2f/i.test(raw.slice(0, 3)) || /%5c/i.test(raw)) return fallback;
+  // slice(1, 4), NOT slice(0, 3). The input starts with a literal '/', so the three characters
+  // that could spell an encoded slash begin at index 1. slice(0, 3) of "/%2f%2fevil.com" is "/%2",
+  // which /%2f/i does NOT match — the guard misses and the open redirect passes. MEASURED.
+  if (/%2f/i.test(raw.slice(1, 4)) || /%5c/i.test(raw)) return fallback;
   return raw;
 }
 ```
