@@ -48,6 +48,8 @@ export function createAuthRoutes(runtime: AuthRuntime): AuthRoutes {
   // fixed elsewhere) rather than by the route table actually saying what it serves.
   const loginPath = `${runtime.basePath}/auth/login`;
   const callbackPath = `${runtime.basePath}/auth/callback`;
+  const logoutPath = `${runtime.basePath}/auth/logout`;
+  const logoutCallbackPath = `${runtime.basePath}/auth/logout/callback`;
 
   return {
     async handle(req: Request): Promise<Response> {
@@ -62,6 +64,21 @@ export function createAuthRoutes(runtime: AuthRuntime): AuthRoutes {
       if (pathname === callbackPath) {
         if (req.method !== 'GET') return new Response(null, { status: 405 });
         return handleCallback(runtime, req, url);
+      }
+
+      // Logout is POST, not GET (design doc § 9.5): a GET route that mutates server-side state is
+      // triggerable by an `<img src>` from any page on the internet. No CSRF token is added on
+      // top of that — `SameSite=Lax` already withholds __Host-pgs_sid from a cross-site form POST,
+      // so a forged POST arrives with no session and does nothing. Recorded here so a later reader
+      // does not "fix" the omission.
+      if (pathname === logoutPath) {
+        if (req.method !== 'POST') return new Response(null, { status: 405 });
+        return handleLogout(runtime, req);
+      }
+
+      if (pathname === logoutCallbackPath) {
+        if (req.method !== 'GET') return new Response(null, { status: 405 });
+        return handleLogoutCallback(runtime);
       }
 
       return new Response(null, { status: 404 });
@@ -211,4 +228,101 @@ async function handleCallback(runtime: AuthRuntime, req: Request, url: URL): Pro
   }
 
   return new Response(null, { status: 302, headers });
+}
+
+// POST /auth/logout — AC 3: "a stolen cookie is dead immediately after". Design doc § 9.5.
+//
+// ORDER IS THE ACCEPTANCE CRITERION. Step 1 (delete) happens before ANY network call, so a slow
+// or unreachable identity provider can never leave a live session behind: whatever happens to
+// steps 3-4 afterwards, the record this cookie pointed at is already gone. The `store.get` read
+// below is a local store lookup, not a call to the identity provider — the ordering this protects
+// is against the IdP specifically, and it is what step 1's own record-lookup needs to find a
+// refresh token worth revoking in step 3.
+//
+// KNOWN GAP — id_token_hint is never sent (flagged in the task 9 report, not silently dropped).
+// RFC 7009 revocation (step 3) and the end-session redirect (step 4) both accept identifying
+// material about the session being torn down; step 4's `id_token_hint` specifically wants the raw
+// ID TOKEN JWT, not its decoded claims. `SessionRecord` (core/session.ts) stores only
+// `idTokenClaims` — the DECODED claims — and adapters/oidc.ts's `OidcTokens` (produced by
+// `authorizationCodeGrant`) never surfaces the raw token string either, so there is nothing here
+// to pass. Threading the raw token through would mean widening `OidcTokens` and `SessionRecord`
+// and changing the task-8 callback path above — three files outside this task's declared scope
+// (`src/http/routes.ts` only) and each already through its own implement/review cycle. Rather than
+// fake a value or reach past scope unreviewed, `buildEndSessionUrl` is called with `idTokenHint`
+// omitted — it is optional in `BuildEndSessionUrlParams` for exactly this reason.
+async function handleLogout(runtime: AuthRuntime, req: Request): Promise<Response> {
+  const cookies = readCookies(req.headers.get('cookie'));
+  const sid = cookies.get(SESSION_COOKIE);
+
+  // STEP 1: delete first, before any network call.
+  let refreshToken: string | undefined;
+  if (sid !== undefined) {
+    const rec = await runtime.store.get(sid);
+    refreshToken = rec?.refreshToken;
+    await runtime.store.delete(sid);
+  }
+
+  // STEP 2: clear the session cookie and every outstanding transaction cookie. Unconditional,
+  // matching handleLogin's own unconditional clear — a logout with no session cookie at all is a
+  // no-op here, not an error, and clearing an already-absent cookie is harmless.
+  const headers = new Headers();
+  headers.append('Set-Cookie', clearCookie(SESSION_COOKIE));
+  for (const name of cookies.keys()) {
+    if (name.startsWith(TXN_COOKIE_PREFIX)) headers.append('Set-Cookie', clearCookie(name));
+  }
+
+  // STEP 3: revoke the refresh token at the IdP — RFC 7009, BEST EFFORT (design doc § 7.1:
+  // "revocation | same | logged, logout continues"). A rejection here must never fail the logout:
+  // the record is already gone (step 1), so the session is dead server-side either way. Skipped
+  // entirely when there was nothing to revoke (no session, or a session with no refresh token).
+  // Never rethrown and never logged as a raw caught error object — it may embed a URL, matching
+  // adapters/oidc.ts's own rule — only the boolean outcome below is recorded.
+  let revoked = false;
+  if (refreshToken !== undefined) {
+    try {
+      await runtime.oidc.revoke(refreshToken);
+      revoked = true;
+    } catch {
+      // Best-effort: swallowed. `revoked: false` in the event below is the record of this.
+    }
+  }
+
+  runtime.logger.event('logout.completed', {
+    zone: runtime.zone,
+    ...(sid !== undefined ? { sid: sidTag(sid) } : {}),
+    revoked,
+  });
+
+  // STEP 4: redirect to end_session_endpoint with post_logout_redirect_uri and a state bound to
+  // this logout. `newTransactionId` is reused as a generic opaque-random-id generator (the same
+  // function already backs the login flow's own `state`) — logout's `state` carries no secret and
+  // needs no separate generator. If the identity provider advertises no end_session_endpoint, or
+  // discovery itself fails, the user is still logged out server-side (step 1 already ran), so this
+  // degrades to the zone root rather than surfacing a 500 for what is inherently a courtesy step.
+  const state = newTransactionId();
+  try {
+    const endSessionUrl = await runtime.oidc.buildEndSessionUrl({ postLogoutRedirectUri: runtime.postLogoutRedirectUri, state });
+    headers.set('Location', endSessionUrl);
+  } catch {
+    headers.set('Location', runtime.postLogoutRedirectUri);
+  }
+
+  return new Response(null, { status: 302, headers });
+}
+
+// GET /auth/logout/callback — design doc § 9.5, "unspecified in revision 1".
+//
+// COSMETIC BY DESIGN. Step 1 of /auth/logout already deleted the session record before this
+// request could exist, so by the time the identity provider (or anyone else) reaches this route
+// the user is already logged out. Nothing here makes a decision based on the request — not even
+// the IdP's `state` query parameter — because there is no stored logout state to compare it
+// against and no security property left to protect: a genuine `state`, a forged one, or a request
+// with no `state` at all land on the exact same response. Treating an unknown state as an error
+// would make this the one place in the package that turns a cosmetic mismatch into a security
+// event, which design doc § 9.5 explicitly rules out. If the identity provider never redirects
+// back here at all, nothing is lost either — the same reasoning applies.
+function handleLogoutCallback(runtime: AuthRuntime): Promise<Response> {
+  const headers = new Headers({ Location: runtime.postLogoutRedirectUri });
+  headers.append('Set-Cookie', clearCookie(SESSION_COOKIE));
+  return Promise.resolve(new Response(null, { status: 302, headers }));
 }
