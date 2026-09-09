@@ -257,6 +257,195 @@ itself if `ts/eslint.config.js` is the consumer (as opposed to shipping the ESLi
 `src/eslint.mjs`, which the plan already defaults to and which this measurement does not
 invalidate).
 
+## M6 — SERVER_ONLY_BLOCKS_MIDDLEWARE (taken in the final fix wave)
+
+**Question.** Three places on this branch claimed `import 'server-only'` makes a **middleware or
+edge-route** import of `@paigasus/next-config/runtime` a **build error**. Is that true on the
+pinned Next 16.3.4?
+
+**Answer: NO. `server-only` does not stop a middleware import. The build succeeds.**
+
+### Method and literal output
+
+A throwaway `ts/apps/paigasus-console/middleware.ts` was added, importing the module and calling
+`getRuntimeConfig()`, then `next build` was run from the app directory. The file was deleted
+afterwards.
+
+```
+$ cat ts/apps/paigasus-console/middleware.ts
+// THROWAWAY probe for SMA-502 I1. Deleted after the measurement.
+import { NextResponse } from 'next/server';
+import { defineRuntimeConfig } from '@paigasus/next-config/runtime';
+
+const { getRuntimeConfig } = defineRuntimeConfig();
+
+export function middleware() {
+  getRuntimeConfig();
+  return NextResponse.next();
+}
+
+export const config = { matcher: '/probe' };
+
+$ pnpm exec next build
+BUILD_EXIT=0
+▲ Next.js 16.3.4 (Turbopack)
+✓ Running next.config.ts took 15ms
+
+⚠ The "middleware" file convention is deprecated. Please use "proxy" instead.
+  Creating an optimized production build ...
+✓ Compiled successfully in 708ms
+  Running TypeScript ...
+  Finished TypeScript in 705ms ...
+✓ Generating static pages using 4 workers (3/3) in 229ms
+
+Route (app)
+┌ ƒ /
+└ ○ /_not-found
+
+ƒ Proxy (Middleware)
+```
+
+The module was then located in the build output, to confirm it really was compiled into the edge
+layer rather than tree-shaken away:
+
+```
+$ grep -rl 'getRuntimeConfig() was called during' .next/ | head
+.next/standalone/apps/paigasus-console/.next/server/chunks/ssr/_1drnzxw._.js
+.next/standalone/apps/paigasus-console/.next/server/edge/chunks/[root-of-the-server]__0g9l-ai._.js
+.next/server/edge/chunks/[root-of-the-server]__0g9l-ai._.js
+.next/server/chunks/ssr/_1drnzxw._.js
+```
+
+### Why
+
+`server-only` throws only when the `react-server` export condition is **absent** — its own
+`package.json` maps `"react-server": "./empty.js"`, `"default": "./index.js"`:
+
+```
+$ cat ts/node_modules/.pnpm/server-only@0.0.1/node_modules/server-only/package.json
+  "exports": { ".": { "react-server": "./empty.js", "default": "./index.js" } }
+```
+
+Next sets that condition for the middleware layer:
+
+```
+$ sed -n '557,561p' .../next/dist/build/webpack-config.js
+    const reactServerConditionNames = [
+        'react-server',
+        ...conditionNames
+    ];
+$ sed -n '1402,1409p' .../next/dist/build/webpack-config.js
+                        {
+                            test: codeCondition.test,
+                            issuerLayer: _constants.WEBPACK_LAYERS.middleware,
+                            use: middlewareLayerLoaders,
+                            resolve: {
+                                mainFields: (0, _resolve.getMainField)(compilerType, true),
+                                conditionNames: reactServerConditionNames,
+```
+
+So the import resolves to `empty.js` in a middleware and is a **no-op** there. `server-only` is a
+**client-bundle** guard, and only that. That part is genuine and is kept.
+
+## M6b — NEXT_RUNTIME is the guard that does close the edge door
+
+**Question.** Next's `process.env.NEXT_RUNTIME` is documented as `'edge'` in the edge runtime.
+Is it, on this build path?
+
+**Answer: YES, and it is a compile-time DEFINE, so the guard is statically resolved.**
+
+```
+$ grep -rn "'process.env.NEXT_RUNTIME'" .../next/dist/build/define-env.js
+80:        'process.env.NEXT_RUNTIME': isEdgeServer ? 'edge' : isNodeServer ? 'nodejs' : '',
+```
+
+A `NEXT_RUNTIME === 'edge'` guard was added to `getRuntimeConfig()` and the same probe middleware
+rebuilt. The literal compiled output shows the branch **eliminated in both directions** — an
+unconditional throw in the edge chunk, and the code removed entirely from the node chunk:
+
+```
+$ pnpm exec next build
+BUILD_EXIT=0
+
+$ grep -o '.\{80\}called in the EDGE runtime.\{80\}' \
+    '.next/server/edge/chunks/[root-of-the-server]__0g9l-ai._.js'
+aigasus/next-config owns it.`);function t(){throw Error("getRuntimeConfig() was called in the EDGE
+runtime. The edge runtime has no dynamic `process.env` — values are inlined at build ti
+
+$ grep -c 'called in the EDGE runtime' .next/server/chunks/ssr/_1drnzxw._.js
+0
+```
+
+So in an edge bundle every `getRuntimeConfig()` call is an unconditional `throw`, and in the node
+bundle the guard costs nothing. It is a loud **runtime** failure on first call, not a build error
+— which is the honest claim, and is what the three sites now say.
+
+The throwaway `middleware.ts` was deleted after the measurement (`git status --short` clean of
+it, confirmed).
+
+## M6c — the zod `.refine()` message form that actually leaks
+
+**Question.** For I5, which `.refine()` message form puts the input into the thrown error on the
+pinned zod 4.5.4? The review quoted `(v) => ({ message: \`${v} …\` })`.
+
+**Answer: that (zod 3) form does NOT leak on zod 4; the `{ error: (iss) => … }` form does.**
+
+```
+$ node probe-zod.mjs
+form A: [{"code":"custom","path":["SECRET_TOKEN"],"message":"Invalid input"}]
+form B: [{"code":"custom","path":["SECRET_TOKEN"],"message":"sk-live-abc123 is not a valid issuer"}]
+form C: [{"code":"custom","path":["SECRET_TOKEN"],"message":"sk-live-abc123 is not a valid issuer"}]
+```
+
+(A = `.refine(fn, (v) => ({ message }))`, B = `.refine(fn, { error: (iss) => … })`, C = a literal
+string message.) A test written against form A would pass with the `describeIssues` owner check
+deleted, i.e. it would assert nothing. The shipped test uses form B, and the guard was verified to
+bite by mutating it back to `issue.code === 'custom'` — see the fix report.
+
+## M6d — bash 5.3.15 deadlocks on a here-string feeding a builtin
+
+**Found while verifying the fix wave, not predicted.** `moon run repo:next-public-free` and
+`bash ci/next-public/run.sh --self-test` began hanging with **no output and no failure**, after
+having passed minutes earlier in the same session on the same code.
+
+`sample` on the stuck process showed a `heredoc_write` → `write` block, and a `bash -x` trace
+placed it on `mapfile -t files <<< "$corpus"` in `check_prefix` — a line this branch did not
+change. bash writes a here-string into a pipe from `do_redirections` **before** the builtin that
+would drain it starts, so content past the pipe's capacity blocks forever.
+
+Threshold, measured on this host (`/opt/homebrew/bin/bash`, 5.3.15, installed 2026-06-13):
+
+```
+/opt/homebrew/bin/bash n=1   len=32:   ok
+/opt/homebrew/bin/bash n=5   len=164:  ok
+/opt/homebrew/bin/bash n=10  len=330:  ok
+/opt/homebrew/bin/bash n=20  len=670:  HUNG
+/opt/homebrew/bin/bash n=40  len=1350: HUNG
+/opt/homebrew/bin/bash n=61  len=2064: HUNG
+/opt/homebrew/bin/bash n=200 len=6891: HUNG
+--- system bash ---
+/bin/bash n=61  len=2064: ok
+/bin/bash n=200 len=6891: ok
+```
+
+And the fix shape, same host, 200 lines:
+
+```
+HUNG: here-string
+n=200
+ok:   process substitution
+```
+
+It is **INTERMITTENT** rather than version-deterministic: macOS can hand back a 512-byte pipe
+under memory pressure instead of the usual 16K, which is why the identical command passed at
+06:11 and hung at 06:16 after several `next build` and `moon` runs. So a green run does not clear
+this.
+
+**Fix.** Both reads in `ci/next-public/run.sh` now use `mapfile -t … < <(printf '%s\n' "$var")`,
+which forks a writer and cannot deadlock. `ci/ruff/run.sh:114` and `:239` carry the identical
+`mapfile … <<<` pattern and are **NOT** changed here — that gate is outside SMA-502's scope, and
+the same hang applies to it on this host.
+
 ## Revert
 
 ```

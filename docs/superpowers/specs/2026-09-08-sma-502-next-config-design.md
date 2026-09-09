@@ -163,7 +163,26 @@ In the edge runtime Next does not provide a dynamic `process.env`; values must b
 known at build time. Middleware or an edge route importing this module would
 therefore read inlined or undefined values, not deployment values — the same
 silent-wrong-value class § 4.2 exists to prevent, arriving through a different
-door. `server-only` makes that a build error.
+door.
+
+**Two doors, two guards. `server-only` closes only one of them.** Revision 2
+claimed `server-only` makes a middleware or edge-route import a build error.
+**That claim is DISPROVEN** (§ 13 M6). `server-only` throws only when the
+`react-server` export condition is ABSENT, and Next 16.3.4 sets that condition
+for the middleware layer too, so the import resolves to `server-only`'s own
+`empty.js` there and is a no-op. Measured: a `middleware.ts` importing this
+module builds at **exit 0**, and the module lands in
+`.next/server/edge/chunks/`.
+
+What `server-only` genuinely does is stop the module reaching a **client
+bundle**, which is real and is kept.
+
+The edge door is closed instead by a **`NEXT_RUNTIME` check** in
+`getRuntimeConfig()`. Next defines `process.env.NEXT_RUNTIME` as the literal
+`'edge'` for the edge compilation (`next/dist/build/define-env.js:80`), so the
+branch is resolved statically: measured, the edge chunk carries an
+**unconditional throw** and the node chunk carries no guard code at all
+(§ 13 M6b). It is a loud runtime failure on first call, not a build error.
 
 **This module is Node-runtime only.** ADR-0017's rule that middleware performs
 cookie-presence checks only is what keeps that constraint satisfiable.
@@ -241,8 +260,16 @@ open when a new field appears.
 **The limit of that argument, stated plainly.** Zod strips unknown *object* keys.
 It does not constrain the key set of a `z.record`. So a secret placed inside the
 `PAIGASUS_ZONES` JSON rides through `publicConfigSchema` inside an allowed key.
-`basePathSchema` (§ 5.1) is what closes this: a value that is not a canonical
-base path is rejected at parse time.
+`basePathSchema` (§ 5.1) **narrows** this: it rejects a value that is not a
+canonical base path at parse time.
+
+**It does not CLOSE it.** A path-shaped secret is a valid canonical base path.
+`{"x": "/sk-live-abc123"}` passes `basePathSchema` and reaches the browser
+unchanged. So the residual is "a secret that happens to look like a URL path",
+which is a narrower class than "any secret", and nothing here removes it. The
+real control against pasting a secret into the zone map is that Helm renders
+`PAIGASUS_ZONES` from the same values block as the ingress rules (§ 5.1), so the
+map is generated rather than hand-written.
 
 A test pins `publicConfigSchema`'s key list by strict equality. Widening the
 client slice is therefore always a deliberate act.
@@ -263,6 +290,13 @@ Every failure throws an `Error` naming the variable key and the failure kind.
 secrets. A zod error that echoes the input would put a secret in a log. On zod 4
 this means formatting from `error.issues[].path` and `.code`, never rendering
 `.input`.
+
+**A `message` is rendered only for a key this package OWNS.** Rendering every
+`code: 'custom'` message verbatim was safe only while this file authored every
+custom issue, which is exactly what `extraShape` ends. A `.refine()` supplied by
+`@paigasus/auth` or `@paigasus/sdk` raises `code: 'custom'` and may interpolate
+its input, so the filter is by path root, not by code. Measured (§ 13 M6c): only
+zod 4's `{ error: (iss) => … }` form leaks, so that is the form the test pins.
 
 ## 6. The `NEXT_PUBLIC_` ban gate
 
@@ -379,26 +413,39 @@ The gate is a `repo:*` Moon task, not an unconditional `ci.yml` step, so it runs
 under a local `moon ci` before a push and `repo:input-liveness` proves its globs
 stay live.
 
-**Inputs are not `ts/**/*`.** `.moon/workspace.yml:59-60` deliberately omits
-`'**/.next/**'` from `hasher.ignorePatterns`, so a `ts/**/*` glob would hash the
-whole built `.next` tree — output this gate never scans — and re-key on every
-console build. Inputs are instead:
+**The inputs must cover the whole scanned corpus.** The scan is
+`git ls-files -- 'ts/'` minus the lockfile and Markdown, so the declared inputs
+are the same shape:
 
 ```
-ts/apps/**/*
-ts/packages/**/*
+ts/**/*
 !ts/apps/*/.next/**
 ci/next-public/**/*
 ```
 
-Whether Moon 2.5.3 honours a negated **input** glob is measured in § 13 M4,
-alongside the negated **output** glob § 8.1 needs. If it does not, the inputs
-enumerate the app and package subdirectories that exist.
+`.moon/workspace.yml:59-60` deliberately omits `'**/.next/**'` from
+`hasher.ignorePatterns`, so a bare `ts/**/*` would hash the whole built `.next`
+tree — output this gate never scans — and re-key on every console build. The
+negated entry is what keeps the broad form affordable, and § 13 M4 measures that
+Moon 2.5.3 honours a negated **input** glob (alongside the negated **output**
+glob § 8.1 needs). `ts/node_modules/**` needs no entry: `hasher.ignorePatterns`
+already covers it.
 
-The declared inputs and the scanned corpus still differ slightly — the inputs
-cover untracked files, the scan does not. That divergence is stated rather than
-hidden, and it is one-directional: the gate may run when nothing it scans
-changed, and never the reverse.
+**Revision 2 declared `ts/apps/**/*` and `ts/packages/**/*` instead, and claimed
+the divergence from the corpus "is one-directional: the gate may run when
+nothing it scans changed, and never the reverse". That claim was FALSE.** Twelve
+tracked, scanned files sat outside those two globs: `ts/eslint.config.js`,
+`ts/package.json`, `ts/moon.yml`, `ts/pnpm-workspace.yaml`,
+`ts/tsconfig.base.json`, `ts/.npmrc`, `ts/.prettierignore`, `ts/.prettierrc.js`,
+`ts/commitlint.config.cjs`, `ts/scripts/check-config-only.mjs` and both
+`ts/tooling/*.mjs`. Concretely: a PR adding `ts/scripts/build-env.mjs` that read
+`NEXT_PUBLIC_API_URL` would never have scheduled the gate and would have merged
+green. Widening to `ts/**/*` closes it — measured, zero scanned files now fall
+outside the declared inputs.
+
+What remains is the divergence in the harmless direction only: the inputs cover
+**untracked** files under `ts/`, the scan does not. So the gate may run when
+nothing it scans changed. That, and only that, is one-directional.
 
 **Residual, stated plainly.** `repo:input-liveness` catches a **dead** glob. It
 does not catch a **too-narrow** one. A future narrowing of this gate's `inputs`
@@ -586,8 +633,16 @@ and its comment records why. Changing that premise is a separate decision.
 satisfied file check exits 0. That is a false green on the issue's headline AC.
 
 The block runs `next build`, then fails with a named message when the standalone
-entry point is absent. The asserted path comes from § 4.3's
-`outputFileTracingRoot`, measured in § 13 M2, not hard-coded.
+entry point is absent.
+
+The asserted path is a **literal**, in two places: the `script:` block in
+`ts/apps/paigasus-console/moon.yml` and `tests/standalone-runtime.test.ts:13`.
+It is not derived from § 4.3's `outputFileTracingRoot` at check time. What § 13
+M2 gives is the measured VALUE that literal was written from, not a derivation.
+That is acceptable because the literal fails LOUDLY if it drifts — a moved entry
+point makes the build assertion red and the smoke unable to start the server —
+and never silently, which is the property that matters. A future
+`outputFileTracingRoot` change means editing both sites.
 
 A unit test on the returned config object proves the factory returns
 `output: 'standalone'`. It does not prove Next honoured it. A Next version that
@@ -774,10 +829,12 @@ Each item is owned elsewhere.
 
 ## 13. Measurements — TAKEN
 
-All five were measured on 2026-09-08 against Next 16.3.4 with Turbopack (the
-default `next build` bundler in Next 16) and Moon 2.5.3. Full commands and
-literal outputs: `docs/superpowers/specs/2026-09-08-sma-502-measurements.md`.
-**Re-take them on a Next or Moon bump.**
+The first five were measured on 2026-09-08 against Next 16.3.4 with Turbopack
+(the default `next build` bundler in Next 16) and Moon 2.5.3; M6/M6b/M6c were
+measured on 2026-09-09 against the same versions plus zod 4.5.4. Full commands
+and literal outputs:
+`docs/superpowers/specs/2026-09-08-sma-502-measurements.md`.
+**Re-take them on a Next, Moon or zod bump.**
 
 **M1 — does the build-phase throw actually fire, including in prerender
 workers? YES.** A page calling a `NEXT_PHASE` guard at module scope fails
@@ -813,6 +870,25 @@ forced, the declaration file would have had to be **generated** with
 `tsc --emitDeclarationOnly` and drift-checked rather than hand-written: a
 hand-written declaration is read by `tsc` instead of the implementation, the same
 shape as `repo:pyo3-stub-drift` (SMA-600) and the still-open SMA-535.
+
+**M6 — does `server-only` make a middleware import a build error? NO.** A
+throwaway `middleware.ts` importing `@paigasus/next-config/runtime` builds at
+**exit 0**, and the module lands in `.next/server/edge/chunks/`. `server-only`
+throws only when the `react-server` condition is ABSENT, and Next sets it for the
+middleware layer, so the import resolves to `empty.js` there. `server-only` is a
+**client-bundle** guard. Revision 2's claim to the contrary is corrected in § 5.
+
+**M6b — `process.env.NEXT_RUNTIME` is a compile-time define, so the edge guard
+resolves statically.** `next/dist/build/define-env.js:80` sets it to the literal
+`'edge'` for the edge compilation. Measured on the rebuilt probe: the edge chunk
+carries an **unconditional throw**, and the node chunk carries **no** guard code
+(`grep -c` returns 0). This is what closes the edge door in § 5.
+
+**M6c — only one zod `.refine()` message form leaks the input.** On zod 4.5.4,
+the zod-3 `(v) => ({ message })` second-argument form is ignored and yields the
+generic `Invalid input`; `{ error: (iss) => \`${iss.input} …\` }` renders the
+input verbatim. § 5.5's `describeIssues` filter and its test are written against
+the second form, because a test using the first would assert nothing.
 
 ## 14. What changed in revision 2
 
