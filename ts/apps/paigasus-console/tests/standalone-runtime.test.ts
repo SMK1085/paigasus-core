@@ -40,6 +40,18 @@ interface HomeResponse {
 // case assert on `status` directly and return in well under a second; it is also a more direct
 // assertion of the actual contract (the server answers with 500), not a proxy for it (fetch failed
 // somehow).
+// The child is OBSERVED, not merely polled. Three things follow from that, and each one was a real
+// defect in the earlier version of this helper.
+//
+// 1. A server that dies at startup — a missing standalone trace, a port already taken, a throw in
+//    the config module — used to cost the full 60s. Every `fetch` failed, none of them told the
+//    loop why, and the test reported "did not become ready within 60s" for a process that had
+//    already exited. Watching `exit` and `error` turns that into a fail in well under a second.
+// 2. `stdio: 'pipe'` with nobody reading it loses exactly the diagnostics that explain such a
+//    death, and a pipe nobody drains can FILL and block a chatty child — turning a startup message
+//    into a hang. Both streams are consumed here and the captured text is attached to every
+//    failure this helper raises.
+// 3. The deadline must still exist, for a process that starts and then never listens.
 async function fetchHomeWith(zones: Record<string, string>): Promise<HomeResponse> {
   const port = await freePort();
   const child: ChildProcess = spawn(process.execPath, [SERVER_ENTRY], {
@@ -52,10 +64,33 @@ async function fetchHomeWith(zones: Record<string, string>): Promise<HomeRespons
     },
     stdio: 'pipe',
   });
+
+  let output = '';
+  const capture = (chunk: Buffer | string) => {
+    output += String(chunk);
+  };
+  child.stdout?.on('data', capture);
+  child.stderr?.on('data', capture);
+
+  // Resolved, never rejected: a spawn `error` and a premature `exit` are two ways of saying the
+  // same thing to the loop below, and it must not race an unhandled rejection to observe either.
+  let died: string | undefined;
+  child.once('error', (err: Error) => {
+    died = `the server process failed to start: ${err.message}`;
+  });
+  child.once('exit', (code, signal) => {
+    died = `the server process exited before answering (code ${String(code)}, signal ${String(signal)})`;
+  });
+
+  const withOutput = (message: string) => new Error(`${message}\n--- server output ---\n${output.trim() === '' ? '(none captured)' : output}`);
+
   try {
     const deadline = Date.now() + 60_000;
     for (;;) {
-      if (Date.now() > deadline) throw new Error('standalone server did not become ready within 60s');
+      // Checked BEFORE the deadline, so an early death is reported as a death rather than as a
+      // timeout — the distinction the previous version could not make.
+      if (died !== undefined) throw withOutput(died);
+      if (Date.now() > deadline) throw withOutput('standalone server did not become ready within 60s');
       try {
         const res = await fetch(`http://127.0.0.1:${port}/iam`);
         return { status: res.status, body: await res.text() };
@@ -65,7 +100,9 @@ async function fetchHomeWith(zones: Record<string, string>): Promise<HomeRespons
       await new Promise((r) => setTimeout(r, 250));
     }
   } finally {
-    child.kill('SIGTERM');
+    // `exitCode`/`signalCode` are non-null once the child is gone, so this does not signal a pid
+    // the OS may have already recycled.
+    if (child.exitCode === null && child.signalCode === null) child.kill('SIGTERM');
   }
 }
 
