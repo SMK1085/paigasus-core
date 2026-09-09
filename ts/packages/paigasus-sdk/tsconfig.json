@@ -1,9 +1,11 @@
 {
   "extends": "../../tsconfig.base.json",
+  "_comment_types": "ts/tsconfig.base.json sets lib: [\"ES2022\"] and no types, under which Headers, fetch and ReadableStream do not exist. `types: [\"node\"]` supplies them WITHOUT pulling in the DOM lib — banning DOM types is spec § 6.2 layer 4, and node types are not DOM types. Matches ts/packages/paigasus-next-config/tsconfig.json.",
+  "_comment_rootDir": "No rootDir/outDir: both are inert under noEmit, but rootDir enforces a containment check that would reject tests/ and vitest.config.ts, which `include` names deliberately so a type error in a test is a typecheck failure rather than a runtime surprise.",
   "compilerOptions": {
-    "outDir": "./dist",
-    "rootDir": "./src",
+    "lib": ["ES2022"],
+    "types": ["node"],
     "noEmit": true
   },
-  "include": ["src/**/*"]
+  "include": ["src/**/*", "tests/**/*", "vitest.config.ts"]
 }
