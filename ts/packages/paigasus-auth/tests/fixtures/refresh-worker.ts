@@ -13,7 +13,37 @@ import { noopLogger } from '../../src/adapters/noop-logger.js';
 import { createRedisSessionStore } from '../../src/adapters/redis-store.js';
 import { resolveSession } from '../../src/core/single-flight.js';
 
-const REFRESH_COUNTER_KEY = 'refresh:count';
+// F9: prefixed with keyPrefix, matching every other key this process touches, rather than a bare
+// literal — a bare key would leak across concurrent test runs sharing one container.
+const ARRIVE_KEY_SUFFIX = 'rendezvous:arrive';
+const REFRESH_COUNTER_KEY_SUFFIX = 'refresh:count';
+const RENDEZVOUS_POLL_MS = 10;
+const EXPECTED_WORKERS = 2;
+
+// Duck-typed, not `ReturnType<typeof createClient>`: node-redis's client type's concrete generic
+// instantiation depends on the exact options object passed to `createClient` at the call site
+// (see redis-store.ts's own comment on the same trap), so re-typing a fresh client value at a
+// separate function boundary does not typecheck under this repo's exactOptionalPropertyTypes.
+// `get` is the only method this helper needs.
+interface RendezvousClient {
+  get(key: string): Promise<string | null>;
+}
+
+/**
+ * F4: block until both workers have arrived. Without this, one worker can start Node, transform
+ * TypeScript, connect two Redis clients and build a store faster than the other, call
+ * resolveSession alone, finish its whole 300ms hold, release, and be long gone before the slower
+ * worker ever calls tryAcquireLock — which reads as "exactly one refresh" for a reason that has
+ * nothing to do with the lock. The rendezvous forces both workers to call resolveSession only
+ * after both are fully started, so a genuine race is what produces the outcome.
+ */
+async function waitForRendezvous(client: RendezvousClient, key: string): Promise<void> {
+  for (;;) {
+    const value = await client.get(key);
+    if (value !== null && Number(value) >= EXPECTED_WORKERS) return;
+    await new Promise((r) => setTimeout(r, RENDEZVOUS_POLL_MS));
+  }
+}
 
 async function main(): Promise<void> {
   const url = process.argv[2];
@@ -23,15 +53,23 @@ async function main(): Promise<void> {
     throw new Error('usage: refresh-worker.ts <redisUrl> <keyPrefix> <sid>');
   }
 
-  // A separate raw client for the shared counter: SessionStore is deliberately primitives-only
-  // (see src/ports/session-store.ts's own comment) and exposes no arbitrary INCR.
+  const arriveKey = `${keyPrefix}${ARRIVE_KEY_SUFFIX}`;
+  const counterKey = `${keyPrefix}${REFRESH_COUNTER_KEY_SUFFIX}`;
+
+  // A separate raw client for the rendezvous and the shared counter: SessionStore is deliberately
+  // primitives-only (see src/ports/session-store.ts's own comment) and exposes no arbitrary INCR.
   const counter = createClient({ url });
   await counter.connect();
 
+  await counter.incr(arriveKey);
+  await waitForRendezvous(counter, arriveKey);
+
   const store = await createRedisSessionStore({ url, commandTimeoutMs: 2000, keyPrefix });
 
+  let ranRefresh = false;
   const refresh = async (): Promise<{ accessToken: string; refreshToken?: string; expiresIn: number }> => {
-    await counter.incr(REFRESH_COUNTER_KEY);
+    ranRefresh = true;
+    await counter.incr(counterKey);
     // Hold the lock long enough that the sibling process's concurrent call is guaranteed to still
     // be contending rather than finishing before this one even starts.
     await new Promise((r) => setTimeout(r, 300));
@@ -40,8 +78,11 @@ async function main(): Promise<void> {
 
   const result = await resolveSession({ store, refresh, logger: noopLogger, skewMs: 30_000, lockTtlMs: 10_000, lockWaitMs: 5_000, ttlMs: 60_000 }, sid);
 
-  // The parent reads this line and JSON.parses it — nothing else may write to stdout.
-  process.stdout.write(`${JSON.stringify({ accessToken: result?.accessToken ?? null })}\n`);
+  // The parent reads this line and JSON.parses it — nothing else may write to stdout. `refreshed`
+  // reports whether THIS process's own refresh function ran, which is what proves the loser
+  // genuinely waited on the lock rather than merely arriving after the winner had already
+  // finished (see runWorker's assertion on this field).
+  process.stdout.write(`${JSON.stringify({ accessToken: result?.accessToken ?? null, refreshed: ranRefresh })}\n`);
 
   await store.close();
   await counter.close();

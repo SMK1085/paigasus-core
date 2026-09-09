@@ -168,3 +168,40 @@ additional AC 2 finding.
 After confirming the failure, the guard was restored by deleting the two
 marker comments and the `if (true)` line (never `git checkout --`), and
 `tests/core/single-flight.test.ts` was re-run: 13 of 13 tests passed again.
+
+### M5, second mutation — invariant 1 (the post-lock double-check)
+
+Review round 1 (F5) found that nothing in the original suite would fail if
+the post-lock double-check were deleted: the two "exactly one refresh" tests
+resolve a WAITER through the outer loop's re-read, never through the
+post-lock double-check, so the first M5 mutation above does not exercise this
+invariant at all.
+
+A new deterministic test was added —
+`the post-lock double-check stops a second holder from refreshing an
+already-refreshed record (F5, invariant 1)` — that overrides `store.get` so
+the FIRST call (the pre-lock read) returns a stale, expired copy, and every
+later call (in particular the post-lock double-check) returns the record
+another holder already refreshed. It asserts `refresh` is called zero times.
+
+The double-check line,
+
+```ts
+if (!shouldRefresh(Date.now(), fresh.accessExpiresAt, skewMs)) return fresh; // invariant 1
+```
+
+was commented out (bounded by `M5-MUTATION2-START` / `M5-MUTATION2-END`
+markers) and the suite re-run:
+
+`pnpm -C ts/packages/paigasus-auth exec vitest run tests/core/single-flight.test.ts`
+against the mutated file: **1 of 20 tests failed** — exactly the new F5 test,
+with `TypeError: Cannot read properties of undefined (reading 'expiresIn')`
+(the mocked `refresh` in that test is a bare `vi.fn()` with no return value
+configured, since the test's whole point is that it must never be called).
+All 19 other tests, including both original "exactly one refresh" tests,
+stayed green — confirming they do not exercise this invariant, exactly as
+the review predicted.
+
+Restored by deleting the `M5-MUTATION2-START`/`M5-MUTATION2-END` markers and
+the commented-out line (never `git checkout --`), and re-ran: 20 of 20
+tests passed again.

@@ -39,6 +39,7 @@ const loaderUrl = pathToFileURL(fileURLToPath(new URL('../fixtures/ts-esm-loader
 
 interface WorkerResult {
   accessToken: string | null;
+  refreshed: boolean;
 }
 
 function runWorker(redisUrl: string, keyPrefix: string, sid: string): Promise<WorkerResult> {
@@ -81,8 +82,17 @@ it('two forked processes racing an expired token trigger exactly one refresh', a
 
   const [a, b] = await Promise.all([runWorker(url, keyPrefix, sid), runWorker(url, keyPrefix, sid)]);
 
-  const count = await admin.get('refresh:count');
+  // F9: the counter key is prefixed by keyPrefix, same as every other key this run touches.
+  const count = await admin.get(`${keyPrefix}refresh:count`);
   expect(count).toBe('1');
   expect(a.accessToken).not.toBeNull();
   expect(a.accessToken).toBe(b.accessToken);
+
+  // F4: a rendezvous (in refresh-worker.ts) forces both workers to call resolveSession only
+  // after both have fully started, so this is not merely "one process happened to finish before
+  // the other started". This is the direct proof that the loser genuinely contended for and lost
+  // the lock, rather than arriving late to an already-finished refresh — refresh:count === '1'
+  // alone cannot distinguish those two outcomes.
+  expect([a.refreshed, b.refreshed].filter((r) => r).length).toBe(1);
+  expect([a.refreshed, b.refreshed].filter((r) => !r).length).toBe(1);
 }, 30_000);
