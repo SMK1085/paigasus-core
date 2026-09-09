@@ -304,8 +304,22 @@ exactly what `describeIssues` (§ 6.9) exists to prevent.
 | `PAIGASUS_SESSION_TTL_SECONDS` | no | `28800` |
 | `PAIGASUS_SESSION_ABSOLUTE_TTL_SECONDS` | no | `86400` |
 | `PAIGASUS_SESSION_REFRESH_SKEW_SECONDS` | no | `30` |
-| `PAIGASUS_SESSION_LOCK_TTL_MS` | no | `5000` |
+| `PAIGASUS_SESSION_LOCK_TTL_MS` | no | `10000` — see below |
 | `PAIGASUS_SESSION_LOCK_WAIT_MS` | no | `3000` |
+
+**The lock TTL default changed during implementation, and the timing invariant
+changed with it.** Revision 2 specified `5000` and the single-timeout bound
+`httpTimeout < lockTtl`. Enabling `enableNonRepudiationChecks` (§ 11.3) makes one
+`oidc.refresh()` into **two** sequential bounded calls — the token endpoint, then
+JWKS — so that bound no longer bounds the refresh against its lock. With a
+3500 ms timeout, a cold-cache refresh can take ~7000 ms while holding a 5000 ms
+lock, which is exactly the overlap § 8.4 exists to prevent.
+
+The implemented invariant is therefore **`2 × httpTimeout < lockTtl`**, asserted
+at startup by `createAuthRuntime`, and the default rises to `10000` so the
+shipped configuration satisfies it (3500 × 2 = 7000 < 10000). The `rev` fence
+means the old bound degraded to a duplicate refresh rather than a stale write —
+but it defeated a guarantee § 8.4 spends a whole subsection establishing.
 
 ### 6.3 The client secret is required
 
