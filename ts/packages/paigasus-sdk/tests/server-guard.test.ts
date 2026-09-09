@@ -3,7 +3,7 @@
 // AC 1, spec § 6.2 layer 3. Driven off package.json's `exports` map rather than a hand-written
 // list, so an entry point added later is covered the day it is added — which is what makes it safe
 // for PR B to ship two entries while the design spec's § 6.1 names five (see the plan's D1).
-import { readdirSync, readFileSync } from 'node:fs';
+import { readdirSync, readFileSync, writeFileSync, unlinkSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
@@ -58,6 +58,14 @@ describe('AC 1 — every guarded entry point imports the server guard first', ()
 });
 
 describe("AC 1 — 'server-only' is imported at exactly one site", () => {
+  // Matches a side-effect import of `server-only` in EITHER quote style, and only as an actual
+  // import statement. A raw `.includes("'server-only'")` had two holes: `import "server-only";`
+  // evaded it entirely (so the one-site guarantee could break while this test stayed green), and
+  // the package name appearing inside a comment produced a false positive. Prettier enforces single
+  // quotes in this repo, which is why the first hole never bit — but a guard defeated by a quote
+  // style is not a guard.
+  const SERVER_ONLY_IMPORT = /^\s*import\s+(['"])server-only\1\s*;?\s*$/m;
+
   it('server-guard.ts imports it first', () => {
     const source = readFileSync(resolve(PKG_ROOT, 'src/server-guard.ts'), 'utf8');
     expect(firstImportStatement(source)).toBe("import 'server-only';");
@@ -65,8 +73,49 @@ describe("AC 1 — 'server-only' is imported at exactly one site", () => {
 
   it('no other file in src/ imports it', () => {
     const others = globSourceFiles().filter((f) => f !== resolve(PKG_ROOT, 'src/server-guard.ts'));
-    const offenders = others.filter((f) => readFileSync(f, 'utf8').includes("'server-only'"));
+    const offenders = others.filter((f) => SERVER_ONLY_IMPORT.test(readFileSync(f, 'utf8')));
     expect(offenders).toEqual([]);
+  });
+
+  it('detects double-quoted server-only import as offender', () => {
+    const probeFile = resolve(PKG_ROOT, 'src/__quote-probe.ts');
+    try {
+      const content = `// SPDX-License-Identifier: Apache-2.0
+import "server-only";
+`;
+      writeFileSync(probeFile, content, 'utf8');
+
+      const others = globSourceFiles().filter((f) => f !== resolve(PKG_ROOT, 'src/server-guard.ts'));
+      const offenders = others.filter((f) => SERVER_ONLY_IMPORT.test(readFileSync(f, 'utf8')));
+      expect(offenders).toContain(probeFile);
+    } finally {
+      try {
+        unlinkSync(probeFile);
+      } catch {
+        // Ignore cleanup errors
+      }
+    }
+  });
+
+  it('does not flag server-only inside a comment as offender', () => {
+    const probeFile = resolve(PKG_ROOT, 'src/__comment-probe.ts');
+    try {
+      const content = `// SPDX-License-Identifier: Apache-2.0
+// This mentions server-only in prose, not as an import.
+export const guard = true;
+`;
+      writeFileSync(probeFile, content, 'utf8');
+
+      const others = globSourceFiles().filter((f) => f !== resolve(PKG_ROOT, 'src/server-guard.ts'));
+      const offenders = others.filter((f) => SERVER_ONLY_IMPORT.test(readFileSync(f, 'utf8')));
+      expect(offenders).not.toContain(probeFile);
+    } finally {
+      try {
+        unlinkSync(probeFile);
+      } catch {
+        // Ignore cleanup errors
+      }
+    }
   });
 });
 
