@@ -536,7 +536,7 @@ getSession(sid):
         if fresh is none -> return null                      # concurrent logout
         if not shouldRefresh(now(), fresh.accessExpiresAt, skew) -> return fresh
         if no fresh.refreshToken -> store.delete(sid); return null
-        tokens <- oidc.refresh(fresh.refreshToken)           # timeout < lockTtlMs
+        tokens <- oidc.refresh(fresh.refreshToken)           # 2 * timeout < lockTtlMs
         next   <- merge(fresh, tokens, rev = fresh.rev + 1)
         ok <- store.set(sid, next, ttl, expectedRev = fresh.rev)
         if not ok -> return store.get(sid)                   # someone fenced us
