@@ -425,9 +425,10 @@ coupling, and revision 1 did not answer it.
 | revocation | same | logged, logout continues |
 | Redis command | `PAIGASUS_SESSION_REDIS_TIMEOUT_MS` | § 7.2 |
 
-**The refresh timeout must be below the lock TTL.** § 8.4 invariant 5 depends on
-it, and it is stated here as a configuration invariant that
-`createAuthRuntime` asserts at startup.
+**`2 × refresh timeout` must be below the lock TTL.** § 8.4 invariant 5 depends
+on it, and `createAuthRuntime` asserts it at startup. The factor of two is
+because § 11.3's non-repudiation opt-in makes one refresh two sequential bounded
+calls — the token endpoint, then JWKS. See § 6.2.
 
 ### 7.2 Redis unavailability
 
@@ -990,12 +991,13 @@ realm import this recipe needs.
 A fixture server in `tests/`, not the console app: a minimal Node server mounting
 the Web-standard handlers plus a public and a guarded page.
 
-**It must run with `NODE_OPTIONS=--conditions=react-server`.** `src/server.ts`
-opens with `import 'server-only'`, whose exports map resolves to an unconditional
-`throw` under every condition except `react-server`
-(`ts/packages/paigasus-next-config/vitest.config.ts:9-12`). Vitest solves this
-with `ssr.resolve.conditions`; a plain Node process has no such setting.
-Revision 1 missed this and the fixture server would not have started. M8.
+**It needs its own answer for `import 'server-only'`, and it is NOT
+`--conditions=react-server`.** Revision 2 specified that flag. Measured (M8) and
+superseded: the `react-server` condition breaks React's and React-DOM's own
+conditional exports, which is why the package dropped it (§ 3.1) in favour of a
+`resolve.alias` to an empty stub in both vitest configs. The fixture server is a
+plain Node process, so it registers a module hook aliasing `server-only` to the
+same stub — converging the two tiers rather than diverging them.
 
 **Stated limitation:** this proves cookie behaviour, the round trip and logout
 revocation, but **not** Next's own integration. The middleware matcher and

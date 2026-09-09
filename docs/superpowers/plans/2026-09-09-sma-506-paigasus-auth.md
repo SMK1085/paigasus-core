@@ -634,6 +634,19 @@ export function validateReturnTo(raw: string | undefined | null, fallback: strin
 }
 ```
 
+**CORRECTION, found by a CodeRabbit pass after implementation.** The version above
+is still incomplete: it rejects leading and trailing whitespace via the `trim`
+check, but nothing rejects an **interior** tab, LF or CR. Browsers strip those
+while parsing a URL, so `/\t/evil.com` clears every rule here and normalises to
+`//evil.com` — an off-origin redirect. This spec's § 9.1 argued the `Headers` API
+covers the class; that is true for CR/LF and **false for TAB**, which is a legal
+header value character. The shipped implementation adds, immediately after the
+trim check:
+
+```ts
+  if (/[\t\n\r]/.test(raw)) return fallback;
+```
+
 - [ ] **Step 6: Run and watch those two pass**
 
 ```bash
