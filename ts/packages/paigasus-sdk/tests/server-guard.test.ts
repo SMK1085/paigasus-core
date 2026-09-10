@@ -4,7 +4,7 @@
 // list, so an entry point added later is covered the day it is added — which is what makes it safe
 // for PR B to ship two entries while the design spec's § 6.1 names five (see the plan's D1).
 import { readdirSync, readFileSync, writeFileSync, unlinkSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import { dirname, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import ts from 'typescript';
 import { describe, expect, it } from 'vitest';
@@ -16,7 +16,17 @@ const PKG_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 // with no runtime import and no server-only evaluation (spec § 6.3). Every OTHER entry is guarded.
 const UNGUARDED_ENTRIES = new Set(['./errors/types']);
 
-const GUARD_IMPORT = "import './server-guard.js';";
+// The guard's expected specifier depends on where the entry FILE sits, not on a single literal.
+// `src/index.ts` needs './server-guard.js'; `src/errors/map-error.ts` needs '../server-guard.js'.
+// Spec § 6.2 layer 3 always said this test "resolves the path relative to each entry" — the
+// original literal did not, and a nested entry could not satisfy it (SMA-625).
+const GUARD_MODULE = 'src/server-guard.js';
+
+function expectedGuardImport(target: string): string {
+  const fromDir = dirname(resolve(PKG_ROOT, target));
+  const specifier = relative(fromDir, resolve(PKG_ROOT, GUARD_MODULE)).split(sep).join('/');
+  return `import '${specifier.startsWith('.') ? specifier : `./${specifier}`}';`;
+}
 
 function readPackageExports(): Record<string, string> {
   const raw = readFileSync(resolve(PKG_ROOT, 'package.json'), 'utf8');
@@ -49,12 +59,12 @@ describe('AC 1 — every guarded entry point imports the server guard first', ()
 
   it.each(entries.filter(([name]) => !UNGUARDED_ENTRIES.has(name)))('entry %s imports the guard as its first import statement', (_name, target) => {
     const source = readFileSync(resolve(PKG_ROOT, target), 'utf8');
-    expect(firstImportStatement(source)).toBe(GUARD_IMPORT);
+    expect(firstImportStatement(source)).toBe(expectedGuardImport(target));
   });
 
   it.each(entries.filter(([name]) => UNGUARDED_ENTRIES.has(name)))('entry %s deliberately carries no guard', (_name, target) => {
     const source = readFileSync(resolve(PKG_ROOT, target), 'utf8');
-    expect(source).not.toContain(GUARD_IMPORT);
+    expect(source).not.toContain(expectedGuardImport(target));
   });
 });
 
