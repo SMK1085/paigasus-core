@@ -6,7 +6,7 @@ export type { Actor } from './generated/paigasus/common/v1/actor_pb.js';
 export { AuditMetadataSchema } from './generated/paigasus/common/v1/audit_pb.js';
 export type { AuditMetadata } from './generated/paigasus/common/v1/audit_pb.js';
 export { capabilityWireKey } from './capability.js';
-export { Capability, ServiceInfoSchema, ServiceInfoService } from './generated/paigasus/common/v1/service_info_pb.js';
+export { Capability, CapabilitySchema, ServiceInfoSchema, ServiceInfoService } from './generated/paigasus/common/v1/service_info_pb.js';
 export type { ServiceInfo } from './generated/paigasus/common/v1/service_info_pb.js';
 
 // The canonical error registry (ADR-0019) and its codec. ErrorReason and

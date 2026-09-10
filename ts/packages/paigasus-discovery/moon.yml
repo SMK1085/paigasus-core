@@ -1,0 +1,55 @@
+$schema: 'https://moonrepo.dev/schemas/project.json'
+
+id: 'paigasus-discovery-ts'
+layer: 'library'
+language: 'typescript'
+
+# BOTH are required and neither implies the other. `dependsOn` is what `moon query projects
+# --affected` follows and what orders the upstream's build; task `inputs` are the ONLY thing that
+# confers affectedness on a DOWNSTREAM.
+dependsOn: ['paigasus-proto-ts']
+
+tasks:
+  # APPEND, never `options.merge: replace`. The inherited definitions in
+  # .moon/tasks/typescript-project.yml supply @group(sources), @group(tests), tsconfig.json,
+  # package.json, /ts/tsconfig.base.json and /ts/pnpm-lock.yaml; replacing would silently drop all
+  # of them — the defect SMA-503 fixed on paigasus-console-ts:build.
+  build:
+    inputs:
+      - '/ts/packages/paigasus-proto/src/**/*'
+  typecheck:
+    inputs:
+      - '/ts/packages/paigasus-proto/src/**/*'
+  test:
+    # vitest.config.ts matches neither src/**/* nor tests/**/*, so without this line an edit to the
+    # `server-only` alias or the resolution conditions serves a cached PASS — and that alias is the
+    # only thing keeping server-only's unconditional throw from failing the whole suite.
+    #
+    # 'README.md' is also required: tests/cosmetic.test.ts reads it and asserts AC4's cosmetic /
+    # not-a-security-boundary wording, and neither src/**/* nor tests/**/* covers a root-level file
+    # — without this, deleting that sentence changes no declared input and serves a cached PASS.
+    inputs:
+      - '/ts/packages/paigasus-proto/src/**/*'
+      - 'vitest.config.ts'
+      - 'README.md'
+  test-e2e:
+    # `script` (not `command`): Moon's `command` setting rejects shell syntax outright.
+    # `set -euo pipefail` mirrors every other `script:` task here — Moon does not enable errexit
+    # for script blocks on its own. The Playwright spec runs AFTER the vitest containers, under
+    # the same `set -euo pipefail` (SMA-509): a real Chromium proving the hit-testing property
+    # jsdom cannot model — see tests/browser/capability-hit-test.spec.ts's header.
+    script: |
+      set -euo pipefail
+      pnpm exec vitest run --config vitest.containers.config.ts
+      pnpm exec playwright test
+    inputs:
+      - '@group(sources)'
+      - '@group(tests)'
+      - 'vitest.config.ts'
+      - 'vitest.containers.config.ts'
+      - 'playwright.config.ts'
+      - 'package.json'
+      - '/ts/pnpm-lock.yaml'
+    options:
+      # Real containers, real Chromium. A cached PASS would replay a green that tested nothing.
+      cache: false

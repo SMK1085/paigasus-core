@@ -1,0 +1,11 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["DOM", "DOM.Iterable", "ES2022"],
+    "jsx": "react-jsx",
+    "types": ["node"],
+    "noEmit": true
+  },
+  "_comment_include": "tests/, both vitest configs and playwright.config.ts must be in the program: ts/eslint.config.js applies type-checked rules with projectService:true to every **/*.{ts,tsx}, and `ts:lint` runs `eslint .` over the whole tree — a file in no program errors there. Same shape and same reason as ts/packages/paigasus-auth/tsconfig.json.",
+  "include": ["src/**/*", "tests/**/*", "vitest.config.ts", "vitest.containers.config.ts", "playwright.config.ts"]
+}
