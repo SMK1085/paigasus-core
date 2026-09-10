@@ -116,6 +116,19 @@ describe('AC1: degraded is rendered disabled, never hidden', () => {
     }
   });
 
+  it('puts aria-disabled and aria-describedby on the CHILD, not only the wrapper', async () => {
+    // `aria-disabled` is not inherited. A screen-reader user navigating by link lands directly on
+    // the <a> and, without this, hears only "Audit, link" — no disabled state, no reason. The
+    // wrapper-only assertions above would not catch this: `link.closest('[data-capability-state]')`
+    // passes whether or not the link itself carries the attributes.
+    await renderDegraded(true);
+    const link = screen.getByRole('link', { name: 'Audit' });
+    expect(link).toHaveAttribute('aria-disabled', 'true');
+    const describedBy = link.getAttribute('aria-describedby');
+    expect(describedBy).toBeTruthy();
+    expect(document.getElementById(describedBy as string)?.textContent).toMatch(/not answering|unreachable/i);
+  });
+
   it('blocks activation — the assertion aria-disabled alone would let through', async () => {
     // THE REGRESSION THIS EXISTS FOR. `tabindex` is NOT inherited: putting tabindex="-1" on the
     // wrapper leaves a nested <a> fully keyboard-activatable while aria-disabled makes the
@@ -172,8 +185,11 @@ describe('AC1: degraded is rendered disabled, never hidden', () => {
         {b}
       </>,
     );
+    // The wrapper AND its single-element child now both carry aria-describedby (the child clone
+    // added for the accessibility fix below), so each instance contributes two matches sharing
+    // one id — four matches, two distinct ids.
     const ids = [...container.querySelectorAll('[aria-describedby]')].map((e) => e.getAttribute('aria-describedby'));
-    expect(ids).toHaveLength(2);
+    expect(ids).toHaveLength(4);
     expect(new Set(ids).size).toBe(2);
   });
 

@@ -4,7 +4,7 @@ import { createRedisDescriptorCache } from '../src/adapters/redis-cache.js';
 
 function fakeClient(over: Record<string, unknown> = {}): never {
   return {
-    options: { disableOfflineQueue: true },
+    options: { disableOfflineQueue: true, commandOptions: { timeout: 1_000 } },
     listenerCount: () => 1,
     ...over,
   } as never;
@@ -24,5 +24,15 @@ describe('createRedisDescriptorCache preconditions', () => {
   it('refuses a client with no error listener', () => {
     // node-redis emits 'error' on an EventEmitter; with no listener Node crashes the process.
     expect(() => createRedisDescriptorCache(fakeClient({ listenerCount: () => 0 }))).toThrow(/error listener/);
+  });
+
+  it('refuses a client with no command timeout', () => {
+    // Without a per-command timeout a hung Redis blocks the render path indefinitely — the same
+    // class of failure disableOfflineQueue guards against, on a path that check cannot reach.
+    expect(() => createRedisDescriptorCache(fakeClient({ options: { disableOfflineQueue: true } }))).toThrow(/timeout/);
+  });
+
+  it('refuses a client with a non-positive command timeout', () => {
+    expect(() => createRedisDescriptorCache(fakeClient({ options: { disableOfflineQueue: true, commandOptions: { timeout: 0 } } }))).toThrow(/timeout/);
   });
 });

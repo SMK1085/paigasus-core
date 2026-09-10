@@ -296,7 +296,10 @@ describe('failure handling', () => {
     const cache = createMemoryDescriptorCache();
     const events: string[] = [];
     const logger = { event: (n: string) => events.push(n) };
-    await cache.writeRawForTest?.(
+    // Assert the seam exists before using it: with optional chaining, a missing method makes this
+    // setup a silent no-op and the test would pass without ever exercising the corrupt-record path.
+    expect(typeof cache.writeRawForTest).toBe('function');
+    await cache.writeRawForTest!(
       'iam',
       JSON.stringify({
         version: RECORD_VERSION,
@@ -458,7 +461,12 @@ describe('SMA-509: an always-throwing logger must never break the non-rejecting 
 
   it('deletes and re-probes a record that is internally impossible', async () => {
     const cache = createMemoryDescriptorCache();
-    await cache.writeRawForTest?.(
+    // Assert the seam exists before using it: with optional chaining, a missing method makes this
+    // setup a silent no-op and the test would pass without ever exercising the corrupt-record path.
+    // Asserting the discovery.record_discarded event is not an option here: this test's logger
+    // always throws.
+    expect(typeof cache.writeRawForTest).toBe('function');
+    await cache.writeRawForTest!(
       'iam',
       JSON.stringify({
         version: RECORD_VERSION,

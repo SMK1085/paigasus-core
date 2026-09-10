@@ -12,7 +12,7 @@
 // an `@source` line in every consumer — and forgetting it drops the classes silently, ONLY in a
 // production build. Everything cosmetic is exposed as a data attribute for the consumer to style.
 
-import { useId, type KeyboardEvent, type MouseEvent, type ReactElement, type ReactNode } from 'react';
+import { cloneElement, isValidElement, useId, type KeyboardEvent, type MouseEvent, type ReactElement, type ReactNode } from 'react';
 import type { DegradedReason } from './types.js';
 
 const REASON_TEXT: Readonly<Record<DegradedReason, string>> = {
@@ -45,6 +45,32 @@ export function CapabilityDisabled({ service, reason, children }: CapabilityDisa
     event.stopPropagation();
   };
 
+  // `aria-disabled` is not inherited, so a screen-reader user navigating by link — a very common
+  // mode — lands directly on the child and hears only its name, with no disabled state and no
+  // reason: the same failure by another route that `inert` was rejected for above. When `children`
+  // is a single valid element (React already collapses one JSX child to a plain element, never an
+  // array — `isValidElement` alone tells single from not, the same test @paigasus/ui's Field uses
+  // for the identical "clone a caller-supplied child" problem), clone it and put both attributes on
+  // it too, so the interactive node itself announces the state. The wrapper keeps both attributes
+  // regardless: a consumer may style off them, and `data-capability-state` lives there either way.
+  // A non-single-element `children` (multiple children, a string, null) falls back to the
+  // wrapper-only behaviour rather than throwing.
+  type ChildAriaProps = { 'aria-disabled'?: string; 'aria-describedby'?: string };
+  const disabledChild = isValidElement<ChildAriaProps>(children)
+    ? // Field (@paigasus/ui) carries the same justification: this component owns the association
+      // between the wrapper's disabled state and a caller-supplied child it did not create, and
+      // cloning is the only way to attach the aria attributes without asking every consumer to
+      // thread them through by hand.
+      // eslint-disable-next-line @eslint-react/no-clone-element -- see the comment above.
+      cloneElement(children, {
+        'aria-disabled': 'true',
+        // Appended, not replaced: aria-describedby accepts a space-separated id list, and
+        // dropping the child's own description would discard information the consumer
+        // deliberately attached, not just ours.
+        'aria-describedby': [children.props['aria-describedby'], descriptionId].filter(Boolean).join(' '),
+      })
+    : null;
+
   return (
     <span
       data-capability-state="degraded"
@@ -57,7 +83,7 @@ export function CapabilityDisabled({ service, reason, children }: CapabilityDisa
         if (event.key === 'Enter' || event.key === ' ') block(event);
       }}
     >
-      {children}
+      {disabledChild ?? children}
       <span
         id={descriptionId}
         style={{
