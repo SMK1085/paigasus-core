@@ -204,7 +204,7 @@ describe('createOidcClient — the rest of the surface', () => {
 // MEASUREMENT (SMA-626 § 2.3). The refresh classifier keys on `ResponseBodyError.error`, and that
 // only works if a refused refresh actually arrives as that class. oauth4webapi@3.8.8's
 // checkOAuthBodyError calls checkAuthenticationChallenges(response) BEFORE parsing the body
-// (build/index.js:917-937), so a response carrying WWW-Authenticate throws
+// (build/index.js:925-937), so a response carrying WWW-Authenticate throws
 // WWWAuthenticateChallengeError instead — which has no `.error` field, and would make a
 // ResponseBodyError-keyed classifier silently never fire.
 //

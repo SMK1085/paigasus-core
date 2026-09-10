@@ -143,6 +143,11 @@ function wrapError(stage: string, cause: unknown): Error {
  * says a token endpoint SHOULD send that header with it.
  *
  * Reads the error CODE only. Never the error object, never its message, never a URL.
+ *
+ * RESIDUAL (design doc § 8, item 8): an `invalid_grant` response that also carries a
+ * `WWW-Authenticate` header arrives as `WWWAuthenticateChallengeError`, not `ResponseBodyError` —
+ * it has no `.error` field, so it falls through to transient here instead of `RefreshRejected`.
+ * Reading challenge parameters to catch that case is deliberately out of scope.
  */
 function classifyRefreshError(cause: unknown): Error {
   if (cause instanceof client.ResponseBodyError && cause.error === 'invalid_grant') {

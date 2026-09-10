@@ -81,6 +81,14 @@ function isObject(value: unknown): value is Record<string, unknown> {
  *
  * `refreshToken` is the one optional field: absent is legal, an explicit `null` is not
  * (`exactOptionalPropertyTypes`).
+ *
+ * THIS PREDICATE GATES READS, NOT WRITES. Both store adapters call it only in `get`, never in
+ * `set`. A record that fails it could in principle still be WRITTEN — logged as
+ * `session.created`, then deleted on its own first read with no event that explains why, a login
+ * loop with no visible cause. In this package today that gap is unreachable: every write goes
+ * through `handleCallback` or a refresh, both of which build the record from `ResolvedPrincipal`
+ * and `OidcTokens` (typed, not `unknown`), and `CreateAuthRuntimeDeps.resolver` is checked by the
+ * compiler, not at runtime. This is defence-in-depth against a future write path, not a live bug.
  */
 export function isSessionRecord(value: unknown): value is SessionRecord {
   if (!isObject(value)) return false;

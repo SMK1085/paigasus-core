@@ -23,7 +23,7 @@ const captured = { options: undefined as Record<string, unknown> | undefined, cl
 
 vi.mock('redis', () => ({
   createClient: (options: Record<string, unknown>) => {
-    // The production RedisClient interface (redis-store.ts:104-110) deliberately omits `on`, so
+    // The production RedisClient interface (redis-store.ts:105-111) deliberately omits `on`, so
     // this factory satisfies that interface PLUS the `on` the real node-redis client carries, and
     // is cast once here rather than widening the production type.
     const client: CapturedClient = {

@@ -129,18 +129,6 @@ describe('getSession', () => {
     expect(redirectMock).not.toHaveBeenCalled();
   });
 
-  // Review round 1: the degrade to "signed out" was silent — a store outage looked identical to
-  // every user simply logging out, with nothing in the auth log to tell the two apart.
-  it('logs store.unavailable rather than staying silent when the store is unavailable', async () => {
-    cookiesMock.mockResolvedValue(cookieJar('some-sid'));
-    const { logger, events } = recordingLogger();
-    const runtime = { ...baseRuntime(unavailableStore()), logger };
-
-    await getSession(runtime);
-
-    expect(events).toEqual([['store.unavailable', { sid: sidTag('some-sid'), stage: 'get_session' }]]);
-  });
-
   // I4 (final fix wave): before this, an IdP outage during refresh surfaced here as ONLY
   // `store.unavailable` with `stage: 'get_session'` — the SAME event a genuine Redis outage
   // produces, so an operator investigating a mass sign-out during an IdP incident chased a

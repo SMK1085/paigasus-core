@@ -117,7 +117,7 @@ async function handleLogin(runtime: AuthRuntime, req: Request, url: URL): Promis
   // fallback stores `returnTo: ''`. The callback then redirects to `Location: ''`, the browser
   // resolves that as the CURRENT url and re-requests the callback, the txn cookies are already
   // gone, and the retry loops through `txn_missing` back to `/auth/login` forever — login never
-  // completes on a root-mounted zone. `src/next/get-session.ts:94` and `src/runtime.ts:123` both
+  // completes on a root-mounted zone. `src/next/get-session.ts:104` and `src/runtime.ts:123` both
   // already use the trailing-slash form; this call is the one place that had drifted from it.
   const returnTo = validateReturnTo(url.searchParams.get('returnTo'), `${runtime.basePath}/`);
 

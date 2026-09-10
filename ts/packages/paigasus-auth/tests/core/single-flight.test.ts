@@ -405,7 +405,7 @@ describe('resolveSession', () => {
   });
 
   // SMA-626 § 5 guard 4. The existing persist-failure test stubs `set` to fail FOREVER, so the
-  // retry at single-flight.ts:151-153 could be deleted entirely and that test would still see
+  // retry at single-flight.ts:201-202 could be deleted entirely and that test would still see
   // `null` and stay green. This one fails the CAS exactly ONCE against UNCHANGED state, which is
   // the only path that reaches the retry — delete the retry and this test sees `null` instead of
   // a refreshed record.

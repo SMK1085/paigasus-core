@@ -160,7 +160,7 @@ export async function resolveSession(deps: ResolveDeps, sid: string): Promise<Re
           // A transient failure with a hard-expired token has nothing left to proceed on.
           //
           // `liveUntil` takes the MINIMUM of the two expiries. handleCallback sets them
-          // independently (http/routes.ts:233-234) and only a refresh write clamps accessExpiresAt
+          // independently (http/routes.ts:240-241) and only a refresh write clamps accessExpiresAt
           // to the cap, so an IdP whose `expires_in` exceeds PAIGASUS_SESSION_ABSOLUTE_TTL_SECONDS
           // mints a first record whose access token outlives its own absolute cap.
           //

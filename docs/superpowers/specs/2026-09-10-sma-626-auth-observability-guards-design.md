@@ -475,6 +475,23 @@ Everything else must stay green. The baseline is `Test Files 22 passed (22)` /
    port; the application supplies the adapter, and the first one lands with SMA-511. Until then
    these events are structure, not an operator-visible signal.
 7. The `README.md:112-115` route table is a third, ungated copy of the route list (§ 3.1).
+8. **A `WWW-Authenticate` header on an `invalid_grant` response defeats the classifier, and the
+   session then degrades instead of signing out.** `classifyRefreshError` (§ 2.2) keys on
+   `client.ResponseBodyError`, but oauth4webapi's `checkOAuthBodyError` calls
+   `checkAuthenticationChallenges` BEFORE it parses the body (`oauth4webapi@3.8.8`,
+   `build/index.js:925-937`), and `checkAuthenticationChallenges` tests only for the header's
+   PRESENCE, never the status code. So a `400 {"error":"invalid_grant"}` response that also
+   carries `WWW-Authenticate` arrives as `WWWAuthenticateChallengeError` instead of
+   `ResponseBodyError` — it has no `.error` field — and falls through to transient. This is a
+   different case from residual 4: residual 4 is an unknown revocation CODE; this is a KNOWN code
+   (`invalid_grant`) arriving in a class the classifier cannot read. The consequence is new on this
+   branch: before it, such a rejection signed the user out; now it degrades, so a revoked session
+   stays usable for up to `skewMs`, the record is never deleted, and every later `getSession()`
+   re-calls the token endpoint until the absolute cap. RFC 6749 § 5.2 ties `WWW-Authenticate` to a
+   401 / `invalid_client` response, and the branch measured exactly that — a conforming provider
+   will not send the header on a 400 `invalid_grant`. An intermediary that adds it can. Reading
+   challenge parameters to recover the code is deliberately out of scope; the classifier is
+   unchanged.
 
 ## 9. What the adversarial challenge changed
 
