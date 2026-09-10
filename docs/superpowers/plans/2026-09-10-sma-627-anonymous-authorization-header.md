@@ -323,7 +323,7 @@ In `ts/packages/paigasus-sdk/src/transport.ts`, replace the first line of the in
 
 Run: `export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"; cd ts/packages/paigasus-sdk && pnpm exec vitest run`
 
-Expected: PASS, **247 tests in 12 files** (237 after Task 1, plus 10 — the `it.each` blocks contribute 2 each).
+Expected: PASS, **248 tests in 12 files** (237 after Task 1, plus 11 — nine `it` blocks and two `it.each` blocks contributing 2 each).
 
 - [ ] **Step 5: Format, typecheck and commit**
 
@@ -427,7 +427,7 @@ Expected: FAIL, on `refuses it on the STREAMING path too` and on **that test alo
 
 Run: `export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"; cd ts/packages/paigasus-sdk && pnpm exec vitest run`
 
-Expected: PASS, **249 tests in 12 files**.
+Expected: PASS, **250 tests in 12 files**.
 
 - [ ] **Step 5: Format and commit**
 
@@ -487,7 +487,7 @@ see `docs/superpowers/specs/2026-09-10-sma-627-anonymous-authorization-header-de
 
 Run: `export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"; cd ts/packages/paigasus-sdk && pnpm exec vitest run`
 
-Expected: PASS, **249 tests in 12 files** — unchanged from Task 3. This step only proves a comment edit did not break a parse.
+Expected: PASS, **250 tests in 12 files** — unchanged from Task 3. This step only proves a comment edit did not break a parse.
 
 - [ ] **Step 4: Format and commit**
 
@@ -551,7 +551,7 @@ If a gate genuinely reds, diagnose it with the procedure between CLAUDE.md's `mo
 
 - [ ] **Step 3: Confirm the acceptance criteria**
 
-Walk spec § 8 and check each of the eight against what now exists. Report any that are not met rather than declaring completion. AC 6 in particular is checkable as a number: the suite must be **249 tests in 12 files**, up from the baseline 236, with no pre-existing test modified except the two empty-bearer ones, whose assertions are unchanged.
+Walk spec § 8 and check each of the eight against what now exists. Report any that are not met rather than declaring completion. AC 6 in particular is checkable as a number: the suite must be **250 tests in 12 files**, up from the baseline 236 (14 added: 1 in Task 1, 11 in Task 2, 2 in Task 3), with no pre-existing test modified except the two empty-bearer ones, whose assertions are unchanged.
 
 No commit — this task produces evidence, not a diff.
 
