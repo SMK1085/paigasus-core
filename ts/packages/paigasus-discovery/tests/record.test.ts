@@ -88,7 +88,9 @@ describe('toState', () => {
     // cache key, because a misconfigured or hostile service could otherwise poison another
     // service's entry.
     const hostile = rec({ descriptor: { ...descriptor, service: 'gateway' } });
-    expect(toState('iam', hostile).service).toBe('iam');
+    const state = toState('iam', hostile);
+    expect(state).not.toBeNull();
+    expect(state?.service).toBe('iam');
   });
 
   it('treats ok + null descriptor as corrupt', () => {
