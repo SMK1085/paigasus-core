@@ -58,18 +58,31 @@ The table above is the authoritative statement of each variable's form.
 
 ## Usage
 
-```ts
-import { createDiscovery, createRedisDescriptorCache } from '@paigasus/discovery/server';
+Build the handle **inside a request-scoped function**, never at module scope.
+The example below is shaped that way on purpose: a bare module-level
+`const discovery = createDiscovery({...})` reads as a singleton, and it is
+wrong. `getServiceState`'s memo map never removes an entry, because the handle
+is meant to die with the request; a process-wide handle would instead replay
+the first caller's outcome forever — including a rejected token — for every
+later request.
 
-const discovery = createDiscovery({
-  services: config.PAIGASUS_SERVICES,
-  cache: createRedisDescriptorCache(redisClient),
-  waitUntil: after, // from 'next/server'
-});
+```ts
+import { createDiscovery, createRedisDescriptorCache, timingsFromEnv, type Discovery } from '@paigasus/discovery/server';
+
+export function getDiscovery(): Discovery {
+  return createDiscovery({
+    services: config.PAIGASUS_SERVICES,
+    cache: createRedisDescriptorCache(redisClient),
+    timings: timingsFromEnv(config), // applies the six PAIGASUS_DISCOVERY_* overrides below
+    waitUntil: after, // from 'next/server'
+  });
+}
 ```
 
-Build **one handle per request**: `getServiceState` memoizes per handle, so N
-`<Capability>` elements over one service cost one resolution.
+Call `getDiscovery()` once per request, for example at the top of a server
+component, and pass the returned handle down. Build **one handle per
+request**: `getServiceState` memoizes per handle, so N `<Capability>` elements
+over one service cost one resolution.
 
 The Redis client is **injected and already connected**. It must be created with
 `disableOfflineQueue: true` and an `error` listener — both are asserted, because
@@ -84,6 +97,43 @@ deploy target the process survives the response and a floated promise completes,
 so `waitUntil` is optional. On a platform that freezes the container at response
 end it is **required**; without it the effective refresh interval degrades to
 `PAIGASUS_DISCOVERY_STALE_MS`.
+
+### Rendering with `<Capability>`
+
+```tsx
+import { Capability } from '@paigasus/discovery/react';
+
+<Capability discovery={discovery} need="iam.audit" token={token}>
+  <NavLink href="/audit">Audit log</NavLink>
+</Capability>;
+```
+
+`<Capability>` renders nothing when the service is absent, the children when the
+service answers and reports the key, and nothing when the service answers but
+lacks the key. When the service is degraded, it renders the children **disabled
+with a reason, never hidden**.
+
+Pass a `degraded` render prop to replace the default disabled wrapper with your
+own — for example a nav item that renders its own tooltip:
+
+```tsx
+<Capability discovery={discovery} need="iam.audit" token={token} degraded={(reason) => <NavItem disabled reason={reason} />}>
+  <NavLink href="/audit">Audit log</NavLink>
+</Capability>
+```
+
+#### Styling the disabled state
+
+The default wrapper carries **no Tailwind utility classes**. Style the disabled
+state against these two data attributes instead:
+
+| Attribute                | Value              | Meaning                                                                                                         |
+| ------------------------ | ------------------ | --------------------------------------------------------------------------------------------------------------- |
+| `data-capability-state`  | `"degraded"`       | the service is configured but not answering right now                                                           |
+| `data-capability-reason` | a `DegradedReason` | `timeout`, `network`, `unauthorized`, `not-implemented`, `bad-response`, `server-error`, or `cache-unavailable` |
+
+These two attributes are the **entire styling contract** the default wrapper
+exposes.
 
 ### Consuming from `@paigasus/app-shell`
 

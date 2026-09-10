@@ -140,7 +140,7 @@ ts/packages/paigasus-discovery/
     config.ts                    discoveryEnvShape (zod)
     probe.ts                     GET /v1/service-info
     core/
-      state.ts                   ServiceState, DegradedReason, SERVICE_STATES
+      state.ts                   CAPABILITY_KEYS, SERVICE_SLUGS, serviceOf (imports @paigasus/proto)
       record.ts                  CacheRecord, isFresh, toState
       reasons.ts                 status/cause -> DegradedReason
       single-flight.ts           SWR + lock algorithm
@@ -152,6 +152,14 @@ ts/packages/paigasus-discovery/
       memory-cache.ts
       noop-logger.ts
 ```
+
+**`ServiceState`, `DegradedReason` and `SERVICE_STATES` live in `types.ts`, not
+`core/state.ts`.** An earlier revision of this section put them in
+`core/state.ts`; the shipped code corrects that. `core/state.ts` imports
+`@paigasus/proto` as a VALUE (to derive `CAPABILITY_KEYS` and `SERVICE_SLUGS`),
+and `types.ts` is the client-safe entry — re-exporting these three from
+`core/state.ts` would pull protobuf-es into any client bundle that imports
+`@paigasus/discovery/types`.
 
 ### 4.1 Entry points
 
@@ -543,8 +551,14 @@ createDiscovery(deps: {
 ```
 
 `Discovery` is `{ getServiceState, hasCapability }`. There is **no module-level
-singleton**: the composition root builds one handle, which is what makes the
-package testable without module resets and matches `createAuthRuntime()`.
+singleton**: the composition root builds a fresh handle **per request**. This is
+the OPPOSITE lifetime from `@paigasus/auth`'s `createAuthRuntime()`, which is
+ONE RUNTIME PER PROCESS — an earlier revision of this section drew the
+analogy the wrong way round, and the shipped code corrects it. The
+`getServiceState` memo (§9.5) never evicts an entry, because the handle is
+meant to die with the request; a process-wide handle would instead replay the
+first caller's outcome, including a rejected token, for the process's whole
+life.
 Revision 1 listed the three as sibling exports with signatures that took no
 handle, which was internally inconsistent.
 
@@ -574,10 +588,15 @@ survive the RSC server-to-client boundary. Membership tests go through a helper.
 hasCapability(key: CapabilityKey, token: string): Promise<boolean>
 ```
 
-`CapabilityKey` is the closed union derived from the `Capability` enum via
-`capabilityWireKey`, not `string`. A typo such as `iam.audits` must be a type
-error, because at runtime it returns `false` forever and silently hides a
-navigation item — the "invisible" outcome §9.4 itself calls the worse failure.
+`CapabilityKey` is a **hand-declared** closed union in `src/types.ts:62`, not a
+derivation and not `string`, and not `` `${string}.${string}` `` either — that
+template would accept the typo `iam.audits`, which at runtime returns `false`
+forever and silently hides a navigation item, the "invisible" outcome §9.4
+itself calls the worse failure. Hand-declaring the union re-opens a drift risk
+against the proto registry; `tests/vocabulary.test.ts:40` closes it by
+comparing the union's members against the registry-derived runtime list, so a
+new capability added to the proto reds that test until the union is updated by
+hand.
 
 The service is derived from the key's first dot-segment. The registry guarantees
 this (`service_info.proto:85-86`), and §5.1 validates the config keys against the
@@ -593,10 +612,16 @@ argues against. The README says this next to the "not a security boundary" line.
 ### 9.4 `<Capability>`
 
 ```tsx
-<Capability need="iam.audit">
+<Capability discovery={discovery} need="iam.audit" token={token}>
   <NavLink href="/audit">Audit</NavLink>
 </Capability>
 ```
+
+The shipped component (`src/react.tsx:12-19`) also requires `discovery` and
+`token` props, both omitted from an earlier revision of this example: `token`
+is per-request caller state (§7.2), and `discovery` is the request-scoped
+handle from §9.1 — neither can come from a module-level singleton, which is
+part of why one must not exist.
 
 It branches on the **full state**, not on `hasCapability`:
 
@@ -620,14 +645,25 @@ outage to report.
 
 ### 9.5 Request-scoped memoization
 
-`getServiceState` is memoized **per request**, via React's `cache()` when
-available and an injected request-scoped map otherwise.
+`getServiceState` is memoized **per handle**, via a plain closure `Map` keyed on
+service and token — not React's `cache()`, and not an injected request-scoped
+map. An earlier revision of this section described both of those instead; the
+shipped code uses neither.
 
-Without it, a navigation with eight `<Capability>` items over two services costs
-eight cache reads per render, and §8.2's latency bound does not hold, because
-React renders server components in tree order and each sibling would resolve
-serially. The bound is stated conditionally on concurrent resolution for exactly
-this reason.
+This is exactly why the handle's lifetime rule (§9.1) matters: the `Map` is
+never evicted, because there is deliberately nothing to evict FOR — the whole
+handle, `Map` included, is meant to die with the request. Calling
+`createDiscovery` once per process instead of once per request would make the
+`Map` outlive every individual request, so a second caller with a different
+token would receive the identical (possibly rejected) result the first caller
+got, and freshness, stale-while-revalidate and the negative TTL would all
+become unreachable, since the memo answers before the cache is ever consulted.
+
+Without the memo at all, a navigation with eight `<Capability>` items over two
+services costs eight cache reads per render, and §8.2's latency bound does not
+hold, because React renders server components in tree order and each sibling
+would resolve serially. The bound is stated conditionally on concurrent
+resolution for exactly this reason.
 
 ### 9.6 The disabled rendering
 

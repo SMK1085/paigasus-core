@@ -109,4 +109,9 @@ describe('parseRecord', () => {
   it('rejects a structurally wrong record', () => {
     expect(parseRecord(JSON.stringify({ version: RECORD_VERSION, rev: 'x' }))).toBeNull();
   });
+
+  it('rejects a record whose descriptor is structurally wrong (capabilities not an array)', () => {
+    const bad = { ...rec(), descriptor: { service: 'iam', version: '0.0.0', capabilities: 'iam.audit' } };
+    expect(parseRecord(JSON.stringify(bad))).toBeNull();
+  });
 });

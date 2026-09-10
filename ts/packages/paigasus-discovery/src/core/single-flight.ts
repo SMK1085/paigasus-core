@@ -23,7 +23,7 @@
 import { RECORD_VERSION, isFresh, toState, type CacheRecord, type Timings } from './record.js';
 import type { ProbeOutcome } from '../probe.js';
 import type { DescriptorCache } from '../ports/cache.js';
-import type { DiscoveryLogger } from '../ports/logger.js';
+import type { DiscoveryEventFields, DiscoveryEventName, DiscoveryLogger } from '../ports/logger.js';
 import type { DegradedReason, ServiceState } from '../types.js';
 
 export type ResolveDeps = {
@@ -43,6 +43,22 @@ const backoff = (attempt: number): number => Math.min(10 * 2 ** attempt, 100) * 
 
 function newLockToken(): string {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
+
+/**
+ * `resolveService` is documented to never reject. Two call sites below sit outside any
+ * surrounding try: one runs INSIDE a catch block, where an unguarded throw would replace the
+ * handled error with a new, unhandled one; the other has no enclosing try at all. A throwing
+ * injected logger would therefore make a rejection reachable, and — because that rejected
+ * promise is what the handle's memo map in server.ts stores — it would then be cached and
+ * replayed for the handle's whole (per-request) life. Swallow rather than propagate.
+ */
+function safeLog(deps: ResolveDeps, name: DiscoveryEventName, fields: DiscoveryEventFields): void {
+  try {
+    deps.logger.event(name, fields);
+  } catch {
+    // Nothing to log to if the logger itself is broken.
+  }
 }
 
 function degraded(service: string, reason: DegradedReason, rec: CacheRecord | null): ServiceState {
@@ -232,7 +248,10 @@ export async function resolveService(deps: ResolveDeps, service: string, token: 
     rec = await readRecord(deps, service);
   } catch {
     // Never propagate. One Redis blip must not 500 every server component rendering navigation.
-    deps.logger.event('discovery.cache_unavailable', { service, stage: 'read' });
+    // safeLog, not deps.logger.event directly: this call already runs inside a catch block, so
+    // an unguarded throw here (a broken injected logger) would replace the handled cache error
+    // with a new, unhandled one and defeat the very guarantee this catch exists for.
+    safeLog(deps, 'discovery.cache_unavailable', { service, stage: 'read' });
     return degraded(service, 'cache-unavailable', null);
   }
 
@@ -316,7 +335,9 @@ export async function resolveService(deps: ResolveDeps, service: string, token: 
     if (deps.now() >= deadline) {
       // Invariant 2: a waiter NEVER probes as a fallback. One final read first, in case the
       // winner wrote just as the deadline expired — otherwise we report a false outage.
-      deps.logger.event('discovery.lock_timeout', { service });
+      // safeLog, not deps.logger.event directly: this call has no enclosing try at all, so a
+      // broken injected logger would otherwise reject resolveService's promise here.
+      safeLog(deps, 'discovery.lock_timeout', { service });
       const last = await readRecord(deps, service).catch(() => null);
       if (last !== null) return toState(service, last) ?? degraded(service, 'timeout', last);
       return degraded(service, 'timeout', null);

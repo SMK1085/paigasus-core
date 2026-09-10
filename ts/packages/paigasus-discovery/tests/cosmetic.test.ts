@@ -12,7 +12,16 @@ import type { ProbeOutcome } from '../src/probe.js';
 // `veto`, `deny`, `block`, or anything else — must red this test until a human adds it here on
 // purpose. An enforcement hook added to this module would silently make capability gating
 // authoritative, which ADR-0020 says it must never be.
-const EXPECTED_SERVER_EXPORTS = ['DEFAULT_TIMINGS', 'createDiscovery', 'createMemoryDescriptorCache', 'createRedisDescriptorCache', 'discoveryEnvShape', 'noopLogger', 'parseServiceMap'];
+const EXPECTED_SERVER_EXPORTS = [
+  'DEFAULT_TIMINGS',
+  'createDiscovery',
+  'createMemoryDescriptorCache',
+  'createRedisDescriptorCache',
+  'discoveryEnvShape',
+  'noopLogger',
+  'parseServiceMap',
+  'timingsFromEnv',
+];
 
 // STRICT EQUALITY, same reason: any method added to the returned handle — the actual place a
 // blocking call would be enforced — must red this test until a human adds it here on purpose.

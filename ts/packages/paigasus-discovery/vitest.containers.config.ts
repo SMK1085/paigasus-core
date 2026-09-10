@@ -2,9 +2,11 @@
 import { fileURLToPath } from 'node:url';
 import { defineConfig } from 'vitest/config';
 
-// A SEPARATE config, not a CLI path filter on the default one: vitest applies a positional path
-// AFTER `exclude`, so `vitest run --config vitest.config.ts tests/containers/` matches zero files
-// and passes vacuously. A suite that silently runs nothing is worse than a red.
+// A SEPARATE config, not a CLI path filter on the default one. Under vitest 5.0.0, a positional
+// path filter on the default config (`vitest run --config vitest.config.ts tests/containers/`)
+// does not pass vacuously — it exits 1 with "No test files found" — but the separate-config design
+// is right regardless: this suite needs its own environment, timeouts and `cache: false`, none of
+// which a CLI filter on the default config could supply.
 //
 // There is NO SKIP HATCH when Docker is unreachable. This suite fails loudly, the precedent
 // @paigasus/auth set deliberately against paigasus-iam's silently-skipping Docker suites.

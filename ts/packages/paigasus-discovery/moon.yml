@@ -24,9 +24,14 @@ tasks:
     # vitest.config.ts matches neither src/**/* nor tests/**/*, so without this line an edit to the
     # `server-only` alias or the resolution conditions serves a cached PASS — and that alias is the
     # only thing keeping server-only's unconditional throw from failing the whole suite.
+    #
+    # 'README.md' is also required: tests/cosmetic.test.ts reads it and asserts AC4's cosmetic /
+    # not-a-security-boundary wording, and neither src/**/* nor tests/**/* covers a root-level file
+    # — without this, deleting that sentence changes no declared input and serves a cached PASS.
     inputs:
       - '/ts/packages/paigasus-proto/src/**/*'
       - 'vitest.config.ts'
+      - 'README.md'
   test-e2e:
     # `script` (not `command`): Moon's `command` setting rejects shell syntax outright.
     # `set -euo pipefail` mirrors every other `script:` task here — Moon does not enable errexit

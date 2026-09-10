@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { z } from 'zod';
 import { SERVICE_SLUGS } from './core/state.js';
-import { DEFAULT_TIMINGS } from './core/record.js';
+import { DEFAULT_TIMINGS, type Timings } from './core/record.js';
 
 // PAIGASUS_ZONES' transform is NOT reusable here: `zoneMapFromJson` validates each value with
 // `canonicalBasePath`, which is a PATH validator, not a URL validator.
@@ -92,3 +92,26 @@ export const discoveryEnvShape = {
   PAIGASUS_DISCOVERY_LOCK_WAIT_MS: positiveInt(DEFAULT_TIMINGS.lockWaitMs),
   PAIGASUS_DISCOVERY_LOCK_TTL_MS: positiveInt(DEFAULT_TIMINGS.lockTtlMs),
 };
+
+/** The composed, already-parsed config an app passes to `timingsFromEnv` — the shape a caller's `getRuntimeConfig()` produces once `discoveryEnvShape` is folded into `defineRuntimeConfig()`. */
+export type DiscoveryEnv = z.infer<z.ZodObject<typeof discoveryEnvShape>>;
+
+/**
+ * Map the six `PAIGASUS_DISCOVERY_*` env keys (already parsed by `discoveryEnvShape`) onto a
+ * `Partial<Timings>` that `createDiscovery` accepts directly.
+ *
+ * Without this, a consumer has to hand-write the SCREAMING_SNAKE -> camelCase mapping for six
+ * fields, and forgetting even one means an operator sets the env var, sees no error (`timings` is
+ * an optional `Partial`, so `createDiscovery` silently falls back to `DEFAULT_TIMINGS`), and gets
+ * no effect at all.
+ */
+export function timingsFromEnv(config: DiscoveryEnv): Partial<Timings> {
+  return {
+    negativeMs: config.PAIGASUS_DISCOVERY_NEGATIVE_MS,
+    freshMs: config.PAIGASUS_DISCOVERY_FRESH_MS,
+    staleMs: config.PAIGASUS_DISCOVERY_STALE_MS,
+    probeTimeoutMs: config.PAIGASUS_DISCOVERY_PROBE_TIMEOUT_MS,
+    lockWaitMs: config.PAIGASUS_DISCOVERY_LOCK_WAIT_MS,
+    lockTtlMs: config.PAIGASUS_DISCOVERY_LOCK_TTL_MS,
+  };
+}

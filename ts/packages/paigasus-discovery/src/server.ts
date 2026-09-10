@@ -15,7 +15,8 @@ export type { DiscoveryLogger, DiscoveryEventName, DiscoveryEventFields } from '
 export { createMemoryDescriptorCache } from './adapters/memory-cache.js';
 export { createRedisDescriptorCache } from './adapters/redis-cache.js';
 export { noopLogger } from './adapters/noop-logger.js';
-export { discoveryEnvShape, parseServiceMap } from './config.js';
+export { discoveryEnvShape, parseServiceMap, timingsFromEnv } from './config.js';
+export type { DiscoveryEnv } from './config.js';
 export { DEFAULT_TIMINGS } from './core/record.js';
 export type { Timings } from './core/record.js';
 export type { ServiceState, ServiceDescriptor, DegradedReason, CapabilityKey } from './types.js';
@@ -60,11 +61,19 @@ function resolveTimings(over: Partial<Timings> | undefined): Timings {
 }
 
 /**
- * Build a request-scoped discovery handle.
+ * Build a discovery handle. Call this ONCE PER REQUEST.
  *
- * There is deliberately NO module-level singleton: the composition root builds one handle, which
- * is what makes this testable without module resets and matches @paigasus/auth's
- * createAuthRuntime().
+ * This is the OPPOSITE lifetime from @paigasus/auth's createAuthRuntime(), which
+ * (runtime.ts:24-33) is ONE RUNTIME PER PROCESS. Do not read the two as analogous: the memo
+ * below never evicts an entry, because there is deliberately nothing to evict FOR — the handle
+ * dies with the request. A process-wide handle would keep the FIRST caller's outcome forever:
+ * a second caller with a different token would receive the identical object the first caller
+ * got, so one rejected token would make every later request see degraded/unauthorized for the
+ * process's life, and freshness, stale-while-revalidate and the negative TTL would all become
+ * unreachable, because the memo answers before the cache is ever consulted.
+ *
+ * There is deliberately NO module-level singleton: the composition root builds a fresh handle
+ * for every request, which is also what makes this testable without module resets.
  *
  * `getServiceState` memoizes per handle. Without it a nav with eight <Capability> items over two
  * services costs eight cache reads per render, because React renders server components in tree
@@ -75,6 +84,10 @@ export function createDiscovery(deps: CreateDiscoveryDeps): Discovery {
   const timings = resolveTimings(deps.timings);
   const logger = deps.logger ?? noopLogger;
   const fetchImpl = deps.fetch ?? globalThis.fetch;
+  // Keyed on service AND token, as a cheap second guard beyond the per-request lifetime rule
+  // above — so two callers with different tokens for the same service never share a result.
+  // Entries are never removed: the handle is per-request, so nothing here can outlive its
+  // request, and evicting would only reintroduce cost this memo exists to avoid.
   const inflight = new Map<string, Promise<ServiceState>>();
 
   const probe =
@@ -102,10 +115,11 @@ export function createDiscovery(deps: CreateDiscoveryDeps): Discovery {
       // ABSENT is decided from config alone. No cache read, no probe.
       return Promise.resolve({ state: 'absent', service });
     }
-    const existing = inflight.get(service);
+    const key = `${service}:${token}`;
+    const existing = inflight.get(key);
     if (existing !== undefined) return existing;
     const pending = resolveService(resolveDeps, service, token);
-    inflight.set(service, pending);
+    inflight.set(key, pending);
     return pending;
   }
 
