@@ -53,6 +53,7 @@ export const BOUNDARY_SCOPES = {
   'packages/paigasus-sdk': 'exists',
   'packages/paigasus-app-shell': 'SMA-510 has not landed yet; the rule is inert until it does',
   'packages/paigasus-auth': 'exists',
+  'packages/paigasus-discovery': 'exists',
   apps: 'exists',
 };
 
@@ -111,6 +112,21 @@ export const boundaryRules = [
       {
         group: ['@paigasus/sdk', '@paigasus/sdk/**', '@paigasus/auth/server', '@paigasus/auth/server/**'],
         message: '@paigasus/app-shell is client-reachable. It may use @paigasus/auth/client, never /server, and never the sdk (§ 6 rule 3).',
+      },
+    ]),
+  },
+  {
+    name: 'paigasus/boundaries/discovery',
+    files: ['packages/paigasus-discovery/**/*.{ts,tsx,mts,cts,js,jsx,mjs,cjs}'],
+    rules: restrict([
+      {
+        group: ['next', 'next/*', 'next/**'],
+        message: '@paigasus/discovery must not import from `next`. Next primitives are INJECTED — `waitUntil` takes `after` as a parameter — so the package tests without a Next runtime (§ 8.1).',
+      },
+      {
+        group: ['@paigasus/sdk', '@paigasus/sdk/**'],
+        message:
+          '@paigasus/discovery must not depend on @paigasus/sdk: its `Presentation` union cannot express a DegradedReason, and a transitive edge would give @paigasus/app-shell a path to the sdk that `paigasus/boundaries/app-shell` bans (spec F8, § 2.1).',
       },
     ]),
   },

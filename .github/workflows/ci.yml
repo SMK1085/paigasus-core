@@ -182,6 +182,10 @@ jobs:
       # not through a path filter this step would check) — the task then fails for a missing
       # browser instead of a red on a green PR being merely wasted CI time. Runs before the
       # `moon ci` step so the browser exists before the task can run.
+      #
+      # `@paigasus/discovery` also declares a `test-e2e` task (SMA-509), but its suite runs vitest
+      # against real containers only and needs no Playwright, so this step stays scoped to
+      # `@paigasus/auth`.
       - name: Install Playwright Chromium (for @paigasus/auth's test-e2e)
         # Run from the PACKAGE, not the ts workspace root: @playwright/test is a devDependency of
         # @paigasus/auth, so `playwright` is only on that package's node_modules/.bin. From ts/ it

@@ -86,9 +86,10 @@ assert_case() {
 #   same-named task in another stack could enter a case's observed set. `contracts:lint` exists
 #   and does not appear here — contracts is UPSTREAM of paigasus-proto-rs and `--downstream deep`
 #   walks dependents — but a future case with a different touched file must re-check that.
-#   Measured: `paigasus-auth-ts` is the only project declaring `test-e2e`
-#   (`moon query tasks` has exactly one match), so widening the filter does not pull a
-#   same-named task from elsewhere into any existing case's observed set.
+#   Measured (SMA-509): two projects now declare `test-e2e` — `paigasus-auth-ts` and
+#   `paigasus-discovery-ts` (`moon query tasks` has exactly two matches). No existing case's
+#   observed set changes, because the two packages' touched files differ; a future case with a
+#   different touched file must still re-check this.
 # returns 0 pass / 1 assertion fail / 2 infrastructure error
 _assert_task_case_impl() {
   local label="$1" file="$2" expected_csv="$3" hint="$4"; shift 4
@@ -262,11 +263,13 @@ run_suite() {
   # contracts proto edit -> proto packages in all three languages + the gateway rebuild + the
   # IAM service crate that consumes paigasus-proto-rs for its gRPC surface (SMA-442) + the
   # shared descriptor crate that consumes the generated ServiceInfo/Capability types (SMA-505)
-  # + @paigasus/sdk, whose build/typecheck/test key on paigasus-proto's sources (SMA-508). That
-  # last edge is what makes a generated-code change re-run the SDK's suite; `dependsOn` alone
+  # + @paigasus/sdk, whose build/typecheck/test key on paigasus-proto's sources (SMA-508)
+  # + @paigasus/discovery (SMA-509), whose build/typecheck/test key on paigasus-proto's sources
+  # the same way, because it consumes the generated ServiceInfo/Capability types. That last edge
+  # is what makes a generated-code change re-run each consumer's suite; `dependsOn` alone
   # schedules the upstream and never selects the downstream.
   run_case "contracts->proto" "contracts/proto/paigasus/gateway/v1/health.proto" \
-    "contracts,paigasus-proto-rs,paigasus-proto-py,paigasus-proto-ts,paigasus-gateway-rs,paigasus-iam-rs,paigasus-service-info-rs,paigasus-sdk-ts"
+    "contracts,paigasus-proto-rs,paigasus-proto-py,paigasus-proto-ts,paigasus-gateway-rs,paigasus-iam-rs,paigasus-service-info-rs,paigasus-sdk-ts,paigasus-discovery-ts"
   # derive-crate edit -> the derive crate + paigasus-proto and everything downstream of it
   # (SMA-438). One-directional w.r.t. contracts: the derive crate is strictly UPSTREAM of
   # paigasus-proto, so a proto edit must NOT reach it — enforced implicitly by the strict
@@ -403,9 +406,11 @@ run_suite() {
   # edit selected no paigasus-sdk-ts task at all.
   # Anchored on the generated error_pb.ts deliberately: SMA-625's error-mapping table test keys on
   # that file's descriptor, so this is the path whose selection that issue's AC depends on.
+  # SMA-509: paigasus-discovery-ts joins this set for the same reason as paigasus-sdk-ts — its
+  # build/typecheck/test key on `/ts/packages/paigasus-proto/src/**/*` too.
   # Strict equality: re-baseline deliberately when the set legitimately changes.
   run_task_case_ci "proto->sdk" "ts/packages/paigasus-proto/src/generated/paigasus/common/v1/error_pb.ts" \
-    "paigasus-proto-ts:build,paigasus-proto-ts:test,paigasus-sdk-ts:build,paigasus-sdk-ts:test,ts:lint"
+    "paigasus-proto-ts:build,paigasus-proto-ts:test,paigasus-sdk-ts:build,paigasus-sdk-ts:test,ts:lint,paigasus-discovery-ts:build,paigasus-discovery-ts:test"
   # SMA-508 final review fix — the SECOND anchor, and it is not redundant. MEASURED: narrowing all
   # three of paigasus-sdk-ts's `inputs` globs from `/ts/packages/paigasus-proto/src/**/*` to
   # `/ts/packages/paigasus-proto/src/generated/paigasus/common/**/*` still yields `PASS proto->sdk`
@@ -421,9 +426,27 @@ run_suite() {
   # The expected set is DERIVED with the same no-flag `moon query tasks --affected` traversal
   # `_assert_task_case_impl` uses (see task-5-measurement-commands.md § B), not copied from the
   # case above; it happens to match, because both files sit inside the same declared input glob.
+  # SMA-509: paigasus-discovery-ts joins this set too, for the same reason as the proto->sdk case
+  # above — its build/typecheck/test also key on `/ts/packages/paigasus-proto/src/**/*`.
   # Strict equality: re-baseline deliberately when the set legitimately changes.
   run_task_case_ci "proto-iam->sdk" "ts/packages/paigasus-proto/src/generated/paigasus/iam/v1/iam_pb.ts" \
-    "paigasus-proto-ts:build,paigasus-proto-ts:test,paigasus-sdk-ts:build,paigasus-sdk-ts:test,ts:lint"
+    "paigasus-proto-ts:build,paigasus-proto-ts:test,paigasus-sdk-ts:build,paigasus-sdk-ts:test,ts:lint,paigasus-discovery-ts:build,paigasus-discovery-ts:test"
+  # SMA-509 — a @paigasus/discovery SOURCE edit must select its own build/test AND the
+  # Docker-backed `test-e2e` task, plus `ts:lint`. Nothing else asserts this package's tasks are
+  # reachable from an edit to it: `repo:input-liveness` scans `repo:*` tasks only and proves
+  # DECLARED inputs are live, never that NEEDED ones are declared.
+  # The expected set is DERIVED with the same no-flag `moon query tasks --affected` traversal
+  # `_assert_task_case_impl` uses, not typed by hand.
+  run_task_case_ci "discovery->discovery-tasks" "ts/packages/paigasus-discovery/src/core/state.ts" \
+    "paigasus-discovery-ts:build,paigasus-discovery-ts:test,paigasus-discovery-ts:test-e2e,ts:lint"
+  # The SECOND anchor, and it is not redundant. The case above anchors only on src/core/, so
+  # narrowing the inherited `sources` file group to `src/core/**/*` would leave it green while an
+  # edit to an ADAPTER stopped selecting anything — and the adapters are where the Redis lock
+  # primitives live, which is exactly what the test-e2e task exists to exercise. Two anchors on
+  # opposite sides of the glob prove its WIDTH rather than one path inside it. This repo's
+  # precedent is the `ui->console` / `ui-components->console` pair.
+  run_task_case_ci "discovery-adapters->discovery-tasks" "ts/packages/paigasus-discovery/src/adapters/memory-cache.ts" \
+    "paigasus-discovery-ts:build,paigasus-discovery-ts:test,paigasus-discovery-ts:test-e2e,ts:lint"
   # SMA-625, spec § 8.4 and § 11.2 obligation 9 — a gateway chat.rs edit must select the SDK's
   # test. This is the ONLY control on the '/rs/.../chat.rs' entry in paigasus-sdk-ts:test's
   # `inputs`. tests/terminal-frame.test.ts reads TERMINAL_SSE_ERROR out of that Rust file by
