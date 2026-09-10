@@ -323,7 +323,7 @@ In `ts/packages/paigasus-sdk/src/transport.ts`, replace the first line of the in
 
 Run: `export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"; cd ts/packages/paigasus-sdk && pnpm exec vitest run`
 
-Expected: PASS, **248 tests in 12 files** (237 after Task 1, plus 11 — nine `it` blocks and two `it.each` blocks contributing 2 each).
+Expected: PASS, **248 tests in 12 files** (237 after Task 1, plus 11 — nine test blocks: seven plain `it`, and two `it.each` blocks contributing 2 runs each).
 
 - [ ] **Step 5: Format, typecheck and commit**
 
