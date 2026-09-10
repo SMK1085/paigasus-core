@@ -29,6 +29,13 @@ describe('AC3: single-flight across PROCESSES', () => {
     // genuinely atomic in Redis, rather than merely appearing so because one event loop
     // serialized every caller.
     //
+    // Each worker (support/worker.ts) awaits a Redis-backed rendezvous barrier before its first
+    // `resolveService` call. Without it, `Promise.all(execFile(...))` gives no guarantee the four
+    // processes' first cache reads overlap: a fast worker could finish its whole probe-and-write
+    // before a slow sibling even reads the (still-empty) cache, so the sibling finds a fresh
+    // record and never probes — `probes === 1` would then pass by timing luck even without a real
+    // distributed lock.
+    //
     const prefix = randomPrefix();
     const results = await Promise.all(Array.from({ length: 4 }, () => run(process.execPath, ['--import', loaderUrl, worker, fixture.url, prefix, '600'])));
     const parsed = results.map((r) => JSON.parse(r.stdout) as { probes: number; state: string });

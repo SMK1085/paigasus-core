@@ -4,7 +4,7 @@ import { createRedisDescriptorCache } from '../src/adapters/redis-cache.js';
 
 function fakeClient(over: Record<string, unknown> = {}): never {
   return {
-    options: { disableOfflineQueue: true, commandOptions: { timeout: 1_000 } },
+    options: { disableOfflineQueue: true, commandOptions: { timeout: 1_000 }, socket: { socketTimeout: 2_000 } },
     listenerCount: () => 1,
     ...over,
   } as never;
@@ -34,5 +34,16 @@ describe('createRedisDescriptorCache preconditions', () => {
 
   it('refuses a client with a non-positive command timeout', () => {
     expect(() => createRedisDescriptorCache(fakeClient({ options: { disableOfflineQueue: true, commandOptions: { timeout: 0 } } }))).toThrow(/timeout/);
+  });
+
+  it('refuses a client missing socketTimeout', () => {
+    // commandOptions.timeout only bounds a command while it is QUEUED. Without socketTimeout a
+    // Redis that accepts a command and never answers blocks the render path indefinitely — the
+    // same class of failure the queued-phase check cannot reach.
+    expect(() => createRedisDescriptorCache(fakeClient({ options: { disableOfflineQueue: true, commandOptions: { timeout: 1_000 } } }))).toThrow(/socketTimeout/);
+  });
+
+  it('refuses a client with a non-positive socketTimeout', () => {
+    expect(() => createRedisDescriptorCache(fakeClient({ options: { disableOfflineQueue: true, commandOptions: { timeout: 1_000 }, socket: { socketTimeout: 0 } } }))).toThrow(/socketTimeout/);
   });
 });

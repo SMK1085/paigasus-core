@@ -25,6 +25,22 @@ describe('createDiscovery', () => {
     expect(get).not.toHaveBeenCalled();
   });
 
+  it('reports absent for an inherited Object.prototype key, never available/degraded (F4)', async () => {
+    // THE REGRESSION THIS TEST EXISTS FOR. `deps.services` is typed as a plain
+    // `Readonly<Record<string, string>>`, so a caller may pass an object literal rather than
+    // `parseServiceMap`'s null-prototype result. `deps.services['constructor'] === undefined` is
+    // FALSE — it resolves to the inherited `Function` — which used to skip the `absent` branch
+    // and hand a non-URL to `probeService`, reporting `degraded` for a service that was never
+    // configured at all.
+    const cache = createMemoryDescriptorCache();
+    const get = vi.spyOn(cache, 'get');
+    const d = make({ cache });
+    for (const service of ['constructor', '__proto__']) {
+      expect(await d.getServiceState(service, 'tok')).toEqual({ state: 'absent', service });
+    }
+    expect(get).not.toHaveBeenCalled();
+  });
+
   it('reports available for a configured, answering service', async () => {
     expect(await make().getServiceState('iam', 'tok')).toMatchObject({ state: 'available' });
   });

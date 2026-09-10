@@ -23,8 +23,14 @@ export type ServiceDescriptor = {
  * A closed union, never free text: the UI branches on the code and never on a message.
  * This vocabulary is owned HERE and not imported from @paigasus/sdk — that package's
  * `Presentation` union cannot express these cases (spec F8).
+ *
+ * `DEGRADED_REASONS` is the single source of truth: `DegradedReason` is DERIVED from it, so a
+ * runtime validator (`parseRecord` in core/record.ts) can check an untrusted value against the
+ * real vocabulary without hand-duplicating the member list and risking drift.
  */
-export type DegradedReason = 'timeout' | 'network' | 'unauthorized' | 'not-implemented' | 'bad-response' | 'server-error' | 'cache-unavailable';
+export const DEGRADED_REASONS = ['timeout', 'network', 'unauthorized', 'not-implemented', 'bad-response', 'server-error', 'cache-unavailable'] as const;
+
+export type DegradedReason = (typeof DEGRADED_REASONS)[number];
 
 export type ServiceState =
   | { readonly state: 'absent'; readonly service: string }

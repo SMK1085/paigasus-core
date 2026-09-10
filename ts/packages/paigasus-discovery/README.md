@@ -85,12 +85,19 @@ request**: `getServiceState` memoizes per handle, so N `<Capability>` elements
 over one service cost one resolution.
 
 The Redis client is **injected and already connected**. It must be created with
-`disableOfflineQueue: true`, an `error` listener, and `commandOptions: { timeout }`
-set to a positive number of milliseconds — all three are asserted, because
-without the first a Redis outage becomes hung page renders, without the second
-node-redis crashes the process, and without the third a hung Redis blocks the
+`disableOfflineQueue: true`, an `error` listener, `commandOptions: { timeout }`,
+and `socket: { socketTimeout }` — all four are asserted, because without the
+first a Redis outage becomes hung page renders, without the second node-redis
+crashes the process, and without the third and fourth a hung Redis blocks the
 render path indefinitely instead of failing fast. The error listener must never
 log the raw error, which embeds the DSN.
+
+The two timeouts bound different phases and neither substitutes for the other:
+`commandOptions.timeout` bounds a command only while it is QUEUED, before it is
+written to the socket. `socket.socketTimeout` is the end-to-end deadline that
+covers the in-flight phase — once a command is written and awaiting a reply,
+only `socketTimeout` stops a Redis that accepts the command and never answers.
+Both must be positive, finite numbers of milliseconds.
 
 ### `waitUntil`
 

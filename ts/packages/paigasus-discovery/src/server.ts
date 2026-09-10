@@ -111,7 +111,14 @@ export function createDiscovery(deps: CreateDiscoveryDeps): Discovery {
   };
 
   function getServiceState(service: string, token: string): Promise<ServiceState> {
-    if (deps.services[service] === undefined) {
+    // Object.hasOwn, never a bare `=== undefined` check: `deps.services` is typed as a plain
+    // `Readonly<Record<string, string>>`, so a caller CAN pass an object literal rather than
+    // `parseServiceMap`'s null-prototype result. `deps.services['constructor'] === undefined` is
+    // false — it finds the inherited `Function` on `Object.prototype` — so `service: 'constructor'`
+    // (or `'__proto__'`, `'toString'`, ...) would skip the `absent` branch entirely and hand a
+    // non-URL to `probeService`, which then reports a configured service as `degraded` instead of
+    // `absent`. The package targets ES2022, so `Object.hasOwn` is available.
+    if (!Object.hasOwn(deps.services, service)) {
       // ABSENT is decided from config alone. No cache read, no probe.
       return Promise.resolve({ state: 'absent', service });
     }

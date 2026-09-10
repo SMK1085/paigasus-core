@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import type { DegradedReason, ServiceDescriptor, ServiceState } from '../types.js';
+import { DEGRADED_REASONS, type DegradedReason, type ServiceDescriptor, type ServiceState } from '../types.js';
 
 /**
  * Bumped whenever CacheRecord's shape or DegradedReason's vocabulary changes.
@@ -42,14 +42,30 @@ export const DEFAULT_TIMINGS: Timings = {
 };
 
 /**
+ * Bounded allowance for clock skew between console replicas that write `outcomeAt` on their own
+ * clocks. Do NOT reject every future timestamp outright: legitimate skew between zones produces
+ * small positive values, and rejecting those would treat every record from a slightly-ahead
+ * replica as corrupt. Instead, a timestamp more than this many milliseconds in the future is
+ * treated as STALE (forces a revalidation) rather than fresh — without this, a far-future
+ * `outcomeAt` (clock error, or a corrupt/malicious value) would suppress revalidation until the
+ * hard TTL, the opposite of the fail-fast behaviour freshness exists to provide.
+ */
+export const CLOCK_SKEW_ALLOWANCE_MS = 5_000;
+
+/**
  * Whether a record may be served without re-probing.
  *
  * Reads `outcomeAt` in BOTH arms. `descriptorAt` moves only on success and is carried for
  * observability alone — using it for the `ok` arm would leave a failed probe honoured for
  * FRESH_MS whenever a stale descriptor happened to be recent, making NEGATIVE_MS dead code.
+ *
+ * An `outcomeAt` more than `CLOCK_SKEW_ALLOWANCE_MS` in the future is treated as stale (see the
+ * comment on that constant) — checked before either arm below, since a far-future timestamp would
+ * otherwise trivially satisfy `age < t.freshMs` via a large negative `age`.
  */
 export function isFresh(rec: CacheRecord, now: number, t: Timings): boolean {
   const age = now - rec.outcomeAt;
+  if (age < -CLOCK_SKEW_ALLOWANCE_MS) return false;
   return rec.outcome === 'ok' ? age < t.freshMs : age < t.negativeMs;
 }
 
@@ -96,10 +112,17 @@ export function parseRecord(raw: string): CacheRecord | null {
   if (typeof parsed !== 'object' || parsed === null) return null;
   const r = parsed as Record<string, unknown>;
   if (r['version'] !== RECORD_VERSION) return null;
-  if (typeof r['rev'] !== 'number') return null;
-  if (typeof r['descriptorAt'] !== 'number' || typeof r['outcomeAt'] !== 'number') return null;
+  // `rev` starts at 1 on the first write (see single-flight.ts's `recordFor`) and only ever
+  // increments, so anything but a positive safe integer is impossible for a genuine record.
+  if (typeof r['rev'] !== 'number' || !Number.isSafeInteger(r['rev']) || r['rev'] <= 0) return null;
+  if (typeof r['descriptorAt'] !== 'number' || !Number.isFinite(r['descriptorAt']) || r['descriptorAt'] < 0) return null;
+  if (typeof r['outcomeAt'] !== 'number' || !Number.isFinite(r['outcomeAt']) || r['outcomeAt'] < 0) return null;
   if (r['outcome'] !== 'ok' && r['outcome'] !== 'fail') return null;
   if (r['descriptor'] !== null && !isDescriptor(r['descriptor'])) return null;
-  if (r['reason'] !== null && typeof r['reason'] !== 'string') return null;
+  // A foreign or corrupt `reason` must never reach `toState`/`ServiceState`, a CLOSED union:
+  // `disabled.tsx`'s `REASON_TEXT[reason]` lookup would return `undefined` and render "<service>
+  // is undefined" to the user. Validated against DEGRADED_REASONS — the one place the vocabulary
+  // is declared — so this check cannot drift from the type.
+  if (r['reason'] !== null && !(DEGRADED_REASONS as readonly unknown[]).includes(r['reason'])) return null;
   return parsed as CacheRecord;
 }

@@ -17,7 +17,7 @@ export async function startRedis(): Promise<RedisFixture> {
  * in @paigasus/auth's createRedisSessionStore.
  */
 export async function connect(url: string): Promise<RedisClientType> {
-  const client: RedisClientType = createClient({ url, disableOfflineQueue: true, commandOptions: { timeout: 5_000 } });
+  const client: RedisClientType = createClient({ url, disableOfflineQueue: true, commandOptions: { timeout: 5_000 }, socket: { socketTimeout: 10_000 } });
   // Never log the raw error: node-redis embeds the DSN in its connection errors.
   client.on('error', () => undefined);
   await client.connect();

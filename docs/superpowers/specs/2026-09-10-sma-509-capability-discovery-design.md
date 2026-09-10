@@ -925,7 +925,7 @@ verified against the code before folding in. Accepted in full:
 | Finding | Change |
 |---|---|
 | BLOCKER — §10's reasons cannot come from `mapError` | Dropped the `@paigasus/sdk` dependency; this package owns the vocabulary (F8, §10) |
-| BLOCKER — invariant 5, the fenced write, was dropped | Added `rev` + Lua CAS + the started-before rule (§8.3) |
+| BLOCKER — invariant 5, the fenced write, was dropped | Added `rev` + Lua CAS (§8.3) |
 | BLOCKER — the record→state mapping was undefined and "fresh" ambiguous | Added `isFresh` on `outcomeAt` and the `toState` table (§6.2, §6.3) |
 | BLOCKER — a shared entry is poisoned by one user's bad token | `401`/`403` are caller-scoped, never cached (§7.2) |
 | MAJOR — lock-wait bound equalled the probe timeout | Separate `LOCK_WAIT_MS`, asserted ordering, final re-read (§5.2, §8.2) |
