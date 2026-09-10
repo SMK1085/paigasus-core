@@ -113,6 +113,20 @@ describe('the two response shapes', () => {
     expect(result.requestId).toBe('req-json');
   });
 
+  // A media type is case-insensitive (RFC 9110). Before this, an upper-cased head fell through to
+  // the JSON arm and the SDK read an SSE stream as a JSON body.
+  it.each(['text/event-stream', 'TEXT/EVENT-STREAM', 'Text/Event-Stream; charset=utf-8'])('treats %s as a stream', async (ct) => {
+    const body = new ReadableStream<Uint8Array>({ start: (c) => c.close() });
+    const response = new Response(body, { status: 200, headers: { 'content-type': ct } });
+    const fetchImpl = vi.fn(() => Promise.resolve(response));
+    const client = createChatClient({ baseUrl: BASE, fetch: fetchImpl }, { bearer: 'T' });
+
+    const result = await client.completions({ stream: true });
+    expect(result.kind).toBe('stream');
+    if (result.kind !== 'stream') throw new Error('unreachable');
+    expect(result.body).toBe(response.body);
+  });
+
   // AC 4. The SDK does not read, buffer, decode or re-encode the stream.
   it('returns the IDENTICAL ReadableStream object for a 2xx SSE response', async () => {
     const body = new ReadableStream<Uint8Array>({ start: (c) => c.close() });

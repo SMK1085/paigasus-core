@@ -14,6 +14,32 @@
 
 **Issue:** SMA-625. **Branch:** `feature/sma-625-ts-sdk-error-mapping-and-chat-client`. **Worktree:** `.claude/worktrees/sma-625`.
 
+## Status — SUPERSEDED IN PLACES; the spec is the authority
+
+This plan is the **historical record of how the work was executed**, not a description of the code
+as it now stands. It was written before a second adversarial challenge and before a review round,
+and several of its details are deliberately not updated to match what shipped — rewriting an
+executed plan to agree with later decisions would destroy the record of what was actually decided
+when.
+
+Where this document and
+`docs/superpowers/specs/2026-09-09-sma-508-sdk-design.md` disagree, **the spec is correct**. The
+known divergences, all recorded in the spec's § 15.2:
+
+- The override table has **six** entries, not the four this plan's Task 3 describes:
+  `UPSTREAM_UNAVAILABLE`, `UPSTREAM_TIMEOUT`, `UPSTREAM_ERROR`, `CAPABILITY_DISABLED`,
+  `INVALID_REQUEST_SCHEMA` and `PRINCIPAL_INACTIVE`.
+- `ResourceExhausted` and HTTP 429 map to **`rate-limited`**, not `degraded`. `Unimplemented` and
+  501 map to **`generic`**, not `disabled` — which is what makes the `CAPABILITY_DISABLED` override
+  do real work rather than restate the transport table.
+- `readEnvelope` treats an **empty** `message` as absent, falling back to `HTTP <status>`.
+- `readBody` returns a **discriminated** result, so a body-read failure on a 2xx is a transport
+  error rather than `{ kind: 'json', body: null }`.
+- `createTerminalFrameParser` takes the **committed status and the head's ids**, and bounds a
+  pending record.
+- Guarded entries need not live at `src/` root; the guard test resolves each entry's specifier
+  relative to that entry.
+
 ## Global Constraints
 
 - Every source file opens with `// SPDX-License-Identifier: Apache-2.0`.

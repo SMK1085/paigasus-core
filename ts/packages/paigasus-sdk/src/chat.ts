@@ -253,7 +253,12 @@ export function createChatClient(options: ChatClientOptions, auth: { readonly be
         return { kind: 'error', error: mapError({ kind: 'http', status: response.status, headers: response.headers, body: read.ok ? read.body : null }) };
       }
 
-      const contentType = response.headers.get('content-type') ?? '';
+      // LOWERCASED: a media type is case-insensitive per RFC 9110, so `Text/Event-Stream` is the
+      // same type. Without this, such a head falls through to the JSON arm and the SDK tries to
+      // read an SSE stream as a JSON body — the passthrough silently lost on a header spelling.
+      // `includes` rather than an equality test because the header carries parameters
+      // (`; charset=utf-8`).
+      const contentType = (response.headers.get('content-type') ?? '').toLowerCase();
       if (contentType.includes('text/event-stream')) {
         if (response.body === null) {
           return { kind: 'error', error: mapError({ kind: 'transport', cause: 'network', message: 'the gateway answered text/event-stream with no body' }) };

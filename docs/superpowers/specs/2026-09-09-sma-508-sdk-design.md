@@ -84,14 +84,18 @@ Tests live in `tests/`, matching `@paigasus/ui` and `@paigasus/next-config`. The
 `@paigasus/proto` follow *that* package's colocated `*.test.ts` convention instead — a package keeps
 its own habit.
 
-**Revision 2 moved the `./errors` entry to `src/errors.ts`, and this is a correctness fix, not a
-preference.** Revision 1 put every `errors` file one directory deep and named no entry file at all.
-PR B's merged `tests/server-guard.test.ts` pins the guard import as a **literal string** —
-`GUARD_IMPORT = "import './server-guard.js';"` at `:19`, compared with `toBe` at `:52` — for every
-guarded entry in the `exports` map. A guarded entry at `src/errors/…` needs
-`import '../server-guard.js';` and fails that comparison. § 6.2 layer 3 said the test resolves "the
-path relative to each entry"; PR B implemented a string compare instead. So PR C would red a merged
-test on its first commit.
+**Revision 2 moved the `./errors` entry to `src/errors.ts`. That was a correctness fix against the
+test as it then stood — and the CONSTRAINT it worked around no longer exists.** Revision 1 put every
+`errors` file one directory deep and named no entry file at all. PR B's merged
+`tests/server-guard.test.ts` pinned the guard import as a **literal string**, so a guarded entry at
+`src/errors/…`, which needs `import '../server-guard.js';`, could not satisfy it. § 6.2 layer 3 had
+always said the test resolves "the path relative to each entry"; PR B implemented a string compare
+instead, and the file layout was bent to fit the weaker test.
+
+**Superseded (§ 15.2, item 5).** That test now computes each entry's expected specifier from the
+entry's own directory, so a guarded entry may live at any depth. `src/errors.ts` staying at the root
+is now a layout preference, not a requirement — keep it for consistency with `src/iam.ts` and
+`src/chat.ts`, but a future nested guarded entry is legal and the test will check it correctly.
 
 Every **guarded entry** therefore sits at `src/` root, beside the existing `src/iam.ts` and
 `src/index.ts`. The internals stay under `src/errors/`, where no guard is needed because the entry
@@ -954,7 +958,7 @@ column says where each row already holds, so PR C's real scope is visible.
 | `mapError` — gRPC, detail present | A `ConnectError` carrying a real `ErrorInfo` detail round-trips; `correlation_id`/`retryable` read from `metadata`; the three lifted keys are absent from `metadata`; `capability` and `field` survive | new |
 | `mapError` — gRPC, detail absent | A `ConnectError` with no `ErrorInfo` detail falls back to the gRPC status table with a message-only object and throws nothing | new |
 | `mapError` — HTTP, both envelopes | IAM's `{error:{code,message}}` and the gateway's `{error:{message,type,param,code}}`; correlation id from **headers**; tri-state retryable | new |
-| `mapError` — an upstream passthrough (§ 9.5 arm 3) | A real OpenAI `429` envelope with `code: "insufficient_quota"` and `param: null` yields `reason: null`, keeps `rawReason`, and presents `degraded` from the status | new |
+| `mapError` — an upstream passthrough (§ 9.5 arm 3) | A real OpenAI `429` envelope with `code: "insufficient_quota"` and `param: null` yields `reason: null`, keeps `rawReason`, and presents `rate-limited` from the status (§ 9.2) | new |
 | `mapError` — a malformed body | A non-JSON HTML `502`, an empty body, and a JSON body with no `error` key each yield a transport-derived presentation and throw nothing | new |
 | `mapError` — a transport failure (§ 9.5 arm 5) | Each of the three causes maps to its presentation; `aborted` is `generic`, not `degraded` | new |
 | `mapError` — degradation (AC 1) | Unknown reason yields `reason: null`, keeps `rawReason` and `correlationId`; unknown domain yields `domain: null`, keeps `rawDomain` | new |
