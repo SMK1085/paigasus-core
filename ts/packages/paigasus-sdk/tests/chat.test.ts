@@ -104,12 +104,10 @@ describe('the two response shapes', () => {
 
 describe('the client never throws a mapped error', () => {
   it('maps a rejected fetch to the transport arm', async () => {
-    // Not `async`: the function always throws synchronously, so TS infers `never` — a subtype of
-    // `Promise<Response>` — and the throw is caught the same way a rejected promise would be,
-    // since the call happens inside the `try` around `await fetchImpl(...)` in src/chat.ts.
-    const fetchImpl = vi.fn(() => {
-      throw new TypeError('fetch failed');
-    });
+    // A real `fetch` REJECTS on a network failure; it does not throw synchronously. A rejection
+    // is caught the same way a synchronous throw would be, since the call happens inside the
+    // `try` around `await fetchImpl(...)` in src/chat.ts — this form just matches reality.
+    const fetchImpl = vi.fn(() => Promise.reject(new TypeError('fetch failed')));
     const client = createChatClient({ baseUrl: BASE, fetch: fetchImpl }, { bearer: 'T' });
 
     const result = await client.completions({});
@@ -121,9 +119,17 @@ describe('the client never throws a mapped error', () => {
 
   it('reports a caller abort as aborted, not as a service fault', async () => {
     const controller = new AbortController();
+    // `throwIfAborted()` is the ONLY way this mock produces the "aborted" outcome — no
+    // unconditional fallback throw. A fallback throw would make this row pass even if the
+    // caller's signal never reached `fetch` at all: src/chat.ts classifies an abort from its
+    // OWN `callerSignal` variable, not from what got thrown, so any throw here would read as
+    // "aborted" regardless of whether `init.signal` itself was aborted. Falling through to a
+    // mundane 2xx response instead means this row only reports "aborted" when the signal
+    // `fetch` actually received is the one that's aborted — exactly what dropping caller-signal
+    // forwarding (src/chat.ts's composite `signal:` expression) would break.
     const fetchImpl = vi.fn((_u: unknown, init?: RequestInit) => {
       init?.signal?.throwIfAborted();
-      throw new DOMException('aborted', 'AbortError');
+      return Promise.resolve(new Response(null, { status: 200 }));
     });
     const client = createChatClient({ baseUrl: BASE, fetch: fetchImpl }, { bearer: 'T' });
     controller.abort();
@@ -198,5 +204,32 @@ describe('cancellation', () => {
     if (result.kind !== 'stream') throw new Error('unreachable');
     await result.body.cancel();
     expect(cancelled).toBe(true);
+  });
+
+  // Closes the gap the code review found: no row asserted that the CALLER'S OWN signal reaches
+  // `fetch`, nor that it stays live past `clearTimeout` — which is exactly what the caller needs
+  // once the head is committed, since nothing else can end the stream at that point. This row
+  // requires BOTH: the composite signal must include `callerSignal` at the `fetch` call, and it
+  // must still be listening after src/chat.ts's `finally { clearTimeout(timer); }` has run.
+  it('forwards a caller abort into the underlying fetch after the head is committed', async () => {
+    const callerController = new AbortController();
+    const fetchImpl = streamingFetch([{ afterMs: 100, text: 'data: {"choices":[]}\n\n' }]);
+    const client = createChatClient({ baseUrl: BASE, fetch: fetchImpl }, { bearer: 'T' });
+
+    const result = await client.completions({ stream: true }, { signal: callerController.signal });
+    expect(result.kind).toBe('stream');
+    if (result.kind !== 'stream') throw new Error('unreachable');
+
+    // The head is committed and the header timer already cleared by this point. Aborting the
+    // caller's OWN controller now is the only thing left in this test that can reach the stream.
+    callerController.abort();
+
+    // The assertion is that this loop rejects, not what it yields — `chunks` is never asserted on.
+    const chunks: Uint8Array[] = [];
+    await expect(async () => {
+      for await (const chunk of result.body as unknown as AsyncIterable<Uint8Array>) {
+        chunks.push(chunk);
+      }
+    }).rejects.toThrow();
   });
 });
