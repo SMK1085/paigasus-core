@@ -133,6 +133,20 @@ catalog:
   '@semantic-release/commit-analyzer': ^13.0.1
   # Protobuf-ES v2 runtime (SMA-389)
   '@bufbuild/protobuf': ^2.14.1
+  # Connect-ES v2 — the gRPC transport and typed clients @paigasus/sdk builds on (SMA-508,
+  # ADR-0018). `@connectrpc/connect` is the protocol-independent client half (createClient,
+  # ContextValues, Interceptor); `@connectrpc/connect-node` supplies createGrpcTransport, which is
+  # HTTP/2 ONLY — it has no `httpVersion` option, unlike createConnectTransport and
+  # createGrpcWebTransport.
+  #
+  # The two entries must move TOGETHER. MEASURED on connect-node@2.2.0: its peer dependency on
+  # `@connectrpc/connect` is the EXACT string "2.2.0", not a range — so bumping one caret entry
+  # without the other makes pnpm's peer resolution fail rather than silently drift. Note the
+  # carets here are NOT what keeps them aligned; that exact peer requirement and the resolution
+  # recorded in pnpm-lock.yaml are. connect-node's `@bufbuild/protobuf` peer range IS a range,
+  # ^2.7.0, which the entry above satisfies.
+  '@connectrpc/connect': ^2.2.0
+  '@connectrpc/connect-node': ^2.2.0
   # napi-rs CLI — drives `napi build --platform` for the Node FFI binding (SMA-420).
   # It is a devDependency of @paigasus/node-bindings, but that crate is reached via a `file:`
   # specifier (not a workspace member), and pnpm does NOT install a dependency's devDeps — so
