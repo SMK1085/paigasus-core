@@ -473,10 +473,27 @@ function chatCompletion(
   package.
 - **Branch on `content-type`, never on the caller's own `stream` flag.** Row 3 of § 8.1 is a
   `stream: true` request answered as JSON. A client that trusts its own flag misreads it.
-- **A non-2xx throws a `PaigasusError`.** One rule, not two: the result union covers 2xx only, and
-  every failure — transport, non-2xx, or a body that will not parse — leaves as a thrown
-  `PaigasusError` from § 9.5 arm 3. A third `{ kind: 'error' }` variant would let a caller ignore a
-  failure by not checking a discriminant.
+- **A non-2xx throws a `PaigasusHttpError`, which CARRIES the `PaigasusError`.** One rule, not two:
+  the result union covers 2xx only, and every failure — transport, non-2xx, or a body that will not
+  parse — leaves as a throw. A third `{ kind: 'error' }` variant would let a caller ignore a failure
+  by not checking a discriminant.
+
+  ```ts
+  export class PaigasusHttpError extends Error {
+    readonly error: PaigasusError;
+  }
+  ```
+
+  **Amended after implementation review.** Revision 2 said the client throws the `PaigasusError`
+  itself. That trips `@typescript-eslint/only-throw-error`, and the rule is right: a plain data
+  object has no stack, so `catch (e) { logger.error(e) }` in BFF middleware yields a log line with
+  no origin, and both `pino`'s `err` serializer and Next's error boundary test `instanceof Error`.
+  The two concerns are separable — the thrown value needs a stack, the *rendered* value needs to be
+  a serializable prop — so the class carries the data object rather than replacing it. § 9.1's shape
+  is unchanged and still crosses the RSC boundary. This also aligns with `@paigasus/auth`, whose
+  `core/errors.ts` already bases every failure on `abstract class AuthError extends Error`; two
+  packages in one SDK should not disagree on how a failure is thrown. Deferring it would make it a
+  breaking change the moment a console consumes the package.
 - **The streaming variant carries the ids** because the terminal frame cannot (§ 8.4).
 
 ### 8.3 Streaming is a passthrough — AC 4
