@@ -55,3 +55,63 @@ export function toSessionView(rec: SessionRecord): SessionView {
     grantsAvailable: rec.principal.grantsAvailable,
   };
 }
+
+function isObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/**
+ * The ONE statement of what a stored session record must look like (SMA-626 § 4.2). Both adapters
+ * call it, replacing the standalone `version !== 1` check each of them used to carry, so the
+ * absent-and-deleted policy is stated once rather than twice.
+ *
+ * IT CHECKS EVERY REQUIRED FIELD, not only the ones the read path touches. Three measured holes
+ * are the reason:
+ *
+ *   1. `JSON.parse('null')` SUCCEEDS, so redis-store's parse guard never fires on a stored
+ *      literal `null`; reading `.version` off it then throws a TypeError that #guarded converts
+ *      into SessionStoreUnavailable — a store-outage signal against a healthy Redis.
+ *   2. A body of `{ version: 1 }` passes two NaN comparisons in a row in resolveSession
+ *      (`now >= undefined` and `now >= NaN` are both false), so it is returned as a LIVE session
+ *      carrying `accessToken: undefined`.
+ *   3. A principal shaped `{ roleGrants: [] }` yields `grantsAvailable: undefined` through
+ *      toSessionView, and `can()` FAILS OPEN on that field (src/client.ts:67) — so every
+ *      browser-side capability check returns true. The fail-open is correct and deliberate; this
+ *      predicate is what keeps a poisoned record from reaching it.
+ *
+ * `refreshToken` is the one optional field: absent is legal, an explicit `null` is not
+ * (`exactOptionalPropertyTypes`).
+ *
+ * THIS PREDICATE GATES READS, NOT WRITES. Both store adapters call it only in `get`, never in
+ * `set`. A record that fails it could in principle still be WRITTEN — logged as
+ * `session.created`, then deleted on its own first read with no event that explains why, a login
+ * loop with no visible cause. In this package today that gap is unreachable: every write goes
+ * through `handleCallback` or a refresh, both of which build the record from `ResolvedPrincipal`
+ * and `OidcTokens` (typed, not `unknown`), and `CreateAuthRuntimeDeps.resolver` is checked by the
+ * compiler, not at runtime. This is defence-in-depth against a future write path, not a live bug.
+ */
+export function isSessionRecord(value: unknown): value is SessionRecord {
+  if (!isObject(value)) return false;
+  if (value['version'] !== 1) return false;
+  if (!Number.isFinite(value['rev'])) return false;
+  if (!Number.isFinite(value['accessExpiresAt'])) return false;
+  if (!Number.isFinite(value['absoluteExpiresAt'])) return false;
+  if (typeof value['accessToken'] !== 'string') return false;
+  if ('refreshToken' in value && typeof value['refreshToken'] !== 'string') return false;
+
+  const claims = value['idTokenClaims'];
+  if (!isObject(claims)) return false;
+  if (typeof claims['iss'] !== 'string' || typeof claims['sub'] !== 'string') return false;
+
+  const principal = value['principal'];
+  if (!isObject(principal)) return false;
+  if (principal['principalPrn'] !== null && typeof principal['principalPrn'] !== 'string') return false;
+  if (typeof principal['issuer'] !== 'string' || typeof principal['subject'] !== 'string') return false;
+  if (typeof principal['grantsAvailable'] !== 'boolean') return false;
+  const memberships = principal['memberships'];
+  if (!Array.isArray(memberships)) return false;
+  if (!memberships.every((m) => isObject(m) && typeof m['id'] === 'string' && typeof m['principalPrn'] === 'string' && typeof m['nodePrn'] === 'string')) return false;
+  const grants = principal['roleGrants'];
+  if (!Array.isArray(grants)) return false;
+  return grants.every((g) => isObject(g) && typeof g['scopePrn'] === 'string' && typeof g['roleKey'] === 'string');
+}

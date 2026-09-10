@@ -612,9 +612,16 @@ error from a server component reaches the nearest `error.tsx` and renders a
 
 ```
 onRefreshTimeout(rec):
-  if now() < rec.accessExpiresAt:  return { ...rec, refreshPending: true }
+  if now() < rec.accessExpiresAt:  return { ...rec, refreshState: 'pending' }
   else:                            return null      # -> treated as signed out
 ```
+
+**Superseded by SMA-626.** The pseudocode above checks `accessExpiresAt` alone. SMA-626
+changed `resolveSession` so both the lock-timeout branch and the refresh-failure branch
+instead test `now() < Math.min(rec.accessExpiresAt, rec.absoluteExpiresAt)`
+(`src/core/single-flight.ts:171` and `:236`): a session past its absolute cap now returns
+`null` even while its access token is still live. This document keeps the original
+pseudocode as the historical record of what SMA-506 designed.
 
 The access token is often still valid inside the skew window, so the request
 proceeds on the stale-but-live token and the next request refreshes. Only a
@@ -1028,7 +1035,10 @@ Minimum event set: `login.started`, `login.callback_rejected` (with a `reason`
 enum — `txn_missing`, `txn_mismatch`, `state_unknown`, `code_exchange_failed`),
 `session.created`, `session.refreshed`, `session.refresh_failed`,
 `session.refresh_timeout`, `session.refresh.persist_failed`, `session.deleted`,
-`logout.completed`, `store.unavailable`.
+`session.resolve_failed`, `logout.completed`, `store.unavailable`.
+
+- `session.resolve_failed` — `getSession` could not resolve the session for a reason that is NOT a
+  store outage (SMA-626 § 2.4). `store.unavailable` is reserved for the store itself.
 
 **Redaction rule, stated per field:** no event carries a token, a refresh token,
 an authorization code, the client secret, the Redis DSN, or a txn secret. `sid`

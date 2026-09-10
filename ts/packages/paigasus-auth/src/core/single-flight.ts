@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import { RefreshRejected } from './errors.js';
 import { newLockToken } from './ids.js';
 import { shouldRefresh } from './refresh-policy.js';
 import type { SessionRecord } from './session.js';
@@ -22,7 +23,19 @@ export interface ResolveDeps {
   ttlMs: number;
 }
 
-export type ResolvedSession = SessionRecord & { refreshPending?: boolean };
+/**
+ * `refreshState` says WHY the returned record may be stale, and the two values are opposites:
+ *
+ *   'pending' — another holder is refreshing right now (the lock wait timed out). The next
+ *               request very likely sees a fresh record.
+ *   'failed'  — the refresh itself failed transiently and NOBODY is refreshing. The next request
+ *               fails the same way.
+ *
+ * One boolean cannot carry both, and a consumer reading it as "retry shortly" would hot-loop
+ * through an identity-provider outage. It replaced the earlier single boolean flag in SMA-626
+ * § 2.3, while that flag still had no consumer anywhere in the repository.
+ */
+export type ResolvedSession = SessionRecord & { refreshState?: 'pending' | 'failed' };
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -121,15 +134,51 @@ export async function resolveSession(deps: ResolveDeps, sid: string): Promise<Re
         // used to propagate all the way to `get-session.ts`'s catch, which logs `store.unavailable`
         // with `stage: 'get_session'` — a store failure and an IdP outage then produce the
         // IDENTICAL event, so an operator investigating a healthy Redis chases the wrong system.
-        // Log the distinguishing event HERE, at the point that actually knows which call failed,
-        // then rethrow unchanged so every existing caller contract (get-session.ts's degrade to
-        // signed-out, this function's own lock release in `finally`) is untouched. Same field
-        // discipline as the rest: no token, no URL, no raw error object — only the truncated sid.
+        // Log the distinguishing event HERE, at the point that actually knows which call failed.
+        // Same field discipline as the rest: no token, no URL, no raw error object — only the
+        // truncated sid, a fixed reason string, and a boolean.
         let tokens: RefreshedTokens;
         try {
           tokens = await refresh(refreshToken);
         } catch (err) {
-          logger.event('session.refresh_failed', { sid: sidTag(sid) });
+          // SMA-626 § 2.3. THREE outcomes, not one.
+          //
+          // A definitive rejection (RefreshRejected — only `invalid_grant`, see
+          // adapters/oidc.ts's classifier) means the refresh token is revoked: an administrator
+          // ended this session, or the user signed out elsewhere. Sign out, and DELETE — leaving
+          // the record would keep a revoked refresh token and a live access token in the store for
+          // the full ttlMs, and every later read would re-take the lock and re-call the token
+          // endpoint until then. The same reasoning as the `no_refresh_token` and
+          // `session.refresh.persist_failed` deletes above and below.
+          //
+          // A transient failure (a network error, a timeout, a 5xx, an unknown OAuth code) with a
+          // still-live access token degrades exactly the way the lock-timeout branch does: the
+          // token works, so proceed on it and let the next request retry. Signing the user out
+          // there would throw away up to skewMs of perfectly good session because someone else's
+          // service blipped.
+          //
+          // A transient failure with a hard-expired token has nothing left to proceed on.
+          //
+          // `liveUntil` takes the MINIMUM of the two expiries. handleCallback sets them
+          // independently (http/routes.ts:240-241) and only a refresh write clamps accessExpiresAt
+          // to the cap, so an IdP whose `expires_in` exceeds PAIGASUS_SESSION_ABSOLUTE_TTL_SECONDS
+          // mints a first record whose access token outlives its own absolute cap.
+          //
+          // `reason` is REQUIRED, not decoration. With `degraded` alone, a benign single-session
+          // revocation and an outage that signs users out produce the identical line — the exact
+          // conflation this whole section exists to remove.
+          const rejected = err instanceof RefreshRejected;
+          const liveUntil = Math.min(fresh.accessExpiresAt, fresh.absoluteExpiresAt);
+          const degraded = !rejected && Date.now() < liveUntil;
+
+          logger.event('session.refresh_failed', { sid: sidTag(sid), reason: rejected ? 'rejected' : 'transient', degraded });
+
+          // The early return still runs the `finally` below, so the lock is released either way.
+          if (degraded) return { ...fresh, refreshState: 'failed' };
+          if (rejected) {
+            await store.delete(sid);
+            logger.event('session.deleted', { sid: sidTag(sid), reason: 'refresh_rejected' });
+          }
           throw err;
         }
         const accessTtlMs = Math.max(tokens.expiresIn * 1000, skewMs + MIN_ACCESS_TTL_BUFFER_MS); // F7
@@ -181,8 +230,10 @@ export async function resolveSession(deps: ResolveDeps, sid: string): Promise<Re
       if (last === null) return null;
       // Still inside the skew window means the access token is live: proceed on it and let the
       // next request refresh. Only a genuinely expired token degrades to "signed out", which has
-      // a defined recovery path, rather than to a 500 from a server component.
-      return Date.now() < last.accessExpiresAt ? { ...last, refreshPending: true } : null;
+      // a defined recovery path, rather than to a 500 from a server component. `Math.min` for the
+      // same reason the refresh catch uses it — a first record's accessExpiresAt is not clamped to
+      // its absolute cap (SMA-626 § 2.3).
+      return Date.now() < Math.min(last.accessExpiresAt, last.absoluteExpiresAt) ? { ...last, refreshState: 'pending' } : null;
     }
 
     await sleep(backoff(attempt));

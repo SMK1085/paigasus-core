@@ -9,6 +9,7 @@
 // createAuthRuntime therefore REFUSES this adapter when the zone map declares more than one zone.
 // It is for local development and single-process tests.
 import type { SessionRecord } from '../core/session.js';
+import { isSessionRecord } from '../core/session.js';
 import type { LoginTransaction, SessionStore } from '../ports/session-store.js';
 
 interface Entry<T> {
@@ -33,8 +34,10 @@ export class MemorySessionStore implements SessionStore {
 
   get(sid: string): Promise<SessionRecord | null> {
     const rec = this.#live(this.#records, sid);
-    // A version mismatch is treated as ABSENT, matching the Redis adapter.
-    if (rec !== null && rec.version !== 1) {
+    // The SAME predicate the Redis adapter uses (SMA-626 § 4). This adapter never parses bytes,
+    // so only a caller violating the type could poison it — sharing the rule means the policy is
+    // stated once rather than twice and drifting.
+    if (rec !== null && !isSessionRecord(rec)) {
       this.#records.delete(sid);
       return Promise.resolve(null);
     }

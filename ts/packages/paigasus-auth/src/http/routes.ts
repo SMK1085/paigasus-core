@@ -31,6 +31,7 @@ import type { SessionRecord } from '../core/session.js';
 import { sidTag } from '../ports/logger.js';
 import type { AuthRuntime } from '../runtime.js';
 import { SESSION_COOKIE, TXN_COOKIE_PREFIX, clearCookie, readCookies, serializeCookie, txnCookieName } from './cookies.js';
+import { AUTH_ROUTE_SUFFIXES, type AuthRouteSuffix } from './route-table.js';
 
 /** Design doc § 9.3: 10 minutes. */
 const TXN_TTL_MS = 10 * 60 * 1000;
@@ -42,46 +43,52 @@ export interface AuthRoutes {
   handle(req: Request): Promise<Response>;
 }
 
+interface RouteEntry {
+  method: 'GET' | 'POST';
+  run(runtime: AuthRuntime, req: Request, url: URL): Promise<Response>;
+}
+
+/**
+ * The route table, keyed by the shared suffix tuple (SMA-626 § 3). `Record<AuthRouteSuffix, …>`
+ * closes the drift in BOTH directions at typecheck time: a suffix added to
+ * `AUTH_ROUTE_SUFFIXES` with no entry here is a missing key, and an entry here for a suffix not in
+ * the tuple is an excess key. That is what binds `middleware.ts`'s `authRoutePaths` to what this
+ * file actually serves, rather than to a second hand-written list that could drift from it.
+ *
+ * Logout is POST, not GET (design doc § 9.5): a GET route that mutates server-side state is
+ * triggerable by an `<img src>` from any page on the internet. No CSRF token is added on top —
+ * `SameSite=Lax` already withholds __Host-pgs_sid from a cross-site form POST, so a forged POST
+ * arrives with no session and does nothing. Recorded here so a later reader does not "fix" it.
+ *
+ * MEASURED 2026-09-10: adding a fifth suffix (`/auth/probe`) to AUTH_ROUTE_SUFFIXES with no entry
+ * here fails typecheck — TS2741, `Property '"/auth/probe"' is missing in type '{ ... }' but
+ * required in type 'Record<"/auth/login" | "/auth/callback" | "/auth/logout" |
+ * "/auth/logout/callback" | "/auth/probe", RouteEntry>'.` Reverting that and instead adding a
+ * spurious `'/auth/probe'` entry here (with the tuple back at four) fails typecheck the other way
+ * — TS2353, `Object literal may only specify known properties, and ''/auth/probe'' does not exist
+ * in type 'Record<"/auth/login" | "/auth/callback" | "/auth/logout" | "/auth/logout/callback",
+ * RouteEntry>'.` Both directions, at build time.
+ */
+const ROUTES: Record<AuthRouteSuffix, RouteEntry> = {
+  '/auth/login': { method: 'GET', run: (runtime, req, url) => handleLogin(runtime, req, url) },
+  '/auth/callback': { method: 'GET', run: (runtime, req, url) => handleCallback(runtime, req, url) },
+  '/auth/logout': { method: 'POST', run: (runtime, req) => handleLogout(runtime, req) },
+  '/auth/logout/callback': { method: 'GET', run: (runtime) => handleLogoutCallback(runtime) },
+};
+
 export function createAuthRoutes(runtime: AuthRuntime): AuthRoutes {
-  // Exact match against THIS runtime's own zone base path (review round 1, M5) — `endsWith`
-  // previously matched `/anything/auth/login` too, harmless only by accident (the redirect URI is
-  // fixed elsewhere) rather than by the route table actually saying what it serves.
-  const loginPath = `${runtime.basePath}/auth/login`;
-  const callbackPath = `${runtime.basePath}/auth/callback`;
-  const logoutPath = `${runtime.basePath}/auth/logout`;
-  const logoutCallbackPath = `${runtime.basePath}/auth/logout/callback`;
+  // Built ONCE per runtime, and matched EXACTLY against this zone's own base path — an `endsWith`
+  // test previously matched `/anything/auth/login` too, harmless only by accident (review round 1,
+  // M5).
+  const table = new Map<string, RouteEntry>(AUTH_ROUTE_SUFFIXES.map((suffix) => [`${runtime.basePath}${suffix}`, ROUTES[suffix]]));
 
   return {
     async handle(req: Request): Promise<Response> {
       const url = new URL(req.url);
-      const { pathname } = url;
-
-      if (pathname === loginPath) {
-        if (req.method !== 'GET') return new Response(null, { status: 405 });
-        return handleLogin(runtime, req, url);
-      }
-
-      if (pathname === callbackPath) {
-        if (req.method !== 'GET') return new Response(null, { status: 405 });
-        return handleCallback(runtime, req, url);
-      }
-
-      // Logout is POST, not GET (design doc § 9.5): a GET route that mutates server-side state is
-      // triggerable by an `<img src>` from any page on the internet. No CSRF token is added on
-      // top of that — `SameSite=Lax` already withholds __Host-pgs_sid from a cross-site form POST,
-      // so a forged POST arrives with no session and does nothing. Recorded here so a later reader
-      // does not "fix" the omission.
-      if (pathname === logoutPath) {
-        if (req.method !== 'POST') return new Response(null, { status: 405 });
-        return handleLogout(runtime, req);
-      }
-
-      if (pathname === logoutCallbackPath) {
-        if (req.method !== 'GET') return new Response(null, { status: 405 });
-        return handleLogoutCallback(runtime);
-      }
-
-      return new Response(null, { status: 404 });
+      const entry = table.get(url.pathname);
+      if (entry === undefined) return new Response(null, { status: 404 });
+      if (req.method !== entry.method) return new Response(null, { status: 405 });
+      return entry.run(runtime, req, url);
     },
   };
 }
@@ -110,7 +117,7 @@ async function handleLogin(runtime: AuthRuntime, req: Request, url: URL): Promis
   // fallback stores `returnTo: ''`. The callback then redirects to `Location: ''`, the browser
   // resolves that as the CURRENT url and re-requests the callback, the txn cookies are already
   // gone, and the retry loops through `txn_missing` back to `/auth/login` forever — login never
-  // completes on a root-mounted zone. `src/next/get-session.ts:94` and `src/runtime.ts:123` both
+  // completes on a root-mounted zone. `src/next/get-session.ts:104` and `src/runtime.ts:123` both
   // already use the trailing-slash form; this call is the one place that had drifted from it.
   const returnTo = validateReturnTo(url.searchParams.get('returnTo'), `${runtime.basePath}/`);
 

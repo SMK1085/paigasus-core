@@ -31,3 +31,25 @@ export class CallbackRejected extends AuthError {
     super(`callback rejected: ${reason}`);
   }
 }
+
+/**
+ * The identity provider REFUSED this refresh token, as opposed to failing to answer. That
+ * distinction decides whether the user is signed out or kept on a still-live access token, so it
+ * is a core concept, not an adapter detail — adapters/oidc.ts maps its library's error onto this,
+ * which is what lets core/single-flight.ts classify without importing adapters/ (SMA-626 § 2.3).
+ *
+ * `oauthError` is typed as the CLOSED set this package admits, not `string`. RFC 6749 § 5.2 does
+ * not bound the value — it is whatever the server's body carried — so a `string` here would leave
+ * the redaction claim resting on the call site, and a later edit widening the set would silently
+ * widen what may be logged. The type and the classifier's membership test are one fact.
+ *
+ * NOT exported from src/server.ts, deliberately: no consumer can produce or observe one.
+ * getSession() swallows every failure into `null`, and CreateAuthRuntimeDeps exposes no OIDC
+ * override.
+ */
+export class RefreshRejected extends AuthError {
+  readonly code = 'oidc_refresh_rejected';
+  constructor(readonly oauthError: 'invalid_grant') {
+    super(`oidc refresh rejected: ${oauthError}`);
+  }
+}
