@@ -1274,7 +1274,10 @@ All three of Revision 1's questions are now **closed**.
 3. **`ResourceExhausted`/429 → `degraded`** (§ 9.2) — the one presentation row worth a second
    opinion. **KEPT as `degraded`,** by the issue owner, on this revision.
 
-### 16.1 What Revision 2 puts to the reader
+### 16.1 What Revision 3 put to the reader — all three now CONFIRMED
+
+The issue owner reviewed all three at the spec-approval gate and confirmed each as written. They are
+recorded here as decisions, not as open questions.
 
 1. **§ 8.5 removes the idle timeout** from the SDK's contract. That is a reduction in scope against
    Revision 1. The alternative is a `TransformStream` wrapper, which breaks the passthrough and
