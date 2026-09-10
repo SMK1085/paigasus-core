@@ -10,8 +10,7 @@ import './server-guard.js';
 
 export { mapError } from './errors/map-error.js';
 export type { ErrorInput } from './errors/map-error.js';
-export { PRESENTATION, presentationOverride } from './errors/presentation.js';
-export type { PresentationEntry } from './errors/presentation.js';
+export { presentationOverride } from './errors/presentation.js';
 export { grpcCodeName, presentationForGrpcCode, presentationForHttpStatus, presentationForTransportCause } from './errors/transport-status.js';
 export { ErrorDomain, ErrorReason } from './errors/types.js';
 export type { PaigasusError, Presentation, TransportCause, TransportInfo } from './errors/types.js';

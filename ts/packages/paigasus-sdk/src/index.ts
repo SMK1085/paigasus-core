@@ -15,5 +15,5 @@ export type { Auth, TransportOptions } from './iam.js';
 export { DEFAULT_HEADER_TIMEOUT_MS, createChatClient, createTerminalFrameParser } from './chat.js';
 export type { ChatClient, ChatClientOptions, ChatResult } from './chat.js';
 
-export { ErrorDomain, ErrorReason, PRESENTATION, grpcCodeName, mapError, presentationForGrpcCode, presentationForHttpStatus, presentationForTransportCause, presentationOverride } from './errors.js';
-export type { ErrorInput, PaigasusError, Presentation, PresentationEntry, TransportCause, TransportInfo } from './errors.js';
+export { ErrorDomain, ErrorReason, grpcCodeName, mapError, presentationForGrpcCode, presentationForHttpStatus, presentationForTransportCause, presentationOverride } from './errors.js';
+export type { ErrorInput, PaigasusError, Presentation, TransportCause, TransportInfo } from './errors.js';

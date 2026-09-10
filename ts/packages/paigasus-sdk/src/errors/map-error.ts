@@ -16,8 +16,12 @@ import type { PaigasusError, Presentation, TransportCause, TransportInfo } from 
 /** The three keys lifted out of ErrorInfo.metadata into their own typed fields. */
 const LIFTED_KEYS = ['retryable', 'correlation_id', 'request_id'] as const;
 
-const CORRELATION_HEADER = 'paigasus-correlation-id';
-const REQUEST_ID_HEADER = 'paigasus-request-id';
+/**
+ * Exported so `src/chat.ts` reads the two success-arm ids off the same literals this module maps
+ * an error with, rather than a second copy of the header names that could drift from these.
+ */
+export const CORRELATION_HEADER = 'paigasus-correlation-id';
+export const REQUEST_ID_HEADER = 'paigasus-request-id';
 const RETRYABLE_HEADER = 'paigasus-retryable';
 
 export type ErrorInput =
@@ -51,7 +55,10 @@ function readEnvelope(body: unknown): { code: string | null; message: string | n
   const e = error as { code?: unknown; message?: unknown; param?: unknown };
   return {
     code: typeof e.code === 'string' ? e.code : null,
-    message: typeof e.message === 'string' ? e.message : null,
+    // An explicit `""` must fall through to mapHttp's `HTTP <status>` fallback the same way a
+    // missing or non-string message does — "Never empty" (spec § 9.5) means never, not "unless
+    // the wire sent the empty string on purpose".
+    message: typeof e.message === 'string' && e.message !== '' ? e.message : null,
     // A null param must not become the string "null" in metadata.
     param: typeof e.param === 'string' ? e.param : null,
   };

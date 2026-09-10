@@ -47,6 +47,9 @@ describe('the chat client sends a credential', () => {
 
     await client.completions({ model: 'gpt-4o', messages: [] });
 
+    // Without this, a `fetch` that is never called fails the cast below with the unhelpful
+    // "undefined is not iterable" rather than a clear "expected fetchImpl to have been called".
+    expect(fetchImpl).toHaveBeenCalledOnce();
     const [url, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit];
     expect(url).toBe(`${BASE}/v1/chat/completions`);
     expect(init.method).toBe('POST');
@@ -65,7 +68,24 @@ describe('the two response shapes', () => {
     const client = createChatClient({ baseUrl: BASE, fetch: fetchImpl }, { bearer: 'T' });
 
     const result = await client.completions({});
-    expect(result).toEqual({ kind: 'json', status: 200, body: { id: 'chat-1' } });
+    expect(result).toEqual({ kind: 'json', status: 200, body: { id: 'chat-1' }, correlationId: null, requestId: null });
+  });
+
+  // Fix wave item 4: `correlation.rs:174-175` sets both id headers on every response head,
+  // success included, so the `json` arm must carry them rather than dropping them silently.
+  it('carries the correlation and request ids on a 2xx JSON response when the head has them', async () => {
+    const fetchImpl = vi.fn(() =>
+      Promise.resolve(
+        new Response(JSON.stringify({ id: 'chat-1' }), { status: 200, headers: { 'content-type': 'application/json', 'paigasus-correlation-id': 'corr-json', 'paigasus-request-id': 'req-json' } }),
+      ),
+    );
+    const client = createChatClient({ baseUrl: BASE, fetch: fetchImpl }, { bearer: 'T' });
+
+    const result = await client.completions({});
+    expect(result.kind).toBe('json');
+    if (result.kind !== 'json') throw new Error('unreachable');
+    expect(result.correlationId).toBe('corr-json');
+    expect(result.requestId).toBe('req-json');
   });
 
   // AC 4. The SDK does not read, buffer, decode or re-encode the stream.
@@ -79,6 +99,25 @@ describe('the two response shapes', () => {
     expect(result.kind).toBe('stream');
     if (result.kind !== 'stream') throw new Error('unreachable');
     expect(result.body).toBe(response.body);
+    // No id header was set on this response, so both must read back as null, not undefined.
+    expect(result.correlationId).toBeNull();
+    expect(result.requestId).toBeNull();
+  });
+
+  // THE case the fix wave closes: a stream that fails mid-flight has no head of its own to read
+  // an id from (map-error.ts's terminal-frame arm calls `mapHttp(200, new Headers(), body)`), so
+  // the id has to come off the ORIGINAL response head, carried on the `stream` arm itself.
+  it('carries the correlation and request ids on a 2xx SSE response when the head has them', async () => {
+    const body = new ReadableStream<Uint8Array>({ start: (c) => c.close() });
+    const response = new Response(body, { status: 200, headers: { 'content-type': 'text/event-stream', 'paigasus-correlation-id': 'corr-stream', 'paigasus-request-id': 'req-stream' } });
+    const fetchImpl = vi.fn(() => Promise.resolve(response));
+    const client = createChatClient({ baseUrl: BASE, fetch: fetchImpl }, { bearer: 'T' });
+
+    const result = await client.completions({ stream: true });
+    expect(result.kind).toBe('stream');
+    if (result.kind !== 'stream') throw new Error('unreachable');
+    expect(result.correlationId).toBe('corr-stream');
+    expect(result.requestId).toBe('req-stream');
   });
 
   // chat.rs:139-141 — a stream:true request that fails BEFORE the head is committed answers as
@@ -103,6 +142,25 @@ describe('the two response shapes', () => {
 });
 
 describe('the client never throws a mapped error', () => {
+  // MEASURED on Node 22.22.3: `Response.text()` on a body stream that errors REJECTS, not
+  // throws synchronously. `readBody` is called on the error path here, so an unhandled rejection
+  // would turn a recoverable failure into an unhandled exception — the failure this suite exists
+  // to close off. This row proves `completions()` RESOLVES to `{ kind: 'error' }` instead.
+  it('resolves to kind error, not a rejection, when the body stream errors mid-read', async () => {
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        controller.error(new Error('stream reset'));
+      },
+    });
+    const fetchImpl = vi.fn(() => Promise.resolve(new Response(body, { status: 500, headers: { 'content-type': 'application/json' } })));
+    const client = createChatClient({ baseUrl: BASE, fetch: fetchImpl }, { bearer: 'T' });
+
+    const result = await client.completions({});
+    expect(result.kind).toBe('error');
+    if (result.kind !== 'error') throw new Error('unreachable');
+    expect(result.error.message).toBe('HTTP 500');
+  });
+
   it('maps a rejected fetch to the transport arm', async () => {
     // A real `fetch` REJECTS on a network failure; it does not throw synchronously. A rejection
     // is caught the same way a synchronous throw would be, since the call happens inside the

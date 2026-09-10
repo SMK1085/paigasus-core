@@ -3,10 +3,9 @@
 // The `./chat` entry (spec § 8). GUARDED and at src/ root, like every other guarded entry.
 import './server-guard.js';
 
-import { mapError } from './errors/map-error.js';
+import { CORRELATION_HEADER, REQUEST_ID_HEADER, mapError } from './errors/map-error.js';
 import type { ErrorInput } from './errors/map-error.js';
-import type { PaigasusError } from './errors/types.js';
-import type { TransportCause } from './errors/types.js';
+import type { PaigasusError, TransportCause } from './errors/types.js';
 
 /** The registry code the gateway puts in its one terminal SSE frame (chat.rs:63). */
 const TERMINAL_CODE = 'upstream-error';
@@ -94,14 +93,29 @@ export interface ChatClientOptions {
  * The client never throws a mapped error. A caller branches on `kind`, and on `content-type`
  * rather than on its own `stream` flag — a `stream: true` request that fails before the head is
  * committed answers as plain JSON, not SSE (chat.rs:139-141).
+ *
+ * **`correlationId`/`requestId` widen spec § 8.2's original two-field arms** (SMA-625 fix wave,
+ * item 4). `correlation.rs:174-175` sets both headers on EVERY response head, success included, so
+ * a `200 text/event-stream` head carries them too — but the SDK returned `{ kind: 'stream', body
+ * }` alone and threw them away. When such a stream then fails mid-flight, the failure routes
+ * through the terminal-frame parser's `mapHttp(200, new Headers(), body)` (map-error.ts:75), which
+ * has no head to read and so reports `correlationId: null` — the one failure this branch exists to
+ * report ends up with no reportable id. Reading the two ids here, on both success arms, closes
+ * that gap. This carries no `Headers` object on `ChatResult`, so AC 3 (no raw transport type
+ * reaches the browser) is unaffected.
  */
 export type ChatResult =
-  | { readonly kind: 'json'; readonly status: number; readonly body: unknown }
-  | { readonly kind: 'stream'; readonly body: ReadableStream<Uint8Array> }
+  | { readonly kind: 'json'; readonly status: number; readonly body: unknown; readonly correlationId: string | null; readonly requestId: string | null }
+  | { readonly kind: 'stream'; readonly body: ReadableStream<Uint8Array>; readonly correlationId: string | null; readonly requestId: string | null }
   | { readonly kind: 'error'; readonly error: PaigasusError };
 
 export interface ChatClient {
-  completions(request: unknown, options?: { readonly signal?: AbortSignal }): Promise<ChatResult>;
+  completions(request: Record<string, unknown>, options?: { readonly signal?: AbortSignal }): Promise<ChatResult>;
+}
+
+/** The two success-arm ids, read off the same header names `mapError` maps an error with. */
+function readIds(headers: Headers): { correlationId: string | null; requestId: string | null } {
+  return { correlationId: headers.get(CORRELATION_HEADER), requestId: headers.get(REQUEST_ID_HEADER) };
 }
 
 /**
@@ -172,17 +186,31 @@ export function createChatClient(options: ChatClientOptions, auth: { readonly be
         }
         // AC 4: the IDENTICAL object. Not read, not buffered, not decoded, not re-encoded.
         // Cancelling it reaches the upstream connection because it IS the platform's stream.
-        return { kind: 'stream', body: response.body };
+        return { kind: 'stream', body: response.body, ...readIds(response.headers) };
       }
 
-      return { kind: 'json', status: response.status, body: await readBody(response) };
+      return { kind: 'json', status: response.status, body: await readBody(response), ...readIds(response.headers) };
     },
   };
 }
 
-/** Parse when we can, hand back the raw text when we cannot. `mapError` handles both. */
+/**
+ * Parse when we can, hand back the raw text when we cannot. `mapError` handles both.
+ *
+ * A body-stream error (a caller abort mid-read, a connection reset) makes `response.text()`
+ * REJECT, not throw synchronously — MEASURED on Node 22.22.3, it rejects with a `DOMException`.
+ * Both call sites are on the mapped-error path, so an uncaught rejection here would turn a
+ * recoverable failure into an unhandled exception, the exact thing this module's error model
+ * exists to prevent. `null` makes `readEnvelope` read no envelope, and `mapHttp` falls back to
+ * `HTTP <status>` plus the transport-derived presentation.
+ */
 async function readBody(response: Response): Promise<unknown> {
-  const text = await response.text();
+  let text: string;
+  try {
+    text = await response.text();
+  } catch {
+    return null;
+  }
   try {
     return JSON.parse(text);
   } catch {

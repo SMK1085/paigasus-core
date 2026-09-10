@@ -269,13 +269,20 @@ offline (§ 5.2). Stated as a deliberate trade, not an oversight.
   ".":              "./src/index.ts",
   "./iam":          "./src/iam.ts",
   "./chat":         "./src/chat.ts",
-  "./errors":       "./src/errors/map-error.ts",
+  "./errors":       "./src/errors.ts",
   "./errors/types": "./src/errors/types.ts"
 }
 ```
 
 Subpaths exist so a caller that only maps an error does not pull `@connectrpc/connect-node` and its
 HTTP/2 stack into its module graph.
+
+**Corrected in the fix wave before PR (SMA-625, item 8):** this table said `./src/errors/map-error.ts`.
+The branch ships `./src/errors.ts` as the guarded `./errors` entry, one directory shallower than the
+internal `map-error.ts` module it re-exports from. `tests/server-guard.test.ts` pins the guard import
+as the literal string `"import './server-guard.js';"` and compares it with `toBe`, so a guarded entry
+one directory deeper — where the relative path would read `'../server-guard.js'` — cannot pass that
+test. `src/errors.ts` is therefore the only depth this entry can live at.
 
 ### 6.2 `server-only` — AC 1
 
@@ -475,10 +482,19 @@ The client returns a discriminated result. It never throws for a mapped error.
 
 ```ts
 type ChatResult =
-  | { kind: 'json'; status: number; body: unknown }
-  | { kind: 'stream'; body: ReadableStream<Uint8Array> }
+  | { kind: 'json'; status: number; body: unknown; correlationId: string | null; requestId: string | null }
+  | { kind: 'stream'; body: ReadableStream<Uint8Array>; correlationId: string | null; requestId: string | null }
   | { kind: 'error'; error: PaigasusError };
 ```
+
+**Widened in the fix wave before PR (SMA-625, item 4), a deliberate deviation from the two-field arms
+above.** `correlation.rs:174-175` sets both id headers on every response head with no status guard, so
+a `200 text/event-stream` head carries them too — but the arm as first written discarded them. When
+such a stream then fails mid-flight, the failure routes through § 8.4's parser and `mapHttp(200, new
+Headers(), body)`, which has no head to read and so reports `correlationId: null` — the one case this
+package built a parser for was the one case with no reportable id. Reading the two ids off the
+original response head, on both success arms, closes that gap. This adds no `Headers` object to
+`ChatResult`, so AC 3 (no raw transport type reaches the browser) is unaffected.
 
 The caller must branch on `content-type`, not on its own `stream` flag. A `stream: true` request that
 fails **before** the head is committed answers as plain JSON, not SSE (`chat.rs:139-141`). Revision 1
@@ -794,6 +810,11 @@ Revision 1 had four arms. Arm 5 is new (§ 9.1).
      `presentation` comes from the gRPC status table, including its `generic` fallback. Without this
      branch the SDK throws while mapping an error, which turns a recoverable upstream failure into an
      unhandled exception in the BFF.
+   - **`message` is `err.rawMessage`, never `err.message`, on both branches of this arm.** Corrected
+     in the fix wave before PR (SMA-625, item 8): `ConnectError.message` prefixes the status code
+     (e.g. `"[not_found] first"`), so reading it would both break AC 1's message-independence claim
+     and leak a raw gRPC status into a user-facing string. `err.rawMessage` carries the message with
+     no such prefix.
    - **The two correlation-id spellings are different and both are read, in this order.** The
      `ErrorInfo` metadata key is `correlation_id` (`convert.rs:70`). The response header is
      `paigasus-correlation-id` (`correlation.rs:31`). `err.metadata` is "a union of response headers

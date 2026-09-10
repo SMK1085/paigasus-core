@@ -172,6 +172,7 @@ describe('mapError is total over a malformed body', () => {
     ['undefined', undefined],
     ['a JSON body with no error key', { detail: 'nope' }],
     ['a JSON null', null],
+    ['an explicit empty message', { error: { message: '', code: null, param: null } }],
   ])('does not throw on %s', (_label, body) => {
     const result = mapError({ kind: 'http', status: 502, headers: new Headers(), body });
     expect(result.reason).toBeNull();

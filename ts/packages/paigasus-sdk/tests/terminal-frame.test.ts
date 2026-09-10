@@ -98,16 +98,30 @@ describe('createTerminalFrameParser', () => {
 
   // A per-chunk TextDecoder().decode() splits a multi-byte character on the same boundary the
   // record parser has to survive, so the parser owns a streaming decoder.
-  it('survives a multi-byte character split across a chunk boundary', () => {
+  //
+  // The split character must sit INSIDE the terminal frame's own `message`, not in an ignored
+  // content record before it: MEASURED, a split in an ignored record still parses as valid JSON
+  // after a non-streaming decode replaces the two half-bytes with U+FFFD, so that shape passes
+  // identically with `{ stream: true }` and without it and proves nothing. This synthetic
+  // terminal frame is built directly, rather than reusing `FRAME`, because the discriminating
+  // property is the split landing inside the reported `message`. MEASURED discriminating:
+  // streaming decode yields "upstream stréam error"; a non-streaming decode yields
+  // "upstream str<0xFFFD><0xFFFD>am error".
+  it('survives a multi-byte character split across a chunk boundary, inside the reported message', () => {
+    const message = 'upstream stréam error';
+    const frameText = `data: {"error":{"message":"${message}","type":"api_error","param":null,"code":"upstream-error"}}\n\n`;
+    const bytes = encode(frameText);
+    // 'é' encodes to the two UTF-8 bytes 0xC3 0xA9. Cut between them so the decoder must carry
+    // the leading byte across the `push` boundary.
+    const i = bytes.indexOf(0xc3);
+    if (i === -1) throw new Error('unreachable: the fixture always contains the multi-byte character');
     const parser = createTerminalFrameParser();
-    const bytes = encode('data: {"choices":[{"delta":{"content":"é"}}]}\n\n' + FRAME);
-    const cut = 40;
-    expect(parser.push(bytes.slice(0, cut))).toEqual([]);
-    const out = parser.push(bytes.slice(cut));
+    expect(parser.push(bytes.slice(0, i + 1))).toEqual([]);
+    const out = parser.push(bytes.slice(i + 1));
     expect(out).toHaveLength(1);
     const [frame] = out;
     if (frame === undefined) throw new Error('unreachable: toHaveLength(1) above');
-    expect(frame.reason).toBe(ErrorReason.UPSTREAM_ERROR);
+    expect(frame.message).toBe(message);
   });
 
   it('accepts CRLF record delimiters', () => {
