@@ -1,6 +1,6 @@
 # SMA-509 — `@paigasus/discovery`: capability discovery with three service states
 
-**Status:** approved design
+**Status:** approved design, revision 2 (after adversarial challenge)
 **Date:** 2026-09-10
 **Issue:** [SMA-509](https://linear.app/smaschek/issue/SMA-509/ts-capability-discovery-client-with-three-service-states)
 **ADR:** ADR-0020 — Service capability discovery, including its 2026-08-15 amendment (A1–A5)
@@ -36,14 +36,28 @@ has no `middleware.ts`, no auth route handler, and no `getSession()` call, so
 `@paigasus/auth` (SMA-506) is not wired into the app. Discovery must run inside
 an authenticated request context, so it cannot run in the console as it stands.
 
-SMA-510 owns navigation and is blocked on the interface this issue defines. The
-app wiring belongs there.
-
 **In scope:** the package, its public API, its cache, its tests, and the repo
 gate changes the new package forces.
 
 **Out of scope:** console wiring, the OIDC flow, a navigation component, and the
 choice of whether production shares one Redis connection with `@paigasus/auth`.
+
+### 2.1 How SMA-510 consumes this
+
+`<Capability>` is an **async server component**. The ESLint block
+`paigasus/boundaries/app-shell` (`ts/packages/paigasus-next-config/src/eslint.mjs:107-116`)
+bans `@paigasus/sdk` and `@paigasus/auth/server` from `@paigasus/app-shell`
+because app-shell is client-reachable.
+
+Therefore **app-shell must not import `@paigasus/discovery/react`.** The division
+is:
+
+- `@paigasus/app-shell` exports navigation **presentation** that takes resolved
+  state as props. It stays client-reachable.
+- The **app** composes `<Capability>` around app-shell's presentation
+  components, because only the app has a server request context.
+
+This constraint is recorded here so SMA-510 does not discover it late.
 
 ---
 
@@ -65,11 +79,13 @@ gateway's uses `require_authenticated`, not `require_iam_auth`. Per ADR-0020 A4,
 a validated token whose identity is not yet provisioned counts as authenticated
 on the discovery path. The descriptor is byte-identical for every caller.
 
-**F3 — `version` carries no signal.**
-Every crate in `rs/` is `version = "0.0.0"` and `rs/release-plz.toml` is dormant,
-so `ServiceInfo.version` reports `0.0.0` on every deployment. The console must
-not render a version-skew banner. Capability keys are the only sanctioned input
-to a feature decision.
+**F3 — `version` carries no signal for these two services.**
+`paigasus-gateway` and `paigasus-iam` are pinned at `version = "0.0.0"`
+**deliberately**: `env!("CARGO_PKG_VERSION")` feeds `ServiceInfo`, and ADR-0020
+skew reporting is parked on that value (SMA-505 R7). release-plz has since cut
+its first live release (SMA-580), but it tagged only the kernel family, not
+these crates. The console must not render a version-skew banner. Capability keys
+are the only sanctioned input to a feature decision.
 
 **F4 — A disabled capability is indistinguishable from an old build.**
 Per ADR-0020 A2, a disabled capability's HTTP routes are not registered (`404`)
@@ -78,95 +94,149 @@ from "not built yet", and does not need to.
 
 **F5 — `@paigasus/auth` owns the only Redis connection.**
 `createRedisSessionStore()` runs once inside a memoized `createAuthRuntime()`.
-Its `SessionStore` port is session-shaped (`get`, `set`, `delete`,
-`tryAcquireLock`, `releaseLock`, `putTransaction`, `takeTransaction`), and
-`core/single-flight.ts` is written against `SessionRecord`. Neither is a general
-cache, so neither is reused directly.
+Its `SessionStore` port is session-shaped and `core/single-flight.ts` is written
+against `SessionRecord`. Neither is a general cache, so neither is reused
+directly.
 
 **F6 — There is no UI pattern to inherit.**
 `@paigasus/ui` has no Button, no Tooltip, and no "disabled with a reason"
-component. Radix's Tooltip primitive ships inside the already-installed
-`radix-ui` package but is unused.
+component.
+
+**F7 — The cache key's `<service>` is fixed by a proto MUST.**
+`service_info.proto:84-94` states that `ServiceInfo.service` is **advisory and
+never a cache key**, and that the `<service>` in `svcinfo:<service>` "MUST be the
+client's own deployment configuration identifier for the service it dialled,
+never this server-reported value — otherwise a misconfigured or hostile service
+could poison another service's cache entry. A mismatch is worth logging and
+nothing more."
+
+**F8 — `@paigasus/sdk`'s `Presentation` union cannot express a degraded reason.**
+`ts/packages/paigasus-sdk/src/errors/types.ts:22` fixes it at
+`'relogin' | 'forbidden' | 'not-found' | 'degraded' | 'rate-limited' |
+'invalid-input' | 'conflict' | 'disabled' | 'generic'`. `HTTP_TABLE`
+(`transport-status.ts:55-69`) has **no 500 row** and **deliberately no 2xx row**.
+This package therefore owns its own reason vocabulary (§10) and takes **no**
+`@paigasus/sdk` dependency. Revision 1 of this spec claimed otherwise and was
+wrong.
 
 ---
 
 ## 4. Package shape
 
-A new source-only package, `private: true`, no build step, matching every other
-package in `ts/packages/`.
+A new source-only package, `private: true`, no build step.
 
 ```
 ts/packages/paigasus-discovery/
+  README.md                      required by AC4
+  moon.yml
+  vitest.config.ts               node / react-server project
+  vitest.jsdom.config.ts         rendering project
+  vitest.containers.config.ts    real-Redis project
   src/
     server.ts                    './server' entry, 'server-only'
     react.tsx                    './react' entry, 'server-only'
+    disabled.tsx                 'use client' — the disabled wrapper
     types.ts                     './types' entry, client-safe
     config.ts                    discoveryEnvShape (zod)
     probe.ts                     GET /v1/service-info
-    has-capability.ts
     core/
-      state.ts                   ServiceState, DegradedReason
-      record.ts                  CacheRecord, freshness predicates
+      state.ts                   ServiceState, DegradedReason, SERVICE_STATES
+      record.ts                  CacheRecord, isFresh, toState
+      reasons.ts                 status/cause -> DegradedReason
       single-flight.ts           SWR + lock algorithm
     ports/
       cache.ts                   DescriptorCache
+      logger.ts                  DiscoveryLogger
     adapters/
       redis-cache.ts             takes an injected node-redis client
       memory-cache.ts
+      noop-logger.ts
 ```
 
 ### 4.1 Entry points
 
 | Entry | Contents | Guard |
 |---|---|---|
-| `./server` | `createDiscovery`, `getServiceState`, `hasCapability`, `DescriptorCache`, both adapters, `discoveryEnvShape` | `import 'server-only'` |
-| `./react` | `<Capability>` | `import 'server-only'` — it is an async server component |
-| `./types` | `ServiceState`, `DegradedReason`, `SERVICE_STATES` | none |
+| `./server` | `createDiscovery`, `DescriptorCache`, `DiscoveryLogger`, both adapters, `discoveryEnvShape` | `import 'server-only'` |
+| `./react` | `<Capability>` | `import 'server-only'` |
+| `./types` | `ServiceState`, `ServiceDescriptor`, `DegradedReason`, `CapabilityKey`, `SERVICE_STATES` | none |
 
-`./types` carries no guard so a client component can hold the state as data.
-This mirrors `@paigasus/sdk`'s `./errors/types`, which
-`tests/server-guard.test.ts` there already pins as a deliberate exception.
+`./types` carries no guard so a client component can hold the state as data,
+mirroring `@paigasus/sdk`'s `./errors/types`.
 
-There is **no root `"."` export.** `@paigasus/auth` omits one for a documented
-reason: a root export re-exporting the server surface lets a client import route
-around the boundary. The same reasoning applies here.
+There is **no root `"."` export**, for the reason `@paigasus/auth` documents: a
+root export re-exporting the server surface lets a client import route around
+the boundary.
+
+`src/disabled.tsx` carries `'use client'` and is imported by `react.tsx`. It is
+**not** an entry point.
 
 ### 4.2 Dependencies
 
 | Package | Why |
 |---|---|
-| `@paigasus/proto` | `ServiceInfoSchema` for `fromJson`, `capabilityWireKey` for the registry vocabulary |
-| `@paigasus/sdk` | `mapError`, so a degraded reason derives from the `(domain, reason)` vocabulary rather than message text |
-| `redis` | the Redis cache adapter (node-redis v6, as `@paigasus/auth` uses) |
+| `@paigasus/proto` | `Capability` + `capabilityWireKey`, to derive the closed key and service-slug vocabularies |
 | `zod` | `discoveryEnvShape` |
+| `redis` | the Redis cache adapter (node-redis v6) |
 | `server-only` | the boundary guard |
 | `react` (peer) | `<Capability>` |
 
-### 4.3 Redis by injection
+**No `@paigasus/sdk` dependency.** Three independent reasons: its `Presentation`
+union cannot express these reasons (F8); the probe is a bare `fetch`, so pulling
+in `@connectrpc/connect` and `@connectrpc/connect-node` is pure cost; and
+`@paigasus/app-shell` is banned from reaching the SDK, which a transitive edge
+would violate (§2.1).
 
-The package never opens a connection. `createRedisDescriptorCache(client,
-keyPrefix)` takes an **already-connected** node-redis client.
+`@paigasus/proto` is used **only for type-level and enum-level vocabulary**, never
+on the wire — see §7 for why the descriptor is parsed by hand.
 
-This defers a decision that does not belong to this issue: whether production
-shares `@paigasus/auth`'s client or opens a second one. The composition root
-decides when the console is wired in SMA-510.
+### 4.3 Redis by injection, with stated preconditions
+
+`createRedisDescriptorCache(client, options)` takes an **already-connected**
+node-redis client. The composition root decides whether to share
+`@paigasus/auth`'s client or open a second one.
+
+The client **must** be created with the options `@paigasus/auth`'s
+`redis-store.ts:236-246` documents as load-bearing:
+
+| Option | Why |
+|---|---|
+| `disableOfflineQueue: true` | without it, an outage becomes hung requests instead of fast failures |
+| `commandOptions.timeout` | bounds a command against an unresponsive server |
+| an `on('error')` listener | node-redis crashes the process without one; it must never log the raw error, which embeds the DSN |
+
+`createRedisDescriptorCache` asserts `disableOfflineQueue` and the presence of an
+error listener at construction and throws otherwise. A precondition nobody checks
+is a precondition nobody keeps.
 
 ---
 
 ## 5. Configuration
 
 `discoveryEnvShape` is a zod shape the app composes into its existing
-`defineRuntimeConfig()` call, the same way `authEnvShape` is intended to be.
-`ts/apps/paigasus-console/app/runtime-config.ts` already carries a comment
-anticipating exactly this composition.
+`defineRuntimeConfig()` call, as `ts/apps/paigasus-console/app/runtime-config.ts`
+already anticipates in a comment.
 
 ```
 PAIGASUS_SERVICES = {"iam":"http://iam:8080","gateway":"http://gateway:8080"}
 ```
 
-A JSON object mapping service name to base URL, parsed as
-`@paigasus/next-config` already parses `PAIGASUS_ZONES` into
-`Record<string, string>`.
+### 5.1 Key and value validation
+
+`PAIGASUS_ZONES`' transform is **not** reusable: `zoneMapFromJson` validates each
+value with `canonicalBasePath` (`next-config/src/runtime.ts:89`), which is a
+**path** validator, not a URL validator. This package writes its own.
+
+**Keys** are validated against the closed set of service slugs derived from
+`capabilityWireKey` over the `Capability` enum — this is what the
+`@paigasus/proto` dependency is actually for. An unknown key **fails
+construction**. An operator writing `{"IAM": ...}` or `{"gw": ...}` would
+otherwise get a silently empty console, which §9.3 itself calls the worse
+failure. Keys must also match `^[a-z][a-z0-9]*$`.
+
+**Values** are validated as URLs: `http:` or `https:` only, no userinfo, no
+query, no fragment. The parsed map is built on `Object.create(null)`, reusing the
+prototype-pollution rule at `next-config/src/runtime.ts:63-75`.
 
 **A service absent from this map is in the `absent` state.** This is the only
 source of the `absent` state; no probe is involved.
@@ -174,19 +244,33 @@ source of the `absent` state; no probe is involved.
 These are cluster-internal DNS names. They stay in the private
 `getRuntimeConfig()` slice and must never appear in `getPublicConfig()`.
 
-Additional variables, all with defaults:
+Note that `describeIssues` (`next-config/src/runtime.ts:136-145`) renders
+`issue.message` only for keys `@paigasus/next-config` itself owns, so a malformed
+value surfaces as `PAIGASUS_SERVICES: custom`. `@paigasus/auth/src/config.ts:13-16`
+records the same constraint. The README therefore carries the expected form of
+every variable.
+
+### 5.2 Timings
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `PAIGASUS_DISCOVERY_FRESH_MS` | 60000 | inside this, serve and do not probe |
-| `PAIGASUS_DISCOVERY_STALE_MS` | 600000 | the Redis hard TTL; the stale window |
-| `PAIGASUS_DISCOVERY_NEGATIVE_MS` | 10000 | how long a failure is remembered |
-| `PAIGASUS_DISCOVERY_PROBE_TIMEOUT_MS` | 1500 | per-probe deadline |
+| `PAIGASUS_DISCOVERY_NEGATIVE_MS` | 10000 | how long a failed probe is honoured before re-probing |
+| `PAIGASUS_DISCOVERY_FRESH_MS` | 60000 | how long a successful probe is honoured |
+| `PAIGASUS_DISCOVERY_STALE_MS` | 600000 | the Redis hard TTL; past this, the next request is cold |
+| `PAIGASUS_DISCOVERY_PROBE_TIMEOUT_MS` | 1500 | per-probe network deadline |
+| `PAIGASUS_DISCOVERY_LOCK_WAIT_MS` | 2500 | how long a cold loser waits for the winner |
 | `PAIGASUS_DISCOVERY_LOCK_TTL_MS` | 5000 | single-flight lock lifetime |
 
-`createDiscovery` asserts `PROBE_TIMEOUT_MS < LOCK_TTL_MS` at construction. The
-lock must outlive the probe it guards. `@paigasus/auth`'s `createAuthRuntime`
-makes the equivalent assertion for its own two IdP calls.
+`createDiscovery` asserts two orderings at construction:
+
+```
+NEGATIVE_MS < FRESH_MS < STALE_MS
+PROBE_TIMEOUT_MS < LOCK_WAIT_MS < LOCK_TTL_MS
+```
+
+The second is what stops the §8.2 false-outage: a loser whose deadline expires
+before the winner can finish its probe **and** write the record would report a
+healthy service as down on the first render after every deploy.
 
 ---
 
@@ -194,48 +278,78 @@ makes the equivalent assertion for its own two IdP calls.
 
 ```ts
 type CacheRecord = {
-  readonly descriptor: ServiceInfo | null;   // last GOOD probe
+  readonly version: 1;
+  readonly rev: number;
+  readonly descriptor: ServiceDescriptor | null;   // last GOOD probe
   readonly descriptorAt: number;
-  readonly outcome: 'ok' | 'fail';           // last probe ATTEMPT
+  readonly outcome: 'ok' | 'fail';                 // last probe ATTEMPT
   readonly outcomeAt: number;
   readonly reason: DegradedReason | null;
 };
 ```
 
 Reachability and the capability list are **independent fields**. This is the
-central design decision. A failed probe sets `outcome: 'fail'` but leaves
-`descriptor` untouched, so the service reports `degraded` while still serving
-its last known feature set. The UI can then render the right items, each
-disabled with a reason, and the outage stays visible.
+central design decision. A failed probe sets `outcome: 'fail'` and leaves
+`descriptor` untouched, so the service reports `degraded` while still serving its
+last known feature set. The UI renders the right items, each disabled with a
+reason, and the outage stays visible.
 
-The rejected alternative — treating a servable stale record as `available` —
-hides an outage for the whole stale window. ADR-0020 calls that "the worst
-possible presentation for an operator".
+`version: 1` exists because during a rolling upgrade two console builds write the
+same key. Both adapters treat a version mismatch or an unparseable value as
+**absent, and delete it** — the pattern `SessionRecord` already uses
+(`redis-store.ts:168-171`, `memory-store.ts:36-40`). Without it, a renamed
+`DegradedReason` poisons the cache fleet-wide for the full 10-minute hard TTL.
+
+`rev` exists for the fenced write in §8.3.
 
 ### 6.1 Keys
 
 ```
-<prefix>svcinfo:<service>
-<prefix>svcinfo:lock:<service>
+<prefix>pgs:svcinfo:<service>
+<prefix>pgs:svcinfo:lock:<service>
 ```
 
-The issue specifies `svcinfo:<service>`. The prefix is injected and is `''` in
-production, matching `@paigasus/auth`, where a per-test random prefix isolates
-tests sharing one container.
+The `pgs:` namespace matches `@paigasus/auth`'s `pgs:sess:` / `pgs:lock:` /
+`pgs:txn:`. The prefix is injected and is `''` in production.
 
-### 6.2 Three TTLs
+Per **F7**, `<service>` is the key from `PAIGASUS_SERVICES` — never
+`descriptor.service`. When a probe returns a `service` field that disagrees with
+the configured key, the record is still stored under the configured key and the
+mismatch is **logged and otherwise ignored**, exactly as the proto directs.
 
-One TTL cannot express stale-while-revalidate. A 60-second Redis expiry deletes
-the record we want to serve stale.
+### 6.2 Freshness
 
-| | Default | Role |
-|---|---|---|
-| Fresh | 60s | a logical age carried in the record, not a Redis TTL |
-| Hard | 10 min | the Redis `PX` expiry; past this the next request is cold |
-| Negative | 10s | a failure's freshness, so a down service does not re-probe on every request |
+Freshness is computed from **`outcomeAt` in both arms**. `descriptorAt` only ever
+moves on success and is carried for observability, never for the freshness
+decision:
 
-Freshness is computed from `descriptorAt` and `outcomeAt` against the clock, not
-from key existence.
+```ts
+isFresh(rec, now) =
+  rec.outcome === 'ok'
+    ? now - rec.outcomeAt < FRESH_MS
+    : now - rec.outcomeAt < NEGATIVE_MS;
+```
+
+Using `descriptorAt` for the `ok` arm would make the negative TTL dead: a probe
+that failed at t=0 over a descriptor from t=−5s would not be re-probed for a full
+60s. Revision 1 left this ambiguous between two windows that disagree.
+
+### 6.3 Record to state
+
+`toState(service, rec)` is total:
+
+| `rec` | `outcome` | `descriptor` | `ServiceState` |
+|---|---|---|---|
+| absent from config | — | — | `absent` |
+| `null` (cold) | — | — | resolved by §8, never mapped directly |
+| present | `ok` | non-null | `available` |
+| present | `ok` | `null` | impossible; treated as corrupt → deleted, re-probed |
+| present | `fail` | non-null | `degraded`, capabilities from the descriptor |
+| present | `fail` | `null` | `degraded`, capabilities empty |
+
+**A stale record whose last outcome was `ok` maps to `available`.** This is what
+AC2 requires. §13's rejected row is narrower than revision 1 stated, and is
+restated there.
 
 ---
 
@@ -244,20 +358,60 @@ from key existence.
 ```
 GET {baseUrl}/v1/service-info
 Authorization: Bearer <access token from the request-scoped session>
+Accept: application/json
 ```
 
-Under `AbortSignal.timeout(PROBE_TIMEOUT_MS)`. The body is canonical protojson of
-the **bare** `ServiceInfo` message — not the `GetServiceInfoResponse` wrapper —
-and is parsed with protobuf-es `fromJson(ServiceInfoSchema, body)`. Both services
-return `capabilities` as `[]` when empty rather than omitting it.
+Bounded by `AbortSignal.timeout(PROBE_TIMEOUT_MS)`, with:
 
-Parsing through the generated schema, rather than by hand, means an unknown
-field is ignored by protobuf-es itself. That is decision 6's version-skew rule
-satisfied by the codec rather than by our own code.
+- `redirect: 'error'` — `fetch` follows redirects by default, and following one
+  would send the user's bearer token wherever a compromised or misconfigured
+  service points.
+- a **case-insensitive** `content-type` check for `application/json` before
+  parsing. Case matters: an externally supplied header must be compared
+  case-insensitively, and every fixture must vary the case.
+- a response-size cap, enforced while reading, so an oversized body cannot be
+  buffered inside the timeout window on a fast internal link.
 
-The bearer token is supplied per call. It is never stored in the cache record and
-never used as part of a cache key. The descriptor is identical for every caller
-(F2), so one cache entry serves all users.
+### 7.1 Parsing
+
+The body is canonical protojson of the **bare** `ServiceInfo` message — not the
+`GetServiceInfoResponse` wrapper. Both services return `capabilities` as `[]`
+when empty.
+
+It is converted at the boundary into a **plain structural type**:
+
+```ts
+type ServiceDescriptor = {
+  readonly service: string;
+  readonly version: string;
+  readonly capabilities: readonly string[];
+};
+```
+
+Not the protobuf-es `ServiceInfo` message, for two reasons. It crosses the RSC
+boundary as a prop, and a protobuf-es message carries `$typeName` and is not a
+plain object. And `paigasus/boundaries/apps` (`eslint.mjs:118-126`) bans apps from
+importing `@paigasus/proto` **including type imports**, so an app could not name
+`ServiceInfo` to hold it.
+
+Unknown fields are dropped by the conversion, which satisfies decision 6's
+"unknown key → ignore" at the codec boundary. A body that does not match the
+shape yields `bad-response`.
+
+### 7.2 The token is caller state, not cached state
+
+The descriptor is identical for every caller (F2), so **one entry serves all
+users**. The auth *outcome* is not caller-independent, and this is the trap.
+
+**`401` and `403` are caller-scoped and are never written to the cache.** They
+return `degraded` with reason `unauthorized` to that request only, and leave the
+record untouched. Otherwise one user with an expired cookie writes `fail` into
+the shared record and disables the navigation for every user in the deployment
+for the negative TTL — self-perpetuating on a low-traffic deployment, with no
+operator signal.
+
+An **empty or absent token** never probes at all. The cache is served read-only,
+and a cold cache yields `degraded` with reason `unauthorized`.
 
 ---
 
@@ -265,48 +419,98 @@ never used as part of a cache key. The descriptor is identical for every caller
 
 `getServiceState(service, token)` resolves one service.
 
-1. **Not in `PAIGASUS_SERVICES`** → `absent`. Return immediately. No Redis, no
-   probe.
-2. **Record exists and is fresh** → return it. No lock, no probe.
-3. **Record exists and is stale** → return it **immediately**, then attempt the
-   lock and revalidate **without awaiting**. This is what satisfies AC2.
-4. **No record (cold)** → take the lock and probe, bounded by the probe timeout.
+1. **Not in `PAIGASUS_SERVICES`** → `absent`. No Redis, no probe.
+2. **Cache read throws** → `degraded` with reason `cache-unavailable`. Never
+   propagate. One Redis blip must not 500 every server component rendering
+   navigation.
+3. **Record fresh** (§6.2) → `toState`. No lock, no probe.
+4. **Record stale** → return `toState` **immediately**, then attempt the lock and
+   revalidate **without awaiting**. This is what satisfies AC2.
+5. **Cold** → take the lock and probe (§8.2).
 
 ### 8.1 The background revalidation
 
-Step 3's promise is handed to an injected
-`waitUntil?: (p: Promise<unknown>) => void`. When the app supplies Next's
-`after`, the runtime keeps the process alive until the probe settles. When it
-does not, the promise floats with a `.catch()` attached.
+Step 4's promise is handed to an injected
+`waitUntil?: (p: Promise<unknown>) => void`. When the app supplies Next's `after`,
+the runtime keeps the process alive until the probe settles. Otherwise the promise
+floats with a `.catch()` that logs.
 
-Injection is what keeps `next/*` out of this package. Only `@paigasus/ui` carries
-a hard no-`next/*` rule, but taking a `next` dependency here would be gratuitous.
+Injection is what keeps `next/*` out of this package.
+
+If the lock is already held, the background task **returns immediately** rather
+than polling — another caller is already revalidating, and a second waiter buys
+nothing. A leaked lock is bounded by `LOCK_TTL_MS` (5s), not by the hard TTL.
+
+The deploy target is self-hosted OCI containers (Frontend Architecture F8), so
+the process survives the response and a floated promise completes. On a
+freeze-at-response platform it would not, and the effective refresh interval
+would degrade to the hard TTL. `waitUntil` is the supported answer there; the
+README says so.
 
 ### 8.2 The single-flight lock
 
-`SET <lockKey> <token> NX PX <LOCK_TTL_MS>`, with a unique token per attempt and
-a compare-and-delete release inside a `finally`. `@paigasus/auth`'s
-`redis-store.ts` already carries the release script; this package keeps its own
-copy rather than importing across a package boundary that exposes a session
-store.
+`SET <lockKey> <token> NX PX <LOCK_TTL_MS>`, unique token per attempt,
+compare-and-delete release in a `finally` — and that `finally` is itself wrapped
+in `try/catch`, so a store error at release time cannot mask the probe's real
+outcome (`single-flight.ts:57-59, 165-174`).
 
-A loser on the cold path polls with backoff and jitter for the winner's record,
-bounded at the probe timeout. On the deadline it returns `degraded` with reason
-`timeout`. A loser **never** probes as a fallback — that is invariant 2 of
-`core/single-flight.ts`, and it is the property AC3 tests.
+After acquiring the lock the holder **re-reads** the record before probing.
+Another holder may have finished between the failed read and the successful
+acquire.
 
-After acquiring the lock, the holder re-reads the record before probing. Another
-holder may have finished between the failed read and the successful acquire.
+A cold loser polls with backoff and jitter, bounded at `LOCK_WAIT_MS`. On the
+deadline it performs **one final cache read** before degrading
+(`single-flight.ts:180` does the same), then returns `degraded` with reason
+`timeout`. A loser **never** probes as a fallback — invariant 2.
 
-Worst-case added render latency is **one probe timeout**, whatever the number of
-unreachable services, because a cold loser waits on the winner and not on its own
-probe.
+Worst-case added render latency is one `LOCK_WAIT_MS`, provided services are
+resolved concurrently (§9.5).
+
+### 8.3 The fenced write — invariant 5
+
+`@paigasus/auth` states it explicitly: a compare-and-delete release protects the
+**lock**, never the **write** (`single-flight.ts:60-65`), which is why
+`redis-store.ts:24-34` carries a `SET_CAS` Lua script.
+
+Revision 1 dropped this, and the exposure is larger here than in auth: a
+background revalidation has **no wall-clock bound**. `AbortSignal.timeout` bounds
+the network wait only — not JSON parsing, not the cache write, not an event-loop
+stall. A probe started at t=0 could resolve at t=30s and blindly overwrite a
+successful probe written at t=5s with its own older failure, masking a healthy
+service until the hard TTL.
+
+Two rules:
+
+- Every write is a **compare-and-set on `rev`**, via a Lua script modelled on
+  `redis-store.ts:24-34`. A losing writer re-reads and discards its result.
+- A write whose probe **started before** the stored `outcomeAt` is discarded
+  without a write attempt.
 
 ---
 
 ## 9. Public API
 
-### 9.1 `ServiceState`
+### 9.1 Construction
+
+```ts
+createDiscovery(deps: {
+  services: Readonly<Record<string, string>>;
+  cache: DescriptorCache;
+  logger?: DiscoveryLogger;
+  fetch?: typeof globalThis.fetch;
+  waitUntil?: (p: Promise<unknown>) => void;
+  timings?: Partial<Timings>;
+  now?: () => number;
+}): Discovery
+```
+
+`Discovery` is `{ getServiceState, hasCapability }`. There is **no module-level
+singleton**: the composition root builds one handle, which is what makes the
+package testable without module resets and matches `createAuthRuntime()`.
+Revision 1 listed the three as sibling exports with signatures that took no
+handle, which was internally inconsistent.
+
+### 9.2 State
 
 ```ts
 type ServiceState =
@@ -314,34 +518,41 @@ type ServiceState =
       readonly service: string }
   | { readonly state: 'available';
       readonly service: string;
-      readonly descriptor: ServiceInfo;
-      readonly capabilities: ReadonlySet<string> }
+      readonly descriptor: ServiceDescriptor;
+      readonly capabilities: readonly string[] }
   | { readonly state: 'degraded';
       readonly service: string;
       readonly reason: DegradedReason;
-      readonly descriptor: ServiceInfo | null;
-      readonly capabilities: ReadonlySet<string> };
+      readonly descriptor: ServiceDescriptor | null;
+      readonly capabilities: readonly string[] };
 ```
 
-`degraded` carries `descriptor: ServiceInfo | null` because a service may fail
-before any successful probe. `capabilities` is then empty.
+`capabilities` is `readonly string[]`, **not** `ReadonlySet`. A `Set` does not
+survive the RSC server-to-client boundary. Membership tests go through a helper.
 
-### 9.2 `hasCapability`
+### 9.3 `hasCapability`
 
 ```ts
-hasCapability(key: string, token: string): Promise<boolean>
+hasCapability(key: CapabilityKey, token: string): Promise<boolean>
 ```
 
-The service is derived from the key's first dot-segment: `iam.audit` resolves
-against `iam`, `gateway.chat.stream` against `gateway`. The registry's naming
-already guarantees this, and `capabilityWireKey` derives the same strings from
-the enum.
+`CapabilityKey` is the closed union derived from the `Capability` enum via
+`capabilityWireKey`, not `string`. A typo such as `iam.audits` must be a type
+error, because at runtime it returns `false` forever and silently hides a
+navigation item — the "invisible" outcome §9.4 itself calls the worse failure.
+
+The service is derived from the key's first dot-segment. The registry guarantees
+this (`service_info.proto:85-86`), and §5.1 validates the config keys against the
+same derived vocabulary, so the two cannot drift.
 
 Returns `true` **only** when the state is `available` and the key is present.
-`degraded` returns `false`, because the feature must not be invoked. An unknown
-key returns `false` without error — decision 6's "unknown key → ignore".
+`degraded` returns `false`, because the feature must not be invoked.
 
-### 9.3 `<Capability>`
+`hasCapability` is for **non-UI callers**. A consumer writing
+`if (await hasCapability(...))` around markup gets the hiding behaviour §9.4
+argues against. The README says this next to the "not a security boundary" line.
+
+### 9.4 `<Capability>`
 
 ```tsx
 <Capability need="iam.audit">
@@ -366,64 +577,84 @@ ADR-0020 names, and a wrongly-shown disabled item is recoverable while a
 wrongly-hidden one is invisible.
 
 The `available, key absent` row hides rather than disables, and that asymmetry is
-deliberate: the service answered and told us it does not have the feature. There
-is no outage to report.
+deliberate: the service answered and told us it lacks the feature. There is no
+outage to report.
 
-### 9.4 The disabled rendering
+### 9.5 Request-scoped memoization
 
-The default wrapper:
+`getServiceState` is memoized **per request**, via React's `cache()` when
+available and an injected request-scoped map otherwise.
+
+Without it, a navigation with eight `<Capability>` items over two services costs
+eight cache reads per render, and §8.2's latency bound does not hold, because
+React renders server components in tree order and each sibling would resolve
+serially. The bound is stated conditionally on concurrent resolution for exactly
+this reason.
+
+### 9.6 The disabled rendering
+
+`src/disabled.tsx` is a **client component**. This is forced: an async server
+component cannot attach event handlers, and the wrapper must block activation.
 
 ```html
-<span aria-disabled="true" tabindex="-1" aria-describedby="cap-r1"
-      class="pointer-events-none opacity-50">
+<span data-capability-state="degraded" data-capability-reason="network"
+      aria-disabled="true" aria-describedby=":r3:">
   <a href="/audit">Audit</a>
-  <span id="cap-r1" class="sr-only">IAM is not answering</span>
+  <span id=":r3:" class="…visually hidden…">IAM is not answering</span>
 </span>
 ```
 
-The component cannot reach into arbitrary children to set a `disabled` prop, so
-it wraps them.
+Four decisions:
 
-**It deliberately does not use `inert`.** The `inert` attribute removes the node
-from the accessibility tree. That hides the item from a screen reader and breaks
-"never hidden" for exactly the users least able to recover from it.
-`aria-disabled` plus `tabindex="-1"` keeps the item announced while removing it
-from the tab order.
+1. **It does not use `inert`.** The `inert` attribute removes the node from the
+   accessibility tree, which hides the item from a screen reader and breaks
+   "never hidden" for exactly the users least able to recover.
+2. **`tabindex` is not inherited**, so `tabindex="-1"` on the wrapper would leave
+   a nested `<a>` fully keyboard-activatable while `aria-disabled` made the tests
+   pass. Activation is blocked with capture-phase `onClickCapture` and
+   `onKeyDownCapture` handlers that call `preventDefault()` and
+   `stopPropagation()`, plus `pointer-events: none` as an inline style. This is
+   the whole reason the wrapper is a client component.
+3. **The description id comes from `useId()`.** A hardcoded id emits duplicates
+   when two `<Capability>` elements appear on one page.
+4. **No Tailwind utility classes.** Tailwind v4's scan root is the working
+   directory and Moon runs `next build` from the app's directory, so a package
+   shipping utility classes needs an `@source` line in **every** consumer;
+   forgetting it drops the classes silently and **only in a production build**.
+   That is the SMA-503 failure class verbatim. The functional bits are inline
+   styles; everything cosmetic is exposed as `data-capability-state` and
+   `data-capability-reason` for the consumer to style. The package needs no
+   `@source` entry and no `ci/tailwind-source` sentinel.
 
-A `degraded` render prop overrides the wrapper:
+A `degraded` render prop overrides the wrapper entirely:
 
 ```tsx
 <Capability need="iam.audit" degraded={(reason) => <NavItem disabled reason={reason} />}>
 ```
 
-SMA-510's navigation is the expected first user of that override.
-
 ---
 
 ## 10. Degraded reasons
 
-A closed union, never free text:
+Owned by this package (F8), never free text:
 
 | Code | Cause |
 |---|---|
-| `timeout` | the probe exceeded its deadline, or a cold loser hit the lock-wait deadline |
-| `network` | connection refused, DNS failure, TLS failure |
-| `unauthorized` | `401` or `403` |
-| `not-implemented` | `404`, meaning a service that predates the descriptor |
-| `bad-response` | a 2xx body that is not valid `ServiceInfo` protojson |
-| `server-error` | `5xx` |
+| `timeout` | the probe exceeded `PROBE_TIMEOUT_MS`, or a cold loser hit `LOCK_WAIT_MS` |
+| `network` | connection refused, DNS failure, TLS failure, a refused redirect |
+| `unauthorized` | `401` or `403`, or an absent token — **never cached** (§7.2) |
+| `not-implemented` | `404`, meaning a service predating the descriptor |
+| `bad-response` | a 2xx whose content-type or body does not match `ServiceDescriptor` |
+| `server-error` | any other non-2xx, `500` included |
+| `cache-unavailable` | the cache read or write threw (§8 step 2) |
 
-Each is carried with a human string for display. **The UI branches on the code
-only.** That is the discipline `@paigasus/sdk`'s `mapError` already enforces, and
-the reason this package takes the SDK dependency: the mapping from a failed HTTP
-call to a code runs through `mapError`'s `'http'` and `'transport'` arms rather
-than through a second hand-written table.
+Classification is a small table in `core/reasons.ts` keyed on HTTP status, plus
+`AbortSignal`'s `TimeoutError` versus a `fetch` `TypeError` for
+`timeout`/`network`. **The UI branches on the code only.**
 
 ---
 
 ## 11. Testing
-
-Each acceptance criterion gets its own test. None is inferred from a neighbour.
 
 ### AC1 — three states, independently
 
@@ -431,98 +662,138 @@ Four tests, not three:
 
 1. `absent` — service not in `PAIGASUS_SERVICES` renders nothing.
 2. `available` — configured and answering renders children normally.
-3. `degraded` with a cached descriptor — renders children, disabled, with a
-   reason.
-4. `degraded` with no descriptor — renders children, disabled, with a reason.
+3. `degraded` with a cached descriptor.
+4. `degraded` with no descriptor.
 
-Tests 3 and 4 assert the rendered output **carries** `aria-disabled="true"` and
-an accessible reason, and assert it is **not** `inert` and **not** absent from
-the tree. Asserting only "it rendered something" would pass an implementation
-that hides the reason.
+Tests 3 and 4 assert the output **carries** `aria-disabled="true"` and an
+accessible reason; is **not** `inert`; is **present** in the accessibility tree;
+and — the assertion revision 1 lacked — that **activating the child does not
+navigate**. Asserting only that `aria-disabled` is present passes an
+implementation whose link is still keyboard-activatable.
 
 ### AC2 — a slow service does not block
 
-A probe that never settles, against a stale record, must return within a few
-milliseconds carrying the cached descriptor. The assertion is on elapsed time and
-on the returned descriptor's identity, so an implementation that awaits the probe
-fails on the clock rather than on the value.
+No wall-clock assertion. Inject a probe returning a deferred promise the test
+**never settles**, then `await getServiceState(...)` and assert it resolves with
+the cached descriptor **by identity**. An implementation that awaits the probe
+hangs and fails deterministically at the suite timeout. A second assertion checks
+the probe *was* called, so revalidation is proven to have been attempted.
 
 ### AC3 — exactly one probe
 
-Both halves:
+Three cases, because the fast case cannot see the invariant it claims to test:
 
-- **In-memory** — many concurrent `getServiceState` calls against
-  `createMemoryDescriptorCache()` with a counting probe. The counter must read
-  exactly 1. Runs on every PR.
-- **Real Redis** — the same assertion against `redis:8-alpine` via
-  `testcontainers`, under a separate `test-e2e` Moon task with its own
-  `vitest.containers.config.ts`. This is the half a fake cannot prove: that
-  `SET NX PX` and compare-and-delete are atomic.
+1. **Fast probe, in-memory** — many concurrent calls, counter reads exactly 1.
+2. **Never-settling probe, in-memory** — counter still exactly 1, **and** every
+   loser returned `degraded` with reason `timeout`. Without this case the
+   never-fall-back invariant is unobserved: with a fast probe the winner finishes
+   before any loser reaches its deadline, so the fallback branch never executes
+   and the counter reads 1 even for an implementation that does fall back.
+3. **Real Redis, cross-process** — a forked worker, mirroring
+   `@paigasus/auth`'s `tests/containers/single-flight-multiprocess.test.ts`. The
+   multi-zone argument applies here identically: two console zones are two
+   processes, not two async callers sharing one event loop, and only that case
+   proves `SET NX PX` and compare-and-delete are atomic rather than merely
+   serialized by one event loop.
 
 One shared contract suite runs against **both** adapters, mirroring
-`@paigasus/auth`'s `tests/store-contract.ts`, so a semantic divergence between
-the memory and Redis adapters fails in CI rather than in production.
+`@paigasus/auth`'s `tests/store-contract.ts`, and covers the `version` mismatch
+and unparseable-record behaviours from §6.
 
 **No skip hatch when Docker is unreachable.** The containers suite fails loudly.
-`@paigasus/auth` set this precedent deliberately, against the pattern
-`paigasus-iam`'s Docker suites use.
 
 ### AC4 — gating is cosmetic
 
-Not prose alone. A test asserts that a call made **despite** a missing
-capability — a `404` and an `UNIMPLEMENTED` — maps to a clean `PaigasusError`
-through `mapError`. That makes "the server remains authoritative" a checked
-claim.
-
-The README states it as well, and states that `hasCapability` is not a security
-boundary.
+- A test asserts the package exposes **no enforcement hook** — `hasCapability`
+  returns data and nothing in the package can block a call.
+- A test asserts a probe receiving `404` yields `degraded`/`not-implemented`
+  rather than throwing, which is the client half of "an older service is handled
+  gracefully".
+- The call path itself is `@paigasus/sdk`'s, and its existing `mapError` tests
+  already cover `404` and `UNIMPLEMENTED`. The README cross-references them
+  rather than duplicating.
+- The README states that `hasCapability` is not a security boundary.
 
 ### Test infrastructure
 
-- vitest, `environment: 'node'` for the resolution tests.
-- `<Capability>` tests need jsdom plus testing-library.
-- `resolve.conditions` **and** `ssr.resolve.conditions` both set to
-  `['react-server', 'node', 'import', 'default']`. vitest 5 resolves a
-  node-environment test's imports through `ssr.resolve.conditions`, and
-  `server-only` resolves to an unconditional throw without the `react-server`
-  condition. `@paigasus/sdk` and `@paigasus/next-config` both carry this already.
-- The probe is faked by injecting a `fetch`-shaped function, not by patching
-  globals.
+`@testing-library/react` needs `react-dom/client`, which is **not resolvable
+under the `react-server` condition**, and React's client renderer cannot render
+an `async` component at all. Revision 1's single-project plan does not work.
+
+Three vitest projects:
+
+| Config | Environment | Conditions | Covers |
+|---|---|---|---|
+| `vitest.config.ts` | node | `['react-server','node','import','default']` | resolution, single-flight, adapters, probe |
+| `vitest.jsdom.config.ts` | jsdom | default | `<Capability>` and the client wrapper |
+| `vitest.containers.config.ts` | node | as the first | real Redis, `test-e2e` only |
+
+The jsdom project aliases `server-only` to a stub, mirroring
+`ts/packages/paigasus-auth/tests/support/server-only-stub.ts`. `<Capability>` is
+tested by **awaiting the element it returns** and rendering that, not by calling
+`render()` on the async component.
+
+Both node projects set `resolve.conditions` **and** `ssr.resolve.conditions`:
+vitest 5 resolves a node-environment test's imports through the latter.
+
+The probe is faked by injecting a `fetch`-shaped function, never by patching
+globals.
 
 ---
 
 ## 12. Repo gate obligations
 
-The new package forces changes that red CI if they are missed. They are listed
-here so they enter the plan as steps rather than as surprises.
+Missing any of these reds CI on the implementation PR.
 
-1. **`proto->sdk` and `proto-iam->sdk` must be re-baselined.**
-   `ci/affected-graph/run.sh` uses **strict equality**. Because this package
-   depends on `@paigasus/proto`, an edit to a generated proto file now also
-   selects `paigasus-discovery-ts:{build,test}`, and both cases fail on any extra
-   project. The Frontend Architecture document flagged this class in § 7.1: "it
-   belongs in the plan as an explicit step, not as a surprise."
+1. **Re-baseline `contracts->proto`.** It is a **project** case using
+   `--downstream deep` (`run.sh:34`), its expected set already contains
+   `paigasus-sdk-ts` (`run.sh:268-269`), and a `paigasus-discovery-ts` declaring
+   `dependsOn: ['paigasus-proto-ts']` lands in it. Revision 1 missed this case
+   entirely.
 
-2. **A two-anchor case pair for the new package.** One case alone lets an
-   `inputs` glob be narrowed to the other subtree while staying green. The
-   `ui->console` / `ui-components->console` pair is this repo's precedent, and
-   `proto->sdk` / `proto-iam->sdk` its second. Anchor one case on `src/core/` and
-   one on `src/adapters/`.
+2. **Re-baseline `proto->sdk` and `proto-iam->sdk`.** Both are strict-equality
+   task cases whose sets grow by `paigasus-discovery-ts:{build,test}` once this
+   package lists `/ts/packages/paigasus-proto/src/**/*` in its `inputs`.
 
-3. **A case covering `test-e2e`.** `@paigasus/auth`'s `auth->auth-tasks` case is
-   the model: it asserts a source edit selects `build`, `test`, `test-e2e` and
-   `ts:lint`.
+3. **A two-anchor case pair for the new package**, following the
+   `ui->console` / `ui-components->console` precedent — one case alone lets an
+   `inputs` glob be narrowed to the other subtree while staying green. Anchor one
+   on `src/core/` and one on `src/adapters/`. The expected sets must include
+   `test-e2e`, as `auth->auth-tasks` does.
 
-4. **`:test-e2e` is already in `ci.yml`'s `T=(…)` array** and in CLAUDE.md's
-   marker-delimited command. The new task joins an existing target, so there is
-   **no** `T`-array obligation and no CLAUDE.md marker edit.
+4. **Correct the stale `test-e2e` uniqueness comment** at `run.sh:89-91`, which
+   records as MEASURED that "`paigasus-auth-ts` is the only project declaring
+   `test-e2e`". This package falsifies it. No existing case's observed set
+   changes, but the recorded justification would mislead the next case author.
+   `ci.yml:185`'s Playwright step comment "(for `@paigasus/auth`'s test-e2e)"
+   needs the same correction.
 
-5. **Expected sets are derived, not typed.** Each is produced with the same
-   no-flag `moon query tasks --affected` traversal `_assert_task_case_impl` uses,
-   as the comments on the existing cases require.
+5. **An ESLint boundary block plus its `BOUNDARY_SCOPES` entry.**
+   `tests/boundaries.test.ts:191-200` only pairs *declared* scopes with rules, so
+   a package with neither is invisible to it. The block bans `next/*` from
+   `./types` and records the §2.1 app-shell rule.
 
-6. **`ts:fmt` is a separate whole-tree Prettier gate**, decoupled from `ts:lint`.
-   Run it after the last TypeScript edit.
+6. **No `T`-array or CLAUDE.md marker edit.** `:test-e2e` is already in both, so
+   the new task joins an existing target.
+
+7. **Expected sets are derived, not typed** — produced with the same no-flag
+   `moon query tasks --affected` traversal `_assert_task_case_impl` uses. This
+   applies to **all** of items 1–3, including the two cases revision 1 did not
+   list.
+
+8. **`moon.yml` completeness.** `build`, `test`, `typecheck` **and** `test-e2e`.
+   `typecheck` needs the proto inputs too (`paigasus-sdk/moon.yml:21-23` is the
+   model). `test-e2e` needs `options: cache: false` and must list all three
+   vitest configs (`paigasus-auth/moon.yml:40-54`).
+
+9. **`ts:fmt` is a separate whole-tree Prettier gate.** Run it after the last
+   TypeScript edit.
+
+No `pnpm-workspace.yaml` edit is needed — it globs `packages/*`. No catalog
+additions are needed: `redis`, `testcontainers`, `zod`, `server-only`, `jsdom`
+and the four `@testing-library/*` entries are all already pinned. That also
+avoids pnpm 11's 24-hour `minimumReleaseAge`, which reds CI on a same-day npm
+release.
 
 ---
 
@@ -530,36 +801,55 @@ here so they enter the plan as steps rather than as surprises.
 
 | Rejected | Why |
 |---|---|
-| Put discovery in `@paigasus/sdk` | The SDK would gain a `redis` dependency and a caching subsystem, making it infrastructure rather than typed clients over proto. It has no `react` dependency, so `<Capability>` would still need a home. |
-| Put discovery in `@paigasus/auth` | Service topology is not identity. The `SessionStore` port is session-shaped and would have to grow a general cache it does not want. |
-| Split across sdk, a new package, and ui | Most faithful to the documented dependency rules, but spreads one feature across three packages and forces `<Capability>` to take a resolved `state` prop rather than the `need=` prop the issue specifies. |
-| gRPC for IAM, HTTP for the gateway | Two code paths where one works. ADR-0020 A5 chose HTTP on both for exactly this reason. |
-| Serve a stale record as `available` | Hides an outage for the whole stale window. |
-| A failed probe drops the capability list | Defeats AC2: a blipping service collapses the whole navigation instead of showing known-but-disabled items. |
-| Return `degraded` immediately on a cold cache | The first page load after a deploy would always show every service as down, which is itself a false ops signal. |
+| Put discovery in `@paigasus/sdk` | The SDK would gain a `redis` dependency and a caching subsystem, making it infrastructure rather than typed clients over proto. |
+| Take a `@paigasus/sdk` **dependency** | Its `Presentation` union cannot express these reasons (F8); the probe is a bare `fetch`; and app-shell is banned from reaching the SDK, which a transitive edge would violate. |
+| Put discovery in `@paigasus/auth` | Service topology is not identity. |
+| Split across sdk, a new package, and ui | Forces `<Capability>` to take a resolved `state` prop rather than the `need=` prop the issue specifies. |
+| gRPC for IAM, HTTP for the gateway | Two code paths where one works. ADR-0020 A5 chose HTTP on both. |
+| **Report `available` when the last probe FAILED but a stale descriptor is servable** | Hides an outage for the whole stale window. Note this is narrower than revision 1 stated: a stale record whose last outcome was `ok` **does** map to `available` (§6.3), which is what stale-while-revalidate means. |
+| A failed probe drops the capability list | Defeats AC2: a blipping service collapses the navigation instead of showing known-but-disabled items. |
+| Return `degraded` immediately on a cold cache | The first page load after a deploy would show every service as down — itself a false ops signal. |
 | Block until the probe settles, with no deadline | Cold render latency becomes the slowest service's timeout, and several unreachable services add up. |
-| `inert` on the disabled wrapper | Removes the node from the accessibility tree, hiding it from a screen reader. |
-| A React context plus `useCapability()` | Forces children into client components, which defeats server resolution and pushes the capability list into the browser bundle. |
+| `inert` on the disabled wrapper | Removes the node from the accessibility tree. |
+| Tailwind utility classes in the wrapper | Silently dropped in production builds without an `@source` line in every consumer. |
+| A React context plus `useCapability()` | Forces children into client components, defeating server resolution. |
+| Caching a `401`/`403` outcome | One user's expired cookie disables navigation for the whole deployment (§7.2). |
 
 ---
 
-## 14. Open items for the implementation plan
+## 14. Challenge log
 
-- The exact re-baselined expected sets for `proto->sdk` and `proto-iam->sdk` must
-  be **measured**, not predicted.
-- `@paigasus/discovery` needs a `moon.yml` whose `test` and `build` tasks list
-  `/ts/packages/paigasus-proto/src/**/*` and `/ts/packages/paigasus-sdk/src/**/*`
-  among their `inputs`. Nothing else confers affectedness in Moon 2.5.3.
+The adversarial pass returned **NEEDS REWORK** with 4 blockers. All were
+verified against the code before folding in. Accepted in full:
 
-### 14.1 Resolved before planning
+| Finding | Change |
+|---|---|
+| BLOCKER — §10's reasons cannot come from `mapError` | Dropped the `@paigasus/sdk` dependency; this package owns the vocabulary (F8, §10) |
+| BLOCKER — invariant 5, the fenced write, was dropped | Added `rev` + Lua CAS + the started-before rule (§8.3) |
+| BLOCKER — the record→state mapping was undefined and "fresh" ambiguous | Added `isFresh` on `outcomeAt` and the `toState` table (§6.2, §6.3) |
+| BLOCKER — a shared entry is poisoned by one user's bad token | `401`/`403` are caller-scoped, never cached (§7.2) |
+| MAJOR — lock-wait bound equalled the probe timeout | Separate `LOCK_WAIT_MS`, asserted ordering, final re-read (§5.2, §8.2) |
+| MAJOR — Tailwind classes vanish in production | Data attributes and inline styles instead (§9.6) |
+| MAJOR — `tabindex` is not inherited | The wrapper is a client component with capture handlers (§9.6) |
+| MAJOR — async server component cannot be rendered by testing-library | Three vitest projects, `server-only` stub, await the element (§11) |
+| MAJOR — AC3 could not observe the invariant it claimed | Added the never-settling and cross-process cases (§11) |
+| MAJOR — AC2 was a flaky wall-clock assertion | Never-settling deferred plus identity assertion (§11) |
+| MAJOR — no arm for a failing cache | `cache-unavailable`, plus stated client preconditions (§4.3, §8, §10) |
+| MAJOR — `PAIGASUS_SERVICES` keys unvalidated | Validated against the registry slugs; fails construction (§5.1) |
+| MAJOR — §12 missed `contracts->proto` and the sdk edge | §12 items 1 and 7; the sdk edge disappears with the dependency |
+| MAJOR — no logger, no observability | `ports/logger.ts` with named events (§4) |
+| MAJOR — no request-scoped memoization | §9.5, and the latency bound is now conditional |
+| MAJOR — no schema version on the record | `version: 1`, mismatch → delete (§6) |
+| MAJOR — SSRF surface | `redirect: 'error'`, scheme allowlist, content-type check, size cap (§5.1, §7) |
+| MAJOR — `createDiscovery` versus free functions unresolved | Settled on the handle (§9.1) |
+| MINOR ×10 | F3 restated; F7 added; `pgs:` prefix; `CapabilityKey`; `hasCapability` doc rule; `test-e2e` comment; boundary block; `describeIssues` note; `SERVICE_STATES` / README / `moon.yml` completeness; invariant 4's try/catch |
 
-Two items that looked open are settled, and both remove work:
+**Nothing was rejected.** Every finding was reproducible against the cited code.
 
-- **No `pnpm-workspace.yaml` package edit.** It globs `packages/*` and `apps/*`,
-  so a new directory is picked up with no manifest change.
-- **No catalog additions.** Every dependency this package needs is already
-  catalog-pinned: `redis ^6.2.1`, `testcontainers ^12.1.0`, `zod ^4.5.4`,
-  `server-only ^0.0.1`, `jsdom ^30.0.1` and the four `@testing-library/*`
-  entries. This matters beyond convenience — pnpm 11's 24-hour
-  `minimumReleaseAge` reds CI on a same-day npm release, and adding no new
-  catalog entry avoids that failure mode entirely.
+The challenge also raised five questions, answered inline: background lock
+contention returns immediately (§8.1); `waitUntil` is optional on the container
+deploy target and the README covers the freeze-at-response case (§8.1);
+`ServiceState` crosses the RSC boundary as plain data, which is why
+`ServiceDescriptor` replaced the protobuf message and `readonly string[]`
+replaced `ReadonlySet` (§7.1, §9.2); the cross-process Redis case **is** in scope
+(§11 AC3 case 3); and the timing orderings are asserted at construction (§5.2).
