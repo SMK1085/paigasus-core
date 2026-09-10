@@ -6,6 +6,7 @@ import { DEFAULT_TIMINGS, RECORD_VERSION, type CacheRecord } from '../src/core/r
 import { resolveService, type ResolveDeps } from '../src/core/single-flight.js';
 import type { ProbeOutcome } from '../src/probe.js';
 import type { DescriptorCache } from '../src/ports/cache.js';
+import type { DiscoveryLogger } from '../src/ports/logger.js';
 import type { ServiceDescriptor } from '../src/types.js';
 
 const descriptor: ServiceDescriptor = { service: 'iam', version: '1.0.0', capabilities: ['iam.audit'] };
@@ -312,5 +313,172 @@ describe('failure handling', () => {
     expect(state).toMatchObject({ state: 'available' });
     expect(probe).toHaveBeenCalledTimes(1);
     expect(events).toContain('discovery.record_discarded');
+  });
+});
+
+describe('SMA-509: an always-throwing logger must never break the non-rejecting contract', () => {
+  // safeLog was once wired into only TWO of roughly THIRTEEN `deps.logger.event(...)` call sites
+  // in single-flight.ts. A logger whose `event()` always throws proved it: resolveService
+  // rejected at the STALE-path revalidation-lock catch and the COLD-path probeAndStore catch.
+  // Each case below drives a distinct guarded call site with an always-throwing logger and
+  // asserts `resolveService` still RESOLVES to a `ServiceState`, never rejects. The two cases
+  // marked "the site that used to be missed" are the ones that would have failed against the
+  // half-applied guard.
+  const throwingLogger: DiscoveryLogger = {
+    event: () => {
+      throw new Error('logger exploded');
+    },
+  };
+
+  it('cold path: probes successfully with no cache faults', async () => {
+    await expect(resolveService(deps({ logger: throwingLogger }), 'iam', 'tok')).resolves.toMatchObject({
+      state: 'available',
+    });
+  });
+
+  it('cache-throws path: the initial cache read throws', async () => {
+    const cache: DescriptorCache = {
+      ...createMemoryDescriptorCache(),
+      get: () => Promise.reject(new Error('redis down')),
+    };
+    await expect(resolveService(deps({ cache, logger: throwingLogger }), 'iam', 'tok')).resolves.toMatchObject({
+      state: 'degraded',
+      reason: 'cache-unavailable',
+    });
+  });
+
+  it('cold path: the lock acquisition itself throws', async () => {
+    const cache: DescriptorCache = {
+      ...createMemoryDescriptorCache(),
+      tryAcquireLock: () => Promise.reject(new Error('lock down')),
+    };
+    await expect(resolveService(deps({ cache, logger: throwingLogger }), 'iam', 'tok')).resolves.toMatchObject({
+      state: 'degraded',
+      reason: 'cache-unavailable',
+    });
+  });
+
+  it('cold path: probeAndStore double-check read throws (the site that used to be missed)', async () => {
+    let getCalls = 0;
+    const cache: DescriptorCache = {
+      ...createMemoryDescriptorCache(),
+      get: () => {
+        getCalls += 1;
+        if (getCalls === 1) return Promise.resolve(null);
+        return Promise.reject(new Error('boom'));
+      },
+    };
+    await expect(resolveService(deps({ cache, logger: throwingLogger }), 'iam', 'tok')).resolves.toMatchObject({
+      state: 'degraded',
+      reason: 'cache-unavailable',
+    });
+  });
+
+  it("cold path: releaseLock throws in probeAndStore's finally after a successful probe", async () => {
+    const cache: DescriptorCache = {
+      ...createMemoryDescriptorCache(),
+      releaseLock: () => Promise.reject(new Error('release failed')),
+    };
+    await expect(resolveService(deps({ cache, logger: throwingLogger }), 'iam', 'tok')).resolves.toMatchObject({
+      state: 'available',
+    });
+  });
+
+  it('stale path: the revalidation-lock acquisition throws (the site that used to be missed)', async () => {
+    const cache = createMemoryDescriptorCache();
+    await cache.set('iam', storedRecord({ outcomeAt: 0 }), DEFAULT_TIMINGS.staleMs, null);
+    const faulty: DescriptorCache = { ...cache, tryAcquireLock: () => Promise.reject(new Error('lock down')) };
+    await expect(resolveService(deps({ cache: faulty, logger: throwingLogger, now: () => 120_000 }), 'iam', 'tok')).resolves.toMatchObject({
+      state: 'available',
+    });
+  });
+
+  it('stale path: the double-check finds an already-revalidated record and releaseLock throws', async () => {
+    let getCalls = 0;
+    const cache: DescriptorCache = {
+      ...createMemoryDescriptorCache(),
+      get: () => {
+        getCalls += 1;
+        return Promise.resolve(getCalls === 1 ? storedRecord({ outcomeAt: 0 }) : storedRecord({ outcomeAt: 120_000 }));
+      },
+      releaseLock: () => Promise.reject(new Error('release failed')),
+    };
+    await expect(resolveService(deps({ cache, logger: throwingLogger, now: () => 120_000 }), 'iam', 'tok')).resolves.toMatchObject({
+      state: 'available',
+    });
+  });
+
+  it('stale path: the probe throws synchronously and the fallback releaseLock also throws', async () => {
+    const cache = createMemoryDescriptorCache();
+    await cache.set('iam', storedRecord({ outcomeAt: 0 }), DEFAULT_TIMINGS.staleMs, null);
+    const faulty: DescriptorCache = { ...cache, releaseLock: () => Promise.reject(new Error('release failed')) };
+    const probe = (): Promise<ProbeOutcome> => {
+      throw new Error('probe threw synchronously');
+    };
+    await expect(resolveService(deps({ cache: faulty, probe, logger: throwingLogger, now: () => 120_000 }), 'iam', 'tok')).resolves.toMatchObject({
+      state: 'available',
+    });
+  });
+
+  it('cold path: the probe reports a service mismatch', async () => {
+    const probe = (): Promise<ProbeOutcome> => Promise.resolve({ ok: true, descriptor: { ...descriptor, service: 'other' } });
+    await expect(resolveService(deps({ probe, logger: throwingLogger }), 'iam', 'tok')).resolves.toMatchObject({
+      state: 'available',
+    });
+  });
+
+  it('cold path: a plain probe failure', async () => {
+    const probe = (): Promise<ProbeOutcome> => Promise.resolve({ ok: false, reason: 'network' });
+    await expect(resolveService(deps({ probe, logger: throwingLogger }), 'iam', 'tok')).resolves.toMatchObject({
+      state: 'degraded',
+      reason: 'network',
+    });
+  });
+
+  it('cold path: a fenced write loses its compare-and-set', async () => {
+    const cache = createMemoryDescriptorCache();
+    let getCalls = 0;
+    const faulty: DescriptorCache = {
+      ...cache,
+      get: async (svc: string) => {
+        getCalls += 1;
+        const result = await cache.get(svc);
+        // Land a newer write right after the double-check read finds nothing, so this call's own
+        // write is fenced out.
+        if (getCalls === 2) {
+          await cache.set(svc, storedRecord({ rev: 5 }), DEFAULT_TIMINGS.staleMs, null);
+        }
+        return result;
+      },
+    };
+    await expect(resolveService(deps({ cache: faulty, logger: throwingLogger }), 'iam', 'tok')).resolves.toMatchObject({
+      state: 'available',
+    });
+  });
+
+  it('deletes and re-probes a record that is internally impossible', async () => {
+    const cache = createMemoryDescriptorCache();
+    await cache.writeRawForTest?.(
+      'iam',
+      JSON.stringify({
+        version: RECORD_VERSION,
+        rev: 1,
+        descriptor: null,
+        descriptorAt: 0,
+        outcome: 'ok',
+        outcomeAt: 0,
+        reason: null,
+      }),
+    );
+    await expect(resolveService(deps({ cache, logger: throwingLogger }), 'iam', 'tok')).resolves.toMatchObject({
+      state: 'available',
+    });
+  });
+
+  it('a cold waiter that exhausts lockWaitMs reports timeout', async () => {
+    const cache = createMemoryDescriptorCache();
+    await cache.tryAcquireLock('iam', 'someone-else', 5_000);
+    const d = deps({ cache, logger: throwingLogger, timings: { ...DEFAULT_TIMINGS, lockWaitMs: 10 } });
+    await expect(resolveService(d, 'iam', 'tok')).resolves.toMatchObject({ state: 'degraded', reason: 'timeout' });
   });
 });

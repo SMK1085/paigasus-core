@@ -46,12 +46,19 @@ function newLockToken(): string {
 }
 
 /**
- * `resolveService` is documented to never reject. Two call sites below sit outside any
- * surrounding try: one runs INSIDE a catch block, where an unguarded throw would replace the
- * handled error with a new, unhandled one; the other has no enclosing try at all. A throwing
+ * EVERY `deps.logger.event(...)` call in this file, and in any other module on a path reachable
+ * from `getServiceState`/`hasCapability`, MUST go through this helper. Never call
+ * `deps.logger.event` directly.
+ *
+ * `resolveService` is documented to never reject. `deps.logger` is caller-supplied code — an
+ * injected logger can throw for any reason, on any call — and several call sites sit outside any
+ * surrounding try: some run INSIDE a catch block, where an unguarded throw would replace the
+ * handled error with a new, unhandled one; others have no enclosing try at all. A throwing
  * injected logger would therefore make a rejection reachable, and — because that rejected
- * promise is what the handle's memo map in server.ts stores — it would then be cached and
- * replayed for the handle's whole (per-request) life. Swallow rather than propagate.
+ * promise is what `getServiceState`'s memo map in server.ts stores — it would then be cached and
+ * replayed for the whole (per-request) life of the handle. A guard applied to only SOME call
+ * sites is worse than none, because it reads as complete while still leaving a live path to a
+ * rejection; that is why this rule has no exceptions. Swallow rather than propagate.
  */
 function safeLog(deps: ResolveDeps, name: DiscoveryEventName, fields: DiscoveryEventFields): void {
   try {
@@ -108,7 +115,7 @@ async function readRecord(deps: ResolveDeps, service: string): Promise<CacheReco
   // toState returns null for an internally impossible record (ok with no descriptor). Treat it
   // as corrupt: delete and re-probe.
   if (toState(service, rec) === null) {
-    deps.logger.event('discovery.record_discarded', { service });
+    safeLog(deps, 'discovery.record_discarded', { service });
     await deps.cache.delete(service);
     return null;
   }
@@ -159,7 +166,7 @@ function probeWithTimeout(deps: ResolveDeps, service: string, token: string): Pr
  */
 async function settleProbe(deps: ResolveDeps, service: string, fresh: CacheRecord | null, outcome: ProbeOutcome): Promise<ServiceState> {
   if (!outcome.ok) {
-    deps.logger.event('discovery.probe_failed', { service, reason: outcome.reason });
+    safeLog(deps, 'discovery.probe_failed', { service, reason: outcome.reason });
     // Never cache a 401/403: the descriptor is caller-independent but the auth outcome is not.
     if (isCallerScoped(outcome.reason)) {
       return degraded(service, outcome.reason, fresh);
@@ -167,7 +174,7 @@ async function settleProbe(deps: ResolveDeps, service: string, fresh: CacheRecor
   } else if (outcome.descriptor.service !== service) {
     // The proto MUST: the descriptor's own `service` is advisory and never a cache key. A
     // mismatch is worth logging and nothing more.
-    deps.logger.event('discovery.service_mismatch', {
+    safeLog(deps, 'discovery.service_mismatch', {
       configured: service,
       reported: outcome.descriptor.service,
     });
@@ -177,7 +184,7 @@ async function settleProbe(deps: ResolveDeps, service: string, fresh: CacheRecor
   const written = await deps.cache.set(service, next, deps.timings.staleMs, fresh?.rev ?? null);
   if (!written) {
     // Invariant 5. Someone else already wrote since our snapshot; theirs is newer, so it wins.
-    deps.logger.event('discovery.write_fenced', { service });
+    safeLog(deps, 'discovery.write_fenced', { service });
     const winner = await readRecord(deps, service);
     if (winner !== null) return toState(service, winner) ?? degraded(service, 'network', winner);
     // The CAS failed (a newer write existed) yet a re-read now finds nothing: the record expired
@@ -214,7 +221,7 @@ async function probeAndStore(deps: ResolveDeps, service: string, token: string, 
     try {
       await deps.cache.releaseLock(service, lockToken);
     } catch {
-      deps.logger.event('discovery.cache_unavailable', { service, stage: 'release_lock' });
+      safeLog(deps, 'discovery.cache_unavailable', { service, stage: 'release_lock' });
     }
   }
 }
@@ -235,7 +242,7 @@ async function finishRevalidation(deps: ResolveDeps, service: string, lockToken:
     try {
       await deps.cache.releaseLock(service, lockToken);
     } catch {
-      deps.logger.event('discovery.cache_unavailable', { service, stage: 'release_lock' });
+      safeLog(deps, 'discovery.cache_unavailable', { service, stage: 'release_lock' });
     }
   }
 }
@@ -268,7 +275,7 @@ export async function resolveService(deps: ResolveDeps, service: string, token: 
     try {
       acquired = await deps.cache.tryAcquireLock(service, lockToken, deps.timings.lockTtlMs);
     } catch {
-      deps.logger.event('discovery.cache_unavailable', { service, stage: 'revalidate_lock' });
+      safeLog(deps, 'discovery.cache_unavailable', { service, stage: 'revalidate_lock' });
     }
 
     if (acquired) {
@@ -281,7 +288,7 @@ export async function resolveService(deps: ResolveDeps, service: string, token: 
         try {
           await deps.cache.releaseLock(service, lockToken);
         } catch {
-          deps.logger.event('discovery.cache_unavailable', { service, stage: 'release_lock' });
+          safeLog(deps, 'discovery.cache_unavailable', { service, stage: 'release_lock' });
         }
       } else {
         try {
@@ -291,7 +298,7 @@ export async function resolveService(deps: ResolveDeps, service: string, token: 
           // handed off.
           const revalidated = beginProbe(deps, service, token, fresh);
           const revalidate = finishRevalidation(deps, service, lockToken, revalidated).catch(() => {
-            deps.logger.event('discovery.cache_unavailable', { service, stage: 'revalidate' });
+            safeLog(deps, 'discovery.cache_unavailable', { service, stage: 'revalidate' });
           });
           if (deps.waitUntil !== undefined) deps.waitUntil(revalidate);
         } catch {
@@ -299,11 +306,11 @@ export async function resolveService(deps: ResolveDeps, service: string, token: 
           // never throws, but nothing in this interface forbids it, and an unguarded throw here
           // would propagate out of `resolveService` and leak this lock for its full TTL. Mirrors
           // `probeAndStore`'s try/finally for the cold path.
-          deps.logger.event('discovery.cache_unavailable', { service, stage: 'revalidate' });
+          safeLog(deps, 'discovery.cache_unavailable', { service, stage: 'revalidate' });
           try {
             await deps.cache.releaseLock(service, lockToken);
           } catch {
-            deps.logger.event('discovery.cache_unavailable', { service, stage: 'release_lock' });
+            safeLog(deps, 'discovery.cache_unavailable', { service, stage: 'release_lock' });
           }
         }
       }
@@ -320,14 +327,14 @@ export async function resolveService(deps: ResolveDeps, service: string, token: 
     try {
       acquired = await deps.cache.tryAcquireLock(service, lockToken, deps.timings.lockTtlMs);
     } catch {
-      deps.logger.event('discovery.cache_unavailable', { service, stage: 'lock' });
+      safeLog(deps, 'discovery.cache_unavailable', { service, stage: 'lock' });
       return degraded(service, 'cache-unavailable', null);
     }
     if (acquired) {
       try {
         return await probeAndStore(deps, service, token, lockToken);
       } catch {
-        deps.logger.event('discovery.cache_unavailable', { service, stage: 'probe_store' });
+        safeLog(deps, 'discovery.cache_unavailable', { service, stage: 'probe_store' });
         return degraded(service, 'cache-unavailable', null);
       }
     }
