@@ -145,11 +145,16 @@ describe('getSession', () => {
   // `store.unavailable` with `stage: 'get_session'` — the SAME event a genuine Redis outage
   // produces, so an operator investigating a mass sign-out during an IdP incident chased a
   // perfectly healthy store. This file's catch is generic by design (§ 10.1: any resolveSession
-  // failure degrades to signed-out, never a 500) and still fires `store.unavailable` here for
-  // every such failure — but a refresh failure now ALSO carries `session.refresh_failed`, emitted
-  // where it actually happens (core/single-flight.ts, tested directly there), which is the signal
-  // that was missing and is what makes the two causes distinguishable at all.
-  it('also logs session.refresh_failed (in addition to store.unavailable) when the IdP refresh call fails', async () => {
+  // failure degrades to signed-out, never a 500) — but a refresh failure now ALSO carries
+  // `session.refresh_failed`, emitted where it actually happens (core/single-flight.ts, tested
+  // directly there), which is the signal that was missing and is what makes the two causes
+  // distinguishable at all.
+  //
+  // SMA-626 § 2.4 (task 7) then narrowed this catch's OWN classification: the generic
+  // `Error` this fixture rejects with is not a `SessionStoreUnavailable`, so it now logs
+  // `session.resolve_failed` here, never `store.unavailable` — the whole point being that an
+  // IdP outage must never raise the store-outage signal against a perfectly healthy store.
+  it('logs session.refresh_failed AND session.resolve_failed, NEVER store.unavailable, when the IdP refresh call fails', async () => {
     cookiesMock.mockResolvedValue(cookieJar('sid-needs-refresh'));
     const store = new MemorySessionStore();
     await store.set('sid-needs-refresh', { ...liveRecord(), accessExpiresAt: Date.now() - 1, refreshToken: 'RT' }, 999_000, null);
@@ -163,6 +168,8 @@ describe('getSession', () => {
     await expect(getSession(runtime)).resolves.toBeNull();
 
     expect(events).toContainEqual(['session.refresh_failed', { sid: sidTag('sid-needs-refresh'), reason: 'transient', degraded: false }]);
+    expect(events).toContainEqual(['session.resolve_failed', { sid: sidTag('sid-needs-refresh'), stage: 'get_session' }]);
+    expect(events.some(([name]) => name === 'store.unavailable')).toBe(false);
   });
 });
 
