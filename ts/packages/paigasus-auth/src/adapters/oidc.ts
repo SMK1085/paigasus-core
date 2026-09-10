@@ -32,6 +32,7 @@
 // exists to state.
 import * as client from 'openid-client';
 import type { IdTokenClaims } from '../ports/principal-resolver.js';
+import { RefreshRejected } from '../core/errors.js';
 
 export interface RefreshedTokens {
   accessToken: string;
@@ -124,6 +125,30 @@ class RedactedSecret {
 function wrapError(stage: string, cause: unknown): Error {
   const name = cause instanceof Error ? cause.name : 'unknown_error';
   return new Error(`oidc ${stage} failed: ${name}`);
+}
+
+/**
+ * Definitive rejection, or a failure to answer? Only `invalid_grant` means "this refresh token is
+ * revoked" — an administrator ended the session, or the user signed out elsewhere. Every other
+ * OAuth code is a per-DEPLOYMENT fault that hits every session at the same instant:
+ * `invalid_client` after a client-secret rotation, `invalid_scope` after a misconfiguration.
+ * Treating those as definitive would sign out the whole fleet into a re-login that fails the same
+ * way (handleCallback -> code_exchange_failed -> HTTP 502). See SMA-626 § 2.2.
+ *
+ * MEASURED against openid-client 6.8.8 / oauth4webapi 3.8.8, pinned by this file's test's
+ * "MEASUREMENT" block: a 400 carrying `{"error":"invalid_grant"}` and no WWW-Authenticate header
+ * arrives here as `client.ResponseBodyError` with `.error === 'invalid_grant'`. A response that
+ * DOES carry WWW-Authenticate arrives as `WWWAuthenticateChallengeError`, which has no `.error`
+ * field at all — that is a second reason `invalid_client` is not in this set, since RFC 6749 § 5.2
+ * says a token endpoint SHOULD send that header with it.
+ *
+ * Reads the error CODE only. Never the error object, never its message, never a URL.
+ */
+function classifyRefreshError(cause: unknown): Error {
+  if (cause instanceof client.ResponseBodyError && cause.error === 'invalid_grant') {
+    return new RefreshRejected('invalid_grant');
+  }
+  return wrapError('refresh_token_grant', cause);
 }
 
 export function createOidcClient(opts: CreateOidcClientOptions): OidcClient {
@@ -249,7 +274,7 @@ export function createOidcClient(opts: CreateOidcClientOptions): OidcClient {
           expiresIn,
         };
       } catch (err) {
-        throw wrapError('refresh_token_grant', err);
+        throw classifyRefreshError(err);
       }
     },
 

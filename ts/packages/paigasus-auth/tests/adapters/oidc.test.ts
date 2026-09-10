@@ -13,6 +13,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import * as client from 'openid-client';
 import { createOidcClient, type OidcClient } from '../../src/adapters/oidc.js';
 import { startOidcFixture, type OidcFixture } from '../fixtures/jwks.js';
+import { RefreshRejected } from '../../src/core/errors.js';
 
 const REDIRECT_URI = 'https://rp.example.com/auth/callback';
 const STATE = 'txn-state-value';
@@ -238,5 +239,45 @@ describe('MEASUREMENT: the error class a refused refresh produces', () => {
 
     expect(err).toBeInstanceOf(client.WWWAuthenticateChallengeError);
     expect(err).not.toBeInstanceOf(client.ResponseBodyError);
+  });
+});
+
+describe('createOidcClient — refresh failure classification (SMA-626 § 2.2)', () => {
+  it('maps invalid_grant to RefreshRejected, carrying only the OAuth code', async () => {
+    const oidc = makeClient();
+    fixture.setNextTokenError('invalid_grant');
+
+    const err: unknown = await oidc.refresh('some-refresh-token').catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(RefreshRejected);
+    expect((err as RefreshRejected).oauthError).toBe('invalid_grant');
+    expect((err as RefreshRejected).code).toBe('oidc_refresh_rejected');
+    // Redaction: the refresh token, the client secret and the issuer URL must not appear.
+    expect((err as Error).message).not.toContain('some-refresh-token');
+    expect((err as Error).message).not.toContain(fixture.clientSecret);
+    expect((err as Error).message).not.toContain(fixture.issuer);
+  });
+
+  // The whole point of § 2.2's narrowing: these are per-DEPLOYMENT faults, not session
+  // revocations. Classifying them as definitive would sign out every session at once when
+  // someone rotates the client secret without updating PAIGASUS_OIDC_CLIENT_SECRET.
+  it.each(['invalid_client', 'unauthorized_client', 'invalid_scope', 'invalid_request', 'server_error', 'temporarily_unavailable'])('treats %s as transient, NOT as RefreshRejected', async (code) => {
+    const oidc = makeClient();
+    fixture.setNextTokenError(code);
+
+    const err: unknown = await oidc.refresh('some-refresh-token').catch((e: unknown) => e);
+
+    expect(err).not.toBeInstanceOf(RefreshRejected);
+    expect((err as Error).message).toMatch(/oidc refresh_token_grant failed/);
+  });
+
+  // A non-OAuth failure raised INSIDE the try block must not be classified either.
+  it('treats a response missing expires_in as transient', async () => {
+    const oidc = makeClient();
+    fixture.setNextExpiresIn(undefined);
+
+    const err: unknown = await oidc.refresh('some-refresh-token').catch((e: unknown) => e);
+
+    expect(err).not.toBeInstanceOf(RefreshRejected);
   });
 });
