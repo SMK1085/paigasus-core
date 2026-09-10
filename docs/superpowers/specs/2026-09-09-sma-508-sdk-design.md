@@ -1380,8 +1380,15 @@ One caveat inherited knowingly: the parser `.trim()`s each `data:` line where th
 exactly one leading space. Harmless for JSON payloads, which ignore surrounding whitespace, and
 recorded here rather than inherited silently.
 
-**Not re-litigated, by the issue owner's decision.** § 9.2's `ResourceExhausted`/429 row stays
-`degraded`; SMA-627 stays out of scope; the three-PR split stands.
+**Not re-litigated at THIS gate, by the issue owner's decision.** § 9.2's `ResourceExhausted`/429 row
+stays `degraded`; SMA-627 stays out of scope; the three-PR split stands.
+
+> **SUPERSEDED in part — the 429 row was re-litigated later and reversed.** § 15.2 item 8 records
+> the reversal: `ResourceExhausted` and 429 now map to **`rate-limited`**. The sentence above is kept
+> as the record of what THIS gate decided, because a second challenge reaching the opposite answer
+> on a measurement this one did not have is the interesting fact, and rewriting it away would hide
+> that the question was asked twice. § 9.2 is authoritative for the mapping. SMA-627 and the
+> three-PR split are unaffected.
 
 ## 16. Open questions for review
 
@@ -1391,7 +1398,10 @@ All three of Revision 1's questions are now **closed**.
 2. **The three-PR split (§ 14.1)** — adopt, and re-cut the Linear issues? **ADOPTED.** SMA-624 (A)
    and SMA-508 (B) have merged; SMA-625 is C.
 3. **`ResourceExhausted`/429 → `degraded`** (§ 9.2) — the one presentation row worth a second
-   opinion. **KEPT as `degraded`,** by the issue owner, on this revision.
+   opinion. **KEPT as `degraded`** by the issue owner on this revision, then **REVERSED to
+   `rate-limited`** after a second challenge produced a measurement this revision did not have
+   (§ 15.2 item 8). The row flagging itself as "worth a second opinion" and then getting one that
+   changed the answer is the section working as intended. § 9.2 is authoritative.
 
 ### 16.1 What Revision 3 put to the reader — all three now CONFIRMED
 
