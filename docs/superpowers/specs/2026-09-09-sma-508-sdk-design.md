@@ -884,9 +884,9 @@ last of these — see the AC 1 row.
 | `mapError` — degradation (AC 2) | Unknown reason yields `reason: null`, keeps `rawReason` and `correlationId`; unknown domain yields `domain: null`, keeps `rawDomain` |
 | Message-independence (AC 2) | One wire error with three different `message` strings maps to three identical objects modulo `message` |
 | AC 1 structure (edit) | `tests/server-guard.test.ts` computes each entry's expected guard specifier **from that entry's own directory**, so a nested entry resolves `'../server-guard.js'`. The shipped literal `"import './server-guard.js';"` cannot express this and is replaced |
-| Chat — shape | Non-stream 2xx yields `{kind:'json'}`; a `stream:true` request answered as JSON (§ 8.1 row 3) is detected by `content-type`, not the flag; a non-2xx **throws** a `PaigasusError` |
+| Chat — shape | Non-stream 2xx yields `{kind:'json'}`; a `stream:true` request answered as JSON (§ 8.1 row 3) is detected by `content-type`, not the flag; a non-2xx **throws** a `PaigasusHttpError` carrying the mapped `PaigasusError` on its `.error` property (§ 8.2) |
 | Chat — ids on success | **Both** variants carry `correlationId` and `requestId` read from the response headers, on a 2xx — the non-streaming variant included. A response missing the headers yields `null`, not a throw |
-| Chat — an upstream 429 | A passthrough 429 (OpenAI's quota) throws a `PaigasusError` with `presentation: 'rate-limited'`, `reason: null` and `rawReason` holding OpenAI's own code |
+| Chat — an upstream 429 | A passthrough 429 (OpenAI's quota) throws a `PaigasusHttpError` whose `.error` holds `presentation: 'rate-limited'`, `reason: null` and `rawReason` set to OpenAI's own code |
 | Chat — passthrough (AC 4) | The returned `body` is the **identical** `ReadableStream` object the stub `fetch` produced |
 | Chat — deadline | A stalled-header request rejects at the pre-header deadline; a response whose headers arrive in time is **not** aborted while its body is still streaming (the cleared-timer proof) |
 | Chat — cancellation | `cancel()` on the returned stream reaches the stub's own cancel. **Scoped to forwarding** — see § 8.4's coverage limit |

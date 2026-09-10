@@ -1127,8 +1127,7 @@ Refs SMA-625"
 // SPDX-License-Identifier: Apache-2.0
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { chatCompletion } from '../src/chat.js';
-import type { PaigasusError } from '../src/errors/types.js';
+import { chatCompletion, PaigasusHttpError } from '../src/chat.js';
 
 const OPTIONS = { baseUrl: 'https://gateway.test', auth: { bearer: 'tok' } } as const;
 const REQUEST = { model: 'gpt-4o', messages: [{ role: 'user', content: 'hi' }] };
@@ -1227,10 +1226,12 @@ describe('a non-2xx throws a PaigasusError', () => {
       ),
     );
 
-    const error = (await chatCompletion(REQUEST, OPTIONS).catch((e: unknown) => e)) as PaigasusError;
-    expect(error.presentation).toBe('invalid-input');
-    expect(error.correlationId).toBe('corr-1');
-    expect(error.metadata).toEqual({ param: 'stream' });
+    const error = (await chatCompletion(REQUEST, OPTIONS).catch((e: unknown) => e)) as PaigasusHttpError;
+    // Pins the contract (spec § 8.2): the thrown value is a real Error, not the plain PaigasusError.
+    expect(error).toBeInstanceOf(PaigasusHttpError);
+    expect(error.error.presentation).toBe('invalid-input');
+    expect(error.error.correlationId).toBe('corr-1');
+    expect(error.error.metadata).toEqual({ param: 'stream' });
   });
 
   it('maps an upstream 429 to rate-limited without resolving OpenAI vocabulary', async () => {
@@ -1244,10 +1245,10 @@ describe('a non-2xx throws a PaigasusError', () => {
       ),
     );
 
-    const error = (await chatCompletion(REQUEST, OPTIONS).catch((e: unknown) => e)) as PaigasusError;
-    expect(error.presentation).toBe('rate-limited');
-    expect(error.reason).toBeNull();
-    expect(error.rawReason).toBe('insufficient_quota');
+    const error = (await chatCompletion(REQUEST, OPTIONS).catch((e: unknown) => e)) as PaigasusHttpError;
+    expect(error.error.presentation).toBe('rate-limited');
+    expect(error.error.reason).toBeNull();
+    expect(error.error.rawReason).toBe('insufficient_quota');
   });
 
   it('does not throw while mapping a body that is not JSON', async () => {
@@ -1256,9 +1257,9 @@ describe('a non-2xx throws a PaigasusError', () => {
       vi.fn(async () => respond('<html>502 Bad Gateway</html>', { status: 502, headers: { 'content-type': 'application/json' } })),
     );
 
-    const error = (await chatCompletion(REQUEST, OPTIONS).catch((e: unknown) => e)) as PaigasusError;
-    expect(error.presentation).toBe('degraded');
-    expect(error.correlationId).toBe('corr-1');
+    const error = (await chatCompletion(REQUEST, OPTIONS).catch((e: unknown) => e)) as PaigasusHttpError;
+    expect(error.error.presentation).toBe('degraded');
+    expect(error.error.correlationId).toBe('corr-1');
   });
 });
 
@@ -1276,8 +1277,8 @@ describe('deadlines', () => {
     );
 
     const promise = chatCompletion(REQUEST, { ...OPTIONS, timeoutMs: 10 });
-    const error = (await promise.catch((e: unknown) => e)) as PaigasusError;
-    expect(error.presentation).toBe('degraded');
+    const error = (await promise.catch((e: unknown) => e)) as PaigasusHttpError;
+    expect(error.error.presentation).toBe('degraded');
   });
 
   // The deadline timer must be CLEARED once the head lands, or the same signal would abort the
@@ -1473,7 +1474,7 @@ Refs SMA-625"
 
 **Interfaces:**
 - Consumes: `mapError`, `FrameIds` (Task 4).
-- Produces: `createTerminalFrameParser(ids: FrameIds): { push(chunk: Uint8Array | string): PaigasusError | null }`, and `TERMINAL_SSE_ERROR` from the fixture.
+- Produces: `createTerminalFrameParser(ids: FrameIds, committedStatus: number): { push(chunk: Uint8Array | string): PaigasusError | null }`, and `TERMINAL_SSE_ERROR` from the fixture. `committedStatus` was made a required second parameter mid-implementation, because the byte-level parser cannot see the gateway's real 2xx status and the caller — the only thing that constructs a parser — already has it.
 
 - [ ] **Step 1: Write the fixture, pinned verbatim**
 
@@ -1527,7 +1528,7 @@ describe('the fixture still matches the Rust constant', () => {
 
 describe('the parser', () => {
   it('returns the mapped error for the pinned frame', () => {
-    const parser = createTerminalFrameParser(IDS);
+    const parser = createTerminalFrameParser(IDS, 200);
     const error = parser.push(encode(TERMINAL_SSE_ERROR));
 
     expect(error).not.toBeNull();
@@ -1540,26 +1541,26 @@ describe('the parser', () => {
   });
 
   it('finds a frame split across two chunks', () => {
-    const parser = createTerminalFrameParser(IDS);
+    const parser = createTerminalFrameParser(IDS, 200);
     const half = Math.floor(TERMINAL_SSE_ERROR.length / 2);
     expect(parser.push(encode(TERMINAL_SSE_ERROR.slice(0, half)))).toBeNull();
     expect(parser.push(encode(TERMINAL_SSE_ERROR.slice(half)))).not.toBeNull();
   });
 
   it('finds the terminal frame after a data frame in the same chunk', () => {
-    const parser = createTerminalFrameParser(IDS);
+    const parser = createTerminalFrameParser(IDS, 200);
     const error = parser.push(encode(`data: {"id":"chatcmpl-1"}\n\n${TERMINAL_SSE_ERROR}`));
     expect(error).not.toBeNull();
     expect(error!.rawReason).toBe('upstream-error');
   });
 
   it('returns null for ordinary data frames', () => {
-    const parser = createTerminalFrameParser(IDS);
+    const parser = createTerminalFrameParser(IDS, 200);
     expect(parser.push(encode('data: {"id":"a"}\n\ndata: [DONE]\n\n'))).toBeNull();
   });
 
   it('returns null for a partial trailing record that never completes', () => {
-    const parser = createTerminalFrameParser(IDS);
+    const parser = createTerminalFrameParser(IDS, 200);
     expect(parser.push(encode('data: {"error":{"code":"upstream-'))).toBeNull();
   });
 
@@ -1568,21 +1569,21 @@ describe('the parser', () => {
     const frame = 'data: {"error":{"message":"café ☕","type":"api_error","param":null,"code":"upstream-error"}}\n\n';
     const bytes = encode(frame);
     const cut = frame.indexOf('café') + 4; // lands inside the two-byte é
-    const parser = createTerminalFrameParser(IDS);
+    const parser = createTerminalFrameParser(IDS, 200);
     expect(parser.push(bytes.slice(0, cut))).toBeNull();
     const error = parser.push(bytes.slice(cut));
     expect(error).not.toBeNull();
     expect(error!.message).toBe('café ☕');
   });
 
-  it.each([['\n\n'], ['\r\n\r\n'], ['\r\r']])('accepts the %j record delimiter', (delimiter) => {
-    const parser = createTerminalFrameParser(IDS);
+  it.each([['\n\n'], ['\r\n\r\n'], ['\r\r'], ['\n\r\n'], ['\r\n\n'], ['\n\r']])('accepts the %j record delimiter', (delimiter) => {
+    const parser = createTerminalFrameParser(IDS, 200);
     const frame = TERMINAL_SSE_ERROR.replace('\n\n', delimiter);
     expect(parser.push(encode(frame))).not.toBeNull();
   });
 
   it('returns null forever after the first terminal error', () => {
-    const parser = createTerminalFrameParser(IDS);
+    const parser = createTerminalFrameParser(IDS, 200);
     expect(parser.push(encode(TERMINAL_SSE_ERROR))).not.toBeNull();
     expect(parser.push(encode(TERMINAL_SSE_ERROR))).toBeNull();
   });
@@ -1590,14 +1591,24 @@ describe('the parser', () => {
   it('drops the buffer rather than growing without bound', () => {
     // An upstream that never sends a blank line must not exhaust memory. Dropping is correct: the
     // parser is a best-effort observer, never a reason to fail a stream still delivering data.
-    const parser = createTerminalFrameParser(IDS);
+    const parser = createTerminalFrameParser(IDS, 200);
     expect(parser.push(encode('data: '.padEnd(70_000, 'x')))).toBeNull();
     expect(parser.push(encode(TERMINAL_SSE_ERROR))).not.toBeNull();
   });
 
   it('accepts a string chunk from a caller that already decoded', () => {
-    const parser = createTerminalFrameParser(IDS);
+    const parser = createTerminalFrameParser(IDS, 200);
     expect(parser.push(TERMINAL_SSE_ERROR)).not.toBeNull();
+  });
+
+  // committedStatus was added as a required second parameter mid-implementation (see Interfaces
+  // above): chat.rs:128 branches on is_success(), so a non-200 2xx is a reachable committed status.
+  it('carries a non-200 committed status onto the mapped error', () => {
+    const parser = createTerminalFrameParser(IDS, 201);
+    const error = parser.push(encode(TERMINAL_SSE_ERROR));
+
+    expect(error).not.toBeNull();
+    expect(error!.transport).toEqual({ kind: 'http', status: 201 });
   });
 });
 ```
@@ -1620,26 +1631,25 @@ import { mapError } from './map-error.js';
 import type { FrameIds } from './map-error.js';
 import type { PaigasusError } from './types.js';
 
-/**
- * The gateway's terminal frame arrives inside a committed 200, so mapping uses that status.
- * chat.rs:128 branches on is_success(), so 200 is usual but not the only reachable value; the
- * parser sees only bytes and cannot know the real one, so it names the usual case.
- */
-const COMMITTED_STATUS = 200;
-
 /** Beyond this, a stream that never sends a blank line would grow the buffer without bound. */
 const MAX_BUFFER_BYTES = 64 * 1024;
 
-/** SSE permits all three; chat.rs:63 emits the first, but upstream chunks pass through verbatim. */
-const DELIMITERS = ['\r\n\r\n', '\n\n', '\r\r'];
+/**
+ * A record ends at a blank line — any TWO consecutive line terminators, each of which may be
+ * CRLF, LF or CR. chat.rs:63 emits `\n\n`, but upstream chunks pass through this gateway
+ * verbatim, so the grammar is what this follows, not that one producer's habit.
+ *
+ * This single regex replaces an earlier three-string `DELIMITERS` list, changed mid-implementation
+ * once the list was seen to miss the three mixed forms (`\n\r\n`, `\r\n\n`, `\n\r`). The alternation
+ * puts `\r\n` first so a CRLF is consumed whole rather than as a bare CR — which is what makes
+ * `\r\n\r\n` match as one four-character delimiter instead of two two-character ones.
+ */
+const RECORD_DELIMITER = /(?:\r\n|\r|\n){2}/;
 
 function firstDelimiter(buffer: string): { index: number; length: number } | null {
-  let best: { index: number; length: number } | null = null;
-  for (const delimiter of DELIMITERS) {
-    const index = buffer.indexOf(delimiter);
-    if (index !== -1 && (best === null || index < best.index)) best = { index, length: delimiter.length };
-  }
-  return best;
+  const match = RECORD_DELIMITER.exec(buffer);
+  if (match === null) return null;
+  return { index: match.index, length: match[0].length };
 }
 
 /**
@@ -1653,8 +1663,14 @@ function firstDelimiter(buffer: string): { index: number; length: number } | nul
  *
  * A chunk boundary can fall anywhere, so a parser over one chunk would miss the terminal frame in
  * exactly the split case it exists to catch — hence the state.
+ *
+ * `committedStatus` is the gateway's real 2xx response status, added as a required second
+ * parameter mid-implementation: the parser itself sees only bytes and cannot know it, so
+ * `chatCompletion` returns it on `ChatCompletionResult.status` and the caller — the only thing
+ * that constructs a parser — always has it. chat.rs:128 branches on `is_success()`, so 200 is the
+ * usual value but not the only reachable one (spec § 9.5 arm 4).
  */
-export function createTerminalFrameParser(ids: FrameIds): { push(chunk: Uint8Array | string): PaigasusError | null } {
+export function createTerminalFrameParser(ids: FrameIds, committedStatus: number): { push(chunk: Uint8Array | string): PaigasusError | null } {
   // ONE decoder for the parser's lifetime. A fresh TextDecoder per chunk corrupts a multi-byte
   // character split across a chunk boundary — the same defect class as a split record, one level
   // down.
@@ -1675,7 +1691,7 @@ export function createTerminalFrameParser(ids: FrameIds): { push(chunk: Uint8Arr
         const record = buffer.slice(0, delimiter.index);
         buffer = buffer.slice(delimiter.index + delimiter.length);
 
-        const error = parseRecord(record, ids);
+        const error = parseRecord(record, ids, committedStatus);
         if (error !== null) {
           found = error;
           done = true;
@@ -1692,7 +1708,7 @@ export function createTerminalFrameParser(ids: FrameIds): { push(chunk: Uint8Arr
 }
 
 /** An SSE record is an error only if its `data:` payload is an OpenAI envelope carrying a code. */
-function parseRecord(record: string, ids: FrameIds): PaigasusError | null {
+function parseRecord(record: string, ids: FrameIds, committedStatus: number): PaigasusError | null {
   const data = record
     .split(/\r\n|\n|\r/)
     .filter((line) => line.startsWith('data:'))
@@ -1711,7 +1727,7 @@ function parseRecord(record: string, ids: FrameIds): PaigasusError | null {
   if (typeof error !== 'object' || error === null) return null;
   if (typeof (error as { code?: unknown }).code !== 'string') return null;
 
-  return mapError({ kind: 'terminal-frame', status: COMMITTED_STATUS, body, ids });
+  return mapError({ kind: 'terminal-frame', status: committedStatus, body, ids });
 }
 ```
 
