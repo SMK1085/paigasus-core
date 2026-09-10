@@ -4,7 +4,7 @@
 import './server-guard.js';
 
 import { CORRELATION_HEADER, REQUEST_ID_HEADER, mapError } from './errors/map-error.js';
-import type { ErrorInput } from './errors/map-error.js';
+import type { ErrorInput, FrameIds } from './errors/map-error.js';
 import type { PaigasusError, TransportCause } from './errors/types.js';
 
 /** The registry code the gateway puts in its one terminal SSE frame (chat.rs:63). */
@@ -19,8 +19,15 @@ const TERMINAL_CODE = 'upstream-error';
  *
  * It holds only the trailing partial record and the trailing partial character, so it does not
  * reintroduce the buffering the passthrough avoids.
+ *
+ * `committedStatus` is the status the gateway actually COMMITTED on the response head, and `ids`
+ * are that head's correlation and request ids. The parser sees only bytes and can know either, so
+ * the caller — which has both on its `ChatResult` — passes them in. Both were ported from PR #231,
+ * which implemented this issue in parallel: its review caught that hardcoding 200 misreports a
+ * stream committed on another 2xx, and carrying the ids means the one failure with no ids of its
+ * own still gives a user something to report.
  */
-export function createTerminalFrameParser(): { push(chunk: Uint8Array): PaigasusError[] } {
+export function createTerminalFrameParser(committedStatus: number, ids?: FrameIds): { push(chunk: Uint8Array): PaigasusError[] } {
   // A streaming decoder, not a per-chunk one: a multi-byte character can straddle a chunk
   // boundary exactly as a record can.
   const decoder = new TextDecoder('utf-8');
@@ -31,17 +38,13 @@ export function createTerminalFrameParser(): { push(chunk: Uint8Array): Paigasus
       buffer += decoder.decode(chunk, { stream: true });
 
       const found: PaigasusError[] = [];
-      // An SSE record ends at a blank line. The gateway emits "\n\n" (chat.rs:63); "\r\n\r\n" is
-      // legal SSE and is not produced here, but accepting it costs one alternation and rejecting
-      // it would be a silent miss.
-      const delimiter = /\r?\n\r?\n/;
       for (;;) {
-        const match = delimiter.exec(buffer);
+        const match = RECORD_DELIMITER.exec(buffer);
         if (match === null) break;
         const record = buffer.slice(0, match.index);
         buffer = buffer.slice(match.index + match[0].length);
 
-        const error = terminalErrorFrom(record);
+        const error = terminalErrorFrom(record, committedStatus, ids);
         if (error !== null) found.push(error);
       }
       return found;
@@ -49,13 +52,29 @@ export function createTerminalFrameParser(): { push(chunk: Uint8Array): Paigasus
   };
 }
 
+/**
+ * An SSE record ends at a BLANK LINE, and the grammar's line terminator is CRLF, LF or CR.
+ * `chat.rs:63` emits `\n\n`, but upstream chunks pass through this gateway, so a bare CR is not
+ * ours to rule out. The alternation puts `\r\n` FIRST so a CRLF is consumed whole rather than as a
+ * bare CR — otherwise `\r\n\r\n` matches as two two-character delimiters instead of one
+ * four-character one, and the record splits in the wrong place. Ported from PR #231, whose version
+ * also caught mixed endings such as `\n\r\n` that a fixed alternation of two-character strings
+ * misses.
+ */
+const RECORD_DELIMITER = /(?:\r\n|\r|\n){2}/;
+
 /** A `PaigasusError` when this record is the terminal error frame, else `null`. */
-function terminalErrorFrom(record: string): PaigasusError | null {
+function terminalErrorFrom(record: string, committedStatus: number, ids?: FrameIds): PaigasusError | null {
   const data = record
-    .split(/\r?\n/)
+    .split(/\r\n|\n|\r/)
     .filter((line) => line.startsWith('data:'))
     .map((line) => line.slice('data:'.length).trim())
-    .join('');
+    // The SSE grammar appends U+000A after each `data` field's value, so a multi-line payload
+    // reconstructs with NEWLINES, not with nothing. The gateway emits one line, so no frame it
+    // produces changes — but a caller may drive this parser over an upstream stream. Joining with
+    // '' would corrupt every legitimate multi-line payload in order to paper over a producer that
+    // split a JSON string literal, which is that producer's bug and not this receiver's to hide.
+    .join('\n');
   if (data === '' || data === '[DONE]') return null;
 
   let body: unknown;
@@ -69,7 +88,7 @@ function terminalErrorFrom(record: string): PaigasusError | null {
 
   const code = (body as { error?: { code?: unknown } } | null)?.error?.code;
   if (code !== TERMINAL_CODE) return null;
-  return mapError({ kind: 'terminal-frame', body });
+  return mapError({ kind: 'terminal-frame', body, status: committedStatus, ids });
 }
 
 /** The default bound on the wait for response HEADERS. Matches the gRPC transport's 10 s (§ 7.2). */
@@ -149,6 +168,19 @@ export function createChatClient(options: ChatClientOptions, auth: { readonly be
       // the streaming body at the deadline, truncating every completion longer than the window —
       // the normal case for this product. A manual controller whose timer is cleared the moment
       // the fetch promise settles bounds the HEAD only (spec § 8.5).
+      // Serialized BEFORE the timer and before the try. `JSON.stringify` throws on a circular
+      // reference or a bigint — the CALLER's bug. Inside the try it was caught by the transport
+      // arm and reported as a gateway `degraded`, blaming the service for the caller's input; and
+      // above the timer it cannot leak one. Ported from PR #231's local review.
+      let payload: string;
+      try {
+        payload = JSON.stringify(request);
+      } catch (cause) {
+        // `cause` is attached deliberately: this is the one error the client throws rather than
+        // maps, and the caller needs the original to find their own circular reference.
+        throw new TypeError(`@paigasus/sdk: the chat request is not JSON-serializable: ${cause instanceof Error ? cause.message : String(cause)}`, { cause });
+      }
+
       const controller = new AbortController();
       let timedOut = false;
       const timer = setTimeout(() => {
@@ -161,7 +193,7 @@ export function createChatClient(options: ChatClientOptions, auth: { readonly be
         response = await fetchImpl(url, {
           method: 'POST',
           headers: { authorization: `Bearer ${auth.bearer}`, 'content-type': 'application/json' },
-          body: JSON.stringify(request),
+          body: payload,
           signal: callerSignal === undefined ? controller.signal : AbortSignal.any([controller.signal, callerSignal]),
         });
       } catch (cause) {

@@ -49,7 +49,7 @@ describe('the terminal frame is read from the gateway, not hand-built', () => {
 
 describe('createTerminalFrameParser', () => {
   it('parses one whole frame in one chunk', () => {
-    const parser = createTerminalFrameParser();
+    const parser = createTerminalFrameParser(200);
     const out = parser.push(encode(FRAME));
     expect(out).toHaveLength(1);
     // `noUncheckedIndexedAccess` types `out[0]` as possibly undefined; the length assertion above
@@ -69,7 +69,7 @@ describe('createTerminalFrameParser', () => {
   // THE case the parser exists for. A chunk boundary can fall anywhere, and a parser over one
   // bare chunk misses the terminal error precisely here.
   it('parses a frame split across two chunks', () => {
-    const parser = createTerminalFrameParser();
+    const parser = createTerminalFrameParser(200);
     const split = Math.floor(FRAME.length / 2);
     expect(parser.push(encode(FRAME.slice(0, split)))).toEqual([]);
     const out = parser.push(encode(FRAME.slice(split)));
@@ -80,18 +80,18 @@ describe('createTerminalFrameParser', () => {
   });
 
   it('returns both frames when two arrive in one chunk', () => {
-    const parser = createTerminalFrameParser();
+    const parser = createTerminalFrameParser(200);
     const out = parser.push(encode(FRAME + FRAME));
     expect(out).toHaveLength(2);
   });
 
   it('holds a partial trailing record and returns nothing', () => {
-    const parser = createTerminalFrameParser();
+    const parser = createTerminalFrameParser(200);
     expect(parser.push(encode('data: {"error":{"code":"upstream-error"'))).toEqual([]);
   });
 
   it('ignores ordinary data records', () => {
-    const parser = createTerminalFrameParser();
+    const parser = createTerminalFrameParser(200);
     expect(parser.push(encode('data: {"choices":[{"delta":{"content":"hi"}}]}\n\n'))).toEqual([]);
     expect(parser.push(encode('data: [DONE]\n\n'))).toEqual([]);
   });
@@ -115,7 +115,7 @@ describe('createTerminalFrameParser', () => {
     // the leading byte across the `push` boundary.
     const i = bytes.indexOf(0xc3);
     if (i === -1) throw new Error('unreachable: the fixture always contains the multi-byte character');
-    const parser = createTerminalFrameParser();
+    const parser = createTerminalFrameParser(200);
     expect(parser.push(bytes.slice(0, i + 1))).toEqual([]);
     const out = parser.push(bytes.slice(i + 1));
     expect(out).toHaveLength(1);
@@ -124,8 +124,56 @@ describe('createTerminalFrameParser', () => {
     expect(frame.message).toBe(message);
   });
 
+  // Ported from PR #231's review: the committed head is not necessarily 200. The gateway forwards
+  // the upstream's own success status, so a stream committed on 201 must report 201 — a hardcoded
+  // 200 is a quietly wrong answer in a field a caller may log or branch on.
+  it('reports the status the head actually committed, not a hardcoded 200', () => {
+    const parser = createTerminalFrameParser(201);
+    const out = parser.push(encode(FRAME));
+    expect(out).toHaveLength(1);
+    const frame = out[0];
+    if (frame === undefined) throw new Error('unreachable');
+    expect(frame.transport).toEqual({ kind: 'http', status: 201 });
+    // The override table, not the status table, is still what makes this `degraded` — no 2xx has
+    // a row of its own.
+    expect(frame.presentation).toBe('degraded');
+  });
+
+  // The mid-stream failure is the ONE case whose frame carries no ids of its own. The head had
+  // them, so the caller passes them back in rather than leaving a user with nothing to report.
+  it('carries the committed head ids into the mapped error', () => {
+    const parser = createTerminalFrameParser(200, { correlationId: 'corr-stream', requestId: 'req-stream' });
+    const out = parser.push(encode(FRAME));
+    const frame = out[0];
+    if (frame === undefined) throw new Error('unreachable');
+    expect(frame.correlationId).toBe('corr-stream');
+    expect(frame.requestId).toBe('req-stream');
+  });
+
+  it('leaves the ids null when the head carried none', () => {
+    const parser = createTerminalFrameParser(200);
+    const frame = parser.push(encode(FRAME))[0];
+    if (frame === undefined) throw new Error('unreachable');
+    expect(frame.correlationId).toBeNull();
+    expect(frame.requestId).toBeNull();
+  });
+
+  // The delimiter is any TWO consecutive line terminators, with CRLF consumed whole.
+  //
+  // BARE CR is the case that discriminates. The previous `/\r?\n\r?\n/` happened to match a mixed
+  // `\n\r\n`, but it requires an LF in each half, so `\r\r` never matched and the terminal frame
+  // was silently never completed. MEASURED: reverting RECORD_DELIMITER reds this row alone.
+  it.each([
+    ['CRLF', '\r\n\r\n'],
+    ['bare CR', '\r\r'],
+    ['mixed LF/CRLF', '\n\r\n'],
+  ])('accepts a %s record delimiter', (_label, delimiter) => {
+    const parser = createTerminalFrameParser(200);
+    expect(parser.push(encode(FRAME.replace(/\n\n$/, delimiter)))).toHaveLength(1);
+  });
+
   it('accepts CRLF record delimiters', () => {
-    const parser = createTerminalFrameParser();
+    const parser = createTerminalFrameParser(200);
     const crlf = FRAME.replace(/\n\n$/, '\r\n\r\n');
     expect(parser.push(encode(crlf))).toHaveLength(1);
   });

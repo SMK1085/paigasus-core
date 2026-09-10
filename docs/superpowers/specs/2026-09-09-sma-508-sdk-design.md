@@ -528,7 +528,7 @@ the split-frame case — the terminal error split across two chunks — which is
 exists to catch. The exported shape is a stateful incremental parser.
 
 ```ts
-export function createTerminalFrameParser(): {
+export function createTerminalFrameParser(committedStatus: number, ids?: FrameIds): {
   /** Every terminal error frame COMPLETED by this chunk, in order. Empty when none completes. */
   push(chunk: Uint8Array): PaigasusError[];
 };
@@ -766,7 +766,8 @@ and the test notices. The test alone is not enough — it runs later. Both are k
 **What the table is for. Revision 2 adds a third example, and it is the strongest of the three.**
 
 - **`UPSTREAM_ERROR` (307) — the override that fixes a visibly wrong default.** Arm 4 sets
-  `transport: { kind: 'http', status: 200 }`, because the head was already committed. § 9.2's HTTP
+  `transport: { kind: 'http', status: <the committed status> }`, because the head was already
+  committed. § 9.2's HTTP
   table has no 200 row, so it falls through to `generic`. Under Revision 1's "every other reason takes
   `'from-transport'`" rule, the mid-stream failure the whole parser exists to catch would render as a
   generic error. `chat.rs:59-62` documents the opposite intent: `upstream-error` "is by construction
@@ -845,7 +846,9 @@ Revision 1 had four arms. Arm 5 is new (§ 9.1).
      renders (`error.rs:204`) and the correlation layer defaults it for responses no renderer owns
      (`correlation.rs:68-77`). An upstream passthrough may carry none, and then `retryable` is `null`.
    - The rate-limit `429` § 9.2 discusses arrives through this arm, as an upstream passthrough.
-4. **A parsed terminal SSE frame**, via § 8.4's parser. `transport` is `{ kind: 'http', status: 200 }`
+4. **A parsed terminal SSE frame**, via § 8.4's parser. `transport` carries the status the gateway
+   actually COMMITTED — usually 200, but a stream committed on another 2xx must report that, and
+   the arm also accepts the head's correlation and request ids
    because the head was already committed. `retryable` is `null`: that frame deliberately carries no
    retryable signal (`chat.rs:56-62`). `metadata` is `{}`. `presentation` is `degraded`, via § 9.4's
    `UPSTREAM_ERROR` entry.
@@ -1287,6 +1290,46 @@ under a stale AC number. Fixed as § 9.2's four-code table.
 Everything else checked — the terminal frame at `chat.rs:63` byte-for-byte, the three header
 constants, `error.proto:239-247`, the 906 and 904 values, the `is_wire_token` allow-list and its ten
 rejected inputs, and the count of 57 reasons excluding the sentinel — was accurate.
+
+### 15.2 What PR #231 contributed (a parallel implementation, merged in)
+
+SMA-625 was implemented **twice**, concurrently and independently, by two sessions that did not see
+each other. PR #231 and PR #232 were both complete and both green. The issue owner chose to keep
+#232 as the base and port #231's better decisions onto it. Five landed:
+
+1. **The SSE record delimiter is `/(?:\r\n|\r|\n){2}/`** — any two consecutive line terminators, with
+   `\r\n` first in the alternation so a CRLF is consumed whole. The previous `/\r?\n\r?\n/` required
+   an LF in each half, so a **bare CR** never matched and the terminal frame was silently never
+   completed. MEASURED: reverting it reds exactly that one row.
+2. **Multiple `data:` lines join with `\n`, not `''`.** The WHATWG grammar appends U+000A after each
+   `data` field's value. Stated honestly: on the frames this gateway emits — always one `data:`
+   line — the two are indistinguishable, so no test discriminates them. This is a correctness
+   change to the receiver, not a bug fix. The counter-argument that `''` protects a JSON string
+   split across two lines was **rejected**: that producer has emitted a broken document, and
+   joining with `''` would corrupt every legitimate multi-line payload to hide it.
+3. **The parser takes the COMMITTED STATUS** rather than hardcoding 200 (§ 9.5 arm 4).
+4. **The parser takes the head's IDS**, so the one failure with no ids of its own still carries a
+   reportable correlation id.
+5. **`tests/server-guard.test.ts` computes each entry's expected guard specifier from that entry's
+   own directory** instead of pinning one literal. This is what § 6.2 layer 3 always described, and
+   it removes the constraint that every guarded entry live at `src/` root — the constraint § 3.1's
+   layout was bent around. The unguarded assertion PARSES rather than pattern-matches, for the
+   reason the rest of that file already records: a first attempt with a regex flagged the prose in
+   `errors/types.ts` that says the file must not gain a guard.
+
+Two further defects came from #231's own review rounds and applied here unchanged:
+
+6. **`JSON.stringify(request)` sat inside the `try` wrapping `fetch`**, so a caller passing a
+   circular reference or a bigint had their own bug reported back as a gateway `degraded`. It is
+   now serialized before the try and before the deadline timer, so a stringify failure can neither
+   be misattributed nor leak a timer.
+7. **`??` does not fall through on an empty string**, so an `ErrorInfo` carrying
+   `correlation_id: ""` suppressed the header fallback and produced a blank id. A `firstNonEmpty`
+   helper replaces it.
+
+One caveat inherited knowingly: the parser `.trim()`s each `data:` line where the grammar strips
+exactly one leading space. Harmless for JSON payloads, which ignore surrounding whitespace, and
+recorded here rather than inherited silently.
 
 **Not re-litigated, by the issue owner's decision.** § 9.2's `ResourceExhausted`/429 row stays
 `degraded`; SMA-627 stays out of scope; the three-PR split stands.

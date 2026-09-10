@@ -13,6 +13,15 @@ import { presentationOverride } from './presentation.js';
 import { grpcCodeName, presentationForGrpcCode, presentationForHttpStatus, presentationForTransportCause } from './transport-status.js';
 import type { PaigasusError, Presentation, TransportCause, TransportInfo } from './types.js';
 
+/**
+ * The correlation and request ids read off a committed response head.
+ *
+ * A mid-stream failure is the ONE case where the terminal frame carries no ids of its own, and it
+ * is also the case a user is most likely to report. The head had them; the caller passes them
+ * back in rather than losing them.
+ */
+export type FrameIds = { readonly correlationId: string | null; readonly requestId: string | null };
+
 /** The three keys lifted out of ErrorInfo.metadata into their own typed fields. */
 const LIFTED_KEYS = ['retryable', 'correlation_id', 'request_id'] as const;
 
@@ -32,13 +41,27 @@ export type ErrorInput =
    * so one reader handles both. `body` is `unknown` because it may be an unparsed non-JSON body.
    */
   | { readonly kind: 'http'; readonly status: number; readonly headers: Headers; readonly body: unknown }
-  | { readonly kind: 'terminal-frame'; readonly body: unknown }
+  /**
+   * A parsed terminal SSE frame. `status` is the status the gateway actually COMMITTED on the
+   * response head, and `ids` are the correlation and request ids that head carried — the parser
+   * sees only bytes and can know neither. Ported from PR #231, whose review caught that a
+   * hardcoded 200 misreports a stream committed on any other 2xx.
+   */
+  | { readonly kind: 'terminal-frame'; readonly body: unknown; readonly status: number; readonly ids?: FrameIds | undefined }
   | { readonly kind: 'transport'; readonly cause: TransportCause; readonly message: string };
 
 /** The wire's tri-state. `unknown`, an absent value, and anything unrecognized all mean `null`. */
 function parseRetryable(value: string | null | undefined): boolean | null {
   if (value === 'true') return true;
   if (value === 'false') return false;
+  return null;
+}
+
+/** The first value that is a non-empty string, else `null`. An empty id is no id. */
+function firstNonEmpty(...values: readonly (string | null | undefined)[]): string | null {
+  for (const value of values) {
+    if (typeof value === 'string' && value !== '') return value;
+  }
   return null;
 }
 
@@ -75,11 +98,16 @@ export function mapError(input: ErrorInput): PaigasusError {
       return mapConnect(input.error);
     case 'http':
       return mapHttp(input.status, input.headers, input.body);
-    case 'terminal-frame':
-      // The head was already committed, so the status cannot change: it is 200, and the HTTP
-      // table has no 200 row. `upstream-error`'s OVERRIDE entry is what makes this `degraded`
-      // rather than `generic` (spec § 9.4).
-      return mapHttp(200, new Headers(), input.body);
+    case 'terminal-frame': {
+      // The head was already committed, so the status cannot change — but it is not necessarily
+      // 200. The gateway forwards the upstream's own success status, so a stream committed on
+      // 201 must report 201. The HTTP table has no 2xx row at all; `upstream-error`'s OVERRIDE
+      // entry is what makes this `degraded` rather than `generic` (spec § 9.4).
+      const headers = new Headers();
+      if (input.ids?.correlationId != null) headers.set(CORRELATION_HEADER, input.ids.correlationId);
+      if (input.ids?.requestId != null) headers.set(REQUEST_ID_HEADER, input.ids.requestId);
+      return mapHttp(input.status, headers, input.body);
+    }
     case 'transport':
       return {
         presentation: presentationForTransportCause(input.cause),
@@ -140,8 +168,10 @@ function mapConnect(err: ConnectError): PaigasusError {
     message: err.rawMessage,
     // The metadata KEY is `correlation_id` (convert.rs:70); the HEADER is
     // `paigasus-correlation-id` (correlation.rs:31). Two spellings, both read, metadata first.
-    correlationId: detail.metadata.correlation_id ?? err.metadata.get(CORRELATION_HEADER),
-    requestId: detail.metadata.request_id ?? err.metadata.get(REQUEST_ID_HEADER),
+    // `??` does NOT fall through on an empty string, so an ErrorInfo carrying `correlation_id: ""`
+    // would suppress the header fallback and yield a blank id. Ported from PR #231's own review.
+    correlationId: firstNonEmpty(detail.metadata.correlation_id, err.metadata.get(CORRELATION_HEADER)),
+    requestId: firstNonEmpty(detail.metadata.request_id, err.metadata.get(REQUEST_ID_HEADER)),
     retryable: parseRetryable(detail.metadata.retryable),
     metadata,
     transport,
