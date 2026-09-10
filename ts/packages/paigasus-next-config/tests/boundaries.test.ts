@@ -2,9 +2,22 @@
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { ESLint } from 'eslint';
+import { ESLint, type Linter } from 'eslint';
+import tseslint from 'typescript-eslint';
 import { describe, expect, it } from 'vitest';
 import { BOUNDARY_SCOPES, boundaryRules } from '../src/eslint.mjs';
+
+/**
+ * A TypeScript-aware parser, with no type-checked rules attached. `boundaryRules` on its own
+ * carries no `languageOptions`, so `overrideConfigFile: true` falls back to ESLint's default
+ * (espree) parser — fine for the plain-ESM rows below, but espree cannot parse TypeScript-only
+ * syntax such as `import type { X } from 'y'`, and fails CLOSED with a fatal parse error rather
+ * than a `no-restricted-imports` message. A DENIED row built on that syntax would then report an
+ * empty message array for the wrong reason — proving the parser choked, not that the rule passed
+ * — and read as a false ALLOW. `tseslint.parser` alone (no `parserOptions.project`) is enough:
+ * this only needs to PARSE the syntax, not type-check it.
+ */
+const TS_PARSER_CONFIG: Linter.Config = { languageOptions: { parser: tseslint.parser } };
 
 /** The ts workspace root — `files` globs in the preset are relative to it. */
 const TS_ROOT = fileURLToPath(new URL('../../..', import.meta.url));
@@ -41,7 +54,7 @@ function expectedPackageName(scopeDir: string): string | undefined {
 }
 
 async function restrictedImportsFor(filePath: string, source: string): Promise<string[]> {
-  const eslint = new ESLint({ cwd: TS_ROOT, overrideConfigFile: true, overrideConfig: boundaryRules });
+  const eslint = new ESLint({ cwd: TS_ROOT, overrideConfigFile: true, overrideConfig: [TS_PARSER_CONFIG, ...boundaryRules] });
   const [result] = await eslint.lintText(source, { filePath, warnIgnored: false });
   return (result?.messages ?? []).filter((m) => m.ruleId === 'no-restricted-imports').map((m) => m.message);
 }
@@ -57,6 +70,45 @@ const DENIED: ReadonlyArray<readonly [string, string, string]> = [
   ['app-shell must not import auth/server', 'packages/paigasus-app-shell/src/header.tsx', "import { x } from '@paigasus/auth/server';"],
   ['apps must not import proto', 'apps/paigasus-console/app/page.tsx', "import { x } from '@paigasus/proto';"],
   ['apps must not import a proto SUBPATH', 'apps/paigasus-console/app/page.tsx', "import { x } from '@paigasus/proto/gen/iam';"],
+  ['auth/client must not import openid-client', 'packages/paigasus-auth/src/client.ts', "import * as c from 'openid-client';"],
+  ['auth/client must not import redis', 'packages/paigasus-auth/src/client.ts', "import { createClient } from 'redis';"],
+  ['auth/client must not import a node builtin', 'packages/paigasus-auth/src/client.ts', "import { randomBytes } from 'node:crypto';"],
+  ['auth/client must not import a BARE node builtin', 'packages/paigasus-auth/src/client.ts', "import { randomBytes } from 'crypto';"],
+  // SIBLING-RELATIVE. src/client.ts reaches src/adapters as './adapters/…', never '../'. A
+  // ../-only group is inert on the one file this rule exists to protect.
+  ['auth/client must not reach adapters via ./', 'packages/paigasus-auth/src/client.ts', "import { x } from './adapters/redis-store.js';"],
+  ['auth/client must not reach core via ./', 'packages/paigasus-auth/src/client.ts', "import { x } from './core/single-flight.js';"],
+  // TYPE-ONLY, on purpose. This is the exact import that started the fix-round-1 investigation:
+  // `import type` is erased at compile time, but the preset bans type imports alongside value
+  // ones everywhere (eslint.mjs:28-31) because a type import still couples the two sides. The
+  // fix was to move the shared vocabulary OUT of core/ into ./session-view.js, not to carve a
+  // `./core/session.js` exception into this rule — so a type-only reach into core/ must stay
+  // rejected, deliberately, rather than by accident.
+  ['auth/client must not reach core via ./, even a TYPE-ONLY import', 'packages/paigasus-auth/src/client.ts', "import type { SessionView } from './core/session.js';"],
+  // EXTENSION-BEARING. This codebase always suffixes relative imports with `.js` (a real file
+  // never writes `from './runtime'` — it writes `from './runtime.js'`), and no-restricted-imports
+  // matches the specifier AS WRITTEN. A bare `'./runtime'` pattern with no `.js` sibling and no
+  // glob matches nothing a real file would ever import — these four rows are what proved that
+  // (fix round 2).
+  ['auth/client must not reach runtime.ts (the composition root)', 'packages/paigasus-auth/src/client.ts', "import { x } from './runtime.js';"],
+  ['auth/client must not reach config.ts', 'packages/paigasus-auth/src/client.ts', "import { x } from './config.js';"],
+  ['auth/middleware must not import the store', 'packages/paigasus-auth/src/middleware.ts', "import { x } from './adapters/redis-store.js';"],
+  ['auth/middleware must not import single-flight', 'packages/paigasus-auth/src/middleware.ts', "import { x } from './core/single-flight.js';"],
+  ['auth/middleware must not import the session store port', 'packages/paigasus-auth/src/middleware.ts', "import { x } from './ports/session-store.js';"],
+  // Four dead entries survived earlier in this branch because a bare './runtime' does not match
+  // the '.js'-suffixed specifier a real file would write — these use the `.js` form a real file
+  // in this codebase always writes, the same lesson the auth/client rows above already record.
+  ['auth/middleware must not reach the session type module', 'packages/paigasus-auth/src/middleware.ts', "import { x } from './core/session.js';"],
+  ['auth/middleware must not reach the http composition-root surface', 'packages/paigasus-auth/src/middleware.ts', "import { x } from './http/routes.js';"],
+  ['auth/middleware must not reach runtime.ts (the composition root)', 'packages/paigasus-auth/src/middleware.ts', "import { x } from './runtime.js';"],
+  ['auth/middleware must not reach config.ts', 'packages/paigasus-auth/src/middleware.ts', "import { x } from './config.js';"],
+  ['an app middleware must not import auth/server', 'apps/paigasus-console/middleware.ts', "import { getSession } from '@paigasus/auth/server';"],
+  ['an app middleware must not import the sdk', 'apps/paigasus-console/middleware.ts', "import { x } from '@paigasus/sdk';"],
+  // Reverse-direction proof for the new `paigasus/boundaries/auth-server` rule (fix round,
+  // finding 6): without a `files` glob matching src/server.ts, the two ALLOWED rows below passed
+  // vacuously — no rule applied to that path at all, so any import would have reported []. This
+  // row proves the new rule actually applies and actually denies something.
+  ['auth/server must not reach the client-only surface', 'packages/paigasus-auth/src/server.ts', "import { x } from './client.js';"],
 ];
 
 const ALLOWED: ReadonlyArray<readonly [string, string, string]> = [
@@ -68,6 +120,23 @@ const ALLOWED: ReadonlyArray<readonly [string, string, string]> = [
   ['apps may import the sdk', 'apps/paigasus-console/app/page.tsx', "import { x } from '@paigasus/sdk';"],
   ['apps may import ui directly — the deliberate § 7.3 deviation', 'apps/paigasus-console/app/page.tsx', "import { x } from '@paigasus/ui';"],
   ['apps may import next', 'apps/paigasus-console/app/page.tsx', "import Link from 'next/link';"],
+  ['auth/client may import react', 'packages/paigasus-auth/src/client.ts', "import { createContext } from 'react';"],
+  // The fix for the type-only-import finding above: SessionView now lives in a leaf module with
+  // no server machinery, one directory level above core/adapters/ports, so client.ts can reach it
+  // without a `./core/**`-shaped specifier ever appearing in its import list.
+  ['auth/client may import the shared session-view module', 'packages/paigasus-auth/src/client.ts', "import type { SessionView } from './session-view.js';"],
+  // Fix round, finding 6: these two rows used to pass VACUOUSLY — no `boundaryRules` entry's
+  // `files` glob matched src/server.ts at all, so `restrictedImportsFor` returned [] for ANY
+  // import, proving nothing. The new `paigasus/boundaries/auth-server` rule above now covers this
+  // path (denying only a reach back into ./client.js — see the DENIED row of the same name), so
+  // these rows genuinely exercise "the rule that covers this file does not ban this import."
+  ['auth/server may import openid-client', 'packages/paigasus-auth/src/server.ts', "import * as c from 'openid-client';"],
+  ['auth/server may reach its own adapters', 'packages/paigasus-auth/src/server.ts', "import { x } from './adapters/redis-store.js';"],
+  ['an app middleware may import auth/middleware', 'apps/paigasus-console/middleware.ts', "import { createAuthMiddleware } from '@paigasus/auth/middleware';"],
+  // Proves the finding-5 widening stayed precise: src/middleware.ts's real, legitimate import of
+  // cookie NAME constants (ADR-0017 decision 7's cookie-presence check) must keep working — only
+  // the composition-root file, './http/routes.js', is banned, not the whole './http/**' directory.
+  ['auth/middleware may still import cookie constants', 'packages/paigasus-auth/src/middleware.ts', "import { SESSION_COOKIE } from './http/cookies.js';"],
 ];
 
 describe('boundary preset', () => {

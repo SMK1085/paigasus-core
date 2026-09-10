@@ -1,0 +1,81 @@
+{
+  "realm": "paigasus-test",
+  "enabled": true,
+  "sslRequired": "none",
+  "clients": [
+    {
+      "clientId": "paigasus-cli",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": true,
+      "standardFlowEnabled": false,
+      "serviceAccountsEnabled": false,
+      "directAccessGrantsEnabled": true,
+      "protocolMappers": [
+        {
+          "name": "paigasus-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.custom.audience": "paigasus",
+            "id.token.claim": "false",
+            "access.token.claim": "true",
+            "introspection.token.claim": "true"
+          }
+        },
+        {
+          "name": "email",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-property-mapper",
+          "consentRequired": false,
+          "config": {
+            "user.attribute": "email",
+            "claim.name": "email",
+            "jsonType.label": "String",
+            "id.token.claim": "false",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "true",
+            "introspection.token.claim": "true"
+          }
+        }
+      ]
+    },
+    {
+      "clientId": "paigasus-e2e-rp",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "implicitFlowEnabled": false,
+      "secret": "e2e-test-secret",
+      "redirectUris": ["http://127.0.0.1:4319/e2e/auth/callback"],
+      "webOrigins": ["http://127.0.0.1:4319"],
+      "attributes": {
+        "post.logout.redirect.uris": "http://127.0.0.1:4319/*"
+      },
+      "defaultClientScopes": ["web-origins", "acr", "profile", "roles", "email", "offline_access"],
+      "optionalClientScopes": ["address", "phone", "microprofile-jwt"]
+    }
+  ],
+  "users": [
+    {
+      "username": "alice",
+      "enabled": true,
+      "emailVerified": true,
+      "email": "alice@example.com",
+      "firstName": "Alice",
+      "lastName": "Example",
+      "realmRoles": ["offline_access"],
+      "credentials": [
+        {
+          "type": "password",
+          "value": "alice-password",
+          "temporary": false
+        }
+      ]
+    }
+  ]
+}

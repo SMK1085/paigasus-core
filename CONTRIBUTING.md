@@ -80,6 +80,26 @@ contributors should run the `moon run repo:install-hooks` step above.
 > to override this per invocation; to stream a specific task locally, set
 > `options.outputStyle: 'stream'` on the task definition.
 
+### Running the full CI graph locally
+
+Per-project Moon tasks (`<proj>:build`/`test`/`lint`/`fmt`) do not run the repo-level
+gates. Before pushing a change that touches new crates, dependencies, or proto files, run
+the full graph the same way CI does — the exact command is the marker-delimited block in
+`CLAUDE.md`, under "Per-project Moon tasks ... do NOT run the repo-level gates".
+
+That run already needs a reachable **Docker daemon**, because `paigasus-iam-rs:test`'s
+suites are in the target list — this is an existing requirement, not a new one. As of
+SMA-506 the full graph also runs `@paigasus/auth`'s `test-e2e` task, which additionally
+needs a **locally installed Chromium**:
+
+```bash
+pnpm --dir ts exec playwright install --with-deps chromium
+```
+
+Run that once (and again after a Playwright version bump) before running the full-graph
+command locally. CI installs Chromium itself on every run, so this step is a local-only
+prerequisite.
+
 ## Commit messages
 
 We follow [Conventional Commits](https://www.conventionalcommits.org). Use a

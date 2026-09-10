@@ -33,12 +33,13 @@
 // Written as plain ESM rather than TypeScript: ts/eslint.config.js is loaded by ESLint's own
 // resolver, and configuration data gains little from types (spec § 13 M5).
 //
-// The app-shell BLOCK is INERT until SMA-506 lands: `packages/paigasus-app-shell` does not exist
-// yet, so its files glob matches nothing. There is no separate "auth" scope — @paigasus/auth
-// appears only as a DENIED TARGET inside that same app-shell rule ('@paigasus/auth/server'), so
-// it needs no scope entry of its own and gains nothing when SMA-508 lands. The block is written
-// now, tested against synthetic paths, and covered by a liveness assertion so a package landing
-// under a different directory name reds instead of silently disabling its rule.
+// The app-shell BLOCK is INERT until SMA-510 lands: `packages/paigasus-app-shell` does not exist
+// yet, so its files glob matches nothing. @paigasus/auth now has its own scope, added below —
+// see the three `paigasus/boundaries/auth-*` and `paigasus/boundaries/app-middleware` blocks — so
+// it is no longer only a DENIED TARGET inside the app-shell rule, and gains real coverage now that
+// SMA-506 lands. The app-shell block is written now, tested against synthetic paths, and covered
+// by a liveness assertion so a package landing under a different directory name reds instead of
+// silently disabling its rule.
 
 /**
  * Package directories these rules expect, mapped to a status string. `'exists'` means the
@@ -50,7 +51,8 @@
 export const BOUNDARY_SCOPES = {
   'packages/paigasus-ui': 'exists',
   'packages/paigasus-sdk': 'exists',
-  'packages/paigasus-app-shell': 'SMA-506 has not landed yet; the rule is inert until it does',
+  'packages/paigasus-app-shell': 'SMA-510 has not landed yet; the rule is inert until it does',
+  'packages/paigasus-auth': 'exists',
   apps: 'exists',
 };
 
@@ -119,6 +121,113 @@ export const boundaryRules = [
       {
         group: ['@paigasus/proto', '@paigasus/proto/**'],
         message: 'Apps reach the contract through @paigasus/sdk, never @paigasus/proto directly (§ 6).',
+      },
+    ]),
+  },
+  {
+    name: 'paigasus/boundaries/auth-client',
+    // `files[0]` MUST begin `packages/paigasus-auth/**` — the liveness test derives its scope key
+    // by cutting at the first `/**`, and a narrower first entry (e.g. one scoped to `src/client`)
+    // would derive a key the reverse loop can never pair with a real package name.
+    files: ['packages/paigasus-auth/**/client.ts', 'packages/paigasus-auth/**/client.tsx', 'packages/paigasus-auth/src/client/**/*.{ts,tsx,mts,cts,js,jsx,mjs,cjs}'],
+    rules: restrict([
+      {
+        group: [
+          'openid-client',
+          'redis',
+          'server-only',
+          'node:*',
+          'crypto',
+          'fs',
+          'net',
+          'tls',
+          'http',
+          'https',
+          'stream',
+          'buffer',
+          './adapters/**',
+          './core/**',
+          './ports/**',
+          './http/**',
+          './next/**',
+          './runtime',
+          './runtime.js',
+          './config',
+          './config.js',
+          '../adapters/**',
+          '../core/**',
+          '../ports/**',
+          '../http/**',
+          '../next/**',
+        ],
+        message:
+          '@paigasus/auth/client is React-only and must never reach the server surface — it would put a token in a browser bundle (AC 5). Import the shared vocabulary from ./session-view.js only.',
+      },
+    ]),
+  },
+  {
+    name: 'paigasus/boundaries/auth-middleware',
+    files: ['packages/paigasus-auth/**/middleware.ts'],
+    rules: restrict([
+      {
+        group: [
+          'openid-client',
+          'redis',
+          './adapters/**',
+          './core/single-flight',
+          './core/single-flight.js',
+          './core/session',
+          './core/session.js',
+          './ports/session-store',
+          './ports/session-store.js',
+          './next/**',
+          // NOT './http/**' — src/middleware.ts legitimately imports './http/cookies.js' for
+          // the cookie-presence check ADR-0017 decision 7 actually authorizes. What must stay
+          // banned is the composition-root surface, './http/routes.js', which pulls in the full
+          // session-resolution machinery (openid-client, the store) that middleware must never
+          // reach.
+          './http/routes',
+          './http/routes.js',
+          './runtime',
+          './runtime.js',
+          './config',
+          './config.js',
+          '../adapters/**',
+          '../ports/**',
+          '../http/routes',
+          '../http/routes.js',
+        ],
+        message: 'Next middleware does cookie-presence checks only (ADR-0017 decision 7; CVE-2025-29927 was a middleware auth bypass). Resolve the session in a server component or route handler.',
+      },
+    ]),
+  },
+  {
+    // Mirrors `paigasus/boundaries/auth-client` in reverse: that rule stops the client surface
+    // reaching the server surface (AC 5); this one stops the server composition root reaching
+    // back into the client-only module, which would be the same coupling from the other side and
+    // a path for `react` to leak into node-only code.
+    name: 'paigasus/boundaries/auth-server',
+    files: ['packages/paigasus-auth/**/server.ts'],
+    rules: restrict([
+      {
+        group: ['./client', './client.js'],
+        message: '@paigasus/auth/server is the server composition root and must never reach the client-only surface (the reverse of AC 5).',
+      },
+    ]),
+  },
+  {
+    name: 'paigasus/boundaries/app-middleware',
+    // 'apps/**/middleware…' rather than 'apps/*/middleware…': the latter derives the scope key
+    // 'apps/*/middleware.{ts,js,mts,cts,mjs,cjs}' (a file glob, not a directory), which the
+    // liveness test's `existsSync` check can never resolve. This form derives 'apps' instead —
+    // the SAME key the `paigasus/boundaries/apps` block above already owns in BOUNDARY_SCOPES —
+    // so it needs no scope entry of its own.
+    files: ['apps/**/middleware.{ts,js,mts,cts,mjs,cjs}'],
+    rules: restrict([
+      {
+        group: ['@paigasus/auth/server', '@paigasus/auth/server/**', '@paigasus/sdk', '@paigasus/sdk/**'],
+        message:
+          "An app's middleware must import @paigasus/auth/middleware, never /server or the sdk. `server-only` is a NO-OP in the middleware layer, so nothing else stops a token-bearing module being bundled there.",
       },
     ]),
   },
