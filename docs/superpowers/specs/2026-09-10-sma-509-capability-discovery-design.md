@@ -129,9 +129,9 @@ A new source-only package, `private: true`, no build step.
 ts/packages/paigasus-discovery/
   README.md                      required by AC4
   moon.yml
-  vitest.config.ts               node / react-server project
-  vitest.jsdom.config.ts         rendering project
+  vitest.config.ts               node; jsdom per-file via docblock
   vitest.containers.config.ts    real-Redis project
+  tests/support/server-only-stub.ts
   src/
     server.ts                    './server' entry, 'server-only'
     react.tsx                    './react' entry, 'server-only'
@@ -716,25 +716,47 @@ and unparseable-record behaviours from §6.
 
 ### Test infrastructure
 
-`@testing-library/react` needs `react-dom/client`, which is **not resolvable
-under the `react-server` condition**, and React's client renderer cannot render
-an `async` component at all. Revision 1's single-project plan does not work.
+**Do not set the `react-server` condition.** `@paigasus/auth`'s
+`vitest.config.ts` records this as MEASURED, and the reason generalises:
+`react-server` is also the condition **`react`'s own exports map** switches on,
+and that build has no `createContext`. Setting it to satisfy `server-only`
+simultaneously breaks `react-dom/client` — which `@testing-library/react`
+requires — and anything reaching `next/navigation`. There is no single flat
+condition list that satisfies both.
 
-Three vitest projects:
+The repo's answer is a permanent **alias**, not a condition:
+`resolve.alias['server-only']` points at an empty stub module, so every test in
+the package resolves it silently with nothing to remember per file. Conditions
+stay `['node', 'import', 'default']` — additive, because dropping
+`import`/`default` breaks source-exports `.ts` resolution for every
+`@paigasus/*` package.
 
-| Config | Environment | Conditions | Covers |
-|---|---|---|---|
-| `vitest.config.ts` | node | `['react-server','node','import','default']` | resolution, single-flight, adapters, probe |
-| `vitest.jsdom.config.ts` | jsdom | default | `<Capability>` and the client wrapper |
-| `vitest.containers.config.ts` | node | as the first | real Redis, `test-e2e` only |
+**Two vitest configs, not three:**
 
-The jsdom project aliases `server-only` to a stub, mirroring
-`ts/packages/paigasus-auth/tests/support/server-only-stub.ts`. `<Capability>` is
-tested by **awaiting the element it returns** and rendering that, not by calling
-`render()` on the async component.
+| Config | Covers |
+|---|---|
+| `vitest.config.ts` | everything except containers; `environment: 'node'`, `include` both `.test.ts` and `.test.tsx`, `exclude` `tests/containers/**` |
+| `vitest.containers.config.ts` | real Redis, `test-e2e` only |
 
-Both node projects set `resolve.conditions` **and** `ssr.resolve.conditions`:
-vitest 5 resolves a node-environment test's imports through the latter.
+A separate config for containers rather than a CLI path filter: vitest applies a
+positional path **after** `exclude`, so
+`vitest run --config vitest.config.ts tests/containers/` matches zero files and
+passes vacuously.
+
+The rendering tests get jsdom through a **per-file docblock**,
+`// @vitest-environment jsdom`, which is how `tests/client.test.tsx` does it in
+`@paigasus/auth`. The jsdom files set `globals: true` behaviour through a setup
+file mirroring `@paigasus/ui`'s: React Testing Library registers its automatic
+cleanup only when a global `afterEach` exists, and without it the DOM
+accumulates between tests and produces duplicate-id failures belonging to an
+earlier test.
+
+`<Capability>` is an async server component, so it is tested by **awaiting the
+element it returns** and rendering that — `await Capability({ need, children })`
+then `render(element)` — never by calling `render()` on the component itself.
+
+Both configs set `resolve.conditions` **and** `ssr.resolve.conditions`: vitest 5
+resolves a node-environment test's imports through the latter.
 
 The probe is faked by injecting a `fetch`-shaped function, never by patching
 globals.
@@ -783,8 +805,12 @@ Missing any of these reds CI on the implementation PR.
 
 8. **`moon.yml` completeness.** `build`, `test`, `typecheck` **and** `test-e2e`.
    `typecheck` needs the proto inputs too (`paigasus-sdk/moon.yml:21-23` is the
-   model). `test-e2e` needs `options: cache: false` and must list all three
-   vitest configs (`paigasus-auth/moon.yml:40-54`).
+   model). `test-e2e` needs `options: cache: false` and must list both vitest
+   configs (`paigasus-auth/moon.yml:40-54`). Tasks **append** to the inherited
+   definitions in `.moon/tasks/typescript-project.yml`; they never use
+   `options.merge: replace`, which would silently drop `@group(sources)`,
+   `tsconfig.json`, `package.json`, `/ts/tsconfig.base.json` and
+   `/ts/pnpm-lock.yaml` — the defect SMA-503 fixed on `paigasus-console-ts:build`.
 
 9. **`ts:fmt` is a separate whole-tree Prettier gate.** Run it after the last
    TypeScript edit.
