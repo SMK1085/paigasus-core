@@ -38,7 +38,7 @@ export type CapabilityDisabledProps = {
 export function CapabilityDisabled({ service, reason, children }: CapabilityDisabledProps): ReactElement {
   // useId, never a hardcoded id: two <Capability> elements on one page would otherwise emit
   // duplicate ids and break the aria-describedby association for both.
-  const describedBy = useId();
+  const descriptionId = useId();
 
   const block = (event: MouseEvent | KeyboardEvent): void => {
     event.preventDefault();
@@ -50,7 +50,7 @@ export function CapabilityDisabled({ service, reason, children }: CapabilityDisa
       data-capability-state="degraded"
       data-capability-reason={reason}
       aria-disabled="true"
-      aria-describedby={describedBy}
+      aria-describedby={descriptionId}
       style={{ pointerEvents: 'none' }}
       onClickCapture={block}
       onKeyDownCapture={(event) => {
@@ -59,7 +59,7 @@ export function CapabilityDisabled({ service, reason, children }: CapabilityDisa
     >
       {children}
       <span
-        id={describedBy}
+        id={descriptionId}
         style={{
           position: 'absolute',
           width: 1,

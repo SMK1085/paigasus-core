@@ -2,7 +2,7 @@
 // @vitest-environment jsdom
 import type { ReactElement } from 'react';
 import { describe, expect, it, vi } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { Capability } from '../src/react.js';
 import { createMemoryDescriptorCache } from '../src/adapters/memory-cache.js';
@@ -89,13 +89,14 @@ describe('AC1: degraded is rendered disabled, never hidden', () => {
       cache,
       probe: () => Promise.resolve({ ok: false, reason: 'network' }),
     });
-    return renderCapability(
+    const rendered = await renderCapability(
       Capability({ discovery, need: 'iam.audit', token: 'tok', children: <a href="/audit">Audit</a> }),
     );
+    return { discovery, rendered };
   }
 
   it.each([true, false])('renders the item, disabled with a reason (cached descriptor: %s)', async (cached) => {
-    await renderDegraded(cached);
+    const { discovery } = await renderDegraded(cached);
     const link = screen.getByRole('link', { name: 'Audit' });
 
     // NEVER HIDDEN: still present, and still in the accessibility tree.
@@ -114,6 +115,16 @@ describe('AC1: degraded is rendered disabled, never hidden', () => {
     const describedBy = wrapper?.getAttribute('aria-describedby');
     expect(describedBy).toBeTruthy();
     expect(document.getElementById(describedBy as string)?.textContent).toMatch(/not answering|unreachable/i);
+
+    // Row 4 is only row 4 if the last good descriptor SURVIVED the failed probe. Without this,
+    // a fixture that silently degraded into row 5 would still pass every assertion above, and
+    // the two rows would be the same test written twice.
+    if (cached) {
+      const state = await discovery.getServiceState('iam', 'tok');
+      expect(state).toMatchObject({ state: 'degraded', reason: 'network' });
+      expect((state as { descriptor: unknown }).descriptor).not.toBeNull();
+      expect((state as { capabilities: readonly string[] }).capabilities).toContain('iam.audit');
+    }
   });
 
   it('blocks activation — the assertion aria-disabled alone would let through', async () => {
@@ -150,6 +161,12 @@ describe('AC1: degraded is rendered disabled, never hidden', () => {
 
     link.focus();
     await user.keyboard('{Enter}');
+    expect(onNavigate).not.toHaveBeenCalled();
+
+    // user-event's `{Enter}` synthesizes a click on a focused <a href>, which onClickCapture
+    // alone would already swallow — that does not prove onKeyDownCapture does anything. Dispatch
+    // a raw keydown, which is NOT translated into a click, to isolate it.
+    fireEvent.keyDown(link, { key: 'Enter' });
     expect(onNavigate).not.toHaveBeenCalled();
   });
 
@@ -194,6 +211,8 @@ describe('AC1: degraded is rendered disabled, never hidden', () => {
     const { container } = await renderCapability(
       Capability({ discovery, need: 'iam.audit', token: 'tok', children: <a href="/audit">Audit</a> }),
     );
+    // Otherwise this assertion would pass vacuously if nothing rendered at all.
+    expect(container.querySelectorAll('*').length).toBeGreaterThan(0);
     for (const el of container.querySelectorAll('*')) {
       expect(el.className, el.outerHTML).toBe('');
     }
