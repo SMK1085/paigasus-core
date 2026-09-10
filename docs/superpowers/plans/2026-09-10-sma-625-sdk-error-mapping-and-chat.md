@@ -1936,6 +1936,13 @@ moon ci :build :test :lint :fmt :deny :osv :machete :actionlint :typecheck :brea
 
 **Reading a failure.** Do not re-run before capturing evidence — a passing re-run rewrites `stdout.log`, truncates `stderr.log`, rewrites `lastRun.json` and flips the `ciReport.json` row to `passed`. Follow the procedure between the `moon-diagnosis` markers in `CLAUDE.md`. Two known non-defects:
 
+<!--
+This paragraph points at CLAUDE.md's corrected moon-diagnosis procedure instead of restating it,
+so it does not carry the broken advice check 12 exists to catch (no action-level exitCode; the
+file has no stdout/stderr).
+-->
+<!-- moon-diagnosis:ok -->
+
 - A `repo:release-parity*` task aborting at rc=2 inside an agent session is the proto NDJSON trap, not a red. It is INCONCLUSIVE.
 - A sub-3s `repo:affected-smoke` failure under a concurrent `moon ci` is the known intermittent abort. Capture the full output and grep it for `proto-shim` BEFORE re-running.
 
