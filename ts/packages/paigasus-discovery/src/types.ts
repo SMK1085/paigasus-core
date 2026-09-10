@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// The client-safe entry. NO `server-only` guard, deliberately — a client component holds a
-// resolved ServiceState as data, exactly as @paigasus/sdk's ./errors/types is exempted.
+// The client-safe entry. Deliberately carries no side-effect import that would restrict this
+// module to the server — a client component holds a resolved ServiceState as data, exactly as
+// @paigasus/sdk's ./errors/types is exempted.
 //
 // Everything here must survive the RSC server-to-client boundary as plain data. That is why
 // `capabilities` is a readonly array and not a ReadonlySet (a Set does not serialize), and why
