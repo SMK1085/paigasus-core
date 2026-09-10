@@ -2,6 +2,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { chatCompletion, PaigasusHttpError } from '../src/chat.js';
+import type { ChatCompletionRequest } from '../src/chat.js';
 
 const OPTIONS = { baseUrl: 'https://gateway.test', auth: { bearer: 'tok' } } as const;
 const REQUEST = { model: 'gpt-4o', messages: [{ role: 'user', content: 'hi' }] };
@@ -150,6 +151,25 @@ describe('a non-2xx throws a PaigasusError', () => {
     const error = (await chatCompletion(REQUEST, OPTIONS).catch((e: unknown) => e)) as PaigasusHttpError;
     expect(error.error.presentation).toBe('degraded');
     expect(error.error.correlationId).toBe('corr-1');
+  });
+});
+
+describe("F3 — a malformed request is the caller's bug, not a gateway outage", () => {
+  it('rejects a circular request with something that is not a PaigasusHttpError', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => Promise.resolve(respond('{}', { status: 200, headers: { 'content-type': 'application/json' } }))),
+    );
+
+    // `ChatCompletionRequest`'s index signature lets a caller pass a value `JSON.stringify`
+    // rejects. This must surface as the caller's own `TypeError`, never as a mapped 504
+    // `degraded` PaigasusHttpError misreporting the gateway as unwell.
+    const circular: ChatCompletionRequest = { model: 'gpt-4o', messages: [] };
+    circular['self'] = circular;
+
+    const error = await chatCompletion(circular, OPTIONS).catch((e: unknown) => e);
+    expect(error).not.toBeInstanceOf(PaigasusHttpError);
+    expect(error).toBeInstanceOf(TypeError);
   });
 });
 

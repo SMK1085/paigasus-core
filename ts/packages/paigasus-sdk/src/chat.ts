@@ -73,12 +73,22 @@ async function readBody(response: Response): Promise<unknown> {
 /**
  * `POST /v1/chat/completions` on the gateway.
  *
- * Returns on 2xx and THROWS a `PaigasusError` otherwise — one rule, not two. A third
+ * Returns on 2xx and THROWS a `PaigasusHttpError` otherwise — one rule, not two. A third
  * `{ kind: 'error' }` variant would let a caller ignore a failure by not checking a discriminant.
+ * The thrown `PaigasusHttpError` carries the mapped, serializable `PaigasusError` on its `.error`
+ * property; a caller renders that property.
  */
 export async function chatCompletion(request: ChatCompletionRequest, options: ChatOptions): Promise<ChatCompletionResult> {
   const headers = new Headers({ 'content-type': 'application/json' });
   if ('bearer' in options.auth) headers.set('authorization', `Bearer ${options.auth.bearer}`);
+
+  // Hoisted above the `try` (and above the deadline timer, so a rejection here starts no timer to
+  // leak): `ChatCompletionRequest` carries an index signature, so a caller can pass a value
+  // `JSON.stringify` rejects (a circular reference, a `bigint`). That is the caller's bug, not a
+  // gateway outage — inside the `try` it was mapped to a 504 `degraded` error, misreporting the
+  // caller's malformed request as the gateway being unwell. Left to escape here, the native
+  // `TypeError` is self-explanatory.
+  const body = JSON.stringify(request);
 
   // A pre-header deadline, merged with the caller's signal. The timer is cleared the moment the
   // head lands: one signal held past that point would abort the BODY too, which is why a single
@@ -91,7 +101,7 @@ export async function chatCompletion(request: ChatCompletionRequest, options: Ch
 
   let response: Response;
   try {
-    response = await fetch(`${options.baseUrl}/v1/chat/completions`, { method: 'POST', headers, body: JSON.stringify(request), signal });
+    response = await fetch(`${options.baseUrl}/v1/chat/completions`, { method: 'POST', headers, body, signal });
   } catch (cause) {
     // A transport failure or an expired deadline. 504 is the honest status: nothing came back.
     throw new PaigasusHttpError(

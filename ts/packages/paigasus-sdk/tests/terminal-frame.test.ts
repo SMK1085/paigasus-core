@@ -24,7 +24,7 @@ describe('the fixture still matches the Rust constant', () => {
 
 describe('the parser', () => {
   it('returns the mapped error for the pinned frame', () => {
-    const parser = createTerminalFrameParser(IDS);
+    const parser = createTerminalFrameParser(IDS, 200);
     const error = parser.push(encode(TERMINAL_SSE_ERROR));
 
     expect(error).not.toBeNull();
@@ -37,26 +37,26 @@ describe('the parser', () => {
   });
 
   it('finds a frame split across two chunks', () => {
-    const parser = createTerminalFrameParser(IDS);
+    const parser = createTerminalFrameParser(IDS, 200);
     const half = Math.floor(TERMINAL_SSE_ERROR.length / 2);
     expect(parser.push(encode(TERMINAL_SSE_ERROR.slice(0, half)))).toBeNull();
     expect(parser.push(encode(TERMINAL_SSE_ERROR.slice(half)))).not.toBeNull();
   });
 
   it('finds the terminal frame after a data frame in the same chunk', () => {
-    const parser = createTerminalFrameParser(IDS);
+    const parser = createTerminalFrameParser(IDS, 200);
     const error = parser.push(encode(`data: {"id":"chatcmpl-1"}\n\n${TERMINAL_SSE_ERROR}`));
     expect(error).not.toBeNull();
     expect(error!.rawReason).toBe('upstream-error');
   });
 
   it('returns null for ordinary data frames', () => {
-    const parser = createTerminalFrameParser(IDS);
+    const parser = createTerminalFrameParser(IDS, 200);
     expect(parser.push(encode('data: {"id":"a"}\n\ndata: [DONE]\n\n'))).toBeNull();
   });
 
   it('returns null for a partial trailing record that never completes', () => {
-    const parser = createTerminalFrameParser(IDS);
+    const parser = createTerminalFrameParser(IDS, 200);
     expect(parser.push(encode('data: {"error":{"code":"upstream-'))).toBeNull();
   });
 
@@ -65,7 +65,7 @@ describe('the parser', () => {
     const frame = 'data: {"error":{"message":"café ☕","type":"api_error","param":null,"code":"upstream-error"}}\n\n';
     const bytes = encode(frame);
     const cut = frame.indexOf('café') + 4; // lands inside the two-byte é
-    const parser = createTerminalFrameParser(IDS);
+    const parser = createTerminalFrameParser(IDS, 200);
     expect(parser.push(bytes.slice(0, cut))).toBeNull();
     const error = parser.push(bytes.slice(cut));
     expect(error).not.toBeNull();
@@ -73,13 +73,13 @@ describe('the parser', () => {
   });
 
   it.each([['\n\n'], ['\r\n\r\n'], ['\r\r']])('accepts the %j record delimiter', (delimiter) => {
-    const parser = createTerminalFrameParser(IDS);
+    const parser = createTerminalFrameParser(IDS, 200);
     const frame = TERMINAL_SSE_ERROR.replace('\n\n', delimiter);
     expect(parser.push(encode(frame))).not.toBeNull();
   });
 
   it('returns null forever after the first terminal error', () => {
-    const parser = createTerminalFrameParser(IDS);
+    const parser = createTerminalFrameParser(IDS, 200);
     expect(parser.push(encode(TERMINAL_SSE_ERROR))).not.toBeNull();
     expect(parser.push(encode(TERMINAL_SSE_ERROR))).toBeNull();
   });
@@ -87,13 +87,23 @@ describe('the parser', () => {
   it('drops the buffer rather than growing without bound', () => {
     // An upstream that never sends a blank line must not exhaust memory. Dropping is correct: the
     // parser is a best-effort observer, never a reason to fail a stream still delivering data.
-    const parser = createTerminalFrameParser(IDS);
+    const parser = createTerminalFrameParser(IDS, 200);
     expect(parser.push(encode('data: '.padEnd(70_000, 'x')))).toBeNull();
     expect(parser.push(encode(TERMINAL_SSE_ERROR))).not.toBeNull();
   });
 
   it('accepts a string chunk from a caller that already decoded', () => {
-    const parser = createTerminalFrameParser(IDS);
+    const parser = createTerminalFrameParser(IDS, 200);
     expect(parser.push(TERMINAL_SSE_ERROR)).not.toBeNull();
+  });
+
+  // F2: the committed status is now the caller's, not a hardcoded 200 — chat.rs:128 branches on
+  // is_success(), so a non-200 2xx is a reachable committed status.
+  it('carries a non-200 committed status onto the mapped error', () => {
+    const parser = createTerminalFrameParser(IDS, 201);
+    const error = parser.push(encode(TERMINAL_SSE_ERROR));
+
+    expect(error).not.toBeNull();
+    expect(error!.transport).toEqual({ kind: 'http', status: 201 });
   });
 });

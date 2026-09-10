@@ -6,13 +6,6 @@ import type { FrameIds } from './map-error.js';
 import type { PaigasusError } from './types.js';
 
 /**
- * The gateway's terminal frame arrives inside a committed 200, so mapping uses that status.
- * chat.rs:128 branches on is_success(), so 200 is usual but not the only reachable value; the
- * parser sees only bytes and cannot know the real one, so it names the usual case.
- */
-const COMMITTED_STATUS = 200;
-
-/**
  * Beyond this, a stream that never sends a blank line would grow the buffer without bound.
  *
  * A count of UTF-16 code units (`buffer.length`), not bytes: the real byte cap can be a small
@@ -44,8 +37,13 @@ function firstDelimiter(buffer: string): { index: number; length: number } | nul
  *
  * A chunk boundary can fall anywhere, so a parser over one chunk would miss the terminal frame in
  * exactly the split case it exists to catch — hence the state.
+ *
+ * `committedStatus` is the gateway's real 2xx response status. The parser itself sees only bytes
+ * and cannot know it; `chatCompletion` returns it on `ChatCompletionResult.status`, so the caller
+ * — the only thing that constructs a parser — always has it. chat.rs:128 branches on
+ * `is_success()`, so 200 is the usual value but not the only reachable one (spec § 9.5 arm 4).
  */
-export function createTerminalFrameParser(ids: FrameIds): { push(chunk: Uint8Array | string): PaigasusError | null } {
+export function createTerminalFrameParser(ids: FrameIds, committedStatus: number): { push(chunk: Uint8Array | string): PaigasusError | null } {
   // ONE decoder for the parser's lifetime. A fresh TextDecoder per chunk corrupts a multi-byte
   // character split across a chunk boundary — the same defect class as a split record, one level
   // down.
@@ -66,7 +64,7 @@ export function createTerminalFrameParser(ids: FrameIds): { push(chunk: Uint8Arr
         const record = buffer.slice(0, delimiter.index);
         buffer = buffer.slice(delimiter.index + delimiter.length);
 
-        const error = parseRecord(record, ids);
+        const error = parseRecord(record, ids, committedStatus);
         if (error !== null) {
           found = error;
           done = true;
@@ -83,7 +81,7 @@ export function createTerminalFrameParser(ids: FrameIds): { push(chunk: Uint8Arr
 }
 
 /** An SSE record is an error only if its `data:` payload is an OpenAI envelope carrying a code. */
-function parseRecord(record: string, ids: FrameIds): PaigasusError | null {
+function parseRecord(record: string, ids: FrameIds, committedStatus: number): PaigasusError | null {
   const data = record
     .split(/\r\n|\n|\r/)
     .filter((line) => line.startsWith('data:'))
@@ -102,5 +100,5 @@ function parseRecord(record: string, ids: FrameIds): PaigasusError | null {
   if (typeof error !== 'object' || error === null) return null;
   if (typeof (error as { code?: unknown }).code !== 'string') return null;
 
-  return mapError({ kind: 'terminal-frame', status: COMMITTED_STATUS, body, ids });
+  return mapError({ kind: 'terminal-frame', status: committedStatus, body, ids });
 }
