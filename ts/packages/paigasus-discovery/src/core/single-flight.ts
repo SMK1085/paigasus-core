@@ -284,12 +284,16 @@ export async function resolveService(deps: ResolveDeps, service: string, token: 
       const fresh = await readRecord(deps, service).catch(() => null);
 
       if (fresh !== null && isFresh(fresh, deps.now(), deps.timings)) {
-        // Another caller already revalidated between our read and our acquire. Nothing to do.
+        // Another caller already revalidated between our read and our acquire. Serve the
+        // fresher record the double-check just found, rather than falling through to the
+        // older `stale` snapshot below — that snapshot can carry a stale `ok` outcome while
+        // `fresh` already reports `fail`, which would mask a service that just went degraded.
         try {
           await deps.cache.releaseLock(service, lockToken);
         } catch {
           safeLog(deps, 'discovery.cache_unavailable', { service, stage: 'release_lock' });
         }
+        return toState(service, fresh) ?? degraded(service, 'network', fresh);
       } else {
         try {
           // START the probe NOW, synchronously, as part of this directly-awaited flow — this is

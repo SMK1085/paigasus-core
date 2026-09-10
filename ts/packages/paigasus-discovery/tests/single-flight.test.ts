@@ -125,6 +125,31 @@ describe('fresh and stale', () => {
     await handed[0];
     expect((await cache.get('iam'))?.rev).toBe(2);
   });
+
+  // Regression: the stale path's invariant-1 double-check used to discard the fresher record it
+  // had just read and fall through to serving the OLDER `stale` snapshot instead. Here the older
+  // snapshot's outcome is `ok` and the fresher record (found by the double-check) is `fail` — if
+  // the fall-through bug is present, the caller is told `available` for a service this process
+  // just learned is degraded, which is exactly the masking the double-check exists to prevent.
+  it('the double-check serves a fresher FAILURE record rather than the older stale snapshot', async () => {
+    const base = createMemoryDescriptorCache();
+    await base.set('iam', storedRecord({ outcomeAt: 0 }), DEFAULT_TIMINGS.staleMs, null);
+    let getCalls = 0;
+    const cache: DescriptorCache = {
+      ...base,
+      get: async (svc: string) => {
+        getCalls += 1;
+        if (getCalls === 2) {
+          // Another caller revalidated and found the service down, landing between our initial
+          // read (call 1) and our double-check read (this call) inside the revalidation lock.
+          await base.set(svc, storedRecord({ rev: 2, outcome: 'fail', reason: 'network', outcomeAt: 120_000 }), DEFAULT_TIMINGS.staleMs, 1);
+        }
+        return base.get(svc);
+      },
+    };
+    const state = await resolveService(deps({ cache, now: () => 120_000 }), 'iam', 'tok');
+    expect(state).toMatchObject({ state: 'degraded', reason: 'network' });
+  });
 });
 
 describe('AC3: single-flight', () => {
