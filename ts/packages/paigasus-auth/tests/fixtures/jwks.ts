@@ -74,6 +74,14 @@ export interface OidcFixture {
    * header. `undefined` (the default) disables the check entirely.
    */
   setNextCodeChallenge(challenge: string | undefined): void;
+  /**
+   * Force the NEXT /token request to answer with an OAuth error instead of tokens. ONE-SHOT,
+   * exactly like setNextExpiresIn — left set, it would also break the next test's token request.
+   * `wwwAuthenticate` sets a WWW-Authenticate header, which is what makes oauth4webapi throw
+   * WWWAuthenticateChallengeError instead of ResponseBodyError (it checks challenges before it
+   * parses the body).
+   */
+  setNextTokenError(error: string | undefined, wwwAuthenticate?: string): void;
   close(): Promise<void>;
 }
 
@@ -108,6 +116,7 @@ export async function startOidcFixture(): Promise<OidcFixture> {
   // must be distinguishable from never calling it at all, since the former omits the response
   // field and the latter keeps the normal 3600 default.
   let expiresInOverride: { value: number | undefined } | undefined;
+  let nextTokenError: { error: string; wwwAuthenticate?: string } | undefined;
   let issuer = '';
 
   const server: Server = createServer((req, res) => {
@@ -138,6 +147,17 @@ export async function startOidcFixture(): Promise<OidcFixture> {
       }
       if (req.method === 'POST' && url.pathname === '/token') {
         const rawBody = await readBody(req);
+        if (nextTokenError !== undefined) {
+          const forced = nextTokenError;
+          nextTokenError = undefined; // one-shot
+          const headers: Record<string, string> = { 'content-type': 'application/json' };
+          if (forced.wwwAuthenticate !== undefined) {
+            headers['www-authenticate'] = forced.wwwAuthenticate;
+          }
+          res.writeHead(forced.error === 'invalid_client' ? 401 : 400, headers);
+          res.end(JSON.stringify({ error: forced.error, error_description: 'fixture-forced' }));
+          return;
+        }
         if (nextCodeChallenge !== undefined) {
           const params = new URLSearchParams(rawBody);
           const verifier = params.get('code_verifier');
@@ -226,6 +246,9 @@ export async function startOidcFixture(): Promise<OidcFixture> {
     },
     setNextCodeChallenge(challenge: string | undefined) {
       nextCodeChallenge = challenge;
+    },
+    setNextTokenError(error: string | undefined, wwwAuthenticate?: string) {
+      nextTokenError = error === undefined ? undefined : { error, ...(wwwAuthenticate !== undefined ? { wwwAuthenticate } : {}) };
     },
     close(): Promise<void> {
       return new Promise<void>((resolve, reject) => {

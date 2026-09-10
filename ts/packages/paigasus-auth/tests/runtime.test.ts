@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { createAuthRuntime, getAuthRuntime } from '../src/runtime.js';
 import { AuthConfigError } from '../src/core/errors.js';
 
@@ -109,5 +109,41 @@ describe('getAuthRuntime', () => {
     const rt1 = await getAuthRuntime(BASE);
     const rt2 = await getAuthRuntime({ ...BASE, PAIGASUS_ZONE: 'ghost' });
     expect(rt2).toBe(rt1);
+  });
+});
+
+// SMA-626 § 5, guard 3. getAuthRuntime's doc comment claims a misconfigured-at-boot process can
+// recover once its config is fixed, and only the SUCCESS path was exercised — delete
+// `sharedRuntime = undefined` from the catch and every existing test still passed.
+//
+// THE VACUOUS MODE THIS AVOIDS: vi.resetModules() runs exactly ONCE, before BOTH imports, so both
+// calls reach the same fresh module instance. Resetting between them would give the second call a
+// module whose sharedRuntime is already undefined, and the test would pass with the reset deleted.
+//
+// MEASURED 2026-09-10: commenting out `sharedRuntime = undefined` in runtime.ts's catch reds
+// both tests here and leaves every other test in this file green.
+describe('getAuthRuntime failure reset (SMA-626 § 5, guard 3)', () => {
+  it('lets a later call succeed after the first one rejected', async () => {
+    vi.resetModules(); // ONCE — see the block comment above.
+    const mod = await import('../src/runtime.js');
+
+    await expect(mod.getAuthRuntime({ ...BASE, PAIGASUS_ZONE: 'ghost' })).rejects.toMatchObject({
+      message: 'PAIGASUS_ZONE has no entry in PAIGASUS_ZONES',
+    });
+
+    // The SAME module instance. Without the reset in the catch, this replays the rejection above.
+    const recovered = await mod.getAuthRuntime(BASE);
+    expect(recovered.zone).toBe(BASE.PAIGASUS_ZONE);
+  });
+
+  it('caches the recovered runtime, so the reset does not disable memoisation', async () => {
+    vi.resetModules();
+    const mod = await import('../src/runtime.js');
+
+    await expect(mod.getAuthRuntime({ ...BASE, PAIGASUS_ZONE: 'ghost' })).rejects.toThrow();
+    const first = await mod.getAuthRuntime(BASE);
+    const second = await mod.getAuthRuntime({ ...BASE, PAIGASUS_ZONE: 'ghost' });
+
+    expect(second).toBe(first);
   });
 });

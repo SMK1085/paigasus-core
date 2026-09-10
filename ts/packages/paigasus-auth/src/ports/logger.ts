@@ -18,6 +18,7 @@ export type AuthEventName =
   | 'session.refreshed'
   | 'session.refresh_failed'
   | 'session.refresh_timeout'
+  | 'session.resolve_failed'
   | 'session.refresh.persist_failed'
   | 'session.deleted'
   | 'logout.completed'

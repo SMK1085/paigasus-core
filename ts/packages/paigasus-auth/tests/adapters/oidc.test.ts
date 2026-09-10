@@ -10,8 +10,10 @@
 // that exact pairing is not reachable against the measured oauth4webapi@3.8.8 behaviour, and why
 // `nbf` is the real mechanism this test exercises instead.
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import * as client from 'openid-client';
 import { createOidcClient, type OidcClient } from '../../src/adapters/oidc.js';
 import { startOidcFixture, type OidcFixture } from '../fixtures/jwks.js';
+import { RefreshRejected } from '../../src/core/errors.js';
 
 const REDIRECT_URI = 'https://rp.example.com/auth/callback';
 const STATE = 'txn-state-value';
@@ -195,5 +197,87 @@ describe('createOidcClient — the rest of the surface', () => {
       allowInsecureRequests: true,
     });
     await expect(oidc.refresh('rt')).rejects.toThrow(/oidc discovery failed/);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// MEASUREMENT (SMA-626 § 2.3). The refresh classifier keys on `ResponseBodyError.error`, and that
+// only works if a refused refresh actually arrives as that class. oauth4webapi@3.8.8's
+// checkOAuthBodyError calls checkAuthenticationChallenges(response) BEFORE parsing the body
+// (build/index.js:925-937), so a response carrying WWW-Authenticate throws
+// WWWAuthenticateChallengeError instead — which has no `.error` field, and would make a
+// ResponseBodyError-keyed classifier silently never fire.
+//
+// These two tests pin the measured answer. They call openid-client DIRECTLY, because
+// createOidcClient.refresh() wraps its error and would hide the class.
+// ---------------------------------------------------------------------------------------------
+describe('MEASUREMENT: the error class a refused refresh produces', () => {
+  async function rawConfig(): Promise<client.Configuration> {
+    return client.discovery(new URL(fixture.issuer), fixture.clientId, { client_secret: fixture.clientSecret }, undefined, {
+      execute: [client.allowInsecureRequests],
+    });
+  }
+
+  it('invalid_grant with no WWW-Authenticate arrives as ResponseBodyError carrying .error', async () => {
+    const config = await rawConfig();
+    fixture.setNextTokenError('invalid_grant');
+
+    const err: unknown = await client.refreshTokenGrant(config, 'rt').catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(client.ResponseBodyError);
+    expect((err as InstanceType<typeof client.ResponseBodyError>).error).toBe('invalid_grant');
+  });
+
+  // The counter-example, and the reason the DEFINITIVE set is `invalid_grant` alone. RFC 6749
+  // § 5.2 says a token endpoint SHOULD send WWW-Authenticate with invalid_client, and when it
+  // does, the error never reaches the body parser at all.
+  it('a WWW-Authenticate response arrives as WWWAuthenticateChallengeError, with no .error field', async () => {
+    const config = await rawConfig();
+    fixture.setNextTokenError('invalid_client', 'Basic realm="idp"');
+
+    const err: unknown = await client.refreshTokenGrant(config, 'rt').catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(client.WWWAuthenticateChallengeError);
+    expect(err).not.toBeInstanceOf(client.ResponseBodyError);
+  });
+});
+
+describe('createOidcClient — refresh failure classification (SMA-626 § 2.2)', () => {
+  it('maps invalid_grant to RefreshRejected, carrying only the OAuth code', async () => {
+    const oidc = makeClient();
+    fixture.setNextTokenError('invalid_grant');
+
+    const err: unknown = await oidc.refresh('some-refresh-token').catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(RefreshRejected);
+    expect((err as RefreshRejected).oauthError).toBe('invalid_grant');
+    expect((err as RefreshRejected).code).toBe('oidc_refresh_rejected');
+    // Redaction: the refresh token, the client secret and the issuer URL must not appear.
+    expect((err as Error).message).not.toContain('some-refresh-token');
+    expect((err as Error).message).not.toContain(fixture.clientSecret);
+    expect((err as Error).message).not.toContain(fixture.issuer);
+  });
+
+  // The whole point of § 2.2's narrowing: these are per-DEPLOYMENT faults, not session
+  // revocations. Classifying them as definitive would sign out every session at once when
+  // someone rotates the client secret without updating PAIGASUS_OIDC_CLIENT_SECRET.
+  it.each(['invalid_client', 'unauthorized_client', 'invalid_scope', 'invalid_request', 'server_error', 'temporarily_unavailable'])('treats %s as transient, NOT as RefreshRejected', async (code) => {
+    const oidc = makeClient();
+    fixture.setNextTokenError(code);
+
+    const err: unknown = await oidc.refresh('some-refresh-token').catch((e: unknown) => e);
+
+    expect(err).not.toBeInstanceOf(RefreshRejected);
+    expect((err as Error).message).toMatch(/oidc refresh_token_grant failed/);
+  });
+
+  // A non-OAuth failure raised INSIDE the try block must not be classified either.
+  it('treats a response missing expires_in as transient', async () => {
+    const oidc = makeClient();
+    fixture.setNextExpiresIn(undefined);
+
+    const err: unknown = await oidc.refresh('some-refresh-token').catch((e: unknown) => e);
+
+    expect(err).not.toBeInstanceOf(RefreshRejected);
   });
 });

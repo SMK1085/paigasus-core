@@ -18,6 +18,7 @@
 import { createClient } from 'redis';
 import type { SetOptions } from 'redis';
 import type { SessionRecord } from '../core/session.js';
+import { isSessionRecord } from '../core/session.js';
 import { SessionStoreUnavailable } from '../core/errors.js';
 import type { LoginTransaction, SessionStore } from '../ports/session-store.js';
 
@@ -153,19 +154,21 @@ class RedisSessionStore implements SessionStore {
     return this.#guarded(async () => {
       const raw = await this.#client.get(sessKey(this.#keyPrefix, sid));
       if (raw === null) return null;
-      let parsed: SessionRecord;
+      let parsed: unknown;
       try {
-        parsed = JSON.parse(raw) as SessionRecord;
+        parsed = JSON.parse(raw);
       } catch {
-        // An unparseable stored value is treated as ABSENT, matching the version-mismatch
-        // handling below and the memory adapter's own absent-and-deleted behaviour. Without
-        // this, JSON.parse throwing surfaces as SessionStoreUnavailable through #guarded's
-        // catch-all, which turns one poisoned key into a permanent sign-out loop for that user.
+        // An unparseable stored value is ABSENT-AND-DELETED. Without this, JSON.parse throwing
+        // surfaces as SessionStoreUnavailable through #guarded's catch-all, which turns one
+        // poisoned key into a false store-outage signal against a healthy Redis.
         await this.#client.del(sessKey(this.#keyPrefix, sid));
         return null;
       }
-      // A version mismatch is treated as ABSENT, matching the memory adapter.
-      if (parsed.version !== 1) {
+      // ONE rule for every shape that is not a session record — a version mismatch, a stored
+      // literal `null` (which JSON.parse accepts), a body missing the fields the read path needs,
+      // and a principal missing `grantsAvailable`, which can() fails OPEN on. See
+      // isSessionRecord's doc comment for the three measured holes this closes (SMA-626 § 4).
+      if (!isSessionRecord(parsed)) {
         await this.#client.del(sessKey(this.#keyPrefix, sid));
         return null;
       }

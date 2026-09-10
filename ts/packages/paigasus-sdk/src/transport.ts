@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import './server-guard.js';
 
-import { createContextKey } from '@connectrpc/connect';
+import { Code, ConnectError, createContextKey } from '@connectrpc/connect';
 import type { Interceptor, Transport } from '@connectrpc/connect';
 import { createGrpcTransport, Http2SessionManager } from '@connectrpc/connect-node';
 
@@ -25,6 +25,12 @@ export type TransportOptions = {
 /**
  * A union rather than an optional, so that an unauthenticated call — the health check is the real
  * case — is a written decision rather than an omission (spec § 7.4).
+ *
+ * The client OWNS the `authorization` header. A caller-supplied one — via `CallOptions.headers` —
+ * is refused on BOTH arms rather than forwarded or overwritten, so `{ anonymous: true }` means what
+ * it says (SMA-627). Two consequences worth knowing before you hit them: `Bearer` is the only
+ * Authorization scheme this client can send, and a credential aimed at an intermediary belongs in
+ * `proxy-authorization`, which this client does not touch.
  */
 export type Auth = { readonly bearer: string } | { readonly anonymous: true };
 
@@ -46,7 +52,62 @@ export const DEFAULT_TIMEOUT_MS = 10_000;
  */
 export const authContextKey = createContextKey<Auth>({ anonymous: true }, { description: '@paigasus/sdk per-call authorization' });
 
+/**
+ * The one place this package decides what `authorization` a request carries.
+ *
+ * Two rules, in this order. A request that ALREADY carries an `authorization` header is refused —
+ * the caller is reaching around the SDK's auth binding, on either `Auth` arm (§ 3). Otherwise the
+ * bound `Auth` decides: a `bearer` becomes `Authorization: Bearer <token>`, and `{ anonymous: true }`
+ * sends nothing.
+ *
+ * Both refusals throw `ConnectError` with `Code.InvalidArgument`, so this package's own error map
+ * presents them as `invalid-input` rather than as a service fault. Neither message ever contains a
+ * credential.
+ *
+ * It runs on the unary and the streaming path alike, and it sits on the CACHED transport — so it
+ * applies to every client and every call, not only to those built through `createIamClient`.
+ *
+ * The reasoning behind each decision is inline below, at the line it governs.
+ */
 export const authInterceptor: Interceptor = (next) => async (req) => {
+  // The SDK owns `authorization`. A request that reaches here already carrying one is refused on
+  // BOTH Auth arms (spec § 3): on the anonymous arm the header would otherwise be forwarded from a
+  // client explicitly declared unauthenticated, and on the bearer arm the `set` below would
+  // silently overwrite it without a word. One check closes both.
+  //
+  // Checked BEFORE contextValues.get, deliberately (spec § 3.6). A request that is wrong in both
+  // ways then reports the header deterministically rather than depending on an evaluation order
+  // nobody wrote down, and the check can never trip over the header the bearer branch itself
+  // writes further down this same function.
+  //
+  // ConnectError with Code.InvalidArgument, not a plain Error, for the reason given on the
+  // empty-bearer throw below: Code.Unknown has no row in src/errors/transport-status.ts and
+  // presents as `generic`, blaming the service for a caller error (spec § 3.1).
+  //
+  // The message must NEVER carry the header's VALUE — that would put a live credential into an
+  // exception message, a container log and any error reporter (spec § 3.5). It names
+  // `proxy-authorization` because that field stays untouched and is the way out for a credential
+  // aimed at an intermediary; note that `Bearer` is consequently the only Authorization scheme
+  // this client can send at all (spec § 3.3).
+  //
+  // This reasoning holds only while `authInterceptor` is the WHOLE interceptor array, and the two
+  // directions are NOT symmetric. MEASURED on connect 2.2.0: `applyInterceptors` reverses the array
+  // before wrapping, so the FIRST entry is the outermost layer and a request "goes through the
+  // outermost layer first" (interceptor.d.ts:18-21). An interceptor PREPENDED before this one runs
+  // first, and a header it set would trip this refusal — loudly, which is fine. An interceptor
+  // APPENDED after this one runs LATER, and would override the decision made here in SILENCE:
+  // overwriting the bearer, or adding a credential to a call declared { anonymous: true }. That is
+  // the direction that would defeat this whole rule. (Read the d.ts phrase "the interceptor at the
+  // end of the array is applied first" as WRAPPED first — innermost — therefore run last.)
+  // tests/transport-wiring.test.ts:49 pins `interceptors` to exactly [authInterceptor]; that pin
+  // is this invariant's guard, and it reds on an insert at either end.
+  if (req.header.has('authorization')) {
+    throw new ConnectError(
+      "@paigasus/sdk: refusing a caller-supplied `authorization` header — this client owns it. Pass the credential as { bearer } to the client factory, or use { anonymous: true } for an unauthenticated call. Do not forward an incoming request's headers wholesale; send the session-bound token instead. A credential for an intermediary belongs in `proxy-authorization`, which this client does not touch.",
+      Code.InvalidArgument,
+    );
+  }
+
   const auth = req.contextValues.get(authContextKey);
   if ('bearer' in auth) {
     // An empty or whitespace-only bearer is refused here, at the point it would be BOUND into the
@@ -54,8 +115,14 @@ export const authInterceptor: Interceptor = (next) => async (req) => {
     // environment variable into `bearer` gets a clear local error naming the cause, instead of a
     // confusing server-side parse failure on the other end of the call.
     if (auth.bearer.trim() === '') {
-      throw new Error(
+      // A ConnectError with Code.InvalidArgument, not a plain Error. A plain Error reaches the
+      // caller as ConnectError(Code.Unknown), and src/errors/transport-status.ts has no Unknown
+      // row, so presentationForGrpcCode falls through to `generic` — the SDK would blame the
+      // service for the caller's own input, the defect src/chat.ts:218-220 records and fixed for
+      // an unserializable request body (spec § 3.1).
+      throw new ConnectError(
         '@paigasus/sdk: refusing to send an empty or whitespace-only bearer token. This usually means an unset environment variable; use { anonymous: true } for an intentionally unauthenticated call.',
+        Code.InvalidArgument,
       );
     }
     req.header.set('authorization', `Bearer ${auth.bearer}`);
