@@ -3598,6 +3598,16 @@ Two known false alarms:
 - A sub-3s `repo:affected-smoke` abort under a concurrent `moon ci`, whose output contains `proto-shim: … Permission denied (os error 13)`. Grep for that line. If present, re-run `moon run repo:affected-smoke --force`; it passes in the usual 6s.
 - A local hang in `affected-smoke` or `actionlint` is this machine's bash 5.3.15 here-string deadlock, not a gate failure. Re-run under `/bin/bash`.
 
+<!-- moon-diagnosis:ok -->
+
+The marker above is what `repo:actionlint`'s check 12 requires of any file mentioning
+`ciReport.json` (SMA-597). It is `:ok` rather than `:superseded` because the passages above
+reproduce CLAUDE.md's moon-diagnosis block correctly rather than the advice it replaced: they say
+there is no action-level `exitCode` key, point at `operations[]` for the real exit code and
+command, and name the two false alarms this repo has actually measured. Re-check that this still
+holds before editing either passage — the marker asserts agreement, so a drift here makes it a lie
+rather than merely stale.
+
 - [ ] **Step 5: Fix, re-run, and commit any fixes**
 
 ```bash
