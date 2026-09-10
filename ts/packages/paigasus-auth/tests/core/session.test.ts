@@ -152,4 +152,18 @@ describe('isSessionRecord (SMA-626 § 4.2)', () => {
     const principal = { ...makeRecord().principal, roleGrants: ['not-an-object'] };
     expect(isSessionRecord({ ...makeRecord(), principal })).toBe(false);
   });
+
+  // Fix 1 (local review round): `memberships` used to stop at Array.isArray, with no per-element
+  // check — asymmetric with roleGrants above. MEASURED: reverting the element check back to the
+  // bare Array.isArray(...) makes both cases below pass (i.e. this test REDS), confirming the
+  // check is load-bearing rather than vacuous.
+  it('rejects a memberships element that is not a { id, principalPrn, nodePrn } object', () => {
+    const principal = { ...makeRecord().principal, memberships: [null] };
+    expect(isSessionRecord({ ...makeRecord(), principal })).toBe(false);
+  });
+
+  it('rejects a memberships element missing a required field', () => {
+    const principal = { ...makeRecord().principal, memberships: [{ id: 'm1', principalPrn: 'prn:x' }] };
+    expect(isSessionRecord({ ...makeRecord(), principal })).toBe(false);
+  });
 });

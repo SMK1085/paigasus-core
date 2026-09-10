@@ -108,7 +108,9 @@ export function isSessionRecord(value: unknown): value is SessionRecord {
   if (principal['principalPrn'] !== null && typeof principal['principalPrn'] !== 'string') return false;
   if (typeof principal['issuer'] !== 'string' || typeof principal['subject'] !== 'string') return false;
   if (typeof principal['grantsAvailable'] !== 'boolean') return false;
-  if (!Array.isArray(principal['memberships'])) return false;
+  const memberships = principal['memberships'];
+  if (!Array.isArray(memberships)) return false;
+  if (!memberships.every((m) => isObject(m) && typeof m['id'] === 'string' && typeof m['principalPrn'] === 'string' && typeof m['nodePrn'] === 'string')) return false;
   const grants = principal['roleGrants'];
   if (!Array.isArray(grants)) return false;
   return grants.every((g) => isObject(g) && typeof g['scopePrn'] === 'string' && typeof g['roleKey'] === 'string');

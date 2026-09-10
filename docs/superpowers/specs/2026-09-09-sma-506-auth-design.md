@@ -616,6 +616,13 @@ onRefreshTimeout(rec):
   else:                            return null      # -> treated as signed out
 ```
 
+**Superseded by SMA-626.** The pseudocode above checks `accessExpiresAt` alone. SMA-626
+changed `resolveSession` so both the lock-timeout branch and the refresh-failure branch
+instead test `now() < Math.min(rec.accessExpiresAt, rec.absoluteExpiresAt)`
+(`src/core/single-flight.ts:171` and `:236`): a session past its absolute cap now returns
+`null` even while its access token is still live. This document keeps the original
+pseudocode as the historical record of what SMA-506 designed.
+
 The access token is often still valid inside the skew window, so the request
 proceeds on the stale-but-live token and the next request refreshes. Only a
 genuinely expired token degrades, and it degrades to "signed out", which has a

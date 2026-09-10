@@ -426,10 +426,14 @@ slow and flake-prone. The behavioural claim in `redis-store.ts:237-240`'s commen
 
 `src/server.ts` is NOT changed: `RefreshRejected` stays internal (§ 2.3).
 
-**Tests (8):** `tests/adapters/oidc.test.ts`, `tests/core/single-flight.test.ts`,
-`tests/next/get-session.test.ts`, `tests/adapters/redis-store.test.ts`,
-`tests/adapters/memory-store.test.ts`, `tests/core/session.test.ts`, `tests/runtime.test.ts`,
-`tests/middleware.test.ts`.
+**Tests (9, corrected against `git diff --stat 51a2d859..HEAD -- ts/packages/paigasus-auth/tests`
+— the list below did not touch `tests/adapters/redis-store.test.ts` and had omitted two new
+files):** `tests/adapters/oidc.test.ts`, `tests/core/single-flight.test.ts`,
+`tests/next/get-session.test.ts`, `tests/adapters/redis-store-parse.test.ts` (new),
+`tests/adapters/redis-client-options.test.ts` (new), `tests/adapters/memory-store.test.ts`,
+`tests/core/session.test.ts`, `tests/runtime.test.ts`, `tests/middleware.test.ts`.
+`tests/fixtures/jwks.ts` also changed on this branch; it is a fixture, not a test file, and is
+noted here rather than counted in the 9.
 
 No new dependency. No container test and no e2e test added.
 
@@ -449,11 +453,17 @@ Everything else must stay green. The baseline is `Test Files 22 passed (22)` /
 `ts/packages/paigasus-auth`. (`tests/client.test.tsx` is the 22nd file; `tests/containers/**` and
 `tests/e2e/**` are excluded by `vitest.config.ts`.)
 
+Prerequisite for every `moon` command below (CLAUDE.md): the Bash tool's PATH lacks the
+proto-managed CLIs, so prefix each one with
+`export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"`.
+
 - `pnpm exec vitest run` — the three re-baselines updated, every other existing test green, every
   new test present.
 - Each § 5 test verified by DELETING its guard and watching it red, then restoring the guard.
   The result is written into a comment beside the test.
-- `moon run paigasus-auth-ts:lint`, `:typecheck`, `:fmt`.
+- `moon run paigasus-auth-ts:typecheck`, `moon run ts:fmt`. `paigasus-auth-ts` is
+  `layer: library`, so there is no per-project `lint` task; lint runs whole-tree as
+  `moon run ts:lint`.
 - The full graph as CI runs it, per CLAUDE.md, before pushing.
 
 ## 8. Residuals carried forward
