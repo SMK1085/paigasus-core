@@ -145,8 +145,8 @@ function mapConnect(err: ConnectError): PaigasusError {
       // rest of mapError never reads — see AC 1's exact-message test.
       message: err.rawMessage,
       // err.metadata is a union of response headers and trailers, so it may still carry the id.
-      correlationId: err.metadata.get(CORRELATION_HEADER),
-      requestId: err.metadata.get(REQUEST_ID_HEADER),
+      correlationId: firstNonEmpty(err.metadata.get(CORRELATION_HEADER)),
+      requestId: firstNonEmpty(err.metadata.get(REQUEST_ID_HEADER)),
       retryable: null,
       metadata: {},
       transport,
@@ -193,8 +193,8 @@ function mapHttp(status: number, headers: Headers, body: unknown): PaigasusError
     rawDomain: null,
     // Never empty: a malformed or non-JSON body still yields something a user can report.
     message: message ?? `HTTP ${status}`,
-    correlationId: headers.get(CORRELATION_HEADER),
-    requestId: headers.get(REQUEST_ID_HEADER),
+    correlationId: firstNonEmpty(headers.get(CORRELATION_HEADER)),
+    requestId: firstNonEmpty(headers.get(REQUEST_ID_HEADER)),
     retryable: parseRetryable(headers.get(RETRYABLE_HEADER)),
     metadata: param === null ? {} : { param },
     transport: { kind: 'http', status },

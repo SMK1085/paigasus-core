@@ -90,6 +90,28 @@ describe('createTerminalFrameParser', () => {
     expect(parser.push(encode('data: {"error":{"code":"upstream-error"'))).toEqual([]);
   });
 
+  // CodeRabbit round 1, Major. `push` appends every chunk and clears only at a delimiter, so an
+  // upstream that never emits a blank line grew the buffer until the process ran out of memory.
+  // The parser is public and caller-driven, and nothing else bounds an active stream.
+  //
+  // This row is built to DISCRIMINATE. The two halves below form ONE well-formed terminal frame,
+  // so without the cap the parser retains the first half, completes the record and reports a
+  // frame. With the cap it drops the oversized partial and resynchronises, reporting nothing. A
+  // simpler "feed junk, expect []" row would pass either way, because an unparseable record is
+  // discarded regardless — the same inert-guard shape this branch has repeatedly had to repair.
+  it('drops an over-long pending record rather than buffering it without bound', () => {
+    const parser = createTerminalFrameParser(200);
+    expect(parser.push(encode('data: {"error":{"message":"' + 'x'.repeat(2 * 1024 * 1024)))).toEqual([]);
+    expect(parser.push(encode('","code":"upstream-error"}}\n\n'))).toEqual([]);
+
+    // And it RESYNCHRONISES: a terminal frame arriving after the discard is still found.
+    const out = parser.push(encode(FRAME));
+    expect(out).toHaveLength(1);
+    const frame = out[0];
+    if (frame === undefined) throw new Error('unreachable');
+    expect(frame.reason).toBe(ErrorReason.UPSTREAM_ERROR);
+  });
+
   it('ignores ordinary data records', () => {
     const parser = createTerminalFrameParser(200);
     expect(parser.push(encode('data: {"choices":[{"delta":{"content":"hi"}}]}\n\n'))).toEqual([]);

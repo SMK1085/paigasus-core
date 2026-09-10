@@ -32,6 +32,8 @@ export function createTerminalFrameParser(committedStatus: number, ids?: FrameId
   // boundary exactly as a record can.
   const decoder = new TextDecoder('utf-8');
   let buffer = '';
+  // True while we are discarding the tail of a record that blew the cap below.
+  let resynchronising = false;
 
   return {
     push(chunk: Uint8Array): PaigasusError[] {
@@ -44,8 +46,27 @@ export function createTerminalFrameParser(committedStatus: number, ids?: FrameId
         const record = buffer.slice(0, match.index);
         buffer = buffer.slice(match.index + match[0].length);
 
+        // The tail of a record we already gave up on. Drop it and resume at the next one.
+        if (resynchronising) {
+          resynchronising = false;
+          continue;
+        }
         const error = terminalErrorFrom(record, committedStatus, ids);
         if (error !== null) found.push(error);
+      }
+
+      // The pending record is UNBOUNDED without this. `push` appends every chunk and only clears
+      // at a delimiter, so an upstream that streams continuously without ever emitting a blank
+      // line grows the buffer until the process runs out of memory. The chat client's deadline
+      // bounds the wait for HEADERS only (§ 8.5), and nothing bounds an active stream — so this
+      // parser, which is public and driven by the caller, has to bound itself.
+      //
+      // On overflow we discard the partial record and RESYNCHRONISE at the next delimiter rather
+      // than throwing: a caller draining a stream cannot act on an exception here, and silently
+      // skipping one malformed record still lets a later terminal frame be found.
+      if (buffer.length > MAX_PENDING_RECORD) {
+        buffer = '';
+        resynchronising = true;
       }
       return found;
     },
@@ -62,6 +83,15 @@ export function createTerminalFrameParser(committedStatus: number, ids?: FrameId
  * misses.
  */
 const RECORD_DELIMITER = /(?:\r\n|\r|\n){2}/;
+
+/**
+ * The cap on a single pending SSE record, in decoded characters.
+ *
+ * The gateway's terminal frame is ~120 characters and an OpenAI content delta is smaller still, so
+ * 1 MiB is orders of magnitude above anything legitimate. It exists only to stop an upstream that
+ * never emits a blank line from growing the buffer without bound.
+ */
+const MAX_PENDING_RECORD = 1_048_576;
 
 /** A `PaigasusError` when this record is the terminal error frame, else `null`. */
 function terminalErrorFrom(record: string, committedStatus: number, ids?: FrameIds): PaigasusError | null {

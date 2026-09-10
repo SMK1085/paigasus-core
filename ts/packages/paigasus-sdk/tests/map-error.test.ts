@@ -182,6 +182,28 @@ describe('mapError is total over a malformed body', () => {
   });
 });
 
+// CodeRabbit round 1, Minor. `Headers.get()` returns '' for a header that is PRESENT but empty,
+// and an empty id is no id — a user cannot report it and a log cannot correlate on it.
+describe('an empty identifier header is normalized to null', () => {
+  it('on the HTTP arm', () => {
+    const result = mapError({
+      kind: 'http',
+      status: 500,
+      headers: new Headers({ 'paigasus-correlation-id': '', 'paigasus-request-id': '' }),
+      body: { error: { code: 'internal', message: 'boom' } },
+    });
+    expect(result.correlationId).toBeNull();
+    expect(result.requestId).toBeNull();
+  });
+
+  it('on the gRPC arm with no ErrorInfo detail', () => {
+    const headers = new Headers({ 'paigasus-correlation-id': '', 'paigasus-request-id': '' });
+    const result = mapError({ kind: 'grpc', error: new ConnectError('x', Code.Internal, headers) });
+    expect(result.correlationId).toBeNull();
+    expect(result.requestId).toBeNull();
+  });
+});
+
 describe('arm 5 — a transport failure with no response at all', () => {
   it.each([
     ['timeout', 'degraded'],
