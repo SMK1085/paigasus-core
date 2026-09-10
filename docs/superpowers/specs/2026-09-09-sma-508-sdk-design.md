@@ -551,20 +551,23 @@ on the split-frame case — the terminal error split across two chunks, the one 
 catch. The exported shape is a stateful incremental parser:
 
 ```ts
-export function createTerminalFrameParser(ids: {
-  correlationId: string | null;
-  requestId: string | null;
-}): {
+export function createTerminalFrameParser(
+  ids: FrameIds,
+  committedStatus: number,
+): {
   push(chunk: Uint8Array | string): PaigasusError | null;
 };
 ```
 
 Six points of the contract, each closing a way the parser could silently miss the frame:
 
-1. **It takes the ids.** The frame arrives inside a committed 2xx whose headers the chat client
-   already read, and those headers carry `paigasus-correlation-id` and `paigasus-request-id`. The
-   frame itself carries neither. Without this argument, the hardest chat failure to support is the
-   one error with no reportable id.
+1. **It takes the ids and the committed status.** The frame arrives inside a committed 2xx whose
+   headers the chat client already read, and those headers carry `paigasus-correlation-id` and
+   `paigasus-request-id`. The frame itself carries neither id nor a status the parser could observe
+   for itself — it sees only bytes. The caller supplies the committed 2xx status from the streaming
+   result, which is what lets a non-200 2xx such as `201` be preserved in
+   `PaigasusError.transport.status` rather than the parser assuming `200`. Without the ids argument,
+   the hardest chat failure to support is the one error with no reportable id.
 2. **It accepts `Uint8Array`** and owns a single streaming `TextDecoder` (`{ stream: true }`).
    Decoding each chunk with a fresh decoder corrupts a multi-byte character split across a chunk
    boundary — the same defect class the split-record argument above identifies, one level down. A
@@ -577,8 +580,9 @@ Six points of the contract, each closing a way the parser could silently miss th
    it "yields each complete SSE record it can form" while its signature returned one nullable value.
    The signature is right and the comment was wrong: the frame is terminal, so there is nothing
    after it worth reporting. Records before it are ordinary data and yield `null`.
-5. **Delimiters are `\n\n`, `\r\n\r\n` and `\r\r`.** `chat.rs:63` emits the first, but upstream
-   chunks pass through verbatim and SSE permits all three.
+5. **A record ends at a blank line — any two consecutive line terminators, each CRLF, LF or CR.**
+   `chat.rs:63` emits `\n\n`, but upstream chunks pass through verbatim, so the parser follows the
+   SSE grammar rather than enumerating that one producer's delimiter.
 6. **It maps through § 9.5 arm 4**, so a terminal frame and a non-2xx body produce the same shape.
 
 ### 8.6 The drift check, and what makes it run

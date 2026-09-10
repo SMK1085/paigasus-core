@@ -72,7 +72,7 @@ describe('the parser', () => {
     expect(error!.message).toBe('café ☕');
   });
 
-  it.each([['\n\n'], ['\r\n\r\n'], ['\r\r']])('accepts the %j record delimiter', (delimiter) => {
+  it.each([['\n\n'], ['\r\n\r\n'], ['\r\r'], ['\n\r\n'], ['\r\n\n'], ['\n\r']])('accepts the %j record delimiter', (delimiter) => {
     const parser = createTerminalFrameParser(IDS, 200);
     const frame = TERMINAL_SSE_ERROR.replace('\n\n', delimiter);
     expect(parser.push(encode(frame))).not.toBeNull();

@@ -14,16 +14,20 @@ import type { PaigasusError } from './types.js';
  */
 const MAX_BUFFER_CHARS = 64 * 1024;
 
-/** SSE permits all three; chat.rs:63 emits the first, but upstream chunks pass through verbatim. */
-const DELIMITERS = ['\r\n\r\n', '\n\n', '\r\r'];
+/**
+ * A record ends at a blank line — any TWO consecutive line terminators, each of which may be
+ * CRLF, LF or CR. `chat.rs:63` emits `\n\n`, but upstream chunks pass through this gateway
+ * verbatim, so the grammar is what this follows, not that one producer's habit.
+ *
+ * The alternation puts `\r\n` first so a CRLF is consumed whole rather than as a bare CR — which
+ * is what makes `\r\n\r\n` match as one four-character delimiter instead of two two-character ones.
+ */
+const RECORD_DELIMITER = /(?:\r\n|\r|\n){2}/;
 
 function firstDelimiter(buffer: string): { index: number; length: number } | null {
-  let best: { index: number; length: number } | null = null;
-  for (const delimiter of DELIMITERS) {
-    const index = buffer.indexOf(delimiter);
-    if (index !== -1 && (best === null || index < best.index)) best = { index, length: delimiter.length };
-  }
-  return best;
+  const match = RECORD_DELIMITER.exec(buffer);
+  if (match === null) return null;
+  return { index: match.index, length: match[0].length };
 }
 
 /**
