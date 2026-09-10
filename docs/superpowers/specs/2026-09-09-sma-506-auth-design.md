@@ -612,7 +612,7 @@ error from a server component reaches the nearest `error.tsx` and renders a
 
 ```
 onRefreshTimeout(rec):
-  if now() < rec.accessExpiresAt:  return { ...rec, refreshPending: true }
+  if now() < rec.accessExpiresAt:  return { ...rec, refreshState: 'pending' }
   else:                            return null      # -> treated as signed out
 ```
 
@@ -1028,7 +1028,10 @@ Minimum event set: `login.started`, `login.callback_rejected` (with a `reason`
 enum — `txn_missing`, `txn_mismatch`, `state_unknown`, `code_exchange_failed`),
 `session.created`, `session.refreshed`, `session.refresh_failed`,
 `session.refresh_timeout`, `session.refresh.persist_failed`, `session.deleted`,
-`logout.completed`, `store.unavailable`.
+`session.resolve_failed`, `logout.completed`, `store.unavailable`.
+
+- `session.resolve_failed` — `getSession` could not resolve the session for a reason that is NOT a
+  store outage (SMA-626 § 2.4). `store.unavailable` is reserved for the store itself.
 
 **Redaction rule, stated per field:** no event carries a token, a refresh token,
 an authorization code, the client secret, the Redis DSN, or a txn secret. `sid`
