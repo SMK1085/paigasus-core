@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import './server-guard.js';
 
-import { createContextKey } from '@connectrpc/connect';
+import { Code, ConnectError, createContextKey } from '@connectrpc/connect';
 import type { Interceptor, Transport } from '@connectrpc/connect';
 import { createGrpcTransport, Http2SessionManager } from '@connectrpc/connect-node';
 
@@ -54,8 +54,14 @@ export const authInterceptor: Interceptor = (next) => async (req) => {
     // environment variable into `bearer` gets a clear local error naming the cause, instead of a
     // confusing server-side parse failure on the other end of the call.
     if (auth.bearer.trim() === '') {
-      throw new Error(
+      // A ConnectError with Code.InvalidArgument, not a plain Error. A plain Error reaches the
+      // caller as ConnectError(Code.Unknown), and src/errors/transport-status.ts has no Unknown
+      // row, so presentationForGrpcCode falls through to `generic` — the SDK would blame the
+      // service for the caller's own input, the defect src/chat.ts:218-220 records and fixed for
+      // an unserializable request body (spec § 3.1).
+      throw new ConnectError(
         '@paigasus/sdk: refusing to send an empty or whitespace-only bearer token. This usually means an unset environment variable; use { anonymous: true } for an intentionally unauthenticated call.',
+        Code.InvalidArgument,
       );
     }
     req.header.set('authorization', `Bearer ${auth.bearer}`);

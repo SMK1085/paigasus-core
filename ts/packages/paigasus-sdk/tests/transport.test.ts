@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 import { afterAll, afterEach, describe, expect, it } from 'vitest';
-import { createContextValues } from '@connectrpc/connect';
+import { Code, ConnectError, createContextValues } from '@connectrpc/connect';
 import type { UnaryRequest, UnaryResponse } from '@connectrpc/connect';
 import { authContextKey, authInterceptor, disposeTransports, getTransport, stableTransportKey } from '../src/transport.js';
+import { presentationForGrpcCode } from '../src/errors.js';
 
 // An open HTTP/2 session keeps the Node process alive, so without this `vitest run` can hang after
 // the assertions pass (spec § 7.3). Nothing here opens a socket — createGrpcTransport is lazy — but
@@ -119,6 +120,21 @@ function fakeUnaryRequest(): UnaryRequest {
 // StreamResponse>` shape without the keyword.
 const noopNext: Parameters<typeof authInterceptor>[0] = (req) => Promise.resolve({ stream: false, header: req.header } as unknown as UnaryResponse);
 
+/**
+ * The rejection reason of a promise, or a hard failure if it resolved.
+ *
+ * `expect(...).rejects.toThrow(/re/)` cannot assert on a thrown value's TYPE or its `code`, and a
+ * bare `.catch(e => e)` cannot tell a rejection from a resolution. This does both.
+ */
+async function rejection(promise: Promise<unknown>): Promise<unknown> {
+  try {
+    await promise;
+  } catch (error: unknown) {
+    return error;
+  }
+  throw new Error('expected the call to reject, but it resolved');
+}
+
 describe('authInterceptor (spec § 7.4)', () => {
   it('sets an Authorization header from a bearer Auth', async () => {
     const req = fakeUnaryRequest();
@@ -150,5 +166,19 @@ describe('authInterceptor (spec § 7.4)', () => {
     const req = fakeUnaryRequest();
     req.contextValues.set(authContextKey, { bearer: '   ' });
     await expect(authInterceptor(noopNext)(req)).rejects.toThrow(/empty|whitespace/);
+  });
+
+  it('refuses an empty bearer with Code.InvalidArgument, so the error map reports invalid-input', async () => {
+    const req = fakeUnaryRequest();
+    req.contextValues.set(authContextKey, { bearer: '' });
+
+    // A plain Error reaches the caller as ConnectError(Code.Unknown), and
+    // src/errors/transport-status.ts has NO Unknown row — presentationForGrpcCode falls through to
+    // `generic`, so the SDK would render a CALLER error as an unclassified SERVICE failure
+    // (spec § 3.1). The presentation assertion is what pins the reason, not just the code.
+    const error = await rejection(authInterceptor(noopNext)(req));
+    expect(error).toBeInstanceOf(ConnectError);
+    expect((error as ConnectError).code).toBe(Code.InvalidArgument);
+    expect(presentationForGrpcCode((error as ConnectError).code)).toBe('invalid-input');
   });
 });
