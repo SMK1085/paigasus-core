@@ -221,8 +221,10 @@ describe('a caller-supplied authorization header is refused (SMA-627 spec § 3)'
   });
 
   // A present-but-empty header is still the caller reaching around the binding, and Headers.has
-  // reports it as present (spec § 3.4). The bearer row additionally proves the check runs BEFORE
-  // req.header.set — after it, the header would be non-empty and the case would be meaningless.
+  // reports it as present (spec § 3.4). Note what the bearer row does NOT prove: it does not pin
+  // the check's position ahead of req.header.set, because after that set the header would be
+  // `Bearer sdk-token` and Headers.has would still report it. The ordering is pinned by the
+  // "reports the HEADER, not the empty bearer" case below.
   it.each([
     ['anonymous', { anonymous: true }],
     ['bearer', { bearer: 'sdk-token' }],
@@ -278,7 +280,7 @@ describe('a caller-supplied authorization header is refused (SMA-627 spec § 3)'
     req.header.set('proxy-authorization', 'Basic Zm9vOmJhcg==');
 
     // A RECORDING next, not the shared noopNext: noopNext returns the SAME Headers object it was
-    // given (tests/transport.test.ts:120), so asserting on the returned header would prove nothing
+    // given (see its definition above), so asserting on the returned header would prove nothing
     // about `next` having been called at all.
     const seen: (string | null)[] = [];
     const recordingNext: Parameters<typeof authInterceptor>[0] = (r) => {

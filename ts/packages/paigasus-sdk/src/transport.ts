@@ -61,7 +61,7 @@ export const authInterceptor: Interceptor = (next) => async (req) => {
   // Checked BEFORE contextValues.get, deliberately (spec § 3.6). A request that is wrong in both
   // ways then reports the header deterministically rather than depending on an evaluation order
   // nobody wrote down, and the check can never trip over the header the bearer branch itself
-  // writes three lines below.
+  // writes further down this same function.
   //
   // ConnectError with Code.InvalidArgument, not a plain Error, for the reason given on the
   // empty-bearer throw below: Code.Unknown has no row in src/errors/transport-status.ts and
