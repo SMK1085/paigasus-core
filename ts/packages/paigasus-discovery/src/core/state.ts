@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import { Capability, CapabilitySchema, capabilityWireKey } from '@paigasus/proto';
+import { CapabilitySchema, capabilityWireKey } from '@paigasus/proto';
 
 /**
  * Every advertised capability key, derived from the generated registry rather than tabulated.
@@ -8,7 +8,7 @@ import { Capability, CapabilitySchema, capabilityWireKey } from '@paigasus/proto
  * descriptor's own value names, so this list moves the day the proto does.
  */
 export const CAPABILITY_KEYS: readonly string[] = Object.keys(CapabilitySchema.value)
-  .map((n) => capabilityWireKey(Number(n) as Capability))
+  .map((n) => capabilityWireKey(Number(n)))
   .filter((k): k is string => k !== undefined);
 
 /**

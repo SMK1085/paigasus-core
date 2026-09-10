@@ -101,6 +101,11 @@ export function runCacheContract(name: string, makeCache: () => Promise<Descript
       await cache.set('iam', rec(), 60_000, null);
       await cache.writeRawForTest?.('iam', JSON.stringify({ ...rec(), version: 99 }));
       expect(await cache.get('iam')).toBeNull();
+      // DELETED, not merely filtered on read. An adapter that masks a foreign-version record
+      // without issuing a DEL would satisfy the assertion above and still re-poison every read
+      // for the whole hard TTL. An insert-only `set` succeeds only if the key is truly gone, so
+      // this second assertion is what makes the first one mean what it says.
+      expect(await cache.set('iam', rec(), 60_000, null)).toBe(true);
     });
   });
 }

@@ -22,6 +22,18 @@
 - `401`/`403` are caller-scoped and **never written to the cache**. Spec §7.2.
 - The cache key's `<service>` is always the config key, never `descriptor.service`. Spec F7.
 - Run `moon run ts:fmt` after the last TypeScript edit; it is a separate whole-tree Prettier gate.
+- **Every task verifies with THREE commands, not one.** They catch disjoint classes of defect and
+  all three are CI gates:
+  ```bash
+  pnpm -C ts/packages/paigasus-discovery exec vitest run     # behaviour
+  pnpm -C ts/packages/paigasus-discovery run typecheck        # types
+  pnpm -C ts exec eslint .                                    # lint
+  ```
+  `vitest` does **not** type-check — esbuild strips types — so a green suite says nothing about
+  `tsc`. And neither vitest nor `tsc` runs ESLint, whose type-checked rules
+  (`@typescript-eslint/require-await` among them) red `moon ci :lint`. Measured on this branch:
+  Task 2 shipped a `tsc` error under a green suite, and Task 3 shipped an ESLint error under both
+  a green suite and a clean `tsc`.
 
 ---
 
@@ -361,7 +373,7 @@ export function serviceOf(key: string): string {
 pnpm -C ts/packages/paigasus-discovery exec vitest run tests/vocabulary.test.ts
 ```
 
-Expected: PASS, 5 tests.
+Expected: PASS, 6 tests.
 
 - [ ] **Step 9: Commit**
 
@@ -479,7 +491,12 @@ describe('toState', () => {
     // cache key, because a misconfigured or hostile service could otherwise poison another
     // service's entry.
     const hostile = rec({ descriptor: { ...descriptor, service: 'gateway' } });
-    expect(toState('iam', hostile).service).toBe('iam');
+    // Assert on the whole resolved value: `toState` returns `ServiceState | null`, so a bare
+    // `toState(...).service` is a TS2531 type error, and a non-null assertion would throw rather
+    // than fail if the mapping ever returned null.
+    const state = toState('iam', hostile);
+    expect(state).not.toBeNull();
+    expect(state?.service).toBe('iam');
   });
 
   it('treats ok + null descriptor as corrupt', () => {
@@ -637,7 +654,7 @@ export function parseRecord(raw: string): CacheRecord | null {
 pnpm -C ts/packages/paigasus-discovery exec vitest run tests/record.test.ts
 ```
 
-Expected: PASS, 11 tests.
+Expected: PASS, 12 tests.
 
 - [ ] **Step 5: Commit**
 
@@ -855,6 +872,11 @@ export function runCacheContract(name: string, makeCache: () => Promise<Descript
       await cache.set('iam', rec(), 60_000, null);
       await cache.writeRawForTest?.('iam', JSON.stringify({ ...rec(), version: 99 }));
       expect(await cache.get('iam')).toBeNull();
+      // DELETED, not merely filtered on read. An adapter that masks a foreign-version record
+      // without issuing a DEL would satisfy the assertion above and still re-poison every read
+      // for the whole hard TTL. An insert-only `set` succeeds only if the key is truly gone, so
+      // this second assertion is what makes the first one mean what it says.
+      expect(await cache.set('iam', rec(), 60_000, null)).toBe(true);
     });
   });
 }
@@ -872,7 +894,46 @@ augmentation is needed here.
 import { createMemoryDescriptorCache } from '../src/adapters/memory-cache.js';
 import { runCacheContract } from './cache-contract.js';
 
-runCacheContract('memory', async () => createMemoryDescriptorCache());
+// `Promise.resolve(...)`, not an `async` arrow: the factory is synchronous, and an async arrow
+// with no `await` trips `@typescript-eslint/require-await`, which reds `moon ci :lint`.
+runCacheContract('memory', () => Promise.resolve(createMemoryDescriptorCache()));
+
+describe('memory adapter TTL', () => {
+  // NOT in the shared contract: TTL expiry is the one behaviour the two adapters cannot prove the
+  // same way. This adapter takes an injectable clock; Redis expires on real time via PX. The
+  // shared contract holds only what BOTH must satisfy.
+  //
+  // The adapter accepts `now` precisely so this is testable without sleeping. Without this case
+  // the expiry branch in `live()` is implemented and proven by nothing.
+  it('treats an expired entry as absent, and as re-insertable', async () => {
+    let now = 1_000;
+    const cache = createMemoryDescriptorCache(() => now);
+    const record: CacheRecord = {
+      version: RECORD_VERSION,
+      rev: 1,
+      descriptor: { service: 'iam', version: '0.0.0', capabilities: ['iam.audit'] },
+      descriptorAt: 0,
+      outcome: 'ok',
+      outcomeAt: 0,
+      reason: null,
+    };
+
+    expect(await cache.set('iam', record, 5_000, null)).toBe(true);
+    now = 5_999;
+    expect(await cache.get('iam')).not.toBeNull();
+    now = 6_001;
+    expect(await cache.get('iam')).toBeNull();
+    // An expired entry must be GONE, not merely masked: an insert-only set proves it.
+    expect(await cache.set('iam', record, 5_000, null)).toBe(true);
+  });
+});
+```
+
+The file therefore also needs these imports at the top:
+
+```ts
+import { describe, expect, it } from 'vitest';
+import { RECORD_VERSION, type CacheRecord } from '../src/core/record.js';
 ```
 
 - [ ] **Step 4: Run to verify it fails**
