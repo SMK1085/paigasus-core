@@ -43,20 +43,13 @@ export type RedisDescriptorCacheOptions = {
  * The two preconditions below are ASSERTED rather than documented. A precondition nobody checks
  * is a precondition nobody keeps, and both failures are silent until production.
  */
-export function createRedisDescriptorCache(
-  client: RedisClientType,
-  options: RedisDescriptorCacheOptions = {},
-): DescriptorCache {
+export function createRedisDescriptorCache(client: RedisClientType, options: RedisDescriptorCacheOptions = {}): DescriptorCache {
   if (client.options?.disableOfflineQueue !== true) {
-    throw new Error(
-      'createRedisDescriptorCache: the client must be created with `disableOfflineQueue: true`, ' +
-        'or a Redis outage becomes hung page renders instead of fast failures',
-    );
+    throw new Error('createRedisDescriptorCache: the client must be created with `disableOfflineQueue: true`, ' + 'or a Redis outage becomes hung page renders instead of fast failures');
   }
   if (client.listenerCount('error') === 0) {
     throw new Error(
-      'createRedisDescriptorCache: the client must have an error listener, or node-redis ' +
-        'crashes the process on a connection error. It must never log the raw error, which embeds the DSN',
+      'createRedisDescriptorCache: the client must have an error listener, or node-redis ' + 'crashes the process on a connection error. It must never log the raw error, which embeds the DSN',
     );
   }
 

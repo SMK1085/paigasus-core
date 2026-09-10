@@ -1,13 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import { describe, expect, it } from 'vitest';
-import {
-  DEFAULT_TIMINGS,
-  RECORD_VERSION,
-  isFresh,
-  parseRecord,
-  toState,
-  type CacheRecord,
-} from '../src/core/record.js';
+import { DEFAULT_TIMINGS, RECORD_VERSION, isFresh, parseRecord, toState, type CacheRecord } from '../src/core/record.js';
 import type { ServiceDescriptor } from '../src/types.js';
 
 const descriptor: ServiceDescriptor = {

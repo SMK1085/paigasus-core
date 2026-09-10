@@ -2,9 +2,7 @@
 import { reasonForStatus, reasonForThrown } from './core/reasons.js';
 import type { DegradedReason, ServiceDescriptor } from './types.js';
 
-export type ProbeOutcome =
-  | { readonly ok: true; readonly descriptor: ServiceDescriptor }
-  | { readonly ok: false; readonly reason: DegradedReason };
+export type ProbeOutcome = { readonly ok: true; readonly descriptor: ServiceDescriptor } | { readonly ok: false; readonly reason: DegradedReason };
 
 export type ProbeOptions = {
   readonly baseUrl: string;

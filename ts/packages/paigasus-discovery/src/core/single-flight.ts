@@ -141,12 +141,7 @@ function probeWithTimeout(deps: ResolveDeps, service: string, token: string): Pr
  * never on a value re-read just before the write. `fresh` is also what a caller-scoped failure
  * (401/403) degrades against, so a known-good descriptor keeps rendering through it.
  */
-async function settleProbe(
-  deps: ResolveDeps,
-  service: string,
-  fresh: CacheRecord | null,
-  outcome: ProbeOutcome,
-): Promise<ServiceState> {
+async function settleProbe(deps: ResolveDeps, service: string, fresh: CacheRecord | null, outcome: ProbeOutcome): Promise<ServiceState> {
   if (!outcome.ok) {
     deps.logger.event('discovery.probe_failed', { service, reason: outcome.reason });
     // Never cache a 401/403: the descriptor is caller-independent but the auth outcome is not.
@@ -183,22 +178,12 @@ async function settleProbe(
  * Splitting the "start" from the "await" is what lets a stale-serving caller with no `waitUntil`
  * still guarantee the probe was STARTED before it returns, without having to block on it.
  */
-function beginProbe(
-  deps: ResolveDeps,
-  service: string,
-  token: string,
-  fresh: CacheRecord | null,
-): Promise<ServiceState> {
+function beginProbe(deps: ResolveDeps, service: string, token: string, fresh: CacheRecord | null): Promise<ServiceState> {
   return probeWithTimeout(deps, service, token).then((outcome) => settleProbe(deps, service, fresh, outcome));
 }
 
 /** Probe under the lock (already held) and write the result, fenced. Releases in `finally`. */
-async function probeAndStore(
-  deps: ResolveDeps,
-  service: string,
-  token: string,
-  lockToken: string,
-): Promise<ServiceState> {
+async function probeAndStore(deps: ResolveDeps, service: string, token: string, lockToken: string): Promise<ServiceState> {
   try {
     // Invariant 1: double-check. Another holder may have written between our read and our
     // acquire. This same read also becomes the fencing snapshot below.
@@ -227,12 +212,7 @@ async function probeAndStore(
  * therefore happen directly in `resolveService`'s own awaited control flow; only awaiting the
  * probe's result, writing it (fenced), and releasing the lock are left running in the background.
  */
-async function finishRevalidation(
-  deps: ResolveDeps,
-  service: string,
-  lockToken: string,
-  revalidated: Promise<ServiceState>,
-): Promise<void> {
+async function finishRevalidation(deps: ResolveDeps, service: string, lockToken: string, revalidated: Promise<ServiceState>): Promise<void> {
   try {
     await revalidated;
   } finally {
@@ -244,11 +224,7 @@ async function finishRevalidation(
   }
 }
 
-export async function resolveService(
-  deps: ResolveDeps,
-  service: string,
-  token: string,
-): Promise<ServiceState> {
+export async function resolveService(deps: ResolveDeps, service: string, token: string): Promise<ServiceState> {
   const sleep = deps.sleep ?? defaultSleep;
 
   let rec: CacheRecord | null;

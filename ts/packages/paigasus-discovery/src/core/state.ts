@@ -18,9 +18,7 @@ export const CAPABILITY_KEYS: readonly string[] = Object.keys(CapabilitySchema.v
  * its own capability keys". This is what PAIGASUS_SERVICES keys are validated against, so an
  * operator typo fails construction instead of silently emptying the console.
  */
-export const SERVICE_SLUGS: readonly string[] = [
-  ...new Set(CAPABILITY_KEYS.map((k) => k.slice(0, k.indexOf('.')))),
-];
+export const SERVICE_SLUGS: readonly string[] = [...new Set(CAPABILITY_KEYS.map((k) => k.slice(0, k.indexOf('.'))))];
 
 // NOTE: `SERVICE_STATES` and `CapabilityKey` live in src/types.ts, NOT here. This file imports
 // `@paigasus/proto` as a value, and types.ts is the client-safe entry — re-exporting from here

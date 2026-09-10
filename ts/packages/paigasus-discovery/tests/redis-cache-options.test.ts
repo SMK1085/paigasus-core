@@ -18,9 +18,7 @@ describe('createRedisDescriptorCache preconditions', () => {
   it('refuses a client without disableOfflineQueue', () => {
     // Without it a Redis outage becomes HUNG REQUESTS rather than fast failures — node-redis
     // queues commands while disconnected. @paigasus/auth records this as load-bearing.
-    expect(() => createRedisDescriptorCache(fakeClient({ options: { disableOfflineQueue: false } }))).toThrow(
-      /disableOfflineQueue/,
-    );
+    expect(() => createRedisDescriptorCache(fakeClient({ options: { disableOfflineQueue: false } }))).toThrow(/disableOfflineQueue/);
   });
 
   it('refuses a client with no error listener', () => {

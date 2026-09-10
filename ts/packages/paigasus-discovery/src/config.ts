@@ -32,9 +32,7 @@ export function parseServiceMap(raw: string): Record<string, string> {
       throw new Error(`PAIGASUS_SERVICES: "${key}" is not a valid service name (expected ^[a-z][a-z0-9]*$)`);
     }
     if (!SERVICE_SLUGS.includes(key)) {
-      throw new Error(
-        `PAIGASUS_SERVICES: "${key}" is not a known service (expected one of ${SERVICE_SLUGS.join(', ')})`,
-      );
+      throw new Error(`PAIGASUS_SERVICES: "${key}" is not a known service (expected one of ${SERVICE_SLUGS.join(', ')})`);
     }
     if (typeof value !== 'string') {
       throw new Error(`PAIGASUS_SERVICES: the address for "${key}" must be a string`);

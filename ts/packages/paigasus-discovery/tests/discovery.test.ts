@@ -32,11 +32,7 @@ describe('createDiscovery', () => {
   it('memoizes within one handle so N calls cost one probe', async () => {
     const probe = vi.fn((): Promise<ProbeOutcome> => Promise.resolve({ ok: true, descriptor }));
     const d = make({ probe });
-    await Promise.all([
-      d.getServiceState('iam', 'tok'),
-      d.getServiceState('iam', 'tok'),
-      d.getServiceState('iam', 'tok'),
-    ]);
+    await Promise.all([d.getServiceState('iam', 'tok'), d.getServiceState('iam', 'tok'), d.getServiceState('iam', 'tok')]);
     expect(probe).toHaveBeenCalledTimes(1);
   });
 

@@ -86,12 +86,7 @@ describe('fresh and stale', () => {
 
   it('serves a fresh FAILURE without probing, for the negative TTL only', async () => {
     const cache = createMemoryDescriptorCache();
-    await cache.set(
-      'iam',
-      storedRecord({ outcome: 'fail', reason: 'network', outcomeAt: 0 }),
-      DEFAULT_TIMINGS.staleMs,
-      null,
-    );
+    await cache.set('iam', storedRecord({ outcome: 'fail', reason: 'network', outcomeAt: 0 }), DEFAULT_TIMINGS.staleMs, null);
     const probe = vi.fn((): Promise<ProbeOutcome> => Promise.resolve({ ok: true, descriptor }));
     expect(await resolveService(deps({ cache, probe, now: () => 5_000 }), 'iam', 'tok')).toMatchObject({
       state: 'degraded',
@@ -124,11 +119,7 @@ describe('fresh and stale', () => {
     const cache = createMemoryDescriptorCache();
     await cache.set('iam', storedRecord({ outcomeAt: 0 }), DEFAULT_TIMINGS.staleMs, null);
     const handed: Promise<unknown>[] = [];
-    await resolveService(
-      deps({ cache, now: () => 120_000, waitUntil: (p) => handed.push(p) }),
-      'iam',
-      'tok',
-    );
+    await resolveService(deps({ cache, now: () => 120_000, waitUntil: (p) => handed.push(p) }), 'iam', 'tok');
     expect(handed).toHaveLength(1);
     await handed[0];
     expect((await cache.get('iam'))?.rev).toBe(2);
@@ -145,9 +136,7 @@ describe('AC3: single-flight', () => {
       return { ok: true, descriptor };
     };
     const d = deps({ cache, probe });
-    const states = await Promise.all(
-      Array.from({ length: 12 }, () => resolveService(d, 'iam', 'tok')),
-    );
+    const states = await Promise.all(Array.from({ length: 12 }, () => resolveService(d, 'iam', 'tok')));
     expect(calls).toBe(1);
     for (const s of states) expect(s).toMatchObject({ state: 'available' });
   });
@@ -178,9 +167,7 @@ describe('AC3: single-flight', () => {
       logger,
       timings: { ...DEFAULT_TIMINGS, lockWaitMs: 60, probeTimeoutMs: 400, lockTtlMs: 5_000 },
     });
-    const states = await Promise.all(
-      Array.from({ length: 8 }, () => resolveService(d, 'iam', 'tok')),
-    );
+    const states = await Promise.all(Array.from({ length: 8 }, () => resolveService(d, 'iam', 'tok')));
     expect(calls).toBe(1);
     const losers = states.filter((s) => s.state === 'degraded');
     expect(losers.length).toBeGreaterThanOrEqual(7);
@@ -196,7 +183,7 @@ describe('AC3: single-flight', () => {
   // return 'available' without ever reaching its own deadline — NOT the final-read-at-deadline
   // path (see the next test for that): the write here lands well before any loser's deadline, so
   // the reread inside the retry loop is what catches it.
-  it('a loser picks up the winner\'s write via its in-loop reread and returns available', async () => {
+  it("a loser picks up the winner's write via its in-loop reread and returns available", async () => {
     const cache = createMemoryDescriptorCache();
     await cache.tryAcquireLock('iam', 'someone-else', 5_000);
     const d = deps({ cache, timings: { ...DEFAULT_TIMINGS, lockWaitMs: 40 } });
@@ -210,7 +197,7 @@ describe('AC3: single-flight', () => {
   // Here the write is engineered — via a `get` wrapper and a hand-driven virtual clock — to land
   // strictly AFTER the one reread that finds nothing and BEFORE the deadline's own final read, so
   // only invariant 2's final-read-before-degrading path can find it.
-  it('a loser catches a just-landed write from the deadline\'s final read, not an in-loop reread', async () => {
+  it("a loser catches a just-landed write from the deadline's final read, not an in-loop reread", async () => {
     const base = createMemoryDescriptorCache();
     await base.tryAcquireLock('iam', 'someone-else', 5_000);
     let getCalls = 0;

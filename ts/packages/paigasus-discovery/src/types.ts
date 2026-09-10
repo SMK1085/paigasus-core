@@ -24,14 +24,7 @@ export type ServiceDescriptor = {
  * This vocabulary is owned HERE and not imported from @paigasus/sdk — that package's
  * `Presentation` union cannot express these cases (spec F8).
  */
-export type DegradedReason =
-  | 'timeout'
-  | 'network'
-  | 'unauthorized'
-  | 'not-implemented'
-  | 'bad-response'
-  | 'server-error'
-  | 'cache-unavailable';
+export type DegradedReason = 'timeout' | 'network' | 'unauthorized' | 'not-implemented' | 'bad-response' | 'server-error' | 'cache-unavailable';
 
 export type ServiceState =
   | { readonly state: 'absent'; readonly service: string }
@@ -66,8 +59,4 @@ export const SERVICE_STATES = ['absent', 'available', 'degraded'] as const;
  * around the `paigasus/boundaries/apps` eslint ban on apps importing `@paigasus/proto`, which
  * cannot see through a re-export.
  */
-export type CapabilityKey =
-  | 'iam.authz.cedar'
-  | 'iam.apikeys'
-  | 'iam.audit'
-  | 'gateway.chat.stream';
+export type CapabilityKey = 'iam.authz.cedar' | 'iam.apikeys' | 'iam.audit' | 'gateway.chat.stream';

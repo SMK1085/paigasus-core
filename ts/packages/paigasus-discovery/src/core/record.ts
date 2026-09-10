@@ -82,12 +82,7 @@ export function toState(service: string, rec: CacheRecord): ServiceState | null 
 function isDescriptor(v: unknown): v is ServiceDescriptor {
   if (typeof v !== 'object' || v === null) return false;
   const d = v as Record<string, unknown>;
-  return (
-    typeof d['service'] === 'string' &&
-    typeof d['version'] === 'string' &&
-    Array.isArray(d['capabilities']) &&
-    d['capabilities'].every((c) => typeof c === 'string')
-  );
+  return typeof d['service'] === 'string' && typeof d['version'] === 'string' && Array.isArray(d['capabilities']) && d['capabilities'].every((c) => typeof c === 'string');
 }
 
 /** Parse a stored record. Any doubt returns null, and the caller deletes the key. */

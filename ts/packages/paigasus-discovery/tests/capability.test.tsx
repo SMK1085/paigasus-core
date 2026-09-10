@@ -12,10 +12,7 @@ import type { ProbeOutcome } from '../src/probe.js';
 
 const descriptor = { service: 'iam', version: '1.0.0', capabilities: ['iam.audit'] };
 
-function discoveryWith(
-  probe: () => Promise<ProbeOutcome>,
-  services: Readonly<Record<string, string>> = { iam: 'http://iam:8080' },
-) {
+function discoveryWith(probe: () => Promise<ProbeOutcome>, services: Readonly<Record<string, string>> = { iam: 'http://iam:8080' }) {
   return createDiscovery({ services, cache: createMemoryDescriptorCache(), probe });
 }
 
@@ -32,17 +29,13 @@ async function renderCapability(element: Promise<ReactElement | null>) {
 describe('AC1: three states', () => {
   it('absent: renders nothing at all', async () => {
     const discovery = discoveryWith(() => Promise.resolve({ ok: true, descriptor }), {});
-    const { container } = await renderCapability(
-      Capability({ discovery, need: 'iam.audit', token: 'tok', children: <a href="/audit">Audit</a> }),
-    );
+    const { container } = await renderCapability(Capability({ discovery, need: 'iam.audit', token: 'tok', children: <a href="/audit">Audit</a> }));
     expect(container).toBeEmptyDOMElement();
   });
 
   it('available with the key: renders children untouched', async () => {
     const discovery = discoveryWith(() => Promise.resolve({ ok: true, descriptor }));
-    await renderCapability(
-      Capability({ discovery, need: 'iam.audit', token: 'tok', children: <a href="/audit">Audit</a> }),
-    );
+    await renderCapability(Capability({ discovery, need: 'iam.audit', token: 'tok', children: <a href="/audit">Audit</a> }));
     const link = screen.getByRole('link', { name: 'Audit' });
     expect(link).toBeInTheDocument();
     expect(link.closest('[aria-disabled="true"]')).toBeNull();
@@ -52,9 +45,7 @@ describe('AC1: three states', () => {
     // The service ANSWERED and said it lacks the feature. There is no outage to report, so
     // hiding is correct here and disabling is not.
     const discovery = discoveryWith(() => Promise.resolve({ ok: true, descriptor }));
-    const { container } = await renderCapability(
-      Capability({ discovery, need: 'iam.apikeys', token: 'tok', children: <a href="/keys">Keys</a> }),
-    );
+    const { container } = await renderCapability(Capability({ discovery, need: 'iam.apikeys', token: 'tok', children: <a href="/keys">Keys</a> }));
     expect(container).toBeEmptyDOMElement();
   });
 });
@@ -89,9 +80,7 @@ describe('AC1: degraded is rendered disabled, never hidden', () => {
       cache,
       probe: () => Promise.resolve({ ok: false, reason: 'network' }),
     });
-    const rendered = await renderCapability(
-      Capability({ discovery, need: 'iam.audit', token: 'tok', children: <a href="/audit">Audit</a> }),
-    );
+    const rendered = await renderCapability(Capability({ discovery, need: 'iam.audit', token: 'tok', children: <a href="/audit">Audit</a> }));
     return { discovery, rendered };
   }
 
@@ -183,9 +172,7 @@ describe('AC1: degraded is rendered disabled, never hidden', () => {
         {b}
       </>,
     );
-    const ids = [...container.querySelectorAll('[aria-describedby]')].map((e) =>
-      e.getAttribute('aria-describedby'),
-    );
+    const ids = [...container.querySelectorAll('[aria-describedby]')].map((e) => e.getAttribute('aria-describedby'));
     expect(ids).toHaveLength(2);
     expect(new Set(ids).size).toBe(2);
   });
@@ -210,9 +197,7 @@ describe('AC1: degraded is rendered disabled, never hidden', () => {
     // drops them silently and ONLY in a production build (the SMA-503 failure class). The
     // functional bits are inline styles; everything cosmetic is a data attribute.
     const discovery = discoveryWith(() => Promise.resolve({ ok: false, reason: 'network' }));
-    const { container } = await renderCapability(
-      Capability({ discovery, need: 'iam.audit', token: 'tok', children: <a href="/audit">Audit</a> }),
-    );
+    const { container } = await renderCapability(Capability({ discovery, need: 'iam.audit', token: 'tok', children: <a href="/audit">Audit</a> }));
     // Otherwise this assertion would pass vacuously if nothing rendered at all.
     expect(container.querySelectorAll('*').length).toBeGreaterThan(0);
     for (const el of container.querySelectorAll('*')) {
