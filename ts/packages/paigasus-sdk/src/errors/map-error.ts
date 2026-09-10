@@ -2,7 +2,6 @@
 import '../server-guard.js';
 
 import { ConnectError } from '@connectrpc/connect';
-import type { Code } from '@connectrpc/connect';
 import { ErrorInfoSchema, fromWireDomain, fromWireReason } from '@paigasus/proto';
 import type { ErrorDomain, ErrorReason } from '@paigasus/proto';
 

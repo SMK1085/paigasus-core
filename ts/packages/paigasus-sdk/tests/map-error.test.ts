@@ -20,6 +20,14 @@ function headers(init: Record<string, string> = {}): Headers {
   return new Headers({ 'paigasus-correlation-id': 'corr-1', 'paigasus-request-id': 'req-1', ...init });
 }
 
+/** Recursively checks whether any own value in `value` is a `Headers` or a `ConnectError`. */
+function containsLeak(value: unknown): boolean {
+  if (value instanceof Headers || value instanceof ConnectError) return true;
+  if (Array.isArray(value)) return value.some(containsLeak);
+  if (value !== null && typeof value === 'object') return Object.values(value).some(containsLeak);
+  return false;
+}
+
 describe('arm 1 — a ConnectError with an ErrorInfo detail', () => {
   it('resolves the pair, lifts the three keys, and keeps the rest of metadata', () => {
     const mapped = mapError({
@@ -49,8 +57,9 @@ describe('arm 1 — a ConnectError with an ErrorInfo detail', () => {
   it('carries the transport code and nothing that could leak Headers', () => {
     const mapped = mapError({ kind: 'grpc', error: grpcError() });
     expect(mapped.transport).toEqual({ kind: 'grpc', code: Code.AlreadyExists });
-    // AC 4: no ConnectError, no Headers anywhere in the object.
-    expect(JSON.stringify(mapped)).not.toContain('ConnectError');
+    // AC 4: no ConnectError, no Headers anywhere in the object. Structural, not string-based:
+    // JSON.stringify(new Headers()) is '{}', so a text search cannot see a leaked Headers value.
+    expect(containsLeak(mapped)).toBe(false);
   });
 
   it('reads a tri-state retryable, and maps an unexpected value to null', () => {
@@ -180,7 +189,7 @@ describe('AC 2 — the branch never reads message text', () => {
   it('maps one wire error with three messages to three identical objects modulo message', () => {
     const mapped = ['the slug is taken', '', 'ERROR: Slug conflict (retry?)'].map((message) => mapError({ kind: 'grpc', error: grpcError({ message }) }));
 
-    const withoutMessage = mapped.map(({ message: _drop, ...rest }) => rest);
+    const withoutMessage = mapped.map((m) => ({ ...m, message: undefined }));
     expect(withoutMessage[1]).toEqual(withoutMessage[0]);
     expect(withoutMessage[2]).toEqual(withoutMessage[0]);
     // ...and the messages really did differ, so the assertion above is not vacuous.

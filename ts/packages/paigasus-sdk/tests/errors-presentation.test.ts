@@ -17,7 +17,7 @@ describe('AC 3 — the override table is total over the registry', () => {
   // than rendering an empty toast. It is the SECOND mechanism — the total Record type is the
   // first, and it alone can be switched off by a refactor to Partial<...>, which this notices.
   it.each(REAL_REASONS.map((v) => [v.name, v.number] as const))('%s has an entry and round-trips', (_name, number) => {
-    const reason = number as ErrorReason;
+    const reason = number;
 
     // Guarded, NOT `fromWireReason(asWireReason(reason))`: asWireReason returns
     // `string | undefined` and fromWireReason takes `string`, so the nested form does not
