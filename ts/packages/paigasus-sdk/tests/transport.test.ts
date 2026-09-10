@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { afterAll, afterEach, describe, expect, it } from 'vitest';
 import { Code, ConnectError, createContextValues } from '@connectrpc/connect';
-import type { UnaryRequest, UnaryResponse } from '@connectrpc/connect';
+import type { StreamRequest, UnaryRequest, UnaryResponse } from '@connectrpc/connect';
 import { authContextKey, authInterceptor, disposeTransports, getTransport, stableTransportKey } from '../src/transport.js';
 import { presentationForGrpcCode } from '../src/errors.js';
 
@@ -104,6 +104,19 @@ function fakeUnaryRequest(): UnaryRequest {
     header: new Headers(),
     contextValues: createContextValues(),
   } as unknown as UnaryRequest;
+}
+
+/**
+ * The same stand-in with `stream: true`. `authInterceptor` is an `Interceptor`, whose `next` takes
+ * `UnaryRequest | StreamRequest`, and createGrpcTransport installs it on both arms — so a rule that
+ * checked `req.stream` would apply to half the surface (spec M5).
+ */
+function fakeStreamRequest(): StreamRequest {
+  return {
+    stream: true,
+    header: new Headers(),
+    contextValues: createContextValues(),
+  } as unknown as StreamRequest;
 }
 
 // Typed via `Parameters<typeof authInterceptor>[0]` rather than `(req: UnaryRequest) =>
@@ -292,5 +305,22 @@ describe('a caller-supplied authorization header is refused (SMA-627 spec § 3)'
     expect(req.header.get('proxy-authorization')).toBe('Basic Zm9vOmJhcg==');
     expect(req.header.get('cookie')).toBe('sid=abc');
     expect(req.header.get('x-paigasus-probe')).toBe('kept');
+  });
+
+  it('refuses it on the STREAMING path too', async () => {
+    const req = fakeStreamRequest();
+    req.contextValues.set(authContextKey, { anonymous: true });
+    req.header.set('authorization', 'Bearer caller-token');
+
+    // The mutation this detects: `if (!req.stream && req.header.has(...))`, which every unary case
+    // above still passes.
+    await expect(authInterceptor(noopNext)(req)).rejects.toThrow(/authorization/);
+  });
+
+  it('still binds the bearer on the STREAMING path when no caller header is present', async () => {
+    const req = fakeStreamRequest();
+    req.contextValues.set(authContextKey, { bearer: 'sdk-token' });
+    await authInterceptor(noopNext)(req);
+    expect(req.header.get('authorization')).toBe('Bearer sdk-token');
   });
 });
