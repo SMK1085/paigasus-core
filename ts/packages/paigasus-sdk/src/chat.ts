@@ -118,3 +118,10 @@ export async function chatCompletion(request: ChatCompletionRequest, options: Ch
 
   return { kind: 'json', status: response.status, body: await readBody(response), correlationId, requestId };
 }
+
+// Re-exported from `./chat` rather than `./errors`, for two reasons. It would be a CYCLE on
+// `./errors` — terminal-frame.ts already imports map-error.ts, so map-error.ts re-exporting it
+// closes the loop. And a caller reaches for this while consuming a chat stream, which is what
+// spec § 8.5 describes it as being for.
+export { createTerminalFrameParser } from './errors/terminal-frame.js';
+export type { FrameIds } from './errors/map-error.js';
