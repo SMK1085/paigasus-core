@@ -261,9 +261,12 @@ run_suite() {
   SUITE_RC=0
   # contracts proto edit -> proto packages in all three languages + the gateway rebuild + the
   # IAM service crate that consumes paigasus-proto-rs for its gRPC surface (SMA-442) + the
-  # shared descriptor crate that consumes the generated ServiceInfo/Capability types (SMA-505).
+  # shared descriptor crate that consumes the generated ServiceInfo/Capability types (SMA-505)
+  # + @paigasus/sdk, whose build/typecheck/test key on paigasus-proto's sources (SMA-508). That
+  # last edge is what makes a generated-code change re-run the SDK's suite; `dependsOn` alone
+  # schedules the upstream and never selects the downstream.
   run_case "contracts->proto" "contracts/proto/paigasus/gateway/v1/health.proto" \
-    "contracts,paigasus-proto-rs,paigasus-proto-py,paigasus-proto-ts,paigasus-gateway-rs,paigasus-iam-rs,paigasus-service-info-rs"
+    "contracts,paigasus-proto-rs,paigasus-proto-py,paigasus-proto-ts,paigasus-gateway-rs,paigasus-iam-rs,paigasus-service-info-rs,paigasus-sdk-ts"
   # derive-crate edit -> the derive crate + paigasus-proto and everything downstream of it
   # (SMA-438). One-directional w.r.t. contracts: the derive crate is strictly UPSTREAM of
   # paigasus-proto, so a proto edit must NOT reach it — enforced implicitly by the strict
@@ -391,6 +394,50 @@ run_suite() {
   #   printf '%s\n' ts/packages/paigasus-auth/src/config.ts | moon query tasks --affected | ...
   run_task_case_ci "auth->auth-tasks" "ts/packages/paigasus-auth/src/config.ts" \
     "paigasus-auth-ts:build,paigasus-auth-ts:test,paigasus-auth-ts:test-e2e,ts:lint"
+  # SMA-508 — a @paigasus/proto SOURCE edit must select the SDK's build and test.
+  # This is the ONLY control on ts/packages/paigasus-sdk/moon.yml's `inputs` list. Remove that
+  # list and the SDK's suite stops running on the PR that changes the generated code it consumes,
+  # which is exactly the PR that can break it — and nothing else in the repo notices, because
+  # `repo:input-liveness` scans `repo:*` tasks only and proves DECLARED inputs are live, never
+  # that NEEDED ones are declared. MEASURED before the input existed (spec § 11.1, M11): the same
+  # edit selected no paigasus-sdk-ts task at all.
+  # Anchored on the generated error_pb.ts deliberately: SMA-625's error-mapping table test keys on
+  # that file's descriptor, so this is the path whose selection that issue's AC depends on.
+  # Strict equality: re-baseline deliberately when the set legitimately changes.
+  run_task_case_ci "proto->sdk" "ts/packages/paigasus-proto/src/generated/paigasus/common/v1/error_pb.ts" \
+    "paigasus-proto-ts:build,paigasus-proto-ts:test,paigasus-sdk-ts:build,paigasus-sdk-ts:test,ts:lint"
+  # SMA-508 final review fix — the SECOND anchor, and it is not redundant. MEASURED: narrowing all
+  # three of paigasus-sdk-ts's `inputs` globs from `/ts/packages/paigasus-proto/src/**/*` to
+  # `/ts/packages/paigasus-proto/src/generated/paigasus/common/**/*` still yields `PASS proto->sdk`
+  # at rc 0 — yet that narrowed glob cannot match src/generated/paigasus/iam/v1/iam_pb.ts, the only
+  # proto path src/iam.ts actually imports today. The case above alone would stay green while the
+  # SDK stopped being selected by a regeneration of the file it depends on.
+  # This repo's own precedent for a two-anchor pair is the `ui->console` /
+  # `ui-components->console` pair above: "a single anchor leaves the input narrowable to the other
+  # subtree while the case stays green." The two anchors here sit on opposite sides of the
+  # `/ts/packages/paigasus-proto/src/**/*` glob — one under generated/paigasus/common, one under
+  # generated/paigasus/iam — so together they prove the glob's WIDTH rather than one path inside
+  # it. Keep the error_pb.ts case above too: SMA-625 keys on that path.
+  # The expected set is DERIVED with the same no-flag `moon query tasks --affected` traversal
+  # `_assert_task_case_impl` uses (see task-5-measurement-commands.md § B), not copied from the
+  # case above; it happens to match, because both files sit inside the same declared input glob.
+  # Strict equality: re-baseline deliberately when the set legitimately changes.
+  run_task_case_ci "proto-iam->sdk" "ts/packages/paigasus-proto/src/generated/paigasus/iam/v1/iam_pb.ts" \
+    "paigasus-proto-ts:build,paigasus-proto-ts:test,paigasus-sdk-ts:build,paigasus-sdk-ts:test,ts:lint"
+  # SMA-625, spec § 8.4 and § 11.2 obligation 9 — a gateway chat.rs edit must select the SDK's
+  # test. This is the ONLY control on the '/rs/.../chat.rs' entry in paigasus-sdk-ts:test's
+  # `inputs`. tests/terminal-frame.test.ts reads TERMINAL_SSE_ERROR out of that Rust file by
+  # constant name. Without this input, editing that constant selects no paigasus-sdk-ts task at
+  # all, so Moon serves a cached PASS on exactly the PR that changes the frame — the same vacuity
+  # M11 measured for the error registry, and nothing else in the repo notices.
+  # The expected set is MEASURED with the same traversal _assert_task_case_impl uses, not copied
+  # from the cases above: a chat.rs edit also selects the gateway crate's own Rust tasks
+  # (build/lint/test), because chat.rs is that crate's own source. It does NOT select
+  # paigasus-sdk-ts:build or ts:lint — only paigasus-sdk-ts's `test` task carries this input, and
+  # ts:lint's own inputs do not reach a Rust file.
+  # Strict equality: re-baseline deliberately when the set legitimately changes.
+  run_task_case_ci "gateway->sdk" "rs/crates/services/paigasus-gateway/src/adapters/http/chat.rs" \
+    "paigasus-gateway-rs:build,paigasus-gateway-rs:lint,paigasus-gateway-rs:test,paigasus-sdk-ts:test"
   # Generic Cargo<->Moon parity: catches a MISSING case, which is how SMA-524's bug survived review.
   assert_cargo_moon_parity || SUITE_RC=1
   # assert_include_relations returns only 0/1 (no infra code), so collapsing is correct here.
