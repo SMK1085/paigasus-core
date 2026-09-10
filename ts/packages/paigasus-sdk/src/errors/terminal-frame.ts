@@ -12,8 +12,14 @@ import type { PaigasusError } from './types.js';
  */
 const COMMITTED_STATUS = 200;
 
-/** Beyond this, a stream that never sends a blank line would grow the buffer without bound. */
-const MAX_BUFFER_BYTES = 64 * 1024;
+/**
+ * Beyond this, a stream that never sends a blank line would grow the buffer without bound.
+ *
+ * A count of UTF-16 code units (`buffer.length`), not bytes: the real byte cap can be a small
+ * multiple higher for multi-byte content. The cap works fine as a memory guard either way; only
+ * the old name overstated its precision.
+ */
+const MAX_BUFFER_CHARS = 64 * 1024;
 
 /** SSE permits all three; chat.rs:63 emits the first, but upstream chunks pass through verbatim. */
 const DELIMITERS = ['\r\n\r\n', '\n\n', '\r\r'];
@@ -70,7 +76,7 @@ export function createTerminalFrameParser(ids: FrameIds): { push(chunk: Uint8Arr
       }
 
       // Best-effort: drop an unbounded partial rather than fail a stream still delivering data.
-      if (buffer.length > MAX_BUFFER_BYTES) buffer = '';
+      if (buffer.length > MAX_BUFFER_CHARS) buffer = '';
       return found;
     },
   };

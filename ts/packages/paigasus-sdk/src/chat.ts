@@ -1,15 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 import './server-guard.js';
 
-import { mapError } from './errors/map-error.js';
+import { CORRELATION_ID_HEADER, mapError, REQUEST_ID_HEADER } from './errors/map-error.js';
 import type { PaigasusError } from './errors/types.js';
 // TYPE-ONLY, deliberately. `transport.ts` imports @connectrpc/connect-node at module scope; a
 // value import here would drag the whole HTTP/2 stack into every `./chat` consumer, defeating the
 // reason § 6.1 gives for having subpaths at all. Under verbatimModuleSyntax this emits nothing.
 import type { Auth } from './transport.js';
-
-const CORRELATION_ID_HEADER = 'paigasus-correlation-id';
-const REQUEST_ID_HEADER = 'paigasus-request-id';
 
 /** Matches the gRPC transport's default (spec § 8.4), so the two surfaces agree. */
 export const DEFAULT_CHAT_TIMEOUT_MS = 10_000;
@@ -52,8 +49,11 @@ interface ChatResultBase {
  * `err.error`, and a logger still sees a real Error.
  */
 export class PaigasusHttpError extends Error {
-  constructor(readonly error: PaigasusError) {
-    super(error.message);
+  constructor(
+    readonly error: PaigasusError,
+    cause?: unknown,
+  ) {
+    super(error.message, cause === undefined ? undefined : { cause });
     this.name = 'PaigasusHttpError';
   }
 }
@@ -96,6 +96,7 @@ export async function chatCompletion(request: ChatCompletionRequest, options: Ch
     // A transport failure or an expired deadline. 504 is the honest status: nothing came back.
     throw new PaigasusHttpError(
       mapError({ kind: 'gateway-http', status: 504, headers: new Headers(), body: { error: { message: cause instanceof Error ? cause.message : 'the chat request failed' } } }),
+      cause,
     );
   } finally {
     clearTimeout(timer);

@@ -9,9 +9,12 @@ import { presentationFor } from './presentation.js';
 import { presentationForGrpcCode, presentationForHttpStatus } from './transport-tables.js';
 import type { PaigasusError, Presentation } from './types.js';
 
-const CORRELATION_ID_HEADER = 'paigasus-correlation-id';
-const REQUEST_ID_HEADER = 'paigasus-request-id';
-const RETRYABLE_HEADER = 'paigasus-retryable';
+// Declared once here, the sole owner. `./chat` imports these two rather than keeping its own
+// copy — two copies of a wire header name is a seam where one can drift and silently lose a
+// correlation id.
+export const CORRELATION_ID_HEADER = 'paigasus-correlation-id';
+export const REQUEST_ID_HEADER = 'paigasus-request-id';
+export const RETRYABLE_HEADER = 'paigasus-retryable';
 
 /** The keys lifted out of the ErrorInfo map into typed fields, so no raw duplicate can disagree. */
 const LIFTED_KEYS = new Set(['retryable', 'correlation_id', 'request_id']);
@@ -77,6 +80,15 @@ function stringField(source: Record<string, unknown> | null, key: string): strin
 }
 
 /**
+ * Treats `''` as absent, the same as `null`/`undefined`, so it falls through a `??` fallback
+ * chain instead of winning it. Not reachable from today's Rust, which only ever inserts a UUID —
+ * this is robustness for a wire value this SDK does not control.
+ */
+function nonEmpty(value: string | null | undefined): string | null {
+  return value === null || value === undefined || value === '' ? null : value;
+}
+
+/**
  * Map any wire failure onto one `PaigasusError`.
  *
  * Branches on `(domain, reason)` and the transport status ONLY. No arm reads `message` — AC 2 is
@@ -113,8 +125,8 @@ function mapConnect(error: ConnectError): PaigasusError {
       rawDomain: null,
       // rawMessage, not message: ConnectError prefixes the latter with "[code] ".
       message: error.rawMessage,
-      correlationId: headerCorrelation ?? null,
-      requestId: error.metadata.get(REQUEST_ID_HEADER) ?? null,
+      correlationId: nonEmpty(headerCorrelation),
+      requestId: nonEmpty(error.metadata.get(REQUEST_ID_HEADER)),
       retryable: null,
       metadata: {},
       transport: { kind: 'grpc', code: error.code },
@@ -137,8 +149,8 @@ function mapConnect(error: ConnectError): PaigasusError {
     message: error.rawMessage,
     // The ids are OMITTED from ErrorInfo.metadata outside a request scope (convert.rs:69-72), so
     // the header fallback is not decoration.
-    correlationId: info.metadata['correlation_id'] ?? headerCorrelation ?? null,
-    requestId: info.metadata['request_id'] ?? error.metadata.get(REQUEST_ID_HEADER) ?? null,
+    correlationId: nonEmpty(info.metadata['correlation_id']) ?? nonEmpty(headerCorrelation),
+    requestId: nonEmpty(info.metadata['request_id']) ?? nonEmpty(error.metadata.get(REQUEST_ID_HEADER)),
     retryable: parseRetryable(info.metadata['retryable']),
     metadata,
     transport: { kind: 'grpc', code: error.code },
@@ -173,7 +185,7 @@ function mapHttpEnvelope(status: number, headers: Headers, body: unknown, source
     reason,
     rawReason,
     rawDomain: null,
-    message: stringField(errorObj, 'message') ?? `HTTP ${String(status)}`,
+    message: nonEmpty(stringField(errorObj, 'message')) ?? `HTTP ${String(status)}`,
     correlationId: headers.get(CORRELATION_ID_HEADER),
     requestId: headers.get(REQUEST_ID_HEADER),
     retryable: parseRetryable(headers.get(RETRYABLE_HEADER)),
@@ -192,7 +204,7 @@ function mapTerminalFrame(status: number, body: unknown, ids: FrameIds): Paigasu
     reason,
     rawReason,
     rawDomain: null,
-    message: stringField(errorObj, 'message') ?? 'upstream stream error',
+    message: nonEmpty(stringField(errorObj, 'message')) ?? 'upstream stream error',
     correlationId: ids.correlationId,
     requestId: ids.requestId,
     // The frame deliberately carries no retryable signal: the 200 head is already committed, so no

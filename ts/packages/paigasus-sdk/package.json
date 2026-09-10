@@ -1,7 +1,7 @@
 {
   "name": "@paigasus/sdk",
   "_comment_exports": "Source-only exports. Bundler-aware consumers only (Next/Vitest/tsc walk through TS via moduleResolution: bundler). Switch to ./dist/index.js when tsup wiring lands — must happen IN LOCKSTEP with flipping `private: false` for publishable packages.",
-  "_comment_entries": "Two entry points when this package is finished, not the five the design spec's § 6.1 lists. `./chat` needs spec § 8 and `./errors` needs spec § 9, and § 14.1 assigns both to PR C (SMA-625). An exports entry pointing at a stub is a public API promise this package would not keep — a consumer importing @paigasus/sdk/errors would get an empty module, which is worse than a resolution error. tests/server-guard.test.ts is driven off THIS map, so PR C's three entries are covered the day they are added, with no edit to the test. `./iam` is added in Task 4, in the same commit as the file it points at.",
+  "_comment_entries": "Five entry points, matching the design spec's § 6.1: `.`, `./iam`, `./chat`, `./errors`, `./errors/types`. The rule stays the same: no commit may leave the `exports` map naming a file that does not exist. An exports entry pointing at a stub is a public API promise this package would not keep — a consumer importing @paigasus/sdk/errors would get an empty module, which is worse than a resolution error. tests/server-guard.test.ts is driven off THIS map, so a new entry is covered the day it is added, with no edit to the test. `./errors/types` is the one entry deliberately left unguarded, pre-registered in that test's UNGUARDED_ENTRIES set.",
   "version": "0.0.0",
   "private": true,
   "type": "module",

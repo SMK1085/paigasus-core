@@ -23,9 +23,11 @@ export type Presentation = 'relogin' | 'forbidden' | 'not-found' | 'degraded' | 
 /**
  * The raw transport status, carried for logging only.
  *
- * A number or a `Code` — NEVER a `ConnectError` and never `Headers`. That is what makes AC 4's
- * "raw gRPC statuses never reach the browser" hold when the whole object is serialized to a client
- * component as a prop.
+ * A number or a `Code` — NEVER a `ConnectError` and never `Headers`. `transport.code` is the raw
+ * gRPC code, and it does cross to the browser when this object is serialized to a client
+ * component as a prop; nothing stops a client component branching on it. What this type actually
+ * guarantees is narrower: the browser need not branch on it, and no `ConnectError` and no
+ * `Headers` ever cross with it.
  */
 export type ErrorTransport = { readonly kind: 'grpc'; readonly code: Code } | { readonly kind: 'http'; readonly status: number };
 

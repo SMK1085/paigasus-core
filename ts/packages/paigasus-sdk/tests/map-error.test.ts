@@ -70,6 +70,20 @@ describe('arm 1 — a ConnectError with an ErrorInfo detail', () => {
   });
 });
 
+describe('AC 2 — an empty-string wire value falls through the fallback, like null/undefined', () => {
+  it('treats correlation_id: "" as absent and falls back to the header', () => {
+    const info = create(ErrorInfoSchema, {
+      reason: 'slug-conflict',
+      domain: 'iam.paigasus.io',
+      metadata: { retryable: 'false', correlation_id: '', request_id: 'req-1' },
+    });
+    const err = new ConnectError('the slug is taken', Code.AlreadyExists, { 'paigasus-correlation-id': 'corr-header' }, [{ desc: ErrorInfoSchema, value: info }]);
+
+    const mapped = mapError({ kind: 'grpc', error: err });
+    expect(mapped.correlationId).toBe('corr-header');
+  });
+});
+
 describe('arm 1 — a ConnectError with NO detail', () => {
   // Reachable: a network failure, a proxy, or a connection reset carries a status and no
   // ErrorInfo. Without this branch the SDK throws WHILE MAPPING an error.
