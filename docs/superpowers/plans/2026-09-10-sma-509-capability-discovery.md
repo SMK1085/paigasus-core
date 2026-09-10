@@ -174,7 +174,8 @@ import '@testing-library/jest-dom/vitest';
 // SPDX-License-Identifier: Apache-2.0
 import { describe, expect, it } from 'vitest';
 import { Capability, CapabilitySchema, capabilityWireKey } from '@paigasus/proto';
-import { CAPABILITY_KEYS, SERVICE_SLUGS, SERVICE_STATES } from '../src/core/state.js';
+import { CAPABILITY_KEYS, SERVICE_SLUGS } from '../src/core/state.js';
+import { SERVICE_STATES, type CapabilityKey } from '../src/types.js';
 
 describe('capability vocabulary', () => {
   it('derives every non-sentinel capability key from the proto registry', () => {
@@ -207,6 +208,16 @@ describe('capability vocabulary', () => {
 
   it('exposes the three state names', () => {
     expect(SERVICE_STATES).toEqual(['absent', 'available', 'degraded']);
+  });
+
+  it('the CapabilityKey union matches the registry exactly', () => {
+    // CapabilityKey is a HAND-DECLARED closed union in src/types.ts, because a template literal
+    // like `${string}.${string}` would accept the typo `iam.audits` and silently defeat the whole
+    // reason the type is not `string`. Hand-declaring it re-opens a drift risk, and THIS
+    // assertion is what closes it: the union's members are listed once here and compared to the
+    // registry-derived runtime list, so a new capability in the proto reds this test.
+    const declared: CapabilityKey[] = ['iam.authz.cedar', 'iam.apikeys', 'iam.audit', 'gateway.chat.stream'];
+    expect([...declared].sort()).toEqual([...CAPABILITY_KEYS].sort());
   });
 });
 ```
@@ -274,9 +285,32 @@ export type ServiceState =
       readonly capabilities: readonly string[];
     };
 
-export type { CapabilityKey } from './core/state.js';
-export { SERVICE_STATES } from './core/state.js';
+export const SERVICE_STATES = ['absent', 'available', 'degraded'] as const;
+
+/**
+ * A capability key, as a CLOSED union.
+ *
+ * Hand-declared, and deliberately not `` `${string}.${string}` ``: that template accepts the typo
+ * `iam.audits`, which at runtime returns false forever and silently hides a nav item — the
+ * "invisible" failure the design calls worse than a wrongly-shown disabled one. Hand-declaring
+ * re-opens a drift risk against the proto registry, and tests/vocabulary.test.ts closes it by
+ * comparing these members against the registry-derived runtime list.
+ *
+ * It lives HERE and not in core/state.ts on purpose. This file is the client-safe entry, and
+ * core/state.ts imports `@paigasus/proto` as a VALUE — re-exporting from it would pull
+ * protobuf-es into any client bundle that imports `@paigasus/discovery/types`, and would route
+ * around the `paigasus/boundaries/apps` eslint ban on apps importing `@paigasus/proto`, which
+ * cannot see through a re-export.
+ */
+export type CapabilityKey =
+  | 'iam.authz.cedar'
+  | 'iam.apikeys'
+  | 'iam.audit'
+  | 'gateway.chat.stream';
 ```
+
+**`src/types.ts` must not import anything from `./core/state.js`.** Task 9's structure test does
+not check this, but the boundary is the reason the file exists.
 
 - [ ] **Step 7: Write `src/core/state.ts`**
 
@@ -305,16 +339,9 @@ export const SERVICE_SLUGS: readonly string[] = [
   ...new Set(CAPABILITY_KEYS.map((k) => k.slice(0, k.indexOf('.')))),
 ];
 
-export const SERVICE_STATES = ['absent', 'available', 'degraded'] as const;
-
-/**
- * A capability key as a compile-time closed union.
- *
- * Typed as a template literal rather than `string` so `need="iam.audits"` is a type error. At
- * runtime a typo returns false forever and silently hides a nav item, which is the "invisible"
- * failure the design calls worse than a wrongly-shown disabled one.
- */
-export type CapabilityKey = `${string}.${string}`;
+// NOTE: `SERVICE_STATES` and `CapabilityKey` live in src/types.ts, NOT here. This file imports
+// `@paigasus/proto` as a value, and types.ts is the client-safe entry — re-exporting from here
+// would pull protobuf-es into a client bundle.
 
 /** Whether a key is in the registry this build knows about. */
 export function isKnownCapability(key: string): boolean {
@@ -660,6 +687,17 @@ export interface DescriptorCache {
   tryAcquireLock(service: string, token: string, ttlMs: number): Promise<boolean>;
   releaseLock(service: string, token: string): Promise<void>;
   close(): Promise<void>;
+
+  /**
+   * TEST SEAM, optional. Plants a raw stored value so the shared contract can prove that a record
+   * from a FOREIGN SCHEMA VERSION is discarded and deleted rather than served — the rolling-upgrade
+   * case, which no other route can set up because every normal write goes through `set`.
+   *
+   * Declared here rather than bolted on from the test file with `declare module`: augmenting a
+   * module through a relative specifier is fragile, and it would put a production interface's
+   * shape inside a test.
+   */
+  writeRawForTest?(service: string, raw: string): Promise<void>;
 }
 ```
 
@@ -820,14 +858,10 @@ export function runCacheContract(name: string, makeCache: () => Promise<Descript
     });
   });
 }
-
-declare module '../src/ports/cache.js' {
-  interface DescriptorCache {
-    /** Test-only seam so the contract can plant a foreign-version record. Adapters implement it. */
-    writeRawForTest?(service: string, raw: string): Promise<void>;
-  }
-}
 ```
+
+`writeRawForTest` is declared on the `DescriptorCache` interface itself (see Step 1), so no module
+augmentation is needed here.
 
 - [ ] **Step 3: Write the memory-adapter test**
 
@@ -1579,8 +1613,7 @@ Expected: FAIL — cannot resolve `../src/core/single-flight.js`.
 //     event-loop stall), so an old probe could otherwise overwrite a newer success with its own
 //     stale failure and mask a healthy service until the hard TTL.
 
-import { isFresh, toState, type CacheRecord, type Timings } from './record.js';
-import { RECORD_VERSION } from './record.js';
+import { RECORD_VERSION, isFresh, toState, type CacheRecord, type Timings } from './record.js';
 import type { ProbeOutcome } from '../probe.js';
 import type { DescriptorCache } from '../ports/cache.js';
 import type { DiscoveryLogger } from '../ports/logger.js';
@@ -1999,12 +2032,13 @@ export const discoveryEnvShape = {
 // SPDX-License-Identifier: Apache-2.0
 import { describe, expect, it, vi } from 'vitest';
 import { createMemoryDescriptorCache } from '../src/adapters/memory-cache.js';
-import { createDiscovery } from '../src/server.js';
+import { createDiscovery, type CreateDiscoveryDeps } from '../src/server.js';
 import type { ProbeOutcome } from '../src/probe.js';
+import type { CapabilityKey } from '../src/types.js';
 
 const descriptor = { service: 'iam', version: '1.0.0', capabilities: ['iam.audit'] };
 
-function make(over: Parameters<typeof createDiscovery>[0] extends infer _ ? Record<string, unknown> : never = {}) {
+function make(over: Partial<CreateDiscoveryDeps> = {}) {
   return createDiscovery({
     services: { iam: 'http://iam:8080' },
     cache: createMemoryDescriptorCache(),
@@ -2066,8 +2100,10 @@ describe('hasCapability', () => {
   });
 
   it('is false for an unknown key, without throwing', async () => {
-    // Decision 6: unknown key -> ignore.
-    expect(await make().hasCapability('iam.future' as never, 'tok')).toBe(false);
+    // Decision 6: unknown key -> ignore. A key outside the closed union needs an explicit cast,
+    // which is the point: this can only reach the runtime from an older or newer build, never
+    // from a typo in our own source.
+    expect(await make().hasCapability('iam.future' as CapabilityKey, 'tok')).toBe(false);
   });
 });
 ```
@@ -2459,6 +2495,7 @@ Carries AC1. The wrapper is a **client** component because an async server compo
 ```tsx
 // SPDX-License-Identifier: Apache-2.0
 // @vitest-environment jsdom
+import type { ReactElement } from 'react';
 import { describe, expect, it, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
@@ -2478,7 +2515,7 @@ function discoveryWith(probe: () => Promise<ProbeOutcome>, services = { iam: 'ht
  * element it returns is awaited and THAT is rendered. Calling render() on the component itself
  * is the mistake this helper exists to prevent.
  */
-async function renderCapability(element: Promise<React.ReactElement | null>) {
+async function renderCapability(element: Promise<ReactElement | null>) {
   const resolved = await element;
   return render(resolved);
 }
@@ -2736,6 +2773,7 @@ import 'server-only';
 
 import type { ReactElement, ReactNode } from 'react';
 import { CapabilityDisabled } from './disabled.js';
+import { serviceOf } from './core/state.js';
 import type { Discovery } from './server.js';
 import type { CapabilityKey, DegradedReason } from './types.js';
 
@@ -2774,8 +2812,9 @@ export type CapabilityProps = {
  */
 export async function Capability(props: CapabilityProps): Promise<ReactElement | null> {
   const { discovery, need, token, children, degraded } = props;
-  const service = need.slice(0, need.indexOf('.'));
-  const state = await discovery.getServiceState(service, token);
+  // serviceOf, not an inline slice: one definition of "the service a key belongs to", shared with
+  // hasCapability and with the config-key validation, so the three cannot drift.
+  const state = await discovery.getServiceState(serviceOf(need), token);
 
   if (state.state === 'absent') return null;
   if (state.state === 'available') {
