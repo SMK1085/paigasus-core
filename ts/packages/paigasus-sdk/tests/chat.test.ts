@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { chatCompletion } from '../src/chat.js';
-import type { PaigasusError } from '../src/errors/types.js';
+import { chatCompletion, PaigasusHttpError } from '../src/chat.js';
 
 const OPTIONS = { baseUrl: 'https://gateway.test', auth: { bearer: 'tok' } } as const;
 const REQUEST = { model: 'gpt-4o', messages: [{ role: 'user', content: 'hi' }] };
@@ -82,6 +81,7 @@ describe('the streaming path — AC 4', () => {
     // Identity, not equivalence. The SDK must not read, buffer, decode or re-encode.
     expect(result.body).toBe(response.body);
     expect(result.correlationId).toBe('corr-1');
+    expect(result.requestId).toBe('req-1');
   });
 
   // chat.rs:138-141 — a `stream:true` request whose upstream answered non-2xx comes back as JSON,
@@ -111,10 +111,12 @@ describe('a non-2xx throws a PaigasusError', () => {
       ),
     );
 
-    const error = (await chatCompletion(REQUEST, OPTIONS).catch((e: unknown) => e)) as PaigasusError;
-    expect(error.presentation).toBe('invalid-input');
-    expect(error.correlationId).toBe('corr-1');
-    expect(error.metadata).toEqual({ param: 'stream' });
+    const error = (await chatCompletion(REQUEST, OPTIONS).catch((e: unknown) => e)) as PaigasusHttpError;
+    // Pins the contract (spec § 8.2): the thrown value is a real Error, not the plain PaigasusError.
+    expect(error).toBeInstanceOf(PaigasusHttpError);
+    expect(error.error.presentation).toBe('invalid-input');
+    expect(error.error.correlationId).toBe('corr-1');
+    expect(error.error.metadata).toEqual({ param: 'stream' });
   });
 
   it('maps an upstream 429 to rate-limited without resolving OpenAI vocabulary', async () => {
@@ -130,10 +132,10 @@ describe('a non-2xx throws a PaigasusError', () => {
       ),
     );
 
-    const error = (await chatCompletion(REQUEST, OPTIONS).catch((e: unknown) => e)) as PaigasusError;
-    expect(error.presentation).toBe('rate-limited');
-    expect(error.reason).toBeNull();
-    expect(error.rawReason).toBe('insufficient_quota');
+    const error = (await chatCompletion(REQUEST, OPTIONS).catch((e: unknown) => e)) as PaigasusHttpError;
+    expect(error.error.presentation).toBe('rate-limited');
+    expect(error.error.reason).toBeNull();
+    expect(error.error.rawReason).toBe('insufficient_quota');
   });
 
   it('does not throw while mapping a body that is not JSON', async () => {
@@ -142,9 +144,9 @@ describe('a non-2xx throws a PaigasusError', () => {
       vi.fn(() => Promise.resolve(respond('<html>502 Bad Gateway</html>', { status: 502, headers: { 'content-type': 'application/json' } }))),
     );
 
-    const error = (await chatCompletion(REQUEST, OPTIONS).catch((e: unknown) => e)) as PaigasusError;
-    expect(error.presentation).toBe('degraded');
-    expect(error.correlationId).toBe('corr-1');
+    const error = (await chatCompletion(REQUEST, OPTIONS).catch((e: unknown) => e)) as PaigasusHttpError;
+    expect(error.error.presentation).toBe('degraded');
+    expect(error.error.correlationId).toBe('corr-1');
   });
 });
 
@@ -162,8 +164,31 @@ describe('deadlines', () => {
     );
 
     const promise = chatCompletion(REQUEST, { ...OPTIONS, timeoutMs: 10 });
-    const error = (await promise.catch((e: unknown) => e)) as PaigasusError;
-    expect(error.presentation).toBe('degraded');
+    const error = (await promise.catch((e: unknown) => e)) as PaigasusHttpError;
+    expect(error.error.presentation).toBe('degraded');
+  });
+
+  // F2: the caller-supplied `signal` branch of `AbortSignal.any([options.signal, deadline.signal])`
+  // had no test — every other case exercised only the deadline timer.
+  it('rejects when the caller aborts while the head is still pending', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((_url: string, init: RequestInit) => {
+        return new Promise<Response>((_resolve, reject) => {
+          init.signal?.addEventListener('abort', () => {
+            reject(new DOMException('aborted', 'AbortError'));
+          });
+        });
+      }),
+    );
+
+    const caller = new AbortController();
+    const promise = chatCompletion(REQUEST, { ...OPTIONS, signal: caller.signal });
+    caller.abort();
+
+    const error = (await promise.catch((e: unknown) => e)) as PaigasusHttpError;
+    expect(error).toBeInstanceOf(PaigasusHttpError);
+    expect(error.error.presentation).toBe('degraded');
   });
 
   // The deadline timer must be CLEARED once the head lands, or the same signal would abort the

@@ -2,6 +2,7 @@
 import './server-guard.js';
 
 import { mapError } from './errors/map-error.js';
+import type { PaigasusError } from './errors/types.js';
 // TYPE-ONLY, deliberately. `transport.ts` imports @connectrpc/connect-node at module scope; a
 // value import here would drag the whole HTTP/2 stack into every `./chat` consumer, defeating the
 // reason § 6.1 gives for having subpaths at all. Under verbatimModuleSyntax this emits nothing.
@@ -42,6 +43,21 @@ interface ChatResultBase {
   readonly requestId: string | null;
 }
 
+/**
+ * What `chatCompletion` throws. It CARRIES the mapped error rather than being it.
+ *
+ * `PaigasusError` is a plain data object by design (spec § 6.3) so it can cross a server/client
+ * prop boundary. A thrown value needs the opposite: a stack, and `instanceof Error`, which every
+ * logger and error boundary tests for. Carrying rather than replacing gets both — a caller renders
+ * `err.error`, and a logger still sees a real Error.
+ */
+export class PaigasusHttpError extends Error {
+  constructor(readonly error: PaigasusError) {
+    super(error.message);
+    this.name = 'PaigasusHttpError';
+  }
+}
+
 export type ChatCompletionResult = (ChatResultBase & { readonly kind: 'json'; readonly body: unknown }) | (ChatResultBase & { readonly kind: 'stream'; readonly body: ReadableStream<Uint8Array> });
 
 /** A body may be labelled application/json and not be JSON — the gateway forces the header. */
@@ -78,10 +94,7 @@ export async function chatCompletion(request: ChatCompletionRequest, options: Ch
     response = await fetch(`${options.baseUrl}/v1/chat/completions`, { method: 'POST', headers, body: JSON.stringify(request), signal });
   } catch (cause) {
     // A transport failure or an expired deadline. 504 is the honest status: nothing came back.
-    // `PaigasusError` is a plain data object BY DESIGN (types.ts:39, spec § 6.3) — never an `Error`
-    // subclass — so it can cross a server/client prop boundary with no server-only evaluation.
-    // eslint-disable-next-line @typescript-eslint/only-throw-error -- deliberately a data object, not an Error
-    throw mapError({ kind: 'gateway-http', status: 504, headers: new Headers(), body: { error: { message: cause instanceof Error ? cause.message : 'the chat request failed' } } });
+    throw new PaigasusHttpError(mapError({ kind: 'gateway-http', status: 504, headers: new Headers(), body: { error: { message: cause instanceof Error ? cause.message : 'the chat request failed' } } }));
   } finally {
     clearTimeout(timer);
   }
@@ -90,8 +103,7 @@ export async function chatCompletion(request: ChatCompletionRequest, options: Ch
   const requestId = response.headers.get(REQUEST_ID_HEADER);
 
   if (!response.ok) {
-    // eslint-disable-next-line @typescript-eslint/only-throw-error -- deliberately a data object, not an Error (see above)
-    throw mapError({ kind: 'gateway-http', status: response.status, headers: response.headers, body: await readBody(response) });
+    throw new PaigasusHttpError(mapError({ kind: 'gateway-http', status: response.status, headers: response.headers, body: await readBody(response) }));
   }
 
   // Branch on what the gateway ACTUALLY sent, never on `request.stream`: a `stream:true` request
