@@ -549,6 +549,14 @@ Expected: green.
 
 If a gate genuinely reds, diagnose it with the procedure between CLAUDE.md's `moon-diagnosis` markers — Step 0 (copy `.moon/cache/ciReport.json` and `.moon/cache/states/<project>/<task>/` out of the repo) comes **before** any re-run.
 
+<!-- moon-diagnosis:ok -->
+<!-- This file mentions ciReport.json only to DEFER to CLAUDE.md's moon-diagnosis block, which is
+     the single source of the procedure. It reproduces none of the advice that block corrects: it
+     makes no claim about an action-level exitCode key, and it does not suggest the file carries
+     stdout or stderr. `repo:actionlint` check 12 (SMA-597) requires this marker on any file
+     carrying the token. -->
+
+
 - [ ] **Step 3: Confirm the acceptance criteria**
 
 Walk spec § 8 and check each of the eight against what now exists. Report any that are not met rather than declaring completion. AC 6 in particular is checkable as a number: the suite must be **250 tests in 12 files**, up from the baseline 236 (14 added: 1 in Task 1, 11 in Task 2, 2 in Task 3), with no pre-existing test modified except the two empty-bearer ones, whose assertions are unchanged.
