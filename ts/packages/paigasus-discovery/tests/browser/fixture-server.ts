@@ -1,11 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// A plain `node:http` server, fronted by a Vite dev server in MIDDLEWARE MODE, that renders
-// app.tsx's <App> (which wraps the REAL src/disabled.tsx CapabilityDisabled — nothing here
-// reimplements it) to real HTML SERVER-SIDE, then serves entry.tsx as a browser module that
-// hydrates the identical tree. Static, pre-hydration markup is exactly what the JS-disabled spec
-// needs to click; jsdom cannot model hit-testing at all, which is the whole reason this harness
-// exists (see capability-hit-test.spec.ts's header).
+// A plain `node:http` server, fronted by a Vite dev server in MIDDLEWARE MODE, that renders one
+// of app.tsx's exported compositions (which wrap the REAL src/disabled.tsx CapabilityDisabled —
+// nothing here reimplements it) to real HTML SERVER-SIDE, then serves entry.tsx as a browser
+// module that hydrates the identical tree. Pre-hydration markup is exactly what the JS-disabled
+// spec needs to click; jsdom cannot model hit-testing at all, which is the whole reason this
+// harness exists (see capability-hit-test.spec.ts's header).
+//
+// SMA-509 finding B: this used to call `renderToStaticMarkup`, whose output React does not
+// support hydrating — it omits the hydration markers `hydrateRoot` needs, so entry.tsx's
+// hydration was never exercised for real. `renderToString` is the hydratable equivalent.
 //
 // Vite is used PROGRAMMATICALLY, not via its CLI: it is already a transitive dependency of
 // vitest, so this needs no new devDependency, and its dev-server module graph gives both
@@ -16,8 +20,9 @@
 import http, { type Server } from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { createElement } from 'react';
-import { renderToStaticMarkup } from 'react-dom/server';
+import { renderToString } from 'react-dom/server';
 import { createServer, type ViteDevServer } from 'vite';
+import type { AppVariant } from './app.js';
 
 export interface FixtureServer {
   readonly url: string;
@@ -25,20 +30,24 @@ export interface FixtureServer {
 }
 
 interface AppModule {
-  readonly App: () => import('react').ReactElement;
+  readonly APPS: Record<AppVariant, () => import('react').ReactElement>;
 }
 
-function page(markup: string): string {
+function page(markup: string, variant: AppVariant): string {
   return `<!doctype html>
 <html>
 <body>
 <div id="root">${markup}</div>
+<script>window.__APP_VARIANT__ = ${JSON.stringify(variant)};</script>
 <script type="module" src="/entry.tsx"></script>
 </body>
 </html>`;
 }
 
-export async function startFixtureServer(): Promise<FixtureServer> {
+// `variant` selects which of app.tsx's exported compositions to render/hydrate — SMA-509 finding
+// A's Fragment-child and non-forwarding-custom-component-child proofs each need their own tree,
+// distinct from the `default` composition the original two specs use.
+export async function startFixtureServer(variant: AppVariant = 'default'): Promise<FixtureServer> {
   const root = fileURLToPath(new URL('.', import.meta.url));
 
   const vite: ViteDevServer = await createServer({
@@ -56,9 +65,9 @@ export async function startFixtureServer(): Promise<FixtureServer> {
   });
 
   // Rendered ONCE at startup: the component takes no props that vary per request, and every spec
-  // in this suite hits the same fixed markup.
-  const { App } = (await vite.ssrLoadModule('/app.tsx')) as AppModule;
-  const html = page(renderToStaticMarkup(createElement(App)));
+  // hitting this fixture's URL hits the same fixed markup for the chosen variant.
+  const { APPS } = (await vite.ssrLoadModule('/app.tsx')) as AppModule;
+  const html = page(renderToString(createElement(APPS[variant])), variant);
 
   // Synchronous: the markup is already rendered above, and `vite.middlewares` itself is a plain
   // connect-style callback, so nothing here needs to await anything.
