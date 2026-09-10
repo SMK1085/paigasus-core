@@ -61,7 +61,8 @@ adapters' `version !== 1` check and becomes the single statement of the absent-a
 | `src/http/route-table.ts` | NEW. The four route suffixes. Imports nothing. | 8 |
 | `src/http/routes.ts` | table-driven dispatch through `Record<AuthRouteSuffix, …>` | 8 |
 | `src/middleware.ts` | `authRoutePaths` derives from the shared table | 8 |
-| `tests/adapters/redis-store.test.ts` | guards 1 and 2, via `vi.mock('redis')` | 9 |
+| `tests/adapters/redis-store-parse.test.ts` | the three corrupt-record holes, via `vi.mock('redis')` | 4 |
+| `tests/adapters/redis-client-options.test.ts` | guards 1 and 2, via `vi.mock('redis')` | 9 |
 | `tests/runtime.test.ts` | guard 3, `getAuthRuntime`'s failure reset | 10 |
 | `docs/superpowers/specs/2026-09-09-sma-506-auth-design.md` | § 12's minimum event set | 11 |
 
@@ -686,6 +687,8 @@ describe('MemorySessionStore and the shared record predicate (SMA-626 § 4)', ()
   });
 });
 ```
+
+**Correction (SMA-626 implementation, review round 1):** The double-`get()` assertion above is vacuous. `MemorySessionStore.get` re-runs the record predicate on whatever remains in the map on every call, so a poisoned record is simply re-rejected on the second call — the test passes identically with `this.#records.delete(sid)` removed from memory-store.ts. What shipped instead performs an insert-only `set(sid, makeRecord(), 60_000, null)` and asserts it returns `true`, which can only succeed if the entry is genuinely gone — the predicate must have deleted it. This proves the deletion actually occurred, not merely that the record is correctly reported absent.
 
 Make sure that file imports `makeRecord` from `../store-contract.js` and `type SessionRecord`
 from `../../src/core/session.js`.
@@ -1493,7 +1496,7 @@ Revert both probes. Record the two results in a comment above `ROUTES`:
 
 ```bash
 pnpm exec vitest run
-export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH" && moon run paigasus-auth-ts:typecheck && moon run paigasus-auth-ts:lint
+export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH" && moon run paigasus-auth-ts:typecheck && moon run ts:lint
 ```
 Expected: green, including `tests/middleware.test.ts`'s existing 405/404 cross-check and the AC 4
 import-graph assertion.
@@ -1791,9 +1794,9 @@ Expected: no output.
 cd ts/packages/paigasus-auth
 pnpm exec vitest run
 export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
-moon run paigasus-auth-ts:lint
+moon run ts:lint
 moon run paigasus-auth-ts:typecheck
-moon run paigasus-auth-ts:fmt
+moon run ts:fmt
 ```
 Expected: all green. Record the final test count; it must EXCEED the 234 baseline, and the three
 re-baselined assertions from Task 6 must be the only pre-existing tests whose text changed.
