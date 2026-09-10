@@ -2,7 +2,7 @@
 // @vitest-environment jsdom
 import type { ReactElement } from 'react';
 import { describe, expect, it, vi } from 'vitest';
-import { fireEvent, render, screen } from '@testing-library/react';
+import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { Capability } from '../src/react.js';
 import { createMemoryDescriptorCache } from '../src/adapters/memory-cache.js';
@@ -163,11 +163,13 @@ describe('AC1: degraded is rendered disabled, never hidden', () => {
     await user.keyboard('{Enter}');
     expect(onNavigate).not.toHaveBeenCalled();
 
-    // user-event's `{Enter}` synthesizes a click on a focused <a href>, which onClickCapture
-    // alone would already swallow — that does not prove onKeyDownCapture does anything. Dispatch
-    // a raw keydown, which is NOT translated into a click, to isolate it.
-    fireEvent.keyDown(link, { key: 'Enter' });
-    expect(onNavigate).not.toHaveBeenCalled();
+    // Isolates onKeyDownCapture. Asserting on the click spy cannot do it: jsdom never synthesizes
+    // a click from a raw keydown, and user-event's {Enter} produces one that onClickCapture
+    // swallows — so with either of those the keydown handler has no independent coverage.
+    // Checking defaultPrevented tests the handler directly.
+    const enter = new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true });
+    link.dispatchEvent(enter);
+    expect(enter.defaultPrevented).toBe(true);
   });
 
   it('gives each instance a unique description id', async () => {
