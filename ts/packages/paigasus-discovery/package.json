@@ -27,6 +27,7 @@
     "react": "catalog:"
   },
   "devDependencies": {
+    "@playwright/test": "catalog:",
     "@testing-library/dom": "catalog:",
     "@testing-library/jest-dom": "catalog:",
     "@testing-library/react": "catalog:",
@@ -39,6 +40,7 @@
     "react-dom": "catalog:",
     "testcontainers": "catalog:",
     "typescript": "catalog:",
+    "vite": "catalog:",
     "vitest": "catalog:"
   }
 }

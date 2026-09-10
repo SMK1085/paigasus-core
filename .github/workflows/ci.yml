@@ -183,14 +183,18 @@ jobs:
       # browser instead of a red on a green PR being merely wasted CI time. Runs before the
       # `moon ci` step so the browser exists before the task can run.
       #
-      # `@paigasus/discovery` also declares a `test-e2e` task (SMA-509), but its suite runs vitest
-      # against real containers only and needs no Playwright, so this step stays scoped to
-      # `@paigasus/auth`.
-      - name: Install Playwright Chromium (for @paigasus/auth's test-e2e)
+      # `@paigasus/discovery` ALSO needs Chromium now (SMA-509): its `test-e2e` task runs vitest
+      # against real containers FIRST, then a real-browser Playwright spec proving a hit-testing
+      # property jsdom cannot model (see tests/browser/capability-hit-test.spec.ts's header) — so
+      # this step installs Chromium for both packages, not just @paigasus/auth.
+      - name: Install Playwright Chromium (for @paigasus/auth's and @paigasus/discovery's test-e2e)
         # Run from the PACKAGE, not the ts workspace root: @playwright/test is a devDependency of
-        # @paigasus/auth, so `playwright` is only on that package's node_modules/.bin. From ts/ it
+        # each package, so `playwright` is only on that package's node_modules/.bin. From ts/ it
         # fails with ERR_PNPM_RECURSIVE_EXEC_FIRST_FAIL, "Command playwright not found" (MEASURED).
-        run: pnpm --dir ts/packages/paigasus-auth exec playwright install --with-deps chromium
+        run: |
+          set -euo pipefail
+          pnpm --dir ts/packages/paigasus-auth exec playwright install --with-deps chromium
+          pnpm --dir ts/packages/paigasus-discovery exec playwright install --with-deps chromium
 
       - name: Validate commit messages (commitlint parity gate)
         # PRs only: commitlint gates commits BEFORE they merge (SMA-371 AC-E, "on every PR").

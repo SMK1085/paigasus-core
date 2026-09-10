@@ -35,17 +35,21 @@ tasks:
   test-e2e:
     # `script` (not `command`): Moon's `command` setting rejects shell syntax outright.
     # `set -euo pipefail` mirrors every other `script:` task here — Moon does not enable errexit
-    # for script blocks on its own.
+    # for script blocks on its own. The Playwright spec runs AFTER the vitest containers, under
+    # the same `set -euo pipefail` (SMA-509): a real Chromium proving the hit-testing property
+    # jsdom cannot model — see tests/browser/capability-hit-test.spec.ts's header.
     script: |
       set -euo pipefail
       pnpm exec vitest run --config vitest.containers.config.ts
+      pnpm exec playwright test
     inputs:
       - '@group(sources)'
       - '@group(tests)'
       - 'vitest.config.ts'
       - 'vitest.containers.config.ts'
+      - 'playwright.config.ts'
       - 'package.json'
       - '/ts/pnpm-lock.yaml'
     options:
-      # Real containers. A cached PASS would replay a green that tested nothing.
+      # Real containers, real Chromium. A cached PASS would replay a green that tested nothing.
       cache: false

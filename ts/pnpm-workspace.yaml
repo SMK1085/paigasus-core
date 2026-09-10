@@ -105,6 +105,10 @@ catalog:
   prettier: ^3.9.6
   # Test runner
   vitest: ^5.0.0
+  # @paigasus/discovery's browser test harness (SMA-509) uses Vite PROGRAMMATICALLY to bundle and
+  # SSR-render a real-Chromium fixture — pinned to the version vitest already resolves, so this
+  # adds no new package to the lockfile, only a direct dependency edge onto one already there.
+  vite: ^8.0.16
   # Runtime env validation for @paigasus/next-config (SMA-502). zod 4 semantics are assumed
   # throughout that package: unknown object keys are stripped by default, z.record takes
   # (keyType, valueType), and errors surface as error.issues[]. The runtime formats messages from

@@ -153,10 +153,10 @@ describe('AC1: degraded is rendered disabled, never hidden', () => {
       }),
     );
     const link = screen.getByRole('link', { name: 'Audit' });
-    // pointerEventsCheck: 0 — the wrapper's `pointer-events: none` is itself part of what this
-    // test proves is not the ONLY guard (see disabled.tsx's comment); without disabling this
-    // check, user-event refuses to simulate the click at all rather than exercising the capture
-    // handler underneath.
+    // pointerEventsCheck: 0 — the CHILD's `pointer-events: none` (moved off the wrapper, see
+    // disabled.tsx's file header) is itself part of what this test proves is not the ONLY guard;
+    // without disabling this check, user-event refuses to simulate the click at all rather than
+    // exercising the capture handler underneath.
     const user = userEvent.setup({ pointerEventsCheck: 0 });
     await user.click(link);
     expect(onNavigate).not.toHaveBeenCalled();
@@ -172,6 +172,21 @@ describe('AC1: degraded is rendered disabled, never hidden', () => {
     const enter = new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true });
     link.dispatchEvent(enter);
     expect(enter.defaultPrevented).toBe(true);
+  });
+
+  it('puts `pointer-events: none` on the CHILD, never the wrapper', async () => {
+    // THE REGRESSION THIS EXISTS FOR (SMA-509). `pointer-events: none` on the WRAPPER makes the
+    // browser's hit-testing skip it entirely when this component sits inside a clickable
+    // ancestor, so the ancestor receives the click instead — jsdom cannot model hit-testing, so
+    // this only asserts the STYLE PLACEMENT the browser-level spec under tests/browser/ then
+    // proves actually matters. The wrapper must stay interactive so the capture handler stays in
+    // the event path; the child carries the style instead, which also protects pre-hydration
+    // since it is plain CSS needing no JavaScript.
+    await renderDegraded(true);
+    const link = screen.getByRole('link', { name: 'Audit' });
+    const wrapper = link.closest('[data-capability-state]') as HTMLElement;
+    expect(wrapper.style.pointerEvents).not.toBe('none');
+    expect(link.style.pointerEvents).toBe('none');
   });
 
   it('gives each instance a unique description id', async () => {
