@@ -19,7 +19,7 @@ import type { ErrorDomain, ErrorReason } from '@paigasus/proto';
 export { ErrorDomain, ErrorReason } from '@paigasus/proto';
 
 /** What a consumer's error boundary switches on. Never the message, never the raw status. */
-export type Presentation = 'relogin' | 'forbidden' | 'not-found' | 'degraded' | 'invalid-input' | 'conflict' | 'disabled' | 'generic';
+export type Presentation = 'relogin' | 'forbidden' | 'not-found' | 'degraded' | 'rate-limited' | 'invalid-input' | 'conflict' | 'disabled' | 'generic';
 
 /** Why a request produced no response at all. */
 export type TransportCause = 'timeout' | 'network' | 'aborted';

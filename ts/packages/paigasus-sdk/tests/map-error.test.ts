@@ -149,7 +149,11 @@ describe("arm 3 — the gateway's OpenAI envelope", () => {
 
     expect(result.reason).toBeNull();
     expect(result.rawReason).toBe('insufficient_quota');
-    expect(result.presentation).toBe('degraded');
+    // `rate-limited`, not `degraded`. This is THE case that state exists for: an upstream quota
+    // refusal forwarded verbatim through the chat passthrough, which wants different copy from a
+    // sick service. Nothing in this repository emits 429 itself, so every 429 the SDK sees is
+    // this one.
+    expect(result.presentation).toBe('rate-limited');
     expect(result.retryable).toBeNull();
     // A null param must not enter metadata as the string "null".
     expect(result.metadata).toEqual({});

@@ -5,7 +5,7 @@ import { describe, expect, it } from 'vitest';
 import { presentationForGrpcCode, presentationForHttpStatus, presentationForTransportCause } from '../src/errors/transport-status.js';
 import type { Presentation } from '../src/errors/types.js';
 
-const PRESENTATIONS: readonly Presentation[] = ['relogin', 'forbidden', 'not-found', 'degraded', 'invalid-input', 'conflict', 'disabled', 'generic'];
+const PRESENTATIONS: readonly Presentation[] = ['relogin', 'forbidden', 'not-found', 'degraded', 'rate-limited', 'invalid-input', 'conflict', 'disabled', 'generic'];
 
 describe('the gRPC status table', () => {
   // TOTALITY is the assertion that carries this suite. A transcription of the table into the
@@ -29,14 +29,23 @@ describe('the gRPC status table', () => {
     [Code.AlreadyExists, 'conflict'],
     [Code.FailedPrecondition, 'conflict'],
     [Code.Aborted, 'conflict'],
-    [Code.Unimplemented, 'disabled'],
-    [Code.ResourceExhausted, 'degraded'],
+    // NOT 'disabled'. The CAPABILITY_DISABLED override is what lifts it, and if this row said
+    // 'disabled' that override would be inert — it would produce the answer this table already
+    // gave. See the comment on GRPC_TABLE.
+    [Code.Unimplemented, 'generic'],
+    [Code.ResourceExhausted, 'rate-limited'],
   ] as const)('maps code %i to %s', (code, expected) => {
     expect(presentationForGrpcCode(code)).toBe(expected);
   });
 
   it('falls through to generic', () => {
     expect(presentationForGrpcCode(Code.Internal)).toBe('generic');
+  });
+
+  // Pins the row the CAPABILITY_DISABLED override depends on. If this ever reads 'disabled' again
+  // the override silently stops doing anything, and no other test would notice.
+  it('sends Unimplemented to generic so the capability override stays load-bearing', () => {
+    expect(presentationForGrpcCode(Code.Unimplemented)).toBe('generic');
   });
 });
 
@@ -46,7 +55,7 @@ describe('the HTTP status table', () => {
     [403, 'forbidden'],
     [404, 'not-found'],
     [408, 'degraded'],
-    [429, 'degraded'],
+    [429, 'rate-limited'],
     [502, 'degraded'],
     [503, 'degraded'],
     [504, 'degraded'],
@@ -55,7 +64,6 @@ describe('the HTTP status table', () => {
     [415, 'invalid-input'],
     [422, 'invalid-input'],
     [409, 'conflict'],
-    [501, 'disabled'],
   ] as const)('maps %i to %s', (status, expected) => {
     expect(presentationForHttpStatus(status)).toBe(expected);
   });
@@ -63,7 +71,8 @@ describe('the HTTP status table', () => {
   // 200 has no row on purpose. The terminal SSE frame arrives with status 200 because the head
   // was already committed, and its `degraded` presentation comes from the reason OVERRIDE table
   // in Task 3, never from here (spec § 9.4).
-  it.each([200, 418, 500, 599])('falls through to generic for %i', (status) => {
+  // 501 joins them: nothing here emits it, and an ingress 501 means the same as Unimplemented.
+  it.each([200, 418, 500, 501, 599])('falls through to generic for %i', (status) => {
     expect(presentationForHttpStatus(status)).toBe('generic');
   });
 });

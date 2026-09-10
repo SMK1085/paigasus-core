@@ -652,7 +652,7 @@ interface PaigasusError {
 }
 
 type Presentation =
-  | 'relogin' | 'forbidden' | 'not-found' | 'degraded'
+  | 'relogin' | 'forbidden' | 'not-found' | 'degraded' | 'rate-limited'
   | 'invalid-input' | 'conflict' | 'disabled' | 'generic';
 ```
 
@@ -703,17 +703,32 @@ Both tables are total. Both fall through to `generic`.
 | `DeadlineExceeded` | `degraded` | | 408 | `degraded` |
 | `InvalidArgument` | `invalid-input` | | 400, 413, 415, 422 | `invalid-input` |
 | `AlreadyExists`, `FailedPrecondition`, `Aborted` | `conflict` | | 409 | `conflict` |
-| `Unimplemented` | `disabled` | | 501 | `disabled` |
-| `ResourceExhausted` | `degraded` | | 429 | `degraded` |
+| `Unimplemented` | `generic` | | 501 | `generic` |
+| `ResourceExhausted` | `rate-limited` | | 429 | `rate-limited` |
 | everything else | `generic` | | everything else | `generic` |
 
 The third `transport` arm maps by `cause`: `timeout` and `network` yield `degraded`, `aborted` yields
 `generic`. A caller abort is not a service fault and must not render as one.
 
-429 and 504 map to `degraded` rather than getting their own states: a gateway proxying OpenAI produces
-both routinely, and both mean "try later", which is what `degraded` renders. `retryable` carries the
-finer signal for a caller that wants it. **The issue owner reviewed this row and kept it** (§ 16 Q3 is
-now closed), so it is a decision, not an omission.
+**429 and `ResourceExhausted` get their own `rate-limited` state. This REVERSES an earlier decision
+in this document and the reversal is the issue owner's.** Revision 3 kept them under `degraded` on
+the argument that both mean "try later". A second adversarial challenge, run independently on this
+same slice by a parallel implementation (§ 15.2), put the question again with a measurement Revision
+3 did not have: **nothing in this repository emits 429 or `ResourceExhausted`**, so every one the SDK
+can currently see is the UPSTREAM's quota refusal arriving through the chat passthrough. That is what
+lets the copy be specific — "you are over your quota" — rather than the hedged "something is wrong,
+try later" that `degraded` has to serve for a sick service. A future Paigasus-side quota gets a
+registry reason and the override table can point it at this same screen, so this does not open the
+door to a tenth value. 504 stays on `degraded`.
+
+**`Unimplemented` and 501 map to `generic`, not `disabled`, and that row is load-bearing.** IAM's
+`capability_disabled` is the only thing that emits `Unimplemented` (`convert.rs:96-104`). If this
+table said `disabled`, § 9.4's `CAPABILITY_DISABLED` override would produce the answer the table
+already gave — decoration, and exactly the critique this document accepted once against a different
+example and then re-committed with this one. Sending `Unimplemented` to `generic` and letting the
+override lift it keeps the two meanings apart. Nothing here emits HTTP 501 at all — the gateway's
+`StreamingDisabled` answers **400** (`error.rs:170`) — so a 501 could only come from an ingress,
+where "the server does not support this method" carries the same meaning.
 
 **The four codes SMA-625's AC 3 names, in one place.** Revision 1's § 10 had a row called "AC 4
 mapping — each of the four codes yields its state" and the four codes appeared nowhere in the spec.
@@ -784,7 +799,17 @@ and the test notices. The test alone is not enough — it runs later. Both are k
 - **`CAPABILITY_DISABLED` (904)** is gRPC `Code::Unimplemented` with no HTTP form at all
   (`convert.rs:96-104`, and no HTTP call site exists in IAM). `Unimplemented` reads as "this build
   cannot do that", but the product meaning is "this deployment turned that capability off" — a
-  different screen. `disabled` exists in § 9.1 for it, and the entry selects it.
+  different screen. `disabled` exists in § 9.1 for it, and the entry selects it. **This example was
+  INERT until § 9.2 moved `Unimplemented` to `generic`**: while the transport table also said
+  `disabled`, the entry changed nothing, and the second challenge (§ 15.2) caught that the example
+  the spec offered as proof of the mechanism was proof of nothing. The pairing is the point, and
+  neither half stands alone.
+- **`PRINCIPAL_INACTIVE` (added after the second challenge)** is `Code::PermissionDenied`
+  (`convert.rs:144`), which § 9.2 renders `forbidden` — so without an entry a **deactivated account
+  is told it lacks permission**, which is both wrong and unactionable. It takes `disabled`. Its two
+  neighbours `IDENTITY_NOT_PROVISIONED` and `PROVISIONING_FAILED` deliberately do NOT: those are
+  provisioning states an administrator resolves, and `forbidden` reads correctly for them. The split
+  is a decision, not an oversight.
 
 Every other reason takes the literal `'from-transport'`, so all 57 are a reviewed decision rather than
 a default.
@@ -1316,6 +1341,18 @@ each other. PR #231 and PR #232 were both complete and both green. The issue own
    layout was bent around. The unguarded assertion PARSES rather than pattern-matches, for the
    reason the rest of that file already records: a first attempt with a regex flagged the prose in
    `errors/types.ts` that says the file must not gain a guard.
+
+**Three further decisions came from the SECOND adversarial challenge**, which #231's author ran
+independently on this same slice after PRs A and B merged. Both branches were challenged; the two
+challenges found overlapping but different things, which is why these were absent here. The issue
+owner confirmed all three against this branch:
+
+8. **`ResourceExhausted` / 429 get a `rate-limited` state** (§ 9.2). This reverses Revision 3's
+   decision, on a measurement Revision 3 did not have.
+9. **`Unimplemented` and 501 move to `generic`** so the `CAPABILITY_DISABLED` override does real
+   work (§ 9.2, § 9.4). Until this, that override was inert.
+10. **`PRINCIPAL_INACTIVE` takes `disabled`** (§ 9.4), with its two provisioning neighbours
+    deliberately left on `forbidden`.
 
 Two further defects came from #231's own review rounds and applied here unchanged:
 

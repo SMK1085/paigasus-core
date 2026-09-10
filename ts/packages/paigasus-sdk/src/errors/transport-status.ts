@@ -9,9 +9,22 @@ import type { Presentation, TransportCause } from './types.js';
 /**
  * gRPC `Code` -> `Presentation`. Total by falling through to `generic`.
  *
- * `ResourceExhausted` sits under `degraded` rather than getting its own state: a gateway proxying
- * OpenAI produces it routinely, and it means "try later", which is what `degraded` renders.
- * `retryable` carries the finer signal. This row was reviewed and kept deliberately (spec § 9.2).
+ * Two rows carry a decision rather than an obvious mapping.
+ *
+ * `ResourceExhausted` gets its OWN `rate-limited` state rather than sharing `degraded`. A quota
+ * refusal and a sick service want different copy. MEASURED: nothing in this repository emits 429
+ * or `ResourceExhausted` today, so every one the SDK can currently see is the UPSTREAM's quota
+ * arriving through the chat passthrough — which is exactly what lets that copy be specific instead
+ * of hedged. A future Paigasus-side quota gets a registry reason, and the override table can give
+ * it this same screen without a tenth presentation value.
+ *
+ * `Unimplemented` maps to `generic`, NOT to `disabled`, and that is load-bearing. IAM's
+ * `capability_disabled` is the only thing that emits `Unimplemented` (`convert.rs:96-104`), so if
+ * this row said `disabled` the `CAPABILITY_DISABLED` OVERRIDE would produce the answer this table
+ * already gave and the whole override mechanism would be decoration on that reason. Sending
+ * `Unimplemented` to `generic` and letting the override lift it to `disabled` keeps the two
+ * meanings apart: "this build cannot do that" against "this deployment turned that capability
+ * off" (spec § 9.2, § 9.4).
  */
 const GRPC_TABLE: ReadonlyMap<Code, Presentation> = new Map([
   [Code.Unauthenticated, 'relogin'],
@@ -19,16 +32,22 @@ const GRPC_TABLE: ReadonlyMap<Code, Presentation> = new Map([
   [Code.NotFound, 'not-found'],
   [Code.Unavailable, 'degraded'],
   [Code.DeadlineExceeded, 'degraded'],
-  [Code.ResourceExhausted, 'degraded'],
+  [Code.ResourceExhausted, 'rate-limited'],
   [Code.InvalidArgument, 'invalid-input'],
   [Code.AlreadyExists, 'conflict'],
   [Code.FailedPrecondition, 'conflict'],
   [Code.Aborted, 'conflict'],
-  [Code.Unimplemented, 'disabled'],
+  [Code.Unimplemented, 'generic'],
 ]);
 
 /**
  * HTTP status -> `Presentation`. Total by falling through to `generic`.
+ *
+ * There is deliberately no 501 row either. Nothing in this repository emits 501 — the gateway's
+ * `StreamingDisabled` answers 400 (`error.rs:170`) and `Unimplemented` has no HTTP form at all — so
+ * a 501 could only come from an ingress or a proxy, where "the server does not support this
+ * method" is the same "this build cannot do that" meaning `Unimplemented` now carries. It falls
+ * through to `generic` with them.
  *
  * There is deliberately NO 200 row. A terminal SSE error frame carries status 200, and its
  * `degraded` presentation comes from the reason override table, not from here (spec § 9.4).
@@ -38,7 +57,7 @@ const HTTP_TABLE: ReadonlyMap<number, Presentation> = new Map([
   [403, 'forbidden'],
   [404, 'not-found'],
   [408, 'degraded'],
-  [429, 'degraded'],
+  [429, 'rate-limited'],
   [502, 'degraded'],
   [503, 'degraded'],
   [504, 'degraded'],
@@ -47,7 +66,6 @@ const HTTP_TABLE: ReadonlyMap<number, Presentation> = new Map([
   [415, 'invalid-input'],
   [422, 'invalid-input'],
   [409, 'conflict'],
-  [501, 'disabled'],
 ]);
 
 const CAUSE_TABLE: Readonly<Record<TransportCause, Presentation>> = {

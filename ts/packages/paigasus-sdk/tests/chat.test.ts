@@ -151,7 +151,9 @@ describe('the two response shapes', () => {
     const fetchImpl = vi.fn(() =>
       Promise.resolve(
         new Response(JSON.stringify({ error: { message: 'no', type: 'invalid_request_error', param: null, code: 'streaming-disabled' } }), {
-          status: 501,
+          // 400, not 501. `GatewayError::StreamingDisabled` answers BAD_REQUEST (error.rs:170);
+          // the 501 this fixture used before was a combination the gateway cannot produce.
+          status: 400,
           headers: { 'content-type': 'application/json', 'paigasus-correlation-id': 'corr-9' },
         }),
       ),
@@ -161,7 +163,7 @@ describe('the two response shapes', () => {
     const result = await client.completions({ stream: true });
     expect(result.kind).toBe('error');
     if (result.kind !== 'error') throw new Error('unreachable');
-    expect(result.error.presentation).toBe('disabled');
+    expect(result.error.presentation).toBe('invalid-input');
     expect(result.error.correlationId).toBe('corr-9');
   });
 });

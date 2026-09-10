@@ -43,8 +43,22 @@ describe('the three overrides that change or pin an answer', () => {
 
   // gRPC Unimplemented with no HTTP form at all (convert.rs:96-104). Unimplemented reads as
   // "this build cannot do that"; the product meaning is "this deployment turned it off".
+  // Load-bearing only because the transport table sends Unimplemented to 'generic'. That pairing
+  // is the whole point: without it this entry produces the answer the table already gave.
   it('maps CAPABILITY_DISABLED to disabled', () => {
     expect(presentationOverride(ErrorReason.CAPABILITY_DISABLED)).toBe('disabled');
+  });
+
+  // IAM answers PermissionDenied for a deactivated account (convert.rs:144), so without this
+  // entry a deactivated user is told they lack permission — a wrong and unactionable screen.
+  it('maps PRINCIPAL_INACTIVE to disabled', () => {
+    expect(presentationOverride(ErrorReason.PRINCIPAL_INACTIVE)).toBe('disabled');
+  });
+
+  // Its two neighbours deliberately do NOT get the same treatment. They are provisioning states
+  // an administrator resolves, and `forbidden` reads correctly for them.
+  it.each([ErrorReason.IDENTITY_NOT_PROVISIONED, ErrorReason.PROVISIONING_FAILED])('leaves %i to the transport', (reason) => {
+    expect(presentationOverride(reason)).toBeNull();
   });
 });
 
