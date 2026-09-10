@@ -94,7 +94,9 @@ export async function chatCompletion(request: ChatCompletionRequest, options: Ch
     response = await fetch(`${options.baseUrl}/v1/chat/completions`, { method: 'POST', headers, body: JSON.stringify(request), signal });
   } catch (cause) {
     // A transport failure or an expired deadline. 504 is the honest status: nothing came back.
-    throw new PaigasusHttpError(mapError({ kind: 'gateway-http', status: 504, headers: new Headers(), body: { error: { message: cause instanceof Error ? cause.message : 'the chat request failed' } } }));
+    throw new PaigasusHttpError(
+      mapError({ kind: 'gateway-http', status: 504, headers: new Headers(), body: { error: { message: cause instanceof Error ? cause.message : 'the chat request failed' } } }),
+    );
   } finally {
     clearTimeout(timer);
   }

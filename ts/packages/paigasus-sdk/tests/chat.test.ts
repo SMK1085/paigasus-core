@@ -72,7 +72,10 @@ describe('the streaming path — AC 4', () => {
       },
     });
     const response = respond(body, { status: 200, headers: { 'content-type': 'text/event-stream' } });
-    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(response)));
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => Promise.resolve(response)),
+    );
 
     const result = await chatCompletion({ ...REQUEST, stream: true }, OPTIONS);
 
@@ -216,7 +219,10 @@ describe('cancellation', () => {
   it('forwards a cancel on the returned stream to the upstream body', async () => {
     const cancel = vi.fn(async () => {});
     const body = new ReadableStream<Uint8Array>({ start() {}, cancel });
-    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(respond(body, { status: 200, headers: { 'content-type': 'text/event-stream' } }))));
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => Promise.resolve(respond(body, { status: 200, headers: { 'content-type': 'text/event-stream' } }))),
+    );
 
     const result = await chatCompletion({ ...REQUEST, stream: true }, OPTIONS);
     if (result.kind !== 'stream') throw new Error('unreachable');
