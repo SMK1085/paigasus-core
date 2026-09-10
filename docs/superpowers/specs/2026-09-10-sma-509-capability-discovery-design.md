@@ -430,7 +430,21 @@ and a cold cache yields `degraded` with reason `unauthorized`.
 
 ### 8.1 The background revalidation
 
-Step 4's promise is handed to an injected
+**What "without awaiting" means, precisely.** The lock acquisition and the
+invariant-1 double-check ARE awaited before the stale value returns; only the
+**probe** is not. Revision 2 specified detaching all three inside one
+un-awaited block, and that was measured wrong during implementation: the
+detached chain suspends on the lock acquire, so `resolveService` returned before
+the probe had started at all, and the revalidation never began on a request that
+supplied no `waitUntil`.
+
+The cost is stated plainly: a stale-serve request now makes three awaited cache
+calls (`get`, `tryAcquireLock`, `get`) instead of one before it returns. The same
+three calls happen either way — detaching only moves them off the response — and
+AC2 is unaffected, because AC2 is about the *probe* not blocking render. The
+fresh path, which is the overwhelmingly common one, remains a single `get`.
+
+The probe's promise is handed to an injected
 `waitUntil?: (p: Promise<unknown>) => void`. When the app supplies Next's `after`,
 the runtime keeps the process alive until the probe settles. Otherwise the promise
 floats with a `.catch()` that logs.
@@ -479,12 +493,36 @@ stall. A probe started at t=0 could resolve at t=30s and blindly overwrite a
 successful probe written at t=5s with its own older failure, masking a healthy
 service until the hard TTL.
 
-Two rules:
+Every write is a **compare-and-set on `rev`**, via a Lua script modelled on
+`redis-store.ts:24-34`, and **the token is the `rev` from the snapshot taken
+BEFORE the probe ran** — never a fresh read taken at write time. A losing writer
+re-reads and returns the winner's state.
 
-- Every write is a **compare-and-set on `rev`**, via a Lua script modelled on
-  `redis-store.ts:24-34`. A losing writer re-reads and discards its result.
-- A write whose probe **started before** the stored `outcomeAt` is discarded
-  without a write attempt.
+That distinction is the whole fence, and it is easy to get wrong. Re-reading the
+record immediately before writing and using *that* read's `rev` makes the
+compare-and-set agree with itself, so it never fences anything. Revision 2 of
+this spec specified exactly that no-op, and it was caught by measurement during
+implementation: a stale `network` failure overwrote a newer successful record at
+`rev 9`, with no fence event emitted. The shape here now matches
+`ts/packages/paigasus-auth/src/core/single-flight.ts`, which this section always
+claimed as its model.
+
+**A second rule, "discard a write whose probe started before the stored
+`outcomeAt`", was specified in revision 2 and has been dropped.** Three reasons,
+all measured: the `rev` CAS strictly subsumes it, since any newer write moves
+`rev`; the CAS additionally catches a newer write carrying the *same*
+`outcomeAt`, which the timestamp rule cannot; and the rule compares one
+process's clock against a timestamp another process wrote, so clock skew between
+two console replicas could discard a valid write.
+
+### 8.4 The holder's own probe deadline
+
+`AbortSignal.timeout` bounds the network wait inside `probeService`, but a
+`probe` that never settles for any other reason would hang the lock holder's own
+call forever — the waiters would time out correctly while the holder never
+returned. The holder therefore races its probe against `PROBE_TIMEOUT_MS`
+itself. A timed-out holder returns `degraded`/`timeout`, writes a `fail` record
+(held for the negative TTL), and releases the lock.
 
 ---
 
