@@ -28,3 +28,9 @@ tasks:
     inputs:
       - '/ts/packages/paigasus-proto/src/**/*'
       - 'vitest.config.ts'
+      # SMA-625 — tests/fixtures/terminal-frame.ts pins the gateway's terminal SSE frame verbatim,
+      # and tests/terminal-frame.test.ts reads THIS file to assert the two still agree. Without
+      # this input, editing the Rust constant selects no TypeScript task and the drift check never
+      # runs on the one PR it exists to catch — the same defect § 11.1 fixed for AC 3.
+      # `ci/affected-graph/run.sh`'s "chat-rs->sdk" case is the only control on this line.
+      - '/rs/crates/services/paigasus-gateway/src/adapters/http/chat.rs'

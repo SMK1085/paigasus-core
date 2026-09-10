@@ -424,6 +424,19 @@ run_suite() {
   # Strict equality: re-baseline deliberately when the set legitimately changes.
   run_task_case_ci "proto-iam->sdk" "ts/packages/paigasus-proto/src/generated/paigasus/iam/v1/iam_pb.ts" \
     "paigasus-proto-ts:build,paigasus-proto-ts:test,paigasus-sdk-ts:build,paigasus-sdk-ts:test,ts:lint"
+  # SMA-625 — a gateway chat.rs edit must select the SDK's test.
+  # This is the ONLY control on the `/rs/.../chat.rs` input in ts/packages/paigasus-sdk/moon.yml.
+  # tests/fixtures/terminal-frame.ts pins the gateway's terminal SSE frame VERBATIM and
+  # tests/terminal-frame.test.ts reads chat.rs to assert the two agree — so without that input the
+  # drift check is inert against exactly the change it exists to absorb, and nothing else notices
+  # (`repo:input-liveness` scans `repo:*` tasks only, and proves DECLARED inputs are live, never
+  # that NEEDED ones are declared). MEASURED before the input existed: the same edit selected no
+  # paigasus-sdk-ts task at all.
+  # ONE anchor suffices here, unlike the `proto->sdk` pair above: that pair's two anchors prove a
+  # GLOB's width, and this input is a literal path with no width to prove.
+  # Strict equality: re-baseline deliberately when the set legitimately changes.
+  run_task_case_ci "chat-rs->sdk" "rs/crates/services/paigasus-gateway/src/adapters/http/chat.rs" \
+    "paigasus-gateway-rs:build,paigasus-gateway-rs:lint,paigasus-gateway-rs:test,paigasus-sdk-ts:test"
   # Generic Cargo<->Moon parity: catches a MISSING case, which is how SMA-524's bug survived review.
   assert_cargo_moon_parity || SUITE_RC=1
   # assert_include_relations returns only 0/1 (no infra code), so collapsing is correct here.
