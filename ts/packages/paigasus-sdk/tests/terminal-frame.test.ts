@@ -101,7 +101,7 @@ describe('createTerminalFrameParser', () => {
   // discarded regardless — the same inert-guard shape this branch has repeatedly had to repair.
   it('drops an over-long pending record rather than buffering it without bound', () => {
     const parser = createTerminalFrameParser(200);
-    expect(parser.push(encode('data: {"error":{"message":"' + 'x'.repeat(2 * 1024 * 1024)))).toEqual([]);
+    expect(parser.push(encode('data: {"error":{"message":"' + 'x'.repeat(128 * 1024)))).toEqual([]);
     expect(parser.push(encode('","code":"upstream-error"}}\n\n'))).toEqual([]);
 
     // And it RESYNCHRONISES: a terminal frame arriving after the discard is still found.

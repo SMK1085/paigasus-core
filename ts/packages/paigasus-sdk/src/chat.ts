@@ -87,11 +87,18 @@ const RECORD_DELIMITER = /(?:\r\n|\r|\n){2}/;
 /**
  * The cap on a single pending SSE record, in decoded characters.
  *
- * The gateway's terminal frame is ~120 characters and an OpenAI content delta is smaller still, so
- * 1 MiB is orders of magnitude above anything legitimate. It exists only to stop an upstream that
- * never emits a blank line from growing the buffer without bound.
+ * 64 KiB, and the number comes from a requirement rather than being a round figure. The gateway's
+ * terminal frame is ~110 characters (`chat.rs:63`) and an OpenAI content delta is smaller still, so
+ * this is already three orders of magnitude of headroom over anything legitimate. The cap only ever
+ * fires on a producer that never emits a blank line at all, which is not a stream anyone is serving
+ * on purpose.
+ *
+ * Chosen over the 1 MiB this originally carried, which was a round number picked without a
+ * derivation. Dropping the buffer is best-effort in either design and never fails the stream, so
+ * the cost of being wrong is small — but the tighter bound is the one that can be argued for
+ * (PR #231; see the spec's § 15.2).
  */
-const MAX_PENDING_RECORD = 1_048_576;
+const MAX_PENDING_RECORD = 64 * 1024;
 
 /** A `PaigasusError` when this record is the terminal error frame, else `null`. */
 function terminalErrorFrom(record: string, committedStatus: number, ids?: FrameIds): PaigasusError | null {

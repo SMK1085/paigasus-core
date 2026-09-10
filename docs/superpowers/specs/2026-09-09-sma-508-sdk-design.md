@@ -1358,6 +1358,14 @@ owner confirmed all three against this branch:
 10. **`PRINCIPAL_INACTIVE` takes `disabled`** (§ 9.4), with its two provisioning neighbours
     deliberately left on `forbidden`.
 
+11. **The pending-record cap is 64 KiB.** The parser bounds a single SSE record so an upstream that
+    never emits a blank line cannot grow the buffer without limit. This branch first shipped 1 MiB,
+    a round number with no derivation; #231's is derived from the frame it has to hold — the
+    terminal frame is ~110 characters, so 64 KiB is three orders of magnitude of headroom and the
+    cap fires only on a producer emitting no blank line at all. Dropping the buffer is best-effort
+    in either design and never fails the stream, so the cost of being wrong is small either way;
+    the tighter bound is simply the one that can be argued for. The issue owner chose it.
+
 Two further defects came from #231's own review rounds and applied here unchanged:
 
 6. **`JSON.stringify(request)` sat inside the `try` wrapping `fetch`**, so a caller passing a
