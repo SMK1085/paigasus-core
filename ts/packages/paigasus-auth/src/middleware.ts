@@ -47,7 +47,7 @@ export interface AuthMiddlewareOptions {
  * `AuthMiddlewareOptions.publicPaths` — I5, final fix wave.
  *
  * THE FAILURE THIS CLOSES. `publicPaths` used to be the caller's own hand-copied list, with
- * nothing binding it to `http/routes.ts`'s actual route table (`src/http/routes.ts:49-52`). Omit
+ * nothing binding it to `http/routes.ts`'s actual route table (`src/http/routes.ts:72-77`). Omit
  * one path there — the callback path is the easy one to miss — and `/auth/login` clears the
  * session cookie, the IdP's redirect back to `/auth/callback` arrives with no cookie, middleware
  * (seeing a non-public path with no cookie) bounces it BACK to `/auth/login`, which clears the

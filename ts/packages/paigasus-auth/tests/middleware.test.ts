@@ -193,11 +193,42 @@ describe('the shared route table (SMA-626 § 3)', () => {
   // than counting to four, which `==`, reversed operands, or a comment all defeat.
   //
   // RESIDUAL, stated: a comparison written another way — a `switch (pathname)`, an aliased
-  // variable, a dispatch in a delegated file — escapes this. The Record is what closes the case
-  // that actually happens.
+  // variable, a dispatch in a delegated file, or a `pathname.endsWith(...)` /
+  // `.startsWith(...)` check (the exact shape this file carried before review round 1's M5 fix,
+  // and the one bypass in this list with a proven history here) — escapes this. The Record is
+  // what closes the case that actually happens.
   it('routes.ts contains no direct pathname comparison', () => {
     const source = readFileSync(resolve(SRC, 'http/routes.ts'), 'utf8');
     const matches = source.match(/pathname\s*===?|===?\s*pathname/g) ?? [];
     expect(matches).toEqual([]);
+  });
+
+  // THE GATE THAT GATES THE GATE. Every control above (this file's own tests, typecheck) reads
+  // only the tuple's VALUES or the file's TEXT for a `pathname` comparison — none of them notices
+  // if `ROUTES`'s annotation is silently widened from `Record<AuthRouteSuffix, RouteEntry>` to
+  // `Record<string, RouteEntry>`. That widening is the one edit that disables the whole task:
+  // typecheck stops requiring the Record to hold exactly the four tuple keys, both Step-6 probes
+  // (a fifth suffix with no entry, an entry with no suffix) stop failing, and the comment above
+  // `ROUTES` claiming "Both directions, at build time" becomes false with nothing to report it.
+  //
+  // MEASURED 2026-09-10: with the annotation widened to `Record<string, RouteEntry>` (no other
+  // change), this assertion REDS — `expect(source).toContain(...)` fails because the exact
+  // substring `Record<AuthRouteSuffix, RouteEntry>` is no longer present — while every OTHER test
+  // in this file stays GREEN (14 passed, 1 failed: this one).
+  //
+  // CORRECTION to the widening's predicted blast radius: `moon run paigasus-auth-ts:typecheck`
+  // does NOT stay green under that same edit in this repo — it separately reds with a
+  // `noUncheckedIndexedAccess`-driven error (`tsconfig.base.json` sets that flag), because
+  // `ROUTES[suffix]` (line 83's Map-building call) then types as `RouteEntry | undefined`
+  // instead of `RouteEntry`, which fails to satisfy `Map`'s constructor overloads. That is a
+  // real, independent build-time signal — but it is a side effect of THIS FILE'S particular
+  // `ROUTES[suffix]` indexing shape, not of the Record's key set being widened per se: a
+  // differently-written lookup (e.g. one going through `.get()` with a fallback) could widen the
+  // same way and keep typechecking clean. This assertion is what closes that gap: it does not
+  // depend on how `ROUTES` happens to be indexed elsewhere in the file. Reverted immediately
+  // after confirming both reds (edited back, not `git checkout --`).
+  it('the ROUTES table is still typed as Record<AuthRouteSuffix, RouteEntry>, not a widened Record<string, ...>', () => {
+    const source = readFileSync(resolve(SRC, 'http/routes.ts'), 'utf8');
+    expect(source).toContain('Record<AuthRouteSuffix, RouteEntry>');
   });
 });
