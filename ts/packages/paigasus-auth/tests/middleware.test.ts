@@ -3,7 +3,7 @@
 // AC 4: middleware checks cookie PRESENCE only, never validity, and cannot even import anything
 // that knows how to validate one — CVE-2025-29927 was exactly a middleware auth bypass.
 import { randomUUID } from 'node:crypto';
-import { rmSync, writeFileSync } from 'node:fs';
+import { readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -12,6 +12,7 @@ import { NextRequest } from 'next/server';
 import { authRoutePaths, createAuthMiddleware } from '../src/middleware.js';
 import { SESSION_COOKIE } from '../src/http/cookies.js';
 import { createAuthRoutes } from '../src/http/routes.js';
+import { AUTH_ROUTE_SUFFIXES } from '../src/http/route-table.js';
 import type { AuthRuntime } from '../src/runtime.js';
 import { collectImportGraph, filesWithDynamicImportOrRequire } from './support/import-graph.js';
 
@@ -162,5 +163,41 @@ describe('the dynamic-import/require backstop is not vacuous', () => {
     withTempFile("import { foo } from './foo.js';\nexport { foo };\n", (path) => {
       expect(filesWithDynamicImportOrRequire(new Set([path]))).toEqual([]);
     });
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// SMA-626 § 3. authRoutePaths and createAuthRoutes's dispatch used to be two independent lists.
+// The existing cross-check above catches a STALE path; nothing caught a route ADDED to the
+// dispatch and forgotten in authRoutePaths, which is the infinite-redirect-loop failure the helper
+// exists to prevent. Both now derive from one table, so the type system closes it — a fifth suffix
+// with no handler, or a handler with no suffix, fails typecheck.
+// ---------------------------------------------------------------------------------------------
+describe('the shared route table (SMA-626 § 3)', () => {
+  it('authRoutePaths is exactly the table mapped over basePath', () => {
+    expect(authRoutePaths({ basePath: '/iam' })).toEqual(AUTH_ROUTE_SUFFIXES.map((s) => `/iam${s}`));
+  });
+
+  it('holds four suffixes, each starting with /auth/', () => {
+    expect(AUTH_ROUTE_SUFFIXES).toHaveLength(4);
+    for (const suffix of AUTH_ROUTE_SUFFIXES) expect(suffix.startsWith('/auth/')).toBe(true);
+  });
+
+  it('works for a root-mounted zone, where basePath is the empty string', () => {
+    expect(authRoutePaths({ basePath: '' })).toEqual(['/auth/login', '/auth/callback', '/auth/logout', '/auth/logout/callback']);
+  });
+
+  // THE BACKSTOP. The Record is the primary control, but a hand-written `if (pathname === ...)`
+  // arm placed before the lookup would still bypass it. After this task there must be ZERO direct
+  // comparisons of `pathname` in routes.ts, so any occurrence reds — a much stronger assertion
+  // than counting to four, which `==`, reversed operands, or a comment all defeat.
+  //
+  // RESIDUAL, stated: a comparison written another way — a `switch (pathname)`, an aliased
+  // variable, a dispatch in a delegated file — escapes this. The Record is what closes the case
+  // that actually happens.
+  it('routes.ts contains no direct pathname comparison', () => {
+    const source = readFileSync(resolve(SRC, 'http/routes.ts'), 'utf8');
+    const matches = source.match(/pathname\s*===?|===?\s*pathname/g) ?? [];
+    expect(matches).toEqual([]);
   });
 });

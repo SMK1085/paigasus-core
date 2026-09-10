@@ -20,6 +20,7 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { SESSION_COOKIE } from './http/cookies.js';
+import { AUTH_ROUTE_SUFFIXES } from './http/route-table.js';
 
 export interface AuthMiddlewareOptions {
   /**
@@ -53,15 +54,18 @@ export interface AuthMiddlewareOptions {
  * cookie again and redirects again: the user loops forever, with no error anywhere, from copying
  * the middleware example without reading this file's doc comment.
  *
- * A pure derivation from `basePath` only — no new imports, so this stays reachable from the
- * middleware entry point without reopening AC 4's import-graph guarantee (see the file header and
- * `tests/middleware.test.ts`'s structural assertion). The parameter is typed structurally
- * (`{ basePath: string }`) rather than as `AuthRuntime` for exactly that reason: importing
- * `AuthRuntime` from `../runtime.js` would pull the server composition root's TYPE into this
- * entry point's module graph, and this file has no need to know anything else about it.
+ * Derived from `route-table.ts`'s shared `AUTH_ROUTE_SUFFIXES` tuple (SMA-626 § 3) — the same
+ * table `http/routes.ts` builds its `Record<AuthRouteSuffix, …>` dispatch from — rather than a
+ * second hand-written list that could drift from it independently. That module imports nothing,
+ * so importing it here adds no new edge into this entry point's module graph: the parameter stays
+ * typed structurally (`{ basePath: string }`) rather than as `AuthRuntime` for the same reason as
+ * before — importing `AuthRuntime` from `../runtime.js` would pull the server composition root's
+ * TYPE into this entry point's module graph, and this file has no need to know anything else
+ * about it. AC 4's import-graph guarantee is therefore unchanged (see the file header and
+ * `tests/middleware.test.ts`'s structural assertion).
  */
 export function authRoutePaths(runtime: { basePath: string }): readonly string[] {
-  return [`${runtime.basePath}/auth/login`, `${runtime.basePath}/auth/callback`, `${runtime.basePath}/auth/logout`, `${runtime.basePath}/auth/logout/callback`];
+  return AUTH_ROUTE_SUFFIXES.map((suffix) => `${runtime.basePath}${suffix}`);
 }
 
 /** Build this zone's middleware. */
