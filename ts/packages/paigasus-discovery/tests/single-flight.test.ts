@@ -152,12 +152,19 @@ describe('AC3: single-flight', () => {
     for (const s of states) expect(s).toMatchObject({ state: 'available' });
   });
 
-  // THE CASE THAT ACTUALLY OBSERVES INVARIANT 2. With a fast probe the winner finishes long
-  // before any loser reaches its deadline, so the fallback branch never executes and the counter
-  // reads 1 even for an implementation that DOES fall back to probing. Only a probe that
-  // outlasts lockWaitMs drives a loser down that path.
+  // THE CASE THAT ACTUALLY OBSERVES INVARIANT 2. `probeTimeoutMs` (400) is set well ABOVE
+  // `lockWaitMs` (60) so the winner's own probe is still in flight when every loser's deadline
+  // passes — with the timings the other way around, the winner times out and writes a `fail`
+  // record well before any loser's deadline, and every loser then picks that up from its in-loop
+  // reread. That makes the deadline branch (invariant 2's fallback ban) dead code for the
+  // duration of the test, and a mutant that adds a fallback probe in the deadline branch would
+  // pass anyway — so the `discovery.lock_timeout` assertion below is not optional: it is what
+  // proves the deadline branch actually ran, rather than merely that every state reported
+  // 'timeout' for some other reason.
   it('a never-settling probe still yields exactly one probe, and losers report timeout', async () => {
     const cache = createMemoryDescriptorCache();
+    const events: string[] = [];
+    const logger = { event: (n: string) => events.push(n) };
     let calls = 0;
     const probe = (): Promise<ProbeOutcome> => {
       calls += 1;
@@ -168,7 +175,8 @@ describe('AC3: single-flight', () => {
     const d = deps({
       cache,
       probe,
-      timings: { ...DEFAULT_TIMINGS, lockWaitMs: 60, probeTimeoutMs: 30, lockTtlMs: 5_000 },
+      logger,
+      timings: { ...DEFAULT_TIMINGS, lockWaitMs: 60, probeTimeoutMs: 400, lockTtlMs: 5_000 },
     });
     const states = await Promise.all(
       Array.from({ length: 8 }, () => resolveService(d, 'iam', 'tok')),
@@ -177,17 +185,66 @@ describe('AC3: single-flight', () => {
     const losers = states.filter((s) => s.state === 'degraded');
     expect(losers.length).toBeGreaterThanOrEqual(7);
     for (const s of losers) expect(s).toMatchObject({ reason: 'timeout' });
+    // Proves the deadline branch was actually taken, not merely that the outcome happened to
+    // read 'timeout' some other way. Without this a vacuous version of this test — one where the
+    // winner settles before any loser's deadline — still reports every loser as 'timeout' by
+    // reading a `fail` record the winner itself wrote, and a fallback-probing mutant slips through.
+    expect(events.filter((e) => e === 'discovery.lock_timeout').length).toBeGreaterThanOrEqual(7);
   });
 
-  it('a loser performs one final cache read before degrading', async () => {
-    // If the winner wrote just as the deadline expired, the loser must see it rather than
-    // reporting a false outage.
+  // This proves a loser can pick up the lock-holder's write via its in-loop backoff-reread and
+  // return 'available' without ever reaching its own deadline — NOT the final-read-at-deadline
+  // path (see the next test for that): the write here lands well before any loser's deadline, so
+  // the reread inside the retry loop is what catches it.
+  it('a loser picks up the winner\'s write via its in-loop reread and returns available', async () => {
     const cache = createMemoryDescriptorCache();
     await cache.tryAcquireLock('iam', 'someone-else', 5_000);
     const d = deps({ cache, timings: { ...DEFAULT_TIMINGS, lockWaitMs: 40 } });
     const pending = resolveService(d, 'iam', 'tok');
     await cache.set('iam', storedRecord({ outcomeAt: Date.now() }), DEFAULT_TIMINGS.staleMs, null);
     expect(await pending).toMatchObject({ state: 'available' });
+  });
+
+  // Distinguishes this from the previous test: there the write lands before any reread ever
+  // happens, so the in-loop reread already catches it and the deadline branch is never reached.
+  // Here the write is engineered — via a `get` wrapper and a hand-driven virtual clock — to land
+  // strictly AFTER the one reread that finds nothing and BEFORE the deadline's own final read, so
+  // only invariant 2's final-read-before-degrading path can find it.
+  it('a loser catches a just-landed write from the deadline\'s final read, not an in-loop reread', async () => {
+    const base = createMemoryDescriptorCache();
+    await base.tryAcquireLock('iam', 'someone-else', 5_000);
+    let getCalls = 0;
+    let clock = 0;
+    const cache: DescriptorCache = {
+      ...base,
+      get: async (svc: string) => {
+        const result = await base.get(svc);
+        getCalls += 1;
+        if (getCalls === 2) {
+          // The winner's write lands in the gap right after this reread returned nothing.
+          await base.set(svc, storedRecord({ outcomeAt: clock }), DEFAULT_TIMINGS.staleMs, null);
+        }
+        return result;
+      },
+    };
+    const events: string[] = [];
+    const logger = { event: (n: string) => events.push(n) };
+    const d = deps({
+      cache,
+      logger,
+      now: () => clock,
+      sleep: () => {
+        clock += 1000; // Jump straight past the deadline after the one reread.
+        return Promise.resolve();
+      },
+      timings: { ...DEFAULT_TIMINGS, lockWaitMs: 100 },
+    });
+    const state = await resolveService(d, 'iam', 'tok');
+    expect(state).toMatchObject({ state: 'available' });
+    // Exactly 3 `get` calls: the initial read, the one reread (misses it), the final read at the
+    // deadline (catches it). A 4th call, or a 2nd, would mean the write was caught somewhere else.
+    expect(getCalls).toBe(3);
+    expect(events).toContain('discovery.lock_timeout');
   });
 });
 
@@ -241,12 +298,32 @@ describe('failure handling', () => {
     expect(events).toContain('discovery.write_fenced');
   });
 
-  it('deletes and re-probes a corrupt record', async () => {
+  it('deletes and re-probes a record that is internally impossible', async () => {
+    // A `version: 99` record never reaches this module at all: the memory adapter's OWN
+    // `parseRecord` guard rejects and deletes it inside `get`, so `readRecord` sees a plain
+    // `null` and never exercises its own corrupt-record branch. Plant something that PARSES
+    // (version and shape are correct) but is internally impossible instead — 'ok' with no
+    // descriptor — which is exactly what `readRecord`'s own `toState(...) === null` check exists
+    // to catch.
     const cache = createMemoryDescriptorCache();
-    await cache.writeRawForTest?.('iam', JSON.stringify({ ...storedRecord(), version: 99 }));
+    const events: string[] = [];
+    const logger = { event: (n: string) => events.push(n) };
+    await cache.writeRawForTest?.(
+      'iam',
+      JSON.stringify({
+        version: RECORD_VERSION,
+        rev: 1,
+        descriptor: null,
+        descriptorAt: 0,
+        outcome: 'ok',
+        outcomeAt: 0,
+        reason: null,
+      }),
+    );
     const probe = vi.fn((): Promise<ProbeOutcome> => Promise.resolve({ ok: true, descriptor }));
-    const state = await resolveService(deps({ cache, probe }), 'iam', 'tok');
+    const state = await resolveService(deps({ cache, probe, logger }), 'iam', 'tok');
     expect(state).toMatchObject({ state: 'available' });
     expect(probe).toHaveBeenCalledTimes(1);
+    expect(events).toContain('discovery.record_discarded');
   });
 });

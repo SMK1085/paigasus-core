@@ -169,7 +169,11 @@ async function settleProbe(
     deps.logger.event('discovery.write_fenced', { service });
     const winner = await readRecord(deps, service);
     if (winner !== null) return toState(service, winner) ?? degraded(service, 'network', winner);
-    return degraded(service, 'cache-unavailable', null);
+    // The CAS failed (a newer write existed) yet a re-read now finds nothing: the record expired
+    // or was deleted concurrently. The cache itself answered fine both times, so this is NOT a
+    // `cache-unavailable` failure — there is simply no descriptor to serve. `network` is the same
+    // generic fallback `toState` uses when a stored record carries no more specific reason.
+    return degraded(service, 'network', null);
   }
   return toState(service, next) ?? degraded(service, 'network', next);
 }
@@ -285,15 +289,28 @@ export async function resolveService(
           deps.logger.event('discovery.cache_unavailable', { service, stage: 'release_lock' });
         }
       } else {
-        // START the probe NOW, synchronously, as part of this directly-awaited flow — this is
-        // what guarantees a caller with no `waitUntil` still sees revalidation begin before this
-        // function returns. Only the tail (awaiting the outcome, writing, releasing) is
-        // handed off.
-        const revalidated = beginProbe(deps, service, token, fresh);
-        const revalidate = finishRevalidation(deps, service, lockToken, revalidated).catch(() => {
+        try {
+          // START the probe NOW, synchronously, as part of this directly-awaited flow — this is
+          // what guarantees a caller with no `waitUntil` still sees revalidation begin before
+          // this function returns. Only the tail (awaiting the outcome, writing, releasing) is
+          // handed off.
+          const revalidated = beginProbe(deps, service, token, fresh);
+          const revalidate = finishRevalidation(deps, service, lockToken, revalidated).catch(() => {
+            deps.logger.event('discovery.cache_unavailable', { service, stage: 'revalidate' });
+          });
+          if (deps.waitUntil !== undefined) deps.waitUntil(revalidate);
+        } catch {
+          // `beginProbe` calls `deps.probe` synchronously (see its doc comment). `probeService`
+          // never throws, but nothing in this interface forbids it, and an unguarded throw here
+          // would propagate out of `resolveService` and leak this lock for its full TTL. Mirrors
+          // `probeAndStore`'s try/finally for the cold path.
           deps.logger.event('discovery.cache_unavailable', { service, stage: 'revalidate' });
-        });
-        if (deps.waitUntil !== undefined) deps.waitUntil(revalidate);
+          try {
+            await deps.cache.releaseLock(service, lockToken);
+          } catch {
+            deps.logger.event('discovery.cache_unavailable', { service, stage: 'release_lock' });
+          }
+        }
       }
     }
 
