@@ -402,4 +402,39 @@ describe('resolveSession', () => {
     expect(out).toBeNull();
     expect(await store.get('s')).toBeNull();
   });
+
+  // SMA-626 § 5 guard 4. The existing persist-failure test stubs `set` to fail FOREVER, so the
+  // retry at single-flight.ts:151-153 could be deleted entirely and that test would still see
+  // `null` and stay green. This one fails the CAS exactly ONCE against UNCHANGED state, which is
+  // the only path that reaches the retry — delete the retry and this test sees `null` instead of
+  // a refreshed record.
+  //
+  // The stub is installed AFTER the setup write, because every fixture here seeds the record with
+  // `store.set(..., null)` and a stub counting "the first set call" would break that seed.
+  //
+  // MEASURED 2026-09-10: with the two retry lines deleted this test reds (`out` is null) while
+  // the fail-forever test above stays green.
+  it('retries the compare-and-set ONCE against unchanged state, and persists (F1, guard 4)', async () => {
+    const store = new MemorySessionStore();
+    await store.set('s', makeRecord({ rev: 7, accessExpiresAt: Date.now() - 1 }), 60_000, null);
+
+    const originalSet = store.set.bind(store);
+    let refused = false;
+    store.set = (sid, rec, ttl, expectedRev) => {
+      // Refuse exactly the first fenced write, and write NOTHING — so the record stays at rev 7
+      // and resolveSession's re-read finds `winner.rev === fresh.rev`, the retry branch.
+      if (!refused && expectedRev === 7) {
+        refused = true;
+        return Promise.resolve(false);
+      }
+      return originalSet(sid, rec, ttl, expectedRev);
+    };
+
+    const out = await resolveSession(deps(store, () => Promise.resolve({ accessToken: 'AT2', refreshToken: 'RT2', expiresIn: 300 })), 's');
+
+    expect(refused).toBe(true); // the retry branch really was reached
+    expect(out?.accessToken).toBe('AT2');
+    expect(out?.rev).toBe(8);
+    expect((await store.get('s'))?.accessToken).toBe('AT2');
+  });
 });
