@@ -162,7 +162,7 @@ describe('getSession', () => {
 
     await expect(getSession(runtime)).resolves.toBeNull();
 
-    expect(events).toContainEqual(['session.refresh_failed', { sid: sidTag('sid-needs-refresh') }]);
+    expect(events).toContainEqual(['session.refresh_failed', { sid: sidTag('sid-needs-refresh'), reason: 'transient', degraded: false }]);
   });
 });
 

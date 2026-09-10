@@ -2,6 +2,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { MemorySessionStore } from '../../src/adapters/memory-store.js';
 import { noopLogger } from '../../src/adapters/noop-logger.js';
+import { RefreshRejected } from '../../src/core/errors.js';
 import { shouldRefresh } from '../../src/core/refresh-policy.js';
 import { resolveSession } from '../../src/core/single-flight.js';
 import { makeRecord } from '../store-contract.js';
@@ -160,7 +161,7 @@ describe('resolveSession', () => {
     };
     const out = await resolveSession(d, 's');
     expect(out?.accessToken).toBe('AT');
-    expect(out?.refreshPending).toBe(true);
+    expect(out?.refreshState).toBe('pending');
   });
 
   it('returns null when the lock cannot be won and the token is genuinely expired', async () => {
@@ -216,7 +217,7 @@ describe('resolveSession', () => {
 
     await expect(resolveSession({ ...deps(store, () => Promise.reject(new Error('token endpoint returned 503'))), logger }, 's')).rejects.toThrow('token endpoint returned 503');
 
-    expect(events).toContainEqual(['session.refresh_failed', { sid: sidTag('s') }]);
+    expect(events).toContainEqual(['session.refresh_failed', { sid: sidTag('s'), reason: 'transient', degraded: false }]);
     expect(events.some(([name]) => name === 'store.unavailable')).toBe(false);
   });
 
@@ -430,11 +431,170 @@ describe('resolveSession', () => {
       return originalSet(sid, rec, ttl, expectedRev);
     };
 
-    const out = await resolveSession(deps(store, () => Promise.resolve({ accessToken: 'AT2', refreshToken: 'RT2', expiresIn: 300 })), 's');
+    const out = await resolveSession(
+      deps(store, () => Promise.resolve({ accessToken: 'AT2', refreshToken: 'RT2', expiresIn: 300 })),
+      's',
+    );
 
     expect(refused).toBe(true); // the retry branch really was reached
     expect(out?.accessToken).toBe('AT2');
     expect(out?.rev).toBe(8);
     expect((await store.get('s'))?.accessToken).toBe('AT2');
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// SMA-626 § 2.3. The lock-timeout path already degrades to a still-live access token; a THROWN
+// refresh did not, so a transient IdP outage signed users out with up to skewMs of token life
+// left. Classification is what makes the degrade safe: only invalid_grant means the refresh token
+// is actually revoked.
+// ---------------------------------------------------------------------------------------------
+describe('a failing refresh (SMA-626 § 2.3)', () => {
+  const transient = () => Promise.reject(new Error('oidc refresh_token_grant failed: TypeError'));
+  const rejected = () => Promise.reject(new RefreshRejected('invalid_grant'));
+
+  it('degrades to the live access token when the failure is transient', async () => {
+    const store = new MemorySessionStore();
+    const rec = makeRecord({ accessExpiresAt: Date.now() + 30_000 }); // inside skew, still live
+    await store.set('s', rec, 60_000, null);
+    const { logger, events } = recordingLogger();
+
+    const out = await resolveSession({ ...deps(store, transient), logger, skewMs: 60_000 }, 's');
+
+    expect(out?.accessToken).toBe('AT');
+    expect(out?.refreshState).toBe('failed');
+    expect(events).toContainEqual(['session.refresh_failed', { sid: sidTag('s'), reason: 'transient', degraded: true }]);
+    expect(await store.get('s')).not.toBeNull(); // a transient failure must NOT delete
+  });
+
+  it('signs out when the failure is transient and the token is hard-expired', async () => {
+    const store = new MemorySessionStore();
+    await store.set('s', makeRecord({ accessExpiresAt: Date.now() - 1 }), 60_000, null);
+    const { logger, events } = recordingLogger();
+
+    await expect(resolveSession({ ...deps(store, transient), logger }, 's')).rejects.toThrow(/refresh_token_grant/);
+    expect(events).toContainEqual(['session.refresh_failed', { sid: sidTag('s'), reason: 'transient', degraded: false }]);
+  });
+
+  // A revoked refresh token means the session is genuinely dead. Degrading would keep it alive for
+  // up to skewMs, which § 2.1 calls a real exposure.
+  it('never degrades a definitive rejection, even with a live access token', async () => {
+    const store = new MemorySessionStore();
+    await store.set('s', makeRecord({ accessExpiresAt: Date.now() + 30_000 }), 60_000, null);
+    const { logger, events } = recordingLogger();
+
+    await expect(resolveSession({ ...deps(store, rejected), logger, skewMs: 60_000 }, 's')).rejects.toBeInstanceOf(RefreshRejected);
+    expect(events).toContainEqual(['session.refresh_failed', { sid: sidTag('s'), reason: 'rejected', degraded: false }]);
+    // The delete is not conditional on the token being dead: a live access token belonging to a
+    // revoked session is exactly the exposure § 2.1 names, so it must go too.
+    expect(await store.get('s')).toBeNull();
+  });
+
+  // Without this, a revoked refresh token and a live access token sit in Redis for the full ttlMs
+  // and every later getSession() re-takes the lock and re-calls the token endpoint.
+  it('DELETES the record on a definitive rejection, and says why', async () => {
+    const store = new MemorySessionStore();
+    await store.set('s', makeRecord({ accessExpiresAt: Date.now() - 1 }), 60_000, null);
+    const { logger, events } = recordingLogger();
+
+    await expect(resolveSession({ ...deps(store, rejected), logger }, 's')).rejects.toBeInstanceOf(RefreshRejected);
+    expect(await store.get('s')).toBeNull();
+    expect(events).toContainEqual(['session.deleted', { sid: sidTag('s'), reason: 'refresh_rejected' }]);
+  });
+
+  // The counterpart to the delete above, and the reason it has to be conditional: a TRANSIENT
+  // failure must leave no `session.deleted` behind at all. Without this, widening the delete to
+  // every failure reds only the "must NOT delete" line in the first test and nothing would say
+  // the EVENT vocabulary had been corrupted too.
+  it('emits no session.deleted when the failure is transient', async () => {
+    const store = new MemorySessionStore();
+    await store.set('s', makeRecord({ accessExpiresAt: Date.now() - 1 }), 60_000, null);
+    const { logger, events } = recordingLogger();
+
+    await expect(resolveSession({ ...deps(store, transient), logger }, 's')).rejects.toThrow(/refresh_token_grant/);
+    expect(events.some(([name]) => name === 'session.deleted')).toBe(false);
+    expect(await store.get('s')).not.toBeNull();
+  });
+
+  // `reason` is what keeps the two apart. With `degraded` alone, both of these log the identical
+  // line, which is the conflation § 2 exists to remove.
+  it('a rejection and a hard-expired transient failure log DIFFERENT reasons', async () => {
+    const run = async (refresh: () => Promise<never>) => {
+      const store = new MemorySessionStore();
+      await store.set('s', makeRecord({ accessExpiresAt: Date.now() - 1 }), 60_000, null);
+      const { logger, events } = recordingLogger();
+      await resolveSession({ ...deps(store, refresh), logger }, 's').catch(() => undefined);
+      return events.find(([name]) => name === 'session.refresh_failed')?.[1];
+    };
+
+    expect(await run(rejected)).toMatchObject({ reason: 'rejected' });
+    expect(await run(transient)).toMatchObject({ reason: 'transient' });
+  });
+
+  // Invariant 4 still holds on the NEW path. The degrade returns EARLY from inside the try block,
+  // so it depends entirely on the `finally` to release the lock. If that early return were ever
+  // moved outside the try, every later request for this session would wait the full lockWaitMs
+  // behind a lock nobody holds — and no other test in this file exercises a return (rather than a
+  // throw) out of the refresh catch.
+  it('releases the lock when the refresh fails and the caller degrades', async () => {
+    const store = new MemorySessionStore();
+    await store.set('s', makeRecord({ accessExpiresAt: Date.now() + 30_000 }), 60_000, null);
+
+    const out = await resolveSession({ ...deps(store, transient), skewMs: 60_000 }, 's');
+
+    expect(out?.refreshState).toBe('failed');
+    expect(await store.tryAcquireLock('s', 'next', 5_000)).toBe(true); // false if the lock leaked
+  });
+
+  // The degrade must return the POST-lock re-read, not the pre-lock copy: between the two, another
+  // holder may have persisted a newer record, and returning the stale outer one would hand the
+  // caller an access token that has already been rotated away.
+  it('degrades on the post-lock re-read, not the stale pre-lock copy', async () => {
+    const store = new MemorySessionStore();
+    const stale = makeRecord({ rev: 0, accessToken: 'STALE-AT', accessExpiresAt: Date.now() + 30_000 });
+    const newer = makeRecord({ rev: 1, accessToken: 'NEWER-AT', accessExpiresAt: Date.now() + 30_000 });
+    await store.set('s', newer, 60_000, null);
+
+    const originalGet = store.get.bind(store);
+    let getCalls = 0;
+    store.get = (sid: string) => {
+      getCalls += 1;
+      return getCalls === 1 ? Promise.resolve(stale) : originalGet(sid);
+    };
+
+    const out = await resolveSession({ ...deps(store, transient), skewMs: 60_000 }, 's');
+
+    expect(out?.accessToken).toBe('NEWER-AT');
+    expect(out?.refreshState).toBe('failed');
+  });
+
+  // § 2.3's cap re-check. The window is NARROW and the test is deliberately slow because of it:
+  // a record whose absolute cap has already passed never reaches the refresh at all (:90 and :107
+  // both delete it first), so the only way to reach this branch with a passed cap is for the cap
+  // to expire DURING the refresh call — which runtime.ts:118-120 bounds at 2x the OIDC HTTP
+  // timeout. The 40ms cap against a 150ms refresh gives a 110ms margin.
+  //
+  // Without Math.min, the degrade returns a session that is past its own absolute cap.
+  it('does not degrade past the absolute cap when the cap expires during the refresh', async () => {
+    const store = new MemorySessionStore();
+    const now = Date.now();
+    await store.set('s', makeRecord({ accessExpiresAt: now + 30_000, absoluteExpiresAt: now + 40 }), 60_000, null);
+    const slowTransient = () => new Promise<never>((_, reject) => setTimeout(() => reject(new Error('oidc refresh_token_grant failed: TypeError')), 150));
+
+    await expect(resolveSession({ ...deps(store, slowTransient), skewMs: 60_000 }, 's')).rejects.toThrow(/refresh_token_grant/);
+  });
+
+  // The timeout branch at single-flight.ts:180-185 has the identical hole and gets the identical
+  // fix. Here the time passes in the lock WAIT rather than in the refresh: lockWaitMs of 150
+  // against a 40ms cap means the deadline is reached well after the cap expired.
+  it('the lock-timeout branch does not degrade past the absolute cap', async () => {
+    const store = new MemorySessionStore();
+    const now = Date.now();
+    await store.set('s', makeRecord({ accessExpiresAt: now + 30_000, absoluteExpiresAt: now + 40 }), 60_000, null);
+    store.tryAcquireLock = () => Promise.resolve(false); // never win the lock
+
+    const out = await resolveSession({ ...deps(store, () => Promise.reject(new Error('unused'))), skewMs: 60_000, lockWaitMs: 150 }, 's');
+
+    expect(out).toBeNull();
   });
 });
