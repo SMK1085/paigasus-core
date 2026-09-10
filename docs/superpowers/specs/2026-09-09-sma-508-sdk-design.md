@@ -427,6 +427,11 @@ The token is a parameter to the **client**, never to `getTransport`, so it is st
 cached object. `Auth` is a union rather than an optional so that an unauthenticated call — the health
 check is the real case — is a written decision rather than an omission.
 
+**Superseded in part by SMA-627.** § 7.4 describes what the SDK *sends*; it does not describe what
+it does with a header the CALLER sends. `{ anonymous: true }` originally left a caller-supplied
+`authorization` header in place, and the bearer arm silently overwrote one. Both are now refused —
+see `docs/superpowers/specs/2026-09-10-sma-627-anonymous-authorization-header-design.md`.
+
 ### 7.5 A client is request-scoped; the transport is not
 
 The transport is cached and shared deliberately (§ 7.1–§ 7.3). The **client** returned by

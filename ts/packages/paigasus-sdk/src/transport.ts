@@ -25,6 +25,12 @@ export type TransportOptions = {
 /**
  * A union rather than an optional, so that an unauthenticated call — the health check is the real
  * case — is a written decision rather than an omission (spec § 7.4).
+ *
+ * The client OWNS the `authorization` header. A caller-supplied one — via `CallOptions.headers` —
+ * is refused on BOTH arms rather than forwarded or overwritten, so `{ anonymous: true }` means what
+ * it says (SMA-627). Two consequences worth knowing before you hit them: `Bearer` is the only
+ * Authorization scheme this client can send, and a credential aimed at an intermediary belongs in
+ * `proxy-authorization`, which this client does not touch.
  */
 export type Auth = { readonly bearer: string } | { readonly anonymous: true };
 
