@@ -568,33 +568,63 @@ describe('a failing refresh (SMA-626 § 2.3)', () => {
     expect(out?.refreshState).toBe('failed');
   });
 
-  // § 2.3's cap re-check. The window is NARROW and the test is deliberately slow because of it:
-  // a record whose absolute cap has already passed never reaches the refresh at all (:90 and :107
-  // both delete it first), so the only way to reach this branch with a passed cap is for the cap
-  // to expire DURING the refresh call — which runtime.ts:118-120 bounds at 2x the OIDC HTTP
-  // timeout. The 40ms cap against a 150ms refresh gives a 110ms margin.
+  // § 2.3's cap re-check. The window is NARROW: a record whose absolute cap has already passed
+  // never reaches the refresh at all (single-flight.ts:103 and :120 both delete it first), so the
+  // only way to reach this branch with a passed cap is for the cap to expire DURING the refresh
+  // call — which runtime.ts:118-120 bounds at 2x the OIDC HTTP timeout.
+  //
+  // The cap is ANCHORED TO THE POST-LOCK READ, not to setup time (review I2). A fixture-time
+  // `absoluteExpiresAt: Date.now() + 40` would put the whole of setup, the outer read and the lock
+  // acquisition inside the 40ms budget — and a loaded CI runner stalling there makes :120 delete
+  // the record and return null, so `rejects` fails with "resolved null". Overriding the SECOND
+  // `store.get` (the same idiom as the post-lock re-read test above) means only the gap between
+  // :116 and :120 counts, which is one continuation with no `await` in it. The 150ms setTimeout
+  // then supplies the entire margin, and a timer can fire late but never early.
   //
   // Without Math.min, the degrade returns a session that is past its own absolute cap.
   it('does not degrade past the absolute cap when the cap expires during the refresh', async () => {
     const store = new MemorySessionStore();
-    const now = Date.now();
-    await store.set('s', makeRecord({ accessExpiresAt: now + 30_000, absoluteExpiresAt: now + 40 }), 60_000, null);
+    // The stored record's own cap is a day out, so the OUTER check at :103 can never fire.
+    await store.set('s', makeRecord({ accessExpiresAt: Date.now() + 30_000 }), 60_000, null);
     const slowTransient = () => new Promise<never>((_, reject) => setTimeout(() => reject(new Error('oidc refresh_token_grant failed: TypeError')), 150));
 
+    const originalGet = store.get.bind(store);
+    let getCalls = 0;
+    store.get = async (sid: string) => {
+      getCalls += 1;
+      const rec = await originalGet(sid);
+      // Call 2 is the post-lock re-read. Give it a cap 40ms out, measured from THIS moment — the
+      // refresh below takes 150ms, so the cap is reliably past by the time the catch classifies.
+      return getCalls === 2 && rec !== null ? { ...rec, absoluteExpiresAt: Date.now() + 40 } : rec;
+    };
+
     await expect(resolveSession({ ...deps(store, slowTransient), skewMs: 60_000 }, 's')).rejects.toThrow(/refresh_token_grant/);
+    expect(getCalls).toBeGreaterThanOrEqual(2); // the post-lock re-read really was the one capped
   });
 
-  // The timeout branch at single-flight.ts:180-185 has the identical hole and gets the identical
-  // fix. Here the time passes in the lock WAIT rather than in the refresh: lockWaitMs of 150
-  // against a 40ms cap means the deadline is reached well after the cap expired.
+  // The timeout branch at single-flight.ts:236 has the identical hole and gets the identical fix.
+  // Here the time passes in the lock WAIT rather than in the refresh: a 750ms lockWaitMs against a
+  // 250ms cap means the deadline is reached well after the cap expired.
+  //
+  // THE EVENT ASSERTION IS WHAT MAKES THIS TEST HONEST (review I1), not the margin. `out` being
+  // null is ALSO what the outer cap check at :103-106 returns when the cap passes during setup —
+  // so on `expect(out).toBeNull()` alone, a slow runner would not flake red, it would pass GREEN
+  // while never reaching the branch under test, and it would keep passing with Math.min deleted
+  // from :236. `session.refresh_timeout` fires at :228, INSIDE this branch and nowhere else, so
+  // asserting it makes the vacuous pass impossible at any load. The wider margins below are the
+  // second measure, not the control.
   it('the lock-timeout branch does not degrade past the absolute cap', async () => {
     const store = new MemorySessionStore();
     const now = Date.now();
-    await store.set('s', makeRecord({ accessExpiresAt: now + 30_000, absoluteExpiresAt: now + 40 }), 60_000, null);
+    await store.set('s', makeRecord({ accessExpiresAt: now + 30_000, absoluteExpiresAt: now + 250 }), 60_000, null);
     store.tryAcquireLock = () => Promise.resolve(false); // never win the lock
+    const { logger, events } = recordingLogger();
 
-    const out = await resolveSession({ ...deps(store, () => Promise.reject(new Error('unused'))), skewMs: 60_000, lockWaitMs: 150 }, 's');
+    const out = await resolveSession({ ...deps(store, () => Promise.reject(new Error('unused'))), logger, skewMs: 60_000, lockWaitMs: 750 }, 's');
 
+    // Proof the lock-timeout branch was reached at all. Without this the assertion below is
+    // satisfied by the outer cap delete, which never touches the code this test exists to guard.
+    expect(events).toContainEqual(['session.refresh_timeout', { sid: sidTag('s') }]);
     expect(out).toBeNull();
   });
 });
