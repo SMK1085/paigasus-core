@@ -3,7 +3,7 @@
 // The `./chat` entry (spec § 8). GUARDED and at src/ root, like every other guarded entry.
 import './server-guard.js';
 
-import { CORRELATION_HEADER, REQUEST_ID_HEADER, mapError } from './errors/map-error.js';
+import { CORRELATION_HEADER, REQUEST_ID_HEADER, firstNonEmpty, mapError } from './errors/map-error.js';
 import type { ErrorInput, FrameIds } from './errors/map-error.js';
 import type { PaigasusError, TransportCause } from './errors/types.js';
 
@@ -164,7 +164,16 @@ export interface ChatClient {
 
 /** The two success-arm ids, read off the same header names `mapError` maps an error with. */
 function readIds(headers: Headers): { correlationId: string | null; requestId: string | null } {
-  return { correlationId: headers.get(CORRELATION_HEADER), requestId: headers.get(REQUEST_ID_HEADER) };
+  // `firstNonEmpty`, not a raw `get`. `Headers.get()` returns '' for a header that is PRESENT but
+  // empty, and '' is an invalid value for a field whose `null` means "the wire carried no id".
+  //
+  // This is the SAME defect CodeRabbit reported in map-error.ts, one level up, and it survived the
+  // first fix because that fix guarded only the sites the finding named. The framing to avoid is
+  // "guard the fallback chain": the chain was never the point — '' is invalid whether or not
+  // anything follows it. Found by the parallel implementation's author on PR #231, who hit the
+  // mirror image of this and traced why the wrong reasoning was plausible enough to survive
+  // their own re-review.
+  return { correlationId: firstNonEmpty(headers.get(CORRELATION_HEADER)), requestId: firstNonEmpty(headers.get(REQUEST_ID_HEADER)) };
 }
 
 /**

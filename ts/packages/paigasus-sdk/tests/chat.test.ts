@@ -62,6 +62,31 @@ describe('the chat client sends a credential', () => {
   });
 });
 
+// Found by the author of the parallel implementation on PR #231, not by CodeRabbit: its finding
+// named map-error.ts only, and fixing exactly what was named left the identical defect here.
+describe('an empty identifier header on a ChatResult is normalized to null', () => {
+  it('on the json arm', async () => {
+    const fetchImpl = vi.fn(() =>
+      Promise.resolve(new Response(JSON.stringify({ id: 'x' }), { status: 200, headers: { 'content-type': 'application/json', 'paigasus-correlation-id': '', 'paigasus-request-id': '' } })),
+    );
+    const client = createChatClient({ baseUrl: BASE, fetch: fetchImpl }, { bearer: 'T' });
+    const result = await client.completions({});
+    if (result.kind !== 'json') throw new Error('unreachable');
+    expect(result.correlationId).toBeNull();
+    expect(result.requestId).toBeNull();
+  });
+
+  it('on the stream arm', async () => {
+    const body = new ReadableStream<Uint8Array>({ start: (c) => c.close() });
+    const fetchImpl = vi.fn(() => Promise.resolve(new Response(body, { status: 200, headers: { 'content-type': 'text/event-stream', 'paigasus-correlation-id': '', 'paigasus-request-id': '' } })));
+    const client = createChatClient({ baseUrl: BASE, fetch: fetchImpl }, { bearer: 'T' });
+    const result = await client.completions({ stream: true });
+    if (result.kind !== 'stream') throw new Error('unreachable');
+    expect(result.correlationId).toBeNull();
+    expect(result.requestId).toBeNull();
+  });
+});
+
 describe('the two response shapes', () => {
   it('returns kind json for a 2xx JSON response', async () => {
     const fetchImpl = vi.fn(() => Promise.resolve(new Response(JSON.stringify({ id: 'chat-1' }), { status: 200, headers: { 'content-type': 'application/json' } })));

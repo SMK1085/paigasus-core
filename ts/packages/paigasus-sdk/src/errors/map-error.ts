@@ -57,8 +57,14 @@ function parseRetryable(value: string | null | undefined): boolean | null {
   return null;
 }
 
-/** The first value that is a non-empty string, else `null`. An empty id is no id. */
-function firstNonEmpty(...values: readonly (string | null | undefined)[]): string | null {
+/**
+ * The first value that is a non-empty string, else `null`. An empty id is no id.
+ *
+ * EXPORTED because `chat.ts` reads the same two headers onto `ChatResult`. Use it at EVERY id read,
+ * not only where a fallback chain exists: `''` is an invalid value for a field whose `null` means
+ * "the wire carried no id", independently of whether anything follows it.
+ */
+export function firstNonEmpty(...values: readonly (string | null | undefined)[]): string | null {
   for (const value of values) {
     if (typeof value === 'string' && value !== '') return value;
   }
