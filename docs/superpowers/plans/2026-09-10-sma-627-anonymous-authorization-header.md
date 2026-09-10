@@ -304,11 +304,17 @@ In `ts/packages/paigasus-sdk/src/transport.ts`, replace the first line of the in
   // aimed at an intermediary; note that `Bearer` is consequently the only Authorization scheme
   // this client can send at all (spec § 3.3).
   //
-  // This reasoning holds only while `authInterceptor` is the WHOLE interceptor array. Connect
-  // applies the interceptor at the END of the array first, so one appended after this that set an
-  // `authorization` header would run first and trip this refusal against the SDK's own writing.
+  // This reasoning holds only while `authInterceptor` is the WHOLE interceptor array, and the two
+  // directions are NOT symmetric. MEASURED on connect 2.2.0: `applyInterceptors` reverses the array
+  // before wrapping, so the FIRST entry is the outermost layer and a request "goes through the
+  // outermost layer first" (interceptor.d.ts:18-21). An interceptor PREPENDED before this one runs
+  // first, and a header it set would trip this refusal — loudly, which is fine. An interceptor
+  // APPENDED after this one runs LATER, and would override the decision made here in SILENCE:
+  // overwriting the bearer, or adding a credential to a call declared { anonymous: true }. That is
+  // the direction that would defeat this whole rule. (Read the d.ts phrase "the interceptor at the
+  // end of the array is applied first" as WRAPPED first — innermost — therefore run last.)
   // tests/transport-wiring.test.ts:49 pins `interceptors` to exactly [authInterceptor]; that pin
-  // is this invariant's guard.
+  // is this invariant's guard, and it reds on an insert at either end.
   if (req.header.has('authorization')) {
     throw new ConnectError(
       "@paigasus/sdk: refusing a caller-supplied `authorization` header — this client owns it. Pass the credential as { bearer } to the client factory, or use { anonymous: true } for an unauthenticated call. Do not forward an incoming request's headers wholesale; send the session-bound token instead. A credential for an intermediary belongs in `proxy-authorization`, which this client does not touch.",

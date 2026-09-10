@@ -91,9 +91,9 @@ export function requestHeader(useBinaryFormat, timeoutMs, userProvidedHeaders) {
     const result = new Headers(userProvidedHeaders !== null && userProvidedHeaders !== void 0 ? userProvidedHeaders : {});
 ```
 
-The unary path reaches it through a wrapper, not directly: `dist/esm/protocol-grpc/transport.js:76`
+The unary path reaches it through a wrapper, not directly: `dist/esm/protocol-grpc/transport.js:73`
 calls `requestHeaderWithCompression(...)`, which calls `requestHeader` at
-`request-header.js:48`. The result becomes the request's `header`, and `runUnaryCall` applies the
+`request-header.js:44`. The result becomes the request's `header`, and `runUnaryCall` applies the
 interceptors to that request.
 
 So `CallOptions.headers` is the **base** of `req.header`, and the interceptor sees whatever the
@@ -137,8 +137,8 @@ as a populated one, with no special case.
 
 `authInterceptor` is an `Interceptor`, whose `next` is
 `AnyFn = (req: UnaryRequest | StreamRequest) => …` (`dist/esm/interceptor.d.ts:37`), and
-`createGrpcTransport` installs the same interceptor array on both arms. `protocol-grpc/transport.js:156`
-seeds a stream request's `header` from the caller's headers exactly as `:76` does for unary, and
+`createGrpcTransport` installs the same interceptor array on both arms. `protocol-grpc/transport.js:153`
+seeds a stream request's `header` from the caller's headers exactly as `:73` does for unary, and
 `runStreamingCall` routes a rejection through the same `setupSignal` `abort`. The design therefore
 holds unchanged on the streaming path.
 
@@ -327,12 +327,24 @@ renders it as `invalid-input` rather than falling through to `generic`; and that
 never carry the header's value.
 
 **One invariant needs stating that § 3.6 does not cover.** § 3.6 reasons about ordering *inside*
-`authInterceptor`. It says nothing about ordering *across* an interceptor array — and Connect
-applies "the interceptor at the end of the array … first" (`dist/esm/interceptor.d.ts:28-29`), so a
-second interceptor appended after `authInterceptor` would run **before** it and, if it set an
-`authorization` header, would trip this refusal against the SDK's own writing. The guard already
-exists: `tests/transport-wiring.test.ts:49` pins `expect(options.interceptors).toEqual([authInterceptor])`
-to the exact one-element array. The comment names that test, so whoever adds a second interceptor
+`authInterceptor`. It says nothing about ordering *across* an interceptor array, and the two
+directions there are not symmetric.
+
+MEASURED on connect 2.2.0: `applyInterceptors` (`dist/esm/interceptor.js`) is
+`for (const i of interceptors.concat().reverse()) { next = i(next); }`, so for `[A, B]` it builds
+`A(B(next))` — the FIRST entry is the outermost layer, and a request "goes through the outermost
+layer first" (`dist/esm/interceptor.d.ts:18-21`). The `d.ts` phrase "the interceptor at the end of
+the array is applied first" (`:28-29`) means *wrapped* first, hence innermost, hence run **last**.
+
+So an interceptor **prepended** before `authInterceptor` runs first, and a header it set would trip
+this refusal — a loud failure, which is acceptable. An interceptor **appended** after it runs later
+and would override this decision **silently**: overwriting the bearer, or adding a credential to a
+call declared `{ anonymous: true }`. That is the direction that defeats the rule, and it is the one
+a maintainer is most likely to reach for.
+
+The guard already exists: `tests/transport-wiring.test.ts:49` pins
+`expect(options.interceptors).toEqual([authInterceptor])` to the exact one-element array, and reds
+on an insert at either end. The code comment names that test, so whoever adds a second interceptor
 finds the constraint at the same time as the failure.
 
 **The `Auth` doc comment carries the rule too** (`src/transport.ts:29-32`). A consumer reads the
@@ -348,10 +360,12 @@ All in `ts/packages/paigasus-sdk/tests/transport.test.ts`, beside the existing e
 refusals, because that file is where interceptor behaviour is already proven and the enforcement
 site is the interceptor.
 
-**Two helper changes**, so the diff is predictable. `fakeUnaryRequest()` takes no arguments and
-always returns `new Headers()` (`tests/transport.test.ts:100-106`); it gains an optional
-`headers?: HeadersInit` parameter defaulting to none. A `fakeStreamRequest()` sibling is added for
-case 10, identical but with `stream: true`. Case 6 additionally needs a **recording** `next` rather
+**One helper addition, no helper signature change.** `fakeUnaryRequest()` keeps its zero-argument
+signature and still always returns `new Headers()` (`tests/transport.test.ts:100-106`); a test that
+needs a header calls `req.header.set(...)` after construction instead, because `HeadersInit` does
+not resolve in this package — its tsconfig excludes the DOM lib (`tests/iam.test.ts:18-23`). A
+`fakeStreamRequest()` sibling is added for case 10, identical but with `stream: true`, since no
+existing helper builds a stream request. Case 6 additionally needs a **recording** `next` rather
 than the shared `noopNext`, for the reason given below.
 
 | # | Case | Expected |
@@ -415,7 +429,7 @@ package's existing `tests/transport-wiring.test.ts` takes the same line — it a
 `Transport.unary`'s `header` parameter into `requestHeaderWithCompression` — not the seeding
 itself, which M1 reads directly. If a future `@connectrpc/connect` stopped seeding `req.header`
 from `CallOptions.headers`, every test in § 5 would still pass while the rule stopped applying to
-the path a caller actually uses. Re-read `request-header.js` and `transport.js:76,156` on a connect
+the path a caller actually uses. Re-read `request-header.js` and `transport.js:73,153` on a connect
 major bump.
 
 ## 6. Documentation
