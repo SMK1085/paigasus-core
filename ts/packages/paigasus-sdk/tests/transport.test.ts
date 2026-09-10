@@ -182,3 +182,115 @@ describe('authInterceptor (spec § 7.4)', () => {
     expect(presentationForGrpcCode((error as ConnectError).code)).toBe('invalid-input');
   });
 });
+
+describe('a caller-supplied authorization header is refused (SMA-627 spec § 3)', () => {
+  it('refuses it on the anonymous arm, rather than forwarding a credential from a client declared unauthenticated', async () => {
+    const req = fakeUnaryRequest();
+    req.contextValues.set(authContextKey, { anonymous: true });
+    req.header.set('authorization', 'Bearer caller-token');
+    await expect(authInterceptor(noopNext)(req)).rejects.toThrow(/authorization/);
+  });
+
+  it('refuses it on the bearer arm, rather than silently overwriting it', async () => {
+    const req = fakeUnaryRequest();
+    req.contextValues.set(authContextKey, { bearer: 'sdk-token' });
+    req.header.set('authorization', 'Bearer caller-token');
+    await expect(authInterceptor(noopNext)(req)).rejects.toThrow(/authorization/);
+  });
+
+  // Headers.has is case-insensitive by construction, so these two cannot fail against any
+  // plausible implementation. Kept as defence in depth, NOT counted as coverage (spec § 5.1).
+  it.each(['Authorization', 'AUTHORIZATION'])('refuses it spelled %s', async (name) => {
+    const req = fakeUnaryRequest();
+    req.contextValues.set(authContextKey, { anonymous: true });
+    req.header.set(name, 'Bearer caller-token');
+    await expect(authInterceptor(noopNext)(req)).rejects.toThrow(/authorization/);
+  });
+
+  // A present-but-empty header is still the caller reaching around the binding, and Headers.has
+  // reports it as present (spec § 3.4). The bearer row additionally proves the check runs BEFORE
+  // req.header.set — after it, the header would be non-empty and the case would be meaningless.
+  it.each([
+    ['anonymous', { anonymous: true }],
+    ['bearer', { bearer: 'sdk-token' }],
+  ] as const)('refuses a present-but-empty header on the %s arm', async (_label, auth) => {
+    const req = fakeUnaryRequest();
+    req.contextValues.set(authContextKey, auth);
+    req.header.set('authorization', '');
+    await expect(authInterceptor(noopNext)(req)).rejects.toThrow(/authorization/);
+  });
+
+  it('reports the HEADER, not the empty bearer, when a request is wrong in both ways', async () => {
+    const req = fakeUnaryRequest();
+    req.contextValues.set(authContextKey, { bearer: '' });
+    req.header.set('authorization', 'Bearer caller-token');
+
+    // The mutation this detects: a check placed AFTER the contextValues.get branch reports the
+    // empty bearer instead, and the ordering spec § 3.6 fixes becomes accidental.
+    const message = ((await rejection(authInterceptor(noopNext)(req))) as Error).message;
+    expect(message).toMatch(/authorization/);
+    expect(message).not.toMatch(/empty|whitespace/);
+  });
+
+  it('refuses with Code.InvalidArgument, so the error map reports invalid-input', async () => {
+    const req = fakeUnaryRequest();
+    req.contextValues.set(authContextKey, { anonymous: true });
+    req.header.set('authorization', 'Bearer caller-token');
+
+    const error = await rejection(authInterceptor(noopNext)(req));
+    expect(error).toBeInstanceOf(ConnectError);
+    expect((error as ConnectError).code).toBe(Code.InvalidArgument);
+    expect(presentationForGrpcCode((error as ConnectError).code)).toBe('invalid-input');
+  });
+
+  it('names the cause and both remedies, and NEVER echoes the credential', async () => {
+    const req = fakeUnaryRequest();
+    req.contextValues.set(authContextKey, { anonymous: true });
+    req.header.set('authorization', 'Bearer super-secret-value');
+
+    // The mutation this detects: `...: ${req.header.get('authorization')}`, the obvious
+    // debugging-friendly form, which writes a live credential into an exception message, a
+    // container log and any error reporter (spec § 3.5).
+    const message = ((await rejection(authInterceptor(noopNext)(req))) as Error).message;
+    expect(message).toMatch(/authorization/);
+    expect(message).toMatch(/bearer/i);
+    expect(message).toMatch(/anonymous/);
+    expect(message).toMatch(/proxy-authorization/);
+    expect(message).not.toContain('super-secret-value');
+  });
+
+  it('leaves proxy-authorization untouched on the anonymous arm, and adds no authorization', async () => {
+    const req = fakeUnaryRequest();
+    req.contextValues.set(authContextKey, { anonymous: true });
+    req.header.set('proxy-authorization', 'Basic Zm9vOmJhcg==');
+
+    // A RECORDING next, not the shared noopNext: noopNext returns the SAME Headers object it was
+    // given (tests/transport.test.ts:120), so asserting on the returned header would prove nothing
+    // about `next` having been called at all.
+    const seen: (string | null)[] = [];
+    const recordingNext: Parameters<typeof authInterceptor>[0] = (r) => {
+      seen.push(r.header.get('proxy-authorization'));
+      return Promise.resolve({ stream: false, header: r.header } as unknown as UnaryResponse);
+    };
+
+    await authInterceptor(recordingNext)(req);
+    expect(seen).toEqual(['Basic Zm9vOmJhcg==']);
+    expect(req.header.get('authorization')).toBeNull();
+  });
+
+  it('claims exactly one header: proxy-authorization, cookie and a custom header survive a bearer call', async () => {
+    const req = fakeUnaryRequest();
+    req.contextValues.set(authContextKey, { bearer: 'sdk-token' });
+    req.header.set('proxy-authorization', 'Basic Zm9vOmJhcg==');
+    req.header.set('cookie', 'sid=abc');
+    req.header.set('x-paigasus-probe', 'kept');
+
+    // The mutation these detect: a check written on a substring or a regex rather than an exact
+    // field name, which would refuse proxy-authorization too (spec § 3.3).
+    await authInterceptor(noopNext)(req);
+    expect(req.header.get('authorization')).toBe('Bearer sdk-token');
+    expect(req.header.get('proxy-authorization')).toBe('Basic Zm9vOmJhcg==');
+    expect(req.header.get('cookie')).toBe('sid=abc');
+    expect(req.header.get('x-paigasus-probe')).toBe('kept');
+  });
+});

@@ -47,6 +47,38 @@ export const DEFAULT_TIMEOUT_MS = 10_000;
 export const authContextKey = createContextKey<Auth>({ anonymous: true }, { description: '@paigasus/sdk per-call authorization' });
 
 export const authInterceptor: Interceptor = (next) => async (req) => {
+  // The SDK owns `authorization`. A request that reaches here already carrying one is refused on
+  // BOTH Auth arms (spec § 3): on the anonymous arm the header would otherwise be forwarded from a
+  // client explicitly declared unauthenticated, and on the bearer arm the `set` below would
+  // silently overwrite it without a word. One check closes both.
+  //
+  // Checked BEFORE contextValues.get, deliberately (spec § 3.6). A request that is wrong in both
+  // ways then reports the header deterministically rather than depending on an evaluation order
+  // nobody wrote down, and the check can never trip over the header the bearer branch itself
+  // writes three lines below.
+  //
+  // ConnectError with Code.InvalidArgument, not a plain Error, for the reason given on the
+  // empty-bearer throw below: Code.Unknown has no row in src/errors/transport-status.ts and
+  // presents as `generic`, blaming the service for a caller error (spec § 3.1).
+  //
+  // The message must NEVER carry the header's VALUE — that would put a live credential into an
+  // exception message, a container log and any error reporter (spec § 3.5). It names
+  // `proxy-authorization` because that field stays untouched and is the way out for a credential
+  // aimed at an intermediary; note that `Bearer` is consequently the only Authorization scheme
+  // this client can send at all (spec § 3.3).
+  //
+  // This reasoning holds only while `authInterceptor` is the WHOLE interceptor array. Connect
+  // applies the interceptor at the END of the array first, so one appended after this that set an
+  // `authorization` header would run first and trip this refusal against the SDK's own writing.
+  // tests/transport-wiring.test.ts:49 pins `interceptors` to exactly [authInterceptor]; that pin
+  // is this invariant's guard.
+  if (req.header.has('authorization')) {
+    throw new ConnectError(
+      "@paigasus/sdk: refusing a caller-supplied `authorization` header — this client owns it. Pass the credential as { bearer } to the client factory, or use { anonymous: true } for an unauthenticated call. Do not forward an incoming request's headers wholesale; send the session-bound token instead. A credential for an intermediary belongs in `proxy-authorization`, which this client does not touch.",
+      Code.InvalidArgument,
+    );
+  }
+
   const auth = req.contextValues.get(authContextKey);
   if ('bearer' in auth) {
     // An empty or whitespace-only bearer is refused here, at the point it would be BOUND into the
