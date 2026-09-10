@@ -28,3 +28,9 @@ tasks:
     inputs:
       - '/ts/packages/paigasus-proto/src/**/*'
       - 'vitest.config.ts'
+      # SMA-625, spec § 8.4. tests/terminal-frame.test.ts reads TERMINAL_SSE_ERROR out of this
+      # Rust file by constant name. Without this input, editing that constant selects NO
+      # paigasus-sdk-ts task and Moon serves a cached PASS on exactly the PR that changes the
+      # frame — the same vacuity M11 measured for the error registry. The control on this line is
+      # `run_task_case_ci "gateway->sdk"` in ci/affected-graph/run.sh.
+      - '/rs/crates/services/paigasus-gateway/src/adapters/http/chat.rs'

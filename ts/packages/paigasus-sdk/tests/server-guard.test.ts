@@ -4,7 +4,7 @@
 // list, so an entry point added later is covered the day it is added — which is what makes it safe
 // for PR B to ship two entries while the design spec's § 6.1 names five (see the plan's D1).
 import { readdirSync, readFileSync, writeFileSync, unlinkSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import { dirname, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import ts from 'typescript';
 import { describe, expect, it } from 'vitest';
@@ -16,7 +16,25 @@ const PKG_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 // with no runtime import and no server-only evaluation (spec § 6.3). Every OTHER entry is guarded.
 const UNGUARDED_ENTRIES = new Set(['./errors/types']);
 
-const GUARD_IMPORT = "import './server-guard.js';";
+// The guard's expected specifier depends on where the entry FILE sits, not on one fixed literal.
+// `src/index.ts` needs './server-guard.js'; a nested entry such as `src/errors/map-error.ts` needs
+// '../server-guard.js'. Spec § 6.2 layer 3 always said this test "resolves the path relative to
+// each entry" — the original literal did not, so a nested guarded entry could not satisfy it and
+// the file layout had to be bent around the test. Ported from PR #231, which fixed the test
+// instead. (SMA-625)
+const GUARD_MODULE = 'src/server-guard.js';
+
+function expectedGuardImport(target: string): string {
+  const fromDir = dirname(resolve(PKG_ROOT, target));
+  const specifier = relative(fromDir, resolve(PKG_ROOT, GUARD_MODULE)).split(sep).join('/');
+  return `import '${specifier.startsWith('.') ? specifier : `./${specifier}`}';`;
+}
+
+/** Does this source carry an import declaration of the server guard, at any relative depth? */
+function importsServerGuard(source: string, fileName: string): boolean {
+  const parsed = ts.createSourceFile(fileName, source, ts.ScriptTarget.ESNext, true);
+  return parsed.statements.some((statement) => ts.isImportDeclaration(statement) && ts.isStringLiteral(statement.moduleSpecifier) && /(?:^|\/)server-guard\.js$/.test(statement.moduleSpecifier.text));
+}
 
 function readPackageExports(): Record<string, string> {
   const raw = readFileSync(resolve(PKG_ROOT, 'package.json'), 'utf8');
@@ -49,12 +67,17 @@ describe('AC 1 — every guarded entry point imports the server guard first', ()
 
   it.each(entries.filter(([name]) => !UNGUARDED_ENTRIES.has(name)))('entry %s imports the guard as its first import statement', (_name, target) => {
     const source = readFileSync(resolve(PKG_ROOT, target), 'utf8');
-    expect(firstImportStatement(source)).toBe(GUARD_IMPORT);
+    expect(firstImportStatement(source)).toBe(expectedGuardImport(target));
   });
 
+  // PARSED, not pattern-matched, and for the reason the second describe block below already
+  // records: a text match cannot tell an import from a mention. The first attempt here used a
+  // regex and immediately flagged the prose in `errors/types.ts` that says the file must not gain
+  // a guard. It also rejects ANY server-guard specifier rather than only the spelling this
+  // entry's depth would produce, so a stray './server-guard.js' in a nested file is still caught.
   it.each(entries.filter(([name]) => UNGUARDED_ENTRIES.has(name)))('entry %s deliberately carries no guard', (_name, target) => {
-    const source = readFileSync(resolve(PKG_ROOT, target), 'utf8');
-    expect(source).not.toContain(GUARD_IMPORT);
+    const file = resolve(PKG_ROOT, target);
+    expect(importsServerGuard(readFileSync(file, 'utf8'), file)).toBe(false);
   });
 });
 

@@ -2,11 +2,16 @@
 
 # SMA-508 — `@paigasus/sdk`: Connect-ES gRPC clients and error mapping
 
-**Issue:** [SMA-508](https://linear.app/smaschek/issue/SMA-508)
+**Issue:** [SMA-508](https://linear.app/smaschek/issue/SMA-508), split into
+[SMA-624](https://linear.app/smaschek/issue/SMA-624) (PR A, merged `9f57d6e4`),
+[SMA-508](https://linear.app/smaschek/issue/SMA-508) (PR B, merged `2262801d`) and
+[SMA-625](https://linear.app/smaschek/issue/SMA-625) (PR C, §§ 8-10)
 **ADR:** ADR-0018 (Connect-ES over gRPC; no OpenAPI surface), ADR-0019 (Canonical error model, incl. Amendment A1)
 **Design source:** Frontend Architecture Scoping §§ 6, 7
 **Date:** 2026-09-09
-**Revision:** 2 — after the adversarial spec challenge. § 15 records what changed and what was rejected.
+**Revision:** 3 — §§ 8-10 re-challenged on their own after PRs A and B merged, and rewritten.
+§ 15.1 records what the second challenge changed. §§ 1-7 and 11-14 are Revision 2 plus the edits
+those findings forced. § 15 records the first challenge.
 
 **Versions this spec is written against.** `@connectrpc/connect` 2.2.0, `@connectrpc/connect-node`
 2.2.0, `@bufbuild/protobuf` 2.14.1, protoc-gen-es v2.13.0 (pinned in `buf.gen.yaml`), buf 1.70.0,
@@ -51,7 +56,7 @@ split is clean.
 
 ```
 ts/packages/paigasus-proto/          (existing package, widened)
-  src/error.ts                       asWireReason / fromWireReason — the codec (§ 9.2)
+  src/error.ts                       asWireReason / fromWireReason — the codec (§ 9.3)
   src/error.test.ts                  parity with the Rust rejection set
   src/generated/google/rpc/error_details_pb.ts   NEW, generated (§ 5)
 
@@ -65,18 +70,45 @@ ts/packages/paigasus-sdk/
     server-guard.ts     the single `import 'server-only'` site (§ 6.2)
     transport.ts        per-key transport cache (§ 7)
     iam.ts              typed client factories over the seven IAM services
-    chat.ts             the OpenAI-compatible chat client + createTerminalFrameParser (§ 8)
+    chat.ts             the "./chat" ENTRY; the chat client + createTerminalFrameParser (§ 8)
+    errors.ts           the "./errors" ENTRY; server-guarded; re-exports mapError + the types
     errors/
-      types.ts          PaigasusError, Presentation — NO server guard (§ 6.3)
-      presentation.ts   the reason -> presentation override table (§ 9.3)
-      transport-status.ts  gRPC Code and HTTP status -> Presentation (§ 9.2)
-      map-error.ts      mapError() — server-guarded
+      types.ts          the "./errors/types" ENTRY; PaigasusError, Presentation — NO guard (§ 6.3)
+      presentation.ts   the reason -> presentation override table (§ 9.4) — internal
+      transport-status.ts  gRPC Code and HTTP status -> Presentation (§ 9.2) — internal
+      map-error.ts      mapError() — internal, reached through ./errors
   tests/
 ```
 
 Tests live in `tests/`, matching `@paigasus/ui` and `@paigasus/next-config`. The two files added to
 `@paigasus/proto` follow *that* package's colocated `*.test.ts` convention instead — a package keeps
 its own habit.
+
+**Revision 2 moved the `./errors` entry to `src/errors.ts`. That was a correctness fix against the
+test as it then stood — and the CONSTRAINT it worked around no longer exists.** Revision 1 put every
+`errors` file one directory deep and named no entry file at all. PR B's merged
+`tests/server-guard.test.ts` pinned the guard import as a **literal string**, so a guarded entry at
+`src/errors/…`, which needs `import '../server-guard.js';`, could not satisfy it. § 6.2 layer 3 had
+always said the test resolves "the path relative to each entry"; PR B implemented a string compare
+instead, and the file layout was bent to fit the weaker test.
+
+**Superseded (§ 15.2, item 5).** That test now computes each entry's expected specifier from the
+entry's own directory, so a guarded entry may live at any depth. `src/errors.ts` staying at the root
+is now a layout preference, not a requirement — keep it for consistency with `src/iam.ts` and
+`src/chat.ts`, but a future nested guarded entry is legal and the test will check it correctly.
+
+Every **guarded entry** therefore sits at `src/` root, beside the existing `src/iam.ts` and
+`src/index.ts`. The internals stay under `src/errors/`, where no guard is needed because the entry
+evaluates it. `src/errors/types.ts` stays one deep: it is unguarded, and the unguarded assertion
+(`:57-60`) is `not.toContain`, which holds at any depth. `UNGUARDED_ENTRIES` in that test already
+lists `'./errors/types'`, so PR B anticipated this entry.
+
+**The root barrel names each re-export explicitly. It does not use `export *` for the new modules.**
+If both `chat.ts` and `errors.ts` re-exported `PaigasusError`, the ES semantics TypeScript follows
+would exclude the ambiguous name **silently** rather than erroring — the exact failure
+`ts/packages/paigasus-proto/src/iam.ts:5-14` documents for `ServiceInfo`, and the reason PR A split
+that package's surface. `src/index.ts` also re-exports the types from `errors/types.ts`, so
+`mapError`'s return type can be named from the root entry.
 
 ## 4. Three corrections this spec makes to its own inputs
 
@@ -241,13 +273,20 @@ offline (§ 5.2). Stated as a deliberate trade, not an oversight.
   ".":              "./src/index.ts",
   "./iam":          "./src/iam.ts",
   "./chat":         "./src/chat.ts",
-  "./errors":       "./src/errors/map-error.ts",
+  "./errors":       "./src/errors.ts",
   "./errors/types": "./src/errors/types.ts"
 }
 ```
 
 Subpaths exist so a caller that only maps an error does not pull `@connectrpc/connect-node` and its
 HTTP/2 stack into its module graph.
+
+**Corrected in the fix wave before PR (SMA-625, item 8):** this table said `./src/errors/map-error.ts`.
+The branch ships `./src/errors.ts` as the guarded `./errors` entry, one directory shallower than the
+internal `map-error.ts` module it re-exports from. `tests/server-guard.test.ts` pins the guard import
+as the literal string `"import './server-guard.js';"` and compares it with `toBe`, so a guarded entry
+one directory deeper — where the relative path would read `'../server-guard.js'` — cannot pass that
+test. `src/errors.ts` is therefore the only depth this entry can live at.
 
 ### 6.2 `server-only` — AC 1
 
@@ -405,64 +444,194 @@ neither request may carry the other's token.
 
 `POST /v1/chat/completions` on the gateway, the one hand-written surface (§ 4.1).
 
-- **Non-streaming:** `fetch`, JSON in, JSON out. A non-2xx body is the OpenAI envelope and goes to
-  `mapError` (§ 9.4 arm 3).
-- **Streaming:** the upstream `Response.body` is returned as a `ReadableStream` **passthrough**. The
-  SDK does not read, buffer, decode or re-encode it. The gateway forwards upstream SSE chunks
-  unbuffered (`chat.rs:128-137`); buffering here would undo that.
+**Revision 2 rewrote this section.** Revision 1 described response handling only. It gave no client
+signature, no credential, and no `fetch` seam. It also stated a timeout contract that contradicted
+its own passthrough rule. § 8.1 to § 8.5 replace it.
 
-Two facts the passthrough forces into the API, both from the gateway's own code:
+### 8.1 The client surface
 
-- A `stream: true` request that fails **before** the head is committed answers as plain JSON, not SSE
-  (`chat.rs:139-141`). The caller must branch on `content-type`, not on its own `stream` flag, so the
-  client returns `{ kind: 'json', … } | { kind: 'stream', body }` rather than making the caller guess.
-- A failure **after** the head is committed cannot change the status, so the gateway injects exactly
-  one terminal SSE frame carrying `code: "upstream-error"` and ends the stream (`chat.rs:63`).
-
-**Mid-stream errors are not surfaced by this client, and the arm that maps them is a caller tool.**
-The SDK never scans the stream, because scanning means buffering. So a terminal-frame parser is
-**exported** — a caller consuming its own stream drives it — rather than being an internal arm no
-code path reaches.
-
-A `ReadableStream` chunk is not guaranteed to contain one complete SSE record. An SSE record is
-delimited by a blank line, and a chunk boundary can fall anywhere, so a parser that reads a bare
-chunk is not merely lossy — it is lossy precisely on the split-frame case, the terminal error frame
-split across two chunks. `parseTerminalFrame(chunk: string)` would silently miss the terminal error
-in exactly the case it exists to catch. The exported shape is therefore a stateful incremental
-parser, not a function over one chunk:
+The endpoint is authenticated. `chat.rs:5-6` records that the G5 `require_iam_auth` middleware runs
+before the handler. `GatewayError::MissingBearer` answers `401` with code `missing-authorization`
+(`error.rs:122-128`). So the chat client needs a credential, and § 7.4's rule applies here too: a
+forgotten token must be a compile error, not a `401`.
 
 ```ts
-// Feed it chunks as they arrive; it buffers across boundaries and yields
-// each complete SSE record it can form.
-export function createTerminalFrameParser(): {
-  push(chunk: string): PaigasusError | null;
+interface ChatClientOptions {
+  baseUrl: string;
+  /** Bound for the response HEAD only. Default 10_000 ms. See § 8.4. */
+  headerTimeoutMs?: number;
+  /** The injection seam. Defaults to `globalThis.fetch`, read per call. */
+  fetch?: typeof globalThis.fetch;
+}
+
+export function createChatClient(opts: ChatClientOptions, auth: { bearer: string }): ChatClient;
+```
+
+Three decisions, each stated because an implementer would otherwise guess:
+
+- **`auth` is a required parameter and its type is not the `Auth` union.** § 7.4's union carries an
+  `{ anonymous: true }` arm for the IAM health check. No path through `chat_completions` accepts an
+  anonymous caller, so an anonymous arm here would be a legal value with no legal use. The narrower
+  type makes that a compile error. This is deliberately NOT a decision about SMA-627, which asks a
+  different question about the gRPC transport.
+- **The chat client does not use `getTransport` and shares none of its cache.** It calls `fetch`; it
+  builds no `Transport`. § 7.1's cache key rule does not reach it, and nothing here is cached.
+- **`fetch` is an optional field, read per call.** A module-load capture would make `vi.stubGlobal`
+  useless, and § 10's deadline, cancellation and streaming rows all need a stub. Reading
+  `globalThis.fetch` per call keeps the default correct when a host installs a dispatcher later.
+
+### 8.2 Two response shapes, and who maps an error
+
+The client returns a discriminated result. It never throws for a mapped error.
+
+```ts
+type ChatResult =
+  | { kind: 'json'; status: number; body: unknown; correlationId: string | null; requestId: string | null }
+  | { kind: 'stream'; body: ReadableStream<Uint8Array>; correlationId: string | null; requestId: string | null }
+  | { kind: 'error'; error: PaigasusError };
+```
+
+**Widened in the fix wave before PR (SMA-625, item 4), a deliberate deviation from the two-field arms
+above.** `correlation.rs:174-175` sets both id headers on every response head with no status guard, so
+a `200 text/event-stream` head carries them too — but the arm as first written discarded them. When
+such a stream then fails mid-flight, the failure routes through § 8.4's parser and `mapHttp(200, new
+Headers(), body)`, which has no head to read and so reports `correlationId: null` — the one case this
+package built a parser for was the one case with no reportable id. Reading the two ids off the
+original response head, on both success arms, closes that gap. This adds no `Headers` object to
+`ChatResult`, so AC 3 (no raw transport type reaches the browser) is unaffected.
+
+The caller must branch on `content-type`, not on its own `stream` flag. A `stream: true` request that
+fails **before** the head is committed answers as plain JSON, not SSE (`chat.rs:139-141`). Revision 1
+got this right and it stands.
+
+**Revision 1 left one question unanswered: does the SDK call `mapError`, or does the caller?** The
+answer is the SDK, on the non-2xx path, and the third arm above carries the result. A caller that
+receives `{ kind: 'error' }` has an already-mapped `PaigasusError` and needs no error knowledge of its
+own. `mapError` stays exported for arm 2 (§ 9.5), which has no in-SDK caller.
+
+### 8.3 Streaming is a passthrough
+
+The upstream `Response.body` is returned as the identical `ReadableStream` object. The SDK does not
+read, buffer, decode or re-encode it. The gateway forwards upstream chunks unbuffered
+(`chat.rs:194-220`, the comment and code at `:210-211`), and buffering here would undo that.
+
+**Citation corrected.** Revision 1 cited `chat.rs:128-137` for the unbuffered forwarding. Those lines
+build the success-stream response. The forwarding itself is at `chat.rs:194-220`.
+
+A failure **after** the head is committed cannot change the status. The gateway therefore injects one
+terminal SSE frame carrying `code: "upstream-error"` and ends the stream.
+
+### 8.4 The terminal-frame parser
+
+The SDK never scans the stream, because scanning means buffering. A terminal-frame parser is
+therefore **exported**, and a caller consuming its own stream drives it.
+
+A `ReadableStream` chunk is not guaranteed to hold one complete SSE record. An SSE record ends at a
+blank line, and a chunk boundary can fall anywhere. A parser over one bare chunk is lossy exactly on
+the split-frame case — the terminal error split across two chunks — which is the case the parser
+exists to catch. The exported shape is a stateful incremental parser.
+
+```ts
+export function createTerminalFrameParser(committedStatus: number, ids?: FrameIds): {
+  /** Every terminal error frame COMPLETED by this chunk, in order. Empty when none completes. */
+  push(chunk: Uint8Array): PaigasusError[];
 };
 ```
 
-The parser holds only the trailing partial record, so it does not reintroduce the buffering the
-passthrough exists to avoid. The SDK still never reads the stream itself; the caller drives the
-parser with chunks it is already reading.
+Four corrections to Revision 1, each from the challenge:
 
-Its test is driven by a fixture holding the exact frame from `chat.rs:63`, with a drift check
-asserting the fixture still matches that Rust constant (the `repo:parity-corpus-drift` precedent).
-Without the fixture the test would hand-build the object it expects and could not fail when the
-gateway's frame changes — which is the one drift it exists to absorb.
+1. **The return type is an array, not `PaigasusError | null`.** Revision 1's doc comment said the
+   parser "yields each complete SSE record it can form" while its signature could carry one value.
+   § 10 also tests "two frames in one chunk", which the single-value signature cannot express.
+2. **`push` takes `Uint8Array`, not `string`.** Revision 1 argued at length that a chunk boundary
+   can fall anywhere, then handed the caller a `string` parser without saying who decodes. A
+   per-chunk `TextDecoder().decode()` splits a multi-byte character on exactly the same boundary.
+   The parser owns a `TextDecoder` and calls `decode(chunk, { stream: true })`, so it holds the
+   trailing partial character as well as the trailing partial record.
+3. **The record delimiter is `\n\n`.** That is what the gateway emits (`chat.rs:63`). A `\r\n\r\n`
+   delimiter is legal SSE and is not produced here; the parser accepts both, because accepting it
+   costs one alternation and rejecting it would be a silent miss.
+4. **The parser holds only the trailing partial record and the trailing partial character.** It does
+   not reintroduce the buffering the passthrough avoids.
 
-### 8.1 Deadlines and cancellation
+**The drift check needs a mechanism, and Revision 1 gave it none.** Revision 1 asked for "a drift
+check asserting the fixture still matches that Rust constant (the `repo:parity-corpus-drift`
+precedent)". That precedent is a `repo:*` Moon gate with its own `inputs`. § 11.3 says this PR adds no
+`repo:*` gate. As an in-package vitest test the check is vacuous: `paigasus-sdk-ts:test`'s inputs are
+`@group(sources)`, `@group(tests)`, `package.json`, `/ts/pnpm-lock.yaml`, plus the two globs PR B
+appended. `chat.rs` is in none of them. Editing `TERMINAL_SSE_ERROR` selects no SDK task, and Moon
+serves a cached PASS. This is the same vacuity § 11.1 measured for AC 3 (M11) and fixed, left unfixed
+here.
 
-§ 7.2 gives the gRPC transport a 10 s default deadline. § 8's chat client had no timeout contract at
-all — no `AbortSignal`, no pre-header timeout, no statement of what happens when a caller abandons
-the stream. That asymmetry is an oversight, not a decision, so the chat client gets the same rules:
+**The fix — obligation 9 (§ 11.2).** `paigasus-sdk-ts:test` gains
+`/rs/crates/services/paigasus-gateway/src/adapters/http/chat.rs` as an `input`, and the test reads the
+constant out of that Rust source **by name**, not by line number. A new
+`run_task_case_ci "gateway->sdk"` case is the control on that input, exactly as obligation 2 is the
+control on § 11.1's.
 
-- The client accepts an optional `AbortSignal` and forwards it to `fetch`.
-- A **pre-header timeout** bounds the wait for response headers, at the same **10 s** default as the
-  gRPC transport, so the two surfaces agree.
-- **After headers, no wall-clock timeout applies.** A long chat completion is a correct slow response,
-  not a stalled one. What applies instead is an **idle timeout**: the stream fails if no bytes arrive
-  for the idle window. A wall-clock cap on an active stream would abort exactly the requests the
-  streaming surface exists to serve.
-- If the caller abandons the returned stream, cancellation must propagate to the upstream connection
-  rather than leaking it.
+Two properties of this choice, stated rather than left to be discovered:
+
+- **Keying on the constant NAME is load-bearing.** Any edit above line 63 moves the constant. A
+  line-number fixture would then compare the wrong line and could pass while the frame changed.
+- **The cost is that every `chat.rs` edit re-runs the SDK suite.** The suite is vitest with no live
+  service, so this is seconds. The alternative — a committed shared fixture plus a Rust `#[test]`
+  beside `the_terminal_sse_frame_carries_a_registered_code` (`chat.rs:253-262`) — moves the assertion
+  to the gateway side and avoids the re-runs, at the cost of a cross-workspace fixture file. **This
+  spec chooses the input, and records the alternative so a reviewer can overrule it.**
+
+### 8.5 Deadlines and cancellation
+
+§ 7.2 gives the gRPC transport a 10 s default deadline. Revision 1's § 8.1 gave the chat client four
+rules. Two survive, one is corrected, and one is **removed**.
+
+**Kept — a pre-header timeout, at the same 10 s default.** The two surfaces agree on the wait for
+response headers.
+
+**Kept — the client accepts an optional `AbortSignal` and forwards it to `fetch`.**
+
+**Corrected — the pre-header timeout must NOT be `AbortSignal.timeout`.** The obvious build is
+`AbortSignal.any([callerSignal, AbortSignal.timeout(10_000)])`. That signal keeps running after the
+headers arrive and aborts the streaming body at 10 s, which is the behaviour this section forbids.
+Every chat completion longer than ten seconds — the normal case for the product — would be truncated
+in production, and § 10's stalled-header row would stay green, because it passes under both builds.
+The correct shape is a manually driven `AbortController` whose timer is cleared the moment the `fetch`
+promise settles:
+
+```ts
+const ctl = new AbortController();
+const timer = setTimeout(() => ctl.abort(new DOMException('header timeout', 'TimeoutError')), headerTimeoutMs);
+try {
+  const res = await fetchImpl(url, { ..., signal: anySignal(ctl.signal, callerSignal) });
+  return res;
+} finally {
+  clearTimeout(timer);      // the body stream outlives this scope, deliberately
+}
+```
+
+§ 10 gains a row that distinguishes the two builds: a stub `fetch` resolves its headers immediately,
+then emits a chunk **after** the pre-header window has passed. The correct build delivers the chunk.
+`headerTimeoutMs` is a per-call option so this test does not wait ten real seconds.
+`AbortSignal.timeout` is not driven by vitest fake timers — confirm this in the test rather than
+assuming it.
+
+**REMOVED — the idle timeout.** Revision 1 said "the stream fails if no bytes arrive for the idle
+window". Detecting idleness means observing the byte flow, and there are only three ways to do it.
+Wrapping `response.body` in a `TransformStream` reads the stream and returns a **different** object,
+which breaks § 8.3's rule and § 10's identity assertion at once. Pushing the job to the caller means
+it is not the SDK's contract. Reaching undici's `bodyTimeout` needs `setGlobalDispatcher`, a
+process-global side effect a library must not take, or a direct `undici` dependency that § 11.3 does
+not list. An implementer reading Revision 1 would pick the `TransformStream` route, because it is the
+only one the spec makes visible, and would silently defeat the unbuffered forwarding the gateway
+went to trouble to preserve.
+
+So the SDK states the narrower contract it can actually keep: **once the head is committed, a stalled
+stream is the caller's responsibility.** The caller's own `AbortSignal` is the lever, and it is
+already forwarded. This is a reduction in scope against Revision 1 and is called out for review
+rather than buried.
+
+**Cancellation propagates because the stream is the platform's own object.** If the caller cancels the
+returned `ReadableStream`, undici cancels the upstream connection. The SDK adds nothing here, and
+§ 10's row is corrected accordingly (see § 10).
 
 ## 9. The error model
 
@@ -480,35 +649,54 @@ interface PaigasusError {
   requestId: string | null;
   retryable: boolean | null;               // null === the wire's "unknown"
   metadata: Readonly<Record<string, string>>;
-  transport: { kind: 'grpc'; code: Code } | { kind: 'http'; status: number };
+  transport:
+    | { kind: 'grpc'; code: Code; codeName: string }
+    | { kind: 'http'; status: number }
+    | { kind: 'transport'; cause: 'timeout' | 'network' | 'aborted' };
 }
 
 type Presentation =
-  | 'relogin' | 'forbidden' | 'not-found' | 'degraded'
+  | 'relogin' | 'forbidden' | 'not-found' | 'degraded' | 'rate-limited'
   | 'invalid-input' | 'conflict' | 'disabled' | 'generic';
 ```
 
-`message` is carried for display and logging and is never an input to a branch. AC 2 is satisfied
-structurally: no function in `src/errors/` reads `message`.
+`message` is carried for display and logging and is never an input to a branch. SMA-625's AC 1 is
+satisfied structurally: no function in `src/errors/` reads `message`.
+
+**`PaigasusError` is a plain data object. It is never an `Error` subclass, and `mapError` returns it
+and never throws it.** Revision 1 declared an `interface`, which is right, but said nothing about the
+runtime shape and had no test for it. The name reads like a throwable, and `ConnectError` — the thing
+arm 1 consumes — is an `Error` subclass, so `class PaigasusError extends Error` is the natural thing
+to write. React's server-to-client serializer rejects class instances, so that choice would invalidate
+§ 6.3 and AC 3 at once, and only when SMA-510 wires a console months later. § 10 gains a row
+asserting `Object.getPrototypeOf(result) === Object.prototype`.
 
 `rawDomain` exists for the same reason as `rawReason`: if a newer service sends an unregistered
 domain, `domain` is `null` and the wire value would otherwise be lost. ADR-0019 decision 9 makes the
 whole `(domain, reason)` pair the basis of consumer branching, so keeping half the pair loggable and
-half of it discarded would be worse than keeping neither. `rawDomain` keeps the wire value
-loggable and user-reportable even when `domain` cannot be resolved.
+discarding the other half would be worse than keeping neither.
 
 `retryable` is tri-state deliberately. The wire's values are `"true" | "false" | "unknown"`, and
 collapsing `unknown` to `false` would assert a non-retryability the service declined to assert.
 ADR-0019 decision 7 exists so clients stop inferring.
 
-`transport` carries the raw code for logging. It is a number or a `Code`, never a `ConnectError` and
-never `Headers`, so AC 4's "raw gRPC statuses never reach the browser" holds when the whole object is
-serialized to a client component.
+**`transport` gained a third arm.** Revision 1's union was gRPC or HTTP, and could not represent "no
+response at all". § 8.5's pre-header timeout, a caller abort, a DNS failure and a refused connection
+all make `fetch` reject with a `TypeError` or `DOMException`, which is none of Revision 1's four
+input arms. The gRPC side has a home for this — arm 1b handles a `ConnectError` with no detail, and
+connect maps an abort to `Code.Canceled` — and the chat side had none. § 8.5's stated goal is that
+the two surfaces agree, and on the failure path they did not.
+
+**`transport.code` carries `codeName` beside it.** `Code` is a runtime enum object from
+`@connectrpc/connect`. Typing the field as `Code` is a type-only use and erases under
+`verbatimModuleSyntax`, so a client component can name it. Reading the number back as a name would
+need a value import of a server-side dependency, so the name is carried instead. `transport` is for
+logging; a client branches on `presentation`. That is what AC 3's "raw gRPC statuses never reach the
+browser" requires — `PaigasusError` holds no `ConnectError` and no `Headers`.
 
 ### 9.2 Two total mappings from transport status
 
-Revision 1 gave gRPC codes only, while three of § 9.4's four arms are HTTP. Both tables are written,
-and both are total by falling through to `generic`:
+Both tables are total. Both fall through to `generic`.
 
 | gRPC `Code` | Presentation | | HTTP status | Presentation |
 |---|---|---|---|---|
@@ -519,39 +707,60 @@ and both are total by falling through to `generic`:
 | `DeadlineExceeded` | `degraded` | | 408 | `degraded` |
 | `InvalidArgument` | `invalid-input` | | 400, 413, 415, 422 | `invalid-input` |
 | `AlreadyExists`, `FailedPrecondition`, `Aborted` | `conflict` | | 409 | `conflict` |
-| `Unimplemented` | `disabled` | | 501 | `disabled` |
-| `ResourceExhausted` | `degraded` | | 429 | `degraded` |
+| `Unimplemented` | `generic` | | 501 | `generic` |
+| `ResourceExhausted` | `rate-limited` | | 429 | `rate-limited` |
 | everything else | `generic` | | everything else | `generic` |
 
-429 and 504 map to `degraded` rather than getting their own states: a gateway proxying OpenAI
-produces both routinely, and both mean "try later", which is what `degraded` renders. `retryable`
-carries the finer signal for a caller that wants it. This is a stated decision, not an omission.
+The third `transport` arm maps by `cause`: `timeout` and `network` yield `degraded`, `aborted` yields
+`generic`. A caller abort is not a service fault and must not render as one.
 
-`ResourceExhausted`/429 sitting under `degraded` is the one row a reviewer may want to revisit; it is
-called out here rather than buried.
+**429 and `ResourceExhausted` get their own `rate-limited` state. This REVERSES an earlier decision
+in this document and the reversal is the issue owner's.** Revision 3 kept them under `degraded` on
+the argument that both mean "try later". A second adversarial challenge, run independently on this
+same slice by a parallel implementation (§ 15.2), put the question again with a measurement Revision
+3 did not have: **nothing in this repository emits 429 or `ResourceExhausted`**, so every one the SDK
+can currently see is the UPSTREAM's quota refusal arriving through the chat passthrough. That is what
+lets the copy be specific — "you are over your quota" — rather than the hedged "something is wrong,
+try later" that `degraded` has to serve for a sick service. A future Paigasus-side quota gets a
+registry reason and the override table can point it at this same screen, so this does not open the
+door to a tenth value. 504 stays on `degraded`.
+
+**`Unimplemented` and 501 map to `generic`, not `disabled`, and that row is load-bearing.** IAM's
+`capability_disabled` is the only thing that emits `Unimplemented` (`convert.rs:96-104`). If this
+table said `disabled`, § 9.4's `CAPABILITY_DISABLED` override would produce the answer the table
+already gave — decoration, and exactly the critique this document accepted once against a different
+example and then re-committed with this one. Sending `Unimplemented` to `generic` and letting the
+override lift it keeps the two meanings apart. Nothing here emits HTTP 501 at all — the gateway's
+`StreamingDisabled` answers **400** (`error.rs:170`) — so a 501 could only come from an ingress,
+where "the server does not support this method" carries the same meaning.
+
+**The four codes SMA-625's AC 3 names, in one place.** Revision 1's § 10 had a row called "AC 4
+mapping — each of the four codes yields its state" and the four codes appeared nowhere in the spec.
+They are:
+
+| Code | Presentation | Rendered as |
+|---|---|---|
+| `Code.Unauthenticated` / 401 | `relogin` | re-login |
+| `Code.PermissionDenied` / 403 | `forbidden` | the 403 view |
+| `Code.NotFound` / 404 | `not-found` | the 404 view |
+| `Code.Unavailable` / 502, 503, 504 | `degraded` | degraded |
+
+**Totality over `Code` has a concrete trap. MEASURED (M13), on `@connectrpc/connect` 2.2.0 under Node
+24.18.1:** `Code` is a non-const numeric enum, so `Object.values(Code)` yields **32** entries — 16
+numeric (1 to 16) and 16 string names. A totality test written the obvious way iterates the strings
+too and asserts nothing useful about them. The test must enumerate
+`Object.values(Code).filter((v) => typeof v === 'number')` and assert each resolves to a member of the
+`Presentation` union. Totality is the assertion that carries that § 10 row; the spot checks are
+secondary, because a transcription of the table into the test proves only that someone transcribed it.
 
 ### 9.3 The wire-reason codec lives in `@paigasus/proto`
 
-The TypeScript twin of `ErrorReason::{as_wire_reason, from_wire_reason}` goes in
-`ts/packages/paigasus-proto/src/error.ts`, next to `capabilityWireKey`. That is where the precedent
-lives, it is a contract concern rather than a transport one, and it stays available to a future
-consumer that is not the SDK.
+**This landed in PR A (SMA-624).** `ts/packages/paigasus-proto/src/error.ts` holds `asWireReason`,
+`fromWireReason`, `asWireDomain` and `fromWireDomain`, and the root barrel exports all four. The
+allow-list `^[a-z][a-z0-9]*(-[a-z0-9]+)*$` and the ten-input rejection parity test are at
+`src/error.test.ts`. Nothing in SMA-625 changes this section; it is kept for context.
 
-Both directions are **derived from the descriptor**: `ErrorReasonSchema.values` yields
-`DescEnumValue[]` carrying `.name` — the raw proto name. `capabilityWireKey`'s doc comment records
-why `.name` and not `.localName`: protobuf-es's shared-prefix heuristic (`findEnumSharedPrefix`)
-degrades for the whole enum if any value's short name is empty or starts with a digit.
-
-`fromWireReason` reproduces the Rust `is_wire_token` **allow-list** exactly —
-`^[a-z][a-z0-9]*(-[a-z0-9]+)*$` — checked *before* any case transform.
-
-**MEASURED (M7), on Node 24.16.0:** `"ınternal".toUpperCase() === "INTERNAL"` is `true`, and
-`"ſlug-conflict"` folds to `SLUG_CONFLICT`. JavaScript folds U+0131 and U+017F exactly as
-`str::to_uppercase` does, so a deny-list check would let both reconstruct valid proto names. The
-allow-list is load-bearing, not decoration. A parity test asserts the TS parser rejects the same ten
-inputs the Rust test rejects (`error.rs:287-302`).
-
-### 9.4 The presentation override table — AC 3
+### 9.4 The presentation override table
 
 `src/errors/presentation.ts` holds
 
@@ -561,125 +770,241 @@ const PRESENTATION: Record<Exclude<ErrorReason, ErrorReason.UNSPECIFIED>, Entry>
 ```
 
 **MEASURED (M8), on TypeScript 6.0.3:** omitting a member yields
-`TS2741: Property '[ErrorReason.INTERNAL]' is missing`, naming it. Revision 1 declared
-`Record<ErrorReason, Presentation>`, which was unwritable twice over — it demanded an entry for the
-`UNSPECIFIED` sentinel the test skips, making the table 58 keys rather than 57, and `'from-transport'`
-is not a `Presentation`. The corrected type is 57 keys.
+`TS2741: Property '[ErrorReason.INTERNAL]' is missing`, naming it. The table is 57 keys. Re-confirmed
+by count: the proto and the generated TS both declare 58 `ErrorReason` members including the sentinel.
 
 Two mechanisms, both required:
 
 1. **The total `Record`** makes a missing reason a compile error.
 2. **A table test** iterates `ErrorReasonSchema.values`, skips the sentinel, and asserts each reason
-   round-trips through `fromWireReason(asWireReason(r))` and has an entry. This is AC 3 verbatim.
+   round-trips through `fromWireReason(asWireReason(r))` and has an entry. This is SMA-625's AC 2.
 
 The type check alone is not enough — a refactor to `Partial<Record<…>>` would silently switch it off,
 and the test notices. The test alone is not enough — it runs later. Both are kept.
 
-**What the table is for, with two real examples.** Revision 1 justified it with `MISSING_SCOPE`,
-which was a bad example: it is a 500, 500 is already `generic`, and the entry changed nothing. The
-genuine cases:
+**What the table is for. Revision 2 adds a third example, and it is the strongest of the three.**
 
+- **`UPSTREAM_ERROR` (307) — the override that fixes a visibly wrong default.** Arm 4 sets
+  `transport: { kind: 'http', status: <the committed status> }`, because the head was already
+  committed. § 9.2's HTTP
+  table has no 200 row, so it falls through to `generic`. Under Revision 1's "every other reason takes
+  `'from-transport'`" rule, the mid-stream failure the whole parser exists to catch would render as a
+  generic error. `chat.rs:59-62` documents the opposite intent: `upstream-error` "is by construction
+  the transient mid-stream case … a client that recognizes this code already knows it may retry".
+  `degraded` is the state § 9.2 says renders "try later". The entry is `'degraded'`.
+  `UPSTREAM_UNAVAILABLE` (305) and `UPSTREAM_TIMEOUT` (306) take an explicit `'degraded'` entry too.
+  Their transport statuses already reach `degraded`, so the entry **pins** an agreement rather than
+  changing an answer — the same job the `INVALID_REQUEST_SCHEMA` entry does.
 - **`INVALID_REQUEST_SCHEMA` (906) — the cross-service divergence.** IAM answers **422**, the gateway
   answers **400**, for the identical wire code. `error.proto:239-247` says so in the registry itself
-  and warns that *"a consumer mapping code -> status must not assume it is one-to-one"*. Under § 9.2
-  both already land on `invalid-input`, so the table's job here is to **pin** that agreement: an
-  explicit entry means a future change to either status cannot silently split the presentation of one
-  code across two services.
+  and warns that "a consumer mapping code -> status must not assume it is one-to-one". Under § 9.2
+  both already land on `invalid-input`, so the entry **pins** that agreement: a future change to
+  either status cannot silently split one code's presentation across two services.
 - **`CAPABILITY_DISABLED` (904)** is gRPC `Code::Unimplemented` with no HTTP form at all
-  (`convert.rs:96-104`). `Unimplemented` reads as "this build cannot do that", but the product meaning
-  is "this deployment turned that capability off" — a different screen. `disabled` exists in § 9.1
-  for it, and the entry is what selects it.
+  (`convert.rs:96-104`, and no HTTP call site exists in IAM). `Unimplemented` reads as "this build
+  cannot do that", but the product meaning is "this deployment turned that capability off" — a
+  different screen. `disabled` exists in § 9.1 for it, and the entry selects it. **This example was
+  INERT until § 9.2 moved `Unimplemented` to `generic`**: while the transport table also said
+  `disabled`, the entry changed nothing, and the second challenge (§ 15.2) caught that the example
+  the spec offered as proof of the mechanism was proof of nothing. The pairing is the point, and
+  neither half stands alone.
+- **`PRINCIPAL_INACTIVE` (added after the second challenge)** is `Code::PermissionDenied`
+  (`convert.rs:144`), which § 9.2 renders `forbidden` — so without an entry a **deactivated account
+  is told it lacks permission**, which is both wrong and unactionable. It takes `disabled`. Its two
+  neighbours `IDENTITY_NOT_PROVISIONED` and `PROVISIONING_FAILED` deliberately do NOT: those are
+  provisioning states an administrator resolves, and `forbidden` reads correctly for them. The split
+  is a decision, not an oversight.
 
-Every other reason takes the literal `'from-transport'`, so all 57 are a reviewed decision rather
-than a default.
+Every other reason takes the literal `'from-transport'`, so all 57 are a reviewed decision rather than
+a default.
 
-**The table is keyed on `reason`, not `(domain, reason)`.** Q1's sweep found exactly one reason whose
-transport status differs by site, `INVALID_REQUEST_SCHEMA`, and both sites resolve to the same
-presentation. Keying on the pair would double the table to normalize nothing. If a second divergence
-appears where the presentations genuinely differ, the key must become the pair — recorded here so the
-decision is revisited rather than inherited.
+**The table is keyed on `reason`, not `(domain, reason)`. Re-checked against the three upstream
+codes.** Q1's sweep found exactly one reason whose transport status differs by site,
+`INVALID_REQUEST_SCHEMA`, and both sites resolve to the same presentation. The three upstream codes
+are gateway-only, so they add no divergence and the conclusion stands. If a second divergence appears
+where the presentations genuinely differ, the key must become the pair — recorded here so the decision
+is revisited rather than inherited.
 
-### 9.5 Four inputs, one output
+### 9.5 Five inputs, one output
 
-`mapError` accepts:
+Revision 1 had four arms. Arm 5 is new (§ 9.1).
 
 1. **A `ConnectError`.** `err.findDetails(ErrorInfoSchema)[0]` can be `undefined` — a `ConnectError`
    raised by a network failure, a proxy, or a connection reset carries a gRPC status and no
-   `ErrorInfo` detail at all. This is a reachable path, not a defensive hypothetical, so arm 1
-   branches before reading the detail:
-   - **Detail present:** `err.findDetails(ErrorInfoSchema)[0]` gives `(reason, domain, metadata)`.
-     `metadata` carries `retryable`, and `correlation_id`/`request_id` **when the error was raised
-     inside a request scope** (`convert.rs:59-74`) — omitted, not nulled, outside one. `err.code`
-     gives the gRPC `Code`; `err.metadata` is *"a union of response headers and trailers"*
-     (`connect-error.d.ts:22-24`), the fallback for the correlation id.
+   `ErrorInfo` detail. This is a reachable path, so arm 1 branches before reading the detail:
+   - **Detail present:** the detail gives `(reason, domain, metadata)`. `metadata` carries
+     `retryable`, and `correlation_id`/`request_id` **when the error was raised inside a request
+     scope** (`convert.rs:59-74`) — omitted, not nulled, outside one.
    - **Detail absent:** `domain`, `reason`, `rawReason` and `rawDomain` are `null`. `retryable` is
      `null` — the wire asserted nothing. `metadata` is empty and `requestId` is `null`.
-     `correlationId` is still read from `err.metadata` when present, since that is a union of
-     response headers and trailers and may still carry it. `message` is the `ConnectError`'s
-     message, preserved. `presentation` is derived from the gRPC status table in § 9.2, including
-     its `generic` fallback. Without this branch the SDK throws while mapping an error, which turns
-     a recoverable upstream failure into an unhandled exception in the BFF.
-2. **An IAM HTTP response** — `{ status, headers, body }` where body is `{error:{code,message}}`. The
-   body carries **no** correlation id and **no** retryable; both are headers
-   (`paigasus-correlation-id`, `paigasus-request-id`, `paigasus-retryable`,
-   `paigasus-observability/src/correlation.rs:20,31-33`). AC 2 asks for "a generic fallback plus
-   correlation id", so the headers are not optional input.
-3. **A gateway HTTP response** — same envelope plus `{message,type,param,code}`. `code` is drawn from
-   the same registry (asserted `gateway/adapters/http/error.rs:296-309`). `type` is **not** read: it
-   takes two values and both are coarser than `code`. `param` enters `metadata` when present.
-4. **A parsed terminal SSE frame**, via the exported terminal-frame parser (§ 8). `transport` is
-   `{ kind: 'http', status: 200 }` because the head was already committed; `retryable` is `null`,
-   since that frame deliberately carries no retryable signal (`chat.rs:56-62`).
+     `presentation` comes from the gRPC status table, including its `generic` fallback. Without this
+     branch the SDK throws while mapping an error, which turns a recoverable upstream failure into an
+     unhandled exception in the BFF.
+   - **`message` is `err.rawMessage`, never `err.message`, on both branches of this arm.** Corrected
+     in the fix wave before PR (SMA-625, item 8): `ConnectError.message` prefixes the status code
+     (e.g. `"[not_found] first"`), so reading it would both break AC 1's message-independence claim
+     and leak a raw gRPC status into a user-facing string. `err.rawMessage` carries the message with
+     no such prefix.
+   - **The two correlation-id spellings are different and both are read, in this order.** The
+     `ErrorInfo` metadata key is `correlation_id` (`convert.rs:70`). The response header is
+     `paigasus-correlation-id` (`correlation.rs:31`). `err.metadata` is "a union of response headers
+     and trailers", so it carries the header spelling. The metadata key wins when both are present.
+     Revision 1 used both spellings without distinguishing them.
+2. **An IAM HTTP response** — `{ status, headers, body }` where body is `{error:{code,message}}`
+   (`adapters/http/error.rs:35`, key set asserted at `:106-110`). The body carries **no** correlation
+   id and **no** retryable; both are headers (`paigasus-correlation-id`, `paigasus-request-id`,
+   `paigasus-retryable`, `correlation.rs:20,31,33`). `metadata` is `{}`: IAM's HTTP envelope carries
+   no metadata map. In particular `field` is **gRPC-only** — `status_to_grpc` puts the failing field
+   name into `ErrorInfo.metadata` (`convert.rs:129-130`), and the HTTP body has no room for it.
+3. **A gateway HTTP response** — the OpenAI envelope
+   `{ error: { message, type, param, code } }` (`adapters/http/error.rs:27-45`, pinned at `:334-342`).
+   **Revision 1's premise here was false for a whole class of real responses.** It said `code` "is
+   drawn from the same registry". That assertion (`error.rs:296-309`) covers only errors the gateway
+   itself generates. `chat.rs:113-119` forwards a non-2xx upstream response **verbatim, including
+   OpenAI's own error envelope**, and `chat.rs:139-141` does the same for a failed `stream: true`
+   request. So:
+   - The body may be gateway-generated **or** an upstream passthrough.
+   - `code` and `param` are **nullable**. OpenAI's `code` is its own vocabulary
+     (`insufficient_quota`, `context_length_exceeded`) or JSON `null`.
+   - A `null` `code` yields `rawReason: null` and `reason: null`. A non-null `code` always populates
+     `rawReason`; `fromWireReason` rejects an underscore token, which is the correct degradation to
+     `reason: null`.
+   - `param` enters `metadata` only when it is a non-null string. `type` is **not** read: it takes two
+     values and both are coarser than `code`.
+   - The same three headers as arm 2 are read. The gateway sets `paigasus-retryable` on every error it
+     renders (`error.rs:204`) and the correlation layer defaults it for responses no renderer owns
+     (`correlation.rs:68-77`). An upstream passthrough may carry none, and then `retryable` is `null`.
+   - The rate-limit `429` § 9.2 discusses arrives through this arm, as an upstream passthrough.
+4. **A parsed terminal SSE frame**, via § 8.4's parser. `transport` carries the status the gateway
+   actually COMMITTED — usually 200, but a stream committed on another 2xx must report that, and
+   the arm also accepts the head's correlation and request ids
+   because the head was already committed. `retryable` is `null`: that frame deliberately carries no
+   retryable signal (`chat.rs:56-62`). `metadata` is `{}`. `presentation` is `degraded`, via § 9.4's
+   `UPSTREAM_ERROR` entry.
+5. **A transport failure with no response at all** — a rejected `fetch`. `transport` is
+   `{ kind: 'transport', cause }`. `domain`, `reason`, `rawReason` and `rawDomain` are `null`,
+   `retryable` is `null`, `metadata` is `{}`, and `message` is the rejection's message. The `cause` is
+   `timeout` for § 8.5's pre-header abort, `aborted` for a caller abort, and `network` otherwise.
 
-**Arm 2 has no in-SDK caller, and that is deliberate.** § 4.1 moves every IAM HTTP surface to gRPC,
-so nothing in this package constructs arm 2's argument. It is kept as a **public helper** because
-IAM's REST surface still exists and is the external customer-facing API (ADR-0018 consequence 6); an
-app calling it directly should map its errors the same way. Its test drives it directly. Stated so
-the arm is not mistaken for a code path the SDK exercises.
+**`mapError` is total over a malformed body, and Revision 1 did not say so.** Its totality claim was
+scoped to an unrecognized *code*. It said nothing about a body that is not JSON at all (an ingress
+HTML `502` in front of the gateway), an empty body, or a JSON body with no `error` key. `mapError`
+runs in the BFF on the failure path, where a throw converts a recoverable upstream failure into an
+unhandled exception — the same failure mode arm 1b exists to prevent. So arms 2 and 3 accept an
+already-parsed body **or** a parse failure, and a missing or malformed `error` object yields
+`reason: null`, `rawReason: null`, `message` from the status text, and the transport-derived
+presentation.
 
-**`metadata` is the ErrorInfo map minus the three lifted keys.** `retryable`, `correlation_id` and
-`request_id` are removed after being read into their typed fields, so a caller cannot branch on a raw
-duplicate that disagrees with the parsed one. `capability`, `field` and `param` survive.
+**Arm 2 has no in-SDK caller, and that is deliberate.** § 4.1 moves every IAM HTTP surface to gRPC, so
+nothing in this package constructs arm 2's argument. It is kept as a **public helper** because IAM's
+REST surface still exists and is the external customer-facing API (ADR-0018 consequence 6); an app
+calling it directly should map its errors the same way. Its test drives it directly.
 
-**Unknown reason and domain handling (AC 2).** `rawReason` always holds what the wire said. When
+**`metadata` is the ErrorInfo map minus the three lifted keys** — on arm 1 only. `retryable`,
+`correlation_id` and `request_id` are removed after being read into their typed fields, so a caller
+cannot branch on a raw duplicate that disagrees with the parsed one. `capability` and `field` survive.
+Arms 2, 4 and 5 yield `{}`; arm 3 yields `{ param }` when `param` is a non-null string.
+
+**Unknown reason and domain handling.** `rawReason` always holds what the wire said. When
 `fromWireReason` rejects it, `reason` is `null`, `presentation` falls back to the transport-derived
 value, and `correlationId` is preserved. An unrecognized code degrades to a generic presentation plus
 a user-reportable id — never a throw, never an empty message. `rawDomain` is populated from
-`ErrorInfo.domain` verbatim, whether or not `fromWireDomain` resolves it — the same "keep the wire
-value even when it cannot be mapped" rule, applied to the other half of the pair.
+`ErrorInfo.domain` verbatim, whether or not `fromWireDomain` resolves it.
 
 **The two system-retirement 409s are not special-cased.** They add sibling keys next to the standard
-`error` object rather than replacing it (`system_retirement.rs:111-126`). `mapError` reads
-`error.code` and ignores the siblings; a caller wanting the surviving-grants list reads the body.
+`error` object rather than replacing it (`system_retirement.rs:143-155` is the insertion site;
+`:111-126` builds the payloads). `mapError` reads `error.code` and ignores the siblings; a caller
+wanting the surviving-grants list reads the body.
+
+### 9.6 A consumer must be able to name a reason
+
+**This is new in Revision 2, and it is the gap that would have made the package unusable for its
+stated purpose.**
+
+§ 1 says the package exists because "ADR-0019 decision 9 requires consumers to branch on
+`(domain, reason)`; there is no consumer to do so". § 9.1 types those fields as `ErrorReason` and
+`ErrorDomain`. But the eslint boundary already merged in this repo bans apps from importing
+`@paigasus/proto` at all — `paigasus/boundaries/apps` in `ts/packages/paigasus-next-config/src/eslint.mjs`
+covers `@paigasus/proto` and `@paigasus/proto/**`, and that file records at `:28-31` that type imports
+are banned alongside value imports, deliberately. `@paigasus/sdk` re-exports the seven IAM services
+but not the registry. So an app would receive `reason: 906` and have no legal way to write
+`ErrorReason.INVALID_REQUEST_SCHEMA`.
+
+**`src/errors/types.ts` therefore re-exports `ErrorReason` and `ErrorDomain` as values**, not only as
+types, from `@paigasus/proto`. This puts two small enum objects in the client bundle deliberately.
+They are plain frozen objects with no `server-only` import, so the entry stays unguarded and
+`tests/server-guard.test.ts`'s unguarded assertion still holds.
+
+**A note for SMA-510's author, not a change here.** The `paigasus/boundaries/app-shell` block bans
+`@paigasus/sdk` and `@paigasus/sdk/**` outright, which includes the client-safe `./errors/types`
+entry § 6.3 exists to provide. That block is inert until `packages/paigasus-app-shell` exists. It will
+need a `!@paigasus/sdk/errors/types` negation pair, in the **doubled** form `eslint.mjs:24-26` says is
+load-bearing. Flagged rather than fixed, because the package it governs does not exist yet.
 
 ## 10. Testing
 
-| Tier | What it proves |
-|---|---|
-| Wire-reason codec parity | Both directions over all 57 reasons; the ten malformed inputs the Rust test rejects |
-| Presentation totality (AC 3) | Every descriptor value has an entry; `INVALID_REQUEST_SCHEMA` and `CAPABILITY_DISABLED` resolve as § 9.4 states |
-| Transport-status tables (§ 9.2) | Both tables, including the `generic` fall-through |
-| `mapError` — gRPC | A `ConnectError` carrying a real `ErrorInfo` detail round-trips; `correlation_id`/`retryable` read from `metadata`; the three lifted keys are absent from `metadata`; a `ConnectError` with no `ErrorInfo` detail falls back to the gRPC status table with a message-only object |
-| `mapError` — HTTP | Both envelopes; correlation id from **headers**; tri-state retryable |
-| `mapError` — degradation (AC 2) | Unknown reason yields `reason: null`, keeps `rawReason` and `correlationId`; unknown domain yields `domain: null`, keeps `rawDomain` |
-| AC 4 mapping | Each of the four codes yields its state |
-| Message-independence (AC 2) | One wire error with three different `message` strings maps to three identical objects modulo `message` |
-| Transport cache | Equal options return the same object; differing options do not; two clients built from the same cached transport with different `Auth` values produce two different `authorization` headers and neither request carries the other's token; `disposeTransports()` lets vitest exit |
-| Server-only structure (AC 1) | Every guarded `exports` entry imports the guard as its first import statement, driven off `package.json` |
-| Chat | Non-streaming maps a non-2xx; streaming returns the identical `ReadableStream` object; the terminal-frame parser against the pinned fixture, a frame split across two chunks, two frames in one chunk, and a partial trailing record that never completes |
-| Terminal-frame drift | The fixture still matches `chat.rs:63` |
-| Chat deadlines (§ 8.1) | A stalled-header request fails at the pre-header deadline |
-| Chat cancellation (§ 8.1) | An abandoned stream propagates cancellation to the upstream connection |
+**Revision 2 rebuilt this table.** Revision 1 listed fourteen rows. Three of them had already shipped
+in PRs A and B, two named a mechanism that does not exist, and two were tautologies. The `Landed`
+column says where each row already holds, so PR C's real scope is visible.
 
-**Two coverage gaps, stated rather than implied.**
+| Tier | What it proves | Landed |
+|---|---|---|
+| Wire-reason codec parity | Both directions over all 57 reasons; the ten malformed inputs the Rust test rejects | **PR A** — `paigasus-proto/src/error.test.ts:47,60` |
+| Transport cache | Equal options return the same object; differing options do not; two clients with different `Auth` produce two different `authorization` headers and neither carries the other's token; `disposeTransports()` lets vitest exit | **PR B** — `tests/transport.test.ts:18-38`, `tests/iam.test.ts:81-123` |
+| Server-only structure | Every guarded `exports` entry imports the guard as its first import statement, driven off `package.json` | **PR B** — `tests/server-guard.test.ts` |
+| Presentation totality (AC 2) | Every descriptor value has an entry; `UPSTREAM_ERROR`, `INVALID_REQUEST_SCHEMA` and `CAPABILITY_DISABLED` resolve as § 9.4 states | new |
+| Transport-status totality (§ 9.2) | `Object.values(Code).filter(v => typeof v === 'number')` — all 16 — resolve to a `Presentation`; the HTTP table over its listed statuses; one unknown status per table hits `generic`; the third arm's three causes | new |
+| The four AC-3 codes | Each of § 9.2's four named codes yields its stated presentation, on both the gRPC and the HTTP side | new |
+| `mapError` — gRPC, detail present | A `ConnectError` carrying a real `ErrorInfo` detail round-trips; `correlation_id`/`retryable` read from `metadata`; the three lifted keys are absent from `metadata`; `capability` and `field` survive | new |
+| `mapError` — gRPC, detail absent | A `ConnectError` with no `ErrorInfo` detail falls back to the gRPC status table with a message-only object and throws nothing | new |
+| `mapError` — HTTP, both envelopes | IAM's `{error:{code,message}}` and the gateway's `{error:{message,type,param,code}}`; correlation id from **headers**; tri-state retryable | new |
+| `mapError` — an upstream passthrough (§ 9.5 arm 3) | A real OpenAI `429` envelope with `code: "insufficient_quota"` and `param: null` yields `reason: null`, keeps `rawReason`, and presents `rate-limited` from the status (§ 9.2) | new |
+| `mapError` — a malformed body | A non-JSON HTML `502`, an empty body, and a JSON body with no `error` key each yield a transport-derived presentation and throw nothing | new |
+| `mapError` — a transport failure (§ 9.5 arm 5) | Each of the three causes maps to its presentation; `aborted` is `generic`, not `degraded` | new |
+| `mapError` — degradation (AC 1) | Unknown reason yields `reason: null`, keeps `rawReason` and `correlationId`; unknown domain yields `domain: null`, keeps `rawDomain` | new |
+| Message-independence (AC 1) | One wire error with three different `message` strings maps to three identical objects modulo `message` | new |
+| `PaigasusError` is a plain object | `Object.getPrototypeOf(result) === Object.prototype`; it is not an `Error` instance | new |
+| Chat — auth | The outgoing request carries `authorization: Bearer <token>`, mirroring PR B's gRPC row | new |
+| Chat — non-streaming | A non-2xx JSON response yields `{ kind: 'error' }` carrying a mapped `PaigasusError` | new |
+| Chat — streaming passthrough (AC 4) | The returned stream is **identity-equal** to the `Response.body` the stubbed `fetch` returned | new |
+| Chat — cancellation | Cancelling the returned stream invokes the stub source's `cancel`. End-to-end propagation to a socket is **not** tested — see the gaps below | new |
+| Chat — the pre-header deadline fires | A stub `fetch` that never resolves its headers fails at `headerTimeoutMs` | new |
+| Chat — the deadline does NOT outlive the head | A stub resolves headers immediately, then emits a chunk **after** `headerTimeoutMs` has passed. The chunk must arrive. This is the row that separates the `AbortController` build from the `AbortSignal.timeout` build (§ 8.5) | new |
+| Terminal-frame parser | Against the frame read from `chat.rs`: one whole frame; a frame split across two chunks; two frames in one chunk (both returned, in order); a partial trailing record that never completes; a multi-byte character split across a chunk boundary | new |
+| Terminal-frame drift | The parser's expected frame is read from `chat.rs` **by constant name**, and `chat.rs` is an input of `paigasus-sdk-ts:test` (§ 8.4, obligation 9) | new |
+| Affected-graph control | A new `run_task_case_ci "gateway->sdk"` selects the SDK suite when `chat.rs` changes | new |
+
+**Two rows Revision 1 carried that are deliberately gone.**
+
+*The idle-timeout row.* § 8.5 removed the contract, so there is nothing to test.
+
+*"Streaming returns the identical `ReadableStream` object" as a separate row from cancellation.* The
+identity assertion is what makes platform cancellation possible, so the two are one row plus its
+consequence. Revision 1's cancellation row — "an abandoned stream propagates cancellation to the
+upstream connection" — was untestable as written: with a stub `fetch` there is no upstream connection,
+and § 10 itself states there is no live-service tier. If § 8.3's passthrough is literal, propagation is
+undici's behaviour and a test of it asserts the platform. The corrected row names the observable the
+SDK actually controls.
+
+**Three coverage gaps, stated rather than implied.**
 
 *No live-service tier.* The SDK has no server to talk to in CI. Transport behaviour is tested through
 interceptors and a stub `fetch`. This suite proves the SDK *forms* correct requests and *interprets*
-correct responses; it does not prove IAM accepts them. Standing a service up is SMA-509/SMA-510's
-integration surface.
+correct responses; it does not prove IAM or the gateway accepts them. Standing a service up is
+SMA-509/SMA-510's integration surface.
 
-*AC 1 is not proven by a build.* See § 6.2.
+*AC 1 of SMA-508 is not proven by a build.* See § 6.2.
 
+*Cancellation does not reach a socket in any test.* The SDK returns the platform's own stream, so the
+propagation belongs to undici. Only an integration tier could prove it.
+
+**One decision the `mapError` gRPC row depends on.** A hand-constructed
+`new ConnectError(msg, code, headers, [{ desc: ErrorInfoSchema, value: {…} }])` takes `findDetails`'s
+**outgoing** branch — a plain `create()` — not the wire branch that runs `fromBinary`. The outgoing
+shape proves nothing about decoding a `grpc-status-details-bin` trailer of the kind
+`tonic_types::ErrorDetails::with_error_info` produces (`convert.rs:79`). **The fixture uses the
+incoming wire shape**, `{ type: 'google.rpc.ErrorInfo', value: toBinary(ErrorInfoSchema, …) }`, so the
+decode path is the one under test.
 ## 11. Registration obligations
 
 Eight edits. Revision 1 listed four and missed the three that matter most.
@@ -710,6 +1035,21 @@ SMA-503 fixed on the console.
 
 **MEASURED (M11b):** with those inputs, the same edit selects `paigasus-sdk-ts:{build,test,typecheck}`.
 
+**PR B shipped this block, so SMA-625 changes one line of it.** `test` gains a second cross-workspace
+input (§ 8.4, obligation 9):
+
+```yaml
+  test:
+    inputs:
+      - '/ts/packages/paigasus-proto/src/**/*'
+      - 'vitest.config.ts'
+      - '/rs/crates/services/paigasus-gateway/src/adapters/http/chat.rs'   # NEW, § 8.4
+```
+
+Without that line the terminal-frame drift check is vacuous in exactly the way M11 measured for AC 3:
+an edit to `TERMINAL_SSE_ERROR` selects no SDK task, and Moon serves a cached PASS on the one PR the
+check exists to catch.
+
 ### 11.2 The gates
 
 1. **`ci/affected-graph/run.sh:258-259`** — the `contracts->proto` expected set gains
@@ -734,6 +1074,17 @@ SMA-503 fixed on the console.
    path) reads Moon's live output and passes, because the live inputs and the tuple agree. Only
    `--self-test` compares the tuple against the frozen fixture. Run **both** paths before pushing
    a change to this pin.
+9. **A new `run_task_case_ci "gateway->sdk"`** — added by Revision 2, and the one registration
+   obligation SMA-625 still owns. It is anchored on
+   `rs/crates/services/paigasus-gateway/src/adapters/http/chat.rs` and asserts the edit selects
+   `paigasus-sdk-ts:test`. This is the only control on § 11.1's new input line, exactly as
+   obligation 2 is the only control on the `@paigasus/proto` one. Without it, a future edit dropping
+   that input leaves the terminal-frame drift check vacuous and nothing reds.
+
+   Re-measure the expected set rather than transcribing it. A `chat.rs` edit also selects the
+   gateway crate's own Rust tasks, so this case's expected set is **not** a copy of `proto->sdk`'s.
+
+   Obligations 1 to 8 all landed in PRs A and B. Obligation 9 is new work.
 
 ### 11.3 The packages
 
@@ -793,13 +1144,37 @@ waiting is the fix.
 
 ## 12. Acceptance criteria mapping
 
-| AC | Where |
-|---|---|
-| 1 — `import 'server-only'`; a client import fails the build | § 6.2 — four layers, **and a stated gap**: enforced structurally, not proven by a build |
-| 2 — branch on `(domain, reason)` only; unknown → generic + correlation id | § 9.1, § 9.5; message-independence and degradation both tested |
-| 3 — table test driven off the registry | § 9.4 — total `Record` (M8) **plus** a descriptor-driven test, made reachable by § 11.1 (M11) |
-| 4 — four codes → four states; raw statuses never reach the browser | § 9.2 both tables; `PaigasusError` carries no `ConnectError` (§ 6.3, § 9.1) |
-| 5 — `ci/affected-graph/run.sh` updated in the same change | § 4.2, § 11.2 — **corrected**: one id, measured (M4) |
+**The three-PR split re-cut the acceptance criteria, and Revision 1's numbers were stale.** This
+document was written as one spec for one issue. §§ 9 and 10 then referred to "AC 2", "AC 3" and
+"AC 4" by SMA-508's ORIGINAL numbering. SMA-508 has since been re-cut and renumbered — its AC 4 is
+now "a new `proto->sdk` case", an affected-graph obligation — so a reader following those numbers
+lands on the wrong criterion. Both tables below are keyed to the CURRENT Linear issues.
+
+### 12.1 SMA-625 — the criteria this PR must meet
+
+**One wording correction against the Linear issue.** SMA-625's AC 1 says an unknown reason yields a
+"generic fallback". The implemented behaviour, which § 9.5 describes and § 10 tests, is the
+**transport-derived** presentation — so an unknown reason on a `404` presents as `not-found`, not as
+`generic`. `generic` is only what the transport tables themselves fall through to. The distinction
+matters: degrading a `404` to `generic` would lose information the status already carried.
+
+| AC | Text | Where |
+|---|---|---|
+| 1 | Branch on `(domain, reason)` only, never message text; an unknown reason degrades to the TRANSPORT-derived presentation plus the correlation id | § 9.1, § 9.5; the message-independence and degradation rows in § 10 |
+| 2 | A table test driven off the registry | § 9.4 — the total `Record` (M8) **plus** a descriptor-driven test, made reachable by § 11.1 (M11) |
+| 3 | The four codes → four states; raw statuses never reach the browser | § 9.2, including the four-code table added in Revision 2; `PaigasusError` holds no `ConnectError` and no `Headers` (§ 6.3, § 9.1) |
+| 4 | Chat streaming is a `ReadableStream` passthrough | § 8.3; § 10's identity-equality row |
+
+### 12.2 SMA-508 — met by PR B, listed so the numbering is unambiguous
+
+| AC | Text | Where |
+|---|---|---|
+| 1 | `import 'server-only'`; a client import fails the build | § 6.2 — four layers, **and a stated gap**: enforced structurally, not proven by a build |
+| 2 | `contracts->proto` updated in the same change | § 4.2, § 11.2 obligation 1 — one id, measured (M4) |
+| 3 | The SDK's task `inputs` name `@paigasus/proto` | § 11.1 (M11, M11b) |
+| 4 | A new `proto->sdk` affected-graph case | § 11.2 obligation 2 |
+| 5 | A forgotten token is a compile error | § 7.4 |
+| 6 | An explicit default deadline | § 7.2 |
 
 ## 13. Measurements
 
@@ -814,6 +1189,10 @@ waiting is the fix.
 | M9 | Every `buf generate` already contacts the BSR (three `remote:` plugins, empty plugin cache); `ci.yml` caches nothing buf-related | **TAKEN** |
 | M11 | An `error_pb.ts` edit selects **no** `paigasus-sdk-ts` task today | **TAKEN** |
 | M11b | With § 11.1's inputs it selects all three | **TAKEN** |
+| M13 | `Object.values(Code)` yields **32** entries — 16 numeric (1-16) and 16 string names — on `@connectrpc/connect` 2.2.0 / Node 24.18.1, so a naive totality test iterates strings too | **TAKEN** |
+| M14 | PR B's `tests/server-guard.test.ts` compares the guard import as a LITERAL string (`:19`, `:52`), so a guarded entry one directory deep fails it | **TAKEN** |
+| M15 | The gateway's chat endpoint requires a bearer (`chat.rs:5-6`); `MissingBearer` answers 401 `missing-authorization` (`error.rs:122-128`) | **TAKEN** |
+| M16 | Apps may not import `@paigasus/proto` — `paigasus/boundaries/apps` bans it, and type imports are banned alongside value imports (`eslint.mjs:28-31`) | **TAKEN** |
 | M5 | Reversing the two `buf generate` calls leaves `error_details_pb.ts` deleted, and the **drift step** reds | **TAKEN** |
 | M6 | Equal transport options return one object; differing options return two; two `Auth` values give two headers | pending |
 | M10 | A client component `import type`-ing from the guarded `./errors` entry builds | pending |
@@ -850,10 +1229,13 @@ none of the SDK work.
 |---|---|---|
 | **A** | § 5 codegen, `@paigasus/proto`'s widened surface, the wire-reason codec (§ 9.3), obligations 3–4, 7–8 | Ships a tested contract surface with no SDK. Its blast radius is CI-wide, so it merges and settles first. |
 | **B** | § 6 package shape, § 7 transport and auth, § 11.1 inputs, obligations 1–2, 5–6 | Needs A's exports. Adds the affected-graph edge and its control case. |
-| **C** | § 8 chat, § 9 error model and tables | Needs A's `ErrorInfoSchema` and B's package. Holds AC 2/3/4. |
+| **C** | § 8 chat, § 9 error model and tables, § 10's new rows, obligation 9 | Needs A's `ErrorInfoSchema` and B's package. Holds all four of SMA-625's ACs (§ 12.1). |
 
-AC 5 lands in **B**, which is where the dependency edge is created. This is a recommendation for the
-Linear breakdown, not a decision this spec takes.
+SMA-508's AC 2 and AC 4 land in **B**, which is where the dependency edge is created.
+
+**ADOPTED, and executed.** PR A is SMA-624, merged as `9f57d6e4`. PR B is SMA-508, merged as
+`2262801d`. PR C is SMA-625. Revision 3 re-challenged §§ 8-10 on their own against the merged
+result of A and B; § 15.1 records what that found.
 
 ## 15. What the adversarial challenge changed
 
@@ -889,8 +1271,149 @@ import statement" and layer 2's static-only caveat; § 13's measurement provenan
 **Deferred to the reader.** The three-PR split (§ 14.1) and the ADR-0018 amendment's timing (§ 16 Q1)
 are decisions for the issue owner, not for this spec.
 
+### 15.1 What the SECOND challenge changed (Revision 2, SMA-625)
+
+§§ 8-10 were re-challenged on their own after PRs A and B merged, because the split left them
+standing against a codebase that already held the other two PRs' output. Six BLOCKERs and eleven
+MAJORs were filed. Every one was verified against the merged code before it was folded in.
+
+**Folded in — the six BLOCKERs.**
+
+1. **§ 8 had no configuration or authorization surface.** It described response handling only, and
+   never said how a caller supplies a base URL or a credential — on the one surface that carries the
+   customer's API key. § 8.1 is new (M15).
+2. **§ 8.1's idle timeout contradicted § 8's own passthrough rule** and named no mechanism that could
+   implement it. Removed, with the narrower contract stated in its place (§ 8.5).
+3. **The pre-header timeout could not be built as `AbortSignal.timeout`** without truncating every
+   chat completion longer than ten seconds, and Revision 1's test row passed under both the correct
+   and the broken build. § 8.5 names the `AbortController` shape and § 10 gains the row that
+   separates them.
+4. **The terminal-frame drift check had no mechanism.** `chat.rs` was not an input of any SDK task,
+   so the check was vacuous in exactly the way M11 measured for AC 3. § 8.4 and obligation 9 fix it.
+5. **`src/errors/map-error.ts` would have failed a test PR B already merged** (M14). § 3.1 moves
+   every guarded entry to `src/` root.
+6. **The AC numbers were stale against the re-cut issues.** § 12 is now two tables, and § 9.2 names
+   the four codes that appeared nowhere in Revision 1.
+
+**Folded in — the MAJORs.** § 9.5 arm 3's false premise, that the gateway's `code` is always
+registry-drawn, when `chat.rs:113-119` forwards OpenAI's own envelope verbatim with a nullable `code`
+and `param`; a fifth `mapError` arm and a third `transport` arm for a rejected `fetch`; totality over
+a malformed or non-JSON body; `UPSTREAM_ERROR`'s `degraded` override, which is the strongest of the
+three override examples because the default is visibly wrong; § 9.6, without which no app could name a
+reason at all (M16); `PaigasusError` being a plain object rather than an `Error` subclass; the `fetch`
+injection seam; the cancellation row rewritten from a tautology; `Code` totality (M13); the three
+§ 10 rows that had already landed; and the parser's signature, which contradicted its own doc comment.
+
+**Folded in — the MINORs.** Arm 3's retryable headers; `metadata` on each HTTP arm; `field` being
+gRPC-only; the root barrel's star-export ambiguity; the parser taking `Uint8Array` rather than
+`string`; and `codeName` beside `transport.code`.
+
+**Corrected rather than accepted as filed.** The challenge said the four AC codes "are never
+enumerated anywhere in the spec". They were enumerated in SMA-625's Linear description and every one
+had a row in § 9.2's table. The real defect was narrower: § 10's row named them without listing them,
+under a stale AC number. Fixed as § 9.2's four-code table.
+
+**Two citations corrected, from an independent fact-check of every reference in §§ 8-10.**
+`chat.rs:128-137` (unbuffered forwarding) is really `chat.rs:194-220`, and
+`system_retirement.rs:111-126` builds the payloads while `:143-155` inserts the sibling keys.
+Everything else checked — the terminal frame at `chat.rs:63` byte-for-byte, the three header
+constants, `error.proto:239-247`, the 906 and 904 values, the `is_wire_token` allow-list and its ten
+rejected inputs, and the count of 57 reasons excluding the sentinel — was accurate.
+
+### 15.2 What PR #231 contributed (a parallel implementation, merged in)
+
+SMA-625 was implemented **twice**, concurrently and independently, by two sessions that did not see
+each other. PR #231 and PR #232 were both complete and both green. The issue owner chose to keep
+#232 as the base and port #231's better decisions onto it. Five landed:
+
+1. **The SSE record delimiter is `/(?:\r\n|\r|\n){2}/`** — any two consecutive line terminators, with
+   `\r\n` first in the alternation so a CRLF is consumed whole. The previous `/\r?\n\r?\n/` required
+   an LF in each half, so a **bare CR** never matched and the terminal frame was silently never
+   completed. MEASURED: reverting it reds exactly that one row.
+2. **Multiple `data:` lines join with `\n`, not `''`.** The WHATWG grammar appends U+000A after each
+   `data` field's value. Stated honestly: on the frames this gateway emits — always one `data:`
+   line — the two are indistinguishable, so no test discriminates them. This is a correctness
+   change to the receiver, not a bug fix. The counter-argument that `''` protects a JSON string
+   split across two lines was **rejected**: that producer has emitted a broken document, and
+   joining with `''` would corrupt every legitimate multi-line payload to hide it.
+3. **The parser takes the COMMITTED STATUS** rather than hardcoding 200 (§ 9.5 arm 4).
+4. **The parser takes the head's IDS**, so the one failure with no ids of its own still carries a
+   reportable correlation id.
+5. **`tests/server-guard.test.ts` computes each entry's expected guard specifier from that entry's
+   own directory** instead of pinning one literal. This is what § 6.2 layer 3 always described, and
+   it removes the constraint that every guarded entry live at `src/` root — the constraint § 3.1's
+   layout was bent around. The unguarded assertion PARSES rather than pattern-matches, for the
+   reason the rest of that file already records: a first attempt with a regex flagged the prose in
+   `errors/types.ts` that says the file must not gain a guard.
+
+**Three further decisions came from the SECOND adversarial challenge**, which #231's author ran
+independently on this same slice after PRs A and B merged. Both branches were challenged; the two
+challenges found overlapping but different things, which is why these were absent here. The issue
+owner confirmed all three against this branch:
+
+8. **`ResourceExhausted` / 429 get a `rate-limited` state** (§ 9.2). This reverses Revision 3's
+   decision, on a measurement Revision 3 did not have.
+9. **`Unimplemented` and 501 move to `generic`** so the `CAPABILITY_DISABLED` override does real
+   work (§ 9.2, § 9.4). Until this, that override was inert.
+10. **`PRINCIPAL_INACTIVE` takes `disabled`** (§ 9.4), with its two provisioning neighbours
+    deliberately left on `forbidden`.
+
+11. **The pending-record cap is 64 KiB.** The parser bounds a single SSE record so an upstream that
+    never emits a blank line cannot grow the buffer without limit. This branch first shipped 1 MiB,
+    a round number with no derivation; #231's is derived from the frame it has to hold — the
+    terminal frame is ~110 characters, so 64 KiB is three orders of magnitude of headroom and the
+    cap fires only on a producer emitting no blank line at all. Dropping the buffer is best-effort
+    in either design and never fails the stream, so the cost of being wrong is small either way;
+    the tighter bound is simply the one that can be argued for. The issue owner chose it.
+
+Two further defects came from #231's own review rounds and applied here unchanged:
+
+6. **`JSON.stringify(request)` sat inside the `try` wrapping `fetch`**, so a caller passing a
+   circular reference or a bigint had their own bug reported back as a gateway `degraded`. It is
+   now serialized before the try and before the deadline timer, so a stringify failure can neither
+   be misattributed nor leak a timer.
+7. **`??` does not fall through on an empty string**, so an `ErrorInfo` carrying
+   `correlation_id: ""` suppressed the header fallback and produced a blank id. A `firstNonEmpty`
+   helper replaces it.
+
+One caveat inherited knowingly: the parser `.trim()`s each `data:` line where the grammar strips
+exactly one leading space. Harmless for JSON payloads, which ignore surrounding whitespace, and
+recorded here rather than inherited silently.
+
+**Not re-litigated at THIS gate, by the issue owner's decision.** § 9.2's `ResourceExhausted`/429 row
+stays `degraded`; SMA-627 stays out of scope; the three-PR split stands.
+
+> **SUPERSEDED in part — the 429 row was re-litigated later and reversed.** § 15.2 item 8 records
+> the reversal: `ResourceExhausted` and 429 now map to **`rate-limited`**. The sentence above is kept
+> as the record of what THIS gate decided, because a second challenge reaching the opposite answer
+> on a measurement this one did not have is the interesting fact, and rewriting it away would hide
+> that the question was asked twice. § 9.2 is authoritative for the mapping. SMA-627 and the
+> three-PR split are unaffected.
+
 ## 16. Open questions for review
 
+All three of Revision 1's questions are now **closed**.
+
 1. **ADR-0018's amendment (§ 4.1)** — precondition of merging, or follow-up? The ADRs live in Notion.
-2. **The three-PR split (§ 14.1)** — adopt, and re-cut the Linear issues?
-3. **`ResourceExhausted`/429 → `degraded`** (§ 9.2) — the one presentation row worth a second opinion.
+2. **The three-PR split (§ 14.1)** — adopt, and re-cut the Linear issues? **ADOPTED.** SMA-624 (A)
+   and SMA-508 (B) have merged; SMA-625 is C.
+3. **`ResourceExhausted`/429 → `degraded`** (§ 9.2) — the one presentation row worth a second
+   opinion. **KEPT as `degraded`** by the issue owner on this revision, then **REVERSED to
+   `rate-limited`** after a second challenge produced a measurement this revision did not have
+   (§ 15.2 item 8). The row flagging itself as "worth a second opinion" and then getting one that
+   changed the answer is the section working as intended. § 9.2 is authoritative.
+
+### 16.1 What Revision 3 put to the reader — all three now CONFIRMED
+
+The issue owner reviewed all three at the spec-approval gate and confirmed each as written. They are
+recorded here as decisions, not as open questions.
+
+1. **§ 8.5 removes the idle timeout** from the SDK's contract. That is a reduction in scope against
+   Revision 1. The alternative is a `TransformStream` wrapper, which breaks the passthrough and
+   SMA-625's AC 4. Confirm the reduction is the right trade.
+2. **§ 8.4 chooses a Moon `input` over a shared fixture** for the terminal-frame drift check. The
+   cost is that every `chat.rs` edit re-runs the SDK's vitest suite. The alternative — a committed
+   fixture plus a Rust `#[test]` — is recorded in § 8.4 and can be chosen instead.
+3. **§ 9.6 puts `ErrorReason` and `ErrorDomain` into the client-safe surface as VALUES.** Two small
+   enum objects enter the client bundle. Without them no app can branch on a reason, which is the
+   package's stated purpose, but it is still a deliberate bundle cost.
