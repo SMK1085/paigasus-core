@@ -13,8 +13,7 @@ import type { CapabilityKey, ServiceState } from './types.js';
 export type { DescriptorCache } from './ports/cache.js';
 export type { DiscoveryLogger, DiscoveryEventName, DiscoveryEventFields } from './ports/logger.js';
 export { createMemoryDescriptorCache } from './adapters/memory-cache.js';
-// NOTE: `export { createRedisDescriptorCache } from './adapters/redis-cache.js';` is added by
-// Task 7, which creates that file. Do not add it here — the module would not resolve.
+export { createRedisDescriptorCache } from './adapters/redis-cache.js';
 export { noopLogger } from './adapters/noop-logger.js';
 export { discoveryEnvShape, parseServiceMap } from './config.js';
 export { DEFAULT_TIMINGS } from './core/record.js';
