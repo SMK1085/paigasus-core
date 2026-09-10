@@ -12,7 +12,8 @@
   "description": "Server-only Connect-ES clients for the Paigasus IAM gRPC services.",
   "exports": {
     ".": "./src/index.ts",
-    "./iam": "./src/iam.ts"
+    "./iam": "./src/iam.ts",
+    "./errors/types": "./src/errors/types.ts"
   },
   "scripts": {
     "typecheck": "tsc -p tsconfig.json --noEmit"
