@@ -21,6 +21,14 @@ describe('MemorySessionStore and the shared record predicate (SMA-626 § 4)', ()
     const s = new MemorySessionStore();
     await s.set('s', { version: 1 } as unknown as SessionRecord, 60_000, null);
     await expect(s.get('s')).resolves.toBeNull();
-    await expect(s.get('s')).resolves.toBeNull(); // deleted, not merely reported absent
+    // Proves DELETION, not merely correct-but-repeated rejection. Calling `get()` twice and
+    // checking `null` both times does NOT distinguish "deleted" from "still in the map but
+    // re-rejected on every read" — `isSessionRecord` runs again on the second call either way.
+    // An insert-only `set` (expectedRev: null) can only return `true` if the map entry is
+    // actually gone (memory-store.ts's own `set` requires `current === null` in that branch).
+    // MEASURED (SMA-626 task 4 review round 1): commenting out `this.#records.delete(sid)` in
+    // memory-store.ts's `get` turns this assertion red — `set` then returns `false` because the
+    // poisoned record still occupies the slot. See the fix report for the captured output.
+    await expect(s.set('s', makeRecord(), 60_000, null)).resolves.toBe(true);
   });
 });
