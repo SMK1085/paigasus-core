@@ -52,6 +52,23 @@ export const DEFAULT_TIMEOUT_MS = 10_000;
  */
 export const authContextKey = createContextKey<Auth>({ anonymous: true }, { description: '@paigasus/sdk per-call authorization' });
 
+/**
+ * The one place this package decides what `authorization` a request carries.
+ *
+ * Two rules, in this order. A request that ALREADY carries an `authorization` header is refused —
+ * the caller is reaching around the SDK's auth binding, on either `Auth` arm (§ 3). Otherwise the
+ * bound `Auth` decides: a `bearer` becomes `Authorization: Bearer <token>`, and `{ anonymous: true }`
+ * sends nothing.
+ *
+ * Both refusals throw `ConnectError` with `Code.InvalidArgument`, so this package's own error map
+ * presents them as `invalid-input` rather than as a service fault. Neither message ever contains a
+ * credential.
+ *
+ * It runs on the unary and the streaming path alike, and it sits on the CACHED transport — so it
+ * applies to every client and every call, not only to those built through `createIamClient`.
+ *
+ * The reasoning behind each decision is inline below, at the line it governs.
+ */
 export const authInterceptor: Interceptor = (next) => async (req) => {
   // The SDK owns `authorization`. A request that reaches here already carrying one is refused on
   // BOTH Auth arms (spec § 3): on the anonymous arm the header would otherwise be forwarded from a
