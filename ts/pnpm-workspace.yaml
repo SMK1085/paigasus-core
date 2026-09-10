@@ -8,7 +8,15 @@ packages:
 # the `allowBuilds` map; the older `onlyBuiltDependencies` list is ignored (verified
 # against pnpm 11.3.0 — onlyBuiltDependencies still errored, allowBuilds builds it).
 allowBuilds:
+  # Transitive via testcontainers -> dockerode (SMA-506). ssh2 is dockerode's OPTIONAL
+  # ssh-transport for a remote Docker daemon; we only ever reach a local Docker socket, so its
+  # native addon is unneeded. cpu-features is ssh2's own native crypto-detection helper (a
+  # node-gyp rebuild) — ssh2 falls back to a pure-JS path without it. protobufjs's postinstall
+  # is a no-op donation notice (scripts/postinstall), not a compile step. All three: false.
+  cpu-features: false
+  protobufjs: false
   sharp: true
+  ssh2: false
 
 # Make the `engines.node` floor a hard error instead of a warning. Every workspace
 # package declares `engines.node: >=24` (Active LTS, matching the 24.16.0 pin in
@@ -151,6 +159,22 @@ catalog:
   # dropped: the sync bundler glue needs no TLA, and v1.6.0 hard-requires classic `rollup`, absent
   # under vitest 4's Vite 8 / rolldown stack — see vitest.config.ts.)
   vite-plugin-wasm: ^3.6.0
+  # OIDC relying party for @paigasus/auth (SMA-506). v6 is the line ADR-0017 decision 4 names.
+  # Protocol handling — PKCE, state, nonce, discovery, JWKS, token exchange — stays in the library.
+  openid-client: ^6.8.8
+  # JOSE primitives. Used ONLY by tests, to mint a local JWKS and sign fixture tokens (AC 6).
+  # Production token verification is openid-client's job; this is never imported from src/.
+  jose: ^6.2.12
+  # node-redis, the official client. v6 — its client API differs from v5, so check the installed
+  # types rather than older examples. Chosen over ioredis because its redis:// DSN parsing matches
+  # rs/crates/services/paigasus-iam/src/adapters/redis_conn.rs verbatim.
+  redis: ^6.2.1
+  # E2E tier for @paigasus/auth. A real browser is the only thing that can prove SameSite behaviour
+  # on the cross-site redirect back from the IdP, and __Host- cookie-prefix enforcement.
+  '@playwright/test': ^1.63.0
+  # Starts Keycloak and Redis for the E2E tier. The Rust side uses testcontainers-modules; this is
+  # the TS equivalent. GitHub Actions `services:` cannot do the cert copy and realm import.
+  testcontainers: ^12.1.0
   # @paigasus/ui foundation (SMA-503, ADR-0021). Tailwind v4 is CSS-first: there is no
   # tailwind.config.*, so `tailwindcss` is present for the `@theme`/`@source` syntax the
   # package's CSS uses and `@tailwindcss/postcss` is what the consuming Next app runs.

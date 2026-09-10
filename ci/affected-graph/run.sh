@@ -75,13 +75,20 @@ assert_case() {
 #   `moon query tasks`. HINT is the traversal-specific sentence printed under a `missing` list.
 #
 #   Scoped to build/test/lint — the three tasks that carry `^:build` (lint joined them in
-#   SMA-526). fmt and build-release are excluded because they carry no `^:build`: fmt is
-#   crate-local by construction, and build-release does not run in CI at all.
+#   SMA-526) — plus `test-e2e` (SMA-506), the one non-`^:build` task name this filter admits.
+#   `test-e2e` is `@paigasus/auth`'s own Docker-backed E2E task; it is included so an
+#   `auth->auth-tasks`-style case can prove the task is reachable from a source edit at all —
+#   nothing else in this file did before SMA-506, since the task name is new. fmt and
+#   build-release stay excluded because they carry no `^:build`: fmt is crate-local by
+#   construction, and build-release does not run in CI at all.
 #
 #   NOTE: the filter matches task NAMES across every project, not just Rust ones, so a
 #   same-named task in another stack could enter a case's observed set. `contracts:lint` exists
 #   and does not appear here — contracts is UPSTREAM of paigasus-proto-rs and `--downstream deep`
 #   walks dependents — but a future case with a different touched file must re-check that.
+#   Measured: `paigasus-auth-ts` is the only project declaring `test-e2e`
+#   (`moon query tasks` has exactly one match), so widening the filter does not pull a
+#   same-named task from elsewhere into any existing case's observed set.
 # returns 0 pass / 1 assertion fail / 2 infrastructure error
 _assert_task_case_impl() {
   local label="$1" file="$2" expected_csv="$3" hint="$4"; shift 4
@@ -95,7 +102,7 @@ d = json.load(sys.stdin)
 out = []
 for pid, tasks in (d.get("tasks") or {}).items():
     for name in tasks:
-        if name in ("build", "test", "lint"):
+        if name in ("build", "test", "lint", "test-e2e"):
             out.append(f"{pid}:{name}")
 print("\n".join(sorted(out)))')" \
     || { echo "FATAL [$label]: moon query tasks failed" >&2; return 2; }
@@ -378,6 +385,15 @@ run_suite() {
   # both files sit inside the same declared input glob.
   run_task_case_ci "ui-components->console" "ts/packages/paigasus-ui/src/components/table.tsx" \
     "paigasus-console-ts:build,paigasus-console-ts:test,paigasus-ui-ts:build,paigasus-ui-ts:test,ts:lint"
+  # SMA-506 — a @paigasus/auth SOURCE edit must select its own build/test AND the new
+  # Docker-backed `test-e2e` task (`^:build`-free — the filter widening above admits it) — plus
+  # `ts:lint`. Nothing asserted this task was reachable from an edit to the package before this
+  # case; without it a typo'd input glob in the package's moon.yml would serve a cached PASS on
+  # every PR touching `src/`. The expected set is DERIVED with the same no-flag
+  # `moon query tasks --affected` traversal `_assert_task_case_impl` uses, not typed by hand:
+  #   printf '%s\n' ts/packages/paigasus-auth/src/config.ts | moon query tasks --affected | ...
+  run_task_case_ci "auth->auth-tasks" "ts/packages/paigasus-auth/src/config.ts" \
+    "paigasus-auth-ts:build,paigasus-auth-ts:test,paigasus-auth-ts:test-e2e,ts:lint"
   # SMA-508 — a @paigasus/proto SOURCE edit must select the SDK's build and test.
   # This is the ONLY control on ts/packages/paigasus-sdk/moon.yml's `inputs` list. Remove that
   # list and the SDK's suite stops running on the PR that changes the generated code it consumes,
