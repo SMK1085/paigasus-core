@@ -424,6 +424,20 @@ run_suite() {
   # Strict equality: re-baseline deliberately when the set legitimately changes.
   run_task_case_ci "proto-iam->sdk" "ts/packages/paigasus-proto/src/generated/paigasus/iam/v1/iam_pb.ts" \
     "paigasus-proto-ts:build,paigasus-proto-ts:test,paigasus-sdk-ts:build,paigasus-sdk-ts:test,ts:lint"
+  # SMA-625, spec § 8.4 and § 11.2 obligation 9 — a gateway chat.rs edit must select the SDK's
+  # test. This is the ONLY control on the '/rs/.../chat.rs' entry in paigasus-sdk-ts:test's
+  # `inputs`. tests/terminal-frame.test.ts reads TERMINAL_SSE_ERROR out of that Rust file by
+  # constant name. Without this input, editing that constant selects no paigasus-sdk-ts task at
+  # all, so Moon serves a cached PASS on exactly the PR that changes the frame — the same vacuity
+  # M11 measured for the error registry, and nothing else in the repo notices.
+  # The expected set is MEASURED with the same traversal _assert_task_case_impl uses, not copied
+  # from the cases above: a chat.rs edit also selects the gateway crate's own Rust tasks
+  # (build/lint/test), because chat.rs is that crate's own source. It does NOT select
+  # paigasus-sdk-ts:build or ts:lint — only paigasus-sdk-ts's `test` task carries this input, and
+  # ts:lint's own inputs do not reach a Rust file.
+  # Strict equality: re-baseline deliberately when the set legitimately changes.
+  run_task_case_ci "gateway->sdk" "rs/crates/services/paigasus-gateway/src/adapters/http/chat.rs" \
+    "paigasus-gateway-rs:build,paigasus-gateway-rs:lint,paigasus-gateway-rs:test,paigasus-sdk-ts:test"
   # Generic Cargo<->Moon parity: catches a MISSING case, which is how SMA-524's bug survived review.
   assert_cargo_moon_parity || SUITE_RC=1
   # assert_include_relations returns only 0/1 (no infra code), so collapsing is correct here.
