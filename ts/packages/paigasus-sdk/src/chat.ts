@@ -176,7 +176,10 @@ export function createChatClient(options: ChatClientOptions, auth: { readonly be
         // The SDK maps it, so the caller needs no error knowledge of its own. The body may be
         // gateway-generated OR an upstream OpenAI envelope forwarded verbatim (chat.rs:113-119),
         // and it may not be JSON at all — mapError is total over both.
-        return { kind: 'error', error: mapError({ kind: 'http', status: response.status, headers: response.headers, body: await readBody(response) }) };
+        // A failed read is not worth a second error here: the status alone already carries the
+        // presentation, and `mapHttp` falls back to `HTTP <status>` for the message.
+        const read = await readBody(response);
+        return { kind: 'error', error: mapError({ kind: 'http', status: response.status, headers: response.headers, body: read.ok ? read.body : null }) };
       }
 
       const contentType = response.headers.get('content-type') ?? '';
@@ -189,32 +192,47 @@ export function createChatClient(options: ChatClientOptions, auth: { readonly be
         return { kind: 'stream', body: response.body, ...readIds(response.headers) };
       }
 
-      return { kind: 'json', status: response.status, body: await readBody(response), ...readIds(response.headers) };
+      const read = await readBody(response);
+      if (!read.ok) {
+        // The head said 2xx, but the body never arrived intact. Reporting `body: null` here would
+        // be a lie a caller cannot detect, so this is a transport failure like any other.
+        return { kind: 'error', error: mapError({ kind: 'transport', cause: callerSignal?.aborted === true ? 'aborted' : 'network', message: 'the response body failed mid-read' }) };
+      }
+      return { kind: 'json', status: response.status, body: read.body, ...readIds(response.headers) };
     },
   };
 }
+
+/**
+ * The outcome of draining a response body.
+ *
+ * DISCRIMINATED deliberately. An earlier revision returned a bare `unknown` and used `null` for a
+ * read failure, which is indistinguishable from a server that legitimately sent the JSON value
+ * `null` — so a failed read on the SUCCESS path silently became `{ kind: 'json', body: null }` and
+ * the caller never learned the stream broke.
+ */
+type BodyRead = { readonly ok: true; readonly body: unknown } | { readonly ok: false };
 
 /**
  * Parse when we can, hand back the raw text when we cannot. `mapError` handles both.
  *
  * A body-stream error (a caller abort mid-read, a connection reset) makes `response.text()`
  * REJECT, not throw synchronously — MEASURED on Node 22.22.3, it rejects with a `DOMException`.
- * Both call sites are on the mapped-error path, so an uncaught rejection here would turn a
- * recoverable failure into an unhandled exception, the exact thing this module's error model
- * exists to prevent. `null` makes `readEnvelope` read no envelope, and `mapHttp` falls back to
- * `HTTP <status>` plus the transport-derived presentation.
+ * An uncaught rejection here would turn a recoverable failure into an unhandled exception, the
+ * exact thing this module's error model exists to prevent, so it is caught and reported as
+ * `{ ok: false }` for each call site to handle on its own terms.
  */
-async function readBody(response: Response): Promise<unknown> {
+async function readBody(response: Response): Promise<BodyRead> {
   let text: string;
   try {
     text = await response.text();
   } catch {
-    return null;
+    return { ok: false };
   }
   try {
-    return JSON.parse(text);
+    return { ok: true, body: JSON.parse(text) };
   } catch {
-    return text;
+    return { ok: true, body: text };
   }
 }
 

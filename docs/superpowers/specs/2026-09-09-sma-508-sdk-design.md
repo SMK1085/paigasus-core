@@ -1120,9 +1120,15 @@ lands on the wrong criterion. Both tables below are keyed to the CURRENT Linear 
 
 ### 12.1 SMA-625 — the criteria this PR must meet
 
+**One wording correction against the Linear issue.** SMA-625's AC 1 says an unknown reason yields a
+"generic fallback". The implemented behaviour, which § 9.5 describes and § 10 tests, is the
+**transport-derived** presentation — so an unknown reason on a `404` presents as `not-found`, not as
+`generic`. `generic` is only what the transport tables themselves fall through to. The distinction
+matters: degrading a `404` to `generic` would lose information the status already carried.
+
 | AC | Text | Where |
 |---|---|---|
-| 1 | Branch on `(domain, reason)` only, never message text; unknown reason → generic + correlation id | § 9.1, § 9.5; the message-independence and degradation rows in § 10 |
+| 1 | Branch on `(domain, reason)` only, never message text; an unknown reason degrades to the TRANSPORT-derived presentation plus the correlation id | § 9.1, § 9.5; the message-independence and degradation rows in § 10 |
 | 2 | A table test driven off the registry | § 9.4 — the total `Record` (M8) **plus** a descriptor-driven test, made reachable by § 11.1 (M11) |
 | 3 | The four codes → four states; raw statuses never reach the browser | § 9.2, including the four-code table added in Revision 2; `PaigasusError` holds no `ConnectError` and no `Headers` (§ 6.3, § 9.1) |
 | 4 | Chat streaming is a `ReadableStream` passthrough | § 8.3; § 10's identity-equality row |

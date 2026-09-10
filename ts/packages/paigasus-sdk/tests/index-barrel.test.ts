@@ -24,9 +24,12 @@ describe('the root barrel serves every entry surface', () => {
     expect(ENTRIES.length).toBeGreaterThanOrEqual(9);
   });
 
-  it.each(ENTRIES)('the barrel re-exports ./%s key %s', (_moduleName, key) => {
+  // IDENTITY, not merely presence. A barrel entry pointing at the wrong module's same-named value
+  // would satisfy `toBeDefined()` while serving something else entirely — which is exactly the
+  // silent shadowing the explicit re-export list exists to prevent.
+  it.each(ENTRIES)('the barrel re-exports ./%s key %s', (moduleName, key) => {
     expect(barrel).toHaveProperty(key);
-    expect(barrel[key as keyof typeof barrel]).toBeDefined();
+    expect(barrel[key as keyof typeof barrel]).toBe(SUBMODULES[moduleName as keyof typeof SUBMODULES][key as never]);
   });
 
   // An ambiguous star-exported name is dropped SILENTLY under ES semantics, so a value that is

@@ -161,6 +161,26 @@ describe('the client never throws a mapped error', () => {
     expect(result.error.message).toBe('HTTP 500');
   });
 
+  // The SUCCESS path is the one that could lie. `readBody` reports a failed read distinctly from a
+  // parsed JSON `null`, so a 2xx whose body breaks mid-read becomes a transport error rather than
+  // `{ kind: 'json', body: null }` — which a caller could not tell apart from a server that really
+  // did send `null`.
+  it('does not pass off a failed body read on a 2xx as a null JSON body', async () => {
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        controller.error(new Error('stream reset'));
+      },
+    });
+    const fetchImpl = vi.fn(() => Promise.resolve(new Response(body, { status: 200, headers: { 'content-type': 'application/json' } })));
+    const client = createChatClient({ baseUrl: BASE, fetch: fetchImpl }, { bearer: 'T' });
+
+    const result = await client.completions({});
+    expect(result.kind).toBe('error');
+    if (result.kind !== 'error') throw new Error('unreachable');
+    expect(result.error.transport).toEqual({ kind: 'transport', cause: 'network' });
+    expect(result.error.presentation).toBe('degraded');
+  });
+
   it('maps a rejected fetch to the transport arm', async () => {
     // A real `fetch` REJECTS on a network failure; it does not throw synchronously. A rejection
     // is caught the same way a synchronous throw would be, since the call happens inside the
