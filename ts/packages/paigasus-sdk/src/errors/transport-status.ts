@@ -72,5 +72,5 @@ export function presentationForTransportCause(cause: TransportCause): Presentati
 
 /** The `Code` member name, for logging. `Code[code]` is the reverse map a numeric enum carries. */
 export function grpcCodeName(code: Code): string {
-  return (Code[code] as string | undefined) ?? String(code);
+  return Code[code] ?? String(code);
 }

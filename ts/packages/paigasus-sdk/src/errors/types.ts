@@ -31,9 +31,7 @@ export type TransportCause = 'timeout' | 'network' | 'aborted';
  * @connectrpc/connect, which is a server-side dependency (spec § 9.1).
  */
 export type TransportInfo =
-  | { readonly kind: 'grpc'; readonly code: Code; readonly codeName: string }
-  | { readonly kind: 'http'; readonly status: number }
-  | { readonly kind: 'transport'; readonly cause: TransportCause };
+  { readonly kind: 'grpc'; readonly code: Code; readonly codeName: string } | { readonly kind: 'http'; readonly status: number } | { readonly kind: 'transport'; readonly cause: TransportCause };
 
 /**
  * One shape for every failure the SDK can report.
