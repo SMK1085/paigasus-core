@@ -21,7 +21,7 @@ vi.mock('next/navigation', () => ({ redirect: redirectMock }));
 import { getSession, requireSession } from '../../src/next/get-session.js';
 import { MemorySessionStore } from '../../src/adapters/memory-store.js';
 import { noopLogger } from '../../src/adapters/noop-logger.js';
-import { SessionStoreUnavailable } from '../../src/core/errors.js';
+import { RefreshRejected, SessionStoreUnavailable } from '../../src/core/errors.js';
 import type { SessionRecord } from '../../src/core/session.js';
 import { SESSION_COOKIE } from '../../src/http/cookies.js';
 import type { AuthEventFields, AuthEventName, AuthLogger } from '../../src/ports/logger.js';
@@ -191,5 +191,54 @@ describe('requireSession', () => {
 
     await expect(requireSession(runtime)).resolves.toMatchObject({ accessToken: 'AT-live' });
     expect(redirectMock).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// SMA-626 § 2.4. This catch used to log `store.unavailable` for EVERY failure, so an identity-
+// provider outage raised the store-outage rate while Redis was perfectly healthy and an operator
+// went and inspected the wrong system. `store.unavailable` now means the store, and nothing else.
+// ---------------------------------------------------------------------------------------------
+describe('getSession failure attribution (SMA-626 § 2.4)', () => {
+  it('logs store.unavailable ONLY for a SessionStoreUnavailable', async () => {
+    cookiesMock.mockResolvedValue(cookieJar('some-sid'));
+    const { logger, events } = recordingLogger();
+
+    await getSession({ ...baseRuntime(unavailableStore()), logger });
+
+    expect(events).toEqual([['store.unavailable', { sid: sidTag('some-sid'), stage: 'get_session' }]]);
+  });
+
+  it('logs session.resolve_failed, NOT store.unavailable, when the IdP definitively rejects', async () => {
+    cookiesMock.mockResolvedValue(cookieJar('sid-needs-refresh'));
+    const store = new MemorySessionStore();
+    await store.set('sid-needs-refresh', { ...liveRecord(), accessExpiresAt: Date.now() - 1, refreshToken: 'RT' }, 999_000, null);
+    const { logger, events } = recordingLogger();
+
+    await expect(
+      getSession({
+        ...baseRuntime(store),
+        logger,
+        oidc: { ...unusedOidc(), refresh: () => Promise.reject(new RefreshRejected('invalid_grant')) },
+      }),
+    ).resolves.toBeNull();
+
+    expect(events).toContainEqual(['session.resolve_failed', { sid: sidTag('sid-needs-refresh'), stage: 'get_session' }]);
+    expect(events.some(([name]) => name === 'store.unavailable')).toBe(false);
+  });
+
+  // The SessionStore port is exported publicly and an injected store, a decorator, or a future
+  // adapter may fail with any error class. This outcome is DELIBERATE and documented in
+  // ports/session-store.ts, not an accident — the test exists so the decision is visible rather
+  // than surviving only because every current fixture happens to throw the right class.
+  it('a store failing with some OTHER error class logs session.resolve_failed', async () => {
+    cookiesMock.mockResolvedValue(cookieJar('some-sid'));
+    const store = new MemorySessionStore();
+    store.get = () => Promise.reject(new Error('a decorator blew up'));
+    const { logger, events } = recordingLogger();
+
+    await expect(getSession({ ...baseRuntime(store), logger })).resolves.toBeNull();
+
+    expect(events).toEqual([['session.resolve_failed', { sid: sidTag('some-sid'), stage: 'get_session' }]]);
   });
 });
