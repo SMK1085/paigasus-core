@@ -205,6 +205,12 @@ describe('GET /auth/login', () => {
     // callback's Location to /iam/auth/login for both. A guard on the raw string misses them.
     '/iam/./auth/login',
     '/iam/x/../auth/login',
+    // Empty segments. MEASURED: the WHATWG URL parser resolves dot segments but does NOT collapse a
+    // duplicate slash, so `new URL(...).pathname` alone keeps both of these and the guard misses
+    // them. Whether `/iam//auth/login` then reaches the login route depends on a server
+    // path-normalization step this package does not control, so the guard collapses the path itself.
+    '/iam//auth/login',
+    '/iam/x/..//auth/login',
   ])('replaces a returnTo under the zone auth routes (%s) with the zone root', async (raw) => {
     const res = await createAuthRoutes(runtime).handle(loginRequest(`?returnTo=${encodeURIComponent(raw)}`));
     const state = new URL(res.headers.get('location') ?? '').searchParams.get('state') ?? '';

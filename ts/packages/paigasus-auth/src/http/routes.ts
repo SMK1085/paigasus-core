@@ -125,12 +125,25 @@ async function handleLogin(runtime: AuthRuntime, req: Request, url: URL): Promis
   // /auth/login (or /auth/callback) after a successful login, so a crafted link loops, one click per
   // round. validateReturnTo accepts such a path, because it is same-origin; it is refused here.
   //
-  // The check reads the path with its dot segments resolved, because the browser resolves them in
-  // the callback's Location: `/iam/./auth/login` and `/iam/x/../auth/login` both land on
-  // `/iam/auth/login`. The placeholder origin only lets `new URL` parse a path. validateReturnTo has
-  // already refused every value that is not a same-origin path (`//`, a backslash), so the parse
-  // cannot move to another host. The stored value stays `requested`, so its query string is kept.
-  const resolvedPath = new URL(requested, 'http://placeholder').pathname;
+  // The check reads the path with its dot segments resolved AND its empty segments collapsed,
+  // because a browser resolves the dot segments in the callback's Location and a server may
+  // normalise the duplicate slashes. Both steps are needed, and MEASURED separately: `new URL`
+  // resolves `/iam/./auth/login` and `/iam/x/../auth/login` to `/iam/auth/login`, but it does NOT
+  // collapse a duplicate slash, so `/iam//auth/login` and `/iam/x/..//auth/login` survive it.
+  // validateReturnTo passes those two as well (one leading slash, no backslash, and its `%2f` test
+  // reads only the first three characters), so collapsing here is what closes the class without
+  // depending on a normalization step this package does not control.
+  //
+  // The placeholder origin only lets `new URL` parse a path. validateReturnTo has already refused
+  // every value that is not a same-origin path (`//`, a backslash), so the parse cannot move to
+  // another host. The stored value stays `requested`, so its query string is kept.
+  //
+  // KNOWN LIMIT, stated rather than closed: the comparison is byte-exact on the collapsed path, so
+  // an encoded or case-shifted spelling of the same route (`/iam/%61uth/login`, `/iam/AUTH/login`)
+  // is not refused. Neither is decoded or case-folded here on purpose — a path is case-sensitive and
+  // `%61` is not the same path segment as `a`, so the route table does not serve either value, and
+  // folding them would make this guard reject paths the zone legitimately serves.
+  const resolvedPath = new URL(requested, 'http://placeholder').pathname.replace(/\/{2,}/g, '/');
   const returnTo = resolvedPath.startsWith(`${runtime.basePath}/auth/`) ? fallback : requested;
 
   const txnId = newTransactionId();
