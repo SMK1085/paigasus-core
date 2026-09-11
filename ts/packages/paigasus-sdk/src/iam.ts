@@ -4,12 +4,16 @@ import './server-guard';
 import { createClient, createContextValues } from '@connectrpc/connect';
 import type { CallOptions, Client } from '@connectrpc/connect';
 import type { DescService } from '@bufbuild/protobuf';
+// ServiceInfoService comes from the proto ROOT entry: it is paigasus.common.v1, served by every
+// Paigasus service. The iam console calls GetServiceInfo as its bearer-enforced provisioning call
+// (SMA-511 spec § 4.5). Never take it from @paigasus/proto/iam (see that entry's ServiceInfo note).
+import { ServiceInfoService } from '@paigasus/proto';
 import { AuditService, AuthnService, AuthorizationService, OutboxService, ServiceAccountService, TenancyService, UserService } from '@paigasus/proto/iam';
 
 import { authContextKey, getTransport } from './transport';
 import type { Auth, TransportOptions } from './transport';
 
-export { AuditService, AuthnService, AuthorizationService, OutboxService, ServiceAccountService, TenancyService, UserService };
+export { AuditService, AuthnService, AuthorizationService, OutboxService, ServiceAccountService, ServiceInfoService, TenancyService, UserService };
 export { disposeTransports } from './transport';
 export type { Auth, TransportOptions } from './transport';
 

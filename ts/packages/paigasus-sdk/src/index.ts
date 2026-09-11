@@ -9,7 +9,19 @@
 // exact failure ts/packages/paigasus-proto/src/iam.ts:5-14 documents for `ServiceInfo`.
 import './server-guard';
 
-export { AuditService, AuthnService, AuthorizationService, OutboxService, ServiceAccountService, TenancyService, UserService, bindAuth, createIamClient, disposeTransports } from './iam';
+export {
+  AuditService,
+  AuthnService,
+  AuthorizationService,
+  OutboxService,
+  ServiceAccountService,
+  ServiceInfoService,
+  TenancyService,
+  UserService,
+  bindAuth,
+  createIamClient,
+  disposeTransports,
+} from './iam';
 export type { Auth, TransportOptions } from './iam';
 
 export { DEFAULT_HEADER_TIMEOUT_MS, createChatClient, createTerminalFrameParser } from './chat';
