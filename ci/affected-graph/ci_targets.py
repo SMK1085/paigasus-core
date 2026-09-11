@@ -367,6 +367,7 @@ SELF_TASK_EXPECTED_GLOBS = {
     # expression; the '!' entry keeps the built .next tree out of the hash walk.
     "next-public-free": (
         "!ts/apps/*/.next/**",
+        "!ts/packages/*/tests/e2e/fixture/.next/**",
         "ci/next-public/**/*",
         "ts/**/*",
     ),

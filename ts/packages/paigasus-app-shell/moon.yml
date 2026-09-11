@@ -57,3 +57,37 @@ tasks:
       - '/ts/packages/paigasus-discovery/package.json'
       - 'vitest.config.ts'
       - '!tests/e2e/fixture/.next/**'
+  test-e2e:
+    # `script` (not `command`): Moon's `command` setting rejects shell syntax outright.
+    # `set -euo pipefail` mirrors every other `script:` task — Moon does not enable errexit for
+    # script blocks on its own. tests/e2e/global-setup.ts builds the fixture and owns the server's
+    # lifecycle; a shell `&` here left an orphan server in the spike.
+    script: |
+      set -euo pipefail
+      pnpm exec playwright test
+    # A NEW task name, so it inherits NOTHING: every input is listed (spec § 11.3). The upstream
+    # sources and manifests are here because the fixture compiles them; next-config's src,
+    # manifest and tsconfig.app.json are here because the fixture builds through createNextConfig
+    # and its tsconfig extends @paigasus/next-config/tsconfig-app (Spec issue 5).
+    inputs:
+      - '@group(sources)'
+      - '@group(tests)'
+      - 'package.json'
+      - 'tsconfig.json'
+      - 'playwright.config.ts'
+      - 'tests/e2e/fixture/**/*'
+      - '!tests/e2e/fixture/.next/**'
+      - '/ts/pnpm-lock.yaml'
+      - '/ts/tsconfig.base.json'
+      - '/ts/packages/paigasus-ui/src/**/*'
+      - '/ts/packages/paigasus-ui/package.json'
+      - '/ts/packages/paigasus-auth/src/**/*'
+      - '/ts/packages/paigasus-auth/package.json'
+      - '/ts/packages/paigasus-discovery/src/**/*'
+      - '/ts/packages/paigasus-discovery/package.json'
+      - '/ts/packages/paigasus-next-config/src/**/*'
+      - '/ts/packages/paigasus-next-config/package.json'
+      - '/ts/packages/paigasus-next-config/tsconfig.app.json'
+    options:
+      # A real build and a real Chromium. A cached PASS would replay a green that tested nothing.
+      cache: false

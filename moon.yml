@@ -937,5 +937,10 @@ tasks:
     toolchain: 'system'
     inputs:
       - '!ts/apps/*/.next/**'
+      # SMA-510: the app-shell fixture's `next build` output sits under
+      # ts/packages/*/tests/e2e/fixture/.next, which the broad 'ts/**/*' entry below also hashes.
+      # MEASURED (Step 11 of the SMA-510 spec): without this negation, a `test-e2e` run re-keys
+      # this gate even though the scan below reads only tracked files.
+      - '!ts/packages/*/tests/e2e/fixture/.next/**'
       - 'ci/next-public/**/*'
       - 'ts/**/*'
