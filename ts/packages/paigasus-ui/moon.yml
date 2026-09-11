@@ -9,7 +9,7 @@ tasks:
     # APPEND, not `options.merge: replace`. The inherited definition in
     # .moon/tasks/typescript-project.yml supplies @group(sources), @group(tests), package.json
     # and /ts/pnpm-lock.yaml; replacing would silently drop all four. That is exactly the
-    # defect this branch fixes on paigasus-console-ts:build (SMA-503 spec §11.1).
+    # defect this branch fixes on iam-console-ts:build (SMA-503 spec §11.1).
     #
     # vitest.config.ts matches neither src/**/* nor tests/**/*, so without this line an edit
     # to the resolver ban or the jsdom environment serves a cached PASS.

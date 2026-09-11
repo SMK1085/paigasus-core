@@ -1,6 +1,6 @@
 $schema: 'https://moonrepo.dev/schemas/project.json'
 
-id: 'paigasus-console-ts'
+id: 'iam-console-ts'
 layer: 'application'
 language: 'typescript'
 
@@ -14,8 +14,8 @@ dependsOn:
 
 # The inherited `sources` group from .moon/tasks/typescript-project.yml is `src/**/*`, and
 # this app has no src/ — its code is in app/. MEASURED before this fix with
-# `moon query projects --id paigasus-console-ts`: the resolved group was exactly
-# ts/apps/paigasus-console/src/**/*, matching nothing, so editing app/page.tsx selected NO
+# `moon query projects --id iam-console-ts`: the resolved group was exactly
+# ts/apps/iam-console/src/**/*, matching nothing, so editing app/page.tsx selected NO
 # console task at all. repo:input-liveness cannot see this — ci/affected-graph/task_inputs.py
 # keys its scan to the `repo` project by exact id. (SMA-503 spec §11.1)
 #
@@ -52,8 +52,8 @@ tasks:
       set -euo pipefail
       rm -rf .next/static
       pnpm exec next build
-      if [ ! -f .next/standalone/apps/paigasus-console/server.js ]; then
-        echo "paigasus-console: standalone entry point missing — output: 'standalone' did not take effect" >&2
+      if [ ! -f .next/standalone/apps/iam-console/server.js ]; then
+        echo "iam-console: standalone entry point missing — output: 'standalone' did not take effect" >&2
         exit 1
       fi
     # NOTE the `merge: replace` below: this task inherits NOTHING, so every input it needs is
@@ -104,7 +104,7 @@ tasks:
     # task's cache key unchanged. `next build` typechecks too, so the coverage exists in practice —
     # this makes it deliberate rather than accidental. `typecheck` merges rather than replaces, so
     # it keeps the inherited /ts/tsconfig.base.json and needs no line of its own (verified with
-    # `moon query projects --id paigasus-console-ts`).
+    # `moon query projects --id iam-console-ts`).
     inputs:
       - '/ts/packages/paigasus-ui/src/**/*'
       # The package MANIFEST, not only its sources. It holds the `exports` map, which decides what

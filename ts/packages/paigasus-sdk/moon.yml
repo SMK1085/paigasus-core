@@ -14,7 +14,7 @@ tasks:
   # APPEND, never `options.merge: replace`. The inherited definitions in
   # .moon/tasks/typescript-project.yml supply @group(sources), tsconfig.json, package.json,
   # /ts/tsconfig.base.json and /ts/pnpm-lock.yaml; replacing would silently drop all of them —
-  # the defect SMA-503 fixed on paigasus-console-ts:build.
+  # the defect SMA-503 fixed on iam-console-ts:build.
   build:
     inputs:
       - '/ts/packages/paigasus-proto/src/**/*'

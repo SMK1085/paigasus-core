@@ -4,7 +4,7 @@ $schema: 'https://moonrepo.dev/schemas/tasks.json'
 # `tsc -p tsconfig.json` binds to each project's own tsconfig (the ts root has none → TS5058,
 # the bug SMA-394 excluded; now simply not routed here), and vitest has NO central config so
 # tests run per-package in each package's own cwd/environment. Apps override `build` with their
-# own outputs: (see paigasus-console). `typecheck` is the canonical type-check task that never
+# own outputs: (see iam-console). `typecheck` is the canonical type-check task that never
 # gets overridden; `build` is the override surface.
 #
 # fileGroups stay in this file (Moon 2.2.5 does not propagate global fileGroups to scoped-task

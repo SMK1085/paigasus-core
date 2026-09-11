@@ -10,7 +10,7 @@ import { createServer } from 'node:net';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
-const SERVER_ENTRY = fileURLToPath(new URL('../.next/standalone/apps/paigasus-console/server.js', import.meta.url));
+const SERVER_ENTRY = fileURLToPath(new URL('../.next/standalone/apps/iam-console/server.js', import.meta.url));
 
 async function freePort(): Promise<number> {
   return await new Promise((resolve, reject) => {

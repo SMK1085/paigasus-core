@@ -50,14 +50,14 @@ export default tseslint.config(
   // eslint.config.js so the workspace-level `moon run ts:lint` task enforces
   // Next.js rules too (the per-project task alone wasn't a complete CI gate).
   // `settings.next.rootDir` is required so `no-html-link-for-pages` resolves
-  // the App Router at apps/paigasus-console/app/ rather than searching
-  // the cwd (ts/ or ts/apps/paigasus-console/ depending on invocation).
+  // the App Router at apps/iam-console/app/ rather than searching
+  // the cwd (ts/ or ts/apps/iam-console/ depending on invocation).
   // Using an absolute path anchored to import.meta.dirname makes it
   // cwd-independent.
   {
-    files: ['apps/paigasus-console/**/*.{ts,tsx}'],
+    files: ['apps/iam-console/**/*.{ts,tsx}'],
     settings: {
-      next: { rootDir: path.join(import.meta.dirname, 'apps/paigasus-console') },
+      next: { rootDir: path.join(import.meta.dirname, 'apps/iam-console') },
     },
     plugins: { '@next/next': nextPlugin },
     rules: { ...nextPlugin.configs.recommended.rules },

@@ -5,7 +5,7 @@ import { defineConfig, type Plugin } from 'vitest/config';
  * AC 1 (SMA-503, ADR-0021 decision 3): @paigasus/ui imports nothing from `next/*`.
  *
  * pnpm's isolated node_modules already makes `next` unresolvable from this package, because
- * next is a dependency of @paigasus/console and not of this one. That protection is real but
+ * next is a dependency of @paigasus/iam-console and not of this one. That protection is real but
  * INCIDENTAL — adding next to this package's devDependencies for any reason would disarm it
  * silently, with no red anywhere. This plugin does not depend on where pnpm places a package.
  *

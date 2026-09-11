@@ -207,7 +207,7 @@ importers:
         specifier: 'catalog:'
         version: 5.0.0(@types/node@24.13.3)(jsdom@30.0.1)(vite@8.0.16(@types/node@24.13.3)(jiti@2.7.0)(yaml@2.9.0))
 
-  apps/paigasus-console:
+  apps/iam-console:
     dependencies:
       '@paigasus/next-config':
         specifier: workspace:*
@@ -246,12 +246,6 @@ importers:
       vitest:
         specifier: 'catalog:'
         version: 5.0.0(@types/node@24.13.3)(jsdom@30.0.1)(vite@8.0.16(@types/node@24.13.3)(jiti@2.7.0)(yaml@2.9.0))
-
-  apps/paigasus-docs:
-    devDependencies:
-      typescript:
-        specifier: 'catalog:'
-        version: 6.0.3
 
   packages/commitlint-config:
     dependencies:

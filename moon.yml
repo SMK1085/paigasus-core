@@ -135,22 +135,22 @@ tasks:
     script: 'ci/next-env/run.sh'
     toolchain: 'system'
     # Ordered AFTER the console build, not merely to have a fresh tree: `next typegen` writes
-    # into ts/apps/paigasus-console/.next, which is `paigasus-console-ts:build`'s declared
+    # into ts/apps/iam-console/.next, which is `iam-console-ts:build`'s declared
     # output. Letting both run concurrently would race on that directory (a build cleaning
     # .next under a running typegen), which is the flake shape SMA-427 already paid for with
     # wasm-pack's destructive --out-dir. This dep serializes them.
     deps:
-      - 'paigasus-console-ts:build'
+      - 'iam-console-ts:build'
     # Narrow inputs — `repo` owns the whole tree, so without these the gate runs on every change.
     # 'ts/pnpm-lock.yaml' is the IMPORTANT one and is the entire reason this drift went unseen:
     # the Next VERSION is what drives this file's content, and the lockfile is absent from
-    # paigasus-console-ts:build's own inputs, so a Next upgrade never re-keyed that task.
+    # iam-console-ts:build's own inputs, so a Next upgrade never re-keyed that task.
     inputs:
       - 'ci/next-env/**/*'
-      - 'ts/apps/paigasus-console/next-env.d.ts'
-      - 'ts/apps/paigasus-console/next.config.ts'
-      - 'ts/apps/paigasus-console/tsconfig.json'
-      - 'ts/apps/paigasus-console/app/**/*'
+      - 'ts/apps/iam-console/next-env.d.ts'
+      - 'ts/apps/iam-console/next.config.ts'
+      - 'ts/apps/iam-console/tsconfig.json'
+      - 'ts/apps/iam-console/app/**/*'
       - 'ts/pnpm-lock.yaml'
 
   affected-smoke:
@@ -920,7 +920,7 @@ tasks:
     #
     # THE .next NEGATION IS WHAT KEEPS THAT AFFORDABLE. .moon/workspace.yml deliberately omits
     # '**/.next/**' from hasher.ignorePatterns (it is a declared `outputs:` of
-    # paigasus-console-ts:build), so a bare 'ts/**/*' would hash the whole built .next tree —
+    # iam-console-ts:build), so a bare 'ts/**/*' would hash the whole built .next tree —
     # output this gate never scans — and re-key on every console build. Moon 2.5.3 honours a
     # negated input glob (spec § 13 M4), which is what makes the broad form usable here.
     # 'ts/node_modules/**' needs no entry: hasher.ignorePatterns already covers it.

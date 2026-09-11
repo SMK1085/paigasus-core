@@ -15,9 +15,8 @@ TypeScript workspace for paigasus-core, managed with [pnpm](https://pnpm.io/) an
   - `paigasus-kernel` (`@paigasus/kernel`) — thin wrapper over the napi-rs binding to `paigasus-kernel-rs`, post-MVP
   - `paigasus-sdk` (`@paigasus/sdk`) — public SDK placeholder
   - `paigasus-ui` (`@paigasus/ui`) — shared React components for the console
-- `apps/*` — deployables (id `paigasus-<name>-ts`):
-  - `paigasus-console` (`@paigasus/console`) — Next.js 16 (App Router) operator console
-  - `paigasus-docs` (`@paigasus/docs`) — framework TBD; framework choice tracked in a follow-up SMA-NNN issue
+- `apps/*` — deployables, one Next.js app per console zone (id `<name>-ts`):
+  - `iam-console` (`@paigasus/iam-console`) — Next.js 16 (App Router) console zone for IAM, mounted at `/iam`
 
 ## Commands
 
@@ -30,7 +29,7 @@ TypeScript workspace for paigasus-core, managed with [pnpm](https://pnpm.io/) an
 | Type check      | `moon run :typecheck --query "language=typescript"` |
 | Test            | `moon run :test --query "language=typescript"`      |
 | Build (all TS)  | `moon run :build --query "language=typescript"`     |
-| Build (one app) | `moon run paigasus-console-ts:build`                |
+| Build (one app) | `moon run iam-console-ts:build`                     |
 
 Notes:
 

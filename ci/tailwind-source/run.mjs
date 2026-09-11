@@ -3,7 +3,7 @@
 /*
  * SMA-503 AC 3 — assert a production console build still emits @paigasus/ui's CSS.
  *
- * THIS FILE MUST STAY OUTSIDE ts/apps/paigasus-console/. See README.md for why: that
+ * THIS FILE MUST STAY OUTSIDE ts/apps/iam-console/. See README.md for why: that
  * directory is Tailwind's scan root, and a copy of the sentinel there would generate the very
  * utility this script asserts on.
  */
@@ -14,7 +14,7 @@ import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
-const CONSOLE_DIR = join(REPO_ROOT, 'ts', 'apps', 'paigasus-console');
+const CONSOLE_DIR = join(REPO_ROOT, 'ts', 'apps', 'iam-console');
 
 const PROBE_SOURCE = '--paigasus' + '-ui-source-probe';
 const PROBE_TOKEN = '--paigasus' + '-token-probe';
@@ -121,7 +121,7 @@ export function verdict({ cssFiles, appFiles, readFile }) {
   // Mirrors assertion 4's empty-set guard: an empty appFiles set must fail loudly, not let
   // the loop below pass vacuously (e.g. if the console directory is renamed).
   if (appFiles.length === 0) {
-    failures.push('no console source file was scanned — ts/apps/paigasus-console may have been renamed or emptied, so this assertion would otherwise pass vacuously');
+    failures.push('no console source file was scanned — ts/apps/iam-console may have been renamed or emptied, so this assertion would otherwise pass vacuously');
   }
 
   for (const file of appFiles) {

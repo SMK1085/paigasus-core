@@ -367,7 +367,7 @@ run_suite() {
   run_task_case_ci "kernel->consumer-tasks" "rs/crates/libs/paigasus-kernel/src/lib.rs" \
     "paigasus-gateway-rs:build,paigasus-gateway-rs:test,paigasus-gateway-rs:lint,paigasus-iam-core-rs:build,paigasus-iam-core-rs:test,paigasus-iam-core-rs:lint,paigasus-iam-rs:build,paigasus-iam-rs:test,paigasus-iam-rs:lint,paigasus-kernel-parity-rs:build,paigasus-kernel-parity-rs:test,paigasus-kernel-parity-rs:lint,paigasus-node-bindings-rs:build,paigasus-node-bindings-rs:test,paigasus-node-bindings-rs:lint,paigasus-observability-rs:build,paigasus-observability-rs:test,paigasus-observability-rs:lint,paigasus-py-bindings-rs:build,paigasus-py-bindings-rs:test,paigasus-py-bindings-rs:lint,paigasus-wasm-rs:build,paigasus-wasm-rs:test,paigasus-wasm-rs:lint,paigasus-kernel-rs:build,paigasus-kernel-rs:test,paigasus-kernel-rs:lint,paigasus-kernel-ts:build,paigasus-kernel-ts:test,paigasus-kernel-py:test"
   # SMA-503 — a @paigasus/ui SOURCE edit must select the console's build and test.
-  # `paigasus-console-ts:test` runs the Tailwind @source guard against the build's output, and
+  # `iam-console-ts:test` runs the Tailwind @source guard against the build's output, and
   # the ONLY thing making that proof real is `/ts/packages/paigasus-ui/src/**/*` sitting in
   # both tasks' `inputs`. Remove it and the guard reads a cached .next produced before the
   # change — a green that means nothing. Nothing else in the repo notices, so this case is the
@@ -378,7 +378,7 @@ run_suite() {
   # SMA-510: paigasus-app-shell-ts:{build,test,test-e2e} join this set — app-shell's inputs name
   # this package's sources.
   run_task_case_ci "ui->console" "ts/packages/paigasus-ui/src/styles/tokens.css" \
-    "paigasus-app-shell-ts:build,paigasus-app-shell-ts:test,paigasus-app-shell-ts:test-e2e,paigasus-console-ts:build,paigasus-console-ts:test,paigasus-ui-ts:build,paigasus-ui-ts:test,ts:lint"
+    "paigasus-app-shell-ts:build,paigasus-app-shell-ts:test,paigasus-app-shell-ts:test-e2e,iam-console-ts:build,iam-console-ts:test,paigasus-ui-ts:build,paigasus-ui-ts:test,ts:lint"
   # SMA-503 fix round 2, item 4 — the SECOND anchor, and it is not redundant. The case above
   # anchors only on src/styles/tokens.css, so narrowing either console task's
   # `/ts/packages/paigasus-ui/src/**/*` input to `/ts/packages/paigasus-ui/src/styles/**/*`
@@ -393,7 +393,7 @@ run_suite() {
   # SMA-510: paigasus-app-shell-ts:{build,test,test-e2e} join this set — app-shell's inputs name
   # this package's sources.
   run_task_case_ci "ui-components->console" "ts/packages/paigasus-ui/src/components/table.tsx" \
-    "paigasus-app-shell-ts:build,paigasus-app-shell-ts:test,paigasus-app-shell-ts:test-e2e,paigasus-console-ts:build,paigasus-console-ts:test,paigasus-ui-ts:build,paigasus-ui-ts:test,ts:lint"
+    "paigasus-app-shell-ts:build,paigasus-app-shell-ts:test,paigasus-app-shell-ts:test-e2e,iam-console-ts:build,iam-console-ts:test,paigasus-ui-ts:build,paigasus-ui-ts:test,ts:lint"
   # SMA-506 — a @paigasus/auth SOURCE edit must select its own build/test AND the new
   # Docker-backed `test-e2e` task (`^:build`-free — the filter widening above admits it) — plus
   # `ts:lint`. Nothing asserted this task was reachable from an edit to the package before this

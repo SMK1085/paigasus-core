@@ -3,7 +3,7 @@
   "compilerOptions": {
     // tsconfig.base.json's lib is ES2022-only. This package's tests render into jsdom via
     // @testing-library/react and read DOM types back (e.g. HTMLElement.className), so DOM must
-    // be added here — same override as ts/apps/paigasus-console/tsconfig.json. MEASURED
+    // be added here — same override as ts/apps/iam-console/tsconfig.json. MEASURED
     // (SMA-503 task 2): tests/table.test.tsx fails `tsc` with TS2812 on `className` without it.
     "lib": ["DOM", "DOM.Iterable", "ES2022"],
     "jsx": "react-jsx",

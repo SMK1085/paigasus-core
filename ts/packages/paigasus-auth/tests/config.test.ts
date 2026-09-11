@@ -7,7 +7,7 @@ const schema = z.object(authEnvShape);
 
 const VALID = {
   PAIGASUS_OIDC_ISSUER: 'https://idp.example.com/realms/paigasus',
-  PAIGASUS_OIDC_CLIENT_ID: 'paigasus-console',
+  PAIGASUS_OIDC_CLIENT_ID: 'iam-console',
   PAIGASUS_OIDC_CLIENT_SECRET: 's3cret',
   PAIGASUS_PUBLIC_ORIGIN: 'https://app.example.com',
   PAIGASUS_SESSION_STORE: 'redis',
@@ -16,7 +16,7 @@ const VALID = {
 
 describe('authEnvShape', () => {
   it('accepts a complete valid environment', () => {
-    expect(schema.parse(VALID).PAIGASUS_OIDC_CLIENT_ID).toBe('paigasus-console');
+    expect(schema.parse(VALID).PAIGASUS_OIDC_CLIENT_ID).toBe('iam-console');
   });
 
   it('applies every documented default', () => {
