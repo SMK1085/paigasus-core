@@ -1,8 +1,10 @@
 {
-  "_comment": "vitest's oxc-based TS transform resolves the nearest tsconfig.json by WALKING UP from the test file's own directory (not via `tsc -p`), and does not dereference a symlink before applying a relative `extends` found through it. The parent tsconfig.json extends '@paigasus/next-config/tsconfig-app' — a package.json `exports` subpath resolved through pnpm's node_modules symlink — whose own `../../tsconfig.base.json` extends then resolve relative to the SYMLINK path rather than its real target, landing on a nonexistent 'node_modules/tsconfig.base.json' (measured: tsc itself resolves this chain correctly, since it follows symlinks; oxc's native resolver does not). This tsconfig stops the walk at this directory with a plain relative extends only, matching the pattern every other package in this workspace already uses. It does not affect `tsc -p tsconfig.json --noEmit`, which is invoked against the parent config directly and never auto-discovers this file.",
+  "_comment": "The nearest tsconfig.json for every file under tests/, for ESLint's projectService (ts/eslint.config.js). It extends the workspace base by a plain relative path, the pattern every package uses. SMA-511 adds `**/*.tsx` and the DOM libs and react-jsx, because tests now render components; without `**/*.tsx` a .test.tsx file belongs to no program and `ts:lint` fails on it. vitest no longer reads any tsconfig for its transform (vitest.config.ts sets `oxc.tsconfig: false`), and `tsc -p tsconfig.json --noEmit` reads the parent config, never this file.",
   "extends": "../../../tsconfig.base.json",
   "compilerOptions": {
+    "lib": ["DOM", "DOM.Iterable", "ES2022"],
+    "jsx": "react-jsx",
     "types": ["node"]
   },
-  "include": ["**/*.ts"]
+  "include": ["**/*.ts", "**/*.tsx"]
 }

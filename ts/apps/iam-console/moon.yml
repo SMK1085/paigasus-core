@@ -94,6 +94,13 @@ tasks:
       # exactOptionalPropertyTypes, verbatimModuleSyntax and noUncheckedIndexedAccess, so editing
       # it changes what `next build` accepts and what vitest compiles.
       - '/ts/tsconfig.base.json'
+      # SMA-511: packages the app compiles (Task 9: auth, discovery, proto; later tasks add more).
+      - '/ts/packages/paigasus-auth/src/**/*'
+      - '/ts/packages/paigasus-auth/package.json'
+      - '/ts/packages/paigasus-discovery/src/**/*'
+      - '/ts/packages/paigasus-discovery/package.json'
+      - '/ts/packages/paigasus-proto/src/**/*'
+      - '/ts/packages/paigasus-proto/package.json'
     outputs:
       # SMA-502 AC4 — the cache archive must not carry .next/cache, which grows without bound.
       - '.next/**/*'
@@ -112,6 +119,12 @@ tasks:
       # The package MANIFEST, not only its sources. It holds the `exports` map, which decides what
       # `@paigasus/ui` and `@paigasus/ui/styles.css` resolve to (SMA-503 local review, finding A).
       - '/ts/packages/paigasus-ui/package.json'
+      - '/ts/packages/paigasus-auth/src/**/*'
+      - '/ts/packages/paigasus-auth/package.json'
+      - '/ts/packages/paigasus-discovery/src/**/*'
+      - '/ts/packages/paigasus-discovery/package.json'
+      - '/ts/packages/paigasus-proto/src/**/*'
+      - '/ts/packages/paigasus-proto/package.json'
 
   test:
     # Two jobs in one task. SMA-502's vitest suite boots the BUILT standalone server, and
@@ -155,6 +168,13 @@ tasks:
       - '/ts/packages/paigasus-ui/package.json'
       - '/ts/pnpm-lock.yaml'
       - '/ts/tsconfig.base.json'
+      # SMA-511: packages the app compiles (Task 9: auth, discovery, proto; later tasks add more).
+      - '/ts/packages/paigasus-auth/src/**/*'
+      - '/ts/packages/paigasus-auth/package.json'
+      - '/ts/packages/paigasus-discovery/src/**/*'
+      - '/ts/packages/paigasus-discovery/package.json'
+      - '/ts/packages/paigasus-proto/src/**/*'
+      - '/ts/packages/paigasus-proto/package.json'
       # SMA-511 D6: tests/unit/prn.test.ts replays the kernel parity corpus and pins ROOT_PRN to
       # root_prn()'s builder call. Without these, a corpus or model.rs edit serves a cached PASS.
       - '/rs/crates/libs/paigasus-kernel-parity/vectors/**/*'
