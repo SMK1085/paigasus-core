@@ -19,3 +19,5 @@ export { PrimaryNav, type NavEntry, type PrimaryNavProps } from './nav/primary-n
 export { Switcher, type SwitcherItem, type SwitcherProps } from './shell/switcher';
 export { UserMenu } from './shell/user-menu';
 export { Breadcrumbs, type BreadcrumbsProps, type Crumb } from './shell/breadcrumbs';
+export { AppShell, type AppShellProps, type Brand } from './shell/app-shell';
+export { PublicShell, type PublicShellProps } from './shell/public-shell';
