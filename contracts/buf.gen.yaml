@@ -49,8 +49,12 @@ plugins:
       - client_generation=async
 
   # ─── TypeScript: protobuf-es v2, pinned ───────────────────────────────────
+  # `import_extension` is deliberately OMITTED (SMA-511 spec § 7.2). Its default, `none`, writes
+  # EXTENSIONLESS relative imports. Turbopack (Next 16.3.4) does not resolve './x.js' to './x.ts',
+  # and every Next zone compiles this output through @paigasus/sdk. Held by
+  # ts/packages/paigasus-proto/src/generated-specifiers.test.ts. Keep buf.gen.googleapis.yaml's es
+  # options identical: both templates write into the same tree.
   - remote: buf.build/bufbuild/es:v2.13.0
     out: ../ts/packages/paigasus-proto/src/generated
     opt:
       - target=ts
-      - import_extension=.js

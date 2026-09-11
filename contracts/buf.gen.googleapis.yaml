@@ -25,8 +25,8 @@ plugins:
   # Pinned to the SAME version as buf.gen.yaml's es plugin. If one moves, both
   # move: two protoc-gen-es versions writing into one tree would produce output
   # that neither template alone reproduces, and the drift gate would flap.
+  # `import_extension` is OMITTED here too, for the reason buf.gen.yaml gives (SMA-511).
   - remote: buf.build/bufbuild/es:v2.13.0
     out: ../ts/packages/paigasus-proto/src/generated
     opt:
       - target=ts
-      - import_extension=.js
