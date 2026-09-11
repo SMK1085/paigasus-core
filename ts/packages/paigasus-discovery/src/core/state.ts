@@ -29,8 +29,7 @@ export function isKnownCapability(key: string): boolean {
   return CAPABILITY_KEYS.includes(key);
 }
 
-/** The service slug a capability key belongs to. */
-export function serviceOf(key: string): string {
-  const dot = key.indexOf('.');
-  return dot === -1 ? key : key.slice(0, dot);
-}
+// serviceOf lives in the import-free leaf ./service-of.ts (SMA-510): core/outcome.ts needs it and is
+// reachable from the client-safe ./client entry, while THIS file imports @paigasus/proto as a value.
+// Re-exported here, so every existing importer is unchanged.
+export { serviceOf } from './service-of.js';

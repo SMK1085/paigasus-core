@@ -146,7 +146,25 @@ exposes.
 
 ### Consuming from `@paigasus/app-shell`
 
-Don't. `<Capability>` is an async server component and this package's `./react`
-and `./server` entries are `server-only`. `paigasus/boundaries/app-shell` keeps
-app-shell client-reachable. App-shell exports navigation _presentation_ taking
-resolved state as props; the **app** composes `<Capability>` around it.
+`<Capability>` stays the tool for feature UI inside a page. It is an async server
+component, and the `./react` and `./server` entries are `server-only`.
+`paigasus/boundaries/app-shell` bans both entries in every app-shell file, tests
+included, because app-shell is client-reachable.
+
+Two entries are client-safe:
+
+| Entry      | Holds                                                                        |
+| ---------- | ---------------------------------------------------------------------------- |
+| `./types`  | `ServiceState`, `DegradedReason`, `CapabilityKey` (data types only)          |
+| `./client` | `capabilityOutcome`, `reasonText`, `CapabilityDisabled`, `CapabilityOutcome` |
+
+`capabilityOutcome(state, need?)` is the one copy of `<Capability>`'s branch
+table, and `<Capability>` calls it. App-shell's `navStateOf` calls it too. A nav
+is rendered from data, so an app cannot wrap one entry in `<Capability>`. The app
+resolves each entry's `ServiceState` on the server and passes
+`navStateOf(state, need)` to app-shell as a prop. App-shell exports navigation
+presentation that takes resolved state as props. It never resolves state itself.
+
+The files behind `./client` use extensionless relative imports. Turbopack in
+Next 16.3.4 does not map `./x.js` to `./x.ts`, and a consuming app compiles these
+files. `tests/structure/exports.test.ts` pins that rule.
