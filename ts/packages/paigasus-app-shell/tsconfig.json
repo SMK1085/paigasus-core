@@ -1,0 +1,13 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["DOM", "DOM.Iterable", "ES2022"],
+    "jsx": "react-jsx",
+    "types": ["node"],
+    "noEmit": true
+  },
+  "_comment_include": "tests/ and vitest.config.ts must be in the program: ts/eslint.config.js applies type-checked rules with projectService:true to every **/*.{ts,tsx}, and `ts:lint` runs `eslint .` over the whole tree — a file in no program errors there. Same shape and reason as ts/packages/paigasus-discovery/tsconfig.json.",
+  "_comment_exclude": "tests/e2e/fixture/ is a Next app with its OWN tsconfig.json, which `next build` type-checks (spec § 11.6). Excluding it here means :typecheck never reads the fixture's .next/types/** while :test-e2e writes it, so the two tasks can run at the same time.",
+  "include": ["src/**/*", "tests/**/*", "vitest.config.ts"],
+  "exclude": ["tests/e2e/fixture/**"]
+}

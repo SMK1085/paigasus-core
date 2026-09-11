@@ -1,0 +1,59 @@
+$schema: 'https://moonrepo.dev/schemas/project.json'
+
+id: 'paigasus-app-shell-ts'
+layer: 'library'
+language: 'typescript'
+
+# BOTH are required and neither implies the other. `dependsOn` is what `moon query projects
+# --affected` follows and what orders an upstream's build; task `inputs` are the ONLY thing that
+# makes a DOWNSTREAM task affected (CLAUDE.md, Moon 2.5.3). paigasus-next-config-ts is here for the
+# fixture: tests/e2e/fixture builds through createNextConfig (SMA-510 spec § 11.3).
+dependsOn:
+  - 'paigasus-ui-ts'
+  - 'paigasus-auth-ts'
+  - 'paigasus-discovery-ts'
+  - 'paigasus-next-config-ts'
+
+tasks:
+  # APPEND, never `options.merge: replace`. The inherited definitions in
+  # .moon/tasks/typescript-project.yml supply @group(sources), @group(tests), tsconfig.json,
+  # package.json, /ts/tsconfig.base.json and /ts/pnpm-lock.yaml; replacing would silently drop them
+  # — the defect SMA-503 fixed on paigasus-console-ts:build.
+  #
+  # The upstream SOURCES are inputs because this package compiles them; without them a change to
+  # @paigasus/ui would not re-run this package's tests. The upstream MANIFESTS are inputs because a
+  # changed `exports` map (SMA-510 adds discovery's ./client) changes what this package resolves
+  # without a change to any upstream src file.
+  build:
+    inputs:
+      - '/ts/packages/paigasus-ui/src/**/*'
+      - '/ts/packages/paigasus-ui/package.json'
+      - '/ts/packages/paigasus-auth/src/**/*'
+      - '/ts/packages/paigasus-auth/package.json'
+      - '/ts/packages/paigasus-discovery/src/**/*'
+      - '/ts/packages/paigasus-discovery/package.json'
+  typecheck:
+    inputs:
+      - '/ts/packages/paigasus-ui/src/**/*'
+      - '/ts/packages/paigasus-ui/package.json'
+      - '/ts/packages/paigasus-auth/src/**/*'
+      - '/ts/packages/paigasus-auth/package.json'
+      - '/ts/packages/paigasus-discovery/src/**/*'
+      - '/ts/packages/paigasus-discovery/package.json'
+  test:
+    # vitest.config.ts matches neither src/**/* nor tests/**/*, so without it an edit to the jsdom
+    # environment or the exclude list serves a cached PASS.
+    #
+    # The negation keeps the fixture's build output out of this task's hash. The inherited
+    # @group(tests) covers tests/**/*, and the Moon hasher does NOT skip `.next` (spec F20:
+    # .moon/workspace.yml omits it from hasher.ignorePatterns on purpose). Without the negation,
+    # every test-e2e run would re-key this task.
+    inputs:
+      - '/ts/packages/paigasus-ui/src/**/*'
+      - '/ts/packages/paigasus-ui/package.json'
+      - '/ts/packages/paigasus-auth/src/**/*'
+      - '/ts/packages/paigasus-auth/package.json'
+      - '/ts/packages/paigasus-discovery/src/**/*'
+      - '/ts/packages/paigasus-discovery/package.json'
+      - 'vitest.config.ts'
+      - '!tests/e2e/fixture/.next/**'

@@ -1,0 +1,46 @@
+{
+  "name": "@paigasus/app-shell",
+  "_comment_exports": "ONE root export, and it is correct here. @paigasus/auth and @paigasus/discovery omit a root export because they have a server surface a client must not reach. This package has NO server surface: every file is client-reachable. Source-only (./src/*.ts), like every @paigasus/* package: a consuming Next app transpiles it through createNextConfig's SOURCE_ONLY_PACKAGES. tests/structure/source-shape.test.ts pins this map.",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "license": "Apache-2.0",
+  "description": "Shared console chrome for Paigasus zones: header, primary navigation, org/team switcher, user menu, breadcrumbs, and zone-safe cross-zone links.",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@paigasus/auth": "workspace:*",
+    "@paigasus/discovery": "workspace:*",
+    "@paigasus/ui": "workspace:*"
+  },
+  "peerDependencies": {
+    "next": "catalog:",
+    "react": "catalog:",
+    "react-dom": "catalog:"
+  },
+  "devDependencies": {
+    "@paigasus/next-config": "workspace:*",
+    "@playwright/test": "catalog:",
+    "@testing-library/dom": "catalog:",
+    "@testing-library/jest-dom": "catalog:",
+    "@testing-library/react": "catalog:",
+    "@testing-library/user-event": "catalog:",
+    "@types/node": "catalog:",
+    "@types/react": "catalog:",
+    "@types/react-dom": "catalog:",
+    "axe-core": "catalog:",
+    "jsdom": "catalog:",
+    "next": "catalog:",
+    "react": "catalog:",
+    "react-dom": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  }
+}
