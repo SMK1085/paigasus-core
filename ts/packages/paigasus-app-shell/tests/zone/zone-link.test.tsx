@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import { render, screen } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { createRef } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Link, LinkProvider } from '@paigasus/ui';
@@ -64,6 +65,32 @@ describe('ZoneLink (spec § 6.4)', () => {
   it('a malformed href throws ZoneLinkError instead of falling back to a plain <a>', () => {
     silenceReactErrorLog();
     expect(() => render(inZone(<ZoneLink href="https://evil.example/">x</ZoneLink>))).toThrow(ZoneLinkError);
+  });
+
+  it('forwards onClick on the same-zone next/link branch (F1)', async () => {
+    const onClick = vi.fn();
+    render(
+      inZone(
+        <ZoneLink href="/iam/users" onClick={onClick}>
+          Users
+        </ZoneLink>,
+      ),
+    );
+    await userEvent.click(screen.getByRole('link', { name: 'Users' }));
+    expect(onClick).toHaveBeenCalledTimes(1);
+  });
+
+  it('forwards onClick on the cross-zone plain <a> branch (F1)', async () => {
+    const onClick = vi.fn();
+    render(
+      inZone(
+        <ZoneLink href="/gateway/usage" onClick={onClick}>
+          Usage
+        </ZoneLink>,
+      ),
+    );
+    await userEvent.click(screen.getByRole('link', { name: 'Usage' }));
+    expect(onClick).toHaveBeenCalledTimes(1);
   });
 
   it('forwards ref, aria-* and data-* on both element kinds (what Radix asChild passes)', () => {

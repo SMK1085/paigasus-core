@@ -8,6 +8,8 @@ export default defineConfig({
   testDir: './tests/e2e',
   // The fixture is a Next app, not a test directory.
   testIgnore: ['**/fixture/**'],
+  // A committed test.only would otherwise drop the only AC 1 / AC 2 proof from CI silently (F4).
+  forbidOnly: !!process.env.CI,
   globalSetup: './tests/e2e/global-setup.ts',
   // One worker: every spec shares ONE fixture server, and the specs count requests per page.
   fullyParallel: false,

@@ -47,6 +47,9 @@ test('E2 + E3: no RSC request leaves the allowlist, the negative control is seen
   await loadHydrated(page, '/iam');
   await setMarker(page);
   await exerciseLinksUnderTest(page);
+  // waitForControls already polls until '/iam/gateway/raw' (one of CONTROLS) has an RSC request,
+  // so this line already proves E3. The explicit E3 assertion below restates that on the SAME
+  // page load, for a reader who is not tracing waitForControls back to its CONTROLS list.
   await waitForControls(log);
 
   // E2: the allowlist rule. It does not depend on where a wrong link sends its prefetch: a ZoneLink

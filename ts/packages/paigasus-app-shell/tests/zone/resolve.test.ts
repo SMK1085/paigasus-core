@@ -26,6 +26,7 @@ const MATCHES: ReadonlyArray<readonly [string, string, ZoneMap, ZoneTarget]> = [
   ['a trailing slash stays in rest', '/iam/users/', ZONES, { zone: 'iam', basePath: '/iam', rest: '/users/' }],
   ['a dot segment inside the QUERY is not a path segment', '/iam/users?next=../x', ZONES, { zone: 'iam', basePath: '/iam', rest: '/users?next=../x' }],
   ['an already percent-encoded path', '/iam/caf%C3%A9', ZONES, { zone: 'iam', basePath: '/iam', rest: '/caf%C3%A9' }],
+  ['a percent-encoded slash inside the QUERY is still accepted (only the pathname is hardened)', '/iam/x?next=%2Fy', ZONES, { zone: 'iam', basePath: '/iam', rest: '/x?next=%2Fy' }],
   ['the root zone as a fallback', '/billing/x', WITH_ROOT, { zone: 'console', basePath: '', rest: '/billing/x' }],
   ['the longest match beats the root zone', '/iam/users', WITH_ROOT, { zone: 'iam', basePath: '/iam', rest: '/users' }],
   ['a segment-edge near miss falls to the root zone', '/iamx/users', WITH_ROOT, { zone: 'console', basePath: '', rest: '/iamx/users' }],
@@ -50,6 +51,9 @@ const REJECTED: ReadonlyArray<readonly [string, string]> = [
   ['a single-dot segment', '/iam/./users'],
   ['a percent-encoded dot-dot segment', '/iam/%2e%2e/gateway/x'],
   ['a raw non-ASCII path, which the URL parser re-encodes', '/iam/café'],
+  ['a percent-encoded slash in the path (an ingress that decodes %2F could route elsewhere)', '/iam/..%2Fgateway/x'],
+  ['a percent-encoded backslash in the path', '/iam/a%5Cb'],
+  ['an empty path segment', '/iam//x'],
 ];
 
 describe('resolveZone', () => {

@@ -19,6 +19,7 @@ test('E5: the degraded entry navigates on neither a click nor Enter (AC 3)', asy
   // force: true bypasses that check and clicks through, which is the faithful simulation here.
   await entry.click({ force: true });
   await entry.focus();
+  await expect(entry).toBeFocused();
   await page.keyboard.press('Enter');
   await page.waitForTimeout(ABSENCE_WINDOW_MS);
   expect(page.url()).toBe(`${origin()}/iam/shell`);

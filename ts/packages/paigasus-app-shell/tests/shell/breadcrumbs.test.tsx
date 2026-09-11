@@ -2,7 +2,9 @@
 import { render, screen } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import { Breadcrumbs } from '../../src/shell/breadcrumbs';
+import { ZoneLinkError } from '../../src/zone/errors';
 import { expectNoAxeViolations } from '../axe';
+import { silenceReactErrorLog } from '../support/console';
 import { inZone } from '../support/providers';
 
 vi.mock('next/link', () => import('../support/next-link-double'));
@@ -40,6 +42,22 @@ describe('Breadcrumbs (spec § 8.4)', () => {
     expect(screen.queryByRole('link', { name: 'Billing' })).not.toBeInTheDocument();
     expect(screen.getByText('Billing')).toBeInTheDocument();
     expect(screen.getAllByRole('listitem')).toHaveLength(2);
+  });
+
+  it('a malformed href on the LAST crumb throws ZoneLinkError, even though the last crumb never links (F8)', () => {
+    silenceReactErrorLog();
+    expect(() =>
+      render(
+        inZone(
+          <Breadcrumbs
+            items={[
+              { label: 'Users', href: '/iam/users' },
+              { label: 'Ada', href: 'https://evil.example' },
+            ]}
+          />,
+        ),
+      ),
+    ).toThrow(ZoneLinkError);
   });
 
   it('a crumb with no href before the last one is plain text', () => {

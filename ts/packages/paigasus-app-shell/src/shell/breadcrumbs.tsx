@@ -34,6 +34,9 @@ export function Breadcrumbs({ items }: BreadcrumbsProps): ReactElement | null {
           const key = `${item.label}|${item.href ?? ''}`;
           let content: ReactElement;
           if (last) {
+            // The last crumb never links, but a malformed href must still throw like every other
+            // href in the package (F8). The result is not used: only the validation matters here.
+            if (item.href !== undefined) resolveZone(item.href, zones);
             content = <span aria-current="page">{item.label}</span>;
           } else if (item.href !== undefined && resolveZone(item.href, zones) !== null) {
             content = (

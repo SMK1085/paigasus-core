@@ -62,6 +62,13 @@ function validate(href: string): { readonly pathname: string; readonly suffix: s
   if (!href.startsWith('/')) reject('it does not start with "/" (absolute URLs and relative paths are refused)');
   if (href.startsWith('//')) reject('it is protocol-relative');
   const pathname = pathOf(href);
+  // A percent-encoded slash or backslash in the PATHNAME (not the query or fragment): an ingress
+  // that decodes %2F before it routes could send a soft same-zone prefetch to another zone
+  // (the ADR-0017 failure class).
+  if (/%2f|%5c/iu.test(pathname)) reject('it contains a percent-encoded slash or backslash in the path');
+  // An empty path segment ("//" anywhere in the pathname). A leading "//" is already rejected
+  // above as protocol-relative, so any remaining "//" here is a non-leading empty segment.
+  if (pathname.includes('//')) reject('it contains an empty path segment');
   if (new URL(pathname, PARSE_BASE).pathname !== pathname) {
     reject('its path changes under URL normalisation (a dot segment, or a character that the browser re-encodes)');
   }

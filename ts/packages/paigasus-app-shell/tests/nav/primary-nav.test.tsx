@@ -55,6 +55,11 @@ describe('PrimaryNav rules (spec § 7.2, in order)', () => {
     expect(() => render(inShell(<PrimaryNav entries={[{ ...USERS, href: '/gateway/usage' }]} />))).toThrow(ZoneLinkError);
   });
 
+  it('rule 2 precedes rule 3: a configured zone with an out-of-zone href throws even when absent', () => {
+    silenceReactErrorLog();
+    expect(() => render(inShell(<PrimaryNav entries={[{ ...USERS, href: '/gateway/usage', state: ABSENT }]} />))).toThrow(ZoneLinkError);
+  });
+
   it('rule 3: absent renders nothing', () => {
     render(inShell(<PrimaryNav entries={[USERS, { ...GATEWAY, state: ABSENT }]} />));
     expect(screen.queryByText('Gateway')).not.toBeInTheDocument();

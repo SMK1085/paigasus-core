@@ -5,22 +5,21 @@ import NextLink from 'next/link';
 import { useEffect, type AnchorHTMLAttributes, type ReactElement, type Ref } from 'react';
 import type { LinkProps } from '@paigasus/ui';
 import { useZone } from './context';
-import { pathOf, resolveZone } from './resolve';
+import { isAtOrUnder, pathOf, resolveZone } from './resolve';
 
 /**
  * A superset of @paigasus/ui's LinkProps, so ZoneLink is assignable to LinkComponent and an app can
  * inject it: <LinkProvider link={ZoneLink}> (spec § 6.4). There is no `prefetch`, `replace` or
  * `scroll`: Next's defaults apply, and nothing consumes them yet.
  */
-export type ZoneLinkProps = LinkProps & Omit<AnchorHTMLAttributes<HTMLAnchorElement>, 'href' | 'onMouseEnter' | 'onTouchStart' | 'onClick'> & { ref?: Ref<HTMLAnchorElement> };
+export type ZoneLinkProps = LinkProps & Omit<AnchorHTMLAttributes<HTMLAnchorElement>, 'href'> & { ref?: Ref<HTMLAnchorElement> };
 
 // One development warning per first path segment, for the life of the page.
 const warnedSegments = new Set<string>();
 
 /** Login and logout are route handlers, not pages. A soft link to them starts an RSC fetch (§ 6.5). */
 function isAuthRoute(rest: string): boolean {
-  const path = pathOf(rest);
-  return path === '/auth' || path.startsWith('/auth/');
+  return isAtOrUnder(pathOf(rest), '/auth');
 }
 
 /**
@@ -35,7 +34,7 @@ function isAuthRoute(rest: string): boolean {
  * Throws ZoneLinkError for a malformed href (spec § 6.2). It forwards `ref` and every anchor
  * attribute, so the props that Radix `asChild` passes reach the DOM.
  */
-export function ZoneLink({ href, children, ...anchorProps }: ZoneLinkProps): ReactElement | null {
+export function ZoneLink({ href, children, onClick, onMouseEnter, onTouchStart, ...anchorProps }: ZoneLinkProps): ReactElement | null {
   const { zone, zones } = useZone();
   const target = resolveZone(href, zones);
   const unmatched = target === null;
@@ -54,14 +53,23 @@ export function ZoneLink({ href, children, ...anchorProps }: ZoneLinkProps): Rea
 
   if (target === null) return null;
   if (target.zone === zone && !isAuthRoute(target.rest)) {
+    // next/link's own LinkProps declares onClick/onMouseEnter/onTouchStart without `| undefined`,
+    // which clashes with @types/react's AnchorHTMLAttributes under exactOptionalPropertyTypes.
+    // A conditional spread omits the key entirely instead of setting it to undefined.
     return (
-      <NextLink {...anchorProps} href={target.rest}>
+      <NextLink
+        {...anchorProps}
+        {...(onClick !== undefined ? { onClick } : {})}
+        {...(onMouseEnter !== undefined ? { onMouseEnter } : {})}
+        {...(onTouchStart !== undefined ? { onTouchStart } : {})}
+        href={target.rest}
+      >
         {children}
       </NextLink>
     );
   }
   return (
-    <a {...anchorProps} href={href}>
+    <a {...anchorProps} onClick={onClick} onMouseEnter={onMouseEnter} onTouchStart={onTouchStart} href={href}>
       {children}
     </a>
   );
