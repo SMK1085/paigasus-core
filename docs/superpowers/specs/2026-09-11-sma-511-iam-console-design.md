@@ -53,6 +53,7 @@ run inside a Next app with a `basePath`, and § 7 fixes what that exposes.
 | D3 | Test harness for AC 5 | In-process fake servers plus MSW (§ 9). No Docker. |
 | D4 | Mutations | Create organization, create team, create project, attach membership, detach membership. |
 | D5 | How the UI decides which affordances to show | `IsAuthorized` self-queries at render time (§ 6.3), not role grants in the session. |
+| D6 | PRN parsing, after the kernel napi binding failed to load in a Next build (§ 4.7) | Spike the kernel's wasm binding on the server first. If it fails, use a small app PRN reader checked against the kernel parity corpus, without asking again. |
 
 ### 2.2 How the acceptance criteria change
 
@@ -280,11 +281,29 @@ and it would be wrong for policies added with `PutPolicy`.
 
 ### 4.7 `lib/prn.ts`
 
-PRN parsing and building use `@paigasus/kernel` (`prnBuild`, `prnOrg`, `prnResourceType`,
-`prnResourceId`), because ADR-0005 keeps cross-language behavior in the kernel. Under the `node`
-condition the kernel loads its napi binding (`ts/packages/paigasus-kernel/package.json:29-35`).
-The plan measures that the binding loads from the standalone output. If it does not, the plan
-stops and asks, and does not write a PRN parser in the app.
+PRN parsing and building should use `@paigasus/kernel` (`prnBuild`, `prnOrg`, `prnResourceType`,
+`prnResourceId`), because ADR-0005 keeps cross-language behavior in the kernel.
+
+**Measured (2026-09-11): the napi binding cannot load in a Next build.** Under the `node`
+condition the kernel imports `@paigasus/node-bindings`, a pnpm `file:` dependency whose `files`
+allowlist is `["index.js", "index.d.ts"]`. pnpm therefore never copies the `.node` binary into
+`node_modules`, and `next build` fails at "Collecting page data" with `Cannot find native binding`
+(`Cannot find module '@paigasus/node-bindings-darwin-arm64'`). The wasm entry
+(`src/wasm.ts`, over the committed `--target bundler` output in `rs/crates/bindings/paigasus-wasm/`)
+has no subpath export, so a server cannot reach it.
+
+**Decision D6.**
+1. **Spike first.** `@paigasus/kernel` gains a `./wasm` subpath export for `src/wasm.ts`. The spike
+   measures that Turbopack bundles the wasm into the standalone server and that `prnBuild`,
+   `prnOrg`, `prnResourceType` and `prnResourceId` return correct values from a route handler.
+   Wasm is platform-neutral, so SMA-513's image then needs no native binary.
+2. **Fallback C, if the spike fails.** `lib/prn.ts` holds a small reader for the IAM tenancy shapes
+   only (resource type, org UUID, resource UUID, and building an organization, team or project
+   PRN). A test runs it against every IAM-tenancy vector in the kernel parity corpus
+   (`rs/crates/libs/paigasus-kernel-parity/vectors/`), so a divergence from the kernel fails CI.
+   This is a recorded ADR-0005 exception (§ 12), and the `./wasm` export is not added.
+
+`lib/prn.ts` has the same interface in both cases, so no caller changes between them.
 
 ### 4.8 `lib/logger.ts`
 
@@ -424,10 +443,13 @@ segment's own `error.tsx` does not catch.
   (`next/dist/server/app-render/create-component-tree.js:56,113-116,313-333`). The plan measures it
   in a real build.
 - `forbidden()` takes no argument, so the view cannot receive the correlation id as a prop.
-  `callIam` writes the error into a request-scoped holder (a React `cache()` object) before it calls
-  `forbidden()`, and the view reads it. The plan measures that the holder survives into the
-  boundary render. If it does not, the view shows no id, `callIam` logs the id with the path, and
-  the spec records the result.
+  **Measured (2026-09-11): a React `cache()` holder set before `forbidden()` is not visible in the
+  `forbidden.tsx` render.** The plan tries one other way: `proxy.ts` mints a per-request id into a
+  request header, `lib/iam.ts` sends it to IAM as `paigasus-correlation-id`, and the view reads it
+  with `headers()`. This works only if IAM adopts an incoming id; the plan checks that in
+  `paigasus-observability` first. If either step fails, the view shows no id, and `callIam` logs the
+  id with the path (the fallback). The section and action 403s always show the id, because they
+  render the `PaigasusError` directly.
 - The view shows a fixed title, the correlation id and a link to `/iam/orgs`. It never shows IAM's
   message.
 
@@ -767,23 +789,37 @@ Linear issues, made on 2026-09-11 after the spec was approved:
 - The `authInterrupts` fallback (§ 6.2) and the correlation-id holder fallback (§ 6.2).
 - `mayI()` fails open, so an IAM outage shows buttons that IAM then denies.
 - The e2e tier runs one zone (§ 9.4).
+- If the wasm spike fails (D6), `lib/prn.ts` is an ADR-0005 exception, held to the kernel by the
+  parity corpus. The napi packaging defect (`files` excludes `*.node`) stays open for any Node
+  consumer of `@paigasus/kernel`, as SMA-634.
 
 ---
 
-## 13. Things to measure in the plan
+## 13. Things to measure
 
-The plan measures each item in a real build or run before it builds on it:
+**Measured on 2026-09-11, before the plan was written** (throwaway Next 16.3.4 apps in the session
+scratchpad; nothing in the repo changed):
 
-1. The three `basePath` failures of § 7.1, then the fixes, in a minimal Next app.
-2. A nested `forbidden.tsx` in a route group, and the correlation-id holder (§ 6.2).
-3. The protobuf-es `import_extension` values (§ 7.2).
-4. The proxy matcher with a `basePath` (§ 7.5), and that `proxy.ts` runs under the `react-server`
-   condition like `middleware.ts`.
-5. The kernel napi binding in the standalone output (§ 4.7) — a stop condition.
-6. The `IsAuthorized` action string format (§ 4.6), and where IAM puts the correlation id (§ 9.1).
-7. Every harness that runs package source under plain Node (§ 7.2).
-8. Whether `msw` declares an install script (§ 8).
-9. Which `@paigasus/proto` entry exports `ServiceInfoService` for the SDK re-export (§ 7.3).
+| # | Result |
+|---|---|
+| 1 | Confirmed all three § 7.1 failures. In the proxy, `req.nextUrl.pathname` is `/auth/login` (basePath removed), `req.nextUrl.basePath` is `/iam`, and `req.url` keeps `/iam`. In a route handler, `req.url` is `http://0.0.0.0:<port>/auth/callback?…`: no basePath, the bind address, and only the scheme follows `X-Forwarded-Proto`. A page `redirect('/auth/login?…')` gives `Location: /iam/auth/login?…`; `redirect('/iam/auth/login')` gives `/iam/iam/auth/login`. A raw `Response` `Location` from a route handler passes through unchanged. A proxy `NextResponse.redirect(new URL('/iam/auth/login?…', req.url))` and a `req.nextUrl.clone()` with `pathname = '/auth/login'` both give `/iam/auth/login` once. |
+| 2 | `forbidden()` → HTTP 403, the nested `(console)/forbidden.tsx` renders inside the `(console)` layout. A `cache()` holder does not reach the view (§ 6.2). |
+| 3 | protobuf-es `import_extension` accepts `none` (the default when omitted), `.js` and `.ts`. Omitting it gives extensionless imports. `buf generate` works in this environment. |
+| 4 | The matcher `'/((?!_next/static|_next/image|favicon.ico).*)'`, written WITHOUT `/iam`, skips static assets under the basePath. Without a matcher, the proxy runs for `/iam/_next/static/*`. A module that imports `server-only` loads in `proxy.ts`. |
+| 5 | The napi kernel binding fails in a Next build (§ 4.7, D6). |
+| 6 | `Action::parse` takes PascalCase names (`CreateTeam`, `ListOrganizations`, `ListAuditLog`; `rs/crates/libs/paigasus-iam-core/src/authz/action.rs:114-163`). IAM puts the correlation id in `ErrorInfo.metadata["correlation_id"]` (`convert.rs:59-74`) with domain `iam.paigasus.io`, and also sends the `paigasus-correlation-id` header; the SDK reads the metadata first (`map-error.ts:179`). |
+| 7 | Two plain-Node loaders import package source: `paigasus-auth/tests/fixtures/ts-esm-loader.mjs` (the e2e fixture server and the multi-process single-flight test) and `paigasus-discovery/tests/containers/support/ts-esm-loader.mjs`. Both need the extensionless retry. |
+| 8 | `msw` 2.15.0 (released 2026-07-08) declares a `postinstall` script, so `allowBuilds` needs `msw: false`. |
+| 9 | `@paigasus/proto`'s root entry exports `ServiceInfoService`; the SDK does not re-export it yet. |
+
+The plan still measures these in the repo itself, before it builds on them:
+
+1. The § 7.1 fixes, in the real app's e2e tier (the failures are measured; the fixes are not).
+2. The kernel wasm spike (D6, § 4.7).
+3. Whether IAM adopts an incoming `paigasus-correlation-id`, and whether `headers()` works in
+   `forbidden.tsx` (§ 6.2).
+4. A Server Action POST under the basePath through the TLS terminator (§ 9.4). The scratch
+   measurement skipped it, because a raw POST needs Flight-encoded arguments.
 
 ---
 
