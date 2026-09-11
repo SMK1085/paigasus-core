@@ -17,3 +17,4 @@ export { ZoneLink, type ZoneLinkProps } from './zone/zone-link';
 export { navStateOf, type NavEntryState } from './nav/state';
 export { PrimaryNav, type NavEntry, type PrimaryNavProps } from './nav/primary-nav';
 export { Switcher, type SwitcherItem, type SwitcherProps } from './shell/switcher';
+export { UserMenu } from './shell/user-menu';
