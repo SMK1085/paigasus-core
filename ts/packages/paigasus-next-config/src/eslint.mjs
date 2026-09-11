@@ -33,6 +33,9 @@
 // Written as plain ESM rather than TypeScript: ts/eslint.config.js is loaded by ESLint's own
 // resolver, and configuration data gains little from types (spec § 13 M5).
 //
+// A SECOND EXPORT, `sourceRules`, carries the custom rule `paigasus/no-js-relative-specifier`
+// (SMA-511 spec § 7.2). It is not a boundaryRules block, on purpose: see its own doc comment.
+//
 // The app-shell blocks are LIVE since SMA-510. They use the ALLOWLIST form, like the sdk block, and
 // a second block carries the fixture's narrow exception. @paigasus/auth has its own scope (the
 // `paigasus/boundaries/auth-*` and `paigasus/boundaries/app-middleware` blocks). Every scope is
@@ -299,6 +302,79 @@ export const boundaryRules = [
           "An app's middleware must import @paigasus/auth/middleware, never /server or the sdk. `server-only` is a NO-OP in the middleware layer, so nothing else stops a token-bearing module being bundled there.",
       },
     ]),
+  },
+];
+
+/**
+ * `paigasus/no-js-relative-specifier` (SMA-511 spec § 7.2).
+ *
+ * MEASURED (SMA-510): Turbopack in Next 16.3.4 does not resolve a `.js` relative specifier to a
+ * `.ts` file. A package whose src/ writes `from './x.js'` therefore breaks `next build` in every
+ * zone that compiles it, and vitest, tsc and ESLint all accept the specifier. This rule reports an
+ * import declaration, an `export … from` and an `import()` with a string literal, whose specifier
+ * starts with `./` or `../` and ends in `.js`. Bare package specifiers are not reported.
+ *
+ * @type {import('eslint').Rule.RuleModule}
+ */
+export const noJsRelativeSpecifier = {
+  meta: {
+    type: 'problem',
+    docs: {
+      description: 'Disallow a relative module specifier that ends in .js (Turbopack does not resolve it to a .ts file)',
+    },
+    schema: [],
+    messages: {
+      jsSpecifier:
+        "Relative specifier '{{specifier}}' ends in .js. Turbopack (Next 16.3.4) does not resolve a .js relative specifier to a .ts file, so every Next zone that compiles this file fails to build. Remove the extension (SMA-511 spec § 7.2).",
+    },
+  },
+  create(context) {
+    const check = (source) => {
+      if (source === null || source === undefined || source.type !== 'Literal' || typeof source.value !== 'string') return;
+      const specifier = source.value;
+      if (/^\.\.?\//.test(specifier) && specifier.endsWith('.js')) {
+        context.report({ node: source, messageId: 'jsSpecifier', data: { specifier } });
+      }
+    };
+    return {
+      ImportDeclaration: (node) => check(node.source),
+      ExportNamedDeclaration: (node) => check(node.source),
+      ExportAllDeclaration: (node) => check(node.source),
+      ImportExpression: (node) => check(node.source),
+    };
+  },
+};
+
+/** @type {import('eslint').ESLint.Plugin} */
+const paigasusPlugin = {
+  meta: { name: '@paigasus/next-config/eslint' },
+  rules: { 'no-js-relative-specifier': noJsRelativeSpecifier },
+};
+
+/**
+ * Source-hygiene blocks, as an ESLint flat-config array. `ts/eslint.config.js` spreads it next to
+ * `boundaryRules`, and `tests/boundaries.test.ts` pins that spread.
+ *
+ * WHY NOT INSIDE `boundaryRules`. The liveness test there derives a `BOUNDARY_SCOPES` key from every
+ * block's `files[0]`; `packages/*` is not a package directory, so the reverse loop would fail.
+ *
+ * WHY A CUSTOM RULE. A second `no-restricted-imports` block that matches the same files REPLACES
+ * the first one's options in flat config. It would switch off the sdk, auth-* and discovery
+ * boundary blocks for every file under packages/*\/src, with no error anywhere.
+ *
+ * Scope: package sources only. Test files are excluded (vitest resolves `.js` to `.ts`). Apps are
+ * excluded, because `next build` itself fails on such a specifier in app code. Generated proto code
+ * is excluded by the workspace's global `**\/generated/**` ignore; a proto test holds it instead.
+ *
+ * @type {import('eslint').Linter.Config[]}
+ */
+export const sourceRules = [
+  {
+    name: 'paigasus/source/no-js-relative-specifier',
+    files: ['packages/*/src/**/*.{ts,tsx,mts,cts}'],
+    ignores: ['**/*.test.*', '**/tests/**'],
+    plugins: { paigasus: paigasusPlugin },
+    rules: { 'paigasus/no-js-relative-specifier': 'error' },
   },
 ];
 
