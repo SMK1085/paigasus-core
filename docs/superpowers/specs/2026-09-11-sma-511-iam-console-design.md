@@ -824,6 +824,12 @@ The plan still measures these in the repo itself, before it builds on them:
 4. A Server Action POST under the basePath through the TLS terminator (§ 9.4). The scratch
    measurement skipped it, because a raw POST needs Flight-encoded arguments.
 
+**Measured during implementation:**
+
+| # | Result |
+|---|---|
+| 10 | D6 wasm spike (plan Task 8). Criterion (D6): the standalone server answers a route handler that calls `prnBuild`, `prnOrg`, `prnResourceType` and `prnResourceId` with the correct values. B1, a warm tree: PASS (`B1 build exit 0`, `B1 standalone entry ok`, `B1 curl exit 0`, `B1 MATCH`); `.wasm` files under `.next/standalone`: `.next/standalone/apps/iam-console/.next/server/chunks/1qe0_@paigasus_wasm_paigasus_wasm_bg_05ek5-k.wasm`. B2, the CI state (the installed `file:` copy of `@paigasus/wasm` without the gitignored `.wasm`): FAIL — `next build` exits 1 with `Error: Module not found: Can't resolve './paigasus_wasm_bg.wasm'` at `./node_modules/.pnpm/@paigasus+wasm@file+..+rs+crates+bindings+paigasus-wasm/node_modules/@paigasus/wasm/paigasus_wasm.js:2:1`; `.wasm` files under `.next/standalone`: none (the directory does not exist). Turbopack resolves `@paigasus/wasm` through pnpm's installed copy, and pnpm links the crate's files ONCE, at install time; in CI `pnpm install` runs before `paigasus-kernel-ts:build`, so the `.wasm` that build writes never reaches the installed copy. Decision: fallback C. |
+
 ---
 
 ## 14. Challenge log (revision 1 → 2)

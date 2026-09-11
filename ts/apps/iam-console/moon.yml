@@ -27,6 +27,8 @@ dependsOn:
 fileGroups:
   sources:
     - 'app/**/*'
+    # SMA-511: the composition root. Without this, an edit in lib/ serves a cached build and test.
+    - 'lib/**/*'
 
 tasks:
   build:
@@ -153,5 +155,9 @@ tasks:
       - '/ts/packages/paigasus-ui/package.json'
       - '/ts/pnpm-lock.yaml'
       - '/ts/tsconfig.base.json'
+      # SMA-511 D6: tests/unit/prn.test.ts replays the kernel parity corpus and pins ROOT_PRN to
+      # root_prn()'s builder call. Without these, a corpus or model.rs edit serves a cached PASS.
+      - '/rs/crates/libs/paigasus-kernel-parity/vectors/**/*'
+      - '/rs/crates/libs/paigasus-iam-core/src/authz/model.rs'
     options:
       merge: replace
