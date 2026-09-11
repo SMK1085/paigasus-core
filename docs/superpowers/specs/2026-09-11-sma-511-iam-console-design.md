@@ -743,15 +743,17 @@ Deployment assumptions:
 
 ## 11. Follow-ups
 
-Linear issues, made after the spec is approved:
+Linear issues, made on 2026-09-11 after the spec was approved:
 
-1. **The dead-letters capability key and screen:** the contracts registry, IAM `Capabilities`, the
-   discovery vocabulary, and `/iam/dead-letters`.
-2. **Rename, archive and restore** for organizations, teams and projects (7 mutations).
-3. **A shared home for the provisioning and principal code** (§ 4.5) when SMA-512 needs it.
-4. **An IAM `WhoAmI` RPC**, so that provisioning does not depend on `GetServiceInfo` being
-   bearer-enforced.
-5. **IAM `Introspect` role grants** — `role_grants` is always empty
+1. **SMA-629 — the dead-letters capability key and screen:** the contracts registry, IAM
+   `Capabilities`, the discovery vocabulary, and `/iam/dead-letters`.
+2. **SMA-630 — rename, archive and restore** for organizations, teams and projects (9 of
+   `TenancyService`'s 14 mutations; this issue delivers 5).
+3. **SMA-631 — a shared home for the provisioning and principal code** (§ 4.5) when SMA-512 needs
+   it.
+4. **SMA-632 — an IAM `WhoAmI` RPC**, so that provisioning does not depend on `GetServiceInfo`
+   being bearer-enforced.
+5. **SMA-633 — IAM `Introspect` role grants.** `role_grants` is always empty
    (`authenticate_token.rs:161-165`), so `SessionView.grants` and `can()` have no data anywhere.
 
 ---
