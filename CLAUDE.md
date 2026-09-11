@@ -917,14 +917,15 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
 - **Turbopack (Next 16.3.4) does NOT resolve a `.js` relative specifier to a `.ts` file** (MEASURED,
   SMA-510): `import { x } from './a.js'` with only `a.ts` on disk fails `next build` with `Module not
   found`, in app code and in a workspace package's source alike. A clause-level `import type … from
-  './a.js'` is erased first and builds; `import { type A } from './a.js'` is NOT erased under
-  `verbatimModuleSyntax`. So every file a Next app compiles uses EXTENSIONLESS relative value
-  imports: `@paigasus/ui`, `@paigasus/next-config`, `@paigasus/app-shell` and discovery's `./client`
-  graph do, and structure tests pin the last two. `@paigasus/auth`'s `/server` and `/middleware`,
-  discovery's `/server` and `/react`, and `@paigasus/sdk` still use `.js` and have never been built
-  by Next — a probe that imported `@paigasus/auth/middleware` failed on `./http/cookies.js`. SMA-511
-  is the first consumer to hit it. Vite, vitest, tsc and Playwright all accept both forms, so
-  nothing but a Next build notices.
+  './a.js'` is erased first and builds (measured). `import { type A } from './a.js'` is not erased
+  under `verbatimModuleSyntax` (reasoned from the flag's rules, not separately measured). So every
+  file a Next app compiles uses EXTENSIONLESS relative value imports: `@paigasus/ui`,
+  `@paigasus/next-config`, `@paigasus/app-shell` and discovery's `./client` graph do, and structure
+  tests pin the last two. `@paigasus/auth`'s `/server` and `/middleware`, discovery's `/server` and
+  `/react`, and `@paigasus/sdk` still use `.js` and have never been built by Next — a probe that
+  imported `@paigasus/auth/middleware` failed on `./http/cookies.js`. SMA-511 is the first consumer
+  that imports these entries, so its `next build` will fail on them. Vite, vitest, tsc and
+  Playwright all accept both forms, so nothing but a Next build notices.
 
 ## Workflow
 
