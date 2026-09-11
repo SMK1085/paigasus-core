@@ -44,6 +44,7 @@ beforeEach(async () => {
       clockToleranceSeconds: 30,
       allowInsecureRequests: true, // the fixture is plain http on localhost — never set in production
     }),
+    publicOrigin: 'https://rp.example.com',
     redirectUri: REDIRECT_URI,
     postLogoutRedirectUri: 'https://rp.example.com/',
     cookieDomainless: true,
@@ -186,6 +187,41 @@ describe('GET /auth/login', () => {
     const rootRuntime: AuthRuntime = { ...runtime, basePath: '' };
 
     const res = await createAuthRoutes(rootRuntime).handle(new Request('https://rp.example.com/auth/login?returnTo=https%3A%2F%2Fevil.com'));
+    const state = new URL(res.headers.get('location') ?? '').searchParams.get('state') ?? '';
+    const tx = await store.takeTransaction(state);
+    expect(tx?.returnTo).toBe('/');
+  });
+
+  // SMA-511 spec § 6.4. validateReturnTo accepts any same-origin path, including this zone's own
+  // auth routes. A crafted link with returnTo=/iam/auth/login would send the browser back into the
+  // login after a successful callback — one loop per click.
+  it.each([
+    '/iam/auth/login',
+    '/iam/auth/login?returnTo=%2Fiam%2F',
+    '/iam/auth/callback?code=x&state=y',
+    '/iam/auth/logout',
+    '/iam/auth/logout/callback',
+    // Dot segments. validateReturnTo keeps these two values unchanged, and the browser resolves the
+    // callback's Location to /iam/auth/login for both. A guard on the raw string misses them.
+    '/iam/./auth/login',
+    '/iam/x/../auth/login',
+  ])('replaces a returnTo under the zone auth routes (%s) with the zone root', async (raw) => {
+    const res = await createAuthRoutes(runtime).handle(loginRequest(`?returnTo=${encodeURIComponent(raw)}`));
+    const state = new URL(res.headers.get('location') ?? '').searchParams.get('state') ?? '';
+    const tx = await store.takeTransaction(state);
+    expect(tx?.returnTo).toBe('/iam/');
+  });
+
+  it('keeps a returnTo that only starts like an auth route', async () => {
+    const res = await createAuthRoutes(runtime).handle(loginRequest('?returnTo=%2Fiam%2Fauthors'));
+    const state = new URL(res.headers.get('location') ?? '').searchParams.get('state') ?? '';
+    const tx = await store.takeTransaction(state);
+    expect(tx?.returnTo).toBe('/iam/authors');
+  });
+
+  it('replaces an /auth/ returnTo with "/" on a root-mounted zone', async () => {
+    const rootRuntime: AuthRuntime = { ...runtime, basePath: '' };
+    const res = await createAuthRoutes(rootRuntime).handle(new Request('https://rp.example.com/auth/login?returnTo=%2Fauth%2Flogin'));
     const state = new URL(res.headers.get('location') ?? '').searchParams.get('state') ?? '';
     const tx = await store.takeTransaction(state);
     expect(tx?.returnTo).toBe('/');

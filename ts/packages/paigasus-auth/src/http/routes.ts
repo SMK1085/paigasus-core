@@ -117,9 +117,21 @@ async function handleLogin(runtime: AuthRuntime, req: Request, url: URL): Promis
   // fallback stores `returnTo: ''`. The callback then redirects to `Location: ''`, the browser
   // resolves that as the CURRENT url and re-requests the callback, the txn cookies are already
   // gone, and the retry loops through `txn_missing` back to `/auth/login` forever — login never
-  // completes on a root-mounted zone. `src/next/get-session.ts:104` and `src/runtime.ts:123` both
+  // completes on a root-mounted zone. `src/next/get-session.ts:110` and `src/runtime.ts:129` both
   // already use the trailing-slash form; this call is the one place that had drifted from it.
-  const returnTo = validateReturnTo(url.searchParams.get('returnTo'), `${runtime.basePath}/`);
+  const fallback = `${runtime.basePath}/`;
+  const requested = validateReturnTo(url.searchParams.get('returnTo'), fallback);
+  // SMA-511 spec § 6.4: a returnTo under this zone's own auth routes would send the browser back into
+  // /auth/login (or /auth/callback) after a successful login, so a crafted link loops, one click per
+  // round. validateReturnTo accepts such a path, because it is same-origin; it is refused here.
+  //
+  // The check reads the path with its dot segments resolved, because the browser resolves them in
+  // the callback's Location: `/iam/./auth/login` and `/iam/x/../auth/login` both land on
+  // `/iam/auth/login`. The placeholder origin only lets `new URL` parse a path. validateReturnTo has
+  // already refused every value that is not a same-origin path (`//`, a backslash), so the parse
+  // cannot move to another host. The stored value stays `requested`, so its query string is kept.
+  const resolvedPath = new URL(requested, 'http://placeholder').pathname;
+  const returnTo = resolvedPath.startsWith(`${runtime.basePath}/auth/`) ? fallback : requested;
 
   const txnId = newTransactionId();
   const secret = newTransactionSecret();
@@ -201,10 +213,18 @@ async function handleCallback(runtime: AuthRuntime, req: Request, url: URL): Pro
   // request this browser's own flow produced) but before any token-endpoint call.
   if (url.searchParams.get('error') !== null) return reject('idp_error');
 
+  // SMA-511 spec § 7.1: `currentUrl` is runtime.redirectUri plus the incoming query string, NEVER
+  // the request URL. openid-client derives the token request's `redirect_uri` from `currentUrl`
+  // (`stripParams(currentUrl)`), and a Next route handler's `req.url` carries the server's bind
+  // address, so the value would not equal the one sent to /authorize. Built from the same
+  // redirectUri `handleLogin` sends, the two are equal with or without an override.
+  const currentUrl = new URL(runtime.redirectUri);
+  currentUrl.search = url.search;
+
   let tokens: OidcTokens;
   try {
     tokens = await runtime.oidc.authorizationCodeGrant({
-      currentUrl: url,
+      currentUrl,
       codeVerifier: tx.codeVerifier,
       expectedState: state,
       expectedNonce: tx.nonce,

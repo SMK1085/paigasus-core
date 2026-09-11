@@ -25,12 +25,13 @@ vi.mock('../src/http/routes.js', () => ({
 import { createAuthRouteHandler } from '../src/server.js';
 import type { AuthRuntime } from '../src/runtime.js';
 
-function runtime(): AuthRuntime {
+function runtime(overrides: Partial<AuthRuntime> = {}): AuthRuntime {
   return {
     store: {} as AuthRuntime['store'],
     resolver: {} as AuthRuntime['resolver'],
     logger: { event: () => undefined },
     oidc: {} as AuthRuntime['oidc'],
+    publicOrigin: 'https://app.example.com',
     redirectUri: 'https://app.example.com/iam/auth/callback',
     postLogoutRedirectUri: 'https://app.example.com/iam/',
     cookieDomainless: true,
@@ -42,6 +43,7 @@ function runtime(): AuthRuntime {
     zone: 'iam',
     basePath: '/iam',
     scopes: 'openid',
+    ...overrides,
   };
 }
 
@@ -87,5 +89,53 @@ describe('createAuthRouteHandler', () => {
     const handler = createAuthRouteHandler(runtime());
 
     await expect(handler(new Request('https://app.example.com/iam/auth/callback'))).rejects.toThrow('boom');
+  });
+});
+
+// SMA-511 spec § 7.1. Next removes the basePath from a route handler's `req.url` and puts the
+// server's bind address in it (measured: `http://0.0.0.0:<port>/auth/callback?…`). The core route
+// table is keyed by the full path on the public origin, so the handler rebuilds the URL first.
+describe('createAuthRouteHandler rebuilds the request URL (SMA-511 spec § 7.1)', () => {
+  async function requestSeenBy(rt: AuthRuntime, input: string, init?: RequestInit): Promise<Request> {
+    handleMock.mockResolvedValueOnce(new Response(null, { status: 204 }));
+    await createAuthRouteHandler(rt)(new Request(input, init));
+    const seen = handleMock.mock.lastCall?.[0];
+    if (seen === undefined) throw new Error('createAuthRoutes().handle was not called');
+    return seen;
+  }
+
+  it('adds the basePath back and uses PAIGASUS_PUBLIC_ORIGIN for what Next hands a route handler', async () => {
+    const seen = await requestSeenBy(runtime(), 'http://0.0.0.0:3000/auth/callback?code=c&state=s');
+    expect(seen.url).toBe('https://app.example.com/iam/auth/callback?code=c&state=s');
+  });
+
+  it('keeps a full path, as a plain node:http server passes it (tests/e2e/fixture-server.ts)', async () => {
+    const seen = await requestSeenBy(runtime(), 'http://127.0.0.1:4000/iam/auth/login?returnTo=%2Fiam%2Fx');
+    expect(seen.url).toBe('https://app.example.com/iam/auth/login?returnTo=%2Fiam%2Fx');
+  });
+
+  // The route table decides, not a prefix test: with basePath '/auth', the stripped path '/auth/login'
+  // STARTS with the basePath and is still not a full path.
+  it('is not confused by a zone whose basePath is /auth', async () => {
+    const rt = runtime({ basePath: '/auth' });
+    expect((await requestSeenBy(rt, 'http://0.0.0.0:3000/auth/login')).url).toBe('https://app.example.com/auth/auth/login');
+    expect((await requestSeenBy(rt, 'http://127.0.0.1:4000/auth/auth/login')).url).toBe('https://app.example.com/auth/auth/login');
+  });
+
+  it('works for a root-mounted zone', async () => {
+    const seen = await requestSeenBy(runtime({ basePath: '' }), 'http://0.0.0.0:3000/auth/login');
+    expect(seen.url).toBe('https://app.example.com/auth/login');
+  });
+
+  it('passes a non-auth path on with only the origin changed, so the route table still 404s it', async () => {
+    const seen = await requestSeenBy(runtime(), 'http://0.0.0.0:3000/elsewhere');
+    expect(seen.url).toBe('https://app.example.com/elsewhere');
+  });
+
+  it('keeps the method, the headers and the body', async () => {
+    const seen = await requestSeenBy(runtime(), 'http://0.0.0.0:3000/auth/logout', { method: 'POST', headers: { cookie: 'a=b' }, body: 'x=1' });
+    expect(seen.method).toBe('POST');
+    expect(seen.headers.get('cookie')).toBe('a=b');
+    expect(await seen.text()).toBe('x=1');
   });
 });

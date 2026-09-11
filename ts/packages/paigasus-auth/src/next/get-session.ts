@@ -92,15 +92,21 @@ export interface RequireSessionOptions {
 
 /**
  * Read the current session, redirecting to this zone's login path when there is none. Safe to
- * call from a server component: `redirect()` is the one recovery a server component may perform,
- * and it is what turns a stale `__Host-pgs_sid` cookie into a working "sign in again" prompt
- * instead of a permanently blank page.
+ * call from a server component or a Server Action: `redirect()` is the one recovery a server
+ * component may perform, and it is what turns a stale `__Host-pgs_sid` cookie into a working
+ * "sign in again" prompt instead of a permanently blank page.
+ *
+ * THE REDIRECT TARGET IS BASEPATH-RELATIVE (SMA-511 spec § 7.1). Next's redirect() adds the
+ * basePath itself, with no duplicate check: `redirect('/auth/login?…')` gives `Location:
+ * /iam/auth/login?…`, and `redirect('/iam/auth/login')` gives `/iam/iam/auth/login` (measured, spec
+ * § 13 row 1). `returnTo` keeps the basePath, because the callback sends it back as a raw Location
+ * header from a route handler, which Next passes through unchanged. Do not call this from a route
+ * handler; a route handler returns its own redirect Response.
  */
 export async function requireSession(runtime: AuthRuntime, options: RequireSessionOptions = {}): Promise<ResolvedSession> {
   const session = await getSession(runtime);
   if (session !== null) return session;
 
-  const loginPath = `${runtime.basePath}/auth/login`;
   const returnTo = validateReturnTo(options.returnTo, `${runtime.basePath}/`);
-  redirect(`${loginPath}?returnTo=${encodeURIComponent(returnTo)}`);
+  redirect(`/auth/login?returnTo=${encodeURIComponent(returnTo)}`);
 }

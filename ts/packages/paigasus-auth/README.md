@@ -114,6 +114,16 @@ routes under a zone's base path:
 | `<basePath>/auth/logout`          | Deletes the session record first, then redirects to the IdP's end-session endpoint (see "Logout" below). |
 | `<basePath>/auth/logout/callback` | The IdP's post-logout redirect target.                                                                   |
 
+Under Next, a zone mounts these routes at `app/auth/[...auth]/route.ts` and exports
+`createAuthRouteHandler(runtime)` as `GET` and `POST`. Next removes the basePath from a route
+handler's `req.url` and puts the server's bind address in it. So `createAuthRouteHandler` rebuilds
+the URL as `PAIGASUS_PUBLIC_ORIGIN` + basePath + path + query before it dispatches. A plain server
+that passes the full path (this package's e2e fixture) works too. The callback sends `redirect_uri`
+from `runtime.redirectUri`, never from the request URL, so it always equals the value sent to the
+IdP's `/authorize`. `/auth/login` resolves the dot segments of a `returnTo` path first. It then
+replaces a path under the zone's own `/auth/` routes with the zone root, so a crafted link cannot
+loop.
+
 ## Cookies
 
 Every cookie this package writes carries the `__Host-` prefix: `__Host-pgs_sid` (the session
@@ -142,11 +152,24 @@ middleware into an authorizer (the CVE-2025-29927 middleware-auth-bypass shape);
 
 ### `publicPaths` must list every route this package serves
 
+The middleware compares `req.nextUrl.pathname`, which Next gives WITHOUT the zone's basePath. So
+`publicPaths` and `loginPath` are basePath-relative: `/auth/login`, not `/iam/auth/login`. The
+middleware puts the basePath back when it builds the login redirect and its `returnTo` value.
+
 `createAuthMiddleware({ publicPaths, loginPath })` requires `publicPaths` to name every route
-`createAuthRoutes` dispatches on for this zone: the login, callback, logout, and logout-callback
-paths. **Do not hand-copy this list.** Build it with `authRoutePaths(runtime)`
-(`@paigasus/auth/middleware`) instead — a pure derivation from `runtime.basePath` that always
-matches the real route table.
+`createAuthRoutes` dispatches on: the login, callback, logout, and logout-callback paths. **Do not
+hand-copy this list.** Build it with `authRoutePaths()` (`@paigasus/auth/middleware`), which
+returns the four basePath-relative paths from the shared route table:
+
+```ts
+// proxy.ts
+import { authRoutePaths, createAuthMiddleware } from '@paigasus/auth/middleware';
+
+export default createAuthMiddleware({ publicPaths: [...authRoutePaths(), '/'], loginPath: '/auth/login' });
+```
+
+`requireSession()` redirects to the basePath-relative `/auth/login` for the same reason: Next's
+`redirect()` adds the basePath itself.
 
 If a path is missing — the callback path is the easy one to miss — the failure has no error
 anywhere: `/auth/login` clears the session cookie, the identity provider's redirect back to

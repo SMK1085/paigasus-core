@@ -63,6 +63,12 @@ export interface AuthRuntime {
   resolver: PrincipalResolver;
   logger: AuthLogger;
   oidc: OidcClient;
+  /**
+   * `PAIGASUS_PUBLIC_ORIGIN` as parsed: an https origin with no trailing slash (config.ts
+   * `httpsUrl`). `createAuthRouteHandler` (server.ts) rebuilds a route handler's request URL on it,
+   * because Next gives a route handler the server's BIND address instead (SMA-511 spec § 7.1).
+   */
+  publicOrigin: string;
   redirectUri: string;
   postLogoutRedirectUri: string;
   /** All zones share one cookie on one origin (design doc § 6.7) — never per-zone, never configurable. */
@@ -146,6 +152,7 @@ export async function createAuthRuntime(cfg: ComposedConfig, deps: CreateAuthRun
     resolver: deps.resolver ?? claimsPrincipalResolver,
     logger: deps.logger ?? noopLogger,
     oidc,
+    publicOrigin: cfg.PAIGASUS_PUBLIC_ORIGIN,
     redirectUri,
     postLogoutRedirectUri,
     cookieDomainless: true,

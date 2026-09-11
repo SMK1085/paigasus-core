@@ -33,6 +33,12 @@ describe('createAuthRuntime', () => {
     expect(rt.postLogoutRedirectUri).toBe('https://app.example.com/iam/');
   });
 
+  // SMA-511 spec § 7.1: createAuthRouteHandler rebuilds a route handler's request URL on this value.
+  it('carries PAIGASUS_PUBLIC_ORIGIN as publicOrigin', async () => {
+    const rt = await createAuthRuntime(BASE);
+    expect(rt.publicOrigin).toBe('https://app.example.com');
+  });
+
   it('honours an explicit redirect URI override', async () => {
     const rt = await createAuthRuntime({ ...BASE, PAIGASUS_OIDC_REDIRECT_URI: 'https://proxy/cb' });
     expect(rt.redirectUri).toBe('https://proxy/cb');

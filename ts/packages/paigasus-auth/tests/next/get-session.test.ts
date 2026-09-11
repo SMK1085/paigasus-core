@@ -69,6 +69,7 @@ function baseRuntime(store: SessionStore): AuthRuntime {
     resolver: { resolve: () => Promise.reject(new Error('unexpectedly called')) },
     logger: noopLogger,
     oidc: unusedOidc(),
+    publicOrigin: 'https://app.example.com',
     redirectUri: 'https://app.example.com/iam/auth/callback',
     postLogoutRedirectUri: 'https://app.example.com/iam/',
     cookieDomainless: true,
@@ -162,19 +163,37 @@ describe('getSession', () => {
 });
 
 describe('requireSession', () => {
-  it("calls next/navigation's redirect() to the login path with returnTo when getSession() is null", async () => {
+  it("calls next/navigation's redirect() with the basePath-RELATIVE login path and a returnTo that keeps the basePath", async () => {
     cookiesMock.mockResolvedValue(cookieJar());
     const runtime = baseRuntime(new MemorySessionStore());
 
-    await expect(requireSession(runtime, { returnTo: '/iam/dashboard' })).rejects.toThrow('NEXT_REDIRECT:/iam/auth/login?returnTo=%2Fiam%2Fdashboard');
-    expect(redirectMock).toHaveBeenCalledWith('/iam/auth/login?returnTo=%2Fiam%2Fdashboard');
+    await expect(requireSession(runtime, { returnTo: '/iam/dashboard' })).rejects.toThrow('NEXT_REDIRECT:/auth/login?returnTo=%2Fiam%2Fdashboard');
+    expect(redirectMock).toHaveBeenCalledWith('/auth/login?returnTo=%2Fiam%2Fdashboard');
+  });
+
+  // SMA-511 spec § 13 row 1: Next's redirect() adds the basePath itself, with no duplicate check, so
+  // `redirect('/iam/auth/login')` lands on `/iam/iam/auth/login`.
+  it('never passes the basePath to redirect()', async () => {
+    cookiesMock.mockResolvedValue(cookieJar());
+
+    await expect(requireSession(baseRuntime(new MemorySessionStore()))).rejects.toThrow();
+
+    const [target] = redirectMock.mock.lastCall ?? [];
+    expect(target).toBe('/auth/login?returnTo=%2Fiam%2F');
   });
 
   it('falls back to the zone root when returnTo is not a valid same-origin path', async () => {
     cookiesMock.mockResolvedValue(cookieJar());
     const runtime = baseRuntime(new MemorySessionStore());
 
-    await expect(requireSession(runtime, { returnTo: 'https://evil.example.com' })).rejects.toThrow('NEXT_REDIRECT:/iam/auth/login?returnTo=%2Fiam%2F');
+    await expect(requireSession(runtime, { returnTo: 'https://evil.example.com' })).rejects.toThrow('NEXT_REDIRECT:/auth/login?returnTo=%2Fiam%2F');
+  });
+
+  it('falls back to "/" on a root-mounted zone', async () => {
+    cookiesMock.mockResolvedValue(cookieJar());
+    const runtime = { ...baseRuntime(new MemorySessionStore()), basePath: '' };
+
+    await expect(requireSession(runtime)).rejects.toThrow('NEXT_REDIRECT:/auth/login?returnTo=%2F');
   });
 
   it('returns the record when a session exists, without redirecting', async () => {

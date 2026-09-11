@@ -133,6 +133,7 @@ function baseRuntime(oidc: OidcClient): AuthRuntime {
     resolver: claimsPrincipalResolver,
     logger: recordingLogger(),
     oidc,
+    publicOrigin: 'https://rp.example.com',
     redirectUri: 'https://rp.example.com/iam/auth/callback',
     postLogoutRedirectUri: POST_LOGOUT_REDIRECT_URI,
     cookieDomainless: true,

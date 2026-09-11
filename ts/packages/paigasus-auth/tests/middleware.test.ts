@@ -19,30 +19,30 @@ import { collectImportGraph, filesWithDynamicImportOrRequire } from './support/i
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SRC = resolve(HERE, '../src');
 
-const OPTIONS = {
-  publicPaths: ['/iam/auth/login', '/iam/auth/callback', '/iam/auth/logout', '/iam/auth/logout/callback'],
-  loginPath: '/iam/auth/login',
-};
+// basePath-RELATIVE since SMA-511 (spec § 7.1): the middleware compares `req.nextUrl.pathname`,
+// which Next gives WITHOUT the zone's basePath.
+const OPTIONS = { publicPaths: authRoutePaths(), loginPath: '/auth/login' };
 
-function request(path: string, cookie?: string): NextRequest {
+/** What Next hands a zone's proxy: a NextRequest whose NextURL knows the compiled basePath. */
+function request(path: string, cookie?: string, basePath = '/iam'): NextRequest {
   const headers = cookie !== undefined ? { cookie } : {};
-  return new NextRequest(`https://app.example.com${path}`, { headers });
+  return new NextRequest(`https://app.example.com${path}`, { headers, nextConfig: { basePath } });
 }
 
 describe('createAuthMiddleware', () => {
-  it('redirects a guarded path with no session cookie to the login path with returnTo', () => {
-    const middleware = createAuthMiddleware(OPTIONS);
-    const res = middleware(request('/iam/dashboard?tab=1'));
+  it('redirects a guarded path with no session cookie to the login path, with a returnTo that keeps the basePath', () => {
+    const res = createAuthMiddleware(OPTIONS)(request('/iam/dashboard?tab=1'));
 
     expect(res.status).toBe(307); // NextResponse.redirect's default status
     const location = new URL(res.headers.get('location') ?? '');
+    // Exactly one `/iam`: a basePath-relative loginPath on a clone of nextUrl (spec § 13 row 1).
     expect(location.pathname).toBe('/iam/auth/login');
     expect(location.searchParams.get('returnTo')).toBe('/iam/dashboard?tab=1');
+    expect([...location.searchParams.keys()]).toEqual(['returnTo']);
   });
 
   it('passes through a guarded path carrying ANY cookie value, including a forged one', () => {
-    const middleware = createAuthMiddleware(OPTIONS);
-    const res = middleware(request('/iam/dashboard', `${SESSION_COOKIE}=totally-forged-not-a-real-sid`));
+    const res = createAuthMiddleware(OPTIONS)(request('/iam/dashboard', `${SESSION_COOKIE}=totally-forged-not-a-real-sid`));
 
     expect(res.headers.get('location')).toBeNull();
     // NextResponse.next() sets this marker header — proof this is a "continue" response, not a
@@ -50,37 +50,50 @@ describe('createAuthMiddleware', () => {
     expect(res.headers.get('x-middleware-next')).toBe('1');
   });
 
-  it('passes through a public path with no cookie at all', () => {
-    const middleware = createAuthMiddleware(OPTIONS);
-    const res = middleware(request('/iam/auth/login'));
+  it.each(AUTH_ROUTE_SUFFIXES)('passes through the auth route /iam%s with no cookie at all', (suffix) => {
+    const res = createAuthMiddleware(OPTIONS)(request(`/iam${suffix}`));
 
     expect(res.headers.get('location')).toBeNull();
     expect(res.headers.get('x-middleware-next')).toBe('1');
+  });
+
+  // The SMA-511 failure, kept as a test: a basePath-PREFIXED public path never matches, because
+  // Next never hands the proxy a prefixed pathname — so the zone's own login route redirected to itself.
+  it('does not match a basePath-PREFIXED public path', () => {
+    const res = createAuthMiddleware({ publicPaths: ['/iam/auth/login'], loginPath: '/auth/login' })(request('/iam/auth/login'));
+
+    expect(res.status).toBe(307);
+  });
+
+  it('works for a root-mounted zone, where basePath is the empty string', () => {
+    const res = createAuthMiddleware(OPTIONS)(request('/dashboard', undefined, ''));
+
+    const location = new URL(res.headers.get('location') ?? '');
+    expect(location.pathname).toBe('/auth/login');
+    expect(location.searchParams.get('returnTo')).toBe('/dashboard');
   });
 });
 
 // I5 (final fix wave). `publicPaths` used to be the caller's own hand-copied list, bound to
 // `http/routes.ts`'s route table by nothing — omit one path there (the callback path is the easy
 // one to miss) and a signed-out visitor loops between `/auth/login` and `/auth/callback` forever,
-// with no error anywhere. `authRoutePaths(runtime)` replaces the hand copy with a derivation; this
-// cross-checks it against the REAL route table in `http/routes.ts`, not a second hand-written list
-// that could drift the same way the original did.
+// with no error anywhere. `authRoutePaths()` replaces the hand copy with a derivation; this
+// cross-checks it against the REAL route table in `http/routes.ts`.
 describe('authRoutePaths (I5)', () => {
-  it('derives the four paths createAuthRoutes dispatches on for this zone', () => {
-    expect(authRoutePaths({ basePath: '/iam' })).toEqual(['/iam/auth/login', '/iam/auth/callback', '/iam/auth/logout', '/iam/auth/logout/callback']);
+  it('returns the four basePath-RELATIVE paths createAuthRoutes dispatches on', () => {
+    expect(authRoutePaths()).toEqual(['/auth/login', '/auth/callback', '/auth/logout', '/auth/logout/callback']);
   });
 
-  // Cross-checked against createAuthRoutes ITSELF: each derived path must be recognised (a 405 on
-  // the wrong method, never a 404 — this proves recognition without needing a full OIDC round
-  // trip), and a lookalike path outside the list must still 404. Only `runtime.basePath` is read
-  // before routes.ts's method dispatch, so a partial fixture is enough here.
-  it('every derived path is recognised by createAuthRoutes, and a lookalike path outside the list is not', async () => {
+  // Each path, under the zone's basePath, must be recognised by createAuthRoutes (a 405 on the
+  // wrong method, never a 404), and a lookalike path must still 404. Only `runtime.basePath` is
+  // read before routes.ts's method dispatch, so a partial fixture is enough here.
+  it('every path, under the basePath, is recognised by createAuthRoutes, and a lookalike is not', async () => {
     const fakeRuntime = { basePath: '/iam' } as unknown as AuthRuntime;
     const routes = createAuthRoutes(fakeRuntime);
 
-    for (const path of authRoutePaths({ basePath: '/iam' })) {
+    for (const path of authRoutePaths()) {
       const wrongMethod = path.endsWith('/logout') ? 'GET' : 'POST';
-      const res = await routes.handle(new Request(`https://rp.example.com${path}`, { method: wrongMethod }));
+      const res = await routes.handle(new Request(`https://rp.example.com/iam${path}`, { method: wrongMethod }));
       expect(res.status).toBe(405);
     }
 
@@ -174,17 +187,13 @@ describe('the dynamic-import/require backstop is not vacuous', () => {
 // with no handler, or a handler with no suffix, fails typecheck.
 // ---------------------------------------------------------------------------------------------
 describe('the shared route table (SMA-626 § 3)', () => {
-  it('authRoutePaths is exactly the table mapped over basePath', () => {
-    expect(authRoutePaths({ basePath: '/iam' })).toEqual(AUTH_ROUTE_SUFFIXES.map((s) => `/iam${s}`));
+  it('authRoutePaths is exactly the table, basePath-relative', () => {
+    expect(authRoutePaths()).toEqual([...AUTH_ROUTE_SUFFIXES]);
   });
 
   it('holds four suffixes, each starting with /auth/', () => {
     expect(AUTH_ROUTE_SUFFIXES).toHaveLength(4);
     for (const suffix of AUTH_ROUTE_SUFFIXES) expect(suffix.startsWith('/auth/')).toBe(true);
-  });
-
-  it('works for a root-mounted zone, where basePath is the empty string', () => {
-    expect(authRoutePaths({ basePath: '' })).toEqual(['/auth/login', '/auth/callback', '/auth/logout', '/auth/logout/callback']);
   });
 
   // THE BACKSTOP. The Record is the primary control, but a hand-written `if (pathname === ...)`
