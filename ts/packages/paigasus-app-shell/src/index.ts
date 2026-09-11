@@ -12,3 +12,5 @@
 // tests/structure/source-shape.test.ts pins both rules.
 export { ZoneConfigError, ZoneLinkError, ZoneProviderMissingError } from './zone/errors';
 export { resolveZone, type ZoneMap, type ZoneTarget } from './zone/resolve';
+export { ZoneProvider, useZone, type ZoneContextValue, type ZoneProviderProps } from './zone/context';
+export { ZoneLink, type ZoneLinkProps } from './zone/zone-link';
