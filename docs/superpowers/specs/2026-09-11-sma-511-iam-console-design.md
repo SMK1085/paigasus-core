@@ -789,6 +789,9 @@ Linear issues, made on 2026-09-11 after the spec was approved:
 - The `authInterrupts` fallback (§ 6.2) and the correlation-id holder fallback (§ 6.2).
 - `mayI()` fails open, so an IAM outage shows buttons that IAM then denies.
 - The e2e tier runs one zone (§ 9.4).
+- The console layout calls `myScopes()` on every console page for the switcher (§ 5.4). That is
+  one `Introspect`, one `ListRoleGrants` and up to 50 tenancy reads per render. The cost is not
+  measured. If it is too slow, a short-lived per-session cache is the next step.
 - If the wasm spike fails (D6), `lib/prn.ts` is an ADR-0005 exception, held to the kernel by the
   parity corpus. The napi packaging defect (`files` excludes `*.node`) stays open for any Node
   consumer of `@paigasus/kernel`, as SMA-634.
