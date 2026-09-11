@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import { Capability, CapabilitySchema } from './generated/paigasus/common/v1/service_info_pb.js';
+import { Capability, CapabilitySchema } from './generated/paigasus/common/v1/service_info_pb';
 
 const PREFIX = 'CAPABILITY_';
 

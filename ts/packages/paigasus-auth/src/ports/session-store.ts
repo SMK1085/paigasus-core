@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import type { SessionRecord } from '../core/session.js';
+import type { SessionRecord } from '../core/session';
 
 export interface LoginTransaction {
   codeVerifier: string;

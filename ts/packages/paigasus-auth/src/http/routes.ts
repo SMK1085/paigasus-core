@@ -23,15 +23,15 @@
 // an HTTP response (an error page, § 10 of the design doc) is a caller concern — this package does
 // not decide that here, matching how core/single-flight.ts lets its own AuthError subclasses
 // propagate rather than swallowing them into a "safe" return value.
-import type { OidcTokens } from '../adapters/oidc.js';
-import { hashSecret, newSessionId, newTransactionId, newTransactionSecret, secretMatchesHash } from '../core/ids.js';
-import { validateReturnTo } from '../core/return-to.js';
-import { CallbackRejected } from '../core/errors.js';
-import type { SessionRecord } from '../core/session.js';
-import { sidTag } from '../ports/logger.js';
-import type { AuthRuntime } from '../runtime.js';
-import { SESSION_COOKIE, TXN_COOKIE_PREFIX, clearCookie, readCookies, serializeCookie, txnCookieName } from './cookies.js';
-import { AUTH_ROUTE_SUFFIXES, type AuthRouteSuffix } from './route-table.js';
+import type { OidcTokens } from '../adapters/oidc';
+import { hashSecret, newSessionId, newTransactionId, newTransactionSecret, secretMatchesHash } from '../core/ids';
+import { validateReturnTo } from '../core/return-to';
+import { CallbackRejected } from '../core/errors';
+import type { SessionRecord } from '../core/session';
+import { sidTag } from '../ports/logger';
+import type { AuthRuntime } from '../runtime';
+import { SESSION_COOKIE, TXN_COOKIE_PREFIX, clearCookie, readCookies, serializeCookie, txnCookieName } from './cookies';
+import { AUTH_ROUTE_SUFFIXES, type AuthRouteSuffix } from './route-table';
 
 /** Design doc § 9.3: 10 minutes. */
 const TXN_TTL_MS = 10 * 60 * 1000;

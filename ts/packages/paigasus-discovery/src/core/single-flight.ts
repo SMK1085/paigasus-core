@@ -20,11 +20,11 @@
 //     re-reading immediately before the write would make the compare-and-set trivially agree
 //     with whatever is already there and defeat the fence.
 
-import { RECORD_VERSION, isFresh, toState, type CacheRecord, type Timings } from './record.js';
-import type { ProbeOutcome } from '../probe.js';
-import type { DescriptorCache } from '../ports/cache.js';
-import type { DiscoveryEventFields, DiscoveryEventName, DiscoveryLogger } from '../ports/logger.js';
-import type { DegradedReason, ServiceState } from '../types.js';
+import { RECORD_VERSION, isFresh, toState, type CacheRecord, type Timings } from './record';
+import type { ProbeOutcome } from '../probe';
+import type { DescriptorCache } from '../ports/cache';
+import type { DiscoveryEventFields, DiscoveryEventName, DiscoveryLogger } from '../ports/logger';
+import type { DegradedReason, ServiceState } from '../types';
 
 export type ResolveDeps = {
   readonly cache: DescriptorCache;

@@ -233,7 +233,7 @@ export const boundaryRules = [
           '../next/**',
         ],
         message:
-          '@paigasus/auth/client is React-only and must never reach the server surface — it would put a token in a browser bundle (AC 5). Import the shared vocabulary from ./session-view.js only.',
+          '@paigasus/auth/client is React-only and must never reach the server surface — it would put a token in a browser bundle (AC 5). Import the shared vocabulary from ./session-view only.',
       },
     ]),
   },
@@ -253,11 +253,11 @@ export const boundaryRules = [
           './ports/session-store',
           './ports/session-store.js',
           './next/**',
-          // NOT './http/**' — src/middleware.ts legitimately imports './http/cookies.js' for
-          // the cookie-presence check ADR-0017 decision 7 actually authorizes. What must stay
-          // banned is the composition-root surface, './http/routes.js', which pulls in the full
-          // session-resolution machinery (openid-client, the store) that middleware must never
-          // reach.
+          // NOT './http/**' — src/middleware.ts legitimately imports './http/cookies' (it wrote
+          // './http/cookies.js' until SMA-511; extensionless since) for the cookie-presence check
+          // ADR-0017 decision 7 actually authorizes. What must stay banned is the composition-root
+          // surface, './http/routes' (both spellings are listed), which pulls in the full
+          // session-resolution machinery (openid-client, the store) that middleware must never reach.
           './http/routes',
           './http/routes.js',
           './runtime',

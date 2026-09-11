@@ -2,7 +2,7 @@
 //
 // Gap 2 (task 12, escalated from task 11's review): task 11 found that the client boundary's
 // eslint deny group listed './runtime' and './config' — specifiers that never matched anything,
-// because this codebase suffixes relative imports with `.js` (`./runtime.js`). Those two entries
+// because this codebase then wrote relative imports with `.js` (`./runtime.js`; src/ is extensionless since SMA-511). Those two entries
 // were the SOLE nominal defence against src/client.ts reaching src/runtime.ts, the composition
 // root that pulls in openid-client, the Redis adapter, and the claims resolver. The eslint rule
 // has since been fixed, but the episode showed src/client.ts had no STRUCTURAL backstop the way

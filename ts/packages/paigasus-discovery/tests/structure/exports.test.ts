@@ -43,7 +43,7 @@ function firstStatementIsUseClient(rel: string): boolean {
  */
 const CLIENT_GRAPH: Readonly<Record<string, readonly string[]>> = {
   'src/client.ts': ['./core/outcome', './disabled'],
-  'src/disabled.tsx': ['./types.js', 'react'],
+  'src/disabled.tsx': ['./types', 'react'],
   'src/core/outcome.ts': ['../types', './service-of'],
   'src/core/service-of.ts': [],
 };

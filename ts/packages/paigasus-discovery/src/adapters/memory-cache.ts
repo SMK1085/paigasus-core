@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
-import { parseRecord, type CacheRecord } from '../core/record.js';
-import type { DescriptorCache } from '../ports/cache.js';
+import { parseRecord, type CacheRecord } from '../core/record';
+import type { DescriptorCache } from '../ports/cache';
 
 type Entry = { readonly raw: string; readonly expiresAt: number };
 type Lock = { readonly token: string; readonly expiresAt: number };

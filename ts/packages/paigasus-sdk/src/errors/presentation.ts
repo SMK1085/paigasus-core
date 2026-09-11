@@ -12,7 +12,7 @@
 // demanding an entry for it would make the table 58 keys rather than 57.
 import { ErrorReason } from '@paigasus/proto';
 
-import type { Presentation } from './types.js';
+import type { Presentation } from './types';
 
 /** `'from-transport'` means "take the transport status table's answer", not "no opinion". */
 export type PresentationEntry = Presentation | 'from-transport';

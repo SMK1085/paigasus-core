@@ -16,18 +16,18 @@
 // `authEnvShape` (the env shape an app composes into `@paigasus/next-config`'s
 // `defineRuntimeConfig`), and every port and adapter.
 import 'server-only';
-import { CallbackRejected } from './core/errors.js';
-import { createAuthRoutes, type AuthRoutes } from './http/routes.js';
-import type { AuthRuntime } from './runtime.js';
+import { CallbackRejected } from './core/errors';
+import { createAuthRoutes, type AuthRoutes } from './http/routes';
+import type { AuthRuntime } from './runtime';
 
-export { createAuthRuntime, getAuthRuntime } from './runtime.js';
-export type { AuthRuntime, ComposedConfig, CreateAuthRuntimeDeps } from './runtime.js';
+export { createAuthRuntime, getAuthRuntime } from './runtime';
+export type { AuthRuntime, ComposedConfig, CreateAuthRuntimeDeps } from './runtime';
 
 export { createAuthRoutes };
 export type { AuthRoutes };
 
-export { getSession, requireSession } from './next/get-session.js';
-export type { RequireSessionOptions } from './next/get-session.js';
+export { getSession, requireSession } from './next/get-session';
+export type { RequireSessionOptions } from './next/get-session';
 
 /**
  * Builds the same four routes as `createAuthRoutes`, mounted as a single Next route handler
@@ -80,30 +80,30 @@ export function createAuthRouteHandler(runtime: AuthRuntime): AuthRoutes['handle
   };
 }
 
-export { SESSION_VIEW_KEYS, toSessionView } from './core/session.js';
-export type { SessionRecord, SessionView, SessionViewKey } from './core/session.js';
+export { SESSION_VIEW_KEYS, toSessionView } from './core/session';
+export type { SessionRecord, SessionView, SessionViewKey } from './core/session';
 
-export type { ResolvedSession } from './core/single-flight.js';
+export type { ResolvedSession } from './core/single-flight';
 
-export { authEnvShape } from './config.js';
-export type { AuthEnv } from './config.js';
+export { authEnvShape } from './config';
+export type { AuthEnv } from './config';
 
-export { AuthConfigError, AuthError, SessionStoreUnavailable } from './core/errors.js';
+export { AuthConfigError, AuthError, SessionStoreUnavailable } from './core/errors';
 export { CallbackRejected };
 
 // Ports.
-export type { LoginTransaction, SessionStore } from './ports/session-store.js';
-export type { IdTokenClaims, Membership, PrincipalResolver, ResolvedPrincipal, RoleGrantRef } from './ports/principal-resolver.js';
-export { sidTag } from './ports/logger.js';
-export type { AuthEventFields, AuthEventName, AuthLogger } from './ports/logger.js';
+export type { LoginTransaction, SessionStore } from './ports/session-store';
+export type { IdTokenClaims, Membership, PrincipalResolver, ResolvedPrincipal, RoleGrantRef } from './ports/principal-resolver';
+export { sidTag } from './ports/logger';
+export type { AuthEventFields, AuthEventName, AuthLogger } from './ports/logger';
 
 // Adapters.
-export { MemorySessionStore } from './adapters/memory-store.js';
-export { createRedisSessionStore } from './adapters/redis-store.js';
-export type { CreateRedisSessionStoreOptions } from './adapters/redis-store.js';
-export { claimsPrincipalResolver } from './adapters/claims-resolver.js';
-export { noopLogger } from './adapters/noop-logger.js';
-export { createOidcClient } from './adapters/oidc.js';
+export { MemorySessionStore } from './adapters/memory-store';
+export { createRedisSessionStore } from './adapters/redis-store';
+export type { CreateRedisSessionStoreOptions } from './adapters/redis-store';
+export { claimsPrincipalResolver } from './adapters/claims-resolver';
+export { noopLogger } from './adapters/noop-logger';
+export { createOidcClient } from './adapters/oidc';
 export type {
   AuthorizationCodeGrantParams,
   AuthorizationRequest,
@@ -113,4 +113,4 @@ export type {
   OidcClient,
   OidcTokens,
   RefreshedTokens as OidcRefreshedTokens,
-} from './adapters/oidc.js';
+} from './adapters/oidc';

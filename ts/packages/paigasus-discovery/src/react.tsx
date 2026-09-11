@@ -2,13 +2,13 @@
 import 'server-only';
 
 import type { ReactElement, ReactNode } from 'react';
-import { CapabilityDisabled } from './disabled.js';
-import { serviceOf } from './core/state.js';
-import { capabilityOutcome } from './core/outcome.js';
-import type { Discovery } from './server.js';
-import type { CapabilityKey, DegradedReason } from './types.js';
+import { CapabilityDisabled } from './disabled';
+import { serviceOf } from './core/state';
+import { capabilityOutcome } from './core/outcome';
+import type { Discovery } from './server';
+import type { CapabilityKey, DegradedReason } from './types';
 
-export { CapabilityDisabled } from './disabled.js';
+export { CapabilityDisabled } from './disabled';
 
 export type CapabilityProps = {
   readonly discovery: Discovery;

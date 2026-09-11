@@ -4,7 +4,7 @@
 // reached through ./errors, so it carries no guard of its own.
 import { Code } from '@connectrpc/connect';
 
-import type { Presentation, TransportCause } from './types.js';
+import type { Presentation, TransportCause } from './types';
 
 /**
  * gRPC `Code` -> `Presentation`. Total by falling through to `generic`.

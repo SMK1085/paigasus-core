@@ -31,16 +31,16 @@
 // a module-level promise, keyed on nothing (there is exactly one configuration per process), and
 // resets on failure so a misconfigured-at-boot process can recover once the config is fixed and
 // the container is asked to try again.
-import { createOidcClient, type OidcClient } from './adapters/oidc.js';
-import { claimsPrincipalResolver } from './adapters/claims-resolver.js';
-import { MemorySessionStore } from './adapters/memory-store.js';
-import { noopLogger } from './adapters/noop-logger.js';
-import { createRedisSessionStore } from './adapters/redis-store.js';
-import type { AuthEnv } from './config.js';
-import { AuthConfigError } from './core/errors.js';
-import type { AuthLogger } from './ports/logger.js';
-import type { PrincipalResolver } from './ports/principal-resolver.js';
-import type { SessionStore } from './ports/session-store.js';
+import { createOidcClient, type OidcClient } from './adapters/oidc';
+import { claimsPrincipalResolver } from './adapters/claims-resolver';
+import { MemorySessionStore } from './adapters/memory-store';
+import { noopLogger } from './adapters/noop-logger';
+import { createRedisSessionStore } from './adapters/redis-store';
+import type { AuthEnv } from './config';
+import { AuthConfigError } from './core/errors';
+import type { AuthLogger } from './ports/logger';
+import type { PrincipalResolver } from './ports/principal-resolver';
+import type { SessionStore } from './ports/session-store';
 
 /**
  * What createAuthRuntime actually receives: `authEnvShape`'s keys, parsed, PLUS the two zone keys

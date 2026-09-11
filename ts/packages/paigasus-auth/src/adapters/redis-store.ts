@@ -17,10 +17,10 @@
 // `{ keys, arguments }` object on `eval`.
 import { createClient } from 'redis';
 import type { SetOptions } from 'redis';
-import type { SessionRecord } from '../core/session.js';
-import { isSessionRecord } from '../core/session.js';
-import { SessionStoreUnavailable } from '../core/errors.js';
-import type { LoginTransaction, SessionStore } from '../ports/session-store.js';
+import type { SessionRecord } from '../core/session';
+import { isSessionRecord } from '../core/session';
+import { SessionStoreUnavailable } from '../core/errors';
+import type { LoginTransaction, SessionStore } from '../ports/session-store';
 
 const SET_CAS = `
 local cur = redis.call('GET', KEYS[1])

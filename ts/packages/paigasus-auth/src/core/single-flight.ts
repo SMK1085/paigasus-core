@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
-import { RefreshRejected } from './errors.js';
-import { newLockToken } from './ids.js';
-import { shouldRefresh } from './refresh-policy.js';
-import type { SessionRecord } from './session.js';
-import type { AuthLogger } from '../ports/logger.js';
-import { sidTag } from '../ports/logger.js';
-import type { SessionStore } from '../ports/session-store.js';
+import { RefreshRejected } from './errors';
+import { newLockToken } from './ids';
+import { shouldRefresh } from './refresh-policy';
+import type { SessionRecord } from './session';
+import type { AuthLogger } from '../ports/logger';
+import { sidTag } from '../ports/logger';
+import type { SessionStore } from '../ports/session-store';
 
 export interface RefreshedTokens {
   accessToken: string;

@@ -1,17 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
-import './server-guard.js';
+import './server-guard';
 
 import { createClient, createContextValues } from '@connectrpc/connect';
 import type { CallOptions, Client } from '@connectrpc/connect';
 import type { DescService } from '@bufbuild/protobuf';
 import { AuditService, AuthnService, AuthorizationService, OutboxService, ServiceAccountService, TenancyService, UserService } from '@paigasus/proto/iam';
 
-import { authContextKey, getTransport } from './transport.js';
-import type { Auth, TransportOptions } from './transport.js';
+import { authContextKey, getTransport } from './transport';
+import type { Auth, TransportOptions } from './transport';
 
 export { AuditService, AuthnService, AuthorizationService, OutboxService, ServiceAccountService, TenancyService, UserService };
-export { disposeTransports } from './transport.js';
-export type { Auth, TransportOptions } from './transport.js';
+export { disposeTransports } from './transport';
+export type { Auth, TransportOptions } from './transport';
 
 /**
  * Bind an `Auth` to every call a client makes.

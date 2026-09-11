@@ -6,7 +6,7 @@ import reactPlugin from '@eslint-react/eslint-plugin';
 import reactHooks from 'eslint-plugin-react-hooks';
 import jsxA11y from 'eslint-plugin-jsx-a11y';
 import nextPlugin from '@next/eslint-plugin-next';
-import { boundaryRules } from '@paigasus/next-config/eslint';
+import { boundaryRules, sourceRules } from '@paigasus/next-config/eslint';
 
 export default tseslint.config(
   // NOTE: adding 'packages/**' or 'apps/**' here switches every boundary block off for real code.
@@ -69,4 +69,8 @@ export default tseslint.config(
   // that package's moon.yml lists /ts/eslint.config.js among its test inputs so the assertion is
   // reachable on the PR that removes it.
   ...boundaryRules,
+  // Source hygiene (SMA-511 spec § 7.2): no `.js` relative specifier in packages/*/src, because
+  // Turbopack does not resolve it to a `.ts` file. A SEPARATE export, never a boundaryRules block —
+  // see its doc comment. paigasus-next-config-ts:test asserts this spread too.
+  ...sourceRules,
 );

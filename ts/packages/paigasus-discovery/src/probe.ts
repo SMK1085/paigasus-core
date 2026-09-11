@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
-import { reasonForStatus, reasonForThrown } from './core/reasons.js';
-import type { DegradedReason, ServiceDescriptor } from './types.js';
+import { reasonForStatus, reasonForThrown } from './core/reasons';
+import type { DegradedReason, ServiceDescriptor } from './types';
 
 export type ProbeOutcome = { readonly ok: true; readonly descriptor: ServiceDescriptor } | { readonly ok: false; readonly reason: DegradedReason };
 

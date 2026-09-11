@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import { DEGRADED_REASONS, type DegradedReason, type ServiceDescriptor, type ServiceState } from '../types.js';
+import { DEGRADED_REASONS, type DegradedReason, type ServiceDescriptor, type ServiceState } from '../types';
 
 /**
  * Bumped whenever CacheRecord's shape or DegradedReason's vocabulary changes.

@@ -19,8 +19,8 @@
 // middleware decide who is authenticated — is the bug class this file exists to avoid.
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
-import { SESSION_COOKIE } from './http/cookies.js';
-import { AUTH_ROUTE_SUFFIXES } from './http/route-table.js';
+import { SESSION_COOKIE } from './http/cookies';
+import { AUTH_ROUTE_SUFFIXES } from './http/route-table';
 
 export interface AuthMiddlewareOptions {
   /**

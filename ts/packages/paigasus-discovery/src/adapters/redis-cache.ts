@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import type { RedisClientType } from 'redis';
-import { parseRecord, type CacheRecord } from '../core/record.js';
-import type { DescriptorCache } from '../ports/cache.js';
+import { parseRecord, type CacheRecord } from '../core/record';
+import type { DescriptorCache } from '../ports/cache';
 
 /**
  * Compare-and-set on `rev`. Invariant 5: a lock's compare-and-delete protects the LOCK, never the

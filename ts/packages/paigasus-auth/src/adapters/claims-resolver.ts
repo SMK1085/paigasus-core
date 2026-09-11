@@ -11,7 +11,7 @@
 //
 // grantsAvailable: false is NOT the same as "no grants". can() must treat it as unknown and fail
 // OPEN, or a console gating navigation on it renders with no navigation at all.
-import type { PrincipalResolver, ResolvedPrincipal } from '../ports/principal-resolver.js';
+import type { PrincipalResolver, ResolvedPrincipal } from '../ports/principal-resolver';
 
 export const claimsPrincipalResolver: PrincipalResolver = {
   resolve({ idTokenClaims }): Promise<ResolvedPrincipal> {

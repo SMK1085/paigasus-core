@@ -32,4 +32,4 @@ export function isKnownCapability(key: string): boolean {
 // serviceOf lives in the import-free leaf ./service-of.ts (SMA-510): core/outcome.ts needs it and is
 // reachable from the client-safe ./client entry, while THIS file imports @paigasus/proto as a value.
 // Re-exported here, so every existing importer is unchanged.
-export { serviceOf } from './service-of.js';
+export { serviceOf } from './service-of';

@@ -31,12 +31,12 @@
 // `SessionStoreUnavailable` alone.
 import { cookies } from 'next/headers';
 import { redirect } from 'next/navigation';
-import { SessionStoreUnavailable } from '../core/errors.js';
-import { validateReturnTo } from '../core/return-to.js';
-import { resolveSession, type ResolvedSession } from '../core/single-flight.js';
-import { SESSION_COOKIE } from '../http/cookies.js';
-import { sidTag } from '../ports/logger.js';
-import type { AuthRuntime } from '../runtime.js';
+import { SessionStoreUnavailable } from '../core/errors';
+import { validateReturnTo } from '../core/return-to';
+import { resolveSession, type ResolvedSession } from '../core/single-flight';
+import { SESSION_COOKIE } from '../http/cookies';
+import { sidTag } from '../ports/logger';
+import type { AuthRuntime } from '../runtime';
 
 /**
  * Read the current session, if any. NEVER redirects and NEVER throws — every failure mode (no

@@ -17,4 +17,4 @@
 // That distinction matters: a passthrough would make the generated file layout
 // public API, so moving a generated directory would become a breaking change for
 // consumers. Here the layout stays free to move behind this barrel.
-export * from './generated/paigasus/iam/v1/iam_pb.js';
+export * from './generated/paigasus/iam/v1/iam_pb';
