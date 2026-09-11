@@ -20,9 +20,10 @@
 - Relative imports in any file that Next compiles (`ts/packages/*/src/**`, `ts/apps/iam-console/{app,lib}/**`, `proxy.ts`) are extensionless. From Task 3, the rule `paigasus/no-js-relative-specifier` enforces this for packages.
 - No `NEXT_PUBLIC_` anywhere in `ts/`. No `env:` in the Next config (the `createNextConfig` factory owns it).
 - `redirect()` in a page or layout takes a basePath-relative path (`'/orgs'`, never `'/iam/orgs'`); a raw `Response` `Location` from a route handler is passed through unchanged, so it must carry the basePath.
-- The app never imports `@paigasus/proto` outside `tests/support/**`. `proxy.ts` imports only `@paigasus/auth/middleware` and `lib/correlation-header.ts`.
+- The app never imports `@paigasus/proto` outside `tests/support/**`. `proxy.ts` has value imports only from `next/server` (`NextResponse`), `@paigasus/auth/middleware` and `lib/correlation-header.ts`; a type import from `next/server` is also allowed. `lib/correlation-header.ts` imports only `server-only`. Task 7's lint rule is a deny list and cannot enforce "only", so the reviewer checks these imports.
 - Do not add a `loading.tsx` under `app/(console)/`: it starts streaming before `forbidden()` runs, and the HTTP 403 status is then lost.
 - `msw` is pinned at `2.15.0` (released 2026-07-08; pnpm 11 `minimumReleaseAge` is 24 hours), and `allowBuilds` has `msw: false`.
+- Every task that creates or edits files under `ts/` runs `pnpm -C ts exec prettier --write <those files>` (paths relative to `ts/`) before its fmt check and before its commit.
 - Functional style in Next and React code; no classes except `Error` subclasses.
 - A per-project Moon task does not run the repo gates. Task 23 runs the full CI target list from `CLAUDE.md` before the push.
 - Prose in code comments, READMEs and commit messages follows ASD-STE100 Simplified Technical English.
@@ -185,11 +186,18 @@ with:
   - `iam-console` (`@paigasus/iam-console`) — Next.js 16 (App Router) console zone for IAM, mounted at `/iam`
 ```
 
-Line 33 already reads `moon run iam-console-ts:build` after Step 3. Prettier aligns Markdown tables, so format the two changed READMEs:
+Line 33 already reads `moon run iam-console-ts:build` after Step 3. Prettier aligns Markdown tables, and the shorter name can change how Prettier wraps a line. So format every `ts/` file that Step 3 and this step edit (the Global Constraints):
 
 ```bash
-pnpm -C ts exec prettier --write README.md packages/paigasus-ui/README.md
+pnpm -C ts exec prettier --write README.md apps/iam-console/app/globals.css apps/iam-console/moon.yml \
+  apps/iam-console/package.json apps/iam-console/tests/standalone-runtime.test.ts eslint.config.js \
+  packages/paigasus-app-shell/moon.yml packages/paigasus-auth/tests/config.test.ts packages/paigasus-discovery/moon.yml \
+  packages/paigasus-next-config/tests/boundaries.test.ts packages/paigasus-sdk/moon.yml packages/paigasus-ui/README.md \
+  packages/paigasus-ui/moon.yml packages/paigasus-ui/src/components/table.tsx packages/paigasus-ui/tsconfig.json \
+  packages/paigasus-ui/vitest.config.ts
 ```
+
+`ts/pnpm-lock.yaml` is not in the list: `ts/.prettierignore` excludes it, and `pnpm install` writes it in Step 5.
 
 - [ ] **Step 5: Update the lockfile**
 
@@ -198,7 +206,7 @@ pnpm -C ts install --no-frozen-lockfile
 grep -n '^  apps/' ts/pnpm-lock.yaml
 ```
 
-Expected: the grep prints exactly one line, `  apps/iam-console:`. `git diff --stat ts/pnpm-lock.yaml` shows only the importer rename and the removed `apps/paigasus-docs` block (about 10 lines).
+Expected: the grep prints exactly one line, `210:  apps/iam-console:` (`-n` adds the line number). `git diff --stat ts/pnpm-lock.yaml` shows only the importer rename and the removed `apps/paigasus-docs` block (about 10 lines).
 
 - [ ] **Step 6: Prove that no old name remains**
 
@@ -230,7 +238,7 @@ Use the system bash. Bash 5.3.15 on this machine deadlocks on this script.
 /bin/bash ci/affected-graph/run.sh
 ```
 
-Expected: `PASS  [ui->console]`, `PASS  [ui-components->console]`, and the last line `== affected-graph cascade intact ==`.
+Expected: a line that starts `PASS  ui->console            -> ` and a line that starts `PASS  ui-components->console -> `, each followed by the sorted task ids, and the last line `== affected-graph cascade intact ==`. `run.sh:113` prints a PASS line as `printf 'PASS  %-22s -> %s\n'`: the label has no brackets and is padded to 22 characters. Only a `FAIL  [label]` line has brackets.
 
 - [ ] **Step 9: Commit**
 
@@ -385,8 +393,21 @@ describe('sourceRules scope', () => {
   it('is a separate export, not a boundaryRules block', () => {
     // A `packages/*/src` block inside boundaryRules would fail the reverse liveness loop in
     // tests/boundaries.test.ts, which derives a BOUNDARY_SCOPES key from every block's files[0].
-    const boundaryNames = boundaryRules.map((entry) => entry.name);
-    for (const entry of sourceRules) expect(boundaryNames).not.toContain(entry.name);
+    // So assert on the real objects: sourceRules holds exactly the one block with the rule, and no
+    // boundaryRules block scopes to packages/*/ or turns the rule on. Move the block into
+    // boundaryRules, change its glob, or set the rule to 'warn', and this case fails.
+    expect(sourceRules).toHaveLength(1);
+    const [block] = sourceRules;
+    expect(block?.name).toBe('paigasus/source/no-js-relative-specifier');
+    expect(block?.files).toEqual(['packages/*/src/**/*.{ts,tsx,mts,cts}']);
+    expect(block?.ignores).toEqual(['**/*.test.*', '**/tests/**']);
+    expect(block?.rules).toEqual({ 'paigasus/no-js-relative-specifier': 'error' });
+    expect(block?.plugins?.['paigasus']?.rules?.['no-js-relative-specifier']).toBe(noJsRelativeSpecifier);
+    expect(boundaryRules.length).toBeGreaterThan(0);
+    for (const entry of boundaryRules) {
+      expect(String(entry.files?.[0]), `${entry.name} scopes to packages/*/`).not.toMatch(/^packages\/\*\//);
+      expect(Object.keys(entry.rules ?? {}), `${entry.name} turns the source rule on`).not.toContain('paigasus/no-js-relative-specifier');
+    }
   });
 });
 ```
@@ -398,7 +419,7 @@ export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
 pnpm -C ts/packages/paigasus-next-config exec vitest run tests/no-js-relative-specifier.test.ts
 ```
 
-Expected: FAIL. `noJsRelativeSpecifier` and `sourceRules` are not exported yet, so RuleTester throws a TypeError on an `undefined` rule and every `sourceRules` case fails on `sourceRules is not iterable`.
+Expected: FAIL at collection. `noJsRelativeSpecifier` and `sourceRules` are not exported yet, so `noJsRelativeSpecifier` is `undefined`. `ruleTester.run` runs at the top level of the module, and RuleTester's `assertRule` throws an `AssertionError`: `` Rule paigasus/no-js-relative-specifier must be an object with a `create` method ``. vitest fails the whole file, and no case runs.
 
 - [ ] **Step 3: Write the rule and the export**
 
@@ -556,7 +577,9 @@ All packages use `moduleResolution: bundler` (`ts/tsconfig.base.json:4`), so tsc
 - Modify: `ts/packages/paigasus-sdk/tests/server-guard.test.ts:19-25,36,76-77`
 - Modify: `ts/packages/paigasus-sdk/src/errors.ts:3-5` and `ts/packages/paigasus-sdk/src/errors/types.ts:3-5` (comments that quote the guard import)
 - Modify: `ts/packages/paigasus-discovery/tests/structure/exports.test.ts:46`
-- Modify: `ts/packages/paigasus-next-config/tests/boundaries.test.ts` — line 8 (import), new DENIED rows after line 110, new tests inside the describe at lines 270–294
+- Modify: `ts/packages/paigasus-next-config/tests/boundaries.test.ts` — line 8 (import), the comments at lines 92–96 and 102–104, new DENIED rows after line 110, new tests inside the describe at lines 270–294
+- Modify: `ts/packages/paigasus-next-config/src/eslint.mjs:236` (the `auth-client` message) and `:256-260` (a comment). These are lines 233 and 253–257 before Task 2 added three header lines.
+- Modify: `ts/packages/paigasus-auth/tests/structure/import-graph.test.ts:5` and `ts/packages/paigasus-auth/tests/support/import-graph.ts:42` (comments)
 - Modify: `ts/eslint.config.js:9` and `:65-71`
 
 **Interfaces:**
@@ -853,7 +876,7 @@ git diff --stat -- ts/packages/*/src
 
 Expected: the second run prints `total: 0 (dry run)` over every package. `git diff --stat` lists the 41 files and no others. Each changed line differs only by a removed `.js`, except where prettier joins a wrapped import that now fits in 200 columns.
 
-- [ ] **Step 9: Update the three places that pin the old form**
+- [ ] **Step 9: Update the places that pin or prescribe the old form**
 
 1. `ts/packages/paigasus-sdk/tests/server-guard.test.ts`. Replace lines 19–25:
 
@@ -912,6 +935,100 @@ with:
 
 ```ts
   'src/disabled.tsx': ['./types', 'react'],
+```
+
+4. One lint message and five comments still tell a developer that the code base always writes `.js`. The new rule rejects that form in `src/`, so change them. Each replacement keeps the line count of the old text, so the line numbers that Step 10, Step 11 and later tasks cite stay correct.
+
+In `ts/packages/paigasus-next-config/src/eslint.mjs:236` (the `paigasus/boundaries/auth-client` message), replace:
+
+```js
+          '@paigasus/auth/client is React-only and must never reach the server surface — it would put a token in a browser bundle (AC 5). Import the shared vocabulary from ./session-view.js only.',
+```
+
+with:
+
+```js
+          '@paigasus/auth/client is React-only and must never reach the server surface — it would put a token in a browser bundle (AC 5). Import the shared vocabulary from ./session-view only.',
+```
+
+In the same file, lines 256–260 (the `paigasus/boundaries/auth-middleware` block), replace:
+
+```js
+          // NOT './http/**' — src/middleware.ts legitimately imports './http/cookies.js' for
+          // the cookie-presence check ADR-0017 decision 7 actually authorizes. What must stay
+          // banned is the composition-root surface, './http/routes.js', which pulls in the full
+          // session-resolution machinery (openid-client, the store) that middleware must never
+          // reach.
+```
+
+with:
+
+```js
+          // NOT './http/**' — src/middleware.ts legitimately imports './http/cookies' (it wrote
+          // './http/cookies.js' until SMA-511; extensionless since) for the cookie-presence check
+          // ADR-0017 decision 7 actually authorizes. What must stay banned is the composition-root
+          // surface, './http/routes' (both spellings are listed), which pulls in the full
+          // session-resolution machinery (openid-client, the store) that middleware must never reach.
+```
+
+In `ts/packages/paigasus-next-config/tests/boundaries.test.ts:92-96`, replace:
+
+```ts
+  // EXTENSION-BEARING. This codebase always suffixes relative imports with `.js` (a real file
+  // never writes `from './runtime'` — it writes `from './runtime.js'`), and no-restricted-imports
+  // matches the specifier AS WRITTEN. A bare `'./runtime'` pattern with no `.js` sibling and no
+  // glob matches nothing a real file would ever import — these four rows are what proved that
+  // (fix round 2).
+```
+
+with:
+
+```ts
+  // EXTENSION-BEARING. This codebase wrote `.js` on every relative import until SMA-511 (a real
+  // file wrote `from './runtime.js'`, never `from './runtime'`); package src/ is extensionless since.
+  // no-restricted-imports matches the specifier AS WRITTEN. A bare `'./runtime'` pattern with no `.js`
+  // sibling and no glob matched nothing a real file imported then — these four rows are what proved
+  // that (fix round 2). The SMA-511 rows below prove that the groups also match the extensionless form.
+```
+
+In the same file, lines 102–104, replace:
+
+```ts
+  // Four dead entries survived earlier in this branch because a bare './runtime' does not match
+  // the '.js'-suffixed specifier a real file would write — these use the `.js` form a real file
+  // in this codebase always writes, the same lesson the auth/client rows above already record.
+```
+
+with:
+
+```ts
+  // Four dead entries survived earlier in this branch because a bare './runtime' did not match
+  // the '.js'-suffixed specifier a real file wrote then — these use the `.js` form that real files
+  // wrote until SMA-511 (extensionless since), the same lesson the auth/client rows above record.
+```
+
+In `ts/packages/paigasus-auth/tests/structure/import-graph.test.ts:5`, replace:
+
+```ts
+// because this codebase suffixes relative imports with `.js` (`./runtime.js`). Those two entries
+```
+
+with:
+
+```ts
+// because this codebase then wrote relative imports with `.js` (`./runtime.js`; src/ is extensionless since SMA-511). Those two entries
+```
+
+In `ts/packages/paigasus-auth/tests/support/import-graph.ts:42`, replace:
+
+```ts
+/** Resolve a relative import specifier (repo convention: `.js` extension, real file is `.ts`/`.tsx`) to a file on disk. */
+```
+
+with:
+
+```ts
+/** Resolve a relative import specifier to a file on disk. src/ wrote `.js` until SMA-511 and is extensionless since; tests keep `.js`. The real file is `.ts`/`.tsx`. */
 ```
 
 - [ ] **Step 10: Run the package suites**
@@ -1009,8 +1126,9 @@ Replace lines 65–71 (the boundary comment and `...boundaryRules,`) with:
 
 ```bash
 pnpm -C ts/packages/paigasus-next-config exec vitest run tests/boundaries.test.ts
-pnpm -C ts exec prettier --write eslint.config.js packages/paigasus-next-config/tests/boundaries.test.ts packages/paigasus-sdk/tests/server-guard.test.ts packages/paigasus-sdk/src/errors.ts packages/paigasus-sdk/src/errors/types.ts packages/paigasus-discovery/tests/structure/exports.test.ts
-moon run paigasus-next-config-ts:test ts:lint ts:fmt --force
+pnpm -C ts exec prettier --write eslint.config.js packages/paigasus-next-config/tests/boundaries.test.ts packages/paigasus-sdk/tests/server-guard.test.ts packages/paigasus-sdk/src/errors.ts packages/paigasus-sdk/src/errors/types.ts packages/paigasus-discovery/tests/structure/exports.test.ts \
+  packages/paigasus-next-config/src/eslint.mjs packages/paigasus-auth/tests/structure/import-graph.test.ts packages/paigasus-auth/tests/support/import-graph.ts
+moon run paigasus-next-config-ts:test paigasus-auth-ts:test ts:lint ts:fmt --force
 ```
 
 Expected: all pass. `ts:lint` reports no `paigasus/no-js-relative-specifier` message. If it reports one, the file is under `packages/*/src` and the Step 8 script missed it (for example a new file); remove the extension there.
@@ -1031,7 +1149,9 @@ Expected: `docker ok`, then both tasks pass. The auth task starts `tests/e2e/fix
 ```bash
 git add ts/eslint.config.js ts/packages/paigasus-next-config/tests/boundaries.test.ts \
   ts/packages/paigasus-auth/src ts/packages/paigasus-sdk/src ts/packages/paigasus-discovery/src ts/packages/paigasus-proto/src \
-  ts/packages/paigasus-sdk/tests/server-guard.test.ts ts/packages/paigasus-discovery/tests/structure/exports.test.ts
+  ts/packages/paigasus-sdk/tests/server-guard.test.ts ts/packages/paigasus-discovery/tests/structure/exports.test.ts \
+  ts/packages/paigasus-next-config/src/eslint.mjs ts/packages/paigasus-auth/tests/structure/import-graph.test.ts \
+  ts/packages/paigasus-auth/tests/support/import-graph.ts
 git commit -F - <<'EOF'
 fix(ts): use extensionless relative imports in package sources (SMA-511)
 
@@ -1041,7 +1161,8 @@ All 162 relative specifiers in their src/ lose the .js suffix. Test files keep i
 
 ts/eslint.config.js now spreads sourceRules, so paigasus/no-js-relative-specifier holds the rule
 for packages/*/src, and a boundaries test pins the spread. The server-guard and client-graph tests
-now expect the extensionless form.
+now expect the extensionless form. The auth-client lint message and five comments no longer tell a
+developer to write .js.
 
 Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
 EOF
@@ -1272,7 +1393,7 @@ The plain-Node e2e fixture (`tests/e2e/fixture-server.ts`) does not use Next. It
 - Modify: `ts/packages/paigasus-auth/src/middleware.ts:25-92`
 - Modify: `ts/packages/paigasus-auth/src/next/get-session.ts:93-106`
 - Modify: `ts/packages/paigasus-auth/src/server.ts:18-81`
-- Modify: `ts/packages/paigasus-auth/src/http/routes.ts:122` (`handleLogin` returnTo) and `:204-211` (`handleCallback` currentUrl)
+- Modify: `ts/packages/paigasus-auth/src/http/routes.ts:120-122` (`handleLogin` returnTo, and the two line citations in the I3 comment above it) and `:204-207` (`handleCallback` currentUrl)
 - Modify: `ts/packages/paigasus-auth/README.md:105-157`
 - Modify tests: `tests/runtime.test.ts:30-34`, `tests/middleware.test.ts:22-90,176-188`, `tests/next/get-session.test.ts:66-84,164-178`, `tests/server.test.ts:28-46` + new describe, `tests/http/login.test.ts:35-58` + new cases, `tests/http/callback.test.ts:43-105` + new describe, `tests/http/logout.test.ts:130-146`
 - Create: `ts/packages/paigasus-auth/tests/http/route-handler.test.ts`
@@ -1339,7 +1460,7 @@ In `src/runtime.ts`, in `interface AuthRuntime`, after `oidc: OidcClient;` (line
   publicOrigin: string;
 ```
 
-In the object returned by `createAuthRuntime` (line 148, after `oidc,`), insert:
+In the object returned by `createAuthRuntime` (line 154 after the insert above, 148 before it; after `oidc,`), insert:
 
 ```ts
     publicOrigin: cfg.PAIGASUS_PUBLIC_ORIGIN,
@@ -1581,7 +1702,7 @@ Expected: PASS. The import-graph cases in the same file stay green (the middlewa
 
 - [ ] **Step 5: Write the failing `requireSession` tests**
 
-In `tests/next/get-session.test.ts`, replace lines 165–178 (the first two `it` of `describe('requireSession', …)`) with:
+In `tests/next/get-session.test.ts`, replace lines 166–179 (165–178 before Step 2's insert). These are the first two `it` of `describe('requireSession', …)`: from `it("calls next/navigation's redirect() to the login path…` to the end of `it('falls back to the zone root when returnTo is not a valid same-origin path', …)`. Line 165, `describe('requireSession', () => {`, stays. Replace the two `it` with:
 
 ```ts
   it("calls next/navigation's redirect() with the basePath-RELATIVE login path and a returnTo that keeps the basePath", async () => {
@@ -1663,7 +1784,7 @@ Expected: PASS.
 
 - [ ] **Step 7: Write the failing route-handler tests (routes mocked)**
 
-In `tests/server.test.ts`, replace the `runtime()` helper (lines 28–46, with the `publicOrigin` line from Step 2) with a version that takes overrides:
+In `tests/server.test.ts`, replace the `runtime()` helper (lines 28–47 after Step 2's `publicOrigin` insert; 28–46 before it) with a version that takes overrides:
 
 ```ts
 function runtime(overrides: Partial<AuthRuntime> = {}): AuthRuntime {
@@ -1747,7 +1868,7 @@ Run:
 pnpm -C ts/packages/paigasus-auth exec vitest run tests/server.test.ts
 ```
 
-Expected: FAIL on five new cases, because the handler still passes the request on unchanged — for example `expected 'http://0.0.0.0:3000/auth/callback?code=c&state=s' to be 'https://app.example.com/iam/auth/callback?code=c&state=s'`. `keeps the method, the headers and the body` passes already. The five existing cases pass.
+Expected: FAIL on five new cases, because the handler still passes the request on unchanged — for example `expected 'http://0.0.0.0:3000/auth/callback?code=c&state=s' to be 'https://app.example.com/iam/auth/callback?code=c&state=s'`. `keeps the method, the headers and the body` passes already. The seven existing cases pass (one `it`, four `it.each` rows, then two more `it`). Totals: 5 failed, 8 passed.
 
 - [ ] **Step 8: Rebuild the URL in `createAuthRouteHandler`**
 
@@ -1768,7 +1889,7 @@ import { createAuthRoutes, type AuthRoutes } from './http/routes';
 import type { AuthRuntime } from './runtime';
 ```
 
-Replace lines 32–81 (the doc comment and the whole `createAuthRouteHandler` function) with:
+Replace lines 33–82 (32–81 before the import edit above; the doc comment and the whole `createAuthRouteHandler` function, from its `/**` to its closing `}`) with:
 
 ```ts
 /** A `RequestInit` that can carry a streamed body: Node's `Request` needs `duplex: 'half'` for one. */
@@ -1872,14 +1993,14 @@ Run:
 pnpm -C ts/packages/paigasus-auth exec vitest run tests/server.test.ts
 ```
 
-Expected: PASS, 11 cases.
+Expected: PASS, 13 cases (the seven existing cases and the six new ones).
 
 - [ ] **Step 9: Write the failing `redirect_uri` tests**
 
-In `tests/http/callback.test.ts`:
+In `tests/http/callback.test.ts` (the line numbers below are for the file after Step 2 and after each earlier item of this step):
 
 1. After line 43 (`let grantCalls: number;`) add `let grantUrls: string[];`.
-2. In `countingOidc` (lines 60–63), replace the `authorizationCodeGrant` entry with:
+2. In `countingOidc` (lines 61–64 after item 1; 60–63 before it), replace the four-line `authorizationCodeGrant` entry with:
 
 ```ts
     authorizationCodeGrant: (params) => {
@@ -1889,8 +2010,8 @@ In `tests/http/callback.test.ts`:
     },
 ```
 
-3. In `beforeEach`, after `grantCalls = 0;` (line 74) add `grantUrls = [];`.
-4. Before `describe('route dispatch', …)` (line 436) add:
+3. In `beforeEach`, after `grantCalls = 0;` (line 76 after items 1 and 2; 74 before them) add `grantUrls = [];`.
+4. Before `describe('route dispatch', …)` (line 440 after Step 2 and items 1–3; 436 in the unchanged file) add:
 
 ```ts
 // SMA-511 spec § 7.1. openid-client sends the token request's `redirect_uri` as `currentUrl` with the
@@ -1934,7 +2055,7 @@ Expected: FAIL on the two new cases — `grantUrls` holds `http://0.0.0.0:3000/i
 
 - [ ] **Step 10: Build `currentUrl` from the redirect URI**
 
-In `src/http/routes.ts`, replace lines 204–211:
+In `src/http/routes.ts`, replace lines 204–207 (only these four lines; `codeVerifier`, `expectedState`, `expectedNonce` and `});` below them stay):
 
 ```ts
   let tokens: OidcTokens;
@@ -1970,21 +2091,28 @@ Expected: PASS, all cases.
 
 - [ ] **Step 11: Write the failing `returnTo` loop tests**
 
-In `tests/http/login.test.ts`, after the test `falls back to "/" (not "") on a root-mounted zone, i.e. basePath === ""` (ends at line 192), add:
+In `tests/http/login.test.ts`, after the test `falls back to "/" (not "") on a root-mounted zone, i.e. basePath === ""` (ends at line 193 after Step 2's insert; 192 before it), add:
 
 ```ts
   // SMA-511 spec § 6.4. validateReturnTo accepts any same-origin path, including this zone's own
   // auth routes. A crafted link with returnTo=/iam/auth/login would send the browser back into the
   // login after a successful callback — one loop per click.
-  it.each(['/iam/auth/login', '/iam/auth/login?returnTo=%2Fiam%2F', '/iam/auth/callback?code=x&state=y', '/iam/auth/logout', '/iam/auth/logout/callback'])(
-    'replaces a returnTo under the zone auth routes (%s) with the zone root',
-    async (raw) => {
-      const res = await createAuthRoutes(runtime).handle(loginRequest(`?returnTo=${encodeURIComponent(raw)}`));
-      const state = new URL(res.headers.get('location') ?? '').searchParams.get('state') ?? '';
-      const tx = await store.takeTransaction(state);
-      expect(tx?.returnTo).toBe('/iam/');
-    },
-  );
+  it.each([
+    '/iam/auth/login',
+    '/iam/auth/login?returnTo=%2Fiam%2F',
+    '/iam/auth/callback?code=x&state=y',
+    '/iam/auth/logout',
+    '/iam/auth/logout/callback',
+    // Dot segments. validateReturnTo keeps these two values unchanged, and the browser resolves the
+    // callback's Location to /iam/auth/login for both. A guard on the raw string misses them.
+    '/iam/./auth/login',
+    '/iam/x/../auth/login',
+  ])('replaces a returnTo under the zone auth routes (%s) with the zone root', async (raw) => {
+    const res = await createAuthRoutes(runtime).handle(loginRequest(`?returnTo=${encodeURIComponent(raw)}`));
+    const state = new URL(res.headers.get('location') ?? '').searchParams.get('state') ?? '';
+    const tx = await store.takeTransaction(state);
+    expect(tx?.returnTo).toBe('/iam/');
+  });
 
   it('keeps a returnTo that only starts like an auth route', async () => {
     const res = await createAuthRoutes(runtime).handle(loginRequest('?returnTo=%2Fiam%2Fauthors'));
@@ -2008,26 +2136,39 @@ Run:
 pnpm -C ts/packages/paigasus-auth exec vitest run tests/http/login.test.ts
 ```
 
-Expected: FAIL on the five `replaces a returnTo …` cases and on the root-mounted case (the stored value is the raw path). `keeps a returnTo …` passes.
+Expected: FAIL on the seven `replaces a returnTo …` cases (the five plain paths and the two dot-segment paths) and on the root-mounted case, 8 failures in total: the stored value is the raw path. `keeps a returnTo …` passes.
 
 - [ ] **Step 12: Refuse a `returnTo` under the zone's auth routes**
 
-In `src/http/routes.ts`, replace line 122:
+In `src/http/routes.ts`, replace lines 120–122 (the last two lines of the I3 comment and the `validateReturnTo` call). Step 10 edited lines 204–207, below these lines, so these lines did not move:
 
 ```ts
+  // completes on a root-mounted zone. `src/next/get-session.ts:104` and `src/runtime.ts:123` both
+  // already use the trailing-slash form; this call is the one place that had drifted from it.
   const returnTo = validateReturnTo(url.searchParams.get('returnTo'), `${runtime.basePath}/`);
 ```
 
 with:
 
 ```ts
+  // completes on a root-mounted zone. `src/next/get-session.ts:110` and `src/runtime.ts:129` both
+  // already use the trailing-slash form; this call is the one place that had drifted from it.
   const fallback = `${runtime.basePath}/`;
   const requested = validateReturnTo(url.searchParams.get('returnTo'), fallback);
   // SMA-511 spec § 6.4: a returnTo under this zone's own auth routes would send the browser back into
   // /auth/login (or /auth/callback) after a successful login, so a crafted link loops, one click per
   // round. validateReturnTo accepts such a path, because it is same-origin; it is refused here.
-  const returnTo = requested.startsWith(`${runtime.basePath}/auth/`) ? fallback : requested;
+  //
+  // The check reads the path with its dot segments resolved, because the browser resolves them in
+  // the callback's Location: `/iam/./auth/login` and `/iam/x/../auth/login` both land on
+  // `/iam/auth/login`. The placeholder origin only lets `new URL` parse a path. validateReturnTo has
+  // already refused every value that is not a same-origin path (`//`, a backslash), so the parse
+  // cannot move to another host. The stored value stays `requested`, so its query string is kept.
+  const resolvedPath = new URL(requested, 'http://placeholder').pathname;
+  const returnTo = resolvedPath.startsWith(`${runtime.basePath}/auth/`) ? fallback : requested;
 ```
+
+The two new line citations are the positions after this task: Step 6 moves the `validateReturnTo` call in `src/next/get-session.ts` from line 104 to line 110, and Step 2 moves the `postLogoutRedirectUri` line in `src/runtime.ts` from line 123 to line 129.
 
 Run:
 
@@ -2035,7 +2176,9 @@ Run:
 pnpm -C ts/packages/paigasus-auth exec vitest run tests/http/login.test.ts tests/middleware.test.ts
 ```
 
-Expected: PASS. `tests/middleware.test.ts`'s `routes.ts contains no direct pathname comparison` stays green (the new code compares `requested`, not `pathname`).
+Expected: PASS. `tests/middleware.test.ts`'s `routes.ts contains no direct pathname comparison` stays green: its pattern matches only `pathname ==` / `pathname ===` and the reverse, and the new code calls `.startsWith` on `resolvedPath`.
+
+To see that the dot-segment rows are not vacuous, change `resolvedPath.startsWith` to `requested.startsWith` in a scratch edit: the `/iam/./auth/login` and `/iam/x/../auth/login` cases then fail with `expected '/iam/./auth/login' to be '/iam/'` and `expected '/iam/x/../auth/login' to be '/iam/'`. Put the line back with Edit, not with `git checkout`.
 
 - [ ] **Step 13: Write the end-to-end route-handler test (real routes, real OIDC fixture)**
 
@@ -2168,11 +2311,12 @@ handler's `req.url` and puts the server's bind address in it. So `createAuthRout
 the URL as `PAIGASUS_PUBLIC_ORIGIN` + basePath + path + query before it dispatches. A plain server
 that passes the full path (this package's e2e fixture) works too. The callback sends `redirect_uri`
 from `runtime.redirectUri`, never from the request URL, so it always equals the value sent to the
-IdP's `/authorize`. `/auth/login` replaces a `returnTo` under the zone's own `/auth/` routes with
-the zone root, so a crafted link cannot loop.
+IdP's `/authorize`. `/auth/login` resolves the dot segments of a `returnTo` path first. It then
+replaces a path under the zone's own `/auth/` routes with the zone root, so a crafted link cannot
+loop.
 ```
 
-Replace lines 143–149 (the heading and first paragraph of "`publicPaths` must list every route this package serves"):
+Replace lines 153–159 (143–149 before the insert above; the heading and first paragraph of "`publicPaths` must list every route this package serves"):
 
 ```markdown
 ### `publicPaths` must list every route this package serves
@@ -2217,8 +2361,17 @@ pnpm -C ts exec prettier --write packages/paigasus-auth/README.md
 
 - [ ] **Step 15: Run the whole package**
 
+Format every file this task creates or edits (the Global Constraints). This runs before the fmt check and before the commit:
+
 ```bash
-pnpm -C ts exec prettier --write packages/paigasus-auth/src packages/paigasus-auth/tests
+pnpm -C ts exec prettier --write \
+  packages/paigasus-auth/src/runtime.ts packages/paigasus-auth/src/middleware.ts \
+  packages/paigasus-auth/src/next/get-session.ts packages/paigasus-auth/src/server.ts \
+  packages/paigasus-auth/src/http/routes.ts packages/paigasus-auth/README.md \
+  packages/paigasus-auth/tests/runtime.test.ts packages/paigasus-auth/tests/middleware.test.ts \
+  packages/paigasus-auth/tests/next/get-session.test.ts packages/paigasus-auth/tests/server.test.ts \
+  packages/paigasus-auth/tests/http/login.test.ts packages/paigasus-auth/tests/http/callback.test.ts \
+  packages/paigasus-auth/tests/http/logout.test.ts packages/paigasus-auth/tests/http/route-handler.test.ts
 moon run paigasus-auth-ts:test paigasus-auth-ts:typecheck paigasus-app-shell-ts:test
 moon run ts:lint ts:fmt --force
 ```
@@ -2251,7 +2404,8 @@ back. authRoutePaths() now takes no argument, and AuthRuntime carries publicOrig
 
 The callback builds its currentUrl from runtime.redirectUri, so redirect_uri always equals the
 value sent to /authorize; a route handler's URL carries the bind address. The login route refuses
-a returnTo under the zone's own /auth/ routes, so a crafted link cannot loop.
+a returnTo whose path, with dot segments resolved, is under the zone's own /auth/ routes, so a
+crafted link cannot loop.
 
 Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
 EOF
@@ -2305,7 +2459,11 @@ describe('@paigasus/sdk/iam re-exports ServiceInfoService (SMA-511 spec § 7.3)'
     expect(typeof client.getServiceInfo).toBe('function');
   });
 
+  // Both sides are checked for a value first. Before the re-export both are `undefined`, and `toBe`
+  // alone passes on `undefined === undefined` (measured, pre-flight T6.a).
   it('the root barrel serves the same object', () => {
+    expect(barrel.ServiceInfoService).toBeDefined();
+    expect(ServiceInfoService).toBeDefined();
     expect(barrel.ServiceInfoService).toBe(ServiceInfoService);
   });
 });
@@ -2318,7 +2476,14 @@ export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
 pnpm -C ts/packages/paigasus-sdk exec vitest run tests/iam-service-info.test.ts
 ```
 
-Expected: FAIL — `expected undefined to be …` on the first case, and `Cannot read properties of undefined (reading 'typeName')` on the second.
+Expected: FAIL on all four cases:
+
+- `is the SAME object …` — `expected undefined to be …`.
+- `is the common.v1 service …` — `Cannot read properties of undefined (reading 'typeName')`.
+- `builds a request-scoped client …` — `Cannot read properties of undefined (reading 'methods')`, because `createIamClient` gets `undefined`.
+- `the root barrel serves the same object` — `expected undefined to be defined`. Without its two `toBeDefined()` lines this case passes here, because both sides are `undefined`.
+
+If you delete only the `ServiceInfoService` entry from `src/index.ts` after Step 3, the fourth case fails on its first line. That is the mutation it exists to catch.
 
 - [ ] **Step 3: Add the re-export**
 
@@ -2378,7 +2543,7 @@ moon run paigasus-sdk-ts:test paigasus-sdk-ts:typecheck
 moon run ts:lint ts:fmt --force
 ```
 
-Expected: all pass. The `paigasus/boundaries/sdk` block allows `@paigasus/proto` (`eslint.mjs:133`).
+Expected: all pass. The `paigasus/boundaries/sdk` block allows `@paigasus/proto` (`eslint.mjs:136` after Task 2's three header lines; 133 on the branch base).
 
 - [ ] **Step 6: Commit**
 
@@ -2404,7 +2569,7 @@ Spec § 7.4. Two changes in `@paigasus/next-config/eslint`:
 
 **Files:**
 - Modify: `ts/packages/paigasus-next-config/src/eslint.mjs:186-195` (the `apps` block) and `:287-302` (the `app-middleware` block). These are the line numbers on the branch base. Task 2 adds three header lines at line 35, so after Task 2 add 3 to every line number in this task; the steps quote the old text, so match the text.
-- Modify: `ts/packages/paigasus-next-config/tests/boundaries.test.ts` — new DENIED rows (before the `];` that closes `DENIED`) and new ALLOWED rows (before the `];` that closes `ALLOWED`)
+- Modify: `ts/packages/paigasus-next-config/tests/boundaries.test.ts` — new DENIED rows (before the `];` that closes `DENIED`), one new ALLOWED row (before the `];` that closes `ALLOWED`), and three new real-config cases at the end of `describe('the workspace eslint config actually applies the preset', …)`
 
 **Interfaces:**
 - Consumes: nothing new.
@@ -2429,13 +2594,42 @@ In `ts/packages/paigasus-next-config/tests/boundaries.test.ts`, add these rows a
   ['an app test outside tests/support must not import proto', 'apps/iam-console/tests/unit/errors.test.ts', "import { ErrorInfoSchema } from '@paigasus/proto';"],
 ```
 
-Add these rows at the end of `ALLOWED` (before its closing `];`):
+Add this row at the end of `ALLOWED` (before its closing `];`):
 
 ```ts
   // SMA-511 spec § 7.4.
   ['an app proxy may import auth/middleware', 'apps/iam-console/proxy.ts', "import { authRoutePaths, createAuthMiddleware } from '@paigasus/auth/middleware';"],
-  ['an app test double may import proto (it builds ErrorInfo details)', 'apps/iam-console/tests/support/fake-iam.ts', "import { ErrorInfoSchema } from '@paigasus/proto';"],
-  ['an app test double may import a proto SUBPATH', 'apps/iam-console/tests/support/fake-iam.ts', "import { TenancyService } from '@paigasus/proto/iam';"],
+```
+
+The test-double exemption does NOT go into `ALLOWED`. `restrictedImportsFor` lints through `boundaryRules` only. After Step 2's `ignores`, no block's `files` matches `apps/iam-console/tests/support/fake-iam.ts`, so ESLint does not lint that path at all. With `warnIgnored: false` the result is empty, and an ALLOWED row passes for that reason alone (measured, pre-flight T7.a). So the exemption is tested through the REAL config, on a `.mjs` path that the real config lints, with a DENIED twin one directory over.
+
+At the end of `describe('the workspace eslint config actually applies the preset', …)` (after the `carries every boundary entry in its EXPORTED array …` case, before the `});` that closes the `describe`), add:
+
+```ts
+  // SMA-511 spec § 7.4 — the app test-double exemption (`ignores: ['apps/*/tests/support/**']`),
+  // through the REAL config. Not an ALLOWED row: through `boundaryRules` alone no block matches a
+  // tests/support `.ts` path after the `ignores`, so ESLint does not lint it, and an empty result
+  // would prove nothing (measured, pre-flight T7.a). The real config lints every `.mjs` path
+  // (`js.configs.recommended` has no `files` key). The `isPathIgnored` check proves that the path
+  // is linted, so an empty list here means that no rule bans the import.
+  const TEST_DOUBLE_PATH = 'apps/iam-console/tests/support/fake-iam.mjs';
+  const TEST_DOUBLE_IMPORTS: ReadonlyArray<readonly [string, string]> = [
+    ['proto (it builds ErrorInfo details)', "import { ErrorInfoSchema } from '@paigasus/proto';\nexport const y = ErrorInfoSchema;\n"],
+    ['a proto SUBPATH', "import { TenancyService } from '@paigasus/proto/iam';\nexport const y = TenancyService;\n"],
+  ];
+
+  it.each(TEST_DOUBLE_IMPORTS)('an app test double under tests/support may import %s, through the REAL config', async (_label, source) => {
+    const ignored = await new ESLint({ cwd: TS_ROOT }).isPathIgnored(TEST_DOUBLE_PATH);
+    expect(ignored, 'the real config does not lint this path, so an empty result would prove nothing').toBe(false);
+    expect(await realConfigRestrictedImportsFor(TEST_DOUBLE_PATH, source)).toEqual([]);
+  });
+
+  // The DENIED twin: the same import one directory over, through the same config. If the exemption
+  // is widened (for example to `apps/*/tests/**`), this case fails.
+  it('an app test OUTSIDE tests/support still may not import proto, through the REAL config', async () => {
+    const messages = await realConfigRestrictedImportsFor('apps/iam-console/tests/unit/errors.mjs', "import { ErrorInfoSchema } from '@paigasus/proto';\nexport const y = ErrorInfoSchema;\n");
+    expect(messages, 'the test-double exemption covers more than apps/*/tests/support/**').not.toHaveLength(0);
+  });
 ```
 
 Run:
@@ -2445,13 +2639,13 @@ export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
 pnpm -C ts/packages/paigasus-next-config exec vitest run tests/boundaries.test.ts
 ```
 
-Expected: FAIL on exactly 6 rows:
+Expected: FAIL on exactly 6 cases:
 
 - `an app proxy must not import auth/server`, `… the sdk`, `… a sdk SUBPATH` — no block bans those for `proxy.ts` yet.
 - `an app middleware must not import proto — the restated ban` — the app-middleware block replaces the apps block for `middleware.ts` and has no proto group. This is a real gap today.
-- the two `an app test double may import …` rows — the apps block still bans proto under `tests/support/`.
+- the two `an app test double under tests/support may import …, through the REAL config` cases — the apps block still bans proto under `tests/support/`. Their `isPathIgnored` line passes; the `toEqual([])` line fails with the apps block's proto message.
 
-The two `an app proxy must not import proto…` rows, the `lib` row and the `tests/unit` row pass already, because the apps block covers those files.
+The two `an app proxy must not import proto…` rows, the `lib` row, the `tests/unit` row and the real-config DENIED twin (`an app test OUTSIDE tests/support …`) pass already, because the apps block covers those files.
 
 - [ ] **Step 2: Change the two blocks**
 
@@ -2555,6 +2749,11 @@ pnpm -C ts/packages/paigasus-next-config exec vitest run tests/boundaries.test.t
 
 Expected: PASS. The liveness tests stay green: both blocks still derive the scope key `apps`. The `carries every boundary entry in its EXPORTED array` test still passes: it compares `files` only, and `ts/eslint.config.js` spreads the same array.
 
+To see that the three real-config cases are not vacuous, make two scratch edits in `src/eslint.mjs`, one at a time. Put each line back with Edit, not with `git checkout`:
+
+- Change `ignores: ['apps/*/tests/support/**']` to `ignores: ['apps/*/tests/**']`. The DENIED twin `an app test OUTSIDE tests/support …` fails.
+- Delete the `ignores:` line. The two `an app test double under tests/support may import …` cases fail.
+
 - [ ] **Step 4: Run the package and the lint**
 
 ```bash
@@ -2603,6 +2802,7 @@ Facts this task relies on (all read from the repo):
 - Modify: `ts/apps/iam-console/package.json` (`dependencies`, `devDependencies`)
 - Modify: `ts/apps/iam-console/moon.yml` — `fileGroups.sources` (lines 27–29), `test.inputs` (lines 139–155); wasm branch only: `dependsOn` (lines 11–13), `build.deps` and `build.inputs` (lines 51–94)
 - Modify: `ts/moon.yml:11-15` (`fileGroups.sources`)
+- Modify (wasm branch only): `ci/affected-graph/run.sh` — five strict-equality cases: `kernel->bindings` (lines 295–296), `binding-oneway-node` (304–305), `binding-oneway-wasm` (308–309), `lockfile->all-lint` (354–355), `kernel->consumer-tasks` (367–368)
 - Modify (spike; kept only in the wasm branch): `ts/packages/paigasus-kernel/package.json` (`exports`, `_comment_exports`)
 - Create then delete (spike only): `ts/apps/iam-console/app/prn-probe/route.ts`
 - Modify: `docs/superpowers/specs/2026-09-11-sma-511-iam-console-design.md` § 13 (record the spike result)
@@ -2742,7 +2942,9 @@ describe('parseTenancyPrn', () => {
     ['an upper-case region', `prn:pgs:iam:US-EAST:${ORG}:team/${TEAM}`],
     ['two slashes in the resource path', `prn:pgs:iam::${ORG}:team/${TEAM}/x`],
     ['the empty string', ''],
-    ['a PRN over 512 characters', `prn:pgs:iam::${ORG}:team/${'a'.repeat(600)}`],
+    // Valid in every field except its length: 12 + 480 + 1 + 36 + 1 + 5 + 36 = 571 characters. The
+    // kernel sets no region length limit other than MAX_LEN (512), so ONLY the length rule rejects it.
+    ['a valid team PRN of 571 characters (a 480-character region)', `prn:pgs:iam:${'a'.repeat(480)}:${ORG}:team/${TEAM}`],
   ])('returns null for %s', (_label, prn) => {
     expect(parseTenancyPrn(prn)).toBeNull();
   });
@@ -2776,7 +2978,7 @@ describe('the builders', () => {
 });
 ```
 
-- [ ] **Step 2: Give the app a `server-only` stub, alias and dependency**
+- [ ] **Step 2: Give the app a `server-only` stub, alias and dependency, and the `oxc` setting**
 
 `lib/*` opens with `import 'server-only'`, whose default export throws. Create `ts/apps/iam-console/tests/support/server-only-stub.ts`:
 
@@ -2789,6 +2991,8 @@ describe('the builders', () => {
 // see its vitest.config.ts). Same pattern as ts/packages/paigasus-auth/tests/support/.
 export {};
 ```
+
+The `oxc` constant below is needed before any test imports `lib/`. vite:oxc loads the NEAREST `tsconfig.json` of each file it transforms. For `lib/prn.ts` that is the app's `tsconfig.json`, which extends the preset through a pnpm symlink that oxc cannot follow. Without the setting, the import of `lib/prn.ts` fails with `[TSCONFIG_ERROR]` (`Tsconfig not found`), and Steps 6, 14C and 15 cannot pass. Task 9 keeps the constant, its comment and the `oxc,` key word for word, in the same places.
 
 Replace the whole of `ts/apps/iam-console/vitest.config.ts` with:
 
@@ -2808,7 +3012,17 @@ const conditions = ['node', 'import', 'default'];
 
 const serverOnlyStub = fileURLToPath(new URL('./tests/support/server-only-stub.ts', import.meta.url));
 
+// MEASURED (SMA-511 plan, Task 9): vite:oxc loads the NEAREST tsconfig.json for every file it
+// transforms. This app's tsconfig.json extends '@paigasus/next-config/tsconfig-app' through pnpm's
+// symlink, which oxc's resolver cannot follow — every import of lib/ or app/ failed with
+// "[TSCONFIG_ERROR] Failed to load tsconfig … Tsconfig not found" — and the preset sets
+// `jsx: preserve`, which Node cannot run. `tsconfig: false` stops the lookup, and the JSX runtime
+// is stated here instead. Vite's OxcOptions type omits `tsconfig`, but the plugin spreads every key
+// into rolldown's transformSync (vite 8.0.16), so a non-literal object carries it.
+const oxc = { tsconfig: false, jsx: { runtime: 'automatic', importSource: 'react' } } as const;
+
 export default defineConfig({
+  oxc,
   test: {
     environment: 'node',
     include: ['tests/**/*.test.ts'],
@@ -2928,7 +3142,7 @@ import wasm from 'vite-plugin-wasm';
 import { defineConfig, type Plugin } from 'vitest/config';
 ```
 
-add, after the `serverOnlyStub` constant:
+add, after the `serverOnlyStub` constant (before the `oxc` comment):
 
 ```ts
 // WASM BRANCH (SMA-511 D6). @paigasus/wasm is aliased to the crate-dir glue, which
@@ -2937,7 +3151,7 @@ add, after the `serverOnlyStub` constant:
 const wasmGlue = fileURLToPath(new URL('../../../rs/crates/bindings/paigasus-wasm/paigasus_wasm.js', import.meta.url));
 ```
 
-and change the config object's resolution to:
+and change the config object's `resolve` and `ssr` lines (below `test`; the `oxc,` key stays first) to:
 
 ```ts
   // vite-plugin-wasm's factory is typed `() => any`; cast to vite's Plugin as the kernel does.
@@ -2981,7 +3195,20 @@ export function GET(): Response {
 }
 ```
 
+**The pass criterion (spec D6, in its own words).** "The spike measures that Turbopack bundles the wasm into the standalone server and that `prnBuild`, `prnOrg`, `prnResourceType` and `prnResourceId` return correct values from a route handler." The probe of Step 7 calls the four functions in a route handler, and the standalone server answers it. So a correct answer from the standalone server proves both halves, and the probe result decides. B1 measures this in a warm developer tree. B2 measures the same thing in the CI state, because CI and the image build from that state. The `.wasm` files under `.next/standalone` are recorded for the spec, but they do not decide: Turbopack can put the module into a JS chunk, and then no `.wasm` file exists.
+
+**Run Steps 8–10 as scripts.** These steps use command substitution and shell variables (`W=$(…)`, `$SERVER_PID`, `$SCRATCH`). The worktree sandbox refuses such commands when you type them. Write each step's commands into a script file in your scratchpad, and run it with `/bin/bash <script>`. Start every script with this header:
+
+```bash
+# The script lives in the scratchpad, so its own directory is the scratchpad.
+SCRATCH="$(cd "$(dirname "$0")" && pwd)"
+export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
+cd /Users/smaschek/dev/paigasus/paigasus-core/.claude/worktrees/feature+sma-511-iam-console
+```
+
 - [ ] **Step 8: Spike B1 — make sure the installed copy has the `.wasm` (a warm developer tree)**
+
+Script `$SCRATCH/spike-step8.sh` (the header, then):
 
 ```bash
 W=$(ls -d ts/node_modules/.pnpm/@paigasus+wasm@file*/node_modules/@paigasus/wasm)
@@ -2989,22 +3216,30 @@ echo "$W"
 ls -li rs/crates/bindings/paigasus-wasm/paigasus_wasm_bg.wasm "$W/paigasus_wasm_bg.wasm"
 ```
 
-Expected: one directory path; both files exist, with the SAME inode number (pnpm hard-linked them at install). If the second file is missing, run `cp rs/crates/bindings/paigasus-wasm/paigasus_wasm_bg.wasm "$W/"` and list again.
+Expected: one directory path; both files exist, with the SAME inode number (pnpm hard-linked them at install). If the second file is missing or has another inode, add `ln -f rs/crates/bindings/paigasus-wasm/paigasus_wasm_bg.wasm "$W/paigasus_wasm_bg.wasm"` above the `ls -li` line and run the script again. Do not use `cp`: a copy gets its own inode, so a later `paigasus-kernel-ts:build` does not update it, and the installed copy goes stale.
 
 - [ ] **Step 9: Spike B1 — build, start the standalone server, and call the probe**
 
-Run in ONE shell command. The server runs in the background and the same command stops it (macOS has no `timeout`; curl's own retry waits for the port). `$SCRATCH` is your scratchpad directory.
+Script `$SCRATCH/spike-probe.sh` (the header, then the lines below). It takes the label `B1` or `B2`, because Step 10 runs it again. The server runs in the background, and the same script stops it (macOS has no `timeout`; curl's own retry waits for the port).
 
 ```bash
-cd ts/apps/iam-console && rm -rf .next \
-&& pnpm exec next build > "$SCRATCH/spike-b1-build.log" 2>&1; echo "B1 build exit $?"; \
-test -f .next/standalone/apps/iam-console/server.js && echo "standalone entry ok"; \
-find .next/standalone -name '*.wasm' | head -5; \
-PORT=3917 HOSTNAME=127.0.0.1 PAIGASUS_ZONE=iam PAIGASUS_ZONES='{"iam":"/iam"}' node .next/standalone/apps/iam-console/server.js > "$SCRATCH/spike-b1-server.log" 2>&1 & SERVER_PID=$!; \
-curl -fsS --retry 60 --retry-delay 1 --retry-connrefused http://127.0.0.1:3917/iam/prn-probe > "$SCRATCH/spike-b1.json"; echo "B1 curl exit $?"; \
-kill "$SERVER_PID"; cd ../../..
+LABEL="${1:?usage: /bin/bash spike-probe.sh B1|B2}"
+cd ts/apps/iam-console
+rm -rf .next
+pnpm exec next build > "$SCRATCH/spike-$LABEL-build.log" 2>&1
+echo "$LABEL build exit $?"
+test -f .next/standalone/apps/iam-console/server.js && echo "$LABEL standalone entry ok"
+echo "$LABEL .wasm files under .next/standalone (recorded, not a criterion):"
+find .next/standalone -name '*.wasm' | head -5
+PORT=3917 HOSTNAME=127.0.0.1 PAIGASUS_ZONE=iam PAIGASUS_ZONES='{"iam":"/iam"}' node .next/standalone/apps/iam-console/server.js > "$SCRATCH/spike-$LABEL-server.log" 2>&1 &
+SERVER_PID=$!
+curl -fsS --retry 60 --retry-delay 1 --retry-connrefused http://127.0.0.1:3917/iam/prn-probe > "$SCRATCH/spike-$LABEL.json"
+echo "$LABEL curl exit $?"
+kill "$SERVER_PID"
+cd ../../..
 node -e '
 const got = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+const label = process.argv[2];
 const want = {
   team: "prn:pgs:iam::0190a100-0000-7000-8000-0000000000aa:team/0190a1b2-0000-7000-8000-000000000001",
   org: "0190a100-0000-7000-8000-0000000000aa",
@@ -3013,26 +3248,32 @@ const want = {
   root: "prn:pgs:iam:::root/00000000-0000-0000-0000-000000000000",
 };
 const ok = JSON.stringify(got) === JSON.stringify(want);
-console.log(ok ? "B1 MATCH" : "B1 MISMATCH", JSON.stringify(got));
+console.log(ok ? `${label} MATCH` : `${label} MISMATCH`, JSON.stringify(got));
 process.exit(ok ? 0 : 1);
-' "$SCRATCH/spike-b1.json"
+' "$SCRATCH/spike-$LABEL.json" "$LABEL"
 ```
 
-B1 PASSES only if all of these hold: `B1 build exit 0`, `standalone entry ok`, at least one `.wasm` path under `.next/standalone`, `B1 curl exit 0`, and `B1 MATCH`. On any other result B1 FAILS: keep the first error line of `spike-b1-build.log` or `spike-b1-server.log` for Step 12, and go to Step 11 (skip Step 10).
+Run `/bin/bash "$SCRATCH/spike-probe.sh" B1` (type the literal scratchpad path in place of `$SCRATCH`).
+
+B1 PASSES only if all of these hold: `B1 build exit 0`, `B1 standalone entry ok`, `B1 curl exit 0`, and `B1 MATCH`. Copy the `find` output (the `.wasm` paths, or none) for Step 12. On any other result B1 FAILS: keep the first error line of `spike-B1-build.log` or `spike-B1-server.log` for Step 12, and go to Step 11 (skip Step 10).
 
 - [ ] **Step 10: Spike B2 — the CI state (only if B1 passed)**
 
-A CI runner installs before it builds the kernel, so its installed `@paigasus/wasm` copy has no `.wasm`. Reproduce that: remove the hard link in the installed copy only (the crate-dir file stays), then build again.
+A CI runner installs before it builds the kernel, so its installed `@paigasus/wasm` copy has no `.wasm`. Reproduce that: remove the hard link in the installed copy only (the crate-dir file stays), then run the same probe again. Script `$SCRATCH/spike-step10.sh` (the header, then):
 
 ```bash
 W=$(ls -d ts/node_modules/.pnpm/@paigasus+wasm@file*/node_modules/@paigasus/wasm)
 rm "$W/paigasus_wasm_bg.wasm"
 ls rs/crates/bindings/paigasus-wasm/paigasus_wasm_bg.wasm
-cd ts/apps/iam-console && rm -rf .next && pnpm exec next build > "$SCRATCH/spike-b2-build.log" 2>&1; echo "B2 build exit $?"; cd ../../..
-cp rs/crates/bindings/paigasus-wasm/paigasus_wasm_bg.wasm "$W/"
+test -e "$W/paigasus_wasm_bg.wasm" || echo "B2 installed copy has no .wasm (the CI state)"
+/bin/bash "$SCRATCH/spike-probe.sh" B2
+# Restore the HARD LINK, not a copy: a copy gets its own inode, and a later kernel build would not
+# update it. The ls -li must show one inode number for both paths.
+ln -f rs/crates/bindings/paigasus-wasm/paigasus_wasm_bg.wasm "$W/paigasus_wasm_bg.wasm"
+ls -li rs/crates/bindings/paigasus-wasm/paigasus_wasm_bg.wasm "$W/paigasus_wasm_bg.wasm"
 ```
 
-B2 PASSES only if `B2 build exit 0`. If it fails, keep the first error line of `spike-b2-build.log` for Step 12 (the expected shape is a `Module not found` for `./paigasus_wasm_bg.wasm`). The last command restores the local tree in both cases.
+Run `/bin/bash "$SCRATCH/spike-step10.sh"` (with the literal scratchpad path). B2 PASSES only if all of these hold: `B2 build exit 0`, `B2 standalone entry ok`, `B2 curl exit 0`, and `B2 MATCH`. Copy the `find` output for Step 12. If B2 fails, keep the first error line of `spike-B2-build.log` or `spike-B2-server.log` for Step 12 (the expected build failure is a `Module not found` for `./paigasus_wasm_bg.wasm`). The `ln -f` line restores the local tree in both cases; check that the last `ls -li` shows the same inode twice.
 
 - [ ] **Step 11: Delete the probe (both branches)**
 
@@ -3054,10 +3295,10 @@ The spike PASSES only if B1 AND B2 passed. Write the result into `docs/superpowe
 
 | # | Result |
 |---|---|
-| 10 | D6 wasm spike (plan Task 8). B1, a warm tree: <PASS, or FAIL with the first error line>. B2, the CI state (the installed `file:` copy of `@paigasus/wasm` without the gitignored `.wasm`): <PASS, FAIL with the first error line, or "not run, B1 failed">. Decision: <the kernel wasm binding, or fallback C>. |
+| 10 | D6 wasm spike (plan Task 8). Criterion (D6): the standalone server answers a route handler that calls `prnBuild`, `prnOrg`, `prnResourceType` and `prnResourceId` with the correct values. B1, a warm tree: <PASS, or FAIL with the first error line>; `.wasm` files under `.next/standalone`: <the B1 `find` output, or "none">. B2, the CI state (the installed `file:` copy of `@paigasus/wasm` without the gitignored `.wasm`): <PASS, FAIL with the first error line, or "not run, B1 failed">; `.wasm` files under `.next/standalone`: <the B2 `find` output, "none", or "not run">. Decision: <the kernel wasm binding, or fallback C>. |
 ```
 
-Fill the three angle-bracket slots with what Steps 9 and 10 printed. Then:
+Fill the five angle-bracket slots with what Steps 9 and 10 printed. Then:
 
 - If the spike PASSED, do Steps 13W–14W and skip Steps 13C–15C.
 - If the spike FAILED, do Steps 13C–15C and skip Steps 13W–14W. Do not ask again (decision D6).
@@ -3087,7 +3328,65 @@ In the `build` task, add `deps: ['^:build']` directly under `script: |…` (befo
       - '/rs/crates/libs/paigasus-kernel/src/**/*'
 ```
 
-Add the same six lines to `test.inputs`. Then do Step 15 (shared) and commit with the wasm message in Step 16.
+Add the same six lines to `test.inputs`.
+
+Then re-baseline the five strict-equality cases in `ci/affected-graph/run.sh` that these edges change. Without this, Step 15's suite reds five cases in this branch. The reasons:
+
+- `run_case` follows `dependsOn` with `--downstream deep` (`run.sh:31-35`). The app now `dependsOn` `paigasus-kernel-ts`, which depends on both binding crates. So `kernel->bindings`, `binding-oneway-node` and `binding-oneway-wasm` each gain the project `iam-console-ts`.
+- `kernel->consumer-tasks` (no flags) anchors on `rs/crates/libs/paigasus-kernel/src/lib.rs`. The new `build` and `test` input `/rs/crates/libs/paigasus-kernel/src/**/*` matches it, so the case gains `iam-console-ts:build,iam-console-ts:test`.
+- `lockfile->all-lint` (`--downstream deep`, which follows task `deps`) selects `paigasus-kernel-ts:build`. The app's `build` reaches it through `^:build`, and the app's `test` through `~:build`, so the case gains `iam-console-ts:build,iam-console-ts:test`.
+
+Make these edits in `ci/affected-graph/run.sh`. Each one inserts ONE comment line directly above the case's `run_case` or `run_task_case*` line, keeps that line, and appends to the expected CSV. The line numbers are from before the edits; match on the text. Do not reorder any other line.
+
+`kernel->bindings` (lines 295–296) becomes:
+
+```bash
+  # + iam-console-ts (SMA-511, D6 wasm branch), through paigasus-kernel-ts.
+  run_case "kernel->bindings" "rs/crates/libs/paigasus-kernel/src/lib.rs" \
+    "paigasus-kernel-rs,paigasus-py-bindings-rs,paigasus-gateway-rs,paigasus-kernel-py,paigasus-node-bindings-rs,paigasus-kernel-ts,paigasus-wasm-rs,paigasus-kernel-parity-rs,paigasus-iam-core-rs,paigasus-iam-rs,paigasus-observability-rs,iam-console-ts"
+```
+
+`binding-oneway-node` (lines 304–305) becomes:
+
+```bash
+  # + iam-console-ts (SMA-511, D6 wasm branch), through paigasus-kernel-ts.
+  run_case "binding-oneway-node" "rs/crates/bindings/paigasus-node-bindings/src/lib.rs" \
+    "paigasus-node-bindings-rs,paigasus-kernel-ts,iam-console-ts"
+```
+
+`binding-oneway-wasm` (lines 308–309) becomes:
+
+```bash
+  # + iam-console-ts (SMA-511, D6 wasm branch), through paigasus-kernel-ts.
+  run_case "binding-oneway-wasm" "rs/crates/bindings/paigasus-wasm/src/lib.rs" \
+    "paigasus-wasm-rs,paigasus-kernel-ts,iam-console-ts"
+```
+
+`lockfile->all-lint` (lines 354–355) becomes:
+
+```bash
+  # + iam-console-ts:{build,test} (SMA-511, D6 wasm branch), through task deps ('^:build', '~:build') on paigasus-kernel-ts:build, not through inputs.
+  run_task_case "lockfile->all-lint" "rs/Cargo.lock" \
+    "paigasus-gateway-rs:lint,paigasus-iam-core-rs:lint,paigasus-iam-rs:lint,paigasus-kernel-parity-rs:lint,paigasus-kernel-py:test,paigasus-kernel-rs:lint,paigasus-kernel-ts:build,paigasus-kernel-ts:test,paigasus-logging-rs:lint,paigasus-node-bindings-rs:lint,paigasus-observability-rs:lint,paigasus-proto-derive-rs:lint,paigasus-proto-rs:lint,paigasus-py-bindings-rs:lint,paigasus-service-info-rs:lint,paigasus-wasm-rs:lint,iam-console-ts:build,iam-console-ts:test"
+```
+
+Its `-ci` twin (`lockfile->all-lint-ci`, lines 359–360) keeps its CSV: the two app tasks do not key on `rs/Cargo.lock`. Its comment says the twin equals the deep set, which is now false in this branch. Insert this line directly above `run_task_case_ci "lockfile->all-lint-ci"`:
+
+```bash
+  # SMA-511 (D6 wasm branch): no longer equal — the deep set also holds iam-console-ts:{build,test}, which arrive through task deps.
+```
+
+`kernel->consumer-tasks` (lines 367–368) becomes:
+
+```bash
+  # + iam-console-ts:{build,test} (SMA-511, D6 wasm branch): both tasks list '/rs/crates/libs/paigasus-kernel/src/**/*' as an input.
+  run_task_case_ci "kernel->consumer-tasks" "rs/crates/libs/paigasus-kernel/src/lib.rs" \
+    "paigasus-gateway-rs:build,paigasus-gateway-rs:test,paigasus-gateway-rs:lint,paigasus-iam-core-rs:build,paigasus-iam-core-rs:test,paigasus-iam-core-rs:lint,paigasus-iam-rs:build,paigasus-iam-rs:test,paigasus-iam-rs:lint,paigasus-kernel-parity-rs:build,paigasus-kernel-parity-rs:test,paigasus-kernel-parity-rs:lint,paigasus-node-bindings-rs:build,paigasus-node-bindings-rs:test,paigasus-node-bindings-rs:lint,paigasus-observability-rs:build,paigasus-observability-rs:test,paigasus-observability-rs:lint,paigasus-py-bindings-rs:build,paigasus-py-bindings-rs:test,paigasus-py-bindings-rs:lint,paigasus-wasm-rs:build,paigasus-wasm-rs:test,paigasus-wasm-rs:lint,paigasus-kernel-rs:build,paigasus-kernel-rs:test,paigasus-kernel-rs:lint,paigasus-kernel-ts:build,paigasus-kernel-ts:test,paigasus-kernel-py:test,iam-console-ts:build,iam-console-ts:test"
+```
+
+Step 15 runs the suite. If a case still FAILs, do not loosen its expected set. Re-derive each `missing` or `unexpected` row from the real inputs with the two `moon query` commands of Task 23 Step 6, and fix the input or the set with a reason in the case's comment.
+
+Then do Step 15 (shared) and commit with the wasm message in Step 16.
 
 - [ ] **Step 14W (wasm branch): nothing else**
 
@@ -3242,16 +3541,16 @@ In `ts/moon.yml`, change `fileGroups.sources` (lines 11–15) to:
     - 'tooling/**/*' # SMA-406 parity helpers; lint/fmt lint the whole tree, so the cache must track these too
 ```
 
-Then run everything:
+Then run everything. The `prettier --write` line comes first and lists every `ts/` file this task creates or edits, in both branches (the Global Constraints). Prettier skips `pnpm-lock.yaml` through `.prettierignore`, and an unchanged file stays unchanged.
 
 ```bash
-pnpm -C ts exec prettier --write apps/iam-console/lib/prn.ts apps/iam-console/tests/unit/prn.test.ts apps/iam-console/tests/support/server-only-stub.ts apps/iam-console/vitest.config.ts apps/iam-console/package.json packages/paigasus-kernel/package.json
+pnpm -C ts exec prettier --write apps/iam-console/lib/prn.ts apps/iam-console/tests/unit/prn.test.ts apps/iam-console/tests/support/server-only-stub.ts apps/iam-console/vitest.config.ts apps/iam-console/package.json apps/iam-console/moon.yml moon.yml packages/paigasus-kernel/package.json pnpm-lock.yaml
 moon run iam-console-ts:typecheck iam-console-ts:build iam-console-ts:test
 moon run ts:lint ts:fmt --force
 /bin/bash ci/affected-graph/run.sh
 ```
 
-Expected: all pass; `iam-console-ts:test` runs the prn suite (54), the standalone-runtime suite (2) and the three Tailwind guard modes; the affected-graph suite ends with `== affected-graph cascade intact ==`. In the wasm branch, `iam-console-ts:build` now also runs `paigasus-kernel-ts:build` first (`^:build`).
+Expected: all pass; `iam-console-ts:test` runs the prn suite (54), the standalone-runtime suite (2) and the three Tailwind guard modes; the affected-graph suite ends with `== affected-graph cascade intact ==` in both branches. In the fallback branch no case changes. In the wasm branch the suite is green only because Step 13W re-baselined the five cases, and `iam-console-ts:build` now also runs `paigasus-kernel-ts:build` first (`^:build`).
 
 - [ ] **Step 16: Commit**
 
@@ -3277,17 +3576,18 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
 EOF
 ```
 
-Expected: `git status --short` before the commit shows no change under `ts/packages/paigasus-kernel/` and no `app/prn-probe/`.
+Expected: `git status --short` before the commit shows no change under `ts/packages/paigasus-kernel/`, no change to `ci/affected-graph/run.sh`, and no `app/prn-probe/`.
 
-Wasm branch: add `ts/packages/paigasus-kernel/package.json` to the `git add` list above, and use this message instead:
+Wasm branch: add `ts/packages/paigasus-kernel/package.json` and `ci/affected-graph/run.sh` to the `git add` list above, and use this message instead:
 
 ```text
 feat(ts): read prns through the kernel wasm binding in iam-console (SMA-511)
 
 Decision D6: @paigasus/kernel gains a ./wasm subpath, and lib/prn.ts reads IAM tenancy PRNs
-through it. The spike measured that Turbopack bundles the wasm into the standalone server, that
-the values are correct at request time, and that the build passes from a fresh install (spec § 13
-row 10). The app depends on the kernel's build, and a test replays the kernel parity corpus.
+through it. The spike measured that Turbopack bundles the wasm into the standalone server, and
+that the values are correct at request time, also from a fresh install (spec § 13 row 10). The
+app depends on the kernel's build, and a test replays the kernel parity corpus. Five
+affected-graph cases gain the app, which now depends on paigasus-kernel-ts.
 
 The app gains a server-only stub alias for vitest, and lib/ joins the app's and the ts workspace's
 Moon sources, so an edit there no longer serves a cached build, test or lint.
@@ -3295,14 +3595,14 @@ Moon sources, so an edit there no longer serves a cached build, test or lint.
 Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
 ```
 
-> Handoff to Task 9: After Task 8 these exist in `ts/apps/iam-console/`: `vitest.config.ts` with `environment: 'node'`, `include: ['tests/**/*.test.ts']`, 120 s timeouts, `resolve.conditions` and `ssr.resolve.conditions` = `['node', 'import', 'default']`, and `resolve.alias['server-only']` → `tests/support/server-only-stub.ts` (wasm branch only: `vite-plugin-wasm` and an `@paigasus/wasm` alias to the crate glue). Task 9 ADDS `__NEXT_EXPERIMENTAL_AUTH_INTERRUPTS=true` (in `test.env`), the `next/headers`/`next/cache` aliases to test doubles, a `setupFiles` entry and the `msw` dependency (Task 11 writes the MSW handlers; each test file starts its own MSW server); it keeps the alias and the conditions. `tests/support/server-only-stub.ts`, `tests/unit/prn.test.ts` and `lib/prn.ts` exist. `package.json` has `server-only` in `dependencies` (wasm branch: also `@paigasus/kernel` and dev `vite-plugin-wasm`). `moon.yml` has `lib/**/*` in `fileGroups.sources` and, in `test.inputs`, the kernel parity vectors and `paigasus-iam-core/src/authz/model.rs`; Task 9 must not add `lib/**/*` again, but must add `proxy.ts` (to the app's `sources` and to `ts/moon.yml`'s `sources` as `'apps/*/proxy.ts'`) when Task 10 creates it. `ts/moon.yml` already lists `apps/*/lib/**/*`. From Task 5, `authRoutePaths()` takes no argument and `proxy.ts` must pass basePath-RELATIVE paths: `createAuthMiddleware({ publicPaths: [...authRoutePaths(), '/', '/healthz'], loginPath: '/auth/login' })`; any hand-built `AuthRuntime` needs `publicOrigin`. From Task 3, no `next build` has yet compiled `@paigasus/auth/server`, `@paigasus/sdk` or `@paigasus/discovery/server`: the first build that imports them (Task 10) is the real Turbopack proof. For Task 23: a corpus or `model.rs` edit now selects `iam-console-ts:test`; no existing affected-graph case anchors there, so no expected set changes, but a new case could pin it. For Task 24: Task 1 already renamed the paths in `CLAUDE.md`.
+> Handoff to Task 9: After Task 8 these exist in `ts/apps/iam-console/`: `vitest.config.ts` with `environment: 'node'`, `include: ['tests/**/*.test.ts']`, 120 s timeouts, `resolve.conditions` and `ssr.resolve.conditions` = `['node', 'import', 'default']`, `resolve.alias['server-only']` → `tests/support/server-only-stub.ts`, and the `oxc` constant (`{ tsconfig: false, jsx: { runtime: 'automatic', importSource: 'react' } }`, with its MEASURED comment) plus the `oxc,` key before `test:`, in the places Task 9's final file has them (wasm branch only: `vite-plugin-wasm` and an `@paigasus/wasm` alias to the crate glue). Task 9 keeps the `oxc` lines and does not add them again. Task 9 ADDS `__NEXT_EXPERIMENTAL_AUTH_INTERRUPTS=true` (in `test.env`), the `next/headers`/`next/cache` aliases to test doubles, a `setupFiles` entry and the `msw` dependency (Task 11 writes the MSW handlers; each test file starts its own MSW server); it keeps the alias and the conditions. `tests/support/server-only-stub.ts`, `tests/unit/prn.test.ts` and `lib/prn.ts` exist. `package.json` has `server-only` in `dependencies` (wasm branch: also `@paigasus/kernel` and dev `vite-plugin-wasm`). `moon.yml` has `lib/**/*` in `fileGroups.sources` and, in `test.inputs`, the kernel parity vectors and `paigasus-iam-core/src/authz/model.rs`; Task 9 must not add `lib/**/*` again. Task 10 (not Task 9) adds `proxy.ts` to both `sources` groups when it creates the file: the app's, and `ts/moon.yml`'s as `'apps/*/proxy.ts'`. `ts/moon.yml` already lists `apps/*/lib/**/*`. From Task 5, `authRoutePaths()` takes no argument and `proxy.ts` must pass basePath-RELATIVE paths: `createAuthMiddleware({ publicPaths: [...authRoutePaths(), '/', '/healthz'], loginPath: '/auth/login' })`; any hand-built `AuthRuntime` needs `publicOrigin`. From Task 3, no `next build` has yet compiled `@paigasus/auth/server`, `@paigasus/sdk` or `@paigasus/discovery/server`: the first build that imports them (Task 10) is the real Turbopack proof. For Task 23: a corpus or `model.rs` edit now selects `iam-console-ts:test`; no existing affected-graph case anchors there, so these inputs change no expected set, but a new case could pin it. In the fallback branch, Task 8 changed no case in `ci/affected-graph/run.sh`. In the wasm branch, Step 13W appended `,iam-console-ts` to `kernel->bindings`, `binding-oneway-node` and `binding-oneway-wasm`, and `,iam-console-ts:build,iam-console-ts:test` to `kernel->consumer-tasks` and `lockfile->all-lint`; Task 23 adds only `,iam-console-ts:test-e2e` to those two task cases. For Task 24: Task 1 already renamed the paths in `CLAUDE.md`.
 
 
 ---
 
 ### Task 9: App dependencies, runtime config, logger and the vitest setup
 
-This task gives the app its dependencies, its one runtime configuration (spec § 4.1), its logger adapter (spec § 4.8) and a vitest setup that can import `lib/` and `app/`. It starts from what Task 8 left: `vitest.config.ts` with the `server-only` alias and the additive conditions, `tests/support/server-only-stub.ts`, `lib/prn.ts`, `server-only` in the app's dependencies, and `lib/**/*` in both Moon `sources` groups. The app still serves the old page after this task; Task 10 replaces it.
+This task gives the app its dependencies, its one runtime configuration (spec § 4.1), its logger adapter (spec § 4.8) and a vitest setup that can import `lib/` and `app/`. It starts from what Task 8 left: `vitest.config.ts` with the `server-only` alias, the additive conditions and the `oxc` constant (`tsconfig: false`), `tests/support/server-only-stub.ts`, `lib/prn.ts`, `server-only` in the app's dependencies, and `lib/**/*` in both Moon `sources` groups. The app still serves the old page after this task; Task 10 replaces it.
 
 **Files:**
 - Modify: `ts/pnpm-workspace.yaml` (catalog entry `msw`, `allowBuilds.msw: false`)
@@ -3363,7 +3663,8 @@ At the end of the `catalog:` map, after the `'axe-core': ^4.13.0` line, add:
   # Request interception for the iam-console vitest tier (SMA-511 spec § 9, AC 5). It intercepts
   # `fetch` — @paigasus/discovery's `GET /v1/service-info` probe. It cannot intercept the SDK's gRPC
   # calls over node:http2; an in-process fake server answers those. 2.15.0 was released 2026-07-08.
-  msw: ^2.15.0
+  # Pinned EXACTLY, not a caret range (the Global Constraints): a later 2.x must not install silently.
+  msw: 2.15.0
 ```
 
 - [ ] **Step 3: Add the app's dependencies**
@@ -3372,6 +3673,7 @@ In `ts/apps/iam-console/package.json`, make `dependencies` and `devDependencies`
 
 ```json
   "dependencies": {
+    "@bufbuild/protobuf": "catalog:",
     "@connectrpc/connect": "catalog:",
     "@paigasus/app-shell": "workspace:*",
     "@paigasus/auth": "workspace:*",
@@ -3389,7 +3691,6 @@ In `ts/apps/iam-console/package.json`, make `dependencies` and `devDependencies`
     "zod": "catalog:"
   },
   "devDependencies": {
-    "@bufbuild/protobuf": "catalog:",
     "@connectrpc/connect-node": "catalog:",
     "@paigasus/proto": "workspace:*",
     "@playwright/test": "catalog:",
@@ -3403,7 +3704,7 @@ In `ts/apps/iam-console/package.json`, make `dependencies` and `devDependencies`
   }
 ```
 
-`@paigasus/proto`, `@bufbuild/protobuf` and `@connectrpc/connect-node` are dev dependencies: only the test doubles in `tests/support/` import them (Task 11). The `apps` boundary rule still bans `@paigasus/proto` everywhere else in the app (Task 7).
+`@paigasus/proto` and `@connectrpc/connect-node` are dev dependencies: only the test doubles in `tests/support/` import them (Task 11). The `apps` boundary rule still bans `@paigasus/proto` everywhere else in the app (Task 7). `@bufbuild/protobuf` is a runtime dependency. The test doubles import it, and `lib/iam-clients.ts` (Task 12) imports a type from it. A type that `lib/` imports must come from a runtime dependency.
 
 - [ ] **Step 4: Install and check the lockfile**
 
@@ -3411,12 +3712,12 @@ Run:
 
 ```bash
 export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
-pnpm -C ts install
+pnpm -C ts install --no-frozen-lockfile
 grep -n "^  msw@" ts/pnpm-lock.yaml
 pnpm -C ts install --frozen-lockfile
 ```
 
-Expected: the first install ends without `ERR_PNPM_IGNORED_BUILDS`. `grep` prints the lockfile's `msw@2.15.<n>` entries (one under `packages:`, one or more under `snapshots:`). The frozen install exits 0 and changes nothing.
+Expected: the first install ends without `ERR_PNPM_IGNORED_BUILDS`. `grep` prints the lockfile's `msw@2.15.0` entries (one under `packages:`, one or more under `snapshots:`). No other `msw@` version appears. The frozen install exits 0 and changes nothing.
 
 - [ ] **Step 5: Let the tests' tsconfig cover `.tsx` files**
 
@@ -3437,7 +3738,7 @@ Replace `ts/apps/iam-console/tests/tsconfig.json` with:
 
 - [ ] **Step 6: Extend the vitest config and write the test support files**
 
-Task 8 wrote `ts/apps/iam-console/vitest.config.ts`. Make three edits to it; they apply in both of Task 8's branches.
+Task 8 wrote `ts/apps/iam-console/vitest.config.ts`, with the `oxc` constant, its MEASURED comment and the `oxc,` key already in place. Task 9 keeps those lines as they are and does not add them again. Make three edits to the file; they apply in both of Task 8's branches.
 
 Replace:
 
@@ -3454,15 +3755,6 @@ const serverOnlyStub = fileURLToPath(new URL('./tests/support/server-only-stub.t
 // headers and cookies, and record revalidatePath() calls (SMA-511, spec § 9.2).
 const nextHeadersDouble = fileURLToPath(new URL('./tests/support/next-headers.ts', import.meta.url));
 const nextCacheDouble = fileURLToPath(new URL('./tests/support/next-cache.ts', import.meta.url));
-
-// MEASURED (SMA-511 plan, Task 9): vite:oxc loads the NEAREST tsconfig.json for every file it
-// transforms. This app's tsconfig.json extends '@paigasus/next-config/tsconfig-app' through pnpm's
-// symlink, which oxc's resolver cannot follow — every import of lib/ or app/ failed with
-// "[TSCONFIG_ERROR] Failed to load tsconfig … Tsconfig not found" — and the preset sets
-// `jsx: preserve`, which Node cannot run. `tsconfig: false` stops the lookup, and the JSX runtime
-// is stated here instead. Vite's OxcOptions type omits `tsconfig`, but the plugin spreads every key
-// into rolldown's transformSync (vite 8.0.16), so a non-literal object carries it.
-const oxc = { tsconfig: false, jsx: { runtime: 'automatic', importSource: 'react' } } as const;
 ```
 
 Replace:
@@ -3476,7 +3768,6 @@ Replace:
 with:
 
 ```ts
-  oxc,
   test: {
     environment: 'node',
     include: ['tests/**/*.test.ts', 'tests/**/*.test.tsx'],
@@ -3702,8 +3993,12 @@ describe('getRuntimeConfig', () => {
     expect(config.PAIGASUS_OIDC_ISSUER).toBe('https://idp.example.test');
   });
 
+  // 'not a url' is the value that reaches the `URL.canParse` branch. 'iam.internal:9090' does not:
+  // it IS a URL, with the scheme `iam.internal:` (MEASURED), so the scheme rule refuses it instead.
+  // Without the canParse guard, `new URL('not a url')` throws a TypeError ("Invalid URL") out of
+  // the zod parse (MEASURED, zod 4.5.4). It names no key, so this case fails its first assertion.
   it.each([
-    ['not a URL', 'iam.internal:9090'],
+    ['not a URL', 'not a url'],
     ['a non-http scheme', 'grpc://iam.internal:9090'],
     ['credentials', 'http://user:pass@iam.internal:9090'],
     ['a query', 'http://iam.internal:9090?x=1'],
@@ -3749,8 +4044,12 @@ Create `ts/apps/iam-console/tests/unit/logger.test.ts`:
 //
 // lib/logger.ts (spec § 4.8, § 9.2): it writes the event name, a time and EXACTLY the fields the
 // port gave it — nothing it could have picked up elsewhere, so never a DSN or a token.
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createJsonLogger } from '../../lib/logger';
+
+afterEach(() => {
+  vi.unstubAllEnvs();
+});
 
 function capture() {
   const lines: string[] = [];
@@ -3781,11 +4080,22 @@ describe('createJsonLogger', () => {
     ]);
   });
 
-  it('adds nothing beyond the given fields, so a DSN it never received cannot appear', () => {
+  // The DSN is really in the environment, in the variable the Redis connect path reads. So a logger
+  // that appends the env (or any key beyond time/event/fields) fails both assertions.
+  it('writes exactly the given fields, and never the Redis DSN that is in its environment', () => {
+    const dsn = 'redis://console:s3cret-password@redis.internal:6379/0';
+    vi.stubEnv('PAIGASUS_SESSION_REDIS_URL', dsn);
     const { logger, lines } = capture();
     logger.appEvent('discovery.redis_connect_failed', { stage: 'connect' });
-    expect(lines.join('\n')).not.toMatch(/redis:\/\//);
-    expect(JSON.parse(lines[0] ?? '{}')).toMatchObject({ fields: { stage: 'connect' } });
+    expect(lines).toHaveLength(1);
+    // The FULL record, by toEqual: any key the logger adds beyond these three fails it. The time
+    // is taken from the record itself, and checked on its own below.
+    const record = JSON.parse(lines[0] ?? '{}') as Record<string, unknown>;
+    expect(record).toEqual({ time: record['time'], event: 'discovery.redis_connect_failed', fields: { stage: 'connect' } });
+    expect(typeof record['time']).toBe('string');
+    const output = lines.join('\n');
+    expect(output).not.toContain(dsn);
+    expect(output).not.toContain('s3cret-password');
   });
 });
 ```
@@ -3834,7 +4144,7 @@ function grpcUrlProblem(value: string): string | null {
 /**
  * IAM's gRPC address. A separate key from PAIGASUS_SERVICES.iam because IAM listens on two
  * addresses: HTTP on 8080, which discovery probes, and gRPC on 9090, which the SDK calls
- * (rs/crates/services/paigasus-iam/src/config.rs:812-813).
+ * (rs/crates/services/paigasus-iam/src/config.rs:811-812).
  *
  * One transform, not a chain of refines: a refine that calls `new URL` after a failed
  * `URL.canParse` refine would THROW, because zod 4 runs every refine. The value is canonicalized
@@ -3995,7 +4305,7 @@ PAIGASUS_ZONE=iam
 
 # Every deployed zone, mapped to its path prefix behind the single origin. The entry for
 # PAIGASUS_ZONE must equal this image's compiled basePath, or the first request fails loudly.
-# With PAIGASUS_SESSION_STORE=memory the map may hold ONE zone only (@paigasus/auth runtime.ts:99-105).
+# With PAIGASUS_SESSION_STORE=memory the map may hold ONE zone only (@paigasus/auth runtime.ts:105-111).
 PAIGASUS_ZONES={"iam":"/iam"}
 
 # @paigasus/auth (ts/packages/paigasus-auth/README.md). Issuer and public origin must be https.
@@ -4019,11 +4329,17 @@ Run:
 
 ```bash
 export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
+pnpm -C ts exec prettier --write pnpm-workspace.yaml \
+  apps/iam-console/package.json apps/iam-console/moon.yml apps/iam-console/vitest.config.ts \
+  apps/iam-console/tests/tsconfig.json apps/iam-console/tests/support/next-headers.ts \
+  apps/iam-console/tests/support/next-cache.ts apps/iam-console/tests/support/setup.ts \
+  apps/iam-console/tests/support/env.ts apps/iam-console/lib/config.ts apps/iam-console/lib/logger.ts \
+  apps/iam-console/tests/unit/config.test.ts apps/iam-console/tests/unit/logger.test.ts
 moon run iam-console-ts:test
 moon run ts:lint ts:fmt --force
 ```
 
-Expected: exit 0. `iam-console-ts:test` builds the app, runs vitest (Task 8's `prn` suite, the two new unit files, and the standalone test, which still targets the old page), and runs the Tailwind guard in its three modes. `--force` makes the whole-tree lint and format run even when Moon's cache key did not move. If `ts:fmt` fails, run `pnpm -C ts exec prettier --write apps/iam-console` and run the step again.
+Expected: exit 0. Prettier formats every `ts/` file this task creates or edits (the Global Constraints). Two files are not in the list. `ts/pnpm-lock.yaml` is in `ts/.prettierignore`. Prettier has no parser for `.env.local.example`, and an explicit path to it exits 2 (measured). `iam-console-ts:test` builds the app, runs vitest (Task 8's `prn` suite, the two new unit files, and the standalone test, which still targets the old page), and runs the Tailwind guard in its three modes. `--force` makes the whole-tree lint and format run even when Moon's cache key did not move.
 
 - [ ] **Step 15: Commit**
 
@@ -4043,12 +4359,11 @@ shapes with PAIGASUS_IAM_GRPC_URL, and refuses a service map without
 iam. The JSON-lines logger implements both package logger ports and
 adds appEvent for the app's own events.
 
-vitest now sets oxc.tsconfig to false. The app tsconfig extends the
-next-config preset through the pnpm symlink, which the oxc resolver
-cannot follow, so every import of lib/ or app/ failed with
-TSCONFIG_ERROR.
+vitest gets the next/headers and next/cache test doubles and a setup
+file that resets them before every test.
 
-msw joins the catalog with its browser postinstall blocked. The app's
+msw joins the catalog, pinned at 2.15.0, with its browser postinstall
+blocked. @bufbuild/protobuf is a runtime dependency. The app's
 Moon tasks now key on the packages lib/config.ts compiles.
 
 Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
@@ -4129,12 +4444,26 @@ Create `ts/apps/iam-console/tests/unit/proxy.test.ts`:
 //
 // proxy.ts under the real basePath (spec § 7.5, § 13 #1). A NextRequest built with
 // `nextConfig: { basePath: '/iam' }` strips the basePath from nextUrl.pathname exactly as Next does.
+import { unstable_doesMiddlewareMatch } from 'next/experimental/testing/server';
 import { NextRequest } from 'next/server';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { SESSION_COOKIE_NAME } from '../../lib/auth';
 import { config, proxy } from '../../proxy';
 
+// Next's server installs globalThis.AsyncLocalStorage before any other module
+// (next/dist/server/node-environment-baseline.js); vitest does not. Loading
+// next/experimental/testing/server patches `console`, and without the global every later console
+// call in this file throws "AsyncLocalStorage accessed in runtime where it is not available"
+// (MEASURED, Next 16.3.4 under vitest 5.0.0). vi.hoisted runs before the imports above.
+vi.hoisted(() => {
+  const scope = globalThis as { AsyncLocalStorage?: unknown };
+  scope.AsyncLocalStorage ??= process.getBuiltinModule('node:async_hooks').AsyncLocalStorage;
+});
+
 const ORIGIN = 'https://console.example.test';
+
+/** The basePath next.config.ts compiles in. unstable_doesMiddlewareMatch prefixes each matcher with it, as Next does. */
+const NEXT_CONFIG = { basePath: '/iam' };
 
 function request(path: string, init: { cookie?: boolean; headers?: Record<string, string> } = {}): NextRequest {
   const headers = new Headers(init.headers);
@@ -4159,9 +4488,23 @@ describe('proxy', () => {
     const res = proxy(request('/iam/orgs', { cookie: true }));
     expect(res.headers.get('location')).toBeNull();
   });
+});
 
-  it('excludes static assets through a matcher written WITHOUT the basePath (spec § 13 #4)', () => {
+// Next's own matcher evaluation (next/experimental/testing/server), run against the exported
+// config under the real basePath. MEASURED: a matcher written WITH the /iam prefix matches no page
+// here (Next prefixes the basePath again), so the "runs" cases fail; a matcher that drops one of
+// the three exclusions fails the matching "skips" case.
+describe('config.matcher (spec § 7.5, § 13 #4)', () => {
+  it('is written WITHOUT the basePath', () => {
     expect(config.matcher).toEqual(['/((?!_next/static|_next/image|favicon.ico).*)']);
+  });
+
+  it.each(['/iam/', '/iam/orgs', '/iam/orgs?offset=50', '/iam/healthz', '/iam/auth/login'])('runs the proxy for the page %s', (url) => {
+    expect(unstable_doesMiddlewareMatch({ config, url, nextConfig: NEXT_CONFIG })).toBe(true);
+  });
+
+  it.each(['/iam/_next/static/chunks/main.js', '/iam/_next/image?url=%2Flogo.png&w=64&q=75', '/iam/favicon.ico'])('skips the static asset %s', (url) => {
+    expect(unstable_doesMiddlewareMatch({ config, url, nextConfig: NEXT_CONFIG })).toBe(false);
   });
 });
 ```
@@ -4185,7 +4528,7 @@ Create `ts/apps/iam-console/lib/auth.ts`:
 // SPDX-License-Identifier: Apache-2.0
 //
 // The auth composition root (spec § 4.2). getAuthRuntime is a PROCESS singleton that returns a
-// Promise (ts/packages/paigasus-auth/src/runtime.ts:178), and its first call fixes the resolver and
+// Promise (ts/packages/paigasus-auth/src/runtime.ts:185), and its first call fixes the resolver and
 // the logger for the life of the process. Nothing here runs at module scope.
 //
 // Task 13 adds the Introspect principal resolver. Until then the package's claims resolver runs,
@@ -4249,7 +4592,7 @@ export const config = {
 
 Run the command of Step 3 again.
 
-Expected: `Test Files  2 passed (2)` and `Tests  11 passed (11)`. If only the case `sends a visitor with no cookie to login ONCE under the basePath …` fails with `expected '/auth/login' to be '/iam/auth/login'`, Task 5's middleware fix is missing: stop and complete Task 5 first. Do not change the test. (Measured in the session scratchpad: this is exactly how the case fails against the pre-Task 5 middleware.)
+Expected: `Test Files  2 passed (2)` and `Tests  19 passed (19)` (2 session-cookie cases; 8 proxy cases and 9 `config.matcher` cases). If only the case `sends a visitor with no cookie to login ONCE under the basePath …` fails with `expected '/auth/login' to be '/iam/auth/login'`, Task 5's middleware fix is missing: stop and complete Task 5 first. Do not change the test. (Measured in the session scratchpad: this is exactly how the case fails against the pre-Task 5 middleware.)
 
 - [ ] **Step 7: Rewrite the standalone-runtime test for `/iam/healthz`**
 
@@ -4487,7 +4830,7 @@ Create `ts/apps/iam-console/app/(public)/page.tsx`:
 // `/iam/` — the landing page (spec § 3.3). It checks only that the session cookie EXISTS and never
 // resolves the session, so it needs no identity provider. A stale cookie therefore reaches
 // requireSession() in the (console) layout, which sends the browser to login. @paigasus/auth sends
-// `idp_error` and the default post-logout redirect here (server.ts:68-69, runtime.ts:123).
+// `idp_error` and the default post-logout redirect here (server.ts:112-113, runtime.ts:129).
 //
 // redirect('/orgs') is basePath-relative: Next adds /iam exactly once (spec § 13 #1).
 import type { ReactElement } from 'react';
@@ -4618,11 +4961,17 @@ Run:
 
 ```bash
 export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
+pnpm -C ts exec prettier --write apps/iam-console/lib/auth.ts apps/iam-console/proxy.ts \
+  'apps/iam-console/app/auth/[...auth]/route.ts' 'apps/iam-console/app/(public)/layout.tsx' \
+  'apps/iam-console/app/(public)/page.tsx' apps/iam-console/app/healthz/route.ts \
+  apps/iam-console/app/layout.tsx apps/iam-console/app/providers.tsx apps/iam-console/moon.yml moon.yml \
+  apps/iam-console/tests/unit/session-cookie.test.ts apps/iam-console/tests/unit/proxy.test.ts \
+  apps/iam-console/tests/standalone-runtime.test.ts
 moon run iam-console-ts:test iam-console-ts:typecheck
 moon run ts:lint ts:fmt --force
 ```
 
-Expected: exit 0. This is the FIRST `next build` that compiles `@paigasus/auth/server` and `@paigasus/discovery/server` (Task 3 made their relative imports extensionless). A `Module not found: Can't resolve './….js'` here means Task 3 missed a specifier: fix it in that package, not here. `next build` lists the routes `/`, `/auth/[...auth]` and `/healthz` as dynamic (`ƒ`). The standalone test prints `2 passed`. The Tailwind guard still finds both of its sentinels: `@source` scans the `@paigasus/ui` source, so the deleted `Table` page does not matter (spec § 3.3).
+Expected: exit 0. Prettier first formats every `ts/` file this task creates or edits (the Global Constraints). It takes the bracket and parenthesis paths literally, because each path exists (measured with Prettier 3.9.6). This is the FIRST `next build` that compiles `@paigasus/auth/server` and `@paigasus/discovery/server` (Task 3 made their relative imports extensionless). A `Module not found: Can't resolve './….js'` here means Task 3 missed a specifier: fix it in that package, not here. `next build` lists the routes `/`, `/auth/[...auth]` and `/healthz` as dynamic (`ƒ`). The standalone test prints `2 passed`. The Tailwind guard still finds both of its sentinels: `@source` scans the `@paigasus/ui` source, so the deleted `Table` page does not matter (spec § 3.3).
 
 - [ ] **Step 12: Commit**
 
@@ -4664,6 +5013,7 @@ The integration tier (Tasks 12–19) and the e2e tier (Tasks 21–22) need IAM, 
 - Test: `ts/apps/iam-console/tests/integration/doubles/fake-iam.test.ts`
 - Test: `ts/apps/iam-console/tests/integration/doubles/fake-idp.test.ts`
 - Test: `ts/apps/iam-console/tests/integration/doubles/tls-terminator.test.ts`
+- Test: `ts/apps/iam-console/tests/integration/doubles/tls.test.ts`
 - Test: `ts/apps/iam-console/tests/integration/doubles/msw.test.ts`
 
 **Interfaces:**
@@ -4671,7 +5021,7 @@ The integration tier (Tasks 12–19) and the e2e tier (Tasks 21–22) need IAM, 
 - Produces (the contract, plus the per-method handler types, `FakeIamCall.correlationId`, `principalPrnFor(token)` and the `https://127.0.0.1:<port>` origins that this task adds):
   - `fake-iam.ts` → `startFakeIam(opts?)`, `denial(opts?)`, `type FakeIam`, `type FakeIamCall`, `type FakeIamHandlers`, `type FakeIamMethod`, `type FakeIamContext`, `type ServiceDescriptorBody`, `IAM_ERROR_DOMAIN`, `FAKE_IAM_ISSUER`.
   - `fake-idp.ts` → `startFakeIdp({ cert, subject? })`, `type FakeIdp`.
-  - `tls.ts` → `testTls()`, `type TlsMaterial`.
+  - `tls.ts` → `testTls(opts?)`, `type TlsMaterial`. Every caller except `tls.test.ts` calls `testTls()` with no argument.
   - `tls-terminator.ts` → `startTlsTerminator({ target, tls })`.
   - `msw.ts` → `serviceInfoHandlers(httpUrl, body)`.
   - `https-client.ts` → `httpsRequest(url, tls, init?)`, `type HttpsResponse` (for self-tests and e2e helpers).
@@ -4820,7 +5170,7 @@ Create `ts/apps/iam-console/tests/support/fake-iam.ts`:
 // h2c for the five services the console calls, and a plain HTTP server for `GET /v1/service-info`,
 // which @paigasus/discovery probes.
 //
-// It BEHAVES LIKE IAM in the ways the console depends on, and each behaviour names its source:
+// It copies these IAM behaviours, which the console depends on. Each one names its source:
 //   - Introspect is exempt from bearer enforcement and never provisions. It answers
 //     `identity-not-provisioned` until the token has made one bearer-enforced call
 //     (rs/crates/services/paigasus-iam/src/adapters/grpc/authn.rs:139-141, :178;
@@ -4828,11 +5178,24 @@ Create `ts/apps/iam-console/tests/support/fake-iam.ts`:
 //   - EVERY other RPC is bearer-enforced, and provisions the token (authn.rs:182-190). So does the
 //     HTTP route (adapters/http/service_info.rs:10, auth_middleware.rs:54).
 //   - Introspect always returns an empty `role_grants` (authenticate_token.rs:161-165).
-//   - An incoming `paigasus-correlation-id` is adopted when it parses as a UUID, else one is minted
-//     (rs/crates/libs/paigasus-observability/src/correlation.rs:103-119). Every error carries it in
+//   - On a gRPC call, an incoming `paigasus-correlation-id` in the HYPHENATED UUID form (8-4-4-4-12
+//     hex digits, any case) is adopted and echoed in lower case. Any other value, and a missing
+//     header, gets a minted id. Every gRPC error carries the id in
 //     `ErrorInfo.metadata["correlation_id"]` (adapters/grpc/convert.rs:59-74).
 //   - A denial is `PermissionDenied` + `ErrorInfo(domain "iam.paigasus.io", reason "forbidden",
 //     metadata { retryable: "false" })` (convert.rs:111-131).
+//
+// Where the fake does LESS than IAM. No current test depends on these differences. A new test that
+// needs one of them must extend the fake first, or it tests the fake and not IAM:
+//   - IAM adopts every form that `Uuid::parse_str` accepts: hyphenated, simple (32 hex digits),
+//     braced and `urn:uuid:` (rs/crates/libs/paigasus-observability/src/correlation.rs:103-119). It
+//     echoes the hyphenated lower-case form. The fake adopts only the hyphenated form, so it mints a
+//     new id where IAM keeps a simple, braced or `urn:uuid:` id.
+//   - IAM mints a UUIDv7 (correlation.rs:94-101). The fake mints a UUIDv4 (`randomUUID()`).
+//   - IAM also puts `request_id` in `ErrorInfo.metadata` (convert.rs:69-72) and sets a
+//     `paigasus-request-id` response header (correlation.rs:174). The fake sets no `request_id`.
+//   - IAM's HTTP routes run the same correlation layer. The fake's HTTP route only records the
+//     incoming header; it adopts, mints and echoes no id.
 //
 // It imports NO `server-only` module. The Playwright e2e harness (a worker-scoped fixture) loads it
 // under plain Node, where `server-only` resolves to its throwing default export. That is why the service descriptors come
@@ -5125,7 +5488,7 @@ Run the command of Step 2 again.
 
 Expected: `Tests  7 passed (7)`. The denial case proves the whole trailer path: `mapError` reads `presentation: 'forbidden'`, `reason: ErrorReason.FORBIDDEN`, `domain: ErrorDomain.IAM`, `retryable: false` and the correlation id that the call SENT, which the fake adopted.
 
-- [ ] **Step 5: Write the failing self-tests for the IdP and the terminator**
+- [ ] **Step 5: Write the failing self-tests for the IdP, the terminator and the certificate helper**
 
 Create `ts/apps/iam-console/tests/integration/doubles/fake-idp.test.ts`:
 
@@ -5288,11 +5651,61 @@ describe('the TLS terminator', () => {
 });
 ```
 
+Create `ts/apps/iam-console/tests/integration/doubles/tls.test.ts`. It proves the property that the parallel test workers rely on: a process that replaces an expiring pair never deletes or changes the pair that another process already holds. Two single-line mutations of Step 6's `tls.ts` turn it red (measured on a scratch copy of this code, vitest 5.0.0). A `rmSync` of the published pair before `generate()` fails the second case with `ENOENT` on the held `cert.pem`. A missing `publish()` fails its last `toEqual`.
+
+```ts
+// SPDX-License-Identifier: Apache-2.0
+//
+// The certificate helper's self-test. It uses its OWN root, so it never touches the pair that the
+// other doubles use. The rotation case is the parallel-worker race in sequential form: a process
+// that finds the published pair expiring must publish a new pair, and must not delete or change the
+// pair that another process already holds.
+import { createPrivateKey, X509Certificate } from 'node:crypto';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { afterAll, describe, expect, it } from 'vitest';
+import { testTls, type TlsMaterial } from '../../support/tls';
+
+const root = mkdtempSync(path.join(os.tmpdir(), 'paigasus-iam-console-tls-selftest-'));
+afterAll(() => rmSync(root, { recursive: true, force: true }));
+
+/** The files on disk are the pair in memory, and the key belongs to the cert. */
+function expectIntact(tls: TlsMaterial): void {
+  expect(readFileSync(tls.certPath, 'utf8')).toBe(tls.cert);
+  expect(readFileSync(tls.keyPath, 'utf8')).toBe(tls.key);
+  expect(new X509Certificate(tls.cert).checkPrivateKey(createPrivateKey(tls.key))).toBe(true);
+}
+
+describe('testTls', () => {
+  it('reuses the published pair while it stays valid', () => {
+    const first = testTls({ root });
+    const second = testTls({ root });
+    expect(second).toEqual(first);
+    expectIntact(second);
+  });
+
+  it('publishes a new pair when the current one expires, and leaves the held pair intact', () => {
+    const held = testTls({ root });
+    // Two days is longer than the one-day cert lives, so the published pair counts as expiring.
+    const rotated = testTls({ root, minValidSeconds: 2 * 86_400 });
+    expect(rotated.certPath).not.toBe(held.certPath);
+    expect(rotated.cert).not.toBe(held.cert);
+    expectIntact(held);
+    expectIntact(rotated);
+    // The pointer moved: a call with the default threshold now reuses the new pair.
+    expect(testTls({ root })).toEqual(rotated);
+  });
+});
+```
+
+The test is sequential. It does not start parallel processes, so it does not prove the race-free publication by itself. That part comes from the design: a pair directory is complete before its name is published, and no code deletes or rewrites a published directory. A one-off stress run of this `tls.ts` (10 parallel processes, 30 calls, half of them forcing rotation) returned 30 intact pairs, and all 30 were still on disk at the end.
+
 Run:
 
 ```bash
 export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
-pnpm -C ts/apps/iam-console exec vitest run tests/integration/doubles/fake-idp.test.ts tests/integration/doubles/tls-terminator.test.ts
+pnpm -C ts/apps/iam-console exec vitest run tests/integration/doubles/fake-idp.test.ts tests/integration/doubles/tls-terminator.test.ts tests/integration/doubles/tls.test.ts
 ```
 
 Expected: FAIL. `../../support/fake-idp`, `../../support/tls`, `../../support/https-client` and `../../support/tls-terminator` cannot be resolved.
@@ -5308,81 +5721,142 @@ Create `ts/apps/iam-console/tests/support/tls.ts`:
 // ts/packages/paigasus-auth/tests/e2e/tls-fixture.ts, and COPIED rather than imported: one
 // package's tests must not import another package's tests (spec § 9.1).
 //
-// The pair lives at a FIXED path under os.tmpdir(), so the path is known before any server process
-// starts: the e2e tier passes it to the standalone server as NODE_EXTRA_CA_CERTS, which Node reads
-// once, at process start.
+// Vitest runs test files in parallel processes, and Playwright runs parallel workers, so two
+// processes can call testTls() at the same moment. The layout under the root is:
+//   - `pair-<pid>-<random>/cert.pem` and `key.pem`: one pair per directory. A process generates
+//     into a NEW directory that no other process knows about, and publishes it only when openssl
+//     has written both files.
+//   - `current`: a pointer file that holds the NAME of the published pair directory. A process
+//     publishes by writing a scratch pointer and then one `renameSync` over `current`. The rename
+//     replaces the file atomically, so a reader sees the old name or the new name, never a mix.
 //
-// Vitest runs test files in parallel processes, so two of them can generate at the same moment.
-// Each one writes into its own temporary directory and RENAMES that directory into place. A rename
-// onto an existing directory fails, so exactly one pair wins and the key always matches the cert.
+// What the code guarantees:
+//   - testTls() never returns a half-written pair. It reads the pointer ONCE and then reads both
+//     files from the directory that the pointer named.
+//   - No code deletes, moves or rewrites a pair directory after it is published. An expired pair
+//     stays where it is; only the pointer moves to the new pair. So `certPath` and `keyPath` hold
+//     the same pair as the returned `cert` and `key`, even after a peer publishes a newer pair.
+//     This matters for the e2e tier: it passes `certPath` to the standalone server as
+//     NODE_EXTRA_CA_CERTS, which Node reads once, at process start.
+//   - When two processes generate at the same moment, both publish, and the LAST rename wins the
+//     pointer. Each process still returns its own complete pair. Each current caller uses one
+//     TlsMaterial for both the server and the client that trusts it, so two pairs do no harm.
+// What it does not guarantee: one pair per day (a race costs one extra pair), and a clean root.
+// Old pair directories stay under os.tmpdir() until the OS cleans that directory.
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
 export type TlsMaterial = { certPath: string; keyPath: string; cert: string; key: string };
 
-const TLS_ROOT = path.join(os.tmpdir(), 'paigasus-iam-console-tls');
-const CURRENT = path.join(TLS_ROOT, 'current');
-const CERT_PATH = path.join(CURRENT, 'cert.pem');
-const KEY_PATH = path.join(CURRENT, 'key.pem');
+/** The root every caller uses. Only the self-test passes its own root. */
+const DEFAULT_TLS_ROOT = path.join(os.tmpdir(), 'paigasus-iam-console-tls');
+
+/** A published pair is reused only while it stays valid for this many more seconds. */
+const MIN_VALID_SECONDS = 300;
+
+const PAIR_PREFIX = 'pair-';
+
+function pointerPath(root: string): string {
+  return path.join(root, 'current');
+}
+
+/** The pair directory that the pointer names, or null when there is no usable pointer. */
+function publishedPair(root: string): string | null {
+  let name: string;
+  try {
+    name = readFileSync(pointerPath(root), 'utf8');
+  } catch {
+    return null;
+  }
+  // This module writes a bare directory name. Any other content is not a pointer it wrote.
+  if (!name.startsWith(PAIR_PREFIX) || path.basename(name) !== name) return null;
+  return path.join(root, name);
+}
 
 /**
- * `-checkend 300`: reuse the pair only while it stays valid for five more minutes. The cert lives
- * one day at a fixed path, so a plain existence check would reuse an expired cert on day two and
- * fail with an opaque TLS error.
+ * `-checkend`: reuse a pair only while it stays valid for `minValidSeconds` more seconds. The cert
+ * lives one day, so a plain existence check would reuse an expired cert on day two and fail with
+ * an opaque TLS error.
  */
-function stillValid(): boolean {
-  if (!existsSync(CERT_PATH) || !existsSync(KEY_PATH)) return false;
+function stillValid(dir: string, minValidSeconds: number): boolean {
+  const certPath = path.join(dir, 'cert.pem');
+  if (!existsSync(certPath) || !existsSync(path.join(dir, 'key.pem'))) return false;
   try {
-    execFileSync('openssl', ['x509', '-in', CERT_PATH, '-checkend', '300', '-noout']);
+    execFileSync('openssl', ['x509', '-in', certPath, '-checkend', String(minValidSeconds), '-noout']);
     return true;
   } catch {
     return false;
   }
 }
 
-function generate(): void {
-  const scratch = mkdtempSync(path.join(TLS_ROOT, 'gen-'));
-  execFileSync(
-    'openssl',
-    [
-      'req',
-      '-x509',
-      '-newkey',
-      'rsa:2048',
-      '-nodes',
-      '-keyout',
-      path.join(scratch, 'key.pem'),
-      '-out',
-      path.join(scratch, 'cert.pem'),
-      '-days',
-      '1',
-      '-subj',
-      '/CN=localhost',
-      '-addext',
-      'subjectAltName=DNS:localhost,IP:127.0.0.1',
-    ],
-    { stdio: 'ignore' },
-  );
+/** Writes a complete pair into a NEW directory and returns it. The directory is not published yet. */
+function generate(root: string): string {
+  const dir = mkdtempSync(path.join(root, `${PAIR_PREFIX}${String(process.pid)}-`));
   try {
-    renameSync(scratch, CURRENT);
-  } catch {
-    // Another process renamed its pair into place first. Use that one.
-    rmSync(scratch, { recursive: true, force: true });
+    execFileSync(
+      'openssl',
+      [
+        'req',
+        '-x509',
+        '-newkey',
+        'rsa:2048',
+        '-nodes',
+        '-keyout',
+        path.join(dir, 'key.pem'),
+        '-out',
+        path.join(dir, 'cert.pem'),
+        '-days',
+        '1',
+        '-subj',
+        '/CN=localhost',
+        '-addext',
+        'subjectAltName=DNS:localhost,IP:127.0.0.1',
+      ],
+      { stdio: 'ignore' },
+    );
+    if (!stillValid(dir, MIN_VALID_SECONDS)) throw new Error(`testTls: openssl wrote no valid certificate in ${dir}`);
+    return dir;
+  } catch (error) {
+    // The directory is not published, so no other process knows its name. Removing it is safe.
+    rmSync(dir, { recursive: true, force: true });
+    throw error;
   }
 }
 
-export function testTls(): TlsMaterial {
-  mkdirSync(TLS_ROOT, { recursive: true });
-  if (!stillValid()) {
-    rmSync(CURRENT, { recursive: true, force: true });
-    generate();
-  }
-  if (!stillValid()) throw new Error(`testTls: no valid certificate at ${CERT_PATH} after generation`);
-  return { certPath: CERT_PATH, keyPath: KEY_PATH, cert: readFileSync(CERT_PATH, 'utf8'), key: readFileSync(KEY_PATH, 'utf8') };
+/** Points `current` at `dir`: a scratch pointer, then ONE atomic rename over the real one. */
+function publish(root: string, dir: string): void {
+  const scratch = path.join(root, `current-${String(process.pid)}-${randomBytes(8).toString('hex')}.tmp`);
+  writeFileSync(scratch, path.basename(dir));
+  renameSync(scratch, pointerPath(root));
+}
+
+function load(dir: string): TlsMaterial {
+  const certPath = path.join(dir, 'cert.pem');
+  const keyPath = path.join(dir, 'key.pem');
+  return { certPath, keyPath, cert: readFileSync(certPath, 'utf8'), key: readFileSync(keyPath, 'utf8') };
+}
+
+/**
+ * The test certificate pair. It reuses the published pair while that pair stays valid for
+ * `minValidSeconds` more seconds (default 300). Otherwise it generates a pair, publishes it and
+ * returns it. `root` and `minValidSeconds` are for the self-test; other callers pass nothing.
+ */
+export function testTls(opts: { root?: string; minValidSeconds?: number } = {}): TlsMaterial {
+  const root = opts.root ?? DEFAULT_TLS_ROOT;
+  const minValidSeconds = opts.minValidSeconds ?? MIN_VALID_SECONDS;
+  mkdirSync(root, { recursive: true });
+  const current = publishedPair(root);
+  if (current !== null && stillValid(current, minValidSeconds)) return load(current);
+  const fresh = generate(root);
+  publish(root, fresh);
+  return load(fresh);
 }
 ```
+
+The `rmSync` in `generate()` is the only delete in the file. It removes a directory that failed before publication, so no other process can hold its name.
 
 Create `ts/apps/iam-console/tests/support/https-client.ts`:
 
@@ -5723,11 +6197,11 @@ export async function startTlsTerminator(opts: { target: string; tls: TlsMateria
 }
 ```
 
-- [ ] **Step 9: Run the two self-tests and see them pass**
+- [ ] **Step 9: Run the three self-tests and see them pass**
 
 Run the command of Step 5 again.
 
-Expected: `Test Files  2 passed (2)` and `Tests  7 passed (7)`. `openssl` writes the certificate once, under `$TMPDIR/paigasus-iam-console-tls/current/`.
+Expected: `Test Files  3 passed (3)` and `Tests  9 passed (9)`. On a fresh machine, `openssl` writes a pair into `$TMPDIR/paigasus-iam-console-tls/pair-<pid>-<random>/`, and the pointer file `$TMPDIR/paigasus-iam-console-tls/current` names that directory. If the two IdP and terminator files start at the same moment, each can write its own pair. `tls.test.ts` uses its own root under `$TMPDIR` and removes it at the end.
 
 - [ ] **Step 10: Write the failing MSW self-test**
 
@@ -5812,18 +6286,24 @@ Run the command of Step 10 again.
 
 Expected: `Tests  3 passed (3)`.
 
-- [ ] **Step 12: Run every double's self-test, the type-check and the lint**
+- [ ] **Step 12: Format the files, then run every double's self-test, the type-check and the lint**
 
 Run:
 
 ```bash
 export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
+pnpm -C ts exec prettier --write apps/iam-console/tests/support/fake-iam.ts apps/iam-console/tests/support/tls.ts \
+  apps/iam-console/tests/support/https-client.ts apps/iam-console/tests/support/fake-idp.ts \
+  apps/iam-console/tests/support/tls-terminator.ts apps/iam-console/tests/support/msw.ts \
+  apps/iam-console/tests/integration/doubles/fake-iam.test.ts apps/iam-console/tests/integration/doubles/fake-idp.test.ts \
+  apps/iam-console/tests/integration/doubles/tls-terminator.test.ts apps/iam-console/tests/integration/doubles/tls.test.ts \
+  apps/iam-console/tests/integration/doubles/msw.test.ts
 pnpm -C ts/apps/iam-console exec vitest run tests/integration/doubles
 moon run iam-console-ts:typecheck
 moon run ts:lint ts:fmt --force
 ```
 
-Expected: `Test Files  4 passed (4)`, `Tests  17 passed (17)`; then exit 0. `ts:lint` accepts the `@paigasus/proto` imports in `tests/support/` because Task 7 exempts that directory from the `apps` boundary rule. It would refuse the same import in any other app file.
+Expected: `prettier --write` lists the eleven files; then `Test Files  5 passed (5)`, `Tests  19 passed (19)`; then exit 0. `ts:lint` accepts the `@paigasus/proto` imports in `tests/support/` because Task 7 exempts that directory from the `apps` boundary rule. It would refuse the same import in any other app file.
 
 - [ ] **Step 13: Commit**
 
@@ -5875,13 +6355,13 @@ This task writes the request-scoped IAM clients (spec § 4.3), the one call wrap
 - Test: `ts/apps/iam-console/tests/unit/error-copy.test.ts`
 - Test: `ts/apps/iam-console/tests/unit/correlation.test.ts`
 - Test: `ts/apps/iam-console/tests/unit/call-iam.test.ts`
-- Test: `ts/apps/iam-console/tests/unit/proxy.test.ts` (two more cases)
+- Test: `ts/apps/iam-console/tests/unit/proxy.test.ts` (three more cases)
 - Test: `ts/apps/iam-console/tests/unit/error-views.test.tsx`
 - Test: `ts/apps/iam-console/tests/unit/error-boundaries.test.tsx`
 - Test: `ts/apps/iam-console/tests/integration/error-info-round-trip.test.ts`
 
 **Interfaces:**
-- Consumes: `createIamClient`, `TenancyService`, `AuthnService`, `AuthorizationService`, `AuditService`, `ServiceInfoService` (`@paigasus/sdk/iam`; `ServiceInfoService` after Task 6); `mapError`, `type PaigasusError` (`@paigasus/sdk/errors`); `ErrorReason`, `type Presentation` (`@paigasus/sdk/errors/types`, the client-safe entry); `requireSession`, `type ResolvedSession` (`@paigasus/auth/server`); `authRuntime` (Task 10); `getRuntimeConfig`, `logger` (Task 9); `startFakeIam`, `denial` (Task 11).
+- Consumes: `createIamClient`, `TenancyService`, `AuthnService`, `AuthorizationService`, `AuditService`, `ServiceInfoService` (`@paigasus/sdk/iam`; `ServiceInfoService` after Task 6); `mapError`, `type PaigasusError` (`@paigasus/sdk/errors`); `ErrorReason`, `type Presentation` (`@paigasus/sdk/errors/types`, the client-safe entry); `requireSession`, `type ResolvedSession` (`@paigasus/auth/server`); `type DescService` (`@bufbuild/protobuf`, a type-only import in `lib/iam-clients.ts`; Task 9 lists the package under `dependencies` because this `lib/` file imports it); `authRuntime` (Task 10); `getRuntimeConfig`, `logger` (Task 9); `startFakeIam`, `denial` (Task 11).
 - Produces: `lib/correlation.ts` → `CORRELATION_HEADER`, `REQUEST_PATH_HEADER`, `requestCorrelationId()`, `requestPath()`, `FORBIDDEN_VIEW_CORRELATION: 'header' | 'fallback'` (set by the Step 19 measurement). `lib/errors.ts` → `type IamResult<T>`, `type ActionState`, `callIam(fn)`. `lib/iam.ts` → `type IamClients`, `createIamClients(opts)`, `iamClientsForToken(token, correlationId?)`, `currentSession()`, `iamClients()`, `sessionToken()`. `app/_components/error-copy.ts` → `PRESENTATION_COPY`, `FORM_REASON_COPY`, `formMessage(error)`. `PageError`, `SectionError` (async server components), `FormError` (client), `CorrelationReference`, `SignInAgain`. The 403 view carries `data-testid="forbidden-view"` and the id `data-testid="correlation-id"`.
 
 > Handoff to Tasks 16–19: a page renders `if (!result.ok) return <PageError error={result.error} />;` for a page read and `<SectionError error={…} />` for a section read. A form renders `<FormError error={state?.ok === false ? state.error : null} />`. Do NOT add a `loading.tsx` under `app/(console)/`: its Suspense boundary would let Next commit status 200 before `forbidden()` throws, and the 403 status would be lost. In vitest, `revalidatePath` is the recorder in `tests/support/next-cache.ts` (`revalidatedPaths`), and React `cache()` does not memoize.
@@ -5980,6 +6460,13 @@ describe('the error copy', () => {
       expect(formMessage(errorWith(presentation, null))).not.toContain('IAM text');
     }
   });
+
+  it('gives a form the spec § 6.1 "not enabled" copy for a disabled capability, and other copy for an inactive principal', () => {
+    expect(formMessage(errorWith('disabled', ErrorReason.CAPABILITY_DISABLED))).toBe('This feature is not enabled on this IAM.');
+    const inactive = formMessage(errorWith('disabled', ErrorReason.PRINCIPAL_INACTIVE));
+    expect(inactive).toBe('Your account is not active in IAM.');
+    expect(inactive).not.toContain('not enabled');
+  });
 });
 ```
 
@@ -6035,6 +6522,11 @@ export const FORM_REASON_COPY: Partial<Record<ErrorReason, string>> = {
   [ErrorReason.NOT_FOUND]: 'The item was not found. It may have been removed.',
   [ErrorReason.MISSING_REQUIRED_FIELD]: 'Fill in every required field.',
   [ErrorReason.FORBIDDEN]: 'You do not have permission to do this.',
+  // The SDK maps TWO reasons to the `disabled` presentation (ts/packages/paigasus-sdk/src/errors/presentation.ts:49,74).
+  // Spec § 6.1 gives a Server Action the same "not enabled" copy as a page, so a disabled capability
+  // shows it. An inactive principal is not a disabled feature, so it gets its own sentence.
+  [ErrorReason.CAPABILITY_DISABLED]: 'This feature is not enabled on this IAM.',
+  [ErrorReason.PRINCIPAL_INACTIVE]: 'Your account is not active in IAM.',
 };
 
 /** The one sentence a form shows for an error. */
@@ -6044,7 +6536,7 @@ export function formMessage(error: PaigasusError): string {
 }
 ```
 
-Run the command of Step 3 again. Expected: `Tests  4 passed (4)`.
+Run the command of Step 3 again. Expected: `Tests  5 passed (5)`.
 
 - [ ] **Step 5: Write the failing correlation test**
 
@@ -6108,7 +6600,7 @@ import 'server-only';
 export const CORRELATION_HEADER = 'paigasus-correlation-id';
 
 /** The public path of the console request, with the basePath and without the query. */
-export const REQUEST_PATH_HEADER = 'paigasus-console-path';
+export const REQUEST_PATH_HEADER = 'x-paigasus-request-path';
 ```
 
 Create `ts/apps/iam-console/lib/correlation.ts`:
@@ -6227,7 +6719,7 @@ describe('callIam', () => {
 
   it('logs one iam.call_failed line with both correlation ids and the path, and never the message', async () => {
     const spy = vi.spyOn(logger, 'appEvent').mockImplementation(() => undefined);
-    setRequestHeaders({ 'paigasus-correlation-id': '0198f2c1-8888-7000-8000-000000000001', 'paigasus-console-path': '/iam/orgs' });
+    setRequestHeaders({ 'paigasus-correlation-id': '0198f2c1-8888-7000-8000-000000000001', 'x-paigasus-request-path': '/iam/orgs' });
     await callIam(() => Promise.reject(new ConnectError('secret internal detail', Code.PermissionDenied)));
     expect(spy).toHaveBeenCalledTimes(1);
     const [name, fields] = spy.mock.calls[0] ?? [];
@@ -6348,14 +6840,18 @@ describe('the ErrorInfo round trip', () => {
   });
 
   it('sends the correlation header from every one of the five clients', async () => {
-    fake.provisioned.add('token-a');
     const clients = createIamClients({ baseUrl: fake.grpcUrl, token: 'token-a', correlationId: REQUEST_ID });
+    // Some calls fail (the beforeEach handler denies getOrganization, and the fake has no default
+    // for listAuditEntries). That does not matter here: the fake records each call as it ARRIVED,
+    // before it runs a handler, so the header of every call is in fake.calls.
+    await callIam(() => clients.tenancy.getOrganization({ prn: ORG }));
     await callIam(() => clients.serviceInfo.getServiceInfo({}));
     await callIam(() => clients.authn.introspect({ token: 'token-a' }));
     await callIam(() => clients.authz.isAuthorized({ principalPrn: fake.principalPrnFor('token-a'), action: 'ListOrganizations', resourcePrn: ORG }));
     await callIam(() => clients.audit.listAuditEntries({}));
     const sent = fake.calls.map((call) => [call.method, call.correlationId]);
     expect(sent).toEqual([
+      ['tenancy.getOrganization', REQUEST_ID],
       ['serviceInfo.getServiceInfo', REQUEST_ID],
       ['authn.introspect', REQUEST_ID],
       ['authz.isAuthorized', REQUEST_ID],
@@ -6392,7 +6888,7 @@ Create `ts/apps/iam-console/lib/iam-clients.ts`:
 // lib/auth.ts uses iamClientsForToken for the login callback, where no session exists yet. The two
 // files are separate so lib/auth.ts and lib/iam.ts do not import each other.
 //
-// No client and no token lives past the request (ts/packages/paigasus-sdk/src/iam.ts:19-24). Only
+// No client and no token lives past the request (ts/packages/paigasus-sdk/src/iam.ts:23-28). Only
 // the SDK's transport is process-scoped.
 import 'server-only';
 import type { DescService } from '@bufbuild/protobuf';
@@ -6456,7 +6952,7 @@ Create `ts/apps/iam-console/lib/iam.ts`:
 //
 // The session-bound IAM clients (spec § 4.3). Every accessor is a React cache(), so it runs once
 // per request and never longer: a client holds a bearer token, and a token must not outlive its
-// request (ts/packages/paigasus-sdk/src/iam.ts:19-24).
+// request (ts/packages/paigasus-sdk/src/iam.ts:23-28).
 //
 // NOTE: outside a React server render (vitest, a plain script) cache() does NOT memoize — React's
 // default build exports a pass-through (measured on react 19.2.8). Tests must not rely on it.
@@ -6485,7 +6981,7 @@ export const sessionToken: () => Promise<string> = cache(async () => (await curr
 
 Run the command of Step 9 again. Expected: `Tests  3 passed (3)`. The first case is the ErrorInfo trailer round trip of spec § 9.3 over a real h2c connection; the second proves that all five clients send the correlation header.
 
-- [ ] **Step 11: Extend the proxy test for the two request headers**
+- [ ] **Step 11: Extend the proxy test for the two request headers and the import list**
 
 Replace `ts/apps/iam-console/tests/unit/proxy.test.ts` with:
 
@@ -6494,13 +6990,25 @@ Replace `ts/apps/iam-console/tests/unit/proxy.test.ts` with:
 //
 // proxy.ts under the real basePath (spec § 7.5, § 13 #1). A NextRequest built with
 // `nextConfig: { basePath: '/iam' }` strips the basePath from nextUrl.pathname exactly as Next does.
+import { readFileSync } from 'node:fs';
 import { NextRequest } from 'next/server';
+import ts from 'typescript';
 import { describe, expect, it } from 'vitest';
 import { SESSION_COOKIE_NAME } from '../../lib/auth';
 import { config, proxy } from '../../proxy';
 
 const ORIGIN = 'https://console.example.test';
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+
+/**
+ * Every module specifier a source file imports, sorted and without duplicates. TypeScript's own
+ * pre-processor reads them: static, type-only, side-effect, re-export, dynamic and require forms,
+ * and never an import inside a comment.
+ */
+function importsOf(relative: string): string[] {
+  const source = readFileSync(new URL(relative, import.meta.url), 'utf8');
+  return [...new Set(ts.preProcessFile(source, true, true).importedFiles.map((file) => file.fileName))].sort();
+}
 
 function request(path: string, init: { cookie?: boolean; headers?: Record<string, string> } = {}): NextRequest {
   const headers = new Headers(init.headers);
@@ -6543,11 +7051,20 @@ describe('proxy', () => {
 
   it('records the public path, with the basePath and without the query', () => {
     const res = proxy(request('/iam/orgs/abc?offset=50', { cookie: true }));
-    expect(forwarded(res, 'paigasus-console-path')).toBe('/iam/orgs/abc');
+    expect(forwarded(res, 'x-paigasus-request-path')).toBe('/iam/orgs/abc');
   });
 
   it('excludes static assets through a matcher written WITHOUT the basePath (spec § 13 #4)', () => {
     expect(config.matcher).toEqual(['/((?!_next/static|_next/image|favicon.ico).*)']);
+  });
+
+  // The proxy's allowed imports, as a strict-equality list. `server-only` is a no-op in the proxy layer,
+  // and paigasus/boundaries/app-middleware is a DENY list of direct specifiers. So one import added to
+  // lib/correlation-header.ts (for example ./iam-clients, which reaches the sdk) would enter the
+  // proxy bundle with no lint error. Here it fails.
+  it('imports only the allowed modules in proxy.ts and lib/correlation-header.ts', () => {
+    expect(importsOf('../../proxy.ts')).toEqual(['./lib/correlation-header', '@paigasus/auth/middleware', 'next/server']);
+    expect(importsOf('../../lib/correlation-header.ts')).toEqual(['server-only']);
   });
 });
 ```
@@ -6559,7 +7076,7 @@ export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
 pnpm -C ts/apps/iam-console exec vitest run tests/unit/proxy.test.ts
 ```
 
-Expected: FAIL in the two new cases: `x-middleware-request-paigasus-correlation-id` and `x-middleware-request-paigasus-console-path` are `null`.
+Expected: FAIL in the three new cases. `x-middleware-request-paigasus-correlation-id` and `x-middleware-request-x-paigasus-request-path` are `null`. The import list of `proxy.ts` is `['@paigasus/auth/middleware', 'next/server']`: `./lib/correlation-header` is missing.
 
 - [ ] **Step 12: Mint the correlation id in the proxy**
 
@@ -6609,7 +7126,7 @@ export const config = {
 };
 ```
 
-Run the command of Step 11 again. Expected: `Tests  11 passed (11)`.
+Run the command of Step 11 again. Expected: `Tests  12 passed (12)`.
 
 - [ ] **Step 13: Write the failing test for the error views and the 403 view**
 
@@ -6689,7 +7206,7 @@ describe('PageError', () => {
   });
 
   it('renders a "Sign in again" LINK with a returnTo for relogin, never a redirect', async () => {
-    setRequestHeaders({ 'paigasus-console-path': '/iam/orgs/abc' });
+    setRequestHeaders({ 'x-paigasus-request-path': '/iam/orgs/abc' });
     const html = render(await PageError({ error: errorWith('relogin') }));
     expect(html).toContain('href="/iam/auth/login?returnTo=%2Fiam%2Forgs%2Fabc"');
   });
@@ -6734,14 +7251,16 @@ describe('the 403 view', () => {
     expect(html).not.toContain('data-testid="correlation-id"');
   });
 
-  it.runIf(FORBIDDEN_VIEW_CORRELATION === 'header')('shows the correlation id proxy.ts set (the header route)', async () => {
+  // ONE case for both values of the constant, so no case is ever skipped. In 'header' mode it fails
+  // when the view stops reading the header; in 'fallback' mode it fails when the view shows the id.
+  it('shows the correlation id proxy.ts set in header mode, and no id in fallback mode (spec § 6.2)', async () => {
     setRequestHeaders({ 'paigasus-correlation-id': CID });
-    expect(render(await Forbidden())).toContain(`data-testid="correlation-id">${CID}<`);
-  });
-
-  it.runIf(FORBIDDEN_VIEW_CORRELATION === 'fallback')('shows no id even when the header is set (the spec § 6.2 fallback)', async () => {
-    setRequestHeaders({ 'paigasus-correlation-id': CID });
-    expect(render(await Forbidden())).not.toContain(CID);
+    const html = render(await Forbidden());
+    if (FORBIDDEN_VIEW_CORRELATION === 'header') {
+      expect(html).toContain(`data-testid="correlation-id">${CID}<`);
+    } else {
+      expect(html).not.toContain(CID);
+    }
   });
 });
 ```
@@ -6937,7 +7456,7 @@ export default async function Forbidden(): Promise<ReactElement> {
 }
 ```
 
-Run the command of Step 13 again. Expected: `Tests  16 passed | 1 skipped (17)`. `FORBIDDEN_VIEW_CORRELATION` starts as `'header'`, so `it.runIf` skips the fallback case; Step 19 measures whether `'header'` is true.
+Run the command of Step 13 again. Expected: `Tests  16 passed (16)`, with no skipped test. `FORBIDDEN_VIEW_CORRELATION` starts as `'header'`, so the id case asserts that the view shows the id. Step 19 measures whether `'header'` is true.
 
 - [ ] **Step 16: Write the failing test for the error boundaries, then the boundaries**
 
@@ -7090,15 +7609,26 @@ with:
 
 - [ ] **Step 18: Run the app's gates**
 
-Run:
+Run Prettier on every file this task creates or edits, then the gates:
 
 ```bash
 export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
+pnpm -C ts exec prettier --write apps/iam-console/next.config.ts apps/iam-console/proxy.ts apps/iam-console/moon.yml \
+  apps/iam-console/lib/correlation-header.ts apps/iam-console/lib/correlation.ts \
+  apps/iam-console/lib/errors.ts apps/iam-console/lib/iam-clients.ts apps/iam-console/lib/iam.ts \
+  apps/iam-console/app/_components/error-copy.ts apps/iam-console/app/_components/error-reference.tsx \
+  apps/iam-console/app/_components/page-error.tsx apps/iam-console/app/_components/section-error.tsx \
+  apps/iam-console/app/_components/form-error.tsx 'apps/iam-console/app/(console)/forbidden.tsx' \
+  'apps/iam-console/app/(console)/error.tsx' apps/iam-console/app/error.tsx apps/iam-console/app/global-error.tsx \
+  apps/iam-console/tests/unit/error-copy.test.ts apps/iam-console/tests/unit/correlation.test.ts \
+  apps/iam-console/tests/unit/call-iam.test.ts apps/iam-console/tests/unit/proxy.test.ts \
+  apps/iam-console/tests/unit/error-views.test.tsx apps/iam-console/tests/unit/error-boundaries.test.tsx \
+  apps/iam-console/tests/integration/error-info-round-trip.test.ts
 moon run iam-console-ts:test iam-console-ts:typecheck
 moon run ts:lint ts:fmt --force
 ```
 
-Expected: exit 0. `next build` accepts `experimental.authInterrupts` and compiles `app/(console)/forbidden.tsx`. The boundary rule for the proxy (Task 7) accepts `proxy.ts`: it imports `@paigasus/auth/middleware` and a relative `lib/correlation-header` only.
+Expected: exit 0. `next build` accepts `experimental.authInterrupts` and compiles `app/(console)/forbidden.tsx`. The boundary rule for the proxy (Task 7) accepts `proxy.ts`. It takes values only from `next/server` (`NextResponse`), `@paigasus/auth/middleware` and a relative `lib/correlation-header`, and `lib/correlation-header.ts` imports only `server-only` (the Global Constraints). The last case of `tests/unit/proxy.test.ts` asserts both import lists by strict equality, because the boundary rule is a deny list and cannot say "only".
 
 - [ ] **Step 19: Measure whether the 403 view can read the header (the objective check for `FORBIDDEN_VIEW_CORRELATION`)**
 
@@ -7188,11 +7718,13 @@ Keep the constant on ONE line in exactly this form: Task 22 reads it as text wit
 rm 'ts/apps/iam-console/app/(console)/correlation-probe/page.tsx' 'ts/apps/iam-console/app/(console)/layout.tsx'
 rmdir 'ts/apps/iam-console/app/(console)/correlation-probe'
 export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
+pnpm -C ts exec prettier --write apps/iam-console/lib/correlation.ts
 pnpm -C ts/apps/iam-console exec vitest run tests/unit/error-views.test.tsx
 moon run iam-console-ts:test
+moon run ts:fmt --force
 ```
 
-Expected: `Tests  16 passed | 1 skipped (17)` in both modes: `it.runIf` runs the one 403-view case that matches the constant and skips the other. Then `iam-console-ts:test` exits 0. `ls 'ts/apps/iam-console/app/(console)'` prints only `error.tsx` and `forbidden.tsx`.
+Step 19 can edit `lib/correlation.ts`, so Prettier runs on it again before the commit. Expected: `Tests  16 passed (16)` in both modes, with no skipped test: the one 403-view id case branches on the constant. Then `iam-console-ts:test` and `ts:fmt` exit 0. `ls 'ts/apps/iam-console/app/(console)'` prints only `error.tsx` and `forbidden.tsx`.
 
 - [ ] **Step 21: Commit**
 
@@ -7430,7 +7962,7 @@ Create `ts/apps/iam-console/lib/principal-resolver.ts`:
 // SPDX-License-Identifier: Apache-2.0
 //
 // @paigasus/auth's PrincipalResolver port, implemented over IAM (spec § 4.5). The login callback
-// calls it once (ts/packages/paigasus-auth/src/http/routes.ts:216), with the new access token.
+// calls it once (ts/packages/paigasus-auth/src/http/routes.ts:236), with the new access token.
 //
 // It lives in the APP because @paigasus/auth must not import @paigasus/sdk
 // (ts/packages/paigasus-auth/src/ports/principal-resolver.ts:3-8), and the sdk boundary rule bans
@@ -7504,7 +8036,7 @@ Replace `ts/apps/iam-console/lib/auth.ts` with:
 // SPDX-License-Identifier: Apache-2.0
 //
 // The auth composition root (spec § 4.2). getAuthRuntime is a PROCESS singleton that returns a
-// Promise (ts/packages/paigasus-auth/src/runtime.ts:178), and its first call fixes the resolver and
+// Promise (ts/packages/paigasus-auth/src/runtime.ts:185), and its first call fixes the resolver and
 // the logger for the life of the process. Nothing here runs at module scope.
 import 'server-only';
 import { getAuthRuntime, type AuthRuntime } from '@paigasus/auth/server';
@@ -7539,10 +8071,12 @@ Expected: every test file passes. `tests/unit/proxy.test.ts` and `tests/unit/ses
 
 - [ ] **Step 6: Run the app's gates**
 
-Run:
+Run Prettier on every file this task creates or edits, then the gates:
 
 ```bash
 export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
+pnpm -C ts exec prettier --write apps/iam-console/lib/principal.ts apps/iam-console/lib/principal-resolver.ts \
+  apps/iam-console/lib/auth.ts apps/iam-console/tests/integration/principal.test.ts
 moon run iam-console-ts:test iam-console-ts:typecheck
 moon run ts:lint ts:fmt --force
 ```
@@ -7925,11 +8459,26 @@ function connectOnce(client: RedisClientType, timeoutMs: number, log: ConsoleLog
 /** Wraps a cache so that every operation first waits (boundedly) for the first connect. */
 function afterConnect(inner: DescriptorCache, ready: Promise<void>): DescriptorCache {
   return {
-    get: async (service) => (await ready, inner.get(service)),
-    set: async (service, rec, ttlMs, expectedRev) => (await ready, inner.set(service, rec, ttlMs, expectedRev)),
-    delete: async (service) => (await ready, inner.delete(service)),
-    tryAcquireLock: async (service, token, ttlMs) => (await ready, inner.tryAcquireLock(service, token, ttlMs)),
-    releaseLock: async (service, token) => (await ready, inner.releaseLock(service, token)),
+    get: async (service) => {
+      await ready;
+      return inner.get(service);
+    },
+    set: async (service, rec, ttlMs, expectedRev) => {
+      await ready;
+      return inner.set(service, rec, ttlMs, expectedRev);
+    },
+    delete: async (service) => {
+      await ready;
+      return inner.delete(service);
+    },
+    tryAcquireLock: async (service, token, ttlMs) => {
+      await ready;
+      return inner.tryAcquireLock(service, token, ttlMs);
+    },
+    releaseLock: async (service, token) => {
+      await ready;
+      return inner.releaseLock(service, token);
+    },
     close: () => inner.close(),
   };
 }
@@ -7983,10 +8532,13 @@ Run the command of Step 3 again. Expected: `Tests  4 passed (4)`. The Redis case
 
 - [ ] **Step 5: Run the app's gates**
 
-Run:
+Run Prettier on every file this task creates or edits, then the gates:
 
 ```bash
 export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
+pnpm -C ts exec prettier --write apps/iam-console/lib/authorize.ts apps/iam-console/lib/discovery.ts \
+  apps/iam-console/tests/unit/authorize.test.ts apps/iam-console/tests/integration/authorize.test.ts \
+  apps/iam-console/tests/integration/discovery.test.ts
 moon run iam-console-ts:test iam-console-ts:typecheck
 moon run ts:lint ts:fmt --force
 ```
@@ -8032,16 +8584,16 @@ This task builds the shell of every signed-in page (spec § 5.4): the navigation
 - Test: `ts/apps/iam-console/tests/unit/org-switcher.test.tsx`
 
 **Interfaces:**
-- Consumes: `navStateOf`, `AppShell`, `useZone`, `type Brand`, `type NavEntry`, `type SwitcherItem`, `type ZoneMap` (`@paigasus/app-shell`); `type ServiceState` (`@paigasus/discovery/types`); `useParams` (`next/navigation`); `toSessionView` (`@paigasus/auth/server`); `currentSession` (Task 12); `discovery` (Task 14); `mayI` (Task 14); `ROOT_PRN` (Task 8); `getPublicConfig` (Task 9); `Providers` (Task 10).
-- Produces: `lib/nav.ts` → `buildNavEntries({ iam, gateway, zones, auditAllowed }): NavEntry[]`. The sentinel `--paigasus-app-shell-source-probe` in `src/shell/app-shell.tsx`. `app/(console)/layout.tsx` renders `<AppShell brand={{ label: 'Paigasus IAM', href: '/iam/orgs' }} nav={nav}>` with NO switcher.
+- Consumes: `navStateOf`, `AppShell`, `useZone`, `type Brand`, `type NavEntry`, `type SwitcherItem`, `type ZoneMap` (`@paigasus/app-shell`); `type ServiceState` (`@paigasus/discovery/types`); `useParams` (`next/navigation`); `connection` (`next/server`); `toSessionView` (`@paigasus/auth/server`); `currentSession` (Task 12); `discovery` (Task 14); `mayI` (Task 14); `ROOT_PRN` (Task 8); `getPublicConfig` (Task 9); `Providers` (Task 10).
+- Produces: `lib/nav.ts` → `buildNavEntries({ iam, gateway, zones, auditAllowed }): NavEntry[]`. The sentinel `--paigasus-app-shell-source-probe` in `src/shell/app-shell.tsx`. `app/(console)/layout.tsx` starts with `await connection();` (as `app/(public)/layout.tsx` does) and renders `<AppShell brand={{ label: 'Paigasus IAM', href: '/iam/orgs' }} nav={nav}>` with NO switcher.
 - Produces: `app/_components/org-switcher.tsx` ('use client'), exactly:
   - `export type OrgSwitcherOrg = { readonly orgId: string; readonly label: string };`
-  - `export function OrgSwitcherShell(props: { brand: Brand; nav: readonly NavEntry[]; orgs: readonly OrgSwitcherOrg[]; children: ReactNode }): ReactElement` — `AppShell` plus one switcher labelled "Organization". The props are `AppShellProps` with `orgs` in place of `switchers`. It must render `AppShell` itself, because `AppShell` renders a switcher only from its `switchers` prop and only a client component can read `[org]` (a layout does not receive child segments' params). It builds each item as `{ id: orgId, label, href: '<basePath>/orgs/<orgId>' }` (full path, as `@paigasus/app-shell`'s `Switcher` requires) and passes `currentId` from `useParams().org`. An empty `orgs` renders no switcher.
-  - For its unit test only: `orgSwitcherItems(orgs, basePath): SwitcherItem[]` and `currentOrgId(params): string | null`. They live in a `'use client'` module, so a server file must not call them.
+  - `export function OrgSwitcherShell(props: { brand: Brand; nav: readonly NavEntry[]; orgs: readonly OrgSwitcherOrg[]; children: ReactNode }): ReactElement` — `AppShell` plus one switcher labelled "Organization". The props are `AppShellProps` with `orgs` in place of `switchers`. It must render `AppShell` itself, because `AppShell` renders a switcher only from its `switchers` prop and only a client component can read `[org]` (a layout does not receive child segments' params). It builds each item as `{ id: orgId, label, href: '<basePath>/orgs/<orgId>' }` (full path, as `@paigasus/app-shell`'s `Switcher` requires) and passes `currentId` from `useParams().org` in lower case (the item ids are lower case). An empty `orgs` renders no switcher.
+  - For its unit test only: `orgSwitcherItems(orgs, basePath): SwitcherItem[]` and `currentOrgId(params): string | null` (the `[org]` segment in lower case). They live in a `'use client'` module, so a server file must not call them.
 
 > Handoff to Task 16: in `app/(console)/layout.tsx`, replace `<AppShell brand={…} nav={nav}>…</AppShell>` with `<OrgSwitcherShell brand={…} nav={nav} orgs={orgs}>…</OrgSwitcherShell>` (same `brand`, same `nav`), import it from `'../_components/org-switcher'`, and delete the two-line comment above it. Build `orgs: OrgSwitcherOrg[]` on the server from `myScopes()`: one `{ orgId, label }` per organization scope, `label` = the organization name, or the `orgId` for a denied row; on an `IamResult` error pass `[]`. Pass plain data only: `OrgSwitcherShell` is a client component and builds the hrefs itself.
 
-> Handoff to Task 23: the new affected-graph case `app-shell->console` anchors on `ts/packages/paigasus-app-shell/src/shell/app-shell.tsx`, the file that holds sentinel C. The app-local case anchors on `ts/apps/iam-console/lib/iam.ts` and `ts/apps/iam-console/proxy.ts`; both exist after Task 12. Task 8 added `apps/*/lib/**/*` and Task 10 added `apps/*/proxy.ts` to `ts/moon.yml`'s `sources` group, so an edit there now selects `ts:lint` and `ts:fmt`; re-baseline any expected set that lists those two tasks.
+> Handoff to Task 23: the new affected-graph case `app-shell->console` anchors on `ts/packages/paigasus-app-shell/src/shell/app-shell.tsx`, the file that holds sentinel C. The app-local case anchors on `ts/apps/iam-console/lib/iam.ts` and `ts/apps/iam-console/proxy.ts`; both exist after Task 12. Task 8 added `apps/*/lib/**/*` and Task 10 added `apps/*/proxy.ts` to `ts/moon.yml`'s `sources` group, so an edit there now selects `ts:lint`; re-baseline any expected set that lists that task.
 
 - [ ] **Step 1: Write the failing navigation test**
 
@@ -8068,6 +8620,7 @@ const { buildNavEntries } = await import('../../lib/nav');
 const ZONES = { iam: '/iam', gateway: '/gateway' };
 const iamUp = (capabilities: string[]): ServiceState => ({ state: 'available', service: 'iam', descriptor: { service: 'iam', version: '1', capabilities }, capabilities });
 const IAM_DOWN: ServiceState = { state: 'degraded', service: 'iam', reason: 'timeout', descriptor: { service: 'iam', version: '1', capabilities: ['iam.audit'] }, capabilities: ['iam.audit'] };
+const IAM_ABSENT: ServiceState = { state: 'absent', service: 'iam' };
 const GATEWAY_ABSENT: ServiceState = { state: 'absent', service: 'gateway' };
 const GATEWAY_DOWN: ServiceState = { state: 'degraded', service: 'gateway', reason: 'network', descriptor: null, capabilities: [] };
 const GATEWAY_UP: ServiceState = { state: 'available', service: 'gateway', descriptor: { service: 'gateway', version: '1', capabilities: [] }, capabilities: [] };
@@ -8099,6 +8652,12 @@ describe('buildNavEntries', () => {
     const entries = byLabel(buildNavEntries({ iam: IAM_DOWN, gateway: GATEWAY_UP, zones: ZONES, auditAllowed: true }));
     expect(entries['Organizations']?.state).toEqual({ state: 'degraded', service: 'iam', reason: 'timeout' });
     expect(entries['Audit']?.state).toEqual({ state: 'degraded', service: 'iam', reason: 'timeout' });
+  });
+
+  it('makes the IAM entries absent when IAM is absent', () => {
+    const entries = byLabel(buildNavEntries({ iam: IAM_ABSENT, gateway: GATEWAY_UP, zones: ZONES, auditAllowed: true }));
+    expect(entries['Organizations']?.state).toEqual({ state: 'absent' });
+    expect(entries['Audit']?.state).toEqual({ state: 'absent' });
   });
 
   it('gives the Gateway entry the gateway’s own state: absent, or degraded with a reason', () => {
@@ -8174,7 +8733,7 @@ export function buildNavEntries(input: { iam: ServiceState; gateway: ServiceStat
 }
 ```
 
-Run the command of Step 1 again. Expected: `Tests  7 passed (7)`. The last case proves that every entry's `state` is exactly what `navStateOf()` returned: the spy counts one call per entry.
+Run the command of Step 1 again. Expected: `Tests  8 passed (8)`. The last case proves that every entry's `state` is exactly what `navStateOf()` returned: the spy counts one call per entry.
 
 - [ ] **Step 3: Write the failing organization-switcher test**
 
@@ -8242,6 +8801,12 @@ describe('the organization switcher', () => {
     expect(renderShell()).toContain('Organization: Globex');
   });
 
+  it('reads an upper-case [org] segment as the lower-case id of its item, and marks it as current', () => {
+    expect(currentOrgId({ org: GLOBEX.toUpperCase() })).toBe(GLOBEX);
+    params.current = { org: GLOBEX.toUpperCase() };
+    expect(renderShell()).toContain('Organization: Globex');
+  });
+
   it('marks nothing on a page outside one organization', () => {
     params.current = {};
     expect(renderShell()).toContain('Organization: none selected');
@@ -8286,10 +8851,13 @@ export function orgSwitcherItems(orgs: readonly OrgSwitcherOrg[], basePath: stri
   return orgs.map((org) => ({ id: org.orgId, label: org.label, href: `${basePath}/orgs/${org.orgId}` }));
 }
 
-/** The `[org]` segment of the current URL, or null on a page outside one organization. */
+/**
+ * The `[org]` segment of the current URL in lower case, or null on a page outside one organization.
+ * The page accepts an upper-case UUID, and the switcher's item ids are lower case (myScopes()).
+ */
 export function currentOrgId(params: Readonly<Record<string, string | string[] | undefined>> | null): string | null {
   const org = params?.['org'];
-  return typeof org === 'string' ? org : null;
+  return typeof org === 'string' ? org.toLowerCase() : null;
 }
 
 /**
@@ -8309,7 +8877,7 @@ export function OrgSwitcherShell({ brand, nav, orgs, children }: { brand: Brand;
 }
 ```
 
-Run the command of Step 3 again. Expected: `Tests  4 passed (4)`.
+Run the command of Step 3 again. Expected: `Tests  5 passed (5)`.
 
 - [ ] **Step 5: Write the console layout**
 
@@ -8327,6 +8895,7 @@ Create `ts/apps/iam-console/app/(console)/layout.tsx`:
 // SessionProvider receives toSessionView() output only — never a token (ADR-0017). This is the
 // first real Flight handoff of getPublicConfig().zones to ZoneProvider (SMA-510 spec § 10.4).
 import type { ReactElement, ReactNode } from 'react';
+import { connection } from 'next/server';
 import { AppShell } from '@paigasus/app-shell';
 import { toSessionView } from '@paigasus/auth/server';
 import { buildNavEntries } from '../../lib/nav';
@@ -8338,6 +8907,8 @@ import { ROOT_PRN } from '../../lib/prn';
 import { Providers } from '../providers';
 
 export default async function ConsoleLayout({ children }: { children: ReactNode }): Promise<ReactElement> {
+  // No prerender, as in app/(public)/layout.tsx: the runtime config does not exist during `next build`.
+  await connection();
   const session = await currentSession();
   const { zone, zones } = getPublicConfig();
   const probe = discovery();
@@ -8637,9 +9208,15 @@ Run:
 
 ```bash
 export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
+pnpm -C ts exec prettier --write apps/iam-console/lib/nav.ts apps/iam-console/app/_components/org-switcher.tsx \
+  'apps/iam-console/app/(console)/layout.tsx' apps/iam-console/app/globals.css \
+  packages/paigasus-app-shell/src/shell/app-shell.tsx \
+  apps/iam-console/tests/unit/nav.test.ts apps/iam-console/tests/unit/org-switcher.test.tsx
 moon run iam-console-ts:test paigasus-app-shell-ts:test iam-console-ts:typecheck
 moon run ts:lint ts:fmt --force
 ```
+
+The `prettier --write` line formats every `ts/` file that this task creates or edits, before the fmt check and the commit (the Global Constraints).
 
 Expected: exit 0. The guard prints `tailwind-source guard: all three sentinels present across 1 CSS file(s)`. `paigasus-app-shell-ts:test` still passes: the header gained one class name and nothing else changed.
 
@@ -8670,6 +9247,20 @@ with:
 | `--paigasus-token-probe` | `ts/packages/paigasus-ui/src/styles/tokens.css` | the app's `@import '@paigasus/ui/styles.css'` RESOLVED, i.e. the token layer reached the output |
 | `--paigasus-app-shell-source-probe` | `ts/packages/paigasus-app-shell/src/shell/app-shell.tsx` | Tailwind SCANNED `@paigasus/app-shell`'s source, i.e. the app's second `@source` line still covers it |
 ```
+
+Then, in the Limitations section (line 47), replace:
+
+```markdown
+  chunks that hydrated tree contains. A chunk from an earlier build can carry both sentinels
+```
+
+with:
+
+```markdown
+  chunks that hydrated tree contains. A chunk from an earlier build can carry every sentinel
+```
+
+Do not change the quoted *"both sentinels present …"* line below it: it quotes an SMA-503 measurement word for word.
 
 - [ ] **Step 11: Commit**
 
@@ -8724,8 +9315,8 @@ This task implements spec § 5.1 exactly, plus the first mutation (§ 5.3), the 
 - Test: `ts/apps/iam-console/tests/unit/switcher-orgs.test.ts`
 
 **Interfaces:**
-- Consumes: `callIam`, `IamResult`, `ActionState` (`lib/errors.ts`); `iamClients`, `sessionToken`, `currentSession`, `IamClients` (`lib/iam.ts`); `currentPrincipal`, `Principal` (`lib/principal.ts`); `mayI`, `MayI`, `IamAction` (`lib/authorize.ts`); `discovery` (`lib/discovery.ts`); `buildNavEntries` (`lib/nav.ts`); `getPublicConfig` (`lib/config.ts`); `parseTenancyPrn`, `organizationPrn`, `teamPrn`, `projectPrn`, `ROOT_PRN`, `TenancyRef` (`lib/prn.ts`); `PageError`, `SectionError`, `FormError`; `OrgSwitcherShell` (`app/_components/org-switcher.tsx`, Task 15; `switcherOrgs` returns its `OrgSwitcherOrg` shape); `Providers` (`app/providers.tsx`, Task 10); `startFakeIam`, `denial`, `FakeIam`, `FakeIamHandlers`, `FakeIamCall` (`tests/support/fake-iam.ts`); `createIamClient`, `TenancyService`, `AuthorizationService`, `AuditService`, `disposeTransports` (`@paigasus/sdk/iam`); `Breadcrumbs`, `ZoneLink` (`@paigasus/app-shell`); `EmptyState`, `Table*`, `Field`, `Input` (`@paigasus/ui`).
-- Produces: `ScopeEntry`, `MyScopes`, `SCOPE_CAP`, `loadMyScopes`, `myScopes` (`lib/scopes.ts`, exactly as the contract states), and `switcherOrgs` (`lib/scopes.ts`, the switcher's data); `PAGE_SIZE`, `parseOffset`, `nextOffset`, `parseCursor` (`lib/paging.ts`); `ActionResult`, `toActionResult`, `invalidFormInput`, `formFields` (`lib/form.ts`); `CreateForm`, `CreateFormProps` (`app/_components/create-form.tsx`); `Pager` (`app/_components/pager.tsx`); `loadOrganizationsPage`, `OrganizationsPageData`, `OrganizationList`, `OrganizationRow` (`orgs/load.ts`); `createOrganizationForm`, `createOrganization` (`orgs/commands.ts`); `createOrganizationAction` (`orgs/actions.ts`); `clientsFor`, `scriptedMayI`, `callsSince`, `IDS` (`tests/integration/support.ts`).
+- Consumes: `type ServiceState` (`@paigasus/discovery/types`); `connection` (`next/server`); `callIam`, `IamResult`, `ActionState` (`lib/errors.ts`); `iamClients`, `sessionToken`, `currentSession`, `IamClients` (`lib/iam.ts`); `currentPrincipal`, `Principal` (`lib/principal.ts`); `mayI`, `MayI`, `IamAction` (`lib/authorize.ts`); `discovery` (`lib/discovery.ts`); `buildNavEntries` (`lib/nav.ts`); `getPublicConfig` (`lib/config.ts`); `parseTenancyPrn`, `organizationPrn`, `teamPrn`, `projectPrn`, `ROOT_PRN`, `TenancyRef` (`lib/prn.ts`); `PageError`, `SectionError`, `FormError`; `OrgSwitcherShell` (`app/_components/org-switcher.tsx`, Task 15; `switcherOrgs` returns its `OrgSwitcherOrg` shape); `Providers` (`app/providers.tsx`, Task 10); `startFakeIam`, `denial`, `FakeIam`, `FakeIamHandlers`, `FakeIamCall` (`tests/support/fake-iam.ts`); `createIamClient`, `TenancyService`, `AuthorizationService`, `AuditService`, `disposeTransports` (`@paigasus/sdk/iam`); `Breadcrumbs`, `ZoneLink` (`@paigasus/app-shell`); `EmptyState`, `Table*`, `Field`, `Input` (`@paigasus/ui`).
+- Produces: `ScopeEntry`, `MyScopes`, `SCOPE_CAP`, `loadMyScopes`, `myScopes` (`lib/scopes.ts`, exactly as the contract states), `cedarCapabilityOf(state: ServiceState): boolean` (`lib/scopes.ts`, the one check in `myScopes()` that selects "memberships only"), and `switcherOrgs` (`lib/scopes.ts`, the switcher's data); `PAGE_SIZE`, `parseOffset`, `nextOffset`, `parseCursor`, `pageHref(path: string, param: string, offset: number, keep: Readonly<Record<string, number>> = {}): string` (`lib/paging.ts`); `ActionResult`, `toActionResult`, `invalidFormInput`, `formFields` (`lib/form.ts`); `CreateForm`, `CreateFormProps` (`app/_components/create-form.tsx`); `Pager`, `PagerProps` (`app/_components/pager.tsx`; props `label`, `path`, `param`, `offset`, `nextOffset`, and the optional `keep?: Readonly<Record<string, number>>`, which Tasks 17 and 18 use on a page with two lists); `loadOrganizationsPage`, `OrganizationsPageData`, `OrganizationList`, `OrganizationRow` (`orgs/load.ts`); `createOrganizationForm`, `createOrganization` (`orgs/commands.ts`); `createOrganizationAction` (`orgs/actions.ts`); `clientsFor`, `scriptedMayI`, `callsSince`, `IDS` (`tests/integration/support.ts`).
 
 Rules for this task and for Tasks 17–19:
 - Every `lib/*.ts` file starts with `import 'server-only';`. Every `commands.ts`, `load.ts` and `members.ts` does too.
@@ -8748,7 +9339,7 @@ grep -n "include" ts/apps/iam-console/vitest.config.ts
 grep -n "export function OrgSwitcherShell\|export type OrgSwitcherOrg" ts/apps/iam-console/app/_components/org-switcher.tsx
 grep -n "<AppShell" 'ts/apps/iam-console/app/(console)/layout.tsx'
 ```
-Expected: `@connectrpc/connect`, `zod` and `typescript` are listed (Task 9 adds all three); the four fake-IAM exports exist; the vitest `include` matches `tests/**/*.test.ts`; Task 15's `OrgSwitcherShell` and `OrgSwitcherOrg` exist; and Task 15's layout still renders `AppShell` (Step 25 swaps it).
+Expected: `@connectrpc/connect`, `zod` and `typescript` are listed (Task 9 adds all three); the four fake-IAM exports exist; the vitest `include` matches `tests/**/*.test.ts`; Task 15's `OrgSwitcherShell` and `OrgSwitcherOrg` exist; and Task 15's layout still renders `AppShell` (Step 26 swaps it).
 If a line is missing, the task that makes it is not complete (Task 9, 11 or 15). Stop and complete that task first. Every test path in this part depends on them.
 
 - [ ] **Step 2: Write the failing unit tests for `lib/paging.ts` and `lib/form.ts`**
@@ -8757,7 +9348,7 @@ If a line is missing, the task that makes it is not complete (Task 9, 11 or 15).
 ```ts
 // SPDX-License-Identifier: Apache-2.0
 import { describe, expect, it } from 'vitest';
-import { PAGE_SIZE, nextOffset, parseCursor, parseOffset } from '../../lib/paging';
+import { PAGE_SIZE, nextOffset, pageHref, parseCursor, parseOffset } from '../../lib/paging';
 
 describe('parseOffset', () => {
   it('reads a plain non-negative integer', () => {
@@ -8788,6 +9379,25 @@ describe('parseCursor', () => {
     expect(parseCursor(['abc', 'def'])).toBe('abc');
     expect(parseCursor(undefined)).toBe('');
     expect(parseCursor('x'.repeat(1025))).toBe('');
+  });
+});
+
+describe('pageHref', () => {
+  it('puts the offset into the one named parameter', () => {
+    expect(pageHref('/iam/orgs', 'offset', 50)).toBe('/iam/orgs?offset=50');
+    expect(pageHref('/iam/orgs', 'offset', 0)).toBe('/iam/orgs?offset=0');
+  });
+
+  it("keeps the other list's offset, so paging one list does not reset the other", () => {
+    expect(pageHref('/iam/orgs/x', 'moffset', 50, { offset: 100 })).toBe('/iam/orgs/x?offset=100&moffset=50');
+  });
+
+  it('drops a kept offset of 0, because 0 is the default page', () => {
+    expect(pageHref('/iam/orgs/x', 'moffset', 50, { offset: 0 })).toBe('/iam/orgs/x?moffset=50');
+  });
+
+  it('lets the parameter override a kept entry of the same name', () => {
+    expect(pageHref('/iam/orgs', 'offset', 50, { offset: 100 })).toBe('/iam/orgs?offset=50');
   });
 });
 ```
@@ -8864,6 +9474,20 @@ export function nextOffset(offset: number, received: number): number | null {
   return received >= PAGE_SIZE ? offset + PAGE_SIZE : null;
 }
 
+/**
+ * The href of one page link. `keep` holds the offsets of the OTHER lists on the same page, so paging
+ * one list does not reset the others. A kept offset of 0 is the default page and is left out. `param`
+ * is set last, so it overrides a kept entry of the same name.
+ */
+export function pageHref(path: string, param: string, offset: number, keep: Readonly<Record<string, number>> = {}): string {
+  const query = new URLSearchParams();
+  for (const [name, value] of Object.entries(keep)) {
+    if (value > 0) query.set(name, String(value));
+  }
+  query.set(param, String(offset));
+  return `${path}?${query.toString()}`;
+}
+
 /** The audit cursor is opaque. IAM validates it and answers `invalid-cursor` for a bad one. */
 export function parseCursor(raw: string | readonly string[] | undefined): string {
   const value = first(raw);
@@ -8921,7 +9545,7 @@ Run:
 ```bash
 pnpm --dir ts/apps/iam-console exec vitest run tests/unit/paging.test.ts tests/unit/form.test.ts
 ```
-Expected: PASS, 7 tests.
+Expected: PASS, 11 tests.
 
 - [ ] **Step 6: Write the shared integration-test support file**
 
@@ -8984,12 +9608,15 @@ export function callsSince(iam: FakeIam): (method: string) => FakeIamCall[] {
 // SPDX-License-Identifier: Apache-2.0
 //
 // Tier 2 (spec § 9.3): loadMyScopes (spec § 5.1) against the fake IAM over real gRPC. Every case
-// scripts the answers and counts the calls, so no case can pass on a call that never happened.
+// scripts the answers, and most cases count the calls. The "ListRoleGrants fails" case counts its
+// call, because its result is the same when the call never happens. The cedarCapabilityOf cases at
+// the bottom are pure: they cover the one check in myScopes() that selects "memberships only".
 import { Code } from '@connectrpc/connect';
+import type { ServiceState } from '@paigasus/discovery/types';
 import { disposeTransports } from '@paigasus/sdk/iam';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { ROOT_PRN, organizationPrn, projectPrn, teamPrn } from '../../lib/prn';
-import { SCOPE_CAP, loadMyScopes } from '../../lib/scopes';
+import { SCOPE_CAP, cedarCapabilityOf, loadMyScopes } from '../../lib/scopes';
 import { denial, startFakeIam, type FakeIam, type FakeIamHandlers } from '../support/fake-iam';
 import { IDS, callsSince, clientsFor } from './support';
 
@@ -9091,9 +9718,7 @@ describe('loadMyScopes', () => {
 
     const result = await loadMyScopes({ ...ports(), principal: principal(), cedarCapability: true });
 
-    expect(result.entries).toEqual([
-      { kind: 'project', prn: PROJECT_B1, orgId: IDS.orgB, teamId: IDS.teamB1, projectId: IDS.projectB1, label: 'Models', denied: false },
-    ]);
+    expect(result.entries).toEqual([{ kind: 'project', prn: PROJECT_B1, orgId: IDS.orgB, teamId: IDS.teamB1, projectId: IDS.projectB1, label: 'Models', denied: false }]);
     expect(calls('tenancy.getProject')).toHaveLength(1);
   });
 
@@ -9159,11 +9784,14 @@ describe('loadMyScopes', () => {
         throw denial({ code: Code.Unavailable });
       },
     });
+    const calls = callsSince(iam);
 
     const result = await loadMyScopes({ ...ports(), principal: principal(ORG_A), cedarCapability: true });
 
     expect(result.grantsListed).toBe(false);
     expect(result.entries.map((entry) => entry.prn)).toEqual([ORG_A]);
+    // grantsListed is false on the no-call path too, so only the count proves that the call happened.
+    expect(calls('authz.listRoleGrants')).toHaveLength(1);
   });
 
   it('pages ListRoleGrants until a page comes back short', async () => {
@@ -9180,6 +9808,25 @@ describe('loadMyScopes', () => {
 
     expect(calls('authz.listRoleGrants').map((call) => (call.request as { offset: bigint }).offset)).toEqual([0n, 200n]);
     expect(result.entries.map((entry) => entry.prn)).toEqual([ORG_A]);
+  });
+});
+
+describe('cedarCapabilityOf', () => {
+  const CEDAR = ['iam.authz.cedar'];
+  const descriptor = (capabilities: string[]) => ({ service: 'iam', version: '1', capabilities });
+
+  it('lists the role grants only when IAM is available and reports iam.authz.cedar', () => {
+    expect(cedarCapabilityOf({ state: 'available', service: 'iam', descriptor: descriptor(CEDAR), capabilities: CEDAR })).toBe(true);
+  });
+
+  const MEMBERSHIPS_ONLY: readonly (readonly [string, ServiceState])[] = [
+    ['IAM is available without iam.authz.cedar', { state: 'available', service: 'iam', descriptor: descriptor(['iam.audit']), capabilities: ['iam.audit'] }],
+    ['IAM is degraded, even with iam.authz.cedar in its last descriptor', { state: 'degraded', service: 'iam', reason: 'timeout', descriptor: descriptor(CEDAR), capabilities: CEDAR }],
+    ['IAM is absent', { state: 'absent', service: 'iam' }],
+  ];
+
+  it.each(MEMBERSHIPS_ONLY)('selects "memberships only" when %s', (_label, state) => {
+    expect(cedarCapabilityOf(state)).toBe(false);
   });
 });
 ```
@@ -9206,6 +9853,7 @@ Expected: FAIL. The import `../../lib/scopes` does not resolve.
 // grants; the RPC needs the capability).
 import 'server-only';
 import { cache } from 'react';
+import type { ServiceState } from '@paigasus/discovery/types';
 import { discovery } from './discovery';
 import { callIam, type IamResult } from './errors';
 import { iamClients, sessionToken, type IamClients } from './iam';
@@ -9302,14 +9950,22 @@ export async function loadMyScopes(deps: {
   return { entries, hiddenCount: scopes.length - shown.length, grantsListed: grantScopes !== null };
 }
 
+/**
+ * True when myScopes() may list the principal's own role grants: IAM is available and reports
+ * `iam.authz.cedar`. Any other state selects "memberships only" (spec § 5.1 step 1). A degraded IAM
+ * selects it too, even when its last descriptor listed the capability.
+ */
+export function cedarCapabilityOf(state: ServiceState): boolean {
+  return state.state === 'available' && state.capabilities.includes('iam.authz.cedar');
+}
+
 /** One per request. The page and the switcher share it (spec § 5.1). */
 export const myScopes = cache(async (): Promise<IamResult<MyScopes>> => {
   const principal = await currentPrincipal();
   if (!principal.ok) return principal;
   const [clients, token] = await Promise.all([iamClients(), sessionToken()]);
   const iam = await discovery().getServiceState('iam', token);
-  const cedarCapability = iam.state === 'available' && iam.capabilities.includes('iam.authz.cedar');
-  return { ok: true, value: await loadMyScopes({ tenancy: clients.tenancy, authz: clients.authz, principal: principal.value, cedarCapability }) };
+  return { ok: true, value: await loadMyScopes({ tenancy: clients.tenancy, authz: clients.authz, principal: principal.value, cedarCapability: cedarCapabilityOf(iam) }) };
 });
 ```
 
@@ -9319,7 +9975,7 @@ Run:
 ```bash
 pnpm --dir ts/apps/iam-console exec vitest run tests/integration/scopes.test.ts
 ```
-Expected: PASS, 11 tests. If the dedup case fails because `parseTenancyPrn` refuses an upper-case UUID, that is a defect in Task 8's reader: the kernel canonicalizes upper case (`prn_canonical.json` has that vector). Fix the reader, not this test.
+Expected: PASS, 15 tests (11 `loadMyScopes` cases and 4 `cedarCapabilityOf` cases). If the dedup case fails because `parseTenancyPrn` refuses an upper-case UUID, that is a defect in Task 8's reader: the kernel canonicalizes upper case (`prn_canonical.json` has that vector). Fix the reader, not this test.
 
 - [ ] **Step 11: Write the failing loader test for `/iam/orgs`**
 
@@ -9351,7 +10007,11 @@ afterAll(async () => {
 });
 
 function organizations(count: number) {
-  return Array.from({ length: count }, (_, index) => ({ prn: organizationPrn(`0190a100-0000-7000-8000-${String(index).padStart(12, '0')}`), slug: `org-${String(index)}`, name: `Org ${String(index)}` }));
+  return Array.from({ length: count }, (_, index) => ({
+    prn: organizationPrn(`0190a100-0000-7000-8000-${String(index).padStart(12, '0')}`),
+    slug: `org-${String(index)}`,
+    name: `Org ${String(index)}`,
+  }));
 }
 
 describe('loadOrganizationsPage', () => {
@@ -9364,7 +10024,12 @@ describe('loadOrganizationsPage', () => {
 
     expect(data).toEqual({ canCreateOrganization: true, all: null });
     expect(calls('tenancy.listOrganizations')).toHaveLength(0);
-    expect(mayI.asked).toEqual(expect.arrayContaining([['ListOrganizations', ROOT_PRN], ['CreateOrganization', ROOT_PRN]]));
+    expect(mayI.asked).toEqual(
+      expect.arrayContaining([
+        ['ListOrganizations', ROOT_PRN],
+        ['CreateOrganization', ROOT_PRN],
+      ]),
+    );
   });
 
   it('lists one page, links each row by UUID, and offers "Next" only when the page is full', async () => {
@@ -9471,15 +10136,16 @@ Expected: PASS, 3 tests.
 // SPDX-License-Identifier: Apache-2.0
 //
 // The create-organization command (spec § 5.3) against the fake IAM. A command takes NO mayI, so
-// it cannot pre-judge: the "direction 1" case proves a hidden button does not stop the call.
+// it cannot pre-judge: the "direction 1" case sends what a hidden button would send, and the call
+// reaches IAM. The other half of the rule, that no actions.ts names mayI, lives in
+// tests/unit/actions-structure.test.ts.
 import { Code } from '@connectrpc/connect';
 import { ErrorReason } from '@paigasus/sdk/errors/types';
 import { disposeTransports } from '@paigasus/sdk/iam';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createOrganization, createOrganizationForm } from '../../app/(console)/orgs/commands';
-import { ROOT_PRN } from '../../lib/prn';
 import { denial, startFakeIam, type FakeIam } from '../support/fake-iam';
-import { callsSince, clientsFor, scriptedMayI } from './support';
+import { callsSince, clientsFor } from './support';
 
 let iam: FakeIam;
 
@@ -9514,11 +10180,9 @@ describe('createOrganization', () => {
     expect(calls('tenancy.createOrganization').map((call) => call.request)).toEqual([expect.objectContaining({ slug: 'acme', name: 'Acme' })]);
   });
 
-  it('is not pre-judged: a hidden button does not stop the call (AC 2, direction 1)', async () => {
+  it('is not pre-judged: the command takes no mayI, so a hidden button does not stop the call (AC 2, direction 1)', async () => {
     iam.setHandlers({ 'tenancy.createOrganization': created });
     const calls = callsSince(iam);
-    const mayI = scriptedMayI({});
-    expect(await mayI('CreateOrganization', ROOT_PRN)).toBe(false);
 
     const result = await createOrganization({ tenancy: clientsFor(iam).tenancy }, { slug: 'hidden', name: 'Hidden' });
 
@@ -9607,6 +10271,8 @@ Expected: PASS, 5 tests.
 // Spec § 5.3: every exported Server Action obtains its client through iamClients(), so
 // requireSession() runs for EVERY action. The (console) layout does not guard Server Actions —
 // an action is a POST to the page URL, and Next does not render the layout for it (spec § 3.3).
+// No actions.ts names mayI (spec § 6.3): a hidden button is cosmetic, and IAM decides. That check
+// reads identifiers, not text, so a comment that names mayI() is not a violation.
 //
 // EXPECTED is a strict-equality list. A new action is a review point: add it here. The negative
 // cases at the bottom prove the checker can fail, so a green here is not vacuous.
@@ -9674,6 +10340,21 @@ function callsIamClients(node: ts.Node): boolean {
   return found;
 }
 
+/** True when any identifier in the tree is `name`: an import, a call, a reference. Comments are not nodes. */
+function namesIdentifier(node: ts.Node, name: string): boolean {
+  let found = false;
+  const visit = (child: ts.Node): void => {
+    if (found) return;
+    if (ts.isIdentifier(child) && child.text === name) {
+      found = true;
+      return;
+    }
+    ts.forEachChild(child, visit);
+  };
+  visit(node);
+  return found;
+}
+
 function checkActionsSource(file: string, text: string): { names: string[]; violations: string[] } {
   const source = ts.createSourceFile(file, text, ts.ScriptTarget.ES2022, true, ts.ScriptKind.TS);
   const violations: string[] = [];
@@ -9686,7 +10367,9 @@ function checkActionsSource(file: string, text: string): { names: string[]; viol
     if (value.body === undefined) violations.push(`${file}: export ${value.name} is not a function whose body this test can read`);
     else if (!callsIamClients(value.body)) violations.push(`${file}: export ${value.name} does not call iamClients()`);
   }
-  if (/\biamClientsForToken\b|\bcreateIamClient\b/.test(text)) violations.push(`${file}: builds an IAM client without a session`);
+  // createIamClients? covers both lib/iam.ts' createIamClients and the SDK's createIamClient.
+  if (/\b(?:iamClientsForToken|createIamClients?)\b/.test(text)) violations.push(`${file}: builds an IAM client without a session`);
+  if (namesIdentifier(source, 'mayI')) violations.push(`${file}: consults mayI()`);
   return { names: values.map((value) => value.name).sort(), violations };
 }
 
@@ -9712,14 +10395,19 @@ describe('every Server Action gets its client through iamClients() (spec § 5.3)
       ['an arrow without the call', `${header}export const a = async () => 1;`, 'does not call iamClients()'],
       ['a re-export', `${header}export { a } from './other';`, 'is not a function whose body this test can read'],
       ['a default export of a value', `${header}export default iamClients;`, 'is not a function whose body this test can read'],
-      ['a missing directive', "export async function a() { await iamClients(); }", "the first statement is not 'use server'"],
+      ['a missing directive', 'export async function a() { await iamClients(); }', "the first statement is not 'use server'"],
       ['a session-less client', `${header}import { iamClientsForToken } from '../lib/iam';\nexport async function a() { await iamClients(); iamClientsForToken('t'); }`, 'without a session'],
+      // No import line: the check reads the text, so the call `createIamClients(` alone must trip it.
+      ['a session-less client builder', `${header}export async function a() { await iamClients(); createIamClients({ baseUrl: 'x', token: 't' }); }`, 'without a session'],
+      ['an action that consults mayI', `${header}import { mayI } from '../lib/authorize';\nexport async function a() { await iamClients(); const may = await mayI(); return may; }`, 'consults mayI()'],
     ])('%s', (_label, source, message) => {
       expect(checkActionsSource('probe.ts', source).violations.join('\n')).toContain(message);
     });
 
-    it('accepts a correct action', () => {
-      expect(checkActionsSource('probe.ts', `${header}export async function a(_p: unknown, f: FormData) { const c = await iamClients(); return c; }`).violations).toEqual([]);
+    it('accepts a correct action, and a comment that names mayI()', () => {
+      expect(
+        checkActionsSource('probe.ts', `${header}// No action consults mayI().\nexport async function a(_p: unknown, f: FormData) { const c = await iamClients(); return c; }`).violations,
+      ).toEqual([]);
     });
   });
 });
@@ -9740,16 +10428,20 @@ Expected: FAIL in "finds exactly the expected actions.ts files and exports": `fi
 // SPDX-License-Identifier: Apache-2.0
 'use server';
 
-// Server Action shells (spec § 5.3). Each one calls iamClients() FIRST, so requireSession() runs
-// for every action, before any input is read. tests/unit/actions-structure.test.ts holds that rule.
-// No action consults mayI(): a hidden button is cosmetic, and IAM decides (spec § 6.3).
+// Server Action shells (spec § 5.3). Each one gets its client through iamClients(), so
+// requireSession() runs for every action. tests/unit/actions-structure.test.ts checks that every
+// export calls it. No action consults mayI(): a hidden button is cosmetic, and IAM decides
+// (spec § 6.3). The same test checks that no code in this file names it.
 import { revalidatePath } from 'next/cache';
 import type { ActionState } from '../../../lib/errors';
 import { formFields, invalidFormInput } from '../../../lib/form';
 import { iamClients } from '../../../lib/iam';
 import { createOrganization, createOrganizationForm } from './commands';
 
-/** Every tenancy page lives under /orgs (basePath-relative), so one layout revalidation covers them. */
+/**
+ * basePath-relative. Route groups such as (console) are not part of the URL path, so '/orgs' with
+ * 'layout' covers every page under /orgs. Task 22's e2e test asserts that a created organization appears.
+ */
 const TENANCY_PATH = '/orgs';
 
 export async function createOrganizationAction(_previous: ActionState, form: FormData): Promise<ActionState> {
@@ -9768,9 +10460,9 @@ Run:
 ```bash
 pnpm --dir ts/apps/iam-console exec vitest run tests/unit/actions-structure.test.ts
 ```
-Expected: PASS, 9 tests.
+Expected: PASS, 11 tests.
 
-- [ ] **Step 23: Write the two client-safe components**
+- [ ] **Step 23: Write the create form (client) and the pager (server)**
 
 `ts/apps/iam-console/app/_components/create-form.tsx`:
 ```tsx
@@ -9833,9 +10525,10 @@ export function CreateForm({ testId, title, submitLabel, action, hidden = {} }: 
 //
 // Offset paging links (spec § 5.2). A SERVER component: ZoneLink is a client component, and a
 // server component may render it with string props. Hrefs are full paths (/iam/…), as ZoneLink needs.
+// On a page with two lists, `keep` carries the other list's offset, so a link keeps that list's page.
 import type { ReactElement } from 'react';
 import { ZoneLink } from '@paigasus/app-shell';
-import { PAGE_SIZE } from '../../lib/paging';
+import { PAGE_SIZE, pageHref } from '../../lib/paging';
 
 export type PagerProps = {
   readonly label: string;
@@ -9843,20 +10536,22 @@ export type PagerProps = {
   readonly param: string;
   readonly offset: number;
   readonly nextOffset: number | null;
+  /** The offsets of the other lists on the page, by query parameter. */
+  readonly keep?: Readonly<Record<string, number>>;
 };
 
-export function Pager({ label, path, param, offset, nextOffset }: PagerProps): ReactElement | null {
+export function Pager({ label, path, param, offset, nextOffset, keep }: PagerProps): ReactElement | null {
   if (offset === 0 && nextOffset === null) return null;
   const previous = Math.max(0, offset - PAGE_SIZE);
   return (
     <nav aria-label={label} className="flex gap-4 text-sm">
       {offset > 0 ? (
-        <ZoneLink href={`${path}?${param}=${String(previous)}`} className="hover:underline">
+        <ZoneLink href={pageHref(path, param, previous, keep)} className="hover:underline">
           Previous
         </ZoneLink>
       ) : null}
       {nextOffset === null ? null : (
-        <ZoneLink href={`${path}?${param}=${String(nextOffset)}`} className="hover:underline">
+        <ZoneLink href={pageHref(path, param, nextOffset, keep)} className="hover:underline">
           Next
         </ZoneLink>
       )}
@@ -10069,8 +10764,11 @@ describe('switcherOrgs', () => {
 
 describe('the (console) layout', () => {
   it('renders OrgSwitcherShell with switcherOrgs(myScopes()), and no bare AppShell', () => {
-    const source = readFileSync(LAYOUT, 'utf8');
-    expect(source).toMatch(/\bmyScopes\(\)/);
+    // Strip the line comments first: the layout's comments name myScopes(), and so did Task 15's
+    // layout, which had no myScopes() call at all.
+    const source = readFileSync(LAYOUT, 'utf8').replace(/^\s*\/\/.*$/gm, '');
+    // The call must sit inside the layout's Promise.all([…]), the one that yields `scopes`.
+    expect(source).toMatch(/Promise\.all\(\[[^\]]*\bmyScopes\(\)/);
     expect(source).toMatch(/<OrgSwitcherShell\b[^>]*\borgs=\{switcherOrgs\(scopes\)\}/);
     expect(source).not.toMatch(/<AppShell\b/);
   });
@@ -10100,7 +10798,7 @@ export function switcherOrgs(scopes: IamResult<MyScopes>): { orgId: string; labe
 }
 ```
 
-Replace the whole of `ts/apps/iam-console/app/(console)/layout.tsx` (Task 15's file) with the code below. It keeps Task 15's session, zone map, discovery, `mayI` and nav, and the same `brand`. It adds `myScopes()` to the reads, and it renders `OrgSwitcherShell` in place of `AppShell`. Task 15's two-line "No organization switcher yet" comment goes.
+Replace the whole of `ts/apps/iam-console/app/(console)/layout.tsx` (Task 15's file) with the code below. It keeps Task 15's `await connection()` as the first statement, and the session, zone map, discovery, `mayI`, nav and `brand`. It adds `myScopes()` to the reads, and it renders `OrgSwitcherShell` in place of `AppShell`. Task 15's two-line "No organization switcher yet" comment goes.
 ```tsx
 // SPDX-License-Identifier: Apache-2.0
 //
@@ -10117,6 +10815,7 @@ Replace the whole of `ts/apps/iam-console/app/(console)/layout.tsx` (Task 15's f
 // React cache(), so in a Next request the /orgs page and this layout share ONE call. OrgSwitcherShell
 // is a client component: it gets plain data only, and reads the [org] segment with useParams().
 import type { ReactElement, ReactNode } from 'react';
+import { connection } from 'next/server';
 import { toSessionView } from '@paigasus/auth/server';
 import { buildNavEntries } from '../../lib/nav';
 import { getPublicConfig } from '../../lib/config';
@@ -10129,6 +10828,8 @@ import { OrgSwitcherShell } from '../_components/org-switcher';
 import { Providers } from '../providers';
 
 export default async function ConsoleLayout({ children }: { children: ReactNode }): Promise<ReactElement> {
+  // No prerender, as in app/(public)/layout.tsx: the runtime config does not exist during `next build`.
+  await connection();
   const session = await currentSession();
   const { zone, zones } = getPublicConfig();
   const probe = discovery();
@@ -10152,7 +10853,7 @@ Run:
 ```bash
 pnpm --dir ts/apps/iam-console exec vitest run tests/unit/switcher-orgs.test.ts tests/unit/org-switcher.test.tsx
 ```
-Expected: PASS, 8 tests (4 new, and Task 15's 4 `OrgSwitcherShell` cases).
+Expected: PASS, 9 tests (4 new, and Task 15's 5 `OrgSwitcherShell` cases).
 
 - [ ] **Step 28: Run the app's checks**
 
@@ -10160,12 +10861,22 @@ Run:
 ```bash
 export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
 cd /Users/smaschek/dev/paigasus/paigasus-core/.claude/worktrees/feature+sma-511-iam-console
+pnpm -C ts exec prettier --write apps/iam-console/lib/paging.ts apps/iam-console/lib/form.ts apps/iam-console/lib/scopes.ts \
+  apps/iam-console/app/_components/create-form.tsx apps/iam-console/app/_components/pager.tsx \
+  'apps/iam-console/app/(console)/orgs/load.ts' 'apps/iam-console/app/(console)/orgs/commands.ts' \
+  'apps/iam-console/app/(console)/orgs/actions.ts' 'apps/iam-console/app/(console)/orgs/page.tsx' \
+  'apps/iam-console/app/(console)/layout.tsx' \
+  apps/iam-console/tests/integration/support.ts apps/iam-console/tests/integration/scopes.test.ts \
+  apps/iam-console/tests/integration/orgs-page.test.ts apps/iam-console/tests/integration/orgs-commands.test.ts \
+  apps/iam-console/tests/unit/paging.test.ts apps/iam-console/tests/unit/form.test.ts \
+  apps/iam-console/tests/unit/actions-structure.test.ts apps/iam-console/tests/unit/switcher-orgs.test.ts
 pnpm --dir ts/apps/iam-console exec vitest run tests/unit tests/integration
 moon run iam-console-ts:typecheck ts:lint ts:fmt --force
 moon run iam-console-ts:build
 ```
-Expected: every vitest file passes; typecheck, lint and fmt pass; the build prints the route list with `ƒ /orgs` and ends with exit 0.
-If `ts:fmt` fails on a file of this task, run `pnpm --dir ts exec prettier --write <file>` on that file and run `moon run ts:fmt --force` again.
+The `prettier --write` line is the normal path, not a fallback. It formats every `ts/` file that this task creates or edits, before the first fmt check and before the commit (the Global Constraints). It can rewrite line breaks in a code block of this task; that changes no behaviour.
+
+Expected: every vitest file passes; typecheck, lint and fmt pass; the build prints the route list with `ƒ /orgs` and ends with exit 0. If the build reports a prerender error on `/orgs`, add `await connection();` (from `next/server`) as the first statement of `OrganizationsPage` too.
 
 - [ ] **Step 29: Commit**
 
@@ -10216,8 +10927,8 @@ EOF
 - Test: `ts/apps/iam-console/tests/integration/membership-commands.test.ts`
 
 **Interfaces:**
-- Consumes: everything Task 16 consumes; `isUuid`, `organizationPrn`, `parseTenancyPrn` (`lib/prn.ts`); `PAGE_SIZE`, `nextOffset`, `parseOffset` (`lib/paging.ts`); `toActionResult`, `formFields`, `invalidFormInput`, `ActionResult` (`lib/form.ts`); `CreateForm`, `Pager` (Task 16).
-- Produces: `MemberRow`, `MemberList`, `MembersData`, `loadMembers` (`orgs/members.ts`); `MembersSection` (`orgs/members-section.tsx`); `AttachMembershipForm`, `DetachMembershipButton` (`app/_components/membership-form.tsx`); `attachMembershipForm`, `attachMembership`, `detachMembershipForm`, `detachMembership` (`orgs/commands.ts`); `attachMembershipAction`, `detachMembershipAction` (`orgs/actions.ts`); `TeamRow`, `TeamList`, `OrganizationPageData`, `loadOrganizationPage` (`orgs/[org]/load.ts`); `createTeamForm`, `createTeam` (`orgs/[org]/commands.ts`); `createTeamAction` (`orgs/[org]/actions.ts`).
+- Consumes: everything Task 16 consumes; `isUuid`, `organizationPrn`, `parseTenancyPrn` (`lib/prn.ts`); `PAGE_SIZE`, `nextOffset`, `parseOffset` (`lib/paging.ts`); `toActionResult`, `formFields`, `invalidFormInput`, `ActionResult` (`lib/form.ts`); `CreateForm`, `Pager` with its optional `keep` prop (Task 16).
+- Produces: `MemberRow`, `MemberList`, `MembersData`, `loadMembers` (`orgs/members.ts`); `MembersSection`, `MembersSectionProps` (an optional `keep` prop that it passes to its member `Pager`) (`orgs/members-section.tsx`); `AttachMembershipForm`, `DetachMembershipButton` (`app/_components/membership-form.tsx`); `attachMembershipForm`, `attachMembership`, `detachMembershipForm`, `detachMembership` (`orgs/commands.ts`); `attachMembershipAction`, `detachMembershipAction` (`orgs/actions.ts`); `TeamRow`, `TeamList`, `OrganizationPageData`, `loadOrganizationPage` (`orgs/[org]/load.ts`); `createTeamForm`, `createTeam` (`orgs/[org]/commands.ts`); `createTeamAction` (`orgs/[org]/actions.ts`).
 
 IAM checks these actions (`adapters/grpc/tenancy.rs`): `GetOrganization` and `ListTeams` against the org (`:174`, `:351`), `CreateTeam` against the org (`:310`), `AttachMembership` against the node (`:615`), `DetachMembership` against the membership's node (`:652`), `ListMemberships(node_prn)` against the node (`:669-676`). The page therefore asks `mayI('CreateTeam' | 'AttachMembership' | 'DetachMembership', orgPrn)`.
 
@@ -10228,7 +10939,8 @@ IAM checks these actions (`adapters/grpc/tenancy.rs`): `GetOrganization` and `Li
 // SPDX-License-Identifier: Apache-2.0
 //
 // The organization page loader (spec § 5.2). A non-UUID segment is notFound() with no IAM call. A
-// denied GetOrganization is a PAGE error (the 403 view). A denied list is a SECTION error.
+// denied GetOrganization is a PAGE error (the 403 view). An invalid-input answer to GetOrganization
+// (IAM's prn-mismatch for a URL-built PRN) is notFound(). A denied list is a SECTION error.
 import { Code } from '@connectrpc/connect';
 import { disposeTransports } from '@paigasus/sdk/iam';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -10328,6 +11040,23 @@ describe('loadOrganizationPage', () => {
     expect(calls('tenancy.listMemberships')).toHaveLength(0);
   });
 
+  it('answers not-found when IAM refuses the URL-built PRN as invalid input (prn-mismatch), and asks for nothing else', async () => {
+    // Real IAM answers a PRN whose canonical form differs from the stored node with PrnMismatch,
+    // which is InvalidArgument (adapters/grpc/tenancy.rs:176-178). Spec § 5.2: a mismatched URL is a 404.
+    iam.setHandlers({
+      ...world(1),
+      'tenancy.getOrganization': () => {
+        throw denial({ code: Code.InvalidArgument, reason: 'prn-mismatch', correlationId: 'corr-org-mismatch' });
+      },
+    });
+    const calls = callsSince(iam);
+
+    expect(await loadOrganizationPage(deps({ CreateTeam: true }), { org: IDS.orgA, offset: 0, membersOffset: 0 })).toEqual({ kind: 'not-found' });
+    expect(calls('tenancy.getOrganization')).toHaveLength(1);
+    expect(calls('tenancy.listTeams')).toHaveLength(0);
+    expect(calls('tenancy.listMemberships')).toHaveLength(0);
+  });
+
   it('keeps the page when a list is denied, and puts the error in that section', async () => {
     iam.setHandlers({
       ...world(1),
@@ -10393,6 +11122,8 @@ export async function loadMembers(deps: MembersDeps, nodePrn: string, offset: nu
 //
 // The loader of /iam/orgs/[org] (spec § 5.2). URLs use UUIDs because a PRN holds no slug. The
 // organization comes first: when IAM denies it, the page is the 403 view and nothing else runs.
+// The PRN comes from the URL, so an invalid-input answer (IAM's prn-mismatch, InvalidArgument,
+// adapters/grpc/tenancy.rs:176-178) means that the URL names no such node: notFound().
 import 'server-only';
 import type { PaigasusError } from '@paigasus/sdk/errors/types';
 import type { MayI } from '../../../../lib/authorize';
@@ -10427,7 +11158,7 @@ export async function loadOrganizationPage(deps: OrganizationPageDeps, params: {
   const orgPrn = organizationPrn(orgId);
 
   const got = await callIam(() => deps.tenancy.getOrganization({ prn: orgPrn }));
-  if (!got.ok) return { kind: 'error', error: got.error };
+  if (!got.ok) return got.error.presentation === 'invalid-input' ? { kind: 'not-found' } : { kind: 'error', error: got.error };
   const organization = got.value.organization;
   if (organization === undefined) return { kind: 'not-found' };
 
@@ -10460,7 +11191,7 @@ Run:
 ```bash
 pnpm --dir ts/apps/iam-console exec vitest run tests/integration/org-page.test.ts
 ```
-Expected: PASS, 5 tests.
+Expected: PASS, 6 tests.
 
 - [ ] **Step 6: Write the failing command tests for create team, attach and detach**
 
@@ -10774,7 +11505,8 @@ export function DetachMembershipButton({ membershipId, principalPrn, action }: {
 // SPDX-License-Identifier: Apache-2.0
 //
 // The Members section of the organization, team and project pages (spec § 5.2). A SERVER
-// component: it passes the Server Actions to the client forms as props.
+// component: it passes the Server Actions to the client forms as props. `keep` holds the offset
+// of the page's other list (for example `{ offset: 50 }`), so a member page link keeps it.
 import type { ReactElement } from 'react';
 import { EmptyState, Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@paigasus/ui';
 import { AttachMembershipForm, DetachMembershipButton } from '../../_components/membership-form';
@@ -10783,7 +11515,14 @@ import { SectionError } from '../../_components/section-error';
 import { attachMembershipAction, detachMembershipAction } from './actions';
 import type { MembersData } from './members';
 
-export function MembersSection({ nodePrn, path, data }: { readonly nodePrn: string; readonly path: string; readonly data: MembersData }): ReactElement {
+export type MembersSectionProps = {
+  readonly nodePrn: string;
+  readonly path: string;
+  readonly data: MembersData;
+  readonly keep?: Readonly<Record<string, number>>;
+};
+
+export function MembersSection({ nodePrn, path, data, keep = {} }: MembersSectionProps): ReactElement {
   return (
     <section aria-labelledby="members-heading" className="flex flex-col gap-3">
       <h2 id="members-heading" className="text-lg font-semibold">
@@ -10816,7 +11555,7 @@ export function MembersSection({ nodePrn, path, data }: { readonly nodePrn: stri
                 ))}
               </TableBody>
             </Table>
-            <Pager label="Member pages" path={path} param="moffset" offset={data.list.value.offset} nextOffset={data.list.value.nextOffset} />
+            <Pager label="Member pages" path={path} param="moffset" offset={data.list.value.offset} nextOffset={data.list.value.nextOffset} keep={keep} />
           </>
         )
       ) : (
@@ -10857,7 +11596,7 @@ type Props = {
   searchParams: Promise<Record<string, string | string[] | undefined>>;
 };
 
-function TeamTable({ orgId, list }: { readonly orgId: string; readonly list: TeamList }): ReactElement {
+function TeamTable({ orgId, list, membersOffset }: { readonly orgId: string; readonly list: TeamList; readonly membersOffset: number }): ReactElement {
   if (list.rows.length === 0 && list.offset === 0) return <EmptyState title="No teams yet" />;
   return (
     <>
@@ -10885,7 +11624,7 @@ function TeamTable({ orgId, list }: { readonly orgId: string; readonly list: Tea
           ))}
         </TableBody>
       </Table>
-      <Pager label="Team pages" path={`/iam/orgs/${orgId}`} param="offset" offset={list.offset} nextOffset={list.nextOffset} />
+      <Pager label="Team pages" path={`/iam/orgs/${orgId}`} param="offset" offset={list.offset} nextOffset={list.nextOffset} keep={{ moffset: membersOffset }} />
     </>
   );
 }
@@ -10893,8 +11632,11 @@ function TeamTable({ orgId, list }: { readonly orgId: string; readonly list: Tea
 export default async function OrganizationPage({ params, searchParams }: Props): Promise<ReactElement> {
   const [{ org }, query] = await Promise.all([params, searchParams]);
   if (!isUuid(org)) notFound();
+  // Each list's pager keeps the other list's offset in its links (pageHref, lib/paging.ts).
+  const offset = parseOffset(query.offset);
+  const membersOffset = parseOffset(query.moffset);
   const [clients, may] = await Promise.all([iamClients(), mayI()]);
-  const data = await loadOrganizationPage({ tenancy: clients.tenancy, mayI: may }, { org, offset: parseOffset(query.offset), membersOffset: parseOffset(query.moffset) });
+  const data = await loadOrganizationPage({ tenancy: clients.tenancy, mayI: may }, { org, offset, membersOffset });
   if (data.kind === 'not-found') notFound();
   if (data.kind === 'error') return <PageError error={data.error} />;
 
@@ -10909,10 +11651,10 @@ export default async function OrganizationPage({ params, searchParams }: Props):
         <h2 id="teams-heading" className="text-lg font-semibold">
           Teams
         </h2>
-        {data.teams.ok ? <TeamTable orgId={data.orgId} list={data.teams.value} /> : <SectionError error={data.teams.error} />}
+        {data.teams.ok ? <TeamTable orgId={data.orgId} list={data.teams.value} membersOffset={membersOffset} /> : <SectionError error={data.teams.error} />}
         {data.canCreateTeam ? <CreateForm testId="create-team" title="Create team" submitLabel="Create" action={createTeamAction} hidden={{ orgPrn: data.orgPrn }} /> : null}
       </section>
-      <MembersSection nodePrn={data.orgPrn} path={`/iam/orgs/${data.orgId}`} data={data.members} />
+      <MembersSection nodePrn={data.orgPrn} path={`/iam/orgs/${data.orgId}`} data={data.members} keep={{ offset }} />
     </div>
   );
 }
@@ -10920,8 +11662,16 @@ export default async function OrganizationPage({ params, searchParams }: Props):
 
 - [ ] **Step 16: Run the checks**
 
-Run:
+First format every file of this task (the Global Constraints). Then run the checks:
 ```bash
+pnpm -C ts exec prettier --write \
+  'apps/iam-console/app/(console)/orgs/members.ts' 'apps/iam-console/app/(console)/orgs/members-section.tsx' \
+  apps/iam-console/app/_components/membership-form.tsx \
+  'apps/iam-console/app/(console)/orgs/commands.ts' 'apps/iam-console/app/(console)/orgs/actions.ts' \
+  'apps/iam-console/app/(console)/orgs/[org]/load.ts' 'apps/iam-console/app/(console)/orgs/[org]/commands.ts' \
+  'apps/iam-console/app/(console)/orgs/[org]/actions.ts' 'apps/iam-console/app/(console)/orgs/[org]/page.tsx' \
+  apps/iam-console/tests/integration/org-page.test.ts apps/iam-console/tests/integration/membership-commands.test.ts \
+  apps/iam-console/tests/unit/actions-structure.test.ts
 pnpm --dir ts/apps/iam-console exec vitest run tests/unit tests/integration
 moon run iam-console-ts:typecheck ts:lint ts:fmt --force
 moon run iam-console-ts:build
@@ -10944,7 +11694,9 @@ feat(ts): add the organization page with team and membership actions (SMA-511)
 The page reads the organization, its teams and its memberships, and pages
 both lists with an offset. A segment that is not a UUID is a 404 with no
 IAM call. A denied organization is the 403 view; a denied list stays in
-its own section.
+its own section. An invalid-input answer to the organization's PRN (IAM's
+prn-mismatch) is a 404. Each list's pager keeps the offset of the other
+list.
 
 Create team, attach membership and detach membership are Server Actions
 that always call IAM. Attach and detach live once in orgs/actions.ts, so
@@ -10969,10 +11721,12 @@ EOF
 - Test: `ts/apps/iam-console/tests/integration/team-project-pages.test.ts`
 
 **Interfaces:**
-- Consumes: Task 16 and Task 17 products (`loadMembers`, `MembersData`, `MembersSection`, `CreateForm`, `Pager`, `toActionResult`, `formFields`, `invalidFormInput`); `isUuid`, `teamPrn`, `projectPrn`, `parseTenancyPrn`, `TenancyKind` (`lib/prn.ts`).
+- Consumes: Task 16 and Task 17 products (`loadMembers`, `MembersData`, `MembersSection` and its optional `keep` prop, `CreateForm`, `Pager` and its optional `keep` prop, `toActionResult`, `formFields`, `invalidFormInput`); `isUuid`, `teamPrn`, `projectPrn`, `parseTenancyPrn`, `TenancyKind` (`lib/prn.ts`).
 - Produces: `sameNode` (`orgs/node-ref.ts`); `ProjectRow`, `ProjectList`, `TeamPageData`, `loadTeamPage` (`[team]/load.ts`); `createProjectForm`, `createProject` (`[team]/commands.ts`); `createProjectAction` (`[team]/actions.ts`); `ProjectPageData`, `loadProjectPage` (`[project]/load.ts`).
 
 Spec § 5.2 "Consistency": a team page compares `GetTeam.org_prn` with `[org]`; a project page compares `GetProject.team_prn` and `.org_prn` with `[team]` and `[org]`. A mismatch renders `notFound()`. IAM stays the authority on access. Note that a project PRN holds the ORG and the project, not the team (`prn:pgs:iam::<org>:project/<id>`), so `[team]` is checked only through `team_prn`.
+
+Real IAM finds a wrong `[org]` segment BEFORE it answers. `GetTeam` and `GetProject` compare the stored node's canonical PRN with the request PRN. On a difference they return `PrnMismatch` (`rs/crates/services/paigasus-iam/src/adapters/grpc/tenancy.rs:331-333`, `:480-482`). IAM runs its access check first (`:328-330`, `:477-479`), so a caller with no access to the node still gets the 403 view. The mismatch error is `InvalidArgument`, and the SDK presents it as `invalid-input`. So both loaders map an `invalid-input` answer of their primary Get to `{ kind: 'not-found' }` (ruling T18.a). The cost: a real invalid input on that call shows the 404, not an error page. The `sameNode` checks stay. For `[org]` they are a second guard. For the project page's `[team]` they are the only guard, because IAM cannot see the team in a project PRN.
 
 - [ ] **Step 1: Write the failing `sameNode` unit test**
 
@@ -11018,9 +11772,12 @@ Expected: FAIL. The import `../../app/(console)/orgs/node-ref` does not resolve.
 ```ts
 // SPDX-License-Identifier: Apache-2.0
 //
-// The URL-consistency check of the node pages (spec § 5.2). IAM answers GetTeam by the team's own
-// id, so /orgs/<wrong org>/teams/<team> can come back with a team whose org_prn names another
-// organization. The page then renders notFound(). This is not an access check: IAM is that.
+// The URL-consistency check of the node pages (spec § 5.2). A team or project PRN holds the org, so
+// for /orgs/<wrong org>/teams/<team> IAM itself answers prn-mismatch (InvalidArgument,
+// adapters/grpc/tenancy.rs:331-333 and :480-482), and the loaders map that invalid-input answer to
+// notFound(). For [org] this check is a second guard. The project page's [team] check is the one
+// IAM cannot make: a project PRN holds no team, so only GetProject's team_prn shows a wrong [team].
+// On a mismatch the page renders notFound(). This is not an access check: IAM is that.
 import 'server-only';
 import { parseTenancyPrn, type TenancyKind } from '../../../lib/prn';
 
@@ -11046,7 +11803,10 @@ Expected: PASS, 2 tests.
 //
 // The team and project page loaders and the create-project command (spec § 5.2, § 5.3), against the
 // fake IAM. The consistency cases prove that a URL whose segments disagree with IAM's answer is a
-// 404, and the non-UUID cases prove that IAM is not called for a malformed URL.
+// 404, and the non-UUID cases prove that IAM is not called for a malformed URL. The prn-mismatch
+// cases script the answer real IAM gives for a wrong [org] (tenancy.rs:331-333, :480-482); the
+// other-organization cases script an answer real IAM never gives, and hold the sameNode guard.
+import { Code } from '@connectrpc/connect';
 import { disposeTransports } from '@paigasus/sdk/iam';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createProject } from '../../app/(console)/orgs/[org]/teams/[team]/commands';
@@ -11103,6 +11863,21 @@ describe('loadTeamPage', () => {
     expect(calls('tenancy.listProjects')).toHaveLength(0);
   });
 
+  it('answers not-found when IAM refuses the URL-built team PRN with prn-mismatch (a wrong [org])', async () => {
+    iam.setHandlers({
+      ...world(),
+      'tenancy.getTeam': () => {
+        throw denial({ code: Code.InvalidArgument, reason: 'prn-mismatch', correlationId: 'corr-team-mismatch' });
+      },
+    });
+    const calls = callsSince(iam);
+
+    expect(await loadTeamPage(deps({ CreateProject: true }), { org: IDS.orgB, team: IDS.teamA1, offset: 0, membersOffset: 0 })).toEqual({ kind: 'not-found' });
+    expect(calls('tenancy.getTeam').map((call) => call.request)).toEqual([expect.objectContaining({ prn: teamPrn(IDS.orgB, IDS.teamA1) })]);
+    expect(calls('tenancy.listProjects')).toHaveLength(0);
+    expect(calls('tenancy.listMemberships')).toHaveLength(0);
+  });
+
   it('returns the team, its projects, its members and the create-project affordance', async () => {
     iam.setHandlers(world());
     const calls = callsSince(iam);
@@ -11150,6 +11925,32 @@ describe('loadProjectPage', () => {
 
     iam.setHandlers(world({ projectOrgPrn: ORG_B }));
     expect(await loadProjectPage(deps(), params)).toEqual({ kind: 'not-found' });
+  });
+
+  it("answers not-found for IAM's prn-mismatch on the URL-built project PRN (a wrong [org]), but a page error for a denial", async () => {
+    iam.setHandlers({
+      ...world(),
+      'tenancy.getProject': () => {
+        throw denial({ code: Code.InvalidArgument, reason: 'prn-mismatch', correlationId: 'corr-project-mismatch' });
+      },
+    });
+    const calls = callsSince(iam);
+
+    expect(await loadProjectPage(deps({ AttachMembership: true }), { ...params, org: IDS.orgB })).toEqual({ kind: 'not-found' });
+    expect(calls('tenancy.getProject').map((call) => call.request)).toEqual([expect.objectContaining({ prn: projectPrn(IDS.orgB, IDS.projectA1) })]);
+    expect(calls('tenancy.listMemberships')).toHaveLength(0);
+
+    // Only invalid-input becomes a 404: a denied GetProject stays the 403 view.
+    iam.setHandlers({
+      ...world(),
+      'tenancy.getProject': () => {
+        throw denial({ correlationId: 'corr-project' });
+      },
+    });
+    const denied = await loadProjectPage(deps(), params);
+    if (denied.kind !== 'error') throw new Error(`expected an error, got ${denied.kind}`);
+    expect(denied.error.presentation).toBe('forbidden');
+    expect(denied.error.correlationId).toBe('corr-project');
   });
 
   it('returns the project and its members', async () => {
@@ -11246,7 +12047,9 @@ export async function loadTeamPage(
   const prn = teamPrn(orgId, teamId);
 
   const got = await callIam(() => deps.tenancy.getTeam({ prn }));
-  if (!got.ok) return { kind: 'error', error: got.error };
+  // The PRN comes from the URL: IAM answers a wrong [org] with prn-mismatch, which is invalid-input
+  // (tenancy.rs:331-333). Spec § 5.2 makes a mismatched URL a 404 (ruling T18.a).
+  if (!got.ok) return got.error.presentation === 'invalid-input' ? { kind: 'not-found' } : { kind: 'error', error: got.error };
   const team = got.value.team;
   if (team === undefined || !sameNode(team.orgPrn, 'organization', orgId)) return { kind: 'not-found' };
 
@@ -11339,7 +12142,9 @@ export async function loadProjectPage(
   const prn = projectPrn(orgId, projectId);
 
   const got = await callIam(() => deps.tenancy.getProject({ prn }));
-  if (!got.ok) return { kind: 'error', error: got.error };
+  // The PRN comes from the URL: IAM answers a wrong [org] with prn-mismatch, which is invalid-input
+  // (tenancy.rs:480-482). Spec § 5.2 makes a mismatched URL a 404 (ruling T18.a).
+  if (!got.ok) return got.error.presentation === 'invalid-input' ? { kind: 'not-found' } : { kind: 'error', error: got.error };
   const project = got.value.project;
   if (project === undefined || !sameNode(project.teamPrn, 'team', teamId) || !sameNode(project.orgPrn, 'organization', orgId)) return { kind: 'not-found' };
 
@@ -11354,7 +12159,7 @@ Run:
 ```bash
 pnpm --dir ts/apps/iam-console exec vitest run tests/integration/team-project-pages.test.ts
 ```
-Expected: PASS, 10 tests.
+Expected: PASS, 11 tests (`loadTeamPage` 5, `loadProjectPage` 4, `createProject` 2).
 
 - [ ] **Step 10: Extend the structure test first, and see it fail**
 
@@ -11427,7 +12232,7 @@ type Props = {
   searchParams: Promise<Record<string, string | string[] | undefined>>;
 };
 
-function ProjectTable({ base, list }: { readonly base: string; readonly list: ProjectList }): ReactElement {
+function ProjectTable({ base, list, membersOffset }: { readonly base: string; readonly list: ProjectList; readonly membersOffset: number }): ReactElement {
   if (list.rows.length === 0 && list.offset === 0) return <EmptyState title="No projects yet" />;
   return (
     <>
@@ -11455,7 +12260,7 @@ function ProjectTable({ base, list }: { readonly base: string; readonly list: Pr
           ))}
         </TableBody>
       </Table>
-      <Pager label="Project pages" path={base} param="offset" offset={list.offset} nextOffset={list.nextOffset} />
+      <Pager label="Project pages" path={base} param="offset" offset={list.offset} nextOffset={list.nextOffset} keep={{ moffset: membersOffset }} />
     </>
   );
 }
@@ -11463,8 +12268,11 @@ function ProjectTable({ base, list }: { readonly base: string; readonly list: Pr
 export default async function TeamPage({ params, searchParams }: Props): Promise<ReactElement> {
   const [{ org, team }, query] = await Promise.all([params, searchParams]);
   if (!isUuid(org) || !isUuid(team)) notFound();
+  // Each list's pager keeps the other list's offset in its links (pageHref, lib/paging.ts).
+  const offset = parseOffset(query.offset);
+  const membersOffset = parseOffset(query.moffset);
   const [clients, may] = await Promise.all([iamClients(), mayI()]);
-  const data = await loadTeamPage({ tenancy: clients.tenancy, mayI: may }, { org, team, offset: parseOffset(query.offset), membersOffset: parseOffset(query.moffset) });
+  const data = await loadTeamPage({ tenancy: clients.tenancy, mayI: may }, { org, team, offset, membersOffset });
   if (data.kind === 'not-found') notFound();
   if (data.kind === 'error') return <PageError error={data.error} />;
   const base = `/iam/orgs/${data.orgId}/teams/${data.teamId}`;
@@ -11480,10 +12288,10 @@ export default async function TeamPage({ params, searchParams }: Props): Promise
         <h2 id="projects-heading" className="text-lg font-semibold">
           Projects
         </h2>
-        {data.projects.ok ? <ProjectTable base={base} list={data.projects.value} /> : <SectionError error={data.projects.error} />}
+        {data.projects.ok ? <ProjectTable base={base} list={data.projects.value} membersOffset={membersOffset} /> : <SectionError error={data.projects.error} />}
         {data.canCreateProject ? <CreateForm testId="create-project" title="Create project" submitLabel="Create" action={createProjectAction} hidden={{ teamPrn: data.teamPrn }} /> : null}
       </section>
-      <MembersSection nodePrn={data.teamPrn} path={base} data={data.members} />
+      <MembersSection nodePrn={data.teamPrn} path={base} data={data.members} keep={{ offset }} />
     </div>
   );
 }
@@ -11543,8 +12351,18 @@ export default async function ProjectPage({ params, searchParams }: Props): Prom
 
 - [ ] **Step 14: Run the checks**
 
-Run:
+First format every file of this task (the Global Constraints). Then run the checks:
 ```bash
+pnpm -C ts exec prettier --write \
+  'apps/iam-console/app/(console)/orgs/node-ref.ts' \
+  'apps/iam-console/app/(console)/orgs/[org]/teams/[team]/load.ts' \
+  'apps/iam-console/app/(console)/orgs/[org]/teams/[team]/commands.ts' \
+  'apps/iam-console/app/(console)/orgs/[org]/teams/[team]/actions.ts' \
+  'apps/iam-console/app/(console)/orgs/[org]/teams/[team]/page.tsx' \
+  'apps/iam-console/app/(console)/orgs/[org]/teams/[team]/projects/[project]/load.ts' \
+  'apps/iam-console/app/(console)/orgs/[org]/teams/[team]/projects/[project]/page.tsx' \
+  apps/iam-console/tests/unit/node-ref.test.ts apps/iam-console/tests/integration/team-project-pages.test.ts \
+  apps/iam-console/tests/unit/actions-structure.test.ts
 pnpm --dir ts/apps/iam-console exec vitest run tests/unit tests/integration
 moon run iam-console-ts:typecheck ts:lint ts:fmt --force
 moon run iam-console-ts:build
@@ -11569,8 +12387,10 @@ feat(ts): add the team and project pages to the iam console (SMA-511)
 The team page reads the team, its projects and its members, and offers
 create project. The project page reads the project and its members. Both
 compare IAM's answer with the URL: a team of another organization, or a
-project of another team or organization, is a 404. A segment that is not
-a UUID is a 404 with no IAM call.
+project of another team or organization, is a 404. IAM itself answers a
+wrong organization segment with prn-mismatch (invalid input), and both
+loaders map that answer to a 404 too. A segment that is not a UUID is a
+404 with no IAM call.
 
 Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
 EOF
@@ -11585,7 +12405,7 @@ EOF
 - Test: `ts/apps/iam-console/tests/integration/audit-page.test.ts`
 
 **Interfaces:**
-- Consumes: `discovery` (`lib/discovery.ts`); `sessionToken`, `iamClients`, `IamClients` (`lib/iam.ts`); `callIam`, `IamResult` (`lib/errors.ts`); `parseCursor` (`lib/paging.ts`); `PageError`, `PRESENTATION_COPY`; `ServiceState` (`@paigasus/discovery/types`); `ErrorState`, `Table*` (`@paigasus/ui`); `Breadcrumbs`, `ZoneLink` (`@paigasus/app-shell`).
+- Consumes: `discovery` (`lib/discovery.ts`); `sessionToken`, `iamClients`, `IamClients` (`lib/iam.ts`); `callIam`, `IamResult` (`lib/errors.ts`); `parseCursor` (`lib/paging.ts`); `PageError`, `PRESENTATION_COPY`; `ServiceState` (`@paigasus/discovery/types`); `capabilityOutcome` (`@paigasus/discovery/client`, `ts/packages/paigasus-discovery/src/core/outcome.ts:25`, returns `'hidden' | 'shown' | 'degraded'`); `ErrorState`, `Table*` (`@paigasus/ui`); `Breadcrumbs`, `ZoneLink` (`@paigasus/app-shell`).
 - Produces: `AuditGate`, `auditGate`, `AUDIT_PAGE_SIZE`, `AuditRow`, `AuditPageData`, `loadAuditPage` (`app/(console)/audit/load.ts`).
 
 Spec § 6.6: absent, or available without `iam.audit` → `notFound()`. Degraded → the degraded `ErrorState`, not a 404. Only an available state WITH `iam.audit` reaches `ListAuditEntries`. The page does NOT ask `mayI('ListAuditLog', …)`: a navigation is a user action, so IAM answers it (spec § 6.3). Only the nav entry is hidden by `mayI` (Task 15).
@@ -11722,17 +12542,22 @@ Expected: FAIL. The import `../../app/(console)/audit/load` does not resolve.
 // /iam/audit (spec § 6.6, AC 4). The screen exists only when IAM reports `iam.audit`. The gate is
 // a pure function of the ServiceState, so a unit test covers every branch.
 import 'server-only';
+import { capabilityOutcome } from '@paigasus/discovery/client';
 import type { ServiceState } from '@paigasus/discovery/types';
 import { callIam, type IamResult } from '../../../lib/errors';
 import type { IamClients } from '../../../lib/iam';
 
 export type AuditGate = 'not-found' | 'degraded' | 'available';
 
-/** Absent or available-without-the-capability is a 404. Degraded is NOT a 404: the feature may exist. */
+/**
+ * The branch table is @paigasus/discovery's capabilityOutcome: there is one copy. This maps its
+ * answer to the page. Absent or available-without-the-capability is `hidden`, which is a 404.
+ * Degraded is NOT a 404: the feature may exist.
+ */
+const GATE = { hidden: 'not-found', shown: 'available', degraded: 'degraded' } as const;
+
 export function auditGate(state: ServiceState): AuditGate {
-  if (state.state === 'degraded') return 'degraded';
-  if (state.state === 'available' && state.capabilities.includes('iam.audit')) return 'available';
-  return 'not-found';
+  return GATE[capabilityOutcome(state, 'iam.audit')];
 }
 
 export const AUDIT_PAGE_SIZE = 50;
@@ -11872,8 +12697,11 @@ export default async function AuditPage({ searchParams }: Props): Promise<ReactE
 
 - [ ] **Step 7: Run the checks**
 
-Run:
+First format every file of this task (the Global Constraints). Then run the checks:
 ```bash
+pnpm -C ts exec prettier --write \
+  'apps/iam-console/app/(console)/audit/load.ts' 'apps/iam-console/app/(console)/audit/page.tsx' \
+  apps/iam-console/tests/unit/audit-gate.test.ts apps/iam-console/tests/integration/audit-page.test.ts
 pnpm --dir ts/apps/iam-console exec vitest run tests/unit tests/integration
 moon run iam-console-ts:typecheck ts:lint ts:fmt --force
 moon run iam-console-ts:build
@@ -11933,6 +12761,14 @@ Facts this task relies on. `server-only`'s exports map is `{ "react-server": "./
 // The two fixtures are two directories because a Next build compiles every file of its project.
 // The last case pins that their sdk-user.tsx files differ ONLY in the directive, so the control
 // stays "the same fixture with the import in a server component".
+//
+// The negative case needs exit code 1 exactly: `null` (a spawn error, or the kill at the timeout)
+// is not a build failure. The message regex matches Next 16.3.4's own error, "'server-only' cannot
+// be imported from a Client Component module. It should only be used from a Server Component."
+// (next/dist/build/webpack-config.js:1183; the swc binary carries the same text for Turbopack), and
+// server-only's own throw, "This module cannot be imported from a Client Component module.". A
+// looser /client component/i also matches Turbopack's layer labels ("Client Component Browser"),
+// so a build that fails for another client-side reason would pass it.
 import { spawnSync } from 'node:child_process';
 import { readFileSync, rmSync } from 'node:fs';
 import path from 'node:path';
@@ -11965,9 +12801,9 @@ function build(fixture: Fixture): { status: number | null; output: string } {
 describe('a client component cannot import @paigasus/sdk (spec § 7.7)', () => {
   it('fails `next build` with the server-only error when a client component imports the SDK', { timeout: BUILD_TIMEOUT_MS + 10_000 }, () => {
     const { status, output } = build('client-imports-sdk');
-    expect(status, output).not.toBe(0);
+    expect(status, output).toBe(1);
     expect(output).toMatch(/server-only/);
-    expect(output).toMatch(/client component/i);
+    expect(output).toMatch(/cannot be imported from a Client Component module/);
   });
 
   it('builds the same code when a server component imports the SDK (positive control)', { timeout: BUILD_TIMEOUT_MS + 10_000 }, () => {
@@ -12136,26 +12972,56 @@ cd /Users/smaschek/dev/paigasus/paigasus-core/.claude/worktrees/feature+sma-511-
 pnpm --dir ts/apps/iam-console exec vitest run tests/build/client-boundary.test.ts
 ```
 Expected: PASS, 3 tests (about one minute per build).
-If the negative case fails on `toMatch(/client component/i)`, read the printed build output. Record the exact Next 16.3.4 message in the test's header comment, and change only that regex to a phrase from the message. Keep `/server-only/`. Do not delete the assertion.
+Then record the build-output line that the message regex matched in the test's header comment, under the two quoted texts.
+If the negative case fails on `toBe(1)` or on a `toMatch`, read the printed build output. The build failed for another reason, or it did not fail. Fix the fixture. Do not loosen or delete an assertion: a build that fails for another reason proves nothing.
 If the positive control fails, the fixture itself is broken (for example a missing dependency). Fix the fixture; the negative case proves nothing until the control is green.
 
 - [ ] **Step 7: Prove the fixture files are clean for lint, format and type-check**
 
-Run:
+First format every `ts/` file that this task creates or edits (the Global Constraints). The two fixtures get the same input, so they stay byte-identical. `.gitignore` is not in the list: Prettier has no parser for it.
 ```bash
-git status --short ts/apps/iam-console/tests/fixtures
+pnpm -C ts exec prettier --write apps/iam-console/tests/build/client-boundary.test.ts \
+  apps/iam-console/tests/fixtures/client-imports-sdk/next.config.ts apps/iam-console/tests/fixtures/client-imports-sdk/tsconfig.json \
+  apps/iam-console/tests/fixtures/client-imports-sdk/app/layout.tsx apps/iam-console/tests/fixtures/client-imports-sdk/app/page.tsx \
+  apps/iam-console/tests/fixtures/client-imports-sdk/app/sdk-user.tsx \
+  apps/iam-console/tests/fixtures/server-imports-sdk/next.config.ts apps/iam-console/tests/fixtures/server-imports-sdk/tsconfig.json \
+  apps/iam-console/tests/fixtures/server-imports-sdk/app/layout.tsx apps/iam-console/tests/fixtures/server-imports-sdk/app/page.tsx \
+  apps/iam-console/tests/fixtures/server-imports-sdk/app/sdk-user.tsx \
+  apps/iam-console/tsconfig.json apps/iam-console/moon.yml
+```
+
+Then run:
+```bash
+git status --short --untracked-files=all ts/apps/iam-console/tests/fixtures
 moon run ts:lint ts:fmt iam-console-ts:typecheck --force
 ```
-Expected: `git status` lists only the ten source files (no `next-env.d.ts`, no `.next`); lint, fmt and typecheck pass.
+Expected: `git status` prints exactly ten `??` lines, one for each source file, and nothing else (no `next-env.d.ts`, no `.next`). `--untracked-files=all` is necessary: without it, git prints one collapsed `?? ts/apps/iam-console/tests/fixtures/` line for the untracked directory. The ten lines:
+```text
+?? ts/apps/iam-console/tests/fixtures/client-imports-sdk/app/layout.tsx
+?? ts/apps/iam-console/tests/fixtures/client-imports-sdk/app/page.tsx
+?? ts/apps/iam-console/tests/fixtures/client-imports-sdk/app/sdk-user.tsx
+?? ts/apps/iam-console/tests/fixtures/client-imports-sdk/next.config.ts
+?? ts/apps/iam-console/tests/fixtures/client-imports-sdk/tsconfig.json
+?? ts/apps/iam-console/tests/fixtures/server-imports-sdk/app/layout.tsx
+?? ts/apps/iam-console/tests/fixtures/server-imports-sdk/app/page.tsx
+?? ts/apps/iam-console/tests/fixtures/server-imports-sdk/app/sdk-user.tsx
+?? ts/apps/iam-console/tests/fixtures/server-imports-sdk/next.config.ts
+?? ts/apps/iam-console/tests/fixtures/server-imports-sdk/tsconfig.json
+```
+Lint, fmt and typecheck pass.
 
 - [ ] **Step 8: Run the gates that key on the changed inputs**
 
 Run:
 ```bash
+export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
 moon run repo:next-public-free repo:input-liveness --force
+python3 ci/affected-graph/ci_targets.py
 /bin/bash ci/affected-graph/run.sh --negative-control
 ```
-Expected: both Moon tasks pass. The negative control ends with `negative-control OK: harness reported red on all wrong expectations` (it runs `ci_targets.py --self-test`, which reads the pin you changed). Use `/bin/bash`: bash 5.3.15 on this machine deadlocks in this script.
+Expected: both Moon tasks pass.
+`python3 ci/affected-graph/ci_targets.py` (no flag) exits 0 and prints one line that starts with `PASS  ci-targets`. This is the check that compares the pin with Moon. It runs `moon query tasks`, and `check_gate_inputs` compares Moon's resolved `next-public-free` inputs with `SELF_TASK_EXPECTED_GLOBS["next-public-free"]` by exact ordered equality. So a typo in the `moon.yml` glob or in the pin fails here.
+The negative control ends with `negative-control OK: harness reported red on all wrong expectations`. It runs `ci_targets.py --self-test`, which checks the table's own shape only: it builds its payload from the table and never reads Moon. It cannot find a `moon.yml`/pin mismatch. Use `/bin/bash`: bash 5.3.15 on this machine deadlocks in this script.
 
 - [ ] **Step 9: Commit**
 
@@ -12306,6 +13172,11 @@ export default function globalSetup(): void {
 // handler set, because the fake's setHandlers() REPLACES the whole map (Task 11). Every key an
 // override uses must therefore exist in the default set below.
 //
+// One piece of state: an organization that CreateOrganization makes is in every later
+// ListOrganizations answer of the same world. Each worldHandlers() call starts with none, so a
+// test cannot see the organizations of an earlier test. R6 uses it to prove that the action
+// refreshes the page (P5b-16).
+//
 // PRNs are literal strings: lib/prn.ts imports server-only, which throws under Playwright.
 import { Code } from '@connectrpc/connect';
 import { denial, type FakeIamHandlers } from '../../support/fake-iam';
@@ -12369,6 +13240,7 @@ const PROJECTS = new Map([
 export function worldHandlers(options: WorldOptions = {}): FakeIamHandlers {
   const allow = new Set<string>(options.allow ?? ALL_ACTIONS);
   const withScopes = options.memberships ?? true;
+  const created: { prn: string; slug: string; name: string }[] = [];
   return {
     'authn.introspect': () => ({
       principalPrn: PRINCIPAL_PRN,
@@ -12401,19 +13273,23 @@ export function worldHandlers(options: WorldOptions = {}): FakeIamHandlers {
       if (project === undefined) throw notFound();
       return { project };
     },
-    'tenancy.listOrganizations': () => ({ organizations: [...ORGANIZATIONS.values()] }),
+    'tenancy.listOrganizations': () => ({ organizations: [...ORGANIZATIONS.values(), ...created] }),
     'tenancy.listTeams': () => ({ teams: [TEAM] }),
     'tenancy.listProjects': () => ({ projects: [PROJECT] }),
     // `filter` is a oneof: its type includes `{ case: undefined }`, so narrow instead of annotating.
     'tenancy.listMemberships': (req) => ({
       memberships: [{ id: '0190a1d4-0000-7000-8000-0000000000f4', principalPrn: PRINCIPAL_PRN, nodePrn: req.filter.case === 'nodePrn' ? req.filter.value : '' }],
     }),
-    'tenancy.createOrganization': (req: { slug: string; name: string }) => ({
-      organization: { prn: `prn:pgs:iam:::organization/${NEW_ORG_ID}`, slug: req.slug, name: req.name },
-    }),
+    'tenancy.createOrganization': (req: { slug: string; name: string }) => {
+      const organization = { prn: `prn:pgs:iam:::organization/${NEW_ORG_ID}`, slug: req.slug, name: req.name };
+      created.push(organization);
+      return { organization };
+    },
     'tenancy.createTeam': (req: { orgPrn: string; slug: string; name: string }) => ({ team: { prn: TEAM_PRN, orgPrn: req.orgPrn, slug: req.slug, name: req.name } }),
     'tenancy.createProject': (req: { teamPrn: string; slug: string; name: string }) => ({ project: { prn: PROJECT_PRN, teamPrn: req.teamPrn, orgPrn: ORG_PRN, slug: req.slug, name: req.name } }),
-    'tenancy.attachMembership': (req: { principalPrn: string; nodePrn: string }) => ({ membership: { id: '0190a1d4-0000-7000-8000-0000000000f5', principalPrn: req.principalPrn, nodePrn: req.nodePrn } }),
+    'tenancy.attachMembership': (req: { principalPrn: string; nodePrn: string }) => ({
+      membership: { id: '0190a1d4-0000-7000-8000-0000000000f5', principalPrn: req.principalPrn, nodePrn: req.nodePrn },
+    }),
     'tenancy.detachMembership': () => ({}),
     'audit.listAuditEntries': () => ({
       entries: [
@@ -12560,74 +13436,103 @@ function serverEnv(values: Readonly<Record<string, string>>): NodeJS.ProcessEnv 
   return { ...env, ...values };
 }
 
+/** Runs every close step in order, also after one throws, so one failed step cannot leak the rest. */
+async function closeInOrder(steps: readonly (() => Promise<void>)[]): Promise<void> {
+  const failures: unknown[] = [];
+  for (const step of steps) {
+    try {
+      await step();
+    } catch (error) {
+      failures.push(error);
+    }
+  }
+  if (failures.length > 0) throw new AggregateError(failures, `${String(failures.length)} of ${String(steps.length)} close steps failed`);
+}
+
 async function startStack(): Promise<{ harness: Harness; close: () => Promise<void> }> {
   const tls = testTls();
-  const idp = await startFakeIdp({ cert: tls });
-  const iam = await startFakeIam({ handlers: worldHandlers() });
-  iam.setServiceInfo(DEFAULT_DESCRIPTOR);
+  // Everything that started so far, NEWEST FIRST: the order to close it in. A start step that
+  // throws closes all of it before the error goes up. waitForHealth throws on a 5xx answer and at
+  // its timeout, and the worker fixture gets no `close` from a start that threw. Without this, the
+  // server.js child, the terminator and both fakes stay alive after a failed start.
+  const started: (() => Promise<void>)[] = [];
+  try {
+    const idp = await startFakeIdp({ cert: tls });
+    started.unshift(() => idp.close());
+    const iam = await startFakeIam({ handlers: worldHandlers() });
+    started.unshift(() => iam.close());
+    iam.setServiceInfo(DEFAULT_DESCRIPTOR);
 
-  let output = '';
-  const failures: string[] = [];
-  for (let attempt = 1; attempt <= MAX_START_ATTEMPTS; attempt += 1) {
-    const port = await freePort();
-    const terminator = await startTlsTerminator({ target: `http://127.0.0.1:${String(port)}`, tls });
-    output = '';
-    const child = spawn(process.execPath, [path.join(STANDALONE_APP_DIR, 'server.js')], {
-      cwd: STANDALONE_APP_DIR,
-      stdio: ['ignore', 'pipe', 'pipe'],
-      env: serverEnv({
-        PORT: String(port),
-        HOSTNAME: '127.0.0.1',
-        NEXT_TELEMETRY_DISABLED: '1',
-        NODE_EXTRA_CA_CERTS: tls.certPath,
-        PAIGASUS_ZONE: 'iam',
-        PAIGASUS_ZONES: JSON.stringify({ iam: '/iam' }),
-        PAIGASUS_OIDC_ISSUER: idp.issuer,
-        PAIGASUS_OIDC_CLIENT_ID: idp.clientId,
-        PAIGASUS_OIDC_CLIENT_SECRET: idp.clientSecret,
-        PAIGASUS_PUBLIC_ORIGIN: terminator.origin,
-        PAIGASUS_SESSION_STORE: 'memory',
-        PAIGASUS_SERVICES: JSON.stringify({ iam: iam.httpUrl }),
-        PAIGASUS_IAM_GRPC_URL: iam.grpcUrl,
-        PAIGASUS_DISCOVERY_NEGATIVE_MS: '1',
-        PAIGASUS_DISCOVERY_FRESH_MS: '2',
-        PAIGASUS_DISCOVERY_STALE_MS: '3',
-      }),
-    });
-    child.stdout?.on('data', (chunk: Buffer) => {
-      output += chunk.toString('utf8');
-    });
-    child.stderr?.on('data', (chunk: Buffer) => {
-      output += chunk.toString('utf8');
-    });
+    let output = '';
+    const failures: string[] = [];
+    for (let attempt = 1; attempt <= MAX_START_ATTEMPTS; attempt += 1) {
+      const port = await freePort();
+      const terminator = await startTlsTerminator({ target: `http://127.0.0.1:${String(port)}`, tls });
+      const closeTerminator = (): Promise<void> => terminator.close();
+      started.unshift(closeTerminator);
+      output = '';
+      const child = spawn(process.execPath, [path.join(STANDALONE_APP_DIR, 'server.js')], {
+        cwd: STANDALONE_APP_DIR,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: serverEnv({
+          PORT: String(port),
+          HOSTNAME: '127.0.0.1',
+          NEXT_TELEMETRY_DISABLED: '1',
+          NODE_EXTRA_CA_CERTS: tls.certPath,
+          PAIGASUS_ZONE: 'iam',
+          PAIGASUS_ZONES: JSON.stringify({ iam: '/iam' }),
+          PAIGASUS_OIDC_ISSUER: idp.issuer,
+          PAIGASUS_OIDC_CLIENT_ID: idp.clientId,
+          PAIGASUS_OIDC_CLIENT_SECRET: idp.clientSecret,
+          PAIGASUS_PUBLIC_ORIGIN: terminator.origin,
+          PAIGASUS_SESSION_STORE: 'memory',
+          PAIGASUS_SERVICES: JSON.stringify({ iam: iam.httpUrl }),
+          PAIGASUS_IAM_GRPC_URL: iam.grpcUrl,
+          PAIGASUS_DISCOVERY_NEGATIVE_MS: '1',
+          PAIGASUS_DISCOVERY_FRESH_MS: '2',
+          PAIGASUS_DISCOVERY_STALE_MS: '3',
+        }),
+      });
+      const stopChild = (): Promise<void> => stop(child);
+      started.unshift(stopChild);
+      child.stdout?.on('data', (chunk: Buffer) => {
+        output += chunk.toString('utf8');
+      });
+      child.stderr?.on('data', (chunk: Buffer) => {
+        output += chunk.toString('utf8');
+      });
 
-    const state = await waitForHealth(`http://127.0.0.1:${String(port)}/iam/healthz`, child, () => output);
-    if (state === 'ready') {
-      const harness: Harness = {
-        origin: terminator.origin,
-        iam,
-        idp,
-        url: (fullPath) => `${terminator.origin}${fullPath}`,
-        serverOutput: () => output,
-        useWorld: (options = {}) => {
-          iam.setHandlers(worldHandlers(options));
-          iam.setServiceInfo(options.descriptor ?? DEFAULT_DESCRIPTOR);
-        },
-      };
-      const close = async (): Promise<void> => {
-        await stop(child);
-        await terminator.close();
-        await iam.close();
-        await idp.close();
-      };
-      return { harness, close };
+      const state = await waitForHealth(`http://127.0.0.1:${String(port)}/iam/healthz`, child, () => output);
+      if (state === 'ready') {
+        const harness: Harness = {
+          origin: terminator.origin,
+          iam,
+          idp,
+          url: (fullPath) => `${terminator.origin}${fullPath}`,
+          serverOutput: () => output,
+          useWorld: (options = {}) => {
+            iam.setHandlers(worldHandlers(options));
+            iam.setServiceInfo(options.descriptor ?? DEFAULT_DESCRIPTOR);
+          },
+        };
+        // The server, then the terminator in front of it, then the fake IAM and the fake IdP.
+        return { harness, close: () => closeInOrder(started.splice(0)) };
+      }
+      failures.push(`attempt ${String(attempt)}: the server exited before it answered\n${output}`);
+      // This attempt's server exited first (a port race). Remove its two entries (the newest two)
+      // and close them. The fakes stay up for the next attempt.
+      started.splice(0, 2);
+      await closeInOrder([stopChild, closeTerminator]);
     }
-    failures.push(`attempt ${String(attempt)}: the server exited before it answered\n${output}`);
-    await terminator.close();
+    throw new Error(`the iam-console server failed to start after ${String(MAX_START_ATTEMPTS)} attempts:\n${failures.join('\n')}`);
+  } catch (error) {
+    // Close what started, then rethrow the START error: it tells why the stack is not up. A close
+    // failure goes to stderr, because it must not hide the start error.
+    await closeInOrder(started.splice(0)).catch((closeError: unknown) => {
+      console.error('the e2e stack failed to start, and closing what had started failed too:', closeError);
+    });
+    throw error;
   }
-  await iam.close();
-  await idp.close();
-  throw new Error(`the iam-console server failed to start after ${String(MAX_START_ATTEMPTS)} attempts:\n${failures.join('\n')}`);
 }
 
 export const test = base.extend<{ world: undefined }, { harness: Harness }>({
@@ -12732,14 +13637,26 @@ and add one line at the end of its `run:` block:
 ```
 Add this sentence to the comment above the step: `@paigasus/iam-console needs it too (SMA-511): its test-e2e task drives the standalone server through a TLS terminator.` All four packages resolve the same catalog `@playwright/test`, so the line is explicit, not a second download.
 
-- [ ] **Step 10: Run the task through Moon and the workflow gate**
+- [ ] **Step 10: Format, then run the task through Moon and the workflow gate**
 
-Run:
+First format every `ts/` file that this task creates or edits (the Global Constraints). The code above is already in Prettier's form (checked with `printWidth: 200`), so the write is a guard against a typo. If Step 1 changed `package.json` or a file in `tests/support/`, add those paths to the command.
+```bash
+export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
+cd /Users/smaschek/dev/paigasus/paigasus-core/.claude/worktrees/feature+sma-511-iam-console
+pnpm -C ts exec prettier --write apps/iam-console/playwright.config.ts apps/iam-console/tests/e2e/global-setup.ts \
+  apps/iam-console/tests/e2e/support/paths.ts apps/iam-console/tests/e2e/support/world.ts apps/iam-console/tests/e2e/support/harness.ts \
+  apps/iam-console/tests/e2e/harness.spec.ts apps/iam-console/moon.yml
+pnpm -C ts exec prettier --check apps/iam-console/playwright.config.ts apps/iam-console/tests/e2e apps/iam-console/moon.yml
+```
+Expected: the check prints `All matched files use Prettier code style!`.
+
+Then run:
 ```bash
 moon run iam-console-ts:test-e2e
 moon run repo:actionlint
 ```
 Expected: `1 passed` in the task output; `repo:actionlint` passes (it lints the edited workflow step).
+If `repo:actionlint` runs for more than 10 minutes, it is the bash 5.3.15 here-string deadlock on this host, not a gate failure. Stop it. Then run the gate script with the system bash, `/bin/bash ci/actionlint/run.sh`, and record both facts (the hang and the `/bin/bash` result) in the task report.
 
 - [ ] **Step 11: Commit**
 
@@ -12992,8 +13909,14 @@ test('R12: sign out posts /iam/auth/logout, and /iam/orgs then redirects to logi
   // The user menu is the LAST menu trigger in the header (the org switcher comes before it).
   await page.getByRole('banner').locator('button[aria-haspopup="menu"]').last().click();
   await page.getByRole('menuitem', { name: 'Sign out' }).click();
-  await logout;
-  await page.waitForLoadState();
+  const request = await logout;
+  // waitForRequest resolves when the POST is SENT, and waitForLoadState() would resolve at once (the
+  // old page is loaded). So wait for the post-logout page instead: handleLogout clears
+  // __Host-pgs_sid in its 302 to the IdP's end_session_endpoint (after it revokes at the IdP), and
+  // the fake IdP sends the browser back to `${PAIGASUS_PUBLIC_ORIGIN}/iam/`. When that URL is
+  // current, the clearing response has arrived.
+  await page.waitForURL((url) => /^\/iam\/?$/.test(url.pathname));
+  expect((await request.response())?.status()).toBe(302);
 
   expect((await page.context().cookies()).filter((cookie) => cookie.name === '__Host-pgs_sid')).toEqual([]);
   const again = await page.request.get(harness.url('/iam/orgs'), { maxRedirects: 0 });
@@ -13045,7 +13968,10 @@ test('R4: a denied page read is an HTTP 403 with the 403 view inside the shell (
   await expect(page.getByTestId('forbidden-view')).toBeVisible();
   await expect(page.getByRole('heading', { name: PRESENTATION_COPY.forbidden.title })).toBeVisible();
   await expect(page.getByRole('navigation', { name: 'Primary' })).toBeVisible();
-  const denied = harness.iam.callsTo('tenancy.getOrganization').slice(before).filter((call) => (call.request as { prn: string }).prn === ORG_PRN);
+  const denied = harness.iam
+    .callsTo('tenancy.getOrganization')
+    .slice(before)
+    .filter((call) => (call.request as { prn: string }).prn === ORG_PRN);
   expect(denied.length).toBeGreaterThan(0);
   // The paigasus-correlation-id header as it ARRIVED at the fake: the id proxy.ts minted. Every call
   // of one request carries the same id (lib/iam.ts reads it once per request).
@@ -13111,6 +14037,12 @@ test('R6: mayI says no, so the button hides, the reads render, and a POST from t
   const created = harness.iam.callsTo('tenancy.createOrganization').slice(before);
   expect(created).toHaveLength(1);
   expect(created[0]?.request).toMatchObject({ slug: 'e2e-org', name: 'E2E Org' });
+
+  // The action's revalidatePath refreshed the page, BEFORE any reload (P5b-16): the new
+  // organization is in "All organizations" (the world's ListOrganizations now returns it). Delete
+  // the revalidatePath call and the old list stays, so this fails. A WRONG path fails here only
+  // when Next matches the path to the page: Next 16.3.4 still refreshes the page for any path.
+  await expect(page.getByRole('region', { name: 'All organizations' }).getByRole('link', { name: 'E2E Org' })).toBeVisible();
 
   await page.reload();
   await expect(page.getByRole('form', { name: 'Create organization' })).toHaveCount(0);
@@ -13222,28 +14154,55 @@ Expected: `3 passed`.
 // ADR-0017: the browser never receives a token. Every response the page receives in a full session
 // is collected: HTML documents, RSC payloads (navigations and prefetches), static assets, and a
 // Server Action result. None may contain the access or the refresh token the fake IdP issued. The
-// vacuity guards at the end prove each kind of response was in fact collected.
+// vacuity guards at the end prove that a non-empty BODY of each kind was in fact read and scanned:
+// a response whose body read failed counts for no guard.
 import type { Response } from '@playwright/test';
-import { ORG_ID, PROJECT_ID, TEAM_ID } from './support/world';
+import { ORG_ID, ORG_NAME, PROJECT_ID, TEAM_ID } from './support/world';
 import { signIn, waitForHydration } from './support/login';
 import { expect, test } from './support/harness';
 
-type Seen = { readonly url: string; readonly method: string; readonly contentType: string; readonly action: boolean; readonly text: string };
+type Seen = {
+  readonly url: string;
+  readonly method: string;
+  readonly contentType: string;
+  readonly action: boolean;
+  /** true only after response.body() succeeded. A redirect has no body, so it stays false. */
+  readonly bodyRead: boolean;
+  readonly body: string;
+  /** The headers and the body: what the leak scan searches. */
+  readonly text: string;
+};
 
 async function capture(response: Response): Promise<Seen> {
   const request = response.request();
   const headers = await response.allHeaders();
   const requestHeaders = await request.allHeaders();
   let body = '';
+  let bodyRead = false;
   const status = response.status();
   if (status < 300 || status >= 400) {
     try {
       body = (await response.body()).toString('utf8');
+      bodyRead = true;
     } catch {
-      // The page navigated away before the body was read.
+      // The page navigated away before the body was read. bodyRead stays false, so no vacuity
+      // guard counts this response as scanned.
     }
   }
-  return { url: response.url(), method: request.method(), contentType: headers['content-type'] ?? '', action: requestHeaders['next-action'] !== undefined, text: `${JSON.stringify(headers)}\n${body}` };
+  return {
+    url: response.url(),
+    method: request.method(),
+    contentType: headers['content-type'] ?? '',
+    action: requestHeaders['next-action'] !== undefined,
+    bodyRead,
+    body,
+    text: `${JSON.stringify(headers)}\n${body}`,
+  };
+}
+
+/** true when the body was read and is not empty, so the leak scan searched it. */
+function scanned(response: Seen): boolean {
+  return response.bodyRead && response.body.length > 0;
 }
 
 test('R11: no response body, header, RSC payload or action result contains a fake token (ADR-0017)', async ({ page, harness }) => {
@@ -13258,10 +14217,15 @@ test('R11: no response body, header, RSC payload or action result contains a fak
     await page.goto(harness.url(path));
   }
   // A client-side navigation, so the RSC payload path is exercised, not only full documents. It
-  // needs a hydrated page: before hydration the click is a plain document request.
+  // needs a hydrated page: before hydration the click is a plain document request. Wait for the
+  // navigation's RSC response and for the new URL. waitForLoadState('networkidle') would resolve at
+  // once, because the document reached that state at its first load, and the page.goto below could
+  // then abort the RSC fetch.
   await waitForHydration(page);
-  await page.getByRole('region', { name: 'Your organizations' }).getByRole('link').first().click();
-  await page.waitForLoadState('networkidle');
+  const rsc = page.waitForResponse((response) => (response.headers()['content-type'] ?? '').startsWith('text/x-component') && response.request().method() === 'GET');
+  await page.getByRole('region', { name: 'Your organizations' }).getByRole('link', { name: ORG_NAME }).click();
+  await rsc;
+  await page.waitForURL((url) => url.pathname.startsWith('/iam/orgs/'));
   await page.goto(harness.url('/iam/orgs'));
   await waitForHydration(page);
   const form = page.getByRole('form', { name: 'Create organization' });
@@ -13279,18 +14243,29 @@ test('R11: no response body, header, RSC payload or action result contains a fak
   const leaks = seen.filter((response) => tokens.some((token) => response.text.includes(token))).map((response) => `${response.method} ${response.url}`);
   expect(leaks).toEqual([]);
 
-  // Vacuity guards: each kind of response the row names was collected.
-  expect(seen.some((response) => response.contentType.startsWith('text/html'))).toBe(true);
-  expect(seen.some((response) => response.contentType.startsWith('text/x-component') && !response.action)).toBe(true);
-  expect(seen.some((response) => response.method === 'POST' && response.action)).toBe(true);
+  // Vacuity guards: for each kind of response the row names, at least one non-empty body was READ
+  // and scanned. A response is not enough: if every body read of a kind failed, the scan above
+  // searched only headers for that kind, and the guard fails.
+  expect(seen.some((response) => response.contentType.startsWith('text/html') && scanned(response))).toBe(true);
+  expect(seen.some((response) => response.contentType.startsWith('text/x-component') && !response.action && scanned(response))).toBe(true);
+  expect(seen.some((response) => response.method === 'POST' && response.action && scanned(response))).toBe(true);
 });
 ```
 Run:
 ```bash
 pnpm --dir ts/apps/iam-console exec playwright test tests/e2e/token-leak.spec.ts
 ```
-Expected: `1 passed`. If the `text/x-component` guard fails, the client navigation did not happen (for example the first link was a cross-zone link). Click a scope link by name instead: `getByRole('link', { name: ORG_NAME })`.
-If the `Created.` status does not appear, the action refreshed the page first (revalidation). Replace that line with `await page.waitForResponse((candidate) => candidate.request().method() === 'POST')` placed before the click, awaited after it.
+Expected: `1 passed`. If the test times out at `await rsc` or at `waitForURL`, the click was not a client navigation (for example the page was not hydrated, or the link is a cross-zone link). Fix the app, not the wait.
+If a vacuity guard fails, no body of that kind was read. Read the `seen` entries of that kind: a `bodyRead: false` entry means the page left before the read. Add a wait for that response before the next `page.goto`. Do not remove `scanned(...)` from a guard.
+Keep the `toHaveText('Created.')` assertion. Only if revalidation hides the `Created.` text, change it to a check of the action result. Start the wait before the click, and assert the status and the header after it:
+```ts
+  const post = page.waitForResponse((candidate) => candidate.request().method() === 'POST' && new URL(candidate.url()).pathname === '/iam/orgs');
+  await form.getByRole('button', { name: 'Create' }).click();
+  const actionResponse = await post;
+  expect(actionResponse.status()).toBe(200);
+  expect((await actionResponse.request().allHeaders())['next-action']).toBeTruthy();
+```
+These five lines replace the `click()` line and the `toHaveText('Created.')` line. Do not use a bare `waitForResponse` with no assertion: that is a wait, not a result check.
 
 - [ ] **Step 8: Write the row-coverage unit test**
 
@@ -13331,10 +14306,13 @@ Expected: PASS, 13 tests.
 
 - [ ] **Step 9: Run the whole tier through Moon, and the app checks**
 
-Run:
+First format every `ts/` file that this task creates (the Global Constraints). The code above is already in Prettier's form, so the write is a guard against a typo. It runs before `ts:fmt` and before the commit. Then run:
 ```bash
 export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
 cd /Users/smaschek/dev/paigasus/paigasus-core/.claude/worktrees/feature+sma-511-iam-console
+pnpm -C ts exec prettier --write apps/iam-console/tests/e2e/support/login.ts apps/iam-console/tests/e2e/support/correlation.ts \
+  apps/iam-console/tests/e2e/public.spec.ts apps/iam-console/tests/e2e/login.spec.ts apps/iam-console/tests/e2e/forbidden.spec.ts \
+  apps/iam-console/tests/e2e/capabilities.spec.ts apps/iam-console/tests/e2e/token-leak.spec.ts apps/iam-console/tests/unit/e2e-rows.test.ts
 moon run iam-console-ts:test-e2e
 moon run iam-console-ts:test iam-console-ts:typecheck ts:lint ts:fmt --force
 ```
@@ -13384,7 +14362,7 @@ Expected: `1` (Branch K) or `0` (Branch C). The copy lets Step 3 compare.
 
 - [ ] **Step 2: Replace `ts/apps/iam-console/moon.yml`**
 
-Write this content (Branch C). For Branch K, apply the four Branch K additions listed after the file.
+Write this content (Branch C). For Branch K, apply the three Branch K additions listed after the file.
 ```yaml
 $schema: 'https://moonrepo.dev/schemas/project.json'
 
@@ -13488,6 +14466,12 @@ tasks:
       - 'app/**/*'
       - 'lib/**/*'
       - 'proxy.ts'
+      # The root-level config files. tsconfig.json includes **/*.ts, so tsc type-checks them, but no
+      # inherited input or source group reaches them. Without these, a type error there serves a
+      # cached typecheck PASS.
+      - 'next.config.ts'
+      - 'vitest.config.ts'
+      - 'playwright.config.ts'
       - 'tests/**/*'
       - '!tests/fixtures/**/.next/**'
       - '!tests/fixtures/*/next-env.d.ts'
@@ -13626,15 +14610,42 @@ tasks:
       - '/rs/crates/bindings/paigasus-wasm/src/**/*'
       - '/rs/crates/libs/paigasus-kernel/src/**/*'
 ```
-3. `build` keeps Task 8's `deps: ['^:build']` line, directly under its `script: |` block and before `inputs:`. It makes `paigasus-kernel-ts:build` write the gitignored `.wasm` before `next build` runs. It is an inline list, so the Step 3 diff (which reads `- '…'` list lines only) cannot see it if it is lost: check it by hand with `grep -n "deps: \['\^:build'\]" ts/apps/iam-console/moon.yml`.
+3. `build` keeps Task 8's `deps: ['^:build']` line, directly under its `script: |` block and before `inputs:`. It makes `paigasus-kernel-ts:build` write the gitignored `.wasm` before `next build` runs. It is an inline list; the Step 3 comparison parses the YAML, so it reports this entry as `tasks.build.deps` if it is lost.
 
 - [ ] **Step 3: Carry over any input that an earlier task added and this file lacks**
 
+Compare the two files PER TASK, not as one sorted set of lines. A whole-file set cannot see an input that Step 2 dropped from one task while another task keeps the same line (for example a `typecheck` line that `build` also lists). The command parses both files with PyYAML from `py/uv.lock`, and prints each entry of the old file that the new file does not have in the SAME section (`dependsOn`, `fileGroups.sources`, or one task's `inputs`, `deps` or `outputs`).
+
 Run:
 ```bash
-diff <(grep -E "^\s+- '" "$TMPDIR/iam-console-moon.before.yml" | sed 's/#.*//' | sort -u) <(grep -E "^\s+- '" ts/apps/iam-console/moon.yml | sed 's/#.*//' | sort -u) | grep '^<' || echo "nothing dropped"
+uv run --locked --project py python -c '
+import sys
+
+import yaml
+
+
+def rows(path):
+    with open(path, encoding="utf-8") as handle:
+        doc = yaml.safe_load(handle)
+    out = set()
+    for entry in doc.get("dependsOn") or []:
+        out.add(("dependsOn", str(entry)))
+    for entry in (doc.get("fileGroups") or {}).get("sources") or []:
+        out.add(("fileGroups.sources", str(entry)))
+    for name, task in (doc.get("tasks") or {}).items():
+        for key in ("inputs", "deps", "outputs"):
+            for entry in task.get(key) or []:
+                out.add((f"tasks.{name}.{key}", str(entry)))
+    return out
+
+
+dropped = sorted(rows(sys.argv[1]) - rows(sys.argv[2]))
+for section, entry in dropped:
+    print(f"< {section}: {entry}")
+print("nothing dropped" if not dropped else f"{len(dropped)} entries dropped")
+' "$TMPDIR/iam-console-moon.before.yml" ts/apps/iam-console/moon.yml
 ```
-Expected: `nothing dropped`. A `<` line is an input or a dependency that an earlier task added and Step 2 does not have (for example a root-level `vitest.setup.ts`). Add each one to the same task in `moon.yml`, and run the command again. Never drop an input.
+Expected: `nothing dropped`. A `<` line is an entry that an earlier task added to that section and Step 2 does not have (for example a root-level `vitest.setup.ts` in `tasks.test.inputs`). Add each one to the same section in `moon.yml`, and run the command again. Never drop an input.
 
 - [ ] **Step 4: Make `ts:lint` key on the app's new code directories**
 
@@ -13655,7 +14666,7 @@ Expected: `nothing dropped`. A `<` line is an input or a dependency that an earl
 
 - [ ] **Step 5: Update the affected-graph cases in `ci/affected-graph/run.sh`**
 
-Each set below is derived from the inputs of Step 2 and Step 4. The rule that derives them: the no-flag `moon query tasks --affected` traversal (`_assert_task_case_impl`) selects a task when the touched file matches one of that task's `inputs`, filtered to the task names `build`, `test`, `lint` and `test-e2e`. The project cases (`run_case`) follow `dependsOn` with `--downstream deep`. Task 1 already renamed `paigasus-console-ts` to `iam-console-ts` in this file; the "old" text below is the text after Task 1.
+Each set below is derived from the inputs of Step 2 and Step 4. The rule that derives them: the no-flag `moon query tasks --affected` traversal (`_assert_task_case_impl`) selects a task when the touched file matches one of that task's `inputs`, filtered to the task names `build`, `test`, `lint` and `test-e2e`. The project cases (`run_case`) follow `dependsOn` with `--downstream deep`. Task 1 already renamed `paigasus-console-ts` to `iam-console-ts` in this file; the "old" text below is the text after Task 1 (and, in Branch K, after Task 8 Step 13W).
 
 **A. Changed project case (both branches).** `contracts->proto`: the app now depends on `paigasus-proto-ts` (and on `sdk`, `discovery` and `app-shell`, which depend on it). Replace its expected CSV with:
 ```
@@ -13663,7 +14674,7 @@ Each set below is derived from the inputs of Step 2 and Step 4. The rule that de
 ```
 and add this line at the end of its comment block: `# + iam-console-ts (SMA-511), which dependsOn paigasus-proto-ts and the three packages above.`
 
-**B. Changed project cases (Branch K only).** The app `dependsOn` `paigasus-kernel-ts`, and `paigasus-kernel-ts` depends on both binding crates. Append `,iam-console-ts` to the expected CSV of `kernel->bindings`, `binding-oneway-node` and `binding-oneway-wasm`, and add `# + iam-console-ts (SMA-511, D6 wasm branch), through paigasus-kernel-ts.` to each comment. In Branch C these three cases do NOT change.
+**B. Kernel project cases (both branches: no change in this task).** In Branch K the app `dependsOn` `paigasus-kernel-ts`, which depends on both binding crates. Task 8 Step 13W already appended `,iam-console-ts` to the expected CSV of `kernel->bindings`, `binding-oneway-node` and `binding-oneway-wasm`, each with the comment line `# + iam-console-ts (SMA-511, D6 wasm branch), through paigasus-kernel-ts.`. Do not append it again. In Branch C these three cases do NOT change.
 
 **C. Changed task cases (both branches).** Every package case gains `iam-console-ts:build,iam-console-ts:test,iam-console-ts:test-e2e`, because all three app tasks list that package's `src/**/*`. Replace the expected CSVs with these exact strings:
 
@@ -13681,15 +14692,31 @@ and add this line at the end of its comment block: `# + iam-console-ts (SMA-511)
 
 Add one comment line above each changed case: `# SMA-511: iam-console-ts:{build,test,test-e2e} join this set — the app's inputs name this package's sources.`
 
-**D. Changed task case (Branch K only).** Task 8 gave the app's `build` `deps: ['^:build']`, and `^:build` includes `paigasus-kernel-ts:build`, because the app `dependsOn` `paigasus-kernel-ts` in this branch. `lockfile->all-lint` runs with `--downstream deep`, which follows task `deps`. `rs/Cargo.lock` selects `paigasus-kernel-ts:build`, and the app's `build`, `test` and `test-e2e` depend on it through `^:build` and `~:build`. Append `,iam-console-ts:build,iam-console-ts:test,iam-console-ts:test-e2e` to that case's CSV. Its `-ci` twin (no flags) does NOT change.
+**D. Changed task cases (Branch K only).** Task 8 Step 13W already appended `,iam-console-ts:build,iam-console-ts:test` to `kernel->consumer-tasks` and `lockfile->all-lint`. This task adds ONLY `,iam-console-ts:test-e2e` to each of the two CSVs, because the new `test-e2e` task (Task 21) joins both:
+- `kernel->consumer-tasks` (no flags) anchors on `rs/crates/libs/paigasus-kernel/src/lib.rs`. Branch K addition 2 puts `/rs/crates/libs/paigasus-kernel/src/**/*` into `test-e2e`'s inputs, and that glob matches the anchor.
+- `lockfile->all-lint` runs with `--downstream deep`, which follows task `deps`. `rs/Cargo.lock` selects `paigasus-kernel-ts:build`, the app's `build` depends on it through `^:build`, and `test-e2e` depends on the app's `build` through `~:build`.
 
-**E. Unchanged cases.** `proto-derive->proto`, `service-info->services`, `binding-oneway`, `parity-oneway`, `proto->svc-info-deep`, `proto->svc-info-ci`, `lockfile->all-lint-ci`, `kernel->consumer-tasks` and `gateway->sdk`: the app's inputs match none of their anchors, and (Branch C) the app has no project edge into the Rust graph. The parity vectors and `model.rs` are task inputs of `iam-console-ts:test`, not project edges, so `parity-oneway` stays as it is.
+Also widen Task 8's comment line above each of the two cases, so that it names the third task. The comment line above `lockfile->all-lint` becomes:
+```bash
+  # + iam-console-ts:{build,test,test-e2e} (SMA-511, D6 wasm branch), through task deps ('^:build', '~:build') on paigasus-kernel-ts:build, not through inputs.
+```
+The comment line above `kernel->consumer-tasks` becomes:
+```bash
+  # + iam-console-ts:{build,test,test-e2e} (SMA-511, D6 wasm branch): all three tasks list '/rs/crates/libs/paigasus-kernel/src/**/*' as an input.
+```
+The Task 8 comment line above `lockfile->all-lint-ci` becomes:
+```bash
+  # SMA-511 (D6 wasm branch): no longer equal — the deep set also holds iam-console-ts:{build,test,test-e2e}, which arrive through task deps.
+```
+The CSV of the `-ci` twin (`lockfile->all-lint-ci`, no flags) does NOT change: no app task keys on `rs/Cargo.lock`.
+
+**E. Unchanged cases.** `proto-derive->proto`, `service-info->services`, `binding-oneway`, `parity-oneway`, `proto->svc-info-deep`, `proto->svc-info-ci`, `lockfile->all-lint-ci` and `gateway->sdk` in both branches, and in Branch C also `kernel->consumer-tasks` and `lockfile->all-lint`: the app's inputs match none of their anchors, no app task keys on `rs/Cargo.lock`, and (Branch C) the app has no project edge into the Rust graph. The parity vectors and `model.rs` are task inputs of `iam-console-ts:test`, not project edges, so `parity-oneway` stays as it is.
 
 **F. New cases.** Add these after the `app-shell-shell->app-shell-tasks` case and before `gateway->sdk`. Find the file that holds the third Tailwind sentinel first:
 ```bash
 git grep -l -- '--paigasus-app-shell-source-probe' -- ts/packages/paigasus-app-shell/src
 ```
-Expected: exactly one path. The block below uses `ts/packages/paigasus-app-shell/src/shell/app-shell.tsx`; if the command printed another path, use that path in the `app-shell-probe->iam-console` line.
+Expected: exactly one path. The block below uses `ts/packages/paigasus-app-shell/src/shell/app-shell.tsx`; if the command printed another path, use that path in the `app-shell->console` line.
 ```bash
   # SMA-511 — a @paigasus/sdk SOURCE edit must select the iam-console's build, test and test-e2e,
   # plus the SDK's own build/test and ts:lint. This is the ONLY control on the three
@@ -13705,7 +14732,7 @@ Expected: exactly one path. The block below uses `ts/packages/paigasus-app-shell
   # spec § 7.6). ci/tailwind-source/run.mjs asserts it against the iam-console build, so an edit to
   # this file MUST rebuild the app. If the app's app-shell input narrowed away from this file, the
   # guard would read a cached .next and pass against stale CSS; this case is the control.
-  run_task_case_ci "app-shell-probe->iam-console" "ts/packages/paigasus-app-shell/src/shell/app-shell.tsx" \
+  run_task_case_ci "app-shell->console" "ts/packages/paigasus-app-shell/src/shell/app-shell.tsx" \
     "paigasus-app-shell-ts:build,paigasus-app-shell-ts:test,paigasus-app-shell-ts:test-e2e,iam-console-ts:build,iam-console-ts:test,iam-console-ts:test-e2e,ts:lint"
   # SMA-511 — the app's OWN code outside app/: lib/ (the composition root) and proxy.ts. Without
   # `lib/**/*` and `proxy.ts` in the app's `sources` group, and `apps/*/lib/**/*` and
@@ -13748,13 +14775,16 @@ Then find which input line or `dependsOn` entry produces each row (`moon query p
 
 - [ ] **Step 7: Check the other gates that read Moon config, then commit**
 
-Run:
+Run (the `prettier --write` line lists the two `ts/` files this task edits, before the fmt check and the commit, as the Global Constraints require):
 ```bash
+pnpm -C ts exec prettier --write apps/iam-console/moon.yml moon.yml
 moon run repo:input-liveness repo:next-public-free repo:actionlint --force
 moon run ts:lint ts:fmt --force
 git diff --stat
 ```
 Expected: all pass. `git diff --stat` lists only `ts/apps/iam-console/moon.yml`, `ts/moon.yml` and `ci/affected-graph/run.sh`.
+
+Stop rule for a local hang: if `repo:actionlint` or `repo:affected-smoke` runs for more than 10 minutes, it is the bash 5.3.15 here-string deadlock on this machine, not a gate failure. Stop it. Run the gate script with the system bash instead: `/bin/bash ci/actionlint/run.sh`, or `/bin/bash ci/affected-graph/run.sh --negative-control && /bin/bash ci/affected-graph/run.sh`. Record the hang and that result in your report. Under `/bin/bash` 3.2, the `cargo-lock-step` self-test rows of `ci/actionlint/run.sh` can fail with `expected rc 0` (SMA-628). Record such rows too; CI (Linux, bash 5) judges them.
 
 ```bash
 git add ts/apps/iam-console/moon.yml ts/moon.yml ci/affected-graph/run.sh
@@ -13800,7 +14830,7 @@ moon ci :build :test :lint :fmt :deny :osv :machete :actionlint :typecheck :brea
 ```
 Expected: exit 0. Docker must run (`paigasus-auth-ts:test-e2e` and the `paigasus-iam-rs` suites need it).
 If a task fails, follow CLAUDE.md "Diagnosing an unattributed `moon ci` failure" BEFORE any re-run: copy `.moon/cache/ciReport.json` and `.moon/cache/states/<project>/<task>/` out of the repo first, because a re-run overwrites them.
-Two known local traps. (1) `repo:affected-smoke` can hang under bash 5.3.15 on this machine: stop it, run `/bin/bash ci/affected-graph/run.sh --negative-control && /bin/bash ci/affected-graph/run.sh` directly, and record that result. (2) A wall of "expected rc 0" self-test failures across unrelated gates means `/bin/bash` 3.2 ran a gate that needs bash 4+; check `which -a bash` before you read it as a finding. A Docker-backed suite that fails only under this parallel load: run the same suite on unmodified `origin/main` before you blame this branch.
+Two known local traps. (1) The stop rule of Step 7: if `repo:actionlint` or `repo:affected-smoke` runs for more than 10 minutes, it is the bash 5.3.15 here-string deadlock, not a gate failure. Stop the run, run that gate's script with `/bin/bash` (`ci/actionlint/run.sh`, or `ci/affected-graph/run.sh --negative-control` and then `ci/affected-graph/run.sh`), and record the hang and that result. (2) A wall of "expected rc 0" self-test failures across unrelated gates means `/bin/bash` 3.2 ran a gate that needs bash 4+; check `which -a bash` before you read it as a finding. A Docker-backed suite that fails only under this parallel load: run the same suite on unmodified `origin/main` before you blame this branch.
 
 ### Task 24: Documentation — CLAUDE.md, `ts/README.md`, the app README, and the PR-ready checklist
 
@@ -13824,7 +14854,7 @@ git grep -n paigasus-console -- ':!docs/superpowers' || echo "no hits"
 grep -c 'moon-diagnosis:begin' CLAUDE.md
 grep -c 'ci-targets:begin' CLAUDE.md
 ```
-Expected: `no hits`, `1`, `1`. If the first command prints a hit, Task 1 missed a site: fix it with Task 1's rule (`paigasus-console` → `iam-console`), in a separate commit.
+Expected: `no hits`, `1`, `1`. Task 12's request header is `x-paigasus-request-path`, so this grep has no hit on it. If the first command prints a hit, Task 1 missed a site: fix it with Task 1's rule (`paigasus-console` → `iam-console`), in a separate commit.
 
 - [ ] **Step 2: Replace the Turbopack entry in `CLAUDE.md`**
 
@@ -13909,11 +14939,9 @@ Insert this text directly after the bullet of Step 2. It contains two choices; k
   `lib/` file (use `@paigasus/proto/iam`, which the `apps/*/tests/support/**` boundary exemption allows).
 - The `ts` project's `sources` group names app code directories BY HAND (`apps/*/app/**/*`,
   `apps/*/lib/**/*`, `apps/*/proxy.ts`). `ts:lint` runs `eslint .` over the whole tree, but Moon
-  re-runs it only for a file in that group, so a new top-level app directory needs a line there, or
-  an edit to it serves a cached lint PASS. Note also that `repo:affected-smoke`'s own `inputs`
-  (`*/moon.yml`, `rs/crates/*/*/moon.yml`) do not reach `ts/apps/*/moon.yml` or
-  `ts/packages/*/moon.yml`, so a PR that only narrows a TS project's `inputs` does not schedule the
-  cases that guard them; run `/bin/bash ci/affected-graph/run.sh` by hand for such a PR.
+  re-runs it only for a file in its `sources` or `tests` group (or one of its config inputs), so a
+  new top-level app directory needs a line in `sources`, or an edit to it serves a cached lint PASS.
+  The same holds for a top-level app file such as `playwright.config.ts`.
 ```
 Run:
 ```bash
@@ -13973,7 +15001,7 @@ view and the capability-gated audit screen. Design: `docs/superpowers/specs/2026
 
 - Every file in `lib/` starts with `import 'server-only'`. A client component that imports one fails the build.
 - Relative imports in `app/`, `lib/` and `proxy.ts` have no file extension (Turbopack, see `CLAUDE.md`).
-- A page or a Server Action ALWAYS calls IAM. `mayI()` (`lib/authorize.ts`) only hides a button, a form, a section or a nav entry. IAM decides.
+- No page and no Server Action skips its IAM call because `mayI()` said no. `mayI()` (`lib/authorize.ts`) only hides a button, a form, a section or a nav entry. IAM decides.
 - Every Server Action gets its client through `iamClients()`, so `requireSession()` runs for each action. `tests/unit/actions-structure.test.ts` holds this rule, and a new action must be added to its list.
 - URLs use UUIDs. A segment that is not a UUID is a 404 with no IAM call. A team or project whose IAM answer disagrees with the URL is a 404.
 - There is no `loading.tsx` under `app/(console)/`, and none may be added: its Suspense boundary lets Next send status 200 before a page's `forbidden()` throws, so the 403 status is lost (e2e R4 asserts it).
@@ -14010,7 +15038,7 @@ No tier needs Docker or a live service.
 
 ## Test tiers
 
-- **Unit and integration** (`tests/unit`, `tests/integration`, vitest). The integration tests talk real gRPC to an in-process fake IAM (`tests/support/fake-iam.ts`), and MSW serves `GET /v1/service-info`. Loaders (`load.ts`) and commands (`commands.ts`) take their IAM client and `mayI` as arguments, so the tests call them with no session and no Next runtime.
+- **Unit and integration** (`tests/unit`, `tests/integration`, vitest). The integration tests talk real gRPC to an in-process fake IAM (`tests/support/fake-iam.ts`), and MSW serves `GET /v1/service-info`. Loaders (`load.ts`) take their IAM client and `mayI` as arguments, and commands (`commands.ts`) take their IAM client only, so the tests call them with no session and no Next runtime.
 - **Client boundary** (`tests/build/client-boundary.test.ts`). `next build` on `tests/fixtures/client-imports-sdk` must fail with the `server-only` error; the same code in a server component (`tests/fixtures/server-imports-sdk`) must build.
 - **Browser** (`tests/e2e`, Playwright). A production build runs through the standalone server behind an in-process TLS terminator, with the fake IAM and a fake HTTPS IdP. The session store is `memory`, so the zone map holds one zone. Each row of the spec's § 9.4 table is one test (`R1`–`R12`); `tests/unit/e2e-rows.test.ts` holds that.
 
@@ -14020,11 +15048,18 @@ No tier needs Docker or a live service.
 - `mayI()` fails open: when `IsAuthorized` fails, a button shows, and IAM then denies the action.
 - The e2e tier runs one zone. A two-zone test belongs to SMA-513.
 - `Introspect` reports no role grants (SMA-633), so the app asks `IsAuthorized` about itself instead of reading grants from the session (a recorded departure from ADR-0017 decision 8).
+- `forbidden()` needs the experimental `authInterrupts` flag. E2e row R4 asserts the real HTTP 403, so a Next upgrade that changes the flag reds CI. The fallback, an inline view with status 200, is recorded in spec § 6.2 and not built.
+- The 403 view shows the correlation id only when `FORBIDDEN_VIEW_CORRELATION` (`lib/correlation.ts`) is `'header'`. When it is `'fallback'`, `callIam` logs the id with the path, and the section and form 403s show it.
+- The console layout calls `myScopes()` on every console page for the organization switcher. That is one `Introspect`, up to ten `ListRoleGrants` pages and up to 50 tenancy reads per render. The cost is not measured (spec § 12). If it is too slow, a short-lived per-session cache is the next step.
+- [Branch C only — delete this bullet in Branch K:] `lib/prn.ts` is a recorded ADR-0005 exception (decision D6, fallback C). `tests/unit/prn.test.ts` holds it to the kernel: it replays every vector of the kernel parity corpus.
+- The kernel's napi binding cannot load in a Next build, because `@paigasus/node-bindings` ships no `.node` binary. The defect stays open for every Node consumer of `@paigasus/kernel` (SMA-634).
 ```
-Run:
+The Known limits hold one choice. In Branch C, remove only the bracketed prefix and keep the bullet. In Branch K, delete the whole bullet. Then run:
 ```bash
 pnpm -C ts exec prettier --write apps/iam-console/README.md
+grep -n '\[Branch C only' ts/apps/iam-console/README.md || echo "choice resolved"
 ```
+Expected: `choice resolved`.
 
 - [ ] **Step 6: Check and commit**
 
@@ -14036,6 +15071,7 @@ moon run ts:fmt --force
 moon run repo:actionlint --force
 ```
 Expected: all pass. `ci/affected-graph/run.sh` reads the CLAUDE.md target list between its markers, and `repo:actionlint` check 12 reads the diagnosis block; both prove this task did not disturb them.
+If `repo:actionlint` runs for more than 10 minutes, apply the stop rule of Task 23 Step 7: it is the bash 5.3.15 here-string deadlock, not a gate failure. Stop it, run `/bin/bash ci/actionlint/run.sh`, and record the hang and that result.
 
 ```bash
 git add CLAUDE.md ts/README.md ts/apps/iam-console/README.md
@@ -14059,7 +15095,7 @@ EOF
 Do each item and tick it. Do not push until every implementer item is done.
 
 Implementer:
-1. `git status` is clean, and `git log --oneline origin/main..HEAD` shows one commit per task, each with the `Co-Authored-By` line.
+1. `git status` is clean, and `git log --oneline origin/main..HEAD` shows one commit per task (plus any Task 1 fix-up commit from Task 24 Step 1), each with the `Co-Authored-By` line.
 2. Every commit message passes commitlint: `pnpm -C ts exec commitlint --from origin/main --to HEAD`. No body line starts with `#<number>` or with `word: value`.
 3. Task 23 Step 9's full `moon ci` run exited 0 on the final `HEAD`. If a commit came after it, run it again.
 4. `/bin/bash ci/affected-graph/run.sh --negative-control && /bin/bash ci/affected-graph/run.sh` passes.
