@@ -146,6 +146,18 @@ const DENIED: ReadonlyArray<readonly [string, string, string]> = [
   ['the fixture must not import auth/server', 'packages/paigasus-app-shell/tests/e2e/fixture/app/page.tsx', "import { x } from '@paigasus/auth/server';"],
   ['the fixture must not import discovery/server', 'packages/paigasus-app-shell/tests/e2e/fixture/app/page.tsx', "import { x } from '@paigasus/discovery/server';"],
   ['the fixture must not import an app-shell SUBPATH', 'packages/paigasus-app-shell/tests/e2e/fixture/app/page.tsx', "import { x } from '@paigasus/app-shell/src/zone/resolve';"],
+  // SMA-511 spec § 7.4. Next 16 names the middleware file `proxy.ts`. The app-middleware block
+  // REPLACES the apps block's options for these files, so it restates the proto ban; these rows
+  // prove both halves on both file names.
+  ['an app proxy must not import auth/server', 'apps/iam-console/proxy.ts', "import { getSession } from '@paigasus/auth/server';"],
+  ['an app proxy must not import the sdk', 'apps/iam-console/proxy.ts', "import { x } from '@paigasus/sdk';"],
+  ['an app proxy must not import a sdk SUBPATH', 'apps/iam-console/proxy.ts', "import { x } from '@paigasus/sdk/iam';"],
+  ['an app proxy must not import proto — the restated ban', 'apps/iam-console/proxy.ts', "import { x } from '@paigasus/proto';"],
+  ['an app proxy must not import a proto SUBPATH', 'apps/iam-console/proxy.ts', "import { x } from '@paigasus/proto/iam';"],
+  ['an app middleware must not import proto — the restated ban', 'apps/iam-console/middleware.ts', "import { x } from '@paigasus/proto';"],
+  // The test-double exemption is NARROW: only apps/*/tests/support/**.
+  ['app lib code must not import proto', 'apps/iam-console/lib/iam.ts', "import { x } from '@paigasus/proto';"],
+  ['an app test outside tests/support must not import proto', 'apps/iam-console/tests/unit/errors.test.ts', "import { ErrorInfoSchema } from '@paigasus/proto';"],
 ];
 
 const ALLOWED: ReadonlyArray<readonly [string, string, string]> = [
@@ -184,6 +196,8 @@ const ALLOWED: ReadonlyArray<readonly [string, string, string]> = [
   ['the fixture may import the package by its own name', 'packages/paigasus-app-shell/tests/e2e/fixture/app/page.tsx', "import { ZoneLink } from '@paigasus/app-shell';"],
   ['the fixture may import auth/client', 'packages/paigasus-app-shell/tests/e2e/fixture/app/providers.tsx', "import { SessionProvider } from '@paigasus/auth/client';"],
   ['the fixture may import ui', 'packages/paigasus-app-shell/tests/e2e/fixture/app/page.tsx', "import { Link } from '@paigasus/ui';"],
+  // SMA-511 spec § 7.4.
+  ['an app proxy may import auth/middleware', 'apps/iam-console/proxy.ts', "import { authRoutePaths, createAuthMiddleware } from '@paigasus/auth/middleware';"],
 ];
 
 describe('boundary preset', () => {
@@ -323,4 +337,29 @@ describe('the workspace eslint config actually applies the preset', () => {
     expect(messages.filter((m) => m.fatal === true)).toEqual([]);
     expect(messages.filter((m) => m.ruleId === 'paigasus/no-js-relative-specifier')).toHaveLength(1);
   }, 120_000);
+
+  // SMA-511 spec § 7.4 — the app test-double exemption (`ignores: ['apps/*/tests/support/**']`),
+  // through the REAL config. Not an ALLOWED row: through `boundaryRules` alone no block matches a
+  // tests/support `.ts` path after the `ignores`, so ESLint does not lint it, and an empty result
+  // would prove nothing (measured, pre-flight T7.a). The real config lints every `.mjs` path
+  // (`js.configs.recommended` has no `files` key). The `isPathIgnored` check proves that the path
+  // is linted, so an empty list here means that no rule bans the import.
+  const TEST_DOUBLE_PATH = 'apps/iam-console/tests/support/fake-iam.mjs';
+  const TEST_DOUBLE_IMPORTS: ReadonlyArray<readonly [string, string]> = [
+    ['proto (it builds ErrorInfo details)', "import { ErrorInfoSchema } from '@paigasus/proto';\nexport const y = ErrorInfoSchema;\n"],
+    ['a proto SUBPATH', "import { TenancyService } from '@paigasus/proto/iam';\nexport const y = TenancyService;\n"],
+  ];
+
+  it.each(TEST_DOUBLE_IMPORTS)('an app test double under tests/support may import %s, through the REAL config', async (_label, source) => {
+    const ignored = await new ESLint({ cwd: TS_ROOT }).isPathIgnored(TEST_DOUBLE_PATH);
+    expect(ignored, 'the real config does not lint this path, so an empty result would prove nothing').toBe(false);
+    expect(await realConfigRestrictedImportsFor(TEST_DOUBLE_PATH, source)).toEqual([]);
+  });
+
+  // The DENIED twin: the same import one directory over, through the same config. If the exemption
+  // is widened (for example to `apps/*/tests/**`), this case fails.
+  it('an app test OUTSIDE tests/support still may not import proto, through the REAL config', async () => {
+    const messages = await realConfigRestrictedImportsFor('apps/iam-console/tests/unit/errors.mjs', "import { ErrorInfoSchema } from '@paigasus/proto';\nexport const y = ErrorInfoSchema;\n");
+    expect(messages, 'the test-double exemption covers more than apps/*/tests/support/**').not.toHaveLength(0);
+  });
 });

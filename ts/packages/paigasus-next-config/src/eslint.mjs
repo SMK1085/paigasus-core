@@ -97,6 +97,16 @@ const APP_SHELL_BARE_ROOTS = [
 ];
 
 /**
+ * The apps' @paigasus/proto ban. Two blocks carry it: `paigasus/boundaries/apps` and
+ * `paigasus/boundaries/app-middleware`. The second REPLACES the first's `no-restricted-imports`
+ * options for middleware/proxy files, so it must restate this group or the ban is lost there.
+ */
+const APP_PROTO_BAN = {
+  group: ['@paigasus/proto', '@paigasus/proto/**'],
+  message: 'Apps reach the contract through @paigasus/sdk, never @paigasus/proto directly (§ 6).',
+};
+
+/**
  * The boundary blocks, as an ESLint flat-config array.
  *
  * The `@type` annotation is load-bearing for the consumer, not decoration: `tests/boundaries.test.ts`
@@ -189,12 +199,12 @@ export const boundaryRules = [
   {
     name: 'paigasus/boundaries/apps',
     files: ['apps/**/*.{ts,tsx,mts,cts,js,jsx,mjs,cjs}'],
-    rules: restrict([
-      {
-        group: ['@paigasus/proto', '@paigasus/proto/**'],
-        message: 'Apps reach the contract through @paigasus/sdk, never @paigasus/proto directly (§ 6).',
-      },
-    ]),
+    // SMA-511 spec § 7.4. An app's in-process fake IAM builds a google.rpc.ErrorInfo detail, and only
+    // @paigasus/proto exports ErrorInfoSchema. Only the test doubles live under tests/support/, so
+    // the exemption is that directory and nothing wider — tests/boundaries.test.ts proves an app
+    // test outside it is still denied.
+    ignores: ['apps/*/tests/support/**'],
+    rules: restrict([APP_PROTO_BAN]),
   },
   {
     name: 'paigasus/boundaries/auth-client',
@@ -289,18 +299,23 @@ export const boundaryRules = [
   },
   {
     name: 'paigasus/boundaries/app-middleware',
-    // 'apps/**/middleware…' rather than 'apps/*/middleware…': the latter derives the scope key
-    // 'apps/*/middleware.{ts,js,mts,cts,mjs,cjs}' (a file glob, not a directory), which the
-    // liveness test's `existsSync` check can never resolve. This form derives 'apps' instead —
-    // the SAME key the `paigasus/boundaries/apps` block above already owns in BOUNDARY_SCOPES —
-    // so it needs no scope entry of its own.
-    files: ['apps/**/middleware.{ts,js,mts,cts,mjs,cjs}'],
+    // 'apps/**/…' rather than 'apps/*/…': the latter derives the scope key
+    // 'apps/*/{middleware,proxy}.{…}' (a file glob, not a directory), which the liveness test's
+    // `existsSync` check can never resolve. This form derives 'apps' instead — the SAME key the
+    // `paigasus/boundaries/apps` block above already owns in BOUNDARY_SCOPES — so it needs no scope
+    // entry of its own.
+    //
+    // `proxy` since SMA-511 (spec § 7.4): Next 16.3.4 deprecates `middleware.ts` in favour of
+    // `proxy.ts`. This block REPLACES the apps block's options for these files, so it restates
+    // APP_PROTO_BAN as its second group.
+    files: ['apps/**/{middleware,proxy}.{ts,js,mts,cts,mjs,cjs}'],
     rules: restrict([
       {
         group: ['@paigasus/auth/server', '@paigasus/auth/server/**', '@paigasus/sdk', '@paigasus/sdk/**'],
         message:
-          "An app's middleware must import @paigasus/auth/middleware, never /server or the sdk. `server-only` is a NO-OP in the middleware layer, so nothing else stops a token-bearing module being bundled there.",
+          "An app's proxy (middleware) must import @paigasus/auth/middleware, never /server or the sdk. `server-only` is a NO-OP in the middleware layer, so nothing else stops a token-bearing module being bundled there.",
       },
+      APP_PROTO_BAN,
     ]),
   },
 ];
