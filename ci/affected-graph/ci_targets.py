@@ -352,21 +352,25 @@ SELF_TASK_EXPECTED_GLOBS = {
         "py/uv.lock",
     ),
     # SMA-502. Four globs, no literal files, in check_gate_inputs' comparison order (globs sorted
-    # first, then files sorted — there are none here). The negated entry keeps the built .next
-    # tree out of the hash walk: .moon/workspace.yml deliberately omits '**/.next/**' from
+    # first, then files sorted — there are none here). The negated entries keep built .next
+    # trees out of the hash walk: .moon/workspace.yml deliberately omits '**/.next/**' from
     # hasher.ignorePatterns, so a ts/**/* glob alone would re-key this gate on every console build
     # while scanning nothing it hashed. Confirmed against `moon query projects`' resolved
     # inputGlobs/inputFiles for repo:next-public-free (moon 2.5.3): reported verbatim as authored,
-    # no drop, rewrite or re-sort of the negated glob.
+    # no drop, rewrite or re-sort of a negated glob.
     # SMA-502 fix wave. Re-baselined from what `moon query projects` REPORTS, not from what was
     # authored: 'ts/apps/**/*' + 'ts/packages/**/*' left twelve tracked, SCANNED files outside the
     # declared inputs (ts/eslint.config.js, ts/package.json, ts/moon.yml, ts/pnpm-workspace.yaml,
     # ts/tsconfig.base.json, ts/.npmrc, ts/.prettierignore, ts/.prettierrc.js,
     # ts/commitlint.config.cjs, ts/scripts/check-config-only.mjs, both ts/tooling/*.mjs), so a PR
     # touching only one of those never scheduled the gate. 'ts/**/*' matches the gate's own corpus
-    # expression; the '!' entry keeps the built .next tree out of the hash walk.
+    # expression; the first '!' entry keeps the console's built .next tree out of the hash walk.
+    # SMA-510 added the second '!' entry, for the app-shell package's own `test-e2e` fixture build
+    # under ts/packages/*/tests/e2e/fixture/.next (root moon.yml's `next-public-free` task records
+    # the same measurement next to that entry).
     "next-public-free": (
         "!ts/apps/*/.next/**",
+        "!ts/packages/*/tests/e2e/fixture/.next/**",
         "ci/next-public/**/*",
         "ts/**/*",
     ),

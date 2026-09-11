@@ -52,6 +52,12 @@ describe('createNextConfig', () => {
     expect(cfg.transpilePackages).toContain('@acme/x');
   });
 
+  it('transpiles the packages an app-shell consumer compiles from source (SMA-510)', () => {
+    // An app that renders @paigasus/app-shell compiles that package's TypeScript source and the
+    // source of the two packages it imports (spec § 9.1, F13).
+    expect(createNextConfig(base).transpilePackages).toEqual(expect.arrayContaining(['@paigasus/app-shell', '@paigasus/auth', '@paigasus/discovery']));
+  });
+
   it('preserves other extend keys', () => {
     expect(createNextConfig({ ...base, extend: { poweredByHeader: false } }).poweredByHeader).toBe(false);
   });

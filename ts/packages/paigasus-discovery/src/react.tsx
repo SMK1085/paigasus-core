@@ -4,6 +4,7 @@ import 'server-only';
 import type { ReactElement, ReactNode } from 'react';
 import { CapabilityDisabled } from './disabled.js';
 import { serviceOf } from './core/state.js';
+import { capabilityOutcome } from './core/outcome.js';
 import type { Discovery } from './server.js';
 import type { CapabilityKey, DegradedReason } from './types.js';
 
@@ -46,9 +47,14 @@ export async function Capability(props: CapabilityProps): Promise<ReactElement |
   // hasCapability and with the config-key validation, so the three cannot drift.
   const state = await discovery.getServiceState(serviceOf(need), token);
 
-  if (state.state === 'absent') return null;
-  if (state.state === 'available') {
-    return state.capabilities.includes(need) ? <>{children}</> : null;
+  // The table above is implemented ONCE, in core/outcome.ts (SMA-510 spec § 9.2).
+  // @paigasus/app-shell's navStateOf calls the same function.
+  const outcome = capabilityOutcome(state, need);
+  if (outcome === 'hidden') return null;
+  if (outcome === 'shown') return <>{children}</>;
+  if (state.state !== 'degraded') {
+    // capabilityOutcome answers 'degraded' only for a degraded state. This guard narrows the type.
+    throw new Error('Capability: capabilityOutcome answered degraded for a state that is not degraded');
   }
 
   if (degraded !== undefined) return <>{degraded(state.reason)}</>;

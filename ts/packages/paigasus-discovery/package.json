@@ -1,6 +1,6 @@
 {
   "name": "@paigasus/discovery",
-  "_comment_exports": "THREE subpath exports and deliberately NO \".\". A root export re-exporting the server surface would let a client component import it and walk around the boundary — the same reason @paigasus/auth omits one. tests/structure/exports.test.ts pins this key set.",
+  "_comment_exports": "FOUR subpath exports and deliberately NO \".\". ./server and ./react are server-only. ./types (data types) and ./client (capabilityOutcome, reasonText, CapabilityDisabled — SMA-510, for @paigasus/app-shell) are client-safe. A root export re-exporting the server surface would let a client component import it and walk around the boundary — the same reason @paigasus/auth omits one. tests/structure/exports.test.ts pins this key set and the ./client import graph.",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -12,7 +12,8 @@
   "exports": {
     "./server": "./src/server.ts",
     "./react": "./src/react.tsx",
-    "./types": "./src/types.ts"
+    "./types": "./src/types.ts",
+    "./client": "./src/client.ts"
   },
   "scripts": {
     "typecheck": "tsc -p tsconfig.json --noEmit"

@@ -33,13 +33,11 @@
 // Written as plain ESM rather than TypeScript: ts/eslint.config.js is loaded by ESLint's own
 // resolver, and configuration data gains little from types (spec § 13 M5).
 //
-// The app-shell BLOCK is INERT until SMA-510 lands: `packages/paigasus-app-shell` does not exist
-// yet, so its files glob matches nothing. @paigasus/auth now has its own scope, added below —
-// see the three `paigasus/boundaries/auth-*` and `paigasus/boundaries/app-middleware` blocks — so
-// it is no longer only a DENIED TARGET inside the app-shell rule, and gains real coverage now that
-// SMA-506 lands. The app-shell block is written now, tested against synthetic paths, and covered
-// by a liveness assertion so a package landing under a different directory name reds instead of
-// silently disabling its rule.
+// The app-shell blocks are LIVE since SMA-510. They use the ALLOWLIST form, like the sdk block, and
+// a second block carries the fixture's narrow exception. @paigasus/auth has its own scope (the
+// `paigasus/boundaries/auth-*` and `paigasus/boundaries/app-middleware` blocks). Every scope is
+// covered by the liveness assertions in tests/boundaries.test.ts, so a package that lands under a
+// different directory name reds instead of silently disabling its rule.
 
 /**
  * Package directories these rules expect, mapped to a status string. `'exists'` means the
@@ -51,13 +49,49 @@
 export const BOUNDARY_SCOPES = {
   'packages/paigasus-ui': 'exists',
   'packages/paigasus-sdk': 'exists',
-  'packages/paigasus-app-shell': 'SMA-510 has not landed yet; the rule is inert until it does',
+  'packages/paigasus-app-shell': 'exists',
+  // The second app-shell block's scope. The reverse liveness loop needs every block's scope here.
+  'packages/paigasus-app-shell/tests/e2e/fixture': 'exists',
   'packages/paigasus-auth': 'exists',
   'packages/paigasus-discovery': 'exists',
   apps: 'exists',
 };
 
 const restrict = (patterns) => ({ 'no-restricted-imports': ['error', { patterns }] });
+
+/**
+ * The @paigasus/* allowlist for @paigasus/app-shell (SMA-510 spec § 9.1).
+ *
+ * THE PARENT NEGATION IS LOAD-BEARING (measured, SMA-510). `no-restricted-imports` matches with
+ * gitignore semantics, and gitignore cannot re-include a path whose PARENT is excluded. So
+ * `'!@paigasus/auth/client'` alone does nothing: `@paigasus/*` already excluded `@paigasus/auth`.
+ * The working form negates the parent, bans its children again, then re-includes the one child.
+ */
+const APP_SHELL_ALLOWLIST = [
+  '@paigasus/*',
+  '@paigasus/*/**',
+  '!@paigasus/ui',
+  '!@paigasus/auth',
+  '@paigasus/auth/*',
+  '!@paigasus/auth/client',
+  '!@paigasus/discovery',
+  '@paigasus/discovery/*',
+  '!@paigasus/discovery/types',
+  '!@paigasus/discovery/client',
+];
+
+const APP_SHELL_MESSAGE =
+  '@paigasus/app-shell is client-reachable. Within @paigasus/*, it may import only @paigasus/ui, @paigasus/auth/client, @paigasus/discovery/types and @paigasus/discovery/client (SMA-510 spec § 9.1; § 6 rule 3).';
+
+/**
+ * The parent negations above also un-ban the BARE roots `@paigasus/auth` and `@paigasus/discovery`.
+ * Neither package has a root export, but the rule must still say no, so `paths` (exact names) bans
+ * them again. Measured: every allowed specifier stays allowed.
+ */
+const APP_SHELL_BARE_ROOTS = [
+  { name: '@paigasus/auth', message: `${APP_SHELL_MESSAGE} @paigasus/auth has no root export.` },
+  { name: '@paigasus/discovery', message: `${APP_SHELL_MESSAGE} @paigasus/discovery has no root export.` },
+];
 
 /**
  * The boundary blocks, as an ESLint flat-config array.
@@ -108,12 +142,31 @@ export const boundaryRules = [
   {
     name: 'paigasus/boundaries/app-shell',
     files: ['packages/paigasus-app-shell/**/*.{ts,tsx,mts,cts,js,jsx,mjs,cjs}'],
-    rules: restrict([
-      {
-        group: ['@paigasus/sdk', '@paigasus/sdk/**', '@paigasus/auth/server', '@paigasus/auth/server/**'],
-        message: '@paigasus/app-shell is client-reachable. It may use @paigasus/auth/client, never /server, and never the sdk (§ 6 rule 3).',
-      },
-    ]),
+    rules: {
+      'no-restricted-imports': ['error', { paths: APP_SHELL_BARE_ROOTS, patterns: [{ group: APP_SHELL_ALLOWLIST, message: APP_SHELL_MESSAGE }] }],
+    },
+  },
+  {
+    // The fixture's one exception (spec § 9.1): its next.config.ts imports the next-config ROOT, and
+    // its pages import the package by its OWN name (Spec issue 4a). A later flat-config block
+    // REPLACES the rule's options for a file, it does not merge them, so this block restates the
+    // whole allowlist and adds the two roots. Their subpaths stay banned.
+    name: 'paigasus/boundaries/app-shell-fixture',
+    files: ['packages/paigasus-app-shell/tests/e2e/fixture/**/*.{ts,tsx,mts,cts,js,jsx,mjs,cjs}'],
+    rules: {
+      'no-restricted-imports': [
+        'error',
+        {
+          paths: APP_SHELL_BARE_ROOTS,
+          patterns: [
+            {
+              group: [...APP_SHELL_ALLOWLIST, '!@paigasus/next-config', '@paigasus/next-config/*', '!@paigasus/app-shell', '@paigasus/app-shell/*'],
+              message: `${APP_SHELL_MESSAGE} The fixture may also import the @paigasus/next-config root and @paigasus/app-shell itself, and no subpath of either.`,
+            },
+          ],
+        },
+      ],
+    },
   },
   {
     name: 'paigasus/boundaries/discovery',

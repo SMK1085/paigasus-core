@@ -113,6 +113,31 @@ const DENIED: ReadonlyArray<readonly [string, string, string]> = [
   // vacuously — no rule applied to that path at all, so any import would have reported []. This
   // row proves the new rule actually applies and actually denies something.
   ['auth/server must not reach the client-only surface', 'packages/paigasus-auth/src/server.ts', "import { x } from './client.js';"],
+  // SMA-510 — the app-shell ALLOWLIST (spec § 9.1). Within @paigasus/*, src/ may import only ui,
+  // auth/client, discovery/types and discovery/client. Each row below is a banned entry, or a
+  // subpath of one. Type imports are banned too (the core rule's default).
+  ['app-shell must not type-import the sdk', 'packages/paigasus-app-shell/src/header.tsx', "import type { X } from '@paigasus/sdk';"],
+  ['app-shell must not import a sdk SUBPATH', 'packages/paigasus-app-shell/src/header.tsx', "import { x } from '@paigasus/sdk/errors';"],
+  ['app-shell must not import auth/middleware', 'packages/paigasus-app-shell/src/header.tsx', "import { x } from '@paigasus/auth/middleware';"],
+  ['app-shell must not import a SUBPATH below auth/client', 'packages/paigasus-app-shell/src/header.tsx', "import { x } from '@paigasus/auth/client/x';"],
+  // The bare roots. The parent negation that makes `auth/client` importable also un-bans the bare
+  // name, so a `paths` entry bans it again (Spec issue 4c, measured).
+  ['app-shell must not import the bare @paigasus/auth root', 'packages/paigasus-app-shell/src/header.tsx', "import { x } from '@paigasus/auth';"],
+  ['app-shell must not import the bare @paigasus/discovery root', 'packages/paigasus-app-shell/src/header.tsx', "import { x } from '@paigasus/discovery';"],
+  ['app-shell must not import discovery/server', 'packages/paigasus-app-shell/src/header.tsx', "import { x } from '@paigasus/discovery/server';"],
+  ['app-shell must not import discovery/react, even in a test', 'packages/paigasus-app-shell/tests/nav.test.tsx', "import { Capability } from '@paigasus/discovery/react';"],
+  ['app-shell must not import a ui SUBPATH', 'packages/paigasus-app-shell/src/header.tsx', "import { x } from '@paigasus/ui/button';"],
+  ['app-shell must not import next-config outside the fixture', 'packages/paigasus-app-shell/src/header.tsx', "import { x } from '@paigasus/next-config';"],
+  ['app-shell must not import next-config/runtime', 'packages/paigasus-app-shell/src/header.tsx', "import { x } from '@paigasus/next-config/runtime';"],
+  ['app-shell must not import proto', 'packages/paigasus-app-shell/src/header.tsx', "import { x } from '@paigasus/proto';"],
+  ['app-shell must not import kernel', 'packages/paigasus-app-shell/src/header.tsx', "import { x } from '@paigasus/kernel';"],
+  ['app-shell src must not import its own package name', 'packages/paigasus-app-shell/src/header.tsx', "import { x } from '@paigasus/app-shell';"],
+  // The fixture exception is narrow: next-config ROOT and the package's own root, nothing more.
+  ['the fixture must not import next-config/runtime', 'packages/paigasus-app-shell/tests/e2e/fixture/app/page.tsx', "import { x } from '@paigasus/next-config/runtime';"],
+  ['the fixture must not import the sdk', 'packages/paigasus-app-shell/tests/e2e/fixture/app/page.tsx', "import { x } from '@paigasus/sdk';"],
+  ['the fixture must not import auth/server', 'packages/paigasus-app-shell/tests/e2e/fixture/app/page.tsx', "import { x } from '@paigasus/auth/server';"],
+  ['the fixture must not import discovery/server', 'packages/paigasus-app-shell/tests/e2e/fixture/app/page.tsx', "import { x } from '@paigasus/discovery/server';"],
+  ['the fixture must not import an app-shell SUBPATH', 'packages/paigasus-app-shell/tests/e2e/fixture/app/page.tsx', "import { x } from '@paigasus/app-shell/src/zone/resolve';"],
 ];
 
 const ALLOWED: ReadonlyArray<readonly [string, string, string]> = [
@@ -142,6 +167,15 @@ const ALLOWED: ReadonlyArray<readonly [string, string, string]> = [
   // cookie NAME constants (ADR-0017 decision 7's cookie-presence check) must keep working — only
   // the composition-root file, './http/routes.js', is banned, not the whole './http/**' directory.
   ['auth/middleware may still import cookie constants', 'packages/paigasus-auth/src/middleware.ts', "import { SESSION_COOKIE } from './http/cookies.js';"],
+  // SMA-510 — the four allowed @paigasus/* entries, and `next`.
+  ['app-shell may import discovery/types', 'packages/paigasus-app-shell/src/nav/state.ts', "import type { ServiceState } from '@paigasus/discovery/types';"],
+  ['app-shell may import discovery/client', 'packages/paigasus-app-shell/src/nav/state.ts', "import { capabilityOutcome } from '@paigasus/discovery/client';"],
+  ['app-shell may import next/link', 'packages/paigasus-app-shell/src/zone/zone-link.tsx', "import NextLink from 'next/link';"],
+  ['app-shell may import next/navigation', 'packages/paigasus-app-shell/src/nav/primary-nav.tsx', "import { usePathname } from 'next/navigation';"],
+  ['the fixture may import the next-config root (its next.config.ts)', 'packages/paigasus-app-shell/tests/e2e/fixture/next.config.ts', "import { createNextConfig } from '@paigasus/next-config';"],
+  ['the fixture may import the package by its own name', 'packages/paigasus-app-shell/tests/e2e/fixture/app/page.tsx', "import { ZoneLink } from '@paigasus/app-shell';"],
+  ['the fixture may import auth/client', 'packages/paigasus-app-shell/tests/e2e/fixture/app/providers.tsx', "import { SessionProvider } from '@paigasus/auth/client';"],
+  ['the fixture may import ui', 'packages/paigasus-app-shell/tests/e2e/fixture/app/page.tsx', "import { Link } from '@paigasus/ui';"],
 ];
 
 describe('boundary preset', () => {
@@ -175,6 +209,10 @@ describe('boundary preset', () => {
             `${expectedName} now exists at ${String(foundAt)}, but BOUNDARY_SCOPES still expects ${dir} — update the scope (and its rule's files glob) to match, or the rule stays permanently inert`,
           ).toBeUndefined();
         }
+      } else {
+        // SMA-510: a scope whose directory EXISTS must say 'exists'. Otherwise a stale "has not
+        // landed yet" note keeps passing after the package lands, and nobody re-reads it.
+        expect(note, `${dir} exists on disk, so BOUNDARY_SCOPES must say 'exists'`).toBe('exists');
       }
     }
   });

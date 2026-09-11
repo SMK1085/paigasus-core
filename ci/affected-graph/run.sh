@@ -86,10 +86,11 @@ assert_case() {
 #   same-named task in another stack could enter a case's observed set. `contracts:lint` exists
 #   and does not appear here — contracts is UPSTREAM of paigasus-proto-rs and `--downstream deep`
 #   walks dependents — but a future case with a different touched file must re-check that.
-#   Measured (SMA-509): two projects now declare `test-e2e` — `paigasus-auth-ts` and
-#   `paigasus-discovery-ts` (`moon query tasks` has exactly two matches). No existing case's
-#   observed set changes, because the two packages' touched files differ; a future case with a
-#   different touched file must still re-check this.
+#   Measured (SMA-510): three projects now declare `test-e2e` — `paigasus-auth-ts`,
+#   `paigasus-discovery-ts` and `paigasus-app-shell-ts`. app-shell's `test-e2e` keys on the ui,
+#   auth, discovery and next-config sources (its Next fixture compiles them), so the ui, auth and
+#   discovery cases below now include it. A future case with a different touched file must still
+#   re-check this.
 # returns 0 pass / 1 assertion fail / 2 infrastructure error
 _assert_task_case_impl() {
   local label="$1" file="$2" expected_csv="$3" hint="$4"; shift 4
@@ -268,8 +269,9 @@ run_suite() {
   # the same way, because it consumes the generated ServiceInfo/Capability types. That last edge
   # is what makes a generated-code change re-run each consumer's suite; `dependsOn` alone
   # schedules the upstream and never selects the downstream.
+  # + @paigasus/app-shell (SMA-510), through dependsOn app-shell -> discovery -> proto-ts.
   run_case "contracts->proto" "contracts/proto/paigasus/gateway/v1/health.proto" \
-    "contracts,paigasus-proto-rs,paigasus-proto-py,paigasus-proto-ts,paigasus-gateway-rs,paigasus-iam-rs,paigasus-service-info-rs,paigasus-sdk-ts,paigasus-discovery-ts"
+    "contracts,paigasus-proto-rs,paigasus-proto-py,paigasus-proto-ts,paigasus-gateway-rs,paigasus-iam-rs,paigasus-service-info-rs,paigasus-sdk-ts,paigasus-discovery-ts,paigasus-app-shell-ts"
   # derive-crate edit -> the derive crate + paigasus-proto and everything downstream of it
   # (SMA-438). One-directional w.r.t. contracts: the derive crate is strictly UPSTREAM of
   # paigasus-proto, so a proto edit must NOT reach it — enforced implicitly by the strict
@@ -373,8 +375,10 @@ run_suite() {
   # LIMITATION: the console's `typecheck` task carries this same input, but
   # `_assert_task_case_impl` filters `moon query tasks` to build/test/lint by name, so
   # `typecheck` is structurally invisible here — this case does NOT cover it.
+  # SMA-510: paigasus-app-shell-ts:{build,test,test-e2e} join this set — app-shell's inputs name
+  # this package's sources.
   run_task_case_ci "ui->console" "ts/packages/paigasus-ui/src/styles/tokens.css" \
-    "paigasus-console-ts:build,paigasus-console-ts:test,paigasus-ui-ts:build,paigasus-ui-ts:test,ts:lint"
+    "paigasus-app-shell-ts:build,paigasus-app-shell-ts:test,paigasus-app-shell-ts:test-e2e,paigasus-console-ts:build,paigasus-console-ts:test,paigasus-ui-ts:build,paigasus-ui-ts:test,ts:lint"
   # SMA-503 fix round 2, item 4 — the SECOND anchor, and it is not redundant. The case above
   # anchors only on src/styles/tokens.css, so narrowing either console task's
   # `/ts/packages/paigasus-ui/src/**/*` input to `/ts/packages/paigasus-ui/src/styles/**/*`
@@ -386,8 +390,10 @@ run_suite() {
   # The expected set is DERIVED, with the same no-flag `moon query tasks --affected` traversal
   # `_assert_task_case_impl` uses, not copied from the case above; it happens to match, because
   # both files sit inside the same declared input glob.
+  # SMA-510: paigasus-app-shell-ts:{build,test,test-e2e} join this set — app-shell's inputs name
+  # this package's sources.
   run_task_case_ci "ui-components->console" "ts/packages/paigasus-ui/src/components/table.tsx" \
-    "paigasus-console-ts:build,paigasus-console-ts:test,paigasus-ui-ts:build,paigasus-ui-ts:test,ts:lint"
+    "paigasus-app-shell-ts:build,paigasus-app-shell-ts:test,paigasus-app-shell-ts:test-e2e,paigasus-console-ts:build,paigasus-console-ts:test,paigasus-ui-ts:build,paigasus-ui-ts:test,ts:lint"
   # SMA-506 — a @paigasus/auth SOURCE edit must select its own build/test AND the new
   # Docker-backed `test-e2e` task (`^:build`-free — the filter widening above admits it) — plus
   # `ts:lint`. Nothing asserted this task was reachable from an edit to the package before this
@@ -395,8 +401,10 @@ run_suite() {
   # every PR touching `src/`. The expected set is DERIVED with the same no-flag
   # `moon query tasks --affected` traversal `_assert_task_case_impl` uses, not typed by hand:
   #   printf '%s\n' ts/packages/paigasus-auth/src/config.ts | moon query tasks --affected | ...
+  # SMA-510: paigasus-app-shell-ts:{build,test,test-e2e} join this set — app-shell's inputs name
+  # this package's sources.
   run_task_case_ci "auth->auth-tasks" "ts/packages/paigasus-auth/src/config.ts" \
-    "paigasus-auth-ts:build,paigasus-auth-ts:test,paigasus-auth-ts:test-e2e,ts:lint"
+    "paigasus-app-shell-ts:build,paigasus-app-shell-ts:test,paigasus-app-shell-ts:test-e2e,paigasus-auth-ts:build,paigasus-auth-ts:test,paigasus-auth-ts:test-e2e,ts:lint"
   # SMA-508 — a @paigasus/proto SOURCE edit must select the SDK's build and test.
   # This is the ONLY control on ts/packages/paigasus-sdk/moon.yml's `inputs` list. Remove that
   # list and the SDK's suite stops running on the PR that changes the generated code it consumes,
@@ -437,16 +445,34 @@ run_suite() {
   # DECLARED inputs are live, never that NEEDED ones are declared.
   # The expected set is DERIVED with the same no-flag `moon query tasks --affected` traversal
   # `_assert_task_case_impl` uses, not typed by hand.
+  # SMA-510: paigasus-app-shell-ts:{build,test,test-e2e} join this set — app-shell's inputs name
+  # this package's sources.
   run_task_case_ci "discovery->discovery-tasks" "ts/packages/paigasus-discovery/src/core/state.ts" \
-    "paigasus-discovery-ts:build,paigasus-discovery-ts:test,paigasus-discovery-ts:test-e2e,ts:lint"
+    "paigasus-app-shell-ts:build,paigasus-app-shell-ts:test,paigasus-app-shell-ts:test-e2e,paigasus-discovery-ts:build,paigasus-discovery-ts:test,paigasus-discovery-ts:test-e2e,ts:lint"
   # The SECOND anchor, and it is not redundant. The case above anchors only on src/core/, so
   # narrowing the inherited `sources` file group to `src/core/**/*` would leave it green while an
   # edit to an ADAPTER stopped selecting anything — and the adapters are where the Redis lock
   # primitives live, which is exactly what the test-e2e task exists to exercise. Two anchors on
   # opposite sides of the glob prove its WIDTH rather than one path inside it. This repo's
   # precedent is the `ui->console` / `ui-components->console` pair.
+  # SMA-510: paigasus-app-shell-ts:{build,test,test-e2e} join this set — app-shell's inputs name
+  # this package's sources.
   run_task_case_ci "discovery-adapters->discovery-tasks" "ts/packages/paigasus-discovery/src/adapters/memory-cache.ts" \
-    "paigasus-discovery-ts:build,paigasus-discovery-ts:test,paigasus-discovery-ts:test-e2e,ts:lint"
+    "paigasus-app-shell-ts:build,paigasus-app-shell-ts:test,paigasus-app-shell-ts:test-e2e,paigasus-discovery-ts:build,paigasus-discovery-ts:test,paigasus-discovery-ts:test-e2e,ts:lint"
+  # SMA-510 — a @paigasus/app-shell SOURCE edit must select its own build/test AND the browser-tier
+  # `test-e2e` task, plus `ts:lint`. Nothing else asserts that this package's tasks are reachable
+  # from an edit to it: `repo:input-liveness` scans `repo:*` tasks only, and it proves that
+  # DECLARED inputs are live, never that NEEDED ones are declared.
+  # The expected set is MEASURED with the no-flag `moon query tasks --affected` traversal that
+  # `_assert_task_case_impl` uses, not typed by hand.
+  run_task_case_ci "app-shell->app-shell-tasks" "ts/packages/paigasus-app-shell/src/zone/resolve.ts" \
+    "paigasus-app-shell-ts:build,paigasus-app-shell-ts:test,paigasus-app-shell-ts:test-e2e,ts:lint"
+  # The SECOND anchor, and it is not redundant: the case above anchors in src/zone/. Narrowing the
+  # inherited `sources` group to `src/zone/**/*` would leave it green while an edit to a shell
+  # component (where the Radix menus live) selected nothing. Two anchors on opposite sides of the
+  # glob prove its WIDTH. Precedent: the `ui->console` / `ui-components->console` pair.
+  run_task_case_ci "app-shell-shell->app-shell-tasks" "ts/packages/paigasus-app-shell/src/shell/switcher.tsx" \
+    "paigasus-app-shell-ts:build,paigasus-app-shell-ts:test,paigasus-app-shell-ts:test-e2e,ts:lint"
   # SMA-625, spec § 8.4 and § 11.2 obligation 9 — a gateway chat.rs edit must select the SDK's
   # test. This is the ONLY control on the '/rs/.../chat.rs' entry in paigasus-sdk-ts:test's
   # `inputs`. tests/terminal-frame.test.ts reads TERMINAL_SSE_ERROR out of that Rust file by

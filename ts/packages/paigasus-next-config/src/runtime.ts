@@ -30,6 +30,11 @@ export const PUBLIC_CONFIG_KEYS = ['zone', 'zones'] as const;
 
 export interface PublicConfig {
   zone: string;
+  /**
+   * Zone id -> canonical base path. A PLAIN object (SMA-510 spec § 9.1, F17): it is passed as a prop
+   * from a server layout, and React Flight refuses a null-prototype object. So it INHERITS
+   * Object.prototype members. Test membership with Object.hasOwn, never with `zones[id] === undefined`.
+   */
   zones: Record<string, string>;
 }
 
@@ -91,6 +96,19 @@ const zoneMapFromJson = z.string().transform((raw, ctx): Record<string, string> 
       ctx.addIssue({ code: 'custom', message: `entry ${JSON.stringify(id)} is not a valid base path` });
       return z.NEVER;
     }
+  }
+  // Two zones on ONE base path (SMA-510 spec § 9.1). The ingress cannot route both, and
+  // @paigasus/app-shell's longest-prefix match would pick one of them with no error. The check runs
+  // on the CANONICAL values, so "/iam" and "/iam/" collide. The message names the two zone ids
+  // (public routing labels) and withholds the shared value, like every other issue in this schema.
+  const owners = new Map<string, string>();
+  for (const [id, basePath] of Object.entries(out)) {
+    const first = owners.get(basePath);
+    if (first !== undefined) {
+      ctx.addIssue({ code: 'custom', message: `entries ${JSON.stringify(first)} and ${JSON.stringify(id)} declare the same base path` });
+      return z.NEVER;
+    }
+    owners.set(basePath, id);
   }
   return out;
 });
@@ -252,7 +270,11 @@ export function defineRuntimeConfig<T extends ZodRawShape = Record<never, never>
    */
   function getPublicConfig(): PublicConfig {
     const full = getRuntimeConfig() as Parsed & { PAIGASUS_ZONE: string; PAIGASUS_ZONES: Record<string, string> };
-    return { zone: full.PAIGASUS_ZONE, zones: full.PAIGASUS_ZONES };
+    // A PLAIN copy, not the internal null-prototype map (SMA-510 spec § 9.1, F17). Object spread
+    // DEFINES each property (CreateDataProperty) and never calls the inherited `__proto__` setter,
+    // so an own `__proto__` zone id survives as an own key. The internal map, which
+    // assertCompiledAgreement reads, keeps its null prototype.
+    return { zone: full.PAIGASUS_ZONE, zones: { ...full.PAIGASUS_ZONES } };
   }
 
   return { getRuntimeConfig, getPublicConfig };

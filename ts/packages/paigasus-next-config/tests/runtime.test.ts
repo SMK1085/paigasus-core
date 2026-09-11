@@ -12,6 +12,16 @@ function setEnv(overrides: Record<string, string | undefined>) {
   }
 }
 
+/** The message of the error `fn` throws. Fails the test when `fn` does not throw. */
+function thrownMessage(fn: () => unknown): string {
+  try {
+    fn();
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  }
+  throw new Error('expected the call to throw');
+}
+
 beforeEach(() => {
   for (const key of Object.keys(process.env)) {
     if (key.startsWith('PAIGASUS_') || key === 'NEXT_PHASE' || key === 'NEXT_RUNTIME' || key === 'SECRET_TOKEN') delete process.env[key];
@@ -203,24 +213,35 @@ describe('defineRuntimeConfig', () => {
     // vanishes from the public projection with no error at all.
     expect(Object.prototype.hasOwnProperty.call(zones, '__proto__')).toBe(true);
     expect(zones['__proto__']).toBe('/evil');
+    // Spec § 9.1: the public copy is a PLAIN object, and object spread keeps the own key.
+    expect(Object.getPrototypeOf(zones)).toBe(Object.prototype);
     // And it must not have polluted anything on the way through.
     expect(Object.getPrototypeOf({})).toBe(Object.prototype);
     expect(({} as Record<string, unknown>)['/evil']).toBeUndefined();
   });
 
-  it('resolves a missing zone id as absent even when it names an Object.prototype member', () => {
+  it('resolves a missing zone id as absent in the INTERNAL map, even when it names an Object.prototype member', () => {
     setEnv({ PAIGASUS_ZONES: '{"iam":"/iam"}' });
-    const { zones } = defineRuntimeConfig().getPublicConfig();
+    // The internal map, which assertCompiledAgreement reads. It keeps its null prototype (spec § 9.1).
+    // SMA-510 retargeted this row: it used to read getPublicConfig().zones, which is now a plain object.
+    const zones = defineRuntimeConfig().getRuntimeConfig().PAIGASUS_ZONES;
     // Indexed through a VARIABLE key, exactly as assertCompiledAgreement does. A literal key would
     // make TypeScript resolve `toString` to Object.prototype's declared method rather than to the
-    // index signature, which both changes the type and trips @typescript-eslint/unbound-method —
-    // and would assert something other than the runtime lookup this test is about.
+    // index signature, which both changes the type and trips @typescript-eslint/unbound-method.
     const lookup = (id: string): string | undefined => zones[id];
-    // On an object literal each of these is an inherited FUNCTION, so `zones[zone] === undefined`
-    // reads as "declared" and assertCompiledAgreement skips the base-path cross-check.
     expect(lookup('toString')).toBeUndefined();
     expect(lookup('constructor')).toBeUndefined();
     expect(lookup('hasOwnProperty')).toBeUndefined();
+  });
+
+  it('the PUBLIC copy answers membership only through Object.hasOwn', () => {
+    setEnv({ PAIGASUS_ZONES: '{"iam":"/iam"}' });
+    const { zones } = defineRuntimeConfig().getPublicConfig();
+    // A plain object inherits `toString` and `constructor`. Every consumer must test membership with
+    // Object.hasOwn — @paigasus/app-shell does (spec § 6.1).
+    expect(Object.hasOwn(zones, 'iam')).toBe(true);
+    expect(Object.hasOwn(zones, 'toString')).toBe(false);
+    expect(Object.hasOwn(zones, 'constructor')).toBe(false);
   });
 
   it("fails closed when the app's own zone id only resolves through the prototype", () => {
@@ -239,5 +260,26 @@ describe('defineRuntimeConfig', () => {
   it('rejects a padded zone id in the zone map, rather than reporting it as missing', () => {
     setEnv({ PAIGASUS_ZONES: '{" iam ":"/iam"}' });
     expect(() => defineRuntimeConfig().getRuntimeConfig()).toThrow(/whitespace/);
+  });
+
+  it('returns the public zone map as a PLAIN object, which React Flight can pass as a prop', () => {
+    // Spec F17: React Flight throws for a null-prototype prop ("Classes or null prototypes are not
+    // supported"), and ZoneProvider receives this map as a prop from a server layout.
+    const { zones } = defineRuntimeConfig().getPublicConfig();
+    expect(Object.getPrototypeOf(zones)).toBe(Object.prototype);
+    expect(zones).toEqual({ iam: '/iam', gateway: '/gateway' });
+  });
+
+  it('rejects two zones on one base path, naming both zone ids and withholding the value', () => {
+    // "/shared-prefix/" canonicalises to "/shared-prefix", so the comparison must run on canonical values.
+    setEnv({ PAIGASUS_ZONES: '{"iam":"/shared-prefix","gateway":"/shared-prefix/"}' });
+    const message = thrownMessage(() => defineRuntimeConfig().getRuntimeConfig());
+    expect(message).toMatch(/entries "iam" and "gateway" declare the same base path/);
+    expect(message).not.toContain('shared-prefix');
+  });
+
+  it('rejects two root-mounted zones', () => {
+    setEnv({ PAIGASUS_ZONES: '{"a":"","b":"/"}' });
+    expect(() => defineRuntimeConfig().getRuntimeConfig()).toThrow(/entries "a" and "b" declare the same base path/);
   });
 });
