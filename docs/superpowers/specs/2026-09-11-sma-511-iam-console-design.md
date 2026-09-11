@@ -305,6 +305,15 @@ has no subpath export, so a server cannot reach it.
 
 `lib/prn.ts` has the same interface in both cases, so no caller changes between them.
 
+**Outcome (measured 2026-09-12, plan Task 8): fallback C.** The wasm spike passes in a warm tree,
+but it fails in the state CI really has: `next build` stops with `Module not found: Can't resolve
+'./paigasus_wasm_bg.wasm'`. `paigasus_wasm_bg.wasm` is gitignored, and pnpm links the crate's files
+at install time, before any build. So `lib/prn.ts` is the app-local reader for the IAM tenancy
+shapes, held to the kernel by the parity corpus, and `@paigasus/kernel` gets no `./wasm` export.
+`ROOT_PRN` is `prn:pgs:iam:::root/00000000-0000-0000-0000-000000000000`
+(`rs/crates/libs/paigasus-iam-core/src/authz/model.rs:30-32`). SMA-634 still owns the napi
+packaging defect.
+
 ### 4.8 `lib/logger.ts`
 
 One JSON-lines adapter writes to stdout. It implements `AuthLogger` and `DiscoveryLogger`, and
