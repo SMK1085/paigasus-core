@@ -14,3 +14,5 @@ export { ZoneConfigError, ZoneLinkError, ZoneProviderMissingError } from './zone
 export { resolveZone, type ZoneMap, type ZoneTarget } from './zone/resolve';
 export { ZoneProvider, useZone, type ZoneContextValue, type ZoneProviderProps } from './zone/context';
 export { ZoneLink, type ZoneLinkProps } from './zone/zone-link';
+export { navStateOf, type NavEntryState } from './nav/state';
+export { PrimaryNav, type NavEntry, type PrimaryNavProps } from './nav/primary-nav';
