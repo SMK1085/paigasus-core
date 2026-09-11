@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import { render, screen } from '@testing-library/react';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Breadcrumbs } from '../../src/shell/breadcrumbs';
 import { ZoneLinkError } from '../../src/zone/errors';
 import { expectNoAxeViolations } from '../axe';
@@ -8,6 +8,10 @@ import { silenceReactErrorLog } from '../support/console';
 import { inZone } from '../support/providers';
 
 vi.mock('next/link', () => import('../support/next-link-double'));
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 const TRAIL = [
   { label: 'Gateway', href: '/gateway' },

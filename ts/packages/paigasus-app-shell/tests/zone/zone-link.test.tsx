@@ -1,15 +1,20 @@
 // SPDX-License-Identifier: Apache-2.0
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { createRef } from 'react';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { createRef, type MouseEvent } from 'react';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Link, LinkProvider } from '@paigasus/ui';
 import { ZoneLinkError } from '../../src/zone/errors';
 import { ZoneLink } from '../../src/zone/zone-link';
 import { silenceReactErrorLog } from '../support/console';
+import { nextLinkClicks } from '../support/next-link-double';
 import { inZone } from '../support/providers';
 
 vi.mock('next/link', () => import('../support/next-link-double'));
+
+beforeEach(() => {
+  nextLinkClicks.length = 0;
+});
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -78,6 +83,22 @@ describe('ZoneLink (spec § 6.4)', () => {
     );
     await userEvent.click(screen.getByRole('link', { name: 'Users' }));
     expect(onClick).toHaveBeenCalledTimes(1);
+  });
+
+  it('a same-zone onClick that calls preventDefault() records no click (double parity with next/link)', async () => {
+    const onClick = vi.fn((event: MouseEvent<HTMLAnchorElement>) => {
+      event.preventDefault();
+    });
+    render(
+      inZone(
+        <ZoneLink href="/iam/users" onClick={onClick}>
+          Users
+        </ZoneLink>,
+      ),
+    );
+    await userEvent.click(screen.getByRole('link', { name: 'Users' }));
+    expect(onClick).toHaveBeenCalledTimes(1);
+    expect(nextLinkClicks).toEqual([]);
   });
 
   it('forwards onClick on the cross-zone plain <a> branch (F1)', async () => {

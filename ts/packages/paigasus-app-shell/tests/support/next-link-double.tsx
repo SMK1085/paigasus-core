@@ -19,7 +19,8 @@ export default function NextLinkDouble({ href, onClick, children, ...rest }: Nex
       href={href}
       onClick={(event) => {
         onClick?.(event);
-        nextLinkClicks.push(href);
+        // Real next/link does not navigate when the consumer already prevented the default.
+        if (!event.defaultPrevented) nextLinkClicks.push(href);
         event.preventDefault();
       }}
     >
