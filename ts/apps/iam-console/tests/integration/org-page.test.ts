@@ -144,4 +144,19 @@ describe('loadOrganizationPage', () => {
     expect(data.members.list.error.correlationId).toBe('corr-members');
     expect(data.teams.ok).toBe(true);
   });
+
+  it('keeps the page when listTeams is denied, and puts the error in that section', async () => {
+    iam.setHandlers({
+      ...world(1),
+      'tenancy.listTeams': () => {
+        throw denial({ code: Code.PermissionDenied, correlationId: 'corr-teams' });
+      },
+    });
+
+    const data = await loadOrganizationPage(deps(), { org: IDS.orgA, offset: 0, membersOffset: 0 });
+
+    if (data.kind !== 'ok' || data.teams.ok) throw new Error('expected a teams section error');
+    expect(data.teams.error.correlationId).toBe('corr-teams');
+    expect(data.members.list.ok).toBe(true);
+  });
 });

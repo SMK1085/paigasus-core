@@ -19,6 +19,7 @@ const APP_DIR = fileURLToPath(new URL('../../app', import.meta.url));
 const EXPECTED: Readonly<Record<string, readonly string[]>> = {
   '(console)/orgs/actions.ts': ['attachMembershipAction', 'createOrganizationAction', 'detachMembershipAction'],
   '(console)/orgs/[org]/actions.ts': ['createTeamAction'],
+  '(console)/orgs/[org]/teams/[team]/actions.ts': ['createProjectAction'],
 };
 
 function findActionFiles(dir: string, prefix = ''): string[] {
