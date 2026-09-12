@@ -919,13 +919,71 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   found`, in app code and in a workspace package's source alike. A clause-level `import type … from
   './a.js'` is erased first and builds (measured). `import { type A } from './a.js'` is not erased
   under `verbatimModuleSyntax` (reasoned from the flag's rules, not separately measured). So every
-  file a Next app compiles uses EXTENSIONLESS relative value imports: `@paigasus/ui`,
-  `@paigasus/next-config`, `@paigasus/app-shell` and discovery's `./client` graph do, and structure
-  tests pin the last two. `@paigasus/auth`'s `/server` and `/middleware`, discovery's `/server` and
-  `/react`, and `@paigasus/sdk` still use `.js` and have never been built by Next — a probe that
-  imported `@paigasus/auth/middleware` failed on `./http/cookies.js`. SMA-511 is the first consumer
-  that imports these entries, so its `next build` will fail on them. Vite, vitest, tsc and
-  Playwright all accept both forms, so nothing but a Next build notices.
+  file a Next app compiles uses EXTENSIONLESS relative value imports. SMA-511 made that true for every
+  package the IAM console compiles: the `src/` of `@paigasus/auth`, `@paigasus/sdk`,
+  `@paigasus/discovery` and the hand-written `@paigasus/proto` files, and BOTH buf templates
+  (`contracts/buf.gen.yaml`, `contracts/buf.gen.googleapis.yaml`) no longer pass
+  `import_extension=.js`, so the generated protobuf-es code is extensionless too. Two controls hold
+  it. The ESLint rule `paigasus/no-js-relative-specifier` reports an `import`, `export … from` or
+  `import()` whose `./`/`../` specifier ends in `.js`, under `packages/*/src/**`, test files
+  excluded. It ships as `sourceRules` from `@paigasus/next-config/eslint`, NOT inside
+  `boundaryRules` (a `packages/*/src` scope there fails the reverse liveness loop), and
+  `ts/eslint.config.js` spreads it, which a test pins. It is a rule with its OWN name on purpose: in
+  flat config a second `no-restricted-imports` block that matches the same files REPLACES the first
+  and switches the boundary rules off without a word. ESLint ignores `**/generated/**`, so a
+  `@paigasus/proto` test asserts the same thing for `src/generated/`. Test files keep their `.js`
+  imports (vitest resolves both). The two plain-Node loaders that run package source
+  (`paigasus-auth/tests/fixtures/ts-esm-loader.mjs`,
+  `paigasus-discovery/tests/containers/support/ts-esm-loader.mjs`) retry an extensionless specifier
+  as `.ts`, then `/index.ts`, because plain Node does not probe extensions. Vite, vitest, tsc and
+  Playwright accept both forms, so only a Next build or these two controls notices a regression.
+- **`@paigasus/auth` under a Next `basePath`** (MEASURED on Next 16.3.4, SMA-511 spec § 13 row 1).
+  Next removes the basePath before app code sees a path, in three different places. In `proxy.ts`,
+  `req.nextUrl.pathname` has no `/iam`, while `req.nextUrl.basePath` is `/iam` and `req.url` keeps
+  it. In a route handler, `req.url` has no basePath AND carries the server's bind address
+  (`http://0.0.0.0:<port>`); only its scheme follows `X-Forwarded-Proto`. A page
+  `redirect('/auth/login')` gets the basePath added once, and `redirect('/iam/auth/login')` becomes
+  `/iam/iam/auth/login`. So `authRoutePaths()` takes no argument and returns basePath-RELATIVE
+  paths, `requireSession` redirects to the relative login path, `createAuthRouteHandler` rebuilds the
+  URL from `AuthRuntime.publicOrigin` + basePath, and `handleCallback` builds openid-client's
+  `currentUrl` from `runtime.redirectUri`. That last part broke `redirect_uri` equality even with NO
+  basePath. A unit test sees none of this without `new NextRequest(url, { nextConfig: { basePath:
+  '/iam' } })`, and the plain-Node auth e2e harness passes full paths, so the iam-console e2e tier
+  (`iam-console-ts:test-e2e`, row R2) is the only end-to-end control.
+- **`@paigasus/kernel` cannot load its napi binding inside a Next build** (MEASURED 2026-09-11,
+  SMA-634 open). `@paigasus/node-bindings` is a pnpm `file:` dependency whose `files` allowlist is
+  `["index.js", "index.d.ts"]`, so pnpm never copies the `.node` binary into `node_modules`, and
+  `next build` fails at "Collecting page data" with `Cannot find native binding`. Every Node consumer
+  of `@paigasus/kernel` has the same defect.
+  The iam-console's `lib/prn.ts` is a small reader for the IAM tenancy PRN shapes (decision D6,
+  fallback C). It is a recorded ADR-0005 exception, and `tests/unit/prn.test.ts` replays the kernel
+  parity corpus through it, so a divergence from the kernel reds `iam-console-ts:test`.
+- **`forbidden()` needs `experimental.authInterrupts`, and a React `cache()` value does not reach
+  `forbidden.tsx`** (MEASURED on Next 16.3.4, SMA-511). Without the flag, `forbidden()` throws
+  instead of rendering the 403 boundary. The iam-console sets it through
+  `createNextConfig({ extend: { experimental: { authInterrupts: true } } })`, and its vitest env needs
+  `__NEXT_EXPERIMENTAL_AUTH_INTERRUPTS=true` or the call throws E488. A nested `forbidden.tsx` is a
+  per-segment boundary: `(console)/forbidden.tsx` renders inside the `(console)` layout with a real
+  HTTP 403. `forbidden()` takes no argument, and a `cache()` holder set before the call is EMPTY in
+  the `forbidden.tsx` render, so the view cannot receive request data that way.
+  The view gets the correlation id from a request header instead: `proxy.ts` mints it, `lib/iam.ts`
+  sends it to IAM as `paigasus-correlation-id`, IAM adopts it, and `forbidden.tsx` reads it with
+  `headers()`. `lib/correlation.ts`'s `FORBIDDEN_VIEW_CORRELATION` records which of the two ships,
+  and e2e row R4 fails if the view does the other. The flag is experimental: R4 asserts the real
+  HTTP 403, so a Next upgrade that changes it reds CI.
+- **A Playwright `globalSetup` runs in another process than the tests.** A fake server that a test
+  must script, or whose calls a test must count, cannot start there. The iam-console e2e tier only
+  checks the build and copies `.next/static` in `tests/e2e/global-setup.ts`, and starts the fake IAM,
+  the fake IdP, the TLS terminator and the standalone server in a WORKER-scoped fixture
+  (`tests/e2e/support/harness.ts`, `workers: 1`). Playwright starts a new worker after a failed test,
+  and the fixture then starts the whole stack again. Anything that fixture imports runs WITHOUT the
+  vitest `server-only` stub, so `tests/support/` must not import a guarded `@paigasus/sdk` entry or a
+  `lib/` file (use `@paigasus/proto/iam`, which the `apps/*/tests/support/**` boundary exemption allows).
+- The `ts` project's `sources` group names app code directories BY HAND (`apps/*/app/**/*`,
+  `apps/*/lib/**/*`, `apps/*/proxy.ts`). `ts:lint` runs `eslint .` over the whole tree, but Moon
+  re-runs it only for a file in its `sources` or `tests` group (or one of its config inputs), so a
+  new top-level app directory needs a line in `sources`, or an edit to it serves a cached lint PASS.
+  The same holds for a top-level app file such as `playwright.config.ts`.
 
 ## Workflow
 

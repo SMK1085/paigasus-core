@@ -11,12 +11,16 @@ TypeScript workspace for paigasus-core, managed with [pnpm](https://pnpm.io/) an
 - `.prettierrc.js`, `.prettierignore` — formatting config. `printWidth: 200` (cross-stack with py/rs).
 - `moon.yml` — workspace parent project (`layer: configuration`). Owns the whole-tree `lint`/`fmt` (run once from `ts/`); `build`/`typecheck`/`test` are routed per-project by layer (`.moon/tasks/typescript-project.yml`), not to the root — Moon owns those fan-out graphs (SMA-401).
 - `packages/*` — publishable libraries; each is a uv-style first-class Moon project (id `paigasus-<short>-ts`):
-  - `paigasus-proto` (`@paigasus/proto`) — generated proto types post-MVP (consumes `contracts/`)
-  - `paigasus-kernel` (`@paigasus/kernel`) — thin wrapper over the napi-rs binding to `paigasus-kernel-rs`, post-MVP
-  - `paigasus-sdk` (`@paigasus/sdk`) — public SDK placeholder
+  - `paigasus-proto` (`@paigasus/proto`) — protobuf-es types generated from `contracts/` (extensionless imports; see CLAUDE.md, Turbopack)
+  - `paigasus-kernel` (`@paigasus/kernel`) — the Rust kernel for Node (napi) and the browser (wasm); a Next build cannot load the napi binding (SMA-634)
+  - `paigasus-sdk` (`@paigasus/sdk`) — server-only Connect clients for the IAM gRPC services, and the error map
   - `paigasus-ui` (`@paigasus/ui`) — shared React components for the console
+  - `paigasus-next-config` (`@paigasus/next-config`) — the Next config factory, runtime config and the ESLint boundary and source rules
+  - `paigasus-auth` (`@paigasus/auth`) — the BFF session: OIDC login, the session store and the proxy
+  - `paigasus-discovery` (`@paigasus/discovery`) — capability discovery with three service states
+  - `paigasus-app-shell` (`@paigasus/app-shell`) — the console chrome: header, navigation, switchers, cross-zone links
 - `apps/*` — deployables, one Next.js app per console zone (id `<name>-ts`):
-  - `iam-console` (`@paigasus/iam-console`) — Next.js 16 (App Router) console zone for IAM, mounted at `/iam`
+  - `iam-console` (`@paigasus/iam-console`) — Next.js 16 (App Router) console zone for IAM, mounted at `/iam`; see its [README](apps/iam-console/README.md) for the environment and the test tiers
 
 ## Commands
 
@@ -30,6 +34,7 @@ TypeScript workspace for paigasus-core, managed with [pnpm](https://pnpm.io/) an
 | Test            | `moon run :test --query "language=typescript"`      |
 | Build (all TS)  | `moon run :build --query "language=typescript"`     |
 | Build (one app) | `moon run iam-console-ts:build`                     |
+| E2E (one app)   | `moon run iam-console-ts:test-e2e`                  |
 
 Notes:
 
