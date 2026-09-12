@@ -4,23 +4,44 @@ id: 'paigasus-discovery-ts'
 layer: 'library'
 language: 'typescript'
 
-# BOTH are required and neither implies the other. `dependsOn` is what `moon query projects
-# --affected` follows and what orders the upstream's build; task `inputs` are the ONLY thing that
-# confers affectedness on a DOWNSTREAM.
+# THREE things are required and none implies another. `dependsOn` is what `moon query projects
+# --affected` follows; task `inputs` are the ONLY thing that confers affectedness on a DOWNSTREAM;
+# and a task-level `deps` entry is the ONLY thing that ORDERS this package's tasks after the
+# generator that writes the tree they read. MEASURED with `moon action-graph
+# paigasus-discovery-ts:build --dot`: before the `deps` lines below, the graph held
+# SyncProject(contracts) but NO RunTask(contracts:generate) node at all — `dependsOn` schedules a
+# project SYNC, never an upstream TASK.
 dependsOn: ['paigasus-proto-ts']
 
 tasks:
+  # Every task below reads ts/packages/paigasus-proto/src/generated/**, so every one carries
+  # `deps: ['contracts:generate']`. This is an ORDERING requirement, not an affectedness one, and
+  # the `inputs` lines cannot supply it. contracts:generate runs `buf generate` with
+  # `clean: true`, which DELETES that whole tree before rewriting it, and google/rpc/ is only
+  # restored by the second template at the very end of the ~11s run. Without these lines Moon
+  # schedules a reader concurrently with the wipe and it compiles a half-deleted tree.
+  #
+  # MEASURED in CI (run 34707777645): contracts:generate executed 17:19:56.257-17:20:07.073, and
+  # paigasus-discovery-ts:build started at 17:20:03.496 — 3.6s inside that window — and died with
+  # `TS2307: Cannot find module './generated/google/rpc/error_details_pb'`. paigasus-sdk-ts:build
+  # started 2.2s AFTER the generator finished and passed. The difference was scheduling luck.
+  # This only surfaced now because contracts:generate is normally a cache HIT; this branch edited
+  # buf.gen.yaml, so it re-ran for the first time alongside these readers.
+  #
   # APPEND, never `options.merge: replace`. The inherited definitions in
   # .moon/tasks/typescript-project.yml supply @group(sources), @group(tests), tsconfig.json,
   # package.json, /ts/tsconfig.base.json and /ts/pnpm-lock.yaml; replacing would silently drop all
   # of them — the defect SMA-503 fixed on iam-console-ts:build.
   build:
+    deps: ['contracts:generate']
     inputs:
       - '/ts/packages/paigasus-proto/src/**/*'
   typecheck:
+    deps: ['contracts:generate']
     inputs:
       - '/ts/packages/paigasus-proto/src/**/*'
   test:
+    deps: ['contracts:generate']
     # vitest.config.ts matches neither src/**/* nor tests/**/*, so without this line an edit to the
     # `server-only` alias or the resolution conditions serves a cached PASS — and that alias is the
     # only thing keeping server-only's unconditional throw from failing the whole suite.
@@ -42,6 +63,13 @@ tasks:
       set -euo pipefail
       pnpm exec vitest run --config vitest.containers.config.ts
       pnpm exec playwright test
+    # This tier reads the generated tree at RUNTIME rather than through tsc: src/core/state.ts and
+    # src/types.ts import `@paigasus/proto`, whose index.ts re-exports
+    # ./generated/google/rpc/error_details_pb, so loading the barrel loads that file. It needs the
+    # same ordering as the tsc tasks above. In the CI run it started 17:19:56.428, also inside the
+    # wipe window, and passed only because the modules it happened to load first were already
+    # rewritten.
+    deps: ['contracts:generate']
     inputs:
       - '@group(sources)'
       - '@group(tests)'

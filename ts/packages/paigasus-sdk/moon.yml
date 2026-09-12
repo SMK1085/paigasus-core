@@ -4,24 +4,39 @@ id: 'paigasus-sdk-ts'
 layer: 'library'
 language: 'typescript'
 
-# BOTH are required and neither implies the other. `dependsOn` is what `moon query projects
-# --affected` follows and what orders the upstream's build; task `inputs` are the ONLY thing that
-# confers affectedness on a DOWNSTREAM. MEASURED (spec § 11.1, M11): without the inputs below, an
-# edit to paigasus-proto's generated error_pb.ts selects no paigasus-sdk-ts task at all.
+# THREE things are required and none implies another. `dependsOn` is what `moon query projects
+# --affected` follows; task `inputs` are the ONLY thing that confers affectedness on a DOWNSTREAM;
+# and a task-level `deps` entry is the ONLY thing that ORDERS a task after the generator that
+# writes the tree it reads. MEASURED (spec § 11.1, M11): without the inputs below, an edit to
+# paigasus-proto's generated error_pb.ts selects no paigasus-sdk-ts task at all. MEASURED again
+# with `moon action-graph paigasus-sdk-ts:build --dot`: without the `deps` lines below the graph
+# holds no RunTask(contracts:generate) node — `dependsOn` schedules a project SYNC, not a task.
 dependsOn: ['paigasus-proto-ts']
 
 tasks:
+  # Every task below reads ts/packages/paigasus-proto/src/generated/**, so every one carries
+  # `deps: ['contracts:generate']`. contracts:generate runs `buf generate` with `clean: true`,
+  # which DELETES that tree before rewriting it, and google/rpc/ is only restored by the second
+  # template at the end of the ~11s run. Without these lines Moon schedules a reader concurrently
+  # with the wipe. See ts/packages/paigasus-discovery/moon.yml for the CI measurement: on run
+  # 34707777645 paigasus-sdk-ts:build started 2.2s after the generator finished and passed, while
+  # paigasus-discovery-ts:build started 3.6s before it finished and failed with TS2307. The only
+  # difference was scheduling luck.
+  #
   # APPEND, never `options.merge: replace`. The inherited definitions in
   # .moon/tasks/typescript-project.yml supply @group(sources), tsconfig.json, package.json,
   # /ts/tsconfig.base.json and /ts/pnpm-lock.yaml; replacing would silently drop all of them —
   # the defect SMA-503 fixed on iam-console-ts:build.
   build:
+    deps: ['contracts:generate']
     inputs:
       - '/ts/packages/paigasus-proto/src/**/*'
   typecheck:
+    deps: ['contracts:generate']
     inputs:
       - '/ts/packages/paigasus-proto/src/**/*'
   test:
+    deps: ['contracts:generate']
     # vitest.config.ts matches neither src/**/* nor tests/**/*, so without this line an edit to the
     # resolution conditions serves a cached PASS — and those conditions are the only thing keeping
     # `server-only`'s unconditional throw from failing the whole suite.

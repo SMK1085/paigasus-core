@@ -9,6 +9,14 @@ language: 'typescript'
 # (CLAUDE.md, Moon 2.5.3). The task `inputs` below are what make these tasks affected by a
 # change inside a package. Every package this app compiles is listed, so the `contracts->proto`
 # case in ci/affected-graph/run.sh reaches this project (SMA-511 spec § 8).
+#
+# It confers no ORDERING on a task either, which is a third distinct thing. MEASURED with
+# `moon action-graph iam-console-ts:build --dot`: the entry below produced SyncProject(contracts)
+# and no RunTask(contracts:generate) node, so every task that reads
+# ts/packages/paigasus-proto/src/generated/** carries its own `deps: ['contracts:generate']`
+# below. That tree is wiped by `clean: true` at the start of the generator's ~11s run and
+# google/rpc/ is only restored at the end of it — see ts/packages/paigasus-discovery/moon.yml for
+# the CI measurement of a reader that was scheduled inside that window and failed.
 dependsOn:
   - 'paigasus-next-config-ts'
   - 'paigasus-ui-ts'
@@ -66,6 +74,9 @@ tasks:
         echo "iam-console: standalone entry point missing — output: 'standalone' did not take effect" >&2
         exit 1
       fi
+    # `next build` compiles @paigasus/proto's generated tree through @paigasus/sdk and
+    # @paigasus/discovery, so this task must not run while the generator is wiping it.
+    deps: ['contracts:generate']
     # NOTE the `merge: replace` below: this task inherits NOTHING, so every input it needs is
     # listed here. That is how it lost /ts/pnpm-lock.yaml once before — see the comment on
     # repo:next-env-drift in the root moon.yml.
@@ -134,6 +145,10 @@ tasks:
     # this makes it deliberate rather than accidental. `typecheck` merges rather than replaces, so
     # it keeps the inherited /ts/tsconfig.base.json and needs no line of its own (verified with
     # `moon query projects --id iam-console-ts`).
+    #
+    # tsc resolves @paigasus/proto's generated tree through the source `exports` of @paigasus/sdk
+    # and @paigasus/discovery, so this task needs the generator ordering too.
+    deps: ['contracts:generate']
     inputs:
       - 'app/**/*'
       - 'lib/**/*'
@@ -194,6 +209,10 @@ tasks:
       # into .next. Without this edge, that gate and this task would run concurrently over the
       # same directory — the flake shape the root moon.yml already records for wasm-pack.
       - 'repo:next-env-drift'
+      # Stated here rather than left to `~:build`'s own edge. tests/support/fake-iam.ts imports
+      # @paigasus/proto directly, so this task is a reader of the generated tree in its own right
+      # and its ordering must not depend on another task keeping an edge it happens to share.
+      - 'contracts:generate'
     inputs:
       - '@group(sources)'
       - 'app/**/*'
@@ -253,6 +272,9 @@ tasks:
       - '~:build'
       # repo:next-env-drift writes into .next too; the same serialization `test` has.
       - 'repo:next-env-drift'
+      # Stated here for the same reason as in `test`: tests/support/fake-iam.ts imports
+      # @paigasus/proto, so this tier reads the generated tree itself.
+      - 'contracts:generate'
     # A NEW task name, so it inherits NOTHING: every input is listed.
     inputs:
       - '@group(sources)'
