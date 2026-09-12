@@ -165,6 +165,11 @@ tasks:
       - '@group(sources)'
       - 'app/**/*'
       - 'tests/**/*'
+      # The fixtures' `next build` output and generated next-env.d.ts. The Moon hasher does NOT skip
+      # `.next` (.moon/workspace.yml omits it on purpose), so without these, every run of this task
+      # would re-key the task itself (the same measurement as app-shell's fixture, SMA-510).
+      - '!tests/fixtures/**/.next/**'
+      - '!tests/fixtures/*/next-env.d.ts'
       - 'vitest.config.ts'
       - 'tsconfig.json'
       - 'package.json'

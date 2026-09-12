@@ -937,6 +937,9 @@ tasks:
     toolchain: 'system'
     inputs:
       - '!ts/apps/*/.next/**'
+      # SMA-511: the iam-console's client-boundary fixtures build under ts/apps/*/tests/fixtures/*/.next,
+      # which the broad 'ts/**/*' entry below also hashes. Same reason as the app-shell entry below.
+      - '!ts/apps/*/tests/fixtures/*/.next/**'
       # SMA-510: the app-shell fixture's `next build` output sits under
       # ts/packages/*/tests/e2e/fixture/.next, which the broad 'ts/**/*' entry below also hashes.
       # MEASURED (SMA-510 plan, Task 10 Step 11; spec § 11.6): without this negation, a

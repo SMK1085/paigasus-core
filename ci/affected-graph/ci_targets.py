@@ -368,8 +368,11 @@ SELF_TASK_EXPECTED_GLOBS = {
     # SMA-510 added the second '!' entry, for the app-shell package's own `test-e2e` fixture build
     # under ts/packages/*/tests/e2e/fixture/.next (root moon.yml's `next-public-free` task records
     # the same measurement next to that entry).
+    # SMA-511 added the '!ts/apps/*/tests/fixtures/*/.next/**' entry, for the iam-console's
+    # client-boundary fixture builds, which run inside iam-console-ts:test.
     "next-public-free": (
         "!ts/apps/*/.next/**",
+        "!ts/apps/*/tests/fixtures/*/.next/**",
         "!ts/packages/*/tests/e2e/fixture/.next/**",
         "ci/next-public/**/*",
         "ts/**/*",
