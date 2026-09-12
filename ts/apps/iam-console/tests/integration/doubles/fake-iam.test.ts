@@ -68,6 +68,22 @@ describe('the fake IAM', () => {
     // a fake that stamps the detail from one that relies on the header (MEASURED).
     expect(errorInfoOf(raw)).toEqual({ reason: 'forbidden', domain: IAM_ERROR_DOMAIN, metadata: { retryable: 'false', correlation_id: SENT_ID } });
     expect(fake.callsTo('tenancy.getOrganization')[0]?.correlationId).toBe(SENT_ID);
+    // The RESPONSE HEADER, which IAM sends beside the detail. It is a SECOND assertion and not a
+    // duplicate: for an error carrying no ErrorInfo, the header is the only correlation source the
+    // SDK has (map-error.ts:142-158), so the next case depends on it arriving.
+    expect(raw.metadata.get('paigasus-correlation-id')).toBe(SENT_ID);
+  });
+
+  it('carries the minted id on an error with NO ErrorInfo, where only the header can supply it', async () => {
+    // No script and no built-in default, so `defaults()` throws a bare Unimplemented. `mapError`
+    // then takes its `correlationId` from `err.metadata` alone.
+    const tenancy = createIamClient(TenancyService, { baseUrl: fake.grpcUrl }, { bearer: 'token-f' });
+    const raw = await rejection(tenancy.createOrganization({ slug: 'acme', name: 'Acme' }));
+    expect(raw.code).toBe(Code.Unimplemented);
+    expect(errorInfoOf(raw)).toBeNull();
+    const error = mapError({ kind: 'grpc', error: raw });
+    expect(error.correlationId).toMatch(/^[0-9a-f-]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
+    expect(error.correlationId).toBe(raw.metadata.get('paigasus-correlation-id'));
   });
 
   it('mints a correlation id when the incoming one is not a UUID', async () => {

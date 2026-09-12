@@ -30,6 +30,13 @@
 //     `paigasus-request-id` response header (correlation.rs:174). The fake sets no `request_id`.
 //   - IAM's HTTP routes run the same correlation layer. The fake's HTTP route only records the
 //     incoming header; it adopts, mints and echoes no id.
+//   - IAM's authorization is Cedar default-DENY: a request allowed by no policy is denied. The
+//     fake's UNSCRIPTED `authz.isAuthorized` answers `{ allowed: true }` (see `defaults()`), so it
+//     default-ALLOWS. This is the divergence most likely to make a test lie, because every user
+//     action in the console calls IAM: a test that reads an unscripted allow as proof of an
+//     authorization decision proves nothing. A test about authorization must SCRIPT
+//     `authz.isAuthorized` — with `denial()` for the deny arm — rather than rely on this default,
+//     which exists only so that a test about something else need not script it.
 //
 // It imports NO `server-only` module. The Playwright e2e harness (a worker-scoped fixture) loads it
 // under plain Node, where `server-only` resolves to its throwing default export. That is why the
@@ -234,6 +241,8 @@ export async function startFakeIam(opts: { handlers?: FakeIamHandlers } = {}): P
     switch (method) {
       case 'serviceInfo.getServiceInfo':
         return { serviceInfo: { ...grpcDescriptor } };
+      // DEFAULT-ALLOW, where IAM's Cedar is default-DENY. See the divergence list in the header:
+      // a test about authorization must script this method rather than rely on this answer.
       case 'authz.isAuthorized':
         return { allowed: true, determiningPolicies: [], reason: '' };
       case 'authz.listRoleGrants':
