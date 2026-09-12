@@ -25,6 +25,10 @@ The image reads these variables at the first request. A parse failure stops ever
 | Discovery | `PAIGASUS_SERVICES` (JSON; it must contain `iam`, IAM's HTTP address), optional `PAIGASUS_DISCOVERY_*_MS`                                    |
 | IAM       | `PAIGASUS_IAM_GRPC_URL` (IAM's gRPC address: absolute `http:` or `https:`, no credentials, no query, no fragment)                            |
 
+This branch does not update `.env.local.example`: a session permission rule denied all access to
+`.env.*` paths, so this table and spec § 10 are the environment contract until someone with access
+syncs that file.
+
 Deployment assumptions (spec § 10):
 
 - IAM's `authn.issuers[].audiences` accepts the audience of the console client's access tokens.

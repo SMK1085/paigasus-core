@@ -950,6 +950,20 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   basePath. A unit test sees none of this without `new NextRequest(url, { nextConfig: { basePath:
   '/iam' } })`, and the plain-Node auth e2e harness passes full paths, so the iam-console e2e tier
   (`iam-console-ts:test-e2e`, row R2) is the only end-to-end control.
+- **Next gives a route handler and a page SEPARATE module graphs, so a module-level singleton is
+  per-layer** (MEASURED, SMA-511). `getAuthRuntime`'s module-level cache produced two memory
+  session stores, one per layer, and login looped forever: a page set a session in its store and
+  redirected, the route handler checked a different, empty store, and sent the user back to log in
+  again. The fix caches the runtime on `globalThis` under a `Symbol.for(...)` key instead, so both
+  layers share one instance. No unit test can catch this: each layer's code is correct in
+  isolation, and only a real Next build with both layers wired together — the iam-console e2e tier
+  — reproduces the split.
+- **`@paigasus/auth`'s `returnTo` loop guard is BYTE-EXACT.** It collapses dot segments and
+  repeated slashes before comparing a path to the auth route prefix, but it does not decode
+  percent-escapes or fold case: `/iam/%61uth/login` and `/iam/AUTH/login` are not refused. No loop
+  exists today, because the route table serves neither spelling (both 404 before the guard would
+  matter). This holds only as long as no proxy or router in front of the app decodes or case-folds
+  a path before routing on it.
 - **`@paigasus/kernel` cannot load its napi binding inside a Next build** (MEASURED 2026-09-11,
   SMA-634 open). `@paigasus/node-bindings` is a pnpm `file:` dependency whose `files` allowlist is
   `["index.js", "index.d.ts"]`, so pnpm never copies the `.node` binary into `node_modules`, and
@@ -984,6 +998,22 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   re-runs it only for a file in its `sources` or `tests` group (or one of its config inputs), so a
   new top-level app directory needs a line in `sources`, or an edit to it serves a cached lint PASS.
   The same holds for a top-level app file such as `playwright.config.ts`.
+- The root `.gitignore`'s bare `build/` rule (line 41) silently ignores ANY directory named
+  `build/` anywhere in the tree, not only a top-level one — `ts/apps/*/tests/build/` included. A
+  file already tracked there stays tracked, so the trap is invisible until someone adds a NEW file
+  under such a directory and it never gets committed. SMA-511 renamed its own directory to
+  `tests/build-guard/` to avoid it, rather than fighting the ignore rule.
+- `ci/actionlint/run.sh` check 12 requires a `<!-- moon-diagnosis:ok -->` (or `:superseded`) marker
+  on ANY file that names `ciReport.json`, unless the file is listed in `CIREPORT_MENTIONS_ALLOWED`.
+  This is broader than the `doc_diagnosis_self_test` entry above says: it is not only about this
+  file's own diagnosis procedure block. A new plan or spec that quotes the procedure, or otherwise
+  mentions `ciReport.json`, reds the gate until it carries the marker or is added to the allowlist.
+- LOCAL ONLY: `/bin/bash` 3.2.57 makes `ci/actionlint/run.sh` print two FALSE `cargo-lock-step`
+  self-test failures — run that gate with `/opt/homebrew/bin/bash` instead. The affected-graph
+  suite (`ci/affected-graph/run.sh`) is the opposite case: it needs system `/bin/bash` 3.2, because
+  bash 5.3.15 deadlocks on a `while read` fed by a here-string over roughly 512 bytes on this class
+  of machine. Keep both facts together: fixing one gate's bash version by copying the other's
+  breaks it.
 
 ## Workflow
 
