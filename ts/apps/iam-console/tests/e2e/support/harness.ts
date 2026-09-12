@@ -21,7 +21,14 @@ import { startTlsTerminator } from '../../support/tls-terminator';
 import { STANDALONE_APP_DIR } from './paths';
 import { DEFAULT_DESCRIPTOR, worldHandlers, type WorldOptions } from './world';
 
-const READY_TIMEOUT_MS = 60_000;
+// CI ONLY. PR #237's `moon ci` run showed the e2e tier flaking under CI's concurrent load (Rust
+// compiles plus four `test-e2e` tasks at once). This bound is not one of the three observed
+// failures, but the same loaded runner can just as well stretch out server start-up, so it is
+// raised here too, on the same reasoning: local keeps its tight 60 s bound, CI gets more room. The
+// worker fixture's own `timeout` below is widened to match, since it wraps up to
+// MAX_START_ATTEMPTS retries of this wait.
+const isCI = !!process.env.CI;
+const READY_TIMEOUT_MS = isCI ? 120_000 : 60_000;
 const PROBE_TIMEOUT_MS = 2_000;
 const STOP_TIMEOUT_MS = 5_000;
 const MAX_START_ATTEMPTS = 3;
@@ -216,7 +223,9 @@ export const test = base.extend<{ world: undefined }, { harness: Harness }>({
         await close();
       }
     },
-    { scope: 'worker', timeout: 180_000 },
+    // CI ONLY: MAX_START_ATTEMPTS (3) * READY_TIMEOUT_MS, plus room for the fakes and the
+    // terminator, so a widened READY_TIMEOUT_MS on a loaded runner cannot outrun this wrapper.
+    { scope: 'worker', timeout: isCI ? 420_000 : 180_000 },
   ],
   // Before EVERY test: the default world and the default descriptor. A test that needs another
   // world calls harness.useWorld(...) itself, after this reset.
