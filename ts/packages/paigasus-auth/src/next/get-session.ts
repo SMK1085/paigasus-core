@@ -91,10 +91,10 @@ export interface RequireSessionOptions {
 }
 
 /**
- * Read the current session, redirecting to this zone's login path when there is none. Safe to
- * call from a server component or a Server Action: `redirect()` is the one recovery a server
- * component may perform, and it is what turns a stale `__Host-pgs_sid` cookie into a working
- * "sign in again" prompt instead of a permanently blank page.
+ * Read the current session, redirecting to this zone's login path when there is none. Safe to call
+ * from a SERVER COMPONENT — a page or a layout: `redirect()` is the one recovery a server component
+ * may perform, and it is what turns a stale `__Host-pgs_sid` cookie into a working "sign in again"
+ * prompt instead of a permanently blank page.
  *
  * THE REDIRECT TARGET IS BASEPATH-RELATIVE (SMA-511 spec § 7.1). Next's redirect() adds the
  * basePath itself, with no duplicate check: `redirect('/auth/login?…')` gives `Location:
@@ -102,6 +102,17 @@ export interface RequireSessionOptions {
  * § 13 row 1). `returnTo` keeps the basePath, because the callback sends it back as a raw Location
  * header from a route handler, which Next passes through unchanged. Do not call this from a route
  * handler; a route handler returns its own redirect Response.
+ *
+ * NOT SAFE FROM A SERVER ACTION UNDER A BASEPATH. An action takes a different path through Next,
+ * and that path adds NO basePath: `next/dist/server/app-render/action-handler.js:261` writes the
+ * RAW url into the `x-action-redirect` header, and `:906` writes the RAW url into `Location` for a
+ * no-JS post. Only the internal RSC pre-fetch at `:267` prefixes the basePath. The browser resolves
+ * the raw value against the current URL and hard-navigates
+ * (`server-action-reducer.js:134`, `:274-279`), so `/auth/login?…` sends the user to
+ * `https://<host>/auth/login`, OUTSIDE the zone, where no login route exists. An action must call
+ * `getSession()` and report the missing session as DATA instead — `@paigasus/auth` cannot do that
+ * for the caller, because only the caller knows its own result shape. The IAM console's
+ * `lib/iam.ts` `iamClientsForAction()` is the worked example.
  */
 export async function requireSession(runtime: AuthRuntime, options: RequireSessionOptions = {}): Promise<ResolvedSession> {
   const session = await getSession(runtime);

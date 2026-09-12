@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// Spec § 9.4 has twelve rows. Each must have exactly one Playwright test whose title starts with
+// Spec § 9.4 has thirteen rows. Each must have exactly one Playwright test whose title starts with
 // its row id. A deleted or renamed scenario then fails this vitest suite, which runs in
 // iam-console-ts:test on every PR that touches the app, even when the e2e task does not run.
 import { readFileSync, readdirSync } from 'node:fs';
@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
 const E2E_DIR = fileURLToPath(new URL('../e2e', import.meta.url));
-const ROWS = Array.from({ length: 12 }, (_, index) => `R${String(index + 1)}`);
+const ROWS = Array.from({ length: 13 }, (_, index) => `R${String(index + 1)}`);
 
 describe('the e2e tier covers every row of spec § 9.4', () => {
   const titles = readdirSync(E2E_DIR)

@@ -38,3 +38,27 @@ export function invalidFormInput(): PaigasusError {
     transport: { kind: 'http', status: 400 },
   };
 }
+
+/**
+ * The session ended before the user submitted the form. Like `invalidFormInput`, this error never
+ * reached IAM, so it carries no IAM data.
+ *
+ * `presentation: 'relogin'` makes `FormError` render the `SignInAgain` LINK (spec § 6.4: relogin is
+ * a link, never an automatic redirect). That link is what keeps the browser inside the zone — see
+ * `lib/iam.ts`'s `iamClientsForAction` for why a Server Action must not redirect here.
+ */
+export function sessionExpired(): PaigasusError {
+  return {
+    presentation: 'relogin',
+    domain: null,
+    reason: null,
+    rawReason: null,
+    rawDomain: null,
+    message: 'The session has ended.',
+    correlationId: null,
+    requestId: null,
+    retryable: false,
+    metadata: {},
+    transport: { kind: 'http', status: 401 },
+  };
+}

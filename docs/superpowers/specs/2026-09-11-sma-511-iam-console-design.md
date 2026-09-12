@@ -162,7 +162,7 @@ ts/apps/iam-console/
   page that renders `Table`, because `@source` scans the package source.
 - The `(console)` route group holds every page that needs a session. Its layout calls
   `requireSession()`. **This does not guard Server Actions**: each action gets its token through
-  `iamClient()`, which calls `requireSession()` itself (§ 5.3).
+  `iamClientsForAction()`, which reads the session itself (§ 5.3).
 - `(public)/page.tsx` checks only that the session cookie exists, and does not resolve the
   session. So it needs no IdP, and a stale cookie reaches `requireSession()` in the console layout,
   which handles it. `@paigasus/auth` redirects `idp_error` and the default post-logout URI to
@@ -387,13 +387,21 @@ A URL segment that is not a UUID renders `notFound()`.
 
 - Each form is a small client component with `useActionState`. It calls a Server Action in the
   route folder's `actions.ts`.
-- The action shell gets its client through `iamClient()` (so `requireSession()` runs for every
-  action), validates the input with zod, and calls a command function with the client as a port.
-  On success it calls `revalidatePath` for the page.
+- The action shell gets its client through `iamClientsForAction()` (so a session read runs for
+  every action), validates the input with zod, and calls a command function with the client as a
+  port. On success it calls `revalidatePath` for the page.
+- **An action never redirects for a missing session.** `requireSession()` redirects
+  basePath-RELATIVE, which is right for a page render only: Next's action handler writes the RAW
+  url into `x-action-redirect` and into `Location`
+  (`next/dist/server/app-render/action-handler.js:261`, `:906`), so the browser would leave the
+  `/iam` zone. `iamClientsForAction()` returns an `ActionState` failure with
+  `presentation: 'relogin'` instead, and the form renders the "Sign in again" link of § 6.4. The
+  action returns before its `revalidatePath` call, so Next skips the post-action page render
+  (`action-handler.js:990`) and the `(console)` layout cannot redirect either.
 - The action returns `{ ok: true } | { ok: false, error: PaigasusError }`. `PaigasusError` is a
   plain object, so it crosses the Flight boundary (`ts/packages/paigasus-sdk/src/errors/types.ts:39-44`).
 - A structure test asserts that every exported function in every `actions.ts` obtains its client
-  through `iamClient()`.
+  through `iamClientsForAction()`, and that no `actions.ts` names the redirecting `iamClients()`.
 - Server Actions keep Next's built-in origin check. § 10 states what the ingress must forward for
   that check to pass.
 
@@ -734,6 +742,7 @@ E488, `forbidden.js:26`), aliases `server-only` to a stub as the other packages 
 | IAM degraded → the entries are disabled with a reason, and `/iam/audit` shows the degraded view | 4 |
 | No response body (HTML, RSC payload or action result) contains the fake access token or refresh token | ADR-0017 |
 | Sign out → POST `/iam/auth/logout` → `/iam/orgs` redirects to login again | 1 |
+| A Server Action whose session ended (the cookie names no record) → the form shows the "Sign in again" link and the browser stays inside `/iam` | 1 |
 
 ### 9.5 AC 3
 
