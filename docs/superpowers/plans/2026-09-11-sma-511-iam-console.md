@@ -14830,6 +14830,8 @@ moon ci :build :test :lint :fmt :deny :osv :machete :actionlint :typecheck :brea
 ```
 Expected: exit 0. Docker must run (`paigasus-auth-ts:test-e2e` and the `paigasus-iam-rs` suites need it).
 If a task fails, follow CLAUDE.md "Diagnosing an unattributed `moon ci` failure" BEFORE any re-run: copy `.moon/cache/ciReport.json` and `.moon/cache/states/<project>/<task>/` out of the repo first, because a re-run overwrites them.
+<!-- moon-diagnosis:ok -->
+(The marker above satisfies `ci/actionlint/run.sh` check 12: this file points at CLAUDE.md's procedure rather than restating it, so it cannot go stale against that procedure.)
 Two known local traps. (1) The stop rule of Step 7: if `repo:actionlint` or `repo:affected-smoke` runs for more than 10 minutes, it is the bash 5.3.15 here-string deadlock, not a gate failure. Stop the run, run that gate's script with `/bin/bash` (`ci/actionlint/run.sh`, or `ci/affected-graph/run.sh --negative-control` and then `ci/affected-graph/run.sh`), and record the hang and that result. (2) A wall of "expected rc 0" self-test failures across unrelated gates means `/bin/bash` 3.2 ran a gate that needs bash 4+; check `which -a bash` before you read it as a finding. A Docker-backed suite that fails only under this parallel load: run the same suite on unmodified `origin/main` before you blame this branch.
 
 ### Task 24: Documentation — CLAUDE.md, `ts/README.md`, the app README, and the PR-ready checklist
