@@ -81,9 +81,9 @@ async function healthzWith(zones: Record<string, string>, waitForOutput?: string
       if (Date.now() > deadline) throw withOutput('standalone server did not become ready within 60s');
       let res: Response | undefined;
       try {
-        res = await fetch(`http://127.0.0.1:${String(port)}/iam/healthz`);
+        res = await fetch(`http://127.0.0.1:${String(port)}/iam/healthz`, { signal: AbortSignal.timeout(5_000) });
       } catch {
-        // not listening yet
+        // not listening yet, or this attempt hung and timed out
       }
       if (res !== undefined) {
         const answer = { status: res.status, body: await res.text() };

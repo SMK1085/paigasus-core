@@ -25,9 +25,9 @@ The image reads these variables at the first request. A parse failure stops ever
 | Discovery | `PAIGASUS_SERVICES` (JSON; it must contain `iam`, IAM's HTTP address), optional `PAIGASUS_DISCOVERY_*_MS`                                    |
 | IAM       | `PAIGASUS_IAM_GRPC_URL` (IAM's gRPC address: absolute `http:` or `https:`, no credentials, no query, no fragment)                            |
 
-This branch does not update `.env.local.example`: a session permission rule denied all access to
-`.env.*` paths, so this table and spec § 10 are the environment contract until someone with access
-syncs that file.
+`.env.local.example` still carries the pre-rename variable set. This branch could not update it: a
+session permission rule denied access to `.env.*` paths. The table below, plus spec § 10, are the
+contract until someone syncs that file.
 
 Deployment assumptions (spec § 10):
 
@@ -50,7 +50,7 @@ No tier needs Docker or a live service.
 ## Test tiers
 
 - **Unit and integration** (`tests/unit`, `tests/integration`, vitest). The integration tests talk real gRPC to an in-process fake IAM (`tests/support/fake-iam.ts`), and MSW serves `GET /v1/service-info`. Loaders (`load.ts`) take their IAM client and `mayI` as arguments, and commands (`commands.ts`) take their IAM client only, so the tests call them with no session and no Next runtime.
-- **Client boundary** (`tests/build/client-boundary.test.ts`). `next build` on `tests/fixtures/client-imports-sdk` must fail with the `server-only` error; the same code in a server component (`tests/fixtures/server-imports-sdk`) must build.
+- **Client boundary** (`tests/build-guard/client-boundary.test.ts`). `next build` on `tests/fixtures/client-imports-sdk` must fail with the `server-only` error; the same code in a server component (`tests/fixtures/server-imports-sdk`) must build.
 - **Browser** (`tests/e2e`, Playwright). A production build runs through the standalone server behind an in-process TLS terminator, with the fake IAM and a fake HTTPS IdP. The session store is `memory`, so the zone map holds one zone. Each row of the spec's § 9.4 table is one test (`R1`–`R12`); `tests/unit/e2e-rows.test.ts` holds that.
 
 ## Known limits

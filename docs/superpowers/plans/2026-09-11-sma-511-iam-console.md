@@ -13689,6 +13689,7 @@ EOF
 - Test: `ts/apps/iam-console/tests/e2e/forbidden.spec.ts` (rows R4, R5, R6, R7)
 - Test: `ts/apps/iam-console/tests/e2e/capabilities.spec.ts` (rows R8, R9, R10)
 - Test: `ts/apps/iam-console/tests/e2e/token-leak.spec.ts` (row R11)
+- Test: `ts/apps/iam-console/tests/e2e/session-expiry.spec.ts` (row R13, added by the final fix wave)
 - Test: `ts/apps/iam-console/tests/unit/e2e-rows.test.ts`
 
 **Interfaces:**
@@ -13711,6 +13712,7 @@ The rows, as spec § 9.4 numbers them (each test title starts with its row id; `
 | R10 | IAM degraded → the entries are disabled with a reason, and `/iam/audit` shows the degraded view | 4 |
 | R11 | No response body (HTML, RSC payload or action result) contains the fake access token or refresh token | ADR-0017 |
 | R12 | Sign out → POST `/iam/auth/logout` → `/iam/orgs` redirects to login again | 1 |
+| R13 | A Server Action whose session ended shows the relogin link and keeps the browser inside `/iam` | 1 |
 
 These specs test code that Tasks 10–19 already built, so most of them pass at once. A failure here is a defect in the app, not in the spec: fix the app. Change a spec only when this plan names a selector that the app renders in another way (Step 1 lists those).
 

@@ -42,12 +42,23 @@ export type AuditRow = {
 
 export type AuditPageData = IamResult<{ readonly rows: readonly AuditRow[]; readonly cursor: string; readonly nextCursor: string | null }>;
 
+/**
+ * `occurredAt.seconds` is a protobuf int64 and can hold a value outside the ECMAScript Date range
+ * (±8,640,000,000,000 ms from the epoch). `Date#toISOString()` throws on an out-of-range Date, so
+ * validate first and return null rather than crash the page on a malformed IAM timestamp.
+ */
+function occurredAtIso(occurredAt: { readonly seconds: bigint; readonly nanos: number } | undefined): string | null {
+  if (occurredAt === undefined) return null;
+  const date = new Date(Number(occurredAt.seconds) * 1000 + Math.floor(occurredAt.nanos / 1_000_000));
+  return Number.isNaN(date.getTime()) ? null : date.toISOString();
+}
+
 export async function loadAuditPage(deps: { readonly audit: Pick<IamClients['audit'], 'listAuditEntries'> }, params: { readonly cursor: string }): Promise<AuditPageData> {
   const result = await callIam(() => deps.audit.listAuditEntries({ cursor: params.cursor, limit: AUDIT_PAGE_SIZE }));
   if (!result.ok) return result;
   const rows = result.value.entries.map((entry): AuditRow => ({
     id: entry.id,
-    occurredAt: entry.occurredAt === undefined ? null : new Date(Number(entry.occurredAt.seconds) * 1000 + Math.floor(entry.occurredAt.nanos / 1_000_000)).toISOString(),
+    occurredAt: occurredAtIso(entry.occurredAt),
     actorPrn: entry.actorPrn,
     action: entry.action,
     resourcePrn: entry.resourcePrn,

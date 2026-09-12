@@ -4,7 +4,7 @@
 // exercises the SDK's transport and error map, not a hand-built object.
 import { AuditService, AuthorizationService, TenancyService, createIamClient } from '@paigasus/sdk/iam';
 import type { IamAction, MayI } from '../../lib/authorize';
-import type { FakeIam, FakeIamCall } from '../support/fake-iam';
+import type { FakeIam, FakeIamCall, FakeIamMethod } from '../support/fake-iam';
 
 /** Fixed UUIDs. `a` sorts before `b`, so orgA's scopes come first in every list. */
 export const IDS = {
@@ -42,7 +42,7 @@ export function scriptedMayI(allowed: Partial<Record<IamAction, boolean>>): Scri
 }
 
 /** The calls the fake saw from now on, by method. The fake's log is shared by every test in a file. */
-export function callsSince(iam: FakeIam): (method: string) => FakeIamCall[] {
+export function callsSince(iam: FakeIam): (method: FakeIamMethod | 'http.getServiceInfo') => FakeIamCall[] {
   const start = iam.calls.length;
   return (method) => iam.calls.slice(start).filter((call) => call.method === method);
 }

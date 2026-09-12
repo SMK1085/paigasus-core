@@ -58,8 +58,18 @@ async function stop(child: ChildProcess): Promise<void> {
   if (child.exitCode !== null || child.signalCode !== null) return;
   const exited = once(child, 'exit').then(() => 'exited' as const);
   child.kill('SIGTERM');
-  const timeout = new Promise<'timeout'>((resolve) => setTimeout(() => resolve('timeout'), STOP_TIMEOUT_MS));
-  if ((await Promise.race([exited, timeout])) === 'timeout') child.kill('SIGKILL');
+  let timeoutHandle: NodeJS.Timeout | undefined;
+  const timeout = new Promise<'timeout'>((resolve) => {
+    timeoutHandle = setTimeout(() => resolve('timeout'), STOP_TIMEOUT_MS);
+  });
+  try {
+    if ((await Promise.race([exited, timeout])) === 'timeout') {
+      child.kill('SIGKILL');
+      await exited;
+    }
+  } finally {
+    clearTimeout(timeoutHandle);
+  }
 }
 
 /** 'ready', or 'exited' when the process died first (a port race: the caller retries). */

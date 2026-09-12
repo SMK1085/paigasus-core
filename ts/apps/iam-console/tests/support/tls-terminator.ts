@@ -12,7 +12,7 @@ import type { AddressInfo } from 'node:net';
 import type { TlsMaterial } from './tls';
 
 /** Hop-by-hop headers (RFC 9110 § 7.6.1). A proxy must not forward them. */
-const HOP_BY_HOP = new Set(['connection', 'keep-alive', 'proxy-connection', 'te', 'trailer', 'upgrade']);
+const HOP_BY_HOP = new Set(['connection', 'keep-alive', 'proxy-connection', 'te', 'trailer', 'transfer-encoding', 'upgrade']);
 
 function forwardable(headers: IncomingHttpHeaders): IncomingHttpHeaders {
   const out: IncomingHttpHeaders = {};
@@ -41,9 +41,14 @@ export async function startTlsTerminator(opts: { target: string; tls: TlsMateria
       },
     );
     upstream.on('error', () => {
-      if (!res.headersSent) res.writeHead(502, { 'content-type': 'text/plain' });
+      if (res.headersSent) return;
+      res.writeHead(502, { 'content-type': 'text/plain' });
       res.end('tls-terminator: the upstream did not answer');
     });
+    // The downstream (browser-facing) response closed before the upstream finished, or after it did
+    // — either way the upstream request has nothing left to do. Destroying it is a no-op once the
+    // upstream has already completed normally.
+    res.on('close', () => upstream.destroy());
     req.pipe(upstream);
   }
 

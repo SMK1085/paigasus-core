@@ -69,6 +69,17 @@ describe('loadAuditPage', () => {
     expect(data.value.rows[0]?.occurredAt).toBeNull();
   });
 
+  it('reads a seconds value outside the ECMAScript Date range as null, not a thrown error', async () => {
+    // 1e15 seconds is far past Date's +/-8,640,000,000,000 ms ceiling; `new Date(...).toISOString()`
+    // throws RangeError on a value like this if it is not validated first.
+    iam.setHandlers({ 'audit.listAuditEntries': () => ({ entries: [{ ...entry, occurredAt: { seconds: 1_000_000_000_000_000n, nanos: 0 } }], nextCursor: '' }) });
+
+    const data = await loadAuditPage({ audit: clientsFor(iam).audit }, { cursor: '' });
+
+    if (!data.ok) throw new Error('expected entries');
+    expect(data.value.rows[0]?.occurredAt).toBeNull();
+  });
+
   it('returns a denial as a page error with the correlation id', async () => {
     iam.setHandlers({
       'audit.listAuditEntries': () => {

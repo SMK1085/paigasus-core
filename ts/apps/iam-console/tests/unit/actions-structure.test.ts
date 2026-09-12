@@ -65,6 +65,10 @@ function exportedValues(source: ts.SourceFile): Exported[] {
   return out;
 }
 
+/**
+ * Walks the action's OWN body only. A call inside a nested, uninvoked function scope (a helper
+ * declared but never called) must NOT count — see the negative control below.
+ */
 function callsActionClients(node: ts.Node): boolean {
   let found = false;
   const visit = (child: ts.Node): void => {
@@ -73,6 +77,7 @@ function callsActionClients(node: ts.Node): boolean {
       found = true;
       return;
     }
+    if (ts.isFunctionLike(child)) return; // stop at a nested function scope; do not descend into it
     ts.forEachChild(child, visit);
   };
   visit(node);
@@ -134,6 +139,8 @@ describe('every Server Action gets its client through iamClientsForAction() (spe
     it.each([
       ['a function without the call', `${header}export async function a() { return 1; }`, 'does not call iamClientsForAction()'],
       ['an arrow without the call', `${header}export const a = async () => 1;`, 'does not call iamClientsForAction()'],
+      // The only call sits inside a nested, uninvoked function scope. The walk must not descend into it.
+      ['a call hidden in an uninvoked nested function', `${header}export async function a() { function unused() { iamClientsForAction(); } return 1; }`, 'does not call iamClientsForAction()'],
       ['a re-export', `${header}export { a } from './other';`, 'is not a function whose body this test can read'],
       ['a default export of a value', `${header}export default iamClientsForAction;`, 'is not a function whose body this test can read'],
       ['a missing directive', 'export async function a() { await iamClientsForAction(); }', "the first statement is not 'use server'"],
