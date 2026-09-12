@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { createAuthRuntime, getAuthRuntime } from '../src/runtime.js';
 import { AuthConfigError } from '../src/core/errors.js';
 
@@ -106,7 +106,18 @@ describe('createAuthRuntime', () => {
   });
 });
 
+// The cache lives on globalThis (runtime.ts), so `vi.resetModules()` alone no longer clears it.
+// The key comes from the GLOBAL symbol registry, the same way runtime.ts creates it, so this test
+// file needs no export of its own from the source.
+const RUNTIME_KEY: unique symbol = Symbol.for('paigasus.auth.runtime');
+
+function clearSharedRuntime(): void {
+  delete (globalThis as typeof globalThis & { [RUNTIME_KEY]?: unknown })[RUNTIME_KEY];
+}
+
 describe('getAuthRuntime', () => {
+  beforeEach(clearSharedRuntime);
+
   // "One runtime per process": the promise is cached after the first successful call and every
   // later call's arguments are ignored — proven here by passing a config on the SECOND call that
   // would throw if it were actually re-validated (an unknown zone), and observing no throw and
@@ -116,21 +127,42 @@ describe('getAuthRuntime', () => {
     const rt2 = await getAuthRuntime({ ...BASE, PAIGASUS_ZONE: 'ghost' });
     expect(rt2).toBe(rt1);
   });
+
+  // SMA-511 Task 22. Next compiles a route handler and a server component into separate module
+  // graphs, so ONE process holds two copies of runtime.ts. Two copies that each keep their own
+  // runtime also keep their own memory session store, and the login loops forever: the callback
+  // route writes the session and the page finds none.
+  //
+  // `vi.resetModules()` between the two imports gives a SECOND module instance — the closest a
+  // test in one process can come to Next's two layers. The two instances must still answer with
+  // ONE runtime. Move the cache back to a module-level variable and this test reds, while every
+  // other test in this file stays green (MEASURED).
+  it('shares one runtime between two module instances, as two Next layers get', async () => {
+    vi.resetModules();
+    const first = await import('../src/runtime.js');
+    vi.resetModules();
+    const second = await import('../src/runtime.js');
+    expect(second).not.toBe(first);
+
+    expect(await second.getAuthRuntime(BASE)).toBe(await first.getAuthRuntime(BASE));
+  });
 });
 
 // SMA-626 § 5, guard 3. getAuthRuntime's doc comment claims a misconfigured-at-boot process can
 // recover once its config is fixed, and only the SUCCESS path was exercised — delete
 // `sharedRuntime = undefined` from the catch and every existing test still passed.
 //
-// THE VACUOUS MODE THIS AVOIDS: vi.resetModules() runs exactly ONCE, before BOTH imports, so both
-// calls reach the same fresh module instance. Resetting between them would give the second call a
-// module whose sharedRuntime is already undefined, and the test would pass with the reset deleted.
+// THE VACUOUS MODE THIS AVOIDS: the cache is cleared exactly ONCE, before BOTH calls, so both
+// calls reach the same cache entry. Clearing it between them would give the second call an empty
+// cache anyway, and the test would pass with the reset in the catch deleted.
 //
-// MEASURED 2026-09-10: commenting out `sharedRuntime = undefined` in runtime.ts's catch reds
-// both tests here and leaves every other test in this file green.
+// MEASURED 2026-09-10: commenting out the cache reset in runtime.ts's catch reds both tests here
+// and leaves every other test in this file green. SMA-511 Task 22 moved that cache from a
+// module-level variable to globalThis, so each test now clears the global slot rather than calling
+// vi.resetModules(), which no longer reaches it.
 describe('getAuthRuntime failure reset (SMA-626 § 5, guard 3)', () => {
   it('lets a later call succeed after the first one rejected', async () => {
-    vi.resetModules(); // ONCE — see the block comment above.
+    clearSharedRuntime(); // ONCE — see the block comment above.
     const mod = await import('../src/runtime.js');
 
     await expect(mod.getAuthRuntime({ ...BASE, PAIGASUS_ZONE: 'ghost' })).rejects.toMatchObject({
@@ -143,7 +175,7 @@ describe('getAuthRuntime failure reset (SMA-626 § 5, guard 3)', () => {
   });
 
   it('caches the recovered runtime, so the reset does not disable memoisation', async () => {
-    vi.resetModules();
+    clearSharedRuntime();
     const mod = await import('../src/runtime.js');
 
     await expect(mod.getAuthRuntime({ ...BASE, PAIGASUS_ZONE: 'ghost' })).rejects.toThrow();

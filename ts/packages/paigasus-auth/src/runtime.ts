@@ -27,8 +27,9 @@
 // expect independent validation each time. A real app must NOT call it per request: doing so
 // would re-run `openid-client` discovery and open a new Redis connection on every request, never
 // closing the old one. `getAuthRuntime` below is the process-wide singleton every other caller
-// (task 8's routes, the Next binding) uses instead — it memoises the FIRST successful call behind
-// a module-level promise, keyed on nothing (there is exactly one configuration per process), and
+// (task 8's routes, the Next binding) uses instead — it memoises the FIRST successful call on
+// `globalThis` (see the comment on RUNTIME_KEY: Next gives a route handler and a page separate
+// copies of this module), keyed on nothing (there is exactly one configuration per process), and
 // resets on failure so a misconfigured-at-boot process can recover once the config is fixed and
 // the container is asked to try again.
 import { createOidcClient, type OidcClient } from './adapters/oidc';
@@ -167,7 +168,27 @@ export async function createAuthRuntime(cfg: ComposedConfig, deps: CreateAuthRun
   };
 }
 
-let sharedRuntime: Promise<AuthRuntime> | undefined;
+/**
+ * The cache lives on `globalThis`, NOT in a module-level variable, and that placement is
+ * load-bearing (SMA-511 Task 22).
+ *
+ * MEASURED on Next 16.3.4 with Turbopack, on this repository's own standalone build: a route
+ * handler and a server component get SEPARATE module graphs.
+ * `.next/server/app/auth/[...auth]/route.js` loads `chunks/[turbopack]_runtime.js`, and
+ * `.next/server/app/(console)/orgs/page.js` loads `chunks/ssr/[turbopack]_runtime.js` — two
+ * registries, each with its own copy of this module. A module-level variable therefore gives each
+ * layer its OWN runtime, and with the memory store each layer also gets its own session records:
+ * `/iam/auth/callback` writes the session, the page that follows it finds none, and the browser
+ * loops between the console and the identity provider until it stops (measured:
+ * `net::ERR_TOO_MANY_REDIRECTS`). Redis hides the fault, because the records are outside the
+ * process; the memory adapter — which this package documents as single-PROCESS — does not.
+ *
+ * `Symbol.for` keys the slot in the global symbol registry, so every copy of this module resolves
+ * the same key with no export to import.
+ */
+const RUNTIME_KEY: unique symbol = Symbol.for('paigasus.auth.runtime');
+
+type RuntimeHolder = { [RUNTIME_KEY]?: Promise<AuthRuntime> };
 
 /**
  * The process-wide singleton. Every real caller — task 8's routes, the Next binding — uses this,
@@ -183,9 +204,14 @@ let sharedRuntime: Promise<AuthRuntime> | undefined;
  * tests (tests/runtime.test.ts) rely on that to validate many independent configurations.
  */
 export function getAuthRuntime(cfg: ComposedConfig, deps?: CreateAuthRuntimeDeps): Promise<AuthRuntime> {
-  sharedRuntime ??= createAuthRuntime(cfg, deps).catch((err: unknown) => {
-    sharedRuntime = undefined;
-    throw err;
-  });
-  return sharedRuntime;
+  const holder = globalThis as typeof globalThis & RuntimeHolder;
+  let shared = holder[RUNTIME_KEY];
+  if (shared === undefined) {
+    shared = createAuthRuntime(cfg, deps).catch((err: unknown) => {
+      delete holder[RUNTIME_KEY];
+      throw err;
+    });
+    holder[RUNTIME_KEY] = shared;
+  }
+  return shared;
 }
