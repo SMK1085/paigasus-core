@@ -29,6 +29,8 @@ fileGroups:
     - 'app/**/*'
     # SMA-511: the composition root. Without this, an edit in lib/ serves a cached build and test.
     - 'lib/**/*'
+    # SMA-511: the zone's proxy (spec § 8). Without it an edit to proxy.ts serves a cached build.
+    - 'proxy.ts'
 
 tasks:
   build:
@@ -101,6 +103,8 @@ tasks:
       - '/ts/packages/paigasus-discovery/package.json'
       - '/ts/packages/paigasus-proto/src/**/*'
       - '/ts/packages/paigasus-proto/package.json'
+      - '/ts/packages/paigasus-app-shell/src/**/*'
+      - '/ts/packages/paigasus-app-shell/package.json'
     outputs:
       # SMA-502 AC4 — the cache archive must not carry .next/cache, which grows without bound.
       - '.next/**/*'
@@ -125,6 +129,8 @@ tasks:
       - '/ts/packages/paigasus-discovery/package.json'
       - '/ts/packages/paigasus-proto/src/**/*'
       - '/ts/packages/paigasus-proto/package.json'
+      - '/ts/packages/paigasus-app-shell/src/**/*'
+      - '/ts/packages/paigasus-app-shell/package.json'
 
   test:
     # Two jobs in one task. SMA-502's vitest suite boots the BUILT standalone server, and
@@ -175,6 +181,8 @@ tasks:
       - '/ts/packages/paigasus-discovery/package.json'
       - '/ts/packages/paigasus-proto/src/**/*'
       - '/ts/packages/paigasus-proto/package.json'
+      - '/ts/packages/paigasus-app-shell/src/**/*'
+      - '/ts/packages/paigasus-app-shell/package.json'
       # SMA-511 D6: tests/unit/prn.test.ts replays the kernel parity corpus and pins ROOT_PRN to
       # root_prn()'s builder call. Without these, a corpus or model.rs edit serves a cached PASS.
       - '/rs/crates/libs/paigasus-kernel-parity/vectors/**/*'

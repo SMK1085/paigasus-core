@@ -1,18 +1,29 @@
 // SPDX-License-Identifier: Apache-2.0
 'use client';
 
-import NextLink from 'next/link';
-import type { ReactElement, ReactNode } from 'react';
+import { useEffect, type ReactElement, type ReactNode } from 'react';
+import { SessionProvider, type SessionView } from '@paigasus/auth/client';
+import { ZoneLink, ZoneProvider, type ZoneMap } from '@paigasus/app-shell';
 import { LinkProvider } from '@paigasus/ui';
 
 /*
- * The injection point for ADR-0021 decision 3: @paigasus/ui never imports next/*.
+ * The client-side context for every page: the zone map, the session view (console pages only), and
+ * the Link implementation @paigasus/ui renders (ADR-0021 decision 3).
  *
- * This is a client boundary because LinkProvider uses React context, and next/link cannot be
- * passed as a prop from the server layout to a client component (a function is not
- * serializable across that boundary). Isolating it here, rather than putting 'use client' on
- * the root layout, keeps the rest of the app's tree eligible for server rendering.
+ * A client boundary because ZoneLink is a function and cannot cross from a server layout as a prop.
+ * `session` is `toSessionView()` output — never a token (ADR-0017). It is null on the public page,
+ * which renders PublicShell and needs no SessionProvider.
  */
-export function Providers({ children }: { children: ReactNode }): ReactElement {
-  return <LinkProvider link={NextLink}>{children}</LinkProvider>;
+export function Providers({ zone, zones, session, children }: { zone: string; zones: ZoneMap; session: SessionView | null; children: ReactNode }): ReactElement {
+  useEffect(() => {
+    // The hydration signal the e2e tier waits for before a click (the @paigasus/app-shell fixture's
+    // pattern): a click before hydration is a document navigation for every link.
+    document.documentElement.dataset['hydrated'] = 'true';
+  }, []);
+  const linked = <LinkProvider link={ZoneLink}>{children}</LinkProvider>;
+  return (
+    <ZoneProvider zone={zone} zones={zones}>
+      {session === null ? linked : <SessionProvider value={session}>{linked}</SessionProvider>}
+    </ZoneProvider>
+  );
 }
