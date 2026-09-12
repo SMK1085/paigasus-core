@@ -17,7 +17,8 @@ import { describe, expect, it } from 'vitest';
 const APP_DIR = fileURLToPath(new URL('../../app', import.meta.url));
 
 const EXPECTED: Readonly<Record<string, readonly string[]>> = {
-  '(console)/orgs/actions.ts': ['createOrganizationAction'],
+  '(console)/orgs/actions.ts': ['attachMembershipAction', 'createOrganizationAction', 'detachMembershipAction'],
+  '(console)/orgs/[org]/actions.ts': ['createTeamAction'],
 };
 
 function findActionFiles(dir: string, prefix = ''): string[] {

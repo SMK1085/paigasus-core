@@ -9,7 +9,7 @@ import { revalidatePath } from 'next/cache';
 import type { ActionState } from '../../../lib/errors';
 import { formFields, invalidFormInput } from '../../../lib/form';
 import { iamClients } from '../../../lib/iam';
-import { createOrganization, createOrganizationForm } from './commands';
+import { attachMembership, attachMembershipForm, createOrganization, createOrganizationForm, detachMembership, detachMembershipForm } from './commands';
 
 /**
  * basePath-relative. Route groups such as (console) are not part of the URL path, so '/orgs' with
@@ -22,6 +22,24 @@ export async function createOrganizationAction(_previous: ActionState, form: For
   const parsed = createOrganizationForm.safeParse(formFields(form, ['slug', 'name']));
   if (!parsed.success) return { ok: false, error: invalidFormInput() };
   const result = await createOrganization({ tenancy: clients.tenancy }, parsed.data);
+  if (result.ok) revalidatePath(TENANCY_PATH, 'layout');
+  return result;
+}
+
+export async function attachMembershipAction(_previous: ActionState, form: FormData): Promise<ActionState> {
+  const clients = await iamClients();
+  const parsed = attachMembershipForm.safeParse(formFields(form, ['principalPrn', 'nodePrn']));
+  if (!parsed.success) return { ok: false, error: invalidFormInput() };
+  const result = await attachMembership({ tenancy: clients.tenancy }, parsed.data);
+  if (result.ok) revalidatePath(TENANCY_PATH, 'layout');
+  return result;
+}
+
+export async function detachMembershipAction(_previous: ActionState, form: FormData): Promise<ActionState> {
+  const clients = await iamClients();
+  const parsed = detachMembershipForm.safeParse(formFields(form, ['id']));
+  if (!parsed.success) return { ok: false, error: invalidFormInput() };
+  const result = await detachMembership({ tenancy: clients.tenancy }, parsed.data);
   if (result.ok) revalidatePath(TENANCY_PATH, 'layout');
   return result;
 }
