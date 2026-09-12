@@ -22,6 +22,14 @@
  */
 @source '../../../packages/paigasus-ui/src';
 
+/*
+ * LOAD-BEARING for the same reason (SMA-511 spec § 7.6): the shell's classes live in
+ * @paigasus/app-shell, which pnpm also resolves through node_modules. Sentinel C in
+ * ci/tailwind-source/run.mjs proves this line; the literal is not written here, because this file
+ * is itself a Tailwind scan root.
+ */
+@source '../../../packages/paigasus-app-shell/src';
+
 body {
   background-color: var(--color-background);
   color: var(--color-foreground);

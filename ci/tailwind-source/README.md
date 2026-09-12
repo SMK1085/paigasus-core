@@ -1,12 +1,14 @@
 # `repo` gate: Tailwind `@source` reachability (SMA-503 AC 3)
 
 Asserts that a production `next build` of `@paigasus/iam-console` still emits the CSS that
-`@paigasus/ui` contributes. Two independent sentinels:
+`@paigasus/ui` contributes, and (SMA-511) the CSS that `@paigasus/app-shell` contributes. Three
+independent sentinels:
 
 | Sentinel | Declared in | Proves |
 |---|---|---|
 | `--paigasus-ui-source-probe` | `ts/packages/paigasus-ui/src/components/table.tsx` | Tailwind SCANNED the package's source, i.e. the app's `@source` line still covers it |
 | `--paigasus-token-probe` | `ts/packages/paigasus-ui/src/styles/tokens.css` | the app's `@import '@paigasus/ui/styles.css'` RESOLVED, i.e. the token layer reached the output |
+| `--paigasus-app-shell-source-probe` | `ts/packages/paigasus-app-shell/src/shell/app-shell.tsx` | Tailwind SCANNED `@paigasus/app-shell`'s source, i.e. the app's second `@source` line still covers it |
 
 Sentinel A alone is not enough: the `@import` can fail, the whole token layer can be absent,
 and sentinel A still passes.
@@ -44,7 +46,7 @@ Run by `iam-console-ts:test`, which depends on `~:build`. Three modes, in order:
   .next/static` lives inside `iam-console-ts:build`'s own `script:`, so it runs only when
   Moon actually EXECUTES that task. On a cache hit Moon hydrates `outputs: ['.next']` from its
   tarball instead, the `rm` never runs, and the guard's fallback walk then reads whatever CSS
-  chunks that hydrated tree contains. A chunk from an earlier build can carry both sentinels
+  chunks that hydrated tree contains. A chunk from an earlier build can carry every sentinel
   and green the assertion on its own.
 
   Evidenced on this branch rather than reasoned about: Proof 3 in

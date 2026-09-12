@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /*
- * SMA-503 AC 3 — assert a production console build still emits @paigasus/ui's CSS.
+ * SMA-503 AC 3 — assert a production console build still emits @paigasus/ui's CSS, and (SMA-511)
+ * @paigasus/app-shell's.
  *
  * THIS FILE MUST STAY OUTSIDE ts/apps/iam-console/. See README.md for why: that
  * directory is Tailwind's scan root, and a copy of the sentinel there would generate the very
@@ -18,6 +19,9 @@ const CONSOLE_DIR = join(REPO_ROOT, 'ts', 'apps', 'iam-console');
 
 const PROBE_SOURCE = '--paigasus' + '-ui-source-probe';
 const PROBE_TOKEN = '--paigasus' + '-token-probe';
+// Sentinel C (SMA-511): declared in ts/packages/paigasus-app-shell/src/shell/app-shell.tsx. It
+// proves the console's second `@source` line, the one that covers @paigasus/app-shell.
+const PROBE_APP_SHELL = '--paigasus' + '-app-shell-source-probe';
 
 /*
  * Directories the walk below never descends into. `.next` is build output and `node_modules`
@@ -117,6 +121,9 @@ export function verdict({ cssFiles, appFiles, readFile }) {
   if (!css.includes(PROBE_TOKEN)) {
     failures.push(`sentinel B (${PROBE_TOKEN}) is absent from the built CSS — the app's \`@import '@paigasus/ui/styles.css'\` did not resolve`);
   }
+  if (!css.includes(PROBE_APP_SHELL)) {
+    failures.push(`sentinel C (${PROBE_APP_SHELL}) is absent from the built CSS — the app's Tailwind \`@source\` line no longer covers ts/packages/paigasus-app-shell/src`);
+  }
 
   // Mirrors assertion 4's empty-set guard: an empty appFiles set must fail loudly, not let
   // the loop below pass vacuously (e.g. if the console directory is renamed).
@@ -126,7 +133,7 @@ export function verdict({ cssFiles, appFiles, readFile }) {
 
   for (const file of appFiles) {
     const text = readFile(file);
-    if (text.includes(PROBE_SOURCE) || text.includes(PROBE_TOKEN)) {
+    if (text.includes(PROBE_SOURCE) || text.includes(PROBE_TOKEN) || text.includes(PROBE_APP_SHELL)) {
       failures.push(`${file} contains a sentinel — the console's own sources must not, or the assertion passes without the package`);
     }
   }
@@ -146,7 +153,7 @@ function realRun() {
     console.error('== tailwind-source guard FAILED ==');
     process.exit(1);
   }
-  console.log(`tailwind-source guard: both sentinels present across ${String(cssFiles.length)} CSS file(s)`);
+  console.log(`tailwind-source guard: all three sentinels present across ${String(cssFiles.length)} CSS file(s)`);
 }
 
 function selfTest() {
@@ -161,23 +168,29 @@ function selfTest() {
   };
   try {
     const good = join(dir, 'good.css');
-    writeFileSync(good, `:root{${PROBE_TOKEN}:1}\n.x{${PROBE_SOURCE}:1}\n`);
+    writeFileSync(good, `:root{${PROBE_TOKEN}:1}\n.x{${PROBE_SOURCE}:1}\n.y{${PROBE_APP_SHELL}:1}\n`);
     const noSource = join(dir, 'no-source.css');
-    writeFileSync(noSource, `:root{${PROBE_TOKEN}:1}\n`);
+    writeFileSync(noSource, `:root{${PROBE_TOKEN}:1}\n.y{${PROBE_APP_SHELL}:1}\n`);
     const noToken = join(dir, 'no-token.css');
-    writeFileSync(noToken, `.x{${PROBE_SOURCE}:1}\n`);
+    writeFileSync(noToken, `.x{${PROBE_SOURCE}:1}\n.y{${PROBE_APP_SHELL}:1}\n`);
+    const noAppShell = join(dir, 'no-app-shell.css');
+    writeFileSync(noAppShell, `:root{${PROBE_TOKEN}:1}\n.x{${PROBE_SOURCE}:1}\n`);
     const cleanApp = join(dir, 'page.tsx');
     writeFileSync(cleanApp, 'export default function Page() { return null; }\n');
     const dirtyApp = join(dir, 'dirty.tsx');
     writeFileSync(dirtyApp, `const leak = '${PROBE_SOURCE}';\n`);
+    const dirtyAppShell = join(dir, 'dirty-app-shell.tsx');
+    writeFileSync(dirtyAppShell, `const leak = '${PROBE_APP_SHELL}';\n`);
 
     const read = (f) => readFileSync(f, 'utf8');
     expect('a good build passes', verdict({ cssFiles: [good], appFiles: [cleanApp], readFile: read }).length, 0);
     expect('a missing sentinel A fails', verdict({ cssFiles: [noSource], appFiles: [cleanApp], readFile: read }).length, 1);
     expect('a missing sentinel B fails', verdict({ cssFiles: [noToken], appFiles: [cleanApp], readFile: read }).length, 1);
+    expect('a missing sentinel C fails', verdict({ cssFiles: [noAppShell], appFiles: [cleanApp], readFile: read }).length, 1);
     expect('an empty CSS set fails', verdict({ cssFiles: [], appFiles: [cleanApp], readFile: read }).length, 1);
     expect('a sentinel in the app fails', verdict({ cssFiles: [good], appFiles: [dirtyApp], readFile: read }).length, 1);
-    expect('both sentinels missing fails twice', verdict({ cssFiles: [cleanApp], appFiles: [cleanApp], readFile: read }).length, 2);
+    expect('an app-shell sentinel in the app fails', verdict({ cssFiles: [good], appFiles: [dirtyAppShell], readFile: read }).length, 1);
+    expect('all three sentinels missing fails three times', verdict({ cssFiles: [cleanApp], appFiles: [cleanApp], readFile: read }).length, 3);
     expect('an empty appFiles set fails', verdict({ cssFiles: [good], appFiles: [], readFile: read }).length, 1);
 
     /*
@@ -228,13 +241,13 @@ function negativeControl() {
     writeFileSync(join(nextDir, 'app-build-manifest.json'), JSON.stringify({ pages: { '/page': ['static/chunks/a.css'] } }));
     const cssFiles = currentBuildCssFiles(nextDir);
     // A non-empty, clean appFiles is required here: an empty appFiles set now fails on its own
-    // (see the guard in verdict()), which would inflate this count past the 2 sentinel failures
+    // (see the guard in verdict()), which would inflate this count past the 3 sentinel failures
     // this control targets.
     const cleanApp = join(dir, 'page.tsx');
     writeFileSync(cleanApp, 'export default function Page() { return null; }\n');
     const failures = verdict({ cssFiles, appFiles: [cleanApp], readFile: (f) => readFileSync(f, 'utf8') });
-    if (failures.length !== 2) {
-      console.error(`NEGATIVE CONTROL FAIL: expected 2 failures on probe-free CSS, got ${String(failures.length)}`);
+    if (failures.length !== 3) {
+      console.error(`NEGATIVE CONTROL FAIL: expected 3 failures on probe-free CSS, got ${String(failures.length)}`);
       process.exit(2);
     }
   } finally {
