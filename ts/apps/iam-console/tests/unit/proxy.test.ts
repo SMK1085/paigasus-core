@@ -2,8 +2,10 @@
 //
 // proxy.ts under the real basePath (spec § 7.5, § 13 #1). A NextRequest built with
 // `nextConfig: { basePath: '/iam' }` strips the basePath from nextUrl.pathname exactly as Next does.
+import { readFileSync } from 'node:fs';
 import { unstable_doesMiddlewareMatch } from 'next/experimental/testing/server';
 import { NextRequest } from 'next/server';
+import ts from 'typescript';
 import { describe, expect, it, vi } from 'vitest';
 import { SESSION_COOKIE_NAME } from '../../lib/auth';
 import { config, proxy } from '../../proxy';
@@ -19,14 +21,30 @@ vi.hoisted(() => {
 });
 
 const ORIGIN = 'https://console.example.test';
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
 /** The basePath next.config.ts compiles in. unstable_doesMiddlewareMatch prefixes each matcher with it, as Next does. */
 const NEXT_CONFIG = { basePath: '/iam' };
+
+/**
+ * Every module specifier a source file imports, sorted and without duplicates. TypeScript's own
+ * pre-processor reads them: static, type-only, side-effect, re-export, dynamic and require forms,
+ * and never an import inside a comment.
+ */
+function importsOf(relative: string): string[] {
+  const source = readFileSync(new URL(relative, import.meta.url), 'utf8');
+  return [...new Set(ts.preProcessFile(source, true, true).importedFiles.map((file) => file.fileName))].sort();
+}
 
 function request(path: string, init: { cookie?: boolean; headers?: Record<string, string> } = {}): NextRequest {
   const headers = new Headers(init.headers);
   if (init.cookie === true) headers.set('cookie', `${SESSION_COOKIE_NAME}=opaque-session-id`);
   return new NextRequest(`${ORIGIN}${path}`, { headers, nextConfig: { basePath: '/iam' } });
+}
+
+/** NextResponse.next({ request: { headers } }) carries each overridden request header as x-middleware-request-<name>. */
+function forwarded(res: Response, name: string): string | null {
+  return res.headers.get(`x-middleware-request-${name}`);
 }
 
 describe('proxy', () => {
@@ -45,6 +63,30 @@ describe('proxy', () => {
   it('lets a request with the session cookie through, and checks presence only', () => {
     const res = proxy(request('/iam/orgs', { cookie: true }));
     expect(res.headers.get('location')).toBeNull();
+  });
+
+  it('mints a fresh UUID correlation id into the REQUEST headers, overwriting one the browser sent', () => {
+    const first = proxy(request('/iam/orgs', { cookie: true, headers: { 'paigasus-correlation-id': 'chosen-by-the-browser' } }));
+    const second = proxy(request('/iam/orgs', { cookie: true }));
+    const a = forwarded(first, 'paigasus-correlation-id');
+    const b = forwarded(second, 'paigasus-correlation-id');
+    expect(a).toMatch(UUID_RE);
+    expect(b).toMatch(UUID_RE);
+    expect(a).not.toBe(b);
+  });
+
+  it('records the public path, with the basePath and without the query', () => {
+    const res = proxy(request('/iam/orgs/abc?offset=50', { cookie: true }));
+    expect(forwarded(res, 'x-paigasus-request-path')).toBe('/iam/orgs/abc');
+  });
+
+  // The proxy's allowed imports, as a strict-equality list. `server-only` is a no-op in the proxy layer,
+  // and paigasus/boundaries/app-middleware is a DENY list of direct specifiers. So one import added to
+  // lib/correlation-header.ts (for example ./iam-clients, which reaches the sdk) would enter the
+  // proxy bundle with no lint error. Here it fails.
+  it('imports only the allowed modules in proxy.ts and lib/correlation-header.ts', () => {
+    expect(importsOf('../../proxy.ts')).toEqual(['./lib/correlation-header', '@paigasus/auth/middleware', 'next/server']);
+    expect(importsOf('../../lib/correlation-header.ts')).toEqual(['server-only']);
   });
 });
 
