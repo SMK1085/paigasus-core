@@ -131,6 +131,5 @@ test('R7: a denied Server Action shows an inline 403 in the form (AC 2)', async 
   const error = page.getByTestId('create-organization-error');
   // A form 403 shows the id in BOTH correlation modes (Task 12's FormError).
   await expect(error.getByTestId('correlation-id')).toHaveText('corr-e2e-action-403');
-  await expect(error).not.toBeEmpty();
   await expect(form).toBeVisible();
 });

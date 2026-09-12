@@ -2,9 +2,13 @@
 //
 // ADR-0017: the browser never receives a token. Every response the page receives in a full session
 // is collected: HTML documents, RSC payloads (navigations and prefetches), static assets, and a
-// Server Action result. None may contain the access or the refresh token the fake IdP issued. The
-// vacuity guards at the end prove that a non-empty BODY of each kind was in fact read and scanned:
-// a response whose body read failed counts for no guard.
+// Server Action result. None may contain the access or the refresh token the fake IdP issued.
+//
+// Three kinds of assertion close this. The leak scan itself; the vacuity guards, which prove that a
+// non-empty BODY of each kind the row names was in fact read and scanned; and the residue
+// assertion, which pins the set of bodies the row does NOT read to one measured class (a prefetch
+// RSC response, see `isPrefetchRsc`). A response whose body read failed counts for no guard and
+// reds the residue assertion.
 import type { Response } from '@playwright/test';
 import { ORG_ID, ORG_NAME, PROJECT_ID, TEAM_ID } from './support/world';
 import { signIn, waitForHydration } from './support/login';
@@ -15,52 +19,59 @@ type Seen = {
   readonly method: string;
   readonly contentType: string;
   readonly action: boolean;
-  /** true only after the body was read. A redirect has no body, so it stays false. */
+  /** false for a redirect, which carries no body. The residue assertion ignores those. */
+  readonly expectsBody: boolean;
+  /** true only after the body was read. */
   readonly bodyRead: boolean;
+  /** The ONE class whose body the browser does not hand over — see `isPrefetchRsc`. */
+  readonly prefetchRsc: boolean;
   readonly body: string;
   /** The headers and the body: what the leak scan searches. */
   readonly text: string;
 };
 
 /**
- * The bound on ONE body read. MEASURED on Next 16.3.4: a PREFETCH RSC response (its URL carries
- * `?_rsc=`) answers 200 `text/x-component`, and Chromium never hands its body to Playwright — the
- * renderer keeps the stream for its prefetch cache. `response.body()` for such a response waits
- * for the whole test timeout, so an unbounded read turns this row into a 60 s timeout as soon as
- * another spec runs before it in the same worker (measured: three prefetch responses,
- * `/iam/audit?_rsc=…`, `/iam/orgs?_rsc=…` and `/iam/orgs/<org>?_rsc=…`).
+ * The ONE class of response whose body this row does not read, matched POSITIVELY on the request:
+ * `Next-Router-Prefetch: 1` together with the `_rsc=` query the router adds. Both, so that the RSC
+ * payload of a real client navigation — which carries `_rsc=` too, and reads normally — stays in
+ * the scan.
  *
- * WHAT THE BOUND COSTS, stated plainly: the body of a prefetch response is NOT scanned. Only its
- * headers are. The row still scans every body the browser delivers — every HTML document, the RSC
- * payload of the real client navigation, and the Server Action result — and the vacuity guards at
- * the end prove one of each kind was read.
+ * MEASURED on Next 16.3.4: Chromium never hands a PREFETCH RSC body to Playwright, because the
+ * renderer keeps the stream for its prefetch cache. `response.body()` for such a response never
+ * settles, so reading one turns this row into a 60 s timeout as soon as another spec runs before
+ * it in the same worker (measured: `Promise.all` waited 59 s on three of them). In one run every
+ * unread response carried these two marks and no other response did.
+ *
+ * The match is deliberately NOT a timeout. A blanket bound would drop any slow-but-real body out
+ * of the scan without a signal; the residue assertion at the end of the test pins the skipped set
+ * to exactly this class, so a NEW unread response reds the row.
+ *
+ * WHAT THIS COSTS, stated plainly: the BODY of a prefetch response is not scanned. Its headers
+ * are. The same routes are also fetched as full documents in this test, and those bodies ARE
+ * scanned.
  */
-const BODY_READ_TIMEOUT_MS = 3_000;
-
-/** The body as text, or null when the read failed or did not finish inside the bound. */
-async function readBody(response: Response): Promise<string | null> {
-  // The rejection is handled HERE, not by the race: a rejection after the race resolved would
-  // otherwise be an unhandled rejection.
-  const body = response.body().then(
-    (buffer) => buffer.toString('utf8'),
-    () => null,
-  );
-  const bound = new Promise<null>((resolve) => setTimeout(resolve, BODY_READ_TIMEOUT_MS, null));
-  return Promise.race([body, bound]);
+async function isPrefetchRsc(response: Response): Promise<boolean> {
+  const request = response.request();
+  const headers = await request.allHeaders();
+  return headers['next-router-prefetch'] === '1' && new URL(request.url()).searchParams.has('_rsc');
 }
 
 async function capture(response: Response): Promise<Seen> {
   const request = response.request();
   const headers = await response.allHeaders();
   const requestHeaders = await request.allHeaders();
+  const status = response.status();
+  const expectsBody = status < 300 || status >= 400;
+  const prefetchRsc = await isPrefetchRsc(response);
   let body = '';
   let bodyRead = false;
-  const status = response.status();
-  if (status < 300 || status >= 400) {
-    const text = await readBody(response);
-    if (text !== null) {
-      body = text;
+  if (expectsBody && !prefetchRsc) {
+    try {
+      body = (await response.body()).toString('utf8');
       bodyRead = true;
+    } catch {
+      // The read failed. bodyRead stays false, so no vacuity guard counts this response as
+      // scanned AND the residue assertion reports it.
     }
   }
   return {
@@ -68,7 +79,9 @@ async function capture(response: Response): Promise<Seen> {
     method: request.method(),
     contentType: headers['content-type'] ?? '',
     action: requestHeaders['next-action'] !== undefined,
+    expectsBody,
     bodyRead,
+    prefetchRsc,
     body,
     text: `${JSON.stringify(headers)}\n${body}`,
   };
@@ -116,6 +129,12 @@ test('R11: no response body, header, RSC payload or action result contains a fak
 
   const leaks = seen.filter((response) => tokens.some((token) => response.text.includes(token))).map((response) => `${response.method} ${response.url}`);
   expect(leaks).toEqual([]);
+
+  // The RESIDUE: every response that should carry a body, and whose body this row did not read,
+  // must belong to the one measured class. A positive match, so a NEW unread response — a body
+  // read that failed, or another class Next starts to stream — reds this row instead of leaving
+  // the scan quietly smaller.
+  expect(seen.filter((response) => response.expectsBody && !response.bodyRead && !response.prefetchRsc).map((response) => `${response.method} ${response.url}`)).toEqual([]);
 
   // Vacuity guards: for each kind of response the row names, at least one non-empty body was READ
   // and scanned. A response is not enough: if every body read of a kind failed, the scan above
