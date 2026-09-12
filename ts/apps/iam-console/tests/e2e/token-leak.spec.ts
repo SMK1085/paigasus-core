@@ -9,7 +9,14 @@
 // assertion, which pins the set of bodies the row does NOT read to one measured class (a prefetch
 // RSC response, see `isPrefetchRsc`). A response whose body read failed counts for no guard and
 // reds the residue assertion.
-import type { Response } from '@playwright/test';
+//
+// THE SERVER ACTION BODY IS BUFFERED BY THIS TEST, not read from Playwright afterwards. MEASURED
+// under a full `moon ci` (SMA-511 Task 23, 3 of 3 runs): the action's answer arrives CHUNKED, with
+// `bodySize: -1`, and `response.body()` then REJECTS. The action result is the one payload
+// ADR-0017's rule is most about, so losing it exactly under load is worse than a red. `page.route`
+// fetches that one response, reads its text in this process and fulfils the request with the same
+// bytes, so the scan never depends on Playwright retaining a chunked body.
+import type { Request, Response } from '@playwright/test';
 import { ORG_ID, ORG_NAME, PROJECT_ID, TEAM_ID } from './support/world';
 import { signIn, waitForHydration } from './support/login';
 import { expect, test } from './support/harness';
@@ -23,6 +30,8 @@ type Seen = {
   readonly expectsBody: boolean;
   /** true only after the body was read. */
   readonly bodyRead: boolean;
+  /** true when the body came from the route interceptor, not from `response.body()`. */
+  readonly buffered: boolean;
   /** The ONE class whose body the browser does not hand over — see `isPrefetchRsc`. */
   readonly prefetchRsc: boolean;
   readonly body: string;
@@ -56,16 +65,22 @@ async function isPrefetchRsc(response: Response): Promise<boolean> {
   return headers['next-router-prefetch'] === '1' && new URL(request.url()).searchParams.has('_rsc');
 }
 
-async function capture(response: Response): Promise<Seen> {
+/** A Server Action call: a POST that carries Next's own action header. */
+function isServerAction(request: Request): boolean {
+  return request.method() === 'POST' && request.headers()['next-action'] !== undefined;
+}
+
+async function capture(response: Response, buffered: ReadonlyMap<Request, string>): Promise<Seen> {
   const request = response.request();
   const headers = await response.allHeaders();
   const requestHeaders = await request.allHeaders();
   const status = response.status();
   const expectsBody = status < 300 || status >= 400;
   const prefetchRsc = await isPrefetchRsc(response);
-  let body = '';
-  let bodyRead = false;
-  if (expectsBody && !prefetchRsc) {
+  const fromRoute = buffered.get(request);
+  let body = fromRoute ?? '';
+  let bodyRead = fromRoute !== undefined;
+  if (!bodyRead && expectsBody && !prefetchRsc) {
     try {
       body = (await response.body()).toString('utf8');
       bodyRead = true;
@@ -81,6 +96,7 @@ async function capture(response: Response): Promise<Seen> {
     action: requestHeaders['next-action'] !== undefined,
     expectsBody,
     bodyRead,
+    buffered: fromRoute !== undefined,
     prefetchRsc,
     body,
     text: `${JSON.stringify(headers)}\n${body}`,
@@ -93,9 +109,32 @@ function scanned(response: Seen): boolean {
 }
 
 test('R11: no response body, header, RSC payload or action result contains a fake token (ADR-0017)', async ({ page, harness }) => {
+  // The buffered Server Action bodies, keyed by the Request the response carries — the SAME object
+  // the route handler saw, so no url or timing match is needed.
+  const buffered = new Map<Request, string>();
+  // Only the action POST is fetched and refilled; everything else falls through untouched. A
+  // narrow pattern keeps every other response on the ordinary path, so the interception cannot
+  // change how the page loads.
+  await page.route('**/iam/orgs', async (route) => {
+    const request = route.request();
+    if (!isServerAction(request)) {
+      await route.fallback();
+      return;
+    }
+    const answer = await route.fetch();
+    const text = await answer.text();
+    buffered.set(request, text);
+    // `body` is the DECODED text, so the stored content-encoding and content-length headers of
+    // `answer` no longer describe it. They are dropped, and the rest is passed through.
+    const headers = { ...answer.headers() };
+    delete headers['content-encoding'];
+    delete headers['content-length'];
+    await route.fulfill({ status: answer.status(), headers, body: text });
+  });
+
   const pending: Promise<Seen>[] = [];
   page.on('response', (response) => {
-    pending.push(capture(response));
+    pending.push(capture(response, buffered));
   });
   const issuedBefore = harness.idp.issued.length;
 
@@ -142,4 +181,9 @@ test('R11: no response body, header, RSC payload or action result contains a fak
   expect(seen.some((response) => response.contentType.startsWith('text/html') && scanned(response))).toBe(true);
   expect(seen.some((response) => response.contentType.startsWith('text/x-component') && !response.action && scanned(response))).toBe(true);
   expect(seen.some((response) => response.method === 'POST' && response.action && scanned(response))).toBe(true);
+
+  // The fourth guard, and the one that keeps the load regression from returning in silence: a
+  // Server Action body was scanned FROM THE ROUTE BUFFER. The guard above is satisfied by either
+  // path, so on its own it would go green again the moment `response.body()` happens to work.
+  expect(seen.some((response) => response.action && response.method === 'POST' && response.buffered && scanned(response))).toBe(true);
 });
