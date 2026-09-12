@@ -7,10 +7,16 @@ language: 'typescript'
 # Graph documentation, and what `moon query projects --affected` follows. This confers NO
 # affectedness on its own: dependsOn schedules an upstream and never selects a downstream
 # (CLAUDE.md, Moon 2.5.3). The task `inputs` below are what make these tasks affected by a
-# change inside either package.
+# change inside a package. Every package this app compiles is listed, so the `contracts->proto`
+# case in ci/affected-graph/run.sh reaches this project (SMA-511 spec § 8).
 dependsOn:
   - 'paigasus-next-config-ts'
   - 'paigasus-ui-ts'
+  - 'paigasus-auth-ts'
+  - 'paigasus-sdk-ts'
+  - 'paigasus-discovery-ts'
+  - 'paigasus-app-shell-ts'
+  - 'paigasus-proto-ts'
 
 # The inherited `sources` group from .moon/tasks/typescript-project.yml is `src/**/*`, and
 # this app has no src/ — its code is in app/. MEASURED before this fix with
@@ -66,6 +72,10 @@ tasks:
     inputs:
       - '@group(sources)'
       - 'app/**/*'
+      # SMA-511: the composition root and the zone proxy. The group above also reaches them; these
+      # entries keep the coverage if the group is ever removed.
+      - 'lib/**/*'
+      - 'proxy.ts'
       - 'tsconfig.json'
       - 'package.json'
       - 'next.config.ts'
@@ -76,6 +86,10 @@ tasks:
       # this input, editing the factory serves a cached build — the staleness class SMA-519 paid
       # for.
       - '/ts/packages/paigasus-next-config/src/**/*'
+      # The package MANIFEST too: its `exports` map decides what an import resolves to.
+      - '/ts/packages/paigasus-next-config/package.json'
+      # tsconfig.json extends @paigasus/next-config/tsconfig-app.
+      - '/ts/packages/paigasus-next-config/tsconfig.app.json'
       # SMA-503 AC 3. Without this, a change inside @paigasus/ui leaves this task's cache key
       # unchanged, Moon serves a cached .next, `next build` never runs, and the assertion in
       # `test` passes against stale CSS — a green that means nothing.
@@ -121,6 +135,25 @@ tasks:
     # it keeps the inherited /ts/tsconfig.base.json and needs no line of its own (verified with
     # `moon query projects --id iam-console-ts`).
     inputs:
+      - 'app/**/*'
+      - 'lib/**/*'
+      - 'proxy.ts'
+      # The root-level config files. tsconfig.json includes **/*.ts, so tsc type-checks them, but
+      # no inherited input or source group reaches them. Without these, a type error there serves a
+      # cached typecheck PASS (SMA-511).
+      - 'next.config.ts'
+      - 'vitest.config.ts'
+      - 'playwright.config.ts'
+      # SMA-511: tsc type-checks the test tree too. Without this, a type error in tests/ — the e2e
+      # tree included — leaves this task's cache key unchanged and serves a cached PASS. The two
+      # negations drop the fixtures' build output, which would otherwise re-key the task on every
+      # run.
+      - 'tests/**/*'
+      - '!tests/fixtures/**/.next/**'
+      - '!tests/fixtures/*/next-env.d.ts'
+      - '/ts/packages/paigasus-next-config/src/**/*'
+      - '/ts/packages/paigasus-next-config/package.json'
+      - '/ts/packages/paigasus-next-config/tsconfig.app.json'
       - '/ts/packages/paigasus-ui/src/**/*'
       # The package MANIFEST, not only its sources. It holds the `exports` map, which decides what
       # `@paigasus/ui` and `@paigasus/ui/styles.css` resolve to (SMA-503 local review, finding A).
@@ -164,6 +197,9 @@ tasks:
     inputs:
       - '@group(sources)'
       - 'app/**/*'
+      # SMA-511: the composition root and the zone proxy, for the same reason as in `build`.
+      - 'lib/**/*'
+      - 'proxy.ts'
       - 'tests/**/*'
       # The fixtures' `next build` output and generated next-env.d.ts. The Moon hasher does NOT skip
       # `.next` (.moon/workspace.yml omits it on purpose), so without these, every run of this task
@@ -179,6 +215,8 @@ tasks:
       # task, and a weakened gate serves a cached PASS.
       - '/ci/tailwind-source/**/*'
       - '/ts/packages/paigasus-next-config/src/**/*'
+      - '/ts/packages/paigasus-next-config/package.json'
+      - '/ts/packages/paigasus-next-config/tsconfig.app.json'
       - '/ts/packages/paigasus-ui/src/**/*'
       - '/ts/packages/paigasus-ui/package.json'
       - '/ts/pnpm-lock.yaml'
