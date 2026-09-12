@@ -6,7 +6,7 @@
 import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { ErrorReason } from '@paigasus/sdk/errors';
 import { disposeTransports } from '@paigasus/sdk/iam';
-import { createIamClients } from '../../lib/iam-clients';
+import { createIamClients, type IamClients } from '../../lib/iam-clients';
 import { createJsonLogger } from '../../lib/logger';
 import { introspectWithProvisioning } from '../../lib/principal';
 import { createIntrospectPrincipalResolver } from '../../lib/principal-resolver';
@@ -70,15 +70,39 @@ describe('provisioning', () => {
       expect(events().map((e) => e.fields['presentation'])).toEqual(['degraded']);
     });
 
-    it('degrades when the client factory itself throws', async () => {
-      const { logger } = captureLogger();
+    it('degrades when the client factory itself throws, logging resolve_crashed not resolve_failed', async () => {
+      const { logger, events } = captureLogger();
       const resolver = createIntrospectPrincipalResolver({
         clientsForToken: () => {
           throw new Error('no config');
         },
         logger,
       });
-      expect((await resolver.resolve({ accessToken: 't', idTokenClaims: CLAIMS })).principalPrn).toBeNull();
+      const principal = await resolver.resolve({ accessToken: 't', idTokenClaims: CLAIMS });
+      expect(principal).toEqual({ principalPrn: null, issuer: CLAIMS.iss, subject: CLAIMS.sub, memberships: [], roleGrants: [], grantsAvailable: false });
+      expect(events()).toEqual([{ event: 'principal.resolve_crashed', fields: { name: 'Error', message: 'no config' }, time: expect.any(String) as string }]);
+    });
+
+    it('logs resolve_crashed, not resolve_failed, when the response mapping throws', async () => {
+      const { logger, events } = captureLogger();
+      const crashingClients: Pick<IamClients, 'authn' | 'serviceInfo'> = {
+        serviceInfo: { getServiceInfo: () => Promise.resolve({}) } as unknown as IamClients['serviceInfo'],
+        authn: {
+          introspect: () =>
+            Promise.resolve({
+              principalPrn: 'prn:pgs:iam:::principal/crash-test',
+              issuer: FAKE_IAM_ISSUER,
+              subject: 'subject-crash-test',
+              get memberships(): never {
+                throw new TypeError('memberships getter exploded');
+              },
+            }),
+        } as unknown as IamClients['authn'],
+      };
+      const resolver = createIntrospectPrincipalResolver({ clientsForToken: () => crashingClients, logger });
+      const principal = await resolver.resolve({ accessToken: 't', idTokenClaims: CLAIMS });
+      expect(principal).toEqual({ principalPrn: null, issuer: CLAIMS.iss, subject: CLAIMS.sub, memberships: [], roleGrants: [], grantsAvailable: false });
+      expect(events()).toEqual([{ event: 'principal.resolve_crashed', fields: { name: 'TypeError', message: 'memberships getter exploded' }, time: expect.any(String) as string }]);
     });
   });
 
@@ -91,7 +115,8 @@ describe('provisioning', () => {
 
     it('makes one Introspect call for a provisioned user', async () => {
       fake.provisioned.add('known-user');
-      await introspectWithProvisioning(clientsFor('known-user'), 'known-user');
+      const result = await introspectWithProvisioning(clientsFor('known-user'), 'known-user');
+      expect(result).toEqual({ ok: true, value: { prn: fake.principalPrnFor('known-user'), memberships: [] } });
       expect(fake.calls.map((call) => call.method)).toEqual(['authn.introspect']);
     });
 

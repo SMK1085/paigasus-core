@@ -8,7 +8,9 @@
 // every @paigasus/* import except proto. SMA-631 records a shared home for SMA-512.
 //
 // IT NEVER FAILS THE LOGIN. On any failure it returns principalPrn: null, empty lists and
-// grantsAvailable: false, and logs `principal.resolve_failed`. The pages do not read this snapshot
+// grantsAvailable: false. An IAM answer that is a failure logs `principal.resolve_failed`; a
+// thrown error — a bug in this function, not an IAM answer — logs `principal.resolve_crashed`
+// instead, so the two causes stay distinguishable in the log. The pages do not read this snapshot
 // (they call currentPrincipal()), so a degraded login costs nothing after the first render.
 import 'server-only';
 import type { PrincipalResolver, ResolvedPrincipal } from '@paigasus/auth/server';
@@ -28,11 +30,26 @@ export function createIntrospectPrincipalResolver(deps: {
 
   return {
     async resolve({ accessToken, idTokenClaims }): Promise<ResolvedPrincipal> {
+      const degradedPrincipal = (): ResolvedPrincipal => ({
+        principalPrn: null,
+        issuer: idTokenClaims.iss,
+        subject: idTokenClaims.sub,
+        memberships: [],
+        roleGrants: [],
+        grantsAvailable: false,
+      });
       const degraded = (presentation: string): ResolvedPrincipal => {
         deps.logger.appEvent('principal.resolve_failed', { presentation });
-        return { principalPrn: null, issuer: idTokenClaims.iss, subject: idTokenClaims.sub, memberships: [], roleGrants: [], grantsAvailable: false };
+        return degradedPrincipal();
       };
-      // The whole sequence, the mapping included, runs inside one try (spec § 4.5).
+      // The try is broad ON PURPOSE (spec § 4.5): it wraps the two calls AND the response mapping.
+      // By the time this runs, the login callback has already spent the single-use OIDC code, so a
+      // throw here would strand the user with no way to retry — a degraded login is the right
+      // outcome whether IAM refused or this function has a bug. The two causes still need to read
+      // apart in the log, so they use different events: a `callIam` result of `ok: false` is an IAM
+      // ANSWER and logs `principal.resolve_failed` with its presentation, from inside the try below.
+      // Anything that instead THROWS out of the try — a bug, not an IAM answer — is caught here and
+      // logs `principal.resolve_crashed`, so an operator can tell a console bug from an IAM outage.
       try {
         const clients = deps.clientsForToken(accessToken);
         // 1. The provisioning call, with the NEW token as the bearer.
@@ -52,9 +69,14 @@ export function createIntrospectPrincipalResolver(deps: {
           roleGrants: [],
           grantsAvailable: false,
         };
-      } catch {
-        // callIam rethrows everything that is not a ConnectError. Here nothing may escape.
-        return degraded('generic');
+      } catch (err) {
+        // callIam rethrows everything that is not a ConnectError, and a bug in the mapping above
+        // throws too. Neither is an IAM answer, so neither is `principal.resolve_failed`. No token,
+        // DSN or cookie is logged here — only the error's own shape.
+        const name = err instanceof Error ? err.constructor.name : typeof err;
+        const message = err instanceof Error ? err.message : String(err);
+        deps.logger.appEvent('principal.resolve_crashed', { name, message });
+        return degradedPrincipal();
       }
     },
   };
