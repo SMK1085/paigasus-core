@@ -28,7 +28,19 @@ export function proxy(req: NextRequest): NextResponse {
   // server chose.
   headers.set(CORRELATION_HEADER, crypto.randomUUID());
   headers.set(REQUEST_PATH_HEADER, `${req.nextUrl.basePath}${req.nextUrl.pathname}`);
-  return NextResponse.next({ request: { headers } });
+  const proceed = NextResponse.next({ request: { headers } });
+  // The auth middleware's allow response sets nothing today, but discarding it would drop a
+  // RESPONSE header a later version of @paigasus/auth adds, with no error anywhere. So carry it
+  // over. `proceed` wins on a name it already holds: its own x-middleware-* keys describe THIS
+  // response's request overrides, and the decision's copies describe none.
+  for (const [name, value] of decision.headers) {
+    if (!proceed.headers.has(name)) proceed.headers.set(name, value);
+  }
+  // Cookies need their own pass: they travel in `set-cookie`, and the loop above would keep only
+  // the last of several. The middleware sets none today (it has no store and no session), so this
+  // is here for the same reason as the loop — to carry, not to discard.
+  for (const cookie of decision.cookies.getAll()) proceed.cookies.set(cookie);
+  return proceed;
 }
 
 /*

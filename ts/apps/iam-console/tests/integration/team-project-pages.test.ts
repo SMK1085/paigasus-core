@@ -8,7 +8,7 @@
 import { Code } from '@connectrpc/connect';
 import { disposeTransports } from '@paigasus/sdk/iam';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { createProject } from '../../app/(console)/orgs/[org]/teams/[team]/commands';
+import { createProject, createProjectForm } from '../../app/(console)/orgs/[org]/teams/[team]/commands';
 import { loadTeamPage } from '../../app/(console)/orgs/[org]/teams/[team]/load';
 import { loadProjectPage } from '../../app/(console)/orgs/[org]/teams/[team]/projects/[project]/load';
 import { PAGE_SIZE } from '../../lib/paging';
@@ -195,5 +195,11 @@ describe('createProject', () => {
 
     if (result.ok) throw new Error('expected a denial');
     expect(result.error.correlationId).toBe('corr-create-project');
+  });
+
+  // The same defect as minor 11's orgPrn, one directory down: teamPrn had no .trim() either.
+  it('trims the parent PRN, and refuses one that is only whitespace', () => {
+    expect(createProjectForm.safeParse({ teamPrn: ` ${TEAM_A1} `, slug: 'a', name: 'A' }).data?.teamPrn).toBe(TEAM_A1);
+    expect(createProjectForm.safeParse({ teamPrn: '  ', slug: 'a', name: 'A' }).success).toBe(false);
   });
 });

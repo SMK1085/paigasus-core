@@ -132,6 +132,25 @@ describe('createAuthRouteHandler rebuilds the request URL (SMA-511 spec § 7.1)'
     expect(seen.url).toBe('https://app.example.com/elsewhere');
   });
 
+  // SMA-511 final review, minor 9. publicRequestUrl CONCATENATES onto the absolute origin on
+  // purpose, and until now nothing pinned that choice. Rewrite it as `new URL(pathname, origin)`
+  // and a pathname that begins with `//` resolves as a PROTOCOL-RELATIVE url, so the host becomes
+  // evil.example — the whole login flow then builds its redirects on an attacker's origin. The
+  // assertion is on the HOST, not on the whole string, because the host is what the defect moves.
+  //
+  // The backslash row is not a duplicate of the first: MEASURED, the WHATWG parser normalises `\`
+  // to `/` for a special scheme, so `/\evil.example` ARRIVES as `//evil.example`. That is the shape
+  // a caller cannot spot by reading the raw string, which is why it is listed.
+  it.each([
+    ['//evil.example/auth/callback', 'https://app.example.com//evil.example/auth/callback'],
+    ['/\\evil.example/auth/callback', 'https://app.example.com//evil.example/auth/callback'],
+    ['//evil.example//auth/login', 'https://app.example.com//evil.example//auth/login'],
+  ])('keeps the public origin for the host-confusing path %s', async (path, expected) => {
+    const seen = await requestSeenBy(runtime(), `http://0.0.0.0:3000${path}`);
+    expect(new URL(seen.url).host).toBe('app.example.com');
+    expect(seen.url).toBe(expected);
+  });
+
   it('keeps the method, the headers and the body', async () => {
     const seen = await requestSeenBy(runtime(), 'http://0.0.0.0:3000/auth/logout', { method: 'POST', headers: { cookie: 'a=b' }, body: 'x=1' });
     expect(seen.method).toBe('POST');

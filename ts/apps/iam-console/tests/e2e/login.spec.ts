@@ -31,6 +31,12 @@ test('R2: an unauthenticated /iam/orgs logs in through the IdP and lands on "You
   const mine = harness.iam.calls.filter((call) => call.token === accessToken);
   expect(mine[0]?.method).toBe('serviceInfo.getServiceInfo');
   expect(mine.some((call) => call.method === 'authn.introspect')).toBe(true);
+
+  // The login callback's own IAM calls carry the id proxy.ts minted for the callback request
+  // (final whole-branch review, minor 4). Before the fix lib/auth.ts sent none, so a login-time
+  // failure could not be joined to the request. /auth/callback is a PUBLIC path, which makes the
+  // middleware allow it, not skip the header.
+  expect(mine[0]?.correlationId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
 });
 
 test('R3: a first-time identity that IAM has never seen lands on the same screen (AC 1)', async ({ page, harness }) => {

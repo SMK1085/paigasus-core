@@ -29,9 +29,6 @@ const MAX_LEN = 512;
 /** The kernel's UUID field form: 36 characters, hyphenated, either case (resource_name.rs `parse_uuid_field`). */
 const UUID = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 
-/** resource_name.rs `is_valid_region`: lower-case alphanumeric segments joined by single hyphens. */
-const REGION = /^[a-z0-9]+(-[a-z0-9]+)*$/;
-
 const TENANCY_KINDS: ReadonlySet<string> = new Set<TenancyKind>(['organization', 'team', 'project']);
 
 export function isUuid(value: string): boolean {
@@ -43,7 +40,17 @@ function requireUuid(label: string, value: string): string {
   return value.toLowerCase();
 }
 
-/** The tenancy node a PRN names, or null for any other resource or an invalid PRN. Ids are lower-case. */
+/**
+ * The tenancy node a PRN names, or null for any other resource or an invalid PRN. Ids are
+ * lower-case.
+ *
+ * A NON-EMPTY REGION IS REJECTED, well formed or not — which is why this file needs no copy of the
+ * kernel's `is_valid_region` grammar. `TenancyRef` has no region field and the three builders always
+ * emit an empty one, so a regionful PRN read here would be REWRITTEN without its region on the way
+ * back out: a silently different resource. IAM's own tenancy PRNs carry no region
+ * (`paigasus-iam-core` tenancy.rs), so this console loses no valid input. The day IAM regionalises
+ * tenancy, this returns null instead of corrupting the value, and `TenancyRef` grows a region field.
+ */
 export function parseTenancyPrn(prn: string): TenancyRef | null {
   if (prn.length === 0 || prn.length > MAX_LEN) return null;
   const parts = prn.split(':');
@@ -51,7 +58,7 @@ export function parseTenancyPrn(prn: string): TenancyRef | null {
   const [scheme, partition, service, region, org, path] = parts as [string, string, string, string, string, string];
   // `iam` is a valid kernel service label, so checking equality also checks the label grammar.
   if (scheme !== 'prn' || partition !== 'pgs' || service !== 'iam') return null;
-  if (region !== '' && !REGION.test(region)) return null;
+  if (region !== '') return null;
   if (org !== '' && !isUuid(org)) return null;
   const slash = path.indexOf('/');
   if (slash === -1 || path.includes('/', slash + 1)) return null;

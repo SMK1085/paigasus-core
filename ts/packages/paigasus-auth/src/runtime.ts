@@ -26,12 +26,12 @@
 // invocation — that is deliberate, since tests call it repeatedly with different configs and
 // expect independent validation each time. A real app must NOT call it per request: doing so
 // would re-run `openid-client` discovery and open a new Redis connection on every request, never
-// closing the old one. `getAuthRuntime` below is the process-wide singleton every other caller
+// closing the old one. `getAuthRuntime` below is the per-zone singleton every other caller
 // (task 8's routes, the Next binding) uses instead — it memoises the FIRST successful call on
-// `globalThis` (see the comment on RUNTIME_KEY: Next gives a route handler and a page separate
-// copies of this module), keyed on nothing (there is exactly one configuration per process), and
-// resets on failure so a misconfigured-at-boot process can recover once the config is fixed and
-// the container is asked to try again.
+// `globalThis` (see the comment on the runtime key: Next gives a route handler and a page separate
+// copies of this module), keyed on `PAIGASUS_ZONE` (there is exactly one configuration per zone per
+// process), and resets that zone's slot on failure so a misconfigured-at-boot process can recover
+// once the config is fixed and the container is asked to try again.
 import { createOidcClient, type OidcClient } from './adapters/oidc';
 import { claimsPrincipalResolver } from './adapters/claims-resolver';
 import { MemorySessionStore } from './adapters/memory-store';
@@ -185,33 +185,46 @@ export async function createAuthRuntime(cfg: ComposedConfig, deps: CreateAuthRun
  *
  * `Symbol.for` keys the slot in the global symbol registry, so every copy of this module resolves
  * the same key with no export to import.
+ *
+ * THE KEY CARRIES THE ZONE AND A SHAPE VERSION (final whole-branch review, minor 8). A bare
+ * `paigasus.auth.runtime` is one slot for a whole PROCESS, so two zone apps composed into one
+ * process — the shape SMA-513 assembles — would hand the second zone the FIRST zone's runtime, with
+ * its basePath, redirect URI and post-logout URI. Every login would then leave the second zone. The
+ * global symbol registry is also shared with every other library in the process, so the version
+ * segment keeps a future, incompatible `AuthRuntime` off this slot rather than on it.
  */
-const RUNTIME_KEY: unique symbol = Symbol.for('paigasus.auth.runtime');
+const RUNTIME_KEY_PREFIX = 'paigasus.auth.runtime.v1';
 
-type RuntimeHolder = { [RUNTIME_KEY]?: Promise<AuthRuntime> };
+function runtimeKey(zone: string): symbol {
+  return Symbol.for(`${RUNTIME_KEY_PREFIX}:${zone}`);
+}
+
+type RuntimeHolder = Record<symbol, Promise<AuthRuntime> | undefined>;
 
 /**
- * The process-wide singleton. Every real caller — task 8's routes, the Next binding — uses this,
+ * The singleton for ONE ZONE. Every real caller — task 8's routes, the Next binding — uses this,
  * never `createAuthRuntime` directly, so discovery, the store adapter, and (for redis) the Redis
- * connection are built exactly ONCE per process. The promise is cached after the first call and
- * every later call's arguments are ignored, matching "one runtime per process" — this is
- * deliberate, not an oversight: a second, differently-configured call in the same process would
- * indicate a bug upstream (there is exactly one deployment configuration per running container),
- * not a legitimate need for a second runtime. A failed first call clears the cache, so a
- * misconfigured-at-boot process can recover once its config is fixed and it is asked to try again.
+ * connection are built exactly ONCE per zone per process. The promise is cached after the first
+ * call and every later call's arguments EXCEPT `PAIGASUS_ZONE` are ignored, matching "one runtime
+ * per zone" — this is deliberate, not an oversight: a second call with the same zone and a
+ * different configuration would indicate a bug upstream (there is exactly one deployment
+ * configuration per zone per running container), not a legitimate need for a second runtime. A
+ * failed first call clears that zone's cache, so a misconfigured-at-boot process can recover once
+ * its config is fixed and it is asked to try again.
  *
  * `createAuthRuntime` itself is NOT memoised and stays directly callable — this package's own
  * tests (tests/runtime.test.ts) rely on that to validate many independent configurations.
  */
 export function getAuthRuntime(cfg: ComposedConfig, deps?: CreateAuthRuntimeDeps): Promise<AuthRuntime> {
   const holder = globalThis as typeof globalThis & RuntimeHolder;
-  let shared = holder[RUNTIME_KEY];
+  const key = runtimeKey(cfg.PAIGASUS_ZONE);
+  let shared = holder[key];
   if (shared === undefined) {
     shared = createAuthRuntime(cfg, deps).catch((err: unknown) => {
-      delete holder[RUNTIME_KEY];
+      delete holder[key];
       throw err;
     });
-    holder[RUNTIME_KEY] = shared;
+    holder[key] = shared;
   }
   return shared;
 }

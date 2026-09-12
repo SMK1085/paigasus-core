@@ -62,6 +62,13 @@ describe('the app’s discovery', () => {
     }
   });
 
+  // The file header's "no silent fallback" rule, from the other side. lib/config.ts's flat zod
+  // shape cannot express this cross-field rule, so the pair reaches descriptorCacheFor. Before the
+  // final-review fix it read as "use memory", and every zone then cached in its own process.
+  it('refuses the redis store with no URL, instead of falling back to the memory cache', async () => {
+    await expect(load({ PAIGASUS_SESSION_STORE: 'redis' })).rejects.toThrow('PAIGASUS_SESSION_REDIS_URL is required when PAIGASUS_SESSION_STORE is "redis"');
+  });
+
   it('with an unreachable Redis: degrades to cache-unavailable, and logs the failure once without the DSN', async () => {
     server.use(...serviceInfoHandlers(IAM_HTTP, { service: 'iam', version: '1.0.0', capabilities: [] }));
     const { handle, lines, reset } = await load({ PAIGASUS_SESSION_STORE: 'redis', PAIGASUS_SESSION_REDIS_URL: 'redis://:hunter2@127.0.0.1:1', PAIGASUS_SESSION_REDIS_TIMEOUT_MS: '200' });

@@ -30,9 +30,13 @@ const TENANCY = new Set(['organization', 'team', 'project']);
 const ORG = '0190a100-0000-7000-8000-0000000000aa';
 const TEAM = '0190a1b2-0000-7000-8000-000000000001';
 
-/** IAM's tenancy rule (paigasus-iam-core tenancy.rs `check`): organization has no org field; team and project have one. */
+/**
+ * IAM's tenancy rule (paigasus-iam-core tenancy.rs `check`): organization has no org field; team and
+ * project have one. A non-empty REGION is not a tenancy PRN either: TenancyRef drops it and the
+ * builders emit none, so lib/prn.ts refuses it rather than rewriting it (final-review minor 5).
+ */
 function expectedRef(c: FieldsCase): TenancyRef | null {
-  if (c.service !== 'iam' || !TENANCY.has(c.resource_type)) return null;
+  if (c.service !== 'iam' || c.region !== '' || !TENANCY.has(c.resource_type)) return null;
   if (c.resource_type === 'organization') return c.org === '' ? { kind: 'organization', orgId: c.resource_id, id: c.resource_id } : null;
   return c.org === '' ? null : { kind: c.resource_type as 'team' | 'project', orgId: c.org, id: c.resource_id };
 }
@@ -108,6 +112,11 @@ describe('parseTenancyPrn', () => {
     ['a non-tenancy IAM type', `prn:pgs:iam:::user/${TEAM}`],
     ['a malformed org UUID', `prn:pgs:iam::not-a-uuid:team/${TEAM}`],
     ['an upper-case region', `prn:pgs:iam:US-EAST:${ORG}:team/${TEAM}`],
+    // A WELL-FORMED region too: TenancyRef has no region field, so accepting it would let the
+    // builders rewrite the PRN without its region — a silently different resource (minor 5).
+    ['a well-formed region on a team', `prn:pgs:iam:us-east-1:${ORG}:team/${TEAM}`],
+    ['a well-formed region on an organization', `prn:pgs:iam:us-east-1::organization/${ORG}`],
+    ['a well-formed region on a project', `prn:pgs:iam:eu1:${ORG}:project/${TEAM}`],
     ['two slashes in the resource path', `prn:pgs:iam::${ORG}:team/${TEAM}/x`],
     ['the empty string', ''],
     // Valid in every field except its length: 12 + 480 + 1 + 36 + 1 + 5 + 36 = 571 characters. The

@@ -9,7 +9,8 @@ import type { IamClients } from '../../../../lib/iam';
 
 const text = z.string().trim().min(1).max(200);
 
-export const createTeamForm = z.object({ orgPrn: z.string().min(1).max(512), slug: text, name: text });
+/** `.trim()` like every other PRN field (../commands.ts's `prn`): a hidden field can carry whitespace. */
+export const createTeamForm = z.object({ orgPrn: z.string().trim().min(1).max(512), slug: text, name: text });
 export type CreateTeamInput = z.infer<typeof createTeamForm>;
 
 export async function createTeam(deps: { readonly tenancy: Pick<IamClients['tenancy'], 'createTeam'> }, input: CreateTeamInput): Promise<ActionResult> {

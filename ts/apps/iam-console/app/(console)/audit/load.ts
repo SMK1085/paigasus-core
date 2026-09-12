@@ -7,6 +7,7 @@ import { capabilityOutcome } from '@paigasus/discovery/client';
 import type { ServiceState } from '@paigasus/discovery/types';
 import { callIam, type IamResult } from '../../../lib/errors';
 import type { IamClients } from '../../../lib/iam';
+import { PAGE_SIZE } from '../../../lib/paging';
 
 export type AuditGate = 'not-found' | 'degraded' | 'available';
 
@@ -21,7 +22,12 @@ export function auditGate(state: ServiceState): AuditGate {
   return GATE[capabilityOutcome(state, 'iam.audit')];
 }
 
-export const AUDIT_PAGE_SIZE = 50;
+/**
+ * ONE source (final whole-branch review, minor 10). This used to be its own literal `50` beside
+ * lib/paging.ts's `PAGE_SIZE`, so raising one left the other behind. The audit list pages by CURSOR
+ * and the tenancy lists page by OFFSET, but the page SIZE is the same console-wide choice.
+ */
+export const AUDIT_PAGE_SIZE = PAGE_SIZE;
 
 export type AuditRow = {
   readonly id: string;

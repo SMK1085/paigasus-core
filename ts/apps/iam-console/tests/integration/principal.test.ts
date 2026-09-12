@@ -48,6 +48,36 @@ describe('provisioning', () => {
       expect(events()).toEqual([]);
     });
 
+    // lib/auth.ts's factory is async: it reads the request's correlation id, so the login callback's
+    // two IAM calls join the id proxy.ts minted for that request. Drop the `await` in
+    // principal-resolver.ts and `clients` is a Promise, so `clients.serviceInfo` is undefined and
+    // this case logs resolve_crashed instead.
+    it('awaits an async client factory, so the login calls carry the request correlation id', async () => {
+      const correlationId = '0190a1e5-0000-7000-8000-0000000000c1';
+      const { logger, events } = captureLogger();
+      const resolver = createIntrospectPrincipalResolver({
+        clientsForToken: (token) => Promise.resolve(createIamClients({ baseUrl: fake.grpcUrl, token, correlationId })),
+        logger,
+      });
+
+      const principal = await resolver.resolve({ accessToken: 'with-correlation', idTokenClaims: CLAIMS });
+
+      expect(principal.principalPrn).toBe(fake.principalPrnFor('with-correlation'));
+      expect(fake.calls.map((call) => call.method)).toEqual(['serviceInfo.getServiceInfo', 'authn.introspect']);
+      expect(fake.calls.map((call) => call.correlationId)).toEqual([correlationId, correlationId]);
+      expect(events()).toEqual([]);
+    });
+
+    it('logs resolve_crashed when an async client factory rejects', async () => {
+      const { logger, events } = captureLogger();
+      const resolver = createIntrospectPrincipalResolver({ clientsForToken: () => Promise.reject(new Error('no config')), logger });
+
+      const principal = await resolver.resolve({ accessToken: 't', idTokenClaims: CLAIMS });
+
+      expect(principal.principalPrn).toBeNull();
+      expect(events()).toEqual([{ event: 'principal.resolve_crashed', fields: { name: 'Error', message: 'no config' }, time: expect.any(String) as string }]);
+    });
+
     it('degrades to a null principal and logs principal.resolve_failed when IAM refuses', async () => {
       fake.setHandlers({
         'serviceInfo.getServiceInfo': () => {

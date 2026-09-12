@@ -51,6 +51,13 @@ describe('createTeam', () => {
   it('refuses a form without the parent PRN', () => {
     expect(createTeamForm.safeParse({ orgPrn: null, slug: 'a', name: 'A' }).success).toBe(false);
   });
+
+  // Minor 11 of the final whole-branch review: orgPrn lacked the .trim() every other PRN field has,
+  // so a padded hidden field reached IAM as a malformed PRN, and a whitespace-only one passed min(1).
+  it('trims the parent PRN, and refuses one that is only whitespace', () => {
+    expect(createTeamForm.safeParse({ orgPrn: `  ${ORG_A}\n`, slug: 'a', name: 'A' }).data?.orgPrn).toBe(ORG_A);
+    expect(createTeamForm.safeParse({ orgPrn: '   ', slug: 'a', name: 'A' }).success).toBe(false);
+  });
 });
 
 describe('attachMembership', () => {

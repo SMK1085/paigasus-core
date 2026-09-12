@@ -6,6 +6,7 @@
 import 'server-only';
 import { getAuthRuntime, type AuthRuntime } from '@paigasus/auth/server';
 import { getRuntimeConfig } from './config';
+import { requestCorrelationId } from './correlation';
 import { iamClientsForToken } from './iam-clients';
 import { logger } from './logger';
 import { createIntrospectPrincipalResolver } from './principal-resolver';
@@ -17,9 +18,16 @@ import { createIntrospectPrincipalResolver } from './principal-resolver';
  */
 export const SESSION_COOKIE_NAME = '__Host-pgs_sid';
 
+/**
+ * The runtime is a process singleton, but `clientsForToken` runs PER REQUEST, inside the login
+ * callback's route handler. So it reads the correlation id there, and the login-time IAM calls
+ * (GetServiceInfo, Introspect) carry the same id as every later call of that request. proxy.ts sets
+ * the header on `/auth/callback` too — the route is public, which makes the middleware allow it, not
+ * skip the header. Outside a request scope `requestCorrelationId()` answers null, never throws.
+ */
 export function authRuntime(): Promise<AuthRuntime> {
   return getAuthRuntime(getRuntimeConfig(), {
     logger,
-    resolver: createIntrospectPrincipalResolver({ clientsForToken: (token) => iamClientsForToken(token), logger }),
+    resolver: createIntrospectPrincipalResolver({ clientsForToken: async (token) => iamClientsForToken(token, await requestCorrelationId()), logger }),
   });
 }

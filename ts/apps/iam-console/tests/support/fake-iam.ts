@@ -111,7 +111,12 @@ export type FakeIam = {
   readonly grpcUrl: string;
   readonly httpUrl: string;
   readonly calls: FakeIamCall[];
-  callsTo(method: string): FakeIamCall[];
+  /**
+   * The calls to one method. The parameter is the CLOSED set, not `string`: a misspelt name would
+   * otherwise return an empty array and every `toHaveLength(0)` or `.length - before` assertion on
+   * it would pass vacuously (final whole-branch review, minor 7).
+   */
+  callsTo(method: FakeIamMethod | 'http.getServiceInfo'): FakeIamCall[];
   /** Tokens that have made a bearer-enforced call, gRPC or HTTP. */
   readonly provisioned: Set<string>;
   /** The principal PRN the default Introspect answer reports for this token. Stable per token. */

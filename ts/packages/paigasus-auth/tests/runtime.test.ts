@@ -107,25 +107,54 @@ describe('createAuthRuntime', () => {
 });
 
 // The cache lives on globalThis (runtime.ts), so `vi.resetModules()` alone no longer clears it.
-// The key comes from the GLOBAL symbol registry, the same way runtime.ts creates it, so this test
-// file needs no export of its own from the source.
-const RUNTIME_KEY: unique symbol = Symbol.for('paigasus.auth.runtime');
+// The key comes from the GLOBAL symbol registry, the same way runtime.ts builds it, so this test
+// file needs no export of its own from the source. It is keyed BY ZONE (SMA-511 final review,
+// minor 8), so clearing it takes the zone as well.
+const ZONES = ['iam', 'gateway', 'ghost'] as const;
 
 function clearSharedRuntime(): void {
-  delete (globalThis as typeof globalThis & { [RUNTIME_KEY]?: unknown })[RUNTIME_KEY];
+  for (const zone of ZONES) {
+    delete (globalThis as typeof globalThis & Record<symbol, unknown>)[Symbol.for(`paigasus.auth.runtime.v1:${zone}`)];
+  }
 }
+
+/** The one failing config that keeps BASE's zone, so it lands in the SAME cache slot as BASE. */
+const SAME_ZONE_BUT_INVALID = { ...BASE, PAIGASUS_OIDC_HTTP_TIMEOUT_MS: 5000, PAIGASUS_SESSION_LOCK_TTL_MS: 10000 };
 
 describe('getAuthRuntime', () => {
   beforeEach(clearSharedRuntime);
 
-  // "One runtime per process": the promise is cached after the first successful call and every
-  // later call's arguments are ignored — proven here by passing a config on the SECOND call that
-  // would throw if it were actually re-validated (an unknown zone), and observing no throw and
-  // reference equality with the first call's result instead.
+  // "One runtime per zone": the promise is cached after the first successful call and every later
+  // call's arguments are ignored — proven here by passing a config on the SECOND call that would
+  // throw if it were actually re-validated (an http timeout at the lock-TTL boundary), and
+  // observing no throw and reference equality with the first call's result instead.
   it('caches the runtime across calls regardless of later arguments', async () => {
     const rt1 = await getAuthRuntime(BASE);
-    const rt2 = await getAuthRuntime({ ...BASE, PAIGASUS_ZONE: 'ghost' });
+    const rt2 = await getAuthRuntime(SAME_ZONE_BUT_INVALID);
     expect(rt2).toBe(rt1);
+  });
+
+  // SMA-511 final review, minor 8. The key used to be one bare symbol for the whole process, so
+  // two zone apps composed into one process (the shape SMA-513 assembles) shared ONE runtime: the
+  // second zone would get the first zone's basePath, redirect URI and post-logout URI, and every
+  // login would leave it. Each config below declares its own single-zone map, because the memory
+  // store refuses a map with more than one zone.
+  it('gives each zone its own runtime in one process', async () => {
+    const iam = await getAuthRuntime(BASE);
+    const gateway = await getAuthRuntime({ ...BASE, PAIGASUS_ZONE: 'gateway', PAIGASUS_ZONES: { gateway: '/gateway' } });
+
+    expect(gateway).not.toBe(iam);
+    expect(iam.zone).toBe('iam');
+    expect(iam.basePath).toBe('/iam');
+    expect(gateway.zone).toBe('gateway');
+    expect(gateway.basePath).toBe('/gateway');
+    expect(gateway.redirectUri).toBe('https://app.example.com/gateway/auth/callback');
+  });
+
+  it('still answers one runtime per zone when the two zones are asked for repeatedly', async () => {
+    const gatewayCfg = { ...BASE, PAIGASUS_ZONE: 'gateway', PAIGASUS_ZONES: { gateway: '/gateway' } };
+    expect(await getAuthRuntime(BASE)).toBe(await getAuthRuntime(BASE));
+    expect(await getAuthRuntime(gatewayCfg)).toBe(await getAuthRuntime(gatewayCfg));
   });
 
   // SMA-511 Task 22. Next compiles a route handler and a server component into separate module
@@ -160,13 +189,17 @@ describe('getAuthRuntime', () => {
 // and leaves every other test in this file green. SMA-511 Task 22 moved that cache from a
 // module-level variable to globalThis, so each test now clears the global slot rather than calling
 // vi.resetModules(), which no longer reaches it.
+// The failing config MUST keep BASE's zone (SMA-511 final review, minor 8): the cache is keyed by
+// zone, so the old `PAIGASUS_ZONE: 'ghost'` config now lands in a DIFFERENT slot and the recovery
+// below would succeed with the reset deleted — a vacuous pass. SAME_ZONE_BUT_INVALID fails the
+// 2 * httpTimeoutMs < lockTtlMs rule while staying on zone `iam`.
 describe('getAuthRuntime failure reset (SMA-626 § 5, guard 3)', () => {
   it('lets a later call succeed after the first one rejected', async () => {
     clearSharedRuntime(); // ONCE — see the block comment above.
     const mod = await import('../src/runtime.js');
 
-    await expect(mod.getAuthRuntime({ ...BASE, PAIGASUS_ZONE: 'ghost' })).rejects.toMatchObject({
-      message: 'PAIGASUS_ZONE has no entry in PAIGASUS_ZONES',
+    await expect(mod.getAuthRuntime(SAME_ZONE_BUT_INVALID)).rejects.toMatchObject({
+      message: '2x PAIGASUS_OIDC_HTTP_TIMEOUT_MS must be strictly below PAIGASUS_SESSION_LOCK_TTL_MS',
     });
 
     // The SAME module instance. Without the reset in the catch, this replays the rejection above.
@@ -178,9 +211,9 @@ describe('getAuthRuntime failure reset (SMA-626 § 5, guard 3)', () => {
     clearSharedRuntime();
     const mod = await import('../src/runtime.js');
 
-    await expect(mod.getAuthRuntime({ ...BASE, PAIGASUS_ZONE: 'ghost' })).rejects.toThrow();
+    await expect(mod.getAuthRuntime(SAME_ZONE_BUT_INVALID)).rejects.toThrow();
     const first = await mod.getAuthRuntime(BASE);
-    const second = await mod.getAuthRuntime({ ...BASE, PAIGASUS_ZONE: 'ghost' });
+    const second = await mod.getAuthRuntime(SAME_ZONE_BUT_INVALID);
 
     expect(second).toBe(first);
   });

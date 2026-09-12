@@ -87,10 +87,22 @@ function redisDescriptorCache(url: string, timeoutMs: number, log: ConsoleLogger
   return afterConnect(inner, connectOnce(client, timeoutMs, log));
 }
 
-/** The process-wide descriptor cache for this configuration. */
+/**
+ * The process-wide descriptor cache for this configuration.
+ *
+ * NO SILENT FALLBACK (see the file header), so `redis` with no URL THROWS. That pair reaches this
+ * function: lib/config.ts's zod shape is flat and cannot express the cross-field rule, and
+ * `createAuthRuntime` — which does hold that rule — may not have run yet for this request. The old
+ * code read the pair as "use memory", which is the exact silent downgrade the header forbids: every
+ * zone would then cache descriptors in its own process and AC 2 would not hold. The message names
+ * the two variables and never the URL, which carries a password.
+ */
 export function descriptorCacheFor(config: ConsoleConfig, log: ConsoleLogger = logger): DescriptorCache {
   if (processCache !== undefined) return processCache;
-  if (config.PAIGASUS_SESSION_STORE === 'redis' && config.PAIGASUS_SESSION_REDIS_URL !== undefined) {
+  if (config.PAIGASUS_SESSION_STORE === 'redis') {
+    if (config.PAIGASUS_SESSION_REDIS_URL === undefined) {
+      throw new Error('PAIGASUS_SESSION_REDIS_URL is required when PAIGASUS_SESSION_STORE is "redis"');
+    }
     processCache = redisDescriptorCache(config.PAIGASUS_SESSION_REDIS_URL, config.PAIGASUS_SESSION_REDIS_TIMEOUT_MS, log);
   } else {
     processCache = createMemoryDescriptorCache();

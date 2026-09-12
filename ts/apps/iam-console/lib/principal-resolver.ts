@@ -22,7 +22,12 @@ import type { ConsoleLogger } from './logger';
 const DEFAULT_TIMEOUT_MS = 3_000;
 
 export function createIntrospectPrincipalResolver(deps: {
-  clientsForToken: (token: string) => Pick<IamClients, 'authn' | 'serviceInfo'>;
+  /**
+   * May be async: lib/auth.ts reads the request's correlation id here, so the login callback's IAM
+   * calls join the id proxy.ts minted. A factory that throws — or a promise that rejects — is a bug,
+   * not an IAM answer, so it lands in the `resolve_crashed` catch below like any other throw.
+   */
+  clientsForToken: (token: string) => Pick<IamClients, 'authn' | 'serviceInfo'> | Promise<Pick<IamClients, 'authn' | 'serviceInfo'>>;
   logger: ConsoleLogger;
   timeoutMs?: number;
 }): PrincipalResolver {
@@ -51,7 +56,7 @@ export function createIntrospectPrincipalResolver(deps: {
       // Anything that instead THROWS out of the try — a bug, not an IAM answer — is caught here and
       // logs `principal.resolve_crashed`, so an operator can tell a console bug from an IAM outage.
       try {
-        const clients = deps.clientsForToken(accessToken);
+        const clients = await deps.clientsForToken(accessToken);
         // 1. The provisioning call, with the NEW token as the bearer.
         const provisioned = await callIam(() => clients.serviceInfo.getServiceInfo({}, { timeoutMs }));
         if (!provisioned.ok) return degraded(provisioned.error.presentation);
