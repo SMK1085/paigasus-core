@@ -189,7 +189,9 @@ jobs:
       # this step installs Chromium for both packages, not just @paigasus/auth.
       # `@paigasus/app-shell` needs it too (SMA-510): its `test-e2e` task builds a Next fixture and
       # drives it with Playwright to prove that a cross-zone link is a hard navigation.
-      - name: Install Playwright Chromium (for the test-e2e tasks of @paigasus/auth, @paigasus/discovery and @paigasus/app-shell)
+      # `@paigasus/iam-console` needs it too (SMA-511): its test-e2e task drives the standalone
+      # server through a TLS terminator.
+      - name: Install Playwright Chromium (for the test-e2e tasks of @paigasus/auth, @paigasus/discovery, @paigasus/app-shell and @paigasus/iam-console)
         # Run from the PACKAGE, not the ts workspace root: @playwright/test is a devDependency of
         # each package, so `playwright` is only on that package's node_modules/.bin. From ts/ it
         # fails with ERR_PNPM_RECURSIVE_EXEC_FIRST_FAIL, "Command playwright not found" (MEASURED).
@@ -198,6 +200,7 @@ jobs:
           pnpm --dir ts/packages/paigasus-auth exec playwright install --with-deps chromium
           pnpm --dir ts/packages/paigasus-discovery exec playwright install --with-deps chromium
           pnpm --dir ts/packages/paigasus-app-shell exec playwright install --with-deps chromium
+          pnpm --dir ts/apps/iam-console exec playwright install --with-deps chromium
 
       - name: Validate commit messages (commitlint parity gate)
         # PRs only: commitlint gates commits BEFORE they merge (SMA-371 AC-E, "on every PR").

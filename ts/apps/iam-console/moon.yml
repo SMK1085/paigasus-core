@@ -200,3 +200,52 @@ tasks:
       - '/rs/crates/libs/paigasus-iam-core/src/authz/model.rs'
     options:
       merge: replace
+
+  test-e2e:
+    # The e2e tier (spec § 9.4): Playwright against the standalone server.js behind a TLS
+    # terminator, with an in-process fake IAM and fake IdP. No Docker. `script` (not `command`):
+    # Moon's `command` refuses shell syntax. `set -euo pipefail` because Moon does not enable
+    # errexit for `script:` blocks. The server's lifecycle belongs to tests/e2e/support/harness.ts;
+    # a shell `&` here left an orphan server in the SMA-510 spike.
+    script: |
+      set -euo pipefail
+      pnpm exec playwright test
+    deps:
+      # The production build. On a cache hit Moon restores `.next`, standalone tree included.
+      - '~:build'
+      # repo:next-env-drift writes into .next too; the same serialization `test` has.
+      - 'repo:next-env-drift'
+    # A NEW task name, so it inherits NOTHING: every input is listed.
+    inputs:
+      - '@group(sources)'
+      - 'app/**/*'
+      - 'lib/**/*'
+      - 'proxy.ts'
+      - 'tests/**/*'
+      - '!tests/fixtures/**/.next/**'
+      - '!tests/fixtures/*/next-env.d.ts'
+      - 'package.json'
+      - 'tsconfig.json'
+      - 'next.config.ts'
+      - 'postcss.config.mjs'
+      - 'playwright.config.ts'
+      - '/ts/pnpm-lock.yaml'
+      - '/ts/tsconfig.base.json'
+      - '/ts/packages/paigasus-next-config/src/**/*'
+      - '/ts/packages/paigasus-next-config/package.json'
+      - '/ts/packages/paigasus-next-config/tsconfig.app.json'
+      - '/ts/packages/paigasus-ui/src/**/*'
+      - '/ts/packages/paigasus-ui/package.json'
+      - '/ts/packages/paigasus-auth/src/**/*'
+      - '/ts/packages/paigasus-auth/package.json'
+      - '/ts/packages/paigasus-sdk/src/**/*'
+      - '/ts/packages/paigasus-sdk/package.json'
+      - '/ts/packages/paigasus-discovery/src/**/*'
+      - '/ts/packages/paigasus-discovery/package.json'
+      - '/ts/packages/paigasus-app-shell/src/**/*'
+      - '/ts/packages/paigasus-app-shell/package.json'
+      - '/ts/packages/paigasus-proto/src/**/*'
+      - '/ts/packages/paigasus-proto/package.json'
+    options:
+      # A real build and a real Chromium. A cached PASS would replay a green that tested nothing.
+      cache: false
