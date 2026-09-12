@@ -20,7 +20,7 @@ import { getPublicConfig } from '../../lib/config';
 import { discovery } from '../../lib/discovery';
 import { currentSession } from '../../lib/iam';
 import { mayI } from '../../lib/authorize';
-import { ROOT_PRN } from '../../lib/prn';
+import { ROOT_PRN } from '../../lib/prn-tenancy';
 import { myScopes, switcherOrgs } from '../../lib/scopes';
 import { OrgSwitcherShell } from '../_components/org-switcher';
 import { Providers } from '../providers';

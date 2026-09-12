@@ -7,7 +7,7 @@
 // IAM cannot make: a project PRN holds no team, so only GetProject's team_prn shows a wrong [team].
 // On a mismatch the page renders notFound(). This is not an access check: IAM is that.
 import 'server-only';
-import { parseTenancyPrn, type TenancyKind } from '../../../lib/prn';
+import { parseTenancyPrn, type TenancyKind } from '../../../lib/prn-tenancy';
 
 export function sameNode(prn: string, kind: TenancyKind, id: string): boolean {
   const ref = parseTenancyPrn(prn);

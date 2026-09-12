@@ -10,7 +10,7 @@
 // test cannot see the organizations of an earlier test. R6 uses it to prove that the action
 // refreshes the page (P5b-16).
 //
-// PRNs are literal strings: lib/prn.ts imports server-only, which throws under Playwright.
+// PRNs are literal strings: lib/prn-tenancy.ts imports server-only, which throws under Playwright.
 import { Code } from '@connectrpc/connect';
 import { denial, type FakeIamHandlers } from '../../support/fake-iam';
 

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { describe, expect, it } from 'vitest';
 import { sameNode } from '../../app/(console)/orgs/node-ref';
-import { organizationPrn, projectPrn, teamPrn } from '../../lib/prn';
+import { organizationPrn, projectPrn, teamPrn } from '../../lib/prn-tenancy';
 
 const ORG = '0190a100-0000-7000-8000-00000000000a';
 const OTHER = '0190a100-0000-7000-8000-00000000000b';

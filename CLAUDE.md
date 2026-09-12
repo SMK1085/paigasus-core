@@ -173,10 +173,15 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
 - Never name a source file with a base name that is a **Windows reserved device name**
   (`CON`, `PRN`, `AUX`, `NUL`, `COM1`–`COM9`, `LPT1`–`LPT9`) — `PRN.<ext>` etc. are reserved
   too, so git can't check the file out on Windows (`error: invalid path …`). The Linux-only
-  `CI` gate passes; only the Windows `prebuild` matrix job catches it — and `prebuild` runs
-  ONLY on push-to-`main` / `workflow_dispatch`, NOT on PRs, so the bad path is green on the PR
-  and reds `main` after merge (SMA-448: `prn.rs` → `resource_name.rs`). An underscore/hyphen
-  suffix (`prn_canonical`, `prn-fields`) is fine.
+  `CI` gate passes; only a Windows matrix job catches it — `prebuild`'s `build win32-x64-msvc`
+  and `wheels`' `wheel win-amd64`. Both DO carry a `pull_request` trigger, but a PATH-FILTERED
+  one (`.moon/**`, `.prototools`, `ts/pnpm-lock.yaml`, …), so whether a PR sees the failure
+  depends on what else the PR touches, not on the bad file: SMA-448 (`prn.rs` →
+  `resource_name.rs`) was green on the PR and red on `main`, while SMA-511
+  (`ts/apps/iam-console/lib/prn.ts` → `prn-tenancy.ts`) reddened both Windows legs on the PR
+  because it also touched `.moon/**`. The rule is language-neutral: it bit a `.rs` file and a
+  `.ts` file the same way. An underscore/hyphen suffix (`prn_canonical`, `prn-fields`,
+  `prn-tenancy`) is fine.
 - Per-project Moon tasks (`<proj>:build/test/lint/fmt`) do NOT run the repo-level gates
   (e.g. `:deny`, `:osv`, `:machete`, `:affected-smoke`, codegen-drift, CODEOWNERS). Before pushing
   new crates/deps/proto, run the full graph like CI does. The command between the markers below is
@@ -969,9 +974,11 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   `["index.js", "index.d.ts"]`, so pnpm never copies the `.node` binary into `node_modules`, and
   `next build` fails at "Collecting page data" with `Cannot find native binding`. Every Node consumer
   of `@paigasus/kernel` has the same defect.
-  The iam-console's `lib/prn.ts` is a small reader for the IAM tenancy PRN shapes (decision D6,
-  fallback C). It is a recorded ADR-0005 exception, and `tests/unit/prn.test.ts` replays the kernel
-  parity corpus through it, so a divergence from the kernel reds `iam-console-ts:test`.
+  The iam-console's `lib/prn-tenancy.ts` is a small reader for the IAM tenancy PRN shapes
+  (decision D6, fallback C). It is a recorded ADR-0005 exception, and
+  `tests/unit/prn-tenancy.test.ts` replays the kernel parity corpus through it, so a divergence
+  from the kernel reds `iam-console-ts:test`. The name carries the `-tenancy` suffix because a
+  bare `prn.ts` is a Windows reserved device name (see the gotcha above).
 - **`forbidden()` needs `experimental.authInterrupts`, and a React `cache()` value does not reach
   `forbidden.tsx`** (MEASURED on Next 16.3.4, SMA-511). Without the flag, `forbidden()` throws
   instead of rendering the 403 boundary. The iam-console sets it through

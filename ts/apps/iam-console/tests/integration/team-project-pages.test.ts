@@ -12,7 +12,7 @@ import { createProject, createProjectForm } from '../../app/(console)/orgs/[org]
 import { loadTeamPage } from '../../app/(console)/orgs/[org]/teams/[team]/load';
 import { loadProjectPage } from '../../app/(console)/orgs/[org]/teams/[team]/projects/[project]/load';
 import { PAGE_SIZE } from '../../lib/paging';
-import { organizationPrn, projectPrn, teamPrn } from '../../lib/prn';
+import { organizationPrn, projectPrn, teamPrn } from '../../lib/prn-tenancy';
 import { denial, startFakeIam, type FakeIam, type FakeIamHandlers } from '../support/fake-iam';
 import { IDS, callsSince, clientsFor, scriptedMayI } from './support';
 

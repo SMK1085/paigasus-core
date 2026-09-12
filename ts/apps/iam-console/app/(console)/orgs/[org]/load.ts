@@ -10,7 +10,7 @@ import type { MayI } from '../../../../lib/authorize';
 import { callIam, type IamResult } from '../../../../lib/errors';
 import type { IamClients } from '../../../../lib/iam';
 import { PAGE_SIZE, nextOffset } from '../../../../lib/paging';
-import { isUuid, organizationPrn, parseTenancyPrn } from '../../../../lib/prn';
+import { isUuid, organizationPrn, parseTenancyPrn } from '../../../../lib/prn-tenancy';
 import { loadMembers, type MembersData } from '../members';
 
 export type TeamRow = { readonly prn: string; readonly teamId: string | null; readonly slug: string; readonly name: string };

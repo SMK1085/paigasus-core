@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// lib/prn.ts against the kernel (SMA-511 spec § 4.7, decision D6). The corpus rows are the SAME
+// lib/prn-tenancy.ts against the kernel (SMA-511 spec § 4.7, decision D6). The corpus rows are the SAME
 // vectors every kernel binding replays (rs/crates/libs/paigasus-kernel-parity/vectors/), so a reader
 // that drifts from the Rust grammar fails here. This suite tests the INTERFACE, so it is the same for
-// both implementations of lib/prn.ts (the kernel wasm binding, or the fallback reader).
+// both implementations of lib/prn-tenancy.ts (the kernel wasm binding, or the fallback reader).
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { ROOT_PRN, isUuid, organizationPrn, parseTenancyPrn, projectPrn, teamPrn, type TenancyRef } from '../../lib/prn';
+import { ROOT_PRN, isUuid, organizationPrn, parseTenancyPrn, projectPrn, teamPrn, type TenancyRef } from '../../lib/prn-tenancy';
 
 // tests/unit -> tests -> iam-console -> apps -> ts -> repo root: five `../`.
 const REPO_ROOT = new URL('../../../../../', import.meta.url);
@@ -33,7 +33,7 @@ const TEAM = '0190a1b2-0000-7000-8000-000000000001';
 /**
  * IAM's tenancy rule (paigasus-iam-core tenancy.rs `check`): organization has no org field; team and
  * project have one. A non-empty REGION is not a tenancy PRN either: TenancyRef drops it and the
- * builders emit none, so lib/prn.ts refuses it rather than rewriting it (final-review minor 5).
+ * builders emit none, so lib/prn-tenancy.ts refuses it rather than rewriting it (final-review minor 5).
  */
 function expectedRef(c: FieldsCase): TenancyRef | null {
   if (c.service !== 'iam' || c.region !== '' || !TENANCY.has(c.resource_type)) return null;
@@ -52,7 +52,7 @@ function build(ref: TenancyRef): string {
   }
 }
 
-describe('lib/prn.ts against the kernel parity corpus', () => {
+describe('lib/prn-tenancy.ts against the kernel parity corpus', () => {
   // Without this, an emptied or reshaped corpus would make every case below pass vacuously.
   it('holds a vector of each tenancy kind, a non-tenancy vector and an invalid vector', () => {
     const kinds = new Set(

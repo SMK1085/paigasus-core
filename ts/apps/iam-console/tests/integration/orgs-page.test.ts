@@ -8,7 +8,7 @@ import { disposeTransports } from '@paigasus/sdk/iam';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { loadOrganizationsPage } from '../../app/(console)/orgs/load';
 import { PAGE_SIZE } from '../../lib/paging';
-import { ROOT_PRN, organizationPrn } from '../../lib/prn';
+import { ROOT_PRN, organizationPrn } from '../../lib/prn-tenancy';
 import { denial, startFakeIam, type FakeIam } from '../support/fake-iam';
 import { callsSince, clientsFor, scriptedMayI } from './support';
 

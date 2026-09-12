@@ -8,7 +8,7 @@ import { Code } from '@connectrpc/connect';
 import type { ServiceState } from '@paigasus/discovery/types';
 import { disposeTransports } from '@paigasus/sdk/iam';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { ROOT_PRN, organizationPrn, projectPrn, teamPrn } from '../../lib/prn';
+import { ROOT_PRN, organizationPrn, projectPrn, teamPrn } from '../../lib/prn-tenancy';
 import { SCOPE_CAP, cedarCapabilityOf, loadMyScopes } from '../../lib/scopes';
 import { denial, startFakeIam, type FakeIam, type FakeIamHandlers } from '../support/fake-iam';
 import { IDS, callsSince, clientsFor } from './support';

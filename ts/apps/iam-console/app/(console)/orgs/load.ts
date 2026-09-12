@@ -7,7 +7,7 @@ import type { MayI } from '../../../lib/authorize';
 import { callIam, type IamResult } from '../../../lib/errors';
 import type { IamClients } from '../../../lib/iam';
 import { PAGE_SIZE, nextOffset } from '../../../lib/paging';
-import { ROOT_PRN, parseTenancyPrn } from '../../../lib/prn';
+import { ROOT_PRN, parseTenancyPrn } from '../../../lib/prn-tenancy';
 
 export type OrganizationRow = { readonly prn: string; readonly orgId: string | null; readonly slug: string; readonly name: string };
 export type OrganizationList = { readonly rows: readonly OrganizationRow[]; readonly offset: number; readonly nextOffset: number | null };

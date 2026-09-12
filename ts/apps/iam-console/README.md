@@ -62,5 +62,5 @@ No tier needs Docker or a live service.
 - `forbidden()` needs the experimental `authInterrupts` flag. E2e row R4 asserts the real HTTP 403, so a Next upgrade that changes the flag reds CI. The fallback, an inline view with status 200, is recorded in spec § 6.2 and not built.
 - The 403 view shows the correlation id only when `FORBIDDEN_VIEW_CORRELATION` (`lib/correlation.ts`) is `'header'`. When it is `'fallback'`, `callIam` logs the id with the path, and the section and form 403s show it.
 - The console layout calls `myScopes()` on every console page for the organization switcher. That is one `Introspect`, up to ten `ListRoleGrants` pages and up to 50 tenancy reads per render. The cost is not measured (spec § 12). If it is too slow, a short-lived per-session cache is the next step.
-- `lib/prn.ts` is a recorded ADR-0005 exception (decision D6, fallback C). `tests/unit/prn.test.ts` holds it to the kernel: it replays every vector of the kernel parity corpus.
+- `lib/prn-tenancy.ts` is a recorded ADR-0005 exception (decision D6, fallback C). `tests/unit/prn-tenancy.test.ts` holds it to the kernel: it replays every vector of the kernel parity corpus.
 - The kernel's napi binding cannot load in a Next build, because `@paigasus/node-bindings` ships no `.node` binary. The defect stays open for every Node consumer of `@paigasus/kernel` (SMA-634).

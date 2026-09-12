@@ -8,7 +8,7 @@ import { PageError } from '../../../../../../../_components/page-error';
 import { mayI } from '../../../../../../../../lib/authorize';
 import { iamClients } from '../../../../../../../../lib/iam';
 import { parseOffset } from '../../../../../../../../lib/paging';
-import { isUuid } from '../../../../../../../../lib/prn';
+import { isUuid } from '../../../../../../../../lib/prn-tenancy';
 import { MembersSection } from '../../../../../members-section';
 import { loadProjectPage } from './load';
 

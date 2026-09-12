@@ -5,7 +5,7 @@
 // A RECORDED ADR-0005 EXCEPTION (spec § 12). PRN logic belongs to paigasus-kernel. The kernel's napi
 // binding cannot load in a Next build (spec § 13 row 5), and the wasm spike did not pass (spec § 13
 // row 10). So this module holds a small reader for the THREE tenancy shapes only. It is held to the
-// kernel by tests/unit/prn.test.ts, which runs every vector of the kernel parity corpus
+// kernel by tests/unit/prn-tenancy.test.ts, which runs every vector of the kernel parity corpus
 // (rs/crates/libs/paigasus-kernel-parity/vectors/) through it: a divergence from the kernel fails CI.
 //
 // The grammar is the kernel's (rs/crates/libs/paigasus-kernel/src/resource_name.rs):
