@@ -3,13 +3,12 @@
 // The auth composition root (spec § 4.2). getAuthRuntime is a PROCESS singleton that returns a
 // Promise (ts/packages/paigasus-auth/src/runtime.ts:185), and its first call fixes the resolver and
 // the logger for the life of the process. Nothing here runs at module scope.
-//
-// Task 13 adds the Introspect principal resolver. Until then the package's claims resolver runs,
-// which reports principalPrn: null (ts/packages/paigasus-auth/src/adapters/claims-resolver.ts).
 import 'server-only';
 import { getAuthRuntime, type AuthRuntime } from '@paigasus/auth/server';
 import { getRuntimeConfig } from './config';
+import { iamClientsForToken } from './iam-clients';
 import { logger } from './logger';
+import { createIntrospectPrincipalResolver } from './principal-resolver';
 
 /**
  * The session cookie's name. @paigasus/auth does not export it from any entry an app may import,
@@ -19,5 +18,8 @@ import { logger } from './logger';
 export const SESSION_COOKIE_NAME = '__Host-pgs_sid';
 
 export function authRuntime(): Promise<AuthRuntime> {
-  return getAuthRuntime(getRuntimeConfig(), { logger });
+  return getAuthRuntime(getRuntimeConfig(), {
+    logger,
+    resolver: createIntrospectPrincipalResolver({ clientsForToken: (token) => iamClientsForToken(token), logger }),
+  });
 }
