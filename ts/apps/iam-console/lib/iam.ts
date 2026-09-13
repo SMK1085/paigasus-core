@@ -10,12 +10,11 @@ import 'server-only';
 import { cache } from 'react';
 import { getSession, requireSession, type ResolvedSession } from '@paigasus/auth/server';
 import { authRuntime } from './auth';
-import { requestCorrelationId } from './correlation';
-import type { IamResult } from './errors';
 import { sessionExpired } from './form';
-import { iamClientsForToken, type IamClients } from './iam-clients';
+import { iamClientsForToken } from './iam-clients';
+import { requestCorrelationId, type IamClients, type IamResult } from '@paigasus/console-core';
 
-export type { IamClients } from './iam-clients';
+export type { IamClients } from '@paigasus/console-core';
 
 /** The session for this request. Redirects to login when there is none. PAGE RENDERS ONLY. */
 export const currentSession: () => Promise<ResolvedSession> = cache(async () => requireSession(await authRuntime()));

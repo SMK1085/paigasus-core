@@ -3,7 +3,7 @@
 // The create-project command (spec § 5.3). It takes NO mayI: IAM decides (spec § 6.3).
 import 'server-only';
 import { z } from 'zod';
-import { callIam } from '../../../../../../lib/errors';
+import { callIam } from '@paigasus/console-core';
 import { toActionResult, type ActionResult } from '../../../../../../lib/form';
 import type { IamClients } from '../../../../../../lib/iam';
 

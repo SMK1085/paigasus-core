@@ -9,7 +9,7 @@ import 'server-only';
 import { ConnectError } from '@connectrpc/connect';
 import { mapError, type PaigasusError } from '@paigasus/sdk/errors';
 import { requestCorrelationId, requestPath } from './correlation';
-import { logger } from '@paigasus/console-core';
+import { logger } from './logger';
 
 export type IamResult<T> = { ok: true; value: T } | { ok: false; error: PaigasusError };
 

@@ -9,7 +9,7 @@
 // renderToStaticMarkup, which cannot suspend on an unawaited async component.
 import type { ReactElement } from 'react';
 import type { PaigasusError } from '@paigasus/sdk/errors';
-import { requestPath } from '../../lib/correlation';
+import { requestPath } from '@paigasus/console-core';
 import { CorrelationReference, SignInAgain } from './error-reference';
 
 export async function errorTail(error: PaigasusError): Promise<ReactElement> {

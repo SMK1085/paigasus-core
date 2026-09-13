@@ -12,7 +12,7 @@
 import type { ReactElement } from 'react';
 import { ZoneLink } from '@paigasus/app-shell';
 import { ErrorState } from '@paigasus/ui';
-import { FORBIDDEN_VIEW_CORRELATION, requestCorrelationId } from '../../lib/correlation';
+import { FORBIDDEN_VIEW_CORRELATION, requestCorrelationId } from '@paigasus/console-core';
 import { PRESENTATION_COPY } from '../_components/error-copy';
 import { CorrelationReference } from '../_components/error-reference';
 

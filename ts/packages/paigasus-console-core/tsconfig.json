@@ -1,9 +1,10 @@
 {
   "extends": "../../tsconfig.base.json",
-  "_comment_types": "ts/tsconfig.base.json sets lib: [\"ES2022\"] and no types, under which Headers, fetch and ReadableStream do not exist. `types: [\"node\"]` supplies them WITHOUT pulling in the DOM lib. This package is server-only composition, the way @paigasus/sdk's is — its own boundary rule bans react-dom and next/navigation from src/ — so there is no `jsx` option and no DOM lib to catch a stray `window` or `document` reference. Matches ts/packages/paigasus-sdk/tsconfig.json.",
+  "_comment_types": "ts/tsconfig.base.json sets lib: [\"ES2022\"] and no types, under which Headers, fetch and ReadableStream do not exist. `types: [\"node\"]` supplies them WITHOUT pulling in the DOM lib. This package is server-only composition, the way @paigasus/sdk's is — its own boundary rule bans react-dom and next/navigation from src/ — so there is no `jsx` option and `src/**/*` itself needs no DOM lib to catch a stray `window` or `document` reference. Matches ts/packages/paigasus-sdk/tsconfig.json.",
+  "_comment_dom": "TEMPORARY (SMA-512 PR 2, task 3 → task 4). \"DOM\" is added to `lib` below ONLY because tsc type-checks a whole program: tests/integration/principal.test.ts reaches into the app's lib/authorize.ts and lib/principal.ts (task 3 → task 4 marker), and both transitively import lib/iam.ts, which imports lib/form.ts — a file that uses FormData/FormDataEntryValue and stays in the app. No file under src/ uses a DOM type; this is purely to let that reached-into subtree type-check. Task 4 should re-examine whether this is still needed once authorize.ts/principal.ts move: iam.ts moves into the package too, and its own need of lib/form.ts (which is NOT in task 4's move list) may keep this DOM dependency alive rather than remove it.",
   "_comment_include": "tests/ and vitest.config.ts must be in the program: ts/eslint.config.js applies type-checked rules with projectService:true to every **/*.{ts,tsx}, and `ts:lint` runs `eslint .` over the whole tree — a file in no program errors there. Same shape and reason as ts/packages/paigasus-discovery/tsconfig.json.",
   "compilerOptions": {
-    "lib": ["ES2022"],
+    "lib": ["ES2022", "DOM"],
     "types": ["node"],
     "noEmit": true
   },

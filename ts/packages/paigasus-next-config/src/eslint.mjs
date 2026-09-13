@@ -215,8 +215,21 @@ export const boundaryRules = [
         message: '@paigasus/console-core reaches proto through @paigasus/sdk, never directly (§ 5.5). The testing/ subpath is the exception.',
       },
       {
-        group: ['react-dom', 'react-dom/*', 'next/navigation'],
+        group: ['react-dom', 'react-dom/*'],
         message: '@paigasus/console-core is server-only composition. React components belong in the app or in @paigasus/ui (§ 5.2).',
+      },
+      {
+        // SMA-512 PR 2, task 3: `unstable_rethrow` is the one named export ALLOWED from
+        // `next/navigation`. It is not a React component and it never triggers Next's
+        // control-flow signals (redirect/notFound/forbidden/unauthorized) — it only detects and
+        // re-throws one a caller already threw, which is exactly callIam's (src/errors.ts) job:
+        // rethrow everything that is not a ConnectError, unchanged. Every other export — the
+        // hooks, and the functions that DO trigger a signal — stays banned, so a future export
+        // added to next/navigation is banned by default, not admitted by omission.
+        group: ['next/navigation'],
+        allowImportNames: ['unstable_rethrow'],
+        message:
+          '@paigasus/console-core is server-only composition. React components and Next’s render-time navigation helpers belong in the app or in @paigasus/ui (§ 5.2); unstable_rethrow is the one exception.',
       },
     ]),
   },

@@ -11,7 +11,7 @@
 import 'server-only';
 import { headers } from 'next/headers';
 import { unstable_rethrow } from 'next/navigation';
-import { CORRELATION_HEADER, REQUEST_PATH_HEADER } from '@paigasus/console-core';
+import { CORRELATION_HEADER, REQUEST_PATH_HEADER } from './correlation-header';
 
 export { CORRELATION_HEADER, REQUEST_PATH_HEADER };
 

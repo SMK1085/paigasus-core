@@ -5,7 +5,7 @@
 // who may act — and answers with a reason the form copy knows (spec § 6.5).
 import 'server-only';
 import type { PaigasusError } from '@paigasus/sdk/errors/types';
-import type { ActionState, IamResult } from './errors';
+import type { ActionState, IamResult } from '@paigasus/console-core';
 
 /** What a command returns. `null` is only the initial state of `useActionState`. */
 export type ActionResult = Exclude<ActionState, null>;

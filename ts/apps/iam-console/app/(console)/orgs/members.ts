@@ -4,7 +4,7 @@
 // lets a non-admin list memberships: ListMemberships(node_prn) checks against the node.
 import 'server-only';
 import type { MayI } from '../../../lib/authorize';
-import { callIam, type IamResult } from '../../../lib/errors';
+import { callIam, type IamResult } from '@paigasus/console-core';
 import type { IamClients } from '../../../lib/iam';
 import { PAGE_SIZE, nextOffset } from '../../../lib/paging';
 

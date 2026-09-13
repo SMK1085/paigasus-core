@@ -2,7 +2,7 @@
 //
 // lib/correlation.ts: the two request headers proxy.ts sets, read back defensively.
 import { describe, expect, it } from 'vitest';
-import { CORRELATION_HEADER, REQUEST_PATH_HEADER, requestCorrelationId, requestPath } from '../../lib/correlation';
+import { CORRELATION_HEADER, REQUEST_PATH_HEADER, requestCorrelationId, requestPath } from '../../src/correlation';
 import { setRequestHeaders } from '../support/next-headers';
 
 describe('the request correlation helpers', () => {

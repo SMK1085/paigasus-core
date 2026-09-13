@@ -7,7 +7,7 @@
 // and that no export calls the redirecting iamClients(). No action consults mayI(): a hidden button
 // is cosmetic, and IAM decides (spec § 6.3). The same test checks that no code in this file names it.
 import { revalidatePath } from 'next/cache';
-import type { ActionState } from '../../../lib/errors';
+import type { ActionState } from '@paigasus/console-core';
 import { formFields, invalidFormInput } from '../../../lib/form';
 import { iamClientsForAction } from '../../../lib/iam';
 import { TENANCY_PATH } from '../../../lib/tenancy-path';

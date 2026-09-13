@@ -5,7 +5,7 @@
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { disposeTransports } from '@paigasus/sdk/iam';
 import { createMayI } from '../../lib/authorize';
-import { createIamClients } from '../../lib/iam-clients';
+import { createIamClients } from '@paigasus/console-core';
 import { denial, startFakeIam, type FakeIam } from '../support/fake-iam';
 
 const ORG = 'prn:pgs:iam::0192f1c0-0000-7000-8000-000000000002:organization/0192f1c0-0000-7000-8000-000000000002';

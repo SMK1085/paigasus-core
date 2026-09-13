@@ -5,9 +5,8 @@
 import 'server-only';
 import type { PaigasusError } from '@paigasus/sdk/errors/types';
 import type { MayI } from '../../../../../../../../lib/authorize';
-import { callIam } from '../../../../../../../../lib/errors';
 import type { IamClients } from '../../../../../../../../lib/iam';
-import { isUuid, projectPrn } from '@paigasus/console-core';
+import { callIam, isUuid, projectPrn } from '@paigasus/console-core';
 import { loadMembers, type MembersData } from '../../../../../members';
 import { sameNode } from '../../../../../node-ref';
 

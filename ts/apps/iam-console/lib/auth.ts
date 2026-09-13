@@ -6,10 +6,8 @@
 import 'server-only';
 import { getAuthRuntime, type AuthRuntime } from '@paigasus/auth/server';
 import { getRuntimeConfig } from './config';
-import { requestCorrelationId } from './correlation';
 import { iamClientsForToken } from './iam-clients';
-import { logger } from '@paigasus/console-core';
-import { createIntrospectPrincipalResolver } from './principal-resolver';
+import { createIntrospectPrincipalResolver, logger, requestCorrelationId } from '@paigasus/console-core';
 
 /**
  * The runtime is a process singleton, but `clientsForToken` runs PER REQUEST, inside the login

@@ -4,10 +4,9 @@
 import 'server-only';
 import type { PaigasusError } from '@paigasus/sdk/errors/types';
 import type { MayI } from '../../../../../../lib/authorize';
-import { callIam, type IamResult } from '../../../../../../lib/errors';
 import type { IamClients } from '../../../../../../lib/iam';
 import { PAGE_SIZE, nextOffset } from '../../../../../../lib/paging';
-import { isUuid, parseTenancyPrn, teamPrn } from '@paigasus/console-core';
+import { callIam, isUuid, parseTenancyPrn, teamPrn, type IamResult } from '@paigasus/console-core';
 import { loadMembers, type MembersData } from '../../../members';
 import { sameNode } from '../../../node-ref';
 

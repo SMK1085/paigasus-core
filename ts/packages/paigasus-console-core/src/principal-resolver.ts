@@ -14,7 +14,8 @@
 // (they call currentPrincipal()), so a degraded login costs nothing after the first render.
 import 'server-only';
 import type { PrincipalResolver, ResolvedPrincipal } from '@paigasus/auth/server';
-import { principalPrnOf, type ConsoleLogger } from '@paigasus/console-core';
+import { principalPrnOf } from './principal-prn';
+import type { ConsoleLogger } from './logger';
 import { callIam } from './errors';
 import type { IamClients } from './iam-clients';
 

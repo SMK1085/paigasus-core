@@ -4,7 +4,7 @@
 // See ../../../actions.ts for the rules every action here follows. tests/unit/actions-structure.test.ts
 // holds the iamClientsForAction() rule.
 import { revalidatePath } from 'next/cache';
-import type { ActionState } from '../../../../../../lib/errors';
+import type { ActionState } from '@paigasus/console-core';
 import { formFields, invalidFormInput } from '../../../../../../lib/form';
 import { iamClientsForAction } from '../../../../../../lib/iam';
 import { TENANCY_PATH } from '../../../../../../lib/tenancy-path';

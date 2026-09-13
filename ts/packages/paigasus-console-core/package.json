@@ -17,6 +17,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
+    "@bufbuild/protobuf": "catalog:",
+    "@connectrpc/connect": "catalog:",
     "@paigasus/auth": "workspace:*",
     "@paigasus/discovery": "workspace:*",
     "@paigasus/sdk": "workspace:*",

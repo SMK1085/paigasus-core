@@ -9,3 +9,7 @@ export { principalPrnOf } from './principal-prn';
 export { ROOT_PRN, isUuid, organizationPrn, parseTenancyPrn, projectPrn, teamPrn, type TenancyKind, type TenancyRef } from './prn-tenancy';
 export { CORRELATION_HEADER, REQUEST_PATH_HEADER } from './correlation-header';
 export { createJsonLogger, logger, type AppEventFields, type AppEventName, type ConsoleLogger } from './logger';
+export { callIam, type ActionState, type IamResult } from './errors';
+export { FORBIDDEN_VIEW_CORRELATION, requestCorrelationId, requestPath } from './correlation';
+export { createIamClients, type IamClients } from './iam-clients';
+export { createIntrospectPrincipalResolver } from './principal-resolver';
