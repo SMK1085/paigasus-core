@@ -1,0 +1,38 @@
+{
+  "cli_version": "0.10.6",
+  "checkpoint_id": "713f6e695847",
+  "strategy": "manual-commit",
+  "branch": "feature/sma-512-console-core",
+  "checkpoints_count": 6,
+  "files_touched": [
+    "ts/apps/iam-console/lib/authorize.ts",
+    "ts/apps/iam-console/lib/discovery.ts",
+    "ts/apps/iam-console/lib/iam.ts",
+    "ts/apps/iam-console/lib/principal.ts",
+    "ts/apps/iam-console/lib/scopes.ts",
+    "ts/apps/iam-console/tests/unit/lib-barrels-wire-ports.test.ts"
+  ],
+  "sessions": [
+    {
+      "metadata": "/71/3f6e695847/0/metadata.json",
+      "transcript": "/71/3f6e695847/0/full.jsonl",
+      "compact_transcript": "/71/3f6e695847/0/transcript.jsonl",
+      "content_hash": "/71/3f6e695847/0/content_hash.txt",
+      "prompt": "/71/3f6e695847/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 410,
+    "cache_creation_tokens": 1248959,
+    "cache_read_tokens": 83698864,
+    "output_tokens": 307733,
+    "api_call_count": 205,
+    "subagent_tokens": {
+      "input_tokens": 172,
+      "cache_creation_tokens": 3945840,
+      "cache_read_tokens": 10730293,
+      "output_tokens": 103157,
+      "api_call_count": 86
+    }
+  }
+}
