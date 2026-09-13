@@ -1,0 +1,31 @@
+{
+  "cli_version": "0.10.6",
+  "checkpoint_id": "7df3d7397797",
+  "strategy": "manual-commit",
+  "branch": "feature/sma-512-ts-gateway-console",
+  "checkpoints_count": 3,
+  "files_touched": null,
+  "sessions": [
+    {
+      "metadata": "/7d/f3d7397797/0/metadata.json",
+      "transcript": "/7d/f3d7397797/0/full.jsonl",
+      "compact_transcript": "/7d/f3d7397797/0/transcript.jsonl",
+      "content_hash": "/7d/f3d7397797/0/content_hash.txt",
+      "prompt": "/7d/f3d7397797/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 380,
+    "cache_creation_tokens": 590579,
+    "cache_read_tokens": 74427121,
+    "output_tokens": 291674,
+    "api_call_count": 190,
+    "subagent_tokens": {
+      "input_tokens": 18,
+      "cache_creation_tokens": 79430,
+      "cache_read_tokens": 307468,
+      "output_tokens": 3147,
+      "api_call_count": 9
+    }
+  }
+}
