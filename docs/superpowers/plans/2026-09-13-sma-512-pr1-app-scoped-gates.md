@@ -585,13 +585,19 @@ Expected: `rc=2`, and the output names `ts/apps/zzz-probe` as having no discover
 
 ```bash
 printf '\n// drift probe\n' >> ts/apps/iam-console/next-env.d.ts
+git add ts/apps/iam-console/next-env.d.ts
 bash ci/next-env/run.sh; echo "rc=$?"
+git restore --staged ts/apps/iam-console/next-env.d.ts
 git checkout -- ts/apps/iam-console/next-env.d.ts
 ```
 
 Expected: `rc=1`, with `the committed ts/apps/iam-console/next-env.d.ts does not match`.
 
-`git checkout --` is safe here: `next-env.d.ts` carries no uncommitted work of ours.
+**The `git add` is required, and the reason is worth knowing.** `check_app` deletes the file and
+regenerates it before diffing, so an UNSTAGED edit is destroyed before `git diff` ever runs and the
+gate passes. `git diff` compares the worktree against the INDEX, so the drift has to be staged for
+the assertion to see it. This is pre-existing behaviour of the gate, not something this task
+introduces. `git checkout --` is safe on this one file: it carries no uncommitted work of ours.
 
 - [ ] **Step 7: Widen the Moon task's inputs per path**
 
