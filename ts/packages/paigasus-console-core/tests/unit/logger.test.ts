@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// lib/logger.ts (spec § 4.8, § 9.2): it writes the event name, a time and EXACTLY the fields the
+// src/logger.ts (spec § 4.8, § 9.2): it writes the event name, a time and EXACTLY the fields the
 // port gave it — nothing it could have picked up elsewhere, so never a DSN or a token.
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { createJsonLogger } from '../../lib/logger';
+import { createJsonLogger } from '../../src/logger';
 
 afterEach(() => {
   vi.unstubAllEnvs();

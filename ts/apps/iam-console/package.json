@@ -17,6 +17,7 @@
     "@connectrpc/connect": "catalog:",
     "@paigasus/app-shell": "workspace:*",
     "@paigasus/auth": "workspace:*",
+    "@paigasus/console-core": "workspace:*",
     "@paigasus/discovery": "workspace:*",
     "@paigasus/next-config": "workspace:*",
     "@paigasus/sdk": "workspace:*",

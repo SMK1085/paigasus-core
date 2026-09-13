@@ -13,7 +13,7 @@ import { discovery } from './discovery';
 import { callIam, type IamResult } from './errors';
 import { iamClients, sessionToken, type IamClients } from './iam';
 import { currentPrincipal, type Principal } from './principal';
-import { organizationPrn, parseTenancyPrn, projectPrn, teamPrn, type TenancyRef } from './prn-tenancy';
+import { organizationPrn, parseTenancyPrn, projectPrn, teamPrn, type TenancyRef } from '@paigasus/console-core';
 
 export type ScopeEntry =
   | { kind: 'organization'; prn: string; orgId: string; label: string | null; denied: boolean }

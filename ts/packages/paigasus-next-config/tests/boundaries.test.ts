@@ -158,6 +158,9 @@ const DENIED: ReadonlyArray<readonly [string, string, string]> = [
   // The test-double exemption is NARROW: only apps/*/tests/support/**.
   ['app lib code must not import proto', 'apps/iam-console/lib/iam.ts', "import { x } from '@paigasus/proto';"],
   ['an app test outside tests/support must not import proto', 'apps/iam-console/tests/unit/errors.test.ts', "import { ErrorInfoSchema } from '@paigasus/proto';"],
+  // SMA-512 — @paigasus/console-core.
+  ['console-core must not import proto directly', 'packages/paigasus-console-core/src/principal.ts', "import { x } from '@paigasus/proto';"],
+  ['a proxy must not import console-core', 'apps/iam-console/proxy.ts', "import { x } from '@paigasus/console-core';"],
 ];
 
 const ALLOWED: ReadonlyArray<readonly [string, string, string]> = [
@@ -198,6 +201,10 @@ const ALLOWED: ReadonlyArray<readonly [string, string, string]> = [
   ['the fixture may import ui', 'packages/paigasus-app-shell/tests/e2e/fixture/app/page.tsx', "import { Link } from '@paigasus/ui';"],
   // SMA-511 spec § 7.4.
   ['an app proxy may import auth/middleware', 'apps/iam-console/proxy.ts', "import { authRoutePaths, createAuthMiddleware } from '@paigasus/auth/middleware';"],
+  // SMA-512 — @paigasus/console-core.
+  ['console-core may import auth/server', 'packages/paigasus-console-core/src/iam.ts', "import { x } from '@paigasus/auth/server';"],
+  ['console-core may import the sdk', 'packages/paigasus-console-core/src/iam.ts', "import { x } from '@paigasus/sdk/iam';"],
+  ['console-core testing may import proto', 'packages/paigasus-console-core/testing/fake-iam.ts', "import { x } from '@paigasus/proto';"],
 ];
 
 describe('boundary preset', () => {

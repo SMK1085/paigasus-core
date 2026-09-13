@@ -12,7 +12,15 @@
 // the proxy sees it (spec § 13 #1).
 import { NextResponse, type NextRequest } from 'next/server';
 import { authRoutePaths, createAuthMiddleware } from '@paigasus/auth/middleware';
-import { CORRELATION_HEADER, REQUEST_PATH_HEADER } from './lib/correlation-header';
+
+// The two header names, INLINED rather than imported from @paigasus/console-core (SMA-512). The
+// package's one entry re-exports the logger too, which reaches @paigasus/auth/server and
+// @paigasus/discovery/server — exactly the token-bearing surface
+// paigasus/boundaries/app-middleware bans from this file, `server-only` being a no-op here. The
+// values must still match ts/packages/paigasus-console-core/src/correlation-header.ts: lib/correlation.ts
+// reads the same two names, exported through @paigasus/console-core, from the request this proxy sets.
+const CORRELATION_HEADER = 'paigasus-correlation-id';
+const REQUEST_PATH_HEADER = 'x-paigasus-request-path';
 
 const authMiddleware = createAuthMiddleware({
   publicPaths: [...authRoutePaths(), '/', '/healthz'],

@@ -80,13 +80,17 @@ describe('proxy', () => {
     expect(forwarded(res, 'x-paigasus-request-path')).toBe('/iam/orgs/abc');
   });
 
-  // The proxy's allowed imports, as a strict-equality list. `server-only` is a no-op in the proxy layer,
-  // and paigasus/boundaries/app-middleware is a DENY list of direct specifiers. So one import added to
-  // lib/correlation-header.ts (for example ./iam-clients, which reaches the sdk) would enter the
-  // proxy bundle with no lint error. Here it fails.
-  it('imports only the allowed modules in proxy.ts and lib/correlation-header.ts', () => {
-    expect(importsOf('../../proxy.ts')).toEqual(['./lib/correlation-header', '@paigasus/auth/middleware', 'next/server']);
-    expect(importsOf('../../lib/correlation-header.ts')).toEqual(['server-only']);
+  // The proxy's allowed imports, as a strict-equality list. `server-only` is a no-op in the proxy
+  // layer, and paigasus/boundaries/app-middleware is a DENY list of direct specifiers. So one new
+  // import (for example @paigasus/console-core, which reaches @paigasus/auth/server through its
+  // logger) would enter the proxy bundle with no lint error. Here it fails.
+  //
+  // SMA-512: the two header names used to come from ./lib/correlation-header, which moved into
+  // @paigasus/console-core. That package's one entry re-exports the logger too, so importing it
+  // here would be exactly the widening this test exists to catch — proxy.ts inlines the two
+  // constants instead (paigasus/boundaries/app-middleware bans @paigasus/console-core here).
+  it('imports only the allowed modules in proxy.ts', () => {
+    expect(importsOf('../../proxy.ts')).toEqual(['@paigasus/auth/middleware', 'next/server']);
   });
 });
 

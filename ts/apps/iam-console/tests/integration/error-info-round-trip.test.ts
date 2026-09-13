@@ -10,7 +10,7 @@ import { ErrorDomain, ErrorReason } from '@paigasus/sdk/errors';
 import { disposeTransports } from '@paigasus/sdk/iam';
 import { callIam } from '../../lib/errors';
 import { createIamClients } from '../../lib/iam-clients';
-import { logger } from '../../lib/logger';
+import { logger } from '@paigasus/console-core';
 import { denial, startFakeIam, type FakeIam } from '../support/fake-iam';
 
 const ORG = 'prn:pgs:iam::0192f1c0-0000-7000-8000-000000000002:organization/0192f1c0-0000-7000-8000-000000000002';

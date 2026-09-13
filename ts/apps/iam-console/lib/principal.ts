@@ -15,7 +15,7 @@ import { cache } from 'react';
 import { ErrorReason } from '@paigasus/sdk/errors';
 import { callIam, type IamResult } from './errors';
 import { iamClients, sessionToken, type IamClients } from './iam';
-import { principalPrnOf } from './principal-prn';
+import { principalPrnOf } from '@paigasus/console-core';
 
 /**
  * `prn` is `null` when IAM answered but named no principal (review, defect 1). That is NOT the

@@ -19,7 +19,7 @@ import { cache } from 'react';
 import { createClient, type RedisClientType } from 'redis';
 import { createDiscovery, createMemoryDescriptorCache, createRedisDescriptorCache, timingsFromEnv, type DescriptorCache, type Discovery } from '@paigasus/discovery/server';
 import { getRuntimeConfig, type ConsoleConfig } from './config';
-import { logger, type ConsoleLogger } from './logger';
+import { logger, type ConsoleLogger } from '@paigasus/console-core';
 
 let processCache: DescriptorCache | undefined;
 let redisClient: RedisClientType | undefined;

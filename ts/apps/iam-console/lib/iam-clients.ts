@@ -11,7 +11,7 @@ import type { DescService } from '@bufbuild/protobuf';
 import type { CallOptions, Client } from '@connectrpc/connect';
 import { AuditService, AuthnService, AuthorizationService, createIamClient, ServiceInfoService, TenancyService } from '@paigasus/sdk/iam';
 import { getRuntimeConfig } from './config';
-import { CORRELATION_HEADER } from './correlation-header';
+import { CORRELATION_HEADER } from '@paigasus/console-core';
 
 export type IamClients = {
   tenancy: Client<typeof TenancyService>;

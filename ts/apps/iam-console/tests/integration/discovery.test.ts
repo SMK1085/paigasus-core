@@ -24,7 +24,7 @@ async function load(overrides: Record<string, string>) {
   vi.resetModules();
   stubConsoleEnv({ PAIGASUS_SERVICES: JSON.stringify({ iam: IAM_HTTP }), ...overrides });
   const { getRuntimeConfig } = await import('../../lib/config');
-  const { createJsonLogger } = await import('../../lib/logger');
+  const { createJsonLogger } = await import('@paigasus/console-core');
   const discovery = await import('../../lib/discovery');
   const lines: string[] = [];
   const handle = discovery.createAppDiscovery({ config: getRuntimeConfig(), log: createJsonLogger((line) => lines.push(line)), waitUntil: () => undefined });

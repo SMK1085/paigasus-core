@@ -1,0 +1,41 @@
+{
+  "name": "@paigasus/console-core",
+  "_comment_exports": "A root export plus a testing subpath. Root is server-only, the way @paigasus/sdk's is — @paigasus/auth and @paigasus/discovery omit a root export only because they also have a CLIENT surface, which this package does not. ./testing is deliberately outside src/ and carries no server-only guard: vitest and Playwright harnesses import it outside a Next server.",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "license": "Apache-2.0",
+  "description": "Server-only console composition shared by the Paigasus zones: IAM clients, provisioning and the principal resolver, authorization self-queries, scopes, discovery, the error wrapper and the JSON-lines logger.",
+  "exports": {
+    ".": "./src/index.ts",
+    "./testing": "./testing/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@paigasus/auth": "workspace:*",
+    "@paigasus/discovery": "workspace:*",
+    "@paigasus/sdk": "workspace:*",
+    "redis": "catalog:",
+    "server-only": "catalog:"
+  },
+  "peerDependencies": {
+    "next": "catalog:",
+    "react": "catalog:"
+  },
+  "devDependencies": {
+    "@connectrpc/connect-node": "catalog:",
+    "@paigasus/proto": "workspace:*",
+    "@types/node": "catalog:",
+    "jose": "catalog:",
+    "next": "catalog:",
+    "react": "catalog:",
+    "testcontainers": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  }
+}

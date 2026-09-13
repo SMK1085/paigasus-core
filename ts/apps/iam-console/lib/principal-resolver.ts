@@ -14,10 +14,9 @@
 // (they call currentPrincipal()), so a degraded login costs nothing after the first render.
 import 'server-only';
 import type { PrincipalResolver, ResolvedPrincipal } from '@paigasus/auth/server';
+import { principalPrnOf, type ConsoleLogger } from '@paigasus/console-core';
 import { callIam } from './errors';
 import type { IamClients } from './iam-clients';
-import type { ConsoleLogger } from './logger';
-import { principalPrnOf } from './principal-prn';
 
 /** The user waits on the login callback, so each call gets 3 s, not the SDK's 10 s (transport.ts:42). */
 const DEFAULT_TIMEOUT_MS = 3_000;

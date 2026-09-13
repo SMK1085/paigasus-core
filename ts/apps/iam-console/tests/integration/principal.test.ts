@@ -8,7 +8,7 @@ import { ErrorReason } from '@paigasus/sdk/errors';
 import { disposeTransports } from '@paigasus/sdk/iam';
 import { createMayI } from '../../lib/authorize';
 import { createIamClients, type IamClients } from '../../lib/iam-clients';
-import { createJsonLogger } from '../../lib/logger';
+import { createJsonLogger } from '@paigasus/console-core';
 import { introspectWithProvisioning } from '../../lib/principal';
 import { createIntrospectPrincipalResolver } from '../../lib/principal-resolver';
 import { denial, FAKE_IAM_ISSUER, startFakeIam, type FakeIam } from '../support/fake-iam';

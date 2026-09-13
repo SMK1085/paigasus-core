@@ -59,6 +59,7 @@ export const BOUNDARY_SCOPES = {
   'packages/paigasus-app-shell/tests/e2e/fixture': 'exists',
   'packages/paigasus-auth': 'exists',
   'packages/paigasus-discovery': 'exists',
+  'packages/paigasus-console-core/src': 'exists',
   apps: 'exists',
 };
 
@@ -199,6 +200,27 @@ export const boundaryRules = [
     ]),
   },
   {
+    name: 'paigasus/boundaries/console-core',
+    // The ONE package allowed to import both @paigasus/auth and @paigasus/sdk. It exists because
+    // @paigasus/auth must not import @paigasus/sdk (ports/principal-resolver.ts) and the sdk block
+    // above bans every @paigasus/* but proto — so only an app could depend on both, until now.
+    //
+    // @paigasus/proto stays BANNED in src/: the provisioning call reaches ServiceInfoService through
+    // the sdk's re-export (SMA-511 § 7.3). The testing/ subpath is the one exception — its fake IAM
+    // needs ErrorInfoSchema, which only @paigasus/proto exports.
+    files: ['packages/paigasus-console-core/src/**/*.{ts,tsx,mts,cts,js,jsx,mjs,cjs}'],
+    rules: restrict([
+      {
+        group: ['@paigasus/proto', '@paigasus/proto/**'],
+        message: '@paigasus/console-core reaches proto through @paigasus/sdk, never directly (§ 5.5). The testing/ subpath is the exception.',
+      },
+      {
+        group: ['react-dom', 'react-dom/*', 'next/navigation'],
+        message: '@paigasus/console-core is server-only composition. React components belong in the app or in @paigasus/ui (§ 5.2).',
+      },
+    ]),
+  },
+  {
     name: 'paigasus/boundaries/apps',
     files: ['apps/**/*.{ts,tsx,mts,cts,js,jsx,mjs,cjs}'],
     // SMA-511 spec § 7.4. An app's in-process fake IAM builds a google.rpc.ErrorInfo detail, and only
@@ -313,9 +335,9 @@ export const boundaryRules = [
     files: ['apps/**/{middleware,proxy}.{ts,js,mts,cts,mjs,cjs}'],
     rules: restrict([
       {
-        group: ['@paigasus/auth/server', '@paigasus/auth/server/**', '@paigasus/sdk', '@paigasus/sdk/**'],
+        group: ['@paigasus/auth/server', '@paigasus/auth/server/**', '@paigasus/sdk', '@paigasus/sdk/**', '@paigasus/console-core', '@paigasus/console-core/**'],
         message:
-          "An app's proxy (middleware) must import @paigasus/auth/middleware, never /server or the sdk. `server-only` is a NO-OP in the middleware layer, so nothing else stops a token-bearing module being bundled there.",
+          "An app's proxy (middleware) must import @paigasus/auth/middleware, never /server, the sdk or @paigasus/console-core. `server-only` is a NO-OP in the middleware layer, so nothing else stops a token-bearing module being bundled there.",
       },
       APP_PROTO_BAN,
     ]),

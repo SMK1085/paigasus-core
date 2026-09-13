@@ -8,7 +8,7 @@ import { getAuthRuntime, type AuthRuntime } from '@paigasus/auth/server';
 import { getRuntimeConfig } from './config';
 import { requestCorrelationId } from './correlation';
 import { iamClientsForToken } from './iam-clients';
-import { logger } from './logger';
+import { logger } from '@paigasus/console-core';
 import { createIntrospectPrincipalResolver } from './principal-resolver';
 
 /**

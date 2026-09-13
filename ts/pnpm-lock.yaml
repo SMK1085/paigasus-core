@@ -224,6 +224,9 @@ importers:
       '@paigasus/auth':
         specifier: workspace:*
         version: link:../../packages/paigasus-auth
+      '@paigasus/console-core':
+        specifier: workspace:*
+        version: link:../../packages/paigasus-console-core
       '@paigasus/discovery':
         specifier: workspace:*
         version: link:../../packages/paigasus-discovery
@@ -407,6 +410,52 @@ importers:
       react-dom:
         specifier: 'catalog:'
         version: 19.2.8(react@19.2.8)
+      testcontainers:
+        specifier: 'catalog:'
+        version: 12.1.0
+      typescript:
+        specifier: 'catalog:'
+        version: 6.0.3
+      vitest:
+        specifier: 'catalog:'
+        version: 5.0.0(@types/node@24.13.3)(jsdom@30.0.1)(msw@2.15.0(@types/node@24.13.3)(typescript@6.0.3))(vite@8.0.16(@types/node@24.13.3)(jiti@2.7.0)(yaml@2.9.0))
+
+  packages/paigasus-console-core:
+    dependencies:
+      '@paigasus/auth':
+        specifier: workspace:*
+        version: link:../paigasus-auth
+      '@paigasus/discovery':
+        specifier: workspace:*
+        version: link:../paigasus-discovery
+      '@paigasus/sdk':
+        specifier: workspace:*
+        version: link:../paigasus-sdk
+      redis:
+        specifier: 'catalog:'
+        version: 6.2.1
+      server-only:
+        specifier: 'catalog:'
+        version: 0.0.1
+    devDependencies:
+      '@connectrpc/connect-node':
+        specifier: 'catalog:'
+        version: 2.2.0(@bufbuild/protobuf@2.14.1)(@connectrpc/connect@2.2.0(@bufbuild/protobuf@2.14.1))
+      '@paigasus/proto':
+        specifier: workspace:*
+        version: link:../paigasus-proto
+      '@types/node':
+        specifier: 'catalog:'
+        version: 24.13.3
+      jose:
+        specifier: 'catalog:'
+        version: 6.2.12
+      next:
+        specifier: 'catalog:'
+        version: 16.3.4(@babel/core@7.29.7)(@playwright/test@1.63.0)(@types/node@24.13.3)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
+      react:
+        specifier: 'catalog:'
+        version: 19.2.8
       testcontainers:
         specifier: 'catalog:'
         version: 12.1.0

@@ -23,7 +23,7 @@ import type { Client } from '@connectrpc/connect';
 import type { AuthorizationService } from '@paigasus/sdk/iam';
 import { callIam } from './errors';
 import { iamClients } from './iam';
-import { logger, type ConsoleLogger } from './logger';
+import { logger, type ConsoleLogger } from '@paigasus/console-core';
 import { currentPrincipal } from './principal';
 
 /** The PascalCase names IAM's Action::parse accepts (rs/crates/libs/paigasus-iam-core/src/authz/action.rs:114-163). */

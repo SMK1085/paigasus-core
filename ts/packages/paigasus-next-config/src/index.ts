@@ -13,7 +13,17 @@ export { canonicalBasePath } from './base-path';
  * `/client`, `@paigasus/discovery` for `/types` and `/client`). The app-shell fixture builds
  * through this factory, so its `next build` is the proof that the list is sufficient.
  */
-const SOURCE_ONLY_PACKAGES = ['@paigasus/app-shell', '@paigasus/auth', '@paigasus/discovery', '@paigasus/kernel', '@paigasus/next-config', '@paigasus/proto', '@paigasus/sdk', '@paigasus/ui'];
+const SOURCE_ONLY_PACKAGES = [
+  '@paigasus/app-shell',
+  '@paigasus/auth',
+  '@paigasus/console-core',
+  '@paigasus/discovery',
+  '@paigasus/kernel',
+  '@paigasus/next-config',
+  '@paigasus/proto',
+  '@paigasus/sdk',
+  '@paigasus/ui',
+];
 
 export interface CreateNextConfigOptions {
   /** This app's zone id, e.g. `iam`. `PAIGASUS_ZONE` must equal it at runtime. */
