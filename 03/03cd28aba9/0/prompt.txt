@@ -1261,3 +1261,7 @@ I ran `python3 ci/affected-graph/ci_targets.py --self-test` (`ci-targets self-te
 **Merge readiness:** Ready — the control no longer has a route by which a registered app's guard invocation can name another app, hide in a non-`test` task, or vanish for want of a `moon.yml`, and the residual lie route that remains (a registered app whose `test` task never runs or is never selected) is outside this PR's scope and belongs with the per-app `ui-&gt;console` re-baselines that pull request 3 owns.</result>
 <usage><subagent_tokens>146153</subagent_tokens><tool_uses>22</tool_uses><duration_ms>373088</duration_ms></usage>
 </task-notification>
+
+---
+
+run stage 5 and 6
