@@ -684,6 +684,20 @@ SELF_TASK_GLOBS_EXEMPT = {
 # a leftover is silent" reasoning T_EXEMPT's stale_exempt row and check_forward's docstring give.
 SELF_SCHEDULED_COVERAGE_EXEMPT = {}
 
+# SMA-512. The tailwind-source guard checks ONE app per invocation (`--app <dir>`), so an app that
+# never invokes it is simply unguarded — the silent skip the parameterization was meant to remove,
+# moved rather than closed. Every ts/apps/* directory must therefore appear here, and its moon.yml
+# must carry all three lines: the self-test and the negative control prove the assertion can fire,
+# and the real run for THAT app is the assertion. Whole lines, compared after stripping, so
+# reordering a flag or dropping the `--app` argument reds this.
+TAILWIND_GUARD_INVOCATIONS = {
+    "iam-console": (
+        "node ../../../ci/tailwind-source/run.mjs --self-test",
+        "node ../../../ci/tailwind-source/run.mjs --negative-control",
+        "node ../../../ci/tailwind-source/run.mjs --app ts/apps/iam-console",
+    ),
+}
+
 # C4, actionlint half (SMA-542). repo:actionlint's self-tests, mutation battery, and the check-8,
 # check-8b, check-8c AND check-8d production call sites are each invoked from ONE call site inside
 # ci/actionlint/run.sh. That script cannot assert its own invocation — deleting the self-test calls
@@ -1862,6 +1876,35 @@ def check_self_scheduled_coverage(scripts, exempt=None):
     bad_exempt = sorted(task for task, reason in exempt.items() if not (reason or "").strip())
     stale_exempt = sorted(set(exempt) - qualifying)
     return unregistered, bad_exempt, stale_exempt
+
+
+def check_tailwind_guard_invocations(moon_ymls, registry=None):
+    """SMA-512. Every ts/apps/* app must invoke the tailwind-source guard for its own directory.
+
+    `moon_ymls` is `{app_dir_name: moon.yml text}`, built by the caller from the ts/apps
+    directories that exist on disk. PURE, so the self-test drives it with plain strings.
+
+    Returns (unregistered, missing_lines, stale), all sorted — the same shape
+    check_self_scheduled_coverage returns, and for the same reason: a typo'd registry key is
+    already loud (the real app shows up under `unregistered`), so `stale` exists for the silent
+    case, an entry that outlived the app it named.
+    """
+    registry = TAILWIND_GUARD_INVOCATIONS if registry is None else registry
+
+    unregistered = sorted(app for app in moon_ymls if app not in registry)
+    stale = sorted(set(registry) - set(moon_ymls))
+
+    missing_lines = []
+    for app, text in sorted(moon_ymls.items()):
+        wanted = registry.get(app)
+        if wanted is None:
+            continue
+        present = {line.strip() for line in text.splitlines()}
+        for want in wanted:
+            if want not in present:
+                missing_lines.append(f"{app}: {want}")
+
+    return unregistered, sorted(missing_lines), stale
 
 
 def self_test():
@@ -3102,6 +3145,36 @@ def self_test():
             "SELF_SCHEDULED_COVERAGE_EXEMPT"
         )
 
+    # SMA-512. check_tailwind_guard_invocations: every ts/apps/* app must invoke the
+    # tailwind-source guard for its own directory (self-test, negative control, and the real
+    # `--app <dir>` run), or the parameterization Task 1 added is unguarded — a new app could
+    # never call the script at all and nothing would notice.
+    def expect_tailwind(label, moon_ymls, want):
+        got = check_tailwind_guard_invocations(moon_ymls, TAILWIND_GUARD_INVOCATIONS)
+        if got != want:
+            failures.append(f"check_tailwind_guard_invocations[{label}]: got {got}, want {want}")
+
+    _tw_ok = "\n".join(f"      {line}" for line in TAILWIND_GUARD_INVOCATIONS["iam-console"])
+    expect_tailwind("compliant", {"iam-console": _tw_ok}, ([], [], []))
+    expect_tailwind(
+        "a dropped real run reds",
+        {"iam-console": "      node ../../../ci/tailwind-source/run.mjs --self-test\n"},
+        (
+            [],
+            [
+                "iam-console: node ../../../ci/tailwind-source/run.mjs --app ts/apps/iam-console",
+                "iam-console: node ../../../ci/tailwind-source/run.mjs --negative-control",
+            ],
+            [],
+        ),
+    )
+    expect_tailwind(
+        "an unregistered app reds",
+        {"iam-console": _tw_ok, "gateway-console": "script: |\n"},
+        (["gateway-console"], [], []),
+    )
+    expect_tailwind("a stale registry entry reds", {}, ([], [], ["iam-console"]))
+
     # SMA-553 D13, mirrored here so repo:input-liveness is not the sole judge of its own inputs.
     # The wired row carries the implicit .moon glob moon injects into every task, which must be
     # tolerated rather than counted as drift.
@@ -3279,6 +3352,11 @@ def main():
         next_public_free_sh = read_input(
             root / "ci" / "next-public" / "run.sh", "ci/next-public/run.sh"
         )
+        tailwind_moon_ymls = {
+            d.name: read_input(d / "moon.yml", f"ts/apps/{d.name}/moon.yml")
+            for d in sorted((root / "ts" / "apps").iterdir())
+            if d.is_dir() and (d / "moon.yml").is_file()
+        }
         floor = check_floor(tasks)
         missing, unexpected, bad_exempt, stale_exempt = check_forward(tasks, t_targets)
         # SMA-553 review finding 1 — these two also raise MoonOutputError (INFRA_ERRORS), so their
@@ -3311,12 +3389,16 @@ def main():
     pairing_unpinned, pairing_bad_exempt, pairing_stale_exempt, pairing_both, pairing_orphan_globs = (
         check_registry_pairing()
     )
+    tw_unregistered, tw_missing_lines, tw_stale = check_tailwind_guard_invocations(
+        tailwind_moon_ymls
+    )
 
     if not (floor or missing or unexpected or bad_exempt or stale_exempt or dead or doc_problems
             or missing_sites or bad_invocation or bad_gate_inputs
             or bad_generate_inputs or unregistered_self_scheduled or bad_coverage_exempt
             or stale_coverage_exempt or pairing_unpinned or pairing_bad_exempt
-            or pairing_stale_exempt or pairing_both or pairing_orphan_globs):
+            or pairing_stale_exempt or pairing_both or pairing_orphan_globs
+            or tw_unregistered or tw_missing_lines or tw_stale):
         print(
             f"PASS  {'ci-targets':<18} -> {len(t_targets)} targets: every CI-eligible repo task is "
             "in ci.yml's T, every entry resolves, CLAUDE.md mirrors it"
@@ -3489,6 +3571,20 @@ def main():
          "    entry, so its pinned `inputs` have no gate behind them.\n"
          "    Fix: add the task to SELF_SCHEDULED_GATES with its script's invocation lines, or\n"
          "    delete the stale entry from SELF_TASK_EXPECTED_GLOBS, in\n"
+         "    ci/affected-graph/ci_targets.py."),
+        (tw_unregistered,
+         "SMA-512. A ts/apps/* directory has no TAILWIND_GUARD_INVOCATIONS entry, so nothing\n"
+         "    proves it ever invokes the tailwind-source guard at all.\n"
+         "    Fix: add the app to TAILWIND_GUARD_INVOCATIONS in ci/affected-graph/ci_targets.py\n"
+         "    with its three guard invocation lines, and wire them into its moon.yml `test` task."),
+        (tw_missing_lines,
+         "SMA-512. A TAILWIND_GUARD_INVOCATIONS line is missing from that app's moon.yml `test`\n"
+         "    task script — the self-test, the negative control, or the real `--app <dir>` run.\n"
+         "    Fix: restore the exact line in the app's moon.yml."),
+        (tw_stale,
+         "SMA-512. A TAILWIND_GUARD_INVOCATIONS entry names a ts/apps/* directory that no longer\n"
+         "    exists on disk — the entry has outlived the app it named.\n"
+         "    Fix: delete the entry from TAILWIND_GUARD_INVOCATIONS in\n"
          "    ci/affected-graph/ci_targets.py."),
     ):
         if rows:
