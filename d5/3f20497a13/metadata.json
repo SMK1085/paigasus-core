@@ -1,0 +1,33 @@
+{
+  "cli_version": "0.10.6",
+  "checkpoint_id": "d53f20497a13",
+  "strategy": "manual-commit",
+  "branch": "feature/sma-512-ts-gateway-console",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "ci/tailwind-source/run.mjs"
+  ],
+  "sessions": [
+    {
+      "metadata": "/d5/3f20497a13/0/metadata.json",
+      "transcript": "/d5/3f20497a13/0/full.jsonl",
+      "compact_transcript": "/d5/3f20497a13/0/transcript.jsonl",
+      "content_hash": "/d5/3f20497a13/0/content_hash.txt",
+      "prompt": "/d5/3f20497a13/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 158,
+    "cache_creation_tokens": 343699,
+    "cache_read_tokens": 18771503,
+    "output_tokens": 148959,
+    "api_call_count": 79,
+    "subagent_tokens": {
+      "input_tokens": 76,
+      "cache_creation_tokens": 431882,
+      "cache_read_tokens": 8131198,
+      "output_tokens": 44370,
+      "api_call_count": 38
+    }
+  }
+}
