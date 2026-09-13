@@ -12,13 +12,6 @@ import { logger } from '@paigasus/console-core';
 import { createIntrospectPrincipalResolver } from './principal-resolver';
 
 /**
- * The session cookie's name. @paigasus/auth does not export it from any entry an app may import,
- * so it is written here once; tests/unit/session-cookie.test.ts proves that @paigasus/auth's own
- * middleware treats exactly this name as the session.
- */
-export const SESSION_COOKIE_NAME = '__Host-pgs_sid';
-
-/**
  * The runtime is a process singleton, but `clientsForToken` runs PER REQUEST, inside the login
  * callback's route handler. So it reads the correlation id there, and the login-time IAM calls
  * (GetServiceInfo, Introspect) carry the same id as every later call of that request. proxy.ts sets

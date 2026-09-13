@@ -30,6 +30,9 @@ export type { AuthRoutes };
 export { getSession, requireSession } from './next/get-session';
 export type { RequireSessionOptions } from './next/get-session';
 
+/** The session cookie's name. Every zone must check the same name (see http/cookies.ts). */
+export { SESSION_COOKIE } from './http/cookies';
+
 /** A `RequestInit` that can carry a streamed body: Node's `Request` needs `duplex: 'half'` for one. */
 interface RequestInitWithDuplex extends RequestInit {
   duplex?: 'half';

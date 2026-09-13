@@ -33,7 +33,6 @@ const { runtime, store } = vi.hoisted(() => {
 });
 
 vi.mock('../../lib/auth', () => ({
-  SESSION_COOKIE_NAME: '__Host-pgs_sid',
   authRuntime: () => Promise.resolve({ ...runtime, store }),
 }));
 

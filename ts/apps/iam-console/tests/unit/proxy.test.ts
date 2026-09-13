@@ -7,8 +7,8 @@ import { unstable_doesMiddlewareMatch } from 'next/experimental/testing/server';
 import { NextRequest } from 'next/server';
 import ts from 'typescript';
 import { describe, expect, it, vi } from 'vitest';
+import { SESSION_COOKIE } from '@paigasus/auth/server';
 import { CORRELATION_HEADER, REQUEST_PATH_HEADER } from '@paigasus/console-core';
-import { SESSION_COOKIE_NAME } from '../../lib/auth';
 import { config, proxy } from '../../proxy';
 
 // Next's server installs globalThis.AsyncLocalStorage before any other module
@@ -39,7 +39,7 @@ function importsOf(relative: string): string[] {
 
 function request(path: string, init: { cookie?: boolean; headers?: Record<string, string> } = {}): NextRequest {
   const headers = new Headers(init.headers);
-  if (init.cookie === true) headers.set('cookie', `${SESSION_COOKIE_NAME}=opaque-session-id`);
+  if (init.cookie === true) headers.set('cookie', `${SESSION_COOKIE}=opaque-session-id`);
   return new NextRequest(`${ORIGIN}${path}`, { headers, nextConfig: { basePath: '/iam' } });
 }
 
