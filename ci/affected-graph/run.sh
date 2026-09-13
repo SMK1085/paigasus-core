@@ -274,8 +274,10 @@ run_suite() {
   # + paigasus-console-core-ts (SMA-512): this is a PROJECT-level case (--downstream deep on
   # `moon query projects`), not one of the task-level cases the new package was expected to join.
   # It was found by --self-test failing after the task-level re-baseline below, not predicted in
-  # advance: the new package `dependsOn` paigasus-proto-ts, so it is now a downstream dependent in
-  # the project graph the same way paigasus-sdk-ts and paigasus-discovery-ts already were.
+  # advance: the new package's `dependsOn` list has four entries — paigasus-auth-ts,
+  # paigasus-sdk-ts, paigasus-discovery-ts and paigasus-proto-ts — and the last one alone makes
+  # it a downstream dependent in the project graph, the same way paigasus-sdk-ts and
+  # paigasus-discovery-ts already were.
   run_case "contracts->proto" "contracts/proto/paigasus/gateway/v1/health.proto" \
     "contracts,paigasus-proto-rs,paigasus-proto-py,paigasus-proto-ts,paigasus-gateway-rs,paigasus-iam-rs,paigasus-service-info-rs,paigasus-sdk-ts,paigasus-discovery-ts,paigasus-app-shell-ts,iam-console-ts,paigasus-console-core-ts"
   # derive-crate edit -> the derive crate + paigasus-proto and everything downstream of it
