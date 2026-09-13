@@ -8,33 +8,48 @@
 // browser leaves the /iam zone. So iamClientsForAction() must RETURN a relogin failure, and
 // iamClients() must keep redirecting for pages. The two cases below run under the SAME conditions
 // and must differ, which is what makes this test a control rather than a restatement.
-import { describe, expect, it, vi } from 'vitest';
-import type { SessionRecord } from '@paigasus/auth/server';
+import { describe, expect, it } from 'vitest';
+import type { AuthRuntime, SessionRecord } from '@paigasus/auth/server';
+import { setConsolePorts } from '@paigasus/console-core';
 import { setRequestCookies, setRequestHeaders } from '../support/next-headers';
 
-// The runtime is built in a vi.hoisted block: the factory below runs while lib/iam.ts's own import
-// graph is evaluated, which is before this file's body.
-const { runtime, store } = vi.hoisted(() => {
-  const records = new Map<string, unknown>();
-  return {
-    records,
-    store: { get: (sid: string) => Promise.resolve(records.get(sid) ?? null), put: () => Promise.resolve(), delete: () => Promise.resolve() },
-    runtime: {
-      basePath: '/iam',
-      logger: { event: () => undefined },
-      skewMs: 30_000,
-      lockTtlMs: 10_000,
-      lockWaitMs: 3_000,
-      ttlMs: 28_800_000,
-      oidc: {},
-      records,
-    },
-  };
-});
+// SMA-512 PR 2, task 4: lib/iam.ts is now a barrel over @paigasus/console-core's iam.ts, which
+// reads authRuntime() and the IAM gRPC URL through the package's runtime-ports seam rather than
+// importing lib/auth.ts directly, so a `vi.mock('../../lib/auth', …)` no longer reaches it. This
+// file wires the port directly instead — the same shape task 5's createConsoleRuntime() will wire
+// for real. setConsolePorts() only needs to run before an accessor is CALLED (not before lib/iam.ts
+// is imported): none of its cache()-wrapped exports read a port at module scope.
+const records = new Map<string, unknown>();
+const store = { get: (sid: string) => Promise.resolve(records.get(sid) ?? null), put: () => Promise.resolve(), delete: () => Promise.resolve() };
+const runtime = {
+  basePath: '/iam',
+  logger: { event: () => undefined },
+  skewMs: 30_000,
+  lockTtlMs: 10_000,
+  lockWaitMs: 3_000,
+  ttlMs: 28_800_000,
+  oidc: {},
+  records,
+};
 
-vi.mock('../../lib/auth', () => ({
-  authRuntime: () => Promise.resolve({ ...runtime, store }),
-}));
+setConsolePorts({
+  // A partial fake, like SessionRecord's below: only the fields requireSession()/getSession()
+  // actually read. vi.mock's factory used to hide this from tsc; a real function value does not.
+  authRuntime: () => Promise.resolve({ ...runtime, store } as unknown as AuthRuntime),
+  config: () => ({
+    PAIGASUS_IAM_GRPC_URL: 'http://iam.internal:9090',
+    PAIGASUS_SESSION_STORE: 'memory',
+    PAIGASUS_SESSION_REDIS_URL: undefined,
+    PAIGASUS_SESSION_REDIS_TIMEOUT_MS: 1000,
+    PAIGASUS_SERVICES: { iam: 'http://iam.internal:8080' },
+    PAIGASUS_DISCOVERY_NEGATIVE_MS: 1000,
+    PAIGASUS_DISCOVERY_FRESH_MS: 5000,
+    PAIGASUS_DISCOVERY_STALE_MS: 30_000,
+    PAIGASUS_DISCOVERY_PROBE_TIMEOUT_MS: 2000,
+    PAIGASUS_DISCOVERY_LOCK_WAIT_MS: 3000,
+    PAIGASUS_DISCOVERY_LOCK_TTL_MS: 10_000,
+  }),
+});
 
 const { iamClients, iamClientsForAction, optionalSession } = await import('../../lib/iam');
 
@@ -83,16 +98,10 @@ describe('iamClientsForAction (the Server Action session read)', () => {
     if (!result.ok) expect(result.error.presentation).toBe('relogin');
   });
 
+  // SMA-512 PR 2, task 4: iamClientsForToken() now reads PAIGASUS_IAM_GRPC_URL through the
+  // config() port set up above, not through the app's own getRuntimeConfig() — so this case no
+  // longer needs to stub a full, schema-valid environment.
   it('returns the five clients when the session resolves', async () => {
-    vi.stubEnv('PAIGASUS_IAM_GRPC_URL', 'http://iam.internal:9090');
-    vi.stubEnv('PAIGASUS_ZONE', 'iam');
-    vi.stubEnv('PAIGASUS_ZONES', '{"iam":"/iam"}');
-    vi.stubEnv('PAIGASUS_OIDC_ISSUER', 'https://idp.example.test');
-    vi.stubEnv('PAIGASUS_OIDC_CLIENT_ID', 'console');
-    vi.stubEnv('PAIGASUS_OIDC_CLIENT_SECRET', 'console-secret');
-    vi.stubEnv('PAIGASUS_PUBLIC_ORIGIN', 'https://console.example.test');
-    vi.stubEnv('PAIGASUS_SESSION_STORE', 'memory');
-    vi.stubEnv('PAIGASUS_SERVICES', '{"iam":"http://iam.internal:8080"}');
     setRequestHeaders({});
     signedIn();
 
@@ -100,7 +109,6 @@ describe('iamClientsForAction (the Server Action session read)', () => {
 
     expect(result.ok).toBe(true);
     if (result.ok) expect(Object.keys(result.value).sort()).toEqual(['audit', 'authn', 'authz', 'serviceInfo', 'tenancy']);
-    vi.unstubAllEnvs();
   });
 
   it('reads the session through getSession, so optionalSession never redirects either', async () => {

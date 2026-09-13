@@ -453,9 +453,15 @@ importers:
       '@types/node':
         specifier: 'catalog:'
         version: 24.13.3
+      '@types/react':
+        specifier: 'catalog:'
+        version: 19.2.18
       jose:
         specifier: 'catalog:'
         version: 6.2.12
+      msw:
+        specifier: 'catalog:'
+        version: 2.15.0(@types/node@24.13.3)(typescript@6.0.3)
       next:
         specifier: 'catalog:'
         version: 16.3.4(@babel/core@7.29.7)(@playwright/test@1.63.0)(@types/node@24.13.3)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)

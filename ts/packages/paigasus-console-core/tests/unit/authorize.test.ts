@@ -4,7 +4,7 @@
 // (action, resource), and FAILS OPEN.
 import { describe, expect, it, vi } from 'vitest';
 import { Code, ConnectError } from '@connectrpc/connect';
-import { createMayI } from '../../lib/authorize';
+import { createMayI } from '../../src/authorize';
 
 const ME = 'prn:pgs:iam:::principal/0192f1c0-0000-7000-8000-000000000001';
 const ORG = 'prn:pgs:iam::0192f1c0-0000-7000-8000-000000000002:organization/0192f1c0-0000-7000-8000-000000000002';

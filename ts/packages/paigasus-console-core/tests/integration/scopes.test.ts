@@ -8,10 +8,30 @@ import { Code } from '@connectrpc/connect';
 import type { ServiceState } from '@paigasus/discovery/types';
 import { disposeTransports } from '@paigasus/sdk/iam';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { ROOT_PRN, organizationPrn, projectPrn, teamPrn } from '@paigasus/console-core';
-import { SCOPE_CAP, cedarCapabilityOf, loadMyScopes } from '../../lib/scopes';
-import { denial, startFakeIam, type FakeIam, type FakeIamHandlers } from '../support/fake-iam';
-import { IDS, callsSince, clientsFor } from './support';
+import { organizationPrn, ROOT_PRN, projectPrn, teamPrn } from '../../src/prn-tenancy';
+import { SCOPE_CAP, cedarCapabilityOf, loadMyScopes } from '../../src/scopes';
+import { createIamClients } from '../../src/iam-clients';
+// TEMPORARY (SMA-512 PR 2, task 3 → task 6): the fakes move to ./testing in task 6.
+import { denial, startFakeIam, type FakeIam, type FakeIamCall, type FakeIamHandlers, type FakeIamMethod } from '../../../../apps/iam-console/tests/support/fake-iam';
+
+// A subset of ts/apps/iam-console/tests/integration/support.ts's IDS, and its callsSince(),
+// duplicated here rather than imported: that file also serves app-only integration tests that are
+// not moving, so it stays in the app. clientsFor() is not duplicated — createIamClients() (below)
+// already gives the same two clients.
+const IDS = {
+  principalPrn: 'prn:pgs:iam:::principal/0190a1e5-0000-7000-8000-0000000000e0',
+  orgA: '0190a100-0000-7000-8000-00000000000a',
+  orgB: '0190a100-0000-7000-8000-00000000000b',
+  teamA1: '0190a1b2-0000-7000-8000-0000000000a1',
+  teamB1: '0190a1b2-0000-7000-8000-0000000000b1',
+  projectB1: '0190a1c3-0000-7000-8000-0000000000b1',
+} as const;
+
+/** The calls the fake saw from now on, by method. The fake's log is shared by every test in a file. */
+function callsSince(fake: FakeIam): (method: FakeIamMethod | 'http.getServiceInfo') => FakeIamCall[] {
+  const start = fake.calls.length;
+  return (method) => fake.calls.slice(start).filter((call) => call.method === method);
+}
 
 let iam: FakeIam;
 
@@ -35,7 +55,7 @@ function principal(...nodePrns: string[]) {
 }
 
 function ports() {
-  const { tenancy, authz } = clientsFor(iam);
+  const { tenancy, authz } = createIamClients({ baseUrl: iam.grpcUrl, token: 'tok-integration' });
   return { tenancy, authz };
 }
 

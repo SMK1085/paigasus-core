@@ -24,8 +24,12 @@
 // assignability error, not a silent pass. MEASURED both ways.
 //
 // If a future `@types/node` bump adds its own global `HeadersInit`, this becomes a duplicate
-// declaration (TS merges identical `type` aliases; a differently-shaped one errors loudly) — check
-// this file first on that bump before assuming an unrelated regression.
+// declaration: TypeScript never merges `type` alias declarations (only `interface` declarations
+// merge), so two `type HeadersInit` in scope raise TS2300 "Duplicate identifier" whether the two
+// shapes agree or not — check this file first on that bump before assuming an unrelated
+// regression. The same collision happens the other way too: if `"DOM"` is ever added back to this
+// package's `lib`, this declaration collides with `lib.dom.d.ts`'s own global `HeadersInit` for
+// the identical reason.
 declare global {
   type HeadersInit = Headers | [string, string][] | Record<string, string>;
 }

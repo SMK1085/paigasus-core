@@ -11,6 +11,7 @@ import type { DescService } from '@bufbuild/protobuf';
 import type { CallOptions, Client } from '@connectrpc/connect';
 import { AuditService, AuthnService, AuthorizationService, createIamClient, ServiceInfoService, TenancyService } from '@paigasus/sdk/iam';
 import { CORRELATION_HEADER } from './correlation-header';
+import { consolePorts } from './runtime-ports';
 
 export type IamClients = {
   tenancy: Client<typeof TenancyService>;
@@ -52,4 +53,16 @@ export function createIamClients(opts: { baseUrl: string; token: string; correla
     audit: withCorrelation(createIamClient(AuditService, transport, auth), id),
     serviceInfo: withCorrelation(createIamClient(ServiceInfoService, transport, auth), id),
   };
+}
+
+/**
+ * The clients for a token the caller already holds, over the app's configured IAM gRPC address.
+ * No session lookup — used by `iam.ts` and by the login callback's resolver factory (`auth.ts`,
+ * the app's composition root). SMA-512 PR 2, task 4: this is what "iam-clients.ts regains a
+ * baseUrl source" means — the app's own temporary `lib/iam-clients.ts` wrapper (task 3) did this
+ * for `iam.ts` while it still lived in the app; now that `iam.ts` lives here, this package needs
+ * its own baseUrl source, read through the port rather than the app's `getRuntimeConfig()`.
+ */
+export function iamClientsForToken(token: string, correlationId: string | null = null): IamClients {
+  return createIamClients({ baseUrl: consolePorts().config().PAIGASUS_IAM_GRPC_URL, token, correlationId });
 }

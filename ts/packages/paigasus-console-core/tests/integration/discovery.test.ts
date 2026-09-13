@@ -1,13 +1,21 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// lib/discovery.ts (spec § 4.4, § 6.6): the app's composition of @paigasus/discovery, with MSW
+// discovery.ts (spec § 4.4, § 6.6): the console's composition of @paigasus/discovery, with MSW
 // serving IAM's `GET /v1/service-info` (AC 5). No live service and no Docker.
 //
-// The process-wide descriptor cache is module state, so each case imports fresh modules and resets
-// the cache afterwards.
+// The process-wide descriptor cache is module state, so each case imports a fresh discovery
+// module and resets the cache afterwards.
+//
+// SMA-512 PR 2, task 4: this used to build its config through the app's own `getRuntimeConfig()`
+// (env vars, parsed by zod). Now that discovery.ts takes a `ConsoleCoreConfig` through the
+// runtime-ports seam instead of the app's config, the test builds that plain object directly —
+// there is no zod schema in this package to parse env vars against, and none of these cases
+// exercise env parsing; they exercise descriptorCacheFor()/createAppDiscovery() themselves.
 import { setupServer } from 'msw/node';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
-import { stubConsoleEnv } from '../support/env';
+import { DEFAULT_TIMINGS } from '@paigasus/discovery/server';
+import { createJsonLogger } from '../../src/logger';
+import type { ConsoleCoreConfig } from '../../src/config-shape';
 import { serviceInfoHandlers } from '../support/msw';
 
 const IAM_HTTP = 'http://iam.msw.test';
@@ -16,22 +24,35 @@ const server = setupServer();
 beforeAll(() => server.listen({ onUnhandledRequest: 'error' }));
 afterEach(() => {
   server.resetHandlers();
-  vi.unstubAllEnvs();
 });
 afterAll(() => server.close());
 
-async function load(overrides: Record<string, string>) {
+function defaultConfig(overrides: Partial<ConsoleCoreConfig> = {}): ConsoleCoreConfig {
+  return {
+    PAIGASUS_IAM_GRPC_URL: 'http://iam.internal:9090',
+    PAIGASUS_SESSION_STORE: 'memory',
+    PAIGASUS_SESSION_REDIS_URL: undefined,
+    PAIGASUS_SESSION_REDIS_TIMEOUT_MS: 1000,
+    PAIGASUS_SERVICES: { iam: IAM_HTTP },
+    PAIGASUS_DISCOVERY_NEGATIVE_MS: DEFAULT_TIMINGS.negativeMs,
+    PAIGASUS_DISCOVERY_FRESH_MS: DEFAULT_TIMINGS.freshMs,
+    PAIGASUS_DISCOVERY_STALE_MS: DEFAULT_TIMINGS.staleMs,
+    PAIGASUS_DISCOVERY_PROBE_TIMEOUT_MS: DEFAULT_TIMINGS.probeTimeoutMs,
+    PAIGASUS_DISCOVERY_LOCK_WAIT_MS: DEFAULT_TIMINGS.lockWaitMs,
+    PAIGASUS_DISCOVERY_LOCK_TTL_MS: DEFAULT_TIMINGS.lockTtlMs,
+    ...overrides,
+  };
+}
+
+async function load(overrides: Partial<ConsoleCoreConfig> = {}) {
   vi.resetModules();
-  stubConsoleEnv({ PAIGASUS_SERVICES: JSON.stringify({ iam: IAM_HTTP }), ...overrides });
-  const { getRuntimeConfig } = await import('../../lib/config');
-  const { createJsonLogger } = await import('@paigasus/console-core');
-  const discovery = await import('../../lib/discovery');
+  const discovery = await import('../../src/discovery');
   const lines: string[] = [];
-  const handle = discovery.createAppDiscovery({ config: getRuntimeConfig(), log: createJsonLogger((line) => lines.push(line)), waitUntil: () => undefined });
+  const handle = discovery.createAppDiscovery({ config: defaultConfig(overrides), log: createJsonLogger((line) => lines.push(line)), waitUntil: () => undefined });
   return { handle, lines, reset: discovery.resetDiscoveryForTest };
 }
 
-describe('the app’s discovery', () => {
+describe('the console’s discovery', () => {
   it('reports IAM available with the capabilities it serves (memory store)', async () => {
     server.use(...serviceInfoHandlers(IAM_HTTP, { service: 'iam', version: '1.0.0', capabilities: ['iam.authz.cedar', 'iam.audit'] }));
     const { handle, reset } = await load({});
@@ -62,7 +83,7 @@ describe('the app’s discovery', () => {
     }
   });
 
-  // The file header's "no silent fallback" rule, from the other side. lib/config.ts's flat zod
+  // The file header's "no silent fallback" rule, from the other side. The app's flat zod config
   // shape cannot express this cross-field rule, so the pair reaches descriptorCacheFor. Before the
   // final-review fix it read as "use memory", and every zone then cached in its own process.
   it('refuses the redis store with no URL, instead of falling back to the memory cache', async () => {
@@ -71,7 +92,7 @@ describe('the app’s discovery', () => {
 
   it('with an unreachable Redis: degrades to cache-unavailable, and logs the failure once without the DSN', async () => {
     server.use(...serviceInfoHandlers(IAM_HTTP, { service: 'iam', version: '1.0.0', capabilities: [] }));
-    const { handle, lines, reset } = await load({ PAIGASUS_SESSION_STORE: 'redis', PAIGASUS_SESSION_REDIS_URL: 'redis://:hunter2@127.0.0.1:1', PAIGASUS_SESSION_REDIS_TIMEOUT_MS: '200' });
+    const { handle, lines, reset } = await load({ PAIGASUS_SESSION_STORE: 'redis', PAIGASUS_SESSION_REDIS_URL: 'redis://:hunter2@127.0.0.1:1', PAIGASUS_SESSION_REDIS_TIMEOUT_MS: 200 });
     try {
       expect(await handle.getServiceState('iam', 'token-a')).toMatchObject({ state: 'degraded', reason: 'cache-unavailable' });
       const events = lines.map((line) => (JSON.parse(line) as { event: string }).event);
