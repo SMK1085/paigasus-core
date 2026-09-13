@@ -1,0 +1,26 @@
+{
+  "cli_version": "0.10.6",
+  "checkpoint_id": "f012e2870658",
+  "strategy": "manual-commit",
+  "branch": "feature/sma-512-ts-gateway-console",
+  "checkpoints_count": 5,
+  "files_touched": [
+    "docs/superpowers/plans/2026-09-13-sma-512-pr1-app-scoped-gates.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/f0/12e2870658/0/metadata.json",
+      "transcript": "/f0/12e2870658/0/full.jsonl",
+      "compact_transcript": "/f0/12e2870658/0/transcript.jsonl",
+      "content_hash": "/f0/12e2870658/0/content_hash.txt",
+      "prompt": "/f0/12e2870658/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 200,
+    "cache_creation_tokens": 378777,
+    "cache_read_tokens": 27423054,
+    "output_tokens": 170627,
+    "api_call_count": 100
+  }
+}
