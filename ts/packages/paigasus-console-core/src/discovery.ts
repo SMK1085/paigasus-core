@@ -14,11 +14,8 @@
 // fast, discovery reports its own `cache-unavailable` degraded reason, and this file logs
 // `discovery.redis_connect_failed` once, with no DSN.
 import 'server-only';
-import { after } from 'next/server';
-import { cache } from 'react';
 import { createClient, type RedisClientType } from 'redis';
 import { createDiscovery, createMemoryDescriptorCache, createRedisDescriptorCache, timingsFromEnv, type DescriptorCache, type Discovery } from '@paigasus/discovery/server';
-import { consolePorts } from './runtime-ports';
 import type { ConsoleCoreConfig } from './config-shape';
 import { logger, type ConsoleLogger } from './logger';
 
@@ -130,6 +127,3 @@ export function createAppDiscovery(deps: { config: ConsoleCoreConfig; log?: Cons
     ...(deps.waitUntil === undefined ? {} : { waitUntil: deps.waitUntil }),
   });
 }
-
-/** One handle per request; background revalidation runs after the response, through after(). */
-export const discovery: () => Discovery = cache(() => createAppDiscovery({ config: consolePorts().config(), waitUntil: (p) => after(p) }));

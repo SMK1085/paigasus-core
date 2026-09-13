@@ -9,7 +9,7 @@
 import { revalidatePath } from 'next/cache';
 import type { ActionState } from '@paigasus/console-core';
 import { formFields, invalidFormInput } from '../../../lib/form';
-import { iamClientsForAction } from '../../../lib/iam';
+import { iamClientsForAction } from '../../../lib/console';
 import { TENANCY_PATH } from '../../../lib/tenancy-path';
 import { attachMembership, attachMembershipForm, createOrganization, createOrganizationForm, detachMembership, detachMembershipForm } from './commands';
 

@@ -3,10 +3,8 @@
 // The loader of /iam/orgs/[org]/teams/[team] (spec § 5.2).
 import 'server-only';
 import type { PaigasusError } from '@paigasus/sdk/errors/types';
-import type { MayI } from '../../../../../../lib/authorize';
-import type { IamClients } from '../../../../../../lib/iam';
 import { PAGE_SIZE, nextOffset } from '../../../../../../lib/paging';
-import { callIam, isUuid, parseTenancyPrn, teamPrn, type IamResult } from '@paigasus/console-core';
+import { callIam, isUuid, parseTenancyPrn, teamPrn, type IamClients, type IamResult, type MayI } from '@paigasus/console-core';
 import { loadMembers, type MembersData } from '../../../members';
 import { sameNode } from '../../../node-ref';
 

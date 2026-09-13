@@ -13,12 +13,9 @@ export { callIam, neverReachedIam, sessionExpired, type ActionState, type IamRes
 export { FORBIDDEN_VIEW_CORRELATION, requestCorrelationId, requestPath } from './correlation';
 export { createIamClients, type IamClients } from './iam-clients';
 export { createIntrospectPrincipalResolver } from './principal-resolver';
-export { setConsolePorts } from './runtime-ports';
+export { createConsoleRuntime, type ConsoleRuntime } from './runtime';
 
-// SMA-512 PR 2, task 4. The five cached accessors, still exporting their module-scope cache()
-// wrappers as-is — task 5 converts them to a createConsoleRuntime() factory.
-export { currentSession, iamClients, iamClientsForAction, optionalSession, sessionToken } from './iam';
-export { currentPrincipal, introspectWithProvisioning, type Principal } from './principal';
-export { createMayI, mayI, type IamAction, type MayI } from './authorize';
-export { SCOPE_CAP, cedarCapabilityOf, loadMyScopes, myScopes, switcherOrgs, type MyScopes, type ScopeEntry } from './scopes';
-export { createAppDiscovery, descriptorCacheFor, discovery, resetDiscoveryForTest } from './discovery';
+export { introspectWithProvisioning, type Principal } from './principal';
+export { createMayI, type IamAction, type MayI } from './authorize';
+export { SCOPE_CAP, cedarCapabilityOf, loadMyScopes, switcherOrgs, type MyScopes, type ScopeEntry } from './scopes';
+export { createAppDiscovery, descriptorCacheFor, resetDiscoveryForTest } from './discovery';

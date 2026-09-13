@@ -11,9 +11,8 @@
 // (authn.rs:182-190). GetServiceInfo is bearer-enforced and checks no Cedar action
 // (adapters/grpc/service_info.rs:1-44), so it is the provisioning call.
 import 'server-only';
-import { cache } from 'react';
 import { ErrorReason } from '@paigasus/sdk/errors';
-import { iamClients, sessionToken, type IamClients } from './iam';
+import type { IamClients } from './iam-clients';
 import { callIam, type IamResult } from './errors';
 import { principalPrnOf } from './principal-prn';
 
@@ -50,6 +49,3 @@ export async function introspectWithProvisioning(
   if (!answer.ok) return answer;
   return { ok: true, value: { prn: principalPrnOf(answer.value.principalPrn), memberships: answer.value.memberships.map((m) => ({ nodePrn: m.nodePrn })) } };
 }
-
-/** Per request: a LIVE Introspect, with one provisioning retry on `identity-not-provisioned`. */
-export const currentPrincipal: () => Promise<IamResult<Principal>> = cache(async () => introspectWithProvisioning(await iamClients(), await sessionToken(), { provisionFirst: false }));

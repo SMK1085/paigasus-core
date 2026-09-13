@@ -5,10 +5,9 @@ import type { ReactElement } from 'react';
 import { notFound } from 'next/navigation';
 import { Breadcrumbs } from '@paigasus/app-shell';
 import { PageError } from '../../../../../../../_components/page-error';
-import { mayI } from '../../../../../../../../lib/authorize';
-import { iamClients } from '../../../../../../../../lib/iam';
-import { parseOffset } from '../../../../../../../../lib/paging';
 import { isUuid } from '@paigasus/console-core';
+import { iamClients, mayI } from '../../../../../../../../lib/console';
+import { parseOffset } from '../../../../../../../../lib/paging';
 import { MembersSection } from '../../../../../members-section';
 import { loadProjectPage } from './load';
 

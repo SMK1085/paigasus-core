@@ -5,8 +5,7 @@
 import 'server-only';
 import { capabilityOutcome } from '@paigasus/discovery/client';
 import type { ServiceState } from '@paigasus/discovery/types';
-import { callIam, type IamResult } from '@paigasus/console-core';
-import type { IamClients } from '../../../lib/iam';
+import { callIam, type IamClients, type IamResult } from '@paigasus/console-core';
 import { PAGE_SIZE } from '../../../lib/paging';
 
 export type AuditGate = 'not-found' | 'degraded' | 'available';

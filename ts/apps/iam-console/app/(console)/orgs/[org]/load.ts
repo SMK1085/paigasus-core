@@ -6,10 +6,8 @@
 // adapters/grpc/tenancy.rs:176-178) means that the URL names no such node: notFound().
 import 'server-only';
 import type { PaigasusError } from '@paigasus/sdk/errors/types';
-import type { MayI } from '../../../../lib/authorize';
-import type { IamClients } from '../../../../lib/iam';
 import { PAGE_SIZE, nextOffset } from '../../../../lib/paging';
-import { callIam, isUuid, organizationPrn, parseTenancyPrn, type IamResult } from '@paigasus/console-core';
+import { callIam, isUuid, organizationPrn, parseTenancyPrn, type IamClients, type IamResult, type MayI } from '@paigasus/console-core';
 import { loadMembers, type MembersData } from '../members';
 
 export type TeamRow = { readonly prn: string; readonly teamId: string | null; readonly slug: string; readonly name: string };

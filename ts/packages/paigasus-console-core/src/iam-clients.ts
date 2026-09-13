@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// The request-scoped IAM clients, with NO session lookup (spec § 4.3). lib/iam.ts adds the session;
-// lib/auth.ts uses iamClientsForToken for the login callback, where no session exists yet. The two
-// files are separate so lib/auth.ts and lib/iam.ts do not import each other.
+// The request-scoped IAM clients, with NO session lookup (spec § 4.3). `runtime.ts`'s
+// `createConsoleRuntime()` adds the session and the app's IAM gRPC address through its
+// `iamClientsForToken` field; the login callback (the app's `lib/auth.ts`) reads that same field,
+// where no session exists yet.
 //
 // No client and no token lives past the request (ts/packages/paigasus-sdk/src/iam.ts:23-28). Only
 // the SDK's transport is process-scoped.
@@ -11,7 +12,6 @@ import type { DescService } from '@bufbuild/protobuf';
 import type { CallOptions, Client } from '@connectrpc/connect';
 import { AuditService, AuthnService, AuthorizationService, createIamClient, ServiceInfoService, TenancyService } from '@paigasus/sdk/iam';
 import { CORRELATION_HEADER } from './correlation-header';
-import { consolePorts } from './runtime-ports';
 
 export type IamClients = {
   tenancy: Client<typeof TenancyService>;
@@ -53,16 +53,4 @@ export function createIamClients(opts: { baseUrl: string; token: string; correla
     audit: withCorrelation(createIamClient(AuditService, transport, auth), id),
     serviceInfo: withCorrelation(createIamClient(ServiceInfoService, transport, auth), id),
   };
-}
-
-/**
- * The clients for a token the caller already holds, over the app's configured IAM gRPC address.
- * No session lookup — used by `iam.ts` and by the login callback's resolver factory (`auth.ts`,
- * the app's composition root). SMA-512 PR 2, task 4: this is what "iam-clients.ts regains a
- * baseUrl source" means — the app's own temporary `lib/iam-clients.ts` wrapper (task 3) did this
- * for `iam.ts` while it still lived in the app; now that `iam.ts` lives here, this package needs
- * its own baseUrl source, read through the port rather than the app's `getRuntimeConfig()`.
- */
-export function iamClientsForToken(token: string, correlationId: string | null = null): IamClients {
-  return createIamClients({ baseUrl: consolePorts().config().PAIGASUS_IAM_GRPC_URL, token, correlationId });
 }

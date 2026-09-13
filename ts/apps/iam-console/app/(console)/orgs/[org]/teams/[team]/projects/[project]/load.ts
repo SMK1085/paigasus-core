@@ -4,9 +4,7 @@
 // the org and the project, not the team, so [team] is checked through GetProject's team_prn.
 import 'server-only';
 import type { PaigasusError } from '@paigasus/sdk/errors/types';
-import type { MayI } from '../../../../../../../../lib/authorize';
-import type { IamClients } from '../../../../../../../../lib/iam';
-import { callIam, isUuid, projectPrn } from '@paigasus/console-core';
+import { callIam, isUuid, projectPrn, type IamClients, type MayI } from '@paigasus/console-core';
 import { loadMembers, type MembersData } from '../../../../../members';
 import { sameNode } from '../../../../../node-ref';
 

@@ -3,7 +3,7 @@
 // Helpers for the tier-2 tests (spec § 9.3). The clients talk real gRPC to the fake IAM, so a test
 // exercises the SDK's transport and error map, not a hand-built object.
 import { AuditService, AuthorizationService, TenancyService, createIamClient } from '@paigasus/sdk/iam';
-import type { IamAction, MayI } from '../../lib/authorize';
+import type { IamAction, MayI } from '@paigasus/console-core';
 import type { FakeIam, FakeIamCall, FakeIamMethod } from '../support/fake-iam';
 
 /** Fixed UUIDs. `a` sorts before `b`, so orgA's scopes come first in every list. */

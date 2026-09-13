@@ -8,8 +8,7 @@ import { Breadcrumbs, ZoneLink } from '@paigasus/app-shell';
 import { EmptyState, ErrorState, Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@paigasus/ui';
 import { PRESENTATION_COPY } from '../../_components/error-copy';
 import { PageError } from '../../_components/page-error';
-import { discovery } from '../../../lib/discovery';
-import { iamClients, sessionToken } from '../../../lib/iam';
+import { discovery, iamClients, sessionToken } from '../../../lib/console';
 import { parseCursor } from '../../../lib/paging';
 import { auditGate, loadAuditPage } from './load';
 

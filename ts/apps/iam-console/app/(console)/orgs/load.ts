@@ -3,10 +3,8 @@
 // The loader of /iam/orgs (spec § 5.2). It takes ports, so the tier-2 tests call it with a client
 // to the fake IAM and a scripted mayI. The "Your organizations" data is lib/scopes.ts' myScopes().
 import 'server-only';
-import type { MayI } from '../../../lib/authorize';
-import type { IamClients } from '../../../lib/iam';
 import { PAGE_SIZE, nextOffset } from '../../../lib/paging';
-import { callIam, ROOT_PRN, parseTenancyPrn, type IamResult } from '@paigasus/console-core';
+import { callIam, ROOT_PRN, parseTenancyPrn, type IamClients, type IamResult, type MayI } from '@paigasus/console-core';
 
 export type OrganizationRow = { readonly prn: string; readonly orgId: string | null; readonly slug: string; readonly name: string };
 export type OrganizationList = { readonly rows: readonly OrganizationRow[]; readonly offset: number; readonly nextOffset: number | null };

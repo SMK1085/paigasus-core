@@ -3,9 +3,7 @@
 // The Members section of every node page (spec § 5.2). A node page is the only place where IAM
 // lets a non-admin list memberships: ListMemberships(node_prn) checks against the node.
 import 'server-only';
-import type { MayI } from '../../../lib/authorize';
-import { callIam, type IamResult } from '@paigasus/console-core';
-import type { IamClients } from '../../../lib/iam';
+import { callIam, type IamClients, type IamResult, type MayI } from '@paigasus/console-core';
 import { PAGE_SIZE, nextOffset } from '../../../lib/paging';
 
 export type MemberRow = { readonly id: string; readonly principalPrn: string };

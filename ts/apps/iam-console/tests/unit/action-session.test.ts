@@ -8,44 +8,36 @@
 // browser leaves the /iam zone. So iamClientsForAction() must RETURN a relogin failure, and
 // iamClients() must keep redirecting for pages. The two cases below run under the SAME conditions
 // and must differ, which is what makes this test a control rather than a restatement.
-import { describe, expect, it } from 'vitest';
+//
+// This drives the REAL lib/console.ts — the app's ONE createConsoleRuntime() call (SMA-512 PR 2,
+// task 5, controller ruling C) — with `./auth` and `./config` mocked out at the module boundary,
+// rather than building a second runtime instance here: a second createConsoleRuntime() call would
+// be a second memoization identity, exactly the thing that call must never have.
+import { describe, expect, it, vi } from 'vitest';
 import type { AuthRuntime, SessionRecord } from '@paigasus/auth/server';
-import { setConsolePorts } from '@paigasus/console-core';
 import { setRequestCookies, setRequestHeaders } from '../support/next-headers';
 
-// SMA-512 PR 2, task 4: lib/iam.ts is now a barrel over @paigasus/console-core's iam.ts, which
-// reads authRuntime() and the IAM gRPC URL through the package's runtime-ports seam rather than
-// importing lib/auth.ts directly, so a `vi.mock('../../lib/auth', …)` no longer reaches it. This
-// file wires the port directly instead — the same shape task 5's createConsoleRuntime() will wire
-// for real.
-//
-// ORDER MATTERS (task 4 fix round 1). lib/iam.ts's barrel now carries `import './auth'` for its
-// own side effect (see its comment), so importing it runs the app's REAL setConsolePorts() call —
-// the one that reads the real, unstubbed environment. Importing lib/iam.ts must therefore happen
-// BEFORE this file's own setConsolePorts() call below, so the fake one is what is left in place
-// when an `it()` runs. Getting this backwards was measured to fail all five cases: the app's real
-// authRuntime()/getRuntimeConfig() clobbers the fake, and every accessor then tries to read a real,
-// unconfigured environment.
-const { iamClients, iamClientsForAction, optionalSession } = await import('../../lib/iam');
+const { runtime, store } = vi.hoisted(() => {
+  const records = new Map<string, unknown>();
+  const store = { get: (sid: string) => Promise.resolve(records.get(sid) ?? null), put: () => Promise.resolve(), delete: () => Promise.resolve() };
+  const runtime = {
+    basePath: '/iam',
+    logger: { event: () => undefined },
+    skewMs: 30_000,
+    lockTtlMs: 10_000,
+    lockWaitMs: 3_000,
+    ttlMs: 28_800_000,
+    oidc: {},
+    records,
+  };
+  return { runtime, store };
+});
 
-const records = new Map<string, unknown>();
-const store = { get: (sid: string) => Promise.resolve(records.get(sid) ?? null), put: () => Promise.resolve(), delete: () => Promise.resolve() };
-const runtime = {
-  basePath: '/iam',
-  logger: { event: () => undefined },
-  skewMs: 30_000,
-  lockTtlMs: 10_000,
-  lockWaitMs: 3_000,
-  ttlMs: 28_800_000,
-  oidc: {},
-  records,
-};
-
-setConsolePorts({
-  // A partial fake, like SessionRecord's below: only the fields requireSession()/getSession()
-  // actually read. vi.mock's factory used to hide this from tsc; a real function value does not.
-  authRuntime: () => Promise.resolve({ ...runtime, store } as unknown as AuthRuntime),
-  config: () => ({
+// A partial fake, like SessionRecord's below: only the fields requireSession()/getSession()
+// actually read. vi.mock's factory used to hide this from tsc; a real function value does not.
+vi.mock('../../lib/auth', () => ({ authRuntime: () => Promise.resolve({ ...runtime, store } as unknown as AuthRuntime) }));
+vi.mock('../../lib/config', () => ({
+  getRuntimeConfig: () => ({
     PAIGASUS_IAM_GRPC_URL: 'http://iam.internal:9090',
     PAIGASUS_SESSION_STORE: 'memory',
     PAIGASUS_SESSION_REDIS_URL: undefined,
@@ -58,7 +50,9 @@ setConsolePorts({
     PAIGASUS_DISCOVERY_LOCK_WAIT_MS: 3000,
     PAIGASUS_DISCOVERY_LOCK_TTL_MS: 10_000,
   }),
-});
+}));
+
+const { iamClients, iamClientsForAction, optionalSession } = await import('../../lib/console');
 
 const SID = 'sid-for-the-action-path';
 
@@ -105,9 +99,6 @@ describe('iamClientsForAction (the Server Action session read)', () => {
     if (!result.ok) expect(result.error.presentation).toBe('relogin');
   });
 
-  // SMA-512 PR 2, task 4: iamClientsForToken() now reads PAIGASUS_IAM_GRPC_URL through the
-  // config() port set up above, not through the app's own getRuntimeConfig() — so this case no
-  // longer needs to stub a full, schema-valid environment.
   it('returns the five clients when the session resolves', async () => {
     setRequestHeaders({});
     signedIn();

@@ -18,13 +18,10 @@
 // The second used to arrive as the empty string, which is not null: every affordance then asked IAM
 // `isAuthorized({ principalPrn: '' })`, got InvalidArgument, and rendered anyway.
 import 'server-only';
-import { cache } from 'react';
 import type { Client } from '@connectrpc/connect';
 import type { AuthorizationService } from '@paigasus/sdk/iam';
-import { iamClients } from './iam';
 import { callIam } from './errors';
-import { logger, type ConsoleLogger } from './logger';
-import { currentPrincipal } from './principal';
+import type { ConsoleLogger } from './logger';
 
 /** The PascalCase names IAM's Action::parse accepts (rs/crates/libs/paigasus-iam-core/src/authz/action.rs:114-163). */
 export type IamAction = 'ListOrganizations' | 'CreateOrganization' | 'CreateTeam' | 'CreateProject' | 'AttachMembership' | 'DetachMembership' | 'ListAuditLog';
@@ -60,9 +57,3 @@ export function createMayI(deps: { authz: Pick<Client<typeof AuthorizationServic
     return pending;
   };
 }
-
-/** One MayI per request, so the memo lives exactly one request. */
-export const mayI: () => Promise<MayI> = cache(async () => {
-  const [principal, clients] = await Promise.all([currentPrincipal(), iamClients()]);
-  return createMayI({ authz: clients.authz, principalPrn: principal.ok ? principal.value.prn : null, logger });
-});
