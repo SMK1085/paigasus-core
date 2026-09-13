@@ -1294,3 +1294,735 @@ If this event is something the user would act on now, send a PushNotification. R
 <status>completed</status>
 <summary>Monitor "PR 238 CI checks (emits every terminal result, pass or fail)" stream ended</summary>
 </task-notification>
+
+---
+
+<task-notification>
+<task-id>a8f8d05e0439b45be</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/0163cf9a-0457-4fcf-af47-2cd420fc6a77/tasks/a8f8d05e0439b45be.output</output-file>
+<status>completed</status>
+<summary>Agent "Map iam-console lib for extraction" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>I now have all data needed. Here is the full structured report.
+
+---
+
+# Map of `ts/apps/iam-console/lib/`
+
+All 19 files import `'server-only'` as their first non-comment statement (verified per-file below). Total: 1148 lines across 19 files.
+
+## Per-file inventory
+
+### `lib/auth.ts` (33 lines)
+- Exports: `SESSION_COOKIE_NAME = '__Host-pgs_sid'`; `function authRuntime(): Promise&lt;AuthRuntime&gt;`
+- Imports from `lib/`: `./config` (`getRuntimeConfig`), `./correlation` (`requestCorrelationId`), `./iam-clients` (`iamClientsForToken`), `./logger` (`logger`), `./principal-resolver` (`createIntrospectPrincipalResolver`)
+- `@paigasus/*`: `@paigasus/auth/server` (`getAuthRuntime`, `type AuthRuntime`)
+- `server-only`: yes (line 6)
+- Runtime config: yes, inside `authRuntime()` function body (`getRuntimeConfig()` call at line 29), not module scope
+- `cache()`: no
+
+### `lib/authorize.ts` (68 lines)
+- Exports: `type IamAction = 'ListOrganizations' | 'CreateOrganization' | 'CreateTeam' | 'CreateProject' | 'AttachMembership' | 'DetachMembership' | 'ListAuditLog'`; `type MayI = (action: IamAction, resourcePrn: string) =&gt; Promise&lt;boolean&gt;`; `function createMayI(deps: { authz: Pick&lt;Client&lt;typeof AuthorizationService&gt;, 'isAuthorized'&gt;; principalPrn: string | null; logger: Pick&lt;ConsoleLogger, 'appEvent'&gt; }): MayI`; `const mayI: () =&gt; Promise&lt;MayI&gt; = cache(...)`
+- Imports from `lib/`: `./errors` (`callIam`), `./iam` (`iamClients`), `./logger` (`logger`, `type ConsoleLogger`), `./principal` (`currentPrincipal`)
+- `@paigasus/*`: `@paigasus/sdk/iam` (`type AuthorizationService`)
+- `server-only`: yes (line 20)
+- Runtime config: no
+- `cache()`: yes — `export const mayI: () =&gt; Promise&lt;MayI&gt; = cache(async () =&gt; {...})` (line 65)
+
+### `lib/config.ts` (56 lines)
+- Exports: `const { getRuntimeConfig, getPublicConfig } = defineRuntimeConfig({...})`; `type ConsoleConfig = ReturnType&lt;typeof getRuntimeConfig&gt;`
+- Imports from `lib/`: none
+- `@paigasus/*`: `@paigasus/auth/server` (`authEnvShape`), `@paigasus/discovery/server` (`discoveryEnvShape`), `@paigasus/next-config/runtime` (`defineRuntimeConfig`)
+- `server-only`: yes (line 10)
+- Runtime config: N/A (this is the config definition itself; no accessor call at module scope, per its own doc comment)
+- `cache()`: no
+
+### `lib/correlation-header.ts` (12 lines)
+- Exports: `const CORRELATION_HEADER = 'paigasus-correlation-id'`; `const REQUEST_PATH_HEADER = 'x-paigasus-request-path'`
+- Imports from `lib/`: none
+- `@paigasus/*`: none
+- `server-only`: yes (line 6)
+- Runtime config: no
+- `cache()`: no
+
+### `lib/correlation.ts` (58 lines)
+- Exports: `{ CORRELATION_HEADER, REQUEST_PATH_HEADER }` (re-export); `const FORBIDDEN_VIEW_CORRELATION: 'header' | 'fallback' = 'header'`; `async function requestCorrelationId(): Promise&lt;string | null&gt;`; `async function requestPath(): Promise&lt;string | null&gt;`
+- Imports from `lib/`: `./correlation-header`
+- `@paigasus/*`: none (imports `next/headers`, `next/navigation`)
+- `server-only`: yes (line 11)
+- Runtime config: no
+- `cache()`: no
+
+### `lib/discovery.ts` (134 lines)
+- Exports: `function descriptorCacheFor(config: ConsoleConfig, log: ConsoleLogger = logger): DescriptorCache`; `function resetDiscoveryForTest(): void`; `function createAppDiscovery(deps: { config: ConsoleConfig; log?: ConsoleLogger; fetch?: typeof globalThis.fetch; waitUntil?: (p: Promise&lt;unknown&gt;) =&gt; void }): Discovery`; `const discovery: () =&gt; Discovery = cache(...)`
+- Imports from `lib/`: `./config` (`getRuntimeConfig`, `type ConsoleConfig`), `./logger` (`logger`, `type ConsoleLogger`)
+- `@paigasus/*`: `@paigasus/discovery/server` (`createDiscovery`, `createMemoryDescriptorCache`, `createRedisDescriptorCache`, `timingsFromEnv`, `type DescriptorCache`, `type Discovery`)
+- `server-only`: yes (line 16)
+- Runtime config: yes, inside a function — the `discovery` cache initializer calls `getRuntimeConfig()` at line 134 (inside the `cache(() =&gt; ...)` callback, not eagerly at module scope)
+- `cache()`: yes — `export const discovery: () =&gt; Discovery = cache(() =&gt; createAppDiscovery({...}))` (line 134)
+
+### `lib/errors.ts` (39 lines)
+- Exports: `type IamResult&lt;T&gt; = { ok: true; value: T } | { ok: false; error: PaigasusError }`; `type ActionState = { ok: true } | { ok: false; error: PaigasusError } | null`; `async function callIam&lt;T&gt;(fn: () =&gt; Promise&lt;T&gt;): Promise&lt;IamResult&lt;T&gt;&gt;`
+- Imports from `lib/`: `./correlation` (`requestCorrelationId`, `requestPath`), `./logger` (`logger`)
+- `@paigasus/*`: `@paigasus/sdk/errors` (`mapError`, `type PaigasusError`)
+- `server-only`: yes (line 8)
+- Runtime config: no
+- `cache()`: no
+
+### `lib/form.ts` (59 lines)
+- Exports: `type ActionResult = Exclude&lt;ActionState, null&gt;`; `function toActionResult(result: IamResult&lt;unknown&gt;): ActionResult`; `function formFields(form: FormData, names: readonly string[]): Record&lt;string, FormDataEntryValue | null&gt;`; `function invalidFormInput(): PaigasusError`; `function sessionExpired(): PaigasusError`
+- Imports from `lib/`: `./errors` (`type ActionState`, `type IamResult`)
+- `@paigasus/*`: `@paigasus/sdk/errors/types` (`type PaigasusError`)
+- `server-only`: yes (line 6)
+- Runtime config: no
+- `cache()`: no
+
+### `lib/iam-clients.ts` (61 lines)
+- Exports: `type IamClients = { tenancy: Client&lt;typeof TenancyService&gt;; authn: Client&lt;typeof AuthnService&gt;; authz: Client&lt;typeof AuthorizationService&gt;; audit: Client&lt;typeof AuditService&gt;; serviceInfo: Client&lt;typeof ServiceInfoService&gt; }`; `function createIamClients(opts: { baseUrl: string; token: string; correlationId?: string | null }): IamClients`; `function iamClientsForToken(token: string, correlationId: string | null = null): IamClients`
+- Imports from `lib/`: `./config` (`getRuntimeConfig`), `./correlation-header` (`CORRELATION_HEADER`)
+- `@paigasus/*`: `@paigasus/sdk/iam` (`AuditService`, `AuthnService`, `AuthorizationService`, `createIamClient`, `ServiceInfoService`, `TenancyService`)
+- `server-only`: yes (line 9)
+- Runtime config: yes, inside `iamClientsForToken()` (`getRuntimeConfig().PAIGASUS_IAM_GRPC_URL` at line 60)
+- `cache()`: no
+
+### `lib/iam.ts` (59 lines)
+- Exports: `export type { IamClients } from './iam-clients'`; `const currentSession: () =&gt; Promise&lt;ResolvedSession&gt; = cache(...)`; `const iamClients: () =&gt; Promise&lt;IamClients&gt; = cache(...)`; `const optionalSession: () =&gt; Promise&lt;ResolvedSession | null&gt; = cache(...)`; `async function iamClientsForAction(): Promise&lt;IamResult&lt;IamClients&gt;&gt;`; `const sessionToken: () =&gt; Promise&lt;string&gt; = cache(...)`
+- Imports from `lib/`: `./auth` (`authRuntime`), `./correlation` (`requestCorrelationId`), `./errors` (`type IamResult`), `./form` (`sessionExpired`), `./iam-clients` (`iamClientsForToken`, `type IamClients`)
+- `@paigasus/*`: `@paigasus/auth/server` (`getSession`, `requireSession`, `type ResolvedSession`)
+- `server-only`: yes (line 9)
+- Runtime config: no (delegates to `authRuntime()`/`iamClientsForToken`)
+- `cache()`: yes — 4 of its 5 exports are `cache()`-wrapped: `currentSession`, `iamClients`, `optionalSession`, `sessionToken`. Only `iamClientsForAction` is a plain async function.
+
+### `lib/logger.ts` (43 lines)
+- Exports: `type AppEventName = 'principal.resolve_failed' | 'principal.resolve_crashed' | 'authorize.query_failed' | 'authorize.no_principal' | 'discovery.redis_connect_failed' | 'iam.call_failed'`; `type AppEventFields = Readonly&lt;Record&lt;string, string | number | boolean | null&gt;&gt;`; `interface ConsoleLogger extends AuthLogger, DiscoveryLogger { event(name: AuthEventName | DiscoveryEventName, fields: AuthEventFields | DiscoveryEventFields): void; appEvent(name: AppEventName, fields: AppEventFields): void }`; `function createJsonLogger(write: (line: string) =&gt; void = stdout): ConsoleLogger`; `const logger: ConsoleLogger = createJsonLogger()`
+- Imports from `lib/`: none
+- `@paigasus/*`: `@paigasus/auth/server` (types `AuthEventFields`, `AuthEventName`, `AuthLogger`), `@paigasus/discovery/server` (types `DiscoveryEventFields`, `DiscoveryEventName`, `DiscoveryLogger`)
+- `server-only`: yes (line 10)
+- Runtime config: no
+- `cache()`: no
+
+### `lib/nav.ts` (35 lines)
+- Exports: `const IAM_BASE_PATH = '/iam'`; `function buildNavEntries(input: { iam: ServiceState; gateway: ServiceState; zones: ZoneMap; auditAllowed: boolean }): NavEntry[]`
+- Imports from `lib/`: none
+- `@paigasus/*`: `@paigasus/app-shell` (`navStateOf`, `type NavEntry`, `type ZoneMap`), `@paigasus/discovery/types` (`type ServiceState`)
+- `server-only`: yes (line 8)
+- Runtime config: no
+- `cache()`: no
+
+### `lib/paging.ts` (89 lines)
+- Exports: `const PAGE_SIZE = 50`; `const MAX_CURSOR_LENGTH = 1024`; `function parseOffset(raw: string | readonly string[] | undefined): number`; `function nextOffset(offset: number, received: number): number | null`; `function pageHref(path: string, param: string, offset: number, keep: Readonly&lt;Record&lt;string, number&gt;&gt; = {}): string`; `type ParsedCursor = { readonly ok: true; readonly cursor: string } | { readonly ok: false; readonly error: PaigasusError }`; `function parseCursor(raw: string | readonly string[] | undefined): ParsedCursor`
+- Imports from `lib/`: none
+- `@paigasus/*`: `@paigasus/sdk/errors/types` (`type PaigasusError`)
+- `server-only`: yes (line 6)
+- Runtime config: no
+- `cache()`: no
+
+### `lib/principal-prn.ts` (23 lines)
+- Exports: `function principalPrnOf(raw: string): string | null`
+- Imports from `lib/`: none
+- `@paigasus/*`: none
+- `server-only`: yes (line 13)
+- Runtime config: no
+- `cache()`: no
+
+### `lib/principal-resolver.ts` (90 lines)
+- Exports: `function createIntrospectPrincipalResolver(deps: { clientsForToken: (token: string) =&gt; Pick&lt;IamClients, 'authn' | 'serviceInfo'&gt; | Promise&lt;Pick&lt;IamClients, 'authn' | 'serviceInfo'&gt;&gt;; logger: ConsoleLogger; timeoutMs?: number }): PrincipalResolver`
+- Imports from `lib/`: `./errors` (`callIam`), `./iam-clients` (`type IamClients`), `./logger` (`type ConsoleLogger`), `./principal-prn` (`principalPrnOf`)
+- `@paigasus/*`: `@paigasus/auth/server` (`type PrincipalResolver`, `type ResolvedPrincipal`)
+- `server-only`: yes (line 15)
+- Runtime config: no
+- `cache()`: no
+
+### `lib/principal.ts` (55 lines)
+- Exports: `type Principal = { prn: string | null; memberships: readonly { nodePrn: string }[] }`; `async function introspectWithProvisioning(clients: Pick&lt;IamClients, 'authn' | 'serviceInfo'&gt;, token: string, opts: { timeoutMs?: number; provisionFirst?: boolean } = {}): Promise&lt;IamResult&lt;Principal&gt;&gt;`; `const currentPrincipal: () =&gt; Promise&lt;IamResult&lt;Principal&gt;&gt; = cache(...)`
+- Imports from `lib/`: `./errors` (`callIam`, `type IamResult`), `./iam` (`iamClients`, `sessionToken`, `type IamClients`), `./principal-prn` (`principalPrnOf`)
+- `@paigasus/*`: `@paigasus/sdk/errors` (`ErrorReason`)
+- `server-only`: yes (line 13)
+- Runtime config: no
+- `cache()`: yes — `export const currentPrincipal: () =&gt; Promise&lt;IamResult&lt;Principal&gt;&gt; = cache(async () =&gt; introspectWithProvisioning(await iamClients(), await sessionToken(), { provisionFirst: false }))` (line 55)
+
+### `lib/prn-tenancy.ts` (85 lines)
+- Exports: `type TenancyKind = 'organization' | 'team' | 'project'`; `type TenancyRef = { kind: TenancyKind; orgId: string; id: string }`; `const ROOT_PRN = 'prn:pgs:iam:::root/00000000-0000-0000-0000-000000000000'`; `function isUuid(value: string): boolean`; `function parseTenancyPrn(prn: string): TenancyRef | null`; `function organizationPrn(orgId: string): string`; `function teamPrn(orgId: string, teamId: string): string`; `function projectPrn(orgId: string, projectId: string): string`
+- Imports from `lib/`: none
+- `@paigasus/*`: none
+- `server-only`: yes (line 15)
+- Runtime config: no
+- `cache()`: no
+
+### `lib/scopes.ts` (140 lines)
+- Exports: `type ScopeEntry = { kind: 'organization'; prn: string; orgId: string; label: string | null; denied: boolean } | { kind: 'team'; prn: string; orgId: string; teamId: string; label: string | null; denied: boolean } | { kind: 'project'; prn: string; orgId: string; teamId: string | null; projectId: string; label: string | null; denied: boolean }`; `type MyScopes = { entries: ScopeEntry[]; hiddenCount: number; grantsListed: boolean }`; `const SCOPE_CAP = 50`; `async function loadMyScopes(deps: { tenancy: Pick&lt;IamClients['tenancy'], 'getOrganization' | 'getTeam' | 'getProject'&gt;; authz: Pick&lt;IamClients['authz'], 'listRoleGrants'&gt;; principal: Principal; cedarCapability: boolean }): Promise&lt;MyScopes&gt;`; `function cedarCapabilityOf(state: ServiceState): boolean`; `const myScopes = cache(async (): Promise&lt;IamResult&lt;MyScopes&gt;&gt; =&gt; {...})`; `function switcherOrgs(scopes: IamResult&lt;MyScopes&gt;): { orgId: string; label: string }[]`
+- Imports from `lib/`: `./discovery` (`discovery`), `./errors` (`callIam`, `type IamResult`), `./iam` (`iamClients`, `sessionToken`, `type IamClients`), `./principal` (`currentPrincipal`, `type Principal`), `./prn-tenancy` (`organizationPrn`, `parseTenancyPrn`, `projectPrn`, `teamPrn`, `type TenancyRef`)
+- `@paigasus/*`: `@paigasus/discovery/types` (`type ServiceState`)
+- `server-only`: yes (line 9)
+- Runtime config: no (goes through `discovery()`/`iamClients()`)
+- `cache()`: yes — `export const myScopes = cache(async (): Promise&lt;IamResult&lt;MyScopes&gt;&gt; =&gt; {...})` (line 123)
+
+### `lib/tenancy-path.ts` (9 lines)
+- Exports: `const TENANCY_PATH = '/orgs'`
+- Imports from `lib/`: none
+- `@paigasus/*`: none
+- `server-only`: NO — plain module, no guard at all (its own comment explains why: a Server Actions file may export only async functions, so this constant cannot live in an actions.ts, and it's not itself in the server-action boundary)
+- Runtime config: no
+- `cache()`: no
+
+---
+
+## Answers to specific questions
+
+### A. `lib/auth.ts` — full quote
+
+```ts
+// SPDX-License-Identifier: Apache-2.0
+//
+// The auth composition root (spec § 4.2). getAuthRuntime is a PROCESS singleton that returns a
+// Promise (ts/packages/paigasus-auth/src/runtime.ts:185), and its first call fixes the resolver and
+// the logger for the life of the process. Nothing here runs at module scope.
+import 'server-only';
+import { getAuthRuntime, type AuthRuntime } from '@paigasus/auth/server';
+import { getRuntimeConfig } from './config';
+import { requestCorrelationId } from './correlation';
+import { iamClientsForToken } from './iam-clients';
+import { logger } from './logger';
+import { createIntrospectPrincipalResolver } from './principal-resolver';
+
+/**
+ * The session cookie's name. @paigasus/auth does not export it from any entry an app may import,
+ * so it is written here once; tests/unit/session-cookie.test.ts proves that @paigasus/auth's own
+ * middleware treats exactly this name as the session.
+ */
+export const SESSION_COOKIE_NAME = '__Host-pgs_sid';
+
+/**
+ * The runtime is a process singleton, but `clientsForToken` runs PER REQUEST, inside the login
+ * callback's route handler. So it reads the correlation id there, and the login-time IAM calls
+ * (GetServiceInfo, Introspect) carry the same id as every later call of that request. proxy.ts sets
+ * the header on `/auth/callback` too — the route is public, which makes the middleware allow it, not
+ * skip the header. Outside a request scope `requestCorrelationId()` answers null, never throws.
+ */
+export function authRuntime(): Promise&lt;AuthRuntime&gt; {
+  return getAuthRuntime(getRuntimeConfig(), {
+    logger,
+    resolver: createIntrospectPrincipalResolver({ clientsForToken: async (token) =&gt; iamClientsForToken(token, await requestCorrelationId()), logger }),
+  });
+}
+```
+
+What it composes: it is a pure **composition root**. It calls `getAuthRuntime()` (from `@paigasus/auth/server`, staying in the shared package) with three things assembled from local lib pieces: (1) `getRuntimeConfig()` from `lib/config.ts`, (2) `logger` from `lib/logger.ts`, (3) a `resolver` built by `createIntrospectPrincipalResolver` from `lib/principal-resolver.ts`, whose `clientsForToken` dependency is itself composed inline from `lib/iam-clients.ts`'s `iamClientsForToken` plus `lib/correlation.ts`'s `requestCorrelationId`. It also owns one bare constant, `SESSION_COOKIE_NAME`, which is app-local knowledge (not exported by `@paigasus/auth`) pinned by a test.
+
+For the shared-package split: `authRuntime()` itself is generic wiring (config → logger → resolver → `getAuthRuntime`) and could move, provided the shared package receives `ConsoleLogger`-shaped and `IamClients`-shaped types as generic parameters/ports rather than the concrete lib types. `SESSION_COOKIE_NAME` is a leaf constant that could move with it (it's not app-specific, just undocumented upstream). What must stay app-specific is whichever module actually calls `getRuntimeConfig()` — since `getRuntimeConfig`/`getPublicConfig` are produced by this app's own `defineRuntimeConfig()` call in `lib/config.ts`, and each app in the workspace instantiates its own.
+
+### B. `lib/iam-clients.ts` — `iamClientsForToken` and principal-resolver dependencies
+
+```ts
+export type IamClients = {
+  tenancy: Client&lt;typeof TenancyService&gt;;
+  authn: Client&lt;typeof AuthnService&gt;;
+  authz: Client&lt;typeof AuthorizationService&gt;;
+  audit: Client&lt;typeof AuditService&gt;;
+  serviceInfo: Client&lt;typeof ServiceInfoService&gt;;
+};
+
+/** The clients for a token the caller already holds. No session lookup — used at login. */
+export function iamClientsForToken(token: string, correlationId: string | null = null): IamClients {
+  return createIamClients({ baseUrl: getRuntimeConfig().PAIGASUS_IAM_GRPC_URL, token, correlationId });
+}
+```
+(`lib/iam-clients.ts:59-61`, `IamClients` type at lines 16-22)
+
+The principal resolver (`lib/principal-resolver.ts:25-34`) depends only on a **narrowed port** of `IamClients`, not the full shape:
+
+```ts
+export function createIntrospectPrincipalResolver(deps: {
+  clientsForToken: (token: string) =&gt; Pick&lt;IamClients, 'authn' | 'serviceInfo'&gt; | Promise&lt;Pick&lt;IamClients, 'authn' | 'serviceInfo'&gt;&gt;;
+  logger: ConsoleLogger;
+  timeoutMs?: number;
+}): PrincipalResolver {
+```
+
+So the exact port shape the resolver receives is `Pick&lt;IamClients, 'authn' | 'serviceInfo'&gt;` (i.e. only `authn: Client&lt;typeof AuthnService&gt;` and `serviceInfo: Client&lt;typeof ServiceInfoService&gt;`), delivered synchronously or as a `Promise` from a `clientsForToken(token: string)` factory, plus a `ConsoleLogger` and an optional `timeoutMs`.
+
+`createIamClients` (`lib/iam-clients.ts:45-56`) is the pure factory both `iamClientsForToken` and (transitively) `lib/iam.ts` depend on:
+```ts
+export function createIamClients(opts: { baseUrl: string; token: string; correlationId?: string | null }): IamClients {
+```
+
+### C. `lib/principal-resolver.ts` — factory signature
+
+```ts
+export function createIntrospectPrincipalResolver(deps: {
+  /**
+   * May be async: lib/auth.ts reads the request's correlation id here, so the login callback's IAM
+   * calls join the id proxy.ts minted. A factory that throws — or a promise that rejects — is a bug,
+   * not an IAM answer, so it lands in the `resolve_crashed` catch below like any other throw.
+   */
+  clientsForToken: (token: string) =&gt; Pick&lt;IamClients, 'authn' | 'serviceInfo'&gt; | Promise&lt;Pick&lt;IamClients, 'authn' | 'serviceInfo'&gt;&gt;;
+  logger: ConsoleLogger;
+  timeoutMs?: number;
+}): PrincipalResolver {
+```
+(`lib/principal-resolver.ts:25-34`)
+
+It takes one `deps` object with three fields: `clientsForToken` (a token→clients port, sync or async, narrowed to `authn`+`serviceInfo`), `logger: ConsoleLogger` (from `lib/logger.ts`), and an optional `timeoutMs` (default `DEFAULT_TIMEOUT_MS = 3_000`, line 23). It returns `PrincipalResolver`, the port type imported from `@paigasus/auth/server`.
+
+### D. `lib/config.ts` — full `defineRuntimeConfig` call with the two requested pieces
+
+Full relevant excerpt (whole file was already quoted above under the per-file inventory; the specific parts asked for):
+
+```ts
+/** Why `value` is not an acceptable IAM gRPC address, or null when it is. */
+function grpcUrlProblem(value: string): string | null {
+  if (!URL.canParse(value)) return 'must be an absolute URL';
+  const url = new URL(value);
+  if (url.protocol !== 'http:' &amp;&amp; url.protocol !== 'https:') return 'must use http: or https:';
+  if (url.username !== '' || url.password !== '') return 'must not carry credentials';
+  if (url.search !== '' || url.hash !== '') return 'must not carry a query or a fragment';
+  return null;
+}
+
+/**
+ * IAM's gRPC address. A separate key from PAIGASUS_SERVICES.iam because IAM listens on two
+ * addresses: HTTP on 8080, which discovery probes, and gRPC on 9090, which the SDK calls
+ * (rs/crates/services/paigasus-iam/src/config.rs:811-812).
+ *
+ * One transform, not a chain of refines: a refine that calls `new URL` after a failed
+ * `URL.canParse` refine would THROW, because zod 4 runs every refine. The value is canonicalized
+ * to `&lt;origin&gt;&lt;path&gt;` with no trailing slash, the form @paigasus/discovery gives its addresses.
+ * The message never contains the value (next-config renders only the issue code for this key).
+ */
+const iamGrpcUrl = z.string().transform((value, ctx) =&gt; {
+  const problem = grpcUrlProblem(value);
+  if (problem !== null) {
+    ctx.addIssue({ code: 'custom', message: problem });
+    return z.NEVER;
+  }
+  const url = new URL(value);
+  return `${url.origin}${url.pathname.replace(/\/+$/, '')}`;
+});
+
+/** discovery's service map, plus one rule: the console cannot run without an `iam` entry. */
+const servicesWithIam = discoveryEnvShape.PAIGASUS_SERVICES.refine((services) =&gt; Object.hasOwn(services, 'iam'), { error: 'must contain an "iam" entry' });
+
+export const { getRuntimeConfig, getPublicConfig } = defineRuntimeConfig({
+  ...authEnvShape,
+  ...discoveryEnvShape,
+  PAIGASUS_SERVICES: servicesWithIam,
+  PAIGASUS_IAM_GRPC_URL: iamGrpcUrl,
+});
+
+export type ConsoleConfig = ReturnType&lt;typeof getRuntimeConfig&gt;;
+```
+(`lib/config.ts:16-56`)
+
+This is the strongest signal that `lib/config.ts` must stay in the app (or become a thin per-app instantiation of a shared factory): the `defineRuntimeConfig` call is a **merge of three schema sources** (`authEnvShape`, `discoveryEnvShape`, and one app-owned key `PAIGASUS_IAM_GRPC_URL`) plus one app-specific cross-cutting refinement (`servicesWithIam` requiring an `iam` entry). A shared package could export `grpcUrlProblem`/`iamGrpcUrl`-shaped helpers, but the actual `defineRuntimeConfig({...})` invocation is inherently one-per-app.
+
+### E. `lib/logger.ts` — interfaces, `appEvent`, ports implemented
+
+```ts
+export type AppEventName = 'principal.resolve_failed' | 'principal.resolve_crashed' | 'authorize.query_failed' | 'authorize.no_principal' | 'discovery.redis_connect_failed' | 'iam.call_failed';
+
+export type AppEventFields = Readonly&lt;Record&lt;string, string | number | boolean | null&gt;&gt;;
+
+/**
+ * `event` is declared again here, as the union of both ports' event names. Without it TypeScript
+ * rejects the interface: AuthLogger.event and DiscoveryLogger.event have different parameter types,
+ * and an interface cannot extend two bases whose same-named members are not identical.
+ */
+export interface ConsoleLogger extends AuthLogger, DiscoveryLogger {
+  event(name: AuthEventName | DiscoveryEventName, fields: AuthEventFields | DiscoveryEventFields): void;
+  appEvent(name: AppEventName, fields: AppEventFields): void;
+}
+```
+(`lib/logger.ts:14-26`)
+
+`appEvent` signature (as part of `ConsoleLogger`): `appEvent(name: AppEventName, fields: AppEventFields): void;` (line 25).
+
+Ports implemented: `ConsoleLogger` `extends AuthLogger, DiscoveryLogger` (line 23) — both imported as types from `@paigasus/auth/server` and `@paigasus/discovery/server` respectively (lines 11-12). It re-declares `event` as the union of `AuthEventName | DiscoveryEventName` (with fields `AuthEventFields | DiscoveryEventFields`) because TypeScript cannot let an interface extend two bases whose same-named member has incompatible signatures, and it adds its own closed `AppEventName` union via `appEvent` for events that belong to neither port. `AppEventName` is entirely app-owned (all 6 values are emitted by other `lib/` files: `principal.resolve_failed`/`principal.resolve_crashed` from `principal-resolver.ts`, `authorize.query_failed`/`authorize.no_principal` from `authorize.ts`, `discovery.redis_connect_failed` from `discovery.ts`, `iam.call_failed` from `errors.ts`).
+
+### F. `lib/discovery.ts` — full quote, four Redis preconditions, lazy-singleton shape
+
+Full file already quoted above in the per-file read. The **four Redis preconditions** `createRedisDescriptorCache` asserts, per the doc comment at lines 6-15 (citing `src/adapters/redis-cache.ts:67-90` in `@paigasus/discovery`), are referenced but enforced by this file's construction logic as:
+
+1. `PAIGASUS_SESSION_STORE === 'redis'` selects the Redis path at all (line 102).
+2. `PAIGASUS_SESSION_REDIS_URL` must be defined — throws `'PAIGASUS_SESSION_REDIS_URL is required when PAIGASUS_SESSION_STORE is "redis"'` otherwise (lines 103-105).
+3. The client must actually connect once, bounded by a timeout (`connectOnce`, lines 33-51) — every cache operation `await`s this readiness gate via `afterConnect` (lines 54-78) before proceeding.
+4. On connect failure, it logs `discovery.redis_connect_failed` and does **not** silently fall back to memory (file header, lines 13-15; also `client.on('error', () =&gt; undefined)` at line 84 to avoid ever logging the DSN).
+
+The **lazy-singleton shape**: two module-scope `let` variables un-set at load —
+```ts
+let processCache: DescriptorCache | undefined;
+let redisClient: RedisClientType | undefined;
+```
+(lines 24-25) — populated on first call to `descriptorCacheFor()` (lines 100-111, `if (processCache !== undefined) return processCache;` guard), and torn down only by the explicit test/shutdown seam `resetDiscoveryForTest()` (lines 114-118). The per-request handle `discovery` is itself a React `cache()` wrapping `createAppDiscovery()`, which in turn calls the process singleton via `descriptorCacheFor(deps.config, log)`:
+```ts
+export const discovery: () =&gt; Discovery = cache(() =&gt; createAppDiscovery({ config: getRuntimeConfig(), waitUntil: (p) =&gt; after(p) }));
+```
+(line 134) — so there are two singleton layers: a PROCESS-wide descriptor cache (`processCache`/`redisClient`), and a PER-REQUEST `Discovery` handle (`discovery()`), exactly as the file header states (lines 3-5).
+
+### G. `app/**` importers of `lib/&lt;file&gt;`
+
+| lib file | app files importing it |
+|---|---|
+| `lib/errors.ts` | `app/_components/create-form.tsx`, `app/_components/membership-form.tsx`, `app/(console)/audit/load.ts`, `app/(console)/orgs/[org]/actions.ts`, `app/(console)/orgs/[org]/commands.ts`, `app/(console)/orgs/[org]/load.ts`, `app/(console)/orgs/[org]/teams/[team]/actions.ts`, `app/(console)/orgs/[org]/teams/[team]/commands.ts`, `app/(console)/orgs/[org]/teams/[team]/load.ts`, `app/(console)/orgs/[org]/teams/[team]/projects/[project]/load.ts`, `app/(console)/orgs/actions.ts`, `app/(console)/orgs/commands.ts`, `app/(console)/orgs/load.ts`, `app/(console)/orgs/members.ts` |
+| `lib/correlation.ts` | `app/_components/error-tail.tsx`, `app/(console)/forbidden.tsx` |
+| `lib/paging.ts` | `app/_components/pager.tsx`, `app/(console)/audit/load.ts`, `app/(console)/audit/page.tsx`, `app/(console)/orgs/[org]/load.ts`, `app/(console)/orgs/[org]/page.tsx`, `app/(console)/orgs/[org]/teams/[team]/load.ts`, `app/(console)/orgs/[org]/teams/[team]/page.tsx`, `app/(console)/orgs/[org]/teams/[team]/projects/[project]/page.tsx`, `app/(console)/orgs/load.ts`, `app/(console)/orgs/members.ts`, `app/(console)/orgs/page.tsx` |
+| `lib/iam.ts` | `app/(console)/audit/load.ts`, `app/(console)/audit/page.tsx`, `app/(console)/layout.tsx`, `app/(console)/orgs/[org]/actions.ts`, `app/(console)/orgs/[org]/commands.ts`, `app/(console)/orgs/[org]/load.ts`, `app/(console)/orgs/[org]/page.tsx`, `app/(console)/orgs/[org]/teams/[team]/actions.ts`, `app/(console)/orgs/[org]/teams/[team]/commands.ts`, `app/(console)/orgs/[org]/teams/[team]/load.ts`, `app/(console)/orgs/[org]/teams/[team]/page.tsx`, `app/(console)/orgs/[org]/teams/[team]/projects/[project]/load.ts`, `app/(console)/orgs/[org]/teams/[team]/projects/[project]/page.tsx`, `app/(console)/orgs/actions.ts`, `app/(console)/orgs/commands.ts`, `app/(console)/orgs/load.ts`, `app/(console)/orgs/members.ts`, `app/(console)/orgs/page.tsx` |
+| `lib/discovery.ts` | `app/(console)/audit/page.tsx`, `app/(console)/layout.tsx` |
+| `lib/nav.ts` | `app/(console)/layout.tsx` |
+| `lib/config.ts` | `app/(console)/layout.tsx`, `app/(public)/layout.tsx`, `app/healthz/route.ts` |
+| `lib/authorize.ts` | `app/(console)/layout.tsx`, `app/(console)/orgs/[org]/load.ts`, `app/(console)/orgs/[org]/page.tsx`, `app/(console)/orgs/[org]/teams/[team]/load.ts`, `app/(console)/orgs/[org]/teams/[team]/page.tsx`, `app/(console)/orgs/[org]/teams/[team]/projects/[project]/load.ts`, `app/(console)/orgs/[org]/teams/[team]/projects/[project]/page.tsx`, `app/(console)/orgs/load.ts`, `app/(console)/orgs/members.ts`, `app/(console)/orgs/page.tsx` |
+| `lib/prn-tenancy.ts` | `app/(console)/layout.tsx`, `app/(console)/orgs/[org]/actions.ts` (via tenancy-path), `app/(console)/orgs/[org]/load.ts`, `app/(console)/orgs/[org]/page.tsx`, `app/(console)/orgs/[org]/teams/[team]/actions.ts` (via tenancy-path), `app/(console)/orgs/[org]/teams/[team]/load.ts`, `app/(console)/orgs/[org]/teams/[team]/page.tsx`, `app/(console)/orgs/[org]/teams/[team]/projects/[project]/load.ts`, `app/(console)/orgs/[org]/teams/[team]/projects/[project]/page.tsx`, `app/(console)/orgs/actions.ts` (via tenancy-path), `app/(console)/orgs/load.ts`, `app/(console)/orgs/node-ref.ts` |
+| `lib/scopes.ts` | `app/(console)/layout.tsx`, `app/(console)/orgs/page.tsx` |
+| `lib/tenancy-path.ts` | `app/(console)/orgs/[org]/actions.ts`, `app/(console)/orgs/[org]/teams/[team]/actions.ts`, `app/(console)/orgs/actions.ts` |
+| `lib/form.ts` | `app/(console)/orgs/[org]/actions.ts`, `app/(console)/orgs/[org]/commands.ts`, `app/(console)/orgs/[org]/teams/[team]/actions.ts`, `app/(console)/orgs/[org]/teams/[team]/commands.ts`, `app/(console)/orgs/actions.ts`, `app/(console)/orgs/commands.ts` |
+| `lib/auth.ts` | `app/(public)/page.tsx`, `app/auth/[...auth]/route.ts` |
+| `lib/correlation-header.ts` | `proxy.ts` (repo root of the app, not under `app/`) |
+| `lib/logger.ts`, `lib/iam-clients.ts`, `lib/principal.ts`, `lib/principal-resolver.ts`, `lib/principal-prn.ts` | none directly under `app/` — used only transitively through `lib/auth.ts`, `lib/iam.ts`, `lib/authorize.ts`, `lib/scopes.ts` |
+
+---
+
+## H. `tests/` coverage of `lib/` code
+
+| Test file | Lines | What it asserts (per its own `describe` blocks / doc comments) |
+|---|---|---|
+| `tests/unit/config.test.ts` | 68 | `getRuntimeConfig`/`getPublicConfig` (dynamic `import('../../lib/config')` per test to reset zod memoization): valid `PAIGASUS_IAM_GRPC_URL` parses/canonicalizes; invalid gRPC URL values throw; missing `PAIGASUS_IAM_GRPC_URL` throws mentioning the key; `PAIGASUS_SERVICES` missing an `iam` entry throws; `getPublicConfig()` returns the expected zone/zones shape. |
+| `tests/unit/nav.test.ts` | 81 | `buildNavEntries` (dynamic import): entry set/labels/`state` per every combination of IAM up/down/absent, with/without `iam.audit` capability, `auditAllowed` true/false, gateway zone present/absent/degraded, and href correctness for a custom zone map. |
+| `tests/integration/discovery.test.ts` | 84 | `the app's discovery` — `createAppDiscovery` wired against MSW-mocked `service-info` HTTP responses; covers the Redis-vs-memory descriptor-cache selection (via `descriptorCacheFor`), the "no silent fallback" throw when `PAIGASUS_SESSION_STORE=redis` lacks a URL, and background revalidation. |
+| `tests/integration/authorize.test.ts` | 44 | `mayI over the wire` — `createMayI` against real `createIamClients` pointed at the fake IAM: authorized/denied answers, fail-open on a failed query. |
+| `tests/integration/principal.test.ts` | 210 | `provisioning`, `the login resolver`, `introspectWithProvisioning` — exercises `createIntrospectPrincipalResolver` and `introspectWithProvisioning` end-to-end against the fake IAM: provisioning retry on `identity-not-provisioned`, degraded principal on failure, `principal.resolve_failed` vs `principal.resolve_crashed` log discrimination. |
+| `tests/integration/scopes.test.ts` | 238 | `loadMyScopes`, `cedarCapabilityOf` — grant-walk pagination bound (`GRANT_MAX_PAGES`), scope dedup/sort/grouping, `denied` flag on forbidden describe calls, cedar-capability gating. |
+| `tests/integration/error-info-round-trip.test.ts` | 74 | `the ErrorInfo round trip` — `callIam` against the fake IAM's real `ConnectError`/`ErrorInfo` details, proving `correlationId` and reason/domain propagate through `mapError`. |
+| `tests/unit/authorize.test.ts` | 81 | `createMayI` (unit, mocked `authz`) — memoization per action+resourcePrn pair, `authorize.query_failed` / `authorize.no_principal` log events, fail-open semantics. |
+| `tests/unit/call-iam.test.ts` | 74 | `callIam` — rethrows non-`ConnectError`s unchanged, maps `ConnectError` to `PaigasusError`, logs `iam.call_failed` with correlation ids. |
+| `tests/unit/correlation.test.ts` | 30 | `the request correlation helpers` — `requestCorrelationId`/`requestPath` read the right headers, reject non-UUID/non-`/`-prefixed values, and handle the "outside a request scope" `headers()`-throws case. |
+| `tests/unit/form.test.ts` | 29 | `lib/form` — `formFields`, `invalidFormInput`, `toActionResult` shape and field defaults (`domain: null`, etc). |
+| `tests/unit/logger.test.ts` | 58 | `createJsonLogger` — JSON-line shape (`time`/`event`/`fields`), that `event` and `appEvent` both emit through the same `write` sink. |
+| `tests/unit/paging.test.ts` | 69 | `parseOffset`, `nextOffset`, `parseCursor`, `pageHref` — malformed/oversized offset and cursor handling, `keep` query preservation. |
+| `tests/unit/prn-tenancy.test.ts` | 155 | `lib/prn-tenancy.ts against the kernel parity corpus`, `ROOT_PRN`, `parseTenancyPrn`, `isUuid`, `the builders` — runs the Rust kernel's parity vectors through `parseTenancyPrn`/`isUuid`/builders to prove no divergence. |
+| `tests/unit/session-cookie.test.ts` | 25 | `SESSION_COOKIE_NAME` — matches the name `@paigasus/auth`'s middleware treats as the session cookie. |
+| `tests/unit/switcher-orgs.test.ts` | 64 | `switcherOrgs`, `the (console) layout` — builds org-switcher entries from `MyScopes`, empty on a failed result. |
+| `tests/unit/node-ref.test.ts` | 24 | `sameNode` (in `app/(console)/orgs/node-ref.ts`, which itself imports `prn-tenancy`) — indirect `lib/prn-tenancy.ts` coverage through builder PRNs. |
+| `tests/integration/membership-commands.test.ts` | 118 | `createTeam`, `attachMembership`, `detachMembership` (app commands) using `organizationPrn`/`teamPrn` from `lib/prn-tenancy.ts` against the fake IAM. |
+| `tests/integration/org-page.test.ts` | 162 | `loadOrganizationPage` — uses `PAGE_SIZE` (`lib/paging.ts`) and `organizationPrn`/`teamPrn` (`lib/prn-tenancy.ts`) against the fake IAM. |
+| `tests/integration/orgs-page.test.ts` | 87 | `loadOrganizationsPage` — `PAGE_SIZE`, `ROOT_PRN`, `organizationPrn`. |
+| `tests/integration/team-project-pages.test.ts` | 205 | `loadTeamPage`, `loadProjectPage`, `createProject` — `PAGE_SIZE`, `organizationPrn`/`projectPrn`/`teamPrn`. |
+| `tests/unit/proxy.test.ts` | 109 | `proxy`, `config.matcher` — indirectly covers `lib/correlation-header.ts`'s exported header name constants (`SESSION_COOKIE_NAME` also asserted here) and the app's `proxy.ts`. |
+| `tests/unit/actions-structure.test.ts` | 175 | `every Server Action gets its client through iamClientsForAction()` — a structural/AST-ish check (using string literals of import specifiers like `'../lib/iam'`, `'../lib/iam-clients'`, `'../lib/authorize'`) that Server Actions never call `iamClients()`/`iamClientsForToken()`/`mayI()` directly, only through `iamClientsForAction()`. |
+| `tests/unit/error-views.test.tsx` | 130 | `PageError`, `SectionError`, `FormError`, `the 403 view` — uses `FORBIDDEN_VIEW_CORRELATION` from `lib/correlation.ts` to pick its assertion branch. |
+
+Not lib-covering (no `lib/` import found): `tests/unit/config.test.ts`/`nav.test.ts`/`discovery.test.ts` use **dynamic `import()`** rather than static imports (shown above) — they DO cover `lib/config.ts`, `lib/nav.ts`, `lib/discovery.ts` respectively, just not caught by a static-import grep. `tests/integration/audit-page.test.ts` and `tests/integration/orgs-commands.test.ts` test `app/(console)/...` load/command modules directly (which themselves import `lib/`), so they exercise `lib/` transitively but do not import it directly. `tests/standalone-runtime.test.ts` and `tests/build-guard/client-boundary.test.ts` test process/build-level concerns, not `lib/` APIs directly.
+
+**Migration implication**: essentially every unit and integration test under `tests/unit/` and `tests/integration/` that imports from `../../lib/...` would need its import path (and possibly its fixtures) updated if the corresponding source moves to a shared package. The `tests/support/` fakes (`fake-iam.ts`, `fake-idp.ts`, `tls.ts`, `tls-terminator.ts`) do **not** import from `lib/` at all (confirmed by grep) — they are decoupled test doubles and can stay with the app or move to a shared test-utilities package independent of the `lib/` extraction decision.
+
+## I. `tests/support/` full listing + exported functions
+
+Full file list:
+```
+tests/support/env.ts
+tests/support/fake-iam.ts
+tests/support/fake-idp.ts
+tests/support/https-client.ts
+tests/support/msw.ts
+tests/support/next-cache.ts
+tests/support/next-headers.ts
+tests/support/server-only-stub.ts
+tests/support/setup.ts
+tests/support/tls-terminator.ts
+tests/support/tls.ts
+```
+
+**`fake-iam.ts`** (347 lines) exports:
+- `export const IAM_ERROR_DOMAIN = 'iam.paigasus.io';`
+- `export const FAKE_IAM_ISSUER = 'https://idp.fake-iam.test';`
+- `export type FakeIamMethod = Entry['key'];`
+- `export type FakeIamContext = { readonly token: string | null; readonly correlationId: string };`
+- `export type FakeIamHandlers = { [E in Entry as E['key']]?: HandlerFor&lt;E['desc']&gt; };`
+- `export type FakeIamCall = { readonly method: string; readonly token: string | null; readonly correlationId: string | null; readonly request: unknown };`
+- `export type ServiceDescriptorBody = { service: string; version: string; capabilities: string[] };`
+- `export type FakeIam = { readonly grpcUrl: string; readonly httpUrl: string; readonly calls: FakeIamCall[]; callsTo(method: FakeIamMethod | 'http.getServiceInfo'): FakeIamCall[]; readonly provisioned: Set&lt;string&gt;; principalPrnFor(token: string): string; setHandlers(handlers: FakeIamHandlers): void; setServiceInfo(descriptor: ServiceDescriptorBody | { status: number }): void; close(): Promise&lt;void&gt; };`
+- `export function denial(opts: { reason?: string; correlationId?: string; code?: Code } = {}): ConnectError`
+- `export function errorInfoOf(error: unknown): { reason: string; domain: string; metadata: Record&lt;string, string&gt; } | null`
+- `export async function startFakeIam(opts: { handlers?: FakeIamHandlers } = {}): Promise&lt;FakeIam&gt;`
+
+**`fake-idp.ts`** (237 lines) exports:
+- `export type FakeIdp = { readonly issuer: string; readonly clientId: string; readonly clientSecret: string; readonly authorizeRedirectUris: string[]; readonly tokenRedirectUris: string[]; readonly issued: { accessToken: string; refreshToken: string }[]; close(): Promise&lt;void&gt; };`
+- `export async function startFakeIdp(opts: { cert: TlsMaterial; subject?: string }): Promise&lt;FakeIdp&gt;`
+
+**`tls.ts`** (161 lines) exports:
+- `export type TlsMaterial = { certPath: string; keyPath: string; cert: string; key: string };`
+- `export function testTls(opts: { root?: string; minValidSeconds?: number } = {}): TlsMaterial`
+
+**`tls-terminator.ts`** (66 lines) exports:
+- `export async function startTlsTerminator(opts: { target: string; tls: TlsMaterial }): Promise&lt;{ origin: string; close(): Promise&lt;void&gt; }&gt;`
+
+## J. `eslint.mjs` — `boundaryRules` shape, `sdk` block, `app-middleware` block, `BOUNDARY_SCOPES`
+
+`BOUNDARY_SCOPES`:
+```js
+export const BOUNDARY_SCOPES = {
+  'packages/paigasus-ui': 'exists',
+  'packages/paigasus-sdk': 'exists',
+  'packages/paigasus-app-shell': 'exists',
+  // The second app-shell block's scope. The reverse liveness loop needs every block's scope here.
+  'packages/paigasus-app-shell/tests/e2e/fixture': 'exists',
+  'packages/paigasus-auth': 'exists',
+  'packages/paigasus-discovery': 'exists',
+  apps: 'exists',
+};
+```
+
+The `sdk` block (a complete `boundaryRules` entry, showing the exact shape a new block must take):
+```js
+{
+  name: 'paigasus/boundaries/sdk',
+  files: ['packages/paigasus-sdk/**/*.{ts,tsx,mts,cts,js,jsx,mjs,cjs}'],
+  rules: restrict([
+    {
+      group: ['@paigasus/*', '@paigasus/*/**', '!@paigasus/proto', '!@paigasus/proto/**'],
+      message: '@paigasus/sdk depends on @paigasus/proto only (§ 6: sdk → proto).',
+    },
+    {
+      group: ['react', 'react-dom', 'react-dom/*', 'next', 'next/*', 'next/**'],
+      message: '@paigasus/sdk is server-only. It attaches bearer tokens, so it must never be reachable from a client bundle (§ 6 rule 2).',
+    },
+  ]),
+},
+```
+(where `const restrict = (patterns) =&gt; ({ 'no-restricted-imports': ['error', { patterns }] });`)
+
+The `app-middleware` block:
+```js
+{
+  name: 'paigasus/boundaries/app-middleware',
+  // 'apps/**/…' rather than 'apps/*/…': the latter derives the scope key
+  // 'apps/*/{middleware,proxy}.{…}' (a file glob, not a directory), which the liveness test's
+  // `existsSync` check can never resolve. This form derives 'apps' instead — the SAME key the
+  // `paigasus/boundaries/apps` block above already owns in BOUNDARY_SCOPES — so it needs no scope
+  // entry of its own.
+  //
+  // `proxy` since SMA-511 (spec § 7.4): Next 16.3.4 deprecates `middleware.ts` in favour of
+  // `proxy.ts`. This block REPLACES the apps block's options for these files, so it restates
+  // APP_PROTO_BAN as its second group.
+  files: ['apps/**/{middleware,proxy}.{ts,js,mts,cts,mjs,cjs}'],
+  rules: restrict([
+    {
+      group: ['@paigasus/auth/server', '@paigasus/auth/server/**', '@paigasus/sdk', '@paigasus/sdk/**'],
+      message:
+        "An app's proxy (middleware) must import @paigasus/auth/middleware, never /server or the sdk. `server-only` is a NO-OP in the middleware layer, so nothing else stops a token-bearing module being bundled there.",
+    },
+    APP_PROTO_BAN,
+  ]),
+},
+```
+
+Note for the implementation plan: a new shared package extracted from `iam-console/lib/` will need its own `paigasus/boundaries/&lt;name&gt;` block (most likely modeled on the `sdk` or `app-shell` block depending on whether it's server-only or client-reachable), plus a `BOUNDARY_SCOPES` entry keyed by its `files[0]` glob cut at `/**` (per the liveness test logic quoted in K below).
+
+## K. `boundaries.test.ts` — reverse-liveness loop and one ALLOWED/DENIED row
+
+Reverse-liveness loop (`ts/packages/paigasus-next-config/tests/boundaries.test.ts:242-266`):
+```ts
+it('every rule scope has a matching entry in the preset', () =&gt; {
+  // Indexed through a typed local rather than a chained member access: `noUncheckedIndexedAccess`
+  // makes `entry.files?.[0]` `string | string[] | undefined` — `boundaryRules` is typed as
+  // ESLint's own `Linter.Config[]`, whose `files` entries can themselves be a nested `string[]`,
+  // not only a plain glob string. Narrowed with a `typeof` guard rather than a cast, so a config
+  // entry that actually used the nested-array form would fail loudly here instead of being
+  // silently coerced.
+  const scoped = boundaryRules.map((entry) =&gt; {
+    const label = entry.name ?? '(unnamed boundary entry)';
+    const first: string | string[] | undefined = entry.files?.[0];
+    expect(first, `${label} declares no files glob`).toBeDefined();
+    expect(typeof first === 'string', `${label} files[0] is a nested string[], not a plain glob — this test does not handle that shape`).toBe(true);
+    return typeof first === 'string' ? first.split('/**')[0] : '';
+  });
+  for (const dir of Object.keys(BOUNDARY_SCOPES)) {
+    expect(scoped).toContain(dir);
+  }
+  // And the REVERSE. The loop above proves every declared scope has a rule; on its own it says
+  // nothing about a rule added WITHOUT a scope entry, which would get no liveness coverage at
+  // all — the package could land under a different directory name and the rule would sit
+  // permanently inert with nothing to notice.
+  for (const dir of scoped) {
+    expect(Object.keys(BOUNDARY_SCOPES), `the ${dir} rule has no BOUNDARY_SCOPES entry, so nothing proves its files glob still matches a real directory`).toContain(dir);
+  }
+});
+```
+
+This is exactly the mechanism a new shared package's boundary block must satisfy: its `files[0]` glob, split at `/**`, must equal a key present in `BOUNDARY_SCOPES` — in both directions.
+
+One DENIED row and one ALLOWED row (showing the row shape — `readonly [label, filePath, source]`, run through `it.each`):
+```ts
+const DENIED: ReadonlyArray&lt;readonly [string, string, string]&gt; = [
+  ['ui must not import next', 'packages/paigasus-ui/src/button.tsx', "import Link from 'next/link';"],
+  // ...
+];
+
+const ALLOWED: ReadonlyArray&lt;readonly [string, string, string]&gt; = [
+  ['sdk may import proto', 'packages/paigasus-sdk/src/iam.ts', "import { x } from '@paigasus/proto';"],
+  // ...
+];
+
+describe('boundary preset', () =&gt; {
+  it.each(DENIED)('reports: %s', async (_label, filePath, source) =&gt; {
+    expect(await restrictedImportsFor(filePath, source)).not.toHaveLength(0);
+  });
+
+  it.each(ALLOWED)('permits: %s', async (_label, filePath, source) =&gt; {
+    expect(await restrictedImportsFor(filePath, source)).toHaveLength(0);
+  });
+```
+
+A new shared package extracted from `iam-console/lib/` will need its own rows added to `DENIED`/`ALLOWED` (each a 3-tuple: a human label, a fake file path under the new package's directory, and a one-line import source string) to prove its boundary block actually fires both ways.
+
+## L. `paigasus-app-shell` `package.json` and `moon.yml` (template for a new source-only package)
+
+`package.json` (full, verbatim):
+```json
+{
+  "name": "@paigasus/app-shell",
+  "_comment_exports": "ONE root export, and it is correct here. @paigasus/auth and @paigasus/discovery omit a root export because they have a server surface a client must not reach. This package has NO server surface: every file is client-reachable. Source-only (./src/*.ts), like every @paigasus/* package: a consuming Next app transpiles it through createNextConfig's SOURCE_ONLY_PACKAGES. tests/structure/source-shape.test.ts pins this map.",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": "&gt;=24"
+  },
+  "license": "Apache-2.0",
+  "description": "Shared console chrome for Paigasus zones: header, primary navigation, org/team switcher, user menu, breadcrumbs, and zone-safe cross-zone links.",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@paigasus/auth": "workspace:*",
+    "@paigasus/discovery": "workspace:*",
+    "@paigasus/ui": "workspace:*"
+  },
+  "peerDependencies": {
+    "next": "catalog:",
+    "react": "catalog:",
+    "react-dom": "catalog:"
+  },
+  "devDependencies": {
+    "@paigasus/next-config": "workspace:*",
+    "@playwright/test": "catalog:",
+    "@testing-library/dom": "catalog:",
+    "@testing-library/jest-dom": "catalog:",
+    "@testing-library/react": "catalog:",
+    "@testing-library/user-event": "catalog:",
+    "@types/node": "catalog:",
+    "@types/react": "catalog:",
+    "@types/react-dom": "catalog:",
+    "axe-core": "catalog:",
+    "jsdom": "catalog:",
+    "next": "catalog:",
+    "react": "catalog:",
+    "react-dom": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  }
+}
+```
+
+`moon.yml` (full, verbatim):
+```yaml
+$schema: 'https://moonrepo.dev/schemas/project.json'
+
+id: 'paigasus-app-shell-ts'
+layer: 'library'
+language: 'typescript'
+
+# BOTH are required and neither implies the other. `dependsOn` is what `moon query projects
+# --affected` follows and what orders an upstream's build; task `inputs` are the ONLY thing that
+# makes a DOWNSTREAM task affected (CLAUDE.md, Moon 2.5.3). paigasus-next-config-ts is here for the
+# fixture: tests/e2e/fixture builds through createNextConfig (SMA-510 spec § 11.3).
+dependsOn:
+  - 'paigasus-ui-ts'
+  - 'paigasus-auth-ts'
+  - 'paigasus-discovery-ts'
+  - 'paigasus-next-config-ts'
+
+tasks:
+  # APPEND, never `options.merge: replace`. The inherited definitions in
+  # .moon/tasks/typescript-project.yml supply @group(sources), @group(tests), tsconfig.json,
+  # package.json, /ts/tsconfig.base.json and /ts/pnpm-lock.yaml; replacing would silently drop them
+  # — the defect SMA-503 fixed on iam-console-ts:build.
+  #
+  # The upstream SOURCES are inputs because this package compiles them; without them a change to
+  # @paigasus/ui would not re-run this package's tests. The upstream MANIFESTS are inputs because a
+  # changed `exports` map (SMA-510 adds discovery's ./client) changes what this package resolves
+  # without a change to any upstream src file.
+  build:
+    inputs:
+      - '/ts/packages/paigasus-ui/src/**/*'
+      - '/ts/packages/paigasus-ui/package.json'
+      - '/ts/packages/paigasus-auth/src/**/*'
+      - '/ts/packages/paigasus-auth/package.json'
+      - '/ts/packages/paigasus-discovery/src/**/*'
+      - '/ts/packages/paigasus-discovery/package.json'
+  typecheck:
+    inputs:
+      - '/ts/packages/paigasus-ui/src/**/*'
+      - '/ts/packages/paigasus-ui/package.json'
+      - '/ts/packages/paigasus-auth/src/**/*'
+      - '/ts/packages/paigasus-auth/package.json'
+      - '/ts/packages/paigasus-discovery/src/**/*'
+      - '/ts/packages/paigasus-discovery/package.json'
+  test:
+    # vitest.config.ts matches neither src/**/* nor tests/**/*, so without it an edit to the jsdom
+    # environment or the exclude list serves a cached PASS.
+    #
+    # The negation keeps the fixture's build output out of this task's hash. The inherited
+    # @group(tests) covers tests/**/*, and the Moon hasher does NOT skip `.next` (spec F20:
+    # .moon/workspace.yml omits it from hasher.ignorePatterns on purpose). Without the negation,
+    # every test-e2e run would re-key this task.
+    inputs:
+      - '/ts/packages/paigasus-ui/src/**/*'
+      - '/ts/packages/paigasus-ui/package.json'
+      - '/ts/packages/paigasus-auth/src/**/*'
+      - '/ts/packages/paigasus-auth/package.json'
+      - '/ts/packages/paigasus-discovery/src/**/*'
+      - '/ts/packages/paigasus-discovery/package.json'
+      - 'vitest.config.ts'
+      - '!tests/e2e/fixture/.next/**'
+  test-e2e:
+    # `script` (not `command`): Moon's `command` setting rejects shell syntax outright.
+    # `set -euo pipefail` mirrors every other `script:` task — Moon does not enable errexit for
+    # script blocks on its own. tests/e2e/global-setup.ts builds the fixture and owns the server's
+    # lifecycle; a shell `&amp;` here left an orphan server in the spike.
+    script: |
+      set -euo pipefail
+      pnpm exec playwright test
+    # A NEW task name, so it inherits NOTHING: every input is listed (spec § 11.3). The upstream
+    # sources and manifests are here because the fixture compiles them; next-config's src,
+    # manifest and tsconfig.app.json are here because the fixture builds through createNextConfig
+    # and its tsconfig extends @paigasus/next-config/tsconfig-app (Spec issue 5).
+    inputs:
+      - '@group(sources)'
+      - '@group(tests)'
+      - 'package.json'
+      - 'tsconfig.json'
+      - 'playwright.config.ts'
+      - 'tests/e2e/fixture/**/*'
+      - '!tests/e2e/fixture/.next/**'
+      - '/ts/pnpm-lock.yaml'
+      - '/ts/tsconfig.base.json'
+      - '/ts/packages/paigasus-ui/src/**/*'
+      - '/ts/packages/paigasus-ui/package.json'
+      - '/ts/packages/paigasus-auth/src/**/*'
+      - '/ts/packages/paigasus-auth/package.json'
+      - '/ts/packages/paigasus-discovery/src/**/*'
+      - '/ts/packages/paigasus-discovery/package.json'
+      - '/ts/packages/paigasus-next-config/src/**/*'
+      - '/ts/packages/paigasus-next-config/package.json'
+      - '/ts/packages/paigasus-next-config/tsconfig.app.json'
+    options:
+      # A real build and a real Chromium. A cached PASS would replay a green that tested nothing.
+      cache: false
+```
+
+Note for the plan: `paigasus-app-shell` has a root export and no server surface. A new package extracted from `iam-console/lib/` (which is entirely `server-only` except `tenancy-path.ts`) is closer in shape to `@paigasus/auth` or `@paigasus/discovery` — packages **without** a root export, that instead expose `/server` (and possibly `/client`) subpath exports gated by the `server-only` boundary — rather than to `app-shell`'s single root-export shape. The `package.json`'s `exports` map, `dependencies`/`peerDependencies` split, and the `moon.yml`'s `dependsOn` + per-task `inputs` mirroring upstream `src/**/*` and `package.json` are the load-bearing template pieces to copy regardless of which shape is chosen.</result>
+<usage><subagent_tokens>123657</subagent_tokens><tool_uses>41</tool_uses><duration_ms>287407</duration_ms></usage>
+</task-notification>
