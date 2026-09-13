@@ -1,0 +1,43 @@
+{
+  "cli_version": "0.10.6",
+  "checkpoint_id": "3db6359f1d7d",
+  "strategy": "manual-commit",
+  "branch": "feature/sma-512-console-core",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "CLAUDE.md",
+    "docs/superpowers/specs/2026-09-13-sma-512-gateway-console-design.md",
+    "ts/README.md",
+    "ts/apps/iam-console/README.md",
+    "ts/apps/iam-console/lib/auth.ts",
+    "ts/packages/paigasus-console-core/package.json",
+    "ts/packages/paigasus-console-core/src/authorize.ts",
+    "ts/packages/paigasus-console-core/src/correlation.ts",
+    "ts/packages/paigasus-console-core/src/errors.ts",
+    "ts/packages/paigasus-console-core/src/principal-prn.ts",
+    "ts/packages/paigasus-console-core/src/principal-resolver.ts",
+    "ts/packages/paigasus-console-core/src/principal.ts",
+    "ts/packages/paigasus-console-core/src/scopes.ts",
+    "ts/packages/paigasus-console-core/tests/integration/discovery.test.ts",
+    "ts/packages/paigasus-console-core/tests/support/msw.ts",
+    "ts/packages/paigasus-console-core/tests/unit/authorize.test.ts",
+    "ts/packages/paigasus-console-core/tests/unit/correlation.test.ts",
+    "ts/pnpm-lock.yaml"
+  ],
+  "sessions": [
+    {
+      "metadata": "/3d/b6359f1d7d/0/metadata.json",
+      "transcript": "/3d/b6359f1d7d/0/full.jsonl",
+      "compact_transcript": "/3d/b6359f1d7d/0/transcript.jsonl",
+      "content_hash": "/3d/b6359f1d7d/0/content_hash.txt",
+      "prompt": "/3d/b6359f1d7d/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 438,
+    "cache_creation_tokens": 1912845,
+    "cache_read_tokens": 92643940,
+    "output_tokens": 321195,
+    "api_call_count": 219
+  }
+}
