@@ -6,15 +6,10 @@
 import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { ErrorReason } from '@paigasus/sdk/errors';
 import { disposeTransports } from '@paigasus/sdk/iam';
-// TEMPORARY (SMA-512 PR 2, task 3 → task 4): authorize.ts and principal.ts move to the package in
-// task 4. Until then this test reaches into the app for the two functions that have not moved yet.
-import { createMayI } from '../../../../apps/iam-console/lib/authorize';
-import { introspectWithProvisioning } from '../../../../apps/iam-console/lib/principal';
-import { createIamClients, type IamClients } from '../../src/iam-clients';
-import { createJsonLogger } from '../../src/logger';
-import { createIntrospectPrincipalResolver } from '../../src/principal-resolver';
-// TEMPORARY (SMA-512 PR 2, task 3 → task 6): the fakes move to ./testing in task 6.
-import { denial, FAKE_IAM_ISSUER, startFakeIam, type FakeIam } from '../../../../apps/iam-console/tests/support/fake-iam';
+import { createMayI } from '../../lib/authorize';
+import { introspectWithProvisioning } from '../../lib/principal';
+import { createIamClients, createJsonLogger, createIntrospectPrincipalResolver, type IamClients } from '@paigasus/console-core';
+import { denial, FAKE_IAM_ISSUER, startFakeIam, type FakeIam } from '../support/fake-iam';
 
 const ORG = 'prn:pgs:iam::0192f1c0-0000-7000-8000-000000000002:organization/0192f1c0-0000-7000-8000-000000000002';
 const CLAIMS = { iss: 'https://idp.example.test', sub: 'user-1' };

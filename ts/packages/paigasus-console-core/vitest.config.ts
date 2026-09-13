@@ -28,20 +28,7 @@ const serverOnlyStub = fileURLToPath(new URL('./tests/support/server-only-stub.t
 const nextHeadersDouble = fileURLToPath(new URL('./tests/support/next-headers.ts', import.meta.url));
 const nextCacheDouble = fileURLToPath(new URL('./tests/support/next-cache.ts', import.meta.url));
 
-// MEASURED (SMA-511 plan, Task 9; hit again here in task 3): vite:oxc loads the NEAREST
-// tsconfig.json for every file it transforms. `tests/integration/principal.test.ts` TEMPORARILY
-// reaches into `ts/apps/iam-console/lib/{authorize,principal}.ts` (task 3 → task 4) — and that
-// app's tsconfig.json extends '@paigasus/next-config/tsconfig-app' through pnpm's symlink, which
-// oxc's resolver cannot follow, failing with "[TSCONFIG_ERROR] Tsconfig not found". `tsconfig:
-// false` stops the lookup for every file this config transforms, this package's own included; see
-// ts/apps/iam-console/vitest.config.ts for the original occurrence. This package has no .tsx
-// source or test file, but the `jsx` option is set anyway — MEASURED: `{ tsconfig: false }` alone
-// fails `tsc`'s overload resolution for `defineConfig` (TS2769), and matching the app's exact
-// shape (`tsconfig` plus `jsx`) is what resolves the right overload.
-const oxc = { tsconfig: false, jsx: { runtime: 'automatic', importSource: 'react' } } as const;
-
 export default defineConfig({
-  oxc,
   test: {
     environment: 'node',
     include: ['tests/**/*.test.ts', 'tests/**/*.test.tsx'],

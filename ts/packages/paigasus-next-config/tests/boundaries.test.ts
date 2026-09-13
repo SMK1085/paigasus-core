@@ -161,6 +161,10 @@ const DENIED: ReadonlyArray<readonly [string, string, string]> = [
   // SMA-512 — @paigasus/console-core.
   ['console-core must not import proto directly', 'packages/paigasus-console-core/src/principal.ts', "import { x } from '@paigasus/proto';"],
   ['a proxy must not import console-core', 'apps/iam-console/proxy.ts', "import { x } from '@paigasus/console-core';"],
+  // SMA-512 PR 2, task 3 fix round 1: the next/navigation carve-out is a list of ONE
+  // (`unstable_rethrow`), not a blanket unban — `redirect` is a different real export of the same
+  // module and must still be denied.
+  ['console-core must not import next/navigation’s redirect', 'packages/paigasus-console-core/src/correlation.ts', "import { redirect } from 'next/navigation';"],
 ];
 
 const ALLOWED: ReadonlyArray<readonly [string, string, string]> = [
@@ -205,6 +209,8 @@ const ALLOWED: ReadonlyArray<readonly [string, string, string]> = [
   ['console-core may import auth/server', 'packages/paigasus-console-core/src/iam.ts', "import { x } from '@paigasus/auth/server';"],
   ['console-core may import the sdk', 'packages/paigasus-console-core/src/iam.ts', "import { x } from '@paigasus/sdk/iam';"],
   ['console-core testing may import proto', 'packages/paigasus-console-core/testing/fake-iam.ts', "import { x } from '@paigasus/proto';"],
+  // SMA-512 PR 2, task 3 fix round 1: the one named export allowed from next/navigation.
+  ['console-core may import next/navigation’s unstable_rethrow', 'packages/paigasus-console-core/src/correlation.ts', "import { unstable_rethrow } from 'next/navigation';"],
 ];
 
 describe('boundary preset', () => {
