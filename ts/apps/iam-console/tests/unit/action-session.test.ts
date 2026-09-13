@@ -17,8 +17,17 @@ import { setRequestCookies, setRequestHeaders } from '../support/next-headers';
 // reads authRuntime() and the IAM gRPC URL through the package's runtime-ports seam rather than
 // importing lib/auth.ts directly, so a `vi.mock('../../lib/auth', …)` no longer reaches it. This
 // file wires the port directly instead — the same shape task 5's createConsoleRuntime() will wire
-// for real. setConsolePorts() only needs to run before an accessor is CALLED (not before lib/iam.ts
-// is imported): none of its cache()-wrapped exports read a port at module scope.
+// for real.
+//
+// ORDER MATTERS (task 4 fix round 1). lib/iam.ts's barrel now carries `import './auth'` for its
+// own side effect (see its comment), so importing it runs the app's REAL setConsolePorts() call —
+// the one that reads the real, unstubbed environment. Importing lib/iam.ts must therefore happen
+// BEFORE this file's own setConsolePorts() call below, so the fake one is what is left in place
+// when an `it()` runs. Getting this backwards was measured to fail all five cases: the app's real
+// authRuntime()/getRuntimeConfig() clobbers the fake, and every accessor then tries to read a real,
+// unconfigured environment.
+const { iamClients, iamClientsForAction, optionalSession } = await import('../../lib/iam');
+
 const records = new Map<string, unknown>();
 const store = { get: (sid: string) => Promise.resolve(records.get(sid) ?? null), put: () => Promise.resolve(), delete: () => Promise.resolve() };
 const runtime = {
@@ -50,8 +59,6 @@ setConsolePorts({
     PAIGASUS_DISCOVERY_LOCK_TTL_MS: 10_000,
   }),
 });
-
-const { iamClients, iamClientsForAction, optionalSession } = await import('../../lib/iam');
 
 const SID = 'sid-for-the-action-path';
 
