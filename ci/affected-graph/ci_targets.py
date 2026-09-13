@@ -1933,10 +1933,23 @@ def check_tailwind_guard_invocations(apps, raw_tasks, registry=None):
     for app in sorted(apps_set):
         project = raw_tasks.get(f"{app}-ts")
         test_task = project.get("test") if isinstance(project, dict) else None
-        script = test_task.get("script") if isinstance(test_task, dict) else None
-        if not isinstance(script, str):
+        if not isinstance(test_task, dict):
             no_project.append(app)
             continue
+        script = test_task.get("script")
+        if script is None:
+            no_project.append(app)
+            continue
+        # A present-but-wrong-typed `script` is a moon OUTPUT SHAPE change, not an authorial
+        # mistake, and the two have different exit codes. Reporting it as `no_project` would tell
+        # the operator to "add a moon.yml with a `test` task" for a task that already exists, and
+        # would return rc 1 where rc 2 is correct. `_scripts()` made exactly this distinction for
+        # the same field (SMA-553 review finding 3); this mirrors it.
+        if not isinstance(script, str):
+            raise MoonOutputError(
+                f"`moon query tasks` reported {app}-ts's `test` `script` as "
+                f"{type(script).__name__}, expected a string"
+            )
         if app not in registry:
             continue
         present = {line.strip() for line in script.splitlines()}
@@ -3491,6 +3504,13 @@ def main():
         scripts = _scripts(raw_tasks)
         bad_gate_inputs = check_gate_inputs(raw_tasks)
         bad_generate_inputs = check_contracts_generate_inputs(raw_tasks)
+        # Inside the try for the same reason as the two calls above: this one raises
+        # MoonOutputError (INFRA_ERRORS) when moon reports a `test` `script` of the wrong type.
+        # Called from the validation flow below it, that raise would escape main() uncaught and
+        # exit 1, misreporting a moon output shape change as an authorial mistake.
+        tw_unregistered, tw_missing_lines, tw_stale, tw_no_project = (
+            check_tailwind_guard_invocations(tailwind_apps, raw_tasks)
+        )
     except GateAssertionError as exc:
         # An authorial mistake, NOT a broken tool: rc 1 so run.sh records a red suite instead of
         # aborting the whole affected-graph guard and losing every other assertion's output (D2).
@@ -3512,9 +3532,6 @@ def main():
     )
     pairing_unpinned, pairing_bad_exempt, pairing_stale_exempt, pairing_both, pairing_orphan_globs = (
         check_registry_pairing()
-    )
-    tw_unregistered, tw_missing_lines, tw_stale, tw_no_project = check_tailwind_guard_invocations(
-        tailwind_apps, raw_tasks
     )
 
     if not (floor or missing or unexpected or bad_exempt or stale_exempt or dead or doc_problems

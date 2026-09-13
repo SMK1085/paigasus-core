@@ -151,6 +151,11 @@ tasks:
       # .moon/workspace.yml's hasher.ignorePatterns deliberately does NOT ignore because `.next`
       # is a declared build output — repo:next-public-free negates it by hand for that reason.
       - 'ts/apps/*/next-env.d.ts'
+      # ci/next-env/run.sh discovers only configs whose app directory carries a package.json, so
+      # adding or removing one CHANGES the discovered app set. Without this glob a package-only
+      # change leaves the gate cached against a stale set. A plain glob, never a brace pattern:
+      # ci/affected-graph/task_inputs.py rejects brace patterns.
+      - 'ts/apps/*/package.json'
       # Pinned to '.ts' only, though ci/next-env/run.sh discovers six config extensions and
       # '.mjs' is a shape this repo actually uses elsewhere. Do NOT widen this glob until such an
       # app exists: repo:input-liveness fails a declared glob that matches zero tracked files, so

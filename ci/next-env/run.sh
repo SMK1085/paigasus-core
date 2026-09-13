@@ -25,11 +25,20 @@ cd "$(git rev-parse --show-toplevel)"
 
 # If typegen dies before writing a file, restore it rather than leaving the tree broken. A
 # DRIFTING file is deliberately left in place: it is the corrected content, ready to commit.
+#
+# RESTORE FROM A BACKUP, NEVER FROM THE INDEX. `git checkout -- "$f"` restores the INDEX copy,
+# which silently discards any UNSTAGED working-tree content the file had before `rm`. That is a
+# reachable data loss, not a hypothetical: this gate's own drift path leaves a regenerated
+# next-env.d.ts unstaged, so a second run whose typegen failed would have destroyed it.
 RESTORE_FILES=()
 restore_if_absent() {
   local f
   for f in "${RESTORE_FILES[@]:-}"; do
-    [ -f "$f" ] || git checkout -- "$f" 2>/dev/null || true
+    [ -n "$f" ] || continue
+    if [ ! -f "$f" ] && [ -f "$f.next-env-bak" ]; then
+      mv -f "$f.next-env-bak" "$f"
+    fi
+    rm -f "$f.next-env-bak"
   done
 }
 trap restore_if_absent EXIT
@@ -53,6 +62,11 @@ check_app() {
     return 2
   fi
 
+  # Back up BEFORE removing; the EXIT trap restores from this copy, not from the index.
+  if ! cp "$FILE" "$FILE.next-env-bak"; then
+    echo "next-env gate: could not back up $FILE before regenerating it." >&2
+    return 2
+  fi
   rm -f "$FILE"
   RESTORE_FILES+=("$FILE")
 

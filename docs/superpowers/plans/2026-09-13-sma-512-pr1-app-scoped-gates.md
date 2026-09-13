@@ -9,7 +9,8 @@
 guard takes the app directory as a CLI argument and every app's own `test` task invokes it for
 itself, so no cross-app Moon dependency appears. The `next-env` gate discovers apps and loops
 inside one repository task. `ts/eslint.config.js` derives one Next block per app from the
-filesystem, so coverage cannot drift. Two new liveness assertions — a set-equality check inside
+filesystem, so coverage cannot drift. Two new liveness assertions — a subset check over the
+`package.json`-bearing apps inside
 `ci/next-env/run.sh` and a registry check inside `ci/affected-graph/ci_targets.py` — are what stop
 a third zone re-creating the trap.
 
@@ -30,7 +31,7 @@ implements § 8.1, § 8.2 and § 8.3, which § 3 assigns to pull request 1.
   request 3, when a second app actually exists (spec § 8.4).
 - **`ci/next-env/run.sh` gains no `--self-test` and no `--negative-control`.** Adding them costs a
   `SELF_SCHEDULED_GATES` entry plus a `SELF_TASK_EXPECTED_GLOBS` or `SELF_TASK_GLOBS_EXEMPT` entry
-  (spec § 8.1). The loop and the set-equality assertion are the control. Follow-up § 12 item 3
+  (spec § 8.1). The loop and the subset assertion are the control. Follow-up § 12 item 3
   owns the rest.
 - `ci/tailwind-source/run.mjs` must stay at the repository root. An app directory is Tailwind's
   scan root, and a script there holding the sentinel literal would make Tailwind generate the
