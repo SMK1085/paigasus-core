@@ -7,6 +7,7 @@ import { unstable_doesMiddlewareMatch } from 'next/experimental/testing/server';
 import { NextRequest } from 'next/server';
 import ts from 'typescript';
 import { describe, expect, it, vi } from 'vitest';
+import { CORRELATION_HEADER, REQUEST_PATH_HEADER } from '@paigasus/console-core';
 import { SESSION_COOKIE_NAME } from '../../lib/auth';
 import { config, proxy } from '../../proxy';
 
@@ -91,6 +92,20 @@ describe('proxy', () => {
   // constants instead (paigasus/boundaries/app-middleware bans @paigasus/console-core here).
   it('imports only the allowed modules in proxy.ts', () => {
     expect(importsOf('../../proxy.ts')).toEqual(['@paigasus/auth/middleware', 'next/server']);
+  });
+
+  // This assertion exists because proxy.ts cannot import @paigasus/console-core (the row above,
+  // and the DENIED boundary row for it). Without it, the two header names would be stated in two
+  // places with nothing binding them: a rename in
+  // ts/packages/paigasus-console-core/src/correlation-header.ts would silently stop the proxy's
+  // headers from being read anywhere downstream. It reads the names FROM the package — the source
+  // of truth — and checks them against the exact literals proxy.ts sets and the `forwarded(...)`
+  // assertions above already use ('paigasus-correlation-id', 'x-paigasus-request-path'). Combined
+  // with those functional tests (which fail if proxy.ts's own inlined literal ever drifts), the two
+  // sides stay bound even though neither can import the other.
+  it("binds the package's header names to the literals proxy.ts inlines", () => {
+    expect(CORRELATION_HEADER).toBe('paigasus-correlation-id');
+    expect(REQUEST_PATH_HEADER).toBe('x-paigasus-request-path');
   });
 });
 
