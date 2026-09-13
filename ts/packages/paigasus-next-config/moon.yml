@@ -18,3 +18,7 @@ tasks:
       - 'package.json'
       - '/ts/eslint.config.js'
       - '/ts/pnpm-lock.yaml'
+      # SMA-512: adding or removing an app changes the derived Next block set, which
+      # tests/next-app-rules.test.ts asserts. Without this input that test serves a cached pass on
+      # the PR that adds a second app.
+      - '/ts/apps/*/package.json'

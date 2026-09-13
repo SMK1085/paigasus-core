@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import { readdirSync } from 'node:fs';
 import path from 'node:path';
 import js from '@eslint/js';
 import tseslint from 'typescript-eslint';
@@ -6,7 +7,7 @@ import reactPlugin from '@eslint-react/eslint-plugin';
 import reactHooks from 'eslint-plugin-react-hooks';
 import jsxA11y from 'eslint-plugin-jsx-a11y';
 import nextPlugin from '@next/eslint-plugin-next';
-import { boundaryRules, sourceRules } from '@paigasus/next-config/eslint';
+import { boundaryRules, nextAppRules, sourceRules } from '@paigasus/next-config/eslint';
 
 export default tseslint.config(
   // NOTE: adding 'packages/**' or 'apps/**' here switches every boundary block off for real code.
@@ -46,22 +47,22 @@ export default tseslint.config(
       ...jsxA11y.configs.recommended.rules,
     },
   },
-  // Next.js rules — scoped to the console app only. Lifted from a per-project
-  // eslint.config.js so the workspace-level `moon run ts:lint` task enforces
-  // Next.js rules too (the per-project task alone wasn't a complete CI gate).
-  // `settings.next.rootDir` is required so `no-html-link-for-pages` resolves
-  // the App Router at apps/iam-console/app/ rather than searching
-  // the cwd (ts/ or ts/apps/iam-console/ depending on invocation).
-  // Using an absolute path anchored to import.meta.dirname makes it
-  // cwd-independent.
-  {
-    files: ['apps/iam-console/**/*.{ts,tsx}'],
-    settings: {
-      next: { rootDir: path.join(import.meta.dirname, 'apps/iam-console') },
-    },
-    plugins: { '@next/next': nextPlugin },
-    rules: { ...nextPlugin.configs.recommended.rules },
-  },
+  /*
+   * Next.js rules — ONE BLOCK PER APP, derived from the filesystem (SMA-512).
+   *
+   * This was a single hardcoded `apps/iam-console/**` block. A second zone app would have shipped
+   * with no Next rules at all and nothing would have said so. The blocks are built by
+   * nextAppRules in @paigasus/next-config/eslint, which is unit-tested there; this file's job is
+   * only to supply the app list. paigasus-next-config-ts:test asserts this spread is still here.
+   */
+  ...nextAppRules({
+    appsDir: path.join(import.meta.dirname, 'apps'),
+    appNames: readdirSync(path.join(import.meta.dirname, 'apps'), { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name)
+      .sort(),
+    plugin: nextPlugin,
+  }),
   // Package dependency direction (Frontend Architecture Scoping § 6, SMA-502). The rules live in
   // @paigasus/next-config/eslint so they ship with the package that owns the boundary, and are
   // unit-tested there against synthetic paths — including the app-shell and auth scopes, which do

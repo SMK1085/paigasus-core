@@ -42,6 +42,8 @@
 // covered by the liveness assertions in tests/boundaries.test.ts, so a package that lands under a
 // different directory name reds instead of silently disabling its rule.
 
+import { join } from 'node:path';
+
 /**
  * Package directories these rules expect, mapped to a status string. `'exists'` means the
  * directory is on disk today; anything else is the stated reason it is not, which the liveness
@@ -392,5 +394,27 @@ export const sourceRules = [
     rules: { 'paigasus/no-js-relative-specifier': 'error' },
   },
 ];
+
+/**
+ * One Next.js flat-config block per app (SMA-512).
+ *
+ * `settings.next.rootDir` must be PER APP so `no-html-link-for-pages` resolves each App Router at
+ * its own apps/<name>/app/ rather than searching the cwd. The caller supplies `appsDir` as an
+ * absolute path, which keeps the result cwd-independent.
+ *
+ * `appNames` is a PARAMETER rather than a readdir inside this function, so the tests are pure. An
+ * inline derivation could only be tested by creating a directory under ts/apps/, and an empty one
+ * there trips ci/next-env/run.sh's liveness assertion.
+ *
+ * @param {{ appsDir: string, appNames: string[], plugin: { configs: { recommended: { rules: Record<string, unknown> } } } }} params
+ */
+export function nextAppRules({ appsDir, appNames, plugin }) {
+  return appNames.map((app) => ({
+    files: [`apps/${app}/**/*.{ts,tsx}`],
+    settings: { next: { rootDir: join(appsDir, app) } },
+    plugins: { '@next/next': plugin },
+    rules: { ...plugin.configs.recommended.rules },
+  }));
+}
 
 export default boundaryRules;
