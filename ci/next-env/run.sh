@@ -8,7 +8,7 @@
 # matched what Next actually emits, and it sat stale from the ts/ bootstrap in May until
 # SMA-517: a newer Next also emits an `./.next/types/root-params.d.ts` reference.
 #
-# WHY THE BUILD DID NOT CATCH IT — paigasus-console-ts:build declares inputs
+# WHY THE BUILD DID NOT CATCH IT — iam-console-ts:build declares inputs
 # ['@group(sources)', 'tsconfig.json', 'package.json', 'next.config.ts']. ts/pnpm-lock.yaml
 # is NOT among them, so a Next upgrade never re-keys the task: the build stays cached, the
 # file is never regenerated, and the drift is invisible. During SMA-517 a full `moon ci`
@@ -23,7 +23,7 @@ set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)"
 
-APP='ts/apps/paigasus-console'
+APP='ts/apps/iam-console'
 FILE="$APP/next-env.d.ts"
 
 if [ ! -f "$FILE" ]; then
@@ -55,7 +55,7 @@ rm -f "$FILE"
 
 # `next typegen` regenerates route/page/layout types without a full production build
 # (~1.5s vs ~5s). It writes into .next/, which is why moon.yml orders this task after
-# paigasus-console-ts:build rather than letting the two race on that directory.
+# iam-console-ts:build rather than letting the two race on that directory.
 if ! pnpm --dir "$APP" exec next typegen >/dev/null 2>&1; then
   echo "next-env gate: 'next typegen' failed in $APP." >&2
   pnpm --dir "$APP" exec next typegen >&2 || true

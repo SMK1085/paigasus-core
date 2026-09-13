@@ -6,8 +6,8 @@
 // under core/**, adapters/**, ports/**) is banned from the client boundary by eslint.mjs's
 // paigasus/boundaries/auth-client rule, including for type-only imports — moving the shared
 // vocabulary out of core/ closes the gap rather than carving an exception into that rule.
-import type { IdTokenClaims, ResolvedPrincipal } from '../ports/principal-resolver.js';
-import { SESSION_VIEW_KEYS, type SessionView, type SessionViewKey } from '../session-view.js';
+import type { IdTokenClaims, ResolvedPrincipal } from '../ports/principal-resolver';
+import { SESSION_VIEW_KEYS, type SessionView, type SessionViewKey } from '../session-view';
 
 export { SESSION_VIEW_KEYS };
 export type { SessionView, SessionViewKey };

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { z } from 'zod';
-import { SERVICE_SLUGS } from './core/state.js';
-import { DEFAULT_TIMINGS, type Timings } from './core/record.js';
+import { SERVICE_SLUGS } from './core/state';
+import { DEFAULT_TIMINGS, type Timings } from './core/record';
 
 // PAIGASUS_ZONES' transform is NOT reusable here: `zoneMapFromJson` validates each value with
 // `canonicalBasePath`, which is a PATH validator, not a URL validator.

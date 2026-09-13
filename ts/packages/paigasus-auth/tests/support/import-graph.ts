@@ -39,7 +39,7 @@ export function filesWithDynamicImportOrRequire(files: Set<string>): string[] {
   return [...files].filter((file) => DYNAMIC_IMPORT_OR_REQUIRE.test(readFileSync(file, 'utf8')));
 }
 
-/** Resolve a relative import specifier (repo convention: `.js` extension, real file is `.ts`/`.tsx`) to a file on disk. */
+/** Resolve a relative import specifier to a file on disk. src/ wrote `.js` until SMA-511 and is extensionless since; tests keep `.js`. The real file is `.ts`/`.tsx`. */
 export function resolveRelative(fromFile: string, specifier: string): string | null {
   if (!specifier.startsWith('.')) return null;
   let base = resolve(dirname(fromFile), specifier);

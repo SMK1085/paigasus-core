@@ -1,8 +1,10 @@
 {
   "extends": "../../tsconfig.base.json",
+  "_comment_types": "ts/tsconfig.base.json sets no `types`, so tsc auto-discovers node_modules/@types packages instead of reading node:fs's ambient globals. `types: [\"node\"]` supplies them WITHOUT pulling in the DOM lib. Matches ts/packages/paigasus-sdk/tsconfig.json.",
   "compilerOptions": {
     "outDir": "./dist",
     "rootDir": "./src",
+    "types": ["node"],
     "noEmit": true
   },
   "include": ["src/**/*"]

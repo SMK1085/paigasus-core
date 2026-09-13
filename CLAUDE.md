@@ -173,10 +173,15 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
 - Never name a source file with a base name that is a **Windows reserved device name**
   (`CON`, `PRN`, `AUX`, `NUL`, `COM1`–`COM9`, `LPT1`–`LPT9`) — `PRN.<ext>` etc. are reserved
   too, so git can't check the file out on Windows (`error: invalid path …`). The Linux-only
-  `CI` gate passes; only the Windows `prebuild` matrix job catches it — and `prebuild` runs
-  ONLY on push-to-`main` / `workflow_dispatch`, NOT on PRs, so the bad path is green on the PR
-  and reds `main` after merge (SMA-448: `prn.rs` → `resource_name.rs`). An underscore/hyphen
-  suffix (`prn_canonical`, `prn-fields`) is fine.
+  `CI` gate passes; only a Windows matrix job catches it — `prebuild`'s `build win32-x64-msvc`
+  and `wheels`' `wheel win-amd64`. Both DO carry a `pull_request` trigger, but a PATH-FILTERED
+  one (`.moon/**`, `.prototools`, `ts/pnpm-lock.yaml`, …), so whether a PR sees the failure
+  depends on what else the PR touches, not on the bad file: SMA-448 (`prn.rs` →
+  `resource_name.rs`) was green on the PR and red on `main`, while SMA-511
+  (`ts/apps/iam-console/lib/prn.ts` → `prn-tenancy.ts`) reddened both Windows legs on the PR
+  because it also touched `.moon/**`. The rule is language-neutral: it bit a `.rs` file and a
+  `.ts` file the same way. An underscore/hyphen suffix (`prn_canonical`, `prn-fields`,
+  `prn-tenancy`) is fine.
 - Per-project Moon tasks (`<proj>:build/test/lint/fmt`) do NOT run the repo-level gates
   (e.g. `:deny`, `:osv`, `:machete`, `:affected-smoke`, codegen-drift, CODEOWNERS). Before pushing
   new crates/deps/proto, run the full graph like CI does. The command between the markers below is
@@ -884,25 +889,25 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
 - Tailwind v4's automatic scan root is the **current working directory**, and Moon runs `next
   build` from the app's own directory — not the repo root. So every consumer of `@paigasus/ui`
   needs its own `@source` line covering `ts/packages/paigasus-ui/src`; forgetting it drops the
-  package's classes silently, and only in a PRODUCTION build (`ts/apps/paigasus-console/app/globals.css:23`
+  package's classes silently, and only in a PRODUCTION build (`ts/apps/iam-console/app/globals.css:23`
   is the first copy). Next 16.3.4 builds with Turbopack and writes CSS to
   `.next/static/chunks/`, not `.next/static/css/`, and there is **no**
   `.next/app-build-manifest.json` at all — so `ci/tailwind-source/run.mjs` walks `.next/static`
-  recursively instead of reading a manifest, and `paigasus-console-ts:build` removes
+  recursively instead of reading a manifest, and `iam-console-ts:build` removes
   `.next/static` before every build so a stale chunk from an earlier build cannot satisfy that
   walk. The guard script lives at `ci/tailwind-source/` and must **never** move under
-  `ts/apps/paigasus-console/`, because that directory is Tailwind's scan root and a script
+  `ts/apps/iam-console/`, because that directory is Tailwind's scan root and a script
   holding the sentinel literal (`--paigasus-ui-source-probe`) would make Tailwind generate the
   very utility it asserts on — and the guard's assertion-3 scan is a **full walk of the console
   directory**, not an allowlist, because the old `['app'] + four config files` list missed
   `moon.yml`, `next-env.d.ts` and `.prettierignore`, all of which Tailwind reads.
-  `paigasus-console-ts:build` also uses `options.merge: replace`, so
+  `iam-console-ts:build` also uses `options.merge: replace`, so
   it inherits nothing from `.moon/tasks/typescript-project.yml` and lists `/ts/pnpm-lock.yaml`
   **and `/ts/tsconfig.base.json`** by hand in its own `inputs` (`test` replaces too and needs
   both; `typecheck` merges and inherits them). `repo:affected-smoke`'s **two** `ui->console`
   cases (`ci/affected-graph/run.sh`) are the only control on the input list that makes the guard
-  real — they assert a `@paigasus/ui` source edit selects both `paigasus-console-ts:build` and
-  `paigasus-console-ts:test`; without them, an input dropped from either task's `inputs` serves a
+  real — they assert a `@paigasus/ui` source edit selects both `iam-console-ts:build` and
+  `iam-console-ts:test`; without them, an input dropped from either task's `inputs` serves a
   cached `.next` and the guard passes against stale CSS. There are two because one anchors on
   `src/styles/tokens.css` and one on `src/components/table.tsx`: a single anchor leaves the
   console's `src/**/*` input narrowable to the other subtree while the case stays green. Note a
@@ -919,13 +924,103 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   found`, in app code and in a workspace package's source alike. A clause-level `import type … from
   './a.js'` is erased first and builds (measured). `import { type A } from './a.js'` is not erased
   under `verbatimModuleSyntax` (reasoned from the flag's rules, not separately measured). So every
-  file a Next app compiles uses EXTENSIONLESS relative value imports: `@paigasus/ui`,
-  `@paigasus/next-config`, `@paigasus/app-shell` and discovery's `./client` graph do, and structure
-  tests pin the last two. `@paigasus/auth`'s `/server` and `/middleware`, discovery's `/server` and
-  `/react`, and `@paigasus/sdk` still use `.js` and have never been built by Next — a probe that
-  imported `@paigasus/auth/middleware` failed on `./http/cookies.js`. SMA-511 is the first consumer
-  that imports these entries, so its `next build` will fail on them. Vite, vitest, tsc and
-  Playwright all accept both forms, so nothing but a Next build notices.
+  file a Next app compiles uses EXTENSIONLESS relative value imports. SMA-511 made that true for every
+  package the IAM console compiles: the `src/` of `@paigasus/auth`, `@paigasus/sdk`,
+  `@paigasus/discovery` and the hand-written `@paigasus/proto` files, and BOTH buf templates
+  (`contracts/buf.gen.yaml`, `contracts/buf.gen.googleapis.yaml`) no longer pass
+  `import_extension=.js`, so the generated protobuf-es code is extensionless too. Two controls hold
+  it. The ESLint rule `paigasus/no-js-relative-specifier` reports an `import`, `export … from` or
+  `import()` whose `./`/`../` specifier ends in `.js`, under `packages/*/src/**`, test files
+  excluded. It ships as `sourceRules` from `@paigasus/next-config/eslint`, NOT inside
+  `boundaryRules` (a `packages/*/src` scope there fails the reverse liveness loop), and
+  `ts/eslint.config.js` spreads it, which a test pins. It is a rule with its OWN name on purpose: in
+  flat config a second `no-restricted-imports` block that matches the same files REPLACES the first
+  and switches the boundary rules off without a word. ESLint ignores `**/generated/**`, so a
+  `@paigasus/proto` test asserts the same thing for `src/generated/`. Test files keep their `.js`
+  imports (vitest resolves both). The two plain-Node loaders that run package source
+  (`paigasus-auth/tests/fixtures/ts-esm-loader.mjs`,
+  `paigasus-discovery/tests/containers/support/ts-esm-loader.mjs`) retry an extensionless specifier
+  as `.ts`, then `/index.ts`, because plain Node does not probe extensions. Vite, vitest, tsc and
+  Playwright accept both forms, so only a Next build or these two controls notices a regression.
+- **`@paigasus/auth` under a Next `basePath`** (MEASURED on Next 16.3.4, SMA-511 spec § 13 row 1).
+  Next removes the basePath before app code sees a path, in three different places. In `proxy.ts`,
+  `req.nextUrl.pathname` has no `/iam`, while `req.nextUrl.basePath` is `/iam` and `req.url` keeps
+  it. In a route handler, `req.url` has no basePath AND carries the server's bind address
+  (`http://0.0.0.0:<port>`); only its scheme follows `X-Forwarded-Proto`. A page
+  `redirect('/auth/login')` gets the basePath added once, and `redirect('/iam/auth/login')` becomes
+  `/iam/iam/auth/login`. So `authRoutePaths()` takes no argument and returns basePath-RELATIVE
+  paths, `requireSession` redirects to the relative login path, `createAuthRouteHandler` rebuilds the
+  URL from `AuthRuntime.publicOrigin` + basePath, and `handleCallback` builds openid-client's
+  `currentUrl` from `runtime.redirectUri`. That last part broke `redirect_uri` equality even with NO
+  basePath. A unit test sees none of this without `new NextRequest(url, { nextConfig: { basePath:
+  '/iam' } })`, and the plain-Node auth e2e harness passes full paths, so the iam-console e2e tier
+  (`iam-console-ts:test-e2e`, row R2) is the only end-to-end control.
+- **Next gives a route handler and a page SEPARATE module graphs, so a module-level singleton is
+  per-layer** (MEASURED, SMA-511). `getAuthRuntime`'s module-level cache produced two memory
+  session stores, one per layer, and login looped forever: a page set a session in its store and
+  redirected, the route handler checked a different, empty store, and sent the user back to log in
+  again. The fix caches the runtime on `globalThis` under a `Symbol.for(...)` key instead, so both
+  layers share one instance. No unit test can catch this: each layer's code is correct in
+  isolation, and only a real Next build with both layers wired together — the iam-console e2e tier
+  — reproduces the split.
+- **`@paigasus/auth`'s `returnTo` loop guard is BYTE-EXACT.** It collapses dot segments and
+  repeated slashes before comparing a path to the auth route prefix, but it does not decode
+  percent-escapes or fold case: `/iam/%61uth/login` and `/iam/AUTH/login` are not refused. No loop
+  exists today, because the route table serves neither spelling (both 404 before the guard would
+  matter). This holds only as long as no proxy or router in front of the app decodes or case-folds
+  a path before routing on it.
+- **`@paigasus/kernel` cannot load its napi binding inside a Next build** (MEASURED 2026-09-11,
+  SMA-634 open). `@paigasus/node-bindings` is a pnpm `file:` dependency whose `files` allowlist is
+  `["index.js", "index.d.ts"]`, so pnpm never copies the `.node` binary into `node_modules`, and
+  `next build` fails at "Collecting page data" with `Cannot find native binding`. Every Node consumer
+  of `@paigasus/kernel` has the same defect.
+  The iam-console's `lib/prn-tenancy.ts` is a small reader for the IAM tenancy PRN shapes
+  (decision D6, fallback C). It is a recorded ADR-0005 exception, and
+  `tests/unit/prn-tenancy.test.ts` replays the kernel parity corpus through it, so a divergence
+  from the kernel reds `iam-console-ts:test`. The name carries the `-tenancy` suffix because a
+  bare `prn.ts` is a Windows reserved device name (see the gotcha above).
+- **`forbidden()` needs `experimental.authInterrupts`, and a React `cache()` value does not reach
+  `forbidden.tsx`** (MEASURED on Next 16.3.4, SMA-511). Without the flag, `forbidden()` throws
+  instead of rendering the 403 boundary. The iam-console sets it through
+  `createNextConfig({ extend: { experimental: { authInterrupts: true } } })`, and its vitest env needs
+  `__NEXT_EXPERIMENTAL_AUTH_INTERRUPTS=true` or the call throws E488. A nested `forbidden.tsx` is a
+  per-segment boundary: `(console)/forbidden.tsx` renders inside the `(console)` layout with a real
+  HTTP 403. `forbidden()` takes no argument, and a `cache()` holder set before the call is EMPTY in
+  the `forbidden.tsx` render, so the view cannot receive request data that way.
+  The view gets the correlation id from a request header instead: `proxy.ts` mints it, `lib/iam.ts`
+  sends it to IAM as `paigasus-correlation-id`, IAM adopts it, and `forbidden.tsx` reads it with
+  `headers()`. `lib/correlation.ts`'s `FORBIDDEN_VIEW_CORRELATION` records which of the two ships,
+  and e2e row R4 fails if the view does the other. The flag is experimental: R4 asserts the real
+  HTTP 403, so a Next upgrade that changes it reds CI.
+- **A Playwright `globalSetup` runs in another process than the tests.** A fake server that a test
+  must script, or whose calls a test must count, cannot start there. The iam-console e2e tier only
+  checks the build and copies `.next/static` in `tests/e2e/global-setup.ts`, and starts the fake IAM,
+  the fake IdP, the TLS terminator and the standalone server in a WORKER-scoped fixture
+  (`tests/e2e/support/harness.ts`, `workers: 1`). Playwright starts a new worker after a failed test,
+  and the fixture then starts the whole stack again. Anything that fixture imports runs WITHOUT the
+  vitest `server-only` stub, so `tests/support/` must not import a guarded `@paigasus/sdk` entry or a
+  `lib/` file (use `@paigasus/proto/iam`, which the `apps/*/tests/support/**` boundary exemption allows).
+- The `ts` project's `sources` group names app code directories BY HAND (`apps/*/app/**/*`,
+  `apps/*/lib/**/*`, `apps/*/proxy.ts`). `ts:lint` runs `eslint .` over the whole tree, but Moon
+  re-runs it only for a file in its `sources` or `tests` group (or one of its config inputs), so a
+  new top-level app directory needs a line in `sources`, or an edit to it serves a cached lint PASS.
+  The same holds for a top-level app file such as `playwright.config.ts`.
+- The root `.gitignore`'s bare `build/` rule (line 41) silently ignores ANY directory named
+  `build/` anywhere in the tree, not only a top-level one — `ts/apps/*/tests/build/` included. A
+  file already tracked there stays tracked, so the trap is invisible until someone adds a NEW file
+  under such a directory and it never gets committed. SMA-511 renamed its own directory to
+  `tests/build-guard/` to avoid it, rather than fighting the ignore rule.
+- `ci/actionlint/run.sh` check 12 requires a `<!-- moon-diagnosis:ok -->` (or `:superseded`) marker
+  on ANY file that names `ciReport.json`, unless the file is listed in `CIREPORT_MENTIONS_ALLOWED`.
+  This is broader than the `doc_diagnosis_self_test` entry above says: it is not only about this
+  file's own diagnosis procedure block. A new plan or spec that quotes the procedure, or otherwise
+  mentions `ciReport.json`, reds the gate until it carries the marker or is added to the allowlist.
+- LOCAL ONLY: `/bin/bash` 3.2.57 makes `ci/actionlint/run.sh` print two FALSE `cargo-lock-step`
+  self-test failures — run that gate with `/opt/homebrew/bin/bash` instead. The affected-graph
+  suite (`ci/affected-graph/run.sh`) is the opposite case: it needs system `/bin/bash` 3.2, because
+  bash 5.3.15 deadlocks on a `while read` fed by a here-string over roughly 512 bytes on this class
+  of machine. Keep both facts together: fixing one gate's bash version by copying the other's
+  breaks it.
 
 ## Workflow
 

@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { ESLint, type Linter } from 'eslint';
 import tseslint from 'typescript-eslint';
 import { describe, expect, it } from 'vitest';
-import { BOUNDARY_SCOPES, boundaryRules } from '../src/eslint.mjs';
+import { BOUNDARY_SCOPES, boundaryRules, sourceRules } from '../src/eslint.mjs';
 
 /**
  * A TypeScript-aware parser, with no type-checked rules attached. `boundaryRules` on its own
@@ -72,8 +72,8 @@ const DENIED: ReadonlyArray<readonly [string, string, string]> = [
   ['discovery must not import a next SUBPATH', 'packages/paigasus-discovery/src/probe.ts', "import { after } from 'next/server';"],
   ['discovery must not import the sdk', 'packages/paigasus-discovery/src/probe.ts', "import { x } from '@paigasus/sdk';"],
   ['discovery must not import a sdk SUBPATH', 'packages/paigasus-discovery/src/probe.ts', "import { x } from '@paigasus/sdk/client';"],
-  ['apps must not import proto', 'apps/paigasus-console/app/page.tsx', "import { x } from '@paigasus/proto';"],
-  ['apps must not import a proto SUBPATH', 'apps/paigasus-console/app/page.tsx', "import { x } from '@paigasus/proto/gen/iam';"],
+  ['apps must not import proto', 'apps/iam-console/app/page.tsx', "import { x } from '@paigasus/proto';"],
+  ['apps must not import a proto SUBPATH', 'apps/iam-console/app/page.tsx', "import { x } from '@paigasus/proto/gen/iam';"],
   ['auth/client must not import openid-client', 'packages/paigasus-auth/src/client.ts', "import * as c from 'openid-client';"],
   ['auth/client must not import redis', 'packages/paigasus-auth/src/client.ts', "import { createClient } from 'redis';"],
   ['auth/client must not import a node builtin', 'packages/paigasus-auth/src/client.ts', "import { randomBytes } from 'node:crypto';"],
@@ -89,25 +89,33 @@ const DENIED: ReadonlyArray<readonly [string, string, string]> = [
   // `./core/session.js` exception into this rule — so a type-only reach into core/ must stay
   // rejected, deliberately, rather than by accident.
   ['auth/client must not reach core via ./, even a TYPE-ONLY import', 'packages/paigasus-auth/src/client.ts', "import type { SessionView } from './core/session.js';"],
-  // EXTENSION-BEARING. This codebase always suffixes relative imports with `.js` (a real file
-  // never writes `from './runtime'` — it writes `from './runtime.js'`), and no-restricted-imports
-  // matches the specifier AS WRITTEN. A bare `'./runtime'` pattern with no `.js` sibling and no
-  // glob matches nothing a real file would ever import — these four rows are what proved that
-  // (fix round 2).
+  // EXTENSION-BEARING. This codebase wrote `.js` on every relative import until SMA-511 (a real
+  // file wrote `from './runtime.js'`, never `from './runtime'`); package src/ is extensionless since.
+  // no-restricted-imports matches the specifier AS WRITTEN. A bare `'./runtime'` pattern with no `.js`
+  // sibling and no glob matched nothing a real file imported then — these four rows are what proved
+  // that (fix round 2). The SMA-511 rows below prove that the groups also match the extensionless form.
   ['auth/client must not reach runtime.ts (the composition root)', 'packages/paigasus-auth/src/client.ts', "import { x } from './runtime.js';"],
   ['auth/client must not reach config.ts', 'packages/paigasus-auth/src/client.ts', "import { x } from './config.js';"],
   ['auth/middleware must not import the store', 'packages/paigasus-auth/src/middleware.ts', "import { x } from './adapters/redis-store.js';"],
   ['auth/middleware must not import single-flight', 'packages/paigasus-auth/src/middleware.ts', "import { x } from './core/single-flight.js';"],
   ['auth/middleware must not import the session store port', 'packages/paigasus-auth/src/middleware.ts', "import { x } from './ports/session-store.js';"],
-  // Four dead entries survived earlier in this branch because a bare './runtime' does not match
-  // the '.js'-suffixed specifier a real file would write — these use the `.js` form a real file
-  // in this codebase always writes, the same lesson the auth/client rows above already record.
+  // Four dead entries survived earlier in this branch because a bare './runtime' did not match
+  // the '.js'-suffixed specifier a real file wrote then — these use the `.js` form that real files
+  // wrote until SMA-511 (extensionless since), the same lesson the auth/client rows above record.
   ['auth/middleware must not reach the session type module', 'packages/paigasus-auth/src/middleware.ts', "import { x } from './core/session.js';"],
   ['auth/middleware must not reach the http composition-root surface', 'packages/paigasus-auth/src/middleware.ts', "import { x } from './http/routes.js';"],
   ['auth/middleware must not reach runtime.ts (the composition root)', 'packages/paigasus-auth/src/middleware.ts', "import { x } from './runtime.js';"],
   ['auth/middleware must not reach config.ts', 'packages/paigasus-auth/src/middleware.ts', "import { x } from './config.js';"],
-  ['an app middleware must not import auth/server', 'apps/paigasus-console/middleware.ts', "import { getSession } from '@paigasus/auth/server';"],
-  ['an app middleware must not import the sdk', 'apps/paigasus-console/middleware.ts', "import { x } from '@paigasus/sdk';"],
+  ['an app middleware must not import auth/server', 'apps/iam-console/middleware.ts', "import { getSession } from '@paigasus/auth/server';"],
+  ['an app middleware must not import the sdk', 'apps/iam-console/middleware.ts', "import { x } from '@paigasus/sdk';"],
+  // SMA-511: package sources are EXTENSIONLESS now (spec § 7.2). The `.js` rows above prove the
+  // groups match the old spelling; these prove they match what real files write today.
+  ['auth/client must not reach runtime.ts, extensionless', 'packages/paigasus-auth/src/client.ts', "import { x } from './runtime';"],
+  ['auth/client must not reach core, extensionless', 'packages/paigasus-auth/src/client.ts', "import { x } from './core/single-flight';"],
+  ['auth/middleware must not reach the http composition root, extensionless', 'packages/paigasus-auth/src/middleware.ts', "import { x } from './http/routes';"],
+  ['auth/middleware must not reach the session store port, extensionless', 'packages/paigasus-auth/src/middleware.ts', "import { x } from './ports/session-store';"],
+  ['auth/middleware must not reach config.ts, extensionless', 'packages/paigasus-auth/src/middleware.ts', "import { x } from './config';"],
+  ['auth/server must not reach the client-only surface, extensionless', 'packages/paigasus-auth/src/server.ts', "import { x } from './client';"],
   // Reverse-direction proof for the new `paigasus/boundaries/auth-server` rule (fix round,
   // finding 6): without a `files` glob matching src/server.ts, the two ALLOWED rows below passed
   // vacuously — no rule applied to that path at all, so any import would have reported []. This
@@ -138,6 +146,18 @@ const DENIED: ReadonlyArray<readonly [string, string, string]> = [
   ['the fixture must not import auth/server', 'packages/paigasus-app-shell/tests/e2e/fixture/app/page.tsx', "import { x } from '@paigasus/auth/server';"],
   ['the fixture must not import discovery/server', 'packages/paigasus-app-shell/tests/e2e/fixture/app/page.tsx', "import { x } from '@paigasus/discovery/server';"],
   ['the fixture must not import an app-shell SUBPATH', 'packages/paigasus-app-shell/tests/e2e/fixture/app/page.tsx', "import { x } from '@paigasus/app-shell/src/zone/resolve';"],
+  // SMA-511 spec § 7.4. Next 16 names the middleware file `proxy.ts`. The app-middleware block
+  // REPLACES the apps block's options for these files, so it restates the proto ban; these rows
+  // prove both halves on both file names.
+  ['an app proxy must not import auth/server', 'apps/iam-console/proxy.ts', "import { getSession } from '@paigasus/auth/server';"],
+  ['an app proxy must not import the sdk', 'apps/iam-console/proxy.ts', "import { x } from '@paigasus/sdk';"],
+  ['an app proxy must not import a sdk SUBPATH', 'apps/iam-console/proxy.ts', "import { x } from '@paigasus/sdk/iam';"],
+  ['an app proxy must not import proto — the restated ban', 'apps/iam-console/proxy.ts', "import { x } from '@paigasus/proto';"],
+  ['an app proxy must not import a proto SUBPATH', 'apps/iam-console/proxy.ts', "import { x } from '@paigasus/proto/iam';"],
+  ['an app middleware must not import proto — the restated ban', 'apps/iam-console/middleware.ts', "import { x } from '@paigasus/proto';"],
+  // The test-double exemption is NARROW: only apps/*/tests/support/**.
+  ['app lib code must not import proto', 'apps/iam-console/lib/iam.ts', "import { x } from '@paigasus/proto';"],
+  ['an app test outside tests/support must not import proto', 'apps/iam-console/tests/unit/errors.test.ts', "import { ErrorInfoSchema } from '@paigasus/proto';"],
 ];
 
 const ALLOWED: ReadonlyArray<readonly [string, string, string]> = [
@@ -147,9 +167,9 @@ const ALLOWED: ReadonlyArray<readonly [string, string, string]> = [
   ['app-shell may import auth/client', 'packages/paigasus-app-shell/src/header.tsx', "import { x } from '@paigasus/auth/client';"],
   ['app-shell may import ui', 'packages/paigasus-app-shell/src/header.tsx', "import { x } from '@paigasus/ui';"],
   ['discovery may import proto', 'packages/paigasus-discovery/src/core/state.ts', "import { x } from '@paigasus/proto';"],
-  ['apps may import the sdk', 'apps/paigasus-console/app/page.tsx', "import { x } from '@paigasus/sdk';"],
-  ['apps may import ui directly — the deliberate § 7.3 deviation', 'apps/paigasus-console/app/page.tsx', "import { x } from '@paigasus/ui';"],
-  ['apps may import next', 'apps/paigasus-console/app/page.tsx', "import Link from 'next/link';"],
+  ['apps may import the sdk', 'apps/iam-console/app/page.tsx', "import { x } from '@paigasus/sdk';"],
+  ['apps may import ui directly — the deliberate § 7.3 deviation', 'apps/iam-console/app/page.tsx', "import { x } from '@paigasus/ui';"],
+  ['apps may import next', 'apps/iam-console/app/page.tsx', "import Link from 'next/link';"],
   ['auth/client may import react', 'packages/paigasus-auth/src/client.ts', "import { createContext } from 'react';"],
   // The fix for the type-only-import finding above: SessionView now lives in a leaf module with
   // no server machinery, one directory level above core/adapters/ports, so client.ts can reach it
@@ -162,7 +182,7 @@ const ALLOWED: ReadonlyArray<readonly [string, string, string]> = [
   // these rows genuinely exercise "the rule that covers this file does not ban this import."
   ['auth/server may import openid-client', 'packages/paigasus-auth/src/server.ts', "import * as c from 'openid-client';"],
   ['auth/server may reach its own adapters', 'packages/paigasus-auth/src/server.ts', "import { x } from './adapters/redis-store.js';"],
-  ['an app middleware may import auth/middleware', 'apps/paigasus-console/middleware.ts', "import { createAuthMiddleware } from '@paigasus/auth/middleware';"],
+  ['an app middleware may import auth/middleware', 'apps/iam-console/middleware.ts', "import { createAuthMiddleware } from '@paigasus/auth/middleware';"],
   // Proves the finding-5 widening stayed precise: src/middleware.ts's real, legitimate import of
   // cookie NAME constants (ADR-0017 decision 7's cookie-presence check) must keep working — only
   // the composition-root file, './http/routes.js', is banned, not the whole './http/**' directory.
@@ -176,6 +196,8 @@ const ALLOWED: ReadonlyArray<readonly [string, string, string]> = [
   ['the fixture may import the package by its own name', 'packages/paigasus-app-shell/tests/e2e/fixture/app/page.tsx', "import { ZoneLink } from '@paigasus/app-shell';"],
   ['the fixture may import auth/client', 'packages/paigasus-app-shell/tests/e2e/fixture/app/providers.tsx', "import { SessionProvider } from '@paigasus/auth/client';"],
   ['the fixture may import ui', 'packages/paigasus-app-shell/tests/e2e/fixture/app/page.tsx', "import { Link } from '@paigasus/ui';"],
+  // SMA-511 spec § 7.4.
+  ['an app proxy may import auth/middleware', 'apps/iam-console/proxy.ts', "import { authRoutePaths, createAuthMiddleware } from '@paigasus/auth/middleware';"],
 ];
 
 describe('boundary preset', () => {
@@ -278,7 +300,7 @@ describe('the workspace eslint config actually applies the preset', () => {
   // The apps/ half, because a single `ignores` entry silences one tree at a time: `'packages/**'`
   // leaves the row above red and this one green, and `'apps/**'` does the reverse.
   it('lints a denied apps/ import through the REAL config, not an override', async () => {
-    const messages = await realConfigRestrictedImportsFor('apps/paigasus-console/app/probe.mjs', "import { x } from '@paigasus/proto';\nexport const y = x;\n");
+    const messages = await realConfigRestrictedImportsFor('apps/iam-console/app/probe.mjs', "import { x } from '@paigasus/proto';\nexport const y = x;\n");
     expect(messages, 'ts/eslint.config.js did not apply the apps boundary rule to an apps/ path — check its global `ignores` array').not.toHaveLength(0);
   });
 
@@ -290,5 +312,54 @@ describe('the workspace eslint config actually applies the preset', () => {
     for (const entry of boundaryRules) {
       expect(shipped, `ts/eslint.config.js dropped the ${entry.name} boundary block`).toContainEqual(expect.objectContaining({ files: entry.files }));
     }
+  });
+
+  // SMA-511 spec § 7.2. The source rule is a SEPARATE export, so the boundary-entry check above does
+  // not see it. Deleting only the spread from ts/eslint.config.js would leave every other test green.
+  it('carries every sourceRules entry in its EXPORTED array', async () => {
+    const shipped = (await import('../../../eslint.config.js')).default as Array<{ files?: string[]; ignores?: string[] }>;
+    for (const entry of sourceRules) {
+      expect(shipped, `ts/eslint.config.js dropped the ${entry.name} block`).toContainEqual(expect.objectContaining({ files: entry.files, ignores: entry.ignores }));
+    }
+  });
+
+  // Lints through the REAL config, so a global `ignores` entry that silences packages/*/src fails
+  // here. The path is a REAL, tracked file: the shipped config lints every .ts path with
+  // projectService, and a path no tsconfig includes gives one fatal parse error and runs no rule.
+  // lintText uses the source given here, not the file on disk.
+  it('lints a .js relative specifier in package src through the REAL config', async () => {
+    const eslint = new ESLint({ cwd: TS_ROOT });
+    const [result] = await eslint.lintText("import { SESSION_VIEW_KEYS } from './core/session.js';\nexport const keys = SESSION_VIEW_KEYS;\n", {
+      filePath: 'packages/paigasus-auth/src/session-view.ts',
+      warnIgnored: false,
+    });
+    const messages = result?.messages ?? [];
+    expect(messages.filter((m) => m.fatal === true)).toEqual([]);
+    expect(messages.filter((m) => m.ruleId === 'paigasus/no-js-relative-specifier')).toHaveLength(1);
+  }, 120_000);
+
+  // SMA-511 spec § 7.4 — the app test-double exemption (`ignores: ['apps/*/tests/support/**']`),
+  // through the REAL config. Not an ALLOWED row: through `boundaryRules` alone no block matches a
+  // tests/support `.ts` path after the `ignores`, so ESLint does not lint it, and an empty result
+  // would prove nothing (measured, pre-flight T7.a). The real config lints every `.mjs` path
+  // (`js.configs.recommended` has no `files` key). The `isPathIgnored` check proves that the path
+  // is linted, so an empty list here means that no rule bans the import.
+  const TEST_DOUBLE_PATH = 'apps/iam-console/tests/support/fake-iam.mjs';
+  const TEST_DOUBLE_IMPORTS: ReadonlyArray<readonly [string, string]> = [
+    ['proto (it builds ErrorInfo details)', "import { ErrorInfoSchema } from '@paigasus/proto';\nexport const y = ErrorInfoSchema;\n"],
+    ['a proto SUBPATH', "import { TenancyService } from '@paigasus/proto/iam';\nexport const y = TenancyService;\n"],
+  ];
+
+  it.each(TEST_DOUBLE_IMPORTS)('an app test double under tests/support may import %s, through the REAL config', async (_label, source) => {
+    const ignored = await new ESLint({ cwd: TS_ROOT }).isPathIgnored(TEST_DOUBLE_PATH);
+    expect(ignored, 'the real config does not lint this path, so an empty result would prove nothing').toBe(false);
+    expect(await realConfigRestrictedImportsFor(TEST_DOUBLE_PATH, source)).toEqual([]);
+  });
+
+  // The DENIED twin: the same import one directory over, through the same config. If the exemption
+  // is widened (for example to `apps/*/tests/**`), this case fails.
+  it('an app test OUTSIDE tests/support still may not import proto, through the REAL config', async () => {
+    const messages = await realConfigRestrictedImportsFor('apps/iam-console/tests/unit/errors.mjs', "import { ErrorInfoSchema } from '@paigasus/proto';\nexport const y = ErrorInfoSchema;\n");
+    expect(messages, 'the test-double exemption covers more than apps/*/tests/support/**').not.toHaveLength(0);
   });
 });

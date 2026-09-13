@@ -31,8 +31,8 @@
 // means "cached for 300s and retried at 60s", not "invisible", which is the caveat this paragraph
 // exists to state.
 import * as client from 'openid-client';
-import type { IdTokenClaims } from '../ports/principal-resolver.js';
-import { RefreshRejected } from '../core/errors.js';
+import type { IdTokenClaims } from '../ports/principal-resolver';
+import { RefreshRejected } from '../core/errors';
 
 export interface RefreshedTokens {
   accessToken: string;

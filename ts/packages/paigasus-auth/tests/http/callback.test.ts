@@ -41,6 +41,7 @@ let fixture: OidcFixture;
 let store: MemorySessionStore;
 let events: Array<[AuthEventName, AuthEventFields]>;
 let grantCalls: number;
+let grantUrls: string[];
 let runtime: AuthRuntime;
 let codeVerifier: string;
 
@@ -59,6 +60,7 @@ function countingOidc(inner: OidcClient): OidcClient {
     buildAuthorizationUrl: (params) => inner.buildAuthorizationUrl(params),
     authorizationCodeGrant: (params) => {
       grantCalls += 1;
+      grantUrls.push(params.currentUrl.href);
       return inner.authorizationCodeGrant(params);
     },
     refresh: (token) => inner.refresh(token),
@@ -72,6 +74,7 @@ beforeEach(async () => {
   store = new MemorySessionStore();
   events = [];
   grantCalls = 0;
+  grantUrls = [];
   // A fresh verifier per test (never a fixed literal): a mutation replacing routes.ts's
   // `codeVerifier: tx.codeVerifier` with any constant cannot coincidentally match this.
   codeVerifier = randomUUID();
@@ -90,6 +93,7 @@ beforeEach(async () => {
         allowInsecureRequests: true, // the fixture is plain http on localhost — never set in production
       }),
     ),
+    publicOrigin: 'https://rp.example.com',
     redirectUri: CALLBACK_URL,
     postLogoutRedirectUri: 'https://rp.example.com/',
     cookieDomainless: true,
@@ -430,6 +434,36 @@ describe('GET /auth/callback — root-mounted zone (I3)', () => {
 
     expect(callbackRes.status).toBe(302);
     expect(callbackRes.headers.get('location')).toBe('/');
+  });
+});
+
+// SMA-511 spec § 7.1. openid-client sends the token request's `redirect_uri` as `currentUrl` with the
+// query removed (openid-client build/index.js `stripParams(currentUrl)`). A Next route handler's
+// `req.url` carries the server's BIND address, so a `currentUrl` built from the request would not
+// equal the redirect_uri sent to /authorize, and the IdP rejects the exchange.
+describe('GET /auth/callback — redirect_uri (SMA-511 spec § 7.1)', () => {
+  it('builds currentUrl from runtime.redirectUri, not from a bind-address request URL', async () => {
+    const state = 'state-bind-address';
+    await seedTransaction(state);
+    fixture.setNextIdToken(await fixture.mintIdToken({ nonce: NONCE }));
+
+    const req = new Request(`http://0.0.0.0:3000/iam/auth/callback?code=test-code&state=${state}`, { headers: { cookie: cookieHeaderFor(state, CORRECT_SECRET) } });
+    const res = await createAuthRoutes(runtime).handle(req);
+
+    expect(res.status).toBe(302);
+    expect(grantUrls).toEqual([`${CALLBACK_URL}?code=test-code&state=${state}`]);
+  });
+
+  it('uses an overridden redirect URI as it is, so redirect_uri always equals the /authorize value', async () => {
+    const state = 'state-override';
+    await seedTransaction(state);
+    fixture.setNextIdToken(await fixture.mintIdToken({ nonce: NONCE }));
+
+    const routes = createAuthRoutes({ ...runtime, redirectUri: 'https://proxy.example.com/cb' });
+    const res = await routes.handle(callbackRequest(state, cookieHeaderFor(state, CORRECT_SECRET)));
+
+    expect(res.status).toBe(302);
+    expect(grantUrls).toEqual([`https://proxy.example.com/cb?code=test-code&state=${state}`]);
   });
 });
 

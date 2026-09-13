@@ -17,12 +17,15 @@ const PKG_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const UNGUARDED_ENTRIES = new Set(['./errors/types']);
 
 // The guard's expected specifier depends on where the entry FILE sits, not on one fixed literal.
-// `src/index.ts` needs './server-guard.js'; a nested entry such as `src/errors/map-error.ts` needs
-// '../server-guard.js'. Spec § 6.2 layer 3 always said this test "resolves the path relative to
+// `src/index.ts` needs './server-guard'; a nested entry such as `src/errors/map-error.ts` needs
+// '../server-guard'. Spec § 6.2 layer 3 always said this test "resolves the path relative to
 // each entry" — the original literal did not, so a nested guarded entry could not satisfy it and
 // the file layout had to be bent around the test. Ported from PR #231, which fixed the test
 // instead. (SMA-625)
-const GUARD_MODULE = 'src/server-guard.js';
+//
+// EXTENSIONLESS since SMA-511: Turbopack does not resolve './x.js' to './x.ts' (spec § 7.2), and
+// `paigasus/no-js-relative-specifier` now rejects the `.js` form in src/.
+const GUARD_MODULE = 'src/server-guard';
 
 function expectedGuardImport(target: string): string {
   const fromDir = dirname(resolve(PKG_ROOT, target));
@@ -33,7 +36,9 @@ function expectedGuardImport(target: string): string {
 /** Does this source carry an import declaration of the server guard, at any relative depth? */
 function importsServerGuard(source: string, fileName: string): boolean {
   const parsed = ts.createSourceFile(fileName, source, ts.ScriptTarget.ESNext, true);
-  return parsed.statements.some((statement) => ts.isImportDeclaration(statement) && ts.isStringLiteral(statement.moduleSpecifier) && /(?:^|\/)server-guard\.js$/.test(statement.moduleSpecifier.text));
+  return parsed.statements.some(
+    (statement) => ts.isImportDeclaration(statement) && ts.isStringLiteral(statement.moduleSpecifier) && /(?:^|\/)server-guard(?:\.js)?$/.test(statement.moduleSpecifier.text),
+  );
 }
 
 function readPackageExports(): Record<string, string> {
@@ -74,7 +79,7 @@ describe('AC 1 — every guarded entry point imports the server guard first', ()
   // records: a text match cannot tell an import from a mention. The first attempt here used a
   // regex and immediately flagged the prose in `errors/types.ts` that says the file must not gain
   // a guard. It also rejects ANY server-guard specifier rather than only the spelling this
-  // entry's depth would produce, so a stray './server-guard.js' in a nested file is still caught.
+  // entry's depth would produce, so a stray './server-guard' (or './server-guard.js') in a nested file is still caught.
   it.each(entries.filter(([name]) => UNGUARDED_ENTRIES.has(name)))('entry %s deliberately carries no guard', (_name, target) => {
     const file = resolve(PKG_ROOT, target);
     expect(importsServerGuard(readFileSync(file, 'utf8'), file)).toBe(false);

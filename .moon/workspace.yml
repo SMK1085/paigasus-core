@@ -56,8 +56,8 @@ hasher:
   # without this block (verified). The warnings come from input COLLECTION; this filter skips the
   # hashing that follows. The block looks inert in the log and is not. Judge it by wall time.
   #
-  # Deliberately NOT listing '**/.next/**': it is a declared `outputs:` of paigasus-console-ts:build
-  # (ts/apps/paigasus-console/moon.yml), and it is not a meaningful part of the cost.
+  # Deliberately NOT listing '**/.next/**': it is a declared `outputs:` of iam-console-ts:build
+  # (ts/apps/iam-console/moon.yml), and it is not a meaningful part of the cost.
   ignorePatterns:
     - '**/node_modules/**'
     - '**/target/**'

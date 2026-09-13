@@ -14,6 +14,9 @@ allowBuilds:
   # node-gyp rebuild) — ssh2 falls back to a pure-JS path without it. protobufjs's postinstall
   # is a no-op donation notice (scripts/postinstall), not a compile step. All three: false.
   cpu-features: false
+  # msw (SMA-511) declares a postinstall that copies its BROWSER service worker into a public
+  # directory. The iam-console tests use msw/node only, so the script has nothing to do.
+  msw: false
   protobufjs: false
   sharp: true
   ssh2: false
@@ -206,3 +209,8 @@ catalog:
   '@testing-library/user-event': ^14.6.7
   '@testing-library/jest-dom': ^7.0.1
   'axe-core': ^4.13.0
+  # Request interception for the iam-console vitest tier (SMA-511 spec § 9, AC 5). It intercepts
+  # `fetch` — @paigasus/discovery's `GET /v1/service-info` probe. It cannot intercept the SDK's gRPC
+  # calls over node:http2; an in-process fake server answers those. 2.15.0 was released 2026-07-08.
+  # Pinned EXACTLY, not a caret range (the Global Constraints): a later 2.x must not install silently.
+  msw: 2.15.0

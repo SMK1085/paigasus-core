@@ -8,9 +8,9 @@
 //
 // createAuthRuntime therefore REFUSES this adapter when the zone map declares more than one zone.
 // It is for local development and single-process tests.
-import type { SessionRecord } from '../core/session.js';
-import { isSessionRecord } from '../core/session.js';
-import type { LoginTransaction, SessionStore } from '../ports/session-store.js';
+import type { SessionRecord } from '../core/session';
+import { isSessionRecord } from '../core/session';
+import type { LoginTransaction, SessionStore } from '../ports/session-store';
 
 interface Entry<T> {
   value: T;

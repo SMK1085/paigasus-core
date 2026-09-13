@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // The guard-free, client-safe surface (spec § 6.3, § 9.6). This file carries NO
-// `import './server-guard.js'` and must not gain one: `tests/server-guard.test.ts` lists
+// `import '../server-guard'` and must not gain one: `tests/server-guard.test.ts` lists
 // './errors/types' in UNGUARDED_ENTRIES and asserts the guard is absent.
 //
 // `Code` is imported as a TYPE only. Under `verbatimModuleSyntax` (ts/tsconfig.base.json:9) an

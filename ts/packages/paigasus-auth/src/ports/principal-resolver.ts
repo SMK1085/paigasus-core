@@ -11,7 +11,7 @@
 // needs the type (SessionView.grants is a RoleGrantRef[]) but must never reach ./ports/**, so the
 // one definition lives in the leaf module both sides can import.
 
-import type { RoleGrantRef } from '../session-view.js';
+import type { RoleGrantRef } from '../session-view';
 
 export type { RoleGrantRef };
 

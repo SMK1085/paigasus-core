@@ -1,0 +1,36 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+@import 'tailwindcss';
+
+/*
+ * The design-token layer from @paigasus/ui. Proven to reach the built CSS by sentinel B,
+ * declared in ts/packages/paigasus-ui/src/styles/tokens.css and asserted by
+ * ci/tailwind-source/run.mjs (see that script's README for the sentinel names — the
+ * literal is deliberately not spelled out here, since this file is itself a Tailwind
+ * scan root).
+ */
+@import '@paigasus/ui/styles.css';
+
+/*
+ * LOAD-BEARING (ADR-0021 decision 4, SMA-503 AC 3). Tailwind's automatic source detection
+ * defaults to the current working directory — this app's own directory — and excludes
+ * node_modules, through which pnpm resolves @paigasus/ui. Without this line the package's
+ * classes are silently absent from a PRODUCTION build, which looks like broken styling
+ * rather than a build error.
+ *
+ * Every new zone app needs its own copy of this line and its own probe assertion. Deleting
+ * it reds iam-console-ts:test.
+ */
+@source '../../../packages/paigasus-ui/src';
+
+/*
+ * LOAD-BEARING for the same reason (SMA-511 spec § 7.6): the shell's classes live in
+ * @paigasus/app-shell, which pnpm also resolves through node_modules. Sentinel C in
+ * ci/tailwind-source/run.mjs proves this line; the literal is not written here, because this file
+ * is itself a Tailwind scan root.
+ */
+@source '../../../packages/paigasus-app-shell/src';
+
+body {
+  background-color: var(--color-background);
+  color: var(--color-foreground);
+}

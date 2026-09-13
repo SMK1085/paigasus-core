@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import './server-guard.js';
+import './server-guard';
 
 import { Code, ConnectError, createContextKey } from '@connectrpc/connect';
 import type { Interceptor, Transport } from '@connectrpc/connect';

@@ -7,13 +7,25 @@
 // Each name is listed EXPLICITLY. `export *` from two modules that share a name drops the
 // ambiguous name SILENTLY under the ES semantics TypeScript follows — no error, no warning — the
 // exact failure ts/packages/paigasus-proto/src/iam.ts:5-14 documents for `ServiceInfo`.
-import './server-guard.js';
+import './server-guard';
 
-export { AuditService, AuthnService, AuthorizationService, OutboxService, ServiceAccountService, TenancyService, UserService, bindAuth, createIamClient, disposeTransports } from './iam.js';
-export type { Auth, TransportOptions } from './iam.js';
+export {
+  AuditService,
+  AuthnService,
+  AuthorizationService,
+  OutboxService,
+  ServiceAccountService,
+  ServiceInfoService,
+  TenancyService,
+  UserService,
+  bindAuth,
+  createIamClient,
+  disposeTransports,
+} from './iam';
+export type { Auth, TransportOptions } from './iam';
 
-export { DEFAULT_HEADER_TIMEOUT_MS, createChatClient, createTerminalFrameParser } from './chat.js';
-export type { ChatClient, ChatClientOptions, ChatResult } from './chat.js';
+export { DEFAULT_HEADER_TIMEOUT_MS, createChatClient, createTerminalFrameParser } from './chat';
+export type { ChatClient, ChatClientOptions, ChatResult } from './chat';
 
-export { ErrorDomain, ErrorReason, grpcCodeName, mapError, presentationForGrpcCode, presentationForHttpStatus, presentationForTransportCause, presentationOverride } from './errors.js';
-export type { ErrorInput, PaigasusError, Presentation, TransportCause, TransportInfo } from './errors.js';
+export { ErrorDomain, ErrorReason, grpcCodeName, mapError, presentationForGrpcCode, presentationForHttpStatus, presentationForTransportCause, presentationOverride } from './errors';
+export type { ErrorInput, PaigasusError, Presentation, TransportCause, TransportInfo } from './errors';

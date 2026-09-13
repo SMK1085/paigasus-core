@@ -1,0 +1,311 @@
+$schema: 'https://moonrepo.dev/schemas/project.json'
+
+id: 'iam-console-ts'
+layer: 'application'
+language: 'typescript'
+
+# Graph documentation, and what `moon query projects --affected` follows. This confers NO
+# affectedness on its own: dependsOn schedules an upstream and never selects a downstream
+# (CLAUDE.md, Moon 2.5.3). The task `inputs` below are what make these tasks affected by a
+# change inside a package. Every package this app compiles is listed, so the `contracts->proto`
+# case in ci/affected-graph/run.sh reaches this project (SMA-511 spec § 8).
+#
+# It confers no ORDERING on a task either, which is a third distinct thing. MEASURED with
+# `moon action-graph iam-console-ts:build --dot`: the entry below produced SyncProject(contracts)
+# and no RunTask(contracts:generate) node, so every task that reads
+# ts/packages/paigasus-proto/src/generated/** carries its own `deps: ['contracts:generate']`
+# below. That tree is wiped by `clean: true` at the start of the generator's ~11s run and
+# google/rpc/ is only restored at the end of it — see ts/packages/paigasus-discovery/moon.yml for
+# the CI measurement of a reader that was scheduled inside that window and failed.
+dependsOn:
+  - 'paigasus-next-config-ts'
+  - 'paigasus-ui-ts'
+  - 'paigasus-auth-ts'
+  - 'paigasus-sdk-ts'
+  - 'paigasus-discovery-ts'
+  - 'paigasus-app-shell-ts'
+  - 'paigasus-proto-ts'
+
+# The inherited `sources` group from .moon/tasks/typescript-project.yml is `src/**/*`, and
+# this app has no src/ — its code is in app/. MEASURED before this fix with
+# `moon query projects --id iam-console-ts`: the resolved group was exactly
+# ts/apps/iam-console/src/**/*, matching nothing, so editing app/page.tsx selected NO
+# console task at all. repo:input-liveness cannot see this — ci/affected-graph/task_inputs.py
+# keys its scan to the `repo` project by exact id. (SMA-503 spec §11.1)
+#
+# SMA-502 worked around the same hole from the other side, by listing `app/**/*` in each task's
+# inputs directly. Both are kept: the group is the real fix, the explicit entries are belt and
+# braces if the group is ever removed. Moon MERGES a project's file groups with the inherited
+# ones rather than overriding them (measured, SMA-503 M3), so `@group(sources)` now resolves to
+# src/**/* plus app/**/*.
+fileGroups:
+  sources:
+    - 'app/**/*'
+    # SMA-511: the composition root. Without this, an edit in lib/ serves a cached build and test.
+    - 'lib/**/*'
+    # SMA-511: the zone's proxy (spec § 8). Without it an edit to proxy.ts serves a cached build.
+    - 'proxy.ts'
+
+tasks:
+  build:
+    # `set -euo pipefail` is REQUIRED. Moon does not enable errexit for `script:` blocks and takes
+    # a block's status from its LAST command, so without it a failed `next build` followed by a
+    # satisfied file check exits 0 — a false green on SMA-502's headline acceptance criterion.
+    #
+    # The standalone assertion is what proves SMA-502 AC1. A unit test on the object
+    # createNextConfig() returns shows `output: 'standalone'` is SET; it cannot show Next HONOURED
+    # it. A Next version that renames or ignores the key would pass that unit test and ship an
+    # image carrying all of node_modules. The asserted path is measured, not assumed: with
+    # outputFileTracingRoot pinned to ts/, Next writes the entry point under the app's own
+    # subpath. See docs/superpowers/specs/2026-09-08-sma-502-measurements.md.
+    #
+    # `rm -rf .next/static` is SMA-503's, and it guards the cache-MISS path. M6 measured that
+    # .next/app-build-manifest.json does not exist at all on Next 16.3.4 with Turbopack, so the
+    # ci/tailwind-source guard's manifest lookup never fires and its fallback — a recursive walk
+    # of .next/static — is what actually runs. That walk cannot tell a file this build wrote from
+    # one an earlier build left behind. .next/cache must survive; deleting all of .next would make
+    # every build cold. The residual on the cache-HIT path is recorded in
+    # ci/tailwind-source/README.md.
+    script: |
+      set -euo pipefail
+      rm -rf .next/static
+      pnpm exec next build
+      if [ ! -f .next/standalone/apps/iam-console/server.js ]; then
+        echo "iam-console: standalone entry point missing — output: 'standalone' did not take effect" >&2
+        exit 1
+      fi
+    # `next build` compiles @paigasus/proto's generated tree through @paigasus/sdk and
+    # @paigasus/discovery, so this task must not run while the generator is wiping it.
+    deps: ['contracts:generate']
+    # NOTE the `merge: replace` below: this task inherits NOTHING, so every input it needs is
+    # listed here. That is how it lost /ts/pnpm-lock.yaml once before — see the comment on
+    # repo:next-env-drift in the root moon.yml.
+    inputs:
+      - '@group(sources)'
+      - 'app/**/*'
+      # SMA-511: the composition root and the zone proxy. The group above also reaches them; these
+      # entries keep the coverage if the group is ever removed.
+      - 'lib/**/*'
+      - 'proxy.ts'
+      - 'tsconfig.json'
+      - 'package.json'
+      - 'next.config.ts'
+      # At the project root, so no source group reaches it. Editing or deleting it changes the
+      # whole CSS pipeline.
+      - 'postcss.config.mjs'
+      # next.config.ts imports the factory, so this task READS the package's sources. Without
+      # this input, editing the factory serves a cached build — the staleness class SMA-519 paid
+      # for.
+      - '/ts/packages/paigasus-next-config/src/**/*'
+      # The package MANIFEST too: its `exports` map decides what an import resolves to.
+      - '/ts/packages/paigasus-next-config/package.json'
+      # tsconfig.json extends @paigasus/next-config/tsconfig-app.
+      - '/ts/packages/paigasus-next-config/tsconfig.app.json'
+      # SMA-503 AC 3. Without this, a change inside @paigasus/ui leaves this task's cache key
+      # unchanged, Moon serves a cached .next, `next build` never runs, and the assertion in
+      # `test` passes against stale CSS — a green that means nothing.
+      - '/ts/packages/paigasus-ui/src/**/*'
+      # The package MANIFEST, not only its sources. It holds the `exports` map — including the
+      # ./styles.css entry this app imports — so changing that map must re-key this task
+      # (SMA-503 local review, finding A).
+      - '/ts/packages/paigasus-ui/package.json'
+      # SMA-502 deliberately left the lockfile OFF this task, on the grounds that
+      # repo:next-env-drift keys on it instead. SMA-503 adds it back, and the two positions do
+      # not merge: that gate keying on the lockfile does not re-key THIS task, and this task's
+      # output is what the Tailwind guard asserts against. The Tailwind, PostCSS and Next
+      # versions all come from here, so a bump that changes emitted CSS must rebuild before the
+      # guard reads it. The cost is that a lockfile change rebuilds the console; that is the
+      # trade SMA-502 was avoiding and SMA-503 is accepting, deliberately.
+      - '/ts/pnpm-lock.yaml'
+      # `merge: replace` drops this inherited input (SMA-503 fix round 2, item 7). It sets
+      # exactOptionalPropertyTypes, verbatimModuleSyntax and noUncheckedIndexedAccess, so editing
+      # it changes what `next build` accepts and what vitest compiles.
+      - '/ts/tsconfig.base.json'
+      # SMA-511: packages the app compiles (Task 9: auth, discovery, proto; later tasks add more).
+      - '/ts/packages/paigasus-auth/src/**/*'
+      - '/ts/packages/paigasus-auth/package.json'
+      - '/ts/packages/paigasus-discovery/src/**/*'
+      - '/ts/packages/paigasus-discovery/package.json'
+      - '/ts/packages/paigasus-proto/src/**/*'
+      - '/ts/packages/paigasus-proto/package.json'
+      - '/ts/packages/paigasus-app-shell/src/**/*'
+      - '/ts/packages/paigasus-app-shell/package.json'
+      - '/ts/packages/paigasus-sdk/src/**/*'
+      - '/ts/packages/paigasus-sdk/package.json'
+    outputs:
+      # SMA-502 AC4 — the cache archive must not carry .next/cache, which grows without bound.
+      - '.next/**/*'
+      - '!.next/cache/**/*'
+    options:
+      merge: replace
+
+  typecheck:
+    # Appended, not replaced. A type error introduced in @paigasus/ui would otherwise leave this
+    # task's cache key unchanged. `next build` typechecks too, so the coverage exists in practice —
+    # this makes it deliberate rather than accidental. `typecheck` merges rather than replaces, so
+    # it keeps the inherited /ts/tsconfig.base.json and needs no line of its own (verified with
+    # `moon query projects --id iam-console-ts`).
+    #
+    # tsc resolves @paigasus/proto's generated tree through the source `exports` of @paigasus/sdk
+    # and @paigasus/discovery, so this task needs the generator ordering too.
+    deps: ['contracts:generate']
+    inputs:
+      - 'app/**/*'
+      - 'lib/**/*'
+      - 'proxy.ts'
+      # The root-level config files. tsconfig.json includes **/*.ts, so tsc type-checks them, but
+      # no inherited input or source group reaches them. Without these, a type error there serves a
+      # cached typecheck PASS (SMA-511).
+      - 'next.config.ts'
+      - 'vitest.config.ts'
+      - 'playwright.config.ts'
+      # SMA-511: tsc type-checks the test tree too. Without this, a type error in tests/ — the e2e
+      # tree included — leaves this task's cache key unchanged and serves a cached PASS. The two
+      # negations drop the fixtures' build output, which would otherwise re-key the task on every
+      # run.
+      - 'tests/**/*'
+      - '!tests/fixtures/**/.next/**'
+      - '!tests/fixtures/*/next-env.d.ts'
+      - '/ts/packages/paigasus-next-config/src/**/*'
+      - '/ts/packages/paigasus-next-config/package.json'
+      - '/ts/packages/paigasus-next-config/tsconfig.app.json'
+      - '/ts/packages/paigasus-ui/src/**/*'
+      # The package MANIFEST, not only its sources. It holds the `exports` map, which decides what
+      # `@paigasus/ui` and `@paigasus/ui/styles.css` resolve to (SMA-503 local review, finding A).
+      - '/ts/packages/paigasus-ui/package.json'
+      - '/ts/packages/paigasus-auth/src/**/*'
+      - '/ts/packages/paigasus-auth/package.json'
+      - '/ts/packages/paigasus-discovery/src/**/*'
+      - '/ts/packages/paigasus-discovery/package.json'
+      - '/ts/packages/paigasus-proto/src/**/*'
+      - '/ts/packages/paigasus-proto/package.json'
+      - '/ts/packages/paigasus-app-shell/src/**/*'
+      - '/ts/packages/paigasus-app-shell/package.json'
+      - '/ts/packages/paigasus-sdk/src/**/*'
+      - '/ts/packages/paigasus-sdk/package.json'
+
+  test:
+    # Two jobs in one task. SMA-502's vitest suite boots the BUILT standalone server, and
+    # SMA-503's guard asserts the built CSS — both need `~:build` to have run, so they share it
+    # rather than building twice.
+    #
+    # The guard runs three times, mirroring the self-scheduled repo:* gates: the self-test and the
+    # negative control prove the assertion CAN fire before the real run is trusted. Moon does not
+    # enable errexit for `script:` blocks — the same latent defect the nats-permissions, promtool
+    # and publish-metadata tasks document — hence the explicit `set -euo pipefail`.
+    #
+    # The guard lives at the REPOSITORY ROOT and must stay there: this directory is Tailwind's
+    # automatic scan root, so a script here containing the sentinel literal would make Tailwind
+    # generate the utility the script asserts on. See ci/tailwind-source/README.md.
+    script: |
+      set -euo pipefail
+      pnpm exec vitest run --passWithNoTests
+      node ../../../ci/tailwind-source/run.mjs --self-test
+      node ../../../ci/tailwind-source/run.mjs --negative-control
+      node ../../../ci/tailwind-source/run.mjs
+    deps:
+      - '~:build'
+      # repo:next-env-drift ALSO depends on this project's build, because `next typegen` writes
+      # into .next. Without this edge, that gate and this task would run concurrently over the
+      # same directory — the flake shape the root moon.yml already records for wasm-pack.
+      - 'repo:next-env-drift'
+      # Stated here rather than left to `~:build`'s own edge. tests/support/fake-iam.ts imports
+      # @paigasus/proto directly, so this task is a reader of the generated tree in its own right
+      # and its ordering must not depend on another task keeping an edge it happens to share.
+      - 'contracts:generate'
+    inputs:
+      - '@group(sources)'
+      - 'app/**/*'
+      # SMA-511: the composition root and the zone proxy, for the same reason as in `build`.
+      - 'lib/**/*'
+      - 'proxy.ts'
+      - 'tests/**/*'
+      # The fixtures' `next build` output and generated next-env.d.ts. The Moon hasher does NOT skip
+      # `.next` (.moon/workspace.yml omits it on purpose), so without these, every run of this task
+      # would re-key the task itself (the same measurement as app-shell's fixture, SMA-510).
+      - '!tests/fixtures/**/.next/**'
+      - '!tests/fixtures/*/next-env.d.ts'
+      - 'vitest.config.ts'
+      - 'tsconfig.json'
+      - 'package.json'
+      - 'next.config.ts'
+      - 'postcss.config.mjs'
+      # The guard itself. Without this, deleting an assertion from the script does not re-key this
+      # task, and a weakened gate serves a cached PASS.
+      - '/ci/tailwind-source/**/*'
+      - '/ts/packages/paigasus-next-config/src/**/*'
+      - '/ts/packages/paigasus-next-config/package.json'
+      - '/ts/packages/paigasus-next-config/tsconfig.app.json'
+      - '/ts/packages/paigasus-ui/src/**/*'
+      - '/ts/packages/paigasus-ui/package.json'
+      - '/ts/pnpm-lock.yaml'
+      - '/ts/tsconfig.base.json'
+      # SMA-511: packages the app compiles (Task 9: auth, discovery, proto; later tasks add more).
+      - '/ts/packages/paigasus-auth/src/**/*'
+      - '/ts/packages/paigasus-auth/package.json'
+      - '/ts/packages/paigasus-discovery/src/**/*'
+      - '/ts/packages/paigasus-discovery/package.json'
+      - '/ts/packages/paigasus-proto/src/**/*'
+      - '/ts/packages/paigasus-proto/package.json'
+      - '/ts/packages/paigasus-app-shell/src/**/*'
+      - '/ts/packages/paigasus-app-shell/package.json'
+      - '/ts/packages/paigasus-sdk/src/**/*'
+      - '/ts/packages/paigasus-sdk/package.json'
+      # SMA-511 D6: tests/unit/prn-tenancy.test.ts replays the kernel parity corpus and pins ROOT_PRN to
+      # root_prn()'s builder call. Without these, a corpus or model.rs edit serves a cached PASS.
+      - '/rs/crates/libs/paigasus-kernel-parity/vectors/**/*'
+      - '/rs/crates/libs/paigasus-iam-core/src/authz/model.rs'
+    options:
+      merge: replace
+
+  test-e2e:
+    # The e2e tier (spec § 9.4): Playwright against the standalone server.js behind a TLS
+    # terminator, with an in-process fake IAM and fake IdP. No Docker. `script` (not `command`):
+    # Moon's `command` refuses shell syntax. `set -euo pipefail` because Moon does not enable
+    # errexit for `script:` blocks. The server's lifecycle belongs to tests/e2e/support/harness.ts;
+    # a shell `&` here left an orphan server in the SMA-510 spike.
+    script: |
+      set -euo pipefail
+      pnpm exec playwright test
+    deps:
+      # The production build. On a cache hit Moon restores `.next`, standalone tree included.
+      - '~:build'
+      # repo:next-env-drift writes into .next too; the same serialization `test` has.
+      - 'repo:next-env-drift'
+      # Stated here for the same reason as in `test`: tests/support/fake-iam.ts imports
+      # @paigasus/proto, so this tier reads the generated tree itself.
+      - 'contracts:generate'
+    # A NEW task name, so it inherits NOTHING: every input is listed.
+    inputs:
+      - '@group(sources)'
+      - 'app/**/*'
+      - 'lib/**/*'
+      - 'proxy.ts'
+      - 'tests/**/*'
+      - '!tests/fixtures/**/.next/**'
+      - '!tests/fixtures/*/next-env.d.ts'
+      - 'package.json'
+      - 'tsconfig.json'
+      - 'next.config.ts'
+      - 'postcss.config.mjs'
+      - 'playwright.config.ts'
+      - '/ts/pnpm-lock.yaml'
+      - '/ts/tsconfig.base.json'
+      - '/ts/packages/paigasus-next-config/src/**/*'
+      - '/ts/packages/paigasus-next-config/package.json'
+      - '/ts/packages/paigasus-next-config/tsconfig.app.json'
+      - '/ts/packages/paigasus-ui/src/**/*'
+      - '/ts/packages/paigasus-ui/package.json'
+      - '/ts/packages/paigasus-auth/src/**/*'
+      - '/ts/packages/paigasus-auth/package.json'
+      - '/ts/packages/paigasus-sdk/src/**/*'
+      - '/ts/packages/paigasus-sdk/package.json'
+      - '/ts/packages/paigasus-discovery/src/**/*'
+      - '/ts/packages/paigasus-discovery/package.json'
+      - '/ts/packages/paigasus-app-shell/src/**/*'
+      - '/ts/packages/paigasus-app-shell/package.json'
+      - '/ts/packages/paigasus-proto/src/**/*'
+      - '/ts/packages/paigasus-proto/package.json'
+    options:
+      # A real build and a real Chromium. A cached PASS would replay a green that tested nothing.
+      cache: false

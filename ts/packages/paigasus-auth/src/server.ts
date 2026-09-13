@@ -16,28 +16,68 @@
 // `authEnvShape` (the env shape an app composes into `@paigasus/next-config`'s
 // `defineRuntimeConfig`), and every port and adapter.
 import 'server-only';
-import { CallbackRejected } from './core/errors.js';
-import { createAuthRoutes, type AuthRoutes } from './http/routes.js';
-import type { AuthRuntime } from './runtime.js';
+import { CallbackRejected } from './core/errors';
+import { AUTH_ROUTE_SUFFIXES } from './http/route-table';
+import { createAuthRoutes, type AuthRoutes } from './http/routes';
+import type { AuthRuntime } from './runtime';
 
-export { createAuthRuntime, getAuthRuntime } from './runtime.js';
-export type { AuthRuntime, ComposedConfig, CreateAuthRuntimeDeps } from './runtime.js';
+export { createAuthRuntime, getAuthRuntime } from './runtime';
+export type { AuthRuntime, ComposedConfig, CreateAuthRuntimeDeps } from './runtime';
 
 export { createAuthRoutes };
 export type { AuthRoutes };
 
-export { getSession, requireSession } from './next/get-session.js';
-export type { RequireSessionOptions } from './next/get-session.js';
+export { getSession, requireSession } from './next/get-session';
+export type { RequireSessionOptions } from './next/get-session';
+
+/** A `RequestInit` that can carry a streamed body: Node's `Request` needs `duplex: 'half'` for one. */
+interface RequestInitWithDuplex extends RequestInit {
+  duplex?: 'half';
+}
+
+/**
+ * The URL `createAuthRoutes` must see: this zone's PUBLIC origin, the FULL path (basePath
+ * included) and the incoming query string (SMA-511 spec § 7.1).
+ *
+ * A Next route handler gets a `req.url` with the basePath REMOVED and the server's BIND address as
+ * its origin — measured on Next 16.3.4: `http://0.0.0.0:<port>/auth/callback?…` under
+ * `basePath: '/iam'` (spec § 13 row 1). The core route table is keyed by the full path, so this
+ * puts the basePath back. A plain `node:http` caller (tests/e2e/fixture-server.ts) passes the full
+ * path already. The route table tells the two apart, not a prefix test: a path that is already one
+ * of this zone's auth routes is kept, and a path that becomes one with the basePath added gets it.
+ * So a zone whose basePath is `/auth` is not ambiguous.
+ */
+function publicRequestUrl(runtime: AuthRuntime, routePaths: ReadonlySet<string>, raw: string): string {
+  const incoming = new URL(raw);
+  const prefixed = `${runtime.basePath}${incoming.pathname}`;
+  const pathname = !routePaths.has(incoming.pathname) && routePaths.has(prefixed) ? prefixed : incoming.pathname;
+  // Concatenated onto the absolute origin, never `new URL(path, origin)`: a path such as
+  // `//evil.example/auth/login` would otherwise resolve as a protocol-relative URL on another host.
+  return `${runtime.publicOrigin}${pathname}${incoming.search}`;
+}
+
+/** The same request at another URL. Method, headers, body and abort signal carry over. */
+function withUrl(req: Request, url: string): Request {
+  const init: RequestInitWithDuplex = { method: req.method, headers: req.headers, signal: req.signal };
+  if (req.method !== 'GET' && req.method !== 'HEAD' && req.body !== null) {
+    init.body = req.body;
+    init.duplex = 'half';
+  }
+  return new Request(url, init);
+}
 
 /**
  * Builds the same four routes as `createAuthRoutes`, mounted as a single Next route handler
- * (`app/[zone]/auth/[...auth]/route.ts`'s `export const GET/POST`), but with `CallbackRejected`
- * mapped to a `Response` instead of left to propagate.
+ * (`app/auth/[...auth]/route.ts`'s `GET`/`POST`), with two differences.
  *
- * `http/routes.ts` deliberately lets `CallbackRejected` reject `handle()`'s promise rather than
- * deciding an HTTP response itself (see that file's header) — this is the Next boundary that
- * makes that decision, so a stale tab hitting `/auth/callback` a second time becomes a redirect,
- * not an unhandled rejection a Next route handler turns into a 500.
+ * 1. The request URL is rebuilt on `PAIGASUS_PUBLIC_ORIGIN` with the basePath put back (see
+ *    `publicRequestUrl` above), so the core route table, keyed by the full path, finds the route.
+ *
+ * 2. `CallbackRejected` is mapped to a `Response` instead of left to propagate. `http/routes.ts`
+ *    deliberately lets `CallbackRejected` reject `handle()`'s promise rather than deciding an HTTP
+ *    response itself (see that file's header) — this is the Next boundary that makes that decision,
+ *    so a stale tab hitting `/auth/callback` a second time becomes a redirect, not an unhandled
+ *    rejection a Next route handler turns into a 500.
  *
  * The five reasons split into two outcomes. `txn_missing`, `txn_mismatch`, and `state_unknown` all
  * mean "this callback cannot be completed with what the server has" — a stale tab, an expired
@@ -48,15 +88,19 @@ export type { RequireSessionOptions } from './next/get-session.js';
  * that is a genuine failure (an unreachable or erroring token endpoint) rather than an expected
  * outcome, so it surfaces as a 502 rather than a silent redirect — an operator must be able to
  * tell it apart from ordinary traffic.
+ *
+ * The redirect Locations below are FULL paths. A raw `Response` Location from a route handler
+ * passes through Next unchanged (measured, spec § 13 row 1).
  */
 export function createAuthRouteHandler(runtime: AuthRuntime): AuthRoutes['handle'] {
   const routes = createAuthRoutes(runtime);
+  const routePaths: ReadonlySet<string> = new Set(AUTH_ROUTE_SUFFIXES.map((suffix) => `${runtime.basePath}${suffix}`));
 
   const redirectTo = (path: string): Response => new Response(null, { status: 302, headers: new Headers({ Location: path }) });
 
   return async function handle(req: Request): Promise<Response> {
     try {
-      return await routes.handle(req);
+      return await routes.handle(withUrl(req, publicRequestUrl(runtime, routePaths, req.url)));
     } catch (err) {
       if (!(err instanceof CallbackRejected)) throw err;
 
@@ -80,30 +124,30 @@ export function createAuthRouteHandler(runtime: AuthRuntime): AuthRoutes['handle
   };
 }
 
-export { SESSION_VIEW_KEYS, toSessionView } from './core/session.js';
-export type { SessionRecord, SessionView, SessionViewKey } from './core/session.js';
+export { SESSION_VIEW_KEYS, toSessionView } from './core/session';
+export type { SessionRecord, SessionView, SessionViewKey } from './core/session';
 
-export type { ResolvedSession } from './core/single-flight.js';
+export type { ResolvedSession } from './core/single-flight';
 
-export { authEnvShape } from './config.js';
-export type { AuthEnv } from './config.js';
+export { authEnvShape } from './config';
+export type { AuthEnv } from './config';
 
-export { AuthConfigError, AuthError, SessionStoreUnavailable } from './core/errors.js';
+export { AuthConfigError, AuthError, SessionStoreUnavailable } from './core/errors';
 export { CallbackRejected };
 
 // Ports.
-export type { LoginTransaction, SessionStore } from './ports/session-store.js';
-export type { IdTokenClaims, Membership, PrincipalResolver, ResolvedPrincipal, RoleGrantRef } from './ports/principal-resolver.js';
-export { sidTag } from './ports/logger.js';
-export type { AuthEventFields, AuthEventName, AuthLogger } from './ports/logger.js';
+export type { LoginTransaction, SessionStore } from './ports/session-store';
+export type { IdTokenClaims, Membership, PrincipalResolver, ResolvedPrincipal, RoleGrantRef } from './ports/principal-resolver';
+export { sidTag } from './ports/logger';
+export type { AuthEventFields, AuthEventName, AuthLogger } from './ports/logger';
 
 // Adapters.
-export { MemorySessionStore } from './adapters/memory-store.js';
-export { createRedisSessionStore } from './adapters/redis-store.js';
-export type { CreateRedisSessionStoreOptions } from './adapters/redis-store.js';
-export { claimsPrincipalResolver } from './adapters/claims-resolver.js';
-export { noopLogger } from './adapters/noop-logger.js';
-export { createOidcClient } from './adapters/oidc.js';
+export { MemorySessionStore } from './adapters/memory-store';
+export { createRedisSessionStore } from './adapters/redis-store';
+export type { CreateRedisSessionStoreOptions } from './adapters/redis-store';
+export { claimsPrincipalResolver } from './adapters/claims-resolver';
+export { noopLogger } from './adapters/noop-logger';
+export { createOidcClient } from './adapters/oidc';
 export type {
   AuthorizationCodeGrantParams,
   AuthorizationRequest,
@@ -113,4 +157,4 @@ export type {
   OidcClient,
   OidcTokens,
   RefreshedTokens as OidcRefreshedTokens,
-} from './adapters/oidc.js';
+} from './adapters/oidc';

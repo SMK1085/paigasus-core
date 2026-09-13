@@ -26,21 +26,22 @@
 // invocation — that is deliberate, since tests call it repeatedly with different configs and
 // expect independent validation each time. A real app must NOT call it per request: doing so
 // would re-run `openid-client` discovery and open a new Redis connection on every request, never
-// closing the old one. `getAuthRuntime` below is the process-wide singleton every other caller
-// (task 8's routes, the Next binding) uses instead — it memoises the FIRST successful call behind
-// a module-level promise, keyed on nothing (there is exactly one configuration per process), and
-// resets on failure so a misconfigured-at-boot process can recover once the config is fixed and
-// the container is asked to try again.
-import { createOidcClient, type OidcClient } from './adapters/oidc.js';
-import { claimsPrincipalResolver } from './adapters/claims-resolver.js';
-import { MemorySessionStore } from './adapters/memory-store.js';
-import { noopLogger } from './adapters/noop-logger.js';
-import { createRedisSessionStore } from './adapters/redis-store.js';
-import type { AuthEnv } from './config.js';
-import { AuthConfigError } from './core/errors.js';
-import type { AuthLogger } from './ports/logger.js';
-import type { PrincipalResolver } from './ports/principal-resolver.js';
-import type { SessionStore } from './ports/session-store.js';
+// closing the old one. `getAuthRuntime` below is the per-zone singleton every other caller
+// (task 8's routes, the Next binding) uses instead — it memoises the FIRST successful call on
+// `globalThis` (see the comment on the runtime key: Next gives a route handler and a page separate
+// copies of this module), keyed on `PAIGASUS_ZONE` (there is exactly one configuration per zone per
+// process), and resets that zone's slot on failure so a misconfigured-at-boot process can recover
+// once the config is fixed and the container is asked to try again.
+import { createOidcClient, type OidcClient } from './adapters/oidc';
+import { claimsPrincipalResolver } from './adapters/claims-resolver';
+import { MemorySessionStore } from './adapters/memory-store';
+import { noopLogger } from './adapters/noop-logger';
+import { createRedisSessionStore } from './adapters/redis-store';
+import type { AuthEnv } from './config';
+import { AuthConfigError } from './core/errors';
+import type { AuthLogger } from './ports/logger';
+import type { PrincipalResolver } from './ports/principal-resolver';
+import type { SessionStore } from './ports/session-store';
 
 /**
  * What createAuthRuntime actually receives: `authEnvShape`'s keys, parsed, PLUS the two zone keys
@@ -63,6 +64,12 @@ export interface AuthRuntime {
   resolver: PrincipalResolver;
   logger: AuthLogger;
   oidc: OidcClient;
+  /**
+   * `PAIGASUS_PUBLIC_ORIGIN` as parsed: an https origin with no trailing slash (config.ts
+   * `httpsUrl`). `createAuthRouteHandler` (server.ts) rebuilds a route handler's request URL on it,
+   * because Next gives a route handler the server's BIND address instead (SMA-511 spec § 7.1).
+   */
+  publicOrigin: string;
   redirectUri: string;
   postLogoutRedirectUri: string;
   /** All zones share one cookie on one origin (design doc § 6.7) — never per-zone, never configurable. */
@@ -146,6 +153,7 @@ export async function createAuthRuntime(cfg: ComposedConfig, deps: CreateAuthRun
     resolver: deps.resolver ?? claimsPrincipalResolver,
     logger: deps.logger ?? noopLogger,
     oidc,
+    publicOrigin: cfg.PAIGASUS_PUBLIC_ORIGIN,
     redirectUri,
     postLogoutRedirectUri,
     cookieDomainless: true,
@@ -160,25 +168,63 @@ export async function createAuthRuntime(cfg: ComposedConfig, deps: CreateAuthRun
   };
 }
 
-let sharedRuntime: Promise<AuthRuntime> | undefined;
+/**
+ * The cache lives on `globalThis`, NOT in a module-level variable, and that placement is
+ * load-bearing (SMA-511 Task 22).
+ *
+ * MEASURED on Next 16.3.4 with Turbopack, on this repository's own standalone build: a route
+ * handler and a server component get SEPARATE module graphs.
+ * `.next/server/app/auth/[...auth]/route.js` loads `chunks/[turbopack]_runtime.js`, and
+ * `.next/server/app/(console)/orgs/page.js` loads `chunks/ssr/[turbopack]_runtime.js` — two
+ * registries, each with its own copy of this module. A module-level variable therefore gives each
+ * layer its OWN runtime, and with the memory store each layer also gets its own session records:
+ * `/iam/auth/callback` writes the session, the page that follows it finds none, and the browser
+ * loops between the console and the identity provider until it stops (measured:
+ * `net::ERR_TOO_MANY_REDIRECTS`). Redis hides the fault, because the records are outside the
+ * process; the memory adapter — which this package documents as single-PROCESS — does not.
+ *
+ * `Symbol.for` keys the slot in the global symbol registry, so every copy of this module resolves
+ * the same key with no export to import.
+ *
+ * THE KEY CARRIES THE ZONE AND A SHAPE VERSION (final whole-branch review, minor 8). A bare
+ * `paigasus.auth.runtime` is one slot for a whole PROCESS, so two zone apps composed into one
+ * process — the shape SMA-513 assembles — would hand the second zone the FIRST zone's runtime, with
+ * its basePath, redirect URI and post-logout URI. Every login would then leave the second zone. The
+ * global symbol registry is also shared with every other library in the process, so the version
+ * segment keeps a future, incompatible `AuthRuntime` off this slot rather than on it.
+ */
+const RUNTIME_KEY_PREFIX = 'paigasus.auth.runtime.v1';
+
+function runtimeKey(zone: string): symbol {
+  return Symbol.for(`${RUNTIME_KEY_PREFIX}:${zone}`);
+}
+
+type RuntimeHolder = Record<symbol, Promise<AuthRuntime> | undefined>;
 
 /**
- * The process-wide singleton. Every real caller — task 8's routes, the Next binding — uses this,
+ * The singleton for ONE ZONE. Every real caller — task 8's routes, the Next binding — uses this,
  * never `createAuthRuntime` directly, so discovery, the store adapter, and (for redis) the Redis
- * connection are built exactly ONCE per process. The promise is cached after the first call and
- * every later call's arguments are ignored, matching "one runtime per process" — this is
- * deliberate, not an oversight: a second, differently-configured call in the same process would
- * indicate a bug upstream (there is exactly one deployment configuration per running container),
- * not a legitimate need for a second runtime. A failed first call clears the cache, so a
- * misconfigured-at-boot process can recover once its config is fixed and it is asked to try again.
+ * connection are built exactly ONCE per zone per process. The promise is cached after the first
+ * call and every later call's arguments EXCEPT `PAIGASUS_ZONE` are ignored, matching "one runtime
+ * per zone" — this is deliberate, not an oversight: a second call with the same zone and a
+ * different configuration would indicate a bug upstream (there is exactly one deployment
+ * configuration per zone per running container), not a legitimate need for a second runtime. A
+ * failed first call clears that zone's cache, so a misconfigured-at-boot process can recover once
+ * its config is fixed and it is asked to try again.
  *
  * `createAuthRuntime` itself is NOT memoised and stays directly callable — this package's own
  * tests (tests/runtime.test.ts) rely on that to validate many independent configurations.
  */
 export function getAuthRuntime(cfg: ComposedConfig, deps?: CreateAuthRuntimeDeps): Promise<AuthRuntime> {
-  sharedRuntime ??= createAuthRuntime(cfg, deps).catch((err: unknown) => {
-    sharedRuntime = undefined;
-    throw err;
-  });
-  return sharedRuntime;
+  const holder = globalThis as typeof globalThis & RuntimeHolder;
+  const key = runtimeKey(cfg.PAIGASUS_ZONE);
+  let shared = holder[key];
+  if (shared === undefined) {
+    shared = createAuthRuntime(cfg, deps).catch((err: unknown) => {
+      delete holder[key];
+      throw err;
+    });
+    holder[key] = shared;
+  }
+  return shared;
 }

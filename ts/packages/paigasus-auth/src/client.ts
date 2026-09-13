@@ -13,7 +13,7 @@
 'use client';
 
 import { createContext, createElement, useContext, type ReactElement, type ReactNode } from 'react';
-import type { SessionView } from './session-view.js';
+import type { SessionView } from './session-view';
 
 export type { SessionView };
 

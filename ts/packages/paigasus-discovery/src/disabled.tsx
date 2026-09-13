@@ -55,7 +55,7 @@
 // production build. Everything cosmetic is exposed as a data attribute for the consumer to style.
 
 import { cloneElement, isValidElement, useId, type CSSProperties, type KeyboardEvent, type MouseEvent, type ReactElement, type ReactNode } from 'react';
-import type { DegradedReason } from './types.js';
+import type { DegradedReason } from './types';
 
 const REASON_TEXT: Readonly<Record<DegradedReason, string>> = {
   timeout: 'not answering (timed out)',

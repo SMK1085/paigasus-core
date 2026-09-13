@@ -1,0 +1,4 @@
+# `next build` writes each fixture's next-env.d.ts. It is generated, so it is not tracked, and
+# repo:next-env-drift (which checks only the app's tracked copy) needs no change. The fixtures'
+# .next/ directories are already covered by the root .gitignore.
+tests/fixtures/*/next-env.d.ts

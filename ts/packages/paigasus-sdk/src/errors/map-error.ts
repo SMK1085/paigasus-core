@@ -9,9 +9,9 @@ import { ConnectError } from '@connectrpc/connect';
 // a type in a value import must be marked, and one statement per module keeps the lint quiet.
 import { type ErrorReason, ErrorInfoSchema, fromWireDomain, fromWireReason } from '@paigasus/proto';
 
-import { presentationOverride } from './presentation.js';
-import { grpcCodeName, presentationForGrpcCode, presentationForHttpStatus, presentationForTransportCause } from './transport-status.js';
-import type { PaigasusError, Presentation, TransportCause, TransportInfo } from './types.js';
+import { presentationOverride } from './presentation';
+import { grpcCodeName, presentationForGrpcCode, presentationForHttpStatus, presentationForTransportCause } from './transport-status';
+import type { PaigasusError, Presentation, TransportCause, TransportInfo } from './types';
 
 /**
  * The correlation and request ids read off a committed response head.

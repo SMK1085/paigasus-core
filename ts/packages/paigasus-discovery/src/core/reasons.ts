@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import type { DegradedReason } from '../types.js';
+import type { DegradedReason } from '../types';
 
 /**
  * HTTP status to reason.

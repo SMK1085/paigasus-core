@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import type { AuditMetadata } from './generated/paigasus/common/v1/audit_pb.js';
+import type { AuditMetadata } from './generated/paigasus/common/v1/audit_pb';
 
 /**
  * Structural interface satisfied by any generated message embedding AuditMetadata.

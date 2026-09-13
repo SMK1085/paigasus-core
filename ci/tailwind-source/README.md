@@ -1,19 +1,21 @@
 # `repo` gate: Tailwind `@source` reachability (SMA-503 AC 3)
 
-Asserts that a production `next build` of `@paigasus/console` still emits the CSS that
-`@paigasus/ui` contributes. Two independent sentinels:
+Asserts that a production `next build` of `@paigasus/iam-console` still emits the CSS that
+`@paigasus/ui` contributes, and (SMA-511) the CSS that `@paigasus/app-shell` contributes. Three
+independent sentinels:
 
 | Sentinel | Declared in | Proves |
 |---|---|---|
 | `--paigasus-ui-source-probe` | `ts/packages/paigasus-ui/src/components/table.tsx` | Tailwind SCANNED the package's source, i.e. the app's `@source` line still covers it |
 | `--paigasus-token-probe` | `ts/packages/paigasus-ui/src/styles/tokens.css` | the app's `@import '@paigasus/ui/styles.css'` RESOLVED, i.e. the token layer reached the output |
+| `--paigasus-app-shell-source-probe` | `ts/packages/paigasus-app-shell/src/shell/app-shell.tsx` | Tailwind SCANNED `@paigasus/app-shell`'s source, i.e. the app's second `@source` line still covers it |
 
 Sentinel A alone is not enough: the `@import` can fail, the whole token layer can be absent,
 and sentinel A still passes.
 
 ## Why this script lives at the repository root
 
-**It must never move under `ts/apps/paigasus-console/`.** Tailwind's automatic scan root is
+**It must never move under `ts/apps/iam-console/`.** Tailwind's automatic scan root is
 the current working directory, and Moon runs `next build` from the console's own directory.
 Tailwind extracts class candidates from any non-ignored text file. A script placed there and
 containing the literal `[--paigasus-ui-source-probe:1]` would make Tailwind generate that
@@ -23,28 +25,28 @@ same hole from the other side.
 
 ## Invocation
 
-Run by `paigasus-console-ts:test`, which depends on `~:build`. Three modes, in order:
+Run by `iam-console-ts:test`, which depends on `~:build`. Three modes, in order:
 
 - `--self-test` — drives the verdict function over synthetic fixtures in a temporary
   directory, proving the assertions can both pass and fail.
 - `--negative-control` — asserts the script reports red against CSS lacking the probes.
-- no flag — the real run, against `ts/apps/paigasus-console/.next`.
+- no flag — the real run, against `ts/apps/iam-console/.next`.
 
 ## Limitations
 
 - **Nothing pins these three invocation lines.** `ci/affected-graph/ci_targets.py`'s
   `check_self_scheduled_coverage` scans `repo:*` tasks only, and this runs under
-  `paigasus-console-ts:test`. Deleting the `--negative-control` line reds nothing. The
+  `iam-console-ts:test`. Deleting the `--negative-control` line reds nothing. The
   alternative is a new `repo:*` gate running a full `next build` on every affected pull
   request, which was judged too expensive.
 - **Coverage is per-consumer.** A green here says nothing about a second zone app. Every new
   app needs its own `@source` line and its own assertion.
 - The script proves the CSS was EMITTED. It does not prove the page references it.
 - **A cache-hit build can leave a stale CSS chunk that satisfies the sentinels.** `rm -rf
-  .next/static` lives inside `paigasus-console-ts:build`'s own `script:`, so it runs only when
+  .next/static` lives inside `iam-console-ts:build`'s own `script:`, so it runs only when
   Moon actually EXECUTES that task. On a cache hit Moon hydrates `outputs: ['.next']` from its
   tarball instead, the `rm` never runs, and the guard's fallback walk then reads whatever CSS
-  chunks that hydrated tree contains. A chunk from an earlier build can carry both sentinels
+  chunks that hydrated tree contains. A chunk from an earlier build can carry every sentinel
   and green the assertion on its own.
 
   Evidenced on this branch rather than reasoned about: Proof 3 in

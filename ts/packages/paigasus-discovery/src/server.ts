@@ -1,25 +1,25 @@
 // SPDX-License-Identifier: Apache-2.0
 import 'server-only';
 
-import { DEFAULT_TIMINGS, type Timings } from './core/record.js';
-import { serviceOf } from './core/state.js';
-import { resolveService, type ResolveDeps } from './core/single-flight.js';
-import { probeService, type ProbeOutcome } from './probe.js';
-import { noopLogger } from './adapters/noop-logger.js';
-import type { DescriptorCache } from './ports/cache.js';
-import type { DiscoveryLogger } from './ports/logger.js';
-import type { CapabilityKey, ServiceState } from './types.js';
+import { DEFAULT_TIMINGS, type Timings } from './core/record';
+import { serviceOf } from './core/state';
+import { resolveService, type ResolveDeps } from './core/single-flight';
+import { probeService, type ProbeOutcome } from './probe';
+import { noopLogger } from './adapters/noop-logger';
+import type { DescriptorCache } from './ports/cache';
+import type { DiscoveryLogger } from './ports/logger';
+import type { CapabilityKey, ServiceState } from './types';
 
-export type { DescriptorCache } from './ports/cache.js';
-export type { DiscoveryLogger, DiscoveryEventName, DiscoveryEventFields } from './ports/logger.js';
-export { createMemoryDescriptorCache } from './adapters/memory-cache.js';
-export { createRedisDescriptorCache } from './adapters/redis-cache.js';
-export { noopLogger } from './adapters/noop-logger.js';
-export { discoveryEnvShape, parseServiceMap, timingsFromEnv } from './config.js';
-export type { DiscoveryEnv } from './config.js';
-export { DEFAULT_TIMINGS } from './core/record.js';
-export type { Timings } from './core/record.js';
-export type { ServiceState, ServiceDescriptor, DegradedReason, CapabilityKey } from './types.js';
+export type { DescriptorCache } from './ports/cache';
+export type { DiscoveryLogger, DiscoveryEventName, DiscoveryEventFields } from './ports/logger';
+export { createMemoryDescriptorCache } from './adapters/memory-cache';
+export { createRedisDescriptorCache } from './adapters/redis-cache';
+export { noopLogger } from './adapters/noop-logger';
+export { discoveryEnvShape, parseServiceMap, timingsFromEnv } from './config';
+export type { DiscoveryEnv } from './config';
+export { DEFAULT_TIMINGS } from './core/record';
+export type { Timings } from './core/record';
+export type { ServiceState, ServiceDescriptor, DegradedReason, CapabilityKey } from './types';
 
 const MAX_DESCRIPTOR_BYTES = 64 * 1024;
 

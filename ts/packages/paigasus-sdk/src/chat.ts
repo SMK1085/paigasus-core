@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // The `./chat` entry (spec § 8). GUARDED and at src/ root, like every other guarded entry.
-import './server-guard.js';
+import './server-guard';
 
-import { CORRELATION_HEADER, REQUEST_ID_HEADER, firstNonEmpty, mapError } from './errors/map-error.js';
-import type { ErrorInput, FrameIds } from './errors/map-error.js';
-import type { PaigasusError, TransportCause } from './errors/types.js';
+import { CORRELATION_HEADER, REQUEST_ID_HEADER, firstNonEmpty, mapError } from './errors/map-error';
+import type { ErrorInput, FrameIds } from './errors/map-error';
+import type { PaigasusError, TransportCause } from './errors/types';
 
 /** The registry code the gateway puts in its one terminal SSE frame (chat.rs:63). */
 const TERMINAL_CODE = 'upstream-error';

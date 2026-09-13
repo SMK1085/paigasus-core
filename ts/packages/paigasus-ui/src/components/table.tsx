@@ -12,7 +12,7 @@ import { cn } from '../lib/cn';
  *
  * It is a dedicated probe rather than a real style so that the assertion cannot pass for the
  * wrong reason. Do not remove it, do not rename it, and do not write its literal value
- * anywhere else in this file or under ts/apps/paigasus-console/ — Tailwind's scanner reads
+ * anywhere else in this file or under ts/apps/iam-console/ — Tailwind's scanner reads
  * raw file text, comments included, so a second copy (even in prose) would generate the
  * utility independently and silently disarm the gate. That is why this comment does not
  * spell out the literal itself; see the assignment below, or run.mjs's own PROBE_SOURCE

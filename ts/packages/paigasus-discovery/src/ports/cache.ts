@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import type { CacheRecord } from '../core/record.js';
+import type { CacheRecord } from '../core/record';
 
 /**
  * Primitives only, no policy. The single-flight algorithm lives once in core/single-flight.ts and

@@ -23,15 +23,15 @@
 // an HTTP response (an error page, § 10 of the design doc) is a caller concern — this package does
 // not decide that here, matching how core/single-flight.ts lets its own AuthError subclasses
 // propagate rather than swallowing them into a "safe" return value.
-import type { OidcTokens } from '../adapters/oidc.js';
-import { hashSecret, newSessionId, newTransactionId, newTransactionSecret, secretMatchesHash } from '../core/ids.js';
-import { validateReturnTo } from '../core/return-to.js';
-import { CallbackRejected } from '../core/errors.js';
-import type { SessionRecord } from '../core/session.js';
-import { sidTag } from '../ports/logger.js';
-import type { AuthRuntime } from '../runtime.js';
-import { SESSION_COOKIE, TXN_COOKIE_PREFIX, clearCookie, readCookies, serializeCookie, txnCookieName } from './cookies.js';
-import { AUTH_ROUTE_SUFFIXES, type AuthRouteSuffix } from './route-table.js';
+import type { OidcTokens } from '../adapters/oidc';
+import { hashSecret, newSessionId, newTransactionId, newTransactionSecret, secretMatchesHash } from '../core/ids';
+import { validateReturnTo } from '../core/return-to';
+import { CallbackRejected } from '../core/errors';
+import type { SessionRecord } from '../core/session';
+import { sidTag } from '../ports/logger';
+import type { AuthRuntime } from '../runtime';
+import { SESSION_COOKIE, TXN_COOKIE_PREFIX, clearCookie, readCookies, serializeCookie, txnCookieName } from './cookies';
+import { AUTH_ROUTE_SUFFIXES, type AuthRouteSuffix } from './route-table';
 
 /** Design doc § 9.3: 10 minutes. */
 const TXN_TTL_MS = 10 * 60 * 1000;
@@ -76,6 +76,26 @@ const ROUTES: Record<AuthRouteSuffix, RouteEntry> = {
   '/auth/logout/callback': { method: 'GET', run: (runtime) => handleLogoutCallback(runtime) },
 };
 
+/**
+ * True when `path` — basePath-INCLUSIVE, and already normalised by the caller — is one of THIS
+ * zone's own auth routes, or lives under one.
+ *
+ * DERIVED FROM THE ROUTE TABLE (review, defect 3). The `returnTo` guard in `handleLogin` used to
+ * test a hardcoded `${basePath}/auth/` prefix while `AUTH_ROUTE_SUFFIXES` is the package's single
+ * source of truth for what this file serves. The two agree today only because all four suffixes
+ * happen to start with `/auth/`: a fifth route outside that prefix would be served here, be public
+ * in `authRoutePaths()`, and escape the guard — so a crafted `returnTo` could send the browser
+ * straight back into it after a successful login, one loop per click. Reading the table closes
+ * that by construction rather than by coincidence.
+ */
+function isAuthRoutePath(basePath: string, path: string): boolean {
+  return AUTH_ROUTE_SUFFIXES.some((suffix) => {
+    const route = `${basePath}${suffix}`;
+    // The subtree test keeps the old prefix guard's reach for anything BELOW a route.
+    return path === route || path.startsWith(`${route}/`);
+  });
+}
+
 export function createAuthRoutes(runtime: AuthRuntime): AuthRoutes {
   // Built ONCE per runtime, and matched EXACTLY against this zone's own base path — an `endsWith`
   // test previously matched `/anything/auth/login` too, harmless only by accident (review round 1,
@@ -117,9 +137,34 @@ async function handleLogin(runtime: AuthRuntime, req: Request, url: URL): Promis
   // fallback stores `returnTo: ''`. The callback then redirects to `Location: ''`, the browser
   // resolves that as the CURRENT url and re-requests the callback, the txn cookies are already
   // gone, and the retry loops through `txn_missing` back to `/auth/login` forever — login never
-  // completes on a root-mounted zone. `src/next/get-session.ts:104` and `src/runtime.ts:123` both
+  // completes on a root-mounted zone. `src/next/get-session.ts:110` and `src/runtime.ts:129` both
   // already use the trailing-slash form; this call is the one place that had drifted from it.
-  const returnTo = validateReturnTo(url.searchParams.get('returnTo'), `${runtime.basePath}/`);
+  const fallback = `${runtime.basePath}/`;
+  const requested = validateReturnTo(url.searchParams.get('returnTo'), fallback);
+  // SMA-511 spec § 6.4: a returnTo under this zone's own auth routes would send the browser back into
+  // /auth/login (or /auth/callback) after a successful login, so a crafted link loops, one click per
+  // round. validateReturnTo accepts such a path, because it is same-origin; it is refused here.
+  //
+  // The check reads the path with its dot segments resolved AND its empty segments collapsed,
+  // because a browser resolves the dot segments in the callback's Location and a server may
+  // normalise the duplicate slashes. Both steps are needed, and MEASURED separately: `new URL`
+  // resolves `/iam/./auth/login` and `/iam/x/../auth/login` to `/iam/auth/login`, but it does NOT
+  // collapse a duplicate slash, so `/iam//auth/login` and `/iam/x/..//auth/login` survive it.
+  // validateReturnTo passes those two as well (one leading slash, no backslash, and its `%2f` test
+  // reads only the first three characters), so collapsing here is what closes the class without
+  // depending on a normalization step this package does not control.
+  //
+  // The placeholder origin only lets `new URL` parse a path. validateReturnTo has already refused
+  // every value that is not a same-origin path (`//`, a backslash), so the parse cannot move to
+  // another host. The stored value stays `requested`, so its query string is kept.
+  //
+  // KNOWN LIMIT, stated rather than closed: the comparison is byte-exact on the collapsed path, so
+  // an encoded or case-shifted spelling of the same route (`/iam/%61uth/login`, `/iam/AUTH/login`)
+  // is not refused. Neither is decoded or case-folded here on purpose — a path is case-sensitive and
+  // `%61` is not the same path segment as `a`, so the route table does not serve either value, and
+  // folding them would make this guard reject paths the zone legitimately serves.
+  const resolvedPath = new URL(requested, 'http://placeholder').pathname.replace(/\/{2,}/g, '/');
+  const returnTo = isAuthRoutePath(runtime.basePath, resolvedPath) ? fallback : requested;
 
   const txnId = newTransactionId();
   const secret = newTransactionSecret();
@@ -201,10 +246,18 @@ async function handleCallback(runtime: AuthRuntime, req: Request, url: URL): Pro
   // request this browser's own flow produced) but before any token-endpoint call.
   if (url.searchParams.get('error') !== null) return reject('idp_error');
 
+  // SMA-511 spec § 7.1: `currentUrl` is runtime.redirectUri plus the incoming query string, NEVER
+  // the request URL. openid-client derives the token request's `redirect_uri` from `currentUrl`
+  // (`stripParams(currentUrl)`), and a Next route handler's `req.url` carries the server's bind
+  // address, so the value would not equal the one sent to /authorize. Built from the same
+  // redirectUri `handleLogin` sends, the two are equal with or without an override.
+  const currentUrl = new URL(runtime.redirectUri);
+  currentUrl.search = url.search;
+
   let tokens: OidcTokens;
   try {
     tokens = await runtime.oidc.authorizationCodeGrant({
-      currentUrl: url,
+      currentUrl,
       codeVerifier: tx.codeVerifier,
       expectedState: state,
       expectedNonce: tx.nonce,

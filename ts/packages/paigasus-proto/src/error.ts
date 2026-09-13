@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import { ErrorDomain, ErrorDomainSchema, ErrorReason, ErrorReasonSchema } from './generated/paigasus/common/v1/error_pb.js';
+import { ErrorDomain, ErrorDomainSchema, ErrorReason, ErrorReasonSchema } from './generated/paigasus/common/v1/error_pb';
 
 const REASON_PREFIX = 'ERROR_REASON_';
 const DOMAIN_PREFIX = 'ERROR_DOMAIN_';

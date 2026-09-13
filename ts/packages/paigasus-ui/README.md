@@ -30,7 +30,7 @@ decided once in the token layer (`src/styles/tokens.css`), not re-verified per c
 ## The per-consumer `@source` obligation
 
 Tailwind v4 does not scan `node_modules` by default, which is how pnpm resolves
-`@paigasus/ui` into a consumer's tree. A green `paigasus-console-ts:test` — the
+`@paigasus/ui` into a consumer's tree. A green `iam-console-ts:test` — the
 `ci/tailwind-source/run.mjs` guard described in that directory's own README — proves only that
 **the console** still reaches this package's classes in production. It says nothing about a
 second zone app.
@@ -40,7 +40,7 @@ Every new consumer must add, to its own global stylesheet:
 - its own `@source` line resolving to `ts/packages/paigasus-ui/src`. **Tailwind resolves an
   `@source` path relative to the stylesheet that declares it, not to the repository root**, so
   each consumer must work out its own relative path rather than copying another app's. The
-  console's stylesheet sits at `ts/apps/paigasus-console/app/globals.css` and therefore writes
+  console's stylesheet sits at `ts/apps/iam-console/app/globals.css` and therefore writes
   `@source '../../../packages/paigasus-ui/src';` — an app at a different depth needs a different
   number of `../` segments. Copying that line verbatim points Tailwind at a path that does not
   exist, and a non-existent `@source` is not an error: it scans nothing and the package's classes
