@@ -197,12 +197,15 @@ tasks:
     # The guard lives at the REPOSITORY ROOT and must stay there: this directory is Tailwind's
     # automatic scan root, so a script here containing the sentinel literal would make Tailwind
     # generate the utility the script asserts on. See ci/tailwind-source/README.md.
+    #
+    # SMA-512: the guard takes the app directory, because a second zone app lands in pull request
+    # 3. Each app invokes it for ITSELF, so no app's test task depends on another app's build.
     script: |
       set -euo pipefail
       pnpm exec vitest run --passWithNoTests
       node ../../../ci/tailwind-source/run.mjs --self-test
       node ../../../ci/tailwind-source/run.mjs --negative-control
-      node ../../../ci/tailwind-source/run.mjs
+      node ../../../ci/tailwind-source/run.mjs --app ts/apps/iam-console
     deps:
       - '~:build'
       # repo:next-env-drift ALSO depends on this project's build, because `next typegen` writes
