@@ -134,11 +134,11 @@ tasks:
     # May until SMA-517. Same shape as parity-corpus-drift: regenerate, then diff.
     script: 'ci/next-env/run.sh'
     toolchain: 'system'
-    # Ordered AFTER the console build, not merely to have a fresh tree: `next typegen` writes
-    # into ts/apps/iam-console/.next, which is `iam-console-ts:build`'s declared
-    # output. Letting both run concurrently would race on that directory (a build cleaning
-    # .next under a running typegen), which is the flake shape SMA-427 already paid for with
-    # wasm-pack's destructive --out-dir. This dep serializes them.
+    # Ordered AFTER each app's build, not merely to have a fresh tree: `next typegen` writes
+    # into that app's own `.next`, which is `<app>-ts:build`'s declared output. Letting both run
+    # concurrently would race on that directory (a build cleaning .next under a running
+    # typegen), which is the flake shape SMA-427 already paid for with wasm-pack's destructive
+    # --out-dir. One `deps` edge per app serializes it against this gate.
     deps:
       - 'iam-console-ts:build'
     # Narrow inputs — `repo` owns the whole tree, so without these the gate runs on every change.
@@ -147,10 +147,23 @@ tasks:
     # iam-console-ts:build's own inputs, so a Next upgrade never re-keyed that task.
     inputs:
       - 'ci/next-env/**/*'
-      - 'ts/apps/iam-console/next-env.d.ts'
-      - 'ts/apps/iam-console/next.config.ts'
-      - 'ts/apps/iam-console/tsconfig.json'
-      - 'ts/apps/iam-console/app/**/*'
+      # SMA-512: per PATH, never `ts/apps/*/**`. A blanket tree glob sweeps in `.next`, which
+      # .moon/workspace.yml's hasher.ignorePatterns deliberately does NOT ignore because `.next`
+      # is a declared build output — repo:next-public-free negates it by hand for that reason.
+      - 'ts/apps/*/next-env.d.ts'
+      # ci/next-env/run.sh discovers only configs whose app directory carries a package.json, so
+      # adding or removing one CHANGES the discovered app set. Without this glob a package-only
+      # change leaves the gate cached against a stale set. A plain glob, never a brace pattern:
+      # ci/affected-graph/task_inputs.py rejects brace patterns.
+      - 'ts/apps/*/package.json'
+      # Pinned to '.ts' only, though ci/next-env/run.sh discovers six config extensions and
+      # '.mjs' is a shape this repo actually uses elsewhere. Do NOT widen this glob until such an
+      # app exists: repo:input-liveness fails a declared glob that matches zero tracked files, so
+      # 'ts/apps/*/next.config.mjs' etc. would red today. Add the missing extensions' globs the
+      # same day an app that needs one lands.
+      - 'ts/apps/*/next.config.ts'
+      - 'ts/apps/*/tsconfig.json'
+      - 'ts/apps/*/app/**/*'
       - 'ts/pnpm-lock.yaml'
 
   affected-smoke:

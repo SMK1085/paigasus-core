@@ -919,6 +919,21 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   literal `./@/components/` directory; every component here is hand-written. Read
   `ts/packages/paigasus-ui/README.md`'s "The `shadcn` CLI is not usable in this package" before
   running it. (SMA-503)
+  Since SMA-512 the guard is **per app**: `ci/tailwind-source/run.mjs --app <dir>`, invoked by each
+  app's own `test` task, and a BARE run now exits 2 rather than silently checking `iam-console`.
+  `TAILWIND_GUARD_INVOCATIONS` in `ci/affected-graph/ci_targets.py` fails `repo:affected-smoke` if
+  a `ts/apps/*` directory with a `package.json` does not invoke all three modes for itself, in its
+  Moon project's resolved `test` script — the fix wave closed three ways to defeat this: an entry
+  no longer stores hand-copied lines (they are derived from the app name, so an entry cannot name
+  another app's `--app` directory), the check matches moon's resolved script rather than the raw
+  `moon.yml` text (a line parked in another task, or one that never runs, no longer counts), and a
+  `package.json`-bearing directory with no matching Moon project is reported rather than skipped.
+  `repo:next-env-drift` and the Next ESLint blocks are app-agnostic too: the first discovers
+  `ts/apps/*/next.config.*` and asserts every `ts/apps/*` directory that has a `package.json` is in
+  the discovered set, and `ts/eslint.config.js` derives one block per app directory. The next-env
+  gate still has **no negative control**. Its `deps` names one build per app by hand and nothing
+  asserts the list is complete, so a new app must add its own `<app>-ts:build` edge or `next
+  typegen` races that app's `.next`.
 - **Turbopack (Next 16.3.4) does NOT resolve a `.js` relative specifier to a `.ts` file** (MEASURED,
   SMA-510): `import { x } from './a.js'` with only `a.ts` on disk fails `next build` with `Module not
   found`, in app code and in a workspace package's source alike. A clause-level `import type … from
@@ -1021,6 +1036,16 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   bash 5.3.15 deadlocks on a `while read` fed by a here-string over roughly 512 bytes on this class
   of machine. Keep both facts together: fixing one gate's bash version by copying the other's
   breaks it.
+  MEASURED (SMA-512): a third gate pair needs the OTHER bash version too. `ci/ruff/run.sh`
+  (lines 114, 239) and `ci/next-public/run.sh` (lines 151-198) both call `mapfile`, a bash-4+
+  builtin absent from system `/bin/bash` 3.2.57 — under it, both gates fail every self-test row
+  (`mapfile: command not found`, read as an ordinary assertion failure, not an infrastructure
+  error). Both pass cleanly under `/opt/homebrew/bin/bash` 5.3.15. So on this class of machine, no
+  single local bash satisfies every gate: `repo:affected-smoke` needs 3.2 (no `mapfile`, and no
+  here-string deadlock), while `repo:ruff-ci`, `repo:next-public-free` and `repo:actionlint` need
+  4+. A local full-graph `moon ci` run must pick one bash for the whole invocation, then re-run the
+  gates that need the other bash directly (`<bash-binary> ci/<gate>/run.sh`) and read those results
+  instead of the `moon ci` verdict for them. CI runs a single Linux bash and never sees this split.
 
 ## Workflow
 

@@ -684,6 +684,38 @@ SELF_TASK_GLOBS_EXEMPT = {
 # a leftover is silent" reasoning T_EXEMPT's stale_exempt row and check_forward's docstring give.
 SELF_SCHEDULED_COVERAGE_EXEMPT = {}
 
+# SMA-512, fix wave (final review). The tailwind-source guard checks ONE app per invocation
+# (`--app <dir>`), so an app that never invokes it is simply unguarded — the silent skip the
+# parameterization was meant to remove, moved rather than closed. Every ts/apps/* directory (one
+# with a `package.json` — the same test ci/next-env/run.sh applies) must therefore be a member of
+# this set, and its Moon project's RESOLVED `test` script must carry all three lines the guard
+# needs: the self-test and the negative control prove the assertion can fire, and the real run for
+# THAT app is the assertion.
+#
+# This is a SET of app names now, not a dict of hand-copied lines. The original shape stored three
+# literal lines per app, so an entry for a second app could read `--app ts/apps/iam-console` —
+# copied from the only existing entry — and MEASURE AS PASSING, because nothing tied the stored
+# text to the key it lived under. The three expected lines are now DERIVED from the app name by
+# `_expected_tailwind_lines` below, so there is nowhere left to write the wrong one: naming an app
+# here means "this app's guard invocation must match `_expected_tailwind_lines(<name>)`," full
+# stop.
+TAILWIND_GUARD_INVOCATIONS = {"iam-console"}
+
+
+def _expected_tailwind_lines(app):
+    """The three ci/tailwind-source/run.mjs invocation lines `app`'s `test` script must carry.
+
+    DERIVED, not stored, so a registry entry can no longer name another app's `--app` directory
+    (fix-wave finding A) and an entry can no longer register with fewer than three lines (the old
+    per-app tuple could hold any length; a set membership check cannot).
+    """
+    run = "node ../../../ci/tailwind-source/run.mjs"
+    return (
+        f"{run} --self-test",
+        f"{run} --negative-control",
+        f"{run} --app ts/apps/{app}",
+    )
+
 # C4, actionlint half (SMA-542). repo:actionlint's self-tests, mutation battery, and the check-8,
 # check-8b, check-8c AND check-8d production call sites are each invoked from ONE call site inside
 # ci/actionlint/run.sh. That script cannot assert its own invocation — deleting the self-test calls
@@ -1862,6 +1894,70 @@ def check_self_scheduled_coverage(scripts, exempt=None):
     bad_exempt = sorted(task for task, reason in exempt.items() if not (reason or "").strip())
     stale_exempt = sorted(set(exempt) - qualifying)
     return unregistered, bad_exempt, stale_exempt
+
+
+def check_tailwind_guard_invocations(apps, raw_tasks, registry=None):
+    """SMA-512, fix wave. Every ts/apps/* app must invoke the tailwind-source guard for its own
+    directory, from its Moon project's RESOLVED `test` script.
+
+    `apps` is the sorted list of ts/apps/* directory names that exist on disk with a
+    `package.json` — built by the caller, the same `package.json` test
+    `ci/next-env/run.sh:113` applies (finding C: a directory need not have a `moon.yml` to reach
+    this check, or it would be silently skipped exactly like the defect this whole branch
+    removes). `raw_tasks` is moon's `{project_id: {task_name: task}}` payload — or an equivalent
+    plain dict for the self-test — read for the app's own project, id `<dir>-ts` by this repo's
+    convention (`moon-project-id-stack-suffix`). PURE, so the self-test drives it with plain
+    dicts.
+
+    Returns (unregistered, missing_lines, stale, no_project), all sorted:
+      - unregistered: an app with no TAILWIND_GUARD_INVOCATIONS entry.
+      - missing_lines: "app: line" for each of `_expected_tailwind_lines(app)` absent from the
+        REGISTERED app's resolved `test` script (finding A: the expected lines are derived from
+        the name, so a script that copied another app's `--app` line, or a registry that dropped
+        one of the three lines, both still red here). Matched against `_scripts`-style resolved
+        text, never the raw moon.yml file, so a line parked in some OTHER task, or one that never
+        runs, cannot satisfy this (finding B).
+      - stale: a registry entry naming an app no longer on disk.
+      - no_project: an app (registered or not) whose `<dir>-ts` Moon project does not resolve, or
+        whose project has no `test` task at all — reported rather than silently skipped, the same
+        reasoning `unregistered`/`stale` already apply to the registry (finding B's sub-case).
+    """
+    registry = TAILWIND_GUARD_INVOCATIONS if registry is None else registry
+    apps_set = set(apps)
+
+    unregistered = sorted(app for app in apps_set if app not in registry)
+    stale = sorted(set(registry) - apps_set)
+
+    missing_lines = []
+    no_project = []
+    for app in sorted(apps_set):
+        project = raw_tasks.get(f"{app}-ts")
+        test_task = project.get("test") if isinstance(project, dict) else None
+        if not isinstance(test_task, dict):
+            no_project.append(app)
+            continue
+        script = test_task.get("script")
+        if script is None:
+            no_project.append(app)
+            continue
+        # A present-but-wrong-typed `script` is a moon OUTPUT SHAPE change, not an authorial
+        # mistake, and the two have different exit codes. Reporting it as `no_project` would tell
+        # the operator to "add a moon.yml with a `test` task" for a task that already exists, and
+        # would return rc 1 where rc 2 is correct. `_scripts()` made exactly this distinction for
+        # the same field (SMA-553 review finding 3); this mirrors it.
+        if not isinstance(script, str):
+            raise MoonOutputError(
+                f"`moon query tasks` reported {app}-ts's `test` `script` as "
+                f"{type(script).__name__}, expected a string"
+            )
+        if app not in registry:
+            continue
+        present = {line.strip() for line in script.splitlines()}
+        for want in _expected_tailwind_lines(app):
+            if want not in present:
+                missing_lines.append(f"{app}: {want}")
+
+    return unregistered, sorted(missing_lines), stale, sorted(no_project)
 
 
 def self_test():
@@ -3102,6 +3198,115 @@ def self_test():
             "SELF_SCHEDULED_COVERAGE_EXEMPT"
         )
 
+    # SMA-512, fix wave. check_tailwind_guard_invocations: every ts/apps/* app with a
+    # package.json must invoke the tailwind-source guard for its own directory, in its Moon
+    # project's RESOLVED `test` script (self-test, negative control, and the real `--app <dir>`
+    # run naming THAT app) — or the parameterization Task 1 added is unguarded, and a new app
+    # could never call the script at all with nothing noticing.
+    def tw_tasks(**scripts_by_app):
+        """{'<app>-ts': {'test': {'script': text}}} — a raw_tasks fixture, one project per app,
+        matching moon's real `{project_id: {task_name: task}}` shape closely enough for this
+        PURE function."""
+        return {
+            f"{app}-ts": {"test": {"script": script}} for app, script in scripts_by_app.items()
+        }
+
+    def expect_tailwind(label, apps, raw_tasks_fixture, registry, want):
+        got = check_tailwind_guard_invocations(apps, raw_tasks_fixture, registry)
+        if got != want:
+            failures.append(f"check_tailwind_guard_invocations[{label}]: got {got}, want {want}")
+
+    _tw_ok = "\n".join(f"      {line}" for line in _expected_tailwind_lines("iam-console"))
+    expect_tailwind(
+        "compliant", ["iam-console"], tw_tasks(**{"iam-console": _tw_ok}),
+        TAILWIND_GUARD_INVOCATIONS, ([], [], [], []),
+    )
+    expect_tailwind(
+        "a dropped real run reds",
+        ["iam-console"],
+        tw_tasks(**{
+            "iam-console": "      node ../../../ci/tailwind-source/run.mjs --self-test\n"
+        }),
+        TAILWIND_GUARD_INVOCATIONS,
+        (
+            [],
+            [
+                "iam-console: node ../../../ci/tailwind-source/run.mjs --app ts/apps/iam-console",
+                "iam-console: node ../../../ci/tailwind-source/run.mjs --negative-control",
+            ],
+            [],
+            [],
+        ),
+    )
+    expect_tailwind(
+        "an unregistered app reds",
+        ["iam-console", "gateway-console"],
+        tw_tasks(**{"iam-console": _tw_ok, "gateway-console": "script: |\n"}),
+        TAILWIND_GUARD_INVOCATIONS,
+        (["gateway-console"], [], [], []),
+    )
+    expect_tailwind(
+        "a stale registry entry reds", [], tw_tasks(), TAILWIND_GUARD_INVOCATIONS,
+        ([], [], ["iam-console"], []),
+    )
+    # Finding A. A registered app's resolved script carries ANOTHER app's `--app` line — the
+    # exact shape of the original defect, where a hand-copied per-app entry could read
+    # `--app ts/apps/iam-console` under the `gateway-console` key and MEASURE AS PASSING. The
+    # expected lines are now DERIVED from the registry key rather than stored, so this reds: no
+    # text typed anywhere in the registry can make `gateway-console`'s expected `--app` line be
+    # anything other than `--app ts/apps/gateway-console`.
+    _wrong_app_script = "\n".join((
+        "      node ../../../ci/tailwind-source/run.mjs --self-test",
+        "      node ../../../ci/tailwind-source/run.mjs --negative-control",
+        "      node ../../../ci/tailwind-source/run.mjs --app ts/apps/iam-console",
+    ))
+    expect_tailwind(
+        "a script naming another app's --app directory reds",
+        ["gateway-console"],
+        tw_tasks(**{"gateway-console": _wrong_app_script}),
+        {"gateway-console"},
+        (
+            [],
+            [
+                "gateway-console: node ../../../ci/tailwind-source/run.mjs "
+                "--app ts/apps/gateway-console"
+            ],
+            [],
+            [],
+        ),
+    )
+    # Finding B. The three lines exist verbatim, but parked in a task OTHER than `test` (or one
+    # that never runs) — the OLD raw-moon.yml-text match found them anywhere in the file; the
+    # resolved `test` script must not.
+    expect_tailwind(
+        "lines present only in a task other than test do not satisfy the pin",
+        ["iam-console"],
+        {"iam-console-ts": {"never-run": {"script": _tw_ok}, "test": {"script": ""}}},
+        TAILWIND_GUARD_INVOCATIONS,
+        (
+            [],
+            sorted(f"iam-console: {line}" for line in _expected_tailwind_lines("iam-console")),
+            [],
+            [],
+        ),
+    )
+    # Finding B's sub-case, and finding C. An app with a package.json but no resolvable
+    # `<dir>-ts` Moon project — no moon.yml at all, or one whose project has no `test` task — is
+    # REPORTED under `no_project` rather than silently dropped, whether or not it is registered.
+    expect_tailwind(
+        "an app with no matching Moon project is reported, not skipped",
+        ["mystery-app"], {}, {"mystery-app"}, ([], [], [], ["mystery-app"]),
+    )
+    expect_tailwind(
+        "a Moon project with no test task is reported the same way",
+        ["mystery-app"], {"mystery-app-ts": {"build": {"script": "echo hi"}}}, {"mystery-app"},
+        ([], [], [], ["mystery-app"]),
+    )
+    expect_tailwind(
+        "no_project fires even when the app is also unregistered",
+        ["mystery-app"], {}, set(), (["mystery-app"], [], [], ["mystery-app"]),
+    )
+
     # SMA-553 D13, mirrored here so repo:input-liveness is not the sole judge of its own inputs.
     # The wired row carries the implicit .moon glob moon injects into every task, which must be
     # tolerated rather than counted as drift.
@@ -3279,6 +3484,16 @@ def main():
         next_public_free_sh = read_input(
             root / "ci" / "next-public" / "run.sh", "ci/next-public/run.sh"
         )
+        # Fix-wave finding C: a `moon.yml` test filtered out any ts/apps/* directory that lacked
+        # one, so such a directory never reached `unregistered` — the exact silent skip this
+        # whole branch exists to remove. `package.json` is the test ci/next-env/run.sh:113
+        # already applies (pnpm's own `apps/*` workspace glob), so the two controls now agree on
+        # what "an app" is. check_tailwind_guard_invocations reports a `package.json`-bearing
+        # directory with no resolvable Moon project under `no_project` rather than dropping it.
+        tailwind_apps = sorted(
+            d.name for d in (root / "ts" / "apps").iterdir()
+            if d.is_dir() and (d / "package.json").is_file()
+        )
         floor = check_floor(tasks)
         missing, unexpected, bad_exempt, stale_exempt = check_forward(tasks, t_targets)
         # SMA-553 review finding 1 — these two also raise MoonOutputError (INFRA_ERRORS), so their
@@ -3289,6 +3504,13 @@ def main():
         scripts = _scripts(raw_tasks)
         bad_gate_inputs = check_gate_inputs(raw_tasks)
         bad_generate_inputs = check_contracts_generate_inputs(raw_tasks)
+        # Inside the try for the same reason as the two calls above: this one raises
+        # MoonOutputError (INFRA_ERRORS) when moon reports a `test` `script` of the wrong type.
+        # Called from the validation flow below it, that raise would escape main() uncaught and
+        # exit 1, misreporting a moon output shape change as an authorial mistake.
+        tw_unregistered, tw_missing_lines, tw_stale, tw_no_project = (
+            check_tailwind_guard_invocations(tailwind_apps, raw_tasks)
+        )
     except GateAssertionError as exc:
         # An authorial mistake, NOT a broken tool: rc 1 so run.sh records a red suite instead of
         # aborting the whole affected-graph guard and losing every other assertion's output (D2).
@@ -3316,7 +3538,8 @@ def main():
             or missing_sites or bad_invocation or bad_gate_inputs
             or bad_generate_inputs or unregistered_self_scheduled or bad_coverage_exempt
             or stale_coverage_exempt or pairing_unpinned or pairing_bad_exempt
-            or pairing_stale_exempt or pairing_both or pairing_orphan_globs):
+            or pairing_stale_exempt or pairing_both or pairing_orphan_globs
+            or tw_unregistered or tw_missing_lines or tw_stale or tw_no_project):
         print(
             f"PASS  {'ci-targets':<18} -> {len(t_targets)} targets: every CI-eligible repo task is "
             "in ci.yml's T, every entry resolves, CLAUDE.md mirrors it"
@@ -3490,6 +3713,29 @@ def main():
          "    Fix: add the task to SELF_SCHEDULED_GATES with its script's invocation lines, or\n"
          "    delete the stale entry from SELF_TASK_EXPECTED_GLOBS, in\n"
          "    ci/affected-graph/ci_targets.py."),
+        (tw_unregistered,
+         "SMA-512. A ts/apps/* directory with a package.json has no TAILWIND_GUARD_INVOCATIONS\n"
+         "    entry, so nothing proves it ever invokes the tailwind-source guard at all.\n"
+         "    Fix: add the app's name to TAILWIND_GUARD_INVOCATIONS in\n"
+         "    ci/affected-graph/ci_targets.py, and wire _expected_tailwind_lines(app)'s three\n"
+         "    lines into its moon.yml `test` task."),
+        (tw_missing_lines,
+         "SMA-512. A line _expected_tailwind_lines derives for that app is missing from its\n"
+         "    Moon project's RESOLVED `test` script — the self-test, the negative control, or the\n"
+         "    real `--app <dir>` run naming THIS app.\n"
+         "    Fix: add the exact line to the app's moon.yml `test` task, so it appears in the\n"
+         "    resolved script."),
+        (tw_stale,
+         "SMA-512. A TAILWIND_GUARD_INVOCATIONS entry names a ts/apps/* directory that no longer\n"
+         "    has a package.json on disk — the entry has outlived the app it named.\n"
+         "    Fix: delete the entry from TAILWIND_GUARD_INVOCATIONS in\n"
+         "    ci/affected-graph/ci_targets.py."),
+        (tw_no_project,
+         "SMA-512. A ts/apps/* directory has a package.json but its <dir>-ts Moon project does\n"
+         "    not resolve, or that project has no `test` task — so nothing can prove it invokes\n"
+         "    the tailwind-source guard, and the app would be silently unguarded.\n"
+         "    Fix: add a moon.yml declaring project id `<dir>-ts` with a `test` task, or correct\n"
+         "    the id if it was typo'd."),
     ):
         if rows:
             print(f"  {title}", file=sys.stderr)

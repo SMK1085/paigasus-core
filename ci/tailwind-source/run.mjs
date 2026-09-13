@@ -10,12 +10,11 @@
  */
 
 import { existsSync, readFileSync, readdirSync, mkdtempSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
-import { join, dirname, resolve, sep } from 'node:path';
+import { join, dirname, resolve, relative, sep } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
-const CONSOLE_DIR = join(REPO_ROOT, 'ts', 'apps', 'iam-console');
 
 const PROBE_SOURCE = '--paigasus' + '-ui-source-probe';
 const PROBE_TOKEN = '--paigasus' + '-token-probe';
@@ -105,7 +104,7 @@ function currentBuildCssFiles(nextDir) {
  * The verdict function. Returns an array of failure messages; empty means pass.
  * Split out from the real run so --self-test can drive it over fixtures.
  */
-export function verdict({ cssFiles, appFiles, readFile }) {
+export function verdict({ cssFiles, appFiles, readFile, appLabel = 'the app' }) {
   const failures = [];
 
   // Assertion 4 first: an empty file set must fail loudly, not pass quietly.
@@ -128,7 +127,7 @@ export function verdict({ cssFiles, appFiles, readFile }) {
   // Mirrors assertion 4's empty-set guard: an empty appFiles set must fail loudly, not let
   // the loop below pass vacuously (e.g. if the console directory is renamed).
   if (appFiles.length === 0) {
-    failures.push('no console source file was scanned — ts/apps/iam-console may have been renamed or emptied, so this assertion would otherwise pass vacuously');
+    failures.push(`no console source file was scanned — ${appLabel} may have been renamed or emptied, so this assertion would otherwise pass vacuously`);
   }
 
   for (const file of appFiles) {
@@ -141,19 +140,20 @@ export function verdict({ cssFiles, appFiles, readFile }) {
   return failures;
 }
 
-function realRun() {
-  const nextDir = join(CONSOLE_DIR, '.next');
+function realRun(appDir) {
+  const nextDir = join(appDir, '.next');
   const cssFiles = currentBuildCssFiles(nextDir);
 
-  const appFiles = existsSync(CONSOLE_DIR) ? walk(CONSOLE_DIR) : [];
+  const appFiles = existsSync(appDir) ? walk(appDir) : [];
 
-  const failures = verdict({ cssFiles, appFiles, readFile: (f) => readFileSync(f, 'utf8') });
+  const appLabel = relative(REPO_ROOT, appDir);
+  const failures = verdict({ cssFiles, appFiles, readFile: (f) => readFileSync(f, 'utf8'), appLabel });
   if (failures.length > 0) {
     for (const f of failures) console.error(`FAIL: ${f}`);
-    console.error('== tailwind-source guard FAILED ==');
+    console.error(`== tailwind-source guard FAILED for ${appLabel} ==`);
     process.exit(1);
   }
-  console.log(`tailwind-source guard: all three sentinels present across ${String(cssFiles.length)} CSS file(s)`);
+  console.log(`tailwind-source guard: all three sentinels present for ${appLabel} across ${String(cssFiles.length)} CSS file(s)`);
 }
 
 function selfTest() {
@@ -192,6 +192,18 @@ function selfTest() {
     expect('an app-shell sentinel in the app fails', verdict({ cssFiles: [good], appFiles: [dirtyAppShell], readFile: read }).length, 1);
     expect('all three sentinels missing fails three times', verdict({ cssFiles: [cleanApp], appFiles: [cleanApp], readFile: read }).length, 3);
     expect('an empty appFiles set fails', verdict({ cssFiles: [good], appFiles: [], readFile: read }).length, 1);
+    expect(
+      'an empty appFiles set names the app in its message',
+      verdict({ cssFiles: [good], appFiles: [], readFile: read, appLabel: 'ts/apps/zzz' })
+        .filter((f) => f.includes('ts/apps/zzz')).length,
+      1,
+    );
+    expect(
+      'an empty appFiles set falls back to a generic label',
+      verdict({ cssFiles: [good], appFiles: [], readFile: read })
+        .filter((f) => f.includes('the app')).length,
+      1,
+    );
 
     /*
      * The three below drive `walk()` itself, not only `verdict()` — because the defect fixed in
@@ -259,8 +271,20 @@ function negativeControl() {
 const mode = process.argv[2];
 if (mode === '--self-test') selfTest();
 else if (mode === '--negative-control') negativeControl();
-else if (mode === undefined) realRun();
-else {
-  console.error(`unknown mode: ${mode}`);
+else if (mode === '--app') {
+  const dir = process.argv[3];
+  if (dir === undefined || dir === '') {
+    console.error('--app requires a repository-relative app directory, e.g. --app ts/apps/iam-console');
+    process.exit(2);
+  }
+  realRun(resolve(REPO_ROOT, dir));
+} else {
+  /*
+   * A BARE RUN IS AN ERROR, deliberately. Until SMA-512 this script checked ts/apps/iam-console
+   * with no argument. Leaving that behaviour would let a stale invocation in a second app's
+   * moon.yml silently re-check the FIRST app and report green, which is the exact silent-skip
+   * this parameterization exists to remove.
+   */
+  console.error(`unknown mode: ${String(mode)} — expected --app <dir>, --self-test or --negative-control`);
   process.exit(2);
 }

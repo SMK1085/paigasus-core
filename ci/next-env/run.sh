@@ -23,60 +23,144 @@ set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)"
 
-APP='ts/apps/iam-console'
-FILE="$APP/next-env.d.ts"
-
-if [ ! -f "$FILE" ]; then
-  echo "next-env gate: '$FILE' is missing from the working tree — it is a tracked file." >&2
-  exit 2
-fi
-
-# Present is not the same as TRACKED, and only tracked is meaningful here. `git diff`
-# ignores untracked paths, so after a `git rm --cached` (a plausible "it's generated, stop
-# tracking it" move) typegen would recreate the file, the diff would compare nothing, and
-# this gate would report a clean pass forever while guarding an untracked file. Verified by
-# reproducing exactly that before adding this check. (CodeRabbit review, SMA-519)
-if ! git ls-files --error-unmatch -- "$FILE" >/dev/null 2>&1; then
-  echo "next-env gate: '$FILE' exists but is NOT tracked by git." >&2
-  echo "  This gate compares generated output against the committed copy; with nothing" >&2
-  echo "  committed that comparison is vacuous and would pass unconditionally." >&2
-  echo "  Re-track the file, or remove this gate deliberately rather than leaving it inert." >&2
-  exit 2
-fi
-
-# If typegen dies before writing the file, restore it rather than leaving the tree broken.
-# A DRIFTING file is deliberately left in place: it is the corrected content, ready to commit.
+# If typegen dies before writing a file, restore it rather than leaving the tree broken. A
+# DRIFTING file is deliberately left in place: it is the corrected content, ready to commit.
+#
+# RESTORE FROM A BACKUP, NEVER FROM THE INDEX. `git checkout -- "$f"` restores the INDEX copy,
+# which silently discards any UNSTAGED working-tree content the file had before `rm`. That is a
+# reachable data loss, not a hypothetical: this gate's own drift path leaves a regenerated
+# next-env.d.ts unstaged, so a second run whose typegen failed would have destroyed it.
+RESTORE_FILES=()
 restore_if_absent() {
-  [ -f "$FILE" ] || git checkout -- "$FILE" 2>/dev/null || true
+  local f
+  for f in "${RESTORE_FILES[@]:-}"; do
+    [ -n "$f" ] || continue
+    if [ ! -f "$f" ] && [ -f "$f.next-env-bak" ]; then
+      mv -f "$f.next-env-bak" "$f"
+    fi
+    rm -f "$f.next-env-bak"
+  done
 }
 trap restore_if_absent EXIT
 
-rm -f "$FILE"
+check_app() {
+  local APP="$1"
+  local FILE="$APP/next-env.d.ts"
 
-# `next typegen` regenerates route/page/layout types without a full production build
-# (~1.5s vs ~5s). It writes into .next/, which is why moon.yml orders this task after
-# iam-console-ts:build rather than letting the two race on that directory.
-if ! pnpm --dir "$APP" exec next typegen >/dev/null 2>&1; then
-  echo "next-env gate: 'next typegen' failed in $APP." >&2
-  pnpm --dir "$APP" exec next typegen >&2 || true
+  if [ ! -f "$FILE" ]; then
+    echo "next-env gate: '$FILE' is missing from the working tree — it is a tracked file." >&2
+    return 2
+  fi
+
+  # Present is not the same as TRACKED, and only tracked is meaningful here. `git diff` ignores
+  # untracked paths, so after a `git rm --cached` typegen would recreate the file, the diff would
+  # compare nothing, and this gate would report a clean pass forever. (CodeRabbit, SMA-519)
+  if ! git ls-files --error-unmatch -- "$FILE" >/dev/null 2>&1; then
+    echo "next-env gate: '$FILE' exists but is NOT tracked by git." >&2
+    echo "  This gate compares generated output against the committed copy; with nothing" >&2
+    echo "  committed that comparison is vacuous and would pass unconditionally." >&2
+    return 2
+  fi
+
+  # Back up BEFORE removing; the EXIT trap restores from this copy, not from the index.
+  if ! cp "$FILE" "$FILE.next-env-bak"; then
+    echo "next-env gate: could not back up $FILE before regenerating it." >&2
+    return 2
+  fi
+  rm -f "$FILE"
+  RESTORE_FILES+=("$FILE")
+
+  # `next typegen` regenerates route/page/layout types without a full production build
+  # (~1.5s vs ~5s). It writes into "$APP"/.next/, which is why moon.yml orders this task after
+  # iam-console-ts:build rather than letting the two race on that directory.
+  if ! pnpm --dir "$APP" exec next typegen >/dev/null 2>&1; then
+    echo "next-env gate: 'next typegen' failed in $APP." >&2
+    pnpm --dir "$APP" exec next typegen >&2 || true
+    return 2
+  fi
+
+  # Control: typegen must actually have produced the file. Without this the gate would go quietly
+  # vacuous the day Next changes how this file is emitted.
+  if [ ! -f "$FILE" ]; then
+    echo "next-env gate: 'next typegen' completed but did not emit $FILE." >&2
+    echo "  Next no longer generates this file the same way, so this gate is guarding nothing." >&2
+    return 2
+  fi
+
+  if ! git diff --exit-code -- "$FILE"; then
+    echo "" >&2
+    echo "next-env gate: the committed $FILE does not match what Next generates." >&2
+    echo "  The regenerated file has been left in your working tree — commit it." >&2
+    return 1
+  fi
+
+  echo "next-env gate: $FILE matches 'next typegen' output."
+  return 0
+}
+
+# SMA-512: this gate checked ONE hardcoded app until a second console zone landed, and it would
+# have skipped the new one in silence. Discovery plus the subset assertion below is what makes a
+# future third zone impossible to miss. It is a SUBSET assertion, not set-equality: every
+# `ts/apps/*` directory that has a `package.json` must be in the discovered set.
+#
+# NOTE: this gate has no --self-test and no --negative-control, deliberately. Adding them costs a
+# SELF_SCHEDULED_GATES entry plus a SELF_TASK_EXPECTED_GLOBS or SELF_TASK_GLOBS_EXEMPT entry in
+# ci/affected-graph/ci_targets.py. The loop and the subset assertion are the control.
+shopt -s nullglob
+apps=()
+# EXACT filenames, never a trailing wildcard. `next.config.[tjmc][sj]*` matched
+# `next.config.ts.bak` (the `*` swallows any suffix) and MISSED `next.config.mts` (`t` is not in
+# `[sj]`) — both measured. A stray backup file would have added a phantom entry, and an `.mts` app
+# would have been invisible here.
+#
+# An app directory is only a workspace member if it has a `package.json` — the same test the
+# liveness assertion below applies, and the one pnpm's own `apps/*` glob uses. Without this filter
+# a config-bearing directory that is NOT a workspace member reaches check_app, which then runs
+# `pnpm --dir` against a non-member and fails confusingly.
+for cfg in ts/apps/*/next.config.{js,mjs,cjs,ts,mts,cts}; do
+  candidate="$(dirname "$cfg")"
+  [ -f "$candidate/package.json" ] && apps+=("$candidate")
+done
+shopt -u nullglob
+
+if [ "${#apps[@]}" -eq 0 ]; then
+  echo "next-env gate: no ts/apps/*/next.config.* found — this gate is guarding nothing." >&2
   exit 2
 fi
 
-# Control: typegen must actually have produced the file. Without this the gate would go
-# quietly vacuous the day Next changes how this file is emitted.
-if [ ! -f "$FILE" ]; then
-  echo "next-env gate: 'next typegen' completed but did not emit $FILE." >&2
-  echo "  Next no longer generates this file the same way, so this gate is guarding nothing." >&2
-  echo "  Update ci/next-env/run.sh (or drop the gate if the file is no longer generated)." >&2
+# LIVENESS. A Next app directory with no discoverable config would otherwise be skipped without a
+# word, which is the exact defect this rewrite exists to remove. Only a directory with its own
+# package.json counts as a workspace member — the same test pnpm's own `apps/*` glob applies —
+# so a stale leftover directory (an old node_modules/.next from a rename, say) is not mistaken
+# for a missing app.
+dirs=()
+for d in ts/apps/*/; do
+  [ -f "${d}package.json" ] && dirs+=("${d%/}")
+done
+missing=()
+for d in "${dirs[@]:-}"; do
+  found=0
+  for a in "${apps[@]}"; do
+    [ "$a" = "$d" ] && found=1
+  done
+  [ "$found" -eq 1 ] || missing+=("$d")
+done
+if [ "${#missing[@]}" -gt 0 ]; then
+  echo "next-env gate: these ts/apps/* directories have no discoverable next.config.*:" >&2
+  printf '  %s\n' "${missing[@]}" >&2
+  echo "  Each would be skipped by this gate in silence. Add a config, or remove the directory." >&2
   exit 2
 fi
 
-if ! git diff --exit-code -- "$FILE"; then
-  echo "" >&2
-  echo "next-env gate: the committed $FILE does not match what Next generates." >&2
-  echo "  The regenerated file has been left in your working tree — commit it." >&2
-  echo "  This usually means Next was upgraded without rebuilding the console app." >&2
-  exit 1
-fi
-
-echo "next-env gate: $FILE matches 'next typegen' output."
+# Preserve the HIGHEST severity seen across apps: rc 2 (infrastructure failure — a missing or
+# untracked file, or a broken typegen) outranks rc 1 (content drift), because an infrastructure
+# failure must never be reported as if it were mere drift needing a commit.
+rc=0
+for APP in "${apps[@]}"; do
+  ec=0
+  check_app "$APP" || ec=$?
+  if [ "$ec" -gt "$rc" ]; then
+    rc="$ec"
+  fi
+done
+exit "$rc"

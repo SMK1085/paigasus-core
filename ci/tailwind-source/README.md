@@ -1,8 +1,9 @@
 # `repo` gate: Tailwind `@source` reachability (SMA-503 AC 3)
 
-Asserts that a production `next build` of `@paigasus/iam-console` still emits the CSS that
-`@paigasus/ui` contributes, and (SMA-511) the CSS that `@paigasus/app-shell` contributes. Three
-independent sentinels:
+Asserts that a production `next build` of a given console app still emits the CSS that
+`@paigasus/ui` contributes, and (SMA-511) the CSS that `@paigasus/app-shell` contributes. The
+app is named on the command line (SMA-512); today the only caller is `iam-console-ts:test`,
+which passes `--app ts/apps/iam-console`. Three independent sentinels:
 
 | Sentinel | Declared in | Proves |
 |---|---|---|
@@ -15,32 +16,47 @@ and sentinel A still passes.
 
 ## Why this script lives at the repository root
 
-**It must never move under `ts/apps/iam-console/`.** Tailwind's automatic scan root is
-the current working directory, and Moon runs `next build` from the console's own directory.
-Tailwind extracts class candidates from any non-ignored text file. A script placed there and
-containing the literal `[--paigasus-ui-source-probe:1]` would make Tailwind generate that
-utility **from the script itself** — so the assertion would pass with the `@source` line
-deleted. Excluding the script from its own "appears nowhere in the app" check reopens the
-same hole from the other side.
+**It must never move under any app directory, e.g. `ts/apps/iam-console/`.** Tailwind's
+automatic scan root is the current working directory, and Moon runs `next build` from the
+app's own directory. Tailwind extracts class candidates from any non-ignored text file. A
+script placed there and containing the literal `[--paigasus-ui-source-probe:1]` would make
+Tailwind generate that utility **from the script itself** — so the assertion would pass with
+the `@source` line deleted. Excluding the script from its own "appears nowhere in the app"
+check reopens the same hole from the other side.
 
 ## Invocation
 
-Run by `iam-console-ts:test`, which depends on `~:build`. Three modes, in order:
+`node ci/tailwind-source/run.mjs --app <repo-relative-app-dir>`. Run by each app's own
+`test` task, which depends on `~:build`; today the only caller is `iam-console-ts:test`,
+passing `--app ts/apps/iam-console`. Three modes, in order:
 
 - `--self-test` — drives the verdict function over synthetic fixtures in a temporary
   directory, proving the assertions can both pass and fail.
 - `--negative-control` — asserts the script reports red against CSS lacking the probes.
-- no flag — the real run, against `ts/apps/iam-console/.next`.
+- `--app <repo-relative-app-dir>` — the real run, against `<app-dir>/.next`. A bare run with
+  no flag is an error (exit 2): until SMA-512 this script checked `ts/apps/iam-console` by
+  default, which would let a stale invocation in a second app's `moon.yml` silently re-check
+  the first app and report green.
 
 ## Limitations
 
-- **Nothing pins these three invocation lines.** `ci/affected-graph/ci_targets.py`'s
-  `check_self_scheduled_coverage` scans `repo:*` tasks only, and this runs under
-  `iam-console-ts:test`. Deleting the `--negative-control` line reds nothing. The
-  alternative is a new `repo:*` gate running a full `next build` on every affected pull
-  request, which was judged too expensive.
+- **The three invocation lines ARE pinned, but the task's execution is not.** SMA-512 added
+  `check_tailwind_guard_invocations` to `ci/affected-graph/ci_targets.py`: it derives all three
+  lines from the app name via `_expected_tailwind_lines(app)` and matches them against that app's
+  **resolved `test` script**, so deleting the `--negative-control` line — or pointing `--app` at
+  another app's directory — reds `repo:affected-smoke`. (`check_self_scheduled_coverage` still
+  scans `repo:*` tasks only and does not reach this one; the new check is what covers it.)
+  What remains unpinned is whether the `test` task **runs**: an app whose `test` is deselected or
+  excluded from CI carries the correct lines while the guard never executes. The per-app
+  `ui->console` strict-equality cases in `ci/affected-graph/run.sh` are what close that half, and
+  they are hand-baselined per app. The alternative — a new `repo:*` gate running a full
+  `next build` on every affected pull request — was judged too expensive.
 - **Coverage is per-consumer.** A green here says nothing about a second zone app. Every new
-  app needs its own `@source` line and its own assertion.
+  app needs its own `@source` line and its own invocation of this script, naming itself with
+  `--app`.
+- The guard checks ONE app per invocation, named by `--app`. Nothing in this script proves every
+  app invokes it. That liveness assertion lives in `ci/affected-graph/ci_targets.py` and runs
+  inside `repo:affected-smoke` (SMA-512 spec § 8.2).
 - The script proves the CSS was EMITTED. It does not prove the page references it.
 - **A cache-hit build can leave a stale CSS chunk that satisfies the sentinels.** `rm -rf
   .next/static` lives inside `iam-console-ts:build`'s own `script:`, so it runs only when
