@@ -1,0 +1,28 @@
+{
+  "cli_version": "0.10.6",
+  "checkpoint_id": "8faebb775f3a",
+  "strategy": "manual-commit",
+  "branch": "feature/sma-512-console-core",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "ts/apps/iam-console/tests/e2e/support/correlation.ts",
+    "ts/apps/iam-console/tests/e2e/support/paths.ts",
+    "ts/apps/iam-console/tests/unit/actions-structure.test.ts"
+  ],
+  "sessions": [
+    {
+      "metadata": "/8f/aebb775f3a/0/metadata.json",
+      "transcript": "/8f/aebb775f3a/0/full.jsonl",
+      "compact_transcript": "/8f/aebb775f3a/0/transcript.jsonl",
+      "content_hash": "/8f/aebb775f3a/0/content_hash.txt",
+      "prompt": "/8f/aebb775f3a/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 438,
+    "cache_creation_tokens": 1912845,
+    "cache_read_tokens": 92643940,
+    "output_tokens": 321195,
+    "api_call_count": 219
+  }
+}
