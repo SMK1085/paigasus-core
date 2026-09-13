@@ -581,6 +581,13 @@ rmdir ts/apps/zzz-probe
 
 Expected: `rc=2`, and the output names `ts/apps/zzz-probe` as having no discoverable config.
 
+> **Superseded during execution.** The final review ruled that the liveness assertion counts only
+> directories containing a `package.json`, so a bare `mkdir` no longer triggers it. The probe that
+> actually exercises the missing-config branch is
+> `mkdir -p ts/apps/zzz-probe && printf '{}' > ts/apps/zzz-probe/package.json`, run the gate,
+> expect rc 2, then `rm -rf ts/apps/zzz-probe`. A directory with no `package.json` is now
+> correctly ignored (rc 0), which is its own probe.
+
 - [ ] **Step 6: Prove the drift assertion still bites**
 
 ```bash

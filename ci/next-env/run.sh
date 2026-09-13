@@ -94,8 +94,18 @@ check_app() {
 # ci/affected-graph/ci_targets.py. The loop and the subset assertion are the control.
 shopt -s nullglob
 apps=()
-for cfg in ts/apps/*/next.config.[tjmc][sj]*; do
-  apps+=("$(dirname "$cfg")")
+# EXACT filenames, never a trailing wildcard. `next.config.[tjmc][sj]*` matched
+# `next.config.ts.bak` (the `*` swallows any suffix) and MISSED `next.config.mts` (`t` is not in
+# `[sj]`) — both measured. A stray backup file would have added a phantom entry, and an `.mts` app
+# would have been invisible here.
+#
+# An app directory is only a workspace member if it has a `package.json` — the same test the
+# liveness assertion below applies, and the one pnpm's own `apps/*` glob uses. Without this filter
+# a config-bearing directory that is NOT a workspace member reaches check_app, which then runs
+# `pnpm --dir` against a non-member and fails confusingly.
+for cfg in ts/apps/*/next.config.{js,mjs,cjs,ts,mts,cts}; do
+  candidate="$(dirname "$cfg")"
+  [ -f "$candidate/package.json" ] && apps+=("$candidate")
 done
 shopt -u nullglob
 

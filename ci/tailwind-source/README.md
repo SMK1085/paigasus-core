@@ -40,11 +40,17 @@ passing `--app ts/apps/iam-console`. Three modes, in order:
 
 ## Limitations
 
-- **Nothing pins these three invocation lines.** `ci/affected-graph/ci_targets.py`'s
-  `check_self_scheduled_coverage` scans `repo:*` tasks only, and this runs under each app's
-  `test` task. Deleting the `--negative-control` line reds nothing. The
-  alternative is a new `repo:*` gate running a full `next build` on every affected pull
-  request, which was judged too expensive.
+- **The three invocation lines ARE pinned, but the task's execution is not.** SMA-512 added
+  `check_tailwind_guard_invocations` to `ci/affected-graph/ci_targets.py`: it derives all three
+  lines from the app name via `_expected_tailwind_lines(app)` and matches them against that app's
+  **resolved `test` script**, so deleting the `--negative-control` line — or pointing `--app` at
+  another app's directory — reds `repo:affected-smoke`. (`check_self_scheduled_coverage` still
+  scans `repo:*` tasks only and does not reach this one; the new check is what covers it.)
+  What remains unpinned is whether the `test` task **runs**: an app whose `test` is deselected or
+  excluded from CI carries the correct lines while the guard never executes. The per-app
+  `ui->console` strict-equality cases in `ci/affected-graph/run.sh` are what close that half, and
+  they are hand-baselined per app. The alternative — a new `repo:*` gate running a full
+  `next build` on every affected pull request — was judged too expensive.
 - **Coverage is per-consumer.** A green here says nothing about a second zone app. Every new
   app needs its own `@source` line and its own invocation of this script, naming itself with
   `--app`.

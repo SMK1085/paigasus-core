@@ -245,6 +245,12 @@ address belongs.
 `ts/packages/paigasus-console-core`. Source-only, `private: true`. Every file under `src/` begins
 with `import 'server-only'`.
 
+**The testing surface lives outside `src/`**, at `testing/`, exported as `./testing` →
+`./testing/index.ts`. That placement is what lets § 5.6's rule hold without an exception: every
+file under `src/` is guarded, and the testing subpath — which vitest and Playwright harnesses
+import outside a Next server — is not. The package's Moon `inputs` and the boundary globs of
+§ 5.5 both name `testing/**` separately from `src/**` for the same reason.
+
 ### 5.1 Why it exists
 
 `iam-console` holds the provisioning call, `IntrospectPrincipalResolver`, `currentPrincipal()`,
@@ -637,7 +643,7 @@ a failed test, so the fixture must be able to bring the whole stack up again.
 |---|---|
 | Log in at `/iam`, navigate to `/gateway`, the overview renders, and the fake IdP's `/authorize` count is **unchanged across that navigation** | 1 |
 | The cross-zone navigation is a hard navigation, and the same-zone one is not | ADR-0017 |
-| Cold login at `/gateway` reaches the overview while **a spy bound to the iam-console port records zero inbound connections** | 2 |
+| Cold login at `/gateway` reaches the overview while **an instrumented listener in front of the iam-console server records zero inbound connections** | 2 |
 | One page render makes exactly one fake-IAM `Introspect` call | § 5.3 |
 | Static chunks do not collide: each zone loads its own `_next` assets under its own base path | SMA-513 AC 3 rehearsal |
 
@@ -654,8 +660,15 @@ and asserts the delta is zero.
 zone's cold-login path is proxy → `/gateway/auth/login` → IdP → `/gateway/auth/callback` → IAM
 gRPC. The `iam-console` process is on none of it, running or stopped, so that test passes whether
 or not the design has the property — and would keep passing against a design that grew a cross-zone
-dependency. Binding the iam-console port with a spy and asserting **zero inbound connections**
-fails if such a dependency ever appears, which is what AC 2 actually claims.
+dependency. Asserting **zero inbound connections to the iam-console zone** fails if such a
+dependency ever appears, which is what AC 2 actually claims.
+
+**The spy cannot simply bind that port.** Both standalone servers run in this tier, so the
+iam-console server already owns it. The listener is therefore a counting **forwarder**: the
+terminator routes `/iam/*` to it, it records each connection and proxies to the real server. That
+keeps the AC 1 scenario — which needs a working IAM zone — and the AC 2 scenario, which needs the
+count, in one fixture. A plain bind-and-drop spy would work only if the IAM app were stopped, and
+stopping it is the tautological test § 10.5 already rejected.
 
 Revision 1 also carried a row asserting the IAM nav entry renders "degraded, not absent" when the
 `iam-console` app is stopped. That row is deleted. `navStateOf` reads the discovery state of the
