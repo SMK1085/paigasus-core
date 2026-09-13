@@ -1,0 +1,57 @@
+{
+  "cli_version": "0.10.6",
+  "checkpoint_id": "99541f963e6b",
+  "strategy": "manual-commit",
+  "branch": "feature/sma-512-console-core",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "ts/apps/iam-console/moon.yml",
+    "ts/apps/iam-console/tests/e2e/forbidden.spec.ts",
+    "ts/apps/iam-console/tests/e2e/support/harness.ts",
+    "ts/apps/iam-console/tests/e2e/support/world.ts",
+    "ts/apps/iam-console/tests/integration/audit-page.test.ts",
+    "ts/apps/iam-console/tests/integration/doubles/fake-iam.test.ts",
+    "ts/apps/iam-console/tests/integration/doubles/fake-idp.test.ts",
+    "ts/apps/iam-console/tests/integration/doubles/tls-terminator.test.ts",
+    "ts/apps/iam-console/tests/integration/doubles/tls.test.ts",
+    "ts/apps/iam-console/tests/integration/membership-commands.test.ts",
+    "ts/apps/iam-console/tests/integration/org-page.test.ts",
+    "ts/apps/iam-console/tests/integration/orgs-commands.test.ts",
+    "ts/apps/iam-console/tests/integration/orgs-page.test.ts",
+    "ts/apps/iam-console/tests/integration/support.ts",
+    "ts/apps/iam-console/tests/integration/team-project-pages.test.ts",
+    "ts/apps/iam-console/tests/support/fake-iam.ts",
+    "ts/apps/iam-console/tests/support/fake-idp.ts",
+    "ts/apps/iam-console/tests/support/https-client.ts",
+    "ts/apps/iam-console/tests/support/tls-terminator.ts",
+    "ts/apps/iam-console/tests/support/tls.ts",
+    "ts/packages/paigasus-console-core/moon.yml",
+    "ts/packages/paigasus-console-core/tests/integration/authorize.test.ts",
+    "ts/packages/paigasus-console-core/tests/integration/error-info-round-trip.test.ts",
+    "ts/packages/paigasus-console-core/tests/integration/principal.test.ts",
+    "ts/packages/paigasus-console-core/tests/integration/scopes.test.ts"
+  ],
+  "sessions": [
+    {
+      "metadata": "/99/541f963e6b/0/metadata.json",
+      "transcript": "/99/541f963e6b/0/full.jsonl",
+      "compact_transcript": "/99/541f963e6b/0/transcript.jsonl",
+      "content_hash": "/99/541f963e6b/0/content_hash.txt",
+      "prompt": "/99/541f963e6b/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 438,
+    "cache_creation_tokens": 1912845,
+    "cache_read_tokens": 92643940,
+    "output_tokens": 321195,
+    "api_call_count": 219,
+    "subagent_tokens": {
+      "input_tokens": 2,
+      "cache_creation_tokens": 357514,
+      "cache_read_tokens": 0,
+      "output_tokens": 583,
+      "api_call_count": 1
+    }
+  }
+}
