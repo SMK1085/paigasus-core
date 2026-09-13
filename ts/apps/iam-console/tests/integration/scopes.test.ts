@@ -94,6 +94,20 @@ describe('loadMyScopes', () => {
     expect(listed?.request).toMatchObject({ principalPrn: IDS.principalPrn, limit: 200, offset: 0n });
   });
 
+  // Review, defect 1. An unnamed principal cannot be the subject of ListRoleGrants. It used to
+  // arrive as `''`, so the walk ran, IAM refused it with InvalidArgument, and the page degraded to
+  // "memberships only" through a failed round trip instead of skipping a call it cannot make.
+  it('never lists role grants for a principal IAM did not name, and still lists its memberships', async () => {
+    iam.setHandlers({ ...tenancyTable({ [ORG_A]: 'Acme' }), ...grants(PROJECT_B1) });
+    const calls = callsSince(iam);
+
+    const result = await loadMyScopes({ ...ports(), principal: { prn: null, memberships: [{ nodePrn: ORG_A }] }, cedarCapability: true });
+
+    expect(calls('authz.listRoleGrants')).toHaveLength(0);
+    expect(result.grantsListed).toBe(false);
+    expect(result.entries).toEqual([{ kind: 'organization', prn: ORG_A, orgId: IDS.orgA, label: 'Acme', denied: false }]);
+  });
+
   it('gives a team-only scope a direct entry and never asks for its organization', async () => {
     iam.setHandlers({ ...tenancyTable({ [TEAM_A1]: 'Platform' }), ...grants(TEAM_A1) });
     const calls = callsSince(iam);

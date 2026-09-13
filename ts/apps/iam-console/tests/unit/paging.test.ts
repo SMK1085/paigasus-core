@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import { describe, expect, it } from 'vitest';
-import { PAGE_SIZE, nextOffset, pageHref, parseCursor, parseOffset } from '../../lib/paging';
+import { MAX_CURSOR_LENGTH, PAGE_SIZE, nextOffset, pageHref, parseCursor, parseOffset } from '../../lib/paging';
 
 describe('parseOffset', () => {
   it('reads a plain non-negative integer', () => {
@@ -26,11 +26,26 @@ describe('nextOffset', () => {
 });
 
 describe('parseCursor', () => {
-  it('passes an opaque cursor through and drops an absent or oversized one', () => {
-    expect(parseCursor('abc')).toBe('abc');
-    expect(parseCursor(['abc', 'def'])).toBe('abc');
-    expect(parseCursor(undefined)).toBe('');
-    expect(parseCursor('x'.repeat(1025))).toBe('');
+  it('passes an opaque cursor through, because IAM owns the cursor grammar', () => {
+    expect(parseCursor('abc')).toEqual({ ok: true, cursor: 'abc' });
+    expect(parseCursor(['abc', 'def'])).toEqual({ ok: true, cursor: 'abc' });
+    expect(parseCursor(undefined)).toEqual({ ok: true, cursor: '' });
+    expect(parseCursor('x'.repeat(MAX_CURSOR_LENGTH))).toEqual({ ok: true, cursor: 'x'.repeat(MAX_CURSOR_LENGTH) });
+  });
+
+  // THE DEFECT THIS PINS (review, defect 5). An over-long cursor used to become `''`, which is the
+  // FIRST page: the user asked for one page and silently got another, and the only answer that
+  // looks like success is the wrong one. The bound stays — a query string is attacker-controlled —
+  // but it now reports the cursor as invalid instead of resetting it.
+  it('reports a cursor past the bound as invalid input, and never as page one', () => {
+    const parsed = parseCursor('x'.repeat(MAX_CURSOR_LENGTH + 1));
+
+    expect(parsed.ok).toBe(false);
+    if (parsed.ok) throw new Error('expected an invalid cursor');
+    expect(parsed.error.presentation).toBe('invalid-input');
+    // It never reached IAM, so it carries no IAM data — the lib/form.ts local-error rule.
+    expect(parsed.error.correlationId).toBeNull();
+    expect(parsed.error.reason).toBeNull();
   });
 });
 

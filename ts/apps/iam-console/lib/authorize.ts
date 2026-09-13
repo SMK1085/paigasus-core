@@ -12,7 +12,11 @@
 //
 // IT FAILS OPEN. A failed query answers true and logs `authorize.query_failed`: a button that
 // should be hidden then shows, and IAM still denies the action. A null principal (IAM could not
-// say who this is) also answers true, for the same reason.
+// say who this is) also answers true, for the same reason — and logs `authorize.no_principal`, so
+// that answer is never SILENT (review, defect 1). It reaches here two ways, and both are covered:
+// a failed Introspect, and an Introspect that succeeded but named no principal (lib/principal-prn.ts).
+// The second used to arrive as the empty string, which is not null: every affordance then asked IAM
+// `isAuthorized({ principalPrn: '' })`, got InvalidArgument, and rendered anyway.
 import 'server-only';
 import { cache } from 'react';
 import type { Client } from '@connectrpc/connect';
@@ -37,14 +41,20 @@ export function createMayI(deps: { authz: Pick<Client<typeof AuthorizationServic
     return true;
   };
 
+  /** No principal to ask about: fail open like a failed query, and say so in the log. */
+  const unnamed = (action: IamAction): Promise<boolean> => {
+    deps.logger.appEvent('authorize.no_principal', { action });
+    return Promise.resolve(true);
+  };
+
   return (action, resourcePrn) => {
     const principalPrn = deps.principalPrn;
-    if (principalPrn === null) return Promise.resolve(true);
+    // The memo covers the unnamed branch too, so a page asking the same question twice logs once.
     // The NUL separator cannot occur in an action name or a PRN, so two pairs never share a key.
     const key = `${action}\u0000${resourcePrn}`;
     let pending = memo.get(key);
     if (pending === undefined) {
-      pending = ask(principalPrn, action, resourcePrn);
+      pending = principalPrn === null ? unnamed(action) : ask(principalPrn, action, resourcePrn);
       memo.set(key, pending);
     }
     return pending;

@@ -76,6 +76,26 @@ const ROUTES: Record<AuthRouteSuffix, RouteEntry> = {
   '/auth/logout/callback': { method: 'GET', run: (runtime) => handleLogoutCallback(runtime) },
 };
 
+/**
+ * True when `path` — basePath-INCLUSIVE, and already normalised by the caller — is one of THIS
+ * zone's own auth routes, or lives under one.
+ *
+ * DERIVED FROM THE ROUTE TABLE (review, defect 3). The `returnTo` guard in `handleLogin` used to
+ * test a hardcoded `${basePath}/auth/` prefix while `AUTH_ROUTE_SUFFIXES` is the package's single
+ * source of truth for what this file serves. The two agree today only because all four suffixes
+ * happen to start with `/auth/`: a fifth route outside that prefix would be served here, be public
+ * in `authRoutePaths()`, and escape the guard — so a crafted `returnTo` could send the browser
+ * straight back into it after a successful login, one loop per click. Reading the table closes
+ * that by construction rather than by coincidence.
+ */
+function isAuthRoutePath(basePath: string, path: string): boolean {
+  return AUTH_ROUTE_SUFFIXES.some((suffix) => {
+    const route = `${basePath}${suffix}`;
+    // The subtree test keeps the old prefix guard's reach for anything BELOW a route.
+    return path === route || path.startsWith(`${route}/`);
+  });
+}
+
 export function createAuthRoutes(runtime: AuthRuntime): AuthRoutes {
   // Built ONCE per runtime, and matched EXACTLY against this zone's own base path — an `endsWith`
   // test previously matched `/anything/auth/login` too, harmless only by accident (review round 1,
@@ -144,7 +164,7 @@ async function handleLogin(runtime: AuthRuntime, req: Request, url: URL): Promis
   // `%61` is not the same path segment as `a`, so the route table does not serve either value, and
   // folding them would make this guard reject paths the zone legitimately serves.
   const resolvedPath = new URL(requested, 'http://placeholder').pathname.replace(/\/{2,}/g, '/');
-  const returnTo = resolvedPath.startsWith(`${runtime.basePath}/auth/`) ? fallback : requested;
+  const returnTo = isAuthRoutePath(runtime.basePath, resolvedPath) ? fallback : requested;
 
   const txnId = newTransactionId();
   const secret = newTransactionSecret();

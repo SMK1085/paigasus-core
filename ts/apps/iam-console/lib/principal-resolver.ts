@@ -17,6 +17,7 @@ import type { PrincipalResolver, ResolvedPrincipal } from '@paigasus/auth/server
 import { callIam } from './errors';
 import type { IamClients } from './iam-clients';
 import type { ConsoleLogger } from './logger';
+import { principalPrnOf } from './principal-prn';
 
 /** The user waits on the login callback, so each call gets 3 s, not the SDK's 10 s (transport.ts:42). */
 const DEFAULT_TIMEOUT_MS = 3_000;
@@ -67,7 +68,8 @@ export function createIntrospectPrincipalResolver(deps: {
         // 3. IAM reports no role grants here (authenticate_token.rs:161-165), and the port says
         //    to treat that as UNKNOWN (ports/principal-resolver.ts:32-36).
         return {
-          principalPrn: me.principalPrn === '' ? null : me.principalPrn,
+          // The SAME reading as the live path (lib/principal-prn.ts). The two used to disagree.
+          principalPrn: principalPrnOf(me.principalPrn),
           issuer: me.issuer,
           subject: me.subject,
           memberships: me.memberships.map((m) => ({ id: m.id, principalPrn: m.principalPrn, nodePrn: m.nodePrn })),

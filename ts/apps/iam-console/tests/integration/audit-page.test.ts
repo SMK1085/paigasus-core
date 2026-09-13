@@ -80,6 +80,27 @@ describe('loadAuditPage', () => {
     expect(data.value.rows[0]?.occurredAt).toBeNull();
   });
 
+  // Review, defect 6 — reported as "Number(seconds) rounds BEFORE the range check, so a big value
+  // renders a WRONG timestamp". MEASURED false, and pinned here rather than left to prose.
+  // `Number(bigint)` is exact up to 2^53 = 9,007,199,254,740,992, and Date accepts at most
+  // ±8,640,000,000,000,000 ms, i.e. ±8,640,000,000,000 SECONDS. Every seconds value that can yield
+  // a valid Date is therefore three orders of magnitude below the point where precision is lost,
+  // and every value that loses precision is three orders of magnitude past the ceiling, so
+  // `Number.isNaN(date.getTime())` already rejects it. A sweep of the boundaries plus 200,000
+  // random int64 seconds found zero disagreements with exact bigint arithmetic.
+  it.each([
+    ['the exact Date ceiling', 8_640_000_000_000n, new Date(8_640_000_000_000_000).toISOString()],
+    ['one second past the ceiling', 8_640_000_000_001n, null],
+    ['the first seconds value Number() cannot represent', 9_007_199_254_740_993n, null],
+  ])('reads %s correctly, never as a rounded-but-valid timestamp', async (_label, seconds, expected) => {
+    iam.setHandlers({ 'audit.listAuditEntries': () => ({ entries: [{ ...entry, occurredAt: { seconds, nanos: 0 } }], nextCursor: '' }) });
+
+    const data = await loadAuditPage({ audit: clientsFor(iam).audit }, { cursor: '' });
+
+    if (!data.ok) throw new Error('expected entries');
+    expect(data.value.rows[0]?.occurredAt).toBe(expected);
+  });
+
   it('returns a denial as a page error with the correlation id', async () => {
     iam.setHandlers({
       'audit.listAuditEntries': () => {

@@ -73,6 +73,35 @@ export function authRoutePaths(): readonly string[] {
   return [...AUTH_ROUTE_SUFFIXES];
 }
 
+/**
+ * Refuses a basePath-PREFIXED `loginPath` or `publicPaths` entry, loudly (review, defect 2).
+ *
+ * THE SILENT CONTRACT CHANGE THIS CLOSES. Both options became basePath-RELATIVE in SMA-511 and both
+ * are plain `string`, so a caller still passing the old full-path form (`'/iam/auth/login'`) type
+ * checks and reproduces the exact redirect loop this file exists to prevent: `publicPaths` never
+ * matches the `/auth/login` Next actually hands the proxy, and a clone of `nextUrl` re-adds the
+ * prefix to `loginPath`, so the browser is sent to `/iam/iam/auth/login`. A 500 on every request is
+ * a bad day; an infinite redirect with no error anywhere is a worse one.
+ *
+ * It runs PER REQUEST, not in `createAuthMiddleware`, because the zone's basePath is not known
+ * until Next hands one over on `req.nextUrl` — the factory has nothing to compare against.
+ *
+ * A root-mounted zone (`basePath === ''`) is skipped: there every path "starts with" the basePath,
+ * the relative and full forms are the same string, and there is nothing to get wrong.
+ */
+function assertBasePathRelative(basePath: string, option: string, paths: readonly string[]): void {
+  if (basePath === '') return;
+  for (const path of paths) {
+    if (path !== basePath && !path.startsWith(`${basePath}/`)) continue;
+    const relative = path.slice(basePath.length);
+    throw new Error(
+      `createAuthMiddleware: ${option} must be basePath-RELATIVE, but "${path}" carries this zone's basePath "${basePath}". ` +
+        `Next removes the basePath from req.nextUrl.pathname before the proxy sees it, so a prefixed entry never matches and the login route redirects to itself. ` +
+        `Write "${relative === '' ? '/' : relative}" instead, or build the list with authRoutePaths().`,
+    );
+  }
+}
+
 /** Build this zone's middleware (Next 16: the zone's `proxy.ts`). */
 export function createAuthMiddleware(options: AuthMiddlewareOptions): (req: NextRequest) => NextResponse {
   const publicPaths = new Set(options.publicPaths);
@@ -80,6 +109,9 @@ export function createAuthMiddleware(options: AuthMiddlewareOptions): (req: Next
   return function authMiddleware(req: NextRequest): NextResponse {
     // basePath-RELATIVE: Next removes the zone's basePath from `nextUrl.pathname` (see publicPaths).
     const { pathname, basePath, search } = req.nextUrl;
+
+    assertBasePathRelative(basePath, 'loginPath', [options.loginPath]);
+    assertBasePathRelative(basePath, 'publicPaths', options.publicPaths);
 
     if (publicPaths.has(pathname)) {
       return NextResponse.next();

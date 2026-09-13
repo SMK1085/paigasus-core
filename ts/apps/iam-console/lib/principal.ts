@@ -15,8 +15,16 @@ import { cache } from 'react';
 import { ErrorReason } from '@paigasus/sdk/errors';
 import { callIam, type IamResult } from './errors';
 import { iamClients, sessionToken, type IamClients } from './iam';
+import { principalPrnOf } from './principal-prn';
 
-export type Principal = { prn: string; memberships: readonly { nodePrn: string }[] };
+/**
+ * `prn` is `null` when IAM answered but named no principal (review, defect 1). That is NOT the
+ * login-time degrade in lib/principal-resolver.ts, which discards the whole answer: here the
+ * memberships IAM did send stay usable, and only the two things that need a name change — mayI()
+ * cannot ask IAM about an unnamed principal (lib/authorize.ts) and myScopes() cannot list its role
+ * grants (lib/scopes.ts). Both say so in the log rather than passing `''` to IAM.
+ */
+export type Principal = { prn: string | null; memberships: readonly { nodePrn: string }[] };
 
 export async function introspectWithProvisioning(
   clients: Pick<IamClients, 'authn' | 'serviceInfo'>,
@@ -40,7 +48,7 @@ export async function introspectWithProvisioning(
     answer = await introspect();
   }
   if (!answer.ok) return answer;
-  return { ok: true, value: { prn: answer.value.principalPrn, memberships: answer.value.memberships.map((m) => ({ nodePrn: m.nodePrn })) } };
+  return { ok: true, value: { prn: principalPrnOf(answer.value.principalPrn), memberships: answer.value.memberships.map((m) => ({ nodePrn: m.nodePrn })) } };
 }
 
 /** Per request: a LIVE Introspect, with one provisioning retry on `identity-not-provisioned`. */

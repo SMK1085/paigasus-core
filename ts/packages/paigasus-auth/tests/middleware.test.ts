@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { NextRequest } from 'next/server';
+import { NextRequest, type NextResponse } from 'next/server';
 import { authRoutePaths, createAuthMiddleware } from '../src/middleware.js';
 import { SESSION_COOKIE } from '../src/http/cookies.js';
 import { createAuthRoutes } from '../src/http/routes.js';
@@ -57,12 +57,36 @@ describe('createAuthMiddleware', () => {
     expect(res.headers.get('x-middleware-next')).toBe('1');
   });
 
-  // The SMA-511 failure, kept as a test: a basePath-PREFIXED public path never matches, because
-  // Next never hands the proxy a prefixed pathname — so the zone's own login route redirected to itself.
-  it('does not match a basePath-PREFIXED public path', () => {
-    const res = createAuthMiddleware({ publicPaths: ['/iam/auth/login'], loginPath: '/auth/login' })(request('/iam/auth/login'));
+  // The SMA-511 failure, kept as a test. A basePath-PREFIXED public path never MATCHES, because
+  // Next never hands the proxy a prefixed pathname — so the zone's own login route redirected to
+  // itself, forever, with no error anywhere. Both options are plain `string`, so the old full-path
+  // form still type checks; since the review's defect 2 it is refused at runtime instead (see
+  // `assertBasePathRelative`), which turns a silent loop into a loud failure.
+  it('refuses a basePath-PREFIXED publicPaths entry, naming the relative form', () => {
+    const run = (): NextResponse => createAuthMiddleware({ publicPaths: ['/iam/auth/login'], loginPath: '/auth/login' })(request('/iam/auth/login'));
 
-    expect(res.status).toBe(307);
+    expect(run).toThrow(/publicPaths must be basePath-RELATIVE/);
+    expect(run).toThrow(/Write "\/auth\/login" instead/);
+  });
+
+  it('refuses a basePath-PREFIXED loginPath, naming the relative form', () => {
+    const run = (): NextResponse => createAuthMiddleware({ publicPaths: authRoutePaths(), loginPath: '/iam/auth/login' })(request('/iam/dashboard'));
+
+    expect(run).toThrow(/loginPath must be basePath-RELATIVE/);
+    expect(run).toThrow(/Write "\/auth\/login" instead/);
+  });
+
+  // The other direction: the CORRECT form is not refused, for a guarded path and a public one
+  // alike. Without this, an assertion that threw on everything would pass the two cases above.
+  it('accepts the basePath-RELATIVE form', () => {
+    expect(() => createAuthMiddleware(OPTIONS)(request('/iam/dashboard'))).not.toThrow();
+    expect(() => createAuthMiddleware(OPTIONS)(request('/iam/auth/login'))).not.toThrow();
+  });
+
+  // A root-mounted zone has no prefix to carry, so the two forms are one string and nothing is
+  // refused. An assertion that compared against `''` would reject every path here.
+  it('refuses nothing on a root-mounted zone, where basePath is the empty string', () => {
+    expect(() => createAuthMiddleware(OPTIONS)(request('/dashboard', undefined, ''))).not.toThrow();
   });
 
   it('works for a root-mounted zone, where basePath is the empty string', () => {

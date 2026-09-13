@@ -11,7 +11,7 @@ import 'server-only';
 import type { AuthEventFields, AuthEventName, AuthLogger } from '@paigasus/auth/server';
 import type { DiscoveryEventFields, DiscoveryEventName, DiscoveryLogger } from '@paigasus/discovery/server';
 
-export type AppEventName = 'principal.resolve_failed' | 'principal.resolve_crashed' | 'authorize.query_failed' | 'discovery.redis_connect_failed' | 'iam.call_failed';
+export type AppEventName = 'principal.resolve_failed' | 'principal.resolve_crashed' | 'authorize.query_failed' | 'authorize.no_principal' | 'discovery.redis_connect_failed' | 'iam.call_failed';
 
 export type AppEventFields = Readonly<Record<string, string | number | boolean | null>>;
 

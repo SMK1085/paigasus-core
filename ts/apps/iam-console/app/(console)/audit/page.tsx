@@ -28,8 +28,13 @@ export default async function AuditPage({ searchParams }: Props): Promise<ReactE
     );
   }
 
+  // The cursor is checked BEFORE the clients are built: a cursor the console refuses outright never
+  // becomes an IAM call (review, defect 5).
+  const parsed = parseCursor(query.cursor);
+  if (!parsed.ok) return <PageError error={parsed.error} />;
+
   const clients = await iamClients();
-  const data = await loadAuditPage({ audit: clients.audit }, { cursor: parseCursor(query.cursor) });
+  const data = await loadAuditPage({ audit: clients.audit }, { cursor: parsed.cursor });
   if (!data.ok) return <PageError error={data.error} />;
   const { rows, cursor, nextCursor } = data.value;
 

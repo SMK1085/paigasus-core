@@ -6,6 +6,7 @@
 import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { ErrorReason } from '@paigasus/sdk/errors';
 import { disposeTransports } from '@paigasus/sdk/iam';
+import { createMayI } from '../../lib/authorize';
 import { createIamClients, type IamClients } from '../../lib/iam-clients';
 import { createJsonLogger } from '../../lib/logger';
 import { introspectWithProvisioning } from '../../lib/principal';
@@ -66,6 +67,17 @@ describe('provisioning', () => {
       expect(fake.calls.map((call) => call.method)).toEqual(['serviceInfo.getServiceInfo', 'authn.introspect']);
       expect(fake.calls.map((call) => call.correlationId)).toEqual([correlationId, correlationId]);
       expect(events()).toEqual([]);
+    });
+
+    // The other half of the ONE reading (review, defect 1): the login snapshot reports an empty
+    // `principal_prn` as null, and the live path above must agree with it.
+    it('reads an empty principal_prn as a null principalPrn', async () => {
+      fake.setHandlers({ 'authn.introspect': () => ({ principalPrn: '' }) });
+      const { logger } = captureLogger();
+
+      const principal = await createIntrospectPrincipalResolver({ clientsForToken: clientsFor, logger }).resolve({ accessToken: 'blank', idTokenClaims: CLAIMS });
+
+      expect(principal.principalPrn).toBeNull();
     });
 
     it('logs resolve_crashed when an async client factory rejects', async () => {
@@ -148,6 +160,37 @@ describe('provisioning', () => {
       const result = await introspectWithProvisioning(clientsFor('known-user'), 'known-user');
       expect(result).toEqual({ ok: true, value: { prn: fake.principalPrnFor('known-user'), memberships: [] } });
       expect(fake.calls.map((call) => call.method)).toEqual(['authn.introspect']);
+    });
+
+    // Review, defect 1. IAM's `principal_prn` is a proto3 string, so an unset one arrives as `''`.
+    // The LIVE path used to pass that through, and `''` is not `null`: mayI() then asked IAM
+    // `isAuthorized({ principalPrn: '' })` for every affordance, IAM refused with InvalidArgument,
+    // mayI() failed open, and every mutation control rendered. Both paths read the field through
+    // lib/principal-prn.ts now, so they answer the same thing.
+    it('reads an empty principal_prn as no principal, like the login resolver does', async () => {
+      fake.provisioned.add('blank-prn');
+      fake.setHandlers({ 'authn.introspect': () => ({ principalPrn: '', memberships: [{ id: 'm-1', principalPrn: '', nodePrn: ORG }] }) });
+
+      const result = await introspectWithProvisioning(clientsFor('blank-prn'), 'blank-prn');
+
+      // The memberships IAM did send stay usable; only the NAME is missing.
+      expect(result).toEqual({ ok: true, value: { prn: null, memberships: [{ nodePrn: ORG }] } });
+    });
+
+    // The join: the live principal feeds createMayI exactly as lib/authorize.ts's mayI() does. An
+    // unnamed principal must produce NO IsAuthorized call, and the fail-open answer must be logged.
+    it('an empty principal_prn produces a mayI that never queries IAM, and says so in the log', async () => {
+      fake.provisioned.add('blank-prn-2');
+      fake.setHandlers({ 'authn.introspect': () => ({ principalPrn: '' }) });
+      const { logger, events } = captureLogger();
+
+      const principal = await introspectWithProvisioning(clientsFor('blank-prn-2'), 'blank-prn-2');
+      const clients = clientsFor('blank-prn-2');
+      const mayI = createMayI({ authz: clients.authz, principalPrn: principal.ok ? principal.value.prn : null, logger });
+
+      expect(await mayI('CreateOrganization', ORG)).toBe(true);
+      expect(fake.callsTo('authz.isAuthorized')).toHaveLength(0);
+      expect(events()).toEqual([{ event: 'authorize.no_principal', fields: { action: 'CreateOrganization' }, time: expect.any(String) as string }]);
     });
 
     it('returns the second identity-not-provisioned as an error instead of looping', async () => {

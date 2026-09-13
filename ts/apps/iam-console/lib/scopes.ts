@@ -98,7 +98,12 @@ export async function loadMyScopes(deps: {
   principal: Principal;
   cedarCapability: boolean;
 }): Promise<MyScopes> {
-  const grantScopes = deps.cedarCapability ? await listOwnGrantScopes(deps.authz, deps.principal.prn) : null;
+  // An unnamed principal (spec § 4.5; lib/principal-prn.ts) cannot be the subject of ListRoleGrants,
+  // so the walk is SKIPPED rather than sent with an empty PRN — which IAM refuses with
+  // InvalidArgument, costing a round trip to reach the same "memberships only" page (review,
+  // defect 1). The memberships IAM did send are still listed.
+  const prn = deps.principal.prn;
+  const grantScopes = deps.cedarCapability && prn !== null ? await listOwnGrantScopes(deps.authz, prn) : null;
   const scopes = collectScopes([...deps.principal.memberships.map((membership) => membership.nodePrn), ...(grantScopes ?? [])]);
   const shown = scopes.slice(0, SCOPE_CAP);
   const entries = await Promise.all(shown.map((scope) => describeScope(deps.tenancy, scope)));
