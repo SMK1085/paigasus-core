@@ -902,7 +902,8 @@ git push -u origin feature/sma-512-ts-gateway-console
 - The Tailwind guard's bare mode is an **error**, not a default. A stale invocation must fail, not
   silently re-check the first app.
 - `repo:next-env-drift` has no negative control. Its correctness rests on the loop and the
-  set-equality assertion.
+  subset assertion (every `ts/apps/*` directory with a `package.json` is in the discovered set,
+  not set-equality).
 - `ts/eslint.config.js` derives its Next blocks from `nextAppRules`. Do not add a literal block
   for a new app.
 - `moon.yml`'s `next-env-drift` inputs are per path. A `ts/apps/*/**` tree glob would hash `.next`.

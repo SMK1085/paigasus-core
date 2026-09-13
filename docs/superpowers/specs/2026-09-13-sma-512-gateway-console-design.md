@@ -131,7 +131,7 @@ dependency, smallest first.
 
 | # | Pull request | What it delivers | What proves it |
 |---|---|---|---|
-| 1 | **Parameterize the app-scoped gates** (§ 8) | `ci/next-env`, `ci/tailwind-source` and `ts/eslint.config.js` stop naming one app. Liveness assertions added. | The three gates stay green on one app, and the tailwind guard's self-test and negative-control arms cover a second app directory. |
+| 1 | **Parameterize the app-scoped gates** (§ 8) | `ci/next-env`, `ci/tailwind-source` and `ts/eslint.config.js` stop naming one app. Liveness assertions added. | The three gates stay green on one app, and `check_tailwind_guard_invocations`'s own self-test in `ci/affected-graph/ci_targets.py` proves a second app directory is covered — the `run.mjs` self-test rows only cover its `appLabel` parameter, and the negative control is unchanged. |
 | 2 | **`@paigasus/console-core`** (§ 5) | The package, its boundary rules, the testing subpath, the `@paigasus/auth` export, and `iam-console` refactored onto all of it. Closes SMA-631. | **No behaviour change.** `iam-console`'s existing suites stay green. |
 | 3 | **The `gateway-console` app** (§ 4, 6, 7) | The app, the shell, the scope route, the overview page, and a single-zone e2e tier. | AC 4 in full, and a cold login at `/gateway` in a single-zone configuration. |
 | 4 | **The two-zone tier** (§ 10.5) | The Redis container, the path-routing terminator, both servers, and the affected-graph inputs edge. | AC 1 and AC 2 in their real form. |
@@ -458,7 +458,8 @@ same trap for the third zone.
 
 Replace `APP='ts/apps/iam-console'` with discovery over `ts/apps/*/next.config.*`, the glob
 `ci/next-public/run.sh:184` already uses, and loop. Fail when the discovered set is empty, and when
-it does not equal the set of `ts/apps/*` directories.
+it does not include every `ts/apps/*` directory that has a `package.json` — a subset assertion,
+not set-equality: a discovered app need not itself be checked against anything else.
 
 **Correction to revision 1.** That revision said the gate's `--self-test` and `--negative-control`
 arms "gain a second-app case". The script has neither: it is 82 lines with no flag parsing, and
@@ -466,7 +467,7 @@ arms "gain a second-app case". The script has neither: it is 82 lines with no fl
 arms is not free — `check_self_scheduled_coverage` in `ci/affected-graph/ci_targets.py` then
 demands a `SELF_SCHEDULED_GATES["next-env-drift"]` entry, and the pairing rule demands a
 `SELF_TASK_EXPECTED_GLOBS` entry or a reasoned `SELF_TASK_GLOBS_EXEMPT` one. **This design does not
-add them.** The loop plus the set-equality assertion is the control, and § 13 records that this
+add them.** The loop plus the subset assertion is the control, and § 13 records that this
 gate has no negative control.
 
 The task's `deps` gains `gateway-console-ts:build`. Its inputs widen **per path, not per tree**:
@@ -745,7 +746,7 @@ Linear issues to create after this spec is approved:
   project settings later.
 - The switcher's scope changes the URL and the breadcrumbs and nothing else (D8).
 - `repo:next-env-drift` still has **no negative control** (§ 8.1). Its correctness rests on the
-  loop and the set-equality assertion. Follow-up § 12 item 3.
+  loop and the subset assertion. Follow-up § 12 item 3.
 - A lost `cache()` memoization is observable only in the e2e tier (§ 5.3).
 - `@paigasus/console-core` exports a testing surface from a package that is not a test package.
 - The PRN reader stays an ADR-0005 exception, now at one site instead of two. SMA-634 owns the

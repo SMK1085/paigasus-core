@@ -199,7 +199,11 @@ tasks:
     # generate the utility the script asserts on. See ci/tailwind-source/README.md.
     #
     # SMA-512: the guard takes the app directory, because a second zone app lands in pull request
-    # 3. Each app invokes it for ITSELF, so no app's test task depends on another app's build.
+    # 3. Each app invokes the GUARD for ITSELF, so no app's copy of the guard depends on another
+    # app's build. That does not hold for the `test` task as a whole: it depends on
+    # `repo:next-env-drift` below, which carries its own `deps` on one build per app (root
+    # moon.yml), so this task already depends transitively on every app's build the drift gate
+    # is wired to, not only this one.
     script: |
       set -euo pipefail
       pnpm exec vitest run --passWithNoTests

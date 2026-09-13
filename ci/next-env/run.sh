@@ -85,12 +85,13 @@ check_app() {
 }
 
 # SMA-512: this gate checked ONE hardcoded app until a second console zone landed, and it would
-# have skipped the new one in silence. Discovery plus the set-equality assertion below is what
-# makes a future third zone impossible to miss.
+# have skipped the new one in silence. Discovery plus the subset assertion below is what makes a
+# future third zone impossible to miss. It is a SUBSET assertion, not set-equality: every
+# `ts/apps/*` directory that has a `package.json` must be in the discovered set.
 #
 # NOTE: this gate has no --self-test and no --negative-control, deliberately. Adding them costs a
 # SELF_SCHEDULED_GATES entry plus a SELF_TASK_EXPECTED_GLOBS or SELF_TASK_GLOBS_EXEMPT entry in
-# ci/affected-graph/ci_targets.py. The loop and the set-equality assertion are the control.
+# ci/affected-graph/ci_targets.py. The loop and the subset assertion are the control.
 shopt -s nullglob
 apps=()
 for cfg in ts/apps/*/next.config.[tjmc][sj]*; do
@@ -113,7 +114,7 @@ for d in ts/apps/*/; do
   [ -f "${d}package.json" ] && dirs+=("${d%/}")
 done
 missing=()
-for d in "${dirs[@]}"; do
+for d in "${dirs[@]:-}"; do
   found=0
   for a in "${apps[@]}"; do
     [ "$a" = "$d" ] && found=1
