@@ -493,8 +493,11 @@ while checking nothing:
    throws when `.next/static` is absent, `run.mjs:99`). Per-app invocation keeps every dependency
    local to the app that already builds.
 
-The self-test's and negative control's expected failure counts change with the per-app split; the
-control currently expects exactly 3 failures (`run.mjs:249`).
+**Correction found while planning.** `verdict()` is already app-agnostic: it takes `cssFiles` and
+`appFiles` as arguments, and `selfTest()` and `negativeControl()` drive it over temporary fixtures
+they build themselves. Their expected failure counts therefore do **not** change — the control's
+3 stays 3. Only `realRun()` and the module-level `CONSOLE_DIR` are app-scoped, plus one failure
+message that names `ts/apps/iam-console` in prose, which becomes a caller-supplied label.
 
 **The liveness control for this one is new.** Per-app invocation means an app could simply never
 invoke the guard. `ci/affected-graph/ci_targets.py` gains a check, run by `repo:affected-smoke`,
