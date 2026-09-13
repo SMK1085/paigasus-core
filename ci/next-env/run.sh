@@ -56,6 +56,9 @@ check_app() {
   rm -f "$FILE"
   RESTORE_FILES+=("$FILE")
 
+  # `next typegen` regenerates route/page/layout types without a full production build
+  # (~1.5s vs ~5s). It writes into "$APP"/.next/, which is why moon.yml orders this task after
+  # iam-console-ts:build rather than letting the two race on that directory.
   if ! pnpm --dir "$APP" exec next typegen >/dev/null 2>&1; then
     echo "next-env gate: 'next typegen' failed in $APP." >&2
     pnpm --dir "$APP" exec next typegen >&2 || true
@@ -124,8 +127,15 @@ if [ "${#missing[@]}" -gt 0 ]; then
   exit 2
 fi
 
+# Preserve the HIGHEST severity seen across apps: rc 2 (infrastructure failure — a missing or
+# untracked file, or a broken typegen) outranks rc 1 (content drift), because an infrastructure
+# failure must never be reported as if it were mere drift needing a commit.
 rc=0
 for APP in "${apps[@]}"; do
-  check_app "$APP" || rc=1
+  ec=0
+  check_app "$APP" || ec=$?
+  if [ "$ec" -gt "$rc" ]; then
+    rc="$ec"
+  fi
 done
 exit "$rc"
