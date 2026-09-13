@@ -18,10 +18,10 @@ import { principalPrnOf } from './principal-prn';
 
 /**
  * `prn` is `null` when IAM answered but named no principal (review, defect 1). That is NOT the
- * login-time degrade in lib/principal-resolver.ts, which discards the whole answer: here the
+ * login-time degrade in principal-resolver.ts, which discards the whole answer: here the
  * memberships IAM did send stay usable, and only the two things that need a name change — mayI()
- * cannot ask IAM about an unnamed principal (lib/authorize.ts) and myScopes() cannot list its role
- * grants (lib/scopes.ts). Both say so in the log rather than passing `''` to IAM.
+ * cannot ask IAM about an unnamed principal (authorize.ts) and myScopes() cannot list its role
+ * grants (scopes.ts). Both say so in the log rather than passing `''` to IAM.
  */
 export type Principal = { prn: string | null; memberships: readonly { nodePrn: string }[] };
 

@@ -11,7 +11,8 @@
 // file is self-contained (its only dependency is `msw` itself) and stays in the app, where its own
 // self-test (tests/integration/doubles/msw.test.ts) and other app-only integration tests keep
 // using it. Duplicating this one small helper keeps this package's tests from reaching into the
-// app for something that is not "the fake" (fake-iam.ts, deferred to task 6).
+// app for something that is not "the fake" — fake-iam.ts, which task 6 has since moved to this
+// package's own testing/ directory.
 import { http, HttpResponse, type HttpHandler } from 'msw';
 
 export function serviceInfoHandlers(httpUrl: string, body: { service: string; version: string; capabilities: string[] } | { status: number }): HttpHandler[] {

@@ -16,6 +16,14 @@ import { iamClientsForToken } from './console';
  * the header on `/auth/callback` too — the route is public, which makes the middleware allow it, not
  * skip the header. Outside a request scope `requestCorrelationId()` answers null, never throws.
  */
+// This module and ./console import from each other (this function from ./console, and ./console
+// imports authRuntime from here). What makes that cycle safe is ./console's call site, not the
+// declaration form here: it passes `authRuntime: () => authRuntime()`, a fresh arrow that
+// resolves the `authRuntime` identifier at CALL time rather than capturing the binding at
+// module-evaluation time. Next gives a route handler and a page SEPARATE module graphs
+// (CLAUDE.md, SMA-511), so both entry orders occur in production, and without that wrapper one
+// order would hit a TDZ ReferenceError if this were ever changed to `export const authRuntime =
+// () => ...`.
 export function authRuntime(): Promise<AuthRuntime> {
   return getAuthRuntime(getRuntimeConfig(), {
     logger,

@@ -24,7 +24,7 @@ const DEFAULT_TIMEOUT_MS = 3_000;
 
 export function createIntrospectPrincipalResolver(deps: {
   /**
-   * May be async: lib/auth.ts reads the request's correlation id here, so the login callback's IAM
+   * May be async: the app's `lib/auth.ts` reads the request's correlation id here, so the login callback's IAM
    * calls join the id proxy.ts minted. A factory that throws — or a promise that rejects — is a bug,
    * not an IAM answer, so it lands in the `resolve_crashed` catch below like any other throw.
    */
@@ -68,7 +68,7 @@ export function createIntrospectPrincipalResolver(deps: {
         // 3. IAM reports no role grants here (authenticate_token.rs:161-165), and the port says
         //    to treat that as UNKNOWN (ports/principal-resolver.ts:32-36).
         return {
-          // The SAME reading as the live path (lib/principal-prn.ts). The two used to disagree.
+          // The SAME reading as the live path (principal-prn.ts). The two used to disagree.
           principalPrn: principalPrnOf(me.principalPrn),
           issuer: me.issuer,
           subject: me.subject,

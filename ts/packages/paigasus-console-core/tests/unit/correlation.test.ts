@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// lib/correlation.ts: the two request headers proxy.ts sets, read back defensively.
+// correlation.ts: the two request headers proxy.ts sets, read back defensively.
 import { describe, expect, it } from 'vitest';
 import { CORRELATION_HEADER, REQUEST_PATH_HEADER, requestCorrelationId, requestPath } from '../../src/correlation';
 import { setRequestHeaders } from '../support/next-headers';

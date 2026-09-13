@@ -276,10 +276,6 @@ tasks:
       # SMA-512 task 6: the real fakes now live here, and every integration test that calls
       # startFakeIam (etc.) runs code from this path.
       - '/ts/packages/paigasus-console-core/testing/**/*'
-      # SMA-511 D6: tests/unit/prn-tenancy.test.ts replays the kernel parity corpus and pins ROOT_PRN to
-      # root_prn()'s builder call. Without these, a corpus or model.rs edit serves a cached PASS.
-      - '/rs/crates/libs/paigasus-kernel-parity/vectors/**/*'
-      - '/rs/crates/libs/paigasus-iam-core/src/authz/model.rs'
     options:
       merge: replace
 

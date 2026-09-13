@@ -7,10 +7,10 @@
 // module and resets the cache afterwards.
 //
 // SMA-512 PR 2, task 4: this used to build its config through the app's own `getRuntimeConfig()`
-// (env vars, parsed by zod). Now that discovery.ts takes a `ConsoleCoreConfig` through the
-// runtime-ports seam instead of the app's config, the test builds that plain object directly —
-// there is no zod schema in this package to parse env vars against, and none of these cases
-// exercise env parsing; they exercise descriptorCacheFor()/createAppDiscovery() themselves.
+// (env vars, parsed by zod). Now that discovery.ts takes a `ConsoleCoreConfig` plain object
+// directly as a parameter, the test builds that object directly — there is no zod schema in this
+// package to parse env vars against, and none of these cases exercise env parsing; they exercise
+// descriptorCacheFor()/createAppDiscovery() themselves.
 import { setupServer } from 'msw/node';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { DEFAULT_TIMINGS } from '@paigasus/discovery/server';

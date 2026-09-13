@@ -43,7 +43,7 @@ describe('createMayI', () => {
     expect(appEvent).toHaveBeenCalledWith('authorize.query_failed', { action: 'ListAuditLog', presentation: 'degraded' });
   });
 
-  // Review, defect 1. The live path reports an unnamed principal as `null` (lib/principal-prn.ts),
+  // Review, defect 1. The live path reports an unnamed principal as `null` (principal-prn.ts),
   // and it used to reach here as `''` — which is not null, so every affordance asked IAM about an
   // empty PRN, IAM refused with InvalidArgument, and the control rendered anyway. Two halves:
   // no call reaches IAM, and the fail-open answer is LOGGED rather than silent.
@@ -68,7 +68,7 @@ describe('createMayI', () => {
     expect(appEvent.mock.calls.map(([, fields]) => (fields as { action: string }).action)).toEqual(['CreateTeam', 'AttachMembership']);
   });
 
-  // An empty PRN is not a principal. Without lib/principal-prn.ts it arrives here verbatim, and
+  // An empty PRN is not a principal. Without principal-prn.ts it arrives here verbatim, and
   // this asserts what the console must never send.
   it('never asks IAM about an empty principal PRN', async () => {
     const { authz, calls } = fakeAuthz(() => false);

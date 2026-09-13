@@ -14,7 +14,7 @@
 // should be hidden then shows, and IAM still denies the action. A null principal (IAM could not
 // say who this is) also answers true, for the same reason — and logs `authorize.no_principal`, so
 // that answer is never SILENT (review, defect 1). It reaches here two ways, and both are covered:
-// a failed Introspect, and an Introspect that succeeded but named no principal (lib/principal-prn.ts).
+// a failed Introspect, and an Introspect that succeeded but named no principal (principal-prn.ts).
 // The second used to arrive as the empty string, which is not null: every affordance then asked IAM
 // `isAuthorized({ principalPrn: '' })`, got InvalidArgument, and rendered anyway.
 import 'server-only';

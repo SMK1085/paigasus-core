@@ -38,7 +38,6 @@
     "msw": "catalog:",
     "next": "catalog:",
     "react": "catalog:",
-    "testcontainers": "catalog:",
     "typescript": "catalog:",
     "vitest": "catalog:"
   }

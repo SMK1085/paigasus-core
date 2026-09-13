@@ -63,7 +63,7 @@ export function neverReachedIam(fields: Pick<PaigasusError, 'presentation' | 'me
  *
  * `presentation: 'relogin'` makes `FormError` render the `SignInAgain` LINK (spec § 6.4: relogin is
  * a link, never an automatic redirect). That link is what keeps the browser inside the zone — see
- * `iam.ts`'s `iamClientsForAction` for why a Server Action must not redirect here.
+ * `runtime.ts`'s `iamClientsForAction` for why a Server Action must not redirect here.
  */
 export function sessionExpired(): PaigasusError {
   return neverReachedIam({ presentation: 'relogin', message: 'The session has ended.', transport: { kind: 'http', status: 401 } });

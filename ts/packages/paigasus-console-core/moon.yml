@@ -4,9 +4,18 @@ id: 'paigasus-console-core-ts'
 layer: 'library'
 language: 'typescript'
 
-# BOTH are required and neither implies the other. `dependsOn` is what `moon query projects
-# --affected` follows; task `inputs` are the ONLY thing that makes a DOWNSTREAM task affected
-# (CLAUDE.md, Moon 2.5.3).
+# THREE things are required and none implies another. `dependsOn` is what `moon query projects
+# --affected` follows; task `inputs` are the ONLY thing that confers affectedness on a
+# DOWNSTREAM task (CLAUDE.md, Moon 2.5.3); and a task-level `deps: ['contracts:generate']` is the
+# ONLY thing that ORDERS this package's tasks after the generator that writes the tree they read.
+# contracts:generate runs `buf generate` with `clean: true`, which DELETES
+# ts/packages/paigasus-proto/src/generated/** before rewriting it, so a task scheduled inside that
+# ~11s window compiles or runs against a half-deleted tree — see
+# ts/packages/paigasus-discovery/moon.yml for the CI measurement of exactly that failure.
+# `testing/fake-iam.ts` imports `@paigasus/proto` and `@paigasus/proto/iam` directly, and
+# `tsconfig.json` includes `testing/**/*`, so `build` and `typecheck` compile that tree;
+# `src/iam-clients.ts` and `src/errors.ts` reach it through `@paigasus/sdk`; and `test` loads
+# `testing/fake-iam.ts` at run time. All three tasks below therefore carry the `deps` line.
 dependsOn:
   - 'paigasus-auth-ts'
   - 'paigasus-sdk-ts'
@@ -15,6 +24,7 @@ dependsOn:
 
 tasks:
   build:
+    deps: ['contracts:generate']
     inputs: &upstreams
       - '/ts/packages/paigasus-auth/src/**/*'
       - '/ts/packages/paigasus-auth/package.json'
@@ -28,8 +38,10 @@ tasks:
       # outside src/, so @group(sources) does not cover it.
       - 'testing/**/*'
   typecheck:
+    deps: ['contracts:generate']
     inputs: *upstreams
   test:
+    deps: ['contracts:generate']
     inputs:
       - 'vitest.config.ts'
       - 'testing/**/*'

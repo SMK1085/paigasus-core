@@ -96,7 +96,7 @@ export async function loadMyScopes(deps: {
   principal: Principal;
   cedarCapability: boolean;
 }): Promise<MyScopes> {
-  // An unnamed principal (spec § 4.5; lib/principal-prn.ts) cannot be the subject of ListRoleGrants,
+  // An unnamed principal (spec § 4.5; principal-prn.ts) cannot be the subject of ListRoleGrants,
   // so the walk is SKIPPED rather than sent with an empty PRN — which IAM refuses with
   // InvalidArgument, costing a round trip to reach the same "memberships only" page (review,
   // defect 1). The memberships IAM did send are still listed.
@@ -121,7 +121,7 @@ export function cedarCapabilityOf(state: ServiceState): boolean {
  * The organization switcher's entries (spec § 5.4): one per ORGANIZATION scope of the same
  * myScopes() result the page shows. A row with no name shows its UUID. A failed myScopes() gives
  * no switcher, not a failed layout. Plain data: OrgSwitcherShell (a client component) builds the
- * hrefs. The shape is app/_components/org-switcher.tsx's OrgSwitcherOrg; lib/ does not import app/.
+ * hrefs. The shape is app/_components/org-switcher.tsx's OrgSwitcherOrg; this package's src/ does not import app/.
  */
 export function switcherOrgs(scopes: IamResult<MyScopes>): { orgId: string; label: string }[] {
   if (!scopes.ok) return [];

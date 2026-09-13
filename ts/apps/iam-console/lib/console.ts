@@ -10,8 +10,14 @@ import { createConsoleRuntime, logger } from '@paigasus/console-core';
 import { authRuntime } from './auth';
 import { getRuntimeConfig } from './config';
 
+// `authRuntime: () => authRuntime()` wraps the import in a fresh arrow rather than passing the
+// imported binding straight through. This module and ./auth import from each other, and Next
+// gives a route handler and a page SEPARATE module graphs (CLAUDE.md, SMA-511), so both entry
+// orders occur in production. The wrapper resolves the `authRuntime` identifier at CALL time, not
+// at module-evaluation time, so it stays safe no matter which declaration form ./auth uses — a
+// hoisted `export function` or a plain `export const` alike.
 export const { currentSession, optionalSession, sessionToken, iamClients, iamClientsForAction, iamClientsForToken, currentPrincipal, mayI, myScopes, discovery } = createConsoleRuntime({
   config: () => getRuntimeConfig(),
-  authRuntime,
+  authRuntime: () => authRuntime(),
   logger,
 });
