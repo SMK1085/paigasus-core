@@ -112,7 +112,7 @@ function checkActionsSource(file: string, text: string): { names: string[]; viol
     if (value.body === undefined) violations.push(`${file}: export ${value.name} is not a function whose body this test can read`);
     else if (!callsActionClients(value.body)) violations.push(`${file}: export ${value.name} does not call iamClientsForAction()`);
   }
-  // createIamClients? covers both lib/iam-clients.ts' createIamClients and the SDK's createIamClient.
+  // createIamClients? covers both @paigasus/console-core's iam-clients.ts' createIamClients and the SDK's createIamClient.
   if (/\b(?:iamClientsForToken|createIamClients?)\b/.test(text)) violations.push(`${file}: builds an IAM client without a session`);
   // `iamClients` is the PAGE accessor. It redirects, and a Server Action's redirect leaves the zone.
   if (namesIdentifier(source, 'iamClients')) violations.push(`${file}: uses the redirecting iamClients()`);

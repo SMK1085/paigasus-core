@@ -10,7 +10,8 @@
 // test cannot see the organizations of an earlier test. R6 uses it to prove that the action
 // refreshes the page (P5b-16).
 //
-// PRNs are literal strings: lib/prn-tenancy.ts imports server-only, which throws under Playwright.
+// PRNs are literal strings: @paigasus/console-core's prn-tenancy.ts imports server-only, which
+// throws under Playwright.
 import { Code } from '@connectrpc/connect';
 import { denial, type FakeIamHandlers } from '@paigasus/console-core/testing';
 
@@ -35,7 +36,7 @@ export const PROJECT_NAME = 'Inference Gateway';
 export const OTHER_PROJECT_NAME = 'Shared Models';
 export const AUDIT_ACTION = 'CreateTeam';
 
-/** The Cedar action names the app asks IsAuthorized about (lib/authorize.ts IamAction). */
+/** The Cedar action names the app asks IsAuthorized about (@paigasus/console-core's authorize.ts IamAction). */
 export const ALL_ACTIONS = ['ListOrganizations', 'CreateOrganization', 'CreateTeam', 'CreateProject', 'AttachMembership', 'DetachMembership', 'ListAuditLog'] as const;
 
 export type Descriptor = { service: string; version: string; capabilities: string[] } | { status: number };
