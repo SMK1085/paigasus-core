@@ -39,10 +39,7 @@ describe('nextAppRules', () => {
 
   it('gives every block its OWN rootDir', () => {
     const blocks = nextAppRules({ appsDir: '/repo/ts/apps', appNames: ['a', 'b'], plugin });
-    expect(blocks.map((b) => b.settings.next.rootDir)).toEqual([
-      join('/repo/ts/apps', 'a'),
-      join('/repo/ts/apps', 'b'),
-    ]);
+    expect(blocks.map((b) => b.settings.next.rootDir)).toEqual([join('/repo/ts/apps', 'a'), join('/repo/ts/apps', 'b')]);
   });
 
   it('carries the plugin and its recommended rules', () => {

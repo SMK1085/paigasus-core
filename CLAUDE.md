@@ -1028,6 +1028,16 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   bash 5.3.15 deadlocks on a `while read` fed by a here-string over roughly 512 bytes on this class
   of machine. Keep both facts together: fixing one gate's bash version by copying the other's
   breaks it.
+  MEASURED (SMA-512): a third gate pair needs the OTHER bash version too. `ci/ruff/run.sh`
+  (lines 114, 239) and `ci/next-public/run.sh` (lines 151-198) both call `mapfile`, a bash-4+
+  builtin absent from system `/bin/bash` 3.2.57 — under it, both gates fail every self-test row
+  (`mapfile: command not found`, read as an ordinary assertion failure, not an infrastructure
+  error). Both pass cleanly under `/opt/homebrew/bin/bash` 5.3.15. So on this class of machine, no
+  single local bash satisfies every gate: `repo:affected-smoke` needs 3.2 (no `mapfile`, and no
+  here-string deadlock), while `repo:ruff-ci`, `repo:next-public-free` and `repo:actionlint` need
+  4+. A local full-graph `moon ci` run must pick one bash for the whole invocation, then re-run the
+  gates that need the other bash directly (`<bash-binary> ci/<gate>/run.sh`) and read those results
+  instead of the `moon ci` verdict for them. CI runs a single Linux bash and never sees this split.
 
 ## Workflow
 
