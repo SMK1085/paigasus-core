@@ -5,7 +5,7 @@
 // And mayI() only hides: a Server Action whose button is hidden still reaches IAM. R6 posts through
 // the REAL browser form, rendered while mayI() said yes, after IsAuthorized has flipped to no.
 import { PRESENTATION_COPY } from '../../app/_components/error-copy';
-import { denial } from '../support/fake-iam';
+import { denial } from '@paigasus/console-core/testing';
 import { forbiddenViewCorrelation } from './support/correlation';
 import { signIn } from './support/login';
 import { ALL_ACTIONS, ORG_ID, ORG_NAME, ORG_PRN } from './support/world';

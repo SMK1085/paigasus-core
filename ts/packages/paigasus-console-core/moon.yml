@@ -44,6 +44,3 @@ tasks:
       # The parity corpus and the Rust constant the PRN reader is held to.
       - '/rs/crates/libs/paigasus-kernel-parity/vectors/**/*'
       - '/rs/crates/libs/paigasus-iam-core/src/authz/model.rs'
-      # TEMPORARY (SMA-512 PR 2, task 3 → task 6): tests/integration/error-info-round-trip.test.ts
-      # reaches into the app's tests/support/fake-iam.ts until task 6 moves the fakes to ./testing.
-      - '/ts/apps/iam-console/tests/support/fake-iam.ts'

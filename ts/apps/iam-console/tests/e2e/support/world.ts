@@ -12,7 +12,7 @@
 //
 // PRNs are literal strings: lib/prn-tenancy.ts imports server-only, which throws under Playwright.
 import { Code } from '@connectrpc/connect';
-import { denial, type FakeIamHandlers } from '../../support/fake-iam';
+import { denial, type FakeIamHandlers } from '@paigasus/console-core/testing';
 
 export const PRINCIPAL_PRN = 'prn:pgs:iam:::principal/0190a1e5-0000-7000-8000-0000000000e0';
 export const ORG_ID = '0190a100-0000-7000-8000-0000000000e1';

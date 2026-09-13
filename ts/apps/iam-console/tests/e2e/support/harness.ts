@@ -14,10 +14,7 @@ import { once } from 'node:events';
 import { createServer } from 'node:net';
 import path from 'node:path';
 import { test as base } from '@playwright/test';
-import { startFakeIam, type FakeIam } from '../../support/fake-iam';
-import { startFakeIdp, type FakeIdp } from '../../support/fake-idp';
-import { testTls } from '../../support/tls';
-import { startTlsTerminator } from '../../support/tls-terminator';
+import { startFakeIam, startFakeIdp, startTlsTerminator, testTls, type FakeIam, type FakeIdp } from '@paigasus/console-core/testing';
 import { STANDALONE_APP_DIR } from './paths';
 import { DEFAULT_DESCRIPTOR, worldHandlers, type WorldOptions } from './world';
 

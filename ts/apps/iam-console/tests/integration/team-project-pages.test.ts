@@ -13,7 +13,7 @@ import { loadTeamPage } from '../../app/(console)/orgs/[org]/teams/[team]/load';
 import { loadProjectPage } from '../../app/(console)/orgs/[org]/teams/[team]/projects/[project]/load';
 import { PAGE_SIZE } from '../../lib/paging';
 import { organizationPrn, projectPrn, teamPrn } from '@paigasus/console-core';
-import { denial, startFakeIam, type FakeIam, type FakeIamHandlers } from '../support/fake-iam';
+import { denial, startFakeIam, type FakeIam, type FakeIamHandlers } from '@paigasus/console-core/testing';
 import { IDS, callsSince, clientsFor, scriptedMayI } from './support';
 
 let iam: FakeIam;

@@ -3,8 +3,7 @@ import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { httpsRequest } from '../../support/https-client';
-import { startTlsTerminator } from '../../support/tls-terminator';
-import { testTls, type TlsMaterial } from '../../support/tls';
+import { startTlsTerminator, testTls, type TlsMaterial } from '@paigasus/console-core/testing';
 
 describe('the TLS terminator', () => {
   let tls: TlsMaterial;

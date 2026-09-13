@@ -2,9 +2,8 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createLocalJWKSet, jwtVerify, type JSONWebKeySet } from 'jose';
-import { startFakeIdp, type FakeIdp } from '../../support/fake-idp';
+import { startFakeIdp, testTls, type FakeIdp, type TlsMaterial } from '@paigasus/console-core/testing';
 import { httpsRequest } from '../../support/https-client';
-import { testTls, type TlsMaterial } from '../../support/tls';
 
 const REDIRECT = 'https://127.0.0.1:9/iam/auth/callback';
 

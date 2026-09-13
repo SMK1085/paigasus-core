@@ -9,7 +9,7 @@ import { ErrorReason } from '@paigasus/sdk/errors/types';
 import { disposeTransports } from '@paigasus/sdk/iam';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createOrganization, createOrganizationForm } from '../../app/(console)/orgs/commands';
-import { denial, startFakeIam, type FakeIam } from '../support/fake-iam';
+import { denial, startFakeIam, type FakeIam } from '@paigasus/console-core/testing';
 import { callsSince, clientsFor } from './support';
 
 let iam: FakeIam;

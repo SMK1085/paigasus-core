@@ -11,8 +11,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { organizationPrn, ROOT_PRN, projectPrn, teamPrn } from '../../src/prn-tenancy';
 import { SCOPE_CAP, cedarCapabilityOf, loadMyScopes } from '../../src/scopes';
 import { createIamClients } from '../../src/iam-clients';
-// TEMPORARY (SMA-512 PR 2, task 3 → task 6): the fakes move to ./testing in task 6.
-import { denial, startFakeIam, type FakeIam, type FakeIamCall, type FakeIamHandlers, type FakeIamMethod } from '../../../../apps/iam-console/tests/support/fake-iam';
+import { denial, startFakeIam, type FakeIam, type FakeIamCall, type FakeIamHandlers, type FakeIamMethod } from '@paigasus/console-core/testing';
 
 // A subset of ts/apps/iam-console/tests/integration/support.ts's IDS, and its callsSince(),
 // duplicated here rather than imported: that file also serves app-only integration tests that are

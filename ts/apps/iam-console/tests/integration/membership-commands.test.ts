@@ -9,7 +9,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createTeam, createTeamForm } from '../../app/(console)/orgs/[org]/commands';
 import { attachMembership, attachMembershipForm, detachMembership, detachMembershipForm } from '../../app/(console)/orgs/commands';
 import { organizationPrn, teamPrn } from '@paigasus/console-core';
-import { denial, startFakeIam, type FakeIam } from '../support/fake-iam';
+import { denial, startFakeIam, type FakeIam } from '@paigasus/console-core/testing';
 import { IDS, callsSince, clientsFor } from './support';
 
 let iam: FakeIam;

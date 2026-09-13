@@ -6,8 +6,7 @@ import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vites
 import { disposeTransports } from '@paigasus/sdk/iam';
 import { createMayI } from '../../src/authorize';
 import { createIamClients } from '../../src/iam-clients';
-// TEMPORARY (SMA-512 PR 2, task 3 → task 6): the fakes move to ./testing in task 6.
-import { denial, startFakeIam, type FakeIam } from '../../../../apps/iam-console/tests/support/fake-iam';
+import { denial, startFakeIam, type FakeIam } from '@paigasus/console-core/testing';
 
 const ORG = 'prn:pgs:iam::0192f1c0-0000-7000-8000-000000000002:organization/0192f1c0-0000-7000-8000-000000000002';
 

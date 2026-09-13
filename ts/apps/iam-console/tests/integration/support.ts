@@ -4,7 +4,7 @@
 // exercises the SDK's transport and error map, not a hand-built object.
 import { AuditService, AuthorizationService, TenancyService, createIamClient } from '@paigasus/sdk/iam';
 import type { IamAction, MayI } from '@paigasus/console-core';
-import type { FakeIam, FakeIamCall, FakeIamMethod } from '../support/fake-iam';
+import type { FakeIam, FakeIamCall, FakeIamMethod } from '@paigasus/console-core/testing';
 
 /** Fixed UUIDs. `a` sorts before `b`, so orgA's scopes come first in every list. */
 export const IDS = {
