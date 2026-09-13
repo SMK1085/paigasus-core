@@ -919,6 +919,13 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   literal `./@/components/` directory; every component here is hand-written. Read
   `ts/packages/paigasus-ui/README.md`'s "The `shadcn` CLI is not usable in this package" before
   running it. (SMA-503)
+  Since SMA-512 the guard is **per app**: `ci/tailwind-source/run.mjs --app <dir>`, invoked by each
+  app's own `test` task, and a BARE run now exits 2 rather than silently checking `iam-console`.
+  `TAILWIND_GUARD_INVOCATIONS` in `ci/affected-graph/ci_targets.py` fails `repo:affected-smoke` if
+  a `ts/apps/*` project does not invoke all three modes for itself. `repo:next-env-drift` and the
+  Next ESLint blocks are app-agnostic too: the first discovers `ts/apps/*/next.config.*` and
+  asserts the discovered set equals the `ts/apps/*` directory set, and `ts/eslint.config.js`
+  derives one block per app directory. The next-env gate still has **no negative control**.
 - **Turbopack (Next 16.3.4) does NOT resolve a `.js` relative specifier to a `.ts` file** (MEASURED,
   SMA-510): `import { x } from './a.js'` with only `a.ts` on disk fails `next build` with `Module not
   found`, in app code and in a workspace package's source alike. A clause-level `import type … from
