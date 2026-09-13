@@ -10,13 +10,8 @@ import { revalidatePath } from 'next/cache';
 import type { ActionState } from '../../../lib/errors';
 import { formFields, invalidFormInput } from '../../../lib/form';
 import { iamClientsForAction } from '../../../lib/iam';
+import { TENANCY_PATH } from '../../../lib/tenancy-path';
 import { attachMembership, attachMembershipForm, createOrganization, createOrganizationForm, detachMembership, detachMembershipForm } from './commands';
-
-/**
- * basePath-relative. Route groups such as (console) are not part of the URL path, so '/orgs' with
- * 'layout' covers every page under /orgs. Task 22's e2e test asserts that a created organization appears.
- */
-const TENANCY_PATH = '/orgs';
 
 export async function createOrganizationAction(_previous: ActionState, form: FormData): Promise<ActionState> {
   const clients = await iamClientsForAction();

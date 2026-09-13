@@ -7,9 +7,8 @@
 import type { ReactElement } from 'react';
 import type { PaigasusError } from '@paigasus/sdk/errors';
 import { EmptyState, ErrorState } from '@paigasus/ui';
-import { requestPath } from '../../lib/correlation';
+import { errorTail } from './error-tail';
 import { PRESENTATION_COPY } from './error-copy';
-import { CorrelationReference, SignInAgain } from './error-reference';
 
 export async function SectionError({ error }: { error: PaigasusError }): Promise<ReactElement> {
   const copy = PRESENTATION_COPY[error.presentation];
@@ -23,7 +22,7 @@ export async function SectionError({ error }: { error: PaigasusError }): Promise
   return (
     <div data-testid="section-error" data-presentation={error.presentation}>
       <ErrorState title={copy.title} description={copy.body} />
-      {error.presentation === 'relogin' ? <SignInAgain returnTo={await requestPath()} /> : <CorrelationReference id={error.correlationId} />}
+      {await errorTail(error)}
     </div>
   );
 }

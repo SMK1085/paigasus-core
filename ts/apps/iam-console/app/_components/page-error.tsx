@@ -15,9 +15,8 @@ import type { ReactElement } from 'react';
 import { forbidden, notFound } from 'next/navigation';
 import type { PaigasusError } from '@paigasus/sdk/errors';
 import { EmptyState, ErrorState } from '@paigasus/ui';
-import { requestPath } from '../../lib/correlation';
+import { errorTail } from './error-tail';
 import { PRESENTATION_COPY } from './error-copy';
-import { CorrelationReference, SignInAgain } from './error-reference';
 
 export async function PageError({ error }: { error: PaigasusError }): Promise<ReactElement> {
   if (error.presentation === 'forbidden') forbidden();
@@ -33,7 +32,7 @@ export async function PageError({ error }: { error: PaigasusError }): Promise<Re
   return (
     <section className="p-8" data-testid="page-error" data-presentation={error.presentation}>
       <ErrorState title={copy.title} description={copy.body} />
-      {error.presentation === 'relogin' ? <SignInAgain returnTo={await requestPath()} /> : <CorrelationReference id={error.correlationId} />}
+      {await errorTail(error)}
     </section>
   );
 }

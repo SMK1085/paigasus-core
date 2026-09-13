@@ -25,13 +25,14 @@ export async function callIam<T>(fn: () => Promise<T>): Promise<IamResult<T>> {
     // One line per failed call. It carries the correlation id IAM put into the error AND the one
     // proxy.ts minted for this request, so an operator can join the console log to IAM's even when
     // the 403 view shows no id (the spec § 6.2 fallback).
+    const [requestCorrelation, path] = await Promise.all([requestCorrelationId(), requestPath()]);
     logger.appEvent('iam.call_failed', {
       presentation: error.presentation,
       reason: error.rawReason,
       code: error.transport.kind === 'grpc' ? error.transport.codeName : null,
       correlation_id: error.correlationId,
-      request_correlation_id: await requestCorrelationId(),
-      path: await requestPath(),
+      request_correlation_id: requestCorrelation,
+      path,
     });
     return { ok: false, error };
   }
