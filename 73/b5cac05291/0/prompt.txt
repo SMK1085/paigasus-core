@@ -1265,3 +1265,7 @@ I ran `python3 ci/affected-graph/ci_targets.py --self-test` (`ci-targets self-te
 ---
 
 run stage 5 and 6
+
+---
+
+run stage 7
