@@ -9,6 +9,8 @@ import jsxA11y from 'eslint-plugin-jsx-a11y';
 import nextPlugin from '@next/eslint-plugin-next';
 import { boundaryRules, nextAppRules, sourceRules } from '@paigasus/next-config/eslint';
 
+const appsDir = path.join(import.meta.dirname, 'apps');
+
 export default tseslint.config(
   // NOTE: adding 'packages/**' or 'apps/**' here switches every boundary block off for real code.
   // `tests/boundaries.test.ts` lints through THIS file with no config override for that reason.
@@ -56,8 +58,8 @@ export default tseslint.config(
    * only to supply the app list. paigasus-next-config-ts:test asserts this spread is still here.
    */
   ...nextAppRules({
-    appsDir: path.join(import.meta.dirname, 'apps'),
-    appNames: readdirSync(path.join(import.meta.dirname, 'apps'), { withFileTypes: true })
+    appsDir,
+    appNames: readdirSync(appsDir, { withFileTypes: true })
       .filter((entry) => entry.isDirectory())
       .map((entry) => entry.name)
       .sort(),

@@ -18,7 +18,9 @@ tasks:
       - 'package.json'
       - '/ts/eslint.config.js'
       - '/ts/pnpm-lock.yaml'
-      # SMA-512: adding or removing an app changes the derived Next block set, which
-      # tests/next-app-rules.test.ts asserts. Without this input that test serves a cached pass on
-      # the PR that adds a second app.
+      # SMA-512: tests/next-app-rules.test.ts reads ts/apps with readdirSync and asserts the
+      # shipped ts/eslint.config.js carries exactly one Next block per app directory found there.
+      # Adding or removing an app changes that directory listing and so changes what the test
+      # asserts. Without this input, Moon serves a cached PASS on the PR that adds a second app —
+      # the exact PR the assertion exists to catch.
       - '/ts/apps/*/package.json'
