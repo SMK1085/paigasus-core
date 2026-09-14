@@ -2155,3 +2155,32 @@ unlocked
 ---
 
 1pw is unlocked
+
+---
+
+<task-notification>
+<task-id>bcbu0i9v0</task-id>
+<summary>Monitor event: "PR 239 CI checks (emits every terminal result, pass or fail)"</summary>
+<event>assemble + verify (dry-run, no publish): pass
+build darwin-arm64 + darwin-x64: pass
+build linux-arm64-gnu: pass
+build linux-arm64-musl: pass
+build linux-x64-gnu: pass
+build linux-x64-musl: pass
+build win32-x64-msvc: pass
+CodeRabbit: pass
+license/cla: pass
+moon ci: fail
+PR 239 HAS FAILURES — actionlint was the unverified one</event>
+If this event is something the user would act on now, send a PushNotification. Routine or benign output doesn't need one.
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>bcbu0i9v0</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/0163cf9a-0457-4fcf-af47-2cd420fc6a77/tasks/bcbu0i9v0.output</output-file>
+<status>completed</status>
+<summary>Monitor "PR 239 CI checks (emits every terminal result, pass or fail)" stream ended</summary>
+</task-notification>
