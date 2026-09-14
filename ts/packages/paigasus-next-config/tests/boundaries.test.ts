@@ -378,11 +378,15 @@ describe('the workspace eslint config actually applies the preset', () => {
     ['a proto SUBPATH', "import { TenancyService } from '@paigasus/proto/iam';\nexport const y = TenancyService;\n"],
   ];
 
-  it.each(TEST_DOUBLE_IMPORTS)('an app test double under tests/support may import %s, through the REAL config', async (_label, source) => {
-    const ignored = await new ESLint({ cwd: TS_ROOT }).isPathIgnored(TEST_DOUBLE_PATH);
-    expect(ignored, 'the real config does not lint this path, so an empty result would prove nothing').toBe(false);
-    expect(await realConfigRestrictedImportsFor(TEST_DOUBLE_PATH, source)).toEqual([]);
-  }, 30_000);
+  it.each(TEST_DOUBLE_IMPORTS)(
+    'an app test double under tests/support may import %s, through the REAL config',
+    async (_label, source) => {
+      const ignored = await new ESLint({ cwd: TS_ROOT }).isPathIgnored(TEST_DOUBLE_PATH);
+      expect(ignored, 'the real config does not lint this path, so an empty result would prove nothing').toBe(false);
+      expect(await realConfigRestrictedImportsFor(TEST_DOUBLE_PATH, source)).toEqual([]);
+    },
+    30_000,
+  );
 
   // The DENIED twin: the same import one directory over, through the same config. If the exemption
   // is widened (for example to `apps/*/tests/**`), this case fails.
