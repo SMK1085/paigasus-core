@@ -17,6 +17,9 @@ fileGroups:
     - 'apps/*/lib/**/*'
     # SMA-511: a zone app's proxy, for the same reason.
     - 'apps/*/proxy.ts'
+    # SMA-512: a package's testing/ subpath (e.g. paigasus-console-core's in-process fakes). Without
+    # this, ts:lint does not key on packages/*/testing and an edit there serves a cached lint pass.
+    - 'packages/*/testing/**/*'
     - 'tooling/**/*' # SMA-406 parity helpers; lint/fmt lint the whole tree, so the cache must track these too
   tests:
     - 'packages/*/tests/**/*'

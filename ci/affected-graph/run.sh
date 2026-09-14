@@ -559,6 +559,23 @@ run_suite() {
     "paigasus-console-core-ts:build,paigasus-console-core-ts:test,iam-console-ts:build,iam-console-ts:test,iam-console-ts:test-e2e,ts:lint"
   run_task_case_ci "console-core-prn-tenancy->consumers" "ts/packages/paigasus-console-core/src/prn-tenancy.ts" \
     "paigasus-console-core-ts:build,paigasus-console-core-ts:test,iam-console-ts:build,iam-console-ts:test,iam-console-ts:test-e2e,ts:lint"
+  # new (SMA-512, review finding I2) — the two cases above anchor on `src/**/*` only. Nothing
+  # anchored on `testing/**/*`, the package's in-process fakes (fake-iam.ts, fake-idp.ts, tls.ts,
+  # tls-terminator.ts, index.ts), even though iam-console's `typecheck`, `test` and `test-e2e`
+  # each list '/ts/packages/paigasus-console-core/testing/**/*' in their own `inputs` for exactly
+  # this reason. Without this case, dropping `testing/**/*` from `test-e2e`'s inputs would leave
+  # every gate green while an edit to `fake-iam.ts` served a cached e2e verdict — and the e2e tier
+  # is the only control for several spec rows. One anchor closes two findings at once: I1 added
+  # 'packages/*/testing/**/*' to ts/moon.yml's `sources` fileGroup (without it, ts:lint does not
+  # key on this directory), so this case's expected set is what pins THAT fact too — `ts:lint`
+  # is in the expected set below because of I1, not because of anything already in this file.
+  # The expected set is DERIVED with the same no-flag `moon query tasks --affected` traversal
+  # `_assert_task_case_impl` uses, not typed by hand:
+  #   printf '%s\n' ts/packages/paigasus-console-core/testing/fake-iam.ts | moon query tasks --affected | ...
+  # `iam-console-ts:build` is correctly ABSENT: build's own `inputs` never lists `testing/**/*`
+  # (only typecheck/test/test-e2e do), so a testing/ edit does not rebuild the app, only test it.
+  run_task_case_ci "console-core-testing->consumers" "ts/packages/paigasus-console-core/testing/fake-iam.ts" \
+    "paigasus-console-core-ts:build,paigasus-console-core-ts:test,iam-console-ts:test,iam-console-ts:test-e2e,ts:lint"
   # SMA-625, spec § 8.4 and § 11.2 obligation 9 — a gateway chat.rs edit must select the SDK's
   # test. This is the ONLY control on the '/rs/.../chat.rs' entry in paigasus-sdk-ts:test's
   # `inputs`. tests/terminal-frame.test.ts reads TERMINAL_SSE_ERROR out of that Rust file by
