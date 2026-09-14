@@ -58,6 +58,11 @@ describe('nextAppRules', () => {
 
 /** Mirrors the existing boundaryRules/sourceRules spread assertions. */
 describe('ts/eslint.config.js', () => {
+  // 30s, not vitest's default 5s: this test boots a real ESLint against the SHIPPED flat
+  // config, and the FIRST such call in a file pays the whole config-resolution cost — the
+  // siblings after it run in tens of milliseconds. It timed out on CI (9.7s and 5.9s) while
+  // passing locally, because a cold runner resolves every workspace package from scratch.
+  // The timeout is the cost of the real-config assertion, not slack for a slow unit test.
   it('carries a Next block for the app that exists today', async () => {
     const nextBlocks = await nextBlocksInShippedConfig();
     // Computed the same way ts/eslint.config.js computes it (three levels up from this test file
@@ -70,8 +75,13 @@ describe('ts/eslint.config.js', () => {
         settings: { next: { rootDir: expectedRootDir } },
       }),
     );
-  });
+  }, 30_000);
 
+  // 30s, not vitest's default 5s: this test boots a real ESLint against the SHIPPED flat
+  // config, and the FIRST such call in a file pays the whole config-resolution cost — the
+  // siblings after it run in tens of milliseconds. It timed out on CI (9.7s and 5.9s) while
+  // passing locally, because a cold runner resolves every workspace package from scratch.
+  // The timeout is the cost of the real-config assertion, not slack for a slow unit test.
   it('carries exactly one Next block per app directory actually on disk', async () => {
     // The regression this task exists to prevent: a hardcoded appNames LIST would still satisfy
     // the case above (today there is only one app), so this asserts against the real filesystem
@@ -87,7 +97,7 @@ describe('ts/eslint.config.js', () => {
     // (all real strings), so the assertion still fails loudly rather than passing vacuously.
     const shippedFiles = nextBlocks.map((block) => block.files?.[0]).sort();
     expect(shippedFiles).toEqual(appNames.map((name) => `apps/${name}/**/*.{ts,tsx}`));
-  });
+  }, 30_000);
 
   it('no longer carries the old single hardcoded block', () => {
     // Cheap regression guard for the specific shape removed by this task, kept alongside the

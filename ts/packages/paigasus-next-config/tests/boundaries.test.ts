@@ -305,17 +305,27 @@ async function realConfigRestrictedImportsFor(filePath: string, source: string):
 describe('the workspace eslint config actually applies the preset', () => {
   // The file need not exist on disk — lintText takes the source and the path it is to be judged
   // as. A path under packages/ is what an `ignores: ['packages/**']` entry would silence.
+  // 30s, not vitest's default 5s: this test boots a real ESLint against the SHIPPED flat
+  // config, and the FIRST such call in a file pays the whole config-resolution cost — the
+  // siblings after it run in tens of milliseconds. It timed out on CI (9.7s and 5.9s) while
+  // passing locally, because a cold runner resolves every workspace package from scratch.
+  // The timeout is the cost of the real-config assertion, not slack for a slow unit test.
   it('lints a denied packages/ import through the REAL config, not an override', async () => {
     const messages = await realConfigRestrictedImportsFor('packages/paigasus-ui/src/probe.mjs', "import { x } from '@paigasus/sdk';\nexport const y = x;\n");
     expect(messages, 'ts/eslint.config.js did not apply the ui boundary rule to a packages/ path — check its global `ignores` array').not.toHaveLength(0);
-  });
+  }, 30_000);
 
   // The apps/ half, because a single `ignores` entry silences one tree at a time: `'packages/**'`
   // leaves the row above red and this one green, and `'apps/**'` does the reverse.
+  // 30s, not vitest's default 5s: this test boots a real ESLint against the SHIPPED flat
+  // config, and the FIRST such call in a file pays the whole config-resolution cost — the
+  // siblings after it run in tens of milliseconds. It timed out on CI (9.7s and 5.9s) while
+  // passing locally, because a cold runner resolves every workspace package from scratch.
+  // The timeout is the cost of the real-config assertion, not slack for a slow unit test.
   it('lints a denied apps/ import through the REAL config, not an override', async () => {
     const messages = await realConfigRestrictedImportsFor('apps/iam-console/app/probe.mjs', "import { x } from '@paigasus/proto';\nexport const y = x;\n");
     expect(messages, 'ts/eslint.config.js did not apply the apps boundary rule to an apps/ path — check its global `ignores` array').not.toHaveLength(0);
-  });
+  }, 30_000);
 
   it('carries every boundary entry in its EXPORTED array, not merely as an import', async () => {
     // Importing the real config is what makes this an assertion rather than a text scan: a dead
@@ -340,6 +350,11 @@ describe('the workspace eslint config actually applies the preset', () => {
   // here. The path is a REAL, tracked file: the shipped config lints every .ts path with
   // projectService, and a path no tsconfig includes gives one fatal parse error and runs no rule.
   // lintText uses the source given here, not the file on disk.
+  // 30s, not vitest's default 5s: this test boots a real ESLint against the SHIPPED flat
+  // config, and the FIRST such call in a file pays the whole config-resolution cost — the
+  // siblings after it run in tens of milliseconds. It timed out on CI (9.7s and 5.9s) while
+  // passing locally, because a cold runner resolves every workspace package from scratch.
+  // The timeout is the cost of the real-config assertion, not slack for a slow unit test.
   it('lints a .js relative specifier in package src through the REAL config', async () => {
     const eslint = new ESLint({ cwd: TS_ROOT });
     const [result] = await eslint.lintText("import { SESSION_VIEW_KEYS } from './core/session.js';\nexport const keys = SESSION_VIEW_KEYS;\n", {
@@ -367,12 +382,17 @@ describe('the workspace eslint config actually applies the preset', () => {
     const ignored = await new ESLint({ cwd: TS_ROOT }).isPathIgnored(TEST_DOUBLE_PATH);
     expect(ignored, 'the real config does not lint this path, so an empty result would prove nothing').toBe(false);
     expect(await realConfigRestrictedImportsFor(TEST_DOUBLE_PATH, source)).toEqual([]);
-  });
+  }, 30_000);
 
   // The DENIED twin: the same import one directory over, through the same config. If the exemption
   // is widened (for example to `apps/*/tests/**`), this case fails.
+  // 30s, not vitest's default 5s: this test boots a real ESLint against the SHIPPED flat
+  // config, and the FIRST such call in a file pays the whole config-resolution cost — the
+  // siblings after it run in tens of milliseconds. It timed out on CI (9.7s and 5.9s) while
+  // passing locally, because a cold runner resolves every workspace package from scratch.
+  // The timeout is the cost of the real-config assertion, not slack for a slow unit test.
   it('an app test OUTSIDE tests/support still may not import proto, through the REAL config', async () => {
     const messages = await realConfigRestrictedImportsFor('apps/iam-console/tests/unit/errors.mjs', "import { ErrorInfoSchema } from '@paigasus/proto';\nexport const y = ErrorInfoSchema;\n");
     expect(messages, 'the test-double exemption covers more than apps/*/tests/support/**').not.toHaveLength(0);
-  });
+  }, 30_000);
 });
