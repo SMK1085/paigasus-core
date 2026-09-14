@@ -896,3 +896,10 @@ git push -u origin <branch>
 - The reverse boundary rule ("only apps may import console-core") is **not** implemented — it needs
   a custom named rule in `sourceRules`. Record it as a follow-up; the `app-middleware` ban added in
   Task 1 covers the case that actually leaks tokens.
+- Spec § 5.5 rule 3 ("only `apps/*/tests/**` may import `@paigasus/console-core/testing`") is also
+  **not** implemented, for the same reason as the reverse rule above and needing the same mechanism
+  — a custom named rule in `sourceRules`, never a second `packages/**` block. `@paigasus/console-core`
+  is a production `dependencies` entry of `iam-console` and the `testing` subpath carries no
+  `server-only` guard by design, so today an `app/page.tsx` could import `startFakeIam` and
+  `next build` would succeed, bundling an in-process gRPC fake into production code. This and the
+  reverse rule above are one piece of follow-up work, not two.

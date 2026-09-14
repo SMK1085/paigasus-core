@@ -38,7 +38,8 @@ test('R4: a denied page read is an HTTP 403 with the 403 view inside the shell (
     .filter((call) => (call.request as { prn: string }).prn === ORG_PRN);
   expect(denied.length).toBeGreaterThan(0);
   // The paigasus-correlation-id header as it ARRIVED at the fake: the id proxy.ts minted. Every call
-  // of one request carries the same id (lib/iam.ts reads it once per request).
+  // of one request carries the same id (@paigasus/console-core's runtime.ts memoizes `iamClients`
+  // with cache(), so it reads it once per request).
   const correlationId = denied.at(-1)?.correlationId ?? '';
   expect(correlationId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
 

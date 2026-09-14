@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // The loader of /iam/orgs (spec § 5.2). It takes ports, so the tier-2 tests call it with a client
-// to the fake IAM and a scripted mayI. The "Your organizations" data is lib/scopes.ts' myScopes().
+// to the fake IAM and a scripted mayI. The "Your organizations" data is @paigasus/console-core's
+// scopes.ts' myScopes().
 import 'server-only';
 import { PAGE_SIZE, nextOffset } from '../../../lib/paging';
 import { callIam, ROOT_PRN, parseTenancyPrn, type IamClients, type IamResult, type MayI } from '@paigasus/console-core';

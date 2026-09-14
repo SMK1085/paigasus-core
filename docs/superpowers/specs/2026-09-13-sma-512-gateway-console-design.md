@@ -411,8 +411,16 @@ Three rules, not one. The first is the hole; the other two keep it from widening
    *"`server-only` is a NO-OP in the middleware layer, so nothing else stops a token-bearing
    module being bundled there."* `@paigasus/console-core` transitively holds both, so it joins that
    ban. Without this, the new package silently reopens the hole the rule exists to close.
-3. **The testing subpath.** Only `apps/*/tests/**` may import `@paigasus/console-core/testing`.
-   Nothing in an app's `lib/` or `app/` may.
+3. **The testing subpath — DID NOT SHIP.** The design intent was that only `apps/*/tests/**` may
+   import `@paigasus/console-core/testing`, and that nothing in an app's `lib/` or `app/` may. This
+   was never built. There is no `no-restricted-imports` group for `@paigasus/console-core/testing`
+   in `eslint.mjs`, the subpath carries no `server-only` guard by design (§ 5.6), and
+   `@paigasus/console-core` is a production `dependencies` entry of `iam-console`, so the subpath
+   resolves from production code today. Building it needs the same mechanism the reverse rule below
+   needs — a custom named rule in `sourceRules`, not a second `packages/**` block, for the reason the
+   next paragraph gives. Residual exposure until it ships: an `app/page.tsx` can import, for example,
+   `startFakeIam` today, and `next build` succeeds, pulling an in-process gRPC fake into the app
+   bundle. See the plan's "Known limits" section for the follow-up.
 
 **Do not express the reverse rule ("only apps may import console-core") as a new `packages/**`
 block.** In flat config a second `no-restricted-imports` block matching the same files
@@ -422,9 +430,10 @@ the `sdk`, `auth-*` and `discovery` boundary rules in silence. Several packages
 nothing to extend for them either. Use a custom named rule in `sourceRules`, following the
 `paigasus/no-js-relative-specifier` precedent, which exists for this exact reason.
 
-`boundaries.test.ts` gains ALLOWED and DENIED rows for all three rules. Its reverse-liveness loop
-derives a scope key as `files[0].split('/**')[0]` (`boundaries.test.ts:254`), so rule 1's glob must
-yield the key `packages/paigasus-console-core/src` and that key must appear in `BOUNDARY_SCOPES`.
+`boundaries.test.ts` gains ALLOWED and DENIED rows for rules 1 and 2 — rule 3 shipped no rule, so it
+gained none. Its reverse-liveness loop derives a scope key as `files[0].split('/**')[0]`
+(`boundaries.test.ts:254`), so rule 1's glob must yield the key `packages/paigasus-console-core/src`
+and that key must appear in `BOUNDARY_SCOPES`.
 
 ### 5.6 The testing subpath (D10)
 

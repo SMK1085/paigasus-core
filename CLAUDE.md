@@ -1012,8 +1012,13 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   request. `iamClientsForAction` is deliberately not memoized: it returns a `relogin` failure
   rather than redirecting, so a Server Action can render an inline error. Its `testing/` subpath is
   OUTSIDE `src/` and carries no `server-only` guard, on purpose: vitest and Playwright harnesses
-  import it outside a Next server, and that placement is what lets "every file under `src/` imports
-  `server-only`" hold with no exception.
+  import it outside a Next server. "Every file under `src/` imports `server-only`" has ONE exception:
+  `src/global.d.ts` declares a type only and imports nothing, so it does not import `server-only`
+  either — harmless, since a `.d.ts` emits no runtime code. What actually keeps a client bundle safe
+  is the package's `exports` map, which exposes only `.` (`src/index.ts`) and `./testing`
+  (`testing/index.ts`), so no deep import can reach an unguarded module, together with
+  `src/index.ts`'s own `import 'server-only'`. The per-file rule is defence in depth on top of that,
+  not the guard itself.
 - **`forbidden()` needs `experimental.authInterrupts`, and a React `cache()` value does not reach
   `forbidden.tsx`** (MEASURED on Next 16.3.4, SMA-511). Without the flag, `forbidden()` throws
   instead of rendering the 403 boundary. The iam-console sets it through
@@ -1051,22 +1056,31 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   This is broader than the `doc_diagnosis_self_test` entry above says: it is not only about this
   file's own diagnosis procedure block. A new plan or spec that quotes the procedure, or otherwise
   mentions `ciReport.json`, reds the gate until it carries the marker or is added to the allowlist.
-- LOCAL ONLY: `/bin/bash` 3.2.57 makes `ci/actionlint/run.sh` print two FALSE `cargo-lock-step`
-  self-test failures — run that gate with `/opt/homebrew/bin/bash` instead. The affected-graph
-  suite (`ci/affected-graph/run.sh`) is the opposite case: it needs system `/bin/bash` 3.2, because
-  bash 5.3.15 deadlocks on a `while read` fed by a here-string over roughly 512 bytes on this class
-  of machine. Keep both facts together: fixing one gate's bash version by copying the other's
-  breaks it.
-  MEASURED (SMA-512): a third gate pair needs the OTHER bash version too. `ci/ruff/run.sh`
-  (lines 114, 239) and `ci/next-public/run.sh` (lines 151-198) both call `mapfile`, a bash-4+
-  builtin absent from system `/bin/bash` 3.2.57 — under it, both gates fail every self-test row
-  (`mapfile: command not found`, read as an ordinary assertion failure, not an infrastructure
-  error). Both pass cleanly under `/opt/homebrew/bin/bash` 5.3.15. So on this class of machine, no
-  single local bash satisfies every gate: `repo:affected-smoke` needs 3.2 (no `mapfile`, and no
-  here-string deadlock), while `repo:ruff-ci`, `repo:next-public-free` and `repo:actionlint` need
-  4+. A local full-graph `moon ci` run must pick one bash for the whole invocation, then re-run the
-  gates that need the other bash directly (`<bash-binary> ci/<gate>/run.sh`) and read those results
-  instead of the `moon ci` verdict for them. CI runs a single Linux bash and never sees this split.
+- LOCAL ONLY, CORRECTED (SMA-512): no local bash currently runs `ci/actionlint/run.sh` to
+  completion, and the two candidates fail differently. Under system `/bin/bash` 3.2.57 the gate
+  does not deadlock — it still prints the two FALSE `cargo-lock-step` self-test failures — but it
+  also does not finish: measured running past one hour without completing. Under Homebrew
+  `/opt/homebrew/bin/bash` 5.3.15 the gate DEADLOCKS instead: measured three times independently on
+  2026-09-14, at 0.0% CPU with 0.00s cumulative CPU time and zero live children after ten to fifteen
+  minutes each time. So `/opt/homebrew/bin/bash` is NOT a working substitute for this gate — it is
+  worse, not better — and an earlier version of this bullet recommending it was wrong. Keep the 3.2
+  fact: it is still true, it just does not mean 3.2 finishes the gate either. CI is unaffected: it
+  runs neither of these bash builds. The affected-graph suite (`ci/affected-graph/run.sh`) is the
+  opposite case: it needs system `/bin/bash` 3.2, because bash 5.3.15 deadlocks on a `while read`
+  fed by a here-string over roughly 512 bytes on this class of machine. Keep both facts together:
+  fixing one gate's bash version by copying the other's breaks it.
+  MEASURED (SMA-512): a third gate pair needs bash 4+. `ci/ruff/run.sh` (lines 114, 239) and
+  `ci/next-public/run.sh` (lines 151-198) both call `mapfile`, a bash-4+ builtin absent from system
+  `/bin/bash` 3.2.57 — under it, both gates fail every self-test row (`mapfile: command not found`,
+  read as an ordinary assertion failure, not an infrastructure error). Both pass cleanly under
+  `/opt/homebrew/bin/bash` 5.3.15. So on this class of machine, no single local bash satisfies every
+  gate: `repo:affected-smoke` needs 3.2 (no `mapfile`, and no here-string deadlock);
+  `repo:ruff-ci` and `repo:next-public-free` need 4+; and `repo:actionlint` has no working local
+  bash at all, per the correction above. A local full-graph `moon ci` run must pick one bash for the
+  whole invocation, then re-run the gates that need the other bash directly
+  (`<bash-binary> ci/<gate>/run.sh`) and read those results instead of the `moon ci` verdict for
+  them — `repo:actionlint` has no local substitute verdict today. CI runs a single Linux bash and
+  never sees this split.
 
 ## Workflow
 

@@ -1,8 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // The testing surface. OUTSIDE src/ and deliberately NOT server-only guarded: vitest and Playwright
-// harnesses import it outside a Next server. That placement is what lets the src/ rule — every file
-// imports 'server-only' — hold with no exception.
+// harnesses import it outside a Next server. The src/ rule — every file imports 'server-only' — has
+// ONE exception: src/global.d.ts declares a type only and imports nothing, so it carries no
+// 'server-only' import either, harmlessly, since a .d.ts emits no runtime code. What actually keeps
+// a client bundle safe is the package's `exports` map (only '.' and './testing' are reachable, so no
+// deep import can reach an unguarded module) together with src/index.ts's own 'server-only' import.
+// The per-file rule is defence in depth on top of that, not the guard itself.
 export {
   denial,
   errorInfoOf,

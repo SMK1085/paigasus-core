@@ -7,8 +7,10 @@
 // re-exported from @paigasus/console-core, which read a package-wide "ports" singleton an app had
 // to set once, separately, before any accessor ran. A refactor silently dropped that separate step
 // once already: the first request in a fresh process to any accessor before lib/auth.ts's
-// module-scope setConsolePorts() call had run threw "createConsoleRuntime() was never called"
-// instead of requireSession() redirecting to login — a 500 where a redirect belongs.
+// module-scope setConsolePorts() call had run threw "createConsoleRuntime() was never called" —
+// the getter's own error message named task 5's not-yet-written factory, not the setConsolePorts()
+// call that was actually missing — instead of requireSession() redirecting to login, a 500 where a
+// redirect belongs.
 //
 // THE NEW SHAPE removes the separate step structurally: lib/console.ts's ONE
 // createConsoleRuntime() call composes the app's real authRuntime and getRuntimeConfig() at module
