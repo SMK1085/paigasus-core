@@ -4,9 +4,9 @@
 // (me, PascalCase action, resource), and a denial of the QUESTION itself fails open.
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { disposeTransports } from '@paigasus/sdk/iam';
-import { createMayI } from '../../lib/authorize';
-import { createIamClients } from '../../lib/iam-clients';
-import { denial, startFakeIam, type FakeIam } from '../support/fake-iam';
+import { createMayI } from '../../src/authorize';
+import { createIamClients } from '../../src/iam-clients';
+import { denial, startFakeIam, type FakeIam } from '@paigasus/console-core/testing';
 
 const ORG = 'prn:pgs:iam::0192f1c0-0000-7000-8000-000000000002:organization/0192f1c0-0000-7000-8000-000000000002';
 

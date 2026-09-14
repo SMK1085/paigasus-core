@@ -7,7 +7,8 @@ import { unstable_doesMiddlewareMatch } from 'next/experimental/testing/server';
 import { NextRequest } from 'next/server';
 import ts from 'typescript';
 import { describe, expect, it, vi } from 'vitest';
-import { SESSION_COOKIE_NAME } from '../../lib/auth';
+import { SESSION_COOKIE } from '@paigasus/auth/server';
+import { CORRELATION_HEADER, REQUEST_PATH_HEADER } from '@paigasus/console-core';
 import { config, proxy } from '../../proxy';
 
 // Next's server installs globalThis.AsyncLocalStorage before any other module
@@ -38,7 +39,7 @@ function importsOf(relative: string): string[] {
 
 function request(path: string, init: { cookie?: boolean; headers?: Record<string, string> } = {}): NextRequest {
   const headers = new Headers(init.headers);
-  if (init.cookie === true) headers.set('cookie', `${SESSION_COOKIE_NAME}=opaque-session-id`);
+  if (init.cookie === true) headers.set('cookie', `${SESSION_COOKIE}=opaque-session-id`);
   return new NextRequest(`${ORIGIN}${path}`, { headers, nextConfig: { basePath: '/iam' } });
 }
 
@@ -80,13 +81,31 @@ describe('proxy', () => {
     expect(forwarded(res, 'x-paigasus-request-path')).toBe('/iam/orgs/abc');
   });
 
-  // The proxy's allowed imports, as a strict-equality list. `server-only` is a no-op in the proxy layer,
-  // and paigasus/boundaries/app-middleware is a DENY list of direct specifiers. So one import added to
-  // lib/correlation-header.ts (for example ./iam-clients, which reaches the sdk) would enter the
-  // proxy bundle with no lint error. Here it fails.
-  it('imports only the allowed modules in proxy.ts and lib/correlation-header.ts', () => {
-    expect(importsOf('../../proxy.ts')).toEqual(['./lib/correlation-header', '@paigasus/auth/middleware', 'next/server']);
-    expect(importsOf('../../lib/correlation-header.ts')).toEqual(['server-only']);
+  // The proxy's allowed imports, as a strict-equality list. `server-only` is a no-op in the proxy
+  // layer, and paigasus/boundaries/app-middleware is a DENY list of direct specifiers. So one new
+  // import (for example @paigasus/console-core, which reaches @paigasus/auth/server through its
+  // logger) would enter the proxy bundle with no lint error. Here it fails.
+  //
+  // SMA-512: the two header names used to come from ./lib/correlation-header, which moved into
+  // @paigasus/console-core. That package's one entry re-exports the logger too, so importing it
+  // here would be exactly the widening this test exists to catch — proxy.ts inlines the two
+  // constants instead (paigasus/boundaries/app-middleware bans @paigasus/console-core here).
+  it('imports only the allowed modules in proxy.ts', () => {
+    expect(importsOf('../../proxy.ts')).toEqual(['@paigasus/auth/middleware', 'next/server']);
+  });
+
+  // This assertion exists because proxy.ts cannot import @paigasus/console-core (the row above,
+  // and the DENIED boundary row for it). Without it, the two header names would be stated in two
+  // places with nothing binding them: a rename in
+  // ts/packages/paigasus-console-core/src/correlation-header.ts would silently stop the proxy's
+  // headers from being read anywhere downstream. It reads the names FROM the package — the source
+  // of truth — and checks them against the exact literals proxy.ts sets and the `forwarded(...)`
+  // assertions above already use ('paigasus-correlation-id', 'x-paigasus-request-path'). Combined
+  // with those functional tests (which fail if proxy.ts's own inlined literal ever drifts), the two
+  // sides stay bound even though neither can import the other.
+  it("binds the package's header names to the literals proxy.ts inlines", () => {
+    expect(CORRELATION_HEADER).toBe('paigasus-correlation-id');
+    expect(REQUEST_PATH_HEADER).toBe('x-paigasus-request-path');
   });
 });
 

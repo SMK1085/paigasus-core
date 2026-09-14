@@ -1,0 +1,58 @@
+$schema: 'https://moonrepo.dev/schemas/project.json'
+
+id: 'paigasus-console-core-ts'
+layer: 'library'
+language: 'typescript'
+
+# THREE things are required and none implies another. `dependsOn` is what `moon query projects
+# --affected` follows; task `inputs` are the ONLY thing that confers affectedness on a
+# DOWNSTREAM task (CLAUDE.md, Moon 2.5.3); and a task-level `deps: ['contracts:generate']` is the
+# ONLY thing that ORDERS this package's tasks after the generator that writes the tree they read.
+# contracts:generate runs `buf generate` with `clean: true`, which DELETES
+# ts/packages/paigasus-proto/src/generated/** before rewriting it, so a task scheduled inside that
+# ~11s window compiles or runs against a half-deleted tree — see
+# ts/packages/paigasus-discovery/moon.yml for the CI measurement of exactly that failure.
+# `testing/fake-iam.ts` imports `@paigasus/proto` and `@paigasus/proto/iam` directly, and
+# `tsconfig.json` includes `testing/**/*`, so `build` and `typecheck` compile that tree;
+# `src/iam-clients.ts` and `src/errors.ts` reach it through `@paigasus/sdk`; and `test` loads
+# `testing/fake-iam.ts` at run time. All three tasks below therefore carry the `deps` line.
+dependsOn:
+  - 'paigasus-auth-ts'
+  - 'paigasus-sdk-ts'
+  - 'paigasus-discovery-ts'
+  - 'paigasus-proto-ts'
+
+tasks:
+  build:
+    deps: ['contracts:generate']
+    inputs: &upstreams
+      - '/ts/packages/paigasus-auth/src/**/*'
+      - '/ts/packages/paigasus-auth/package.json'
+      - '/ts/packages/paigasus-sdk/src/**/*'
+      - '/ts/packages/paigasus-sdk/package.json'
+      - '/ts/packages/paigasus-discovery/src/**/*'
+      - '/ts/packages/paigasus-discovery/package.json'
+      - '/ts/packages/paigasus-proto/src/**/*'
+      - '/ts/packages/paigasus-proto/package.json'
+      # testing/ is a published subpath, not test-only scaffolding: both apps import it. It is
+      # outside src/, so @group(sources) does not cover it.
+      - 'testing/**/*'
+  typecheck:
+    deps: ['contracts:generate']
+    inputs: *upstreams
+  test:
+    deps: ['contracts:generate']
+    inputs:
+      - 'vitest.config.ts'
+      - 'testing/**/*'
+      - '/ts/packages/paigasus-auth/src/**/*'
+      - '/ts/packages/paigasus-auth/package.json'
+      - '/ts/packages/paigasus-sdk/src/**/*'
+      - '/ts/packages/paigasus-sdk/package.json'
+      - '/ts/packages/paigasus-discovery/src/**/*'
+      - '/ts/packages/paigasus-discovery/package.json'
+      - '/ts/packages/paigasus-proto/src/**/*'
+      - '/ts/packages/paigasus-proto/package.json'
+      # The parity corpus and the Rust constant the PRN reader is held to.
+      - '/rs/crates/libs/paigasus-kernel-parity/vectors/**/*'
+      - '/rs/crates/libs/paigasus-iam-core/src/authz/model.rs'

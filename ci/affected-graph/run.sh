@@ -271,8 +271,15 @@ run_suite() {
   # schedules the upstream and never selects the downstream.
   # + @paigasus/app-shell (SMA-510), through dependsOn app-shell -> discovery -> proto-ts.
   # + iam-console-ts (SMA-511), which dependsOn paigasus-proto-ts and the three packages above.
+  # + paigasus-console-core-ts (SMA-512): this is a PROJECT-level case (--downstream deep on
+  # `moon query projects`), not one of the task-level cases the new package was expected to join.
+  # It was found by --self-test failing after the task-level re-baseline below, not predicted in
+  # advance: the new package's `dependsOn` list has four entries — paigasus-auth-ts,
+  # paigasus-sdk-ts, paigasus-discovery-ts and paigasus-proto-ts — and the last one alone makes
+  # it a downstream dependent in the project graph, the same way paigasus-sdk-ts and
+  # paigasus-discovery-ts already were.
   run_case "contracts->proto" "contracts/proto/paigasus/gateway/v1/health.proto" \
-    "contracts,paigasus-proto-rs,paigasus-proto-py,paigasus-proto-ts,paigasus-gateway-rs,paigasus-iam-rs,paigasus-service-info-rs,paigasus-sdk-ts,paigasus-discovery-ts,paigasus-app-shell-ts,iam-console-ts"
+    "contracts,paigasus-proto-rs,paigasus-proto-py,paigasus-proto-ts,paigasus-gateway-rs,paigasus-iam-rs,paigasus-service-info-rs,paigasus-sdk-ts,paigasus-discovery-ts,paigasus-app-shell-ts,iam-console-ts,paigasus-console-core-ts"
   # derive-crate edit -> the derive crate + paigasus-proto and everything downstream of it
   # (SMA-438). One-directional w.r.t. contracts: the derive crate is strictly UPSTREAM of
   # paigasus-proto, so a proto edit must NOT reach it — enforced implicitly by the strict
@@ -410,8 +417,10 @@ run_suite() {
   # this package's sources.
   # SMA-511: iam-console-ts:{build,test,test-e2e} join this set — the app's inputs name this
   # package's sources.
+  # SMA-512: paigasus-console-core-ts:{build,test} join this set — the new package's `build` and
+  # `test` inputs both name `/ts/packages/paigasus-auth/src/**/*` (no test-e2e task exists there).
   run_task_case_ci "auth->auth-tasks" "ts/packages/paigasus-auth/src/config.ts" \
-    "paigasus-app-shell-ts:build,paigasus-app-shell-ts:test,paigasus-app-shell-ts:test-e2e,paigasus-auth-ts:build,paigasus-auth-ts:test,paigasus-auth-ts:test-e2e,iam-console-ts:build,iam-console-ts:test,iam-console-ts:test-e2e,ts:lint"
+    "paigasus-app-shell-ts:build,paigasus-app-shell-ts:test,paigasus-app-shell-ts:test-e2e,paigasus-auth-ts:build,paigasus-auth-ts:test,paigasus-auth-ts:test-e2e,iam-console-ts:build,iam-console-ts:test,iam-console-ts:test-e2e,paigasus-console-core-ts:build,paigasus-console-core-ts:test,ts:lint"
   # SMA-508 — a @paigasus/proto SOURCE edit must select the SDK's build and test.
   # This is the ONLY control on ts/packages/paigasus-sdk/moon.yml's `inputs` list. Remove that
   # list and the SDK's suite stops running on the PR that changes the generated code it consumes,
@@ -426,8 +435,10 @@ run_suite() {
   # Strict equality: re-baseline deliberately when the set legitimately changes.
   # SMA-511: iam-console-ts:{build,test,test-e2e} join this set — the app's inputs name this
   # package's sources.
+  # SMA-512: paigasus-console-core-ts:{build,test} join this set — the new package's `build` and
+  # `test` inputs both name `/ts/packages/paigasus-proto/src/**/*`.
   run_task_case_ci "proto->sdk" "ts/packages/paigasus-proto/src/generated/paigasus/common/v1/error_pb.ts" \
-    "paigasus-proto-ts:build,paigasus-proto-ts:test,paigasus-sdk-ts:build,paigasus-sdk-ts:test,ts:lint,paigasus-discovery-ts:build,paigasus-discovery-ts:test,iam-console-ts:build,iam-console-ts:test,iam-console-ts:test-e2e"
+    "paigasus-proto-ts:build,paigasus-proto-ts:test,paigasus-sdk-ts:build,paigasus-sdk-ts:test,ts:lint,paigasus-discovery-ts:build,paigasus-discovery-ts:test,iam-console-ts:build,iam-console-ts:test,iam-console-ts:test-e2e,paigasus-console-core-ts:build,paigasus-console-core-ts:test"
   # SMA-508 final review fix — the SECOND anchor, and it is not redundant. MEASURED: narrowing all
   # three of paigasus-sdk-ts's `inputs` globs from `/ts/packages/paigasus-proto/src/**/*` to
   # `/ts/packages/paigasus-proto/src/generated/paigasus/common/**/*` still yields `PASS proto->sdk`
@@ -448,8 +459,10 @@ run_suite() {
   # Strict equality: re-baseline deliberately when the set legitimately changes.
   # SMA-511: iam-console-ts:{build,test,test-e2e} join this set — the app's inputs name this
   # package's sources.
+  # SMA-512: paigasus-console-core-ts:{build,test} join this set — the new package's `build` and
+  # `test` inputs both name `/ts/packages/paigasus-proto/src/**/*`.
   run_task_case_ci "proto-iam->sdk" "ts/packages/paigasus-proto/src/generated/paigasus/iam/v1/iam_pb.ts" \
-    "paigasus-proto-ts:build,paigasus-proto-ts:test,paigasus-sdk-ts:build,paigasus-sdk-ts:test,ts:lint,paigasus-discovery-ts:build,paigasus-discovery-ts:test,iam-console-ts:build,iam-console-ts:test,iam-console-ts:test-e2e"
+    "paigasus-proto-ts:build,paigasus-proto-ts:test,paigasus-sdk-ts:build,paigasus-sdk-ts:test,ts:lint,paigasus-discovery-ts:build,paigasus-discovery-ts:test,iam-console-ts:build,iam-console-ts:test,iam-console-ts:test-e2e,paigasus-console-core-ts:build,paigasus-console-core-ts:test"
   # SMA-509 — a @paigasus/discovery SOURCE edit must select its own build/test AND the
   # Docker-backed `test-e2e` task, plus `ts:lint`. Nothing else asserts this package's tasks are
   # reachable from an edit to it: `repo:input-liveness` scans `repo:*` tasks only and proves
@@ -460,8 +473,10 @@ run_suite() {
   # this package's sources.
   # SMA-511: iam-console-ts:{build,test,test-e2e} join this set — the app's inputs name this
   # package's sources.
+  # SMA-512: paigasus-console-core-ts:{build,test} join this set — the new package's `build` and
+  # `test` inputs both name `/ts/packages/paigasus-discovery/src/**/*`.
   run_task_case_ci "discovery->discovery-tasks" "ts/packages/paigasus-discovery/src/core/state.ts" \
-    "paigasus-app-shell-ts:build,paigasus-app-shell-ts:test,paigasus-app-shell-ts:test-e2e,paigasus-discovery-ts:build,paigasus-discovery-ts:test,paigasus-discovery-ts:test-e2e,iam-console-ts:build,iam-console-ts:test,iam-console-ts:test-e2e,ts:lint"
+    "paigasus-app-shell-ts:build,paigasus-app-shell-ts:test,paigasus-app-shell-ts:test-e2e,paigasus-discovery-ts:build,paigasus-discovery-ts:test,paigasus-discovery-ts:test-e2e,iam-console-ts:build,iam-console-ts:test,iam-console-ts:test-e2e,paigasus-console-core-ts:build,paigasus-console-core-ts:test,ts:lint"
   # The SECOND anchor, and it is not redundant. The case above anchors only on src/core/, so
   # narrowing the inherited `sources` file group to `src/core/**/*` would leave it green while an
   # edit to an ADAPTER stopped selecting anything — and the adapters are where the Redis lock
@@ -472,8 +487,10 @@ run_suite() {
   # this package's sources.
   # SMA-511: iam-console-ts:{build,test,test-e2e} join this set — the app's inputs name this
   # package's sources.
+  # SMA-512: paigasus-console-core-ts:{build,test} join this set — the new package's `build` and
+  # `test` inputs both name `/ts/packages/paigasus-discovery/src/**/*`.
   run_task_case_ci "discovery-adapters->discovery-tasks" "ts/packages/paigasus-discovery/src/adapters/memory-cache.ts" \
-    "paigasus-app-shell-ts:build,paigasus-app-shell-ts:test,paigasus-app-shell-ts:test-e2e,paigasus-discovery-ts:build,paigasus-discovery-ts:test,paigasus-discovery-ts:test-e2e,iam-console-ts:build,iam-console-ts:test,iam-console-ts:test-e2e,ts:lint"
+    "paigasus-app-shell-ts:build,paigasus-app-shell-ts:test,paigasus-app-shell-ts:test-e2e,paigasus-discovery-ts:build,paigasus-discovery-ts:test,paigasus-discovery-ts:test-e2e,iam-console-ts:build,iam-console-ts:test,iam-console-ts:test-e2e,paigasus-console-core-ts:build,paigasus-console-core-ts:test,ts:lint"
   # SMA-510 — a @paigasus/app-shell SOURCE edit must select its own build/test AND the browser-tier
   # `test-e2e` task, plus `ts:lint`. Nothing else asserts that this package's tasks are reachable
   # from an edit to it: `repo:input-liveness` scans `repo:*` tasks only, and it proves that
@@ -498,10 +515,12 @@ run_suite() {
   # SDK change serves a cached .next and a cached e2e verdict. Two anchors on opposite sides of the
   # glob (src/ root and src/errors/) prove its WIDTH, the precedent being the ui->console pair. The
   # expected set is DERIVED with the no-flag `moon query tasks --affected` traversal.
+  # SMA-512: paigasus-console-core-ts:{build,test} join both sets — the new package's `build` and
+  # `test` inputs both name `/ts/packages/paigasus-sdk/src/**/*`.
   run_task_case_ci "sdk->iam-console" "ts/packages/paigasus-sdk/src/iam.ts" \
-    "paigasus-sdk-ts:build,paigasus-sdk-ts:test,iam-console-ts:build,iam-console-ts:test,iam-console-ts:test-e2e,ts:lint"
+    "paigasus-sdk-ts:build,paigasus-sdk-ts:test,iam-console-ts:build,iam-console-ts:test,iam-console-ts:test-e2e,paigasus-console-core-ts:build,paigasus-console-core-ts:test,ts:lint"
   run_task_case_ci "sdk-errors->iam-console" "ts/packages/paigasus-sdk/src/errors/map-error.ts" \
-    "paigasus-sdk-ts:build,paigasus-sdk-ts:test,iam-console-ts:build,iam-console-ts:test,iam-console-ts:test-e2e,ts:lint"
+    "paigasus-sdk-ts:build,paigasus-sdk-ts:test,iam-console-ts:build,iam-console-ts:test,iam-console-ts:test-e2e,paigasus-console-core-ts:build,paigasus-console-core-ts:test,ts:lint"
   # SMA-511 — the file that holds the THIRD Tailwind sentinel (--paigasus-app-shell-source-probe,
   # spec § 7.6). ci/tailwind-source/run.mjs asserts it against the iam-console build, so an edit to
   # this file MUST rebuild the app. If the app's app-shell input narrowed away from this file, the
@@ -512,10 +531,51 @@ run_suite() {
   # `lib/**/*` and `proxy.ts` in the app's `sources` group, and `apps/*/lib/**/*` and
   # `apps/*/proxy.ts` in the ts project's, an edit there serves a cached build, test, e2e and lint
   # (spec § 8). Two anchors, one per path, because the two are separate input lines.
-  run_task_case_ci "iam-console-lib->iam-console-tasks" "ts/apps/iam-console/lib/iam.ts" \
+  # SMA-512 RE-ANCHOR: the original anchor was `ts/apps/iam-console/lib/iam.ts`, which PR2 Task 1
+  # deleted — the console's IAM composition moved into `@paigasus/console-core`. Re-anchored on
+  # `lib/config.ts`, a file that still lives in the app's own `lib/` (not extracted into the
+  # package), so this case keeps testing exactly what it always tested: the app's OWN `lib/**/*`
+  # input, not the new package's. The expected set is unchanged — re-derived with the same no-flag
+  # `moon query tasks --affected` traversal, not assumed: touching an app-local `lib/` file selects
+  # no `paigasus-console-core-ts` task, because that package's inputs name its OWN `src/**/*`, not
+  # the app's `lib/**/*`.
+  run_task_case_ci "iam-console-lib->iam-console-tasks" "ts/apps/iam-console/lib/config.ts" \
     "iam-console-ts:build,iam-console-ts:test,iam-console-ts:test-e2e,ts:lint"
   run_task_case_ci "iam-console-proxy->iam-console-tasks" "ts/apps/iam-console/proxy.ts" \
     "iam-console-ts:build,iam-console-ts:test,iam-console-ts:test-e2e,ts:lint"
+  # new (SMA-512) — a @paigasus/console-core SOURCE edit must select its own build/test AND the
+  # iam-console's build, test and test-e2e, plus ts:lint. This is the ONLY control on the
+  # '/ts/packages/paigasus-console-core/src/**/*' entries in ts/apps/iam-console/moon.yml: without
+  # them, a change inside the package serves a cached .next and a cached e2e verdict — the same
+  # staleness class the sdk->iam-console pair above guards against.
+  # Two anchors, not one: a single anchor leaves the app's input glob narrowable to that one
+  # subpath while the case stays green. `src/iam.ts` (the file spec § 3.1 originally named) no
+  # longer exists — PR2 Task 5 dissolved it into `src/runtime.ts` — so the anchors are
+  # `src/runtime.ts` and `src/prn-tenancy.ts`, two files on opposite ends of the package's flat
+  # `src/` tree. Precedent: the `ui->console` / `ui-components->console` pair above. The expected
+  # set is DERIVED with the no-flag `moon query tasks --affected` traversal, not typed by hand; it
+  # is identical for both anchors because both files sit inside the same declared input glob.
+  run_task_case_ci "console-core->consumers" "ts/packages/paigasus-console-core/src/runtime.ts" \
+    "paigasus-console-core-ts:build,paigasus-console-core-ts:test,iam-console-ts:build,iam-console-ts:test,iam-console-ts:test-e2e,ts:lint"
+  run_task_case_ci "console-core-prn-tenancy->consumers" "ts/packages/paigasus-console-core/src/prn-tenancy.ts" \
+    "paigasus-console-core-ts:build,paigasus-console-core-ts:test,iam-console-ts:build,iam-console-ts:test,iam-console-ts:test-e2e,ts:lint"
+  # new (SMA-512, review finding I2) — the two cases above anchor on `src/**/*` only. Nothing
+  # anchored on `testing/**/*`, the package's in-process fakes (fake-iam.ts, fake-idp.ts, tls.ts,
+  # tls-terminator.ts, index.ts), even though iam-console's `typecheck`, `test` and `test-e2e`
+  # each list '/ts/packages/paigasus-console-core/testing/**/*' in their own `inputs` for exactly
+  # this reason. Without this case, dropping `testing/**/*` from `test-e2e`'s inputs would leave
+  # every gate green while an edit to `fake-iam.ts` served a cached e2e verdict — and the e2e tier
+  # is the only control for several spec rows. One anchor closes two findings at once: I1 added
+  # 'packages/*/testing/**/*' to ts/moon.yml's `sources` fileGroup (without it, ts:lint does not
+  # key on this directory), so this case's expected set is what pins THAT fact too — `ts:lint`
+  # is in the expected set below because of I1, not because of anything already in this file.
+  # The expected set is DERIVED with the same no-flag `moon query tasks --affected` traversal
+  # `_assert_task_case_impl` uses, not typed by hand:
+  #   printf '%s\n' ts/packages/paigasus-console-core/testing/fake-iam.ts | moon query tasks --affected | ...
+  # `iam-console-ts:build` is correctly ABSENT: build's own `inputs` never lists `testing/**/*`
+  # (only typecheck/test/test-e2e do), so a testing/ edit does not rebuild the app, only test it.
+  run_task_case_ci "console-core-testing->consumers" "ts/packages/paigasus-console-core/testing/fake-iam.ts" \
+    "paigasus-console-core-ts:build,paigasus-console-core-ts:test,iam-console-ts:test,iam-console-ts:test-e2e,ts:lint"
   # SMA-625, spec § 8.4 and § 11.2 obligation 9 — a gateway chat.rs edit must select the SDK's
   # test. This is the ONLY control on the '/rs/.../chat.rs' entry in paigasus-sdk-ts:test's
   # `inputs`. tests/terminal-frame.test.ts reads TERMINAL_SSE_ERROR out of that Rust file by

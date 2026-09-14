@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// The fake IAM's self-test: each IAM behaviour the console depends on (tests/support/fake-iam.ts's
-// header lists them) is observable through the REAL SDK transport, over h2c.
+// The fake IAM's self-test: each IAM behaviour the console depends on (@paigasus/console-core's
+// testing/fake-iam.ts's header lists them) is observable through the REAL SDK transport, over h2c.
 import { connect } from 'node:net';
 import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { Code, ConnectError } from '@connectrpc/connect';
 import { ErrorDomain, ErrorReason, mapError } from '@paigasus/sdk/errors';
 import { AuthnService, createIamClient, disposeTransports, ServiceInfoService, TenancyService } from '@paigasus/sdk/iam';
-import { denial, errorInfoOf, IAM_ERROR_DOMAIN, startFakeIam, type FakeIam } from '../../support/fake-iam';
+import { denial, errorInfoOf, IAM_ERROR_DOMAIN, startFakeIam, type FakeIam } from '@paigasus/console-core/testing';
 
 const DENIED = 'prn:pgs:iam::0192f1c0-0000-7000-8000-000000000002:organization/0192f1c0-0000-7000-8000-000000000002';
 const ALLOWED = 'prn:pgs:iam::0192f1c0-0000-7000-8000-000000000009:organization/0192f1c0-0000-7000-8000-000000000009';

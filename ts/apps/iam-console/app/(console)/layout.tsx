@@ -17,11 +17,8 @@ import { connection } from 'next/server';
 import { toSessionView } from '@paigasus/auth/server';
 import { buildNavEntries, IAM_BASE_PATH } from '../../lib/nav';
 import { getPublicConfig } from '../../lib/config';
-import { discovery } from '../../lib/discovery';
-import { currentSession } from '../../lib/iam';
-import { mayI } from '../../lib/authorize';
-import { ROOT_PRN } from '../../lib/prn-tenancy';
-import { myScopes, switcherOrgs } from '../../lib/scopes';
+import { currentSession, discovery, mayI, myScopes } from '../../lib/console';
+import { ROOT_PRN, switcherOrgs } from '@paigasus/console-core';
 import { OrgSwitcherShell } from '../_components/org-switcher';
 import { Providers } from '../providers';
 

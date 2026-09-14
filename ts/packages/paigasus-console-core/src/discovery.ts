@@ -14,11 +14,9 @@
 // fast, discovery reports its own `cache-unavailable` degraded reason, and this file logs
 // `discovery.redis_connect_failed` once, with no DSN.
 import 'server-only';
-import { after } from 'next/server';
-import { cache } from 'react';
 import { createClient, type RedisClientType } from 'redis';
 import { createDiscovery, createMemoryDescriptorCache, createRedisDescriptorCache, timingsFromEnv, type DescriptorCache, type Discovery } from '@paigasus/discovery/server';
-import { getRuntimeConfig, type ConsoleConfig } from './config';
+import type { ConsoleCoreConfig } from './config-shape';
 import { logger, type ConsoleLogger } from './logger';
 
 let processCache: DescriptorCache | undefined;
@@ -91,13 +89,13 @@ function redisDescriptorCache(url: string, timeoutMs: number, log: ConsoleLogger
  * The process-wide descriptor cache for this configuration.
  *
  * NO SILENT FALLBACK (see the file header), so `redis` with no URL THROWS. That pair reaches this
- * function: lib/config.ts's zod shape is flat and cannot express the cross-field rule, and
+ * function: the app's flat zod config shape cannot express the cross-field rule, and
  * `createAuthRuntime` — which does hold that rule — may not have run yet for this request. The old
  * code read the pair as "use memory", which is the exact silent downgrade the header forbids: every
  * zone would then cache descriptors in its own process and AC 2 would not hold. The message names
  * the two variables and never the URL, which carries a password.
  */
-export function descriptorCacheFor(config: ConsoleConfig, log: ConsoleLogger = logger): DescriptorCache {
+export function descriptorCacheFor(config: ConsoleCoreConfig, log: ConsoleLogger = logger): DescriptorCache {
   if (processCache !== undefined) return processCache;
   if (config.PAIGASUS_SESSION_STORE === 'redis') {
     if (config.PAIGASUS_SESSION_REDIS_URL === undefined) {
@@ -118,7 +116,7 @@ export function resetDiscoveryForTest(): void {
 }
 
 /** A Discovery handle for one request. Pure apart from the process cache: tests call it directly. */
-export function createAppDiscovery(deps: { config: ConsoleConfig; log?: ConsoleLogger; fetch?: typeof globalThis.fetch; waitUntil?: (p: Promise<unknown>) => void }): Discovery {
+export function createAppDiscovery(deps: { config: ConsoleCoreConfig; log?: ConsoleLogger; fetch?: typeof globalThis.fetch; waitUntil?: (p: Promise<unknown>) => void }): Discovery {
   const log = deps.log ?? logger;
   return createDiscovery({
     services: deps.config.PAIGASUS_SERVICES,
@@ -129,6 +127,3 @@ export function createAppDiscovery(deps: { config: ConsoleConfig; log?: ConsoleL
     ...(deps.waitUntil === undefined ? {} : { waitUntil: deps.waitUntil }),
   });
 }
-
-/** One handle per request; background revalidation runs after the response, through after(). */
-export const discovery: () => Discovery = cache(() => createAppDiscovery({ config: getRuntimeConfig(), waitUntil: (p) => after(p) }));

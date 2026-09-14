@@ -32,7 +32,7 @@ const { tenancy, failNext } = vi.hoisted(() => {
 
 // The session read is the one thing an action does before its command, and it needs a Next request
 // scope. tests/unit/action-session.test.ts covers that read itself; here it always succeeds.
-vi.mock('../../lib/iam', () => ({ iamClientsForAction: () => Promise.resolve({ ok: true, value: { tenancy } }) }));
+vi.mock('../../lib/console', () => ({ iamClientsForAction: () => Promise.resolve({ ok: true, value: { tenancy } }) }));
 
 const { attachMembershipAction, createOrganizationAction, detachMembershipAction } = await import('../../app/(console)/orgs/actions');
 const { createTeamAction } = await import('../../app/(console)/orgs/[org]/actions');

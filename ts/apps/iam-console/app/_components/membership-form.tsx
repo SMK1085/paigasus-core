@@ -3,7 +3,7 @@
 
 import { useActionState, useId, type ReactElement } from 'react';
 import { Field, Input } from '@paigasus/ui';
-import type { ActionState } from '../../lib/errors';
+import type { ActionState } from '@paigasus/console-core';
 import { FormError } from './form-error';
 
 export type MembershipAction = (previous: ActionState, form: FormData) => Promise<ActionState>;

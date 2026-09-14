@@ -8,7 +8,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { ZoneProvider } from '@paigasus/app-shell';
 import type { PaigasusError, Presentation } from '@paigasus/sdk/errors/types';
 import Forbidden from '../../app/(console)/forbidden';
-import { FORBIDDEN_VIEW_CORRELATION } from '../../lib/correlation';
+import { FORBIDDEN_VIEW_CORRELATION } from '@paigasus/console-core';
 import { FormError } from '../../app/_components/form-error';
 import { PageError } from '../../app/_components/page-error';
 import { SectionError } from '../../app/_components/section-error';

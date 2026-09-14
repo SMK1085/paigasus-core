@@ -6,12 +6,12 @@
 import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { ErrorReason } from '@paigasus/sdk/errors';
 import { disposeTransports } from '@paigasus/sdk/iam';
-import { createMayI } from '../../lib/authorize';
-import { createIamClients, type IamClients } from '../../lib/iam-clients';
-import { createJsonLogger } from '../../lib/logger';
-import { introspectWithProvisioning } from '../../lib/principal';
-import { createIntrospectPrincipalResolver } from '../../lib/principal-resolver';
-import { denial, FAKE_IAM_ISSUER, startFakeIam, type FakeIam } from '../support/fake-iam';
+import { createMayI } from '../../src/authorize';
+import { introspectWithProvisioning } from '../../src/principal';
+import { createIamClients, type IamClients } from '../../src/iam-clients';
+import { createJsonLogger } from '../../src/logger';
+import { createIntrospectPrincipalResolver } from '../../src/principal-resolver';
+import { denial, FAKE_IAM_ISSUER, startFakeIam, type FakeIam } from '@paigasus/console-core/testing';
 
 const ORG = 'prn:pgs:iam::0192f1c0-0000-7000-8000-000000000002:organization/0192f1c0-0000-7000-8000-000000000002';
 const CLAIMS = { iss: 'https://idp.example.test', sub: 'user-1' };
@@ -49,7 +49,7 @@ describe('provisioning', () => {
       expect(events()).toEqual([]);
     });
 
-    // lib/auth.ts's factory is async: it reads the request's correlation id, so the login callback's
+    // The app's `lib/auth.ts`'s factory is async: it reads the request's correlation id, so the login callback's
     // two IAM calls join the id proxy.ts minted for that request. Drop the `await` in
     // principal-resolver.ts and `clients` is a Promise, so `clients.serviceInfo` is undefined and
     // this case logs resolve_crashed instead.
@@ -166,7 +166,7 @@ describe('provisioning', () => {
     // The LIVE path used to pass that through, and `''` is not `null`: mayI() then asked IAM
     // `isAuthorized({ principalPrn: '' })` for every affordance, IAM refused with InvalidArgument,
     // mayI() failed open, and every mutation control rendered. Both paths read the field through
-    // lib/principal-prn.ts now, so they answer the same thing.
+    // principal-prn.ts now, so they answer the same thing.
     it('reads an empty principal_prn as no principal, like the login resolver does', async () => {
       fake.provisioned.add('blank-prn');
       fake.setHandlers({ 'authn.introspect': () => ({ principalPrn: '', memberships: [{ id: 'm-1', principalPrn: '', nodePrn: ORG }] }) });
@@ -177,7 +177,7 @@ describe('provisioning', () => {
       expect(result).toEqual({ ok: true, value: { prn: null, memberships: [{ nodePrn: ORG }] } });
     });
 
-    // The join: the live principal feeds createMayI exactly as lib/authorize.ts's mayI() does. An
+    // The join: the live principal feeds createMayI exactly as authorize.ts's mayI() does. An
     // unnamed principal must produce NO IsAuthorized call, and the fail-open answer must be logged.
     it('an empty principal_prn produces a mayI that never queries IAM, and says so in the log', async () => {
       fake.provisioned.add('blank-prn-2');

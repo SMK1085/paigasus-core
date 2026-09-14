@@ -5,7 +5,7 @@
 import { disposeTransports } from '@paigasus/sdk/iam';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { AUDIT_PAGE_SIZE, loadAuditPage } from '../../app/(console)/audit/load';
-import { denial, startFakeIam, type FakeIam } from '../support/fake-iam';
+import { denial, startFakeIam, type FakeIam } from '@paigasus/console-core/testing';
 import { IDS, callsSince, clientsFor } from './support';
 
 let iam: FakeIam;

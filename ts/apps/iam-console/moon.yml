@@ -25,6 +25,7 @@ dependsOn:
   - 'paigasus-discovery-ts'
   - 'paigasus-app-shell-ts'
   - 'paigasus-proto-ts'
+  - 'paigasus-console-core-ts'
 
 # The inherited `sources` group from .moon/tasks/typescript-project.yml is `src/**/*`, and
 # this app has no src/ — its code is in app/. MEASURED before this fix with
@@ -132,6 +133,9 @@ tasks:
       - '/ts/packages/paigasus-app-shell/package.json'
       - '/ts/packages/paigasus-sdk/src/**/*'
       - '/ts/packages/paigasus-sdk/package.json'
+      # SMA-512: the composition root now imports @paigasus/console-core (Task 1 of PR2).
+      - '/ts/packages/paigasus-console-core/src/**/*'
+      - '/ts/packages/paigasus-console-core/package.json'
     outputs:
       # SMA-502 AC4 — the cache archive must not carry .next/cache, which grows without bound.
       - '.next/**/*'
@@ -183,6 +187,13 @@ tasks:
       - '/ts/packages/paigasus-app-shell/package.json'
       - '/ts/packages/paigasus-sdk/src/**/*'
       - '/ts/packages/paigasus-sdk/package.json'
+      # SMA-512: the composition root now imports @paigasus/console-core (Task 1 of PR2).
+      - '/ts/packages/paigasus-console-core/src/**/*'
+      - '/ts/packages/paigasus-console-core/package.json'
+      # SMA-512 task 6: several test files under tests/**/* import types from
+      # @paigasus/console-core/testing. Without this, an edit to a fake's exported type leaves this
+      # task's cache key unchanged.
+      - '/ts/packages/paigasus-console-core/testing/**/*'
 
   test:
     # Two jobs in one task. SMA-502's vitest suite boots the BUILT standalone server, and
@@ -216,9 +227,10 @@ tasks:
       # into .next. Without this edge, that gate and this task would run concurrently over the
       # same directory — the flake shape the root moon.yml already records for wasm-pack.
       - 'repo:next-env-drift'
-      # Stated here rather than left to `~:build`'s own edge. tests/support/fake-iam.ts imports
-      # @paigasus/proto directly, so this task is a reader of the generated tree in its own right
-      # and its ordering must not depend on another task keeping an edge it happens to share.
+      # Stated here rather than left to `~:build`'s own edge. @paigasus/console-core's
+      # testing/fake-iam.ts imports @paigasus/proto directly, so this task is a reader of the
+      # generated tree in its own right and its ordering must not depend on another task keeping an
+      # edge it happens to share.
       - 'contracts:generate'
     inputs:
       - '@group(sources)'
@@ -258,10 +270,12 @@ tasks:
       - '/ts/packages/paigasus-app-shell/package.json'
       - '/ts/packages/paigasus-sdk/src/**/*'
       - '/ts/packages/paigasus-sdk/package.json'
-      # SMA-511 D6: tests/unit/prn-tenancy.test.ts replays the kernel parity corpus and pins ROOT_PRN to
-      # root_prn()'s builder call. Without these, a corpus or model.rs edit serves a cached PASS.
-      - '/rs/crates/libs/paigasus-kernel-parity/vectors/**/*'
-      - '/rs/crates/libs/paigasus-iam-core/src/authz/model.rs'
+      # SMA-512: the composition root now imports @paigasus/console-core (Task 1 of PR2).
+      - '/ts/packages/paigasus-console-core/src/**/*'
+      - '/ts/packages/paigasus-console-core/package.json'
+      # SMA-512 task 6: the real fakes now live here, and every integration test that calls
+      # startFakeIam (etc.) runs code from this path.
+      - '/ts/packages/paigasus-console-core/testing/**/*'
     options:
       merge: replace
 
@@ -279,8 +293,8 @@ tasks:
       - '~:build'
       # repo:next-env-drift writes into .next too; the same serialization `test` has.
       - 'repo:next-env-drift'
-      # Stated here for the same reason as in `test`: tests/support/fake-iam.ts imports
-      # @paigasus/proto, so this tier reads the generated tree itself.
+      # Stated here for the same reason as in `test`: @paigasus/console-core's testing/fake-iam.ts
+      # imports @paigasus/proto, so this tier reads the generated tree itself.
       - 'contracts:generate'
     # A NEW task name, so it inherits NOTHING: every input is listed.
     inputs:
@@ -307,6 +321,12 @@ tasks:
       - '/ts/packages/paigasus-auth/package.json'
       - '/ts/packages/paigasus-sdk/src/**/*'
       - '/ts/packages/paigasus-sdk/package.json'
+      # SMA-512: the composition root now imports @paigasus/console-core (Task 1 of PR2).
+      - '/ts/packages/paigasus-console-core/src/**/*'
+      - '/ts/packages/paigasus-console-core/package.json'
+      # SMA-512 task 6: tests/e2e/support/harness.ts imports all four fakes to build the
+      # worker-scoped stack every Playwright spec runs against.
+      - '/ts/packages/paigasus-console-core/testing/**/*'
       - '/ts/packages/paigasus-discovery/src/**/*'
       - '/ts/packages/paigasus-discovery/package.json'
       - '/ts/packages/paigasus-app-shell/src/**/*'

@@ -4,7 +4,7 @@
 // could set NODE_EXTRA_CA_CERTS, so the global `fetch` cannot reach the fake IdP or the TLS
 // terminator; `node:https` with an explicit `ca` can.
 import { request } from 'node:https';
-import type { TlsMaterial } from './tls';
+import type { TlsMaterial } from '@paigasus/console-core/testing';
 
 export type HttpsResponse = { status: number; headers: Record<string, string | string[] | undefined>; body: string };
 

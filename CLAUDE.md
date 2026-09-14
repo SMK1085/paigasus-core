@@ -989,11 +989,36 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   `["index.js", "index.d.ts"]`, so pnpm never copies the `.node` binary into `node_modules`, and
   `next build` fails at "Collecting page data" with `Cannot find native binding`. Every Node consumer
   of `@paigasus/kernel` has the same defect.
-  The iam-console's `lib/prn-tenancy.ts` is a small reader for the IAM tenancy PRN shapes
-  (decision D6, fallback C). It is a recorded ADR-0005 exception, and
-  `tests/unit/prn-tenancy.test.ts` replays the kernel parity corpus through it, so a divergence
-  from the kernel reds `iam-console-ts:test`. The name carries the `-tenancy` suffix because a
+  `@paigasus/console-core`'s `src/prn-tenancy.ts` (moved out of iam-console's `lib/` in SMA-512
+  PR 2) is a small reader for the IAM tenancy PRN shapes (decision D6, fallback C). It is a
+  recorded ADR-0005 exception, and its `tests/unit/prn-tenancy.test.ts` replays the kernel parity
+  corpus through it, so a divergence from the kernel reds `paigasus-console-core-ts:test` — not
+  `iam-console-ts:test`, since the file now lives in, and is owned by, the package's own Moon
+  project (`ts/packages/paigasus-console-core/moon.yml`'s `test` task keys on the parity corpus
+  vectors and the kernel's `model.rs` directly). The name carries the `-tenancy` suffix because a
   bare `prn.ts` is a Windows reserved device name (see the gotcha above).
+- **`@paigasus/console-core`** (`ts/packages/paigasus-console-core`, SMA-512 PR 2) is a source-only,
+  private, server-only package holding the console composition both zones share: the IAM client
+  factory, provisioning and the principal resolver, `mayI()`, `myScopes()`, `callIam`, the
+  JSON-lines logger, discovery, the correlation helpers and the PRN readers. It is the ONE package
+  allowed to import both `@paigasus/auth` and `@paigasus/sdk`: `@paigasus/auth` must not import
+  `@paigasus/sdk`, and the sdk boundary block bans every other `@paigasus/*` import, so before this
+  package only an app could depend on both. Its `createConsoleRuntime` factory must be called
+  EXACTLY ONCE per app, at module scope: every accessor but `iamClientsForToken` and
+  `iamClientsForAction` is a React `cache()` wrapper, and a second call makes a second memoization
+  identity — a second `Introspect`, a second `ListRoleGrants` walk, and up to 50 more tenancy reads
+  per render. Outside a React server render `cache()` is a pass-through, so NO unit or integration
+  test can catch a violation; only an e2e `Introspect` count can, and that lives in a later pull
+  request. `iamClientsForAction` is deliberately not memoized: it returns a `relogin` failure
+  rather than redirecting, so a Server Action can render an inline error. Its `testing/` subpath is
+  OUTSIDE `src/` and carries no `server-only` guard, on purpose: vitest and Playwright harnesses
+  import it outside a Next server. "Every file under `src/` imports `server-only`" has ONE exception:
+  `src/global.d.ts` declares a type only and imports nothing, so it does not import `server-only`
+  either — harmless, since a `.d.ts` emits no runtime code. What actually keeps a client bundle safe
+  is the package's `exports` map, which exposes only `.` (`src/index.ts`) and `./testing`
+  (`testing/index.ts`), so no deep import can reach an unguarded module, together with
+  `src/index.ts`'s own `import 'server-only'`. The per-file rule is defence in depth on top of that,
+  not the guard itself.
 - **`forbidden()` needs `experimental.authInterrupts`, and a React `cache()` value does not reach
   `forbidden.tsx`** (MEASURED on Next 16.3.4, SMA-511). Without the flag, `forbidden()` throws
   instead of rendering the 403 boundary. The iam-console sets it through
@@ -1002,9 +1027,10 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   per-segment boundary: `(console)/forbidden.tsx` renders inside the `(console)` layout with a real
   HTTP 403. `forbidden()` takes no argument, and a `cache()` holder set before the call is EMPTY in
   the `forbidden.tsx` render, so the view cannot receive request data that way.
-  The view gets the correlation id from a request header instead: `proxy.ts` mints it, `lib/iam.ts`
-  sends it to IAM as `paigasus-correlation-id`, IAM adopts it, and `forbidden.tsx` reads it with
-  `headers()`. `lib/correlation.ts`'s `FORBIDDEN_VIEW_CORRELATION` records which of the two ships,
+  The view gets the correlation id from a request header instead: `proxy.ts` mints it,
+  `@paigasus/console-core`'s `iam-clients.ts` sends it to IAM as `paigasus-correlation-id`, IAM
+  adopts it, and `forbidden.tsx` reads it with `headers()`. `@paigasus/console-core`'s
+  `correlation.ts`'s `FORBIDDEN_VIEW_CORRELATION` records which of the two ships,
   and e2e row R4 fails if the view does the other. The flag is experimental: R4 asserts the real
   HTTP 403, so a Next upgrade that changes it reds CI.
 - **A Playwright `globalSetup` runs in another process than the tests.** A fake server that a test
@@ -1030,22 +1056,31 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   This is broader than the `doc_diagnosis_self_test` entry above says: it is not only about this
   file's own diagnosis procedure block. A new plan or spec that quotes the procedure, or otherwise
   mentions `ciReport.json`, reds the gate until it carries the marker or is added to the allowlist.
-- LOCAL ONLY: `/bin/bash` 3.2.57 makes `ci/actionlint/run.sh` print two FALSE `cargo-lock-step`
-  self-test failures — run that gate with `/opt/homebrew/bin/bash` instead. The affected-graph
-  suite (`ci/affected-graph/run.sh`) is the opposite case: it needs system `/bin/bash` 3.2, because
-  bash 5.3.15 deadlocks on a `while read` fed by a here-string over roughly 512 bytes on this class
-  of machine. Keep both facts together: fixing one gate's bash version by copying the other's
-  breaks it.
-  MEASURED (SMA-512): a third gate pair needs the OTHER bash version too. `ci/ruff/run.sh`
-  (lines 114, 239) and `ci/next-public/run.sh` (lines 151-198) both call `mapfile`, a bash-4+
-  builtin absent from system `/bin/bash` 3.2.57 — under it, both gates fail every self-test row
-  (`mapfile: command not found`, read as an ordinary assertion failure, not an infrastructure
-  error). Both pass cleanly under `/opt/homebrew/bin/bash` 5.3.15. So on this class of machine, no
-  single local bash satisfies every gate: `repo:affected-smoke` needs 3.2 (no `mapfile`, and no
-  here-string deadlock), while `repo:ruff-ci`, `repo:next-public-free` and `repo:actionlint` need
-  4+. A local full-graph `moon ci` run must pick one bash for the whole invocation, then re-run the
-  gates that need the other bash directly (`<bash-binary> ci/<gate>/run.sh`) and read those results
-  instead of the `moon ci` verdict for them. CI runs a single Linux bash and never sees this split.
+- LOCAL ONLY, CORRECTED (SMA-512): no local bash currently runs `ci/actionlint/run.sh` to
+  completion, and the two candidates fail differently. Under system `/bin/bash` 3.2.57 the gate
+  does not deadlock — it still prints the two FALSE `cargo-lock-step` self-test failures — but it
+  also does not finish: measured running past one hour without completing. Under Homebrew
+  `/opt/homebrew/bin/bash` 5.3.15 the gate DEADLOCKS instead: measured three times independently on
+  2026-09-14, at 0.0% CPU with 0.00s cumulative CPU time and zero live children after ten to fifteen
+  minutes each time. So `/opt/homebrew/bin/bash` is NOT a working substitute for this gate — it is
+  worse, not better — and an earlier version of this bullet recommending it was wrong. Keep the 3.2
+  fact: it is still true, it just does not mean 3.2 finishes the gate either. CI is unaffected: it
+  runs neither of these bash builds. The affected-graph suite (`ci/affected-graph/run.sh`) is the
+  opposite case: it needs system `/bin/bash` 3.2, because bash 5.3.15 deadlocks on a `while read`
+  fed by a here-string over roughly 512 bytes on this class of machine. Keep both facts together:
+  fixing one gate's bash version by copying the other's breaks it.
+  MEASURED (SMA-512): a third gate pair needs bash 4+. `ci/ruff/run.sh` (lines 114, 239) and
+  `ci/next-public/run.sh` (lines 151-198) both call `mapfile`, a bash-4+ builtin absent from system
+  `/bin/bash` 3.2.57 — under it, both gates fail every self-test row (`mapfile: command not found`,
+  read as an ordinary assertion failure, not an infrastructure error). Both pass cleanly under
+  `/opt/homebrew/bin/bash` 5.3.15. So on this class of machine, no single local bash satisfies every
+  gate: `repo:affected-smoke` needs 3.2 (no `mapfile`, and no here-string deadlock);
+  `repo:ruff-ci` and `repo:next-public-free` need 4+; and `repo:actionlint` has no working local
+  bash at all, per the correction above. A local full-graph `moon ci` run must pick one bash for the
+  whole invocation, then re-run the gates that need the other bash directly
+  (`<bash-binary> ci/<gate>/run.sh`) and read those results instead of the `moon ci` verdict for
+  them — `repo:actionlint` has no local substitute verdict today. CI runs a single Linux bash and
+  never sees this split.
 
 ## Workflow
 

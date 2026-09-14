@@ -7,12 +7,10 @@
 // reports `iam.authz.cedar`, the scopes of its OWN role grants (a principal may always list its own
 // grants; the RPC needs the capability).
 import 'server-only';
-import { cache } from 'react';
 import type { ServiceState } from '@paigasus/discovery/types';
-import { discovery } from './discovery';
+import type { IamClients } from './iam-clients';
+import type { Principal } from './principal';
 import { callIam, type IamResult } from './errors';
-import { iamClients, sessionToken, type IamClients } from './iam';
-import { currentPrincipal, type Principal } from './principal';
 import { organizationPrn, parseTenancyPrn, projectPrn, teamPrn, type TenancyRef } from './prn-tenancy';
 
 export type ScopeEntry =
@@ -98,7 +96,7 @@ export async function loadMyScopes(deps: {
   principal: Principal;
   cedarCapability: boolean;
 }): Promise<MyScopes> {
-  // An unnamed principal (spec § 4.5; lib/principal-prn.ts) cannot be the subject of ListRoleGrants,
+  // An unnamed principal (spec § 4.5; principal-prn.ts) cannot be the subject of ListRoleGrants,
   // so the walk is SKIPPED rather than sent with an empty PRN — which IAM refuses with
   // InvalidArgument, costing a round trip to reach the same "memberships only" page (review,
   // defect 1). The memberships IAM did send are still listed.
@@ -119,20 +117,11 @@ export function cedarCapabilityOf(state: ServiceState): boolean {
   return state.state === 'available' && state.capabilities.includes('iam.authz.cedar');
 }
 
-/** One per request. The page and the switcher share it (spec § 5.1). */
-export const myScopes = cache(async (): Promise<IamResult<MyScopes>> => {
-  const principal = await currentPrincipal();
-  if (!principal.ok) return principal;
-  const [clients, token] = await Promise.all([iamClients(), sessionToken()]);
-  const iam = await discovery().getServiceState('iam', token);
-  return { ok: true, value: await loadMyScopes({ tenancy: clients.tenancy, authz: clients.authz, principal: principal.value, cedarCapability: cedarCapabilityOf(iam) }) };
-});
-
 /**
  * The organization switcher's entries (spec § 5.4): one per ORGANIZATION scope of the same
  * myScopes() result the page shows. A row with no name shows its UUID. A failed myScopes() gives
  * no switcher, not a failed layout. Plain data: OrgSwitcherShell (a client component) builds the
- * hrefs. The shape is app/_components/org-switcher.tsx's OrgSwitcherOrg; lib/ does not import app/.
+ * hrefs. The shape is app/_components/org-switcher.tsx's OrgSwitcherOrg; this package's src/ does not import app/.
  */
 export function switcherOrgs(scopes: IamResult<MyScopes>): { orgId: string; label: string }[] {
   if (!scopes.ok) return [];

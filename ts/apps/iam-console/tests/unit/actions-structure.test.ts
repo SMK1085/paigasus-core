@@ -6,7 +6,8 @@
 //
 // iamClients() is BANNED here, and that ban is the control on the final-review fix: it redirects
 // through requireSession(), and a Server Action's redirect carries no basePath, so the browser
-// leaves the /iam zone (lib/iam.ts's iamClientsForAction doc comment has the Next line numbers).
+// leaves the /iam zone (@paigasus/console-core's src/runtime.ts has the Next line numbers, on
+// iamClientsForAction's doc comment).
 //
 // No actions.ts names mayI (spec § 6.3): a hidden button is cosmetic, and IAM decides. That check
 // reads identifiers, not text, so a comment that names mayI() is not a violation.
@@ -111,7 +112,7 @@ function checkActionsSource(file: string, text: string): { names: string[]; viol
     if (value.body === undefined) violations.push(`${file}: export ${value.name} is not a function whose body this test can read`);
     else if (!callsActionClients(value.body)) violations.push(`${file}: export ${value.name} does not call iamClientsForAction()`);
   }
-  // createIamClients? covers both lib/iam-clients.ts' createIamClients and the SDK's createIamClient.
+  // createIamClients? covers both @paigasus/console-core's iam-clients.ts' createIamClients and the SDK's createIamClient.
   if (/\b(?:iamClientsForToken|createIamClients?)\b/.test(text)) violations.push(`${file}: builds an IAM client without a session`);
   // `iamClients` is the PAGE accessor. It redirects, and a Server Action's redirect leaves the zone.
   if (namesIdentifier(source, 'iamClients')) violations.push(`${file}: uses the redirecting iamClients()`);
@@ -135,7 +136,7 @@ describe('every Server Action gets its client through iamClientsForAction() (spe
   });
 
   describe('the checker fails on each broken shape (negative controls)', () => {
-    const header = "'use server';\nimport { iamClientsForAction } from '../lib/iam';\n";
+    const header = "'use server';\nimport { iamClientsForAction } from '../lib/console';\n";
     it.each([
       ['a function without the call', `${header}export async function a() { return 1; }`, 'does not call iamClientsForAction()'],
       ['an arrow without the call', `${header}export const a = async () => 1;`, 'does not call iamClientsForAction()'],
@@ -146,7 +147,7 @@ describe('every Server Action gets its client through iamClientsForAction() (spe
       ['a missing directive', 'export async function a() { await iamClientsForAction(); }', "the first statement is not 'use server'"],
       [
         'a session-less client',
-        `${header}import { iamClientsForToken } from '../lib/iam-clients';\nexport async function a() { await iamClientsForAction(); iamClientsForToken('t'); }`,
+        `${header}import { iamClientsForToken } from '../lib/console';\nexport async function a() { await iamClientsForAction(); iamClientsForToken('t'); }`,
         'without a session',
       ],
       // No import line: the check reads the text, so the call `createIamClients(` alone must trip it.
@@ -154,12 +155,12 @@ describe('every Server Action gets its client through iamClientsForAction() (spe
       // The redirecting page accessor. This is the control on the final-review fix (see the header).
       [
         'the redirecting page accessor',
-        `${header}import { iamClients } from '../lib/iam';\nexport async function a() { await iamClientsForAction(); await iamClients(); }`,
+        `${header}import { iamClients } from '../lib/console';\nexport async function a() { await iamClientsForAction(); await iamClients(); }`,
         'redirecting iamClients()',
       ],
       [
         'an action that consults mayI',
-        `${header}import { mayI } from '../lib/authorize';\nexport async function a() { await iamClientsForAction(); const may = await mayI(); return may; }`,
+        `${header}import { mayI } from '../lib/console';\nexport async function a() { await iamClientsForAction(); const may = await mayI(); return may; }`,
         'consults mayI()',
       ],
     ])('%s', (_label, source, message) => {

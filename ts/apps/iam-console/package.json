@@ -13,10 +13,10 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@bufbuild/protobuf": "catalog:",
     "@connectrpc/connect": "catalog:",
     "@paigasus/app-shell": "workspace:*",
     "@paigasus/auth": "workspace:*",
+    "@paigasus/console-core": "workspace:*",
     "@paigasus/discovery": "workspace:*",
     "@paigasus/next-config": "workspace:*",
     "@paigasus/sdk": "workspace:*",
@@ -25,14 +25,11 @@
     "next": "catalog:",
     "react": "catalog:",
     "react-dom": "catalog:",
-    "redis": "catalog:",
     "server-only": "catalog:",
     "tailwindcss": "catalog:",
     "zod": "catalog:"
   },
   "devDependencies": {
-    "@connectrpc/connect-node": "catalog:",
-    "@paigasus/proto": "workspace:*",
     "@playwright/test": "catalog:",
     "@types/node": "catalog:",
     "@types/react": "catalog:",

@@ -264,94 +264,137 @@ needs the same code.
 A subpath on either existing package would break one of those two rules. A third package is the
 only shape that holds them.
 
-### 5.2 What moves
+### 5.2 What moved
 
-| From `ts/apps/iam-console/lib/` | Note |
-|---|---|
-| `iam.ts`, `iam-clients.ts` | `currentSession`, `optionalSession`, `sessionToken`, `iamClients`, `iamClientsForAction` |
-| `principal.ts`, `principal-resolver.ts`, `principal-prn.ts` | provisioning, the resolver, `currentPrincipal()`, and the one reading of `principal_prn` |
-| `authorize.ts` | `mayI()` |
-| `scopes.ts` | `myScopes()` |
-| `errors.ts` | the `callIam` wrapper and the presentation mapping |
-| `logger.ts` | the JSON-lines adapter |
-| `discovery.ts` | the discovery handle and the Redis descriptor cache |
-| `correlation.ts`, `correlation-header.ts` | the correlation header names and the reader |
-| `prn-tenancy.ts`, `tenancy-path.ts` | the PRN reader and the path helpers |
+**Corrected at Task 8, against the shipped tree.** Revision 1 of this table paired `prn-tenancy.ts`
+with `tenancy-path.ts` and proposed both move. Only `prn-tenancy.ts` did.
 
-`principal-prn.ts` moves **with its two callers, and must not be separated from them.** Its header
+| From `ts/apps/iam-console/lib/` | To `packages/paigasus-console-core/src/` | Note |
+|---|---|---|
+| `iam-clients.ts` | `iam-clients.ts` | `createIamClients`, the five-client factory. The request-scoped accessors that used to live in `iam.ts` (`currentSession`, `optionalSession`, `sessionToken`, `iamClients`, `iamClientsForAction`) are not carried over as a standalone file — they are built by `runtime.ts`'s `createConsoleRuntime` factory instead (§ 5.3) |
+| `principal.ts`, `principal-resolver.ts`, `principal-prn.ts` | `principal.ts`, `principal-resolver.ts`, `principal-prn.ts` | provisioning, the resolver, `introspectWithProvisioning()`, and the one reading of `principal_prn` |
+| `authorize.ts` | `authorize.ts` | `createMayI()` / `mayI()` |
+| `scopes.ts` | `scopes.ts` | `loadMyScopes()` / `myScopes()`, `switcherOrgs`, `cedarCapabilityOf` |
+| `errors.ts` | `errors.ts` | the `callIam` wrapper and the presentation mapping |
+| `logger.ts` | `logger.ts` | the JSON-lines adapter |
+| `discovery.ts` | `discovery.ts` | the discovery handle and the Redis descriptor cache |
+| `correlation.ts`, `correlation-header.ts` | `correlation.ts`, `correlation-header.ts` | the correlation header names and the reader |
+| `prn-tenancy.ts` | `prn-tenancy.ts` | the PRN reader |
+
+**`tenancy-path.ts` does not move.** It holds one constant, `TENANCY_PATH = '/orgs'`, and
+deliberately carries no `server-only` guard: a Server Actions file may export only async functions,
+so the constant cannot live in an `actions.ts`. Moving it into `src/` would force an exception to
+the guard rule for one string. It stays per app (`ts/apps/iam-console/lib/tenancy-path.ts`).
+
+Two files exist in the package with no `lib/` predecessor: `runtime.ts`, holding the
+`createConsoleRuntime` factory (§ 5.3), and `config-shape.ts`, the structural `ConsoleCoreConfig`
+type § 5.3 also corrects. Neither is a move.
+
+`principal-prn.ts` moved **with its two callers, and was not separated from them.** Its header
 records the drift that splitting the reading caused once already: the login resolver normalised
 `'' -> null` while the live path passed the empty string through, so `mayI()` asked IAM
 `isAuthorized({ principalPrn: '' })`, IAM refused with `InvalidArgument`, `mayI()` failed open, and
 every mutation control rendered for a principal IAM could not name
-(`ts/apps/iam-console/lib/principal-prn.ts:5-12`). Leaving it behind while `principal.ts` and
-`principal-resolver.ts` move would reinstate a measured production bug.
+(`ts/packages/paigasus-console-core/src/principal-prn.ts:5-12`). Leaving it behind while
+`principal.ts` and `principal-resolver.ts` moved would have reinstated a measured production bug.
 
-`discovery.ts` moves although it does not touch the `auth`/`sdk` conflict, because both zones need
-byte-identical code and the code is subtle: `createRedisDescriptorCache` asserts four preconditions
-on the client, the error listener must never log the error object because node-redis embeds the
-DSN in it, and a failed `connect()` must degrade to the `cache-unavailable` reason rather than fall
-back to a memory cache in silence. A second hand-written copy would get one of those wrong.
+`discovery.ts` moved although it does not touch the `auth`/`sdk` conflict, because both zones need
+byte-identical code and the code is subtle: the Redis descriptor cache it wraps asserts
+preconditions on the client, the error listener must never log the error object because node-redis
+embeds the DSN in it, and a failed `connect()` must degrade to the `cache-unavailable` reason
+rather than fall back to a memory cache in silence. A second hand-written copy would get one of
+those wrong.
 
-`tests/unit/prn-tenancy.test.ts` moves with the reader. The reader is a recorded ADR-0005
-exception, held to the Rust kernel by the parity corpus. One exception with one parity test is
-defensible; two copies of an ADR exception are not.
+`tests/unit/prn-tenancy.test.ts` moved with the reader, to
+`ts/packages/paigasus-console-core/tests/unit/prn-tenancy.test.ts`. The reader is a recorded
+ADR-0005 exception, held to the Rust kernel by the parity corpus. One exception with one parity
+test is defensible; two copies of an ADR exception are not.
 
-The logger has two halves and only one moves. The JSON-lines **adapter** moves. The app still
+The logger has two halves and only one moved. The JSON-lines **adapter** moved. The app still
 constructs it and passes it in, because the app owns composition.
 
 **What stays in each app:** `config.ts` (the key sets differ per zone), `auth.ts` (composition —
 it builds the auth runtime from the moved resolver, logger and clients, and its shape depends on
-which keys the zone declares), `nav.ts` (the entries differ per zone), `form.ts` and `paging.ts`
-(IAM screen helpers with no gateway consumer), and every React component. Pulling React in would
+which keys the zone declares), `console.ts` (the app's one `createConsoleRuntime` call, § 5.3),
+`nav.ts` (the entries differ per zone), `form.ts` and `paging.ts` (IAM screen helpers with no
+gateway consumer), `tenancy-path.ts` (above), and every React component. Pulling React in would
 make the package client-reachable and compromise the `server-only` guard that is its point.
 
-### 5.3 The interface
+### 5.3 The interface (corrected at Task 8, against the shipped code)
 
-The package reads no environment. An app passes **thunks**, so the factory is safe at module scope
-and no configuration is read during `next build`:
+The package reads no environment. An app passes a **config thunk**, not the `iamGrpcUrl` thunk
+revision 1 proposed, because `discovery.ts` also needs the session-store and discovery-timing
+settings — one thunk replaces the two:
 
 ```ts
-createConsoleRuntime({
+createConsoleRuntime(deps: {
+  config: () => ConsoleCoreConfig,
   authRuntime: () => Promise<AuthRuntime>,
-  iamGrpcUrl: () => string,
   logger: ConsoleLogger,
 }): ConsoleRuntime
 ```
 
+**Correction to revision 1.** § 5.3 there proposed `{ authRuntime, iamGrpcUrl, logger }`.
+`ConsoleCoreConfig` (`ts/packages/paigasus-console-core/src/config-shape.ts`) is a structural type
+with eleven keys — `PAIGASUS_IAM_GRPC_URL`, the three `PAIGASUS_SESSION_*` keys `discovery.ts`
+needs, `PAIGASUS_SERVICES`, and the six `PAIGASUS_DISCOVERY_*_MS` timings — declared structurally
+rather than imported from either app's own `ConsoleConfig`, so both zones satisfy it without the
+package knowing either app exists. Each app's own config structurally satisfies it.
+
 `ConsoleRuntime` exposes `currentSession`, `optionalSession`, `sessionToken`, `iamClients`,
-`iamClientsForAction`, `currentPrincipal`, `mayI`, `myScopes` and `callIam`.
+`iamClientsForAction`, `iamClientsForToken`, `currentPrincipal`, `mayI`, `myScopes` and `discovery`
+(`ts/packages/paigasus-console-core/src/runtime.ts:34-45`). There is no `callIam` on
+`ConsoleRuntime`: `callIam` is exported directly from the package's root (§ 5.2), not built by the
+factory.
 
 **The factory must be called exactly once per app, at module scope in `lib/console.ts`, and the
-app re-exports the returned accessors.** This is a correctness rule, not a style preference. Today
-each accessor is a module-scope `cache(...)` (`ts/apps/iam-console/lib/iam.ts:21,24,30,59`), and a
-factory creates fresh `cache()` wrappers on every call. Two calls means two memoization identities
-and a second `Introspect`, `ListRoleGrants` and up to 50 tenancy reads per render. Outside a React
-server render `cache()` is a pass-through (`lib/iam.ts:7-8`), so **no vitest tier can observe the
-difference** — § 10.5 carries the only assertion that can, an e2e row counting fake-IAM
-`Introspect` calls for one page render.
+app re-exports the returned accessors.** This is a correctness rule, not a style preference. Every
+accessor except `iamClientsForToken` and `iamClientsForAction` is a module-scope `cache(...)`
+wrapper built inside the factory (`runtime.ts:57,60,63,69,99,102,108,111`), and a second
+`createConsoleRuntime()` call makes fresh `cache()` wrappers with a new memoization identity. Two
+calls therefore means a second `Introspect`, a second `ListRoleGrants` walk (up to 50 tenancy
+reads) and a second discovery probe per render. Outside a React server render `cache()` is a
+pass-through (measured on react 19.2.8, `runtime.ts:17`), so **no unit or integration test can
+observe the difference** — this is the single most important thing a future reader needs to know
+about this package. Only an e2e `Introspect` count can observe it; § 10.5 carries the only
+assertion that can, an e2e row counting fake-IAM `Introspect` calls for one page render, and PR 3
+owns it.
 
-`iamClientsForAction` is deliberately **not** memoized (`lib/iam.ts:52`); the sentence above
-applies to the accessors that are.
+`iamClientsForAction` is deliberately **not** memoized (`runtime.ts:92`): it returns a `relogin`
+failure rather than redirecting, so a Server Action can render an inline error rather than a
+mid-action redirect Next cannot resolve correctly inside the zone.
 
-`createIntrospectPrincipalResolver` is exported **separately**, not from that factory. It cannot
-come from the console runtime: the console runtime takes the auth runtime, and the auth runtime
-takes the resolver. Its signature is
+`iamClientsForToken` is also not memoized (`runtime.ts:54`): it is parameterized by `token`, and
+every call site — `iamClients`/`iamClientsForAction` inside the factory, and the login callback's
+resolver factory in the app's `lib/auth.ts` — already runs behind its own per-request
+memoization.
+
+`createIntrospectPrincipalResolver` is exported **separately** (`principal-resolver.ts`), not from
+that factory. It cannot come from the console runtime: the console runtime takes the auth runtime,
+and the auth runtime takes the resolver, so building it inside would be circular. Its signature is
 `createIntrospectPrincipalResolver({ clientsForToken, logger, timeoutMs })`, where `clientsForToken`
-is the same port `iam-console` builds today (`lib/iam-clients.ts:59-61`, wired at `lib/auth.ts:31`).
-Stating it here stops two implementers picking two shapes.
+takes a bearer token and returns `Pick<IamClients, 'authn' | 'serviceInfo'>` — the two clients
+provisioning needs, not the full five. `iam-console/lib/auth.ts` wires it to `iamClientsForToken`
+from `./console`, reading the request's correlation id first. Stating the signature here stops two
+implementers picking two shapes.
 
-The PRN reader and the path helpers are pure functions and are exported directly.
+The PRN reader (`principalPrnOf`) and the path helpers (`prn-tenancy.ts`'s exports) are pure
+functions and are exported directly.
 
-### 5.4 One small change to `@paigasus/auth`
+### 5.4 One small change to `@paigasus/auth` (as shipped)
 
-`iam-console/lib/auth.ts` re-declares the session cookie name as `SESSION_COOKIE_NAME =
-'__Host-pgs_sid'`, because `@paigasus/auth` defines it at `src/http/cookies.ts:21` but exports it
-from no public entry — its `exports` map has only `./server`, `./client` and `./middleware`. A
-second app would make a third copy of a constant that must agree across every zone or the shared
-session silently stops working.
+`iam-console/lib/auth.ts` used to re-declare the session cookie name as `SESSION_COOKIE_NAME =
+'__Host-pgs_sid'`, because `@paigasus/auth` defined it at `src/http/cookies.ts:21` but exported it
+from no public entry — its `exports` map had only `./server`, `./client` and `./middleware`. A
+second app would have made a third copy of a constant that must agree across every zone or the
+shared session silently stops working.
 
-`@paigasus/auth` therefore exports `SESSION_COOKIE` from `./server`, and both apps use it. This is
-the only change this issue makes to `@paigasus/auth`, and it belongs in pull request 2.
+**Correction to revision 1: this is solved, not merely proposed.** `@paigasus/auth` now exports
+`SESSION_COOKIE` from `./server` (`src/server.ts:34`, re-exporting `src/http/cookies.ts:21`), and
+`iam-console/lib/auth.ts` no longer declares its own copy — confirmed by grep: there are zero
+occurrences of `SESSION_COOKIE_NAME`, or a re-declared `SESSION_COOKIE`, anywhere under
+`ts/apps/iam-console/lib/`. A second app will use the same export once it exists (pull request 3).
+This is the only change this issue makes to `@paigasus/auth`, and it shipped in pull request 2.
 
 ### 5.5 Boundary rules
 
@@ -368,8 +411,16 @@ Three rules, not one. The first is the hole; the other two keep it from widening
    *"`server-only` is a NO-OP in the middleware layer, so nothing else stops a token-bearing
    module being bundled there."* `@paigasus/console-core` transitively holds both, so it joins that
    ban. Without this, the new package silently reopens the hole the rule exists to close.
-3. **The testing subpath.** Only `apps/*/tests/**` may import `@paigasus/console-core/testing`.
-   Nothing in an app's `lib/` or `app/` may.
+3. **The testing subpath — DID NOT SHIP.** The design intent was that only `apps/*/tests/**` may
+   import `@paigasus/console-core/testing`, and that nothing in an app's `lib/` or `app/` may. This
+   was never built. There is no `no-restricted-imports` group for `@paigasus/console-core/testing`
+   in `eslint.mjs`, the subpath carries no `server-only` guard by design (§ 5.6), and
+   `@paigasus/console-core` is a production `dependencies` entry of `iam-console`, so the subpath
+   resolves from production code today. Building it needs the same mechanism the reverse rule below
+   needs — a custom named rule in `sourceRules`, not a second `packages/**` block, for the reason the
+   next paragraph gives. Residual exposure until it ships: an `app/page.tsx` can import, for example,
+   `startFakeIam` today, and `next build` succeeds, pulling an in-process gRPC fake into the app
+   bundle. See the plan's "Known limits" section for the follow-up.
 
 **Do not express the reverse rule ("only apps may import console-core") as a new `packages/**`
 block.** In flat config a second `no-restricted-imports` block matching the same files
@@ -379,9 +430,10 @@ the `sdk`, `auth-*` and `discovery` boundary rules in silence. Several packages
 nothing to extend for them either. Use a custom named rule in `sourceRules`, following the
 `paigasus/no-js-relative-specifier` precedent, which exists for this exact reason.
 
-`boundaries.test.ts` gains ALLOWED and DENIED rows for all three rules. Its reverse-liveness loop
-derives a scope key as `files[0].split('/**')[0]` (`boundaries.test.ts:254`), so rule 1's glob must
-yield the key `packages/paigasus-console-core/src` and that key must appear in `BOUNDARY_SCOPES`.
+`boundaries.test.ts` gains ALLOWED and DENIED rows for rules 1 and 2 — rule 3 shipped no rule, so it
+gained none. Its reverse-liveness loop derives a scope key as `files[0].split('/**')[0]`
+(`boundaries.test.ts:254`), so rule 1's glob must yield the key `packages/paigasus-console-core/src`
+and that key must appear in `BOUNDARY_SCOPES`.
 
 ### 5.6 The testing subpath (D10)
 

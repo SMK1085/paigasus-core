@@ -158,6 +158,13 @@ const DENIED: ReadonlyArray<readonly [string, string, string]> = [
   // The test-double exemption is NARROW: only apps/*/tests/support/**.
   ['app lib code must not import proto', 'apps/iam-console/lib/iam.ts', "import { x } from '@paigasus/proto';"],
   ['an app test outside tests/support must not import proto', 'apps/iam-console/tests/unit/errors.test.ts', "import { ErrorInfoSchema } from '@paigasus/proto';"],
+  // SMA-512 — @paigasus/console-core.
+  ['console-core must not import proto directly', 'packages/paigasus-console-core/src/principal.ts', "import { x } from '@paigasus/proto';"],
+  ['a proxy must not import console-core', 'apps/iam-console/proxy.ts', "import { x } from '@paigasus/console-core';"],
+  // SMA-512 PR 2, task 3 fix round 1: the next/navigation carve-out is a list of ONE
+  // (`unstable_rethrow`), not a blanket unban — `redirect` is a different real export of the same
+  // module and must still be denied.
+  ['console-core must not import next/navigation’s redirect', 'packages/paigasus-console-core/src/correlation.ts', "import { redirect } from 'next/navigation';"],
 ];
 
 const ALLOWED: ReadonlyArray<readonly [string, string, string]> = [
@@ -198,6 +205,12 @@ const ALLOWED: ReadonlyArray<readonly [string, string, string]> = [
   ['the fixture may import ui', 'packages/paigasus-app-shell/tests/e2e/fixture/app/page.tsx', "import { Link } from '@paigasus/ui';"],
   // SMA-511 spec § 7.4.
   ['an app proxy may import auth/middleware', 'apps/iam-console/proxy.ts', "import { authRoutePaths, createAuthMiddleware } from '@paigasus/auth/middleware';"],
+  // SMA-512 — @paigasus/console-core.
+  ['console-core may import auth/server', 'packages/paigasus-console-core/src/iam.ts', "import { x } from '@paigasus/auth/server';"],
+  ['console-core may import the sdk', 'packages/paigasus-console-core/src/iam.ts', "import { x } from '@paigasus/sdk/iam';"],
+  ['console-core testing may import proto', 'packages/paigasus-console-core/testing/fake-iam.ts', "import { x } from '@paigasus/proto';"],
+  // SMA-512 PR 2, task 3 fix round 1: the one named export allowed from next/navigation.
+  ['console-core may import next/navigation’s unstable_rethrow', 'packages/paigasus-console-core/src/correlation.ts', "import { unstable_rethrow } from 'next/navigation';"],
 ];
 
 describe('boundary preset', () => {
@@ -292,17 +305,27 @@ async function realConfigRestrictedImportsFor(filePath: string, source: string):
 describe('the workspace eslint config actually applies the preset', () => {
   // The file need not exist on disk — lintText takes the source and the path it is to be judged
   // as. A path under packages/ is what an `ignores: ['packages/**']` entry would silence.
+  // 30s, not vitest's default 5s: this test boots a real ESLint against the SHIPPED flat
+  // config, and the FIRST such call in a file pays the whole config-resolution cost — the
+  // siblings after it run in tens of milliseconds. It timed out on CI (9.7s and 5.9s) while
+  // passing locally, because a cold runner resolves every workspace package from scratch.
+  // The timeout is the cost of the real-config assertion, not slack for a slow unit test.
   it('lints a denied packages/ import through the REAL config, not an override', async () => {
     const messages = await realConfigRestrictedImportsFor('packages/paigasus-ui/src/probe.mjs', "import { x } from '@paigasus/sdk';\nexport const y = x;\n");
     expect(messages, 'ts/eslint.config.js did not apply the ui boundary rule to a packages/ path — check its global `ignores` array').not.toHaveLength(0);
-  });
+  }, 30_000);
 
   // The apps/ half, because a single `ignores` entry silences one tree at a time: `'packages/**'`
   // leaves the row above red and this one green, and `'apps/**'` does the reverse.
+  // 30s, not vitest's default 5s: this test boots a real ESLint against the SHIPPED flat
+  // config, and the FIRST such call in a file pays the whole config-resolution cost — the
+  // siblings after it run in tens of milliseconds. It timed out on CI (9.7s and 5.9s) while
+  // passing locally, because a cold runner resolves every workspace package from scratch.
+  // The timeout is the cost of the real-config assertion, not slack for a slow unit test.
   it('lints a denied apps/ import through the REAL config, not an override', async () => {
     const messages = await realConfigRestrictedImportsFor('apps/iam-console/app/probe.mjs', "import { x } from '@paigasus/proto';\nexport const y = x;\n");
     expect(messages, 'ts/eslint.config.js did not apply the apps boundary rule to an apps/ path — check its global `ignores` array').not.toHaveLength(0);
-  });
+  }, 30_000);
 
   it('carries every boundary entry in its EXPORTED array, not merely as an import', async () => {
     // Importing the real config is what makes this an assertion rather than a text scan: a dead
@@ -327,6 +350,11 @@ describe('the workspace eslint config actually applies the preset', () => {
   // here. The path is a REAL, tracked file: the shipped config lints every .ts path with
   // projectService, and a path no tsconfig includes gives one fatal parse error and runs no rule.
   // lintText uses the source given here, not the file on disk.
+  // 30s, not vitest's default 5s: this test boots a real ESLint against the SHIPPED flat
+  // config, and the FIRST such call in a file pays the whole config-resolution cost — the
+  // siblings after it run in tens of milliseconds. It timed out on CI (9.7s and 5.9s) while
+  // passing locally, because a cold runner resolves every workspace package from scratch.
+  // The timeout is the cost of the real-config assertion, not slack for a slow unit test.
   it('lints a .js relative specifier in package src through the REAL config', async () => {
     const eslint = new ESLint({ cwd: TS_ROOT });
     const [result] = await eslint.lintText("import { SESSION_VIEW_KEYS } from './core/session.js';\nexport const keys = SESSION_VIEW_KEYS;\n", {
@@ -350,16 +378,25 @@ describe('the workspace eslint config actually applies the preset', () => {
     ['a proto SUBPATH', "import { TenancyService } from '@paigasus/proto/iam';\nexport const y = TenancyService;\n"],
   ];
 
-  it.each(TEST_DOUBLE_IMPORTS)('an app test double under tests/support may import %s, through the REAL config', async (_label, source) => {
-    const ignored = await new ESLint({ cwd: TS_ROOT }).isPathIgnored(TEST_DOUBLE_PATH);
-    expect(ignored, 'the real config does not lint this path, so an empty result would prove nothing').toBe(false);
-    expect(await realConfigRestrictedImportsFor(TEST_DOUBLE_PATH, source)).toEqual([]);
-  });
+  it.each(TEST_DOUBLE_IMPORTS)(
+    'an app test double under tests/support may import %s, through the REAL config',
+    async (_label, source) => {
+      const ignored = await new ESLint({ cwd: TS_ROOT }).isPathIgnored(TEST_DOUBLE_PATH);
+      expect(ignored, 'the real config does not lint this path, so an empty result would prove nothing').toBe(false);
+      expect(await realConfigRestrictedImportsFor(TEST_DOUBLE_PATH, source)).toEqual([]);
+    },
+    30_000,
+  );
 
   // The DENIED twin: the same import one directory over, through the same config. If the exemption
   // is widened (for example to `apps/*/tests/**`), this case fails.
+  // 30s, not vitest's default 5s: this test boots a real ESLint against the SHIPPED flat
+  // config, and the FIRST such call in a file pays the whole config-resolution cost — the
+  // siblings after it run in tens of milliseconds. It timed out on CI (9.7s and 5.9s) while
+  // passing locally, because a cold runner resolves every workspace package from scratch.
+  // The timeout is the cost of the real-config assertion, not slack for a slow unit test.
   it('an app test OUTSIDE tests/support still may not import proto, through the REAL config', async () => {
     const messages = await realConfigRestrictedImportsFor('apps/iam-console/tests/unit/errors.mjs', "import { ErrorInfoSchema } from '@paigasus/proto';\nexport const y = ErrorInfoSchema;\n");
     expect(messages, 'the test-double exemption covers more than apps/*/tests/support/**').not.toHaveLength(0);
-  });
+  }, 30_000);
 });

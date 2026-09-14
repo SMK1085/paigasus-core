@@ -5,7 +5,7 @@
 // And mayI() only hides: a Server Action whose button is hidden still reaches IAM. R6 posts through
 // the REAL browser form, rendered while mayI() said yes, after IsAuthorized has flipped to no.
 import { PRESENTATION_COPY } from '../../app/_components/error-copy';
-import { denial } from '../support/fake-iam';
+import { denial } from '@paigasus/console-core/testing';
 import { forbiddenViewCorrelation } from './support/correlation';
 import { signIn } from './support/login';
 import { ALL_ACTIONS, ORG_ID, ORG_NAME, ORG_PRN } from './support/world';
@@ -38,7 +38,8 @@ test('R4: a denied page read is an HTTP 403 with the 403 view inside the shell (
     .filter((call) => (call.request as { prn: string }).prn === ORG_PRN);
   expect(denied.length).toBeGreaterThan(0);
   // The paigasus-correlation-id header as it ARRIVED at the fake: the id proxy.ts minted. Every call
-  // of one request carries the same id (lib/iam.ts reads it once per request).
+  // of one request carries the same id (@paigasus/console-core's runtime.ts memoizes `iamClients`
+  // with cache(), so it reads it once per request).
   const correlationId = denied.at(-1)?.correlationId ?? '';
   expect(correlationId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
 

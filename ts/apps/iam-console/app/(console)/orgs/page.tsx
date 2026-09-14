@@ -9,10 +9,9 @@ import { CreateForm } from '../../_components/create-form';
 import { PageError } from '../../_components/page-error';
 import { Pager } from '../../_components/pager';
 import { SectionError } from '../../_components/section-error';
-import { mayI } from '../../../lib/authorize';
-import { iamClients } from '../../../lib/iam';
+import type { ScopeEntry } from '@paigasus/console-core';
+import { iamClients, mayI, myScopes } from '../../../lib/console';
 import { parseOffset } from '../../../lib/paging';
-import { myScopes, type ScopeEntry } from '../../../lib/scopes';
 import { createOrganizationAction } from './actions';
 import { loadOrganizationsPage, type OrganizationList } from './load';
 

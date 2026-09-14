@@ -11,11 +11,11 @@ import { cookies } from 'next/headers';
 import { redirect } from 'next/navigation';
 import { connection } from 'next/server';
 import { PublicShell } from '@paigasus/app-shell';
-import { SESSION_COOKIE_NAME } from '../../lib/auth';
+import { SESSION_COOKIE } from '@paigasus/auth/server';
 
 export default async function PublicHome(): Promise<ReactElement> {
   await connection();
-  if ((await cookies()).has(SESSION_COOKIE_NAME)) redirect('/orgs');
+  if ((await cookies()).has(SESSION_COOKIE)) redirect('/orgs');
   return (
     <PublicShell brand={{ label: 'Paigasus IAM', href: '/iam' }}>
       <section className="p-8" data-testid="public-home">

@@ -4,8 +4,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Code, ConnectError } from '@connectrpc/connect';
 import { notFound, redirect } from 'next/navigation';
-import { callIam } from '../../lib/errors';
-import { logger } from '../../lib/logger';
+import { callIam } from '../../src/errors';
+import { logger } from '../../src/logger';
 import { setRequestHeaders } from '../support/next-headers';
 
 // callIam writes one real JSON line per failed call. Silenced here so the suite's output stays

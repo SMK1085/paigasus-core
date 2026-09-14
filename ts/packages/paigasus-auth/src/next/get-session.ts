@@ -111,8 +111,8 @@ export interface RequireSessionOptions {
  * (`server-action-reducer.js:134`, `:274-279`), so `/auth/login?…` sends the user to
  * `https://<host>/auth/login`, OUTSIDE the zone, where no login route exists. An action must call
  * `getSession()` and report the missing session as DATA instead — `@paigasus/auth` cannot do that
- * for the caller, because only the caller knows its own result shape. The IAM console's
- * `lib/iam.ts` `iamClientsForAction()` is the worked example.
+ * for the caller, because only the caller knows its own result shape. `@paigasus/console-core`'s
+ * `runtime.ts` `iamClientsForAction()` is the worked example.
  */
 export async function requireSession(runtime: AuthRuntime, options: RequireSessionOptions = {}): Promise<ResolvedSession> {
   const session = await getSession(runtime);

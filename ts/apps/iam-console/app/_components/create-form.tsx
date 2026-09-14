@@ -4,7 +4,7 @@
 import { useActionState, useId, type ReactElement } from 'react';
 import { Field, Input } from '@paigasus/ui';
 // A TYPE import: verbatimModuleSyntax erases it, so no server-only module reaches the client bundle.
-import type { ActionState } from '../../lib/errors';
+import type { ActionState } from '@paigasus/console-core';
 import { FormError } from './form-error';
 
 /**

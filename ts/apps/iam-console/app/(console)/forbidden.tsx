@@ -8,11 +8,12 @@
 // It shows a fixed title, the request's correlation id and a way back. It never shows IAM's
 // message. forbidden() takes no argument, so the id comes from the request header proxy.ts set;
 // IAM adopted the same id, so it is the one in IAM's logs. FORBIDDEN_VIEW_CORRELATION records
-// whether that route works (lib/correlation.ts); under 'fallback' the view shows no id.
+// whether that route works (@paigasus/console-core's correlation.ts); under 'fallback' the view
+// shows no id.
 import type { ReactElement } from 'react';
 import { ZoneLink } from '@paigasus/app-shell';
 import { ErrorState } from '@paigasus/ui';
-import { FORBIDDEN_VIEW_CORRELATION, requestCorrelationId } from '../../lib/correlation';
+import { FORBIDDEN_VIEW_CORRELATION, requestCorrelationId } from '@paigasus/console-core';
 import { PRESENTATION_COPY } from '../_components/error-copy';
 import { CorrelationReference } from '../_components/error-reference';
 

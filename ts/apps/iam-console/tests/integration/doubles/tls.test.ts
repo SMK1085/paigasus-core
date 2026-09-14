@@ -9,7 +9,7 @@ import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:
 import os from 'node:os';
 import path from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
-import { testTls, type TlsMaterial } from '../../support/tls';
+import { testTls, type TlsMaterial } from '@paigasus/console-core/testing';
 
 const root = mkdtempSync(path.join(os.tmpdir(), 'paigasus-iam-console-tls-selftest-'));
 afterAll(() => rmSync(root, { recursive: true, force: true }));

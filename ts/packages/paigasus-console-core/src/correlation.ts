@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // The per-request correlation id (spec § 6.2). proxy.ts mints a UUID into the REQUEST headers of
-// every request it lets through; lib/iam.ts sends it to IAM as `paigasus-correlation-id`; IAM adopts
+// every request it lets through; iam-clients.ts sends it to IAM as `paigasus-correlation-id`; IAM adopts
 // it (rs/crates/libs/paigasus-observability/src/correlation.rs:103-119, applied to the gRPC server
 // at rs/crates/services/paigasus-iam/src/adapters/grpc/mod.rs:139) and puts it into every error's
 // ErrorInfo metadata. So the id a user reads on the 403 view is the id in IAM's logs.
@@ -22,7 +22,7 @@ export { CORRELATION_HEADER, REQUEST_PATH_HEADER };
  *
  *   'header'   — the view read the id proxy.ts set, with headers(), and shows it.
  *   'fallback' — it could not; the view shows no id, and callIam's `iam.call_failed` log line
- *                (lib/errors.ts) carries IAM's correlation id and the request path instead.
+ *                (errors.ts) carries IAM's correlation id and the request path instead.
  *
  * The e2e tier (Task 22) reads this constant to choose its assertion.
  */

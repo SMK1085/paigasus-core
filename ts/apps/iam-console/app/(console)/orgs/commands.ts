@@ -5,9 +5,8 @@
 // It takes NO mayI: a command cannot refuse an action on the UI's guess. IAM decides (spec § 6.3).
 import 'server-only';
 import { z } from 'zod';
-import { callIam } from '../../../lib/errors';
+import { callIam, type IamClients } from '@paigasus/console-core';
 import { toActionResult, type ActionResult } from '../../../lib/form';
-import type { IamClients } from '../../../lib/iam';
 
 const text = z.string().trim().min(1).max(200);
 
