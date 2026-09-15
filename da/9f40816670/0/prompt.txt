@@ -2733,3 +2733,13 @@ I also caught **a reviewer** asserting that glob matched "exactly two paths" —
 ---
 
 run both
+
+---
+
+<task-notification>
+<task-id>bxtn4nbm8</task-id>
+<tool-use-id>toolu_014U7qZGWn1GKv1ZoQwWC3bA</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/0163cf9a-0457-4fcf-af47-2cd420fc6a77/tasks/bxtn4nbm8.output</output-file>
+<status>completed</status>
+<summary>Background command "Run the local CodeRabbit review, pass 1" completed (exit code 0)</summary>
+</task-notification>
