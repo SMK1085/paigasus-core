@@ -937,6 +937,18 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   gate still has **no negative control**. Its `deps` names one build per app by hand and nothing
   asserts the list is complete, so a new app must add its own `<app>-ts:build` edge or `next
   typegen` races that app's `.next`.
+- `repo:next-public-free`'s `APP_CONFIG_FLOOR` is **2** since the second console zone landed,
+  pinned as a whole line (`"APP_CONFIG_FLOOR=2"`) in `ci/affected-graph/ci_targets.py:1251`, so
+  the constant in `ci/next-public/run.sh` and its pin move together or the gate reds. It is a
+  **collapse detector**, not a per-app assertion. MEASURED reason: `APP_CONFIG_GLOB='ts/apps/*/
+  next.config.[tjmc][sj]*'` matches **four** tracked paths today, not two — the two real apps'
+  configs plus `ts/apps/iam-console/tests/fixtures/{client,server}-imports-sdk/next.config.ts` —
+  because a git pathspec's `*` spans `/`, the same pathspec trap this file already records for the
+  ruff gate's `ci/**/*.py` corpus. The gate's own `app_configs()` then filters with
+  `grep -E '/next\.config\.(ts|js|mjs|cjs)$'`, which does **not** exclude those fixtures, since
+  they end in `next.config.ts` too. So deleting one app's `next.config.ts` leaves 3 ≥ 2 and the
+  gate stays **green**. What actually holds a specific app's config in place is that app's own
+  build and `ci/next-env/run.sh`'s per-app discovery — not this floor.
 - **Turbopack (Next 16.3.4) does NOT resolve a `.js` relative specifier to a `.ts` file** (MEASURED,
   SMA-510): `import { x } from './a.js'` with only `a.ts` on disk fails `next build` with `Module not
   found`, in app code and in a workspace package's source alike. A clause-level `import type … from
