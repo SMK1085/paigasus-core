@@ -209,7 +209,8 @@ hand-written projects (SMA-381).
 
 **App build artifacts (TypeScript):** every `ts/apps/*` that produces a build
 artifact MUST define its own Moon `build` task with `outputs:` — as
-`iam-console` does (`next build` → `outputs: ['.next']`). The `ts` root
+`iam-console` and `gateway-console` both do (`next build` → `outputs: ['.next']`).
+The `ts` root
 excludes the inherited `build`/`typecheck` (SMA-394), so Moon's per-project
 tasks own the build graph; a project that only inherits the default `build`
 runs `tsc -p tsconfig.json --noEmit`, which type-checks but **emits nothing**.

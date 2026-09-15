@@ -93,11 +93,20 @@ CORPUS_FLOOR=48
 # The SAME collapse-detector idea, applied to check 2's own list. Check 2 iterated app configs and
 # printed its success line when the list was EMPTY, so renaming ts/apps — or adding an app that
 # uses next.config.mjs, which check 2 did not match — silently dropped that app while CORPUS_FLOOR
-# stayed satisfied, because the corpus counts ts/ FILES and not app configs. One app today.
+# stayed satisfied, because the corpus counts ts/ FILES and not app configs. Two apps today
+# (SMA-512 added ts/apps/gateway-console beside ts/apps/iam-console).
 #
 # Deliberate re-baseline, exactly like CORPUS_FLOOR: raise this when a second console zone app
 # lands, and lower it only for a real removal.
-APP_CONFIG_FLOOR=1
+#
+# MEASURED (SMA-512), so nobody reads this floor as more than it is: APP_CONFIG_GLOB matches FOUR
+# tracked paths today, not two — the two real apps plus ts/apps/iam-console/tests/fixtures/*'s two
+# next.config.ts files, because a git pathspec's `*` spans `/`. So deleting ONE app's config
+# leaves 3 and this gate stays GREEN. The floor is a COLLAPSE detector, exactly like CORPUS_FLOOR,
+# and it does NOT assert "every app still has a config". What holds a specific app's config in
+# place is that app's own build, not this line. Raise the floor when an app lands anyway: 2 is
+# strictly tighter than 1, and the ratchet is the point.
+APP_CONFIG_FLOOR=2
 
 # GLOBAL, not function-local: negative_control's EXIT trap fires after the function that sets this
 # has already returned (including via the `exit 1` on its own failure path), and a `local` binding
@@ -222,7 +231,7 @@ removed, lower APP_CONFIG_FLOOR in ci/next-public/run.sh to match instead of rai
 make_fixture() {
   local dir="$1" n=0
   git -C "$dir" init -q
-  mkdir -p "$dir/ts/apps/probe" "$dir/ts/packages/probe/src"
+  mkdir -p "$dir/ts/apps/probe" "$dir/ts/apps/probe2" "$dir/ts/packages/probe/src"
   # 60 filler files (+ the config below) clears CORPUS_FLOOR (48) with margin: self_test calls
   # check_prefix directly against this fixture (clean/violating/markdown/lockfile rows), so an
   # undersized fixture would trip the floor instead of exercising the row it is meant to test.
@@ -232,6 +241,18 @@ make_fixture() {
   done
   printf 'import { createNextConfig } from "@paigasus/next-config";\nexport default createNextConfig({ zone: "probe", basePath: "/probe", outputFileTracingRoot: "/x" });\n' \
     >"$dir/ts/apps/probe/next.config.ts"
+  # SECOND app config, for exactly the reason the filler count above exists: APP_CONFIG_FLOOR is
+  # now 2 (SMA-512 landed ts/apps/gateway-console beside ts/apps/iam-console), and the rows that
+  # call check_factory directly against this fixture — clean, nofactory, mjsconfig, mjsok — would
+  # otherwise trip the FLOOR instead of exercising the factory assertion they are each written to
+  # test. Keeping the fixture at or above the production floor is what keeps those rows honest;
+  # the floor itself has its own dedicated row (noapps) below.
+  #
+  # probe2 is deliberately a plain factory-using .ts config and nothing else. The rows that mutate
+  # a config mutate ONLY probe's, so probe2 is the constant that holds the count at the floor while
+  # probe carries whatever the row under test needs.
+  printf 'import { createNextConfig } from "@paigasus/next-config";\nexport default createNextConfig({ zone: "probe2", basePath: "/probe2", outputFileTracingRoot: "/x" });\n' \
+    >"$dir/ts/apps/probe2/next.config.ts"
   git -C "$dir" add -A >/dev/null 2>&1
 }
 
@@ -322,8 +343,11 @@ self_test() {
   # `git ls-files` empty, the loop never runs, and the success line prints having examined nothing
   # — with every other row still green, since the corpus floor counts ts/ FILES, not app configs.
   noapps="$(mktemp -d)"; make_fixture "$noapps"
-  git -C "$noapps" rm -q --cached 'ts/apps/probe/next.config.ts' >/dev/null 2>&1
-  rm -f "$noapps/ts/apps/probe/next.config.ts"
+  # BOTH configs go, not just probe's: this row asserts the EMPTY-listing path its comment above
+  # describes, and leaving probe2 behind would red it at rc 1 from the floor instead — the right
+  # verdict for the wrong reason, which is the failure mode the mjsok row already documents.
+  git -C "$noapps" rm -q --cached 'ts/apps/probe/next.config.ts' 'ts/apps/probe2/next.config.ts' >/dev/null 2>&1
+  rm -f "$noapps/ts/apps/probe/next.config.ts" "$noapps/ts/apps/probe2/next.config.ts"
   rc=0; ( cd "$noapps" && check_factory "$noapps" ) >/dev/null 2>&1 || rc=$?
   if [ "$rc" != 1 ]; then
     printf '  FAIL zero app configs: expected rc 1 from APP_CONFIG_FLOOR, got %s\n' "$rc" >&2; failures=$((failures + 1))
@@ -343,10 +367,11 @@ self_test() {
   fi
 
   # The positive half of the same widening, and it is the row that actually DETECTS a narrowing.
-  # MEASURED: reverting APP_CONFIG_GLOB to `next.config.ts` leaves the row above green — with no
-  # config matched, APP_CONFIG_FLOOR reds it at rc 1 for a different reason, which is the right
-  # verdict but not the reason the row asserts. This row fails on that mutation (expected rc 0,
-  # got 1), so the two rows are kept as a pair rather than either one alone.
+  # MEASURED: reverting APP_CONFIG_GLOB to `next.config.ts` leaves the row above green — with one
+  # config matched (probe2's, which the mjsconfig row never touches), APP_CONFIG_FLOOR reds it at
+  # rc 1 for a different reason, which is the right verdict but not the reason the row asserts.
+  # This row fails on that mutation (expected rc 0, got 1), so the two rows are kept as a pair
+  # rather than either one alone.
   mjsok="$(mktemp -d)"; make_fixture "$mjsok"
   git -C "$mjsok" rm -q --cached 'ts/apps/probe/next.config.ts' >/dev/null 2>&1
   rm -f "$mjsok/ts/apps/probe/next.config.ts"

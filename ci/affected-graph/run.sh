@@ -86,10 +86,13 @@ assert_case() {
 #   same-named task in another stack could enter a case's observed set. `contracts:lint` exists
 #   and does not appear here — contracts is UPSTREAM of paigasus-proto-rs and `--downstream deep`
 #   walks dependents — but a future case with a different touched file must re-check that.
-#   Measured (SMA-510, SMA-511): four projects now declare `test-e2e` — `paigasus-auth-ts`,
-#   `paigasus-discovery-ts`, `paigasus-app-shell-ts` and `iam-console-ts`. app-shell's `test-e2e`
+#   Measured (SMA-510, SMA-511, SMA-512): FIVE projects now declare `test-e2e` —
+#   `paigasus-auth-ts`, `paigasus-discovery-ts`, `paigasus-app-shell-ts`, `iam-console-ts` and
+#   `gateway-console-ts`. app-shell's `test-e2e`
 #   keys on the ui, auth, discovery and next-config sources; iam-console's keys on every package the
 #   app compiles, so the ui, auth, discovery, app-shell, proto and sdk cases below include it.
+#   gateway-console's keys on the same package set, so those cases carry a second app's three tasks
+#   as well. This sentence is PROSE, asserted nowhere — re-count it by hand when an app lands.
 #   A future case with a different touched file must still re-check this.
 # returns 0 pass / 1 assertion fail / 2 infrastructure error
 _assert_task_case_impl() {
@@ -278,8 +281,12 @@ run_suite() {
   # paigasus-sdk-ts, paigasus-discovery-ts and paigasus-proto-ts — and the last one alone makes
   # it a downstream dependent in the project graph, the same way paigasus-sdk-ts and
   # paigasus-discovery-ts already were.
+  # + gateway-console-ts (SMA-512 PR 3), the second console zone. Same PROJECT-level reason as
+  # iam-console-ts above: its `dependsOn` names paigasus-proto-ts (alongside paigasus-sdk-ts,
+  # paigasus-discovery-ts, paigasus-app-shell-ts and paigasus-console-core-ts), so the deep
+  # downstream traversal reaches it from a contracts edit.
   run_case "contracts->proto" "contracts/proto/paigasus/gateway/v1/health.proto" \
-    "contracts,paigasus-proto-rs,paigasus-proto-py,paigasus-proto-ts,paigasus-gateway-rs,paigasus-iam-rs,paigasus-service-info-rs,paigasus-sdk-ts,paigasus-discovery-ts,paigasus-app-shell-ts,iam-console-ts,paigasus-console-core-ts"
+    "contracts,paigasus-proto-rs,paigasus-proto-py,paigasus-proto-ts,paigasus-gateway-rs,paigasus-iam-rs,paigasus-service-info-rs,paigasus-sdk-ts,paigasus-discovery-ts,paigasus-app-shell-ts,iam-console-ts,paigasus-console-core-ts,gateway-console-ts"
   # derive-crate edit -> the derive crate + paigasus-proto and everything downstream of it
   # (SMA-438). One-directional w.r.t. contracts: the derive crate is strictly UPSTREAM of
   # paigasus-proto, so a proto edit must NOT reach it — enforced implicitly by the strict
@@ -387,8 +394,11 @@ run_suite() {
   # this package's sources.
   # SMA-511: iam-console-ts:{build,test,test-e2e} join this set — the app's inputs name this
   # package's sources.
+  # SMA-512 PR 3: gateway-console-ts:{build,test,test-e2e} join this set — the second zone's
+  # build, test and test-e2e each list '/ts/packages/paigasus-ui/src/**/*' in their own `inputs`,
+  # and its own Tailwind guard invocation needs that edge for the same reason iam-console's does.
   run_task_case_ci "ui->console" "ts/packages/paigasus-ui/src/styles/tokens.css" \
-    "paigasus-app-shell-ts:build,paigasus-app-shell-ts:test,paigasus-app-shell-ts:test-e2e,iam-console-ts:build,iam-console-ts:test,iam-console-ts:test-e2e,paigasus-ui-ts:build,paigasus-ui-ts:test,ts:lint"
+    "paigasus-app-shell-ts:build,paigasus-app-shell-ts:test,paigasus-app-shell-ts:test-e2e,iam-console-ts:build,iam-console-ts:test,iam-console-ts:test-e2e,gateway-console-ts:build,gateway-console-ts:test,gateway-console-ts:test-e2e,paigasus-ui-ts:build,paigasus-ui-ts:test,ts:lint"
   # SMA-503 fix round 2, item 4 — the SECOND anchor, and it is not redundant. The case above
   # anchors only on src/styles/tokens.css, so narrowing either console task's
   # `/ts/packages/paigasus-ui/src/**/*` input to `/ts/packages/paigasus-ui/src/styles/**/*`
@@ -404,8 +414,12 @@ run_suite() {
   # this package's sources.
   # SMA-511: iam-console-ts:{build,test,test-e2e} join this set — the app's inputs name this
   # package's sources.
+  # SMA-512 PR 3: gateway-console-ts:{build,test,test-e2e} join this set, for the same reason as
+  # the case above — the same '/ts/packages/paigasus-ui/src/**/*' glob on all three tasks. This is
+  # the COMPONENT-side anchor of the pair, so it is what proves that glob is not narrowable to
+  # src/styles/ for the new zone either.
   run_task_case_ci "ui-components->console" "ts/packages/paigasus-ui/src/components/table.tsx" \
-    "paigasus-app-shell-ts:build,paigasus-app-shell-ts:test,paigasus-app-shell-ts:test-e2e,iam-console-ts:build,iam-console-ts:test,iam-console-ts:test-e2e,paigasus-ui-ts:build,paigasus-ui-ts:test,ts:lint"
+    "paigasus-app-shell-ts:build,paigasus-app-shell-ts:test,paigasus-app-shell-ts:test-e2e,iam-console-ts:build,iam-console-ts:test,iam-console-ts:test-e2e,gateway-console-ts:build,gateway-console-ts:test,gateway-console-ts:test-e2e,paigasus-ui-ts:build,paigasus-ui-ts:test,ts:lint"
   # SMA-506 — a @paigasus/auth SOURCE edit must select its own build/test AND the new
   # Docker-backed `test-e2e` task (`^:build`-free — the filter widening above admits it) — plus
   # `ts:lint`. Nothing asserted this task was reachable from an edit to the package before this
@@ -419,8 +433,11 @@ run_suite() {
   # package's sources.
   # SMA-512: paigasus-console-core-ts:{build,test} join this set — the new package's `build` and
   # `test` inputs both name `/ts/packages/paigasus-auth/src/**/*` (no test-e2e task exists there).
+  # SMA-512 PR 3: gateway-console-ts:{build,test,test-e2e} join this set — the second zone runs the
+  # same session and login flow, so its build, test and test-e2e each list
+  # '/ts/packages/paigasus-auth/src/**/*' in their own `inputs`.
   run_task_case_ci "auth->auth-tasks" "ts/packages/paigasus-auth/src/config.ts" \
-    "paigasus-app-shell-ts:build,paigasus-app-shell-ts:test,paigasus-app-shell-ts:test-e2e,paigasus-auth-ts:build,paigasus-auth-ts:test,paigasus-auth-ts:test-e2e,iam-console-ts:build,iam-console-ts:test,iam-console-ts:test-e2e,paigasus-console-core-ts:build,paigasus-console-core-ts:test,ts:lint"
+    "paigasus-app-shell-ts:build,paigasus-app-shell-ts:test,paigasus-app-shell-ts:test-e2e,paigasus-auth-ts:build,paigasus-auth-ts:test,paigasus-auth-ts:test-e2e,iam-console-ts:build,iam-console-ts:test,iam-console-ts:test-e2e,gateway-console-ts:build,gateway-console-ts:test,gateway-console-ts:test-e2e,paigasus-console-core-ts:build,paigasus-console-core-ts:test,ts:lint"
   # SMA-508 — a @paigasus/proto SOURCE edit must select the SDK's build and test.
   # This is the ONLY control on ts/packages/paigasus-sdk/moon.yml's `inputs` list. Remove that
   # list and the SDK's suite stops running on the PR that changes the generated code it consumes,
@@ -437,8 +454,11 @@ run_suite() {
   # package's sources.
   # SMA-512: paigasus-console-core-ts:{build,test} join this set — the new package's `build` and
   # `test` inputs both name `/ts/packages/paigasus-proto/src/**/*`.
+  # SMA-512 PR 3: gateway-console-ts:{build,test,test-e2e} join this set — the second zone compiles
+  # the generated protobuf-es code directly, so its build, test and test-e2e each list
+  # '/ts/packages/paigasus-proto/src/**/*' in their own `inputs`.
   run_task_case_ci "proto->sdk" "ts/packages/paigasus-proto/src/generated/paigasus/common/v1/error_pb.ts" \
-    "paigasus-proto-ts:build,paigasus-proto-ts:test,paigasus-sdk-ts:build,paigasus-sdk-ts:test,ts:lint,paigasus-discovery-ts:build,paigasus-discovery-ts:test,iam-console-ts:build,iam-console-ts:test,iam-console-ts:test-e2e,paigasus-console-core-ts:build,paigasus-console-core-ts:test"
+    "paigasus-proto-ts:build,paigasus-proto-ts:test,paigasus-sdk-ts:build,paigasus-sdk-ts:test,ts:lint,paigasus-discovery-ts:build,paigasus-discovery-ts:test,iam-console-ts:build,iam-console-ts:test,iam-console-ts:test-e2e,gateway-console-ts:build,gateway-console-ts:test,gateway-console-ts:test-e2e,paigasus-console-core-ts:build,paigasus-console-core-ts:test"
   # SMA-508 final review fix — the SECOND anchor, and it is not redundant. MEASURED: narrowing all
   # three of paigasus-sdk-ts's `inputs` globs from `/ts/packages/paigasus-proto/src/**/*` to
   # `/ts/packages/paigasus-proto/src/generated/paigasus/common/**/*` still yields `PASS proto->sdk`
@@ -461,8 +481,12 @@ run_suite() {
   # package's sources.
   # SMA-512: paigasus-console-core-ts:{build,test} join this set — the new package's `build` and
   # `test` inputs both name `/ts/packages/paigasus-proto/src/**/*`.
+  # SMA-512 PR 3: gateway-console-ts:{build,test,test-e2e} join this set, on the same
+  # '/ts/packages/paigasus-proto/src/**/*' glob as the case above. This is the generated/paigasus/iam
+  # side of the two-anchor pair, so it is what proves that glob is not narrowable to
+  # generated/paigasus/common for the new zone either.
   run_task_case_ci "proto-iam->sdk" "ts/packages/paigasus-proto/src/generated/paigasus/iam/v1/iam_pb.ts" \
-    "paigasus-proto-ts:build,paigasus-proto-ts:test,paigasus-sdk-ts:build,paigasus-sdk-ts:test,ts:lint,paigasus-discovery-ts:build,paigasus-discovery-ts:test,iam-console-ts:build,iam-console-ts:test,iam-console-ts:test-e2e,paigasus-console-core-ts:build,paigasus-console-core-ts:test"
+    "paigasus-proto-ts:build,paigasus-proto-ts:test,paigasus-sdk-ts:build,paigasus-sdk-ts:test,ts:lint,paigasus-discovery-ts:build,paigasus-discovery-ts:test,iam-console-ts:build,iam-console-ts:test,iam-console-ts:test-e2e,gateway-console-ts:build,gateway-console-ts:test,gateway-console-ts:test-e2e,paigasus-console-core-ts:build,paigasus-console-core-ts:test"
   # SMA-509 — a @paigasus/discovery SOURCE edit must select its own build/test AND the
   # Docker-backed `test-e2e` task, plus `ts:lint`. Nothing else asserts this package's tasks are
   # reachable from an edit to it: `repo:input-liveness` scans `repo:*` tasks only and proves
@@ -475,8 +499,11 @@ run_suite() {
   # package's sources.
   # SMA-512: paigasus-console-core-ts:{build,test} join this set — the new package's `build` and
   # `test` inputs both name `/ts/packages/paigasus-discovery/src/**/*`.
+  # SMA-512 PR 3: gateway-console-ts:{build,test,test-e2e} join this set — the second zone resolves
+  # its upstream through the same discovery client, so its build, test and test-e2e each list
+  # '/ts/packages/paigasus-discovery/src/**/*' in their own `inputs`.
   run_task_case_ci "discovery->discovery-tasks" "ts/packages/paigasus-discovery/src/core/state.ts" \
-    "paigasus-app-shell-ts:build,paigasus-app-shell-ts:test,paigasus-app-shell-ts:test-e2e,paigasus-discovery-ts:build,paigasus-discovery-ts:test,paigasus-discovery-ts:test-e2e,iam-console-ts:build,iam-console-ts:test,iam-console-ts:test-e2e,paigasus-console-core-ts:build,paigasus-console-core-ts:test,ts:lint"
+    "paigasus-app-shell-ts:build,paigasus-app-shell-ts:test,paigasus-app-shell-ts:test-e2e,paigasus-discovery-ts:build,paigasus-discovery-ts:test,paigasus-discovery-ts:test-e2e,iam-console-ts:build,iam-console-ts:test,iam-console-ts:test-e2e,gateway-console-ts:build,gateway-console-ts:test,gateway-console-ts:test-e2e,paigasus-console-core-ts:build,paigasus-console-core-ts:test,ts:lint"
   # The SECOND anchor, and it is not redundant. The case above anchors only on src/core/, so
   # narrowing the inherited `sources` file group to `src/core/**/*` would leave it green while an
   # edit to an ADAPTER stopped selecting anything — and the adapters are where the Redis lock
@@ -489,8 +516,12 @@ run_suite() {
   # package's sources.
   # SMA-512: paigasus-console-core-ts:{build,test} join this set — the new package's `build` and
   # `test` inputs both name `/ts/packages/paigasus-discovery/src/**/*`.
+  # SMA-512 PR 3: gateway-console-ts:{build,test,test-e2e} join this set, on the same
+  # '/ts/packages/paigasus-discovery/src/**/*' glob as the case above. This is the adapters side of
+  # the two-anchor pair, so it is what proves that glob is not narrowable to src/core/ for the new
+  # zone either.
   run_task_case_ci "discovery-adapters->discovery-tasks" "ts/packages/paigasus-discovery/src/adapters/memory-cache.ts" \
-    "paigasus-app-shell-ts:build,paigasus-app-shell-ts:test,paigasus-app-shell-ts:test-e2e,paigasus-discovery-ts:build,paigasus-discovery-ts:test,paigasus-discovery-ts:test-e2e,iam-console-ts:build,iam-console-ts:test,iam-console-ts:test-e2e,paigasus-console-core-ts:build,paigasus-console-core-ts:test,ts:lint"
+    "paigasus-app-shell-ts:build,paigasus-app-shell-ts:test,paigasus-app-shell-ts:test-e2e,paigasus-discovery-ts:build,paigasus-discovery-ts:test,paigasus-discovery-ts:test-e2e,iam-console-ts:build,iam-console-ts:test,iam-console-ts:test-e2e,gateway-console-ts:build,gateway-console-ts:test,gateway-console-ts:test-e2e,paigasus-console-core-ts:build,paigasus-console-core-ts:test,ts:lint"
   # SMA-510 — a @paigasus/app-shell SOURCE edit must select its own build/test AND the browser-tier
   # `test-e2e` task, plus `ts:lint`. Nothing else asserts that this package's tasks are reachable
   # from an edit to it: `repo:input-liveness` scans `repo:*` tasks only, and it proves that
@@ -499,16 +530,23 @@ run_suite() {
   # `_assert_task_case_impl` uses, not typed by hand.
   # SMA-511: iam-console-ts:{build,test,test-e2e} join this set — the app's inputs name this
   # package's sources.
+  # SMA-512 PR 3: gateway-console-ts:{build,test,test-e2e} join this set — the second zone renders
+  # the same shell and cross-zone switcher, so its build, test and test-e2e each list
+  # '/ts/packages/paigasus-app-shell/src/**/*' in their own `inputs`.
   run_task_case_ci "app-shell->app-shell-tasks" "ts/packages/paigasus-app-shell/src/zone/resolve.ts" \
-    "paigasus-app-shell-ts:build,paigasus-app-shell-ts:test,paigasus-app-shell-ts:test-e2e,iam-console-ts:build,iam-console-ts:test,iam-console-ts:test-e2e,ts:lint"
+    "paigasus-app-shell-ts:build,paigasus-app-shell-ts:test,paigasus-app-shell-ts:test-e2e,iam-console-ts:build,iam-console-ts:test,iam-console-ts:test-e2e,gateway-console-ts:build,gateway-console-ts:test,gateway-console-ts:test-e2e,ts:lint"
   # The SECOND anchor, and it is not redundant: the case above anchors in src/zone/. Narrowing the
   # inherited `sources` group to `src/zone/**/*` would leave it green while an edit to a shell
   # component (where the Radix menus live) selected nothing. Two anchors on opposite sides of the
   # glob prove its WIDTH. Precedent: the `ui->console` / `ui-components->console` pair.
   # SMA-511: iam-console-ts:{build,test,test-e2e} join this set — the app's inputs name this
   # package's sources.
+  # SMA-512 PR 3: gateway-console-ts:{build,test,test-e2e} join this set, on the same
+  # '/ts/packages/paigasus-app-shell/src/**/*' glob as the case above. This is the src/shell/ side
+  # of the two-anchor pair, so it is what proves that glob is not narrowable to src/zone/ for the
+  # new zone either — and switcher.tsx is the cross-zone control the second zone exists to exercise.
   run_task_case_ci "app-shell-shell->app-shell-tasks" "ts/packages/paigasus-app-shell/src/shell/switcher.tsx" \
-    "paigasus-app-shell-ts:build,paigasus-app-shell-ts:test,paigasus-app-shell-ts:test-e2e,iam-console-ts:build,iam-console-ts:test,iam-console-ts:test-e2e,ts:lint"
+    "paigasus-app-shell-ts:build,paigasus-app-shell-ts:test,paigasus-app-shell-ts:test-e2e,iam-console-ts:build,iam-console-ts:test,iam-console-ts:test-e2e,gateway-console-ts:build,gateway-console-ts:test,gateway-console-ts:test-e2e,ts:lint"
   # SMA-511 — a @paigasus/sdk SOURCE edit must select the iam-console's build, test and test-e2e,
   # plus the SDK's own build/test and ts:lint. This is the ONLY control on the three
   # '/ts/packages/paigasus-sdk/src/**/*' entries in ts/apps/iam-console/moon.yml: without them, an
@@ -517,16 +555,31 @@ run_suite() {
   # expected set is DERIVED with the no-flag `moon query tasks --affected` traversal.
   # SMA-512: paigasus-console-core-ts:{build,test} join both sets — the new package's `build` and
   # `test` inputs both name `/ts/packages/paigasus-sdk/src/**/*`.
+  # SMA-512 PR 3: gateway-console-ts:{build,test,test-e2e} join BOTH sets — the second zone talks to
+  # IAM through the same SDK, so its build, test and test-e2e each list
+  # '/ts/packages/paigasus-sdk/src/**/*' in their own `inputs`. Both anchors gain it, which is the
+  # point of the pair: the glob must stay un-narrowable from src/ root AND from src/errors/.
+  #
+  # NAME MISMATCH, deliberate and not a defect: these two cases are still called `->iam-console`
+  # though they now assert a second app as well. They are NOT renamed here because a renamed case
+  # is invisible in a diff that also re-baselines it — the rename and the set change would have to
+  # be read as one edit, and neither would be reviewable. Rename them in a later, set-preserving
+  # commit if it is worth the churn.
   run_task_case_ci "sdk->iam-console" "ts/packages/paigasus-sdk/src/iam.ts" \
-    "paigasus-sdk-ts:build,paigasus-sdk-ts:test,iam-console-ts:build,iam-console-ts:test,iam-console-ts:test-e2e,paigasus-console-core-ts:build,paigasus-console-core-ts:test,ts:lint"
+    "paigasus-sdk-ts:build,paigasus-sdk-ts:test,iam-console-ts:build,iam-console-ts:test,iam-console-ts:test-e2e,gateway-console-ts:build,gateway-console-ts:test,gateway-console-ts:test-e2e,paigasus-console-core-ts:build,paigasus-console-core-ts:test,ts:lint"
   run_task_case_ci "sdk-errors->iam-console" "ts/packages/paigasus-sdk/src/errors/map-error.ts" \
-    "paigasus-sdk-ts:build,paigasus-sdk-ts:test,iam-console-ts:build,iam-console-ts:test,iam-console-ts:test-e2e,paigasus-console-core-ts:build,paigasus-console-core-ts:test,ts:lint"
+    "paigasus-sdk-ts:build,paigasus-sdk-ts:test,iam-console-ts:build,iam-console-ts:test,iam-console-ts:test-e2e,gateway-console-ts:build,gateway-console-ts:test,gateway-console-ts:test-e2e,paigasus-console-core-ts:build,paigasus-console-core-ts:test,ts:lint"
   # SMA-511 — the file that holds the THIRD Tailwind sentinel (--paigasus-app-shell-source-probe,
   # spec § 7.6). ci/tailwind-source/run.mjs asserts it against the iam-console build, so an edit to
   # this file MUST rebuild the app. If the app's app-shell input narrowed away from this file, the
   # guard would read a cached .next and pass against stale CSS; this case is the control.
+  # SMA-512 PR 3: gateway-console-ts:{build,test,test-e2e} join this set, and here that matters more
+  # than elsewhere. This file holds the third Tailwind sentinel, and ci/tailwind-source/run.mjs is
+  # now invoked once per app — so the new zone's own guard run asserts that sentinel against the new
+  # zone's own .next. Without this edge that guard would read a cached build and pass against stale
+  # CSS, which is exactly the staleness the iam-console half of this case already exists to prevent.
   run_task_case_ci "app-shell->console" "ts/packages/paigasus-app-shell/src/shell/app-shell.tsx" \
-    "paigasus-app-shell-ts:build,paigasus-app-shell-ts:test,paigasus-app-shell-ts:test-e2e,iam-console-ts:build,iam-console-ts:test,iam-console-ts:test-e2e,ts:lint"
+    "paigasus-app-shell-ts:build,paigasus-app-shell-ts:test,paigasus-app-shell-ts:test-e2e,iam-console-ts:build,iam-console-ts:test,iam-console-ts:test-e2e,gateway-console-ts:build,gateway-console-ts:test,gateway-console-ts:test-e2e,ts:lint"
   # SMA-511 — the app's OWN code outside app/: lib/ (the composition root) and proxy.ts. Without
   # `lib/**/*` and `proxy.ts` in the app's `sources` group, and `apps/*/lib/**/*` and
   # `apps/*/proxy.ts` in the ts project's, an edit there serves a cached build, test, e2e and lint
@@ -543,6 +596,29 @@ run_suite() {
     "iam-console-ts:build,iam-console-ts:test,iam-console-ts:test-e2e,ts:lint"
   run_task_case_ci "iam-console-proxy->iam-console-tasks" "ts/apps/iam-console/proxy.ts" \
     "iam-console-ts:build,iam-console-ts:test,iam-console-ts:test-e2e,ts:lint"
+  # SMA-512 PR 3 — the second zone's OWN code outside app/, mirroring the iam-console pair above.
+  # Its build, test and test-e2e all reach lib/**/* through fileGroups.sources; without this case,
+  # narrowing that group would silently stop selecting them and every later change to the zone's
+  # configuration would serve a cached pass. Two anchors, one per path, because `lib/**/*` and
+  # `proxy.ts` are two separate input lines in the app's own `sources` group AND in ts/moon.yml's.
+  #
+  # Anchored on lib/config.ts deliberately: iam-console's original anchor was a file that PR 2
+  # moved into @paigasus/console-core, which forced a re-anchor. config.ts holds the zone's own
+  # env reading and stays app-local by design.
+  #
+  # The expected set is MEASURED with the same no-flag `moon query tasks --affected` traversal
+  # `_assert_task_case_impl` uses, not copied from the iam-console pair — it happens to match,
+  # because the two apps declare the same `sources` group shape. The raw traversal also returns
+  # gateway-console-ts:typecheck, ts:fmt and three repo:* gates; the harness's name filter
+  # (build/test/lint/test-e2e) drops them, so this case does NOT cover `typecheck`, the same
+  # limitation the ui->console case records.
+  run_task_case_ci "gateway-console-lib->gateway-console-tasks" "ts/apps/gateway-console/lib/config.ts" \
+    "gateway-console-ts:build,gateway-console-ts:test,gateway-console-ts:test-e2e,ts:lint"
+  # The zone's proxy. It sits at the PROJECT ROOT, not under a directory glob, so only the explicit
+  # `proxy.ts` entry in fileGroups.sources reaches it — drop that one line and an edit to the zone's
+  # entire request path serves a cached build, test and e2e verdict.
+  run_task_case_ci "gateway-console-proxy->gateway-console-tasks" "ts/apps/gateway-console/proxy.ts" \
+    "gateway-console-ts:build,gateway-console-ts:test,gateway-console-ts:test-e2e,ts:lint"
   # new (SMA-512) — a @paigasus/console-core SOURCE edit must select its own build/test AND the
   # iam-console's build, test and test-e2e, plus ts:lint. This is the ONLY control on the
   # '/ts/packages/paigasus-console-core/src/**/*' entries in ts/apps/iam-console/moon.yml: without
@@ -555,10 +631,14 @@ run_suite() {
   # `src/` tree. Precedent: the `ui->console` / `ui-components->console` pair above. The expected
   # set is DERIVED with the no-flag `moon query tasks --affected` traversal, not typed by hand; it
   # is identical for both anchors because both files sit inside the same declared input glob.
+  # SMA-512 PR 3: gateway-console-ts:{build,test,test-e2e} join BOTH sets — the second zone's
+  # composition root calls the same createConsoleRuntime factory, so its build, test and test-e2e
+  # each list '/ts/packages/paigasus-console-core/src/**/*' in their own `inputs`. "consumers" is
+  # now literally two apps, which is what this case's name always anticipated.
   run_task_case_ci "console-core->consumers" "ts/packages/paigasus-console-core/src/runtime.ts" \
-    "paigasus-console-core-ts:build,paigasus-console-core-ts:test,iam-console-ts:build,iam-console-ts:test,iam-console-ts:test-e2e,ts:lint"
+    "paigasus-console-core-ts:build,paigasus-console-core-ts:test,iam-console-ts:build,iam-console-ts:test,iam-console-ts:test-e2e,gateway-console-ts:build,gateway-console-ts:test,gateway-console-ts:test-e2e,ts:lint"
   run_task_case_ci "console-core-prn-tenancy->consumers" "ts/packages/paigasus-console-core/src/prn-tenancy.ts" \
-    "paigasus-console-core-ts:build,paigasus-console-core-ts:test,iam-console-ts:build,iam-console-ts:test,iam-console-ts:test-e2e,ts:lint"
+    "paigasus-console-core-ts:build,paigasus-console-core-ts:test,iam-console-ts:build,iam-console-ts:test,iam-console-ts:test-e2e,gateway-console-ts:build,gateway-console-ts:test,gateway-console-ts:test-e2e,ts:lint"
   # new (SMA-512, review finding I2) — the two cases above anchor on `src/**/*` only. Nothing
   # anchored on `testing/**/*`, the package's in-process fakes (fake-iam.ts, fake-idp.ts, tls.ts,
   # tls-terminator.ts, index.ts), even though iam-console's `typecheck`, `test` and `test-e2e`
@@ -574,8 +654,14 @@ run_suite() {
   #   printf '%s\n' ts/packages/paigasus-console-core/testing/fake-iam.ts | moon query tasks --affected | ...
   # `iam-console-ts:build` is correctly ABSENT: build's own `inputs` never lists `testing/**/*`
   # (only typecheck/test/test-e2e do), so a testing/ edit does not rebuild the app, only test it.
+  # SMA-512 PR 3: gateway-console-ts:test and :test-e2e join this set — and gateway-console-ts:build
+  # is correctly ABSENT, exactly as iam-console-ts:build is. MEASURED, not assumed: the new zone's
+  # `typecheck`, `test` and `test-e2e` each list
+  # '/ts/packages/paigasus-console-core/testing/**/*', while its `build` does not, so an edit to a
+  # fake re-tests both zones without rebuilding either. That asymmetry is the reason this case is
+  # worth having, and a re-baseline that quietly added a :build row here would have destroyed it.
   run_task_case_ci "console-core-testing->consumers" "ts/packages/paigasus-console-core/testing/fake-iam.ts" \
-    "paigasus-console-core-ts:build,paigasus-console-core-ts:test,iam-console-ts:test,iam-console-ts:test-e2e,ts:lint"
+    "paigasus-console-core-ts:build,paigasus-console-core-ts:test,iam-console-ts:test,iam-console-ts:test-e2e,gateway-console-ts:test,gateway-console-ts:test-e2e,ts:lint"
   # SMA-625, spec § 8.4 and § 11.2 obligation 9 — a gateway chat.rs edit must select the SDK's
   # test. This is the ONLY control on the '/rs/.../chat.rs' entry in paigasus-sdk-ts:test's
   # `inputs`. tests/terminal-frame.test.ts reads TERMINAL_SSE_ERROR out of that Rust file by

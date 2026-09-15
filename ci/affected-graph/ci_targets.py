@@ -699,7 +699,7 @@ SELF_SCHEDULED_COVERAGE_EXEMPT = {}
 # `_expected_tailwind_lines` below, so there is nowhere left to write the wrong one: naming an app
 # here means "this app's guard invocation must match `_expected_tailwind_lines(<name>)`," full
 # stop.
-TAILWIND_GUARD_INVOCATIONS = {"iam-console"}
+TAILWIND_GUARD_INVOCATIONS = {"gateway-console", "iam-console"}
 
 
 def _expected_tailwind_lines(app):
@@ -1248,7 +1248,7 @@ NEXT_PUBLIC_FREE_SH_CALL_SITES = (
     "check)    check_prefix; check_factory ;;",
     "negctl)   negative_control ;;",
     "CORPUS_FLOOR=48",
-    "APP_CONFIG_FLOOR=1",
+    "APP_CONFIG_FLOOR=2",
     "APP_CONFIG_GLOB='ts/apps/*/next.config.[tjmc][sj]*'",
     '( cd "$tmp" && check_prefix "$tmp" ) >/dev/null 2>&1 || negctl_rc=$?',
     'if [ "$negctl_rc" != 1 ]; then',
@@ -3216,18 +3216,46 @@ def self_test():
         if got != want:
             failures.append(f"check_tailwind_guard_invocations[{label}]: got {got}, want {want}")
 
+    # SMA-512 PR 3. These rows pass an EXPLICIT literal registry, never the live
+    # TAILWIND_GUARD_INVOCATIONS. They used to pass the live one while pinning `apps` to a
+    # synthetic single-app list, which was fine while the repo had one app and broke the moment it
+    # had two: registering `gateway-console` made the live registry name an app absent from every
+    # row's `apps`, so four rows started reporting it under `stale` and the "unregistered" row
+    # stopped reporting it at all — five failures that say nothing about the function under test.
+    # This is the SAME defect the `wired()` helper below already records for check_gate_inputs
+    # ("fine while the table had one entry and silently vacuous the moment it had two"), so the
+    # fix is the same: a row asserts the FUNCTION's behaviour against a fixture it fully controls.
+    # The live registry is asserted in production instead, at the real call site in main(), and
+    # the row directly below pins the `registry=None` default to it so this parameter cannot
+    # quietly point production at a stub (the SMA-576 reasoning check_gate_inputs documents).
+    _tw_reg = {"iam-console"}
     _tw_ok = "\n".join(f"      {line}" for line in _expected_tailwind_lines("iam-console"))
     expect_tailwind(
         "compliant", ["iam-console"], tw_tasks(**{"iam-console": _tw_ok}),
-        TAILWIND_GUARD_INVOCATIONS, ([], [], [], []),
+        _tw_reg, ([], [], [], []),
     )
+    # The `registry=None` DEFAULT must still resolve to the live registry, which no row above can
+    # show now that they all pass an explicit one. Driven with the live registry's own membership
+    # as `apps`, so it stays correct as apps are added: a default that resolved to anything else
+    # (a stub, an empty set) would report every live entry as unregistered or stale here.
+    if check_tailwind_guard_invocations(
+        sorted(TAILWIND_GUARD_INVOCATIONS),
+        tw_tasks(**{
+            app: "\n".join(f"      {line}" for line in _expected_tailwind_lines(app))
+            for app in TAILWIND_GUARD_INVOCATIONS
+        }),
+    ) != ([], [], [], []):
+        failures.append(
+            "check_tailwind_guard_invocations: omitting `registry` did not resolve to the live "
+            "TAILWIND_GUARD_INVOCATIONS"
+        )
     expect_tailwind(
         "a dropped real run reds",
         ["iam-console"],
         tw_tasks(**{
             "iam-console": "      node ../../../ci/tailwind-source/run.mjs --self-test\n"
         }),
-        TAILWIND_GUARD_INVOCATIONS,
+        _tw_reg,
         (
             [],
             [
@@ -3242,11 +3270,11 @@ def self_test():
         "an unregistered app reds",
         ["iam-console", "gateway-console"],
         tw_tasks(**{"iam-console": _tw_ok, "gateway-console": "script: |\n"}),
-        TAILWIND_GUARD_INVOCATIONS,
+        _tw_reg,
         (["gateway-console"], [], [], []),
     )
     expect_tailwind(
-        "a stale registry entry reds", [], tw_tasks(), TAILWIND_GUARD_INVOCATIONS,
+        "a stale registry entry reds", [], tw_tasks(), _tw_reg,
         ([], [], ["iam-console"], []),
     )
     # Finding A. A registered app's resolved script carries ANOTHER app's `--app` line — the
@@ -3282,7 +3310,7 @@ def self_test():
         "lines present only in a task other than test do not satisfy the pin",
         ["iam-console"],
         {"iam-console-ts": {"never-run": {"script": _tw_ok}, "test": {"script": ""}}},
-        TAILWIND_GUARD_INVOCATIONS,
+        _tw_reg,
         (
             [],
             sorted(f"iam-console: {line}" for line in _expected_tailwind_lines("iam-console")),

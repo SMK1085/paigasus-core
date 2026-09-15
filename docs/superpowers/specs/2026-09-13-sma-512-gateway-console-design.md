@@ -816,6 +816,18 @@ Linear issues to create after this spec is approved:
 - `@paigasus/console-core` exports a testing surface from a package that is not a test package.
 - The PRN reader stays an ADR-0005 exception, now at one site instead of two. SMA-634 owns the
   underlying napi packaging defect.
+- **About 250 lines are byte-identical between `iam-console` and `gateway-console`**:
+  `app/_components/org-switcher.tsx` (47 lines), `page-error.tsx` (38), `lib/auth.ts` (32),
+  `app/providers.tsx` (29), `(console)/error.tsx` (24), `lib/console.ts` (23),
+  `(public)/layout.tsx` (21), and all but two lines each of `proxy.ts` (63) and
+  `error-reference.tsx` (29). Nothing in the repository gates a divergence, so a fix applied to
+  one zone's copy and not the other passes every gate. D16's reasoning (the
+  `paigasus/boundaries/console-core` rule bans React components from that package's `src/`) covers
+  the view files but not `lib/auth.ts` and `lib/console.ts`, which are server composition, not
+  React. `@paigasus/app-shell` is the natural home for `org-switcher.tsx` and `providers.tsx`,
+  since `@paigasus/console-core`'s own boundary rule excludes React components from that package.
+  This is recorded, not extracted, in this pull request: an extraction touching both zones inside
+  a re-baselining pull request would land unreviewable.
 
 ---
 
@@ -827,14 +839,30 @@ Linear issues to create after this spec is approved:
 2. Whether `testcontainers` starts Redis from a **Playwright worker fixture** — not from a vitest
    config, which `@paigasus/auth` and `@paigasus/discovery` already prove works — and what a worker
    restart does to a container that is already running.
-3. Whether pnpm resolves `@paigasus/console-core/testing`'s devDependencies for a consuming app.
+3. **ANSWERED (pull request 3).** Whether pnpm resolves `@paigasus/console-core/testing`'s
+   devDependencies for a consuming app. **Yes, with nothing added** to
+   `ts/apps/gateway-console/package.json` for it. `jose` (pulled in by `startFakeIdp`) and
+   `@connectrpc/connect-node` (pulled in by `startFakeIam`'s gRPC server) both resolve, because
+   Node's module resolution walks up from a file's own real path and finds them in
+   `ts/packages/paigasus-console-core/node_modules`, regardless of which app's process loaded the
+   file. The full e2e suite ran 8/8 on that basis. `testcontainers` is a separate case and this
+   question does **not** apply to it: it is not imported anywhere under
+   `ts/packages/paigasus-console-core/testing/` — those files import only `node:*` built-ins,
+   `@connectrpc/connect`, `@connectrpc/connect-node`, `jose` and `@paigasus/proto`. The only
+   dependency pull request 3 added to the app was `@playwright/test`.
 4. Whether adding `/ts/apps/iam-console/**/*` to `gateway-console-ts:test-e2e`'s `inputs` actually
    makes `moon query tasks --affected` select the tier from an `iam-console` edit, measured with the
    unpiped exit status. This is the fix for revision 1's wrong `dependsOn` claim, and it must be
-   confirmed rather than assumed.
+   confirmed rather than assumed. **Still open — belongs to pull request 4.**
 5. The wall-clock cost of the two-zone tier on a loaded CI runner. The `iam-console` tier already
    needs a 420 s worker timeout in CI (`tests/e2e/support/harness.ts:226-228`), and this tier runs
-   two servers and a container.
+   two servers and a container. **Partially answered (pull request 3): the single-zone baseline.**
+   For the single-zone tier, local, warm caches, no Docker: Playwright's own execution is ~2.4 s for
+   the 8 specs (reproduced three times; per-spec 80 ms–413 ms), the one completed
+   `moon run gateway-console-ts:test-e2e` reported the task at 3 s 884 ms, and total `moon run`
+   wall-clock was ~5 s including cached dependencies. **No CI number exists yet.** This item, as
+   worded, asks for the **two-zone** tier's cost on a loaded CI runner — that measurement is still
+   open and belongs to pull request 4, which adds the second server and the Redis container.
 6. Whether `boundaries.test.ts`'s reverse-liveness loop accepts the derived scope key
    `packages/paigasus-console-core/src` (§ 5.5).
 

@@ -141,6 +141,7 @@ tasks:
     # --out-dir. One `deps` edge per app serializes it against this gate.
     deps:
       - 'iam-console-ts:build'
+      - 'gateway-console-ts:build'
     # Narrow inputs — `repo` owns the whole tree, so without these the gate runs on every change.
     # 'ts/pnpm-lock.yaml' is the IMPORTANT one and is the entire reason this drift went unseen:
     # the Next VERSION is what drives this file's content, and the lockfile is absent from
