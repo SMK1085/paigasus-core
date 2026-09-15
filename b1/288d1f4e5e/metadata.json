@@ -1,0 +1,34 @@
+{
+  "cli_version": "0.10.6",
+  "checkpoint_id": "b1288d1f4e5e",
+  "strategy": "manual-commit",
+  "branch": "feature/sma-512-gateway-console",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "CLAUDE.md",
+    "docs/superpowers/specs/2026-09-13-sma-512-gateway-console-design.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/b1/288d1f4e5e/0/metadata.json",
+      "transcript": "/b1/288d1f4e5e/0/full.jsonl",
+      "compact_transcript": "/b1/288d1f4e5e/0/transcript.jsonl",
+      "content_hash": "/b1/288d1f4e5e/0/content_hash.txt",
+      "prompt": "/b1/288d1f4e5e/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 578,
+    "cache_creation_tokens": 3859902,
+    "cache_read_tokens": 123702285,
+    "output_tokens": 427502,
+    "api_call_count": 289,
+    "subagent_tokens": {
+      "input_tokens": 66,
+      "cache_creation_tokens": 181168,
+      "cache_read_tokens": 1914672,
+      "output_tokens": 18004,
+      "api_call_count": 33
+    }
+  }
+}
