@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// proxy.ts carries the auth middleware's ALLOW response onto its own `next()` (final whole-branch
-// review, minor 6). The middleware sets nothing on that response today, so only a double can show
-// the carry — hence this file, separate from tests/unit/proxy.test.ts, which runs the real
-// middleware and pins proxy.ts's import list.
+// proxy.ts carries the auth middleware's ALLOW response onto its own `next()`. The middleware
+// sets nothing on that response today, so only a double can show the carry — hence this file,
+// separate from tests/unit/proxy.test.ts, which runs the real middleware and pins proxy.ts's
+// import list.
 import { NextRequest, NextResponse } from 'next/server';
 import { describe, expect, it, vi } from 'vitest';
 

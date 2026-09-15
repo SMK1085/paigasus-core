@@ -816,6 +816,18 @@ Linear issues to create after this spec is approved:
 - `@paigasus/console-core` exports a testing surface from a package that is not a test package.
 - The PRN reader stays an ADR-0005 exception, now at one site instead of two. SMA-634 owns the
   underlying napi packaging defect.
+- **About 250 lines are byte-identical between `iam-console` and `gateway-console`**:
+  `app/_components/org-switcher.tsx` (47 lines), `page-error.tsx` (38), `lib/auth.ts` (32),
+  `app/providers.tsx` (29), `(console)/error.tsx` (24), `lib/console.ts` (23),
+  `(public)/layout.tsx` (21), and all but two lines each of `proxy.ts` (63) and
+  `error-reference.tsx` (29). Nothing in the repository gates a divergence, so a fix applied to
+  one zone's copy and not the other passes every gate. D16's reasoning (the
+  `paigasus/boundaries/console-core` rule bans React components from that package's `src/`) covers
+  the view files but not `lib/auth.ts` and `lib/console.ts`, which are server composition, not
+  React. `@paigasus/app-shell` is the natural home for `org-switcher.tsx` and `providers.tsx`,
+  since `@paigasus/console-core`'s own boundary rule excludes React components from that package.
+  This is recorded, not extracted, in this pull request: an extraction touching both zones inside
+  a re-baselining pull request would land unreviewable.
 
 ---
 

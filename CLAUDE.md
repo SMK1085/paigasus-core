@@ -561,7 +561,7 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   is set, and the failure reads as "the reader found nothing" rather than "the flag is invalid".
   That is not hypothetical — it cost a cycle on this very branch, where the first measurement
   read `head`'s status through a pipe and recorded exit 0.
-- The **codegen-drift gate is an inline `ci.yml` step** (`.github/workflows/ci.yml:249-262`), NOT
+- The **codegen-drift gate is an inline `ci.yml` step** (`.github/workflows/ci.yml:342-355`), NOT
   a `repo:*` Moon task — searching `moon.yml` for it finds nothing. That placement is deliberate
   and load-bearing: the step carries no `if:`, so it runs on EVERY CI run and cannot be
   deselected, where a `T`-array task would run only when affected and a wrong `inputs` list would
