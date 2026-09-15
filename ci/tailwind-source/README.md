@@ -2,8 +2,9 @@
 
 Asserts that a production `next build` of a given console app still emits the CSS that
 `@paigasus/ui` contributes, and (SMA-511) the CSS that `@paigasus/app-shell` contributes. The
-app is named on the command line (SMA-512); today the only caller is `iam-console-ts:test`,
-which passes `--app ts/apps/iam-console`. Three independent sentinels:
+app is named on the command line (SMA-512); today there are two callers, `iam-console-ts:test`
+and `gateway-console-ts:test`, each passing its own `--app` (`ts/apps/iam-console` and
+`ts/apps/gateway-console`). Three independent sentinels:
 
 | Sentinel | Declared in | Proves |
 |---|---|---|
@@ -27,8 +28,9 @@ check reopens the same hole from the other side.
 ## Invocation
 
 `node ci/tailwind-source/run.mjs --app <repo-relative-app-dir>`. Run by each app's own
-`test` task, which depends on `~:build`; today the only caller is `iam-console-ts:test`,
-passing `--app ts/apps/iam-console`. Three modes, in order:
+`test` task, which depends on `~:build`; today `iam-console-ts:test` passes
+`--app ts/apps/iam-console` and `gateway-console-ts:test` passes
+`--app ts/apps/gateway-console`. Three modes, in order:
 
 - `--self-test` — drives the verdict function over synthetic fixtures in a temporary
   directory, proving the assertions can both pass and fail.

@@ -896,11 +896,12 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   recursively instead of reading a manifest, and `iam-console-ts:build` removes
   `.next/static` before every build so a stale chunk from an earlier build cannot satisfy that
   walk. The guard script lives at `ci/tailwind-source/` and must **never** move under
-  `ts/apps/iam-console/`, because that directory is Tailwind's scan root and a script
-  holding the sentinel literal (`--paigasus-ui-source-probe`) would make Tailwind generate the
-  very utility it asserts on — and the guard's assertion-3 scan is a **full walk of the console
-  directory**, not an allowlist, because the old `['app'] + four config files` list missed
-  `moon.yml`, `next-env.d.ts` and `.prettierignore`, all of which Tailwind reads.
+  any `ts/apps/*` directory, because each one is Tailwind's scan root for its own app and a
+  script holding the sentinel literal (`--paigasus-ui-source-probe`) would make Tailwind generate
+  the very utility it asserts on — and the guard's assertion-3 scan is a **full walk of the named
+  app's own directory** (parameterized by `--app`), not an allowlist, because the old
+  `['app'] + four config files` list missed `moon.yml`, `next-env.d.ts` and `.prettierignore`, all
+  of which Tailwind reads.
   `iam-console-ts:build` also uses `options.merge: replace`, so
   it inherits nothing from `.moon/tasks/typescript-project.yml` and lists `/ts/pnpm-lock.yaml`
   **and `/ts/tsconfig.base.json`** by hand in its own `inputs` (`test` replaces too and needs
@@ -921,7 +922,9 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   running it. (SMA-503)
   Since SMA-512 the guard is **per app**: `ci/tailwind-source/run.mjs --app <dir>`, invoked by each
   app's own `test` task, and a BARE run now exits 2 rather than silently checking `iam-console`.
-  `TAILWIND_GUARD_INVOCATIONS` in `ci/affected-graph/ci_targets.py` fails `repo:affected-smoke` if
+  `TAILWIND_GUARD_INVOCATIONS` holds **two** apps today (`iam-console`, `gateway-console` — SMA-512
+  pull request 3), each invoking the guard for itself in its own `test` task; a third app repeats
+  the same shape. That registry, in `ci/affected-graph/ci_targets.py`, fails `repo:affected-smoke` if
   a `ts/apps/*` directory with a `package.json` does not invoke all three modes for itself, in its
   Moon project's resolved `test` script — the fix wave closed three ways to defeat this: an entry
   no longer stores hand-copied lines (they are derived from the app name, so an entry cannot name
@@ -1081,6 +1084,17 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   (`<bash-binary> ci/<gate>/run.sh`) and read those results instead of the `moon ci` verdict for
   them — `repo:actionlint` has no local substitute verdict today. CI runs a single Linux bash and
   never sees this split.
+- **`ts/apps/gateway-console`** (SMA-512 PR 3) is the second console zone: a Next.js 16 App Router
+  app for the AI Gateway, mounted at `/gateway`, Moon id `gateway-console-ts`. Its `lib/config.ts`
+  demands **both** an `iam` entry and a `gateway` entry in `PAIGASUS_SERVICES` — it refuses to
+  parse a map missing either one — and declares no gateway-specific env key of its own; the
+  gateway's address comes only through `PAIGASUS_SERVICES.gateway`, unlike IAM, which also carries
+  its own `PAIGASUS_IAM_GRPC_URL`. The zone overview lives at **`(console)/overview/page.tsx`** →
+  `/gateway/overview`, **not** at `/gateway/` — the public landing page already owns that path, and
+  a second `page.tsx` at the same route fails the Next build (plan D14). `gateway.chat.stream`
+  (`app/_components/gateway-state.ts`) counts only when the service's state is `available`; a
+  `degraded` service can still carry the descriptor of its last good probe, and treating that
+  stale descriptor as a live capability would report a feature the gateway cannot currently serve.
 
 ## Workflow
 

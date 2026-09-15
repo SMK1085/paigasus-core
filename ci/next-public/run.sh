@@ -367,10 +367,11 @@ self_test() {
   fi
 
   # The positive half of the same widening, and it is the row that actually DETECTS a narrowing.
-  # MEASURED: reverting APP_CONFIG_GLOB to `next.config.ts` leaves the row above green — with no
-  # config matched, APP_CONFIG_FLOOR reds it at rc 1 for a different reason, which is the right
-  # verdict but not the reason the row asserts. This row fails on that mutation (expected rc 0,
-  # got 1), so the two rows are kept as a pair rather than either one alone.
+  # MEASURED: reverting APP_CONFIG_GLOB to `next.config.ts` leaves the row above green — with one
+  # config matched (probe2's, which the mjsconfig row never touches), APP_CONFIG_FLOOR reds it at
+  # rc 1 for a different reason, which is the right verdict but not the reason the row asserts.
+  # This row fails on that mutation (expected rc 0, got 1), so the two rows are kept as a pair
+  # rather than either one alone.
   mjsok="$(mktemp -d)"; make_fixture "$mjsok"
   git -C "$mjsok" rm -q --cached 'ts/apps/probe/next.config.ts' >/dev/null 2>&1
   rm -f "$mjsok/ts/apps/probe/next.config.ts"
