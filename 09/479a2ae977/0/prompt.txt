@@ -2207,3 +2207,432 @@ If this event is something the user would act on now, send a PushNotification. R
 ---
 
 merge then do clenaup
+
+---
+
+go ahead with PR 3
+
+---
+
+<task-notification>
+<task-id>a7aef6f505c553ea5</task-id>
+<tool-use-id>toolu_01AZrGf7zpQEoxQxf126FLLL</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/0163cf9a-0457-4fcf-af47-2cd420fc6a77/tasks/a7aef6f505c553ea5.output</output-file>
+<status>completed</status>
+<summary>Agent "Survey gate re-baselines for PR 3" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>Now I have full coverage of all requested items. Here is the structured report.
+
+---
+
+# Inventory: sites that must change / be re-baselined for `gateway-console-ts`
+
+Repo root: `/Users/smaschek/dev/paigasus/paigasus-core`. All line numbers verified against the current working tree (read-only, nothing was modified).
+
+Bonus finding relevant to all items below: `.moon/workspace.yml:3-13` discovers projects by **glob** (`ts/apps/*`), so `gateway-console-ts` needs **no explicit project registration** anywhere — it is picked up automatically once `ts/apps/gateway-console/moon.yml` exists with `id: 'gateway-console-ts'`.
+
+## 1. `ci/affected-graph/run.sh` — strict-equality task-set cases
+
+### Full case-block shape (the template to copy for a new case)
+
+The generic helper machinery (verbatim):
+
+```
+# lines 73-129
+# _assert_task_case_impl LABEL FILE EXPECTED_CSV HINT [QUERY_FLAGS...]
+...
+_assert_task_case_impl() {
+  local label="$1" file="$2" expected_csv="$3" hint="$4"; shift 4
+  local got want missing unexpected
+  [ -n "$expected_csv" ] || { echo "FATAL [$label]: EXPECTED_CSV is empty (harness bug)" &gt;&amp;2; return 2; }
+  got="$(printf '%s\n' "$file" \
+    | moon query tasks --affected "$@" \
+    | python3 -c '
+import sys, json
+d = json.load(sys.stdin)
+out = []
+for pid, tasks in (d.get("tasks") or {}).items():
+    for name in tasks:
+        if name in ("build", "test", "lint", "test-e2e"):
+            out.append(f"{pid}:{name}")
+print("\n".join(sorted(out)))')" \
+    || { echo "FATAL [$label]: moon query tasks failed" &gt;&amp;2; return 2; }
+  want="$(tr ',' '\n' &lt;&lt;&lt;"$expected_csv" | sort)"
+  if [ "$got" = "$want" ]; then
+    printf 'PASS  %-22s -&gt; %s\n' "$label" "$(tr '\n' ' ' &lt;&lt;&lt;"$got")"
+    return 0
+  fi
+  ...
+}
+```
+
+```
+# lines 161-164
+assert_task_case_ci() {
+  _assert_task_case_impl "$1" "$2" "$3" \
+    "the consumer's build/test/lint does not key on this upstream's sources; check its fileGroups.upstreams and that .moon/tasks/rust.yml still references @group(upstreams)."
+}
+```
+
+```
+# lines 230-238
+run_task_case_ci() {
+  local ec=0
+  assert_task_case_ci "$@" || ec=$?
+  case "$ec" in
+    0) ;;
+    1) SUITE_RC=1 ;;
+    *) echo "== affected-graph guard ABORTED: infrastructure error (rc=$ec) ==" &gt;&amp;2; exit 2 ;;
+  esac
+}
+```
+
+One concrete full case block, exactly as written in `run_suite` (lines 528-529, `app-shell-&gt;console`, shown as the template shape — comment + `run_task_case_ci LABEL FILE \` + continuation line with the CSV):
+
+```
+# lines 524-529
+  # SMA-511 — the file that holds the THIRD Tailwind sentinel (--paigasus-app-shell-source-probe,
+  # spec § 7.6). ci/tailwind-source/run.mjs asserts it against the iam-console build, so an edit to
+  # this file MUST rebuild the app. If the app's app-shell input narrowed away from this file, the
+  # guard would read a cached .next and pass against stale CSS; this case is the control.
+  run_task_case_ci "app-shell-&gt;console" "ts/packages/paigasus-app-shell/src/shell/app-shell.tsx" \
+    "paigasus-app-shell-ts:build,paigasus-app-shell-ts:test,paigasus-app-shell-ts:test-e2e,iam-console-ts:build,iam-console-ts:test,iam-console-ts:test-e2e,ts:lint"
+```
+
+So a new case is written as: `run_task_case_ci "&lt;label&gt;" "&lt;anchor-file&gt;" "&lt;comma-separated pid:task list&gt;"`, called inside `run_suite()` (lines 262-604), with a comment above explaining the SMA/rationale. `run_case` (project-level, line 208-216) has the analogous non-task shape: `run_case "&lt;label&gt;" "&lt;file&gt;" "&lt;comma-separated project-id list&gt;"`.
+
+### Each named case — line number, anchor file, exact current expected-set text
+
+| Case | Line(s) | Anchor file | Exact current expected CSV |
+|---|---|---|---|
+| `ui-&gt;console` | 390-391 | `ts/packages/paigasus-ui/src/styles/tokens.css` | `"paigasus-app-shell-ts:build,paigasus-app-shell-ts:test,paigasus-app-shell-ts:test-e2e,iam-console-ts:build,iam-console-ts:test,iam-console-ts:test-e2e,paigasus-ui-ts:build,paigasus-ui-ts:test,ts:lint"` |
+| `ui-components-&gt;console` | 407-408 | `ts/packages/paigasus-ui/src/components/table.tsx` | `"paigasus-app-shell-ts:build,paigasus-app-shell-ts:test,paigasus-app-shell-ts:test-e2e,iam-console-ts:build,iam-console-ts:test,iam-console-ts:test-e2e,paigasus-ui-ts:build,paigasus-ui-ts:test,ts:lint"` |
+| `app-shell-&gt;console` | 528-529 | `ts/packages/paigasus-app-shell/src/shell/app-shell.tsx` | `"paigasus-app-shell-ts:build,paigasus-app-shell-ts:test,paigasus-app-shell-ts:test-e2e,iam-console-ts:build,iam-console-ts:test,iam-console-ts:test-e2e,ts:lint"` |
+| `auth-&gt;auth-tasks` | 422-423 | `ts/packages/paigasus-auth/src/config.ts` | `"paigasus-app-shell-ts:build,paigasus-app-shell-ts:test,paigasus-app-shell-ts:test-e2e,paigasus-auth-ts:build,paigasus-auth-ts:test,paigasus-auth-ts:test-e2e,iam-console-ts:build,iam-console-ts:test,iam-console-ts:test-e2e,paigasus-console-core-ts:build,paigasus-console-core-ts:test,ts:lint"` |
+| `proto-&gt;sdk` | 440-441 | `ts/packages/paigasus-proto/src/generated/paigasus/common/v1/error_pb.ts` | `"paigasus-proto-ts:build,paigasus-proto-ts:test,paigasus-sdk-ts:build,paigasus-sdk-ts:test,ts:lint,paigasus-discovery-ts:build,paigasus-discovery-ts:test,iam-console-ts:build,iam-console-ts:test,iam-console-ts:test-e2e,paigasus-console-core-ts:build,paigasus-console-core-ts:test"` |
+| `proto-iam-&gt;sdk` | 464-465 | `ts/packages/paigasus-proto/src/generated/paigasus/iam/v1/iam_pb.ts` | `"paigasus-proto-ts:build,paigasus-proto-ts:test,paigasus-sdk-ts:build,paigasus-sdk-ts:test,ts:lint,paigasus-discovery-ts:build,paigasus-discovery-ts:test,iam-console-ts:build,iam-console-ts:test,iam-console-ts:test-e2e,paigasus-console-core-ts:build,paigasus-console-core-ts:test"` |
+| `discovery-&gt;discovery-tasks` | 478-479 | `ts/packages/paigasus-discovery/src/core/state.ts` | `"paigasus-app-shell-ts:build,paigasus-app-shell-ts:test,paigasus-app-shell-ts:test-e2e,paigasus-discovery-ts:build,paigasus-discovery-ts:test,paigasus-discovery-ts:test-e2e,iam-console-ts:build,iam-console-ts:test,iam-console-ts:test-e2e,paigasus-console-core-ts:build,paigasus-console-core-ts:test,ts:lint"` |
+| `discovery-adapters-&gt;discovery-tasks` (2nd discovery-&gt;* case) | 492-493 | `ts/packages/paigasus-discovery/src/adapters/memory-cache.ts` | `"paigasus-app-shell-ts:build,paigasus-app-shell-ts:test,paigasus-app-shell-ts:test-e2e,paigasus-discovery-ts:build,paigasus-discovery-ts:test,paigasus-discovery-ts:test-e2e,iam-console-ts:build,iam-console-ts:test,iam-console-ts:test-e2e,paigasus-console-core-ts:build,paigasus-console-core-ts:test,ts:lint"` |
+| `sdk-&gt;iam-console` | 520-521 | `ts/packages/paigasus-sdk/src/iam.ts` | `"paigasus-sdk-ts:build,paigasus-sdk-ts:test,iam-console-ts:build,iam-console-ts:test,iam-console-ts:test-e2e,paigasus-console-core-ts:build,paigasus-console-core-ts:test,ts:lint"` |
+| `sdk-errors-&gt;iam-console` | 522-523 | `ts/packages/paigasus-sdk/src/errors/map-error.ts` | `"paigasus-sdk-ts:build,paigasus-sdk-ts:test,iam-console-ts:build,iam-console-ts:test,iam-console-ts:test-e2e,paigasus-console-core-ts:build,paigasus-console-core-ts:test,ts:lint"` |
+| `console-core-&gt;consumers` | 558-559 | `ts/packages/paigasus-console-core/src/runtime.ts` | `"paigasus-console-core-ts:build,paigasus-console-core-ts:test,iam-console-ts:build,iam-console-ts:test,iam-console-ts:test-e2e,ts:lint"` |
+| `iam-console-lib-&gt;iam-console-tasks` | 542-543 | `ts/apps/iam-console/lib/config.ts` | `"iam-console-ts:build,iam-console-ts:test,iam-console-ts:test-e2e,ts:lint"` |
+
+**Important**: also note (not explicitly asked, but directly load-bearing) the related, un-listed sibling cases that reference `iam-console-ts` and will need matching `gateway-console-ts` analogues if the new app is meant to be symmetric:
+- `contracts-&gt;proto` (line 281-282) — expected CSV includes `iam-console-ts` and `paigasus-console-core-ts` explicitly by project id.
+- `console-core-prn-tenancy-&gt;consumers` (560-561), `console-core-testing-&gt;consumers` (577-578) — same shape as `console-core-&gt;consumers`.
+- `iam-console-proxy-&gt;iam-console-tasks` (544-545) — sibling of `iam-console-lib-&gt;iam-console-tasks`.
+- `app-shell-&gt;app-shell-tasks` (502-503), `app-shell-shell-&gt;app-shell-tasks` (510-511) — include `iam-console-ts:*`.
+
+All of these are **strict-equality / default-deny**: any new project (`gateway-console-ts`) that becomes affected by these anchors but is absent from the expected CSV will fail the case as "unexpected." Whether `gateway-console-ts` needs to be *added* to each of these depends on whether it will `dependsOn` the same upstream packages (ui, auth, sdk, discovery, app-shell, proto, console-core) as iam-console — almost certainly yes per your plan, so **every one of the cases above will need `gateway-console-ts:build,gateway-console-ts:test,gateway-console-ts:test-e2e` (or the project id alone, for `run_case` cases) appended to its expected CSV**, plus new anchor cases mirroring `iam-console-lib-&gt;iam-console-tasks`/`iam-console-proxy-&gt;iam-console-tasks` for the new app's own `lib/`/`proxy.ts`.
+
+Also note the doc comment at lines 89-92 hardcodes a *count* of iam-console-ts as one of "four projects" declaring `test-e2e` — this comment text should be updated (not asserted anywhere, but read by reviewers) when a fifth (`gateway-console-ts`) is added.
+
+## 2. `ci/next-public/run.sh` — `APP_CONFIG_FLOOR` / `APP_CONFIG_GLOB`
+
+```
+# lines 93-100
+# The SAME collapse-detector idea, applied to check 2's own list. Check 2 iterated app configs and
+# printed its success line when the list was EMPTY, so renaming ts/apps — or adding an app that
+# uses next.config.mjs, which check 2 did not match — silently dropped that app while CORPUS_FLOOR
+# stayed satisfied, because the corpus counts ts/ FILES and not app configs. One app today.
+#
+# Deliberate re-baseline, exactly like CORPUS_FLOOR: raise this when a second console zone app
+# lands, and lower it only for a real removal.
+APP_CONFIG_FLOOR=1
+```
+
+```
+# lines 181-184
+# ALL FOUR Next config extensions, not just .ts. `next.config.{js,mjs,cjs}` are equally valid Next
+# config names, and an app using one was invisible to this check while the corpus floor — which
+# counts ts/ files, not app configs — stayed happily satisfied.
+APP_CONFIG_GLOB='ts/apps/*/next.config.[tjmc][sj]*'
+```
+
+The comment on line 98-99 is explicit: **`APP_CONFIG_FLOOR` must be raised from `1` to `2`** when `gateway-console-ts` (with its own `next.config.ts`) lands. `APP_CONFIG_GLOB` needs no change (already wildcarded over `ts/apps/*`).
+
+## 3. `ci/affected-graph/ci_targets.py` — pins
+
+**`NEXT_PUBLIC_FREE_SH_CALL_SITES`** (pins the exact `APP_CONFIG_FLOOR=1` line by literal string match):
+
+```
+# lines 1244-1257
+NEXT_PUBLIC_FREE_SH_CALL_SITES = (
+    "--self-test)        MODE=selftest; shift ;;",
+    "--negative-control) MODE=negctl;   shift ;;",
+    "selftest) self_test ;;",
+    "check)    check_prefix; check_factory ;;",
+    "negctl)   negative_control ;;",
+    "CORPUS_FLOOR=48",
+    "APP_CONFIG_FLOOR=1",
+    "APP_CONFIG_GLOB='ts/apps/*/next.config.[tjmc][sj]*'",
+    '( cd "$tmp" &amp;&amp; check_prefix "$tmp" ) &gt;/dev/null 2&gt;&amp;1 || negctl_rc=$?',
+    'if [ "$negctl_rc" != 1 ]; then',
+    "printf '  FAIL a planted NEXT_PUBLIC_ did not red the gate: expected rc 1, got %s\\n' \"$negctl_rc\" &gt;&amp;2",
+    'if [ "$failures" -gt 0 ]; then',
+)
+```
+
+Line **1251**, `"APP_CONFIG_FLOOR=1",` — this string is matched **verbatim** against `ci/next-public/run.sh`'s source text (see usage at ci_targets.py:1734, 2546, 3032, 3049), so bumping `APP_CONFIG_FLOOR` to `2` in `ci/next-public/run.sh` **requires this pinned string to become `"APP_CONFIG_FLOOR=2",`** in the same commit, or `repo:affected-smoke`'s `assert_ci_targets` will report the old pin as stale/mismatched.
+
+**`TAILWIND_GUARD_INVOCATIONS`** and **`_expected_tailwind_lines`**:
+
+```
+# lines 687-702
+# SMA-512, fix wave (final review). The tailwind-source guard checks ONE app per invocation
+# (`--app &lt;dir&gt;`), so an app that never invokes it is simply unguarded — the silent skip the
+# parameterization was meant to remove, moved rather than closed. Every ts/apps/* directory (one
+# with a `package.json` — the same test ci/next-env/run.sh applies) must therefore be a member of
+# this set, and its Moon project's RESOLVED `test` script must carry all three lines the guard
+# needs: the self-test and the negative control prove the assertion can fire, and the real run for
+# THAT app is the assertion.
+#
+# This is a SET of app names now, not a dict of hand-copied lines. The original shape stored three
+# literal lines per app, so an entry for a second app could read `--app ts/apps/iam-console` —
+# copied from the only existing entry — and MEASURE AS PASSING, because nothing tied the stored
+# text to the key it lived under. The three expected lines are now DERIVED from the app name by
+# `_expected_tailwind_lines` below, so there is nowhere left to write the wrong one: naming an app
+# here means "this app's guard invocation must match `_expected_tailwind_lines(&lt;name&gt;)`," full
+# stop.
+TAILWIND_GUARD_INVOCATIONS = {"iam-console"}
+```
+
+```
+# lines 705-717
+def _expected_tailwind_lines(app):
+    """The three ci/tailwind-source/run.mjs invocation lines `app`'s `test` script must carry.
+
+    DERIVED, not stored, so a registry entry can no longer name another app's `--app` directory
+    (fix-wave finding A) and an entry can no longer register with fewer than three lines (the old
+    per-app tuple could hold any length; a set membership check cannot).
+    """
+    run = "node ../../../ci/tailwind-source/run.mjs"
+    return (
+        f"{run} --self-test",
+        f"{run} --negative-control",
+        f"{run} --app ts/apps/{app}",
+    )
+```
+
+Line **702** — `TAILWIND_GUARD_INVOCATIONS = {"iam-console"}` **must become `{"iam-console", "gateway-console"}`** (comment at 3717-3731 confirms: "A ts/apps/* directory with a package.json has no TAILWIND_GUARD_INVOCATIONS ... Fix: add the app's name"). No change needed to `_expected_tailwind_lines` itself — it derives the three lines generically from whatever name is added to the set, and the new app's `test` task script must literally contain those three derived lines (mirroring `ts/apps/iam-console/moon.yml` lines 221-223).
+
+## 4. Root `moon.yml` — `repo:next-env-drift`
+
+```
+# lines 130-167
+  next-env-drift:
+    description: 'Assert the committed next-env.d.ts matches what `next typegen` emits (SMA-519).'
+    # next-env.d.ts is generated by Next but tracked (tsconfig lists it in `include`, and
+    # typecheck runs without a build), and nothing asserted the two agreed — it sat stale from
+    # May until SMA-517. Same shape as parity-corpus-drift: regenerate, then diff.
+    script: 'ci/next-env/run.sh'
+    toolchain: 'system'
+    # Ordered AFTER each app's build, not merely to have a fresh tree: `next typegen` writes
+    # into that app's own `.next`, which is `&lt;app&gt;-ts:build`'s declared output. Letting both run
+    # concurrently would race on that directory (a build cleaning .next under a running
+    # typegen), which is the flake shape SMA-427 already paid for with wasm-pack's destructive
+    # --out-dir. One `deps` edge per app serializes it against this gate.
+    deps:
+      - 'iam-console-ts:build'
+    # Narrow inputs — `repo` owns the whole tree, so without these the gate runs on every change.
+    # 'ts/pnpm-lock.yaml' is the IMPORTANT one and is the entire reason this drift went unseen:
+    # the Next VERSION is what drives this file's content, and the lockfile is absent from
+    # iam-console-ts:build's own inputs, so a Next upgrade never re-keyed that task.
+    inputs:
+      - 'ci/next-env/**/*'
+      # SMA-512: per PATH, never `ts/apps/*/**`. A blanket tree glob sweeps in `.next`, which
+      # .moon/workspace.yml's hasher.ignorePatterns deliberately does NOT ignore because `.next`
+      # is a declared build output — repo:next-public-free negates it by hand for that reason.
+      - 'ts/apps/*/next-env.d.ts'
+      # ci/next-env/run.sh discovers only configs whose app directory carries a package.json, so
+      # adding or removing one CHANGES the discovered app set. Without this glob a package-only
+      # change leaves the gate cached against a stale set. A plain glob, never a brace pattern:
+      # ci/affected-graph/task_inputs.py rejects brace patterns.
+      - 'ts/apps/*/package.json'
+      # Pinned to '.ts' only, though ci/next-env/run.sh discovers six config extensions and
+      # '.mjs' is a shape this repo actually uses elsewhere. Do NOT widen this glob until such an
+      # app exists: repo:input-liveness fails a declared glob that matches zero tracked files, so
+      # 'ts/apps/*/next.config.mjs' etc. would red today. Add the missing extensions' globs the
+      # same day an app that needs one lands.
+      - 'ts/apps/*/next.config.ts'
+      - 'ts/apps/*/tsconfig.json'
+      - 'ts/apps/*/app/**/*'
+      - 'ts/pnpm-lock.yaml'
+```
+
+`deps:` (line 142-143) is the **only** field with an explicit `iam-console-ts` name — the comment (137-141) explicitly explains "One `deps` edge per app serializes it." **`deps` must gain `- 'gateway-console-ts:build'`.** All `inputs:` entries (149-167) are already `ts/apps/*/...` globs, so — per the explicit comment at 159-163 — they need **no change**, provided the new app uses `next.config.ts` (not `.mjs`/`.js`/`.cjs`; the comment warns widening the glob before such an app exists will fail `repo:input-liveness`).
+
+## 5. ESLint config sites
+
+### `ts/eslint.config.js`
+
+```
+# lines 1-79 (full file)
+```
+Key excerpt — app names are **not hardcoded**; they are derived from the filesystem:
+
+```
+# lines 12, 52-67
+const appsDir = path.join(import.meta.dirname, 'apps');
+...
+  /*
+   * Next.js rules — ONE BLOCK PER APP, derived from the filesystem (SMA-512).
+   *
+   * This was a single hardcoded `apps/iam-console/**` block. A second zone app would have shipped
+   * with no Next rules at all and nothing would have said so. The blocks are built by
+   * nextAppRules in @paigasus/next-config/eslint, which is unit-tested there; this file's job is
+   * only to supply the app list. paigasus-next-config-ts:test asserts this spread is still here.
+   */
+  ...nextAppRules({
+    appsDir,
+    appNames: readdirSync(appsDir, { withFileTypes: true })
+      .filter((entry) =&gt; entry.isDirectory())
+      .map((entry) =&gt; entry.name)
+      .sort(),
+    plugin: nextPlugin,
+  }),
+```
+
+**No edit needed here** — `appNames` (lines 62-65) is computed via `readdirSync(appsDir)`, so `gateway-console` is picked up automatically once the directory exists.
+
+### `ts/packages/paigasus-next-config/src/eslint.mjs`
+
+`BOUNDARY_SCOPES` (lines 54-64):
+
+```
+export const BOUNDARY_SCOPES = {
+  'packages/paigasus-ui': 'exists',
+  'packages/paigasus-sdk': 'exists',
+  'packages/paigasus-app-shell': 'exists',
+  // The second app-shell block's scope. The reverse liveness loop needs every block's scope here.
+  'packages/paigasus-app-shell/tests/e2e/fixture': 'exists',
+  'packages/paigasus-auth': 'exists',
+  'packages/paigasus-discovery': 'exists',
+  'packages/paigasus-console-core/src': 'exists',
+  apps: 'exists',
+};
+```
+
+This maps **package** directories, not apps — the single `apps: 'exists'` entry (line 63) already covers both `apps/iam-console` and `apps/gateway-console` generically. **No new key needed** for a second app.
+
+`paigasus/boundaries/app-middleware` block (lines 337-357):
+
+```
+  {
+    name: 'paigasus/boundaries/app-middleware',
+    // 'apps/**/…' rather than 'apps/*/…': the latter derives the scope key
+    // 'apps/*/{middleware,proxy}.{…}' (a file glob, not a directory), which the liveness test's
+    // `existsSync` check can never resolve. This form derives 'apps' instead — the SAME key the
+    // `paigasus/boundaries/apps` block above already owns in BOUNDARY_SCOPES — so it needs no scope
+    // entry of its own.
+    //
+    // `proxy` since SMA-511 (spec § 7.4): Next 16.3.4 deprecates `middleware.ts` in favour of
+    // `proxy.ts`. This block REPLACES the apps block's options for these files, so it restates
+    // APP_PROTO_BAN as its second group.
+    files: ['apps/**/{middleware,proxy}.{ts,js,mts,cts,mjs,cjs}'],
+    rules: restrict([
+      {
+        group: ['@paigasus/auth/server', '@paigasus/auth/server/**', '@paigasus/sdk', '@paigasus/sdk/**', '@paigasus/console-core', '@paigasus/console-core/**'],
+        message:
+          "An app's proxy (middleware) must import @paigasus/auth/middleware, never /server, the sdk or @paigasus/console-core. `server-only` is a NO-OP in the middleware layer, so nothing else stops a token-bearing module being bundled there.",
+      },
+      APP_PROTO_BAN,
+    ]),
+  },
+```
+
+`files: ['apps/**/{middleware,proxy}.{ts,js,mts,cts,mjs,cjs}']` (line 348) already globs across all apps. **No edit needed** — it will apply to `apps/gateway-console/proxy.ts` automatically.
+
+## 6. `ts/packages/paigasus-next-config/src/index.ts` — `SOURCE_ONLY_PACKAGES`
+
+```
+# lines 7-26
+/**
+ * Workspace packages that export TypeScript source rather than built JS. Next must transpile
+ * them. Every `@paigasus/*` package is `private: true` with `exports` pointing at `./src/*.ts`;
+ * this list grows when a new one lands.
+ *
+ * SMA-510 added `@paigasus/app-shell` and the two packages it imports (`@paigasus/auth` for
+ * `/client`, `@paigasus/discovery` for `/types` and `/client`). The app-shell fixture builds
+ * through this factory, so its `next build` is the proof that the list is sufficient.
+ */
+const SOURCE_ONLY_PACKAGES = [
+  '@paigasus/app-shell',
+  '@paigasus/auth',
+  '@paigasus/console-core',
+  '@paigasus/discovery',
+  '@paigasus/kernel',
+  '@paigasus/next-config',
+  '@paigasus/proto',
+  '@paigasus/sdk',
+  '@paigasus/ui',
+];
+```
+
+This is keyed by **package** name, not app. It only needs an edit if `gateway-console` imports a `@paigasus/*` package not already listed (unlikely, since the existing 9 already cover the full current package set) — otherwise **no change needed**.
+
+## 7. `.github/workflows/ci.yml` — Playwright Chromium install step
+
+```
+# lines 179-203
+      # UNCONDITIONAL, no `if:`. `@paigasus/auth`'s `test-e2e` task (SMA-506) needs a real
+      # Chromium. A path-filtered condition here can be skipped on a run where `moon ci` still
+      # selects `test-e2e` as affected (e.g. a change reached through `--include-relations`,
+      # not through a path filter this step would check) — the task then fails for a missing
+      # browser instead of a red on a green PR being merely wasted CI time. Runs before the
+      # `moon ci` step so the browser exists before the task can run.
+      #
+      # `@paigasus/discovery` ALSO needs Chromium now (SMA-509): its `test-e2e` task runs vitest
+      # against real containers FIRST, then a real-browser Playwright spec proving a hit-testing
+      # property jsdom cannot model (see tests/browser/capability-hit-test.spec.ts's header) — so
+      # this step installs Chromium for both packages, not just @paigasus/auth.
+      # `@paigasus/app-shell` needs it too (SMA-510): its `test-e2e` task builds a Next fixture and
+      # drives it with Playwright to prove that a cross-zone link is a hard navigation.
+      # `@paigasus/iam-console` needs it too (SMA-511): its test-e2e task drives the standalone
+      # server through a TLS terminator.
+      - name: Install Playwright Chromium (for the test-e2e tasks of @paigasus/auth, @paigasus/discovery, @paigasus/app-shell and @paigasus/iam-console)
+        # Run from the PACKAGE, not the ts workspace root: @playwright/test is a devDependency of
+        # each package, so `playwright` is only on that package's node_modules/.bin. From ts/ it
+        # fails with ERR_PNPM_RECURSIVE_EXEC_FIRST_FAIL, "Command playwright not found" (MEASURED).
+        run: |
+          set -euo pipefail
+          pnpm --dir ts/packages/paigasus-auth exec playwright install --with-deps chromium
+          pnpm --dir ts/packages/paigasus-discovery exec playwright install --with-deps chromium
+          pnpm --dir ts/packages/paigasus-app-shell exec playwright install --with-deps chromium
+          pnpm --dir ts/apps/iam-console exec playwright install --with-deps chromium
+```
+
+If `gateway-console` has its own `test-e2e` Playwright task, you need to: append `pnpm --dir ts/apps/gateway-console exec playwright install --with-deps chromium` (new line after 203), and update the step `name:` (line 194) to list the new app. This is the **only** iam-console-specific site in `ci.yml` (the `T=(...)` task-name array at line 261 is task-type-based, not per-project, so it needs no change).
+
+## 8. `ts/apps/iam-console/moon.yml` — full file (template for the new app)
+
+Full 339-line file already read verbatim above (Read tool output). Key structural points to carry over when writing `ts/apps/gateway-console/moon.yml`:
+- `id: 'gateway-console-ts'`, same `layer: 'application'`, `language: 'typescript'`.
+- `dependsOn:` (lines 20-28) — same 8 entries if gateway-console shares the same package graph (`paigasus-next-config-ts`, `paigasus-ui-ts`, `paigasus-auth-ts`, `paigasus-sdk-ts`, `paigasus-discovery-ts`, `paigasus-app-shell-ts`, `paigasus-proto-ts`, `paigasus-console-core-ts`).
+- `fileGroups.sources` (lines 42-48) — same `app/**/*`, `lib/**/*`, `proxy.ts` pattern (comment at 30-41 explains why this override is required: the inherited group from `.moon/tasks/typescript-project.yml` is `src/**/*`, which doesn't exist in a Next app).
+- `build` task (lines 51-144): note the hardcoded standalone-entry-point assertion at line 74 — `.next/standalone/apps/iam-console/server.js` — **must become `.next/standalone/apps/gateway-console/server.js`** for the new app. Also note line 223's `--app ts/apps/iam-console` invocation inside `test` — **must become `--app ts/apps/gateway-console`**.
+- `test` task's comment block (lines 212-217) is directly relevant: *"SMA-512: the guard takes the app directory, because a second zone app lands in pull request 3."* — i.e., this repo's own comments already anticipated this exact change and describe the invariant (`each app invokes the GUARD for ITSELF`).
+- All `/ts/packages/.../src/**/*` and `.../package.json` input lines (across `build`, `typecheck`, `test`, `test-e2e`) should be duplicated verbatim if gateway-console depends on the same packages.
+
+## 9. `.moon/tasks/typescript-project.yml` — inherited ts tasks
+
+```
+# lines 27-53 (task section)
+tasks:
+  build:
+    command: 'pnpm exec tsc -p tsconfig.json --noEmit'
+    inputs: [...]
+  typecheck:
+    command: 'pnpm exec tsc -p tsconfig.json --noEmit'
+    inputs: [...]
+  test:
+    command: 'pnpm exec vitest run --passWithNoTests'
+    inputs: [...]
+```
+
+Task names defined here (`inheritedBy.layers: ['library', 'application']`, line 15): **`build`, `typecheck`, `test`** only. `test-e2e` is **not defined** anywhere under `.moon/tasks/` (confirmed via `grep -rn "test-e2e" .moon/tasks/` → no hits) — it is a **project-local task** each app/package declares itself (as `iam-console`, `paigasus-auth`, `paigasus-discovery`, `paigasus-app-shell` all do in their own `moon.yml`). So `gateway-console-ts` must declare its own `test-e2e:` task block in its `moon.yml`, exactly as `iam-console`'s (lines 282-338) does — nothing in `.moon/tasks/` needs to change.
+
+Related, not explicitly asked but directly relevant: `lint`/`fmt` come from `.moon/tasks/typescript.yml` (`layers: ['configuration']`, lines 14-15, 28-36) — those apply to the `ts` root project only (`ts:lint`), not per-app, and (per item 4's finding) `ts/moon.yml`'s `fileGroups.sources` already globs `apps/*/lib/**/*`, `apps/*/app/**/*`, `apps/*/proxy.ts`, `apps/*/src/**/*` (lines 12-19), so `ts:lint` will automatically cover `gateway-console` with no edit.</result>
+<usage><subagent_tokens>93407</subagent_tokens><tool_uses>30</tool_uses><duration_ms>222995</duration_ms></usage>
+</task-notification>
