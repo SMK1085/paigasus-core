@@ -27,6 +27,14 @@ See `.env.local.example` for a working set of values for `next dev`.
 
 ## Commands
 
+Every command below goes through Moon, which resolves its tools from the proto shims. A
+non-interactive shell does not have them on `PATH`, and the command then runs the globally pinned
+tool or none at all. Export them once per shell first:
+
+```bash
+export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
+```
+
 | Task                                       | Command                                 |
 | ------------------------------------------ | --------------------------------------- |
 | Build (asserts the standalone `server.js`) | `moon run gateway-console-ts:build`     |
