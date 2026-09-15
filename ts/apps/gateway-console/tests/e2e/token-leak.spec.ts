@@ -161,9 +161,18 @@ test('R5: no response body, header or RSC payload contains a fake token (ADR-001
     settledCount = pending.length;
     await page.waitForTimeout(QUIESCE_MS);
   }
+  // Whether the stream actually went quiet, or the bound above simply expired. The loop ends when
+  // EITHER clause fails, so this comparison is accurate for both exits.
+  const quiesced = pending.length === settledCount;
   // Detach FIRST, then drain: after this line the array cannot grow, so one Promise.all is total.
   page.off('response', onResponse);
   const seen = await Promise.all(pending);
+
+  // A bound that gives up SILENTLY is the defect this whole row is built against: every later
+  // assertion reads `seen` alone, so a scan missing the responses that arrived after the bound
+  // expired would report an empty leak list and pass. Asserted BEFORE the leak scan, so an
+  // untrustworthy scan fails as itself rather than as a clean result.
+  expect(quiesced, `the response stream did not go quiet within ${String(QUIESCE_TIMEOUT_MS)} ms, so this scan may be missing responses and cannot be trusted`).toBe(true);
   const tokens = [accessToken, refreshToken, ...harness.idp.issued.slice(issuedBefore).flatMap((issued) => [issued.accessToken, issued.refreshToken])];
   expect(tokens.length).toBeGreaterThanOrEqual(2);
   for (const token of tokens) expect(token.length).toBeGreaterThanOrEqual(16);
