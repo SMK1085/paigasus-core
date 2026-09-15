@@ -18,6 +18,12 @@ const source = readFileSync(new URL('../../lib/console.ts', import.meta.url), 'u
 // regresses to the bare imported binding (`authRuntime,`), because the comment string survives
 // untouched. The fresh-arrow assertion below therefore runs against comment-stripped source, so it
 // binds to the call site and not to documentation about the call site.
+//
+// The call-COUNT assertion below runs against the same stripped view, for the same reason read in
+// the other direction: `createConsoleRuntime(...)` is the natural way to name the function in
+// prose — this file's own header does it — so a comment can both break the count falsely AND hold
+// it at 1 after the real call site is deleted. Only the second of those is silent, and it is the
+// one that matters.
 const codeOnly = source
   .split('\n')
   .filter((line) => !line.trim().startsWith('//'))
@@ -25,7 +31,7 @@ const codeOnly = source
 
 describe('lib/console.ts composes the runtime exactly once, correctly', () => {
   it('calls createConsoleRuntime exactly once', () => {
-    expect(source.match(/createConsoleRuntime\s*\(/g) ?? []).toHaveLength(1);
+    expect(codeOnly.match(/createConsoleRuntime\s*\(/g) ?? []).toHaveLength(1);
   });
 
   it('calls it at module scope, not inside a function', () => {
