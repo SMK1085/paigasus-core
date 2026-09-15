@@ -142,6 +142,7 @@ tasks:
       # a cached typecheck PASS.
       - 'next.config.ts'
       - 'vitest.config.ts'
+      - 'playwright.config.ts'
       # tsc type-checks the test tree too. Without this, a type error in tests/ leaves this task's
       # cache key unchanged and serves a cached PASS. This app has no tests/fixtures, so the
       # negations iam-console carries for that directory would match nothing here.
@@ -246,3 +247,61 @@ tasks:
       - '/ts/packages/paigasus-console-core/testing/**/*'
     options:
       merge: replace
+
+  test-e2e:
+    # The e2e tier (spec § 9.4): Playwright against the standalone server.js behind a TLS
+    # terminator, with an in-process fake IAM, fake IdP and fake gateway. No Docker. `script` (not
+    # `command`): Moon's `command` refuses shell syntax. `set -euo pipefail` because Moon does not
+    # enable errexit for `script:` blocks. The server's lifecycle belongs to
+    # tests/e2e/support/harness.ts; a shell `&` here left an orphan server in the SMA-510 spike.
+    script: |
+      set -euo pipefail
+      pnpm exec playwright test
+    deps:
+      # The production build. On a cache hit Moon restores `.next`, standalone tree included.
+      - '~:build'
+      # repo:next-env-drift writes into .next too; the same serialization `test` has.
+      - 'repo:next-env-drift'
+      # Stated here for the same reason as in `test`: @paigasus/console-core's testing/fake-iam.ts
+      # imports @paigasus/proto, so this tier reads the generated tree itself.
+      - 'contracts:generate'
+    # A NEW task name, so it inherits NOTHING: every input is listed. This app has no
+    # tests/fixtures, so the two negations iam-console's copy carries for that directory would
+    # match nothing here.
+    inputs:
+      - '@group(sources)'
+      - 'app/**/*'
+      - 'lib/**/*'
+      - 'proxy.ts'
+      - 'tests/**/*'
+      - 'package.json'
+      - 'tsconfig.json'
+      - 'next.config.ts'
+      - 'postcss.config.mjs'
+      - 'playwright.config.ts'
+      - '/ts/pnpm-lock.yaml'
+      - '/ts/tsconfig.base.json'
+      - '/ts/packages/paigasus-next-config/src/**/*'
+      - '/ts/packages/paigasus-next-config/package.json'
+      - '/ts/packages/paigasus-next-config/tsconfig.app.json'
+      - '/ts/packages/paigasus-ui/src/**/*'
+      - '/ts/packages/paigasus-ui/package.json'
+      - '/ts/packages/paigasus-auth/src/**/*'
+      - '/ts/packages/paigasus-auth/package.json'
+      - '/ts/packages/paigasus-sdk/src/**/*'
+      - '/ts/packages/paigasus-sdk/package.json'
+      # The composition root imports @paigasus/console-core.
+      - '/ts/packages/paigasus-console-core/src/**/*'
+      - '/ts/packages/paigasus-console-core/package.json'
+      # tests/e2e/support/harness.ts imports all four fakes to build the worker-scoped stack every
+      # Playwright spec runs against.
+      - '/ts/packages/paigasus-console-core/testing/**/*'
+      - '/ts/packages/paigasus-discovery/src/**/*'
+      - '/ts/packages/paigasus-discovery/package.json'
+      - '/ts/packages/paigasus-app-shell/src/**/*'
+      - '/ts/packages/paigasus-app-shell/package.json'
+      - '/ts/packages/paigasus-proto/src/**/*'
+      - '/ts/packages/paigasus-proto/package.json'
+    options:
+      # A real build and a real Chromium. A cached PASS would replay a green that tested nothing.
+      cache: false
