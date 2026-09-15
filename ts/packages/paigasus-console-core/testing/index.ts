@@ -7,6 +7,7 @@
 // a client bundle safe is the package's `exports` map (only '.' and './testing' are reachable, so no
 // deep import can reach an unguarded module) together with src/index.ts's own 'server-only' import.
 // The per-file rule is defence in depth on top of that, not the guard itself.
+export { GATEWAY_CORRELATION_HEADER, startFakeGateway, type FakeGateway, type FakeGatewayCall, type GatewayDescriptorBody } from './fake-gateway';
 export {
   denial,
   errorInfoOf,

@@ -13,6 +13,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
+    "@connectrpc/connect": "catalog:",
     "@paigasus/app-shell": "workspace:*",
     "@paigasus/auth": "workspace:*",
     "@paigasus/console-core": "workspace:*",
