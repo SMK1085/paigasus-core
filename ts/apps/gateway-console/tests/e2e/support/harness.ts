@@ -227,9 +227,16 @@ export const test = base.extend<{ world: undefined }, { harness: Harness }>({
         await close();
       }
     },
-    // CI ONLY: MAX_START_ATTEMPTS (3) * READY_TIMEOUT_MS, plus room for the fakes and the
-    // terminator, so a widened READY_TIMEOUT_MS on a loaded runner cannot outrun this wrapper.
-    { scope: 'worker', timeout: isCI ? 420_000 : 180_000 },
+    // MAX_START_ATTEMPTS (3) * READY_TIMEOUT_MS, plus room for the fakes, the terminator, the port
+    // probes and the cleanup — so a widened READY_TIMEOUT_MS cannot outrun this wrapper.
+    //
+    // The LOCAL value is 240 s, not the 180 s iam-console's copy carries. 3 * 60 s is exactly
+    // 180 s, leaving zero margin: three early child exits could trip this wrapper first, and the
+    // worker would report an opaque fixture timeout instead of startStack's aggregated "failed to
+    // start after 3 attempts" error, which names the reason. The CI arm already had that margin
+    // (3 * 120 s = 360 s against 420 s); this gives the local arm the same. iam-console's copy has
+    // the same gap and is left alone — it is not this pull request's file.
+    { scope: 'worker', timeout: isCI ? 420_000 : 240_000 },
   ],
   // Before EVERY test: the default world and the default descriptors, and a reachable gateway. A
   // test that needs another world calls harness.useWorld(...) itself, after this reset — including

@@ -16,12 +16,22 @@ import { ORG_ID } from './support/world';
 import { signIn, waitForHydration } from './support/login';
 import { expect, test } from './support/harness';
 
+/** The response stream counts as quiet after this long with no new response. */
+const QUIESCE_MS = 500;
+/** A bound on the quiesce wait, so a page that never goes quiet fails the row rather than hanging it. */
+const QUIESCE_TIMEOUT_MS = 10_000;
+
 type Seen = {
   readonly url: string;
   readonly method: string;
   readonly contentType: string;
-  /** false for a redirect, which carries no body. The residue assertion ignores those. */
+  /**
+   * Whether HTTP permits this response to carry a body at all. Only HEAD, 204, 205 and 304 are
+   * truly bodyless. A 3xx MAY carry one, so it is no longer classified away — see `redirect`.
+   */
   readonly expectsBody: boolean;
+  /** A 3xx whose body Playwright's Response.body() contract refuses. Exempt POSITIVELY, like prefetchRsc. */
+  readonly redirect: boolean;
   /** true only after the body was read. */
   readonly bodyRead: boolean;
   /** true when the body came from the route interceptor, not from `response.body()`. */
@@ -53,7 +63,11 @@ async function capture(response: Response, buffered: ReadonlyMap<Request, string
   const request = response.request();
   const headers = await response.allHeaders();
   const status = response.status();
-  const expectsBody = status < 300 || status >= 400;
+  // HTTP-correct, not status-class shorthand. The old `status < 300 || status >= 400` marked EVERY
+  // 3xx bodyless, so a redirect's body was never read AND the residue assertion below could not
+  // report it. Only these four cases genuinely carry no body.
+  const expectsBody = request.method() !== 'HEAD' && status !== 204 && status !== 205 && status !== 304;
+  const redirect = status >= 300 && status < 400;
   const prefetchRsc = await isPrefetchRsc(response);
   const fromRoute = buffered.get(request);
   let body = fromRoute ?? '';
@@ -72,6 +86,7 @@ async function capture(response: Response, buffered: ReadonlyMap<Request, string
     method: request.method(),
     contentType: headers['content-type'] ?? '',
     expectsBody,
+    redirect,
     bodyRead,
     buffered: fromRoute !== undefined,
     prefetchRsc,
@@ -118,9 +133,12 @@ test('R5: no response body, header or RSC payload contains a fake token (ADR-001
   );
 
   const pending: Promise<Seen>[] = [];
-  page.on('response', (response) => {
+  // NAMED, so the listener can be detached before the drain below. An anonymous listener cannot be,
+  // and a response arriving after Promise.all consumed the array would be silently unscanned.
+  const onResponse = (response: Response): void => {
     pending.push(capture(response, buffered));
-  });
+  };
+  page.on('response', onResponse);
   const issuedBefore = harness.idp.issued.length;
 
   const { accessToken, refreshToken } = await signIn(page, harness, '/gateway/overview');
@@ -133,6 +151,18 @@ test('R5: no response body, header or RSC payload contains a fake token (ADR-001
   await rsc;
   await page.waitForURL((url) => url.pathname === '/gateway/overview');
 
+  // The Overview entry is a ZoneLink, which renders NextLink WITHOUT overriding `prefetch`, so the
+  // router can emit a prefetch after waitForURL resolves. Neither waitForResponse nor waitForURL
+  // closes the response stream. Wait for the stream to go quiet BEFORE detaching the listener, so a
+  // late payload is scanned rather than dropped. Bounded, so a chatty page cannot hang this row.
+  const quiesceDeadline = Date.now() + QUIESCE_TIMEOUT_MS;
+  let settledCount = -1;
+  while (pending.length !== settledCount && Date.now() < quiesceDeadline) {
+    settledCount = pending.length;
+    await page.waitForTimeout(QUIESCE_MS);
+  }
+  // Detach FIRST, then drain: after this line the array cannot grow, so one Promise.all is total.
+  page.off('response', onResponse);
   const seen = await Promise.all(pending);
   const tokens = [accessToken, refreshToken, ...harness.idp.issued.slice(issuedBefore).flatMap((issued) => [issued.accessToken, issued.refreshToken])];
   expect(tokens.length).toBeGreaterThanOrEqual(2);
@@ -144,10 +174,10 @@ test('R5: no response body, header or RSC payload contains a fake token (ADR-001
   // The RESIDUE: every response that should carry a body, and whose body this row did not read,
   // must belong to the one measured class. A positive match, so a NEW unread response reds this
   // row instead of leaving the scan quietly smaller.
-  expect(seen.filter((response) => response.expectsBody && !response.bodyRead && !response.prefetchRsc).map((response) => `${response.method} ${response.url}`)).toEqual([]);
+  expect(seen.filter((response) => response.expectsBody && !response.bodyRead && !response.prefetchRsc && !response.redirect).map((response) => `${response.method} ${response.url}`)).toEqual([]);
   // The census of the scan, so a SHRINKING scan is visible in the log and not only in a red.
   console.log(
-    `R5 scan: ${String(seen.length)} responses, ${String(seen.filter(scanned).length)} scanned, ${String(seen.filter((response) => response.buffered).length)} buffered, ${String(seen.filter((response) => response.expectsBody && !response.bodyRead).length)} unread`,
+    `R5 scan: ${String(seen.length)} responses, ${String(seen.filter(scanned).length)} scanned, ${String(seen.filter((response) => response.buffered).length)} buffered, ${String(seen.filter((response) => response.expectsBody && !response.bodyRead).length)} unread, ${String(seen.filter((response) => response.redirect).length)} redirects (${String(seen.filter((response) => response.redirect && scanned(response)).length)} with a scanned body)`,
   );
 
   // Vacuity guards: at least one non-empty HTML body and one non-empty RSC body were READ and
