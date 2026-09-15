@@ -210,6 +210,67 @@ importers:
         specifier: 'catalog:'
         version: 5.0.0(@types/node@24.13.3)(jsdom@30.0.1)(msw@2.15.0(@types/node@24.13.3)(typescript@6.0.3))(vite@8.0.16(@types/node@24.13.3)(jiti@2.7.0)(yaml@2.9.0))
 
+  apps/gateway-console:
+    dependencies:
+      '@paigasus/app-shell':
+        specifier: workspace:*
+        version: link:../../packages/paigasus-app-shell
+      '@paigasus/auth':
+        specifier: workspace:*
+        version: link:../../packages/paigasus-auth
+      '@paigasus/console-core':
+        specifier: workspace:*
+        version: link:../../packages/paigasus-console-core
+      '@paigasus/discovery':
+        specifier: workspace:*
+        version: link:../../packages/paigasus-discovery
+      '@paigasus/next-config':
+        specifier: workspace:*
+        version: link:../../packages/paigasus-next-config
+      '@paigasus/sdk':
+        specifier: workspace:*
+        version: link:../../packages/paigasus-sdk
+      '@paigasus/ui':
+        specifier: workspace:*
+        version: link:../../packages/paigasus-ui
+      '@tailwindcss/postcss':
+        specifier: 'catalog:'
+        version: 4.3.3
+      next:
+        specifier: 'catalog:'
+        version: 16.3.4(@babel/core@7.29.7)(@playwright/test@1.63.0)(@types/node@24.13.3)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
+      react:
+        specifier: 'catalog:'
+        version: 19.2.8
+      react-dom:
+        specifier: 'catalog:'
+        version: 19.2.8(react@19.2.8)
+      server-only:
+        specifier: 'catalog:'
+        version: 0.0.1
+      tailwindcss:
+        specifier: 'catalog:'
+        version: 4.3.3
+      zod:
+        specifier: 'catalog:'
+        version: 4.5.4
+    devDependencies:
+      '@types/node':
+        specifier: 'catalog:'
+        version: 24.13.3
+      '@types/react':
+        specifier: 'catalog:'
+        version: 19.2.18
+      '@types/react-dom':
+        specifier: 'catalog:'
+        version: 19.2.7(@types/react@19.2.18)
+      typescript:
+        specifier: 'catalog:'
+        version: 6.0.3
+      vitest:
+        specifier: 'catalog:'
+        version: 5.0.0(@types/node@24.13.3)(jsdom@30.0.1)(msw@2.15.0(@types/node@24.13.3)(typescript@6.0.3))(vite@8.0.16(@types/node@24.13.3)(jiti@2.7.0)(yaml@2.9.0))
+
   apps/iam-console:
     dependencies:
       '@connectrpc/connect':
