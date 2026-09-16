@@ -561,7 +561,7 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   is set, and the failure reads as "the reader found nothing" rather than "the flag is invalid".
   That is not hypothetical — it cost a cycle on this very branch, where the first measurement
   read `head`'s status through a pipe and recorded exit 0.
-- The **codegen-drift gate is an inline `ci.yml` step** (`.github/workflows/ci.yml:249-262`), NOT
+- The **codegen-drift gate is an inline `ci.yml` step** (`.github/workflows/ci.yml:342-355`), NOT
   a `repo:*` Moon task — searching `moon.yml` for it finds nothing. That placement is deliberate
   and load-bearing: the step carries no `if:`, so it runs on EVERY CI run and cannot be
   deselected, where a `T`-array task would run only when affected and a wrong `inputs` list would
@@ -896,11 +896,12 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   recursively instead of reading a manifest, and `iam-console-ts:build` removes
   `.next/static` before every build so a stale chunk from an earlier build cannot satisfy that
   walk. The guard script lives at `ci/tailwind-source/` and must **never** move under
-  `ts/apps/iam-console/`, because that directory is Tailwind's scan root and a script
-  holding the sentinel literal (`--paigasus-ui-source-probe`) would make Tailwind generate the
-  very utility it asserts on — and the guard's assertion-3 scan is a **full walk of the console
-  directory**, not an allowlist, because the old `['app'] + four config files` list missed
-  `moon.yml`, `next-env.d.ts` and `.prettierignore`, all of which Tailwind reads.
+  any `ts/apps/*` directory, because each one is Tailwind's scan root for its own app and a
+  script holding the sentinel literal (`--paigasus-ui-source-probe`) would make Tailwind generate
+  the very utility it asserts on — and the guard's assertion-3 scan is a **full walk of the named
+  app's own directory** (parameterized by `--app`), not an allowlist, because the old
+  `['app'] + four config files` list missed `moon.yml`, `next-env.d.ts` and `.prettierignore`, all
+  of which Tailwind reads.
   `iam-console-ts:build` also uses `options.merge: replace`, so
   it inherits nothing from `.moon/tasks/typescript-project.yml` and lists `/ts/pnpm-lock.yaml`
   **and `/ts/tsconfig.base.json`** by hand in its own `inputs` (`test` replaces too and needs
@@ -921,7 +922,9 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   running it. (SMA-503)
   Since SMA-512 the guard is **per app**: `ci/tailwind-source/run.mjs --app <dir>`, invoked by each
   app's own `test` task, and a BARE run now exits 2 rather than silently checking `iam-console`.
-  `TAILWIND_GUARD_INVOCATIONS` in `ci/affected-graph/ci_targets.py` fails `repo:affected-smoke` if
+  `TAILWIND_GUARD_INVOCATIONS` holds **two** apps today (`iam-console`, `gateway-console` — SMA-512
+  pull request 3), each invoking the guard for itself in its own `test` task; a third app repeats
+  the same shape. That registry, in `ci/affected-graph/ci_targets.py`, fails `repo:affected-smoke` if
   a `ts/apps/*` directory with a `package.json` does not invoke all three modes for itself, in its
   Moon project's resolved `test` script — the fix wave closed three ways to defeat this: an entry
   no longer stores hand-copied lines (they are derived from the app name, so an entry cannot name
@@ -934,6 +937,18 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   gate still has **no negative control**. Its `deps` names one build per app by hand and nothing
   asserts the list is complete, so a new app must add its own `<app>-ts:build` edge or `next
   typegen` races that app's `.next`.
+- `repo:next-public-free`'s `APP_CONFIG_FLOOR` is **2** since the second console zone landed,
+  pinned as a whole line (`"APP_CONFIG_FLOOR=2"`) in `ci/affected-graph/ci_targets.py:1251`, so
+  the constant in `ci/next-public/run.sh` and its pin move together or the gate reds. It is a
+  **collapse detector**, not a per-app assertion. MEASURED reason: `APP_CONFIG_GLOB='ts/apps/*/
+  next.config.[tjmc][sj]*'` matches **four** tracked paths today, not two — the two real apps'
+  configs plus `ts/apps/iam-console/tests/fixtures/{client,server}-imports-sdk/next.config.ts` —
+  because a git pathspec's `*` spans `/`, the same pathspec trap this file already records for the
+  ruff gate's `ci/**/*.py` corpus. The gate's own `app_configs()` then filters with
+  `grep -E '/next\.config\.(ts|js|mjs|cjs)$'`, which does **not** exclude those fixtures, since
+  they end in `next.config.ts` too. So deleting one app's `next.config.ts` leaves 3 ≥ 2 and the
+  gate stays **green**. What actually holds a specific app's config in place is that app's own
+  build and `ci/next-env/run.sh`'s per-app discovery — not this floor.
 - **Turbopack (Next 16.3.4) does NOT resolve a `.js` relative specifier to a `.ts` file** (MEASURED,
   SMA-510): `import { x } from './a.js'` with only `a.ts` on disk fails `next build` with `Module not
   found`, in app code and in a workspace package's source alike. A clause-level `import type … from
@@ -1081,6 +1096,17 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   (`<bash-binary> ci/<gate>/run.sh`) and read those results instead of the `moon ci` verdict for
   them — `repo:actionlint` has no local substitute verdict today. CI runs a single Linux bash and
   never sees this split.
+- **`ts/apps/gateway-console`** (SMA-512 PR 3) is the second console zone: a Next.js 16 App Router
+  app for the AI Gateway, mounted at `/gateway`, Moon id `gateway-console-ts`. Its `lib/config.ts`
+  demands **both** an `iam` entry and a `gateway` entry in `PAIGASUS_SERVICES` — it refuses to
+  parse a map missing either one — and declares no gateway-specific env key of its own; the
+  gateway's address comes only through `PAIGASUS_SERVICES.gateway`, unlike IAM, which also carries
+  its own `PAIGASUS_IAM_GRPC_URL`. The zone overview lives at **`(console)/overview/page.tsx`** →
+  `/gateway/overview`, **not** at `/gateway/` — the public landing page already owns that path, and
+  a second `page.tsx` at the same route fails the Next build (plan D14). `gateway.chat.stream`
+  (`app/_components/gateway-state.ts`) counts only when the service's state is `available`; a
+  `degraded` service can still carry the descriptor of its last good probe, and treating that
+  stale descriptor as a live capability would report a feature the gateway cannot currently serve.
 
 ## Workflow
 
