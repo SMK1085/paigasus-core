@@ -265,6 +265,11 @@ tasks:
       # Stated here for the same reason as in `test`: @paigasus/console-core's testing/fake-iam.ts
       # imports @paigasus/proto, so this tier reads the generated tree itself.
       - 'contracts:generate'
+      # SMA-512 PR 4. The two-zone tier starts the iam-console standalone server too, so that
+      # build must exist before this task runs. This edge SCHEDULES the build; it confers NO
+      # affectedness (CLAUDE.md, Moon 2.5.3). The '/ts/apps/iam-console/**/*' input below is what
+      # selects this task, and the two are needed together, never one instead of the other.
+      - 'iam-console-ts:build'
     # A NEW task name, so it inherits NOTHING: every input is listed. This app has no
     # tests/fixtures, so the two negations iam-console's copy carries for that directory would
     # match nothing here.
@@ -302,6 +307,20 @@ tasks:
       - '/ts/packages/paigasus-app-shell/package.json'
       - '/ts/packages/paigasus-proto/src/**/*'
       - '/ts/packages/paigasus-proto/package.json'
+      # SMA-512 PR 4. The two-zone tier runs the iam-console standalone server, so an iam-console
+      # change can break it. This edge comes from `inputs` and NOT from `deps`: task inputs are the
+      # only thing that confers affectedness in Moon 2.5.3, and the affected-graph harness queries
+      # with no graph flags. Without this line the tier never re-runs on an iam-console change and
+      # the only proof of ACs 1 and 2 goes quietly stale.
+      #
+      # THE COST IS REAL AND ACCEPTED: every iam-console edit now runs a Docker-backed, two-server
+      # Playwright tier.
+      - '/ts/apps/iam-console/**/*'
+      # `.next` is a declared build output and .moon/workspace.yml's hasher.ignorePatterns
+      # deliberately does NOT ignore it, so a blanket tree glob would hash the whole build.
+      - '!/ts/apps/iam-console/.next/**'
+      - '!/ts/apps/iam-console/tests/fixtures/**/.next/**'
+      - '!/ts/apps/iam-console/tests/fixtures/*/next-env.d.ts'
     options:
       # A real build and a real Chromium. A cached PASS would replay a green that tested nothing.
       cache: false
