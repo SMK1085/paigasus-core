@@ -32,9 +32,12 @@ const CONNECT_NODE_FILE = 'src/transport.ts';
 const CONNECT_NODE_IMPORTS = new Set(['createGrpcTransport', 'Http2SessionManager']);
 
 // Rule 2. Banned outside src/chat.ts. `globalThis`, `global` and `process` close the obvious
-// escapes (`globalThis['fe' + 'tch']`, `process.getBuiltinModule('node:https')`). `Headers` is
-// NOT here: src/errors/map-error.ts uses it to read response metadata.
-const BANNED_IDENTIFIERS = new Set(['fetch', 'XMLHttpRequest', 'WebSocket', 'EventSource', 'Request', 'Response', 'RequestInit', 'globalThis', 'global', 'process']);
+// escapes (`globalThis['fe' + 'tch']`, `process.getBuiltinModule('node:https')`). `require` and
+// `module` close two more: the specifier check in `checkSpecifier` only fires when the callee is
+// the bare identifier `require`, so an aliased call (`const r = require; r(...)`, `(require)(...)`)
+// or `module.require(...)` reaches a module outside the allowlist with zero violations otherwise.
+// `Headers` is NOT here: src/errors/map-error.ts uses it to read response metadata.
+const BANNED_IDENTIFIERS = new Set(['fetch', 'XMLHttpRequest', 'WebSocket', 'EventSource', 'Request', 'Response', 'RequestInit', 'globalThis', 'global', 'process', 'require', 'module']);
 
 type Violation = { readonly relPath: string; readonly line: number; readonly reason: string };
 
@@ -77,6 +80,8 @@ function findViolations(relPath: string, source: string): Violation[] {
       const [first] = node.arguments;
       if (first === undefined) report(node, 'import()/require() without an argument');
       else checkSpecifier(first);
+    } else if (ts.isImportEqualsDeclaration(node) && ts.isExternalModuleReference(node.moduleReference)) {
+      checkSpecifier(node.moduleReference.expression);
     }
     if (ts.isIdentifier(node) && relPath !== CHAT_FILE && BANNED_IDENTIFIERS.has(node.text)) {
       report(node, `network identifier outside ${CHAT_FILE}: ${node.text}`);
@@ -107,7 +112,24 @@ describe('SMA-575 AC 2 — findViolations negative controls', () => {
     ['const m = await import(name);', 'src/x.ts', 1],
     // An ALLOWED module behind a template literal: only the non-literal rule can catch this one.
     ['const m = await import(`server-only`);', 'src/x.ts', 1],
-    ["const a = require('axios');", 'src/x.ts', 1],
+    // `require` is now on BANNED_IDENTIFIERS too, so this yields both the identifier violation and
+    // the specifier violation.
+    ["const a = require('axios');", 'src/x.ts', 2],
+    // A parenthesised callee is not `ts.isIdentifier(node.expression)`, so `checkSpecifier` never
+    // runs for the call — only the `require` identifier itself is caught (rule 2).
+    ["const h = (require)('node:https');", 'src/x.ts', 1],
+    // An aliased call: `r(...)` is a call on an Identifier named `r`, not `require`, so
+    // `checkSpecifier` never runs. Only the `require` identifier in the alias assignment is caught.
+    ["const r = require; export const h = r('node:https');", 'src/x.ts', 1],
+    // MEASURED (AST dump): a PropertyAccessExpression callee is not `ts.isIdentifier`, so
+    // `checkSpecifier` never runs for the call. But `module.require` is itself a
+    // PropertyAccessExpression with TWO separate Identifier children — "module" and "require" —
+    // and `ts.forEachChild` visits both, so BOTH are caught by rule 2. Two violations, not one.
+    ["const h = module.require('node:https');", 'src/x.ts', 2],
+    // MEASURED: for `import h = require('node:https')`, ts.ExternalModuleReference's `expression`
+    // is the string literal itself; there is no separate `require` Identifier node in this AST
+    // shape (unlike the call-expression form). So only the specifier violation fires.
+    ["import h = require('node:https');", 'src/x.ts', 1],
     ["import { createNodeHttpClient } from '@connectrpc/connect-node';", 'src/transport.ts', 1],
     ["import { createGrpcTransport } from '@connectrpc/connect-node';", 'src/x.ts', 1],
     ["export { createGrpcTransport } from '@connectrpc/connect-node';", 'src/transport.ts', 1],
