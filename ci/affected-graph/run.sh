@@ -569,6 +569,13 @@ run_suite() {
     "paigasus-sdk-ts:build,paigasus-sdk-ts:test,iam-console-ts:build,iam-console-ts:test,iam-console-ts:test-e2e,gateway-console-ts:build,gateway-console-ts:test,gateway-console-ts:test-e2e,paigasus-console-core-ts:build,paigasus-console-core-ts:test,ts:lint"
   run_task_case_ci "sdk-errors->iam-console" "ts/packages/paigasus-sdk/src/errors/map-error.ts" \
     "paigasus-sdk-ts:build,paigasus-sdk-ts:test,iam-console-ts:build,iam-console-ts:test,iam-console-ts:test-e2e,gateway-console-ts:build,gateway-console-ts:test,gateway-console-ts:test-e2e,paigasus-console-core-ts:build,paigasus-console-core-ts:test,ts:lint"
+  # SMA-575 — an sdk TEST-file edit must select the sdk's own `build` (tsc over tests/, which holds
+  # the expectTypeOf proof of AC 1) and `test`, plus `ts:lint`, and nothing downstream: a test file
+  # is not a source of any consumer. This is the ONLY control on the `tests/**/*` lines in
+  # ts/packages/paigasus-sdk/moon.yml. Without them the edit selects `test` alone and tsc never
+  # re-checks the type-level proof.
+  run_task_case_ci "sdk-tests->sdk" "ts/packages/paigasus-sdk/tests/iam-factory.test.ts" \
+    "paigasus-sdk-ts:build,paigasus-sdk-ts:test,ts:lint"
   # SMA-511 — the file that holds the THIRD Tailwind sentinel (--paigasus-app-shell-source-probe,
   # spec § 7.6). ci/tailwind-source/run.mjs asserts it against the iam-console build, so an edit to
   # this file MUST rebuild the app. If the app's app-shell input narrowed away from this file, the
