@@ -91,8 +91,12 @@ assert_case() {
 #   `gateway-console-ts`. app-shell's `test-e2e`
 #   keys on the ui, auth, discovery and next-config sources; iam-console's keys on every package the
 #   app compiles, so the ui, auth, discovery, app-shell, proto and sdk cases below include it.
-#   gateway-console's keys on the same package set, so those cases carry a second app's three tasks
-#   as well. This sentence is PROSE, asserted nowhere — re-count it by hand when an app lands.
+#   gateway-console's keys on that same package set AND, since SMA-512 PR 4, on the whole
+#   `/ts/apps/iam-console/**/*` tree — the two-zone tier starts the iam-console standalone server,
+#   so an iam-console change must re-run it. So a package case carries a second app's three tasks,
+#   and an iam-console-anchored case carries `gateway-console-ts:test-e2e` alone, because that one
+#   input sits on that one task.
+#   This sentence is PROSE, asserted nowhere — re-count it by hand when an app lands.
 #   A future case with a different touched file must still re-check this.
 # returns 0 pass / 1 assertion fail / 2 infrastructure error
 _assert_task_case_impl() {
