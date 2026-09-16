@@ -1,7 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // The ingress stand-in for the e2e tier (spec § 9.4). The browser speaks HTTPS to this server; it
-// forwards each request over plain HTTP to the standalone Next server.
+// forwards each request over plain HTTP to a standalone Next server — one, given `target`, or one
+// of several chosen by path prefix, given `routes` (SMA-512 PR4 task 1). The two forms are
+// mutually exclusive (ruling D23): the existing `target` form and its three call sites are
+// unchanged, and `routes` is what task 3's two-zone harness uses to front both zones with one
+// terminator.
 //
 // It keeps `Host` UNCHANGED and adds `X-Forwarded-Proto: https` and `X-Forwarded-Host`. That is
 // the deployment contract of spec § 10: Next's Server Action origin check compares `Origin` with
@@ -22,10 +26,37 @@ function forwardable(headers: IncomingHttpHeaders): IncomingHttpHeaders {
   return out;
 }
 
-export async function startTlsTerminator(opts: { target: string; tls: TlsMaterial }): Promise<{ origin: string; close(): Promise<void> }> {
-  const target = new URL(opts.target);
+/** One upstream, selected when its request path starts with `prefix`. */
+export type TerminatorRoute = { readonly prefix: string; readonly target: string };
+
+/** `/gateway` matches `/gateway`, `/gateway/` and `/gateway/anything`, but not `/gatewayx`. */
+function matches(pathname: string, prefix: string): boolean {
+  if (prefix === '/') return true;
+  return pathname === prefix || pathname.startsWith(`${prefix}/`);
+}
+
+export async function startTlsTerminator(opts: { tls: TlsMaterial; target?: string; routes?: readonly TerminatorRoute[] }): Promise<{ origin: string; close(): Promise<void> }> {
+  // Mutually exclusive, and an error rather than a precedence rule: a caller that passes both has a
+  // wrong mental model of which upstream serves a path, and silently preferring one would hide it.
+  if ((opts.target === undefined) === (opts.routes === undefined)) {
+    throw new Error('tls-terminator: pass exactly one of `target` (one upstream) or `routes` (path-routed upstreams)');
+  }
+  if (opts.routes !== undefined && opts.routes.length === 0) {
+    throw new Error('tls-terminator: `routes` must not be empty');
+  }
+  // LONGEST PREFIX FIRST, so a future '/iam/admin' route wins over '/iam' regardless of array order.
+  const routes: readonly TerminatorRoute[] = opts.routes === undefined ? [{ prefix: '/', target: opts.target as string }] : [...opts.routes].sort((a, b) => b.prefix.length - a.prefix.length);
+  const configuredPrefixes = routes.map((route) => route.prefix).join(', ');
 
   function forward(req: IncomingMessage, res: ServerResponse): void {
+    const pathname = req.url ?? '/';
+    const route = routes.find((candidate) => matches(pathname, candidate.prefix));
+    if (route === undefined) {
+      res.writeHead(502, { 'content-type': 'text/plain' });
+      res.end(`tls-terminator: no route matches ${pathname} (configured prefixes: ${configuredPrefixes})`);
+      return;
+    }
+    const target = new URL(route.target);
     const host = req.headers.host ?? '';
     const upstream = httpRequest(
       {
