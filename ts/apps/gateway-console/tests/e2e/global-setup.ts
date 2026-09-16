@@ -1,21 +1,31 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // Runs ONCE, in the Playwright runner process, before any worker starts. It does not start servers:
-// see playwright.config.ts. The build comes from `gateway-console-ts:build` (the Moon task's deps).
+// see playwright.config.ts. The single-zone build comes from `gateway-console-ts:build` (the Moon
+// task's deps). The two-zone tier (SMA-512 PR4 task 3) also needs `iam-console`'s own standalone
+// build staged the same way — `gateway-console-ts:test-e2e` does not yet depend on
+// `iam-console-ts:build` (that lands in task 5), so until then both builds must be run by hand:
+//   moon run iam-console-ts:build gateway-console-ts:build
 import { cpSync, existsSync, rmSync } from 'node:fs';
 import path from 'node:path';
-import { APP_DIR, STANDALONE_APP_DIR } from './support/paths';
+import { APP_DIR, IAM_CONSOLE_APP_DIR, IAM_CONSOLE_STANDALONE_DIR, STANDALONE_APP_DIR } from './support/paths';
+
+/** Asserts the build exists, then copies `.next/static` and `public/` into the standalone tree —
+ * the standalone output carries no `static` tree (measured, SMA-510), so without this copy every
+ * client chunk is a 404, nothing hydrates, and no Server Action can run. */
+function stage(moonTask: string, appDir: string, standaloneDir: string): void {
+  const serverJs = path.join(standaloneDir, 'server.js');
+  if (!existsSync(serverJs)) {
+    throw new Error(`the standalone server is missing at ${serverJs}. Run \`moon run ${moonTask}\` first.`);
+  }
+  const staticTarget = path.join(standaloneDir, '.next', 'static');
+  rmSync(staticTarget, { recursive: true, force: true });
+  cpSync(path.join(appDir, '.next', 'static'), staticTarget, { recursive: true });
+  const publicDir = path.join(appDir, 'public');
+  if (existsSync(publicDir)) cpSync(publicDir, path.join(standaloneDir, 'public'), { recursive: true });
+}
 
 export default function globalSetup(): void {
-  const serverJs = path.join(STANDALONE_APP_DIR, 'server.js');
-  if (!existsSync(serverJs)) {
-    throw new Error(`the standalone server is missing at ${serverJs}. Run \`moon run gateway-console-ts:build\` first (gateway-console-ts:test-e2e depends on it).`);
-  }
-  // The standalone tree has NO .next/static (measured, SMA-510). Without this copy every client
-  // chunk is a 404, nothing hydrates, and no Server Action can run.
-  const staticTarget = path.join(STANDALONE_APP_DIR, '.next', 'static');
-  rmSync(staticTarget, { recursive: true, force: true });
-  cpSync(path.join(APP_DIR, '.next', 'static'), staticTarget, { recursive: true });
-  const publicDir = path.join(APP_DIR, 'public');
-  if (existsSync(publicDir)) cpSync(publicDir, path.join(STANDALONE_APP_DIR, 'public'), { recursive: true });
+  stage('gateway-console-ts:build', APP_DIR, STANDALONE_APP_DIR);
+  stage('iam-console-ts:build', IAM_CONSOLE_APP_DIR, IAM_CONSOLE_STANDALONE_DIR);
 }

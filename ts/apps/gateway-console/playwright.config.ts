@@ -37,5 +37,26 @@ export default defineConfig({
     // The terminator and the fake IdP use a self-signed test certificate.
     ignoreHTTPSErrors: true,
   },
-  projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }],
+  // TWO projects (SMA-512 PR4 task 3, ruling D20): the single-zone rows run one server on the
+  // memory store, and the two-zone rows run two servers, a Redis container and a forwarder. Forcing
+  // the single-zone rows through the two-zone fixture would make every one of them pay for a
+  // container, so they stay on separate fixtures, selected by file name (ruling D21 keeps the specs
+  // flat in tests/e2e/, so tests/unit/e2e-rows.test.ts's non-recursive scan still sees them).
+  //
+  // BASENAME-anchored, not path-anchored (ruling P2): Playwright matches `testMatch` against the
+  // file's ABSOLUTE path, and this very branch is named `feature/sma-512-two-zone-tier` — a checkout
+  // or worktree directory whose path contains "two-zone" would make `/^(?!.*two-zone).*\.spec\.ts$/`
+  // exclude EVERY single-zone spec in silence, a false green of exactly the kind this pull request
+  // exists to remove. `[\\/]` anchors each pattern on the path SEPARATOR before the basename, so only
+  // the FILE NAME is tested for the "two-zone" prefix, never any ancestor directory.
+  //
+  // ONE CAVEAT (also ruling P2's siblings): Playwright tears worker fixtures down when the worker
+  // ENDS, not between files, so with workers: 1 both stacks can be alive at once. That is safe here
+  // — every port is ephemeral and every fake binds 127.0.0.1:0 — but the two-zone project's container
+  // may outlive the last two-zone spec by the length of the single-zone project. Do not "fix" that by
+  // sharing one fixture: paying for a container on every single-zone row is worse.
+  projects: [
+    { name: 'single-zone', testMatch: /[\\/](?!two-zone)[^\\/]*\.spec\.ts$/, use: { ...devices['Desktop Chrome'] } },
+    { name: 'two-zone', testMatch: /[\\/]two-zone.*\.spec\.ts$/, use: { ...devices['Desktop Chrome'] } },
+  ],
 });
