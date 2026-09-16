@@ -50,6 +50,15 @@ export default defineConfig({
   // exists to remove. `[\\/]` anchors each pattern on the path SEPARATOR before the basename, so only
   // the FILE NAME is tested for the "two-zone" prefix, never any ancestor directory.
   //
+  // BOTH patterns use `[^\\/]*`, never a bare `.*`, in the basename segment. `.*` spans path
+  // separators, so `/[\\/]two-zone.*\.spec\.ts$/` (the first cut of this line, fixed in review round
+  // 1) matched any absolute path with "two-zone" ANYWHERE in it — for example a worktree directory
+  // named after this branch, `.../worktrees/two-zone-tier/.../login.spec.ts` — which would have put
+  // every single-zone spec into the two-zone project too, running each twice against two different
+  // stacks. `[^\\/]*` cannot cross a separator, so only the actual FILE NAME is tested. Verified:
+  //   /[\\/]two-zone[^\\/]*\.spec\.ts$/.test('/Users/x/worktrees/two-zone-tier/.../login.spec.ts') === false
+  //   /[\\/](?!two-zone)[^\\/]*\.spec\.ts$/.test('/Users/x/worktrees/two-zone-tier/.../login.spec.ts') === true
+  //
   // ONE CAVEAT (also ruling P2's siblings): Playwright tears worker fixtures down when the worker
   // ENDS, not between files, so with workers: 1 both stacks can be alive at once. That is safe here
   // — every port is ephemeral and every fake binds 127.0.0.1:0 — but the two-zone project's container
@@ -57,6 +66,6 @@ export default defineConfig({
   // sharing one fixture: paying for a container on every single-zone row is worse.
   projects: [
     { name: 'single-zone', testMatch: /[\\/](?!two-zone)[^\\/]*\.spec\.ts$/, use: { ...devices['Desktop Chrome'] } },
-    { name: 'two-zone', testMatch: /[\\/]two-zone.*\.spec\.ts$/, use: { ...devices['Desktop Chrome'] } },
+    { name: 'two-zone', testMatch: /[\\/]two-zone[^\\/]*\.spec\.ts$/, use: { ...devices['Desktop Chrome'] } },
   ],
 });

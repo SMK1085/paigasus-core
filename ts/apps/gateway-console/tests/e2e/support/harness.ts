@@ -81,8 +81,12 @@ export async function stop(child: ChildProcess): Promise<void> {
 }
 
 /** 'ready', or 'exited' when the process died first (a port race: the caller retries). Exported for
- * two-zone-harness.ts (SMA-512 PR4 task 3). */
-export async function waitForHealth(url: string, child: ChildProcess, output: () => string): Promise<'ready' | 'exited'> {
+ * two-zone-harness.ts (SMA-512 PR4 task 3), which passes its OWN `label` ('iam-console' or
+ * 'gateway-console') so a health failure names the SERVER that failed rather than the front — with
+ * two servers in that harness, the default label below would name the wrong one. The single-zone
+ * harness's own call site is unchanged apart from adding no argument, so its message is
+ * byte-identical to before. */
+export async function waitForHealth(url: string, child: ChildProcess, output: () => string, label = 'gateway-console'): Promise<'ready' | 'exited'> {
   const deadline = Date.now() + READY_TIMEOUT_MS;
   while (Date.now() < deadline) {
     if (child.exitCode !== null || child.signalCode !== null) return 'exited';
@@ -97,7 +101,7 @@ export async function waitForHealth(url: string, child: ChildProcess, output: ()
     }
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
-  throw new Error(`the gateway-console server did not answer ${url} within ${String(READY_TIMEOUT_MS)} ms\n--- server output ---\n${output()}`);
+  throw new Error(`the ${label} server did not answer ${url} within ${String(READY_TIMEOUT_MS)} ms\n--- server output ---\n${output()}`);
 }
 
 /**

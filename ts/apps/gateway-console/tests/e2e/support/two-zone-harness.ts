@@ -167,9 +167,12 @@ async function startStack(): Promise<{ harness: TwoZoneHarness; close: () => Pro
       captureOutput('gateway', gatewayChild);
 
       // Through 127.0.0.1:<port> DIRECTLY, not through the terminator, so a health failure names the
-      // server rather than the front.
-      const iamState = await waitForHealth(`http://127.0.0.1:${String(iamPort)}/iam/healthz`, iamChild, () => outputs.iam);
-      const gatewayState = iamState === 'ready' ? await waitForHealth(`http://127.0.0.1:${String(gatewayPort)}/gateway/healthz`, gatewayChild, () => outputs.gateway) : ('exited' as const);
+      // server rather than the front. The explicit `label` argument is what makes it name the RIGHT
+      // server: with two children, harness.ts's own default label ('gateway-console') would be
+      // wrong for the iam-console child.
+      const iamState = await waitForHealth(`http://127.0.0.1:${String(iamPort)}/iam/healthz`, iamChild, () => outputs.iam, 'iam-console');
+      const gatewayState =
+        iamState === 'ready' ? await waitForHealth(`http://127.0.0.1:${String(gatewayPort)}/gateway/healthz`, gatewayChild, () => outputs.gateway, 'gateway-console') : ('exited' as const);
 
       if (iamState === 'ready' && gatewayState === 'ready') {
         const harness: TwoZoneHarness = {
