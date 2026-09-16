@@ -26,18 +26,36 @@ const ALLOWED_SPECIFIERS = new Set(['server-only', '@connectrpc/connect', '@bufb
 
 // Rule 1, narrowed. @connectrpc/connect-node also exports a generic HTTP client
 // (`createNodeHttpClient`) and the Connect and gRPC-web transports, so it is allowed in ONE file
-// and for the two gRPC names only.
+// and for the two gRPC names only. `createGrpcTransport` and `Http2SessionManager` are allowed
+// because they are gRPC transport plumbing. `Http2SessionManager` ALSO exposes raw HTTP/2 methods
+// (`request`, `connect`) on the object it builds. Allowing the name does not allow those calls:
+// rule 3 below closes that path by property name, everywhere outside src/chat.ts.
 const CONNECT_NODE = '@connectrpc/connect-node';
 const CONNECT_NODE_FILE = 'src/transport.ts';
 const CONNECT_NODE_IMPORTS = new Set(['createGrpcTransport', 'Http2SessionManager']);
 
-// Rule 2. Banned outside src/chat.ts. `globalThis`, `global` and `process` close the obvious
+// Rule 3. `Http2SessionManager.request(method, path, headers, options)` sends a raw HTTP/2
+// request, and `.connect()` opens a raw session — both bypass the generated Connect-ES clients
+// entirely. MEASURED: no property access named either word exists in src/ today. A property
+// access by either name, outside src/chat.ts, is a violation regardless of which object it is
+// called on — the check is by NAME, not by declared type, so it also fires on an unrelated
+// object's same-named method. That is a stated limit (spec § 4.5), not a defect: the allowlist is
+// small and the false positive costs one rename.
+const CONNECT_NODE_PROPERTY_ESCAPES = new Set(['request', 'connect']);
+
+// Rule 2. Banned outside src/chat.ts, except for the three names src/chat.ts itself needs
+// (CHAT_ALLOWED_IDENTIFIERS below). `globalThis`, `global` and `process` close the obvious
 // escapes (`globalThis['fe' + 'tch']`, `process.getBuiltinModule('node:https')`). `require` and
 // `module` close two more: the specifier check in `checkSpecifier` only fires when the callee is
 // the bare identifier `require`, so an aliased call (`const r = require; r(...)`, `(require)(...)`)
 // or `module.require(...)` reaches a module outside the allowlist with zero violations otherwise.
 // `Headers` is NOT here: src/errors/map-error.ts uses it to read response metadata.
 const BANNED_IDENTIFIERS = new Set(['fetch', 'XMLHttpRequest', 'WebSocket', 'EventSource', 'Request', 'Response', 'RequestInit', 'globalThis', 'global', 'process', 'require', 'module']);
+
+// MEASURED (final review, SMA-575): src/chat.ts uses exactly these three banned names, and
+// nothing else on the list. The exemption is per-NAME, not per-file: every other banned
+// identifier, and rule 3 above, applies to chat.ts too.
+const CHAT_ALLOWED_IDENTIFIERS = new Set(['fetch', 'globalThis', 'Response']);
 
 type Violation = { readonly relPath: string; readonly line: number; readonly reason: string };
 
@@ -83,8 +101,11 @@ function findViolations(relPath: string, source: string): Violation[] {
     } else if (ts.isImportEqualsDeclaration(node) && ts.isExternalModuleReference(node.moduleReference)) {
       checkSpecifier(node.moduleReference.expression);
     }
-    if (ts.isIdentifier(node) && relPath !== CHAT_FILE && BANNED_IDENTIFIERS.has(node.text)) {
+    if (ts.isIdentifier(node) && BANNED_IDENTIFIERS.has(node.text) && !(relPath === CHAT_FILE && CHAT_ALLOWED_IDENTIFIERS.has(node.text))) {
       report(node, `network identifier outside ${CHAT_FILE}: ${node.text}`);
+    }
+    if (ts.isPropertyAccessExpression(node) && relPath !== CHAT_FILE && CONNECT_NODE_PROPERTY_ESCAPES.has(node.name.text)) {
+      report(node, `raw HTTP/2 session escape: ${node.name.text}`);
     }
     ts.forEachChild(node, visit);
   };
@@ -137,8 +158,21 @@ describe('SMA-575 AC 2 — findViolations negative controls', () => {
     ['// fetch is mentioned here\n/** See {@link fetch}. @param fetch unused */\nexport const a = 1;', 'src/x.ts', 0],
     ['const r = await fetch(u);', 'src/chat.ts', 0],
     ["import 'node:https';", 'src/chat.ts', 1],
+    // MEASURED (final review, SMA-575). CHAT_ALLOWED_IDENTIFIERS is per-name, not per-file: every
+    // OTHER banned identifier still fires in src/chat.ts.
+    ["const h = process.getBuiltinModule('node:https');", 'src/chat.ts', 1],
+    ['const s = new WebSocket(u);', 'src/chat.ts', 1],
     ["import { fetch } from './x';", 'src/errors/chat.ts', 1],
     ["import { createGrpcTransport, Http2SessionManager } from '@connectrpc/connect-node';", 'src/transport.ts', 0],
+    // Rule 3, MEASURED. `Http2SessionManager` itself is not a banned identifier — only its raw
+    // `request`/`connect` methods are, and only by property name.
+    ["const s = new Http2SessionManager(u); export const r = s.request('POST', '/v1/users', {}, {});", 'src/transport.ts', 1],
+    ['export const c = (m: Http2SessionManager) => m.connect();', 'src/transport.ts', 1],
+    // Rule 1, MEASURED. A default or namespace import of @connectrpc/connect-node is not the
+    // narrow named-import shape the allowlist carves out, so both fall through to "not on the
+    // allowlist" even in src/transport.ts.
+    ["import cn, { createGrpcTransport } from '@connectrpc/connect-node';", 'src/transport.ts', 1],
+    ["import * as cn from '@connectrpc/connect-node';", 'src/transport.ts', 1],
     [
       [
         "import './server-guard';",
@@ -216,6 +250,22 @@ describe('SMA-575 AC 2 — the real src/ tree', () => {
 
     it('names no gateway path other than /v1/chat/completions', () => {
       expect(literalTexts(chat).filter((text) => text.includes('/v1/'))).toEqual(['/v1/chat/completions']);
+    });
+
+    // Finding 5, final review (SMA-575). chat.ts reads `globalThis.fetch` once, into `fetchImpl`
+    // (the seam above), and never calls `fetch` or `globalThis.fetch` directly anywhere else.
+    it('never calls fetch directly', () => {
+      let directCalls = 0;
+      const visit = (node: ts.Node): void => {
+        if (ts.isCallExpression(node)) {
+          const callee = node.expression;
+          if (ts.isIdentifier(callee) && callee.text === 'fetch') directCalls += 1;
+          else if (ts.isPropertyAccessExpression(callee) && ts.isIdentifier(callee.expression) && callee.expression.text === 'globalThis' && callee.name.text === 'fetch') directCalls += 1;
+        }
+        ts.forEachChild(node, visit);
+      };
+      visit(chat);
+      expect(directCalls).toBe(0);
     });
   });
 });
