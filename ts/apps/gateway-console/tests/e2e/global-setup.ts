@@ -3,8 +3,9 @@
 // Runs ONCE, in the Playwright runner process, before any worker starts. It does not start servers:
 // see playwright.config.ts. The single-zone build comes from `gateway-console-ts:build` (the Moon
 // task's deps). The two-zone tier (SMA-512 PR4 task 3) also needs `iam-console`'s own standalone
-// build staged the same way — `gateway-console-ts:test-e2e` does not yet depend on
-// `iam-console-ts:build` (that lands in task 5), so until then both builds must be run by hand:
+// build staged the same way — `gateway-console-ts:test-e2e`'s `deps` names `iam-console-ts:build`
+// directly, at `ts/apps/gateway-console/moon.yml` around :272. If that edge is ever missing, run
+// both builds by hand:
 //   moon run iam-console-ts:build gateway-console-ts:build
 import { cpSync, existsSync, rmSync } from 'node:fs';
 import path from 'node:path';

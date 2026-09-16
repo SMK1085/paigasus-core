@@ -153,6 +153,11 @@ describe('the counting forwarder', () => {
     expect(received).toEqual(['first-chunk', 'second-chunk']);
   });
 
+  // Caveat, measured on Node 22.22.3 and re-measured on Node 24: a write to an already-destroyed
+  // `ServerResponse` is a silent no-op there — no throw, no unhandled error, no crash. So this
+  // test currently passes identically with or without the destroyed-response guard in
+  // counting-forwarder.ts; it cannot fail today. It is kept as a forward-looking regression pin
+  // against other runtimes and future Node behaviour, not as proof that the guard is exercised.
   it('survives a client abort that races a delayed upstream response, and answers the next request normally', async () => {
     let releaseUpstream: (() => void) | undefined;
     const upstreamGate = new Promise<void>((resolve) => {

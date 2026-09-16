@@ -116,6 +116,16 @@ describe('the TLS terminator, path-routed between two upstreams', () => {
     expect(JSON.parse(res.body)).toMatchObject({ server: 'gateway', url: '/gateway/_next/static/x.js' });
   });
 
+  it('does not match a path that merely has the prefix as a string prefix, e.g. /iamx against /iam', async () => {
+    // Pins the boundary documented at tls-terminator.ts's matches(): '/iam' must match '/iam',
+    // '/iam/' and '/iam/anything', but never '/iamx'. A bare `pathname.startsWith(prefix)` would
+    // wrongly send this to the iam upstream; with no route matching, it must fall through to the
+    // no-match 502 instead.
+    const res = await get(`${terminator.origin}/iamx`, tls);
+    expect(res.status).toBe(502);
+    expect(res.body).toContain('/iamx');
+  });
+
   it('routes the longest matching prefix first, even when the array lists the shorter one first', async () => {
     const iamAdmin = await startEcho('iam-admin');
     // Passed in the order that gives the WRONG answer without the longest-prefix-first sort: the
@@ -161,10 +171,13 @@ describe('the TLS terminator, path-routed between two upstreams', () => {
     expect(body.proto).toBe('https');
   });
 
-  it('answers 502 for a path no route matches', async () => {
-    const res = await get(`${terminator.origin}/`, tls);
+  it('answers 502 for a path no route matches, naming the requested path and the configured prefixes', async () => {
+    // A distinctive path, not '/': '/' is a substring of almost any string (including '/iam' and
+    // '/gateway' themselves), so asserting toContain('/') here would pass against nearly any body
+    // and prove nothing about the actual requested path being named.
+    const res = await get(`${terminator.origin}/nope-nothing-here`, tls);
     expect(res.status).toBe(502);
-    expect(res.body).toContain('/');
+    expect(res.body).toContain('/nope-nothing-here');
     expect(res.body).toContain('/iam');
     expect(res.body).toContain('/gateway');
   });
