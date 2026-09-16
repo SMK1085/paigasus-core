@@ -18,6 +18,10 @@ import { startTlsTerminator, testTls, type TlsMaterial } from '@paigasus/console
 
 type Upstream = { server: Server; url: string };
 type Response = { status: number; body: string };
+/** The shape a startEcho() upstream's JSON body parses into. `JSON.parse` returns `any`, so a case
+ * that reads a field off the parsed body (rather than handing the whole value to `toMatchObject`)
+ * needs this to avoid an unsafe member access. */
+type Echo = { server: string; url: string };
 
 /** A minimal HTTPS client that trusts the test certificate, mirroring iam-console's own. */
 function get(url: string, tls: TlsMaterial): Promise<Response> {
@@ -139,12 +143,14 @@ describe('the TLS terminator, path-routed between two upstreams', () => {
 
   it('routes a bare zone root carrying a query string (an RSC prefetch shape)', async () => {
     const res = await get(`${terminator.origin}/gateway?_rsc=1`, tls);
-    expect(JSON.parse(res.body).server).toBe('gateway');
+    const body = JSON.parse(res.body) as Echo;
+    expect(body.server).toBe('gateway');
   });
 
   it('forwards the query string to the upstream unchanged', async () => {
     const res = await get(`${terminator.origin}/gateway/orgs?x=1&y=2`, tls);
-    expect(JSON.parse(res.body).url).toBe('/gateway/orgs?x=1&y=2');
+    const body = JSON.parse(res.body) as Echo;
+    expect(body.url).toBe('/gateway/orgs?x=1&y=2');
   });
 
   it('keeps Host unchanged and sets X-Forwarded-Proto on a routed request', async () => {
