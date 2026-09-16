@@ -88,6 +88,41 @@ describe('the TLS terminator, path-routed between two upstreams', () => {
     expect(JSON.parse(res.body)).toMatchObject({ server: 'gateway', url: '/gateway/_next/static/x.js' });
   });
 
+  it('routes the longest matching prefix first, even when the array lists the shorter one first', async () => {
+    const iamAdmin = await startEcho('iam-admin');
+    // Passed in the order that gives the WRONG answer without the longest-prefix-first sort: the
+    // short, overlapping prefix ('/iam') listed BEFORE the longer one ('/iam/admin'). If `.find()`
+    // ever ran against this array unsorted, '/iam/admin/x' would match '/iam' first and reach the
+    // wrong upstream.
+    const overlapping = await startTlsTerminator({
+      tls,
+      routes: [
+        { prefix: '/iam', target: iam.url },
+        { prefix: '/iam/admin', target: iamAdmin.url },
+      ],
+    });
+    try {
+      const adminRes = await get(`${overlapping.origin}/iam/admin/x`, tls);
+      expect(JSON.parse(adminRes.body)).toMatchObject({ server: 'iam-admin', url: '/iam/admin/x' });
+
+      const iamRes = await get(`${overlapping.origin}/iam/x`, tls);
+      expect(JSON.parse(iamRes.body)).toMatchObject({ server: 'iam', url: '/iam/x' });
+    } finally {
+      await overlapping.close();
+      await closeUpstream(iamAdmin);
+    }
+  });
+
+  it('routes a bare zone root carrying a query string (an RSC prefetch shape)', async () => {
+    const res = await get(`${terminator.origin}/gateway?_rsc=1`, tls);
+    expect(JSON.parse(res.body).server).toBe('gateway');
+  });
+
+  it('forwards the query string to the upstream unchanged', async () => {
+    const res = await get(`${terminator.origin}/gateway/orgs?x=1&y=2`, tls);
+    expect(JSON.parse(res.body).url).toBe('/gateway/orgs?x=1&y=2');
+  });
+
   it('keeps Host unchanged and sets X-Forwarded-Proto on a routed request', async () => {
     const res = await get(`${terminator.origin}/iam/x`, tls);
     const body = JSON.parse(res.body) as { host: string; proto: string };

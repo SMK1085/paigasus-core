@@ -35,6 +35,14 @@ function matches(pathname: string, prefix: string): boolean {
   return pathname === prefix || pathname.startsWith(`${prefix}/`);
 }
 
+// A bare zone root carrying a query string — `/gateway?_rsc=1`, the shape Next's RSC prefetch
+// produces — is neither `=== prefix` nor `startsWith(prefix + '/')` if matched against the raw
+// `req.url`. Strip the query string (and any fragment) before matching; the base URL is a dummy,
+// discarded once `.pathname` is read, and never sent anywhere.
+function pathnameOf(url: string | undefined): string {
+  return new URL(url ?? '/', 'http://tls-terminator.internal').pathname;
+}
+
 export async function startTlsTerminator(opts: { tls: TlsMaterial; target?: string; routes?: readonly TerminatorRoute[] }): Promise<{ origin: string; close(): Promise<void> }> {
   // Mutually exclusive, and an error rather than a precedence rule: a caller that passes both has a
   // wrong mental model of which upstream serves a path, and silently preferring one would hide it.
@@ -49,7 +57,7 @@ export async function startTlsTerminator(opts: { tls: TlsMaterial; target?: stri
   const configuredPrefixes = routes.map((route) => route.prefix).join(', ');
 
   function forward(req: IncomingMessage, res: ServerResponse): void {
-    const pathname = req.url ?? '/';
+    const pathname = pathnameOf(req.url);
     const route = routes.find((candidate) => matches(pathname, candidate.prefix));
     if (route === undefined) {
       res.writeHead(502, { 'content-type': 'text/plain' });
@@ -63,6 +71,8 @@ export async function startTlsTerminator(opts: { tls: TlsMaterial; target?: stri
         hostname: target.hostname,
         port: target.port,
         method: req.method,
+        // The ORIGINAL req.url, query string and all — only the ROUTING decision above uses the
+        // stripped pathname; the upstream still needs `_rsc=1` and every other query parameter.
         path: req.url,
         headers: { ...forwardable(req.headers), host, 'x-forwarded-proto': 'https', 'x-forwarded-host': host, 'x-forwarded-port': host.split(':')[1] ?? '443' },
       },
