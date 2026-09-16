@@ -163,9 +163,9 @@ It applies these rules:
    - `server-only`, `@connectrpc/connect`, `@bufbuild/protobuf`, `@paigasus/proto`,
      `@paigasus/proto/iam`;
    - `@connectrpc/connect-node`, **only** in `src/transport.ts`, and **only** with the named
-     imports `createGrpcTransport` and `Http2SessionManager`. This package exports a generic HTTP
-     client (`createNodeHttpClient`) and the Connect and gRPC-web transports, so a general allow
-     would let a new file send REST calls;
+     imports `createGrpcTransport` and `Http2SessionManager`. These two names are gRPC transport
+     plumbing. This package also exports a generic HTTP client (`createNodeHttpClient`) and the
+     Connect and gRPC-web transports, so a general allow would let a new file send REST calls;
    - a relative specifier (`./`, `../`) that resolves to a path inside `src/`.
 2. **Network and escape identifiers.** Outside `src/chat.ts`, an identifier named `fetch`,
    `XMLHttpRequest`, `WebSocket`, `EventSource`, `Request`, `Response`, `RequestInit`,
@@ -175,8 +175,18 @@ It applies these rules:
    variable named `fetch` also fails. That is intentional: the file list is small, and a false
    positive costs one rename. The exemption matches `relPath === 'src/chat.ts'` exactly, so
    `src/errors/chat.ts` is not exempt.
+   **Correction (final review, SMA-575).** The exemption for `src/chat.ts` is now per identifier
+   NAME, not per file. Only `fetch`, `globalThis` and `Response` are exempt there. These are the
+   three names `src/chat.ts` uses, MEASURED with the TypeScript compiler API. Every other banned
+   identifier fails in `src/chat.ts` too.
+3. **The raw HTTP/2 session escape.** `Http2SessionManager` (allowed by rule 1, in
+   `src/transport.ts` only) declares `request(method, path, headers, options)` and `connect()`.
+   Both send a raw HTTP/2 request over the object's own session. Both bypass every generated
+   Connect-ES client. Outside `src/chat.ts`, a property access whose name is `request` or
+   `connect` is a violation, on any object. The check is by property NAME, not by the object's
+   declared type. MEASURED: no such property access exists in `src/` today.
 
-`src/chat.ts` is still subject to rule 1.
+`src/chat.ts` is still subject to rule 1 and rule 3.
 
 ### 4.3 What the test asserts over the real tree
 
@@ -190,6 +200,10 @@ It applies these rules:
    fetch seam (`fetchImpl(`, `src/chat.ts:239`). Its only string or template literal that contains
    `/v1/` is the `/v1/chat/completions` path (`src/chat.ts:206`). So `chat.ts` cannot gain a second
    endpoint without a red test. This check reads the AST, not the text.
+5. **No direct fetch call (final review, SMA-575).** The number of `CallExpression` nodes in
+   `src/chat.ts` whose callee is the identifier `fetch`, or the property access
+   `globalThis.fetch`, is 0. `src/chat.ts` reads `globalThis.fetch` once, as a value into
+   `fetchImpl`, and calls only `fetchImpl` after that. This check reads the AST, not the text.
 
 ### 4.4 Negative controls
 
@@ -220,23 +234,38 @@ number of violations:
 | `// fetch is mentioned here` and `/** {@link fetch} */ export const a = 1` | `src/x.ts` | 0 |
 | `const r = await fetch(u)` | `src/chat.ts` | 0 |
 | `import 'node:https'` | `src/chat.ts` | 1 |
+| `process.getBuiltinModule('node:https')` (final review, SMA-575) | `src/chat.ts` | 1 |
+| `new WebSocket(u)` (final review, SMA-575) | `src/chat.ts` | 1 |
 | `import { fetch } from './x'` | `src/errors/chat.ts` | 1 |
 | only allowlisted specifiers | `src/x.ts` | 0 |
+| `new Http2SessionManager(u); s.request('POST', '/v1/users', {}, {})` (final review, SMA-575) | `src/transport.ts` | 1 |
+| `(m: Http2SessionManager) => m.connect()` (final review, SMA-575) | `src/transport.ts` | 1 |
+| `import cn, { createGrpcTransport } from '@connectrpc/connect-node'` (final review, SMA-575) | `src/transport.ts` | 1 |
+| `import * as cn from '@connectrpc/connect-node'` (final review, SMA-575) | `src/transport.ts` | 1 |
 
 The plan also measures one mutation for each real-tree assertion: `fetch` added to `src/iam.ts`
 (rule 2), `import 'node:https'` added to `src/transport.ts` (rule 1), the `fetchImpl(` call removed
 from `src/chat.ts` (assertion 4), and the walk root pointed at an empty directory (assertion 2).
+The final review adds one more, for assertion 5: `fetchImpl(url, {` changed to `fetch(url, {` in
+`src/chat.ts` fails both assertion 4 and assertion 5.
 
 ### 4.5 Limits (stated, not closed)
 
 - The guard sees only `src/`. A hand-written client in `tests/` is not a shipped surface.
 - A library on the allowlist can still do HTTP. `@connectrpc/connect` and the two allowed
-  `connect-node` imports do exactly that, over gRPC. The guard controls *hand-written* HTTP, which
-  is what AC-2 asks for.
+  `connect-node` names are gRPC transport plumbing. **Corrected (final review, SMA-575):** the raw
+  HTTP/2 session methods behind those two names, `Http2SessionManager.request` and `.connect`, are
+  closed by name under rule 3 above. The guard controls *hand-written* HTTP, which is what AC-2
+  asks for.
 - An allowlist entry can change without review of what the new module does. The list is in one
   place and is small, so the diff shows it.
 - `eval`, `new Function(…)`, and a string passed to a library that evaluates code are not detected.
   Each one is an obvious red flag in review.
+- The `/v1/` check in assertion 4 reads a single string or template literal. It does not see a
+  split literal, for example `'/v' + '1/users'`.
+- Rule 3, the property-name check, does not see an aliased or element-access call. For example
+  `const { request } = s; request(...)` or `s['request'](...)` are not caught. The allowlist is
+  small, so a reviewer can still find these by hand.
 - Assertion 5 of § 3.2 pins the `./iam` entry only. The `./chat`, `./errors` and root entries have
   their own existing tests (`tests/index-barrel.test.ts`, `tests/chat.test.ts`), which do not pin
   exact export sets.
