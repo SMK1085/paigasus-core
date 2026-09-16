@@ -152,4 +152,53 @@ describe('the counting forwarder', () => {
 
     expect(received).toEqual(['first-chunk', 'second-chunk']);
   });
+
+  it('survives a client abort that races a delayed upstream response, and answers the next request normally', async () => {
+    let releaseUpstream: (() => void) | undefined;
+    const upstreamGate = new Promise<void>((resolve) => {
+      releaseUpstream = resolve;
+    });
+    upstream = await startEcho((req, res) => {
+      // Only the slow path the aborted request hits waits on the gate; the follow-up request
+      // below uses a different path and must be answered as a normal echo, so a process that
+      // survived the abort but somehow broke ordinary responses would still be caught.
+      if (req.url !== '/slow') {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ method: req.method, url: req.url }));
+        return;
+      }
+      // The upstream answers only once the test has already aborted the downstream client — so
+      // if the forwarder's response callback writes to `res` unguarded, it writes to an already
+      // destroyed response. The assertion that matters is not that the abort itself rejects, but
+      // that a NORMAL request through the SAME forwarder afterwards still succeeds: a process that
+      // died on the uncaught write would fail that follow-up, not the aborted request.
+      void upstreamGate.then(() => {
+        res.writeHead(200, { 'content-type': 'text/plain' });
+        res.end('late-response');
+      });
+    });
+    forwarder = await startCountingForwarder({ target: upstream.url });
+
+    const connectionsBefore = forwarder.connections();
+    const controller = new AbortController();
+    const aborted = fetch(`${forwarder.url}/slow`, { signal: controller.signal });
+    // Give the TCP connection a moment to establish before aborting, so connections() has
+    // something to count.
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    controller.abort();
+    await expect(aborted).rejects.toThrow();
+
+    // The connection was established before the abort, so it counts — the same traffic
+    // acceptance criterion 2 is looking for must not be under-counted just because it was cut short.
+    expect(forwarder.connections() - connectionsBefore).toBeGreaterThanOrEqual(1);
+
+    releaseUpstream?.();
+    // Let the delayed upstream response actually arrive at the (already-aborted) forwarder
+    // response before asserting survival.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    const followUp = await get(`${forwarder.url}/x`);
+    expect(followUp.status).toBe(200);
+    expect(JSON.parse(followUp.body)).toMatchObject({ method: 'GET', url: '/x' });
+  });
 });

@@ -49,9 +49,28 @@ export function startCountingForwarder(opts: { target: string }): Promise<Counti
   const server = createServer((req: IncomingMessage, res: ServerResponse) => {
     requestCount += 1;
     const upstream = httpRequest({ hostname: target.hostname, port: target.port, method: req.method, path: req.url, headers: forwardable(req.headers) }, (upstreamRes) => {
-      res.writeHead(upstreamRes.statusCode ?? 502, forwardable(upstreamRes.headers));
-      upstreamRes.pipe(res);
+      // The response callback is an event callback with no handler above it: an uncaught throw
+      // here would kill the whole process, the class of failure that crashed the TLS terminator
+      // earlier in this pull request. Two guards, for two different triggers.
+      //
+      // Realistic, and tested below: the downstream client closed or aborted before the upstream
+      // answered, so `res` is already ended or destroyed by the time this callback runs.
+      if (res.writableEnded || res.destroyed || res.headersSent) {
+        upstreamRes.resume();
+        return;
+      }
+      // Exotic, and NOT exercised by a test — synthesising a header value `writeHead` rejects
+      // from a real upstream response was not worth the time. Defence in depth against the same
+      // uncaught-throw-in-an-event-callback class; the realistic trigger is the guard just above.
+      try {
+        res.writeHead(upstreamRes.statusCode ?? 502, forwardable(upstreamRes.headers));
+        upstreamRes.pipe(res);
+      } catch {
+        if (!res.headersSent) res.destroy();
+      }
     });
+    // A late stream error on a response nothing else is listening for would otherwise raise.
+    res.on('error', () => undefined);
     // Never a synchronous throw here: this handler must answer a status code, not propagate.
     upstream.on('error', () => {
       if (res.headersSent) return;
