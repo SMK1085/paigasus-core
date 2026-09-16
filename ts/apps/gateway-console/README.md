@@ -42,16 +42,24 @@ export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
 | Browser tier                               | `moon run gateway-console-ts:test-e2e`  |
 | Type check                                 | `moon run gateway-console-ts:typecheck` |
 
-No tier needs Docker or a live service.
+Only the browser tier needs Docker or a live service. The browser tier now holds a two-zone
+Playwright project (see below). The two projects share one Moon task,
+`gateway-console-ts:test-e2e`. So a run with no Docker daemon also loses the single-zone rows, not
+only the two-zone ones. There is no skip hatch. A run fails loudly when Docker is unreachable,
+instead of reporting green having proved nothing.
 
 ## Test tiers
 
 - **Unit and integration** (`tests/unit`, `tests/integration`, vitest). The integration tests talk real gRPC to an in-process fake IAM and a fake gateway (`@paigasus/console-core`'s `testing/fake-iam.ts` and `testing/fake-gateway.ts`).
-- **Browser** (`tests/e2e`, Playwright). A production build runs through the standalone server behind an in-process TLS terminator, with the fake IAM, a fake gateway and a fake HTTPS IdP. The session store is `memory`, so the zone map holds one zone. This is the single-zone tier; a two-zone tier is a later pull request. Each row this tier covers — R1 through R7, plus R4b, a second capability case pairing with R4 — is one test; `tests/unit/e2e-rows.test.ts` holds that.
+- **Browser** (`tests/e2e`, Playwright). `gateway-console-ts:test-e2e` runs two Playwright projects, selected by file name:
+  - **`single-zone`** — a production build runs through the standalone server behind an in-process TLS terminator, with the fake IAM, a fake gateway and a fake HTTPS IdP. The session store is `memory`, so the zone map holds one zone. It covers rows R1 through R7, plus R4b, a second capability case that pairs with R4.
+  - **`two-zone`** (SMA-512 pull request 4) — a worker fixture starts a `redis:8-alpine` container (the first container this repository starts this way), both apps' standalone servers (`iam-console` and `gateway-console`), and one TLS terminator that path-routes to both. The session store is `redis`, so a session set on one zone is visible on the other. It covers rows R8 through R12. Together they prove the cross-zone session, the gateway zone's isolation from an IAM-only session, and that the two apps' static chunks do not collide under one origin.
+
+  Each row is one test. `tests/unit/e2e-rows.test.ts` holds the full row list (R1–R7, plus R4b and R7's 403 control, then R8–R12). It fails when a row is missing, duplicated, or renamed.
 
 ## Known limits
 
-- Acceptance criteria 1 and 2 (the two-zone properties) are not proved by this app alone: the single-zone tier above cannot prove a cross-zone property. A later pull request owns them.
+- Acceptance criteria 1 and 2 (the two-zone properties) are now proved by the `two-zone` Playwright project above (SMA-512 pull request 4). Row R8 proves AC 1: a session from the IAM zone carries into the gateway zone with no second authorization. Row R10 proves AC 2: a cold login at the gateway zone works with zero connections to `iam-console`.
 - Acceptance criterion 3 is not delivered at all: the gateway's chat route authenticates Paigasus API keys and never an OIDC token, so a playground built on a console session could not make one real call. A follow-up issue owns widening `require_iam_auth` and deciding the authorization resource for a user principal.
 - The organization scope route changes the URL and the breadcrumbs and nothing else. It exists so a later settings screen has a working shape to hang off, and so the switcher is not a dead control.
 - The organization switcher runs `myScopes()` on every console page render — one `Introspect`, one `ListRoleGrants` walk and up to 50 tenancy reads. The cost is not measured, and this zone pays it independently of `iam-console`, which pays the same cost.
