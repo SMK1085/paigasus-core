@@ -2799,3 +2799,257 @@ merge then do cleanup
 ---
 
 unlocked
+
+---
+
+go ahead with PR 4
+
+---
+
+<task-notification>
+<task-id>ae6a6e1774571f4dc</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/0163cf9a-0457-4fcf-af47-2cd420fc6a77/tasks/ae6a6e1774571f4dc.output</output-file>
+<status>completed</status>
+<summary>Agent "Survey Redis and container precedents" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>I now have everything needed. Here is the complete, verbatim survey.
+
+## 1. testcontainers + Redis precedent
+
+Five real (non-node_modules) hits in `ts/`. All use `GenericContainer('redis:8-alpine').withExposedPorts(6379)` from the `testcontainers` package — none use a `RedisContainer` module.
+
+**`ts/packages/paigasus-discovery/tests/containers/support/redis.ts:10-13`** — a shared helper, run from vitest (`vitest.containers.config.ts`, no global setup):
+```ts
+export async function startRedis(): Promise&lt;RedisFixture&gt; {
+  const container = await new GenericContainer('redis:8-alpine').withExposedPorts(6379).start();
+  return { url: `redis://${container.getHost()}:${container.getMappedPort(6379)}`, container };
+}
+```
+No explicit timeout override here (whatever testcontainers' own default startup wait is); the caller supplies the vitest `beforeAll` timeout instead (see below/other files). No `.stop()` in this file — stop is the caller's responsibility (`container.stop()` on the returned handle).
+
+**`ts/packages/paigasus-auth/tests/containers/redis-store.test.ts:14-21`** — vitest `beforeAll`/`afterAll`, run via `vitest.containers.config.ts`:
+```ts
+beforeAll(async () =&gt; {
+  container = await new GenericContainer('redis:8-alpine').withExposedPorts(6379).start();
+  url = `redis://${container.getHost()}:${String(container.getMappedPort(6379))}/0`;
+}, 120_000);
+
+afterAll(async () =&gt; {
+  await container.stop();
+});
+```
+URL derivation: `getHost()` + `getMappedPort(6379)` + literal `/0` DB suffix. `beforeAll`'s own timeout arg is `120_000` ms (matches `vitest.containers.config.ts`'s `hookTimeout: 300_000` ceiling).
+
+**`ts/packages/paigasus-auth/tests/containers/single-flight-redis.test.ts:21-28`** — identical shape (same `120_000` beforeAll timeout, same URL derivation, same vitest containers config):
+```ts
+beforeAll(async () =&gt; {
+  container = await new GenericContainer('redis:8-alpine').withExposedPorts(6379).start();
+  url = `redis://${container.getHost()}:${String(container.getMappedPort(6379))}/0`;
+}, 120_000);
+
+afterAll(async () =&gt; {
+  await container.stop();
+});
+```
+
+**`ts/packages/paigasus-auth/tests/containers/single-flight-multiprocess.test.ts:23-33`** — same pattern, plus an admin client connected on the same container:
+```ts
+beforeAll(async () =&gt; {
+  container = await new GenericContainer('redis:8-alpine').withExposedPorts(6379).start();
+  url = `redis://${container.getHost()}:${String(container.getMappedPort(6379))}/0`;
+  admin = createClient({ url });
+  await admin.connect();
+}, 120_000);
+
+afterAll(async () =&gt; {
+  await admin.close();
+  await container.stop();
+});
+```
+
+**`ts/packages/paigasus-auth/tests/e2e/global-setup.ts:112, 89-137`** — the one case NOT run from a vitest config or a Playwright fixture: it runs from **Playwright's `globalSetup` hook AND from the top level of `playwright.config.ts` itself** (module-evaluation time), because a `webServer` block needs the Redis URL/issuer before `globalSetup` would otherwise run:
+```ts
+const redis = await new GenericContainer(REDIS_IMAGE).withExposedPorts(6379).start();
+...
+const redisUrl = `redis://127.0.0.1:${String(redis.getMappedPort(6379))}/0`;
+...
+teardown: async () =&gt; {
+  clearRuntimeEnv();
+  await redis.stop();
+  await keycloak.stop();
+},
+```
+Here `container.getHost()` is deliberately NOT used for the URL (hardcoded `127.0.0.1` instead — the file explains Keycloak's issuer must match exactly what `getHost()` might return as `localhost` on some setups). `startContainers()` has no separate startup-timeout for Redis (only Keycloak gets `.withStartupTimeout(KEYCLOAK_READY_TIMEOUT_MS)` = 240_000 ms); this whole function is invoked once via a **module-level memo** (`let started`) with an additional cross-process "adopt-if-reachable" check (`isReachable`) since Playwright workers are separate OS processes that would otherwise each start their own container pair — measured via `docker ps` showing two Redis+Keycloak containers for one `playwright test` run. This is invoked from `ts/packages/paigasus-auth/playwright.config.ts:15` (`const { env: e2eEnv } = await startE2eInfrastructure();`), NOT from a Playwright worker fixture (`test.extend`).
+
+Summary of homes: 4 files run from **vitest** configs (`paigasus-discovery/vitest.containers.config.ts`, `paigasus-auth/vitest.containers.config.ts`), and 1 file (`paigasus-auth/tests/e2e/global-setup.ts`) runs from a **Playwright global-setup / config-top-level module load**, not a fixture.
+
+## 2. The "no skip hatch" precedent
+
+Full contents of `ts/packages/paigasus-discovery/vitest.containers.config.ts` above; lines 11-12 verbatim:
+```
+// There is NO SKIP HATCH when Docker is unreachable. This suite fails loudly, the precedent
+// @paigasus/auth set deliberately against paigasus-iam's silently-skipping Docker suites.
+```
+The same rule is restated at `ts/packages/paigasus-auth/tests/containers/redis-store.test.ts:11-13`:
+```
+// NO SKIP. If Docker is unreachable this FAILS. That is the whole reason the container suites
+// live in their own Moon task: a task whose only purpose is container tests has no reason to
+// skip, so there is no hatch, no canary, and no way to green a run that tested nothing.
+```
+and again at `tests/e2e/global-setup.ts:7-10` for the Playwright-tier containers.
+
+## 3. The Redis session store (`ts/packages/paigasus-auth/src/runtime.ts`)
+
+(a) The memory+multi-zone throw, `runtime.ts:105-113`:
+```ts
+if (cfg.PAIGASUS_SESSION_STORE === 'redis') {
+  requireRedisUrl(cfg); // Invariant 1 — validated here regardless of an injected store.
+} else if (Object.keys(cfg.PAIGASUS_ZONES).length &gt; 1) {
+  // Invariant 2: the memory store (adapters/memory-store.ts) is single-process. Under
+  // multi-zone the zones share nothing — a user who logs in on zone A is anonymous on zone B —
+  // and the single-flight lock is per-process, so AC 2's "exactly one refresh" guarantee does
+  // not hold across processes. A startup error beats that silent wrong answer.
+  throw new AuthConfigError('PAIGASUS_SESSION_STORE cannot be "memory" when PAIGASUS_ZONES declares more than one zone');
+}
+```
+Exact message: `'PAIGASUS_SESSION_STORE cannot be "memory" when PAIGASUS_ZONES declares more than one zone'` — line 112.
+
+(b) The Redis client build, `runtime.ts:140-149`:
+```ts
+const store =
+  deps.store ??
+  (cfg.PAIGASUS_SESSION_STORE === 'redis'
+    ? await createRedisSessionStore({
+        url: requireRedisUrl(cfg),
+        commandTimeoutMs: cfg.PAIGASUS_SESSION_REDIS_TIMEOUT_MS,
+        // All zones share ONE store (design doc § 6.7) — no per-zone key prefix to configure.
+        keyPrefix: '',
+      })
+    : new MemorySessionStore());
+```
+`keyPrefix` is hardcoded to `''` (empty string) — line 147-148 — deliberately, per the comment: all zones share one store, no per-zone prefix. `requireRedisUrl(cfg)` (lines 89-95) throws `AuthConfigError('PAIGASUS_SESSION_REDIS_URL is required when PAIGASUS_SESSION_STORE is "redis"')` when `PAIGASUS_SESSION_REDIS_URL` is `undefined`.
+
+`PAIGASUS_SESSION_*` keys from `ts/packages/paigasus-auth/src/config.ts:49-61`, with their zod validation:
+```ts
+PAIGASUS_SESSION_STORE: z.enum(['redis', 'memory']),
+PAIGASUS_SESSION_REDIS_URL: z.string().optional(),
+PAIGASUS_SESSION_REDIS_TIMEOUT_MS: millis(1000),
+PAIGASUS_SESSION_TTL_SECONDS: seconds(28800),
+PAIGASUS_SESSION_ABSOLUTE_TTL_SECONDS: seconds(86400),
+PAIGASUS_SESSION_REFRESH_SKEW_SECONDS: seconds(30),
+PAIGASUS_SESSION_LOCK_TTL_MS: millis(10000),
+PAIGASUS_SESSION_LOCK_WAIT_MS: millis(3000),
+```
+where `seconds(fallback) = z.coerce.number().int().positive().default(fallback)` and `millis` is the identical helper (config.ts:19-20). `PAIGASUS_SESSION_STORE` is a required enum with no default; `PAIGASUS_SESSION_REDIS_URL` is an optional bare string (cross-field "required when redis" rule lives in `runtime.ts`, not here, per the file's own header comment, config.ts:6-11). All numeric session keys coerce, must be positive integers, and default as shown; `createAuthRuntime` additionally asserts `2 * PAIGASUS_OIDC_HTTP_TIMEOUT_MS &lt; PAIGASUS_SESSION_LOCK_TTL_MS` (runtime.ts:125-127) — a cross-field rule tying `PAIGASUS_SESSION_LOCK_TTL_MS` to the OIDC HTTP timeout.
+
+## 4. The terminator's call sites
+
+`startTlsTerminator` (defined `ts/packages/paigasus-console-core/testing/tls-terminator.ts:25`, re-exported from `testing/index.ts:26`) is called from exactly two other locations, both with the identical two-key argument shape `{ target, tls }`:
+
+- `ts/apps/gateway-console/tests/e2e/support/harness.ts:148`:
+  ```ts
+  const terminator = await startTlsTerminator({ target: `http://127.0.0.1:${String(port)}`, tls });
+  ```
+- `ts/apps/iam-console/tests/e2e/support/harness.ts:144` — same shape (worker-fixture harness, `test.extend`-based, same as gateway's).
+- `ts/apps/iam-console/tests/integration/doubles/tls-terminator.test.ts:35` — a vitest integration test exercising the terminator directly, same shape.
+
+Any signature change (adding a required param, renaming `target`/`tls`, changing the return shape `{ origin, close() }`) breaks all three call sites above.
+
+## 5. Affected-graph cases anchored under `ts/apps/iam-console/`
+
+From `ci/affected-graph/run.sh`, every `run_case`/`run_task_case_ci` whose **ANCHOR file** lives under `ts/apps/iam-console/`:
+
+```
+595   run_task_case_ci "iam-console-lib-&gt;iam-console-tasks" "ts/apps/iam-console/lib/config.ts" \
+596     "iam-console-ts:build,iam-console-ts:test,iam-console-ts:test-e2e,ts:lint"
+597   run_task_case_ci "iam-console-proxy-&gt;iam-console-tasks" "ts/apps/iam-console/proxy.ts" \
+598     "iam-console-ts:build,iam-console-ts:test,iam-console-ts:test-e2e,ts:lint"
+```
+
+No other case in the file anchors a file under `ts/apps/iam-console/` (every other iam-console-related case anchors a file elsewhere — e.g. proto, sdk, ui, auth, discovery, app-shell, console-core sources — and merely lists `iam-console-ts:*` in its *expected* CSV, which is not what was asked for). Note the file itself documents a re-anchor: line 587-596's comment records that the original anchor for the `lib-&gt;tasks` case was `ts/apps/iam-console/lib/iam.ts`, deleted in a later PR and replaced by `lib/config.ts`.
+
+## 6. The two apps' current tasks
+
+`ts/apps/gateway-console/moon.yml`'s `test-e2e` block, verbatim (lines 251-308):
+```yaml
+  test-e2e:
+    # The e2e tier (spec § 9.4): Playwright against the standalone server.js behind a TLS
+    # terminator, with an in-process fake IAM, fake IdP and fake gateway. No Docker. `script` (not
+    # `command`): Moon's `command` refuses shell syntax. `set -euo pipefail` because Moon does not
+    # enable errexit for `script:` blocks. The server's lifecycle belongs to
+    # tests/e2e/support/harness.ts; a shell `&amp;` here left an orphan server in the SMA-510 spike.
+    script: |
+      set -euo pipefail
+      pnpm exec playwright test
+    deps:
+      # The production build. On a cache hit Moon restores `.next`, standalone tree included.
+      - '~:build'
+      # repo:next-env-drift writes into .next too; the same serialization `test` has.
+      - 'repo:next-env-drift'
+      # Stated here for the same reason as in `test`: @paigasus/console-core's testing/fake-iam.ts
+      # imports @paigasus/proto, so this tier reads the generated tree itself.
+      - 'contracts:generate'
+    # A NEW task name, so it inherits NOTHING: every input is listed. This app has no
+    # tests/fixtures, so the two negations iam-console's copy carries for that directory would
+    # match nothing here.
+    inputs:
+      - '@group(sources)'
+      - 'app/**/*'
+      - 'lib/**/*'
+      - 'proxy.ts'
+      - 'tests/**/*'
+      - 'package.json'
+      - 'tsconfig.json'
+      - 'next.config.ts'
+      - 'postcss.config.mjs'
+      - 'playwright.config.ts'
+      - '/ts/pnpm-lock.yaml'
+      - '/ts/tsconfig.base.json'
+      - '/ts/packages/paigasus-next-config/src/**/*'
+      - '/ts/packages/paigasus-next-config/package.json'
+      - '/ts/packages/paigasus-next-config/tsconfig.app.json'
+      - '/ts/packages/paigasus-ui/src/**/*'
+      - '/ts/packages/paigasus-ui/package.json'
+      - '/ts/packages/paigasus-auth/src/**/*'
+      - '/ts/packages/paigasus-auth/package.json'
+      - '/ts/packages/paigasus-sdk/src/**/*'
+      - '/ts/packages/paigasus-sdk/package.json'
+      # The composition root imports @paigasus/console-core.
+      - '/ts/packages/paigasus-console-core/src/**/*'
+      - '/ts/packages/paigasus-console-core/package.json'
+      # tests/e2e/support/harness.ts imports all four fakes to build the worker-scoped stack every
+      # Playwright spec runs against.
+      - '/ts/packages/paigasus-console-core/testing/**/*'
+      - '/ts/packages/paigasus-discovery/src/**/*'
+      - '/ts/packages/paigasus-discovery/package.json'
+      - '/ts/packages/paigasus-app-shell/src/**/*'
+      - '/ts/packages/paigasus-app-shell/package.json'
+      - '/ts/packages/paigasus-proto/src/**/*'
+      - '/ts/packages/paigasus-proto/package.json'
+    options:
+      # A real build and a real Chromium. A cached PASS would replay a green that tested nothing.
+      cache: false
+```
+
+`ts/apps/iam-console/moon.yml`'s `build` task's `outputs` block, verbatim (lines 139-142 in that file, part of the larger `build:` task):
+```yaml
+    outputs:
+      # SMA-502 AC4 — the cache archive must not carry .next/cache, which grows without bound.
+      - '.next/**/*'
+      - '!.next/cache/**/*'
+```
+
+## 7. Playwright worker fixtures and containers
+
+**None of the four named locations starts a container from inside a Playwright fixture.** Specifically:
+
+- `ts/packages/paigasus-app-shell/playwright.config.ts` — no `webServer`, no container; `globalSetup: './tests/e2e/global-setup.ts'` builds/checks the Next fixture only (no testcontainers import anywhere in its `tests/e2e` tree per the grep above).
+- `ts/packages/paigasus-discovery/playwright.config.ts` — explicitly documents it needs "no shared external infrastructure the way @paigasus/auth's Keycloak-backed E2E tier does"; each spec starts its own ephemeral-port fixture server directly, no containers. (Its testcontainers/Redis usage is confined to the separate `vitest.containers.config.ts` tier, item 1 above — a different test tier entirely, not Playwright.)
+- `ts/apps/iam-console/playwright.config.ts` and `ts/apps/gateway-console/playwright.config.ts` — both use a genuine Playwright **worker-scoped fixture** (`base.extend&lt;{...}, { harness: Harness }&gt;({ harness: [..., { scope: 'worker', timeout: ... }] })`, confirmed in `gateway-console/tests/e2e/support/harness.ts:219-240`, iam-console's mirror is structurally identical per its own header comment "worker fixture's own `timeout` below"). That worker fixture starts the fake IAM/IdP/gateway servers, the TLS terminator, and the standalone `server.js` child process — but explicitly configures `PAIGASUS_SESSION_STORE: 'memory'` (harness.ts:166) and has **zero Redis/testcontainers imports**. Their own comments say "No Docker" (both moon.yml `test-e2e` blocks: "No Docker.").
+
+The only place in the whole repo where a Playwright run touches `testcontainers`/Redis at all is `@paigasus/auth`'s E2E tier (`ts/packages/paigasus-auth/tests/e2e/global-setup.ts` + `playwright.config.ts`) — and even there, the container start happens at **`playwright.config.ts` module-evaluation / `globalSetup`**, not inside a `test.extend` worker fixture, precisely because (per that file's own header) Playwright runs every `webServer` `setup()` before any `globalSetup`, and starting containers inside a worker fixture would be too late for a `webServer` block that needs the Redis URL to construct its command.
+
+**Conclusion for your plan:** there is no existing precedent anywhere in this repo of a container being started from inside a Playwright `test.extend` worker fixture (as opposed to `globalSetup`/config-top-level). If your two-zone tier needs a worker-scoped Redis-container fixture, you would be introducing a new pattern — combining `paigasus-discovery`'s/`paigasus-auth`'s vitest-side `GenericContainer('redis:8-alpine').withExposedPorts(6379)` construction with iam-console/gateway-console's existing `base.extend(..., { scope: 'worker' })` harness-fixture shape, which today only starts fakes/terminator/server, never a container.</result>
+<usage><subagent_tokens>110833</subagent_tokens><tool_uses>22</tool_uses><duration_ms>100286</duration_ms></usage>
+</task-notification>
