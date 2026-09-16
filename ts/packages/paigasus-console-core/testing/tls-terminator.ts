@@ -39,8 +39,23 @@ function matches(pathname: string, prefix: string): boolean {
 // produces — is neither `=== prefix` nor `startsWith(prefix + '/')` if matched against the raw
 // `req.url`. Strip the query string (and any fragment) before matching; the base URL is a dummy,
 // discarded once `.pathname` is read, and never sent anywhere.
-function pathnameOf(url: string | undefined): string {
-  return new URL(url ?? '/', 'http://tls-terminator.internal').pathname;
+//
+// TOTAL, not partial: Node's HTTP parser accepts request lines `new URL` rejects — a malformed
+// absolute-form target such as `GET http://[::1/x HTTP/1.1` reaches here as `req.url`, and `new
+// URL` throws on it. An uncaught throw inside the request handler has no handler in this file, so
+// it becomes an uncaught exception that kills the whole process — the terminator would die instead
+// of answering. Treat an unparseable request line as matching no route (never as `/`: with a
+// single-upstream `target` route that would forward the malformed line to the upstream, which is
+// worse than refusing it).
+type PathnameResult = { readonly ok: true; readonly pathname: string } | { readonly ok: false; readonly raw: string };
+
+function pathnameOf(url: string | undefined): PathnameResult {
+  const raw = url ?? '/';
+  try {
+    return { ok: true, pathname: new URL(raw, 'http://tls-terminator.internal').pathname };
+  } catch {
+    return { ok: false, raw };
+  }
 }
 
 export async function startTlsTerminator(opts: { tls: TlsMaterial; target?: string; routes?: readonly TerminatorRoute[] }): Promise<{ origin: string; close(): Promise<void> }> {
@@ -57,11 +72,16 @@ export async function startTlsTerminator(opts: { tls: TlsMaterial; target?: stri
   const configuredPrefixes = routes.map((route) => route.prefix).join(', ');
 
   function forward(req: IncomingMessage, res: ServerResponse): void {
-    const pathname = pathnameOf(req.url);
-    const route = routes.find((candidate) => matches(pathname, candidate.prefix));
+    const parsed = pathnameOf(req.url);
+    if (!parsed.ok) {
+      res.writeHead(502, { 'content-type': 'text/plain' });
+      res.end(`tls-terminator: could not parse the request path from "${parsed.raw}"`);
+      return;
+    }
+    const route = routes.find((candidate) => matches(parsed.pathname, candidate.prefix));
     if (route === undefined) {
       res.writeHead(502, { 'content-type': 'text/plain' });
-      res.end(`tls-terminator: no route matches ${pathname} (configured prefixes: ${configuredPrefixes})`);
+      res.end(`tls-terminator: no route matches ${parsed.pathname} (configured prefixes: ${configuredPrefixes})`);
       return;
     }
     const target = new URL(route.target);

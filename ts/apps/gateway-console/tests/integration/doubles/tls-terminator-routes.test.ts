@@ -12,6 +12,7 @@
 import { createServer, type Server } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 import type { AddressInfo } from 'node:net';
+import { connect as tlsConnect } from 'node:tls';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { startTlsTerminator, testTls, type TlsMaterial } from '@paigasus/console-core/testing';
 
@@ -48,6 +49,29 @@ function startEcho(name: string): Promise<Upstream> {
 
 function closeUpstream(upstream: Upstream): Promise<void> {
   return new Promise((resolve) => upstream.server.close(() => resolve()));
+}
+
+/**
+ * Writes a request line over a raw TLS socket, bypassing `node:https`'s own client, which would
+ * refuse to send a malformed request line before it ever reaches the terminator. This is what lets
+ * a test drive a request line Node's HTTP parser accepts but `new URL` rejects.
+ */
+function sendRawRequest(origin: string, tls: TlsMaterial, requestLine: string): Promise<Response> {
+  return new Promise((resolve, reject) => {
+    const url = new URL(origin);
+    const socket = tlsConnect({ host: url.hostname, port: Number(url.port), ca: tls.cert }, () => {
+      socket.write(`${requestLine}\r\nHost: ${url.host}\r\nConnection: close\r\n\r\n`);
+    });
+    const chunks: Buffer[] = [];
+    socket.on('data', (chunk: Buffer) => chunks.push(chunk));
+    socket.on('end', () => {
+      const raw = Buffer.concat(chunks).toString('utf8');
+      const [head, ...bodyParts] = raw.split('\r\n\r\n');
+      const statusLine = head?.split('\r\n')[0] ?? '';
+      resolve({ status: Number(statusLine.split(' ')[1] ?? 0), body: bodyParts.join('\r\n\r\n') });
+    });
+    socket.on('error', reject);
+  });
 }
 
 describe('the TLS terminator, path-routed between two upstreams', () => {
@@ -137,6 +161,20 @@ describe('the TLS terminator, path-routed between two upstreams', () => {
     expect(res.body).toContain('/');
     expect(res.body).toContain('/iam');
     expect(res.body).toContain('/gateway');
+  });
+
+  it('answers 502, not a crash, for a request line `new URL` cannot parse, and stays alive for the next request', async () => {
+    // Node's HTTP parser accepts this absolute-form request line and hands it to the terminator as
+    // req.url; `new URL(req.url, base)` then throws on the unbalanced IPv6 literal.
+    const res = await sendRawRequest(terminator.origin, tls, 'GET http://[::1/x HTTP/1.1');
+    expect(res.status).toBe(502);
+    expect(res.body).toContain('[::1/x');
+
+    // The regression this pins: an uncaught throw in the request handler kills the whole process,
+    // so a bare 502 check on the malformed request would still pass against a terminator that then
+    // died. A normal request through the SAME instance afterwards is what actually proves it's alive.
+    const followUp = await get(`${terminator.origin}/iam/x`, tls);
+    expect(JSON.parse(followUp.body)).toMatchObject({ server: 'iam', url: '/iam/x' });
   });
 });
 
