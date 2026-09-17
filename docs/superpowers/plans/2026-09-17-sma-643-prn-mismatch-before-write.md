@@ -1043,9 +1043,9 @@ git commit -m "test(rs): an ungranted caller gets the same answer for a forged p
   `TenancyError::PrnMismatch`, `convert::{node_uuid, status_to_grpc}`.
 - Produces:
   - `async fn load_org_for_write(state: &AppState, actor: &Prn, action: Action, id: Uuid,
-    canonical: &str, rpc: &str) -> Result<NodeView<Organization>, Status>`
-  - `async fn load_team_for_write(...) -> Result<NodeView<Team>, Status>`
-  - `async fn load_project_for_write(...) -> Result<NodeView<Project>, Status>`
+    canonical: &str, rpc: &str) -> Result<(), Status>`
+  - `async fn load_team_for_write(...) -> Result<(), Status>`
+  - `async fn load_project_for_write(...) -> Result<(), Status>`
 
 - [ ] **Step 1: Add the three helpers**
 
@@ -1068,7 +1068,7 @@ need: `use paigasus_iam_core::{Organization, Project, Team};` (extend the existi
 /// changes: the `prn` column is written once, at insert, and no repository method, service or
 /// migration moves a node to a different parent. A future "move" feature breaks that invariant
 /// and must revisit this helper.
-async fn load_org_for_write(state: &AppState, actor: &Prn, action: Action, id: Uuid, canonical: &str, rpc: &str) -> Result<NodeView<Organization>, Status> {
+async fn load_org_for_write(state: &AppState, actor: &Prn, action: Action, id: Uuid, canonical: &str, rpc: &str) -> Result<(), Status> {
     let view = state.orgs.get(id).await.map_err(convert::status_to_grpc)?;
     if state.enforce_tenancy {
         state.authorize.check(actor, action, view.node.id.prn()).await.map_err(convert::status_to_grpc)?;
@@ -1078,11 +1078,11 @@ async fn load_org_for_write(state: &AppState, actor: &Prn, action: Action, id: U
         warn_prn_mismatch(actor, canonical, &stored, rpc);
         return Err(convert::status_to_grpc(TenancyError::PrnMismatch));
     }
-    Ok(view)
+    Ok(())
 }
 
 /// The team twin of [`load_org_for_write`] — same order, same reasons.
-async fn load_team_for_write(state: &AppState, actor: &Prn, action: Action, id: Uuid, canonical: &str, rpc: &str) -> Result<NodeView<Team>, Status> {
+async fn load_team_for_write(state: &AppState, actor: &Prn, action: Action, id: Uuid, canonical: &str, rpc: &str) -> Result<(), Status> {
     let view = state.teams.get(id).await.map_err(convert::status_to_grpc)?;
     if state.enforce_tenancy {
         state.authorize.check(actor, action, view.node.id.prn()).await.map_err(convert::status_to_grpc)?;
@@ -1092,11 +1092,11 @@ async fn load_team_for_write(state: &AppState, actor: &Prn, action: Action, id: 
         warn_prn_mismatch(actor, canonical, &stored, rpc);
         return Err(convert::status_to_grpc(TenancyError::PrnMismatch));
     }
-    Ok(view)
+    Ok(())
 }
 
 /// The project twin of [`load_org_for_write`] — same order, same reasons.
-async fn load_project_for_write(state: &AppState, actor: &Prn, action: Action, id: Uuid, canonical: &str, rpc: &str) -> Result<NodeView<Project>, Status> {
+async fn load_project_for_write(state: &AppState, actor: &Prn, action: Action, id: Uuid, canonical: &str, rpc: &str) -> Result<(), Status> {
     let view = state.projects.get(id).await.map_err(convert::status_to_grpc)?;
     if state.enforce_tenancy {
         state.authorize.check(actor, action, view.node.id.prn()).await.map_err(convert::status_to_grpc)?;
@@ -1106,7 +1106,7 @@ async fn load_project_for_write(state: &AppState, actor: &Prn, action: Action, i
         warn_prn_mismatch(actor, canonical, &stored, rpc);
         return Err(convert::status_to_grpc(TenancyError::PrnMismatch));
     }
-    Ok(view)
+    Ok(())
 }
 
 /// One warning line per refused write (SMA-643 D4). After the check moved before the write, a
@@ -1166,10 +1166,10 @@ The six Archive/Restore handlers read the PRN from `request.get_ref().prn` and n
 `request.into_inner()`; keep that as it is. Their helper call goes exactly where the
 `if self.state.enforce_tenancy { … }` block was.
 
-The helpers return the loaded view. None of the nine handlers needs it — the service call
-returns the post-write view that the response carries. Discard it with a bare call, as the
-example above does. Do NOT bind it to `_existing`; clippy is set to `-D warnings` in this
-workspace and an unused binding is a warning.
+The helpers return `Result<(), Status>`. No handler needs the loaded node: the service call
+returns the post-write view that the response carries. Call the helper as a statement, with
+`?`. Do NOT bind the result; clippy is set to `-D warnings` in this workspace and an unused
+binding is a warning.
 
 - [ ] **Step 3: Check that the handlers compile and the whole crate is clean**
 
@@ -1320,8 +1320,12 @@ labels. Undo the edit.
 In `rename_team` only, move the `load_team_for_write` call to AFTER the `teams.rename` call. Run
 the same command.
 
-Expected: `a_forged_prn_never_writes_a_team` FAILS with the two `RenameTeam` labels and nothing
-else. Record it. Undo the edit.
+Expected: `a_forged_prn_never_writes_a_team` FAILS with the two `RenameTeam` labels.
+`an_ungranted_caller_cannot_tell_a_forged_prn_from_a_correct_one` fails too, because the helper
+holds the authorization as well as the comparison: moving the call after `teams.rename` moves
+the authorization after the write, so a denied caller's `RenameTeam` also writes. This was
+MEASURED; the first version of this step expected the T1 failures alone. Record it. Undo the
+edit.
 
 - [ ] **Step 3: m3 — compare before authorize**
 
