@@ -11,9 +11,12 @@
 // refreshes the page (P5b-16).
 //
 // PRNs are literal strings: @paigasus/console-core's prn-tenancy.ts imports server-only, which
-// throws under Playwright.
+// throws under Playwright. NodeStatus comes from @paigasus/sdk's guard-free ./iam/types entry, and
+// IamAction is a TYPE import, which the compiler erases (SMA-630).
 import { Code } from '@connectrpc/connect';
+import type { IamAction } from '@paigasus/console-core';
 import { denial, type FakeIamHandlers } from '@paigasus/console-core/testing';
+import { NodeStatus } from '@paigasus/sdk/iam/types';
 
 export const PRINCIPAL_PRN = 'prn:pgs:iam:::principal/0190a1e5-0000-7000-8000-0000000000e0';
 export const ORG_ID = '0190a100-0000-7000-8000-0000000000e1';
@@ -36,8 +39,29 @@ export const PROJECT_NAME = 'Inference Gateway';
 export const OTHER_PROJECT_NAME = 'Shared Models';
 export const AUDIT_ACTION = 'CreateTeam';
 
-/** The Cedar action names the app asks IsAuthorized about (@paigasus/console-core's authorize.ts IamAction). */
-export const ALL_ACTIONS = ['ListOrganizations', 'CreateOrganization', 'CreateTeam', 'CreateProject', 'AttachMembership', 'DetachMembership', 'ListAuditLog'] as const;
+/**
+ * The Cedar action names the app asks IsAuthorized about. `satisfies` holds each entry to
+ * @paigasus/console-core's IamAction, and tests/unit/world-actions.test.ts holds the SET to
+ * IAM_ACTIONS (SMA-630 spec § 5.1).
+ */
+export const ALL_ACTIONS = [
+  'ListOrganizations',
+  'CreateOrganization',
+  'RenameOrganization',
+  'ArchiveOrganization',
+  'RestoreOrganization',
+  'CreateTeam',
+  'RenameTeam',
+  'ArchiveTeam',
+  'RestoreTeam',
+  'CreateProject',
+  'RenameProject',
+  'ArchiveProject',
+  'RestoreProject',
+  'AttachMembership',
+  'DetachMembership',
+  'ListAuditLog',
+] as const satisfies readonly IamAction[];
 
 export type Descriptor = { service: string; version: string; capabilities: string[] } | { status: number };
 export const DEFAULT_DESCRIPTOR: Descriptor = { service: 'iam', version: '0.0.0-e2e', capabilities: ['iam.authz.cedar', 'iam.audit'] };
@@ -55,26 +79,50 @@ export type WorldOptions = {
 
 const notFound = (): Error => denial({ code: Code.NotFound, reason: 'not-found' });
 
+/**
+ * Every scripted node is active. Without a status a node reads as UNSPECIFIED, and every row and
+ * header would show "Status unknown" (SMA-630 spec § 8).
+ */
+const ACTIVE = { status: NodeStatus.ACTIVE, effectiveStatus: NodeStatus.ACTIVE };
+
 // Named constants, not `Map.get()` results, where a response lists them: the handlers are typed per
 // method (Task 11), and a repeated field must not hold `undefined`.
-const ORGANIZATION = { prn: ORG_PRN, slug: 'acme', name: ORG_NAME };
-const TEAM = { prn: TEAM_PRN, orgPrn: ORG_PRN, slug: 'platform', name: TEAM_NAME };
-const PROJECT = { prn: PROJECT_PRN, teamPrn: TEAM_PRN, orgPrn: ORG_PRN, slug: 'gateway', name: PROJECT_NAME };
+const ORGANIZATION = { prn: ORG_PRN, slug: 'acme', name: ORG_NAME, ...ACTIVE };
+const TEAM = { prn: TEAM_PRN, orgPrn: ORG_PRN, slug: 'platform', name: TEAM_NAME, ...ACTIVE };
+const PROJECT = { prn: PROJECT_PRN, teamPrn: TEAM_PRN, orgPrn: ORG_PRN, slug: 'gateway', name: PROJECT_NAME, ...ACTIVE };
 
 const ORGANIZATIONS = new Map([[ORG_PRN, ORGANIZATION]]);
 const TEAMS = new Map([
   [TEAM_PRN, TEAM],
-  [OTHER_TEAM_PRN, { prn: OTHER_TEAM_PRN, orgPrn: `prn:pgs:iam:::organization/${OTHER_ORG_ID}`, slug: 'shared', name: 'Shared Team' }],
+  [OTHER_TEAM_PRN, { prn: OTHER_TEAM_PRN, orgPrn: `prn:pgs:iam:::organization/${OTHER_ORG_ID}`, slug: 'shared', name: 'Shared Team', ...ACTIVE }],
 ]);
 const PROJECTS = new Map([
   [PROJECT_PRN, PROJECT],
-  [OTHER_PROJECT_PRN, { prn: OTHER_PROJECT_PRN, teamPrn: OTHER_TEAM_PRN, orgPrn: `prn:pgs:iam:::organization/${OTHER_ORG_ID}`, slug: 'models', name: OTHER_PROJECT_NAME }],
+  [OTHER_PROJECT_PRN, { prn: OTHER_PROJECT_PRN, teamPrn: OTHER_TEAM_PRN, orgPrn: `prn:pgs:iam:::organization/${OTHER_ORG_ID}`, slug: 'models', name: OTHER_PROJECT_NAME, ...ACTIVE }],
 ]);
+
+function organizationAt(prn: string): typeof ORGANIZATION {
+  const organization = ORGANIZATIONS.get(prn);
+  if (organization === undefined) throw notFound();
+  return organization;
+}
+
+function teamAt(prn: string): typeof TEAM {
+  const team = TEAMS.get(prn);
+  if (team === undefined) throw notFound();
+  return team;
+}
+
+function projectAt(prn: string): typeof PROJECT {
+  const project = PROJECTS.get(prn);
+  if (project === undefined) throw notFound();
+  return project;
+}
 
 export function worldHandlers(options: WorldOptions = {}): FakeIamHandlers {
   const allow = new Set<string>(options.allow ?? ALL_ACTIONS);
   const withScopes = options.memberships ?? true;
-  const created: { prn: string; slug: string; name: string }[] = [];
+  const created: { prn: string; slug: string; name: string; status: NodeStatus; effectiveStatus: NodeStatus }[] = [];
   return {
     'authn.introspect': () => ({
       principalPrn: PRINCIPAL_PRN,
@@ -92,21 +140,9 @@ export function worldHandlers(options: WorldOptions = {}): FakeIamHandlers {
     'authz.listRoleGrants': () => ({
       grants: withScopes ? [{ id: '0190a1d4-0000-7000-8000-0000000000f3', principalPrn: PRINCIPAL_PRN, roleKey: 'project_viewer', scopePrn: OTHER_PROJECT_PRN }] : [],
     }),
-    'tenancy.getOrganization': (req: { prn: string }) => {
-      const organization = ORGANIZATIONS.get(req.prn);
-      if (organization === undefined) throw notFound();
-      return { organization };
-    },
-    'tenancy.getTeam': (req: { prn: string }) => {
-      const team = TEAMS.get(req.prn);
-      if (team === undefined) throw notFound();
-      return { team };
-    },
-    'tenancy.getProject': (req: { prn: string }) => {
-      const project = PROJECTS.get(req.prn);
-      if (project === undefined) throw notFound();
-      return { project };
-    },
+    'tenancy.getOrganization': (req: { prn: string }) => ({ organization: organizationAt(req.prn) }),
+    'tenancy.getTeam': (req: { prn: string }) => ({ team: teamAt(req.prn) }),
+    'tenancy.getProject': (req: { prn: string }) => ({ project: projectAt(req.prn) }),
     'tenancy.listOrganizations': () => ({ organizations: [...ORGANIZATIONS.values(), ...created] }),
     'tenancy.listTeams': () => ({ teams: [TEAM] }),
     'tenancy.listProjects': () => ({ projects: [PROJECT] }),
@@ -115,12 +151,25 @@ export function worldHandlers(options: WorldOptions = {}): FakeIamHandlers {
       memberships: [{ id: '0190a1d4-0000-7000-8000-0000000000f4', principalPrn: PRINCIPAL_PRN, nodePrn: req.filter.case === 'nodePrn' ? req.filter.value : '' }],
     }),
     'tenancy.createOrganization': (req: { slug: string; name: string }) => {
-      const organization = { prn: `prn:pgs:iam:::organization/${NEW_ORG_ID}`, slug: req.slug, name: req.name };
+      const organization = { prn: `prn:pgs:iam:::organization/${NEW_ORG_ID}`, slug: req.slug, name: req.name, ...ACTIVE };
       created.push(organization);
       return { organization };
     },
-    'tenancy.createTeam': (req: { orgPrn: string; slug: string; name: string }) => ({ team: { prn: TEAM_PRN, orgPrn: req.orgPrn, slug: req.slug, name: req.name } }),
-    'tenancy.createProject': (req: { teamPrn: string; slug: string; name: string }) => ({ project: { prn: PROJECT_PRN, teamPrn: req.teamPrn, orgPrn: ORG_PRN, slug: req.slug, name: req.name } }),
+    'tenancy.createTeam': (req: { orgPrn: string; slug: string; name: string }) => ({ team: { prn: TEAM_PRN, orgPrn: req.orgPrn, slug: req.slug, name: req.name, ...ACTIVE } }),
+    'tenancy.createProject': (req: { teamPrn: string; slug: string; name: string }) => ({
+      project: { prn: PROJECT_PRN, teamPrn: req.teamPrn, orgPrn: ORG_PRN, slug: req.slug, name: req.name, ...ACTIVE },
+    }),
+    // SMA-630: the nine lifecycle RPCs. Each returns the scripted node unchanged. A test that needs
+    // the node to change (R14) scripts stateful handlers through `overrides`.
+    'tenancy.renameOrganization': (req: { prn: string }) => ({ organization: organizationAt(req.prn) }),
+    'tenancy.archiveOrganization': (req: { prn: string }) => ({ organization: organizationAt(req.prn) }),
+    'tenancy.restoreOrganization': (req: { prn: string }) => ({ organization: organizationAt(req.prn) }),
+    'tenancy.renameTeam': (req: { prn: string }) => ({ team: teamAt(req.prn) }),
+    'tenancy.archiveTeam': (req: { prn: string }) => ({ team: teamAt(req.prn) }),
+    'tenancy.restoreTeam': (req: { prn: string }) => ({ team: teamAt(req.prn) }),
+    'tenancy.renameProject': (req: { prn: string }) => ({ project: projectAt(req.prn) }),
+    'tenancy.archiveProject': (req: { prn: string }) => ({ project: projectAt(req.prn) }),
+    'tenancy.restoreProject': (req: { prn: string }) => ({ project: projectAt(req.prn) }),
     'tenancy.attachMembership': (req: { principalPrn: string; nodePrn: string }) => ({
       membership: { id: '0190a1d4-0000-7000-8000-0000000000f5', principalPrn: req.principalPrn, nodePrn: req.nodePrn },
     }),

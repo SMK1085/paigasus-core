@@ -561,7 +561,7 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   is set, and the failure reads as "the reader found nothing" rather than "the flag is invalid".
   That is not hypothetical — it cost a cycle on this very branch, where the first measurement
   read `head`'s status through a pipe and recorded exit 0.
-- The **codegen-drift gate is an inline `ci.yml` step** (`.github/workflows/ci.yml:249-262`), NOT
+- The **codegen-drift gate is an inline `ci.yml` step** (`.github/workflows/ci.yml:342-355`), NOT
   a `repo:*` Moon task — searching `moon.yml` for it finds nothing. That placement is deliberate
   and load-bearing: the step carries no `if:`, so it runs on EVERY CI run and cannot be
   deselected, where a `T`-array task would run only when affected and a wrong `inputs` list would
@@ -850,6 +850,24 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   the real repo, since several tasks legitimately lack those (`affected-smoke`'s own globs are
   pinned by check 8e instead; the three `release-parity*` tasks route through
   `SELF_TASK_GLOBS_EXEMPT`).
+- `ci/affected-graph/ci_targets.py` derives its verdict AND its report from ONE list (SMA-638).
+  `collect_findings` returns 23 `(key, rows, title)` triples; `main()` reads
+  `if not any(rows for _, rows, _ in findings)` for the verdict and iterates that same list for the
+  report, so a check folded into one and not the other cannot exist — the defect SMA-638 reported
+  for `check_tailwind_guard_invocations`, which applied to every check in the file. What stops the
+  list being SHRUNK is `EXPECTED_FINDING_KEYS`, a 23-key tuple whose non-emptiness, arity and exact
+  key sequence `self_test()` asserts. So adding or removing a check reds the gate until that tuple
+  is re-baselined, and the re-baseline is a deliberate act, never a mechanical edit to clear a red.
+  The floor proves MEMBERSHIP, not semantics: a key whose `rows` are always empty satisfies it.
+  Separately, `RUN_SH_CALL_SITES` (in that file) and `T_AFFECTED_GRAPH_CALL_SITES` (in
+  `ci/actionlint/run.sh`) now hold **four** entries each, not two — the two `ci_targets.py`
+  invocations, plus `ci/affected-graph/run.sh`'s `--negative-control` flag parse and its `NEGATIVE`
+  branch guard, because `run.sh` initialises `NEGATIVE=0` and deleting either line let the control
+  fall through and run the real suite twice at exit 0. The two tables are hand-mirrored and
+  **nothing asserts the copies agree**, so every edit to one must be made to the other. Both are
+  SUBSTRING pins (`site not in run_sh_text`; `grep -qF`): MEASURED, deleting a pinned line reds both
+  gates, but COMMENTING IT OUT leaves both green. That is the documented limit
+  (`ci/affected-graph/README.md`, L2), not a defect.
 - `repo:actionlint` now runs shellcheck over every workflow `run:` block, sourced from
   `shellcheck-py` pinned in `py/uv.lock` (bounded specifier `>=0.11.0.1,<0.12`), resolved via
   `uv run --locked --project py` and asserted with `[ -x ]`. It FAILS CLOSED at rc 2 — there is
@@ -896,11 +914,12 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   recursively instead of reading a manifest, and `iam-console-ts:build` removes
   `.next/static` before every build so a stale chunk from an earlier build cannot satisfy that
   walk. The guard script lives at `ci/tailwind-source/` and must **never** move under
-  `ts/apps/iam-console/`, because that directory is Tailwind's scan root and a script
-  holding the sentinel literal (`--paigasus-ui-source-probe`) would make Tailwind generate the
-  very utility it asserts on — and the guard's assertion-3 scan is a **full walk of the console
-  directory**, not an allowlist, because the old `['app'] + four config files` list missed
-  `moon.yml`, `next-env.d.ts` and `.prettierignore`, all of which Tailwind reads.
+  any `ts/apps/*` directory, because each one is Tailwind's scan root for its own app and a
+  script holding the sentinel literal (`--paigasus-ui-source-probe`) would make Tailwind generate
+  the very utility it asserts on — and the guard's assertion-3 scan is a **full walk of the named
+  app's own directory** (parameterized by `--app`), not an allowlist, because the old
+  `['app'] + four config files` list missed `moon.yml`, `next-env.d.ts` and `.prettierignore`, all
+  of which Tailwind reads.
   `iam-console-ts:build` also uses `options.merge: replace`, so
   it inherits nothing from `.moon/tasks/typescript-project.yml` and lists `/ts/pnpm-lock.yaml`
   **and `/ts/tsconfig.base.json`** by hand in its own `inputs` (`test` replaces too and needs
@@ -921,7 +940,9 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   running it. (SMA-503)
   Since SMA-512 the guard is **per app**: `ci/tailwind-source/run.mjs --app <dir>`, invoked by each
   app's own `test` task, and a BARE run now exits 2 rather than silently checking `iam-console`.
-  `TAILWIND_GUARD_INVOCATIONS` in `ci/affected-graph/ci_targets.py` fails `repo:affected-smoke` if
+  `TAILWIND_GUARD_INVOCATIONS` holds **two** apps today (`iam-console`, `gateway-console` — SMA-512
+  pull request 3), each invoking the guard for itself in its own `test` task; a third app repeats
+  the same shape. That registry, in `ci/affected-graph/ci_targets.py`, fails `repo:affected-smoke` if
   a `ts/apps/*` directory with a `package.json` does not invoke all three modes for itself, in its
   Moon project's resolved `test` script — the fix wave closed three ways to defeat this: an entry
   no longer stores hand-copied lines (they are derived from the app name, so an entry cannot name
@@ -934,6 +955,18 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   gate still has **no negative control**. Its `deps` names one build per app by hand and nothing
   asserts the list is complete, so a new app must add its own `<app>-ts:build` edge or `next
   typegen` races that app's `.next`.
+- `repo:next-public-free`'s `APP_CONFIG_FLOOR` is **2** since the second console zone landed,
+  pinned as a whole line (`"APP_CONFIG_FLOOR=2"`) in `ci/affected-graph/ci_targets.py:1251`, so
+  the constant in `ci/next-public/run.sh` and its pin move together or the gate reds. It is a
+  **collapse detector**, not a per-app assertion. MEASURED reason: `APP_CONFIG_GLOB='ts/apps/*/
+  next.config.[tjmc][sj]*'` matches **four** tracked paths today, not two — the two real apps'
+  configs plus `ts/apps/iam-console/tests/fixtures/{client,server}-imports-sdk/next.config.ts` —
+  because a git pathspec's `*` spans `/`, the same pathspec trap this file already records for the
+  ruff gate's `ci/**/*.py` corpus. The gate's own `app_configs()` then filters with
+  `grep -E '/next\.config\.(ts|js|mjs|cjs)$'`, which does **not** exclude those fixtures, since
+  they end in `next.config.ts` too. So deleting one app's `next.config.ts` leaves 3 ≥ 2 and the
+  gate stays **green**. What actually holds a specific app's config in place is that app's own
+  build and `ci/next-env/run.sh`'s per-app discovery — not this floor.
 - **Turbopack (Next 16.3.4) does NOT resolve a `.js` relative specifier to a `.ts` file** (MEASURED,
   SMA-510): `import { x } from './a.js'` with only `a.ts` on disk fails `next build` with `Module not
   found`, in app code and in a workspace package's source alike. A clause-level `import type … from
@@ -1081,6 +1114,29 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   (`<bash-binary> ci/<gate>/run.sh`) and read those results instead of the `moon ci` verdict for
   them — `repo:actionlint` has no local substitute verdict today. CI runs a single Linux bash and
   never sees this split.
+- **`ts/apps/gateway-console`** (SMA-512 PR 3) is the second console zone: a Next.js 16 App Router
+  app for the AI Gateway, mounted at `/gateway`, Moon id `gateway-console-ts`. Its `lib/config.ts`
+  demands **both** an `iam` entry and a `gateway` entry in `PAIGASUS_SERVICES` — it refuses to
+  parse a map missing either one — and declares no gateway-specific env key of its own; the
+  gateway's address comes only through `PAIGASUS_SERVICES.gateway`, unlike IAM, which also carries
+  its own `PAIGASUS_IAM_GRPC_URL`. The zone overview lives at **`(console)/overview/page.tsx`** →
+  `/gateway/overview`, **not** at `/gateway/` — the public landing page already owns that path, and
+  a second `page.tsx` at the same route fails the Next build (plan D14). `gateway.chat.stream`
+  (`app/_components/gateway-state.ts`) counts only when the service's state is `available`; a
+  `degraded` service can still carry the descriptor of its last good probe, and treating that
+  stale descriptor as a live capability would report a feature the gateway cannot currently serve.
+- **`gateway-console-ts:test-e2e` now needs Docker** (SMA-512 PR 4). It fails loudly when Docker is
+  not reachable. `iam-console`'s own e2e tier does not need Docker. The `PAIGASUS_SESSION_STORE`
+  memory setting is refused when `PAIGASUS_ZONES` names two zones, so a two-zone tier has no
+  alternative store to use instead. Every `iam-console` edit now runs this tier too. An `inputs`
+  entry on `gateway-console-ts:test-e2e` causes this, not a `deps` relation — only `inputs` confers
+  affectedness on Moon 2.5.3. This is the cost of a tier that must re-run when the property it
+  tests can break. A Playwright **worker fixture** now starts a container: the first one in this
+  repository started this way. A worker restart does not overlap two containers. The fixture's
+  teardown runs before the worker restarts. The old container stops and is fully removed before the
+  new worker starts a new one. A measured run showed the old container up at t=15s, no container at
+  all at t=16s, and a brand-new container at t=17s. So this pull request needed no deterministic
+  container label and no stale-container sweep.
 
 ## Workflow
 

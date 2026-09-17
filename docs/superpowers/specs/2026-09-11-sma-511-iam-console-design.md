@@ -482,6 +482,9 @@ recorded here and not built.
   No page and no action refuses anything because `mayI()` returned false. A user who types a URL,
   or posts to an action whose button is hidden, gets IAM's real answer.
 - The tests prove both directions and count the calls (§ 9.3, § 9.4).
+- SMA-630 adds one rule for the lifecycle controls: a control shows only the transition that the
+  node's own status allows (`docs/superpowers/specs/2026-09-17-sma-630-tenancy-lifecycle-design.md`,
+  § 5.3, D7).
 
 ### 6.4 No login loop
 

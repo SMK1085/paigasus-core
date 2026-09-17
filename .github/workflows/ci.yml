@@ -191,7 +191,13 @@ jobs:
       # drives it with Playwright to prove that a cross-zone link is a hard navigation.
       # `@paigasus/iam-console` needs it too (SMA-511): its test-e2e task drives the standalone
       # server through a TLS terminator.
-      - name: Install Playwright Chromium (for the test-e2e tasks of @paigasus/auth, @paigasus/discovery, @paigasus/app-shell and @paigasus/iam-console)
+      # `@paigasus/gateway-console` needs it too (SMA-512 PR 3): the second console zone ships the
+      # same single-zone e2e tier, driving its own standalone server through a TLS terminator.
+      #
+      # This step is deliberately UNCONDITIONAL — no `if:`. A path filter can be skipped on a run
+      # where `moon ci` still selects a `test-e2e` task (affectedness comes from that task's own
+      # inputs, not from this step's filter), and the task then fails for a missing browser.
+      - name: Install Playwright Chromium (for the test-e2e tasks of @paigasus/auth, @paigasus/discovery, @paigasus/app-shell, @paigasus/iam-console and @paigasus/gateway-console)
         # Run from the PACKAGE, not the ts workspace root: @playwright/test is a devDependency of
         # each package, so `playwright` is only on that package's node_modules/.bin. From ts/ it
         # fails with ERR_PNPM_RECURSIVE_EXEC_FIRST_FAIL, "Command playwright not found" (MEASURED).
@@ -201,6 +207,7 @@ jobs:
           pnpm --dir ts/packages/paigasus-discovery exec playwright install --with-deps chromium
           pnpm --dir ts/packages/paigasus-app-shell exec playwright install --with-deps chromium
           pnpm --dir ts/apps/iam-console exec playwright install --with-deps chromium
+          pnpm --dir ts/apps/gateway-console exec playwright install --with-deps chromium
 
       - name: Validate commit messages (commitlint parity gate)
         # PRs only: commitlint gates commits BEFORE they merge (SMA-371 AC-E, "on every PR").

@@ -23,8 +23,32 @@ import type { AuthorizationService } from '@paigasus/sdk/iam';
 import { callIam } from './errors';
 import type { ConsoleLogger } from './logger';
 
-/** The PascalCase names IAM's Action::parse accepts (rs/crates/libs/paigasus-iam-core/src/authz/action.rs:114-163). */
-export type IamAction = 'ListOrganizations' | 'CreateOrganization' | 'CreateTeam' | 'CreateProject' | 'AttachMembership' | 'DetachMembership' | 'ListAuditLog';
+/**
+ * The PascalCase names IAM's Action::parse accepts (rs/crates/libs/paigasus-iam-core/src/authz/action.rs,
+ * `as_wire`). A RUNTIME array, not only a type (SMA-630 spec § 5.1): mayI() fails open, so a
+ * misspelt name would show its control for ever. tests/unit/action-names.test.ts holds every entry
+ * to the Rust wire names, and the e2e world of the IAM console holds its ALL_ACTIONS to this list.
+ */
+export const IAM_ACTIONS = [
+  'ListOrganizations',
+  'CreateOrganization',
+  'RenameOrganization',
+  'ArchiveOrganization',
+  'RestoreOrganization',
+  'CreateTeam',
+  'RenameTeam',
+  'ArchiveTeam',
+  'RestoreTeam',
+  'CreateProject',
+  'RenameProject',
+  'ArchiveProject',
+  'RestoreProject',
+  'AttachMembership',
+  'DetachMembership',
+  'ListAuditLog',
+] as const;
+
+export type IamAction = (typeof IAM_ACTIONS)[number];
 
 export type MayI = (action: IamAction, resourcePrn: string) => Promise<boolean>;
 

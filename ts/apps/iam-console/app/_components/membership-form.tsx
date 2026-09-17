@@ -4,6 +4,7 @@
 import { useActionState, useId, type ReactElement } from 'react';
 import { Field, Input } from '@paigasus/ui';
 import type { ActionState } from '@paigasus/console-core';
+import { PRIMARY_BUTTON_CLASS } from './button-class';
 import { FormError } from './form-error';
 
 export type MembershipAction = (previous: ActionState, form: FormData) => Promise<ActionState>;
@@ -21,7 +22,7 @@ export function AttachMembershipForm({ nodePrn, action }: { readonly nodePrn: st
       <Field label="Principal PRN" htmlFor={`${id}-principal`} description="IAM has no user search yet. Enter the PRN of the principal.">
         <Input name="principalPrn" required autoComplete="off" />
       </Field>
-      <button type="submit" disabled={pending} className="bg-primary text-primary-foreground rounded-pgs self-start px-3 py-1.5 text-sm font-medium disabled:opacity-50">
+      <button type="submit" disabled={pending} className={PRIMARY_BUTTON_CLASS}>
         Add member
       </button>
       {state?.ok === true ? (

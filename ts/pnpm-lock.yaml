@@ -210,7 +210,7 @@ importers:
         specifier: 'catalog:'
         version: 5.0.0(@types/node@24.13.3)(jsdom@30.0.1)(msw@2.15.0(@types/node@24.13.3)(typescript@6.0.3))(vite@8.0.16(@types/node@24.13.3)(jiti@2.7.0)(yaml@2.9.0))
 
-  apps/iam-console:
+  apps/gateway-console:
     dependencies:
       '@connectrpc/connect':
         specifier: 'catalog:'
@@ -270,9 +270,91 @@ importers:
       '@types/react-dom':
         specifier: 'catalog:'
         version: 19.2.7(@types/react@19.2.18)
+      testcontainers:
+        specifier: 'catalog:'
+        version: 12.1.0
+      typescript:
+        specifier: 'catalog:'
+        version: 6.0.3
+      vitest:
+        specifier: 'catalog:'
+        version: 5.0.0(@types/node@24.13.3)(jsdom@30.0.1)(msw@2.15.0(@types/node@24.13.3)(typescript@6.0.3))(vite@8.0.16(@types/node@24.13.3)(jiti@2.7.0)(yaml@2.9.0))
+
+  apps/iam-console:
+    dependencies:
+      '@connectrpc/connect':
+        specifier: 'catalog:'
+        version: 2.2.0(@bufbuild/protobuf@2.14.1)
+      '@paigasus/app-shell':
+        specifier: workspace:*
+        version: link:../../packages/paigasus-app-shell
+      '@paigasus/auth':
+        specifier: workspace:*
+        version: link:../../packages/paigasus-auth
+      '@paigasus/console-core':
+        specifier: workspace:*
+        version: link:../../packages/paigasus-console-core
+      '@paigasus/discovery':
+        specifier: workspace:*
+        version: link:../../packages/paigasus-discovery
+      '@paigasus/next-config':
+        specifier: workspace:*
+        version: link:../../packages/paigasus-next-config
+      '@paigasus/sdk':
+        specifier: workspace:*
+        version: link:../../packages/paigasus-sdk
+      '@paigasus/ui':
+        specifier: workspace:*
+        version: link:../../packages/paigasus-ui
+      '@tailwindcss/postcss':
+        specifier: 'catalog:'
+        version: 4.3.3
+      next:
+        specifier: 'catalog:'
+        version: 16.3.4(@babel/core@7.29.7)(@playwright/test@1.63.0)(@types/node@24.13.3)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
+      react:
+        specifier: 'catalog:'
+        version: 19.2.8
+      react-dom:
+        specifier: 'catalog:'
+        version: 19.2.8(react@19.2.8)
+      server-only:
+        specifier: 'catalog:'
+        version: 0.0.1
+      tailwindcss:
+        specifier: 'catalog:'
+        version: 4.3.3
+      zod:
+        specifier: 'catalog:'
+        version: 4.5.4
+    devDependencies:
+      '@playwright/test':
+        specifier: 'catalog:'
+        version: 1.63.0
+      '@testing-library/dom':
+        specifier: 'catalog:'
+        version: 10.4.1
+      '@testing-library/react':
+        specifier: 'catalog:'
+        version: 16.3.3(@testing-library/dom@10.4.1)(@types/react-dom@19.2.7(@types/react@19.2.18))(@types/react@19.2.18)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
+      '@testing-library/user-event':
+        specifier: 'catalog:'
+        version: 14.6.7(@testing-library/dom@10.4.1)
+      '@types/node':
+        specifier: 'catalog:'
+        version: 24.13.3
+      '@types/react':
+        specifier: 'catalog:'
+        version: 19.2.18
+      '@types/react-dom':
+        specifier: 'catalog:'
+        version: 19.2.7(@types/react@19.2.18)
       jose:
         specifier: 'catalog:'
         version: 6.2.12
+      jsdom:
+        specifier: 'catalog:'
+        version: 30.0.1
       msw:
         specifier: 'catalog:'
         version: 2.15.0(@types/node@24.13.3)(typescript@6.0.3)
@@ -10817,7 +10899,7 @@ snapshots:
   readable-stream@3.6.2:
     dependencies:
       inherits: 2.0.4
-      string_decoder: 1.1.1
+      string_decoder: 1.3.0
       util-deprecate: 1.0.2
 
   readable-stream@4.7.0:
