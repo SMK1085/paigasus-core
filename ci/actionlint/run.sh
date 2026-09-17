@@ -2051,6 +2051,12 @@ invocation_allowlist_verdict() {
 T_AFFECTED_GRAPH_CALL_SITES=(
   'assert_ci_targets || SUITE_RC=1'
   '"$HERE/ci_targets.py" --self-test || NEG_RC=1'
+  # SMA-638. Copied VERBATIM from ci_targets.py's RUN_SH_CALL_SITES, like the two above. These
+  # pin the path that REACHES the --self-test call: run.sh initialises NEGATIVE=0, so deleting
+  # the flag parse skips the whole --negative-control branch and the gate exits 0 having run the
+  # real suite twice. Substring-matched, so a commented-out copy still satisfies them.
+  '[ "${1-}" = "--negative-control" ] && NEGATIVE=1'
+  'if [ "$NEGATIVE" = 1 ]; then'
 )
 
 # Echoes one verdict token per problem, and nothing for a wired file:
@@ -3124,21 +3130,30 @@ affected_graph_wiring_self_test() {
     fi
   }
 
-  # The healthy control: both call sites present, exactly as ci/affected-graph/run.sh's real
-  # run_suite() and its --negative-control branch have them, plus the function DEFINITION that
-  # makes the substring-trap fixture below meaningful (mirrors ci_targets.py's own `wired`
-  # self-test fixture for this exact pair of lines).
+  # The healthy control: all four pinned lines present, exactly as ci/affected-graph/run.sh's
+  # real flag parse, run_suite() and --negative-control branch have them, plus the function
+  # DEFINITION that makes the substring-trap fixture below meaningful (mirrors ci_targets.py's
+  # own `wired` self-test fixture for this exact set of lines).
+  #
+  # SMA-638: every negative fixture below now carries the flag parse and the branch guard too,
+  # and removes exactly ONE line from this control. That is what keeps each row's expected
+  # verdict a SINGLE `missing` token — a fixture short of an unrelated pinned line would report
+  # it as missing as well, and the row would then pass for a reason it does not name.
   local wired='assert_ci_targets() {
   :
 }
+[ "${1-}" = "--negative-control" ] && NEGATIVE=1
   assert_ci_targets || SUITE_RC=1
+if [ "$NEGATIVE" = 1 ]; then
   python3 "$HERE/ci_targets.py" --self-test || NEG_RC=1
 '
-  expect_wiring 'both call sites present, suffixes intact, is clean' '' "$wired"
+  expect_wiring 'all four pinned lines present, suffixes intact, is clean' '' "$wired"
 
   # Each site deleted OUTRIGHT, one at a time — the plainest form of the residual this check
   # closes.
-  local no_assert_call='  python3 "$HERE/ci_targets.py" --self-test || NEG_RC=1
+  local no_assert_call='[ "${1-}" = "--negative-control" ] && NEGATIVE=1
+if [ "$NEGATIVE" = 1 ]; then
+  python3 "$HERE/ci_targets.py" --self-test || NEG_RC=1
 '
   expect_wiring 'assert_ci_targets call site deleted outright fires' \
     'missing assert_ci_targets || SUITE_RC=1' "$no_assert_call"
@@ -3146,7 +3161,9 @@ affected_graph_wiring_self_test() {
   local no_selftest_call='assert_ci_targets() {
   :
 }
+[ "${1-}" = "--negative-control" ] && NEGATIVE=1
   assert_ci_targets || SUITE_RC=1
+if [ "$NEGATIVE" = 1 ]; then
 '
   expect_wiring 'the --self-test call site deleted outright fires' \
     'missing "$HERE/ci_targets.py" --self-test || NEG_RC=1' "$no_selftest_call"
@@ -3158,6 +3175,8 @@ affected_graph_wiring_self_test() {
   local def_only_no_call='assert_ci_targets() {
   :
 }
+[ "${1-}" = "--negative-control" ] && NEGATIVE=1
+if [ "$NEGATIVE" = 1 ]; then
   python3 "$HERE/ci_targets.py" --self-test || NEG_RC=1
 '
   expect_wiring 'assert_ci_targets present only in its own definition still fires' \
@@ -3170,7 +3189,9 @@ affected_graph_wiring_self_test() {
   local assert_swallowed='assert_ci_targets() {
   :
 }
+[ "${1-}" = "--negative-control" ] && NEGATIVE=1
   assert_ci_targets || true
+if [ "$NEGATIVE" = 1 ]; then
   python3 "$HERE/ci_targets.py" --self-test || NEG_RC=1
 '
   expect_wiring 'assert_ci_targets suffix swallowed by || true fires' \
@@ -3179,18 +3200,46 @@ affected_graph_wiring_self_test() {
   local selftest_swallowed='assert_ci_targets() {
   :
 }
+[ "${1-}" = "--negative-control" ] && NEGATIVE=1
   assert_ci_targets || SUITE_RC=1
+if [ "$NEGATIVE" = 1 ]; then
   python3 "$HERE/ci_targets.py" --self-test || true
 '
   expect_wiring 'the --self-test suffix swallowed by || true fires' \
     'missing "$HERE/ci_targets.py" --self-test || NEG_RC=1' "$selftest_swallowed"
 
-  # Both missing at once — proves the two are reported independently, in
-  # T_AFFECTED_GRAPH_CALL_SITES' own order, not merged into a single verdict that could mask the
-  # second.
-  expect_wiring 'both call sites missing fires both, independently' \
+  # SMA-638. The two call sites above are reachable only through the flag parse and the branch
+  # guard. Deleting the flag parse leaves NEGATIVE at 0, the --negative-control branch is never
+  # entered, and run.sh falls through to the real suite having proved nothing — the bypass
+  # CLAUDE.md records as MEASURED for repo:release-parity.
+  local no_flag_parse='assert_ci_targets() {
+  :
+}
+  assert_ci_targets || SUITE_RC=1
+if [ "$NEGATIVE" = 1 ]; then
+  python3 "$HERE/ci_targets.py" --self-test || NEG_RC=1
+'
+  expect_wiring 'the --negative-control flag parse deleted fires' \
+    'missing [ "${1-}" = "--negative-control" ] && NEGATIVE=1' "$no_flag_parse"
+
+  local no_negative_guard='assert_ci_targets() {
+  :
+}
+[ "${1-}" = "--negative-control" ] && NEGATIVE=1
+  assert_ci_targets || SUITE_RC=1
+  python3 "$HERE/ci_targets.py" --self-test || NEG_RC=1
+'
+  expect_wiring 'the NEGATIVE branch guard deleted fires' \
+    'missing if [ "$NEGATIVE" = 1 ]; then' "$no_negative_guard"
+
+  # All four missing at once — proves they are reported independently, in
+  # T_AFFECTED_GRAPH_CALL_SITES' own order, not merged into a single verdict that could mask any
+  # of the others.
+  expect_wiring 'all four pinned lines missing fires all four, independently' \
     'missing assert_ci_targets || SUITE_RC=1
-missing "$HERE/ci_targets.py" --self-test || NEG_RC=1' \
+missing "$HERE/ci_targets.py" --self-test || NEG_RC=1
+missing [ "${1-}" = "--negative-control" ] && NEGATIVE=1
+missing if [ "$NEGATIVE" = 1 ]; then' \
     'echo "nothing relevant here"
 '
 
