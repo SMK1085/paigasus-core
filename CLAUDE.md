@@ -1144,9 +1144,10 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   hydration waits now go through `tests/e2e/support/hydration.ts`, bounded at
   `HYDRATION_TIMEOUT_MS = 15_000` (one value, deliberately not a `process.env.CI` branch: both
   configs set `retries: isCI ? 2 : 0`, so a branched constant would put the TIGHTER bound on the
-  run with NO retry). The helper's only `@playwright/test` import is a TYPE, which is what lets
-  `tests/unit/hydration.test.ts` drive it with a stub and exercise the failure path with no
-  browser. Two traps measured there: `Pick<Page, 'locator'>` does NOT accept a stub (it keeps the
+  run with NO retry). The helper carries no `@playwright/test` import at all — not even a type
+  import — which is what lets `tests/unit/hydration.test.ts` drive it with a plain stub and
+  exercise the failure path with no browser. Two traps measured there: `Pick<Page, 'locator'>`
+  does NOT accept a stub (it keeps the
   full `Locator` return type — `error TS2322`), so the parameter is a structural type; and the
   helper verifies timeout failures by checking the error's `name` field. MEASURED on 1.63.0: a
   `waitFor` that exceeds its own `timeout` rejects with `name` `TimeoutError`, but the constructor
