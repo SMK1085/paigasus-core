@@ -446,6 +446,14 @@ RUN_SH_CALL_SITES = (
     # ci/actionlint/run.sh mirrors that same suffix requirement from its own copy of these two
     # strings.
     '"$HERE/ci_targets.py" --self-test || NEG_RC=1',
+    # SMA-638. The two entries above pin the CALLS; these two pin the only path that REACHES the
+    # --self-test call. `run.sh` initialises NEGATIVE=0, so deleting the flag parse leaves the
+    # --negative-control branch unentered: run.sh falls through to run_suite and exits 0 having
+    # run the real suite twice. Both pinned strings are SUBSTRING-matched like their neighbours,
+    # so a commented-out copy still satisfies them — recorded in ci/affected-graph/README.md,
+    # not closed here. ci/actionlint/run.sh's T_AFFECTED_GRAPH_CALL_SITES carries the same two.
+    '[ "${1-}" = "--negative-control" ] && NEGATIVE=1',
+    'if [ "$NEGATIVE" = 1 ]; then',
 )
 
 # repo:input-liveness's resolved script must run BOTH its negative control and the real check —
@@ -2369,7 +2377,9 @@ def self_test():
         # the bare name `assert_ci_targets`, so a name-only RUN_SH_CALL_SITES entry would
         # survive deleting the call. Dropping this line silently de-fangs that assertion.
         'assert_ci_targets() {\n  :\n}\n'
+        '[ "${1-}" = "--negative-control" ] && NEGATIVE=1\n'
         '  assert_ci_targets || SUITE_RC=1\n'
+        'if [ "$NEGATIVE" = 1 ]; then\n'
         '  python3 "$HERE/ci_targets.py" --self-test || NEG_RC=1\n'
     )
     def wired_scripts(**overrides):
@@ -2559,6 +2569,19 @@ def self_test():
     silenced = wired.replace("--self-test || NEG_RC=1", "--self-test || true")
     if not check_self_invocation(silenced, scripts, wired_actionlint, wired_release_parity, wired_workflow_credentials, wired_release_plan, wired_ruff, wired_next_public_free):
         failures.append("check_self_invocation: missed a --self-test whose failure is swallowed")
+    # SMA-638. The two call sites above are reachable ONLY if the flag parse and the branch guard
+    # survive. Deleting the flag parse leaves NEGATIVE at its initialised 0, so the whole
+    # --negative-control branch is skipped, run.sh falls through to run_suite and the gate exits 0
+    # having run the real suite twice and proved nothing. CLAUDE.md records that exact bypass as
+    # MEASURED for repo:release-parity, which closed it by pinning its own flag parse.
+    no_flag_parse = wired.replace(
+        '[ "${1-}" = "--negative-control" ] && NEGATIVE=1\n', ""
+    )
+    if not check_self_invocation(no_flag_parse, scripts, wired_actionlint, wired_release_parity, wired_workflow_credentials, wired_release_plan, wired_ruff, wired_next_public_free):
+        failures.append("check_self_invocation: missed a deleted --negative-control flag parse")
+    no_negative_guard = wired.replace('if [ "$NEGATIVE" = 1 ]; then\n', "")
+    if not check_self_invocation(no_negative_guard, scripts, wired_actionlint, wired_release_parity, wired_workflow_credentials, wired_release_plan, wired_ruff, wired_next_public_free):
+        failures.append("check_self_invocation: missed a deleted NEGATIVE branch guard")
     # SMA-553 D10 + review finding 1, generalised (SMA-530). These three named fixtures used
     # to be spelled out for input-liveness only: the deleted REAL RUN (a strict PREFIX of the
     # --self-test line, so a substring test would report the script fully wired while the gate
