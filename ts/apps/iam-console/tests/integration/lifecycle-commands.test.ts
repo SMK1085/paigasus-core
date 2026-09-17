@@ -10,10 +10,11 @@ import { ErrorReason, type Presentation } from '@paigasus/sdk/errors/types';
 import { disposeTransports } from '@paigasus/sdk/iam';
 import { NodeStatus } from '@paigasus/sdk/iam/types';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { organizationPrn, teamPrn } from '@paigasus/console-core';
+import { organizationPrn, projectPrn, teamPrn } from '@paigasus/console-core';
 import { denial, startFakeIam, type FakeIam, type FakeIamHandlers, type FakeIamMethod } from '@paigasus/console-core/testing';
 import { archiveOrganization, archiveOrganizationForm, renameOrganization, renameOrganizationForm, restoreOrganization, restoreOrganizationForm } from '../../app/(console)/orgs/[org]/commands';
 import { archiveTeam, renameTeam, restoreTeam } from '../../app/(console)/orgs/[org]/teams/[team]/commands';
+import { archiveProject, renameProject, restoreProject } from '../../app/(console)/orgs/[org]/teams/[team]/projects/[project]/commands';
 import type { ActionResult } from '../../lib/form';
 import { IDS, callsSince, clientsFor } from './support';
 
@@ -30,6 +31,7 @@ afterAll(async () => {
 
 const ORG_A = organizationPrn(IDS.orgA);
 const TEAM_A1 = teamPrn(IDS.orgA, IDS.teamA1);
+const PROJECT_A1 = projectPrn(IDS.orgA, IDS.projectA1);
 const SLUG = 'current-slug';
 const NAME = 'Current Name';
 
@@ -216,6 +218,29 @@ lifecycleSuite({
   rename: renameTeam,
   archive: archiveTeam,
   restore: restoreTeam,
+});
+
+lifecycleSuite({
+  node: 'project',
+  prn: PROJECT_A1,
+  methods: { rename: 'tenancy.renameProject', archive: 'tenancy.archiveProject', restore: 'tenancy.restoreProject' },
+  handlers: (script) => ({
+    'tenancy.renameProject': (req) => {
+      answerRename(script, req);
+      return { project: { prn: req.prn, teamPrn: TEAM_A1, orgPrn: ORG_A, ...nodeFields(NodeStatus.ACTIVE, req) } };
+    },
+    'tenancy.archiveProject': (req) => {
+      answer(script);
+      return { project: { prn: req.prn, teamPrn: TEAM_A1, orgPrn: ORG_A, ...nodeFields(NodeStatus.ARCHIVED) } };
+    },
+    'tenancy.restoreProject': (req) => {
+      answer(script);
+      return { project: { prn: req.prn, teamPrn: TEAM_A1, orgPrn: ORG_A, ...nodeFields(NodeStatus.ACTIVE) } };
+    },
+  }),
+  rename: renameProject,
+  archive: archiveProject,
+  restore: restoreProject,
 });
 
 describe('the organization lifecycle forms', () => {
