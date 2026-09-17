@@ -208,9 +208,11 @@ The test drives a stub page that records what it was asked:
    — it passes no `timeout` at all.
 2. **The resolve path.** A `waitFor` that resolves makes the helper resolve, throwing nothing.
 3. **The message.** A rejected `TimeoutError` makes the helper throw a message that names the
-   attribute, the `Providers` effect, and **each of the three causes as a separate assertion**
-   — three substring checks, never one whole-string equality against a second copy of the
-   literal, which would pass with the message gutted.
+   attribute, the `Providers` effect, and **each of the four causes as a separate assertion**
+   — four substring checks, never one whole-string equality against a second copy of the
+   literal, which would pass with the message gutted. The four causes are a 404 on a chunk, a
+   hydration error thrown before the effect, a browser too CPU-starved to reach it, and the
+   page rendered outside a `Providers` layout at all (a 404 or an error boundary).
 4. **The cause.** The thrown error's `cause` is the original error, and its text quotes the
    original message.
 5. **The bound, three ways.** All three import the app's real `playwright.config.ts`:
@@ -357,8 +359,9 @@ scheduled dependency of `test` (`deps: ['~:build']`), not as a selected task.
 3. `HYDRATION_TIMEOUT_MS` is `15_000`, is not below the app's `expect.timeout`, and is at most a
    quarter of the app's Playwright `timeout` — all three asserted against the real config, in both
    apps.
-4. A timeout rejection throws a message naming the attribute, the `Providers` effect and the three
-   causes, with the original error as `cause`. A non-timeout rejection is rethrown unchanged.
+4. A timeout rejection throws a message naming the attribute, the `Providers` effect and the four
+   causes (404 on a chunk, hydration error, CPU starvation, page outside a Providers layout),
+   with the original error as `cause`. A non-timeout rejection is rethrown unchanged.
 5. No `.waitFor(` under either app's `tests/e2e/**` omits a `timeout`.
 6. Both apps' `test`, `typecheck` and `lint` pass, `ts:fmt` is clean, and **both apps'
    `test-e2e` tiers pass — including `gateway-console`'s `two-zone` project**, which is the

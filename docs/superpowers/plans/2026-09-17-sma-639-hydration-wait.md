@@ -35,6 +35,7 @@ From `ts/apps/<app>/` (where `<app>` is `gateway-console` or `iam-console`):
 From the repo root, for the gate-level runs in Task 6:
 
 ```bash
+export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
 moon run gateway-console-ts:test iam-console-ts:test
 moon run gateway-console-ts:typecheck iam-console-ts:typecheck
 moon run ts:lint ts:fmt
@@ -535,6 +536,8 @@ moon run gateway-console-ts:test          # must RE-RUN, not report a cached pas
 
 Expected: the second run executes the task rather than reporting it cached.
 
+**Correction (SMA-639):** The `touch` command shown here cannot invalidate a Moon cache key, because Moon hashes **file content**, not mtime. The probe as originally written was therefore defective. What was actually run: changed the file's content (appended a comment line), ran the task, observed a different cache hash and an executed task, then reverted the file with `git checkout --` and observed the original hash return. The measured hashes: `ea96c8ea` (original, executed) → `6550597c` (content changed, executed) → `ea96c8ea` (reverted, cached).
+
 If the second run reports a cache hit, the entry landed in the wrong task's `inputs` list — find the list containing `'vitest.config.ts'` and move it there.
 
 - [ ] **Step 4: Commit**
@@ -592,7 +595,7 @@ Both must print `1`. Any other number reds `repo:affected-smoke`.
 
 ```bash
 git add CLAUDE.md
-git commit -m "docs: record that locator.waitFor has no default timeout (SMA-639)"
+git commit -m "docs(ts): record that locator.waitFor has no default timeout (SMA-639)"
 ```
 
 ---
