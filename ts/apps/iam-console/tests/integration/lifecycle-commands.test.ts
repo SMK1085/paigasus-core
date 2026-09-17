@@ -10,9 +10,10 @@ import { ErrorReason, type Presentation } from '@paigasus/sdk/errors/types';
 import { disposeTransports } from '@paigasus/sdk/iam';
 import { NodeStatus } from '@paigasus/sdk/iam/types';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { organizationPrn } from '@paigasus/console-core';
+import { organizationPrn, teamPrn } from '@paigasus/console-core';
 import { denial, startFakeIam, type FakeIam, type FakeIamHandlers, type FakeIamMethod } from '@paigasus/console-core/testing';
 import { archiveOrganization, archiveOrganizationForm, renameOrganization, renameOrganizationForm, restoreOrganization, restoreOrganizationForm } from '../../app/(console)/orgs/[org]/commands';
+import { archiveTeam, renameTeam, restoreTeam } from '../../app/(console)/orgs/[org]/teams/[team]/commands';
 import type { ActionResult } from '../../lib/form';
 import { IDS, callsSince, clientsFor } from './support';
 
@@ -28,6 +29,7 @@ afterAll(async () => {
 });
 
 const ORG_A = organizationPrn(IDS.orgA);
+const TEAM_A1 = teamPrn(IDS.orgA, IDS.teamA1);
 const SLUG = 'current-slug';
 const NAME = 'Current Name';
 
@@ -191,6 +193,29 @@ lifecycleSuite({
   rename: renameOrganization,
   archive: archiveOrganization,
   restore: restoreOrganization,
+});
+
+lifecycleSuite({
+  node: 'team',
+  prn: TEAM_A1,
+  methods: { rename: 'tenancy.renameTeam', archive: 'tenancy.archiveTeam', restore: 'tenancy.restoreTeam' },
+  handlers: (script) => ({
+    'tenancy.renameTeam': (req) => {
+      answerRename(script, req);
+      return { team: { prn: req.prn, orgPrn: ORG_A, ...nodeFields(NodeStatus.ACTIVE, req) } };
+    },
+    'tenancy.archiveTeam': (req) => {
+      answer(script);
+      return { team: { prn: req.prn, orgPrn: ORG_A, ...nodeFields(NodeStatus.ARCHIVED) } };
+    },
+    'tenancy.restoreTeam': (req) => {
+      answer(script);
+      return { team: { prn: req.prn, orgPrn: ORG_A, ...nodeFields(NodeStatus.ACTIVE) } };
+    },
+  }),
+  rename: renameTeam,
+  archive: archiveTeam,
+  restore: restoreTeam,
 });
 
 describe('the organization lifecycle forms', () => {
