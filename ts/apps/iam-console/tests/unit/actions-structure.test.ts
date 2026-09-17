@@ -29,11 +29,12 @@ const EXPECTED: Readonly<Record<string, readonly string[]>> = {
   '(console)/orgs/[org]/teams/[team]/projects/[project]/actions.ts': ['archiveProjectAction', 'renameProjectAction', 'restoreProjectAction'],
 };
 
-// SMA-630 spec § 4.4, D2. A Server Action never navigates. redirect() from an action carries no
-// basePath and leaves the zone; forbidden() and notFound() would replace the inline form error that
-// D2 requires. The check reads identifiers: a presentation STRING such as 'forbidden' is not one.
-// It also matches a property NAME (`x.forbidden`), which no action uses.
-const NAVIGATION_HELPERS = ['redirect', 'forbidden', 'notFound'] as const;
+// SMA-630 spec § 4.4, D2. A Server Action never navigates. redirect() and permanentRedirect() from
+// an action carry no basePath and leave the zone; forbidden(), unauthorized() and notFound() would
+// replace the inline form error that D2 requires. The check reads identifiers: a presentation
+// STRING such as 'forbidden' is not one. It also matches a property NAME (`x.forbidden`), which no
+// action uses.
+const NAVIGATION_HELPERS = ['redirect', 'permanentRedirect', 'forbidden', 'unauthorized', 'notFound'] as const;
 
 function findActionFiles(dir: string, prefix = ''): string[] {
   const found: string[] = [];
@@ -187,6 +188,16 @@ describe('every Server Action gets its client through iamClientsForAction() (spe
         'an action that renders the 404 view',
         `${header}import { notFound } from 'next/navigation';\nexport async function a() { await iamClientsForAction(); notFound(); }`,
         'navigation helper notFound()',
+      ],
+      [
+        'an action that redirects permanently',
+        `${header}import { permanentRedirect } from 'next/navigation';\nexport async function a() { await iamClientsForAction(); permanentRedirect('/orgs'); }`,
+        'navigation helper permanentRedirect()',
+      ],
+      [
+        'an action that renders the 401 view',
+        `${header}import { unauthorized } from 'next/navigation';\nexport async function a() { await iamClientsForAction(); unauthorized(); }`,
+        'navigation helper unauthorized()',
       ],
     ])('%s', (_label, source, message) => {
       expect(checkActionsSource('probe.ts', source).violations.join('\n')).toContain(message);
