@@ -1,17 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 import { expect, type Page, type Request, type Response } from '@playwright/test';
 import type { Harness } from './harness';
+import { waitForHydration } from './hydration';
 
 export type SignedIn = { readonly accessToken: string; readonly refreshToken: string; readonly response: Response };
 
-/**
- * Waits until React hydrated the page: `Providers` sets `html[data-hydrated="true"]` in an effect.
- * A click before that is a plain document request, not a client navigation and not a Server Action
- * call (no `Next-Action` header), so every test waits for it before a click.
- */
-export async function waitForHydration(page: Page): Promise<void> {
-  await page.locator('html[data-hydrated="true"]').waitFor({ state: 'attached' });
-}
+// waitForHydration lives in its own module so it carries no RUNTIME @playwright/test import and a
+// vitest unit test can drive it (tests/unit/hydration.test.ts). Re-exported here so every spec
+// keeps importing it from './support/login'.
+export { waitForHydration } from './hydration';
 
 /**
  * Open `path` with no session and follow the whole login: proxy -> /gateway/auth/login -> the fake

@@ -1137,6 +1137,50 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   new worker starts a new one. A measured run showed the old container up at t=15s, no container at
   all at t=16s, and a brand-new container at t=17s. So this pull request needed no deterministic
   container label and no stale-container sweep.
+- Playwright's `locator.waitFor()` defaults to **no timeout** (1.63.0), and no `playwright.config.ts`
+  in this repo sets `use.actionTimeout`. So an unbounded `waitFor` is bounded only by the TEST
+  budget — 120 s in CI, 60 s locally — and when it expires it reports the locator, not a cause.
+  That cost SMA-512 pull request 4 two minutes of CI for an unexplained R4 flake. Both consoles'
+  hydration waits now go through `tests/e2e/support/hydration.ts`, bounded at
+  `HYDRATION_TIMEOUT_MS = 15_000` (one value, deliberately not a `process.env.CI` branch: both
+  configs set `retries: isCI ? 2 : 0`, so a branched constant would put the TIGHTER bound on the
+  run with NO retry). The helper takes a hand-written STRUCTURAL page type rather than `Page`,
+  which lets `tests/unit/hydration.test.ts` drive it with a plain stub and exercise the failure
+  path with no browser; a real `Page` satisfies that type on its own, so the module needs no
+  `@playwright/test` import at all — not even a type one. Two traps measured there:
+  `Pick<Page, 'locator'>` does NOT accept a stub (it keeps the full `Locator` return type —
+  `error TS2322`), so the parameter is a structural type; and the helper verifies timeout
+  failures by checking the error's `name` field. MEASURED on 1.63.0: a
+  `waitFor` that exceeds its own `timeout` rejects with `name` `TimeoutError`, but the constructor
+  name is mangled to `TimeoutError2` by bundling, so `error.constructor.name` is not usable either;
+  the check is on `name` because importing the class would give the module a runtime
+  `@playwright/test` dependency. Playwright also rejects a pending `waitFor` with "Target page, context
+  or browser has been closed" during teardown; calling that "the client bundle did not run" is a
+  confident wrong diagnosis. **Residual: nothing gates a third console zone** — a new app that copies
+  `login.ts` gets an unbounded wait and no `hydration.test.ts`, and nothing reds. `stripComments`
+  (SMA-639 local review) is now a single-pass character scanner, not a pair of regexes: it tracks
+  plain code, a single-quoted string, a double-quoted string, a template literal, a line comment,
+  and a block comment as separate states, with backslash escapes consumed inside a string. A `/*`
+  or `//` inside a string literal, or inside a line comment, no longer starts a comment and can no
+  longer eat a real `.waitFor(` call — the false negative the old regex pair had is closed, and a
+  fixture in `hydration.test.ts` proves it (verified by temporarily restoring the old two-regex
+  version, which fails that fixture). A template literal's `${...}` interpolation is now tracked as
+  its own code region too (SMA-639 CR round 2): the scanner resumes plain-code scanning at an
+  unescaped `${`, counts nested `{`/`}` pairs to find the matching closer, so an object literal or
+  a block body inside the interpolation does not end it early, and a nested template literal inside
+  an interpolation is handled the same way, on the same stack. A second fixture in
+  `hydration.test.ts` proves this the same way (temporarily masking the whole template span again
+  fails that fixture). **What remains:** the scanner is not a full tokenizer, so a regex literal is
+  not its own state — a `/*` or `//` sequence inside one would still be read as a comment marker.
+  That shape is absent from the tree today and is not gated. The scan's regex also cannot see the sibling
+  `waitForURL`/`waitForResponse`/`waitForRequest`/`waitForLoadState` APIs, which default to unbounded
+  the same way (`use.navigationTimeout` also defaults to 0) — roughly 15 live call sites across both
+  apps' e2e trees are not covered, and widening the regex is out of scope. The `15_000` literal pin in
+  `hydration.test.ts` case 5 is also the only tight constraint on the value in CI: MEASURED, with the
+  literal removed, a `30_000` constant passes the relational assertions under `CI=1`, since CI's 120 s
+  budget permits up to 30 s — the `/4` bound is tight only locally. `@paigasus/app-shell`'s
+  `loadHydrated` is NOT affected: it uses `expect(...).toHaveCount(1)`, already bounded by the expect
+  timeout.
 
 ## Workflow
 
