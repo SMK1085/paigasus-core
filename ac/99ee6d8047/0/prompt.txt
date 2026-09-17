@@ -3221,3 +3221,7 @@ Append the two lines
 ---
 
 And what do we need then for a working dev server?
+
+---
+
+then run stage 7
