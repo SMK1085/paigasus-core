@@ -24,13 +24,9 @@ use paigasus_kernel::Prn;
 use paigasus_proto::paigasus::iam::v1::tenancy_service_client::TenancyServiceClient;
 use paigasus_proto::paigasus::iam::v1::{ArchiveOrganizationRequest, RestoreOrganizationRequest};
 use paigasus_proto::paigasus::iam::v1::{
-    ArchiveTeamRequest, AttachMembershipRequest, CreateOrganizationRequest, CreateProjectRequest, CreateTeamRequest, GetOrganizationRequest, GetTeamRequest, Organization as ProtoOrganization,
-    Project as ProtoProject, RenameOrganizationRequest, RenameProjectRequest, RenameTeamRequest, RestoreTeamRequest, Team as ProtoTeam,
+    ArchiveProjectRequest, ArchiveTeamRequest, AttachMembershipRequest, CreateOrganizationRequest, CreateProjectRequest, CreateTeamRequest, GetOrganizationRequest, GetProjectRequest, GetTeamRequest,
+    Organization as ProtoOrganization, Project as ProtoProject, RenameOrganizationRequest, RenameProjectRequest, RenameTeamRequest, RestoreProjectRequest, RestoreTeamRequest, Team as ProtoTeam,
 };
-// The Archive*/Restore* requests for projects are for Tasks 4-5's forged-prn tests; unused at
-// this commit.
-#[allow(unused_imports)]
-use paigasus_proto::paigasus::iam::v1::{ArchiveProjectRequest, RestoreProjectRequest};
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter};
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
@@ -912,4 +908,236 @@ async fn a_forged_prn_never_writes_a_team() {
     on_server.abort();
     off_server.abort();
     assert!(failures.is_empty(), "forged-prn team cases failed:\n{}", failures.join("\n"));
+}
+
+/// T1 for projects (spec § 5.2). Forged shapes for this node kind: a wrong organization uuid
+/// (rename, restore), and a non-empty region (archive).
+#[tokio::test]
+async fn a_forged_prn_never_writes_a_project() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let idp = support::start_mock_idp().await;
+    let (enforced, unenforced) = two_states(&db, &idp).await;
+    let token = idp.bearer("forged-project", Some("forged-project@example.com"), "paigasus", 3600);
+    support::provision_platform_admin(&enforced, &token).await;
+    let (on_addr, on_server) = spawn_tenancy_server(enforced).await;
+    let (off_addr, off_server) = spawn_tenancy_server(unenforced).await;
+    let mut on = connect(on_addr).await;
+    let mut off = connect(off_addr).await;
+
+    let mut failures: Vec<String> = Vec::new();
+    let absent_org = Uuid::from_u128(0x0f03).as_hyphenated().to_string();
+
+    for (setting, slug_tag, client) in [("enforce=on", "on", &mut on), ("enforce=off", "off", &mut off)] {
+        // ---- rename (forged shape: a wrong organization uuid) ----
+        let org = create_org(client, &token, &format!("p-rn-o-{slug_tag}"), "Project Parent").await;
+        let team = create_team(client, &token, &org.prn, &format!("p-rn-t-{slug_tag}")).await;
+        let project = create_project(client, &token, &team.prn, &format!("p-rn-p-{slug_tag}")).await;
+        let action = Action::RenameProject.as_wire();
+        let event = EventType::ProjectRenamed.as_wire();
+        let before = client
+            .get_project(authed(GetProjectRequest { prn: project.prn.clone() }, &token))
+            .await
+            .unwrap()
+            .into_inner()
+            .project
+            .expect("project");
+        let audits = audit_count(&db, action, &project.prn).await;
+        let events = outbox_count(&db, event, &project.prn).await;
+        let label = format!("{setting} RenameProject");
+        let err = client
+            .rename_project(authed(
+                RenameProjectRequest {
+                    prn: with_org(&project.prn, &absent_org),
+                    new_slug: Some(format!("p-rn-p-{slug_tag}-renamed")),
+                    new_name: Some("Renamed".to_string()),
+                },
+                &token,
+            ))
+            .await
+            .unwrap_err();
+        check(&mut failures, &label, err.code() == Code::InvalidArgument, format!("code was {:?}", err.code()));
+        check(&mut failures, &label, reason(&err) == "prn-mismatch", format!("reason was {}", reason(&err)));
+        let after = client
+            .get_project(authed(GetProjectRequest { prn: project.prn.clone() }, &token))
+            .await
+            .unwrap()
+            .into_inner()
+            .project
+            .expect("project");
+        check(&mut failures, &label, after == before, format!("the project changed: {before:?} -> {after:?}"));
+        check(
+            &mut failures,
+            &label,
+            audit_count(&db, action, &project.prn).await == audits,
+            "an audit_log row was written".to_string(),
+        );
+        check(
+            &mut failures,
+            &label,
+            outbox_count(&db, event, &project.prn).await == events,
+            "an event_outbox row was written".to_string(),
+        );
+        // Positive control: a FRESH project in the same team, not the one just forged against
+        // (ruling R8 above).
+        let control = create_project(client, &token, &team.prn, &format!("p-rn-p-{slug_tag}-c")).await;
+        let control_audits = audit_count(&db, action, &control.prn).await;
+        let control_events = outbox_count(&db, event, &control.prn).await;
+        client
+            .rename_project(authed(
+                RenameProjectRequest {
+                    prn: control.prn.clone(),
+                    new_slug: Some(format!("p-rn-p-{slug_tag}-c-renamed")),
+                    new_name: Some("Renamed Control".to_string()),
+                },
+                &token,
+            ))
+            .await
+            .expect("the correct prn must succeed");
+        check(
+            &mut failures,
+            &label,
+            audit_count(&db, action, &control.prn).await == control_audits + 1 && outbox_count(&db, event, &control.prn).await == control_events + 1,
+            "the positive control wrote no row — the queries cannot see anything".to_string(),
+        );
+
+        // ---- archive (forged shape: a non-empty region) ----
+        let org = create_org(client, &token, &format!("p-ar-o-{slug_tag}"), "Project Parent").await;
+        let team = create_team(client, &token, &org.prn, &format!("p-ar-t-{slug_tag}")).await;
+        let project = create_project(client, &token, &team.prn, &format!("p-ar-p-{slug_tag}")).await;
+        let action = Action::ArchiveProject.as_wire();
+        let event = EventType::ProjectArchived.as_wire();
+        let before = client
+            .get_project(authed(GetProjectRequest { prn: project.prn.clone() }, &token))
+            .await
+            .unwrap()
+            .into_inner()
+            .project
+            .expect("project");
+        let audits = audit_count(&db, action, &project.prn).await;
+        let events = outbox_count(&db, event, &project.prn).await;
+        let label = format!("{setting} ArchiveProject");
+        let err = client
+            .archive_project(authed(
+                ArchiveProjectRequest {
+                    prn: with_region(&project.prn, "eu-west-1"),
+                },
+                &token,
+            ))
+            .await
+            .unwrap_err();
+        check(&mut failures, &label, err.code() == Code::InvalidArgument, format!("code was {:?}", err.code()));
+        check(&mut failures, &label, reason(&err) == "prn-mismatch", format!("reason was {}", reason(&err)));
+        let after = client
+            .get_project(authed(GetProjectRequest { prn: project.prn.clone() }, &token))
+            .await
+            .unwrap()
+            .into_inner()
+            .project
+            .expect("project");
+        check(&mut failures, &label, after == before, format!("the project changed: {before:?} -> {after:?}"));
+        check(
+            &mut failures,
+            &label,
+            audit_count(&db, action, &project.prn).await == audits,
+            "an audit_log row was written".to_string(),
+        );
+        check(
+            &mut failures,
+            &label,
+            outbox_count(&db, event, &project.prn).await == events,
+            "an event_outbox row was written".to_string(),
+        );
+        // Positive control: a FRESH project. The forged call above already archived the SAME
+        // project (same bug), and the `forbid-archived-writes` policy would then deny a second
+        // `ArchiveProject` against an already-archived node with `PermissionDenied` — a fresh
+        // project sidesteps both that denial and the no-op it would otherwise mask.
+        let control = create_project(client, &token, &team.prn, &format!("p-ar-p-{slug_tag}-c")).await;
+        let control_audits = audit_count(&db, action, &control.prn).await;
+        let control_events = outbox_count(&db, event, &control.prn).await;
+        client
+            .archive_project(authed(ArchiveProjectRequest { prn: control.prn.clone() }, &token))
+            .await
+            .expect("the correct prn must succeed");
+        check(
+            &mut failures,
+            &label,
+            audit_count(&db, action, &control.prn).await == control_audits + 1 && outbox_count(&db, event, &control.prn).await == control_events + 1,
+            "the positive control wrote no row — the queries cannot see anything".to_string(),
+        );
+
+        // ---- restore (forged shape: a wrong organization uuid) ----
+        let org = create_org(client, &token, &format!("p-rs-o-{slug_tag}"), "Project Parent").await;
+        let team = create_team(client, &token, &org.prn, &format!("p-rs-t-{slug_tag}")).await;
+        let project = create_project(client, &token, &team.prn, &format!("p-rs-p-{slug_tag}")).await;
+        client.archive_project(authed(ArchiveProjectRequest { prn: project.prn.clone() }, &token)).await.expect("setup archive");
+        let action = Action::RestoreProject.as_wire();
+        let event = EventType::ProjectRestored.as_wire();
+        let before = client
+            .get_project(authed(GetProjectRequest { prn: project.prn.clone() }, &token))
+            .await
+            .unwrap()
+            .into_inner()
+            .project
+            .expect("project");
+        let audits = audit_count(&db, action, &project.prn).await;
+        let events = outbox_count(&db, event, &project.prn).await;
+        let label = format!("{setting} RestoreProject");
+        let err = client
+            .restore_project(authed(
+                RestoreProjectRequest {
+                    prn: with_org(&project.prn, &absent_org),
+                },
+                &token,
+            ))
+            .await
+            .unwrap_err();
+        check(&mut failures, &label, err.code() == Code::InvalidArgument, format!("code was {:?}", err.code()));
+        check(&mut failures, &label, reason(&err) == "prn-mismatch", format!("reason was {}", reason(&err)));
+        let after = client
+            .get_project(authed(GetProjectRequest { prn: project.prn.clone() }, &token))
+            .await
+            .unwrap()
+            .into_inner()
+            .project
+            .expect("project");
+        check(&mut failures, &label, after == before, format!("the project changed: {before:?} -> {after:?}"));
+        check(
+            &mut failures,
+            &label,
+            audit_count(&db, action, &project.prn).await == audits,
+            "an audit_log row was written".to_string(),
+        );
+        check(
+            &mut failures,
+            &label,
+            outbox_count(&db, event, &project.prn).await == events,
+            "an event_outbox row was written".to_string(),
+        );
+        // Positive control: a FRESH project, archived first so a restore actually changes it.
+        // The forged call above already restored the SAME project (same bug), so a second
+        // restore on it would be a no-op and prove nothing about the count queries.
+        let control = create_project(client, &token, &team.prn, &format!("p-rs-p-{slug_tag}-c")).await;
+        client
+            .archive_project(authed(ArchiveProjectRequest { prn: control.prn.clone() }, &token))
+            .await
+            .expect("setup archive for the restore control");
+        let control_audits = audit_count(&db, action, &control.prn).await;
+        let control_events = outbox_count(&db, event, &control.prn).await;
+        client
+            .restore_project(authed(RestoreProjectRequest { prn: control.prn.clone() }, &token))
+            .await
+            .expect("the correct prn must succeed");
+        check(
+            &mut failures,
+            &label,
+            audit_count(&db, action, &control.prn).await == control_audits + 1 && outbox_count(&db, event, &control.prn).await == control_events + 1,
+            "the positive control wrote no row — the queries cannot see anything".to_string(),
+        );
+    }
+
+    on_server.abort();
+    off_server.abort();
+    assert!(failures.is_empty(), "forged-prn project cases failed:\n{}", failures.join("\n"));
 }
