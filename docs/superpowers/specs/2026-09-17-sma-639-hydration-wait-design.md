@@ -146,9 +146,17 @@ The helper explains a **timeout** and nothing else:
 ```
 React never hydrated: html[data-hydrated="true"] was not attached within 15000 ms.
 `Providers` sets that attribute in an effect, so its absence means the client bundle did not
-run — a 404 on a chunk, a hydration error thrown before the effect, or a browser too
-CPU-starved to reach it. Playwright reported: <original message>
+run — a 404 on a chunk, a hydration error thrown before the effect, a browser too CPU-starved
+to reach it, or the page rendered outside a `Providers` layout at all — a 404 or an error
+boundary. Playwright reported: <original message>
 ```
+
+The message names **four** causes, not three. `Providers` mounts only in
+`app/(console)/layout.tsx` and `app/(public)/layout.tsx` — the root `app/layout.tsx` renders
+`html`/`body` only. So a 404 or an error boundary can render without ever going through a
+`Providers` layout, and it never sets the attribute either. Omitting this fourth cause would
+reintroduce the exact "confident wrong diagnosis" this section bans, on a page that hydrated
+fine but simply never mounted `Providers`.
 
 **Every other error is rethrown unchanged.** An earlier draft wrapped all of them. That is a
 defect, not a simplification: Playwright rejects a pending `waitFor` with "Target page,
