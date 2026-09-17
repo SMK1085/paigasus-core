@@ -144,8 +144,8 @@ changed, which is the repository's own convention for a real write.
 ### D3 — Order of refusals
 
 **At the application service**, in order: `nothing-to-rename`, then `invalid-slug`, then
-`invalid-name`, then everything the repository raises (`node-archived`, `parent-archived`,
-`slug-conflict`, `not-found`). `nothing-to-rename` is first because the
+`invalid-name`, then everything the repository raises (`node-archived`, `slug-conflict`,
+`not-found`). `nothing-to-rename` is first because the
 `new_slug.is_none() && new_name.is_none()` check stays at the top of the method. The slug and name
 lines both run before `uow.begin()`, so both outrank every repository refusal. This extends the
 precedence F6 records for the slug; it does not change it.
@@ -159,6 +159,15 @@ refusals
 Only `enforce_tenancy = false` produces the application-layer order end to end. The default
 (`true`, `config.rs:847`) is the documented contract; the transport order above is what a client
 may rely on.
+
+**`rename` never answers `parent-archived`.** Measured during implementation, and the reason is
+worth stating because `create` differs. `rename_in` guards on the node's EFFECTIVE status — it
+folds the ancestors in and then raises the single `NodeArchived`
+(`pg_teams.rs:199-201`: `if NodeStatus::effective(team_status, &[org_status]) == …`, and
+`pg_projects.rs:232-234` over both ancestors). `ParentArchived` is raised only by the `create`
+paths (`pg_teams.rs:131`, `projects.rs:136`). So an active team under an archived organization
+answers `node-archived` on a rename and `parent-archived` on a create of a child. A doc comment or
+a test that expects `parent-archived` from a rename is wrong.
 
 A request that carries both an invalid slug and an invalid name answers `invalid-slug`, because the
 slug line comes first. `OrganizationService::create` and `TeamService::create` behave the same way
