@@ -28,6 +28,19 @@ test('R10: a cold login at the gateway zone reaches the overview with zero conne
   // is the assertion that actually proves acceptance criterion 2. connections() stays too: it
   // catches a connection opened and dropped without completing a request, a different failure
   // shape that requests() cannot see.
+  // THIS ROW'S OWN POSITIVE CONTROL, and it may not be moved to another test. A zero delta is
+  // also what an unwired forwarder reports — one the terminator never routes to counts nothing
+  // and this row would pass having proved no isolation at all. R8 drives traffic through /iam,
+  // but R8 is a DIFFERENT test: run this row alone (`--grep R10`), or let Playwright restart the
+  // worker after a failure, and R8's traffic never happens. A vacuity guard that lives in another
+  // test is not a guard on this one.
+  //
+  // So: reach the IAM zone through the terminator first, and prove the counter moves.
+  const wiringBefore = harness.iamConsole.requests();
+  const probe = await page.request.get(harness.url('/iam/healthz'));
+  expect(probe.ok(), 'the IAM zone did not answer through the terminator, so this row cannot measure isolation').toBe(true);
+  expect(harness.iamConsole.requests() - wiringBefore, 'the counting forwarder is not on the /iam route: a zero delta below would prove nothing').toBeGreaterThan(0);
+
   const connectionsBefore = harness.iamConsole.connections();
   const requestsBefore = harness.iamConsole.requests();
 

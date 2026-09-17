@@ -10,19 +10,36 @@ import { expect, test } from './support/two-zone-harness';
 type StaticAsset = { readonly pathname: string; readonly status: number; readonly type: string };
 
 test('R12: each zone loads its own _next assets under its own base path (SMA-513 AC 3 rehearsal)', async ({ page, harness }) => {
-  const assets: StaticAsset[] = [];
-  page.on('response', (response) => {
+  // ONE PAGE PER ZONE, in the SAME browser context. The context is what carries the shared
+  // session cookie, so the two zones are still one signed-in user; the separate pages are what
+  // make each zone's asset list its own.
+  //
+  // The obvious alternative — one page, one listener, split the array at the index the first
+  // navigation ended on — has a race: an IAM prefetch or a deferred asset can land after that
+  // snapshot and be counted as a gateway asset, failing the row for no real reason. The other
+  // obvious alternative, partitioning by pathname prefix, is worse than the race: this row's
+  // whole assertion is that each bucket carries its zone's prefix, so deriving the bucket FROM
+  // that prefix makes both checks tautologies that pass even for a genuine collision.
+  //
+  // A listener per page settles it. The bucket comes from which page made the request — the
+  // test's own structure — and the prefix stays an independent claim about it.
+  const iamAssets: StaticAsset[] = [];
+  const gatewayAssets: StaticAsset[] = [];
+  const record = (into: StaticAsset[]) => (response: import('@playwright/test').Response) => {
     const url = new URL(response.url());
-    if (url.pathname.includes('/_next/static/')) assets.push({ pathname: url.pathname, status: response.status(), type: response.request().resourceType() });
-  });
+    if (url.pathname.includes('/_next/static/')) into.push({ pathname: url.pathname, status: response.status(), type: response.request().resourceType() });
+  };
 
+  page.on('response', record(iamAssets));
   await page.goto(harness.url('/iam/orgs'));
   await expect(page.getByRole('region', { name: 'Your organizations' })).toBeVisible();
-  const iamAssets = [...assets];
 
-  await page.goto(harness.url('/gateway/overview'));
-  await expect(page.getByTestId('zone-overview')).toBeVisible();
-  const gatewayAssets = assets.slice(iamAssets.length);
+  const gatewayPage = await page.context().newPage();
+  gatewayPage.on('response', record(gatewayAssets));
+  await gatewayPage.goto(harness.url('/gateway/overview'));
+  await expect(gatewayPage.getByTestId('zone-overview')).toBeVisible();
+
+  const assets = [...iamAssets, ...gatewayAssets];
 
   // Every static request during the IAM visit is under /iam/_next/, and every one during the
   // gateway visit is under /gateway/_next/ — the base path is the only thing keeping the two

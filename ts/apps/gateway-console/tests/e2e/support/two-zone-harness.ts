@@ -223,9 +223,15 @@ export const test = base.extend<{ world: undefined }, { harness: TwoZoneHarness 
       }
     },
     // The container start on top of the two servers: REDIS_START_TIMEOUT_MS (120 s) for Redis, plus
-    // MAX_START_ATTEMPTS * READY_TIMEOUT_MS for the servers, plus room for the three fakes, the
-    // forwarder, the terminator, the port probes and the cleanup.
-    { scope: 'worker', timeout: REDIS_START_TIMEOUT_MS + MAX_START_ATTEMPTS * READY_TIMEOUT_MS + 60_000 },
+    // the server budget, plus room for the three fakes, the forwarder, the terminator, the port
+    // probes and the cleanup.
+    //
+    // The server budget is MAX_START_ATTEMPTS * 2 * READY_TIMEOUT_MS, and the 2 is load-bearing:
+    // THIS stack waits on two health endpoints per attempt, and waitForHealth can spend the full
+    // READY_TIMEOUT_MS on each before it observes a late child exit. Budgeting one probe per
+    // attempt lets this wrapper fire first on a slow start, and Playwright then reports an opaque
+    // fixture timeout instead of startStack's aggregated error, which names the server that failed.
+    { scope: 'worker', timeout: REDIS_START_TIMEOUT_MS + MAX_START_ATTEMPTS * 2 * READY_TIMEOUT_MS + 60_000 },
   ],
   // Before EVERY test: the default world and the default descriptors, and a reachable gateway — the
   // same three resets the single-zone harness does, for the same reason (a test that made the
