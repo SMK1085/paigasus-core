@@ -15,10 +15,10 @@ export async function waitForHydration(page: Page): Promise<void> {
 }
 ```
 
-Playwright 1.63's `locator.waitFor()` defaults to **no timeout**. The wait is therefore
-bounded only by the test budget — `timeout: isCI ? 120_000 : 60_000` in both
-`playwright.config.ts` files. When hydration does not happen, the helper consumes the whole
-budget and then reports the locator, not a cause.
+Playwright 1.63's `locator.waitFor()` defaults to **no timeout**, and no config in this
+repository sets `use.actionTimeout`. The wait is therefore bounded only by the test budget —
+`timeout: isCI ? 120_000 : 60_000` in both `playwright.config.ts` files. When hydration does
+not happen, the helper consumes the whole budget and then reports the locator, not a cause.
 
 Measured on SMA-512 pull request 4 (#248). Row R4 failed in CI with:
 
@@ -32,196 +32,319 @@ The underlying cause was browser CPU starvation on a loaded runner. R4 runs in a
 second locally and passed 5 of 5 under `CI=1` when run alone. It is not a logic defect and
 it does not reproduce.
 
-`signIn` calls the helper, so most rows reach it: seven call sites in `gateway-console`,
-and `iam-console` carries the same helper. Every future occurrence costs the full test
-budget and says nothing.
+`signIn` calls the helper, so most rows reach it: **`gateway-console`** has 7 call sites
+(5 through `signIn`, 2 direct), **`iam-console`** has 15 (12 through `signIn`, 3 direct).
 
 ## 2. Goal and non-goal
 
 **Goal.** Convert an unexplained two-minute timeout into a fast, self-explaining failure.
 
 **Non-goal.** This does not reduce flakiness. It changes what a flake costs and what it
-reports. Section 8 states the cost of that trade honestly.
+reports. Section 9 states the cost of that trade honestly.
 
 ## 3. D1 — Structure
 
-Add `tests/e2e/support/hydration.ts` to each app. Its only Playwright import is
+Add `tests/e2e/support/hydration.ts` to each app. Its only Playwright import is a type:
 
 ```ts
 import type { Page } from '@playwright/test';
 ```
 
-a type-only import, fully erased under `verbatimModuleSyntax`. The module therefore has
-**no runtime dependency on Playwright**, which is what makes section 6's unit test possible:
-a vitest test can call the helper with a stub object.
+fully erased under `verbatimModuleSyntax`. The module therefore has **no runtime dependency
+on Playwright**, which is what makes section 7's unit test possible.
 
-`login.ts` re-exports the helper:
+### The parameter type
+
+The helper does **not** take `Page`, and it does **not** take `Pick<Page, 'locator'>`.
+
+**Measured (tsc, this worktree):** `Pick<Page, 'locator'>` keeps `locator()`'s return type
+as the full `Locator` interface, so a plain stub is rejected —
+`error TS2322: Type '{ locator: … }' is not assignable to type 'Pick<Page, "locator">'`.
+An earlier draft of this spec claimed otherwise; it was wrong, and an implementer following
+it would have reached for `as unknown as Locator`, which would have removed tsc from the
+stub entirely.
+
+The parameter is a structural type that models both levels:
 
 ```ts
-export { HYDRATION_TIMEOUT_MS, waitForHydration } from './hydration';
+type HydrationPage = {
+  locator(selector: string): { waitFor(options: { state: 'attached'; timeout: number }): Promise<void> };
+};
 ```
 
-No call site changes. The existing `import { signIn, waitForHydration } from './support/login'`
-lines in the spec files keep working, and `signIn` keeps calling it.
+**Measured:** a plain stub and a real `Page` both satisfy it, with no cast and no error —
+method-parameter bivariance makes the real `Page` assignable. So every existing call site
+keeps type-checking and the unit test needs no escape hatch.
 
-The `Page` parameter is narrowed to the surface the helper uses, so the stub in the unit
-test satisfies it without constructing a real `Page`:
+`tsconfig.base.json:11` sets `exactOptionalPropertyTypes`, so the helper must always pass a
+real `timeout` and never `timeout: undefined`.
+
+### The re-export
+
+`login.ts` re-exports the **function only**:
 
 ```ts
-type HydrationPage = Pick<Page, 'locator'>;
+export { waitForHydration } from './hydration';
 ```
 
-A real `Page` satisfies `Pick<Page, 'locator'>`, so every existing call site still
-type-checks.
+`HYDRATION_TIMEOUT_MS` has no call-site consumer, so the unit test imports it from
+`./hydration` directly. No spec file changes.
+
+The existing doc comment at `login.ts:7-11` — why every test waits before a click — **moves
+to `hydration.ts`**. It is the reason the helper exists and belongs with it.
+
+### Why it lives under `tests/e2e/support/`
+
+It is e2e support; the unit test importing it is the point, not an accident. **Measured:**
+vitest's `exclude: ['tests/e2e/**']` governs *collection*, not the import graph — a
+`tests/unit/` test imports a `tests/e2e/support/` module cleanly (1 test, 85 ms, exit 0).
 
 ## 4. D2 — The timeout value
 
 ```ts
-export const HYDRATION_TIMEOUT_MS = process.env.CI ? 15_000 : 5_000;
+export const HYDRATION_TIMEOUT_MS = 15_000;
 ```
 
-This **deliberately mirrors each app's `expect.timeout`**, which both `playwright.config.ts`
-files already set to `isCI ? 15_000 : 5_000`. That is not an arbitrary number: the config's
-own comment states why it was raised, and it describes this exact condition —
+**One value, not a CI branch.** An earlier draft used `process.env.CI ? 15_000 : 5_000`.
+That is wrong, and the reason is the mitigation structure: both configs set
+`retries: isCI ? 2 : 0`, so the **local** branch would have been the tighter bound *and* the
+one with no retry to absorb it — on the same hardware, running the same full graph CLAUDE.md
+tells a developer to run, under the same concurrent load the config comment blames
+("Rust compiles plus four `test-e2e` tasks at once", `iam-console/playwright.config.ts:21-23`).
+
+15 s is the number this repo already calibrated for a hydrating page on a loaded runner. Both
+configs set `expect: { timeout: isCI ? 15_000 : 5_000 }`, and the comment above it says:
 
 > CI ONLY, same reasoning as `timeout` above: a `waitFor`/`toBeVisible` bounded by the 5 s
 > default can fail while the page is still hydrating on a loaded CI runner.
 
-So the repo has already calibrated a hydration-aware bound for a loaded CI runner, and this
-helper adopts it rather than inventing a second number.
+Taking that value unconditionally gives:
 
-Two consequences, both intended:
+| | test budget | this bound | share of budget |
+|---|---|---|---|
+| CI | 120 s | 15 s | 1/8 |
+| local | 60 s | 15 s | 1/4 |
 
-* In CI the wait is **1/8 of the test budget** (15 s against 120 s), so it fails fast.
-* The truthiness test is `process.env.CI`, byte-identical to the two config files' own
-  `!!process.env.CI`. The helper and the config can therefore never disagree about whether
-  a run is a CI run.
+It fails fast in both, is never tighter than the expect timeout the repo already deems
+necessary, and it deletes the CI detection along with three problems that came with it: the
+untested branch (`process.env.CI` is frozen at module evaluation, so `vi.stubEnv` cannot
+reach it and only the current process's branch is ever exercised), the question of whether a
+local `moon ci` exports `CI` at all, and a false claim that the helper's test was
+"byte-identical" to the config's.
 
-The value is **not** read from the config at runtime — importing `playwright.config.ts` into
-test support would give the helper a runtime Playwright dependency and undo section 3. The
-relationship is asserted in a test instead (section 6, case 5).
+**Not measured:** whether a local `moon ci` sets `CI`. Nothing in `.moon/workspace.yml` or
+`.moon/tasks.yml` mentions it, and Moon reads `CI` for `runInCI` rather than setting it — but
+this spec does not assert it, because with one value the answer cannot change any outcome.
 
-## 5. D3 — The message
+The value is **not** read from the config at runtime; that would give the helper a runtime
+Playwright dependency and undo section 3. The relationship is asserted in a test instead.
 
-The helper catches, then rethrows with the explanation, preserving the original error twice
-over: as `cause`, and quoted in the text so it survives a reporter that does not print
-`cause`.
+## 5. D3 — The message, and what it must not claim
+
+The helper explains a **timeout** and nothing else:
 
 ```
-React never hydrated: html[data-hydrated="true"] was not attached within <N> ms.
+React never hydrated: html[data-hydrated="true"] was not attached within 15000 ms.
 `Providers` sets that attribute in an effect, so its absence means the client bundle did not
 run — a 404 on a chunk, a hydration error thrown before the effect, or a browser too
 CPU-starved to reach it. Playwright reported: <original message>
 ```
 
-Three points of design:
+**Every other error is rethrown unchanged.** An earlier draft wrapped all of them. That is a
+defect, not a simplification: Playwright rejects a pending `waitFor` with "Target page,
+context or browser has been closed" or "Test ended." during teardown, and with a navigation
+error on a hard failure. Reporting those as "the client bundle did not run" is a confident
+wrong diagnosis, which is worse than the locator dump this issue exists to replace.
 
-* It names **what the attribute means** (`Providers` sets it in an effect), which is the
-  fact a reader needs and the original error does not carry.
-* It names **the three things its absence implies**, which is the triage the reader would
-  otherwise have to reconstruct.
-* It wraps **every** error from `waitFor`, not only a timeout. Any failure of this wait is
-  worth the context, and no caller branches on Playwright's `TimeoutError` class — all
-  call sites simply `await`.
+The branch is `err instanceof Error && err.name === 'TimeoutError'` — a string comparison, so
+it needs no runtime Playwright import. Section 3's constraint is what forces a name check
+rather than `instanceof TimeoutError`; that is the compromise, stated rather than hidden.
 
-The Playwright trace is unaffected: `trace: 'retain-on-failure'` is per test, not per error.
+**To be measured during implementation:** that a `waitFor` which exceeds its *own* `timeout`
+option rejects with `name === 'TimeoutError'`. If it does not, the branch is wrong and the
+fallback is to also match the message against `/Timeout .* exceeded/`. This must be measured
+against a real browser, not assumed.
 
-## 6. D4 — Verification
+The error keeps the original as `cause`, and quotes its text so it survives a reporter that
+does not print `cause`. The Playwright trace is unaffected: `trace: 'retain-on-failure'` is
+per test, not per error.
 
-`tests/unit/hydration.test.ts` per app. The unit tier runs on every pull request that
-touches the app (`tests/**/*` is an input of each app's `test` task), and it runs without a
-browser, so the failure path is exercised on every run rather than only when the e2e tier
-is red.
+## 6. Rejected alternative: `expect(locator, message).toBeAttached()`
+
+```ts
+await expect(page.locator('html[data-hydrated="true"]'), MESSAGE)
+  .toBeAttached({ timeout: HYDRATION_TIMEOUT_MS });
+```
+
+Playwright 1.63 supports both `toBeAttached()` and the `expect(value, message)` description
+form, and this is already the repository's shape at
+`paigasus-app-shell/tests/e2e/support/recorder.ts:55`. It is genuinely simpler: no structural
+type, no stub, no error wrapping, and Playwright's own error class, call log and code snippet
+all survive.
+
+**It is rejected because it cannot be tested.** The helper would have a runtime Playwright
+import, so only a browser run could exercise it — and the failure path never runs when the
+e2e tier is green. The whole failure mode this issue describes reached production precisely
+because nothing exercised the failure path. The cost of rejecting it is real and stated here:
+we lose Playwright's call log, and we take on the `TimeoutError` name check in section 5.
+
+## 7. D4 — Verification
+
+`tests/unit/hydration.test.ts` per app. The unit tier runs without a browser on every pull
+request that touches the app, so the failure path is exercised on every run.
 
 The test drives a stub page that records what it was asked:
 
 1. **The call.** The selector is `html[data-hydrated="true"]`, the state is `attached`, and
-   the `timeout` option equals `HYDRATION_TIMEOUT_MS`. This is what the current helper gets
-   wrong — it passes no `timeout` at all.
+   the `timeout` option equals `HYDRATION_TIMEOUT_MS`. This is what today's helper gets wrong
+   — it passes no `timeout` at all.
 2. **The resolve path.** A `waitFor` that resolves makes the helper resolve, throwing nothing.
-3. **The message.** A `waitFor` that rejects makes the helper throw a message naming the
-   attribute, stating that the client bundle did not run, and listing the three causes.
+3. **The message.** A rejected `TimeoutError` makes the helper throw a message that names the
+   attribute, the `Providers` effect, and **each of the three causes as a separate assertion**
+   — three substring checks, never one whole-string equality against a second copy of the
+   literal, which would pass with the message gutted.
 4. **The cause.** The thrown error's `cause` is the original error, and its text quotes the
    original message.
-5. **The relationship.** `HYDRATION_TIMEOUT_MS < config.timeout`, importing the app's real
-   `playwright.config.ts`. This pins what the issue actually asks for — "shorter than the
-   test budget" — rather than pinning a literal, so raising either number alone reds the
-   test.
+5. **The bound, three ways.** All three import the app's real `playwright.config.ts`:
+   - `HYDRATION_TIMEOUT_MS === 15_000` — the literal pin. This is also the **only** thing that
+     keeps the two apps' values equal; each app's other assertions constrain only its own copy
+     against its own config, so without this `iam = 15_000` and `gateway = 30_000` would both
+     pass.
+   - `HYDRATION_TIMEOUT_MS >= config.expect.timeout` — never tighter than the bound the repo
+     already calibrated for a hydrating page.
+   - `HYDRATION_TIMEOUT_MS <= config.timeout / 4` — *meaningfully* shorter than the budget, not
+     nominally shorter. An earlier draft asserted only `< config.timeout`, an 8× margin, and
+     claimed it would red when either number moved. It would not: 15 s → 60 s would have stayed
+     green. The `/4` form is exactly tight locally (60 s / 4 = 15 s), so raising the constant at
+     all reds it.
 
-   **Measured, not assumed:** a vitest unit test in `gateway-console` imports
-   `../../playwright.config` cleanly (1 test, 596 ms, exit 0) on vitest 5.0.0. If a future
-   change makes that import fail, the fallback is a literal comparison against `60_000`,
-   the smaller of the two budgets — weaker, and a deliberate downgrade to be noted, not a
-   silent substitution.
+   `config.timeout` and `config.expect` are optional in `defineConfig`'s return type and this
+   repo is `strict`, so the test **narrows explicitly and fails when either is absent** — never
+   skips.
 
-Cases 1 and 5 are the two that can fail on the current code. Cases 2–4 pin the new
-behaviour against a later edit.
+   **Measured:** a vitest unit test imports `../../playwright.config` cleanly (1 test, 596 ms,
+   exit 0) in `gateway-console`. `iam-console`'s vitest config aliases `next/cache` in addition,
+   so **the implementation must repeat this measurement there** rather than inherit the claim.
+6. **The non-timeout path.** A rejection whose `name` is not `TimeoutError` is rethrown
+   **unchanged** — same error object, no hydration text. This is the assertion that stops
+   section 5's wrong diagnosis from coming back.
+7. **No unbounded wait in this app.** A source scan of that app's `tests/e2e/**` asserting no
+   `.waitFor(` call omits a `timeout`, following the `tests/unit/e2e-rows.test.ts` precedent.
+   This is what stops the defect being reintroduced in a *new* helper in the same app.
 
-## 7. Decisions taken and their reasons
+Cases 1, 5 and 7 fail on today's code.
+
+## 8. Decisions and residuals
 
 ### D5 — Two copies stay two copies
 
-The issue directs this: "Do it in **both** apps' copies; they are the same helper." No
-shared e2e-support package exists, and an eight-line helper does not justify creating one —
-it would need its own `package.json`, its own Moon project, and a place in every consuming
-task's `inputs`.
+The issue directs it: "Do it in **both** apps' copies; they are the same helper." No shared
+e2e-support package exists, and an eight-line helper does not justify creating one — it would
+need a `package.json`, a Moon project, and a place in every consuming task's `inputs`.
 
-The duplication is bounded by the per-app test: each app's `hydration.test.ts` asserts that
-app's own copy, so a drift in one app reds that app's own tier. There is deliberately **no
-single-site gate** (the repo's `repo:*-single-site` pattern) — those exist where a second
-copy of a *policy* silently diverges from the one that is enforced. Here both copies are
-independently asserted, so a divergence cannot hide.
+Case 5's literal pin is what keeps the two values equal, and case 7 keeps each app free of a
+new unbounded wait.
 
-### D6 — `paigasus-app-shell`'s `loadHydrated` is out of scope
+**Residual, stated in the repository's own form: nothing gates a third console zone.** CLAUDE.md
+records that a third app "repeats the same shape" for the Tailwind guard. A third zone that
+copies today's `login.ts` gets the unbounded `waitFor`, ships without a `hydration.test.ts`, and
+**nothing reds**. Closing that needs a registry entry of the `TAILWIND_GUARD_INVOCATIONS` kind in
+`ci/affected-graph/ci_targets.py`, which would also mean re-baselining that file's 23-key
+`EXPECTED_FINDING_KEYS` tuple. That is out of proportion to this change and is deliberately not
+done here.
 
-`ts/packages/paigasus-app-shell/tests/e2e/support/recorder.ts:55` waits for the same
-attribute, but with `await expect(page.locator('html[data-hydrated="true"]')).toHaveCount(1)`.
-That is bounded by the **expect** timeout, not the test budget — 5 s there, since that
-package's `playwright.config.ts` sets no `expect` override — and it already fails with an
-expect-style error naming the locator and the expected count.
+### D6 — `paigasus-app-shell`'s `loadHydrated` stays as it is
 
-It does not have this defect. Pulling it in would widen the pull request into a package
-whose e2e tier runs with `retries: 0`, for no measured problem.
+`paigasus-app-shell/tests/e2e/support/recorder.ts:55` waits for the same attribute with
+`expect(...).toHaveCount(1)` — bounded by the **expect** timeout, 5 s there, since that package's
+config sets no `expect` override. It does not have this defect: it is bounded, and it already
+fails with an expect-style error naming the locator.
 
-## 8. What this costs
+**The contradiction this raises is real and is answered, not dodged.** Section 4 says a 5 s bound
+can be too short while hydrating; `app-shell` runs on exactly that bound, with `retries: 0`. The
+difference is the page: `app-shell`'s fixture is a minimal Next app with no auth, no IAM client
+and no container, and its tier has not produced this flake shape. If it ever does, the same
+treatment applies there. Pulling it into this pull request now would widen it into a package with
+no retries, for no measured problem.
 
-Making the wait fail at 15 s can turn a pass into a failure: a starved CI runner that would
-have hydrated at 20 s now fails where it previously passed. That is the deliberate trade,
-and three things bound it.
+### `paigasus-auth`'s bounded wait is prior art
 
-* CI runs `retries: 2`, so a single starved attempt does not red the run.
-* A test that needs a retry is reported **FLAKY**, not PASSED, so the condition stays
-  visible rather than being hidden by the retry.
-* The one occurrence actually measured never recovered inside 120 s, so there is no
-  evidence of a real hydration that lands between 15 s and 120 s.
+`paigasus-auth/tests/e2e/roundtrip.spec.ts:28` already passes `timeout: 5_000` to a `waitFor`.
+It is a different package, a different element (a Keycloak heading, not hydration), and it is
+already bounded, so it stays as it is. It is cited so a reader knows the repo has two spellings
+of this and that only the console helper was unbounded.
 
-If such an occurrence appears, the answer is to raise `HYDRATION_TIMEOUT_MS` with the
-measurement recorded — not to remove the bound.
+## 9. What this costs
 
-## 9. Files
+Making the wait fail at 15 s can turn a pass into a failure: a runner that would have hydrated at
+20 s now fails where it previously passed.
+
+* In CI, `retries: 2` absorbs a single starved attempt, and a retry-dependent pass is reported
+  **FLAKY** rather than PASSED, so the condition stays visible.
+* **Locally there are no retries**, so a local full-graph run can newly red. That is the price of
+  the bound, and 15 s (rather than the 5 s of the first draft) is what keeps it small.
+* The one occurrence actually measured never recovered inside 120 s, so there is no evidence of a
+  real hydration landing between 15 s and 120 s.
+
+**The two-zone tier is the heaviest caller.** `gateway-console/tests/e2e/two-zone-session.spec.ts:71`
+and `:74` run in the `two-zone` Playwright project, whose worker fixture starts a Redis container;
+Playwright starts a new worker after a failed test, so each CI retry pays a container
+teardown-and-restart plus a full login. Line 71 is the first hydration on a cold stack.
+
+Those rows nonetheless keep the same 15 s bound. The container starts in the fixture, **before**
+the page load, so it is not inside the hydration wait — a cold two-zone stack does not hydrate more
+slowly than a warm one. The retry cost the fixture imposes exists today and is not created by this
+change; what changes is that the first attempt gives up after 15 s instead of 120 s, which makes
+three attempts cheaper than one is now.
+
+If a two-zone row does prove to need a larger bound, the answer is to raise it with the measurement
+recorded — not to remove it.
+
+## 10. Files
 
 | File | Change |
 |------|--------|
 | `ts/apps/iam-console/tests/e2e/support/hydration.ts` | new |
-| `ts/apps/iam-console/tests/e2e/support/login.ts` | drop the helper, re-export it |
+| `ts/apps/iam-console/tests/e2e/support/login.ts` | drop the helper, re-export it, move the comment |
 | `ts/apps/iam-console/tests/unit/hydration.test.ts` | new |
+| `ts/apps/iam-console/moon.yml` | add `playwright.config.ts` to `test` inputs |
 | `ts/apps/gateway-console/tests/e2e/support/hydration.ts` | new |
-| `ts/apps/gateway-console/tests/e2e/support/login.ts` | drop the helper, re-export it |
+| `ts/apps/gateway-console/tests/e2e/support/login.ts` | drop the helper, re-export it, move the comment |
 | `ts/apps/gateway-console/tests/unit/hydration.test.ts` | new |
+| `ts/apps/gateway-console/moon.yml` | add `playwright.config.ts` to `test` inputs |
+| `CLAUDE.md` | one bullet: `locator.waitFor()` defaults to no timeout |
 
-Every file opens with `// SPDX-License-Identifier: Apache-2.0`.
+Every source file opens with `// SPDX-License-Identifier: Apache-2.0`.
 
-**Scheduling.** `tests/**/*` is an input of each app's `build`, `typecheck`, `test` and
-`test-e2e` tasks, so this change selects all four in both apps.
-`gateway-console-ts:test-e2e` needs Docker, so a local full run needs a reachable daemon.
+### Why `moon.yml` must change
 
-## 10. Acceptance
+**Measured.** Each app's `test` task carries `options.merge: replace`
+(`iam-console/moon.yml:280`, `gateway-console/moon.yml:249`), so it inherits nothing and lists
+every input by hand — and neither list contains `playwright.config.ts`
+(`iam-console/moon.yml:235-280`, `gateway-console/moon.yml:210-249`). Without the entry, the one
+edit case 5 exists to catch — lowering `timeout:` below `HYDRATION_TIMEOUT_MS` — leaves the
+task's cache key unchanged, Moon serves a cached green, and the assertion proves nothing. This is
+the staleness class `iam-console/moon.yml:113-119` already records.
 
-1. Neither `login.ts` defines `waitForHydration`; both re-export it from `hydration.ts`.
-2. `waitForHydration` passes an explicit `timeout` to `waitFor`, equal to
-   `HYDRATION_TIMEOUT_MS`.
-3. `HYDRATION_TIMEOUT_MS` is smaller than the app's Playwright `timeout`, asserted against
-   the real config.
-4. A rejected wait throws a message naming the attribute, the `Providers` effect, and the
-   three causes, with the original error as `cause`.
-5. Both apps' `test`, `typecheck` and `lint` tasks pass, and `ts:fmt` is clean.
+### Scheduling, corrected
+
+`tests/**/*` is an input of each app's **`typecheck`, `test` and `test-e2e`** tasks — **not**
+`build`. `build` also carries `merge: replace` and its `@group(sources)` is `app/**/*`,
+`lib/**/*`, `proxy.ts` only (`gateway-console/moon.yml:33-39`). `build` still runs, as a
+scheduled dependency of `test` (`deps: ['~:build']`), not as a selected task.
+`gateway-console-ts:test-e2e` needs Docker.
+
+## 11. Acceptance
+
+1. Neither `login.ts` defines `waitForHydration`; both re-export it from `hydration.ts`, and the
+   explanatory comment moved with it.
+2. `waitForHydration` passes an explicit `timeout` to `waitFor`, equal to `HYDRATION_TIMEOUT_MS`.
+3. `HYDRATION_TIMEOUT_MS` is `15_000`, is not below the app's `expect.timeout`, and is at most a
+   quarter of the app's Playwright `timeout` — all three asserted against the real config, in both
+   apps.
+4. A timeout rejection throws a message naming the attribute, the `Providers` effect and the three
+   causes, with the original error as `cause`. A non-timeout rejection is rethrown unchanged.
+5. No `.waitFor(` under either app's `tests/e2e/**` omits a `timeout`.
+6. Both apps' `test`, `typecheck` and `lint` pass, `ts:fmt` is clean, and **both apps'
+   `test-e2e` tiers pass — including `gateway-console`'s `two-zone` project**, which is the
+   heaviest caller and the one this change can most plausibly disturb.
