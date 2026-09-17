@@ -2,11 +2,14 @@
 //
 // The loader of /iam/orgs/[org]/teams/[team]/projects/[project] (spec § 5.2). A project PRN holds
 // the org and the project, not the team, so [team] is checked through GetProject's team_prn.
+// SMA-630 spec § 5.1: the member load and three affordance questions about the project's OWN PRN
+// run together.
 import 'server-only';
 import type { PaigasusError } from '@paigasus/sdk/errors/types';
 import { callIam, isUuid, projectPrn, type IamClients, type MayI } from '@paigasus/console-core';
 import { loadMembers, type MembersData } from '../../../../../members';
 import { sameNode } from '../../../../../node-ref';
+import { lifecycleOf, type NodeLifecycle } from '../../../../../../node-status';
 
 export type ProjectPageData =
   | { readonly kind: 'not-found' }
@@ -17,7 +20,10 @@ export type ProjectPageData =
       readonly teamId: string;
       readonly projectId: string;
       readonly projectPrn: string;
-      readonly project: { readonly name: string; readonly slug: string };
+      readonly project: { readonly name: string; readonly slug: string; readonly lifecycle: NodeLifecycle };
+      readonly canRename: boolean;
+      readonly canArchive: boolean;
+      readonly canRestore: boolean;
       readonly members: MembersData;
     };
 export type ProjectPageDeps = {
@@ -42,6 +48,22 @@ export async function loadProjectPage(
   const project = got.value.project;
   if (project === undefined || !sameNode(project.teamPrn, 'team', teamId) || !sameNode(project.orgPrn, 'organization', orgId)) return { kind: 'not-found' };
 
-  const members = await loadMembers(deps, prn, params.membersOffset);
-  return { kind: 'ok', orgId, teamId, projectId, projectPrn: prn, project: { name: project.name, slug: project.slug }, members };
+  const [members, canRename, canArchive, canRestore] = await Promise.all([
+    loadMembers(deps, prn, params.membersOffset),
+    deps.mayI('RenameProject', prn),
+    deps.mayI('ArchiveProject', prn),
+    deps.mayI('RestoreProject', prn),
+  ]);
+  return {
+    kind: 'ok',
+    orgId,
+    teamId,
+    projectId,
+    projectPrn: prn,
+    project: { name: project.name, slug: project.slug, lifecycle: lifecycleOf(project) },
+    canRename,
+    canArchive,
+    canRestore,
+    members,
+  };
 }

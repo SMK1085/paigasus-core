@@ -13,8 +13,11 @@ import { SectionError } from '../../../../../_components/section-error';
 import { isUuid } from '@paigasus/console-core';
 import { iamClients, mayI } from '../../../../../../lib/console';
 import { parseOffset } from '../../../../../../lib/paging';
+import { ManageSection } from '../../../../manage-section';
+import { statusColumnLabel } from '../../../../node-status';
+import { StatusBadge } from '../../../../status-badge';
 import { MembersSection } from '../../../members-section';
-import { createProjectAction } from './actions';
+import { archiveTeamAction, createProjectAction, renameTeamAction, restoreTeamAction } from './actions';
 import { loadTeamPage, type ProjectList } from './load';
 
 type Props = {
@@ -31,6 +34,7 @@ function ProjectTable({ base, list, membersOffset }: { readonly base: string; re
           <TableRow>
             <TableHead>Name</TableHead>
             <TableHead>Slug</TableHead>
+            <TableHead>Status</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
@@ -46,6 +50,7 @@ function ProjectTable({ base, list, membersOffset }: { readonly base: string; re
                 )}
               </TableCell>
               <TableCell>{row.slug}</TableCell>
+              <TableCell>{statusColumnLabel(row.lifecycle)}</TableCell>
             </TableRow>
           ))}
         </TableBody>
@@ -71,7 +76,10 @@ export default async function TeamPage({ params, searchParams }: Props): Promise
     <div className="flex flex-col gap-8 p-6">
       <Breadcrumbs items={[{ label: 'Organizations', href: '/iam/orgs' }, { label: 'Organization', href: `/iam/orgs/${data.orgId}` }, { label: data.team.name }]} />
       <div>
-        <h1 className="text-2xl font-semibold">{data.team.name}</h1>
+        <div className="flex flex-wrap items-center gap-2">
+          <h1 className="text-2xl font-semibold">{data.team.name}</h1>
+          <StatusBadge lifecycle={data.team.lifecycle} />
+        </div>
         <p className="text-muted-foreground text-sm">{data.team.slug}</p>
       </div>
       <section aria-labelledby="projects-heading" className="flex flex-col gap-3">
@@ -82,6 +90,15 @@ export default async function TeamPage({ params, searchParams }: Props): Promise
         {data.canCreateProject ? <CreateForm testId="create-project" title="Create project" submitLabel="Create" action={createProjectAction} hidden={{ teamPrn: data.teamPrn }} /> : null}
       </section>
       <MembersSection nodePrn={data.teamPrn} path={base} data={data.members} keep={{ offset }} />
+      <ManageSection
+        node="team"
+        prn={data.teamPrn}
+        name={data.team.name}
+        slug={data.team.slug}
+        lifecycle={data.team.lifecycle}
+        can={{ rename: data.canRename, archive: data.canArchive, restore: data.canRestore }}
+        actions={{ rename: renameTeamAction, archive: archiveTeamAction, restore: restoreTeamAction }}
+      />
     </div>
   );
 }
