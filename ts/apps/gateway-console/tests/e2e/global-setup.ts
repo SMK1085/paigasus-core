@@ -22,8 +22,16 @@ function stage(moonTask: string, appDir: string, standaloneDir: string): void {
   const staticTarget = path.join(standaloneDir, '.next', 'static');
   rmSync(staticTarget, { recursive: true, force: true });
   cpSync(path.join(appDir, '.next', 'static'), staticTarget, { recursive: true });
+  // Cleared FIRST, exactly like `.next/static` two lines above, and cleared even when the source
+  // is absent. cpSync merges into an existing tree rather than replacing it, so without this a
+  // file deleted from `public/` would survive in the standalone copy across runs and the tier
+  // would serve an asset the app no longer ships. Neither app has a `public/` today, so this
+  // branch is currently unreachable — which is the reason to make it correct now rather than
+  // when someone adds a favicon and hits it.
   const publicDir = path.join(appDir, 'public');
-  if (existsSync(publicDir)) cpSync(publicDir, path.join(standaloneDir, 'public'), { recursive: true });
+  const publicTarget = path.join(standaloneDir, 'public');
+  rmSync(publicTarget, { recursive: true, force: true });
+  if (existsSync(publicDir)) cpSync(publicDir, publicTarget, { recursive: true });
 }
 
 export default function globalSetup(): void {
