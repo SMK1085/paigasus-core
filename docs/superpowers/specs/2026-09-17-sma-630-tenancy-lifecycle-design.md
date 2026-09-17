@@ -377,7 +377,11 @@ renders it with no `key` at a stable position, so React keeps its state through 
 - A failure shows in the `-error` area of the control that produced it, while that control is
   mounted. The region shows the failure only after that control unmounts: its key changed, or the
   section does not render it. So the same error never shows twice.
-- A new submission replaces the previous result.
+- A new submission replaces the previous result. It also clears the error of every other control:
+  each control key holds a reset counter, and a submission increments the counters of the other
+  controls. The control that submits keeps its key, so a failed rename keeps its typed values (§ 6.1).
+- Only the last submission sets the result. When an older submission completes after a newer one
+  started, `ManageControls` ignores its result.
 
 The region is inside the section. When the refreshed section renders nothing (§ 5.3), the region
 goes too. `tests/unit/manage-controls.test.tsx` pins this rule.

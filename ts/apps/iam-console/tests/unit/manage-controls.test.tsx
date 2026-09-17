@@ -9,7 +9,7 @@
 // Each case renders the real ManageSection with real useActionState and a real form submission,
 // then renders it AGAIN with the props that the refreshed page sends.
 import type { ReactNode } from 'react';
-import { cleanup, render, screen, within } from '@testing-library/react';
+import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ZoneProvider } from '@paigasus/app-shell';
@@ -184,5 +184,65 @@ describe('ManageSection result region (spec § 6.4)', () => {
     await within(screen.getByTestId('manage-result')).findByText('Restored.');
     expect(screen.queryByText(FORBIDDEN_COPY)).toBeNull();
     expect(screen.queryByTestId('correlation-id')).toBeNull();
+  });
+
+  it('keeps the typed values next to the error after a refused rename', async () => {
+    const user = userEvent.setup();
+    render(section(base({ rename: answering({ ok: false, error: SLUG_CONFLICT }) })));
+
+    await user.clear(screen.getByLabelText('Slug'));
+    await user.type(screen.getByLabelText('Slug'), 'taken');
+    await user.click(screen.getByRole('button', { name: 'Rename' }));
+    await within(screen.getByTestId('rename-team-error')).findByText(CONFLICT_COPY);
+
+    expect(screen.getByLabelText<HTMLInputElement>('Slug').value).toBe('taken');
+    expectOnce(CONFLICT_COPY);
+  });
+
+  it('removes the error of another control when a new submission succeeds', async () => {
+    const user = userEvent.setup();
+    const props = base({ rename: answering({ ok: false, error: SLUG_CONFLICT }), archive: answering({ ok: true }) });
+    const { rerender } = render(section(props));
+
+    await user.clear(screen.getByLabelText('Slug'));
+    await user.type(screen.getByLabelText('Slug'), 'taken');
+    await user.click(screen.getByRole('button', { name: 'Rename' }));
+    await within(screen.getByTestId('rename-team-error')).findByText(CONFLICT_COPY);
+
+    await confirmArchive(user);
+    await within(screen.getByTestId('manage-result')).findByText('Archived.');
+    rerender(section({ ...props, lifecycle: ARCHIVED }));
+
+    expect(screen.queryByText(CONFLICT_COPY)).toBeNull();
+    expect(screen.getByTestId('rename-team-error').textContent).toBe('');
+    expect(screen.getByTestId('manage-result').textContent).toBe('Archived.');
+    expectOnce('Archived.');
+  });
+
+  it('ignores the result of a submission that a later submission replaced', async () => {
+    const user = userEvent.setup();
+    let finishRename: (state: ActionState) => void = () => undefined;
+    const slowRename: FormAction = () =>
+      new Promise<ActionState>((resolve) => {
+        finishRename = resolve;
+      });
+    const props = base({ rename: slowRename, archive: answering({ ok: true }) });
+    const { rerender } = render(section(props));
+
+    await user.click(screen.getByRole('button', { name: 'Rename' }));
+    await confirmArchive(user);
+    // The rename finishes AFTER the archive.
+    await act(async () => {
+      finishRename({ ok: true });
+      await Promise.resolve();
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId('manage-result').textContent).toBe('Archived.');
+    });
+    rerender(section({ ...props, lifecycle: ARCHIVED }));
+
+    expect(screen.getByTestId('manage-result').textContent).toBe('Archived.');
+    expect(screen.queryByText('Renamed.')).toBeNull();
+    expectOnce('Archived.');
   });
 });
