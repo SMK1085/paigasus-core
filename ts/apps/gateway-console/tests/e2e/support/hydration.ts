@@ -15,9 +15,9 @@
  * it is both configs' CI `expect.timeout`, and the comment above that setting says why. It is 1/8
  * of the 120 s CI test budget and 1/4 of the 60 s local one, so the wait fails fast in both.
  *
- * Without it, a locator's `waitFor` call has NO timeout at all in Playwright 1.63 (no config here
- * sets `use.actionTimeout`), so the wait consumes the whole test budget and then reports the
- * locator rather than a cause.
+ * Without it, `locator.waitFor()` has NO timeout at all in Playwright 1.63 (no config here sets
+ * `use.actionTimeout`), so the wait consumes the whole test budget and then reports the locator
+ * rather than a cause.
  */
 export const HYDRATION_TIMEOUT_MS = 15_000;
 

@@ -32,6 +32,28 @@ function timeoutError(message: string): Error {
   return error;
 }
 
+/**
+ * Removes block and line comments from source text before it is scanned for unbounded
+ * `.waitFor(` calls, so prose mentioning the API in a doc comment cannot masquerade as a real
+ * call (a false POSITIVE, demonstrated against this very file — see the doc comment on
+ * `HYDRATION_TIMEOUT_MS` in `hydration.ts`) and, more dangerously, so a *comment* that happens to
+ * contain the substring `timeout` cannot make the scan silently SKIP a real unguarded call next to
+ * it (a false NEGATIVE — this repo has a recorded history of assertions going inert exactly this
+ * way). The `[^:]` guard on the line-comment strip is deliberate: without it, `https://` inside a
+ * string literal reads as a line comment and everything after it on that line is discarded,
+ * corrupting real code rather than removing a comment.
+ */
+function stripComments(source: string): string {
+  return source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
+}
+
+/** The list of `.waitFor(...)` findings in `source` whose call omits an explicit `timeout`. */
+function findUnboundedWaitFor(source: string): string[] {
+  return [...stripComments(source).matchAll(/\.waitFor\(([^)]*)\)/g)]
+    .filter((match) => !(match[1] ?? '').includes('timeout'))
+    .map((match) => `.waitFor(${match[1] ?? ''})`);
+}
+
 describe('waitForHydration', () => {
   it('waits for the hydration attribute with an explicit timeout', async () => {
     const { page, calls } = stubPage();
@@ -109,10 +131,31 @@ describe('waitForHydration', () => {
     walk(root);
     expect(files.length).toBeGreaterThan(0);
     const unbounded = files.flatMap((file) =>
-      [...readFileSync(file, 'utf8').matchAll(/\.waitFor\(([^)]*)\)/g)]
-        .filter((match) => !(match[1] ?? '').includes('timeout'))
-        .map((match) => `${path.relative(root, file)}: .waitFor(${match[1] ?? ''})`),
+      findUnboundedWaitFor(readFileSync(file, 'utf8')).map((finding) => `${path.relative(root, file)}: ${finding}`),
     );
     expect(unbounded).toEqual([]);
+  });
+
+  it('strips comments before scanning so prose mentions are ignored and real code survives', () => {
+    // Four shapes in one fixture: a real unguarded call (must be reported), a real guarded call
+    // (must not), the same unguarded shape quoted inside a block comment AND a line comment (must
+    // not — this is the false-positive case that bit hydration.ts's own doc comment), and a
+    // `https://` URL on a line with real code after it (the code must survive the line-comment
+    // strip, proving the `[^:]` guard works rather than silently discarding it).
+    const fixture = [
+      `await page.locator('unguarded').waitFor({ state: 'attached', marker: 'real-call' });`,
+      `await page.locator('guarded').waitFor({ state: 'attached', timeout: 1 });`,
+      `/**`,
+      ` * Prose: page.locator('block').waitFor({ state: 'attached', marker: 'block-comment' });`,
+      ` */`,
+      `// Prose: page.locator('line').waitFor({ state: 'attached', marker: 'line-comment' });`,
+      `const docs = 'see https://example.com for details';`,
+      `await page.locator('after-url').waitFor({ state: 'attached', marker: 'after-url' });`,
+    ].join('\n');
+
+    expect(findUnboundedWaitFor(fixture)).toEqual([
+      ".waitFor({ state: 'attached', marker: 'real-call' })",
+      ".waitFor({ state: 'attached', marker: 'after-url' })",
+    ]);
   });
 });
