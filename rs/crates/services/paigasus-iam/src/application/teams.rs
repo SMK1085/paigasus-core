@@ -17,6 +17,7 @@ use crate::application::error::TenancyError;
 use crate::application::pagination::Page;
 use paigasus_iam_core::{
     Action, AuditEntry, AuditLog, AuditOutcome, Clock, DomainEvent, EntityGenBumper, EventType, IdGenerator, NodeStatus, NodeView, Outbox, PrincipalId, Slug, Stamp, Team, TeamRepository, UnitOfWork,
+    validate_name,
 };
 use std::sync::Arc;
 use uuid::Uuid;
@@ -170,6 +171,10 @@ where
     /// (`NothingToRename` otherwise); rejected on an EFFECTIVELY archived team — own status
     /// or ancestor org (`NodeArchived`).
     ///
+    /// The new name is validated with the same rule `create` uses (`validate_name`) and answers
+    /// `InvalidName` (SMA-642). The check runs before the transaction opens, so it outranks
+    /// `NodeArchived` and `ParentArchived`. The stored name is the TRIMMED one.
+    ///
     /// SMA-606 D2: builds its event/entry AFTER `rename_in`, from `Mutated::value` — it
     /// receives a bare `Uuid`, not a PRN, so it cannot construct one until the repository hands
     /// back the (possibly renamed) node, and the payload must carry the POST-change
@@ -180,11 +185,14 @@ where
             return Err(TenancyError::NothingToRename);
         }
         let slug = new_slug.map(Slug::parse).transpose()?;
+        // SMA-642: mirrors the slug line above. `create` validates through `Team::new`; without
+        // this, `rename` stores a name `create` refuses. The stored name is the TRIMMED one (D2).
+        let name = new_name.map(validate_name).transpose()?;
         let stamp = Stamp::new(self.clock.now(), actor.clone());
         let corr = self.ids.new_correlation_id();
 
         let tx = self.uow.begin().await?;
-        let out = self.repo.rename_in(&*tx, id, slug.as_ref(), new_name, &stamp).await?;
+        let out = self.repo.rename_in(&*tx, id, slug.as_ref(), name.as_deref(), &stamp).await?;
         if out.changed {
             let ev = self.team_event(EventType::TeamRenamed, &out.value, &stamp, corr);
             // SMA-606 D5: the detail must carry the same payload shape as the event, not an
@@ -838,5 +846,61 @@ mod tests {
 
         assert_eq!(bumper.calls(), 1);
         assert_eq!(bumper.snapshot_at_bump(), Some(1), "the commit counter must already read 1 (committed) at the instant bump() runs");
+    }
+
+    /// SMA-642 § 6.1: the three refusals the issue names, on a team. Each proves `TeamService::
+    /// rename` calls `validate_name` at all — the per-file half of the check, which no test in
+    /// organizations.rs can cover.
+    #[tokio::test]
+    async fn rename_refuses_an_empty_blank_or_overlong_name() {
+        let store = TenancyStore::default();
+        let org = seed_org(&store, 9800, "acme", &test_stamp(Utc::now(), 1));
+        let svc = new_service(store);
+        let id = svc.create(org, "eng", "Engineering", &actor(1)).await.unwrap().node.id.uuid();
+
+        let too_long = "x".repeat(257);
+        for bad in ["", "   ", too_long.as_str()] {
+            let err = svc.rename(id, None, Some(bad), &actor(2)).await.unwrap_err();
+            assert!(matches!(err, TenancyError::InvalidName(_)), "a rename to {bad:?} must be refused, got {err:?}");
+        }
+    }
+
+    /// SMA-642 D3, the case an organization cannot express. A team's in-transaction guard folds
+    /// its org's status (`pg_teams.rs:200`), so an active team under an archived org answers
+    /// `NodeArchived` on rename — same variant `rename` uses for an own-archived node
+    /// (`ports.rs:161`; `organizations.rs`'s own archived-rename tests answer `NodeArchived`
+    /// too, `:561`/`:684`). `ParentArchived` is `create`'s variant, not `rename`'s. The name
+    /// check runs before the transaction opens, so it must win.
+    #[tokio::test]
+    async fn a_bad_name_outranks_an_ancestor_archived_node() {
+        let store = TenancyStore::default();
+        let stamp = test_stamp(Utc::now(), 1);
+        let org = seed_org(&store, 9801, "acme", &stamp);
+        let svc = new_service(store.clone());
+        let id = svc.create(org, "eng", "Engineering", &actor(1)).await.unwrap().node.id.uuid();
+
+        InMemoryOrgs(store.clone()).set_status(org, NodeStatus::Archived, &stamp).await.unwrap();
+
+        // The guard is real: a VALID name on this team is refused as NodeArchived.
+        assert_eq!(svc.rename(id, None, Some("Platform"), &actor(2)).await.unwrap_err(), TenancyError::NodeArchived);
+
+        // And invalid-name still outranks it.
+        let err = svc.rename(id, None, Some(""), &actor(2)).await.unwrap_err();
+        assert!(matches!(err, TenancyError::InvalidName(_)), "InvalidName must outrank NodeArchived, got {err:?}");
+    }
+
+    /// SMA-642 D2: the stored name is the trimmed one on a team too. Task 1 proves the semantics
+    /// on an organization; this proves THIS file's line passes the validated value down rather
+    /// than the raw input — a copy that validates and then forwards `new_name` would pass the
+    /// refusal test above and fail here.
+    #[tokio::test]
+    async fn rename_stores_the_trimmed_name() {
+        let store = TenancyStore::default();
+        let org = seed_org(&store, 9802, "acme", &test_stamp(Utc::now(), 1));
+        let svc = new_service(store);
+        let id = svc.create(org, "eng", "Engineering", &actor(1)).await.unwrap().node.id.uuid();
+
+        let renamed = svc.rename(id, None, Some("  Platform  "), &actor(2)).await.unwrap();
+        assert_eq!(renamed.node.name, "Platform");
     }
 }
