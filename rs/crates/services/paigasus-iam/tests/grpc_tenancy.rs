@@ -1166,6 +1166,19 @@ async fn an_ungranted_caller_cannot_tell_a_forged_prn_from_a_correct_one() {
     let project = create_project(&mut client, &admin, &team.prn, "t3-project").await;
     let archived_org = create_org(&mut client, &admin, "t3-org-archived", "T3 Archived").await;
     client.archive_organization(authed(ArchiveOrganizationRequest { prn: archived_org.prn.clone() }, &admin)).await.unwrap();
+    // RestoreTeam and RestoreProject below use `team` and `project`, which are NOT archived;
+    // RestoreOrganization uses `archived_org`, which IS. Both are correct as they stand: the
+    // stranger has no grant, so every restore call below is refused at the authorization gate,
+    // before the handler ever reaches an archived-state check. `archived_org`'s archived state
+    // is set up only so its "correct" case names a plausible restore target — this test's
+    // property does not depend on it, and an unarchived org here would be denied the same way.
+
+    // Snapshot the total row counts BEFORE any denied call, after every setup write above (four
+    // creates, one archive). Eighteen calls below span nine handlers and three node kinds, so a
+    // count filtered to one action/node (as this test's first draft used) would miss a write by
+    // any of the other eight handlers. An unfiltered total catches all of them.
+    let audit_total_before = audit_log::Entity::find().count(&db).await.expect("count audit_log total");
+    let outbox_total_before = event_outbox::Entity::find().count(&db).await.expect("count event_outbox total");
 
     let mut failures: Vec<String> = Vec::new();
     let absent_org = Uuid::from_u128(0x0f04).as_hyphenated().to_string();
@@ -1247,12 +1260,18 @@ async fn an_ungranted_caller_cannot_tell_a_forged_prn_from_a_correct_one() {
         expect_denied(&mut failures, label, err);
     }
 
-    // Nothing was written by any of the refused calls.
+    // Nothing was written by any of the eighteen denied calls above, across all nine handlers.
     check(
         &mut failures,
-        "no write",
-        audit_count(&db, Action::RenameTeam.as_wire(), &team.prn).await == 0 && outbox_count(&db, EventType::TeamRenamed.as_wire(), &team.prn).await == 0,
-        "a denied call wrote a row".to_string(),
+        "no write: audit_log",
+        audit_log::Entity::find().count(&db).await.expect("count audit_log total") == audit_total_before,
+        "a denied call wrote an audit_log row".to_string(),
+    );
+    check(
+        &mut failures,
+        "no write: event_outbox",
+        event_outbox::Entity::find().count(&db).await.expect("count event_outbox total") == outbox_total_before,
+        "a denied call wrote an event_outbox row".to_string(),
     );
 
     server.abort();
