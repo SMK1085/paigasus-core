@@ -3,7 +3,7 @@
 // AC 1, spec § 6.2 layer 3. Driven off package.json's `exports` map rather than a hand-written
 // list, so an entry point added later is covered the day it is added — which is what makes it safe
 // for PR B to ship two entries while the design spec's § 6.1 names five (see the plan's D1).
-import { readdirSync, readFileSync, writeFileSync, unlinkSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { dirname, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import ts from 'typescript';
@@ -109,129 +109,59 @@ describe("AC 1 — 'server-only' is imported at exactly one site", () => {
     expect(offenders).toEqual([]);
   });
 
+  // In-memory probes. They used to write `src/__*-probe.ts` files and walk the tree. Vitest runs
+  // test files in parallel, so another file that walks `src/` (tests/http-surface.test.ts) could
+  // read a probe mid-flight and report a false violation, or hit ENOENT when the probe was deleted
+  // between its readdir and its read. A killed run also left the probe in `src/`. RULE: no test in
+  // this package writes into `src/` (SMA-575 spec § 2). The probes test `importsServerOnly`, which
+  // is the part that decides; the walk itself is covered by 'no other file in src/ imports it'.
+  const PROBE = 'src/__probe.ts';
+
   it('detects double-quoted server-only import as offender', () => {
-    const probeFile = resolve(PKG_ROOT, 'src/__quote-probe.ts');
-    try {
-      const content = `// SPDX-License-Identifier: Apache-2.0
+    const content = `// SPDX-License-Identifier: Apache-2.0
 import "server-only";
 `;
-      writeFileSync(probeFile, content, 'utf8');
-
-      const others = globSourceFiles().filter((f) => f !== resolve(PKG_ROOT, 'src/server-guard.ts'));
-      const offenders = others.filter((f) => importsServerOnly(readFileSync(f, 'utf8'), f));
-      expect(offenders).toContain(probeFile);
-    } finally {
-      try {
-        unlinkSync(probeFile);
-      } catch {
-        // Ignore cleanup errors
-      }
-    }
+    expect(importsServerOnly(content, PROBE)).toBe(true);
   });
 
   it('does not flag server-only inside a comment as offender', () => {
-    const probeFile = resolve(PKG_ROOT, 'src/__comment-probe.ts');
-    try {
-      const content = `// SPDX-License-Identifier: Apache-2.0
+    const content = `// SPDX-License-Identifier: Apache-2.0
 // This mentions server-only in prose, not as an import.
 export const guard = true;
 `;
-      writeFileSync(probeFile, content, 'utf8');
-
-      const others = globSourceFiles().filter((f) => f !== resolve(PKG_ROOT, 'src/server-guard.ts'));
-      const offenders = others.filter((f) => importsServerOnly(readFileSync(f, 'utf8'), f));
-      expect(offenders).not.toContain(probeFile);
-    } finally {
-      try {
-        unlinkSync(probeFile);
-      } catch {
-        // Ignore cleanup errors
-      }
-    }
+    expect(importsServerOnly(content, PROBE)).toBe(false);
   });
 
   it('detects server-only import with trailing comment as offender', () => {
-    const probeFile = resolve(PKG_ROOT, 'src/__trailing-comment-probe.ts');
-    try {
-      const content = `// SPDX-License-Identifier: Apache-2.0
+    const content = `// SPDX-License-Identifier: Apache-2.0
 import "server-only"; // boundary
 `;
-      writeFileSync(probeFile, content, 'utf8');
-
-      const others = globSourceFiles().filter((f) => f !== resolve(PKG_ROOT, 'src/server-guard.ts'));
-      const offenders = others.filter((f) => importsServerOnly(readFileSync(f, 'utf8'), f));
-      expect(offenders).toContain(probeFile);
-    } finally {
-      try {
-        unlinkSync(probeFile);
-      } catch {
-        // Ignore cleanup errors
-      }
-    }
+    expect(importsServerOnly(content, PROBE)).toBe(true);
   });
 
   it('detects server-only import with block comment noise as offender', () => {
-    const probeFile = resolve(PKG_ROOT, 'src/__block-comment-probe.ts');
-    try {
-      const content = `// SPDX-License-Identifier: Apache-2.0
+    const content = `// SPDX-License-Identifier: Apache-2.0
 import /* boundary */ "server-only";
 `;
-      writeFileSync(probeFile, content, 'utf8');
-
-      const others = globSourceFiles().filter((f) => f !== resolve(PKG_ROOT, 'src/server-guard.ts'));
-      const offenders = others.filter((f) => importsServerOnly(readFileSync(f, 'utf8'), f));
-      expect(offenders).toContain(probeFile);
-    } finally {
-      try {
-        unlinkSync(probeFile);
-      } catch {
-        // Ignore cleanup errors
-      }
-    }
+    expect(importsServerOnly(content, PROBE)).toBe(true);
   });
 
   it('detects server-only import with a multiline block comment as offender', () => {
-    const probeFile = resolve(PKG_ROOT, 'src/__multiline-block-comment-probe.ts');
-    try {
-      // The block comment carries a REAL line terminator (not an escaped "\\n" inside one
-      // source line) — this is the case a regex anchored on `[^'"\n]*` cannot see, since the
-      // comment crosses a newline before the specifier is reached.
-      const content = `// SPDX-License-Identifier: Apache-2.0
+    // The block comment carries a REAL line terminator (not an escaped "\\n" inside one
+    // source line) — this is the case a regex anchored on `[^'"\n]*` cannot see, since the
+    // comment crosses a newline before the specifier is reached.
+    const content = `// SPDX-License-Identifier: Apache-2.0
 import /* boundary
 */ "server-only";
 `;
-      writeFileSync(probeFile, content, 'utf8');
-
-      const others = globSourceFiles().filter((f) => f !== resolve(PKG_ROOT, 'src/server-guard.ts'));
-      const offenders = others.filter((f) => importsServerOnly(readFileSync(f, 'utf8'), f));
-      expect(offenders).toContain(probeFile);
-    } finally {
-      try {
-        unlinkSync(probeFile);
-      } catch {
-        // Ignore cleanup errors
-      }
-    }
+    expect(importsServerOnly(content, PROBE)).toBe(true);
   });
 
   it('does not flag unrelated import with server-only in comment as offender', () => {
-    const probeFile = resolve(PKG_ROOT, 'src/__unrelated-import-probe.ts');
-    try {
-      const content = `// SPDX-License-Identifier: Apache-2.0
+    const content = `// SPDX-License-Identifier: Apache-2.0
 import { readFileSync } from 'node:fs'; // not a server-only import
 `;
-      writeFileSync(probeFile, content, 'utf8');
-
-      const others = globSourceFiles().filter((f) => f !== resolve(PKG_ROOT, 'src/server-guard.ts'));
-      const offenders = others.filter((f) => importsServerOnly(readFileSync(f, 'utf8'), f));
-      expect(offenders).not.toContain(probeFile);
-    } finally {
-      try {
-        unlinkSync(probeFile);
-      } catch {
-        // Ignore cleanup errors
-      }
-    }
+    expect(importsServerOnly(content, PROBE)).toBe(false);
   });
 });
 
