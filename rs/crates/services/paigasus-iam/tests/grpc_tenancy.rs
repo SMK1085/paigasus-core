@@ -1141,3 +1141,120 @@ async fn a_forged_prn_never_writes_a_project() {
     off_server.abort();
     assert!(failures.is_empty(), "forged-prn project cases failed:\n{}", failures.join("\n"));
 }
+
+/// T3 (spec § 5.2, decision D1): with `enforce_tenancy` on, a principal with NO grant must get
+/// `permission-denied` for a forged prn and for the correct prn alike. A different answer for
+/// the two would tell the caller which organization owns the node. This test passes before the
+/// SMA-643 fix as well; mutation m3 (compare before authorize) must break it.
+#[tokio::test]
+async fn an_ungranted_caller_cannot_tell_a_forged_prn_from_a_correct_one() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let idp = support::start_mock_idp().await;
+    let state = AppState::new(db.clone(), &support::test_config(&idp)).await.unwrap();
+    let admin = idp.bearer("t3-admin", Some("t3-admin@example.com"), "paigasus", 3600);
+    support::provision_platform_admin(&state, &admin).await;
+    // A second principal, JIT-provisioned but never granted anything.
+    let stranger = idp.bearer("t3-stranger", Some("t3-stranger@example.com"), "paigasus", 3600);
+    support::provision(&state, &stranger).await;
+    let (addr, server) = spawn_tenancy_server(state).await;
+    let mut client = connect(addr).await;
+
+    let org = create_org(&mut client, &admin, "t3-org", "T3 Org").await;
+    let team = create_team(&mut client, &admin, &org.prn, "t3-team").await;
+    let project = create_project(&mut client, &admin, &team.prn, "t3-project").await;
+    let archived_org = create_org(&mut client, &admin, "t3-org-archived", "T3 Archived").await;
+    client.archive_organization(authed(ArchiveOrganizationRequest { prn: archived_org.prn.clone() }, &admin)).await.unwrap();
+
+    let mut failures: Vec<String> = Vec::new();
+    let absent_org = Uuid::from_u128(0x0f04).as_hyphenated().to_string();
+    let forged_org = with_org(&org.prn, &absent_org);
+    let forged_archived = with_org(&archived_org.prn, &absent_org);
+    let forged_team = with_org(&team.prn, &absent_org);
+    let forged_project = with_org(&project.prn, &absent_org);
+
+    // Each row: a label, the correct prn, the forged prn. Both must answer permission-denied.
+    let expect_denied = |failures: &mut Vec<String>, label: &str, err: tonic::Status| {
+        check(failures, label, err.code() == Code::PermissionDenied, format!("code was {:?}", err.code()));
+        check(failures, label, reason(&err) == "forbidden", format!("reason was {}", reason(&err)));
+    };
+
+    for (label, prn) in [("RenameOrganization correct", org.prn.clone()), ("RenameOrganization forged", forged_org.clone())] {
+        let err = client
+            .rename_organization(authed(
+                RenameOrganizationRequest {
+                    prn,
+                    new_slug: Some("t3-stolen".to_string()),
+                    new_name: None,
+                },
+                &stranger,
+            ))
+            .await
+            .unwrap_err();
+        expect_denied(&mut failures, label, err);
+    }
+    for (label, prn) in [("ArchiveOrganization correct", org.prn.clone()), ("ArchiveOrganization forged", forged_org.clone())] {
+        let err = client.archive_organization(authed(ArchiveOrganizationRequest { prn }, &stranger)).await.unwrap_err();
+        expect_denied(&mut failures, label, err);
+    }
+    for (label, prn) in [("RestoreOrganization correct", archived_org.prn.clone()), ("RestoreOrganization forged", forged_archived.clone())] {
+        let err = client.restore_organization(authed(RestoreOrganizationRequest { prn }, &stranger)).await.unwrap_err();
+        expect_denied(&mut failures, label, err);
+    }
+    for (label, prn) in [("RenameTeam correct", team.prn.clone()), ("RenameTeam forged", forged_team.clone())] {
+        let err = client
+            .rename_team(authed(
+                RenameTeamRequest {
+                    prn,
+                    new_slug: Some("t3-stolen".to_string()),
+                    new_name: None,
+                },
+                &stranger,
+            ))
+            .await
+            .unwrap_err();
+        expect_denied(&mut failures, label, err);
+    }
+    for (label, prn) in [("ArchiveTeam correct", team.prn.clone()), ("ArchiveTeam forged", forged_team.clone())] {
+        let err = client.archive_team(authed(ArchiveTeamRequest { prn }, &stranger)).await.unwrap_err();
+        expect_denied(&mut failures, label, err);
+    }
+    for (label, prn) in [("RestoreTeam correct", team.prn.clone()), ("RestoreTeam forged", forged_team.clone())] {
+        let err = client.restore_team(authed(RestoreTeamRequest { prn }, &stranger)).await.unwrap_err();
+        expect_denied(&mut failures, label, err);
+    }
+    for (label, prn) in [("RenameProject correct", project.prn.clone()), ("RenameProject forged", forged_project.clone())] {
+        let err = client
+            .rename_project(authed(
+                RenameProjectRequest {
+                    prn,
+                    new_slug: Some("t3-stolen".to_string()),
+                    new_name: None,
+                },
+                &stranger,
+            ))
+            .await
+            .unwrap_err();
+        expect_denied(&mut failures, label, err);
+    }
+    for (label, prn) in [("ArchiveProject correct", project.prn.clone()), ("ArchiveProject forged", forged_project.clone())] {
+        let err = client.archive_project(authed(ArchiveProjectRequest { prn }, &stranger)).await.unwrap_err();
+        expect_denied(&mut failures, label, err);
+    }
+    for (label, prn) in [("RestoreProject correct", project.prn.clone()), ("RestoreProject forged", forged_project.clone())] {
+        let err = client.restore_project(authed(RestoreProjectRequest { prn }, &stranger)).await.unwrap_err();
+        expect_denied(&mut failures, label, err);
+    }
+
+    // Nothing was written by any of the refused calls.
+    check(
+        &mut failures,
+        "no write",
+        audit_count(&db, Action::RenameTeam.as_wire(), &team.prn).await == 0 && outbox_count(&db, EventType::TeamRenamed.as_wire(), &team.prn).await == 0,
+        "a denied call wrote a row".to_string(),
+    );
+
+    server.abort();
+    assert!(failures.is_empty(), "authorize-before-compare cases failed:\n{}", failures.join("\n"));
+}
