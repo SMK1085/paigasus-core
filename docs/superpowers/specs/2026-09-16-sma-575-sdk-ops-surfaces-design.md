@@ -182,9 +182,9 @@ It applies these rules:
 3. **The raw HTTP/2 session escape.** `Http2SessionManager` (allowed by rule 1, in
    `src/transport.ts` only) declares `request(method, path, headers, options)` and `connect()`.
    Both send a raw HTTP/2 request over the object's own session. Both bypass every generated
-   Connect-ES client. Outside `src/chat.ts`, a property access whose name is `request` or
-   `connect` is a violation, on any object. The check is by property NAME, not by the object's
-   declared type. MEASURED: no such property access exists in `src/` today.
+   Connect-ES client. In every file, `src/chat.ts` included, a property access whose name is
+   `request` or `connect` is a violation, on any object. The check is by property NAME, not by
+   the object's declared type. MEASURED: no such property access exists in `src/` today.
 
 `src/chat.ts` is still subject to rule 1 and rule 3.
 
@@ -204,6 +204,7 @@ It applies these rules:
    `src/chat.ts` whose callee is the identifier `fetch`, or the property access
    `globalThis.fetch`, is 0. `src/chat.ts` reads `globalThis.fetch` once, as a value into
    `fetchImpl`, and calls only `fetchImpl` after that. This check reads the AST, not the text.
+   The check unwraps parentheses around the callee, so `(fetch)(u)` also counts as a direct call.
 
 ### 4.4 Negative controls
 

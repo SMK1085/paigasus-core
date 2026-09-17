@@ -528,7 +528,7 @@ Run: `/bin/bash ci/affected-graph/run.sh 2>&1 | tail -40`
 Use `/bin/bash` (3.2). Homebrew bash 5.3.15 deadlocks on this suite on this machine (CLAUDE.md).
 Expected: every case passes. If `sdk-tests->sdk` fails, read the reported actual set. Correct the expected string to the actual set ONLY if every extra or missing id is explained by Step 7; otherwise STOP and report. If any OTHER case fails, STOP and report (the moon.yml change must not change other cases).
 
-Then prove the control bites: remove the two `tests/**/*` lines from `build` in `moon.yml` (Edit), run `/bin/bash ci/affected-graph/run.sh 2>&1 | grep -A3 "sdk-tests"`. Expected: the case FAILS and reports `paigasus-sdk-ts:build` missing. Restore the two lines with Edit and run the suite again. Expected: PASS.
+Then prove the control bites: remove the one `tests/**/*` line from `build` in `moon.yml` (Edit), run `/bin/bash ci/affected-graph/run.sh 2>&1 | grep -A3 "sdk-tests"`. Expected: the case FAILS and reports `paigasus-sdk-ts:build` missing. Restore that one line with Edit and run the suite again. Expected: PASS.
 
 - [ ] **Step 9: Mutation battery (spec § 3.4)**
 

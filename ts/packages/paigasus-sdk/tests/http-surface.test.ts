@@ -29,18 +29,18 @@ const ALLOWED_SPECIFIERS = new Set(['server-only', '@connectrpc/connect', '@bufb
 // and for the two gRPC names only. `createGrpcTransport` and `Http2SessionManager` are allowed
 // because they are gRPC transport plumbing. `Http2SessionManager` ALSO exposes raw HTTP/2 methods
 // (`request`, `connect`) on the object it builds. Allowing the name does not allow those calls:
-// rule 3 below closes that path by property name, everywhere outside src/chat.ts.
+// rule 3 below closes that path by property name, in every file, src/chat.ts included.
 const CONNECT_NODE = '@connectrpc/connect-node';
 const CONNECT_NODE_FILE = 'src/transport.ts';
 const CONNECT_NODE_IMPORTS = new Set(['createGrpcTransport', 'Http2SessionManager']);
 
 // Rule 3. `Http2SessionManager.request(method, path, headers, options)` sends a raw HTTP/2
-// request, and `.connect()` opens a raw session — both bypass the generated Connect-ES clients
-// entirely. MEASURED: no property access named either word exists in src/ today. A property
-// access by either name, outside src/chat.ts, is a violation regardless of which object it is
-// called on — the check is by NAME, not by declared type, so it also fires on an unrelated
+// request. `.connect()` opens a raw session. Both bypass the generated Connect-ES clients.
+// MEASURED: no property access named either word exists in src/ today. A property access by
+// either name is a violation in every file, src/chat.ts included, regardless of which object it
+// is called on. The check works by NAME, not by declared type, so it also fires on an unrelated
 // object's same-named method. That is a stated limit (spec § 4.5), not a defect: the allowlist is
-// small and the false positive costs one rename.
+// small, and the false positive costs one rename.
 const CONNECT_NODE_PROPERTY_ESCAPES = new Set(['request', 'connect']);
 
 // Rule 2. Banned outside src/chat.ts, except for the three names src/chat.ts itself needs
@@ -53,8 +53,8 @@ const CONNECT_NODE_PROPERTY_ESCAPES = new Set(['request', 'connect']);
 const BANNED_IDENTIFIERS = new Set(['fetch', 'XMLHttpRequest', 'WebSocket', 'EventSource', 'Request', 'Response', 'RequestInit', 'globalThis', 'global', 'process', 'require', 'module']);
 
 // MEASURED (final review, SMA-575): src/chat.ts uses exactly these three banned names, and
-// nothing else on the list. The exemption is per-NAME, not per-file: every other banned
-// identifier, and rule 3 above, applies to chat.ts too.
+// nothing else on the list. The exemption works per NAME, not per file. Every other banned
+// identifier still applies to chat.ts. Rule 3 above applies to chat.ts too.
 const CHAT_ALLOWED_IDENTIFIERS = new Set(['fetch', 'globalThis', 'Response']);
 
 type Violation = { readonly relPath: string; readonly line: number; readonly reason: string };
@@ -104,7 +104,7 @@ function findViolations(relPath: string, source: string): Violation[] {
     if (ts.isIdentifier(node) && BANNED_IDENTIFIERS.has(node.text) && !(relPath === CHAT_FILE && CHAT_ALLOWED_IDENTIFIERS.has(node.text))) {
       report(node, `network identifier outside ${CHAT_FILE}: ${node.text}`);
     }
-    if (ts.isPropertyAccessExpression(node) && relPath !== CHAT_FILE && CONNECT_NODE_PROPERTY_ESCAPES.has(node.name.text)) {
+    if (ts.isPropertyAccessExpression(node) && CONNECT_NODE_PROPERTY_ESCAPES.has(node.name.text)) {
       report(node, `raw HTTP/2 session escape: ${node.name.text}`);
     }
     ts.forEachChild(node, visit);
@@ -168,6 +168,10 @@ describe('SMA-575 AC 2 — findViolations negative controls', () => {
     // `request`/`connect` methods are, and only by property name.
     ["const s = new Http2SessionManager(u); export const r = s.request('POST', '/v1/users', {}, {});", 'src/transport.ts', 1],
     ['export const c = (m: Http2SessionManager) => m.connect();', 'src/transport.ts', 1],
+    // Rule 3 applies to src/chat.ts too (final review, SMA-575). `request` in the type literal is
+    // a PropertySignature, not a PropertyAccessExpression, so it does not count. `s.request()` is
+    // the one PropertyAccessExpression named `request`, so this yields exactly one violation.
+    ['export const r = (s: { request: () => void }) => s.request();', 'src/chat.ts', 1],
     // Rule 1, MEASURED. A default or namespace import of @connectrpc/connect-node is not the
     // narrow named-import shape the allowlist carves out, so both fall through to "not on the
     // allowlist" even in src/transport.ts.
@@ -200,6 +204,30 @@ function listSourceFiles(): string[] {
     .map((entry) => `${SRC_DIR}/${entry.split(sep).join('/')}`)
     .filter((relPath) => statSync(resolve(PKG_ROOT, relPath)).isFile())
     .sort();
+}
+
+/**
+ * Counts direct calls to `fetch` or `globalThis.fetch` in `source`.
+ *
+ * A `CallExpression` counts when its callee, after unwrapping any `ParenthesizedExpression`
+ * layers, is the identifier `fetch` or the property access `globalThis.fetch`. Parentheses around
+ * a callee do not change what the callee IS: `(fetch)(u)` and `((fetch))(u)` are direct fetch
+ * calls too, and a naive check that reads `node.expression` without unwrapping misses both.
+ */
+function countDirectFetchCalls(source: string): number {
+  const file = ts.createSourceFile('src/x.ts', source, ts.ScriptTarget.ESNext, true, ts.ScriptKind.TS);
+  let directCalls = 0;
+  const visit = (node: ts.Node): void => {
+    if (ts.isCallExpression(node)) {
+      let callee: ts.Expression = node.expression;
+      while (ts.isParenthesizedExpression(callee)) callee = callee.expression;
+      if (ts.isIdentifier(callee) && callee.text === 'fetch') directCalls += 1;
+      else if (ts.isPropertyAccessExpression(callee) && ts.isIdentifier(callee.expression) && callee.expression.text === 'globalThis' && callee.name.text === 'fetch') directCalls += 1;
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(file);
+  return directCalls;
 }
 
 function literalTexts(node: ts.Node, out: string[] = []): string[] {
@@ -236,7 +264,8 @@ describe('SMA-575 AC 2 — the real src/ tree', () => {
   });
 
   describe('the chat exception is live and narrow', () => {
-    const chat = ts.createSourceFile(CHAT_FILE, readFileSync(resolve(PKG_ROOT, CHAT_FILE), 'utf8'), ts.ScriptTarget.ESNext, true, ts.ScriptKind.TS);
+    const chatSource = readFileSync(resolve(PKG_ROOT, CHAT_FILE), 'utf8');
+    const chat = ts.createSourceFile(CHAT_FILE, chatSource, ts.ScriptTarget.ESNext, true, ts.ScriptKind.TS);
 
     it('makes exactly one call through the fetch seam', () => {
       let seamCalls = 0;
@@ -255,17 +284,23 @@ describe('SMA-575 AC 2 — the real src/ tree', () => {
     // Finding 5, final review (SMA-575). chat.ts reads `globalThis.fetch` once, into `fetchImpl`
     // (the seam above), and never calls `fetch` or `globalThis.fetch` directly anywhere else.
     it('never calls fetch directly', () => {
-      let directCalls = 0;
-      const visit = (node: ts.Node): void => {
-        if (ts.isCallExpression(node)) {
-          const callee = node.expression;
-          if (ts.isIdentifier(callee) && callee.text === 'fetch') directCalls += 1;
-          else if (ts.isPropertyAccessExpression(callee) && ts.isIdentifier(callee.expression) && callee.expression.text === 'globalThis' && callee.name.text === 'fetch') directCalls += 1;
-        }
-        ts.forEachChild(node, visit);
-      };
-      visit(chat);
-      expect(directCalls).toBe(0);
+      expect(countDirectFetchCalls(chatSource)).toBe(0);
     });
+  });
+});
+
+describe('SMA-575 AC 2 — countDirectFetchCalls negative controls', () => {
+  // A parenthesised callee unwraps to the same underlying expression, so it counts the same way.
+  const CASES: readonly (readonly [string, number])[] = [
+    ['fetch(u);', 1],
+    ['(fetch)(u);', 1],
+    ['((fetch))(u);', 1],
+    ['globalThis.fetch(u);', 1],
+    ['(globalThis.fetch)(u);', 1],
+    ['const f = globalThis.fetch; fetchImpl(u);', 0],
+  ];
+
+  it.each(CASES)('fixture %j yields %i direct fetch call(s)', (source, expected) => {
+    expect(countDirectFetchCalls(source)).toBe(expected);
   });
 });
