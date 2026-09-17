@@ -77,3 +77,14 @@ export function formFields(form: FormData, names: readonly string[]): Record<str
 export function invalidFormInput(): PaigasusError {
   return neverReachedIam({ presentation: 'invalid-input', message: 'Fill in every field of the form.', transport: { kind: 'http', status: 400 } });
 }
+
+/**
+ * Whether a rename, archive or restore action refreshes the tenancy pages (SMA-630 spec § 4.4): on a
+ * success, as every action does, and ALSO on `forbidden` and `conflict`. For these actions a refusal
+ * often means that the page is stale (another user archived the node or took the slug). Without the
+ * refresh the page shows "Active" next to a 403. Other refusals change nothing on the page. The five
+ * create and membership actions keep their success-only rule.
+ */
+export function refreshesAfterLifecycleAction(result: ActionResult): boolean {
+  return result.ok || result.error.presentation === 'forbidden' || result.error.presentation === 'conflict';
+}

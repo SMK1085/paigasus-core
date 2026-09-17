@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { describe, expect, it } from 'vitest';
-import { currentField, formFields, invalidFormInput, nameField, NAME_MAX_CODE_POINTS, prnField, renameChange, slugField, toActionResult } from '../../lib/form';
+import type { Presentation } from '@paigasus/sdk/errors/types';
+import { currentField, formFields, invalidFormInput, nameField, NAME_MAX_CODE_POINTS, prnField, refreshesAfterLifecycleAction, renameChange, slugField, toActionResult } from '../../lib/form';
 
 describe('lib/form', () => {
   it('reads the named fields and nothing else', () => {
@@ -94,5 +95,29 @@ describe('renameChange', () => {
     expect(renameChange({ slug: ' acme ', name: ' Acme ', currentSlug: 'acme', currentName: 'Acme' })).toEqual({});
     expect(renameChange({ slug: 'acme', name: 'Acme', currentSlug: ' acme', currentName: 'Acme ' })).toEqual({});
     expect(renameChange({ slug: ' new ', name: 'Acme', currentSlug: 'acme', currentName: 'Acme' })).toEqual({ newSlug: 'new' });
+  });
+});
+
+// SMA-630 spec § 4.4. A lifecycle action refreshes on success, and ALSO on the two refusals that
+// often mean the page is stale.
+describe('refreshesAfterLifecycleAction', () => {
+  const refused = (presentation: Presentation) => ({ ok: false as const, error: { ...invalidFormInput(), presentation } });
+
+  it('refreshes on a success', () => {
+    expect(refreshesAfterLifecycleAction({ ok: true })).toBe(true);
+  });
+
+  it.each<[Presentation, boolean]>([
+    ['forbidden', true],
+    ['conflict', true],
+    ['invalid-input', false],
+    ['relogin', false],
+    ['not-found', false],
+    ['degraded', false],
+    ['rate-limited', false],
+    ['disabled', false],
+    ['generic', false],
+  ])('a refusal with presentation %s refreshes: %s', (presentation, expected) => {
+    expect(refreshesAfterLifecycleAction(refused(presentation))).toBe(expected);
   });
 });

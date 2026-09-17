@@ -1,0 +1,43 @@
+// SPDX-License-Identifier: Apache-2.0
+'use server';
+
+// See ../../../../../actions.ts for the rules every action here follows.
+// tests/unit/actions-structure.test.ts holds the iamClientsForAction() rule and bans the navigation
+// helpers. The three lifecycle actions (SMA-630 spec § 4.4) also refresh the page after a forbidden
+// or conflict answer.
+import { revalidatePath } from 'next/cache';
+import type { ActionState } from '@paigasus/console-core';
+import { formFields, invalidFormInput, refreshesAfterLifecycleAction } from '../../../../../../../../lib/form';
+import { iamClientsForAction } from '../../../../../../../../lib/console';
+import { TENANCY_PATH } from '../../../../../../../../lib/tenancy-path';
+import { archiveProject, archiveProjectForm, renameProject, renameProjectForm, restoreProject, restoreProjectForm } from './commands';
+
+export async function renameProjectAction(_previous: ActionState, form: FormData): Promise<ActionState> {
+  const clients = await iamClientsForAction();
+  if (!clients.ok) return clients;
+  const parsed = renameProjectForm.safeParse(formFields(form, ['prn', 'slug', 'name', 'currentSlug', 'currentName']));
+  if (!parsed.success) return { ok: false, error: invalidFormInput() };
+  const result = await renameProject({ tenancy: clients.value.tenancy }, parsed.data);
+  if (refreshesAfterLifecycleAction(result)) revalidatePath(TENANCY_PATH, 'layout');
+  return result;
+}
+
+export async function archiveProjectAction(_previous: ActionState, form: FormData): Promise<ActionState> {
+  const clients = await iamClientsForAction();
+  if (!clients.ok) return clients;
+  const parsed = archiveProjectForm.safeParse(formFields(form, ['prn']));
+  if (!parsed.success) return { ok: false, error: invalidFormInput() };
+  const result = await archiveProject({ tenancy: clients.value.tenancy }, parsed.data);
+  if (refreshesAfterLifecycleAction(result)) revalidatePath(TENANCY_PATH, 'layout');
+  return result;
+}
+
+export async function restoreProjectAction(_previous: ActionState, form: FormData): Promise<ActionState> {
+  const clients = await iamClientsForAction();
+  if (!clients.ok) return clients;
+  const parsed = restoreProjectForm.safeParse(formFields(form, ['prn']));
+  if (!parsed.success) return { ok: false, error: invalidFormInput() };
+  const result = await restoreProject({ tenancy: clients.value.tenancy }, parsed.data);
+  if (refreshesAfterLifecycleAction(result)) revalidatePath(TENANCY_PATH, 'layout');
+  return result;
+}
