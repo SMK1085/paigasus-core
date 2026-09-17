@@ -327,9 +327,30 @@ set (`E,F,W,I,N,UP,B,A,C4,SIM,TCH,RUF`, `line-length = 200`). The new code must 
 | Delete `check_tailwind_guard_invocations`' triple, re-run `--self-test` | rc 1. This is the regression SMA-638 reports. |
 | Delete `ci/affected-graph/run.sh:28`, re-run `--self-test` | rc 1, naming the missing pin. |
 | `bash ci/next-env/run.sh` | rc 0. |
-| `moon run repo:affected-smoke --force` | Passes. Run it with system `/bin/bash` first on `PATH`. |
-| `moon run repo:ruff-ci` | Passes. Needs bash 4 or later, so run it with Homebrew bash. |
+| `moon run repo:affected-smoke --force` | Passes. Needs bash 3.2 **and** Python 3.11 or later — see the PATH note below. |
+| `moon run repo:ruff-ci --force` | Passes. Needs bash 4 or later: `export PATH="/opt/homebrew/bin:$HOME/.proto/shims:$HOME/.proto/bin:$PATH"`. |
 | `repo:actionlint` | **Cannot be verified locally.** CLAUDE.md records that no local bash runs it to completion on this class of machine. CI is the only proof, and section 4 edits that gate. |
+
+**The PATH for `repo:affected-smoke`, measured 2026-09-17.** Moon resolves `bash` through `PATH`,
+and Homebrew's bash 5.3.15 deadlocks this gate on this class of machine, so bash 3.2 must win.
+But prepending `/bin:/usr/bin` to get it also makes `python3` resolve to `/usr/bin/python3`,
+which is **3.9.6**, and `ci/affected-graph/cargo_moon_parity.py` imports `tomllib` — stdlib only
+since 3.11. The gate then dies with `ModuleNotFoundError: No module named 'tomllib'` and prints
+`negative-control FAILED`, which reads as a gate failure and is not one. Note `ci-targets
+self-test OK` prints immediately above it.
+
+Shim the one binary instead, so bash downgrades and nothing else does:
+
+```bash
+mkdir -p /tmp/bashshim && ln -sf /bin/bash /tmp/bashshim/bash
+export PATH="/tmp/bashshim:$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
+export PROTO_REPORTER=text
+moon run repo:affected-smoke --force
+```
+
+Measured with that PATH: bash 3.2.57, python3 3.14.7, exit 0 in 13.6s, negative control and real
+suite both green. `--force` is required — a cache hit replays a stored log and is not evidence
+the gate ran.
 
 Baselines measured before any change, in a worktree provisioned with `proto install`,
 `pnpm -C ts install`, `uv sync` and `cargo fetch`: `ci_targets.py --self-test` returned rc 0,

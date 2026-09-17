@@ -15,7 +15,7 @@
 - Every source file opens with an SPDX header. Both files touched already have one; do not add a second.
 - `ci/**/*.py` must pass `repo:ruff-ci`: rules `E,F,W,I,N,UP,B,A,C4,SIM,TCH,RUF`, `line-length = 200`, `target-version = "py312"`, `ignore = ["E501"]`.
 - `ci/**/*.sh` must stay **bash 3.2 compatible**. No `mapfile`, no associative arrays, no `${var^^}`.
-- Run `ci/affected-graph/*` gates with **system `/bin/bash` first on `PATH`**: `export PATH="/bin:/usr/bin:$HOME/.proto/shims:$HOME/.proto/bin:$PATH"`. Homebrew bash 5.3.15 deadlocks on this machine.
+- Run `ci/affected-graph/*` gates with **bash 3.2**, because Homebrew bash 5.3.15 deadlocks on this machine. Use a **bash-only shim**, not a bare `/bin` prefix: `mkdir -p /tmp/bashshim && ln -sf /bin/bash /tmp/bashshim/bash`, then `export PATH="/tmp/bashshim:$HOME/.proto/shims:$HOME/.proto/bin:$PATH"`. MEASURED 2026-09-17: prepending `/bin:/usr/bin` also downgrades `python3` to 3.9.6, and `cargo_moon_parity.py` imports `tomllib` (stdlib only since 3.11), so `moon run repo:affected-smoke` dies with `ModuleNotFoundError: No module named 'tomllib'` and prints `negative-control FAILED` — which reads as a gate failure and is not one. Running `python3 ci/affected-graph/ci_targets.py` directly is unaffected either way.
 - `export PROTO_REPORTER=text` before any command whose stdout you capture.
 - `repo:actionlint` **cannot be run to completion locally on this machine.** Task 4 edits it. Verify Task 4 by running its self-test function only, and state in the commit that CI is the proof.
 - Commit subjects must be lowercase after the `type(scope):` prefix — commitlint rejects a subject starting with an uppercase token. Allowed scopes: `rs, py, ts, contracts, ci, docs, deps, release, repo, claude, workspace`.
@@ -92,8 +92,12 @@ Insert into `self_test()`, immediately before the existing `main_src = inspect.g
     # assertion gone. Arity first, so a shrunk list says so plainly, then the exact sequence.
     if not EXPECTED_FINDING_KEYS:
         failures.append("EXPECTED_FINDING_KEYS is empty — the findings floor would assert nothing")
+    # `{"repo": {}}` and `""`, not `{}` and `None`: MEASURED — `check_forward` raises
+    # MoonOutputError("'moon query tasks' reported no 'repo' project") on an empty `tasks`, and
+    # `check_docs` does `flag not in region`, which raises TypeError on None. `parse_doc_targets`
+    # always returns a str, so `""` is the type-correct empty case.
     _fk_findings = collect_findings(
-        {}, [], {}, {}, "", [], None, [], dict.fromkeys(_CALL_SITE_SOURCE_KEYS, ""),
+        {"repo": {}}, [], {}, {}, "", [], "", [], dict.fromkeys(_CALL_SITE_SOURCE_KEYS, ""),
     )
     if len(_fk_findings) != len(EXPECTED_FINDING_KEYS):
         failures.append(
@@ -408,6 +412,7 @@ the call and the five triples, then confirm rc 0.
 - [ ] **Step 6: Lint and commit**
 
 ```bash
+export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
 uv run --locked --project py ruff check --config py/pyproject.toml -- ci/affected-graph/ci_targets.py
 git add ci/affected-graph/ci_targets.py
 git commit -F <message file>
@@ -514,6 +519,7 @@ exactly rather than adjusting the comparison.
 - [ ] **Step 7: Lint and commit**
 
 ```bash
+export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
 uv run --locked --project py ruff check --config py/pyproject.toml -- ci/affected-graph/ci_targets.py
 git add ci/affected-graph/ci_targets.py
 git commit -F <message file>
