@@ -173,7 +173,7 @@ where
     ///
     /// The new name is validated with the same rule `create` uses (`validate_name`) and answers
     /// `InvalidName` (SMA-642). The check runs before the transaction opens, so it outranks
-    /// `NodeArchived` and `ParentArchived`. The stored name is the TRIMMED one.
+    /// `NodeArchived`. The stored name is the TRIMMED one.
     ///
     /// SMA-606 D2: builds its event/entry AFTER `rename_in`, from `Mutated::value` — it
     /// receives a bare `Uuid`, not a PRN, so it cannot construct one until the repository hands
