@@ -524,11 +524,12 @@ Now read `run_task_case_ci` and the `sdk->iam-console` cases in `ci/affected-gra
 
 - [ ] **Step 8: Run the affected-graph suite with system bash**
 
-Run: `/bin/bash ci/affected-graph/run.sh 2>&1 | tail -40`
+Run: `set -o pipefail; /bin/bash ci/affected-graph/run.sh 2>&1 | tail -40`
+`pipefail` keeps the suite's exit status; without it the pipe reports `tail`'s status.
 Use `/bin/bash` (3.2). Homebrew bash 5.3.15 deadlocks on this suite on this machine (CLAUDE.md).
 Expected: every case passes. If `sdk-tests->sdk` fails, read the reported actual set. Correct the expected string to the actual set ONLY if every extra or missing id is explained by Step 7; otherwise STOP and report. If any OTHER case fails, STOP and report (the moon.yml change must not change other cases).
 
-Then prove the control bites: remove the one `tests/**/*` line from `build` in `moon.yml` (Edit), run `/bin/bash ci/affected-graph/run.sh 2>&1 | grep -A3 "sdk-tests"`. Expected: the case FAILS and reports `paigasus-sdk-ts:build` missing. Restore that one line with Edit and run the suite again. Expected: PASS.
+Then prove the control bites: remove the one `tests/**/*` line from `build` in `moon.yml` (Edit), run `set -o pipefail; /bin/bash ci/affected-graph/run.sh 2>&1 | grep -A3 "sdk-tests"`. `pipefail` keeps the suite's exit status; without it the pipe reports `grep`'s status. Expected: the case FAILS and reports `paigasus-sdk-ts:build` missing. Restore that one line with Edit and run the suite again. Expected: PASS.
 
 - [ ] **Step 9: Mutation battery (spec § 3.4)**
 
@@ -569,6 +570,22 @@ Report the mutation table with the recorded messages, and the Step 7 measurement
 ---
 
 ### Task 3: Guard that hand-written HTTP lives only in `chat.ts`
+
+> **Changed after execution (review rounds).** The code blocks in this task are the ORIGINAL plan.
+> The committed file `tests/http-surface.test.ts` is authoritative. These items differ, checked
+> against the committed file:
+>
+> - `src/chat.ts` is exempt only for the identifiers `fetch`, `globalThis` and `Response`
+>   (`CHAT_ALLOWED_IDENTIFIERS`). It is not exempt for every banned identifier.
+> - `require` and `module` are banned identifiers too.
+> - The checker treats `import x = require('…')` (an `ImportEqualsDeclaration`) as a specifier
+>   check.
+> - Rule 3 bans a property access named `request` or `connect` (`CONNECT_NODE_PROPERTY_ESCAPES`) in
+>   every file. `src/chat.ts` is included.
+> - A real-tree test checks that `src/chat.ts` makes no direct `fetch(` or `globalThis.fetch(`
+>   call. The test uses `countDirectFetchCalls`, which unwraps a parenthesised callee.
+> - The fixture table has 37 rows, not 26. A separate table with 6 rows checks
+>   `countDirectFetchCalls`.
 
 Spec § 4 and § 6.
 
@@ -814,6 +831,15 @@ Clean-tree baseline first: the Step 2 command passes. Then, for each row, apply 
 | 6 | In the test file, change `const SRC_DIR = 'src';` to `const SRC_DIR = 'src/errors';` | 'walks at least the ten files' |
 | 7 | In `findViolations`, delete `relPath !== CHAT_FILE && ` | the `src/chat.ts` fixture row expecting 0 and the real-tree test both fail |
 | 8 | In `checkSpecifier`, change `if (!ts.isStringLiteral(specifier))` to `if (!ts.isStringLiteral(specifier) && !ts.isNoSubstitutionTemplateLiteral(specifier))` | the ``import(`server-only`)`` fixture row fails (0 violations instead of 1). The ``import(`undici`)`` row still passes, because `undici` is off the allowlist either way |
+
+Mutations added in review rounds (measured, recorded in the task reports):
+
+- `require` removed from the banned set: the `(require)(…)` row fails.
+- `clause.name === undefined` removed: the default-import connect-node row fails.
+- `ts.isNamedImports` removed: the namespace-import row fails.
+- `fetchImpl(url, {` changed to `fetch(url, {` in `src/chat.ts`: the direct-fetch test and the seam-count test fail.
+- the `relPath !== CHAT_FILE` guard put back on rule 3: the `src/chat.ts` rule-3 row fails.
+- the parenthesis-unwrap loop removed: the three parenthesised direct-fetch rows fail.
 
 Run all eight even if one surprises you. After any fix, run all eight again. When done: `git diff -- ts/packages/paigasus-sdk/src` must be empty.
 
