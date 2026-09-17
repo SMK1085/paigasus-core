@@ -1164,12 +1164,15 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   or `//` inside a string literal, or inside a line comment, no longer starts a comment and can no
   longer eat a real `.waitFor(` call — the false negative the old regex pair had is closed, and a
   fixture in `hydration.test.ts` proves it (verified by temporarily restoring the old two-regex
-  version, which fails that fixture). **What remains:** the scanner is not a full tokenizer, so a
-  regex literal is not its own state — a `/*` or `//` sequence inside one would still be read as a
-  comment marker — and a template literal's `${...}` interpolation is not tracked separately from
-  its literal text, so a quote, backtick, or comment-like sequence nested inside one could still
-  mis-close the template early. Both shapes are absent from the tree today and are not gated. The
-  scan's regex also cannot see the sibling
+  version, which fails that fixture). A template literal's `${...}` interpolation is now tracked as
+  its own code region too (SMA-639 CR round 2): the scanner resumes plain-code scanning at an
+  unescaped `${`, counts nested `{`/`}` pairs to find the matching closer, so an object literal or
+  a block body inside the interpolation does not end it early, and a nested template literal inside
+  an interpolation is handled the same way, on the same stack. A second fixture in
+  `hydration.test.ts` proves this the same way (temporarily masking the whole template span again
+  fails that fixture). **What remains:** the scanner is not a full tokenizer, so a regex literal is
+  not its own state — a `/*` or `//` sequence inside one would still be read as a comment marker.
+  That shape is absent from the tree today and is not gated. The scan's regex also cannot see the sibling
   `waitForURL`/`waitForResponse`/`waitForRequest`/`waitForLoadState` APIs, which default to unbounded
   the same way (`use.navigationTimeout` also defaults to 0) — roughly 15 live call sites across both
   apps' e2e trees are not covered, and widening the regex is out of scope. The `15_000` literal pin in

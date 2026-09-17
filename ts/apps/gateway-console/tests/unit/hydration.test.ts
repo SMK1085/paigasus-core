@@ -65,10 +65,27 @@ function timeoutError(message: string): Error {
  * consumed character by character, an escaping backslash is consumed together with the character
  * it escapes so an escaped quote cannot close the string early, and the matching unescaped quote
  * is the only thing that ends it.
+ *
+ * A template literal's `${...}` interpolation is executable CODE, not literal text, so it is
+ * scanned as code rather than masked along with the rest of the template: hitting an unescaped
+ * `${` while in `template` state pushes a frame onto `interpolationDepths` and switches to `code`;
+ * the matching `}` — the one found while that frame's own nested-brace count is back at zero — pops
+ * the frame and switches back to `template`. The count is what stops an object literal or a block
+ * body written inside the interpolation (`${ f({ a: 1 }) }`) from ending it on its own first `}`:
+ * every `{` seen in `code` state while a frame is open increments that frame's count, and every `}`
+ * decrements it, so only a `}` at count zero is the interpolation's own closer. A nested template
+ * literal inside an interpolation (`${ \`a${b}c\` }`) needs no special case: entering it pushes the
+ * ordinary `template` state as usual, and its own interpolations push and pop their own frames on
+ * the same stack — the outer frame's count is untouched while the inner template is open, because
+ * brace-counting only runs in `code` state and a nested template is its own state.
  */
 function stripCommentsAndStringContents(source: string): string {
   let out = '';
   let state: 'code' | 'line' | 'block' | 'single' | 'double' | 'template' = 'code';
+  // One entry per currently-open `${...}` interpolation, innermost last. Each entry is the count of
+  // `{` seen inside that interpolation (in `code` state) not yet matched by a `}` — see the doc
+  // comment above.
+  const interpolationDepths: number[] = [];
   for (let i = 0; i < source.length; i++) {
     const ch = source[i] as string;
     const next = source[i + 1];
@@ -83,6 +100,21 @@ function stripCommentsAndStringContents(source: string): string {
         state = 'block';
         out += '  ';
         i++;
+        continue;
+      }
+      if (interpolationDepths.length > 0 && (ch === '{' || ch === '}')) {
+        const top = interpolationDepths[interpolationDepths.length - 1] as number;
+        if (ch === '{') {
+          interpolationDepths[interpolationDepths.length - 1] = top + 1;
+        } else if (top === 0) {
+          // The interpolation's own closer, not a brace opened inside it: this `${...}` is done —
+          // resume masking the enclosing template literal's text.
+          interpolationDepths.pop();
+          state = 'template';
+        } else {
+          interpolationDepths[interpolationDepths.length - 1] = top - 1;
+        }
+        out += ch;
         continue;
       }
       if (ch === "'" || ch === '"' || ch === '`') state = ch === "'" ? 'single' : ch === '"' ? 'double' : 'template';
@@ -106,6 +138,15 @@ function stripCommentsAndStringContents(source: string): string {
       } else {
         out += ch === '\n' ? '\n' : ' ';
       }
+      continue;
+    }
+    // An unescaped `${` inside a template literal starts an interpolation: everything from here to
+    // its matching `}` is code, not literal text, and must be scanned (and left unmasked) as such.
+    if (state === 'template' && ch === '$' && next === '{') {
+      interpolationDepths.push(0);
+      out += ch + next;
+      state = 'code';
+      i++;
       continue;
     }
     // single, double, template: opaque string spans. Only an unescaped matching quote closes one.
@@ -295,5 +336,26 @@ describe('waitForHydration', () => {
     ].join('\n');
 
     expect(findUnboundedWaitFor(fixture)).toEqual([".waitFor({ state: 'attached', marker: 'still-unbounded' })"]);
+  });
+
+  it('scans a template literal interpolation as code, not as literal text', () => {
+    // A `${...}` interpolation runs as real code, so a `.waitFor(` written inside one is a real
+    // defect and must be caught the same as anywhere else. Masking the whole template span (the
+    // pre-fix behavior) hid this case entirely — a false NEGATIVE in a gate whose whole purpose is
+    // not to go inert. Four shapes: a real unguarded call inside an interpolation (must be
+    // reported); a guarded call inside another interpolation (must not); an interpolation whose
+    // object-literal argument has its own nested braces, followed by a real unguarded call outside
+    // any template (the later call must still be reported — proving the brace-depth counter, not a
+    // naive first-`}`-closes-it toggle, is what decides where the interpolation ends); and literal
+    // template text mentioning the API outside any interpolation, in a template that also contains
+    // a real (guarded) interpolation (must not be reported).
+    const fixture = [
+      "const mixed = `literal says .waitFor({ state: 'attached', marker: 'literal-not-code' }) then ${page.locator('interp-guarded').waitFor({ state: 'attached', timeout: 2 })} end`;",
+      "const unguarded = `before ${page.locator('interp-unbounded').waitFor({ state: 'attached', marker: 'interp-unbounded' })} after`;",
+      'const withBraces = `value: ${f({ nested: { a: 1 } })}`;',
+      "await page.locator('after-braces').waitFor({ state: 'attached', marker: 'after-braces' });",
+    ].join('\n');
+
+    expect(findUnboundedWaitFor(fixture)).toEqual([".waitFor({ state: 'attached', marker: 'interp-unbounded' })", ".waitFor({ state: 'attached', marker: 'after-braces' })"]);
   });
 });
