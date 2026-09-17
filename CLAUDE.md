@@ -1107,6 +1107,18 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   (`app/_components/gateway-state.ts`) counts only when the service's state is `available`; a
   `degraded` service can still carry the descriptor of its last good probe, and treating that
   stale descriptor as a live capability would report a feature the gateway cannot currently serve.
+- **`gateway-console-ts:test-e2e` now needs Docker** (SMA-512 PR 4). It fails loudly when Docker is
+  not reachable. `iam-console`'s own e2e tier does not need Docker. The `PAIGASUS_SESSION_STORE`
+  memory setting is refused when `PAIGASUS_ZONES` names two zones, so a two-zone tier has no
+  alternative store to use instead. Every `iam-console` edit now runs this tier too. An `inputs`
+  entry on `gateway-console-ts:test-e2e` causes this, not a `deps` relation — only `inputs` confers
+  affectedness on Moon 2.5.3. This is the cost of a tier that must re-run when the property it
+  tests can break. A Playwright **worker fixture** now starts a container: the first one in this
+  repository started this way. A worker restart does not overlap two containers. The fixture's
+  teardown runs before the worker restarts. The old container stops and is fully removed before the
+  new worker starts a new one. A measured run showed the old container up at t=15s, no container at
+  all at t=16s, and a brand-new container at t=17s. So this pull request needed no deterministic
+  container label and no stale-container sweep.
 
 ## Workflow
 

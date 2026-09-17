@@ -91,8 +91,12 @@ assert_case() {
 #   `gateway-console-ts`. app-shell's `test-e2e`
 #   keys on the ui, auth, discovery and next-config sources; iam-console's keys on every package the
 #   app compiles, so the ui, auth, discovery, app-shell, proto and sdk cases below include it.
-#   gateway-console's keys on the same package set, so those cases carry a second app's three tasks
-#   as well. This sentence is PROSE, asserted nowhere — re-count it by hand when an app lands.
+#   gateway-console's keys on that same package set AND, since SMA-512 PR 4, on the whole
+#   `/ts/apps/iam-console/**/*` tree — the two-zone tier starts the iam-console standalone server,
+#   so an iam-console change must re-run it. So a package case carries a second app's three tasks,
+#   and an iam-console-anchored case carries `gateway-console-ts:test-e2e` alone, because that one
+#   input sits on that one task.
+#   This sentence is PROSE, asserted nowhere — re-count it by hand when an app lands.
 #   A future case with a different touched file must still re-check this.
 # returns 0 pass / 1 assertion fail / 2 infrastructure error
 _assert_task_case_impl() {
@@ -592,10 +596,28 @@ run_suite() {
   # `moon query tasks --affected` traversal, not assumed: touching an app-local `lib/` file selects
   # no `paigasus-console-core-ts` task, because that package's inputs name its OWN `src/**/*`, not
   # the app's `lib/**/*`.
+  # SMA-512 PR 4 RE-BASELINE: both sets gain gateway-console-ts:test-e2e, and ONLY that task. The
+  # two-zone tier runs the iam-console standalone server, so that tier now lists the iam-console
+  # tree in its own `inputs` (ts/apps/gateway-console/moon.yml). The new entry sits on that one
+  # task, which is why no other gateway-console task joins either set. MEASURED, not predicted:
+  # `printf 'ts/apps/iam-console/lib/config.ts\n' | moon query tasks --affected` returns
+  # gateway-console-ts:test-e2e, and the proxy.ts anchor returns the same set.
   run_task_case_ci "iam-console-lib->iam-console-tasks" "ts/apps/iam-console/lib/config.ts" \
-    "iam-console-ts:build,iam-console-ts:test,iam-console-ts:test-e2e,ts:lint"
+    "iam-console-ts:build,iam-console-ts:test,iam-console-ts:test-e2e,gateway-console-ts:test-e2e,ts:lint"
   run_task_case_ci "iam-console-proxy->iam-console-tasks" "ts/apps/iam-console/proxy.ts" \
-    "iam-console-ts:build,iam-console-ts:test,iam-console-ts:test-e2e,ts:lint"
+    "iam-console-ts:build,iam-console-ts:test,iam-console-ts:test-e2e,gateway-console-ts:test-e2e,ts:lint"
+  # SMA-512 PR 4 — the two-zone tier runs the iam-console standalone server, so ANY iam-console
+  # change must re-run it. The two cases above anchor lib/ and proxy.ts; this one anchors app/,
+  # the subtree neither reaches. The edge is an `inputs` entry on gateway-console-ts:test-e2e, not
+  # a `deps` relation: deps schedule a build and never select a downstream (CLAUDE.md, Moon 2.5.3).
+  # Revision 1 of the design claimed the `deps` relation carried it; under that claim this case
+  # would report an EMPTY gateway-console half and the only proof of ACs 1 and 2 would never re-run.
+  # The expected set is MEASURED with the same no-flag traversal the harness uses. The raw traversal
+  # also returns iam-console-ts:typecheck, repo:next-env-drift, repo:actionlint, repo:input-liveness,
+  # repo:next-public-free and ts:fmt; the harness's name filter drops them, so this case does NOT
+  # cover those — the same limitation the ui->console case records.
+  run_task_case_ci "iam-console-app->two-zone-tier" "ts/apps/iam-console/app/(console)/layout.tsx" \
+    "iam-console-ts:build,iam-console-ts:test,iam-console-ts:test-e2e,gateway-console-ts:test-e2e,ts:lint"
   # SMA-512 PR 3 — the second zone's OWN code outside app/, mirroring the iam-console pair above.
   # Its build, test and test-e2e all reach lib/**/* through fileGroups.sources; without this case,
   # narrowing that group would silently stop selecting them and every later change to the zone's

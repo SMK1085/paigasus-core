@@ -265,9 +265,17 @@ tasks:
       # Stated here for the same reason as in `test`: @paigasus/console-core's testing/fake-iam.ts
       # imports @paigasus/proto, so this tier reads the generated tree itself.
       - 'contracts:generate'
-    # A NEW task name, so it inherits NOTHING: every input is listed. This app has no
-    # tests/fixtures, so the two negations iam-console's copy carries for that directory would
-    # match nothing here.
+      # SMA-512 PR 4. The two-zone tier starts the iam-console standalone server too, so that
+      # build must exist before this task runs. This edge SCHEDULES the build; it confers NO
+      # affectedness (CLAUDE.md, Moon 2.5.3). The '/ts/apps/iam-console/**/*' input below is what
+      # selects this task, and the two are needed together, never one instead of the other.
+      - 'iam-console-ts:build'
+    # A NEW task name, so it inherits NOTHING: every input is listed. THIS app has no
+    # tests/fixtures of its own, so a RELATIVE `!tests/fixtures/...` negation — the form
+    # iam-console's own copy of this task carries — would match nothing here and none is written.
+    # Do not confuse that with the ABSOLUTE `!/ts/apps/iam-console/tests/fixtures/...` negations at
+    # the end of this list: those name iam-console's fixtures, reached through the iam-console tree
+    # glob below, and they are load-bearing.
     inputs:
       - '@group(sources)'
       - 'app/**/*'
@@ -302,6 +310,28 @@ tasks:
       - '/ts/packages/paigasus-app-shell/package.json'
       - '/ts/packages/paigasus-proto/src/**/*'
       - '/ts/packages/paigasus-proto/package.json'
+      # SMA-512 PR 4. The two-zone tier runs the iam-console standalone server, so an iam-console
+      # change can break it. This edge comes from `inputs` and NOT from `deps`: task inputs are the
+      # only thing that confers affectedness in Moon 2.5.3, and the affected-graph harness queries
+      # with no graph flags. Without this line the tier never re-runs on an iam-console change and
+      # the only proof of ACs 1 and 2 goes quietly stale.
+      #
+      # THE COST IS REAL AND ACCEPTED: every iam-console edit now runs a Docker-backed, two-server
+      # Playwright tier.
+      - '/ts/apps/iam-console/**/*'
+      # `.next` is a declared build output and .moon/workspace.yml's hasher.ignorePatterns
+      # deliberately does NOT ignore it, so a blanket tree glob would hash the whole build.
+      - '!/ts/apps/iam-console/.next/**'
+      - '!/ts/apps/iam-console/tests/fixtures/**/.next/**'
+      - '!/ts/apps/iam-console/tests/fixtures/*/next-env.d.ts'
     options:
       # A real build and a real Chromium. A cached PASS would replay a green that tested nothing.
+      #
+      # THIS LINE IS PAIRED WITH THE iam-console NEGATIONS ABOVE. `cache: false` means this task
+      # stores no hash at all (MEASURED: every `test-e2e` task in the repo has an empty `hash` in
+      # .moon/cache/states/*/test-e2e/lastRun.json), so a gitignored file the tree glob matches
+      # cannot re-key it. Moon DOES hash gitignored files a glob matches — repo:actionlint's hash
+      # manifest lists ts/apps/iam-console/tsconfig.tsbuildinfo — so if you ever remove
+      # `cache: false`, add `- '!/ts/apps/iam-console/tsconfig.tsbuildinfo'` in the same edit, or
+      # every local `tsc` run becomes a cache miss here. Nothing gates that pairing.
       cache: false

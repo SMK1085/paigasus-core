@@ -833,12 +833,39 @@ Linear issues to create after this spec is approved:
 
 ## 14. Things the plan must measure before building on them
 
-1. **Whether one TLS terminator can path-route to two Next standalone servers** with `Host` and
-   `X-Forwarded-Proto` intact, and whether the two apps' static chunks collide under one origin.
-   This rehearses SMA-513 AC 3.
-2. Whether `testcontainers` starts Redis from a **Playwright worker fixture** — not from a vitest
-   config, which `@paigasus/auth` and `@paigasus/discovery` already prove works — and what a worker
-   restart does to a container that is already running.
+1. **ANSWERED (pull request 4).** One TLS terminator can path-route to two Next standalone servers.
+   `startTlsTerminator` now takes EITHER of two shapes. `{ tls, target }` is the original
+   single-upstream form and is unchanged — `iam-console`'s tier, the gateway zone's single-zone
+   tier and `iam-console`'s own terminator unit test all still use it. `{ tls, routes }` is the new
+   path-routing form, where `routes` is a `readonly { prefix, target }[]` array. The terminator strips the query string first. It then matches the longest prefix first.
+   An unmatched path gets a 502 response, and that response names the path and the configured
+   prefixes. `target` and `routes` are mutually exclusive; passing both throws. `Host` passes
+   through unchanged, and `X-Forwarded-Proto` is set on every request. Both facts are asserted by
+   `ts/apps/gateway-console/tests/integration/doubles/tls-terminator-routes.test.ts`. The two apps'
+   static chunks do not collide. Row R12 passed. Every static request during the IAM visit used
+   `/iam/_next/`. Every static request during the gateway visit used `/gateway/_next/`. All
+   requests answered 200. Each zone served at least one stylesheet and one script. This result
+   rehearses SMA-513 acceptance criterion 3.
+2. **ANSWERED (pull request 4, Task 3 Step 1).** `testcontainers` can start Redis from a Playwright
+   worker fixture, not only from a vitest config. `@paigasus/auth` and `@paigasus/discovery`
+   already prove the vitest case works. Three measurements answer this item, each checked with
+   `docker ps`:
+   1. The container starts and accepts a connection. A raw TCP socket to the mapped port returned
+      `+PONG`.
+   2. `workers: 1` makes one run start exactly one container. A `docker ps` check while the run was
+      in flight showed one `redis:8-alpine` container, plus testcontainers' own
+      `testcontainers/ryuk:0.14.0` reaper sidecar. The sidecar is not a second Redis container.
+   3. A forced failure in the first of two tests triggers a worker restart. The fixture's teardown
+      runs before the restart. The first container stops and is removed before the restart starts a
+      new one. A second container never runs alongside the first. A per-second `docker ps -a` log
+      proved this: the first container was up at t=15s, no container existed at t=16s (removed, not
+      merely stopped), and a new container appeared at t=17s, aged "Less than a second". Neither run
+      showed an overlap window.
+
+   **Consequence:** this pull request needed no deterministic label and no stale-container sweep.
+   `@paigasus/auth`'s leak guard covers a different mechanism: a module-level memo that every worker
+   process re-evaluates. A worker-scoped fixture does not share that mechanism, because Playwright
+   runs the fixture's teardown as part of ending a worker, before the next worker starts.
 3. **ANSWERED (pull request 3).** Whether pnpm resolves `@paigasus/console-core/testing`'s
    devDependencies for a consuming app. **Yes, with nothing added** to
    `ts/apps/gateway-console/package.json` for it. `jose` (pulled in by `startFakeIdp`) and
@@ -850,19 +877,34 @@ Linear issues to create after this spec is approved:
    `ts/packages/paigasus-console-core/testing/` — those files import only `node:*` built-ins,
    `@connectrpc/connect`, `@connectrpc/connect-node`, `jose` and `@paigasus/proto`. The only
    dependency pull request 3 added to the app was `@playwright/test`.
-4. Whether adding `/ts/apps/iam-console/**/*` to `gateway-console-ts:test-e2e`'s `inputs` actually
-   makes `moon query tasks --affected` select the tier from an `iam-console` edit, measured with the
-   unpiped exit status. This is the fix for revision 1's wrong `dependsOn` claim, and it must be
-   confirmed rather than assumed. **Still open — belongs to pull request 4.**
+4. **ANSWERED (pull request 4, Task 5 Step 2).** Adding `/ts/apps/iam-console/**/*` to
+   `gateway-console-ts:test-e2e`'s `inputs` does make `moon query tasks --affected` select the tier
+   from an `iam-console` edit. This closes out revision 1's wrong `dependsOn` claim.
+   `gateway-console-ts:test-e2e` is selected. The query ran alone. Its exit status was read unpiped
+   (`QUERY_EXIT=0`). Its output was parsed as JSON. The parser took one target per
+   `tasks[project][task]`. The parser did not grep the output: every `deps[]` entry carries its own
+   `"target"` key, and a grep would count a scheduled upstream as a selection. The task reviewer
+   reproduced the same result against the new `ts/apps/iam-console/app/(console)/layout.tsx`
+   anchor. The reproduction returned a byte-identical filtered set. All three affected-graph cases
+   now expect exactly these targets: `iam-console-ts:build`, `iam-console-ts:test`,
+   `iam-console-ts:test-e2e`, `gateway-console-ts:test-e2e`, `ts:lint`.
 5. The wall-clock cost of the two-zone tier on a loaded CI runner. The `iam-console` tier already
    needs a 420 s worker timeout in CI (`tests/e2e/support/harness.ts:226-228`), and this tier runs
    two servers and a container. **Partially answered (pull request 3): the single-zone baseline.**
-   For the single-zone tier, local, warm caches, no Docker: Playwright's own execution is ~2.4 s for
-   the 8 specs (reproduced three times; per-spec 80 ms–413 ms), the one completed
-   `moon run gateway-console-ts:test-e2e` reported the task at 3 s 884 ms, and total `moon run`
-   wall-clock was ~5 s including cached dependencies. **No CI number exists yet.** This item, as
-   worded, asks for the **two-zone** tier's cost on a loaded CI runner — that measurement is still
-   open and belongs to pull request 4, which adds the second server and the Redis container.
+   **Pull request 4, Task 4 Step 7 now measured the local cost for both Playwright projects.** This
+   measurement is local, not a CI baseline. It is explicitly warm. `/usr/bin/time -p` timed the
+   whole command:
+   - **two-zone project: `real` 3.16 s.** Playwright's own summary reported 2.7 s. The ~0.46 s gap
+     is process and fixture cost that Playwright's summary omits. The controller reproduced this
+     independently at `real` 3.19 s, with all five rows passing.
+   - **single-zone project: `real` 3.25 s.** Playwright's own summary reported 2.8 s.
+
+   Use the `real` figure, not Playwright's summary: a CI runner pays for the container and both
+   servers, not only for the assertions. State the warm caveat plainly: `redis:8-alpine` was
+   already pulled locally, and both apps' Next standalone builds were warm. No image pull and no
+   `next build` happened inside the timed window. A cold CI runner would cost meaningfully more.
+   **No CI number exists yet.** This item also asks for the tier's cost on a loaded CI runner. The
+   local number above does not answer that part.
 6. Whether `boundaries.test.ts`'s reverse-liveness loop accepts the derived scope key
    `packages/paigasus-console-core/src` (§ 5.5).
 

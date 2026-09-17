@@ -23,4 +23,4 @@ export {
 } from './fake-iam';
 export { startFakeIdp, type FakeIdp } from './fake-idp';
 export { testTls, type TlsMaterial } from './tls';
-export { startTlsTerminator } from './tls-terminator';
+export { startTlsTerminator, type TerminatorRoute } from './tls-terminator';
