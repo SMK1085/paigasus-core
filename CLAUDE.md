@@ -850,6 +850,24 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   the real repo, since several tasks legitimately lack those (`affected-smoke`'s own globs are
   pinned by check 8e instead; the three `release-parity*` tasks route through
   `SELF_TASK_GLOBS_EXEMPT`).
+- `ci/affected-graph/ci_targets.py` derives its verdict AND its report from ONE list (SMA-638).
+  `collect_findings` returns 23 `(key, rows, title)` triples; `main()` reads
+  `if not any(rows for _, rows, _ in findings)` for the verdict and iterates that same list for the
+  report, so a check folded into one and not the other cannot exist — the defect SMA-638 reported
+  for `check_tailwind_guard_invocations`, which applied to every check in the file. What stops the
+  list being SHRUNK is `EXPECTED_FINDING_KEYS`, a 23-key tuple whose non-emptiness, arity and exact
+  key sequence `self_test()` asserts. So adding or removing a check reds the gate until that tuple
+  is re-baselined, and the re-baseline is a deliberate act, never a mechanical edit to clear a red.
+  The floor proves MEMBERSHIP, not semantics: a key whose `rows` are always empty satisfies it.
+  Separately, `RUN_SH_CALL_SITES` (in that file) and `T_AFFECTED_GRAPH_CALL_SITES` (in
+  `ci/actionlint/run.sh`) now hold **four** entries each, not two — the two `ci_targets.py`
+  invocations, plus `ci/affected-graph/run.sh`'s `--negative-control` flag parse and its `NEGATIVE`
+  branch guard, because `run.sh` initialises `NEGATIVE=0` and deleting either line let the control
+  fall through and run the real suite twice at exit 0. The two tables are hand-mirrored and
+  **nothing asserts the copies agree**, so every edit to one must be made to the other. Both are
+  SUBSTRING pins (`site not in run_sh_text`; `grep -qF`): MEASURED, deleting a pinned line reds both
+  gates, but COMMENTING IT OUT leaves both green. That is the documented limit
+  (`ci/affected-graph/README.md`, L2), not a defect.
 - `repo:actionlint` now runs shellcheck over every workflow `run:` block, sourced from
   `shellcheck-py` pinned in `py/uv.lock` (bounded specifier `>=0.11.0.1,<0.12`), resolved via
   `uv run --locked --project py` and asserted with `[ -x ]`. It FAILS CLOSED at rc 2 — there is
