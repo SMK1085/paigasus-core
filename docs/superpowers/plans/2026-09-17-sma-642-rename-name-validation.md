@@ -754,6 +754,15 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 
 ### Task 5: Correct the iam-console comments this change falsifies
 
+> **Superseded in two places during implementation.** Step 1's replacement text below says IAM now
+> validates "with the same rule and the same 256 code-point bound". The BOUND is the same; the RULE
+> is not. The spec's F2 measures that `nameField` trims as JavaScript does while `validate_name`
+> trims Unicode `White_Space`, so a name of only U+0085 passes the form and IAM answers
+> `invalid-name`. The final review caught this and the committed comment states both facts — read
+> `ts/apps/iam-console/lib/form.ts`, not the block below, for the wording that shipped. Separately,
+> the file list below names two files; a fifth falsified comment was found in
+> `tests/integration/lifecycle-commands.test.ts` and corrected in the same wave.
+
 **Files:**
 - Modify: `ts/apps/iam-console/lib/form.ts` — 3 doc comments
 - Modify: `ts/apps/iam-console/tests/unit/form.test.ts:44` — 1 comment
