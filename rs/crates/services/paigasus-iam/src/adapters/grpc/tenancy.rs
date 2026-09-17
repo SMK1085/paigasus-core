@@ -31,7 +31,7 @@
 use std::time::Instant;
 
 use paigasus_iam_core::authz::model::root_prn;
-use paigasus_iam_core::{Action, NodeStatus, NodeView, TenancyNodeRef};
+use paigasus_iam_core::{Action, NodeStatus, NodeView, Organization, Project, Team, TenancyNodeRef};
 use paigasus_kernel::Prn;
 use paigasus_observability::record_grpc;
 use paigasus_proto::paigasus::iam::v1::list_memberships_request;
@@ -119,6 +119,68 @@ async fn resolve_node(state: &AppState, node: &TenancyNodeRef) -> Result<Prn, Te
         TenancyNodeRef::Team(id) => state.teams.get(id.uuid()).await?.node.id.prn().clone(),
         TenancyNodeRef::Project(id) => state.projects.get(id.uuid()).await?.node.id.prn().clone(),
     })
+}
+
+/// Loads the stored organization, authorizes against its OWN prn, and refuses a request prn
+/// that does not match the stored canonical one — all BEFORE the caller writes (SMA-643).
+///
+/// Order matters twice over. The load comes first because the request prn's organization slot
+/// is caller input; authorizing against the stored prn is what keeps a forged slot from
+/// choosing the resource. The comparison comes AFTER the authorization, so a caller with no
+/// grant gets `permission-denied` for a forged prn and for the correct prn alike — otherwise
+/// the difference between the two answers would tell the caller which organization owns the
+/// node.
+///
+/// The comparison is sound outside the write transaction because a node's stored prn never
+/// changes: the `prn` column is written once, at insert, and no repository method, service or
+/// migration moves a node to a different parent. A future "move" feature breaks that invariant
+/// and must revisit this helper.
+async fn load_org_for_write(state: &AppState, actor: &Prn, action: Action, id: Uuid, canonical: &str, rpc: &str) -> Result<NodeView<Organization>, Status> {
+    let view = state.orgs.get(id).await.map_err(convert::status_to_grpc)?;
+    if state.enforce_tenancy {
+        state.authorize.check(actor, action, view.node.id.prn()).await.map_err(convert::status_to_grpc)?;
+    }
+    let stored = view.node.id.canonical();
+    if stored != canonical {
+        warn_prn_mismatch(actor, canonical, &stored, rpc);
+        return Err(convert::status_to_grpc(TenancyError::PrnMismatch));
+    }
+    Ok(view)
+}
+
+/// The team twin of [`load_org_for_write`] — same order, same reasons.
+async fn load_team_for_write(state: &AppState, actor: &Prn, action: Action, id: Uuid, canonical: &str, rpc: &str) -> Result<NodeView<Team>, Status> {
+    let view = state.teams.get(id).await.map_err(convert::status_to_grpc)?;
+    if state.enforce_tenancy {
+        state.authorize.check(actor, action, view.node.id.prn()).await.map_err(convert::status_to_grpc)?;
+    }
+    let stored = view.node.id.canonical();
+    if stored != canonical {
+        warn_prn_mismatch(actor, canonical, &stored, rpc);
+        return Err(convert::status_to_grpc(TenancyError::PrnMismatch));
+    }
+    Ok(view)
+}
+
+/// The project twin of [`load_org_for_write`] — same order, same reasons.
+async fn load_project_for_write(state: &AppState, actor: &Prn, action: Action, id: Uuid, canonical: &str, rpc: &str) -> Result<NodeView<Project>, Status> {
+    let view = state.projects.get(id).await.map_err(convert::status_to_grpc)?;
+    if state.enforce_tenancy {
+        state.authorize.check(actor, action, view.node.id.prn()).await.map_err(convert::status_to_grpc)?;
+    }
+    let stored = view.node.id.canonical();
+    if stored != canonical {
+        warn_prn_mismatch(actor, canonical, &stored, rpc);
+        return Err(convert::status_to_grpc(TenancyError::PrnMismatch));
+    }
+    Ok(view)
+}
+
+/// One warning line per refused write (SMA-643 D4). After the check moved before the write, a
+/// refused attempt leaves NO audit row and no denial row, and the attempt is a tampering
+/// signal, so the log line is the only trace.
+fn warn_prn_mismatch(actor: &Prn, requested: &str, stored: &str, rpc: &str) {
+    tracing::warn!(rpc = %rpc, actor = %actor.canonical(), requested_prn = %requested, stored_prn = %stored, "refused a tenancy write: the request prn does not match the stored node");
 }
 
 #[tonic::async_trait]
@@ -211,23 +273,13 @@ impl TenancyService for TenancyGrpc {
             let actor = actor_principal.prn().clone();
             let req = request.into_inner();
             let (id, canonical) = convert::node_uuid(&req.prn, "organization")?;
-            if self.state.enforce_tenancy {
-                let existing = self.state.orgs.get(id).await.map_err(convert::status_to_grpc)?;
-                self.state
-                    .authorize
-                    .check(&actor, Action::RenameOrganization, existing.node.id.prn())
-                    .await
-                    .map_err(convert::status_to_grpc)?;
-            }
+            load_org_for_write(&self.state, &actor, Action::RenameOrganization, id, &canonical, "RenameOrganization").await?;
             let view = self
                 .state
                 .orgs
                 .rename(id, req.new_slug.as_deref(), req.new_name.as_deref(), &actor_principal)
                 .await
                 .map_err(convert::status_to_grpc)?;
-            if view.node.id.canonical() != canonical {
-                return Err(convert::status_to_grpc(TenancyError::PrnMismatch));
-            }
             Ok(Response::new(RenameOrganizationResponse {
                 organization: Some(convert::to_proto_org(&view)),
             }))
@@ -243,18 +295,8 @@ impl TenancyService for TenancyGrpc {
             let actor_principal = actor_context(&request)?.principal_id;
             let actor = actor_principal.prn().clone();
             let (id, canonical) = convert::node_uuid(&request.get_ref().prn, "organization")?;
-            if self.state.enforce_tenancy {
-                let existing = self.state.orgs.get(id).await.map_err(convert::status_to_grpc)?;
-                self.state
-                    .authorize
-                    .check(&actor, Action::ArchiveOrganization, existing.node.id.prn())
-                    .await
-                    .map_err(convert::status_to_grpc)?;
-            }
+            load_org_for_write(&self.state, &actor, Action::ArchiveOrganization, id, &canonical, "ArchiveOrganization").await?;
             let view = self.state.orgs.archive(id, &actor_principal).await.map_err(convert::status_to_grpc)?;
-            if view.node.id.canonical() != canonical {
-                return Err(convert::status_to_grpc(TenancyError::PrnMismatch));
-            }
             Ok(Response::new(ArchiveOrganizationResponse {
                 organization: Some(convert::to_proto_org(&view)),
             }))
@@ -270,18 +312,8 @@ impl TenancyService for TenancyGrpc {
             let actor_principal = actor_context(&request)?.principal_id;
             let actor = actor_principal.prn().clone();
             let (id, canonical) = convert::node_uuid(&request.get_ref().prn, "organization")?;
-            if self.state.enforce_tenancy {
-                let existing = self.state.orgs.get(id).await.map_err(convert::status_to_grpc)?;
-                self.state
-                    .authorize
-                    .check(&actor, Action::RestoreOrganization, existing.node.id.prn())
-                    .await
-                    .map_err(convert::status_to_grpc)?;
-            }
+            load_org_for_write(&self.state, &actor, Action::RestoreOrganization, id, &canonical, "RestoreOrganization").await?;
             let view = self.state.orgs.restore(id, &actor_principal).await.map_err(convert::status_to_grpc)?;
-            if view.node.id.canonical() != canonical {
-                return Err(convert::status_to_grpc(TenancyError::PrnMismatch));
-            }
             Ok(Response::new(RestoreOrganizationResponse {
                 organization: Some(convert::to_proto_org(&view)),
             }))
@@ -368,19 +400,13 @@ impl TenancyService for TenancyGrpc {
             let actor = actor_principal.prn().clone();
             let req = request.into_inner();
             let (id, canonical) = convert::node_uuid(&req.prn, "team")?;
-            if self.state.enforce_tenancy {
-                let existing = self.state.teams.get(id).await.map_err(convert::status_to_grpc)?;
-                self.state.authorize.check(&actor, Action::RenameTeam, existing.node.id.prn()).await.map_err(convert::status_to_grpc)?;
-            }
+            load_team_for_write(&self.state, &actor, Action::RenameTeam, id, &canonical, "RenameTeam").await?;
             let view = self
                 .state
                 .teams
                 .rename(id, req.new_slug.as_deref(), req.new_name.as_deref(), &actor_principal)
                 .await
                 .map_err(convert::status_to_grpc)?;
-            if view.node.id.canonical() != canonical {
-                return Err(convert::status_to_grpc(TenancyError::PrnMismatch));
-            }
             Ok(Response::new(RenameTeamResponse {
                 team: Some(convert::to_proto_team(&view)),
             }))
@@ -396,14 +422,8 @@ impl TenancyService for TenancyGrpc {
             let actor_principal = actor_context(&request)?.principal_id;
             let actor = actor_principal.prn().clone();
             let (id, canonical) = convert::node_uuid(&request.get_ref().prn, "team")?;
-            if self.state.enforce_tenancy {
-                let existing = self.state.teams.get(id).await.map_err(convert::status_to_grpc)?;
-                self.state.authorize.check(&actor, Action::ArchiveTeam, existing.node.id.prn()).await.map_err(convert::status_to_grpc)?;
-            }
+            load_team_for_write(&self.state, &actor, Action::ArchiveTeam, id, &canonical, "ArchiveTeam").await?;
             let view = self.state.teams.archive(id, &actor_principal).await.map_err(convert::status_to_grpc)?;
-            if view.node.id.canonical() != canonical {
-                return Err(convert::status_to_grpc(TenancyError::PrnMismatch));
-            }
             Ok(Response::new(ArchiveTeamResponse {
                 team: Some(convert::to_proto_team(&view)),
             }))
@@ -419,14 +439,8 @@ impl TenancyService for TenancyGrpc {
             let actor_principal = actor_context(&request)?.principal_id;
             let actor = actor_principal.prn().clone();
             let (id, canonical) = convert::node_uuid(&request.get_ref().prn, "team")?;
-            if self.state.enforce_tenancy {
-                let existing = self.state.teams.get(id).await.map_err(convert::status_to_grpc)?;
-                self.state.authorize.check(&actor, Action::RestoreTeam, existing.node.id.prn()).await.map_err(convert::status_to_grpc)?;
-            }
+            load_team_for_write(&self.state, &actor, Action::RestoreTeam, id, &canonical, "RestoreTeam").await?;
             let view = self.state.teams.restore(id, &actor_principal).await.map_err(convert::status_to_grpc)?;
-            if view.node.id.canonical() != canonical {
-                return Err(convert::status_to_grpc(TenancyError::PrnMismatch));
-            }
             Ok(Response::new(RestoreTeamResponse {
                 team: Some(convert::to_proto_team(&view)),
             }))
@@ -521,23 +535,13 @@ impl TenancyService for TenancyGrpc {
             let actor = actor_principal.prn().clone();
             let req = request.into_inner();
             let (id, canonical) = convert::node_uuid(&req.prn, "project")?;
-            if self.state.enforce_tenancy {
-                let existing = self.state.projects.get(id).await.map_err(convert::status_to_grpc)?;
-                self.state
-                    .authorize
-                    .check(&actor, Action::RenameProject, existing.node.id.prn())
-                    .await
-                    .map_err(convert::status_to_grpc)?;
-            }
+            load_project_for_write(&self.state, &actor, Action::RenameProject, id, &canonical, "RenameProject").await?;
             let view = self
                 .state
                 .projects
                 .rename(id, req.new_slug.as_deref(), req.new_name.as_deref(), &actor_principal)
                 .await
                 .map_err(convert::status_to_grpc)?;
-            if view.node.id.canonical() != canonical {
-                return Err(convert::status_to_grpc(TenancyError::PrnMismatch));
-            }
             Ok(Response::new(RenameProjectResponse {
                 project: Some(convert::to_proto_project(&view)),
             }))
@@ -553,18 +557,8 @@ impl TenancyService for TenancyGrpc {
             let actor_principal = actor_context(&request)?.principal_id;
             let actor = actor_principal.prn().clone();
             let (id, canonical) = convert::node_uuid(&request.get_ref().prn, "project")?;
-            if self.state.enforce_tenancy {
-                let existing = self.state.projects.get(id).await.map_err(convert::status_to_grpc)?;
-                self.state
-                    .authorize
-                    .check(&actor, Action::ArchiveProject, existing.node.id.prn())
-                    .await
-                    .map_err(convert::status_to_grpc)?;
-            }
+            load_project_for_write(&self.state, &actor, Action::ArchiveProject, id, &canonical, "ArchiveProject").await?;
             let view = self.state.projects.archive(id, &actor_principal).await.map_err(convert::status_to_grpc)?;
-            if view.node.id.canonical() != canonical {
-                return Err(convert::status_to_grpc(TenancyError::PrnMismatch));
-            }
             Ok(Response::new(ArchiveProjectResponse {
                 project: Some(convert::to_proto_project(&view)),
             }))
@@ -580,18 +574,8 @@ impl TenancyService for TenancyGrpc {
             let actor_principal = actor_context(&request)?.principal_id;
             let actor = actor_principal.prn().clone();
             let (id, canonical) = convert::node_uuid(&request.get_ref().prn, "project")?;
-            if self.state.enforce_tenancy {
-                let existing = self.state.projects.get(id).await.map_err(convert::status_to_grpc)?;
-                self.state
-                    .authorize
-                    .check(&actor, Action::RestoreProject, existing.node.id.prn())
-                    .await
-                    .map_err(convert::status_to_grpc)?;
-            }
+            load_project_for_write(&self.state, &actor, Action::RestoreProject, id, &canonical, "RestoreProject").await?;
             let view = self.state.projects.restore(id, &actor_principal).await.map_err(convert::status_to_grpc)?;
-            if view.node.id.canonical() != canonical {
-                return Err(convert::status_to_grpc(TenancyError::PrnMismatch));
-            }
             Ok(Response::new(RestoreProjectResponse {
                 project: Some(convert::to_proto_project(&view)),
             }))
