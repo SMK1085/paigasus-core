@@ -4,12 +4,10 @@
 import 'server-only';
 import { z } from 'zod';
 import { callIam, type IamClients } from '@paigasus/console-core';
-import { toActionResult, type ActionResult } from '../../../../lib/form';
+import { nameField, prnField, slugField, toActionResult, type ActionResult } from '../../../../lib/form';
 
-const text = z.string().trim().min(1).max(200);
-
-/** `.trim()` like every other PRN field (../commands.ts's `prn`): a hidden field can carry whitespace. */
-export const createTeamForm = z.object({ orgPrn: z.string().trim().min(1).max(512), slug: text, name: text });
+/** `prnField` trims: a hidden field can carry whitespace. */
+export const createTeamForm = z.object({ orgPrn: prnField, slug: slugField, name: nameField });
 export type CreateTeamInput = z.infer<typeof createTeamForm>;
 
 export async function createTeam(deps: { readonly tenancy: Pick<IamClients['tenancy'], 'createTeam'> }, input: CreateTeamInput): Promise<ActionResult> {
