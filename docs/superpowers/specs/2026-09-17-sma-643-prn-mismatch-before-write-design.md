@@ -67,8 +67,9 @@ owner from the change in the answer. Test T3 holds this order.
 
 Steps 2–4 go into ONE helper per node kind (`load_org_for_write`, `load_team_for_write`,
 `load_project_for_write`, placed next to `resolve_node`). Each helper takes the state, the actor,
-the action, the UUID and the canonical request PRN, and returns the loaded view. The nine
-handlers call the helper and do not copy the block.
+the action, the UUID and the canonical request PRN. It returns `Result<(), Status>`: no handler
+needs the loaded node, because the service call returns the post-write view that the response
+carries. The nine handlers call the helper and do not copy the block.
 
 **D2 — Remove the post-write comparison.** Per F2 it can never fire. If it did fire, it would
 bring back the defect. The pre-write comparison is the only comparison.
