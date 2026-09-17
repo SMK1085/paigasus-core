@@ -17,8 +17,10 @@ import { RenameForm } from './rename-form';
  * WHY THE REGION EXISTS. A rename, archive or restore action refreshes the page on a success and
  * on `forbidden`/`conflict` (§ 4.4). The action result and the refreshed page commit together. The
  * refresh can change the lifecycle view or the rename key, and then the control that ran the action
- * unmounts with its `useActionState` result. The section renders this component with NO key at a
- * stable position, so React keeps its state through the refresh.
+ * unmounts with its `useActionState` result. The section renders this component keyed by the node
+ * PRN (`key={prn}`): the key is stable during a refresh of the SAME node, so React keeps its state,
+ * and the result, through the refresh. A move to a DIFFERENT node changes the key, so React starts a
+ * new instance with an empty region.
  *
  * THE RULE.
  *   - A success shows ONLY here: "Renamed.", "Archived." or "Restored.". The controls show no

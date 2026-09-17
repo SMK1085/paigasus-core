@@ -369,7 +369,8 @@ never show, and a 403 on a stale page loses its copy and its correlation id.
 The fix is a client component, `app/_components/manage-controls.tsx`. The server section keeps its
 § 5.3 decisions and passes them, with the three actions, to `ManageControls`. `ManageControls`
 renders the controls and one result region (test id `manage-result`) below them. The section
-renders it with no `key` at a stable position, so React keeps its state through the refresh.
+renders it with `key={prn}` at a stable position, so React keeps its state through the refresh. The
+region is keyed by the node PRN, so a move to another node starts with an empty region.
 `ManageControls` wraps each action and keeps the last result in `useState`. The rule:
 
 - A success shows only in the region: "Renamed.", "Archived." or "Restored.". The controls show no

@@ -2,8 +2,9 @@
 //
 // The Manage section of the organization, team and project pages (SMA-630 spec § 5.3). A SERVER
 // component: it passes each page's own three Server Actions to the client controls as props.
-// ManageControls renders the controls and the result region (spec § 6.4). It has NO key and a
-// stable position, so its state stays through the page refresh after an action.
+// ManageControls renders the controls and the result region (spec § 6.4). It renders with
+// `key={prn}` at a stable position, so its state stays through a refresh of the SAME node. A move
+// to a DIFFERENT node changes the key, so React starts a new instance with an empty result region.
 //
 // Two inputs select the controls:
 //   - mayI() (`can`). It may hide an affordance and nothing more (511 § 6.3). Every action still
@@ -65,7 +66,7 @@ export function ManageSection({ node, prn, name, slug, lifecycle, can, actions }
           {PARENT_ARCHIVED_NOTE}
         </p>
       ) : null}
-      <ManageControls node={node} prn={prn} name={name} slug={slug} view={view} rename={can.rename} lifecycle={control} actions={actions} />
+      <ManageControls key={prn} node={node} prn={prn} name={name} slug={slug} view={view} rename={can.rename} lifecycle={control} actions={actions} />
     </section>
   );
 }

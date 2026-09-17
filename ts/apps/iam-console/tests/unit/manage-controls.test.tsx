@@ -61,12 +61,16 @@ function answering(state: ActionState): FormAction {
 
 type Props = Omit<ManageSectionProps, 'node' | 'prn'>;
 
-function section(props: Props): ReactNode {
+function sectionAt(prn: string, props: Props): ReactNode {
   return (
     <ZoneProvider zone="iam" zones={{ iam: '/iam' }}>
-      <ManageSection node="team" prn={TEAM_PRN} {...props} />
+      <ManageSection node="team" prn={prn} {...props} />
     </ZoneProvider>
   );
+}
+
+function section(props: Props): ReactNode {
+  return sectionAt(TEAM_PRN, props);
 }
 
 function base(actions: Partial<Props['actions']>): Props {
@@ -244,5 +248,23 @@ describe('ManageSection result region (spec § 6.4)', () => {
     expect(screen.getByTestId('manage-result').textContent).toBe('Archived.');
     expect(screen.queryByText('Renamed.')).toBeNull();
     expectOnce('Archived.');
+  });
+
+  it('empties the result region when the user moves to a different node (CR round 1)', async () => {
+    const user = userEvent.setup();
+    const props = base({ archive: answering({ ok: true }) });
+    const { rerender } = render(section(props));
+
+    await confirmArchive(user);
+    await within(screen.getByTestId('manage-result')).findByText('Archived.');
+
+    // A client navigation to a different node's page: a new PRN, name and slug, the same lifecycle
+    // view. Without a key on ManageControls, React reuses the instance and node A's result shows on
+    // node B (spec § 6.4).
+    const OTHER_PRN = 'prn:pgs:iam::0190a100-0000-7000-8000-0000000000e1:team/0190a1b2-0000-7000-8000-0000000000f9';
+    rerender(sectionAt(OTHER_PRN, { ...props, name: 'Other Team', slug: 'other' }));
+
+    expect(screen.getByTestId('manage-result').textContent).toBe('');
+    expect(screen.queryByText('Archived.')).toBeNull();
   });
 });
