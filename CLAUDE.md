@@ -1137,6 +1137,28 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   new worker starts a new one. A measured run showed the old container up at t=15s, no container at
   all at t=16s, and a brand-new container at t=17s. So this pull request needed no deterministic
   container label and no stale-container sweep.
+- Playwright's `locator.waitFor()` defaults to **no timeout** (1.63.0), and no `playwright.config.ts`
+  in this repo sets `use.actionTimeout`. So an unbounded `waitFor` is bounded only by the TEST
+  budget — 120 s in CI, 60 s locally — and when it expires it reports the locator, not a cause.
+  That cost SMA-512 pull request 4 two minutes of CI for an unexplained R4 flake. Both consoles'
+  hydration waits now go through `tests/e2e/support/hydration.ts`, bounded at
+  `HYDRATION_TIMEOUT_MS = 15_000` (one value, deliberately not a `process.env.CI` branch: both
+  configs set `retries: isCI ? 2 : 0`, so a branched constant would put the TIGHTER bound on the
+  run with NO retry). The helper's only `@playwright/test` import is a TYPE, which is what lets
+  `tests/unit/hydration.test.ts` drive it with a stub and exercise the failure path with no
+  browser. Two traps measured there: `Pick<Page, 'locator'>` does NOT accept a stub (it keeps the
+  full `Locator` return type — `error TS2322`), so the parameter is a structural type; and the
+  helper verifies timeout failures by checking the error's `name` field. MEASURED on 1.63.0: a
+  `waitFor` that exceeds its own `timeout` rejects with `name` `TimeoutError`, but the constructor
+  name is mangled to `TimeoutError2` by bundling — which is why the check is on `name` and never
+  `instanceof TimeoutError`. Playwright also rejects a pending `waitFor` with "Target page, context
+  or browser has been closed" during teardown; calling that "the client bundle did not run" is a
+  confident wrong diagnosis. **Residual: nothing gates a third console zone** — a new app that copies
+  `login.ts` gets an unbounded wait and no `hydration.test.ts`, and nothing reds. `stripComments`
+  is a naive regex with no string-literal awareness, so an unbalanced `/*` inside a string literal
+  would make it eat a real `.waitFor(` call and the scan would report clean; that shape is absent
+  from the tree today and is not gated. `@paigasus/app-shell`'s `loadHydrated` is NOT affected: it
+  uses `expect(...).toHaveCount(1)`, already bounded by the expect timeout.
 
 ## Workflow
 
