@@ -291,7 +291,7 @@ the ancestor-archived case, which needs a node that has an ancestor and so runs 
 | A whitespace-only difference is a no-op (D2.1) | Stored `"Acme"`, input `Some("  Acme  ")` | `changed == false`: `updated_at` and `modified_by` unchanged, no event, no audit entry. |
 | A legacy untrimmed name is normalized (D2.2) | Stored `"  Acme  "`, input `Some("  Acme  ")` | `changed == true`: the stored name becomes `"Acme"`, `updated_at` and `modified_by` advance, one event and one audit entry. |
 | A bad name outranks an archived node (D3) | An archived org, `Some("")` | `TenancyError::InvalidName`, not `NodeArchived`. |
-| A bad name outranks an ancestor-archived node (D3) | A team under an archived org, `Some("")` | `TenancyError::InvalidName`, not `ParentArchived`. The org's own guard is own-status only (`pg_organizations.rs:238`); teams and projects fold ancestors (`pg_teams.rs:200`, `pg_projects.rs:233`), so this case needs a team. |
+| A bad name outranks an ancestor-archived node (D3) | A team under an archived org, `Some("")` | `TenancyError::InvalidName`, not `NodeArchived`. The org's own guard is own-status only (`pg_organizations.rs:238`); teams and projects fold ancestors (`pg_teams.rs:200`, `pg_projects.rs:233`), so this case needs a team. |
 | A legacy overlong name survives a slug-only rename (D4) | Stored name of 300 characters, `new_slug = Some("x")`, `new_name = None` | The rename succeeds and the stored name is unchanged. |
 | Create and rename accept the same set (Risk 3) | One table of names, each run through `Organization::new` and through `rename` | The two agree on every row. A file that loses its `validate_name` line fails 6.1; this fails if the two rules ever diverge. |
 

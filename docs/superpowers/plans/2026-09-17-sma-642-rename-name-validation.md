@@ -337,6 +337,10 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 
 ### Task 2: Teams — validate the name on rename
 
+> **Corrected during implementation.** A rename never raises `ParentArchived` — `rename_in` guards
+> on effective status and raises `NodeArchived`. The `ParentArchived` references below are the
+> text as dispatched; the committed test asserts `NodeArchived`. See the spec's D3.
+
 **Files:**
 - Modify: `rs/crates/services/paigasus-iam/src/application/teams.rs:178-187` (the `rename` method) and `:18-20` (the `use paigasus_iam_core::{…}` list)
 - Test: same file, the `#[cfg(test)] mod tests` block
