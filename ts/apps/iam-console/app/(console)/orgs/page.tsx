@@ -12,6 +12,7 @@ import { SectionError } from '../../_components/section-error';
 import type { ScopeEntry } from '@paigasus/console-core';
 import { iamClients, mayI, myScopes } from '../../../lib/console';
 import { parseOffset } from '../../../lib/paging';
+import { statusColumnLabel } from '../node-status';
 import { createOrganizationAction } from './actions';
 import { loadOrganizationsPage, type OrganizationList } from './load';
 
@@ -54,6 +55,7 @@ function OrganizationTable({ list }: { readonly list: OrganizationList }): React
           <TableRow>
             <TableHead>Name</TableHead>
             <TableHead>Slug</TableHead>
+            <TableHead>Status</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
@@ -69,6 +71,7 @@ function OrganizationTable({ list }: { readonly list: OrganizationList }): React
                 )}
               </TableCell>
               <TableCell>{row.slug}</TableCell>
+              <TableCell>{statusColumnLabel(row.lifecycle)}</TableCell>
             </TableRow>
           ))}
         </TableBody>

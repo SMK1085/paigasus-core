@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // /iam/orgs/[org] (spec § 5.2). A navigation is a user action, so this page always asks IAM; the
-// only things mayI() hides are the create and membership forms (spec § 6.3).
+// only things mayI() hides are the create, membership and manage controls (spec § 6.3, SMA-630
+// spec § 5.3).
 import type { ReactElement } from 'react';
 import { notFound } from 'next/navigation';
 import { Breadcrumbs, ZoneLink } from '@paigasus/app-shell';
@@ -13,8 +14,11 @@ import { SectionError } from '../../../_components/section-error';
 import { isUuid } from '@paigasus/console-core';
 import { iamClients, mayI } from '../../../../lib/console';
 import { parseOffset } from '../../../../lib/paging';
+import { ManageSection } from '../../manage-section';
+import { statusColumnLabel } from '../../node-status';
+import { StatusBadge } from '../../status-badge';
 import { MembersSection } from '../members-section';
-import { createTeamAction } from './actions';
+import { archiveOrganizationAction, createTeamAction, renameOrganizationAction, restoreOrganizationAction } from './actions';
 import { loadOrganizationPage, type TeamList } from './load';
 
 type Props = {
@@ -31,6 +35,7 @@ function TeamTable({ orgId, list, membersOffset }: { readonly orgId: string; rea
           <TableRow>
             <TableHead>Name</TableHead>
             <TableHead>Slug</TableHead>
+            <TableHead>Status</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
@@ -46,6 +51,7 @@ function TeamTable({ orgId, list, membersOffset }: { readonly orgId: string; rea
                 )}
               </TableCell>
               <TableCell>{row.slug}</TableCell>
+              <TableCell>{statusColumnLabel(row.lifecycle)}</TableCell>
             </TableRow>
           ))}
         </TableBody>
@@ -70,7 +76,10 @@ export default async function OrganizationPage({ params, searchParams }: Props):
     <div className="flex flex-col gap-8 p-6">
       <Breadcrumbs items={[{ label: 'Organizations', href: '/iam/orgs' }, { label: data.organization.name }]} />
       <div>
-        <h1 className="text-2xl font-semibold">{data.organization.name}</h1>
+        <div className="flex flex-wrap items-center gap-2">
+          <h1 className="text-2xl font-semibold">{data.organization.name}</h1>
+          <StatusBadge lifecycle={data.organization.lifecycle} />
+        </div>
         <p className="text-muted-foreground text-sm">{data.organization.slug}</p>
       </div>
       <section aria-labelledby="teams-heading" className="flex flex-col gap-3">
@@ -81,6 +90,15 @@ export default async function OrganizationPage({ params, searchParams }: Props):
         {data.canCreateTeam ? <CreateForm testId="create-team" title="Create team" submitLabel="Create" action={createTeamAction} hidden={{ orgPrn: data.orgPrn }} /> : null}
       </section>
       <MembersSection nodePrn={data.orgPrn} path={`/iam/orgs/${data.orgId}`} data={data.members} keep={{ offset }} />
+      <ManageSection
+        node="organization"
+        prn={data.orgPrn}
+        name={data.organization.name}
+        slug={data.organization.slug}
+        lifecycle={data.organization.lifecycle}
+        can={{ rename: data.canRename, archive: data.canArchive, restore: data.canRestore }}
+        actions={{ rename: renameOrganizationAction, archive: archiveOrganizationAction, restore: restoreOrganizationAction }}
+      />
     </div>
   );
 }
