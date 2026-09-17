@@ -5255,13 +5255,18 @@ while IFS= read -r verdict; do
       T_AFFECTED_GRAPH_CALL_SITES (above affected_graph_wiring_verdict in $0)." ;;
     'missing '*)
       fail "ci/affected-graph/run.sh no longer contains the exact text
-      '${verdict#missing }' (its '|| SUITE_RC=1'/'|| NEG_RC=1' propagation suffix included). That
-      call is what runs ci_targets.py's C1-C5 AND ci_targets.py's own check of THIS file's call
-      sites (ACTIONLINT_SH_CALL_SITES) — delete it, or swallow its suffix with e.g. '|| true', and
-      BOTH stop running, silently, with nothing inside ci/affected-graph/ able to notice its own
-      deletion. This check exists to close exactly that: it is scheduled independently of
-      ci/affected-graph/ (repo:actionlint's inputs are ['**/*']), so it survives the deletion.
-      Restore the exact line, suffix included." ;;
+      '${verdict#missing }'. For the two INVOCATION lines that text includes the
+      '|| SUITE_RC=1'/'|| NEG_RC=1' propagation suffix; the other two pinned lines — the
+      '--negative-control' flag parse and the 'if [ \"\$NEGATIVE\" = 1 ]; then' guard — carry no
+      suffix, and are pinned because they are the only path that REACHES the --self-test call
+      (run.sh initialises NEGATIVE=0, so deleting the flag parse skips the whole branch and the
+      gate exits 0 having run the real suite twice). Those calls are what run ci_targets.py's
+      C1-C5 AND ci_targets.py's own check of THIS file's call sites (ACTIONLINT_SH_CALL_SITES) —
+      delete one, or swallow an invocation's suffix with e.g. '|| true', and BOTH stop running,
+      silently, with nothing inside ci/affected-graph/ able to notice its own deletion. This
+      check exists to close exactly that: it is scheduled independently of ci/affected-graph/
+      (repo:actionlint's inputs are ['**/*']), so it survives the deletion. Restore the exact
+      line, suffix included where the line carries one." ;;
     *)
       infra "unhandled affected-graph-wiring verdict '$verdict'" ;;
   esac
