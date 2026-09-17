@@ -1152,15 +1152,23 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   `error TS2322`), so the parameter is a structural type; and the helper verifies timeout
   failures by checking the error's `name` field. MEASURED on 1.63.0: a
   `waitFor` that exceeds its own `timeout` rejects with `name` `TimeoutError`, but the constructor
-  name is mangled to `TimeoutError2` by bundling — which is why the check is on `name` and never
-  `instanceof TimeoutError`. Playwright also rejects a pending `waitFor` with "Target page, context
+  name is mangled to `TimeoutError2` by bundling, so `error.constructor.name` is not usable either;
+  the check is on `name` because importing the class would give the module a runtime
+  `@playwright/test` dependency. Playwright also rejects a pending `waitFor` with "Target page, context
   or browser has been closed" during teardown; calling that "the client bundle did not run" is a
   confident wrong diagnosis. **Residual: nothing gates a third console zone** — a new app that copies
   `login.ts` gets an unbounded wait and no `hydration.test.ts`, and nothing reds. `stripComments`
-  is a naive regex with no string-literal awareness, so an unbalanced `/*` inside a string literal
-  would make it eat a real `.waitFor(` call and the scan would report clean; that shape is absent
-  from the tree today and is not gated. `@paigasus/app-shell`'s `loadHydrated` is NOT affected: it
-  uses `expect(...).toHaveCount(1)`, already bounded by the expect timeout.
+  is a naive regex with no string-literal awareness, so an unbalanced `/*` in a string literal or a
+  line comment would make it eat a real `.waitFor(` call and the scan would report clean; that shape
+  is absent from the tree today and is not gated. The scan's regex also cannot see the sibling
+  `waitForURL`/`waitForResponse`/`waitForRequest`/`waitForLoadState` APIs, which default to unbounded
+  the same way (`use.navigationTimeout` also defaults to 0) — roughly 15 live call sites across both
+  apps' e2e trees are not covered, and widening the regex is out of scope. The `15_000` literal pin in
+  `hydration.test.ts` case 5 is also the only tight constraint on the value in CI: MEASURED, with the
+  literal removed, a `30_000` constant passes the relational assertions under `CI=1`, since CI's 120 s
+  budget permits up to 30 s — the `/4` bound is tight only locally. `@paigasus/app-shell`'s
+  `loadHydrated` is NOT affected: it uses `expect(...).toHaveCount(1)`, already bounded by the expect
+  timeout.
 
 ## Workflow
 

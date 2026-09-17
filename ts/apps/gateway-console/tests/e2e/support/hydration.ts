@@ -53,7 +53,8 @@ export async function waitForHydration(page: HydrationPage): Promise<void> {
     throw new Error(
       `React never hydrated: ${SELECTOR} was not attached within ${String(HYDRATION_TIMEOUT_MS)} ms. ` +
         '`Providers` sets that attribute in an effect, so its absence means the client bundle did not run — ' +
-        'a 404 on a chunk, a hydration error thrown before the effect, or a browser too CPU-starved to reach it. ' +
+        'a 404 on a chunk, a hydration error thrown before the effect, a browser too CPU-starved to reach it, ' +
+        'or the page rendered outside a `Providers` layout at all — a 404 or an error boundary. ' +
         `Playwright reported: ${error.message}`,
       { cause: error },
     );

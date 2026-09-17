@@ -67,7 +67,7 @@ describe('waitForHydration', () => {
     await expect(waitForHydration(page)).resolves.toBeUndefined();
   });
 
-  it('explains a timeout: the attribute, the effect, and each of the three causes', async () => {
+  it('explains a timeout: the attribute, the effect, and each of the four causes', async () => {
     const { page } = stubPage({ reject: timeoutError('locator.waitFor: Timeout 15000ms exceeded.') });
     const error = await waitForHydration(page).catch((caught: unknown) => caught);
     expect(error).toBeInstanceOf(Error);
@@ -80,6 +80,7 @@ describe('waitForHydration', () => {
     expect(message).toContain('404');
     expect(message).toContain('hydration error');
     expect(message).toContain('CPU-starved');
+    expect(message).toContain('error boundary');
   });
 
   it('keeps the original timeout error as the cause and quotes its message', async () => {
@@ -102,7 +103,10 @@ describe('waitForHydration', () => {
 
   it('is bounded well inside the test budget and never below the expect timeout', () => {
     // The literal pin. It is also the ONLY thing keeping this app's value equal to iam-console's:
-    // the two relational assertions below constrain each app against its own config only.
+    // the two relational assertions below constrain each app against its own config only. It is
+    // also the ONLY tight constraint on the value in CI: MEASURED, with this literal removed, a
+    // `30_000` constant still passes both relational assertions below under `CI=1`, since CI's
+    // 120 s budget permits up to 30 s — the `/4` bound is tight only locally.
     expect(HYDRATION_TIMEOUT_MS).toBe(15_000);
     // defineConfig's return type makes both optional and this project is strict, so an absent
     // value must FAIL here rather than skip the assertion.
@@ -114,9 +118,13 @@ describe('waitForHydration', () => {
     expect(HYDRATION_TIMEOUT_MS).toBeLessThanOrEqual((budget as number) / 4);
   });
 
-  it('leaves no unbounded waitFor anywhere in this app e2e tree', () => {
+  it('leaves no unbounded locator.waitFor( in this app e2e tree', () => {
     // What stops the defect returning in a NEW helper in this app. It cannot see a third app —
-    // that residual is stated in the spec, § 8 D5.
+    // that residual is stated in the spec, § 8 D5. It also does not cover the sibling
+    // `waitForURL`/`waitForResponse`/`waitForRequest`/`waitForLoadState` APIs: MEASURED,
+    // `use.navigationTimeout` also defaults to 0 in playwright@1.63.0, so those are equally
+    // unbounded, and the scan's `\.waitFor\(` regex cannot see any of their ~15 live call sites
+    // across both apps' e2e trees. Widening the regex is out of scope for this change.
     const root = fileURLToPath(new URL('../e2e', import.meta.url));
     const files: string[] = [];
     const walk = (dir: string): void => {
@@ -128,6 +136,9 @@ describe('waitForHydration', () => {
     };
     walk(root);
     expect(files.length).toBeGreaterThan(0);
+    // Pins the walk's SCOPE, not just its non-emptiness: narrowing the root to `support/` would
+    // otherwise leave this case green while it scanned almost nothing (measured).
+    expect(files.filter((file) => file.endsWith('.spec.ts')).length).toBeGreaterThan(0);
     const unbounded = files.flatMap((file) => findUnboundedWaitFor(readFileSync(file, 'utf8')).map((finding) => `${path.relative(root, file)}: ${finding}`));
     expect(unbounded).toEqual([]);
   });

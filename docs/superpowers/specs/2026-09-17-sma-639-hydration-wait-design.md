@@ -280,7 +280,10 @@ Making the wait fail at 15 s can turn a pass into a failure: a runner that would
 20 s now fails where it previously passed.
 
 * In CI, `retries: 2` absorbs a single starved attempt, and a retry-dependent pass is reported
-  **FLAKY** rather than PASSED, so the condition stays visible.
+  **FLAKY** rather than PASSED, so the condition stays visible. The measured cause was
+  concurrent-load CPU starvation, which can persist across retries within one run, so the weight
+  here rests on the single measured occurrence never recovering inside 120 s — not on the retry
+  mechanism reliably absorbing the condition.
 * **Locally there are no retries**, so a local full-graph run can newly red. That is the price of
   the bound, and 15 s (rather than the 5 s of the first draft) is what keeps it small.
 * The one occurrence actually measured never recovered inside 120 s, so there is no evidence of a
@@ -294,8 +297,12 @@ teardown-and-restart plus a full login. Line 71 is the first hydration on a cold
 Those rows nonetheless keep the same 15 s bound. The container starts in the fixture, **before**
 the page load, so it is not inside the hydration wait — a cold two-zone stack does not hydrate more
 slowly than a warm one. The retry cost the fixture imposes exists today and is not created by this
-change; what changes is that the first attempt gives up after 15 s instead of 120 s, which makes
-three attempts cheaper than one is now.
+change; what changes is that the first attempt gives up after 15 s instead of 120 s. Whether three
+15 s-bounded attempts end up cheaper than one 120 s-bounded attempt is unmeasured — a retry restarts
+the whole worker fixture (fake IdP, fake IAM, TLS terminator, standalone server, plus a Redis
+container in the two-zone project; `tests/e2e/support/harness.ts` budgets 420 s for it in CI), so
+the honest claim is only that this change is not obviously more expensive. The bound stands either
+way.
 
 If a two-zone row does prove to need a larger bound, the answer is to raise it with the measurement
 recorded — not to remove it.
