@@ -39,12 +39,67 @@ function timeoutError(message: string): Error {
  * `HYDRATION_TIMEOUT_MS` in `hydration.ts`) and, more dangerously, so a *comment* that happens to
  * contain the substring `timeout` cannot make the scan silently SKIP a real unguarded call next to
  * it (a false NEGATIVE — this repo has a recorded history of assertions going inert exactly this
- * way). The `[^:]` guard on the line-comment strip is deliberate: without it, `https://` inside a
- * string literal reads as a line comment and everything after it on that line is discarded,
- * corrupting real code rather than removing a comment.
+ * way).
+ *
+ * String-aware: a single-pass character scanner, not a pair of regexes. It tracks one of six
+ * states — plain code, a single-quoted string, a double-quoted string, a template literal, a line
+ * comment, or a block comment — and a slash-star or double-slash only starts a comment while the
+ * scanner is in plain code. A regex-based strip runs the comment pattern over the whole source
+ * regardless of what it is inside, so a slash-star or double-slash that occurs INSIDE a string
+ * literal used to start a "comment" there too, and the lazy match could run past the string and
+ * swallow a real `.waitFor(` call before the next genuine block-comment closer (or, for a line
+ * comment, the rest of that line). The scanner never makes that mistake: string content is
+ * consumed character by character, an escaping backslash is consumed together with the character
+ * it escapes so an escaped quote cannot close the string early, and the matching unescaped quote
+ * is the only thing that ends it. String content (and the real code around it) is kept in the
+ * output; only comment characters are dropped.
  */
 function stripComments(source: string): string {
-  return source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
+  let out = '';
+  let state: 'code' | 'line' | 'block' | 'single' | 'double' | 'template' = 'code';
+  for (let i = 0; i < source.length; i++) {
+    const ch = source[i] as string;
+    const next = source[i + 1];
+    if (state === 'code') {
+      if (ch === '/' && next === '/') {
+        state = 'line';
+        i++;
+        continue;
+      }
+      if (ch === '/' && next === '*') {
+        state = 'block';
+        i++;
+        continue;
+      }
+      if (ch === "'" || ch === '"' || ch === '`') state = ch === "'" ? 'single' : ch === '"' ? 'double' : 'template';
+      out += ch;
+      continue;
+    }
+    if (state === 'line') {
+      if (ch === '\n') {
+        state = 'code';
+        out += ch;
+      }
+      continue;
+    }
+    if (state === 'block') {
+      if (ch === '*' && next === '/') {
+        state = 'code';
+        i++;
+      }
+      continue;
+    }
+    // single, double, template: opaque string spans. Only an unescaped matching quote closes one.
+    out += ch;
+    if (ch === '\\' && next !== undefined) {
+      out += next;
+      i++;
+      continue;
+    }
+    const closer = state === 'single' ? "'" : state === 'double' ? '"' : '`';
+    if (ch === closer) state = 'code';
+  }
+  return out;
 }
 
 /** The list of `.waitFor(...)` findings in `source` whose call omits an explicit `timeout`. */
@@ -147,8 +202,9 @@ describe('waitForHydration', () => {
     // Four shapes in one fixture: a real unguarded call (must be reported), a real guarded call
     // (must not), the same unguarded shape quoted inside a block comment AND a line comment (must
     // not — this is the false-positive case that bit hydration.ts's own doc comment), and a
-    // `https://` URL on a line with real code after it (the code must survive the line-comment
-    // strip, proving the `[^:]` guard works rather than silently discarding it).
+    // `https://` URL on a line with real code after it (the code must survive: the `//` is inside
+    // a string literal, so the scanner never leaves plain code and never starts a line comment
+    // there — proving the string-aware tracking, not a separate regex guard).
     const fixture = [
       `await page.locator('unguarded').waitFor({ state: 'attached', marker: 'real-call' });`,
       `await page.locator('guarded').waitFor({ state: 'attached', timeout: 1 });`,
@@ -161,5 +217,28 @@ describe('waitForHydration', () => {
     ].join('\n');
 
     expect(findUnboundedWaitFor(fixture)).toEqual([".waitFor({ state: 'attached', marker: 'real-call' })", ".waitFor({ state: 'attached', marker: 'after-url' })"]);
+  });
+
+  it('is string-aware: a stray /* or // inside a string literal cannot swallow real code', () => {
+    // Regression fixture for the false negative the old two-regex `stripComments` had: an
+    // unbalanced `/*` or a `//` inside a string ran the corresponding regex past the string and
+    // ate a real, unguarded `.waitFor(` call, so the scan reported clean when it should have
+    // reported a finding.
+    const fixture = [
+      // Case 1: a string containing `/*` with no closer on its own line, followed by a real
+      // unguarded call. A later GENUINE block comment supplies the accidental closing `*/` that
+      // let the old block-comment regex run past the string and the real call in between.
+      `const withStar = 'contains /* but nothing closes it here';`,
+      `await page.locator('unbounded-star').waitFor({ state: 'attached', marker: 'string-slash-star' });`,
+      `/** a real block comment whose closer used to accidentally close the fake one above */`,
+      // Case 2: a string containing `//`, followed by a real unguarded call on the SAME line —
+      // the old line-comment regex matched to end-of-line and used to eat the call.
+      `const withSlashSlash = "contains // not a comment"; await page.locator('unbounded-slash').waitFor({ state: 'attached', marker: 'string-slash-slash' });`,
+      // Case 3 (kept covered): a genuine comment mentioning `.waitFor(` with no timeout must
+      // still be ignored.
+      `// a genuine comment: page.locator('prose').waitFor({ state: 'attached', marker: 'prose-only' });`,
+    ].join('\n');
+
+    expect(findUnboundedWaitFor(fixture)).toEqual([".waitFor({ state: 'attached', marker: 'string-slash-star' })", ".waitFor({ state: 'attached', marker: 'string-slash-slash' })"]);
   });
 });

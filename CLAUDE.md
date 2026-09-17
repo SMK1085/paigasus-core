@@ -1158,9 +1158,18 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   or browser has been closed" during teardown; calling that "the client bundle did not run" is a
   confident wrong diagnosis. **Residual: nothing gates a third console zone** — a new app that copies
   `login.ts` gets an unbounded wait and no `hydration.test.ts`, and nothing reds. `stripComments`
-  is a naive regex with no string-literal awareness, so an unbalanced `/*` in a string literal or a
-  line comment would make it eat a real `.waitFor(` call and the scan would report clean; that shape
-  is absent from the tree today and is not gated. The scan's regex also cannot see the sibling
+  (SMA-639 local review) is now a single-pass character scanner, not a pair of regexes: it tracks
+  plain code, a single-quoted string, a double-quoted string, a template literal, a line comment,
+  and a block comment as separate states, with backslash escapes consumed inside a string. A `/*`
+  or `//` inside a string literal, or inside a line comment, no longer starts a comment and can no
+  longer eat a real `.waitFor(` call — the false negative the old regex pair had is closed, and a
+  fixture in `hydration.test.ts` proves it (verified by temporarily restoring the old two-regex
+  version, which fails that fixture). **What remains:** the scanner is not a full tokenizer, so a
+  regex literal is not its own state — a `/*` or `//` sequence inside one would still be read as a
+  comment marker — and a template literal's `${...}` interpolation is not tracked separately from
+  its literal text, so a quote, backtick, or comment-like sequence nested inside one could still
+  mis-close the template early. Both shapes are absent from the tree today and are not gated. The
+  scan's regex also cannot see the sibling
   `waitForURL`/`waitForResponse`/`waitForRequest`/`waitForLoadState` APIs, which default to unbounded
   the same way (`use.navigationTimeout` also defaults to 0) — roughly 15 live call sites across both
   apps' e2e trees are not covered, and widening the regex is out of scope. The `15_000` literal pin in
