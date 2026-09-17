@@ -19,19 +19,18 @@ use paigasus_iam::adapters::grpc;
 use paigasus_iam::adapters::http::AppState;
 use paigasus_iam::adapters::persistence::entities::{audit_log, event_outbox};
 use paigasus_iam::application::create_user::NewUser;
-// `Action`/`EventType` are for Tasks 2-5 (audit/outbox assertions); unused at this commit.
-#[allow(unused_imports)]
 use paigasus_iam_core::{Action, EventType};
 use paigasus_kernel::Prn;
 use paigasus_proto::paigasus::iam::v1::tenancy_service_client::TenancyServiceClient;
+use paigasus_proto::paigasus::iam::v1::{ArchiveOrganizationRequest, RestoreOrganizationRequest};
 use paigasus_proto::paigasus::iam::v1::{
     AttachMembershipRequest, CreateOrganizationRequest, CreateProjectRequest, CreateTeamRequest, GetOrganizationRequest, GetTeamRequest, Organization as ProtoOrganization, Project as ProtoProject,
     RenameOrganizationRequest, RenameProjectRequest, RenameTeamRequest, Team as ProtoTeam,
 };
-// The Archive*/Restore* requests are for Tasks 2-5's archive/restore forged-prn tests; unused
-// at this commit.
+// The Archive*/Restore* requests for teams and projects are for Tasks 3-5's forged-prn tests;
+// unused at this commit.
 #[allow(unused_imports)]
-use paigasus_proto::paigasus::iam::v1::{ArchiveOrganizationRequest, ArchiveProjectRequest, ArchiveTeamRequest, RestoreOrganizationRequest, RestoreProjectRequest, RestoreTeamRequest};
+use paigasus_proto::paigasus::iam::v1::{ArchiveProjectRequest, ArchiveTeamRequest, RestoreProjectRequest, RestoreTeamRequest};
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter};
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
@@ -76,7 +75,6 @@ fn authed<T>(msg: T, token: &str) -> tonic::Request<T> {
 /// the memory authz cache, so each state builds its own `Generations::memory()`
 /// (`http/mod.rs:339-340`). Therefore every node in a case is created, changed and read
 /// through the SAME state, and the `platform_admin` grant is seeded through the enforced one.
-#[allow(dead_code)]
 async fn two_states(db: &DatabaseConnection, idp: &support::MockIdp) -> (AppState, AppState) {
     let enforced = AppState::new(db.clone(), &support::test_config(idp)).await.unwrap();
     let mut cfg = support::test_config(idp);
@@ -87,7 +85,6 @@ async fn two_states(db: &DatabaseConnection, idp: &support::MockIdp) -> (AppStat
 
 /// Counts the `audit_log` rows for one action against one resource PRN. The queries below use
 /// the SeaORM entities directly, exactly as `tests/mutation_audit_e2e.rs:101-116` does.
-#[allow(dead_code)]
 async fn audit_count(db: &DatabaseConnection, action: &str, resource_prn: &str) -> u64 {
     audit_log::Entity::find()
         .filter(audit_log::Column::Action.eq(action))
@@ -98,7 +95,6 @@ async fn audit_count(db: &DatabaseConnection, action: &str, resource_prn: &str) 
 }
 
 /// Counts the `event_outbox` rows for one event type against one aggregate PRN.
-#[allow(dead_code)]
 async fn outbox_count(db: &DatabaseConnection, event_type: &str, aggregate_prn: &str) -> u64 {
     event_outbox::Entity::find()
         .filter(event_outbox::Column::EventType.eq(event_type))
@@ -116,14 +112,12 @@ fn prn_fields(prn: &str) -> Vec<&str> {
 }
 
 /// Replaces the organization slot. `""` removes it.
-#[allow(dead_code)]
 fn with_org(prn: &str, org: &str) -> String {
     let f = prn_fields(prn);
     format!("prn:pgs:{}:{}:{}:{}", f[2], f[3], org, f[5])
 }
 
 /// Replaces the region slot.
-#[allow(dead_code)]
 fn with_region(prn: &str, region: &str) -> String {
     let f = prn_fields(prn);
     format!("prn:pgs:{}:{}:{}:{}", f[2], region, f[4], f[5])
@@ -140,7 +134,6 @@ fn upper_uuid(prn: &str) -> String {
 /// Records one assertion. Every case collects its failures instead of panicking, so ONE test
 /// run shows every failing case — the unfixed run must show all of them, not only the first
 /// (spec § 5.1).
-#[allow(dead_code)]
 fn check(failures: &mut Vec<String>, label: &str, ok: bool, detail: String) {
     if !ok {
         failures.push(format!("{label}: {detail}"));
@@ -198,7 +191,6 @@ async fn create_project(client: &mut TenancyServiceClient<Channel>, token: &str,
 }
 
 /// Reads `ErrorInfo.reason` off a `tonic::Status`. Every IAM status carries one (SMA-504).
-#[allow(dead_code)]
 fn reason(err: &tonic::Status) -> String {
     let details = tonic_types::StatusExt::get_error_details(err);
     details.error_info().expect("every IAM status carries ErrorInfo").reason.clone()
@@ -462,4 +454,229 @@ async fn an_upper_case_uuid_in_a_correct_prn_still_renames() {
         .expect("an upper-case uuid must still address the project");
 
     server.abort();
+}
+
+/// T1 for organizations (spec § 5.2): each of `RenameOrganization`, `ArchiveOrganization` and
+/// `RestoreOrganization`, against both `enforce_tenancy` settings, on a FRESH organization per
+/// case. A forged prn must answer `prn-mismatch`, must leave the node untouched, and must write
+/// neither an `audit_log` row nor an `event_outbox` row. The positive control that follows each
+/// case proves the two queries can see a row at all.
+///
+/// The stored organization prn has an EMPTY organization slot
+/// (`paigasus-iam-core/src/tenancy.rs:79`), so the forged shapes here are a NON-EMPTY slot and a
+/// non-empty region. `convert::node_uuid` checks only the service and the resource type, so both
+/// reach the comparison.
+///
+/// Deviations from the brief (report both; no assertion, case or the number of cases changed):
+/// (1) the brief's `setting` label (`"enforce=on"` / `"enforce=off"`) also fed the org slug
+/// (`forged-rn-{setting}`), but `Slug::parse` (`paigasus-iam-core/src/tenancy.rs:18-27`) rejects
+/// `=` — only lowercase ascii, digits and `-` are allowed. A separate slug-safe tag (`on` /
+/// `off`) is used for slugs; the `setting` label keeps its original form for the failure
+/// messages.
+/// (2) each positive control now targets a FRESH organization instead of the one just forged
+/// against. The current (buggy) handlers write before checking the prn, so the forged call
+/// already committed the same mutation against the tested org: re-running an identical rename or
+/// restore on it is a no-op (`out.changed == false`, no new row), and re-running an archive on an
+/// already-archived org is denied outright by the `forbid-archived-writes` policy
+/// (`PermissionDenied`, panicking the whole test before it could report all six cases). A fresh
+/// org, untouched by the forged call, keeps the positive control meaningful in both the current
+/// (failing) state and after the Task 6 fix lands.
+#[tokio::test]
+async fn a_forged_prn_never_writes_an_organization() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let idp = support::start_mock_idp().await;
+    let (enforced, unenforced) = two_states(&db, &idp).await;
+    let token = idp.bearer("forged-org", Some("forged-org@example.com"), "paigasus", 3600);
+    // Seeded through the ENFORCED state: `seed_platform_admin` bumps only the state it gets
+    // (`tests/support/mod.rs:639-643`), and the two states have separate generation counters.
+    support::provision_platform_admin(&enforced, &token).await;
+    let (on_addr, on_server) = spawn_tenancy_server(enforced).await;
+    let (off_addr, off_server) = spawn_tenancy_server(unenforced).await;
+    let mut on = connect(on_addr).await;
+    let mut off = connect(off_addr).await;
+
+    let mut failures: Vec<String> = Vec::new();
+    let forged_slot = Uuid::from_u128(0x0f01).as_hyphenated().to_string();
+
+    for (setting, slug_tag, client) in [("enforce=on", "on", &mut on), ("enforce=off", "off", &mut off)] {
+        // ---- rename ----
+        let org = create_org(client, &token, &format!("forged-rn-{slug_tag}"), "Rename Me").await;
+        let action = Action::RenameOrganization.as_wire();
+        let event = EventType::OrganizationRenamed.as_wire();
+        let before = client
+            .get_organization(authed(GetOrganizationRequest { prn: org.prn.clone() }, &token))
+            .await
+            .unwrap()
+            .into_inner()
+            .organization
+            .expect("organization");
+        let audits = audit_count(&db, action, &org.prn).await;
+        let events = outbox_count(&db, event, &org.prn).await;
+        let request = |prn: String| RenameOrganizationRequest {
+            prn,
+            new_slug: Some(format!("forged-rn-{slug_tag}-renamed")),
+            new_name: Some("Renamed".to_string()),
+        };
+        let label = format!("{setting} RenameOrganization");
+        let err = client.rename_organization(authed(request(with_org(&org.prn, &forged_slot)), &token)).await.unwrap_err();
+        check(&mut failures, &label, err.code() == Code::InvalidArgument, format!("code was {:?}", err.code()));
+        check(&mut failures, &label, reason(&err) == "prn-mismatch", format!("reason was {}", reason(&err)));
+        let after = client
+            .get_organization(authed(GetOrganizationRequest { prn: org.prn.clone() }, &token))
+            .await
+            .unwrap()
+            .into_inner()
+            .organization
+            .expect("organization");
+        check(&mut failures, &label, after == before, format!("the organization changed: {before:?} -> {after:?}"));
+        check(&mut failures, &label, audit_count(&db, action, &org.prn).await == audits, "an audit_log row was written".to_string());
+        check(&mut failures, &label, outbox_count(&db, event, &org.prn).await == events, "an event_outbox row was written".to_string());
+        // Positive control: a FRESH organization, not the one just forged against. The forged
+        // call above already committed the same rename (this is the bug T1 targets: the write
+        // lands before the prn check), so re-running the identical rename on that SAME org would
+        // be a no-op (`out.changed == false`) and prove nothing about whether the count queries
+        // can see a row at all.
+        let control = create_org(client, &token, &format!("forged-rn-{slug_tag}-control"), "Rename Control").await;
+        let control_audits = audit_count(&db, action, &control.prn).await;
+        let control_events = outbox_count(&db, event, &control.prn).await;
+        // A distinct target slug: `request`'s own target (`forged-rn-{slug_tag}-renamed`) is
+        // already taken by the org the forged call above renamed into it.
+        client
+            .rename_organization(authed(
+                RenameOrganizationRequest {
+                    prn: control.prn.clone(),
+                    new_slug: Some(format!("forged-rn-{slug_tag}-control-renamed")),
+                    new_name: Some("Renamed Control".to_string()),
+                },
+                &token,
+            ))
+            .await
+            .expect("the correct prn must succeed");
+        check(
+            &mut failures,
+            &label,
+            audit_count(&db, action, &control.prn).await == control_audits + 1 && outbox_count(&db, event, &control.prn).await == control_events + 1,
+            "the positive control wrote no row — the queries cannot see anything".to_string(),
+        );
+
+        // ---- archive ----
+        let org = create_org(client, &token, &format!("forged-ar-{slug_tag}"), "Archive Me").await;
+        let action = Action::ArchiveOrganization.as_wire();
+        let event = EventType::OrganizationArchived.as_wire();
+        let before = client
+            .get_organization(authed(GetOrganizationRequest { prn: org.prn.clone() }, &token))
+            .await
+            .unwrap()
+            .into_inner()
+            .organization
+            .expect("organization");
+        let audits = audit_count(&db, action, &org.prn).await;
+        let events = outbox_count(&db, event, &org.prn).await;
+        let label = format!("{setting} ArchiveOrganization");
+        // a non-empty REGION this time (the second forged shape for this node kind).
+        let err = client
+            .archive_organization(authed(
+                ArchiveOrganizationRequest {
+                    prn: with_region(&org.prn, "eu-west-1"),
+                },
+                &token,
+            ))
+            .await
+            .unwrap_err();
+        check(&mut failures, &label, err.code() == Code::InvalidArgument, format!("code was {:?}", err.code()));
+        check(&mut failures, &label, reason(&err) == "prn-mismatch", format!("reason was {}", reason(&err)));
+        let after = client
+            .get_organization(authed(GetOrganizationRequest { prn: org.prn.clone() }, &token))
+            .await
+            .unwrap()
+            .into_inner()
+            .organization
+            .expect("organization");
+        check(&mut failures, &label, after == before, format!("the organization changed: {before:?} -> {after:?}"));
+        check(&mut failures, &label, audit_count(&db, action, &org.prn).await == audits, "an audit_log row was written".to_string());
+        check(&mut failures, &label, outbox_count(&db, event, &org.prn).await == events, "an event_outbox row was written".to_string());
+        // Positive control: a FRESH organization. The forged call above already archived the
+        // SAME org (same bug), and the `forbid-archived-writes` policy then denies a second
+        // `ArchiveOrganization` against an already-archived node with `PermissionDenied` — a
+        // fresh org sidesteps both that denial and the no-op it would otherwise mask.
+        let control = create_org(client, &token, &format!("forged-ar-{slug_tag}-control"), "Archive Control").await;
+        let control_audits = audit_count(&db, action, &control.prn).await;
+        let control_events = outbox_count(&db, event, &control.prn).await;
+        client
+            .archive_organization(authed(ArchiveOrganizationRequest { prn: control.prn.clone() }, &token))
+            .await
+            .expect("the correct prn must succeed");
+        check(
+            &mut failures,
+            &label,
+            audit_count(&db, action, &control.prn).await == control_audits + 1 && outbox_count(&db, event, &control.prn).await == control_events + 1,
+            "the positive control wrote no row — the queries cannot see anything".to_string(),
+        );
+
+        // ---- restore (on a fresh org that this case archives first) ----
+        let org = create_org(client, &token, &format!("forged-rs-{slug_tag}"), "Restore Me").await;
+        client
+            .archive_organization(authed(ArchiveOrganizationRequest { prn: org.prn.clone() }, &token))
+            .await
+            .expect("setup archive");
+        let action = Action::RestoreOrganization.as_wire();
+        let event = EventType::OrganizationRestored.as_wire();
+        let before = client
+            .get_organization(authed(GetOrganizationRequest { prn: org.prn.clone() }, &token))
+            .await
+            .unwrap()
+            .into_inner()
+            .organization
+            .expect("organization");
+        let audits = audit_count(&db, action, &org.prn).await;
+        let events = outbox_count(&db, event, &org.prn).await;
+        let label = format!("{setting} RestoreOrganization");
+        let err = client
+            .restore_organization(authed(
+                RestoreOrganizationRequest {
+                    prn: with_org(&org.prn, &forged_slot),
+                },
+                &token,
+            ))
+            .await
+            .unwrap_err();
+        check(&mut failures, &label, err.code() == Code::InvalidArgument, format!("code was {:?}", err.code()));
+        check(&mut failures, &label, reason(&err) == "prn-mismatch", format!("reason was {}", reason(&err)));
+        let after = client
+            .get_organization(authed(GetOrganizationRequest { prn: org.prn.clone() }, &token))
+            .await
+            .unwrap()
+            .into_inner()
+            .organization
+            .expect("organization");
+        check(&mut failures, &label, after == before, format!("the organization changed: {before:?} -> {after:?}"));
+        check(&mut failures, &label, audit_count(&db, action, &org.prn).await == audits, "an audit_log row was written".to_string());
+        check(&mut failures, &label, outbox_count(&db, event, &org.prn).await == events, "an event_outbox row was written".to_string());
+        // Positive control: a FRESH organization, archived first so a restore actually changes
+        // it. The forged call above already restored the SAME org (same bug), so a second
+        // restore on it would be a no-op and prove nothing about the count queries.
+        let control = create_org(client, &token, &format!("forged-rs-{slug_tag}-control"), "Restore Control").await;
+        client
+            .archive_organization(authed(ArchiveOrganizationRequest { prn: control.prn.clone() }, &token))
+            .await
+            .expect("setup archive for the restore control");
+        let control_audits = audit_count(&db, action, &control.prn).await;
+        let control_events = outbox_count(&db, event, &control.prn).await;
+        client
+            .restore_organization(authed(RestoreOrganizationRequest { prn: control.prn.clone() }, &token))
+            .await
+            .expect("the correct prn must succeed");
+        check(
+            &mut failures,
+            &label,
+            audit_count(&db, action, &control.prn).await == control_audits + 1 && outbox_count(&db, event, &control.prn).await == control_events + 1,
+            "the positive control wrote no row — the queries cannot see anything".to_string(),
+        );
+    }
+
+    on_server.abort();
+    off_server.abort();
+    assert!(failures.is_empty(), "forged-prn organization cases failed:\n{}", failures.join("\n"));
 }
