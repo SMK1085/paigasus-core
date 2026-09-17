@@ -307,7 +307,8 @@ a failed rename would put the old values back, and the error "This slug is alrea
 show next to the old slug. Controlled inputs keep their React state through the reset. So:
 
 - The component holds `slug` and `name` in `useState`, initialised from the props.
-- The page renders it with `key={`${slug} ${name}`}`. After a successful rename, the page
+- The page renders it with `` key={`${slug} ${name}`} ``. A space is a safe separator, because IAM
+  allows only `[a-z0-9-]` in a slug. After a successful rename, the page
   renders again with new props, the key changes, and the component starts again from the new values
   (and with a new `useActionState`, so "Renamed." does not stay after a later change elsewhere).
 - After a failed rename, the key does not change, so the typed values stay.
