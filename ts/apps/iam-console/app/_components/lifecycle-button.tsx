@@ -10,7 +10,8 @@ import { FormError } from './form-error';
  * The lifecycle controls of the Manage section (SMA-630 spec § 6.2). The section renders ONE of the
  * two, with `key` set to the lifecycle view, so no `useActionState` result and no `confirming` state
  * passes from one to the other. The page renders the section only for a node where mayI() allowed
- * the transition; the Server Action still asks IAM (spec § 6.3).
+ * the transition; the Server Action still asks IAM (spec § 6.3). The section's result region shows
+ * the success text (spec § 6.4), so these controls show only their own error area.
  */
 export type LifecycleButtonProps = {
   readonly testId: string;
@@ -32,11 +33,6 @@ export function RestoreButton({ testId, prn, action }: LifecycleButtonProps): Re
       <button type="submit" disabled={pending} className={PRIMARY_BUTTON_CLASS}>
         Restore
       </button>
-      {state?.ok === true ? (
-        <p role="status" className="text-sm">
-          Restored.
-        </p>
-      ) : null}
       <div data-testid={`${testId}-error`}>
         <FormError error={state?.ok === false ? state.error : null} />
       </div>
@@ -85,11 +81,6 @@ export function ArchiveButton({ testId, prn, name, action }: LifecycleButtonProp
           Archive
         </button>
       )}
-      {state?.ok === true ? (
-        <p role="status" className="text-sm">
-          Archived.
-        </p>
-      ) : null}
       <div data-testid={`${testId}-error`}>
         <FormError error={state?.ok === false ? state.error : null} />
       </div>

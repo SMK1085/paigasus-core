@@ -4,7 +4,7 @@
 // The two lifecycle controls (SMA-630 spec § 6.2). ArchiveButton asks in two steps with local
 // state, and has NO submit button before the first click. RestoreButton submits at once.
 import type { ReactElement, ReactNode } from 'react';
-import { cleanup, render, screen, within } from '@testing-library/react';
+import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ZoneProvider } from '@paigasus/app-shell';
@@ -84,16 +84,23 @@ describe('ArchiveButton', () => {
     expect(container.querySelector('button[type="submit"]')).toBeNull();
   });
 
-  it('posts the node PRN on confirm and shows "Archived."', async () => {
+  // The Manage section's result region shows "Archived." and "Restored." (spec § 6.4,
+  // manage-controls.test.tsx). The controls show no success text, so the text never shows twice.
+  it('posts the node PRN on confirm and shows no success text of its own', async () => {
     const user = userEvent.setup();
     const action = actionAnswering({ ok: true });
     renderInZone(<ArchiveButton testId="archive-team" prn={TEAM_PRN} name="Platform Team" action={action} />);
 
     await user.click(screen.getByRole('button', { name: 'Archive' }));
-    await user.click(screen.getByRole('button', { name: 'Confirm archive' }));
+    const confirm = screen.getByRole<HTMLButtonElement>('button', { name: 'Confirm archive' });
+    await user.click(confirm);
 
-    expect(await screen.findByText('Archived.')).toBeDefined();
-    expect(action).toHaveBeenCalledTimes(1);
+    await waitFor(() => {
+      expect(action).toHaveBeenCalledTimes(1);
+      expect(confirm.disabled).toBe(false);
+    });
+    expect(screen.queryByText('Archived.')).toBeNull();
+    expect(screen.queryByRole('status')).toBeNull();
     expect(action.mock.calls[0]?.[1].get('prn')).toBe(TEAM_PRN);
   });
 
@@ -111,19 +118,24 @@ describe('ArchiveButton', () => {
 });
 
 describe('RestoreButton', () => {
-  it('has a submit button at once, posts the node PRN and shows "Restored."', async () => {
+  it('has a submit button at once, posts the node PRN and shows no success text of its own', async () => {
     const user = userEvent.setup();
     const action = actionAnswering({ ok: true });
     renderInZone(<RestoreButton testId="restore-team" prn={TEAM_PRN} action={action} />);
 
-    const button = screen.getByRole('button', { name: 'Restore' });
+    const button = screen.getByRole<HTMLButtonElement>('button', { name: 'Restore' });
     expect(button.getAttribute('type')).toBe('submit');
     expect(screen.getByTestId('restore-team').tagName).toBe('FORM');
     expect(screen.getByTestId('restore-team-error')).toBeDefined();
 
     await user.click(button);
 
-    expect(await screen.findByText('Restored.')).toBeDefined();
+    await waitFor(() => {
+      expect(action).toHaveBeenCalledTimes(1);
+      expect(button.disabled).toBe(false);
+    });
+    expect(screen.queryByText('Restored.')).toBeNull();
+    expect(screen.queryByRole('status')).toBeNull();
     expect(action.mock.calls[0]?.[1].get('prn')).toBe(TEAM_PRN);
   });
 });

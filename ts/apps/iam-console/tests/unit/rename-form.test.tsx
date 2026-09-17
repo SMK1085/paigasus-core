@@ -7,7 +7,7 @@
 // The control case below proves that this harness really resets a form, so the main case is not
 // green for the wrong reason.
 import { useActionState, type ReactElement, type ReactNode } from 'react';
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ZoneProvider } from '@paigasus/app-shell';
@@ -114,16 +114,25 @@ describe('RenameForm', () => {
     expect(name.value).toBe('Renamed Team');
   });
 
-  it('shows "Renamed." after a success', async () => {
+  // The Manage section's result region shows "Renamed." (spec § 6.4, manage-controls.test.tsx). The
+  // form itself shows no success text, so the text never shows twice.
+  it('shows no success text of its own after a success', async () => {
     const user = userEvent.setup();
     // Zero-arg implementation: TS allows assigning it where FormAction (2 args) is expected, and the
     // mock's calls are never inspected here, so no explicit arity type argument is needed.
     const action = vi.fn((): Promise<ActionState> => Promise.resolve({ ok: true }));
     renderInZone(<RenameForm testId="rename-team" title="Rename team" prn={TEAM_PRN} slug="platform" name="Platform Team" action={action} />);
 
-    await user.click(screen.getByRole('button', { name: 'Rename' }));
+    const button = screen.getByRole<HTMLButtonElement>('button', { name: 'Rename' });
+    await user.click(button);
 
-    expect(await screen.findByText('Renamed.')).toBeDefined();
+    await waitFor(() => {
+      expect(action).toHaveBeenCalledTimes(1);
+      expect(button.disabled).toBe(false);
+    });
+    expect(screen.queryByText('Renamed.')).toBeNull();
+    expect(screen.queryByRole('status')).toBeNull();
+    expect(screen.queryByTestId('form-error')).toBeNull();
   });
 
   // The control: the same wiring with an uncontrolled input LOSES the typed value. If this case

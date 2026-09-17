@@ -16,7 +16,8 @@ import { FormError } from './form-error';
  * reset, so after a failed rename the typed values stay next to the error. The Manage section
  * renders this component with `key={`${slug} ${name}`}`: after a successful rename the page renders
  * again with new props, the key changes, and the form starts again from the new values, with a new
- * `useActionState`, so "Renamed." does not stay.
+ * `useActionState`. The section's result region shows "Renamed." (spec § 6.4), so this form shows
+ * no success text.
  */
 export type RenameFormProps = {
   readonly testId: string;
@@ -63,11 +64,6 @@ export function RenameForm({ testId, title, prn, slug: currentSlug, name: curren
       <button type="submit" disabled={pending} className={PRIMARY_BUTTON_CLASS}>
         Rename
       </button>
-      {state?.ok === true ? (
-        <p role="status" className="text-sm">
-          Renamed.
-        </p>
-      ) : null}
       <div data-testid={`${testId}-error`}>
         <FormError error={state?.ok === false ? state.error : null} />
       </div>

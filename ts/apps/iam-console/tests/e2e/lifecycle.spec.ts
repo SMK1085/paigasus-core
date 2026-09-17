@@ -42,6 +42,8 @@ test('R14: archive and restore a team, with a two-step archive (SMA-630)', async
   const archive = page.getByRole('button', { name: 'Archive', exact: true });
   const confirm = page.getByRole('button', { name: 'Confirm archive', exact: true });
   const restore = page.getByRole('button', { name: 'Restore', exact: true });
+  // The result region keeps the result through the page refresh (spec § 6.4).
+  const result = page.getByTestId('manage-result');
   await expect(badge).toHaveCount(0);
 
   // Step 1: the two-step archive.
@@ -51,12 +53,14 @@ test('R14: archive and restore a team, with a two-step archive (SMA-630)', async
   await expect(restore).toBeVisible();
   await expect(archive).toHaveCount(0);
   await expect(confirm).toHaveCount(0);
+  await expect(result).toHaveText('Archived.');
 
   // Step 2: restore. The confirmation state of the first control is not kept.
   await restore.click();
   await expect(badge).toHaveCount(0);
   await expect(archive).toBeVisible();
   await expect(confirm).toHaveCount(0);
+  await expect(result).toHaveText('Restored.');
 
   // Step 3: exactly one call of each, with the team PRN.
   const prnOf = (call: { request: unknown }): string => (call.request as { prn: string }).prn;

@@ -298,7 +298,8 @@ to the ancestor, because the page does not know which ancestor is archived.
 ### 6.1 `app/_components/rename-form.tsx`
 
 A client component. It has hidden `prn`, `currentSlug` and `currentName` fields, a slug field and a
-name field. The success text is "Renamed.". The error area is `FormError`. Test id:
+name field. The success text is "Renamed.", and the result region shows it (§ 6.4). The error area
+is `FormError`. Test id:
 `rename-<node>`.
 
 **The inputs are controlled.** React 19 resets a form before it runs **every** action, whatever the
@@ -310,7 +311,7 @@ show next to the old slug. Controlled inputs keep their React state through the 
 - The page renders it with `` key={`${slug} ${name}`} ``. A space is a safe separator, because IAM
   allows only `[a-z0-9-]` in a slug. After a successful rename, the page
   renders again with new props, the key changes, and the component starts again from the new values
-  (and with a new `useActionState`, so "Renamed." does not stay after a later change elsewhere).
+  (and with a new `useActionState`). The result region shows "Renamed." (§ 6.4).
 - After a failed rename, the key does not change, so the typed values stay.
 
 ### 6.2 `app/_components/lifecycle-button.tsx`
@@ -337,6 +338,7 @@ With JavaScript off, the first state has no form, so archive is not possible at 
 accepted: the console is a React app, and the create forms need JavaScript for their state too.
 
 Test ids: `archive-<node>` and `restore-<node>`, each with an `-error` child as in `CreateForm`.
+The result region shows the success text of both controls (§ 6.4).
 
 ### 6.3 The status badge and column
 
@@ -353,6 +355,30 @@ types (`OrganizationRow`, `TeamRow`, `ProjectRow`) get a `lifecycle: NodeLifecyc
 
 The "Your organizations" list on the orgs page and the organization switcher come from
 `myScopes()`, which returns no status. They stay as they are (§ 10).
+
+### 6.4 The result region
+
+A rename, archive or restore action refreshes the page on a success, and on `forbidden` and
+`conflict` (§ 4.4). React commits the action result and the refreshed page together. The refresh
+can change the lifecycle view or the rename key. Then the control that ran the action unmounts, and
+its `useActionState` result goes with it. Without a fix, "Renamed.", "Archived." and "Restored."
+never show, and a 403 on a stale page loses its copy and its correlation id.
+
+The fix is a client component, `app/_components/manage-controls.tsx`. The server section keeps its
+§ 5.3 decisions and passes them, with the three actions, to `ManageControls`. `ManageControls`
+renders the controls and one result region (test id `manage-result`) below them. The section
+renders it with no `key` at a stable position, so React keeps its state through the refresh.
+`ManageControls` wraps each action and keeps the last result in `useState`. The rule:
+
+- A success shows only in the region: "Renamed.", "Archived." or "Restored.". The controls show no
+  success text.
+- A failure shows in the `-error` area of the control that produced it, while that control is
+  mounted. The region shows the failure only after that control unmounts: its key changed, or the
+  section does not render it. So the same error never shows twice.
+- A new submission replaces the previous result.
+
+The region is inside the section. When the refreshed section renders nothing (§ 5.3), the region
+goes too. `tests/unit/manage-controls.test.tsx` pins this rule.
 
 ## 7. Error copy
 
@@ -484,6 +510,9 @@ Proposed IAM follow-up issues (found during the challenge, not fixed here):
   of the same field still end with the later write, with no warning. The proto has no version
   field, so the console cannot detect this.
 - **D7 is a new UI rule.** It is narrow, a unit test pins its table, and 511 § 6.3 points to it.
+- **Another user renamed the node.** The refresh then changes the rename key, and the form starts
+  again from the new values. The values that the user typed are lost. The page shows the new values,
+  and the result region (§ 6.4) shows the refusal or the result. This is accepted.
 
 ## 12. Challenge log (Stage 2)
 

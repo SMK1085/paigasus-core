@@ -2,6 +2,8 @@
 //
 // The Manage section of the organization, team and project pages (SMA-630 spec § 5.3). A SERVER
 // component: it passes each page's own three Server Actions to the client controls as props.
+// ManageControls renders the controls and the result region (spec § 6.4). It has NO key and a
+// stable position, so its state stays through the page refresh after an action.
 //
 // Two inputs select the controls:
 //   - mayI() (`can`). It may hide an affordance and nothing more (511 § 6.3). Every action still
@@ -14,8 +16,7 @@
 //     its effective status (spec F8). No action and no command applies D7; 511 § 6.3 points here.
 import type { ReactElement } from 'react';
 import type { FormAction } from '../_components/form-action';
-import { ArchiveButton, RestoreButton } from '../_components/lifecycle-button';
-import { RenameForm } from '../_components/rename-form';
+import { ManageControls } from '../_components/manage-controls';
 import { lifecycleView, PARENT_ARCHIVED_NOTE, type LifecycleView, type NodeLifecycle } from './node-status';
 
 export type ManageNode = 'organization' | 'team' | 'project';
@@ -64,10 +65,7 @@ export function ManageSection({ node, prn, name, slug, lifecycle, can, actions }
           {PARENT_ARCHIVED_NOTE}
         </p>
       ) : null}
-      {can.rename ? <RenameForm key={`${slug} ${name}`} testId={`rename-${node}`} title={`Rename ${node}`} prn={prn} slug={slug} name={name} action={actions.rename} /> : null}
-      {/* `key={view}`: the two control types never share state, and a view change starts a new control. */}
-      {control === 'archive' ? <ArchiveButton key={view} testId={`archive-${node}`} prn={prn} name={name} action={actions.archive} /> : null}
-      {control === 'restore' ? <RestoreButton key={view} testId={`restore-${node}`} prn={prn} action={actions.restore} /> : null}
+      <ManageControls node={node} prn={prn} name={name} slug={slug} view={view} rename={can.rename} lifecycle={control} actions={actions} />
     </section>
   );
 }

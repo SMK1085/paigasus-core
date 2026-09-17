@@ -96,6 +96,8 @@ describe('ManageSection (spec § 5.3)', () => {
     expect(html).toContain('aria-label="Rename team"');
     expect(html).toContain('data-testid="rename-team-error"');
     expect(html).toContain('data-testid="archive-team-error"');
+    // The result region (spec § 6.4) renders with the controls, empty before any action.
+    expect(html).toContain('<div data-testid="manage-result"></div>');
     expect(html).toContain('>Archive</button>');
     expect(html).not.toContain('Confirm archive');
   });
