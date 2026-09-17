@@ -1,7 +1,7 @@
 {
   "name": "@paigasus/sdk",
   "_comment_exports": "Source-only exports. Bundler-aware consumers only (Next/Vitest/tsc walk through TS via moduleResolution: bundler). Switch to ./dist/index.js when tsup wiring lands — must happen IN LOCKSTEP with flipping `private: false` for publishable packages.",
-  "_comment_entries": "Five entry points: `.` (the root barrel), `./iam` (the generated Connect-ES clients and createIamClient), `./chat` (the gateway's OpenAI-compatible chat client — the ONLY hand-written HTTP surface, enforced by tests/http-surface.test.ts, SMA-575), `./errors`, and `./errors/types` (types only, deliberately unguarded). tests/server-guard.test.ts is driven off THIS map, so a new entry is covered the day it is added. tests/http-surface.test.ts asserts every target stays under ./src/.",
+  "_comment_entries": "Six entry points: `.` (the root barrel), `./iam` (the generated Connect-ES clients and createIamClient), `./iam/types` (the NodeStatus enum only, deliberately unguarded, SMA-630), `./chat` (the gateway's OpenAI-compatible chat client — the ONLY hand-written HTTP surface, enforced by tests/http-surface.test.ts, SMA-575), `./errors`, and `./errors/types` (types only, deliberately unguarded). tests/server-guard.test.ts is driven off THIS map, so a new entry is covered the day it is added. tests/http-surface.test.ts asserts every target stays under ./src/.",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -14,6 +14,7 @@
     ".": "./src/index.ts",
     "./chat": "./src/chat.ts",
     "./iam": "./src/iam.ts",
+    "./iam/types": "./src/iam/types.ts",
     "./errors": "./src/errors.ts",
     "./errors/types": "./src/errors/types.ts"
   },

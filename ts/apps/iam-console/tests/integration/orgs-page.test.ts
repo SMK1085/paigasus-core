@@ -5,12 +5,13 @@
 // IAM says no, the section shows IAM's 403 inline and the page lives (AC 2).
 import { ErrorReason } from '@paigasus/sdk/errors/types';
 import { disposeTransports } from '@paigasus/sdk/iam';
+import { NodeStatus } from '@paigasus/sdk/iam/types';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { loadOrganizationsPage } from '../../app/(console)/orgs/load';
 import { PAGE_SIZE } from '../../lib/paging';
 import { ROOT_PRN, organizationPrn } from '@paigasus/console-core';
 import { denial, startFakeIam, type FakeIam } from '@paigasus/console-core/testing';
-import { callsSince, clientsFor, scriptedMayI } from './support';
+import { IDS, callsSince, clientsFor, scriptedMayI } from './support';
 
 let iam: FakeIam;
 
@@ -28,6 +29,8 @@ function organizations(count: number) {
     prn: organizationPrn(`0190a100-0000-7000-8000-${String(index).padStart(12, '0')}`),
     slug: `org-${String(index)}`,
     name: `Org ${String(index)}`,
+    status: NodeStatus.ACTIVE,
+    effectiveStatus: NodeStatus.ACTIVE,
   }));
 }
 
@@ -59,7 +62,13 @@ describe('loadOrganizationsPage', () => {
 
     if (first.all?.ok !== true || second.all?.ok !== true) throw new Error('expected two listed pages');
     expect(first.all.value.rows).toHaveLength(PAGE_SIZE);
-    expect(first.all.value.rows[0]).toEqual({ prn: organizationPrn('0190a100-0000-7000-8000-000000000000'), orgId: '0190a100-0000-7000-8000-000000000000', slug: 'org-0', name: 'Org 0' });
+    expect(first.all.value.rows[0]).toEqual({
+      prn: organizationPrn('0190a100-0000-7000-8000-000000000000'),
+      orgId: '0190a100-0000-7000-8000-000000000000',
+      slug: 'org-0',
+      name: 'Org 0',
+      lifecycle: { own: 'active', effective: 'active' },
+    });
     expect(first.all.value.nextOffset).toBe(PAGE_SIZE);
     expect(second.all.value.nextOffset).toBeNull();
     expect(calls('tenancy.listOrganizations').map((call) => call.request)).toEqual([
@@ -83,5 +92,25 @@ describe('loadOrganizationsPage', () => {
     expect(data.all.error.reason).toBe(ErrorReason.FORBIDDEN);
     expect(data.all.error.correlationId).toBe('corr-all-orgs');
     expect(calls('tenancy.listOrganizations')).toHaveLength(1);
+  });
+
+  // SMA-630 spec § 6.3, § 9.1: the "All organizations" rows carry their lifecycle for the Status column.
+  it('carries the lifecycle of each row, and maps UNSPECIFIED to unknown', async () => {
+    iam.setHandlers({
+      'tenancy.listOrganizations': () => ({
+        organizations: [
+          { prn: organizationPrn(IDS.orgA), slug: 'a', name: 'A', status: NodeStatus.ARCHIVED, effectiveStatus: NodeStatus.ARCHIVED },
+          { prn: organizationPrn(IDS.orgB), slug: 'b', name: 'B' },
+        ],
+      }),
+    });
+
+    const data = await loadOrganizationsPage({ tenancy: clientsFor(iam).tenancy, mayI: scriptedMayI({ ListOrganizations: true }) }, { offset: 0 });
+
+    if (data.all?.ok !== true) throw new Error('expected a listed page');
+    expect(data.all.value.rows.map((row) => row.lifecycle)).toEqual([
+      { own: 'archived', effective: 'archived' },
+      { own: 'unknown', effective: 'unknown' },
+    ]);
   });
 });

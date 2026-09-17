@@ -24,9 +24,17 @@ const APP_DIR = fileURLToPath(new URL('../../app', import.meta.url));
 
 const EXPECTED: Readonly<Record<string, readonly string[]>> = {
   '(console)/orgs/actions.ts': ['attachMembershipAction', 'createOrganizationAction', 'detachMembershipAction'],
-  '(console)/orgs/[org]/actions.ts': ['createTeamAction'],
-  '(console)/orgs/[org]/teams/[team]/actions.ts': ['createProjectAction'],
+  '(console)/orgs/[org]/actions.ts': ['archiveOrganizationAction', 'createTeamAction', 'renameOrganizationAction', 'restoreOrganizationAction'],
+  '(console)/orgs/[org]/teams/[team]/actions.ts': ['archiveTeamAction', 'createProjectAction', 'renameTeamAction', 'restoreTeamAction'],
+  '(console)/orgs/[org]/teams/[team]/projects/[project]/actions.ts': ['archiveProjectAction', 'renameProjectAction', 'restoreProjectAction'],
 };
+
+// SMA-630 spec § 4.4, D2. A Server Action never navigates. redirect() and permanentRedirect() from
+// an action carry no basePath and leave the zone; forbidden(), unauthorized() and notFound() would
+// replace the inline form error that D2 requires. The check reads identifiers: a presentation
+// STRING such as 'forbidden' is not one. It also matches a property NAME (`x.forbidden`), which no
+// action uses.
+const NAVIGATION_HELPERS = ['redirect', 'permanentRedirect', 'forbidden', 'unauthorized', 'notFound'] as const;
 
 function findActionFiles(dir: string, prefix = ''): string[] {
   const found: string[] = [];
@@ -117,6 +125,9 @@ function checkActionsSource(file: string, text: string): { names: string[]; viol
   // `iamClients` is the PAGE accessor. It redirects, and a Server Action's redirect leaves the zone.
   if (namesIdentifier(source, 'iamClients')) violations.push(`${file}: uses the redirecting iamClients()`);
   if (namesIdentifier(source, 'mayI')) violations.push(`${file}: consults mayI()`);
+  for (const helper of NAVIGATION_HELPERS) {
+    if (namesIdentifier(source, helper)) violations.push(`${file}: names the navigation helper ${helper}()`);
+  }
   return { names: values.map((value) => value.name).sort(), violations };
 }
 
@@ -163,6 +174,31 @@ describe('every Server Action gets its client through iamClientsForAction() (spe
         `${header}import { mayI } from '../lib/console';\nexport async function a() { await iamClientsForAction(); const may = await mayI(); return may; }`,
         'consults mayI()',
       ],
+      [
+        'an action that redirects',
+        `${header}import { redirect } from 'next/navigation';\nexport async function a() { await iamClientsForAction(); redirect('/orgs'); }`,
+        'navigation helper redirect()',
+      ],
+      [
+        'an action that renders the 403 view',
+        `${header}import { forbidden } from 'next/navigation';\nexport async function a() { await iamClientsForAction(); forbidden(); }`,
+        'navigation helper forbidden()',
+      ],
+      [
+        'an action that renders the 404 view',
+        `${header}import { notFound } from 'next/navigation';\nexport async function a() { await iamClientsForAction(); notFound(); }`,
+        'navigation helper notFound()',
+      ],
+      [
+        'an action that redirects permanently',
+        `${header}import { permanentRedirect } from 'next/navigation';\nexport async function a() { await iamClientsForAction(); permanentRedirect('/orgs'); }`,
+        'navigation helper permanentRedirect()',
+      ],
+      [
+        'an action that renders the 401 view',
+        `${header}import { unauthorized } from 'next/navigation';\nexport async function a() { await iamClientsForAction(); unauthorized(); }`,
+        'navigation helper unauthorized()',
+      ],
     ])('%s', (_label, source, message) => {
       expect(checkActionsSource('probe.ts', source).violations.join('\n')).toContain(message);
     });
@@ -170,6 +206,15 @@ describe('every Server Action gets its client through iamClientsForAction() (spe
     it('accepts a correct action, and a comment that names mayI()', () => {
       expect(
         checkActionsSource('probe.ts', `${header}// No action consults mayI().\nexport async function a(_p: unknown, f: FormData) { const c = await iamClientsForAction(); return c; }`).violations,
+      ).toEqual([]);
+    });
+
+    it('accepts a presentation string and a comment that name forbidden', () => {
+      expect(
+        checkActionsSource(
+          'probe.ts',
+          `${header}// Never call forbidden() here.\nexport async function a() { const c = await iamClientsForAction(); return c.ok ? 'fine' : c.error.presentation === 'forbidden'; }`,
+        ).violations,
       ).toEqual([]);
     });
   });
