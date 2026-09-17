@@ -43,7 +43,9 @@ export type Harness = {
   useWorld(options?: WorldOptions): void;
 };
 
-function freePort(): Promise<number> {
+/** Exported for two-zone-harness.ts (SMA-512 PR4 task 3), which reuses this rather than keeping a
+ * second, divergent copy of the same process-lifecycle helper. */
+export function freePort(): Promise<number> {
   return new Promise((resolve, reject) => {
     const probe = createServer();
     probe.once('error', reject);
@@ -59,7 +61,8 @@ function freePort(): Promise<number> {
   });
 }
 
-async function stop(child: ChildProcess): Promise<void> {
+/** Exported for two-zone-harness.ts (SMA-512 PR4 task 3). */
+export async function stop(child: ChildProcess): Promise<void> {
   if (child.exitCode !== null || child.signalCode !== null) return;
   const exited = once(child, 'exit').then(() => 'exited' as const);
   child.kill('SIGTERM');
@@ -77,8 +80,13 @@ async function stop(child: ChildProcess): Promise<void> {
   }
 }
 
-/** 'ready', or 'exited' when the process died first (a port race: the caller retries). */
-async function waitForHealth(url: string, child: ChildProcess, output: () => string): Promise<'ready' | 'exited'> {
+/** 'ready', or 'exited' when the process died first (a port race: the caller retries). Exported for
+ * two-zone-harness.ts (SMA-512 PR4 task 3), which passes its OWN `label` ('iam-console' or
+ * 'gateway-console') so a health failure names the SERVER that failed rather than the front — with
+ * two servers in that harness, the default label below would name the wrong one. The single-zone
+ * harness's own call site is unchanged apart from adding no argument, so its message is
+ * byte-identical to before. */
+export async function waitForHealth(url: string, child: ChildProcess, output: () => string, label = 'gateway-console'): Promise<'ready' | 'exited'> {
   const deadline = Date.now() + READY_TIMEOUT_MS;
   while (Date.now() < deadline) {
     if (child.exitCode !== null || child.signalCode !== null) return 'exited';
@@ -93,7 +101,7 @@ async function waitForHealth(url: string, child: ChildProcess, output: () => str
     }
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
-  throw new Error(`the gateway-console server did not answer ${url} within ${String(READY_TIMEOUT_MS)} ms\n--- server output ---\n${output()}`);
+  throw new Error(`the ${label} server did not answer ${url} within ${String(READY_TIMEOUT_MS)} ms\n--- server output ---\n${output()}`);
 }
 
 /**
@@ -101,8 +109,10 @@ async function waitForHealth(url: string, child: ChildProcess, output: () => str
  *
  * NODE_ENV is STATED, not inherited: this is a production build, and the parent runs under the
  * Playwright runner. Next's type augmentation also makes the key required on ProcessEnv.
+ *
+ * Exported for two-zone-harness.ts (SMA-512 PR4 task 3).
  */
-function serverEnv(values: Readonly<Record<string, string>>): NodeJS.ProcessEnv {
+export function serverEnv(values: Readonly<Record<string, string>>): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { NODE_ENV: 'production' };
   for (const [key, value] of Object.entries(process.env)) {
     if (key === 'NODE_ENV' || key.startsWith('PAIGASUS_') || key.startsWith('__NEXT')) continue;
@@ -111,8 +121,9 @@ function serverEnv(values: Readonly<Record<string, string>>): NodeJS.ProcessEnv 
   return { ...env, ...values };
 }
 
-/** Runs every close step in order, also after one throws, so one failed step cannot leak the rest. */
-async function closeInOrder(steps: readonly (() => Promise<void>)[]): Promise<void> {
+/** Runs every close step in order, also after one throws, so one failed step cannot leak the rest.
+ * Exported for two-zone-harness.ts (SMA-512 PR4 task 3). */
+export async function closeInOrder(steps: readonly (() => Promise<void>)[]): Promise<void> {
   const failures: unknown[] = [];
   for (const step of steps) {
     try {
