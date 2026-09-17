@@ -230,6 +230,35 @@ code, run the tests, record the result, and remove the mutation:
 Remove each mutation by editing the code back, not with `git checkout`, so that the uncommitted
 fix is kept.
 
+#### Mutation battery result
+
+Task 8 ran the battery on the fixed code (SMA-643). Each mutation was undone by hand after its
+run; `git status --short` and `git diff --stat` showed no tracked-file change before the next
+mutation started.
+
+- **m1** (compare inside `enforce_tenancy`, all three helpers). All three T1 tests failed:
+  `a_forged_prn_never_writes_an_organization`, `a_forged_prn_never_writes_a_team`,
+  `a_forged_prn_never_writes_a_project`. Each failure was on the `enforce=off` case. Matches
+  the expectation.
+- **m2** (`rename_team`: call `teams.rename` before `load_team_for_write`). Two tests failed:
+  `a_forged_prn_never_writes_a_team`, on exactly the two `RenameTeam` labels
+  (`enforce=on RenameTeam`, `enforce=off RenameTeam`), as expected; and
+  `an_ungranted_caller_cannot_tell_a_forged_prn_from_a_correct_one`, which the brief did NOT
+  expect to fail. The denied call still wrote an `audit_log` row and an `event_outbox` row.
+  This is a real mismatch with the brief, not an adjusted expectation: moving the load call
+  after the write also moves the authorize check after the write for `RenameTeam`, so an
+  ungranted caller's forged-and-correct requests both write before they are refused.
+- **m3** (`load_team_for_write`: compare before authorize). One test failed:
+  `an_ungranted_caller_cannot_tell_a_forged_prn_from_a_correct_one`, on exactly
+  `RenameTeam forged`, `ArchiveTeam forged`, `RestoreTeam forged`, each answering
+  `InvalidArgument`/`prn-mismatch` instead of `PermissionDenied`/`forbidden`. Matches the
+  expectation.
+- **m4** (`rename_organization`: pass `&req.prn`, the raw request string, instead of the
+  canonicalized PRN, to `load_org_for_write`). One test failed:
+  `an_upper_case_uuid_in_a_correct_prn_still_renames`, which got `InvalidArgument`/
+  `prn-mismatch` for a request PRN differing from the stored one only by UUID case. Matches
+  the expectation.
+
 ## 6. Out of scope
 
 - The generation bump for a no-op write (`Mutated::changed == false`). That is SMA-606 D7 and
