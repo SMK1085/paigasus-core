@@ -83,6 +83,22 @@ async function confirmArchive(user: ReturnType<typeof userEvent.setup>): Promise
   await user.click(screen.getByRole('button', { name: 'Confirm archive' }));
 }
 
+/**
+ * Renders the props of the refreshed page, and waits until React has committed them.
+ *
+ * The wait is necessary. React commits "Restored." (and the other results) BEFORE the action
+ * transition of the control finishes, in a separate commit. `findBy*` returns after the first commit
+ * and one macrotask. On a slow machine the transition is still open then, and a render in a
+ * SYNCHRONOUS act() reads the unsettled action promise. React then stops the flush, logs "A component
+ * suspended inside an `act` scope, but the `act` call was not awaited", and the DOM keeps the old
+ * tree (CI run 35249338656). An awaited act() lets React finish the flush.
+ */
+async function refresh(rerender: (ui: ReactNode) => void, ui: ReactNode): Promise<void> {
+  await act(async () => {
+    rerender(ui);
+  });
+}
+
 /** The text shows exactly once: the control and the region never repeat it. */
 function expectOnce(text: string): void {
   expect(screen.getAllByText(text)).toHaveLength(1);
@@ -100,7 +116,7 @@ describe('ManageSection result region (spec § 6.4)', () => {
     expectOnce(FORBIDDEN_COPY);
 
     // Another user archived the team: the refreshed page shows Restore, and ArchiveButton unmounts.
-    rerender(section({ ...props, lifecycle: ARCHIVED }));
+    await refresh(rerender, section({ ...props, lifecycle: ARCHIVED }));
 
     expect(screen.queryByTestId('archive-team')).toBeNull();
     expect(screen.getByTestId('restore-team')).toBeDefined();
@@ -122,7 +138,7 @@ describe('ManageSection result region (spec § 6.4)', () => {
     expectOnce(CONFLICT_COPY);
 
     // Another user renamed the team: the form starts again from the new values.
-    rerender(section({ ...props, slug: 'platform-2', name: 'Platform Two' }));
+    await refresh(rerender, section({ ...props, slug: 'platform-2', name: 'Platform Two' }));
 
     expect(screen.getByLabelText<HTMLInputElement>('Slug').value).toBe('platform-2');
     const region = screen.getByTestId('manage-result');
@@ -138,7 +154,7 @@ describe('ManageSection result region (spec § 6.4)', () => {
 
     await confirmArchive(user);
     await within(screen.getByTestId('manage-result')).findByText('Archived.');
-    rerender(section({ ...props, lifecycle: ARCHIVED }));
+    await refresh(rerender, section({ ...props, lifecycle: ARCHIVED }));
 
     expect(screen.getByTestId('manage-result').textContent).toBe('Archived.');
     expectOnce('Archived.');
@@ -151,7 +167,7 @@ describe('ManageSection result region (spec § 6.4)', () => {
 
     await user.click(screen.getByRole('button', { name: 'Restore' }));
     await within(screen.getByTestId('manage-result')).findByText('Restored.');
-    rerender(section({ ...props, lifecycle: ACTIVE }));
+    await refresh(rerender, section({ ...props, lifecycle: ACTIVE }));
 
     expect(screen.queryByTestId('restore-team')).toBeNull();
     expect(screen.getByTestId('manage-result').textContent).toBe('Restored.');
@@ -167,7 +183,7 @@ describe('ManageSection result region (spec § 6.4)', () => {
     await user.type(screen.getByLabelText('Slug'), 'platform-2');
     await user.click(screen.getByRole('button', { name: 'Rename' }));
     await within(screen.getByTestId('manage-result')).findByText('Renamed.');
-    rerender(section({ ...props, slug: 'platform-2' }));
+    await refresh(rerender, section({ ...props, slug: 'platform-2' }));
 
     expect(screen.getByTestId('manage-result').textContent).toBe('Renamed.');
     expectOnce('Renamed.');
@@ -180,7 +196,7 @@ describe('ManageSection result region (spec § 6.4)', () => {
 
     await confirmArchive(user);
     await within(screen.getByTestId('archive-team-error')).findByText(FORBIDDEN_COPY);
-    rerender(section({ ...props, lifecycle: ARCHIVED }));
+    await refresh(rerender, section({ ...props, lifecycle: ARCHIVED }));
     expect(within(screen.getByTestId('manage-result')).getByText(FORBIDDEN_COPY)).toBeDefined();
 
     await user.click(screen.getByRole('button', { name: 'Restore' }));
@@ -215,7 +231,7 @@ describe('ManageSection result region (spec § 6.4)', () => {
 
     await confirmArchive(user);
     await within(screen.getByTestId('manage-result')).findByText('Archived.');
-    rerender(section({ ...props, lifecycle: ARCHIVED }));
+    await refresh(rerender, section({ ...props, lifecycle: ARCHIVED }));
 
     expect(screen.queryByText(CONFLICT_COPY)).toBeNull();
     expect(screen.getByTestId('rename-team-error').textContent).toBe('');
@@ -243,7 +259,7 @@ describe('ManageSection result region (spec § 6.4)', () => {
     await waitFor(() => {
       expect(screen.getByTestId('manage-result').textContent).toBe('Archived.');
     });
-    rerender(section({ ...props, lifecycle: ARCHIVED }));
+    await refresh(rerender, section({ ...props, lifecycle: ARCHIVED }));
 
     expect(screen.getByTestId('manage-result').textContent).toBe('Archived.');
     expect(screen.queryByText('Renamed.')).toBeNull();
@@ -262,7 +278,7 @@ describe('ManageSection result region (spec § 6.4)', () => {
     // view. Without a key on ManageControls, React reuses the instance and node A's result shows on
     // node B (spec § 6.4).
     const OTHER_PRN = 'prn:pgs:iam::0190a100-0000-7000-8000-0000000000e1:team/0190a1b2-0000-7000-8000-0000000000f9';
-    rerender(sectionAt(OTHER_PRN, { ...props, name: 'Other Team', slug: 'other' }));
+    await refresh(rerender, sectionAt(OTHER_PRN, { ...props, name: 'Other Team', slug: 'other' }));
 
     expect(screen.getByTestId('manage-result').textContent).toBe('');
     expect(screen.queryByText('Archived.')).toBeNull();
