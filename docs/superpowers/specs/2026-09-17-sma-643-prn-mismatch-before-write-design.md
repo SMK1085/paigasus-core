@@ -107,8 +107,11 @@ and no new dependency. The `Get*` handlers keep their present behavior and get n
 
 ## 4. Visible behavior changes
 
-- **B1.** A forged PRN now causes no write, no audit row, no outbox row and no generation bump.
-  The answer stays `InvalidArgument` with `ErrorInfo.reason = "prn-mismatch"`.
+- **B1.** A forged PRN from an AUTHORIZED caller now causes no write, no mutation audit row, no
+  outbox row and no generation bump. The answer stays `InvalidArgument` with
+  `ErrorInfo.reason = "prn-mismatch"`. A caller who is DENIED never reaches the comparison: the
+  answer is `permission-denied`, and in production the denial-audit path writes its own row
+  (F5). That row records the denied decision, not a tenancy write.
 - **B2. Error order.** All the requests below fail in both versions. The reason changes, and in
   some cases the gRPC status code changes too.
   - **B2a.** A forged PRN on `Rename*` together with no new field, an invalid slug, or a slug
@@ -223,8 +226,9 @@ code, run the tests, record the result, and remove the mutation:
 
 - **m1.** Move the compare inside the `if enforce_tenancy` block. Expected: only the O cases of
   T1 fail.
-- **m2.** In one handler, call the service before the helper's compare (the old order). Expected:
-  only that handler's T1 cases fail.
+- **m2.** In one handler, call the service before the helper's compare (the old order). This
+  moves the AUTHORIZATION after the write too, because the helper holds both. Expected: that
+  handler's T1 cases fail, and T3 fails as well, because a denied caller's call then writes.
 - **m3.** In the helper, compare before authorize. Expected: T3 fails for the forged requests.
 - **m4.** Compare the raw request string instead of `canonical()`. Expected: T2 fails.
 
