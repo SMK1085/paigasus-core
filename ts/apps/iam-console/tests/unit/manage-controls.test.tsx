@@ -94,8 +94,10 @@ async function confirmArchive(user: ReturnType<typeof userEvent.setup>): Promise
  * tree (CI run 35249338656). An awaited act() lets React finish the flush.
  */
 async function refresh(rerender: (ui: ReactNode) => void, ui: ReactNode): Promise<void> {
-  await act(async () => {
+  // A callback that returns a thenable makes act() take its awaited path.
+  await act(() => {
     rerender(ui);
+    return Promise.resolve();
   });
 }
 
