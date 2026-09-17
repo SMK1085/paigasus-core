@@ -1,0 +1,21 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// The e2e tier reads FORBIDDEN_VIEW_CORRELATION from @paigasus/console-core's src/correlation.ts as
+// TEXT: the module imports server-only, which throws under Playwright. A missing literal is a loud
+// error, not a default.
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
+import { TS_ROOT } from './paths';
+
+export type CorrelationMode = 'header' | 'fallback';
+
+const CORRELATION_SOURCE = path.join(TS_ROOT, 'packages', 'paigasus-console-core', 'src', 'correlation.ts');
+
+export function forbiddenViewCorrelation(): CorrelationMode {
+  const source = readFileSync(CORRELATION_SOURCE, 'utf8');
+  const match = /export const FORBIDDEN_VIEW_CORRELATION(?::[^=]+)?= '(header|fallback)'/.exec(source);
+  if (match?.[1] === undefined) {
+    throw new Error(`${CORRELATION_SOURCE} does not export FORBIDDEN_VIEW_CORRELATION = 'header' | 'fallback' on one line`);
+  }
+  return match[1] as CorrelationMode;
+}

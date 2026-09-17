@@ -6,8 +6,9 @@
 import 'server-only';
 import { PAGE_SIZE, nextOffset } from '../../../lib/paging';
 import { callIam, ROOT_PRN, parseTenancyPrn, type IamClients, type IamResult, type MayI } from '@paigasus/console-core';
+import { lifecycleOf, type NodeLifecycle } from '../node-status';
 
-export type OrganizationRow = { readonly prn: string; readonly orgId: string | null; readonly slug: string; readonly name: string };
+export type OrganizationRow = { readonly prn: string; readonly orgId: string | null; readonly slug: string; readonly name: string; readonly lifecycle: NodeLifecycle };
 export type OrganizationList = { readonly rows: readonly OrganizationRow[]; readonly offset: number; readonly nextOffset: number | null };
 export type OrganizationsPageData = {
   readonly canCreateOrganization: boolean;
@@ -29,7 +30,13 @@ export async function loadOrganizationsPage(deps: OrganizationsPageDeps, params:
 
   const rows = result.value.organizations.map((organization): OrganizationRow => {
     const ref = parseTenancyPrn(organization.prn);
-    return { prn: organization.prn, orgId: ref?.kind === 'organization' ? ref.id.toLowerCase() : null, slug: organization.slug, name: organization.name };
+    return {
+      prn: organization.prn,
+      orgId: ref?.kind === 'organization' ? ref.id.toLowerCase() : null,
+      slug: organization.slug,
+      name: organization.name,
+      lifecycle: lifecycleOf(organization),
+    };
   });
   return { canCreateOrganization, all: { ok: true, value: { rows, offset: params.offset, nextOffset: nextOffset(params.offset, rows.length) } } };
 }

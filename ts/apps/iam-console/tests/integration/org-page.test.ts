@@ -5,6 +5,7 @@
 // (IAM's prn-mismatch for a URL-built PRN) is notFound(). A denied list is a SECTION error.
 import { Code } from '@connectrpc/connect';
 import { disposeTransports } from '@paigasus/sdk/iam';
+import { NodeStatus } from '@paigasus/sdk/iam/types';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { loadOrganizationPage } from '../../app/(console)/orgs/[org]/load';
 import { PAGE_SIZE } from '../../lib/paging';
@@ -25,19 +26,23 @@ afterAll(async () => {
 
 const ORG_A = organizationPrn(IDS.orgA);
 
-function teams(count: number) {
+type StatusPair = { readonly status?: NodeStatus; readonly effectiveStatus?: NodeStatus };
+const ACTIVE: StatusPair = { status: NodeStatus.ACTIVE, effectiveStatus: NodeStatus.ACTIVE };
+
+function teams(count: number, status: StatusPair = ACTIVE) {
   return Array.from({ length: count }, (_, index) => ({
     prn: teamPrn(IDS.orgA, `0190a1b2-0000-7000-8000-${String(index).padStart(12, '0')}`),
     orgPrn: ORG_A,
     slug: `t-${String(index)}`,
     name: `Team ${String(index)}`,
+    ...status,
   }));
 }
 
-function world(teamCount: number): FakeIamHandlers {
+function world(teamCount: number, organizationStatus: StatusPair = ACTIVE, teamStatus: StatusPair = ACTIVE): FakeIamHandlers {
   return {
-    'tenancy.getOrganization': (req: { prn: string }) => ({ organization: { prn: req.prn, slug: 'acme', name: 'Acme' } }),
-    'tenancy.listTeams': () => ({ teams: teams(teamCount) }),
+    'tenancy.getOrganization': (req: { prn: string }) => ({ organization: { prn: req.prn, slug: 'acme', name: 'Acme', ...organizationStatus } }),
+    'tenancy.listTeams': () => ({ teams: teams(teamCount, teamStatus) }),
     // `filter` is a oneof: its type includes `{ case: undefined }`, so narrow instead of annotating.
     'tenancy.listMemberships': (req) => ({ memberships: [{ id: IDS.membership, principalPrn: IDS.principalPrn, nodePrn: req.filter.case === 'nodePrn' ? req.filter.value : '' }] }),
   };
@@ -64,10 +69,14 @@ describe('loadOrganizationPage', () => {
     if (data.kind !== 'ok') throw new Error(`expected ok, got ${data.kind}`);
     expect(data.orgId).toBe(IDS.orgA);
     expect(data.orgPrn).toBe(ORG_A);
-    expect(data.organization).toEqual({ name: 'Acme', slug: 'acme' });
+    expect(data.organization).toEqual({ name: 'Acme', slug: 'acme', lifecycle: { own: 'active', effective: 'active' } });
     expect(data.teams).toEqual({
       ok: true,
-      value: { offset: 0, nextOffset: null, rows: teams(2).map((team) => ({ prn: team.prn, teamId: team.prn.slice(-36), slug: team.slug, name: team.name })) },
+      value: {
+        offset: 0,
+        nextOffset: null,
+        rows: teams(2).map((team) => ({ prn: team.prn, teamId: team.prn.slice(-36), slug: team.slug, name: team.name, lifecycle: { own: 'active', effective: 'active' } })),
+      },
     });
     expect(data.canCreateTeam).toBe(true);
     expect(data.members.canAttach).toBe(true);
@@ -158,5 +167,37 @@ describe('loadOrganizationPage', () => {
     if (data.kind !== 'ok' || data.teams.ok) throw new Error('expected a teams section error');
     expect(data.teams.error.correlationId).toBe('corr-teams');
     expect(data.members.list.ok).toBe(true);
+  });
+
+  // SMA-630 spec § 5.1: three more IsAuthorized questions, all about the organization's OWN PRN.
+  it('asks the three lifecycle questions about the organization, and follows the answers', async () => {
+    iam.setHandlers(world(1));
+    const d = deps({ RenameOrganization: true, ArchiveOrganization: false, RestoreOrganization: true });
+
+    const data = await loadOrganizationPage(d, { org: IDS.orgA, offset: 0, membersOffset: 0 });
+
+    if (data.kind !== 'ok') throw new Error(`expected ok, got ${data.kind}`);
+    expect({ rename: data.canRename, archive: data.canArchive, restore: data.canRestore }).toEqual({ rename: true, archive: false, restore: true });
+    expect(d.mayI.asked).toEqual(
+      expect.arrayContaining([
+        ['RenameOrganization', ORG_A],
+        ['ArchiveOrganization', ORG_A],
+        ['RestoreOrganization', ORG_A],
+      ]),
+    );
+  });
+
+  it('maps the organization and team statuses to lifecycles, and UNSPECIFIED to unknown', async () => {
+    iam.setHandlers(world(1, { status: NodeStatus.ARCHIVED, effectiveStatus: NodeStatus.ARCHIVED }, { status: NodeStatus.ACTIVE, effectiveStatus: NodeStatus.ARCHIVED }));
+    const archived = await loadOrganizationPage(deps(), { org: IDS.orgA, offset: 0, membersOffset: 0 });
+    if (archived.kind !== 'ok' || !archived.teams.ok) throw new Error('expected an organization with a team list');
+    expect(archived.organization.lifecycle).toEqual({ own: 'archived', effective: 'archived' });
+    expect(archived.teams.value.rows.map((row) => row.lifecycle)).toEqual([{ own: 'active', effective: 'archived' }]);
+
+    iam.setHandlers(world(1, {}, {}));
+    const unknown = await loadOrganizationPage(deps(), { org: IDS.orgA, offset: 0, membersOffset: 0 });
+    if (unknown.kind !== 'ok' || !unknown.teams.ok) throw new Error('expected an organization with a team list');
+    expect(unknown.organization.lifecycle).toEqual({ own: 'unknown', effective: 'unknown' });
+    expect(unknown.teams.value.rows.map((row) => row.lifecycle)).toEqual([{ own: 'unknown', effective: 'unknown' }]);
   });
 });

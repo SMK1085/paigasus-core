@@ -5,7 +5,8 @@
 // so form-error.tsx (a client component) can use it.
 //
 // Two tables. PRESENTATION_COPY is total over Presentation, so a tenth presentation fails the
-// type-check. FORM_REASON_COPY covers the reasons the five forms can get; a test asserts every key
+// type-check. FORM_REASON_COPY covers the reasons that the create, membership, rename, archive and
+// restore forms can get (SMA-630 added the last three); a test asserts every key
 // is a real ErrorReason. A reason with no entry — including one this build does not know, which
 // the SDK reports as reason null — falls back to the presentation's copy (the version-skew rule).
 // No copy ever repeats IAM's message.
@@ -33,6 +34,8 @@ export const FORM_REASON_COPY: Partial<Record<ErrorReason, string>> = {
   [ErrorReason.MISSING_ORG_MEMBERSHIP]: 'Add this principal to the organization first.',
   [ErrorReason.PARENT_ARCHIVED]: 'The parent of this item is archived.',
   [ErrorReason.NODE_ARCHIVED]: 'This item is archived.',
+  // SMA-630 spec § 7: a rename with no changed field reaches IAM with neither field (D6).
+  [ErrorReason.NOTHING_TO_RENAME]: 'Change the slug or the name first.',
   [ErrorReason.NOT_FOUND]: 'The item was not found. It may have been removed.',
   [ErrorReason.MISSING_REQUIRED_FIELD]: 'Fill in every required field.',
   [ErrorReason.FORBIDDEN]: 'You do not have permission to do this.',

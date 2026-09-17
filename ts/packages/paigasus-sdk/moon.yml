@@ -31,10 +31,26 @@ tasks:
     deps: ['contracts:generate']
     inputs:
       - '/ts/packages/paigasus-proto/src/**/*'
+      # SMA-575 spec § 3.3. tsconfig.json `include` names tests/ and vitest.config.ts, so tsc
+      # type-checks them — but the inherited inputs are @group(sources) plus config only. Without
+      # these two lines a PR that edits only a test file gets a cached PASS, and the
+      # `expectTypeOf` proof in tests/iam-factory.test.ts is never checked in CI. The control is
+      # `run_task_case_ci "sdk-tests->sdk"` in ci/affected-graph/run.sh — for THIS `tests/**/*`
+      # line only (CORRECTED, final review): `_assert_task_case_impl` keeps only build/test/lint/
+      # test-e2e, so it cannot see `typecheck` at all, and it asserts nothing about the
+      # `vitest.config.ts` line either.
+      - 'tests/**/*'
+      - 'vitest.config.ts'
   typecheck:
     deps: ['contracts:generate']
     inputs:
       - '/ts/packages/paigasus-proto/src/**/*'
+      # Mirrors `build` above (SMA-575 spec § 3.3), for local `moon run …:typecheck` runs. It
+      # carries NO affected-graph control: `_assert_task_case_impl` cannot see a `typecheck` task
+      # at all (it keeps only build/test/lint/test-e2e), so nothing in ci/affected-graph/run.sh
+      # would catch this line, or the vitest.config.ts line below it, being dropped.
+      - 'tests/**/*'
+      - 'vitest.config.ts'
   test:
     deps: ['contracts:generate']
     # vitest.config.ts matches neither src/**/* nor tests/**/*, so without this line an edit to the

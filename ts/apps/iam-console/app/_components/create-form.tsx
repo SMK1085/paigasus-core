@@ -5,6 +5,7 @@ import { useActionState, useId, type ReactElement } from 'react';
 import { Field, Input } from '@paigasus/ui';
 // A TYPE import: verbatimModuleSyntax erases it, so no server-only module reaches the client bundle.
 import type { ActionState } from '@paigasus/console-core';
+import { PRIMARY_BUTTON_CLASS } from './button-class';
 import { FormError } from './form-error';
 
 /**
@@ -35,7 +36,7 @@ export function CreateForm({ testId, title, submitLabel, action, hidden = {} }: 
       <Field label="Name" htmlFor={`${id}-name`}>
         <Input name="name" required autoComplete="off" />
       </Field>
-      <button type="submit" disabled={pending} className="bg-primary text-primary-foreground rounded-pgs self-start px-3 py-1.5 text-sm font-medium disabled:opacity-50">
+      <button type="submit" disabled={pending} className={PRIMARY_BUTTON_CLASS}>
         {submitLabel}
       </button>
       {state?.ok === true ? (
