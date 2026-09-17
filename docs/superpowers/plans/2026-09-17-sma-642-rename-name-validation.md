@@ -19,7 +19,7 @@
   `export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"`
 - `NAME_MAX_CHARS` is **256 Unicode scalar values** (`rs/crates/libs/paigasus-iam-core/src/tenancy.rs:11`). `validate_name` trims first, then bounds. 256 is accepted; 257 is refused.
 - `TenancyError::InvalidName` carries a `String` (`rs/crates/services/paigasus-iam/src/application/error.rs:40`). Assert it with `matches!(…, TenancyError::InvalidName(_))`. `assert_eq!` against the bare variant does not compile.
-- **Never write the literal string `"invalid-name"` in any file under `rs/crates/services/paigasus-iam/src/`.** None of those three application files is in `ci/error-registry/check.py`'s `MANIFEST`, so a literal there reds `repo:error-code-single-site`. The literal IS allowed in `rs/crates/services/paigasus-iam/tests/http_tenancy.rs`, which is not a `src/` file.
+- **Never write the literal string `"invalid-name"` in `application/organizations.rs`, `application/teams.rs` or `application/projects.rs`.** None of those three is in `ci/error-registry/check.py`'s `MANIFEST`, so a literal there reds `repo:error-code-single-site`. This is NOT a blanket ban on the `src/` tree: `application/error.rs:179` holds the literal legitimately, because it is the registered emission site the MANIFEST names. The literal is also fine in `tests/http_tenancy.rs`, which is not a `src/` file at all.
 - Run cargo from `rs/`, never from the repository root.
 - Do not bypass the git hooks with `--no-verify`.
 

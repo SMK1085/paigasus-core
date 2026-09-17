@@ -320,9 +320,14 @@ altered behaviour beyond this spec.
 
 ### 6.5 Commands
 
+Each block below is independently runnable, so each exports the proto PATH itself. Without it
+`cargo nextest` resolves to whatever is on the ambient PATH, or to nothing at all — `CLAUDE.md`
+records that the agent shell does not carry the proto-managed CLIs.
+
 Unit tests, no Docker needed:
 
 ```
+export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
 cd rs && cargo nextest run -p paigasus-iam --lib
 ```
 
@@ -330,6 +335,7 @@ The integration cases in 6.3 need Docker. Run them named, with the require-Docke
 missing daemon reds instead of skipping quietly:
 
 ```
+export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
 cd rs && PAIGASUS_REQUIRE_DOCKER=1 cargo nextest run -p paigasus-iam --test http_tenancy
 ```
 
