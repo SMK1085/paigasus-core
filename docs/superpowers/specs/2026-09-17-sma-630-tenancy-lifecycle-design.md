@@ -334,8 +334,10 @@ passes from one to the other.
   - Success text: "Archived.". After a successful archive, the page renders again, and
     `RestoreButton` replaces this component.
 
-With JavaScript off, the first state has no form, so archive is not possible at all. That is
-accepted: the console is a React app, and the create forms need JavaScript for their state too.
+With JavaScript off, no manage control works. The first archive state has no form. Rename and
+restore post to a client wrapper (§ 6.4), not directly to the Server Action, so React renders no
+server form action for them. A submit before hydration still works, because React replays it. This
+is accepted: the console is a React app, and the create forms need JavaScript for their state too.
 
 Test ids: `archive-<node>` and `restore-<node>`, each with an `-error` child as in `CreateForm`.
 The result region shows the success text of both controls (§ 6.4).
