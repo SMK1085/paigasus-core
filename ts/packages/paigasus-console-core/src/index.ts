@@ -16,6 +16,6 @@ export { createIntrospectPrincipalResolver } from './principal-resolver';
 export { createConsoleRuntime, type ConsoleRuntime } from './runtime';
 
 export { introspectWithProvisioning, type Principal } from './principal';
-export { createMayI, type IamAction, type MayI } from './authorize';
+export { IAM_ACTIONS, createMayI, type IamAction, type MayI } from './authorize';
 export { SCOPE_CAP, cedarCapabilityOf, loadMyScopes, switcherOrgs, type MyScopes, type ScopeEntry } from './scopes';
 export { createAppDiscovery, descriptorCacheFor, resetDiscoveryForTest } from './discovery';

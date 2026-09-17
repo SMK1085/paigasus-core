@@ -6,22 +6,17 @@
 import 'server-only';
 import { z } from 'zod';
 import { callIam, type IamClients } from '@paigasus/console-core';
-import { toActionResult, type ActionResult } from '../../../lib/form';
-
-const text = z.string().trim().min(1).max(200);
+import { nameField, prnField, slugField, toActionResult, type ActionResult } from '../../../lib/form';
 
 /** The shape of the form, not IAM's rules. IAM validates the slug grammar and answers with a reason. */
-export const createOrganizationForm = z.object({ slug: text, name: text });
+export const createOrganizationForm = z.object({ slug: slugField, name: nameField });
 export type CreateOrganizationInput = z.infer<typeof createOrganizationForm>;
 
 export async function createOrganization(deps: { readonly tenancy: Pick<IamClients['tenancy'], 'createOrganization'> }, input: CreateOrganizationInput): Promise<ActionResult> {
   return toActionResult(await callIam(() => deps.tenancy.createOrganization({ slug: input.slug, name: input.name })));
 }
 
-/** A PRN field: bounded text. IAM parses it and answers `invalid-prn` for a bad one. */
-const prn = z.string().trim().min(1).max(512);
-
-export const attachMembershipForm = z.object({ principalPrn: prn, nodePrn: prn });
+export const attachMembershipForm = z.object({ principalPrn: prnField, nodePrn: prnField });
 export type AttachMembershipInput = z.infer<typeof attachMembershipForm>;
 
 /** The same for every node: the node PRN is a hidden field of the page that rendered the form. */
