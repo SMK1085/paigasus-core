@@ -17,9 +17,9 @@ function stubPage(outcome: { reject?: Error } = {}): { page: HydrationPage; call
   const calls: Recorded[] = [];
   const page: HydrationPage = {
     locator: (selector: string) => ({
-      waitFor: async (options: { state: 'attached'; timeout: number }): Promise<void> => {
+      waitFor: (options: { state: 'attached'; timeout: number }): Promise<void> => {
         calls.push({ selector, options });
-        if (outcome.reject !== undefined) throw outcome.reject;
+        return outcome.reject === undefined ? Promise.resolve() : Promise.reject(outcome.reject);
       },
     }),
   };
@@ -49,9 +49,7 @@ function stripComments(source: string): string {
 
 /** The list of `.waitFor(...)` findings in `source` whose call omits an explicit `timeout`. */
 function findUnboundedWaitFor(source: string): string[] {
-  return [...stripComments(source).matchAll(/\.waitFor\(([^)]*)\)/g)]
-    .filter((match) => !(match[1] ?? '').includes('timeout'))
-    .map((match) => `.waitFor(${match[1] ?? ''})`);
+  return [...stripComments(source).matchAll(/\.waitFor\(([^)]*)\)/g)].filter((match) => !(match[1] ?? '').includes('timeout')).map((match) => `.waitFor(${match[1] ?? ''})`);
 }
 
 describe('waitForHydration', () => {
@@ -130,9 +128,7 @@ describe('waitForHydration', () => {
     };
     walk(root);
     expect(files.length).toBeGreaterThan(0);
-    const unbounded = files.flatMap((file) =>
-      findUnboundedWaitFor(readFileSync(file, 'utf8')).map((finding) => `${path.relative(root, file)}: ${finding}`),
-    );
+    const unbounded = files.flatMap((file) => findUnboundedWaitFor(readFileSync(file, 'utf8')).map((finding) => `${path.relative(root, file)}: ${finding}`));
     expect(unbounded).toEqual([]);
   });
 
@@ -153,9 +149,6 @@ describe('waitForHydration', () => {
       `await page.locator('after-url').waitFor({ state: 'attached', marker: 'after-url' });`,
     ].join('\n');
 
-    expect(findUnboundedWaitFor(fixture)).toEqual([
-      ".waitFor({ state: 'attached', marker: 'real-call' })",
-      ".waitFor({ state: 'attached', marker: 'after-url' })",
-    ]);
+    expect(findUnboundedWaitFor(fixture)).toEqual([".waitFor({ state: 'attached', marker: 'real-call' })", ".waitFor({ state: 'attached', marker: 'after-url' })"]);
   });
 });
