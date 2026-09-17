@@ -1,0 +1,31 @@
+{
+  "cli_version": "0.10.6",
+  "checkpoint_id": "755a4445685f",
+  "strategy": "manual-commit",
+  "branch": "feature/sma-512-two-zone-tier",
+  "checkpoints_count": 5,
+  "files_touched": null,
+  "sessions": [
+    {
+      "metadata": "/75/5a4445685f/0/metadata.json",
+      "transcript": "/75/5a4445685f/0/full.jsonl",
+      "compact_transcript": "/75/5a4445685f/0/transcript.jsonl",
+      "content_hash": "/75/5a4445685f/0/content_hash.txt",
+      "prompt": "/75/5a4445685f/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 812,
+    "cache_creation_tokens": 5600196,
+    "cache_read_tokens": 169948636,
+    "output_tokens": 542672,
+    "api_call_count": 406,
+    "subagent_tokens": {
+      "input_tokens": 302,
+      "cache_creation_tokens": 1912319,
+      "cache_read_tokens": 29233918,
+      "output_tokens": 129336,
+      "api_call_count": 151
+    }
+  }
+}
