@@ -136,7 +136,7 @@ EXPECTED_FINDING_KEYS = (
     "pairing-orphan-globs", "tw-unregistered", "tw-missing-lines", "tw-stale", "tw-no-project",
 )
 
-# The eight shell sources check_self_invocation reads, keyed so collect_findings' signature does
+# The seven shell sources check_self_invocation reads, keyed so collect_findings' signature does
 # not grow eight positional parameters that a caller could silently transpose.
 _CALL_SITE_SOURCE_KEYS = (
     "run", "actionlint", "release_parity", "workflow_credentials", "release_plan", "ruff",
@@ -262,13 +262,30 @@ improvement, and deliberate: a `GateAssertionError` from `check_reverse` or `che
 previously escaped `main()` as an uncaught traceback. It now takes the documented rc-1 path with
 its `FAIL [ci-targets]` prefix. Record this in the commit body.
 
-- [ ] **Step 6: Run the self-test to verify it passes**
+- [ ] **Step 6: Run the self-test and expect it to be RED**
 
 ```bash
 python3 ci/affected-graph/ci_targets.py --self-test
 ```
 
-Expected: `ci-targets self-test OK`, rc 0.
+Expected: **rc 1**, with exactly five rows and nothing else:
+
+```
+main() wiring[pairing_unpinned]: found 0 occurrence(s) in main()'s source, want at least 3 ...
+main() wiring[pairing_bad_exempt]: ...
+main() wiring[pairing_stale_exempt]: ...
+main() wiring[pairing_both]: ...
+main() wiring[pairing_orphan_globs]: ...
+```
+
+**This is correct and expected.** The superseded `main_src.count(...)` block counts those five
+names in `main()`'s source; this task moves them into `collect_findings`, so the count drops to
+0 and the block reds. **Task 2 is what returns the suite to green** — it is load-bearing, not
+cleanup. Do not try to fix this here, and do not read the branch as green between the two
+commits.
+
+Confirm the three NEW assertions added in Step 1 do **not** appear in the failure list. If any
+does, that is a real defect in this task.
 
 - [ ] **Step 7: Run the real gate to verify the verdict and report still work**
 
@@ -300,7 +317,7 @@ Re-run the self-test and confirm rc 0 before continuing.
 
 ```bash
 export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
-uv run --locked --project py ruff check ci/affected-graph/ci_targets.py
+uv run --locked --project py ruff check --config py/pyproject.toml -- ci/affected-graph/ci_targets.py
 ```
 
 Expected: `All checks passed!`
@@ -328,13 +345,18 @@ Subject: `refactor(ci): build ci_targets' verdict and report from one findings l
 This is its own task because it is the step a reviewer could reject while approving Task 1: it
 removes a working control, and its safety depends entirely on Task 1's floor being real.
 
-- [ ] **Step 1: Confirm the old block currently passes**
+- [ ] **Step 1: Confirm the starting state is RED**
 
 ```bash
 python3 ci/affected-graph/ci_targets.py --self-test
 ```
 
-Expected: rc 0, with the block still present.
+Expected: **rc 1**, with exactly five `main() wiring[pairing_*]` rows and nothing else — the
+state Task 1 leaves behind. This task is what returns the suite to green, so Step 4 is the real
+proof of the task.
+
+(An earlier revision of this plan said "confirm the old block currently passes". That was wrong:
+the block cannot pass once Task 1 has moved the five `pairing_*` names into `collect_findings`.)
 
 - [ ] **Step 2: Delete the block**
 
@@ -386,7 +408,7 @@ the call and the five triples, then confirm rc 0.
 - [ ] **Step 6: Lint and commit**
 
 ```bash
-uv run --locked --project py ruff check ci/affected-graph/ci_targets.py
+uv run --locked --project py ruff check --config py/pyproject.toml -- ci/affected-graph/ci_targets.py
 git add ci/affected-graph/ci_targets.py
 git commit -F <message file>
 ```
@@ -492,7 +514,7 @@ exactly rather than adjusting the comparison.
 - [ ] **Step 7: Lint and commit**
 
 ```bash
-uv run --locked --project py ruff check ci/affected-graph/ci_targets.py
+uv run --locked --project py ruff check --config py/pyproject.toml -- ci/affected-graph/ci_targets.py
 git add ci/affected-graph/ci_targets.py
 git commit -F <message file>
 ```
