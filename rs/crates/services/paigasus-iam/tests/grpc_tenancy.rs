@@ -24,14 +24,14 @@ use paigasus_iam::application::create_user::NewUser;
 use paigasus_iam_core::{Action, EventType};
 use paigasus_kernel::Prn;
 use paigasus_proto::paigasus::iam::v1::tenancy_service_client::TenancyServiceClient;
+use paigasus_proto::paigasus::iam::v1::{
+    AttachMembershipRequest, CreateOrganizationRequest, CreateProjectRequest, CreateTeamRequest, GetOrganizationRequest, GetTeamRequest, Organization as ProtoOrganization, Project as ProtoProject,
+    RenameOrganizationRequest, RenameProjectRequest, RenameTeamRequest, Team as ProtoTeam,
+};
 // The Archive*/Restore* requests are for Tasks 2-5's archive/restore forged-prn tests; unused
 // at this commit.
 #[allow(unused_imports)]
-use paigasus_proto::paigasus::iam::v1::{
-    ArchiveOrganizationRequest, ArchiveProjectRequest, ArchiveTeamRequest, AttachMembershipRequest, CreateOrganizationRequest, CreateProjectRequest, CreateTeamRequest, GetOrganizationRequest,
-    GetTeamRequest, Organization as ProtoOrganization, Project as ProtoProject, RenameOrganizationRequest, RenameProjectRequest, RenameTeamRequest, RestoreOrganizationRequest, RestoreProjectRequest,
-    RestoreTeamRequest, Team as ProtoTeam,
-};
+use paigasus_proto::paigasus::iam::v1::{ArchiveOrganizationRequest, ArchiveProjectRequest, ArchiveTeamRequest, RestoreOrganizationRequest, RestoreProjectRequest, RestoreTeamRequest};
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter};
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
