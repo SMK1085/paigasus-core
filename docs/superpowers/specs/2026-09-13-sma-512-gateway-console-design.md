@@ -834,8 +834,10 @@ Linear issues to create after this spec is approved:
 ## 14. Things the plan must measure before building on them
 
 1. **ANSWERED (pull request 4).** One TLS terminator can path-route to two Next standalone servers.
-   `startTlsTerminator` now takes `{ tls, routes }`. `routes` is a `readonly { prefix, target }[]`
-   array. The terminator strips the query string first. It then matches the longest prefix first.
+   `startTlsTerminator` now takes EITHER of two shapes. `{ tls, target }` is the original
+   single-upstream form and is unchanged — `iam-console`'s tier, the gateway zone's single-zone
+   tier and `iam-console`'s own terminator unit test all still use it. `{ tls, routes }` is the new
+   path-routing form, where `routes` is a `readonly { prefix, target }[]` array. The terminator strips the query string first. It then matches the longest prefix first.
    An unmatched path gets a 502 response, and that response names the path and the configured
    prefixes. `target` and `routes` are mutually exclusive; passing both throws. `Host` passes
    through unchanged, and `X-Forwarded-Proto` is set on every request. Both facts are asserted by
