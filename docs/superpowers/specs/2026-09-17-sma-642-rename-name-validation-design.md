@@ -267,10 +267,12 @@ does not compile. **No test in these three files may assert the literal `"invali
 of them is in `ci/error-registry/check.py`'s `MANIFEST`, so a literal there reds
 `repo:error-code-single-site` (F5).
 
-### 6.2 Unit tests on the organization only
+### 6.2 Unit tests on the semantics, on one node kind each
 
 These prove the shared semantics of the pipeline, not the presence of the call. F9 shows the three
-methods are byte-identical in this path, and 6.1 already proves each one calls `validate_name`.
+methods are byte-identical in this path, and 6.1 already proves each one calls `validate_name`, so
+each case below runs on one node kind rather than three. All of them run on the organization except
+the ancestor-archived case, which needs a node that has an ancestor and so runs on a team.
 
 | Case | Input | Expected |
 |---|---|---|
