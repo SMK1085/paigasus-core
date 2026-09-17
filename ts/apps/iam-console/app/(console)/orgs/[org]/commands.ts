@@ -5,7 +5,7 @@
 import 'server-only';
 import { z } from 'zod';
 import { callIam, type IamClients } from '@paigasus/console-core';
-import { currentField, nameField, prnField, renameChange, slugField, toActionResult, type ActionResult } from '../../../../lib/form';
+import { nameField, prnField, renameChange, renameForm, slugField, toActionResult, type ActionResult } from '../../../../lib/form';
 
 /** `prnField` trims: a hidden field can carry whitespace. */
 export const createTeamForm = z.object({ orgPrn: prnField, slug: slugField, name: nameField });
@@ -20,7 +20,7 @@ export async function createTeam(deps: { readonly tenancy: Pick<IamClients['tena
  * user changed (SMA-630 spec D6). A changed hidden `prn` is safe: IAM authorizes the action against
  * the STORED node that the PRN names (spec § 4.2).
  */
-export const renameOrganizationForm = z.object({ prn: prnField, slug: slugField, name: nameField, currentSlug: currentField, currentName: currentField });
+export const renameOrganizationForm = renameForm();
 export type RenameOrganizationInput = z.infer<typeof renameOrganizationForm>;
 
 export async function renameOrganization(deps: { readonly tenancy: Pick<IamClients['tenancy'], 'renameOrganization'> }, input: RenameOrganizationInput): Promise<ActionResult> {

@@ -5,7 +5,7 @@
 import 'server-only';
 import { z } from 'zod';
 import { callIam, type IamClients } from '@paigasus/console-core';
-import { currentField, nameField, prnField, renameChange, slugField, toActionResult, type ActionResult } from '../../../../../../lib/form';
+import { nameField, prnField, renameChange, renameForm, slugField, toActionResult, type ActionResult } from '../../../../../../lib/form';
 
 /** `prnField` trims: a hidden field can carry whitespace. */
 export const createProjectForm = z.object({ teamPrn: prnField, slug: slugField, name: nameField });
@@ -16,7 +16,7 @@ export async function createProject(deps: { readonly tenancy: Pick<IamClients['t
 }
 
 /** See ../../commands.ts: the rename form holds the current values, and the command sends only the changes (D6). */
-export const renameTeamForm = z.object({ prn: prnField, slug: slugField, name: nameField, currentSlug: currentField, currentName: currentField });
+export const renameTeamForm = renameForm();
 export type RenameTeamInput = z.infer<typeof renameTeamForm>;
 
 export async function renameTeam(deps: { readonly tenancy: Pick<IamClients['tenancy'], 'renameTeam'> }, input: RenameTeamInput): Promise<ActionResult> {

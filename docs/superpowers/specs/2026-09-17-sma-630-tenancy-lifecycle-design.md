@@ -125,6 +125,12 @@ imports `server-only`, and only server modules import it.
   Create keeps using the same `name` schema, so the two forms agree.
 - `prn`: `z.string().trim().min(1).max(512)`, as today.
 
+**CR round 1 fix — the name bound applies only to a changed name.** The `name` bound in a rename
+form applies only when the trimmed name is different from the trimmed current name. An unchanged
+name passes with no length check, so a slug-only rename of a node with a stored name over 256 code
+points (F11) still works. `renameForm()` in `lib/form.ts` builds this rule once; each `commands.ts`
+calls it instead of its own copy of the schema.
+
 **Why a changed hidden `prn` is safe.** A user can change a hidden field. IAM authorizes the action
 against the **stored** node that the PRN names (F7), so the user can only act on a node that IAM
 allows. A PRN of the wrong kind fails as `invalid-prn` in `convert::node_uuid` before anything runs

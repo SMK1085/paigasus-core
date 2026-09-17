@@ -34,12 +34,32 @@ export const prnField = z.string().trim().min(1).max(512);
 /**
  * A hidden "current value" of a rename form. It can be empty, and it can be longer than the name
  * bound, because IAM stores a renamed name without a check (spec F11). A stricter schema here would
- * refuse every rename of such a node. The bound only limits the request.
+ * refuse every rename of such a node. It carries no `.max()` of its own: this field is only
+ * COMPARED (see `renameForm` and `renameChange`) and never sent to IAM, and a Next Server Action
+ * request body is already bounded (1 MB by default), which bounds how large it can arrive.
  */
-export const currentField = z.string().trim().max(4096);
+export const currentField = z.string().trim();
 
 export type RenameFields = { readonly slug: string; readonly name: string; readonly currentSlug: string; readonly currentName: string };
 export type RenameChange = { newSlug?: string; newName?: string };
+
+/**
+ * The shared shape of the three rename forms (SMA-630 CR round 1, spec § 4.2): `prn`, `slug`,
+ * `name` and the two hidden "current value" fields. IAM can store a name longer than 256 code
+ * points (spec F11), so `nameField`'s bound applies ONLY when the trimmed name changed. An
+ * unchanged name is accepted as it is: it is never sent to IAM either way (`renameChange` omits an
+ * unchanged field). A CHANGED name still must pass `nameField`. This is the ONE place that builds a
+ * rename schema; each `commands.ts` calls it instead of repeating the shape.
+ */
+export function renameForm() {
+  return z.object({ prn: prnField, slug: slugField, name: z.string().trim(), currentSlug: currentField, currentName: currentField }).superRefine((value, ctx) => {
+    if (value.name.trim() === value.currentName.trim()) return;
+    const result = nameField.safeParse(value.name);
+    if (!result.success) {
+      for (const issue of result.error.issues) ctx.addIssue({ ...issue, path: ['name'] });
+    }
+  });
+}
 
 /**
  * The fields a rename sends (SMA-630 spec D6, § 4.3): only the ones the user changed, compared on

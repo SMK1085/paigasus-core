@@ -6,9 +6,9 @@
 import 'server-only';
 import { z } from 'zod';
 import { callIam, type IamClients } from '@paigasus/console-core';
-import { currentField, nameField, prnField, renameChange, slugField, toActionResult, type ActionResult } from '../../../../../../../../lib/form';
+import { prnField, renameChange, renameForm, toActionResult, type ActionResult } from '../../../../../../../../lib/form';
 
-export const renameProjectForm = z.object({ prn: prnField, slug: slugField, name: nameField, currentSlug: currentField, currentName: currentField });
+export const renameProjectForm = renameForm();
 export type RenameProjectInput = z.infer<typeof renameProjectForm>;
 
 export async function renameProject(deps: { readonly tenancy: Pick<IamClients['tenancy'], 'renameProject'> }, input: RenameProjectInput): Promise<ActionResult> {
