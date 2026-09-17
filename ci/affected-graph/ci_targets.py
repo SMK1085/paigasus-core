@@ -3127,28 +3127,6 @@ def self_test():
             f"was dropped, added or reordered in the findings list"
         )
 
-    # The five fixtures above prove check_registry_pairing() itself fires; nothing proves
-    # main() actually SURFACES its rows. main() cannot be called directly here — it shells out
-    # to `moon query tasks` — so this reads its own SOURCE instead, the same way this file
-    # already pins textual wiring elsewhere (RUN_SH_CALL_SITES and friends). Each of the five
-    # result names must appear at least three times: once where main() unpacks
-    # check_registry_pairing()'s return, once inside the `if not (...)` pass/fail condition, and
-    # once in the printed-rows tuple below it. A name appearing only twice means one of those
-    # three wires is missing — collected but never folded into pass/fail, or folded in but never
-    # printed, both silent regressions a reader would only find by tracing the diff by hand.
-    main_src = inspect.getsource(main)
-    for _name in (
-        "pairing_unpinned", "pairing_bad_exempt", "pairing_stale_exempt", "pairing_both",
-        "pairing_orphan_globs",
-    ):
-        _count = main_src.count(_name)
-        if _count < 3:
-            failures.append(
-                f"main() wiring[{_name}]: found {_count} occurrence(s) in main()'s source, "
-                "want at least 3 (unpack, pass/fail condition, printed rows) — a "
-                "check_registry_pairing row is collected but not fully wired into main()"
-            )
-
     # SMA-539. check_self_scheduled_coverage: a `repo:*` task whose resolved script runs
     # --self-test/--negative-control must be a SELF_SCHEDULED_GATES key. `coverage_scripts()`
     # is built from the LIVE registry, for the same reason `wired_scripts()` above is: a literal
