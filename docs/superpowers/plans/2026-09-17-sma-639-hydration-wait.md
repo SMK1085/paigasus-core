@@ -126,7 +126,7 @@ describe('waitForHydration', () => {
     await expect(waitForHydration(page)).resolves.toBeUndefined();
   });
 
-  it('explains a timeout: the attribute, the effect, and each of the three causes', async () => {
+  it('explains a timeout: the attribute, the effect, and each of the four causes', async () => {
     const { page } = stubPage({ reject: timeoutError('locator.waitFor: Timeout 15000ms exceeded.') });
     const error = await waitForHydration(page).catch((caught: unknown) => caught);
     expect(error).toBeInstanceOf(Error);
@@ -139,6 +139,7 @@ describe('waitForHydration', () => {
     expect(message).toContain('404');
     expect(message).toContain('hydration error');
     expect(message).toContain('CPU-starved');
+    expect(message).toContain('error boundary');
   });
 
   it('keeps the original timeout error as the cause and quotes its message', async () => {
@@ -269,7 +270,8 @@ export async function waitForHydration(page: HydrationPage): Promise<void> {
     throw new Error(
       `React never hydrated: ${SELECTOR} was not attached within ${String(HYDRATION_TIMEOUT_MS)} ms. ` +
         '`Providers` sets that attribute in an effect, so its absence means the client bundle did not run — ' +
-        'a 404 on a chunk, a hydration error thrown before the effect, or a browser too CPU-starved to reach it. ' +
+        'a 404 on a chunk, a hydration error thrown before the effect, a browser too CPU-starved to reach it, ' +
+        'or the page rendered outside a `Providers` layout at all — a 404 or an error boundary. ' +
         `Playwright reported: ${error.message}`,
       { cause: error },
     );

@@ -33,13 +33,26 @@ function timeoutError(message: string): Error {
 }
 
 /**
- * Removes block and line comments from source text before it is scanned for unbounded
- * `.waitFor(` calls, so prose mentioning the API in a doc comment cannot masquerade as a real
+ * Removes block and line comments from source text, and masks the CONTENTS of every string and
+ * template literal, before the result is scanned for unbounded `.waitFor(` calls. Length and
+ * structure survive — every masked span keeps its original character count, and a string's quote
+ * delimiters are kept unmasked — only the characters that could be mistaken for something else
+ * are replaced.
+ *
+ * Comments are removed so prose mentioning the API in a doc comment cannot masquerade as a real
  * call (a false POSITIVE, demonstrated against this very file — see the doc comment on
  * `HYDRATION_TIMEOUT_MS` in `hydration.ts`) and, more dangerously, so a *comment* that happens to
  * contain the substring `timeout` cannot make the scan silently SKIP a real unguarded call next to
  * it (a false NEGATIVE — this repo has a recorded history of assertions going inert exactly this
  * way).
+ *
+ * String and template-literal CONTENT is masked for the mirror reason: a `.waitFor(` spelled out
+ * inside a quoted string or a template literal is prose, not code, and must not be reported as a
+ * finding — and, the opposite hazard, a `timeout` spelled inside a real call's own string
+ * arguments must not make an unbounded call look bounded. Masking rather than dropping keeps the
+ * masked text the same LENGTH as `source` at every position, so `findUnboundedWaitFor` can map a
+ * match found here straight back to the same offsets in the real source and report the call's
+ * actual, unmasked text.
  *
  * String-aware: a single-pass character scanner, not a pair of regexes. It tracks one of six
  * states — plain code, a single-quoted string, a double-quoted string, a template literal, a line
@@ -51,10 +64,9 @@ function timeoutError(message: string): Error {
  * comment, the rest of that line). The scanner never makes that mistake: string content is
  * consumed character by character, an escaping backslash is consumed together with the character
  * it escapes so an escaped quote cannot close the string early, and the matching unescaped quote
- * is the only thing that ends it. String content (and the real code around it) is kept in the
- * output; only comment characters are dropped.
+ * is the only thing that ends it.
  */
-function stripComments(source: string): string {
+function stripCommentsAndStringContents(source: string): string {
   let out = '';
   let state: 'code' | 'line' | 'block' | 'single' | 'double' | 'template' = 'code';
   for (let i = 0; i < source.length; i++) {
@@ -63,11 +75,13 @@ function stripComments(source: string): string {
     if (state === 'code') {
       if (ch === '/' && next === '/') {
         state = 'line';
+        out += '  ';
         i++;
         continue;
       }
       if (ch === '/' && next === '*') {
         state = 'block';
+        out += '  ';
         i++;
         continue;
       }
@@ -79,32 +93,57 @@ function stripComments(source: string): string {
       if (ch === '\n') {
         state = 'code';
         out += ch;
+      } else {
+        out += ' ';
       }
       continue;
     }
     if (state === 'block') {
       if (ch === '*' && next === '/') {
         state = 'code';
+        out += '  ';
         i++;
+      } else {
+        out += ch === '\n' ? '\n' : ' ';
       }
       continue;
     }
     // single, double, template: opaque string spans. Only an unescaped matching quote closes one.
-    out += ch;
+    // Content is masked to a filler space — preserving the span's length, not its characters — so
+    // a `.waitFor(` spelled inside cannot be mistaken for a real call and a `timeout` spelled
+    // inside cannot be mistaken for the real option. The quote delimiters are kept, unmasked.
     if (ch === '\\' && next !== undefined) {
-      out += next;
+      out += '  ';
       i++;
       continue;
     }
     const closer = state === 'single' ? "'" : state === 'double' ? '"' : '`';
-    if (ch === closer) state = 'code';
+    if (ch === closer) {
+      out += ch;
+      state = 'code';
+      continue;
+    }
+    out += ' ';
   }
   return out;
 }
 
-/** The list of `.waitFor(...)` findings in `source` whose call omits an explicit `timeout`. */
+/**
+ * The list of `.waitFor(...)` findings in `source` whose call omits an explicit `timeout`.
+ * Matching runs against the masked text from `stripCommentsAndStringContents` — so a `.waitFor(`
+ * inside a comment or a string is never a finding, and a `timeout` inside a string can never hide
+ * a real one — but every masked span keeps the masked text the same length as `source`, so each
+ * finding is sliced back out of the ORIGINAL `source` at those same offsets: the reported text is
+ * the real, unmasked call, not a string full of filler spaces.
+ */
 function findUnboundedWaitFor(source: string): string[] {
-  return [...stripComments(source).matchAll(/\.waitFor\(([^)]*)\)/g)].filter((match) => !(match[1] ?? '').includes('timeout')).map((match) => `.waitFor(${match[1] ?? ''})`);
+  const masked = stripCommentsAndStringContents(source);
+  return [...masked.matchAll(/\.waitFor\(([^)]*)\)/g)]
+    .filter((match) => !(match[1] ?? '').includes('timeout'))
+    .map((match) => {
+      const start = match.index ?? 0;
+      return source.slice(start, start + match[0].length);
+    });
 }
 
 describe('waitForHydration', () => {
@@ -157,8 +196,8 @@ describe('waitForHydration', () => {
   });
 
   it('is bounded well inside the test budget and never below the expect timeout', () => {
-    // The literal pin. It is also the ONLY thing keeping this app's value equal to iam-console's:
-    // the two relational assertions below constrain each app against its own config only. It is
+    // The literal pin. It is also the only thing keeping the two consoles' values equal; each
+    // app's relational assertions below constrain only its own copy against its own config. It is
     // also the ONLY tight constraint on the value in CI: MEASURED, with this literal removed, a
     // `30_000` constant still passes both relational assertions below under `CI=1`, since CI's
     // 120 s budget permits up to 30 s — the `/4` bound is tight only locally.
@@ -240,5 +279,21 @@ describe('waitForHydration', () => {
     ].join('\n');
 
     expect(findUnboundedWaitFor(fixture)).toEqual([".waitFor({ state: 'attached', marker: 'string-slash-star' })", ".waitFor({ state: 'attached', marker: 'string-slash-slash' })"]);
+  });
+
+  it('does not report a .waitFor( spelled out inside a quoted string or a template literal', () => {
+    // Regression fixture for the false positive the old `stripComments` had: it preserved string
+    // CONTENT verbatim, so a `.waitFor(` written out as prose inside a quoted string or a template
+    // literal matched the same as real code and was reported as an unbounded wait. A documentation
+    // example, a log message, or a test fixture string can now mention the API freely without
+    // tripping the scan — while a genuine unbounded call elsewhere in the same source is still
+    // caught.
+    const fixture = [
+      `const inSingleOrDouble = "example: page.locator('x').waitFor({ state: 'attached' })";`,
+      `const inTemplate = \`example: page.locator('y').waitFor({ state: 'attached' })\`;`,
+      `await page.locator('real').waitFor({ state: 'attached', marker: 'still-unbounded' });`,
+    ].join('\n');
+
+    expect(findUnboundedWaitFor(fixture)).toEqual([".waitFor({ state: 'attached', marker: 'still-unbounded' })"]);
   });
 });
