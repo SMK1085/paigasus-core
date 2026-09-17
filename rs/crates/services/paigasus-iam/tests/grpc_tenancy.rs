@@ -24,13 +24,13 @@ use paigasus_kernel::Prn;
 use paigasus_proto::paigasus::iam::v1::tenancy_service_client::TenancyServiceClient;
 use paigasus_proto::paigasus::iam::v1::{ArchiveOrganizationRequest, RestoreOrganizationRequest};
 use paigasus_proto::paigasus::iam::v1::{
-    AttachMembershipRequest, CreateOrganizationRequest, CreateProjectRequest, CreateTeamRequest, GetOrganizationRequest, GetTeamRequest, Organization as ProtoOrganization, Project as ProtoProject,
-    RenameOrganizationRequest, RenameProjectRequest, RenameTeamRequest, Team as ProtoTeam,
+    ArchiveTeamRequest, AttachMembershipRequest, CreateOrganizationRequest, CreateProjectRequest, CreateTeamRequest, GetOrganizationRequest, GetTeamRequest, Organization as ProtoOrganization,
+    Project as ProtoProject, RenameOrganizationRequest, RenameProjectRequest, RenameTeamRequest, RestoreTeamRequest, Team as ProtoTeam,
 };
-// The Archive*/Restore* requests for teams and projects are for Tasks 3-5's forged-prn tests;
-// unused at this commit.
+// The Archive*/Restore* requests for projects are for Tasks 4-5's forged-prn tests; unused at
+// this commit.
 #[allow(unused_imports)]
-use paigasus_proto::paigasus::iam::v1::{ArchiveProjectRequest, ArchiveTeamRequest, RestoreProjectRequest, RestoreTeamRequest};
+use paigasus_proto::paigasus::iam::v1::{ArchiveProjectRequest, RestoreProjectRequest};
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter};
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
@@ -679,4 +679,237 @@ async fn a_forged_prn_never_writes_an_organization() {
     on_server.abort();
     off_server.abort();
     assert!(failures.is_empty(), "forged-prn organization cases failed:\n{}", failures.join("\n"));
+}
+
+/// T1 for teams (spec § 5.2): each of `RenameTeam`, `ArchiveTeam` and `RestoreTeam`, against
+/// both `enforce_tenancy` settings, on a FRESH team per case. A forged prn must answer
+/// `prn-mismatch`, must leave the node untouched, and must write neither an `audit_log` row nor
+/// an `event_outbox` row. The positive control that follows each case proves the two queries can
+/// see a row at all.
+///
+/// A team's stored prn carries the parent organization's uuid in the organization slot
+/// (`paigasus-iam-core/src/tenancy.rs:79`, `TeamId::canonical`), so the forged shapes here are a
+/// WRONG organization uuid and an EMPTY organization slot. `convert::node_uuid` checks only the
+/// service and the resource type — it never builds a `TeamId` — so both shapes reach the
+/// comparison rather than being refused earlier as `invalid-prn` (measured: both cases below
+/// answered `prn-mismatch`, matching the brief's prediction that `node_uuid` lets the empty slot
+/// through).
+///
+/// Deviations from the brief (report both; no assertion, case or the number of cases changed):
+/// (1) the brief's `setting` label (`"enforce=on"` / `"enforce=off"`) also fed the team/org slugs
+/// (`t-rn-{setting}`) — `Slug::parse` (`paigasus-iam-core/src/tenancy.rs:18-27`) rejects `=`, so a
+/// separate slug-safe tag (`on` / `off`) is used for slugs; the `setting` label keeps its
+/// original form for the failure messages.
+/// (2) each positive control now targets a FRESH team (created in the same case's organization)
+/// instead of re-running the call against the team the forged call just attacked. Controller
+/// ruling R8, stated correctly here (the organization test's own comment states it imprecisely):
+/// the current (buggy) handlers write before checking the prn, so the forged call above already
+/// committed the same mutation against the tested team. A same-team control on rename or restore
+/// would then be a no-op (`Mutated::changed == false`, no new row), proving nothing about whether
+/// the count queries can see a row at all; on archive it would PANIC outright, since the
+/// `forbid-archived-writes` policy denies a second archive of an already-archived node. A fresh
+/// team, untouched by the forged call, keeps the positive control meaningful in both the current
+/// (failing) state and after the Task 6 fix lands.
+#[tokio::test]
+async fn a_forged_prn_never_writes_a_team() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let idp = support::start_mock_idp().await;
+    let (enforced, unenforced) = two_states(&db, &idp).await;
+    let token = idp.bearer("forged-team", Some("forged-team@example.com"), "paigasus", 3600);
+    support::provision_platform_admin(&enforced, &token).await;
+    let (on_addr, on_server) = spawn_tenancy_server(enforced).await;
+    let (off_addr, off_server) = spawn_tenancy_server(unenforced).await;
+    let mut on = connect(on_addr).await;
+    let mut off = connect(off_addr).await;
+
+    let mut failures: Vec<String> = Vec::new();
+    let absent_org = Uuid::from_u128(0x0f02).as_hyphenated().to_string();
+
+    for (setting, slug_tag, client) in [("enforce=on", "on", &mut on), ("enforce=off", "off", &mut off)] {
+        // ---- rename (forged shape: a wrong organization uuid) ----
+        let org = create_org(client, &token, &format!("t-rn-{slug_tag}"), "Team Parent").await;
+        let team = create_team(client, &token, &org.prn, &format!("t-rn-{slug_tag}")).await;
+        let action = Action::RenameTeam.as_wire();
+        let event = EventType::TeamRenamed.as_wire();
+        let before = client
+            .get_team(authed(GetTeamRequest { prn: team.prn.clone() }, &token))
+            .await
+            .unwrap()
+            .into_inner()
+            .team
+            .expect("team");
+        let audits = audit_count(&db, action, &team.prn).await;
+        let events = outbox_count(&db, event, &team.prn).await;
+        let label = format!("{setting} RenameTeam");
+        let err = client
+            .rename_team(authed(
+                RenameTeamRequest {
+                    prn: with_org(&team.prn, &absent_org),
+                    new_slug: Some(format!("t-rn-{slug_tag}-renamed")),
+                    new_name: Some("Renamed".to_string()),
+                },
+                &token,
+            ))
+            .await
+            .unwrap_err();
+        check(&mut failures, &label, err.code() == Code::InvalidArgument, format!("code was {:?}", err.code()));
+        check(&mut failures, &label, reason(&err) == "prn-mismatch", format!("reason was {}", reason(&err)));
+        let after = client
+            .get_team(authed(GetTeamRequest { prn: team.prn.clone() }, &token))
+            .await
+            .unwrap()
+            .into_inner()
+            .team
+            .expect("team");
+        check(&mut failures, &label, after == before, format!("the team changed: {before:?} -> {after:?}"));
+        check(&mut failures, &label, audit_count(&db, action, &team.prn).await == audits, "an audit_log row was written".to_string());
+        check(
+            &mut failures,
+            &label,
+            outbox_count(&db, event, &team.prn).await == events,
+            "an event_outbox row was written".to_string(),
+        );
+        // Positive control: a FRESH team in the same organization, not the one just forged
+        // against (ruling R8 above).
+        let control = create_team(client, &token, &org.prn, &format!("t-rn-{slug_tag}-control")).await;
+        let control_audits = audit_count(&db, action, &control.prn).await;
+        let control_events = outbox_count(&db, event, &control.prn).await;
+        client
+            .rename_team(authed(
+                RenameTeamRequest {
+                    prn: control.prn.clone(),
+                    new_slug: Some(format!("t-rn-{slug_tag}-control-renamed")),
+                    new_name: Some("Renamed Control".to_string()),
+                },
+                &token,
+            ))
+            .await
+            .expect("the correct prn must succeed");
+        check(
+            &mut failures,
+            &label,
+            audit_count(&db, action, &control.prn).await == control_audits + 1 && outbox_count(&db, event, &control.prn).await == control_events + 1,
+            "the positive control wrote no row — the queries cannot see anything".to_string(),
+        );
+
+        // ---- archive (forged shape: an EMPTY organization slot) ----
+        let org = create_org(client, &token, &format!("t-ar-{slug_tag}"), "Team Parent").await;
+        let team = create_team(client, &token, &org.prn, &format!("t-ar-{slug_tag}")).await;
+        let action = Action::ArchiveTeam.as_wire();
+        let event = EventType::TeamArchived.as_wire();
+        let before = client
+            .get_team(authed(GetTeamRequest { prn: team.prn.clone() }, &token))
+            .await
+            .unwrap()
+            .into_inner()
+            .team
+            .expect("team");
+        let audits = audit_count(&db, action, &team.prn).await;
+        let events = outbox_count(&db, event, &team.prn).await;
+        let label = format!("{setting} ArchiveTeam");
+        let err = client.archive_team(authed(ArchiveTeamRequest { prn: with_org(&team.prn, "") }, &token)).await.unwrap_err();
+        check(&mut failures, &label, err.code() == Code::InvalidArgument, format!("code was {:?}", err.code()));
+        check(&mut failures, &label, reason(&err) == "prn-mismatch", format!("reason was {}", reason(&err)));
+        let after = client
+            .get_team(authed(GetTeamRequest { prn: team.prn.clone() }, &token))
+            .await
+            .unwrap()
+            .into_inner()
+            .team
+            .expect("team");
+        check(&mut failures, &label, after == before, format!("the team changed: {before:?} -> {after:?}"));
+        check(&mut failures, &label, audit_count(&db, action, &team.prn).await == audits, "an audit_log row was written".to_string());
+        check(
+            &mut failures,
+            &label,
+            outbox_count(&db, event, &team.prn).await == events,
+            "an event_outbox row was written".to_string(),
+        );
+        // Positive control: a FRESH team. The forged call above already archived the SAME team
+        // (same bug), and the `forbid-archived-writes` policy would then deny a second
+        // `ArchiveTeam` against an already-archived node with `PermissionDenied` — a fresh team
+        // sidesteps both that denial and the no-op it would otherwise mask.
+        let control = create_team(client, &token, &org.prn, &format!("t-ar-{slug_tag}-control")).await;
+        let control_audits = audit_count(&db, action, &control.prn).await;
+        let control_events = outbox_count(&db, event, &control.prn).await;
+        client
+            .archive_team(authed(ArchiveTeamRequest { prn: control.prn.clone() }, &token))
+            .await
+            .expect("the correct prn must succeed");
+        check(
+            &mut failures,
+            &label,
+            audit_count(&db, action, &control.prn).await == control_audits + 1 && outbox_count(&db, event, &control.prn).await == control_events + 1,
+            "the positive control wrote no row — the queries cannot see anything".to_string(),
+        );
+
+        // ---- restore (forged shape: a wrong organization uuid) ----
+        let org = create_org(client, &token, &format!("t-rs-{slug_tag}"), "Team Parent").await;
+        let team = create_team(client, &token, &org.prn, &format!("t-rs-{slug_tag}")).await;
+        client.archive_team(authed(ArchiveTeamRequest { prn: team.prn.clone() }, &token)).await.expect("setup archive");
+        let action = Action::RestoreTeam.as_wire();
+        let event = EventType::TeamRestored.as_wire();
+        let before = client
+            .get_team(authed(GetTeamRequest { prn: team.prn.clone() }, &token))
+            .await
+            .unwrap()
+            .into_inner()
+            .team
+            .expect("team");
+        let audits = audit_count(&db, action, &team.prn).await;
+        let events = outbox_count(&db, event, &team.prn).await;
+        let label = format!("{setting} RestoreTeam");
+        let err = client
+            .restore_team(authed(
+                RestoreTeamRequest {
+                    prn: with_org(&team.prn, &absent_org),
+                },
+                &token,
+            ))
+            .await
+            .unwrap_err();
+        check(&mut failures, &label, err.code() == Code::InvalidArgument, format!("code was {:?}", err.code()));
+        check(&mut failures, &label, reason(&err) == "prn-mismatch", format!("reason was {}", reason(&err)));
+        let after = client
+            .get_team(authed(GetTeamRequest { prn: team.prn.clone() }, &token))
+            .await
+            .unwrap()
+            .into_inner()
+            .team
+            .expect("team");
+        check(&mut failures, &label, after == before, format!("the team changed: {before:?} -> {after:?}"));
+        check(&mut failures, &label, audit_count(&db, action, &team.prn).await == audits, "an audit_log row was written".to_string());
+        check(
+            &mut failures,
+            &label,
+            outbox_count(&db, event, &team.prn).await == events,
+            "an event_outbox row was written".to_string(),
+        );
+        // Positive control: a FRESH team, archived first so a restore actually changes it. The
+        // forged call above already restored the SAME team (same bug), so a second restore on it
+        // would be a no-op and prove nothing about the count queries.
+        let control = create_team(client, &token, &org.prn, &format!("t-rs-{slug_tag}-control")).await;
+        client
+            .archive_team(authed(ArchiveTeamRequest { prn: control.prn.clone() }, &token))
+            .await
+            .expect("setup archive for the restore control");
+        let control_audits = audit_count(&db, action, &control.prn).await;
+        let control_events = outbox_count(&db, event, &control.prn).await;
+        client
+            .restore_team(authed(RestoreTeamRequest { prn: control.prn.clone() }, &token))
+            .await
+            .expect("the correct prn must succeed");
+        check(
+            &mut failures,
+            &label,
+            audit_count(&db, action, &control.prn).await == control_audits + 1 && outbox_count(&db, event, &control.prn).await == control_events + 1,
+            "the positive control wrote no row — the queries cannot see anything".to_string(),
+        );
+    }
+
+    on_server.abort();
+    off_server.abort();
+    assert!(failures.is_empty(), "forged-prn team cases failed:\n{}", failures.join("\n"));
 }
