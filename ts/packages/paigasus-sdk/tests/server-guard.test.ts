@@ -13,8 +13,9 @@ const PKG_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 // Entries that deliberately carry NO guard. `./errors/types` (PR C) holds only types: under
 // `verbatimModuleSyntax` an `import type` emits nothing, so a client component can name those types
-// with no runtime import and no server-only evaluation (spec § 6.3). Every OTHER entry is guarded.
-const UNGUARDED_ENTRIES = new Set(['./errors/types']);
+// with no runtime import and no server-only evaluation (spec § 6.3). `./iam/types` (SMA-630 D8)
+// re-exports the NodeStatus enum for the same readers. Every OTHER entry is guarded.
+const UNGUARDED_ENTRIES = new Set(['./errors/types', './iam/types']);
 
 // The guard's expected specifier depends on where the entry FILE sits, not on one fixed literal.
 // `src/index.ts` needs './server-guard'; a nested entry such as `src/errors/map-error.ts` needs
