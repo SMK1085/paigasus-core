@@ -7,6 +7,7 @@
 // other-organization cases script an answer real IAM never gives, and hold the sameNode guard.
 import { Code } from '@connectrpc/connect';
 import { disposeTransports } from '@paigasus/sdk/iam';
+import { NodeStatus } from '@paigasus/sdk/iam/types';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createProject, createProjectForm } from '../../app/(console)/orgs/[org]/teams/[team]/commands';
 import { loadTeamPage } from '../../app/(console)/orgs/[org]/teams/[team]/load';
@@ -32,13 +33,34 @@ const ORG_B = organizationPrn(IDS.orgB);
 const TEAM_A1 = teamPrn(IDS.orgA, IDS.teamA1);
 const PROJECT_A1 = projectPrn(IDS.orgA, IDS.projectA1);
 
-function world(overrides: { teamOrgPrn?: string; projectTeamPrn?: string; projectOrgPrn?: string } = {}): FakeIamHandlers {
+type StatusPair = { readonly status?: NodeStatus; readonly effectiveStatus?: NodeStatus };
+const ACTIVE: StatusPair = { status: NodeStatus.ACTIVE, effectiveStatus: NodeStatus.ACTIVE };
+
+function world(
+  overrides: {
+    teamOrgPrn?: string;
+    projectTeamPrn?: string;
+    projectOrgPrn?: string;
+    teamStatus?: StatusPair;
+    projectStatus?: StatusPair;
+    listedStatus?: StatusPair;
+  } = {},
+): FakeIamHandlers {
   return {
-    'tenancy.getTeam': (req: { prn: string }) => ({ team: { prn: req.prn, orgPrn: overrides.teamOrgPrn ?? ORG_A, slug: 'platform', name: 'Platform' } }),
-    'tenancy.getProject': (req: { prn: string }) => ({
-      project: { prn: req.prn, teamPrn: overrides.projectTeamPrn ?? TEAM_A1, orgPrn: overrides.projectOrgPrn ?? ORG_A, slug: 'models', name: 'Models' },
+    'tenancy.getTeam': (req: { prn: string }) => ({
+      team: { prn: req.prn, orgPrn: overrides.teamOrgPrn ?? ORG_A, slug: 'platform', name: 'Platform', ...(overrides.teamStatus ?? ACTIVE) },
     }),
-    'tenancy.listProjects': () => ({ projects: [{ prn: PROJECT_A1, teamPrn: TEAM_A1, orgPrn: ORG_A, slug: 'models', name: 'Models' }] }),
+    'tenancy.getProject': (req: { prn: string }) => ({
+      project: {
+        prn: req.prn,
+        teamPrn: overrides.projectTeamPrn ?? TEAM_A1,
+        orgPrn: overrides.projectOrgPrn ?? ORG_A,
+        slug: 'models',
+        name: 'Models',
+        ...(overrides.projectStatus ?? ACTIVE),
+      },
+    }),
+    'tenancy.listProjects': () => ({ projects: [{ prn: PROJECT_A1, teamPrn: TEAM_A1, orgPrn: ORG_A, slug: 'models', name: 'Models', ...(overrides.listedStatus ?? ACTIVE) }] }),
     'tenancy.listMemberships': () => ({ memberships: [] }),
   };
 }
@@ -86,7 +108,10 @@ describe('loadTeamPage', () => {
 
     if (data.kind !== 'ok') throw new Error(`expected ok, got ${data.kind}`);
     expect(data).toMatchObject({ orgId: IDS.orgA, teamId: IDS.teamA1, teamPrn: TEAM_A1, team: { name: 'Platform', slug: 'platform' }, canCreateProject: true });
-    expect(data.projects).toEqual({ ok: true, value: { offset: 0, nextOffset: null, rows: [{ prn: PROJECT_A1, projectId: IDS.projectA1, slug: 'models', name: 'Models' }] } });
+    expect(data.projects).toEqual({
+      ok: true,
+      value: { offset: 0, nextOffset: null, rows: [{ prn: PROJECT_A1, projectId: IDS.projectA1, slug: 'models', name: 'Models', lifecycle: { own: 'active', effective: 'active' } }] },
+    });
     expect(d.mayI.asked).toEqual(
       expect.arrayContaining([
         ['CreateProject', TEAM_A1],
@@ -111,6 +136,34 @@ describe('loadTeamPage', () => {
     if (data.kind !== 'error') throw new Error(`expected an error, got ${data.kind}`);
     expect(data.error.presentation).toBe('forbidden');
     expect(data.error.correlationId).toBe('corr-team');
+  });
+
+  // SMA-630 spec § 5.1: three more IsAuthorized questions, all about the team's OWN PRN.
+  it('asks the three lifecycle questions about the team, and follows the answers', async () => {
+    iam.setHandlers(world());
+    const d = deps({ RenameTeam: true, ArchiveTeam: false, RestoreTeam: true });
+
+    const data = await loadTeamPage(d, { org: IDS.orgA, team: IDS.teamA1, offset: 0, membersOffset: 0 });
+
+    if (data.kind !== 'ok') throw new Error(`expected ok, got ${data.kind}`);
+    expect({ rename: data.canRename, archive: data.canArchive, restore: data.canRestore }).toEqual({ rename: true, archive: false, restore: true });
+    expect(d.mayI.asked).toEqual(
+      expect.arrayContaining([
+        ['RenameTeam', TEAM_A1],
+        ['ArchiveTeam', TEAM_A1],
+        ['RestoreTeam', TEAM_A1],
+      ]),
+    );
+  });
+
+  it('maps the team status and each project row status to a lifecycle, and UNSPECIFIED to unknown', async () => {
+    iam.setHandlers(world({ teamStatus: { status: NodeStatus.ACTIVE, effectiveStatus: NodeStatus.ARCHIVED }, listedStatus: {} }));
+
+    const data = await loadTeamPage(deps(), { org: IDS.orgA, team: IDS.teamA1, offset: 0, membersOffset: 0 });
+
+    if (data.kind !== 'ok' || !data.projects.ok) throw new Error('expected a team with a project list');
+    expect(data.team.lifecycle).toEqual({ own: 'active', effective: 'archived' });
+    expect(data.projects.value.rows.map((row) => row.lifecycle)).toEqual([{ own: 'unknown', effective: 'unknown' }]);
   });
 });
 
@@ -170,6 +223,36 @@ describe('loadProjectPage', () => {
     expect(data.members.canAttach).toBe(true);
     expect(calls('tenancy.getProject')[0]?.request).toMatchObject({ prn: PROJECT_A1 });
     expect(calls('tenancy.listMemberships')[0]?.request).toMatchObject({ filter: { case: 'nodePrn', value: PROJECT_A1 } });
+  });
+
+  // SMA-630 spec § 5.1: the project loader now runs the member load and the three questions together.
+  it('asks the three lifecycle questions about the project, and follows the answers', async () => {
+    iam.setHandlers(world());
+    const d = deps({ RenameProject: false, ArchiveProject: true, RestoreProject: false });
+
+    const data = await loadProjectPage(d, params);
+
+    if (data.kind !== 'ok') throw new Error(`expected ok, got ${data.kind}`);
+    expect({ rename: data.canRename, archive: data.canArchive, restore: data.canRestore }).toEqual({ rename: false, archive: true, restore: false });
+    expect(d.mayI.asked).toEqual(
+      expect.arrayContaining([
+        ['RenameProject', PROJECT_A1],
+        ['ArchiveProject', PROJECT_A1],
+        ['RestoreProject', PROJECT_A1],
+      ]),
+    );
+  });
+
+  it('maps the project status to a lifecycle, and UNSPECIFIED to unknown', async () => {
+    iam.setHandlers(world({ projectStatus: { status: NodeStatus.ARCHIVED, effectiveStatus: NodeStatus.ARCHIVED } }));
+    const archived = await loadProjectPage(deps(), params);
+    if (archived.kind !== 'ok') throw new Error(`expected ok, got ${archived.kind}`);
+    expect(archived.project.lifecycle).toEqual({ own: 'archived', effective: 'archived' });
+
+    iam.setHandlers(world({ projectStatus: {} }));
+    const unknown = await loadProjectPage(deps(), params);
+    if (unknown.kind !== 'ok') throw new Error(`expected ok, got ${unknown.kind}`);
+    expect(unknown.project.lifecycle).toEqual({ own: 'unknown', effective: 'unknown' });
   });
 });
 

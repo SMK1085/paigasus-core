@@ -5,6 +5,7 @@ import * as barrel from '../src/index.js';
 import * as chat from '../src/chat.js';
 import * as errors from '../src/errors.js';
 import * as iam from '../src/iam.js';
+import * as iamTypes from '../src/iam/types.js';
 
 /**
  * Every runtime key of each submodule, derived rather than hand-listed.
@@ -14,7 +15,7 @@ import * as iam from '../src/iam.js';
  * keys ARE its runtime export names (type-only exports are erased entirely under
  * `verbatimModuleSyntax`), so deriving from `Object.keys` cannot go stale the way a hand list can.
  */
-const SUBMODULES = { chat, errors, iam } as const;
+const SUBMODULES = { chat, errors, iam, 'iam/types': iamTypes } as const;
 const ENTRIES = Object.entries(SUBMODULES).flatMap(([moduleName, ns]) => Object.keys(ns).map((key) => [moduleName, key] as const));
 
 describe('the root barrel serves every entry surface', () => {
@@ -37,5 +38,9 @@ describe('the root barrel serves every entry surface', () => {
   // re-export explicitly is what prevents it; this test is the reminder, not the mechanism.
   it('exposes ErrorReason as the registry enum, not a shadow', () => {
     expect(barrel.ErrorReason.UPSTREAM_ERROR).toBe(307);
+  });
+
+  it('exposes NodeStatus as the registry enum (SMA-630)', () => {
+    expect(barrel.NodeStatus.ARCHIVED).toBe(2);
   });
 });

@@ -56,3 +56,9 @@ tasks:
       # The parity corpus and the Rust constant the PRN reader is held to.
       - '/rs/crates/libs/paigasus-kernel-parity/vectors/**/*'
       - '/rs/crates/libs/paigasus-iam-core/src/authz/model.rs'
+      # SMA-630 spec § 5.1. tests/unit/action-names.test.ts reads the action catalog as TEXT. Without
+      # this input, a changed Rust action name selects no paigasus-console-core-ts task, and Moon
+      # serves a cached PASS on exactly the PR that breaks the parity. repo:input-liveness checks
+      # `repo:*` tasks only, so the SMA-630 plan (Task 2) confirmed with `moon task … --json` that
+      # this entry resolves to a tracked file.
+      - '/rs/crates/libs/paigasus-iam-core/src/authz/action.rs'

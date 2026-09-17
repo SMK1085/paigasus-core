@@ -446,6 +446,14 @@ RUN_SH_CALL_SITES = (
     # ci/actionlint/run.sh mirrors that same suffix requirement from its own copy of these two
     # strings.
     '"$HERE/ci_targets.py" --self-test || NEG_RC=1',
+    # SMA-638. The two entries above pin the CALLS; these two pin the only path that REACHES the
+    # --self-test call. `run.sh` initialises NEGATIVE=0, so deleting the flag parse leaves the
+    # --negative-control branch unentered: run.sh falls through to run_suite and exits 0 having
+    # run the real suite twice. Both pinned strings are SUBSTRING-matched like their neighbours,
+    # so a commented-out copy still satisfies them — recorded in ci/affected-graph/README.md,
+    # not closed here. ci/actionlint/run.sh's T_AFFECTED_GRAPH_CALL_SITES carries the same two.
+    '[ "${1-}" = "--negative-control" ] && NEGATIVE=1',
+    'if [ "$NEGATIVE" = 1 ]; then',
 )
 
 # repo:input-liveness's resolved script must run BOTH its negative control and the real check —
@@ -2369,7 +2377,9 @@ def self_test():
         # the bare name `assert_ci_targets`, so a name-only RUN_SH_CALL_SITES entry would
         # survive deleting the call. Dropping this line silently de-fangs that assertion.
         'assert_ci_targets() {\n  :\n}\n'
+        '[ "${1-}" = "--negative-control" ] && NEGATIVE=1\n'
         '  assert_ci_targets || SUITE_RC=1\n'
+        'if [ "$NEGATIVE" = 1 ]; then\n'
         '  python3 "$HERE/ci_targets.py" --self-test || NEG_RC=1\n'
     )
     def wired_scripts(**overrides):
@@ -2559,6 +2569,19 @@ def self_test():
     silenced = wired.replace("--self-test || NEG_RC=1", "--self-test || true")
     if not check_self_invocation(silenced, scripts, wired_actionlint, wired_release_parity, wired_workflow_credentials, wired_release_plan, wired_ruff, wired_next_public_free):
         failures.append("check_self_invocation: missed a --self-test whose failure is swallowed")
+    # SMA-638. The two call sites above are reachable ONLY if the flag parse and the branch guard
+    # survive. Deleting the flag parse leaves NEGATIVE at its initialised 0, so the whole
+    # --negative-control branch is skipped, run.sh falls through to run_suite and the gate exits 0
+    # having run the real suite twice and proved nothing. CLAUDE.md records that exact bypass as
+    # MEASURED for repo:release-parity, which closed it by pinning its own flag parse.
+    no_flag_parse = wired.replace(
+        '[ "${1-}" = "--negative-control" ] && NEGATIVE=1\n', ""
+    )
+    if not check_self_invocation(no_flag_parse, scripts, wired_actionlint, wired_release_parity, wired_workflow_credentials, wired_release_plan, wired_ruff, wired_next_public_free):
+        failures.append("check_self_invocation: missed a deleted --negative-control flag parse")
+    no_negative_guard = wired.replace('if [ "$NEGATIVE" = 1 ]; then\n', "")
+    if not check_self_invocation(no_negative_guard, scripts, wired_actionlint, wired_release_parity, wired_workflow_credentials, wired_release_plan, wired_ruff, wired_next_public_free):
+        failures.append("check_self_invocation: missed a deleted NEGATIVE branch guard")
     # SMA-553 D10 + review finding 1, generalised (SMA-530). These three named fixtures used
     # to be spelled out for input-liveness only: the deleted REAL RUN (a strict PREFIX of the
     # --self-test line, so a substring test would report the script fully wired while the gate
@@ -3104,27 +3127,28 @@ def self_test():
     pairing("exempt-and-pinned", {"g": ()}, {"g": ("**/*",)}, {"g": "r"}, ([], [], [], ["g"], []))
     pairing("orphan-globs", {}, {"ghost": ("**/*",)}, {}, ([], [], [], [], ["ghost"]))
 
-    # The five fixtures above prove check_registry_pairing() itself fires; nothing proves
-    # main() actually SURFACES its rows. main() cannot be called directly here — it shells out
-    # to `moon query tasks` — so this reads its own SOURCE instead, the same way this file
-    # already pins textual wiring elsewhere (RUN_SH_CALL_SITES and friends). Each of the five
-    # result names must appear at least three times: once where main() unpacks
-    # check_registry_pairing()'s return, once inside the `if not (...)` pass/fail condition, and
-    # once in the printed-rows tuple below it. A name appearing only twice means one of those
-    # three wires is missing — collected but never folded into pass/fail, or folded in but never
-    # printed, both silent regressions a reader would only find by tracing the diff by hand.
-    main_src = inspect.getsource(main)
-    for _name in (
-        "pairing_unpinned", "pairing_bad_exempt", "pairing_stale_exempt", "pairing_both",
-        "pairing_orphan_globs",
-    ):
-        _count = main_src.count(_name)
-        if _count < 3:
-            failures.append(
-                f"main() wiring[{_name}]: found {_count} occurrence(s) in main()'s source, "
-                "want at least 3 (unpack, pass/fail condition, printed rows) — a "
-                "check_registry_pairing row is collected but not fully wired into main()"
-            )
+    # SMA-638. The findings list is what makes "collected but not judged" and "judged but not
+    # reported" impossible, and EXPECTED_FINDING_KEYS is what stops the list itself being
+    # shrunk. cargo_moon_parity.py:2290-2337 records the measurement that a name-based guard is
+    # NOT enough: three deletions from its findings list left --self-test green with a real
+    # assertion gone. Arity first, so a shrunk list says so plainly, then the exact sequence.
+    if not EXPECTED_FINDING_KEYS:
+        failures.append("EXPECTED_FINDING_KEYS is empty — the findings floor would assert nothing")
+    _fk_findings = collect_findings(
+        {"repo": {}}, [], {}, {}, "", [], "", [], dict.fromkeys(_CALL_SITE_SOURCE_KEYS, ""),
+    )
+    if len(_fk_findings) != len(EXPECTED_FINDING_KEYS):
+        failures.append(
+            f"collect_findings returned {len(_fk_findings)} entries, expected "
+            f"{len(EXPECTED_FINDING_KEYS)} — a check was added or dropped without updating "
+            f"EXPECTED_FINDING_KEYS"
+        )
+    _fk_keys = tuple(key for key, _, _ in _fk_findings)
+    if _fk_keys != EXPECTED_FINDING_KEYS:
+        failures.append(
+            f"collect_findings reported {_fk_keys}, expected {EXPECTED_FINDING_KEYS} — a check "
+            f"was dropped, added or reordered in the findings list"
+        )
 
     # SMA-539. check_self_scheduled_coverage: a `repo:*` task whose resolved script runs
     # --self-test/--negative-control must be a SELF_SCHEDULED_GATES key. `coverage_scripts()`
@@ -3481,78 +3505,53 @@ def self_test():
     return 0
 
 
-def main():
-    root = Path(__file__).resolve().parents[2]
-    try:
-        raw_tasks = moon_payload()
-        tasks = _eligibility(raw_tasks)
-        ci_yml = read_input(root / ".github" / "workflows" / "ci.yml", ".github/workflows/ci.yml")
-        t_targets = parse_t(ci_yml)
-        doc_targets, region = parse_doc_targets(
-            read_input(root / "CLAUDE.md", "CLAUDE.md")
-        )
-        run_sh = read_input(
-            root / "ci" / "affected-graph" / "run.sh", "ci/affected-graph/run.sh"
-        )
-        actionlint_sh = read_input(
-            root / "ci" / "actionlint" / "run.sh", "ci/actionlint/run.sh"
-        )
-        release_parity_sh = read_input(
-            root / "ci" / "release-parity" / "run.sh", "ci/release-parity/run.sh"
-        )
-        workflow_credentials_sh = read_input(
-            root / "ci" / "workflow-credentials" / "run.sh", "ci/workflow-credentials/run.sh"
-        )
-        release_plan_sh = read_input(
-            root / "ci" / "release-plan" / "run.sh", "ci/release-plan/run.sh"
-        )
-        ruff_sh = read_input(
-            root / "ci" / "ruff" / "run.sh", "ci/ruff/run.sh"
-        )
-        next_public_free_sh = read_input(
-            root / "ci" / "next-public" / "run.sh", "ci/next-public/run.sh"
-        )
-        # Fix-wave finding C: a `moon.yml` test filtered out any ts/apps/* directory that lacked
-        # one, so such a directory never reached `unregistered` — the exact silent skip this
-        # whole branch exists to remove. `package.json` is the test ci/next-env/run.sh:113
-        # already applies (pnpm's own `apps/*` workspace glob), so the two controls now agree on
-        # what "an app" is. check_tailwind_guard_invocations reports a `package.json`-bearing
-        # directory with no resolvable Moon project under `no_project` rather than dropping it.
-        tailwind_apps = sorted(
-            d.name for d in (root / "ts" / "apps").iterdir()
-            if d.is_dir() and (d / "package.json").is_file()
-        )
-        floor = check_floor(tasks)
-        missing, unexpected, bad_exempt, stale_exempt = check_forward(tasks, t_targets)
-        # SMA-553 review finding 1 — these two also raise MoonOutputError (INFRA_ERRORS), so their
-        # call sites belong inside this same try: called from the validation flow below it, a raise
-        # would escape main() uncaught and exit 1, misreporting an infrastructure fault (a moon
-        # output shape change) as the rc-1 authorial-mistake path. Bound to locals here and reused
-        # below so the try block stays the single place these two extractors are invoked.
-        scripts = _scripts(raw_tasks)
-        bad_gate_inputs = check_gate_inputs(raw_tasks)
-        bad_generate_inputs = check_contracts_generate_inputs(raw_tasks)
-        # Inside the try for the same reason as the two calls above: this one raises
-        # MoonOutputError (INFRA_ERRORS) when moon reports a `test` `script` of the wrong type.
-        # Called from the validation flow below it, that raise would escape main() uncaught and
-        # exit 1, misreporting a moon output shape change as an authorial mistake.
-        tw_unregistered, tw_missing_lines, tw_stale, tw_no_project = (
-            check_tailwind_guard_invocations(tailwind_apps, raw_tasks)
-        )
-    except GateAssertionError as exc:
-        # An authorial mistake, NOT a broken tool: rc 1 so run.sh records a red suite instead of
-        # aborting the whole affected-graph guard and losing every other assertion's output (D2).
-        print(f"FAIL  [ci-targets] {exc}", file=sys.stderr)
-        return 1
-    except INFRA_ERRORS as exc:
-        print(f"FATAL [ci-targets] could not read the inputs: {exc}", file=sys.stderr)
-        return 2
+# SMA-638. The membership floor for collect_findings' list. `self_test` asserts BOTH its arity
+# and its exact sequence, because the restructure below removes "judged but not reported" as a
+# possible state and leaves exactly one: a triple deleted from the list outright. A name-based
+# guard cannot close that — cargo_moon_parity.py:2290 measured three such deletions passing —
+# so this pins the LIST. Re-baseline it deliberately when a check is genuinely added or removed.
+EXPECTED_FINDING_KEYS = (
+    "floor", "t-missing", "t-unexpected", "t-exempt-noreason", "t-exempt-stale", "t-dead",
+    "docs", "call-sites", "ci-invocation", "gate-inputs", "generate-inputs",
+    "selfsched-unregistered", "selfsched-exempt-noreason", "selfsched-exempt-stale",
+    "pairing-unpinned", "pairing-exempt-noreason", "pairing-exempt-stale", "pairing-both",
+    "pairing-orphan-globs", "tw-unregistered", "tw-missing-lines", "tw-stale", "tw-no-project",
+)
 
+# The seven shell sources check_self_invocation reads, keyed so collect_findings' signature does
+# not grow seven positional parameters that a caller could silently transpose.
+_CALL_SITE_SOURCE_KEYS = (
+    "run", "actionlint", "release_parity", "workflow_credentials", "release_plan", "ruff",
+    "next_public_free",
+)
+
+
+def collect_findings(tasks, t_targets, raw_tasks, scripts, ci_yml, doc_targets, region,
+                     tailwind_apps, sh):
+    """Every assertion's rows, as `(key, rows, title)`, in report order.
+
+    ONE list, used for BOTH the pass/fail verdict and the report. They used to be written
+    separately, so a check folded into one and not the other was a green no-op — the defect
+    SMA-638 reports for check_tailwind_guard_invocations, which applied to all eleven checks.
+    That restructure is necessary but NOT sufficient on its own: what makes the list itself hard
+    to shrink is `EXPECTED_FINDING_KEYS` above, asserted by `self_test`. This mirrors
+    cargo_moon_parity.py's collect_findings, in this same directory, deliberately.
+
+    Raises GateAssertionError (rc 1) and the INFRA_ERRORS members its checks raise (rc 2), so
+    `main` keeps the call inside its try and maps them as it always has.
+    """
+    floor = check_floor(tasks)
+    missing, unexpected, bad_exempt, stale_exempt = check_forward(tasks, t_targets)
+    bad_gate_inputs = check_gate_inputs(raw_tasks)
+    bad_generate_inputs = check_contracts_generate_inputs(raw_tasks)
+    tw_unregistered, tw_missing_lines, tw_stale, tw_no_project = (
+        check_tailwind_guard_invocations(tailwind_apps, raw_tasks)
+    )
     dead = check_reverse(tasks, t_targets)
     doc_problems = check_docs(t_targets, doc_targets, region)
     missing_sites = check_self_invocation(
-        run_sh, scripts, actionlint_sh, release_parity_sh, workflow_credentials_sh,
-        release_plan_sh, ruff_sh, next_public_free_sh,
+        sh["run"], scripts, sh["actionlint"], sh["release_parity"],
+        sh["workflow_credentials"], sh["release_plan"], sh["ruff"], sh["next_public_free"],
     )
     bad_invocation = check_invocation(ci_yml)
     unregistered_self_scheduled, bad_coverage_exempt, stale_coverage_exempt = (
@@ -3562,64 +3561,51 @@ def main():
         check_registry_pairing()
     )
 
-    if not (floor or missing or unexpected or bad_exempt or stale_exempt or dead or doc_problems
-            or missing_sites or bad_invocation or bad_gate_inputs
-            or bad_generate_inputs or unregistered_self_scheduled or bad_coverage_exempt
-            or stale_coverage_exempt or pairing_unpinned or pairing_bad_exempt
-            or pairing_stale_exempt or pairing_both or pairing_orphan_globs
-            or tw_unregistered or tw_missing_lines or tw_stale or tw_no_project):
-        print(
-            f"PASS  {'ci-targets':<18} -> {len(t_targets)} targets: every CI-eligible repo task is "
-            "in ci.yml's T, every entry resolves, CLAUDE.md mirrors it"
-        )
-        return 0
-
-    print("FAIL  [ci-targets] ci.yml's moon ci target array is out of sync", file=sys.stderr)
     # Rows that name a `T` ENTRY are printed WITH the leading colon, so they read as what the
     # reader sees in ci.yml and CLAUDE.md and as what the fix line tells them to type — a forgotten
     # gate printed bare `new-gate` under "append `:<name>`" made the reader do the translation.
     # `floor` and `bad_exempt`/`stale_exempt` stay BARE deliberately: their fix sites are
     # REQUIRED_REPO_TASKS and T_EXEMPT in this file, where the names are written without a colon.
     # `doc_problems`, `missing_sites` and `bad_invocation` are sentences and command text, not names.
-    for rows, title in (
-        (floor,
+    return [
+        ("floor", floor,
          "A task this gate REQUIRES to be present is absent from the parsed `repo` set, so the\n"
          "    comparison below may be between two empty sets and assert nothing.\n"
          "    Fix: if the task was genuinely renamed or removed, update REQUIRED_REPO_TASKS in\n"
          "    ci/affected-graph/ci_targets.py. Otherwise the project filter or moon's output\n"
          "    shape has changed — investigate before touching anything else."),
-        ([":" + name for name in missing],
+        ("t-missing", [":" + name for name in missing],
          "A CI-eligible `repo:*` task is NOT in ci.yml's `T=(...)` array, so it does not run in\n"
          "    CI at all — it passes locally and silently does not exist on any PR (SMA-541).\n"
          "    Fix: append `:<name>` to `T` in .github/workflows/ci.yml AND to the command\n"
          "    between the <!-- ci-targets:begin/end --> markers in CLAUDE.md."),
-        ([":" + name for name in unexpected],
+        ("t-unexpected", [":" + name for name in unexpected],
          "`T` contains a `repo` task that is NOT CI-eligible (runInCI: false) or is listed in\n"
          "    T_EXEMPT. `moon ci` will resolve nothing for it and still exit 0, so the gate reads\n"
          "    as running while it is off.\n"
          "    Fix: remove the entry from `T` and from CLAUDE.md, or drop the `runInCI: false` /\n"
          "    the T_EXEMPT entry if the task is meant to run."),
-        (bad_exempt,
+        ("t-exempt-noreason", bad_exempt,
          "A T_EXEMPT entry has no reason string. An exemption is a recorded decision, so the\n"
          "    record is what earns it.\n"
          "    Fix: give it a non-empty reason in ci/affected-graph/ci_targets.py, or delete it."),
-        (stale_exempt,
+        ("t-exempt-stale", stale_exempt,
          "A T_EXEMPT entry names no `repo` task at all — the task it exempted was renamed or\n"
          "    deleted and the exemption outlived it. A typo is loud (the real task shows up under\n"
          "    `missing` above); a leftover is silent, and exempts nothing forever.\n"
          "    Fix: delete the entry from T_EXEMPT in ci/affected-graph/ci_targets.py, or correct\n"
          "    its name."),
-        ([":" + name for name in dead],
+        ("t-dead", [":" + name for name in dead],
          "A `T` entry resolves to no CI-eligible task anywhere in the graph — a typo, or a task\n"
          "    that was renamed, deleted or turned off. `moon ci` exits 0 on such a target, even\n"
          "    when real targets surround it, so nothing else in CI reports this.\n"
          "    Fix: correct the entry in .github/workflows/ci.yml and CLAUDE.md, or delete it."),
-        (doc_problems,
+        ("docs", doc_problems,
          "CLAUDE.md's documented full-graph command no longer mirrors `T`, so the documented way\n"
          "    to reproduce CI locally does not reproduce it.\n"
          "    Fix: copy `T` verbatim between the <!-- ci-targets:begin/end --> markers, keeping\n"
          "    the `--base origin/main --include-relations` tail."),
-        (missing_sites,
+        ("call-sites", missing_sites,
          "A gate's own call site is missing: this gate's, from\n"
          "    ci/affected-graph/run.sh; a self-scheduled gate's own invocation from inside its\n"
          "    moon.yml task script; or repo:actionlint's, from ci/actionlint/run.sh — so that\n"
@@ -3671,7 +3657,7 @@ def main():
          "    floor to 1 — that made `--self-test` report 'passed' at rc 0 with the seven\n"
          "    negative_control() lines untouched; these three close that gap the same way the\n"
          "    seven above close it for negative_control()."),
-        (bad_invocation,
+        ("ci-invocation", bad_invocation,
          "`.github/workflows/ci.yml`'s `moon ci` branch block no longer matches the exact literal\n"
          "    pinned as `MOON_CI_BRANCH_BLOCK` in ci/affected-graph/ci_targets.py, or the file\n"
          "    carries a `moon ci` invocation outside it. Every other check asserts what is IN `T`;\n"
@@ -3685,86 +3671,163 @@ def main():
          "    Copy the lines VERBATIM from ci.yml, indentation included; do not hand-format them.\n"
          "    If instead this is an added invocation, `EXPECTED_MOON_CI_INVOCATIONS` is the\n"
          "    constant to review — deliberately, not reflexively."),
-        (bad_gate_inputs,
+        ("gate-inputs", bad_gate_inputs,
          "A self-scheduled gate's own `inputs` no longer match what it needs to see. This is the\n"
          "    second, independently-scheduled copy of an assertion that gate also makes about\n"
          "    itself — it exists so the gate is not the sole judge of its own configuration.\n"
          "    Fix: restore `inputs: ['**/*']` on the task in moon.yml."),
-        (bad_generate_inputs,
+        ("generate-inputs", bad_generate_inputs,
          "contracts:generate's inputs have drifted, so ci.yml's codegen-drift gate can serve a\n"
          "    cached pass and compare the committed generated code against itself (SMA-592).\n"
          "    Fix: restore the inputs in contracts/moon.yml, or update\n"
          "    CONTRACTS_GENERATE_INPUTS in ci/affected-graph/ci_targets.py if the change is\n"
          "    intended."),
-        ([":" + name for name in unregistered_self_scheduled],
+        ("selfsched-unregistered", [":" + name for name in unregistered_self_scheduled],
          "A `repo:*` task's own resolved script runs `--self-test` or `--negative-control`, but\n"
          "    it has no SELF_SCHEDULED_GATES entry (SMA-539) — so nothing here proves that gate's\n"
          "    control can still report red.\n"
          "    Fix: add the task's four (or three) script lines to SELF_SCHEDULED_GATES in\n"
          "    ci/affected-graph/ci_targets.py, or add a reasoned SELF_SCHEDULED_COVERAGE_EXEMPT\n"
          "    entry if it is genuinely not meant to be pinned there."),
-        (bad_coverage_exempt,
+        ("selfsched-exempt-noreason", bad_coverage_exempt,
          "A SELF_SCHEDULED_COVERAGE_EXEMPT entry has no reason string. An exemption is a recorded\n"
          "    decision, so the record is what earns it.\n"
          "    Fix: give it a non-empty reason in ci/affected-graph/ci_targets.py, or delete it."),
-        (stale_coverage_exempt,
+        ("selfsched-exempt-stale", stale_coverage_exempt,
          "A SELF_SCHEDULED_COVERAGE_EXEMPT entry names a task whose resolved script no longer\n"
          "    mentions --self-test or --negative-control — the exemption has outlived what it\n"
          "    exempted.\n"
          "    Fix: delete the entry from SELF_SCHEDULED_COVERAGE_EXEMPT in\n"
          "    ci/affected-graph/ci_targets.py."),
-        ([":" + name for name in pairing_unpinned],
+        ("pairing-unpinned", [":" + name for name in pairing_unpinned],
          "SMA-530. A SELF_SCHEDULED_GATES entry is in neither SELF_TASK_EXPECTED_GLOBS nor\n"
          "    SELF_TASK_GLOBS_EXEMPT, so this gate's own `inputs` are unpinned — they can drift\n"
          "    and nothing here would notice.\n"
          "    Fix: add the task to SELF_TASK_EXPECTED_GLOBS with its exact authored `inputs`, or\n"
          "    to SELF_TASK_GLOBS_EXEMPT with a reasoned waiver, in\n"
          "    ci/affected-graph/ci_targets.py."),
-        (pairing_bad_exempt,
+        ("pairing-exempt-noreason", pairing_bad_exempt,
          "SMA-530. A SELF_TASK_GLOBS_EXEMPT entry has no reason string. An exemption is a\n"
          "    recorded decision, so the record is what earns it.\n"
          "    Fix: give it a non-empty reason in ci/affected-graph/ci_targets.py, or delete it."),
-        (pairing_stale_exempt,
+        ("pairing-exempt-stale", pairing_stale_exempt,
          "SMA-530. A SELF_TASK_GLOBS_EXEMPT entry names a task that is no longer in\n"
          "    SELF_SCHEDULED_GATES — the waiver has outlived the thing it waived.\n"
          "    Fix: delete the entry from SELF_TASK_GLOBS_EXEMPT in\n"
          "    ci/affected-graph/ci_targets.py."),
-        ([":" + name for name in pairing_both],
+        ("pairing-both", [":" + name for name in pairing_both],
          "SMA-530. A task holds BOTH a SELF_TASK_EXPECTED_GLOBS entry and a\n"
          "    SELF_TASK_GLOBS_EXEMPT entry — pinned and waived at the same time, which is\n"
          "    contradictory.\n"
          "    Fix: keep whichever of the two is correct and delete the task's entry from the\n"
          "    other one in ci/affected-graph/ci_targets.py."),
-        ([":" + name for name in pairing_orphan_globs],
+        ("pairing-orphan-globs", [":" + name for name in pairing_orphan_globs],
          "SMA-530. A SELF_TASK_EXPECTED_GLOBS entry names a task with no SELF_SCHEDULED_GATES\n"
          "    entry, so its pinned `inputs` have no gate behind them.\n"
          "    Fix: add the task to SELF_SCHEDULED_GATES with its script's invocation lines, or\n"
          "    delete the stale entry from SELF_TASK_EXPECTED_GLOBS, in\n"
          "    ci/affected-graph/ci_targets.py."),
-        (tw_unregistered,
+        ("tw-unregistered", tw_unregistered,
          "SMA-512. A ts/apps/* directory with a package.json has no TAILWIND_GUARD_INVOCATIONS\n"
          "    entry, so nothing proves it ever invokes the tailwind-source guard at all.\n"
          "    Fix: add the app's name to TAILWIND_GUARD_INVOCATIONS in\n"
          "    ci/affected-graph/ci_targets.py, and wire _expected_tailwind_lines(app)'s three\n"
          "    lines into its moon.yml `test` task."),
-        (tw_missing_lines,
+        ("tw-missing-lines", tw_missing_lines,
          "SMA-512. A line _expected_tailwind_lines derives for that app is missing from its\n"
          "    Moon project's RESOLVED `test` script — the self-test, the negative control, or the\n"
          "    real `--app <dir>` run naming THIS app.\n"
          "    Fix: add the exact line to the app's moon.yml `test` task, so it appears in the\n"
          "    resolved script."),
-        (tw_stale,
+        ("tw-stale", tw_stale,
          "SMA-512. A TAILWIND_GUARD_INVOCATIONS entry names a ts/apps/* directory that no longer\n"
          "    has a package.json on disk — the entry has outlived the app it named.\n"
          "    Fix: delete the entry from TAILWIND_GUARD_INVOCATIONS in\n"
          "    ci/affected-graph/ci_targets.py."),
-        (tw_no_project,
+        ("tw-no-project", tw_no_project,
          "SMA-512. A ts/apps/* directory has a package.json but its <dir>-ts Moon project does\n"
          "    not resolve, or that project has no `test` task — so nothing can prove it invokes\n"
          "    the tailwind-source guard, and the app would be silently unguarded.\n"
          "    Fix: add a moon.yml declaring project id `<dir>-ts` with a `test` task, or correct\n"
          "    the id if it was typo'd."),
-    ):
+    ]
+
+
+def main():
+    root = Path(__file__).resolve().parents[2]
+    try:
+        raw_tasks = moon_payload()
+        tasks = _eligibility(raw_tasks)
+        ci_yml = read_input(root / ".github" / "workflows" / "ci.yml", ".github/workflows/ci.yml")
+        t_targets = parse_t(ci_yml)
+        doc_targets, region = parse_doc_targets(
+            read_input(root / "CLAUDE.md", "CLAUDE.md")
+        )
+        run_sh = read_input(
+            root / "ci" / "affected-graph" / "run.sh", "ci/affected-graph/run.sh"
+        )
+        actionlint_sh = read_input(
+            root / "ci" / "actionlint" / "run.sh", "ci/actionlint/run.sh"
+        )
+        release_parity_sh = read_input(
+            root / "ci" / "release-parity" / "run.sh", "ci/release-parity/run.sh"
+        )
+        workflow_credentials_sh = read_input(
+            root / "ci" / "workflow-credentials" / "run.sh", "ci/workflow-credentials/run.sh"
+        )
+        release_plan_sh = read_input(
+            root / "ci" / "release-plan" / "run.sh", "ci/release-plan/run.sh"
+        )
+        ruff_sh = read_input(
+            root / "ci" / "ruff" / "run.sh", "ci/ruff/run.sh"
+        )
+        next_public_free_sh = read_input(
+            root / "ci" / "next-public" / "run.sh", "ci/next-public/run.sh"
+        )
+        # Fix-wave finding C: a `moon.yml` test filtered out any ts/apps/* directory that lacked
+        # one, so such a directory never reached `unregistered` — the exact silent skip this
+        # whole branch exists to remove. `package.json` is the test ci/next-env/run.sh:113
+        # already applies (pnpm's own `apps/*` workspace glob), so the two controls now agree on
+        # what "an app" is. check_tailwind_guard_invocations reports a `package.json`-bearing
+        # directory with no resolvable Moon project under `no_project` rather than dropping it.
+        tailwind_apps = sorted(
+            d.name for d in (root / "ts" / "apps").iterdir()
+            if d.is_dir() and (d / "package.json").is_file()
+        )
+        # SMA-553 review finding 1 — this extractor also raises MoonOutputError (INFRA_ERRORS), so
+        # its call site belongs inside this same try: called from the validation flow below it, a
+        # raise would escape main() uncaught and exit 1, misreporting an infrastructure fault (a
+        # moon output shape change) as the rc-1 authorial-mistake path. Bound to a local here and
+        # handed to collect_findings, so the try block stays the single place it is invoked.
+        scripts = _scripts(raw_tasks)
+        findings = collect_findings(
+            tasks, t_targets, raw_tasks, scripts, ci_yml, doc_targets, region, tailwind_apps,
+            {
+                "run": run_sh, "actionlint": actionlint_sh,
+                "release_parity": release_parity_sh,
+                "workflow_credentials": workflow_credentials_sh,
+                "release_plan": release_plan_sh, "ruff": ruff_sh,
+                "next_public_free": next_public_free_sh,
+            },
+        )
+    except GateAssertionError as exc:
+        # An authorial mistake, NOT a broken tool: rc 1 so run.sh records a red suite instead of
+        # aborting the whole affected-graph guard and losing every other assertion's output (D2).
+        print(f"FAIL  [ci-targets] {exc}", file=sys.stderr)
+        return 1
+    except INFRA_ERRORS as exc:
+        print(f"FATAL [ci-targets] could not read the inputs: {exc}", file=sys.stderr)
+        return 2
+
+    if not any(rows for _, rows, _ in findings):
+        print(
+            f"PASS  {'ci-targets':<18} -> {len(t_targets)} targets: every CI-eligible repo task is "
+            "in ci.yml's T, every entry resolves, CLAUDE.md mirrors it"
+        )
+        return 0
+
+    print("FAIL  [ci-targets] ci.yml's moon ci target array is out of sync", file=sys.stderr)
+    for _, rows, title in findings:
         if rows:
             print(f"  {title}", file=sys.stderr)
             for row in rows:

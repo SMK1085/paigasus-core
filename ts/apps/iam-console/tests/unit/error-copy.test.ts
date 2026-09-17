@@ -59,4 +59,9 @@ describe('the error copy', () => {
     expect(inactive).toBe('Your account is not active in IAM.');
     expect(inactive).not.toContain('not enabled');
   });
+
+  // SMA-630 spec § 7. D6 makes this reason reachable: a rename submit with no change sends neither field.
+  it('tells the user to change a field when IAM answers nothing-to-rename', () => {
+    expect(formMessage(errorWith('invalid-input', ErrorReason.NOTHING_TO_RENAME))).toBe('Change the slug or the name first.');
+  });
 });

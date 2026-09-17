@@ -1,14 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// The loader of /iam/orgs/[org]/teams/[team] (spec § 5.2).
+// The loader of /iam/orgs/[org]/teams/[team] (spec § 5.2). SMA-630 spec § 5.1 adds three affordance
+// questions about the team's OWN PRN, and the lifecycle of the team and of each project row.
 import 'server-only';
 import type { PaigasusError } from '@paigasus/sdk/errors/types';
 import { PAGE_SIZE, nextOffset } from '../../../../../../lib/paging';
 import { callIam, isUuid, parseTenancyPrn, teamPrn, type IamClients, type IamResult, type MayI } from '@paigasus/console-core';
 import { loadMembers, type MembersData } from '../../../members';
 import { sameNode } from '../../../node-ref';
+import { lifecycleOf, type NodeLifecycle } from '../../../../node-status';
 
-export type ProjectRow = { readonly prn: string; readonly projectId: string | null; readonly slug: string; readonly name: string };
+export type ProjectRow = { readonly prn: string; readonly projectId: string | null; readonly slug: string; readonly name: string; readonly lifecycle: NodeLifecycle };
 export type ProjectList = { readonly rows: readonly ProjectRow[]; readonly offset: number; readonly nextOffset: number | null };
 export type TeamPageData =
   | { readonly kind: 'not-found' }
@@ -18,9 +20,12 @@ export type TeamPageData =
       readonly orgId: string;
       readonly teamId: string;
       readonly teamPrn: string;
-      readonly team: { readonly name: string; readonly slug: string };
+      readonly team: { readonly name: string; readonly slug: string; readonly lifecycle: NodeLifecycle };
       readonly projects: IamResult<ProjectList>;
       readonly canCreateProject: boolean;
+      readonly canRename: boolean;
+      readonly canArchive: boolean;
+      readonly canRestore: boolean;
       readonly members: MembersData;
     };
 export type TeamPageDeps = {
@@ -41,9 +46,12 @@ export async function loadTeamPage(deps: TeamPageDeps, params: { readonly org: s
   const team = got.value.team;
   if (team === undefined || !sameNode(team.orgPrn, 'organization', orgId)) return { kind: 'not-found' };
 
-  const [projects, canCreateProject, members] = await Promise.all([
+  const [projects, canCreateProject, canRename, canArchive, canRestore, members] = await Promise.all([
     callIam(() => deps.tenancy.listProjects({ teamPrn: prn, limit: PAGE_SIZE, offset: BigInt(params.offset) })),
     deps.mayI('CreateProject', prn),
+    deps.mayI('RenameTeam', prn),
+    deps.mayI('ArchiveTeam', prn),
+    deps.mayI('RestoreTeam', prn),
     loadMembers(deps, prn, params.membersOffset),
   ]);
   const projectList: IamResult<ProjectList> = projects.ok
@@ -52,7 +60,7 @@ export async function loadTeamPage(deps: TeamPageDeps, params: { readonly org: s
         value: {
           rows: projects.value.projects.map((project): ProjectRow => {
             const ref = parseTenancyPrn(project.prn);
-            return { prn: project.prn, projectId: ref?.kind === 'project' ? ref.id.toLowerCase() : null, slug: project.slug, name: project.name };
+            return { prn: project.prn, projectId: ref?.kind === 'project' ? ref.id.toLowerCase() : null, slug: project.slug, name: project.name, lifecycle: lifecycleOf(project) };
           }),
           offset: params.offset,
           nextOffset: nextOffset(params.offset, projects.value.projects.length),
@@ -60,5 +68,17 @@ export async function loadTeamPage(deps: TeamPageDeps, params: { readonly org: s
       }
     : projects;
 
-  return { kind: 'ok', orgId, teamId, teamPrn: prn, team: { name: team.name, slug: team.slug }, projects: projectList, canCreateProject, members };
+  return {
+    kind: 'ok',
+    orgId,
+    teamId,
+    teamPrn: prn,
+    team: { name: team.name, slug: team.slug, lifecycle: lifecycleOf(team) },
+    projects: projectList,
+    canCreateProject,
+    canRename,
+    canArchive,
+    canRestore,
+    members,
+  };
 }

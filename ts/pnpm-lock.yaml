@@ -331,6 +331,15 @@ importers:
       '@playwright/test':
         specifier: 'catalog:'
         version: 1.63.0
+      '@testing-library/dom':
+        specifier: 'catalog:'
+        version: 10.4.1
+      '@testing-library/react':
+        specifier: 'catalog:'
+        version: 16.3.3(@testing-library/dom@10.4.1)(@types/react-dom@19.2.7(@types/react@19.2.18))(@types/react@19.2.18)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
+      '@testing-library/user-event':
+        specifier: 'catalog:'
+        version: 14.6.7(@testing-library/dom@10.4.1)
       '@types/node':
         specifier: 'catalog:'
         version: 24.13.4
@@ -343,6 +352,9 @@ importers:
       jose:
         specifier: 'catalog:'
         version: 6.2.12
+      jsdom:
+        specifier: 'catalog:'
+        version: 30.0.1
       msw:
         specifier: 'catalog:'
         version: 2.15.0(@types/node@24.13.4)(typescript@6.0.3)
