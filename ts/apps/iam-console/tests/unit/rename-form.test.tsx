@@ -7,7 +7,7 @@
 // The control case below proves that this harness really resets a form, so the main case is not
 // green for the wrong reason.
 import { useActionState, type ReactElement, type ReactNode } from 'react';
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ZoneProvider } from '@paigasus/app-shell';
@@ -133,6 +133,49 @@ describe('RenameForm', () => {
     expect(screen.queryByText('Renamed.')).toBeNull();
     expect(screen.queryByRole('status')).toBeNull();
     expect(screen.queryByTestId('form-error')).toBeNull();
+  });
+
+  // While the action runs, the user cannot change the values that were sent: a failure then shows next
+  // to the values that IAM refused. The inputs are READ-ONLY, not disabled, because the form data
+  // leaves out a disabled input.
+  it('makes both inputs read-only while the action runs, and editable again after it', async () => {
+    const user = userEvent.setup();
+    let finish: (state: ActionState) => void = () => undefined;
+    const action = vi.fn(
+      (): Promise<ActionState> =>
+        new Promise<ActionState>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    renderInZone(<RenameForm testId="rename-team" title="Rename team" prn={TEAM_PRN} slug="platform" name="Platform Team" action={action} />);
+
+    const slug = screen.getByLabelText<HTMLInputElement>('Slug');
+    const name = screen.getByLabelText<HTMLInputElement>('Name');
+    expect(slug.readOnly).toBe(false);
+    expect(name.readOnly).toBe(false);
+
+    await user.click(screen.getByRole('button', { name: 'Rename' }));
+    try {
+      await waitFor(() => {
+        expect(action).toHaveBeenCalledTimes(1);
+        expect(slug.readOnly).toBe(true);
+        expect(name.readOnly).toBe(true);
+      });
+      expect(slug.disabled).toBe(false);
+      expect(name.disabled).toBe(false);
+    } finally {
+      // Always end the action. React entangles a later transition with an open async action, so an
+      // unresolved promise here would also stop the next case.
+      await act(async () => {
+        finish({ ok: false, error: SLUG_CONFLICT });
+        await Promise.resolve();
+      });
+    }
+    await screen.findByText(FORM_REASON_COPY[ErrorReason.SLUG_CONFLICT] ?? '');
+    await waitFor(() => {
+      expect(slug.readOnly).toBe(false);
+      expect(name.readOnly).toBe(false);
+    });
   });
 
   // The control: the same wiring with an uncontrolled input LOSES the typed value. If this case

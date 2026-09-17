@@ -18,6 +18,9 @@ import { FormError } from './form-error';
  * again with new props, the key changes, and the form starts again from the new values, with a new
  * `useActionState`. The section's result region shows "Renamed." (spec § 6.4), so this form shows
  * no success text.
+ *
+ * WHILE THE ACTION RUNS, the inputs are read-only, so a failure shows next to the values that were
+ * sent. They are not `disabled`: the form data leaves out a disabled input.
  */
 export type RenameFormProps = {
   readonly testId: string;
@@ -44,6 +47,7 @@ export function RenameForm({ testId, title, prn, slug: currentSlug, name: curren
           name="slug"
           required
           autoComplete="off"
+          readOnly={pending}
           value={slug}
           onChange={(event) => {
             setSlug(event.target.value);
@@ -55,6 +59,7 @@ export function RenameForm({ testId, title, prn, slug: currentSlug, name: curren
           name="name"
           required
           autoComplete="off"
+          readOnly={pending}
           value={name}
           onChange={(event) => {
             setName(event.target.value);
