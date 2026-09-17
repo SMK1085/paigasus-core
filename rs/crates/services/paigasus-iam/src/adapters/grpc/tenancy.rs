@@ -4,28 +4,37 @@
 //! thin: parse the wire PRN(s) -> call the same `AppState` service the HTTP surface uses ->
 //! convert the result; all business logic lives in the application/domain layers.
 //!
-//! Every Get/Rename/Archive/Restore re-checks the *stored* canonical PRN (`view.node.id
-//! .canonical()`) against the request's parsed one after the service call and maps a
-//! divergence to `TenancyError::PrnMismatch` — the forged-org-slot defense (brief rule 8,
-//! mirroring the HTTP layer's semantics). Creates only resolve the *parent* PRN (there is no
-//! "stored" resource yet to compare against); the service call re-validates the parent's
-//! existence/status in-txn regardless.
+//! Every Get/Rename/Archive/Restore compares the *stored* canonical PRN (`view.node.id
+//! .canonical()`) with the request's parsed one — the forged-org-slot defense (brief rule 8,
+//! mirroring the HTTP layer's semantics). A Get compares after its read. A Rename/Archive/
+//! Restore compares BEFORE its write, in `load_{org,team,project}_for_write` (SMA-643): the
+//! comparison used to run after the service call, so a forged organization slot committed the
+//! write, the audit row and the outbox event and still answered `prn-mismatch`. The comparison
+//! is sound outside the write transaction because a node's stored PRN never changes (the `prn`
+//! column is written once, at insert, and nothing moves a node to a different parent).
+//!
+//! Creates and Lists do NOT compare their parent PRN at all: they take the parent's uuid and
+//! discard the rest, so a forged parent organization slot is accepted without an error (the
+//! write still goes to the real parent). That is SMA-645, not a property of this design.
 //!
 //! **SMA-444 Task 20/21 enforcement:** every RPC authorizes the bearer-resolved actor
 //! ([`actor_context`]) before performing its operation, gated by
 //! `AppState.enforce_tenancy` (config-driven, `authz.enforce_tenancy`, Task 21) — mirrors
-//! `adapters::http::{organizations,teams,
-//! projects,memberships}`'s fetch-then-authorize-then-act posture exactly (the same action
-//! to resource map, spec §9.4), so the two transports can never diverge. `CreateTeam`/
+//! `adapters::http::{organizations,teams,projects,memberships}`'s
+//! fetch-then-authorize-then-act posture (the same action to resource map, spec §9.4). Under
+//! the default `enforce_tenancy = true` the two transports answer alike. They differ only in
+//! the test-only `enforce_tenancy = false` setting, where gRPC still loads the node (SMA-643)
+//! and HTTP does not, so gRPC answers `not-found` for an unknown uuid where HTTP answers
+//! `nothing-to-rename` or `invalid-slug` first. `CreateTeam`/
 //! `ListTeams` fetch the parent org first (`orgs.get`); `CreateProject`/`ListProjects`/
 //! `AttachMembership`/`ListMemberships`(node-filtered) resolve their parent/target node by
 //! uuid through the owning service ([`resolve_node`]) — all rather than trusting the wire
 //! PRN's org slot directly (or building an unchecked PRN straight from a path/wire uuid),
 //! which would otherwise let a claimed-but-nonexistent parent reach the entity-slice loader
 //! and fail closed as an internal error instead of the expected `NotFound`. The existing
-//! forged-org-slot defense (this module's own stored-canonical recheck, and
-//! `MembershipService::attach`'s own `PrnMismatch` detection) still fires on the actual
-//! mutating call; this only keeps the AUTHORIZATION step itself from ever entity-slice-loading
+//! forged-org-slot defense (this module's own stored-canonical check, and
+//! `MembershipService::attach`'s own `PrnMismatch` detection) fires BEFORE the actual mutating
+//! call; this only keeps the AUTHORIZATION step itself from ever entity-slice-loading
 //! a claimed-but-nonexistent org.
 
 use std::time::Instant;
