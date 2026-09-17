@@ -13,8 +13,8 @@
 //! is sound outside the write transaction because a node's stored PRN never changes (the `prn`
 //! column is written once, at insert, and nothing moves a node to a different parent).
 //!
-//! Creates and Lists do NOT compare their parent PRN at all: they take the parent's uuid and
-//! discard the rest, so a forged parent organization slot is accepted without an error (the
+//! Creates and Lists **that take a parent PRN** do NOT compare it: they take the parent's uuid
+//! and discard the rest, so a forged parent organization slot is accepted without an error (the
 //! write still goes to the real parent). That is SMA-645, not a property of this design.
 //!
 //! **SMA-444 Task 20/21 enforcement:** every RPC authorizes the bearer-resolved actor
@@ -40,7 +40,7 @@
 use std::time::Instant;
 
 use paigasus_iam_core::authz::model::root_prn;
-use paigasus_iam_core::{Action, NodeStatus, NodeView, Organization, Project, Team, TenancyNodeRef};
+use paigasus_iam_core::{Action, NodeStatus, NodeView, TenancyNodeRef};
 use paigasus_kernel::Prn;
 use paigasus_observability::record_grpc;
 use paigasus_proto::paigasus::iam::v1::list_memberships_request;
@@ -144,7 +144,7 @@ async fn resolve_node(state: &AppState, node: &TenancyNodeRef) -> Result<Prn, Te
 /// changes: the `prn` column is written once, at insert, and no repository method, service or
 /// migration moves a node to a different parent. A future "move" feature breaks that invariant
 /// and must revisit this helper.
-async fn load_org_for_write(state: &AppState, actor: &Prn, action: Action, id: Uuid, canonical: &str, rpc: &str) -> Result<NodeView<Organization>, Status> {
+async fn load_org_for_write(state: &AppState, actor: &Prn, action: Action, id: Uuid, canonical: &str, rpc: &str) -> Result<(), Status> {
     let view = state.orgs.get(id).await.map_err(convert::status_to_grpc)?;
     if state.enforce_tenancy {
         state.authorize.check(actor, action, view.node.id.prn()).await.map_err(convert::status_to_grpc)?;
@@ -154,11 +154,11 @@ async fn load_org_for_write(state: &AppState, actor: &Prn, action: Action, id: U
         warn_prn_mismatch(actor, canonical, &stored, rpc);
         return Err(convert::status_to_grpc(TenancyError::PrnMismatch));
     }
-    Ok(view)
+    Ok(())
 }
 
 /// The team twin of [`load_org_for_write`] — same order, same reasons.
-async fn load_team_for_write(state: &AppState, actor: &Prn, action: Action, id: Uuid, canonical: &str, rpc: &str) -> Result<NodeView<Team>, Status> {
+async fn load_team_for_write(state: &AppState, actor: &Prn, action: Action, id: Uuid, canonical: &str, rpc: &str) -> Result<(), Status> {
     let view = state.teams.get(id).await.map_err(convert::status_to_grpc)?;
     if state.enforce_tenancy {
         state.authorize.check(actor, action, view.node.id.prn()).await.map_err(convert::status_to_grpc)?;
@@ -168,11 +168,11 @@ async fn load_team_for_write(state: &AppState, actor: &Prn, action: Action, id: 
         warn_prn_mismatch(actor, canonical, &stored, rpc);
         return Err(convert::status_to_grpc(TenancyError::PrnMismatch));
     }
-    Ok(view)
+    Ok(())
 }
 
 /// The project twin of [`load_org_for_write`] — same order, same reasons.
-async fn load_project_for_write(state: &AppState, actor: &Prn, action: Action, id: Uuid, canonical: &str, rpc: &str) -> Result<NodeView<Project>, Status> {
+async fn load_project_for_write(state: &AppState, actor: &Prn, action: Action, id: Uuid, canonical: &str, rpc: &str) -> Result<(), Status> {
     let view = state.projects.get(id).await.map_err(convert::status_to_grpc)?;
     if state.enforce_tenancy {
         state.authorize.check(actor, action, view.node.id.prn()).await.map_err(convert::status_to_grpc)?;
@@ -182,7 +182,7 @@ async fn load_project_for_write(state: &AppState, actor: &Prn, action: Action, i
         warn_prn_mismatch(actor, canonical, &stored, rpc);
         return Err(convert::status_to_grpc(TenancyError::PrnMismatch));
     }
-    Ok(view)
+    Ok(())
 }
 
 /// One warning line per refused write (SMA-643 D4). After the check moved before the write, a

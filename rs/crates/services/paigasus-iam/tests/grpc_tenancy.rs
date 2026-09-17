@@ -455,28 +455,14 @@ async fn an_upper_case_uuid_in_a_correct_prn_still_renames() {
 /// T1 for organizations (spec § 5.2): each of `RenameOrganization`, `ArchiveOrganization` and
 /// `RestoreOrganization`, against both `enforce_tenancy` settings, on a FRESH organization per
 /// case. A forged prn must answer `prn-mismatch`, must leave the node untouched, and must write
-/// neither an `audit_log` row nor an `event_outbox` row. The positive control that follows each
-/// case proves the two queries can see a row at all.
+/// neither an `audit_log` row nor an `event_outbox` row. Each positive control targets a FRESH
+/// organization: before SMA-643, the forged call itself wrote to the attacked node, so a
+/// same-node control could not prove the audit and outbox queries see a real write.
 ///
 /// The stored organization prn has an EMPTY organization slot
 /// (`paigasus-iam-core/src/tenancy.rs:79`), so the forged shapes here are a NON-EMPTY slot and a
 /// non-empty region. `convert::node_uuid` checks only the service and the resource type, so both
 /// reach the comparison.
-///
-/// Deviations from the brief (report both; no assertion, case or the number of cases changed):
-/// (1) the brief's `setting` label (`"enforce=on"` / `"enforce=off"`) also fed the org slug
-/// (`forged-rn-{setting}`), but `Slug::parse` (`paigasus-iam-core/src/tenancy.rs:18-27`) rejects
-/// `=` — only lowercase ascii, digits and `-` are allowed. A separate slug-safe tag (`on` /
-/// `off`) is used for slugs; the `setting` label keeps its original form for the failure
-/// messages.
-/// (2) each positive control now targets a FRESH organization instead of the one just forged
-/// against. The current (buggy) handlers write before checking the prn, so the forged call
-/// already committed the same mutation against the tested org: re-running an identical rename or
-/// restore on it is a no-op (`out.changed == false`, no new row), and re-running an archive on an
-/// already-archived org is denied outright by the `forbid-archived-writes` policy
-/// (`PermissionDenied`, panicking the whole test before it could report all six cases). A fresh
-/// org, untouched by the forged call, keeps the positive control meaningful in both the current
-/// (failing) state and after the Task 6 fix lands.
 #[tokio::test]
 async fn a_forged_prn_never_writes_an_organization() {
     let Some((_node, db)) = support::start_migrated_postgres().await else {
@@ -510,13 +496,18 @@ async fn a_forged_prn_never_writes_an_organization() {
             .expect("organization");
         let audits = audit_count(&db, action, &org.prn).await;
         let events = outbox_count(&db, event, &org.prn).await;
-        let request = |prn: String| RenameOrganizationRequest {
-            prn,
-            new_slug: Some(format!("forged-rn-{slug_tag}-renamed")),
-            new_name: Some("Renamed".to_string()),
-        };
         let label = format!("{setting} RenameOrganization");
-        let err = client.rename_organization(authed(request(with_org(&org.prn, &forged_slot)), &token)).await.unwrap_err();
+        let err = client
+            .rename_organization(authed(
+                RenameOrganizationRequest {
+                    prn: with_org(&org.prn, &forged_slot),
+                    new_slug: Some(format!("forged-rn-{slug_tag}-renamed")),
+                    new_name: Some("Renamed".to_string()),
+                },
+                &token,
+            ))
+            .await
+            .unwrap_err();
         check(&mut failures, &label, err.code() == Code::InvalidArgument, format!("code was {:?}", err.code()));
         check(&mut failures, &label, reason(&err) == "prn-mismatch", format!("reason was {}", reason(&err)));
         let after = client
@@ -529,16 +520,12 @@ async fn a_forged_prn_never_writes_an_organization() {
         check(&mut failures, &label, after == before, format!("the organization changed: {before:?} -> {after:?}"));
         check(&mut failures, &label, audit_count(&db, action, &org.prn).await == audits, "an audit_log row was written".to_string());
         check(&mut failures, &label, outbox_count(&db, event, &org.prn).await == events, "an event_outbox row was written".to_string());
-        // Positive control: a FRESH organization, not the one just forged against. The forged
-        // call above already committed the same rename (this is the bug T1 targets: the write
-        // lands before the prn check), so re-running the identical rename on that SAME org would
-        // be a no-op (`out.changed == false`) and prove nothing about whether the count queries
-        // can see a row at all.
+        // Positive control: a fresh organization (see the docstring for why).
         let control = create_org(client, &token, &format!("forged-rn-{slug_tag}-control"), "Rename Control").await;
         let control_audits = audit_count(&db, action, &control.prn).await;
         let control_events = outbox_count(&db, event, &control.prn).await;
-        // A distinct target slug: `request`'s own target (`forged-rn-{slug_tag}-renamed`) is
-        // already taken by the org the forged call above renamed into it.
+        // Before SMA-643 the forged call itself renamed the org into `forged-rn-{slug_tag}-renamed`,
+        // so this control uses a distinct target slug to avoid a collision.
         client
             .rename_organization(authed(
                 RenameOrganizationRequest {
@@ -593,10 +580,7 @@ async fn a_forged_prn_never_writes_an_organization() {
         check(&mut failures, &label, after == before, format!("the organization changed: {before:?} -> {after:?}"));
         check(&mut failures, &label, audit_count(&db, action, &org.prn).await == audits, "an audit_log row was written".to_string());
         check(&mut failures, &label, outbox_count(&db, event, &org.prn).await == events, "an event_outbox row was written".to_string());
-        // Positive control: a FRESH organization. The forged call above already archived the
-        // SAME org (same bug), and the `forbid-archived-writes` policy then denies a second
-        // `ArchiveOrganization` against an already-archived node with `PermissionDenied` — a
-        // fresh org sidesteps both that denial and the no-op it would otherwise mask.
+        // Positive control: a fresh organization (see the docstring for why).
         let control = create_org(client, &token, &format!("forged-ar-{slug_tag}-control"), "Archive Control").await;
         let control_audits = audit_count(&db, action, &control.prn).await;
         let control_events = outbox_count(&db, event, &control.prn).await;
@@ -650,9 +634,7 @@ async fn a_forged_prn_never_writes_an_organization() {
         check(&mut failures, &label, after == before, format!("the organization changed: {before:?} -> {after:?}"));
         check(&mut failures, &label, audit_count(&db, action, &org.prn).await == audits, "an audit_log row was written".to_string());
         check(&mut failures, &label, outbox_count(&db, event, &org.prn).await == events, "an event_outbox row was written".to_string());
-        // Positive control: a FRESH organization, archived first so a restore actually changes
-        // it. The forged call above already restored the SAME org (same bug), so a second
-        // restore on it would be a no-op and prove nothing about the count queries.
+        // Positive control: a fresh organization, archived first so a restore actually changes it.
         let control = create_org(client, &token, &format!("forged-rs-{slug_tag}-control"), "Restore Control").await;
         client
             .archive_organization(authed(ArchiveOrganizationRequest { prn: control.prn.clone() }, &token))
@@ -680,32 +662,16 @@ async fn a_forged_prn_never_writes_an_organization() {
 /// T1 for teams (spec § 5.2): each of `RenameTeam`, `ArchiveTeam` and `RestoreTeam`, against
 /// both `enforce_tenancy` settings, on a FRESH team per case. A forged prn must answer
 /// `prn-mismatch`, must leave the node untouched, and must write neither an `audit_log` row nor
-/// an `event_outbox` row. The positive control that follows each case proves the two queries can
-/// see a row at all.
+/// an `event_outbox` row. Each positive control targets a FRESH team: before SMA-643, the forged
+/// call itself wrote to the attacked team, so a same-team control could not prove the audit and
+/// outbox queries see a real write.
 ///
 /// A team's stored prn carries the parent organization's uuid in the organization slot
 /// (`paigasus-iam-core/src/tenancy.rs:79`, `TeamId::canonical`), so the forged shapes here are a
 /// WRONG organization uuid and an EMPTY organization slot. `convert::node_uuid` checks only the
 /// service and the resource type — it never builds a `TeamId` — so both shapes reach the
 /// comparison rather than being refused earlier as `invalid-prn` (measured: both cases below
-/// answered `prn-mismatch`, matching the brief's prediction that `node_uuid` lets the empty slot
-/// through).
-///
-/// Deviations from the brief (report both; no assertion, case or the number of cases changed):
-/// (1) the brief's `setting` label (`"enforce=on"` / `"enforce=off"`) also fed the team/org slugs
-/// (`t-rn-{setting}`) — `Slug::parse` (`paigasus-iam-core/src/tenancy.rs:18-27`) rejects `=`, so a
-/// separate slug-safe tag (`on` / `off`) is used for slugs; the `setting` label keeps its
-/// original form for the failure messages.
-/// (2) each positive control now targets a FRESH team (created in the same case's organization)
-/// instead of re-running the call against the team the forged call just attacked. Controller
-/// ruling R8, stated correctly here (the organization test's own comment states it imprecisely):
-/// the current (buggy) handlers write before checking the prn, so the forged call above already
-/// committed the same mutation against the tested team. A same-team control on rename or restore
-/// would then be a no-op (`Mutated::changed == false`, no new row), proving nothing about whether
-/// the count queries can see a row at all; on archive it would PANIC outright, since the
-/// `forbid-archived-writes` policy denies a second archive of an already-archived node. A fresh
-/// team, untouched by the forged call, keeps the positive control meaningful in both the current
-/// (failing) state and after the Task 6 fix lands.
+/// answered `prn-mismatch`).
 #[tokio::test]
 async fn a_forged_prn_never_writes_a_team() {
     let Some((_node, db)) = support::start_migrated_postgres().await else {
@@ -767,8 +733,7 @@ async fn a_forged_prn_never_writes_a_team() {
             outbox_count(&db, event, &team.prn).await == events,
             "an event_outbox row was written".to_string(),
         );
-        // Positive control: a FRESH team in the same organization, not the one just forged
-        // against (ruling R8 above).
+        // Positive control: a fresh team in the same organization (see the docstring for why).
         let control = create_team(client, &token, &org.prn, &format!("t-rn-{slug_tag}-control")).await;
         let control_audits = audit_count(&db, action, &control.prn).await;
         let control_events = outbox_count(&db, event, &control.prn).await;
@@ -823,10 +788,7 @@ async fn a_forged_prn_never_writes_a_team() {
             outbox_count(&db, event, &team.prn).await == events,
             "an event_outbox row was written".to_string(),
         );
-        // Positive control: a FRESH team. The forged call above already archived the SAME team
-        // (same bug), and the `forbid-archived-writes` policy would then deny a second
-        // `ArchiveTeam` against an already-archived node with `PermissionDenied` — a fresh team
-        // sidesteps both that denial and the no-op it would otherwise mask.
+        // Positive control: a fresh team (see the docstring for why).
         let control = create_team(client, &token, &org.prn, &format!("t-ar-{slug_tag}-control")).await;
         let control_audits = audit_count(&db, action, &control.prn).await;
         let control_events = outbox_count(&db, event, &control.prn).await;
@@ -883,9 +845,7 @@ async fn a_forged_prn_never_writes_a_team() {
             outbox_count(&db, event, &team.prn).await == events,
             "an event_outbox row was written".to_string(),
         );
-        // Positive control: a FRESH team, archived first so a restore actually changes it. The
-        // forged call above already restored the SAME team (same bug), so a second restore on it
-        // would be a no-op and prove nothing about the count queries.
+        // Positive control: a fresh team, archived first so a restore actually changes it.
         let control = create_team(client, &token, &org.prn, &format!("t-rs-{slug_tag}-control")).await;
         client
             .archive_team(authed(ArchiveTeamRequest { prn: control.prn.clone() }, &token))
@@ -910,8 +870,15 @@ async fn a_forged_prn_never_writes_a_team() {
     assert!(failures.is_empty(), "forged-prn team cases failed:\n{}", failures.join("\n"));
 }
 
-/// T1 for projects (spec § 5.2). Forged shapes for this node kind: a wrong organization uuid
-/// (rename, restore), and a non-empty region (archive).
+/// T1 for projects (spec § 5.2): each of `RenameProject`, `ArchiveProject` and `RestoreProject`,
+/// against both `enforce_tenancy` settings, on a FRESH project per case. A forged prn must
+/// answer `prn-mismatch`, must leave the node untouched, and must write neither an `audit_log`
+/// row nor an `event_outbox` row. Each positive control targets a FRESH project: before
+/// SMA-643, the forged call itself wrote to the attacked project, so a same-project control
+/// could not prove the audit and outbox queries see a real write.
+///
+/// Forged shapes for this node kind: a wrong organization uuid (rename, restore), and a
+/// non-empty region (archive).
 #[tokio::test]
 async fn a_forged_prn_never_writes_a_project() {
     let Some((_node, db)) = support::start_migrated_postgres().await else {
@@ -979,8 +946,7 @@ async fn a_forged_prn_never_writes_a_project() {
             outbox_count(&db, event, &project.prn).await == events,
             "an event_outbox row was written".to_string(),
         );
-        // Positive control: a FRESH project in the same team, not the one just forged against
-        // (ruling R8 above).
+        // Positive control: a fresh project in the same team (see the docstring for why).
         let control = create_project(client, &token, &team.prn, &format!("p-rn-p-{slug_tag}-c")).await;
         let control_audits = audit_count(&db, action, &control.prn).await;
         let control_events = outbox_count(&db, event, &control.prn).await;
@@ -1049,10 +1015,7 @@ async fn a_forged_prn_never_writes_a_project() {
             outbox_count(&db, event, &project.prn).await == events,
             "an event_outbox row was written".to_string(),
         );
-        // Positive control: a FRESH project. The forged call above already archived the SAME
-        // project (same bug), and the `forbid-archived-writes` policy would then deny a second
-        // `ArchiveProject` against an already-archived node with `PermissionDenied` — a fresh
-        // project sidesteps both that denial and the no-op it would otherwise mask.
+        // Positive control: a fresh project (see the docstring for why).
         let control = create_project(client, &token, &team.prn, &format!("p-ar-p-{slug_tag}-c")).await;
         let control_audits = audit_count(&db, action, &control.prn).await;
         let control_events = outbox_count(&db, event, &control.prn).await;
@@ -1115,9 +1078,7 @@ async fn a_forged_prn_never_writes_a_project() {
             outbox_count(&db, event, &project.prn).await == events,
             "an event_outbox row was written".to_string(),
         );
-        // Positive control: a FRESH project, archived first so a restore actually changes it.
-        // The forged call above already restored the SAME project (same bug), so a second
-        // restore on it would be a no-op and prove nothing about the count queries.
+        // Positive control: a fresh project, archived first so a restore actually changes it.
         let control = create_project(client, &token, &team.prn, &format!("p-rs-p-{slug_tag}-c")).await;
         client
             .archive_project(authed(ArchiveProjectRequest { prn: control.prn.clone() }, &token))
@@ -1261,6 +1222,8 @@ async fn an_ungranted_caller_cannot_tell_a_forged_prn_from_a_correct_one() {
     }
 
     // Nothing was written by any of the eighteen denied calls above, across all nine handlers.
+    // This total-count check holds only because `grpc::router` starts no denial-audit drain
+    // (spec fact F5); such a drain would write its own rows and change the counts below.
     check(
         &mut failures,
         "no write: audit_log",

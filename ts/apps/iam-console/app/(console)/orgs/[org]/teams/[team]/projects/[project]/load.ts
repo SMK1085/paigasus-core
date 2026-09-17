@@ -43,7 +43,7 @@ export async function loadProjectPage(
 
   const got = await callIam(() => deps.tenancy.getProject({ prn }));
   // The PRN comes from the URL: IAM answers a wrong [org] with prn-mismatch, which is invalid-input
-  // (tenancy.rs:480-482). Spec § 5.2 makes a mismatched URL a 404 (ruling T18.a).
+  // (the `get_project` handler in tenancy.rs). Spec § 5.2 makes a mismatched URL a 404 (ruling T18.a).
   if (!got.ok) return got.error.presentation === 'invalid-input' ? { kind: 'not-found' } : { kind: 'error', error: got.error };
   const project = got.value.project;
   if (project === undefined || !sameNode(project.teamPrn, 'team', teamId) || !sameNode(project.orgPrn, 'organization', orgId)) return { kind: 'not-found' };

@@ -124,7 +124,8 @@ describe('loadOrganizationPage', () => {
 
   it('answers not-found when IAM refuses the URL-built PRN as invalid input (prn-mismatch), and asks for nothing else', async () => {
     // Real IAM answers a PRN whose canonical form differs from the stored node with PrnMismatch,
-    // which is InvalidArgument (adapters/grpc/tenancy.rs:176-178). Spec § 5.2: a mismatched URL is a 404.
+    // which is InvalidArgument (the `get_organization` handler in adapters/grpc/tenancy.rs).
+    // Spec § 5.2: a mismatched URL is a 404.
     iam.setHandlers({
       ...world(1),
       'tenancy.getOrganization': () => {

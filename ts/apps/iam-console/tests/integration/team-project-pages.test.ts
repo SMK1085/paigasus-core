@@ -3,8 +3,9 @@
 // The team and project page loaders and the create-project command (spec § 5.2, § 5.3), against the
 // fake IAM. The consistency cases prove that a URL whose segments disagree with IAM's answer is a
 // 404, and the non-UUID cases prove that IAM is not called for a malformed URL. The prn-mismatch
-// cases script the answer real IAM gives for a wrong [org] (tenancy.rs:331-333, :480-482); the
-// other-organization cases script an answer real IAM never gives, and hold the sameNode guard.
+// cases script the answer real IAM gives for a wrong [org] (the `get_team` and `get_project`
+// handlers in tenancy.rs); the other-organization cases script an answer real IAM never gives,
+// and hold the sameNode guard.
 import { Code } from '@connectrpc/connect';
 import { disposeTransports } from '@paigasus/sdk/iam';
 import { NodeStatus } from '@paigasus/sdk/iam/types';
