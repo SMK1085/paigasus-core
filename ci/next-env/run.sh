@@ -138,13 +138,20 @@ for d in ts/apps/*/; do
   [ -f "${d}package.json" ] && dirs+=("${d%/}")
 done
 missing=()
-for d in "${dirs[@]:-}"; do
-  found=0
-  for a in "${apps[@]}"; do
-    [ "$a" = "$d" ] && found=1
+# `"${dirs[@]:-}"` iterates ONCE with an empty `d` when `dirs` is empty, which printed a blank
+# row under the heading below. Unreachable today — `apps` needs a package.json AND a config, and
+# the exit above fires when `apps` is empty, so reaching here proves `dirs` is non-empty too —
+# but the `:-` idiom is wrong regardless, and a future reordering of the two blocks would make it
+# live. The length guard is the bash-3.2-safe form under `set -u`; lines 126 and 148 use it too.
+if [ "${#dirs[@]}" -gt 0 ]; then
+  for d in "${dirs[@]}"; do
+    found=0
+    for a in "${apps[@]}"; do
+      [ "$a" = "$d" ] && found=1
+    done
+    [ "$found" -eq 1 ] || missing+=("$d")
   done
-  [ "$found" -eq 1 ] || missing+=("$d")
-done
+fi
 if [ "${#missing[@]}" -gt 0 ]; then
   echo "next-env gate: these ts/apps/* directories have no discoverable next.config.*:" >&2
   printf '  %s\n' "${missing[@]}" >&2

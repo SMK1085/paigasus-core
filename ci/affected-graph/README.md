@@ -347,11 +347,15 @@ It also runs several checks that the per-case project sets structurally **cannot
   gate, or one with a blank reason, is itself reported. The registries were equality-paired
   until SMA-530 — a plain subset would have let `repo:affected-smoke` be script-pinned
   later without pinning the inputs that make every pin in this file reachable. The function
-  that asserts this pairing, `check_registry_pairing`, is not called from `main()` — it is
-  exercised only via the `--self-test` path, which CI reaches through
-  `repo:affected-smoke` → `ci/affected-graph/run.sh --negative-control` → run.sh:404's
+  that asserts this pairing, `check_registry_pairing`, runs on BOTH paths. On the real gate
+  path `main()` reaches it through `collect_findings`, which reports its five row sets under
+  the `pairing-*` finding keys. On the `--self-test` path it is additionally exercised against
+  synthetic registries, which CI reaches through `repo:affected-smoke` →
+  `ci/affected-graph/run.sh --negative-control` → run.sh:760's
   `python3 "$HERE/ci_targets.py" --self-test || NEG_RC=1`, a line pinned by
   `RUN_SH_CALL_SITES` above and mirrored by `ci/actionlint/run.sh`'s check 8c.
+  An earlier revision of this passage said the function was "not called from `main()`" and
+  cited "run.sh:404". Both statements were wrong; SMA-638 corrected them.
   Each value there is the gate's WHOLE authored input set, globs first then literal files,
   because moon resolves a wildcard entry into `inputGlobs` and a literal path into
   `inputFiles`: `repo:version-lockstep` (SMA-576) declares sixteen literal paths and no glob
@@ -461,3 +465,32 @@ no assumption of its own beyond what A4-A6 already state. A8 depends on the same
 the guard, so re-grounding is a known step of any moon bump. All five treat a missing key as a
 violation or an infrastructure error rather than skipping, precisely so such a change cannot turn
 into a silent pass.
+
+## Limitations
+
+These are the stated limits of `ci_targets.py`'s own wiring floor (SMA-638). They are recorded,
+not closed.
+
+**L1 — `EXPECTED_FINDING_KEYS` proves membership, not semantics.** `main()` derives both its
+verdict (`if not any(rows for _, rows, _ in findings)`) and its report (`for _, rows, title in
+findings`) from the one list `collect_findings` returns, so a check folded into one and not the
+other can no longer exist. `EXPECTED_FINDING_KEYS` then pins that list's arity and its exact key
+sequence, which is what stops a triple being deleted outright. It cannot judge what a key
+reports: a key whose `rows` are always empty satisfies the floor completely. The sibling
+`cargo_moon_parity.py` accepts the same limit for the same reason.
+
+**L2 — Both pin tables are substring pins, so a commented-out line still satisfies them.**
+`check_self_invocation` tests `site not in run_sh_text`, and `ci/actionlint/run.sh`'s
+`affected_graph_wiring_verdict` uses `grep -qF`. MEASURED on SMA-638 against
+`ci/affected-graph/run.sh`'s `--negative-control` flag parse (line 28): deleting the line reds
+both gates, but commenting it out leaves both green. Adding that line and the `NEGATIVE` branch
+guard (line 714) to `RUN_SH_CALL_SITES` and `T_AFFECTED_GRAPH_CALL_SITES` narrows the bypass —
+it does not make either pin exact. A whole-line or execution-reachability pin would, and is not
+attempted here.
+
+**L3 — `self_test()`'s own `if failures:` report guard is unpinned.** Nothing asserts that the
+self-test still reports the failures it collects, so gutting that guard leaves a self-test that
+runs every row and prints nothing. This is closable, and by a means this repository already
+uses: `RUFF_SH_CALL_SITES` pins three lines inside `ci/ruff/run.sh`'s own self-test for exactly
+this shape. It is left open as scope, not as an inherent limit, so a later reader can pick it up
+deliberately.
