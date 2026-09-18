@@ -96,8 +96,7 @@ negative_control() {
   # release.yml row PASS (a failed pipeline reads as "no match"), and so did a SIGPIPE on the
   # producer at the exact moment grep found release.yml. Both failed OPEN on the row this control
   # exists for.
-  subjects_rc=0
-  subjects_out="$(bash "$0" 2>/dev/null)" || subjects_rc=$?
+  subjects_rc=0; subjects_out="$(bash "$0" 2>/dev/null)" || subjects_rc=$?
   if [ "$subjects_rc" -ne 0 ]; then
     printf '  FAIL the real run exited %s, so the subject-set rows below cannot assert\n' "$subjects_rc" >&2
     failures=$((failures + 1))

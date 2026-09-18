@@ -1080,6 +1080,10 @@ RELEASE_PARITY_SH_CALL_SITES = (
 # guard on its exit status, and the match. The old line piped the real run into an early-exit grep
 # under `pipefail`, so a failing checker AND a SIGPIPE on the producer both made the release.yml
 # row pass (fail-OPEN). Deleting the status guard alone brings that back, so it is pinned too.
+# The `subjects_rc=0` default is folded into the capture line (`;`-joined) rather than living on
+# its own line: a standalone default line would be unpinned, and the mutation battery only
+# deletes lines already in this tuple — an unpinned default that gets deleted lets the guard stop
+# firing on a checker failure with nothing to catch it (review round 1 finding).
 #
 # The fifth entry is an ASSERTION line, added after the first four were measured to be
 # insufficient: deleting every `_expect` and `grep` row inside negative_control() left all four
@@ -1090,7 +1094,7 @@ RELEASE_PARITY_SH_CALL_SITES = (
 WORKFLOW_CREDENTIALS_SH_CALL_SITES = (
     "--negative-control) MODE=negctl;   shift ;;",
     "negctl)   negative_control ;;",
-    "subjects_out=\"$(bash \"$0\" 2>/dev/null)\" || subjects_rc=$?",
+    "subjects_rc=0; subjects_out=\"$(bash \"$0\" 2>/dev/null)\" || subjects_rc=$?",
     'if [ "$subjects_rc" -ne 0 ]; then',
     "if grep -q '^workflow-credentials: subjects:.*release.yml' < <(printf '%s\\n' \"$subjects_out\"); then",
     'if [ "$failures" -gt 0 ]; then',
@@ -2526,7 +2530,7 @@ def self_test():
         # The assertion lines (SMA-593 F1; split into capture, status guard and match by SMA-647).
         # Indented in the real script, so they also exercise the stripped-whole-line matching this
         # haystack uses.
-        '  subjects_out="$(bash "$0" 2>/dev/null)" || subjects_rc=$?\n'
+        '  subjects_rc=0; subjects_out="$(bash "$0" 2>/dev/null)" || subjects_rc=$?\n'
         '  if [ "$subjects_rc" -ne 0 ]; then\n'
         "  if grep -q '^workflow-credentials: subjects:.*release.yml' "
         "< <(printf '%s\\n' \"$subjects_out\"); then\n"
