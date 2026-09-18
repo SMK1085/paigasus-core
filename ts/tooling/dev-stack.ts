@@ -195,7 +195,13 @@ function stop(child: ChildProcess): Promise<void> {
 function spawnZone(zone: Zone, env: Record<string, string>): ChildProcess {
   const cwd = ZONE_DIR[zone];
   const nextBin = createRequire(path.join(cwd, 'package.json')).resolve('next/dist/bin/next');
-  const child = spawn(process.execPath, [nextBin, 'dev'], {
+  // `--hostname` as a CLI FLAG, not the HOSTNAME env var. MEASURED on Next 16.3.5: `next dev`
+  // ignores HOSTNAME (it prints a `Network:` line and binds every interface), while the standalone
+  // `server.js` the e2e harness spawns does honour it — which is why the harness needs no flag and
+  // this does. The bind host is what Next puts in `blockCrossSiteDEV`'s allowlist, so without the
+  // flag every hot-reload socket arriving through the terminator is refused with "Blocked
+  // cross-origin request to Next.js dev resource", and hot reload silently does not work.
+  const child = spawn(process.execPath, [nextBin, 'dev', '--hostname', '127.0.0.1'], {
     cwd,
     stdio: ['ignore', 'pipe', 'pipe'],
     env: { ...env, PORT: String(ZONE_PORT[zone]), HOSTNAME: '127.0.0.1', PAIGASUS_ZONE: zone },
