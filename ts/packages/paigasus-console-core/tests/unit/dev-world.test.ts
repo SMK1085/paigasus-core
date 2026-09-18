@@ -10,7 +10,6 @@ const REQUIRED = [
   'authn.introspect',
   'authz.isAuthorized',
   'authz.listRoleGrants',
-  'serviceInfo.getServiceInfo',
   'tenancy.getOrganization',
   'tenancy.getTeam',
   'tenancy.getProject',
@@ -41,6 +40,16 @@ describe('devWorld', () => {
     for (const method of REQUIRED) expect(Object.keys(handlers)).toContain(method);
   });
 
+  it('leaves serviceInfo.getServiceInfo unscripted, so the gRPC answer stays tied to setServiceInfo()', () => {
+    // fake-iam.ts's dispatch() always prefers a scripted handler over defaults(), so scripting
+    // this method here would freeze the gRPC answer at whatever this map returned — even after a
+    // later setServiceInfo() call moved the HTTP answer, breaking the fake's documented contract
+    // that a descriptor change updates both answers (fake-iam.ts:130-134). Leaving the key absent
+    // lets defaults() keep serving the mutable descriptor. Do not re-add this key.
+    const handlers = devWorld();
+    expect(Object.keys(handlers)).not.toContain('serviceInfo.getServiceInfo');
+  });
+
   it('allows every action, so a dev session is never denied', () => {
     const handlers = devWorld();
     const isAuthorized = handlers['authz.isAuthorized'];
@@ -56,6 +65,12 @@ describe('devWorld', () => {
       expect(organization.status).toEqual(organization.effectiveStatus);
       expect(organization.status).not.toEqual(0); // 0 is UNSPECIFIED
     }
+    const team = handlers['tenancy.getTeam']?.({} as never, {} as never) as { team: { status: number; effectiveStatus: number } };
+    expect(team.team.status).toEqual(team.team.effectiveStatus);
+    expect(team.team.status).not.toEqual(0); // 0 is UNSPECIFIED
+    const project = handlers['tenancy.getProject']?.({} as never, {} as never) as { project: { status: number; effectiveStatus: number } };
+    expect(project.project.status).toEqual(project.project.effectiveStatus);
+    expect(project.project.status).not.toEqual(0); // 0 is UNSPECIFIED
   });
 
   it('pins the two descriptors the consoles switch on', () => {

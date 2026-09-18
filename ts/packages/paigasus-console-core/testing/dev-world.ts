@@ -51,9 +51,13 @@ export function devWorld(): FakeIamHandlers {
     }),
     'authz.isAuthorized': () => ({ allowed: true, determiningPolicies: [], reason: '' }),
     'authz.listRoleGrants': () => ({ grants: [{ id: '0190a1d4-0000-7000-8000-00000000d103', principalPrn: PRINCIPAL_PRN, roleKey: 'project_viewer', scopePrn: PROJECT_PRN }] }),
-    // Scripted (rather than left to the fake's built-in default) so it stays a member of
-    // Object.keys(handlers) — the completeness this world's own test pins.
-    'serviceInfo.getServiceInfo': () => ({ serviceInfo: { ...DEV_IAM_DESCRIPTOR } }),
+    // `serviceInfo.getServiceInfo` is deliberately NOT scripted here. `dispatch()` in fake-iam.ts
+    // always prefers a scripted handler over `defaults()`, so scripting it would freeze the gRPC
+    // answer at whatever this map returned, even after a later `setServiceInfo()` call moved the
+    // HTTP answer — breaking the fake's documented contract that a descriptor change updates both
+    // the gRPC and the HTTP answer (fake-iam.ts:130-134). Leaving it unscripted lets `defaults()`
+    // keep serving the mutable `grpcDescriptor`, matching the e2e world's own choice
+    // (tests/e2e/support/world.ts), where the harness calls `setServiceInfo()` after startup.
     'tenancy.getOrganization': () => ({ organization: ORGANIZATION }),
     'tenancy.getTeam': () => ({ team: TEAM }),
     'tenancy.getProject': () => ({ project: PROJECT }),
