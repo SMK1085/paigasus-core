@@ -7,9 +7,16 @@
 //
 // It closes on "Done" and on `pagehide` ONLY (rule 6). It does not close on another submission, so
 // key rotation works: issue, copy, then revoke the old key with the new token still on screen.
+//
+// The `pagehide` close runs inside flushSync: a native `pagehide` listener gets React's
+// DefaultEventPriority, so an ordinary setState schedules its render for a later macrotask. If the
+// page enters the back/forward cache right after `pagehide`, the task queue freezes before that
+// macrotask runs and the frozen DOM keeps showing the token. flushSync forces the removal to commit
+// before this handler returns, so the token is gone from the DOM by the time the page can freeze.
 'use client';
 
 import { useEffect, useImperativeHandle, useState, type ReactElement, type Ref } from 'react';
+import { flushSync } from 'react-dom';
 import { PRIMARY_BUTTON_CLASS, SECONDARY_BUTTON_CLASS } from '@paigasus/ui';
 
 export type TokenPanelHandle = { show(token: string, prefix: string): void };
@@ -34,7 +41,13 @@ export function TokenPanel({ ref }: { readonly ref: Ref<TokenPanelHandle> }): Re
   useEffect(() => {
     if (issued === null) return undefined;
     const close = (): void => {
-      setIssued(null);
+      // See the file comment above: a native pagehide handler must commit the removal before it
+      // returns, or the back/forward cache can freeze the page with the token still in the DOM
+      // (SMA-636 fix round 1).
+      // eslint-disable-next-line @eslint-react/dom-no-flush-sync -- flushSync is the fix here, not the hazard.
+      flushSync(() => {
+        setIssued(null);
+      });
     };
     window.addEventListener('pagehide', close);
     return () => {

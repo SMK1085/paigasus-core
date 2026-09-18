@@ -59,6 +59,21 @@ describe('TokenPanel', () => {
     expect(screen.queryByTestId('token-panel')).toBeNull();
   });
 
+  it('clears the token SYNCHRONOUSLY on pagehide, before the back/forward cache can freeze the page', () => {
+    // Dispatched OUTSIDE act() on purpose: a real `pagehide` listener fires outside React's own
+    // event handling, so this is the only way to reproduce the bfcache race (SMA-636 fix round 1).
+    // act() flushes every pending update synchronously and would hide a setState that React
+    // schedules for a later macrotask, which is exactly the bug this test exists to catch.
+    const ref = mount();
+    act(() => {
+      ref.current?.show(TOKEN, 'pgs_unit_01');
+    });
+    window.dispatchEvent(new PageTransitionEvent('pagehide'));
+    // No act(), no await: if the page enters the back/forward cache right after this line, the
+    // task queue freezes here. The token must already be gone from the DOM by now.
+    expect(screen.queryByTestId('token-value')).toBeNull();
+  });
+
   it('shows the second token when a second key is issued', () => {
     const ref = mount();
     act(() => {
