@@ -8259,9 +8259,9 @@ input).
 
 - [ ] **Step 3: The full CI target set**
 
-Before a re-run of anything that failed, copy `.moon/cache/ciReport.json` and
-`.moon/cache/states/<project>/<task>/` out of the repository. A re-run overwrites the evidence
-(CLAUDE.md, "Diagnosing an unattributed `moon ci` failure").
+Before a re-run of anything that failed, follow step 0 of CLAUDE.md's "Diagnosing an
+unattributed `moon ci` failure": copy the CI report and `.moon/cache/states/<project>/<task>/`
+out of the repository. A re-run overwrites the evidence.
 
 ```bash
 export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
