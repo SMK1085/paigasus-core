@@ -18,7 +18,9 @@ export type AppEventName =
   | 'authorize.no_principal'
   | 'discovery.redis_connect_failed'
   | 'discovery.redis_connection_lost'
-  | 'iam.call_failed';
+  | 'iam.call_failed'
+  // SMA-636 § 5.2: CreateServiceAccount succeeded, and the gateway_user grant after it failed.
+  | 'gateway.sa.grant_failed';
 
 export type AppEventFields = Readonly<Record<string, string | number | boolean | null>>;
 
