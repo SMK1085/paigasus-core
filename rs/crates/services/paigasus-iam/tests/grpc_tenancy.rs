@@ -1586,3 +1586,111 @@ async fn a_forged_team_parent_never_lists_projects() {
     off_server.abort();
     assert!(failures.is_empty(), "forged team-parent ListProjects cases failed:\n{}", failures.join("\n"));
 }
+
+/// SMA-645 T3: a CORRECT parent PRN written with upper-case uuids must still succeed, on all four
+/// handlers. `Prn::canonical()` renders every uuid through `as_hyphenated()`, which lower-cases
+/// the resource uuid AND the organization slot — so a fix that compares the raw request string
+/// instead of the canonical one breaks these cases.
+///
+/// All four handlers are covered, not one case per parent type: the canonical string is produced
+/// and passed at each CALL SITE, so passing the raw PRN is a per-handler defect that a
+/// two-handler test would leave uncaught in the other two.
+#[tokio::test]
+async fn an_upper_case_uuid_in_a_correct_parent_prn_still_works() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let idp = support::start_mock_idp().await;
+    let state = AppState::new(db.clone(), &support::test_config(&idp)).await.unwrap();
+    let token = idp.bearer("upper-parent", Some("upper-parent@example.com"), "paigasus", 3600);
+    support::provision_platform_admin(&state, &token).await;
+    let (addr, server) = spawn_tenancy_server(state).await;
+    let mut client = connect(addr).await;
+
+    let mut failures: Vec<String> = Vec::new();
+    let org = create_org(&mut client, &token, "upper-parent", "Upper Parent").await;
+    let team = create_team(&mut client, &token, &org.prn, "upper-parent").await;
+    let org_uuid = org.prn.rsplit('/').next().expect("org uuid").to_string();
+    let upper_org_slot = with_org(&team.prn, &org_uuid.to_uppercase());
+
+    // CreateTeam: the organization PRN's resource uuid upper-cased.
+    let r = client
+        .create_team(authed(
+            CreateTeamRequest {
+                org_prn: upper_uuid(&org.prn),
+                slug: "upper-ct".to_string(),
+                name: "Upper CT".to_string(),
+            },
+            &token,
+        ))
+        .await;
+    check(&mut failures, "CreateTeam upper resource uuid", r.is_ok(), format!("refused a correct prn: {:?}", r.err()));
+
+    // ListTeams: the same shape.
+    let r = client
+        .list_teams(authed(
+            ListTeamsRequest {
+                org_prn: upper_uuid(&org.prn),
+                limit: 100,
+                offset: 0,
+            },
+            &token,
+        ))
+        .await;
+    check(&mut failures, "ListTeams upper resource uuid", r.is_ok(), format!("refused a correct prn: {:?}", r.err()));
+
+    // CreateProject: the team PRN's resource uuid upper-cased.
+    let r = client
+        .create_project(authed(
+            CreateProjectRequest {
+                team_prn: upper_uuid(&team.prn),
+                slug: "upper-cp".to_string(),
+                name: "Upper CP".to_string(),
+            },
+            &token,
+        ))
+        .await;
+    check(&mut failures, "CreateProject upper resource uuid", r.is_ok(), format!("refused a correct prn: {:?}", r.err()));
+
+    // CreateProject: the team PRN's ORG SLOT uuid upper-cased. `canonical()` folds that uuid too,
+    // so this is also a correct PRN — a case `upper_uuid` alone does not reach.
+    let r = client
+        .create_project(authed(
+            CreateProjectRequest {
+                team_prn: upper_org_slot.clone(),
+                slug: "upper-cp-slot".to_string(),
+                name: "Upper CP Slot".to_string(),
+            },
+            &token,
+        ))
+        .await;
+    check(&mut failures, "CreateProject upper org slot", r.is_ok(), format!("refused a correct prn: {:?}", r.err()));
+
+    // ListProjects: both shapes.
+    let r = client
+        .list_projects(authed(
+            ListProjectsRequest {
+                team_prn: upper_uuid(&team.prn),
+                limit: 100,
+                offset: 0,
+            },
+            &token,
+        ))
+        .await;
+    check(&mut failures, "ListProjects upper resource uuid", r.is_ok(), format!("refused a correct prn: {:?}", r.err()));
+
+    let r = client
+        .list_projects(authed(
+            ListProjectsRequest {
+                team_prn: upper_org_slot,
+                limit: 100,
+                offset: 0,
+            },
+            &token,
+        ))
+        .await;
+    check(&mut failures, "ListProjects upper org slot", r.is_ok(), format!("refused a correct prn: {:?}", r.err()));
+
+    server.abort();
+    assert!(failures.is_empty(), "upper-case parent prn cases failed:\n{}", failures.join("\n"));
+}
