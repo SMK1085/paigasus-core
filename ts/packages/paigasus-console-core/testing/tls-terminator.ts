@@ -172,9 +172,20 @@ export async function startTlsTerminator(opts: { tls: TlsMaterial; target?: stri
       upstreamSocket.on('close', drop);
     });
     // The upstream answered with an ordinary response instead of upgrading, or never answered.
-    upstream.on('response', () => clientSocket.destroy());
+    // Destroying `upstream` too (not just the client socket) is what releases its underlying
+    // connection — mirroring forward()'s res.on('close', () => upstream.destroy()) above.
+    // Without it, an unconsumed response body keeps that connection open for the life of the
+    // process (SMA-641 review round 1).
+    upstream.on('response', () => {
+      clientSocket.destroy();
+      upstream.destroy();
+    });
     upstream.on('error', () => clientSocket.destroy());
     clientSocket.on('error', () => upstream.destroy());
+    // The browser closed the handshake socket (a clean disconnect, no error) before the upstream
+    // answered at all. `destroy()` is idempotent, so this is a no-op once 'upgrade' has already
+    // handed the connection off to the drop() handlers below.
+    clientSocket.on('close', () => upstream.destroy());
     upstream.end();
   }
 

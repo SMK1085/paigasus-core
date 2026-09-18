@@ -56,6 +56,36 @@ async function upgradeUpstream(opts: { trailer?: string } = {}): Promise<{ url: 
 }
 
 /**
+ * An upstream with NO 'upgrade' listener — only an ordinary request handler. Node then answers
+ * the Upgrade request as a normal HTTP response (MEASURED) instead of emitting 'upgrade', which
+ * is the path the tunnel's `upstream.on('response', ...)` handler exists for. `closed` flips once
+ * the backend's own TCP connection is gone, which only happens if the tunnel actually destroys
+ * its `ClientRequest` — an unconsumed keep-alive response otherwise leaves it open indefinitely.
+ */
+async function refusingUpstream(): Promise<{ url: string; closed: () => boolean }> {
+  let closed = false;
+  const server = createServer((_req, res) => {
+    res.writeHead(426);
+    res.end('upgrade required');
+  });
+  server.on('connection', (socket) => {
+    socket.on('close', () => {
+      closed = true;
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address() as AddressInfo;
+  closers.push(
+    () =>
+      new Promise<void>((resolve) => {
+        server.closeAllConnections();
+        server.close(() => resolve());
+      }),
+  );
+  return { url: `http://127.0.0.1:${String(port)}`, closed: () => closed };
+}
+
+/**
  * Opens a TLS socket to the terminator and sends an upgrade request by hand.
  *
  * The tunnel writes the status line and the UPSTREAM `head` buffer as two separate
@@ -144,5 +174,19 @@ describe('the terminator tunnels a WebSocket upgrade', () => {
     const { head, socket } = await handshake(terminator.origin, '/iam/_next/hmr');
     expect(head).toContain('101');
     socket.destroy();
+  });
+
+  it('releases the upstream connection when it declines the upgrade with an ordinary response', async () => {
+    const back = await refusingUpstream();
+    const terminator = await startTlsTerminator({ tls, routes: [{ prefix: '/iam', target: back.url }] });
+    closers.push(terminator.close);
+
+    // The terminator destroys the client socket once the upstream answers normally instead of
+    // upgrading, so this rejects the same way the "no route matches" case does.
+    await expect(handshake(terminator.origin, '/iam/_next/hmr')).rejects.toThrow();
+
+    // Proves the upstream ClientRequest was destroyed too, not only the client socket: without
+    // that, this keep-alive connection would stay open for the life of the process.
+    await expect.poll(() => back.closed()).toBe(true);
   });
 });
