@@ -164,6 +164,16 @@ describe('createServiceAccountAction (§ 5.2)', () => {
     expect(revalidatedPaths).toEqual(LAYOUT);
   });
 
+  it('answers partial and revalidates NOTHING when the grant answers relogin (plan SPEC DEVIATION 6)', async () => {
+    fake.handlers = failing('authz.grantRole', new ConnectError('expired', Code.Unauthenticated));
+    captureOutput();
+
+    const result = await createServiceAccountAction(null, form({ ownerPrn: OWNER, name: 'ci-bot' }));
+
+    expect(result).toMatchObject({ kind: 'partial', saPrn: SA, error: { presentation: 'relogin' } });
+    expect(revalidatedPaths).toEqual([]);
+  });
+
   it.each([
     ['conflict', denial({ code: Code.AlreadyExists, reason: 'service-account-name-conflict' }), true],
     ['forbidden', denial(), true],

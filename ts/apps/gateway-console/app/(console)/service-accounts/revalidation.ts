@@ -11,10 +11,13 @@ import type { CreateState, IssueKeyState } from './view';
 
 /**
  * § 5.2's table: every create result except `invalid-input` (and `relogin`). A `degraded` or
- * `generic` failure revalidates too: step 1 may have committed before the response was lost.
+ * `generic` failure revalidates too: step 1 may have committed before the response was lost. A
+ * `partial` whose grant answered `relogin` does NOT revalidate either: the session ended between
+ * the two calls, and the rule above holds for it too.
  */
 export function refreshesAfterCreate(state: Exclude<CreateState, null>): boolean {
-  if (state.kind !== 'failed') return true;
+  if (state.kind === 'created') return true;
+  if (state.kind === 'partial') return state.error.presentation !== 'relogin';
   return state.error.presentation !== 'invalid-input' && state.error.presentation !== 'relogin';
 }
 
