@@ -152,7 +152,20 @@ async function startDefaultZone(): Promise<{ url: string; close: () => Promise<v
     res.on('close', () => upstream.destroy());
     req.pipe(upstream);
   });
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  // A server with no 'error' listener turns a listen failure into an UNCAUGHT exception that
+  // escapes closeAll() — by this point Redis and the three fakes already registered their
+  // closers. Same defect, same fix, as tls-terminator.ts and fake-idp.ts (SMA-641, CodeRabbit
+  // review on PR #256).
+  await new Promise<void>((resolve, reject) => {
+    const onError = (error: NodeJS.ErrnoException): void => {
+      reject(new Error(`dev-stack: the default zone server could not listen: ${error.code ?? error.message}`));
+    };
+    server.once('error', onError);
+    server.listen(0, '127.0.0.1', () => {
+      server.removeListener('error', onError);
+      resolve();
+    });
+  });
   const { port } = server.address() as AddressInfo;
   return {
     url: `http://127.0.0.1:${String(port)}`,
@@ -244,7 +257,7 @@ async function waitForZone(zone: Zone, child: ChildProcess, isInterrupted: () =>
   child.once('error', onError);
   try {
     while (Date.now() < deadline) {
-      if (isInterrupted()) throw new Error('dev-stack: interrupted by signal during startup');
+      if (isInterrupted()) throw new Error('dev-stack: startup interrupted (a shutdown was requested)');
       if (childError !== undefined) throw new Error(`dev-stack: the ${zone} server failed to start: ${childError.message}`);
       if (child.exitCode !== null || child.signalCode !== null) {
         throw new Error(`dev-stack: the ${zone} server exited (code=${String(child.exitCode)}, signal=${String(child.signalCode)}) before it became ready`);
@@ -283,21 +296,39 @@ async function waitForZone(zone: Zone, child: ChildProcess, isInterrupted: () =>
 }
 
 /**
- * Logs loudly if a zone dies after it was already reported ready. Without this the supervisor
- * keeps running and the browser just gets 502s with nothing in the log naming the zone (SMA-641
- * dev-stack review round 1, minor E).
+ * Reports, and now acts on, a zone dying after it was already reported ready: it used to only log
+ * (SMA-641 dev-stack review round 1, minor E), which left the supervisor up and the browser getting
+ * 502s with nobody told to stop it. `onUnexpectedExit` now drives the same teardown path a signal
+ * does, so a dead zone brings the whole stack down instead of leaving it half-alive
+ * (SMA-641, CodeRabbit review on PR #256).
  *
- * `isShuttingDown` gates the log: `stop()` sends SIGTERM (and in a terminal, Ctrl-C usually kills
- * the whole foreground process group with SIGINT before closeAll even runs), so an UNGATED
+ * `isShuttingDown` gates the callback: `stop()` sends SIGTERM (and in a terminal, Ctrl-C usually
+ * kills the whole foreground process group with SIGINT before closeAll even runs), so an UNGATED
  * listener fired this same "exited unexpectedly" alarm on every ordinary shutdown — training a
  * developer to ignore the one case this function exists to catch (SMA-641 dev-stack review
- * round 2, finding 1).
+ * round 2, finding 1). An exit during teardown itself is also gated out here, so it can never
+ * re-enter `closeAll()` — which is idempotent anyway, so no second guard is added on top.
  */
-function watchZone(zone: Zone, child: ChildProcess, isShuttingDown: () => boolean): void {
+function watchZone(zone: Zone, child: ChildProcess, isShuttingDown: () => boolean, onUnexpectedExit: (zone: Zone, code: number | null, signal: NodeJS.Signals | null) => void): void {
   child.once('exit', (code, signal) => {
     if (isShuttingDown()) return;
-    console.error(`[dev-stack] the ${zone} server exited unexpectedly (code=${String(code)}, signal=${String(signal)})`);
+    onUnexpectedExit(zone, code, signal);
   });
+}
+
+/**
+ * `waitForZone` returning does not, by itself, prove the child is still alive: a successful health
+ * response and the child exiting are two independent events, and the loop returns as soon as the
+ * FIRST one lands without re-checking the second. Call this right before installing a zone's
+ * watcher — as early as possible after its own `waitForZone` resolves, not after both zones are
+ * ready — so a child that died in that narrow window is treated as a startup failure (same path as
+ * every other start-step error) rather than silently going unwatched (SMA-641, CodeRabbit review
+ * on PR #256).
+ */
+function assertZoneAlive(zone: Zone, child: ChildProcess): void {
+  if (child.exitCode !== null || child.signalCode !== null) {
+    throw new Error(`dev-stack: the ${zone} server exited (code=${String(child.exitCode)}, signal=${String(child.signalCode)}) before it could be watched`);
+  }
 }
 
 /**
@@ -394,7 +425,7 @@ async function main(): Promise<void> {
     notifyShutdown = resolve;
   });
   const checkpoint = (): void => {
-    if (shutdownRequested) throw new Error('dev-stack: interrupted by signal during startup');
+    if (shutdownRequested) throw new Error('dev-stack: startup interrupted (a shutdown was requested)');
   };
   const onSignal = (signal: NodeJS.Signals): void => {
     // Teardown has not actually started yet here: it begins once the in-flight start step (or, if
@@ -409,6 +440,18 @@ async function main(): Promise<void> {
   };
   process.once('SIGINT', () => onSignal('SIGINT'));
   process.once('SIGTERM', () => onSignal('SIGTERM'));
+
+  // Fires from watchZone() when a zone dies AFTER readiness, unrelated to any signal. It routes
+  // through the SAME `shutdown` promise a signal resolves, so `await shutdown; await closeAll();`
+  // below tears the whole stack down exactly once — closeAll() is already idempotent, so nothing
+  // here needs a second guard against re-entry (SMA-641, CodeRabbit review on PR #256). A dead
+  // zone is never a clean stop, so this always sets a non-zero exit code, ready or not.
+  const onZoneDied = (zone: Zone, code: number | null, signal: NodeJS.Signals | null): void => {
+    console.error(`[dev-stack] the ${zone} server exited unexpectedly (code=${String(code)}, signal=${String(signal)})`);
+    process.exitCode = 1;
+    shutdownRequested = true;
+    notifyShutdown();
+  };
 
   try {
     await preflight();
@@ -483,12 +526,23 @@ async function main(): Promise<void> {
     const gatewayChild = spawnZone('gateway', env);
     started.unshift(() => stop(gatewayChild));
 
+    // Each zone's watcher installs right after ITS OWN waitForZone resolves, not after both zones
+    // are ready: with a single watch-both-at-the-end step, the iam child was unwatched for the
+    // whole time gateway readiness was still pending. assertZoneAlive() closes the narrower race
+    // inside that — a child that died in the instant between waitForZone's health check and this
+    // line — by failing startup instead of installing a watcher on an already-dead child
+    // (SMA-641, CodeRabbit review on PR #256).
     await waitForZone('iam', iamChild, () => shutdownRequested);
+    checkpoint();
+    assertZoneAlive('iam', iamChild);
+    watchZone('iam', iamChild, () => shutdownRequested || closing, onZoneDied);
+
     await waitForZone('gateway', gatewayChild, () => shutdownRequested);
     checkpoint();
+    assertZoneAlive('gateway', gatewayChild);
+    watchZone('gateway', gatewayChild, () => shutdownRequested || closing, onZoneDied);
+
     ready = true;
-    watchZone('iam', iamChild, () => shutdownRequested || closing);
-    watchZone('gateway', gatewayChild, () => shutdownRequested || closing);
 
     console.log('');
     console.log(`  open  ${terminator.origin}/iam`);
