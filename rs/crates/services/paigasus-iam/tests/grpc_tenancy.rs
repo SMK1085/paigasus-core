@@ -1736,3 +1736,70 @@ async fn an_upper_case_uuid_in_a_correct_parent_prn_still_works() {
     server.abort();
     assert!(failures.is_empty(), "upper-case parent prn cases failed:\n{}", failures.join("\n"));
 }
+
+/// SMA-645 row B6: `ListTeams` and `ListProjects` answer `not-found` for a parent that does not
+/// exist. This is the one genuinely NEW answer in the change — before it, neither list had an
+/// existence check, so an unknown parent returned an empty OK list under
+/// `enforce_tenancy = false`.
+///
+/// Both settings are covered so they are pinned to agree: under `enforce_tenancy = true` the
+/// parent was already loaded for the authorize call, so that half already answered `not-found`.
+///
+/// The gRPC twin of the HTTP behaviour, which already chose `not-found` for the same case.
+#[tokio::test]
+async fn an_unknown_parent_is_not_found_for_a_list() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let idp = support::start_mock_idp().await;
+    let (enforced, unenforced) = two_states(&db, &idp).await;
+    let token = idp.bearer("absent-parent", Some("absent-parent@example.com"), "paigasus", 3600);
+    support::provision_platform_admin(&enforced, &token).await;
+    let (on_addr, on_server) = spawn_tenancy_server(enforced).await;
+    let (off_addr, off_server) = spawn_tenancy_server(unenforced).await;
+    let mut on = connect(on_addr).await;
+    let mut off = connect(off_addr).await;
+
+    let mut failures: Vec<String> = Vec::new();
+    // Well-formed, canonical PRNs naming nodes that were never created.
+    let absent_org_uuid = Uuid::from_u128(0x0f09).as_hyphenated().to_string();
+    let absent_team_uuid = Uuid::from_u128(0x0f0a).as_hyphenated().to_string();
+    let absent_org_prn = format!("prn:pgs:iam:::organization/{absent_org_uuid}");
+    let absent_team_prn = format!("prn:pgs:iam::{absent_org_uuid}:team/{absent_team_uuid}");
+
+    for (setting, client) in [("enforce=on", &mut on), ("enforce=off", &mut off)] {
+        let label = format!("{setting} ListTeams");
+        let err = client
+            .list_teams(authed(
+                ListTeamsRequest {
+                    org_prn: absent_org_prn.clone(),
+                    limit: 100,
+                    offset: 0,
+                },
+                &token,
+            ))
+            .await
+            .unwrap_err();
+        check(&mut failures, &label, err.code() == Code::NotFound, format!("code was {:?}", err.code()));
+        check(&mut failures, &label, reason(&err) == "not-found", format!("reason was {}", reason(&err)));
+
+        let label = format!("{setting} ListProjects");
+        let err = client
+            .list_projects(authed(
+                ListProjectsRequest {
+                    team_prn: absent_team_prn.clone(),
+                    limit: 100,
+                    offset: 0,
+                },
+                &token,
+            ))
+            .await
+            .unwrap_err();
+        check(&mut failures, &label, err.code() == Code::NotFound, format!("code was {:?}", err.code()));
+        check(&mut failures, &label, reason(&err) == "not-found", format!("reason was {}", reason(&err)));
+    }
+
+    on_server.abort();
+    off_server.abort();
+    assert!(failures.is_empty(), "unknown-parent list cases failed:\n{}", failures.join("\n"));
+}
