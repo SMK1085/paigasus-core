@@ -1151,7 +1151,7 @@ async fn an_ungranted_caller_cannot_tell_a_forged_prn_from_a_correct_one() {
     // property does not depend on it, and an unarchived org here would be denied the same way.
 
     // Snapshot the total row counts BEFORE any denied call, after every setup write above (four
-    // creates, one archive). Eighteen calls below span nine handlers and three node kinds, so a
+    // creates, one archive). Twenty-six calls below span thirteen handlers and three node kinds, so a
     // count filtered to one action/node (as this test's first draft used) would miss a write by
     // any of the other eight handlers. An unfiltered total catches all of them.
     let audit_total_before = audit_log::Entity::find().count(&db).await.expect("count audit_log total");
@@ -1237,9 +1237,51 @@ async fn an_ungranted_caller_cannot_tell_a_forged_prn_from_a_correct_one() {
         expect_denied(&mut failures, label, err);
     }
 
-    // Nothing was written by any of the eighteen denied calls above, across all nine handlers.
-    // This total-count check holds only because `grpc::router` starts no denial-audit drain
-    // (spec fact F5); such a drain would write its own rows and change the counts below.
+    // SMA-645: the four handlers that take a PARENT prn. Each must answer permission-denied for
+    // the forged and the correct parent alike — otherwise the difference between the prn mismatch
+    // and permission-denied tells an ungranted caller which organization owns the node. These
+    // calls sit above the total-count check on purpose, so the "nothing was written" assertion
+    // covers the two Creates among them as well.
+    for (label, prn) in [("CreateTeam correct", org.prn.clone()), ("CreateTeam forged", forged_org.clone())] {
+        let err = client
+            .create_team(authed(
+                CreateTeamRequest {
+                    org_prn: prn,
+                    slug: "t3-stolen-team".to_string(),
+                    name: "Stolen".to_string(),
+                },
+                &stranger,
+            ))
+            .await
+            .unwrap_err();
+        expect_denied(&mut failures, label, err);
+    }
+    for (label, prn) in [("ListTeams correct", org.prn.clone()), ("ListTeams forged", forged_org.clone())] {
+        let err = client.list_teams(authed(ListTeamsRequest { org_prn: prn, limit: 100, offset: 0 }, &stranger)).await.unwrap_err();
+        expect_denied(&mut failures, label, err);
+    }
+    for (label, prn) in [("CreateProject correct", team.prn.clone()), ("CreateProject forged", forged_team.clone())] {
+        let err = client
+            .create_project(authed(
+                CreateProjectRequest {
+                    team_prn: prn,
+                    slug: "t3-stolen-project".to_string(),
+                    name: "Stolen".to_string(),
+                },
+                &stranger,
+            ))
+            .await
+            .unwrap_err();
+        expect_denied(&mut failures, label, err);
+    }
+    for (label, prn) in [("ListProjects correct", team.prn.clone()), ("ListProjects forged", forged_team.clone())] {
+        let err = client.list_projects(authed(ListProjectsRequest { team_prn: prn, limit: 100, offset: 0 }, &stranger)).await.unwrap_err();
+        expect_denied(&mut failures, label, err);
+    }
+
+    // Nothing was written by any of the twenty-six denied calls above, across all thirteen
+    // handlers. This total-count check holds only because `grpc::router` starts no denial-audit
+    // drain (spec fact F5); such a drain would write its own rows and change the counts below.
     check(
         &mut failures,
         "no write: audit_log",
