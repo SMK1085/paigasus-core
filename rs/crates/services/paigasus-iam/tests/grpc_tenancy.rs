@@ -1803,3 +1803,160 @@ async fn an_unknown_parent_is_not_found_for_a_list() {
     off_server.abort();
     assert!(failures.is_empty(), "unknown-parent list cases failed:\n{}", failures.join("\n"));
 }
+
+/// SMA-645 rows B2/B3/B4: for a request naming the WRONG parent, `prn-mismatch` outranks the
+/// field and state errors. Without this test those three rows are unasserted claims — every
+/// other forged-parent test pairs its forged PRN with a VALID slug, a live parent and
+/// `limit: 100`, so they catch the check being REMOVED but not the check being MOVED after
+/// `Slug::parse`, after the repository's archived-parent guard, or after `convert::to_page`.
+///
+/// Four cases, both `enforce_tenancy` settings:
+///   - `CreateTeam` / `CreateProject` with a forged parent AND an invalid slug (`Slug::parse`
+///     rejects upper case and spaces, `paigasus-iam-core/src/tenancy.rs:20`). Today's order
+///     would answer `invalid-slug`, because the service parses the slug before touching the
+///     repository.
+///   - `ListTeams` / `ListProjects` with a forged parent AND `limit: 9999` (`Page::new` accepts
+///     `1..=200`, `application/pagination.rs:23`). This is what pins `to_page` AFTER the check.
+///   - `CreateTeam` with a forged parent whose real organization is ARCHIVED, which would
+///     otherwise answer `parent-archived` from `pg_teams::create_in`'s in-transaction guard.
+#[tokio::test]
+async fn a_forged_parent_outranks_a_later_error() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let idp = support::start_mock_idp().await;
+    let (enforced, unenforced) = two_states(&db, &idp).await;
+    let token = idp.bearer("precedence", Some("precedence@example.com"), "paigasus", 3600);
+    support::provision_platform_admin(&enforced, &token).await;
+    let (on_addr, on_server) = spawn_tenancy_server(enforced).await;
+    let (off_addr, off_server) = spawn_tenancy_server(unenforced).await;
+    let mut on = connect(on_addr).await;
+    let mut off = connect(off_addr).await;
+
+    let mut failures: Vec<String> = Vec::new();
+    let absent_org = Uuid::from_u128(0x0f0b).as_hyphenated().to_string();
+    // Rejected by `Slug::parse`: upper case and spaces.
+    let bad_slug = "NOT A SLUG";
+
+    let expect_mismatch = |failures: &mut Vec<String>, label: &str, err: tonic::Status| {
+        check(failures, label, err.code() == Code::InvalidArgument, format!("code was {:?}", err.code()));
+        check(failures, label, reason(&err) == "prn-mismatch", format!("reason was {} — the check ran too late", reason(&err)));
+    };
+
+    for (setting, tag, client) in [("enforce=on", "on", &mut on), ("enforce=off", "off", &mut off)] {
+        let org = create_org(client, &token, &format!("prec-{tag}"), "Precedence Parent").await;
+        let team = create_team(client, &token, &org.prn, &format!("prec-{tag}")).await;
+        let forged_org = with_org(&org.prn, &absent_org);
+        let forged_team = with_org(&team.prn, &absent_org);
+
+        // B2 — forged parent + invalid slug, on both creates.
+        let err = client
+            .create_team(authed(
+                CreateTeamRequest {
+                    org_prn: forged_org.clone(),
+                    slug: bad_slug.to_string(),
+                    name: "Bad".to_string(),
+                },
+                &token,
+            ))
+            .await
+            .unwrap_err();
+        expect_mismatch(&mut failures, &format!("{setting} CreateTeam forged+invalid-slug"), err);
+
+        let err = client
+            .create_project(authed(
+                CreateProjectRequest {
+                    team_prn: forged_team.clone(),
+                    slug: bad_slug.to_string(),
+                    name: "Bad".to_string(),
+                },
+                &token,
+            ))
+            .await
+            .unwrap_err();
+        expect_mismatch(&mut failures, &format!("{setting} CreateProject forged+invalid-slug"), err);
+
+        // B4 — forged parent + an out-of-range limit, on both lists. This is the case that pins
+        // `to_page` after the check rather than before it.
+        let err = client
+            .list_teams(authed(
+                ListTeamsRequest {
+                    org_prn: forged_org.clone(),
+                    limit: 9999,
+                    offset: 0,
+                },
+                &token,
+            ))
+            .await
+            .unwrap_err();
+        expect_mismatch(&mut failures, &format!("{setting} ListTeams forged+bad-limit"), err);
+
+        let err = client
+            .list_projects(authed(
+                ListProjectsRequest {
+                    team_prn: forged_team,
+                    limit: 9999,
+                    offset: 0,
+                },
+                &token,
+            ))
+            .await
+            .unwrap_err();
+        expect_mismatch(&mut failures, &format!("{setting} ListProjects forged+bad-limit"), err);
+
+        // B3 — forged parent whose real organization is ARCHIVED, `enforce_tenancy = false` only.
+        //
+        // MEASURED: under `enforce_tenancy = true` this case cannot be built. Authorizing against
+        // an archived organization answers `permission-denied`/`forbidden`, and the authorize step
+        // runs BEFORE the comparison by design, so both the forged and the correct prn stop there
+        // and `parent-archived` is unreachable at this layer. The control below proves that is a
+        // property of the archived parent rather than of the forged prn. So the precedence claim
+        // is only assertable with enforcement off — where the authorize step is skipped and
+        // `pg_teams::create_in`'s in-transaction guard is the next thing that would fire.
+        if setting == "enforce=off" {
+            let archived = create_org(client, &token, &format!("prec-arch-{tag}"), "Archived Parent").await;
+            client
+                .archive_organization(authed(ArchiveOrganizationRequest { prn: archived.prn.clone() }, &token))
+                .await
+                .expect("archive the parent");
+            let err = client
+                .create_team(authed(
+                    CreateTeamRequest {
+                        org_prn: with_org(&archived.prn, &absent_org),
+                        slug: format!("prec-arch-{tag}-child"),
+                        name: "Child".to_string(),
+                    },
+                    &token,
+                ))
+                .await
+                .unwrap_err();
+            expect_mismatch(&mut failures, &format!("{setting} CreateTeam forged+archived-parent"), err);
+
+            // Control: the CORRECT prn against that same archived parent must still answer
+            // `parent-archived`. Without it the case above would pass even if every create were
+            // broken, and the precedence assertion would prove nothing.
+            let label = format!("{setting} CreateTeam correct+archived-parent control");
+            let err = client
+                .create_team(authed(
+                    CreateTeamRequest {
+                        org_prn: archived.prn.clone(),
+                        slug: format!("prec-arch-{tag}-ctl"),
+                        name: "Control".to_string(),
+                    },
+                    &token,
+                ))
+                .await
+                .unwrap_err();
+            check(
+                &mut failures,
+                &label,
+                reason(&err) == "parent-archived",
+                format!("reason was {} — expected the archived-parent error to be reachable at all", reason(&err)),
+            );
+        }
+    }
+
+    on_server.abort();
+    off_server.abort();
+    assert!(failures.is_empty(), "parent-precedence cases failed:\n{}", failures.join("\n"));
+}

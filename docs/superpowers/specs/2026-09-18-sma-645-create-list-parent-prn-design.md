@@ -103,7 +103,7 @@ handler gains exactly one step. Under `false` the load itself is new.
 |---|---|---|---|---|
 | B1 | forged parent, everything else valid | succeeds against the real parent | `prn-mismatch` | both |
 | B2 | forged parent + invalid slug or name | `invalid-slug` / `invalid-name` | `prn-mismatch` | both |
-| B3 | forged parent + effectively archived parent | `parent-archived` | `prn-mismatch` | both |
+| B3 | forged parent + effectively archived parent | `parent-archived` | `prn-mismatch` | `false` only — see below |
 | B4 | forged parent + out-of-range `limit` (Lists) | `invalid-pagination` | `prn-mismatch` | both |
 | B5 | **unknown** parent uuid, Create | `not-found` | `not-found` — **no change** | both |
 | B6 | **unknown** parent uuid, List | empty OK list | `not-found` | `false` only |
@@ -112,6 +112,14 @@ handler gains exactly one step. Under `false` the load itself is new.
 B1 is the intended fix. B2–B4 are precedence changes: for a request that names the wrong parent,
 `prn-mismatch` now takes precedence over the field and state errors. That is the correct precedence
 — the server should reject a request that misidentifies its target before judging its contents.
+
+**B3 narrowed, MEASURED while writing its test.** Under `enforce_tenancy = true` this row does not
+apply, because the case cannot arise: authorizing against an ARCHIVED organization answers
+`permission-denied` / `forbidden`, and the authorize step runs before the comparison by §3, so both
+the forged PRN and the correct PRN stop there and `parent-archived` is unreachable at this layer.
+The precedence claim therefore holds only with enforcement off. §6 T6's control pins this — it
+asserts the *correct* PRN against the same archived parent still answers `parent-archived`, which
+is what shows the `forbidden` above belongs to the archived parent and not to the forged PRN.
 
 **B5 is the case an earlier draft of this spec got wrong**, and the correction matters: `CreateTeam`
 against an unknown organization *already* answers `not-found` today, because `pg_teams::create_in`
@@ -435,6 +443,23 @@ correct parent PRN alike.
 the one genuinely new answer — and is the gRPC twin of the HTTP test at
 `tests/http_tenancy.rs:247-279`. Without it, B6 is an unasserted behaviour change.
 
+### T6 — a forged parent outranks a later error
+
+`a_forged_parent_outranks_a_later_error`. Rows B2, B3 and B4 are precedence claims, and every other
+test above pairs its forged PRN with a VALID slug, a live parent and `limit: 100` — so they catch
+the check being REMOVED but not the check being MOVED after `Slug::parse`, after the repository's
+archived-parent guard, or after `convert::to_page`. Without this test those three rows are
+unasserted.
+
+- **B2:** `CreateTeam` and `CreateProject` with a forged parent AND an invalid slug (`NOT A SLUG`
+  — `Slug::parse` rejects upper case and spaces). Both settings.
+- **B4:** `ListTeams` and `ListProjects` with a forged parent AND `limit: 9999` (`Page::new`
+  accepts `1..=200`). Both settings. This is the case that pins `to_page` after the check.
+- **B3:** `CreateTeam` with a forged parent whose real organization is archived —
+  **`enforce_tenancy = false` only**, per §2.3. Paired with a control asserting the CORRECT PRN
+  against that same archived parent still answers `parent-archived`, so the case cannot pass
+  vacuously.
+
 ### 6.1 Mutation checks
 
 Each must red at least one test above. Run them, record which test caught each, and restore by
@@ -449,6 +474,7 @@ deleting the marked insert rather than by `git checkout --`, which would also re
 | m5 | at the `create_team` call site, pass `&req.org_prn` instead of the canonicalized PRN | T3 |
 | m6 | at the `list_teams` call site, pass `&req.org_prn` instead of the canonicalized PRN | T3 |
 | m7 | in `load_org_checked`, move the comparison above the authorize call | T4 |
+| m8 | in `list_teams`, call `convert::to_page` BEFORE the helper instead of after | T6 |
 
 m1–m4 restore the pre-fix block rather than deleting the helper call outright: deleting it would
 remove the load, the authorization AND the comparison at once, which proves nothing specific about
