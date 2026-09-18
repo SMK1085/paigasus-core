@@ -553,6 +553,9 @@ importers:
       react:
         specifier: 'catalog:'
         version: 19.3.0
+      testcontainers:
+        specifier: 'catalog:'
+        version: 12.1.0
       typescript:
         specifier: 'catalog:'
         version: 6.0.3

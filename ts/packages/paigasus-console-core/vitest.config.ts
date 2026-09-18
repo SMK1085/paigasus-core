@@ -32,6 +32,9 @@ export default defineConfig({
   test: {
     environment: 'node',
     include: ['tests/**/*.test.ts', 'tests/**/*.test.tsx'],
+    // The container-backed suite lives under tests/containers/ and runs only in the test-e2e task
+    // (vitest.containers.config.ts). Without this line the Docker-free `test` task would start it.
+    exclude: ['tests/containers/**', '**/node_modules/**'],
     setupFiles: ['./tests/support/setup.ts'],
   },
   resolve: { conditions, alias: { 'server-only': serverOnlyStub, 'next/headers': nextHeadersDouble, 'next/cache': nextCacheDouble } },
