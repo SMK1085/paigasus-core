@@ -307,7 +307,9 @@ function redisDescriptorCache(url: string, timeoutMs: number, log: ConsoleLogger
   watchConnectionLoss(client, log);
   state().redisClient = client;
   const inner = createRedisDescriptorCache(client);
-  return afterConnect(inner, connectOnce(client, timeoutMs, log));
+  // The deadline wraps OUTSIDE afterConnect, so it bounds the `await ready` too and `4 × timeoutMs`
+  // is the whole bound, not an addition to the connect wait (SMA-650 § 4.1).
+  return withOperationDeadline(afterConnect(inner, connectOnce(client, timeoutMs, log)), client, timeoutMs, log);
 }
 
 /**

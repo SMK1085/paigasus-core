@@ -9,7 +9,8 @@
 import { EventEmitter } from 'node:events';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { DescriptorCache } from '@paigasus/discovery/server';
-import { DescriptorCacheTimeoutError, withOperationDeadline } from '../../src/discovery';
+import type { ConsoleCoreConfig } from '../../src/config-shape';
+import { DescriptorCacheTimeoutError, descriptorCacheFor, resetDiscoveryForTest, withOperationDeadline } from '../../src/discovery';
 import { createJsonLogger, type ConsoleLogger } from '../../src/logger';
 
 const TIMEOUT_MS = 1000;
@@ -75,6 +76,10 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.useRealTimers();
+});
+
+afterEach(() => {
+  resetDiscoveryForTest();
 });
 
 describe('withOperationDeadline — the deadline (D3, D7, D9, D10)', () => {
@@ -249,5 +254,22 @@ describe('withOperationDeadline — the circuit (D4, D5, D6, D8)', () => {
     const { client } = wrapped();
     expect(client.listenerCount('ready')).toBe(1);
     expect(client.listenerCount('error')).toBe(0);
+  });
+});
+
+describe('descriptorCacheFor wires the deadline in (D1)', () => {
+  it('bounds a real Redis path operation instead of hanging', async () => {
+    // Port 1 refuses the connection, so the cache never becomes ready. The point of this test is
+    // only that the operation SETTLES — before the wiring it would depend entirely on node-redis.
+    const cache = descriptorCacheFor(
+      { PAIGASUS_SESSION_STORE: 'redis', PAIGASUS_SESSION_REDIS_URL: 'redis://127.0.0.1:1', PAIGASUS_SESSION_REDIS_TIMEOUT_MS: TIMEOUT_MS } as ConsoleCoreConfig,
+      createJsonLogger(() => undefined),
+    );
+    const settled = cache.get('iam').then(
+      () => 'resolved',
+      (error: unknown) => error,
+    );
+    await vi.advanceTimersByTimeAsync(DEADLINE_MS + 1);
+    await expect(settled).resolves.toBeDefined();
   });
 });
