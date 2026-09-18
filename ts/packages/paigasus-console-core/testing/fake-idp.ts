@@ -63,7 +63,7 @@ function clientAuthenticated(req: IncomingMessage, form: URLSearchParams): boole
   return form.get('client_id') === CLIENT_ID && form.get('client_secret') === CLIENT_SECRET;
 }
 
-export async function startFakeIdp(opts: { cert: TlsMaterial; subject?: string }): Promise<FakeIdp> {
+export async function startFakeIdp(opts: { cert: TlsMaterial; subject?: string; port?: number }): Promise<FakeIdp> {
   const subject = opts.subject ?? 'fake-user-1';
   const keys = await generateKeyPair('RS256', { extractable: true });
   const publicJwk = { ...(await exportJWK(keys.publicKey)), kid: KID, use: 'sig', alg: 'RS256' };
@@ -213,7 +213,18 @@ export async function startFakeIdp(opts: { cert: TlsMaterial; subject?: string }
       res.end();
     });
   });
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const wanted = opts.port ?? 0;
+  // Same reason as tls-terminator.ts: a fixed port makes EADDRINUSE reachable (SMA-641).
+  await new Promise<void>((resolve, reject) => {
+    const onError = (error: NodeJS.ErrnoException): void => {
+      reject(new Error(`fake-idp: could not listen on port ${String(wanted)}: ${error.code ?? error.message}`));
+    };
+    server.once('error', onError);
+    server.listen(wanted, '127.0.0.1', () => {
+      server.removeListener('error', onError);
+      resolve();
+    });
+  });
   const { port } = server.address() as AddressInfo;
   // 127.0.0.1, not `localhost`: the certificate names both, the server listens on IPv4 only, and
   // `localhost` can resolve to ::1 first. The issuer string must equal the `iss` claim byte for

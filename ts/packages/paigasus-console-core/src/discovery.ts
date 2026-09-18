@@ -19,8 +19,26 @@ import { createDiscovery, createMemoryDescriptorCache, createRedisDescriptorCach
 import type { ConsoleCoreConfig } from './config-shape';
 import { logger, type ConsoleLogger } from './logger';
 
-let processCache: DescriptorCache | undefined;
-let redisClient: RedisClientType | undefined;
+// MODULE scope is not enough. `next dev` recompiles the module graph on every edit, so a
+// module-level singleton is remade each time and its Redis client leaks — one per recompile, for
+// the life of a dev session. @paigasus/auth's getAuthRuntime carries the same fix for the same
+// reason (src/runtime.ts:171-230): hold the state on globalThis, under a key that survives a
+// reload. `Symbol.for` resolves through a registry that is GLOBAL to the process, keyed by the
+// string given to it — every module that calls `Symbol.for` with the same string gets the SAME
+// symbol back, so the key must be specific to this cache AND carry a version segment, the same
+// reasoning `runtime.ts`'s `RUNTIME_KEY_PREFIX` states for its own key. The key carries no zone
+// segment, and that is deliberate: `descriptorCacheFor` is documented above as a process-wide
+// singleton, so sharing one cache across every zone composed into this process is the wanted
+// behaviour, not the bug the zone segment in `runtime.ts`'s key exists to avoid.
+type DiscoveryState = { processCache?: DescriptorCache | undefined; redisClient?: RedisClientType | undefined };
+
+const DISCOVERY_STATE = Symbol.for('paigasus.console-core.discovery-state.v1');
+
+function state(): DiscoveryState {
+  const holder = globalThis as typeof globalThis & { [DISCOVERY_STATE]?: DiscoveryState };
+  holder[DISCOVERY_STATE] ??= {};
+  return holder[DISCOVERY_STATE];
+}
 
 /**
  * Waits for the first connect, but never longer than one command timeout. node-redis's connect()
@@ -80,7 +98,7 @@ function redisDescriptorCache(url: string, timeoutMs: number, log: ConsoleLogger
   // REQUIRED by createRedisDescriptorCache, and it must NEVER log the error: node-redis embeds the
   // DSN in its connection errors. Reconnects fire it repeatedly, so it logs nothing at all.
   client.on('error', () => undefined);
-  redisClient = client;
+  state().redisClient = client;
   const inner = createRedisDescriptorCache(client);
   return afterConnect(inner, connectOnce(client, timeoutMs, log));
 }
@@ -96,23 +114,25 @@ function redisDescriptorCache(url: string, timeoutMs: number, log: ConsoleLogger
  * the two variables and never the URL, which carries a password.
  */
 export function descriptorCacheFor(config: ConsoleCoreConfig, log: ConsoleLogger = logger): DescriptorCache {
-  if (processCache !== undefined) return processCache;
+  const current = state();
+  if (current.processCache !== undefined) return current.processCache;
   if (config.PAIGASUS_SESSION_STORE === 'redis') {
     if (config.PAIGASUS_SESSION_REDIS_URL === undefined) {
       throw new Error('PAIGASUS_SESSION_REDIS_URL is required when PAIGASUS_SESSION_STORE is "redis"');
     }
-    processCache = redisDescriptorCache(config.PAIGASUS_SESSION_REDIS_URL, config.PAIGASUS_SESSION_REDIS_TIMEOUT_MS, log);
+    current.processCache = redisDescriptorCache(config.PAIGASUS_SESSION_REDIS_URL, config.PAIGASUS_SESSION_REDIS_TIMEOUT_MS, log);
   } else {
-    processCache = createMemoryDescriptorCache();
+    current.processCache = createMemoryDescriptorCache();
   }
-  return processCache;
+  return current.processCache;
 }
 
 /** Test and shutdown seam: forget the process cache and close the Redis client, if any. */
 export function resetDiscoveryForTest(): void {
-  redisClient?.destroy();
-  redisClient = undefined;
-  processCache = undefined;
+  const current = state();
+  current.redisClient?.destroy();
+  current.redisClient = undefined;
+  current.processCache = undefined;
 }
 
 /** A Discovery handle for one request. Pure apart from the process cache: tests call it directly. */

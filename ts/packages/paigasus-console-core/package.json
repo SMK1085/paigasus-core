@@ -1,6 +1,6 @@
 {
   "name": "@paigasus/console-core",
-  "_comment_exports": "A root export plus a testing subpath. Root is server-only, the way @paigasus/sdk's is — @paigasus/auth and @paigasus/discovery omit a root export only because they also have a CLIENT surface, which this package does not. ./testing is deliberately outside src/ and carries no server-only guard: vitest and Playwright harnesses import it outside a Next server.",
+  "_comment_exports": "A root export plus a testing subpath. Root is server-only, the way @paigasus/sdk's is — @paigasus/auth and @paigasus/discovery omit a root export only because they also have a CLIENT surface, which this package does not. ./testing is deliberately outside src/ and carries no server-only guard: vitest and Playwright harnesses import it outside a Next server, and so does ts/tooling/dev-stack.ts (SMA-641), a developer-facing command rather than a test.",
   "version": "0.0.0",
   "private": true,
   "type": "module",
