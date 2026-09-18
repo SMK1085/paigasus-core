@@ -7,15 +7,36 @@
 //! Every Get/Rename/Archive/Restore compares the *stored* canonical PRN (`view.node.id
 //! .canonical()`) with the request's parsed one — the forged-org-slot defense (brief rule 8,
 //! mirroring the HTTP layer's semantics). A Get compares after its read. A Rename/Archive/
-//! Restore compares BEFORE its write, in `load_{org,team,project}_for_write` (SMA-643): the
+//! Restore compares BEFORE its write, in `load_{org,team,project}_checked` (SMA-643): the
 //! comparison used to run after the service call, so a forged organization slot committed the
 //! write, the audit row and the outbox event and still answered `prn-mismatch`. The comparison
 //! is sound outside the write transaction because a node's stored PRN never changes (the `prn`
 //! column is written once, at insert, and nothing moves a node to a different parent).
 //!
-//! Creates and Lists **that take a parent PRN** do NOT compare it: they take the parent's uuid
-//! and discard the rest, so a forged parent organization slot is accepted without an error (the
-//! write still goes to the real parent). That is SMA-645, not a property of this design.
+//! Creates and Lists **that take a parent PRN** compare it too (SMA-645): `CreateTeam`/
+//! `ListTeams` against the stored organization, `CreateProject`/`ListProjects` against the stored
+//! team, in `load_{org,team}_checked`. Before that they took the parent's uuid and discarded the
+//! rest, so a forged parent organization slot — or a forged region, which `convert::node_uuid`
+//! does not check either — was accepted and the write went to the real parent with no error.
+//!
+//! Two consequences worth knowing. The parent load is UNCONDITIONAL for these four, so with the
+//! test-only `enforce_tenancy = false` a List against an unknown parent now answers `not-found`
+//! where it used to return an empty OK list. And for a request naming the wrong parent, the
+//! mismatch now outranks the field and state errors: a forged parent with an invalid slug, an
+//! archived parent or an out-of-range `limit` answers the mismatch, not `invalid-slug`,
+//! `parent-archived` or `invalid-pagination`. `convert::to_page` runs after the check for that
+//! reason.
+//!
+//! **The rule, and its one exception.** Every tenancy-NODE PRN this module accepts is confirmed
+//! against the stored node before it is acted on: in the handler for the sixteen node RPCs — the
+//! thirteen that route through `load_{org,team,project}_checked`, plus `GetOrganization`/`GetTeam`/
+//! `GetProject`, which compare inline after their read — and
+//! in the REPOSITORY for the two membership RPCs that take a node PRN (`pg_memberships`'s
+//! `list_by_node` and `attach_in` both compare the stored `prn` column and answer
+//! [`TenancyError::PrnMismatch`]). The exception is `ListMemberships` with a PRINCIPAL filter:
+//! `parse_principal_prn` checks only the service and the resource type, and `list_by_principal`
+//! then filters on a bare uuid, so a forged region or organization slot on a principal PRN is
+//! accepted. That is SMA-649, not a property of this design.
 //!
 //! **SMA-444 Task 20/21 enforcement:** every RPC authorizes the bearer-resolved actor
 //! ([`actor_context`]) before performing its operation, gated by
@@ -25,17 +46,19 @@
 //! the default `enforce_tenancy = true` the two transports answer alike. They differ only in
 //! the test-only `enforce_tenancy = false` setting, where gRPC still loads the node (SMA-643)
 //! and HTTP does not, so gRPC answers `not-found` for an unknown uuid where HTTP answers
-//! `nothing-to-rename` or `invalid-slug` first. `CreateTeam`/
-//! `ListTeams` fetch the parent org first (`orgs.get`); `CreateProject`/`ListProjects`/
-//! `AttachMembership`/`ListMemberships`(node-filtered) resolve their parent/target node by
-//! uuid through the owning service ([`resolve_node`]) — all rather than trusting the wire
-//! PRN's org slot directly (or building an unchecked PRN straight from a path/wire uuid),
-//! which would otherwise let a claimed-but-nonexistent parent reach the entity-slice loader
-//! and fail closed as an internal error instead of the expected `NotFound`. The existing
-//! forged-org-slot defense (this module's own stored-canonical check, and
-//! `MembershipService::attach`'s own `PrnMismatch` detection) fires BEFORE the actual mutating
-//! call; this only keeps the AUTHORIZATION step itself from ever entity-slice-loading
-//! a claimed-but-nonexistent org.
+//! `nothing-to-rename` or `invalid-slug` first. Since SMA-645 that divergence covers the four
+//! parent-PRN handlers as well, because their parent load is unconditional too.
+//! `CreateTeam`/`ListTeams` fetch the parent org first (`orgs.get`, now inside
+//! [`load_org_checked`]); `CreateProject`/`ListProjects` fetch the parent team
+//! (`teams.get`, inside [`load_team_checked`]); `AttachMembership`/
+//! `ListMemberships`(node-filtered) resolve their target node by uuid through the owning
+//! service ([`resolve_node`]) — all rather than trusting the wire PRN's org slot directly (or
+//! building an unchecked PRN straight from a path/wire uuid), which would otherwise let a
+//! claimed-but-nonexistent parent reach the entity-slice loader and fail closed as an internal
+//! error instead of the expected `NotFound`. The forged-org-slot defense (this module's own
+//! stored-canonical check, and `MembershipService::attach`'s own `PrnMismatch` detection) fires
+//! BEFORE the actual mutating call; the uuid resolution only keeps the AUTHORIZATION step itself
+//! from ever entity-slice-loading a claimed-but-nonexistent org.
 
 use std::time::Instant;
 
@@ -144,7 +167,15 @@ async fn resolve_node(state: &AppState, node: &TenancyNodeRef) -> Result<Prn, Te
 /// changes: the `prn` column is written once, at insert, and no repository method, service or
 /// migration moves a node to a different parent. A future "move" feature breaks that invariant
 /// and must revisit this helper.
-async fn load_org_for_write(state: &AppState, actor: &Prn, action: Action, id: Uuid, canonical: &str, rpc: &str) -> Result<(), Status> {
+///
+/// The load is UNCONDITIONAL, and that predates the comparison needing it (SMA-444): resolving
+/// the node through `orgs.get` — rather than trusting the wire PRN's organization slot, or
+/// building an `OrganizationId::from_uuid` PRN without confirming existence — is what keeps a
+/// claimed-but-nonexistent node from reaching the entity-slice loader with a dangling id and
+/// failing closed as an internal error instead of the expected `NotFound`. SMA-645 moved
+/// `CreateTeam`/`ListTeams` onto this helper, which is why that reasoning lives here now rather
+/// than in each handler.
+async fn load_org_checked(state: &AppState, actor: &Prn, action: Action, id: Uuid, canonical: &str, rpc: &str) -> Result<(), Status> {
     let view = state.orgs.get(id).await.map_err(convert::status_to_grpc)?;
     if state.enforce_tenancy {
         state.authorize.check(actor, action, view.node.id.prn()).await.map_err(convert::status_to_grpc)?;
@@ -157,8 +188,10 @@ async fn load_org_for_write(state: &AppState, actor: &Prn, action: Action, id: U
     Ok(())
 }
 
-/// The team twin of [`load_org_for_write`] — same order, same reasons.
-async fn load_team_for_write(state: &AppState, actor: &Prn, action: Action, id: Uuid, canonical: &str, rpc: &str) -> Result<(), Status> {
+/// The team twin of [`load_org_checked`] — same order, same reasons, including the unconditional
+/// `teams.get` load. SMA-645 moved `CreateProject`/`ListProjects` onto this helper: their parent
+/// is a TEAM, so they compare against the stored team rather than the stored organization.
+async fn load_team_checked(state: &AppState, actor: &Prn, action: Action, id: Uuid, canonical: &str, rpc: &str) -> Result<(), Status> {
     let view = state.teams.get(id).await.map_err(convert::status_to_grpc)?;
     if state.enforce_tenancy {
         state.authorize.check(actor, action, view.node.id.prn()).await.map_err(convert::status_to_grpc)?;
@@ -171,8 +204,8 @@ async fn load_team_for_write(state: &AppState, actor: &Prn, action: Action, id: 
     Ok(())
 }
 
-/// The project twin of [`load_org_for_write`] — same order, same reasons.
-async fn load_project_for_write(state: &AppState, actor: &Prn, action: Action, id: Uuid, canonical: &str, rpc: &str) -> Result<(), Status> {
+/// The project twin of [`load_org_checked`] — same order, same reasons.
+async fn load_project_checked(state: &AppState, actor: &Prn, action: Action, id: Uuid, canonical: &str, rpc: &str) -> Result<(), Status> {
     let view = state.projects.get(id).await.map_err(convert::status_to_grpc)?;
     if state.enforce_tenancy {
         state.authorize.check(actor, action, view.node.id.prn()).await.map_err(convert::status_to_grpc)?;
@@ -189,7 +222,7 @@ async fn load_project_for_write(state: &AppState, actor: &Prn, action: Action, i
 /// refused attempt leaves NO audit row and no denial row, and the attempt is a tampering
 /// signal, so the log line is the only trace.
 fn warn_prn_mismatch(actor: &Prn, requested: &str, stored: &str, rpc: &str) {
-    tracing::warn!(rpc = %rpc, actor = %actor.canonical(), requested_prn = %requested, stored_prn = %stored, "refused a tenancy write: the request prn does not match the stored node");
+    tracing::warn!(rpc = %rpc, actor = %actor.canonical(), requested_prn = %requested, stored_prn = %stored, "refused a tenancy request: the request prn does not match the stored node");
 }
 
 #[tonic::async_trait]
@@ -282,7 +315,7 @@ impl TenancyService for TenancyGrpc {
             let actor = actor_principal.prn().clone();
             let req = request.into_inner();
             let (id, canonical) = convert::node_uuid(&req.prn, "organization")?;
-            load_org_for_write(&self.state, &actor, Action::RenameOrganization, id, &canonical, "RenameOrganization").await?;
+            load_org_checked(&self.state, &actor, Action::RenameOrganization, id, &canonical, "RenameOrganization").await?;
             let view = self
                 .state
                 .orgs
@@ -304,7 +337,7 @@ impl TenancyService for TenancyGrpc {
             let actor_principal = actor_context(&request)?.principal_id;
             let actor = actor_principal.prn().clone();
             let (id, canonical) = convert::node_uuid(&request.get_ref().prn, "organization")?;
-            load_org_for_write(&self.state, &actor, Action::ArchiveOrganization, id, &canonical, "ArchiveOrganization").await?;
+            load_org_checked(&self.state, &actor, Action::ArchiveOrganization, id, &canonical, "ArchiveOrganization").await?;
             let view = self.state.orgs.archive(id, &actor_principal).await.map_err(convert::status_to_grpc)?;
             Ok(Response::new(ArchiveOrganizationResponse {
                 organization: Some(convert::to_proto_org(&view)),
@@ -321,7 +354,7 @@ impl TenancyService for TenancyGrpc {
             let actor_principal = actor_context(&request)?.principal_id;
             let actor = actor_principal.prn().clone();
             let (id, canonical) = convert::node_uuid(&request.get_ref().prn, "organization")?;
-            load_org_for_write(&self.state, &actor, Action::RestoreOrganization, id, &canonical, "RestoreOrganization").await?;
+            load_org_checked(&self.state, &actor, Action::RestoreOrganization, id, &canonical, "RestoreOrganization").await?;
             let view = self.state.orgs.restore(id, &actor_principal).await.map_err(convert::status_to_grpc)?;
             Ok(Response::new(RestoreOrganizationResponse {
                 organization: Some(convert::to_proto_org(&view)),
@@ -340,16 +373,8 @@ impl TenancyService for TenancyGrpc {
             let actor_principal = actor_context(&request)?.principal_id;
             let actor = actor_principal.prn().clone();
             let req = request.into_inner();
-            let (org_id, _) = convert::node_uuid(&req.org_prn, "organization")?;
-            if self.state.enforce_tenancy {
-                // Resolved by uuid through `orgs.get` (not the wire `org_prn` string directly, and
-                // not a `OrganizationId::from_uuid` PRN built without confirming existence): a
-                // nonexistent org would otherwise reach the entity-slice loader with a dangling id
-                // and fail closed as an internal error rather than the expected `NotFound` — mirrors
-                // `create_project`/`list_projects`'s `teams.get` resolution below.
-                let org_view = self.state.orgs.get(org_id).await.map_err(convert::status_to_grpc)?;
-                self.state.authorize.check(&actor, Action::CreateTeam, org_view.node.id.prn()).await.map_err(convert::status_to_grpc)?;
-            }
+            let (org_id, canonical) = convert::node_uuid(&req.org_prn, "organization")?;
+            load_org_checked(&self.state, &actor, Action::CreateTeam, org_id, &canonical, "CreateTeam").await?;
             let view = self.state.teams.create(org_id, &req.slug, &req.name, &actor_principal).await.map_err(convert::status_to_grpc)?;
             Ok(Response::new(CreateTeamResponse {
                 team: Some(convert::to_proto_team(&view)),
@@ -386,11 +411,12 @@ impl TenancyService for TenancyGrpc {
         let result: Result<Response<ListTeamsResponse>, Status> = async {
             let actor = actor_context(&request)?.principal_id.prn().clone();
             let req = request.into_inner();
-            let (org_id, _) = convert::node_uuid(&req.org_prn, "organization")?;
-            if self.state.enforce_tenancy {
-                let org_view = self.state.orgs.get(org_id).await.map_err(convert::status_to_grpc)?;
-                self.state.authorize.check(&actor, Action::ListTeams, org_view.node.id.prn()).await.map_err(convert::status_to_grpc)?;
-            }
+            let (org_id, canonical) = convert::node_uuid(&req.org_prn, "organization")?;
+            load_org_checked(&self.state, &actor, Action::ListTeams, org_id, &canonical, "ListTeams").await?;
+            // `to_page` runs AFTER the check, so a forged parent with an out-of-range `limit`
+            // answers the prn mismatch rather than `invalid-pagination` — the request names the
+            // wrong parent, and that outranks judging its contents. Mirrors the HTTP twin, which
+            // builds its `Page` after the authorize block.
             let page = convert::to_page(req.limit, req.offset).map_err(convert::status_to_grpc)?;
             let views = self.state.teams.list_by_org(org_id, page).await.map_err(convert::status_to_grpc)?;
             Ok(Response::new(ListTeamsResponse {
@@ -409,7 +435,7 @@ impl TenancyService for TenancyGrpc {
             let actor = actor_principal.prn().clone();
             let req = request.into_inner();
             let (id, canonical) = convert::node_uuid(&req.prn, "team")?;
-            load_team_for_write(&self.state, &actor, Action::RenameTeam, id, &canonical, "RenameTeam").await?;
+            load_team_checked(&self.state, &actor, Action::RenameTeam, id, &canonical, "RenameTeam").await?;
             let view = self
                 .state
                 .teams
@@ -431,7 +457,7 @@ impl TenancyService for TenancyGrpc {
             let actor_principal = actor_context(&request)?.principal_id;
             let actor = actor_principal.prn().clone();
             let (id, canonical) = convert::node_uuid(&request.get_ref().prn, "team")?;
-            load_team_for_write(&self.state, &actor, Action::ArchiveTeam, id, &canonical, "ArchiveTeam").await?;
+            load_team_checked(&self.state, &actor, Action::ArchiveTeam, id, &canonical, "ArchiveTeam").await?;
             let view = self.state.teams.archive(id, &actor_principal).await.map_err(convert::status_to_grpc)?;
             Ok(Response::new(ArchiveTeamResponse {
                 team: Some(convert::to_proto_team(&view)),
@@ -448,7 +474,7 @@ impl TenancyService for TenancyGrpc {
             let actor_principal = actor_context(&request)?.principal_id;
             let actor = actor_principal.prn().clone();
             let (id, canonical) = convert::node_uuid(&request.get_ref().prn, "team")?;
-            load_team_for_write(&self.state, &actor, Action::RestoreTeam, id, &canonical, "RestoreTeam").await?;
+            load_team_checked(&self.state, &actor, Action::RestoreTeam, id, &canonical, "RestoreTeam").await?;
             let view = self.state.teams.restore(id, &actor_principal).await.map_err(convert::status_to_grpc)?;
             Ok(Response::new(RestoreTeamResponse {
                 team: Some(convert::to_proto_team(&view)),
@@ -467,20 +493,8 @@ impl TenancyService for TenancyGrpc {
             let actor_principal = actor_context(&request)?.principal_id;
             let actor = actor_principal.prn().clone();
             let req = request.into_inner();
-            let (team_id, _) = convert::node_uuid(&req.team_prn, "team")?;
-            if self.state.enforce_tenancy {
-                // Resolved by uuid through `teams.get` (not the wire `team_prn` string directly):
-                // `ProjectService::create` itself only ever consumes the bare `team_id` uuid, with
-                // no stored-canonical recheck of its own (unlike Get/Rename/Archive/Restore) — so
-                // authorizing against the REAL team's prn keeps that existing "trust the uuid"
-                // posture, and never entity-slice-loads a claimed-but-nonexistent org.
-                let team_view = self.state.teams.get(team_id).await.map_err(convert::status_to_grpc)?;
-                self.state
-                    .authorize
-                    .check(&actor, Action::CreateProject, team_view.node.id.prn())
-                    .await
-                    .map_err(convert::status_to_grpc)?;
-            }
+            let (team_id, canonical) = convert::node_uuid(&req.team_prn, "team")?;
+            load_team_checked(&self.state, &actor, Action::CreateProject, team_id, &canonical, "CreateProject").await?;
             let view = self.state.projects.create(team_id, &req.slug, &req.name, &actor_principal).await.map_err(convert::status_to_grpc)?;
             Ok(Response::new(CreateProjectResponse {
                 project: Some(convert::to_proto_project(&view)),
@@ -517,15 +531,9 @@ impl TenancyService for TenancyGrpc {
         let result: Result<Response<ListProjectsResponse>, Status> = async {
             let actor = actor_context(&request)?.principal_id.prn().clone();
             let req = request.into_inner();
-            let (team_id, _) = convert::node_uuid(&req.team_prn, "team")?;
-            if self.state.enforce_tenancy {
-                let team_view = self.state.teams.get(team_id).await.map_err(convert::status_to_grpc)?;
-                self.state
-                    .authorize
-                    .check(&actor, Action::ListProjects, team_view.node.id.prn())
-                    .await
-                    .map_err(convert::status_to_grpc)?;
-            }
+            let (team_id, canonical) = convert::node_uuid(&req.team_prn, "team")?;
+            load_team_checked(&self.state, &actor, Action::ListProjects, team_id, &canonical, "ListProjects").await?;
+            // `to_page` runs AFTER the check — see the note in `list_teams`.
             let page = convert::to_page(req.limit, req.offset).map_err(convert::status_to_grpc)?;
             let views = self.state.projects.list_by_team(team_id, page).await.map_err(convert::status_to_grpc)?;
             Ok(Response::new(ListProjectsResponse {
@@ -544,7 +552,7 @@ impl TenancyService for TenancyGrpc {
             let actor = actor_principal.prn().clone();
             let req = request.into_inner();
             let (id, canonical) = convert::node_uuid(&req.prn, "project")?;
-            load_project_for_write(&self.state, &actor, Action::RenameProject, id, &canonical, "RenameProject").await?;
+            load_project_checked(&self.state, &actor, Action::RenameProject, id, &canonical, "RenameProject").await?;
             let view = self
                 .state
                 .projects
@@ -566,7 +574,7 @@ impl TenancyService for TenancyGrpc {
             let actor_principal = actor_context(&request)?.principal_id;
             let actor = actor_principal.prn().clone();
             let (id, canonical) = convert::node_uuid(&request.get_ref().prn, "project")?;
-            load_project_for_write(&self.state, &actor, Action::ArchiveProject, id, &canonical, "ArchiveProject").await?;
+            load_project_checked(&self.state, &actor, Action::ArchiveProject, id, &canonical, "ArchiveProject").await?;
             let view = self.state.projects.archive(id, &actor_principal).await.map_err(convert::status_to_grpc)?;
             Ok(Response::new(ArchiveProjectResponse {
                 project: Some(convert::to_proto_project(&view)),
@@ -583,7 +591,7 @@ impl TenancyService for TenancyGrpc {
             let actor_principal = actor_context(&request)?.principal_id;
             let actor = actor_principal.prn().clone();
             let (id, canonical) = convert::node_uuid(&request.get_ref().prn, "project")?;
-            load_project_for_write(&self.state, &actor, Action::RestoreProject, id, &canonical, "RestoreProject").await?;
+            load_project_checked(&self.state, &actor, Action::RestoreProject, id, &canonical, "RestoreProject").await?;
             let view = self.state.projects.restore(id, &actor_principal).await.map_err(convert::status_to_grpc)?;
             Ok(Response::new(RestoreProjectResponse {
                 project: Some(convert::to_proto_project(&view)),
