@@ -62,3 +62,35 @@ tasks:
       # `repo:*` tasks only, so the SMA-630 plan (Task 2) confirmed with `moon task … --json` that
       # this entry resolves to a tracked file.
       - '/rs/crates/libs/paigasus-iam-core/src/authz/action.rs'
+  test-e2e:
+    # SMA-648 § 4.4: the Docker-backed tier. It drives the REAL call site, descriptorCacheFor, against
+    # a real Redis, because the defect lived in the client options that call site passes.
+    # `script` (not `command`): Moon's `command` setting rejects shell syntax. `set -euo pipefail`
+    # because Moon does not enable errexit for script blocks.
+    # NO SKIP HATCH: like @paigasus/auth's and @paigasus/discovery's tiers, this task fails when
+    # Docker is unreachable.
+    script: |
+      set -euo pipefail
+      pnpm exec vitest run --config vitest.containers.config.ts
+    # src/discovery.ts loads @paigasus/discovery/server at RUN time, whose core imports
+    # @paigasus/proto's generated tree. contracts:generate deletes that tree before it rewrites it,
+    # so this task must be ordered after it (the measured failure is in
+    # ts/packages/paigasus-discovery/moon.yml).
+    deps: ['contracts:generate']
+    # Inputs are the ONLY thing that confers affectedness on Moon 2.5.3. This list covers this
+    # package's source and tests, both vitest configs, tsconfig.json, package.json, the lockfile,
+    # and @paigasus/discovery's source (which owns createRedisDescriptorCache's preconditions).
+    # It deliberately does NOT list testing/**/*: this tier imports nothing from testing/.
+    inputs:
+      - 'src/**/*'
+      - 'tests/**/*'
+      - 'vitest.config.ts'
+      - 'vitest.containers.config.ts'
+      - 'tsconfig.json'
+      - 'package.json'
+      - '/ts/pnpm-lock.yaml'
+      - '/ts/packages/paigasus-discovery/src/**/*'
+      - '/ts/packages/paigasus-discovery/package.json'
+    options:
+      # A real container. A cached PASS would replay a green that tested nothing.
+      cache: false

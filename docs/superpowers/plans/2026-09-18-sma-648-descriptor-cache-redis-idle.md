@@ -1912,3 +1912,13 @@ The agent memory is outside the repo. After Task 7, the controller corrects it (
 
 - `/Users/smaschek/.claude/projects/-Users-smaschek-dev-paigasus-paigasus-core/memory/node-redis-command-vs-socket-timeout.md`: replace the claim that `socketTimeout` is "the end-to-end deadline" with the D5 wording (idle timer; any read OR write resets it; bounds a hung command only while the socket is otherwise silent; `pingInterval` keeps an idle socket alive; a reconnect strategy must accept a `SocketTimeoutError`; SMA-648, SMA-650).
 - The matching index line in `MEMORY.md` ("node-redis command vs socket timeout"): replace "`socket.socketTimeout` is the end-to-end deadline" with "`socket.socketTimeout` is an IDLE timer that reads and writes reset, and the default reconnect strategy refuses its error (SMA-648)".
+
+---
+
+## Red-run record (Task 2, unmodified client after D10)
+
+- T1: `Error: The client is closed`
+- T2: `Error: The client is closed`
+- T3: `Error: a read after the pause: no success within 5000 ms; the last error was "The client is closed"`
+- T4: `AssertionError: expected [] to deeply equal [ { reason: 'socket_closed' } ]`
+- T5: `AssertionError: expected 0 to be greater than 0`
