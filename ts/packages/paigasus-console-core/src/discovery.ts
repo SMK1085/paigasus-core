@@ -198,7 +198,7 @@ function redisDescriptorCache(url: string, timeoutMs: number, log: ConsoleLogger
     // the socket after the timer fires on a real hang.
     socket: { socketTimeout: timeoutMs * 2, connectTimeout: timeoutMs, reconnectStrategy: descriptorCacheReconnectStrategy },
   });
-  // Registers the error listener createRedisDescriptorCache requires. It never logs the error.
+  // Registers the error listener createRedisDescriptorCache requires. It never logs the error's message.
   watchConnectionLoss(client, log);
   state().redisClient = client;
   const inner = createRedisDescriptorCache(client);

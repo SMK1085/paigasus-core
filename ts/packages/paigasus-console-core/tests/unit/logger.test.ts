@@ -44,12 +44,12 @@ describe('createJsonLogger', () => {
     const dsn = 'redis://console:s3cret-password@redis.internal:6379/0';
     vi.stubEnv('PAIGASUS_SESSION_REDIS_URL', dsn);
     const { logger, lines } = capture();
-    logger.appEvent('discovery.redis_connect_failed', { stage: 'connect' });
+    logger.appEvent('discovery.redis_connect_failed', { stage: 'connect_timeout' });
     expect(lines).toHaveLength(1);
     // The FULL record, by toEqual: any key the logger adds beyond these three fails it. The time
     // is taken from the record itself, and checked on its own below.
     const record = JSON.parse(lines[0] ?? '{}') as Record<string, unknown>;
-    expect(record).toEqual({ time: record['time'], event: 'discovery.redis_connect_failed', fields: { stage: 'connect' } });
+    expect(record).toEqual({ time: record['time'], event: 'discovery.redis_connect_failed', fields: { stage: 'connect_timeout' } });
     expect(typeof record['time']).toBe('string');
     const output = lines.join('\n');
     expect(output).not.toContain(dsn);
