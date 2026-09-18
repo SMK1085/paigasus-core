@@ -21,7 +21,8 @@ export type OrganizationsPageDeps = {
 };
 
 export async function loadOrganizationsPage(deps: OrganizationsPageDeps, params: { readonly offset: number }): Promise<OrganizationsPageData> {
-  // Both RPCs check against the root PRN (adapters/grpc/tenancy.rs:135 and :193).
+  // Both RPCs check against the root PRN (the `create_organization` and `list_organizations`
+  // handlers in adapters/grpc/tenancy.rs).
   const [canList, canCreateOrganization] = await Promise.all([deps.mayI('ListOrganizations', ROOT_PRN), deps.mayI('CreateOrganization', ROOT_PRN)]);
   if (!canList) return { canCreateOrganization, all: null };
 

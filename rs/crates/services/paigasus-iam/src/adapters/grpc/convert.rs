@@ -159,8 +159,9 @@ pub fn authn_status(err: &AuthnError) -> Status {
 /// carries its canonical form instead (mirrors `application::memberships`'s PRN parsing).
 ///
 /// The returned canonical is compared by every Get/Rename/Archive/Restore handler against the
-/// service's stored canonical PRN after the call — the forged-org-slot defense (brief rule 8,
-/// mirroring the HTTP layer's semantics via stored-PRN comparison).
+/// service's stored canonical PRN before the write for Rename/Archive/Restore, and after the
+/// read for Get — the forged-org-slot defense (brief rule 8, mirroring the HTTP layer's
+/// semantics via stored-PRN comparison).
 pub fn node_uuid(prn: &str, expect: &str) -> Result<(Uuid, String), Status> {
     let parsed = Prn::parse(prn).map_err(|e| status_to_grpc(TenancyError::InvalidPrn(e.kind().to_owned())))?;
     if parsed.service() != "iam" || parsed.resource_type() != expect {
