@@ -91,6 +91,34 @@ The alternative — comparing only when `enforce_tenancy` is on — was rejected
 PRN-integrity check to an authorization flag, and because SMA-643's tests deliberately assert the
 refusal holds under both settings.
 
+### 2.3 No existing caller breaks
+
+The change makes a previously accepted request fail, so every caller in the repo was audited.
+
+**No caller breaks.** All four RPCs have exactly one production consumer, the IAM console, and it
+builds every parent PRN through the canonical constructors in
+`ts/packages/paigasus-console-core/src/prn-tenancy.ts:76-84` — `organizationPrn` emits an empty
+region and an empty org slot; `teamPrn` emits an empty region and the correct org uuid. The four
+call sites are `ts/apps/iam-console/app/(console)/orgs/[org]/{load.ts,commands.ts}` and
+`.../teams/[team]/{load.ts,commands.ts}`. The team loader additionally confirms the URL's org
+matches the team's stored org (`teams/[team]/load.ts:46`) before calling `listProjects`.
+`gateway-console` calls none of the four. `@paigasus/sdk` and `@paigasus/proto` build no PRNs. `py/`
+has no TenancyService client.
+
+In Rust, `tests/grpc_tenancy.rs` is the only file that calls these four RPCs, and it always passes
+the canonical `org.prn` / `team.prn` returned by a prior create. Its `with_org` / `with_region`
+forging helpers are used today only against Rename/Archive/Restore.
+
+The seven non-canonical `prn:pgs:iam:` literals in the repo are either grammar negative-test vectors
+or fixtures for unrelated RPCs (`IsAuthorized`, `GetOrganization`, membership `node_prn`) against
+fakes. None reaches these handlers.
+
+**The console's own reader is already stricter than the server.** `parseTenancyPrn` returns `null`
+for a region on any tenancy PRN and for a populated org slot on an organization, with named test
+vectors for both (`tests/unit/prn-tenancy.test.ts:112,120`). So a PRN this change starts refusing is
+one the TypeScript consumer already treats as invalid. The server is catching up to the client, not
+diverging from it.
+
 ---
 
 ## 3. Order of operations
@@ -116,7 +144,19 @@ organization owns a node. §6 test T4 pins this.
 step 5 is a read, so ordering is a consistency choice, not a safety one — the same order is used so
 all four handlers read alike.
 
-### 3.1 Soundness of comparing outside the write transaction
+### 3.1 The stored canonical cannot itself drift
+
+The comparison refuses a correct PRN only if the STORED canonical is ever non-canonical. It cannot
+be. An organization row's PRN is re-parsed from the `prn` column through `OrganizationId::from_prn`
+(`pg_organizations.rs:143-144`), and a team's through `TeamId::from_prn` (`pg_teams.rs:73-74`) —
+and `check` (`paigasus-iam-core/src/tenancy.rs:66-69`) enforces the org slot's presence on that
+read path. The column itself is written from `canonical()`, which always emits an empty region.
+A corrupt row therefore surfaces as a `Backend` error on read, never as a false `prn-mismatch`.
+
+Uuid case is likewise safe: the comparison is between two `Prn::canonical()` outputs, and
+`canonical()` lower-cases the uuid (`resource_name.rs:163-167`). §6 T3 pins this.
+
+### 3.2 Soundness of comparing outside the write transaction
 
 Unchanged from SMA-643, and it is the parent's PRN that must be stable here: a node's stored PRN is
 written once, at insert, and nothing moves a node to a different parent. A future "move" feature
