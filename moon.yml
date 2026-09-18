@@ -370,7 +370,7 @@ tasks:
         echo "cargo tree failed for paigasus-wasm (wasm32) — cannot verify getrandom absence" >&2
         exit 2
       fi
-      if printf '%s\n' "$out" | grep -qw getrandom; then
+      if grep -qw getrandom < <(printf '%s\n' "$out"); then
         echo "getrandom is in the paigasus-wasm dependency graph — a uuid rng feature leaked" >&2
         exit 1
       fi
