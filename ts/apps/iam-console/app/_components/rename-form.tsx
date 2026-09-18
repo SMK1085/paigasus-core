@@ -2,8 +2,7 @@
 'use client';
 
 import { useActionState, useId, useState, type ReactElement } from 'react';
-import { Field, Input } from '@paigasus/ui';
-import { PRIMARY_BUTTON_CLASS } from './button-class';
+import { Field, Input, PRIMARY_BUTTON_CLASS } from '@paigasus/ui';
 import type { FormAction } from '@paigasus/console-core';
 import { FormError } from './form-error';
 
