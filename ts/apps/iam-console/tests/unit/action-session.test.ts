@@ -99,14 +99,15 @@ describe('iamClientsForAction (the Server Action session read)', () => {
     if (!result.ok) expect(result.error.presentation).toBe('relogin');
   });
 
-  it('returns the five clients when the session resolves', async () => {
+  it('returns the six clients when the session resolves', async () => {
     setRequestHeaders({});
     signedIn();
 
     const result = await iamClientsForAction();
 
     expect(result.ok).toBe(true);
-    if (result.ok) expect(Object.keys(result.value).sort()).toEqual(['audit', 'authn', 'authz', 'serviceInfo', 'tenancy']);
+    // SMA-636 added serviceAccounts to IamClients.
+    if (result.ok) expect(Object.keys(result.value).sort()).toEqual(['audit', 'authn', 'authz', 'serviceAccounts', 'serviceInfo', 'tenancy']);
   });
 
   it('reads the session through getSession, so optionalSession never redirects either', async () => {
