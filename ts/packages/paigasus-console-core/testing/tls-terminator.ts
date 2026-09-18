@@ -58,7 +58,7 @@ function pathnameOf(url: string | undefined): PathnameResult {
   }
 }
 
-export async function startTlsTerminator(opts: { tls: TlsMaterial; target?: string; routes?: readonly TerminatorRoute[] }): Promise<{ origin: string; close(): Promise<void> }> {
+export async function startTlsTerminator(opts: { tls: TlsMaterial; target?: string; routes?: readonly TerminatorRoute[]; port?: number }): Promise<{ origin: string; close(): Promise<void> }> {
   // Mutually exclusive, and an error rather than a precedence rule: a caller that passes both has a
   // wrong mental model of which upstream serves a path, and silently preferring one would hide it.
   if ((opts.target === undefined) === (opts.routes === undefined)) {
@@ -114,7 +114,20 @@ export async function startTlsTerminator(opts: { tls: TlsMaterial; target?: stri
   }
 
   const server = createServer({ cert: opts.tls.cert, key: opts.tls.key }, forward);
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const wanted = opts.port ?? 0;
+  // A fixed port makes EADDRINUSE reachable, and a server with no 'error' listener turns that into
+  // an UNCAUGHT exception that kills the whole process with a raw stack. `listen(0)` could never
+  // produce one, which is why the original promise had no reject path (SMA-641).
+  await new Promise<void>((resolve, reject) => {
+    const onError = (error: NodeJS.ErrnoException): void => {
+      reject(new Error(`tls-terminator: could not listen on port ${String(wanted)}: ${error.code ?? error.message}`));
+    };
+    server.once('error', onError);
+    server.listen(wanted, '127.0.0.1', () => {
+      server.removeListener('error', onError);
+      resolve();
+    });
+  });
   const { port } = server.address() as AddressInfo;
   return {
     origin: `https://127.0.0.1:${String(port)}`,
