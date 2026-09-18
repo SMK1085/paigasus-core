@@ -154,8 +154,17 @@ async function startDefaultZone(): Promise<{ url: string; close: () => Promise<v
   };
 }
 
-/** SIGTERM, then SIGKILL after a grace period — the shape the e2e harness's own stop() uses. */
+/**
+ * SIGTERM, then SIGKILL after a grace period — the shape the e2e harness's own stop() uses.
+ *
+ * A child whose spawn failed (an 'error' event — see spawnZone) never got a pid, so `kill()` is a
+ * no-op and there is nothing to wait for: Node documents 'exit' as "may or may not" fire after
+ * 'error' (it emits 'close' instead), so waiting on it here could stall forever and, since this is
+ * always the FIRST closer pushed for a zone, take every later closer down with it (SMA-641
+ * dev-stack review round 2, finding 2).
+ */
 function stop(child: ChildProcess): Promise<void> {
+  if (child.pid === undefined) return Promise.resolve();
   if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve();
   return new Promise<void>((resolve) => {
     const timer = setTimeout(() => child.kill('SIGKILL'), STOP_GRACE_MS);
@@ -252,9 +261,16 @@ async function waitForZone(zone: Zone, child: ChildProcess, isInterrupted: () =>
  * Logs loudly if a zone dies after it was already reported ready. Without this the supervisor
  * keeps running and the browser just gets 502s with nothing in the log naming the zone (SMA-641
  * dev-stack review round 1, minor E).
+ *
+ * `isShuttingDown` gates the log: `stop()` sends SIGTERM (and in a terminal, Ctrl-C usually kills
+ * the whole foreground process group with SIGINT before closeAll even runs), so an UNGATED
+ * listener fired this same "exited unexpectedly" alarm on every ordinary shutdown — training a
+ * developer to ignore the one case this function exists to catch (SMA-641 dev-stack review
+ * round 2, finding 1).
  */
-function watchZone(zone: Zone, child: ChildProcess): void {
+function watchZone(zone: Zone, child: ChildProcess, isShuttingDown: () => boolean): void {
   child.once('exit', (code, signal) => {
+    if (isShuttingDown()) return;
     console.error(`[dev-stack] the ${zone} server exited unexpectedly (code=${String(code)}, signal=${String(signal)})`);
   });
 }
@@ -296,7 +312,10 @@ async function main(): Promise<void> {
     if (shutdownRequested) throw new Error('dev-stack: interrupted by signal during startup');
   };
   const onSignal = (signal: NodeJS.Signals): void => {
-    log(`received ${signal}, shutting down`);
+    // Teardown has not actually started yet here: it begins once the in-flight start step (or, if
+    // already ready, the very next line) settles and reaches a checkpoint. Say so, rather than
+    // implying closeAll() is already running (SMA-641 dev-stack review round 2, wording fix).
+    log(ready ? `received ${signal}, shutting down` : `received ${signal}; finishing the current start step, then shutting down`);
     shutdownRequested = true;
     // A signal that lands before both zones are ready is an INTERRUPTED startup, not a clean
     // stop, so the process exits non-zero.
@@ -374,8 +393,8 @@ async function main(): Promise<void> {
     await waitForZone('gateway', gatewayChild, () => shutdownRequested);
     checkpoint();
     ready = true;
-    watchZone('iam', iamChild);
-    watchZone('gateway', gatewayChild);
+    watchZone('iam', iamChild, () => shutdownRequested || closing);
+    watchZone('gateway', gatewayChild, () => shutdownRequested || closing);
 
     console.log('');
     console.log(`  open  ${terminator.origin}/iam`);
