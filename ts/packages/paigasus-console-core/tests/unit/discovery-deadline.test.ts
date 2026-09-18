@@ -103,15 +103,31 @@ describe('withOperationDeadline — the deadline (D3, D7, D9, D10)', () => {
     expect((error as Error).message).not.toContain('redis://');
   });
 
+  it('U2c: the deadline is exactly 4 × the command timeout, not shorter', async () => {
+    const { cache } = wrapped();
+    const settled = cache.get('iam').then(
+      () => 'resolved',
+      () => 'rejected',
+    );
+    // One millisecond before the deadline the operation is still running. This is what fails if
+    // DEADLINE_FACTOR is ever narrowed to 3 or less (spec D3).
+    await vi.advanceTimersByTimeAsync(DEADLINE_MS - 1);
+    await expect(Promise.race([settled, Promise.resolve('still running')])).resolves.toBe('still running');
+    // The remaining millisecond fires it.
+    await vi.advanceTimersByTimeAsync(1);
+    await expect(settled).resolves.toBe('rejected');
+  });
+
   it('U8: an inner rejection propagates unchanged, and the deadline timer was cleared', async () => {
-    const { cache, inner, log } = wrapped();
+    const { cache, inner } = wrapped();
     const boom = new Error('inner failed');
     const pending = cache.get('iam').catch((error: unknown) => error);
     inner.fail(boom);
     await expect(pending).resolves.toBe(boom);
-    // If the timer had not been cleared it would open the circuit here.
-    await vi.advanceTimersByTimeAsync(DEADLINE_MS);
-    expect(log.timeouts()).toEqual([]);
+    // The deadline timer must be gone once the operation settles. This is the only assertion that
+    // actually fails if `clearTimeout` is removed from the `finally` — a stale timer rejects a race
+    // that already settled, so it changes no observable behaviour, in this task or in Task 2.
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it('U9: a late rejection from the abandoned operation is not an unhandled rejection', async () => {
