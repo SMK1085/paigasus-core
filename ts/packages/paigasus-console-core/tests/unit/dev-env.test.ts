@@ -37,7 +37,7 @@ describe('buildDevEnv', () => {
   it('removes the parent PAIGASUS_, __NEXT and NODE_ENV keys', () => {
     const env = buildDevEnv({
       ...input,
-      parentEnv: { PAIGASUS_SESSION_STORE: 'memory', PAIGASUS_ANYTHING: 'x', __NEXT_PRIVATE_ORIGIN: 'y', NODE_ENV: 'production', HOME: '/home/dev' } as NodeJS.ProcessEnv,
+      parentEnv: { PAIGASUS_SESSION_STORE: 'memory', PAIGASUS_ANYTHING: 'x', __NEXT_PRIVATE_ORIGIN: 'y', NODE_ENV: 'production', HOME: '/home/dev' },
     });
     expect(env.PAIGASUS_ANYTHING).toBeUndefined();
     expect(env.__NEXT_PRIVATE_ORIGIN).toBeUndefined();

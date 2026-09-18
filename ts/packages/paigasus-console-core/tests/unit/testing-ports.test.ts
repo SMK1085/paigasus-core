@@ -38,9 +38,9 @@ describe('the terminator and the fake IdP accept a fixed port', () => {
     const back = await upstream();
     cleanup.push(back.close);
     const first = await startTlsTerminator({ tls, target: back.url });
-    cleanup.push(first.close);
+    cleanup.push(() => first.close());
     const second = await startTlsTerminator({ tls, target: back.url });
-    cleanup.push(second.close);
+    cleanup.push(() => second.close());
     expect(first.origin).not.toEqual(second.origin);
   });
 
@@ -50,7 +50,7 @@ describe('the terminator and the fake IdP accept a fixed port', () => {
     const free = await takenPort();
     await free.close(); // now very likely free again
     const terminator = await startTlsTerminator({ tls, target: back.url, port: free.port });
-    cleanup.push(terminator.close);
+    cleanup.push(() => terminator.close());
     expect(terminator.origin).toEqual(`https://127.0.0.1:${String(free.port)}`);
   });
 
@@ -66,7 +66,7 @@ describe('the terminator and the fake IdP accept a fixed port', () => {
     const free = await takenPort();
     await free.close();
     const idp = await startFakeIdp({ cert: tls, port: free.port });
-    cleanup.push(idp.close);
+    cleanup.push(() => idp.close());
     expect(idp.issuer).toEqual(`https://127.0.0.1:${String(free.port)}`);
   });
 

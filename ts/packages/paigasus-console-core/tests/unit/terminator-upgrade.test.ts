@@ -2,7 +2,7 @@
 //
 // A raw upgrade through the terminator. `node:http`'s own 'upgrade' event is the whole protocol
 // here: no WebSocket library is involved, so the test asserts the bytes the tunnel must move.
-import { createServer, request as httpRequest, type IncomingMessage } from 'node:http';
+import { createServer } from 'node:http';
 import { connect as tlsConnect } from 'node:tls';
 import type { AddressInfo } from 'node:net';
 import type { Duplex } from 'node:stream';
@@ -128,7 +128,7 @@ describe('the terminator tunnels a WebSocket upgrade', () => {
   it('answers 101 and moves bytes both ways', async () => {
     const back = await upgradeUpstream();
     const terminator = await startTlsTerminator({ tls, routes: [{ prefix: '/iam', target: back.url }] });
-    closers.push(terminator.close);
+    closers.push(() => terminator.close());
 
     const { head, socket } = await handshake(terminator.origin, '/iam/_next/hmr?id=1');
     expect(head).toContain('101 Switching Protocols');
@@ -144,7 +144,7 @@ describe('the terminator tunnels a WebSocket upgrade', () => {
   it('replays the CLIENT head buffer that arrived with the handshake', async () => {
     const back = await upgradeUpstream();
     const terminator = await startTlsTerminator({ tls, routes: [{ prefix: '/iam', target: back.url }] });
-    closers.push(terminator.close);
+    closers.push(() => terminator.close());
 
     // 'early' rides in the same packet as the request line, so it reaches the terminator as the
     // server-side `head` buffer. Dropping it loses the first frame.
@@ -156,7 +156,7 @@ describe('the terminator tunnels a WebSocket upgrade', () => {
   it('replays the UPSTREAM head buffer written with the 101', async () => {
     const back = await upgradeUpstream({ trailer: 'first-frame' });
     const terminator = await startTlsTerminator({ tls, routes: [{ prefix: '/iam', target: back.url }] });
-    closers.push(terminator.close);
+    closers.push(() => terminator.close());
 
     const { head, socket } = await handshake(terminator.origin, '/iam/_next/hmr');
     expect(head).toContain('first-frame');
@@ -166,7 +166,7 @@ describe('the terminator tunnels a WebSocket upgrade', () => {
   it('destroys the client socket when no route matches, and stays up', async () => {
     const back = await upgradeUpstream();
     const terminator = await startTlsTerminator({ tls, routes: [{ prefix: '/iam', target: back.url }] });
-    closers.push(terminator.close);
+    closers.push(() => terminator.close());
 
     await expect(handshake(terminator.origin, '/nowhere/_next/hmr')).rejects.toThrow();
 
@@ -179,7 +179,7 @@ describe('the terminator tunnels a WebSocket upgrade', () => {
   it('releases the upstream connection when it declines the upgrade with an ordinary response', async () => {
     const back = await refusingUpstream();
     const terminator = await startTlsTerminator({ tls, routes: [{ prefix: '/iam', target: back.url }] });
-    closers.push(terminator.close);
+    closers.push(() => terminator.close());
 
     // The terminator destroys the client socket once the upstream answers normally instead of
     // upgrading, so this rejects the same way the "no route matches" case does.
