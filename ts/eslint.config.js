@@ -18,9 +18,11 @@ export default tseslint.config(
   js.configs.recommended,
   // Node CLI tooling scripts (e.g. the SMA-406 semantic-release parity helpers under
   // tooling/): plain Node ESM, outside the typed app/library graph. Provide Node globals
-  // so `no-undef` doesn't flag `process` etc.
+  // so `no-undef` doesn't flag `process` etc. SMA-641 added `.ts` here for the dev stack;
+  // that file IS in a program — tooling/tsconfig.json — which the type-checked block below
+  // requires of every .ts file in the tree.
   {
-    files: ['tooling/**/*.{js,mjs,cjs}'],
+    files: ['tooling/**/*.{js,mjs,cjs,ts}'],
     languageOptions: { globals: { process: 'readonly', console: 'readonly' } },
   },
   // Type-checked rules only on TS files. JS config files (eslint.config.js itself,

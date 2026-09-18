@@ -34,11 +34,14 @@ import path from 'node:path';
 
 export type TlsMaterial = { certPath: string; keyPath: string; cert: string; key: string };
 
-/** The root every caller uses. Only the self-test passes its own root. */
+/** The root every caller uses. The self-test and the dev stack (SMA-641) pass their own. */
 const DEFAULT_TLS_ROOT = path.join(os.tmpdir(), 'paigasus-iam-console-tls');
 
 /** A published pair is reused only while it stays valid for this many more seconds. */
 const MIN_VALID_SECONDS = 300;
+
+/** How long a generated pair lives. The dev stack (SMA-641) passes a longer one, with its own root. */
+const DEFAULT_DAYS = 1;
 
 const PAIR_PREFIX = 'pair-';
 
@@ -76,7 +79,7 @@ function stillValid(dir: string, minValidSeconds: number): boolean {
 }
 
 /** Writes a complete pair into a NEW directory and returns it. The directory is not published yet. */
-function generate(root: string): string {
+function generate(root: string, days: number): string {
   const dir = mkdtempSync(path.join(root, `${PAIR_PREFIX}${String(process.pid)}-`));
   try {
     execFileSync(
@@ -92,7 +95,7 @@ function generate(root: string): string {
         '-out',
         path.join(dir, 'cert.pem'),
         '-days',
-        '1',
+        String(days),
         '-subj',
         '/CN=localhost',
         '-addext',
@@ -148,14 +151,16 @@ function load(dir: string): TlsMaterial {
  * The test certificate pair. It reuses the published pair while that pair stays valid for
  * `minValidSeconds` more seconds (default 300). Otherwise it generates a pair, publishes it and
  * returns it. `root` and `minValidSeconds` are for the self-test; other callers pass nothing.
+ * `days` sets how long a NEW pair lives; it does not shorten one that is already published.
  */
-export function testTls(opts: { root?: string; minValidSeconds?: number } = {}): TlsMaterial {
+export function testTls(opts: { root?: string; minValidSeconds?: number; days?: number } = {}): TlsMaterial {
   const root = opts.root ?? DEFAULT_TLS_ROOT;
   const minValidSeconds = opts.minValidSeconds ?? MIN_VALID_SECONDS;
+  const days = opts.days ?? DEFAULT_DAYS;
   mkdirSync(root, { recursive: true });
   const current = publishedPair(root);
   if (current !== null && stillValid(current, minValidSeconds)) return load(current);
-  const fresh = generate(root);
+  const fresh = generate(root, days);
   publish(root, fresh);
   return load(fresh);
 }

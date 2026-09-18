@@ -13,9 +13,15 @@
 import { request as httpRequest, type IncomingHttpHeaders, type IncomingMessage, type ServerResponse } from 'node:http';
 import { createServer } from 'node:https';
 import type { AddressInfo } from 'node:net';
+import type { Duplex } from 'node:stream';
 import type { TlsMaterial } from './tls';
 
-/** Hop-by-hop headers (RFC 9110 § 7.6.1). A proxy must not forward them. */
+/**
+ * Hop-by-hop headers (RFC 9110 § 7.6.1). A proxy must not forward them.
+ *
+ * `ts/tooling/dev-stack.ts` (SMA-641) keeps its own copy of this set and of `forwardable()` below,
+ * for its second in-process proxy, and says so. Widening this set means widening that copy too.
+ */
 const HOP_BY_HOP = new Set(['connection', 'keep-alive', 'proxy-connection', 'te', 'trailer', 'transfer-encoding', 'upgrade']);
 
 function forwardable(headers: IncomingHttpHeaders): IncomingHttpHeaders {
@@ -58,7 +64,7 @@ function pathnameOf(url: string | undefined): PathnameResult {
   }
 }
 
-export async function startTlsTerminator(opts: { tls: TlsMaterial; target?: string; routes?: readonly TerminatorRoute[] }): Promise<{ origin: string; close(): Promise<void> }> {
+export async function startTlsTerminator(opts: { tls: TlsMaterial; target?: string; routes?: readonly TerminatorRoute[]; port?: number }): Promise<{ origin: string; close(): Promise<void> }> {
   // Mutually exclusive, and an error rather than a precedence rule: a caller that passes both has a
   // wrong mental model of which upstream serves a path, and silently preferring one would hide it.
   if ((opts.target === undefined) === (opts.routes === undefined)) {
@@ -113,8 +119,97 @@ export async function startTlsTerminator(opts: { tls: TlsMaterial; target?: stri
     req.pipe(upstream);
   }
 
+  /**
+   * A WebSocket upgrade. `next dev` opens one for hot module replacement, at
+   * `${basePath}/_next/hmr` — MEASURED on Next 16.3.5 — so the SAME longest-prefix rule that
+   * routes a request routes the tunnel to the right zone (SMA-641).
+   *
+   * There is no ServerResponse on this path: Node hands over the raw socket, so the 101 status
+   * line and the upstream's headers are written by hand. Both `head` buffers carry bytes that
+   * arrived together with the handshake; dropping either loses the first frame, which shows up as
+   * an INTERMITTENT hot-reload failure rather than a hard one.
+   */
+  function tunnel(req: IncomingMessage, clientSocket: Duplex, head: Buffer): void {
+    const parsed = pathnameOf(req.url);
+    const route = parsed.ok ? routes.find((candidate) => matches(parsed.pathname, candidate.prefix)) : undefined;
+    if (route === undefined) {
+      // No status line: an upgrade that matches nothing has no HTTP response to carry one.
+      clientSocket.destroy();
+      return;
+    }
+    const target = new URL(route.target);
+    const host = req.headers.host ?? '';
+    const upstream = httpRequest({
+      hostname: target.hostname,
+      port: target.port,
+      method: req.method,
+      path: req.url,
+      headers: {
+        ...forwardable(req.headers),
+        host,
+        // forwardable() strips these two as hop-by-hop, which is correct for a normal request and
+        // wrong for the handshake that establishes the tunnel. Put them back.
+        connection: 'Upgrade',
+        upgrade: req.headers.upgrade ?? 'websocket',
+        'x-forwarded-proto': 'https',
+        'x-forwarded-host': host,
+        'x-forwarded-port': host.split(':')[1] ?? '443',
+      },
+    });
+    upstream.on('upgrade', (upstreamRes, upstreamSocket: Duplex, upstreamHead: Buffer) => {
+      const lines = [`HTTP/1.1 ${String(upstreamRes.statusCode ?? 101)} ${upstreamRes.statusMessage ?? 'Switching Protocols'}`];
+      for (const [name, value] of Object.entries(upstreamRes.headers)) {
+        if (value === undefined) continue;
+        for (const one of Array.isArray(value) ? value : [value]) lines.push(`${name}: ${one}`);
+      }
+      clientSocket.write(`${lines.join('\r\n')}\r\n\r\n`);
+      if (upstreamHead.length > 0) clientSocket.write(upstreamHead);
+      if (head.length > 0) upstreamSocket.write(head);
+      clientSocket.pipe(upstreamSocket);
+      upstreamSocket.pipe(clientSocket);
+      const drop = (): void => {
+        clientSocket.destroy();
+        upstreamSocket.destroy();
+      };
+      clientSocket.on('error', drop);
+      upstreamSocket.on('error', drop);
+      clientSocket.on('close', drop);
+      upstreamSocket.on('close', drop);
+    });
+    // The upstream answered with an ordinary response instead of upgrading, or never answered.
+    // Destroying `upstream` too (not just the client socket) is what releases its underlying
+    // connection — mirroring forward()'s res.on('close', () => upstream.destroy()) above.
+    // Without it, an unconsumed response body keeps that connection open for the life of the
+    // process (SMA-641 review round 1).
+    upstream.on('response', () => {
+      clientSocket.destroy();
+      upstream.destroy();
+    });
+    upstream.on('error', () => clientSocket.destroy());
+    clientSocket.on('error', () => upstream.destroy());
+    // The browser closed the handshake socket (a clean disconnect, no error) before the upstream
+    // answered at all. `destroy()` is idempotent, so this is a no-op once 'upgrade' has already
+    // handed the connection off to the drop() handlers below.
+    clientSocket.on('close', () => upstream.destroy());
+    upstream.end();
+  }
+
   const server = createServer({ cert: opts.tls.cert, key: opts.tls.key }, forward);
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  server.on('upgrade', tunnel);
+  const wanted = opts.port ?? 0;
+  // A fixed port makes EADDRINUSE reachable, and a server with no 'error' listener turns that into
+  // an UNCAUGHT exception that kills the whole process with a raw stack. `listen(0)` could never
+  // produce one, which is why the original promise had no reject path (SMA-641).
+  await new Promise<void>((resolve, reject) => {
+    const onError = (error: NodeJS.ErrnoException): void => {
+      reject(new Error(`tls-terminator: could not listen on port ${String(wanted)}: ${error.code ?? error.message}`));
+    };
+    server.once('error', onError);
+    server.listen(wanted, '127.0.0.1', () => {
+      server.removeListener('error', onError);
+      resolve();
+    });
+  });
   const { port } = server.address() as AddressInfo;
   return {
     origin: `https://127.0.0.1:${String(port)}`,

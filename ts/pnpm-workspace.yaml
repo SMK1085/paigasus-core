@@ -14,6 +14,13 @@ allowBuilds:
   # node-gyp rebuild) — ssh2 falls back to a pure-JS path without it. protobufjs's postinstall
   # is a no-op donation notice (scripts/postinstall), not a compile step. All three: false.
   cpu-features: false
+  # tsx (SMA-641) depends on esbuild. esbuild's postinstall only hardlinks its own bin/esbuild CLI
+  # shim to the already-resolved @esbuild/<platform> optional package, a startup-speed
+  # optimization for the esbuild CLI — it skips itself on win32, under Yarn, and for WASM builds,
+  # so esbuild works fine with it never having run. tsx never shells out to that CLI: it consumes
+  # esbuild as a library and resolves the platform binary itself via its own require.resolve()
+  # against @esbuild/<platform>, which pnpm installs regardless of this setting. Not needed.
+  esbuild: false
   # msw (SMA-511) declares a postinstall that copies its BROWSER service worker into a public
   # directory. The iam-console tests use msw/node only, so the script has nothing to do.
   msw: false
@@ -182,6 +189,10 @@ catalog:
   # Starts Keycloak and Redis for the E2E tier. The Rust side uses testcontainers-modules; this is
   # the TS equivalent. GitHub Actions `services:` cannot do the cert copy and realm import.
   testcontainers: ^12.1.0
+  # SMA-641: runs ts/tooling/dev-stack.ts. The dev stack imports @paigasus/console-core/testing,
+  # whose exports map points at TypeScript source with EXTENSIONLESS relative imports. Node 24
+  # strips types but resolves specifiers literally, so plain `node` cannot load it.
+  tsx: ^4.20.6
   # @paigasus/ui foundation (SMA-503, ADR-0021). Tailwind v4 is CSS-first: there is no
   # tailwind.config.*, so `tailwindcss` is present for the `@theme`/`@source` syntax the
   # package's CSS uses and `@tailwindcss/postcss` is what the consuming Next app runs.

@@ -11,6 +11,7 @@
     "format:write": "prettier --write .",
     "typecheck": "pnpm -r --if-present run typecheck",
     "test": "vitest run --passWithNoTests",
+    "dev:stack": "tsx tooling/dev-stack.ts",
     "prepare": "command -v lefthook >/dev/null 2>&1 && lefthook install || echo \"[hooks] run 'proto install' then 'moon run repo:install-hooks' to enable git hooks\""
   },
   "devDependencies": {
@@ -19,13 +20,17 @@
     "@eslint/js": "catalog:",
     "@next/eslint-plugin-next": "catalog:",
     "@paigasus/commitlint-config": "workspace:*",
+    "@paigasus/console-core": "workspace:*",
     "@paigasus/next-config": "workspace:*",
     "@semantic-release/commit-analyzer": "catalog:",
+    "@types/node": "catalog:",
     "eslint": "catalog:",
     "eslint-plugin-jsx-a11y": "catalog:",
     "eslint-plugin-react-hooks": "catalog:",
     "prettier": "catalog:",
     "semantic-release": "catalog:",
+    "testcontainers": "catalog:",
+    "tsx": "catalog:",
     "typescript": "catalog:",
     "typescript-eslint": "catalog:",
     "vitest": "catalog:"
