@@ -187,6 +187,89 @@ function afterConnect(inner: DescriptorCache, ready: Promise<void>): DescriptorC
   };
 }
 
+/** How many command timeouts one cache operation may take, end to end (SMA-650 D3). */
+const DEADLINE_FACTOR = 4;
+
+/** Which half of the wrapper refused the operation (SMA-650 D9). */
+export type DescriptorCacheTimeoutPhase = 'deadline' | 'circuit-open';
+
+/**
+ * The descriptor cache did not answer. `phase` says why: `deadline` means this operation itself ran
+ * past its bound, `circuit-open` means an earlier one did and this one was refused without touching
+ * the socket (SMA-650 D9).
+ *
+ * `name` is set explicitly, because a production bundle can mangle `constructor.name` — the same
+ * reasoning connectionLossReason records above. The message NEVER carries the DSN, the URL, or a
+ * node-redis error: `operation` is one of five fixed literals.
+ */
+export class DescriptorCacheTimeoutError extends Error {
+  readonly phase: DescriptorCacheTimeoutPhase;
+
+  constructor(operation: string, deadlineMs: number, phase: DescriptorCacheTimeoutPhase) {
+    super(
+      phase === 'deadline'
+        ? `the descriptor cache operation "${operation}" did not answer within ${deadlineMs} ms`
+        : `the descriptor cache is not answering: "${operation}" was refused while the circuit was open`,
+    );
+    this.name = 'DescriptorCacheTimeoutError';
+    this.phase = phase;
+  }
+}
+
+/**
+ * The part of a node-redis client the deadline wrapper reads. Structural, so the default test tier
+ * can drive it with a plain EventEmitter — the same shape ConnectionLossSource uses above.
+ *
+ * It carries `ready` ONLY. An `error` listener here would duplicate watchConnectionLoss's job and
+ * would break its test's pin on listenerCount('error') === 1.
+ */
+export type ReadySource = { on(event: 'ready', listener: () => void): unknown };
+
+/**
+ * Bounds every cache operation (SMA-650). `commandOptions.timeout` covers only the queued phase and
+ * `socketTimeout` is an idle timer that any write resets, so a Redis that accepts commands and never
+ * replies is unbounded under steady traffic. This is the only end-to-end bound.
+ */
+// eslint-disable-next-line @typescript-eslint/no-unused-vars -- `log` is wired in Task 2 (SMA-650); the signature must not change then.
+export function withOperationDeadline(inner: DescriptorCache, client: ReadySource, timeoutMs: number, log: ConsoleLogger): DescriptorCache {
+  const deadlineMs = timeoutMs * DEADLINE_FACTOR;
+
+  const bounded = async <T>(operation: string, run: () => Promise<T>): Promise<T> => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const running = run();
+    try {
+      return await Promise.race([
+        running,
+        new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(() => reject(new DescriptorCacheTimeoutError(operation, deadlineMs, 'deadline')), deadlineMs);
+          timer.unref();
+        }),
+      ]);
+    } catch (error) {
+      if (error instanceof DescriptorCacheTimeoutError && error.phase === 'deadline') {
+        // D7: the abandoned operation keeps running. node-redis rejects it when the socket dies, and
+        // an unhandled rejection can end the process. A late SUCCESS is discarded: the caller has
+        // already degraded and moved on.
+        running.catch(() => undefined);
+      }
+      throw error;
+    } finally {
+      // Mandatory. An uncleared timer is a leak per operation, and worse, it would open the circuit
+      // long after an operation that already settled.
+      clearTimeout(timer);
+    }
+  };
+
+  return {
+    get: (service) => bounded('get', () => inner.get(service)),
+    set: (service, rec, ttlMs, expectedRev) => bounded('set', () => inner.set(service, rec, ttlMs, expectedRev)),
+    delete: (service) => bounded('delete', () => inner.delete(service)),
+    tryAcquireLock: (service, token, ttlMs) => bounded('tryAcquireLock', () => inner.tryAcquireLock(service, token, ttlMs)),
+    releaseLock: (service, token) => bounded('releaseLock', () => inner.releaseLock(service, token)),
+    close: () => inner.close(),
+  };
+}
+
 function redisDescriptorCache(url: string, timeoutMs: number, log: ConsoleLogger): DescriptorCache {
   const client: RedisClientType = createClient({
     url,
