@@ -127,10 +127,17 @@ export function descriptorCacheFor(config: ConsoleCoreConfig, log: ConsoleLogger
   return current.processCache;
 }
 
-/** Test and shutdown seam: forget the process cache and close the Redis client, if any. */
+/**
+ * Test and shutdown seam: forget the process cache and close the Redis client, if any.
+ *
+ * It destroys the client ONLY while it is still open (SMA-648 D10). node-redis's destroy() throws
+ * ClientClosedError on a client that is already closed (@redis/client socket.js destroy()), and a
+ * throw here would skip the two lines that clear the state, so the next caller would inherit a
+ * dead cache.
+ */
 export function resetDiscoveryForTest(): void {
   const current = state();
-  current.redisClient?.destroy();
+  if (current.redisClient?.isOpen === true) current.redisClient.destroy();
   current.redisClient = undefined;
   current.processCache = undefined;
 }
