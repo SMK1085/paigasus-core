@@ -41,7 +41,7 @@ export async function loadTeamPage(deps: TeamPageDeps, params: { readonly org: s
 
   const got = await callIam(() => deps.tenancy.getTeam({ prn }));
   // The PRN comes from the URL: IAM answers a wrong [org] with prn-mismatch, which is invalid-input
-  // (tenancy.rs:331-333). Spec § 5.2 makes a mismatched URL a 404 (ruling T18.a).
+  // (tenancy.rs's get_team handler). Spec § 5.2 makes a mismatched URL a 404 (ruling T18.a).
   if (!got.ok) return got.error.presentation === 'invalid-input' ? { kind: 'not-found' } : { kind: 'error', error: got.error };
   const team = got.value.team;
   if (team === undefined || !sameNode(team.orgPrn, 'organization', orgId)) return { kind: 'not-found' };

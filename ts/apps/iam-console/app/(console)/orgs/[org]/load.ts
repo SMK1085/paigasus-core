@@ -3,7 +3,8 @@
 // The loader of /iam/orgs/[org] (spec § 5.2). URLs use UUIDs because a PRN holds no slug. The
 // organization comes first: when IAM denies it, the page is the 403 view and nothing else runs.
 // The PRN comes from the URL, so an invalid-input answer (IAM's prn-mismatch, InvalidArgument,
-// adapters/grpc/tenancy.rs:176-178) means that the URL names no such node: notFound().
+// the `get_organization` handler in adapters/grpc/tenancy.rs) means that the URL names no such
+// node: notFound().
 //
 // SMA-630 spec § 5.1: three more affordance questions, all about the organization's OWN PRN, and
 // the lifecycle of the organization and of each team row.
