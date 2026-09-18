@@ -2,7 +2,7 @@
 
 - Linear: SMA-648 (related: SMA-641, which found it)
 - Date: 2026-09-18
-- Revision: 2, after the adversarial challenge (changelog in § 8)
+- Revision: 2, after the adversarial challenge (changelog in § 8). Approved by Sven on 2026-09-18.
 - Scope: `@paigasus/console-core` (the client), `@paigasus/discovery` (the precondition), one new
   Docker-backed test tier in `@paigasus/console-core`.
 
@@ -74,15 +74,14 @@ Rejected or out of scope:
   client forever. T3 fails for this option.
 - **A per-operation deadline in `afterConnect`.** Under steady traffic, `socketTimeout` does not
   find a Redis that accepts commands and never replies (§ 2, fact 1). This gap exists on `main`
-  and is not the reported bug. **Out of scope, with a proposed follow-up Linear issue.** § 2 and
+  and is not the reported bug. **Out of scope; follow-up SMA-650.** § 2 and
   D5 state the gap in the docs.
 - **A floor on `pingInterval`.** `PAIGASUS_SESSION_REDIS_TIMEOUT_MS` accepts any positive
   integer, so a value of 1 gives one PING per ms. The dependency is documented in the
   `discovery.ts` comment instead; a floor would break D4 (a) for small values.
-- **A `discovery.redis_reconnected` event.** Not requested. It is cheap once D8 exists, so it is
-  offered at the approval gate as an option.
-- **`@paigasus/auth`'s missing in-flight bound.** A different defect in a different package. No
-  Linear issue exists; a follow-up is proposed at the gate.
+- **A `discovery.redis_reconnected` event.** Not requested; Sven declined it at the approval gate.
+- **`@paigasus/auth`'s missing in-flight bound.** A different defect in a different package;
+  follow-up SMA-651.
 
 ## 4. Changes
 
@@ -197,7 +196,7 @@ records the failure output.
 
 ## 7. Out of scope
 
-- The per-operation deadline and `@paigasus/auth`'s in-flight bound (§ 3, rejected list).
+- The per-operation deadline (SMA-650) and `@paigasus/auth`'s in-flight bound (SMA-651).
 - Confirming why the gateway-console e2e tier stayed green. T1–T4 are the direct control now.
 
 ## 8. Changelog (revision 2)
@@ -210,6 +209,6 @@ fragments; the corrected "reconnect only" timing; D11; the `server-only` alias r
 options-pin method; the README and `MEMORY.md` lines; the maintenance-error note; the `+ping`
 requirement.
 
-Rejected from the challenge: a per-operation deadline (out of scope, follow-up proposed); a
+Rejected from the challenge: a per-operation deadline (out of scope, SMA-650); a
 `pingInterval` floor (conflicts with D4 (a), documented instead); a Docker-free RESP stub (Sven
 chose the container tier).
