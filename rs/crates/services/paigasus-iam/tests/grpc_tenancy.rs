@@ -25,7 +25,8 @@ use paigasus_proto::paigasus::iam::v1::tenancy_service_client::TenancyServiceCli
 use paigasus_proto::paigasus::iam::v1::{ArchiveOrganizationRequest, RestoreOrganizationRequest};
 use paigasus_proto::paigasus::iam::v1::{
     ArchiveProjectRequest, ArchiveTeamRequest, AttachMembershipRequest, CreateOrganizationRequest, CreateProjectRequest, CreateTeamRequest, GetOrganizationRequest, GetProjectRequest, GetTeamRequest,
-    Organization as ProtoOrganization, Project as ProtoProject, RenameOrganizationRequest, RenameProjectRequest, RenameTeamRequest, RestoreProjectRequest, RestoreTeamRequest, Team as ProtoTeam,
+    ListTeamsRequest, Organization as ProtoOrganization, Project as ProtoProject, RenameOrganizationRequest, RenameProjectRequest, RenameTeamRequest, RestoreProjectRequest, RestoreTeamRequest,
+    Team as ProtoTeam,
 };
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter};
 use tokio::net::TcpListener;
@@ -125,6 +126,21 @@ fn upper_uuid(prn: &str) -> String {
     let f = prn_fields(prn);
     let (kind, uuid) = f[5].split_once('/').expect("the last prn field is type/uuid");
     format!("prn:pgs:{}:{}:{}:{}/{}", f[2], f[3], f[4], kind, uuid.to_uppercase())
+}
+
+/// Total `audit_log` rows, unfiltered. A refused create writes no node, so there is no resource
+/// PRN to filter on — and filtering by the PARENT's PRN is vacuous, because a `CreateTeam` audit
+/// row carries the NEW team's PRN (`application/teams.rs`, `team_entry`), so a parent-filtered
+/// count is zero with the fix present or absent. Each test owns its own Postgres container, so
+/// nothing else writes concurrently and a total is safe. Mirrors the snapshot in
+/// `an_ungranted_caller_cannot_tell_a_forged_prn_from_a_correct_one`.
+async fn audit_total(db: &DatabaseConnection) -> u64 {
+    audit_log::Entity::find().count(db).await.expect("count audit_log total")
+}
+
+/// The `event_outbox` twin of [`audit_total`].
+async fn outbox_total(db: &DatabaseConnection) -> u64 {
+    event_outbox::Entity::find().count(db).await.expect("count event_outbox total")
 }
 
 /// Records one assertion. Every case collects its failures instead of panicking, so ONE test
@@ -1239,4 +1255,167 @@ async fn an_ungranted_caller_cannot_tell_a_forged_prn_from_a_correct_one() {
 
     server.abort();
     assert!(failures.is_empty(), "authorize-before-compare cases failed:\n{}", failures.join("\n"));
+}
+
+/// SMA-645 T1, organization parent: `CreateTeam` must refuse a forged parent PRN with
+/// `prn-mismatch`, under both `enforce_tenancy` settings, and must create nothing.
+///
+/// The stored organization PRN has an EMPTY organization slot and an EMPTY region
+/// (`paigasus-iam-core/src/tenancy.rs`, `OrganizationId::from_uuid`), so the forged shapes are a
+/// NON-EMPTY organization slot and a non-empty region. Both reach the comparison rather than
+/// being refused earlier as `invalid-prn`: `convert::node_uuid` checks only the service and the
+/// resource type, and never builds an `OrganizationId`.
+///
+/// A wrong RESOURCE uuid is deliberately NOT tested here — that answers `not-found`, before the
+/// comparison runs.
+#[tokio::test]
+async fn a_forged_org_parent_never_creates_a_team() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let idp = support::start_mock_idp().await;
+    let (enforced, unenforced) = two_states(&db, &idp).await;
+    let token = idp.bearer("forged-ct", Some("forged-ct@example.com"), "paigasus", 3600);
+    support::provision_platform_admin(&enforced, &token).await;
+    let (on_addr, on_server) = spawn_tenancy_server(enforced).await;
+    let (off_addr, off_server) = spawn_tenancy_server(unenforced).await;
+    let mut on = connect(on_addr).await;
+    let mut off = connect(off_addr).await;
+
+    let mut failures: Vec<String> = Vec::new();
+    let absent_org = Uuid::from_u128(0x0f05).as_hyphenated().to_string();
+
+    for (setting, tag, client) in [("enforce=on", "on", &mut on), ("enforce=off", "off", &mut off)] {
+        let org = create_org(client, &token, &format!("ct-{tag}"), "Create Team Parent").await;
+
+        for (shape, forged) in [("non-empty org slot", with_org(&org.prn, &absent_org)), ("non-empty region", with_region(&org.prn, "eu-west-1"))] {
+            let label = format!("{setting} CreateTeam {shape}");
+            let audits = audit_total(&db).await;
+            let events = outbox_total(&db).await;
+            let err = client
+                .create_team(authed(
+                    CreateTeamRequest {
+                        org_prn: forged,
+                        slug: format!("ct-{tag}-forged"),
+                        name: "Forged".to_string(),
+                    },
+                    &token,
+                ))
+                .await
+                .unwrap_err();
+            check(&mut failures, &label, err.code() == Code::InvalidArgument, format!("code was {:?}", err.code()));
+            check(&mut failures, &label, reason(&err) == "prn-mismatch", format!("reason was {}", reason(&err)));
+            check(&mut failures, &label, audit_total(&db).await == audits, "an audit_log row was written".to_string());
+            check(&mut failures, &label, outbox_total(&db).await == events, "an event_outbox row was written".to_string());
+            // The team must not exist. Listing through the CORRECT parent PRN is the only way to
+            // ask, and it doubles as proof that ListTeams works for this org.
+            //
+            // Asserted by SLUG, not by an empty list: creating an organization auto-seeds a
+            // `default` team, so the list is never empty and `is_empty()` would fail even with
+            // the fix in place.
+            let forged_slug = format!("ct-{tag}-forged");
+            let teams = client
+                .list_teams(authed(
+                    ListTeamsRequest {
+                        org_prn: org.prn.clone(),
+                        limit: 100,
+                        offset: 0,
+                    },
+                    &token,
+                ))
+                .await
+                .expect("the correct parent prn must list")
+                .into_inner()
+                .teams;
+            check(&mut failures, &label, !teams.iter().any(|t| t.slug == forged_slug), format!("the forged create made a team: {teams:?}"));
+        }
+
+        // Positive control: the same call with the CORRECT parent PRN must succeed AND move both
+        // totals by exactly one. Without it the two "unchanged" assertions above cannot tell a
+        // refusal from a query that sees nothing.
+        let label = format!("{setting} CreateTeam control");
+        let audits = audit_total(&db).await;
+        let events = outbox_total(&db).await;
+        create_team(client, &token, &org.prn, &format!("ct-{tag}-control")).await;
+        check(
+            &mut failures,
+            &label,
+            audit_total(&db).await == audits + 1 && outbox_total(&db).await == events + 1,
+            "the positive control wrote no row — the queries cannot see anything".to_string(),
+        );
+    }
+
+    on_server.abort();
+    off_server.abort();
+    assert!(failures.is_empty(), "forged org-parent CreateTeam cases failed:\n{}", failures.join("\n"));
+}
+
+/// SMA-645 T2, organization parent: `ListTeams` must refuse a forged parent PRN with
+/// `prn-mismatch`, under both `enforce_tenancy` settings. A list writes nothing, so the control
+/// is that the CORRECT parent PRN returns the seeded team — otherwise the refusal could pass by
+/// the RPC being broken for every input.
+#[tokio::test]
+async fn a_forged_org_parent_never_lists_teams() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let idp = support::start_mock_idp().await;
+    let (enforced, unenforced) = two_states(&db, &idp).await;
+    let token = idp.bearer("forged-lt", Some("forged-lt@example.com"), "paigasus", 3600);
+    support::provision_platform_admin(&enforced, &token).await;
+    let (on_addr, on_server) = spawn_tenancy_server(enforced).await;
+    let (off_addr, off_server) = spawn_tenancy_server(unenforced).await;
+    let mut on = connect(on_addr).await;
+    let mut off = connect(off_addr).await;
+
+    let mut failures: Vec<String> = Vec::new();
+    let absent_org = Uuid::from_u128(0x0f06).as_hyphenated().to_string();
+
+    for (setting, tag, client) in [("enforce=on", "on", &mut on), ("enforce=off", "off", &mut off)] {
+        let org = create_org(client, &token, &format!("lt-{tag}"), "List Teams Parent").await;
+        let seeded = create_team(client, &token, &org.prn, &format!("lt-{tag}-seed")).await;
+
+        for (shape, forged) in [("non-empty org slot", with_org(&org.prn, &absent_org)), ("non-empty region", with_region(&org.prn, "eu-west-1"))] {
+            let label = format!("{setting} ListTeams {shape}");
+            let err = client
+                .list_teams(authed(
+                    ListTeamsRequest {
+                        org_prn: forged,
+                        limit: 100,
+                        offset: 0,
+                    },
+                    &token,
+                ))
+                .await
+                .unwrap_err();
+            check(&mut failures, &label, err.code() == Code::InvalidArgument, format!("code was {:?}", err.code()));
+            check(&mut failures, &label, reason(&err) == "prn-mismatch", format!("reason was {}", reason(&err)));
+        }
+
+        // Control: the correct parent PRN returns the seeded team.
+        let label = format!("{setting} ListTeams control");
+        let teams = client
+            .list_teams(authed(
+                ListTeamsRequest {
+                    org_prn: org.prn.clone(),
+                    limit: 100,
+                    offset: 0,
+                },
+                &token,
+            ))
+            .await
+            .expect("the correct parent prn must list")
+            .into_inner()
+            .teams;
+        check(
+            &mut failures,
+            &label,
+            teams.iter().any(|t| t.prn == seeded.prn),
+            format!("the control did not return the seeded team: {teams:?}"),
+        );
+    }
+
+    on_server.abort();
+    off_server.abort();
+    assert!(failures.is_empty(), "forged org-parent ListTeams cases failed:\n{}", failures.join("\n"));
 }

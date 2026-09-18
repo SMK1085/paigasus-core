@@ -340,16 +340,8 @@ impl TenancyService for TenancyGrpc {
             let actor_principal = actor_context(&request)?.principal_id;
             let actor = actor_principal.prn().clone();
             let req = request.into_inner();
-            let (org_id, _) = convert::node_uuid(&req.org_prn, "organization")?;
-            if self.state.enforce_tenancy {
-                // Resolved by uuid through `orgs.get` (not the wire `org_prn` string directly, and
-                // not a `OrganizationId::from_uuid` PRN built without confirming existence): a
-                // nonexistent org would otherwise reach the entity-slice loader with a dangling id
-                // and fail closed as an internal error rather than the expected `NotFound` — mirrors
-                // `create_project`/`list_projects`'s `teams.get` resolution below.
-                let org_view = self.state.orgs.get(org_id).await.map_err(convert::status_to_grpc)?;
-                self.state.authorize.check(&actor, Action::CreateTeam, org_view.node.id.prn()).await.map_err(convert::status_to_grpc)?;
-            }
+            let (org_id, canonical) = convert::node_uuid(&req.org_prn, "organization")?;
+            load_org_checked(&self.state, &actor, Action::CreateTeam, org_id, &canonical, "CreateTeam").await?;
             let view = self.state.teams.create(org_id, &req.slug, &req.name, &actor_principal).await.map_err(convert::status_to_grpc)?;
             Ok(Response::new(CreateTeamResponse {
                 team: Some(convert::to_proto_team(&view)),
@@ -386,11 +378,12 @@ impl TenancyService for TenancyGrpc {
         let result: Result<Response<ListTeamsResponse>, Status> = async {
             let actor = actor_context(&request)?.principal_id.prn().clone();
             let req = request.into_inner();
-            let (org_id, _) = convert::node_uuid(&req.org_prn, "organization")?;
-            if self.state.enforce_tenancy {
-                let org_view = self.state.orgs.get(org_id).await.map_err(convert::status_to_grpc)?;
-                self.state.authorize.check(&actor, Action::ListTeams, org_view.node.id.prn()).await.map_err(convert::status_to_grpc)?;
-            }
+            let (org_id, canonical) = convert::node_uuid(&req.org_prn, "organization")?;
+            load_org_checked(&self.state, &actor, Action::ListTeams, org_id, &canonical, "ListTeams").await?;
+            // `to_page` runs AFTER the check, so a forged parent with an out-of-range `limit`
+            // answers the prn mismatch rather than `invalid-pagination` — the request names the
+            // wrong parent, and that outranks judging its contents. Mirrors the HTTP twin, which
+            // builds its `Page` after the authorize block.
             let page = convert::to_page(req.limit, req.offset).map_err(convert::status_to_grpc)?;
             let views = self.state.teams.list_by_org(org_id, page).await.map_err(convert::status_to_grpc)?;
             Ok(Response::new(ListTeamsResponse {
