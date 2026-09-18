@@ -1063,7 +1063,7 @@ pattern_verdict() {
   # this conservative class is rejected rather than passed to git. Acts as the catch-all for
   # every remaining unsupported character, now that '?'/'+'/'[]' are handled above with their
   # own message.
-  if ! printf '%s' "$p" | grep -qE '^[A-Za-z0-9._/*-]+$'; then
+  if ! grep -qE '^[A-Za-z0-9._/*-]+$' < <(printf '%s' "$p"); then
     echo 'rejected-charset'; return
   fi
 
@@ -1139,14 +1139,15 @@ load_origin_refs() {
 
 origin_has() {
   load_origin_refs
-  printf '%s\n' "$ORIGIN_REFS" | grep -qxF -- "$1"
+  grep -qxF -- "$1" < <(printf '%s\n' "$ORIGIN_REFS")
 }
 
 # A sample of what DOES exist, for the unresolved message. A bare "did not resolve" is the same
 # unhelpful-message problem the canary exists to avoid, one level down. $1, if given, is the
 # unresolved entry itself.
 #
-# Two failure modes of a naive `head -8` on ORIGIN_REFS, fixed here:
+# Two failure modes of a naive first-8-lines cut on ORIGIN_REFS, fixed here (the cut itself is
+# `sed -n 1,8p`, not `head -8`: head exits early and would lose the producer to SIGPIPE, SMA-647):
 #   - An empty ref list: `printf '%s\n' ""` emits a blank line, so a bare `head -8 | tr '\n' ' '`
 #     would return a single space and the message would read "include: ." — printf '(none)'
 #     instead, so an empty cache reads as empty, not as a truncated list.
@@ -1170,7 +1171,7 @@ origin_candidates() {
     $0 == "main"                           { print "0\t" $0; next }
     prefix != "" && index($0, prefix) == 1 { print "1\t" $0; next }
                                             { print "2\t" $0 }
-  ' | sort -t $'\t' -k1,1 -k2,2 | cut -f2- | head -8 | tr '\n' ' ' | sed 's/ *$//'
+  ' | sort -t $'\t' -k1,1 -k2,2 | cut -f2- | sed -n 1,8p | tr '\n' ' ' | sed 's/ *$//'
 }
 
 # Exits 2. MAIN SHELL ONLY — called from the production call site and from
@@ -2479,7 +2480,7 @@ cargo_lock_step_verdict() { # $1 workflow file
   # Entry 0 LOCATES the step; without it there is no window to search, and reporting the five
   # run-block lines as individually missing would misdescribe one deletion as six.
   n_step="$(printf '%s\n' "$stripped" \
-    | grep -nxF -e "${T_CARGO_LOCK_STEP_REQUIRED[0]}" | head -1 | cut -d: -f1)"
+    | grep -nxF -e "${T_CARGO_LOCK_STEP_REQUIRED[0]}" | sed -n 1p | cut -d: -f1)"
   if [ -z "$n_step" ]; then
     echo "missing-line ${T_CARGO_LOCK_STEP_REQUIRED[0]}"
     return
@@ -2489,7 +2490,7 @@ cargo_lock_step_verdict() { # $1 workflow file
   # (stripped, so every step in the job starts at column 0). Falls back to end-of-file for a
   # step that is last in its job.
   n_end="$(printf '%s\n' "$stripped" | tail -n +"$((n_step + 1))" \
-    | grep -nE '^- ' | head -1 | cut -d: -f1)"
+    | grep -nE '^- ' | sed -n 1p | cut -d: -f1)"
   if [ -n "$n_end" ]; then
     n_end=$((n_step + n_end - 1))
   else
@@ -2503,7 +2504,7 @@ cargo_lock_step_verdict() { # $1 workflow file
   # invocations keeps every line byte-identical while a failing mode stops aborting the block.
   prev=0
   for line in "${T_CARGO_LOCK_STEP_REQUIRED[@]:1}"; do
-    idx="$(printf '%s\n' "$window" | grep -nxF -e "$line" | head -1 | cut -d: -f1)"
+    idx="$(printf '%s\n' "$window" | grep -nxF -e "$line" | sed -n 1p | cut -d: -f1)"
     if [ -z "$idx" ]; then
       echo "missing-line $line"
     elif [ "$idx" -le "$prev" ]; then
@@ -2516,7 +2517,7 @@ cargo_lock_step_verdict() { # $1 workflow file
   # Placement is the guarantee, so ordering is asserted, not assumed. Anchored on the stripped
   # text so indentation changes do not defeat it.
   n_moon="$(printf '%s\n' "$stripped" | grep -nxF \
-    -e '- name: moon ci (affected graph)' | head -1 | cut -d: -f1)"
+    -e '- name: moon ci (affected graph)' | sed -n 1p | cut -d: -f1)"
   if [ -n "$n_moon" ] && [ "$n_step" -gt "$n_moon" ]; then
     echo "out-of-order"
   fi
@@ -2562,7 +2563,7 @@ cargo_lock_step_verdict() { # $1 workflow file
   # the moon ci step. Scanned over the whole window rather than a fixed line count: the run block
   # is multi-line now, so continue-on-error legitimately sits several lines below the name.
   coe="$(printf '%s\n' "$keys" \
-    | grep -m1 '^continue-on-error:' | sed 's/^continue-on-error:[[:space:]]*//')"
+    | grep '^continue-on-error:' | sed -n '1s/^continue-on-error:[[:space:]]*//p')"
   if [ -n "$coe" ] && [ "$coe" != "false" ]; then
     echo "continue-on-error $coe"
   fi
@@ -2575,7 +2576,7 @@ cargo_lock_step_verdict() { # $1 workflow file
   #
   # An `if:` written BEFORE the `name:` key needs no separate rule: the step then opens with
   # `- if: ...` and its name line is no longer `- name: ...`, so entry 0 is reported missing.
-  cond="$(printf '%s\n' "$keys" | grep -m1 '^if:' | sed 's/^if:[[:space:]]*//')"
+  cond="$(printf '%s\n' "$keys" | grep '^if:' | sed -n '1s/^if:[[:space:]]*//p')"
   if [ -n "$cond" ]; then
     echo "conditional $cond"
   fi
@@ -5643,7 +5644,7 @@ selftest_expect_tag() {
       guarding anything — check for an -ignore flag or a narrowed rule set."
     return
   fi
-  if ! printf '%s' "$out" | grep -qF "[$tag]"; then
+  if ! grep -qF "[$tag]" < <(printf '%s' "$out"); then
     fail "self-test '$label': actionlint failed, but not with the expected [$tag] rule. Got:
 $out"
   fi
