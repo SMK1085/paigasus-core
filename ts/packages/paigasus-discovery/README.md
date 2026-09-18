@@ -86,18 +86,30 @@ over one service cost one resolution.
 
 The Redis client is **injected and already connected**. It must be created with
 `disableOfflineQueue: true`, an `error` listener, `commandOptions: { timeout }`,
-and `socket: { socketTimeout }` — all four are asserted, because without the
-first a Redis outage becomes hung page renders, without the second node-redis
-crashes the process, and without the third and fourth a hung Redis blocks the
-render path indefinitely instead of failing fast. The error listener must never
-log the raw error, which embeds the DSN.
+`socket: { socketTimeout }`, `pingInterval`, and a `socket.reconnectStrategy`
+that accepts a socket timeout — all six are asserted. Without the first a Redis
+outage becomes hung page renders. Without the second node-redis crashes the
+process. Without the third and fourth a hung Redis blocks the render path
+instead of failing fast. Without the fifth a quiet, healthy connection is
+closed. Without the sixth that close is permanent. The error listener must
+never log the raw error, which embeds the DSN.
 
-The two timeouts bound different phases and neither substitutes for the other:
+The two timeouts bound different phases and neither substitutes for the other.
 `commandOptions.timeout` bounds a command only while it is QUEUED, before it is
-written to the socket. `socket.socketTimeout` is the end-to-end deadline that
-covers the in-flight phase — once a command is written and awaiting a reply,
-only `socketTimeout` stops a Redis that accepts the command and never answers.
-Both must be positive, finite numbers of milliseconds.
+written to the socket. `socket.socketTimeout` is an IDLE timer, not a reply
+deadline: node-redis destroys the socket when nothing is read or written for
+that many milliseconds, and any read OR write resets it. So it bounds a command
+in flight only while the socket is otherwise silent. Under steady traffic each
+new write moves the deadline, and a Redis that accepts commands and never
+replies can go unnoticed (SMA-650). Both must be positive, finite numbers of
+milliseconds.
+
+Because `socketTimeout` also fires on a quiet, healthy connection, two more
+options are required. `pingInterval` keeps an idle socket alive: it must be a
+positive number of at most half of `socketTimeout`. The reconnect strategy must
+return a delay for a `SocketTimeoutError`: node-redis's default strategy returns
+`false` for that cause, so without one the first idle gap closes the client for
+the life of the process. The Redis user needs the `+ping` ACL permission.
 
 ### `waitUntil`
 

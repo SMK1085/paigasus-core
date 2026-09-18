@@ -13,11 +13,18 @@ export async function startRedis(): Promise<RedisFixture> {
 }
 
 /**
- * A client carrying the options createRedisDescriptorCache asserts. Mirrors the production shape
- * in @paigasus/auth's createRedisSessionStore.
+ * A client carrying the six options createRedisDescriptorCache asserts. `pingInterval` is half of
+ * `socketTimeout`, the largest value the precondition allows, and the reconnect strategy returns a
+ * delay for every cause, a socket timeout included (SMA-648 D4).
  */
 export async function connect(url: string): Promise<RedisClientType> {
-  const client: RedisClientType = createClient({ url, disableOfflineQueue: true, commandOptions: { timeout: 5_000 }, socket: { socketTimeout: 10_000 } });
+  const client: RedisClientType = createClient({
+    url,
+    disableOfflineQueue: true,
+    commandOptions: { timeout: 5_000 },
+    pingInterval: 5_000,
+    socket: { socketTimeout: 10_000, reconnectStrategy: (retries: number) => Math.min(retries * 100, 2_000) },
+  });
   // Never log the raw error: node-redis embeds the DSN in its connection errors.
   client.on('error', () => undefined);
   await client.connect();
