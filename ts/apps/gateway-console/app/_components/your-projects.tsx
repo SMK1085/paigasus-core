@@ -15,11 +15,16 @@ import { EmptyState } from '@paigasus/ui';
 
 export type YourProjectRow = { readonly key: string; readonly kind: 'team' | 'project'; readonly label: string; readonly href: string | null };
 
+/** A denied entry never links: the link would only lead to a 403 (mirrors iam-console's own orgs page). */
 export function yourProjectRows(scopes: IamResult<MyScopes>, basePath: string): YourProjectRow[] {
   if (!scopes.ok) return [];
   return scopes.value.entries.flatMap((entry: ScopeEntry): YourProjectRow[] => {
-    if (entry.kind === 'team') return [{ key: entry.prn, kind: 'team', label: entry.label ?? entry.teamId, href: null }];
-    if (entry.kind === 'project') return [{ key: entry.prn, kind: 'project', label: entry.label ?? entry.projectId, href: `${basePath}/orgs/${entry.orgId}/projects/${entry.projectId}` }];
+    if (entry.kind === 'team') return [{ key: entry.prn, kind: 'team', label: entry.denied ? 'No access to details' : (entry.label ?? entry.teamId), href: null }];
+    if (entry.kind === 'project') {
+      const label = entry.denied ? 'No access to details' : (entry.label ?? entry.projectId);
+      const href = entry.denied ? null : `${basePath}/orgs/${entry.orgId}/projects/${entry.projectId}`;
+      return [{ key: entry.prn, kind: 'project', label, href }];
+    }
     return [];
   });
 }
@@ -31,8 +36,10 @@ function ListBody({ scopes, rows }: { readonly scopes: IamResult<MyScopes>; read
     <ul className="flex flex-col gap-1 text-sm">
       {rows.map((row) => (
         <li key={row.key} data-kind={row.kind}>
-          {row.href === null ? (
+          {row.kind === 'team' ? (
             <span>{`Team: ${row.label}`}</span>
+          ) : row.href === null ? (
+            <span>{`Project: ${row.label}`}</span>
           ) : (
             <ZoneLink prefetch={false} href={row.href} className="hover:underline">
               {row.label}

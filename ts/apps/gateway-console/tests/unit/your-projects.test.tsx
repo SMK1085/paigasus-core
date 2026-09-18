@@ -22,6 +22,9 @@ const ORG = '0190a100-0000-7000-8000-00000000000a';
 const TEAM = '0190a1b2-0000-7000-8000-0000000000a1';
 const PROJECT = '0190a1c3-0000-7000-8000-0000000000a1';
 
+const DENIED_TEAM = '0190a1b2-0000-7000-8000-0000000000b2';
+const DENIED_PROJECT = '0190a1c3-0000-7000-8000-0000000000b3';
+
 const SCOPES: IamResult<MyScopes> = {
   ok: true,
   value: {
@@ -31,6 +34,18 @@ const SCOPES: IamResult<MyScopes> = {
       { kind: 'project', prn: `prn:pgs:iam::${ORG}:project/${PROJECT}`, orgId: ORG, teamId: TEAM, projectId: PROJECT, label: null, denied: false },
     ],
     hiddenCount: 2,
+    grantsListed: true,
+  },
+};
+
+const SCOPES_WITH_DENIED: IamResult<MyScopes> = {
+  ok: true,
+  value: {
+    entries: [
+      { kind: 'team', prn: `prn:pgs:iam::${ORG}:team/${DENIED_TEAM}`, orgId: ORG, teamId: DENIED_TEAM, label: null, denied: true },
+      { kind: 'project', prn: `prn:pgs:iam::${ORG}:project/${DENIED_PROJECT}`, orgId: ORG, teamId: null, projectId: DENIED_PROJECT, label: null, denied: true },
+    ],
+    hiddenCount: 0,
     grantsListed: true,
   },
 };
@@ -64,5 +79,18 @@ describe('Your projects', () => {
     expect(render({ ok: true, value: { entries: [], hiddenCount: 0, grantsListed: true } })).toContain('No team or project scopes');
     const error = { presentation: 'degraded' } as PaigasusError;
     expect(render({ ok: false, error })).toContain('Your teams and projects could not be loaded.');
+  });
+
+  it('does not link a denied team or project: the link would only lead to a 403', () => {
+    expect(yourProjectRows(SCOPES_WITH_DENIED, '/gateway')).toEqual([
+      { key: `prn:pgs:iam::${ORG}:team/${DENIED_TEAM}`, kind: 'team', label: 'No access to details', href: null },
+      { key: `prn:pgs:iam::${ORG}:project/${DENIED_PROJECT}`, kind: 'project', label: 'No access to details', href: null },
+    ]);
+
+    const html = render(SCOPES_WITH_DENIED);
+    expect(html).toContain('Team: No access to details');
+    expect(html).toContain('Project: No access to details');
+    expect(html).not.toContain('<a ');
+    expect(html).not.toContain(DENIED_PROJECT);
   });
 });
