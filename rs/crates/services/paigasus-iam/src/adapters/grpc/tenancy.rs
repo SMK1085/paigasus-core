@@ -28,7 +28,9 @@
 //! reason.
 //!
 //! **The rule, and its one exception.** Every tenancy-NODE PRN this module accepts is confirmed
-//! against the stored node before it is acted on: in the handler for the thirteen node RPCs, and
+//! against the stored node before it is acted on: in the handler for the sixteen node RPCs — the
+//! thirteen that route through `load_{org,team,project}_checked`, plus `GetOrganization`/`GetTeam`/
+//! `GetProject`, which compare inline after their read — and
 //! in the REPOSITORY for the two membership RPCs that take a node PRN (`pg_memberships`'s
 //! `list_by_node` and `attach_in` both compare the stored `prn` column and answer
 //! [`TenancyError::PrnMismatch`]). The exception is `ListMemberships` with a PRINCIPAL filter:

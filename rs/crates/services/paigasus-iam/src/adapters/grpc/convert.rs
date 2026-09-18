@@ -164,11 +164,15 @@ pub fn authn_status(err: &AuthnError) -> Status {
 /// PRN, against the stored PARENT. That is the forged-org-slot defense (brief rule 8, mirroring
 /// the HTTP layer's semantics via stored-PRN comparison).
 ///
-/// Note what this function does NOT check: only the service and the resource type. It never
-/// builds an `OrganizationId`/`TeamId`/`ProjectId`, so the domain's own org-slot rule does not
-/// run here, and neither the organization slot nor the region is validated. Both are left to
-/// that comparison — which is why a forged slot answers `TenancyError::PrnMismatch` rather than
-/// being refused here as an invalid PRN.
+/// Region and organization slot are validated in TWO stages, and this function is only the
+/// first. `Prn::parse` here rejects a syntactically invalid region (`EU-WEST-1` fails
+/// `is_valid_region`), so that answers `invalid-prn`. Beyond the service and the resource type
+/// this function checks nothing else: it never builds an `OrganizationId`/`TeamId`/`ProjectId`,
+/// so the domain's own org-slot rule does not run, and a syntactically VALID region
+/// (`eu-west-1`) and any organization slot both pass through into the returned canonical. The
+/// second stage is the caller's stored-PRN comparison, which is what rejects a well-formed but
+/// non-matching region or slot — and why a forged slot answers `TenancyError::PrnMismatch`
+/// rather than `invalid-prn`.
 pub fn node_uuid(prn: &str, expect: &str) -> Result<(Uuid, String), Status> {
     let parsed = Prn::parse(prn).map_err(|e| status_to_grpc(TenancyError::InvalidPrn(e.kind().to_owned())))?;
     if parsed.service() != "iam" || parsed.resource_type() != expect {

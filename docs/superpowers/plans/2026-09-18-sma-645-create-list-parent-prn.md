@@ -1094,7 +1094,9 @@ Append this to the module doc, after the paragraph from Step 1. Do NOT write an 
 
 ```rust
 //! **The rule, and its one exception.** Every tenancy-NODE PRN this module accepts is confirmed
-//! against the stored node before it is acted on: in the handler for the thirteen node RPCs, and
+//! against the stored node before it is acted on: in the handler for the sixteen node RPCs — the
+//! thirteen that route through `load_{org,team,project}_checked`, plus the three Gets, which
+//! compare inline after their read — and
 //! in the REPOSITORY for the two membership RPCs that take a node PRN (`pg_memberships`'s
 //! `list_by_node` and `attach_in` both compare the stored `prn` column and answer
 //! `TenancyError::PrnMismatch`). The exception is `ListMemberships` with a PRINCIPAL filter:
@@ -1124,10 +1126,17 @@ Its doc says the canonical "is compared by every Get/Rename/Archive/Restore hand
 ```rust
 /// The returned canonical is compared against the service's stored canonical PRN by every
 /// Get/Rename/Archive/Restore handler, and — since SMA-645 — by the four Create/List handlers
-/// that take a PARENT PRN, against the stored PARENT. Note what this function does NOT check:
-/// only the service and the resource type. The organization slot and the region are left to that
-/// comparison, which is why a forged slot answers `TenancyError::PrnMismatch` rather than being
-/// refused here as an invalid PRN.
+/// that take a PARENT PRN, against the stored PARENT.
+///
+/// Region and organization slot are validated in TWO stages, and this function is only the
+/// first. `Prn::parse` here rejects a syntactically invalid region (`EU-WEST-1` fails
+/// `is_valid_region`), so that answers `invalid-prn`. Beyond the service and the resource type
+/// this function checks nothing else: it never builds an `OrganizationId`/`TeamId`/`ProjectId`,
+/// so the domain's own org-slot rule does not run, and a syntactically VALID region
+/// (`eu-west-1`) and any organization slot both pass through into the returned canonical. The
+/// second stage is the caller's stored-PRN comparison, which is what rejects a well-formed but
+/// non-matching region or slot — and why a forged slot answers `TenancyError::PrnMismatch`
+/// rather than `invalid-prn`.
 ```
 
 - [ ] **Step 5: Verify no quoted error-code literal reached `src/`**
@@ -1167,7 +1176,7 @@ The module doc stated the opposite of what the code now does and named
 SMA-645 as the reason.
 
 States the confirmation rule with its true scope rather than an
-unconditional one: the handler confirms for the thirteen node RPCs, the
+unconditional one: the handler confirms for the sixteen node RPCs, the
 repository confirms for the two membership RPCs that take a node PRN,
 and ListMemberships with a principal filter is a real exception tracked
 as SMA-649.

@@ -66,7 +66,7 @@ with `Code::InvalidArgument` / `ErrorInfo.reason = "prn-mismatch"`.
 Three reasons.
 
 1. **Consistency.** Every other node RPC that accepts a caller PRN already compares it. After this
-   change all thirteen node RPCs follow one rule. §4.3 states that rule with its true scope — it is
+   change all sixteen node RPCs follow one rule. §4.3 states that rule with its true scope — it is
    narrower than "every RPC in the module", and §5 names the exception.
 2. **The stated justification does not hold.** The module doc says there is "no stored resource yet
    to compare against". The PARENT is stored, and the handlers already load it under
@@ -292,7 +292,9 @@ unconditional load.
 confirmed against storage" — §5 shows that sentence is false. Write instead:
 
 > Every tenancy-NODE PRN this module accepts is confirmed against the stored node before it is acted
-> on: in the handler for the thirteen node RPCs, and in the repository for the two membership RPCs
+> on: in the handler for the sixteen node RPCs (the thirteen that route through
+> `load_{org,team,project}_checked`, plus the three Gets, which compare inline after their read),
+> and in the repository for the two membership RPCs
 > that take a node PRN. The one exception is `ListMemberships`' PRINCIPAL filter — see SMA-649.
 
 The follow-up issue is SMA-649.
