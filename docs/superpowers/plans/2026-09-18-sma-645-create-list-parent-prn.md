@@ -16,7 +16,14 @@
 - **Never write the literal `"prn-mismatch"` in quotes anywhere under `rs/crates/services/paigasus-iam/src/`.** `ci/error-registry/check.py`'s `code_pattern` matches a registry code in quotes anywhere in a file, comments included, and `adapters/grpc/tenancy.rs` is not in its `MANIFEST`. In `src/` prose use backticks or name `TenancyError::PrnMismatch`. Test files under `tests/` are not scanned and may use the literal.
 - The comparison order is fixed: **load → authorize (if `enforce_tenancy`) → compare**. Never compare before authorizing.
 - For the two Lists, `convert::to_page` runs **after** the helper call, not before.
-- Tests need a reachable Docker daemon. Without one they skip silently and prove nothing. Set `PAIGASUS_REQUIRE_DOCKER=1` to turn a skip into a panic when you need certainty.
+- **Every shell block below assumes these two exports.** They are stated once here rather than repeated, but they are not optional:
+
+  ```bash
+  export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"   # the Bash tool's PATH lacks the proto-managed CLIs
+  export PAIGASUS_REQUIRE_DOCKER=1                          # turn a Docker-less skip into a panic
+  ```
+
+  The first is required by CLAUDE.md so `moon`/`uv`/`nextest` resolve to the repo-pinned versions. The second matters more than it looks: `support::start_migrated_postgres()` returns `None` when the daemon is unreachable and every test then returns early, **counted as passed**. A whole run can report green having asserted nothing — which would make the entire mutation battery in Task 8 meaningless, since a mutation that reds nothing is indistinguishable from a suite that never ran. Never read a green without it.
 - Do not hand-edit `.github/CODEOWNERS` (Moon-generated).
 - Commit messages are conventional with a workspace scope, e.g. `fix(rs): …`, and end with the `Co-Authored-By` trailer used by the other commits on this branch.
 - A `#NNN` or `token: value` line in a commit BODY fails `footer-leading-blank`. Keep the body prose-only.
@@ -1256,11 +1263,13 @@ Expected: `an_upper_case_uuid_in_a_correct_parent_prn_still_works` FAILS on its 
 
 In `load_org_checked`, move the `if stored != canonical { … }` block ABOVE the `if state.enforce_tenancy { … }` authorize block.
 
-Expected: **two** tests FAIL — `an_ungranted_caller_cannot_tell_a_forged_prn_from_a_correct_one` (both the pre-existing SMA-643 cases and the four added in Task 5, since they share the helper). If only the SMA-643 cases fail, Task 5's extension did not take effect; check that the four loops were inserted before `server.abort()`. Restore.
+Expected: ONE test function FAILS — `an_ungranted_caller_cannot_tell_a_forged_prn_from_a_correct_one` — but its failure must name **both** the pre-existing SMA-643 cases and the four added in Task 5, since they share the helper and live in the same function. Check the failing labels, not the test count: `RenameOrganization forged` and `ArchiveOrganization forged` alongside `CreateTeam forged` and `ListTeams forged`. If only the SMA-643 labels appear, Task 5's extension did not take effect. Only organization-parent handlers appear at all, because this mutation touches `load_org_checked` alone. Restore.
 
 - [ ] **Step 9: Confirm the tree is clean and the suite is green**
 
 ```bash
+export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
+export PAIGASUS_REQUIRE_DOCKER=1
 cd /Users/smaschek/dev/paigasus/paigasus-core/.claude/worktrees/sma-645
 git status --short
 grep -c "MUTATION" rs/crates/services/paigasus-iam/src/adapters/grpc/tenancy.rs || echo "0 mutations left"
@@ -1271,7 +1280,11 @@ Expected: `git status --short` shows no modified source file, zero `MUTATION` ma
 
 - [ ] **Step 10: Run the full graph as CI does**
 
-Per-project tasks do not run the repo-level gates. Run the whole graph. Note the local-bash split recorded in CLAUDE.md: `repo:affected-smoke` needs system `/bin/bash` 3.2, while `repo:ruff-ci` and `repo:next-public-free` need bash 4+, so a single invocation cannot satisfy every gate — re-run the mismatched ones directly and read those results instead of the `moon ci` verdict for them.
+Per-project tasks do not run the repo-level gates. Run the whole graph. Note the local-bash split recorded in CLAUDE.md: `repo:affected-smoke` needs system `/bin/bash` 3.2, while `repo:ruff-ci`, `repo:next-public-free` and `repo:publish-metadata` need bash 4+, so a single invocation cannot satisfy every gate — re-run the mismatched ones directly with `/opt/homebrew/bin/bash ci/<gate>/run.sh` and read those results instead of the `moon ci` verdict for them.
+
+Use a bash-3.2-only shim directory for the `moon ci` invocation rather than prepending `/bin` to `PATH`, which would also downgrade `python3` to 3.9 and break `cargo_moon_parity.py` on `tomllib`.
+
+`repo:publish-metadata` was added to that bash-4+ set during this task (SMA-645): `ci/publish-metadata/run.sh:662` uses `declare -A`, so under bash 3.2 it dies immediately with `declare: -A: invalid option` on stderr and an EMPTY `stdout.log`. That shape reads as an infrastructure abort rather than a failed assertion — do not diagnose it as a real break. `repo:actionlint` has no working local bash at all, so it has no local verdict; CI is the only signal for it.
 
 ```bash
 export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
@@ -1302,7 +1315,7 @@ inside an agent session, which breaks any captured `$(proto …)` call in a gate
 
 - [ ] **Step 11: Record the mutation results**
 
-Write the table into the PR description in Task 9 (the open-pr stage). Format:
+This plan has eight tasks; opening the PR is the pipeline's own Stage 6, not a task here. Write the table to a scratchpad file as you go, then paste it into the PR description at that stage. Format:
 
 | # | mutation | tests that failed |
 |---|---|---|

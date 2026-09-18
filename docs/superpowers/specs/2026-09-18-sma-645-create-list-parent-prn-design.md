@@ -462,9 +462,18 @@ take effect.
 
 ### 6.2 Local run
 
-`cargo nextest run -p paigasus-iam --profile iam` needs a reachable Docker daemon; without one these
-suites skip and prove nothing. Before pushing, run the full graph as CI does, per CLAUDE.md — the
-per-crate task does not run the repo-level gates.
+Run with the repo-pinned toolchain on `PATH` and Docker made mandatory, or a green means nothing:
+
+```bash
+export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
+export PAIGASUS_REQUIRE_DOCKER=1
+cd rs && cargo nextest run -p paigasus-iam --profile iam
+```
+
+Without the first export the proto-managed CLIs do not resolve. Without the second, an unreachable
+Docker daemon makes every Docker-backed test return early and be counted as **passed**, so the suite
+reports green having asserted nothing. Before pushing, run the full graph as CI does, per CLAUDE.md —
+the per-crate task does not run the repo-level gates, and no single local bash satisfies all of them.
 
 ---
 
