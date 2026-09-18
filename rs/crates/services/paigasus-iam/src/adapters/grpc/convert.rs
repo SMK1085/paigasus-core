@@ -158,10 +158,17 @@ pub fn authn_status(err: &AuthnError) -> Status {
 /// through the kernel's stable error-kind token; a well-formed PRN of the wrong service/type
 /// carries its canonical form instead (mirrors `application::memberships`'s PRN parsing).
 ///
-/// The returned canonical is compared by every Get/Rename/Archive/Restore handler against the
-/// service's stored canonical PRN before the write for Rename/Archive/Restore, and after the
-/// read for Get — the forged-org-slot defense (brief rule 8, mirroring the HTTP layer's
-/// semantics via stored-PRN comparison).
+/// The returned canonical is compared against the service's stored canonical PRN by every
+/// Get/Rename/Archive/Restore handler — before the write for Rename/Archive/Restore, and after
+/// the read for Get — and, since SMA-645, by the four Create/List handlers that take a PARENT
+/// PRN, against the stored PARENT. That is the forged-org-slot defense (brief rule 8, mirroring
+/// the HTTP layer's semantics via stored-PRN comparison).
+///
+/// Note what this function does NOT check: only the service and the resource type. It never
+/// builds an `OrganizationId`/`TeamId`/`ProjectId`, so the domain's own org-slot rule does not
+/// run here, and neither the organization slot nor the region is validated. Both are left to
+/// that comparison — which is why a forged slot answers `TenancyError::PrnMismatch` rather than
+/// being refused here as an invalid PRN.
 pub fn node_uuid(prn: &str, expect: &str) -> Result<(Uuid, String), Status> {
     let parsed = Prn::parse(prn).map_err(|e| status_to_grpc(TenancyError::InvalidPrn(e.kind().to_owned())))?;
     if parsed.service() != "iam" || parsed.resource_type() != expect {

@@ -13,9 +13,28 @@
 //! is sound outside the write transaction because a node's stored PRN never changes (the `prn`
 //! column is written once, at insert, and nothing moves a node to a different parent).
 //!
-//! Creates and Lists **that take a parent PRN** do NOT compare it: they take the parent's uuid
-//! and discard the rest, so a forged parent organization slot is accepted without an error (the
-//! write still goes to the real parent). That is SMA-645, not a property of this design.
+//! Creates and Lists **that take a parent PRN** compare it too (SMA-645): `CreateTeam`/
+//! `ListTeams` against the stored organization, `CreateProject`/`ListProjects` against the stored
+//! team, in `load_{org,team}_checked`. Before that they took the parent's uuid and discarded the
+//! rest, so a forged parent organization slot — or a forged region, which `convert::node_uuid`
+//! does not check either — was accepted and the write went to the real parent with no error.
+//!
+//! Two consequences worth knowing. The parent load is UNCONDITIONAL for these four, so with the
+//! test-only `enforce_tenancy = false` a List against an unknown parent now answers `not-found`
+//! where it used to return an empty OK list. And for a request naming the wrong parent, the
+//! mismatch now outranks the field and state errors: a forged parent with an invalid slug, an
+//! archived parent or an out-of-range `limit` answers the mismatch, not `invalid-slug`,
+//! `parent-archived` or `invalid-pagination`. `convert::to_page` runs after the check for that
+//! reason.
+//!
+//! **The rule, and its one exception.** Every tenancy-NODE PRN this module accepts is confirmed
+//! against the stored node before it is acted on: in the handler for the thirteen node RPCs, and
+//! in the REPOSITORY for the two membership RPCs that take a node PRN (`pg_memberships`'s
+//! `list_by_node` and `attach_in` both compare the stored `prn` column and answer
+//! [`TenancyError::PrnMismatch`]). The exception is `ListMemberships` with a PRINCIPAL filter:
+//! `parse_principal_prn` checks only the service and the resource type, and `list_by_principal`
+//! then filters on a bare uuid, so a forged region or organization slot on a principal PRN is
+//! accepted. That is SMA-649, not a property of this design.
 //!
 //! **SMA-444 Task 20/21 enforcement:** every RPC authorizes the bearer-resolved actor
 //! ([`actor_context`]) before performing its operation, gated by
@@ -25,17 +44,19 @@
 //! the default `enforce_tenancy = true` the two transports answer alike. They differ only in
 //! the test-only `enforce_tenancy = false` setting, where gRPC still loads the node (SMA-643)
 //! and HTTP does not, so gRPC answers `not-found` for an unknown uuid where HTTP answers
-//! `nothing-to-rename` or `invalid-slug` first. `CreateTeam`/
-//! `ListTeams` fetch the parent org first (`orgs.get`); `CreateProject`/`ListProjects`/
-//! `AttachMembership`/`ListMemberships`(node-filtered) resolve their parent/target node by
-//! uuid through the owning service ([`resolve_node`]) — all rather than trusting the wire
-//! PRN's org slot directly (or building an unchecked PRN straight from a path/wire uuid),
-//! which would otherwise let a claimed-but-nonexistent parent reach the entity-slice loader
-//! and fail closed as an internal error instead of the expected `NotFound`. The existing
-//! forged-org-slot defense (this module's own stored-canonical check, and
-//! `MembershipService::attach`'s own `PrnMismatch` detection) fires BEFORE the actual mutating
-//! call; this only keeps the AUTHORIZATION step itself from ever entity-slice-loading
-//! a claimed-but-nonexistent org.
+//! `nothing-to-rename` or `invalid-slug` first. Since SMA-645 that divergence covers the four
+//! parent-PRN handlers as well, because their parent load is unconditional too.
+//! `CreateTeam`/`ListTeams` fetch the parent org first (`orgs.get`, now inside
+//! [`load_org_checked`]); `CreateProject`/`ListProjects` fetch the parent team
+//! (`teams.get`, inside [`load_team_checked`]); `AttachMembership`/
+//! `ListMemberships`(node-filtered) resolve their target node by uuid through the owning
+//! service ([`resolve_node`]) — all rather than trusting the wire PRN's org slot directly (or
+//! building an unchecked PRN straight from a path/wire uuid), which would otherwise let a
+//! claimed-but-nonexistent parent reach the entity-slice loader and fail closed as an internal
+//! error instead of the expected `NotFound`. The forged-org-slot defense (this module's own
+//! stored-canonical check, and `MembershipService::attach`'s own `PrnMismatch` detection) fires
+//! BEFORE the actual mutating call; the uuid resolution only keeps the AUTHORIZATION step itself
+//! from ever entity-slice-loading a claimed-but-nonexistent org.
 
 use std::time::Instant;
 
@@ -144,6 +165,14 @@ async fn resolve_node(state: &AppState, node: &TenancyNodeRef) -> Result<Prn, Te
 /// changes: the `prn` column is written once, at insert, and no repository method, service or
 /// migration moves a node to a different parent. A future "move" feature breaks that invariant
 /// and must revisit this helper.
+///
+/// The load is UNCONDITIONAL, and that predates the comparison needing it (SMA-444): resolving
+/// the node through `orgs.get` — rather than trusting the wire PRN's organization slot, or
+/// building an `OrganizationId::from_uuid` PRN without confirming existence — is what keeps a
+/// claimed-but-nonexistent node from reaching the entity-slice loader with a dangling id and
+/// failing closed as an internal error instead of the expected `NotFound`. SMA-645 moved
+/// `CreateTeam`/`ListTeams` onto this helper, which is why that reasoning lives here now rather
+/// than in each handler.
 async fn load_org_checked(state: &AppState, actor: &Prn, action: Action, id: Uuid, canonical: &str, rpc: &str) -> Result<(), Status> {
     let view = state.orgs.get(id).await.map_err(convert::status_to_grpc)?;
     if state.enforce_tenancy {
@@ -157,7 +186,9 @@ async fn load_org_checked(state: &AppState, actor: &Prn, action: Action, id: Uui
     Ok(())
 }
 
-/// The team twin of [`load_org_checked`] — same order, same reasons.
+/// The team twin of [`load_org_checked`] — same order, same reasons, including the unconditional
+/// `teams.get` load. SMA-645 moved `CreateProject`/`ListProjects` onto this helper: their parent
+/// is a TEAM, so they compare against the stored team rather than the stored organization.
 async fn load_team_checked(state: &AppState, actor: &Prn, action: Action, id: Uuid, canonical: &str, rpc: &str) -> Result<(), Status> {
     let view = state.teams.get(id).await.map_err(convert::status_to_grpc)?;
     if state.enforce_tenancy {
