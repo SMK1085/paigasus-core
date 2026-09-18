@@ -2,8 +2,9 @@
 
 The AI Gateway zone of the Paigasus console. It is a Next.js 16 app, mounted at `/gateway`, that
 runs as a standalone server, beside `@paigasus/iam-console` (mounted at `/iam`) in a multi-zone
-deployment. It has the login, the console shell, the zone overview and the organization scope
-route. Design: `docs/superpowers/specs/2026-09-13-sma-512-gateway-console-design.md`.
+deployment. It has the login, the console shell, the zone overview, and the organization and
+project settings pages (SMA-636). Design: `docs/superpowers/specs/2026-09-13-sma-512-gateway-console-design.md`
+and `docs/superpowers/specs/2026-09-18-sma-636-gateway-org-project-settings-design.md`.
 
 ## Run it locally
 
@@ -82,7 +83,14 @@ instead of reporting green having proved nothing.
 
 - Acceptance criteria 1 and 2 (the two-zone properties) are now proved by the `two-zone` Playwright project above (SMA-512 pull request 4). Row R8 proves AC 1: a session from the IAM zone carries into the gateway zone with no second authorization. Row R10 proves AC 2: a cold login at the gateway zone works with zero connections to `iam-console`.
 - Acceptance criterion 3 is not delivered at all: the gateway's chat route authenticates Paigasus API keys and never an OIDC token, so a playground built on a console session could not make one real call. A follow-up issue owns widening `require_iam_auth` and deciding the authorization resource for a user principal.
-- The organization scope route changes the URL and the breadcrumbs and nothing else. It exists so a later settings screen has a working shape to hang off, and so the switcher is not a dead control.
+- The settings pages list the service accounts that the organization or the project owns, and their API keys (SMA-636). An account that a team owns is not visible in this zone, so an organization admin has no complete list of live keys here.
+- Creating a service account makes two IAM calls, not one atomic call. A failed `gateway_user` grant leaves an account that cannot call models until someone uses "Allow model calls".
+- An account that got `gateway_user` outside the console, at an ancestor scope, shows "Can call models: Yes". The console cannot show where the grant comes from.
+- There is no "Stop model calls" control: `RevokeRole` needs a grant id, and only a platform admin can list another principal's grants. Archive the account or revoke its keys instead.
+- After an archive, IAM evicts the account's keys from its API-key cache. How fast every IAM replica stops accepting them depends on IAM's cache configuration, which the console does not check.
+- `FormError`, `node-status.ts`, `section-error.tsx` and the two-step confirm button are copies of iam-console's. Nothing gates a divergence.
+- The organization page makes one `ListProjects` call per shown team (at most 50, at most 8 in flight). Row R19 counts the calls of one render; nothing measures their latency against a real IAM.
+- With JavaScript off, the settings pages are read-only: every mutation control renders after hydration.
 - The organization switcher runs `myScopes()` on every console page render — one `Introspect`, one `ListRoleGrants` walk and up to 50 tenancy reads. The cost is not measured, and this zone pays it independently of `iam-console`, which pays the same cost.
 - A lost `cache()` memoization inside `lib/console.ts` (there must be exactly one `createConsoleRuntime()` call) is observable only in the browser tier, and this app ships that rule today with no automated control behind it.
 - A stopped zone app is invisible to ADR-0020 discovery: discovery probes services, not zone apps, so a zone whose app is down still renders an _available_ nav entry pointing at a dead route. A later ingress layer is where that would be caught.

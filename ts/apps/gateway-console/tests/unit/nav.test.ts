@@ -13,7 +13,7 @@ vi.mock('@paigasus/app-shell', async (importOriginal) => {
   return { ...actual, navStateOf };
 });
 
-const { GATEWAY_BASE_PATH, buildNavEntries } = await import('../../lib/nav');
+const { GATEWAY_BASE_PATH, buildNavEntries, iamManageHref } = await import('../../lib/nav');
 
 const ZONES = { iam: '/iam', gateway: '/gateway' };
 
@@ -78,5 +78,25 @@ describe('buildNavEntries', () => {
     const entries = buildNavEntries({ iam: available('iam'), gateway: available('gateway'), zones: ZONES });
     expect(navStateOf).toHaveBeenCalledTimes(entries.length);
     expect(navStateOf.mock.results.map((r) => r.value as unknown)).toEqual(entries.map((e) => e.state));
+  });
+});
+
+describe('iamManageHref (SMA-636 spec § 4.4)', () => {
+  const ORG = '0190a100-0000-7000-8000-00000000000a';
+  const TEAM = '0190a1b2-0000-7000-8000-0000000000a1';
+  const PROJECT = '0190a1c3-0000-7000-8000-0000000000a1';
+
+  it('points an organization at the IAM zone, honouring a non-default mount prefix', () => {
+    expect(iamManageHref(ZONES, { kind: 'organization', orgId: ORG })).toBe(`/iam/orgs/${ORG}`);
+    expect(iamManageHref({ iam: '/identity' }, { kind: 'organization', orgId: ORG })).toBe(`/identity/orgs/${ORG}`);
+  });
+
+  it('points a project at its team route in the IAM zone', () => {
+    expect(iamManageHref(ZONES, { kind: 'project', orgId: ORG, teamId: TEAM, projectId: PROJECT })).toBe(`/iam/orgs/${ORG}/teams/${TEAM}/projects/${PROJECT}`);
+  });
+
+  it('is null with no IAM zone in the map, and for a project whose team is not known', () => {
+    expect(iamManageHref({ gateway: '/gateway' }, { kind: 'organization', orgId: ORG })).toBeNull();
+    expect(iamManageHref(ZONES, { kind: 'project', orgId: ORG, teamId: null, projectId: PROJECT })).toBeNull();
   });
 });
