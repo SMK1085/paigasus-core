@@ -58,10 +58,11 @@ with `Code::InvalidArgument` / `ErrorInfo.reason = "prn-mismatch"`.
 
 Three reasons.
 
-1. **Consistency.** Every other RPC in this module that accepts a caller PRN already compares it.
-   After this change the rule is unconditional and needs no exception list: *a tenancy RPC never
-   acts on a PRN it has not confirmed against storage.* An exception list is what let this hole
-   survive SMA-643.
+1. **Consistency.** Every other node RPC that accepts a caller PRN already compares it. After this
+   change all thirteen node RPCs follow one rule — *act only on a PRN confirmed against storage* —
+   and the module needs no exception list for them. An exception list is what let this hole survive
+   SMA-643. (One RPC outside that set, node-filtered `ListMemberships`, still has the defect; §5
+   records it and keeps it out of scope rather than leaving it unsaid.)
 2. **The stated justification does not hold.** The module doc says there is "no stored resource yet
    to compare against". The PARENT is stored, and three of the four handlers already load it.
 3. **Cost is near zero.** SMA-643 built the exact helper this needs. The change removes more code
@@ -229,13 +230,26 @@ unconditional load.
 
 ## 5. Out of scope
 
-- **`AttachMembership` and node-filtered `ListMemberships`.** Their node PRN goes through
-  `parse_node_prn` → `TenancyNodeRef::from_prn`, which validates that the org slot is *present* for a
-  team/project and *absent* for an organization — but not its VALUE, and not the region. For
-  `AttachMembership` the raw wire PRN reaches `MembershipService::attach`, which has its own
-  `PrnMismatch` detection. Whether node-filtered `ListMemberships` has equivalent protection was not
-  established here. These are not among SMA-645's four handlers; they deserve their own issue rather
-  than a silent scope widening.
+- **Node-filtered `ListMemberships` — a real, measured gap, left open deliberately.**
+  `AttachMembership` is covered: its raw wire PRN reaches `MembershipService::attach`, which has its
+  own `PrnMismatch` detection (`application/memberships.rs:13,113`). **`MembershipService::list` does
+  not.** Its `Node` arm parses the PRN and calls `repo.list_by_node(&node, …)` with no comparison at
+  all (`memberships.rs:247-250`). `parse_node_prn` → `TenancyNodeRef::from_prn` validates the org
+  slot's PRESENCE but never its VALUE, and never the region — so a node-filtered `ListMemberships`
+  with a wrong org uuid on a team PRN is accepted today, the same defect class as this issue's four
+  handlers.
+
+  It is out of scope because it is not one of SMA-645's four handlers, the fix belongs in the
+  application layer rather than this adapter, and widening the issue silently is how SMA-643 left
+  SMA-645 behind in the first place. **Raise a follow-up Linear issue for it.**
+
+  **Consequence for §4.3.** The module doc must NOT claim an unconditional rule such as "a tenancy
+  RPC never acts on a PRN it has not confirmed". That sentence would be false while
+  `ListMemberships` stands. State the rule for the node CRUD RPCs, and name node-filtered
+  `ListMemberships` as the one remaining exception with its follow-up issue — an accurate doc with a
+  named gap beats a tidy doc that lies. The §2 reasoning is unaffected: consistency across the
+  thirteen node RPCs is still the argument, and this makes the twelve-versus-one remainder explicit
+  rather than hiding it.
 - **The HTTP transport.** All four HTTP twins name the parent with a bare uuid path segment
   (`/v1/organizations/{id}/teams`, `/v1/teams/{id}/projects`, via `UuidPath<…>`), so there is no
   caller-supplied PRN and structurally nothing to forge. No HTTP change is needed or possible.
