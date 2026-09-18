@@ -2,7 +2,7 @@
 // @vitest-environment jsdom
 //
 // The service-accounts section (SMA-636 spec § 4.6, § 5.4, § 7.1). Each case renders the real
-// section with real transitions and real form submissions, then renders it AGAIN with the props
+// frame and section with real transitions and real form submissions, then renders it AGAIN with the props
 // that the revalidated page sends — the technique of iam-console's manage-controls.test.tsx.
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
@@ -13,6 +13,7 @@ import { ZoneProvider } from '@paigasus/app-shell';
 import type { FormAction } from '@paigasus/console-core';
 import { ErrorReason, type PaigasusError, type Presentation } from '@paigasus/sdk/errors/types';
 import { FORM_REASON_COPY } from '../../app/_components/error-copy';
+import { ServiceAccountFrame } from '../../app/_components/service-account-frame';
 import { ServiceAccountSection } from '../../app/_components/service-account-section';
 import type { ApiKeyRowView, IssueKeyState, SectionOk, SelectedView, ServiceAccountActions, ServiceAccountRowView } from '../../app/(console)/service-accounts/view';
 
@@ -90,7 +91,9 @@ function actions(overrides: Partial<ServiceAccountActions> = {}): ServiceAccount
 function section(v: SectionOk, a: ServiceAccountActions): ReactNode {
   return (
     <ZoneProvider zone="gateway" zones={{ gateway: '/gateway' }}>
-      <ServiceAccountSection key={v.ownerPrn} ownerKind="organization" path={PATH} view={v} actions={a} />
+      <ServiceAccountFrame key={v.ownerPrn} path={PATH} saOffset={v.saOffset}>
+        <ServiceAccountSection ownerKind="organization" path={PATH} view={v} actions={a} />
+      </ServiceAccountFrame>
     </ZoneProvider>
   );
 }
@@ -280,13 +283,24 @@ describe('the token (§ 5.4)', () => {
 
   it('disables every other submit in the section while an issue is pending (rule 5)', async () => {
     const user = userEvent.setup();
-    render(section(view(), actions({ issue: () => new Promise<IssueKeyState>(() => undefined) })));
+    let finishIssue: (state: IssueKeyState) => void = () => undefined;
+    const issue = (): Promise<IssueKeyState> =>
+      new Promise((resolve) => {
+        finishIssue = resolve;
+      });
+    render(section(view(), actions({ issue })));
 
     await user.click(within(panel()).getByRole('button', { name: 'Issue key' }));
 
     await waitFor(() => {
       const enabled = screen.getAllByRole('button').filter((button) => !(button as HTMLButtonElement).disabled);
       expect(enabled.map((button) => button.textContent)).toEqual([]);
+    });
+    // Settle the issue. React 19 entangles pending async transitions, so an issue left pending
+    // forever keeps `isPending` true in every LATER test of this file too.
+    await act(async () => {
+      finishIssue(null);
+      await Promise.resolve();
     });
   });
 
@@ -306,6 +320,50 @@ describe('the token (§ 5.4)', () => {
     expect(html).not.toContain('data-testid="issue-key-form"');
     expect(html).not.toContain('data-testid="sa-create-form"');
     expect(html).not.toContain('Allow model calls');
+  });
+});
+
+describe('a rejected action (§ 5.4 rule 6)', () => {
+  const UNREACHED = 'The request did not reach the server. Reload the page and check the result.';
+
+  it('keeps the token open and shows the error in the result region when a later action rejects', async () => {
+    const user = userEvent.setup();
+    render(section(view(), actions({ revoke: () => Promise.reject(new Error('the network dropped')) })));
+
+    await user.click(within(panel()).getByRole('button', { name: 'Issue key' }));
+    await waitFor(() => {
+      expect(screen.getByTestId('token-value').textContent).toBe(TOKEN);
+    });
+    // Rule 5 keeps every submit disabled until the issue transition ends.
+    await waitFor(() => {
+      expect(within(panel()).getByRole<HTMLButtonElement>('button', { name: 'Revoke' }).disabled).toBe(false);
+    });
+    await revokeFirstKey(user);
+
+    expect(await within(region()).findByText(UNREACHED)).toBeDefined();
+    expect(screen.getByTestId('token-value').textContent).toBe(TOKEN);
+  });
+
+  it.each(['create', 'issue', 'allow', 'archive'] as const)('shows the error in the result region when %s rejects', async (control) => {
+    const user = userEvent.setup();
+    const reject = (): Promise<never> => Promise.reject(new TypeError('Failed to fetch'));
+    render(section(view(), actions({ [control]: reject })));
+
+    if (control === 'create') {
+      const form = screen.getByRole('form', { name: 'Create service account' });
+      await user.type(within(form).getByLabelText('Name'), 'ci-bot');
+      await user.click(within(form).getByRole('button', { name: 'Create' }));
+    } else if (control === 'issue') {
+      await user.click(within(panel()).getByRole('button', { name: 'Issue key' }));
+    } else if (control === 'allow') {
+      await user.click(within(panel()).getByRole('button', { name: 'Allow model calls' }));
+    } else {
+      await user.click(within(panel()).getByRole('button', { name: 'Archive' }));
+      await user.click(within(panel()).getByRole('button', { name: 'Confirm archive' }));
+    }
+
+    expect(await within(region()).findByText(UNREACHED)).toBeDefined();
+    expect(within(region()).getByTestId('form-error').getAttribute('data-presentation')).toBe('generic');
   });
 });
 

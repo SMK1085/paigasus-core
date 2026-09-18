@@ -58,7 +58,7 @@ export default async function ProjectSettingsPage({ params, searchParams }: Prop
         manage={manage}
       />
       <GatewayStateLine view={gatewayView(gateway)} />
-      {await serviceAccountsBlock({ view: data.section, ownerKind: 'project', path })}
+      {await serviceAccountsBlock({ view: data.section, ownerKind: 'project', ownerPrn: data.projectPrn, path })}
     </div>
   );
 }

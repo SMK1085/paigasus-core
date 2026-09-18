@@ -114,5 +114,19 @@ export type ServiceAccountActions = {
 
 export type SimpleControl = 'allow' | 'revoke' | 'archive' | 'issue';
 
-/** The ONE result region of a section (§ 4.6): the last result of any of its actions. */
-export type SectionResult = { readonly control: 'create'; readonly state: Exclude<CreateState, null> } | { readonly control: SimpleControl; readonly state: Exclude<ActionState, null> } | null;
+/**
+ * The ONE result region of a section (§ 4.6): the last result of any of its actions.
+ *
+ * The `issue` arm holds a FAILURE only. A success carries the token, and § 6.1 allows the token in
+ * one browser place, TokenPanel's own useState; storing it here would make a second copy. So an
+ * IssueKeyState success is not assignable to this type (tests/unit/section-result-type.test.ts).
+ * `unreached` is a rejected action (a client-built error). `token-lost` is a minted key whose token
+ * could not reach the TokenPanel: it holds the key prefix, never the token.
+ */
+export type SectionResult =
+  | { readonly control: 'create'; readonly state: Exclude<CreateState, null> }
+  | { readonly control: Exclude<SimpleControl, 'issue'>; readonly state: Exclude<ActionState, null> }
+  | { readonly control: 'issue'; readonly state: { readonly ok: false; readonly error: PaigasusError } }
+  | { readonly control: 'unreached'; readonly error: PaigasusError }
+  | { readonly control: 'token-lost'; readonly prefix: string }
+  | null;

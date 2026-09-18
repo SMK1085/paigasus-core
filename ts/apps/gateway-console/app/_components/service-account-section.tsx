@@ -1,37 +1,22 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// The service-accounts section (SMA-636 spec § 4.6): the frame, ONE result region for every action
-// of the section, the create form, the list, the pager and the selected-account panel. CLIENT
-// component. The server block renders it with `key={ownerPrn}`, so its state — the result region
-// and the token panel — stays through a revalidation of the SAME owner, and a move to another owner
-// starts a new, empty instance (the ManageControls pattern, SMA-630).
-//
-// WHY ONE REGION. A row or panel control that succeeds often unmounts itself: a revoked key loses
-// its Revoke button, an archived account loses every control. So every result, success or error,
-// goes to this region, and no control holds the only copy of its result.
-//
-// HOW AN ACTION RUNS. Every control hands its form to this component, which calls the action
-// DIRECTLY in a transition, with `null` as the previous state. § 5.4 rule 2 requires that for the
-// issue action, because useActionState sends the previous state — the token — back to the server;
-// the other actions follow the same path. A newer submission replaces the result of an older one
-// (a generation counter), EXCEPT an issue result: a token that IAM minted is always shown (rule 4).
-// While any action runs, every submit in the section is disabled (rule 5 needs that for an issue).
+// The service-accounts section body (SMA-636 spec § 4.6): the read-only note, the create form, the
+// list, the pager and the selected-account panel. CLIENT component. It renders inside
+// ServiceAccountFrame (./service-account-frame.tsx), which owns the ONE result region, the
+// TokenPanel and the runners that call the actions. The frame survives a revalidated render that
+// turns this body into an error or a denial, so a shown token stays (§ 5.4 rule 3).
 // Every submit control renders only after hydration (rule 7; plan SPEC DEVIATION 7 for the rest).
 'use client';
 
-import { useId, useRef, useState, useTransition, type ReactElement } from 'react';
+import { useId, type ReactElement } from 'react';
 import { ZoneLink } from '@paigasus/app-shell';
-import type { FormAction } from '@paigasus/console-core';
-import type { PaigasusError } from '@paigasus/sdk/errors/types';
 import { EmptyState, Field, Input, PRIMARY_BUTTON_CLASS, Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@paigasus/ui';
 import { linkHref } from '../../lib/paging';
 import { PARENT_ARCHIVED_NOTE } from '../(console)/node-status';
-import { serviceAccountIdOf } from '../(console)/service-accounts/service-account-id';
-import type { OwnerKind, ReadOnlyView, SectionOk, SectionResult, ServiceAccountActions, ServiceAccountRowView, SimpleControl } from '../(console)/service-accounts/view';
-import { FormError } from './form-error';
+import type { OwnerKind, ReadOnlyView, SectionOk, ServiceAccountActions, ServiceAccountRowView } from '../(console)/service-accounts/view';
 import { Pager } from './pager';
+import { useSectionRunner } from './service-account-frame';
 import { ServiceAccountPanel } from './service-account-panel';
-import { TokenPanel, type TokenPanelHandle } from './token-panel';
 import { useHydrated } from './use-hydrated';
 
 export type ServiceAccountSectionProps = {
@@ -42,76 +27,11 @@ export type ServiceAccountSectionProps = {
   readonly actions: ServiceAccountActions;
 };
 
-// An issue success never reaches ResultMessage's success branch: runIssue below hands a successful
-// token straight to the TokenPanel and never calls setResult for it (only an issue ERROR does). So
-// this table excludes 'issue' — an entry for it would be dead code, never read (controller F9).
-type SuccessControl = Exclude<SimpleControl, 'issue'>;
-
-const SUCCESS_TEXT: Readonly<Record<SuccessControl, string>> = {
-  allow: 'Model calls allowed.',
-  revoke: 'Key revoked.',
-  archive: 'Service account archived.',
-};
-
-/** § 5.3: a generic answer to "Allow model calls" can be a duplicate grant (§ 3.2). */
-const ALLOW_MAY_ALREADY = 'Model calls may already be allowed. The page was reloaded.';
-/** § 5.4: a plain denial and IAM's D15 check both answer forbidden. */
-const ISSUE_FORBIDDEN = 'You need permission to issue keys here and to grant every role this account holds.';
-
-function overrideFor(control: SimpleControl, error: PaigasusError): string | undefined {
-  if (control === 'allow' && error.presentation === 'generic') return ALLOW_MAY_ALREADY;
-  if (control === 'issue' && error.presentation === 'forbidden') return ISSUE_FORBIDDEN;
-  return undefined;
-}
-
 /** § 5.8. `unknown` is read-only with no note. */
 function readOnlyNote(readOnly: ReadOnlyView, ownerKind: OwnerKind): string | null {
   if (readOnly === 'archived') return `This ${ownerKind} is archived. IAM refuses changes to its service accounts and keys.`;
   if (readOnly === 'archived-parent') return PARENT_ARCHIVED_NOTE;
   return null;
-}
-
-function ResultMessage({ result, path, saOffset }: { readonly result: SectionResult; readonly path: string; readonly saOffset: number }): ReactElement | null {
-  if (result === null) return null;
-  if (result.control === 'create') {
-    const state = result.state;
-    if (state.kind === 'failed') return <FormError error={state.error} />;
-    const id = serviceAccountIdOf(state.saPrn);
-    const select =
-      id === null ? null : (
-        <ZoneLink prefetch={false} href={linkHref(path, { saOffset, sa: id })} className="underline">
-          Select it
-        </ZoneLink>
-      );
-    if (state.kind === 'partial') {
-      return (
-        <>
-          <p role="status" className="flex flex-wrap gap-2 text-sm">
-            <span>Service account created, but it cannot call models yet.</span>
-            {select}
-          </p>
-          <FormError error={state.error} />
-        </>
-      );
-    }
-    return (
-      <p role="status" className="flex flex-wrap gap-2 text-sm">
-        <span>{state.granted ? 'Service account created. It can call models.' : 'Service account created. This IAM does not offer role administration, so it cannot call models from here.'}</span>
-        {select}
-      </p>
-    );
-  }
-  if (result.state.ok) {
-    // Structural, not merely a policy: an issue success never lands here (see SUCCESS_TEXT above),
-    // and narrowing on it is what lets SUCCESS_TEXT's type omit an 'issue' entry.
-    if (result.control === 'issue') return null;
-    return (
-      <p role="status" className="text-sm">
-        {SUCCESS_TEXT[result.control]}
-      </p>
-    );
-  }
-  return <FormError error={result.state.error} message={overrideFor(result.control, result.state.error)} />;
 }
 
 export function CreateServiceAccountForm({ ownerPrn, disabled, onSubmit }: { readonly ownerPrn: string; readonly disabled: boolean; readonly onSubmit: (form: FormData) => void }): ReactElement {
@@ -199,45 +119,9 @@ function ServiceAccountList({ view, path }: { readonly view: SectionOk; readonly
 
 export function ServiceAccountSection({ ownerKind, path, view, actions }: ServiceAccountSectionProps): ReactElement {
   const hydrated = useHydrated();
-  const [result, setResult] = useState<SectionResult>(null);
-  const [working, startWork] = useTransition();
-  const [issuing, startIssue] = useTransition();
-  const generationRef = useRef(0);
-  const tokenPanelRef = useRef<TokenPanelHandle>(null);
-  const busy = working || issuing;
+  const runner = useSectionRunner();
+  const busy = runner.busy;
   const note = readOnlyNote(view.readOnly, ownerKind);
-
-  function runCreate(form: FormData): void {
-    generationRef.current += 1;
-    const mine = generationRef.current;
-    setResult(null);
-    startWork(async () => {
-      const state = await actions.create(null, form);
-      if (state !== null && generationRef.current === mine) setResult({ control: 'create', state });
-    });
-  }
-
-  function run(control: 'allow' | 'revoke' | 'archive', action: FormAction, form: FormData): void {
-    generationRef.current += 1;
-    const mine = generationRef.current;
-    setResult(null);
-    startWork(async () => {
-      const state = await action(null, form);
-      if (state !== null && generationRef.current === mine) setResult({ control, state });
-    });
-  }
-
-  function runIssue(form: FormData): void {
-    generationRef.current += 1;
-    setResult(null);
-    startIssue(async () => {
-      const state = await actions.issue(null, form);
-      // NO generation check (§ 5.4 rule 4): a token that IAM minted is always shown.
-      if (state === null) return;
-      if (state.ok) tokenPanelRef.current?.show(state.token, state.prefix);
-      else setResult({ control: 'issue', state });
-    });
-  }
 
   return (
     <div className="flex flex-col gap-4">
@@ -246,11 +130,15 @@ export function ServiceAccountSection({ ownerKind, path, view, actions }: Servic
           {note}
         </p>
       )}
-      <div data-testid="sa-result" className="flex flex-col gap-2">
-        <ResultMessage result={result} path={path} saOffset={view.saOffset} />
-        <TokenPanel ref={tokenPanelRef} />
-      </div>
-      {view.canCreate && hydrated ? <CreateServiceAccountForm ownerPrn={view.ownerPrn} disabled={busy} onSubmit={runCreate} /> : null}
+      {view.canCreate && hydrated ? (
+        <CreateServiceAccountForm
+          ownerPrn={view.ownerPrn}
+          disabled={busy}
+          onSubmit={(form) => {
+            runner.runCreate(actions.create, form);
+          }}
+        />
+      ) : null}
       <ServiceAccountList view={view} path={path} />
       <Pager label="Service account pages" path={path} param="saOffset" offset={view.page.offset} nextOffset={view.page.nextOffset} keep={{ sa: view.sa }} />
       <ServiceAccountPanel
@@ -261,15 +149,17 @@ export function ServiceAccountSection({ ownerKind, path, view, actions }: Servic
         hydrated={hydrated}
         disabled={busy}
         onAllow={(form) => {
-          run('allow', actions.allow, form);
+          runner.run('allow', actions.allow, form);
         }}
         onRevoke={(form) => {
-          run('revoke', actions.revoke, form);
+          runner.run('revoke', actions.revoke, form);
         }}
         onArchive={(form) => {
-          run('archive', actions.archive, form);
+          runner.run('archive', actions.archive, form);
         }}
-        onIssue={runIssue}
+        onIssue={(form) => {
+          runner.runIssue(actions.issue, form);
+        }}
       />
     </div>
   );

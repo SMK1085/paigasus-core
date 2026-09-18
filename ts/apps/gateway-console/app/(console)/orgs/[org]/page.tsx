@@ -50,7 +50,7 @@ export default async function OrganizationSettingsPage({ params, searchParams }:
       <Breadcrumbs items={[{ label: 'Overview', href: `${GATEWAY_BASE_PATH}/overview` }, { label: data.organization.name }]} />
       <SettingsHeader name={data.organization.name} status={statusColumnLabel(data.organization.lifecycle)} slug={data.organization.slug} manage={manage} />
       <GatewayStateLine view={gatewayView(gateway)} />
-      {await serviceAccountsBlock({ view: data.section, ownerKind: 'organization', path })}
+      {await serviceAccountsBlock({ view: data.section, ownerKind: 'organization', ownerPrn: data.orgPrn, path })}
       {await projectsBlock({ orgId: data.orgId, projects: data.projects })}
     </div>
   );

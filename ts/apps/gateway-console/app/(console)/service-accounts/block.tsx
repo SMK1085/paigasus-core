@@ -6,13 +6,29 @@
 //
 // A forbidden list shows only this section's denial; the page stays 200. It passes the same five
 // Server Actions on both pages: no action takes its owner from the page (plan SPEC DEVIATION 5).
+//
+// EVERY view kind renders inside ServiceAccountFrame, keyed by the owner PRN. The frame holds the
+// result region and the TokenPanel. A successful issue revalidates (plan SPEC DEVIATION 8), and the
+// revalidated section can be an error or a denial; the frame, and the token in it, stays through
+// that (§ 5.4 rule 3). The owner PRN comes from the page, because an error or a denial has none.
 import type { ReactElement } from 'react';
 import { SectionError } from '../../_components/section-error';
+import { ServiceAccountFrame } from '../../_components/service-account-frame';
 import { ServiceAccountSection } from '../../_components/service-account-section';
 import { allowModelCallsAction, archiveServiceAccountAction, createServiceAccountAction, issueApiKeyAction, revokeApiKeyAction } from './actions';
 import type { OwnerKind, SectionView } from './view';
 
-export async function serviceAccountsBlock({ view, ownerKind, path }: { readonly view: SectionView; readonly ownerKind: OwnerKind; readonly path: string }): Promise<ReactElement> {
+export async function serviceAccountsBlock({
+  view,
+  ownerKind,
+  ownerPrn,
+  path,
+}: {
+  readonly view: SectionView;
+  readonly ownerKind: OwnerKind;
+  readonly ownerPrn: string;
+  readonly path: string;
+}): Promise<ReactElement> {
   let body: ReactElement;
   if (view.kind === 'denied') {
     body = (
@@ -25,7 +41,6 @@ export async function serviceAccountsBlock({ view, ownerKind, path }: { readonly
   } else {
     body = (
       <ServiceAccountSection
-        key={view.ownerPrn}
         ownerKind={ownerKind}
         path={path}
         view={view}
@@ -38,7 +53,9 @@ export async function serviceAccountsBlock({ view, ownerKind, path }: { readonly
       <h2 id="service-accounts-heading" className="text-lg font-semibold">
         Service accounts
       </h2>
-      {body}
+      <ServiceAccountFrame key={ownerPrn} path={path} saOffset={view.kind === 'ok' ? view.saOffset : 0}>
+        {body}
+      </ServiceAccountFrame>
     </section>
   );
 }
