@@ -1,0 +1,39 @@
+{
+  "cli_version": "0.10.6",
+  "checkpoint_id": "df7f6cebd3d1",
+  "strategy": "manual-commit",
+  "branch": "main",
+  "checkpoints_count": 6,
+  "files_touched": [
+    ".superpowers/sdd/2026-09-13-sma-512-pr1-app-scoped-gates/final-fix-report.md",
+    ".superpowers/sdd/2026-09-13-sma-512-pr1-app-scoped-gates/task-1-report.md",
+    ".superpowers/sdd/2026-09-13-sma-512-pr1-app-scoped-gates/task-2-report.md",
+    ".superpowers/sdd/2026-09-13-sma-512-pr1-app-scoped-gates/task-3-report.md",
+    ".superpowers/sdd/2026-09-13-sma-512-pr1-app-scoped-gates/task-4-report.md",
+    ".superpowers/sdd/2026-09-13-sma-512-pr1-app-scoped-gates/task-5-report.md",
+    "scratchpad-types-orig.ts"
+  ],
+  "sessions": [
+    {
+      "metadata": "/df/7f6cebd3d1/0/metadata.json",
+      "transcript": "/df/7f6cebd3d1/0/full.jsonl",
+      "compact_transcript": "/df/7f6cebd3d1/0/transcript.jsonl",
+      "content_hash": "/df/7f6cebd3d1/0/content_hash.txt",
+      "prompt": "/df/7f6cebd3d1/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 930,
+    "cache_creation_tokens": 5691541,
+    "cache_read_tokens": 202254612,
+    "output_tokens": 594326,
+    "api_call_count": 465,
+    "subagent_tokens": {
+      "input_tokens": 0,
+      "cache_creation_tokens": 0,
+      "cache_read_tokens": 0,
+      "output_tokens": 0,
+      "api_call_count": 0
+    }
+  }
+}
