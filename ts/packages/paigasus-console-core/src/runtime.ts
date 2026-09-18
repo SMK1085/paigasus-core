@@ -59,7 +59,7 @@ export function createConsoleRuntime(deps: { config: () => ConsoleCoreConfig; au
   /** The session for this request, WITHOUT a redirect. `null` when there is none. */
   const optionalSession: () => Promise<ResolvedSession | null> = cache(async () => getSession(await deps.authRuntime()));
 
-  /** The five IAM clients for this request, bound to the session's access token and correlation id. */
+  /** The six IAM clients for this request, bound to the session's access token and correlation id. */
   const iamClients: () => Promise<IamClients> = cache(async () => {
     const session = await currentSession();
     return iamClientsForToken(session.accessToken, await requestCorrelationId());
@@ -69,7 +69,7 @@ export function createConsoleRuntime(deps: { config: () => ConsoleCoreConfig; au
   const sessionToken: () => Promise<string> = cache(async () => (await currentSession()).accessToken);
 
   /**
-   * The five IAM clients for a SERVER ACTION. Deliberately NOT a `cache()`: it returns a `relogin`
+   * The six IAM clients for a SERVER ACTION. Deliberately NOT a `cache()`: it returns a `relogin`
    * failure rather than redirecting, so a Server Action can render an inline error.
    *
    * WHY AN ACTION MUST NOT REDIRECT HERE. `requireSession()` redirects basePath-RELATIVE, which a

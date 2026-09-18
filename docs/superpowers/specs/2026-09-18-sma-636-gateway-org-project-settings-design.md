@@ -546,6 +546,10 @@ per-session cache stays a follow-up that needs a latency number first.
   (§ 7.3), not timed.
 - The overview's Your projects list shows at most the 50 scopes that `myScopes()` shows
   (`SCOPE_CAP`).
+- Plan deviation 8 (a successful issue revalidates) opens a window: if the revalidated render fails
+  at page level (`GetOrganization` or `GetProject`), the page is replaced and the shown token is
+  lost. A section-level error or denial keeps the token, because the token panel lives in a frame
+  that every section view kind renders.
 
 ---
 

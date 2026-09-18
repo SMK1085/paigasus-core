@@ -74,8 +74,8 @@ test('R16: an issued token is in exactly one response body, the action response,
   expect(action === undefined ? '' : headerText(action)).not.toContain(token);
 
   // The residue: every response that should carry a body, and whose body this row did not read,
-  // must belong to the one measured class the README's Known limits records — an unbuffered
-  // prefetch (F16) or a redirect Playwright's Response.body() contract refuses.
+  // must belong to one of the two measured classes the README's Known limits records — an
+  // unbuffered prefetch (F16) or a redirect Playwright's Response.body() contract refuses.
   expect(seen.filter((response) => response.expectsBody && !response.bodyRead && !response.prefetchRsc && !response.redirect).map((response) => `${response.method} ${response.url}`)).toEqual([]);
 
   // Vacuity guards: the action body, an HTML body and a non-action RSC body were READ and searched.
