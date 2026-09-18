@@ -86,9 +86,12 @@ assert_case() {
 #   same-named task in another stack could enter a case's observed set. `contracts:lint` exists
 #   and does not appear here — contracts is UPSTREAM of paigasus-proto-rs and `--downstream deep`
 #   walks dependents — but a future case with a different touched file must re-check that.
-#   Measured (SMA-510, SMA-511, SMA-512): FIVE projects now declare `test-e2e` —
-#   `paigasus-auth-ts`, `paigasus-discovery-ts`, `paigasus-app-shell-ts`, `iam-console-ts` and
-#   `gateway-console-ts`. app-shell's `test-e2e`
+#   Measured (SMA-510, SMA-511, SMA-512, SMA-648): SIX projects now declare `test-e2e` —
+#   `paigasus-auth-ts`, `paigasus-discovery-ts`, `paigasus-app-shell-ts`, `iam-console-ts`,
+#   `gateway-console-ts` and `paigasus-console-core-ts`. console-core's `test-e2e` (SMA-648) keys
+#   on its own `src/**/*` and `tests/**/*` and on `@paigasus/discovery`'s `src/**/*`, so the
+#   discovery and console-core source cases below include it; it does NOT key on `testing/**/*`,
+#   so the console-core-testing case does not. app-shell's `test-e2e`
 #   keys on the ui, auth, discovery and next-config sources; iam-console's keys on every package the
 #   app compiles, so the ui, auth, discovery, app-shell, proto and sdk cases below include it.
 #   gateway-console's keys on that same package set AND, since SMA-512 PR 4, on the whole
@@ -506,8 +509,11 @@ run_suite() {
   # SMA-512 PR 3: gateway-console-ts:{build,test,test-e2e} join this set — the second zone resolves
   # its upstream through the same discovery client, so its build, test and test-e2e each list
   # '/ts/packages/paigasus-discovery/src/**/*' in their own `inputs`.
+  # SMA-648: paigasus-console-core-ts:test-e2e joins this set — the new Docker tier's inputs name
+  # '/ts/packages/paigasus-discovery/src/**/*', because that package owns the preconditions the
+  # tier's Redis client must meet. MEASURED with the no-flag `moon query tasks --affected`.
   run_task_case_ci "discovery->discovery-tasks" "ts/packages/paigasus-discovery/src/core/state.ts" \
-    "paigasus-app-shell-ts:build,paigasus-app-shell-ts:test,paigasus-app-shell-ts:test-e2e,paigasus-discovery-ts:build,paigasus-discovery-ts:test,paigasus-discovery-ts:test-e2e,iam-console-ts:build,iam-console-ts:test,iam-console-ts:test-e2e,gateway-console-ts:build,gateway-console-ts:test,gateway-console-ts:test-e2e,paigasus-console-core-ts:build,paigasus-console-core-ts:test,ts:lint"
+    "paigasus-app-shell-ts:build,paigasus-app-shell-ts:test,paigasus-app-shell-ts:test-e2e,paigasus-discovery-ts:build,paigasus-discovery-ts:test,paigasus-discovery-ts:test-e2e,iam-console-ts:build,iam-console-ts:test,iam-console-ts:test-e2e,gateway-console-ts:build,gateway-console-ts:test,gateway-console-ts:test-e2e,paigasus-console-core-ts:build,paigasus-console-core-ts:test,paigasus-console-core-ts:test-e2e,ts:lint"
   # The SECOND anchor, and it is not redundant. The case above anchors only on src/core/, so
   # narrowing the inherited `sources` file group to `src/core/**/*` would leave it green while an
   # edit to an ADAPTER stopped selecting anything — and the adapters are where the Redis lock
@@ -524,8 +530,11 @@ run_suite() {
   # '/ts/packages/paigasus-discovery/src/**/*' glob as the case above. This is the adapters side of
   # the two-anchor pair, so it is what proves that glob is not narrowable to src/core/ for the new
   # zone either.
+  # SMA-648: paigasus-console-core-ts:test-e2e joins this set — the new Docker tier's inputs name
+  # '/ts/packages/paigasus-discovery/src/**/*', because that package owns the preconditions the
+  # tier's Redis client must meet. MEASURED with the no-flag `moon query tasks --affected`.
   run_task_case_ci "discovery-adapters->discovery-tasks" "ts/packages/paigasus-discovery/src/adapters/memory-cache.ts" \
-    "paigasus-app-shell-ts:build,paigasus-app-shell-ts:test,paigasus-app-shell-ts:test-e2e,paigasus-discovery-ts:build,paigasus-discovery-ts:test,paigasus-discovery-ts:test-e2e,iam-console-ts:build,iam-console-ts:test,iam-console-ts:test-e2e,gateway-console-ts:build,gateway-console-ts:test,gateway-console-ts:test-e2e,paigasus-console-core-ts:build,paigasus-console-core-ts:test,ts:lint"
+    "paigasus-app-shell-ts:build,paigasus-app-shell-ts:test,paigasus-app-shell-ts:test-e2e,paigasus-discovery-ts:build,paigasus-discovery-ts:test,paigasus-discovery-ts:test-e2e,iam-console-ts:build,iam-console-ts:test,iam-console-ts:test-e2e,gateway-console-ts:build,gateway-console-ts:test,gateway-console-ts:test-e2e,paigasus-console-core-ts:build,paigasus-console-core-ts:test,paigasus-console-core-ts:test-e2e,ts:lint"
   # SMA-510 — a @paigasus/app-shell SOURCE edit must select its own build/test AND the browser-tier
   # `test-e2e` task, plus `ts:lint`. Nothing else asserts that this package's tasks are reachable
   # from an edit to it: `repo:input-liveness` scans `repo:*` tasks only, and it proves that
@@ -670,10 +679,14 @@ run_suite() {
   # composition root calls the same createConsoleRuntime factory, so its build, test and test-e2e
   # each list '/ts/packages/paigasus-console-core/src/**/*' in their own `inputs`. "consumers" is
   # now literally two apps, which is what this case's name always anticipated.
+  # SMA-648: paigasus-console-core-ts:test-e2e joins BOTH sets — the new Docker tier's inputs name
+  # this package's own `src/**/*`. It is correctly ABSENT from the console-core-testing case below:
+  # the tier imports nothing from testing/, so its inputs do not list it. MEASURED with the no-flag
+  # `moon query tasks --affected`.
   run_task_case_ci "console-core->consumers" "ts/packages/paigasus-console-core/src/runtime.ts" \
-    "paigasus-console-core-ts:build,paigasus-console-core-ts:test,iam-console-ts:build,iam-console-ts:test,iam-console-ts:test-e2e,gateway-console-ts:build,gateway-console-ts:test,gateway-console-ts:test-e2e,ts:lint"
+    "paigasus-console-core-ts:build,paigasus-console-core-ts:test,paigasus-console-core-ts:test-e2e,iam-console-ts:build,iam-console-ts:test,iam-console-ts:test-e2e,gateway-console-ts:build,gateway-console-ts:test,gateway-console-ts:test-e2e,ts:lint"
   run_task_case_ci "console-core-prn-tenancy->consumers" "ts/packages/paigasus-console-core/src/prn-tenancy.ts" \
-    "paigasus-console-core-ts:build,paigasus-console-core-ts:test,iam-console-ts:build,iam-console-ts:test,iam-console-ts:test-e2e,gateway-console-ts:build,gateway-console-ts:test,gateway-console-ts:test-e2e,ts:lint"
+    "paigasus-console-core-ts:build,paigasus-console-core-ts:test,paigasus-console-core-ts:test-e2e,iam-console-ts:build,iam-console-ts:test,iam-console-ts:test-e2e,gateway-console-ts:build,gateway-console-ts:test,gateway-console-ts:test-e2e,ts:lint"
   # new (SMA-512, review finding I2) — the two cases above anchor on `src/**/*` only. Nothing
   # anchored on `testing/**/*`, the package's in-process fakes (fake-iam.ts, fake-idp.ts, tls.ts,
   # tls-terminator.ts, index.ts), even though iam-console's `typecheck`, `test` and `test-e2e`
