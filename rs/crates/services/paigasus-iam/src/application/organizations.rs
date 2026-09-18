@@ -21,7 +21,7 @@ use crate::application::error::TenancyError;
 use crate::application::pagination::Page;
 use paigasus_iam_core::{
     Action, AuditEntry, AuditLog, AuditOutcome, Clock, DomainEvent, EntityGenBumper, EventType, GrantScope, IdGenerator, NodeStatus, NodeView, Organization, OrganizationRepository, Outbox,
-    PolicyGenBumper, PrincipalId, RoleGrant, Slug, Stamp, Team, TenancyNodeRef, UnitOfWork,
+    PolicyGenBumper, PrincipalId, RoleGrant, Slug, Stamp, Team, TenancyNodeRef, UnitOfWork, validate_name,
 };
 use std::sync::Arc;
 use uuid::Uuid;
@@ -294,6 +294,11 @@ where
     /// (`NothingToRename` otherwise); rejected on an (effectively) archived org
     /// (`NodeArchived`).
     ///
+    /// The new name is validated with the same rule `create` uses (`validate_name`: trimmed, not
+    /// empty, at most `NAME_MAX_CHARS` scalar values) and answers `InvalidName` (SMA-642). The
+    /// check runs before the transaction opens, so it outranks every refusal the repository
+    /// raises. The stored name is the TRIMMED one.
+    ///
     /// SMA-606 D2: builds its event/audit entry AFTER `rename_in`, from `Mutated::value` — it
     /// receives a bare `Uuid`, not a PRN, so it cannot construct one until the repository hands
     /// back the (possibly renamed) node, and the payload must carry the POST-change slug/name.
@@ -304,11 +309,15 @@ where
             return Err(TenancyError::NothingToRename);
         }
         let slug = new_slug.map(Slug::parse).transpose()?;
+        // SMA-642: mirrors the slug line above. `create` validates through `Organization::new`;
+        // without this, `rename` stores a name `create` refuses. `validate_name` returns the
+        // TRIMMED name and that is what gets stored, exactly as `create` stores it (D2).
+        let name = new_name.map(validate_name).transpose()?;
         let stamp = Stamp::new(self.clock.now(), actor.clone());
         let corr = self.ids.new_correlation_id();
 
         let tx = self.uow.begin().await?;
-        let out = self.repo.rename_in(&*tx, id, slug.as_ref(), new_name, &stamp).await?;
+        let out = self.repo.rename_in(&*tx, id, slug.as_ref(), name.as_deref(), &stamp).await?;
         if out.changed {
             let ev = self.org_event(EventType::OrganizationRenamed, &out.value, &stamp, corr);
             // fix-round-1 finding 3 (spec D5): the detail must carry the same payload shape as
@@ -385,7 +394,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::application::fakes::{BumpSnapshotBumper, CountingGenBumper, FailingRenameOrgs, FakeAuditLog, FakeOutbox, FakePolicyGenBumper, FakeUnitOfWork, FixedClock, InMemoryOrgs, SeqIds};
+    use crate::application::fakes::{
+        BumpSnapshotBumper, CountingGenBumper, FailingRenameOrgs, FakeAuditLog, FakeOutbox, FakePolicyGenBumper, FakeUnitOfWork, FixedClock, InMemoryOrgs, SeqIds, TenancyStore,
+    };
     use chrono::{Duration, TimeZone, Utc};
 
     /// Bundles an `OrganizationService` together with every fake it was built over (SMA-606,
@@ -417,6 +428,28 @@ mod tests {
 
     fn service_with_fakes() -> (OrganizationService<InMemoryOrgs, SeqIds, FixedClock>, FakeOutbox, FakeAuditLog, CountingGenBumper, FakeUnitOfWork) {
         service_with_fakes_and_clock(FixedClock::default())
+    }
+
+    /// Builds an `OrganizationService` over a store the CALLER keeps a handle to, so a test can
+    /// plant a stored name that `create` would refuse (SMA-642 D4). Every other helper here
+    /// builds `InMemoryOrgs::default()` and drops the store, which no test could then reach.
+    fn service_over_store(store: TenancyStore, clock: FixedClock) -> OrganizationService<InMemoryOrgs, SeqIds, FixedClock> {
+        OrganizationService::new(OrganizationServiceDeps {
+            repo: InMemoryOrgs(store),
+            uow: Arc::new(FakeUnitOfWork::default()),
+            outbox: Arc::new(FakeOutbox::default()),
+            audit: Arc::new(FakeAuditLog::default()),
+            gen_bumper: Arc::new(CountingGenBumper::default()),
+            policy_gen_bumper: Arc::new(FakePolicyGenBumper::default()),
+            ids: SeqIds::default(),
+            clock,
+        })
+    }
+
+    /// Overwrites a stored name directly, bypassing every validation path — the only way to
+    /// reproduce a row the unvalidated rename wrote before SMA-642 closed it.
+    fn plant_stored_name(store: &TenancyStore, id: Uuid, name: &str) {
+        store.orgs.lock().unwrap().get_mut(&id).expect("org was created above").name = name.to_owned();
     }
 
     fn new_service() -> OrganizationService<InMemoryOrgs, SeqIds, FixedClock> {
@@ -952,5 +985,152 @@ mod tests {
         assert_eq!(err, TenancyError::Internal, "RepositoryError::Backend from a mid-txn store failure maps to Internal");
         assert!(outbox.0.lock().unwrap().is_empty(), "the event must not survive a failed mutation");
         assert!(audit.0.lock().unwrap().is_empty(), "nor the audit entry");
+    }
+
+    /// SMA-642 § 6.1: the three refusals the issue names. Each proves `rename` calls
+    /// `validate_name` at all. `matches!`, not `assert_eq!`: the variant carries a String.
+    #[tokio::test]
+    async fn rename_refuses_an_empty_blank_or_overlong_name() {
+        let svc = new_service();
+        let id = svc.create(&actor(1), "acme", "Acme").await.unwrap().organization.id.uuid();
+
+        let too_long = "x".repeat(257);
+        for bad in ["", "   ", too_long.as_str()] {
+            let err = svc.rename(id, None, Some(bad), &actor(2)).await.unwrap_err();
+            assert!(matches!(err, TenancyError::InvalidName(_)), "a rename to {bad:?} must be refused, got {err:?}");
+        }
+    }
+
+    /// SMA-642 § 6.2: the bound is INCLUSIVE at 256 and counts Unicode scalar values, not bytes.
+    /// A `>=` in place of `>` fails the first row; a byte count fails the second, because "ü" is
+    /// two bytes.
+    #[tokio::test]
+    async fn rename_accepts_the_upper_bound_in_scalar_values() {
+        let svc = new_service();
+        let id = svc.create(&actor(1), "acme", "Acme").await.unwrap().organization.id.uuid();
+
+        let max_ascii = "x".repeat(256);
+        assert_eq!(svc.rename(id, None, Some(&max_ascii), &actor(2)).await.unwrap().node.name, max_ascii);
+
+        let max_wide = "ü".repeat(256);
+        assert_eq!(svc.rename(id, None, Some(&max_wide), &actor(2)).await.unwrap().node.name, max_wide);
+    }
+
+    /// SMA-642 D2: `validate_name` returns the TRIMMED name and `create` stores that, so `rename`
+    /// must store it too. Storing the raw input would keep the exact defect this issue closes.
+    #[tokio::test]
+    async fn rename_stores_the_trimmed_name() {
+        let svc = new_service();
+        let id = svc.create(&actor(1), "acme", "Acme").await.unwrap().organization.id.uuid();
+
+        let renamed = svc.rename(id, None, Some("  Acme Corp.  "), &actor(2)).await.unwrap();
+        assert_eq!(renamed.node.name, "Acme Corp.", "the stored name must be trimmed, as create's is");
+    }
+
+    /// SMA-642 D2 consequence 1: because the application now trims before the repository's
+    /// byte-exact comparison, a name differing only in surrounding whitespace is the SAME name.
+    /// The rename must therefore change nothing at all.
+    #[tokio::test]
+    async fn a_whitespace_only_difference_is_a_no_op() {
+        let clock = FixedClock::default();
+        let t0 = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
+        clock.set(t0);
+        let (svc, outbox, audit, _bumper, _uow) = service_with_fakes_and_clock(clock.clone());
+        let id = svc.create(&actor(1), "acme", "Acme").await.unwrap().organization.id.uuid();
+        let events_after_create = outbox.0.lock().unwrap().len();
+        let entries_after_create = audit.0.lock().unwrap().len();
+
+        clock.set(t0 + Duration::seconds(10));
+        let same = svc.rename(id, None, Some("  Acme  "), &actor(2)).await.unwrap();
+
+        assert_eq!(same.node.name, "Acme");
+        assert_eq!(same.node.updated_at, t0, "a whitespace-only difference must not advance updated_at");
+        assert_eq!(same.node.modified_by.as_ref(), Some(&actor(1)), "a whitespace-only difference must not restamp the modifier");
+        assert_eq!(outbox.0.lock().unwrap().len(), events_after_create, "a no-op rename must emit no event");
+        assert_eq!(audit.0.lock().unwrap().len(), entries_after_create, "a no-op rename must record no audit entry");
+    }
+
+    /// SMA-642 D2 consequence 2, the direction that WRITES. A name stored untrimmed is only
+    /// reachable through the unvalidated rename this issue closes. Re-sending it was a no-op
+    /// before; now the application trims first, the repository's byte-exact comparison fails, and
+    /// the call normalizes the row. That is intended, and it is not silent: it emits the event and
+    /// the audit entry that say what changed.
+    #[tokio::test]
+    async fn a_legacy_untrimmed_name_is_normalized_by_the_next_rename() {
+        let store = TenancyStore::default();
+        let clock = FixedClock::default();
+        let t0 = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
+        clock.set(t0);
+        let svc = service_over_store(store.clone(), clock.clone());
+        let id = svc.create(&actor(1), "acme", "Acme").await.unwrap().organization.id.uuid();
+        plant_stored_name(&store, id, "  Acme  ");
+
+        clock.set(t0 + Duration::seconds(10));
+        let renamed = svc.rename(id, None, Some("  Acme  "), &actor(2)).await.unwrap();
+
+        assert_eq!(renamed.node.name, "Acme", "the legacy untrimmed name must be normalized");
+        assert_eq!(renamed.node.updated_at, t0 + Duration::seconds(10), "normalizing is a real write and must advance updated_at");
+        assert_eq!(renamed.node.modified_by.as_ref(), Some(&actor(2)), "normalizing is a real write and must restamp the modifier");
+    }
+
+    /// SMA-642 D3: the name check runs before `uow.begin()`, so it outranks every refusal the
+    /// repository raises inside the transaction. Without the check, this call answers NodeArchived.
+    #[tokio::test]
+    async fn a_bad_name_outranks_an_archived_node() {
+        let svc = new_service();
+        let id = svc.create(&actor(1), "acme", "Acme").await.unwrap().organization.id.uuid();
+        svc.archive(id, &actor(1)).await.unwrap();
+
+        let err = svc.rename(id, None, Some(""), &actor(2)).await.unwrap_err();
+        assert!(matches!(err, TenancyError::InvalidName(_)), "InvalidName must outrank NodeArchived, got {err:?}");
+    }
+
+    /// SMA-642 D4: a name IAM already stored that breaks the rule is NOT migrated and does not
+    /// block a rename that supplies no name. This is the exact shape the iam-console sends for a
+    /// slug-only rename — `renameChange` omits an unchanged name (`ts/apps/iam-console/lib/form.ts:72-79`).
+    #[tokio::test]
+    async fn a_slug_only_rename_survives_a_legacy_overlong_name() {
+        let store = TenancyStore::default();
+        let svc = service_over_store(store.clone(), FixedClock::default());
+        let id = svc.create(&actor(1), "acme", "Acme").await.unwrap().organization.id.uuid();
+        let legacy = "x".repeat(300);
+        plant_stored_name(&store, id, &legacy);
+
+        let renamed = svc.rename(id, Some("acme-2"), None, &actor(2)).await.unwrap();
+        assert_eq!(renamed.node.slug.as_str(), "acme-2");
+        assert_eq!(renamed.node.name, legacy, "a slug-only rename must leave a legacy name untouched");
+    }
+
+    /// SMA-642 Risk 3: the whole premise of the issue is that `create` and `rename` must accept
+    /// the same set of names. This is the only test that fails if the two rules ever diverge —
+    /// the per-file tests above would all still pass.
+    #[tokio::test]
+    async fn create_and_rename_accept_the_same_names() {
+        let cases: Vec<(String, bool)> = vec![
+            ("Acme".to_owned(), true),
+            ("  Acme  ".to_owned(), true),
+            ("ü".repeat(256), true),
+            ("x".repeat(256), true),
+            (String::new(), false),
+            ("   ".to_owned(), false),
+            ("x".repeat(257), false),
+        ];
+
+        for (name, want_ok) in &cases {
+            let name = name.as_str();
+            let want_ok = *want_ok;
+            let svc = new_service();
+            let created = svc.create(&actor(1), "acme", name).await;
+            assert_eq!(created.is_ok(), want_ok, "create disagreed on {name:?}");
+
+            let svc = new_service();
+            let id = svc.create(&actor(1), "acme", "Seed").await.unwrap().organization.id.uuid();
+            let renamed = svc.rename(id, None, Some(name), &actor(2)).await;
+            assert_eq!(renamed.is_ok(), want_ok, "rename disagreed on {name:?}");
+
+            if want_ok {
+                assert_eq!(created.unwrap().organization.name, renamed.unwrap().node.name, "create and rename stored different names for {name:?}");
+            }
+        }
     }
 }

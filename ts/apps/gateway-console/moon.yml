@@ -215,6 +215,11 @@ tasks:
       - 'proxy.ts'
       - 'tests/**/*'
       - 'vitest.config.ts'
+      # tests/unit/hydration.test.ts imports this config and asserts HYDRATION_TIMEOUT_MS against
+      # its `timeout` and `expect.timeout` (SMA-639). This task carries `merge: replace`, so no
+      # inherited input reaches a root-level config file: without this entry, lowering `timeout:`
+      # below the constant leaves the cache key unchanged and Moon serves a cached PASS.
+      - 'playwright.config.ts'
       - 'tsconfig.json'
       - 'package.json'
       - 'next.config.ts'

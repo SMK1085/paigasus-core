@@ -84,9 +84,10 @@ describe('the shared field bounds', () => {
   });
 });
 
-// SMA-630 CR round 1, spec § 4.2. The `name` bound applies only when the trimmed name changed: IAM
-// can store a name longer than 256 code points (spec F11), and a slug-only rename of such a node
-// must still work.
+// SMA-630 CR round 1, spec § 4.2, updated by SMA-642. The `name` bound applies only when the
+// trimmed name changed: IAM holds names longer than 256 code points that it stored before SMA-642
+// validated the rename path, it does not migrate them (SMA-642 D4), and a slug-only rename of such
+// a node must still work.
 describe('renameForm (the shared rename schema)', () => {
   const form = renameForm();
   const base = { prn: 'prn:pgs:iam::o:org/o', slug: 'acme', name: 'Acme', currentSlug: 'acme-old', currentName: 'Acme' };
