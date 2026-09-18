@@ -14,6 +14,7 @@ import { createJsonLogger, type ConsoleLogger } from '../../src/logger';
 
 const TIMEOUT_MS = 1000;
 const DEADLINE_MS = TIMEOUT_MS * 4;
+const COOLDOWN_MS = TIMEOUT_MS * 4;
 
 type CacheRecord = Parameters<DescriptorCache['set']>[1];
 
@@ -151,7 +152,7 @@ describe('withOperationDeadline — the deadline (D3, D7, D9, D10)', () => {
   });
 
   it('U10: all five operations are wrapped, and close() passes through unwrapped', async () => {
-    const { cache, inner } = wrapped();
+    const { cache, inner, client } = wrapped();
     for (const run of [
       () => cache.get('iam'),
       () => cache.set('iam', record(), 1000, null),
@@ -162,9 +163,91 @@ describe('withOperationDeadline — the deadline (D3, D7, D9, D10)', () => {
       const pending = run().catch(() => undefined);
       await vi.advanceTimersByTimeAsync(DEADLINE_MS);
       await pending;
+      // SMA-650 Task 2: this operation just expired and opened the circuit (D4). Close it before the
+      // next one so this test still proves each of the five methods reaches the inner cache, not the
+      // circuit's own behaviour — that is covered separately in the "circuit" describe block below.
+      client.emit('ready');
     }
     expect(inner.calls).toEqual(['get', 'set', 'delete', 'tryAcquireLock', 'releaseLock']);
     await expect(cache.close()).resolves.toBeUndefined();
     expect(inner.calls).toEqual(['get', 'set', 'delete', 'tryAcquireLock', 'releaseLock', 'close']);
+  });
+});
+
+describe('withOperationDeadline — the circuit (D4, D5, D6, D8)', () => {
+  /** Drives one operation to its deadline and returns once it has rejected. */
+  async function expire(cache: DescriptorCache): Promise<void> {
+    const pending = cache.get('iam').catch(() => undefined);
+    await vi.advanceTimersByTimeAsync(DEADLINE_MS);
+    await pending;
+  }
+
+  it('U3: after an expiry the next operation rejects at once with phase "circuit-open", and does not call the inner cache', async () => {
+    const { cache, inner } = wrapped();
+    await expire(cache);
+    expect(inner.calls).toEqual(['get']);
+    await expect(cache.get('iam')).rejects.toMatchObject({ name: 'DescriptorCacheTimeoutError', phase: 'circuit-open' });
+    // Still one call: the refused operation never reached the inner cache.
+    expect(inner.calls).toEqual(['get']);
+  });
+
+  it('U4: a ready event closes the circuit', async () => {
+    const { cache, inner, client } = wrapped();
+    await expire(cache);
+    client.emit('ready');
+    const pending = cache.get('iam');
+    inner.settle(record());
+    await expect(pending).resolves.toEqual(record());
+    expect(inner.calls).toEqual(['get', 'get']);
+  });
+
+  it('U5: with no ready event, the circuit closes after the cooldown', async () => {
+    const { cache, inner } = wrapped();
+    await expire(cache);
+    await vi.advanceTimersByTimeAsync(COOLDOWN_MS);
+    const pending = cache.get('iam');
+    inner.settle(record());
+    await expect(pending).resolves.toEqual(record());
+    expect(inner.calls).toEqual(['get', 'get']);
+  });
+
+  it('U5b: the circuit is still open one millisecond before the cooldown elapses', async () => {
+    const { cache } = wrapped();
+    await expire(cache);
+    await vi.advanceTimersByTimeAsync(COOLDOWN_MS - 1);
+    await expect(cache.get('iam')).rejects.toMatchObject({ phase: 'circuit-open' });
+  });
+
+  it('U6: one wedge logs one line, with the operation and the deadline', async () => {
+    const { cache, log } = wrapped();
+    await expire(cache);
+    await expect(cache.get('iam')).rejects.toThrow();
+    await expect(cache.delete('iam')).rejects.toThrow();
+    expect(log.timeouts()).toEqual([{ operation: 'get', deadlineMs: DEADLINE_MS }]);
+  });
+
+  it('U7: three concurrent expiries open the circuit once, and the cooldown runs from the FIRST', async () => {
+    const inner = fakeInner();
+    const client = new EventEmitter();
+    const log = sink();
+    // A fake inner cache that parks EVERY call, so three can be in flight at once.
+    const parked = { ...inner.cache, get: () => new Promise<never>(() => undefined) } as unknown as DescriptorCache;
+    const cache = withOperationDeadline(parked, client, TIMEOUT_MS, log.log);
+    const pending = [cache.get('iam').catch(() => undefined), cache.get('gateway').catch(() => undefined), cache.get('other').catch(() => undefined)];
+    await vi.advanceTimersByTimeAsync(DEADLINE_MS);
+    await Promise.all(pending);
+    expect(log.timeouts()).toEqual([{ operation: 'get', deadlineMs: DEADLINE_MS }]);
+    // The cooldown runs from the FIRST expiry, so it has elapsed after exactly COOLDOWN_MS more.
+    await vi.advanceTimersByTimeAsync(COOLDOWN_MS);
+    const after = cache.get('iam').catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(0);
+    // It parked inside the inner cache rather than being refused, so nothing has settled yet.
+    await expect(Promise.race([after, Promise.resolve('still running')])).resolves.toBe('still running');
+  });
+
+  it('U11: the wrapper registers a ready listener and no error listener', () => {
+    const { client } = wrapped();
+    expect(client.listenerCount('ready')).toBe(1);
+    expect(client.listenerCount('error')).toBe(0);
   });
 });

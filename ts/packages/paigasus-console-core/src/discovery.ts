@@ -190,6 +190,9 @@ function afterConnect(inner: DescriptorCache, ready: Promise<void>): DescriptorC
 /** How many command timeouts one cache operation may take, end to end (SMA-650 D3). */
 const DEADLINE_FACTOR = 4;
 
+/** How many command timeouts the wrapper stays silent after an expiry (SMA-650 D5). */
+const COOLDOWN_FACTOR = 4;
+
 /** Which half of the wrapper refused the operation (SMA-650 D9). */
 export type DescriptorCacheTimeoutPhase = 'deadline' | 'circuit-open';
 
@@ -230,11 +233,28 @@ export type ReadySource = { on(event: 'ready', listener: () => void): unknown };
  * `socketTimeout` is an idle timer that any write resets, so a Redis that accepts commands and never
  * replies is unbounded under steady traffic. This is the only end-to-end bound.
  */
-// eslint-disable-next-line @typescript-eslint/no-unused-vars -- `log` is wired in Task 2 (SMA-650); the signature must not change then.
 export function withOperationDeadline(inner: DescriptorCache, client: ReadySource, timeoutMs: number, log: ConsoleLogger): DescriptorCache {
   const deadlineMs = timeoutMs * DEADLINE_FACTOR;
+  const cooldownMs = timeoutMs * COOLDOWN_FACTOR;
+  // null = closed. Otherwise the Date.now() at which it opened (D4, D5). One field, mutated only
+  // from the event loop's single thread, so D6's read-then-write cannot interleave.
+  let openedAt: number | null = null;
+
+  // `ready` is the exact signal that node-redis finished a reconnect. NO error listener (D4 note).
+  client.on('ready', () => {
+    openedAt = null;
+  });
 
   const bounded = async <T>(operation: string, run: () => Promise<T>): Promise<T> => {
+    if (openedAt !== null) {
+      // While the cooldown runs we write NOTHING. That silence is what lets node-redis's idle timer
+      // fire and its reconnect strategy repair the socket (SMA-650 § 2 fact 4) — it is the repair
+      // mechanism, not only a cost saving.
+      if (Date.now() - openedAt < cooldownMs) throw new DescriptorCacheTimeoutError(operation, deadlineMs, 'circuit-open');
+      // The cooldown elapsed with no `ready`. Let this operation through: if the client is still not
+      // ready, node-redis refuses it at once (disableOfflineQueue), so the attempt costs nothing.
+      openedAt = null;
+    }
     let timer: ReturnType<typeof setTimeout> | undefined;
     const running = run();
     try {
@@ -247,15 +267,17 @@ export function withOperationDeadline(inner: DescriptorCache, client: ReadySourc
       ]);
     } catch (error) {
       if (error instanceof DescriptorCacheTimeoutError && error.phase === 'deadline') {
-        // D7: the abandoned operation keeps running. node-redis rejects it when the socket dies, and
-        // an unhandled rejection can end the process. A late SUCCESS is discarded: the caller has
-        // already degraded and moved on.
+        // D6: concurrent operations all expire together. Only the FIRST opens the circuit and logs,
+        // or one wedge would log a line per operation and the cooldown would never elapse.
+        if (openedAt === null) {
+          openedAt = Date.now();
+          log.appEvent('discovery.redis_operation_timeout', { operation, deadlineMs });
+        }
+        // D7: see Task 1.
         running.catch(() => undefined);
       }
       throw error;
     } finally {
-      // Mandatory. An uncleared timer is a leak per operation, and worse, it would open the circuit
-      // long after an operation that already settled.
       clearTimeout(timer);
     }
   };
