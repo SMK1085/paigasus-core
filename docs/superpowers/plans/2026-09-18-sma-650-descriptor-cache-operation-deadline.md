@@ -694,9 +694,10 @@ Add this case inside the existing `describe` block, after T5:
     })();
 
     await admin.clientPause(PAUSE_MS, 'ALL');
-    // The first operation issued after the pause begins expires DEADLINE_MS later. Give it that
-    // plus one drive step of slack, and stay inside the pause.
-    await sleep(DEADLINE_MS + DRIVE_STEP_MS);
+    // The first operation issued INSIDE the pause can go out as late as one drive step in, so it
+    // expires at DEADLINE_MS + DRIVE_STEP_MS. Wait one more drive step than that, so the assertion
+    // is not made exactly on the boundary — and stay inside PAUSE_MS, so the server is still paused.
+    await sleep(DEADLINE_MS + 2 * DRIVE_STEP_MS);
     driving = false;
     await driver;
     await Promise.all(issued);
