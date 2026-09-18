@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import { describe, expect, it } from 'vitest';
+import { NodeStatus } from '@paigasus/sdk/iam/types';
 import { DEV_GATEWAY_DESCRIPTOR, DEV_IAM_DESCRIPTOR, devWorld } from '../../testing/index';
 
 /**
@@ -62,15 +63,15 @@ describe('devWorld', () => {
     const listed = handlers['tenancy.listOrganizations']?.({} as never, {} as never) as { organizations: { status: number; effectiveStatus: number }[] };
     expect(listed.organizations.length).toBeGreaterThan(0);
     for (const organization of listed.organizations) {
-      expect(organization.status).toEqual(organization.effectiveStatus);
-      expect(organization.status).not.toEqual(0); // 0 is UNSPECIFIED
+      expect(organization.status).toEqual(NodeStatus.ACTIVE);
+      expect(organization.effectiveStatus).toEqual(NodeStatus.ACTIVE);
     }
     const team = handlers['tenancy.getTeam']?.({} as never, {} as never) as { team: { status: number; effectiveStatus: number } };
-    expect(team.team.status).toEqual(team.team.effectiveStatus);
-    expect(team.team.status).not.toEqual(0); // 0 is UNSPECIFIED
+    expect(team.team.status).toEqual(NodeStatus.ACTIVE);
+    expect(team.team.effectiveStatus).toEqual(NodeStatus.ACTIVE);
     const project = handlers['tenancy.getProject']?.({} as never, {} as never) as { project: { status: number; effectiveStatus: number } };
-    expect(project.project.status).toEqual(project.project.effectiveStatus);
-    expect(project.project.status).not.toEqual(0); // 0 is UNSPECIFIED
+    expect(project.project.status).toEqual(NodeStatus.ACTIVE);
+    expect(project.project.effectiveStatus).toEqual(NodeStatus.ACTIVE);
   });
 
   it('pins the two descriptors the consoles switch on', () => {
