@@ -49,11 +49,12 @@ export type RedisDescriptorCacheOptions = {
 /**
  * SMA-648 D4 (b): true when node-redis would reconnect after a socket timeout. `undefined` means
  * node-redis's default strategy, which returns `false` for a SocketTimeoutError, and `false` never
- * reconnects. A number always reconnects. A function is called ONCE, with the arguments node-redis
- * passes on a first timeout, and must return a finite, non-negative number.
+ * reconnects. A number reconnects only if it is finite and non-negative. A function is called ONCE,
+ * with the arguments node-redis passes on a first timeout, and must return a finite, non-negative
+ * number.
  */
 function reconnectsAfterSocketTimeout(strategy: unknown, socketTimeoutMs: number): boolean {
-  if (typeof strategy === 'number') return true;
+  if (typeof strategy === 'number') return Number.isFinite(strategy) && strategy >= 0;
   if (typeof strategy !== 'function') return false;
   let delay: unknown;
   try {

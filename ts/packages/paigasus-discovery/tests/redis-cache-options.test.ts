@@ -150,6 +150,10 @@ describe('createRedisDescriptorCache preconditions', () => {
     expect(() => createRedisDescriptorCache(withSocket({ reconnectStrategy }))).not.toThrow();
   });
 
+  it.each([Number.NaN, -1, Number.POSITIVE_INFINITY])('refuses a numeric reconnectStrategy of %s', (reconnectStrategy) => {
+    expectRefusedBy(withSocket({ reconnectStrategy }), RECONNECT_STRATEGY);
+  });
+
   it('calls a strategy function once, with retries 0 and a SocketTimeoutError', () => {
     const calls: unknown[][] = [];
     const reconnectStrategy = (...args: unknown[]): number => {
