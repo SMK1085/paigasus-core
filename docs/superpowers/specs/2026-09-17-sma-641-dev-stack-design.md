@@ -300,11 +300,17 @@ no vitest project of its own:
 - `tenancy.attachMembership`, `detachMembership`
 - `audit.listAuditEntries`
 - `authz.isAuthorized` (allow every action), `authz.listRoleGrants`
-- `serviceInfo.getServiceInfo`
 
 The exact key set is taken from `ts/apps/iam-console/tests/e2e/support/world.ts:126-194`; the
 gateway zone additionally needs `authn.introspect`, `authz.listRoleGrants` and the three
 `tenancy.get*` (`ts/apps/gateway-console/tests/e2e/support/world.ts:50-77`).
+
+**`serviceInfo.getServiceInfo` is deliberately NOT scripted**, and a test pins its absence. The
+fake's `defaults()` already answers it from the descriptor `setServiceInfo()` sets, and
+`dispatch()` always prefers a scripted handler over `defaults()` — so scripting it would freeze
+the gRPC answer for the life of the fake, while `setServiceInfo()` kept moving the HTTP one. That
+is a silent divergence, and `fake-iam.ts:130-134` documents the opposite contract. The e2e world
+this one is modelled on does not script it either.
 
 Two further requirements, each measured by the e2e worlds:
 
