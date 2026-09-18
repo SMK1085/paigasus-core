@@ -1056,7 +1056,8 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   `@redis/client` 6.2.1, SMA-648). Any read OR write on the socket resets it, so it fires on a
   quiet, healthy connection, and it bounds a hung command only while the socket is otherwise
   silent — under steady traffic a Redis that accepts commands and never replies is still unbounded
-  (follow-up SMA-650). node-redis's DEFAULT reconnect strategy returns `false` for a
+  (SMA-650 added a per-operation deadline in `@paigasus/console-core`; `@paigasus/auth` still has
+  none — SMA-651). node-redis's DEFAULT reconnect strategy returns `false` for a
   `SocketTimeoutError`, so the first idle gap closed the console descriptor cache's client for the
   life of the process (`The client is closed`, nav degraded). A client that sets `socketTimeout`
   therefore needs `pingInterval` (at most half of `socketTimeout`) to keep an idle socket alive, and

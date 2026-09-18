@@ -83,8 +83,11 @@ function reconnectsAfterSocketTimeout(strategy: unknown, socketTimeoutMs: number
  * 6.2.1 socket.js). node-redis destroys the socket with a SocketTimeoutError after that many
  * milliseconds with no socket activity, and any read OR write resets the timer. So it bounds a
  * command in flight only while the socket is otherwise silent: under steady traffic each new write
- * moves the deadline, and a Redis that accepts commands and never replies can go unnoticed
- * (follow-up SMA-650). It also fires on a quiet, healthy connection. Two more preconditions make
+ * moves the deadline, and a Redis that accepts commands and never replies can go unnoticed.
+ * A consumer needs its own per-operation deadline; @paigasus/console-core's withOperationDeadline
+ * is the worked example (SMA-650).
+ *
+ * `socket.socketTimeout` also fires on a quiet, healthy connection. Two more preconditions make
  * that safe. `pingInterval` keeps an idle socket alive; it must be at most half of `socketTimeout`,
  * which leaves one ping interval of margin for event-loop lag. And `socket.reconnectStrategy` must
  * return a delay for a SocketTimeoutError: node-redis's default strategy returns `false` for that

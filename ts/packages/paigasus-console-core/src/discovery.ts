@@ -21,7 +21,7 @@
 //   socket activity, and any read OR write resets it. So it fires on a quiet, healthy connection.
 //   It bounds a command in flight only while nothing else is written to the socket: under steady
 //   traffic each write moves the deadline, and a Redis that accepts commands and never replies can
-//   go unnoticed (follow-up SMA-650).
+//   go unnoticed. withOperationDeadline below is the end-to-end bound (SMA-650).
 // - `pingInterval` (PAIGASUS_SESSION_REDIS_TIMEOUT_MS) sends PING while the socket is ready. The
 //   PING and its reply are socket activity, so a healthy idle socket never reaches the idle timer.
 //   The gap between "the ping is due" and "the idle timer fires" is one timeout. That gap is the
