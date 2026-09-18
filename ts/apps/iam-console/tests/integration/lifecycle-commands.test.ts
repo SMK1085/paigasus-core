@@ -257,9 +257,10 @@ describe('the organization lifecycle forms', () => {
     expect(restoreOrganizationForm.safeParse({ prn: ORG_A }).data).toEqual({ prn: ORG_A });
   });
 
-  // SMA-630 CR round 1, spec § 4.2: the name bound applies only when the trimmed name changed, so a
-  // slug-only rename of a node with an overlong stored name (IAM does not validate a rename name,
-  // spec F11) still works, and sends newSlug only.
+  // SMA-630 CR round 1, spec § 4.2, updated by SMA-642: the name bound applies only when the
+  // trimmed name changed, so a slug-only rename of a node whose stored name exceeds the bound
+  // still works, and sends newSlug only. IAM validates a renamed name since SMA-642 but does not
+  // migrate the names it stored before that (SMA-642 D4), so such nodes still exist.
   it('accepts a slug-only rename of a node whose stored name exceeds the name bound', () => {
     const longName = 'a'.repeat(300);
     const parsed = renameOrganizationForm.safeParse({ prn: ORG_A, slug: 'new-slug', name: longName, currentSlug: SLUG, currentName: longName });

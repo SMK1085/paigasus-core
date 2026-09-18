@@ -17,7 +17,7 @@ use crate::application::error::TenancyError;
 use crate::application::pagination::Page;
 use paigasus_iam_core::{
     Action, AuditEntry, AuditLog, AuditOutcome, Clock, DomainEvent, EntityGenBumper, EventType, IdGenerator, NodeStatus, NodeView, Outbox, PrincipalId, Project, ProjectRepository, Slug, Stamp,
-    TeamRepository, UnitOfWork,
+    TeamRepository, UnitOfWork, validate_name,
 };
 use std::sync::Arc;
 use uuid::Uuid;
@@ -186,6 +186,11 @@ where
     /// (`NothingToRename` otherwise); rejected on an EFFECTIVELY archived project — own
     /// status, ancestor team, or ancestor org (`NodeArchived`).
     ///
+    /// The new name is validated with the same rule `create` uses (`validate_name`) and answers
+    /// `InvalidName` (SMA-642). The check runs before the transaction opens, so it outranks
+    /// `NodeArchived` — which is what a rename raises for an ancestor-archived node too, since
+    /// `rename_in` guards on EFFECTIVE status. The stored name is the TRIMMED one.
+    ///
     /// SMA-606 D2: builds its event/entry AFTER `rename_in`, from `Mutated::value` — it
     /// receives a bare `Uuid`, not a PRN, so it cannot construct one until the repository
     /// hands back the (possibly renamed) node, and the payload must carry the POST-change
@@ -196,11 +201,14 @@ where
             return Err(TenancyError::NothingToRename);
         }
         let slug = new_slug.map(Slug::parse).transpose()?;
+        // SMA-642: mirrors the slug line above. `create` validates through `Project::new`; without
+        // this, `rename` stores a name `create` refuses. The stored name is the TRIMMED one (D2).
+        let name = new_name.map(validate_name).transpose()?;
         let stamp = Stamp::new(self.clock.now(), actor.clone());
         let corr = self.ids.new_correlation_id();
 
         let tx = self.uow.begin().await?;
-        let out = self.projects.rename_in(&*tx, id, slug.as_ref(), new_name, &stamp).await?;
+        let out = self.projects.rename_in(&*tx, id, slug.as_ref(), name.as_deref(), &stamp).await?;
         if out.changed {
             let ev = self.project_event(EventType::ProjectRenamed, &out.value, &stamp, corr);
             // SMA-606 D5: the detail must carry the same payload shape as the event, not an
@@ -838,5 +846,35 @@ mod tests {
 
         assert_eq!(bumper.calls(), 1);
         assert_eq!(bumper.snapshot_at_bump(), Some(1), "the commit counter must already read 1 (committed) at the instant bump() runs");
+    }
+
+    /// SMA-642 § 6.1: the three refusals the issue names, on a project. Proves
+    /// `ProjectService::rename` calls `validate_name` at all.
+    #[tokio::test]
+    async fn rename_refuses_an_empty_blank_or_overlong_name() {
+        let store = TenancyStore::default();
+        let (_org, team) = seed_org_and_team(&store, 9900, 9901, &test_stamp(Utc::now(), 1));
+        let svc = new_service(store);
+        let id = svc.create(team, "api", "API", &actor(1)).await.unwrap().node.id.uuid();
+
+        let too_long = "x".repeat(257);
+        for bad in ["", "   ", too_long.as_str()] {
+            let err = svc.rename(id, None, Some(bad), &actor(2)).await.unwrap_err();
+            assert!(matches!(err, TenancyError::InvalidName(_)), "a rename to {bad:?} must be refused, got {err:?}");
+        }
+    }
+
+    /// SMA-642 D2: the stored name is the trimmed one. This catches a copy of the fix that
+    /// validates and then forwards the RAW `new_name` — that copy passes the refusal test above
+    /// and fails this one. `ProjectService` reads `self.projects`, not `self.repo`.
+    #[tokio::test]
+    async fn rename_stores_the_trimmed_name() {
+        let store = TenancyStore::default();
+        let (_org, team) = seed_org_and_team(&store, 9902, 9903, &test_stamp(Utc::now(), 1));
+        let svc = new_service(store);
+        let id = svc.create(team, "api", "API", &actor(1)).await.unwrap().node.id.uuid();
+
+        let renamed = svc.rename(id, None, Some("  Public API  "), &actor(2)).await.unwrap();
+        assert_eq!(renamed.node.name, "Public API");
     }
 }

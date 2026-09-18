@@ -20,7 +20,11 @@ export const slugField = z.string().trim().min(1).max(200);
 /**
  * A name, for create AND rename. The bound counts code points (`[...value].length`), as IAM does:
  * zod's `.max()` counts UTF-16 units, and would refuse a valid name of astral characters. IAM's
- * rename path does not validate a name (spec F11), so for a rename this schema is the only guard.
+ * rename path validates a name too since SMA-642, with the same 256 code-point bound, so this
+ * schema is no longer the only guard for a rename — it is the one that gives the user the error in
+ * the form rather than a round trip. The two trims are not identical: this schema trims as
+ * JavaScript does, IAM trims Unicode `White_Space` (SMA-642 spec F2), so a name of only U+0085
+ * passes here and IAM answers `invalid-name`.
  */
 export const nameField = z
   .string()
@@ -33,10 +37,11 @@ export const prnField = z.string().trim().min(1).max(512);
 
 /**
  * A hidden "current value" of a rename form. It can be empty, and it can be longer than the name
- * bound, because IAM stores a renamed name without a check (spec F11). A stricter schema here would
- * refuse every rename of such a node. It carries no `.max()` of its own: this field is only
- * COMPARED (see `renameForm` and `renameChange`) and never sent to IAM, and a Next Server Action
- * request body is already bounded (1 MB by default), which bounds how large it can arrive.
+ * bound, because IAM stored renamed names without a check before SMA-642 and those rows are kept as
+ * they are (SMA-642 D4). A stricter schema here would refuse every rename of such a node. It
+ * carries no `.max()` of its own: this field is only COMPARED (see `renameForm` and `renameChange`)
+ * and never sent to IAM, and a Next Server Action request body is already bounded (1 MB by
+ * default), which bounds how large it can arrive.
  */
 export const currentField = z.string().trim();
 
@@ -45,11 +50,13 @@ export type RenameChange = { newSlug?: string; newName?: string };
 
 /**
  * The shared shape of the three rename forms (SMA-630 CR round 1, spec § 4.2): `prn`, `slug`,
- * `name` and the two hidden "current value" fields. IAM can store a name longer than 256 code
- * points (spec F11), so `nameField`'s bound applies ONLY when the trimmed name changed. An
- * unchanged name is accepted as it is: it is never sent to IAM either way (`renameChange` omits an
- * unchanged field). A CHANGED name still must pass `nameField`. This is the ONE place that builds a
- * rename schema; each `commands.ts` calls it instead of repeating the shape.
+ * `name` and the two hidden "current value" fields. IAM holds names longer than 256 code points
+ * that it stored before SMA-642 and does not migrate (SMA-642 D4), so `nameField`'s bound applies
+ * ONLY when the trimmed name changed. An unchanged name is accepted as it is: it is never sent to
+ * IAM either way (`renameChange` omits an unchanged field). A CHANGED name still must pass
+ * `nameField`. Do NOT make it unconditional now that IAM validates: that would refuse every
+ * slug-only rename of such a node. This is the ONE place that builds a rename schema; each
+ * `commands.ts` calls it instead of repeating the shape.
  */
 export function renameForm() {
   return z.object({ prn: prnField, slug: slugField, name: z.string().trim(), currentSlug: currentField, currentName: currentField }).superRefine((value, ctx) => {

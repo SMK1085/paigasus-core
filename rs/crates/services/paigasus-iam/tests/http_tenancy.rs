@@ -82,6 +82,54 @@ async fn org_lifecycle_over_http() {
     assert_eq!(err["error"]["code"], "not-found");
 }
 
+/// SMA-642: the only execution-level proof that a refused name reaches a client as
+/// `invalid-name`, and that it does so with the ordering the spec's D3 claims. The three
+/// application services' unit tests prove the rule; nothing but this proves the wire.
+///
+/// The literal code string is safe HERE and nowhere in `src/`: `ci/error-registry/check.py`'s
+/// MANIFEST does not list the three application service files, so a literal in one of those
+/// reds `repo:error-code-single-site`. A test file is not a `src/` file.
+#[tokio::test]
+async fn rename_with_a_bad_name_answers_invalid_name_over_http() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let (app, state, idp) = app_with_state(db).await;
+    let token = idp.bearer("name-guard-user", Some("name-guard@example.com"), "paigasus", 3600);
+    provision_platform_admin(&state, &token).await;
+
+    let (status, created) = send(&app, "POST", "/v1/organizations", Some(json!({"slug": "namecheck", "name": "Name Check"})), Some(token.as_str())).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let org_prn = created["organization"]["prn"].as_str().expect("organization.prn");
+    let org_id = org_prn.rsplit('/').next().unwrap();
+
+    // An empty name -> 400 `invalid-name`. Before SMA-642 this was a 200 that stored "".
+    let (status, err) = send(&app, "PATCH", &format!("/v1/organizations/{org_id}"), Some(json!({"name": ""})), Some(token.as_str())).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{err}");
+    assert_eq!(err["error"]["code"], "invalid-name");
+
+    // A 257-character name -> the same. `NAME_MAX_CHARS` is 256 and the bound is inclusive.
+    let too_long = "x".repeat(257);
+    let (status, err) = send(&app, "PATCH", &format!("/v1/organizations/{org_id}"), Some(json!({"name": too_long})), Some(token.as_str())).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{err}");
+    assert_eq!(err["error"]["code"], "invalid-name");
+
+    // The stored name is the TRIMMED one (D2), and a valid name still renames.
+    let (status, renamed) = send(&app, "PATCH", &format!("/v1/organizations/{org_id}"), Some(json!({"name": "  Trimmed Name  "})), Some(token.as_str())).await;
+    assert_eq!(status, StatusCode::OK, "{renamed}");
+    assert_eq!(renamed["name"], "Trimmed Name");
+
+    // D3/F7: `not-found` PRECEDES `invalid-name` on the wire. Under the default
+    // `enforce_tenancy = true` the handler runs `get(id)` then `authorize.check` BEFORE it calls
+    // `rename` (`adapters/http/organizations.rs:84-87`), so an unknown id answers 404 even with a
+    // name the service would refuse. A reader who takes the application-layer order as the wire
+    // order gets this backwards.
+    let unknown = Uuid::from_u128(0xdead_beef);
+    let (status, err) = send(&app, "PATCH", &format!("/v1/organizations/{unknown}"), Some(json!({"name": ""})), Some(token.as_str())).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{err}");
+    assert_eq!(err["error"]["code"], "not-found");
+}
+
 #[tokio::test]
 async fn nested_team_and_project_creation_folds_effective_status() {
     let Some((_node, db)) = support::start_migrated_postgres().await else {
