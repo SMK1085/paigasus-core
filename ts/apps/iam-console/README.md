@@ -4,6 +4,26 @@ The IAM zone of the Paigasus console (ADR-0017). It is a Next.js 16 app, mounted
 runs as a standalone server. It has the login, the console shell, the tenancy screens, the 403
 view and the capability-gated audit screen. Design: `docs/superpowers/specs/2026-09-11-sma-511-iam-console-design.md`.
 
+## Run it locally
+
+`next dev` cannot start this app on its own: six environment variables have no default, two of them
+are schema-enforced `https` URLs, and the app calls a real OIDC provider, an IAM gRPC endpoint and
+two service-info endpoints. The dev stack supplies all of it:
+
+```bash
+pnpm --dir ts dev:stack
+```
+
+It starts a fake IdP, a fake IAM, a fake gateway, a TLS terminator and a Redis container, then runs
+both console zones under `next dev` and prints the URL to open:
+`https://127.0.0.1:8443/iam`. Startup takes about 9 seconds; shutdown takes about 6. **Docker is
+required.** Accept the self-signed certificate once for each of the two origins it uses: the
+terminator on port 8443, and the fake OIDC provider on port 8444, where login redirects — both
+ports are fixed, so each exception persists across runs. Hot reload works: the terminator tunnels
+the WebSocket. A restart logs you out, because Redis is new each run. On shutdown the command
+restores `next-env.d.ts` and removes the `AGENTS.md`/`CLAUDE.md` files Next generates, so it leaves
+the working tree as it found it.
+
 ## Rules that the code depends on
 
 - Every file in `lib/` starts with `import 'server-only'`. A client component that imports one fails the build.

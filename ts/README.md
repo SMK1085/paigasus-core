@@ -28,16 +28,17 @@ TypeScript workspace for paigasus-core, managed with [pnpm](https://pnpm.io/) an
 
 `lint`/`fmt` run once over the whole workspace from the `ts` Moon project; `typecheck`, `test`, and `build` fan out per project (Moon owns those graphs by layer — SMA-401), so they are addressed with a TypeScript-scoped query — a bare `moon run :test` would also run the `rust`/`py` workspaces:
 
-| Task                     | Command                                                     |
-| ------------------------ | ----------------------------------------------------------- |
-| Lint                     | `moon run ts:lint`                                          |
-| Format check             | `moon run ts:fmt`                                           |
-| Type check               | `moon run :typecheck --query "language=typescript"`         |
-| Test                     | `moon run :test --query "language=typescript"`              |
-| Build (all TS)           | `moon run :build --query "language=typescript"`             |
-| Build (one app)          | `moon run iam-console-ts:build`                             |
-| E2E (one app)            | `moon run iam-console-ts:test-e2e`                          |
-| Tailwind guard (one app) | `node ci/tailwind-source/run.mjs --app ts/apps/iam-console` |
+| Task                      | Command                                                     |
+| ------------------------- | ----------------------------------------------------------- |
+| Lint                      | `moon run ts:lint`                                          |
+| Format check              | `moon run ts:fmt`                                           |
+| Type check                | `moon run :typecheck --query "language=typescript"`         |
+| Test                      | `moon run :test --query "language=typescript"`              |
+| Build (all TS)            | `moon run :build --query "language=typescript"`             |
+| Build (one app)           | `moon run iam-console-ts:build`                             |
+| E2E (one app)             | `moon run iam-console-ts:test-e2e`                          |
+| Tailwind guard (one app)  | `node ci/tailwind-source/run.mjs --app ts/apps/iam-console` |
+| Dev stack (both consoles) | `pnpm --dir ts dev:stack` (Docker required)                 |
 
 Notes:
 
