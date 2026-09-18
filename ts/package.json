@@ -23,6 +23,7 @@
     "@paigasus/console-core": "workspace:*",
     "@paigasus/next-config": "workspace:*",
     "@semantic-release/commit-analyzer": "catalog:",
+    "@types/node": "catalog:",
     "eslint": "catalog:",
     "eslint-plugin-jsx-a11y": "catalog:",
     "eslint-plugin-react-hooks": "catalog:",

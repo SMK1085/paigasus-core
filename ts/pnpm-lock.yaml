@@ -191,6 +191,9 @@ importers:
       '@semantic-release/commit-analyzer':
         specifier: 'catalog:'
         version: 13.0.1(semantic-release@25.0.9(typescript@6.0.3))
+      '@types/node':
+        specifier: 'catalog:'
+        version: 24.13.5
       eslint:
         specifier: 'catalog:'
         version: 10.10.0(jiti@2.7.0)
