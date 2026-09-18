@@ -8,6 +8,7 @@
 // deep import can reach an unguarded module) together with src/index.ts's own 'server-only' import.
 // The per-file rule is defence in depth on top of that, not the guard itself.
 export { buildDevEnv, DEV_ZONES, type DevEnvInput } from './dev-env';
+export { DEV_GATEWAY_DESCRIPTOR, DEV_IAM_DESCRIPTOR, devWorld } from './dev-world';
 export { GATEWAY_CORRELATION_HEADER, startFakeGateway, type FakeGateway, type FakeGatewayCall, type GatewayDescriptorBody } from './fake-gateway';
 export {
   denial,
