@@ -213,3 +213,6 @@ requirement.
 Rejected from the challenge: a per-operation deadline (out of scope, SMA-650); a
 `pingInterval` floor (conflicts with D4 (a), documented instead); a Docker-free RESP stub (Sven
 chose the container tier).
+
+Revision 3: after the final review, the container-tier timings were raised to 1000 ms; the
+numeric reconnect strategy must be finite and non-negative (local review).

@@ -30,7 +30,7 @@ testcontainers 12.1.0, Moon 2.5.3, pnpm, bash (`ci/affected-graph/run.sh`).
 - Prefix every moon/pnpm/uv command with `export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"`.
 - Run `pnpm -C ts exec prettier --write <each changed ts/ file>` before each commit that touches `ts/`. `ts:fmt` is a separate whole-tree Prettier gate (printWidth 200).
 - The `test-e2e` tiers need Docker. testcontainers finds it through `/var/run/docker.sock` (a symlink to Docker Desktop's socket on this machine). If testcontainers reports that it cannot find a container runtime, `export DOCKER_HOST=unix://$HOME/.docker/run/docker.sock` and retry. Do NOT add a skip hatch.
-- The console-core tier timings are fixed by the spec: `PAIGASUS_SESSION_REDIS_TIMEOUT_MS = 500`, so `socketTimeout = 1000`, `pingInterval = 500`. Every poll is bounded at 5000 ms.
+- The console-core tier timings are fixed by the spec: `PAIGASUS_SESSION_REDIS_TIMEOUT_MS = 1000`, so `socketTimeout = 2000`, `pingInterval = 1000`. Every poll is bounded at 5000 ms. (Raised from 500 after the final review, for event-loop-stall tolerance on a loaded runner.)
 - Commits are SSH-signed through 1Password. If `git commit` fails with `failed to fill whole buffer`, 1Password is locked. Stop and report it; do not disable signing.
 - If the sandbox refuses a shell loop or a variable in a Bash call, write the commands to a script file in your scratchpad and run it with `/bin/bash <that file>`.
 
@@ -445,8 +445,8 @@ Write `ts/packages/paigasus-console-core/tests/containers/descriptor-cache-idle.
 // REAL call site, descriptorCacheFor, against a real Redis, because the defect lived in the client
 // options that call site passes to node-redis.
 //
-// PAIGASUS_SESSION_REDIS_TIMEOUT_MS is 500, so `socketTimeout` is 1000 ms and `pingInterval` is
-// 500 ms. Every poll is bounded by POLL_BUDGET_MS. Each test has its own log sink, so a late event
+// PAIGASUS_SESSION_REDIS_TIMEOUT_MS is 1000, so `socketTimeout` is 2000 ms and `pingInterval` is
+// 1000 ms. Every poll is bounded by POLL_BUDGET_MS. Each test has its own log sink, so a late event
 // from the previous test's destroy() cannot land in the next test's lines.
 //
 // The Redis carries a password (`--requirepass`), so every URL in this file holds a secret, and T5
@@ -465,12 +465,12 @@ import type { ConsoleCoreConfig } from '../../src/config-shape';
 import { descriptorCacheFor, resetDiscoveryForTest } from '../../src/discovery';
 import { createJsonLogger, type ConsoleLogger } from '../../src/logger';
 
-const TIMEOUT_MS = 500;
+const TIMEOUT_MS = 1000;
 const SOCKET_TIMEOUT_MS = TIMEOUT_MS * 2;
 /** Three times socketTimeout. */
 const IDLE_MS = 3 * SOCKET_TIMEOUT_MS;
-/** More than pingInterval + 2 × socketTimeout = 2500 ms, so the idle timer MUST fire during it. */
-const PAUSE_MS = 3_000;
+/** More than pingInterval + 2 × socketTimeout = 5000 ms, so the idle timer MUST fire during it. */
+const PAUSE_MS = 6_000;
 const POLL_BUDGET_MS = 5_000;
 const POLL_STEP_MS = 100;
 const LOST_EVENT = 'discovery.redis_connection_lost';
@@ -1916,6 +1916,8 @@ The agent memory is outside the repo. After Task 7, the controller corrects it (
 ---
 
 ## Red-run record (Task 2, unmodified client after D10)
+
+This run used the original 500 ms timings; the tier was later raised to 1000 ms (spec § 5.1).
 
 - T1: `Error: The client is closed`
 - T2: `Error: The client is closed`
