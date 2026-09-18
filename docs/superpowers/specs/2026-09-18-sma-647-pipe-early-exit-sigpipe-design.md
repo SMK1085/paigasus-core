@@ -2,6 +2,11 @@
 
 Status: revised after the spec challenge, for GATE 1. Linear: SMA-647.
 
+<!-- moon-diagnosis:ok -->
+<!-- The marker above is for check 12: this file names the ciReport token only to say that a
+plan quoting it needs this marker. -->
+
+
 ## 1. Problem
 
 `repo:actionlint` red three times in CI with a false check 12 result. Each time the
