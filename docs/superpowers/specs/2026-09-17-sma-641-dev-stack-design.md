@@ -286,7 +286,9 @@ scripted handler (`fake-iam.ts:228-231`), but the principal resolver calls
 Login works. Note also that `fake-iam.ts:241` forces `roleGrants: []` after the spread, so a
 scripted `authn.introspect` cannot return grants.
 
-`ts/tooling/dev-stack-world.ts` therefore supplies the FULL handler map:
+`ts/packages/paigasus-console-core/testing/dev-world.ts` therefore supplies the FULL handler map.
+It lives in the package, not in `ts/tooling/`, so a vitest project can cover it — `ts/tooling/` has
+no vitest project of its own:
 
 - `authn.introspect`
 - `tenancy.listOrganizations`, `listTeams`, `listProjects`, `listMemberships`
@@ -397,7 +399,7 @@ on the feature being built.
 ## 12. Deliverables
 
 1. `ts/tooling/dev-stack.ts` — the supervisor, including the default-zone handler.
-2. `ts/tooling/dev-stack-world.ts` — the fake-IAM world.
+2. `ts/packages/paigasus-console-core/testing/dev-world.ts` — the fake-IAM world.
 3. `ts/tooling/tsconfig.json` — extends `../tsconfig.base.json`, includes `**/*.ts`, types
    `["node"]`. **Required, not optional:** `ts/eslint.config.js:29-38` applies `projectService`
    with `tsconfigRootDir: ts/` to every `**/*.{ts,tsx,mts,cts}`, `ts/` has no root `tsconfig.json`

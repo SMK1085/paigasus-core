@@ -54,6 +54,8 @@ const REDIS_START_TIMEOUT_MS = 120_000;
 /** In dev the FIRST request compiles the route, so the e2e budget is far too short. */
 const READY_TIMEOUT_MS = 180_000;
 const STOP_GRACE_MS = 5_000;
+/** Per-request cap on a single health-check fetch, so one wedged request cannot outlast READY_TIMEOUT_MS. */
+const HEALTH_FETCH_TIMEOUT_MS = 5_000;
 
 const TS_ROOT = path.resolve(fileURLToPath(new URL('..', import.meta.url)));
 
@@ -243,9 +245,18 @@ async function waitForZone(zone: Zone, child: ChildProcess, isInterrupted: () =>
       }
       let response: Response | undefined;
       try {
-        response = await fetch(url);
+        // Bound the fetch itself: without an abort signal, a child that accepts the TCP
+        // connection but never answers (a wedged compile, a hung process) leaves this `await`
+        // unsettled forever, and neither the deadline above nor `isInterrupted()` gets re-checked
+        // until it resolves. Use the smaller of a short per-request cap and the time left until
+        // the deadline, floored at 1ms so a near-expired deadline never produces a non-positive
+        // timeout.
+        const remainingMs = deadline - Date.now();
+        const fetchTimeoutMs = Math.max(1, Math.min(HEALTH_FETCH_TIMEOUT_MS, remainingMs));
+        response = await fetch(url, { signal: AbortSignal.timeout(fetchTimeoutMs) });
       } catch {
-        // Not listening yet, or still compiling the route.
+        // Not listening yet, still compiling the route, or the per-request cap above was hit —
+        // all three mean the same thing here: "not ready yet".
       }
       // OUTSIDE the try/catch above: a real HTTP answer, fatal or not, is never "still compiling".
       // The previous shape sniffed `error.message.startsWith('dev-stack:')` to tell its own throw
