@@ -14,10 +14,13 @@ allowBuilds:
   # node-gyp rebuild) — ssh2 falls back to a pure-JS path without it. protobufjs's postinstall
   # is a no-op donation notice (scripts/postinstall), not a compile step. All three: false.
   cpu-features: false
-  # tsx (SMA-641) depends on esbuild. Its postinstall picks the prebuilt platform binary from an
-  # already-resolved @esbuild/* optionalDependency, the same prebuilt-binary shape as sharp below
-  # — without it tsx has no binary to run. Allow it.
-  esbuild: true
+  # tsx (SMA-641) depends on esbuild. esbuild's postinstall only hardlinks its own bin/esbuild CLI
+  # shim to the already-resolved @esbuild/<platform> optional package, a startup-speed
+  # optimization for the esbuild CLI — it skips itself on win32, under Yarn, and for WASM builds,
+  # so esbuild works fine with it never having run. tsx never shells out to that CLI: it consumes
+  # esbuild as a library and resolves the platform binary itself via its own require.resolve()
+  # against @esbuild/<platform>, which pnpm installs regardless of this setting. Not needed.
+  esbuild: false
   # msw (SMA-511) declares a postinstall that copies its BROWSER service worker into a public
   # directory. The iam-console tests use msw/node only, so the script has nothing to do.
   msw: false
