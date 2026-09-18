@@ -17,7 +17,9 @@ pnpm --dir ts dev:stack
 It starts a fake IdP, a fake IAM, a fake gateway, a TLS terminator and a Redis container, then runs
 both console zones under `next dev` and prints the URL to open:
 `https://127.0.0.1:8443/iam`. Startup takes about 9 seconds; shutdown takes about 6. **Docker is
-required.** Accept the self-signed certificate once for each of the two origins it uses: the
+required**, and `PAIGASUS_SESSION_STORE` is forced to `redis`: `createAuthRuntime` refuses the
+memory store once `PAIGASUS_ZONES` names more than one zone, and the dev stack always runs both
+zones. Accept the self-signed certificate once for each of the two origins it uses: the
 terminator on port 8443, and the fake OIDC provider on port 8444, where login redirects — both
 ports are fixed, so each exception persists across runs. Hot reload works: the terminator tunnels
 the WebSocket. A restart logs you out, because Redis is new each run. On shutdown the command
