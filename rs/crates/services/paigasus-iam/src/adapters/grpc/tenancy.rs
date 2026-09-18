@@ -7,7 +7,7 @@
 //! Every Get/Rename/Archive/Restore compares the *stored* canonical PRN (`view.node.id
 //! .canonical()`) with the request's parsed one — the forged-org-slot defense (brief rule 8,
 //! mirroring the HTTP layer's semantics). A Get compares after its read. A Rename/Archive/
-//! Restore compares BEFORE its write, in `load_{org,team,project}_for_write` (SMA-643): the
+//! Restore compares BEFORE its write, in `load_{org,team,project}_checked` (SMA-643): the
 //! comparison used to run after the service call, so a forged organization slot committed the
 //! write, the audit row and the outbox event and still answered `prn-mismatch`. The comparison
 //! is sound outside the write transaction because a node's stored PRN never changes (the `prn`
@@ -144,7 +144,7 @@ async fn resolve_node(state: &AppState, node: &TenancyNodeRef) -> Result<Prn, Te
 /// changes: the `prn` column is written once, at insert, and no repository method, service or
 /// migration moves a node to a different parent. A future "move" feature breaks that invariant
 /// and must revisit this helper.
-async fn load_org_for_write(state: &AppState, actor: &Prn, action: Action, id: Uuid, canonical: &str, rpc: &str) -> Result<(), Status> {
+async fn load_org_checked(state: &AppState, actor: &Prn, action: Action, id: Uuid, canonical: &str, rpc: &str) -> Result<(), Status> {
     let view = state.orgs.get(id).await.map_err(convert::status_to_grpc)?;
     if state.enforce_tenancy {
         state.authorize.check(actor, action, view.node.id.prn()).await.map_err(convert::status_to_grpc)?;
@@ -157,8 +157,8 @@ async fn load_org_for_write(state: &AppState, actor: &Prn, action: Action, id: U
     Ok(())
 }
 
-/// The team twin of [`load_org_for_write`] — same order, same reasons.
-async fn load_team_for_write(state: &AppState, actor: &Prn, action: Action, id: Uuid, canonical: &str, rpc: &str) -> Result<(), Status> {
+/// The team twin of [`load_org_checked`] — same order, same reasons.
+async fn load_team_checked(state: &AppState, actor: &Prn, action: Action, id: Uuid, canonical: &str, rpc: &str) -> Result<(), Status> {
     let view = state.teams.get(id).await.map_err(convert::status_to_grpc)?;
     if state.enforce_tenancy {
         state.authorize.check(actor, action, view.node.id.prn()).await.map_err(convert::status_to_grpc)?;
@@ -171,8 +171,8 @@ async fn load_team_for_write(state: &AppState, actor: &Prn, action: Action, id: 
     Ok(())
 }
 
-/// The project twin of [`load_org_for_write`] — same order, same reasons.
-async fn load_project_for_write(state: &AppState, actor: &Prn, action: Action, id: Uuid, canonical: &str, rpc: &str) -> Result<(), Status> {
+/// The project twin of [`load_org_checked`] — same order, same reasons.
+async fn load_project_checked(state: &AppState, actor: &Prn, action: Action, id: Uuid, canonical: &str, rpc: &str) -> Result<(), Status> {
     let view = state.projects.get(id).await.map_err(convert::status_to_grpc)?;
     if state.enforce_tenancy {
         state.authorize.check(actor, action, view.node.id.prn()).await.map_err(convert::status_to_grpc)?;
@@ -189,7 +189,7 @@ async fn load_project_for_write(state: &AppState, actor: &Prn, action: Action, i
 /// refused attempt leaves NO audit row and no denial row, and the attempt is a tampering
 /// signal, so the log line is the only trace.
 fn warn_prn_mismatch(actor: &Prn, requested: &str, stored: &str, rpc: &str) {
-    tracing::warn!(rpc = %rpc, actor = %actor.canonical(), requested_prn = %requested, stored_prn = %stored, "refused a tenancy write: the request prn does not match the stored node");
+    tracing::warn!(rpc = %rpc, actor = %actor.canonical(), requested_prn = %requested, stored_prn = %stored, "refused a tenancy request: the request prn does not match the stored node");
 }
 
 #[tonic::async_trait]
@@ -282,7 +282,7 @@ impl TenancyService for TenancyGrpc {
             let actor = actor_principal.prn().clone();
             let req = request.into_inner();
             let (id, canonical) = convert::node_uuid(&req.prn, "organization")?;
-            load_org_for_write(&self.state, &actor, Action::RenameOrganization, id, &canonical, "RenameOrganization").await?;
+            load_org_checked(&self.state, &actor, Action::RenameOrganization, id, &canonical, "RenameOrganization").await?;
             let view = self
                 .state
                 .orgs
@@ -304,7 +304,7 @@ impl TenancyService for TenancyGrpc {
             let actor_principal = actor_context(&request)?.principal_id;
             let actor = actor_principal.prn().clone();
             let (id, canonical) = convert::node_uuid(&request.get_ref().prn, "organization")?;
-            load_org_for_write(&self.state, &actor, Action::ArchiveOrganization, id, &canonical, "ArchiveOrganization").await?;
+            load_org_checked(&self.state, &actor, Action::ArchiveOrganization, id, &canonical, "ArchiveOrganization").await?;
             let view = self.state.orgs.archive(id, &actor_principal).await.map_err(convert::status_to_grpc)?;
             Ok(Response::new(ArchiveOrganizationResponse {
                 organization: Some(convert::to_proto_org(&view)),
@@ -321,7 +321,7 @@ impl TenancyService for TenancyGrpc {
             let actor_principal = actor_context(&request)?.principal_id;
             let actor = actor_principal.prn().clone();
             let (id, canonical) = convert::node_uuid(&request.get_ref().prn, "organization")?;
-            load_org_for_write(&self.state, &actor, Action::RestoreOrganization, id, &canonical, "RestoreOrganization").await?;
+            load_org_checked(&self.state, &actor, Action::RestoreOrganization, id, &canonical, "RestoreOrganization").await?;
             let view = self.state.orgs.restore(id, &actor_principal).await.map_err(convert::status_to_grpc)?;
             Ok(Response::new(RestoreOrganizationResponse {
                 organization: Some(convert::to_proto_org(&view)),
@@ -409,7 +409,7 @@ impl TenancyService for TenancyGrpc {
             let actor = actor_principal.prn().clone();
             let req = request.into_inner();
             let (id, canonical) = convert::node_uuid(&req.prn, "team")?;
-            load_team_for_write(&self.state, &actor, Action::RenameTeam, id, &canonical, "RenameTeam").await?;
+            load_team_checked(&self.state, &actor, Action::RenameTeam, id, &canonical, "RenameTeam").await?;
             let view = self
                 .state
                 .teams
@@ -431,7 +431,7 @@ impl TenancyService for TenancyGrpc {
             let actor_principal = actor_context(&request)?.principal_id;
             let actor = actor_principal.prn().clone();
             let (id, canonical) = convert::node_uuid(&request.get_ref().prn, "team")?;
-            load_team_for_write(&self.state, &actor, Action::ArchiveTeam, id, &canonical, "ArchiveTeam").await?;
+            load_team_checked(&self.state, &actor, Action::ArchiveTeam, id, &canonical, "ArchiveTeam").await?;
             let view = self.state.teams.archive(id, &actor_principal).await.map_err(convert::status_to_grpc)?;
             Ok(Response::new(ArchiveTeamResponse {
                 team: Some(convert::to_proto_team(&view)),
@@ -448,7 +448,7 @@ impl TenancyService for TenancyGrpc {
             let actor_principal = actor_context(&request)?.principal_id;
             let actor = actor_principal.prn().clone();
             let (id, canonical) = convert::node_uuid(&request.get_ref().prn, "team")?;
-            load_team_for_write(&self.state, &actor, Action::RestoreTeam, id, &canonical, "RestoreTeam").await?;
+            load_team_checked(&self.state, &actor, Action::RestoreTeam, id, &canonical, "RestoreTeam").await?;
             let view = self.state.teams.restore(id, &actor_principal).await.map_err(convert::status_to_grpc)?;
             Ok(Response::new(RestoreTeamResponse {
                 team: Some(convert::to_proto_team(&view)),
@@ -544,7 +544,7 @@ impl TenancyService for TenancyGrpc {
             let actor = actor_principal.prn().clone();
             let req = request.into_inner();
             let (id, canonical) = convert::node_uuid(&req.prn, "project")?;
-            load_project_for_write(&self.state, &actor, Action::RenameProject, id, &canonical, "RenameProject").await?;
+            load_project_checked(&self.state, &actor, Action::RenameProject, id, &canonical, "RenameProject").await?;
             let view = self
                 .state
                 .projects
@@ -566,7 +566,7 @@ impl TenancyService for TenancyGrpc {
             let actor_principal = actor_context(&request)?.principal_id;
             let actor = actor_principal.prn().clone();
             let (id, canonical) = convert::node_uuid(&request.get_ref().prn, "project")?;
-            load_project_for_write(&self.state, &actor, Action::ArchiveProject, id, &canonical, "ArchiveProject").await?;
+            load_project_checked(&self.state, &actor, Action::ArchiveProject, id, &canonical, "ArchiveProject").await?;
             let view = self.state.projects.archive(id, &actor_principal).await.map_err(convert::status_to_grpc)?;
             Ok(Response::new(ArchiveProjectResponse {
                 project: Some(convert::to_proto_project(&view)),
@@ -583,7 +583,7 @@ impl TenancyService for TenancyGrpc {
             let actor_principal = actor_context(&request)?.principal_id;
             let actor = actor_principal.prn().clone();
             let (id, canonical) = convert::node_uuid(&request.get_ref().prn, "project")?;
-            load_project_for_write(&self.state, &actor, Action::RestoreProject, id, &canonical, "RestoreProject").await?;
+            load_project_checked(&self.state, &actor, Action::RestoreProject, id, &canonical, "RestoreProject").await?;
             let view = self.state.projects.restore(id, &actor_principal).await.map_err(convert::status_to_grpc)?;
             Ok(Response::new(RestoreProjectResponse {
                 project: Some(convert::to_proto_project(&view)),
