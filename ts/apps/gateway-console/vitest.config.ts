@@ -13,10 +13,11 @@ const conditions = ['node', 'import', 'default'];
 
 const serverOnlyStub = fileURLToPath(new URL('./tests/support/server-only-stub.ts', import.meta.url));
 
-// The real module throws outside a Next request scope. This double lets a test set the request
-// headers and cookies it needs; tests/support/setup.ts clears them before every test. This zone
-// runs no Server Action, so it has no next/cache double (nothing calls revalidatePath).
+// Both real modules throw outside a Next request scope. These doubles let a test set the request
+// headers and cookies, and record revalidatePath() calls (SMA-636: this zone now runs Server
+// Actions). tests/support/setup.ts resets both before every test.
 const nextHeadersDouble = fileURLToPath(new URL('./tests/support/next-headers.ts', import.meta.url));
+const nextCacheDouble = fileURLToPath(new URL('./tests/support/next-cache.ts', import.meta.url));
 
 // MEASURED (SMA-511 plan, Task 9): vite:oxc loads the NEAREST tsconfig.json for every file it
 // transforms. This app's tsconfig.json extends '@paigasus/next-config/tsconfig-app' through pnpm's
@@ -47,6 +48,6 @@ export default defineConfig({
     testTimeout: 120_000,
     hookTimeout: 120_000,
   },
-  resolve: { conditions, alias: { 'server-only': serverOnlyStub, 'next/headers': nextHeadersDouble } },
+  resolve: { conditions, alias: { 'server-only': serverOnlyStub, 'next/headers': nextHeadersDouble, 'next/cache': nextCacheDouble } },
   ssr: { resolve: { conditions } },
 });
