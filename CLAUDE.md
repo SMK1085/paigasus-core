@@ -543,10 +543,12 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   `SELF_SCHEDULED_GATES` and `SELF_TASK_EXPECTED_GLOBS` validate only entries already present as
   KEYS, so omitting either one was never self-enforcing on its own; see the `repo:ruff-ci` entry
   below for the measurement and the partial fix.)
-  `WORKFLOW_CREDENTIALS_SH_CALL_SITES` pins **five** lines in `run.sh`, and the fifth is an
-  ASSERTION line: with only the flag parse, the dispatch arm and the two report lines pinned,
+  `WORKFLOW_CREDENTIALS_SH_CALL_SITES` pins **seven** lines in `run.sh`, and three of them are the
+  ASSERTION: with only the flag parse, the dispatch arm and the two report lines pinned,
   deleting every `_expect` and `grep` row left all four byte-identical and the control exited 0
-  having asserted nothing (MEASURED).
+  having asserted nothing (MEASURED). SMA-647 split the one assertion line into three: the capture
+  of the real run, the guard on its exit status, and the match. The old pipe failed OPEN when the
+  checker failed, so deleting the status guard alone is a regression, and it is pinned too.
   The **exit codes differ between the checker and the wrapper, deliberately**:
   `workflow_credentials.py` exits **3** for an assertion failure, and `run.sh` maps 3 -> 1 and
   everything else -> 2. `uv` itself exits 1 on a failed resolution, so a shared code would let

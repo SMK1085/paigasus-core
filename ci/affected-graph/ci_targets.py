@@ -1076,6 +1076,11 @@ RELEASE_PARITY_SH_CALL_SITES = (
 # the `case` arms and the `if` are conventionally indented, so a column-0 rule would reject the
 # real executing lines, while a substring rule would let a COMMENTED-OUT copy satisfy the pin.
 #
+# SMA-647 split the one assertion line into three (entries 3-5): the capture of the real run, the
+# guard on its exit status, and the match. The old line piped the real run into an early-exit grep
+# under `pipefail`, so a failing checker AND a SIGPIPE on the producer both made the release.yml
+# row pass (fail-OPEN). Deleting the status guard alone brings that back, so it is pinned too.
+#
 # The fifth entry is an ASSERTION line, added after the first four were measured to be
 # insufficient: deleting every `_expect` and `grep` row inside negative_control() left all four
 # byte-identical, so the control exited 0 having asserted nothing — the "control that actively
@@ -1085,7 +1090,9 @@ RELEASE_PARITY_SH_CALL_SITES = (
 WORKFLOW_CREDENTIALS_SH_CALL_SITES = (
     "--negative-control) MODE=negctl;   shift ;;",
     "negctl)   negative_control ;;",
-    "if bash \"$0\" 2>/dev/null | grep '^workflow-credentials: subjects:' | grep -q 'release.yml'; then",
+    "subjects_out=\"$(bash \"$0\" 2>/dev/null)\" || subjects_rc=$?",
+    'if [ "$subjects_rc" -ne 0 ]; then',
+    "if grep -q '^workflow-credentials: subjects:.*release.yml' < <(printf '%s\\n' \"$subjects_out\"); then",
     'if [ "$failures" -gt 0 ]; then',
     "printf 'workflow-credentials negative control: %d row(s) failed\\n' \"$failures\" >&2",
 )
@@ -2516,10 +2523,13 @@ def self_test():
     # file indents these lines, so the stripped-whole-line rule is exercised on realistic text
     # rather than on a column-0 idealisation the production file never produces.
     wired_workflow_credentials = (
-        # The assertion line (SMA-593 F1). Indented in the real script, so it also exercises the
-        # stripped-whole-line matching this haystack uses.
-        '  if bash "$0" 2>/dev/null | grep \'^workflow-credentials: subjects:\' '
-        "| grep -q 'release.yml'; then\n"
+        # The assertion lines (SMA-593 F1; split into capture, status guard and match by SMA-647).
+        # Indented in the real script, so they also exercise the stripped-whole-line matching this
+        # haystack uses.
+        '  subjects_out="$(bash "$0" 2>/dev/null)" || subjects_rc=$?\n'
+        '  if [ "$subjects_rc" -ne 0 ]; then\n'
+        "  if grep -q '^workflow-credentials: subjects:.*release.yml' "
+        "< <(printf '%s\\n' \"$subjects_out\"); then\n"
         '  if [ "$failures" -gt 0 ]; then\n'
         "    printf 'workflow-credentials negative control: %d row(s) failed\\n' \"$failures\" >&2\n"
         '    exit 1\n'
