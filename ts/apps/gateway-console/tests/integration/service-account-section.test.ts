@@ -107,6 +107,11 @@ describe('loadServiceAccountSection: the list', () => {
     expect(view.canCreate).toBe(true);
     expect(view.selected).toEqual({ kind: 'none' });
     expect(calls('serviceAccounts.getServiceAccount')).toHaveLength(0);
+    // D14: with no `?sa=`, the loader never fans out per row. `mayI` here is `scriptedMayI`,
+    // which asks nothing of the fake, so every IsAuthorized call in this window would be a
+    // per-row model-call-state check — the total must be zero.
+    expect(calls('serviceAccounts.listApiKeys')).toHaveLength(0);
+    expect(calls('authz.isAuthorized')).toHaveLength(0);
   });
 
   it('shows exactly 50 rows with no next page for 50, and a next page for 51 (limit+1)', async () => {
