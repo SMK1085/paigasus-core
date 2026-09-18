@@ -77,7 +77,7 @@ instead of reporting green having proved nothing.
   - **`single-zone`** — a production build runs through the standalone server behind an in-process TLS terminator, with the fake IAM, a fake gateway and a fake HTTPS IdP. The session store is `memory`, so the zone map holds one zone. It covers rows R1 through R7, plus R4b, a second capability case that pairs with R4.
   - **`two-zone`** (SMA-512 pull request 4) — a worker fixture starts a `redis:8-alpine` container (the first container this repository starts this way), both apps' standalone servers (`iam-console` and `gateway-console`), and one TLS terminator that path-routes to both. The session store is `redis`, so a session set on one zone is visible on the other. It covers rows R8 through R12. Together they prove the cross-zone session, the gateway zone's isolation from an IAM-only session, and that the two apps' static chunks do not collide under one origin.
 
-  Each row is one test. `tests/unit/e2e-rows.test.ts` holds the full row list (R1–R7, plus R4b and R7's 403 control, then R8–R12). It fails when a row is missing, duplicated, or renamed.
+  Each row is one test. `tests/unit/e2e-rows.test.ts` holds the full row list (R1–R7, plus R4b and R7's 403 control, then R8–R12, then R13–R21 for the settings pages of SMA-636). It fails when a row is missing, duplicated, or renamed.
 
 ## Known limits
 
