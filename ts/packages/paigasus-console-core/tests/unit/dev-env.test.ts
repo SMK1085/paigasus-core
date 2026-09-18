@@ -48,6 +48,18 @@ describe('buildDevEnv', () => {
     expect(env.HOME).toEqual('/home/dev');
   });
 
+  it('makes its own NODE_EXTRA_CA_CERTS and NEXT_TELEMETRY_DISABLED win over the parent env', () => {
+    const env = buildDevEnv({
+      ...input,
+      parentEnv: { NODE_EXTRA_CA_CERTS: '/etc/ssl/wrong-cert.pem', NEXT_TELEMETRY_DISABLED: '0' },
+    });
+    // Neither key starts with PAIGASUS_/NODE_ENV/__NEXT, so the strip filter never removes them —
+    // only spread order decides the winner. A developer with NODE_EXTRA_CA_CERTS already exported
+    // for their own use must still get the stack's cert, or the child fails to trust the fake IdP.
+    expect(env.NODE_EXTRA_CA_CERTS).toEqual('/tmp/pair/cert.pem');
+    expect(env.NEXT_TELEMETRY_DISABLED).toEqual('1');
+  });
+
   it('leaves the three discovery timing keys UNSET, so dev uses the real defaults', () => {
     const env = buildDevEnv(input);
     expect(env.PAIGASUS_DISCOVERY_NEGATIVE_MS).toBeUndefined();

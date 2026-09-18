@@ -20,6 +20,13 @@
 // This file has no automated coverage and never will — CI cannot run Docker plus two dev servers —
 // so a review pass and one hand-verification are the only gates it ever gets (SMA-641 dev-stack
 // review round 1).
+//
+// NOTHING TYPECHECKS THIS FILE EITHER (final whole-branch review, minor 5). `ts/tooling` has no
+// `package.json`, so the root `typecheck` script (`pnpm -r --if-present run typecheck`) never
+// reaches `tooling/tsconfig.json`, and Moon's `ts:typecheck` is routed to the library/application
+// layers, never the root project (`ts/moon.yml:28-30`). Typed ESLint rules report lint problems,
+// not type errors. So a type error introduced here reds nothing in CI — a local
+// `pnpm --dir ts exec tsc -p tooling/tsconfig.json --noEmit` is the only way to catch one.
 import { spawn, type ChildProcess } from 'node:child_process';
 import { readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { createServer, request as httpRequest, type IncomingHttpHeaders, type IncomingMessage, type ServerResponse } from 'node:http';

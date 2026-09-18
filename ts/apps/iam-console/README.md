@@ -6,7 +6,7 @@ view and the capability-gated audit screen. Design: `docs/superpowers/specs/2026
 
 ## Run it locally
 
-`next dev` cannot start this app on its own: six environment variables have no default, two of them
+`next dev` cannot start this app on its own: nine environment variables have no default, two of them
 are schema-enforced `https` URLs, and the app calls a real OIDC provider, an IAM gRPC endpoint and
 two service-info endpoints. The dev stack supplies all of it:
 

@@ -10,7 +10,14 @@
 // e2e tier sets those to 1, 2 and 3 milliseconds to force a re-probe on every call. A dev server
 // must behave the way a deployment does, so it uses the real defaults.
 
-/** The zone map both children share. BYTE-IDENTICAL in both, or the compiled-agreement check fails. */
+/**
+ * The zone map both children share. Each entry must equal that zone's app's OWN compiled base
+ * path, or `assertCompiledAgreement` (`ts/packages/paigasus-next-config/src/runtime.ts:190-201`)
+ * throws a base-path-mismatch error for that app at startup — it compares `PAIGASUS_ZONES[zone]`
+ * against `PAIGASUS_COMPILED_BASE_PATH`, the value `createNextConfig` wrote into that app's own
+ * build. Nothing enforces this map staying byte-identical with the e2e harness's own
+ * `two-zone-harness.ts` zone map; the two are kept in sync by hand.
+ */
 export const DEV_ZONES = JSON.stringify({ iam: '/iam', gateway: '/gateway' });
 
 export type DevEnvInput = {

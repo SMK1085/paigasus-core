@@ -16,7 +16,12 @@ import type { AddressInfo } from 'node:net';
 import type { Duplex } from 'node:stream';
 import type { TlsMaterial } from './tls';
 
-/** Hop-by-hop headers (RFC 9110 § 7.6.1). A proxy must not forward them. */
+/**
+ * Hop-by-hop headers (RFC 9110 § 7.6.1). A proxy must not forward them.
+ *
+ * `ts/tooling/dev-stack.ts` (SMA-641) keeps its own copy of this set and of `forwardable()` below,
+ * for its second in-process proxy, and says so. Widening this set means widening that copy too.
+ */
 const HOP_BY_HOP = new Set(['connection', 'keep-alive', 'proxy-connection', 'te', 'trailer', 'transfer-encoding', 'upgrade']);
 
 function forwardable(headers: IncomingHttpHeaders): IncomingHttpHeaders {

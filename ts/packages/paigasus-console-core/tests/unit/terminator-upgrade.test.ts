@@ -168,7 +168,10 @@ describe('the terminator tunnels a WebSocket upgrade', () => {
     const terminator = await startTlsTerminator({ tls, routes: [{ prefix: '/iam', target: back.url }] });
     closers.push(() => terminator.close());
 
-    await expect(handshake(terminator.origin, '/nowhere/_next/hmr')).rejects.toThrow();
+    // The terminator DESTROYS the socket with no response — a clean close, per handshake()'s own
+    // comment above — so a bare rejects.toThrow() would also pass on the helper's unrelated 5s
+    // timeout. Assert the specific message so a timeout can no longer masquerade as this refusal.
+    await expect(handshake(terminator.origin, '/nowhere/_next/hmr')).rejects.toThrow('the handshake socket closed with no response');
 
     // The server must still serve a normal request afterwards.
     const { head, socket } = await handshake(terminator.origin, '/iam/_next/hmr');
@@ -182,8 +185,10 @@ describe('the terminator tunnels a WebSocket upgrade', () => {
     closers.push(() => terminator.close());
 
     // The terminator destroys the client socket once the upstream answers normally instead of
-    // upgrading, so this rejects the same way the "no route matches" case does.
-    await expect(handshake(terminator.origin, '/iam/_next/hmr')).rejects.toThrow();
+    // upgrading, so this rejects the same way the "no route matches" case does: a clean close with
+    // no response. Assert the specific message so the helper's own 5s timeout cannot masquerade as
+    // this refusal.
+    await expect(handshake(terminator.origin, '/iam/_next/hmr')).rejects.toThrow('the handshake socket closed with no response');
 
     // Proves the upstream ClientRequest was destroyed too, not only the client socket: without
     // that, this keep-alive connection would stay open for the life of the process.

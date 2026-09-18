@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // The testing surface. OUTSIDE src/ and deliberately NOT server-only guarded: vitest and Playwright
-// harnesses import it outside a Next server. The src/ rule — every file imports 'server-only' — has
+// harnesses import it outside a Next server, and so does `ts/tooling/dev-stack.ts` (SMA-641), a
+// developer-facing command rather than a test — `dev-env.ts` and `dev-world.ts` exist only for it.
+// The src/ rule — every file imports 'server-only' — has
 // ONE exception: src/global.d.ts declares a type only and imports nothing, so it carries no
 // 'server-only' import either, harmlessly, since a .d.ts emits no runtime code. What actually keeps
 // a client bundle safe is the package's `exports` map (only '.' and './testing' are reachable, so no

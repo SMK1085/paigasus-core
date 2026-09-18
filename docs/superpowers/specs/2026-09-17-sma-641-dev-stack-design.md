@@ -11,7 +11,7 @@ Neither `ts/apps/iam-console` nor `ts/apps/gateway-console` can run `next dev` t
 `package.json` files declare `"dev": "next dev"`, and both fail at the first request, because
 `getRuntimeConfig()` rejects the environment.
 
-Eight keys have no default:
+Nine keys have no default:
 
 | Source | Keys with no default |
 | -- | -- |

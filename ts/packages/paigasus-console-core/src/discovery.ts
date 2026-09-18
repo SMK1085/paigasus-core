@@ -23,10 +23,16 @@ import { logger, type ConsoleLogger } from './logger';
 // module-level singleton is remade each time and its Redis client leaks — one per recompile, for
 // the life of a dev session. @paigasus/auth's getAuthRuntime carries the same fix for the same
 // reason (src/runtime.ts:171-230): hold the state on globalThis, under a key that survives a
-// reload. Symbol.for, not a string key, so nothing else can collide with it.
+// reload. `Symbol.for` resolves through a registry that is GLOBAL to the process, keyed by the
+// string given to it — every module that calls `Symbol.for` with the same string gets the SAME
+// symbol back, so the key must be specific to this cache AND carry a version segment, the same
+// reasoning `runtime.ts`'s `RUNTIME_KEY_PREFIX` states for its own key. The key carries no zone
+// segment, and that is deliberate: `descriptorCacheFor` is documented above as a process-wide
+// singleton, so sharing one cache across every zone composed into this process is the wanted
+// behaviour, not the bug the zone segment in `runtime.ts`'s key exists to avoid.
 type DiscoveryState = { processCache?: DescriptorCache | undefined; redisClient?: RedisClientType | undefined };
 
-const DISCOVERY_STATE = Symbol.for('paigasus.console-core.discovery-state');
+const DISCOVERY_STATE = Symbol.for('paigasus.console-core.discovery-state.v1');
 
 function state(): DiscoveryState {
   const holder = globalThis as typeof globalThis & { [DISCOVERY_STATE]?: DiscoveryState };

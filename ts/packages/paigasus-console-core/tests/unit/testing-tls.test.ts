@@ -3,7 +3,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdtempSync, readFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it } from 'vitest';
 import { testTls } from '../../testing/index';
 
 /** True when the certificate is still valid `seconds` from now. */
@@ -19,6 +19,18 @@ function validFor(certPath: string, seconds: number): boolean {
 const TWO_DAYS = 2 * 24 * 60 * 60;
 
 describe('testTls validity and root isolation', () => {
+  // `validFor` catches EVERY execFileSync failure, including `openssl` being absent from PATH —
+  // and an absent binary and a real `-checkend` failure return the same `false`. Without this
+  // probe, "issues a one-day certificate by default" (below) would pass for the wrong reason on a
+  // host with no openssl: the case exists to pin the default expiry, not to pin a missing tool.
+  beforeAll(() => {
+    try {
+      execFileSync('openssl', ['version']);
+    } catch (err) {
+      throw new Error(`this suite requires an "openssl" binary on PATH: ${err instanceof Error ? err.message : String(err)}`, { cause: err });
+    }
+  });
+
   it('issues a one-day certificate by default', () => {
     const root = mkdtempSync(path.join(os.tmpdir(), 'tls-default-'));
     const material = testTls({ root });
