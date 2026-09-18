@@ -16,8 +16,12 @@
 // DOCKER IS REQUIRED AND FAILS LOUDLY, the same rule the two-zone e2e tier states: two zones force
 // PAIGASUS_SESSION_STORE=redis, because createAuthRuntime refuses the memory store once
 // PAIGASUS_ZONES names more than one zone.
+//
+// This file has no automated coverage and never will — CI cannot run Docker plus two dev servers —
+// so a review pass and one hand-verification are the only gates it ever gets (SMA-641 dev-stack
+// review round 1).
 import { spawn, type ChildProcess } from 'node:child_process';
-import { createServer, request as httpRequest, type IncomingMessage, type ServerResponse } from 'node:http';
+import { createServer, request as httpRequest, type IncomingHttpHeaders, type IncomingMessage, type ServerResponse } from 'node:http';
 import { createConnection, type AddressInfo } from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
@@ -58,6 +62,23 @@ function log(message: string): void {
 }
 
 /**
+ * Hop-by-hop headers (RFC 9110 § 7.6.1). A proxy must not forward them. Copied from
+ * tls-terminator.ts's own `HOP_BY_HOP` / `forwardable` rather than imported — that module's
+ * `./testing` export map exposes only what the e2e harness needs, and this file is the only other
+ * caller, the same call this repo already made for fake-idp.ts's JWKS helper ("copied rather than
+ * imported") (SMA-641 dev-stack review round 1, finding 2).
+ */
+const HOP_BY_HOP = new Set(['connection', 'keep-alive', 'proxy-connection', 'te', 'trailer', 'transfer-encoding', 'upgrade']);
+
+function forwardable(headers: IncomingHttpHeaders): IncomingHttpHeaders {
+  const out: IncomingHttpHeaders = {};
+  for (const [name, value] of Object.entries(headers)) {
+    if (!HOP_BY_HOP.has(name) && value !== undefined) out[name] = value;
+  }
+  return out;
+}
+
+/**
  * Advisory only. It RACES anything that takes the port in between, so the authoritative check is
  * each server's own listen error. It exists because failing here names all four ports at once,
  * before a Docker pull.
@@ -94,13 +115,18 @@ async function preflight(): Promise<void> {
  */
 async function startDefaultZone(): Promise<{ url: string; close: () => Promise<void> }> {
   const server = createServer((req: IncomingMessage, res: ServerResponse) => {
-    if (req.url === '/' || req.url === '') {
+    // A bare root carrying a query string — `/?_rsc=1`, the shape Next's RSC prefetch produces —
+    // is not `=== '/'` against the raw req.url. Strip the query before matching, the same rule
+    // tls-terminator.ts applies to its own route matching. `req.url === ''` is unreachable for a
+    // Node HTTP server, so it is no longer checked (SMA-641 dev-stack review round 1, minor D).
+    const pathname = (req.url ?? '/').split('?')[0] ?? '/';
+    if (pathname === '/') {
       res.writeHead(302, { location: '/iam' });
       res.end();
       return;
     }
-    const upstream = httpRequest({ hostname: '127.0.0.1', port: IAM_PORT, method: req.method, path: req.url, headers: req.headers }, (upstreamRes) => {
-      res.writeHead(upstreamRes.statusCode ?? 502, upstreamRes.headers);
+    const upstream = httpRequest({ hostname: '127.0.0.1', port: IAM_PORT, method: req.method, path: req.url, headers: forwardable(req.headers) }, (upstreamRes) => {
+      res.writeHead(upstreamRes.statusCode ?? 502, forwardable(upstreamRes.headers));
       upstreamRes.pipe(res);
     });
     upstream.on('error', () => {
@@ -108,6 +134,12 @@ async function startDefaultZone(): Promise<{ url: string; close: () => Promise<v
       res.writeHead(502, { 'content-type': 'text/plain' });
       res.end('dev-stack: the default zone did not answer');
     });
+    // Mirrors tls-terminator.ts's forward(): the downstream (browser-facing, via the terminator)
+    // response closed — a client abort, e.g. a cancelled RSC prefetch, which `next dev` produces a
+    // constant stream of — before the upstream finished. Destroying it releases the socket pinned
+    // against the iam child; without this handler every aborted request leaked one (SMA-641
+    // dev-stack review round 1, finding 1).
+    res.on('close', () => upstream.destroy());
     req.pipe(upstream);
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -156,45 +188,127 @@ function spawnZone(zone: Zone, env: Record<string, string>): ChildProcess {
   };
   child.stdout?.on('data', prefix);
   child.stderr?.on('data', prefix);
+  // `spawn` reports an async launch failure (EACCES, EAGAIN — the binary resolved but could not be
+  // started) as an 'error' event. With no listener, EventEmitter rethrows it as an UNCAUGHT
+  // exception outside main()'s try/catch, so nothing would be torn down. waitForZone below also
+  // listens, to fail fast instead of polling to the deadline (SMA-641 dev-stack review round 1,
+  // finding 5).
+  child.on('error', (error) => {
+    console.error(`[${zone}] failed to start:`, error);
+  });
   return child;
 }
 
 /**
  * Ready when the zone's health route answers 2xx. A refusal or a timeout means "still compiling";
  * a 5xx is FATAL, because that is a rejected configuration rather than a slow build — the same
- * rule the e2e harness uses, with a much longer deadline.
+ * rule the e2e harness uses, with a much longer deadline. An `'error'` event, or an exit by code
+ * OR signal (`stop()` already checks both, so this does too, SMA-641 dev-stack review round 1,
+ * minor C), is also fatal and fails fast rather than polling to the deadline (finding 5).
+ * `isInterrupted` is checked every iteration so a signal that lands during the up-to-180s compile
+ * wait does not sit out the rest of the timeout (finding 4).
  */
-async function waitForZone(zone: Zone, child: ChildProcess): Promise<void> {
+async function waitForZone(zone: Zone, child: ChildProcess, isInterrupted: () => boolean): Promise<void> {
   const url = `http://127.0.0.1:${String(ZONE_PORT[zone])}/${zone}/healthz`;
   const deadline = Date.now() + READY_TIMEOUT_MS;
-  while (Date.now() < deadline) {
-    if (child.exitCode !== null) throw new Error(`dev-stack: the ${zone} server exited with code ${String(child.exitCode)} before it became ready`);
-    try {
-      const response = await fetch(url);
-      if (response.ok) return;
-      if (response.status >= 500) {
-        throw new Error(`dev-stack: the ${zone} server answered ${String(response.status)} at ${url}. That is a rejected configuration, not a slow compile — read the [${zone}] lines above.`);
+  // Node's ChildProcess always reports its 'error' event with an actual Error object.
+  let childError: Error | undefined;
+  const onError = (error: Error): void => {
+    childError = error;
+  };
+  child.once('error', onError);
+  try {
+    while (Date.now() < deadline) {
+      if (isInterrupted()) throw new Error('dev-stack: interrupted by signal during startup');
+      if (childError !== undefined) throw new Error(`dev-stack: the ${zone} server failed to start: ${childError.message}`);
+      if (child.exitCode !== null || child.signalCode !== null) {
+        throw new Error(`dev-stack: the ${zone} server exited (code=${String(child.exitCode)}, signal=${String(child.signalCode)}) before it became ready`);
       }
-    } catch (error) {
-      if (error instanceof Error && error.message.startsWith('dev-stack:')) throw error;
-      // Not listening yet, or still compiling the route.
+      let response: Response | undefined;
+      try {
+        response = await fetch(url);
+      } catch {
+        // Not listening yet, or still compiling the route.
+      }
+      // OUTSIDE the try/catch above: a real HTTP answer, fatal or not, is never "still compiling".
+      // The previous shape sniffed `error.message.startsWith('dev-stack:')` to tell its own throw
+      // apart from a fetch failure, which made an explicit status rule depend on a message string
+      // (SMA-641 dev-stack review round 1, minor A).
+      if (response !== undefined) {
+        if (response.ok) return;
+        if (response.status >= 500) {
+          throw new Error(`dev-stack: the ${zone} server answered ${String(response.status)} at ${url}. That is a rejected configuration, not a slow compile — read the [${zone}] lines above.`);
+        }
+      }
+      await new Promise((resolve) => setTimeout(resolve, 500));
     }
-    await new Promise((resolve) => setTimeout(resolve, 500));
+    throw new Error(`dev-stack: the ${zone} server was not ready within ${String(READY_TIMEOUT_MS / 1000)}s`);
+  } finally {
+    child.off('error', onError);
   }
-  throw new Error(`dev-stack: the ${zone} server was not ready within ${String(READY_TIMEOUT_MS / 1000)}s`);
+}
+
+/**
+ * Logs loudly if a zone dies after it was already reported ready. Without this the supervisor
+ * keeps running and the browser just gets 502s with nothing in the log naming the zone (SMA-641
+ * dev-stack review round 1, minor E).
+ */
+function watchZone(zone: Zone, child: ChildProcess): void {
+  child.once('exit', (code, signal) => {
+    console.error(`[dev-stack] the ${zone} server exited unexpectedly (code=${String(code)}, signal=${String(signal)})`);
+  });
 }
 
 async function main(): Promise<void> {
   // NEWEST FIRST: the order to close in. Every start step pushes its own closer.
   const started: (() => Promise<void>)[] = [];
+  let closing = false;
   const closeAll = async (): Promise<void> => {
+    // Idempotent: the signal path and the normal/catch path could both reach this, and must not
+    // run concurrently (SMA-641 dev-stack review round 1, finding 4 / minor B).
+    if (closing) return;
+    closing = true;
     for (const close of started.splice(0)) {
-      await close().catch((error: unknown) => console.error('[dev-stack] a shutdown step failed:', error));
+      // try/catch, not `.catch()` on the call: a closer that threw SYNCHRONOUSLY used to escape
+      // `.catch()`, abort this loop, and take every remaining closer with it — gone from both the
+      // spliced copy and `started` (SMA-641 dev-stack review round 1, minor B).
+      try {
+        await close();
+      } catch (error) {
+        console.error('[dev-stack] a shutdown step failed:', error);
+      }
     }
   };
 
+  // Registered BEFORE preflight(), not after both zones are ready: that used to leave the longest
+  // window in the program — a Docker pull plus up to 180s of compile per zone — with NO handler at
+  // all, so a Ctrl-C there hit Node's default SIGINT behaviour (immediate exit, no teardown)
+  // instead of this one. `shutdownRequested` is also checked between start steps below (`checkpoint`)
+  // and inside waitForZone's own poll loop, so a signal does not sit out whichever wait was in
+  // flight (SMA-641 dev-stack review round 1, finding 4).
+  let ready = false;
+  let shutdownRequested = false;
+  let notifyShutdown!: () => void;
+  const shutdown = new Promise<void>((resolve) => {
+    notifyShutdown = resolve;
+  });
+  const checkpoint = (): void => {
+    if (shutdownRequested) throw new Error('dev-stack: interrupted by signal during startup');
+  };
+  const onSignal = (signal: NodeJS.Signals): void => {
+    log(`received ${signal}, shutting down`);
+    shutdownRequested = true;
+    // A signal that lands before both zones are ready is an INTERRUPTED startup, not a clean
+    // stop, so the process exits non-zero.
+    if (!ready) process.exitCode = 1;
+    notifyShutdown();
+  };
+  process.once('SIGINT', () => onSignal('SIGINT'));
+  process.once('SIGTERM', () => onSignal('SIGTERM'));
+
   try {
     await preflight();
+    checkpoint();
 
     log('generating the TLS material');
     const tls = testTls({ root: TLS_ROOT, days: CERT_DAYS });
@@ -205,6 +319,7 @@ async function main(): Promise<void> {
       await redis.stop();
     });
     const redisUrl = `redis://${redis.getHost()}:${String(redis.getMappedPort(6379))}/0`;
+    checkpoint();
 
     log('starting the fakes');
     const idp = await startFakeIdp({ cert: tls, port: IDP_PORT });
@@ -215,6 +330,7 @@ async function main(): Promise<void> {
     const gateway = await startFakeGateway();
     started.unshift(() => gateway.close());
     gateway.setServiceInfo(DEV_GATEWAY_DESCRIPTOR);
+    checkpoint();
 
     const defaultZone = await startDefaultZone();
     started.unshift(() => defaultZone.close());
@@ -230,6 +346,7 @@ async function main(): Promise<void> {
       ],
     });
     started.unshift(() => terminator.close());
+    checkpoint();
 
     const env = buildDevEnv({
       parentEnv: process.env,
@@ -242,12 +359,23 @@ async function main(): Promise<void> {
     });
 
     log('starting both zones with `next dev` — the first request compiles, so this takes a while');
-    const children: Record<Zone, ChildProcess> = { iam: spawnZone('iam', env), gateway: spawnZone('gateway', env) };
-    started.unshift(() => stop(children.gateway));
-    started.unshift(() => stop(children.iam));
+    // Split so each child's closer is registered before the NEXT child starts: with both spawned
+    // inside one object literal, a synchronous throw from the second spawnZone call (e.g. the
+    // gateway zone's own `createRequire(...).resolve(...)` failing on a partially provisioned
+    // worktree) left the first child running and unreachable by closeAll(). This also fixes the
+    // previously inverted teardown order between the two (SMA-641 dev-stack review round 1,
+    // finding 3).
+    const iamChild = spawnZone('iam', env);
+    started.unshift(() => stop(iamChild));
+    const gatewayChild = spawnZone('gateway', env);
+    started.unshift(() => stop(gatewayChild));
 
-    await waitForZone('iam', children.iam);
-    await waitForZone('gateway', children.gateway);
+    await waitForZone('iam', iamChild, () => shutdownRequested);
+    await waitForZone('gateway', gatewayChild, () => shutdownRequested);
+    checkpoint();
+    ready = true;
+    watchZone('iam', iamChild);
+    watchZone('gateway', gatewayChild);
 
     console.log('');
     console.log(`  open  ${terminator.origin}/iam`);
@@ -266,14 +394,7 @@ async function main(): Promise<void> {
     console.log('  Ctrl-C stops everything. A restart logs you out: Redis is new each run.');
     console.log('');
 
-    await new Promise<void>((resolve) => {
-      const shutdown = (): void => {
-        log('shutting down');
-        resolve();
-      };
-      process.once('SIGINT', shutdown);
-      process.once('SIGTERM', shutdown);
-    });
+    await shutdown;
     await closeAll();
   } catch (error) {
     // Close what started, then report the START error: it says why the stack is not up. A close
