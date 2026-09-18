@@ -1137,13 +1137,13 @@ RELEASE_PLAN_SH_CALL_SITES = (
     "--negative-control)  MODE=negctl; shift ;;",
     "output)   github_output ;;",
     "negctl)   require_uv; negative_control ;;",
-    'if [ "$rc" -ne 0 ] || ! printf \'%s\\n\' "$out" | grep -qE \'^nothing_to_release=(true|false)$\'; then',
+    'if [ "$rc" -ne 0 ] || ! grep -qE \'^nothing_to_release=(true|false)$\' < <(printf \'%s\\n\' "$out"); then',
     "printf 'nothing_to_release=false\\n' >> \"${GITHUB_OUTPUT:-/dev/stdout}\"",
     "if ! grep -qx 'nothing_to_release=false' \"$nouv_out\"; then",
     'if [ "$mut_rc" != "3" ]; then',
     "printf 'release-plan negative control: %d row(s) failed\\n' \"$failures\" >&2",
     'if [ "$mut8_rc" != "3" ]; then',
-    "if ! printf '%s\\n' \"$mut8_out\" | grep -q \"a non-table \\[workspace\\] is inconclusive\"; then",
+    "if ! grep -q \"a non-table \\[workspace\\] is inconclusive\" < <(printf '%s\\n' \"$mut8_out\"); then",
 )
 
 
