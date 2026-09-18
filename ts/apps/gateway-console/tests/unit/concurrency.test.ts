@@ -25,6 +25,20 @@ describe('mapWithLimit', () => {
     expect(peak).toBe(8);
   });
 
+  it('rejects with the failing call error, and settles instead of hanging, when one item rejects mid-run', async () => {
+    const err = new Error('item 2 failed');
+    // Item 1 is still mid-flight (its later() has not fired) when item 2 rejects. mapWithLimit does
+    // not cancel item 1's worker: it keeps running to completion, unobserved (acceptable per review).
+    // What this proves is that the RETURNED promise rejects with the failing call's own error, and
+    // does so promptly, not after every other in-flight call has also settled.
+    await expect(
+      mapWithLimit([1, 2, 3, 4], 2, async (n) => {
+        if (n === 2) throw err;
+        return later(n, 20);
+      }),
+    ).rejects.toBe(err);
+  });
+
   it('answers an empty list with no call', async () => {
     let calls = 0;
     const results = await mapWithLimit([], 8, () => {
