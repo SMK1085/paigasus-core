@@ -218,6 +218,20 @@ describe('the token (§ 5.4)', () => {
     expect(issue.mock.calls[0]?.[1].get('expiry')).toBe('90');
     expect(issue.mock.calls[0]?.[1].get('saPrn')).toBe(SA_PRN);
 
+    // Issue a SECOND key. A useActionState(actions.issue, null) implementation — the exact
+    // shape rule 2 forbids — would also send null on the FIRST call, so that assertion alone
+    // cannot tell the direct-call path from the forbidden one. It sends the PREVIOUS result
+    // (the first token) as this call's first argument instead of null, which only a second
+    // call can expose.
+    await waitFor(() => {
+      expect(within(panel()).getByRole<HTMLButtonElement>('button', { name: 'Issue key' }).disabled).toBe(false);
+    });
+    await user.click(within(panel()).getByRole('button', { name: 'Issue key' }));
+    await waitFor(() => {
+      expect(issue).toHaveBeenCalledTimes(2);
+    });
+    expect(issue.mock.calls[1]?.[0]).toBeNull();
+
     const NEW_KEY: ApiKeyRowView = { ...KEY, id: 'key-2', prefix: 'pgs_unit_new' };
     await refresh(rerender, section(view({ selected: selected({ keys: { kind: 'ok', rows: [KEY, NEW_KEY], page: { offset: 0, nextOffset: null } } }) }), a));
 
