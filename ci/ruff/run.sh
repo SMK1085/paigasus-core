@@ -144,8 +144,16 @@ self_test() {
   git -C "$tmp" add -A >/dev/null 2>&1
 
   _row() { # $1 label, $2 expected-present (0/1), $3 path
-    local label="$1" want="$2" path="$3" got=0
-    ruff_corpus "$tmp" | grep -qx "$path" || got=1
+    local label="$1" want="$2" path="$3" got=0 corpus corpus_rc=0
+    # Capture, check, then match (SMA-647). The old pipe read a failed ruff_corpus as "absent",
+    # which PASSED every row that expects absence.
+    corpus="$(ruff_corpus "$tmp")" || corpus_rc=$?
+    if [ "$corpus_rc" -ne 0 ]; then
+      printf '  FAIL %s: ruff_corpus exited %s, so the row cannot assert\n' "$label" "$corpus_rc" >&2
+      failures=$((failures + 1))
+      return 0
+    fi
+    grep -qx "$path" < <(printf '%s\n' "$corpus") || got=1
     if [ "$got" != "$want" ]; then
       printf '  FAIL %s: %s (want present=%s)\n' "$label" "$path" "$want" >&2
       failures=$((failures + 1))

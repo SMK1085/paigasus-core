@@ -533,7 +533,7 @@ assert_freshness_call_site() { # $1 workflow file
   # `[[:space:]]` and `(- )?` are ERE and portable across BSD and GNU grep; the literal
   # dot in the path is escaped so it does not match "any character".
   local hit_line hit_lineno
-  hit_line="$(grep -nE '^[[:space:]]*(- )?run:[^#]*ci/publish-metadata/run\.sh[^#]*--check-categories-freshness' "$wf" | head -n1 || true)"
+  hit_line="$(grep -nE '^[[:space:]]*(- )?run:[^#]*ci/publish-metadata/run\.sh[^#]*--check-categories-freshness' "$wf" | sed -n 1p || true)"
   if [ -z "$hit_line" ]; then
     echo "Check 4 FAILED: $wf no longer invokes --check-categories-freshness on a real," >&2
     echo "  non-comment run: line. The category snapshot's ONLY drift detector would be" >&2
@@ -1497,10 +1497,13 @@ $scanroot/rs/crates/bindings/paigasus-py-bindings/pyproject.toml"
   # A NEW package under py/packages is picked up with no edit to this file — the property
   # the hand-maintained list did not have (a new PyPI-bound package passed green, rc 0).
   mkdir -p "$scanroot/py/packages/newpkg"; : >"$scanroot/py/packages/newpkg/pyproject.toml"
-  if pypi_scan_paths "$scanroot" | grep -q '/py/packages/newpkg/pyproject.toml$'; then
+  # Capture, check, then match (SMA-647): a piped grep -q could lose the producer to SIGPIPE.
+  local newpkg_scan newpkg_rc=0
+  newpkg_scan="$(pypi_scan_paths "$scanroot")" || newpkg_rc=$?
+  if [ "$newpkg_rc" -eq 0 ] && grep -q '/py/packages/newpkg/pyproject.toml$' < <(printf '%s\n' "$newpkg_scan"); then
     echo "  ok — Check P0 (a NEW py/packages member enters the scan set automatically)"
   else
-    echo "NEGATIVE CONTROL FAILED: discovery missed a new py/packages member" >&2
+    echo "NEGATIVE CONTROL FAILED: discovery missed a new py/packages member (pypi_scan_paths exited $newpkg_rc)" >&2
     failures=$((failures + 1))
   fi
   rm -rf "$scanroot/py/packages/newpkg"
