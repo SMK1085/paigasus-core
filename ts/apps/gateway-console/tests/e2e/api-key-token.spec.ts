@@ -11,11 +11,21 @@
 // `finish()` polls the pending count instead of waiting for the network to go idle, so a page that
 // never goes quiet fails this row instead of hanging it.
 import { signIn, waitForHydration } from './support/login';
-import { scanned, startResponseScan, QUIESCE_TIMEOUT_MS } from './support/response-scan';
+import { scanned, startResponseScan, QUIESCE_TIMEOUT_MS, type Seen } from './support/response-scan';
 import { ORG_ID, SEEDED_SA_ID, TOKEN_PREFIX } from './support/world';
 import { expect, test } from './support/harness';
 
 const ORG_PATH = `/gateway/orgs/${ORG_ID}`;
+
+/**
+ * The header portion of `Seen.text` (`text` is `JSON.stringify(headers) + '\n' + body`, built from
+ * the SAME `body` value in response-scan.ts's `capture()`), so this slice is exact regardless of
+ * what the body contains — a response header (Set-Cookie, Location, an x-action-redirect header,
+ * or any other) must not carry the token, not even alongside the action response's own body.
+ */
+function headerText(response: Seen): string {
+  return response.text.slice(0, response.text.length - response.body.length - 1);
+}
 
 test('R16: an issued token is in exactly one response body, the action response, and in none after it (§ 7.2 row 4)', async ({ page, harness }) => {
   harness.useWorld({ seedServiceAccount: true });
@@ -51,9 +61,17 @@ test('R16: an issued token is in exactly one response body, the action response,
 
   const carrying = seen.filter((response) => response.body.includes(token));
   expect(carrying.map((response) => `${response.method} ${response.url}`)).toHaveLength(1);
-  expect(carrying[0]?.method).toBe('POST');
-  expect(carrying[0]?.action).toBe(true);
+  const action = carrying[0];
+  expect(action?.method).toBe('POST');
+  expect(action?.action).toBe(true);
   expect(seen.filter((response) => response.url.includes(token))).toEqual([]);
+
+  // Headers, not only bodies (the review finding this row missed at first): the token must not
+  // leak into a Set-Cookie, a Location, an x-action-redirect header, or any other response header —
+  // not on any OTHER response, and not even alongside the action response's own body.
+  const other = seen.filter((response) => response !== action);
+  expect(other.filter((response) => response.text.includes(token)).map((response) => `${response.method} ${response.url}`)).toEqual([]);
+  expect(action === undefined ? '' : headerText(action)).not.toContain(token);
 
   // The residue: every response that should carry a body, and whose body this row did not read,
   // must belong to the one measured class the README's Known limits records — an unbuffered
