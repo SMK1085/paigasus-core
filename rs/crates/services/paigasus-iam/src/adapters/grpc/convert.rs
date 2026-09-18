@@ -158,10 +158,21 @@ pub fn authn_status(err: &AuthnError) -> Status {
 /// through the kernel's stable error-kind token; a well-formed PRN of the wrong service/type
 /// carries its canonical form instead (mirrors `application::memberships`'s PRN parsing).
 ///
-/// The returned canonical is compared by every Get/Rename/Archive/Restore handler against the
-/// service's stored canonical PRN before the write for Rename/Archive/Restore, and after the
-/// read for Get — the forged-org-slot defense (brief rule 8, mirroring the HTTP layer's
-/// semantics via stored-PRN comparison).
+/// The returned canonical is compared against the service's stored canonical PRN by every
+/// Get/Rename/Archive/Restore handler — before the write for Rename/Archive/Restore, and after
+/// the read for Get — and, since SMA-645, by the four Create/List handlers that take a PARENT
+/// PRN, against the stored PARENT. That is the forged-org-slot defense (brief rule 8, mirroring
+/// the HTTP layer's semantics via stored-PRN comparison).
+///
+/// Region and organization slot are validated in TWO stages, and this function is only the
+/// first. `Prn::parse` here rejects a syntactically invalid region (`EU-WEST-1` fails
+/// `is_valid_region`), so that answers `invalid-prn`. Beyond the service and the resource type
+/// this function checks nothing else: it never builds an `OrganizationId`/`TeamId`/`ProjectId`,
+/// so the domain's own org-slot rule does not run, and a syntactically VALID region
+/// (`eu-west-1`) and any organization slot both pass through into the returned canonical. The
+/// second stage is the caller's stored-PRN comparison, which is what rejects a well-formed but
+/// non-matching region or slot — and why a forged slot answers `TenancyError::PrnMismatch`
+/// rather than `invalid-prn`.
 pub fn node_uuid(prn: &str, expect: &str) -> Result<(Uuid, String), Status> {
     let parsed = Prn::parse(prn).map_err(|e| status_to_grpc(TenancyError::InvalidPrn(e.kind().to_owned())))?;
     if parsed.service() != "iam" || parsed.resource_type() != expect {

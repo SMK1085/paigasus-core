@@ -1117,9 +1117,18 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   `ci/next-public/run.sh` (lines 151-198) both call `mapfile`, a bash-4+ builtin absent from system
   `/bin/bash` 3.2.57 — under it, both gates fail every self-test row (`mapfile: command not found`,
   read as an ordinary assertion failure, not an infrastructure error). Both pass cleanly under
-  `/opt/homebrew/bin/bash` 5.3.15. So on this class of machine, no single local bash satisfies every
+  `/opt/homebrew/bin/bash` 5.3.15.
+  MEASURED (SMA-645): `repo:publish-metadata` is a THIRD bash-4+ gate, and it fails differently —
+  `ci/publish-metadata/run.sh:662` uses `declare -A` (an associative array), so under 3.2 the gate
+  dies at once with `declare: -A: invalid option` on **stderr** and an EMPTY `stdout.log`, rather
+  than failing self-test rows the way a `mapfile` gate does. Read an empty stdout plus a one-line
+  `declare`/`mapfile` stderr as a bash-version artifact, never as a finding: the same commit passed
+  `/opt/homebrew/bin/bash ci/publish-metadata/run.sh` ("all checks passed"). Expect more gates in
+  this class — grep a failing gate for `declare -A` and `mapfile` before diagnosing anything else.
+  So on this class of machine, no single local bash satisfies every
   gate: `repo:affected-smoke` needs 3.2 (no `mapfile`, and no here-string deadlock);
-  `repo:ruff-ci` and `repo:next-public-free` need 4+; and `repo:actionlint` has no working local
+  `repo:ruff-ci`, `repo:next-public-free` and `repo:publish-metadata` need 4+; and
+  `repo:actionlint` has no working local
   bash at all, per the correction above. A local full-graph `moon ci` run must pick one bash for the
   whole invocation, then re-run the gates that need the other bash directly
   (`<bash-binary> ci/<gate>/run.sh`) and read those results instead of the `moon ci` verdict for
