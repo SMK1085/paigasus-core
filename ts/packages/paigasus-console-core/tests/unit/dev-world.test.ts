@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import { describe, expect, it } from 'vitest';
+import { Code, ConnectError } from '@connectrpc/connect';
 import { NodeStatus } from '@paigasus/sdk/iam/types';
 import { DEV_GATEWAY_DESCRIPTOR, DEV_IAM_DESCRIPTOR, devWorld } from '../../testing/index';
 
@@ -66,10 +67,12 @@ describe('devWorld', () => {
       expect(organization.status).toEqual(NodeStatus.ACTIVE);
       expect(organization.effectiveStatus).toEqual(NodeStatus.ACTIVE);
     }
-    const team = handlers['tenancy.getTeam']?.({} as never, {} as never) as { team: { status: number; effectiveStatus: number } };
+    const listedTeams = handlers['tenancy.listTeams']?.({} as never, {} as never) as { teams: { prn: string }[] };
+    const team = handlers['tenancy.getTeam']?.({ prn: listedTeams.teams[0]?.prn } as never, {} as never) as { team: { status: number; effectiveStatus: number } };
     expect(team.team.status).toEqual(NodeStatus.ACTIVE);
     expect(team.team.effectiveStatus).toEqual(NodeStatus.ACTIVE);
-    const project = handlers['tenancy.getProject']?.({} as never, {} as never) as { project: { status: number; effectiveStatus: number } };
+    const listedProjects = handlers['tenancy.listProjects']?.({} as never, {} as never) as { projects: { prn: string }[] };
+    const project = handlers['tenancy.getProject']?.({ prn: listedProjects.projects[0]?.prn } as never, {} as never) as { project: { status: number; effectiveStatus: number } };
     expect(project.project.status).toEqual(NodeStatus.ACTIVE);
     expect(project.project.effectiveStatus).toEqual(NodeStatus.ACTIVE);
   });
@@ -79,5 +82,46 @@ describe('devWorld', () => {
     // (src/scopes.ts:116-118), and the audit page needs iam.audit.
     expect(DEV_IAM_DESCRIPTOR.capabilities).toEqual(['iam.authz.cedar', 'iam.audit']);
     expect(DEV_GATEWAY_DESCRIPTOR.capabilities).toEqual(['gateway.chat.stream']);
+  });
+
+  it('returns the submitted name from get, not the fixture, for an organization the developer creates', () => {
+    const handlers = devWorld();
+    const created = handlers['tenancy.createOrganization']?.({ slug: 'acme', name: 'Acme' } as never, {} as never) as { organization: { prn: string; name: string } };
+    expect(created.organization.name).toBe('Acme');
+    const fetched = handlers['tenancy.getOrganization']?.({ prn: created.organization.prn } as never, {} as never) as { organization: { name: string } };
+    expect(fetched.organization.name).toBe('Acme');
+  });
+
+  it('renames a node and returns the new name', () => {
+    const handlers = devWorld();
+    const listed = handlers['tenancy.listOrganizations']?.({} as never, {} as never) as { organizations: { prn: string }[] };
+    const prn = listed.organizations[0]?.prn;
+    expect(prn).toBeDefined();
+    const renamed = handlers['tenancy.renameOrganization']?.({ prn, newName: 'Renamed Org' } as never, {} as never) as { organization: { name: string } };
+    expect(renamed.organization.name).toBe('Renamed Org');
+    const fetched = handlers['tenancy.getOrganization']?.({ prn } as never, {} as never) as { organization: { name: string } };
+    expect(fetched.organization.name).toBe('Renamed Org');
+  });
+
+  it('archives a node and changes its status to archived', () => {
+    const handlers = devWorld();
+    const listed = handlers['tenancy.listTeams']?.({} as never, {} as never) as { teams: { prn: string }[] };
+    const prn = listed.teams[0]?.prn;
+    expect(prn).toBeDefined();
+    const result = handlers['tenancy.archiveTeam']?.({ prn } as never, {} as never) as { team: { status: number; effectiveStatus: number } };
+    expect(result.team.status).toEqual(NodeStatus.ARCHIVED);
+    expect(result.team.effectiveStatus).toEqual(NodeStatus.ARCHIVED);
+  });
+
+  it('refuses to get an unknown PRN', () => {
+    const handlers = devWorld();
+    let caught: unknown;
+    try {
+      void handlers['tenancy.getProject']?.({ prn: 'prn:pgs:iam:::project/00000000-0000-0000-0000-000000000000' } as never, {} as never);
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(ConnectError);
+    expect((caught as ConnectError).code).toBe(Code.NotFound);
   });
 });
