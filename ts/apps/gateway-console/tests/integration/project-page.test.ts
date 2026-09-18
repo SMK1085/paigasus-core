@@ -62,6 +62,11 @@ function render(element: ReactElement): string {
   return renderToStaticMarkup(createElement(ZoneProvider, { zone: 'gateway', zones: { gateway: '/gateway' }, children: element }));
 }
 
+/** The text of the header's `data-testid="node-status"` span, or null when the span is absent. */
+function nodeStatusText(html: string): string | null {
+  return /<span data-testid="node-status"[^>]*>([^<]*)</.exec(html)?.[1] ?? null;
+}
+
 function page(project: string = IDS.projectA1): Promise<ReactElement> {
   return ProjectSettingsPage({ params: Promise.resolve({ org: IDS.orgA, project }), searchParams: Promise.resolve({}) });
 }
@@ -75,6 +80,8 @@ describe('the project settings page', () => {
 
     expect(html).toContain('data-testid="project-settings"');
     expect(html).toContain('Inference Gateway');
+    // F17a: the header shows the node status for every lifecycle, "Active" included.
+    expect(nodeStatusText(html)).toBe('Active');
     expect(html).toContain('Team: Platform Team');
     expect(html).toContain(`<a href="/orgs/${IDS.orgA}">Acme Corp</a>`);
     expect(html).toContain('data-testid="service-accounts"');

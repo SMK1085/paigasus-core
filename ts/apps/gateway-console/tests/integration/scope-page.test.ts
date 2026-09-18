@@ -60,6 +60,11 @@ function render(element: ReactElement): string {
   return renderToStaticMarkup(createElement(ZoneProvider, { zone: 'gateway', zones: { gateway: '/gateway' }, children: element }));
 }
 
+/** The text of the header's `data-testid="node-status"` span, or null when the span is absent. */
+function nodeStatusText(html: string): string | null {
+  return /<span data-testid="node-status"[^>]*>([^<]*)</.exec(html)?.[1] ?? null;
+}
+
 const ORG_A = organizationPrn(IDS.orgA);
 const TEAM_A1 = teamPrn(IDS.orgA, IDS.teamA1);
 const PROJECT_A1 = projectPrn(IDS.orgA, IDS.projectA1);
@@ -89,6 +94,8 @@ describe('the organization settings page', () => {
 
     expect(html).toContain('data-testid="org-settings"');
     expect(html).toContain('Acme Corp');
+    // F17a: the header shows the node status for every lifecycle, "Active" included.
+    expect(nodeStatusText(html)).toBe('Active');
     expect(html).toContain('data-testid="gateway-state-line"');
     expect(html).toContain('data-testid="service-accounts"');
     expect(html).toContain('ci-bot');

@@ -16,5 +16,5 @@ import { currentSession, discovery } from '../../../lib/console';
 export default async function OverviewPage(): Promise<ReactElement> {
   const session = await currentSession();
   const state = await discovery().getServiceState('gateway', session.accessToken);
-  return <ZoneOverview view={gatewayView(state)} scope={null} />;
+  return <ZoneOverview view={gatewayView(state)} />;
 }
