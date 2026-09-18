@@ -21,7 +21,7 @@ import { createClient, type RedisClientType } from 'redis';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import type { DescriptorCache } from '@paigasus/discovery/server';
 import type { ConsoleCoreConfig } from '../../src/config-shape';
-import { descriptorCacheFor, resetDiscoveryForTest } from '../../src/discovery';
+import { DescriptorCacheTimeoutError, descriptorCacheFor, resetDiscoveryForTest } from '../../src/discovery';
 import { createJsonLogger, type ConsoleLogger } from '../../src/logger';
 
 const TIMEOUT_MS = 1000;
@@ -32,6 +32,10 @@ const IDLE_MS = 3 * SOCKET_TIMEOUT_MS;
 const PAUSE_MS = 6_000;
 const POLL_BUDGET_MS = 5_000;
 const POLL_STEP_MS = 100;
+/** SMA-650 D3: 4 × the command timeout. */
+const DEADLINE_MS = TIMEOUT_MS * 4;
+/** Strictly BELOW socketTimeout, so the driver's writes keep resetting the idle timer. */
+const DRIVE_STEP_MS = 500;
 const LOST_EVENT = 'discovery.redis_connection_lost';
 const SECRET = `s3cret${randomBytes(8).toString('hex')}`;
 
@@ -164,5 +168,50 @@ describe('the descriptor cache Redis client (SMA-648)', () => {
     // A guard, exempt from red-first: it must see at least one line, or it proves nothing.
     expect(sink.lost().length).toBeGreaterThan(0);
     for (const line of sink.lines) expect(line).not.toContain(SECRET);
+  });
+
+  it('T6: a hang under STEADY TRAFFIC is bounded by the operation deadline (SMA-650)', async () => {
+    const sink = logSink();
+    const { cache, service } = await warmCache(sink.log);
+    const failures: unknown[] = [];
+    const issued: Array<Promise<void>> = [];
+    let driving = true;
+
+    // FIRE AND FORGET, never awaited, at an interval strictly below socketTimeout. Awaiting each
+    // operation would stop the traffic, the idle timer would fire, and node-redis would reject the
+    // command by itself — which is T3's path, and it passes WITHOUT this feature. Keeping several
+    // operations in flight is the whole point of this test.
+    const driver = (async () => {
+      while (driving) {
+        issued.push(
+          cache.get(service).then(
+            () => undefined,
+            (error: unknown) => {
+              failures.push(error);
+            },
+          ),
+        );
+        await sleep(DRIVE_STEP_MS);
+      }
+    })();
+
+    await admin.clientPause(PAUSE_MS, 'ALL');
+    // The first operation issued INSIDE the pause can go out as late as one drive step in, so it
+    // expires at DEADLINE_MS + DRIVE_STEP_MS. Wait one more drive step than that, so the assertion
+    // is not made exactly on the boundary — and stay inside PAUSE_MS, so the server is still paused.
+    await sleep(DEADLINE_MS + 2 * DRIVE_STEP_MS);
+    driving = false;
+    await driver;
+    await Promise.all(issued);
+
+    // The assertion is on the TYPE, not on the clock. A node-redis teardown rejection can never be
+    // a DescriptorCacheTimeoutError, so this discriminates the new path from T3's idle-timer path
+    // exactly, with no wall-clock window to go flaky on a loaded CI runner.
+    const deadlineFailures = failures.filter((error) => error instanceof DescriptorCacheTimeoutError && error.phase === 'deadline');
+    expect(deadlineFailures.length).toBeGreaterThan(0);
+
+    // The cache recovers once the pause ends.
+    await sleep(PAUSE_MS);
+    expect(await eventually(() => cache.get(service), 'a read after the paused-with-traffic window')).toEqual(record());
   });
 });
