@@ -21,6 +21,7 @@
 // so a review pass and one hand-verification are the only gates it ever gets (SMA-641 dev-stack
 // review round 1).
 import { spawn, type ChildProcess } from 'node:child_process';
+import { readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { createServer, request as httpRequest, type IncomingHttpHeaders, type IncomingMessage, type ServerResponse } from 'node:http';
 import { createConnection, type AddressInfo } from 'node:net';
 import os from 'node:os';
@@ -275,6 +276,66 @@ function watchZone(zone: Zone, child: ChildProcess, isShuttingDown: () => boolea
   });
 }
 
+/**
+ * `next dev` dirties the working tree in two ways this supervisor must undo: it rewrites the
+ * TRACKED `next-env.d.ts` (a `.next/types/...` reference becomes `.next/dev/types/...`, which
+ * `repo:next-env-drift` watches for), and Next 16 drops untracked `AGENTS.md` / `CLAUDE.md` files
+ * at the app root. The second matters more than it looks — a stray `CLAUDE.md` is read by a
+ * future agent session as project instructions, so leaving it behind actively misleads (SMA-641
+ * dev-stack review round 3).
+ */
+const RESTORABLE_DOC_NAMES = new Set(['AGENTS.md', 'CLAUDE.md']);
+
+type ZoneSnapshot = { readonly nextEnvContent: string; readonly entries: ReadonlySet<string> };
+
+/** Taken BEFORE spawning the zone's `next dev` child, so `entries` reflects what was on disk
+ * before that child could write anything. */
+async function snapshotZone(zone: Zone): Promise<ZoneSnapshot> {
+  const dir = ZONE_DIR[zone];
+  const nextEnvContent = await readFile(path.join(dir, 'next-env.d.ts'), 'utf8');
+  const entries = new Set(await readdir(dir));
+  return { nextEnvContent, entries };
+}
+
+/**
+ * Restores `next-env.d.ts` to its startup content if `next dev` changed it, and removes any
+ * `AGENTS.md` / `CLAUDE.md` that appeared directly in the app directory and was NOT there at
+ * startup. By NAME, by presence-at-startup, and non-recursive ONLY — a dev tool that deletes
+ * files needs a narrow, obvious rule; nothing else in the directory is touched. A read/write/list
+ * failure here is logged and does not stop the rest of teardown, the same rule every other closer
+ * follows.
+ */
+async function restoreZone(zone: Zone, snapshot: ZoneSnapshot): Promise<void> {
+  const dir = ZONE_DIR[zone];
+  const nextEnvPath = path.join(dir, 'next-env.d.ts');
+  try {
+    const current = await readFile(nextEnvPath, 'utf8');
+    if (current !== snapshot.nextEnvContent) {
+      await writeFile(nextEnvPath, snapshot.nextEnvContent, 'utf8');
+      log(`restored ${nextEnvPath} (next dev rewrote it)`);
+    }
+  } catch (error) {
+    console.error(`[dev-stack] could not restore ${nextEnvPath}:`, error);
+  }
+
+  try {
+    const current = await readdir(dir);
+    for (const name of current) {
+      if (snapshot.entries.has(name)) continue;
+      if (!RESTORABLE_DOC_NAMES.has(name)) continue;
+      const filePath = path.join(dir, name);
+      try {
+        await rm(filePath);
+        log(`removed ${filePath} (next dev created it)`);
+      } catch (error) {
+        console.error(`[dev-stack] could not remove ${filePath}:`, error);
+      }
+    }
+  } catch (error) {
+    console.error(`[dev-stack] could not list ${dir}:`, error);
+  }
+}
+
 async function main(): Promise<void> {
   // NEWEST FIRST: the order to close in. Every start step pushes its own closer.
   const started: (() => Promise<void>)[] = [];
@@ -376,6 +437,15 @@ async function main(): Promise<void> {
       redisUrl,
       publicOrigin: terminator.origin,
     });
+
+    // BEFORE spawning either child: snapshot what next dev is about to dirty, so it can be put
+    // back. The restore closers are pushed here too, ahead of the children's own `stop()` closers
+    // below, so — newest-first — both children are fully stopped before restoreZone ever reads
+    // their app directory (SMA-641 dev-stack review round 3).
+    const iamSnapshot = await snapshotZone('iam');
+    const gatewaySnapshot = await snapshotZone('gateway');
+    started.unshift(() => restoreZone('iam', iamSnapshot));
+    started.unshift(() => restoreZone('gateway', gatewaySnapshot));
 
     log('starting both zones with `next dev` — the first request compiles, so this takes a while');
     // Split so each child's closer is registered before the NEXT child starts: with both spawned
