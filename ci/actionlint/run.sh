@@ -4271,7 +4271,7 @@ jobs:
           T=(:a :b :c)
           if [ "$EVENT" = "pull_request" ]; then
             moon ci "${T[@]}" --base origin/main --include-relations
-          elif [ -n "${BEFORE:-}" ] && ! printf '"'"'%s'"'"' "$BEFORE" | grep -qE '"'"'^0+$'"'"'; then
+          elif [ -n "${BEFORE:-}" ] && ! grep -qE '"'"'^0+$'"'"' < <(printf '"'"'%s'"'"' "$BEFORE"); then
             moon ci "${T[@]}" --base "$BEFORE" --include-relations
           else
             moon run "${T[@]}"
@@ -4302,7 +4302,7 @@ jobs:
           if false; then
           if [ "$EVENT" = "pull_request" ]; then
             moon ci "${T[@]}" --base origin/main --include-relations
-          elif [ -n "${BEFORE:-}" ] && ! printf '"'"'%s'"'"' "$BEFORE" | grep -qE '"'"'^0+$'"'"'; then
+          elif [ -n "${BEFORE:-}" ] && ! grep -qE '"'"'^0+$'"'"' < <(printf '"'"'%s'"'"' "$BEFORE"); then
             moon ci "${T[@]}" --base "$BEFORE" --include-relations
           else
             moon run "${T[@]}"
@@ -4338,7 +4338,7 @@ jobs:
           T=(:a :b :c)
           if [ "$EVENT" = "pull_request" ]; then
             moon ci "${T[@]:0:1}" --base origin/main --include-relations
-          elif [ -n "${BEFORE:-}" ] && ! printf '"'"'%s'"'"' "$BEFORE" | grep -qE '"'"'^0+$'"'"'; then
+          elif [ -n "${BEFORE:-}" ] && ! grep -qE '"'"'^0+$'"'"' < <(printf '"'"'%s'"'"' "$BEFORE"); then
             moon ci "${T[@]:0:1}" --base "$BEFORE" --include-relations
           else
             moon run "${T[@]:0:1}"
@@ -4373,7 +4373,7 @@ jobs:
           T=(:a :b :c)
           if [ "$EVENT" = "pull_request" ]; then
             moon run "${T[@]}"
-          elif [ -n "${BEFORE:-}" ] && ! printf '"'"'%s'"'"' "$BEFORE" | grep -qE '"'"'^0+$'"'"'; then
+          elif [ -n "${BEFORE:-}" ] && ! grep -qE '"'"'^0+$'"'"' < <(printf '"'"'%s'"'"' "$BEFORE"); then
             moon ci "${T[@]}" --base "$BEFORE" --include-relations
           else
             moon ci "${T[@]}" --base origin/main --include-relations
@@ -4406,7 +4406,7 @@ jobs:
           if [ "$EVENT" = "pull_request" ]; then
             moon ci "${T[@]}" --base origin/main --include-relations
             moon ci "${T[@]}" --base origin/main --include-relations
-          elif [ -n "${BEFORE:-}" ] && ! printf '"'"'%s'"'"' "$BEFORE" | grep -qE '"'"'^0+$'"'"'; then
+          elif [ -n "${BEFORE:-}" ] && ! grep -qE '"'"'^0+$'"'"' < <(printf '"'"'%s'"'"' "$BEFORE"); then
             moon ci "${T[@]}" --base "$BEFORE" --include-relations
           else
             moon run "${T[@]}"

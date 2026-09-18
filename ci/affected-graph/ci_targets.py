@@ -102,7 +102,7 @@ T_ARRAY_RE = re.compile(r"^[ \t]*T=\((.*?)\)[ \t]*$", re.MULTILINE)
 MOON_CI_BRANCH_BLOCK = (
     '          if [ "$EVENT" = "pull_request" ]; then',
     '            moon ci "${T[@]}" --base origin/main --include-relations',
-    "          elif [ -n \"${BEFORE:-}\" ] && ! printf '%s' \"$BEFORE\" | grep -qE '^0+$'; then",
+    "          elif [ -n \"${BEFORE:-}\" ] && ! grep -qE '^0+$' < <(printf '%s' \"$BEFORE\"); then",
     '            moon ci "${T[@]}" --base "$BEFORE" --include-relations',
     "          else",
     "            # Initial push with no usable base — run the whole graph to warm caches.",
