@@ -4773,8 +4773,21 @@ claude_md_block_verdict() {
   block="$(sed -n "$((lb + 1)),$((le - 1))p" "$file")"
   if [ -z "$(printf '%s' "$block" | tr -d '[:space:]')" ]; then echo "empty-block"; return; fi
 
+  # Process substitution, NOT a pipe (SMA-647). `grep -q` exits at its first match, so a later
+  # write from a piped printf got SIGPIPE, and under `pipefail` that 141 read as a miss. That was
+  # the false `missing-literal` row behind three CI reds, and on macOS with BSD grep it fired on
+  # every run (MEASURED, 500 of 500).
+  #
+  # SECOND OPINION (SMA-647 §5.6). A grep miss is checked again with a pure-bash substring match.
+  # If bash finds the literal, the two matchers disagree and the row says so instead of reporting
+  # a miss. grep cannot race here any more, so such a row is evidence of a second mechanism — the
+  # open question SMA-647 keeps its observation window for.
   for lit in "${DOC_DIAGNOSIS_REQUIRED_LITERALS[@]}"; do
-    printf '%s' "$block" | grep -qF -- "$lit" || echo "missing-literal $lit"
+    grep -qF -- "$lit" < <(printf '%s' "$block") && continue
+    case "$block" in
+      *"$lit"*) echo "literal-disagreement $lit" ;;
+      *) echo "missing-literal $lit" ;;
+    esac
   done
 }
 
@@ -4916,6 +4929,21 @@ more prose"
     got="$(claude_md_block_verdict "$tmpd/miss.md")"
     expect_doc "required literal '$lit' deleted fires" "missing-literal $lit"
   done
+
+  # SMA-647 §5.6 — the second opinion. A fake `grep` that reports every -qF probe as a miss, put
+  # first on PATH inside ONE command substitution, makes the two matchers disagree on purpose. It
+  # is the only way to execute the disagreement arm: after the process-substitution rewrite the
+  # real grep cannot race, so no fixture file can produce the row. Every other grep call passes
+  # through to the real binary, because the marker counts above the literal loop use grep too.
+  local real_grep
+  real_grep="$(command -v grep)"
+  mkdir -p "$tmpd/stub-bin"
+  printf '#!/bin/sh\ncase "$1" in -qF) exit 1 ;; esac\nexec "%s" "$@"\n' "$real_grep" > "$tmpd/stub-bin/grep"
+  chmod +x "$tmpd/stub-bin/grep"
+  printf '%s\n' "$good" > "$tmpd/claude.md"
+  got="$(PATH="$tmpd/stub-bin:$PATH"; claude_md_block_verdict "$tmpd/claude.md")"
+  expect_doc 'a grep miss that a bash substring match contradicts is a literal-disagreement row' \
+    "$(for lit in "${DOC_DIAGNOSIS_REQUIRED_LITERALS[@]}"; do printf 'literal-disagreement %s\n' "$lit"; done)"
 
   rm -rf "$tmpd"
   return "$rc"
@@ -5997,6 +6025,11 @@ while IFS= read -r verdict; do
       fail "check 12: CLAUDE.md's moon-diagnosis block no longer contains
       '${verdict#missing-literal }'. Every entry in DOC_DIAGNOSIS_REQUIRED_LITERALS is a
       load-bearing element of the measured procedure." ;;
+    literal-disagreement\ *)
+      fail "check 12: grep reported '${verdict#literal-disagreement }' missing from CLAUDE.md's
+      moon-diagnosis block, but a bash substring match found it there. The two must agree
+      (SMA-647). This is the evidence the SMA-647 observation window waits for: keep this run's
+      whole output and attach it to SMA-647 before you re-run anything." ;;
     *)
       infra "check 12: unrecognised block verdict '$verdict'" ;;
   esac
