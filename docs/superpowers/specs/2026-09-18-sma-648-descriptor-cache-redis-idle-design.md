@@ -156,17 +156,18 @@ Rejected or out of scope:
 
 ### 5.1 Container tier: `tests/containers/descriptor-cache-idle.test.ts`
 
-One `redis:8-alpine` container per file. `PAIGASUS_SESSION_REDIS_TIMEOUT_MS: 500`, so
-`socketTimeout` is 1000 ms and `pingInterval` is 500 ms. Each test has its own log sink, so a late
+One `redis:8-alpine` container per file. `PAIGASUS_SESSION_REDIS_TIMEOUT_MS: 1000`, so
+`socketTimeout` is 2000 ms and `pingInterval` is 1000 ms. Raised from 500 after the final review,
+for event-loop-stall tolerance on a loaded runner. Each test has its own log sink, so a late
 microtask from the previous test's `destroy()` cannot write into the next test's lines. Each test
 waits, with a bounded poll (at most 5 s), until a first `set` succeeds before it starts to idle.
 `afterEach` calls `resetDiscoveryForTest()` (safe after D10).
 
 | # | Test | On `main` |
 |---|------|-----------|
-| T1 | **Idle past the timeout, then read.** `set` one descriptor record, idle 3000 ms (three times `socketTimeout`), then `get`. The `get` returns the record, and the sink has no `discovery.redis_connection_lost`. | Fails: `The client is closed`. |
-| T2 | **Idle twice.** As T1, with two 3000 ms gaps and a read after each. | Fails. It catches a fix that survives only the first gap. |
-| T3 | **A real hang recovers.** From a second admin client, send `CLIENT PAUSE 3000 ALL` (more than `pingInterval + 2 × socketTimeout` = 2500 ms). The cache's next PING is in flight with no reply, and nothing else writes, so the idle timer fires. After the pause ends, poll `get` every 100 ms for at most 5 s: it must succeed. The sink holds `discovery.redis_connection_lost` with `reason: "socket_timeout"` **exactly once**. | Fails: the client stays closed. |
+| T1 | **Idle past the timeout, then read.** `set` one descriptor record, idle 6000 ms (three times `socketTimeout`), then `get`. The `get` returns the record, and the sink has no `discovery.redis_connection_lost`. | Fails: `The client is closed`. |
+| T2 | **Idle twice.** As T1, with two 6000 ms gaps and a read after each. | Fails. It catches a fix that survives only the first gap. |
+| T3 | **A real hang recovers.** From a second admin client, send `CLIENT PAUSE 6000 ALL` (more than `pingInterval + 2 × socketTimeout` = 5000 ms). The cache's next PING is in flight with no reply, and nothing else writes, so the idle timer fires. After the pause ends, poll `get` every 100 ms for at most 5 s: it must succeed. The sink holds `discovery.redis_connection_lost` with `reason: "socket_timeout"` **exactly once**. | Fails: the client stays closed. |
 | T4 | **A server-side close recovers.** From the admin client, `CLIENT KILL` the cache's connection (found with `CLIENT LIST`, by the client name or the non-admin id). Poll `get` as in T3: it must succeed. The sink holds exactly one `lost` line with `reason: "socket_closed"`. | On `main` the client reconnects (the default strategy accepts this cause), so the `get` passes, but there is no `lost` line. It fails on the log check. |
 | T5 | **No DSN in any line.** The URL carries a password (`redis://:<secret>@host:port`, set with `--requirepass` on the container). Force one loss as in T4. Assert that at least one `lost` line exists, then that no line holds the secret. | A guard, exempt from the red-first rule: on `main` it fails only because no line exists. |
 

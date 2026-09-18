@@ -4,8 +4,8 @@
 // REAL call site, descriptorCacheFor, against a real Redis, because the defect lived in the client
 // options that call site passes to node-redis.
 //
-// PAIGASUS_SESSION_REDIS_TIMEOUT_MS is 500, so `socketTimeout` is 1000 ms and `pingInterval` is
-// 500 ms. Every poll is bounded by POLL_BUDGET_MS. Each test has its own log sink, so a late event
+// PAIGASUS_SESSION_REDIS_TIMEOUT_MS is 1000, so `socketTimeout` is 2000 ms and `pingInterval` is
+// 1000 ms. Every poll is bounded by POLL_BUDGET_MS. Each test has its own log sink, so a late event
 // from the previous test's destroy() cannot land in the next test's lines.
 //
 // The Redis carries a password (`--requirepass`), so every URL in this file holds a secret, and T5
@@ -24,12 +24,12 @@ import type { ConsoleCoreConfig } from '../../src/config-shape';
 import { descriptorCacheFor, resetDiscoveryForTest } from '../../src/discovery';
 import { createJsonLogger, type ConsoleLogger } from '../../src/logger';
 
-const TIMEOUT_MS = 500;
+const TIMEOUT_MS = 1000;
 const SOCKET_TIMEOUT_MS = TIMEOUT_MS * 2;
 /** Three times socketTimeout. */
 const IDLE_MS = 3 * SOCKET_TIMEOUT_MS;
-/** More than pingInterval + 2 × socketTimeout = 2500 ms, so the idle timer MUST fire during it. */
-const PAUSE_MS = 3_000;
+/** More than pingInterval + 2 × socketTimeout = 5000 ms, so the idle timer MUST fire during it. */
+const PAUSE_MS = 6_000;
 const POLL_BUDGET_MS = 5_000;
 const POLL_STEP_MS = 100;
 const LOST_EVENT = 'discovery.redis_connection_lost';
