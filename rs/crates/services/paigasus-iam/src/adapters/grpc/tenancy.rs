@@ -460,20 +460,8 @@ impl TenancyService for TenancyGrpc {
             let actor_principal = actor_context(&request)?.principal_id;
             let actor = actor_principal.prn().clone();
             let req = request.into_inner();
-            let (team_id, _) = convert::node_uuid(&req.team_prn, "team")?;
-            if self.state.enforce_tenancy {
-                // Resolved by uuid through `teams.get` (not the wire `team_prn` string directly):
-                // `ProjectService::create` itself only ever consumes the bare `team_id` uuid, with
-                // no stored-canonical recheck of its own (unlike Get/Rename/Archive/Restore) — so
-                // authorizing against the REAL team's prn keeps that existing "trust the uuid"
-                // posture, and never entity-slice-loads a claimed-but-nonexistent org.
-                let team_view = self.state.teams.get(team_id).await.map_err(convert::status_to_grpc)?;
-                self.state
-                    .authorize
-                    .check(&actor, Action::CreateProject, team_view.node.id.prn())
-                    .await
-                    .map_err(convert::status_to_grpc)?;
-            }
+            let (team_id, canonical) = convert::node_uuid(&req.team_prn, "team")?;
+            load_team_checked(&self.state, &actor, Action::CreateProject, team_id, &canonical, "CreateProject").await?;
             let view = self.state.projects.create(team_id, &req.slug, &req.name, &actor_principal).await.map_err(convert::status_to_grpc)?;
             Ok(Response::new(CreateProjectResponse {
                 project: Some(convert::to_proto_project(&view)),
@@ -510,15 +498,9 @@ impl TenancyService for TenancyGrpc {
         let result: Result<Response<ListProjectsResponse>, Status> = async {
             let actor = actor_context(&request)?.principal_id.prn().clone();
             let req = request.into_inner();
-            let (team_id, _) = convert::node_uuid(&req.team_prn, "team")?;
-            if self.state.enforce_tenancy {
-                let team_view = self.state.teams.get(team_id).await.map_err(convert::status_to_grpc)?;
-                self.state
-                    .authorize
-                    .check(&actor, Action::ListProjects, team_view.node.id.prn())
-                    .await
-                    .map_err(convert::status_to_grpc)?;
-            }
+            let (team_id, canonical) = convert::node_uuid(&req.team_prn, "team")?;
+            load_team_checked(&self.state, &actor, Action::ListProjects, team_id, &canonical, "ListProjects").await?;
+            // `to_page` runs AFTER the check — see the note in `list_teams`.
             let page = convert::to_page(req.limit, req.offset).map_err(convert::status_to_grpc)?;
             let views = self.state.projects.list_by_team(team_id, page).await.map_err(convert::status_to_grpc)?;
             Ok(Response::new(ListProjectsResponse {

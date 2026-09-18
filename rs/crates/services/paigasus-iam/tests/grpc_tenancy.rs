@@ -25,8 +25,8 @@ use paigasus_proto::paigasus::iam::v1::tenancy_service_client::TenancyServiceCli
 use paigasus_proto::paigasus::iam::v1::{ArchiveOrganizationRequest, RestoreOrganizationRequest};
 use paigasus_proto::paigasus::iam::v1::{
     ArchiveProjectRequest, ArchiveTeamRequest, AttachMembershipRequest, CreateOrganizationRequest, CreateProjectRequest, CreateTeamRequest, GetOrganizationRequest, GetProjectRequest, GetTeamRequest,
-    ListTeamsRequest, Organization as ProtoOrganization, Project as ProtoProject, RenameOrganizationRequest, RenameProjectRequest, RenameTeamRequest, RestoreProjectRequest, RestoreTeamRequest,
-    Team as ProtoTeam,
+    ListProjectsRequest, ListTeamsRequest, Organization as ProtoOrganization, Project as ProtoProject, RenameOrganizationRequest, RenameProjectRequest, RenameTeamRequest, RestoreProjectRequest,
+    RestoreTeamRequest, Team as ProtoTeam,
 };
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter};
 use tokio::net::TcpListener;
@@ -1418,4 +1418,171 @@ async fn a_forged_org_parent_never_lists_teams() {
     on_server.abort();
     off_server.abort();
     assert!(failures.is_empty(), "forged org-parent ListTeams cases failed:\n{}", failures.join("\n"));
+}
+
+/// SMA-645 T1, team parent: `CreateProject` must refuse a forged parent PRN with `prn-mismatch`,
+/// under both `enforce_tenancy` settings, and must create nothing.
+///
+/// A team's stored PRN carries the parent organization's uuid in the organization slot
+/// (`paigasus-iam-core/src/tenancy.rs`, `TeamId::from_parts`), so the forged shapes are a WRONG
+/// organization uuid, an EMPTY organization slot, and a non-empty region. All three reach the
+/// comparison: `convert::node_uuid` checks only the service and the resource type, and never
+/// builds a `TeamId`.
+#[tokio::test]
+async fn a_forged_team_parent_never_creates_a_project() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let idp = support::start_mock_idp().await;
+    let (enforced, unenforced) = two_states(&db, &idp).await;
+    let token = idp.bearer("forged-cp", Some("forged-cp@example.com"), "paigasus", 3600);
+    support::provision_platform_admin(&enforced, &token).await;
+    let (on_addr, on_server) = spawn_tenancy_server(enforced).await;
+    let (off_addr, off_server) = spawn_tenancy_server(unenforced).await;
+    let mut on = connect(on_addr).await;
+    let mut off = connect(off_addr).await;
+
+    let mut failures: Vec<String> = Vec::new();
+    let absent_org = Uuid::from_u128(0x0f07).as_hyphenated().to_string();
+
+    for (setting, tag, client) in [("enforce=on", "on", &mut on), ("enforce=off", "off", &mut off)] {
+        let org = create_org(client, &token, &format!("cp-{tag}"), "Create Project Parent").await;
+        let team = create_team(client, &token, &org.prn, &format!("cp-{tag}")).await;
+
+        for (shape, forged) in [
+            ("wrong org uuid", with_org(&team.prn, &absent_org)),
+            ("empty org slot", with_org(&team.prn, "")),
+            ("non-empty region", with_region(&team.prn, "eu-west-1")),
+        ] {
+            let label = format!("{setting} CreateProject {shape}");
+            let audits = audit_total(&db).await;
+            let events = outbox_total(&db).await;
+            let err = client
+                .create_project(authed(
+                    CreateProjectRequest {
+                        team_prn: forged,
+                        slug: format!("cp-{tag}-forged"),
+                        name: "Forged".to_string(),
+                    },
+                    &token,
+                ))
+                .await
+                .unwrap_err();
+            check(&mut failures, &label, err.code() == Code::InvalidArgument, format!("code was {:?}", err.code()));
+            check(&mut failures, &label, reason(&err) == "prn-mismatch", format!("reason was {}", reason(&err)));
+            check(&mut failures, &label, audit_total(&db).await == audits, "an audit_log row was written".to_string());
+            check(&mut failures, &label, outbox_total(&db).await == events, "an event_outbox row was written".to_string());
+            // Asserted by SLUG rather than by an empty list, for the same reason as the CreateTeam
+            // twin: a parent may already carry children this test did not create.
+            let forged_slug = format!("cp-{tag}-forged");
+            let projects = client
+                .list_projects(authed(
+                    ListProjectsRequest {
+                        team_prn: team.prn.clone(),
+                        limit: 100,
+                        offset: 0,
+                    },
+                    &token,
+                ))
+                .await
+                .expect("the correct parent prn must list")
+                .into_inner()
+                .projects;
+            check(
+                &mut failures,
+                &label,
+                !projects.iter().any(|p| p.slug == forged_slug),
+                format!("the forged create made a project: {projects:?}"),
+            );
+        }
+
+        // Positive control: see `a_forged_org_parent_never_creates_a_team` for why this is here.
+        let label = format!("{setting} CreateProject control");
+        let audits = audit_total(&db).await;
+        let events = outbox_total(&db).await;
+        create_project(client, &token, &team.prn, &format!("cp-{tag}-control")).await;
+        check(
+            &mut failures,
+            &label,
+            audit_total(&db).await == audits + 1 && outbox_total(&db).await == events + 1,
+            "the positive control wrote no row — the queries cannot see anything".to_string(),
+        );
+    }
+
+    on_server.abort();
+    off_server.abort();
+    assert!(failures.is_empty(), "forged team-parent CreateProject cases failed:\n{}", failures.join("\n"));
+}
+
+/// SMA-645 T2, team parent: `ListProjects` must refuse a forged parent PRN with `prn-mismatch`,
+/// under both `enforce_tenancy` settings. The control is that the correct parent PRN returns the
+/// seeded project.
+#[tokio::test]
+async fn a_forged_team_parent_never_lists_projects() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let idp = support::start_mock_idp().await;
+    let (enforced, unenforced) = two_states(&db, &idp).await;
+    let token = idp.bearer("forged-lp", Some("forged-lp@example.com"), "paigasus", 3600);
+    support::provision_platform_admin(&enforced, &token).await;
+    let (on_addr, on_server) = spawn_tenancy_server(enforced).await;
+    let (off_addr, off_server) = spawn_tenancy_server(unenforced).await;
+    let mut on = connect(on_addr).await;
+    let mut off = connect(off_addr).await;
+
+    let mut failures: Vec<String> = Vec::new();
+    let absent_org = Uuid::from_u128(0x0f08).as_hyphenated().to_string();
+
+    for (setting, tag, client) in [("enforce=on", "on", &mut on), ("enforce=off", "off", &mut off)] {
+        let org = create_org(client, &token, &format!("lp-{tag}"), "List Projects Parent").await;
+        let team = create_team(client, &token, &org.prn, &format!("lp-{tag}")).await;
+        let seeded = create_project(client, &token, &team.prn, &format!("lp-{tag}-seed")).await;
+
+        for (shape, forged) in [
+            ("wrong org uuid", with_org(&team.prn, &absent_org)),
+            ("empty org slot", with_org(&team.prn, "")),
+            ("non-empty region", with_region(&team.prn, "eu-west-1")),
+        ] {
+            let label = format!("{setting} ListProjects {shape}");
+            let err = client
+                .list_projects(authed(
+                    ListProjectsRequest {
+                        team_prn: forged,
+                        limit: 100,
+                        offset: 0,
+                    },
+                    &token,
+                ))
+                .await
+                .unwrap_err();
+            check(&mut failures, &label, err.code() == Code::InvalidArgument, format!("code was {:?}", err.code()));
+            check(&mut failures, &label, reason(&err) == "prn-mismatch", format!("reason was {}", reason(&err)));
+        }
+
+        let label = format!("{setting} ListProjects control");
+        let projects = client
+            .list_projects(authed(
+                ListProjectsRequest {
+                    team_prn: team.prn.clone(),
+                    limit: 100,
+                    offset: 0,
+                },
+                &token,
+            ))
+            .await
+            .expect("the correct parent prn must list")
+            .into_inner()
+            .projects;
+        check(
+            &mut failures,
+            &label,
+            projects.iter().any(|p| p.prn == seeded.prn),
+            format!("the control did not return the seeded project: {projects:?}"),
+        );
+    }
+
+    on_server.abort();
+    off_server.abort();
+    assert!(failures.is_empty(), "forged team-parent ListProjects cases failed:\n{}", failures.join("\n"));
 }
