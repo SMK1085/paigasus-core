@@ -6,7 +6,7 @@ import type { ReactNode } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it, vi } from 'vitest';
 import { ZoneProvider } from '@paigasus/app-shell';
-import type { FormAction } from '../../app/_components/form-action';
+import type { FormAction } from '@paigasus/console-core';
 import { ManageSection, type ManageSectionProps } from '../../app/(console)/manage-section';
 import { PARENT_ARCHIVED_NOTE, type NodeLifecycle } from '../../app/(console)/node-status';
 
