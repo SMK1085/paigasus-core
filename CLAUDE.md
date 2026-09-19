@@ -1087,12 +1087,28 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   HTTP 403, so a Next upgrade that changes it reds CI.
 - **A Playwright `globalSetup` runs in another process than the tests.** A fake server that a test
   must script, or whose calls a test must count, cannot start there. The iam-console e2e tier only
-  checks the build and copies `.next/static` in `tests/e2e/global-setup.ts`, and starts the fake IAM,
+  checks the staged build in `tests/e2e/global-setup.ts` (SMA-655: `build` stages `.next/static`), and starts the fake IAM,
   the fake IdP, the TLS terminator and the standalone server in a WORKER-scoped fixture
   (`tests/e2e/support/harness.ts`, `workers: 1`). Playwright starts a new worker after a failed test,
   and the fixture then starts the whole stack again. Anything that fixture imports runs WITHOUT the
   vitest `server-only` stub, so `tests/support/` must not import a guarded `@paigasus/sdk` entry or a
   `lib/` file (use `@paigasus/proto/iam`, which the `apps/*/tests/support/**` boundary exemption allows).
+- **An e2e tier must never write into a build tree** (MEASURED, SMA-655). iam-console's standalone
+  tree serves two tiers — `iam-console-ts:test-e2e` and gateway-console's two-zone tier — and Moon
+  runs them at the same time. When each tier's `global-setup.ts` deleted and re-copied
+  `.next/static` there, one tier's delete wiped the tree under the other: `ENOTEMPTY` in one
+  setup, and `React never hydrated` in 16 of 17 specs of the other. Each app's `build` script now
+  stages the standalone tree (`.next/static`, and `public/` if it exists), and the setups only
+  check it through `tests/e2e/support/staged-build.ts`. Two tests pin this in each app's `test`
+  task: `tests/unit/e2e-read-only.test.ts` is an allowlist scan that reds any `fs` write form in
+  `tests/e2e/**` or `playwright.config.ts` (its `ALLOWED_EXCEPTIONS` ships empty), and
+  `tests/standalone-staging.test.ts` reds if `build` stops staging. Both `test` tasks list
+  `moon.yml` as an input, because without it a `moon.yml`-only edit selects neither. After a bare
+  `pnpm exec next build` the staged tree is gone (Next's `cleanDistDir`), and `moon run
+  <app>-ts:build` without `--force` sees an unchanged hash and skips; use `--force`. Residuals:
+  the scan does not see a write through `child_process` or through a helper outside
+  `tests/e2e/`; a Moon cache-hit restore MERGES into `.next`, so a deleted stable-named `public/`
+  file can survive; nothing asserts that a third console app has these tests.
 - The `ts` project's `sources` group names app code directories BY HAND (`apps/*/app/**/*`,
   `apps/*/lib/**/*`, `apps/*/proxy.ts`). `ts:lint` runs `eslint .` over the whole tree, but Moon
   re-runs it only for a file in its `sources` or `tests` group (or one of its config inputs), so a
