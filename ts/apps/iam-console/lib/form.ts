@@ -72,3 +72,14 @@ export function renameChange(fields: RenameFields): RenameChange {
 export function refreshesAfterLifecycleAction(result: ActionResult): boolean {
   return result.ok || result.error.presentation === 'forbidden' || result.error.presentation === 'conflict';
 }
+
+/**
+ * Whether a replay or discard action refreshes /iam/dead-letters (SMA-629 spec § 6.4). On a success,
+ * and ALSO on `not-found`: the entry is no longer parked, so its row is stale and must go. NOT on
+ * `forbidden`, unlike `refreshesAfterLifecycleAction`: a forbidden replay means that the caller is
+ * not Root, so the list read is forbidden too, the refreshed page would call forbidden() and replace
+ * the whole page, and the inline error would be lost. Other refusals change nothing on the page.
+ */
+export function refreshesAfterDeadLetterAction(result: ActionResult): boolean {
+  return result.ok || result.error.presentation === 'not-found';
+}

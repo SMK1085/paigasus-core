@@ -5,7 +5,7 @@
 import { describe, expect, it } from 'vitest';
 import type { Presentation } from '@paigasus/sdk/errors/types';
 import { invalidFormInput } from '@paigasus/console-core';
-import { currentField, refreshesAfterLifecycleAction, renameChange, renameForm, slugField } from '../../lib/form';
+import { currentField, refreshesAfterDeadLetterAction, refreshesAfterLifecycleAction, renameChange, renameForm, slugField } from '../../lib/form';
 
 describe('the rename field bounds', () => {
   it('keeps the slug bound at 200, trimmed', () => {
@@ -113,5 +113,30 @@ describe('refreshesAfterLifecycleAction', () => {
     ['generic', false],
   ])('a refusal with presentation %s refreshes: %s', (presentation, expected) => {
     expect(refreshesAfterLifecycleAction(refused(presentation))).toBe(expected);
+  });
+});
+
+// SMA-629 spec § 6.4. A dead-letter action refreshes on success and on not-found (the row is stale),
+// and NOT on forbidden: the refreshed list read would be forbidden too, and forbidden() would replace
+// the page and lose the inline error.
+describe('refreshesAfterDeadLetterAction', () => {
+  const refused = (presentation: Presentation) => ({ ok: false as const, error: { ...invalidFormInput(), presentation } });
+
+  it('refreshes on a success', () => {
+    expect(refreshesAfterDeadLetterAction({ ok: true })).toBe(true);
+  });
+
+  it.each<[Presentation, boolean]>([
+    ['not-found', true],
+    ['forbidden', false],
+    ['degraded', false],
+    ['conflict', false],
+    ['invalid-input', false],
+    ['relogin', false],
+    ['rate-limited', false],
+    ['disabled', false],
+    ['generic', false],
+  ])('a refusal with presentation %s refreshes: %s', (presentation, expected) => {
+    expect(refreshesAfterDeadLetterAction(refused(presentation))).toBe(expected);
   });
 });
