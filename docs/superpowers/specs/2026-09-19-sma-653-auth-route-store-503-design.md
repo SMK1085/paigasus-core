@@ -71,7 +71,10 @@ check changes (D8).
 - **D6. When the logout delete fails, the route returns 503 and keeps the session cookie.** It does
   not redirect to the identity provider. A cleared cookie would show the user a false "signed out"
   while a copied cookie stays live for its TTL. The user sees that logout did not finish and can
-  retry from the form, which sends the cookie again.
+  retry from the form, which sends the cookie again. If the read returned a refresh token, the route
+  first revokes it, best effort (resolved gate question Q1). This does not break the SMA-506 § 9.5
+  order rule, because the delete has already failed. A copied cookie then works only until its
+  access token expires, not for the session TTL. The same swallow rule as logout step 3 applies.
 - **D7. `Retry-After` is a fixed 5 seconds.** With the shipped `PAIGASUS_SESSION_REDIS_TIMEOUT_MS`
   of 1000 ms, the SMA-651 circuit cooldown is 4 × 1000 = 4000 ms (`operation-deadline.ts:26`), so a
   retry after 5 s reaches a closed or re-probing circuit. An operator who raises the timeout makes
@@ -81,7 +84,7 @@ check changes (D8).
   module-duplication defect as D2: a foreign-copy error is logged as `session.resolve_failed`
   instead of `store.unavailable`. The behaviour (return `null`) does not change; only the event name
   becomes correct. The same shape in `single-flight.ts:170` (`RefreshRejected`) is NOT fixed here; a
-  follow-up issue records it (§ 9).
+  follow-up issue records it (§ 9, SMA-657).
 - **D9. A login retry keeps a session that survived.** During a wedge, `requireSession` sends a
   signed-in user to `/auth/login`. With this change, `putTransaction` fails first
   (`routes.ts:180`, before the delete at `:188-191`), so the route returns 503 and the session record
@@ -150,8 +153,8 @@ function storeUnavailableResponse(retry: RetryAffordance): Response;
 | 4 | `GET /auth/callback` | `delete(old sid)` | 503, after a best-effort revoke (D10) | `<basePath>/auth/login?returnTo=<tx.returnTo>` | the old session may stay live; the code is spent. At the IdP: a session, and an offline session if the revoke failed. |
 | 5 | `GET /auth/callback` | `set(new sid)` | 503, after a best-effort revoke (D10) | the same as row 4 | the old session is deleted. A late-landing new record has no cookie and expires after `ttlMs` (SMA-651 § 6); it holds the refresh token, which is dead if the revoke succeeded. At the IdP: as row 4. |
 | 6 | `POST /auth/logout` | `get` only | the delete still runs (D5) and succeeds; the normal 302 logout, `revoked: false` | — | none |
-| 7 | `POST /auth/logout` | `delete` only | 503, cookie kept, no revoke, no IdP redirect | a POST form to `<basePath>/auth/logout` | the session stays live until the retry or its TTL |
-| 8 | `POST /auth/logout` | `get` and `delete` | 503, cookie kept, no IdP redirect | the same as row 7 | the same as row 7. This is the usual row during a wedge (D5). |
+| 7 | `POST /auth/logout` | `delete` only | 503, cookie kept, a best-effort revoke of the refresh token that `get` returned (D6), no IdP redirect | a POST form to `<basePath>/auth/logout` | the session record stays until the retry or its TTL; its refresh token is dead if the revoke succeeded |
+| 8 | `POST /auth/logout` | `get` and `delete` | 503, cookie kept, no revoke (no token was read), no IdP redirect | the same as row 7 | the same as row 7. This is the usual row during a wedge (D5). |
 
 `<returnTo>` for login is the value that `handleLogin` computes after `validateReturnTo` and the
 auth-route guard, so a retry can never target an auth route. `tx.returnTo` was validated the same
@@ -163,8 +166,6 @@ every rejection in `routes.ts:220-266` happens before the failing store calls or
 principal resolvers make no store call.
 
 `handleLogoutCallback` makes no store call and does not change.
-
-Whether row 7 should revoke the refresh token that `get` returned is open question Q1 (§ 10).
 
 ## 5. Logging
 
@@ -224,8 +225,9 @@ All tests are Vitest unit tests in `ts/packages/paigasus-auth/tests/`. No Docker
    - a round trip: after an HTML-decode of the attribute,
      `new URL(href, origin).searchParams.get('returnTo')` equals the input (login link), and
      `new URL(href, origin).pathname + search` equals the input (D9 link).
-6. **Revoke on the callback rows (D10).** On rows 4 and 5, `oidc.revoke` is called with the new
-   refresh token. A second case makes `revoke` reject and asserts that the response is still the same
+6. **Revoke on the error rows (D10, D6).** On rows 4 and 5, `oidc.revoke` is called with the new
+   refresh token. On row 7, it is called with the refresh token that `get` returned. On row 8, it is
+   not called. A second case makes `revoke` reject and asserts that the response is still the same
    503 and that no event holds the error.
 7. **Other errors still propagate.** A store method that throws a plain `Error` still rejects
    `handle()`. This proves the D2 filter.
@@ -242,7 +244,7 @@ and at least one test must go red for each:
 - the D9 branch;
 - each escaping layer (`encodeURIComponent`, and the HTML escaper);
 - each security header in § 3;
-- the D10 revoke.
+- the D10 revoke, and the row-7 revoke (D6).
 
 A test that passes only because the code did not exist yet does not count (red-first is not proof).
 
@@ -274,24 +276,20 @@ A test that passes only because the code did not exist yet does not count (red-f
 - `/auth/logout/callback`, which makes no store call.
 - An end-to-end test with a real wedged Redis. The unit tests cover each mapping. The SMA-651
   Docker suite covers the store's own timeout behaviour.
-- **Follow-up issue A:** SMA-506 § 7.1 specifies "login fails, 503 page" for an OIDC discovery
+- **Follow-up issue A (SMA-656):** SMA-506 § 7.1 specifies "login fails, 503 page" for an OIDC discovery
   failure. `buildAuthorizationUrl` (`routes.ts:172`) still gives a 500. It can reuse the new 503
   builder.
-- **Follow-up issue B:** `RefreshRejected` in `single-flight.ts:170` is classified with `instanceof`
+- **Follow-up issue B (SMA-657):** `RefreshRejected` in `single-flight.ts:170` is classified with `instanceof`
   and has the D2 module-duplication defect.
 - **Not a follow-up:** a first-connect `SessionStoreUnavailable` from `createRedisSessionStore`
   (`redis-store.ts:313-315`) is raised from `await authRuntime()` in each app's `route.ts`, outside
   `createAuthRoutes`, so it stays a 500. `redis-store.ts:260-262` says that this path is defensive
   only: the first connect is bounded and the store is created even when Redis is unreachable.
 
-## 10. Open questions for the gate
+## 10. Resolved gate questions
 
-- **Q1.** On row 7 (`get` returned a refresh token, `delete` failed), should the route revoke the
-  refresh token, best effort, before the 503? This does not break the SMA-506 § 9.5 order rule,
-  because the delete has already failed. Benefit: a copied cookie then works only until its access
-  token expires, not for the session TTL. Cost: up to `PAIGASUS_OIDC_HTTP_TIMEOUT_MS` more on an
-  error response, and the session record then points at a dead refresh token until the retry.
-  Recommendation: yes.
+- **Q1 (approved 2026-09-19).** Row 7 revokes the refresh token that `get` returned, best effort,
+  before the 503. See D6.
 
 ## 11. Rejected alternatives
 
