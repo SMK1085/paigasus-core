@@ -120,8 +120,10 @@ SMA-653 fixed the identical shape for `SessionStoreUnavailable` with a `code`-ba
   classified by its `code`. A class thrown and caught inside one closure, or thrown and caught by
   two modules of one copy, may use `instanceof`. The comment added beside `isRefreshRejected` states
   it. Note what the rule turns on: it is the CLOSURE boundary, not whether a runtime is shared. § 3
-  shows three sites that share a runtime and are still safe, because the throw and the catch are
-  inside one closure.
+  shows three sites that share a runtime and are still safe, each for one of the two reasons this
+  rule allows: `operation-deadline.ts`, because the throw and the catch are inside one closure;
+  `server.ts`, because they are two modules of one copy; and `oidc.ts`, because they are in one
+  module, not because they share a closure.
 
 - **D8. The `code` check is deliberately WIDER than `instanceof`.** `hasAuthErrorCode` is true for
   ANY `Error` carrying that `code`, not only for a `RefreshRejected` from some copy. That is
@@ -143,7 +145,7 @@ third acceptance criterion asks for.
 | `core/single-flight.ts:170` | `RefreshRejected` | package | **YES** | `refresh` delegates to `runtime.oidc`, built by the copy that created the runtime. The catch is OUTSIDE that closure, in whichever copy serves the request. |
 | `server.ts:111` | `CallbackRejected` | package | No | The catch lives inside the `handle` function that `createAuthRouteHandler` RETURNED (`server.ts:107-130`), and that function closes over the `routes` object built at `:102`. So the copy that built the handler is the copy that throws at `routes.ts:238` and the copy that catches. Verified for all three consumers: `ts/apps/iam-console/app/auth/[...auth]/route.ts:20`, `ts/apps/gateway-console/app/auth/[...auth]/route.ts:20`, and `tests/e2e/fixture-server.ts:140`. Each calls `createAuthRouteHandler` from its own module and never passes a handler across a boundary. `@paigasus/console-core` does not call it. |
 | `adapters/operation-deadline.ts:73` | `SessionStoreTimeout` | package | No | Throw and catch are inside the same `bounded` closure, built once by one copy. A caller from the other copy runs that closure verbatim and does not re-resolve the class. (Two throw sites exist, `:52` circuit-open and `:65` deadline; only `:65` is matched by this catch, and both are inside the closure.) |
-| `adapters/oidc.ts:153` | `client.ResponseBodyError` | third party | No | Same-module, not same-closure. `openid-client` may itself be duplicated across the two graphs, and it does not matter: this check (`classifyRefreshError`, `:152`) and the `client.refreshTokenGrant` call (`:274`) are sibling TOP-LEVEL functions of one module instance, so both read the one module-level `client` import. `classifyRefreshError` is NOT part of the object `createOidcClient` (`:164`) returns. The classifier's OUTPUT is what crosses, as `RefreshRejected`. |
+| `adapters/oidc.ts:153` | `client.ResponseBodyError` | third party | No | Same-module, not same-closure. `openid-client` may itself be duplicated across the two graphs, and it does not matter: this check (`classifyRefreshError`) and the code that calls `client.refreshTokenGrant` (inside `createOidcClient`, a sibling top-level function) both read the one module-level `client` import. It is the MODULE that stays single, not any one closure — `classifyRefreshError` is not part of the object `createOidcClient` returns. The classifier's OUTPUT is what crosses, as `RefreshRejected`. |
 | `adapters/oidc.ts:126` | `Error` | builtin | No | One isolate, one builtin. |
 | `core/errors.ts:55` | `Error` | builtin | No | One isolate, one builtin. This is the line D3 moves into `hasAuthErrorCode`. |
 
