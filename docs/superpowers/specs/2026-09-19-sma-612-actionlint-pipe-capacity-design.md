@@ -100,7 +100,7 @@ Until an actionlint release contains `fd33e9f582`:
    `ok)`; `*)` calls `infra`, which also catches an empty verdict from a renamed or missing
    function.
 6. **D6 — No bypass flag.** No environment variable skips the probe. A bypass would only restore
-   the silent hang. The syntax-only workaround in §6 stays available.
+   the silent hang. The actionlint-only workaround in §6 stays available.
 7. **D7 — Probe tool.** A Python one-liner through `uv run --locked --project py python3 -c`,
    the interpreter the gate already uses for `SHELLCHECK_BIN`. `PROTO_REPORTER=text` is already
    exported (`run.sh:31`). The capture ends in `| tail -n1`, the `SHELLCHECK_BIN` convention;
@@ -225,8 +225,9 @@ Each new entry needs, in the same file:
 ## 6. Documentation
 
 - `ci/actionlint/README.md`: a new section "Small pipes on macOS": both mechanisms, M1–M10 in
-  short form, the upstream link, and the syntax-only workaround (`actionlint -shellcheck=
-  -pyflakes= <file>`, stated plainly as NOT the gate: it skips shellcheck and every other check).
+  short form, the upstream link, and the actionlint-only workaround (`actionlint -shellcheck=
+  -pyflakes= <file>`, stated plainly as NOT the gate: it runs actionlint's own checks, omits
+  shellcheck and pyflakes, and does not run the checks that `run.sh` adds).
   A new Limitations entry for R1–R4. A paragraph "SMA-612 added a SIXTEENTH self-test". Update
   the "State: CURRENT" text (`:774-783`) and the cost paragraph that says one `uv run` on the
   full-gate path (`:785-793`); there are now two.

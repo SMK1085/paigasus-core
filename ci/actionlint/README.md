@@ -200,9 +200,10 @@ before the self-tests run. If the capacity is below 8192 bytes, the gate exits a
 /usr/bin/python3 -c $'import os,fcntl\nr,w=os.pipe();fcntl.fcntl(w,fcntl.F_SETFL,os.O_NONBLOCK);n=0\ntry:\n  while n<1<<20: n+=os.write(w,b"x")\nexcept BlockingIOError: pass\nprint(n)'
 ```
 
-**A syntax-only workaround.** Run `actionlint -shellcheck= -pyflakes= <file>` to check only
-the workflow syntax. This command is NOT the gate. It skips shellcheck and every other check
-this gate runs.
+**An actionlint-only workaround.** Run `actionlint -shellcheck= -pyflakes= <file>`. This runs
+actionlint's own workflow checks and omits shellcheck and pyflakes. This command is NOT the
+gate. It does not run shellcheck on the `run:` scripts, and it does not run the other checks
+that `run.sh` adds after check 1.
 
 **Removing the probe.** The probe stays until a later change removes it, per decision D9 in
 `docs/superpowers/specs/2026-09-19-sma-612-actionlint-pipe-capacity-design.md`. SMA-654
