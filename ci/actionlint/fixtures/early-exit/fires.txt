@@ -1,0 +1,25 @@
+# SPDX-License-Identifier: Apache-2.0
+# SMA-647 check 13 fixture, read by early_exit_reader_self_test: every logical line below fires.
+printf '%s' "$v" | grep -q x
+printf '%s' "$v" | grep -qF x
+printf '%s' "$v" | grep -nxm1 x
+printf '%s' "$v" | grep --quiet x
+printf '%s' "$v" | grep --silent x
+printf '%s' "$v" | grep -m1 x
+printf '%s' "$v" | grep -m 1 x
+printf '%s' "$v" | grep --max-count=1 x
+printf '%s' "$v" | grep -E -q x
+printf '%s\n' "$v" | head -1
+v="$(printf '%s\n' "$v" | head)"
+printf '%s\n' "$v" | head -n1 | cut -d: -f1
+otool -l "$so" | awk '/X/{print $2; exit}'
+printf '%s' "$v" | LC_ALL=C grep -q x
+printf '%s' "$v" | command grep -q x
+printf '%s' "$v" |
+  grep -q x
+printf '%s' "$v" |\
+  grep -q x
+# a comment that ends in a pipe |
+printf '%s' "$v" | grep -q x
+  if printf '%s' "$v" | grep -q x; then
+          elif [ -n "${BEFORE:-}" ] && ! printf '%s' "$BEFORE" | grep -qE '^0+$'; then

@@ -914,7 +914,9 @@ jobs:
       # after one line, so `sort` can die with SIGPIPE, the pipeline status becomes 141, and the
       # step reds with NO `::error::` line at all — indistinguishable, to a reader of the run,
       # from a real floor violation. Nothing here writes to a closed pipe, so a version verdict
-      # is the only thing that can fail this step. A version that is empty or not purely dotted
+      # is the only thing that can fail this step. `ci/actionlint/run.sh` check 13 (SMA-647) now
+      # bans a pipe into an early-exit reader in every tracked shell surface, not only here.
+      # A version that is empty or not purely dotted
       # digits also fails: this step guards the least recoverable failure in the repository, so
       # "cannot parse" must never read as "above the floor".
       - name: Assert npm is new enough for OIDC trusted publishing

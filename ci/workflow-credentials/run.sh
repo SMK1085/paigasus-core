@@ -42,13 +42,13 @@ run_checker() {
 # The wiring rows — only what needs the real tree. The rule table lives in the checker's
 # --self-test, in-process, because ~31 rows through `uv run` would be ~31 subprocesses.
 #
-# These five discrete lines are pinned by ci_targets.py. Pinning the moon.yml INVOCATION
+# These seven discrete lines are pinned by ci_targets.py. Pinning the moon.yml INVOCATION
 # alone is not enough: the repo measured two bypasses of exactly that shape on
 # ci/release-parity/run.sh — neutering the flag parse so --negative-control falls through to
 # the real suite, and gutting the assertion body so the control prints "reported red as
 # expected" while calling nothing.
 negative_control() {
-  local failures=0 tmp rc
+  local failures=0 tmp rc subjects_out subjects_rc
   tmp="$(mktemp -d)"
 
   _expect() { # $1 expected rc, $2 label, then the command
@@ -90,11 +90,22 @@ negative_control() {
   fi
   # Greps the `subjects:` line the checker prints (pre-flight ruling 2). A count-only line
   # would make this row match nothing and assert nothing regardless of what discovery did.
-  if bash "$0" 2>/dev/null | grep '^workflow-credentials: subjects:' | grep -q 'release.yml'; then
+  #
+  # Captured ONCE, with the checker's own status asserted on its own line (SMA-647). The old
+  # form piped the real run into an early-exit grep under `pipefail`. A failing checker made the
+  # release.yml row PASS (a failed pipeline reads as "no match"), and so did a SIGPIPE on the
+  # producer at the exact moment grep found release.yml. Both failed OPEN on the row this control
+  # exists for.
+  subjects_rc=0; subjects_out="$(bash "$0" 2>/dev/null)" || subjects_rc=$?
+  if [ "$subjects_rc" -ne 0 ]; then
+    printf '  FAIL the real run exited %s, so the subject-set rows below cannot assert\n' "$subjects_rc" >&2
+    failures=$((failures + 1))
+  fi
+  if grep -q '^workflow-credentials: subjects:.*release.yml' < <(printf '%s\n' "$subjects_out"); then
     printf '  FAIL release.yml appeared in the subject set; it has no pull_request trigger\n' >&2
     failures=$((failures + 1))
   fi
-  if ! bash "$0" 2>/dev/null | grep -q '^workflow-credentials: subjects:'; then
+  if ! grep -q '^workflow-credentials: subjects:' < <(printf '%s\n' "$subjects_out"); then
     printf '  FAIL the checker printed no subjects line — the row above cannot assert\n' >&2
     failures=$((failures + 1))
   fi

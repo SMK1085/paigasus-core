@@ -46,8 +46,8 @@ crate_for() {
 assert_pins() {
   local dockerfile="$ROOT/rs/Dockerfile"
   local channel from_version rustup_toolchain
-  channel="$(grep -E '^channel[[:space:]]*=' "$ROOT/rs/rust-toolchain.toml" | head -1 | sed -E 's/.*"([^"]+)".*/\1/')"
-  from_version="$(grep -oE '^FROM rust:[0-9]+\.[0-9]+\.[0-9]+' "$dockerfile" | head -1 | sed 's/^FROM rust://')"
+  channel="$(grep -E '^channel[[:space:]]*=' "$ROOT/rs/rust-toolchain.toml" | sed -n 1p | sed -E 's/.*"([^"]+)".*/\1/')"
+  from_version="$(grep -oE '^FROM rust:[0-9]+\.[0-9]+\.[0-9]+' "$dockerfile" | sed -n 1p | sed 's/^FROM rust://')"
   if [ "$channel" != "$from_version" ]; then
     echo "::error::rs/Dockerfile's FROM tag (rust:${from_version}) disagrees with rs/rust-toolchain.toml's channel (${channel})." >&2
     echo "  Bump the FROM line (and its digest) together with the toolchain, or the image ships a different compiler." >&2
@@ -57,7 +57,7 @@ assert_pins() {
   # inside the build context and rustup honours it over the image. ENV RUSTUP_TOOLCHAIN is what
   # closes that gap, so it must agree with channel/FROM too, or a bump that forgets this one line
   # reintroduces the exact drift the FROM/channel check above exists to prevent.
-  rustup_toolchain="$(grep -oE '^ENV RUSTUP_TOOLCHAIN=[0-9]+\.[0-9]+\.[0-9]+' "$dockerfile" | head -1 | sed 's/^ENV RUSTUP_TOOLCHAIN=//')"
+  rustup_toolchain="$(grep -oE '^ENV RUSTUP_TOOLCHAIN=[0-9]+\.[0-9]+\.[0-9]+' "$dockerfile" | sed -n 1p | sed 's/^ENV RUSTUP_TOOLCHAIN=//')"
   if [ "$channel" != "$rustup_toolchain" ]; then
     echo "::error::rs/Dockerfile's ENV RUSTUP_TOOLCHAIN (${rustup_toolchain:-<missing>}) disagrees with rs/rust-toolchain.toml's channel (${channel})." >&2
     echo "  Bump ENV RUSTUP_TOOLCHAIN together with the FROM line and the toolchain, or the builder can resolve a different compiler than the FROM tag implies." >&2
@@ -74,8 +74,8 @@ assert_pins() {
   # ubuntu:25.04 bump that forgot to also bump `--release ubuntu-24.04` would cut 24.04 slices
   # into a 25.04-labelled rootfs — nothing else here or in the smoke suite would notice.
   local ubuntu_from ubuntu_chisel
-  ubuntu_from="$(grep -oE '^FROM ubuntu:[0-9]+\.[0-9]+' "$dockerfile" | head -1 | sed 's/^FROM ubuntu://')"
-  ubuntu_chisel="$(grep -oE 'chisel cut --release ubuntu-[0-9]+\.[0-9]+' "$dockerfile" | head -1 | sed 's/.*ubuntu-//')"
+  ubuntu_from="$(grep -oE '^FROM ubuntu:[0-9]+\.[0-9]+' "$dockerfile" | sed -n 1p | sed 's/^FROM ubuntu://')"
+  ubuntu_chisel="$(grep -oE 'chisel cut --release ubuntu-[0-9]+\.[0-9]+' "$dockerfile" | sed -n 1p | sed 's/.*ubuntu-//')"
   if [ "$ubuntu_from" != "$ubuntu_chisel" ]; then
     echo "::error::rs/Dockerfile's FROM tag (ubuntu:${ubuntu_from}) disagrees with its chisel cut --release (ubuntu-${ubuntu_chisel})." >&2
     echo "  Bump both together, or chisel cuts the wrong release's package slices into the rootfs." >&2
@@ -114,7 +114,7 @@ assert_pins() {
     return 1
   fi
   local start_period
-  start_period="$(grep -oE '\-\-start-period=[0-9]+s' "$dockerfile" | head -1 | grep -oE '[0-9]+' || true)"
+  start_period="$(grep -oE '\-\-start-period=[0-9]+s' "$dockerfile" | sed -n 1p | grep -oE '[0-9]+' || true)"
   if [ -z "$start_period" ]; then
     echo "::error::could not read the HEALTHCHECK --start-period; the grep anchor moved, or the HEALTHCHECK was removed." >&2
     return 1
