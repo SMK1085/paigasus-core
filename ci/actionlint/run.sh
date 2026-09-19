@@ -45,10 +45,10 @@ FAILED=0
 # Deliberately NOT `readonly`: without `set -e` a reassignment only warns, so readonly buys no
 # protection and would break a future harness that sources this file twice (SMA-542 D3).
 SELF_TESTS_RAN=0
-SELF_TEST_COUNT=14  # extractor, path-filter, branch-filter, config, ci-target-floor,
+SELF_TEST_COUNT=15  # extractor, path-filter, branch-filter, config, ci-target-floor,
                     # invocation-allowlist, affected-graph-wiring, block-execution,
                     # kill-predicate, affected-smoke-block, release-guard, cargo-lock-step,
-                    # release-plan, doc-diagnosis
+                    # release-plan, doc-diagnosis, early-exit-reader
 
 fail() {
   echo "actionlint gate: $*" >&2
@@ -63,11 +63,12 @@ infra() {
 usage() {
   echo "usage: $(basename "$0") [--self-test]" >&2
   echo "  (no argument)  run the full gate" >&2
-  echo "  --self-test    run the fourteen fixture tables only — extractor, path-filter verdicts," >&2
+  echo "  --self-test    run the fifteen fixture tables only — extractor, path-filter verdicts," >&2
   echo "                 branch-filter verdicts, config allowlist, ci-target floor, invocation" >&2
   echo "                 allowlist, affected-graph wiring, block execution, kill predicate," >&2
   echo "                 affected-smoke block, release guard, cargo-lock step, release-plan," >&2
-  echo "                 doc-diagnosis." >&2
+  echo "                 doc-diagnosis, early-exit reader. The early-exit-reader table reads its" >&2
+  echo "                 fixtures from ci/actionlint/fixtures/early-exit/." >&2
   echo "                 No actionlint binary is required, but the branch-filter table needs a" >&2
   echo "                 git repo carrying refs/remotes/origin/main, and the release-guard table" >&2
   echo "                 shells out to 'uv run --locked --project py', so it needs uv on PATH and" >&2
@@ -4951,9 +4952,251 @@ more prose"
 }
 
 # ---------------------------------------------------------------------------------------------
+# Check 13 (definitions) — no pipe into an early-exit reader (SMA-647).
+#
+# THE DEFECT. A reader that exits at its first match — grep in quiet or max-count mode, head, an
+# awk program with exit — closes the pipe while the producer may still write. The producer's next
+# write gets SIGPIPE and exits 141, and under `pipefail` that 141 becomes the pipeline status, so
+# a match reads as a miss. MEASURED (SMA-647): bash sends a multi-line value in many small writes;
+# on Linux the race is rare and needs load, on macOS with BSD grep it fired on every run. Check
+# 12's literal probe red three times in CI this way. The replacements: process substitution (the
+# producer leaves the pipeline), capture-then-match (when the producer's status matters), and
+# `sed -n 1p` in place of a first-line reader. A here-string is not one of them: Homebrew bash
+# 5.3.15 deadlocks on one over about 512 bytes.
+#
+# THE RULE, per LOGICAL line of each corpus file:
+#   1. A full-line comment is skipped, and it never starts a join: a comment that ends in a pipe
+#      character would otherwise swallow the code line after it.
+#   2. A line that ends in a pipe, optionally followed by a backslash, is joined with the next
+#      line, because bash accepts a pipe at the end of a line. A YAML block-scalar header
+#      (`run: |`, `script: |`, `- |`) is NOT joined: all 117 end-of-line pipes in the corpus were
+#      such headers when this was written, and joining one makes the first line of its block look
+#      like a pipe consumer.
+#   3. The logical line fires if EARLY_EXIT_ERE matches: a pipe that is not part of `||` or `|&`,
+#      optional VAR=value words and an optional `command`, then grep with a q or m in a short-flag
+#      cluster (or --quiet/--silent/--max-count) before the next pipe, head as a whole word, or
+#      awk with the word exit before the next pipe. Only the NEXT command word counts, so an
+#      xargs-driven grep and a reader word inside a grep pattern do not fire.
+# POSIX classes only, no `\s`/`\b`: this file runs on BSD tools locally and GNU tools in CI (see
+# the BSD/GNU note at cargo_lock_step_verdict). The ERE writes every literal pipe as a bracket
+# expression and never puts a reader word right after an alternation bar, so its own definition
+# line does not match itself.
+#
+# FIXTURES LIVE OUTSIDE THE CORPUS, in ci/actionlint/fixtures/early-exit/*.txt: this check scans
+# THIS file, so a fixture line written here would fire. For the same reason no message in this
+# file quotes a banned form literally.
+#
+# `<path>:<line>|<reason>|<logical line text>` strings, keyed the COE_SKIP way: a row waives a hit
+# only while BOTH its location and its text agree, so a shifted row stops matching instead of
+# waiving another line. The text is LAST because it always holds a pipe; the location cannot (no
+# tracked path contains one) and the reason must not. Every expansion uses the ${ARR+"${ARR[@]}"}
+# idiom (see BRANCH_SKIP): bash 3.2 under `set -u` cannot expand an empty array, the error kills
+# the verdict's process substitution, and a real violation passes in silence. Ships EMPTY
+# (SMA-647 D3): about fifteen "safe today" rows would each be a claim about buffering that a later
+# edit can falsify.
+# ---------------------------------------------------------------------------------------------
+EARLY_EXIT_READER_ALLOWED=(
+  # (empty — add entries as "<path>:<line>|<reason, no pipe character>|<logical line text>")
+)
+
+EARLY_EXIT_ERE='(^|[^|])[|][[:space:]]*([A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]+)*(command[[:space:]]+)?(grep[[:space:]]([^|]*[[:space:]])?(-[[:alpha:]]*[qm]|--(quiet|silent|max-count))|head([[:space:];)]|$)|awk[[:space:]]([^|]*[^[:alnum:]_])?exit([^[:alnum:]_]|$))'
+
+# Prints one `<path>:<first line>\t<logical text>` record per logical line of $1, with rules 1 and 2
+# above applied. Plain awk regexes only (bracket expressions with a literal space and tab), which
+# BSD awk, mawk and gawk all read the same way.
+early_exit_join() { # $1 file
+  awk -v F="$1" '
+    function flush() { if (acc != "") print F ":" start "\t" acc; acc = "" }
+    {
+      line = $0
+      if (acc == "") {
+        if (line ~ /^[ \t]*#/) next
+        start = NR
+        acc = line
+      } else {
+        acc = acc " " line
+      }
+      if (acc ~ /:[ \t]*[|][ \t]*$/ || acc ~ /^[ \t]*-[ \t]+[|][ \t]*$/) { flush(); next }
+      if (acc ~ /[|][ \t]*\\?[ \t]*$/ && acc !~ /[|][|][ \t]*\\?[ \t]*$/) {
+        sub(/\\[ \t]*$/, "", acc)
+        next
+      }
+      flush()
+    }
+    END { flush() }
+  ' "$1"
+}
+
+# Emits one row per violation (unsorted), nothing when clean. Takes a FILE listing corpus paths,
+# one per line, rather than running `git ls-files` itself — the split that lets the self-test drive
+# it against fixture files (the doc_diagnosis_verdict precedent).
+early_exit_reader_rows() { # $1 = a file listing corpus paths, one per line
+  local list="$1" f tmpd rc row loc text entry e_loc e_rest e_reason e_text waived i used tab
+  [ -f "$list" ] && [ -r "$list" ] || { echo "no-list"; return; }
+  tmpd="$(mktemp -d)" || { echo "no-tmp"; return; }
+  tab="$(printf '\t')"
+  : > "$tmpd/joined"
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    if [ ! -f "$f" ] || [ ! -r "$f" ]; then echo "unreadable $f"; continue; fi
+    early_exit_join "$f" >> "$tmpd/joined" || echo "join-failed $f"
+  done < "$list"
+  # grep's own status is ROUTED: 1 is "no line matched", anything above 1 is a broken scan, and a
+  # broken scan that emitted nothing would otherwise read as a clean corpus.
+  rc=0
+  grep -E -- "$EARLY_EXIT_ERE" "$tmpd/joined" > "$tmpd/hits" || rc=$?
+  if [ "$rc" -gt 1 ]; then echo "grep-failed $rc"; rm -rf "$tmpd"; return; fi
+  used=' '
+  while IFS= read -r row; do
+    loc="${row%%"$tab"*}"
+    text="${row#*"$tab"}"
+    waived=0
+    i=0
+    for entry in ${EARLY_EXIT_READER_ALLOWED+"${EARLY_EXIT_READER_ALLOWED[@]}"}; do
+      i=$((i + 1))
+      e_loc="${entry%%|*}"
+      e_rest="${entry#*|}"
+      e_reason="${e_rest%%|*}"
+      e_text="${e_rest#*|}"
+      # Fewer than two separators: no reason and no text, so the row can never waive a line.
+      case "$entry" in *'|'*'|'*) ;; *) e_reason=''; e_text='' ;; esac
+      if [ "$e_loc" = "$loc" ] && [ "$e_text" = "$text" ]; then
+        waived=1
+        used="$used$i "
+        [ -n "$e_reason" ] || echo "blank-reason $loc"
+        break
+      fi
+    done
+    [ "$waived" -eq 1 ] || echo "early-exit-reader $loc"
+  done < "$tmpd/hits"
+  # A row that waived nothing is stale: a NOTE, not a red (check 12's stale-allowlist precedent).
+  i=0
+  for entry in ${EARLY_EXIT_READER_ALLOWED+"${EARLY_EXIT_READER_ALLOWED[@]}"}; do
+    i=$((i + 1))
+    case "$used" in *" $i "*) ;; *) echo "stale-allowlist ${entry%%|*}" ;; esac
+  done
+  rm -rf "$tmpd"
+}
+
+early_exit_reader_verdict() { # $1 = a file listing corpus paths, one per line
+  early_exit_reader_rows "$1" | LC_ALL=C sort
+}
+
+early_exit_reader_self_test() {
+  SELF_TESTS_RAN=$((SELF_TESTS_RAN + 1))
+  local rc=0 fx=ci/actionlint/fixtures/early-exit tmpd list got want n text
+  local ps flag_a late_a flag_b late_b second_b i1_rc waited
+
+  expect_early() {
+    local name="$1" expected="$2"
+    if [ "$got" != "$expected" ]; then
+      fail "early-exit self-test '$name': got '$got', expected '$expected'. Check 13 is not
+      deciding what it is documented to decide."
+      rc=1
+    fi
+  }
+
+  [ -d "$fx" ] || infra "check 13 self-test: the fixture directory $fx is missing"
+  tmpd="$(mktemp -d)" || infra "check 13 self-test: mktemp -d failed"
+  list="$tmpd/list"
+
+  # Every reader form fires, once per LOGICAL line: two joined pairs report their first line, and
+  # the comment that ends in a pipe (line 22) does not hide line 23 (SMA-647 plan D-3).
+  printf '%s\n' "$fx/fires.txt" > "$list"
+  got="$(early_exit_reader_verdict "$list")"
+  want="$(for n in 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 20 23 24 25; do
+    printf 'early-exit-reader %s:%s\n' "$fx/fires.txt" "$n"; done | LC_ALL=C sort)"
+  expect_early 'every reader form fires, once per logical line' "$want"
+
+  # Nothing else fires: `||`, `|&`, an xargs-driven grep, a reader word inside a pattern, comments,
+  # the I1/I2/value-reader replacements, and the two YAML block-scalar headers (plan D-2).
+  printf '%s\n' "$fx/silent.txt" > "$list"
+  got="$(early_exit_reader_verdict "$list")"
+  expect_early 'no non-reader, comment, I1, I2, value-reader or YAML-header line fires' ''
+
+  # The allowlist's row shapes. The override is scoped INSIDE each command substitution, as check
+  # 12's cases are, so no expansion of the real table runs in the main shell. The text comes from
+  # the fixture file, never from this file: check 13 scans this file.
+  text="$(sed -n 3p "$fx/allow.txt")"
+  printf '%s\n' "$fx/allow.txt" > "$list"
+  got="$(EARLY_EXIT_READER_ALLOWED=("$fx/allow.txt:3|a stated reason|$text")
+         early_exit_reader_verdict "$list")"
+  expect_early 'an allowlist row with a reason waives its line' ''
+
+  got="$(EARLY_EXIT_READER_ALLOWED=("$fx/allow.txt:3||$text")
+         early_exit_reader_verdict "$list")"
+  expect_early 'an allowlist row with an empty reason fires' "blank-reason $fx/allow.txt:3"
+
+  got="$(EARLY_EXIT_READER_ALLOWED=("$fx/allow.txt:3|a stated reason|some other text")
+         early_exit_reader_verdict "$list")"
+  expect_early 'a row whose text no longer matches is a note, and the line still fires' \
+    "$(printf 'early-exit-reader %s:3\nstale-allowlist %s:3' "$fx/allow.txt" "$fx/allow.txt")"
+
+  # THE bash 3.2 case: an EMPTY table under `set -u`. Without the ${ARR+...} idiom the expansion
+  # is an unbound-variable error that kills the verdict's subshell, and zero rows come out.
+  got="$(EARLY_EXIT_READER_ALLOWED=()
+         early_exit_reader_verdict "$list")"
+  expect_early 'an EMPTY allowlist still emits the row (the bash 3.2 unbound-array case)' \
+    "early-exit-reader $fx/allow.txt:3"
+
+  got="$(early_exit_reader_verdict "$tmpd/nope")"
+  expect_early 'a missing list reports no-list' 'no-list'
+
+  printf '%s\n' "$tmpd/absent.txt" > "$list"
+  got="$(early_exit_reader_verdict "$list")"
+  expect_early 'an unreadable corpus member reports unreadable' "unreadable $tmpd/absent.txt"
+
+  # --- Behavioural proof (SMA-647 spec §5.3): a HANDSHAKE, not a sleep. ----------------------
+  # The reader runs grep, closes its own stdin, then touches a flag. The producer writes one
+  # line, waits for the flag (bounded, 10 s), and only then writes again — so the second write
+  # happens after the reader closed the pipe, on every run, under any load. Check 9 runs this
+  # table 16 times concurrently, the load that produced two of the three CI flakes.
+  flag_a="$tmpd/flag-a"; late_a="$tmpd/late-a"
+  flag_b="$tmpd/flag-b"; late_b="$tmpd/late-b"; second_b="$tmpd/second-b"
+  early_exit_producer() { # $1 flag the reader touches, $2 timeout marker, $3 second-write marker
+    local w=0
+    printf 'hit\n'
+    while [ ! -e "$1" ] && [ "$w" -lt 100 ]; do sleep 0.1; w=$((w + 1)); done
+    [ -e "$1" ] || : > "$2"
+    : > "$3"
+    printf 'more\n'
+  }
+
+  # The OLD shape. The case must SEE the defect, or it proves nothing: the producer must fail
+  # (141 on SIGPIPE, or 1 on EPIPE when SIGPIPE is ignored) while the reader succeeds.
+  early_exit_producer "$flag_a" "$late_a" "$tmpd/second-a" 2>/dev/null \
+    | ( grep -q hit; r=$?; exec <&-; : > "$flag_a"; exit "$r" )
+  ps=("${PIPESTATUS[@]}")
+  [ ! -e "$late_a" ] || infra "check 13 self-test: the handshake reader never touched its flag within 10 s, so the pipe case cannot decide anything"
+  got="${ps[0]}/${ps[1]}"
+  if [ "${ps[0]}" -eq 0 ] || [ "${ps[1]}" -ne 0 ]; then
+    fail "early-exit self-test 'the pipe form loses its producer to the closed pipe': got
+      PIPESTATUS '$got', expected a non-zero producer and a zero reader. The case cannot see the
+      defect it exists to prove fixed."
+    rc=1
+  fi
+
+  # The I1 shape, same producer, same reader: rc 0. The main shell does not wait for a process
+  # substitution (bash 3.2 has no $! for one), so wait — bounded — for the producer to reach its
+  # second write before the temp directory goes away (plan D-6).
+  ( grep -q hit; r=$?; exec <&-; : > "$flag_b"; exit "$r" ) \
+    < <(early_exit_producer "$flag_b" "$late_b" "$second_b" 2>/dev/null)
+  i1_rc=$?
+  waited=0
+  while [ ! -e "$second_b" ] && [ "$waited" -lt 100 ]; do sleep 0.1; waited=$((waited + 1)); done
+  [ -e "$second_b" ] || infra "check 13 self-test: the process-substitution producer never reached its second write within 10 s"
+  [ ! -e "$late_b" ] || infra "check 13 self-test: the handshake reader never touched its flag within 10 s, so the I1 case cannot decide anything"
+  got="$i1_rc"
+  expect_early 'the I1 form with the same producer and reader exits 0' '0'
+
+  rm -rf "$tmpd"
+  return "$rc"
+}
+
+# ---------------------------------------------------------------------------------------------
 # Check 7 — the self-tests, and the counter that proves they were invoked.
 #
-# All FOURTEEN are defined above so this block can run them from ONE call site, reached by both the
+# All FIFTEEN are defined above so this block can run them from ONE call site, reached by both the
 # --self-test path and the full gate. One call site rather than two is deliberate: ci_targets.py's
 # C4 pins this by whole stripped line, and two identical lines would let one be deleted while the
 # pin still matched (SMA-542 D2).
@@ -4985,6 +5228,7 @@ run_self_tests() {
   cargo_lock_step_self_test
   release_plan_self_test
   doc_diagnosis_self_test
+  early_exit_reader_self_test
 
   assert_self_tests_ran "$SELF_TEST_COUNT"
 
