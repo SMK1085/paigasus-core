@@ -114,6 +114,17 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   does not explain your failure — diagnose it on its own terms.
   The NDJSON entry above is the same root tool, a different symptom; both mean a `moon`/`proto`
   call inside a gate is the fragile part of an agent-driven local run, never in CI.
+- `paigasus-kernel-ts:build`/`:test` (and a task that depends on it) can fail `moon ci` in GitHub
+  Actions with a `cargo metadata` error that names a `.napi-stage-<random>` path under
+  `rs/crates/bindings/`. napi's build tooling makes a temporary staging directory there, and
+  `rs/Cargo.toml`'s `crates/bindings/*` workspace-member glob can pick it up mid-creation or
+  mid-teardown, while a concurrent task's `cargo metadata` call hard-errors on it instead of
+  skipping it. This is a CI-only concurrency flake, not a defect in the PR's diff; a re-run clears
+  it, and it never reproduces locally, since it needs CI's own parallel job scheduling. **Observed
+  rate on the SMA-658 branch: 4 of 4 `moon ci` runs**, each time on a different task
+  (`paigasus-service-info-rs:{lint,test}`, `paigasus-kernel-ts:test`, `paigasus-kernel-py:test`),
+  each time with a `.napi-stage-<random>` path in the error. Treat this as a common failure on this
+  repo, not a rare one, and confirm it by the exact error text before assuming a real regression.
 - **Diagnosing an unattributed `moon ci` failure.** The procedure below is MEASURED on moon 2.5.3
   (SMA-597); re-take it on a bump. It is for **local** runs — in CI see the note at the end.
   <!-- moon-diagnosis:begin -->
