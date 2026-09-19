@@ -10,7 +10,7 @@
 import 'server-only';
 import type { DescService } from '@bufbuild/protobuf';
 import type { CallOptions, Client } from '@connectrpc/connect';
-import { AuditService, AuthnService, AuthorizationService, createIamClient, ServiceAccountService, ServiceInfoService, TenancyService } from '@paigasus/sdk/iam';
+import { AuditService, AuthnService, AuthorizationService, createIamClient, OutboxService, ServiceAccountService, ServiceInfoService, TenancyService } from '@paigasus/sdk/iam';
 import { CORRELATION_HEADER } from './correlation-header';
 
 export type IamClients = {
@@ -21,6 +21,8 @@ export type IamClients = {
   serviceInfo: Client<typeof ServiceInfoService>;
   /** Service accounts and their API keys (SMA-636): the gateway zone's settings. */
   serviceAccounts: Client<typeof ServiceAccountService>;
+  /** The Root-only dead-letter queue (SMA-629): the IAM zone's /iam/dead-letters page. */
+  outbox: Client<typeof OutboxService>;
 };
 
 /**
@@ -43,7 +45,7 @@ function withCorrelation<S extends DescService>(client: Client<S>, correlationId
   });
 }
 
-/** The six clients for one bearer token, over one base URL. Pure: tests call it with a fake IAM. */
+/** The seven clients for one bearer token, over one base URL. Pure: tests call it with a fake IAM. */
 export function createIamClients(opts: { baseUrl: string; token: string; correlationId?: string | null }): IamClients {
   const transport = { baseUrl: opts.baseUrl };
   const auth = { bearer: opts.token };
@@ -55,5 +57,6 @@ export function createIamClients(opts: { baseUrl: string; token: string; correla
     audit: withCorrelation(createIamClient(AuditService, transport, auth), id),
     serviceInfo: withCorrelation(createIamClient(ServiceInfoService, transport, auth), id),
     serviceAccounts: withCorrelation(createIamClient(ServiceAccountService, transport, auth), id),
+    outbox: withCorrelation(createIamClient(OutboxService, transport, auth), id),
   };
 }

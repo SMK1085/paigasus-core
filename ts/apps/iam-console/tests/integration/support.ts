@@ -2,7 +2,7 @@
 //
 // Helpers for the tier-2 tests (spec § 9.3). The clients talk real gRPC to the fake IAM, so a test
 // exercises the SDK's transport and error map, not a hand-built object.
-import { AuditService, AuthorizationService, TenancyService, createIamClient } from '@paigasus/sdk/iam';
+import { AuditService, AuthorizationService, OutboxService, TenancyService, createIamClient } from '@paigasus/sdk/iam';
 import type { IamAction, MayI } from '@paigasus/console-core';
 import type { FakeIam, FakeIamCall, FakeIamMethod } from '@paigasus/console-core/testing';
 
@@ -26,6 +26,7 @@ export function clientsFor(iam: FakeIam, token = 'tok-integration') {
     tenancy: createIamClient(TenancyService, options, auth),
     authz: createIamClient(AuthorizationService, options, auth),
     audit: createIamClient(AuditService, options, auth),
+    outbox: createIamClient(OutboxService, options, auth),
   };
 }
 

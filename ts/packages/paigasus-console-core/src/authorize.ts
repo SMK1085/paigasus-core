@@ -33,6 +33,11 @@ import type { ConsoleLogger } from './logger';
  * deliberately ABSENT: mayI() asks about the current user, and neither question is about the user.
  * The gateway zone asks InvokeModel about a service account through its own fail-closed
  * modelCallState, and ListRoleGrants for another principal needs Root.
+ *
+ * SMA-629 added ListOutboxDeadLetters, the Dead letters nav entry's question. ReplayOutboxDeadLetter
+ * and DiscardOutboxDeadLetter are deliberately ABSENT: they are separate Cedar actions, but the
+ * console asks no mayI() question about either one — the buttons show for every user who reaches
+ * the page, and IAM decides each action anyway (the UI does not pre-judge, SMA-511 spec § 6.3).
  */
 export const IAM_ACTIONS = [
   'ListOrganizations',
@@ -51,6 +56,10 @@ export const IAM_ACTIONS = [
   'AttachMembership',
   'DetachMembership',
   'ListAuditLog',
+  // SMA-629: the Dead letters nav entry asks this at Root. Replay and discard are deliberately
+  // ABSENT: they are separate Cedar actions, but the console asks no mayI() question about
+  // either one — every button shows, and IAM decides each action anyway.
+  'ListOutboxDeadLetters',
   'CreateServiceAccount',
   'ArchiveServiceAccount',
   'IssueApiKey',

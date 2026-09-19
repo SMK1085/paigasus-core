@@ -51,3 +51,11 @@ export function formMessage(error: PaigasusError): string {
   const byReason = error.reason === null ? undefined : FORM_REASON_COPY[error.reason];
   return byReason ?? PRESENTATION_COPY[error.presentation].body;
 }
+
+/**
+ * A replay or discard answered `not-found` (SMA-629 spec § 6.5). The frame of /iam/dead-letters passes
+ * it as FormError's `message` for that one answer; FORM_REASON_COPY[ErrorReason.NOT_FOUND] does not
+ * change. The words follow RUNBOOK-observability.md's 404 note: a retry of a replay whose answer was
+ * lost also lands here, so the copy does not blame another operator.
+ */
+export const DEAD_LETTER_GONE = 'This entry is no longer in the dead-letter queue. It was already replayed or discarded, maybe by an earlier attempt of this request.';

@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // An in-process fake of IAM for the integration and e2e tiers (spec § 9.1): a real gRPC server over
-// h2c for the six services the console calls (SMA-636 added ServiceAccountService), and a plain
-// HTTP server for `GET /v1/service-info`, which @paigasus/discovery probes.
+// h2c for the seven services the console calls (SMA-636 added ServiceAccountService, SMA-629
+// OutboxService), and a plain HTTP server for `GET /v1/service-info`, which @paigasus/discovery
+// probes.
 //
 // It copies these IAM behaviours, which the console depends on. Each one names its source:
 //   - Introspect is exempt from bearer enforcement and never provisions. It answers
@@ -50,7 +51,7 @@ import type { DescMessage, DescService, MessageInitShape, MessageShape } from '@
 import { Code, ConnectError, type ConnectRouter, type HandlerContext } from '@connectrpc/connect';
 import { connectNodeAdapter } from '@connectrpc/connect-node';
 import { ErrorInfoSchema, ServiceInfoService } from '@paigasus/proto';
-import { AuditService, AuthnService, AuthorizationService, ServiceAccountService, TenancyService } from '@paigasus/proto/iam';
+import { AuditService, AuthnService, AuthorizationService, OutboxService, ServiceAccountService, TenancyService } from '@paigasus/proto/iam';
 
 /** IAM's error domain on the wire (ErrorDomain.IAM through the registry's mapping rule). */
 export const IAM_ERROR_DOMAIN = 'iam.paigasus.io';
@@ -69,6 +70,8 @@ const SERVICES = {
   // SMA-636. No default answers: an unscripted service-account RPC answers Unimplemented, so a
   // test that forgets a handler fails loudly instead of reading a made-up account.
   serviceAccounts: ServiceAccountService,
+  // SMA-629. No default answers, like `audit`: an unscripted dead-letter RPC answers Unimplemented.
+  outbox: OutboxService,
 } as const;
 
 type ServiceMap = typeof SERVICES;

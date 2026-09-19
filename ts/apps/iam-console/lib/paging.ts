@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// Offset paging for the tenancy lists and cursor paging for the audit list (spec § 5.2). IAM's
-// tenancy list responses carry no total, so "Next" appears only when a page came back full. A
-// missing or malformed offset reads as 0: a hand-edited query string is not an error page.
+// Offset paging for the tenancy lists, cursor paging for the audit and dead-letters lists, and the
+// dead-letters filter (spec § 5.2; SMA-629 spec § 6.3). IAM's tenancy list responses carry no
+// total, so "Next" appears only when a page came back full. A missing or malformed offset reads as
+// 0: a hand-edited query string is not an error page.
 import 'server-only';
 import type { PaigasusError } from '@paigasus/sdk/errors/types';
 
@@ -86,4 +87,57 @@ export function parseCursor(raw: string | readonly string[] | undefined): Parsed
   const value = first(raw);
   if (value === undefined) return { ok: true, cursor: '' };
   return value.length > MAX_CURSOR_LENGTH ? { ok: false, error: cursorTooLong() } : { ok: true, cursor: value };
+}
+
+/**
+ * The longest event-type filter the console forwards, in characters. It is the console's bound for a
+ * short identifier (lib/form.ts's `slugField`). IAM matches `event_type` exactly, so the bound only
+ * limits an attacker-controlled query string.
+ */
+export const MAX_EVENT_TYPE_LENGTH = 200;
+
+/** What `parseEventType` answers: the filter to send to IAM ('' for none), or the error the page renders. */
+export type ParsedEventType = { readonly ok: true; readonly value: string } | { readonly ok: false; readonly error: PaigasusError };
+
+/** A filter longer than the console forwards. Like `cursorTooLong`, it never reached IAM. */
+function eventTypeTooLong(): PaigasusError {
+  return {
+    presentation: 'invalid-input',
+    domain: null,
+    reason: null,
+    rawReason: null,
+    rawDomain: null,
+    message: 'The event type filter is too long.',
+    correlationId: null,
+    requestId: null,
+    retryable: false,
+    metadata: {},
+    transport: { kind: 'http', status: 400 },
+  };
+}
+
+/**
+ * The dead-letters filter (SMA-629 spec § 6.3): the first value, trimmed. `''` is no filter. A value
+ * past MAX_EVENT_TYPE_LENGTH is REPORTED as invalid, never cut or dropped, for the same reason as
+ * `parseCursor`: a quiet change would show the user another list than the one they asked for.
+ */
+export function parseEventType(raw: string | readonly string[] | undefined): ParsedEventType {
+  const value = (first(raw) ?? '').trim();
+  return value.length > MAX_EVENT_TYPE_LENGTH ? { ok: false, error: eventTypeTooLong() } : { ok: true, value };
+}
+
+/**
+ * `path` plus a query of the given entries, in their order (SMA-629 spec § 6.3). An entry of 0, ''
+ * or null is a default and is left out, so the first unfiltered page has no query at all. A copy of
+ * the gateway console's `linkHref` (ts/apps/gateway-console/lib/paging.ts:40); nothing gates a
+ * divergence.
+ */
+export function listHref(path: string, query: Readonly<Record<string, string | number | null>>): string {
+  const params = new URLSearchParams();
+  for (const [name, value] of Object.entries(query)) {
+    if (value === null || value === 0 || value === '') continue;
+    params.set(name, String(value));
+  }
+  const text = params.toString();
+  return text === '' ? path : `${path}?${text}`;
 }

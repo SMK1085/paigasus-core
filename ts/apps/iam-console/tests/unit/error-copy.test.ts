@@ -3,7 +3,7 @@
 // The error copy tables (spec § 6.5, § 9.2).
 import { describe, expect, it } from 'vitest';
 import { ErrorReason, type PaigasusError, type Presentation } from '@paigasus/sdk/errors/types';
-import { FORM_REASON_COPY, formMessage, PRESENTATION_COPY } from '../../app/_components/error-copy';
+import { DEAD_LETTER_GONE, FORM_REASON_COPY, formMessage, PRESENTATION_COPY } from '../../app/_components/error-copy';
 
 const PRESENTATIONS: readonly Presentation[] = ['relogin', 'forbidden', 'not-found', 'degraded', 'rate-limited', 'invalid-input', 'conflict', 'disabled', 'generic'];
 
@@ -63,5 +63,12 @@ describe('the error copy', () => {
   // SMA-630 spec § 7. D6 makes this reason reachable: a rename submit with no change sends neither field.
   it('tells the user to change a field when IAM answers nothing-to-rename', () => {
     expect(formMessage(errorWith('invalid-input', ErrorReason.NOTHING_TO_RENAME))).toBe('Change the slug or the name first.');
+  });
+
+  // SMA-629 spec § 6.5. The words of RUNBOOK-observability.md's 404 note: the entry is gone, maybe by
+  // an earlier attempt of the same request. The global not-found copy does not change.
+  it('has a dead-letter not-found sentence and leaves the global not-found copy alone', () => {
+    expect(DEAD_LETTER_GONE).toBe('This entry is no longer in the dead-letter queue. It was already replayed or discarded, maybe by an earlier attempt of this request.');
+    expect(FORM_REASON_COPY[ErrorReason.NOT_FOUND]).toBe('The item was not found. It may have been removed.');
   });
 });

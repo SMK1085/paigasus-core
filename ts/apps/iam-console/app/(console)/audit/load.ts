@@ -7,6 +7,7 @@ import { capabilityOutcome } from '@paigasus/discovery/client';
 import type { ServiceState } from '@paigasus/discovery/types';
 import { callIam, type IamClients, type IamResult } from '@paigasus/console-core';
 import { PAGE_SIZE } from '../../../lib/paging';
+import { timestampIso } from '../../../lib/time';
 
 export type AuditGate = 'not-found' | 'degraded' | 'available';
 
@@ -41,23 +42,12 @@ export type AuditRow = {
 
 export type AuditPageData = IamResult<{ readonly rows: readonly AuditRow[]; readonly cursor: string; readonly nextCursor: string | null }>;
 
-/**
- * `occurredAt.seconds` is a protobuf int64 and can hold a value outside the ECMAScript Date range
- * (±8,640,000,000,000 ms from the epoch). `Date#toISOString()` throws on an out-of-range Date, so
- * validate first and return null rather than crash the page on a malformed IAM timestamp.
- */
-function occurredAtIso(occurredAt: { readonly seconds: bigint; readonly nanos: number } | undefined): string | null {
-  if (occurredAt === undefined) return null;
-  const date = new Date(Number(occurredAt.seconds) * 1000 + Math.floor(occurredAt.nanos / 1_000_000));
-  return Number.isNaN(date.getTime()) ? null : date.toISOString();
-}
-
 export async function loadAuditPage(deps: { readonly audit: Pick<IamClients['audit'], 'listAuditEntries'> }, params: { readonly cursor: string }): Promise<AuditPageData> {
   const result = await callIam(() => deps.audit.listAuditEntries({ cursor: params.cursor, limit: AUDIT_PAGE_SIZE }));
   if (!result.ok) return result;
   const rows = result.value.entries.map((entry): AuditRow => ({
     id: entry.id,
-    occurredAt: occurredAtIso(entry.occurredAt),
+    occurredAt: timestampIso(entry.occurredAt),
     actorPrn: entry.actorPrn,
     action: entry.action,
     resourcePrn: entry.resourcePrn,

@@ -80,6 +80,12 @@ class Capability(betterproto2.Enum):
     "gateway.chat.stream" — chat completions can be streamed.
     """
 
+    IAM_DEADLETTERS = 5
+    """
+    "iam.deadletters" — the Root-only dead-letter queue (OutboxService) is served. IAM always
+    reports it: OutboxService has no config switch (a break-glass surface).
+    """
+
     @classmethod
     def betterproto_value_to_renamed_proto_names(cls) -> dict[int, str]:
         return {
@@ -88,6 +94,7 @@ class Capability(betterproto2.Enum):
             2: "CAPABILITY_IAM_APIKEYS",
             3: "CAPABILITY_IAM_AUDIT",
             4: "CAPABILITY_GATEWAY_CHAT_STREAM",
+            5: "CAPABILITY_IAM_DEADLETTERS",
         }
 
     @classmethod
@@ -98,6 +105,7 @@ class Capability(betterproto2.Enum):
             "CAPABILITY_IAM_APIKEYS": 2,
             "CAPABILITY_IAM_AUDIT": 3,
             "CAPABILITY_GATEWAY_CHAT_STREAM": 4,
+            "CAPABILITY_IAM_DEADLETTERS": 5,
         }
 
 

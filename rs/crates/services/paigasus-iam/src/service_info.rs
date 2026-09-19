@@ -7,9 +7,10 @@
 //! transitively carries `RawPepper` and every `RedactedUrl`, so storing it would clone the
 //! API-key pepper into every HTTP and gRPC worker.
 //!
-//! `enabled()` is a pure function of three booleans, which is what makes AC 3's central
-//! assertion ("flip the flag, the key disappears, the siblings remain") an ordinary unit test
-//! with no `AppState`, no Postgres and no Docker.
+//! `enabled()` is a pure function of three booleans, plus one unconditional key
+//! (`iam.deadletters`, SMA-629). That is what makes AC 3's central assertion ("flip the flag, the
+//! key disappears, the siblings remain") an ordinary unit test with no `AppState`, no Postgres and
+//! no Docker.
 
 use paigasus_proto::paigasus::common::v1::{Capability, ServiceInfo};
 
@@ -47,6 +48,12 @@ impl Capabilities {
 
     /// The registered capabilities this build currently has enabled. Pure — the unit under
     /// test for AC 3.
+    ///
+    /// `iam.deadletters` is UNCONDITIONAL (SMA-629 D2). `OutboxService` is registered on gRPC and
+    /// HTTP with no config switch, because a break-glass surface must not be disable-able
+    /// (`adapters/grpc/dead_letters.rs:13-18`). The key therefore means "this build serves
+    /// `OutboxService`". It has no field on `Capabilities`: a field that is always `true` would be
+    /// a false degree of freedom.
     #[must_use]
     pub fn enabled(&self) -> Vec<Capability> {
         let mut caps = Vec::new();
@@ -59,6 +66,7 @@ impl Capabilities {
         if self.audit_query {
             caps.push(Capability::IamAudit);
         }
+        caps.push(Capability::IamDeadletters);
         caps
     }
 
@@ -90,12 +98,16 @@ mod tests {
 
     #[test]
     fn all_enabled_advertises_every_iam_capability() {
-        assert_eq!(caps(true, true, true), HashSet::from([Capability::IamAuthzCedar, Capability::IamApikeys, Capability::IamAudit]));
+        assert_eq!(
+            caps(true, true, true),
+            HashSet::from([Capability::IamAuthzCedar, Capability::IamApikeys, Capability::IamAudit, Capability::IamDeadletters])
+        );
     }
 
+    /// SMA-629 D2: OutboxService has no config switch, so every flag off still advertises it.
     #[test]
-    fn all_disabled_advertises_nothing() {
-        assert!(caps(false, false, false).is_empty());
+    fn all_flags_off_advertises_only_iam_deadletters() {
+        assert_eq!(caps(false, false, false), HashSet::from([Capability::IamDeadletters]));
     }
 
     /// AC 3's central assertion. Asserting only "the key is absent" would pass against an
@@ -103,13 +115,13 @@ mod tests {
     /// siblings survive.
     #[test]
     fn disabling_one_flag_removes_exactly_its_key() {
-        assert_eq!(caps(false, true, true), HashSet::from([Capability::IamApikeys, Capability::IamAudit]));
-        assert_eq!(caps(true, false, true), HashSet::from([Capability::IamAuthzCedar, Capability::IamAudit]));
-        assert_eq!(caps(true, true, false), HashSet::from([Capability::IamAuthzCedar, Capability::IamApikeys]));
+        assert_eq!(caps(false, true, true), HashSet::from([Capability::IamApikeys, Capability::IamAudit, Capability::IamDeadletters]));
+        assert_eq!(caps(true, false, true), HashSet::from([Capability::IamAuthzCedar, Capability::IamAudit, Capability::IamDeadletters]));
+        assert_eq!(caps(true, true, false), HashSet::from([Capability::IamAuthzCedar, Capability::IamApikeys, Capability::IamDeadletters]));
     }
 
     /// R3: the real risk surface is combinations, not single flags. All 8 are cheap here
-    /// because this is a pure function.
+    /// because this is a pure function. The dead-letters key is in EVERY combination.
     #[test]
     fn every_combination_advertises_exactly_its_enabled_keys() {
         for authz in [false, true] {
@@ -119,6 +131,7 @@ mod tests {
                     assert_eq!(got.contains(&Capability::IamAuthzCedar), authz);
                     assert_eq!(got.contains(&Capability::IamApikeys), apikeys);
                     assert_eq!(got.contains(&Capability::IamAudit), audit);
+                    assert!(got.contains(&Capability::IamDeadletters), "iam.deadletters must be advertised for ({authz}, {apikeys}, {audit})");
                 }
             }
         }
