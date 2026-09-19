@@ -421,7 +421,9 @@ EOF
 ### Task 3: Make the idempotent-`put` test assert the absorb path
 
 **Files:**
-- Modify: `rs/crates/services/paigasus-iam/tests/authz_policy_store.rs:360-394` (the doc comment and body of `concurrent_put_of_the_same_new_policy_id_is_idempotent_not_a_conflict`)
+- Modify: `rs/crates/services/paigasus-iam/tests/authz_policy_store.rs` — the doc comment and body of `concurrent_put_of_the_same_new_policy_id_is_idempotent_not_a_conflict`
+
+**Locate by symbol, not by line number.** Task 1 deleted about 99 lines from the top of this file and Task 2 appended to the guard test, so every line number the spec and the issue quote for this file is stale. Find the test with `grep -n "concurrent_put_of_the_same_new_policy_id_is_idempotent_not_a_conflict" rs/crates/services/paigasus-iam/tests/authz_policy_store.rs` and work from there. Its doc comment is the `///` block immediately above its `#[tokio::test]`, ending at the line `/// must exist afterward.`
 
 **Interfaces:**
 - Consumes: `support::race::{backend_pid, expect_racer_blocked}` from Task 1.
@@ -431,7 +433,7 @@ Spec §3.4 and §1.2. The test currently drives two `put` calls under `tokio::jo
 
 - [ ] **Step 1: Replace the test body**
 
-Replace lines 379-394 (from `async fn concurrent_put_of_the_same_new_policy_id_is_idempotent_not_a_conflict() {` through its closing `}`) with:
+Replace the whole function body — from `async fn concurrent_put_of_the_same_new_policy_id_is_idempotent_not_a_conflict() {` through its closing `}` — with:
 
 ```rust
 async fn concurrent_put_of_the_same_new_policy_id_is_idempotent_not_a_conflict() {
@@ -496,7 +498,7 @@ async fn concurrent_put_of_the_same_new_policy_id_is_idempotent_not_a_conflict()
 
 - [ ] **Step 2: Replace the doc comment**
 
-Replace lines 360-378 (the whole doc comment above the test) with:
+Replace the whole `///` doc comment above the test (it currently starts `/// Boot-reliability fix (SMA-444 Task 17 review finding):` and ends `/// must exist afterward.`) with:
 
 ```rust
 /// Boot-reliability fix (SMA-444 Task 17 review finding): `PgPolicyStore::put`'s existence
@@ -591,7 +593,9 @@ EOF
 ### Task 4: Rewrite S1 and S2 in `tenancy_events_pg.rs`
 
 **Files:**
-- Modify: `rs/crates/services/paigasus-iam/tests/tenancy_events_pg.rs` — S1 at `:382-412`, S2 at `:474-495`, and the `use std::time::Duration;` import at `:48`
+- Modify: `rs/crates/services/paigasus-iam/tests/tenancy_events_pg.rs` — S1 inside `a_concurrent_detach_of_a_cascade_row_does_not_make_this_call_over_report` (around `:382-412` as the file stands now), S2 inside `a_concurrent_org_archive_is_reflected_in_a_racing_team_set_status_event` (around `:474-495`), and the `use std::time::Duration;` import at `:48`
+
+**Every line number below is pre-edit.** Editing S1 shifts S2, so locate S2 by its test name, not by its quoted lines. The two anchors that never move are the `tokio::time::sleep(Duration::from_millis(300)).await;` line in each test and the `assert!(!handle.is_finished(), …)` line directly beneath it — those two lines, plus the comment paragraph above them, are what each site replaces.
 
 **Interfaces:**
 - Consumes: `support::race::{backend_pid, expect_racer_blocked}` from Task 1, plus `paigasus_iam::adapters::persistence::uow::recover_txn`.
@@ -752,6 +756,8 @@ If Step 8 left a `wip:` commit, squash it into this one with `git rebase -i` or 
 
 **Files:**
 - Modify: `rs/crates/services/paigasus-iam/tests/authz_system_retirement_pg.rs` — S3 at `:645-647` (inside `a_concurrent_grant_blocks_then_reports_unknown_role`, `:604`), S4 at `:692-694` (inside `locking_the_policy_row_blocks_a_concurrent_role_insert`, `:668`)
+
+**Every line number below is pre-edit**, and editing S3 shifts S4 — locate S4 by its test name. The stable anchor at each site is the three-line `tokio::time::timeout(Duration::from_millis(500), &mut handle)` / `.await` / `.expect_err("…")` block, together with the comment paragraph above it. Those are what each site replaces. Do not touch the LATER `tokio::time::timeout(Duration::from_secs(10), handle)` in either test — that one bounds a released waiter and stays.
 
 **Interfaces:**
 - Consumes: `support::race::{backend_pid, expect_racer_blocked}` from Task 1, plus `recover_txn`.
