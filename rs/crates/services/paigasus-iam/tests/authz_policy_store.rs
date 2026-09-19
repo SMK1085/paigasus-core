@@ -717,9 +717,10 @@ async fn put_in_enqueue_and_record_commit_atomically_sharing_correlation_id() {
 /// blocks, and must not report one that blocks for the WRONG reason. Four cases: a racer that
 /// finished, a racer that never blocks at all, a prefix matching no statement, and a blocker pid
 /// that blocks nobody. Without the last two, deleting either the `query_prefix` term or the
-/// `pg_blocking_pids` term from the predicate leaves every race test in this crate green — the
-/// second matters most, because `pg_blocking_pids` is the only discriminating term at the two
-/// `tenancy_events_pg` sites, whose prefix is a bare `select%`.
+/// `pg_blocking_pids` term from the predicate leaves every race test in this crate green — at S1
+/// the prefix term is what rejects a racer blocked by the same peer inside a later statement
+/// (measured, V7 S1); `pg_blocking_pids`'s necessity is guarded only here, by case 4, and by no
+/// V7 row.
 #[tokio::test]
 async fn wait_until_blocked_by_reports_a_racer_that_never_blocks() {
     let Some((_pg, db)) = support::start_migrated_postgres().await else { return };

@@ -3,7 +3,7 @@
 //! Waiting for a racer to reach a lock, rather than sleeping and hoping it got there.
 //!
 //! SMA-659 added this to `tests/authz_policy_store.rs` for one INSERT-vs-INSERT race. SMA-660
-//! moved it here, because four more race tests in this crate need it and one predicate term —
+//! moved it here, because five more race tests in this crate need it and one predicate term —
 //! the statement the racer blocks INSIDE — differs per site.
 //!
 //! Every item is `#[allow(dead_code)]`: `support` compiles once per test binary (about 59 of
@@ -26,13 +26,15 @@ const RACER_BLOCK_POLL: Duration = Duration::from_millis(10);
 /// Counts backends blocked by `$1` on a row lock while running a statement that starts with `$2`.
 ///
 /// Three terms, three jobs (SMA-660 spec §3.2). `$1 = ANY(pg_blocking_pids(pid))` answers WHO
-/// blocks the racer, and it is the only term that discriminates at the two `tenancy_events_pg`
-/// sites. `btrim(query) ILIKE $2` shows the racer is inside the statement under test rather than
-/// an earlier one — `btrim` because the match would otherwise depend on whether a production SQL
-/// constant starts its raw string with a newline. `wait_event IN ('transactionid', 'tuple')`
-/// covers both forms a row-lock waiter can show: a waiter takes a `tuple` lock before it waits on
-/// the holder's transaction id, so a poll can land on either. The `'tuple'` half is NOT verified
-/// by any test — see spec D5.
+/// blocks the racer; its necessity is guarded only synthetically, by guard case 4, not by any
+/// V7 measurement — at S1 it is the PREFIX term that discriminates, rejecting a racer blocked by
+/// the same peer inside a later statement (measured, V7 S1), and at S2 a missing lock surfaces
+/// as a finished racer rather than a wrong-statement block. `btrim(query) ILIKE $2` shows the
+/// racer is inside the statement under test rather than an earlier one — `btrim` because the
+/// match would otherwise depend on whether a production SQL constant starts its raw string with
+/// a newline. `wait_event IN ('transactionid', 'tuple')` covers both forms a row-lock waiter can
+/// show: a waiter takes a `tuple` lock before it waits on the holder's transaction id, so a poll
+/// can land on either. The `'tuple'` half is NOT verified by any test — see spec D5.
 #[allow(dead_code)]
 const BLOCKED_STATEMENTS_SQL: &str = "SELECT count(*)::bigint AS n FROM pg_stat_activity \
      WHERE wait_event_type = 'Lock' AND wait_event IN ('transactionid', 'tuple') \
@@ -63,7 +65,11 @@ pub async fn backend_pid(conn: &impl ConnectionTrait) -> i32 {
 /// Waits until the racer is inside a statement matching `query_prefix` and blocked by
 /// `blocker_pid`, which replaces a fixed sleep that only HOPED it had got there. Each poll is an
 /// autocommit statement on `db`: `pg_stat_activity` is a per-transaction snapshot, so a poll
-/// inside one transaction would see the same data every time.
+/// inside one transaction would see the same data every time. It identifies a blocked backend
+/// only by `(blocker_pid, query_prefix)`, never by "is this specifically `racer`" — `racer` is
+/// used only for its `is_finished()` check. Safe at all eight call sites today, since each has
+/// exactly one racer; a future test with two racers must not assume this returns `Ok` only when
+/// THIS `racer` is the one blocked.
 ///
 /// Checks, in this order, every [`RACER_BLOCK_POLL`]: racer blocked → `Ok`; `racer` finished →
 /// `Err` (a blocked racer cannot finish while the peer is uncommitted, so checking "blocked"

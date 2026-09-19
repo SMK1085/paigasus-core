@@ -311,8 +311,8 @@ id, a raw uncommitted `db.begin()` + entity insert as peer A, `pid_a`, and a spa
    200 ms budget. Assert `Err` containing `did not block`. Without this case,
    `AND $1 = ANY(pg_blocking_pids(pid))` can be deleted outright and every test in this spec
    still passes, because the racer is the only backend in a lock wait at all six race sites.
-   That term is what answers *who* blocks the racer, and it is the only term that discriminates
-   at S1 and S2 (D3).
+   That term is what answers *who* blocks the racer; unlike the prefix, its necessity is guarded
+   only synthetically, by this case, not by any V7 measurement (D3).
 
 Teardown for cases 3 and 4: commit or drop peer A, then await the racer so no task outlives the
 test, and drop the third transaction.
@@ -327,12 +327,15 @@ test, and drop the third transaction.
   Approved in brainstorming.
 - **D3. The helper takes a prefix rather than dropping the `ILIKE` term.** The term earns its
   place at S3, S4 and the absorb test, where the racer runs a locking read *before* the INSERT
-  under test and `insert%` is what proves it is past that read. At S1 and S2 it does **not**
-  discriminate: both of `set_status_in`'s locking reads are SELECTs (F4), so `select%` cannot
-  tell them apart, and `pg_blocking_pids` is what does the work there. The prefix is kept at all
-  eight sites anyway, because a site-appropriate prefix costs one argument and makes the
-  observation self-describing. Guard case 4 exists because `pg_blocking_pids` carries S1 and S2
-  alone.
+  under test and `insert%` is what proves it is past that read. At S1 it also discriminates, just
+  not on query SHAPE — both of `set_status_in`'s locking reads are SELECTs (F4), so `select%`
+  cannot tell them apart by text — but with `FOR UPDATE` deleted the racer is genuinely blocked
+  by the same peer, and the prefix is what rejects it, because the racer is stuck in a later,
+  unrelated `DELETE` rather than the SELECT under test (measured, V7 S1). At S2 a missing lock
+  surfaces as a finished racer rather than a wrong-statement block, so neither term carries it
+  there. `pg_blocking_pids`'s necessity is guarded only synthetically, by guard case 4 — no V7
+  row proves it is needed. The prefix is kept at all eight sites anyway, because a
+  site-appropriate prefix costs one argument and makes the observation self-describing.
 - **D4. `RACER_BLOCK_BUDGET` stays 30 s** for all eight call sites. It is a load budget, not an
   expectation: the wait returns on the first observation. Recorded cost: on a genuinely broken
   site the failure now takes 30 s rather than 500 ms, times the three attempts
@@ -345,6 +348,10 @@ test, and drop the third transaction.
   waiters queued on one row, and that fixture would itself be timing-dependent — the defect this
   spec removes. The term is kept because F6 says a poll can land there and the cost of the extra
   value is one more `IN` member. Read it as defence against a rare poll, not as a tested path.
+  The `wait_event_type`/`wait_event` clause can only NARROW the predicate, and it is
+  near-redundant with `pg_blocking_pids`, which is non-empty only for a backend already waiting
+  on a lock — so this clause's failure mode is a false red at the deadline, loud, never a false
+  green. That is what makes the untested `'tuple'` half safe to ship.
 
 ### 3.7 Out of scope
 
