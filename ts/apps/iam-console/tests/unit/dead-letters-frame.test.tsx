@@ -163,7 +163,7 @@ describe('the runner', () => {
     expect(within(region()).queryByText(DEAD_LETTER_GONE)).toBeNull();
   });
 
-  it('disables every Replay and Discard button while an action runs', async () => {
+  it('disables every Replay and Discard button while an action runs, and a confirming row’s Confirm discard and Cancel too', async () => {
     const user = userEvent.setup();
     let finish: (state: ActionState) => void = () => undefined;
     render(
@@ -178,11 +178,21 @@ describe('the runner', () => {
       ),
     );
 
+    // Row B opens its discard confirmation BEFORE row A's replay starts, so its Confirm discard
+    // and Cancel buttons already exist when the frame goes busy.
+    await user.click(within(controlsOf(B)).getByRole('button', { name: 'Discard' }));
+    const confirmDiscard = within(controlsOf(B)).getByRole<HTMLButtonElement>('button', { name: 'Confirm discard' });
+    const cancel = within(controlsOf(B)).getByRole<HTMLButtonElement>('button', { name: 'Cancel' });
+
     await user.click(within(controlsOf(A)).getByRole('button', { name: 'Replay' }));
 
     await waitFor(() => {
-      expect(rowButtons()).toHaveLength(4);
+      // Row B is confirming, so its own "Discard" button is replaced by Confirm discard and
+      // Cancel: row A's Replay and Discard plus row B's Replay is 3, not 4.
+      expect(rowButtons()).toHaveLength(3);
       for (const button of rowButtons()) expect(button.disabled).toBe(true);
+      expect(confirmDiscard.disabled).toBe(true);
+      expect(cancel.disabled).toBe(true);
     });
     await act(async () => {
       finish({ ok: true });
@@ -190,6 +200,8 @@ describe('the runner', () => {
     });
     await waitFor(() => {
       for (const button of rowButtons()) expect(button.disabled).toBe(false);
+      expect(confirmDiscard.disabled).toBe(false);
+      expect(cancel.disabled).toBe(false);
     });
   });
 });
