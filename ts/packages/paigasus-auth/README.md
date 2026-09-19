@@ -112,18 +112,32 @@ T below is `PAIGASUS_SESSION_REDIS_TIMEOUT_MS` (default 1000 ms, at most 5368709
 - **The client sends one PING every T** to keep a healthy idle connection open. A console process
   has one such client per zone for sessions, plus one for the descriptor cache.
 
-**A failed store call can sign the user out.** `requireSession()` treats a store failure as "no
-session" and redirects to `/auth/login`. When `/auth/login` runs against a store that answers, it
-deletes the presented session and clears the cookie. While the circuit is open, that delete fails
-too, and the session record stays in Redis until its TTL ends. So a Redis stall longer than 4T (a
-fork stall during BGSAVE, an fsync stall, a failover) sends every user who loads a page in that
-window to the login page. A user who then signs in again, or reloads `/auth/login` after Redis
-recovers, loses the old session. Raise T if your Redis can stall longer than that. Size T against the worst event-loop lag of the Node process too: a stall longer
-than 4T in the process itself fires the deadlines before the replies are read.
+**A failed store call on a page can sign the user out.** `requireSession()` treats a store failure
+as "no session" and redirects to `/auth/login`. When `/auth/login` then runs against a store that
+answers, it deletes the presented session and clears the cookie. So a Redis stall longer than 4T (a
+fork stall during BGSAVE, an fsync stall, a failover) can send a user who loads a page in that
+window to the login page, and a new sign-in then replaces the old session. Raise T if your Redis can
+stall longer than that. Size T against the worst event-loop lag of the Node process too: a stall
+longer than 4T in the process itself fires the deadlines before the replies are read.
 
-**A logout can fail during a wedge.** The logout route reads the session before it deletes it. If
-the read fails, the route never sends the delete. The session then stays live until its TTL ends.
-SMA-653 tracks the fix.
+**The auth routes answer a store failure with a 503 (SMA-653).** When a store call on
+`/auth/login`, `/auth/callback` or `/auth/logout` fails, the route returns a 503 with
+`Retry-After: 5`, `Cache-Control: no-store`, a strict CSP and no `Set-Cookie`, and a small HTML page
+with a retry control:
+
+- `/auth/login`: a link. If the browser holds a session cookie, the link goes to `returnTo`, so a
+  session that survived the stall is not deleted by the retry. Otherwise it goes to `/auth/login`.
+- `/auth/callback`: a link to `/auth/login`. If the code exchange already succeeded, the route first
+  revokes the new refresh token, best effort.
+- `/auth/logout`: if only the read fails, the delete still runs and logout completes. If the delete
+  fails, the route revokes the refresh token it read (best effort), keeps the session cookie, and
+  shows a form that posts to `/auth/logout` again. The user sees that logout did not finish.
+
+Each failed store call logs `store.unavailable` with a `stage` of `login_put_transaction`,
+`login_delete`, `callback_take_transaction`, `callback_delete`, `callback_set`, `logout_get` or
+`logout_delete` (pages use `get_session`, the refresh lock uses `release_lock`). Do not put an
+ingress custom error page or a mesh retry policy for 503 in front of the auth routes: the first
+removes the retry control, and the second replays logins and logouts.
 
 **Redis ACL.** The store's Redis user needs `+get`, `+set`, `+del`, `+eval` and `+ping`.
 `+client|setinfo` is optional (node-redis sends CLIENT SETINFO at connect and ignores the error).
