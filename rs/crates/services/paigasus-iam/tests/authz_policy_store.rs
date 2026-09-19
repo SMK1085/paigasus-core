@@ -258,38 +258,81 @@ async fn delete_of_an_unknown_policy_id_is_a_noop() {
 }
 
 /// Boot-reliability fix (SMA-444 Task 17 review finding): `PgPolicyStore::put`'s existence
-/// check and its INSERT aren't atomic, so two replicas booting concurrently against a
-/// fresh, unseeded database can both observe `existing == None` for the same starter
-/// `policy_id` and both attempt to insert it — the loser must hit a unique-constraint
-/// violation and absorb it as an idempotent success (mirroring the same absorption in
-/// `PgSystemRoleReconciler::reconcile_role`, where `bootstrap.rs::seed_role_row` moved in
-/// SMA-477), not fail its replica's `AppState::new`. This covers the
-/// SAME-content case (both racers write the IDENTICAL starter policy document); the
-/// DIFFERENT-content case is covered separately below
-/// (`concurrent_put_of_the_same_new_policy_id_with_different_content_is_a_conflict`).
+/// check and its INSERT aren't atomic, so two replicas booting concurrently against a fresh,
+/// unseeded database can both observe `existing == None` for the same starter `policy_id` and
+/// both attempt to insert it — the loser must hit a unique-constraint violation and absorb it as
+/// an idempotent success, not fail its replica's `AppState::new`.
 ///
-/// Drives two `PgPolicyStore` handles that share the same underlying connection pool
-/// (`DatabaseConnection` clones an `Arc`-backed pool handle, so this is a REAL race over
-/// the network, not a simulation) at the exact same, previously-absent `policy_id` via
-/// `tokio::join!`. Both `put` calls must return `Ok(())` — one takes the genuine INSERT
-/// path, the other absorbs the resulting unique-constraint violation — and exactly one row
-/// must exist afterward.
+/// SMA-660 made this deterministic and gave it a real assertion. It used to drive two `put`
+/// calls under `tokio::join!` and assert only that both returned `Ok` and one row survived —
+/// both of which are ALSO true when racer A's whole `put` committed before B's existence check,
+/// leaving B on the ordinary UPDATE path with no absorb anywhere in the test. It now holds A's
+/// INSERT open in an uncommitted transaction, waits until B is provably blocked inside its own
+/// INSERT, and then commits A, exactly as the two `put_in` race tests below do.
+///
+/// What it asserts that nothing else does: `put` SKIPS its `policy_gen` bump when the outcome is
+/// `AbsorbedIdempotent`. The absorb itself is already covered at the `put_in` level by
+/// `put_in_absorbs_a_same_content_savepoint_conflict_and_the_outer_txn_stays_usable`, which reads
+/// the `PutOutcome` directly; `put` returns `Result<(), AuthzError>` and cannot, so the
+/// generation counter is the only observable that tells the two paths apart here.
 #[tokio::test]
 async fn concurrent_put_of_the_same_new_policy_id_is_idempotent_not_a_conflict() {
     let Some((_pg, db)) = support::start_migrated_postgres().await else { return };
     let now = Utc::now().trunc_subsecs(6);
-
-    let store_a = PgPolicyStore::new(db.clone(), Generations::memory());
-    let store_b = PgPolicyStore::new(db.clone(), Generations::memory());
     let doc = valid_static_doc("racing-policy", false, now);
 
-    let (result_a, result_b) = tokio::join!(store_a.put(&doc), store_b.put(&doc));
-    assert!(result_a.is_ok(), "first racer must not fail: {result_a:?}");
-    assert!(result_b.is_ok(), "second racer must not fail — the unique-violation loser must absorb, not error: {result_b:?}");
+    // Racer A: insert directly (bypassing `PgPolicyStore::put`, mirroring `seed_system_policy`'s
+    // established direct-entity pattern) and hold the transaction open. The content matches
+    // `doc` on every field `policy_content_matches` compares — kind, source, description and
+    // system — which is what makes B's conflict an absorb rather than a `Conflict`.
+    let txn_a = db.begin().await.unwrap();
+    policy::ActiveModel {
+        policy_id: Set(doc.policy_id.clone()),
+        kind: Set("static".to_string()),
+        source: Set(doc.source.clone()),
+        description: Set(Some(doc.description.clone())),
+        system: Set(doc.system),
+        created_at: Set(doc.created_at),
+        updated_at: Set(doc.updated_at),
+        content_fingerprint: NotSet,
+        starter_revision: NotSet,
+    }
+    .insert(&txn_a)
+    .await
+    .unwrap();
+    let pid_a = support::race::backend_pid(&txn_a).await;
 
-    let all = store_a.list_all().await.unwrap();
+    // Racer B: the real `PgPolicyStore::put`. The test holds a CLONE of the same `Generations`
+    // handle B bumps — every other store in this file takes a fresh `Generations::memory()`, and
+    // copying that here would leave the assertion below reading a counter nothing touches.
+    let gens = Generations::memory();
+    let store_b = PgPolicyStore::new(db.clone(), gens.clone());
+    let doc_b = doc.clone();
+    let mut put_b = tokio::spawn(async move { store_b.put(&doc_b).await });
+    let before = gens.policy_gen().await.unwrap();
+
+    // Commit A only once B is provably blocked INSIDE its INSERT on A's uncommitted row — past
+    // its existence check, so its INSERT must resolve into a real unique violation.
+    support::race::expect_racer_blocked(&db, pid_a, &mut put_b, "insert%", |r| format!("{r:?}")).await;
+    txn_a.commit().await.unwrap();
+
+    let result_b = put_b.await.unwrap();
+    assert!(result_b.is_ok(), "the unique-violation loser must absorb, not error: {result_b:?}");
+
+    let store = PgPolicyStore::new(db.clone(), Generations::memory());
+    let all = store.list_all().await.unwrap();
     let matches: Vec<_> = all.iter().filter(|d| d.policy_id == "racing-policy").collect();
     assert_eq!(matches.len(), 1, "exactly one row must exist after the race, not zero or two: {matches:?}");
+
+    // THE assertion this test exists for. `put` bumps `policy_gen` unless its outcome is
+    // `AbsorbedIdempotent`, and racer A was a raw entity insert that bumps nothing. So an
+    // unmoved counter means B absorbed, and a counter that moved by one means B took the UPDATE
+    // path — the silent failure this test could not see while it used `tokio::join!`.
+    assert_eq!(
+        gens.policy_gen().await.unwrap(),
+        before,
+        "put must SKIP its policy_gen bump on the absorb path; a moved generation means racer B took the UPDATE path and the absorb never ran"
+    );
 }
 
 /// CodeRabbit review fix (SMA-444): the SAME-content race above absorbs a unique-constraint
