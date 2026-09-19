@@ -55,12 +55,35 @@ tasks:
     # lookup never fires and its fallback — a recursive walk of .next/static — is what actually
     # runs. That walk cannot tell a file this build wrote from one an earlier build left behind.
     # .next/cache must survive; deleting all of .next would make every build cold.
+    #
+    # SMA-655: the standalone tree is staged HERE, never in an e2e setup. The standalone output has
+    # no .next/static of its own (measured, SMA-510), and without it every client chunk is a 404.
+    # Two e2e tiers serve from this tree — for iam-console, that app's own tier and this app's
+    # two-zone tier; for this app, its own tier — and Moon runs them at the same time; when each
+    # tier staged the tree for itself, one tier's delete wiped it under the other. `outputs` covers
+    # the staged files, so a cache hit restores them. `next build` already empties
+    # .next/standalone (cleanDistDir), so the `rm -rf` deletes nothing today: it keeps `cp -R`
+    # copying to an ABSENT destination (BSD and GNU cp differ when it exists), and it survives a
+    # future `cleanDistDir: false`. The last check fails the build when the staged tree is not this
+    # build's. tests/standalone-staging.test.ts pins the result.
     script: |
       set -euo pipefail
       rm -rf .next/static
       pnpm exec next build
       if [ ! -f .next/standalone/apps/gateway-console/server.js ]; then
         echo "gateway-console: standalone entry point missing — output: 'standalone' did not take effect" >&2
+        exit 1
+      fi
+      dest=.next/standalone/apps/gateway-console
+      rm -rf "$dest/.next/static" "$dest/public"
+      cp -R .next/static "$dest/.next/static"
+      if [ -d public ]; then
+        cp -R public "$dest/public"
+      fi
+      build_id="$(cat .next/BUILD_ID)"
+      staged_id="$(cat "$dest/.next/BUILD_ID" 2>/dev/null || true)"
+      if [ -z "$build_id" ] || [ "$staged_id" != "$build_id" ] || [ ! -d "$dest/.next/static/$build_id" ]; then
+        echo "gateway-console: staging the standalone tree failed (BUILD_ID '$build_id', staged '$staged_id')" >&2
         exit 1
       fi
     # `next build` compiles @paigasus/proto's generated tree through @paigasus/sdk and
@@ -220,6 +243,10 @@ tasks:
       # inherited input reaches a root-level config file: without this entry, lowering `timeout:`
       # below the constant leaves the cache key unchanged and Moon serves a cached PASS.
       - 'playwright.config.ts'
+      # SMA-655: `build`'s script stages the standalone tree and tests/standalone-staging.test.ts
+      # checks it. This task carries `merge: replace`, and nothing else makes a moon.yml-only edit
+      # select it, so without this entry a PR that removes the staging runs no check at all.
+      - 'moon.yml'
       - 'tsconfig.json'
       - 'package.json'
       - 'next.config.ts'
