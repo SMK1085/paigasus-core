@@ -32,15 +32,7 @@ export type AuthEventFields = Readonly<Record<string, string | number | boolean>
  * type, so an operator can rely on the list. Each value names ONE store call.
  */
 export type StoreUnavailableStage =
-  | 'get_session'
-  | 'release_lock'
-  | 'login_put_transaction'
-  | 'login_delete'
-  | 'callback_take_transaction'
-  | 'callback_delete'
-  | 'callback_set'
-  | 'logout_get'
-  | 'logout_delete';
+  'get_session' | 'release_lock' | 'login_put_transaction' | 'login_delete' | 'callback_take_transaction' | 'callback_delete' | 'callback_set' | 'logout_get' | 'logout_delete';
 
 export interface AuthLogger {
   event(name: AuthEventName, fields: AuthEventFields): void;
