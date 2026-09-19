@@ -34,6 +34,9 @@ const REQUIRED = [
   'tenancy.attachMembership',
   'tenancy.detachMembership',
   'audit.listAuditEntries',
+  'outbox.listDeadLetters',
+  'outbox.replayDeadLetter',
+  'outbox.discardDeadLetter',
 ] as const;
 
 describe('devWorld', () => {
@@ -79,8 +82,9 @@ describe('devWorld', () => {
 
   it('pins the two descriptors the consoles switch on', () => {
     // myScopes() lists role grants only when discovery reports iam.authz.cedar
-    // (src/scopes.ts:116-118), and the audit page needs iam.audit.
-    expect(DEV_IAM_DESCRIPTOR.capabilities).toEqual(['iam.authz.cedar', 'iam.audit']);
+    // (src/scopes.ts:116-118), the audit page needs iam.audit, and the dead-letters page needs
+    // iam.deadletters. The dev world is a CURRENT IAM, which always reports that key (SMA-629).
+    expect(DEV_IAM_DESCRIPTOR.capabilities).toEqual(['iam.authz.cedar', 'iam.audit', 'iam.deadletters']);
     expect(DEV_GATEWAY_DESCRIPTOR.capabilities).toEqual(['gateway.chat.stream']);
   });
 
@@ -118,6 +122,46 @@ describe('devWorld', () => {
     let caught: unknown;
     try {
       void handlers['tenancy.getProject']?.({ prn: 'prn:pgs:iam:::project/00000000-0000-0000-0000-000000000000' } as never, {} as never);
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(ConnectError);
+    expect((caught as ConnectError).code).toBe(Code.NotFound);
+  });
+
+  // SMA-629 spec § 5.3: three parked entries with RFC 4122 ids, newest first, as IAM orders them.
+  const RFC_4122 = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+  type Listed = { entries: { id: string; eventType: string }[]; nextCursor: string };
+  const list = (handlers: ReturnType<typeof devWorld>, eventType = ''): Listed => handlers['outbox.listDeadLetters']?.({ eventType } as never, {} as never) as Listed;
+
+  it('lists three dead letters with RFC 4122 ids, in descending id order', () => {
+    const listed = list(devWorld());
+    expect(listed.entries).toHaveLength(3);
+    for (const entry of listed.entries) expect(entry.id).toMatch(RFC_4122);
+    const ids = listed.entries.map((entry) => entry.id);
+    expect(ids).toEqual([...ids].sort().reverse());
+    expect(listed.nextCursor).toBe('');
+  });
+
+  it('filters by the exact event type', () => {
+    const handlers = devWorld();
+    const [first] = list(handlers).entries;
+    expect(first).toBeDefined();
+    const filtered = list(handlers, first?.eventType);
+    expect(filtered.entries.every((entry) => entry.eventType === first?.eventType)).toBe(true);
+    expect(filtered.entries.length).toBeGreaterThan(0);
+  });
+
+  it.each(['outbox.replayDeadLetter', 'outbox.discardDeadLetter'] as const)('%s removes the entry, and a second call answers NotFound', (method) => {
+    const handlers = devWorld();
+    const id = list(handlers).entries[0]?.id;
+    expect(id).toBeDefined();
+    const answer = handlers[method]?.({ id } as never, {} as never) as { entry: { id: string } };
+    expect(answer.entry.id).toBe(id);
+    expect(list(handlers).entries.map((entry) => entry.id)).not.toContain(id);
+    let caught: unknown;
+    try {
+      void handlers[method]?.({ id } as never, {} as never);
     } catch (error) {
       caught = error;
     }

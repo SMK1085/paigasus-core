@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // The IAM the DEV STACK talks to (SMA-641): one organization, one team, one project, one audit
-// entry, every action allowed. `startFakeIam()` with no handlers cannot serve the console — its
+// entry, three dead letters (SMA-629), every action allowed. It models a CURRENT IAM, which always
+// reports `iam.deadletters`. `startFakeIam()` with no handlers cannot serve the console — its
 // defaults answer three methods and throw `Unimplemented` for every tenancy and audit call
 // (fake-iam.ts:245-258) — and `setHandlers()` replaces the whole map (:126-129), so the map below
 // is complete rather than partial.
@@ -40,10 +41,74 @@ type OrganizationNode = typeof ORGANIZATION;
 type TeamNode = typeof TEAM;
 type ProjectNode = typeof PROJECT;
 
-/** iam.authz.cedar gates myScopes() (src/scopes.ts:116-118); iam.audit gates the audit page. */
-export const DEV_IAM_DESCRIPTOR: ServiceDescriptorBody = { service: 'iam', version: '0.0.0-dev', capabilities: ['iam.authz.cedar', 'iam.audit'] };
+/**
+ * iam.authz.cedar gates myScopes() (src/scopes.ts:116-118); iam.audit gates the audit page;
+ * iam.deadletters gates the dead-letters page. A current IAM always reports the last one (SMA-629 D2).
+ */
+export const DEV_IAM_DESCRIPTOR: ServiceDescriptorBody = { service: 'iam', version: '0.0.0-dev', capabilities: ['iam.authz.cedar', 'iam.audit', 'iam.deadletters'] };
 
 export const DEV_GATEWAY_DESCRIPTOR: GatewayDescriptorBody = { service: 'gateway', version: '0.0.0-dev', capabilities: ['gateway.chat.stream'] };
+
+/** A parked outbox event, as IAM's DeadLetterEntry carries it. `''` means "none" (iam.proto:619-624). */
+type DeadLetterFixture = {
+  id: string;
+  occurredAt: { seconds: bigint; nanos: number };
+  eventType: string;
+  schemaVersion: number;
+  aggregatePrn: string;
+  actorPrn: string;
+  payload: string;
+  correlationId: string;
+  attempts: number;
+  parkedAt: { seconds: bigint; nanos: number };
+  lastError: string;
+};
+
+/** Three parked events with RFC 4122 (UUIDv7-shaped) ids, like the ids IAM mints. */
+function seededDeadLetters(): Map<string, DeadLetterFixture> {
+  const entries: DeadLetterFixture[] = [
+    {
+      id: '0190a1f0-0000-7000-8000-00000000d201',
+      occurredAt: { seconds: 1_788_000_000n, nanos: 0 },
+      eventType: 'iam.organization.created',
+      schemaVersion: 1,
+      aggregatePrn: ORG_PRN,
+      actorPrn: PRINCIPAL_PRN,
+      payload: '{"slug":"dev","name":"Dev Organization"}',
+      correlationId: 'corr-dev-dead-letter-1',
+      attempts: 5,
+      parkedAt: { seconds: 1_788_000_300n, nanos: 0 },
+      lastError: 'nats: no responders available for request',
+    },
+    {
+      id: '0190a1f0-0000-7000-8000-00000000d202',
+      occurredAt: { seconds: 1_788_000_600n, nanos: 0 },
+      eventType: 'iam.team.created',
+      schemaVersion: 1,
+      aggregatePrn: TEAM_PRN,
+      actorPrn: PRINCIPAL_PRN,
+      payload: '{"slug":"platform","name":"Platform Team"}',
+      correlationId: 'corr-dev-dead-letter-2',
+      attempts: 5,
+      parkedAt: { seconds: 1_788_000_900n, nanos: 0 },
+      lastError: 'nats: timeout',
+    },
+    {
+      id: '0190a1f0-0000-7000-8000-00000000d203',
+      occurredAt: { seconds: 1_788_001_200n, nanos: 0 },
+      eventType: 'iam.project.created',
+      schemaVersion: 2,
+      aggregatePrn: PROJECT_PRN,
+      actorPrn: '',
+      payload: '{"slug":"gateway","name":"Inference Gateway"}',
+      correlationId: '',
+      attempts: 5,
+      parkedAt: { seconds: 1_788_001_500n, nanos: 0 },
+      lastError: '',
+    },
+  ];
+  return new Map(entries.map((entry) => [entry.id, entry]));
+}
 
 /** Same shape as the e2e world's `notFound()` (tests/e2e/support/world.ts): a PermissionDenied-style IAM error. */
 const notFound = (): Error => denial({ code: Code.NotFound, reason: 'not-found' });
@@ -71,6 +136,15 @@ export function devWorld(): FakeIamHandlers {
   const organizations = new Map<string, OrganizationNode>([[ORG_PRN, ORGANIZATION]]);
   const teams = new Map<string, TeamNode>([[TEAM_PRN, TEAM]]);
   const projects = new Map<string, ProjectNode>([[PROJECT_PRN, PROJECT]]);
+  // SMA-629: replay and discard remove the entry, as IAM does; an unknown id answers NotFound.
+  const deadLetters = seededDeadLetters();
+
+  function takeDeadLetter(id: string): DeadLetterFixture {
+    const entry = deadLetters.get(id);
+    if (entry === undefined) throw notFound();
+    deadLetters.delete(id);
+    return entry;
+  }
 
   function organizationAt(prn: string): OrganizationNode {
     const organization = organizations.get(prn);
@@ -198,5 +272,12 @@ export function devWorld(): FakeIamHandlers {
       ],
       nextCursor: '',
     }),
+    // IAM orders by id DESCENDING (tests/dead_letters_pg.rs:432) and matches event_type exactly.
+    'outbox.listDeadLetters': (req: { eventType: string }) => ({
+      entries: [...deadLetters.values()].filter((entry) => req.eventType === '' || entry.eventType === req.eventType).sort((a, b) => (a.id < b.id ? 1 : -1)),
+      nextCursor: '',
+    }),
+    'outbox.replayDeadLetter': (req: { id: string }) => ({ entry: takeDeadLetter(req.id) }),
+    'outbox.discardDeadLetter': (req: { id: string }) => ({ entry: takeDeadLetter(req.id) }),
   };
 }
