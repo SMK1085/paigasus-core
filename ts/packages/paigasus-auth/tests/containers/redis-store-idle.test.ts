@@ -82,7 +82,9 @@ async function eventually<T>(attempt: () => Promise<T>, what: string): Promise<T
 
 /** A store with one session written, after a bounded wait for the first write. */
 async function warmStore(s: Sink): Promise<{ store: SessionStore; sid: string; rec: ReturnType<typeof makeRecord> }> {
-  const store = await createRedisSessionStore({ url, commandTimeoutMs: TIMEOUT_MS, keyPrefix: `idle${randomBytes(4).toString('hex')}:`, logger: s.logger } as Parameters<typeof createRedisSessionStore>[0]);
+  const store = await createRedisSessionStore({ url, commandTimeoutMs: TIMEOUT_MS, keyPrefix: `idle${randomBytes(4).toString('hex')}:`, logger: s.logger } as Parameters<
+    typeof createRedisSessionStore
+  >[0]);
   const sid = `sid-${randomBytes(4).toString('hex')}`;
   const rec = makeRecord();
   await eventually(() => store.set(sid, rec, 60_000, null), 'the first set');
