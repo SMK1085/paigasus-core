@@ -35,8 +35,9 @@ import type { ConsoleLogger } from './logger';
  * modelCallState, and ListRoleGrants for another principal needs Root.
  *
  * SMA-629 added ListOutboxDeadLetters, the Dead letters nav entry's question. ReplayOutboxDeadLetter
- * and DiscardOutboxDeadLetter are deliberately ABSENT: the page is Root-only, so no button needs its
- * own question, and IAM decides every action anyway.
+ * and DiscardOutboxDeadLetter are deliberately ABSENT: they are separate Cedar actions, but the
+ * console asks no mayI() question about either one — the buttons show for every user who reaches
+ * the page, and IAM decides each action anyway (the UI does not pre-judge, SMA-511 spec § 6.3).
  */
 export const IAM_ACTIONS = [
   'ListOrganizations',
@@ -56,7 +57,8 @@ export const IAM_ACTIONS = [
   'DetachMembership',
   'ListAuditLog',
   // SMA-629: the Dead letters nav entry asks this at Root. Replay and discard are deliberately
-  // ABSENT: the page is Root-only, so no button needs its own question.
+  // ABSENT: they are separate Cedar actions, but the console asks no mayI() question about
+  // either one — every button shows, and IAM decides each action anyway.
   'ListOutboxDeadLetters',
   'CreateServiceAccount',
   'ArchiveServiceAccount',

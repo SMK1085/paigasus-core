@@ -171,9 +171,10 @@ fifth name for symmetry. It does not fail without the edit.
   `tests/integration/outbox-client.test.ts`, proves that the client reaches `OutboxService`. It
   follows `tests/integration/service-accounts-client.test.ts`.
 - `src/authorize.ts:37-59`: `IAM_ACTIONS` gets `ListOutboxDeadLetters` only. The layout asks about
-  it (§ 6.1). Replay and discard have no `mayI` caller: the page is Root-only, and a user who can
-  list can act. The existing `tests/unit/action-names.test.ts` checks the new name against IAM's
-  Rust action catalog.
+  it (§ 6.1). Replay and discard have no `mayI` caller: they are separate Cedar actions, but the
+  console asks no question about either one. Every button shows, and IAM decides each action
+  anyway. The existing `tests/unit/action-names.test.ts` checks the new name against IAM's Rust
+  action catalog.
 - `testing/fake-iam.ts`: register `outbox: OutboxService` in `SERVICES`. Add no default handlers:
   `audit` has none either, and every unscripted method already throws `Unimplemented`
   (`:248-260`). Update the header comment, which says "six services" (`:4`).
@@ -312,9 +313,11 @@ design.
   `refreshesAfterLifecycleAction`, returns `true` for `ok` and for a `not-found` failure. The action
   then calls `revalidatePath('/dead-letters', 'page')`.
   - `not-found` means that the entry is no longer parked, so the row is stale and must go.
-  - `forbidden` does **not** revalidate, unlike the lifecycle rule. A forbidden replay means that the
-    caller is not Root, so the list read is forbidden too. The re-render would call `forbidden()`
-    and replace the whole page with the 403 view, and the inline error would be lost.
+  - `forbidden` does **not** revalidate, unlike the lifecycle rule. IAM checks each of the three
+    actions separately at the Root PRN, so a forbidden replay or discard does not prove the list
+    read is forbidden too. A re-render whose list read IS forbidden would call `forbidden()` and
+    replace the whole page with the 403 view, and the inline error would be lost. When the caller
+    CAN list, skipping the revalidation costs nothing, because a refused action changed nothing.
   - Other failures change nothing on the page and do not revalidate.
 
 ### 6.5 Error copy
@@ -483,3 +486,4 @@ console. Bulk replay stays API-only.
 | QUESTION — a dedup-window warning on Replay | rejected for this issue: scope; recorded as a risk | § 3.2, § 9 |
 | QUESTION — an ADR-0020 note | accepted as a follow-up, not in this PR | § 11 |
 | QUESTION — key the frame by filter and cursor | accepted | § 6.4 |
+| Final review — the Root-only reasoning was wrong; IAM checks each action separately | accepted; the reasons are corrected, the rules do not change | § 5.3, § 6.4 |

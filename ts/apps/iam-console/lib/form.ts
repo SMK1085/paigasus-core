@@ -76,9 +76,11 @@ export function refreshesAfterLifecycleAction(result: ActionResult): boolean {
 /**
  * Whether a replay or discard action refreshes /iam/dead-letters (SMA-629 spec § 6.4). On a success,
  * and ALSO on `not-found`: the entry is no longer parked, so its row is stale and must go. NOT on
- * `forbidden`, unlike `refreshesAfterLifecycleAction`: a forbidden replay means that the caller is
- * not Root, so the list read is forbidden too, the refreshed page would call forbidden() and replace
- * the whole page, and the inline error would be lost. Other refusals change nothing on the page.
+ * `forbidden`, unlike `refreshesAfterLifecycleAction`: IAM checks each of the three actions
+ * separately at the Root PRN, so a forbidden replay or discard does not prove the list read is
+ * forbidden too. A refresh whose list read IS forbidden would call forbidden() and replace the
+ * whole page, and the inline error would be lost. When the caller CAN list, skipping the refresh
+ * costs nothing, because a refused action changed nothing on the page.
  */
 export function refreshesAfterDeadLetterAction(result: ActionResult): boolean {
   return result.ok || result.error.presentation === 'not-found';

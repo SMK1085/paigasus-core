@@ -60,8 +60,8 @@ describe('IAM_ACTIONS against the Rust action catalog', () => {
   });
 
   // SMA-629 spec § 5.3. The IAM console's layout asks ListOutboxDeadLetters at Root to show the Dead
-  // letters entry. Replay and discard have no mayI caller: the page is Root-only, so a user who can
-  // list can act, and IAM decides every action anyway.
+  // letters entry. Replay and discard have no mayI caller: they are separate Cedar actions, but the
+  // console asks no question about either one, and IAM decides each action anyway.
   it('holds ListOutboxDeadLetters, and neither ReplayOutboxDeadLetter nor DiscardOutboxDeadLetter', () => {
     expect([...IAM_ACTIONS]).toContain('ListOutboxDeadLetters');
     expect([...IAM_ACTIONS]).not.toContain('ReplayOutboxDeadLetter');
