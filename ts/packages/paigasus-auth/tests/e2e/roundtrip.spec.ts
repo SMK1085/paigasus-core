@@ -41,7 +41,7 @@ async function readSessionCookieValue(context: BrowserContext): Promise<string |
  * Playwright attachment or trace survives the runner), so the same text goes to stderr AND to a
  * text/plain attachment. Paths, statuses, cookie NAMES only: a Keycloak URL carries `state`, a
  * callback URL carries `code`, and a cookie value is a credential. */
-async function reportFreshTabFailure(testInfo: TestInfo, context: BrowserContext, fresh: Page, response: Response | null, authRequests: readonly string[]): Promise<void> {
+async function reportFreshTabFailure(testInfo: TestInfo, context: BrowserContext, fresh: Page | undefined, response: Response | null, authRequests: readonly string[]): Promise<void> {
   const chain: string[] = [];
   let request: Request | null = response?.request() ?? null;
   while (request !== null) {
@@ -50,12 +50,16 @@ async function reportFreshTabFailure(testInfo: TestInfo, context: BrowserContext
     chain.unshift(`${String(hop?.status() ?? 0)} ${url.origin}${url.pathname}`);
     request = request.redirectedFrom();
   }
-  const finalUrl = new URL(fresh.url());
+  let finalPage = '(no page)';
+  if (fresh !== undefined) {
+    const finalUrl = new URL(fresh.url());
+    finalPage = `${finalUrl.origin}${finalUrl.pathname}`;
+  }
   const cookies = (await context.cookies()).map((c) => `${c.name} domain=${c.domain} path=${c.path}`);
   const text = [
     'SMA-652 fresh-tab diagnostics',
     `redirect chain (${String(chain.length)} hop(s)): ${chain.length === 0 ? '(no response)' : chain.join(' -> ')}`,
-    `final page: ${finalUrl.origin}${finalUrl.pathname}`,
+    `final page: ${finalPage}`,
     `cookies (${String(cookies.length)}): ${cookies.join('; ')}`,
     `auth requests after the primary completed (${String(authRequests.length)}): ${authRequests.join(', ') || '(none)'}`,
   ].join('\n');
@@ -144,17 +148,16 @@ test('§ 9.2: two concurrent logins mint distinct txn cookies, and one completio
   // WHICHEVER tab is still valid.
   //
   // SMA-652 (measured on Keycloak 26.4.7; global-setup.ts uses the floating tag `keycloak:26.4`):
-  // a Keycloak login page must never stay open, and never be reused, once the other login has
-  // completed. The two pages also race for `KC_AUTH_SESSION_HASH`; the losing page's
-  // `authChecker.js` (`checkAuthSession`, one-shot, 1000 ms after load) calls `location.reload()`
-  // on the mismatch, and `beforeunload` does not cancel that timer — so a later `goto` on that tab
-  // can reach /guarded (200) and then be overridden by the reload, leaving the tab on the Keycloak
-  // form. An open login page also polls every 2 s and may follow the SSO session into
-  // /auth/callback, where `txn_missing` -> /auth/login would delete the shared session. So the
-  // test never reuses AND never closes a Keycloak tab: reusing it loses the final navigation to
-  // the pending reload, and closing it can hang — Chromium answers `Target.closeTarget` with
-  // success, then the reload commits and the target never detaches (Chromium issue
-  // https://issues.chromium.org/issues/536385539, measured on Playwright 1.63). The proof runs on
+  // a Keycloak login page must never be reused once the other login has completed, and the test
+  // does not close it either. The two pages also race for `KC_AUTH_SESSION_HASH`; the losing
+  // page's `authChecker.js` (`checkAuthSession`, one-shot, 1000 ms after load) calls
+  // `location.reload()` on the mismatch, and `beforeunload` does not cancel that timer — so a
+  // later `goto` on that tab can reach /guarded (200) and then be overridden by the reload,
+  // leaving the tab on the Keycloak form. So the test never reuses AND never closes a Keycloak
+  // tab: reusing it loses the final navigation to the pending reload, and closing it can hang —
+  // Chromium answers `Target.closeTarget` with success, then the reload commits and the target
+  // never detaches (a Chromium issue with a matching title:
+  // https://issues.chromium.org/issues/536385539); measured on Playwright 1.63. The proof runs on
   // a fresh page, which no Keycloak document can navigate. An open Keycloak tab could, in
   // principle, follow the SSO session into /auth/callback and /auth/login and delete the shared
   // session (seen 0 times in 110 runs); the one-hop and same-sid checks below would then fail
@@ -187,13 +190,16 @@ test('§ 9.2: two concurrent logins mint distinct txn cookies, and one completio
     authRequests.push(`${pageLabels.get(request.frame().page()) ?? 'other'} ${pathname}`);
   });
 
-  const sidBefore = await readSessionCookieValue(context);
-  expect(sidBefore !== undefined, 'the primary login must have set __Host-pgs_sid').toBe(true);
-
-  const fresh = await context.newPage();
-  pageLabels.set(fresh, 'fresh');
-  const response = await fresh.goto(`${ZONE_BASE_PATH}/guarded`);
+  let fresh: Page | undefined;
+  let response: Response | null = null;
   try {
+    const sidBefore = await readSessionCookieValue(context);
+    expect(sidBefore !== undefined, 'the primary login must have set __Host-pgs_sid').toBe(true);
+
+    fresh = await context.newPage();
+    pageLabels.set(fresh, 'fresh');
+    response = await fresh.goto(`${ZONE_BASE_PATH}/guarded`);
+
     // The heading alone cannot tell the shared cookie apart from a re-login: if Keycloak still
     // held an SSO session for the context, it would even skip its own form and land back on
     // /guarded with a NEW sid. The one-hop and same-sid checks fail on every such path.
@@ -206,7 +212,12 @@ test('§ 9.2: two concurrent logins mint distinct txn cookies, and one completio
     const sidNow = await readSessionCookieValue(context);
     expect(sidNow === sidBefore, 'the fresh tab must reuse the SAME __Host-pgs_sid, not a new session').toBe(true);
   } catch (error) {
-    await reportFreshTabFailure(testInfo, context, fresh, response, authRequests);
+    try {
+      await reportFreshTabFailure(testInfo, context, fresh, response, authRequests);
+    } catch {
+      // Diagnostics are best-effort: the original assertion failure must still surface below,
+      // not be replaced by a failure inside the reporter itself.
+    }
     throw error;
   }
 });

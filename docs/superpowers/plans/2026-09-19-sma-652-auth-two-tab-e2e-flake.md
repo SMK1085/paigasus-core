@@ -1,5 +1,8 @@
 # SMA-652 § 9.2 two-tab e2e flake — Implementation Plan
 
+> **Superseded where it closes a tab:** per Sven's ruling of 2026-09-19, the test closes no
+> Keycloak tab (closing can hang in Chromium). Spec § 3.1 is the authority.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Make the § 9.2 test in `ts/packages/paigasus-auth/tests/e2e/roundtrip.spec.ts` deterministic by never reusing a tab that holds a Keycloak document, and prove the shared-session property with checks that a silent SSO re-login cannot satisfy.

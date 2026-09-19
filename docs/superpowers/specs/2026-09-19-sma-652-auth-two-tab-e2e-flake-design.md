@@ -89,7 +89,9 @@ signature becomes `async ({ context }, testInfo) => …`.
    `Target.closeTarget` on every main-frame commit measured 0 hangs in 120 forced runs, but Sven
    ruled against it: it is Chromium-only CDP code kept alive to work around a browser defect, for
    a close the test does not need. Letting the per-test `context` fixture dispose the tab at the
-   end of the test, instead of an explicit `close()`, does not hit this hang (measured).
+   end of the test, instead of an explicit `close()`, does not hit this hang (120 runs with no
+   teardown hang; a protocol log showed `Target.disposeBrowserContext` detaching a target whose
+   close was lost; teardown was not itself forced).
 4. Read the value of `__Host-pgs_sid` from `context.cookies()` before opening the fresh page in
    step 5, and keep it in a local variable. Never print it.
 5. Open a new page in the SAME context: `const fresh = await context.newPage()`. Then
@@ -104,11 +106,20 @@ signature becomes `async ({ context }, testInfo) => …`.
      boolean (`expect(sidNow === sidBefore, '…').toBe(true)`), so a failure prints no value.
 
 Why the one-hop and sid checks are needed: the heading and the URL cannot tell "the shared cookie
-worked" apart from "a re-login". MEASURED (Task 3's negative control, `task-3-report.md`): with
+worked" apart from "a re-login". MEASURED (local investigation notes, not committed): with
 `__Host-pgs_sid` cleared, the fresh tab's redirect chain stopped at Keycloak's own login form —
 `/guarded` → `/auth/login` → Keycloak `200` (its login page), with no further redirect back
 through `/auth/callback` — so the heading did NOT show, and the one-hop check failed as designed,
-printing the multi-hop chain and the recorded `fresh /e2e/auth/login` request.
+printing the multi-hop chain and the recorded `fresh /e2e/auth/login` request. The diagnostics
+block from that run (cookie values never printed by the helper itself):
+
+```
+SMA-652 fresh-tab diagnostics
+redirect chain (3 hop(s)): 302 http://127.0.0.1:4319/e2e/guarded -> 302 http://127.0.0.1:4319/e2e/auth/login -> 200 https://127.0.0.1:56369/realms/paigasus-test/protocol/openid-connect/auth
+final page: https://127.0.0.1:56369/realms/paigasus-test/protocol/openid-connect/auth
+cookies (4): AUTH_SESSION_ID domain=127.0.0.1 path=/realms/paigasus-test/; KC_AUTH_SESSION_HASH domain=127.0.0.1 path=/realms/paigasus-test/; KC_RESTART domain=127.0.0.1 path=/realms/paigasus-test/; __Host-pgs_txn_hDwmWPtq-sZC domain=127.0.0.1 path=/
+auth requests after the primary completed (1): fresh /e2e/auth/login
+```
 
 Reasoned, not reached in that run: if Keycloak still held a valid SSO session for the context, it
 would skip its login form and redirect straight through `/auth/callback` to a NEW session, and the
@@ -142,10 +153,14 @@ record and is not edited.
 CI uploads no Playwright output. Only the task's stdout and stderr reach the `moon-diagnostics`
 artifact. So:
 
-- From the moment the primary completes, record every main-frame request to `/auth/login` and
+- From the moment the primary completes, record every navigation request to `/auth/login` and
   `/auth/callback` in the context (`context.on('request')`), as tab label + path only.
-- Wrap the step 6 assertions in `try { … } catch (e) { report(); throw e; }`. The error is always
-  thrown again.
+- Wrap `try { … } catch (e) { report(); throw e; }` around everything from the sid-before read
+  through the last step 6 check, including opening the fresh page and its `goto` — a failure in
+  any of those must still print diagnostics. The error is always thrown again. `report()` itself
+  runs inside its own `try`/`catch` with an empty, commented catch body, so a failure in the
+  reporter (for example, no fresh page was ever created) cannot replace the original assertion
+  error.
 - `report()` writes lines with `console.error` (not cut by the reporter) and also attaches the
   same text as `text/plain`. The lines hold: the fresh tab's redirect chain as path + status (no
   query string — Keycloak URLs carry `state`, callback URLs carry `code`); every cookie in the
@@ -176,8 +191,8 @@ short: this doc holds the evidence.
    - **Before (unchanged test):** the wait sits before `secondary.goto`. This batch must reproduce
      at least 3 failures in the session, or the "after" batch does not count.
    - **After (fixed test):** the fixed test has no `close()` call to place the wait before; per
-     `task-3b-report.md`, the wait instead sits right before the fresh-tab action begins
-     (`const sidBefore = …`). Expect 0 failures.
+     local investigation notes (not committed), the wait instead sits right before the fresh-tab
+     action begins (`const sidBefore = …`). Expect 0 failures.
    - Interleave before and after batches on one machine. Report run counts per mode and per
      classification. The after-fix guarantee for the timer is STRUCTURAL (the document no longer
      exists); the batch is a check of the implementation, not the proof.
@@ -256,8 +271,8 @@ Failing sequence (batch 3, run 7), times in ms from test start, query strings re
 | before-a (Task 3, forced) | 30 | 3 | target symptom: secondary stuck on the Keycloak login form |
 | before-b (Task 3, forced) | 30 | 1 | same target symptom |
 | close-based after (Task 3, forced, a+b) | 60 | 5 | ALL 5 failed a different way: `browserContext.newPage` error after a 30 s hang at `secondary.close()` — this is the close-hang, not the § 9.2 property |
-| close-hang, isolated (`newpage-hang-report.md`, `final-control.log`) | 60 | 6 | dedicated forcing on `secondary.close()` alone, no resend workaround |
-| close-hang, CDP resend workaround (`newpage-hang-report.md`) | 120 | 0 | rejected by Sven: Chromium-only CDP code for a browser defect |
+| close-hang, isolated (local investigation notes, not committed) | 60 | 6 | dedicated forcing on `secondary.close()` alone, no resend workaround |
+| close-hang, CDP resend workaround (local investigation notes, not committed) | 120 | 0 | rejected by Sven: Chromium-only CDP code for a browser defect |
 | polling-path probe (Task 3, tabs kept open 2.0–2.5 s) | 20 | 0 | 0 secondary auth requests observed |
 
 The before batches (4 failures in 60) reproduce the original reload race from § 2. The close-based
