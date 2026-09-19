@@ -63,7 +63,7 @@ test('R9: the cross-zone link is a hard navigation and the same-zone one is not 
   });
 
   // A cold sign-in at the overview, then a same-zone navigation to the scope route — the
-  // established pattern (tests/e2e/token-leak.spec.ts:144-145) — so both halves of this test run
+  // established pattern (tests/e2e/token-leak.spec.ts:24-25) — so both halves of this test run
   // from a page that carries the primary nav's cross-zone "IAM" entry and the scope route's own
   // breadcrumb "Overview" entry back to it.
   await page.goto(harness.url('/gateway/overview'));
@@ -72,7 +72,8 @@ test('R9: the cross-zone link is a hard navigation and the same-zone one is not 
 
   await page.goto(harness.url(`/gateway/orgs/${ORG_ID}`));
   await waitForHydration(page);
-  await expect(page.getByTestId('zone-overview')).toBeVisible();
+  // SMA-636 § 7.4: /gateway/orgs/<org> is the organization settings page now, not the zone overview.
+  await expect(page.getByTestId('org-settings')).toBeVisible();
   await setMarker(page);
 
   // SAME ZONE: the scope route's breadcrumb "Overview" link targets `/gateway/overview`, in the

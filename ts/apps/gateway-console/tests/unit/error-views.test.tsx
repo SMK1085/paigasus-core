@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // PageError and the 403 view (spec § 6.1, § 6.2). Server components are async functions here, so a
-// test awaits them and renders the element they return. This zone has no forms, so it has no
-// SectionError or FormError counterpart.
+// test awaits them and renders the element they return. FormError and SectionError have their own
+// file, tests/unit/form-error.test.tsx (SMA-636).
 import type { ReactElement, ReactNode } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it, vi } from 'vitest';

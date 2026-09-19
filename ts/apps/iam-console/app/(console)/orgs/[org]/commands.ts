@@ -4,8 +4,8 @@
 // restore the organization (SMA-630 spec § 4). They take NO mayI: IAM decides (spec § 6.3).
 import 'server-only';
 import { z } from 'zod';
-import { callIam, type IamClients } from '@paigasus/console-core';
-import { nameField, prnField, renameChange, renameForm, slugField, toActionResult, type ActionResult } from '../../../../lib/form';
+import { callIam, nameField, prnField, toActionResult, type ActionResult, type IamClients } from '@paigasus/console-core';
+import { renameChange, renameForm, slugField } from '../../../../lib/form';
 
 /** `prnField` trims: a hidden field can carry whitespace. */
 export const createTeamForm = z.object({ orgPrn: prnField, slug: slugField, name: nameField });

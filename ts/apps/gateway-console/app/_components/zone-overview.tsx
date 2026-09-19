@@ -5,6 +5,10 @@
 // gate on — the gateway answers a streaming request with a 400 carrying `param: "stream"` when the
 // capability is off, so a console that could not see the capability would ship a control that
 // always fails.
+//
+// It has no organization scope (SMA-636 controller F10): the organization and project settings
+// pages replaced the SMA-512 scope route, so this component's only production caller is
+// /gateway/overview, which is never scoped to one organization. It always shows "All organizations".
 import type { ReactElement } from 'react';
 import { EmptyState } from '@paigasus/ui';
 import { STREAM_CAPABILITY, type GatewayView } from './gateway-state';
@@ -15,14 +19,14 @@ const STATE_COPY: Record<GatewayView['state'], { title: string; body: string }> 
   absent: { title: 'The gateway is not configured', body: 'No gateway entry is present in this deployment’s service map.' },
 };
 
-export function ZoneOverview({ view, scope }: { readonly view: GatewayView; readonly scope: { readonly orgId: string; readonly name: string } | null }): ReactElement {
+export function ZoneOverview({ view }: { readonly view: GatewayView }): ReactElement {
   const copy = STATE_COPY[view.state];
   return (
     <section className="flex flex-col gap-6 p-8" data-testid="zone-overview">
       <div>
         <h1 className="text-2xl font-semibold">AI Gateway</h1>
         <p className="text-muted-foreground text-sm" data-testid="gateway-scope">
-          {scope === null ? 'All organizations' : scope.name}
+          All organizations
         </p>
       </div>
 

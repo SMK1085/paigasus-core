@@ -36,7 +36,7 @@ describe('no zone hand-rolls the session cookie name', () => {
   });
 
   it('checked at least lib/auth.ts, lib/config.ts, lib/console.ts, lib/nav.ts and proxy.ts', () => {
-    expect(files.sort()).toEqual(['lib/auth.ts', 'lib/config.ts', 'lib/console.ts', 'lib/nav.ts', 'proxy.ts'].sort());
+    expect(files.sort()).toEqual(['lib/auth.ts', 'lib/concurrency.ts', 'lib/config.ts', 'lib/console.ts', 'lib/nav.ts', 'lib/paging.ts', 'lib/settings-path.ts', 'proxy.ts'].sort());
     // Sanity: APP_ROOT resolves, so the relative reads above are actually reading this app's own
     // files and not silently matching nothing.
     expect(APP_ROOT.endsWith('gateway-console/')).toBe(true);

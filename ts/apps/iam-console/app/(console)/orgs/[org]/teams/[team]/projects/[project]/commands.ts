@@ -5,8 +5,8 @@
 // sends only the changes (D6).
 import 'server-only';
 import { z } from 'zod';
-import { callIam, type IamClients } from '@paigasus/console-core';
-import { prnField, renameChange, renameForm, toActionResult, type ActionResult } from '../../../../../../../../lib/form';
+import { callIam, prnField, toActionResult, type ActionResult, type IamClients } from '@paigasus/console-core';
+import { renameChange, renameForm } from '../../../../../../../../lib/form';
 
 export const renameProjectForm = renameForm();
 export type RenameProjectInput = z.infer<typeof renameProjectForm>;

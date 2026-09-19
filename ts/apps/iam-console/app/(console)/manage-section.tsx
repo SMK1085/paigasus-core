@@ -16,7 +16,7 @@
 //     'archived-parent' view shows no Restore either: a restore of the node itself does not change
 //     its effective status (spec F8). No action and no command applies D7; 511 § 6.3 points here.
 import type { ReactElement } from 'react';
-import type { FormAction } from '../_components/form-action';
+import type { FormAction } from '@paigasus/console-core';
 import { ManageControls } from '../_components/manage-controls';
 import { lifecycleView, PARENT_ARCHIVED_NOTE, type LifecycleView, type NodeLifecycle } from './node-status';
 

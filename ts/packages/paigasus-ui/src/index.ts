@@ -14,4 +14,5 @@ export { Label, Input, Field, type FieldProps } from './components/form';
 export { EmptyState, type EmptyStateProps } from './components/empty-state';
 export { ErrorState, type ErrorStateProps } from './components/error-state';
 export { cn } from './lib/cn';
+export { PRIMARY_BUTTON_CLASS, SECONDARY_BUTTON_CLASS } from './lib/button-class';
 export { Link, LinkProvider, useLinkComponent, type LinkComponent, type LinkProps } from './nav/link';

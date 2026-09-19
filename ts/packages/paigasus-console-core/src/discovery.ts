@@ -21,7 +21,7 @@
 //   socket activity, and any read OR write resets it. So it fires on a quiet, healthy connection.
 //   It bounds a command in flight only while nothing else is written to the socket: under steady
 //   traffic each write moves the deadline, and a Redis that accepts commands and never replies can
-//   go unnoticed (follow-up SMA-650).
+//   go unnoticed. withOperationDeadline below is the end-to-end bound (SMA-650).
 // - `pingInterval` (PAIGASUS_SESSION_REDIS_TIMEOUT_MS) sends PING while the socket is ready. The
 //   PING and its reply are socket activity, so a healthy idle socket never reaches the idle timer.
 //   The gap between "the ping is due" and "the idle timer fires" is one timeout. That gap is the
@@ -187,6 +187,116 @@ function afterConnect(inner: DescriptorCache, ready: Promise<void>): DescriptorC
   };
 }
 
+/** How many command timeouts one cache operation may take, end to end (SMA-650 D3). */
+const DEADLINE_FACTOR = 4;
+
+/** How many command timeouts the wrapper stays silent after an expiry (SMA-650 D5). */
+const COOLDOWN_FACTOR = 4;
+
+/** Which half of the wrapper refused the operation (SMA-650 D9). */
+export type DescriptorCacheTimeoutPhase = 'deadline' | 'circuit-open';
+
+/**
+ * The descriptor cache did not answer. `phase` says why: `deadline` means this operation itself ran
+ * past its bound, `circuit-open` means an earlier one did and this one was refused without touching
+ * the socket (SMA-650 D9).
+ *
+ * `name` is set explicitly, because a production bundle can mangle `constructor.name` — the same
+ * reasoning connectionLossReason records above. The message NEVER carries the DSN, the URL, or a
+ * node-redis error: `operation` is one of five fixed literals.
+ */
+export class DescriptorCacheTimeoutError extends Error {
+  readonly phase: DescriptorCacheTimeoutPhase;
+
+  constructor(operation: string, deadlineMs: number, phase: DescriptorCacheTimeoutPhase) {
+    super(
+      phase === 'deadline'
+        ? `the descriptor cache operation "${operation}" did not answer within ${deadlineMs} ms`
+        : `the descriptor cache is not answering: "${operation}" was refused while the circuit was open`,
+    );
+    this.name = 'DescriptorCacheTimeoutError';
+    this.phase = phase;
+  }
+}
+
+/**
+ * The part of a node-redis client the deadline wrapper reads. Structural, so the default test tier
+ * can drive it with a plain EventEmitter — the same shape ConnectionLossSource uses above.
+ *
+ * It carries `ready` ONLY. An `error` listener here would duplicate watchConnectionLoss's job and
+ * would break its test's pin on listenerCount('error') === 1.
+ */
+export type ReadySource = { on(event: 'ready', listener: () => void): unknown };
+
+/**
+ * Bounds every cache operation (SMA-650). `commandOptions.timeout` covers only the queued phase and
+ * `socketTimeout` is an idle timer that any write resets, so a Redis that accepts commands and never
+ * replies is unbounded under steady traffic. This is the only end-to-end bound.
+ */
+export function withOperationDeadline(inner: DescriptorCache, client: ReadySource, timeoutMs: number, log: ConsoleLogger): DescriptorCache {
+  const deadlineMs = timeoutMs * DEADLINE_FACTOR;
+  const cooldownMs = timeoutMs * COOLDOWN_FACTOR;
+  // null = closed. Otherwise the Date.now() at which it opened (D4, D5). One field, mutated only
+  // from the event loop's single thread, so D6's read-then-write cannot interleave.
+  let openedAt: number | null = null;
+
+  // `ready` is the exact signal that node-redis finished a reconnect. NO error listener (D4 note).
+  client.on('ready', () => {
+    openedAt = null;
+  });
+
+  const bounded = async <T>(operation: string, run: () => Promise<T>): Promise<T> => {
+    if (openedAt !== null) {
+      // While the cooldown runs we write NOTHING. That silence is what lets node-redis's idle timer
+      // fire and its reconnect strategy repair the socket (SMA-650 § 2 fact 4) — it is the repair
+      // mechanism, not only a cost saving.
+      // Date.now() is wall-clock, not monotonic (house style here — single-flight uses deps.now()).
+      // If the host clock steps BACKWARDS (a VM resume, chrony makestep), this comparison stays
+      // true for the length of the step, so the circuit stays open that much longer than
+      // cooldownMs and every service's navigation degrades for that long. Containers normally
+      // slew rather than step, so this is accepted, not fixed.
+      if (Date.now() - openedAt < cooldownMs) throw new DescriptorCacheTimeoutError(operation, deadlineMs, 'circuit-open');
+      // The cooldown elapsed with no `ready`. Let this operation through: if the client is still not
+      // ready, node-redis refuses it at once (disableOfflineQueue), so the attempt costs nothing.
+      openedAt = null;
+    }
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const running = run();
+    try {
+      return await Promise.race([
+        running,
+        new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(() => reject(new DescriptorCacheTimeoutError(operation, deadlineMs, 'deadline')), deadlineMs);
+          timer.unref();
+        }),
+      ]);
+    } catch (error) {
+      if (error instanceof DescriptorCacheTimeoutError && error.phase === 'deadline') {
+        // D6: concurrent operations all expire together. Only the FIRST opens the circuit and logs,
+        // or one wedge would log a line per operation and the cooldown would never elapse.
+        if (openedAt === null) {
+          openedAt = Date.now();
+          log.appEvent('discovery.redis_operation_timeout', { operation, deadlineMs });
+        }
+        // D7: see Task 1.
+        running.catch(() => undefined);
+      }
+      throw error;
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+
+  return {
+    get: (service) => bounded('get', () => inner.get(service)),
+    set: (service, rec, ttlMs, expectedRev) => bounded('set', () => inner.set(service, rec, ttlMs, expectedRev)),
+    delete: (service) => bounded('delete', () => inner.delete(service)),
+    tryAcquireLock: (service, token, ttlMs) => bounded('tryAcquireLock', () => inner.tryAcquireLock(service, token, ttlMs)),
+    releaseLock: (service, token) => bounded('releaseLock', () => inner.releaseLock(service, token)),
+    close: () => inner.close(),
+  };
+}
+
 function redisDescriptorCache(url: string, timeoutMs: number, log: ConsoleLogger): DescriptorCache {
   const client: RedisClientType = createClient({
     url,
@@ -202,7 +312,9 @@ function redisDescriptorCache(url: string, timeoutMs: number, log: ConsoleLogger
   watchConnectionLoss(client, log);
   state().redisClient = client;
   const inner = createRedisDescriptorCache(client);
-  return afterConnect(inner, connectOnce(client, timeoutMs, log));
+  // The deadline wraps OUTSIDE afterConnect, so it bounds the `await ready` too and `4 × timeoutMs`
+  // is the whole bound, not an addition to the connect wait (SMA-650 § 4.1).
+  return withOperationDeadline(afterConnect(inner, connectOnce(client, timeoutMs, log)), client, timeoutMs, log);
 }
 
 /**

@@ -24,9 +24,9 @@ export {
 } from './iam';
 export type { Auth, TransportOptions } from './iam';
 
-// The guard-free ./iam/types entry (SMA-630). tests/index-barrel.test.ts requires every subpath
-// export in this barrel.
-export { NodeStatus } from './iam/types';
+// The guard-free ./iam/types entry (SMA-630, SMA-636). tests/index-barrel.test.ts requires every
+// subpath export in this barrel.
+export { ApiKeyStatus, NodeStatus } from './iam/types';
 
 export { DEFAULT_HEADER_TIMEOUT_MS, createChatClient, createTerminalFrameParser } from './chat';
 export type { ChatClient, ChatClientOptions, ChatResult } from './chat';

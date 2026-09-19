@@ -2,8 +2,9 @@
 //
 // src/logger.ts (spec § 4.8, § 9.2): it writes the event name, a time and EXACTLY the fields the
 // port gave it — nothing it could have picked up elsewhere, so never a DSN or a token.
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, expectTypeOf, it, vi } from 'vitest';
 import { createJsonLogger } from '../../src/logger';
+import type { AppEventName } from '../../src/logger';
 
 afterEach(() => {
   vi.unstubAllEnvs();
@@ -54,5 +55,19 @@ describe('createJsonLogger', () => {
     const output = lines.join('\n');
     expect(output).not.toContain(dsn);
     expect(output).not.toContain('s3cret-password');
+  });
+
+  it('writes the gateway zone’s grant failure event (SMA-636 § 5.2)', () => {
+    const { logger, parsed } = capture();
+    logger.appEvent('gateway.sa.grant_failed', { presentation: 'generic', reason: null, correlation_id: 'cid-1' });
+    expect(parsed().map((line) => [line.event, line.fields])).toEqual([['gateway.sa.grant_failed', { presentation: 'generic', reason: null, correlation_id: 'cid-1' }]]);
+  });
+
+  it('holds gateway.sa.grant_failed in AppEventName at the TYPE level (SMA-636)', () => {
+    // Enforced by `tsc --noEmit` in the typecheck task, NOT by `vitest run` — the inherited test
+    // task passes no --typecheck, so expectTypeOf is a runtime no-op there. It works only because
+    // tsconfig.json includes tests/**/*. A runtime-only test above cannot fail this on its own: the
+    // logger writes any name it is given.
+    expectTypeOf<'gateway.sa.grant_failed'>().toMatchTypeOf<AppEventName>();
   });
 });

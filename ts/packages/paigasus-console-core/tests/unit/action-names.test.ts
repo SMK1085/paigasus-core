@@ -25,6 +25,10 @@ function wireNames(source: string): Set<string> {
 
 const LIFECYCLE = ['RenameOrganization', 'ArchiveOrganization', 'RestoreOrganization', 'RenameTeam', 'ArchiveTeam', 'RestoreTeam', 'RenameProject', 'ArchiveProject', 'RestoreProject'];
 
+// SMA-636 spec § 4.5. mayI() asks about the CURRENT user only, so InvokeModel (asked about a service
+// account, through modelCallState) and ListRoleGrants (Root-only for another principal) stay out.
+const SERVICE_ACCOUNT = ['CreateServiceAccount', 'ArchiveServiceAccount', 'IssueApiKey', 'RevokeApiKey', 'GrantRole'];
+
 describe('IAM_ACTIONS against the Rust action catalog', () => {
   const wire = wireNames(readFileSync(fileURLToPath(new URL(ACTION_RS, REPO_ROOT)), 'utf8'));
 
@@ -47,5 +51,11 @@ describe('IAM_ACTIONS against the Rust action catalog', () => {
   it('wireNames refuses a misspelt name', () => {
     expect(wire.has('RenameTeams')).toBe(false);
     expect(wire.has('renameTeam')).toBe(false);
+  });
+
+  it('holds the five gateway-settings names of SMA-636, and neither InvokeModel nor ListRoleGrants', () => {
+    expect(IAM_ACTIONS).toEqual(expect.arrayContaining(SERVICE_ACCOUNT));
+    expect([...IAM_ACTIONS]).not.toContain('InvokeModel');
+    expect([...IAM_ACTIONS]).not.toContain('ListRoleGrants');
   });
 });
