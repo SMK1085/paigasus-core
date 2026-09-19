@@ -670,11 +670,13 @@ async fn put_in_enqueue_and_record_commit_atomically_sharing_correlation_id() {
     );
 }
 
-/// SMA-659 guard: [`wait_until_blocked_by`] must REPORT a racer that never blocks, on both of its
-/// error paths. Without this, a wait that always returned `Ok` would keep the three race tests
-/// green while the race went back to depending on timing — which is the defect SMA-659 removes.
-/// (The opposite defect, a predicate that is never true, makes those three tests fail at the
-/// deadline, so they guard it themselves.)
+/// SMA-659/SMA-660 guard: [`support::race::wait_until_blocked_by`] must REPORT a racer that never
+/// blocks, and must not report one that blocks for the WRONG reason. Four cases: a racer that
+/// finished, a racer that never blocks at all, a prefix matching no statement, and a blocker pid
+/// that blocks nobody. Without the last two, deleting either the `query_prefix` term or the
+/// `pg_blocking_pids` term from the predicate leaves every race test in this crate green — the
+/// second matters most, because `pg_blocking_pids` is the only discriminating term at the two
+/// `tenancy_events_pg` sites, whose prefix is a bare `select%`.
 #[tokio::test]
 async fn wait_until_blocked_by_reports_a_racer_that_never_blocks() {
     let Some((_pg, db)) = support::start_migrated_postgres().await else { return };
@@ -715,4 +717,54 @@ async fn wait_until_blocked_by_reports_a_racer_that_never_blocks() {
         !err.contains("(dump failed") && !err.contains("(dump unreadable") && !err.contains("(dump returned no row"),
         "the backend dump query itself failed: {err}"
     );
+
+    // Cases 3 and 4 need a racer that IS blocked, which neither case above has. Set one up once:
+    // peer C holds an uncommitted INSERT of a fresh id, and racer D's real `put` of the same id
+    // blocks inside its own INSERT on C's row.
+    let doc_c = valid_static_doc("guard-blocked-racer", false, now);
+    let txn_c = db.begin().await.unwrap();
+    policy::ActiveModel {
+        policy_id: Set(doc_c.policy_id.clone()),
+        kind: Set("static".to_string()),
+        source: Set(doc_c.source.clone()),
+        description: Set(Some(doc_c.description.clone())),
+        system: Set(doc_c.system),
+        created_at: Set(doc_c.created_at),
+        updated_at: Set(doc_c.updated_at),
+        content_fingerprint: NotSet,
+        starter_revision: NotSet,
+    }
+    .insert(&txn_c)
+    .await
+    .unwrap();
+    let pid_c = support::race::backend_pid(&txn_c).await;
+    let store_d = PgPolicyStore::new(db.clone(), Generations::memory());
+    let doc_d = doc_c.clone();
+    let racer_d = tokio::spawn(async move { store_d.put(&doc_d).await });
+
+    // Case 3: the prefix is honoured. Phase one proves the racer really is blocked — without it,
+    // phase two could report `did not block` simply because the racer had not arrived yet, which
+    // is the timing-dependent assertion this whole issue removes.
+    support::race::wait_until_blocked_by(&db, pid_c, &racer_d, "insert%", support::race::RACER_BLOCK_BUDGET)
+        .await
+        .expect("phase one: the racer must be blocked inside its INSERT before the prefix can be tested");
+    let err = support::race::wait_until_blocked_by(&db, pid_c, &racer_d, "delete%", Duration::from_millis(200))
+        .await
+        .expect_err("a prefix that matches no statement must reach the deadline, even with the racer blocked");
+    assert!(err.contains("did not block"), "wrong message for a non-matching prefix: {err}");
+    assert!(err.contains("\"delete%\""), "the deadline message must name the prefix it looked for: {err}");
+
+    // Case 4: the blocker pid is honoured. A third, idle transaction blocks nobody, so asking
+    // about ITS pid must reach the deadline although a blocked racer exists.
+    let txn_idle = db.begin().await.unwrap();
+    let pid_idle = support::race::backend_pid(&txn_idle).await;
+    let err = support::race::wait_until_blocked_by(&db, pid_idle, &racer_d, "insert%", Duration::from_millis(200))
+        .await
+        .expect_err("a pid that blocks nobody must reach the deadline, even with a blocked racer running");
+    assert!(err.contains("did not block"), "wrong message for an unrelated blocker pid: {err}");
+
+    // Teardown: release the racer, then drain both transactions so no task outlives the test.
+    txn_c.commit().await.unwrap();
+    racer_d.await.unwrap().expect("the racer must absorb the same-content conflict once C commits");
+    txn_idle.rollback().await.unwrap();
 }
