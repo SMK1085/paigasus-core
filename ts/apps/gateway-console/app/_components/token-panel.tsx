@@ -13,6 +13,9 @@
 // page enters the back/forward cache right after `pagehide`, the task queue freezes before that
 // macrotask runs and the frozen DOM keeps showing the token. flushSync forces the removal to commit
 // before this handler returns, so the token is gone from the DOM by the time the page can freeze.
+// `onClosed` must run INSIDE that same flushSync call, not after it (SMA-636 fix round 2): it sets
+// the parent frame's `tokenVisible` flag, and a call placed after flushSync is an ordinary update at
+// default priority again, so the same freeze can leave "Issue key" disabled after a bfcache restore.
 'use client';
 
 import { useEffect, useImperativeHandle, useState, type ReactElement, type Ref } from 'react';
@@ -58,8 +61,8 @@ export function TokenPanel({ ref, onClosed }: TokenPanelProps): ReactElement | n
       // eslint-disable-next-line @eslint-react/dom-no-flush-sync -- flushSync is the fix here, not the hazard.
       flushSync(() => {
         setIssued(null);
+        onClosed?.();
       });
-      onClosed?.();
     };
     window.addEventListener('pagehide', close);
     return () => {

@@ -295,6 +295,23 @@ describe('the token (§ 5.4)', () => {
     });
   });
 
+  it('keeps the Issue key submit enabled SYNCHRONOUSLY after a pagehide, before the back/forward cache can freeze the page (SMA-636 fix round 2)', async () => {
+    // Dispatched OUTSIDE act() on purpose, the same way token-panel.test.tsx's bfcache test does:
+    // a real `pagehide` listener fires outside React's own event handling, so this is the only way
+    // to reproduce the race. No act(), no await, no waitFor on the assertion below: if the page
+    // enters the back/forward cache right after the dispatch, the task queue freezes there, so the
+    // flag that re-enables "Issue key" must already have committed by then.
+    const user = userEvent.setup();
+    render(section(view(), actions()));
+
+    await user.click(within(panel()).getByRole('button', { name: 'Issue key' }));
+    await waitFor(() => {
+      expect(screen.getByTestId('token-value').textContent).toBe(TOKEN);
+    });
+    window.dispatchEvent(new PageTransitionEvent('pagehide'));
+    expect(within(panel()).getByRole<HTMLButtonElement>('button', { name: 'Issue key' }).disabled).toBe(false);
+  });
+
   it('keeps the token panel open after a revoke, so key rotation works (rule 6)', async () => {
     const user = userEvent.setup();
     render(section(view(), actions()));
