@@ -368,6 +368,12 @@ reports, the runner's Docker version, and the runner's image store. The image st
 ID is correct: a containerd store and the classic store report different IDs for the same archive.
 Read the expected ID against the store named on the same line.
 
+`build-oci` runs `docker buildx build`, not plain `docker build`. The OCI exporter needs the
+`docker-container` buildx driver. GitHub-hosted runners do not carry a containerd image store, and
+a plain `docker build` there does not reliably use the builder that `docker/setup-buildx-action`
+selects. `docker buildx build` always uses that builder. This makes no difference on a Mac with
+Docker Desktop's containerd store: Docker Desktop already routes `docker build` the same way.
+
 ### The rehearsal workflow
 
 Before the first rehearsal run, set up the `images-rehearsal` environment once. In the repository
