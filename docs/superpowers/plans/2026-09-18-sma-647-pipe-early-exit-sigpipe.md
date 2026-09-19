@@ -74,6 +74,13 @@ flag and then writes. In the I1 form the main shell does not wait for a process 
 10 s and outlives the test. The producer therefore touches a "second write" marker before its second
 write, and the self-test waits (bounded, 10 s, `infra` on timeout) for that marker.
 
+**D-6, superseded during Task 10's review.** The handshake above could not catch a deleted
+`exec <&-` (measured: 26 of 26 mutant runs passed). The shipped handshake is different: the
+producer ignores SIGPIPE and creates the second-write marker AFTER its second write, and each
+reader waits (bounded) for that marker before it exits. Spec §5.3 and
+`early_exit_reader_self_test` describe the shipped form. Task 10's code below is the plan as
+written, not the code that shipped.
+
 **D-7. `ci_targets.py:2522` is two lines.** The `wired_workflow_credentials` assertion line is split
 over two Python literals at `ci_targets.py:2521-2522`. Task 5 replaces both.
 

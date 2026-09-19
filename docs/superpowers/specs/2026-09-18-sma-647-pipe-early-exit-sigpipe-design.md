@@ -111,7 +111,7 @@ Sites of the class that are safe today, for the stated reason. They are still re
 | `.github/workflows/ci.yml:271` and its copies at `ci/actionlint/run.sh:4273-4408` | one sha with no newline |
 | `ci/ruff/run.sh:148` | the producer ends in `sort` (`ci/ruff/run.sh:62`), which is block-buffered and writes once |
 | `ci/actionlint/run.sh:1173, 2482, 2492, 2506, 2519, 2565, 2578` | inside `$( )` with the status discarded, and `run.sh` has no `set -e` |
-| `ci/images/run.sh:49-117`, `ci/publish-metadata/run.sh:536` | `grep` output to `head` is block-buffered and small; 536 also has `|| true` |
+| `ci/images/run.sh:49-117`, `ci/publish-metadata/run.sh:536` | `grep` output to `head` is block-buffered and small; 536 also has `\|\| true` |
 | `moon.yml:373` | the Moon script has no `pipefail`, so the status is `grep`'s |
 
 `release.yml:913` and `prebuild.yml:266` already record this hazard for `sort -V | head -n1`
@@ -204,9 +204,13 @@ misses `.moon/tasks.yml`, and `**/moon.yml` misses the root `moon.yml` (the trap
 `ops/nats/check-subjects.sh`. A missing member, or a corpus that cannot be listed, is rc 2
 (`infra`). The floor lines are pinned (§5.4).
 
-**Rule.** Line joining first: a line that ends in `|` or `|\` (after trailing spaces) is
-joined with the next line, because bash accepts a bare `|` at the end of a line. Then a
-full-line comment (first non-blank character `#`) is skipped. Then the line matches if a
+**Rule.** Comments first: a full-line comment (first non-blank character `#`) is skipped,
+and it never starts a join. If it did, a comment that ends in `|` would join the next code
+line, and the joined line would then be skipped as a comment, so a real reader would hide
+(plan D-3). Then line joining: a line that ends in `|` or `|\` (after trailing spaces) is
+joined with the next line, because bash accepts a bare `|` at the end of a line. A YAML
+block-scalar header (`run: |`, `script: |`, or a sequence item `- |`) is not joined, because
+it is not a shell pipe (plan D-2). Then the logical line matches if a
 pipe `[|]` that is not part of `||` or `|&` is followed by optional spaces, optional
 `VAR=value` assignments, an optional `command ` prefix, and then one of:
 
@@ -293,8 +297,11 @@ text. Known pins:
 - The copies of the `ci.yml` step embedded in `ci/actionlint/run.sh:4273-4408` (check 8d's
   mutation battery), which must stay byte-faithful to `ci.yml`.
 - `WORKFLOW_CREDENTIALS_SH_CALL_SITES` (`ci_targets.py:1079-1091`) pins
-  `workflow-credentials/run.sh:93` as its ASSERTION line. If I2 splits that line into a
-  capture line and a match line, both lines are pinned, because deleting either one must red.
+  `workflow-credentials/run.sh:93` as its ASSERTION line. I2 splits that line into three:
+  the capture line (which also sets the status default, `subjects_rc=0; …`), the status
+  guard, and the match line. All three are pinned, because deleting any one of them must red:
+  without the guard, a checker failure reads as a pass again (plan D-4; the tuple grows from
+  five to seven entries).
 
 Check 13 is a new check inside an existing gate, not a new `repo:*` task. So it needs no `T`
 array entry, no CLAUDE.md marker-command change, and no `SELF_SCHEDULED_GATES` entry. It
