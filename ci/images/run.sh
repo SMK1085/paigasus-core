@@ -9,7 +9,7 @@
 # .github/workflows/images.yml instead.
 #
 # usage: ci/images/run.sh build [iam|gateway]     # [iam|gateway] scopes the build
-#        ci/images/run.sh smoke                    # always smokes BOTH images; takes no service arg
+#        ci/images/run.sh smoke [iam|gateway]...   # no argument: both images; else exactly those
 #        ci/images/run.sh all                       # build both + smoke; takes no service arg
 #        ci/images/run.sh build-oci <iam|gateway> <outdir>   # SMA-658: OCI archive, no --load
 #        ci/images/run.sh load-oci <archive> <image-name>     # load + identity check (prints M3)
@@ -452,11 +452,20 @@ assert_base_intact() {
   echo "  ${image}: no shell, ${certs} CA certs, $((size / 1024 / 1024)) MB"
 }
 
-smoke() {
-  trap cleanup EXIT
-  cleanup
-  docker network create "$NET" >/dev/null
+# The image under test must be the one THIS checkout built. This replaces the old rule that
+# `smoke` took no service argument (SMA-500): the danger was that `smoke` would test a stale or
+# absent image of the OTHER service and still report SMOKE OK. A per-service smoke never touches
+# the other service's image, and this check refuses a stale image of the service it does test.
+assert_fresh() {
+  local image="$1" rev
+  rev="$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$image" 2>/dev/null || true)"
+  if [ "$rev" != "$REVISION" ]; then
+    echo "::error::${image} carries revision '${rev:-<none>}', expected ${REVISION}: a stale or absent image would be smoke-tested." >&2
+    return 1
+  fi
+}
 
+smoke_gateway() {
   echo "== gateway: standalone =="
   # Runtime-only config (AC-2): env vars ONLY, no mounted file, no --env-file. Success IS the
   # proof. The key is a literal dummy and must never be a real one.
@@ -481,7 +490,9 @@ smoke() {
     *) echo "::error::gateway readyz probe exited ${readyz_rc}, expected exactly 1 (unhealthy)" >&2; return 1 ;;
   esac
   assert_base_intact paigasus-gateway:dev
+}
 
+smoke_iam() {
   echo "== iam: with postgres, reached BY HOSTNAME =="
   # --health-cmd/--health-interval + wait_healthy, not a fixed `sleep`: sea-orm's
   # Database::connect does not retry, so IAM's own boot attempt must land AFTER postgres is
@@ -508,24 +519,38 @@ smoke() {
   expect_status "iam /healthz" "http://${IAM_NAME}:8080/healthz" 200
   expect_status "iam /readyz"  "http://${IAM_NAME}:8080/readyz"  200
   assert_base_intact paigasus-iam:dev
+}
 
-  echo "== runs as the non-root uid it claims =="
-  # `docker top`, not `docker inspect .Config.User`: the latter reads IMAGE config, so a
-  # `--user 0` invocation would still pass it.
-  # `-o pid,uid`, not `-o pid,user` or `-o user` alone: `pid` stays required — some docker
-  # engines (observed on Docker Desktop 29.6.2) need it present in the ps format to correlate
-  # host processes back to the container and error `Couldn't find PID field in ps output`
-  # otherwise — but `user` is resolved through NSS, so on a Linux runner where uid 65532
-  # resolves to a synthesized name (e.g. nss-systemd on GitHub-hosted ubuntu-latest) this would
-  # print a username instead of "65532" and false-negative CI on a correct image. `uid` is the
-  # raw numeric column and is never name-resolved. Do NOT "simplify" this back to `-o user`.
-  # `awk '{print $NF}'` takes the last column so the field order doesn't matter.
-  for c in "$GW_NAME" "$IAM_NAME"; do
-    uid="$(docker top "$c" -o pid,uid 2>/dev/null | tail -1 | awk '{print $NF}')"
-    [ "$uid" = "65532" ] || { echo "::error::$c runs as ${uid}, expected 65532" >&2; return 1; }
-    echo "  $c runs as uid ${uid}"
+# `docker top`, not `docker inspect .Config.User`: the latter reads IMAGE config, so a
+# `--user 0` invocation would still pass it.
+# `-o pid,uid`, not `-o pid,user` or `-o user` alone: `pid` stays required — some docker
+# engines (observed on Docker Desktop 29.6.2) need it present in the ps format to correlate
+# host processes back to the container and error `Couldn't find PID field in ps output`
+# otherwise — but `user` is resolved through NSS, so on a Linux runner where uid 65532
+# resolves to a synthesized name (e.g. nss-systemd on GitHub-hosted ubuntu-latest) this would
+# print a username instead of "65532" and false-negative CI on a correct image. `uid` is the
+# raw numeric column and is never name-resolved. Do NOT "simplify" this back to `-o user`.
+# `awk '{print $NF}'` takes the last column so the field order doesn't matter.
+assert_uid() {
+  local c="$1" uid
+  uid="$(docker top "$c" -o pid,uid 2>/dev/null | tail -1 | awk '{print $NF}')"
+  [ "$uid" = "65532" ] || { echo "::error::$c runs as ${uid}, expected 65532" >&2; return 1; }
+  echo "  $c runs as uid ${uid}"
+}
+
+smoke() {
+  local s
+  trap cleanup EXIT
+  cleanup
+  docker network create "$NET" >/dev/null
+  for s in "$@"; do
+    case "$s" in
+      gateway) assert_fresh paigasus-gateway:dev; smoke_gateway; assert_uid "$GW_NAME" ;;
+      iam)     assert_fresh paigasus-iam:dev;     smoke_iam;     assert_uid "$IAM_NAME" ;;
+      *) echo "unknown service: $s" >&2; return 1 ;;
+    esac
   done
-  echo "SMOKE OK"
+  echo "SMOKE OK ($*)"
 }
 
 cmd="${1:?usage: ci/images/run.sh build [iam|gateway] | ci/images/run.sh \{smoke\|all\}}"
@@ -533,20 +558,14 @@ target="${2:-}"
 services=("iam" "gateway")
 [ -n "$target" ] && services=("$target")
 
-# `smoke` and `all` always exercise BOTH images (§ 5.2: the negative case on the gateway needs
-# no IAM reachable, and the positive case needs IAM's own postgres) — a service argument on
-# either of them is silently ignored by `build_one`'s scoping but NOT by `smoke`, which has no
-# way to honour it. `run.sh all iam` would then build only iam while still smoke-testing
-# whatever `paigasus-gateway:dev` happens to already be on the daemon (stale or absent), and
-# report SMOKE OK regardless. Reject the argument outright rather than let it lie.
+# `smoke` with no argument smokes both images, gateway first (the old behaviour). With service
+# arguments it smokes exactly those; assert_fresh (above) is what stops a stale image from being
+# tested. `all` still takes no argument: it builds with --load and smokes both.
 case "$cmd" in
   build) assert_pins; for s in "${services[@]}"; do build_one "$s"; done ;;
   smoke)
-    if [ -n "$target" ]; then
-      echo "usage: ci/images/run.sh smoke takes no service argument — it always smokes both images" >&2
-      exit 1
-    fi
-    smoke
+    shift
+    if [ "$#" -eq 0 ]; then smoke gateway iam; else smoke "$@"; fi
     ;;
   all)
     if [ -n "$target" ]; then
@@ -555,7 +574,7 @@ case "$cmd" in
     fi
     assert_pins
     for s in "${services[@]}"; do build_one "$s"; done
-    smoke
+    smoke gateway iam
     ;;
   build-oci)
     if [ -z "$target" ] || [ -z "${3:-}" ]; then
