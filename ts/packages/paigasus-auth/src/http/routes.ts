@@ -397,16 +397,36 @@ async function bestEffortRevoke(runtime: AuthRuntime, refreshToken: string): Pro
 // does not accept `client_id` as a substitute — Okta documents it as required. Logging out against
 // such a provider still succeeds server-side (step 1 already deleted the record), but the
 // end-session redirect will not complete: a UX failure there, not a security one.
+//
+// A STORE FAILURE (SMA-653). A failed read does not stop the delete (D5). A failed delete answers
+// 503 with a POST retry form and keeps the session cookie (D6): the user must see that logout did
+// not finish, never a false "signed out".
 async function handleLogout(runtime: AuthRuntime, req: Request): Promise<Response> {
   const cookies = readCookies(req.headers.get('cookie'));
   const sid = cookies.get(SESSION_COOKIE);
 
   // STEP 1: delete first, before any network call.
+  //
+  // The read only finds a refresh token worth revoking in step 3. Its failure must NEVER cost the
+  // delete (SMA-653 D5): a failed read leaves `refreshToken` undefined, and the delete still runs.
+  // That rescues a TRANSIENT failure. During a real wedge the read opens the SMA-651 circuit, the
+  // circuit then refuses the delete at once, and the delete branch below answers 503 — the usual
+  // outcome of a wedge (spec § 4 row 8).
   let refreshToken: string | undefined;
   if (sid !== undefined) {
-    const rec = await runtime.store.get(sid);
-    refreshToken = rec?.refreshToken;
-    await runtime.store.delete(sid);
+    const rec = await storeStep(runtime, 'logout_get', sid, () => runtime.store.get(sid));
+    refreshToken = rec === STORE_DOWN ? undefined : rec?.refreshToken;
+
+    const deleted = await storeStep(runtime, 'logout_delete', sid, () => runtime.store.delete(sid));
+    if (deleted === STORE_DOWN) {
+      // SMA-653 D6: the record may still be live, so this is NOT a logout. No cookie is cleared (a
+      // cleared cookie would show a false "signed out" while a copied cookie stays live) and there
+      // is no IdP redirect. The refresh token that the read found is revoked, best effort, so a
+      // copied cookie works only until its access token expires. This keeps the § 9.5 order rule:
+      // the delete was attempted first, and it failed. The retry form sends the cookie again.
+      if (refreshToken !== undefined) await bestEffortRevoke(runtime, refreshToken);
+      return storeUnavailableResponse({ kind: 'post', action: `${runtime.basePath}/auth/logout` });
+    }
   }
 
   // STEP 2: clear the session cookie and every outstanding transaction cookie. Unconditional,

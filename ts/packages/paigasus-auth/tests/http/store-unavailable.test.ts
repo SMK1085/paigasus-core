@@ -11,7 +11,20 @@ import type { SessionRecord } from '../../src/core/session.js';
 import { SESSION_COOKIE, txnCookieName } from '../../src/http/cookies.js';
 import { createAuthRoutes } from '../../src/http/routes.js';
 import { sidTag } from '../../src/ports/logger.js';
-import { BASE_PATH, FAILURE_KINDS, NEW_REFRESH_TOKEN, ORIGIN, SENTINEL_DSN, expectEventsClean, expectStoreUnavailable, harness, storeError, storeUnavailableEvents, type Harness } from '../support/store-failure.js';
+import {
+  BASE_PATH,
+  END_SESSION_URL,
+  FAILURE_KINDS,
+  NEW_REFRESH_TOKEN,
+  ORIGIN,
+  SENTINEL_DSN,
+  expectEventsClean,
+  expectStoreUnavailable,
+  harness,
+  storeError,
+  storeUnavailableEvents,
+  type Harness,
+} from '../support/store-failure.js';
 
 const RETURN_TO = '/iam/orgs';
 const OLD_SID = 'old-session-id-0123456789';
@@ -177,6 +190,72 @@ describe.each(FAILURE_KINDS)('GET /auth/callback with the store down (%s)', (kin
     await expectStoreUnavailable(res, { kind: 'link', target: `/iam/auth/login?returnTo=${encodeURIComponent(RETURN_TO)}` });
     expect(h.oidc.revokeCalls).toEqual([NEW_REFRESH_TOKEN]);
     expect(storeUnavailableEvents(h.events).map((fields) => fields.stage)).toEqual(['callback_set']);
+    expectEventsClean(h.events);
+  });
+});
+
+function logoutRequest(sid: string): Request {
+  return new Request(`${ORIGIN}${BASE_PATH}/auth/logout`, { method: 'POST', headers: { cookie: `${SESSION_COOKIE}=${sid}` } });
+}
+
+describe.each(FAILURE_KINDS)('POST /auth/logout with the store down (%s)', (kind) => {
+  it('row 6: the read fails -> the delete still runs, and logout completes (D5)', async () => {
+    const h = harness(['get'], () => storeError(kind));
+    await h.inner.set(OLD_SID, record(), 60_000, null);
+
+    const res = await createAuthRoutes(h.runtime).handle(logoutRequest(OLD_SID));
+
+    expect(res.status).toBe(302);
+    expect(res.headers.get('location')).toBe(END_SESSION_URL);
+    expect(res.headers.getSetCookie().some((cookie) => cookie.startsWith(`${SESSION_COOKIE}=;`))).toBe(true);
+    expect(h.calls).toEqual([`get:${OLD_SID}`, `delete:${OLD_SID}`]);
+    expect(await h.inner.get(OLD_SID)).toBeNull();
+    expect(h.oidc.revokeCalls).toEqual([]);
+    expect(h.events).toEqual([
+      ['store.unavailable', { zone: 'iam', stage: 'logout_get', sid: sidTag(OLD_SID) }],
+      ['logout.completed', { zone: 'iam', sid: sidTag(OLD_SID), revoked: false, endSessionRedirected: true }],
+    ]);
+    expectEventsClean(h.events);
+  });
+
+  it('row 7: the delete fails -> revoke the read token, 503 with a POST form, cookie kept (D6)', async () => {
+    const h = harness(['delete'], () => storeError(kind));
+    await h.inner.set(OLD_SID, record(), 60_000, null);
+
+    const res = await createAuthRoutes(h.runtime).handle(logoutRequest(OLD_SID));
+
+    await expectStoreUnavailable(res, { kind: 'post', target: '/iam/auth/logout' });
+    expect(h.oidc.revokeCalls).toEqual(['old-refresh-token']);
+    expect(await h.inner.get(OLD_SID)).not.toBeNull();
+    expect(h.events).toEqual([['store.unavailable', { zone: 'iam', stage: 'logout_delete', sid: sidTag(OLD_SID) }]]);
+    expectEventsClean(h.events);
+  });
+
+  it('row 7: a failing revoke still gives the same 503, and logs nothing more', async () => {
+    const h = harness(['delete'], () => storeError(kind));
+    h.oidc.failRevoke = true;
+    await h.inner.set(OLD_SID, record(), 60_000, null);
+
+    const res = await createAuthRoutes(h.runtime).handle(logoutRequest(OLD_SID));
+
+    await expectStoreUnavailable(res, { kind: 'post', target: '/iam/auth/logout' });
+    expect(h.events).toEqual([['store.unavailable', { zone: 'iam', stage: 'logout_delete', sid: sidTag(OLD_SID) }]]);
+    expectEventsClean(h.events);
+  });
+
+  it('row 8: the read and the delete both fail -> 503, no revoke, two events in order', async () => {
+    const h = harness(['get', 'delete'], () => storeError(kind));
+    await h.inner.set(OLD_SID, record(), 60_000, null);
+
+    const res = await createAuthRoutes(h.runtime).handle(logoutRequest(OLD_SID));
+
+    await expectStoreUnavailable(res, { kind: 'post', target: '/iam/auth/logout' });
+    expect(h.oidc.revokeCalls).toEqual([]);
+    expect(h.calls).toEqual([`get:${OLD_SID}`, `delete:${OLD_SID}`]);
+    expect(h.events).toEqual([
+      ['store.unavailable', { zone: 'iam', stage: 'logout_get', sid: sidTag(OLD_SID) }],
+      ['store.unavailable', { zone: 'iam', stage: 'logout_delete', sid: sidTag(OLD_SID) }],
+    ]);
     expectEventsClean(h.events);
   });
 });
