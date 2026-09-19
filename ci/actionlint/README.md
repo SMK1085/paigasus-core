@@ -832,7 +832,7 @@ real producer and a real reader, which waits for flag files in steps of 0.1 s. N
 measured for this paragraph; only the row and mutant counts below are asserted.
 
 **SMA-612 added a SIXTEENTH self-test.** `pipe_capacity_self_test` is a fixture-table check at
-the same level as checks 12 and 13. It drives `pipe_capacity_verdict` against fifteen input
+the same level as checks 12 and 13. It drives `pipe_capacity_verdict` against sixteen input
 rows, with no subprocess of its own. The preflight function it backs runs only in full-gate
 mode (D2), so `--self-test` mode checks the verdict function but never runs the probe itself.
 No timing was measured for this paragraph; only the row and mutant counts below are asserted.
