@@ -4979,8 +4979,11 @@ more prose"
 #      xargs-driven grep and a reader word inside a grep pattern do not fire.
 # POSIX classes only, no `\s`/`\b`: this file runs on BSD tools locally and GNU tools in CI (see
 # the BSD/GNU note at cargo_lock_step_verdict). The ERE writes every literal pipe as a bracket
-# expression and never puts a reader word right after an alternation bar, so its own definition
-# line does not match itself.
+# expression. It DOES contain the words `head` and `awk` right after an alternation bar
+# (`)|head(` and `)|awk[`), so its own definition line does not escape the scan by avoiding those
+# words — it escapes because the character each word is followed by there (`(` for `head`, `[`
+# for `awk`) is not one the pattern accepts as the word's own separator (`[[:space:];)]` or
+# end-of-line for `head`, a space for `awk`), so neither reads as a match against its own rule.
 #
 # FIXTURES LIVE OUTSIDE THE CORPUS, in ci/actionlint/fixtures/early-exit/*.txt: this check scans
 # THIS file, so a fixture line written here would fire. For the same reason no message in this
@@ -5085,7 +5088,7 @@ early_exit_reader_verdict() { # $1 = a file listing corpus paths, one per line
 early_exit_reader_self_test() {
   SELF_TESTS_RAN=$((SELF_TESTS_RAN + 1))
   local rc=0 fx=ci/actionlint/fixtures/early-exit tmpd list got want n text
-  local ps flag_a late_a flag_b late_b second_b i1_rc waited
+  local ps flag_a late_a second_a stall_a flag_b late_b second_b stall_b i1_rc waited w2
 
   expect_early() {
     local name="$1" expected="$2"
@@ -5147,27 +5150,44 @@ early_exit_reader_self_test() {
   expect_early 'an unreadable corpus member reports unreadable' "unreadable $tmpd/absent.txt"
 
   # --- Behavioural proof (SMA-647 spec §5.3): a HANDSHAKE, not a sleep. ----------------------
-  # The reader runs grep, closes its own stdin, then touches a flag. The producer writes one
-  # line, waits for the flag (bounded, 10 s), and only then writes again — so the second write
-  # happens after the reader closed the pipe, on every run, under any load. Check 9 runs this
-  # table 16 times concurrently, the load that produced two of the three CI flakes.
-  flag_a="$tmpd/flag-a"; late_a="$tmpd/late-a"
-  flag_b="$tmpd/flag-b"; late_b="$tmpd/late-b"; second_b="$tmpd/second-b"
+  # The READER decides when the pipe closes, not a sleep: it runs grep, closes its own stdin
+  # (`exec <&-`), touches a flag, and only THEN waits (bounded, 10 s, 0.1 s steps) for the
+  # producer's second-write marker before it exits. The producer ignores SIGPIPE
+  # (`trap '' PIPE`), so a write to an already-closed pipe reports EPIPE on the producer's OWN
+  # exit status instead of killing it with SIGPIPE, and it writes the second-write marker AFTER
+  # that write, never before, and never waits for the reader once it has written (so neither side
+  # can deadlock). In the real code `exec <&-` closes the pipe before the reader's wait begins, so
+  # the producer's second write always lands on a closed pipe (rc 1). MEASURED: without the
+  # reader's wait, removing `exec <&-` almost never failed this case — the reader subshell exited
+  # a few ms after touching its flag while the producer polled the flag only every 0.1 s, so the
+  # pipe was almost always already closed by process exit before the second write. With the
+  # reader's wait, removing `exec <&-` keeps the pipe open through the reader's own wait, so the
+  # second write succeeds (rc 0) and the case reds, which is what makes it catch that mutant.
+  # Check 9 runs this table 16 times concurrently, the load that produced two of the three CI
+  # flakes.
+  flag_a="$tmpd/flag-a"; late_a="$tmpd/late-a"; second_a="$tmpd/second-a"; stall_a="$tmpd/stall-a"
+  flag_b="$tmpd/flag-b"; late_b="$tmpd/late-b"; second_b="$tmpd/second-b"; stall_b="$tmpd/stall-b"
   early_exit_producer() { # $1 flag the reader touches, $2 timeout marker, $3 second-write marker
-    local w=0
+    trap '' PIPE
+    local w=0 w_rc
     printf 'hit\n'
     while [ ! -e "$1" ] && [ "$w" -lt 100 ]; do sleep 0.1; w=$((w + 1)); done
     [ -e "$1" ] || : > "$2"
-    : > "$3"
-    printf 'more\n'
+    printf 'more\n'; w_rc=$?; : > "$3"
+    return "$w_rc"
   }
 
   # The OLD shape. The case must SEE the defect, or it proves nothing: the producer must fail
-  # (141 on SIGPIPE, or 1 on EPIPE when SIGPIPE is ignored) while the reader succeeds.
-  early_exit_producer "$flag_a" "$late_a" "$tmpd/second-a" 2>/dev/null \
-    | ( grep -q hit; r=$?; exec <&-; : > "$flag_a"; exit "$r" )
+  # (1 on EPIPE, since the producer ignores SIGPIPE) while the reader succeeds.
+  early_exit_producer "$flag_a" "$late_a" "$second_a" 2>/dev/null \
+    | ( grep -q hit; r=$?; exec <&-; : > "$flag_a"
+        w2=0
+        while [ ! -e "$second_a" ] && [ "$w2" -lt 100 ]; do sleep 0.1; w2=$((w2 + 1)); done
+        [ -e "$second_a" ] || : > "$stall_a"
+        exit "$r" )
   ps=("${PIPESTATUS[@]}")
   [ ! -e "$late_a" ] || infra "check 13 self-test: the handshake reader never touched its flag within 10 s, so the pipe case cannot decide anything"
+  [ ! -e "$stall_a" ] || infra "check 13 self-test: the handshake reader never saw the producer's second write within 10 s, so the pipe case cannot decide anything"
   got="${ps[0]}/${ps[1]}"
   if [ "${ps[0]}" -eq 0 ] || [ "${ps[1]}" -ne 0 ]; then
     fail "early-exit self-test 'the pipe form loses its producer to the closed pipe': got
@@ -5179,13 +5199,18 @@ early_exit_reader_self_test() {
   # The I1 shape, same producer, same reader: rc 0. The main shell does not wait for a process
   # substitution (bash 3.2 has no $! for one), so wait — bounded — for the producer to reach its
   # second write before the temp directory goes away (plan D-6).
-  ( grep -q hit; r=$?; exec <&-; : > "$flag_b"; exit "$r" ) \
+  ( grep -q hit; r=$?; exec <&-; : > "$flag_b"
+    w2=0
+    while [ ! -e "$second_b" ] && [ "$w2" -lt 100 ]; do sleep 0.1; w2=$((w2 + 1)); done
+    [ -e "$second_b" ] || : > "$stall_b"
+    exit "$r" ) \
     < <(early_exit_producer "$flag_b" "$late_b" "$second_b" 2>/dev/null)
   i1_rc=$?
   waited=0
   while [ ! -e "$second_b" ] && [ "$waited" -lt 100 ]; do sleep 0.1; waited=$((waited + 1)); done
   [ -e "$second_b" ] || infra "check 13 self-test: the process-substitution producer never reached its second write within 10 s"
   [ ! -e "$late_b" ] || infra "check 13 self-test: the handshake reader never touched its flag within 10 s, so the I1 case cannot decide anything"
+  [ ! -e "$stall_b" ] || infra "check 13 self-test: the handshake reader never saw the producer's second write within 10 s, so the I1 case cannot decide anything"
   got="$i1_rc"
   expect_early 'the I1 form with the same producer and reader exits 0' '0'
 
