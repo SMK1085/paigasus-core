@@ -19,7 +19,7 @@ case "$branch" in
 esac
 
 # Enforce: feature/<lowercase-slug>.
-if printf '%s' "$branch" | grep -Eq '^feature/[a-z0-9._-]+$'; then
+if grep -Eq '^feature/[a-z0-9._-]+$' < <(printf '%s' "$branch"); then
   exit 0
 fi
 

@@ -43,7 +43,7 @@ check_identity() {
   # — before the `[ -z ... ]` checks below ever run — turning a named "MISSING placeholder"
   # diagnostic into a silent, unexplained abort. Tolerating no-match keeps the diagnostics live.
   local start
-  start=$(grep -nF -- "$nkey_placeholder" "$tmpl" | head -1 | cut -d: -f1 || true)
+  start=$(grep -nF -- "$nkey_placeholder" "$tmpl" | sed -n 1p | cut -d: -f1 || true)
   if [ -z "$start" ]; then
     echo "MISSING from accounts.conf.tmpl: no nkey placeholder $nkey_placeholder found for $identity" >&2
     fail=1
@@ -53,7 +53,7 @@ check_identity() {
   local end
   if [ -n "$next_placeholder" ]; then
     local next_start
-    next_start=$(grep -nF -- "$next_placeholder" "$tmpl" | head -1 | cut -d: -f1 || true)
+    next_start=$(grep -nF -- "$next_placeholder" "$tmpl" | sed -n 1p | cut -d: -f1 || true)
     if [ -z "$next_start" ]; then
       echo "MISSING from accounts.conf.tmpl: no nkey placeholder $next_placeholder found (needed to bound $identity's stanza)" >&2
       fail=1
@@ -98,14 +98,14 @@ check_identity() {
   local g
   while IFS= read -r g; do
     [ -z "$g" ] && continue
-    if ! printf '%s\n' "$pub_declared" | grep -qxF -- "$g"; then
+    if ! grep -qxF -- "$g" < <(printf '%s\n' "$pub_declared"); then
       echo "UNDECLARED grant in accounts.conf.tmpl (not in subjects.env): $g (found in $identity's publish.allow)" >&2
       fail=1
     fi
   done <<< "$pub_granted"
   while IFS= read -r g; do
     [ -z "$g" ] && continue
-    if ! printf '%s\n' "$sub_declared" | grep -qxF -- "$g"; then
+    if ! grep -qxF -- "$g" < <(printf '%s\n' "$sub_declared"); then
       echo "UNDECLARED grant in accounts.conf.tmpl (not in subjects.env): $g (found in $identity's subscribe.allow)" >&2
       fail=1
     fi

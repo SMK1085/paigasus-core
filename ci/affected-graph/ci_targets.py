@@ -102,7 +102,7 @@ T_ARRAY_RE = re.compile(r"^[ \t]*T=\((.*?)\)[ \t]*$", re.MULTILINE)
 MOON_CI_BRANCH_BLOCK = (
     '          if [ "$EVENT" = "pull_request" ]; then',
     '            moon ci "${T[@]}" --base origin/main --include-relations',
-    "          elif [ -n \"${BEFORE:-}\" ] && ! printf '%s' \"$BEFORE\" | grep -qE '^0+$'; then",
+    "          elif [ -n \"${BEFORE:-}\" ] && ! grep -qE '^0+$' < <(printf '%s' \"$BEFORE\"); then",
     '            moon ci "${T[@]}" --base "$BEFORE" --include-relations',
     "          else",
     "            # Initial push with no usable base — run the whole graph to warm caches.",
@@ -943,6 +943,18 @@ ACTIONLINT_SH_CALL_SITES = (
     # PASS, and the moon-diagnosis procedure this check exists to protect could then be deleted
     # from CLAUDE.md with nothing to notice.
     "done < <(claude_md_block_verdict CLAUDE.md)",
+    # SMA-647 — check 13's corpus listing, its five corpus-floor lines and its production call
+    # site, at run.sh's top level, column 0 like every other entry above. Same reasons as check
+    # 12's four: `early_exit_reader_verdict` is also called from its own self-test, so only this
+    # exact production line proves the REAL corpus is scanned, and an empty or partial corpus
+    # passes having asserted nothing unless its listing and floor are pinned too.
+    "git ls-files -- ':(glob)**/*.sh' ':(glob).github/workflows/*.yml' ':(glob).github/workflows/*.yaml' 'moon.yml' ':(glob)**/moon.yml' ':(glob).moon/**/*.yml' 'lefthook.yml' > \"$EE_LIST\"",
+    'grep -qxF \'ci/actionlint/run.sh\' "$EE_LIST" || infra "check 13: corpus floor: ci/actionlint/run.sh is not listed, so a pathspec stopped matching"',
+    'grep -qxF \'.github/workflows/ci.yml\' "$EE_LIST" || infra "check 13: corpus floor: .github/workflows/ci.yml is not listed, so a pathspec stopped matching"',
+    'grep -qxF \'moon.yml\' "$EE_LIST" || infra "check 13: corpus floor: moon.yml is not listed, so a pathspec stopped matching"',
+    'grep -qxF \'.moon/tasks.yml\' "$EE_LIST" || infra "check 13: corpus floor: .moon/tasks.yml is not listed, so a pathspec stopped matching"',
+    'grep -qxF \'ops/nats/check-subjects.sh\' "$EE_LIST" || infra "check 13: corpus floor: ops/nats/check-subjects.sh is not listed, so a pathspec stopped matching"',
+    'done < <(early_exit_reader_verdict "$EE_LIST")',
 )
 
 # SMA-579 — check 10's two remaining call sites, pinned SEPARATELY from ACTIONLINT_SH_CALL_SITES
@@ -1076,6 +1088,15 @@ RELEASE_PARITY_SH_CALL_SITES = (
 # the `case` arms and the `if` are conventionally indented, so a column-0 rule would reject the
 # real executing lines, while a substring rule would let a COMMENTED-OUT copy satisfy the pin.
 #
+# SMA-647 split the one assertion line into three (entries 3-5): the capture of the real run, the
+# guard on its exit status, and the match. The old line piped the real run into an early-exit grep
+# under `pipefail`, so a failing checker AND a SIGPIPE on the producer both made the release.yml
+# row pass (fail-OPEN). Deleting the status guard alone brings that back, so it is pinned too.
+# The `subjects_rc=0` default is folded into the capture line (`;`-joined) rather than living on
+# its own line: a standalone default line would be unpinned, and the mutation battery only
+# deletes lines already in this tuple — an unpinned default that gets deleted lets the guard stop
+# firing on a checker failure with nothing to catch it (review round 1 finding).
+#
 # The fifth entry is an ASSERTION line, added after the first four were measured to be
 # insufficient: deleting every `_expect` and `grep` row inside negative_control() left all four
 # byte-identical, so the control exited 0 having asserted nothing — the "control that actively
@@ -1085,7 +1106,9 @@ RELEASE_PARITY_SH_CALL_SITES = (
 WORKFLOW_CREDENTIALS_SH_CALL_SITES = (
     "--negative-control) MODE=negctl;   shift ;;",
     "negctl)   negative_control ;;",
-    "if bash \"$0\" 2>/dev/null | grep '^workflow-credentials: subjects:' | grep -q 'release.yml'; then",
+    "subjects_rc=0; subjects_out=\"$(bash \"$0\" 2>/dev/null)\" || subjects_rc=$?",
+    'if [ "$subjects_rc" -ne 0 ]; then',
+    "if grep -q '^workflow-credentials: subjects:.*release.yml' < <(printf '%s\\n' \"$subjects_out\"); then",
     'if [ "$failures" -gt 0 ]; then',
     "printf 'workflow-credentials negative control: %d row(s) failed\\n' \"$failures\" >&2",
 )
@@ -1137,13 +1160,13 @@ RELEASE_PLAN_SH_CALL_SITES = (
     "--negative-control)  MODE=negctl; shift ;;",
     "output)   github_output ;;",
     "negctl)   require_uv; negative_control ;;",
-    'if [ "$rc" -ne 0 ] || ! printf \'%s\\n\' "$out" | grep -qE \'^nothing_to_release=(true|false)$\'; then',
+    'if [ "$rc" -ne 0 ] || ! grep -qE \'^nothing_to_release=(true|false)$\' < <(printf \'%s\\n\' "$out"); then',
     "printf 'nothing_to_release=false\\n' >> \"${GITHUB_OUTPUT:-/dev/stdout}\"",
     "if ! grep -qx 'nothing_to_release=false' \"$nouv_out\"; then",
     'if [ "$mut_rc" != "3" ]; then',
     "printf 'release-plan negative control: %d row(s) failed\\n' \"$failures\" >&2",
     'if [ "$mut8_rc" != "3" ]; then',
-    "if ! printf '%s\\n' \"$mut8_out\" | grep -q \"a non-table \\[workspace\\] is inconclusive\"; then",
+    "if ! grep -q \"a non-table \\[workspace\\] is inconclusive\" < <(printf '%s\\n' \"$mut8_out\"); then",
 )
 
 
@@ -2500,6 +2523,15 @@ def self_test():
         '[ "${#CIREPORT_MENTIONS_ALLOWED[@]}" -ge 3 ] || infra "check 12: CIREPORT_MENTIONS_ALLOWED has ${#CIREPORT_MENTIONS_ALLOWED[@]} entries, expected at least 3"\n'
         # ...and Assertion B's own production call site (fix-wave Finding 1, review of SMA-597).
         'done < <(claude_md_block_verdict CLAUDE.md)\n'
+        # SMA-647 — check 13's corpus listing, its five corpus-floor lines and its production call
+        # site, at run.sh's top level, outside any function — column 0 like every entry above.
+        "git ls-files -- ':(glob)**/*.sh' ':(glob).github/workflows/*.yml' ':(glob).github/workflows/*.yaml' 'moon.yml' ':(glob)**/moon.yml' ':(glob).moon/**/*.yml' 'lefthook.yml' > \"$EE_LIST\"\n"
+        'grep -qxF \'ci/actionlint/run.sh\' "$EE_LIST" || infra "check 13: corpus floor: ci/actionlint/run.sh is not listed, so a pathspec stopped matching"\n'
+        'grep -qxF \'.github/workflows/ci.yml\' "$EE_LIST" || infra "check 13: corpus floor: .github/workflows/ci.yml is not listed, so a pathspec stopped matching"\n'
+        'grep -qxF \'moon.yml\' "$EE_LIST" || infra "check 13: corpus floor: moon.yml is not listed, so a pathspec stopped matching"\n'
+        'grep -qxF \'.moon/tasks.yml\' "$EE_LIST" || infra "check 13: corpus floor: .moon/tasks.yml is not listed, so a pathspec stopped matching"\n'
+        'grep -qxF \'ops/nats/check-subjects.sh\' "$EE_LIST" || infra "check 13: corpus floor: ops/nats/check-subjects.sh is not listed, so a pathspec stopped matching"\n'
+        'done < <(early_exit_reader_verdict "$EE_LIST")\n'
     )
     wired_release_parity = (
         '    --negative-control) NEGATIVE=1; shift ;;\n'
@@ -2516,10 +2548,13 @@ def self_test():
     # file indents these lines, so the stripped-whole-line rule is exercised on realistic text
     # rather than on a column-0 idealisation the production file never produces.
     wired_workflow_credentials = (
-        # The assertion line (SMA-593 F1). Indented in the real script, so it also exercises the
-        # stripped-whole-line matching this haystack uses.
-        '  if bash "$0" 2>/dev/null | grep \'^workflow-credentials: subjects:\' '
-        "| grep -q 'release.yml'; then\n"
+        # The assertion lines (SMA-593 F1; split into capture, status guard and match by SMA-647).
+        # Indented in the real script, so they also exercise the stripped-whole-line matching this
+        # haystack uses.
+        '  subjects_rc=0; subjects_out="$(bash "$0" 2>/dev/null)" || subjects_rc=$?\n'
+        '  if [ "$subjects_rc" -ne 0 ]; then\n'
+        "  if grep -q '^workflow-credentials: subjects:.*release.yml' "
+        "< <(printf '%s\\n' \"$subjects_out\"); then\n"
         '  if [ "$failures" -gt 0 ]; then\n'
         "    printf 'workflow-credentials negative control: %d row(s) failed\\n' \"$failures\" >&2\n"
         '    exit 1\n'
@@ -2786,6 +2821,34 @@ def self_test():
     if not check_self_invocation(wired, scripts, indented_rg_rc_check, wired_release_parity, wired_workflow_credentials, wired_release_plan, wired_ruff, wired_next_public_free):
         failures.append(
             "check_self_invocation: an INDENTED check-10 exit-2 routing satisfied the column-0 pin"
+        )
+    # SMA-647 — check 13's seven column-0 lines, each deleted in turn (the deletion case), and its
+    # production call INDENTED (the indentation case), mirroring the check-8d pair above. Derived
+    # from the registry by the one token the seven share, with the count asserted, so an entry
+    # dropped from ACTIONLINT_SH_CALL_SITES reds here as well.
+    _ee_sites = [site for site in ACTIONLINT_SH_CALL_SITES if '"$EE_LIST"' in site]
+    if len(_ee_sites) != 7:
+        failures.append(
+            f"check_self_invocation: expected 7 check-13 entries in ACTIONLINT_SH_CALL_SITES, "
+            f"found {len(_ee_sites)}"
+        )
+    for _ee_site in _ee_sites:
+        _ee_broken = wired_actionlint.replace(f"{_ee_site}\n", "")
+        if _ee_broken == wired_actionlint:
+            failures.append(
+                f"check_self_invocation: wired_actionlint lacks the check-13 line {_ee_site!r}"
+            )
+        elif not check_self_invocation(wired, scripts, _ee_broken, wired_release_parity, wired_workflow_credentials, wired_release_plan, wired_ruff, wired_next_public_free):
+            failures.append(
+                f"check_self_invocation: missed a deleted check-13 line {_ee_site!r}"
+            )
+    indented_check13_call = wired_actionlint.replace(
+        'done < <(early_exit_reader_verdict "$EE_LIST")\n',
+        '  done < <(early_exit_reader_verdict "$EE_LIST")\n',
+    )
+    if not check_self_invocation(wired, scripts, indented_check13_call, wired_release_parity, wired_workflow_credentials, wired_release_plan, wired_ruff, wired_next_public_free):
+        failures.append(
+            "check_self_invocation: an INDENTED check-13 call site satisfied the column-0 pin"
         )
     # Contamination cases, THREE of them (SMA-542 review finding I1, plus a round-2 addition). The
     # obvious "swap the two texts wholesale" version tried first passed unconditionally, because it

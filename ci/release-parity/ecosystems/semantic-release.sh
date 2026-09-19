@@ -31,8 +31,8 @@ _SR_UI_CFG="$_SR_TS/packages/paigasus-ui/.releaserc.json"
 # 1.x column is asserted) this MUST consume expected_1x / compute major-of-baseline.
 ecosystem::expected() { # id subject footer expected_0x expected_1x discr
   local subject="$2" footer="$3" expected_0x="$4"
-  if printf '%s' "$subject" | grep -qE '^[a-z]+(\([^)]*\))?!:' \
-     || printf '%s' "$footer" | grep -q 'BREAKING CHANGE'; then
+  if grep -qE '^[a-z]+(\([^)]*\))?!:' < <(printf '%s' "$subject") \
+     || grep -q 'BREAKING CHANGE' < <(printf '%s' "$footer"); then
     printf '1.0.0'
   else
     printf '%s' "$expected_0x"

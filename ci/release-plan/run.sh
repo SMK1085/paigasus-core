@@ -80,7 +80,7 @@ github_output() {
   out="$(uv run --locked --project "$HERE" --python '>=3.12' python3 \
     "$HERE/release_plan.py" --event-name "${GITHUB_EVENT_NAME:-}" "$REPO_ROOT" 2>&1)" || rc=$?
   printf '%s\n' "$out"
-  if [ "$rc" -ne 0 ] || ! printf '%s\n' "$out" | grep -qE '^nothing_to_release=(true|false)$'; then
+  if [ "$rc" -ne 0 ] || ! grep -qE '^nothing_to_release=(true|false)$' < <(printf '%s\n' "$out"); then
     printf '::warning::release-plan could not decide (rc=%s) — building, which is the fail-safe direction\n' "$rc"
     printf 'nothing_to_release=false\n' >> "${GITHUB_OUTPUT:-/dev/stdout}"
     exit 0
@@ -184,7 +184,7 @@ negative_control() {
   git -C "$tmp/synthetic-true" tag "a-v1.0.0"
   out="$(uv run --locked --project "$HERE" --python '>=3.12' python3 "$HERE/release_plan.py" \
     --event-name push "$tmp/synthetic-true" 2>&1)" || true
-  if ! printf '%s\n' "$out" | grep -q '^nothing_to_release=true$'; then
+  if ! grep -q '^nothing_to_release=true$' < <(printf '%s\n' "$out"); then
     printf '  FAIL a synthetic tree with every tag already cut did not print nothing_to_release=true\n' >&2
     printf '  --- output ---\n%s\n' "$out" >&2
     failures=$((failures + 1))
@@ -199,7 +199,7 @@ negative_control() {
   git -C "$tmp/synthetic-false" tag "a-v0.9.0"
   out="$(uv run --locked --project "$HERE" --python '>=3.12' python3 "$HERE/release_plan.py" \
     --event-name push "$tmp/synthetic-false" 2>&1)" || true
-  if ! printf '%s\n' "$out" | grep -q '^nothing_to_release=false$'; then
+  if ! grep -q '^nothing_to_release=false$' < <(printf '%s\n' "$out"); then
     printf '  FAIL a synthetic tree with a missing tag did not print nothing_to_release=false\n' >&2
     printf '  --- output ---\n%s\n' "$out" >&2
     failures=$((failures + 1))
@@ -338,7 +338,7 @@ negative_control() {
     printf '       loop in self_test() no longer evaluates its rows\n' >&2
     failures=$((failures + 1))
   fi
-  if ! printf '%s\n' "$mut8_out" | grep -q "a non-table \[workspace\] is inconclusive"; then
+  if ! grep -q "a non-table \[workspace\] is inconclusive" < <(printf '%s\n' "$mut8_out"); then
     printf '  FAIL the mutant exited 3 without reporting the non-table [workspace] row — the\n' >&2
     printf '       exit code came from somewhere else (the arity floor, most likely)\n' >&2
     printf '  --- mutant output ---\n%s\n' "$mut8_out" >&2

@@ -1,0 +1,23 @@
+# SPDX-License-Identifier: Apache-2.0
+# SMA-647 check 13 fixture, read by early_exit_reader_self_test: no line below fires.
+grep -qF -- "$lit" < <(printf '%s' "$block")
+out="$(producer)" || rc=$?
+if grep -q x < <(printf '%s\n' "$out"); then
+printf '%s\n' "$v" | sed -n 1p | cut -d: -f1
+otool -l "$so" | awk '/X/&&!d{v=$2; d=1} END{print v}'
+false || grep -q x file
+cmd |& tee log
+printf '%s\n' "$v" | xargs grep -q x
+grep -E 'a|head' file
+# printf '%s' "$v" | grep -q x
+    # an indented comment | head -1
+printf '%s' "$v" | grep -c x
+printf '%s' "$v" | grep -o x | tr -d y
+printf '%s' "$v" | headline
+printf '%s' "$v" | awk '{print $1}'
+cmd | sort | tail -n 1
+grep '^if:' | sed -n '1s/^if:[[:space:]]*//p'
+        run: |
+          head -1 file
+      - |
+        grep -q x file
