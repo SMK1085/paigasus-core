@@ -895,6 +895,11 @@ moon ci :build :test :test-e2e :lint :fmt :typecheck --base origin/main > "$SP/m
 
 Record the rc. On failure, follow CLAUDE.md's diagnosis procedure (copy `.moon/cache/ciReport.json` and the failed task's state directory to `$SP` BEFORE anything else re-runs). A failure in a gate that CLAUDE.md records as bash-version or pipe-capacity limited on this host is not a finding: record it as such.
 
+<!-- moon-diagnosis:ok -->
+<!-- This file references ciReport.json only to point at CLAUDE.md's procedure; it does not
+     restate or supersede it. `ci/actionlint/run.sh` check 12 requires this marker on any file
+     naming ciReport.json. -->
+
 - [ ] **Step 5: Append § 10.2 to the spec**
 
 ```markdown

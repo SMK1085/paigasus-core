@@ -1100,15 +1100,23 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   setup, and `React never hydrated` in 16 of 17 specs of the other. Each app's `build` script now
   stages the standalone tree (`.next/static`, and `public/` if it exists), and the setups only
   check it through `tests/e2e/support/staged-build.ts`. Two tests pin this in each app's `test`
-  task: `tests/unit/e2e-read-only.test.ts` is an allowlist scan that reds any `fs` write form in
-  `tests/e2e/**` or `playwright.config.ts` (its `ALLOWED_EXCEPTIONS` ships empty), and
-  `tests/standalone-staging.test.ts` reds if `build` stops staging. Both `test` tasks list
-  `moon.yml` as an input, because without it a `moon.yml`-only edit selects neither. After a bare
-  `pnpm exec next build` the staged tree is gone (Next's `cleanDistDir`), and `moon run
-  <app>-ts:build` without `--force` sees an unchanged hash and skips; use `--force`. Residuals:
-  the scan does not see a write through `child_process` or through a helper outside
-  `tests/e2e/`; a Moon cache-hit restore MERGES into `.next`, so a deleted stable-named `public/`
-  file can survive; nothing asserts that a third console app has these tests.
+  task: `tests/unit/e2e-read-only.test.ts` is an allowlist scan that reds any `fs` write form
+  (`require`, a dynamic `import(...)` and `process.getBuiltinModule(...)` included — the latter
+  two also catch a plain backtick specifier, not only `'`/`"`) in `tests/e2e/**` or
+  `playwright.config.ts` (its `ALLOWED_EXCEPTIONS` ships empty), AND separately extracts the
+  `test-e2e` task's own `script:` block from `moon.yml` by indentation and reds it on a
+  filesystem-mutating command word or a `>`/`>>` redirection — because a copy or delete added
+  directly to that script imports no `fs` module at all, so the allowlist alone cannot see it —
+  and also resolves `playwright.config.ts`'s `globalSetup`/`globalTeardown` and reds if either
+  points outside `tests/e2e/`. `tests/standalone-staging.test.ts` reds if `build` stops staging.
+  Both `test` tasks list `moon.yml` as an input, because without it a `moon.yml`-only edit selects
+  neither — a cost of this: EVERY edit to an app's `moon.yml`, comment-only included, now selects
+  that app's whole `test` task. After a bare `pnpm exec next build` the staged tree is gone (Next's
+  `cleanDistDir`), and `moon run <app>-ts:build` without `--force` sees an unchanged hash and
+  skips; use `--force`. Residuals: the scan does not see a write through `child_process` or
+  through a helper outside `tests/e2e/`; a Moon cache-hit restore MERGES into `.next`, so a
+  deleted stable-named `public/` file can survive; nothing asserts that a third console app has
+  these tests.
 - The `ts` project's `sources` group names app code directories BY HAND (`apps/*/app/**/*`,
   `apps/*/lib/**/*`, `apps/*/proxy.ts`). `ts:lint` runs `eslint .` over the whole tree, but Moon
   re-runs it only for a file in its `sources` or `tests` group (or one of its config inputs), so a
