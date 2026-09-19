@@ -101,8 +101,9 @@ deadline: node-redis destroys the socket when nothing is read or written for
 that many milliseconds, and any read OR write resets it. So it bounds a command
 in flight only while the socket is otherwise silent. Under steady traffic each
 new write moves the deadline, and a Redis that accepts commands and never
-replies can go unnoticed (SMA-650). Both must be positive, finite numbers of
-milliseconds.
+replies can go unnoticed. A consumer needs its own per-operation deadline;
+`@paigasus/console-core`'s `withOperationDeadline` is the worked example
+(SMA-650). Both must be positive, finite numbers of milliseconds.
 
 Because `socketTimeout` also fires on a quiet, healthy connection, two more
 options are required. `pingInterval` keeps an idle socket alive: it must be a
