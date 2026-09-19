@@ -2,20 +2,21 @@
 //
 // Runs ONCE, in the Playwright runner process, before any worker starts. It does not start servers:
 // see playwright.config.ts. The build comes from `iam-console-ts:build` (the Moon task's deps).
-import { cpSync, existsSync, rmSync } from 'node:fs';
+//
+// This setup only CHECKS the build tree; it never writes into it (SMA-655). The standalone output
+// has no .next/static of its own (measured, SMA-510), so `build` stages it (moon.yml). An e2e
+// setup must not do that copy: gateway-console's two-zone tier serves from this same tree, Moon
+// runs the two tiers at the same time, and a delete-then-copy here wiped the tree under the other
+// tier. tests/unit/e2e-read-only.test.ts reds any fs write under tests/e2e/.
+import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { APP_DIR, STANDALONE_APP_DIR } from './support/paths';
+import { assertStagedBuild } from './support/staged-build';
 
 export default function globalSetup(): void {
   const serverJs = path.join(STANDALONE_APP_DIR, 'server.js');
   if (!existsSync(serverJs)) {
     throw new Error(`the standalone server is missing at ${serverJs}. Run \`moon run iam-console-ts:build\` first (iam-console-ts:test-e2e depends on it).`);
   }
-  // The standalone tree has NO .next/static (measured, SMA-510). Without this copy every client
-  // chunk is a 404, nothing hydrates, and no Server Action can run.
-  const staticTarget = path.join(STANDALONE_APP_DIR, '.next', 'static');
-  rmSync(staticTarget, { recursive: true, force: true });
-  cpSync(path.join(APP_DIR, '.next', 'static'), staticTarget, { recursive: true });
-  const publicDir = path.join(APP_DIR, 'public');
-  if (existsSync(publicDir)) cpSync(publicDir, path.join(STANDALONE_APP_DIR, 'public'), { recursive: true });
+  assertStagedBuild(APP_DIR, STANDALONE_APP_DIR, 'iam-console-ts:build');
 }
