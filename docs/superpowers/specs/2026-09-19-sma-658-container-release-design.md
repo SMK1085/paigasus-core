@@ -5,8 +5,9 @@
   only what it publishes), SMA-602 (V10, no publish credential), SMA-603 (`ci/release-plan/`).
 - **Status:** revision 2, after the adversarial challenge (verdict: NEEDS REWORK, 3 BLOCKER,
   9 MAJOR). Sven approved the three design sections of revision 1 in the brainstorm on 2026-09-19.
-  Revision 2 changes the job graph (§ 4) and the recovery model (§ 5). It waits for his review
-  (GATE 1).
+  Revision 2 changes the job graph (§ 4) and the recovery model (§ 5). Sven approved revision 2 at
+  GATE 1 on 2026-09-19, with D5 = V-a (a version bump by hand) and the two-PR rollout (§ 10). The
+  ADR-0011 amendment is drafted in Notion as "Proposed" and waits for his review (§ 13).
 - **Approach chosen by Sven:** A — new jobs in `release.yml` (option 1 of 3, 2026-09-19).
 
 ## 1. Problem
