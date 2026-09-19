@@ -10,6 +10,10 @@
 // test cannot see the organizations of an earlier test. R6 uses it to prove that the action
 // refreshes the page (P5b-16).
 //
+// SMA-629: three outbox handlers are in the default set too, because every override key must exist
+// there. They hold two seeded dead letters with RFC 4122 ids, per worldHandlers() call; replay and
+// discard remove the entry, and an unknown id answers NotFound, as IAM does.
+//
 // PRNs are literal strings: @paigasus/console-core's prn-tenancy.ts imports server-only, which
 // throws under Playwright. NodeStatus comes from @paigasus/sdk's guard-free ./iam/types entry, and
 // IamAction is a TYPE import, which the compiler erases (SMA-630).
@@ -74,6 +78,16 @@ export const ALL_ACTIONS = [
 export type Descriptor = { service: string; version: string; capabilities: string[] } | { status: number };
 export const DEFAULT_DESCRIPTOR: Descriptor = { service: 'iam', version: '0.0.0-e2e', capabilities: ['iam.authz.cedar', 'iam.audit'] };
 
+export const DEAD_LETTER_A_ID = '0190a1f0-0000-7000-8000-0000000000d1';
+export const DEAD_LETTER_B_ID = '0190a1f0-0000-7000-8000-0000000000d2';
+
+/**
+ * An IAM that serves OutboxService (SMA-629). The FULL Descriptor shape — service, version and
+ * capabilities — because the type needs all three. DEFAULT_DESCRIPTOR keeps its two keys, so a
+ * test that does not ask for this one meets an older IAM (AC 2).
+ */
+export const DEAD_LETTERS_DESCRIPTOR: Descriptor = { service: 'iam', version: '0.0.0-e2e', capabilities: ['iam.authz.cedar', 'iam.audit', 'iam.deadletters'] };
+
 export type WorldOptions = {
   /** The actions IsAuthorized allows. Default: all of them. */
   readonly allow?: readonly string[];
@@ -86,6 +100,59 @@ export type WorldOptions = {
 };
 
 const notFound = (): Error => denial({ code: Code.NotFound, reason: 'not-found' });
+
+type DeadLetterFixture = {
+  id: string;
+  occurredAt: { seconds: bigint; nanos: number };
+  eventType: string;
+  schemaVersion: number;
+  aggregatePrn: string;
+  actorPrn: string;
+  payload: string;
+  correlationId: string;
+  attempts: number;
+  parkedAt: { seconds: bigint; nanos: number };
+  lastError: string;
+};
+
+function seededDeadLetters(): Map<string, DeadLetterFixture> {
+  const entries: DeadLetterFixture[] = [
+    {
+      id: DEAD_LETTER_A_ID,
+      occurredAt: { seconds: 1_788_000_000n, nanos: 0 },
+      eventType: 'iam.team.created',
+      schemaVersion: 1,
+      aggregatePrn: TEAM_PRN,
+      actorPrn: PRINCIPAL_PRN,
+      payload: '{"slug":"platform"}',
+      correlationId: 'corr-dead-letter-a',
+      attempts: 5,
+      parkedAt: { seconds: 1_788_000_300n, nanos: 0 },
+      lastError: 'nats: no responders available for request',
+    },
+    {
+      id: DEAD_LETTER_B_ID,
+      occurredAt: { seconds: 1_788_000_600n, nanos: 0 },
+      eventType: 'iam.project.created',
+      schemaVersion: 1,
+      aggregatePrn: PROJECT_PRN,
+      actorPrn: '',
+      payload: '{"slug":"gateway"}',
+      correlationId: '',
+      attempts: 5,
+      parkedAt: { seconds: 1_788_000_900n, nanos: 0 },
+      lastError: '',
+    },
+  ];
+  return new Map(entries.map((entry) => [entry.id, entry]));
+}
+
+function takeDeadLetter(deadLetters: Map<string, DeadLetterFixture>, id: string): DeadLetterFixture {
+  const entry = deadLetters.get(id);
+  if (entry === undefined) throw notFound();
+  deadLetters.delete(id);
+  return entry;
+}
 
 /**
  * Every scripted node is active. Without a status a node reads as UNSPECIFIED, and every row and
@@ -131,6 +198,7 @@ export function worldHandlers(options: WorldOptions = {}): FakeIamHandlers {
   const allow = new Set<string>(options.allow ?? ALL_ACTIONS);
   const withScopes = options.memberships ?? true;
   const created: { prn: string; slug: string; name: string; status: NodeStatus; effectiveStatus: NodeStatus }[] = [];
+  const deadLetters = seededDeadLetters();
   return {
     'authn.introspect': () => ({
       principalPrn: PRINCIPAL_PRN,
@@ -198,6 +266,13 @@ export function worldHandlers(options: WorldOptions = {}): FakeIamHandlers {
       ],
       nextCursor: '',
     }),
+    // SMA-629. IAM orders by id DESCENDING and matches event_type exactly.
+    'outbox.listDeadLetters': (req: { eventType: string }) => ({
+      entries: [...deadLetters.values()].filter((entry) => req.eventType === '' || entry.eventType === req.eventType).sort((a, b) => (a.id < b.id ? 1 : -1)),
+      nextCursor: '',
+    }),
+    'outbox.replayDeadLetter': (req: { id: string }) => ({ entry: takeDeadLetter(deadLetters, req.id) }),
+    'outbox.discardDeadLetter': (req: { id: string }) => ({ entry: takeDeadLetter(deadLetters, req.id) }),
     ...options.overrides,
   };
 }
