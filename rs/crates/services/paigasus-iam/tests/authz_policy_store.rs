@@ -153,7 +153,6 @@ async fn wait_until_blocked_by<T>(db: &DatabaseConnection, blocker_pid: i32, rac
 /// finished, B's own result is part of the message (through `describe`, since a racer's output
 /// can hold a non-`Debug` transaction), so a `DbErr` or a panic inside B is not hidden behind
 /// "finished".
-#[allow(dead_code)] // SMA-659: used from Task 2
 async fn expect_racer_blocked<T>(db: &DatabaseConnection, blocker_pid: i32, racer: &mut JoinHandle<T>, describe: impl FnOnce(&T) -> String) {
     let Err(reason) = wait_until_blocked_by(db, blocker_pid, racer, RACER_BLOCK_BUDGET).await else {
         return;
@@ -407,8 +406,8 @@ async fn concurrent_put_of_the_same_new_policy_id_is_idempotent_not_a_conflict()
 /// deterministically instead: it holds racer A's INSERT open in an UNCOMMITTED transaction
 /// (so B's existence check still sees no row — MVCC visibility — and B also attempts an
 /// INSERT, which Postgres blocks on A's uncommitted row), then commits A once B's `put` (the
-/// real, unmodified production method) is in flight, forcing B's blocked INSERT to resolve
-/// into a genuine unique-constraint violation.
+/// real, unmodified production method) is observed blocked on it (`expect_racer_blocked`),
+/// forcing B's blocked INSERT to resolve into a genuine unique-constraint violation.
 #[tokio::test]
 async fn concurrent_put_of_the_same_new_policy_id_with_different_content_is_a_conflict() {
     let Some((_pg, db)) = support::start_migrated_postgres().await else { return };
@@ -438,16 +437,19 @@ async fn concurrent_put_of_the_same_new_policy_id_with_different_content_is_a_co
     .insert(&txn_a)
     .await
     .unwrap();
+    let pid_a = backend_pid(&txn_a).await;
 
     // Racer B: the real `PgPolicyStore::put`, spawned so it runs concurrently with the test
     // body. Its existence check sees no row yet (A's insert is uncommitted) and it attempts
     // its own INSERT, which Postgres blocks pending A's transaction outcome.
     let store_b = PgPolicyStore::new(db.clone(), Generations::memory());
-    let put_b = tokio::spawn(async move { store_b.put(&doc_b).await });
+    let mut put_b = tokio::spawn(async move { store_b.put(&doc_b).await });
 
-    // Give racer B's task time to actually reach (and block inside) its own INSERT before A
-    // commits — comfortably longer than a local Postgres round-trip even under load.
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    // Commit A only once B is provably blocked INSIDE its INSERT on A's uncommitted row — past its
+    // existence check, so its INSERT must resolve into a real unique violation. A fixed sleep here
+    // only hoped for that and failed under CI load (SMA-659): a late B saw A's committed row and
+    // took the UPDATE path instead.
+    expect_racer_blocked(&db, pid_a, &mut put_b, |r| format!("{r:?}")).await;
 
     txn_a.commit().await.unwrap();
 
@@ -516,6 +518,7 @@ async fn put_in_absorbs_a_same_content_savepoint_conflict_and_the_outer_txn_stay
     .insert(&txn_a)
     .await
     .unwrap();
+    let pid_a = backend_pid(&txn_a).await;
 
     // Racer B: `put_in` on a caller-owned UoW transaction, spawned to run concurrently, with
     // the SAME content as A.
@@ -524,15 +527,15 @@ async fn put_in_absorbs_a_same_content_savepoint_conflict_and_the_outer_txn_stay
     let store_b = store.clone();
     let doc_b = doc.clone();
     let uow_b = SeaOrmUnitOfWork::new(db.clone());
-    let put_b = tokio::spawn(async move {
+    let mut put_b = tokio::spawn(async move {
         let tx = uow_b.begin().await.expect("begin");
         let outcome = store_b.put_in(&*tx, &doc_b).await;
         (tx, outcome)
     });
 
-    // Give racer B's task time to actually reach (and block inside) its own savepoint INSERT
-    // before A commits — comfortably longer than a local Postgres round-trip even under load.
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    // Commit A only once B is provably blocked INSIDE its savepoint INSERT on A's uncommitted row
+    // (SMA-659 — a fixed sleep here only hoped for that, and a late B took the UPDATE path).
+    expect_racer_blocked(&db, pid_a, &mut put_b, |(_, outcome)| format!("{outcome:?}")).await;
     txn_a.commit().await.unwrap();
 
     let (tx_b, outcome_b) = put_b.await.unwrap();
@@ -563,8 +566,9 @@ async fn put_in_absorbs_a_same_content_savepoint_conflict_and_the_outer_txn_stay
 /// `concurrent_put_of_the_same_new_policy_id_with_different_content_is_a_conflict` above:
 /// holds racer A's INSERT open uncommitted (so racer B's existence check sees no row and
 /// itself attempts an INSERT, which Postgres blocks on A's uncommitted row) inside racer B's
-/// own savepoint, then commits A once B's `put_in` is in flight, forcing B's blocked INSERT
-/// to resolve into a genuine unique-constraint violation.
+/// own savepoint, then commits A once B's `put_in` is observed blocked on it
+/// (`expect_racer_blocked`), forcing B's blocked INSERT to resolve into a genuine
+/// unique-constraint violation.
 #[tokio::test]
 async fn put_in_surfaces_a_different_content_savepoint_conflict_and_the_outer_txn_stays_usable() {
     let Some((_pg, db)) = support::start_migrated_postgres().await else { return };
@@ -593,21 +597,22 @@ async fn put_in_surfaces_a_different_content_savepoint_conflict_and_the_outer_tx
     .insert(&txn_a)
     .await
     .unwrap();
+    let pid_a = backend_pid(&txn_a).await;
 
     // Racer B: `put_in` on a caller-owned UoW transaction, spawned to run concurrently.
     let gens = Generations::memory();
     let store = PgPolicyStore::new(db.clone(), gens);
     let store_b = store.clone();
     let uow_b = SeaOrmUnitOfWork::new(db.clone());
-    let put_b = tokio::spawn(async move {
+    let mut put_b = tokio::spawn(async move {
         let tx = uow_b.begin().await.expect("begin");
         let outcome = store_b.put_in(&*tx, &doc_b).await;
         (tx, outcome)
     });
 
-    // Give racer B's task time to actually reach (and block inside) its own savepoint INSERT
-    // before A commits — comfortably longer than a local Postgres round-trip even under load.
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    // Commit A only once B is provably blocked INSIDE its savepoint INSERT on A's uncommitted row
+    // (SMA-659 — a fixed sleep here only hoped for that, and a late B took the UPDATE path).
+    expect_racer_blocked(&db, pid_a, &mut put_b, |(_, outcome)| format!("{outcome:?}")).await;
     txn_a.commit().await.unwrap();
 
     let (tx_b, outcome_b) = put_b.await.unwrap();
