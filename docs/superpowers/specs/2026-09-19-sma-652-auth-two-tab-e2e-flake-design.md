@@ -60,10 +60,10 @@ URL. With a valid SSO session, Keycloak can then send that tab to `/e2e/auth/cal
 own `state`. The primary callback already cleared every txn cookie (`src/http/routes.ts:310-314`),
 so that callback fails with `txn_missing`. `src/server.ts:111-114` redirects it to `/auth/login`,
 and `handleLogin` deletes the presented session and clears `__Host-pgs_sid`
-(`src/http/routes.ts:188-196`). The investigation saw 0 such callbacks in 90 runs. Closing a tab
-stops navigation of the tab under test. It does not stop an OPEN tab from changing shared state
-first: the probe (spec § 4 step 3) saw 0 secondary auth requests in 20 runs, and the test keeps
-the tabs open; the checks fail loudly if the path occurs. § 3.3 records these requests.
+(`src/http/routes.ts:188-196`). The investigation saw 0 such callbacks in 90 runs. An open tab
+could in principle change shared state before any later check runs: the probe (spec § 4 step 3)
+saw 0 secondary auth requests in 20 runs, and the test keeps the tabs open regardless; the checks
+fail loudly if the path occurs. § 3.3 records these requests.
 
 ## 3. Design
 
@@ -104,16 +104,25 @@ signature becomes `async ({ context }, testInfo) => …`.
      boolean (`expect(sidNow === sidBefore, '…').toBe(true)`), so a failure prints no value.
 
 Why the one-hop and sid checks are needed: the heading and the URL cannot tell "the shared cookie
-worked" apart from "a silent SSO re-login". Without a valid sid, the fresh tab goes `/guarded` →
-`/auth/login` → Keycloak, which finds the valid `KEYCLOAK_IDENTITY` and redirects at once →
-`/auth/callback` → a NEW session → `/guarded` with the heading. The one-hop check and the sid
-check both fail on that path, and neither needs the Keycloak origin (its host port is random).
+worked" apart from "a re-login". MEASURED (Task 3's negative control, `task-3-report.md`): with
+`__Host-pgs_sid` cleared, the fresh tab's redirect chain stopped at Keycloak's own login form —
+`/guarded` → `/auth/login` → Keycloak `200` (its login page), with no further redirect back
+through `/auth/callback` — so the heading did NOT show, and the one-hop check failed as designed,
+printing the multi-hop chain and the recorded `fresh /e2e/auth/login` request.
 
-Why no other document can navigate the fresh tab: a closed tab has no document. `newPage()` gives
-a page with no opener. Keycloak's origin (https, a mapped port) differs from the fixture origin
-(http, port 4319), so a `BroadcastChannel` or `storage` event from a Keycloak page cannot reach
-it. The fixture pages contain no script. So the fix does not depend on the content of Keycloak's
-scripts.
+Reasoned, not reached in that run: if Keycloak still held a valid SSO session for the context, it
+would skip its login form and redirect straight through `/auth/callback` to a NEW session, and the
+heading WOULD show — a silent SSO re-login. That is the worst case the one-hop and sid checks
+exist for. It was likely not reached in the control run because the stale tab's own reload had
+already expired `KEYCLOAK_IDENTITY` / `KEYCLOAK_SESSION` (§ 2 step 3). Either way — form or silent
+re-login — the one-hop check and the sid check both fail on the failure path, and neither needs
+the Keycloak origin (its host port is random).
+
+Why no other document can navigate the fresh tab: `newPage()` gives a page with no opener, so no
+existing document holds a reference to it. Keycloak's origin (https, a mapped port) differs from
+the fixture origin (http, port 4319), so a `BroadcastChannel` or `storage` event from a Keycloak
+page cannot reach it. The fixture pages contain no script. So the fix does not depend on the
+content of Keycloak's scripts, or on the Keycloak tabs ever being closed.
 
 The property proved: a second tab in the same browser context reaches the authenticated state
 through the shared `__Host-pgs_sid`, with no further login. A tab's identity is not part of the
@@ -148,12 +157,13 @@ artifact. So:
 
 ### 3.4 Comments
 
-Rewrite the comment block at lines 107–118 and 127–128. Keep the existing explanation of the
+Rewrite the SMA-652 comment block above `attemptKeycloakLogin`'s call and the try-block comment in
+step 6. Keep the existing explanation of the
 `KC_RESTART` / `AUTH_SESSION_ID` race, because it justifies the "whichever tab is still valid"
 logic. Add the timer mechanism (§ 2 steps 1–3) and the polling path, with the Keycloak file names
 and the note "measured on 26.4.7; `global-setup.ts` uses the floating tag `keycloak:26.4`". Say
-why the test closes tabs instead of reusing them, and why the one-hop and sid checks exist. Keep
-it short: this doc holds the evidence.
+why the test never reuses or closes a tab, and why the one-hop and sid checks exist. Keep it
+short: this doc holds the evidence.
 
 ## 4. Verification
 
@@ -170,8 +180,12 @@ it short: this doc holds the evidence.
      classification. The after-fix guarantee for the timer is STRUCTURAL (the document no longer
      exists); the batch is a check of the implementation, not the proof.
 2. **Negative control for the new checks.** Temporarily run
-   `context.clearCookies({ name: SESSION_COOKIE_NAME })` before `fresh.goto`. Expect the heading to
-   still show (silent SSO) and the one-hop and sid checks to FAIL. Record the output. Revert.
+   `context.clearCookies({ name: SESSION_COOKIE_NAME })` before `fresh.goto`. MEASURED (Task 3):
+   the chain stopped at Keycloak's own login form — no valid SSO session was left over from the
+   stale tab's reload — so the heading did NOT show, and the one-hop check failed as designed,
+   printing the multi-hop chain and the `fresh /e2e/auth/login` request. A silent SSO re-login,
+   where Keycloak still holds a session and the heading WOULD show, is the reasoned worst case
+   these checks exist for; it was not reached in this run. Record the output. Revert.
 3. **Polling-path probe.** Temporarily keep the secondary open for 2.0–2.5 s after the primary
    shows the heading (past its first poll). Run at least 20 times and count `/auth/login` and
    `/auth/callback` requests from the secondary. Report the count. If the path is real, the new
@@ -200,8 +214,8 @@ it short: this doc holds the evidence.
 - **Product question (for Sven):** can a real user hit the polling path in § 2? A second tab that
   sits on the Keycloak login form while the first tab signs in could reach `/auth/callback`, get
   `txn_missing`, go to `/auth/login`, and so DELETE the first tab's session, followed by a silent
-  SSO re-login. This is not measured. If § 4 step 3 shows it, or Sven wants it examined anyway, it
-  becomes its own Linear issue.
+  SSO re-login. The probe (§ 4 step 3) saw 0 secondary auth requests in 20 runs. Per Sven, this
+  count did not warrant its own Linear issue.
 - Update the auto-memory entry `paigasus-auth-two-tab-e2e-flake` with the root cause and the fix.
 - Search the other e2e suites (`logout.spec.ts`, `recovery.spec.ts`, both console zones) for a
   Keycloak or IdP login page that stays open while ANOTHER page in the same context completes a
@@ -249,4 +263,15 @@ after batches (5 failures in 60) do not reproduce it even once; they show a dist
 the close hang — which is why round 1 removes both `close()` calls instead of keeping them. The
 isolated close-hang measurement (6 in 60) is the more direct one, since it forces the closing
 window specifically rather than relying on the reload race also landing there.
+
+### Fix round 1: Task 3b, the committed no-close design (2026-09-19)
+
+| Batch | Runs | Failures | Notes |
+|---|---|---|---|
+| forced (`SMA652_TARGET_MS=1100`) | 80 | 0 | 7 of 80 runs saw the stale tab's reload fire AFTER the fresh-tab action had already begun — the exact ordering § 2 names as the failure trigger — and the test still passed on every one |
+| unforced | 40 | 0 | both tests, 20 runs each |
+
+This is the committed, no-close design: no `close()` call exists to hang, and the reload race no
+longer matters because no assertion depends on the reload's target tab at all — the proof runs on
+a separate, fresh page.
 

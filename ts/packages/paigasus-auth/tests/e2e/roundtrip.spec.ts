@@ -194,9 +194,9 @@ test('§ 9.2: two concurrent logins mint distinct txn cookies, and one completio
   pageLabels.set(fresh, 'fresh');
   const response = await fresh.goto(`${ZONE_BASE_PATH}/guarded`);
   try {
-    // The heading alone cannot tell the shared cookie apart from a SILENT SSO re-login
-    // (/guarded -> /auth/login -> Keycloak -> /auth/callback -> a NEW session -> /guarded). The
-    // one-hop check and the unchanged sid both fail on that path.
+    // The heading alone cannot tell the shared cookie apart from a re-login: if Keycloak still
+    // held an SSO session for the context, it would even skip its own form and land back on
+    // /guarded with a NEW sid. The one-hop and same-sid checks fail on every such path.
     expect(response !== null, 'the fresh tab navigation must produce a response').toBe(true);
     if (response === null) throw new Error('unreachable');
     expect(response.status()).toBe(200);
