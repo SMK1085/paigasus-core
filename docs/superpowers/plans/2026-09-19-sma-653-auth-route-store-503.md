@@ -249,7 +249,7 @@ describe('storeUnavailableResponse', () => {
     expect(res.headers.get('content-type')).toBe('text/html; charset=utf-8');
     expect(res.headers.get('referrer-policy')).toBe('no-referrer');
     expect(res.headers.get('content-security-policy')).toBe(STORE_UNAVAILABLE_CSP);
-    expect(STORE_UNAVAILABLE_CSP).toBe("default-src 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'");
+    expect(STORE_UNAVAILABLE_CSP).toBe("default-src 'none'; frame-ancestors 'none'; base-uri 'none'");
     expect(res.headers.getSetCookie()).toEqual([]);
     const body = await res.text();
     expect(body).toContain('<a href="/iam/auth/login">');
@@ -363,7 +363,7 @@ import { sidTag, type AuthLogger, type StoreUnavailableStage } from '../ports/lo
 
 export const RETRY_AFTER_SECONDS = 5;
 
-export const STORE_UNAVAILABLE_CSP = "default-src 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'";
+export const STORE_UNAVAILABLE_CSP = "default-src 'none'; frame-ancestors 'none'; base-uri 'none'";
 
 export type RetryAffordance = { kind: 'link'; href: string } | { kind: 'post'; action: string };
 
@@ -382,7 +382,7 @@ export function storeUnavailableResponse(retry: RetryAffordance): Response {
   const signOut = retry.kind === 'post';
   const heading = signOut ? 'Sign-out did not complete' : 'Sign-in is temporarily unavailable';
   const sentence = signOut
-    ? 'You are still signed in. The session service did not answer. Try again in a few seconds.'
+    ? 'The session service did not answer, so your session may still be active. Try again in a few seconds.'
     : 'The session service did not answer. Try again in a few seconds.';
   const control =
     retry.kind === 'post'
