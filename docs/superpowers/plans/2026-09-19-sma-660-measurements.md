@@ -1,6 +1,10 @@
 # SMA-660 measurements
 
-Every run used `PAIGASUS_REQUIRE_DOCKER=1` and `--retries 0`, from the worktree.
+Every run used `PAIGASUS_REQUIRE_DOCKER=1`, from the worktree. Every targeted verification run below
+also used `--retries 0`, so no mutation could be greened by a retry. The one exception is the
+whole-crate `moon run paigasus-iam-rs:test --force`, which deliberately ran under CI's own
+`retries = 2` budget because its purpose is to reproduce what CI does — which is why it reports one
+test as flaky rather than as a bare pass.
 
 ## The four measured query strings (spec V2)
 

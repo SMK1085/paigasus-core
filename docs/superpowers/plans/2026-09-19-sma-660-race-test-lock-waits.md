@@ -4,7 +4,7 @@
 
 **Goal:** Make four more `paigasus-iam` race tests wait on an observed lock rather than on a fixed sleep, and make the idempotent-`put` test assert that the absorb path ran.
 
-**Architecture:** SMA-659's `wait_until_blocked_by` helper moves from `tests/authz_policy_store.rs` to a new `tests/support/race.rs`, and its `pg_stat_activity` predicate gains a per-site `query_prefix` parameter. Six tests then call it: the three SMA-659 tests unchanged in behaviour, the rewritten absorb test, and the four sites that sleep today. The change is test-only — no production code ships in this branch.
+**Architecture:** SMA-659's `wait_until_blocked_by` helper moves from `tests/authz_policy_store.rs` to a new `tests/support/race.rs`, and its `pg_stat_activity` predicate gains a per-site `query_prefix` parameter. Eight call sites then use it: the three SMA-659 tests unchanged in behaviour, the rewritten absorb test, the four sites that sleep today — and, in the guard test, three direct calls that prove the predicate's terms bite. The change is test-only — no production code ships in this branch.
 
 **Tech Stack:** Rust (edition 2024), SeaORM, `tokio`, `cargo nextest`, Postgres 16 in Docker via testcontainers, Moon.
 
@@ -14,7 +14,7 @@
 
 - **Work in the worktree.** Everything below runs from `/Users/smaschek/dev/paigasus/paigasus-core/.claude/worktrees/sma-660-race-lock-waits`, on branch `feature/sma-660-race-test-lock-waits`. Do not `cd` to the main checkout.
 - **Every shell command starts with** `export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"` so `cargo nextest` and `moon` resolve to the repository-pinned tools.
-- **Every test run uses** `PAIGASUS_REQUIRE_DOCKER=1` and `--retries 0`. Without the first, a filtered run with no Docker daemon skips in silence and reads as a pass. Without the second, `rs/.config/nextest.toml`'s `retries = 2` can turn a failing mutation green.
+- **Every test run uses** `PAIGASUS_REQUIRE_DOCKER=1`, and every VERIFICATION run adds `--retries 0`. Without the first, a filtered run with no Docker daemon skips in silence and reads as a pass. Without the second, `rs/.config/nextest.toml`'s `retries = 2` can turn a failing mutation green. The one deliberate exception is Task 6's `moon run paigasus-iam-rs:test --force`, which exists to reproduce what CI does and therefore runs under CI's own retry budget — so its result must name any test that passed only on a retry, rather than reporting a bare pass.
 - **Docker must be running.** Every test in this plan starts a Postgres container. If the daemon is unreachable the run fails loudly, which is the intended behaviour, not a defect to work around.
 - **Every mutation must COMPILE.** This workspace denies warnings, so a mutation that leaves a binding unused or code unreachable dies at `rustc` (rc 101) instead of at the assertion it targets — and a compile failure proves only that warnings are denied, not that the test catches the defect. That is the claim this branch's pull request makes, so it must be demonstrated at the assertion. Measured three times on this plan: shadowing a parameter, adding an early `return`, and deleting a guard that leaves its binding unread all failed this way. If a mutation will not compile, adapt it (silence the binding with `_`, or make a condition unconditionally true) rather than accepting the compile error as the result.
 - **When a mutation's expected result is "exactly N tests fail", pass `--no-fail-fast`.** nextest cancels the remaining tests at the first failure by default, so without it the run stops looking and the claim is unprovable.
@@ -764,21 +764,12 @@ export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
 cd /Users/smaschek/dev/paigasus/paigasus-core/.claude/worktrees/sma-660-race-lock-waits/rs
 cargo fmt --check && cargo clippy -p paigasus-iam --all-targets -- -D warnings
 cd ..
-git status --short   # no src/ path may appear
-git add rs/crates/services/paigasus-iam/tests/tenancy_events_pg.rs
-git commit -m "$(cat <<'EOF'
-test(rs): make the two tenancy_events race tests wait for the racer to block (SMA-660)
-
-Both slept 300 ms and then asserted the racer had not finished, which is also
-true for a racer that never started. They now wait until pg_stat_activity shows
-the racer blocked by the peer inside its own locking read.
-
-Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
-EOF
-)"
+git status --short   # must be EMPTY: no src/ path, and no leftover mutation
+git log --oneline -1 # must still be your Step 5b commit
 ```
 
-If Step 8 left a `wip:` commit, squash it into this one with `git rebase -i` or `git reset --soft HEAD~1` before committing, so the branch carries no WIP commit.
+Do **not** commit again here. Step 5b already made this task's commit, and Steps 6-9 reverted every mutation, so the tree is unchanged since then — a second `git commit` would have nothing to record.
+
 
 ---
 
@@ -895,19 +886,11 @@ export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
 cd /Users/smaschek/dev/paigasus/paigasus-core/.claude/worktrees/sma-660-race-lock-waits/rs
 cargo fmt --check && cargo clippy -p paigasus-iam --all-targets -- -D warnings
 cd ..
-git status --short   # no src/ path may appear
-git add rs/crates/services/paigasus-iam/tests/authz_system_retirement_pg.rs
-git commit -m "$(cat <<'EOF'
-test(rs): make the two retirement lock tests wait for the racer to block (SMA-660)
-
-Both asserted that a 500 ms timeout expires, which a racer that never started
-also satisfies. They now wait until pg_stat_activity shows the racer blocked by
-the retirement transaction inside its own INSERT.
-
-Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
-EOF
-)"
+git status --short   # must be EMPTY: no src/ path, and no leftover mutation
+git log --oneline -1 # must still be your Step 4b commit
 ```
+
+Do **not** commit again here. Step 4b already made this task's commit, and Steps 5-7 reverted every mutation, so the tree is unchanged since then — a second `git commit` would have nothing to record.
 
 ---
 

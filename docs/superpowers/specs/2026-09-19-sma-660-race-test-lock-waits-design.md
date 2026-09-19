@@ -387,12 +387,22 @@ Every local run starts with `export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$P
 `PAIGASUS_REQUIRE_DOCKER=1` (a filtered run without Docker skips silently) and `--retries 0` (a
 retry can turn a failing mutation green — F12).
 
-**Restoring a mutation.** Two rules, because this PR touches test files and not production
-files. A mutation in a file this PR **edits** (`tests/support/race.rs`, the three test files) is
-a marked insert, undone by deleting the marked lines — never by `git checkout --`, which would
-also discard the uncommitted work under test. A mutation in a **production** file (V5, V9) is
-restored with `git checkout -- <path>`, which is safe precisely because this PR changes no
-production file; confirm with `git status` that the path is clean before and after.
+**Restoring a mutation.** The rule follows the FILE, never the V number — several controls mutate
+one file of each kind at once, so a per-V rule would be wrong half the time.
+
+A mutation in a file this PR **edits** (`tests/support/race.rs` and the three test files) is a
+marked insert, undone by deleting the marked lines. Restoring one of these with `git checkout --`
+would also discard the uncommitted work under test. Test-file mutations appear in V2's probes,
+V3, V4, V6, V7's S3/S4 lock removals, V8's racer-sleep half and V9.
+
+A mutation in a **production** file is restored with `git checkout -- <path>`, which is safe
+precisely because this PR changes no production file; confirm with `git status` that the path is
+clean before and after. Production-file mutations appear in V5, V7's S1/S2 lock deletions and
+V8's lock-deletion half.
+
+**Commit the task's own work BEFORE running its mutations.** Otherwise a `git checkout --` meant
+for a production file, or a mis-aimed restore of a test file, destroys the rewrite the mutation
+exists to test. Once the work is committed, the same command restores it instead.
 
 - **V1.** `cargo nextest run -p paigasus-iam --test authz_policy_store --test tenancy_events_pg
   --test authz_system_retirement_pg` passes, the guard test included.
@@ -403,16 +413,31 @@ production file; confirm with `git status` that the path is clean before and aft
   actual query text per site in the implementation report, and confirm the prefix chosen in
   §3.3 matches it. If a measured string contradicts F3, the prefix changes and this spec's table
   is corrected — the measurement wins.
-- **V3. The wait must be load-bearing.** Marked insert: `return Ok(());` as the first statement
-  of `wait_until_blocked_by`. Guard cases 1, 3 and 4 must fail. (Case 2 asserts `Err` too, so it
-  fails as well; naming all of them keeps the expected output exact.)
-- **V4. The prefix must be honoured.** Marked insert: `let query_prefix = "%";` at the top of
-  `wait_until_blocked_by`, which neutralises the term without deleting it. Guard case 3 must
-  fail. V2 proves the prefix *values*; this proves the *plumbing*.
+- **Every mutation below must COMPILE.** The workspace denies warnings, so a recipe that leaves a
+  binding unused or code unreachable dies at `rustc` rather than at the assertion it targets — and
+  a compile failure proves only that warnings are denied, not that the test catches the defect,
+  which is what these controls claim. Three recipes written here originally failed that way and
+  were replaced; the forms below are the ones measured to work.
+- **V3. The wait must be load-bearing.** Make the first check unconditionally true —
+  `if blocked >= 0 {` in place of `if blocked > 0 {`. `blocked` is a `count(*)` and can never be
+  negative, so the wait returns `Ok` on its first poll while still running the observer query, and
+  the rest of the function stays reachable. All four guard cases assert an `Err`, so all four are
+  broken, but a `#[tokio::test]` stops at its first panic: **case 1 failing is the evidence.** Do
+  not split the guard into four tests to observe the other three — that would quadruple this
+  file's container starts to prove what the first failure already establishes.
+- **V4. The prefix must be honoured.** Do not shadow the parameter, which would leave it unused.
+  Bind a literal into the statement instead: `let _ = query_prefix;` plus
+  `[blocker_pid.into(), "%".into()]` in place of `[blocker_pid.into(), query_prefix.into()]`.
+  Guard case 3 alone must fail, at its phase-two `expect_err`; cases 1, 2 and 4 must still pass,
+  since `pg_blocking_pids` is untouched. V2 proves the prefix *values*; this proves the *plumbing*.
 - **V5. The absorb assertion must bite.** Mutation in `pg_policies.rs:257-259`: bump
-  unconditionally. The rewritten absorb test must fail on its `policy_gen` assertion, and no
-  other test in the three binaries may fail — if another does, it already covered that
-  condition and §1.2 is wrong.
+  unconditionally, renaming the now-unread binding to `_outcome` so the mutation still compiles.
+  Run the `authz_policy_store` binary with `--no-fail-fast`, or nextest stops at the first
+  failure and "exactly one test failed" is unprovable. The rewritten absorb test must fail on its
+  `policy_gen` assertion, and no other test in THAT binary may fail — if another does, it already
+  covered that condition and §1.2 is wrong. Scope, stated so the evidence is not read as broader
+  than it is: this runs one of the three binaries, which is where every test that drives `put`
+  into an absorb lives; the other two are not exercised under this mutation.
 - **V6. The blocker pid must be honoured.** Marked insert: replace the `$1 = ANY(...)` term's
   parameter so it always matches (`WHERE ... AND true`). Guard case 4 must fail, and only case 4.
 - **V7. Each rewritten test must still catch the regression it exists to catch.** This is AC 2's
