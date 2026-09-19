@@ -97,9 +97,10 @@ development or test deployment.
 
 T below is `PAIGASUS_SESSION_REDIS_TIMEOUT_MS` (default 1000 ms, at most 536870911 ms, no minimum).
 
-- **Every store operation has a deadline of 4T.** node-redis's own command timeout covers only a
-  command that waits in its queue. A Redis that accepts a command and never replies is bounded by
-  this deadline alone.
+- **Every store operation except `close()` has a deadline of 4T.** node-redis's own command
+  timeout covers only a command that waits in its queue. A Redis that accepts a command and never
+  replies is bounded by this deadline alone. `close()` has no deadline: it destroys the connection
+  at once.
 - **The first expiry opens a circuit for 4T.** While it is open, every store call fails at once and
   the store writes nothing to Redis. That silence lets the client's idle timer (2T) tear down the
   wedged connection and reconnect. The circuit closes when the client reconnects, or when the 4T
@@ -111,11 +112,13 @@ T below is `PAIGASUS_SESSION_REDIS_TIMEOUT_MS` (default 1000 ms, at most 5368709
 - **The client sends one PING every T** to keep a healthy idle connection open. A console process
   has one such client per zone for sessions, plus one for the descriptor cache.
 
-**A failed store call signs the user out.** `requireSession()` treats a store failure as "no
-session" and redirects to `/auth/login`, and `/auth/login` deletes the presented session. So a
-Redis stall longer than 4T (a fork stall during BGSAVE, an fsync stall, a failover) signs out every
-user who loads a page in that window, and those sessions are gone. Raise T if your Redis can stall
-longer than that. Size T against the worst event-loop lag of the Node process too: a stall longer
+**A failed store call can sign the user out.** `requireSession()` treats a store failure as "no
+session" and redirects to `/auth/login`. When `/auth/login` runs against a store that answers, it
+deletes the presented session and clears the cookie. While the circuit is open, that delete fails
+too, and the session record stays in Redis until its TTL ends. So a Redis stall longer than 4T (a
+fork stall during BGSAVE, an fsync stall, a failover) sends every user who loads a page in that
+window to the login page. A user who then signs in again, or reloads `/auth/login` after Redis
+recovers, loses the old session. Raise T if your Redis can stall longer than that. Size T against the worst event-loop lag of the Node process too: a stall longer
 than 4T in the process itself fires the deadlines before the replies are read.
 
 **A logout can fail during a wedge.** The logout route reads the session before it deletes it. If
