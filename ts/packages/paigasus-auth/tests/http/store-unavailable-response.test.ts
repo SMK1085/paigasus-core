@@ -42,6 +42,8 @@ describe('storeUnavailableResponse', () => {
     const body = await storeUnavailableResponse({ kind: 'post', action: '/iam/auth/logout' }).text();
     expect(body).toContain('<form method="post" action="/iam/auth/logout">');
     expect(body).toContain('Sign-out did not complete');
+    expect(body).toContain('your session may still be active');
+    expect(body).not.toContain('You are still signed in');
     expect(body).not.toContain('<a href=');
   });
 

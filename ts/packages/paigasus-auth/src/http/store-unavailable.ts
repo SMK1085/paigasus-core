@@ -49,7 +49,7 @@ export function loginRetryHref(basePath: string, returnTo?: string): string {
 export function storeUnavailableResponse(retry: RetryAffordance): Response {
   const signOut = retry.kind === 'post';
   const heading = signOut ? 'Sign-out did not complete' : 'Sign-in is temporarily unavailable';
-  const sentence = signOut ? 'You are still signed in. The session service did not answer. Try again in a few seconds.' : 'The session service did not answer. Try again in a few seconds.';
+  const sentence = signOut ? 'The session service did not answer, so your session may still be active. Try again in a few seconds.' : 'The session service did not answer. Try again in a few seconds.';
   const control =
     retry.kind === 'post'
       ? `<form method="post" action="${escapeHtmlAttribute(retry.action)}"><button type="submit">Sign out again</button></form>`
