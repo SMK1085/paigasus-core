@@ -1,0 +1,294 @@
+# SMA-652: the § 9.2 two-tab e2e test fails intermittently — design
+
+Linear: SMA-652. Path: bounded (one test file). Written as a spec so the pipeline's
+adversarial challenge has a document to read.
+
+## 1. Problem
+
+`paigasus-auth-ts:test-e2e` fails intermittently in CI on
+"§ 9.2: two tabs starting a login concurrently both complete"
+(`ts/packages/paigasus-auth/tests/e2e/roundtrip.spec.ts`). The failing step is the last one:
+
+```ts
+await secondary.goto(`${ZONE_BASE_PATH}/guarded`);
+await expect(secondary.getByTestId('guarded-heading')).toBeVisible(); // not found after 5 s
+```
+
+Any change to `ts/pnpm-lock.yaml` selects this task, so PRs that do not touch
+`@paigasus/auth` go red. Known occurrences: runs 35358572907 (`main`), 35371349003,
+35426197675 and 35426686584.
+
+## 2. Root cause (measured)
+
+An investigation on 2026-09-19 forced the failure 6 times and recorded 84 passes for contrast.
+The counts and one redacted failing sequence are in Appendix A. All 6 failures occurred in the
+mode where tab1 wins and the secondary (tab2) is the loser.
+
+1. Both tabs load the Keycloak login page at the same time. Each response sets
+   `KC_AUTH_SESSION_HASH`, and the last response wins. The other page ("the loser") embeds a hash
+   that no longer matches the cookie.
+2. Keycloak 26.4.7's login template (`theme/keycloak.v2/login/template.ftl:119-127`) calls
+   `checkAuthSession(hash)`. `theme/base/login/resources/js/authChecker.js` runs it ONCE,
+   1000 ms after load (`AUTH_SESSION_TIMEOUT_MILLISECS`). On a mismatch it calls
+   `location.reload()`. The page's `beforeunload` handler clears only the polling interval, not
+   this one-shot timeout, so the timer can fire after a navigation away has started.
+3. When tab1 wins and becomes primary, tab2 (the loser) is the secondary tab. If tab2's timer
+   fires 6–29 ms after `secondary.goto('/guarded')` starts, the order is:
+   - the fixture server answers `GET /e2e/guarded` with **200** and the valid `__Host-pgs_sid`;
+   - the old Keycloak document's reload requests `/openid-connect/auth` with the ORIGINAL `state`;
+   - the reload overrides the goto. Keycloak returns its login form and expires
+     `KEYCLOAK_IDENTITY` / `KEYCLOAK_SESSION` (cause not found; recorded as a fact only);
+   - the tab stays on the Keycloak login form, and the assertion times out.
+4. In all 6 failures the timer fired inside that window. In all 28 delayed runs where it fired
+   BEFORE the goto, the test passed. With no delay, the goto starts about 210 ms after the
+   secondary page loads, long before the timer. 80 of 80 undelayed local runs passed, also under
+   CPU load. A slow CI runner stretches the primary login (form, token exchange, `/guarded`) to
+   about 1 s. That last step is inferred; CI timing was not measured.
+
+Refuted: the secondary tab's callback failing and clearing the session (no `/auth/callback`
+request from it; 0 `login.callback_rejected` events in 90 runs), an uncommitted session (the
+server returned 200 with the same sid), and a leftover txn cookie (both were cleared before the
+goto, and `/guarded` reads only `__Host-pgs_sid`).
+
+**For the measured failure, `@paigasus/auth` behaves correctly. The defect is in the test:** it reuses a tab that still
+holds a Keycloak document with a pending timer, and a later `goto` cannot cancel that timer.
+
+A second, UNMEASURED path exists through shared server state (spec challenge, MAJOR 1). A
+Keycloak login page that stays open also polls every 2 s (`startSessionPolling`). When a
+`KEYCLOAK_SESSION` cookie appears, it can move that tab to Keycloak's "logged in in another tab"
+URL. With a valid SSO session, Keycloak can then send that tab to `/e2e/auth/callback` with its
+own `state`. The primary callback already cleared every txn cookie (`src/http/routes.ts:310-314`),
+so that callback fails with `txn_missing`. `src/server.ts:111-114` redirects it to `/auth/login`,
+and `handleLogin` deletes the presented session and clears `__Host-pgs_sid`
+(`src/http/routes.ts:188-196`). The investigation saw 0 such callbacks in 90 runs. An open tab
+could in principle change shared state before any later check runs: the probe (spec § 4 step 3)
+saw 0 secondary auth requests in 20 runs, and the test keeps the tabs open regardless; the checks
+fail loudly if the path occurs. § 3.3 records these requests.
+
+## 3. Design
+
+Change only `ts/packages/paigasus-auth/tests/e2e/roundtrip.spec.ts`, the § 9.2 test. The test
+signature becomes `async ({ context }, testInfo) => …`.
+
+### 3.1 Never close a Keycloak tab; prove the property on a fresh tab
+
+1. The concurrent start and the txn-cookie count assertion (`toHaveLength(2)`, the m1 guard)
+   stay unchanged. They are the test's primary proof of § 9.2.
+2. The test closes no Keycloak tab. **Tab1-lost mode:** when `attemptKeycloakLogin(tab1)` returns
+   `false`, tab1 stays open and is labelled `secondary`; the test attempts login on tab2 next.
+   **Tab1-wins mode:** tab2 stays open and is labelled `secondary`. In both modes every Keycloak
+   tab stays open for the rest of the test; the per-test `context` fixture disposes every page
+   when the test ends.
+3. **Why no tab is closed.** A first version of this fix closed the secondary tab (and, in the
+   tab1-lost mode, tab1) as soon as the test no longer needed it. Forced reproduction of that
+   closing code found `secondary.close()` itself can hang forever: Chromium answers
+   `Target.closeTarget` with `{"success":true}`, then the tab's own pending Keycloak
+   `location.reload()` (§ 2) commits a new document, and the target then never sends
+   `detachedFromTarget` — so `page.close()` waits with no limit (Playwright 1.63 sets none).
+   Forced runs on that closing code hung in 6 of 60 runs. A workaround that resent
+   `Target.closeTarget` on every main-frame commit measured 0 hangs in 120 forced runs, but Sven
+   ruled against it: it is Chromium-only CDP code kept alive to work around a browser defect, for
+   a close the test does not need. Letting the per-test `context` fixture dispose the tab at the
+   end of the test, instead of an explicit `close()`, does not hit this hang (120 runs with no
+   teardown hang; a protocol log showed `Target.disposeBrowserContext` detaching a target whose
+   close was lost; teardown was not itself forced).
+4. Read the value of `__Host-pgs_sid` from `context.cookies()` before opening the fresh page in
+   step 5, and keep it in a local variable. Never print it.
+5. Open a new page in the SAME context: `const fresh = await context.newPage()`. Then
+   `const res = await fresh.goto(`${ZONE_BASE_PATH}/guarded`)`.
+6. Assert, in this order:
+   - `res` is not `null`, and `res.status()` is 200;
+   - `res.request().redirectedFrom()` is `null` — the navigation was ONE hop, with no redirect
+     through `/auth/login`, Keycloak or `/auth/callback`;
+   - `new URL(res.url()).pathname` is `${ZONE_BASE_PATH}/guarded`;
+   - `guarded-heading` is visible;
+   - the `__Host-pgs_sid` value in the context is EQUAL to the value from step 4. Compare it as a
+     boolean (`expect(sidNow === sidBefore, '…').toBe(true)`), so a failure prints no value.
+
+Why the one-hop and sid checks are needed: the heading and the URL cannot tell "the shared cookie
+worked" apart from "a re-login". MEASURED (local investigation notes, not committed): with
+`__Host-pgs_sid` cleared, the fresh tab's redirect chain stopped at Keycloak's own login form —
+`/guarded` → `/auth/login` → Keycloak `200` (its login page), with no further redirect back
+through `/auth/callback` — so the heading did NOT show, and the one-hop check failed as designed,
+printing the multi-hop chain and the recorded `fresh /e2e/auth/login` request. The diagnostics
+block from that run (cookie values never printed by the helper itself):
+
+```
+SMA-652 fresh-tab diagnostics
+redirect chain (3 hop(s)): 302 http://127.0.0.1:4319/e2e/guarded -> 302 http://127.0.0.1:4319/e2e/auth/login -> 200 https://127.0.0.1:56369/realms/paigasus-test/protocol/openid-connect/auth
+final page: https://127.0.0.1:56369/realms/paigasus-test/protocol/openid-connect/auth
+cookies (4): AUTH_SESSION_ID domain=127.0.0.1 path=/realms/paigasus-test/; KC_AUTH_SESSION_HASH domain=127.0.0.1 path=/realms/paigasus-test/; KC_RESTART domain=127.0.0.1 path=/realms/paigasus-test/; __Host-pgs_txn_hDwmWPtq-sZC domain=127.0.0.1 path=/
+auth requests after the primary completed (1): fresh /e2e/auth/login
+```
+
+Reasoned, not reached in that run: if Keycloak still held a valid SSO session for the context, it
+would skip its login form and redirect straight through `/auth/callback` to a NEW session, and the
+heading WOULD show — a silent SSO re-login. That is the worst case the one-hop and sid checks
+exist for. It was likely not reached in the control run because the stale tab's own reload had
+already expired `KEYCLOAK_IDENTITY` / `KEYCLOAK_SESSION` (§ 2 step 3). Either way — form or silent
+re-login — the one-hop check and the sid check both fail on the failure path, and neither needs
+the Keycloak origin (its host port is random).
+
+Why no other document can navigate the fresh tab: `newPage()` gives a page with no opener, so no
+existing document holds a reference to it. Keycloak's origin (https, a mapped port) differs from
+the fixture origin (http, port 4319), so a `BroadcastChannel` or `storage` event from a Keycloak
+page cannot reach it. The fixture pages contain no script. So the fix does not depend on the
+content of Keycloak's scripts, or on the Keycloak tabs ever being closed.
+
+The property proved: a second tab in the same browser context reaches the authenticated state
+through the shared `__Host-pgs_sid`, with no further login. A tab's identity is not part of the
+cookie contract, so a fresh tab proves the same property the old step claimed.
+
+### 3.2 Rename the test
+
+The concurrently started second login never completes: a successful callback clears every txn
+cookie (`routes.ts:310-314`), and its tab stays open, unused, until the context fixture disposes
+it. The new title is
+"§ 9.2: two concurrent logins mint distinct txn cookies, and one completion signs in the whole
+context". The SMA-506 design doc row (`2026-09-09-sma-506-auth-design.md:994`) is a historical
+record and is not edited.
+
+### 3.3 Diagnostics that survive CI
+
+CI uploads no Playwright output. Only the task's stdout and stderr reach the `moon-diagnostics`
+artifact. So:
+
+- From the moment the primary completes, record every navigation request to `/auth/login` and
+  `/auth/callback` in the context (`context.on('request')`), as tab label + path only.
+- Wrap `try { … } catch (e) { report(); throw e; }` around everything from the sid-before read
+  through the last step 6 check, including opening the fresh page and its `goto` — a failure in
+  any of those must still print diagnostics. The error is always thrown again. `report()` itself
+  runs inside its own `try`/`catch` with an empty, commented catch body, so a failure in the
+  reporter (for example, no fresh page was ever created) cannot replace the original assertion
+  error.
+- `report()` writes lines with `console.error` (not cut by the reporter) and also attaches the
+  same text as `text/plain`. The lines hold: the fresh tab's redirect chain as path + status (no
+  query string — Keycloak URLs carry `state`, callback URLs carry `code`); every cookie in the
+  context as name + domain + path, duplicates kept, NO values; the recorded `/auth/login` and
+  `/auth/callback` requests.
+- Add a `testInfo.annotations` entry `{ type: 'sma-652-mode', description: 'tab1-won' | 'tab1-lost' }`
+  on every run, so normal runs report the mode split too.
+- Every new `waitFor*` call gets an explicit `timeout` (Playwright 1.63 has no default).
+
+### 3.4 Comments
+
+Rewrite the SMA-652 comment block above `attemptKeycloakLogin`'s call and the try-block comment in
+step 6. Keep the existing explanation of the
+`KC_RESTART` / `AUTH_SESSION_ID` race, because it justifies the "whichever tab is still valid"
+logic. Add the timer mechanism (§ 2 steps 1–3) and the polling path, with the Keycloak file names
+and the note "measured on 26.4.7; `global-setup.ts` uses the floating tag `keycloak:26.4`". Say
+why the test never reuses or closes a tab, and why the one-hop and sid checks exist. Keep it
+short: this doc holds the evidence.
+
+## 4. Verification
+
+1. **Forced reproduction, anchored on the loser document.** Add TEMPORARY instrumentation (never
+   committed) that, in the tab1-wins mode, reads the secondary's
+   `performance.getEntriesByType('navigation')[0].domContentLoadedEventEnd` and `performance.now()`,
+   and waits until about 5–30 ms before `domContentLoadedEventEnd + 1000 ms`. It classifies each
+   run on three points: the secondary is the loser (page hash ≠ `KC_AUTH_SESSION_HASH` cookie);
+   a reload request was seen; the reload fired before or after the final action.
+   - **Before (unchanged test):** the wait sits before `secondary.goto`. This batch must reproduce
+     at least 3 failures in the session, or the "after" batch does not count.
+   - **After (fixed test):** the fixed test has no `close()` call to place the wait before; per
+     local investigation notes (not committed), the wait instead sits right before the fresh-tab
+     action begins (`const sidBefore = …`). Expect 0 failures.
+   - Interleave before and after batches on one machine. Report run counts per mode and per
+     classification. The after-fix guarantee for the timer is STRUCTURAL (the document no longer
+     exists); the batch is a check of the implementation, not the proof.
+2. **Negative control for the new checks.** Temporarily run
+   `context.clearCookies({ name: SESSION_COOKIE_NAME })` before `fresh.goto`. MEASURED (Task 3):
+   the chain stopped at Keycloak's own login form — no valid SSO session was left over from the
+   stale tab's reload — so the heading did NOT show, and the one-hop check failed as designed,
+   printing the multi-hop chain and the `fresh /e2e/auth/login` request. A silent SSO re-login,
+   where Keycloak still holds a session and the heading WOULD show, is the reasoned worst case
+   these checks exist for; it was not reached in this run. Record the output. Revert.
+3. **Polling-path probe.** Temporarily keep the secondary open for 2.0–2.5 s after the primary
+   shows the heading (past its first poll). Run at least 20 times and count `/auth/login` and
+   `/auth/callback` requests from the secondary. Report the count. If the path is real, the new
+   checks fail loudly (§ 3.1 keeps every tab open regardless, so nothing else would catch it). If
+   the count is non-zero, file a Linear issue for the product question in § 6.
+4. **Diagnostics proof.** Temporarily break a step 6 check. Confirm that the `list` reporter
+   output on the terminal (not only the file in `test-results/`) shows the chain, the cookie
+   names with no values, and the recorded requests. Revert.
+5. **Normal runs.** `pnpm exec playwright test tests/e2e/roundtrip.spec.ts --repeat-each=40`
+   passes, and the full `moon run paigasus-auth-ts:test-e2e` passes.
+6. `ts:lint`, `ts:fmt` and `paigasus-auth-ts:typecheck` pass.
+
+## 5. Non-goals
+
+- No change to `src/`.
+- No change to Keycloak, the realm fixture or its image tag.
+- No retry (`toPass`, `retries`) around the final step. A retry would hide a real § 9.2
+  regression.
+- No `context.clock` control of Keycloak timers. It would change Keycloak's multi-tab behaviour
+  under test.
+- Why Keycloak expires the SSO cookies on the reload stays unexplained.
+- The 5 s budget in `attemptKeycloakLogin` is not changed.
+
+## 6. Follow-ups and open questions
+
+- **Product question (for Sven):** can a real user hit the polling path in § 2? A second tab that
+  sits on the Keycloak login form while the first tab signs in could reach `/auth/callback`, get
+  `txn_missing`, go to `/auth/login`, and so DELETE the first tab's session, followed by a silent
+  SSO re-login. The probe (§ 4 step 3) saw 0 secondary auth requests in 20 runs. Per Sven, this
+  count did not warrant its own Linear issue.
+- Update the auto-memory entry `paigasus-auth-two-tab-e2e-flake` with the root cause and the fix.
+- Search the other e2e suites (`logout.spec.ts`, `recovery.spec.ts`, both console zones) for a
+  Keycloak or IdP login page that stays open while ANOTHER page in the same context completes a
+  login, and for a tab reused after it showed a Keycloak page. Any hit becomes a new Linear issue.
+
+## Appendix A. Evidence from the investigation (2026-09-19)
+
+| Batch | Delay before the final goto | Runs | Failures |
+|---|---|---|---|
+| no delay | 0 | 40 | 0 |
+| no delay, 24 CPU burners | 0 | 40 | 0 |
+| random | 0–2500 ms | 30 | 1 |
+| random | 650–950 ms | 30 | 1 |
+| random | 780–840 ms | 30 | 4 |
+
+Mode split: tab1-lost 43 of 43 passed; all 6 failures in tab1-wins. Server log for the 90 delayed
+runs: 180 `login.started`, 90 `session.created`, 0 `login.callback_rejected`.
+
+Failing sequence (batch 3, run 7), times in ms from test start, query strings reduced to `state`:
+
+| t | Event |
+|---|---|
+| +59 | both tabs `GET /e2e/guarded` → 302 `/e2e/auth/login` → 302 Keycloak auth |
+| +105/+106 | tab2 then tab1 receive `KC_AUTH_SESSION_HASH`; tab1's value wins |
+| +259→+300 | tab1 POST → `/e2e/auth/callback` → `/e2e/guarded` 200; both txn cookies cleared |
+| +1120 | test: `secondary.goto('/e2e/guarded')` |
+| +1122/+1123 | tab2 `GET /e2e/guarded` → 200 (valid sid) |
+| +1128 | tab2 `GET …/openid-connect/auth` (the reload from the old document) |
+| +1148 | Keycloak 200 login form; `KEYCLOAK_IDENTITY`, `KEYCLOAK_SESSION` expired |
+| +6205 | assertion fails; tab2 on the Keycloak login form; `__Host-pgs_sid` unchanged |
+
+### Fix round 1: Task 3 and hang measurements (2026-09-19)
+
+| Batch | Runs | Failures | Notes |
+|---|---|---|---|
+| before-a (Task 3, forced) | 30 | 3 | target symptom: secondary stuck on the Keycloak login form |
+| before-b (Task 3, forced) | 30 | 1 | same target symptom |
+| close-based after (Task 3, forced, a+b) | 60 | 5 | ALL 5 failed a different way: `browserContext.newPage` error after a 30 s hang at `secondary.close()` — this is the close-hang, not the § 9.2 property |
+| close-hang, isolated (local investigation notes, not committed) | 60 | 6 | dedicated forcing on `secondary.close()` alone, no resend workaround |
+| close-hang, CDP resend workaround (local investigation notes, not committed) | 120 | 0 | rejected by Sven: Chromium-only CDP code for a browser defect |
+| polling-path probe (Task 3, tabs kept open 2.0–2.5 s) | 20 | 0 | 0 secondary auth requests observed |
+
+The before batches (4 failures in 60) reproduce the original reload race from § 2. The close-based
+after batches (5 failures in 60) do not reproduce it even once; they show a distinct, new failure —
+the close hang — which is why round 1 removes both `close()` calls instead of keeping them. The
+isolated close-hang measurement (6 in 60) is the more direct one, since it forces the closing
+window specifically rather than relying on the reload race also landing there.
+
+### Fix round 1: Task 3b, the committed no-close design (2026-09-19)
+
+| Batch | Runs | Failures | Notes |
+|---|---|---|---|
+| forced (`SMA652_TARGET_MS=1100`) | 80 | 0 | 7 of 80 runs saw the stale tab's reload fire AFTER the fresh-tab action had already begun — the exact ordering § 2 names as the failure trigger — and the test still passed on every one |
+| unforced | 40 | 0 | both tests, 20 runs each |
+
+This is the committed, no-close design: no `close()` call exists to hang, and the reload race no
+longer matters because no assertion depends on the reload's target tab at all — the proof runs on
+a separate, fresh page.
+
