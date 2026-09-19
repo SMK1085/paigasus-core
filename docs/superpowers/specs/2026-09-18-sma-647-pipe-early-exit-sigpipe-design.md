@@ -359,6 +359,10 @@ decides whether a PATH-stubbed `grep` fixture is worth it.
 - L5. `repo:actionlint` still has no working local bash (CLAUDE.md). The self-tests can run
   locally with `bash ci/actionlint/run.sh --self-test` under the bash the plan verifies; the
   whole gate is verified only in CI.
+- L6. The rule reads the next command word after the pipe. A reader inside a subshell or a
+  brace group — `| ( grep -q … )` or `| { grep -q …; }` — does not fire. The self-test's own
+  handshake line uses that form, and it passes check 13 only because of this gap. Closing the
+  gap later needs that line restructured, or an allowlist row.
 
 ## 8. Testing
 

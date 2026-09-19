@@ -6305,6 +6305,59 @@ while IFS= read -r verdict; do
   esac
 done < <(claude_md_block_verdict CLAUDE.md)
 
+# ---------------------------------------------------------------------------------------------
+# Check 13 — no pipe into an early-exit reader, over the real tracked corpus (SMA-647). Runs here,
+# not in --self-test, because it reads the real tracked tree, like checks 5/6/10/11/12.
+#
+# CORPUS: `git ls-files` with `:(glob)` magic on every pattern that holds `**`. Without it git
+# still needs a literal `/` for `**`, so `.moon/**/*.yml` would miss `.moon/tasks.yml` (the trap
+# CLAUDE.md records for repo:ruff-ci). The root `moon.yml` is listed on its own for the same
+# reason. It reads the INDEX, as check 12 does: a file not yet `git add`ed is invisible.
+#
+# THE CORPUS FLOOR IS PART OF THE CHECK. An empty or partial corpus emits zero rows and passes
+# having asserted nothing (check 12's `∅ ⊆ allowlist` shape). Five named members must be listed.
+# `infra`, not `fail`: a corpus that vanished is a broken gate, not a clean repo.
+#
+# COLUMN 0 for the listing, the five floor lines and the read loop: ACTIONLINT_SH_CALL_SITES
+# matches with no leading whitespace, so indenting any of them reds that pin.
+# ---------------------------------------------------------------------------------------------
+EE_LIST="$(mktemp)" || infra "check 13: mktemp failed"
+git ls-files -- ':(glob)**/*.sh' ':(glob).github/workflows/*.yml' ':(glob).github/workflows/*.yaml' 'moon.yml' ':(glob)**/moon.yml' ':(glob).moon/**/*.yml' 'lefthook.yml' > "$EE_LIST"
+EE_RC=$?
+[ "$EE_RC" -eq 0 ] || infra "check 13: git ls-files exited $EE_RC, so check 13 cannot know its corpus."
+grep -qxF 'ci/actionlint/run.sh' "$EE_LIST" || infra "check 13: corpus floor: ci/actionlint/run.sh is not listed, so a pathspec stopped matching"
+grep -qxF '.github/workflows/ci.yml' "$EE_LIST" || infra "check 13: corpus floor: .github/workflows/ci.yml is not listed, so a pathspec stopped matching"
+grep -qxF 'moon.yml' "$EE_LIST" || infra "check 13: corpus floor: moon.yml is not listed, so a pathspec stopped matching"
+grep -qxF '.moon/tasks.yml' "$EE_LIST" || infra "check 13: corpus floor: .moon/tasks.yml is not listed, so a pathspec stopped matching"
+grep -qxF 'ops/nats/check-subjects.sh' "$EE_LIST" || infra "check 13: corpus floor: ops/nats/check-subjects.sh is not listed, so a pathspec stopped matching"
+
+while IFS= read -r verdict; do
+  case "$verdict" in
+    '') ;;
+    no-list|no-tmp)
+      infra "check 13: could not build the corpus list or a scratch directory ($verdict)." ;;
+    unreadable\ *|join-failed\ *|grep-failed\ *)
+      infra "check 13: $verdict — the scan did not read the whole corpus, so a clean result would
+      prove nothing." ;;
+    early-exit-reader\ *)
+      fail "check 13: ${verdict#early-exit-reader } pipes a producer into a reader that can exit
+      before the producer ends (grep in quiet or max-count mode, head, or awk with exit). Under
+      pipefail the producer's SIGPIPE turns a match into a false failure (SMA-647). Rewrite it:
+      'reader < <(producer)' when the producer's status does not matter; capture the producer,
+      check its status, then match the variable, when it does; 'sed -n 1p' in place of a
+      first-line reader. Not a here-string: see CLAUDE.md." ;;
+    blank-reason\ *)
+      fail "check 13: the EARLY_EXIT_READER_ALLOWED entry for ${verdict#blank-reason } has an
+      empty reason. An unexplained waiver is not a waiver." ;;
+    stale-allowlist\ *)
+      echo "actionlint gate: check 13 NOTE: EARLY_EXIT_READER_ALLOWED names ${verdict#stale-allowlist }, which no longer matches that line's text — drop the row." >&2 ;;
+    *)
+      infra "check 13: unrecognised verdict '$verdict'" ;;
+  esac
+done < <(early_exit_reader_verdict "$EE_LIST")
+
+rm -f "$EE_LIST"
+
 selftest_mutation_battery
 
 exit "$FAILED"

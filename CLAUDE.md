@@ -1103,6 +1103,26 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   This is broader than the `doc_diagnosis_self_test` entry above says: it is not only about this
   file's own diagnosis procedure block. A new plan or spec that quotes the procedure, or otherwise
   mentions `ciReport.json`, reds the gate until it carries the marker or is added to the allowlist.
+- **A pipe into a reader that can exit early is a false red under `pipefail`** (MEASURED, SMA-647).
+  `grep -q`, `grep -m N`, `head` and `awk … exit` stop reading at their first match. A producer
+  that writes again after that gets SIGPIPE and exits 141. Under `pipefail` the pipeline status is
+  then 141, although the reader found the match. On Linux in CI the race is rare and needs CPU load,
+  so a re-run passes: it caused three false check-12 reds in `repo:actionlint` (PRs 223, 255, 258).
+  On macOS with BSD grep 2.6.0 it is near-certain: the old check-12 probe missed on 500 of 500 runs
+  against the real block. Use one of three forms instead. When the producer's status does not
+  matter, use process substitution: `grep -qF -- "$lit" < <(printf '%s' "$block")`. When the
+  status matters, capture the producer into a variable, check its status, then match the variable
+  the same way; declare a `local` on its own line, and under `set -e` write the capture as the left
+  side of `||`. In place of `head -1` or `grep -m1 … | sed`, use `sed -n 1p`; in place of
+  `awk '…{print $2; exit}'`, take the first match in awk's `END` block. Do not use a here-string:
+  Homebrew bash 5.3.15 deadlocks on one over about 512 bytes (see the LOCAL ONLY entry). Do not use
+  `>/dev/null` in place of `-q`, and do not use a `sed` script with `q`. `ci/actionlint/run.sh`
+  check 13 bans the pattern in every tracked `*.sh`, workflow, `moon.yml`, `.moon/**/*.yml` and
+  `lefthook.yml`. Its allowlist, `EARLY_EXIT_READER_ALLOWED`, ships empty. Its fixtures live in
+  `ci/actionlint/fixtures/early-exit/*.txt`, because check 13 also scans `run.sh`. Check 12 keeps
+  a second opinion on each missing literal: a `literal-disagreement` row means `grep` and a bash
+  `case` match disagree, which is evidence of a second mechanism. Keep that run's whole output for
+  SMA-647 before you re-run.
 - LOCAL ONLY, CORRECTED (SMA-512): no local bash currently runs `ci/actionlint/run.sh` to
   completion, and the two candidates fail differently. Under system `/bin/bash` 3.2.57 the gate
   does not deadlock — it still prints the two FALSE `cargo-lock-step` self-test failures — but it
@@ -1112,7 +1132,13 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   minutes each time. So `/opt/homebrew/bin/bash` is NOT a working substitute for this gate — it is
   worse, not better — and an earlier version of this bullet recommending it was wrong. Keep the 3.2
   fact: it is still true, it just does not mean 3.2 finishes the gate either. CI is unaffected: it
-  runs neither of these bash builds. The affected-graph suite (`ci/affected-graph/run.sh`) is the
+  runs neither of these bash builds. MEASURED (SMA-647, 2026-09-18): `--self-test` ALONE is
+  different. Under `/bin/bash` 3.2.57 it finishes in about 7 s with rc 1, and its only failures are
+  the same two false `cargo-lock-step` rows, so it is a usable local check when those two rows are
+  its only failures. Under Homebrew bash 5.3.15 it deadlocks too (0.20 s of CPU in 420 s). On the
+  same day `/opt/homebrew/bin/bash ci/publish-metadata/run.sh --negative-control` also hung (0.01 s
+  of CPU in 300 s, after its categories self-test), although SMA-645 recorded a pass for it.
+  The affected-graph suite (`ci/affected-graph/run.sh`) is the
   opposite case: it needs system `/bin/bash` 3.2, because bash 5.3.15 deadlocks on a `while read`
   fed by a here-string over roughly 512 bytes on this class of machine. Keep both facts together:
   fixing one gate's bash version by copying the other's breaks it.

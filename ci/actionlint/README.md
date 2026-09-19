@@ -46,6 +46,7 @@ cross-cutting pin needs — a narrower `inputs` list would be the SMA-553 failur
 | 10 | (SMA-579) The release guard, whose VERDICT lives in `ci/actionlint/release_guard.py` because it needs YAML structure (a job-level `if:` told apart from eight identical step-level ones, `needs:` chains walked) rather than line-oriented text scanning. Two parts: `release_guard_self_test`, in the battery above, asserts `release_guard.py --fixture-count` reports at least 105 fixtures and that `--self-test` itself reports a healthy verdict; the full-gate-only half runs `release_guard.py` over the real `.github/workflows/release.yml` and fails on anything it reports, capturing its output to a file first since a process substitution would silently discard its exit status. Fail-closed on EVERY status, not only the guard's own 2: an unreadable file or unparseable YAML gives 2, a missing `uv` gives **127 from the wrapper**, and a kill gives 137 — all three abort the gate. An earlier revision of this row claimed a missing `uv` was covered by the exit-2 routing; it was not, and a status the routing did not recognise left the gate passing having asserted nothing (measured at rc 127, SMA-579 fix round 3). rc 1 with no output aborts too, since that contradicts the guard's own contract |
 | 11 | (SMA-603) The release-plan decision, whose VERDICT lives in `ci/release-plan/release_plan.py` — TAG EXISTENCE against the derived releasable set, not a `release-plz release --dry-run` read (see that project's own README for why the dry-run reading is silently, permanently wrong). Two parts: `release_plan_self_test`, in the battery above, reads `release_plan.py --fixture-count` directly rather than through `ci/release-plan/run.sh` (that wrapper's flag parser rejects `--fixture-count` outright), asserts it reports at least 8 fixtures (a floor against 9 actual — one row of headroom so a legitimate row removal does not abort the gate as infra), and asserts `ci/release-plan/run.sh --self-test` and `--negative-control` both report a healthy verdict; the full-gate-only half runs `ci/release-plan/run.sh --assert` over the real repository and fails on anything it reports. Fail-closed on every status the wrapper can produce, the same shape as check 10: exit 2 aborts the gate (uv or the interpreter failed, not an assertion), exit 1 fails it (the derived releasable set, a crate version, or the tag-name format changed), and anything else non-zero also aborts — this file is `set -uo pipefail` with **no** `-e`, so an unrouted status would finish the gate rc 0 having asserted nothing |
 | 12 | Every tracked file carrying the token `ciReport` must carry `<!-- moon-diagnosis:superseded -->` (a dated record), `<!-- moon-diagnosis:ok -->` (a deliberate reference to the corrected procedure), or a `CIREPORT_MENTIONS_ALLOWED` row with a non-empty reason — plus CLAUDE.md's `moon-diagnosis` block must exist, have exactly one ordered marker pair, be non-empty, and contain all five entries of `DOC_DIAGNOSIS_REQUIRED_LITERALS` (SMA-597). Three `-ge` arity floors keep an emptied table from passing having asserted nothing: the corpus command must find at least 60 tracked files carrying the token, `DOC_DIAGNOSIS_REQUIRED_LITERALS` must have at least 5 entries, and `CIREPORT_MENTIONS_ALLOWED` must have at least 3 — the third floor closes a bash-3.2-specific hole (macOS's system bash, this repo's stated compat target): an emptied `CIREPORT_MENTIONS_ALLOWED` makes `for entry in "${CIREPORT_MENTIONS_ALLOWED[@]}"` an unbound-variable error under `set -u` on bash 3.2 (measured; bash 4.4+ reds instead), which kills the process substitution rather than the gate and lets the assertion pass having asserted nothing |
+| 13 | (SMA-647) No tracked shell surface pipes a producer into a reader that can exit before the producer ends: `grep` with a `q` or `m` in a short-flag cluster (or `--quiet`/`--silent`/`--max-count`), `head`, or `awk` with `exit`. Under `pipefail` the producer's SIGPIPE (141) becomes the pipeline status, so a match reads as a miss; this caused three false check-12 reds in CI, and on macOS with BSD grep the old check-12 probe missed on every run. The corpus is `git ls-files` over `**/*.sh`, the workflows, every `moon.yml`, `.moon/**/*.yml` and `lefthook.yml`, with a floor of five named members (`infra` when one is missing). A line that ends in a pipe is joined with the next line, except a YAML block-scalar header; a full-line comment is skipped and never starts a join; only the next command word after the pipe counts. Verdicts: `early-exit-reader <path>:<line>` (a violation), `blank-reason` (a violation), `stale-allowlist` (a note), and `no-list`/`no-tmp`/`unreadable`/`join-failed`/`grep-failed` (infra). `EARLY_EXIT_READER_ALLOWED` is keyed by location AND the logical line's text, and ships empty. `early_exit_reader_self_test` drives the verdict from `ci/actionlint/fixtures/early-exit/*.txt` (outside the corpus, because the check scans `run.sh` itself) and owns one behavioural case: a handshake proves the pipe form loses its producer and process substitution does not. Check 12 gained a second opinion at the same time: a `grep` miss that a bash substring match contradicts is a `literal-disagreement` row |
 
 Only a `paths:`/`paths-ignore:`/`branches:`/`branches-ignore:` key **two levels deep** inside
 `on:` — `on.<event>.paths` — is a filter. A workflow input may legitimately be *named* `paths` or
@@ -525,6 +526,43 @@ literal token — describing a `ciReport` field, a captured task output, or a mo
 step without ever spelling the four characters — passes the corpus scan cleanly, since Assertion A
 never reads for meaning, only for the token's presence. Closing either needs the same
 procedure-execution gate L29 defers to a follow-up issue, not a bigger token list.
+
+**L33 (SMA-647).** Check 13 knows four readers only: `grep` with a `q`/`m` flag or the matching long
+flags, `head`, and `awk` with `exit`. Other readers that stop early (`sed` with `q`, `read`,
+`perl … last`) are not seen.
+
+**L34 (SMA-647).** Check 13 reads the NEXT command word after the pipe only. A reader behind a word
+outside its vocabulary (`timeout 5 grep -q`, `env grep -q`) is not seen, and a `|&` pipe is not
+matched at all, into any reader.
+
+**L35 (SMA-647).** Check 13 scans `*.sh`, the workflows, `moon.yml` files, `.moon/**/*.yml` and
+`lefthook.yml`. A `subprocess` pipe or a `bash -c` string in a `.py` file, a script in `ts/` or `py/`
+that is not `*.sh`, and shell quoted in a Markdown document are not scanned.
+
+**L36 (SMA-647).** Check 13 is textual. A banned form inside a quoted string or a heredoc body in a
+corpus file fires. That is why its fixtures are `.txt` files and why no message in `run.sh` quotes a
+banned form.
+
+**L37 (SMA-647).** A comment line between a pipe and its reader (`foo |`, then `# note`, then
+`grep -q x`) is joined with the comment, and the reader line is not seen. A SHELL line that ends in
+`key: |` is not joined either, because it has the shape of a YAML block-scalar header. Neither
+shape exists in the corpus.
+
+**L38 (SMA-647).** An `EARLY_EXIT_READER_ALLOWED` row keys on the joined LOGICAL text, which for a
+joined pair spans two physical lines.
+
+**L39 (SMA-647).** `repo:actionlint` still has no working local bash for the whole gate. MEASURED
+2026-09-18: `/bin/bash` 3.2.57 finishes `--self-test` in about 7 s (rc 1, with only the two known
+false `cargo-lock-step` rows); Homebrew bash 5.3.15 deadlocks on it. Check 13's production half runs
+locally only through an extraction harness, and otherwise in CI.
+
+**L40 (SMA-647).** Only check 12's literal probe has a second opinion (`literal-disagreement`). The
+other rewritten sites rely on the rewrite alone.
+
+**L41 (SMA-647).** The rule reads the next command word after the pipe. A reader inside a subshell
+or a brace group — `| ( grep -q … )` or `| { grep -q …; }` — does not fire. The self-test's own
+handshake line uses that form, and it passes check 13 only because of this gap. Closing the gap
+later needs that line restructured, or an allowlist row.
 
 ## Cost
 

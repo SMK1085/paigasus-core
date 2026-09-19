@@ -265,6 +265,7 @@ jobs:
       # Separate step: a `$GITHUB_PATH` write takes effect only from the NEXT step. The
       # comparison is pure shell for the reason release.yml's copy records: `sort -V | head -n1`
       # under `pipefail` can red at status 141 on SIGPIPE with no `::error::` line at all.
+      # `ci/actionlint/run.sh` check 13 (SMA-647) now bans that pattern repo-wide.
       - name: Assert npm is new enough for OIDC trusted publishing
         run: |
           set -euo pipefail
