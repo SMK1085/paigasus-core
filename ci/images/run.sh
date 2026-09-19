@@ -229,7 +229,8 @@ build_one() {
 # being loaded, so its bytes (and so its digest) are fixed before anything is pushed.
 # --provenance=false --sbom=false: buildx would otherwise wrap the image in an index with its own
 # attestation manifests; the release path attests through GitHub instead (spec D4).
-# name=<crate>:dev: `docker load` of the archive then restores that name for load_oci and smoke.
+# name=<crate>:dev: records the image's own identity inside the archive; load_oci tags it as
+# whatever name its caller passes (smoke expects <crate>:dev), by digest, not from this name.
 #
 # `docker buildx build`, never bare `docker build` (SMA-658 PR1 CI fix, PR 270). MEASURED on the
 # GitHub-hosted runner: bare `docker build --output type=oci,...` failed with "OCI exporter is
@@ -275,17 +276,65 @@ build_oci() {
   echo "  built ${archive}"
 }
 
-# SMA-658 spec § 4.2: the image the smoke suite tests must be the image in the archive. What
-# `docker load` reports as the image ID depends on the daemon's image store (measured M3, local
-# Docker 29.8): the containerd store gives the MANIFEST digest, the classic store gives the CONFIG
+# SMA-658 spec § 4.2: the image the smoke suite tests must be the image in the archive. What a
+# local image's `.Id` reports depends on the daemon's image store (measured M3, local Docker
+# 29.8): the containerd store gives the MANIFEST digest, the classic store gives the CONFIG
 # digest. So the check accepts the one value that matches this daemon's store, and prints every
 # value once per runner so CI records M3 for each runner label.
+#
+# CI fix (PR 270): `docker load -i <oci-archive>` of a buildx OCI-layout archive needs the
+# CONTAINERD image store to parse it. MEASURED on `ubuntu-latest` and `ubuntu-24.04-arm` (both
+# arch legs): it fails with `open .../blobs/json: no such file or directory`, because those
+# runners' Docker uses the CLASSIC store. It only works on this Mac because Docker Desktop uses
+# the containerd store. So the archive is no longer handed to `docker load` at all — it goes
+# through a throwaway local registry instead: start one (the same `registry:2` container and free
+# -port pattern `start_registry`/`rehearse` below already use), push the archive with `crane push`
+# (crane is proto-pinned; `rehearse` already pushes this way), then `docker pull` it back BY
+# DIGEST and tag it as $name. Docker verifies the manifest bytes it downloads hash to the digest
+# it was asked for and fails the pull otherwise, so a successful pull is already proof the
+# manifest is intact; the store-dependent `.Id` check below then gives the SAME guarantee the old
+# `docker load`-based check gave, because it is the STORE, not the ingestion path, that decides
+# whether a local image's `.Id` is its manifest digest (containerd) or its config digest
+# (classic) — both a `docker load` and a `docker pull` land in the same local store afterwards.
+# A second `--output type=docker` export would run the smoke test on different bytes than the
+# published archive, which defeats the check; skopeo's docker-daemon transport would add an
+# unpinned tool. The registry (and its scratch dir) are removed in an EXIT trap so they are gone
+# on every exit path, including a `set -e` abort partway through — measured: a RETURN trap, the
+# pattern `build_one`/`build_oci` use for their build log, does NOT fire when `set -e` aborts a
+# function from inside, only on that function's normal return, so it would leak the registry
+# container on exactly the failures this check exists to catch.
 load_oci() {
   local archive="$1" name="$2" digests manifest config store driver loaded size expected
+  local reg_name reg repo tmpdir=""
   digests="$(decide oci-digests "$archive")"
   manifest="$(kv "$digests" manifest)"
   config="$(kv "$digests" config)"
-  docker load -i "$archive" >/dev/null
+
+  if ! command -v crane >/dev/null 2>&1; then
+    echo "::error::crane is not on PATH; run 'proto install crane'" >&2
+    return 2
+  fi
+  reg_name="load-oci-registry-$$"
+  trap 'docker rm -f "$reg_name" >/dev/null 2>&1 || true; [ -n "$tmpdir" ] && rm -rf "$tmpdir"' EXIT
+  reg="$(start_registry "$reg_name")"
+  # `127.0.0.1`, not the `localhost` `start_registry` returns (kept as-is for `rehearse`, which
+  # needs it — see its own comment): measured on this Mac, `docker pull`/`docker tag` resolve
+  # `localhost` to `::1` first and time out, because the registry container is published on
+  # `127.0.0.1` only. `crane push` below is unaffected either way (it is given `--insecure`
+  # explicitly), so using the literal IP for the whole function sidesteps the resolution order
+  # entirely rather than depending on it.
+  reg="${reg/localhost/127.0.0.1}"
+  repo="${reg}/paigasus-load-oci"
+
+  tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/paigasus-load-oci.XXXXXX")"
+  tar -xf "$archive" -C "$tmpdir"
+  crane push --insecure "$tmpdir" "${repo}:load" >/dev/null
+  rm -rf "$tmpdir"
+  tmpdir=""
+
+  docker pull "${repo}@${manifest}" >/dev/null
+  docker tag "${repo}@${manifest}" "$name"
+
   loaded="$(docker image inspect --format '{{.Id}}' "$name")"
   size="$(docker image inspect --format '{{.Size}}' "$name")"
   driver="$(docker info --format '{{json .DriverStatus}}')"
@@ -295,10 +344,10 @@ load_oci() {
   [ "$store" = "containerd" ] && expected="$manifest"
   echo "M3 arch=$(docker version --format '{{.Server.Arch}}') docker=$(docker version --format '{{.Server.Version}}') store=${store} loaded_id=${loaded} manifest=${manifest} config=${config} size=${size}"
   if [ "$loaded" != "$expected" ]; then
-    echo "::error::${name} loaded as ${loaded}, but the ${store} store should report ${expected}: the loaded image is not the archive's image." >&2
+    echo "::error::${name} loaded as ${loaded} (pulled by digest via a local registry), but the ${store} store should report ${expected}: the loaded image is not the archive's image." >&2
     return 1
   fi
-  echo "  ${name} is the archive's image (${store} store)"
+  echo "  ${name} is the archive's image (${store} store, loaded via a local registry)"
 }
 
 # Every container/network name carries the same $$ suffix so two concurrent

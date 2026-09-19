@@ -104,8 +104,11 @@ jobs:
           ci/images/run.sh build-oci iam out
           ci/images/run.sh build-oci gateway out
 
-      # Prints one `M3 …` line per image: this runner's image store and what `docker load`
-      # reports as the image ID (spec M3).
+      # Prints one `M3 …` line per image: this runner's image store and what the loaded image
+      # reports as its ID (spec M3). The load goes through a throwaway local registry, not
+      # `docker load`, because `docker load` of an OCI-layout archive needs the containerd image
+      # store, which this runner does not carry (CI fix, PR 270; see ci/images/run.sh's
+      # load_oci comment).
       - name: Load each archive and check its identity
         run: |
           for crate in paigasus-iam paigasus-gateway; do
