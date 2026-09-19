@@ -363,7 +363,7 @@ ci/images/run.sh smoke [iam|gateway]...              # smoke-test images built a
 ci/images/run.sh rehearse <archive.oci.tar>...       # SMA-658: publish steps vs two local registries
 ```
 
-`load-oci` prints a line that starts with `M3 `. This line records the loaded image's ID, the
+`load-oci` prints a line that starts with `M3` followed by a space. This line records the loaded image's ID, the
 runner's Docker version, and the runner's image store. The image store decides which ID is
 correct: a containerd store and the classic store report different IDs for the same archive.
 Read the expected ID against the store named on the same line.

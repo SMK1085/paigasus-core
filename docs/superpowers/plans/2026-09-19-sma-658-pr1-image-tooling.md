@@ -1537,7 +1537,8 @@ name: images-rehearsal
 # SMA-658 PR 1 (spec § 8). Runs the signing and attestation steps of the future release path FOR
 # REAL, against a scratch GHCR package, so they have run once before the first real release:
 # cosign keyless, attest-build-provenance, attest-sbom (per-platform subject), cosign verify and
-# gh attestation verify. It publishes no release image and reads no secret.
+# gh attestation verify. It publishes no release image. It reads one dummy secret,
+# REHEARSAL_ENV_PROBE, only to measure spec M9 (does an environment secret reach a job).
 #
 # workflow_dispatch ONLY. A pull_request trigger would let a PR mint an OIDC token
 # (repo:workflow-credentials bans that shape), and both jobs refuse any ref but main.
@@ -1825,7 +1826,7 @@ Add a section `## 16. Decisions made in the PR 1 plan` to the spec, with one row
 | P2 | The release decisions live in `ci/images/release_decision.py` (stdlib, self-test), used by both `rehearse` and PR 2. | § 7.1 wants registry commands literal in `release.yml`, so the rehearse can share only the decision code. The command sequence in `rehearse` is a copy: that is the residual, and the `images-rehearsal.yml` push step is a second copy of the same `decide`/`kv` and push-then-assert sequence. |
 | P3 | `tag_digest` reads only a missing-tag error as "absent"; every other error is fatal. | D10: an error read as "absent" would push a second digest under a published version. |
 | P4 | `ci.yml`'s bare `proto install` now also downloads crane, cosign and syft. | One pin source. The cost is measured on PR 1's CI run (Task 9). |
-| P5 | M9 (an environment secret reaching a `release.yml` job) is not measured in PR 1. | The rehearsal has no environment and no secret. PR 2's first real run is the first test. |
+| P5 | M9 (an environment secret reaching a `release.yml` job) is measured by the rehearsal, not by PR 1 directly. | The `images-rehearsal` environment carries a dummy `REHEARSAL_ENV_PROBE` secret, and the rehearsal validates it reaches the job. PR 2's `release.yml` reuses the same environment shape. |
 | P6 | `smoke` takes service arguments. The reject-argument guard (orig `:444-456`) is replaced by `assert_fresh`, which refuses an image whose revision label is not HEAD. | A per-service chain (§ 4.2) needs a one-service smoke. `assert_fresh` closes the same stale-image risk, and it is stricter. |
 
 - [ ] **Step 3: Commit**
