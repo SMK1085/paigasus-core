@@ -10,6 +10,36 @@ export class SessionStoreUnavailable extends AuthError {
   readonly code = 'session_store_unavailable';
 }
 
+/** Which half of the deadline decorator refused the operation (SMA-651 D7). */
+export type SessionStoreTimeoutPhase = 'deadline' | 'circuit-open';
+
+/**
+ * The store did not answer in time (SMA-651). `deadline` means this operation ran past its bound;
+ * `circuit-open` means an earlier one did and this one was refused without touching the socket.
+ *
+ * A SUBCLASS of SessionStoreUnavailable, deliberately: every caller that classifies on that class
+ * (next/get-session.ts, core/single-flight.ts's release-time catch) keeps working unchanged, and
+ * `code` stays 'session_store_unavailable'. `name` is set explicitly because a production bundle
+ * can mangle `constructor.name`. The message names one of seven fixed operation literals and a
+ * number, never the DSN.
+ *
+ * NOT exported from src/server.ts, for the reason RefreshRejected records below: getSession()
+ * swallows every failure, so no consumer can observe one.
+ */
+export class SessionStoreTimeout extends SessionStoreUnavailable {
+  readonly phase: SessionStoreTimeoutPhase;
+
+  constructor(operation: string, deadlineMs: number, phase: SessionStoreTimeoutPhase) {
+    super(
+      phase === 'deadline'
+        ? `the session store operation "${operation}" did not answer within ${String(deadlineMs)} ms`
+        : `the session store is not answering: "${operation}" was refused while the circuit was open`,
+    );
+    this.name = 'SessionStoreTimeout';
+    this.phase = phase;
+  }
+}
+
 /** Configuration is internally inconsistent. Thrown by createAuthRuntime at first request. */
 export class AuthConfigError extends AuthError {
   readonly code = 'auth_config_invalid';
