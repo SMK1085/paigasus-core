@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import { RefreshRejected } from './errors';
+import { isRefreshRejected } from './errors';
 import { newLockToken } from './ids';
 import { shouldRefresh } from './refresh-policy';
 import type { SessionRecord } from './session';
@@ -167,7 +167,11 @@ export async function resolveSession(deps: ResolveDeps, sid: string): Promise<Re
           // `reason` is REQUIRED, not decoration. With `degraded` alone, a benign single-session
           // revocation and an outage that signs users out produce the identical line — the exact
           // conflation this whole section exists to remove.
-          const rejected = err instanceof RefreshRejected;
+          // NOT `instanceof` (SMA-657). `refresh` delegates to the shared `runtime.oidc`
+          // (next/get-session.ts), so this error was built by whichever copy of this package
+          // created the runtime, while this line runs in whichever copy serves the request. See
+          // hasAuthErrorCode in core/errors.ts.
+          const rejected = isRefreshRejected(err);
           const liveUntil = Math.min(fresh.accessExpiresAt, fresh.absoluteExpiresAt);
           const degraded = !rejected && Date.now() < liveUntil;
 

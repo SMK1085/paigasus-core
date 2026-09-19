@@ -490,6 +490,34 @@ describe('a failing refresh (SMA-626 § 2.3)', () => {
     expect(await store.get('s')).toBeNull();
   });
 
+  // SMA-657. The SAME case as the row above, with the error built by a SECOND copy of core/errors
+  // — the shape Next 16 produces, because `refresh` delegates to the shared `runtime.oidc` while
+  // `resolveSession` runs in whichever copy serves the request. `resolveSession` was imported
+  // statically at the top of this file, so it keeps its FIRST-copy binding: this is the real
+  // two-copy shape, not a simulation of it.
+  //
+  // The fixture must be inside the skew window AND still live, or single-flight.ts returns early
+  // and never attempts a refresh at all (shouldRefresh is `now >= expiresAt - skewMs`). The live
+  // token is the point: it is the case where the defect changes the RETURN path, not just the log.
+  it('classifies a definitive rejection from a SECOND module copy', async () => {
+    vi.resetModules();
+    const foreign = await import('../../src/core/errors.js');
+    // Precondition: without this, the test passes vacuously if the import returns the same module.
+    expect(foreign.RefreshRejected).not.toBe(RefreshRejected);
+    const foreignRejected = () => Promise.reject(new foreign.RefreshRejected('invalid_grant'));
+
+    const store = new MemorySessionStore();
+    await store.set('s', makeRecord({ accessExpiresAt: Date.now() + 30_000 }), 60_000, null);
+    const { logger, events } = recordingLogger();
+
+    // NOT `toBeInstanceOf(RefreshRejected)`: that is FALSE for a foreign-copy error, which is the
+    // entire defect. Asserting it would red this test both before AND after the fix.
+    await expect(resolveSession({ ...deps(store, foreignRejected), logger, skewMs: 60_000 }, 's')).rejects.toBeInstanceOf(foreign.RefreshRejected);
+    expect(events).toContainEqual(['session.refresh_failed', { sid: sidTag('s'), reason: 'rejected', degraded: false }]);
+    expect(events).toContainEqual(['session.deleted', { sid: sidTag('s'), reason: 'refresh_rejected' }]);
+    expect(await store.get('s')).toBeNull();
+  });
+
   // Without this, a revoked refresh token and a live access token sit in Redis for the full ttlMs
   // and every later getSession() re-takes the lock and re-calls the token endpoint.
   it('DELETES the record on a definitive rejection, and says why', async () => {
