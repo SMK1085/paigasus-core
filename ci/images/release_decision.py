@@ -153,7 +153,8 @@ def _require_list(value: object, what: str) -> list[Any]:
 def oci_digests_from(tar: tarfile.TarFile) -> dict[str, str]:
     """The manifest and config digests of a single-image buildx OCI export."""
     index = _require_dict(json.loads(_member(tar, "index.json")), "index.json")
-    manifests = _require_list(index.get("manifests") or [], "index.json's manifests")
+    manifests_value = index.get("manifests")
+    manifests = [] if manifests_value is None else _require_list(manifests_value, "index.json's manifests")
     if len(manifests) != 1:
         raise UsageError(f"index.json lists {len(manifests)} manifests; expected one image (build with --provenance=false --sbom=false)")
     entry = _require_dict(manifests[0], "index.json's manifest entry")
@@ -161,7 +162,8 @@ def oci_digests_from(tar: tarfile.TarFile) -> dict[str, str]:
         raise UsageError(f"index.json names {entry.get('mediaType')!r}, not one image manifest")
     manifest_digest = require_digest(str(entry.get("digest", "")))
     manifest = _require_dict(json.loads(_blob(tar, manifest_digest)), "the image manifest")
-    config_ref = manifest.get("config") or {}
+    config_ref_value = manifest.get("config")
+    config_ref = {} if config_ref_value is None else config_ref_value
     config_digest = require_digest(str(_require_dict(config_ref, "the image manifest's config").get("digest", "")))
     config = _require_dict(json.loads(_blob(tar, config_digest)), "the image config")
     platform = f"{config.get('os', 'unknown')}/{config.get('architecture', 'unknown')}"
@@ -178,14 +180,18 @@ def oci_digests(path: Path) -> dict[str, str]:
 
 def sbom_summary(doc: dict[str, Any]) -> dict[str, str]:
     """Spec M8: does the SBOM see the Ubuntu packages and the Rust crates at all?"""
-    packages = _require_list(doc.get("packages") or [], "packages")
+    # A missing "packages" key defaults to []; a present key must be a list (even if falsey).
+    packages_value = doc.get("packages")
+    packages = [] if packages_value is None else _require_list(packages_value, "packages")
     names = set()
     cargo = 0
     for p in packages:
         if not isinstance(p, dict):
             raise UsageError(f"packages must be a list of objects, not {type(p).__name__!r}")
         names.add(str(p.get("name", "")))
-        refs = _require_list(p.get("externalRefs") or [], "a package's externalRefs")
+        # A missing "externalRefs" key defaults to []; a present key must be a list (even if falsey).
+        refs_value = p.get("externalRefs")
+        refs = [] if refs_value is None else _require_list(refs_value, "a package's externalRefs")
         for ref in refs:
             if not isinstance(ref, dict):
                 raise UsageError(f"an externalRefs entry must be a JSON object, not {type(ref).__name__!r}")
@@ -317,6 +323,11 @@ def self_test() -> int:
             lambda: sbom_summary({"packages": [{"name": "serde", "externalRefs": ["oops"]}]}),
             "UsageError",
         ),
+        # TDD: falsey-value cases that must raise UsageError
+        ("sbom: packages is false (present but falsey)", lambda: sbom_summary({"packages": False}), "UsageError"),
+        ("sbom: packages is 0 (present but falsey)", lambda: sbom_summary({"packages": 0}), "UsageError"),
+        ("sbom: externalRefs is '' (present but falsey)", lambda: sbom_summary({"packages": [{"name": "test", "externalRefs": ""}]}), "UsageError"),
+        ("sbom: missing packages key gives empty list (no error)", lambda: sbom_summary({}), {"packages": "0", "libc6": "false", "cargo": "0"}),
     ]
     failed = 0
     for label, fn, want in rows:
