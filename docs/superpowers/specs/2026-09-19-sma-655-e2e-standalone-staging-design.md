@@ -190,10 +190,13 @@ If V4 finds a write, the spec returns to design before implementation continues.
 - V4. `.next/BUILD_ID` is written early in `next build`, before the rest of the server tree, so
   "newer than BUILD_ID" cannot distinguish a build's own output from a later write — it catches
   ordinary build output too. Instead: touch a marker file, start both apps' Playwright suites
-  directly (no Moon, so no cache restore) at the same time, wait for both to finish, then list
-  every file under each app's `.next` — `.next/standalone` included, directories included, so
-  `.next/standalone/.../.next/cache/fetch-cache` is covered — that is newer than the marker.
-  Nothing may appear.
+  directly (no Moon, so no cache restore) at the same time, and wait for both to finish. Then run
+  two checks against the marker: a narrow one, every FILE under each app's `.next` (excluding
+  `.next/cache`) newer than the marker; and a broad one, every file AND DIRECTORY under each app's
+  `.next/standalone` newer than the marker, with no exclusion, so it covers
+  `.next/standalone/.../.next/cache/fetch-cache`. Nothing may appear in either. Also check whether
+  a `fetch-cache` path exists under either app's `.next` at all, since a 0 count from the broad
+  check means different things depending on the answer.
 
 ## 8. Out of scope
 
@@ -281,21 +284,39 @@ invariant that actually gates a release, checks BUILD_ID equality and `static/` 
 existence/size, not `.next/server/**` mtimes, and it passed in all three runs. This first attempt
 is kept here as a recorded false start, not as the V4 verdict.
 
-**V4, corrected re-check (marker-based, 2026-09-19).** Script:
-`$SP/v4-check.sh` (`$SP` = the session scratchpad). Method: touch a marker file, wait one second,
-then run `pnpm exec playwright test` in `ts/apps/iam-console` and `ts/apps/gateway-console` at the
-same time (no Moon, so no cache restore can mask a write), and wait for both. Then run two checks:
-`find <app>/.next -type f -newer marker -not -path '*/.next/cache/*'` for each app, and a second,
-broader `find ts/apps/{iam,gateway}-console/.next/standalone -newer marker` (files and
-directories, `.next/cache` included), which covers `.next/standalone/.../.next/cache/fetch-cache`
-— the specific path spec § 5 names as the runtime hazard ("Next's file-system cache can write into
-`.next/server/app` and `.next/cache/fetch-cache`... its Server Actions call `revalidatePath`").
+**V4, corrected re-check (marker-based, 2026-09-19 19:36–19:37 CEST).** Script: `$SP/v4-check.sh`
+(`$SP` = the session scratchpad). Method: touch a marker file (`$SP/v4-marker`, `ls -l` shows
+mtime 19:36), wait one second, then run `pnpm exec playwright test` in `ts/apps/iam-console` and
+`ts/apps/gateway-console` at the same time (no Moon, so no cache restore can mask a write), and
+wait for both — `$SP/v4-iam.log` (mtime 19:36) and `$SP/v4-gw.log` (mtime 19:37) confirm both
+tiers finished, `iam rc=0` / `gw rc=0` (`$SP/v4-rc-iam.txt`, `$SP/v4-rc-gw.txt`).
 
-Result: a fourth concurrent pass, `iam rc=0`, `gw rc=0`. The first `find` listed nothing for
-either app. The second, broader `find` (standalone tree, cache included) counted 0.
+The script itself only ran one check — `find <app>/.next -type f -newer marker -not -path
+'*/.next/cache/*'` per app — and its output was not redirected to a file at the time. A second,
+broader check (`.next/standalone`, files and directories, no exclusion, so it covers
+`.next/standalone/.../.next/cache/fetch-cache`, the specific path spec § 5 names as the runtime
+hazard) was also run at the time but its output was likewise not saved. Neither result was
+verifiable from disk, so both were re-run on 2026-09-19 19:44 CEST against the same on-disk state
+— the trees were not touched between the original run and the re-measurement (only read-only
+review checks ran in between), and the marker file still exists — and saved this time:
 
-**V4 verdict: clean.** The servers wrote nothing into their trees while the tiers ran. Spec § 5's
-assumption holds. The first attempt's 190-file list is superseded, not a finding to act on.
+- Narrow check (the one `v4-check.sh` itself runs): `find ts/apps/iam-console/.next
+  ts/apps/gateway-console/.next -type f -newer "$SP/v4-marker" -not -path '*/.next/cache/*'`,
+  saved to `$SP/v4-narrow.txt`: **0 lines**.
+- Broad check: `find ts/apps/iam-console/.next/standalone ts/apps/gateway-console/.next/standalone
+  -newer "$SP/v4-marker"` (files and directories, no exclusion), saved to `$SP/v4-broad.txt`:
+  **0 lines**.
+- Named-hazard existence check: `find ts/apps/iam-console/.next ts/apps/gateway-console/.next
+  -path '*fetch-cache*'`, saved to `$SP/v4-fetch-cache.txt`: **0 lines** — no `fetch-cache` path
+  exists anywhere under either app's `.next` tree at all, in the staged tree or the source tree.
+  The broad check's 0 is therefore not "an existing fetch-cache directory was untouched"; it is
+  "no fetch-cache directory exists to be touched" — a stronger result for the same conclusion.
+
+**V4 verdict: clean.** All three counts are 0, confirmed by the saved artifacts above, and the
+finds ran (2026-09-19 19:44 CEST) well after both tiers finished (19:36–19:37 CEST). The servers
+wrote nothing into their trees while the tiers ran, and no fetch-cache mechanism exists in either
+tree to write into. Spec § 5's assumption holds. The first attempt's 190-file list is superseded,
+not a finding to act on.
 
 **Mutations (§ 7 V3).** Reused from task-3-report.md and task-4-report.md (SMA-655
 `.superpowers/sdd/2026-09-19-sma-655-e2e-standalone-staging/`), not re-run:
