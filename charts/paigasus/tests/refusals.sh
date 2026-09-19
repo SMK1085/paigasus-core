@@ -26,8 +26,15 @@ expect_fail() {
 
 expect_render() {
   local label="$1"; shift
-  if render "$@" >/dev/null; then echo "  ok [$label]: renders"; else
-    echo "FAIL [$label]: expected a successful render"; render "$@"; ec=1
+  local out
+  # Capture once. The earlier shape re-ran `render "$@"` bare inside the else branch to print the
+  # error, and under `set -e` that non-zero return ABORTED the whole script — so one failing row
+  # silently cancelled every row after it. A battery that stops early hides findings, which is the
+  # opposite of what it is for.
+  if out="$(render "$@")"; then
+    echo "  ok [$label]: renders"
+  else
+    echo "FAIL [$label]: expected a successful render"; printf '%s\n' "$out"; ec=1
   fi
 }
 
@@ -40,5 +47,5 @@ expect_fail "unknown zone id" "is not a known service slug" \
 expect_render "iam only" --set zones.gateway.enabled=false
 expect_render "iam and gateway" --set zones.gateway.enabled=true
 
-[ "$ec" -eq 0 ] && echo "== chart refusals OK =="
+if [ "$ec" -eq 0 ]; then echo "== chart refusals OK =="; fi
 exit "$ec"
