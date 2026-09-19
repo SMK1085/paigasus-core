@@ -19,11 +19,14 @@ type Mode = 'hang' | 'ok' | 'reject';
 
 function fakeInner() {
   const calls: string[] = [];
+  // ONE shared object for every 'reject' answer, so a test can assert identity (U9): the
+  // decorator must pass the SAME error through, never wrap or replace it.
+  const rejectError = new SessionStoreUnavailable('session store unavailable (redis://<redacted>)');
   const state = { mode: 'ok' as Mode };
   const answer = <V>(name: string, value: V): Promise<V> => {
     calls.push(name);
     if (state.mode === 'hang') return new Promise<V>(() => undefined);
-    if (state.mode === 'reject') return Promise.reject(new SessionStoreUnavailable('session store unavailable (redis://<redacted>)'));
+    if (state.mode === 'reject') return Promise.reject(rejectError);
     return Promise.resolve(value);
   };
   const store: SessionStore = {
@@ -36,7 +39,7 @@ function fakeInner() {
     takeTransaction: () => answer('takeTransaction', null),
     close: () => answer('close', undefined),
   };
-  return { store, calls, state };
+  return { store, calls, state, rejectError };
 }
 
 function fakeLogger() {
@@ -128,6 +131,21 @@ describe('withOperationDeadline (SMA-651)', () => {
     expect(s.inner.calls.length).toBe(callsBefore + 1);
   });
 
+  it('U4b: the circuit stays open until the full cooldown has elapsed', async () => {
+    const s = setup();
+    await openCircuit(s);
+    s.inner.state.mode = 'ok';
+    await vi.advanceTimersByTimeAsync(COOLDOWN - 1);
+    const callsBefore = s.inner.calls.length;
+    const stillOpen = track(s.store.get('b'));
+    await vi.advanceTimersByTimeAsync(0);
+    expect((stillOpen.error as SessionStoreTimeout).phase).toBe('circuit-open');
+    expect(s.inner.calls.length).toBe(callsBefore);
+    await vi.advanceTimersByTimeAsync(1);
+    await expect(s.store.get('b')).resolves.toBeNull();
+    expect(s.inner.calls.length).toBe(callsBefore + 1);
+  });
+
   it('U5: after the cooldown, a second expiry re-opens the circuit and logs a second line', async () => {
     const s = setup();
     await openCircuit(s);
@@ -170,6 +188,7 @@ describe('withOperationDeadline (SMA-651)', () => {
     const error = await s.store.get('a').catch((e: unknown) => e);
     expect(error).toBeInstanceOf(SessionStoreUnavailable);
     expect(error).not.toBeInstanceOf(SessionStoreTimeout);
+    expect(error).toBe(s.inner.rejectError);
     s.inner.state.mode = 'ok';
     await expect(s.store.get('b')).resolves.toBeNull();
     expect(s.log.events).toEqual([]);
@@ -204,6 +223,13 @@ describe('withOperationDeadline (SMA-651)', () => {
     await expect(s.store.close()).resolves.toBeUndefined();
     expect(s.inner.calls.slice(callsBefore)).toEqual(['close']);
     expect(vi.getTimerCount()).toBe(0);
+
+    // The deadline half. A close that never settles must still be PENDING at 4T: a bounded
+    // close would have rejected with SessionStoreTimeout by now.
+    s.inner.state.mode = 'hang';
+    const box = track(s.store.close());
+    await vi.advanceTimersByTimeAsync(DEADLINE);
+    expect(box.settled).toBe(false);
   });
 
   it('U12: no message and no log field holds a URL', async () => {
