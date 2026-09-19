@@ -40,6 +40,21 @@ export class SessionStoreTimeout extends SessionStoreUnavailable {
   }
 }
 
+/**
+ * True for a SessionStoreUnavailable, or a subclass such as SessionStoreTimeout, from ANY copy of
+ * this module (SMA-653 D2).
+ *
+ * Why not `instanceof`: Next 16 gives a route handler and a page SEPARATE copies of this package
+ * (measured, see src/runtime.ts's comment on RUNTIME_KEY_PREFIX), and the runtime, with its store,
+ * is shared between them through globalThis. The store therefore throws the class of whichever
+ * copy built the runtime first, and `instanceof` in the other copy is false. The `code` class
+ * field is an own property of every instance, and the subclass inherits it, so it survives the
+ * duplication.
+ */
+export function isSessionStoreUnavailable(err: unknown): err is SessionStoreUnavailable {
+  return err instanceof Error && (err as { code?: unknown }).code === 'session_store_unavailable';
+}
+
 /** Configuration is internally inconsistent. Thrown by createAuthRuntime at first request. */
 export class AuthConfigError extends AuthError {
   readonly code = 'auth_config_invalid';
