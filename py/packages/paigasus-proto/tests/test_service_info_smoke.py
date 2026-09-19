@@ -20,3 +20,4 @@ def test_capability_registry_keeps_the_proto_names() -> None:
     assert names[Capability.IAM_APIKEYS.value] == "CAPABILITY_IAM_APIKEYS"
     assert names[Capability.IAM_AUDIT.value] == "CAPABILITY_IAM_AUDIT"
     assert names[Capability.GATEWAY_CHAT_STREAM.value] == "CAPABILITY_GATEWAY_CHAT_STREAM"
+    assert names[Capability.IAM_DEADLETTERS.value] == "CAPABILITY_IAM_DEADLETTERS"
