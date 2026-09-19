@@ -1,0 +1,59 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# ONE values block. Six projections derive from `zones` and from nothing else: the ingress path
+# rules, PAIGASUS_ZONES, PAIGASUS_SERVICES, PAIGASUS_IAM_GRPC_URL, the console Deployments and the
+# backend Deployments. A zone's `enabled` flag governs ALL of them together — that is what makes
+# "routable but unadvertised" unrepresentable rather than merely checked (spec D6).
+#
+# A zone id MUST be a member of SERVICE_SLUGS (ts/packages/paigasus-discovery/src/core/state.ts).
+# parseServiceMap THROWS on an unknown key, in BOTH consoles, at first request (spec F8).
+zones:
+  iam:
+    enabled: true
+    basePath: /iam
+    console:
+      image:
+        repository: ghcr.io/smk1085/paigasus-iam-console
+        tag: ""          # defaults to .Chart.AppVersion
+      replicas: 2
+    backend:
+      image:
+        repository: ghcr.io/smk1085/paigasus-iam
+        tag: ""
+      # replicas and maxSurge are pinned; see the comment in templates/backend-deployment.yaml.
+      httpPort: 8080
+      grpcPort: 9090
+      migrationLockWaitSeconds: 120
+  gateway:
+    enabled: false
+    basePath: /gateway
+    console:
+      image:
+        repository: ghcr.io/smk1085/paigasus-gateway-console
+        tag: ""
+      replicas: 2
+    backend:
+      image:
+        repository: ghcr.io/smk1085/paigasus-gateway
+        tag: ""
+      httpPort: 8088
+
+ingress:
+  host: ""               # REQUIRED. Feeds PAIGASUS_PUBLIC_ORIGIN as https://<host>.
+  className: ""
+  tlsSecretName: ""      # REQUIRED. The ingress must terminate TLS: PAIGASUS_PUBLIC_ORIGIN is
+                         # validated as https, and __Host-pgs_sid requires Secure.
+  annotations: {}
+  # DO NOT add a rewrite annotation. Each console compiles basePath in and serves its full path
+  # already; a rewrite that strips /iam breaks every route in that zone.
+
+oidc:
+  issuer: ""             # REQUIRED
+  clientId: ""           # REQUIRED
+  existingSecret: ""     # REQUIRED. Must hold keys: oidc-client-secret, session-redis-url.
+
+redis: {}                # the URL lives in oidc.existingSecret, since it may carry a password
+
+postgres:
+  host: ""               # REQUIRED by the IAM backend
+  existingSecret: ""     # REQUIRED

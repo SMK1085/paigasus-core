@@ -1,0 +1,7 @@
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: v2
+name: paigasus
+description: Paigasus IAM and AI Gateway, with their console zones behind one origin
+type: application
+version: 0.1.0
+appVersion: "0.0.0"
