@@ -1331,3 +1331,28 @@ Expected: every task passes. If `paigasus-auth-ts:typecheck` exists (`moon task 
 - [ ] **Step 3: Report**
 
 Report: the commit list (`git log --oneline origin/main..HEAD`), each task's pass/fail, the Task 6 table, and any red that is not caused by this branch with its evidence.
+
+---
+
+## Mutation battery results (Task 6)
+
+Each row: tree clean, one Edit applied, the named test run, verdict recorded, `git checkout --` restored. Every mutation bit — no guard survived deletion.
+
+| # | Mutation (file:line) | Test run | Verdict | First assertion message |
+|---|---|---|---|---|
+| M1 | Delete `pingInterval: opts.commandTimeoutMs,` (`src/adapters/redis-store.ts:293`) | container E1 | FAIL (as expected) | `expected 7 to be 4 // Object.is equality` (a reconnect was counted) |
+| M2 | Delete `socketTimeout: opts.commandTimeoutMs * 2,` (`src/adapters/redis-store.ts:298`) | container E3 | FAIL (as expected) | `expected 4 to be greater than 4` (no reconnect happened) |
+| M3 | Delete `openedAt = performance.now();` (`src/adapters/operation-deadline.ts:76`) | unit U3 | FAIL (as expected) | `Cannot read properties of undefined (reading 'phase')` |
+| M3 | (same mutation) | container E3 | FAIL (as expected) | `expected 4 to be greater than 4` (no reconnect happened) |
+| M4 | Replace `get: (sid) => bounded('get', () => inner.get(sid)),` with `get: (sid) => inner.get(sid),` (`src/adapters/operation-deadline.ts:90`) | unit U10 (`get` row) | FAIL (as expected) | `Cannot read properties of undefined (reading 'phase')` — the other six U10 rows stayed green |
+| M5 | Replace `putTransaction: (txnId, tx, ttlMs) => bounded('putTransaction', () => inner.putTransaction(txnId, tx, ttlMs)),` with the unwrapped call (`src/adapters/operation-deadline.ts:95`) | unit U10 (`putTransaction` row) | FAIL (as expected) | `Cannot read properties of undefined (reading 'phase')` — the other six U10 rows stayed green |
+| M6 | Delete `logger,` from the `createRedisSessionStore` call (`src/runtime.ts:151`) | `tests/runtime-redis-wiring.test.ts` | FAIL (as expected) | `expected [] to deep equally contain [ 'store.operation_timeout', …(1) ]` |
+| M7 | Delete the `openedAt = null;` line after the cooldown check (`src/adapters/operation-deadline.ts:56`) | unit U5 | FAIL (as expected) | `expected [ [ 'store.operation_timeout', …(1) ] ] to have a length of 2 but got 1` |
+| M8 | Replace the `close()` body with the destroying `close()` variant given in the brief (`src/adapters/redis-store.ts:238-243`) | container E5 | FAIL (as expected) | `expected 'still waiting' to be 'closed' // Object.is equality` |
+| M9 | Replace `connectWithin(client, opts.commandTimeoutMs)` with `client.connect().then(() => 'connected' as const)` (`src/adapters/redis-store.ts:310`) | `tests/adapters/redis-store-connect.test.ts` first case | FAIL (as expected) | `Test timed out in 5000ms.` (the T-bounded wait was removed, so the call hangs when connect never settles) |
+| M10 | Delete `.max(536_870_911)` (`src/config.ts:53`) | `tests/config.test.ts` | FAIL (as expected) | `expected [Function] to throw an error` |
+| M11 | Change `DEADLINE_FACTOR = 4` to `3` (`src/adapters/operation-deadline.ts:23`) | unit U1 | FAIL (as expected) | `expected true to be false // Object.is equality` (the call settled one tick earlier than the test's fixed 4T clock expected) |
+
+After the last restore: `git status --porcelain` printed nothing, and `pnpm -C ts/packages/paigasus-auth exec vitest run` passed all 382 tests across 30 files.
+
+No mutation left its test green. No test was changed during the battery.
