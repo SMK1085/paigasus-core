@@ -1,0 +1,22 @@
+{{/* SPDX-License-Identifier: Apache-2.0 */}}
+{{- include "paigasus.validate" . -}}
+{{- $root := . -}}
+{{- $full := include "paigasus.fullname" . -}}
+{{- range $id, $z := .Values.zones }}
+{{- if $z.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $full }}-{{ $id }}-console
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: {{ $id }}-console
+    app.kubernetes.io/instance: {{ $root.Release.Name }}
+  ports:
+    - name: http
+      port: 3000
+      targetPort: http
+{{- end }}
+{{- end }}

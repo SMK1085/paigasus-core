@@ -1,0 +1,71 @@
+{{/* SPDX-License-Identifier: Apache-2.0 */}}
+{{- include "paigasus.validate" . -}}
+{{- $root := . -}}
+{{- $full := include "paigasus.fullname" . -}}
+{{- range $id, $z := .Values.zones }}
+{{- if $z.enabled }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $full }}-{{ $id }}-console
+spec:
+  replicas: {{ $z.console.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ $id }}-console
+      app.kubernetes.io/instance: {{ $root.Release.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ $id }}-console
+        app.kubernetes.io/instance: {{ $root.Release.Name }}
+      annotations:
+        # All three checksums, not two. With envFrom and no checksum on the SECRET, rotating
+        # PAIGASUS_SESSION_REDIS_URL or the OIDC client secret restarts nothing and every pod
+        # keeps the old value indefinitely.
+        checksum/zonemap: {{ include (print $root.Template.BasePath "/zonemap-configmap.yaml") $root | sha256sum }}
+        checksum/console-env: {{ include (print $root.Template.BasePath "/console-env-configmap.yaml") $root | sha256sum }}
+        checksum/secret: {{ $root.Values.oidc.existingSecret | sha256sum }}
+    spec:
+      securityContext:
+        runAsUser: 65532
+        runAsGroup: 65532
+        runAsNonRoot: true
+        # NO readOnlyRootFilesystem. RUNBOOK-containers.md § 7: that posture is untested for
+        # every image in this repo. It is a follow-up to measure, not a default to ship.
+      containers:
+        - name: console
+          image: "{{ $z.console.image.repository }}:{{ $z.console.image.tag | default $root.Chart.AppVersion }}"
+          ports:
+            - name: http
+              containerPort: 3000
+          env:
+            - name: PAIGASUS_ZONE
+              value: {{ $id | quote }}
+            - name: PORT
+              value: "3000"
+          envFrom:
+            - configMapRef:
+                name: {{ $full }}-zonemap
+            - configMapRef:
+                name: {{ $full }}-console-env
+            - secretRef:
+                name: {{ $root.Values.oidc.existingSecret }}
+          # Liveness is a TCP check, NOT httpGet on /healthz. That route runs the FULL config
+          # parse and its failure is deliberately not memoized, so using it for liveness puts a
+          # misconfigured pod into CrashLoopBackOff instead of leaving it running and NotReady
+          # with a readable log — and RUNBOOK-containers.md § 4 requires liveness never to touch
+          # a dependency. The consoles have no /readyz; that is a recorded gap (spec § 7.8).
+          livenessProbe:
+            tcpSocket:
+              port: http
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: {{ $z.basePath }}/healthz
+              port: http
+            periodSeconds: 10
+            failureThreshold: 3
+{{- end }}
+{{- end }}
