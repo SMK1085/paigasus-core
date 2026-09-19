@@ -71,8 +71,7 @@ async fn seed_system_policy(db: &DatabaseConnection, policy_id: &str, now: DateT
 }
 
 /// Upper bound on how long racer B may take to block on racer A's uncommitted INSERT (SMA-659).
-/// A LOAD BUDGET, not an expectation: the wait returns on the first observation, which on an idle
-/// machine is the first or second poll.
+/// A LOAD BUDGET, not an expectation: the wait returns on the first observation that B is blocked.
 const RACER_BLOCK_BUDGET: Duration = Duration::from_secs(30);
 
 /// How often [`wait_until_blocked_by`] polls `pg_stat_activity`.
@@ -114,7 +113,10 @@ async fn backend_pid(conn: &impl ConnectionTrait) -> i32 {
 /// `Err` (a blocked racer cannot finish while A is uncommitted, so checking "blocked" first
 /// never hides a finished one); `budget` elapsed → `Err` with a dump of the non-idle backends.
 /// Panics with `observer query failed: …` if the poll itself fails, which is neither of the two
-/// verdicts.
+/// verdicts. `budget` is not a hard wall-clock bound: the deadline is checked only after a poll
+/// returns, so with an exhausted connection pool one poll can wait up to the pool's own
+/// `acquire_timeout` (30 s) before the check runs and panics with `observer query failed`. The
+/// worst case is therefore about `budget` plus that acquire timeout, and it is still bounded.
 async fn wait_until_blocked_by<T>(db: &DatabaseConnection, blocker_pid: i32, racer: &JoinHandle<T>, budget: Duration) -> Result<(), String> {
     let deadline = std::time::Instant::now() + budget;
     loop {
@@ -807,4 +809,11 @@ async fn wait_until_blocked_by_reports_a_racer_that_never_blocks() {
     pending.abort();
     assert!(err.contains("did not block"), "wrong message at the deadline: {err}");
     assert!(err.contains("non-idle backends"), "the deadline message must carry the backend dump: {err}");
+    // The "non-idle backends" text alone does not prove the dump query itself worked: that text is
+    // in the format string, so it is present even when `NON_IDLE_BACKENDS_SQL` fails. Rule out the
+    // three dump-failure fallbacks explicitly.
+    assert!(
+        !err.contains("(dump failed") && !err.contains("(dump unreadable") && !err.contains("(dump returned no row"),
+        "the backend dump query itself failed: {err}"
+    );
 }
