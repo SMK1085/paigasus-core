@@ -309,7 +309,7 @@ jobs:
                 # LC_BUILD_VERSION (whose field is `minos`), NOT the legacy LC_VERSION_MIN_MACOSX
                 # the x86_64 branch parses — so it needs its own parse, not a shared one.
                 otool -l "$so" | grep -A4 -E 'LC_BUILD_VERSION|LC_VERSION_MIN_MACOSX'
-                minos="$(otool -l "$so" | awk '/LC_BUILD_VERSION/{f=1} f&&/^ *minos/{print $2; exit}')"
+                minos="$(otool -l "$so" | awk '/LC_BUILD_VERSION/{f=1} f&&/^ *minos/&&!d{v=$2; d=1} END{print v}')"
                 [ -n "$minos" ] || { echo "::error::could not read LC_BUILD_VERSION minos from $so"; exit 1; }
                 [ "$minos" = "11.0" ] || { echo "::error::arm64 minimum macOS is [$minos], but the wheel is tagged macosx_11_0 — re-pin this constant if [$minos] is correct, never relax the check"; exit 1; }
                 echo "darwin-arm64 minimum macOS: [$minos] — agrees with the tag"
@@ -320,7 +320,7 @@ jobs:
                 # LC_VERSION_MIN_MACOSX while arm64 emits LC_BUILD_VERSION. Grepping only the
                 # latter prints nothing at all for the x64 binary — the cross-built one.
                 otool -l "$so" | grep -A4 -E 'LC_BUILD_VERSION|LC_VERSION_MIN_MACOSX'
-                min="$(otool -l "$so" | awk '/LC_VERSION_MIN_MACOSX/{getline; getline; print $2; exit}')"
+                min="$(otool -l "$so" | awk '/LC_VERSION_MIN_MACOSX/&&!d{getline; getline; v=$2; d=1} END{print v}')"
                 # A cross-built slice could otherwise inherit the HOST SDK's floor and silently
                 # drop macOS 10.13-10.15 Intel users while the tag still reads 10_12.
                 [ "$min" = "10.12" ] || { echo "::error::x86_64 minimum macOS is [$min], but the wheel is tagged 10_12"; exit 1; }
@@ -518,7 +518,7 @@ jobs:
           set -euo pipefail
           listing="$(tar tzf dist/*.tar.gz)"
           echo "$listing"
-          if printf '%s\n' "$listing" | grep -q 'moon\.yml'; then
+          if grep -q 'moon\.yml' < <(printf '%s\n' "$listing"); then
             echo "::error::sdist ships moon.yml — the Cargo include allowlist has regressed"; exit 1
           fi
           # README.md and LICENSE are anchored on the CRATE PATH, not on their basename. The
@@ -541,7 +541,7 @@ jobs:
             crates/bindings/paigasus-py-bindings/LICENSE \
             pyproject.toml \
             Cargo.lock; do
-            printf '%s\n' "$listing" | grep -q "/$required$" \
+            grep -q "/$required$" < <(printf '%s\n' "$listing") \
               || { echo "::error::sdist is missing $required"; exit 1; }
           done
 
@@ -674,7 +674,7 @@ jobs:
           z = zipfile.ZipFile(w)
           n = next(i for i in z.namelist() if i.endswith('.dist-info/METADATA'))
           print(z.read(n).decode())")"
-          printf '%s\n' "$meta" | grep -qE '^Requires-Dist: paigasus-py-bindings==' \
+          grep -qE '^Requires-Dist: paigasus-py-bindings==' < <(printf '%s\n' "$meta") \
             || { echo "::error::the wrapper lost its == pin on paigasus-py-bindings"; printf '%s\n' "$meta"; exit 1; }
           echo "OK: exact pin present"
 
