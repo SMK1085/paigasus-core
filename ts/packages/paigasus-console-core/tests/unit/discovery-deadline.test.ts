@@ -19,6 +19,7 @@ const COOLDOWN_MS = TIMEOUT_MS * 4;
 
 type CacheRecord = Parameters<DescriptorCache['set']>[1];
 
+/** A minimal valid cache record. Its content does not matter here; only that it round-trips. */
 function record(): CacheRecord {
   return { version: 1, rev: 1, descriptor: { service: 'iam', version: '1.0.0', capabilities: [] }, descriptorAt: 0, outcome: 'ok', outcomeAt: 0, reason: null };
 }
@@ -49,6 +50,11 @@ function fakeInner(): { cache: DescriptorCache; calls: string[]; settle: (value:
   return { cache, calls, settle: (value) => resolveNext?.(value), fail: (error) => rejectNext?.(error) };
 }
 
+/**
+ * A logger that collects its JSON lines. `timeouts()` returns the fields of every
+ * `discovery.redis_operation_timeout` line, in order, so a test can assert on the count as well as
+ * the content — one wedge must produce exactly one line (D6).
+ */
 function sink(): { log: ConsoleLogger; lines: string[]; timeouts: () => unknown[] } {
   const lines: string[] = [];
   const log = createJsonLogger((line) => {
@@ -62,6 +68,11 @@ function sink(): { log: ConsoleLogger; lines: string[]; timeouts: () => unknown[
   return { log, lines, timeouts };
 }
 
+/**
+ * One wrapped cache plus the three things a test drives it through: the fake inner cache, the
+ * `ready` source (a plain EventEmitter, which satisfies the structural ReadySource), and the log
+ * sink. Each call builds a fresh set, so the circuit state never leaks between tests.
+ */
 function wrapped(): { cache: DescriptorCache; inner: ReturnType<typeof fakeInner>; client: EventEmitter; log: ReturnType<typeof sink> } {
   const inner = fakeInner();
   const client = new EventEmitter();
