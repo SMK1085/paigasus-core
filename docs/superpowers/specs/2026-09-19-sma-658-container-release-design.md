@@ -422,13 +422,13 @@ A result that contradicts this spec changes the spec first.
 | # | Question | Why it matters |
 |---|---|---|
 | M1 | ~~Does a `Cargo.lock`-only change bump a service?~~ Answered by M7: release-plz does not process the services at all. | — |
-| M2 | Which of `crane`, `skopeo`, `regctl` pushes a buildx OCI archive by digest, and has a proto plugin? | § 4.3 step 4. |
-| M3 | On the Docker version of each runner label (`ubuntu-latest`, `ubuntu-24.04-arm`): after `docker load` of a buildx OCI archive, which identity equals which archive digest (classic store: config digest; containerd store: manifest or index digest)? What does `.Size` mean? | § 4.2 identity check, `assert_base_intact`. |
-| M4 | Does `docker buildx imagetools create` from GHCR to Docker Hub keep the index digest byte for byte? | AC 2. |
+| M2 | Which of `crane`, `skopeo`, `regctl` pushes a buildx OCI archive by digest, and has a proto plugin? | **Done, 2026-09-19: `crane`** (go-containerregistry v0.22.1). MEASURED: `crane push <oci-layout> <ref>` kept the archive's manifest digest. No proto plugin exists for crane, cosign or syft (`proto plugin search`, proto 0.61.1): each gets a vendored TOML plugin with the release `checksums.txt`, like the other pinned CLIs. |
+| M3 | On the Docker version of each runner label (`ubuntu-latest`, `ubuntu-24.04-arm`): after `docker load` of a buildx OCI archive, which identity equals which archive digest? What does `.Size` mean? | **Local only** (Docker 29.8.0, containerd store, arm64): the loaded ID is the **manifest** digest, not the config digest; `.Size` is the unpacked size. The runners are NOT measured: PR 1's `images.yml` reports both values on each runner, and the identity check accepts the value that matches the runner's store. |
+| M4 | Does `docker buildx imagetools create` from GHCR to Docker Hub keep the index digest byte for byte? | **Local proxy** (two `registry:2`): an index keeps its digest byte for byte. A single-platform manifest is **re-wrapped** in a new index with a new digest, so the copy must always start from the index (§ 4.3 step 6 does). Docker Hub itself is not measured. |
 | M5 | Does the per-service smoke pass on `ubuntu-24.04-arm`? | The arm64 leg has never run. |
-| M6 | Does any gate assert the services' `0.0.0`? | § 3.4. |
+| M6 | Does any gate assert the services' `0.0.0`? | **Done: no.** `publish-metadata` Check 3 filters out `publish = false` crates first; the `service_info.rs` tests compare against `env!("CARGO_PKG_VERSION")`. A bump to `0.1.0` reds nothing. |
 | M7 | release-plz 0.3.158 and a Cargo `publish = false` crate. | **Done** (§ 3.1): never bumped, never tagged; `git_only` fails on the second release. |
-| M8 | What does syft list for the archive today? | § 4.5, AC 7. |
+| M8 | What does syft list for the archive today? | § 4.5, AC 7. Not measured locally (a cold release build). PR 1's `images.yml` runs syft and uploads its output. |
 | M9 | Does an environment secret reach a job in `release.yml` with `environment: release-images` when the environment has no reviewers and a `main`-only rule? (Expected yes; confirm in the rehearsal.) | AC 5. |
 
 ## 10. Rollout order
