@@ -255,7 +255,10 @@ async function handleCallback(runtime: AuthRuntime, req: Request, url: URL): Pro
   // because the `SessionStore` port deliberately offers no peek — `takeTransaction` is atomic
   // get-and-delete by design (ports/session-store.ts), and adding one back would reopen exactly
   // the race it exists to prevent.
-  const tx = await runtime.store.takeTransaction(state);
+  const tx = await storeStep(runtime, 'callback_take_transaction', undefined, () => runtime.store.takeTransaction(state));
+  // No exchange has happened, so nothing is orphaned. The code is not spent, but the retry starts a
+  // new login rather than replaying this URL (spec § 11: the page must not carry the code).
+  if (tx === STORE_DOWN) return storeUnavailableResponse({ kind: 'link', href: loginRetryHref(runtime.basePath) });
   if (tx === null) return reject('state_unknown');
 
   if (!secretMatchesHash(cookieSecret, tx.secretHash)) return reject('txn_mismatch');
@@ -289,6 +292,15 @@ async function handleCallback(runtime: AuthRuntime, req: Request, url: URL): Pro
 
   const principal = await runtime.resolver.resolve({ accessToken: tokens.accessToken, idTokenClaims: tokens.idTokenClaims });
 
+  // SMA-653 D10. From here on the code exchange has SUCCEEDED, so the IdP holds a session (with
+  // `offline_access`, an offline one) and a live refresh token. A store failure below must not
+  // orphan it: revoke it, best effort, then answer 503. The retry starts a new login, because the
+  // code is spent.
+  const failAfterExchange = async (): Promise<Response> => {
+    if (tokens.refreshToken !== undefined) await bestEffortRevoke(runtime, tokens.refreshToken);
+    return storeUnavailableResponse({ kind: 'link', href: loginRetryHref(runtime.basePath, tx.returnTo) });
+  };
+
   // Session fixation guard (design doc § 9.4): whatever the browser presented as its CURRENT
   // session is discarded before a new one is minted, regardless of whether the sid the browser
   // holds still resolves to a live record.
@@ -301,7 +313,8 @@ async function handleCallback(runtime: AuthRuntime, req: Request, url: URL): Pro
   // first tab's clearing response.
   const presentedSid = cookies.get(SESSION_COOKIE);
   if (presentedSid !== undefined) {
-    await runtime.store.delete(presentedSid);
+    const deleted = await storeStep(runtime, 'callback_delete', presentedSid, () => runtime.store.delete(presentedSid));
+    if (deleted === STORE_DOWN) return failAfterExchange();
   }
 
   const sid = newSessionId();
@@ -319,7 +332,8 @@ async function handleCallback(runtime: AuthRuntime, req: Request, url: URL): Pro
   // expectedRev: null means "insert only if absent" — a `false` here means a record already
   // exists at this freshly-minted, 256-bit random sid (review round 1, M2). Astronomically
   // unlikely, but an unchecked write on the session-creation path is still an unchecked write.
-  const stored = await runtime.store.set(sid, record, runtime.ttlMs, null);
+  const stored = await storeStep(runtime, 'callback_set', sid, () => runtime.store.set(sid, record, runtime.ttlMs, null));
+  if (stored === STORE_DOWN) return failAfterExchange();
   if (!stored) {
     throw new Error('failed to persist a newly minted session: a record already exists at this sid');
   }
@@ -335,6 +349,21 @@ async function handleCallback(runtime: AuthRuntime, req: Request, url: URL): Pro
   }
 
   return new Response(null, { status: 302, headers });
+}
+
+/**
+ * RFC 7009 revocation, BEST EFFORT: `true` when the IdP accepted it, `false` on any failure. Never
+ * rethrown and never logged as a raw caught error object — it may embed a URL, matching
+ * adapters/oidc.ts's own rule. Used by logout step 3, and by the store-failure paths that would
+ * otherwise orphan a live refresh token (SMA-653 D6, D10).
+ */
+async function bestEffortRevoke(runtime: AuthRuntime, refreshToken: string): Promise<boolean> {
+  try {
+    await runtime.oidc.revoke(refreshToken);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 // POST /auth/logout — AC 3: "a stolen cookie is dead immediately after". Design doc § 9.5.
@@ -395,15 +424,8 @@ async function handleLogout(runtime: AuthRuntime, req: Request): Promise<Respons
   // entirely when there was nothing to revoke (no session, or a session with no refresh token).
   // Never rethrown and never logged as a raw caught error object — it may embed a URL, matching
   // adapters/oidc.ts's own rule — only the boolean outcome below is recorded.
-  let revoked = false;
-  if (refreshToken !== undefined) {
-    try {
-      await runtime.oidc.revoke(refreshToken);
-      revoked = true;
-    } catch {
-      // Best-effort: swallowed. `revoked: false` in the event below is the record of this.
-    }
-  }
+  // Best-effort: a failure is swallowed, and `revoked: false` in the event below is its record.
+  const revoked = refreshToken !== undefined ? await bestEffortRevoke(runtime, refreshToken) : false;
 
   // STEP 4: redirect to end_session_endpoint with post_logout_redirect_uri and a state bound to
   // this logout. `newTransactionId` is reused as a generic opaque-random-id generator (the same

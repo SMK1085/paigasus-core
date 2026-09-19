@@ -5,12 +5,13 @@
 // once with its SessionStoreTimeout subclass. Every row also asserts redaction (the sentinel DSN
 // in the thrown error reaches neither the response nor a log).
 import { describe, expect, it, vi } from 'vitest';
+import { hashSecret } from '../../src/core/ids.js';
 import { SessionStoreUnavailable } from '../../src/core/errors.js';
 import type { SessionRecord } from '../../src/core/session.js';
-import { SESSION_COOKIE } from '../../src/http/cookies.js';
+import { SESSION_COOKIE, txnCookieName } from '../../src/http/cookies.js';
 import { createAuthRoutes } from '../../src/http/routes.js';
 import { sidTag } from '../../src/ports/logger.js';
-import { BASE_PATH, FAILURE_KINDS, ORIGIN, SENTINEL_DSN, expectEventsClean, expectStoreUnavailable, harness, storeError, storeUnavailableEvents } from '../support/store-failure.js';
+import { BASE_PATH, FAILURE_KINDS, NEW_REFRESH_TOKEN, ORIGIN, SENTINEL_DSN, expectEventsClean, expectStoreUnavailable, harness, storeError, storeUnavailableEvents, type Harness } from '../support/store-failure.js';
 
 const RETURN_TO = '/iam/orgs';
 const OLD_SID = 'old-session-id-0123456789';
@@ -107,5 +108,75 @@ describe('GET /auth/login — escaping and classification', () => {
   it('lets any other store error propagate (D2)', async () => {
     const h = harness(['putTransaction'], () => new Error('boom'));
     await expect(createAuthRoutes(h.runtime).handle(loginRequest(RETURN_TO))).rejects.toThrow('boom');
+  });
+});
+
+const STATE = 'state-0123456789';
+const TXN_SECRET = 'correct-secret-value-32-bytes-ok';
+
+async function seedTransaction(h: Harness): Promise<void> {
+  await h.inner.putTransaction(STATE, { codeVerifier: 'a-verifier', nonce: 'a-nonce', returnTo: RETURN_TO, secretHash: hashSecret(TXN_SECRET), createdAt: Date.now() }, 600_000);
+}
+
+function callbackRequest(sid?: string): Request {
+  const cookies = [`${txnCookieName(STATE)}=${TXN_SECRET}`, ...(sid !== undefined ? [`${SESSION_COOKIE}=${sid}`] : [])];
+  return new Request(`${ORIGIN}${BASE_PATH}/auth/callback?code=a-code&state=${STATE}`, { headers: { cookie: cookies.join('; ') } });
+}
+
+describe.each(FAILURE_KINDS)('GET /auth/callback with the store down (%s)', (kind) => {
+  it('row 3: takeTransaction fails -> 503, link to login, no exchange, no revoke', async () => {
+    const h = harness(['takeTransaction'], () => storeError(kind));
+    await seedTransaction(h);
+
+    const res = await createAuthRoutes(h.runtime).handle(callbackRequest());
+
+    await expectStoreUnavailable(res, { kind: 'link', target: '/iam/auth/login' });
+    expect(storeUnavailableEvents(h.events)).toEqual([{ zone: 'iam', stage: 'callback_take_transaction' }]);
+    expect(h.calls).toEqual([`takeTransaction:${STATE}`]);
+    expect(h.oidc.revokeCalls).toEqual([]);
+    expectEventsClean(h.events);
+  });
+
+  it('row 4: the delete of the presented session fails -> revoke the new token, then 503', async () => {
+    const h = harness(['delete'], () => storeError(kind));
+    await seedTransaction(h);
+
+    const res = await createAuthRoutes(h.runtime).handle(callbackRequest(OLD_SID));
+
+    await expectStoreUnavailable(res, { kind: 'link', target: `/iam/auth/login?returnTo=${encodeURIComponent(RETURN_TO)}` });
+    expect(storeUnavailableEvents(h.events)).toEqual([{ zone: 'iam', stage: 'callback_delete', sid: sidTag(OLD_SID) }]);
+    expect(h.oidc.revokeCalls).toEqual([NEW_REFRESH_TOKEN]);
+    expect(h.calls.some((call) => call.startsWith('set:'))).toBe(false);
+    expect(h.events.map(([name]) => name)).not.toContain('session.created');
+    expectEventsClean(h.events);
+  });
+
+  it('row 5: the set of the new session fails -> revoke the new token, then 503', async () => {
+    const h = harness(['set'], () => storeError(kind));
+    await seedTransaction(h);
+
+    const res = await createAuthRoutes(h.runtime).handle(callbackRequest());
+
+    await expectStoreUnavailable(res, { kind: 'link', target: `/iam/auth/login?returnTo=${encodeURIComponent(RETURN_TO)}` });
+    const setCall = h.calls.find((call) => call.startsWith('set:'));
+    expect(setCall).toBeDefined();
+    const newSid = (setCall ?? '').slice('set:'.length);
+    expect(storeUnavailableEvents(h.events)).toEqual([{ zone: 'iam', stage: 'callback_set', sid: sidTag(newSid) }]);
+    expect(h.oidc.revokeCalls).toEqual([NEW_REFRESH_TOKEN]);
+    expect(h.events.map(([name]) => name)).not.toContain('session.created');
+    expectEventsClean(h.events);
+  });
+
+  it('rows 4 and 5: a failing revoke changes nothing in the response or the log', async () => {
+    const h = harness(['set'], () => storeError(kind));
+    h.oidc.failRevoke = true;
+    await seedTransaction(h);
+
+    const res = await createAuthRoutes(h.runtime).handle(callbackRequest());
+
+    await expectStoreUnavailable(res, { kind: 'link', target: `/iam/auth/login?returnTo=${encodeURIComponent(RETURN_TO)}` });
+    expect(h.oidc.revokeCalls).toEqual([NEW_REFRESH_TOKEN]);
+    expect(storeUnavailableEvents(h.events).map((fields) => fields.stage)).toEqual(['callback_set']);
+    expectEventsClean(h.events);
   });
 });
