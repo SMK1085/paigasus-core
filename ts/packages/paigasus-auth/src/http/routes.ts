@@ -23,6 +23,12 @@
 // an HTTP response (an error page, § 10 of the design doc) is a caller concern — this package does
 // not decide that here, matching how core/single-flight.ts lets its own AuthError subclasses
 // propagate rather than swallowing them into a "safe" return value.
+//
+// A STORE FAILURE IS THE EXCEPTION, and it is mapped HERE (SMA-653 D1). A SessionStoreUnavailable
+// from any store call on these routes becomes a 503 with a retry control (http/store-unavailable.ts;
+// SMA-506 design § 7.2). Unlike CallbackRejected, the 503 is a fixed rule of the design, not a
+// caller choice, and only this file knows WHICH store call failed — the logout route needs that to
+// still attempt its delete when its read fails. Every other error still propagates.
 import type { OidcTokens } from '../adapters/oidc';
 import { hashSecret, newSessionId, newTransactionId, newTransactionSecret, secretMatchesHash } from '../core/ids';
 import { validateReturnTo } from '../core/return-to';
@@ -32,6 +38,7 @@ import { sidTag } from '../ports/logger';
 import type { AuthRuntime } from '../runtime';
 import { SESSION_COOKIE, TXN_COOKIE_PREFIX, clearCookie, readCookies, serializeCookie, txnCookieName } from './cookies';
 import { AUTH_ROUTE_SUFFIXES, type AuthRouteSuffix } from './route-table';
+import { STORE_DOWN, loginRetryHref, storeStep, storeUnavailableResponse, type RetryAffordance } from './store-unavailable';
 
 /** Design doc § 9.3: 10 minutes. */
 const TXN_TTL_MS = 10 * 60 * 1000;
@@ -177,7 +184,19 @@ async function handleLogin(runtime: AuthRuntime, req: Request, url: URL): Promis
     state: txnId,
   });
 
-  await runtime.store.putTransaction(txnId, { codeVerifier: authorization.codeVerifier, nonce: authorization.nonce, returnTo, secretHash: hashSecret(secret), createdAt: Date.now() }, TXN_TTL_MS);
+  // SMA-653 D9: read the presented sid BEFORE the first store call, because it decides where the
+  // 503's retry link points. When this browser holds a session, the link goes to `returnTo`, NOT to
+  // /auth/login: during a wedge `requireSession` sends a signed-in user here, the store call below
+  // fails first, and the session record and cookie both survive. A retry link to /auth/login would
+  // delete that still-valid session once Redis recovers (SMA-651 § 5). `returnTo` has already
+  // passed validateReturnTo and the auth-route guard above, so it cannot loop back into this route.
+  const presentedSid = readCookies(req.headers.get('cookie')).get(SESSION_COOKIE);
+  const retry: RetryAffordance = { kind: 'link', href: presentedSid !== undefined ? returnTo : loginRetryHref(runtime.basePath, returnTo) };
+
+  const put = await storeStep(runtime, 'login_put_transaction', undefined, () =>
+    runtime.store.putTransaction(txnId, { codeVerifier: authorization.codeVerifier, nonce: authorization.nonce, returnTo, secretHash: hashSecret(secret), createdAt: Date.now() }, TXN_TTL_MS),
+  );
+  if (put === STORE_DOWN) return storeUnavailableResponse(retry);
 
   // I6 (final fix wave): delete the OLD session record here, not only clear its cookie. A
   // single-tab re-login browser-clears __Host-pgs_sid in THIS same 302, so the browser never
@@ -185,9 +204,11 @@ async function handleLogin(runtime: AuthRuntime, req: Request, url: URL): Promis
   // the common case, and a copied cookie stayed live for the full session TTL after the user
   // signed in again. Reading it from the REQUEST (before it is cleared in the response) is what
   // makes this reachable; clearing the browser cookie alone was never enough.
-  const presentedSid = readCookies(req.headers.get('cookie')).get(SESSION_COOKIE);
+  //
+  // If this delete fails, the stored transaction has no cookie and expires unused (spec § 4 row 2).
   if (presentedSid !== undefined) {
-    await runtime.store.delete(presentedSid);
+    const deleted = await storeStep(runtime, 'login_delete', presentedSid, () => runtime.store.delete(presentedSid));
+    if (deleted === STORE_DOWN) return storeUnavailableResponse(retry);
   }
 
   const headers = new Headers({ Location: authorization.url });
@@ -234,7 +255,10 @@ async function handleCallback(runtime: AuthRuntime, req: Request, url: URL): Pro
   // because the `SessionStore` port deliberately offers no peek — `takeTransaction` is atomic
   // get-and-delete by design (ports/session-store.ts), and adding one back would reopen exactly
   // the race it exists to prevent.
-  const tx = await runtime.store.takeTransaction(state);
+  const tx = await storeStep(runtime, 'callback_take_transaction', undefined, () => runtime.store.takeTransaction(state));
+  // No exchange has happened, so nothing is orphaned. The code is not spent, but the retry starts a
+  // new login rather than replaying this URL (spec § 11: the page must not carry the code).
+  if (tx === STORE_DOWN) return storeUnavailableResponse({ kind: 'link', href: loginRetryHref(runtime.basePath) });
   if (tx === null) return reject('state_unknown');
 
   if (!secretMatchesHash(cookieSecret, tx.secretHash)) return reject('txn_mismatch');
@@ -268,6 +292,15 @@ async function handleCallback(runtime: AuthRuntime, req: Request, url: URL): Pro
 
   const principal = await runtime.resolver.resolve({ accessToken: tokens.accessToken, idTokenClaims: tokens.idTokenClaims });
 
+  // SMA-653 D10. From here on the code exchange has SUCCEEDED, so the IdP holds a session (with
+  // `offline_access`, an offline one) and a live refresh token. A store failure below must not
+  // orphan it: revoke it, best effort, then answer 503. The retry starts a new login, because the
+  // code is spent.
+  const failAfterExchange = async (): Promise<Response> => {
+    if (tokens.refreshToken !== undefined) await bestEffortRevoke(runtime, tokens.refreshToken);
+    return storeUnavailableResponse({ kind: 'link', href: loginRetryHref(runtime.basePath, tx.returnTo) });
+  };
+
   // Session fixation guard (design doc § 9.4): whatever the browser presented as its CURRENT
   // session is discarded before a new one is minted, regardless of whether the sid the browser
   // holds still resolves to a live record.
@@ -280,7 +313,8 @@ async function handleCallback(runtime: AuthRuntime, req: Request, url: URL): Pro
   // first tab's clearing response.
   const presentedSid = cookies.get(SESSION_COOKIE);
   if (presentedSid !== undefined) {
-    await runtime.store.delete(presentedSid);
+    const deleted = await storeStep(runtime, 'callback_delete', presentedSid, () => runtime.store.delete(presentedSid));
+    if (deleted === STORE_DOWN) return failAfterExchange();
   }
 
   const sid = newSessionId();
@@ -298,7 +332,8 @@ async function handleCallback(runtime: AuthRuntime, req: Request, url: URL): Pro
   // expectedRev: null means "insert only if absent" — a `false` here means a record already
   // exists at this freshly-minted, 256-bit random sid (review round 1, M2). Astronomically
   // unlikely, but an unchecked write on the session-creation path is still an unchecked write.
-  const stored = await runtime.store.set(sid, record, runtime.ttlMs, null);
+  const stored = await storeStep(runtime, 'callback_set', sid, () => runtime.store.set(sid, record, runtime.ttlMs, null));
+  if (stored === STORE_DOWN) return failAfterExchange();
   if (!stored) {
     throw new Error('failed to persist a newly minted session: a record already exists at this sid');
   }
@@ -314,6 +349,21 @@ async function handleCallback(runtime: AuthRuntime, req: Request, url: URL): Pro
   }
 
   return new Response(null, { status: 302, headers });
+}
+
+/**
+ * RFC 7009 revocation, BEST EFFORT: `true` when the IdP accepted it, `false` on any failure. Never
+ * rethrown and never logged as a raw caught error object — it may embed a URL, matching
+ * adapters/oidc.ts's own rule. Used by logout step 3, and by the store-failure paths that would
+ * otherwise orphan a live refresh token (SMA-653 D6, D10).
+ */
+async function bestEffortRevoke(runtime: AuthRuntime, refreshToken: string): Promise<boolean> {
+  try {
+    await runtime.oidc.revoke(refreshToken);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 // POST /auth/logout — AC 3: "a stolen cookie is dead immediately after". Design doc § 9.5.
@@ -347,16 +397,36 @@ async function handleCallback(runtime: AuthRuntime, req: Request, url: URL): Pro
 // does not accept `client_id` as a substitute — Okta documents it as required. Logging out against
 // such a provider still succeeds server-side (step 1 already deleted the record), but the
 // end-session redirect will not complete: a UX failure there, not a security one.
+//
+// A STORE FAILURE (SMA-653). A failed read does not stop the delete (D5). A failed delete answers
+// 503 with a POST retry form and keeps the session cookie (D6): the user must see that logout did
+// not finish, never a false "signed out".
 async function handleLogout(runtime: AuthRuntime, req: Request): Promise<Response> {
   const cookies = readCookies(req.headers.get('cookie'));
   const sid = cookies.get(SESSION_COOKIE);
 
   // STEP 1: delete first, before any network call.
+  //
+  // The read only finds a refresh token worth revoking in step 3. Its failure must NEVER cost the
+  // delete (SMA-653 D5): a failed read leaves `refreshToken` undefined, and the delete still runs.
+  // That rescues a TRANSIENT failure. During a real wedge the read opens the SMA-651 circuit, the
+  // circuit then refuses the delete at once, and the delete branch below answers 503 — the usual
+  // outcome of a wedge (spec § 4 row 8).
   let refreshToken: string | undefined;
   if (sid !== undefined) {
-    const rec = await runtime.store.get(sid);
-    refreshToken = rec?.refreshToken;
-    await runtime.store.delete(sid);
+    const rec = await storeStep(runtime, 'logout_get', sid, () => runtime.store.get(sid));
+    refreshToken = rec === STORE_DOWN ? undefined : rec?.refreshToken;
+
+    const deleted = await storeStep(runtime, 'logout_delete', sid, () => runtime.store.delete(sid));
+    if (deleted === STORE_DOWN) {
+      // SMA-653 D6: the record may still be live, so this is NOT a logout. No cookie is cleared (a
+      // cleared cookie would show a false "signed out" while a copied cookie stays live) and there
+      // is no IdP redirect. The refresh token that the read found is revoked, best effort, so a
+      // copied cookie works only until its access token expires. This keeps the § 9.5 order rule:
+      // the delete was attempted first, and it failed. The retry form sends the cookie again.
+      if (refreshToken !== undefined) await bestEffortRevoke(runtime, refreshToken);
+      return storeUnavailableResponse({ kind: 'post', action: `${runtime.basePath}/auth/logout` });
+    }
   }
 
   // STEP 2: clear the session cookie and every outstanding transaction cookie. Unconditional,
@@ -374,15 +444,8 @@ async function handleLogout(runtime: AuthRuntime, req: Request): Promise<Respons
   // entirely when there was nothing to revoke (no session, or a session with no refresh token).
   // Never rethrown and never logged as a raw caught error object — it may embed a URL, matching
   // adapters/oidc.ts's own rule — only the boolean outcome below is recorded.
-  let revoked = false;
-  if (refreshToken !== undefined) {
-    try {
-      await runtime.oidc.revoke(refreshToken);
-      revoked = true;
-    } catch {
-      // Best-effort: swallowed. `revoked: false` in the event below is the record of this.
-    }
-  }
+  // Best-effort: a failure is swallowed, and `revoked: false` in the event below is its record.
+  const revoked = refreshToken !== undefined ? await bestEffortRevoke(runtime, refreshToken) : false;
 
   // STEP 4: redirect to end_session_endpoint with post_logout_redirect_uri and a state bound to
   // this logout. `newTransactionId` is reused as a generic opaque-random-id generator (the same

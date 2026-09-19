@@ -446,6 +446,9 @@ strategy. A store call that cannot reach Redis fails fast and raises
 | mid-session, `get` fails | treated as **no session** -> redirect to login, not a 500 |
 | mid-session, `set` fails after a successful refresh | § 8.4 |
 
+The route behaviour for every store call on `/auth/login`, `/auth/callback` and `/auth/logout` is
+specified in `2026-09-19-sma-653-auth-route-store-503-design.md` (SMA-653).
+
 ## 8. The session
 
 ### 8.1 The record and the view

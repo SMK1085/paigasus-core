@@ -12,6 +12,7 @@ import { SESSION_COOKIE, TXN_COOKIE_PREFIX } from '../../src/http/cookies.js';
 import type { AuthRuntime } from '../../src/runtime.js';
 import { createAuthRouteHandler } from '../../src/server.js';
 import { startOidcFixture, type OidcFixture } from '../fixtures/jwks.js';
+import { expectStoreUnavailable, failingStore, storeError } from '../support/store-failure.js';
 
 const BIND = 'http://0.0.0.0:3000';
 const PUBLIC_ORIGIN = 'https://console.example.com';
@@ -100,5 +101,13 @@ describe('createAuthRouteHandler under basePath /iam (SMA-511 spec § 7.1)', () 
   it('still 404s a path that is not an auth route', async () => {
     const res = await createAuthRouteHandler(runtime)(new Request(`${BIND}/orgs`));
     expect(res.status).toBe(404);
+  });
+
+  it('passes a store-failure 503 through, with a full-path retry link (SMA-653)', async () => {
+    runtime = { ...runtime, store: failingStore(new MemorySessionStore(), new Set(['putTransaction']), () => storeError('timeout'), []) };
+
+    const res = await createAuthRouteHandler(runtime)(new Request(`${BIND}/auth/login?returnTo=%2Fiam%2Forgs`));
+
+    await expectStoreUnavailable(res, { kind: 'link', target: '/iam/auth/login?returnTo=%2Fiam%2Forgs' });
   });
 });

@@ -82,6 +82,9 @@ function withUrl(req: Request, url: string): Request {
  *    so a stale tab hitting `/auth/callback` a second time becomes a redirect, not an unhandled
  *    rejection a Next route handler turns into a 500.
  *
+ * A session-store failure is NOT mapped here. `createAuthRoutes` already answers it with a 503
+ * `Response` (SMA-653, http/store-unavailable.ts), which this handler returns unchanged.
+ *
  * The five reasons split into two outcomes. `txn_missing`, `txn_mismatch`, and `state_unknown` all
  * mean "this callback cannot be completed with what the server has" — a stale tab, an expired
  * (10-minute) transaction, or a replayed request — and the safe, unsurprising recovery is the same

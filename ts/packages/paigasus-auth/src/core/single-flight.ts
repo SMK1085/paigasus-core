@@ -3,7 +3,7 @@ import { RefreshRejected } from './errors';
 import { newLockToken } from './ids';
 import { shouldRefresh } from './refresh-policy';
 import type { SessionRecord } from './session';
-import type { AuthLogger } from '../ports/logger';
+import type { AuthLogger, StoreUnavailableStage } from '../ports/logger';
 import { sidTag } from '../ports/logger';
 import type { SessionStore } from '../ports/session-store';
 
@@ -218,7 +218,7 @@ export async function resolveSession(deps: ResolveDeps, sid: string): Promise<Re
         try {
           await store.releaseLock(sid, lockToken); // invariant 4
         } catch {
-          logger.event('store.unavailable', { sid: sidTag(sid), stage: 'release_lock' });
+          logger.event('store.unavailable', { sid: sidTag(sid), stage: 'release_lock' satisfies StoreUnavailableStage });
         }
       }
     }
