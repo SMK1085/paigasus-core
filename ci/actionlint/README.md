@@ -529,7 +529,9 @@ procedure-execution gate L29 defers to a follow-up issue, not a bigger token lis
 
 **L33 (SMA-647).** Check 13 knows four readers only: `grep` with a `q`/`m` flag or the matching long
 flags, `head`, and `awk` with `exit`. Other readers that stop early (`sed` with `q`, `read`,
-`perl … last`) are not seen.
+`perl … last`, `grep -l`, `grep -L`) are not seen. MEASURED: BSD grep also exits early on a pipe
+under `-l`/`-L` (`141 0` under `pipefail`), the same defect check 13 exists to catch; GNU grep does
+not. The tree has no such site today.
 
 **L34 (SMA-647).** Check 13 reads the NEXT command word after the pipe only. A reader behind a word
 outside its vocabulary (`timeout 5 grep -q`, `env grep -q`) is not seen, and a `|&` pipe is not

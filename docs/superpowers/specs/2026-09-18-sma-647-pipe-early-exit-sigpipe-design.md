@@ -132,8 +132,10 @@ Non-goals:
 - Printing the block's size and hash on a miss (the issue's second suggestion). §5.6's
   second-opinion row is a sharper instrument for the one open question.
 - Python `subprocess` pipes, and scripts in `ts/` and `py/` that are not `*.sh`.
-- `grep -l`, `grep -L` and `--files-with-matches` on stdin. GNU grep reads a pipe to EOF in
-  these modes, BSD grep may not, and the tree has no such site.
+- `grep -l`, `grep -L` and `--files-with-matches` on stdin. The rule's vocabulary does not
+  cover these flags (§7 L1). MEASURED: BSD grep exits early on a pipe in this mode too
+  (`141 0` under `pipefail`), the same defect this issue fixes; GNU grep reads the pipe to
+  EOF. The tree has no such site today.
 
 ## 5. Design
 
@@ -250,22 +252,34 @@ the row (the bash 3.2 case). `SELF_TEST_COUNT` goes from 14 to 15.
 
 ### 5.3 Proof that the fix bites (behavioural)
 
-`early_exit_reader_self_test` owns one behavioural case that uses a HANDSHAKE, not a sleep:
+`early_exit_reader_self_test` owns one behavioural case that uses a HANDSHAKE, not a sleep.
+This describes what ships in `run.sh` at HEAD, not an earlier draft:
 
-- The reader is `{ grep -q hit; exec <&-; : > "$flag"; }`. It closes its own stdin after
-  `grep` returns, then touches a flag file.
-- The producer writes `hit`, waits for the flag in a bounded loop (at most 10 s), then writes
-  again.
-- Old pipe form: assert `PIPESTATUS[0] != 0` and `PIPESTATUS[1] == 0`. This does not assume
+- `early_exit_producer` sets `trap '' PIPE`, then writes `hit`. It then waits, in a bounded
+  loop (at most 10 s, 0.1 s steps), for the reader to touch its flag file. It then writes
+  `more`, and only AFTER that write creates the second-write marker file. The function
+  returns the second write's own exit status, not a fixed value.
+- Each reader form runs `grep -q hit`, closes its own stdin (`exec <&-`), and touches its
+  flag file. It then waits, in the same bounded way, for the producer's second-write marker
+  before it exits.
+- Pipe form: assert `PIPESTATUS[0] != 0` and `PIPESTATUS[1] == 0`. This does not assume
   exactly 141, because with SIGPIPE ignored the producer fails with EPIPE and rc 1.
-- I1 form, with the same producer and the same reader: assert rc 0.
+- I1 form, with the same producer and the same reader: assert the reader's rc is 0. The
+  process substitution is not part of the pipeline, so this is the reader's own exit status;
+  the I1 half therefore checks only the reader's rc, never the producer's.
+- A wait that reaches its bound reports `infra`, not a verdict, on either side.
 
-The first assertion proves the case can see the defect. Without it, a case that never races
-proves nothing. The handshake removes the timing dependency: the second write happens only
-after the reader has closed the pipe. This matters because `run_self_tests` runs 16 times per
-gate run (once directly, and in check 9's 15 concurrent control processes), which is the same
-load that produced occurrences 1 and 3. If the flag does not appear within the bound, the
-case reports `infra`, not a verdict.
+The first assertion (pipe form) proves the case can see the defect. Without it, a case that
+never races proves nothing. The handshake removes the timing dependency: the producer's
+second write happens only after the reader has closed the pipe.
+
+This design makes the check catch a deleted `exec <&-` deterministically — that mutant then
+gives PIPESTATUS `0/0` in the pipe form, which the assertion above reds on — while the first
+(fixed-wait) design did not (SMA-647 Task 10 review).
+
+This matters because check 9 runs this table 15 times concurrently (14 mutants that still
+run this table, plus the control), plus once directly, which is the same load that produced
+occurrences 1 and 3.
 
 ### 5.4 Registries and pins that move
 
@@ -348,8 +362,9 @@ decides whether a PATH-stubbed `grep` fixture is worth it.
 
 ## 7. Limitations
 
-- L1. Early-exit readers outside the rule's vocabulary (`sed q`, `read`, `perl … last`) are
-  not seen.
+- L1. Early-exit readers outside the rule's vocabulary (`sed q`, `read`, `perl … last`,
+  `grep -l`, `grep -L`) are not seen. MEASURED: BSD grep exits early on a pipe under `-l`/`-L`
+  too (`141 0` under `pipefail`); GNU grep does not.
 - L2. The rule reads the next command word only. A reader reached through a wrapper that is
   not in the vocabulary (`| timeout 5 grep -q`, `| env grep -q`) is not seen.
 - L3. Surfaces outside the corpus are not scanned (§4 non-goals). In particular a `bash -c`

@@ -5157,14 +5157,17 @@ early_exit_reader_self_test() {
   # exit status instead of killing it with SIGPIPE, and it writes the second-write marker AFTER
   # that write, never before, and never waits for the reader once it has written (so neither side
   # can deadlock). In the real code `exec <&-` closes the pipe before the reader's wait begins, so
-  # the producer's second write always lands on a closed pipe (rc 1). MEASURED: without the
-  # reader's wait, removing `exec <&-` almost never failed this case — the reader subshell exited
-  # a few ms after touching its flag while the producer polled the flag only every 0.1 s, so the
-  # pipe was almost always already closed by process exit before the second write. With the
-  # reader's wait, removing `exec <&-` keeps the pipe open through the reader's own wait, so the
-  # second write succeeds (rc 0) and the case reds, which is what makes it catch that mutant.
-  # Check 9 runs this table 16 times concurrently, the load that produced two of the three CI
-  # flakes.
+  # the producer's second write lands on a closed pipe (rc 1) in the PIPE case. MEASURED: without
+  # the reader's wait, removing `exec <&-` almost never failed this case — the reader subshell
+  # exited a few ms after touching its flag while the producer polled the flag only every 0.1 s,
+  # so the pipe was almost always already closed by process exit before the second write. With
+  # the reader's wait, removing `exec <&-` keeps the pipe open through the reader's own wait, so
+  # the second write succeeds (rc 0) and the case reds, which is what makes it catch that mutant.
+  # In the I1 (process-substitution) case this does NOT hold: the main shell can keep the read end
+  # open (bash 5.x leaks a file descriptor there), so the producer can still get rc 0. For this
+  # reason the I1 half below asserts only the reader's rc, never the producer's.
+  # Check 9 runs this table 15 times concurrently (14 mutants that still run this table, plus the
+  # control), plus once directly, the load that produced two of the three CI flakes.
   flag_a="$tmpd/flag-a"; late_a="$tmpd/late-a"; second_a="$tmpd/second-a"; stall_a="$tmpd/stall-a"
   flag_b="$tmpd/flag-b"; late_b="$tmpd/late-b"; second_b="$tmpd/second-b"; stall_b="$tmpd/stall-b"
   early_exit_producer() { # $1 flag the reader touches, $2 timeout marker, $3 second-write marker

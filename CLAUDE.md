@@ -1104,12 +1104,14 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   file's own diagnosis procedure block. A new plan or spec that quotes the procedure, or otherwise
   mentions `ciReport.json`, reds the gate until it carries the marker or is added to the allowlist.
 - **A pipe into a reader that can exit early is a false red under `pipefail`** (MEASURED, SMA-647).
-  `grep -q`, `grep -m N`, `head` and `awk … exit` stop reading at their first match. A producer
-  that writes again after that gets SIGPIPE and exits 141. Under `pipefail` the pipeline status is
-  then 141, although the reader found the match. On Linux in CI the race is rare and needs CPU load,
-  so a re-run passes: it caused three false check-12 reds in `repo:actionlint` (PRs 223, 255, 258).
-  On macOS with BSD grep 2.6.0 it is near-certain: the old check-12 probe missed on 500 of 500 runs
-  against the real block. Use one of three forms instead. When the producer's status does not
+  `grep -q` stops at its first match. `grep -m N` stops after N matches. `head` stops after N
+  lines. `awk … exit` stops at its `exit`. Each one stops before it reads the rest of its input. A
+  producer that writes again after that gets SIGPIPE and exits 141. Under `pipefail` the pipeline
+  status is then 141, although the reader found the match. On Linux in CI the race is rare and
+  needs CPU load, so a re-run passes: it caused three false check-12 reds in `repo:actionlint`
+  (PRs 223, 255, 258). On macOS with BSD grep 2.6.0 it is near-certain: the old check-12 probe
+  missed on 500 of 500 runs against the real block. Use one of three forms instead. When the
+  producer's status does not
   matter, use process substitution: `grep -qF -- "$lit" < <(printf '%s' "$block")`. When the
   status matters, capture the producer into a variable, check its status, then match the variable
   the same way; declare a `local` on its own line, and under `set -e` write the capture as the left
@@ -1118,8 +1120,11 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   Homebrew bash 5.3.15 deadlocks on one over about 512 bytes (see the LOCAL ONLY entry). Do not use
   `>/dev/null` in place of `-q`, and do not use a `sed` script with `q`. `ci/actionlint/run.sh`
   check 13 bans the pattern in every tracked `*.sh`, workflow, `moon.yml`, `.moon/**/*.yml` and
-  `lefthook.yml`. Its allowlist, `EARLY_EXIT_READER_ALLOWED`, ships empty. Its fixtures live in
-  `ci/actionlint/fixtures/early-exit/*.txt`, because check 13 also scans `run.sh`. Check 12 keeps
+  `lefthook.yml`. The rule reads only the next command word after the pipe, so a reader inside a
+  subshell or a brace group, a reader behind a wrapper word, and a `|&` pipe are not seen — see
+  `ci/actionlint/README.md` L33–L41. Its allowlist, `EARLY_EXIT_READER_ALLOWED`, ships empty. Its
+  fixtures live in `ci/actionlint/fixtures/early-exit/*.txt`, because check 13 also scans
+  `run.sh`. Check 12 keeps
   a second opinion on each missing literal: a `literal-disagreement` row means `grep` and a bash
   `case` match disagree, which is evidence of a second mechanism. Keep that run's whole output for
   SMA-647 before you re-run.
