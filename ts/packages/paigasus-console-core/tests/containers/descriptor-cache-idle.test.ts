@@ -213,5 +213,12 @@ describe('the descriptor cache Redis client (SMA-648)', () => {
     // The cache recovers once the pause ends.
     await sleep(PAUSE_MS);
     expect(await eventually(() => cache.get(service), 'a read after the paused-with-traffic window')).toEqual(record());
+
+    // This is the ONE place discovery.redis_operation_timeout is emitted against a real client
+    // whose DSN carries a password, so the no-secret-in-logs claim for that event rests on this
+    // assertion, not only on reading the code. A guard, exempt from red-first like T5's own: it
+    // must see at least one such line, or the secret check below proves nothing.
+    expect(sink.lines.some((line) => line.includes('discovery.redis_operation_timeout'))).toBe(true);
+    for (const line of sink.lines) expect(line).not.toContain(SECRET);
   });
 });

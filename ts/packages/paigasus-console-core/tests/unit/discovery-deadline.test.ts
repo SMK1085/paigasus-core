@@ -257,10 +257,15 @@ describe('withOperationDeadline — the circuit (D4, D5, D6, D8)', () => {
   });
 });
 
-describe('descriptorCacheFor wires the deadline in (D1)', () => {
-  it('bounds a real Redis path operation instead of hanging', async () => {
-    // Port 1 refuses the connection, so the cache never becomes ready. The point of this test is
-    // only that the operation SETTLES — before the wiring it would depend entirely on node-redis.
+describe('descriptorCacheFor against an unreachable Redis (D1)', () => {
+  it('a Redis-path operation settles rather than hanging when the client cannot connect', async () => {
+    // Port 1 refuses the connection, so the cache never becomes ready. Against
+    // redis://127.0.0.1:1 node-redis rejects at once with ClientOfflineError, so this test
+    // passes whether or not withOperationDeadline is actually wired into descriptorCacheFor —
+    // MEASURED by reverting the wiring line in src/discovery.ts, which leaves this test green.
+    // This is NOT the wiring control. T6 in tests/containers/descriptor-cache-idle.test.ts is:
+    // it fails when the wiring line is reverted, because it exercises a client that DOES
+    // connect and then goes idle, so only the wrapper's own deadline can bound it.
     const cache = descriptorCacheFor(
       { PAIGASUS_SESSION_STORE: 'redis', PAIGASUS_SESSION_REDIS_URL: 'redis://127.0.0.1:1', PAIGASUS_SESSION_REDIS_TIMEOUT_MS: TIMEOUT_MS } as ConsoleCoreConfig,
       createJsonLogger(() => undefined),

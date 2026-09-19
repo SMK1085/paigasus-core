@@ -250,6 +250,11 @@ export function withOperationDeadline(inner: DescriptorCache, client: ReadySourc
       // While the cooldown runs we write NOTHING. That silence is what lets node-redis's idle timer
       // fire and its reconnect strategy repair the socket (SMA-650 § 2 fact 4) — it is the repair
       // mechanism, not only a cost saving.
+      // Date.now() is wall-clock, not monotonic (house style here — single-flight uses deps.now()).
+      // If the host clock steps BACKWARDS (a VM resume, chrony makestep), this comparison stays
+      // true for the length of the step, so the circuit stays open that much longer than
+      // cooldownMs and every service's navigation degrades for that long. Containers normally
+      // slew rather than step, so this is accepted, not fixed.
       if (Date.now() - openedAt < cooldownMs) throw new DescriptorCacheTimeoutError(operation, deadlineMs, 'circuit-open');
       // The cooldown elapsed with no `ready`. Let this operation through: if the client is still not
       // ready, node-redis refuses it at once (disableOfflineQueue), so the attempt costs nothing.

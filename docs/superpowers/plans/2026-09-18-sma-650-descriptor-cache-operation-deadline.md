@@ -867,6 +867,11 @@ For anything else, use the diagnosis procedure in `CLAUDE.md`: copy `.moon/cache
 `.moon/cache/states/<project>/<task>/` out of the repo FIRST, then read the failing action's
 `operations[]` entry whose `meta.type` is `task-execution` for the real command and exit code.
 
+<!-- moon-diagnosis:ok -->
+<!-- This file references ciReport.json only to point at CLAUDE.md's procedure; it does not
+     restate or supersede it. `ci/actionlint/run.sh` check 12 requires this marker on any file
+     naming ciReport.json. -->
+
 - [ ] **Step 3: Run the Prettier gate**
 
 ```bash
