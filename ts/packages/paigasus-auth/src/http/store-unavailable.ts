@@ -17,7 +17,10 @@
 //   - Referrer-Policy: no-referrer. A callback 503 is served at /auth/callback?code=…&state=…, and
 //     the code may not be spent yet. The retry link must not send that URL as a Referer.
 //   - The CSP makes a future escaping defect inert, forbids framing, and `base-uri 'none'` stops an
-//     injected <base> from moving the absolute-path links.
+//     injected <base> from moving the absolute-path links. It carries NO `form-action`. The logout
+//     retry form's successful response is a 302 to the IdP's cross-origin end-session endpoint.
+//     Chromium applies `form-action` to the redirects after a form submission, and it blocked that
+//     redirect (measured on Playwright 1.63.0 Chromium, SMA-653 final review).
 //   - NO Set-Cookie. The browser keeps the state it had before the request (spec D4).
 //
 // ESCAPING. The retry target can hold an attacker-influenced `returnTo` (validated to a same-origin
@@ -28,7 +31,7 @@ import { sidTag, type AuthLogger, type StoreUnavailableStage } from '../ports/lo
 
 export const RETRY_AFTER_SECONDS = 5;
 
-export const STORE_UNAVAILABLE_CSP = "default-src 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'";
+export const STORE_UNAVAILABLE_CSP = "default-src 'none'; frame-ancestors 'none'; base-uri 'none'";
 
 export type RetryAffordance = { kind: 'link'; href: string } | { kind: 'post'; action: string };
 

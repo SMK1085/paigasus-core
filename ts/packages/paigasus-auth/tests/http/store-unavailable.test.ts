@@ -97,6 +97,7 @@ describe('GET /auth/login — escaping and classification', () => {
     expect(body).toContain('&#39;');
     const href = /href="([^"]*)"/.exec(body)?.[1] ?? '';
     expect(new URL(href.replace(/&#39;/g, "'").replace(/&amp;/g, '&'), ORIGIN).searchParams.get('returnTo')).toBe(HOSTILE);
+    expectEventsClean(h.events);
   });
 
   it('keeps a hostile returnTo inert in the D9 link', async () => {
@@ -105,6 +106,7 @@ describe('GET /auth/login — escaping and classification', () => {
     const res = await createAuthRoutes(h.runtime).handle(loginRequest(HOSTILE, OLD_SID));
     const body = await expectStoreUnavailable(res, { kind: 'link', target: HOSTILE });
     expect(body).toContain('href="/iam/a&quot;b&lt;c&gt;d&amp;e&#39;f#g h"');
+    expectEventsClean(h.events);
   });
 
   it('maps an error from a SECOND copy of core/errors (D2)', async () => {
@@ -116,6 +118,7 @@ describe('GET /auth/login — escaping and classification', () => {
     const res = await createAuthRoutes(h.runtime).handle(loginRequest(RETURN_TO));
 
     await expectStoreUnavailable(res, { kind: 'link', target: `/iam/auth/login?returnTo=${encodeURIComponent(RETURN_TO)}` });
+    expectEventsClean(h.events);
   });
 
   it('lets any other store error propagate (D2)', async () => {
@@ -239,6 +242,7 @@ describe.each(FAILURE_KINDS)('POST /auth/logout with the store down (%s)', (kind
     const res = await createAuthRoutes(h.runtime).handle(logoutRequest(OLD_SID));
 
     await expectStoreUnavailable(res, { kind: 'post', target: '/iam/auth/logout' });
+    expect(h.oidc.revokeCalls).toEqual(['old-refresh-token']);
     expect(h.events).toEqual([['store.unavailable', { zone: 'iam', stage: 'logout_delete', sid: sidTag(OLD_SID) }]]);
     expectEventsClean(h.events);
   });

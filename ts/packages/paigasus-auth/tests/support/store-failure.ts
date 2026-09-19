@@ -6,7 +6,7 @@
 // THE SENTINEL. Every thrown store error carries SENTINEL_DSN in its message, the same way the
 // real adapter puts the (redacted) DSN there. expectStoreUnavailable and expectEventsClean then
 // assert that no byte of it reaches the body, a header, or a logged field. A test that forgets to
-// call them is weaker; every row in store-unavailable.test.ts calls both.
+// call them is weaker; every row in store-unavailable.test.ts that produces a response calls both.
 import { expect } from 'vitest';
 import { claimsPrincipalResolver } from '../../src/adapters/claims-resolver.js';
 import { MemorySessionStore } from '../../src/adapters/memory-store.js';

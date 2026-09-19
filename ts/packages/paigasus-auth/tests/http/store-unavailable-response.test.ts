@@ -23,12 +23,19 @@ describe('storeUnavailableResponse', () => {
     expect(res.headers.get('content-type')).toBe('text/html; charset=utf-8');
     expect(res.headers.get('referrer-policy')).toBe('no-referrer');
     expect(res.headers.get('content-security-policy')).toBe(STORE_UNAVAILABLE_CSP);
-    expect(STORE_UNAVAILABLE_CSP).toBe("default-src 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'");
+    expect(STORE_UNAVAILABLE_CSP).toBe("default-src 'none'; frame-ancestors 'none'; base-uri 'none'");
     expect(res.headers.getSetCookie()).toEqual([]);
     const body = await res.text();
     expect(body).toContain('<a href="/iam/auth/login">');
     expect(body).toContain('Sign-in is temporarily unavailable');
     expect(body).not.toMatch(/<script|<style|style=/i);
+  });
+
+  // The logout retry form's successful response is a 302 to the IdP's cross-origin end-session
+  // endpoint. Chromium applies `form-action` to the redirects after a form submission, and it
+  // blocked that redirect (measured on Playwright 1.63.0 Chromium, SMA-653 final review).
+  it('has no form-action, so the logout retry reaches the cross-origin IdP redirect', () => {
+    expect(STORE_UNAVAILABLE_CSP).not.toContain('form-action');
   });
 
   it('renders a POST form for the logout affordance', async () => {

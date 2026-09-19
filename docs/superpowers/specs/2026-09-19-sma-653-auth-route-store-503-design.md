@@ -123,10 +123,13 @@ function storeUnavailableResponse(retry: RetryAffordance): Response;
   - `Referrer-Policy: no-referrer`. A callback 503 is served at `/auth/callback?code=…&state=…`, and
     on the `callback_take_transaction` row the code is not yet spent. Without this header, the retry
     link sends that URL, with the code, as the `Referer` (RFC 9700 § 4.2.4).
-  - `Content-Security-Policy: default-src 'none'; form-action 'self'; frame-ancestors 'none';
-    base-uri 'none'`. No CSP exists in the apps today. This policy makes a future escaping defect
-    in the reflected `returnTo` inert, prevents framing, and `base-uri 'none'` stops an injected
-    `<base>` from moving the absolute-path links.
+  - `Content-Security-Policy: default-src 'none'; frame-ancestors 'none'; base-uri 'none'`. No CSP
+    exists in the apps today. This policy makes a future escaping defect in the reflected `returnTo`
+    inert, prevents framing, and `base-uri 'none'` stops an injected `<base>` from moving the
+    absolute-path links. The policy carries no `form-action`. The logout retry form's successful
+    response is a 302 to the IdP's cross-origin end-session endpoint, and Chromium applies
+    `form-action` to the redirects after a form submission, so it blocked that redirect. The final
+    review found this (measured on Playwright 1.63.0 Chromium, SMA-653 final review).
   - No `Set-Cookie`.
 - The body is a fixed HTML document: a title and heading "Sign-in is temporarily unavailable" (for
   logout: "Sign-out did not complete"), one sentence, and the retry control. It has no script and no

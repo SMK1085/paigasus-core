@@ -15,7 +15,7 @@
 - Every new source file starts with `// SPDX-License-Identifier: Apache-2.0`.
 - Relative imports in `src/` are EXTENSIONLESS (`'../core/errors'`). Test files import with `.js` (`'../../src/core/errors.js'`), as the existing tests do. (CLAUDE.md: Turbopack does not resolve `.js` to `.ts`; ESLint rule `paigasus/no-js-relative-specifier`.)
 - No log event and no response may hold a caught error object, an error message, an error name, or a DSN (`src/ports/logger.ts` redaction contract). A `sid` is logged only as `sidTag(sid)` (8 characters).
-- `Retry-After` is exactly `5`. The CSP is exactly `default-src 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'`.
+- `Retry-After` is exactly `5`. The CSP is exactly `default-src 'none'; frame-ancestors 'none'; base-uri 'none'`.
 - A 503 response has NO `Set-Cookie` header.
 - Commits: conventional, scope `ts`, subject ends with `(SMA-653)`, body ends with `Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>`. Do not use `--no-verify`. Do not amend. Add new commits only.
 - Work in the worktree `/Users/smaschek/dev/paigasus/paigasus-core/.claude/worktrees/sma-653-auth-route-503` on branch `feature/sma-653-auth-route-503`. Check the branch with `git branch --show-current` before the first commit of each task.

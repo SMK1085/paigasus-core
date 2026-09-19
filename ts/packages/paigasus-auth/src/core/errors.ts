@@ -51,7 +51,7 @@ export class SessionStoreTimeout extends SessionStoreUnavailable {
  * field is an own property of every instance, and the subclass inherits it, so it survives the
  * duplication.
  */
-export function isSessionStoreUnavailable(err: unknown): err is SessionStoreUnavailable {
+export function isSessionStoreUnavailable(err: unknown): boolean {
   return err instanceof Error && (err as { code?: unknown }).code === 'session_store_unavailable';
 }
 

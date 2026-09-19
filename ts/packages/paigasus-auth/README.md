@@ -122,11 +122,13 @@ longer than 4T in the process itself fires the deadlines before the replies are 
 
 **The auth routes answer a store failure with a 503 (SMA-653).** When a store call on
 `/auth/login`, `/auth/callback` or `/auth/logout` fails, the route returns a 503 with
-`Retry-After: 5`, `Cache-Control: no-store`, a strict CSP and no `Set-Cookie`, and a small HTML page
-with a retry control:
+`Retry-After: 5`, `Cache-Control: no-store`, `Referrer-Policy: no-referrer`, a strict CSP and no
+`Set-Cookie`, and a small HTML page with a retry control:
 
 - `/auth/login`: a link. If the browser holds a session cookie, the link goes to `returnTo`, so a
   session that survived the stall is not deleted by the retry. Otherwise it goes to `/auth/login`.
+  If `returnTo` is a public page, the link opens that page directly, and the user must choose
+  sign-in again.
 - `/auth/callback`: a link to `/auth/login`. If the code exchange already succeeded, the route first
   revokes the new refresh token, best effort.
 - `/auth/logout`: if only the read fails, the delete still runs and logout completes. If the delete
