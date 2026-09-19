@@ -303,9 +303,38 @@ build_oci() {
 # pattern `build_one`/`build_oci` use for their build log, does NOT fire when `set -e` aborts a
 # function from inside, only on that function's normal return, so it would leak the registry
 # container on exactly the failures this check exists to catch.
+#
+# CI fix, PR 270: the EXIT trap must not read a variable the function it was set in declared
+# `local` — a trap fires at SCRIPT exit, after the function has already returned and its locals
+# have gone out of scope, so under `set -u` the trap itself dies with `reg_name: unbound
+# variable` (MEASURED on all three CI legs: every one printed M3 for the first crate, then died
+# on that exact line before reaching the second crate). `LOAD_OCI_REG`/`LOAD_OCI_TMPDIR` below
+# are script-global instead, initialised to the empty string so `load_oci_cleanup` is a safe
+# no-op for every command that never runs `load_oci` at all, and the trap that calls it is
+# registered ONCE, at top level — not re-registered per call, so a second `load-oci` invocation
+# in the same script process reads the same always-defined globals rather than risking a second,
+# possibly stale, trap body. `load_oci` also calls `load_oci_cleanup` explicitly once it is done
+# with the registry, so a normal, successful call leaves nothing behind for a second call to
+# collide with; the trap remains as the backstop for a `set -e` abort or a signal before that
+# point is reached.
+LOAD_OCI_REG=""
+LOAD_OCI_TMPDIR=""
+
+load_oci_cleanup() {
+  if [ -n "$LOAD_OCI_REG" ]; then
+    docker rm -f "$LOAD_OCI_REG" >/dev/null 2>&1 || true
+    LOAD_OCI_REG=""
+  fi
+  if [ -n "$LOAD_OCI_TMPDIR" ]; then
+    rm -rf "$LOAD_OCI_TMPDIR"
+    LOAD_OCI_TMPDIR=""
+  fi
+}
+trap load_oci_cleanup EXIT
+
 load_oci() {
   local archive="$1" name="$2" digests manifest config store driver loaded size expected
-  local reg_name reg repo tmpdir=""
+  local reg repo
   digests="$(decide oci-digests "$archive")"
   manifest="$(kv "$digests" manifest)"
   config="$(kv "$digests" config)"
@@ -314,9 +343,8 @@ load_oci() {
     echo "::error::crane is not on PATH; run 'proto install crane'" >&2
     return 2
   fi
-  reg_name="load-oci-registry-$$"
-  trap 'docker rm -f "$reg_name" >/dev/null 2>&1 || true; [ -n "$tmpdir" ] && rm -rf "$tmpdir"' EXIT
-  reg="$(start_registry "$reg_name")"
+  LOAD_OCI_REG="load-oci-registry-$$"
+  reg="$(start_registry "$LOAD_OCI_REG")"
   # `127.0.0.1`, not the `localhost` `start_registry` returns (kept as-is for `rehearse`, which
   # needs it — see its own comment): measured on this Mac, `docker pull`/`docker tag` resolve
   # `localhost` to `::1` first and time out, because the registry container is published on
@@ -326,11 +354,11 @@ load_oci() {
   reg="${reg/localhost/127.0.0.1}"
   repo="${reg}/paigasus-load-oci"
 
-  tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/paigasus-load-oci.XXXXXX")"
-  tar -xf "$archive" -C "$tmpdir"
-  crane push --insecure "$tmpdir" "${repo}:load" >/dev/null
-  rm -rf "$tmpdir"
-  tmpdir=""
+  LOAD_OCI_TMPDIR="$(mktemp -d "${TMPDIR:-/tmp}/paigasus-load-oci.XXXXXX")"
+  tar -xf "$archive" -C "$LOAD_OCI_TMPDIR"
+  crane push --insecure "$LOAD_OCI_TMPDIR" "${repo}:load" >/dev/null
+  rm -rf "$LOAD_OCI_TMPDIR"
+  LOAD_OCI_TMPDIR=""
 
   docker pull "${repo}@${manifest}" >/dev/null
   docker tag "${repo}@${manifest}" "$name"
@@ -343,6 +371,11 @@ load_oci() {
   expected="$config"
   [ "$store" = "containerd" ] && expected="$manifest"
   echo "M3 arch=$(docker version --format '{{.Server.Arch}}') docker=$(docker version --format '{{.Server.Version}}') store=${store} loaded_id=${loaded} manifest=${manifest} config=${config} size=${size}"
+  # Clean up now rather than waiting for the script-exit trap: a successful call must not leave
+  # its registry running for a SECOND `load-oci` call in the same script process to collide
+  # with. The trap above stays registered as the backstop for every path that returns before
+  # this line runs.
+  load_oci_cleanup
   if [ "$loaded" != "$expected" ]; then
     echo "::error::${name} loaded as ${loaded} (pulled by digest via a local registry), but the ${store} store should report ${expected}: the loaded image is not the archive's image." >&2
     return 1
