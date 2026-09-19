@@ -13,6 +13,7 @@
 #        ci/images/run.sh all                       # build both + smoke; takes no service arg
 #        ci/images/run.sh build-oci <iam|gateway> <outdir>   # SMA-658: OCI archive, no --load
 #        ci/images/run.sh load-oci <archive> <image-name>     # load + identity check (prints M3)
+#        ci/images/run.sh rehearse <archive.oci.tar>...      # SMA-658: publish steps vs two local registries
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -46,6 +47,10 @@ kv() {
 #   docker buildx imagetools inspect curlimages/curl:8.11.1 --format '{{.Manifest.Digest}}'
 POSTGRES_16_ALPINE_DIGEST="postgres:16-alpine@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685"
 CURL_8_11_1_DIGEST="curlimages/curl:8.11.1@sha256:c1fe1679c34d9784c1b0d1e5f62ac0a79fca01fb6377cdd33e90473c6f9f9a69"
+
+# SMA-658: the two throwaway registries that `rehearse` pushes to. Refresh with:
+#   docker buildx imagetools inspect registry:2 --format '{{.Manifest.Digest}}'
+REGISTRY_2_DIGEST="registry:2@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373"
 
 crate_for() {
   case "$1" in
@@ -553,6 +558,188 @@ smoke() {
   echo "SMOKE OK ($*)"
 }
 
+# --- rehearse (SMA-658 spec § 8) -----------------------------------------------------------------
+# Runs the publish sequence of the future release path against two LOCAL registries: A stands in
+# for GHCR and B for Docker Hub. It needs no credential, so images.yml runs it on a pull request.
+# It proves the parts that do not need OIDC or a secret: push by digest, the index, the
+# digest-preserving copy, the D10 adoption rule, the conflict refusal and the floating-tag rule.
+# The decisions come from release_decision.py, so PR 2 runs the SAME decision code; the registry
+# commands here are a copy of PR 2's sequence, which is the residual (spec § 7.1 wants them
+# literal in release.yml).
+REH_A_NAME="rehearse-a-${RUN_ID}"
+REH_B_NAME="rehearse-b-${RUN_ID}"
+REH_TMP=""
+
+rehearse_cleanup() {
+  docker rm -f "$REH_A_NAME" "$REH_B_NAME" >/dev/null 2>&1 || true
+  if [ -n "$REH_TMP" ]; then rm -rf "$REH_TMP"; fi
+}
+
+rh_fail() {
+  echo "::error::rehearse: $*" >&2
+  return 1
+}
+
+# Starts a registry:2 on a free localhost port and prints `localhost:<port>`. `localhost`, not
+# 127.0.0.1, because crane and buildx both treat a `localhost` registry as plain HTTP.
+start_registry() {
+  local name="$1" hostport port i
+  docker run -d --name "$name" -p 127.0.0.1::5000 "$REGISTRY_2_DIGEST" >/dev/null
+  hostport="$(docker port "$name" 5000/tcp | sed -n 1p)"
+  port="${hostport##*:}"
+  for i in $(seq 1 30); do
+    if crane catalog --insecure "localhost:${port}" >/dev/null 2>&1; then
+      echo "localhost:${port}"
+      return 0
+    fi
+    sleep 1
+  done
+  rh_fail "registry ${name} never answered on localhost:${port} (${i}s)"
+}
+
+# The digest that `$1:$2` resolves to, or `none` when the tag does not exist. Any OTHER failure
+# (a network error, a registry 5xx, auth) is fatal: reading it as "absent" would let a real
+# release push a second digest under a published version (spec D10). PR 2 keeps this rule.
+tag_digest() {
+  local ref="$1:$2" out rc=0
+  out="$(crane digest --insecure "$ref" 2>&1)" || rc=$?
+  if [ "$rc" -eq 0 ]; then
+    printf '%s\n' "$out"
+    return 0
+  fi
+  case "$out" in
+    *MANIFEST_UNKNOWN*|*NAME_UNKNOWN*) echo "none" ;;
+    *) rh_fail "cannot read ${ref}: ${out}" ;;
+  esac
+}
+
+expect_kv() {
+  local got
+  got="$(kv "$1" "$2")"
+  [ "$got" = "$3" ] || rh_fail "expected $2=$3, got $2=${got:-<empty>}"
+}
+
+expect_tag() {
+  local got
+  got="$(tag_digest "$1" "$2")"
+  [ "$got" = "$3" ] || rh_fail "$1:$2 is ${got}, expected $3"
+}
+
+rehearse() {
+  if [ "$#" -lt 1 ]; then
+    echo "usage: ci/images/run.sh rehearse <archive.oci.tar>..." >&2
+    return 1
+  fi
+  if ! command -v crane >/dev/null 2>&1; then
+    echo "::error::crane is not on PATH; run 'proto install crane'" >&2
+    return 2
+  fi
+  trap rehearse_cleanup EXIT
+  REH_TMP="$(mktemp -d "${TMPDIR:-/tmp}/paigasus-rehearse.XXXXXX")"
+  local a b repo_a repo_b archive digests manifest platform arch refs first index index2 rebuilt ga gb out rc r t
+  refs=()
+  a="$(start_registry "$REH_A_NAME")"
+  b="$(start_registry "$REH_B_NAME")"
+  repo_a="${a}/paigasus-rehearse"
+  repo_b="${b}/paigasus-rehearse"
+
+  echo "== rehearse: push each platform to A and keep its digest =="
+  for archive in "$@"; do
+    digests="$(decide oci-digests "$archive")"
+    manifest="$(kv "$digests" manifest)"
+    platform="$(kv "$digests" platform)"
+    arch="${platform#*/}"
+    mkdir -p "$REH_TMP/$arch"
+    tar -xf "$archive" -C "$REH_TMP/$arch"
+    crane push --insecure "$REH_TMP/$arch" "${repo_a}:${REVISION}-${arch}" >/dev/null
+    expect_tag "$repo_a" "${REVISION}-${arch}" "$manifest"
+    refs+=("${repo_a}@${manifest}")
+    echo "  ${arch}: ${manifest}"
+  done
+  first="${refs[0]#*@}"
+  docker buildx imagetools create --tag "${repo_a}:${REVISION}" "${refs[@]}"
+  index="$(tag_digest "$repo_a" "$REVISION")"
+  echo "  index: ${index}"
+
+  echo "== case 1: nothing published -> push-new, copy to B, tag both =="
+  ga="$(tag_digest "$repo_a" 0.1.0)"
+  gb="$(tag_digest "$repo_b" 0.1.0)"
+  out="$(decide adopt --new-digest "$index" --ghcr "$ga" --dockerhub "$gb" --git-tag absent)"
+  expect_kv "$out" action push-new
+  docker buildx imagetools create --tag "${repo_b}:${REVISION}" "${repo_a}@${index}"
+  expect_tag "$repo_b" "$REVISION" "$index"
+  : > "$REH_TMP/tags"
+  out="$(decide floating --service gateway --version 0.1.0 --tags-file "$REH_TMP/tags")"
+  expect_kv "$out" move true
+  for r in "$repo_a" "$repo_b"; do
+    crane tag --insecure "${r}@${index}" 0.1.0
+    crane tag --insecure "${r}@${index}" "$(kv "$out" minor_tag)"
+    crane tag --insecure "${r}@${index}" latest
+    for t in 0.1.0 0.1 latest; do expect_tag "$r" "$t" "$index"; done
+  done
+
+  echo "== case 2: a rebuild of a published version -> adopt the first digest, overwrite nothing =="
+  crane mutate --insecure "${repo_a}@${first}" --label org.opencontainers.image.description=rehearsal-rebuild -t "${repo_a}:rebuild" >/dev/null
+  rebuilt="$(tag_digest "$repo_a" rebuild)"
+  [ "$rebuilt" != "$first" ] || rh_fail "the rebuild kept the first digest; the case proves nothing"
+  docker buildx imagetools create --tag "${repo_a}:rebuild-index" "${repo_a}@${rebuilt}"
+  index2="$(tag_digest "$repo_a" rebuild-index)"
+  ga="$(tag_digest "$repo_a" 0.1.0)"
+  gb="$(tag_digest "$repo_b" 0.1.0)"
+  out="$(decide adopt --new-digest "$index2" --ghcr "$ga" --dockerhub "$gb" --git-tag absent)"
+  expect_kv "$out" action adopt
+  expect_kv "$out" digest "$index"
+  expect_kv "$out" copy_to none
+  # A real "overwrite nothing" claim needs a write that COULD have happened. Gate a tag move to
+  # the rebuild's index behind the same condition PR 2 will use, so a branch that pushed
+  # unconditionally would move the tag to $index2 and the assertion below would catch it.
+  if [ "$(kv "$out" action)" = push-new ]; then
+    for r in "$repo_a" "$repo_b"; do crane tag --insecure "${r}@${index2}" 0.1.0; done
+  fi
+  expect_tag "$repo_a" 0.1.0 "$index"
+  expect_tag "$repo_b" 0.1.0 "$index"
+
+  echo "== case 3: only A holds the version -> adopt A's digest and copy it to B =="
+  crane tag --insecure "${repo_a}@${index2}" 0.1.1
+  ga="$(tag_digest "$repo_a" 0.1.1)"
+  gb="$(tag_digest "$repo_b" 0.1.1)"
+  out="$(decide adopt --new-digest "$index" --ghcr "$ga" --dockerhub "$gb" --git-tag absent)"
+  expect_kv "$out" action adopt
+  expect_kv "$out" digest "$index2"
+  expect_kv "$out" copy_to dockerhub
+  docker buildx imagetools create --tag "${repo_b}:0.1.1" "${repo_a}@${index2}"
+  expect_tag "$repo_b" 0.1.1 "$index2"
+
+  echo "== case 4: the registries disagree -> refuse (exit 3) =="
+  crane tag --insecure "${repo_a}@${index}" 0.1.2
+  docker buildx imagetools create --tag "${repo_b}:0.1.2" "${repo_a}@${index2}"
+  ga="$(tag_digest "$repo_a" 0.1.2)"
+  gb="$(tag_digest "$repo_b" 0.1.2)"
+  rc=0
+  out="$(decide adopt --new-digest "$index" --ghcr "$ga" --dockerhub "$gb" --git-tag absent)" || rc=$?
+  [ "$rc" -eq 3 ] || rh_fail "a digest conflict must exit 3, got ${rc}"
+  expect_kv "$out" action conflict
+
+  echo "== case 5: an older version than a released one -> the floating tags hold =="
+  printf 'abc123\trefs/tags/paigasus-gateway-v0.2.0\n' > "$REH_TMP/tags"
+  out="$(decide floating --service gateway --version 0.1.1 --tags-file "$REH_TMP/tags")"
+  expect_kv "$out" move false
+  # Same reasoning as case 2: gate the case-1 tag-move loop behind the real condition, using
+  # $index2 (already known to differ from $index) as the would-be new value, so a branch that
+  # moved the tags unconditionally would be caught below.
+  if [ "$(kv "$out" move)" = true ]; then
+    for r in "$repo_a" "$repo_b"; do
+      crane tag --insecure "${r}@${index2}" 0.1.1
+      crane tag --insecure "${r}@${index2}" "$(kv "$out" minor_tag)"
+      crane tag --insecure "${r}@${index2}" latest
+    done
+  fi
+  expect_tag "$repo_a" latest "$index"
+  expect_tag "$repo_b" latest "$index"
+
+  echo "REHEARSE OK"
+}
+
 cmd="${1:?usage: ci/images/run.sh build [iam|gateway] | ci/images/run.sh \{smoke\|all\}}"
 target="${2:-}"
 services=("iam" "gateway")
@@ -591,5 +778,6 @@ case "$cmd" in
     fi
     load_oci "$target" "$3"
     ;;
+  rehearse) shift; rehearse "$@" ;;
   *) echo "unknown command: $cmd" >&2; exit 1 ;;
 esac
