@@ -24,6 +24,12 @@ zones:
       httpPort: 8080
       grpcPort: 9090
       migrationLockWaitSeconds: 120
+      # REQUIRED. Genuinely missing from the original schema (SMA-513 Task 11) — added because
+      # IamConfig::validate hard-fails boot without it. Must hold key "pepper": a base64 string
+      # decoding to at least 32 bytes (ApiKeyConfig::pepper). Kept as its own secret rather than
+      # folded into postgres.existingSecret or oidc.existingSecret because it rotates on its own
+      # schedule and belongs to neither of those two concerns.
+      apiKeysPepperSecret: ""
   gateway:
     enabled: false
     basePath: /gateway
@@ -37,6 +43,10 @@ zones:
         repository: ghcr.io/smk1085/paigasus-gateway
         tag: ""
       httpPort: 8088
+      # Genuinely missing from the original schema (SMA-513 Task 11) — the gateway backend is
+      # stateless and horizontally scalable, unlike IAM's SMA-559-pinned single replica, so it
+      # gets a real knob rather than a hardcoded default. Mirrors console.replicas above.
+      replicas: 2
 
 ingress:
   host: ""               # REQUIRED. Feeds PAIGASUS_PUBLIC_ORIGIN as https://<host>.
@@ -56,4 +66,8 @@ redis: {}                # the URL lives in oidc.existingSecret, since it may ca
 
 postgres:
   host: ""               # REQUIRED by the IAM backend
-  existingSecret: ""     # REQUIRED
+  existingSecret: ""     # REQUIRED. Must hold key "password". IamConfig has no decomposed
+                         # host/user/db config of its own — figment reads ONE opaque DSN
+                         # (IAM_DATABASE_URL) — so the chart composes it from this password and
+                         # postgres.host via Kubernetes' own $(VAR) dependent env-var expansion,
+                         # against a fixed "iam" database and role name (no knob for either yet).

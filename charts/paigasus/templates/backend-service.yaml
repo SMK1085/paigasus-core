@@ -1,0 +1,31 @@
+{{/* SPDX-License-Identifier: Apache-2.0 */}}
+{{- include "paigasus.validate" . -}}
+{{- $root := . -}}
+{{- $full := include "paigasus.fullname" . -}}
+{{- range $id, $z := .Values.zones }}
+{{- if $z.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  # MUST be exactly <fullname>-<id>-backend: paigasus.serviceMapJson (_helpers.tpl) builds every
+  # PAIGASUS_SERVICES URL from this same shape. A mismatch here is invisible to `helm template`
+  # and renders a permanently `degraded` console tile at runtime instead — the exact state AC 2
+  # exists to distinguish from `absent`.
+  name: {{ $full }}-{{ $id }}-backend
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: {{ $id }}-backend
+    app.kubernetes.io/instance: {{ $root.Release.Name }}
+  ports:
+    - name: http
+      port: {{ $z.backend.httpPort }}
+      targetPort: http
+{{- if eq $id "iam" }}
+    - name: grpc
+      port: {{ $z.backend.grpcPort }}
+      targetPort: grpc
+{{- end }}
+{{- end }}
+{{- end }}
