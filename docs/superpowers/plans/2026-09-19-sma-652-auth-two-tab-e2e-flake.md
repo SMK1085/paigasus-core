@@ -1,7 +1,11 @@
 # SMA-652 § 9.2 two-tab e2e flake — Implementation Plan
 
 > **Superseded where it closes a tab:** per Sven's ruling of 2026-09-19, the test closes no
-> Keycloak tab (closing can hang in Chromium). Spec § 3.1 is the authority.
+> Keycloak tab (closing can hang in Chromium). This affects the Architecture line, Task 2
+> (`tab1.close()`, `secondary.close()`, `secondary: Page | null`) and Task 3 (the forcing block
+> and the probe placed before `secondary.close()`). The text below stays as the historical plan.
+> Spec § 3.1 is the authority for the design, and spec § 4 and Appendix A for the verification
+> that replaced the close-based steps.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
