@@ -703,6 +703,14 @@ cd rs && PAIGASUS_REQUIRE_DOCKER=1 cargo nextest run -p paigasus-iam --test tena
 
 Expected: PASS, whole binary.
 
+- [ ] **Step 5b: COMMIT NOW, before any mutation**
+
+Run the lint and format check from Step 10, then make Step 10's commit at this point rather than at the end of the task.
+
+This ordering is not cosmetic, it is what makes the mutation steps safe. Steps 6-9 restore mutated files with `git checkout -- <path>`. While your new S1 and S2 are uncommitted, that command would restore `tenancy_events_pg.rs` to its PRE-TASK state and silently destroy your work. Once the new tests are committed, `git checkout --` restores exactly what you wrote, and the pre-task version is still reachable with `git show` when Step 8 needs it.
+
+After this commit, Steps 6-9 must produce NO further commit: every mutation they make is reverted, so the tree returns to this commit each time.
+
 - [ ] **Step 6: V7 — delete the lock S1 protects**
 
 In `rs/crates/services/paigasus-iam/src/adapters/persistence/pg_memberships.rs:160`, delete the ` FOR UPDATE` from `DETACH_LOCK_SQL` (the raw string then ends after the closing paren of line 159). Run S1 alone.
@@ -721,7 +729,15 @@ In `rs/crates/services/paigasus-iam/src/adapters/persistence/pg_teams.rs:266`, d
 
 This is the evidence that the OLD tests could pass while the race did not happen, and it needs BOTH halves: the lock deleted AND the racer late. A late racer alone makes `!handle.is_finished()` more true, not less, so it would prove nothing on its own.
 
-1. Stash your new work on S1 so you can run the OLD test: `git stash push -u -m "sma-660-v8"` is NOT safe here (the stash stack is shared across worktrees). Instead, make a temporary WIP commit: `git add -A && git commit -m "wip: sma-660 v8 checkpoint"`. Then check out the pre-Task-4 version of the file into the working tree: `git checkout HEAD~1 -- rs/crates/services/paigasus-iam/tests/tenancy_events_pg.rs`.
+1. Materialize the PRE-TASK version of the test file into the working tree, without touching HEAD, the index, or the stash (the stash stack is shared across worktrees and another session may be using it — never `git stash` here):
+
+```bash
+# TASK4_BASE is the commit your Step 5b commit was made ON TOP OF
+git show "$TASK4_BASE":rs/crates/services/paigasus-iam/tests/tenancy_events_pg.rs \
+  > rs/crates/services/paigasus-iam/tests/tenancy_events_pg.rs
+```
+
+Your new tests are safe in the Step 5b commit, so this is reversible with a plain `git checkout -- rs/crates/services/paigasus-iam/tests/tenancy_events_pg.rs` when you are done.
 2. Delete ` FOR UPDATE` from `DETACH_LOCK_SQL` as in Step 6, and insert into S1's spawned racer, as the first statement inside `tokio::spawn(async move {`:
 
 ```rust
@@ -729,7 +745,7 @@ This is the evidence that the OLD tests could pass while the race did not happen
 ```
 
 3. Run S1. **Expected: PASS.** That is the false green: the lock is gone, the race never happened, and the old test reports success. Record it.
-4. Restore the production file with `git checkout --`, restore the test file with `git checkout HEAD -- rs/crates/services/paigasus-iam/tests/tenancy_events_pg.rs`, and confirm `git status --short` is clean.
+4. Restore both files with `git checkout -- <path>` — the production file and the test file. Because of Step 5b, that returns the test file to YOUR version, not the pre-task one. Confirm `git status --short` is clean and `git log --oneline -1` still shows your Step 5b commit.
 5. Repeat 2-4 for S2 with `.lock_shared()` and S2's racer. Expected: PASS on the old file both times.
 6. Now the other half: with the NEW file and the locks still deleted, the same 1 s racer sleep must FAIL at the wait. That is Step 6 and Step 7's result plus a delay, so run one of the two — S1 — to confirm, and record it.
 
@@ -739,7 +755,9 @@ With production files clean and the new tests in place, insert the same 1 s slee
 
 **Expected: PASS.** The wait absorbs a late racer, which is the entire point of the change. Delete the marked lines and re-run to confirm PASS.
 
-- [ ] **Step 10: Lint, format and commit**
+- [ ] **Step 10: Final check (the commit already happened at Step 5b)**
+
+Confirm the tree is exactly your Step 5b commit with nothing left over from Steps 6-9:
 
 ```bash
 export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
