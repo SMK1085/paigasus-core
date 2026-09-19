@@ -2,7 +2,8 @@
 import { describe, expect, it, vi } from 'vitest';
 import { MemorySessionStore } from '../../src/adapters/memory-store.js';
 import { noopLogger } from '../../src/adapters/noop-logger.js';
-import { RefreshRejected } from '../../src/core/errors.js';
+import { RefreshRejected, SessionStoreTimeout } from '../../src/core/errors.js';
+import { failingStore, type StoreMethod } from '../support/store-failure.js';
 import { shouldRefresh } from '../../src/core/refresh-policy.js';
 import { resolveSession } from '../../src/core/single-flight.js';
 import { makeRecord } from '../store-contract.js';
@@ -654,5 +655,28 @@ describe('a failing refresh (SMA-626 § 2.3)', () => {
     // satisfied by the outer cap delete, which never touches the code this test exists to guard.
     expect(events).toContainEqual(['session.refresh_timeout', { sid: sidTag('s') }]);
     expect(out).toBeNull();
+  });
+
+  // SMA-657 § 7. The `if (rejected)` delete became reachable from BOTH module copies with this
+  // fix, and that delete goes through the SMA-651 deadline decorator. A store that fails there
+  // REPLACES the RefreshRejected as the thrown value, so `session.deleted` never fires and the
+  // record survives for its TTL. That outcome is accepted, not fixed: getSession returns null on
+  // any throw, so the user is still signed out, and the next request retries the delete. This row
+  // exists so the accepted outcome is pinned rather than discovered later as a surprise.
+  it('a failing delete on the rejection path replaces the error and leaves the record', async () => {
+    const inner = new MemorySessionStore();
+    await inner.set('s', makeRecord({ accessExpiresAt: Date.now() + 30_000 }), 60_000, null);
+    const calls: string[] = [];
+    const store = failingStore(inner, new Set<StoreMethod>(['delete']), () => new SessionStoreTimeout('delete', 4000, 'deadline'), calls);
+    const { logger, events } = recordingLogger();
+
+    await expect(resolveSession({ ...deps(store, rejected), logger, skewMs: 60_000 }, 's')).rejects.toBeInstanceOf(SessionStoreTimeout);
+    // The classification still happened and was logged...
+    expect(events).toContainEqual(['session.refresh_failed', { sid: sidTag('s'), reason: 'rejected', degraded: false }]);
+    // ...the delete WAS attempted...
+    expect(calls).toContain('delete:s');
+    // ...but it did not land, so there is no session.deleted and the record survives.
+    expect(events.some(([name]) => name === 'session.deleted')).toBe(false);
+    expect(await inner.get('s')).not.toBeNull();
   });
 });
