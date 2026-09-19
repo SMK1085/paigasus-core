@@ -10,7 +10,7 @@
 // rather than imported from src/http/cookies.ts: this suite drives the running fixture server as
 // an external black box, so it treats the cookie name as part of the OBSERVABLE contract this AC
 // is about, not as a fact reached by importing the module under test.
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test, type BrowserContext, type Page, type Request, type Response, type TestInfo } from '@playwright/test';
 import { KEYCLOAK_PASSWORD, KEYCLOAK_USERNAME, SESSION_COOKIE_NAME, ZONE_BASE_PATH } from './constants.js';
 
 async function fillKeycloakLoginForm(page: Page): Promise<void> {
@@ -30,6 +30,37 @@ async function attemptKeycloakLogin(page: Page): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+/** The session cookie's value, or `undefined`. The value is compared, never printed. */
+async function readSessionCookieValue(context: BrowserContext): Promise<string | undefined> {
+  return (await context.cookies()).find((c) => c.name === SESSION_COOKIE_NAME)?.value;
+}
+
+/** SMA-652: explains a failed fresh-tab check. CI keeps only the task's stdout and stderr (no
+ * Playwright attachment or trace survives the runner), so the same text goes to stderr AND to a
+ * text/plain attachment. Paths, statuses, cookie NAMES only: a Keycloak URL carries `state`, a
+ * callback URL carries `code`, and a cookie value is a credential. */
+async function reportFreshTabFailure(testInfo: TestInfo, context: BrowserContext, fresh: Page, response: Response | null, authRequests: readonly string[]): Promise<void> {
+  const chain: string[] = [];
+  let request: Request | null = response?.request() ?? null;
+  while (request !== null) {
+    const hop = await request.response();
+    const url = new URL(request.url());
+    chain.unshift(`${String(hop?.status() ?? 0)} ${url.origin}${url.pathname}`);
+    request = request.redirectedFrom();
+  }
+  const finalUrl = new URL(fresh.url());
+  const cookies = (await context.cookies()).map((c) => `${c.name} domain=${c.domain} path=${c.path}`);
+  const text = [
+    'SMA-652 fresh-tab diagnostics',
+    `redirect chain (${String(chain.length)} hop(s)): ${chain.length === 0 ? '(no response)' : chain.join(' -> ')}`,
+    `final page: ${finalUrl.origin}${finalUrl.pathname}`,
+    `cookies (${String(cookies.length)}): ${cookies.join('; ')}`,
+    `auth requests after the primary completed (${String(authRequests.length)}): ${authRequests.join(', ') || '(none)'}`,
+  ].join('\n');
+  console.error(text);
+  await testInfo.attach('sma-652-fresh-tab-diagnostics', { body: text, contentType: 'text/plain' });
 }
 
 test('AC 1: the full authorization-code round trip works with config only', async ({ page, context, baseURL }) => {
@@ -85,7 +116,7 @@ test('AC 1: the full authorization-code round trip works with config only', asyn
   expect(debugBody.refreshToken, 'Keycloak must actually issue a refresh_token for offline_access to mean anything').not.toBeNull();
 });
 
-test('§ 9.2: two tabs starting a login concurrently both complete', async ({ context }) => {
+test('§ 9.2: two concurrent logins mint distinct txn cookies, and one completion signs in the whole context', async ({ context }, testInfo) => {
   const tab1 = await context.newPage();
   const tab2 = await context.newPage();
 
@@ -106,29 +137,70 @@ test('§ 9.2: two tabs starting a login concurrently both complete', async ({ co
 
   // MEASURED while building this test: Keycloak 26.4 (dev mode) shares ONE `KC_RESTART` /
   // `AUTH_SESSION_ID` cookie pair across the WHOLE browser context, not one per tab, so two tabs
-  // that both just navigated to its `/auth` endpoint are racing for that single shared slot.
-  // NONDETERMINISTICALLY, either tab's freshly-loaded login form can end up pointing at a session
-  // Keycloak no longer recognises ("Your login attempt timed out. Login will start from the
-  // beginning.") — which tab loses the race varies between runs. That is Keycloak's own session
-  // model under concurrent tabs, not a property of this package: the assertion above (two
-  // DISTINCT txn cookies, neither overwriting the other) is what actually proves § 9.2, and it
-  // does not depend on which tab wins Keycloak's race. What follows completes login on WHICHEVER
-  // tab is still valid, then proves the OTHER tab reaches the same authenticated state too —
-  // through the shared __Host-pgs_sid cookie the first one sets, since both tabs are the SAME
-  // browser context and therefore the same signed-in user the moment either flow finishes.
+  // that both just navigated to its `/auth` endpoint race for that single shared slot, and
+  // NONDETERMINISTICALLY either tab's login form can point at a session Keycloak no longer
+  // recognises ("Your login attempt timed out"). That is Keycloak's session model, not this
+  // package's; the txn-cookie count above is what proves § 9.2. What follows completes login on
+  // WHICHEVER tab is still valid.
+  //
+  // SMA-652 (measured on Keycloak 26.4.7; global-setup.ts uses the floating tag `keycloak:26.4`):
+  // a Keycloak login page must never stay open, and never be reused, once the other login has
+  // completed. The two pages also race for `KC_AUTH_SESSION_HASH`; the losing page's
+  // `authChecker.js` (`checkAuthSession`, one-shot, 1000 ms after load) calls `location.reload()`
+  // on the mismatch, and `beforeunload` does not cancel that timer — so a later `goto` on that tab
+  // can reach /guarded (200) and then be overridden by the reload, leaving the tab on the Keycloak
+  // form. An open login page also polls every 2 s and may follow the SSO session into
+  // /auth/callback, where `txn_missing` -> /auth/login would delete the shared session. So each
+  // Keycloak tab is closed as soon as the test no longer needs it, and the shared-session
+  // property is proved on a FRESH page, which no Keycloak document can navigate.
+  // Evidence: docs/superpowers/specs/2026-09-19-sma-652-auth-two-tab-e2e-flake-design.md.
   const tab1Completed = await attemptKeycloakLogin(tab1);
-  const [primary, secondary] = tab1Completed ? [tab1, tab2] : [tab2, tab1];
-  if (!tab1Completed) {
+  testInfo.annotations.push({ type: 'sma-652-mode', description: tab1Completed ? 'tab1-won' : 'tab1-lost' });
+  let primary: Page;
+  let secondary: Page | null;
+  if (tab1Completed) {
+    primary = tab1;
+    secondary = tab2;
+  } else {
+    await tab1.close();
     const tab2Completed = await attemptKeycloakLogin(tab2);
     expect(tab2Completed, 'at least one of the two concurrently-started logins must complete on its first Keycloak submission').toBe(true);
+    primary = tab2;
+    secondary = null;
   }
   await expect(primary.getByTestId('guarded-heading')).toBeVisible();
 
-  // The secondary tab never needs Keycloak again — a fresh load of the guarded page finds it
-  // already signed in, via the session cookie the primary tab's completion just set.
-  await secondary.goto(`${ZONE_BASE_PATH}/guarded`);
-  await expect(secondary.getByTestId('guarded-heading')).toBeVisible();
+  const pageLabels = new Map<Page, string>([[primary, 'primary']]);
+  if (secondary !== null) pageLabels.set(secondary, 'secondary');
+  const authRequests: string[] = [];
+  context.on('request', (request) => {
+    if (!request.isNavigationRequest()) return;
+    const { pathname } = new URL(request.url());
+    if (pathname !== `${ZONE_BASE_PATH}/auth/login` && pathname !== `${ZONE_BASE_PATH}/auth/callback`) return;
+    authRequests.push(`${pageLabels.get(request.frame().page()) ?? 'other'} ${pathname}`);
+  });
 
-  await tab1.close();
-  await tab2.close();
+  const sidBefore = await readSessionCookieValue(context);
+  expect(sidBefore !== undefined, 'the primary login must have set __Host-pgs_sid').toBe(true);
+  if (secondary !== null) await secondary.close();
+
+  const fresh = await context.newPage();
+  pageLabels.set(fresh, 'fresh');
+  const response = await fresh.goto(`${ZONE_BASE_PATH}/guarded`);
+  try {
+    // The heading alone cannot tell the shared cookie apart from a SILENT SSO re-login
+    // (/guarded -> /auth/login -> Keycloak -> /auth/callback -> a NEW session -> /guarded). The
+    // one-hop check and the unchanged sid both fail on that path.
+    expect(response !== null, 'the fresh tab navigation must produce a response').toBe(true);
+    if (response === null) throw new Error('unreachable');
+    expect(response.status()).toBe(200);
+    expect(response.request().redirectedFrom() === null, 'the fresh tab must reach /guarded in ONE hop, with no login redirect').toBe(true);
+    expect(new URL(response.url()).pathname).toBe(`${ZONE_BASE_PATH}/guarded`);
+    await expect(fresh.getByTestId('guarded-heading')).toBeVisible();
+    const sidNow = await readSessionCookieValue(context);
+    expect(sidNow === sidBefore, 'the fresh tab must reuse the SAME __Host-pgs_sid, not a new session').toBe(true);
+  } catch (error) {
+    await reportFreshTabFailure(testInfo, context, fresh, response, authRequests);
+    throw error;
+  }
 });
