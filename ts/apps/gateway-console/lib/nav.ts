@@ -29,3 +29,19 @@ export function buildNavEntries(input: { iam: ServiceState; gateway: ServiceStat
   }
   return entries;
 }
+
+/** What a "Manage in IAM" link points at (SMA-636 spec § 4.4). */
+export type ManageTarget = { readonly kind: 'organization'; readonly orgId: string } | { readonly kind: 'project'; readonly orgId: string; readonly teamId: string | null; readonly projectId: string };
+
+/**
+ * The "Manage in IAM" href (SMA-636 spec § 4.4, D10): the same node in the IAM zone, from the zone
+ * map's `iam` entry, in the pattern of buildNavEntries above. Null when the map has no IAM zone
+ * (the single-zone e2e tier), and for a project whose team is not known, because the IAM zone's
+ * project route carries the team.
+ */
+export function iamManageHref(zones: ZoneMap, target: ManageTarget): string | null {
+  const iamBase = zones['iam'];
+  if (iamBase === undefined) return null;
+  if (target.kind === 'organization') return `${iamBase}/orgs/${target.orgId}`;
+  return target.teamId === null ? null : `${iamBase}/orgs/${target.orgId}/teams/${target.teamId}/projects/${target.projectId}`;
+}

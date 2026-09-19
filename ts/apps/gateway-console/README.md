@@ -2,8 +2,9 @@
 
 The AI Gateway zone of the Paigasus console. It is a Next.js 16 app, mounted at `/gateway`, that
 runs as a standalone server, beside `@paigasus/iam-console` (mounted at `/iam`) in a multi-zone
-deployment. It has the login, the console shell, the zone overview and the organization scope
-route. Design: `docs/superpowers/specs/2026-09-13-sma-512-gateway-console-design.md`.
+deployment. It has the login, the console shell, the zone overview, and the organization and
+project settings pages (SMA-636). Design: `docs/superpowers/specs/2026-09-13-sma-512-gateway-console-design.md`
+and `docs/superpowers/specs/2026-09-18-sma-636-gateway-org-project-settings-design.md`.
 
 ## Run it locally
 
@@ -73,16 +74,23 @@ instead of reporting green having proved nothing.
 
 - **Unit and integration** (`tests/unit`, `tests/integration`, vitest). The integration tests talk real gRPC to an in-process fake IAM and a fake gateway (`@paigasus/console-core`'s `testing/fake-iam.ts` and `testing/fake-gateway.ts`).
 - **Browser** (`tests/e2e`, Playwright). `gateway-console-ts:test-e2e` runs two Playwright projects, selected by file name:
-  - **`single-zone`** — a production build runs through the standalone server behind an in-process TLS terminator, with the fake IAM, a fake gateway and a fake HTTPS IdP. The session store is `memory`, so the zone map holds one zone. It covers rows R1 through R7, plus R4b, a second capability case that pairs with R4.
-  - **`two-zone`** (SMA-512 pull request 4) — a worker fixture starts a `redis:8-alpine` container (the first container this repository starts this way), both apps' standalone servers (`iam-console` and `gateway-console`), and one TLS terminator that path-routes to both. The session store is `redis`, so a session set on one zone is visible on the other. It covers rows R8 through R12. Together they prove the cross-zone session, the gateway zone's isolation from an IAM-only session, and that the two apps' static chunks do not collide under one origin.
+  - **`single-zone`** — a production build runs through the standalone server behind an in-process TLS terminator, with the fake IAM, a fake gateway and a fake HTTPS IdP. The session store is `memory`, so the zone map holds one zone. It covers rows R1 through R7, plus R4b, a second capability case that pairs with R4, and rows R13 through R20 for the settings pages of SMA-636.
+  - **`two-zone`** (SMA-512 pull request 4) — a worker fixture starts a `redis:8-alpine` container (the first container this repository starts this way), both apps' standalone servers (`iam-console` and `gateway-console`), and one TLS terminator that path-routes to both. The session store is `redis`, so a session set on one zone is visible on the other. It covers rows R8 through R12, and row R21 for the settings pages of SMA-636. Together they prove the cross-zone session, the gateway zone's isolation from an IAM-only session, and that the two apps' static chunks do not collide under one origin.
 
-  Each row is one test. `tests/unit/e2e-rows.test.ts` holds the full row list (R1–R7, plus R4b and R7's 403 control, then R8–R12). It fails when a row is missing, duplicated, or renamed.
+  Each row is one test. `tests/unit/e2e-rows.test.ts` holds the full row list (R1–R7, plus R4b and R7's 403 control, then R8–R12, then R13–R21 for the settings pages of SMA-636). It fails when a row is missing, duplicated, or renamed.
 
 ## Known limits
 
 - Acceptance criteria 1 and 2 (the two-zone properties) are now proved by the `two-zone` Playwright project above (SMA-512 pull request 4). Row R8 proves AC 1: a session from the IAM zone carries into the gateway zone with no second authorization. Row R10 proves AC 2: a cold login at the gateway zone works with zero connections to `iam-console`.
 - Acceptance criterion 3 is not delivered at all: the gateway's chat route authenticates Paigasus API keys and never an OIDC token, so a playground built on a console session could not make one real call. A follow-up issue owns widening `require_iam_auth` and deciding the authorization resource for a user principal.
-- The organization scope route changes the URL and the breadcrumbs and nothing else. It exists so a later settings screen has a working shape to hang off, and so the switcher is not a dead control.
+- The settings pages list the service accounts that the organization or the project owns, and their API keys (SMA-636). An account that a team owns is not visible in this zone, so an organization admin has no complete list of live keys here.
+- Creating a service account makes two IAM calls, not one atomic call. A failed `gateway_user` grant leaves an account that cannot call models until someone uses "Allow model calls".
+- An account that got `gateway_user` outside the console, at an ancestor scope, shows "Can call models: Yes". The console cannot show where the grant comes from.
+- There is no "Stop model calls" control: `RevokeRole` needs a grant id, and only a platform admin can list another principal's grants. Archive the account or revoke its keys instead.
+- After an archive, IAM evicts the account's keys from its API-key cache. How fast every IAM replica stops accepting them depends on IAM's cache configuration, which the console does not check.
+- `FormError`, `node-status.ts`, `section-error.tsx` and the two-step confirm button are copies of iam-console's. Nothing gates a divergence.
+- The organization page makes one `ListProjects` call per shown team (at most 50, at most 8 in flight). Row R19 counts the calls of one render; nothing measures their latency against a real IAM.
+- With JavaScript off, the settings pages are read-only: every mutation control renders after hydration.
 - The organization switcher runs `myScopes()` on every console page render — one `Introspect`, one `ListRoleGrants` walk and up to 50 tenancy reads. The cost is not measured, and this zone pays it independently of `iam-console`, which pays the same cost.
 - A lost `cache()` memoization inside `lib/console.ts` (there must be exactly one `createConsoleRuntime()` call) is observable only in the browser tier, and this app ships that rule today with no automated control behind it.
 - A stopped zone app is invisible to ADR-0020 discovery: discovery probes services, not zone apps, so a zone whose app is down still renders an _available_ nav entry pointing at a dead route. A later ingress layer is where that would be caught.
@@ -90,3 +98,6 @@ instead of reporting green having proved nothing.
 - The presentation-copy table (`app/_components/error-copy.ts`) stays per zone: `iam-console` keeps its own table, worded for IAM, and nothing gates the two tables against each other. That is intended.
 - About 250 lines of server composition and view code are byte-identical with `iam-console`, and nothing in the repository gates a divergence between the two copies. See spec § 13 for the full list of files and why this is recorded rather than extracted.
 - The kernel's napi binding cannot load in a Next build, because `@paigasus/node-bindings` ships no `.node` binary. The defect stays open for every Node consumer of `@paigasus/kernel` (SMA-634).
+- Row R16's token-exposure scan cannot read two classes of response, and both are excluded from the row's residue check on purpose: a prefetch response the router issues but the interceptor could not buffer (an unbuffered prefetch), and a 3xx redirect, whose body Playwright's `Response.body()` refuses to read. Every response header, a redirect's included, is still scanned. This is the honest limit of spec § 7.2 row 4, not a gap the row hides.
+- A successful key issue revalidates the page (plan SPEC DEVIATION 8). The token panel survives a revalidated section that turns into an error or a denial, but not a page-level error: if `GetOrganization` or `GetProject` fails on that render, the whole page is replaced and the token is lost.
+- The project page's breadcrumb link to its organization page uses the default prefetch, because `@paigasus/app-shell`'s `Breadcrumbs` takes no `prefetch` option. For a `project_admin` with no access to the organization, every project page view prefetches a 403 render of the organization page.

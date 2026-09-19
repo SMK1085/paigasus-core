@@ -9,13 +9,18 @@ import type { AnchorHTMLAttributes, ReactElement, Ref } from 'react';
 /** Every href a click on the double activated, in order. Reset it in `beforeEach`. */
 export const nextLinkClicks: string[] = [];
 
-type NextLinkDoubleProps = Omit<AnchorHTMLAttributes<HTMLAnchorElement>, 'href'> & { href: string; ref?: Ref<HTMLAnchorElement> };
+type NextLinkDoubleProps = Omit<AnchorHTMLAttributes<HTMLAnchorElement>, 'href'> & { href: string; prefetch?: boolean; ref?: Ref<HTMLAnchorElement> };
 
-export default function NextLinkDouble({ href, onClick, children, ...rest }: NextLinkDoubleProps): ReactElement {
+/**
+ * `prefetch` is written as `data-prefetch` (SMA-636), so a test can see what ZoneLink passed. The
+ * attribute is absent when ZoneLink passed nothing.
+ */
+export default function NextLinkDouble({ href, onClick, prefetch, children, ...rest }: NextLinkDoubleProps): ReactElement {
   return (
     <a
       {...rest}
       data-next-link=""
+      data-prefetch={prefetch === undefined ? undefined : String(prefetch)}
       href={href}
       onClick={(event) => {
         onClick?.(event);

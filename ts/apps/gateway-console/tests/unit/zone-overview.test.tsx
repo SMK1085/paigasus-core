@@ -26,8 +26,8 @@ function absent(): ServiceState {
   return { state: 'absent', service: 'gateway' };
 }
 
-function render(state: ServiceState, scope: { readonly orgId: string; readonly name: string } | null = null): string {
-  return renderToStaticMarkup(<ZoneOverview view={gatewayView(state)} scope={scope} />);
+function render(state: ServiceState): string {
+  return renderToStaticMarkup(<ZoneOverview view={gatewayView(state)} />);
 }
 
 describe('ZoneOverview', () => {
@@ -60,11 +60,7 @@ describe('ZoneOverview', () => {
     expect(html).not.toContain('data-testid="gateway-capabilities"');
   });
 
-  it('renders "All organizations" with no scope', () => {
-    expect(render(absent(), null)).toContain('All organizations');
-  });
-
-  it("renders the organization's name with a scope", () => {
-    expect(render(absent(), { orgId: '0192f1c0-0000-7000-8000-00000000000a', name: 'Acme' })).toContain('Acme');
+  it('always renders "All organizations"', () => {
+    expect(render(absent())).toContain('All organizations');
   });
 });

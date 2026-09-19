@@ -5,8 +5,8 @@
 // It takes NO mayI: a command cannot refuse an action on the UI's guess. IAM decides (spec § 6.3).
 import 'server-only';
 import { z } from 'zod';
-import { callIam, type IamClients } from '@paigasus/console-core';
-import { nameField, prnField, slugField, toActionResult, type ActionResult } from '../../../lib/form';
+import { callIam, nameField, prnField, toActionResult, type ActionResult, type IamClients } from '@paigasus/console-core';
+import { slugField } from '../../../lib/form';
 
 /** The shape of the form, not IAM's rules. IAM validates the slug grammar and answers with a reason. */
 export const createOrganizationForm = z.object({ slug: slugField, name: nameField });

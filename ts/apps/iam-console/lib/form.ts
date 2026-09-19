@@ -1,39 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// Shared pieces of the Server Action shells (spec § 5.3). zod checks the SHAPE of a form only
-// (present, trimmed, bounded). IAM owns every business rule — the slug grammar, the PRN grammar,
-// who may act — and answers with a reason the form copy knows (spec § 6.5).
+// The RENAME pieces of the Server Action shells (spec § 5.3, SMA-630 spec § 4.2). Only this zone
+// renames a node, so they stay here. The pure helpers that both zones use — formFields,
+// invalidFormInput, toActionResult, ActionResult, nameField, NAME_MAX_CODE_POINTS and prnField —
+// moved to @paigasus/console-core (SMA-636 D11). zod checks the SHAPE of a form only; IAM owns
+// every business rule and answers with a reason the form copy knows (spec § 6.5).
 import 'server-only';
 import { z } from 'zod';
-import type { PaigasusError } from '@paigasus/sdk/errors/types';
-import { neverReachedIam, type ActionState, type IamResult } from '@paigasus/console-core';
-
-// The field bounds of every tenancy form (SMA-630 spec § 4.2). They live ONLY here: each
-// commands.ts imports them, so a create form and a rename form cannot disagree.
-
-/** IAM's NAME_MAX_CHARS (paigasus-iam-core tenancy.rs): 256 Unicode scalar values, not UTF-16 units. */
-export const NAME_MAX_CODE_POINTS = 256;
+import { nameField, prnField, type ActionResult } from '@paigasus/console-core';
 
 /** A slug. IAM refuses more than 64 bytes with `invalid-slug`; this bound only limits the request. */
 export const slugField = z.string().trim().min(1).max(200);
-
-/**
- * A name, for create AND rename. The bound counts code points (`[...value].length`), as IAM does:
- * zod's `.max()` counts UTF-16 units, and would refuse a valid name of astral characters. IAM's
- * rename path validates a name too since SMA-642, with the same 256 code-point bound, so this
- * schema is no longer the only guard for a rename — it is the one that gives the user the error in
- * the form rather than a round trip. The two trims are not identical: this schema trims as
- * JavaScript does, IAM trims Unicode `White_Space` (SMA-642 spec F2), so a name of only U+0085
- * passes here and IAM answers `invalid-name`.
- */
-export const nameField = z
-  .string()
-  .trim()
-  .min(1)
-  .refine((value) => [...value].length <= NAME_MAX_CODE_POINTS);
-
-/** A PRN: bounded text. IAM parses it and answers `invalid-prn` for a bad one. */
-export const prnField = z.string().trim().min(1).max(512);
 
 /**
  * A hidden "current value" of a rename form. It can be empty, and it can be longer than the name
@@ -83,26 +60,6 @@ export function renameChange(fields: RenameFields): RenameChange {
     ...(slug === fields.currentSlug.trim() ? {} : { newSlug: slug }),
     ...(name === fields.currentName.trim() ? {} : { newName: name }),
   };
-}
-
-/** What a command returns. `null` is only the initial state of `useActionState`. */
-export type ActionResult = Exclude<ActionState, null>;
-
-export function toActionResult(result: IamResult<unknown>): ActionResult {
-  return result.ok ? { ok: true } : { ok: false, error: result.error };
-}
-
-export function formFields(form: FormData, names: readonly string[]): Record<string, FormDataEntryValue | null> {
-  return Object.fromEntries(names.map((name) => [name, form.get(name)]));
-}
-
-/**
- * A form that zod refused never reached IAM (see `@paigasus/console-core`'s `neverReachedIam`).
- * `transport` says HTTP 400 because the BFF itself refused the request; the field is for logging
- * only, and nothing branches on it (ADR-0019 E8).
- */
-export function invalidFormInput(): PaigasusError {
-  return neverReachedIam({ presentation: 'invalid-input', message: 'Fill in every field of the form.', transport: { kind: 'http', status: 400 } });
 }
 
 /**

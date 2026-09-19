@@ -15,7 +15,8 @@ import { denial, startFakeIam, type FakeIam, type FakeIamHandlers, type FakeIamM
 import { archiveOrganization, archiveOrganizationForm, renameOrganization, renameOrganizationForm, restoreOrganization, restoreOrganizationForm } from '../../app/(console)/orgs/[org]/commands';
 import { archiveTeam, renameTeam, restoreTeam } from '../../app/(console)/orgs/[org]/teams/[team]/commands';
 import { archiveProject, renameProject, restoreProject } from '../../app/(console)/orgs/[org]/teams/[team]/projects/[project]/commands';
-import { renameChange, type ActionResult } from '../../lib/form';
+import type { ActionResult } from '@paigasus/console-core';
+import { renameChange } from '../../lib/form';
 import { IDS, callsSince, clientsFor } from './support';
 
 let iam: FakeIam;

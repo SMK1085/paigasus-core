@@ -13,7 +13,8 @@
 // SAME store.
 import { randomUUID } from 'node:crypto';
 import { SESSION_COOKIE, type SessionRecord } from '@paigasus/auth/server';
-import { startFakeGateway, startFakeIam, type FakeGateway, type FakeIam } from '@paigasus/console-core/testing';
+import { createIamClients, type IamAction, type IamClients, type MayI } from '@paigasus/console-core';
+import { startFakeGateway, startFakeIam, type FakeGateway, type FakeIam, type FakeIamCall, type FakeIamMethod } from '@paigasus/console-core/testing';
 import { authRuntime } from '../../lib/auth';
 import { setRequestCookies } from '../support/next-headers';
 import { stubConsoleEnv } from '../support/env';
@@ -22,6 +23,10 @@ import { stubConsoleEnv } from '../support/env';
 export const IDS = {
   orgA: '0190a100-0000-7000-8000-00000000000a',
   orgB: '0190a100-0000-7000-8000-00000000000b',
+  teamA1: '0190a1b2-0000-7000-8000-0000000000a1',
+  projectA1: '0190a1c3-0000-7000-8000-0000000000a1',
+  saA: '0190a1e5-0000-7000-8000-0000000000a1',
+  saB: '0190a1e5-0000-7000-8000-0000000000b1',
 } as const;
 
 export type IntegrationEnv = { readonly iam: FakeIam; readonly gateway: FakeGateway };
@@ -78,4 +83,31 @@ export async function installSession(token = 'tok-integration'): Promise<string>
   if (!inserted) throw new Error('installSession: the store refused the insert (an sid collision — this should never happen)');
   setRequestCookies({ [SESSION_COOKIE]: sid });
   return token;
+}
+
+/** The six IAM clients for `token` over the fake's gRPC address: the factory the app itself uses. */
+export function clientsFor(iam: FakeIam, token = 'tok-integration'): IamClients {
+  return createIamClients({ baseUrl: iam.grpcUrl, token });
+}
+
+/** The calls the fake saw from now on, by method. The fake's log is shared by every test in a file. */
+export function callsSince(iam: FakeIam): (method: FakeIamMethod | 'http.getServiceInfo') => FakeIamCall[] {
+  const start = iam.calls.length;
+  return (method) => iam.calls.slice(start).filter((call) => call.method === method);
+}
+
+export type ScriptedMayI = MayI & { readonly asked: readonly (readonly [IamAction, string])[] };
+
+/**
+ * A MayI that answers from a table (absent = false) and records every question. The pattern of
+ * iam-console's tests/integration/support.ts. It makes no IAM call, so a test's isAuthorized log
+ * holds only the questions the code under test asked about a SERVICE ACCOUNT.
+ */
+export function scriptedMayI(allowed: Partial<Record<IamAction, boolean>>): ScriptedMayI {
+  const asked: (readonly [IamAction, string])[] = [];
+  const mayI = (action: IamAction, resourcePrn: string): Promise<boolean> => {
+    asked.push([action, resourcePrn]);
+    return Promise.resolve(allowed[action] ?? false);
+  };
+  return Object.assign(mayI, { asked });
 }

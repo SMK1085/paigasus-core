@@ -2,9 +2,8 @@
 'use client';
 
 import { useRef, useState, type ReactElement } from 'react';
-import type { ActionState } from '@paigasus/console-core';
+import type { ActionState, FormAction } from '@paigasus/console-core';
 import type { PaigasusError } from '@paigasus/sdk/errors/types';
-import type { FormAction } from './form-action';
 import { FormError } from './form-error';
 import { ArchiveButton, RestoreButton } from './lifecycle-button';
 import { RenameForm } from './rename-form';

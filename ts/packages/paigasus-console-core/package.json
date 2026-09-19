@@ -23,7 +23,8 @@
     "@paigasus/discovery": "workspace:*",
     "@paigasus/sdk": "workspace:*",
     "redis": "catalog:",
-    "server-only": "catalog:"
+    "server-only": "catalog:",
+    "zod": "catalog:"
   },
   "peerDependencies": {
     "next": "catalog:",

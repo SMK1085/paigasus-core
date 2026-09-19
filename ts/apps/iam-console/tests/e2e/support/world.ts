@@ -61,6 +61,12 @@ export const ALL_ACTIONS = [
   'AttachMembership',
   'DetachMembership',
   'ListAuditLog',
+  // SMA-636: the gateway settings. This zone asks none of them, but the SET must equal IAM_ACTIONS.
+  'CreateServiceAccount',
+  'ArchiveServiceAccount',
+  'IssueApiKey',
+  'RevokeApiKey',
+  'GrantRole',
 ] as const satisfies readonly IamAction[];
 
 export type Descriptor = { service: string; version: string; capabilities: string[] } | { status: number };

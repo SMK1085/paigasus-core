@@ -9,10 +9,15 @@ import { isAtOrUnder, pathOf, resolveZone } from './resolve';
 
 /**
  * A superset of @paigasus/ui's LinkProps, so ZoneLink is assignable to LinkComponent and an app can
- * inject it: <LinkProvider link={ZoneLink}> (spec § 6.4). There is no `prefetch`, `replace` or
- * `scroll`: Next's defaults apply, and nothing consumes them yet.
+ * inject it: <LinkProvider link={ZoneLink}> (spec § 6.4). There is no `replace` or `scroll`: Next's
+ * defaults apply, and nothing consumes them yet.
+ *
+ * `prefetch` reaches next/link on the SAME-ZONE branch only (SMA-636 spec § 4.1). After hydration
+ * the router prefetches every visible same-zone link, and each prefetch is a server render, so a
+ * long list of links passes `prefetch={false}`. A cross-zone or auth link is a plain <a>, which
+ * never prefetches, so it never receives the prop.
  */
-export type ZoneLinkProps = LinkProps & Omit<AnchorHTMLAttributes<HTMLAnchorElement>, 'href'> & { ref?: Ref<HTMLAnchorElement> };
+export type ZoneLinkProps = LinkProps & Omit<AnchorHTMLAttributes<HTMLAnchorElement>, 'href'> & { ref?: Ref<HTMLAnchorElement>; prefetch?: boolean };
 
 // One development warning per first path segment, for the life of the page.
 const warnedSegments = new Set<string>();
@@ -34,7 +39,7 @@ function isAuthRoute(rest: string): boolean {
  * Throws ZoneLinkError for a malformed href (spec § 6.2). It forwards `ref` and every anchor
  * attribute, so the props that Radix `asChild` passes reach the DOM.
  */
-export function ZoneLink({ href, children, onClick, onMouseEnter, onTouchStart, ...anchorProps }: ZoneLinkProps): ReactElement | null {
+export function ZoneLink({ href, children, onClick, onMouseEnter, onTouchStart, prefetch, ...anchorProps }: ZoneLinkProps): ReactElement | null {
   const { zone, zones } = useZone();
   const target = resolveZone(href, zones);
   const unmatched = target === null;
@@ -62,6 +67,7 @@ export function ZoneLink({ href, children, onClick, onMouseEnter, onTouchStart, 
         {...(onClick !== undefined ? { onClick } : {})}
         {...(onMouseEnter !== undefined ? { onMouseEnter } : {})}
         {...(onTouchStart !== undefined ? { onTouchStart } : {})}
+        {...(prefetch !== undefined ? { prefetch } : {})}
         href={target.rest}
       >
         {children}

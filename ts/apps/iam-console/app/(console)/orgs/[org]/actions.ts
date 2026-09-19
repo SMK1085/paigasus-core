@@ -6,8 +6,8 @@
 // (SMA-630 spec § 4.4) also refresh the page after a forbidden or conflict answer, which often means
 // that the page is stale.
 import { revalidatePath } from 'next/cache';
-import type { ActionState } from '@paigasus/console-core';
-import { formFields, invalidFormInput, refreshesAfterLifecycleAction } from '../../../../lib/form';
+import { formFields, invalidFormInput, type ActionState } from '@paigasus/console-core';
+import { refreshesAfterLifecycleAction } from '../../../../lib/form';
 import { iamClientsForAction } from '../../../../lib/console';
 import { TENANCY_PATH } from '../../../../lib/tenancy-path';
 import { archiveOrganization, archiveOrganizationForm, createTeam, createTeamForm, renameOrganization, renameOrganizationForm, restoreOrganization, restoreOrganizationForm } from './commands';

@@ -48,6 +48,37 @@ describe('ZoneLink (spec § 6.4)', () => {
     expect(link).toHaveAttribute('href', '/gateway/usage');
   });
 
+  it('same zone: passes prefetch={false} to next/link (SMA-636 spec § 4.1)', () => {
+    render(
+      inZone(
+        <ZoneLink href="/iam/users" prefetch={false}>
+          Users
+        </ZoneLink>,
+      ),
+    );
+    expect(screen.getByRole('link', { name: 'Users' })).toHaveAttribute('data-prefetch', 'false');
+  });
+
+  it('same zone: leaves prefetch unset when the caller gives none, so Next keeps its default', () => {
+    render(inZone(<ZoneLink href="/iam/users">Users</ZoneLink>));
+    expect(screen.getByRole('link', { name: 'Users' })).not.toHaveAttribute('data-prefetch');
+  });
+
+  it('cross zone: never writes prefetch onto the plain <a>', () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    render(
+      inZone(
+        <ZoneLink href="/gateway/usage" prefetch={false}>
+          Usage
+        </ZoneLink>,
+      ),
+    );
+    const link = screen.getByRole('link', { name: 'Usage' });
+    expect(link).not.toHaveAttribute('prefetch');
+    expect(link).not.toHaveAttribute('data-prefetch');
+    expect(error).not.toHaveBeenCalled();
+  });
+
   it('no match: renders nothing, and warns ONCE per first segment without the full href', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     const { container, rerender } = render(inZone(<ZoneLink href="/orphans?token=secret-abc">Orphans</ZoneLink>));

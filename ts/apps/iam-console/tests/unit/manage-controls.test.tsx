@@ -13,10 +13,9 @@ import { act, cleanup, render, screen, waitFor, within } from '@testing-library/
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ZoneProvider } from '@paigasus/app-shell';
-import type { ActionState } from '@paigasus/console-core';
+import type { ActionState, FormAction } from '@paigasus/console-core';
 import { ErrorDomain, ErrorReason, type PaigasusError } from '@paigasus/sdk/errors/types';
 import { FORM_REASON_COPY } from '../../app/_components/error-copy';
-import type { FormAction } from '../../app/_components/form-action';
 import { ManageSection, type ManageSectionProps } from '../../app/(console)/manage-section';
 import type { NodeLifecycle } from '../../app/(console)/node-status';
 

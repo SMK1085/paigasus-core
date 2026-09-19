@@ -28,6 +28,11 @@ import type { ConsoleLogger } from './logger';
  * `as_wire`). A RUNTIME array, not only a type (SMA-630 spec § 5.1): mayI() fails open, so a
  * misspelt name would show its control for ever. tests/unit/action-names.test.ts holds every entry
  * to the Rust wire names, and the e2e world of the IAM console holds its ALL_ACTIONS to this list.
+ *
+ * SMA-636 added the five names of the gateway settings. InvokeModel and ListRoleGrants are
+ * deliberately ABSENT: mayI() asks about the current user, and neither question is about the user.
+ * The gateway zone asks InvokeModel about a service account through its own fail-closed
+ * modelCallState, and ListRoleGrants for another principal needs Root.
  */
 export const IAM_ACTIONS = [
   'ListOrganizations',
@@ -46,6 +51,11 @@ export const IAM_ACTIONS = [
   'AttachMembership',
   'DetachMembership',
   'ListAuditLog',
+  'CreateServiceAccount',
+  'ArchiveServiceAccount',
+  'IssueApiKey',
+  'RevokeApiKey',
+  'GrantRole',
 ] as const;
 
 export type IamAction = (typeof IAM_ACTIONS)[number];

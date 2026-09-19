@@ -35,7 +35,8 @@ test('R11: no single request makes more than one Introspect call (§ 5.3)', asyn
   // each with its own `createConsoleRuntime()` call — real traffic for the grouping below, not a
   // single request repeated.
   await page.goto(harness.url(`/gateway/orgs/${ORG_ID}`));
-  await expect(page.getByTestId('zone-overview')).toBeVisible();
+  // SMA-636 § 7.4: /gateway/orgs/<org> is the organization settings page now, not the zone overview.
+  await expect(page.getByTestId('org-settings')).toBeVisible();
 
   await page.getByRole('navigation', { name: 'Primary' }).getByRole('link', { name: 'IAM', exact: true }).click();
   await page.waitForURL(`${harness.origin}/iam/orgs`);
