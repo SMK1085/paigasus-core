@@ -23,6 +23,12 @@
 // an HTTP response (an error page, § 10 of the design doc) is a caller concern — this package does
 // not decide that here, matching how core/single-flight.ts lets its own AuthError subclasses
 // propagate rather than swallowing them into a "safe" return value.
+//
+// A STORE FAILURE IS THE EXCEPTION, and it is mapped HERE (SMA-653 D1). A SessionStoreUnavailable
+// from any store call on these routes becomes a 503 with a retry control (http/store-unavailable.ts;
+// SMA-506 design § 7.2). Unlike CallbackRejected, the 503 is a fixed rule of the design, not a
+// caller choice, and only this file knows WHICH store call failed — the logout route needs that to
+// still attempt its delete when its read fails. Every other error still propagates.
 import type { OidcTokens } from '../adapters/oidc';
 import { hashSecret, newSessionId, newTransactionId, newTransactionSecret, secretMatchesHash } from '../core/ids';
 import { validateReturnTo } from '../core/return-to';
@@ -32,6 +38,7 @@ import { sidTag } from '../ports/logger';
 import type { AuthRuntime } from '../runtime';
 import { SESSION_COOKIE, TXN_COOKIE_PREFIX, clearCookie, readCookies, serializeCookie, txnCookieName } from './cookies';
 import { AUTH_ROUTE_SUFFIXES, type AuthRouteSuffix } from './route-table';
+import { STORE_DOWN, loginRetryHref, storeStep, storeUnavailableResponse, type RetryAffordance } from './store-unavailable';
 
 /** Design doc § 9.3: 10 minutes. */
 const TXN_TTL_MS = 10 * 60 * 1000;
@@ -177,7 +184,19 @@ async function handleLogin(runtime: AuthRuntime, req: Request, url: URL): Promis
     state: txnId,
   });
 
-  await runtime.store.putTransaction(txnId, { codeVerifier: authorization.codeVerifier, nonce: authorization.nonce, returnTo, secretHash: hashSecret(secret), createdAt: Date.now() }, TXN_TTL_MS);
+  // SMA-653 D9: read the presented sid BEFORE the first store call, because it decides where the
+  // 503's retry link points. When this browser holds a session, the link goes to `returnTo`, NOT to
+  // /auth/login: during a wedge `requireSession` sends a signed-in user here, the store call below
+  // fails first, and the session record and cookie both survive. A retry link to /auth/login would
+  // delete that still-valid session once Redis recovers (SMA-651 § 5). `returnTo` has already
+  // passed validateReturnTo and the auth-route guard above, so it cannot loop back into this route.
+  const presentedSid = readCookies(req.headers.get('cookie')).get(SESSION_COOKIE);
+  const retry: RetryAffordance = { kind: 'link', href: presentedSid !== undefined ? returnTo : loginRetryHref(runtime.basePath, returnTo) };
+
+  const put = await storeStep(runtime, 'login_put_transaction', undefined, () =>
+    runtime.store.putTransaction(txnId, { codeVerifier: authorization.codeVerifier, nonce: authorization.nonce, returnTo, secretHash: hashSecret(secret), createdAt: Date.now() }, TXN_TTL_MS),
+  );
+  if (put === STORE_DOWN) return storeUnavailableResponse(retry);
 
   // I6 (final fix wave): delete the OLD session record here, not only clear its cookie. A
   // single-tab re-login browser-clears __Host-pgs_sid in THIS same 302, so the browser never
@@ -185,9 +204,11 @@ async function handleLogin(runtime: AuthRuntime, req: Request, url: URL): Promis
   // the common case, and a copied cookie stayed live for the full session TTL after the user
   // signed in again. Reading it from the REQUEST (before it is cleared in the response) is what
   // makes this reachable; clearing the browser cookie alone was never enough.
-  const presentedSid = readCookies(req.headers.get('cookie')).get(SESSION_COOKIE);
+  //
+  // If this delete fails, the stored transaction has no cookie and expires unused (spec § 4 row 2).
   if (presentedSid !== undefined) {
-    await runtime.store.delete(presentedSid);
+    const deleted = await storeStep(runtime, 'login_delete', presentedSid, () => runtime.store.delete(presentedSid));
+    if (deleted === STORE_DOWN) return storeUnavailableResponse(retry);
   }
 
   const headers = new Headers({ Location: authorization.url });
