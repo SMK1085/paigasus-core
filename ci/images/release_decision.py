@@ -163,7 +163,13 @@ def oci_digests(path: Path) -> dict[str, str]:
 def sbom_summary(doc: dict[str, Any]) -> dict[str, str]:
     """Spec M8: does the SBOM see the Ubuntu packages and the Rust crates at all?"""
     packages = doc.get("packages") or []
-    names = {str(p.get("name", "")) for p in packages}
+    if not isinstance(packages, list):
+        raise UsageError(f"packages must be a list, not {type(packages).__name__!r}")
+    names = set()
+    for p in packages:
+        if not isinstance(p, dict):
+            raise UsageError(f"packages must be a list of objects, not {type(p).__name__!r}")
+        names.add(str(p.get("name", "")))
     cargo = sum(
         1 for p in packages if any(str(ref.get("referenceLocator", "")).startswith("pkg:cargo/") for ref in p.get("externalRefs") or [])
     )
@@ -250,6 +256,8 @@ def self_test() -> int:
             {"packages": "2", "libc6": "true", "cargo": "1"},
         ),
         ("sbom: an empty document", lambda: sbom_summary({}), {"packages": "0", "libc6": "false", "cargo": "0"}),
+        ("sbom: packages is not a list", lambda: sbom_summary({"packages": "oops"}), "UsageError"),
+        ("sbom: packages list has non-dict elements", lambda: sbom_summary({"packages": [{"name": "libc6"}, "oops", 5]}), "UsageError"),
     ]
     failed = 0
     for label, fn, want in rows:
