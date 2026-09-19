@@ -223,6 +223,19 @@ describe('getSession failure attribution (SMA-626 § 2.4)', () => {
     expect(events).toEqual([['store.unavailable', { sid: sidTag('some-sid'), stage: 'get_session' }]]);
   });
 
+  it('logs store.unavailable for a SessionStoreUnavailable from a second module copy (SMA-653 D8)', async () => {
+    vi.resetModules();
+    const foreign = await import('../../src/core/errors.js');
+    expect(foreign.SessionStoreUnavailable).not.toBe(SessionStoreUnavailable);
+    cookiesMock.mockResolvedValue(cookieJar('some-sid'));
+    const { logger, events } = recordingLogger();
+    const store: SessionStore = { ...unavailableStore(), get: () => Promise.reject(new foreign.SessionStoreUnavailable('down')) };
+
+    await expect(getSession({ ...baseRuntime(store), logger })).resolves.toBeNull();
+
+    expect(events).toEqual([['store.unavailable', { sid: sidTag('some-sid'), stage: 'get_session' }]]);
+  });
+
   it('logs session.resolve_failed, NOT store.unavailable, when the IdP definitively rejects', async () => {
     cookiesMock.mockResolvedValue(cookieJar('sid-needs-refresh'));
     const store = new MemorySessionStore();

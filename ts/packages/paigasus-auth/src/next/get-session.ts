@@ -31,10 +31,11 @@
 // `SessionStoreUnavailable` alone.
 import { cookies } from 'next/headers';
 import { redirect } from 'next/navigation';
-import { SessionStoreUnavailable } from '../core/errors';
+import { isSessionStoreUnavailable } from '../core/errors';
 import { validateReturnTo } from '../core/return-to';
 import { resolveSession, type ResolvedSession } from '../core/single-flight';
 import { SESSION_COOKIE } from '../http/cookies';
+import type { StoreUnavailableStage } from '../ports/logger';
 import { sidTag } from '../ports/logger';
 import type { AuthRuntime } from '../runtime';
 
@@ -68,13 +69,14 @@ export async function getSession(runtime: AuthRuntime): Promise<ResolvedSession 
     // WHICH line is the point (SMA-626 § 2.4). This catch is deliberately broad, and it used to
     // log `store.unavailable` for every failure — so an identity-provider outage raised the
     // store-outage rate while Redis was healthy, and an operator investigating a mass sign-out
-    // went and inspected a perfectly good store. Classifying here costs one `instanceof` and makes
-    // `store.unavailable` mean the store.
+    // went and inspected a perfectly good store. Classifying here costs one `code` check
+    // (`isSessionStoreUnavailable`, SMA-653 D8 — `instanceof` fails across Next's two module
+    // copies) and makes `store.unavailable` mean the store.
     //
     // Same field discipline either way: a truncated sid, a fixed stage name, never the caught
     // error object (it may embed a DSN).
-    if (err instanceof SessionStoreUnavailable) {
-      runtime.logger.event('store.unavailable', { sid: sidTag(sid), stage: 'get_session' });
+    if (isSessionStoreUnavailable(err)) {
+      runtime.logger.event('store.unavailable', { sid: sidTag(sid), stage: 'get_session' satisfies StoreUnavailableStage });
     } else {
       runtime.logger.event('session.resolve_failed', { sid: sidTag(sid), stage: 'get_session' });
     }
