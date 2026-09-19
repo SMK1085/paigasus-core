@@ -1058,8 +1058,8 @@ Spec § 7.4. The Secret needs its own checksum annotation for a concrete reason:
 **Files:**
 - Create: `charts/paigasus/templates/zonemap-configmap.yaml`
 - Create: `charts/paigasus/templates/console-env-configmap.yaml`
-- Modify: `charts/paigasus/tests/refusals.sh` (add an assertion file for maps)
 - Create: `charts/paigasus/tests/maps.sh`
+- Do **not** modify `charts/paigasus/tests/refusals.sh`. It must keep passing unchanged — a new template that renders unconditionally can break it, so run it as a regression check.
 
 **Interfaces:**
 - Consumes: `paigasus.fullname`, `paigasus.zoneMapJson`, `paigasus.serviceMapJson`, `paigasus.validate`.
