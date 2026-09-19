@@ -27,7 +27,7 @@ sets `release = false` for them. So an image release has no version to carry.
 | D2 | Registries | Docker Hub `docker.io/smaschek/paigasus-{iam,gateway}` and GHCR `ghcr.io/smk1085/paigasus-{iam,gateway}`. Both registries hold the same index digest. |
 | D3 | Architectures | `linux/amd64` and `linux/arm64`, built on native runners (`ubuntu-latest`, `ubuntu-24.04-arm`), joined in one image index. |
 | D4 | Metadata | GitHub build provenance and SBOM attestations, and a cosign keyless signature on the index digest. |
-| D5 | Versioning | **Open at GATE 1** (§ 3.1). M7 measured that release-plz cannot bump a Cargo `publish = false` crate. A workflow job makes the git tag in every option. |
+| D5 | Versioning | **V-a: a version bump by hand, in a normal PR** (§ 3.1). Sven chose it at GATE 1 on 2026-09-19, after M7 showed that release-plz cannot bump a Cargo `publish = false` crate. The `tag-<svc>` job makes the git tag. |
 | D6 | Version relation | Independent. Each service has its own version. |
 | D7 | Docker Hub credential | A personal access token with Read & Write scope, stored as an environment secret. |
 | D8 | Workflow shape | New jobs in `release.yml` (approach A). |
@@ -96,23 +96,38 @@ had a group with **only** unpublishable members, and `version groups: {}` came o
 do not contradict each other: the kernel group also contains the publishable `paigasus-kernel`.
 M7 did not test that case, so this spec makes no claim about it.
 
-**Decision for GATE 1 — how a service gets a new version.** The rest of this spec does not depend
-on the answer: `plan` reads the Cargo version and the git tag (§ 6.1), whatever changed the version.
+**D5, decided at GATE 1: V-a, a version bump by hand, in a normal PR.**
 
-- **V-a (recommended): a version bump by hand, in a normal PR.** A maintainer changes the version in
-  the service's `Cargo.toml` (and `Cargo.lock`) and adds a `CHANGELOG.md` entry. The merge makes
-  `plan` select the service. No new tool. The cost: a person decides the bump level, and nothing
-  catches a missing changelog entry. The plan can add a small check that the changelog names the
-  new version.
-- **V-b: a changelog tool for the services.** `git-cliff` with `--include-path` and
-  `--bumped-version` computes the bump from the conventional commits that touch the service. A new
-  step in `release-pr` opens a bump PR. This automates the bump, but it adds a tool, a second
-  author of release PRs next to release-plz, and a second changelog format.
-- **V-c: a `workflow_dispatch` bump.** A maintainer starts a workflow with a service and a level,
-  and the workflow opens the bump PR. This is V-a with a button.
+- A maintainer changes the version in the service's `Cargo.toml`, updates `Cargo.lock`, and adds a
+  section for the new version to the service's `CHANGELOG.md`. The PR title is
+  `chore(rs): release paigasus-<svc> v<version>`.
+- The merge makes `plan` select the service, because the new version has no git tag (§ 6.1).
+- A person decides the bump level. Library changes do not bump a service by themselves (§ 3.2).
+- **The changelog check.** `release_plan.py --assert` (run on every PR by `repo:actionlint`
+  check 11) fails when a service's Cargo version is not `0.0.0` and its `CHANGELOG.md` has no
+  heading for that version. The plan confirms the exact heading form and that `--assert` runs on
+  every PR.
+- `rs/release-plz.toml` keeps `release = false` for both services, because `release = true` has no
+  effect on them (M7). Its comment changes to say why.
 
-`rs/release-plz.toml` keeps `release = false` for both services under every option, because
-`release = true` has no effect on them.
+**Rejected alternatives.**
+
+- **V-b: `git-cliff` with `--include-path` and `--bumped-version`.** It automates the bump, but it
+  adds a tool, a second author of release PRs next to release-plz, and a second changelog format.
+  It stays a possible follow-up (§ 12).
+- **V-c: a `workflow_dispatch` bump.** This is V-a with a button. It adds a workflow that has
+  `contents: write` for small value.
+- **Cargo `publish = true` for the services only** (with `publish = false` in `release-plz.toml`).
+  `repo:publish-metadata` selects crates by the Cargo field (`ci/publish-metadata/run.sh:184`), and
+  its `cargo publish --dry-run` fails on the four unpublished dependencies (`paigasus-iam-core`,
+  `paigasus-logging`, `paigasus-observability`, `paigasus-service-info`). Without `git_only`,
+  release-plz still proposes no bump; with it, `cargo package` fails on the same dependencies
+  (reasoned from M7, not measured for this case). If it worked, release-plz would make the tag in
+  the kernel `release` job, before any image exists (`release.rs:950-987`).
+- **Publish the services and their four dependencies to crates.io.** This works: release-plz then
+  treats the services like the kernel family. But it makes four internal libraries a permanent
+  public API, it needs a manual first publish for each new crate, and it moves the tag before the
+  image, into the kernel approval. That is a product decision that is larger than this issue.
 
 ### 3.2 No dependency cascade reaches the services
 
@@ -121,9 +136,7 @@ dependent of a bumped crate. That is true for the crates that release-plz proces
 are not among them (§ 3.1), so a `paigasus-proto` or `paigasus-kernel` release does **not** bump a
 service. Revision 2 of this spec said the opposite before M7 finished; that was wrong.
 
-Under V-a and V-c, a person decides when a library change needs a new image. Under V-b, the
-`--include-path` set decides: it can list the service's own directory only, or also the library
-directories that the service links.
+Under V-a, a person decides when a library change needs a new image.
 
 ### 3.3 The first version
 
@@ -471,6 +484,7 @@ The order of the steps:
 - **Reproducible builds** (`SOURCE_DATE_EPOCH`, a pinned chisel snapshot). D10 makes them
   unnecessary for correctness.
 - **Retention.** No cleanup of old image tags.
+- **An automated service bump** (V-b, `git-cliff`), if the manual bump becomes a burden.
 - **zizmor.** The GitHub-expression interpolation class in `release.yml` stays unlinted.
 
 ## 13. ADR
@@ -497,7 +511,7 @@ ADR-0011 S1 and S3 in Notion, and reword the V5 message to match.
 |---|---|
 | B1 graph drops or reds single-family releases | Folded: § 4, D9, AC 9. Option (a) rejected (§ 2). |
 | B2 re-run not idempotent | Folded: D10, § 4.3 step 3, § 5, AC 8. |
-| B3 release-plz may not bump the services | Confirmed by M7, and worse: it never can. § 3.1 rewritten; D5 is a GATE 1 decision. |
+| B3 release-plz may not bump the services | Confirmed by M7, and worse: it never can. § 3.1 rewritten; Sven chose V-a at GATE 1. |
 | M1 cascade already measured | Rejected after M7: the cascade does not reach the services (§ 3.2). |
 | M2 floating tags move backwards | Folded: concurrency group, semver rule, fixture rows. |
 | M3 ADR-0011 | Folded: § 13, precondition. |
