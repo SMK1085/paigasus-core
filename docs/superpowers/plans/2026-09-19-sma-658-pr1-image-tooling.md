@@ -43,7 +43,7 @@
 - Docker Desktop 29.8 with the **containerd image store**, arm64. A cold release build of a service takes longer than 15 minutes, so local checks use a tiny fixture image. CI is the verification for the real images and for the runner-specific values (M3, M5, M8).
 - Run `ci/images/run.sh` locally with `/bin/bash` (3.2). Homebrew bash 5.3 can deadlock on this Mac (512-byte pipes).
 - `repo:actionlint`'s full gate exits rc 2 on this Mac (512-byte pipe preflight). Locally, lint the two workflows with `actionlint -shellcheck= <file>` (no shellcheck, which is the part that hangs) and rely on CI for the shellcheck pass. `ci/actionlint/run.sh --self-test` under `/bin/bash` shows two known false `cargo-lock-step` rows; any OTHER failing row is real.
-- Lint new Python with `uv run --locked --project py ruff check ci/images/`.
+- Lint new Python with `uv run --locked --project py ruff check --config py/pyproject.toml ci/images/`.
 - Shellcheck the script by file argument (no pipe): `uv run --locked --project py shellcheck ci/images/run.sh`.
 
 ## File Structure
@@ -70,7 +70,7 @@
 - `images.yml` stays in `workflow_credentials.py`'s `EXPECTED_PR_SUBJECTS` (`:287`) and reads no secret. `images-rehearsal.yml` has no `pull_request` trigger, so it is not a subject.
 - `release_guard.py` checks only `release.yml` and the workflows it calls. The rehearsal workflow is neither.
 - `repo:actionlint` applies to both workflows: actionlint and shellcheck on every `run:` block (check 1), `paths:` globs must match the tree and filters must be block sequences (checks 5, 6), no early-exit reader (check 13, which also scans `ci/images/run.sh`).
-- `ci.yml`'s bare `proto install` (`ci.yml:76`) now also downloads crane, cosign and syft on every CI run. This plan accepts that cost (three release downloads). Task 8 records the added time from the PR's own CI run.
+- `ci.yml`'s bare `proto install` (`ci.yml:76`) now also downloads crane, cosign and syft on every CI run. This plan accepts that cost (three release downloads). Task 9 records the added time from the PR's own CI run.
 
 ---
 
@@ -108,6 +108,8 @@ Expected: a non-zero rc; proto does not know the tool `crane`.
 # same on every OS, so one global [install.arch] covers all three platforms.
 #
 # Each tarball holds crane, gcrane and krane at its root, so exe-path names the crane binary.
+# exe-path is kept explicit here (unlike actionlint.toml/maturin.toml), although the binary sits
+# at the archive root.
 # All platforms share one checksums.txt. Tags are "v"-prefixed; asset names carry no version.
 
 name = "crane"
@@ -192,7 +194,8 @@ git-url = "https://github.com/sigstore/cosign"
 #
 # Asset names embed the bare version (syft_1.52.0_linux_amd64.tar.gz) and use Go's GOARCH names
 # on every OS, so one global [install.arch] remaps both arches. The binary sits at the archive
-# root. Windows ships a .zip, not a .tar.gz. One syft_{version}_checksums.txt covers all assets.
+# root; exe-path is kept explicit here (unlike actionlint.toml/maturin.toml). Windows ships a
+# .zip, not a .tar.gz. One syft_{version}_checksums.txt covers all assets.
 
 name = "syft"
 type = "cli"
@@ -237,7 +240,9 @@ Put this one directly after `release-plz = "0.3.158"`:
 
 ```toml
 syft = "1.52.0"
-``` Add three lines to `[plugins]`, in alphabetical order:
+```
+
+Add three lines to `[plugins]`, in alphabetical order:
 
 ```toml
 cosign = "file://./.proto/plugins/cosign.toml"
@@ -578,6 +583,8 @@ def main(argv: list[str]) -> int:
                 doc = json.loads(_read_text(args.sbom))
             except json.JSONDecodeError as exc:
                 raise UsageError(f"{args.sbom} is not JSON: {exc}") from exc
+            if not isinstance(doc, dict):
+                raise UsageError(f"{args.sbom} is not an SPDX JSON object")
             _emit(sbom_summary(doc))
         else:
             parser.print_usage(sys.stderr)
@@ -689,7 +696,7 @@ Temporarily change `move = not existing or mine >= max(existing)` to `move = Tru
 
 - [ ] **Step 6: Lint**
 
-Run: `uv run --locked --project py ruff check ci/images/release_decision.py`
+Run: `uv run --locked --project py ruff check --config py/pyproject.toml ci/images/release_decision.py`
 Expected: `All checks passed!`. Fix any finding in place.
 
 - [ ] **Step 7: Commit**
@@ -756,7 +763,7 @@ kv() {
 
 - [ ] **Step 4: Split the chisel-manifest extraction out of `build_one` and add `version_for`**
 
-Replace lines `:174-182` of `build_one` (the `grep -oE 'Fetching pool…'` line through the empty-manifest check) with a call `extract_chisel_manifest "$build_log" "$ROOT/chisel-manifest-${service}.txt"`, and add this function above `build_one`:
+Replace the lines of `build_one` from `grep -oE 'Fetching pool/[^ ]+\.deb' "$build_log" | sort -u > "$ROOT/chisel-manifest-${service}.txt" || true` through the `fi` that closes the empty-manifest check, with a call `extract_chisel_manifest "$build_log" "$ROOT/chisel-manifest-${service}.txt"`, and add this function above `build_one`:
 
 ```bash
 # Writes the chisel package list that a build log names into $2, and fails when it is empty
@@ -892,10 +899,13 @@ Temporarily change `expected="$config"` to `expected="$manifest"` and `[ "$store
 
 - [ ] **Step 10: Shellcheck and the early-exit ban**
 
+The second command below uses the `EARLY_EXIT_ERE` from `ci/actionlint/run.sh:5005`. It runs
+against the file with full-line comments stripped first. The real gate joins logical lines before
+it matches. This plain grep needs only the comment strip, to avoid a false hit inside a comment.
 Run:
 ```bash
 uv run --locked --project py shellcheck ci/images/run.sh
-grep -nE '\|[[:space:]]*(grep[[:space:]]+(-[a-zA-Z]*q|-m)|head|awk[^|]*exit)' ci/images/run.sh || echo "no early-exit reader"
+grep -v '^[[:space:]]*#' ci/images/run.sh | grep -nE '(^|[^|])[|][[:space:]]*([A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]+)*(command[[:space:]]+)?(grep[[:space:]]([^|]*[[:space:]])?(-[[:alpha:]]*[qm]|--(quiet|silent|max-count))|head([[:space:];)]|$)|awk[[:space:]]([^|]*[^[:alnum:]_])?exit([^[:alnum:]_]|$))' || echo "no early-exit reader"
 ```
 Expected: no shellcheck finding for the new lines, and `no early-exit reader`.
 
@@ -913,7 +923,9 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 ### Task 4: Smoke one service at a time
 
 **Files:**
-- Modify: `ci/images/run.sh` (`smoke` `:363-437`, dispatch `:444-469`)
+- Modify: `ci/images/run.sh` (the `smoke` function, from `smoke() {` through the `}` above the
+  `cmd=` line; the dispatch, from the comment beginning `` `smoke` and `all` always exercise BOTH
+  images `` through `esac`)
 
 **Interfaces:**
 - Consumes: nothing new.
@@ -926,7 +938,7 @@ Expected: `usage: ci/images/run.sh smoke takes no service argument — it always
 
 - [ ] **Step 2: Split `smoke` into per-service functions**
 
-Replace the whole `smoke()` function (`:363-437`) with the functions below. The body text of `smoke_gateway` is the old lines `:368-391` unchanged, and the body of `smoke_iam` is the old lines `:393-418` unchanged; the uid loop becomes `assert_uid`.
+Replace the whole `smoke()` function (from `smoke() {` through the `}` above the `cmd=` line) with the functions below. The body text of `smoke_gateway` is the old lines from `echo "== gateway: standalone =="` through `assert_base_intact paigasus-gateway:dev`, unchanged, and the body of `smoke_iam` is the old lines from `echo "== iam: with postgres, reached BY HOSTNAME =="` through `assert_base_intact paigasus-iam:dev`, unchanged; the uid loop becomes `assert_uid`.
 
 ```bash
 # The image under test must be the one THIS checkout built. This replaces the old rule that
@@ -943,11 +955,11 @@ assert_fresh() {
 }
 
 smoke_gateway() {
-  # (old lines 368-391, unchanged: "== gateway: standalone ==" through assert_base_intact)
+  # (old lines, unchanged: from `echo "== gateway: standalone =="` through `assert_base_intact paigasus-gateway:dev`)
 }
 
 smoke_iam() {
-  # (old lines 393-418, unchanged: "== iam: with postgres, reached BY HOSTNAME ==" through assert_base_intact)
+  # (old lines, unchanged: from `echo "== iam: with postgres, reached BY HOSTNAME =="` through `assert_base_intact paigasus-iam:dev`)
 }
 
 # `docker top`, not `docker inspect .Config.User`: the latter reads IMAGE config, so a `--user 0`
@@ -980,7 +992,9 @@ When you paste the two old bodies, copy them exactly from the current file, incl
 
 - [ ] **Step 3: Update the dispatch**
 
-Replace the comment block `:444-449` and the `smoke)` and `all)` arms with:
+Replace everything from the comment block (beginning `` # `smoke` and `all` always exercise BOTH
+images ``, the block that precedes `case "$cmd" in`) through the `;;` that ends the `all)` arm,
+with:
 
 ```bash
 # `smoke` with no argument smokes both images, gateway first (the old behaviour). With service
@@ -1003,6 +1017,8 @@ case "$cmd" in
     ;;
 ```
 
+Keep Task 3's `build-oci)`/`load-oci)` arms between `all)` and `*)`.
+
 Update the header usage line for `smoke`:
 
 ```bash
@@ -1010,6 +1026,9 @@ Update the header usage line for `smoke`:
 ```
 
 - [ ] **Step 4: Check the stale-image guard on the fixture**
+
+Re-make the fixture with Task 3 Step 1 and re-load it with Task 3 Step 8. HEAD moved when Task 3
+was committed, so a fixture from before that commit fails `assert_fresh` for the wrong reason.
 
 The fixture image is not a real service, so only the guard can be checked locally. The fixture that Task 3 Step 8 loaded is `paigasus-gateway:dev`. Run:
 ```bash
@@ -1044,7 +1063,7 @@ The real smoke of both services runs in CI (Task 6). Say so in the task report.
 ### Task 5: Rehearse the publish steps against two local registries
 
 **Files:**
-- Modify: `ci/images/run.sh` (pins block `:21-30`, a new section after `load_oci`, dispatch)
+- Modify: `ci/images/run.sh` (the pins block that ends at `CURL_8_11_1_DIGEST=…`; a new section placed directly above the `cmd=` dispatch line, after `smoke()`; the dispatch)
 
 **Interfaces:**
 - Consumes: `decide`, `kv` (Task 3); `release_decision.py adopt|floating|oci-digests` (Task 2); `crane` on PATH (Task 1).
@@ -1070,7 +1089,9 @@ REGISTRY_2_DIGEST="registry:2@sha256:<the 64 hex characters that command printed
 
 - [ ] **Step 3: Add the rehearse helpers and `rehearse`**
 
-Add after `load_oci`:
+Add directly above the `cmd="${1:?…}"` line (orig `:439`), after `smoke()`'s closing `}`. `RUN_ID`
+(orig `:189`) must be set before this point. `REH_A_NAME` and `REH_B_NAME` below read `RUN_ID`. An
+earlier position triggers `set -u` and fails every command, including `nosuchcmd` and `smoke`:
 
 ```bash
 # --- rehearse (SMA-658 spec § 8) -----------------------------------------------------------------
@@ -1205,6 +1226,12 @@ rehearse() {
   expect_kv "$out" action adopt
   expect_kv "$out" digest "$index"
   expect_kv "$out" copy_to none
+  # A real "overwrite nothing" claim needs a write that COULD have happened. Gate a tag move to
+  # the rebuild's index behind the same condition PR 2 will use, so a branch that pushed
+  # unconditionally would move the tag to $index2 and the assertion below would catch it.
+  if [ "$(kv "$out" action)" = push-new ]; then
+    for r in "$repo_a" "$repo_b"; do crane tag --insecure "${r}@${index2}" 0.1.0; done
+  fi
   expect_tag "$repo_a" 0.1.0 "$index"
   expect_tag "$repo_b" 0.1.0 "$index"
 
@@ -1233,6 +1260,16 @@ rehearse() {
   printf 'abc123\trefs/tags/paigasus-gateway-v0.2.0\n' > "$REH_TMP/tags"
   out="$(decide floating --service gateway --version 0.1.1 --tags-file "$REH_TMP/tags")"
   expect_kv "$out" move false
+  # Same reasoning as case 2: gate the case-1 tag-move loop behind the real condition, using
+  # $index2 (already known to differ from $index) as the would-be new value, so a branch that
+  # moved the tags unconditionally would be caught below.
+  if [ "$(kv "$out" move)" = true ]; then
+    for r in "$repo_a" "$repo_b"; do
+      crane tag --insecure "${r}@${index2}" 0.1.1
+      crane tag --insecure "${r}@${index2}" "$(kv "$out" minor_tag)"
+      crane tag --insecure "${r}@${index2}" latest
+    done
+  fi
   expect_tag "$repo_a" latest "$index"
   expect_tag "$repo_b" latest "$index"
 
@@ -1360,6 +1397,9 @@ jobs:
         arch: ${{ fromJSON(github.event_name == 'pull_request' && '["amd64"]' || '["amd64", "arm64"]') }}
     env:
       ARCH: ${{ matrix.arch }}
+      # SMA-609: every captured shim output must set this, so `$(uv run …)` never captures proto's
+      # NDJSON preamble.
+      PROTO_REPORTER: text
     steps:
       # Same reclaim as ci.yml: this builds the cedar-policy tree in --release on a ~14 GB disk.
       - name: Reclaim runner disk (drop unused preinstalled toolchains)
@@ -1461,7 +1501,11 @@ Expected: every listed path prints (the plugin files after Task 1 is committed).
 
 - [ ] **Step 4: Check the early-exit ban on the workflow**
 
-Run: `grep -nE '\|[[:space:]]*(grep[[:space:]]+(-[a-zA-Z]*q|-m)|head|awk[^|]*exit)' .github/workflows/images.yml || echo "no early-exit reader"`
+Run (the `EARLY_EXIT_ERE` from `ci/actionlint/run.sh:5005`, comments stripped first — see Task 3
+Step 10):
+```bash
+grep -v '^[[:space:]]*#' .github/workflows/images.yml | grep -nE '(^|[^|])[|][[:space:]]*([A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]+)*(command[[:space:]]+)?(grep[[:space:]]([^|]*[[:space:]])?(-[[:alpha:]]*[qm]|--(quiet|silent|max-count))|head([[:space:];)]|$)|awk[[:space:]]([^|]*[^[:alnum:]_])?exit([^[:alnum:]_]|$))' || echo "no early-exit reader"
+```
 Expected: `no early-exit reader`.
 
 - [ ] **Step 5: Commit**
@@ -1524,6 +1568,8 @@ jobs:
           - arm64
     env:
       ARCH: ${{ matrix.arch }}
+      # SMA-609: every captured shim output must set this (Global Constraint `:36`).
+      PROTO_REPORTER: text
     steps:
       - name: Refuse any ref but main
         run: |
@@ -1551,10 +1597,8 @@ jobs:
         with:
           cache: false
 
-      - name: Install syft and uv
-        run: |
-          proto install syft
-          proto install uv
+      - name: Install syft
+        run: proto install syft
 
       - name: Build the gateway image as an OCI archive
         run: ci/images/run.sh build-oci gateway out
@@ -1647,7 +1691,8 @@ jobs:
             refs+=("${IMAGE}@${manifest}")
           done
           docker buildx imagetools create --tag "${IMAGE}:${GITHUB_SHA}" "${refs[@]}"
-          echo "index=$(crane digest "${IMAGE}:${GITHUB_SHA}")" >> "$GITHUB_OUTPUT"
+          index="$(crane digest "${IMAGE}:${GITHUB_SHA}")"
+          echo "index=${index}" >> "$GITHUB_OUTPUT"
 
       - name: Attest build provenance (index)
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8  # v4.2.2
@@ -1706,7 +1751,8 @@ jobs:
 Run:
 ```bash
 actionlint -shellcheck= .github/workflows/images-rehearsal.yml; echo "rc=$?"
-grep -nE '\|[[:space:]]*(grep[[:space:]]+(-[a-zA-Z]*q|-m)|head|awk[^|]*exit)' .github/workflows/images-rehearsal.yml || echo "no early-exit reader"
+# The EARLY_EXIT_ERE from ci/actionlint/run.sh:5005, comments stripped first — see Task 3 Step 10.
+grep -v '^[[:space:]]*#' .github/workflows/images-rehearsal.yml | grep -nE '(^|[^|])[|][[:space:]]*([A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]+)*(command[[:space:]]+)?(grep[[:space:]]([^|]*[[:space:]])?(-[[:alpha:]]*[qm]|--(quiet|silent|max-count))|head([[:space:];)]|$)|awk[[:space:]]([^|]*[^[:alnum:]_])?exit([^[:alnum:]_]|$))' || echo "no early-exit reader"
 ```
 Expected: rc 0 and `no early-exit reader`.
 
@@ -1735,6 +1781,7 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 **Files:**
 - Modify: `docs/ops/RUNBOOK-containers.md`
 - Modify: `docs/superpowers/specs/2026-09-19-sma-658-container-release-design.md`
+- Modify: `CLAUDE.md`
 
 **Interfaces:**
 - Consumes: everything above.
@@ -1749,6 +1796,25 @@ Append to `docs/ops/RUNBOOK-containers.md` a section `## Release tooling (SMA-65
 - **The rehearsal workflow.** When to run it (once after PR 1 merges, and again after any change to the attest or sign steps), the command `gh workflow run images-rehearsal.yml --ref main`, what `REHEARSAL OK` proves, and what it does NOT prove: the Docker Hub login, the Docker Hub copy and the git tag (PR 2's first real release is their first test).
 - **The scratch package.** `ghcr.io/smk1085/paigasus-rehearsal` is private after its first push. It holds only rehearsal images. Delete old versions in the package settings when they are not needed.
 
+Also edit two existing runbook lines, since `smoke` and the chisel-manifest artifact changed shape
+in Tasks 3, 4 and 6:
+
+- Runbook `:26` (`ci/images/run.sh smoke            # smoke-test whatever images are already built`)
+  becomes: `ci/images/run.sh smoke [iam|gateway]...  # smoke-test images built at this HEAD`.
+- Runbook `:326-328` (the "Which libc is in the image I am running?" section) names the artifact
+  `chisel-manifests` and the file `chisel-manifest-<service>.txt`. Rewrite it to say: the artifact
+  is `chisel-manifests-<arch>`; `build-oci` writes `chisel-manifest-<service>-<arch>.txt`; the
+  plain `build` command still writes the un-arched `chisel-manifest-<service>.txt`.
+
+Also edit `CLAUDE.md`, since it is now incomplete rather than false:
+
+- `CLAUDE.md:312` (`` Container images (SMA-500) live behind `ci/images/run.sh {build,smoke,all}`
+  and ``) — add the new commands: `ci/images/run.sh {build,smoke,all,build-oci,load-oci,rehearse}`.
+- `CLAUDE.md:316-318` (the `pull_request` trigger's path list: `rs/Dockerfile`,
+  `rs/Cargo.{lock,toml}`, `rs/rust-toolchain.toml`, `rs/.dockerignore`, `ci/images/**` and the
+  workflow itself) — add `.prototools`, `.proto/plugins/crane.toml` and `.proto/plugins/syft.toml`
+  (not `cosign.toml`: `images.yml` does not use cosign).
+
 - [ ] **Step 2: Record the plan's decisions in the spec**
 
 Add a section `## 16. Decisions made in the PR 1 plan` to the spec, with one row each:
@@ -1756,15 +1822,16 @@ Add a section `## 16. Decisions made in the PR 1 plan` to the spec, with one row
 | # | Decision | Reason |
 |---|---|---|
 | P1 | The per-platform images are pushed under `:<git-sha>-<arch>` and their digest is asserted, instead of a push "by digest" with no tag. | `crane push` writes to a tag reference. The tag also makes each platform image findable. |
-| P2 | The release decisions live in `ci/images/release_decision.py` (stdlib, self-test), used by both `rehearse` and PR 2. | § 7.1 wants registry commands literal in `release.yml`, so the rehearse can share only the decision code. The command sequence in `rehearse` is a copy: that is the residual. |
+| P2 | The release decisions live in `ci/images/release_decision.py` (stdlib, self-test), used by both `rehearse` and PR 2. | § 7.1 wants registry commands literal in `release.yml`, so the rehearse can share only the decision code. The command sequence in `rehearse` is a copy: that is the residual, and the `images-rehearsal.yml` push step is a second copy of the same `decide`/`kv` and push-then-assert sequence. |
 | P3 | `tag_digest` reads only a missing-tag error as "absent"; every other error is fatal. | D10: an error read as "absent" would push a second digest under a published version. |
 | P4 | `ci.yml`'s bare `proto install` now also downloads crane, cosign and syft. | One pin source. The cost is measured on PR 1's CI run (Task 9). |
 | P5 | M9 (an environment secret reaching a `release.yml` job) is not measured in PR 1. | The rehearsal has no environment and no secret. PR 2's first real run is the first test. |
+| P6 | `smoke` takes service arguments. The reject-argument guard (orig `:444-456`) is replaced by `assert_fresh`, which refuses an image whose revision label is not HEAD. | A per-service chain (§ 4.2) needs a one-service smoke. `assert_fresh` closes the same stale-image risk, and it is stricter. |
 
 - [ ] **Step 3: Commit**
 
 ```bash
-git add docs/ops/RUNBOOK-containers.md docs/superpowers/specs/2026-09-19-sma-658-container-release-design.md
+git add docs/ops/RUNBOOK-containers.md docs/superpowers/specs/2026-09-19-sma-658-container-release-design.md CLAUDE.md
 git commit -m "docs(repo): document the SMA-658 image release tooling and the PR 1 decisions
 
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
@@ -1816,4 +1883,4 @@ git push
 
 - **Spec coverage (PR 1 scope, § 10):** proto pins → Task 1; `run.sh` OCI mode, version label, identity check, per-service smoke, `.Size` reporting → Tasks 3–4; `rehearse` with D10 adoption, conflict and floating rule → Tasks 2 and 5; `images.yml` release path with arm64 off PRs → Task 6; rehearsal workflow → Task 7; runbook → Task 8; M3/M5/M8 → Tasks 6 and 9. Out of PR 1 by design: `release.yml`, `ci/release-plan/`, the guards, the `0.1.0` bump, the changelog check.
 - **`.Size` under the containerd store:** the plan reports it in the `M3` line and keeps the existing 200 MB ceiling in `assert_base_intact`, which reads the same field. Local M3 measured `.Size` as the unpacked size, which is at least the compressed size, so the ceiling does not become weaker.
-- **Names used across tasks:** `decide`, `kv`, `version_for`, `extract_chisel_manifest`, `build_oci`, `load_oci`, `assert_fresh`, `smoke_gateway`, `smoke_iam`, `assert_uid`, `tag_digest`, `expect_kv`, `expect_tag`, `start_registry`, `rehearse`; archive path `out/paigasus-<svc>-<arch>.oci.tar`; SBOM path `sbom-paigasus-<svc>-<arch>.spdx.json`. Checked for consistency.
+- **Names used across tasks:** `decide`, `kv`, `version_for`, `extract_chisel_manifest`, `build_oci`, `load_oci`, `assert_fresh`, `smoke_gateway`, `smoke_iam`, `assert_uid`, `tag_digest`, `expect_kv`, `expect_tag`, `start_registry`, `rehearse`; archive path `out/paigasus-<svc>-<arch>.oci.tar`; SBOM path `sbom-paigasus-<svc>-<arch>.spdx.json` in `images.yml`, `out/sbom-paigasus-<svc>-<arch>.spdx.json` in `images-rehearsal.yml` (a deliberate difference: the rehearsal uploads its whole `out/` directory). Checked for consistency.
