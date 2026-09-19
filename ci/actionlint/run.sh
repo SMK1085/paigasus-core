@@ -5253,6 +5253,37 @@ pipe_capacity_verdict() {
   return 0
 }
 
+# The probe: one new pipe, non-blocking write end, one byte per write until the kernel refuses
+# (or 1 MiB, so the probe itself can never run forever). One byte per write measures the real
+# capacity; a large write returns a partial count and would hide it (SMA-612 M5).
+PIPE_CAPACITY_PROBE_PY='import fcntl, os
+r, w = os.pipe()
+fcntl.fcntl(w, fcntl.F_SETFL, os.O_NONBLOCK)
+n = 0
+try:
+    while n < 1 << 20:
+        n += os.write(w, b"x")
+except BlockingIOError:
+    pass
+print(n)'
+
+# SMA-612 — full-gate preflight. It runs BEFORE run_self_tests, because under bash 5.x the
+# self-tests themselves deadlock on a small pipe. It is not run in --self-test mode: check 9
+# starts one --self-test subprocess per table, and a uv run in each is the cost the SHELLCHECK_BIN
+# comment below already refuses. Every failure is infra (rc 2): no check ran, so rc 1 would be a
+# false "a workflow is wrong" and rc 0 a false pass. `ok)` is the only arm that continues.
+pipe_capacity_preflight() {
+  local pc_out pc_rc=0
+  grep -qxF 'actionlint = "1.7.12"' .prototools || infra ".prototools no longer pins actionlint 1.7.12. The pipe-capacity probe (SMA-612) exists only for that version. Re-decide it per docs/superpowers/specs/2026-09-19-sma-612-actionlint-pipe-capacity-design.md D9."
+  pc_out="$(uv run --locked --project py python3 -c "$PIPE_CAPACITY_PROBE_PY" | tail -n1)" || pc_rc=$?
+  [ "$pc_rc" -eq 0 ] || infra "the pipe-capacity probe failed (rc $pc_rc) via 'uv run --locked --project py'. No check ran."
+  case "$(pipe_capacity_verdict "$pc_out")" in
+    ok) echo "actionlint gate: pipe capacity $pc_out bytes (floor $PIPE_CAPACITY_FLOOR)" >&2 ;;
+    small) infra "a new pipe on this host holds only $pc_out bytes (floor $PIPE_CAPACITY_FLOOR). With pipes this small, the gate cannot finish: bash 5.x here-strings in its own self-tests deadlock above $pc_out bytes, and the pinned actionlint writes each run: script into shellcheck's stdin before it starts shellcheck (rhysd/actionlint#650). No check ran. See ci/actionlint/README.md, \"Small pipes on macOS\"." ;;
+    *) infra "the pipe-capacity probe printed '$pc_out', not a positive integer. No check ran." ;;
+  esac
+}
+
 # SMA-612 — the sixteenth self-test. Pure input -> verdict rows: no pipe, no subprocess, no
 # actionlint. It proves pipe_capacity_verdict, which the full-gate preflight below reads. The
 # preflight itself runs only in full-gate mode, so this table is the only proof in --self-test mode.
@@ -5469,6 +5500,10 @@ case "$#:${1:-}" in
   *)
     usage ;;
 esac
+
+# SMA-612 — the pipe-capacity preflight, full-gate mode only, before any self-test. Column 0 and
+# unwrapped on purpose: ci/affected-graph/ci_targets.py pins this exact line at column 0.
+[ "$SELF_TEST_ONLY" = 1 ] || pipe_capacity_preflight
 
 # Check 7 runs FIRST, and from a single call site. --self-test never shells out to actionlint, so
 # this sits AHEAD of the PATH guard below and stays runnable on a machine without the binary. It
