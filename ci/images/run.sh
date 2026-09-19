@@ -740,7 +740,10 @@ rehearse() {
   echo "REHEARSE OK"
 }
 
-cmd="${1:?usage: ci/images/run.sh build [iam|gateway] | ci/images/run.sh \{smoke\|all\}}"
+# One usage string for both the missing-command case and the unknown-command case below, so the
+# two never drift apart. Lists every command the case block accepts, in the order it accepts them.
+USAGE="usage: ci/images/run.sh build [iam|gateway] | ci/images/run.sh build-oci <iam|gateway> <outdir> | ci/images/run.sh load-oci <archive> <image-name> | ci/images/run.sh smoke [iam|gateway]... | ci/images/run.sh all | ci/images/run.sh rehearse <archive.oci.tar>..."
+cmd="${1:?$USAGE}"
 target="${2:-}"
 services=("iam" "gateway")
 [ -n "$target" ] && services=("$target")
@@ -779,5 +782,9 @@ case "$cmd" in
     load_oci "$target" "$3"
     ;;
   rehearse) shift; rehearse "$@" ;;
-  *) echo "unknown command: $cmd" >&2; exit 1 ;;
+  *)
+    echo "unknown command: $cmd" >&2
+    echo "$USAGE" >&2
+    exit 1
+    ;;
 esac

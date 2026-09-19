@@ -135,19 +135,35 @@ def _blob(tar: tarfile.TarFile, digest: str) -> bytes:
     return data
 
 
+def _require_dict(value: object, what: str) -> dict[str, Any]:
+    """Every JSON value in this file comes from a file on disk, not a trusted source. A wrong
+    shape must raise UsageError (exit 2). It must never raise an unhandled AttributeError. The
+    module docstring says this script never exits 1."""
+    if not isinstance(value, dict):
+        raise UsageError(f"{what} must be a JSON object, not {type(value).__name__!r}")
+    return value
+
+
+def _require_list(value: object, what: str) -> list[Any]:
+    if not isinstance(value, list):
+        raise UsageError(f"{what} must be a JSON list, not {type(value).__name__!r}")
+    return value
+
+
 def oci_digests_from(tar: tarfile.TarFile) -> dict[str, str]:
     """The manifest and config digests of a single-image buildx OCI export."""
-    index = json.loads(_member(tar, "index.json"))
-    manifests = index.get("manifests") or []
+    index = _require_dict(json.loads(_member(tar, "index.json")), "index.json")
+    manifests = _require_list(index.get("manifests") or [], "index.json's manifests")
     if len(manifests) != 1:
         raise UsageError(f"index.json lists {len(manifests)} manifests; expected one image (build with --provenance=false --sbom=false)")
-    entry = manifests[0]
+    entry = _require_dict(manifests[0], "index.json's manifest entry")
     if entry.get("mediaType") not in IMAGE_MANIFEST_TYPES:
         raise UsageError(f"index.json names {entry.get('mediaType')!r}, not one image manifest")
     manifest_digest = require_digest(str(entry.get("digest", "")))
-    manifest = json.loads(_blob(tar, manifest_digest))
-    config_digest = require_digest(str((manifest.get("config") or {}).get("digest", "")))
-    config = json.loads(_blob(tar, config_digest))
+    manifest = _require_dict(json.loads(_blob(tar, manifest_digest)), "the image manifest")
+    config_ref = manifest.get("config") or {}
+    config_digest = require_digest(str(_require_dict(config_ref, "the image manifest's config").get("digest", "")))
+    config = _require_dict(json.loads(_blob(tar, config_digest)), "the image config")
     platform = f"{config.get('os', 'unknown')}/{config.get('architecture', 'unknown')}"
     return {"manifest": manifest_digest, "config": config_digest, "platform": platform}
 
@@ -162,17 +178,19 @@ def oci_digests(path: Path) -> dict[str, str]:
 
 def sbom_summary(doc: dict[str, Any]) -> dict[str, str]:
     """Spec M8: does the SBOM see the Ubuntu packages and the Rust crates at all?"""
-    packages = doc.get("packages") or []
-    if not isinstance(packages, list):
-        raise UsageError(f"packages must be a list, not {type(packages).__name__!r}")
+    packages = _require_list(doc.get("packages") or [], "packages")
     names = set()
+    cargo = 0
     for p in packages:
         if not isinstance(p, dict):
             raise UsageError(f"packages must be a list of objects, not {type(p).__name__!r}")
         names.add(str(p.get("name", "")))
-    cargo = sum(
-        1 for p in packages if any(str(ref.get("referenceLocator", "")).startswith("pkg:cargo/") for ref in p.get("externalRefs") or [])
-    )
+        refs = _require_list(p.get("externalRefs") or [], "a package's externalRefs")
+        for ref in refs:
+            if not isinstance(ref, dict):
+                raise UsageError(f"an externalRefs entry must be a JSON object, not {type(ref).__name__!r}")
+            if str(ref.get("referenceLocator", "")).startswith("pkg:cargo/"):
+                cargo += 1
     return {"packages": str(len(packages)), "libc6": "true" if "libc6" in names else "false", "cargo": str(cargo)}
 
 
@@ -181,6 +199,19 @@ def sbom_summary(doc: dict[str, Any]) -> dict[str, str]:
 D1 = "sha256:" + "1" * 64
 D2 = "sha256:" + "2" * 64
 D3 = "sha256:" + "3" * 64
+
+
+def _archive_from_files(files: dict[str, bytes]) -> tarfile.TarFile:
+    """Builds an in-memory tar from a name-to-bytes map. The shape matches an OCI archive's
+    members."""
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w") as tar:
+        for name, data in files.items():
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+    buf.seek(0)
+    return tarfile.open(fileobj=buf, mode="r")
 
 
 def _fixture_archive(
@@ -192,18 +223,34 @@ def _fixture_archive(
     manifest = json.dumps({"config": {"digest": config_digest}}).encode()
     manifest_digest = "sha256:" + hashlib.sha256(manifest).hexdigest()
     index = json.dumps({"manifests": [{"mediaType": media_type, "digest": manifest_digest}] * manifests}).encode()
-    buf = io.BytesIO()
-    with tarfile.open(fileobj=buf, mode="w") as tar:
-        for name, data in (
-            ("index.json", index),
-            ("blobs/sha256/" + manifest_digest.removeprefix("sha256:"), manifest),
-            ("blobs/sha256/" + config_digest.removeprefix("sha256:"), config),
-        ):
-            info = tarfile.TarInfo(name)
-            info.size = len(data)
-            tar.addfile(info, io.BytesIO(data))
-    buf.seek(0)
-    return tarfile.open(fileobj=buf, mode="r"), manifest_digest, config_digest
+    tar = _archive_from_files(
+        {
+            "index.json": index,
+            "blobs/sha256/" + manifest_digest.removeprefix("sha256:"): manifest,
+            "blobs/sha256/" + config_digest.removeprefix("sha256:"): config,
+        }
+    )
+    return tar, manifest_digest, config_digest
+
+
+def _fixture_archive_bad_index() -> tarfile.TarFile:
+    """`index.json` is valid JSON, but it is not an object."""
+    return _archive_from_files({"index.json": json.dumps(["not", "an", "object"]).encode()})
+
+
+def _fixture_archive_bad_manifest() -> tarfile.TarFile:
+    """`index.json` is well-formed. The manifest blob it names is not an object."""
+    manifest = json.dumps(["not", "an", "object"]).encode()
+    manifest_digest = "sha256:" + hashlib.sha256(manifest).hexdigest()
+    index = json.dumps(
+        {"manifests": [{"mediaType": "application/vnd.oci.image.manifest.v1+json", "digest": manifest_digest}]}
+    ).encode()
+    return _archive_from_files(
+        {
+            "index.json": index,
+            "blobs/sha256/" + manifest_digest.removeprefix("sha256:"): manifest,
+        }
+    )
 
 
 def _outcome(fn: Callable[[], object]) -> object:
@@ -249,6 +296,8 @@ def self_test() -> int:
         ("oci: a single-image archive", lambda: oci_digests_from(tar), {"manifest": manifest, "config": config, "platform": "linux/arm64"}),
         ("oci: an index is refused", lambda: oci_digests_from(_fixture_archive(media_type="application/vnd.oci.image.index.v1+json")[0]), "UsageError"),
         ("oci: two manifests are refused", lambda: oci_digests_from(_fixture_archive(manifests=2)[0]), "UsageError"),
+        ("oci: index.json is not an object", lambda: oci_digests_from(_fixture_archive_bad_index()), "UsageError"),
+        ("oci: the manifest blob is not an object", lambda: oci_digests_from(_fixture_archive_bad_manifest()), "UsageError"),
         # sbom-summary (spec M8)
         (
             "sbom: counts libc6 and cargo packages",
@@ -258,6 +307,16 @@ def self_test() -> int:
         ("sbom: an empty document", lambda: sbom_summary({}), {"packages": "0", "libc6": "false", "cargo": "0"}),
         ("sbom: packages is not a list", lambda: sbom_summary({"packages": "oops"}), "UsageError"),
         ("sbom: packages list has non-dict elements", lambda: sbom_summary({"packages": [{"name": "libc6"}, "oops", 5]}), "UsageError"),
+        (
+            "sbom: externalRefs is not a list",
+            lambda: sbom_summary({"packages": [{"name": "serde", "externalRefs": "oops"}]}),
+            "UsageError",
+        ),
+        (
+            "sbom: an externalRefs element is not an object",
+            lambda: sbom_summary({"packages": [{"name": "serde", "externalRefs": ["oops"]}]}),
+            "UsageError",
+        ),
     ]
     failed = 0
     for label, fn, want in rows:
