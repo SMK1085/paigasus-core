@@ -233,7 +233,7 @@ class RedisSessionStore implements SessionStore {
 
   // DESTROYS AT ONCE (SMA-651 D5). node-redis's graceful close() waits for pending commands and
   // checks only on a `data` event, so against a Redis that never replies it never resolves. No
-  // production code closes the store, so a graceful close buys nothing. The `isOpen` guard is
+  // production code closes the store, so a graceful close has no use here. The `isOpen` guard is
   // required: destroy() THROWS ClientClosedError on a client that is no longer open.
   close(): Promise<void> {
     return this.#guarded(() => {
@@ -257,6 +257,9 @@ export interface CreateRedisSessionStoreOptions {
  * does, so an unreachable Redis would otherwise hold the first request, and every request that
  * awaits the same runtime, without end. The connect keeps running in the background: until
  * `ready`, every command fails at once (disableOfflineQueue), and the store works when Redis does.
+ * The `'failed'` result is defensive. This store's reconnect strategy always returns a number, so
+ * an unreachable Redis takes the `'waiting'` path instead. `'failed'` happens only when something
+ * closes the client during the connect.
  */
 async function connectWithin(client: { connect(): Promise<unknown> }, timeoutMs: number): Promise<'connected' | 'failed' | 'waiting'> {
   let timer: ReturnType<typeof setTimeout> | undefined;

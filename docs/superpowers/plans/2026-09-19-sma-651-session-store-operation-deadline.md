@@ -934,7 +934,7 @@ interface RedisClient {
 ```ts
   // DESTROYS AT ONCE (SMA-651 D5). node-redis's graceful close() waits for pending commands and
   // checks only on a `data` event, so against a Redis that never replies it never resolves. No
-  // production code closes the store, so a graceful close buys nothing. The `isOpen` guard is
+  // production code closes the store, so a graceful close has no use here. The `isOpen` guard is
   // required: destroy() THROWS ClientClosedError on a client that is no longer open.
   close(): Promise<void> {
     return this.#guarded(() => {
@@ -1336,7 +1336,7 @@ Report: the commit list (`git log --oneline origin/main..HEAD`), each task's pas
 
 ## Mutation battery results (Task 6)
 
-Each row: tree clean, one Edit applied, the named test run, verdict recorded, `git checkout --` restored. Every mutation bit — no guard survived deletion.
+Each row: tree clean, one Edit applied, the named test run, verdict recorded, `git checkout --` restored. Every mutation made its test fail — no guard survived deletion.
 
 | # | Mutation (file:line) | Test run | Verdict | First assertion message |
 |---|---|---|---|---|
@@ -1348,11 +1348,12 @@ Each row: tree clean, one Edit applied, the named test run, verdict recorded, `g
 | M5 | Replace `putTransaction: (txnId, tx, ttlMs) => bounded('putTransaction', () => inner.putTransaction(txnId, tx, ttlMs)),` with the unwrapped call (`src/adapters/operation-deadline.ts:95`) | unit U10 (`putTransaction` row) | FAIL (as expected) | `Cannot read properties of undefined (reading 'phase')` — the other six U10 rows stayed green |
 | M6 | Delete `logger,` from the `createRedisSessionStore` call (`src/runtime.ts:151`) | `tests/runtime-redis-wiring.test.ts` | FAIL (as expected) | `expected [] to deep equally contain [ 'store.operation_timeout', …(1) ]` |
 | M7 | Delete the `openedAt = null;` line after the cooldown check (`src/adapters/operation-deadline.ts:56`) | unit U5 | FAIL (as expected) | `expected [ [ 'store.operation_timeout', …(1) ] ] to have a length of 2 but got 1` |
-| M8 | Replace the `close()` body with the destroying `close()` variant given in the brief (`src/adapters/redis-store.ts:238-243`) | container E5 | FAIL (as expected) | `expected 'still waiting' to be 'closed' // Object.is equality` |
+| M8 | Replace the `close()` body with the graceful `close()` variant given in the brief (`src/adapters/redis-store.ts:238-243`) | container E5 | FAIL (as expected) | `expected 'still waiting' to be 'closed' // Object.is equality` |
 | M9 | Replace `connectWithin(client, opts.commandTimeoutMs)` with `client.connect().then(() => 'connected' as const)` (`src/adapters/redis-store.ts:310`) | `tests/adapters/redis-store-connect.test.ts` first case | FAIL (as expected) | `Test timed out in 5000ms.` (the T-bounded wait was removed, so the call hangs when connect never settles) |
 | M10 | Delete `.max(536_870_911)` (`src/config.ts:53`) | `tests/config.test.ts` | FAIL (as expected) | `expected [Function] to throw an error` |
 | M11 | Change `DEADLINE_FACTOR = 4` to `3` (`src/adapters/operation-deadline.ts:23`) | unit U1 | FAIL (as expected) | `expected true to be false // Object.is equality` (the call settled one tick earlier than the test's fixed 4T clock expected) |
+| M12 | Change `COOLDOWN_FACTOR = 4` to `1` (`src/adapters/operation-deadline.ts:26`) | unit U4b | FAIL (as expected) | `TypeError: Cannot read properties of undefined (reading 'phase')` (the circuit had already closed at `COOLDOWN - 1`, so the call resolved instead of rejecting) |
 
-After the last restore: `git status --porcelain` printed nothing, and `pnpm -C ts/packages/paigasus-auth exec vitest run` passed all 382 tests across 30 files.
+After the last restore: `git status --porcelain` printed nothing, and `pnpm -C ts/packages/paigasus-auth exec vitest run` passed all 383 tests across 30 files.
 
 No mutation left its test green. No test was changed during the battery.

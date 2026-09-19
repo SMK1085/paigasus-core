@@ -151,7 +151,7 @@ SMA-650 used the same shape. So:
 ### D5 — `close()` destroys at once
 
 `close()` has no production caller in the repo (only tests call it), but it is part of the port and
-fact 6 means a graceful close can hang. A graceful close buys nothing here. So
+fact 6 means a graceful close can hang. A graceful close has no use here. So
 `RedisSessionStore#close()` becomes `if (client.isOpen) client.destroy()`, with no timer.
 
 - The `isOpen` guard is required: a second `destroy()` throws (fact 4). `discovery.ts:344-356`
