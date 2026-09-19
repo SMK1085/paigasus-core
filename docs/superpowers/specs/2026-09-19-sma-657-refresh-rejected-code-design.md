@@ -118,12 +118,16 @@ SMA-653 fixed the identical shape for `SessionStoreUnavailable` with a `code`-ba
 - **D7. The general rule, stated once so a future site can be judged against it.** A class thrown by
   a closure that is reachable through shared state, and caught OUTSIDE that closure, must be
   classified by its `code`. A class thrown and caught inside one closure, or thrown and caught by
-  two modules of one copy, may use `instanceof`. The comment added beside `isRefreshRejected` states
-  it. Note what the rule turns on: it is the CLOSURE boundary, not whether a runtime is shared. § 3
-  shows three sites that share a runtime and are still safe, each for one of the two reasons this
-  rule allows: `operation-deadline.ts`, because the throw and the catch are inside one closure;
-  `server.ts`, because they are two modules of one copy; and `oidc.ts`, because they are in one
-  module, not because they share a closure.
+  one or more modules of a single copy, may use `instanceof` — the one-module case is just the
+  degenerate form of that second category, not a third one. The comment added beside
+  `isRefreshRejected` states it. Note what the rule turns on: it is the CLOSURE boundary, not
+  whether a runtime is shared. § 3 shows three sites that share a runtime and are still safe, each
+  for one of the two reasons this rule allows: `operation-deadline.ts`, because the throw and the
+  catch are inside one closure; `server.ts`, because they are two modules of one copy; and
+  `oidc.ts`, because they are in one module of one copy, not because they share a closure. `oidc.ts`
+  tests a THIRD-PARTY class, so this rule — which is stated for a class this package declares —
+  does not strictly govern it; that site is judged by analogy to the rule, and saying so plainly is
+  clearer than stretching the rule to cover it.
 
 - **D8. The `code` check is deliberately WIDER than `instanceof`.** `hasAuthErrorCode` is true for
   ANY `Error` carrying that `code`, not only for a `RefreshRejected` from some copy. That is
@@ -135,6 +139,10 @@ SMA-653 fixed the identical shape for `SessionStoreUnavailable` with a `code`-ba
   them to be discovered.
 
 ## 3. The audit: every `instanceof` in `src/`
+
+This is the audit AS PERFORMED, against the tree BEFORE this change; the fix below removes the
+first row's defect, so a reader who greps the tree after merge finds five `instanceof` operators
+and no `RefreshRejected` row.
 
 `src/` holds SIX `instanceof` operators. Three test a class this package defines, one a third-party
 class, and two the builtin `Error`. Exactly one can cross the copies. This is the search the issue's
@@ -254,6 +262,9 @@ cannot force the two-copy split, so the test would pass before and after the fix
 
 ## 5. Documentation changes
 
+Line numbers below are pre-change, the same tree § 3 audits; they are not updated to their
+post-change value.
+
 - The doc comment above `isRefreshRejected` states D7's rule and names the `runtime.oidc` path that
   makes this site cross.
 - A comment at each of the three safe package-class sites (`server.ts:111`,
@@ -275,9 +286,10 @@ cannot force the two-copy split, so the test would pass before and after the fix
 - `vi.resetModules()` plus a dynamic import produces a genuinely distinct module instance under this
   package's vitest configuration. The existing `errors.test.ts` row proves it today, and every new
   row asserts it again rather than assuming it. Note the call mutates the module registry for the
-  REST of the file; no other dynamic import exists in `single-flight.test.ts` or
-  `get-session.test.ts` today, so there is no live interaction. That file uses REAL timers
-  throughout (`single-flight.test.ts:19-22`) and no `vi.mock`, and `vitest.config.ts` sets no
+  REST of the file: `get-session.test.ts` has done this since SMA-653, at two rows today
+  (`:227-228`, `:262-263`), with no observed interaction — direct evidence that the pattern is safe
+  mid-file. `single-flight.test.ts` gains its first such call on this branch. That file uses REAL
+  timers throughout (`single-flight.test.ts:19-22`) and no `vi.mock`, and `vitest.config.ts` sets no
   `setupFiles`, no `isolate: false` and no `restoreMocks`, so there is no timer or mock-hoisting
   interaction either.
 - No consumer classifies a `RefreshRejected` (D4).
@@ -294,7 +306,15 @@ cannot force the two-copy split, so the test would pass before and after the fix
   caught at `:274`, all inside the `bounded` closure at `:248`. Its `errors.ts:23`
   (`err instanceof ConnectError`, inside `callIam`) classifies a third-party class on a client that
   comes from `createConsoleRuntime` and deserves its own audit, which this issue does not perform.
-  A follow-up issue should carry it.
+  **SMA-662** ("ts: audit @paigasus/console-core for cross-copy instanceof classification") carries
+  it as a follow-up issue.
+- **`server.ts`'s `CallbackRejected` catch is safe only because nothing injects a foreign throw.**
+  `CallbackRejected` IS public (`src/server.ts` exports it), and `resolver` and `logger` are
+  injectable dependencies carried on the shared `AuthRuntime`. So a dependency injected by one copy
+  could in principle throw that copy's `CallbackRejected` from inside `routes.handle`, which the
+  other copy's catch would miss. Nothing does this today — neither `adapters/claims-resolver.ts` nor
+  `@paigasus/console-core`'s resolver throws it — and the blast radius would be small: an HTTP 500
+  instead of a redirect to login, not a session-lifetime defect like the one this issue fixes.
 - **No automated gate (D5). Residual, stated plainly:** nothing reds when a future site classifies a
   package error class with `instanceof` across the copies. The comments of § 5 and this document are
   the only control. A gate would need to tell a crossing site from a non-crossing one, which needs

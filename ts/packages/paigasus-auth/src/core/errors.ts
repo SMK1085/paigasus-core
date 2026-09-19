@@ -42,7 +42,7 @@ export class SessionStoreTimeout extends SessionStoreUnavailable {
 }
 
 /**
- * True when `err` is an `Error` whose own `code` property equals `code`, from ANY copy of this
+ * True when `err` is an `Error` whose `code` property equals `code`, from ANY copy of this
  * module.
  *
  * Why not `instanceof`: Next 16 gives a route handler and a page SEPARATE copies of this package
@@ -54,8 +54,9 @@ export class SessionStoreTimeout extends SessionStoreUnavailable {
  * THE RULE, stated once (SMA-657 D7). A class thrown by a closure that is reachable through shared
  * state, and caught OUTSIDE that closure, must be classified by its `code`. A class thrown and
  * caught inside one closure, or thrown and caught by two modules of one copy, may use `instanceof`
- * — the boundary is the CLOSURE, not whether state is shared. The three remaining `instanceof`
- * sites in this package each carry a comment saying which side of that line they fall on.
+ * — the boundary is the CLOSURE, not whether state is shared. The three remaining sites in this
+ * package that test a NON-BUILTIN class each carry a comment saying which side of that line they
+ * fall on.
  *
  * The `err instanceof Error` test is an `instanceof` against a BUILTIN, which both copies share in
  * one isolate, so it does not have the defect this function exists to avoid. It is what rejects a

@@ -495,7 +495,8 @@ describe('a failing refresh (SMA-626 § 2.3)', () => {
   // — the shape Next 16 produces, because `refresh` delegates to the shared `runtime.oidc` while
   // `resolveSession` runs in whichever copy serves the request. `resolveSession` was imported
   // statically at the top of this file, so it keeps its FIRST-copy binding: this is the real
-  // two-copy shape, not a simulation of it.
+  // class-identity split; the refresh dependency is injected here rather than taken from the
+  // runtime.
   //
   // The fixture must be inside the skew window AND still live, or single-flight.ts returns early
   // and never attempts a refresh at all (shouldRefresh is `now >= expiresAt - skewMs`). The live

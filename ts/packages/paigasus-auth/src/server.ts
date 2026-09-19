@@ -111,10 +111,7 @@ export function createAuthRouteHandler(runtime: AuthRuntime): AuthRoutes['handle
       // `instanceof` is SAFE here, unlike core/single-flight.ts's (SMA-657). This catch lives
       // inside the `handle` function createAuthRouteHandler RETURNED, closing over the `routes`
       // object built above — so the copy of this package that built the handler is the copy that
-      // throws at http/routes.ts's `reject()` and the copy that catches here. Verified for all
-      // three consumers: both apps' app/auth/[...auth]/route.ts and the e2e fixture server each
-      // call createAuthRouteHandler from their own module and never pass a handler across a
-      // boundary.
+      // throws at http/routes.ts's `reject()` and the copy that catches here.
       if (!(err instanceof CallbackRejected)) throw err;
 
       switch (err.reason) {
