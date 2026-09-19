@@ -415,6 +415,10 @@ end of this section only when the API itself is unreachable.
   queue; the relay picks it up on its next poll. **Discard one row permanently:**
   `POST /v1/outbox/dead-letters/{id}/discard`. Both are Root-only, the same posture as the `GET`
   listed under Confirm above.
+- **In the IAM console:** a Root user can also list, replay and discard single entries at
+  `/iam/dead-letters` (SMA-629). Each row shows the payload and `last_error`, and a discard asks for
+  a confirmation first. The screen appears only when IAM reports the `iam.deadletters` capability,
+  which every IAM build since SMA-629 does. Bulk replay stays API-only.
 - **Bulk replay:** `POST /v1/outbox/dead-letters/replay` with a JSON body
   `{"event_type": …, "parked_from": …, "parked_to": …, "max_rows": N}`. **`max_rows` is required**
   — an absent or zero value is rejected with `400 invalid-bulk-replay` *before any store access*.
