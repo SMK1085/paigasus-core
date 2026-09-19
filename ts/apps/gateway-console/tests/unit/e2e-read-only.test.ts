@@ -13,9 +13,11 @@
 // specifier too, not only `'`/`"`.
 //
 // Two further checks below hold what the import scan alone cannot see: the `test-e2e` task's
-// `script:` block in moon.yml (a copy or delete brought the shared-tree write back once with no
-// fs import at all), and playwright.config.ts's `globalSetup`/`globalTeardown` paths (a setup
-// file outside tests/e2e/ would not be scanned by the import check above).
+// `script:` block in moon.yml, checked against an ALLOWLIST of the two lines the script may hold
+// (a copy or delete brought the shared-tree write back once with no fs import at all, and a
+// denylist of command words separately missed `sed -i`, `truncate`, `dd` and a `node -e` fs
+// call), and playwright.config.ts's `globalSetup`/`globalTeardown` paths (a setup file outside
+// tests/e2e/ would not be scanned by the import check above).
 //
 // Limits (spec § 9, R1): this is a text scan, not a parse. It does not see a write through
 // `child_process`, or through a helper module outside tests/e2e/. The comment stripper does not
@@ -35,8 +37,8 @@ const READ_SET: ReadonlySet<string> = new Set(['existsSync', 'readFileSync', 're
 const SCRIPT_FILE = /\.(?:[cm]?[jt]s|tsx)$/;
 /** File path (relative to the app, `/` separators) → reason. Ships EMPTY; an entry needs a reason. */
 const ALLOWED_EXCEPTIONS: ReadonlyMap<string, string> = new Map();
-/** SMA-655: filesystem-mutating command words the test-e2e script must never contain. */
-const MUTATING_WORDS: readonly string[] = ['rm', 'cp', 'mv', 'rsync', 'mkdir', 'ln', 'touch', 'install', 'tee'];
+/** SMA-655: the only line text the test-e2e script may hold, after trimming each line. */
+const ALLOWED_SCRIPT_LINES: ReadonlySet<string> = new Set(['set -euo pipefail', 'pnpm exec playwright test']);
 
 /** Removes `//` and block comments. String and template contents stay, because a module specifier is a string. */
 function stripComments(source: string): string {
@@ -183,18 +185,20 @@ function extractTestE2eScript(moonYmlText: string): string {
   return script;
 }
 
-/** Every filesystem-mutating command word, or `>`/`>>` redirection, on any line of `script`. */
-function findScriptMutations(script: string): string[] {
+/** Every non-empty, trimmed line of `script` that is not exactly one of ALLOWED_SCRIPT_LINES. */
+function findDisallowedScriptLines(script: string): string[] {
   const found: string[] = [];
   for (const rawLine of script.split('\n')) {
     const line = rawLine.trim();
     if (line === '') continue;
-    if (line.includes('>')) found.push(`redirection: ${line}`);
-    for (const word of MUTATING_WORDS) {
-      if (new RegExp(`\\b${word}\\b`).test(line)) found.push(`${word}: ${line}`);
-    }
+    if (!ALLOWED_SCRIPT_LINES.has(line)) found.push(line);
   }
   return found;
+}
+
+/** Whether `script` holds the required Playwright invocation, so an emptied script cannot pass. */
+function scriptRunsPlaywright(script: string): boolean {
+  return script.split('\n').some((rawLine) => rawLine.trim() === 'pnpm exec playwright test');
 }
 
 describe('findFsViolations', () => {
@@ -262,8 +266,11 @@ describe('the e2e tree is read-only on every build tree (SMA-655)', () => {
 });
 
 // SMA-655: a copy or delete added directly to the `test-e2e` task's `script:` in moon.yml brings
-// the shared-tree write back with no fs import at all, so the scan above cannot see it.
-describe('extractTestE2eScript / findScriptMutations', () => {
+// the shared-tree write back with no fs import at all, so the scan above cannot see it. This is
+// an ALLOWLIST, not a denylist of mutating command words: a denylist missed `sed -i`, `truncate`,
+// `dd` and a `node -e` fs call, so every non-empty trimmed line must be exactly one of
+// ALLOWED_SCRIPT_LINES.
+describe('extractTestE2eScript / findDisallowedScriptLines', () => {
   /** A minimal moon.yml holding a `test-e2e:` task whose script body is `script`. */
   function fixtureMoonYml(script: string): string {
     const body = script
@@ -277,15 +284,26 @@ describe('extractTestE2eScript / findScriptMutations', () => {
     ['a copy into the standalone tree', 'set -euo pipefail\ncp -R .next/static x\npnpm exec playwright test'],
     ['a delete', 'set -euo pipefail\nrm -rf x\npnpm exec playwright test'],
     ['a redirection', 'set -euo pipefail\necho hi > x\npnpm exec playwright test'],
+    ['a stream edit', "set -euo pipefail\nsed -i 's/a/b/' .next/x\npnpm exec playwright test"],
+    ['a truncate', 'set -euo pipefail\ntruncate -s 0 .next/x\npnpm exec playwright test'],
+    ['a raw disk write', 'set -euo pipefail\ndd if=/dev/zero of=.next/x\npnpm exec playwright test'],
+    ['a node fs call', "set -euo pipefail\nnode -e \"require('fs').rmSync('.next',{recursive:true})\"\npnpm exec playwright test"],
   ];
   it.each(redScripts)('reds on %s', (_label, script) => {
     const extracted = extractTestE2eScript(fixtureMoonYml(script));
-    expect(findScriptMutations(extracted)).not.toEqual([]);
+    expect(findDisallowedScriptLines(extracted)).not.toEqual([]);
   });
 
   it('accepts the real playwright invocation', () => {
     const extracted = extractTestE2eScript(fixtureMoonYml('set -euo pipefail\npnpm exec playwright test'));
-    expect(findScriptMutations(extracted)).toEqual([]);
+    expect(findDisallowedScriptLines(extracted)).toEqual([]);
+    expect(scriptRunsPlaywright(extracted)).toBe(true);
+  });
+
+  it('passes the allowlist but fails the presence check on an emptied script', () => {
+    const extracted = extractTestE2eScript(fixtureMoonYml('set -euo pipefail'));
+    expect(findDisallowedScriptLines(extracted)).toEqual([]);
+    expect(scriptRunsPlaywright(extracted)).toBe(false);
   });
 
   it('throws when the test-e2e task cannot be found ("block not found")', () => {
@@ -304,9 +322,14 @@ describe('extractTestE2eScript / findScriptMutations', () => {
       expect(script.trim().length).toBeGreaterThan(0);
     });
 
-    it('holds no filesystem-mutating command word or redirection', () => {
+    it('holds only the allowed script lines', () => {
       const script = extractTestE2eScript(moonYmlText);
-      expect(findScriptMutations(script)).toEqual([]);
+      expect(findDisallowedScriptLines(script)).toEqual([]);
+    });
+
+    it('runs the playwright suite', () => {
+      const script = extractTestE2eScript(moonYmlText);
+      expect(scriptRunsPlaywright(script)).toBe(true);
     });
   });
 });

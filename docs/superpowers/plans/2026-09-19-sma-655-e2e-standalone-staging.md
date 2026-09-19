@@ -865,16 +865,41 @@ Expected: `rc=0` three times. If a run fails, keep its log, do NOT re-run, and r
 
 - [ ] **Step 2: V4 — no server wrote into its tree**
 
-After the last run:
+`.next/BUILD_ID` is written early in `next build`, before the rest of the server tree, so "newer
+than BUILD_ID" cannot distinguish a build's own output from a later write (spec § 7 V4) — it
+catches ordinary build output too. Use a marker file instead: touch it, start both apps'
+Playwright suites directly (no Moon, so no cache restore can mask a write) at the same time, and
+wait for both to finish.
 
 ```bash
-for app in iam-console gateway-console; do
-  s=ts/apps/$app/.next/standalone/apps/$app
-  echo "== $app"; find "$s" -type f -newer "$s/.next/BUILD_ID" -not -path "$s/.next/static/*" -not -path "$s/public/*"
-done
+touch "$SP/v4-marker"
+sleep 1
+( cd ts/apps/iam-console && pnpm exec playwright test > "$SP/v4-iam.log" 2>&1; echo $? > "$SP/v4-rc-iam.txt" ) &
+( cd ts/apps/gateway-console && pnpm exec playwright test > "$SP/v4-gw.log" 2>&1; echo $? > "$SP/v4-rc-gw.txt" ) &
+wait
+cat "$SP/v4-rc-iam.txt" "$SP/v4-rc-gw.txt"
 ```
 
-Expected: no files listed (the staged `static/` and `public/` are the only files newer than `BUILD_ID`). If a file is listed, STOP and report it: spec § 5 says the work returns to design.
+Expected: both rc files hold `0`. Then run three checks against the marker and save each result:
+
+```bash
+# Narrow check: every FILE under each app's .next (excluding .next/cache) newer than the marker.
+find ts/apps/iam-console/.next ts/apps/gateway-console/.next -type f -newer "$SP/v4-marker" -not -path '*/.next/cache/*' > "$SP/v4-narrow.txt"
+
+# Broad check: every FILE AND DIRECTORY under each app's .next/standalone newer than the marker,
+# no exclusion, so it covers .next/standalone/.../.next/cache/fetch-cache.
+find ts/apps/iam-console/.next/standalone ts/apps/gateway-console/.next/standalone -newer "$SP/v4-marker" > "$SP/v4-broad.txt"
+
+# Named-hazard existence check: does a fetch-cache path exist under either app's .next at all.
+find ts/apps/iam-console/.next ts/apps/gateway-console/.next -path '*fetch-cache*' > "$SP/v4-fetch-cache.txt"
+
+wc -l "$SP/v4-narrow.txt" "$SP/v4-broad.txt" "$SP/v4-fetch-cache.txt"
+```
+
+Expected: `$SP/v4-narrow.txt` and `$SP/v4-broad.txt` are both empty. Record whether
+`$SP/v4-fetch-cache.txt` is empty too, since a 0 count from the broad check means different things
+depending on the answer (spec § 7 V4). If the narrow or broad check lists anything, STOP and
+report it: spec § 5 says the work returns to design.
 
 - [ ] **Step 3: Run the affected-graph gate with system bash**
 
@@ -913,7 +938,10 @@ Same command, three runs.
 | 2 | … | … | … |
 | 3 | … | … | … |
 
-V4: files newer than `BUILD_ID` outside the staged paths: … (expected: none).
+V4 (marker-based): narrow check (files under each app's `.next`, excluding `.next/cache`, newer
+than the marker): … (expected: empty). Broad check (every file and directory under each app's
+`.next/standalone` newer than the marker): … (expected: empty). Fetch-cache path exists under
+either app's `.next`: … .
 Mutations: M1 …, M1b …, M2a …, M2b …, M3 …, M4 … (each: red as expected / not).
 `ci/affected-graph/run.sh` under /bin/bash 3.2: rc … .
 Local `moon ci :build :test :test-e2e :lint :fmt :typecheck`: rc … (and why, if not 0).

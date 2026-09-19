@@ -1104,11 +1104,15 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   (`require`, a dynamic `import(...)` and `process.getBuiltinModule(...)` included — the latter
   two also catch a plain backtick specifier, not only `'`/`"`) in `tests/e2e/**` or
   `playwright.config.ts` (its `ALLOWED_EXCEPTIONS` ships empty), AND separately extracts the
-  `test-e2e` task's own `script:` block from `moon.yml` by indentation and reds it on a
-  filesystem-mutating command word or a `>`/`>>` redirection — because a copy or delete added
-  directly to that script imports no `fs` module at all, so the allowlist alone cannot see it —
-  and also resolves `playwright.config.ts`'s `globalSetup`/`globalTeardown` and reds if either
-  points outside `tests/e2e/`. `tests/standalone-staging.test.ts` reds if `build` stops staging.
+  `test-e2e` task's own `script:` block from `moon.yml` by indentation and checks it against an
+  ALLOWLIST, not a denylist of mutating command words — a denylist missed `sed -i`, `truncate`,
+  `dd` and a `node -e` fs call — so every non-empty trimmed line must be exactly one of
+  `set -euo pipefail` or `pnpm exec playwright test`, any other line reds and is named, and the
+  `pnpm exec playwright test` line must be present so an emptied script cannot pass — because a
+  copy or delete added directly to that script imports no `fs` module at all, so the fs allowlist
+  alone cannot see it — and also resolves `playwright.config.ts`'s `globalSetup`/`globalTeardown`
+  and reds if either points outside `tests/e2e/`. `tests/standalone-staging.test.ts` reds if
+  `build` stops staging.
   Both `test` tasks list `moon.yml` as an input, because without it a `moon.yml`-only edit selects
   neither — a cost of this: EVERY edit to an app's `moon.yml`, comment-only included, now selects
   that app's whole `test` task. After a bare `pnpm exec next build` the staged tree is gone (Next's

@@ -140,11 +140,16 @@ red. The scan asserts that it read at least one file from each of `tests/e2e/` a
 
 **The import scan cannot see everything, so two further checks sit beside it in the same file.**
 First, the `test-e2e` task's `script:` block in each app's `moon.yml`: the scan extracts that
-block from the file's TEXT by indentation (no YAML parser), and reds if any line holds a
-filesystem-mutating command word (`rm`, `cp`, `mv`, `rsync`, `mkdir`, `ln`, `touch`, `install`,
-`tee`) or a `>`/`>>` redirection. It also asserts the block was found and is non-empty, so a
-renamed task cannot pass vacuously — a copy or delete added directly to that script would import
-no `fs` module at all, and the allowlist above would never see it. Second, `playwright.config.ts`:
+block from the file's TEXT by indentation (no YAML parser). This check is an ALLOWLIST too, not a
+denylist of mutating command words: after trimming, every non-empty line must be exactly one of
+`set -euo pipefail` or `pnpm exec playwright test`, and any other line is a red that names the
+line. A denylist of command words (`rm`, `cp`, `mv`, `rsync`, `mkdir`, `ln`, `touch`, `install`,
+`tee`) plus a `>`/`>>` redirection check was tried first and missed `sed -i`, `truncate`, `dd` and
+a `node -e` fs call, so it was replaced. The check also asserts the block was found and is
+non-empty, and that the `pnpm exec playwright test` line is present, so a renamed task cannot pass
+vacuously and an emptied script cannot pass either — a copy or delete added directly to that
+script would import no `fs` module at all, and the allowlist above would never see it. Second,
+`playwright.config.ts`:
 the scan imports the config (the same way `tests/unit/hydration.test.ts` already does), resolves
 `globalSetup` and `globalTeardown` — each may be absent, a string, or an array of strings — against
 the app directory, and asserts every resolved path lies under `tests/e2e/`, since a setup file
@@ -236,7 +241,7 @@ If V4 finds a write, the spec returns to design before implementation continues.
   `process.getBuiltinModule(...)` use in `tests/e2e/**` and `playwright.config.ts`. A shell
   command (`child_process`) or a helper module outside that tree can still write into a build
   tree without a red. Two things this residual used to cover are now closed instead: the
-  `test-e2e` task's own `moon.yml` script (a command-word/redirection check, § 4.3) and a
+  `test-e2e` task's own `moon.yml` script (an allowlist check on the script's lines, § 4.3) and a
   `globalSetup`/`globalTeardown` pointed outside `tests/e2e/` (a path-resolution check, § 4.3).
 - R2. Nothing asserts that the two apps' copies of the tests stay identical.
 - R3. Nothing asserts that a third `ts/apps/*` app with an e2e tier has these tests.
