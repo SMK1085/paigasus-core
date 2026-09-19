@@ -70,4 +70,11 @@ describe('authEnvShape', () => {
   it('rejects a malformed post-logout redirect URI override', () => {
     expect(() => schema.parse({ ...VALID, PAIGASUS_OIDC_POST_LOGOUT_REDIRECT_URI: 'not a url' })).toThrow();
   });
+
+  // SMA-651 D9. Node turns a timer delay above 2^31 - 1 ms into 1 ms, and the largest timer the
+  // session store sets is 4 x this value.
+  it('caps PAIGASUS_SESSION_REDIS_TIMEOUT_MS at 536870911 ms', () => {
+    expect(schema.parse({ ...VALID, PAIGASUS_SESSION_REDIS_TIMEOUT_MS: '536870911' }).PAIGASUS_SESSION_REDIS_TIMEOUT_MS).toBe(536_870_911);
+    expect(() => schema.parse({ ...VALID, PAIGASUS_SESSION_REDIS_TIMEOUT_MS: '536870912' })).toThrow();
+  });
 });
