@@ -363,10 +363,17 @@ ci/images/run.sh smoke [iam|gateway]...              # smoke-test images built a
 ci/images/run.sh rehearse <archive.oci.tar>...       # SMA-658: publish steps vs two local registries
 ```
 
-`load-oci` prints a line that starts with `M3 `. This line records the image ID that `docker load`
-reports, the runner's Docker version, and the runner's image store. The image store decides which
-ID is correct: a containerd store and the classic store report different IDs for the same archive.
+`load-oci` prints a line that starts with `M3 `. This line records the loaded image's ID, the
+runner's Docker version, and the runner's image store. The image store decides which ID is
+correct: a containerd store and the classic store report different IDs for the same archive.
 Read the expected ID against the store named on the same line.
+
+`load-oci` does not call `docker load` on the archive. `docker load` of an OCI-layout archive
+needs the containerd image store to read it. GitHub-hosted runners use the classic store, so
+`docker load` fails there with `open .../blobs/json: no such file or directory`. It only works on
+a Mac because Docker Desktop uses the containerd store. So `load-oci` starts a throwaway local
+registry, pushes the archive to it with `crane push`, then pulls the image back by digest and
+tags it. This works on both image stores.
 
 `build-oci` runs `docker buildx build`, not plain `docker build`. The OCI exporter needs the
 `docker-container` buildx driver. GitHub-hosted runners do not carry a containerd image store, and
