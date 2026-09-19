@@ -51,7 +51,7 @@ No code changes. This records how often the race fails BEFORE the fix, so the af
 ```bash
 cd /Users/smaschek/dev/paigasus/paigasus-core/.claude/worktrees/sma-655-e2e-standalone-race
 git branch --show-current            # feature/sma-655-e2e-standalone-race
-git diff --stat e1413535 -- ts        # empty: no ts change yet
+git diff --stat 8a185402 -- ts        # empty: no ts change yet
 docker info >/dev/null && echo docker-ok
 ```
 
@@ -85,7 +85,7 @@ Append this, filled with the measured values:
 ```markdown
 ## 10. Measurements
 
-### 10.1 Baseline (base commit e1413535, 2026-09-19)
+### 10.1 Baseline (base commit 8a185402, 2026-09-19)
 
 Command: `moon run iam-console-ts:test-e2e gateway-console-ts:test-e2e --force`, three runs.
 
