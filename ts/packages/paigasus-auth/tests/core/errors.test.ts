@@ -5,7 +5,7 @@
 // store error can be an instance of the OTHER copy's class, and `instanceof` is then false. These
 // tests build that second copy with vi.resetModules() and a dynamic import.
 import { describe, expect, it, vi } from 'vitest';
-import { CallbackRejected, SessionStoreTimeout, SessionStoreUnavailable, isSessionStoreUnavailable } from '../../src/core/errors.js';
+import { CallbackRejected, RefreshRejected, SessionStoreTimeout, SessionStoreUnavailable, isRefreshRejected, isSessionStoreUnavailable } from '../../src/core/errors.js';
 
 describe('isSessionStoreUnavailable (SMA-653 D2)', () => {
   it('is true for a SessionStoreUnavailable and for its SessionStoreTimeout subclass', () => {
@@ -29,5 +29,43 @@ describe('isSessionStoreUnavailable (SMA-653 D2)', () => {
     expect(isSessionStoreUnavailable(new Error('session_store_unavailable'))).toBe(false);
     expect(isSessionStoreUnavailable({ code: 'session_store_unavailable' })).toBe(false);
     expect(isSessionStoreUnavailable(undefined)).toBe(false);
+  });
+});
+
+// SMA-657. The same defect as the block above, on the OTHER class that crosses the two copies:
+// `refresh` delegates to the shared `runtime.oidc`, so adapters/oidc.ts builds a RefreshRejected
+// with the class of whichever copy built the runtime, and core/single-flight.ts classifies it in
+// whichever copy serves the request.
+describe('isRefreshRejected (SMA-657)', () => {
+  it('is true for a RefreshRejected', () => {
+    expect(isRefreshRejected(new RefreshRejected('invalid_grant'))).toBe(true);
+  });
+
+  it('is true for an error from a SECOND copy of core/errors', async () => {
+    vi.resetModules();
+    const foreign = await import('../../src/core/errors.js');
+    // Precondition: without this, the test passes vacuously if the import returns the same module.
+    expect(foreign.RefreshRejected).not.toBe(RefreshRejected);
+    const err = new foreign.RefreshRejected('invalid_grant');
+    expect(err instanceof RefreshRejected).toBe(false);
+    expect(isRefreshRejected(err)).toBe(true);
+  });
+
+  // D8. The check is deliberately WIDER than `instanceof`: `code` is the identity, and admitting
+  // any Error that carries it is the whole mechanism by which the foreign-copy instance passes.
+  // Pinned here so the semantics are stated rather than discovered.
+  it('is true for any Error carrying the code, not only a RefreshRejected', () => {
+    expect(isRefreshRejected(Object.assign(new Error('x'), { code: 'oidc_refresh_rejected' }))).toBe(true);
+  });
+
+  it('is false for other errors and for non-errors', () => {
+    expect(isRefreshRejected(new CallbackRejected('txn_missing'))).toBe(false);
+    expect(isRefreshRejected(new SessionStoreUnavailable('down'))).toBe(false);
+    expect(isRefreshRejected(new SessionStoreTimeout('get', 4000, 'deadline'))).toBe(false);
+    // The literal in the MESSAGE, not in `code`.
+    expect(isRefreshRejected(new Error('oidc_refresh_rejected'))).toBe(false);
+    // A plain object, not an Error.
+    expect(isRefreshRejected({ code: 'oidc_refresh_rejected' })).toBe(false);
+    expect(isRefreshRejected(undefined)).toBe(false);
   });
 });

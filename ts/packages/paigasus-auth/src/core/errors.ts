@@ -41,18 +41,45 @@ export class SessionStoreTimeout extends SessionStoreUnavailable {
 }
 
 /**
- * True for a SessionStoreUnavailable, or a subclass such as SessionStoreTimeout, from ANY copy of
- * this module (SMA-653 D2).
+ * True when `err` is an `Error` whose own `code` property equals `code`, from ANY copy of this
+ * module.
  *
  * Why not `instanceof`: Next 16 gives a route handler and a page SEPARATE copies of this package
- * (measured, see src/runtime.ts's comment on RUNTIME_KEY_PREFIX), and the runtime, with its store,
- * is shared between them through globalThis. The store therefore throws the class of whichever
- * copy built the runtime first, and `instanceof` in the other copy is false. The `code` class
- * field is an own property of every instance, and the subclass inherits it, so it survives the
- * duplication.
+ * (measured, see src/runtime.ts's comment on RUNTIME_KEY_PREFIX), and state is shared between them
+ * through globalThis. An object built by one copy is therefore routinely classified by the other,
+ * where `instanceof` against the local class is false. The `code` class field is an own property of
+ * every instance, and a subclass inherits it, so it survives the duplication.
+ *
+ * THE RULE, stated once (SMA-657 D7). A class thrown by a closure that is reachable through shared
+ * state, and caught OUTSIDE that closure, must be classified by its `code`. A class thrown and
+ * caught inside one closure, or thrown and caught by two modules of one copy, may use `instanceof`
+ * — the boundary is the CLOSURE, not whether state is shared. The three remaining `instanceof`
+ * sites in this package each carry a comment saying which side of that line they fall on.
+ *
+ * The `err instanceof Error` test is an `instanceof` against a BUILTIN, which both copies share in
+ * one isolate, so it does not have the defect this function exists to avoid. It is what rejects a
+ * plain object that happens to carry a matching `code`.
+ *
+ * This is deliberately WIDER than `instanceof`: any `Error` carrying the code passes, not only an
+ * instance of the declaring class. That widening IS the mechanism.
  */
+function hasAuthErrorCode(err: unknown, code: string): boolean {
+  return err instanceof Error && (err as { code?: unknown }).code === code;
+}
+
+/** True for a SessionStoreUnavailable, or a subclass such as SessionStoreTimeout, from ANY copy of
+ * this module (SMA-653 D2). See `hasAuthErrorCode` for why this is not an `instanceof`. */
 export function isSessionStoreUnavailable(err: unknown): boolean {
-  return err instanceof Error && (err as { code?: unknown }).code === 'session_store_unavailable';
+  return hasAuthErrorCode(err, 'session_store_unavailable');
+}
+
+/** True for a RefreshRejected from ANY copy of this module (SMA-657 D1). The crossing path is
+ * real and not hypothetical: next/get-session.ts wires `refresh` to the shared `runtime.oidc`, so
+ * adapters/oidc.ts builds this class in whichever copy created the runtime, and
+ * core/single-flight.ts classifies it in whichever copy serves the request. See
+ * `hasAuthErrorCode`. */
+export function isRefreshRejected(err: unknown): boolean {
+  return hasAuthErrorCode(err, 'oidc_refresh_rejected');
 }
 
 /** Configuration is internally inconsistent. Thrown by createAuthRuntime at first request. */
