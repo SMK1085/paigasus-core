@@ -175,7 +175,9 @@ short: this doc holds the evidence.
    a reload request was seen; the reload fired before or after the final action.
    - **Before (unchanged test):** the wait sits before `secondary.goto`. This batch must reproduce
      at least 3 failures in the session, or the "after" batch does not count.
-   - **After (fixed test):** the wait sits before `secondary.close()`. Expect 0 failures.
+   - **After (fixed test):** the fixed test has no `close()` call to place the wait before; per
+     `task-3b-report.md`, the wait instead sits right before the fresh-tab action begins
+     (`const sidBefore = …`). Expect 0 failures.
    - Interleave before and after batches on one machine. Report run counts per mode and per
      classification. The after-fix guarantee for the timer is STRUCTURAL (the document no longer
      exists); the batch is a check of the implementation, not the proof.
@@ -189,8 +191,8 @@ short: this doc holds the evidence.
 3. **Polling-path probe.** Temporarily keep the secondary open for 2.0–2.5 s after the primary
    shows the heading (past its first poll). Run at least 20 times and count `/auth/login` and
    `/auth/callback` requests from the secondary. Report the count. If the path is real, the new
-   checks fail, and the early close in § 3.1 is what keeps the normal test green. If the count is
-   non-zero, file a Linear issue for the product question in § 6.
+   checks fail loudly (§ 3.1 keeps every tab open regardless, so nothing else would catch it). If
+   the count is non-zero, file a Linear issue for the product question in § 6.
 4. **Diagnostics proof.** Temporarily break a step 6 check. Confirm that the `list` reporter
    output on the terminal (not only the file in `test-results/`) shows the chain, the cookie
    names with no values, and the recorded requests. Revert.
