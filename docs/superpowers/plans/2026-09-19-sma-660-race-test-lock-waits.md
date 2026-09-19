@@ -16,11 +16,13 @@
 - **Every shell command starts with** `export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"` so `cargo nextest` and `moon` resolve to the repository-pinned tools.
 - **Every test run uses** `PAIGASUS_REQUIRE_DOCKER=1` and `--retries 0`. Without the first, a filtered run with no Docker daemon skips in silence and reads as a pass. Without the second, `rs/.config/nextest.toml`'s `retries = 2` can turn a failing mutation green.
 - **Docker must be running.** Every test in this plan starts a Postgres container. If the daemon is unreachable the run fails loudly, which is the intended behaviour, not a defect to work around.
+- **Every mutation must COMPILE.** This workspace denies warnings, so a mutation that leaves a binding unused or code unreachable dies at `rustc` (rc 101) instead of at the assertion it targets — and a compile failure proves only that warnings are denied, not that the test catches the defect. That is the claim this branch's pull request makes, so it must be demonstrated at the assertion. Measured three times on this plan: shadowing a parameter, adding an early `return`, and deleting a guard that leaves its binding unread all failed this way. If a mutation will not compile, adapt it (silence the binding with `_`, or make a condition unconditionally true) rather than accepting the compile error as the result.
+- **When a mutation's expected result is "exactly N tests fail", pass `--no-fail-fast`.** nextest cancels the remaining tests at the first failure by default, so without it the run stops looking and the claim is unprovable.
 - **A mutation in a file this branch EDITS is a marked insert**, undone by deleting the marked lines. Write the marker as `// MUTATION SMA-660 — delete this line` on each inserted line. Never restore such a file with `git checkout --`: it would also discard the uncommitted work under test.
 - **A mutation in a PRODUCTION file is restored with `git checkout -- <path>`.** This is safe only because this branch changes no production file. Run `git status --short` before and after each one and confirm the path is clean.
 - **No production file may appear in any commit.** The only permanent changes are under `rs/crates/services/paigasus-iam/tests/` and `docs/`.
 - **SPDX header.** Every new source file opens with `// SPDX-License-Identifier: Apache-2.0`.
-- **Commits** are Conventional with the `rs` scope, e.g. `test(rs): …`, and end with the line `Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>`. Put the issue key `(SMA-660)` in the subject. Do not write a bare `#NNN` line or a `token: value` line in the commit BODY — the local `commit-msg` hook rejects it.
+- **Commits** are Conventional with the `rs` scope, e.g. `test(rs): …`, and end with the line `Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>` — **verbatim, whichever model writes the commit.** That trailer names the Claude Code session, not the subagent executing a task, so a subagent whose own environment names a different model still writes this line. It keeps one trailer across the branch. Put the issue key `(SMA-660)` in the subject. Do not write a bare `#NNN` line or a `token: value` line in the commit BODY — the local `commit-msg` hook rejects it.
 - **Do not write the literal name of Moon's cached CI report file into any file in this repository.** A repository gate requires a special marker on any file that names it, and this plan and its commits do not carry that marker.
 - **Record every measurement.** Tasks 2, 4 and 5 produce output that the pull request body must quote. Keep it as you go in `docs/superpowers/plans/2026-09-19-sma-660-measurements.md`, which is committed with Task 6.
 
@@ -550,18 +552,20 @@ This one mutates a PRODUCTION file, so it is restored with `git checkout --`. In
         }
 ```
 
-with an unconditional bump:
+with an unconditional bump. `outcome` then has no reader, and `-D warnings` rejects that, so rename its binding to `_outcome` in the same mutation — the mutation must COMPILE or it proves only that this workspace denies warnings:
 
 ```rust
+        let _outcome = self.put_in(&*tx, doc).await?;
+        tx.commit().await.map_err(map_txn_err)?;
         self.bump_policy_gen_best_effort().await;
 ```
 
-Then run the WHOLE binary, not just the one test:
+Then run the WHOLE binary, not just the one test, and **pass `--no-fail-fast`**. Without it nextest cancels the remaining tests at the first failure, so "exactly one test failed" would be unprovable — the run would simply stop looking:
 
 ```bash
 export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
 cd /Users/smaschek/dev/paigasus/paigasus-core/.claude/worktrees/sma-660-race-lock-waits/rs
-PAIGASUS_REQUIRE_DOCKER=1 cargo nextest run -p paigasus-iam --test authz_policy_store --retries 0
+PAIGASUS_REQUIRE_DOCKER=1 cargo nextest run -p paigasus-iam --test authz_policy_store --retries 0 --no-fail-fast
 ```
 
 **Expected: exactly ONE failure** — `concurrent_put_of_the_same_new_policy_id_is_idempotent_not_a_conflict`, on its `policy_gen` assertion. Record the count and the message.
