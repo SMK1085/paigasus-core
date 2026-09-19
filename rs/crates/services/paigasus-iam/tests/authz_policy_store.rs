@@ -32,7 +32,9 @@ use paigasus_iam::adapters::persistence::entities::{audit_log, event_outbox, pol
 use paigasus_iam::adapters::persistence::{PgAuditLog, PgOutbox, PgPolicyStore, SeaOrmUnitOfWork};
 use paigasus_iam_core::authz::model::{PolicyKind, root_prn};
 use paigasus_iam_core::{AuditEntry, AuditLog, AuditOutcome, AuthzError, DomainEvent, EventType, IdGenerator, Outbox, PolicyDocument, PolicyStore, PutOutcome, UnitOfWork};
-use sea_orm::{ActiveModelTrait, ActiveValue::NotSet, DatabaseConnection, EntityTrait, Set, TransactionTrait};
+use sea_orm::{ActiveModelTrait, ActiveValue::NotSet, ConnectionTrait, DatabaseConnection, DbBackend, EntityTrait, Set, Statement, TransactionTrait};
+use std::time::Duration;
+use tokio::task::JoinHandle;
 
 /// A well-formed, schema-valid static policy document (mirrors `authz::schema`'s own
 /// "well-formed" test fixture).
@@ -66,6 +68,105 @@ async fn seed_system_policy(db: &DatabaseConnection, policy_id: &str, now: DateT
     .insert(db)
     .await
     .unwrap();
+}
+
+/// Upper bound on how long racer B may take to block on racer A's uncommitted INSERT (SMA-659).
+/// A LOAD BUDGET, not an expectation: the wait returns on the first observation, which on an idle
+/// machine is the first or second poll.
+const RACER_BLOCK_BUDGET: Duration = Duration::from_secs(30);
+
+/// How often [`wait_until_blocked_by`] polls `pg_stat_activity`.
+const RACER_BLOCK_POLL: Duration = Duration::from_millis(10);
+
+/// Counts backends that are inside an INSERT and blocked by `$1` on a transaction-id lock. That is
+/// exactly racer B once it is in its INSERT: its `SELECT … FOR UPDATE` existence check does not
+/// wait on A's uncommitted, invisible row, but its unique-index check does wait on A's
+/// transaction id (spec §2, F1–F2). The `ILIKE 'insert%'` term makes the observation itself show
+/// that B is in the INSERT, rather than relying on F1 alone.
+const BLOCKED_INSERTS_SQL: &str = "SELECT count(*)::bigint AS n FROM pg_stat_activity \
+     WHERE wait_event_type = 'Lock' AND wait_event = 'transactionid' \
+     AND query ILIKE 'insert%' AND $1 = ANY(pg_blocking_pids(pid))";
+
+/// Every non-idle client backend but the one running this query, for a deadline message: a stuck
+/// pool, a different lock and a wrong predicate each look different here.
+const NON_IDLE_BACKENDS_SQL: &str = "SELECT coalesce(string_agg(format('pid=%s state=%s wait=%s/%s query=%s', \
+     pid, state, wait_event_type, wait_event, left(query, 80)), '; ' ORDER BY pid), '(none)') AS dump \
+     FROM pg_stat_activity \
+     WHERE backend_type = 'client backend' AND state IS DISTINCT FROM 'idle' AND pid <> pg_backend_pid()";
+
+/// The backend pid of the connection that runs `conn` — for a transaction, the backend that holds
+/// its locks.
+async fn backend_pid(conn: &impl ConnectionTrait) -> i32 {
+    conn.query_one_raw(Statement::from_string(DbBackend::Postgres, "SELECT pg_backend_pid() AS pid"))
+        .await
+        .expect("query pg_backend_pid()")
+        .expect("pg_backend_pid() always returns a row")
+        .try_get::<i32>("", "pid")
+        .expect("pg_backend_pid() is an integer")
+}
+
+/// SMA-659: waits until racer B is inside its INSERT and blocked by `blocker_pid` (racer A's
+/// backend), which replaces a fixed sleep that only HOPED B had got there. Each poll is an
+/// autocommit statement on `db`: `pg_stat_activity` is a per-transaction snapshot, so a poll
+/// inside one transaction would see the same data every time (spec §2, F3).
+///
+/// Checks, in this order, every [`RACER_BLOCK_POLL`]: B blocked → `Ok`; `racer` finished →
+/// `Err` (a blocked racer cannot finish while A is uncommitted, so checking "blocked" first
+/// never hides a finished one); `budget` elapsed → `Err` with a dump of the non-idle backends.
+/// Panics with `observer query failed: …` if the poll itself fails, which is neither of the two
+/// verdicts.
+async fn wait_until_blocked_by<T>(db: &DatabaseConnection, blocker_pid: i32, racer: &JoinHandle<T>, budget: Duration) -> Result<(), String> {
+    let deadline = std::time::Instant::now() + budget;
+    loop {
+        let blocked = db
+            .query_one_raw(Statement::from_sql_and_values(DbBackend::Postgres, BLOCKED_INSERTS_SQL, [blocker_pid.into()]))
+            .await
+            .unwrap_or_else(|e| panic!("observer query failed: {e}"))
+            .expect("count(*) always returns a row")
+            .try_get::<i64>("", "n")
+            .unwrap_or_else(|e| panic!("observer query failed: {e}"));
+        if blocked > 0 {
+            return Ok(());
+        }
+        if racer.is_finished() {
+            return Err(format!(
+                "racer B finished before it blocked on racer A's uncommitted INSERT (pid {blocker_pid}), so the race never happened"
+            ));
+        }
+        if std::time::Instant::now() >= deadline {
+            let dump = match db.query_one_raw(Statement::from_string(DbBackend::Postgres, NON_IDLE_BACKENDS_SQL)).await {
+                Ok(Some(row)) => row.try_get::<String>("", "dump").unwrap_or_else(|e| format!("(dump unreadable: {e})")),
+                Ok(None) => "(dump returned no row)".to_string(),
+                Err(e) => format!("(dump failed: {e})"),
+            };
+            return Err(format!(
+                "racer B did not block on racer A's uncommitted INSERT (pid {blocker_pid}) within {budget:?}; non-idle backends: {dump}"
+            ));
+        }
+        tokio::time::sleep(RACER_BLOCK_POLL).await;
+    }
+}
+
+/// The race tests' call site for [`wait_until_blocked_by`] with [`RACER_BLOCK_BUDGET`]: panics
+/// with the wait's reason when B does not block, so the test stops HERE and never reaches its
+/// `Conflict`/`Updated` verdict, which would be meaningless without the race. When B has already
+/// finished, B's own result is part of the message (through `describe`, since a racer's output
+/// can hold a non-`Debug` transaction), so a `DbErr` or a panic inside B is not hidden behind
+/// "finished".
+#[allow(dead_code)] // SMA-659: used from Task 2
+async fn expect_racer_blocked<T>(db: &DatabaseConnection, blocker_pid: i32, racer: &mut JoinHandle<T>, describe: impl FnOnce(&T) -> String) {
+    let Err(reason) = wait_until_blocked_by(db, blocker_pid, racer, RACER_BLOCK_BUDGET).await else {
+        return;
+    };
+    if racer.is_finished() {
+        let own = match racer.await {
+            Ok(output) => describe(&output),
+            Err(join_err) => format!("{join_err:?}"),
+        };
+        panic!("{reason}; racer B's own result: {own}");
+    }
+    racer.abort();
+    panic!("{reason}");
 }
 
 #[tokio::test]
@@ -661,4 +762,44 @@ async fn put_in_enqueue_and_record_commit_atomically_sharing_correlation_id() {
         before,
         "put_in must never bump policy_gen itself — that is the caller's own post-commit responsibility"
     );
+}
+
+/// SMA-659 guard: [`wait_until_blocked_by`] must REPORT a racer that never blocks, on both of its
+/// error paths. Without this, a wait that always returned `Ok` would keep the three race tests
+/// green while the race went back to depending on timing — which is the defect SMA-659 removes.
+/// (The opposite defect, a predicate that is never true, makes those three tests fail at the
+/// deadline, so they guard it themselves.)
+#[tokio::test]
+async fn wait_until_blocked_by_reports_a_racer_that_never_blocks() {
+    let Some((_pg, db)) = support::start_migrated_postgres().await else { return };
+    let now = Utc::now().trunc_subsecs(6);
+
+    // "Finished" path. A's row is COMMITTED before B starts, so B's existence check sees it and
+    // B takes the UPDATE path: it never waits on any lock and simply finishes.
+    let store = PgPolicyStore::new(db.clone(), Generations::memory());
+    let doc_a = valid_static_doc("guard-never-blocks", false, now);
+    store.put(&doc_a).await.unwrap();
+    let pid_a = backend_pid(&db).await;
+    let mut doc_b = doc_a.clone();
+    doc_b.description = "racer B's document".to_string();
+    let store_b = store.clone();
+    let put_b = tokio::spawn(async move { store_b.put(&doc_b).await });
+
+    let err = wait_until_blocked_by(&db, pid_a, &put_b, RACER_BLOCK_BUDGET)
+        .await
+        .expect_err("a racer that takes the UPDATE path never blocks, so the wait must report it");
+    assert!(err.contains("finished before it blocked"), "wrong message for a finished racer: {err}");
+    // The guard proves the UPDATE-path case specifically, not some racer that died of an error.
+    let result_b = put_b.await.unwrap();
+    assert!(result_b.is_ok(), "racer B must have finished through the ordinary UPDATE path: {result_b:?}");
+
+    // "Deadline" path. A racer that neither blocks nor finishes: the wait must give up at its
+    // budget and say so, with the backend dump that tells the reader what was running instead.
+    let pending = tokio::spawn(std::future::pending::<()>());
+    let err = wait_until_blocked_by(&db, pid_a, &pending, Duration::from_millis(200))
+        .await
+        .expect_err("a racer that never blocks must hit the deadline");
+    pending.abort();
+    assert!(err.contains("did not block"), "wrong message at the deadline: {err}");
+    assert!(err.contains("non-idle backends"), "the deadline message must carry the backend dump: {err}");
 }
