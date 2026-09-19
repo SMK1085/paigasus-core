@@ -198,13 +198,17 @@ build_one() {
   # always re-execute is what the comment above already assumed ("re-resolves ... on every
   # build") and costs one small apt/chisel fetch, not a rebuild of the (cache-mounted) Rust
   # compile.
+  # `docker buildx build`, not bare `docker build` (SMA-658 PR1 CI fix): plain `docker build` is
+  # not guaranteed to route through the builder that `docker buildx use` (what
+  # docker/setup-buildx-action selects) made current — build_oci below hit exactly this gap, so
+  # both build paths now say `buildx` explicitly. See build_oci's comment for the measured proof.
   # --load: docker/setup-buildx-action makes a `docker-container` builder CURRENT, and that
   # driver does not reliably auto-load its output into the local `docker images` store on every
   # Docker version (it happens to on 29.6.2, but the CI runner's version is not guaranteed to
   # match). Without --load the failure mode is silent here and loud at the first `docker run`
   # below ("No such image"). Under the plain `docker` driver (no buildx container) --load is a
   # no-op-safe `--output=type=docker`, so it costs nothing locally.
-  docker build \
+  docker buildx build \
     --progress=plain \
     --no-cache-filter=rootfs \
     --load \
@@ -226,6 +230,23 @@ build_one() {
 # --provenance=false --sbom=false: buildx would otherwise wrap the image in an index with its own
 # attestation manifests; the release path attests through GitHub instead (spec D4).
 # name=<crate>:dev: `docker load` of the archive then restores that name for load_oci and smoke.
+#
+# `docker buildx build`, never bare `docker build` (SMA-658 PR1 CI fix, PR 270). MEASURED on the
+# GitHub-hosted runner: bare `docker build --output type=oci,...` failed with "OCI exporter is
+# not supported for the docker driver", although images.yml already runs
+# docker/setup-buildx-action, which creates a `docker-container` builder and switches to it
+# (`use: true`, its default). The action's own docs describe that switch as making the builder
+# current "for subsequent docker buildx commands", not for the classic `docker build` CLI path —
+# and Docker's own exporter docs are explicit: "The docker driver doesn't support these
+# exporters. You must use docker-container or some other driver." So on this runner, plain
+# `docker build` resolved to the classic `docker` driver regardless of the builder
+# docker/setup-buildx-action had selected, and the OCI exporter has no path there. Spelling the
+# command as `docker buildx build` removes that ambiguity: it always talks to buildx and always
+# uses the current builder — the `docker-container` one in CI (OCI export works, per Docker's
+# docs), and whatever builder is current locally (unchanged behaviour there: Docker Desktop
+# already aliases `docker build` to the same buildx call, which is how the containerd-image-store
+# Mac measurement in docs/ops/RUNBOOK-containers.md was taken). Do NOT "simplify" this back to
+# bare `docker build` — that is the exact regression this comment exists to prevent.
 build_oci() {
   local service="$1" outdir="$2" crate version arch archive build_log
   crate="$(crate_for "$service")"
@@ -236,7 +257,7 @@ build_oci() {
   build_log="$(mktemp "${TMPDIR:-/tmp}/paigasus-build-${service}.XXXXXX")"
   trap 'rm -f "$build_log"' RETURN
   echo "== build-oci ${crate} ${version} (${arch}) =="
-  docker build \
+  docker buildx build \
     --progress=plain \
     --no-cache-filter=rootfs \
     --provenance=false --sbom=false \
