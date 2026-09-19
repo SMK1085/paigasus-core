@@ -184,10 +184,10 @@ pipe's capacity never finishes writing. actionlint then busy-loops at about 300%
 Upstream issue [#650](https://github.com/rhysd/actionlint/issues/650) reports the same fault.
 Commit `fd33e9f582` fixes it. No actionlint release contains that fix on 2026-09-19.
 
-**Mechanism 2 — bash here-strings.** Homebrew bash 5.x writes a here-string into a pipe
-before the reader starts. The measured boundary is exact: 512 bytes finish, and 513 bytes
-hang (M9). Under this bash, the gate's self-tests deadlock at about 0% CPU, before check 1
-ever runs (M8).
+**Mechanism 2 — bash here-strings.** Homebrew bash writes a here-string into a pipe before the
+reader starts. The measured version is 5.3.15 (M8, M9). The measured boundary is exact: 512
+bytes finish, and 513 bytes hang (M9). Under this bash, the gate's self-tests deadlock at about
+0% CPU, before check 1 ever runs (M8).
 
 **What the gate does now.** In full-gate mode, a preflight step measures the pipe capacity
 before the self-tests run. If the capacity is below 8192 bytes, the gate exits at rc 2 with a
@@ -617,7 +617,10 @@ can still hang silently under Homebrew bash.
 
 R3: a copy of a pinned call line, placed inside a dead code block, can still satisfy the
 call-site pins (see L10, above). The probe's own Python text is pinned as one line only. A
-change inside that line, which still prints a large number, is not caught by any pin.
+change inside that line, which still prints a large number, is not caught by any pin. No pin
+checks the call line's ORDER. A move to below `run_self_tests` keeps every pin green. It loses
+the protection against the bash 5.x self-test deadlock (D1). An early `return 0` added at the
+top of `pipe_capacity_preflight` is also not caught by any pin.
 
 R4: the probe detects only the one measured trigger. A different cause of the same hang, with
 a normal pipe size, stays undetected. The gate has no watchdog timer.

@@ -5314,6 +5314,7 @@ pipe_capacity_self_test() {
   expect_pipe_capacity 'a negative number' '-1' invalid
   expect_pipe_capacity 'a trailing space' '512 ' invalid
   expect_pipe_capacity 'two lines' "$(printf 'abc\n65536')" invalid
+  expect_pipe_capacity 'two lines of digits' "$(printf '512\n65536')" invalid
   expect_pipe_capacity 'an NDJSON preamble that passed tail -n1' '{"type":"message"}' invalid
   expect_pipe_capacity 'ten digits would wrap in bash arithmetic' '1234567890' invalid
 
@@ -5917,10 +5918,11 @@ done < <(cargo_lock_script_verdict ci/cargo-lock-integrity/run.sh)
 # opportunistic PATH lookup made the gate's strictness a property of the host; this resolves ONE
 # hash-pinned binary from py/uv.lock instead, so a dev box and CI agree.
 #
-# PLACEMENT IS LOAD-BEARING. This sits AFTER the --self-test early exit at :4765, beside the
-# actionlint guard, for the same reason that guard does: --self-test must stay runnable on a
-# machine with neither binary installed. It also keeps check 9's mutant fan-out — one --self-test
-# subprocess per self-test — from paying 15 `uv run` invocations against one py/.venv.
+# PLACEMENT IS LOAD-BEARING. This sits AFTER the `--self-test` early exit that follows
+# run_self_tests, beside the actionlint guard, for the same reason that guard does: --self-test
+# must stay runnable on a machine with neither binary installed. It also keeps check 9's mutant
+# fan-out — one --self-test subprocess per self-test — from paying 16 `uv run` invocations
+# against one py/.venv.
 #
 # FAIL CLOSED. There is deliberately NO fallback to `-shellcheck=`: a silent downgrade to
 # "whatever this host has" is exactly the failure SMA-525 refused, and it would be invisible on

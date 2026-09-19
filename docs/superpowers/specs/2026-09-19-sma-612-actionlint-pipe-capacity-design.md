@@ -77,8 +77,9 @@ Until an actionlint release contains `fd33e9f582`:
    fixture table and no actionlint. The probe must run before `run_self_tests`, because under
    the default bash on this host (Homebrew 5.3.15, which Moon's `bash -c` and a bare `bash` both
    resolve first) the self-tests deadlock before any later code runs (M8).
-2. **D2 — `--self-test` mode does not probe.** The mutation battery (check 9) starts sixteen
-   concurrent `--self-test` subprocesses. A probe there adds a `uv run` to each. The existing
+2. **D2 — `--self-test` mode does not probe.** The mutation battery (check 9) starts seventeen
+   concurrent `--self-test` subprocesses (sixteen mutants plus the control). A probe there adds a
+   `uv run` to each. The existing
    `SHELLCHECK_BIN` comment (`run.sh:5812-5820`) rejects that cost for the same reason. So
    `--self-test` under Homebrew bash on a small-pipe host still hangs; §9 R2 records it. Under
    `/bin/bash` 3.2 `--self-test` works on such a host (CLAUDE.md, SMA-647 measurement), and a

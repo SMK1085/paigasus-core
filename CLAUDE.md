@@ -1131,9 +1131,10 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   `case` match disagree, which is evidence of a second mechanism. Keep that run's whole output for
   SMA-647 before you re-run.
 - LOCAL ONLY, CORRECTED (SMA-512): no local bash currently runs `ci/actionlint/run.sh` to
-  completion. SMA-612 found the cause of both hangs: a 512-byte pipe (see the next entry). The
-  full gate now exits rc 2 in seconds under either bash instead of hanging. The two candidates
-  still failed differently before that fix. Under system `/bin/bash` 3.2.57 the gate
+  completion. The 512-byte pipe (see the next entry) is most probably the same cause; nobody
+  measured the pipe state on these 2026-09-14 runs (spec §2). When the host is in that
+  small-pipe state, the full gate now exits rc 2 in seconds under either bash, instead of
+  hanging. The two candidates still failed differently before that fix. Under system `/bin/bash` 3.2.57 the gate
   does not deadlock — it still prints the two FALSE `cargo-lock-step` self-test failures — but it
   also does not finish: measured running past one hour without completing. Under Homebrew
   `/opt/homebrew/bin/bash` 5.3.15 the gate DEADLOCKS instead: measured three times independently on
@@ -1173,19 +1174,21 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   them — `repo:actionlint` has no local substitute verdict today. CI runs a single Linux bash and
   never sees this split.
 - **A new pipe on the development Mac can hold only 512 bytes, and two local hangs come from
-  it** (SMA-612). A new pipe on that host holds 512 bytes, not the normal 16384 (M4). The pipe
+  it** (SMA-612). A new pipe on that host holds 512 bytes (M4), not the nominal 16384 that
+  kqueue reports (M5). The healthy macOS value on this host is not measured (spec D3). The pipe
   does not grow when it fills (M6). The Bash tool sandbox is not the cause: the same 512-byte
   limit appears with the sandbox disabled (M10). Mechanism 1: actionlint 1.7.12 writes a whole
-  `run:` script into shellcheck's stdin before it starts shellcheck, so a script over the pipe's
-  capacity blocks forever and actionlint busy-loops (M2, M3). Mechanism 2: Homebrew bash 5.x
-  writes a here-string into a pipe before its reader starts; 512 bytes finish and 513 bytes hang
-  (M9), and the gate's self-tests then deadlock at about 0% CPU (M8). `repo:actionlint` now runs
-  a pipe-capacity preflight before its self-tests in full-gate mode, and it exits rc 2 with a
-  `small` message on a host below the 8192-byte floor. `--self-test` mode does not probe and
-  still hangs under Homebrew bash on such a host. Remove the probe only per spec decision D9 in
-  `docs/superpowers/specs/2026-09-19-sma-612-actionlint-pipe-capacity-design.md`; a `.prototools`
-  actionlint version bump reds the gate on purpose until then. Other gates that use here-strings
-  (for example `repo:affected-smoke`) still hang under bash 5.x on such a host; this entry does
+  `run:` script into shellcheck's stdin before it starts shellcheck. A script over the pipe's
+  capacity then blocks forever, and actionlint busy-loops (M2, M3). Mechanism 2: Homebrew bash
+  5.x writes a here-string into a pipe before its reader starts. A write of 512 bytes finishes,
+  and a write of 513 bytes hangs (M9). The gate's self-tests then deadlock at about 0% CPU (M8).
+  `repo:actionlint` now runs a pipe-capacity preflight before its self-tests in full-gate mode.
+  It exits rc 2 with a `small` message on a host below the 8192-byte floor. `--self-test` mode
+  does not probe and still hangs under Homebrew bash on such a host. Remove the probe only per
+  spec decision D9 in
+  `docs/superpowers/specs/2026-09-19-sma-612-actionlint-pipe-capacity-design.md`. A `.prototools`
+  actionlint version bump reds the gate on purpose, until then. Other gates that use here-strings
+  (for example `repo:affected-smoke`) still hang under bash 5.x on such a host. This entry does
   not fix them.
 - **`ts/apps/gateway-console`** (SMA-512 PR 3) is the second console zone: a Next.js 16 App Router
   app for the AI Gateway, mounted at `/gateway`, Moon id `gateway-console-ts`. Its `lib/config.ts`
