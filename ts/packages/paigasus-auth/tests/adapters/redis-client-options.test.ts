@@ -11,6 +11,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 interface CapturedClient {
   on: ReturnType<typeof vi.fn>;
+  isOpen: boolean;
+  destroy: ReturnType<typeof vi.fn>;
   connect: () => Promise<void>;
   get: () => Promise<string | null>;
   set: () => Promise<string | null>;
@@ -23,17 +25,23 @@ const captured = { options: undefined as Record<string, unknown> | undefined, cl
 
 vi.mock('redis', () => ({
   createClient: (options: Record<string, unknown>) => {
-    // The production RedisClient interface (redis-store.ts:105-111) deliberately omits `on`, so
-    // this factory satisfies that interface PLUS the `on` the real node-redis client carries, and
-    // is cast once here rather than widening the production type.
+    // The factory satisfies the production RedisClient duck type (redis-store.ts) plus the
+    // `connect` the factory calls. `destroy` mirrors node-redis 6.2.1 exactly: it THROWS when the
+    // client is no longer open (@redis/client socket.js destroy()), so a double destroy reds here
+    // instead of passing on a forgiving fake.
     const client: CapturedClient = {
       on: vi.fn(),
+      isOpen: true,
+      destroy: vi.fn(() => {
+        if (!client.isOpen) throw new Error('ClientClosedError');
+        client.isOpen = false;
+      }),
       connect: () => Promise.resolve(),
       get: () => Promise.resolve(null),
       set: () => Promise.resolve('OK'),
       del: () => Promise.resolve(1),
       eval: () => Promise.resolve(1),
-      close: () => Promise.resolve(),
+      close: () => Promise.reject(new Error('graceful close() must not be called (SMA-651 D5)')),
     };
     captured.options = options;
     captured.client = client;
@@ -43,10 +51,12 @@ vi.mock('redis', () => ({
 
 const { createRedisSessionStore } = await import('../../src/adapters/redis-store.js');
 
+let store: Awaited<ReturnType<typeof createRedisSessionStore>>;
+
 beforeEach(async () => {
   captured.options = undefined;
   captured.client = undefined;
-  await createRedisSessionStore({ url: 'redis://user:pw@redis.internal:6379', commandTimeoutMs: 1234, keyPrefix: '' });
+  store = await createRedisSessionStore({ url: 'redis://user:pw@redis.internal:6379', commandTimeoutMs: 1234, keyPrefix: '' });
 });
 
 afterEach(() => {
@@ -73,6 +83,41 @@ describe('guard 1: disableOfflineQueue', () => {
   });
 });
 
+// SMA-651 D1. pingInterval keeps a healthy idle socket under the idle timer; socketTimeout is the
+// only thing that tears down a wedged socket.
+describe('SMA-651: the idle timer and the ping', () => {
+  it('sets pingInterval to T and socketTimeout to 2T', () => {
+    expect(captured.options?.['pingInterval']).toBe(1234);
+    const socket = captured.options?.['socket'] as { socketTimeout: number };
+    expect(socket.socketTimeout).toBe(2468);
+  });
+
+  it('keeps pingInterval at or below half of socketTimeout', () => {
+    const socket = captured.options?.['socket'] as { socketTimeout: number };
+    expect(captured.options?.['pingInterval'] as number).toBeLessThanOrEqual(socket.socketTimeout / 2);
+  });
+
+  // The CAPTURED strategy, not the export: this proves the wiring as well as the function.
+  // node-redis's DEFAULT strategy returns false for a SocketTimeoutError, which closes the client
+  // for good (SMA-648). This one must return a number for it.
+  it('the strategy passed to createClient reconnects after a SocketTimeoutError', async () => {
+    const { SocketTimeoutError } = await vi.importActual<typeof import('redis')>('redis');
+    const strategy = (captured.options?.['socket'] as { reconnectStrategy: (retries: number, cause: Error) => unknown }).reconnectStrategy;
+    for (let retries = 0; retries <= 50; retries += 1) {
+      expect(typeof strategy(retries, new SocketTimeoutError(2468))).toBe('number');
+    }
+  });
+});
+
+// SMA-651 D5. close() destroys at once, and only while the client is still open.
+describe('SMA-651: close()', () => {
+  it('destroys once and does not throw when called twice', async () => {
+    await store.close();
+    await store.close();
+    expect(captured.client?.destroy).toHaveBeenCalledTimes(1);
+  });
+});
+
 // GUARD 2. node-redis emits 'error' on the client's EventEmitter for connection-level failures;
 // with no listener that is an unhandled event that crashes the process.
 //
@@ -81,8 +126,9 @@ describe('guard 1: disableOfflineQueue', () => {
 // throw" would stay green if `() => undefined` became `(e) => console.error(e)`, which leaks the
 // DSN on every connection blip and breaks the absolute redaction rule.
 describe('guard 2: the silent error listener', () => {
-  it('registers a listener for the error event', () => {
-    expect(captured.client?.on).toHaveBeenCalledWith('error', expect.any(Function));
+  it('registers exactly one listener for the error event', () => {
+    const errorListeners = captured.client?.on.mock.calls.filter(([event]) => event === 'error') ?? [];
+    expect(errorListeners).toHaveLength(1);
   });
 
   it('the handler neither throws nor reports the DSN anywhere', () => {
