@@ -137,6 +137,8 @@ export async function createAuthRuntime(cfg: ComposedConfig, deps: CreateAuthRun
     clockToleranceSeconds: cfg.PAIGASUS_OIDC_CLOCK_TOLERANCE_SECONDS,
   });
 
+  const logger = deps.logger ?? noopLogger;
+
   const store =
     deps.store ??
     (cfg.PAIGASUS_SESSION_STORE === 'redis'
@@ -145,13 +147,15 @@ export async function createAuthRuntime(cfg: ComposedConfig, deps: CreateAuthRun
           commandTimeoutMs: cfg.PAIGASUS_SESSION_REDIS_TIMEOUT_MS,
           // All zones share ONE store (design doc § 6.7) — no per-zone key prefix to configure.
           keyPrefix: '',
+          // SMA-651 D8: store.operation_timeout goes to the runtime's logger.
+          logger,
         })
       : new MemorySessionStore());
 
   return {
     store,
     resolver: deps.resolver ?? claimsPrincipalResolver,
-    logger: deps.logger ?? noopLogger,
+    logger,
     oidc,
     publicOrigin: cfg.PAIGASUS_PUBLIC_ORIGIN,
     redirectUri,

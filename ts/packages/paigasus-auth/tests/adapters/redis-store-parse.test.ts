@@ -21,7 +21,8 @@ vi.mock('redis', () => ({
     },
     set: () => Promise.resolve('OK'),
     eval: () => Promise.resolve(1),
-    close: () => Promise.resolve(),
+    isOpen: true,
+    destroy: () => undefined,
   }),
 }));
 

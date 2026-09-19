@@ -22,7 +22,8 @@ export type AuthEventName =
   | 'session.refresh.persist_failed'
   | 'session.deleted'
   | 'logout.completed'
-  | 'store.unavailable';
+  | 'store.unavailable'
+  | 'store.operation_timeout';
 
 export type AuthEventFields = Readonly<Record<string, string | number | boolean>>;
 

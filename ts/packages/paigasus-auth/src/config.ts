@@ -48,7 +48,9 @@ export const authEnvShape = {
   PAIGASUS_OIDC_HTTP_TIMEOUT_MS: millis(3500),
   PAIGASUS_SESSION_STORE: z.enum(['redis', 'memory']),
   PAIGASUS_SESSION_REDIS_URL: z.string().optional(),
-  PAIGASUS_SESSION_REDIS_TIMEOUT_MS: millis(1000),
+  // SMA-651 D9: at most 536870911 ms. Node turns a timer delay above 2^31 - 1 ms into 1 ms, and the
+  // session store's largest timer is 4 x this value (its per-operation deadline).
+  PAIGASUS_SESSION_REDIS_TIMEOUT_MS: z.coerce.number().int().positive().max(536_870_911).default(1000),
   PAIGASUS_SESSION_TTL_SECONDS: seconds(28800),
   PAIGASUS_SESSION_ABSOLUTE_TTL_SECONDS: seconds(86400),
   PAIGASUS_SESSION_REFRESH_SKEW_SECONDS: seconds(30),

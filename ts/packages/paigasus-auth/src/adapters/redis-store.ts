@@ -15,12 +15,19 @@
 // docs/superpowers/specs/2026-09-09-sma-506-measurements.md under M2, not against v5-era
 // examples: v6 changed the SET options shape, and KEYS/ARGV both travel through one
 // `{ keys, arguments }` object on `eval`.
+//
+// SMA-651: createRedisSessionStore returns this adapter WRAPPED in withOperationDeadline
+// (./operation-deadline.ts), which bounds every operation at 4 x the command timeout, and it
+// waits at most one command timeout for the first connect.
 import { createClient } from 'redis';
 import type { SetOptions } from 'redis';
 import type { SessionRecord } from '../core/session';
 import { isSessionRecord } from '../core/session';
 import { SessionStoreUnavailable } from '../core/errors';
 import type { LoginTransaction, SessionStore } from '../ports/session-store';
+import type { AuthLogger } from '../ports/logger';
+import { noopLogger } from './noop-logger';
+import { withOperationDeadline } from './operation-deadline';
 
 const SET_CAS = `
 local cur = redis.call('GET', KEYS[1])
@@ -51,15 +58,17 @@ return v`;
 const MAX_RECONNECT_DELAY_MS = 2000;
 
 // The backoff DELAY is bounded; the RETRY COUNT never is, and this function never returns an
-// `Error`. In node-redis, a `reconnectStrategy` that returns an `Error` stops automatic
-// reconnection PERMANENTLY — `RedisSessionStore` holds one client with no reconnect or recreate
-// path, so a bounded retry count would make every later call raise `SessionStoreUnavailable`
-// forever, even long after Redis itself recovers. A brief outage would then kill the store for
-// the rest of the process lifetime.
+// `Error` or `false`, FOR ANY CAUSE. node-redis passes `(retries, cause)`; this ignores `cause`
+// on purpose. A strategy that returns an `Error` or `false` stops reconnection PERMANENTLY, and
+// the store holds one client with no recreate path, so every later call would raise
+// SessionStoreUnavailable for the rest of the process. That includes a SocketTimeoutError: since
+// SMA-651 sets `socketTimeout`, the idle timer's error comes through here, and node-redis's
+// DEFAULT strategy returns `false` for it (the SMA-648 bug). Do not reintroduce a retry cap or a
+// per-cause branch.
 //
-// Capping only the delay still gets fast failure during the outage: `disableOfflineQueue: true`
-// plus the per-command timeout already reject in-flight calls quickly, so the retry cap added
-// nothing but that permanent-death risk. Do not reintroduce a retry cap here.
+// Fast failure during an outage comes from `disableOfflineQueue: true` (a not-ready client refuses
+// a command at once). `commandOptions.timeout` does NOT bound a command in flight: it covers only
+// the queued phase. The in-flight bound is withOperationDeadline (./operation-deadline.ts).
 export function reconnectStrategy(retries: number): number {
   return Math.min(retries * 100, MAX_RECONNECT_DELAY_MS);
 }
@@ -89,8 +98,8 @@ class RedactedDsn {
 // generic type has a different concrete instantiation depending on which options were passed
 // to createClient (e.g. `commandOptions` changes the inferred module/function/script type
 // parameters), so naming "the" return type of createClient and using it for a value created
-// with different options does not typecheck. This adapter only ever calls five methods, so it
-// only needs to agree on those five.
+// with different options does not typecheck. This adapter only ever calls the methods below, so
+// it only needs to agree on those.
 //
 // METHOD SHORTHAND, DELIBERATELY (final fix wave, finding 7). Writing these as method signatures
 // (`get(key: string): ...`) rather than property arrow types (`get: (key: string) => ...`) makes
@@ -99,7 +108,7 @@ class RedactedDsn {
 // supertype of this interface's, where a property-typed field would only accept a subtype. This
 // is an accepted trade-off, not an oversight: the alternative (property syntax) is measurably
 // stricter but repeatedly fights the real client's own generic, overload-heavy method signatures
-// for no bug this adapter has ever hit — the five methods above are simple enough (string/number
+// for no bug this adapter has ever hit — the methods below are simple enough (string/number
 // primitives, no covariant return position that bivariance could silently mismatch) that the
 // soundness hole costs nothing in practice here.
 interface RedisClient {
@@ -107,7 +116,8 @@ interface RedisClient {
   set(key: string, value: string, options?: SetOptions): Promise<string | null>;
   del(key: string): Promise<number>;
   eval(script: string, options: { keys: string[]; arguments: string[] }): Promise<unknown>;
-  close(): Promise<void>;
+  readonly isOpen: boolean;
+  destroy(): void;
 }
 
 function sessKey(keyPrefix: string, sid: string): string {
@@ -221,9 +231,14 @@ class RedisSessionStore implements SessionStore {
     });
   }
 
+  // DESTROYS AT ONCE (SMA-651 D5). node-redis's graceful close() waits for pending commands and
+  // checks only on a `data` event, so against a Redis that never replies it never resolves. No
+  // production code closes the store, so a graceful close has no use here. The `isOpen` guard is
+  // required: destroy() THROWS ClientClosedError on a client that is no longer open.
   close(): Promise<void> {
-    return this.#guarded(async () => {
-      await this.#client.close();
+    return this.#guarded(() => {
+      if (this.#client.isOpen) this.#client.destroy();
+      return Promise.resolve();
     });
   }
 }
@@ -232,6 +247,39 @@ export interface CreateRedisSessionStoreOptions {
   url: string;
   commandTimeoutMs: number;
   keyPrefix: string;
+  /** Receives `store.operation_timeout`, once per circuit open. Defaults to the no-op logger. */
+  logger?: AuthLogger;
+}
+
+/**
+ * Waits for the first connect, but never longer than one command timeout (SMA-651 D6). node-redis's
+ * connect() keeps retrying while the reconnect strategy returns a number, and this store's always
+ * does, so an unreachable Redis would otherwise hold the first request, and every request that
+ * awaits the same runtime, without end. The connect keeps running in the background: until
+ * `ready`, every command fails at once (disableOfflineQueue), and the store works when Redis does.
+ * The `'failed'` result is defensive. This store's reconnect strategy always returns a number, so
+ * an unreachable Redis takes the `'waiting'` path instead. `'failed'` happens only when something
+ * closes the client during the connect.
+ */
+async function connectWithin(client: { connect(): Promise<unknown> }, timeoutMs: number): Promise<'connected' | 'failed' | 'waiting'> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  // Both handlers are attached HERE, so a later rejection of the background connect is never an
+  // unhandled rejection.
+  const connected = client.connect().then(
+    () => 'connected' as const,
+    () => 'failed' as const,
+  );
+  const waited = new Promise<'waiting'>((resolve) => {
+    timer = setTimeout(() => {
+      resolve('waiting');
+    }, timeoutMs);
+    timer.unref();
+  });
+  try {
+    return await Promise.race([connected, waited]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 export async function createRedisSessionStore(opts: CreateRedisSessionStoreOptions): Promise<SessionStore> {
@@ -243,8 +291,14 @@ export async function createRedisSessionStore(opts: CreateRedisSessionStoreOptio
     // rather than erroring. See § 7.2 of the design doc.
     disableOfflineQueue: true,
     commandOptions: { timeout: opts.commandTimeoutMs },
+    // SMA-651 D1: a PING every T keeps a healthy idle socket under the idle timer. The Redis user
+    // needs `+ping`, or every PING gets -NOPERM (still socket activity, so it is silent).
+    pingInterval: opts.commandTimeoutMs,
     socket: {
       connectTimeout: opts.commandTimeoutMs,
+      // SMA-651 D1: an IDLE timer, not a reply deadline. It is the only thing that tears down a
+      // wedged socket; withOperationDeadline's circuit goes silent so that it can fire.
+      socketTimeout: opts.commandTimeoutMs * 2,
       reconnectStrategy,
     },
   });
@@ -253,14 +307,14 @@ export async function createRedisSessionStore(opts: CreateRedisSessionStoreOptio
   // listener that is an unhandled event that crashes the process. This handler is intentionally
   // silent: every store method already converts a failure into SessionStoreUnavailable at the
   // call site, and this listener must never log the node-redis error object either, since it
-  // embeds the DSN.
+  // embeds the DSN. It stays the ONLY error listener (tests/adapters/redis-client-options.test.ts).
   client.on('error', () => undefined);
 
-  try {
-    await client.connect();
-  } catch {
+  if ((await connectWithin(client, opts.commandTimeoutMs)) === 'failed') {
     throw new SessionStoreUnavailable(`session store unavailable (${dsn.toString()})`);
   }
 
-  return new RedisSessionStore(client, opts.keyPrefix, dsn);
+  // The decorator wraps OUTSIDE #guarded, so a SessionStoreTimeout is never rewrapped into a plain
+  // SessionStoreUnavailable by #guarded's catch-all (SMA-651 D4).
+  return withOperationDeadline(new RedisSessionStore(client, opts.keyPrefix, dsn), client, opts.commandTimeoutMs, opts.logger ?? noopLogger);
 }
