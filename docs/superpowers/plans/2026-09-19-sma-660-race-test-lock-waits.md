@@ -367,13 +367,21 @@ Expected: PASS. A failure in phase one of case 3 means the setup is wrong (the r
 
 - [ ] **Step 3: Mutation V4 — the prefix must be honoured**
 
-In `tests/support/race.rs`, insert as the first statement of `wait_until_blocked_by`:
+**Every mutation in this task must COMPILE.** One that dies at `rustc` proves only that this workspace denies warnings; it does not prove the guard test catches the defect, which is the claim the pull request makes. So do not shadow the parameter and do not add an early `return` — both leave a parameter unused or code unreachable, and `-D warnings` rejects them at rc 101. (Measured: the first two recipes written here did exactly that.)
+
+In `tests/support/race.rs`, inside `wait_until_blocked_by`, bind a literal into the statement instead. Two marked edits:
 
 ```rust
-    let query_prefix = "%"; // MUTATION SMA-660 — delete this line
+    let _ = query_prefix; // MUTATION SMA-660 — delete this line
 ```
 
-Run the command from Step 2. **Expected: FAIL**, on case 3's second assertion (`a prefix that matches no statement must reach the deadline`). Record the failure line in the measurements file. Then delete the marked line and re-run to confirm PASS.
+and, on the `query_one_raw` line, replace `[blocker_pid.into(), query_prefix.into()]` with:
+
+```rust
+[blocker_pid.into(), "%".into()] // MUTATION SMA-660 — restore to: [blocker_pid.into(), query_prefix.into()]
+```
+
+Run the command from Step 2. **Expected: FAIL, case 3 alone**, at its phase-two `expect_err` — the wrong prefix `delete%` now matches the blocked racer's INSERT because the predicate compares against `%`. Cases 1, 2 and 4 must still pass, since `pg_blocking_pids` is untouched; if any of them fails too, the cases are less independent than this brief claims, so record that. Then restore both lines and re-run to confirm PASS.
 
 - [ ] **Step 4: Mutation V6 — the blocker pid must be honoured**
 
@@ -387,13 +395,13 @@ Run the command from Step 2. **Expected: FAIL**, on case 4 (`a pid that blocks n
 
 - [ ] **Step 5: Mutation V3 — the wait must be load-bearing at all**
 
-In `tests/support/race.rs`, insert as the first statement of `wait_until_blocked_by`:
+Again, it must compile. In `tests/support/race.rs`, make the first check unconditionally true instead of returning early — `blocked` is a `count(*)` and can never be negative, so the wait returns `Ok` on its first poll while still running the observer query:
 
 ```rust
-    return Ok(()); // MUTATION SMA-660 — delete this line
+        if blocked >= 0 { // MUTATION SMA-660 — restore to: if blocked > 0 {
 ```
 
-Run the command from Step 2. **Expected: FAIL** — cases 1, 2, 3 and 4 all assert an `Err`, so every one of them fails. Record the output. Delete the marked line and re-run to confirm PASS.
+Run the command from Step 2. **Expected: FAIL at case 1.** All four cases assert an `Err`, so all four are broken by this mutation — but a `#[tokio::test]` stops at its first panic, so one run can only ever show the first. Case 1 failing IS the evidence; do not split the test to observe the other three, which would quadruple this file's container starts to prove something the first failure already establishes. Record the output, restore the line, and re-run to confirm PASS.
 
 - [ ] **Step 6: Lint, format and commit**
 
@@ -936,8 +944,8 @@ State for each whether it agrees with the spec's F3 table. If one does not, say 
 
 | # | Mutation | Expected | Observed |
 | -- | -- | -- | -- |
-| V3 | `wait_until_blocked_by` returns `Ok` at once | guard cases 1-4 fail | … |
-| V4 | `query_prefix` neutralised to `%` | guard case 3 fails | … |
+| V3 | the wait's first check made unconditionally true | guard fails at case 1 (a test stops at its first panic) | … |
+| V4 | `query_prefix` neutralised to `%` at the bind site | guard case 3 alone fails | … |
 | V5 | `pg_policies.rs` bumps unconditionally | absorb test fails, and NOTHING else | … |
 | V6 | `pg_blocking_pids` term neutralised | guard case 4 fails | … |
 | V7 S1 | `FOR UPDATE` deleted from `DETACH_LOCK_SQL` | S1 fails AT the wait | … |
