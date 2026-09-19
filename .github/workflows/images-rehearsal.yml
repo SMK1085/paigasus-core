@@ -4,7 +4,8 @@ name: images-rehearsal
 # SMA-658 PR 1 (spec § 8). Runs the signing and attestation steps of the future release path FOR
 # REAL, against a scratch GHCR package, so they have run once before the first real release:
 # cosign keyless, attest-build-provenance, attest-sbom (per-platform subject), cosign verify and
-# gh attestation verify. It publishes no release image and reads no secret.
+# gh attestation verify. It publishes no release image. It reads one probe secret, never a real
+# release credential, to prove an environment secret reaches a main-only, no-reviewer job (M9).
 #
 # workflow_dispatch ONLY. A pull_request trigger would let a PR mint an OIDC token
 # (repo:workflow-credentials bans that shape), and both jobs refuse any ref but main.
@@ -35,7 +36,7 @@ jobs:
           - arm64
     env:
       ARCH: ${{ matrix.arch }}
-      # SMA-609: every captured shim output must set this (Global Constraint `:36`).
+      # SMA-609: every captured shim output must set this (CLAUDE.md).
       PROTO_REPORTER: text
     steps:
       - name: Refuse any ref but main
@@ -88,6 +89,11 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # The `images-rehearsal` environment, its main-only deployment rule and no reviewers, and
+    # the REHEARSAL_ENV_PROBE secret are a MANUAL setup step (runbook) in the repo settings, not
+    # something this file creates. Spec § 9 M9 needs a job with that exact shape to confirm an
+    # environment secret reaches it before the same pattern is trusted for a real release.
+    environment: images-rehearsal
     permissions:
       contents: read
       packages: write       # push to ghcr.io/smk1085/paigasus-rehearsal
@@ -100,6 +106,20 @@ jobs:
             echo "::error::images-rehearsal runs only from main (got ${GITHUB_REF})." >&2
             exit 1
           fi
+
+      # Spec § 9 M9: the `images-rehearsal` environment carries a main-only deployment rule and
+      # no reviewers. This confirms an environment secret actually reaches a job shaped like that,
+      # before a real release trusts the same pattern. Read through `env:`, never interpolated
+      # into the script, and never printed.
+      - name: Confirm the environment secret reaches this job (spec M9)
+        env:
+          REHEARSAL_ENV_PROBE: ${{ secrets.REHEARSAL_ENV_PROBE }}
+        run: |
+          if [ -z "$REHEARSAL_ENV_PROBE" ]; then
+            echo "::error::REHEARSAL_ENV_PROBE is empty or unset; the images-rehearsal environment secret did not reach this job." >&2
+            exit 1
+          fi
+          echo "M9 environment secret reached the job (length ${#REHEARSAL_ENV_PROBE})"
 
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -203,11 +223,13 @@ jobs:
             "${IMAGE}@${INDEX}"
           gh attestation verify "oci://${IMAGE}@${INDEX}" \
             --repo SMK1085/paigasus-core \
-            --signer-workflow SMK1085/paigasus-core/.github/workflows/images-rehearsal.yml
+            --signer-workflow SMK1085/paigasus-core/.github/workflows/images-rehearsal.yml \
+            --source-ref refs/heads/main
           for d in "$DIGEST_AMD64" "$DIGEST_ARM64"; do
             gh attestation verify "oci://${IMAGE}@${d}" \
               --repo SMK1085/paigasus-core \
               --signer-workflow SMK1085/paigasus-core/.github/workflows/images-rehearsal.yml \
-              --predicate-type https://spdx.dev/Document/v2.3
+              --predicate-type https://spdx.dev/Document/v2.3 \
+              --source-ref refs/heads/main
           done
           echo "REHEARSAL OK: ${IMAGE}@${INDEX}"
