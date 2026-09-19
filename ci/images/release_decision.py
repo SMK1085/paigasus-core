@@ -174,7 +174,7 @@ def oci_digests(path: Path) -> dict[str, str]:
     try:
         with tarfile.open(path) as tar:
             return oci_digests_from(tar)
-    except (OSError, tarfile.TarError, json.JSONDecodeError) as exc:
+    except (OSError, tarfile.TarError, json.JSONDecodeError, UnicodeDecodeError) as exc:
         raise UsageError(f"cannot read {path}: {exc}") from exc
 
 
@@ -353,7 +353,7 @@ def _emit(result: dict[str, str]) -> None:
 def _read_text(path: Path) -> str:
     try:
         return path.read_text(encoding="utf-8")
-    except OSError as exc:
+    except (OSError, UnicodeDecodeError) as exc:
         raise UsageError(f"cannot read {path}: {exc}") from exc
 
 
