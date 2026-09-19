@@ -255,10 +255,18 @@ describe('the token (§ 5.4)', () => {
     await waitFor(() => {
       expect(screen.getByTestId('token-value').textContent).toBe(TOKEN);
     });
+    // The token panel commits at ordinary priority, but the section's own `busy` flag (rule 5)
+    // settles one or more ticks later, through the issue transition's own pending state (it
+    // resolves through a chained thenable that a React scheduler callback applies, not through
+    // the same render as the token). Wait for `busy` to settle too — observable here as Revoke
+    // going enabled, since Revoke reads only `busy`, never `tokenVisible` — before asserting on
+    // it, or a slow commit still reads as busy (SMA-636 fix round 3).
+    await waitFor(() => {
+      expect(within(panel()).getByRole<HTMLButtonElement>('button', { name: 'Revoke' }).disabled).toBe(false);
+    });
 
     expect(within(panel()).getByRole<HTMLButtonElement>('button', { name: 'Issue key' }).disabled).toBe(true);
     expect(within(panel()).getByText('Close the token panel before you issue another key.')).toBeDefined();
-    expect(within(panel()).getByRole<HTMLButtonElement>('button', { name: 'Revoke' }).disabled).toBe(false);
     expect(within(panel()).getByRole<HTMLButtonElement>('button', { name: 'Archive' }).disabled).toBe(false);
   });
 
@@ -307,6 +315,14 @@ describe('the token (§ 5.4)', () => {
     await user.click(within(panel()).getByRole('button', { name: 'Issue key' }));
     await waitFor(() => {
       expect(screen.getByTestId('token-value').textContent).toBe(TOKEN);
+    });
+    // Wait for the section to go idle BEFORE dispatching pagehide. `busy` (rule 5) settles a tick
+    // or more after the token panel does (see the test above), through the issue transition's own
+    // pending state, not through this test's assertion. If `busy` is still true when pagehide
+    // fires, the synchronous check below reads a leftover unrelated `true` that has nothing to do
+    // with the flushSync fix under test (SMA-636 fix round 3).
+    await waitFor(() => {
+      expect(within(panel()).getByRole<HTMLButtonElement>('button', { name: 'Revoke' }).disabled).toBe(false);
     });
     window.dispatchEvent(new PageTransitionEvent('pagehide'));
     expect(within(panel()).getByRole<HTMLButtonElement>('button', { name: 'Issue key' }).disabled).toBe(false);
