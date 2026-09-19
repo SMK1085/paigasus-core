@@ -11,12 +11,30 @@
 # usage: ci/images/run.sh build [iam|gateway]     # [iam|gateway] scopes the build
 #        ci/images/run.sh smoke                    # always smokes BOTH images; takes no service arg
 #        ci/images/run.sh all                       # build both + smoke; takes no service arg
+#        ci/images/run.sh build-oci <iam|gateway> <outdir>   # SMA-658: OCI archive, no --load
+#        ci/images/run.sh load-oci <archive> <image-name>     # load + identity check (prints M3)
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"
 REGISTRY="${PAIGASUS_IMAGE_REGISTRY:-ghcr.io/smk1085}"
 REVISION="$(git -C "$ROOT" rev-parse HEAD)"
+
+# proto prints an NDJSON preamble on STDOUT inside an agent session, and that poisons every
+# `$(...)` capture of a shimmed tool such as `uv` (CLAUDE.md, SMA-609). Exported once here so every
+# capture below inherits it.
+export PROTO_REPORTER=text
+
+# The release decisions live in release_decision.py so a self-test can prove them (SMA-658).
+# Standard library only: no project, no lock, any Python >= 3.12 that uv can find.
+decide() {
+  uv run --no-project --python '>=3.12' python3 "$HERE/release_decision.py" "$@"
+}
+
+# kv "<key=value lines>" <key> — the value of one key, or an empty string.
+kv() {
+  printf '%s\n' "$1" | sed -n "s/^$2=//p"
+}
 
 # Digest-pinned smoke-test dependencies. This branch's whole design argument is that a floating
 # tag is the least-pinned input in a repo that pins everything else, so the smoke path pins its
@@ -130,6 +148,29 @@ assert_pins() {
   echo "  pins OK: rustc ${channel}, bookworm builder, ubuntu ${ubuntu_from} == chisel release, no baked service config, start-period ${start_period}s >= 30s"
 }
 
+# Writes the chisel package list that a build log names into $2, and fails when it is empty
+# (SMA-500 fix-round 1: an empty manifest answers nothing when someone asks which libc shipped).
+extract_chisel_manifest() {
+  local build_log="$1" out="$2"
+  grep -oE 'Fetching pool/[^ ]+\.deb' "$build_log" | sort -u > "$out" || true
+  if [ ! -s "$out" ]; then
+    echo "::error::$(basename "$out") is empty; the package-fetch log format may have changed — update the grep pattern in ci/images/run.sh." >&2
+    return 1
+  fi
+}
+
+# The version line of a service crate's own Cargo.toml. Both services carry a literal version
+# (not `version.workspace = true`), which is what the image's version label must equal.
+version_for() {
+  local crate="$1" v
+  v="$(sed -n 's/^version = "\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)"$/\1/p' "$ROOT/rs/crates/services/${crate}/Cargo.toml" | sed -n 1p)"
+  if [ -z "$v" ]; then
+    echo "::error::no literal version line in rs/crates/services/${crate}/Cargo.toml" >&2
+    return 1
+  fi
+  echo "$v"
+}
+
 build_one() {
   local service="$1" crate tag build_log
   crate="$(crate_for "$service")"
@@ -171,16 +212,67 @@ build_one() {
     --label "org.opencontainers.image.licenses=Apache-2.0" \
     -t "$tag" -t "${crate}:dev" \
     "$ROOT/rs" 2>&1 | tee "$build_log"
-  grep -oE 'Fetching pool/[^ ]+\.deb' "$build_log" | sort -u > "$ROOT/chisel-manifest-${service}.txt" || true
-  # Defense in depth on top of --no-cache-filter=rootfs above: if the manifest is EVER empty
-  # (a future chisel version changing its log wording, buildkit changing --progress=plain
-  # formatting, etc.), fail loudly instead of shipping a 0-byte file that silently answers
-  # nothing when someone asks "which libc did this image ship?" (SMA-500 fix-round 1).
-  if [ ! -s "$ROOT/chisel-manifest-${service}.txt" ]; then
-    echo "::error::chisel-manifest-${service}.txt is empty; the package-fetch log format may have changed — update the grep pattern in ci/images/run.sh." >&2
+  extract_chisel_manifest "$build_log" "$ROOT/chisel-manifest-${service}.txt"
+  echo "  built ${tag}"
+}
+
+# SMA-658: the release build. The same image as build_one, exported as an OCI ARCHIVE instead of
+# being loaded, so its bytes (and so its digest) are fixed before anything is pushed.
+# --provenance=false --sbom=false: buildx would otherwise wrap the image in an index with its own
+# attestation manifests; the release path attests through GitHub instead (spec D4).
+# name=<crate>:dev: `docker load` of the archive then restores that name for load_oci and smoke.
+build_oci() {
+  local service="$1" outdir="$2" crate version arch archive build_log
+  crate="$(crate_for "$service")"
+  version="$(version_for "$crate")"
+  arch="$(docker version --format '{{.Server.Arch}}')"
+  mkdir -p "$outdir"
+  archive="${outdir}/${crate}-${arch}.oci.tar"
+  build_log="$(mktemp "${TMPDIR:-/tmp}/paigasus-build-${service}.XXXXXX")"
+  trap 'rm -f "$build_log"' RETURN
+  echo "== build-oci ${crate} ${version} (${arch}) =="
+  docker build \
+    --progress=plain \
+    --no-cache-filter=rootfs \
+    --provenance=false --sbom=false \
+    --output "type=oci,dest=${archive},name=${crate}:dev" \
+    -f "$ROOT/rs/Dockerfile" \
+    --build-arg "BIN=${crate}" \
+    --label "org.opencontainers.image.title=${crate}" \
+    --label "org.opencontainers.image.description=Paigasus ${service} service" \
+    --label "org.opencontainers.image.source=https://github.com/SMK1085/paigasus-core" \
+    --label "org.opencontainers.image.revision=${REVISION}" \
+    --label "org.opencontainers.image.version=${version}" \
+    --label "org.opencontainers.image.licenses=Apache-2.0" \
+    "$ROOT/rs" 2>&1 | tee "$build_log"
+  extract_chisel_manifest "$build_log" "$ROOT/chisel-manifest-${service}-${arch}.txt"
+  echo "  built ${archive}"
+}
+
+# SMA-658 spec § 4.2: the image the smoke suite tests must be the image in the archive. What
+# `docker load` reports as the image ID depends on the daemon's image store (measured M3, local
+# Docker 29.8): the containerd store gives the MANIFEST digest, the classic store gives the CONFIG
+# digest. So the check accepts the one value that matches this daemon's store, and prints every
+# value once per runner so CI records M3 for each runner label.
+load_oci() {
+  local archive="$1" name="$2" digests manifest config store driver loaded size expected
+  digests="$(decide oci-digests "$archive")"
+  manifest="$(kv "$digests" manifest)"
+  config="$(kv "$digests" config)"
+  docker load -i "$archive" >/dev/null
+  loaded="$(docker image inspect --format '{{.Id}}' "$name")"
+  size="$(docker image inspect --format '{{.Size}}' "$name")"
+  driver="$(docker info --format '{{json .DriverStatus}}')"
+  store="classic"
+  case "$driver" in *io.containerd.snapshotter*) store="containerd" ;; esac
+  expected="$config"
+  [ "$store" = "containerd" ] && expected="$manifest"
+  echo "M3 arch=$(docker version --format '{{.Server.Arch}}') docker=$(docker version --format '{{.Server.Version}}') store=${store} loaded_id=${loaded} manifest=${manifest} config=${config} size=${size}"
+  if [ "$loaded" != "$expected" ]; then
+    echo "::error::${name} loaded as ${loaded}, but the ${store} store should report ${expected}: the loaded image is not the archive's image." >&2
     return 1
   fi
-  echo "  built ${tag}"
+  echo "  ${name} is the archive's image (${store} store)"
 }
 
 # Every container/network name carries the same $$ suffix so two concurrent
@@ -464,6 +556,21 @@ case "$cmd" in
     assert_pins
     for s in "${services[@]}"; do build_one "$s"; done
     smoke
+    ;;
+  build-oci)
+    if [ -z "$target" ] || [ -z "${3:-}" ]; then
+      echo "usage: ci/images/run.sh build-oci <iam|gateway> <outdir>" >&2
+      exit 1
+    fi
+    assert_pins
+    build_oci "$target" "$3"
+    ;;
+  load-oci)
+    if [ -z "$target" ] || [ -z "${3:-}" ]; then
+      echo "usage: ci/images/run.sh load-oci <archive> <image-name>" >&2
+      exit 1
+    fi
+    load_oci "$target" "$3"
     ;;
   *) echo "unknown command: $cmd" >&2; exit 1 ;;
 esac
