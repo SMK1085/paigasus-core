@@ -39,7 +39,7 @@ is present and well-formed.
 | `PAIGASUS_OIDC_HTTP_TIMEOUT_MS`          | no                                       | `3500`                                                                          | A positive integer. Must satisfy `2 * PAIGASUS_OIDC_HTTP_TIMEOUT_MS < PAIGASUS_SESSION_LOCK_TTL_MS` — see that variable.                                                                                                                                                                                                                                            |
 | `PAIGASUS_SESSION_STORE`                 | yes                                      | —                                                                               | `redis` or `memory`. There is no third value and no presence-based fallback — a typo fails startup rather than silently downgrading to `memory`.                                                                                                                                                                                                                    |
 | `PAIGASUS_SESSION_REDIS_URL`             | when `PAIGASUS_SESSION_STORE` is `redis` | —                                                                               | A node-redis connection string, e.g. `redis://[[user][:password]@]host[:port][/db-number]`. Required at startup when the store is `redis`; the value is never logged (see "Redaction" below).                                                                                                                                                                       |
-| `PAIGASUS_SESSION_REDIS_TIMEOUT_MS`      | no                                       | `1000`                                                                          | A positive integer.                                                                                                                                                                                                                                                                                                                                                 |
+| `PAIGASUS_SESSION_REDIS_TIMEOUT_MS`      | no                                       | `1000`                                                                          | A positive integer. At most 536870911 ms.                                                                                                                                                                                                                                                                                                                           |
 | `PAIGASUS_SESSION_TTL_SECONDS`           | no                                       | `28800` (8 hours)                                                               | A positive integer. Idle timeout for a session record.                                                                                                                                                                                                                                                                                                              |
 | `PAIGASUS_SESSION_ABSOLUTE_TTL_SECONDS`  | no                                       | `86400` (24 hours)                                                              | A positive integer. Hard ceiling on a session's lifetime regardless of activity.                                                                                                                                                                                                                                                                                    |
 | `PAIGASUS_SESSION_REFRESH_SKEW_SECONDS`  | no                                       | `30`                                                                            | A positive integer. How early, before actual access-token expiry, a refresh is attempted.                                                                                                                                                                                                                                                                           |
@@ -92,6 +92,43 @@ Because a silently-downgraded production deployment is worse than a loud failure
 **`createAuthRuntime` refuses to start with `PAIGASUS_SESSION_STORE=memory` when `PAIGASUS_ZONES`
 declares more than one zone.** Use `redis` for anything beyond a single-process
 development or test deployment.
+
+### When Redis stops answering (SMA-651)
+
+T below is `PAIGASUS_SESSION_REDIS_TIMEOUT_MS` (default 1000 ms, at most 536870911 ms, no minimum).
+
+- **Every store operation except `close()` has a deadline of 4T.** node-redis's own command
+  timeout covers only a command that waits in its queue. A Redis that accepts a command and never
+  replies is bounded by this deadline alone. `close()` has no deadline: it destroys the connection
+  at once.
+- **The first expiry opens a circuit for 4T.** While it is open, every store call fails at once and
+  the store writes nothing to Redis. That silence lets the client's idle timer (2T) tear down the
+  wedged connection and reconnect. The circuit closes when the client reconnects, or when the 4T
+  cooldown ends.
+- **One `store.operation_timeout` event** (`{ operation, deadlineMs }`) is logged each time the
+  circuit opens. `getSession()` still logs `store.unavailable` for each failed read.
+- **The first connect waits at most T.** If Redis is unreachable at start-up, the store is still
+  created, every call fails at once until Redis answers, and the store then works with no restart.
+- **The client sends one PING every T** to keep a healthy idle connection open. A console process
+  has one such client per zone for sessions, plus one for the descriptor cache.
+
+**A failed store call can sign the user out.** `requireSession()` treats a store failure as "no
+session" and redirects to `/auth/login`. When `/auth/login` runs against a store that answers, it
+deletes the presented session and clears the cookie. While the circuit is open, that delete fails
+too, and the session record stays in Redis until its TTL ends. So a Redis stall longer than 4T (a
+fork stall during BGSAVE, an fsync stall, a failover) sends every user who loads a page in that
+window to the login page. A user who then signs in again, or reloads `/auth/login` after Redis
+recovers, loses the old session. Raise T if your Redis can stall longer than that. Size T against the worst event-loop lag of the Node process too: a stall longer
+than 4T in the process itself fires the deadlines before the replies are read.
+
+**A logout can fail during a wedge.** The logout route reads the session before it deletes it. If
+the read fails, the route never sends the delete. The session then stays live until its TTL ends.
+SMA-653 tracks the fix.
+
+**Redis ACL.** The store's Redis user needs `+get`, `+set`, `+del`, `+eval` and `+ping`.
+`+client|setinfo` is optional (node-redis sends CLIENT SETINFO at connect and ignores the error).
+Without `+ping`, every PING gets `-NOPERM`; the connection stays open, and nothing reports the
+missing permission.
 
 ### Redaction
 

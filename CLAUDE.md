@@ -1057,16 +1057,19 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   not the guard itself.
 - **node-redis `socket.socketTimeout` is an IDLE timer, not a reply deadline** (read from
   `@redis/client` 6.2.1, SMA-648). Any read OR write on the socket resets it, so it fires on a
-  quiet, healthy connection, and it bounds a hung command only while the socket is otherwise
-  silent — under steady traffic a Redis that accepts commands and never replies is still unbounded
-  (SMA-650 added a per-operation deadline in `@paigasus/console-core`; `@paigasus/auth` still has
-  none — SMA-651). node-redis's DEFAULT reconnect strategy returns `false` for a
-  `SocketTimeoutError`, so the first idle gap closed the console descriptor cache's client for the
-  life of the process (`The client is closed`, nav degraded). A client that sets `socketTimeout`
-  therefore needs `pingInterval` (at most half of `socketTimeout`) to keep an idle socket alive, and
-  a `socket.reconnectStrategy` that returns a delay for EVERY cause. `createRedisDescriptorCache`
-  asserts all six options; the Redis user needs `+ping`. `paigasus-console-core-ts:test-e2e` is the
-  Docker-backed control, with no skip hatch, so a console-core source edit now needs Docker.
+  quiet, healthy connection, and it bounds a hung command only while the socket is otherwise silent
+  — under steady traffic a Redis that accepts commands and never replies is still unbounded (SMA-650
+  added a per-operation deadline in `@paigasus/console-core`. SMA-651 added the same shape to
+  `@paigasus/auth`'s session store, as the decorator in `src/adapters/operation-deadline.ts`. Its
+  `close()` destroys the connection at once. node-redis's graceful `close()` waits for a reply that
+  never comes, so the decorator does not use it). node-redis's DEFAULT reconnect strategy returns
+  `false` for a `SocketTimeoutError`, so the first idle gap closed the console descriptor cache's
+  client for the life of the process (`The client is closed`, nav degraded). A client that sets
+  `socketTimeout` therefore needs `pingInterval` (at most half of `socketTimeout`) to keep an idle
+  socket alive, and a `socket.reconnectStrategy` that returns a delay for EVERY cause.
+  `createRedisDescriptorCache` asserts all six options; the Redis user needs `+ping`.
+  `paigasus-console-core-ts:test-e2e` is the Docker-backed control, with no skip hatch, so a
+  console-core source edit now needs Docker.
 - **`forbidden()` needs `experimental.authInterrupts`, and a React `cache()` value does not reach
   `forbidden.tsx`** (MEASURED on Next 16.3.4, SMA-511). Without the flag, `forbidden()` throws
   instead of rendering the 403 boundary. The iam-console sets it through
