@@ -211,3 +211,26 @@ If V4 finds a write, the spec returns to design before implementation continues.
   depend on the build. It can happen with two concurrent local sessions in one checkout.
 - R6. The BUILD_ID and size checks prove which build was staged and that its files are present.
   They do not prove that the content of each file is identical.
+
+## 10. Measurements
+
+### 10.1 Baseline (base commit 8a185402, 2026-09-19)
+
+Command: `moon run iam-console-ts:test-e2e gateway-console-ts:test-e2e --force`, three runs.
+
+| Run | rc | ENOTEMPTY | `React never hydrated` | Failed task |
+|---|---|---|---|---|
+| 1 | 0 | 0 | 0 | none |
+| 2 | 1 | 1 | 0 | gateway-console-ts:test-e2e |
+| 3 | 0 | 0 | 0 | none |
+
+The race reproduced once in three runs. In run 2, `gateway-console-ts:test-e2e` failed at
+`global-setup.ts:23` with `Error: ENOTEMPTY, Directory not empty` on
+`ts/apps/iam-console/.next/standalone/apps/iam-console/.next/static`, while
+`iam-console-ts:test-e2e` was running its own setup at the same time. This matches the race this
+spec describes: both tiers stage into the shared standalone tree without serialization.
+
+The `failed` column in the raw `grep -cE 'test-e2e.*(failed|FAIL)'` count was 1 in every run,
+including the two passing ones. In runs 1 and 3, the match was a passing test's own title
+(`R14: a failed grant leaves the account unable to call models, …`), not a failure. Only run 2
+carried a true failure, reported by Moon as `Task gateway-console-ts:test-e2e failed to run.`
