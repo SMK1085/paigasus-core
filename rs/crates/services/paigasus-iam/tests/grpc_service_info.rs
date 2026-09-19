@@ -105,7 +105,10 @@ async fn get_service_info_reports_the_enabled_capabilities() {
     assert_eq!(info.service, "iam");
     assert!(!info.version.is_empty(), "version must be a non-empty string");
     let caps: HashSet<String> = info.capabilities.into_iter().collect();
-    assert_eq!(caps, HashSet::from(["iam.authz.cedar".to_string(), "iam.apikeys".to_string(), "iam.audit".to_string()]));
+    assert_eq!(
+        caps,
+        HashSet::from(["iam.authz.cedar".to_string(), "iam.apikeys".to_string(), "iam.audit".to_string(), "iam.deadletters".to_string()])
+    );
 
     server.abort();
 }
@@ -182,7 +185,10 @@ async fn the_grpc_and_http_transports_describe_the_same_build() {
             .expect("service_info must always be populated, never None");
         let grpc_caps: HashSet<String> = grpc_info.capabilities.into_iter().collect();
         assert!(!grpc_caps.contains("iam.audit"), "the disabled key must be absent from gRPC: {grpc_caps:?}");
-        assert!(grpc_caps.contains("iam.authz.cedar") && grpc_caps.contains("iam.apikeys"), "siblings must survive: {grpc_caps:?}");
+        assert!(
+            grpc_caps.contains("iam.authz.cedar") && grpc_caps.contains("iam.apikeys") && grpc_caps.contains("iam.deadletters"),
+            "siblings must survive: {grpc_caps:?}"
+        );
 
         let http_caps: HashSet<String> = http_body["capabilities"]
             .as_array()

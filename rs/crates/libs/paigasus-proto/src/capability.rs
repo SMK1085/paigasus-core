@@ -66,7 +66,13 @@ mod tests {
     /// Every registered capability. Deliberately explicit: prost generates no
     /// variant iterator. `adding_a_capability_forces_updating_these_tests`
     /// below is what stops this list going stale.
-    const ALL: [Capability; 5] = [Capability::IamAuthzCedar, Capability::IamApikeys, Capability::IamAudit, Capability::GatewayChatStream, Capability::IamDeadletters];
+    const ALL: [Capability; 5] = [
+        Capability::IamAuthzCedar,
+        Capability::IamApikeys,
+        Capability::IamAudit,
+        Capability::GatewayChatStream,
+        Capability::IamDeadletters,
+    ];
 
     #[test]
     fn every_capability_round_trips() {
