@@ -1187,7 +1187,7 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   does not probe and still hangs under Homebrew bash on such a host. Remove the probe only per
   spec decision D9 in
   `docs/superpowers/specs/2026-09-19-sma-612-actionlint-pipe-capacity-design.md`. A `.prototools`
-  actionlint version bump reds the gate on purpose, until then. Other gates that use here-strings
+  actionlint version bump reds the gate on purpose until then (SMA-654). Other gates that use here-strings
   (for example `repo:affected-smoke`) still hang under bash 5.x on such a host. This entry does
   not fix them.
 - **`ts/apps/gateway-console`** (SMA-512 PR 3) is the second console zone: a Next.js 16 App Router

@@ -1,7 +1,7 @@
 # SMA-612 — `repo:actionlint` hangs on macOS: fail loud on a small pipe
 
 - **Linear:** [SMA-612](https://linear.app/smaschek/issue/SMA-612)
-- **Status:** design, revised after the adversarial challenge, awaiting approval
+- **Status:** approved by Sven on 2026-09-19, after the adversarial challenge. Follow-up: SMA-654.
 - **Approach chosen by Sven:** "Fail loud + bump later" (option 1 of 4, 2026-09-19).
 
 ## 1. Problem
