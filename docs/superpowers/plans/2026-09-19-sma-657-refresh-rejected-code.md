@@ -49,7 +49,7 @@
 
 - [ ] **Step 1: Write the failing test**
 
-Append this block to `ts/packages/paigasus-auth/tests/core/errors.test.ts`, after the existing `describe('isSessionStoreUnavailable (SMA-653 D2)', …)` block. Add `RefreshRejected` and `isRefreshRejected` to the existing import on line 7 of that file, so it reads:
+Append this block to `ts/packages/paigasus-auth/tests/core/errors.test.ts`, after the existing `describe('isSessionStoreUnavailable (SMA-653 D2)', …)` block. Add `RefreshRejected` and `isRefreshRejected` to that file's existing `../../src/core/errors.js` import (NOT the `vitest` import on the line above it), so it reads:
 
 ```ts
 import { CallbackRejected, RefreshRejected, SessionStoreTimeout, SessionStoreUnavailable, isRefreshRejected, isSessionStoreUnavailable } from '../../src/core/errors.js';
@@ -379,12 +379,25 @@ This task adds a test and changes no source. It pins the current outcome rather 
 - [ ] **Step 1: Write the test**
 
 Add this row to the same `describe('a failing refresh (SMA-626 § 2.3)', …)` block, after the row
-Task 2 added. It needs `SessionStoreTimeout` imported; extend the existing line 5 import of that
-file to read:
+Task 2 added.
+
+Two imports are needed. Extend that file's existing `../../src/core/errors.js` import to read:
 
 ```ts
 import { RefreshRejected, SessionStoreTimeout } from '../../src/core/errors.js';
 ```
+
+and add a new import for the store helper this package already uses for exactly this shape:
+
+```ts
+import { failingStore, type StoreMethod } from '../support/store-failure.js';
+```
+
+`failingStore(inner, failOn, makeError, calls)` wraps a real store, rejects on the named methods,
+passes every other method through, and records `method:arg` for each guarded call. Use it rather
+than hand-building an object: spreading a `MemorySessionStore` instance does NOT copy its prototype
+methods, and a hand-written literal must satisfy all eight `SessionStore` members or it fails
+typecheck.
 
 Then add:
 
@@ -398,13 +411,16 @@ Then add:
   it('a failing delete on the rejection path replaces the error and leaves the record', async () => {
     const inner = new MemorySessionStore();
     await inner.set('s', makeRecord({ accessExpiresAt: Date.now() + 30_000 }), 60_000, null);
-    const store: SessionStore = { ...inner, get: (sid) => inner.get(sid), set: (sid, rec, ttl, rev) => inner.set(sid, rec, ttl, rev), tryAcquireLock: (sid, t, ttl) => inner.tryAcquireLock(sid, t, ttl), releaseLock: (sid, t) => inner.releaseLock(sid, t), delete: () => Promise.reject(new SessionStoreTimeout('delete', 4000, 'deadline')) };
+    const calls: string[] = [];
+    const store = failingStore(inner, new Set<StoreMethod>(['delete']), () => new SessionStoreTimeout('delete', 4000, 'deadline'), calls);
     const { logger, events } = recordingLogger();
 
     await expect(resolveSession({ ...deps(store, rejected), logger, skewMs: 60_000 }, 's')).rejects.toBeInstanceOf(SessionStoreTimeout);
     // The classification still happened and was logged...
     expect(events).toContainEqual(['session.refresh_failed', { sid: sidTag('s'), reason: 'rejected', degraded: false }]);
-    // ...but the delete did not land, so there is no session.deleted and the record survives.
+    // ...the delete WAS attempted...
+    expect(calls).toContain('delete:s');
+    // ...but it did not land, so there is no session.deleted and the record survives.
     expect(events.some(([name]) => name === 'session.deleted')).toBe(false);
     expect(await inner.get('s')).not.toBeNull();
   });
