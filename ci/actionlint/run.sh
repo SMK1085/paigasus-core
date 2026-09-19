@@ -45,10 +45,10 @@ FAILED=0
 # Deliberately NOT `readonly`: without `set -e` a reassignment only warns, so readonly buys no
 # protection and would break a future harness that sources this file twice (SMA-542 D3).
 SELF_TESTS_RAN=0
-SELF_TEST_COUNT=15  # extractor, path-filter, branch-filter, config, ci-target-floor,
+SELF_TEST_COUNT=16  # extractor, path-filter, branch-filter, config, ci-target-floor,
                     # invocation-allowlist, affected-graph-wiring, block-execution,
                     # kill-predicate, affected-smoke-block, release-guard, cargo-lock-step,
-                    # release-plan, doc-diagnosis, early-exit-reader
+                    # release-plan, doc-diagnosis, early-exit-reader, pipe-capacity
 
 fail() {
   echo "actionlint gate: $*" >&2
@@ -63,12 +63,12 @@ infra() {
 usage() {
   echo "usage: $(basename "$0") [--self-test]" >&2
   echo "  (no argument)  run the full gate" >&2
-  echo "  --self-test    run the fifteen fixture tables only — extractor, path-filter verdicts," >&2
+  echo "  --self-test    run the sixteen fixture tables only — extractor, path-filter verdicts," >&2
   echo "                 branch-filter verdicts, config allowlist, ci-target floor, invocation" >&2
   echo "                 allowlist, affected-graph wiring, block execution, kill predicate," >&2
   echo "                 affected-smoke block, release guard, cargo-lock step, release-plan," >&2
-  echo "                 doc-diagnosis, early-exit reader. The early-exit-reader table reads its" >&2
-  echo "                 fixtures from ci/actionlint/fixtures/early-exit/." >&2
+  echo "                 doc-diagnosis, early-exit reader, pipe capacity. The early-exit-reader" >&2
+  echo "                 table reads its fixtures from ci/actionlint/fixtures/early-exit/." >&2
   echo "                 No actionlint binary is required, but the branch-filter table needs a" >&2
   echo "                 git repo carrying refs/remotes/origin/main, and the release-guard table" >&2
   echo "                 shells out to 'uv run --locked --project py', so it needs uv on PATH and" >&2
@@ -5166,7 +5166,7 @@ early_exit_reader_self_test() {
   # In the I1 (process-substitution) case this does NOT hold: the main shell can keep the read end
   # open (bash 5.x leaks a file descriptor there), so the producer can still get rc 0. For this
   # reason the I1 half below asserts only the reader's rc, never the producer's.
-  # Check 9 runs this table 15 times concurrently (14 mutants that still run this table, plus the
+  # Check 9 runs this table 16 times concurrently (15 mutants that still run this table, plus the
   # control), plus once directly, the load that produced two of the three CI flakes.
   flag_a="$tmpd/flag-a"; late_a="$tmpd/late-a"; second_a="$tmpd/second-a"; stall_a="$tmpd/stall-a"
   flag_b="$tmpd/flag-b"; late_b="$tmpd/late-b"; second_b="$tmpd/second-b"; stall_b="$tmpd/stall-b"
@@ -5221,10 +5221,78 @@ early_exit_reader_self_test() {
   return "$rc"
 }
 
+# SMA-612 — the pipe-capacity floor and its verdict. On a host where a new pipe holds only 512
+# bytes, this gate cannot finish: bash 5.x writes a here-string over 512 bytes into a pipe before
+# the reader starts and deadlocks in run_self_tests, and actionlint 1.7.12 writes each run: script
+# into shellcheck's stdin before it starts shellcheck (rhysd/actionlint#650) and spins forever.
+# 8192 is 3.3 times the largest run: block (2498 bytes, 2026-09-19) and at or below every healthy
+# value (macOS 16384, Linux 65536, the Linux soft-limit fallback 8192). The probe detects "the
+# kernel does not grow a new pipe past its 512-byte minimum". It does not detect "below normal".
+# See docs/superpowers/specs/2026-09-19-sma-612-actionlint-pipe-capacity-design.md.
+PIPE_CAPACITY_FLOOR=8192
+
+# Prints exactly one of ok / small / invalid. Pure: no subprocess, no file access.
+# invalid: empty, any non-digit (newline and space included), more than 9 digits (bash arithmetic
+# wraps), or zero. `10#` forces base 10, so `08192` is not read as octal.
+pipe_capacity_verdict() {
+  local v="$1"
+  case "$v" in
+    ''|*[!0-9]*) echo invalid; return 0 ;;
+  esac
+  if [ "${#v}" -gt 9 ]; then
+    echo invalid; return 0
+  fi
+  v=$((10#$v))
+  if [ "$v" -eq 0 ]; then
+    echo invalid
+  elif [ "$v" -lt "$PIPE_CAPACITY_FLOOR" ]; then
+    echo small
+  else
+    echo ok
+  fi
+  return 0
+}
+
+# SMA-612 — the sixteenth self-test. Pure input -> verdict rows: no pipe, no subprocess, no
+# actionlint. It proves pipe_capacity_verdict, which the full-gate preflight below reads. The
+# preflight itself runs only in full-gate mode, so this table is the only proof in --self-test mode.
+pipe_capacity_self_test() {
+  local rc=0
+  SELF_TESTS_RAN=$((SELF_TESTS_RAN + 1))
+
+  expect_pipe_capacity() {
+    local name="$1" input="$2" want="$3" got
+    got="$(pipe_capacity_verdict "$input")"
+    if [ "$got" != "$want" ]; then
+      fail "pipe-capacity self-test '$name': input '$input' gave '$got', expected '$want'. The
+      full-gate preflight would misread the pipe probe."
+      rc=1
+    fi
+  }
+
+  expect_pipe_capacity 'the measured small state (SMA-612 M4)' '512' small
+  expect_pipe_capacity 'one byte below the floor' '8191' small
+  expect_pipe_capacity 'exactly the floor' '8192' ok
+  expect_pipe_capacity 'the Linux default' '65536' ok
+  expect_pipe_capacity 'a leading zero is decimal, not octal' '08192' ok
+  expect_pipe_capacity 'nine digits is the largest accepted length' '999999999' ok
+  expect_pipe_capacity 'zero' '0' invalid
+  expect_pipe_capacity 'zero with a leading zero' '00' invalid
+  expect_pipe_capacity 'empty output' '' invalid
+  expect_pipe_capacity 'not a number' 'abc' invalid
+  expect_pipe_capacity 'a negative number' '-1' invalid
+  expect_pipe_capacity 'a trailing space' '512 ' invalid
+  expect_pipe_capacity 'two lines' "$(printf 'abc\n65536')" invalid
+  expect_pipe_capacity 'an NDJSON preamble that passed tail -n1' '{"type":"message"}' invalid
+  expect_pipe_capacity 'ten digits would wrap in bash arithmetic' '1234567890' invalid
+
+  return $rc
+}
+
 # ---------------------------------------------------------------------------------------------
 # Check 7 — the self-tests, and the counter that proves they were invoked.
 #
-# All FIFTEEN are defined above so this block can run them from ONE call site, reached by both the
+# All SIXTEEN are defined above so this block can run them from ONE call site, reached by both the
 # --self-test path and the full gate. One call site rather than two is deliberate: ci_targets.py's
 # C4 pins this by whole stripped line, and two identical lines would let one be deleted while the
 # pin still matched (SMA-542 D2).
@@ -5257,6 +5325,7 @@ run_self_tests() {
   release_plan_self_test
   doc_diagnosis_self_test
   early_exit_reader_self_test
+  pipe_capacity_self_test
 
   assert_self_tests_ran "$SELF_TEST_COUNT"
 
