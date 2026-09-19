@@ -118,18 +118,37 @@ under `tests/e2e/**`, and also `playwright.config.ts`. It is an ALLOWLIST, not a
 - From these modules, only a named import from a fixed read set passes: `existsSync`,
   `readFileSync`, `readdirSync`, `statSync` and `lstatSync`. A type-only import passes.
 - Every other form of these modules is a red: another named import, a default import, a namespace
-  import, `require(...)`, `createRequire`, and a dynamic `import(...)`.
-- An `ALLOWED_EXCEPTIONS` table, keyed by file path with a reason, ships EMPTY.
+  import, `require(...)`, `createRequire`, `process.getBuiltinModule(...)`, and a dynamic
+  `import(...)`. `getBuiltinModule(...)` returns the whole module object, so it is banned for an
+  fs specifier regardless of what the caller does with the result. `require(...)`, `import(...)`
+  and `getBuiltinModule(...)` are function calls, so a plain (no-interpolation) backtick specifier
+  is also in scope, not only `'`/`"`: the static `import … from`/`export … from` forms need no
+  such extension, because that syntax never accepts a backtick.
+- An `ALLOWED_EXCEPTIONS` table, keyed by file path with a reason, ships EMPTY. Every entry's
+  reason must be a non-empty, trimmed string.
 
 The scan matches on source text with comments removed. String contents are NOT masked, because
 the module specifier is a string. It reports each file and each offending form.
 
 Fixture cases prove that the scan reds on a named write import, an aliased import
 (`rmSync as remove`), a default import, a namespace import, `require('node:fs')`, a dynamic
-`import('node:fs')` and a `fs/promises` import. They also prove that it accepts a read-only named
-import and a type-only import, and that a banned form inside a comment does not red. The scan
-asserts that it read at least one file from each of `tests/e2e/` and `tests/e2e/support/`, so a
-wrong glob cannot pass with nothing scanned.
+`import('node:fs')`, a `fs/promises` import, `process.getBuiltinModule('node:fs')` and a
+backtick-specifier dynamic import (`` import(`node:fs`) ``). They also prove that it accepts a
+read-only named import and a type-only import, and that a banned form inside a comment does not
+red. The scan asserts that it read at least one file from each of `tests/e2e/` and
+`tests/e2e/support/`, so a wrong glob cannot pass with nothing scanned.
+
+**The import scan cannot see everything, so two further checks sit beside it in the same file.**
+First, the `test-e2e` task's `script:` block in each app's `moon.yml`: the scan extracts that
+block from the file's TEXT by indentation (no YAML parser), and reds if any line holds a
+filesystem-mutating command word (`rm`, `cp`, `mv`, `rsync`, `mkdir`, `ln`, `touch`, `install`,
+`tee`) or a `>`/`>>` redirection. It also asserts the block was found and is non-empty, so a
+renamed task cannot pass vacuously — a copy or delete added directly to that script would import
+no `fs` module at all, and the allowlist above would never see it. Second, `playwright.config.ts`:
+the scan imports the config (the same way `tests/unit/hydration.test.ts` already does), resolves
+`globalSetup` and `globalTeardown` — each may be absent, a string, or an array of strings — against
+the app directory, and asserts every resolved path lies under `tests/e2e/`, since a setup file
+pointed elsewhere would never be scanned by the import check above.
 
 **Build side: `tests/standalone-staging.test.ts`, in each app.** It sits next to
 `tests/standalone-runtime.test.ts`, because both depend on the build output. It calls the same
@@ -137,8 +156,14 @@ check function as the setup (§ 4.2) on the real build tree. It reds `test` if a
 removes the staging from `build`.
 
 **Selection.** Both apps' `test` tasks add `'moon.yml'` to their `inputs`. Without it, a pull
-request that edits only `build`'s script in `moon.yml` selects no task that runs the pin (F9).
-The plan verifies this with `moon query tasks --affected` on a `moon.yml`-only change.
+request that edits only `build`'s script in `moon.yml` selects no task that runs the pin (F9). One
+consequence: because `inputs` cannot distinguish a comment from a behavior change, EVERY edit to
+an app's `moon.yml` now selects `<app>-ts:test` — the app's whole vitest suite, including its
+build-guard fixture builds — even a comment-only edit; the app's `build` task itself stays a cache
+hit unless the edit also touches `build`'s own inputs. Measured at this branch's base commit
+(8a185402): the two `moon.yml` files changed in 6 of the 249 commits then on `main`. The plan
+verifies the `inputs` addition itself with `moon query tasks --affected` on a `moon.yml`-only
+change.
 
 Each app has its own copy of these files. This follows the repository pattern: each app owns its
 e2e support files.
@@ -207,9 +232,12 @@ If V4 finds a write, the spec returns to design before implementation continues.
 
 ## 9. Residuals
 
-- R1. The scan sees only `fs` module use in `tests/e2e/**` and `playwright.config.ts`. A shell
+- R1. The import scan sees only `fs`, `node:fs`, `fs/promises`, `node:fs/promises` and
+  `process.getBuiltinModule(...)` use in `tests/e2e/**` and `playwright.config.ts`. A shell
   command (`child_process`) or a helper module outside that tree can still write into a build
-  tree without a red.
+  tree without a red. Two things this residual used to cover are now closed instead: the
+  `test-e2e` task's own `moon.yml` script (a command-word/redirection check, § 4.3) and a
+  `globalSetup`/`globalTeardown` pointed outside `tests/e2e/` (a path-resolution check, § 4.3).
 - R2. Nothing asserts that the two apps' copies of the tests stay identical.
 - R3. Nothing asserts that a third `ts/apps/*` app with an e2e tier has these tests.
 - R4. A cache-hit restore merges (F2), so a stable-named `public/` file that a later build deleted
@@ -263,6 +291,15 @@ failures, which produced no e2e result at all and are not counted as a run.
 
 All three runs passed: 17/17 iam-console tests and 22/22 gateway-console tests (single-zone and
 two-zone) each time, with no ENOTEMPTY and no hydration failure in any log.
+
+**3/3 clean runs, on their own, are weak evidence.** The base-commit baseline (§ 10.1) failed once
+in three runs, roughly a 1-in-3 rate. At that rate, three clean runs in a row happen by chance
+about 30% of the time: `(2/3)^3 ≈ 0.30`. Three passes after the change are consistent with a fix,
+but they do not rule out a race that still fires roughly one run in three. The real proof is
+structural, not statistical: no e2e tier writes into a build tree any more (§ 4), pinned by
+`tests/unit/e2e-read-only.test.ts` in each app, and V4 below found no server write into either
+app's tree while both tiers ran at once. The race this spec closes needed a writer; removing every
+writer removes the race regardless of how many repeated runs happen to stay green.
 
 **V4, first attempt (wrong reference file).** After the final run, `find <standalone-app-dir>
 -type f -newer .../.next/BUILD_ID -not -path '.../static/*' -not -path '.../public/*'` listed
@@ -347,3 +384,31 @@ selected `RunTask` actions passed (`contracts:generate`, both apps' `build`/`typ
 not touch the BSR rate limit. Both apps' `build` tasks were also cache hits, reusing the
 standalone trees staged by run 3 above, which is why the V4 first-attempt file list above and this
 `moon ci` run describe the same on-disk trees.
+
+### 10.3 Acceptance: two consecutive `moon ci` runs (Linear AC)
+
+Linear asks for "a local `moon ci` that selects both tiers passes both, run twice in a row." The
+single run recorded in § 10.2 above satisfies "passes both" but not "twice in a row"; this section
+adds the second run and the pairing the first one was missing. Both runs used the exact command
+`moon ci :build :test :test-e2e :lint :fmt :typecheck --base origin/main`, one right after the
+other, on 2026-09-19. `RunTask` timestamps below are read from each run's own cache report with a
+small script (`python3`, not `grep`), on the `RunTask(...)` action for each app's `test-e2e` task.
+
+| Run | rc | started | `iam-console-ts:test-e2e` | `gateway-console-ts:test-e2e` |
+|---|---|---|---|---|
+| 1 | 0 | 20:04:40 CEST | 18:04:43.066–18:04:52.248 UTC | 18:04:43.090–18:04:56.501 UTC |
+| 2 | 0 | 20:06:06 CEST | 18:06:07.301–18:06:13.277 UTC | 18:06:07.320–18:06:17.055 UTC |
+
+Both runs passed: run 1 was a cold run (`contracts:generate` and both apps' `build` executed for
+real, 26 actions completed with 3 cached); run 2 was a warm run (10 of 26 actions served from
+cache, both `test-e2e` tasks still executed for real — `options: cache: false` on that task, per
+moon.yml — so a repeat run still re-exercises the race). Run 1's rc was read from the printed
+`SUMMARY`/`STATS` blocks (every action `pass`, none `fail`) rather than from a captured shell exit
+code, because the run was piped through `tee` for a live log and the pipe's exit status was not
+separately captured; run 2's rc was captured directly as the command's own exit status with no
+pipe in the way. In both runs the two tiers overlap: in run 1, `gateway-console-ts:test-e2e`
+starts (18:04:43.090) while `iam-console-ts:test-e2e` is still running (it does not finish until
+18:04:52.248) — an overlap of roughly 9.2 seconds out of the gateway tier's own 13.4-second span;
+in run 2, the same pattern holds (gateway starts at 18:06:07.320, iam finishes at 18:06:13.277, an
+overlap of roughly 5.96 seconds). This is exactly the concurrent-tier condition the spec exists to
+make safe (§ 1): both runs pass with the tiers overlapping, not despite avoiding the overlap.
