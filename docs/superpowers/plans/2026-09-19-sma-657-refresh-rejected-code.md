@@ -213,7 +213,8 @@ existing `it('never degrades a definitive rejection, even with a live access tok
   // — the shape Next 16 produces, because `refresh` delegates to the shared `runtime.oidc` while
   // `resolveSession` runs in whichever copy serves the request. `resolveSession` was imported
   // statically at the top of this file, so it keeps its FIRST-copy binding: this is the real
-  // two-copy shape, not a simulation of it.
+  // class-identity split; the refresh dependency is injected here rather than taken from the
+  // runtime.
   //
   // The fixture must be inside the skew window AND still live, or single-flight.ts returns early
   // and never attempts a refresh at all (shouldRefresh is `now >= expiresAt - skewMs`). The live
@@ -474,10 +475,7 @@ In `ts/packages/paigasus-auth/src/server.ts`, insert directly above the line
       // `instanceof` is SAFE here, unlike core/single-flight.ts's (SMA-657). This catch lives
       // inside the `handle` function createAuthRouteHandler RETURNED, closing over the `routes`
       // object built above — so the copy of this package that built the handler is the copy that
-      // throws at http/routes.ts's `reject()` and the copy that catches here. Verified for all
-      // three consumers: both apps' app/auth/[...auth]/route.ts and the e2e fixture server each
-      // call createAuthRouteHandler from their own module and never pass a handler across a
-      // boundary.
+      // throws at http/routes.ts's `reject()` and the copy that catches here.
 ```
 
 - [ ] **Step 2: Comment the `operation-deadline.ts` site**
