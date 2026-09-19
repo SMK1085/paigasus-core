@@ -187,8 +187,13 @@ If V4 finds a write, the spec returns to design before implementation continues.
     proves the fixture is not vacuous.
   - M4: remove `'moon.yml'` from one `test` task's inputs. `moon query tasks --affected` for a
     `moon.yml`-only change no longer selects that `test` task.
-- V4. After a V2 run, list files under both standalone trees that are newer than
-  `.next/BUILD_ID`. Only the staged files from the build may appear.
+- V4. `.next/BUILD_ID` is written early in `next build`, before the rest of the server tree, so
+  "newer than BUILD_ID" cannot distinguish a build's own output from a later write — it catches
+  ordinary build output too. Instead: touch a marker file, start both apps' Playwright suites
+  directly (no Moon, so no cache restore) at the same time, wait for both to finish, then list
+  every file under each app's `.next` — `.next/standalone` included, directories included, so
+  `.next/standalone/.../.next/cache/fetch-cache` is covered — that is newer than the marker.
+  Nothing may appear.
 
 ## 8. Out of scope
 
@@ -256,42 +261,41 @@ failures, which produced no e2e result at all and are not counted as a run.
 All three runs passed: 17/17 iam-console tests and 22/22 gateway-console tests (single-zone and
 two-zone) each time, with no ENOTEMPTY and no hydration failure in any log.
 
-**V4.** After the final run, `find <standalone-app-dir> -type f -newer .../.next/BUILD_ID -not
--path '.../static/*' -not -path '.../public/*'` listed files: 104 for iam-console, 86 for
-gateway-console (190 total), none under `static/` or `public/`. Per the task instructions this is
-a STOP condition (spec § 5: "If V4 finds a write, the spec returns to design"), so it is reported
-here without any code change.
+**V4, first attempt (wrong reference file).** After the final run, `find <standalone-app-dir>
+-type f -newer .../.next/BUILD_ID -not -path '.../static/*' -not -path '.../public/*'` listed
+files: 104 for iam-console, 86 for gateway-console (190 total), none under `static/` or
+`public/`. Every one of the 190 sits under `.next/required-server-files.json` or
+`.next/server/**` — compiled route bundles (`.js`), route manifests (`.json`), prerendered
+`_not-found`/`_global-error`/middleware artifacts (`.html`, `.rsc`, `.meta`), and source maps
+(`.map`). Zero of the 190 are under `.next/cache/fetch-cache`.
 
-Characterizing the finding before it is acted on: every one of the 190 listed files sits under
-`.next/required-server-files.json` or `.next/server/**` — compiled route bundles (`.js`), route
-manifests (`.json`), prerendered `_not-found`/`_global-error`/middleware artifacts (`.html`,
-`.rsc`, `.meta`), and source maps (`.map`). Zero of the 190 are under `.next/cache/fetch-cache` —
-the specific path § 5 names as the runtime hazard ("Next's file-system cache can write into
+**Why that reference was wrong.** `.next/BUILD_ID` is written early in `next build`, before the
+rest of the server tree is finalized, so "newer than BUILD_ID" cannot tell a build's own output
+from a later write — it also catches ordinary build output from the same `next build` invocation.
+All 190 files carry the same wall-clock second as BUILD_ID itself, consistent with this: they are
+part of the same build pass, not a later write. The `build` task's own script only ever touches
+`$dest/.next/static` and `$dest/public`, and the now-read-only `global-setup.ts` files only read
+(pinned by `tests/unit/e2e-read-only.test.ts`, which passed in every run above) — neither one
+wrote any of the 190 paths. `assertStagedBuild` (`tests/e2e/support/staged-build.ts`), the
+invariant that actually gates a release, checks BUILD_ID equality and `static/` file
+existence/size, not `.next/server/**` mtimes, and it passed in all three runs. This first attempt
+is kept here as a recorded false start, not as the V4 verdict.
+
+**V4, corrected re-check (marker-based, 2026-09-19).** Script:
+`$SP/v4-check.sh` (`$SP` = the session scratchpad). Method: touch a marker file, wait one second,
+then run `pnpm exec playwright test` in `ts/apps/iam-console` and `ts/apps/gateway-console` at the
+same time (no Moon, so no cache restore can mask a write), and wait for both. Then run two checks:
+`find <app>/.next -type f -newer marker -not -path '*/.next/cache/*'` for each app, and a second,
+broader `find ts/apps/{iam,gateway}-console/.next/standalone -newer marker` (files and
+directories, `.next/cache` included), which covers `.next/standalone/.../.next/cache/fetch-cache`
+— the specific path spec § 5 names as the runtime hazard ("Next's file-system cache can write into
 `.next/server/app` and `.next/cache/fetch-cache`... its Server Actions call `revalidatePath`").
-The `build` task's own script (`ts/apps/iam-console/moon.yml`, `ts/apps/gateway-console/moon.yml`)
-only ever touches `$dest/.next/static` and `$dest/public` — it never writes any of the 190 listed
-paths — and the now-read-only `global-setup.ts` files only read (pinned by
-`tests/unit/e2e-read-only.test.ts`, which passed in every run above). The production invariant
-that actually gates a release, `assertStagedBuild` (`tests/e2e/support/staged-build.ts`), checks
-BUILD_ID equality and `static/` file existence and size — it does not compare `.next/server/**`
-mtimes at all, and it passed in all three runs. All 190 files carry the same wall-clock second as
-BUILD_ID itself, consistent with Next's own `next build --output standalone` finalization writing
-BUILD_ID and these route/manifest files within the same build pass in an order where BUILD_ID is
-not strictly last. An isolated build-only measurement (`moon run iam-console-ts:build --force`,
-with no e2e tier run afterward) was attempted to confirm this reproduces from the build alone with
-no server ever started, but it could not complete: two more BSR `resource_exhausted` attempts (with
-the same restore-and-wait recipe, including a 5-minute wait between them) both failed at
-`contracts:generate` before reaching the build step. That measurement was not obtained.
 
-**Conclusion on V4, stated plainly:** the raw file list is a real STOP condition per the letter of
-the task brief and spec § 5, and is recorded as such with no code change made. The evidence
-gathered — the complete absence of any `.next/cache/fetch-cache` write, the exclusive match to
-Next's own static build-output filenames, and the passing `assertStagedBuild`/`e2e-read-only`
-checks in the same runs — points to the V4 diagnostic's own "newer than BUILD_ID" comparison being
-too coarse a proxy for "a server wrote into its tree": it also catches ordinary same-build write
-ordering inside `next build` itself, not only a later runtime write. It does not point to the
-`revalidatePath` hazard § 5 describes actually having occurred. This is reported as a finding for
-design review, not resolved here.
+Result: a fourth concurrent pass, `iam rc=0`, `gw rc=0`. The first `find` listed nothing for
+either app. The second, broader `find` (standalone tree, cache included) counted 0.
+
+**V4 verdict: clean.** The servers wrote nothing into their trees while the tiers ran. Spec § 5's
+assumption holds. The first attempt's 190-file list is superseded, not a finding to act on.
 
 **Mutations (§ 7 V3).** Reused from task-3-report.md and task-4-report.md (SMA-655
 `.superpowers/sdd/2026-09-19-sma-655-e2e-standalone-staging/`), not re-run:
@@ -320,5 +324,5 @@ Local `moon ci :build :test :test-e2e :lint :fmt :typecheck --base origin/main`:
 selected `RunTask` actions passed (`contracts:generate`, both apps' `build`/`typecheck`/`test`/
 `test-e2e`, `ts:fmt`, `ts:lint`); `contracts:generate` was a cache hit this time, so this run did
 not touch the BSR rate limit. Both apps' `build` tasks were also cache hits, reusing the
-standalone trees staged by run 3 above, which is why the V4 file list above and this `moon ci` run
-describe the same on-disk trees.
+standalone trees staged by run 3 above, which is why the V4 first-attempt file list above and this
+`moon ci` run describe the same on-disk trees.
