@@ -61,6 +61,8 @@ export const ALL_ACTIONS = [
   'AttachMembership',
   'DetachMembership',
   'ListAuditLog',
+  // SMA-629: the Dead letters nav entry.
+  'ListOutboxDeadLetters',
   // SMA-636: the gateway settings. This zone asks none of them, but the SET must equal IAM_ACTIONS.
   'CreateServiceAccount',
   'ArchiveServiceAccount',
