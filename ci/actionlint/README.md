@@ -205,8 +205,8 @@ the workflow syntax. This command is NOT the gate. It skips shellcheck and every
 this gate runs.
 
 **Removing the probe.** The probe stays until a later change removes it, per decision D9 in
-`docs/superpowers/specs/2026-09-19-sma-612-actionlint-pipe-capacity-design.md`. See the
-SMA-612 follow-up issue.
+`docs/superpowers/specs/2026-09-19-sma-612-actionlint-pipe-capacity-design.md`. SMA-654
+tracks the actionlint bump and that decision.
 
 ## Limitations
 
