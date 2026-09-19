@@ -124,8 +124,7 @@ In `ts/packages/paigasus-auth/src/core/errors.ts`, replace the whole existing `i
  * THE RULE, stated once (SMA-657 D7). A class thrown by a closure that is reachable through shared
  * state, and caught OUTSIDE that closure, must be classified by its `code`. A class thrown and
  * caught inside one closure, or thrown and caught by two modules of one copy, may use `instanceof`
- * — the boundary is the CLOSURE, not whether state is shared. The three remaining `instanceof`
- * sites in this package each carry a comment saying which side of that line they fall on.
+ * — the boundary is the CLOSURE, not whether state is shared.
  *
  * The `err instanceof Error` test is an `instanceof` against a BUILTIN, which both copies share in
  * one isolate, so it does not have the defect this function exists to avoid. It is what rejects a
@@ -516,7 +515,25 @@ In `ts/packages/paigasus-auth/src/adapters/oidc.ts`, insert directly above the l
   // crosses copies, as RefreshRejected — which is exactly why that one needs a code check.
 ```
 
-- [ ] **Step 4: Correct the `SessionStoreTimeout` doc comment**
+- [ ] **Step 4: Add the cross-reference the three comments now earn**
+
+Task 1 deliberately left this sentence OUT of `core/errors.ts`, because it was not yet true: the
+three comments did not exist. Steps 1-3 just created them, so add it now. In
+`ts/packages/paigasus-auth/src/core/errors.ts`, find this line in the `hasAuthErrorCode` doc
+comment:
+
+```
+ * — the boundary is the CLOSURE, not whether state is shared.
+```
+
+and extend it to:
+
+```
+ * — the boundary is the CLOSURE, not whether state is shared. The three remaining `instanceof`
+ * sites in this package each carry a comment saying which side of that line they fall on.
+```
+
+- [ ] **Step 5: Correct the `SessionStoreTimeout` doc comment**
 
 In `ts/packages/paigasus-auth/src/core/errors.ts`, that class's doc comment currently says:
 
@@ -536,7 +553,7 @@ classifier is `http/store-unavailable.ts`'s `storeStep`, reached from every stor
  * next/get-session.ts) keeps working unchanged, and
 ```
 
-- [ ] **Step 5: Verify nothing changed behaviourally**
+- [ ] **Step 6: Verify nothing changed behaviourally**
 
 ```bash
 export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
@@ -546,7 +563,7 @@ cd ts/packages/paigasus-auth && pnpm exec tsc --noEmit -p tsconfig.json && pnpm 
 Expected: typecheck clean, every test passes. These are comments; a failure means an edit landed
 inside a statement.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
 git add ts/packages/paigasus-auth/src/server.ts ts/packages/paigasus-auth/src/adapters/operation-deadline.ts ts/packages/paigasus-auth/src/adapters/oidc.ts ts/packages/paigasus-auth/src/core/errors.ts
