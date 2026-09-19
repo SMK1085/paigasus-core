@@ -1,0 +1,44 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Vendored proto TOML plugin for crane (SMA-658).
+#
+# Resolves official google/go-containerregistry GitHub release tarballs. Same vendoring rationale
+# as cargo-deny/promtool: a static schema over official release assets. There is no proto plugin
+# for crane upstream (`proto plugin search crane`, proto 0.61.1: no results).
+#
+# The asset names use a CAPITALISED OS (Linux/Darwin/Windows) and x86_64/arm64 for the arch.
+# proto's default {arch} tokens are x86_64/aarch64, so only aarch64 needs a remap, and it is the
+# same on every OS, so one global [install.arch] covers all three platforms.
+#
+# Each tarball holds crane, gcrane and krane at its root, so exe-path names the crane binary.
+# exe-path is kept explicit here (unlike actionlint.toml/maturin.toml), although the binary sits
+# at the archive root.
+# All platforms share one checksums.txt. Tags are "v"-prefixed; asset names carry no version.
+
+name = "crane"
+type = "cli"
+
+[platform.linux]
+download-file = "go-containerregistry_Linux_{arch}.tar.gz"
+checksum-file = "checksums.txt"
+exe-path = "crane"
+
+[platform.macos]
+download-file = "go-containerregistry_Darwin_{arch}.tar.gz"
+checksum-file = "checksums.txt"
+exe-path = "crane"
+
+[platform.windows]
+download-file = "go-containerregistry_Windows_{arch}.tar.gz"
+checksum-file = "checksums.txt"
+exe-path = "crane.exe"
+
+[install]
+download-url = "https://github.com/google/go-containerregistry/releases/download/v{version}/{download_file}"
+checksum-url = "https://github.com/google/go-containerregistry/releases/download/v{version}/{checksum_file}"
+
+[install.arch]
+aarch64 = "arm64"
+
+[resolve]
+git-url = "https://github.com/google/go-containerregistry"
