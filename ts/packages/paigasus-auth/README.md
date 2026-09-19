@@ -93,6 +93,36 @@ Because a silently-downgraded production deployment is worse than a loud failure
 declares more than one zone.** Use `redis` for anything beyond a single-process
 development or test deployment.
 
+### When Redis stops answering (SMA-651)
+
+T below is `PAIGASUS_SESSION_REDIS_TIMEOUT_MS` (default 1000 ms, at most 536870911 ms, no minimum).
+
+- **Every store operation has a deadline of 4T.** node-redis's own command timeout covers only a
+  command that waits in its queue. A Redis that accepts a command and never replies is bounded by
+  this deadline alone.
+- **The first expiry opens a circuit for 4T.** While it is open, every store call fails at once and
+  the store writes nothing to Redis. That silence lets the client's idle timer (2T) tear down the
+  wedged connection and reconnect. The circuit closes when the client reconnects, or when the 4T
+  cooldown ends.
+- **One `store.operation_timeout` event** (`{ operation, deadlineMs }`) is logged each time the
+  circuit opens. `getSession()` still logs `store.unavailable` for each failed read.
+- **The first connect waits at most T.** If Redis is unreachable at start-up, the store is still
+  created, every call fails at once until Redis answers, and the store then works with no restart.
+- **The client sends one PING every T** to keep a healthy idle connection open. A console process
+  has one such client per zone for sessions, plus one for the descriptor cache.
+
+**A failed store call signs the user out.** `requireSession()` treats a store failure as "no
+session" and redirects to `/auth/login`, and `/auth/login` deletes the presented session. So a
+Redis stall longer than 4T (a fork stall during BGSAVE, an fsync stall, a failover) signs out every
+user who loads a page in that window, and those sessions are gone. Raise T if your Redis can stall
+longer than that. Size T against the worst event-loop lag of the Node process too: a stall longer
+than 4T in the process itself fires the deadlines before the replies are read.
+
+**Redis ACL.** The store's Redis user needs `+get`, `+set`, `+del`, `+eval` and `+ping`.
+`+client|setinfo` is optional (node-redis sends CLIENT SETINFO at connect and ignores the error).
+Without `+ping`, every PING gets `-NOPERM`; the connection stays open, and nothing reports the
+missing permission.
+
 ### Redaction
 
 No event this package logs carries a token, a refresh token, an authorization code, the client
