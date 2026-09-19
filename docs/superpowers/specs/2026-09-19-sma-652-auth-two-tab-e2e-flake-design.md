@@ -62,25 +62,36 @@ so that callback fails with `txn_missing`. `src/server.ts:111-114` redirects it 
 and `handleLogin` deletes the presented session and clears `__Host-pgs_sid`
 (`src/http/routes.ts:188-196`). The investigation saw 0 such callbacks in 90 runs. Closing a tab
 stops navigation of the tab under test. It does not stop an OPEN tab from changing shared state
-first. § 3.1 therefore closes each Keycloak tab as early as the test allows, and § 3.3 records
-these requests.
+first: the probe (spec § 4 step 3) saw 0 secondary auth requests in 20 runs, and the test keeps
+the tabs open; the checks fail loudly if the path occurs. § 3.3 records these requests.
 
 ## 3. Design
 
 Change only `ts/packages/paigasus-auth/tests/e2e/roundtrip.spec.ts`, the § 9.2 test. The test
 signature becomes `async ({ context }, testInfo) => …`.
 
-### 3.1 Close each Keycloak tab early; prove the property on a fresh tab
+### 3.1 Never close a Keycloak tab; prove the property on a fresh tab
 
 1. The concurrent start and the txn-cookie count assertion (`toHaveLength(2)`, the m1 guard)
    stay unchanged. They are the test's primary proof of § 9.2.
-2. **Tab1-lost mode:** when `attemptKeycloakLogin(tab1)` returns `false`, close tab1 at once,
-   BEFORE `attemptKeycloakLogin(tab2)`. The test does not use tab1 after that point. This removes
-   the mode where a Keycloak page stays open longest (more than 5 s).
-3. **Tab1-wins mode:** after the primary shows the guarded heading, close the secondary tab at
-   once.
-4. Before any close in step 3, read the value of `__Host-pgs_sid` from `context.cookies()` and
-   keep it in a local variable. Never print it.
+2. The test closes no Keycloak tab. **Tab1-lost mode:** when `attemptKeycloakLogin(tab1)` returns
+   `false`, tab1 stays open and is labelled `secondary`; the test attempts login on tab2 next.
+   **Tab1-wins mode:** tab2 stays open and is labelled `secondary`. In both modes every Keycloak
+   tab stays open for the rest of the test; the per-test `context` fixture disposes every page
+   when the test ends.
+3. **Why no tab is closed.** A first version of this fix closed the secondary tab (and, in the
+   tab1-lost mode, tab1) as soon as the test no longer needed it. Forced reproduction of that
+   closing code found `secondary.close()` itself can hang forever: Chromium answers
+   `Target.closeTarget` with `{"success":true}`, then the tab's own pending Keycloak
+   `location.reload()` (§ 2) commits a new document, and the target then never sends
+   `detachedFromTarget` — so `page.close()` waits with no limit (Playwright 1.63 sets none).
+   Forced runs on that closing code hung in 6 of 60 runs. A workaround that resent
+   `Target.closeTarget` on every main-frame commit measured 0 hangs in 120 forced runs, but Sven
+   ruled against it: it is Chromium-only CDP code kept alive to work around a browser defect, for
+   a close the test does not need. Letting the per-test `context` fixture dispose the tab at the
+   end of the test, instead of an explicit `close()`, does not hit this hang (measured).
+4. Read the value of `__Host-pgs_sid` from `context.cookies()` before opening the fresh page in
+   step 5, and keep it in a local variable. Never print it.
 5. Open a new page in the SAME context: `const fresh = await context.newPage()`. Then
    `const res = await fresh.goto(`${ZONE_BASE_PATH}/guarded`)`.
 6. Assert, in this order:
@@ -111,7 +122,8 @@ cookie contract, so a fresh tab proves the same property the old step claimed.
 ### 3.2 Rename the test
 
 The concurrently started second login never completes: a successful callback clears every txn
-cookie (`routes.ts:310-314`), and the test now closes its tab. The new title is
+cookie (`routes.ts:310-314`), and its tab stays open, unused, until the context fixture disposes
+it. The new title is
 "§ 9.2: two concurrent logins mint distinct txn cookies, and one completion signs in the whole
 context". The SMA-506 design doc row (`2026-09-09-sma-506-auth-design.md:994`) is a historical
 record and is not edited.
@@ -220,4 +232,21 @@ Failing sequence (batch 3, run 7), times in ms from test start, query strings re
 | +1128 | tab2 `GET …/openid-connect/auth` (the reload from the old document) |
 | +1148 | Keycloak 200 login form; `KEYCLOAK_IDENTITY`, `KEYCLOAK_SESSION` expired |
 | +6205 | assertion fails; tab2 on the Keycloak login form; `__Host-pgs_sid` unchanged |
+
+### Fix round 1: Task 3 and hang measurements (2026-09-19)
+
+| Batch | Runs | Failures | Notes |
+|---|---|---|---|
+| before-a (Task 3, forced) | 30 | 3 | target symptom: secondary stuck on the Keycloak login form |
+| before-b (Task 3, forced) | 30 | 1 | same target symptom |
+| close-based after (Task 3, forced, a+b) | 60 | 5 | ALL 5 failed a different way: `browserContext.newPage` error after a 30 s hang at `secondary.close()` — this is the close-hang, not the § 9.2 property |
+| close-hang, isolated (`newpage-hang-report.md`, `final-control.log`) | 60 | 6 | dedicated forcing on `secondary.close()` alone, no resend workaround |
+| close-hang, CDP resend workaround (`newpage-hang-report.md`) | 120 | 0 | rejected by Sven: Chromium-only CDP code for a browser defect |
+| polling-path probe (Task 3, tabs kept open 2.0–2.5 s) | 20 | 0 | 0 secondary auth requests observed |
+
+The before batches (4 failures in 60) reproduce the original reload race from § 2. The close-based
+after batches (5 failures in 60) do not reproduce it even once; they show a distinct, new failure —
+the close hang — which is why round 1 removes both `close()` calls instead of keeping them. The
+isolated close-hang measurement (6 in 60) is the more direct one, since it forces the closing
+window specifically rather than relying on the reload race also landing there.
 

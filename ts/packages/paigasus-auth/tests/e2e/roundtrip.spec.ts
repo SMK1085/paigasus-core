@@ -150,28 +150,35 @@ test('§ 9.2: two concurrent logins mint distinct txn cookies, and one completio
   // on the mismatch, and `beforeunload` does not cancel that timer — so a later `goto` on that tab
   // can reach /guarded (200) and then be overridden by the reload, leaving the tab on the Keycloak
   // form. An open login page also polls every 2 s and may follow the SSO session into
-  // /auth/callback, where `txn_missing` -> /auth/login would delete the shared session. So each
-  // Keycloak tab is closed as soon as the test no longer needs it, and the shared-session
-  // property is proved on a FRESH page, which no Keycloak document can navigate.
+  // /auth/callback, where `txn_missing` -> /auth/login would delete the shared session. So the
+  // test never reuses AND never closes a Keycloak tab: reusing it loses the final navigation to
+  // the pending reload, and closing it can hang — Chromium answers `Target.closeTarget` with
+  // success, then the reload commits and the target never detaches (Chromium issue
+  // https://issues.chromium.org/issues/536385539, measured on Playwright 1.63). The proof runs on
+  // a fresh page, which no Keycloak document can navigate. An open Keycloak tab could, in
+  // principle, follow the SSO session into /auth/callback and /auth/login and delete the shared
+  // session (seen 0 times in 110 runs); the one-hop and same-sid checks below would then fail
+  // loudly, never pass falsely.
   // Evidence: docs/superpowers/specs/2026-09-19-sma-652-auth-two-tab-e2e-flake-design.md.
   const tab1Completed = await attemptKeycloakLogin(tab1);
   testInfo.annotations.push({ type: 'sma-652-mode', description: tab1Completed ? 'tab1-won' : 'tab1-lost' });
   let primary: Page;
-  let secondary: Page | null;
+  let secondary: Page;
   if (tab1Completed) {
     primary = tab1;
     secondary = tab2;
   } else {
-    await tab1.close();
     const tab2Completed = await attemptKeycloakLogin(tab2);
     expect(tab2Completed, 'at least one of the two concurrently-started logins must complete on its first Keycloak submission').toBe(true);
     primary = tab2;
-    secondary = null;
+    secondary = tab1;
   }
   await expect(primary.getByTestId('guarded-heading')).toBeVisible();
 
-  const pageLabels = new Map<Page, string>([[primary, 'primary']]);
-  if (secondary !== null) pageLabels.set(secondary, 'secondary');
+  const pageLabels = new Map<Page, string>([
+    [primary, 'primary'],
+    [secondary, 'secondary'],
+  ]);
   const authRequests: string[] = [];
   context.on('request', (request) => {
     if (!request.isNavigationRequest()) return;
@@ -182,7 +189,6 @@ test('§ 9.2: two concurrent logins mint distinct txn cookies, and one completio
 
   const sidBefore = await readSessionCookieValue(context);
   expect(sidBefore !== undefined, 'the primary login must have set __Host-pgs_sid').toBe(true);
-  if (secondary !== null) await secondary.close();
 
   const fresh = await context.newPage();
   pageLabels.set(fresh, 'fresh');
