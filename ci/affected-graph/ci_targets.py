@@ -767,6 +767,26 @@ def _expected_tailwind_lines(app):
 # leave run.sh at rc 0 and THIS gate PASSing, because block_execution_self_test still calls the
 # function.
 #
+# SMA-612 — the pipe-capacity preflight in ci/actionlint/run.sh. Its call line sits at run.sh's
+# top level and is pinned at COLUMN 0 (ACTIONLINT_SH_CALL_SITES). The six lines inside
+# pipe_capacity_preflight() carry real leading whitespace, so they are pinned stripped
+# (ACTIONLINT_SH_INDENTED_CALL_SITES). The check-10 precedent pins the call, the status capture
+# and the routing arms for the same reason: a one-token edit to any one of them (a constant in
+# place of the capture, an empty `small)` arm, a deleted status guard) disables the preflight
+# while every other pinned line stays byte-identical. Kept as named tuples so the self-test below
+# can drive its deletion and indentation rows from them.
+PIPE_CAPACITY_CALL_SITES = (
+    '[ "$SELF_TEST_ONLY" = 1 ] || pipe_capacity_preflight',
+)
+PIPE_CAPACITY_INDENTED_CALL_SITES = (
+    "grep -qxF 'actionlint = \"1.7.12\"' .prototools || infra \".prototools no longer pins actionlint 1.7.12. The pipe-capacity probe (SMA-612) exists only for that version. Re-decide it per docs/superpowers/specs/2026-09-19-sma-612-actionlint-pipe-capacity-design.md D9.\"",
+    'pc_out="$(uv run --locked --project py python3 -c "$PIPE_CAPACITY_PROBE_PY" | tail -n1)" || pc_rc=$?',
+    '[ "$pc_rc" -eq 0 ] || infra "the pipe-capacity probe failed (rc $pc_rc) via \'uv run --locked --project py\'. No check ran."',
+    'case "$(pipe_capacity_verdict "$pc_out")" in',
+    'small) infra "a new pipe on this host holds only $pc_out bytes (floor $PIPE_CAPACITY_FLOOR). With pipes this small, the gate cannot finish: bash 5.x here-strings in its own self-tests deadlock above $pc_out bytes, and the pinned actionlint writes each run: script into shellcheck\'s stdin before it starts shellcheck (rhysd/actionlint#650). No check ran. See ci/actionlint/README.md, \\"Small pipes on macOS\\"." ;;',
+    '*) infra "the pipe-capacity probe printed \'$pc_out\', not a positive integer. No check ran." ;;',
+)
+#
 # COLUMN 0, not stripped-both-sides (CodeRabbit, PR 150). check_self_invocation used to build
 # `actionlint_lines` with `line.strip()`, so a required line was satisfied by that exact TEXT
 # appearing anywhere in the file — including indented inside `if false; then … fi` or a heredoc,
@@ -955,6 +975,7 @@ ACTIONLINT_SH_CALL_SITES = (
     'grep -qxF \'.moon/tasks.yml\' "$EE_LIST" || infra "check 13: corpus floor: .moon/tasks.yml is not listed, so a pathspec stopped matching"',
     'grep -qxF \'ops/nats/check-subjects.sh\' "$EE_LIST" || infra "check 13: corpus floor: ops/nats/check-subjects.sh is not listed, so a pathspec stopped matching"',
     'done < <(early_exit_reader_verdict "$EE_LIST")',
+    *PIPE_CAPACITY_CALL_SITES,  # SMA-612 — see PIPE_CAPACITY_CALL_SITES above.
 )
 
 # SMA-579 — check 10's two remaining call sites, pinned SEPARATELY from ACTIONLINT_SH_CALL_SITES
@@ -1017,6 +1038,7 @@ ACTIONLINT_SH_INDENTED_CALL_SITES = (
     # here rather than in ACTIONLINT_SH_CALL_SITES because the line carries real, executing
     # leading whitespace inside the function body, which the column-0 haystack rejects outright.
     'bash ci/release-plan/run.sh "$@"',
+    *PIPE_CAPACITY_INDENTED_CALL_SITES,  # SMA-612 — see PIPE_CAPACITY_CALL_SITES above.
 )
 
 # SMA-530. The moon.yml pins above prove the CONTROL IS INVOKED; these prove it still DOES
@@ -2532,6 +2554,11 @@ def self_test():
         'grep -qxF \'.moon/tasks.yml\' "$EE_LIST" || infra "check 13: corpus floor: .moon/tasks.yml is not listed, so a pathspec stopped matching"\n'
         'grep -qxF \'ops/nats/check-subjects.sh\' "$EE_LIST" || infra "check 13: corpus floor: ops/nats/check-subjects.sh is not listed, so a pathspec stopped matching"\n'
         'done < <(early_exit_reader_verdict "$EE_LIST")\n'
+        # SMA-612 — the pipe-capacity preflight: its column-0 call line, then the six lines
+        # inside pipe_capacity_preflight(), indented two spaces as the real function body is.
+        # Derived from the registry so the fixture cannot drift from the pin it exercises.
+        + "".join(f"{site}\n" for site in PIPE_CAPACITY_CALL_SITES)
+        + "".join(f"  {site}\n" for site in PIPE_CAPACITY_INDENTED_CALL_SITES)
     )
     wired_release_parity = (
         '    --negative-control) NEGATIVE=1; shift ;;\n'
@@ -2850,6 +2877,35 @@ def self_test():
         failures.append(
             "check_self_invocation: an INDENTED check-13 call site satisfied the column-0 pin"
         )
+    # SMA-612 — the pipe-capacity preflight's seven pinned lines, each deleted in turn, and its
+    # column-0 call line INDENTED. Same shape as the check-13 rows above. The count assertions
+    # make a line dropped from either registry red here as well.
+    if len(PIPE_CAPACITY_CALL_SITES) != 1 or len(PIPE_CAPACITY_INDENTED_CALL_SITES) != 6:
+        failures.append(
+            "check_self_invocation: expected 1 column-0 and 6 indented SMA-612 pipe-capacity "
+            f"entries, found {len(PIPE_CAPACITY_CALL_SITES)} and "
+            f"{len(PIPE_CAPACITY_INDENTED_CALL_SITES)}"
+        )
+    for _pc_line in (
+        *(f"{site}\n" for site in PIPE_CAPACITY_CALL_SITES),
+        *(f"  {site}\n" for site in PIPE_CAPACITY_INDENTED_CALL_SITES),
+    ):
+        _pc_broken = wired_actionlint.replace(_pc_line, "")
+        if _pc_broken == wired_actionlint:
+            failures.append(
+                f"check_self_invocation: wired_actionlint lacks the SMA-612 line {_pc_line!r}"
+            )
+        elif not check_self_invocation(wired, scripts, _pc_broken, wired_release_parity, wired_workflow_credentials, wired_release_plan, wired_ruff, wired_next_public_free):
+            failures.append(
+                f"check_self_invocation: missed a deleted SMA-612 line {_pc_line!r}"
+            )
+    for _pc_site in PIPE_CAPACITY_CALL_SITES:
+        indented_pc_call = wired_actionlint.replace(f"{_pc_site}\n", f"  {_pc_site}\n")
+        if not check_self_invocation(wired, scripts, indented_pc_call, wired_release_parity, wired_workflow_credentials, wired_release_plan, wired_ruff, wired_next_public_free):
+            failures.append(
+                "check_self_invocation: an INDENTED SMA-612 preflight call satisfied the "
+                "column-0 pin"
+            )
     # Contamination cases, THREE of them (SMA-542 review finding I1, plus a round-2 addition). The
     # obvious "swap the two texts wholesale" version tried first passed unconditionally, because it
     # only proves the required site is ABSENT from the wrong haystack — never exercising whether

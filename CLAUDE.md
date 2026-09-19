@@ -359,12 +359,13 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   `run_self_tests` and `selftest_mutation_battery` as **whole lines** in `run.sh` (a substring
   match would survive deleting the call, since the name is a prefix of its own definition). That
   pin only works because `repo:affected-smoke` lists `ci/actionlint/**/*` in its `inputs` — remove
-  that and the pin stays green on exactly the PR that breaks it. Adding a sixteenth-and-later
-  `*_self_test` table means bumping `SELF_TEST_COUNT` (currently 15 — SMA-579 added the eleventh,
+  that and the pin stays green on exactly the PR that breaks it. Adding a seventeenth-and-later
+  `*_self_test` table means bumping `SELF_TEST_COUNT` (currently 16 — SMA-579 added the eleventh,
   `release_guard_self_test` at check 10, SMA-601 the twelfth, `cargo_lock_step_self_test` at
   check 8f, SMA-603 the thirteenth, `release_plan_self_test` at check 11, SMA-597 the
   fourteenth, `doc_diagnosis_self_test` at check 12, and SMA-647 the fifteenth,
-  `early_exit_reader_self_test` at check 13): the gate asserts
+  `early_exit_reader_self_test` at check 13, and SMA-612 the sixteenth,
+  `pipe_capacity_self_test` (the full-gate preflight)): the gate asserts
   invocations AND definitions. The cycle's
   second half is now closed too (SMA-542 residual closure): check 8c
   in `ci/actionlint/run.sh` pins `ci/affected-graph/run.sh`'s own two call sites into
@@ -1133,7 +1134,10 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   `case` match disagree, which is evidence of a second mechanism. Keep that run's whole output for
   SMA-647 before you re-run.
 - LOCAL ONLY, CORRECTED (SMA-512): no local bash currently runs `ci/actionlint/run.sh` to
-  completion, and the two candidates fail differently. Under system `/bin/bash` 3.2.57 the gate
+  completion. The 512-byte pipe (see the next entry) is most probably the same cause; nobody
+  measured the pipe state on these 2026-09-14 runs (spec §2). When the host is in that
+  small-pipe state, the full gate now exits rc 2 in seconds under either bash, instead of
+  hanging. The two candidates still failed differently before that fix. Under system `/bin/bash` 3.2.57 the gate
   does not deadlock — it still prints the two FALSE `cargo-lock-step` self-test failures — but it
   also does not finish: measured running past one hour without completing. Under Homebrew
   `/opt/homebrew/bin/bash` 5.3.15 the gate DEADLOCKS instead: measured three times independently on
@@ -1172,6 +1176,23 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   (`<bash-binary> ci/<gate>/run.sh`) and read those results instead of the `moon ci` verdict for
   them — `repo:actionlint` has no local substitute verdict today. CI runs a single Linux bash and
   never sees this split.
+- **A new pipe on the development Mac can hold only 512 bytes, and two local hangs come from
+  it** (SMA-612). A new pipe on that host holds 512 bytes (M4), not the nominal 16384 that
+  kqueue reports (M5). The healthy macOS value on this host is not measured (spec D3). The pipe
+  does not grow when it fills (M6). The Bash tool sandbox is not the cause: the same 512-byte
+  limit appears with the sandbox disabled (M10). Mechanism 1: actionlint 1.7.12 writes a whole
+  `run:` script into shellcheck's stdin before it starts shellcheck. A script over the pipe's
+  capacity then blocks forever, and actionlint busy-loops (M2, M3). Mechanism 2: Homebrew bash
+  5.x writes a here-string into a pipe before its reader starts. A write of 512 bytes finishes,
+  and a write of 513 bytes hangs (M9). The gate's self-tests then deadlock at about 0% CPU (M8).
+  `repo:actionlint` now runs a pipe-capacity preflight before its self-tests in full-gate mode.
+  It exits rc 2 with a `small` message on a host below the 8192-byte floor. `--self-test` mode
+  does not probe and still hangs under Homebrew bash on such a host. Remove the probe only per
+  spec decision D9 in
+  `docs/superpowers/specs/2026-09-19-sma-612-actionlint-pipe-capacity-design.md`. A `.prototools`
+  actionlint version bump reds the gate on purpose until then (SMA-654). Other gates that use here-strings
+  (for example `repo:affected-smoke`) still hang under bash 5.x on such a host. This entry does
+  not fix them.
 - **`ts/apps/gateway-console`** (SMA-512 PR 3) is the second console zone: a Next.js 16 App Router
   app for the AI Gateway, mounted at `/gateway`, Moon id `gateway-console-ts`. Its `lib/config.ts`
   demands **both** an `iam` entry and a `gateway` entry in `PAIGASUS_SERVICES` — it refuses to
