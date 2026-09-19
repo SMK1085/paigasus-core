@@ -860,6 +860,14 @@ Expected: PASS. Watch `a_contended_row_times_out_rather_than_hanging` (`:715`) i
 
 Check whether `Duration` is still used in this file (it is — `begin_retirement(Duration::from_secs(5))` and the trailing `timeout(Duration::from_secs(10), handle)` both remain), so do NOT delete its import here.
 
+- [ ] **Step 4b: COMMIT NOW, before any mutation**
+
+Run Step 8's lint and format check, then make Step 8's commit at this point rather than at the end.
+
+Same reason as Task 4's Step 5b, and it matters more here: Steps 5 and 6 mutate THIS TEST FILE (they comment out a `lock_*_in` call in the test body), and Step 7 inserts marked lines into it. While your S3/S4 rewrite is uncommitted, restoring any of that with `git checkout -- <path>` would destroy your own work. Once committed, `git checkout --` restores exactly what you wrote.
+
+After this commit, Steps 5-7 must produce NO further commit: every mutation they make is reverted, so the tree returns to this commit each time.
+
 - [ ] **Step 5: V7 — delete the lock S3 protects**
 
 In S3's test body, comment out the `retirer.lock_role_in(&*tx, "legacy_auditor")` call at `:611` and its `.expect(..)`:
@@ -878,7 +886,9 @@ Same, for `retirer.lock_policy_in(&*tx, "legacy_auditor")` inside `locking_the_p
 
 Insert `tokio::time::sleep(Duration::from_secs(1)).await;` marked `// MUTATION SMA-660 — delete this line` as the first statement inside each of S3's and S4's `tokio::spawn(async move {` blocks. Run the whole binary. **Expected: PASS.** Delete the marked lines and re-run to confirm.
 
-- [ ] **Step 8: Lint, format and commit**
+- [ ] **Step 8: Final check (the commit already happened at Step 4b)**
+
+Confirm the tree is exactly your Step 4b commit with nothing left over from Steps 5-7:
 
 ```bash
 export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
