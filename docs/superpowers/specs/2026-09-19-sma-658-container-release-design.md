@@ -255,7 +255,7 @@ plan ─┬─ wheels / prebuild / proto-dist ─ approve-release ─ release �
      `paigasus-<svc>-v*` git tag, compared as semver and read at this step.
   8. **Verify (AC 3).** Against both registries:
      `cosign verify --certificate-identity https://github.com/SMK1085/paigasus-core/.github/workflows/release.yml@refs/heads/main --certificate-oidc-issuer https://token.actions.githubusercontent.com <image>@<digest>`,
-     and `gh attestation verify oci://<image>@<digest> --repo SMK1085/paigasus-core --signer-workflow SMK1085/paigasus-core/.github/workflows/release.yml`.
+     and `gh attestation verify oci://<image>@<digest> --repo SMK1085/paigasus-core --signer-workflow SMK1085/paigasus-core/.github/workflows/release.yml --source-ref refs/heads/main`.
      A failure fails the job, and `tag-<svc>` does not run.
 - **What differs between the registries.** The index digest is the same. The stored metadata is
   not: GHCR holds the GitHub attestations and a cosign signature; Docker Hub holds only a cosign
@@ -429,7 +429,7 @@ A result that contradicts this spec changes the spec first.
 | M6 | Does any gate assert the services' `0.0.0`? | **Done: no.** `publish-metadata` Check 3 filters out `publish = false` crates first; the `service_info.rs` tests compare against `env!("CARGO_PKG_VERSION")`. A bump to `0.1.0` reds nothing. |
 | M7 | release-plz 0.3.158 and a Cargo `publish = false` crate. | **Done** (§ 3.1): never bumped, never tagged; `git_only` fails on the second release. |
 | M8 | What does syft list for the archive today? | § 4.5, AC 7. Not measured locally (a cold release build). PR 1's `images.yml` runs syft and uploads its output. |
-| M9 | Does an environment secret reach a job in `release.yml` with `environment: release-images` when the environment has no reviewers and a `main`-only rule? (Expected yes; confirm in the rehearsal.) | AC 5. |
+| M9 | Does an environment secret reach a job in `release.yml` with `environment: release-images` when the environment has no reviewers and a `main`-only rule? | Measured by the rehearsal on `main` (`images-rehearsal.yml`, `publish` job, environment `images-rehearsal`). AC 5. |
 
 ## 10. Rollout order
 
@@ -446,17 +446,19 @@ in **two pull requests**:
 The order of the steps:
 
 1. Merge PR 1.
-2. Run `images-rehearsal.yml` on `main`. It must pass before PR 2 merges.
-3. Make the Docker Hub repositories `smaschek/paigasus-iam` and `smaschek/paigasus-gateway`
+2. Make the `images-rehearsal` environment with a `main`-only deployment rule and no reviewers.
+   Store a non-empty dummy secret named `REHEARSAL_ENV_PROBE` in it.
+3. Run `images-rehearsal.yml` on `main`. It must pass before PR 2 merges.
+4. Make the Docker Hub repositories `smaschek/paigasus-iam` and `smaschek/paigasus-gateway`
    (public).
-4. Make the `release-images` environment with a `main`-only deployment rule and no reviewers. If a
+5. Make the `release-images` environment with a `main`-only deployment rule and no reviewers. If a
    job names an environment that does not exist, GitHub makes it with **no** branch rule, so this
    step comes before PR 2.
-5. Make the Docker Hub PAT (Read & Write) and store it as `DOCKERHUB_TOKEN` in `release-images`
+6. Make the Docker Hub PAT (Read & Write) and store it as `DOCKERHUB_TOKEN` in `release-images`
    only. Record its expiry date.
-6. Read back: no repository or organization secret named `DOCKERHUB_TOKEN`.
-7. Merge PR 2. Approve each service chain.
-8. After the first GHCR push, set each GHCR package to **public** and link it to the repository.
+7. Read back: no repository or organization secret named `DOCKERHUB_TOKEN`.
+8. Merge PR 2. Approve each service chain.
+9. After the first GHCR push, set each GHCR package to **public** and link it to the repository.
    GitHub makes a new package private. Until this step, Docker Hub is public and GHCR is not.
 
 ## 11. Acceptance criteria
@@ -532,3 +534,14 @@ ADR-0011 S1 and S3 in Notion, and reword the V5 message to match.
 | Q: dispatch selection | Answered: § 6.1. |
 | Q: D7 source | Answered: § 2 links. |
 | Q: GHCR packages exist? | Open: the local `gh` token has no `read:packages` scope. Sven checks. |
+
+## 16. Decisions made in the PR 1 plan
+
+| # | Decision | Reason |
+|---|---|---|
+| P1 | The per-platform images are pushed under `:<git-sha>-<arch>` and their digest is asserted, instead of a push "by digest" with no tag. | `crane push` writes to a tag reference. The tag also makes each platform image findable. |
+| P2 | The release decisions live in `ci/images/release_decision.py` (stdlib, self-test), used by both `rehearse` and PR 2. | § 7.1 wants registry commands literal in `release.yml`, so the rehearse can share only the decision code. The command sequence in `rehearse` is a copy: that is the residual, and the `images-rehearsal.yml` push step is a second copy of the same `decide`/`kv` and push-then-assert sequence. |
+| P3 | `tag_digest` reads only a missing-tag error as "absent"; every other error is fatal. | D10: an error read as "absent" would push a second digest under a published version. |
+| P4 | `ci.yml`'s bare `proto install` now also downloads crane, cosign and syft. | One pin source. The cost is measured on PR 1's CI run (Task 9). |
+| P5 | The rehearsal measures M9. The `publish` job carries `environment: images-rehearsal`, and a step fails the job when the `REHEARSAL_ENV_PROBE` secret is empty. | The job needs the same main-only, no-reviewer environment shape as PR 2's real release job. A real secret's reachability is confirmed once, before PR 2 relies on the same pattern. |
+| P6 | `smoke` takes service arguments. The reject-argument guard (orig `:444-456`) is replaced by `assert_fresh`, which refuses an image whose revision label is not HEAD. | A per-service chain (§ 4.2) needs a one-service smoke. `assert_fresh` closes the same stale-image risk, and it is stricter. |

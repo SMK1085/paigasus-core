@@ -23,7 +23,7 @@ ci/images/run.sh all              # build + smoke-test both images
 ci/images/run.sh build            # build both images, no smoke test
 ci/images/run.sh build iam        # build only paigasus-iam
 ci/images/run.sh build gateway    # build only paigasus-gateway
-ci/images/run.sh smoke            # smoke-test whatever images are already built
+ci/images/run.sh smoke [iam|gateway]...  # smoke-test images built at this HEAD
 ```
 
 The build context is `rs/` (the Cargo workspace root). This is also what
@@ -323,12 +323,72 @@ observed truncating a drain.
 
 ### Which libc is in the image I am running?
 
-`ci/images/run.sh build` produces (and `.github/workflows/images.yml` uploads as a CI artifact,
-`chisel-manifests`, 90-day retention) a `chisel-manifest-<service>.txt` per service — e.g.
-`chisel-manifest-iam.txt` — listing the exact `chisel cut` package versions, including the
-resolved `libc6`, that build actually resolved. This is the answerable half of a real
-limitation: `chisel cut` resolves against the **live** Ubuntu archive (§ 2.6 of the design doc),
-so two builds a month apart produce different, patched base layers — the image is **not**
-bit-reproducible from `rs/Dockerfile` alone. The manifest artifact for the specific build that
-produced a given `:<git-sha>` tag is the only record of which packages actually shipped in it;
-without it, "which libc is in the image I am running" has no answer after the fact.
+`ci/images/run.sh build` makes a `chisel-manifest-<service>.txt` file for each service, for
+example `chisel-manifest-iam.txt`. The file lists the exact `chisel cut` package versions the
+build used, including the resolved `libc6`. `.github/workflows/images.yml` uploads these files as
+a CI artifact named `chisel-manifests-<arch>`, with 90-day retention.
+
+`ci/images/run.sh build-oci` writes a different file name: `chisel-manifest-<service>-<arch>.txt`.
+It adds the architecture, because a per-arch build can run on two different runners in the same
+workflow.
+
+This is the answerable half of a real limit. `chisel cut` uses the **live** Ubuntu archive (see
+§ 2.6 of the design document). So two builds one month apart produce different, patched base
+layers. The image is **not** bit-reproducible from `rs/Dockerfile` alone. The manifest artifact
+for one build is the only record of which packages that build used. Without it, you cannot answer
+"which libc is in the image I am running" after the fact.
+
+## Release tooling (SMA-658, PR 1)
+
+### Tools
+
+The release tooling adds three CLIs: crane 0.22.1, cosign 3.1.3, and syft 1.52.0. Each tool is
+pinned in `.prototools`. Each tool uses a vendored plugin file in `.proto/plugins/`. Install one
+tool with `proto install <tool>`, for example `proto install crane`. `ci.yml`'s bare
+`proto install` step now installs all three tools too.
+
+### New `ci/images/run.sh` commands
+
+```bash
+ci/images/run.sh build-oci <iam|gateway> <outdir>   # SMA-658: OCI archive, no --load
+ci/images/run.sh load-oci <archive> <image-name>     # load + identity check (prints M3)
+ci/images/run.sh smoke [iam|gateway]...              # smoke-test images built at this HEAD
+ci/images/run.sh rehearse <archive.oci.tar>...       # SMA-658: publish steps vs two local registries
+```
+
+`load-oci` prints a line that starts with `M3 `. This line records the image ID that `docker load`
+reports, the runner's Docker version, and the runner's image store. The image store decides which
+ID is correct: a containerd store and the classic store report different IDs for the same archive.
+Read the expected ID against the store named on the same line.
+
+### The rehearsal workflow
+
+Before the first rehearsal run, set up the `images-rehearsal` environment once. In the repository
+settings, make an environment named `images-rehearsal`. Give it a `main`-only deployment rule and
+no reviewers. Store a non-empty dummy secret named `REHEARSAL_ENV_PROBE` in that environment. The
+secret value can be any non-empty string. The rehearsal only checks that the secret reached the
+job.
+
+Run the rehearsal once after PR 1 merges. Run it again after any change to the attest or sign
+steps.
+
+```bash
+gh workflow run images-rehearsal.yml --ref main
+```
+
+The `publish` job first prints `M9 environment secret reached the job (length N)`. This line
+proves the environment secret reached the job. The job runs under a main-only, no-reviewer
+environment. PR 2's real release job will use the same environment shape.
+
+A passing run ends with `REHEARSAL OK: <image>@<digest>`. This line proves the push, the
+build-provenance attestation, the SBOM attestation, the cosign signature, and both verify commands
+worked against a real registry.
+
+`REHEARSAL OK` does NOT prove the Docker Hub login, the Docker Hub copy, or the git tag. PR 1 adds
+none of those steps. PR 2's first real release is their first test.
+
+### The scratch package
+
+The rehearsal pushes to `ghcr.io/smk1085/paigasus-rehearsal`. This package becomes private after
+its first push. It holds only rehearsal images. Delete old versions in the package settings when
+you do not need them.

@@ -309,13 +309,15 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   or any entry carrying a glob character (`*`, `?`, `+`, `[]` — `+` included, since GitHub reads it
   as a quantifier), needs a justified `BRANCH_SKIP` entry in `ci/actionlint/run.sh`. A typo'd
   branch name otherwise disables a workflow silently and permanently (SMA-540).
-- Container images (SMA-500) live behind `ci/images/run.sh {build,smoke,all}` and
+- Container images (SMA-500) live behind
+  `ci/images/run.sh {build,smoke,all,build-oci,load-oci,rehearse}` and
   `.github/workflows/images.yml`, **not** Moon — a `repo:*` task would have to join `ci.yml`'s
   `T=(…)` array (a `--release` build on every affected PR) or become a `T_EXEMPT` entry. The
   workflow is **not a required check**, so a broken image build reds `main`, not the PR. Its
   `pull_request` trigger already covers `rs/Dockerfile`, `rs/Cargo.{lock,toml}`,
-  `rs/rust-toolchain.toml`, `rs/.dockerignore`, `ci/images/**` and the workflow itself, so a PR
-  touching any of those runs it automatically — no manual step needed there.
+  `rs/rust-toolchain.toml`, `rs/.dockerignore`, `ci/images/**`, the workflow itself, `.prototools`,
+  `.proto/plugins/crane.toml` and `.proto/plugins/syft.toml`, so a PR touching any of those runs
+  it automatically — no manual step needed there.
   `workflow_dispatch` it instead for a PR touching `rs/**` but **none** of those filtered
   inputs (a plain service code change, say) — that's the one case the narrower `pull_request`
   filter misses, and it can still break an image build. (`gh workflow run images.yml --ref
