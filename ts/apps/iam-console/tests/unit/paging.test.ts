@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import { describe, expect, it } from 'vitest';
-import { MAX_CURSOR_LENGTH, PAGE_SIZE, nextOffset, pageHref, parseCursor, parseOffset } from '../../lib/paging';
+import { MAX_CURSOR_LENGTH, MAX_EVENT_TYPE_LENGTH, PAGE_SIZE, listHref, nextOffset, pageHref, parseCursor, parseEventType, parseOffset } from '../../lib/paging';
 
 describe('parseOffset', () => {
   it('reads a plain non-negative integer', () => {
@@ -65,5 +65,42 @@ describe('pageHref', () => {
 
   it('lets the parameter override a kept entry of the same name', () => {
     expect(pageHref('/iam/orgs', 'offset', 50, { offset: 100 })).toBe('/iam/orgs?offset=50');
+  });
+});
+
+// SMA-629 spec § 6.3. The dead-letters filter: IAM matches event_type exactly, and '' is no filter.
+describe('parseEventType', () => {
+  it('reads the first value, trimmed, and no value as no filter', () => {
+    expect(parseEventType('iam.team.created')).toEqual({ ok: true, value: 'iam.team.created' });
+    expect(parseEventType(['iam.team.created', 'iam.project.created'])).toEqual({ ok: true, value: 'iam.team.created' });
+    expect(parseEventType('  iam.team.created  ')).toEqual({ ok: true, value: 'iam.team.created' });
+    expect(parseEventType(undefined)).toEqual({ ok: true, value: '' });
+    expect(parseEventType('')).toEqual({ ok: true, value: '' });
+    expect(parseEventType('   ')).toEqual({ ok: true, value: '' });
+  });
+
+  it('accepts 200 characters after the trim and refuses 201 as invalid input that never reached IAM', () => {
+    expect(MAX_EVENT_TYPE_LENGTH).toBe(200);
+    expect(parseEventType(` ${'e'.repeat(200)} `)).toEqual({ ok: true, value: 'e'.repeat(200) });
+
+    const parsed = parseEventType('e'.repeat(201));
+
+    expect(parsed.ok).toBe(false);
+    if (parsed.ok) throw new Error('expected an invalid event type');
+    expect(parsed.error.presentation).toBe('invalid-input');
+    expect(parsed.error.correlationId).toBeNull();
+    expect(parsed.error.reason).toBeNull();
+  });
+});
+
+describe('listHref', () => {
+  it('leaves out every empty value, so the first unfiltered page has no query', () => {
+    expect(listHref('/iam/dead-letters', {})).toBe('/iam/dead-letters');
+    expect(listHref('/iam/dead-letters', { eventType: '', cursor: null })).toBe('/iam/dead-letters');
+    expect(listHref('/iam/dead-letters', { eventType: 'iam.team.created', cursor: '' })).toBe('/iam/dead-letters?eventType=iam.team.created');
+  });
+
+  it('encodes the values and keeps their order', () => {
+    expect(listHref('/iam/dead-letters', { eventType: 'a b', cursor: 'c&d=e' })).toBe('/iam/dead-letters?eventType=a+b&cursor=c%26d%3De');
   });
 });

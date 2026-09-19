@@ -15,7 +15,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { Code, ConnectError } from '@connectrpc/connect';
 import { revalidatedPaths } from '../support/next-cache';
 
-const { tenancy, failNext } = vi.hoisted(() => {
+const { tenancy, outbox, failNext } = vi.hoisted(() => {
   let failure: Code | null = null;
   const call = (): Promise<Record<string, never>> => {
     if (failure === null) return Promise.resolve({});
@@ -43,17 +43,23 @@ const { tenancy, failNext } = vi.hoisted(() => {
       archiveProject: call,
       restoreProject: call,
     },
+    // SMA-629: recording mocks, so a test can count the calls an invalid id must NOT make.
+    outbox: {
+      replayDeadLetter: vi.fn<(request: { id: string }) => Promise<Record<string, never>>>(call),
+      discardDeadLetter: vi.fn<(request: { id: string }) => Promise<Record<string, never>>>(call),
+    },
   };
 });
 
 // The session read is the one thing an action does before its command, and it needs a Next request
 // scope. tests/unit/action-session.test.ts covers that read itself; here it always succeeds.
-vi.mock('../../lib/console', () => ({ iamClientsForAction: () => Promise.resolve({ ok: true, value: { tenancy } }) }));
+vi.mock('../../lib/console', () => ({ iamClientsForAction: () => Promise.resolve({ ok: true, value: { tenancy, outbox } }) }));
 
 const { attachMembershipAction, createOrganizationAction, detachMembershipAction } = await import('../../app/(console)/orgs/actions');
 const { archiveOrganizationAction, createTeamAction, renameOrganizationAction, restoreOrganizationAction } = await import('../../app/(console)/orgs/[org]/actions');
 const { archiveTeamAction, createProjectAction, renameTeamAction, restoreTeamAction } = await import('../../app/(console)/orgs/[org]/teams/[team]/actions');
 const { archiveProjectAction, renameProjectAction, restoreProjectAction } = await import('../../app/(console)/orgs/[org]/teams/[team]/projects/[project]/actions');
+const { discardDeadLetterAction, replayDeadLetterAction } = await import('../../app/(console)/dead-letters/actions');
 
 const ORG_PRN = 'prn:pgs:iam:::organization/0190a100-0000-7000-8000-00000000000a';
 const TEAM_PRN = 'prn:pgs:iam::0190a100-0000-7000-8000-00000000000a:team/0190a1b2-0000-7000-8000-0000000000a1';
@@ -169,6 +175,64 @@ describe('the nine lifecycle actions also revalidate on forbidden and conflict',
     const result = await run();
 
     expect(result).toMatchObject({ ok: false, error: { presentation: 'invalid-input' } });
+    expect(revalidatedPaths).toEqual([]);
+  });
+});
+
+// SMA-629 spec § 6.4. The two dead-letter actions refresh the ONE page, on ok and on not-found (the
+// row is stale), and never on forbidden: the refreshed list read would call forbidden() and replace
+// the inline error with the 403 view.
+const DEAD_LETTER_ID = '0190a1f0-0000-7000-8000-0000000000d1';
+const PAGE_REFRESH = [{ path: '/dead-letters', type: 'page' }];
+const DEAD_LETTER_ACTIONS = [
+  ['replayDeadLetterAction', (id: string) => replayDeadLetterAction(null, form({ id })), outbox.replayDeadLetter],
+  ['discardDeadLetterAction', (id: string) => discardDeadLetterAction(null, form({ id })), outbox.discardDeadLetter],
+] as const;
+
+describe('the two dead-letter actions', () => {
+  it.each(DEAD_LETTER_ACTIONS)('%s sends the trimmed id and refreshes the page on a success', async (_name, run, rpc) => {
+    const result = await run(` ${DEAD_LETTER_ID} `);
+
+    expect(result).toEqual({ ok: true });
+    expect(rpc.mock.calls.at(-1)?.[0]).toEqual({ id: DEAD_LETTER_ID });
+    expect(revalidatedPaths).toEqual(PAGE_REFRESH);
+  });
+
+  it.each(DEAD_LETTER_ACTIONS)('%s refreshes the page when IAM answers not-found', async (_name, run) => {
+    failNext(Code.NotFound);
+
+    const result = await run(DEAD_LETTER_ID);
+
+    expect(result).toMatchObject({ ok: false, error: { presentation: 'not-found' } });
+    expect(revalidatedPaths).toEqual(PAGE_REFRESH);
+  });
+
+  it.each(DEAD_LETTER_ACTIONS)('%s refreshes nothing when IAM answers forbidden', async (_name, run) => {
+    failNext(Code.PermissionDenied);
+
+    const result = await run(DEAD_LETTER_ID);
+
+    expect(result).toMatchObject({ ok: false, error: { presentation: 'forbidden' } });
+    expect(revalidatedPaths).toEqual([]);
+  });
+
+  it.each(DEAD_LETTER_ACTIONS)('%s refreshes nothing when IAM is degraded', async (_name, run) => {
+    failNext(Code.Unavailable);
+
+    const result = await run(DEAD_LETTER_ID);
+
+    expect(result).toMatchObject({ ok: false, error: { presentation: 'degraded' } });
+    expect(revalidatedPaths).toEqual([]);
+  });
+
+  // § 7.3: this check belongs at the action level, because the command does not validate.
+  it.each(DEAD_LETTER_ACTIONS)('%s refuses an id that is not a UUID and makes ZERO IAM calls', async (_name, run, rpc) => {
+    const before = rpc.mock.calls.length;
+
+    const result = await run('not-a-uuid');
+
+    expect(result).toMatchObject({ ok: false, error: { presentation: 'invalid-input' } });
+    expect(rpc.mock.calls.length).toBe(before);
     expect(revalidatedPaths).toEqual([]);
   });
 });

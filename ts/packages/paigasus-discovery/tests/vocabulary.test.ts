@@ -43,7 +43,7 @@ describe('capability vocabulary', () => {
     // reason the type is not `string`. Hand-declaring it re-opens a drift risk, and THIS
     // assertion is what closes it: the union's members are listed once here and compared to the
     // registry-derived runtime list, so a new capability in the proto reds this test.
-    const declared: CapabilityKey[] = ['iam.authz.cedar', 'iam.apikeys', 'iam.audit', 'gateway.chat.stream'];
+    const declared: CapabilityKey[] = ['iam.authz.cedar', 'iam.apikeys', 'iam.audit', 'gateway.chat.stream', 'iam.deadletters'];
     expect([...declared].sort()).toEqual([...CAPABILITY_KEYS].sort());
   });
 });

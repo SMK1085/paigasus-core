@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // Every page that needs a session (spec § 5.4). It resolves the session FIRST — requireSession()
-// redirects to login when there is none — then builds the shell from five request-scoped reads.
+// redirects to login when there is none — then builds the shell from five request-scoped reads, and
+// asks mayI() two questions in parallel: ListAuditLog and ListOutboxDeadLetters, both at Root. Each
+// question is one IsAuthorized call, so SMA-629 added one IAM call to every console render.
 //
 // This layout does NOT guard Server Actions: an action is its own request, and each one gets its
 // token through iamClients(), which calls requireSession() itself (spec § 3.3, § 5.3).
@@ -29,7 +31,8 @@ export default async function ConsoleLayout({ children }: { children: ReactNode 
   const { zone, zones } = getPublicConfig();
   const probe = discovery();
   const [iam, gateway, may, scopes] = await Promise.all([probe.getServiceState('iam', session.accessToken), probe.getServiceState('gateway', session.accessToken), mayI(), myScopes()]);
-  const nav = buildNavEntries({ iam, gateway, zones, auditAllowed: await may('ListAuditLog', ROOT_PRN) });
+  const [auditAllowed, deadLettersAllowed] = await Promise.all([may('ListAuditLog', ROOT_PRN), may('ListOutboxDeadLetters', ROOT_PRN)]);
+  const nav = buildNavEntries({ iam, gateway, zones, auditAllowed, deadLettersAllowed });
   return (
     <Providers zone={zone} zones={zones} session={toSessionView(session)}>
       <OrgSwitcherShell brand={{ label: 'Paigasus IAM', href: `${IAM_BASE_PATH}/orgs` }} nav={nav} orgs={switcherOrgs(scopes)}>

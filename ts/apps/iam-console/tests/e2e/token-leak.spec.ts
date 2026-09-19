@@ -23,7 +23,7 @@
 // on exactly the response class the rule is about; buffering makes it strictly larger, and the
 // prefetch bodies that Chromium never handed over are now scanned too.
 import type { Request, Response } from '@playwright/test';
-import { ORG_ID, ORG_NAME, PROJECT_ID, TEAM_ID } from './support/world';
+import { DEAD_LETTER_A_ID, DEAD_LETTERS_DESCRIPTOR, ORG_ID, ORG_NAME, PROJECT_ID, TEAM_ID } from './support/world';
 import { signIn, waitForHydration } from './support/login';
 import { expect, test } from './support/harness';
 
@@ -123,6 +123,7 @@ function scanned(response: Seen): boolean {
 }
 
 test('R11: no response body, header, RSC payload or action result contains a fake token (ADR-0017)', async ({ page, harness }) => {
+  harness.useWorld({ descriptor: DEAD_LETTERS_DESCRIPTOR });
   // The buffered bodies, keyed by the Request the response carries — the SAME object the route
   // handler saw, so no url or timing match is needed.
   const buffered = new Map<Request, string>();
@@ -131,7 +132,7 @@ test('R11: no response body, header, RSC payload or action result contains a fak
   // cannot change how the page loads. The URL predicate is the coarse filter; the two predicates
   // in the handler are the real test, and anything else takes the ordinary path.
   await page.route(
-    (url) => url.origin === harness.origin && (url.pathname === '/iam/orgs' || url.searchParams.has('_rsc')),
+    (url) => url.origin === harness.origin && (url.pathname === '/iam/orgs' || url.pathname === '/iam/dead-letters' || url.searchParams.has('_rsc')),
     async (route) => {
       const request = route.request();
       if (!isServerAction(request) && !isRscGet(request)) {
@@ -167,7 +168,7 @@ test('R11: no response body, header, RSC payload or action result contains a fak
   const issuedBefore = harness.idp.issued.length;
 
   await signIn(page, harness);
-  for (const path of [`/iam/orgs/${ORG_ID}`, `/iam/orgs/${ORG_ID}/teams/${TEAM_ID}`, `/iam/orgs/${ORG_ID}/teams/${TEAM_ID}/projects/${PROJECT_ID}`, '/iam/audit', '/iam/orgs']) {
+  for (const path of [`/iam/orgs/${ORG_ID}`, `/iam/orgs/${ORG_ID}/teams/${TEAM_ID}`, `/iam/orgs/${ORG_ID}/teams/${TEAM_ID}/projects/${PROJECT_ID}`, '/iam/audit', '/iam/dead-letters', '/iam/orgs']) {
     await page.goto(harness.url(path));
   }
   // A client-side navigation, so the RSC payload path is exercised, not only full documents. It
@@ -187,6 +188,12 @@ test('R11: no response body, header, RSC payload or action result contains a fak
   await form.getByLabel('Name').fill('Leak Check');
   await form.getByRole('button', { name: 'Create' }).click();
   await expect(form.getByRole('status')).toHaveText('Created.');
+  await page.waitForLoadState('networkidle');
+  // SMA-629: one replay, so the dead-letters Server Action result is scanned too.
+  await page.goto(harness.url('/iam/dead-letters'));
+  await waitForHydration(page);
+  await page.getByTestId(`dead-letter-controls-${DEAD_LETTER_A_ID}`).getByRole('button', { name: 'Replay' }).click();
+  await expect(page.getByTestId('dead-letters-result')).toContainText(`Replayed event ${DEAD_LETTER_A_ID}.`);
   await page.waitForLoadState('networkidle');
 
   const seen = await Promise.all(pending);
@@ -221,4 +228,6 @@ test('R11: no response body, header, RSC payload or action result contains a fak
   // work — which is exactly what made the CI-only failure invisible locally.
   expect(seen.some((response) => response.action && response.method === 'POST' && response.buffered && scanned(response))).toBe(true);
   expect(seen.some((response) => response.method === 'GET' && !response.action && response.contentType.startsWith('text/x-component') && response.buffered && scanned(response))).toBe(true);
+  // SMA-629: the dead-letters action body was buffered and scanned, not only the create action's.
+  expect(seen.some((response) => response.action && response.method === 'POST' && new URL(response.url).pathname === '/iam/dead-letters' && response.buffered && scanned(response))).toBe(true);
 });

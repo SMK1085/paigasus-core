@@ -23,6 +23,7 @@ import { describe, expect, it } from 'vitest';
 const APP_DIR = fileURLToPath(new URL('../../app', import.meta.url));
 
 const EXPECTED: Readonly<Record<string, readonly string[]>> = {
+  '(console)/dead-letters/actions.ts': ['discardDeadLetterAction', 'replayDeadLetterAction'],
   '(console)/orgs/actions.ts': ['attachMembershipAction', 'createOrganizationAction', 'detachMembershipAction'],
   '(console)/orgs/[org]/actions.ts': ['archiveOrganizationAction', 'createTeamAction', 'renameOrganizationAction', 'restoreOrganizationAction'],
   '(console)/orgs/[org]/teams/[team]/actions.ts': ['archiveTeamAction', 'createProjectAction', 'renameTeamAction', 'restoreTeamAction'],

@@ -9,6 +9,7 @@ import { ZoneProvider } from '@paigasus/app-shell';
 import type { PaigasusError, Presentation } from '@paigasus/sdk/errors/types';
 import Forbidden from '../../app/(console)/forbidden';
 import { FORBIDDEN_VIEW_CORRELATION } from '@paigasus/console-core';
+import { DEAD_LETTER_GONE, PRESENTATION_COPY } from '../../app/_components/error-copy';
 import { FormError } from '../../app/_components/form-error';
 import { PageError } from '../../app/_components/page-error';
 import { SectionError } from '../../app/_components/section-error';
@@ -105,6 +106,19 @@ describe('FormError', () => {
   it('keeps the basePath in the returnTo of its "Sign in again" link', () => {
     const html = render(<FormError error={errorWith('relogin')} />);
     expect(html).toContain('href="/iam/auth/login?returnTo=%2Fiam%2Forgs%2Fabc"');
+  });
+
+  // SMA-629 spec § 6.5: `message` replaces the copy only when it is set, and the id stays.
+  it('shows the message prop instead of the copy, and keeps the correlation id', () => {
+    const html = render(<FormError error={errorWith('not-found')} message={DEAD_LETTER_GONE} />);
+    expect(html).toContain(DEAD_LETTER_GONE);
+    expect(html).not.toContain(PRESENTATION_COPY['not-found'].body);
+    expect(html).toContain(CID);
+  });
+
+  it('shows the copy when message is undefined', () => {
+    const html = render(<FormError error={errorWith('not-found')} message={undefined} />);
+    expect(html).toContain(PRESENTATION_COPY['not-found'].body);
   });
 });
 
