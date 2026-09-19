@@ -755,13 +755,21 @@ Both are vendored schema plugins. Note the `[platform.*.arch]` override shape �
 
 - [ ] **Step 2: Write `.proto/plugins/helm.toml`**
 
-Model it on `promtool.toml`, which is the closest shape: a GitHub-release archive with per-platform naming. Helm's release assets are at `https://get.helm.sh/helm-v{version}-{os}-{arch}.tar.gz`, and the binary sits under `{os}-{arch}/helm` inside the archive.
+Model it on `promtool.toml`, which is the closest shape. **Three facts measured on 2026-09-20 that differ from every other plugin in this directory:**
+
+1. **The tarballs are NOT GitHub release assets.** `helm/helm`'s releases carry only `.asc` signature files. The archives live at `https://get.helm.sh/helm-v{version}-{os}-{arch}.tar.gz` (verified: HTTP 200).
+2. **There is no combined checksum file.** Each archive has its own sibling `…​.tar.gz.sha256sum` at the same host (verified: HTTP 200 for both 3.22.0 and 4.3.0). So `checksum-file` is per-asset, unlike promtool's shared `sha256sums.txt`.
+3. **The version is embedded with a `v` prefix** in both the filename and the path, unlike promtool where the tag has the `v` and the filename does not.
+
+The binary sits at `{os}-{arch}/helm` inside the archive, so `exe-path` is required on every platform. Use Go arch names uniformly (`amd64`/`arm64`) via a single global `[install.arch]` remap — helm, like Prometheus, needs no Rust-triple identity override on Linux.
 
 - [ ] **Step 3: Add the pin and install it**
 
+**Pin `helm = "3.22.0"`, not 4.x.** Both are maintained (latest 3.x is 3.22.0, latest overall is 4.3.0, measured 2026-09-20). 3.x is chosen because PR 3's kind job installs ingress-nginx's own chart, and helm 3 is what that ecosystem targets; this chart is `apiVersion: v2`, which both majors render, so nothing here depends on the choice. Record the reasoning in the measurements file — moving to 4.x later is a deliberate golden re-baseline either way.
+
 ```bash
 export PROTO_REPORTER=text
-# Add `helm = "3.19.0"` to .prototools' tool block, and the plugin entry to [plugins].
+# Add `helm = "3.22.0"` to .prototools' tool block, and the plugin entry to [plugins].
 proto install helm
 proto bin helm --reporter text
 ```
@@ -775,7 +783,7 @@ export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
 helm version --short
 ```
 
-Expected: `v3.19.0+…`. Append an M2 section to `docs/superpowers/specs/2026-09-19-sma-513-measurements.md` recording the exact version, because every golden file in Task 13 is pinned against it.
+Expected: `v3.22.0+…`. Append an M2 section to `docs/superpowers/specs/2026-09-19-sma-513-measurements.md` recording the exact version, because every golden file in Task 13 is pinned against it.
 
 - [ ] **Step 5: Commit**
 
