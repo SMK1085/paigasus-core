@@ -226,6 +226,9 @@ describe('the token (§ 5.4)', () => {
     // cannot tell the direct-call path from the forbidden one. It sends the PREVIOUS result
     // (the first token) as this call's first argument instead of null, which only a second
     // call can expose.
+    // Finding B: the issue submit stays disabled while the first token is visible, so close the
+    // panel first (rule 6 still allows rotation once the user acted on the token).
+    await user.click(screen.getByRole('button', { name: 'Done' }));
     await waitFor(() => {
       expect(within(panel()).getByRole<HTMLButtonElement>('button', { name: 'Issue key' }).disabled).toBe(false);
     });
@@ -234,11 +237,62 @@ describe('the token (§ 5.4)', () => {
       expect(issue).toHaveBeenCalledTimes(2);
     });
     expect(issue.mock.calls[1]?.[0]).toBeNull();
+    await waitFor(() => {
+      expect(screen.getByTestId('token-value').textContent).toBe(TOKEN);
+    });
 
     const NEW_KEY: ApiKeyRowView = { ...KEY, id: 'key-2', prefix: 'pgs_unit_new' };
     await refresh(rerender, section(view({ selected: selected({ keys: { kind: 'ok', rows: [KEY, NEW_KEY], page: { offset: 0, nextOffset: null } } }) }), a));
 
     expect(screen.getByTestId('token-value').textContent).toBe(TOKEN);
+  });
+
+  it('disables only the Issue key submit while a token is visible, with a hint; Revoke and Archive stay enabled (Finding B)', async () => {
+    const user = userEvent.setup();
+    render(section(view(), actions()));
+
+    await user.click(within(panel()).getByRole('button', { name: 'Issue key' }));
+    await waitFor(() => {
+      expect(screen.getByTestId('token-value').textContent).toBe(TOKEN);
+    });
+
+    expect(within(panel()).getByRole<HTMLButtonElement>('button', { name: 'Issue key' }).disabled).toBe(true);
+    expect(within(panel()).getByText('Close the token panel before you issue another key.')).toBeDefined();
+    expect(within(panel()).getByRole<HTMLButtonElement>('button', { name: 'Revoke' }).disabled).toBe(false);
+    expect(within(panel()).getByRole<HTMLButtonElement>('button', { name: 'Archive' }).disabled).toBe(false);
+  });
+
+  it('enables the Issue key submit again after "Done" (Finding B)', async () => {
+    const user = userEvent.setup();
+    render(section(view(), actions()));
+
+    await user.click(within(panel()).getByRole('button', { name: 'Issue key' }));
+    await waitFor(() => {
+      expect(screen.getByTestId('token-value').textContent).toBe(TOKEN);
+    });
+    await user.click(screen.getByRole('button', { name: 'Done' }));
+
+    await waitFor(() => {
+      expect(within(panel()).getByRole<HTMLButtonElement>('button', { name: 'Issue key' }).disabled).toBe(false);
+    });
+    expect(within(panel()).queryByText('Close the token panel before you issue another key.')).toBeNull();
+  });
+
+  it('enables the Issue key submit again after a pagehide (Finding B)', async () => {
+    const user = userEvent.setup();
+    render(section(view(), actions()));
+
+    await user.click(within(panel()).getByRole('button', { name: 'Issue key' }));
+    await waitFor(() => {
+      expect(screen.getByTestId('token-value').textContent).toBe(TOKEN);
+    });
+    act(() => {
+      window.dispatchEvent(new Event('pagehide'));
+    });
+
+    await waitFor(() => {
+      expect(within(panel()).getByRole<HTMLButtonElement>('button', { name: 'Issue key' }).disabled).toBe(false);
+    });
   });
 
   it('keeps the token panel open after a revoke, so key rotation works (rule 6)', async () => {
@@ -324,7 +378,7 @@ describe('the token (§ 5.4)', () => {
 });
 
 describe('a rejected action (§ 5.4 rule 6)', () => {
-  const UNREACHED = 'The request did not reach the server. Reload the page and check the result.';
+  const UNREACHED = 'No answer came back from the server. Reload the page and check the result.';
 
   it('keeps the token open and shows the error in the result region when a later action rejects', async () => {
     const user = userEvent.setup();

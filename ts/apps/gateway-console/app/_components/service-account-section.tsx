@@ -148,6 +148,7 @@ export function ServiceAccountSection({ ownerKind, path, view, actions }: Servic
         sa={view.sa}
         hydrated={hydrated}
         disabled={busy}
+        tokenVisible={runner.tokenVisible}
         onAllow={(form) => {
           runner.run('allow', actions.allow, form);
         }}

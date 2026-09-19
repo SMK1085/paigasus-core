@@ -27,7 +27,7 @@
 // reaches the (console) error boundary, which unmounts this frame and an open TokenPanel (rule 6).
 'use client';
 
-import { createContext, use, useRef, useState, useTransition, type ReactElement, type ReactNode } from 'react';
+import { createContext, use, useCallback, useRef, useState, useTransition, type ReactElement, type ReactNode } from 'react';
 import { ZoneLink } from '@paigasus/app-shell';
 import type { FormAction } from '@paigasus/console-core';
 import type { PaigasusError } from '@paigasus/sdk/errors/types';
@@ -53,7 +53,7 @@ const ALLOW_MAY_ALREADY = 'Model calls may already be allowed. The page was relo
 /** § 5.4: a plain denial and IAM's D15 check both answer forbidden. */
 const ISSUE_FORBIDDEN = 'You need permission to issue keys here and to grant every role this account holds.';
 /** The action's promise rejected: no answer came back. The action can still have run on the server. */
-const UNREACHED_TEXT = 'The request did not reach the server. Reload the page and check the result.';
+const UNREACHED_TEXT = 'No answer came back from the server. Reload the page and check the result.';
 
 /** A client-built error for a rejected action. It never reached IAM, so it has no correlation id. */
 function unreachedError(): PaigasusError {
@@ -130,6 +130,12 @@ function ResultMessage({ result, path, saOffset }: { readonly result: SectionRes
 export type SectionRunner = {
   /** True while any action of the section runs. Every submit in the section is disabled then. */
   readonly busy: boolean;
+  /**
+   * True while an issued token is visible in the TokenPanel (Finding B). Only the Issue key
+   * submit reads this — revoke, archive, allow and create stay enabled, so key rotation (issue,
+   * copy, revoke the old key) still works (rule 6). It never carries the token itself.
+   */
+  readonly tokenVisible: boolean;
   runCreate(action: CreateAction, form: FormData): void;
   run(control: SuccessControl, action: FormAction, form: FormData): void;
   runIssue(action: IssueKeyAction, form: FormData): void;
@@ -156,8 +162,15 @@ export function ServiceAccountFrame({ path, saOffset, children }: ServiceAccount
   const [result, setResult] = useState<SectionResult>(null);
   const [working, startWork] = useTransition();
   const [issuing, startIssue] = useTransition();
+  const [tokenVisible, setTokenVisible] = useState(false);
   const generationRef = useRef(0);
   const tokenPanelRef = useRef<TokenPanelHandle>(null);
+
+  // Stable identity (Finding B): the TokenPanel effect that calls this on `pagehide` must not
+  // re-subscribe its listener on every frame render.
+  const onTokenClosed = useCallback(() => {
+    setTokenVisible(false);
+  }, []);
 
   function next(): number {
     generationRef.current += 1;
@@ -167,6 +180,7 @@ export function ServiceAccountFrame({ path, saOffset, children }: ServiceAccount
 
   const runner: SectionRunner = {
     busy: working || issuing,
+    tokenVisible,
     runCreate(action, form) {
       const mine = next();
       startWork(async () => {
@@ -209,7 +223,12 @@ export function ServiceAccountFrame({ path, saOffset, children }: ServiceAccount
         const panel = tokenPanelRef.current;
         // Only the prefix goes to the result region, never the token.
         if (panel === null) setResult({ control: 'token-lost', prefix: state.prefix });
-        else panel.show(state.token, state.prefix);
+        else {
+          panel.show(state.token, state.prefix);
+          // Finding B: the frame already knows the token just became visible at this call site,
+          // so it sets the flag itself rather than reading it back from the panel.
+          setTokenVisible(true);
+        }
       });
     },
   };
@@ -219,7 +238,7 @@ export function ServiceAccountFrame({ path, saOffset, children }: ServiceAccount
       <div className="flex flex-col gap-4">
         <div data-testid="sa-result" className="flex flex-col gap-2">
           <ResultMessage result={result} path={path} saOffset={saOffset} />
-          <TokenPanel ref={tokenPanelRef} />
+          <TokenPanel ref={tokenPanelRef} onClosed={onTokenClosed} />
         </div>
         {children}
       </div>

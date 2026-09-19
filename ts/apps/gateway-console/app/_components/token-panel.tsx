@@ -23,7 +23,18 @@ export type TokenPanelHandle = { show(token: string, prefix: string): void };
 
 type Issued = { readonly token: string; readonly prefix: string };
 
-export function TokenPanel({ ref }: { readonly ref: Ref<TokenPanelHandle> }): ReactElement | null {
+export type TokenPanelProps = {
+  readonly ref: Ref<TokenPanelHandle>;
+  /**
+   * Called whenever the panel clears its token: on "Done" and on `pagehide`. It is NOT called
+   * from `show()` — the frame already knows a token is visible at that call site (Finding B, CR
+   * round). A boolean only ever crosses this callback; the token itself never leaves this
+   * component's own state.
+   */
+  readonly onClosed?: () => void;
+};
+
+export function TokenPanel({ ref, onClosed }: TokenPanelProps): ReactElement | null {
   const [issued, setIssued] = useState<Issued | null>(null);
   const [copied, setCopied] = useState(false);
 
@@ -48,12 +59,13 @@ export function TokenPanel({ ref }: { readonly ref: Ref<TokenPanelHandle> }): Re
       flushSync(() => {
         setIssued(null);
       });
+      onClosed?.();
     };
     window.addEventListener('pagehide', close);
     return () => {
       window.removeEventListener('pagehide', close);
     };
-  }, [issued]);
+  }, [issued, onClosed]);
 
   if (issued === null) return null;
   return (
@@ -87,6 +99,7 @@ export function TokenPanel({ ref }: { readonly ref: Ref<TokenPanelHandle> }): Re
           className={PRIMARY_BUTTON_CLASS}
           onClick={() => {
             setIssued(null);
+            onClosed?.();
           }}
         >
           Done

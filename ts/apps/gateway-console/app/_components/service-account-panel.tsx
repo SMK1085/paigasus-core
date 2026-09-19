@@ -22,6 +22,12 @@ export type ServiceAccountPanelProps = {
   readonly hydrated: boolean;
   /** true while any action of the section runs (§ 5.4 rule 5). */
   readonly disabled: boolean;
+  /**
+   * true while an issued token is visible in the TokenPanel (Finding B). It disables ONLY the
+   * Issue key submit, with a hint — revoke, archive and allow stay enabled, so key rotation
+   * (issue, copy, revoke the old key) still works (rule 6).
+   */
+  readonly tokenVisible: boolean;
   readonly onAllow: (form: FormData) => void;
   readonly onIssue: (form: FormData) => void;
   readonly onRevoke: (form: FormData) => void;
@@ -204,7 +210,16 @@ export function ServiceAccountPanel(props: ServiceAccountPanelProps): ReactEleme
         {`Can call models: ${MODEL_CALLS_TEXT[modelCalls]}`}
       </p>
       {controls.allow && props.hydrated ? <AllowModelCallsForm saPrn={account.prn} disabled={props.disabled} onSubmit={props.onAllow} /> : null}
-      {controls.issue && props.hydrated ? <IssueKeyForm saPrn={account.prn} disabled={props.disabled} onSubmit={props.onIssue} /> : null}
+      {controls.issue && props.hydrated ? (
+        <div className="flex flex-col gap-1">
+          <IssueKeyForm saPrn={account.prn} disabled={props.disabled || props.tokenVisible} onSubmit={props.onIssue} />
+          {props.tokenVisible ? (
+            <p data-testid="issue-key-hint" className="text-muted-foreground text-sm">
+              Close the token panel before you issue another key.
+            </p>
+          ) : null}
+        </div>
+      ) : null}
       <KeysList keys={keys} saPrn={account.prn} path={props.path} saOffset={props.saOffset} sa={props.sa} revoke={controls.revoke} disabled={props.disabled} onRevoke={props.onRevoke} />
       {controls.archive ? <ArchiveServiceAccountButton saPrn={account.prn} disabled={props.disabled} onConfirm={props.onArchive} /> : null}
     </section>
