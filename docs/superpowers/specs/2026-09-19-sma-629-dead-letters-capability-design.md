@@ -215,7 +215,8 @@ The page (`page.tsx`):
 
 1. Reads `searchParams` and the session token, then calls `discovery().getServiceState('iam', token)`.
 2. `not-found` → `notFound()`. This covers an absent IAM, and an available IAM without the key.
-3. `degraded` → the degraded view (§ 6.4), HTTP 200, and no IAM call.
+3. `degraded` → the degraded view (§ 6.4), HTTP 200, and no `ListDeadLetters` call. (The discovery
+   probe in step 1 is the only IAM request.)
 4. `available` → validates the query (§ 6.3), builds the clients, and calls the loader.
 
 The page does not call `mayI()` (SMA-511 § 6.3): a typed URL is a user action, and IAM answers it.
@@ -441,8 +442,10 @@ codegen-drift step.
 - **The payload may hold personal data.** The screen shows it to Root users only, which IAM already
   allows through the API. The console does not log it.
 - **A lost network response.** When a replay or discard response is lost, the runner cannot know the
-  result. It says so and asks the operator to reload. A later retry of the same id answers
-  `not-found` with `DEAD_LETTER_GONE`, which covers this case.
+  result. It says so and asks the operator to reload. The reloaded list is the answer. A retry
+  without a reload is not always safe to read: it answers `not-found` (with `DEAD_LETTER_GONE`) only
+  while the row is not parked. If the new publish failed, the relay parks the row again, and a retry
+  replays it again.
 
 ---
 

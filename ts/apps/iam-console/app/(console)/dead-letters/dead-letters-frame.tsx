@@ -17,8 +17,9 @@
 //
 // A REJECTED ACTION (a network drop, a server fault). The runner catches it and shows a client-built
 // error. It never rethrows: a rethrow reaches (console)/error.tsx, which unmounts this frame. The
-// action may still have run on the server, so the text says the result is unknown; a later retry of
-// the same id answers not-found, and DEAD_LETTER_GONE covers that (§ 9).
+// action may still have run on the server, so the text says the result is unknown and asks for a
+// reload. A later retry of the same id answers not-found only while the row is not parked: if the
+// new publish failed, the relay parks the row again and a retry replays it again (§ 9).
 'use client';
 
 import { createContext, use, useRef, useState, useTransition, type FormEvent, type ReactElement, type ReactNode } from 'react';

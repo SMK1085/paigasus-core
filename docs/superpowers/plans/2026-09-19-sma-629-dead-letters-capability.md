@@ -13,7 +13,7 @@
 ## Global Constraints
 
 - Work only in the worktree `/Users/smaschek/dev/paigasus/paigasus-core/.claude/worktrees/sma-629-dead-letters`, branch `feature/sma-629-dead-letters`. Check the branch before the first commit.
-- Before any Moon, buf, uv or pnpm command: `export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"; export PROTO_REPORTER=text`.
+- Before any Moon, buf, uv, pnpm or `cargo nextest` command: `export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"; export PROTO_REPORTER=text`.
 - If the sandbox refuses a compound shell command, write it to a script in `/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/60d1d45d-b338-40eb-b51d-ba6e2f04ed45/scratchpad/` and run it with `/bin/bash <script>`.
 - Every new source file opens with `// SPDX-License-Identifier: Apache-2.0` (TS, Rust) or `# SPDX-License-Identifier: Apache-2.0` (Python). A `'use client'` or `'use server'` directive comes after the header comment block, as in the existing files.
 - Conventional commits with a workspace scope from the commitlint allowlist (`rs`, `py`, `ts`, `contracts`, `ci`, `docs`, `deps`, `release`, `repo`, `claude`, `workspace`). This plan uses `feat(contracts)`, `feat(rs)`, `feat(ts)`, `test(ts)` and `docs(repo)`, exactly as each task's commit step shows. Header at most 100 characters, body lines at most 100 characters. No body line may start with `#NNN` or have the shape `token: value` (it fails `footer-leading-blank`). Each commit step passes the trailer as its own `-m` paragraph.
