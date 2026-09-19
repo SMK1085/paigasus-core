@@ -70,6 +70,12 @@ export function withOperationDeadline(inner: SessionStore, client: ReadySource, 
     } catch (error) {
       // Only a DEADLINE expiry opens the circuit. A fast failure (ClientOfflineError during a
       // reconnect) passes through and leaves the circuit as it is.
+      //
+      // `instanceof` is SAFE here, unlike core/single-flight.ts's (SMA-657). Both throw sites and
+      // this catch are inside the SAME `bounded` closure, built once by one copy of this package.
+      // The returned store is shared to the other copy through the runtime, and calling it runs
+      // this closure verbatim — it never re-resolves SessionStoreTimeout against the other copy's
+      // module registry.
       if (error instanceof SessionStoreTimeout && error.phase === 'deadline') {
         // Concurrent operations expire together. Only the FIRST opens the circuit and logs.
         if (openedAt === null) {

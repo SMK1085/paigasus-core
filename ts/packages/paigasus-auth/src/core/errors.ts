@@ -18,7 +18,8 @@ export type SessionStoreTimeoutPhase = 'deadline' | 'circuit-open';
  * `circuit-open` means an earlier one did and this one was refused without touching the socket.
  *
  * A SUBCLASS of SessionStoreUnavailable, deliberately: every caller that classifies on that class
- * (next/get-session.ts, core/single-flight.ts's release-time catch) keeps working unchanged, and
+ * (http/store-unavailable.ts's storeStep, reached from every store call in http/routes.ts, and
+ * next/get-session.ts) keeps working unchanged, and
  * `code` stays 'session_store_unavailable'. `name` is set explicitly because a production bundle
  * can mangle `constructor.name`. The message names one of seven fixed operation literals and a
  * number, never the DSN.
@@ -53,7 +54,8 @@ export class SessionStoreTimeout extends SessionStoreUnavailable {
  * THE RULE, stated once (SMA-657 D7). A class thrown by a closure that is reachable through shared
  * state, and caught OUTSIDE that closure, must be classified by its `code`. A class thrown and
  * caught inside one closure, or thrown and caught by two modules of one copy, may use `instanceof`
- * — the boundary is the CLOSURE, not whether state is shared.
+ * — the boundary is the CLOSURE, not whether state is shared. The three remaining `instanceof`
+ * sites in this package each carry a comment saying which side of that line they fall on.
  *
  * The `err instanceof Error` test is an `instanceof` against a BUILTIN, which both copies share in
  * one isolate, so it does not have the defect this function exists to avoid. It is what rejects a
