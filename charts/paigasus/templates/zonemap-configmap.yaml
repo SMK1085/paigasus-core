@@ -1,0 +1,12 @@
+{{/* SPDX-License-Identifier: Apache-2.0 */}}
+{{- include "paigasus.validate" . -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "paigasus.fullname" . }}-zonemap
+data:
+  # Byte-identical across every console pod BY CONSTRUCTION — one object, mounted by both — rather
+  # than by template discipline. assertCompiledAgreement() throws on a pod whose OWN entry
+  # disagrees, but it does not check the other zones' entries, so this is the control, not it.
+  PAIGASUS_ZONES: {{ include "paigasus.zoneMapJson" . | quote }}
+  PAIGASUS_SERVICES: {{ include "paigasus.serviceMapJson" . | quote }}
