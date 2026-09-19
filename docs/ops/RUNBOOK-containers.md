@@ -26,12 +26,17 @@ ci/images/run.sh build gateway    # build only paigasus-gateway
 ci/images/run.sh smoke [iam|gateway]...  # smoke-test images built at this HEAD
 ```
 
-The build context is `rs/` (the Cargo workspace root). This is also what
-`.github/workflows/images.yml` runs in CI — `workflow_dispatch`, on every `push` to `main` that
-touches `rs/**`, and on pull requests that touch the build inputs (`rs/Cargo.lock`,
-`rs/Cargo.toml`, `rs/rust-toolchain.toml`, `rs/Dockerfile`, `rs/.dockerignore`,
-`ci/images/**`). **The workflow is not a required check**, so a broken image build reds `main`
-after merge rather than blocking the PR that broke it.
+No CI job runs `build` or `all` any more. `.github/workflows/images.yml` runs `build-oci`,
+`load-oci`, `smoke` and `rehearse` instead (see "Release tooling" below). So `build` and `all` can
+break without turning CI red. Run them yourself before you rely on them.
+
+The build context is `rs/` (the Cargo workspace root). `.github/workflows/images.yml` runs on
+`workflow_dispatch`, on every `push` to `main` that touches `rs/**`, and on pull requests that
+touch the build inputs (`rs/Cargo.lock`, `rs/Cargo.toml`, `rs/rust-toolchain.toml`,
+`rs/Dockerfile`, `rs/.dockerignore`, `ci/images/**`, `.github/workflows/images.yml`,
+`.prototools`, `.proto/plugins/crane.toml`, `.proto/plugins/syft.toml`). **The workflow is not a
+required check**, so a broken image build reds `main` after merge rather than blocking the PR
+that broke it.
 
 That said, a PR touching any of the filtered inputs above — including `rs/Dockerfile` — already
 triggers the workflow automatically via its `pull_request` path filter; no manual step is needed
@@ -47,9 +52,10 @@ ghcr.io/smk1085/paigasus-iam:<git-sha>
 ghcr.io/smk1085/paigasus-gateway:<git-sha>
 ```
 
-Publishing to the registry is deferred — `ci/images/run.sh` only builds and smoke-tests, it never
-pushes, and no registry credentials are wired into `images.yml`. The names and the `:<git-sha>`
-tag convention are fixed now regardless, so SMA-513's Helm chart has a concrete
+Publishing to a real registry is deferred — `ci/images/run.sh` builds, smoke-tests, and (through
+its `rehearse` command) pushes only to two throwaway local `registry:2` containers. It pushes to
+no real registry, and no registry credentials are wired into `images.yml`. The names and the
+`:<git-sha>` tag convention are fixed now regardless, so SMA-513's Helm chart has a concrete
 `image.repository`/`image.tag` to inherit rather than inventing its own image story.
 
 ## 3. Runtime configuration
@@ -325,12 +331,13 @@ observed truncating a drain.
 
 `ci/images/run.sh build` makes a `chisel-manifest-<service>.txt` file for each service, for
 example `chisel-manifest-iam.txt`. The file lists the exact `chisel cut` package versions the
-build used, including the resolved `libc6`. `.github/workflows/images.yml` uploads these files as
-a CI artifact named `chisel-manifests-<arch>`, with 90-day retention.
+build used, including the resolved `libc6`. This file stays local: `images.yml` does not run
+`build`, so CI uploads nothing from it.
 
 `ci/images/run.sh build-oci` writes a different file name: `chisel-manifest-<service>-<arch>.txt`.
 It adds the architecture, because a per-arch build can run on two different runners in the same
-workflow.
+workflow. `.github/workflows/images.yml` runs `build-oci` and uploads these files as a CI
+artifact named `chisel-manifests-<arch>`, with 90-day retention.
 
 This is the answerable half of a real limit. `chisel cut` uses the **live** Ubuntu archive (see
 § 2.6 of the design document). So two builds one month apart produce different, patched base
@@ -389,6 +396,6 @@ none of those steps. PR 2's first real release is their first test.
 
 ### The scratch package
 
-The rehearsal pushes to `ghcr.io/smk1085/paigasus-rehearsal`. This package becomes private after
-its first push. It holds only rehearsal images. Delete old versions in the package settings when
-you do not need them.
+The rehearsal pushes to `ghcr.io/smk1085/paigasus-rehearsal`. GitHub makes this package private
+after its first push. It holds only rehearsal images. Delete old versions in the package settings
+when you do not need them.

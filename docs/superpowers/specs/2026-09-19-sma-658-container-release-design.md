@@ -219,8 +219,10 @@ plan ─┬─ wheels / prebuild / proto-dist ─ approve-release ─ release �
 `ci/images/run.sh` changes:
 
 - `build` gets an OCI-archive mode and the version label. The `--load` mode stays for `images.yml`.
+  Superseded: see § 16 P6. `images.yml` now uses the OCI path (§ 8), not the `--load` mode.
 - `smoke` gets an optional service argument. The uid loop at `:431` names both containers and
-  changes with it. The stale-image guard at `:444-456` stays.
+  changes with it. The stale-image guard at `:444-456` stays. Superseded: see § 16 P6. `images.yml`
+  now uses the OCI path (§ 8), not the `--load` mode.
 - `assert_base_intact`'s `.Size` check (`:355`) is re-checked under the containerd image store (M3).
 
 ### 4.3 `publish-images-<svc>` — after the approval
