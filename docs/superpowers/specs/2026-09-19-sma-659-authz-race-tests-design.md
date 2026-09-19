@@ -153,7 +153,9 @@ moves it to `tests/support/` when it gets a second user. The other fixed sleeps 
 
 ## 4. Verification
 
-Every local run below uses `PAIGASUS_REQUIRE_DOCKER=1` and `--retries 0`: a filtered run
+Every local run below starts with `export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"`, so
+`cargo nextest` and `moon` resolve to the repository-pinned tools rather than to a global binary.
+Every local run below also uses `PAIGASUS_REQUIRE_DOCKER=1` and `--retries 0`: a filtered run
 without Docker skips silently, and a retry can turn a failing mutation green. Every mutation is
 a marked insert and is undone by deleting the marked lines, never by `git checkout`.
 
