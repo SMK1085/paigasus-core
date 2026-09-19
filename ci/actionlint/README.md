@@ -35,14 +35,14 @@ cross-cutting pin needs — a narrower `inputs` list would be the SMA-553 failur
 | 4 | A healthy stdin fixture must pass — the control for check 3 |
 | 5 | Every `paths:` glob is in the supported vocabulary and matches the tracked tree, and every `branches:` entry resolves as a ref or is skip-listed |
 | 6 | Every extracted filter key carries at least one sequence entry; a `paths:`/`branches:` key must also have at least one of them positive (the `-ignore` variants are exempt) |
-| 7 | Fifteen self-tests against fixture tables — extractor, path-filter verdicts, branch-filter verdicts, config allowlist, ci-target floor, invocation allowlist, affected-graph wiring, block execution, kill predicate, affected-smoke block, release guard, cargo-lock step, release-plan, doc-diagnosis, early-exit reader — plus a counter (`SELF_TESTS_RAN`/`SELF_TEST_COUNT`) asserting all fifteen ran, and a definition-count check catching a sixteenth table that is defined but never wired into `run_self_tests` (`run.sh --self-test`) |
+| 7 | Sixteen self-tests against fixture tables — extractor, path-filter verdicts, branch-filter verdicts, config allowlist, ci-target floor, invocation allowlist, affected-graph wiring, block execution, kill predicate, affected-smoke block, release guard, cargo-lock step, release-plan, doc-diagnosis, early-exit reader, pipe capacity — plus a counter (`SELF_TESTS_RAN`/`SELF_TEST_COUNT`) asserting all sixteen ran, and a definition-count check catching a seventeenth table that is defined but never wired into `run_self_tests` (`run.sh --self-test`) |
 | 8 | `ci.yml`'s `T=(…)` still schedules the gate that guards `T` itself, and nothing silences that gate's result. Six verdict families: **(a)** the floor — `:affected-smoke` present in `T` (`missing`), or the array can't even be read (`no-array`/`no-file`); **(b)** no `moon` command line is continued onto another physical line, where a discarded exit status would be invisible to this check (`continued`); **(c)** no single-line `moon` command line discards its own exit status (`swallowed`), with `SWALLOWED_SKIP` as the escape hatch for an unrelated `moon` line this check cannot know is harmless; **(d)** no line CLOSING a block (`fi`/`done`/`}`) discards its own exit status either, the same tail on a different line (`block-swallowed`), sharing `SWALLOWED_SKIP`; **(e)** no `moon ci`/`moon run` invocation sits behind a known command wrapper (`command`/`env`/`time`/`eval`/`exec`/`if`/`while`/`until`/`!`) on the same line, where propagation cannot be confirmed (`wrapped`), sharing `SWALLOWED_SKIP` as its escape hatch; **(f)** no step's `continue-on-error:` value suppresses it — any spelling but the literal `false` (`continue-on-error`), with `COE_SKIP` as the escape hatch for an unrelated later step |
 | 8b | Every line in `ci.yml` carrying the target-array expansion `"${T[@]}"` matches one of `T_INVOCATION_ALLOWLIST` (declared with `T_FLOOR`) **exactly** — indentation included — and the number of such lines matches the array's length. This is the PRIMARY guard on the INVOCATION LINES themselves (SMA-542 CodeRabbit round 3, finding B — a bare `VAR=value` assignment prefix defeated BOTH check 8's `swallowed` and `wrapped`, since it has neither `moon` at column 0 nor a recognized wrapper token there); check 8's `continued`/`swallowed`/`block-swallowed`/`wrapped` stay for their more specific diagnostics and are consulted first, so a line they already explain is not also reported here as `not-allowlisted`. It matches each LINE against a SET of allowed forms, with no notion of which branch a line sits under, so it is NOT a complete guard on the step's control flow — check 8d, below, closes the concretely-identified gaps; see L12 for what (if anything) still isn't |
 | 8c | `ci/affected-graph/run.sh` still contains its own two call sites into `ci_targets.py` — `assert_ci_targets \|\| SUITE_RC=1` and `"$HERE/ci_targets.py" --self-test \|\| NEG_RC=1` — WITH each `\|\| RC=1` propagation suffix intact (`missing <site>`), and that the file itself exists and is readable (`no-file`). Closes L6 (SMA-542 residual closure, PR 150 follow-up): check 8 above pins only `:affected-smoke`'s *scheduling*; this pins the two lines that actually INVOKE the gate which, in turn, pins THIS file's own call sites back (`ci_targets.py`'s `ACTIONLINT_SH_CALL_SITES`). Scheduled independently of `ci/affected-graph/`, so it survives a deletion there that would otherwise green both directions of the cycle silently |
 | 8d | The `"moon ci (affected graph)"` step's `run:` block — extracted from `ci.yml`, dedented, then EXECUTED once per GitHub event path (`pull_request`; `push` with a real `BEFORE` sha; `push` with the all-zero `BEFORE`; `push` with an empty `BEFORE`) against a `moon` stubbed in a `mktemp -d` bin directory placed first on a minimal PATH. Each path must invoke `moon` **exactly once**, with the exact subcommand + the WHOLE `T` array + the `--base`/`--include-relations` shape that path requires (`no-step`/`multi-step <n>` when the step can't be found unambiguously, `no-run-block` when its `run:` block can't be extracted, `no-target-array` when `T` can't either, `zero-invocations <path>`, `wrong-count <path> <n>`, `bad-args <path>`). Closes README L12 (SMA-542 residual closure, PR 150 follow-up): 8b matches invocation LINES; this proves the CONTROL FLOW around them actually reaches one, on every path — an outer `if false; then … fi` (byte-identical lines, zero executions) now reds, and so does a `"${T[@]}"` line moved to the wrong branch (individually allowlisted, wrong condition) |
 | 8e | `moon.yml`'s `repo:affected-smoke` task still declares every input that schedules a pin in `ci/affected-graph/ci_targets.py`, and still runs its `set -euo pipefail` / `--negative-control` / real-run script lines in the right order (SMA-572/SMA-573). Two tables: `T_AFFECTED_SMOKE_REQUIRED_INPUTS` (20 globs/files) is matched by **containment** — the block's `inputs:` sequence must be a superset, since the list legitimately grows every time a gate keys on a new directory — while `T_AFFECTED_SMOKE_REQUIRED_SCRIPT` (3 lines) is matched **whole-line, in order**: unlike the inputs table, a set-membership check would accept `set -euo pipefail` moved below the invocations, and Moon takes a `script:` block's status from its LAST command, so that reordering silently stops a failing `--negative-control` from propagating. Verdicts: `no-file`/`no-task`/`bad-task-form`/`bad-script-form`/`bad-inputs-form`/`duplicate-key <name>` (the block could not be parsed — `no-task` means the extractor saw no key at exactly two spaces of indentation whose name is `affected-smoke`; it identifies the task by INDENTATION AND NAME ONLY and never checks that the key is nested under a `tasks:` mapping, see L18), `missing-input <glob>`, `missing-script <line>` (a commented-out copy counts as absent), `out-of-order-script <line>`, `skip-without-reason <glob>`, `stale-skip <glob>`. Each table carries an `-ge` arity floor (20 / 3, pinned back from `ci_targets.py`'s `ACTIONLINT_SH_CALL_SITES`) so an EMPTIED table cannot pass by asserting nothing — `check_self_invocation` alone cannot buy this, since 8e's tables are not a dual copy of anything else the way check 8c's is. `REQUIRED_INPUT_SKIP` is the escape hatch for a legitimately-removed input, mirroring `COE_SKIP`/`SWALLOWED_SKIP`/`BRANCH_SKIP`: an entry with no stated reason is reported (`skip-without-reason`), and one naming a glob no longer required is reported too (`stale-skip`), so a waiver cannot outlive its glob. Unconditional, like check 8c — it reads `moon.yml`, not `ci.yml`, so gating it on `ci.yml`'s existence would switch it off for an unrelated reason — and COLUMN 0 for both floor lines, the same discipline as checks 8/8b/8c/8d's own call-site pins |
 | 8f | The `cargo-lock-integrity` step in `ci.yml` is still wired, and the script it invokes still asserts something (SMA-601). Two tables. `T_CARGO_LOCK_STEP_REQUIRED` (6 lines) pins the step: entry 0 is its `- name:` line, matched against the whole stripped file and used to LOCATE the step; the other five — `run: \|`, `set -euo pipefail`, and the `--self-test` / `--negative-control` / bare invocations — are matched **whole-line and in order, inside the step's own window only**, because `run: \|` and `set -euo pipefail` occur in other `ci.yml` steps and a whole-file match on them would be vacuous. The step must also PRECEDE the `moon ci` step (`out-of-order`), carry no `continue-on-error:` other than the literal `false` (`continue-on-error <value>`), and carry **no `if:` at all** (`conditional <expr>`). Both protected keys are matched after normalising the quoted (`"if":`) and spaced (`if :`) spellings, and YAML's explicit-key form (`? if` / `: always()`) is REJECTED outright (`explicit-key <key>`) rather than parsed — measured, that form yields a real `if` key and actionlint accepts it at rc 0, so it would clear check 1 and evade every same-line scan — a skipped step is a green step, so any `if:` switches the guarantee off for every event it excludes, `pull_request` included, which is exactly where a Dependabot PR ships a truncated lock. `T_CARGO_LOCK_SH_CALL_SITES` (6 lines) pins `ci/cargo-lock-integrity/run.sh` itself (`missing-site <text>`, `no-file`): the two flag-parse arms, the `cargo metadata --locked` line, the negative control's call into the real assertion, that control's rc=1 report arm, and the real run's own call. MEASURED: deleting `--locked` from that one line makes the command exit 0 **and repair the lock**, so the gate prints "satisfies every manifest" and becomes the first repairer — the SMA-530 "control that actively lies" shape. This file is the right home for both because `repo:actionlint` carries `inputs: ['**/*']`, so it is scheduled on every PR without a new input registration, and unlike a pin inside `ci/affected-graph/` it is not the sole judge of its own reachability |
-| 9 | A mutation battery, full-gate only: each of the fifteen self-test invocations inside `run_self_tests`, deleted one at a time, run concurrently against the real unmutated control — every mutant must die at the counter's own message (a kill predicate driven by its own fixture table, not merely "non-zero"), or the battery itself reds |
+| 9 | A mutation battery, full-gate only: each of the sixteen self-test invocations inside `run_self_tests`, deleted one at a time, run concurrently against the real unmutated control — every mutant must die at the counter's own message (a kill predicate driven by its own fixture table, not merely "non-zero"), or the battery itself reds |
 | 10 | (SMA-579) The release guard, whose VERDICT lives in `ci/actionlint/release_guard.py` because it needs YAML structure (a job-level `if:` told apart from eight identical step-level ones, `needs:` chains walked) rather than line-oriented text scanning. Two parts: `release_guard_self_test`, in the battery above, asserts `release_guard.py --fixture-count` reports at least 105 fixtures and that `--self-test` itself reports a healthy verdict; the full-gate-only half runs `release_guard.py` over the real `.github/workflows/release.yml` and fails on anything it reports, capturing its output to a file first since a process substitution would silently discard its exit status. Fail-closed on EVERY status, not only the guard's own 2: an unreadable file or unparseable YAML gives 2, a missing `uv` gives **127 from the wrapper**, and a kill gives 137 — all three abort the gate. An earlier revision of this row claimed a missing `uv` was covered by the exit-2 routing; it was not, and a status the routing did not recognise left the gate passing having asserted nothing (measured at rc 127, SMA-579 fix round 3). rc 1 with no output aborts too, since that contradicts the guard's own contract |
 | 11 | (SMA-603) The release-plan decision, whose VERDICT lives in `ci/release-plan/release_plan.py` — TAG EXISTENCE against the derived releasable set, not a `release-plz release --dry-run` read (see that project's own README for why the dry-run reading is silently, permanently wrong). Two parts: `release_plan_self_test`, in the battery above, reads `release_plan.py --fixture-count` directly rather than through `ci/release-plan/run.sh` (that wrapper's flag parser rejects `--fixture-count` outright), asserts it reports at least 8 fixtures (a floor against 9 actual — one row of headroom so a legitimate row removal does not abort the gate as infra), and asserts `ci/release-plan/run.sh --self-test` and `--negative-control` both report a healthy verdict; the full-gate-only half runs `ci/release-plan/run.sh --assert` over the real repository and fails on anything it reports. Fail-closed on every status the wrapper can produce, the same shape as check 10: exit 2 aborts the gate (uv or the interpreter failed, not an assertion), exit 1 fails it (the derived releasable set, a crate version, or the tag-name format changed), and anything else non-zero also aborts — this file is `set -uo pipefail` with **no** `-e`, so an unrouted status would finish the gate rc 0 having asserted nothing |
 | 12 | Every tracked file carrying the token `ciReport` must carry `<!-- moon-diagnosis:superseded -->` (a dated record), `<!-- moon-diagnosis:ok -->` (a deliberate reference to the corrected procedure), or a `CIREPORT_MENTIONS_ALLOWED` row with a non-empty reason — plus CLAUDE.md's `moon-diagnosis` block must exist, have exactly one ordered marker pair, be non-empty, and contain all five entries of `DOC_DIAGNOSIS_REQUIRED_LITERALS` (SMA-597). Three `-ge` arity floors keep an emptied table from passing having asserted nothing: the corpus command must find at least 60 tracked files carrying the token, `DOC_DIAGNOSIS_REQUIRED_LITERALS` must have at least 5 entries, and `CIREPORT_MENTIONS_ALLOWED` must have at least 3 — the third floor closes a bash-3.2-specific hole (macOS's system bash, this repo's stated compat target): an emptied `CIREPORT_MENTIONS_ALLOWED` makes `for entry in "${CIREPORT_MENTIONS_ALLOWED[@]}"` an unbound-variable error under `set -u` on bash 3.2 (measured; bash 4.4+ reds instead), which kills the process substitution rather than the gate and lets the assertion pass having asserted nothing |
@@ -167,6 +167,46 @@ version. **A version bump re-opens that verification — it is not a one-time ch
 stays disabled: actionlint only ever applies pyflakes to a step declaring `shell: python`, and
 `wheels.yml`'s Python-shaped blocks are actually bash heredocs, so nothing in this repository would
 be covered by turning it on.
+
+## Small pipes on macOS
+
+**The symptom.** On the development Mac, the gate ran for many minutes and printed no output
+(SMA-612).
+
+**The trigger.** A new pipe on that host holds only 512 bytes (M4, M6, M10). All measurements
+below ran inside a Claude Code agent session. A plain Terminal session is not measured; see
+the open question in
+`docs/superpowers/specs/2026-09-19-sma-612-actionlint-pipe-capacity-design.md`, §10 Q1.
+
+**Mechanism 1 — actionlint.** actionlint 1.7.12 writes the whole `run:` script into
+shellcheck's stdin before it starts shellcheck. No reader exists yet, so a script over the
+pipe's capacity never finishes writing. actionlint then busy-loops at about 300% CPU (M2, M3).
+Upstream issue [#650](https://github.com/rhysd/actionlint/issues/650) reports the same fault.
+Commit `fd33e9f582` fixes it. No actionlint release contains that fix on 2026-09-19.
+
+**Mechanism 2 — bash here-strings.** Homebrew bash 5.x writes a here-string into a pipe
+before the reader starts. The measured boundary is exact: 512 bytes finish, and 513 bytes
+hang (M9). Under this bash, the gate's self-tests deadlock at about 0% CPU, before check 1
+ever runs (M8).
+
+**What the gate does now.** In full-gate mode, a preflight step measures the pipe capacity
+before the self-tests run. If the capacity is below 8192 bytes, the gate exits at rc 2 with a
+`small` message. `--self-test` mode does not run the preflight.
+
+**How to check a host.** Run this command. It prints `512` on a host in the small state, and
+`16384` or more on a healthy host (spec §10 Q1):
+
+```sh
+/usr/bin/python3 -c $'import os,fcntl\nr,w=os.pipe();fcntl.fcntl(w,fcntl.F_SETFL,os.O_NONBLOCK);n=0\ntry:\n  while n<1<<20: n+=os.write(w,b"x")\nexcept BlockingIOError: pass\nprint(n)'
+```
+
+**A syntax-only workaround.** Run `actionlint -shellcheck= -pyflakes= <file>` to check only
+the workflow syntax. This command is NOT the gate. It skips shellcheck and every other check
+this gate runs.
+
+**Removing the probe.** The probe stays until a later change removes it, per decision D9 in
+`docs/superpowers/specs/2026-09-19-sma-612-actionlint-pipe-capacity-design.md`. See the
+SMA-612 follow-up issue.
 
 ## Limitations
 
@@ -566,6 +606,22 @@ or a brace group — `| ( grep -q … )` or `| { grep -q …; }` — does not fi
 handshake line uses that form, and it passes check 13 only because of this gap. Closing the gap
 later needs that line restructured, or an allowlist row.
 
+**L42 (SMA-612) — the pipe-capacity preflight has four residual risks.**
+
+R1: the probe measures one pipe at one moment. The small-pipe state is probably global to the
+host. A state change between the probe and check 1 can still cause a hang. No measurement
+gives this a probability.
+
+R2: `--self-test` mode does not run the preflight (D2). On a small-pipe host, `--self-test`
+can still hang silently under Homebrew bash.
+
+R3: a copy of a pinned call line, placed inside a dead code block, can still satisfy the
+call-site pins (see L10, above). The probe's own Python text is pinned as one line only. A
+change inside that line, which still prints a large number, is not caught by any pin.
+
+R4: the probe detects only the one measured trigger. A different cause of the same hang, with
+a normal pipe size, stays undetected. The gate has no watchdog timer.
+
 ## Cost
 
 `inputs: ['**/*']` is deliberate (see the WHY comment on the `actionlint:` task in `moon.yml`),
@@ -752,10 +808,10 @@ project's own `--self-test` and `--negative-control`, bypassing `ci/actionlint/r
 entirely — min-of-3 on this session's sandbox host: `ci/release-plan/run.sh --self-test` ~0.10s,
 `ci/release-plan/run.sh --negative-control` ~0.81s. Check 9's battery re-invokes the whole of
 `ci/actionlint/run.sh --self-test` (which calls `release_plan_self_test`, which calls both of
-these) roughly sixteen times per full gate run — fifteen mutants plus the unmutated control, since
-SMA-647 — so the new row's `uv run` is paid roughly 16x per `moon run repo:actionlint`, not once.
-This does not change check 9's own fixture-table or mutant count (fifteen and fifteen, below); it only
-grows the per-invocation subprocess count nested inside check 11.
+these) roughly seventeen times per full gate run — sixteen mutants plus the unmutated control,
+since SMA-612 — so the new row's `uv run` is paid roughly 17x per `moon run repo:actionlint`, not
+once. This does not change check 9's own fixture-table or mutant count (sixteen and sixteen,
+below); it only grows the per-invocation subprocess count nested inside check 11.
 
 **SMA-597 added a FOURTEENTH self-test.** `doc_diagnosis_self_test` (check 12) is a fixture-table
 check at the same `grep`/`sed` level as checks 1-8f, not a real-subprocess check like 10 and 11 —
@@ -771,12 +827,18 @@ fixture-table check at the same `grep`/`sed`/`awk` level as check 12. It reads i
 real producer and a real reader, which waits for flag files in steps of 0.1 s. No timing was
 measured for this paragraph; only the row and mutant counts below are asserted.
 
-State: CURRENT — fifteen fixture tables, fifteen mutants (sixteen concurrent `--self-test`
-subprocesses in check 9's battery: fifteen mutants plus the unmutated control). Nested one level
+**SMA-612 added a SIXTEENTH self-test.** `pipe_capacity_self_test` is a fixture-table check at
+the same level as checks 12 and 13. It drives `pipe_capacity_verdict` against fifteen input
+rows, with no subprocess of its own. The preflight function it backs runs only in full-gate
+mode (D2), so `--self-test` mode checks the verdict function but never runs the probe itself.
+No timing was measured for this paragraph; only the row and mutant counts below are asserted.
+
+State: CURRENT — sixteen fixture tables, sixteen mutants (seventeen concurrent `--self-test`
+subprocesses in check 9's battery: sixteen mutants plus the unmutated control). Nested one level
 in, check 11's own `negative_control()` now runs seven `uv run` subprocesses per invocation
-(SMA-608, above), not six, so the battery's sixteen concurrent `--self-test` subprocesses each pay
-that extra `uv run` too — check 9's fixture-table and mutant counts are unchanged by this, only the
-subprocess count nested inside check 11 grew. `--self-test` and
+(SMA-608, above), not six, so the battery's seventeen concurrent `--self-test` subprocesses each
+pay that extra `uv run` too — check 9's fixture-table and mutant counts are unchanged by this,
+only the subprocess count nested inside check 11 grew. `--self-test` and
 full-gate timings continue to vary by host and load, as the notes above already establish; see the
 SMA-597 paragraph immediately above for the most recent measurement. The toolchain also moved moon
 2.3.2 -> 2.5.3 earlier under this branch (SMA-595), so no figure in this section should be read as
@@ -792,6 +854,12 @@ shells out to neither `uv` nor `shellcheck`, by the same "must stay runnable wit
 installed" placement rule the actionlint-binary guard already follows (see "shellcheck
 provenance" above).
 
+**SMA-612 added a second `uv run` to the full-gate path.** The pipe-capacity preflight (see
+"Small pipes on macOS" above) runs one `uv run --locked --project py python3 -c …` call before
+the self-tests start. This is in addition to the `SHELLCHECK_BIN` resolution above, so the
+full-gate path now pays two `uv run` calls, not one. `--self-test` mode still shells out to
+neither call (D2). The measured cost of the new call is about 0.3 s (spec D7).
+
 ## Running it
 
 ```bash
@@ -799,10 +867,10 @@ export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"   # proto CLIs (moon, ac
                                                             # on a default shell PATH
 moon run repo:actionlint      # via Moon, as CI does
 ci/actionlint/run.sh          # directly, bypassing the Moon cache
-ci/actionlint/run.sh --self-test   # the fifteen fixture tables only, for fast iteration
+ci/actionlint/run.sh --self-test   # the sixteen fixture tables only, for fast iteration
 ```
 
-`--self-test` runs the fifteen fixture tables and nothing else — check 9's mutation battery is
+`--self-test` runs the sixteen fixture tables and nothing else — check 9's mutation battery is
 full-gate-only, which is what keeps `--self-test` the fast path and what makes the battery's own
 mutants (each internally invoked with `--self-test`) unable to recurse into a battery of their
 own.
