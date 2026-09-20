@@ -14,6 +14,8 @@
 #        ci/images/run.sh build-oci <iam|gateway> <outdir>   # SMA-658: OCI archive, no --load
 #        ci/images/run.sh load-oci <archive> <image-name>     # load + identity check (prints M3)
 #        ci/images/run.sh rehearse <archive.oci.tar>...      # SMA-658: publish steps vs two local registries
+#        ci/images/run.sh build-console [iam|gateway]   # SMA-513: console image; [iam|gateway] scopes the build
+#        ci/images/run.sh all-consoles                    # SMA-513: build both consoles + smoke; takes no service arg
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -153,6 +155,34 @@ assert_pins() {
   echo "  pins OK: rustc ${channel}, bookworm builder, ubuntu ${ubuntu_from} == chisel release, no baked service config, start-period ${start_period}s >= 30s"
 }
 
+# The console image's Node major is a SECOND pin beside .prototools. distroless publishes no
+# patch-level tags, so only the major can be held equal — that is the ceiling of this check, not
+# an oversight. A distroless bump that crosses a major reds here rather than shipping a runtime
+# the repo does not pin.
+assert_console_pins() {
+  local df="$ROOT/ts/Dockerfile" want_major base_major proto_node
+  proto_node="$(sed -n 's/^node = "\([0-9.]*\)"$/\1/p' "$ROOT/.prototools")"
+  want_major="${proto_node%%.*}"
+  base_major="$(sed -n 's#^FROM gcr\.io/distroless/nodejs\([0-9]*\)-debian12.*#\1#p' "$df")"
+  if [ -z "$base_major" ]; then
+    echo "::error::ts/Dockerfile: no gcr.io/distroless/nodejsNN-debian12 FROM line found." >&2
+    return 1
+  fi
+  if [ "$base_major" != "$want_major" ]; then
+    echo "::error::ts/Dockerfile pins Node ${base_major} but .prototools pins ${proto_node}." >&2
+    return 1
+  fi
+  if grep -qE '^ENV +PAIGASUS_' "$df"; then
+    echo "::error::ts/Dockerfile bakes a PAIGASUS_* env var; console config is deployment-varying and must stay runtime-only." >&2
+    return 1
+  fi
+  if ! grep -qF -- '--frozen-lockfile' "$df"; then
+    echo "::error::ts/Dockerfile installs without --frozen-lockfile; the image would not be built from the committed lockfile." >&2
+    return 1
+  fi
+  echo "  ts/Dockerfile: Node ${base_major} matches .prototools, no baked PAIGASUS_*, --frozen-lockfile present"
+}
+
 # Writes the chisel package list that a build log names into $2, and fails when it is empty
 # (SMA-500 fix-round 1: an empty manifest answers nothing when someone asks which libc shipped).
 extract_chisel_manifest() {
@@ -222,6 +252,48 @@ build_one() {
     -t "$tag" -t "${crate}:dev" \
     "$ROOT/rs" 2>&1 | tee "$build_log"
   extract_chisel_manifest "$build_log" "$ROOT/chisel-manifest-${service}.txt"
+  echo "  built ${tag}"
+}
+
+app_for() {
+  case "$1" in
+    iam)     echo "iam-console" ;;
+    gateway) echo "gateway-console" ;;
+    *) echo "unknown console: $1" >&2; return 1 ;;
+  esac
+}
+
+base_path_for() {
+  case "$1" in
+    iam)     echo "/iam" ;;
+    gateway) echo "/gateway" ;;
+    *) echo "unknown console: $1" >&2; return 1 ;;
+  esac
+}
+
+# There is no --no-cache-filter here. That flag exists on build_one because rs/Dockerfile's
+# rootfs stage is byte-identical between services and BuildKit would cache-hit it, leaving the
+# second service's chisel manifest empty. Every stage in ts/Dockerfile references APP, so no
+# stage is shared between the two console builds and there is nothing to force.
+build_console_one() {
+  local service="$1" app base_path tag
+  app="$(app_for "$service")"
+  base_path="$(base_path_for "$service")"
+  tag="${REGISTRY}/paigasus-${app}:${REVISION}"
+  echo "== build ${app} =="
+  docker build \
+    --progress=plain \
+    --load \
+    -f "$ROOT/ts/Dockerfile" \
+    --build-arg "APP=${app}" \
+    --build-arg "BASE_PATH=${base_path}" \
+    --label "org.opencontainers.image.title=paigasus-${app}" \
+    --label "org.opencontainers.image.description=Paigasus ${service} console" \
+    --label "org.opencontainers.image.source=https://github.com/SMK1085/paigasus-core" \
+    --label "org.opencontainers.image.revision=${REVISION}" \
+    --label "org.opencontainers.image.licenses=Apache-2.0" \
+    -t "$tag" -t "${app}:dev" \
+    "$ROOT/ts"
   echo "  built ${tag}"
 }
 
@@ -845,11 +917,13 @@ rehearse() {
 
 # One usage string for both the missing-command case and the unknown-command case below, so the
 # two never drift apart. Lists every command the case block accepts, in the order it accepts them.
-USAGE="usage: ci/images/run.sh build [iam|gateway] | ci/images/run.sh build-oci <iam|gateway> <outdir> | ci/images/run.sh load-oci <archive> <image-name> | ci/images/run.sh smoke [iam|gateway]... | ci/images/run.sh all | ci/images/run.sh rehearse <archive.oci.tar>..."
+USAGE="usage: ci/images/run.sh build [iam|gateway] | ci/images/run.sh build-oci <iam|gateway> <outdir> | ci/images/run.sh load-oci <archive> <image-name> | ci/images/run.sh smoke [iam|gateway]... | ci/images/run.sh all | ci/images/run.sh rehearse <archive.oci.tar>... | ci/images/run.sh build-console [iam|gateway] | ci/images/run.sh all-consoles"
 cmd="${1:?$USAGE}"
 target="${2:-}"
 services=("iam" "gateway")
 [ -n "$target" ] && services=("$target")
+console_services=("iam" "gateway")
+[ -n "$target" ] && console_services=("$target")
 
 # `smoke` with no argument smokes both images, gateway first (the old behaviour). With service
 # arguments it smokes exactly those; assert_fresh (above) is what stops a stale image from being
@@ -885,6 +959,19 @@ case "$cmd" in
     load_oci "$target" "$3"
     ;;
   rehearse) shift; rehearse "$@" ;;
+  build-console)
+    assert_console_pins
+    for s in "${console_services[@]}"; do build_console_one "$s"; done
+    ;;
+  all-consoles)
+    if [ -n "$target" ]; then
+      echo "usage: ci/images/run.sh all-consoles takes no service argument — use 'build-console [iam|gateway]' to build one" >&2
+      exit 1
+    fi
+    assert_console_pins
+    for s in "${console_services[@]}"; do build_console_one "$s"; done
+    smoke_consoles
+    ;;
   *)
     echo "unknown command: $cmd" >&2
     echo "$USAGE" >&2
