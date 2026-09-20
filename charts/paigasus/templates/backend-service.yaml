@@ -3,7 +3,7 @@
 {{- $root := . -}}
 {{- $full := include "paigasus.fullname" . -}}
 {{- range $id, $z := .Values.zones }}
-{{- if $z.enabled }}
+{{- if and $z.enabled $z.backend.deploy }}
 ---
 apiVersion: v1
 kind: Service

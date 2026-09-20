@@ -40,6 +40,11 @@ template would fire only when that template happens to render first.
 {{- if and (has "gateway" $enabled) (not (has "iam" $enabled)) -}}
 {{- fail "the gateway zone requires the iam zone: gateway-console's PAIGASUS_SERVICES schema refuses to construct without an \"iam\" entry, so its pods would crash-loop" -}}
 {{- end -}}
+{{- range $id, $z := .Values.zones -}}
+{{- if and $z.enabled (not $z.backend.deploy) (not $z.backend.url) -}}
+{{- fail (printf "zones.%s.backend.url is required when zones.%s.backend.deploy is false" $id $id) -}}
+{{- end -}}
+{{- end -}}
 {{- if not .Values.ingress.host -}}
 {{- fail "ingress.host is required; it is the single origin every zone's cookie is scoped to" -}}
 {{- end -}}
@@ -58,7 +63,11 @@ template would fire only when that template happens to render first.
 {{- $full := include "paigasus.fullname" . -}}
 {{- range $id, $z := .Values.zones -}}
 {{- if $z.enabled -}}
+{{- if $z.backend.deploy -}}
 {{- $_ := set $m $id (printf "http://%s-%s-backend:%d" $full $id (int $z.backend.httpPort)) -}}
+{{- else -}}
+{{- $_ := set $m $id $z.backend.url -}}
+{{- end -}}
 {{- end -}}
 {{- end -}}
 {{- toJson $m -}}

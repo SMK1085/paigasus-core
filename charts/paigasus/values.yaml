@@ -17,6 +17,10 @@ zones:
         tag: ""          # defaults to .Chart.AppVersion
       replicas: 2
     backend:
+      # Deployed by this chart. Kept true: the gRPC-to-IAM link from any other zone's backend has
+      # no TLS design yet (see zones.gateway.backend below), but IAM itself has no such backend
+      # dependency, so this chart deploys it directly.
+      deploy: true
       image:
         repository: ghcr.io/smk1085/paigasus-iam
         tag: ""
@@ -39,6 +43,13 @@ zones:
         tag: ""
       replicas: 2
     backend:
+      # NOT deployed by this chart (SMA-513 Task 11b). Measured in the tree:
+      # GatewayConfig::validate hard-fails boot on an empty upstream.openai.api_key
+      # (rs/crates/services/paigasus-gateway/src/config.rs:278), and iam.grpc_addr accepts
+      # LoopbackInsecure only for a loopback host (:209-222) — so an in-cluster gateway->IAM
+      # link needs a TLS design that is out of scope here. Supply the address of an existing
+      # gateway backend instead, the same way postgres.host and oidc.existingSecret do.
+      deploy: false
       image:
         repository: ghcr.io/smk1085/paigasus-gateway
         tag: ""
@@ -47,6 +58,9 @@ zones:
       # stateless and horizontally scalable, unlike IAM's SMA-559-pinned single replica, so it
       # gets a real knob rather than a hardcoded default. Mirrors console.replicas above.
       replicas: 2
+      # REQUIRED whenever the gateway zone is enabled (deploy is false and stays false; see
+      # above). The full base URL of an existing gateway backend, e.g. "http://gateway.internal:8088".
+      url: ""
 
 ingress:
   host: ""               # REQUIRED. Feeds PAIGASUS_PUBLIC_ORIGIN as https://<host>.

@@ -7,7 +7,8 @@
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CHART="$(cd "$HERE/.." && pwd)"
-BASE=(--kube-version 1.31.0 --set ingress.host=console.example.test "$@")
+BASE=(--kube-version 1.31.0 --set ingress.host=console.example.test \
+  --set zones.gateway.backend.url=http://gw.example.test:8088 "$@")
 ec=0
 
 keys() {  # keys() <json>

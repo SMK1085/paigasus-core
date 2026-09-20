@@ -44,8 +44,12 @@ expect_fail "gateway without iam" "the gateway zone requires the iam zone" \
   --set zones.iam.enabled=false --set zones.gateway.enabled=true
 expect_fail "unknown zone id" "is not a known service slug" \
   --set zones.frobnicate.enabled=true --set zones.frobnicate.basePath=/frobnicate
+expect_fail "external backend without url" "backend.url is required" \
+  --set zones.gateway.enabled=true --set zones.gateway.backend.deploy=false \
+  --set zones.gateway.backend.url=""
 expect_render "iam only" --set zones.gateway.enabled=false
-expect_render "iam and gateway" --set zones.gateway.enabled=true
+expect_render "iam and gateway" --set zones.gateway.enabled=true \
+  --set zones.gateway.backend.url=http://gw.example.test:8088
 
 if [ "$ec" -eq 0 ]; then echo "== chart refusals OK =="; fi
 exit "$ec"
