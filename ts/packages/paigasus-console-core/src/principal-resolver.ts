@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // @paigasus/auth's PrincipalResolver port, implemented over IAM (spec § 4.5). The login callback
-// calls it once (ts/packages/paigasus-auth/src/http/routes.ts:236), with the new access token.
+// calls it once (ts/packages/paigasus-auth/src/http/routes.ts:293), with the new access token.
 //
 // It lives in the APP because @paigasus/auth must not import @paigasus/sdk
 // (ts/packages/paigasus-auth/src/ports/principal-resolver.ts:3-8), and the sdk boundary rule bans
@@ -12,6 +12,15 @@
 // thrown error — a bug in this function, not an IAM answer — logs `principal.resolve_crashed`
 // instead, so the two causes stay distinguishable in the log. The pages do not read this snapshot
 // (they call currentPrincipal()), so a degraded login costs nothing after the first render.
+//
+// THIS IS THE ONE PRODUCT OF THIS PACKAGE THAT LIVES ON SHARED STATE (SMA-662). The app's
+// lib/auth.ts hands this resolver to getAuthRuntime, whose singleton lives on globalThis under a
+// key carrying the ZONE (@paigasus/auth's runtime.ts:203) — one per zone per process, not one per
+// process. Its FIRST call fixes the resolver for the life of that zone, so one copy's resolver
+// serves requests the other copy handles. It
+// is safe because the closure supplies BOTH sides: deps.clientsForToken builds the client and
+// callIam below classifies its errors, and both belong to the copy that built this resolver. The
+// two `err instanceof Error` reads in the catch test a BUILTIN, which both copies share.
 import 'server-only';
 import type { PrincipalResolver, ResolvedPrincipal } from '@paigasus/auth/server';
 import { principalPrnOf } from './principal-prn';
