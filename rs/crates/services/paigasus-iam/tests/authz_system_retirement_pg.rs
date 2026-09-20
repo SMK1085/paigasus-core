@@ -639,12 +639,13 @@ async fn a_concurrent_grant_blocks_then_reports_unknown_role() {
     let grant_store = PgRoleGrantStore::new(db_b.clone(), Generations::memory());
     let mut handle = tokio::spawn(async move { grant_store.grant(&racing_grant).await });
 
-    // Prove the grant actually BLOCKS: actively polling it (not merely sleeping then checking
-    // `is_finished`) within a bounded window must itself time out while the role row's lock is
-    // still held.
-    tokio::time::timeout(Duration::from_millis(500), &mut handle)
-        .await
-        .expect_err("the grant must block behind the role row's FOR UPDATE lock, not complete while it is held");
+    // Prove the grant actually BLOCKS, and prove it is blocked INSIDE its own INSERT (whose FK
+    // check reads the role row this transaction holds FOR UPDATE) BY this transaction. The old
+    // form — a 500 ms `timeout` that must expire — is also satisfied by a racer that has not
+    // started yet, so under load it could pass with no race at all (SMA-660). Poll on `db_a`:
+    // `pg_stat_activity` is instance-wide, and `db_b` is the pool holding the blocked racer.
+    let pid_peer = support::race::backend_pid(paigasus_iam::adapters::persistence::uow::recover_txn(&*tx).unwrap()).await;
+    support::race::expect_racer_blocked(&db_a, pid_peer, &mut handle, "insert%", |r| format!("{r:?}")).await;
 
     // Release the lock: delete the role (and its parent policy) and commit.
     assert!(retirer.delete_role_in(&*tx, "legacy_auditor").await.unwrap());
@@ -689,9 +690,13 @@ async fn locking_the_policy_row_blocks_a_concurrent_role_insert() {
     let reconciler = PgSystemRoleReconciler::new(db_b.clone());
     let mut handle = tokio::spawn(async move { reconciler.reconcile_role(&role_def).await });
 
-    tokio::time::timeout(Duration::from_millis(500), &mut handle)
-        .await
-        .expect_err("the role INSERT must block behind the policy row's FOR UPDATE lock — this is why retirement locks the policy row, the FK parent, first");
+    // Prove the role INSERT actually BLOCKS, and prove it is blocked inside that INSERT — whose
+    // FK check reads the policy row this transaction holds FOR UPDATE — by this transaction.
+    // `reconcile_role`'s own existence check is an unlocked `find_by_id`, so it never blocks and
+    // the racer really does reach its INSERT. The old 500 ms `timeout` form was also satisfied
+    // by a racer that had not started (SMA-660).
+    let pid_peer = support::race::backend_pid(paigasus_iam::adapters::persistence::uow::recover_txn(&*tx).unwrap()).await;
+    support::race::expect_racer_blocked(&db_a, pid_peer, &mut handle, "insert%", |r| format!("{r:?}")).await;
 
     assert!(retirer.delete_policy_in(&*tx, "legacy_auditor").await.unwrap());
     tx.commit().await.unwrap();

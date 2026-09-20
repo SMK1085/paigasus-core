@@ -33,6 +33,7 @@ use paigasus_iam::adapters::persistence::{PgAuditLog, PgOutbox, PgPolicyStore, S
 use paigasus_iam_core::authz::model::{PolicyKind, root_prn};
 use paigasus_iam_core::{AuditEntry, AuditLog, AuditOutcome, AuthzError, DomainEvent, EventType, IdGenerator, Outbox, PolicyDocument, PolicyStore, PutOutcome, UnitOfWork};
 use sea_orm::{ActiveModelTrait, ActiveValue::NotSet, DatabaseConnection, EntityTrait, Set, TransactionTrait};
+use std::time::Duration;
 
 /// A well-formed, schema-valid static policy document (mirrors `authz::schema`'s own
 /// "well-formed" test fixture).
@@ -257,38 +258,81 @@ async fn delete_of_an_unknown_policy_id_is_a_noop() {
 }
 
 /// Boot-reliability fix (SMA-444 Task 17 review finding): `PgPolicyStore::put`'s existence
-/// check and its INSERT aren't atomic, so two replicas booting concurrently against a
-/// fresh, unseeded database can both observe `existing == None` for the same starter
-/// `policy_id` and both attempt to insert it — the loser must hit a unique-constraint
-/// violation and absorb it as an idempotent success (mirroring the same absorption in
-/// `PgSystemRoleReconciler::reconcile_role`, where `bootstrap.rs::seed_role_row` moved in
-/// SMA-477), not fail its replica's `AppState::new`. This covers the
-/// SAME-content case (both racers write the IDENTICAL starter policy document); the
-/// DIFFERENT-content case is covered separately below
-/// (`concurrent_put_of_the_same_new_policy_id_with_different_content_is_a_conflict`).
+/// check and its INSERT aren't atomic, so two replicas booting concurrently against a fresh,
+/// unseeded database can both observe `existing == None` for the same starter `policy_id` and
+/// both attempt to insert it — the loser must hit a unique-constraint violation and absorb it as
+/// an idempotent success, not fail its replica's `AppState::new`.
 ///
-/// Drives two `PgPolicyStore` handles that share the same underlying connection pool
-/// (`DatabaseConnection` clones an `Arc`-backed pool handle, so this is a REAL race over
-/// the network, not a simulation) at the exact same, previously-absent `policy_id` via
-/// `tokio::join!`. Both `put` calls must return `Ok(())` — one takes the genuine INSERT
-/// path, the other absorbs the resulting unique-constraint violation — and exactly one row
-/// must exist afterward.
+/// SMA-660 made this deterministic and gave it a real assertion. It used to drive two `put`
+/// calls under `tokio::join!` and assert only that both returned `Ok` and one row survived —
+/// both of which are ALSO true when racer A's whole `put` committed before B's existence check,
+/// leaving B on the ordinary UPDATE path with no absorb anywhere in the test. It now holds A's
+/// INSERT open in an uncommitted transaction, waits until B is provably blocked inside its own
+/// INSERT, and then commits A, exactly as the two `put_in` race tests below do.
+///
+/// What it asserts that nothing else does: `put` SKIPS its `policy_gen` bump when the outcome is
+/// `AbsorbedIdempotent`. The absorb itself is already covered at the `put_in` level by
+/// `put_in_absorbs_a_same_content_savepoint_conflict_and_the_outer_txn_stays_usable`, which reads
+/// the `PutOutcome` directly; `put` returns `Result<(), AuthzError>` and cannot, so the
+/// generation counter is the only observable that tells the two paths apart here.
 #[tokio::test]
 async fn concurrent_put_of_the_same_new_policy_id_is_idempotent_not_a_conflict() {
     let Some((_pg, db)) = support::start_migrated_postgres().await else { return };
     let now = Utc::now().trunc_subsecs(6);
-
-    let store_a = PgPolicyStore::new(db.clone(), Generations::memory());
-    let store_b = PgPolicyStore::new(db.clone(), Generations::memory());
     let doc = valid_static_doc("racing-policy", false, now);
 
-    let (result_a, result_b) = tokio::join!(store_a.put(&doc), store_b.put(&doc));
-    assert!(result_a.is_ok(), "first racer must not fail: {result_a:?}");
-    assert!(result_b.is_ok(), "second racer must not fail — the unique-violation loser must absorb, not error: {result_b:?}");
+    // Racer A: insert directly (bypassing `PgPolicyStore::put`, mirroring `seed_system_policy`'s
+    // established direct-entity pattern) and hold the transaction open. The content matches
+    // `doc` on every field `policy_content_matches` compares — kind, source, description and
+    // system — which is what makes B's conflict an absorb rather than a `Conflict`.
+    let txn_a = db.begin().await.unwrap();
+    policy::ActiveModel {
+        policy_id: Set(doc.policy_id.clone()),
+        kind: Set("static".to_string()),
+        source: Set(doc.source.clone()),
+        description: Set(Some(doc.description.clone())),
+        system: Set(doc.system),
+        created_at: Set(doc.created_at),
+        updated_at: Set(doc.updated_at),
+        content_fingerprint: NotSet,
+        starter_revision: NotSet,
+    }
+    .insert(&txn_a)
+    .await
+    .unwrap();
+    let pid_a = support::race::backend_pid(&txn_a).await;
 
-    let all = store_a.list_all().await.unwrap();
+    // Racer B: the real `PgPolicyStore::put`. The test holds a CLONE of the same `Generations`
+    // handle B bumps — every other store in this file takes a fresh `Generations::memory()`, and
+    // copying that here would leave the assertion below reading a counter nothing touches.
+    let gens = Generations::memory();
+    let store_b = PgPolicyStore::new(db.clone(), gens.clone());
+    let doc_b = doc.clone();
+    let mut put_b = tokio::spawn(async move { store_b.put(&doc_b).await });
+    let before = gens.policy_gen().await.unwrap();
+
+    // Commit A only once B is provably blocked INSIDE its INSERT on A's uncommitted row — past
+    // its existence check, so its INSERT must resolve into a real unique violation.
+    support::race::expect_racer_blocked(&db, pid_a, &mut put_b, "insert%", |r| format!("{r:?}")).await;
+    txn_a.commit().await.unwrap();
+
+    let result_b = put_b.await.unwrap();
+    assert!(result_b.is_ok(), "the unique-violation loser must absorb, not error: {result_b:?}");
+
+    let store = PgPolicyStore::new(db.clone(), Generations::memory());
+    let all = store.list_all().await.unwrap();
     let matches: Vec<_> = all.iter().filter(|d| d.policy_id == "racing-policy").collect();
     assert_eq!(matches.len(), 1, "exactly one row must exist after the race, not zero or two: {matches:?}");
+
+    // THE assertion this test exists for. `put` bumps `policy_gen` unless its outcome is
+    // `AbsorbedIdempotent`, and racer A was a raw entity insert that bumps nothing. So an
+    // unmoved counter means B absorbed, and a counter that moved by one means B took the UPDATE
+    // path — the silent failure this test could not see while it used `tokio::join!`.
+    assert_eq!(
+        gens.policy_gen().await.unwrap(),
+        before,
+        "put must SKIP its policy_gen bump on the absorb path; a moved generation means racer B took the UPDATE path and the absorb never ran"
+    );
 }
 
 /// CodeRabbit review fix (SMA-444): the SAME-content race above absorbs a unique-constraint
@@ -306,8 +350,8 @@ async fn concurrent_put_of_the_same_new_policy_id_is_idempotent_not_a_conflict()
 /// deterministically instead: it holds racer A's INSERT open in an UNCOMMITTED transaction
 /// (so B's existence check still sees no row — MVCC visibility — and B also attempts an
 /// INSERT, which Postgres blocks on A's uncommitted row), then commits A once B's `put` (the
-/// real, unmodified production method) is in flight, forcing B's blocked INSERT to resolve
-/// into a genuine unique-constraint violation.
+/// real, unmodified production method) is observed blocked on it (`expect_racer_blocked`),
+/// forcing B's blocked INSERT to resolve into a genuine unique-constraint violation.
 #[tokio::test]
 async fn concurrent_put_of_the_same_new_policy_id_with_different_content_is_a_conflict() {
     let Some((_pg, db)) = support::start_migrated_postgres().await else { return };
@@ -337,16 +381,19 @@ async fn concurrent_put_of_the_same_new_policy_id_with_different_content_is_a_co
     .insert(&txn_a)
     .await
     .unwrap();
+    let pid_a = support::race::backend_pid(&txn_a).await;
 
     // Racer B: the real `PgPolicyStore::put`, spawned so it runs concurrently with the test
     // body. Its existence check sees no row yet (A's insert is uncommitted) and it attempts
     // its own INSERT, which Postgres blocks pending A's transaction outcome.
     let store_b = PgPolicyStore::new(db.clone(), Generations::memory());
-    let put_b = tokio::spawn(async move { store_b.put(&doc_b).await });
+    let mut put_b = tokio::spawn(async move { store_b.put(&doc_b).await });
 
-    // Give racer B's task time to actually reach (and block inside) its own INSERT before A
-    // commits — comfortably longer than a local Postgres round-trip even under load.
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    // Commit A only once B is provably blocked INSIDE its INSERT on A's uncommitted row — past its
+    // existence check, so its INSERT must resolve into a real unique violation. A fixed sleep here
+    // only hoped for that and failed under CI load (SMA-659): a late B saw A's committed row and
+    // took the UPDATE path instead.
+    support::race::expect_racer_blocked(&db, pid_a, &mut put_b, "insert%", |r| format!("{r:?}")).await;
 
     txn_a.commit().await.unwrap();
 
@@ -415,6 +462,7 @@ async fn put_in_absorbs_a_same_content_savepoint_conflict_and_the_outer_txn_stay
     .insert(&txn_a)
     .await
     .unwrap();
+    let pid_a = support::race::backend_pid(&txn_a).await;
 
     // Racer B: `put_in` on a caller-owned UoW transaction, spawned to run concurrently, with
     // the SAME content as A.
@@ -423,15 +471,15 @@ async fn put_in_absorbs_a_same_content_savepoint_conflict_and_the_outer_txn_stay
     let store_b = store.clone();
     let doc_b = doc.clone();
     let uow_b = SeaOrmUnitOfWork::new(db.clone());
-    let put_b = tokio::spawn(async move {
+    let mut put_b = tokio::spawn(async move {
         let tx = uow_b.begin().await.expect("begin");
         let outcome = store_b.put_in(&*tx, &doc_b).await;
         (tx, outcome)
     });
 
-    // Give racer B's task time to actually reach (and block inside) its own savepoint INSERT
-    // before A commits — comfortably longer than a local Postgres round-trip even under load.
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    // Commit A only once B is provably blocked INSIDE its savepoint INSERT on A's uncommitted row
+    // (SMA-659 — a fixed sleep here only hoped for that, and a late B took the UPDATE path).
+    support::race::expect_racer_blocked(&db, pid_a, &mut put_b, "insert%", |(_, outcome)| format!("{outcome:?}")).await;
     txn_a.commit().await.unwrap();
 
     let (tx_b, outcome_b) = put_b.await.unwrap();
@@ -462,8 +510,9 @@ async fn put_in_absorbs_a_same_content_savepoint_conflict_and_the_outer_txn_stay
 /// `concurrent_put_of_the_same_new_policy_id_with_different_content_is_a_conflict` above:
 /// holds racer A's INSERT open uncommitted (so racer B's existence check sees no row and
 /// itself attempts an INSERT, which Postgres blocks on A's uncommitted row) inside racer B's
-/// own savepoint, then commits A once B's `put_in` is in flight, forcing B's blocked INSERT
-/// to resolve into a genuine unique-constraint violation.
+/// own savepoint, then commits A once B's `put_in` is observed blocked on it
+/// (`expect_racer_blocked`), forcing B's blocked INSERT to resolve into a genuine
+/// unique-constraint violation.
 #[tokio::test]
 async fn put_in_surfaces_a_different_content_savepoint_conflict_and_the_outer_txn_stays_usable() {
     let Some((_pg, db)) = support::start_migrated_postgres().await else { return };
@@ -492,21 +541,22 @@ async fn put_in_surfaces_a_different_content_savepoint_conflict_and_the_outer_tx
     .insert(&txn_a)
     .await
     .unwrap();
+    let pid_a = support::race::backend_pid(&txn_a).await;
 
     // Racer B: `put_in` on a caller-owned UoW transaction, spawned to run concurrently.
     let gens = Generations::memory();
     let store = PgPolicyStore::new(db.clone(), gens);
     let store_b = store.clone();
     let uow_b = SeaOrmUnitOfWork::new(db.clone());
-    let put_b = tokio::spawn(async move {
+    let mut put_b = tokio::spawn(async move {
         let tx = uow_b.begin().await.expect("begin");
         let outcome = store_b.put_in(&*tx, &doc_b).await;
         (tx, outcome)
     });
 
-    // Give racer B's task time to actually reach (and block inside) its own savepoint INSERT
-    // before A commits — comfortably longer than a local Postgres round-trip even under load.
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    // Commit A only once B is provably blocked INSIDE its savepoint INSERT on A's uncommitted row
+    // (SMA-659 — a fixed sleep here only hoped for that, and a late B took the UPDATE path).
+    support::race::expect_racer_blocked(&db, pid_a, &mut put_b, "insert%", |(_, outcome)| format!("{outcome:?}")).await;
     txn_a.commit().await.unwrap();
 
     let (tx_b, outcome_b) = put_b.await.unwrap();
@@ -661,4 +711,104 @@ async fn put_in_enqueue_and_record_commit_atomically_sharing_correlation_id() {
         before,
         "put_in must never bump policy_gen itself — that is the caller's own post-commit responsibility"
     );
+}
+
+/// SMA-659/SMA-660 guard: [`support::race::wait_until_blocked_by`] must REPORT a racer that never
+/// blocks, and must not report one that blocks for the WRONG reason. Four cases: a racer that
+/// finished, a racer that never blocks at all, a prefix matching no statement, and a blocker pid
+/// that blocks nobody. Without the last two, deleting either the `query_prefix` term or the
+/// `pg_blocking_pids` term from the predicate leaves every race test in this crate green — at S1
+/// the prefix term is what rejects a racer blocked by the same peer inside a later statement
+/// (measured, V7 S1); `pg_blocking_pids`'s necessity is guarded only here, by case 4, and by no
+/// V7 row.
+#[tokio::test]
+async fn wait_until_blocked_by_reports_a_racer_that_never_blocks() {
+    let Some((_pg, db)) = support::start_migrated_postgres().await else { return };
+    let now = Utc::now().trunc_subsecs(6);
+
+    // "Finished" path. A's row is COMMITTED before B starts, so B's existence check sees it and
+    // B takes the UPDATE path: it never waits on any lock and simply finishes.
+    let store = PgPolicyStore::new(db.clone(), Generations::memory());
+    let doc_a = valid_static_doc("guard-never-blocks", false, now);
+    store.put(&doc_a).await.unwrap();
+    let pid_a = support::race::backend_pid(&db).await;
+    let mut doc_b = doc_a.clone();
+    doc_b.description = "racer B's document".to_string();
+    let store_b = store.clone();
+    let put_b = tokio::spawn(async move { store_b.put(&doc_b).await });
+
+    let err = support::race::wait_until_blocked_by(&db, pid_a, &put_b, "insert%", support::race::RACER_BLOCK_BUDGET)
+        .await
+        .expect_err("a racer that takes the UPDATE path never blocks, so the wait must report it");
+    assert!(err.contains("finished before it blocked"), "wrong message for a finished racer: {err}");
+    // The guard proves the UPDATE-path case specifically, not some racer that died of an error.
+    let result_b = put_b.await.unwrap();
+    assert!(result_b.is_ok(), "racer B must have finished through the ordinary UPDATE path: {result_b:?}");
+
+    // "Deadline" path. A racer that neither blocks nor finishes: the wait must give up at its
+    // budget and say so, with the backend dump that tells the reader what was running instead.
+    let pending = tokio::spawn(std::future::pending::<()>());
+    let err = support::race::wait_until_blocked_by(&db, pid_a, &pending, "insert%", Duration::from_millis(200))
+        .await
+        .expect_err("a racer that never blocks must hit the deadline");
+    pending.abort();
+    assert!(err.contains("did not block"), "wrong message at the deadline: {err}");
+    assert!(err.contains("non-idle backends"), "the deadline message must carry the backend dump: {err}");
+    // The "non-idle backends" text alone does not prove the dump query itself worked: that text is
+    // in the format string, so it is present even when `NON_IDLE_BACKENDS_SQL` fails. Rule out the
+    // three dump-failure fallbacks explicitly.
+    assert!(
+        !err.contains("(dump failed") && !err.contains("(dump unreadable") && !err.contains("(dump returned no row"),
+        "the backend dump query itself failed: {err}"
+    );
+
+    // Cases 3 and 4 need a racer that IS blocked, which neither case above has. Set one up once:
+    // peer C holds an uncommitted INSERT of a fresh id, and racer D's real `put` of the same id
+    // blocks inside its own INSERT on C's row.
+    let doc_c = valid_static_doc("guard-blocked-racer", false, now);
+    let txn_c = db.begin().await.unwrap();
+    policy::ActiveModel {
+        policy_id: Set(doc_c.policy_id.clone()),
+        kind: Set("static".to_string()),
+        source: Set(doc_c.source.clone()),
+        description: Set(Some(doc_c.description.clone())),
+        system: Set(doc_c.system),
+        created_at: Set(doc_c.created_at),
+        updated_at: Set(doc_c.updated_at),
+        content_fingerprint: NotSet,
+        starter_revision: NotSet,
+    }
+    .insert(&txn_c)
+    .await
+    .unwrap();
+    let pid_c = support::race::backend_pid(&txn_c).await;
+    let store_d = PgPolicyStore::new(db.clone(), Generations::memory());
+    let doc_d = doc_c.clone();
+    let racer_d = tokio::spawn(async move { store_d.put(&doc_d).await });
+
+    // Case 3: the prefix is honoured. Phase one proves the racer really is blocked — without it,
+    // phase two could report `did not block` simply because the racer had not arrived yet, which
+    // is the timing-dependent assertion this whole issue removes.
+    support::race::wait_until_blocked_by(&db, pid_c, &racer_d, "insert%", support::race::RACER_BLOCK_BUDGET)
+        .await
+        .expect("phase one: the racer must be blocked inside its INSERT before the prefix can be tested");
+    let err = support::race::wait_until_blocked_by(&db, pid_c, &racer_d, "delete%", Duration::from_millis(200))
+        .await
+        .expect_err("a prefix that matches no statement must reach the deadline, even with the racer blocked");
+    assert!(err.contains("did not block"), "wrong message for a non-matching prefix: {err}");
+    assert!(err.contains("\"delete%\""), "the deadline message must name the prefix it looked for: {err}");
+
+    // Case 4: the blocker pid is honoured. A third, idle transaction blocks nobody, so asking
+    // about ITS pid must reach the deadline although a blocked racer exists.
+    let txn_idle = db.begin().await.unwrap();
+    let pid_idle = support::race::backend_pid(&txn_idle).await;
+    let err = support::race::wait_until_blocked_by(&db, pid_idle, &racer_d, "insert%", Duration::from_millis(200))
+        .await
+        .expect_err("a pid that blocks nobody must reach the deadline, even with a blocked racer running");
+    assert!(err.contains("did not block"), "wrong message for an unrelated blocker pid: {err}");
+
+    // Teardown: release the racer, then drain both transactions so no task outlives the test.
+    txn_c.commit().await.unwrap();
+    racer_d.await.unwrap().expect("the racer must absorb the same-content conflict once C commits");
+    txn_idle.rollback().await.unwrap();
 }

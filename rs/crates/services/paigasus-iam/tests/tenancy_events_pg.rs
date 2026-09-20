@@ -45,7 +45,6 @@
 mod support;
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use paigasus_iam::adapters::authz::{Generations, GenerationsEntityGenBumper};
@@ -391,7 +390,7 @@ async fn a_concurrent_detach_of_a_cascade_row_does_not_make_this_call_over_repor
     let repo1 = repo.clone();
     let db1 = db.clone();
     let target_id = org_membership.id;
-    let handle = tokio::spawn(async move {
+    let mut handle = tokio::spawn(async move {
         let uow1 = SeaOrmUnitOfWork::new(db1);
         let tx1 = uow1.begin().await?;
         let deleted = repo1.detach_in(&*tx1, target_id).await?;
@@ -399,12 +398,13 @@ async fn a_concurrent_detach_of_a_cascade_row_does_not_make_this_call_over_repor
         Ok::<_, RepositoryError>(deleted)
     });
 
-    // Give the spawned call real wall-clock time to reach (and block on) its own conflicting
-    // statement against the peer's uncommitted row — it cannot finish before the peer releases
-    // that lock, so this is a generous budget, not a fragile one: on a warm connection the block
-    // happens in well under this window.
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    assert!(!handle.is_finished(), "sanity: this call must still be blocked on the peer's uncommitted delete");
+    // Wait until this call is provably blocked INSIDE its own `DETACH_LOCK_SQL` — the
+    // `SELECT … FOR UPDATE` at `pg_memberships.rs:155-160` — on the peer's uncommitted delete.
+    // A fixed sleep here proved nothing: `!handle.is_finished()` is just as true for a racer
+    // that has not started, so a late racer under CI load made this test pass without the race
+    // ever happening (SMA-660).
+    let pid_peer = support::race::backend_pid(paigasus_iam::adapters::persistence::uow::recover_txn(&*peer_tx).unwrap()).await;
+    support::race::expect_racer_blocked(&db, pid_peer, &mut handle, "select%", |r| format!("{r:?}")).await;
 
     peer_tx.commit().await.expect("peer commit");
 
@@ -484,13 +484,15 @@ async fn a_concurrent_org_archive_is_reflected_in_a_racing_team_set_status_event
     // held org-row lock until the peer commits; awaiting it inline here would deadlock the test.
     let team_id = team.id.uuid();
     let actor2 = actor.clone();
-    let handle = tokio::spawn(async move { svc.restore(team_id, &actor2).await });
+    let mut handle = tokio::spawn(async move { svc.restore(team_id, &actor2).await });
 
-    // Give the spawned call real wall-clock time to reach (and block on) its own conflicting
-    // ancestor read against the peer's uncommitted org update — a generous budget, not a
-    // fragile one: on a warm connection the block happens in well under this window.
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    assert!(!handle.is_finished(), "sanity: this call must still be blocked on the peer's uncommitted org archive");
+    // Wait until the racing `restore` is provably blocked INSIDE `set_status_in`'s org ancestor
+    // read — the `.lock_shared()` at `pg_teams.rs:266` — on the peer's uncommitted org update.
+    // Its earlier `lock_exclusive()` on the TEAM row (`:245`) is uncontested, so the ancestor
+    // read is the only statement that can block on this peer. A fixed sleep proved nothing here
+    // for the same reason as the test above (SMA-660).
+    let pid_peer = support::race::backend_pid(paigasus_iam::adapters::persistence::uow::recover_txn(&*peer_tx).unwrap()).await;
+    support::race::expect_racer_blocked(&db, pid_peer, &mut handle, "select%", |r| format!("{r:?}")).await;
 
     peer_tx.commit().await.expect("peer commit");
 
