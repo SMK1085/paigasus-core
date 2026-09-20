@@ -84,8 +84,14 @@ grant-store read placed on that path turns a `role_grant` outage into a gateway 
 
 ### D3 — the port
 
-`AuthenticateToken` gains a `RoleGrantStore` port as a further generic parameter,
-matching how it already holds `MembershipRepository`. The trait exists
+`AuthenticateToken` gains a `grants: Arc<dyn RoleGrantStore>` field. It is a trait
+object, not a further generic parameter, for the reason `RoleService` already
+records at `application/roles.rs:91`: it is the same shared handle the composition
+root composes into `PolicySnapshot`, so the wiring clones one `Arc` instead of
+standing up a second store. A generic parameter would also not compile against that
+`Arc`, because no `impl RoleGrantStore for Arc<dyn RoleGrantStore>` exists. The
+`AuthnSvc` type alias therefore keeps its six generic parameters and does not change.
+The trait exists
 (`rs/crates/libs/paigasus-iam-core/src/authz/ports.rs:54-77`) and offers
 `list_by_principal(&PrincipalId) -> Result<Vec<RoleGrant>, AuthzError>`. The Postgres
 adapter exists (`adapters/persistence/pg_role_grants.rs:229-232`), the in-memory fake
@@ -221,11 +227,26 @@ Rust, in `rs/crates/services/paigasus-iam/`:
   `introspect` (or in `context_for` after the rebase), and the roughly twelve unit-test
   constructor sites (`:471,492,514,534,553,572,594,613,646,681,720,737`). The site at
   `:737-745` uses `PanicIfCalled*` fakes and needs a matching choice for the grant store.
-- `src/adapters/http/mod.rs` — pass the existing `Arc<dyn RoleGrantStore>`; update the
-  `AuthnSvc` type alias at `:158`.
+- `src/adapters/http/mod.rs` — pass the existing `role_grant_store` (built at `:371`)
+  to `AuthenticateToken::new` at `:772-780`. The `AuthnSvc` alias at `:158` does not
+  change (D3).
 - `src/service_info.rs` — the `iam.authn.grants` key (D9).
-- `contracts/proto/paigasus/common/v1/` — the new `Capability` enum value, plus
-  regenerated bindings for Rust, Python and TypeScript.
+
+The capability key follows the six sites SMA-629 used for `iam.deadletters`:
+
+- `contracts/proto/paigasus/common/v1/service_info.proto` — `CAPABILITY_IAM_AUTHN_GRANTS = 6`.
+- `rs/crates/libs/paigasus-proto/src/capability.rs` — the `ALL` array grows to six, the
+  literal-spelling test gains a row, and `adding_a_capability_forces_updating_these_tests`
+  moves from `try_from(6)` to `try_from(7)`. That guard is designed to fail here.
+- `ts/packages/paigasus-discovery/src/types.ts:68` — the `CapabilityKey` union.
+- `py/packages/paigasus-proto/tests/test_service_info_smoke.py` — the registry-name assertion.
+- `rs/crates/services/paigasus-iam/tests/http_service_info.rs` and
+  `tests/grpc_service_info.rs` — the full-capability-set assertions.
+- Regenerated bindings for Rust, Python and TypeScript.
+
+The wire key needs no table: `as_wire_key` derives it by stripping `CAPABILITY_`,
+lowercasing and turning `_` into `.`, so `CAPABILITY_IAM_AUTHN_GRANTS` yields
+`iam.authn.grants` mechanically.
 
 Doc comments that become false and must change in the same commit:
 
