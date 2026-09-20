@@ -1064,9 +1064,12 @@ mod tests {
     }
 
     /// SMA-632 put `/v1/authn/whoami` INSIDE `protected` while `/v1/authn/introspect` stays
-    /// OUTSIDE it. axum panics at REGISTRATION time on a pattern conflict, so this reproduces
-    /// `app_routes`'s outer merge — which the test above does not cover — and fails here rather
-    /// than at the first request in production.
+    /// OUTSIDE it. axum panics at REGISTRATION time on a pattern conflict, so this proves that
+    /// `/v1/authn/whoami` does not collide with `authn::router`'s or `api_keys::introspect_router`'s
+    /// paths across the outer merge, and fails here rather than at the first request in
+    /// production. This is a stand-in for `app_routes`'s outer merge, not a full reproduction:
+    /// `app_routes` merges about ten routers, and this test's stand-in holds only a few of them.
+    /// A collision involving a router absent from this stand-in would not be caught here.
     #[test]
     fn outer_router_merge_has_no_path_conflicts() {
         let protected: Router<AppState> = Router::new().merge(service_info::router()).merge(authn::whoami_router());

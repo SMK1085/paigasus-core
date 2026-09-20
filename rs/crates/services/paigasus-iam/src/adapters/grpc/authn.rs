@@ -263,8 +263,11 @@ mod tests {
         assert!(!is_exempt("/paigasus.iam.v1.AuthnService/WhoAmI"));
     }
 
-    /// The two RPCs that ARE exempt stay exempt — this test fails if someone "fixes" the one
-    /// above by widening the predicate rather than leaving WhoAmI out of it.
+    /// Guards against a future edit that REMOVES an exemption from `Introspect` or
+    /// `IntrospectApiKey` — for example a predicate rewrite that narrows the match by accident.
+    /// It does not guard against `WhoAmI` being wrongly added to `is_exempt`: both assertions
+    /// here stay true either way. That protection comes from `who_am_i_is_not_exempt` above,
+    /// and from `tests/grpc_whoami.rs`.
     #[test]
     fn the_two_introspection_rpcs_are_still_exempt() {
         assert!(is_exempt("/paigasus.iam.v1.AuthnService/Introspect"));

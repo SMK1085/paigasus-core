@@ -12,10 +12,10 @@
 // `iamClientsForToken` and `iamClientsForAction`, see their own comments) is a React `cache()`
 // wrapper, and `cache()` memoizes by the WRAPPER's identity, not by its arguments. A second
 // `createConsoleRuntime()` call therefore makes a second, independent memoization identity for the
-// same request: every accessor built from it runs its live call again — a second `Introspect`, a
+// same request: every accessor built from it runs its live call again — a second `WhoAmI`, a
 // second `ListRoleGrants` walk (up to 50 tenancy reads), a second discovery probe. Outside a React
 // server render `cache()` is a pass-through (measured on react 19.2.8), so no vitest tier can
-// observe two calls behaving differently from one — only an e2e `Introspect` count can (PR 3).
+// observe two calls behaving differently from one — only an e2e `WhoAmI` count can (PR 3).
 import 'server-only';
 import { cache } from 'react';
 import { after } from 'next/server';

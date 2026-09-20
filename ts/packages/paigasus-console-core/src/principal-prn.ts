@@ -2,7 +2,7 @@
 //
 // The ONE reading of IAM's `principal_prn` (review, defect 1).
 //
-// THE DRIFT THIS CLOSES. Introspect answers a proto3 string, and an unset string arrives as `''`.
+// THE DRIFT THIS CLOSES. WhoAmI answers a proto3 string, and an unset string arrives as `''`.
 // Two call sites map that answer and they disagreed: the login resolver (principal-resolver.ts)
 // normalised `'' -> null`, while the LIVE path (principal.ts, which every page uses) passed the
 // empty string through. An empty PRN then slipped past every `=== null` guard downstream: mayI()

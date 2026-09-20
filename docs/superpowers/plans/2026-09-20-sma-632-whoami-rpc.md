@@ -1921,6 +1921,8 @@ need bash 4+ are re-run in Step 4.
 
 - [ ] **Step 3: If a task fails, diagnose it before re-running**
 
+<!-- moon-diagnosis:ok -->
+
 **Capture first.** A re-run overwrites the evidence, and a *passing* re-run is as destructive as
 a failing one:
 

@@ -361,7 +361,7 @@ combinations; the new route is added there too. That test does **not** reproduce
 |---|---|
 | `who_am_i_is_not_exempt` | `is_exempt("/paigasus.iam.v1.AuthnService/WhoAmI")` is `false`. Direct on the mechanism. |
 | the § 5.2 helper's tests | A principal with 0, 1, 200 and 201 memberships returns all of them. 200 is the page size, so 201 proves the loop runs twice. |
-| `who_am_i_response_mirrors_introspect_response` | The two proto messages carry the same field names and numbers, `expires_at`'s optionality aside. This is D2's drift guard (§ 3.1). |
+| *(no Rust unit test)* | D2's drift guard (§ 3.1) ships as `buf lint` plus `buf breaking`, not a Rust test — see § 9 limit 7. |
 | `to_who_am_i_response_on_an_api_key` | `issuer` and `subject` are empty, and `expires_at` is the key's own expiry. |
 | `to_who_am_i_response_on_an_api_key_without_expiry` | `expires_at` is absent, not the current time. |
 | `who_am_i_response_dto_omits_an_absent_expiry` | The JSON has no `expires_at` key, rather than `null`. |
@@ -446,8 +446,11 @@ exactly one IAM call. That is the property this issue delivers, and nothing asse
 - **`src/runtime.ts:99`** — `currentPrincipal()` drops `{ provisionFirst: false }`.
 - **`src/index.ts:19`** — the renamed export.
 - **`src/iam-clients.ts`** — no change. `WhoAmI` is on `AuthnService`, so it is
-  `clients.authn.whoAmI({})`. The `serviceInfo` client stays: the capability-discovery probe
-  still uses it, over HTTP.
+  `clients.authn.whoAmI({})`. The `serviceInfo` client stays, but not because a probe still uses
+  it: the capability-discovery probe uses `fetch` (`src/discovery.ts`,
+  `paigasus-discovery/src/probe.ts`), over HTTP, not the Connect client. `IamClients.serviceInfo`
+  has no production caller after this change and is read by tests only. Keeping the field is
+  harmless and out of scope for this issue; removing it belongs in a follow-up.
 
 **`identity-not-provisioned` does NOT disappear from the console.** Revision 1 deleted the
 branch. Per § 2, `WhoAmI` still returns that error for an issuer with JIT off. The live path in
@@ -510,6 +513,14 @@ the claim in a comment; the test itself only checks the generated client and doe
    with a second proto message and a second mapper. The codegen-drift gate wants the proto and
    its bindings in one commit, and an RPC with no caller proves nothing, so the split stays
    rejected. The review surface is the cost.
+7. **D2's drift guard is `buf lint` plus `buf breaking`, not a Rust test.** § 6.1 named a test,
+   `who_am_i_response_mirrors_introspect_response`, that was never written. prost's generated
+   structs carry no field-name reflection, so a direct field-by-field comparison of
+   `IntrospectResponse` and `WhoAmIResponse` at test time would need to parse the `.proto` file
+   itself. The guard was deliberately replaced with `buf lint` and `buf breaking`, which run in
+   `:lint`. **Residual:** a field added to one message and not the other goes uncaught until
+   someone reads both messages side by side. Neither `buf lint` nor `buf breaking` compares one
+   message's shape against another's.
 
 ## 10. Verification before the PR
 

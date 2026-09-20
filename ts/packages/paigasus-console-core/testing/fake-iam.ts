@@ -135,8 +135,10 @@ export type FakeIam = {
   setHandlers(handlers: FakeIamHandlers): void;
   /**
    * A descriptor changes both the gRPC and the HTTP answer. `{ status }` changes ONLY the HTTP
-   * route (the discovery probe): the gRPC GetServiceInfo keeps the last descriptor, because it is
-   * also the provisioning call and a degraded-discovery scenario must not fail every first login.
+   * route (the discovery probe): the gRPC GetServiceInfo keeps the last descriptor, because
+   * `IamClients.serviceInfo` has no production caller today — only a test reads it directly, and
+   * a test that scripts a real descriptor must not have it clobbered by an unrelated HTTP status
+   * override.
    */
   setServiceInfo(descriptor: ServiceDescriptorBody | { status: number }): void;
   close(): Promise<void>;
