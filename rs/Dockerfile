@@ -22,9 +22,20 @@ COPY . .
 # the resulting layer, so `COPY --from=builder /src/target/...` in a later stage finds nothing.
 # Distinct cache ids per binary — the default sharing mode is `shared`, so two concurrent builds
 # would otherwise contend on cargo's lock.
+# `cargo auditable` embeds the crate list in the binary, which is what makes the image SBOM list
+# the Rust dependencies. MEASURED on 2026-09-20 (spec § 4.5): a plain `cargo build` gives
+# `cargo=0` in the SBOM, and `cargo auditable build` gives real purls. syft's
+# cargo-auditable-binary-cataloger is in its default set, so no syft flag changes.
+# Version-pinned: cargo-auditable has no proto plugin, so this is the only pin it can carry.
+RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry \
+    cargo install cargo-auditable --locked --version 0.7.6
+# The binary is copied OUT of the cache mount inside this same RUN: a cache mount is not part of
+# the resulting layer, so `COPY --from=builder /src/target/...` in a later stage finds nothing.
+# Distinct cache ids per binary — the default sharing mode is `shared`, so two concurrent builds
+# would otherwise contend on cargo's lock.
 RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry \
     --mount=type=cache,id=target-${BIN},target=/src/target \
-    cargo build --release --locked -p "${BIN}" --bin "${BIN}" \
+    cargo auditable build --release --locked -p "${BIN}" --bin "${BIN}" \
  && mkdir -p /out && cp "/src/target/release/${BIN}" /out/service
 
 FROM ubuntu:24.04@sha256:224a1869083a311ef3f13648a154ba79832fbef6364d31493642ca03082da254 AS rootfs
