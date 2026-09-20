@@ -409,8 +409,11 @@ revision 1 got wrong:
 - `FakeIamMethod` is derived from the proto service descriptors (`fake-iam.ts:64-88`), so
   `authn.whoAmI` appears **automatically** once codegen lands. No hand edit.
 - `dispatch` already calls `provisioned.add(token)` for any method absent from `UNENFORCED`
-  (`fake-iam.ts:148`, `:274-277`), so `WhoAmI` provisions in the fake **automatically** too. No
-  `dispatch` entry.
+  (`fake-iam.ts:148`, `:274-277`), so `WhoAmI` **provisions** in the fake automatically — no
+  `dispatch` entry is needed *for provisioning*. It still needs one to **answer**: `dispatch`
+  routes `authn.whoAmI` to the `whoAmI(context)` helper, the way it already routes
+  `authn.introspect` (`fake-iam.ts:311`). Provisioning and answering are separate concerns here,
+  and only the first is automatic.
 - The trap: the existing `introspect()` helper keys on `request.token` (`fake-iam.ts:234-249`).
   `WhoAmIRequest` is empty, so a naive delegation reads `undefined` and throws. The `whoAmI`
   default **must key on `context.token`**, and `principalPrnFor(context.token)` must agree with
@@ -531,6 +534,7 @@ The full gate graph, per the root `CLAUDE.md` — this change adds proto message
 `:typecheck` and the codegen-drift gate all have something to say about it:
 
 ```
+export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
 moon ci :build :test :lint :fmt :deny :osv :machete :actionlint :typecheck :breaking
   :affected-smoke :parity-corpus-drift :next-env-drift :wasm-getrandom-free
   :redis-connect-single-site :iam-docker-policy-single-site :error-code-single-site
