@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import io
+import re
 import shutil
 import subprocess
 import sys
@@ -275,6 +276,56 @@ def repo_tags(repo_root: Path) -> set[str]:
     except (OSError, subprocess.CalledProcessError) as exc:
         raise InconclusiveError(f"git tag -l failed: {exc}") from exc
     return {line.strip() for line in proc.stdout.splitlines() if line.strip()}
+
+
+# SMA-658. Both services are Cargo `publish = false`, so `releasable_packages` filters them out by
+# design and release-plz never processes them (M7). They need their own reader, and a STRICT pin:
+# a service crate that is missing from the tree is inconclusive for that service, never a silent
+# skip.
+SERVICES: dict[str, str] = {"iam": "paigasus-iam", "gateway": "paigasus-gateway"}
+
+_CHANGELOG_HEADING = re.compile(r"^##\s+\[?(?P<version>[0-9][^\]\s]*)\]?", re.M)
+
+
+def changelog_names_version(text: str, version: str) -> bool:
+    """True when a `## [<version>]` heading names exactly this version.
+
+    The comparison is on the captured version STRING, not a prefix test: `## [0.1.01]` must not
+    satisfy a 0.1.0 release, and prose that merely contains the number must not either.
+    """
+    return any(m.group("version") == version for m in _CHANGELOG_HEADING.finditer(text))
+
+
+def service_skips(version: str, service: str, tags: set[str]) -> bool:
+    """Spec § 6.1. Skip when there is no real version yet, or when the tag already exists."""
+    if version == "0.0.0":
+        return True
+    return tag_for(f"paigasus-{service}", version) in tags
+
+
+def service_state(rs_root: Path, tags: set[str]) -> dict[str, tuple[bool, str]]:
+    """service -> (skip, version). A SEPARATE FAILURE DOMAIN from the kernel verdict.
+
+    Each service is read in its own try. A failure for one service writes skip=False for that
+    service — the fail-safe direction, because spec § 4.3 step 3 makes a run for an already
+    released version a no-op — and leaves the other service and the kernel verdict untouched. The
+    negative control's synthetic trees hold no service crate at all, and their kernel verdict must
+    not change because of that.
+    """
+    out: dict[str, tuple[bool, str]] = {}
+    for service, crate in SERVICES.items():
+        try:
+            manifest = crate_manifests(rs_root)[crate]
+            pkg = load_toml(manifest).get("package") or {}
+            version = pkg.get("version")
+            if not isinstance(version, str):
+                raise InconclusiveError(f"{crate} has no literal [package] version in {manifest}")
+            out[service] = (service_skips(version, service, tags), version)
+        except Exception as exc:  # deliberately broad; see the docstring above.
+            print(f"release-plan: {service} is inconclusive ({type(exc).__name__}: {exc}) — run",
+                  file=sys.stderr)
+            out[service] = (False, "")
+    return out
 
 
 def run(repo_root: Path, event_name: str) -> tuple[bool, str]:
@@ -727,6 +778,86 @@ def _markers_are_mutually_exclusive() -> str | None:
     return "; ".join(problems) or None
 
 
+# SMA-658. The services are invisible to `releasable_packages` (they are Cargo `publish = false`),
+# so they need their own reader. A service is SKIPPED when it has no real version yet, or when its
+# tag already exists. Anything else RUNS, which is the fail-safe direction: spec § 4.3 step 3 makes
+# a run for an already released version a no-op.
+SERVICE_FIXTURES: list[tuple[str, str, set[str], bool]] = [
+    ("a version with no tag -> run", "0.1.0", set(), False),
+    ("the tag already exists -> skip", "0.1.0", {"paigasus-iam-v0.1.0"}, True),
+    ("still 0.0.0 -> skip", "0.0.0", set(), True),
+    ("a newer version than the tag -> run", "0.2.0", {"paigasus-iam-v0.1.0"}, False),
+    ("a tag that only PREFIXES the wanted one -> run", "0.1.0", {"paigasus-iam-v0.1.0-rc1"}, False),
+]
+
+
+def _service_fixture_rows() -> str | None:
+    for label, version, tags, want in SERVICE_FIXTURES:
+        got = service_skips(version, "iam", tags)
+        if got != want:
+            return f"{label!r}: expected {want}, got {got}"
+    return None
+
+
+def _changelog_reader_rows() -> str | None:
+    rows: list[tuple[str, str, str, bool]] = [
+        ("a keep-a-changelog heading", "## [0.1.0] - 2026-09-20\n", "0.1.0", True),
+        ("a heading with a compare link", "## [0.1.0](https://x/y) - 2026-09-20\n", "0.1.0", True),
+        ("a bare heading", "## 0.1.0\n", "0.1.0", True),
+        ("only the unreleased section", "## [Unreleased]\n", "0.1.0", False),
+        ("another version only", "## [0.2.0] - 2026-09-20\n", "0.1.0", False),
+        # A prefix must not read as a hit: 0.1.0 is not named by a 0.1.01 heading.
+        ("a longer version that starts with it", "## [0.1.01] - 2026-09-20\n", "0.1.0", False),
+        ("the version inside prose, not a heading", "see 0.1.0 below\n", "0.1.0", False),
+    ]
+    for label, text, version, want in rows:
+        got = changelog_names_version(text, version)
+        if got != want:
+            return f"{label!r}: expected {want}, got {got}"
+    return None
+
+
+# S9 (SMA-658). Spec § 6.1's fail-safe direction as a fixture: a service that cannot be read is
+# inconclusive for THAT SERVICE alone — never a silent skip, and never cross-talk into the other
+# service or into run()'s own kernel verdict. This mirrors _broken_crate_manifest_tree's shape,
+# but leaves `paigasus-iam` OUT of `[workspace] members` entirely (rather than malforming its
+# manifest), so `crate_manifests(rs_root)["paigasus-iam"]` fails with a plain KeyError that never
+# touches the scan for the healthy `paigasus-gateway` crate or for run()'s own kernel packages.
+def _mixed_service_tree(tmp: str) -> Path:
+    rs_root = Path(tmp) / "rs"
+    kernel_dir = rs_root / "crates" / "libs" / "paigasus-kernel"
+    gateway_dir = rs_root / "crates" / "services" / "paigasus-gateway"
+    kernel_dir.mkdir(parents=True)
+    gateway_dir.mkdir(parents=True)
+    (rs_root / "Cargo.toml").write_text(
+        '[workspace]\nmembers = ["crates/libs/*", "crates/services/paigasus-gateway"]\n')
+    (rs_root / "release-plz.toml").write_text("")
+    (kernel_dir / "Cargo.toml").write_text(
+        '[package]\nname = "paigasus-kernel"\nversion = "0.1.0"\n')
+    (gateway_dir / "Cargo.toml").write_text(
+        '[package]\nname = "paigasus-gateway"\nversion = "0.1.0"\npublish = false\n')
+    return rs_root
+
+
+def _service_state_is_a_separate_failure_domain() -> str | None:
+    tmp = tempfile.mkdtemp()
+    try:
+        rs_root = _mixed_service_tree(tmp)
+        state = service_state(rs_root, set())
+        if state.get("iam") != (False, ""):
+            return f"the missing iam crate did not read as (False, ''): {state.get('iam')!r}"
+        if state.get("gateway") != (False, "0.1.0"):
+            return (f"the healthy gateway crate was affected by iam's failure: "
+                    f"{state.get('gateway')!r}")
+        try:
+            run(Path(tmp), "push")
+        except Exception as exc:  # deliberately broad; run() must never raise (see its docstring)
+            return f"run() raised {type(exc).__name__}: {exc} — a service failure must not reach it"
+        return None
+    finally:
+        shutil.rmtree(tmp)
+
+
 # The collection-layer rows: paths a pure-function fixture cannot reach. Fourteen of the fifteen
 # need a filesystem (they build throwaway trees under tempfile.mkdtemp()); row 15
 # (_markers_are_mutually_exclusive) needs none, but still cannot be expressed as a decide()-only
@@ -754,6 +885,9 @@ COLLECTION_ROWS: tuple[tuple[str, Callable[[], str | None]], ...] = (
      _untyped_collection_failure_asserts_three),
     ("an untyped collection failure makes run() build", _untyped_collection_failure_builds),
     ("the five shape markers are mutually exclusive", _markers_are_mutually_exclusive),
+    ("SMA-658 service skip rows", _service_fixture_rows),
+    ("SMA-658 changelog reader rows", _changelog_reader_rows),
+    ("SMA-658 service_state is a separate failure domain", _service_state_is_a_separate_failure_domain),
 )
 
 
@@ -847,6 +981,23 @@ def _assert_repo(repo_root: Path) -> int:
             f"publishable, re-baseline the pin deliberately — do not loosen the comparison.")
     if not tags:
         problems.append("the repository reports no tags; --assert needs a full checkout")
+    # SMA-658 spec § 3.1: V-a is a bump by hand, so nothing else can catch a forgotten changelog
+    # entry. `repo:actionlint` check 11 runs --assert on every pull request, which is what makes
+    # this a gate rather than a convention.
+    for service, (_skip, version) in service_state(repo_root / "rs", tags).items():
+        if not version or version == "0.0.0":
+            continue
+        changelog = repo_root / "rs" / "crates" / "services" / SERVICES[service] / "CHANGELOG.md"
+        try:
+            text = changelog.read_text(encoding="utf-8")
+        except OSError as exc:
+            problems.append(f"{SERVICES[service]} is at {version} but {changelog} cannot be read "
+                            f"({exc}). A hand-bumped service needs a changelog section.")
+            continue
+        if not changelog_names_version(text, version):
+            problems.append(f"{SERVICES[service]} is at {version} but {changelog} has no "
+                            f"`## [{version}]` heading. Add the section in the same PR as the "
+                            f"bump: nothing else records what that release contains.")
     for p in problems:
         print(f"release-plan: {p}", file=sys.stderr)
     return 3 if problems else 0
@@ -876,6 +1027,19 @@ def main(argv: list[str]) -> int:
 
     nothing, reason = run(root, args.event_name)
     print(f"release-plan: {reason}")
+    # SMA-658. The service lines are computed in their own failure domain, so a broken service
+    # read cannot change the kernel verdict above. `repo_tags` is read once more here on purpose:
+    # `run()` swallows its own failure, and a second failure here must land on the per-service
+    # fail-safe rather than on the kernel one.
+    try:
+        tags = repo_tags(root)
+    except Exception as exc:  # deliberately broad; the fail-safe direction is "run".
+        print(f"release-plan: tags are inconclusive ({type(exc).__name__}: {exc}) — run",
+              file=sys.stderr)
+        tags = set()
+    for service, (skip, version) in service_state(root / "rs", tags).items():
+        print(f"skip_{service}={'true' if skip else 'false'}")
+        print(f"version_{service}={version}")
     print(f"nothing_to_release={'true' if nothing else 'false'}")
     return 0
 
