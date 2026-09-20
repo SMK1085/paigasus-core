@@ -12,7 +12,7 @@ import { iamClientsForToken } from './console';
 /**
  * The runtime is a process singleton, but `clientsForToken` runs PER REQUEST, inside the login
  * callback's route handler. So it reads the correlation id there, and the login-time IAM calls
- * (GetServiceInfo, Introspect) carry the same id as every later call of that request. proxy.ts sets
+ * (WhoAmI) carry the same id as every later call of that request. proxy.ts sets
  * the header on `/auth/callback` too — the route is public, which makes the middleware allow it, not
  * skip the header. Outside a request scope `requestCorrelationId()` answers null, never throws.
  */

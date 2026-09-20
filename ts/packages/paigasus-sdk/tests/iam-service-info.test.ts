@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// SMA-511 spec § 7.3. The iam console provisions its principal with
-// ServiceInfoService.GetServiceInfo (spec § 4.5), and apps must not import @paigasus/proto, so the
-// SDK's ./iam entry re-exports the service. It must be the paigasus.common.v1 service from the proto
-// ROOT entry — never anything from @paigasus/proto/iam, which keeps a deprecated ServiceInfo.
+// SMA-511 spec § 7.3. The consoles provision their principal with AuthnService.WhoAmI (SMA-632);
+// this file checks ServiceInfoService, the capability descriptor, which is unaffected. Apps must
+// not import @paigasus/proto, so the SDK's ./iam entry re-exports the service. It must be the
+// paigasus.common.v1 service from the proto ROOT entry — never anything from @paigasus/proto/iam,
+// which keeps a deprecated ServiceInfo.
 import { afterEach, describe, expect, it } from 'vitest';
 import { ServiceInfoService as ProtoServiceInfoService } from '@paigasus/proto';
 import { ServiceInfoService, createIamClient, disposeTransports } from '../src/iam.js';

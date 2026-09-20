@@ -130,19 +130,24 @@ export function worldHandlers(options: WorldOptions = {}): FakeIamHandlers {
     if (projectAdmin) throw denial();
   };
 
+  const e2ePrincipal = () => ({
+    principalPrn: PRINCIPAL_PRN,
+    status: 'active',
+    issuer: 'fake-idp',
+    subject: 'e2e-user',
+    memberships: withScopes
+      ? [
+          { id: '0190a1d4-0000-7000-8000-0000000000f1', principalPrn: PRINCIPAL_PRN, nodePrn: ORG_PRN },
+          { id: '0190a1d4-0000-7000-8000-0000000000f2', principalPrn: PRINCIPAL_PRN, nodePrn: TEAM_PRN },
+        ]
+      : [],
+  });
+
   return {
-    'authn.introspect': () => ({
-      principalPrn: PRINCIPAL_PRN,
-      status: 'active',
-      issuer: 'fake-idp',
-      subject: 'e2e-user',
-      memberships: withScopes
-        ? [
-            { id: '0190a1d4-0000-7000-8000-0000000000f1', principalPrn: PRINCIPAL_PRN, nodePrn: ORG_PRN },
-            { id: '0190a1d4-0000-7000-8000-0000000000f2', principalPrn: PRINCIPAL_PRN, nodePrn: TEAM_PRN },
-          ]
-        : [],
-    }),
+    // Both authn reads answer the SAME principal. The console calls whoAmI (SMA-632); introspect
+    // stays scripted because IAM still serves it and a test may drive it directly.
+    'authn.introspect': e2ePrincipal,
+    'authn.whoAmI': e2ePrincipal,
     'authz.listRoleGrants': () => ({ grants: userGrants(projectAdmin, withScopes) }),
     'authz.isAuthorized': (req) => {
       if (req.principalPrn === PRINCIPAL_PRN) return { allowed: allow === null || allow.has(req.action), determiningPolicies: [], reason: '' };

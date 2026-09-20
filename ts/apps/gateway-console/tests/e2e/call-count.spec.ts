@@ -31,7 +31,7 @@ const TEAMS = 1;
 /** § 7.3's table for S scopes and T teams, with no `sa` parameter. */
 function formula(): Record<string, number> {
   return {
-    'authn.introspect': 1, // the session principal, memoized per request
+    'authn.whoAmI': 1, // the session principal, memoized per request
     'authz.listRoleGrants': 1, // myScopes(), with iam.authz.cedar present
     'tenancy.getOrganization': 1 + SCOPES.organization, // the page, plus myScopes()'s label of the org scope
     'tenancy.getTeam': SCOPES.team, // myScopes() labels

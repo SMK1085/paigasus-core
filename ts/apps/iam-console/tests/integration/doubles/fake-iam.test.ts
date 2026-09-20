@@ -103,8 +103,10 @@ describe('the fake IAM', () => {
     const before = mapError({ kind: 'grpc', error: await rejection(authn.introspect({ token: 'token-b' })) });
     expect(before).toMatchObject({ presentation: 'forbidden', reason: ErrorReason.IDENTITY_NOT_PROVISIONED });
 
-    const info = createIamClient(ServiceInfoService, { baseUrl: fake.grpcUrl }, { bearer: 'token-b' });
-    expect((await info.getServiceInfo({})).serviceInfo?.service).toBe('iam');
+    // WhoAmI is the bearer-enforced call the console actually makes (SMA-632). GetServiceInfo is
+    // still enforced and would still provision; it is simply no longer what the console uses.
+    const authnBearer = createIamClient(AuthnService, { baseUrl: fake.grpcUrl }, { bearer: 'token-b' });
+    await authnBearer.whoAmI({});
     expect(fake.provisioned.has('token-b')).toBe(true);
 
     const after = await authn.introspect({ token: 'token-b' });

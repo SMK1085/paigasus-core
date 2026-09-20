@@ -3,8 +3,8 @@
 // The app's ONE call to createConsoleRuntime, at module scope. Called once per module graph, which
 // is a correctness requirement, not a convention: each accessor is a React cache() wrapper, and a
 // second call would make a second memoization identity. Outside a server render cache() is a
-// pass-through, so no unit or integration test can catch a regression here — only an e2e Introspect
-// count can.
+// pass-through, so no unit or integration test can catch a regression here — only an e2e WhoAmI
+// count can (SMA-632).
 import 'server-only';
 import { createConsoleRuntime, logger } from '@paigasus/console-core';
 import { authRuntime } from './auth';
