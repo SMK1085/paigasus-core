@@ -190,7 +190,12 @@ plan ─┬─ wheels / prebuild / proto-dist ─ approve-release ─ release �
   (challenger B1). A job-level `if:` cannot read `matrix`. One approval job that needs both builds
   is skipped when one build is skipped. A static chain for each service avoids all three problems.
 - **Result:** a kernel-only, an image-only, and a combined release all work. A failure in one chain
-  does not block another chain. When two chains are pending, the reviewer approves each one.
+  does not block another chain. **Intent, not a verified fact:** when two chains are pending, the
+  reviewer approves each one separately. GitHub's pending-deployment API is keyed by environment,
+  and whether approving one chain also releases another job waiting on the same environment is not
+  confirmed (PR 2 review). Confirm this on the first release where two chains are pending at once.
+  Either way, the security floor holds: a human must approve before any step that publishes or tags
+  an image runs.
 
 ### 4.1 The gate on each chain
 
@@ -212,9 +217,11 @@ plan ─┬─ wheels / prebuild / proto-dist ─ approve-release ─ release �
   archive's image (M3 decides the exact identity check on each runner's image store), and runs the
   smoke suite for this one service.
 - **SBOM:** an SPDX SBOM for this architecture (§ 4.5).
-- **Outputs:** the per-platform manifest digest is a **job output**. It reaches `publish-images`
-  through `needs:`, not through the artifact store, so § 4.3 step 2 can check the artifact hop.
-- **Artifact:** the archive, the SBOM and the chisel manifest.
+- **Outputs:** the per-platform manifest digest travels in the **artifact**, written to
+  `out/digest-<arch>.txt` alongside the archive, not as a job output read through `needs:` (§ 16
+  P16). § 4.3 step 2 checks the artifact hop by comparing this file against the digest it computes
+  from the downloaded archive.
+- **Artifact:** the archive, the SBOM, the chisel manifest and the digest file.
 
 `ci/images/run.sh` changes:
 
@@ -598,3 +605,4 @@ ADR-0011 S1 and S3 in Notion, and reword the V5 message to match.
 | P13 | The two chains share their step lists through YAML anchors. MEASURED (SMA-658 B2, actionlint 1.7.12): a top-level `x-image-chain:` key fails schema validation (`unexpected key`), so each anchor (`&image-build-steps`, `&image-publish-steps`, `&image-tag-steps`) is defined on the `iam` job that needs it first, as that job's own `steps:` value, and aliased from the matching `gateway` job. PyYAML still expands the alias before `release_guard.py` reads the file, so each job is checked in full. |
 | P14 | `cargo-auditable` is pinned at `0.7.6` with `cargo install --locked --version`, in the builder stage. It has no proto plugin, so this is the only pin available to it. |
 | P15 | `docker logout docker.io` runs after the `crane tag` loop, not immediately after the Hub `cosign sign` (§ 4.3 step 6's "at once" wording). `crane tag`'s Hub write also needs the credential `docker login` set, so logging out earlier would break it (SMA-658 S15, should-fix — not measured live; verify on the first live release whether that constraint still holds). |
+| P16 | The per-platform manifest digest travels in the artifact (`out/digest-<arch>.txt`), not as a job output through `needs:`, contrary to § 4.2's original wording (PR 2 review, I3). | A matrix job writes one output map; the last leg to finish wins, so a job output cannot carry two different per-arch values out of a `fail-fast: false` matrix. The artifact file has no such collision, since each leg writes its own file under its own name. The digest file rides in the SAME artifact as the archive it describes, so § 4.3 step 2's comparison proves the archive was not corrupted in the upload/download hop; it does not prove the two were not swapped together by a coordinated attacker who controls both. |

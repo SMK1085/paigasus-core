@@ -418,17 +418,29 @@ when you do not need them.
 A maintainer sets a service version by hand. release-plz does not process these crates, because
 their Cargo manifests set `publish = false` (SMA-658, spec § 3.1).
 
+Before you release a service for the first time, create both registry repositories:
+`ghcr.io/smk1085/paigasus-<svc>` and `docker.io/smaschek/paigasus-<svc>`. Set the Docker Hub
+repository to public. The `decide` step reads Docker Hub before it logs in. A missing or private
+repository sends a 401 answer. The step treats a 401 answer as a fatal error, not as "no image
+yet".
+
 1. Open a pull request with the title `chore(rs): release paigasus-<svc> v<version>`. In it:
    - set `version` in `rs/crates/services/paigasus-<svc>/Cargo.toml`;
-   - run `cargo update --manifest-path rs/Cargo.toml --workspace --offline`;
+   - run `cargo update --manifest-path rs/Cargo.toml -p paigasus-<svc> --offline`;
    - add a `## [<version>] - <date>` section to that crate's `CHANGELOG.md`.
    `repo:actionlint` check 11 fails the pull request when the changelog section is missing.
 2. Merge it. The `plan` job selects the service, because its version has no tag.
-3. Approve the `approve-images-<svc>` job. Each service has its own approval: approving one does
-   not approve the other, and neither approves the kernel release.
+3. Approve the `approve-images-<svc>` job. Each service chain has its own approval job, with its
+   own environment name. The intent: approving one chain does not approve another chain, and no
+   chain approval approves the kernel release. **This independence is not verified.** GitHub keys
+   its pending-deployment API by environment. It is not confirmed whether one approval releases
+   every job that waits on the same environment in the run. Confirm this on the first release
+   where two chains wait for approval at the same time, and update this note with the result. The
+   security floor holds either way: a human must approve before any step that publishes or tags
+   an image runs.
 4. The `publish-images-<svc>` job pushes to GHCR, copies the index to Docker Hub, signs both,
-   moves `:<minor>` and `:latest` only forward, and verifies the result. The `tag-<svc>` job then
-   makes `paigasus-<svc>-v<version>`.
+   moves `:<major>`, `:<minor>` and `:latest` only forward, and verifies the result. The
+   `tag-<svc>` job then makes `paigasus-<svc>-v<version>`.
 5. After the first push of a new package, set the GHCR package to public and link it to the
    repository. GitHub makes every new package private.
 
@@ -460,8 +472,8 @@ every build.
 ### If the release plan itself cannot be read
 
 `ci/release-plan/run.sh`'s fail-safe branch writes `skip_iam=false` and `skip_gateway=false` (S12,
-so both chains RUN — the fail-safe direction), but it writes no `version_iam` or `version_gateway`
-at all. Every chain job that got past its gate then hard-fails at the label compare (`the archive
-carries version , but plan says .`), because `plan`'s version output is empty. Read that specific
-failure as "the release plan could not be read" — check the `plan` job's own log — not as a build
-problem in `images-build-<svc>`.
+so both chains RUN — the fail-safe direction), and it writes `version_iam` and `version_gateway` as
+explicit EMPTY strings, not as outputs left unwritten. Every chain job that got past its gate then
+hard-fails at the label compare (`the archive carries version , but plan says .`), because `plan`'s
+version output is empty. Read that specific failure as "the release plan could not be read" — check
+the `plan` job's own log — not as a build problem in `images-build-<svc>`.
