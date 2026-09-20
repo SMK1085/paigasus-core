@@ -13,9 +13,11 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   gets bumped ("dependencies changed") — and Cargo's `publish = false` suppresses publishing but
   **not tagging**, so the first release would permanently tag most of the workspace. Per-package
   `release = false` removes a package from the proposal entirely; every non-family crate needs
-  one explicitly. `paigasus-gateway` / `paigasus-iam` stay at `0.0.0` deliberately: their
-  `env!("CARGO_PKG_VERSION")` feeds `ServiceInfo`, and ADR-0020 skew reporting is parked on that
-  value (SMA-505 R7).
+  one explicitly. `paigasus-gateway` / `paigasus-iam` are versioned BY HAND (SMA-658, option
+  V-a) and are at `0.1.0` as of this PR: release-plz never processes a crate whose Cargo manifest
+  sets `publish = false` (measured, M7), so `release = false` stays and release-plz neither bumps
+  nor tags them. `env!("CARGO_PKG_VERSION")` still feeds `ServiceInfo`, and ADR-0020 skew
+  reporting is still parked on that value (SMA-505 R7).
 - release-plz's `release_pr()` does all its work in a **tempdir copy** (`copy_to_temp_dir`,
   measured against the pinned 0.3.158) — it never touches the local working tree or `HEAD`. This
   nearly shipped a direct push to `main`: deriving the push target with `git rev-parse
@@ -234,3 +236,24 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   V7 is NOT the last check: the roster has since grown through V8 to V12 (SMA-602), so read
   `ci/actionlint/release_guard.py`'s `^# V` comments rather than this entry alone.
 - `release.yml` must never gain a `pull_request` or `pull_request_target` trigger (SMA-579).
+- Each service image releases through **its own chain** in `release.yml`: `images-build-<svc>` →
+  `approve-images-<svc>` → `publish-images-<svc>` → `tag-<svc>`, for `iam` and `gateway`. The
+  chains are independent of the kernel chain and of each other, so a kernel-only release, an
+  image-only release and a combined release all work, and a failed image chain does not stop the
+  kernel release. `release_guard.py` V8 asserts that a publisher sits behind the approval of ITS
+  OWN chain — a kernel approval never authorises an image push. V14 asserts the same for the
+  CAPABILITY (`packages: write`, `id-token: write`, `attestations: write`, the `release-images`
+  or `release-publish` environment, an App token with `contents: write`), so a publish with a tool
+  no marker names still reds. V13 allows `DOCKERHUB_TOKEN` only in a job whose environment is
+  `release-images`, compares environment names case-folded, and fails closed on an `environment:`
+  built from an expression.
+- **The first digest published under `:<version>` is final** (D10). A later run adopts it and
+  discards its own build. A rebuild never reproduces a digest, because `chisel cut` resolves the
+  live Ubuntu archive on every build, so "push the same digest again" is not available as a
+  recovery. `:<major>`, `:<minor>` and `:latest` move only forward, compared as numbers.
+- A service version is set **by hand**, in a normal pull request, with a `CHANGELOG.md` section.
+  release-plz never processes a crate whose Cargo manifest says `publish = false` (MEASURED,
+  SMA-658 M7: it is invisible to `release-plz update`, and `git_only` hard-errors on the second
+  release when the crate has an unpublished workspace dependency). `ci/release-plan/release_plan.py
+  --assert`, which `repo:actionlint` check 11 runs on every pull request, fails when a bumped
+  service has no changelog section.

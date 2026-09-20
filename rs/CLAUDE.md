@@ -203,3 +203,8 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   parameterized `rs/Dockerfile` installs both binaries to the fixed path
   `/usr/local/bin/paigasus-service`. Service identity comes from `paigasus_logging::init`, not
   `argv[0]`.
+- `rs/Dockerfile` builds the services with **`cargo auditable`**, which is what makes the image
+  SBOM list the Rust crates. MEASURED (SMA-658, 2026-09-20): a plain `cargo build` gives `cargo=0`.
+  The OS-package half of the SBOM is still empty and is tracked as SMA-665: syft 1.52.0 reads only
+  `/var/lib/dpkg/status` or `.deb` files, and a chisel cut writes neither. The `base-files_chisel`
+  slice does NOT help — it writes a chisel-specific manifest that syft cannot read.
