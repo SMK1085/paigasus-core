@@ -82,6 +82,22 @@ decides the caching and availability questions with a concrete requirement. It m
 read D6 first: the gateway maps IAM's `Internal` to `IamUnavailable` (503), so a
 grant-store read placed on that path turns a `role_grant` outage into a gateway outage.
 
+**The rule is about the call site, not the credential.** This is easy to misread, so it
+is stated explicitly. `WhoAmI` accepts an API-key bearer: `require_bearer` resolves an
+API-key token through `api_key_auth.resolve`
+(`adapters/http/auth_middleware.rs:51-55`), and the handler then calls
+`state.authn.context_for` (`adapters/http/authn.rs:119`, and `adapters/grpc/authn.rs:105`).
+So a service account calling `WhoAmI` **does** get its grants, while the same service
+account calling `IntrospectApiKey` gets an empty list. The two endpoints disagree on
+purpose. `IntrospectApiKey` is the gateway's per-request authentication call with no
+reader of the field; `WhoAmI` is an explicit, console-facing request whose whole purpose
+is to describe the caller. The cost argument applies to the first and not to the second.
+
+This discloses nothing new. Both answers describe the same principal's own grants, and
+D15 already establishes that the key wields the service account's entire grant set.
+
+Found by the Task 2 review, which was right that the spec had not anticipated it.
+
 ### D3 — the port
 
 `AuthenticateToken` gains a `grants: Arc<dyn RoleGrantStore>` field. It is a trait
