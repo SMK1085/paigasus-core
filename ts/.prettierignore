@@ -9,3 +9,7 @@ generated
 # see the root .gitignore entry.
 test-results
 playwright-report
+
+# Project memory: hand-wrapped prose, like the root CLAUDE.md. Prettier strips the
+# continuation indent and breaks the list nesting.
+CLAUDE.md
