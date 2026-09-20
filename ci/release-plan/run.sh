@@ -83,6 +83,9 @@ github_output() {
   if [ "$rc" -ne 0 ] || ! grep -qE '^nothing_to_release=(true|false)$' < <(printf '%s\n' "$out"); then
     printf '::warning::release-plan could not decide (rc=%s) — building, which is the fail-safe direction\n' "$rc"
     printf 'nothing_to_release=false\n' >> "${GITHUB_OUTPUT:-/dev/stdout}"
+    # SMA-658. The image chains read their own outputs, and an unset output makes the chain RUN
+    # (spec § 4.1). Writing them here as well keeps the fail-safe explicit rather than implied.
+    printf 'skip_iam=false\nskip_gateway=false\n' >> "${GITHUB_OUTPUT:-/dev/stdout}"
     exit 0
   fi
   # `tail -n 1` guards against a second, forged verdict line ahead of the genuine one — e.g. a
@@ -93,6 +96,18 @@ github_output() {
   # confirm whether Actions takes the first or the last of two same-named `>>` output keys, and
   # a fail-safe control must not lean on an assumption nobody checked.
   printf '%s\n' "$out" | grep -E '^nothing_to_release=(true|false)$' | tail -n 1 \
+    >> "${GITHUB_OUTPUT:-/dev/stdout}"
+  # SMA-658. Four separate greps, one per key, each taken LAST for the same forged-line reason as
+  # the verdict above: a service line inside a heredoc or an echoed error message must not be
+  # read as the real decision. S6: a single combined grep over two keys cannot use `tail -n 1`
+  # without dropping one of the two services, so each key gets its own grep and its own tail.
+  printf '%s\n' "$out" | grep -E '^skip_iam=(true|false)$' | tail -n 1 \
+    >> "${GITHUB_OUTPUT:-/dev/stdout}"
+  printf '%s\n' "$out" | grep -E '^skip_gateway=(true|false)$' | tail -n 1 \
+    >> "${GITHUB_OUTPUT:-/dev/stdout}"
+  printf '%s\n' "$out" | grep -E '^version_iam=' | tail -n 1 \
+    >> "${GITHUB_OUTPUT:-/dev/stdout}"
+  printf '%s\n' "$out" | grep -E '^version_gateway=' | tail -n 1 \
     >> "${GITHUB_OUTPUT:-/dev/stdout}"
   exit 0
 }
