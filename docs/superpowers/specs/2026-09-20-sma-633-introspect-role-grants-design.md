@@ -134,7 +134,17 @@ creation time stay off the wire. This issue does not widen that contract.
 This does widen what a stolen OIDC token discloses: identity and memberships today,
 plus the principal's grant scopes and role keys after the change. That is accepted.
 The grant set is already readable by the same principal through `ListRoleGrants`, so
-the token discloses nothing its holder could not already fetch.
+in an ordinary build the token discloses nothing its holder could not already fetch.
+
+One case is not quite "nothing new", and it is accepted too. `ListRoleGrants` is gated
+on `authz.admin_enabled` (`adapters/grpc/authz.rs:228`); `Introspect` is not. So in a
+build with `admin_enabled = false`, the token now discloses a grant set that
+`ListRoleGrants` would refuse to serve. The disclosure stays self-referential — the
+caller learns only its own grants, which it exercises on every authorized request
+anyway — and `admin_enabled` gates policy **administration**, not the right to know
+one's own authority. Gating introspection on an administration switch would make the
+capability key meaningless in exactly the builds most likely to need it. Raised by the
+whole-branch review.
 
 ### D5 — `resolve` is untouched
 
