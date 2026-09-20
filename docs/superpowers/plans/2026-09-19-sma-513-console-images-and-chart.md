@@ -1423,6 +1423,74 @@ git commit -m "feat(repo): backend Deployments and Services, with the SMA-559 ro
 
 ---
 
+### Task 11b: Make a zone's backend optionally external
+
+**Added 2026-09-20, after Task 11 surfaced that the gateway backend cannot boot from this chart.** Measured in the tree: `GatewayConfig::validate` hard-fails on an empty `upstream.openai.api_key` (`rs/crates/services/paigasus-gateway/src/config.rs:278`), and `iam.grpc_addr` defaults to `https://127.0.0.1:9090` with `LoopbackInsecure` accepted only for a loopback host (`:209-222`). An in-cluster gateway→IAM link therefore needs a TLS design, which is an ADR-shaped decision and not chart work. Sven's call: the chart keeps both console zones and the IAM backend, and any other zone's backend becomes an address in values, exactly like Postgres and Redis.
+
+**This does not weaken D6.** A zone stays atomic — enabling it still renders its ingress rule, its `PAIGASUS_ZONES` entry, its `PAIGASUS_SERVICES` entry and its console together. Whether that zone's backend is deployed here or supplied is a separate axis, and it cannot produce "routable but unadvertised".
+
+**Files:**
+- Modify: `charts/paigasus/values.yaml`
+- Modify: `charts/paigasus/templates/_helpers.tpl` (`paigasus.serviceMapJson`, `paigasus.validate`)
+- Modify: `charts/paigasus/templates/backend-deployment.yaml`, `charts/paigasus/templates/backend-service.yaml`
+- Modify: `charts/paigasus/tests/maps.sh`, `charts/paigasus/tests/refusals.sh`
+
+**Interfaces:**
+- Produces: `zones.<id>.backend.deploy` (bool) and `zones.<id>.backend.url` (string). `iam` defaults `deploy: true`; `gateway` defaults `deploy: false`. Tasks 12 and 13 consume the resulting render.
+
+- [ ] **Step 1: Add the failing refusal row first**
+
+In `charts/paigasus/tests/refusals.sh`, add a row asserting that an enabled zone with `backend.deploy: false` and no `backend.url` is refused with its own message:
+
+```bash
+expect_fail "external backend without url" "backend.url is required" \
+  --set zones.gateway.enabled=true --set zones.gateway.backend.deploy=false \
+  --set zones.gateway.backend.url=""
+```
+
+Run it. Expected: FAIL, because no such refusal exists yet.
+
+- [ ] **Step 2: Add the values keys**
+
+`zones.iam.backend.deploy: true` and `zones.gateway.backend.deploy: false`, plus `zones.gateway.backend.url: ""` with a comment saying it is required whenever the gateway zone is enabled, and why the chart does not deploy that backend (the two measured `config.rs` facts above, cited by file and line).
+
+- [ ] **Step 3: Gate the refusal in `paigasus.validate`**
+
+For every enabled zone with `backend.deploy` false, `fail` unless `backend.url` is a non-empty string. The message must contain `backend.url is required` and name the zone.
+
+- [ ] **Step 4: Make `paigasus.serviceMapJson` pick the right address**
+
+When `backend.deploy` is true, keep `http://<fullname>-<id>-backend:<httpPort>`. When false, use `backend.url` verbatim. Nothing else about the helper changes.
+
+- [ ] **Step 5: Render the backend only when deployed**
+
+Add `and $z.enabled $z.backend.deploy` to the `range` guard in both `backend-deployment.yaml` and `backend-service.yaml`.
+
+- [ ] **Step 6: Update `maps.sh` for the new required value**
+
+Its `BASE` needs `--set zones.gateway.backend.url=http://gw.example.test:8088` so the two-zone rows still render. The assertion itself does not change: the key sets must still be exactly the enabled zones.
+
+- [ ] **Step 7: Prove every branch**
+
+```bash
+export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH" PROTO_REPORTER=text
+charts/paigasus/tests/refusals.sh --set ingress.host=h.test
+charts/paigasus/tests/maps.sh
+```
+
+Expected: six `ok` rows in refusals (the new one included) and four in maps.
+
+Then verify by hand and report: with both zones enabled, the rendered output contains a Deployment and Service for the **iam** backend and **none** for the gateway backend; and `PAIGASUS_SERVICES`'s `gateway` value equals the supplied `backend.url`, not an in-cluster Service name.
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add charts/paigasus
+git commit -m "feat(repo): let a zone supply its backend address instead of deploying it (SMA-513)"
+```
+
+---
+
 ### Task 12: The Ingress
 
 **Files:**
