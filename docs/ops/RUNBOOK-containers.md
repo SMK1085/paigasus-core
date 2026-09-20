@@ -289,15 +289,15 @@ build itself — they bite the first operator who deploys without reading this s
 `ts/Dockerfile` builds one image for both console zones, selected by the `APP` build arg. It
 follows the same shape as the Rust service images:
 
-- The runtime stage is the distroless base
+- **The runtime stage is the distroless base**
   `gcr.io/distroless/nodejs24-debian12:nonroot@sha256:14d42e2511532589a7c7e01a753667a74fcc96266e137e8125006b87b0c32d0a`.
   It has **no shell**. `smoke_consoles` in `ci/images/run.sh` asserts that absence against the
   running container, not only against the pin.
-- The image runs as uid:gid `65532:65532` (`USER 65532:65532`). This is the same uid the Rust
-  service images use, so one Kubernetes `securityContext` (`runAsNonRoot: true`,
-  `runAsUser: 65532`) covers all four images. `smoke_consoles` reads the running container's uid
-  with `docker top` and fails if it is not `65532`.
-- The image writes two fixed-path `.mjs` files, `/app/entrypoint.mjs` and
+- **The image runs as uid:gid `65532:65532`** (`USER 65532:65532`). This is the same uid the Rust
+  service images use (`rs/Dockerfile`'s `USER 65532:65532`), so one Kubernetes `securityContext`
+  (`runAsNonRoot: true`, `runAsUser: 65532`) covers all four images. `smoke_consoles` reads the
+  running container's uid with `docker top` and fails if it is not `65532`.
+- **The image writes two fixed-path `.mjs` files**, `/app/entrypoint.mjs` and
   `/app/healthcheck.mjs`, and `ENTRYPOINT`/`HEALTHCHECK` name them literally. This works around a
   Docker limitation: exec-form `ENTRYPOINT` and `HEALTHCHECK` do **not** expand `ARG` or `ENV`, so
   neither instruction can reference `${APP}` directly. The files are `.mjs`, not `.js`, because
@@ -306,18 +306,23 @@ follows the same shape as the Rust service images:
   The healthcheck file curls its own `<BASE_PATH>/healthz` over `127.0.0.1:$PORT`.
   `assert_console_pins` in `ci/images/run.sh` holds the base's Node major, the builder's exact
   Node version, and the builder's pnpm version to `.prototools`' pins (Node `24.16.0`, pnpm
-  `11.3.0`), and separately refuses any `PAIGASUS_*` `ENV`/`ARG` line in `ts/Dockerfile`.
-- Configuration is runtime-only: the image bakes no `PAIGASUS_*` environment variable, and
+  `11.3.0`).
+- **Configuration is runtime-only:** the image bakes no `PAIGASUS_*` environment variable, and
   `assert_console_pins` greps `ts/Dockerfile` to enforce it. The one exception is
   `PAIGASUS_COMPILED_*` (`PAIGASUS_COMPILED_ZONE`, `PAIGASUS_COMPILED_BASE_PATH`), which
   `createNextConfig` in `ts/packages/paigasus-next-config` writes at build time on purpose — it
   is a compiled-in record of the zone the artifact was built for, not deployment-varying
   configuration, so `runtime.ts` can compare it against the `PAIGASUS_ZONE` a deployment supplies.
-- `.github/dependabot.yml` carries a `docker` ecosystem block for directory `/ts`, mirroring the
-  `/rs` block. It ignores major and minor/patch bumps on both
-  `gcr.io/distroless/nodejs24-debian12` and `node`, because `assert_console_pins` couples both to
-  `.prototools` and an automated version bump would red a gate Dependabot cannot fix on its own;
-  only a digest refresh within the pinned version flows through automatically.
+- **`.github/dependabot.yml`'s `/ts` docker block treats its two pinned images differently, not
+  identically.** The distroless base's `ignore` entry blocks only its major-version bumps
+  (`.github/dependabot.yml:177-179`); its minor and patch bumps are not ignored, so they still go
+  into the `docker-minor-patch` group as normal proposals, and a digest refresh on the pinned
+  major flows through automatically too. The `node` builder's `ignore` entry blocks all three
+  update types — major, minor, and patch (`.github/dependabot.yml:184-188`) — because
+  `assert_console_pins` holds its exact `X.Y.Z` to `.prototools`' pin; and because
+  `ts/Dockerfile:13` pins the builder by a bare tag with no `@sha256` digest, there is also no
+  digest for Dependabot to refresh, so nothing updates automatically for `node` at all. A version
+  bump for either stays deliberate, human, and moves `ts/Dockerfile` and `.prototools` together.
 - **The standalone output has no static assets.** Next writes no `.next/static` and no `public/`
   into `.next/standalone`. The console image's builder stages both, exactly as
   `ts/apps/<app>/moon.yml`'s `build` task does. An image built without that copy answers 200 on
