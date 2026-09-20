@@ -2230,8 +2230,9 @@ their Cargo manifests set `publish = false` (SMA-658, spec § 3.1).
 3. Approve the `approve-images-<svc>` job. Each service has its own approval: approving one does
    not approve the other, and neither approves the kernel release.
 4. The `publish-images-<svc>` job pushes to GHCR, copies the index to Docker Hub, signs both,
-   moves `:<minor>` and `:latest` only forward, and verifies the result. The `tag-<svc>` job then
-   makes `paigasus-<svc>-v<version>`.
+   moves `:<major>.<minor>` and `:latest` only forward, and verifies the result. While the version
+   is `0.x`, no `:<major>` tag is made. The `tag-<svc>` job then makes
+   `paigasus-<svc>-v<version>`.
 5. After the first push of a new package, set the GHCR package to public and link it to the
    repository. GitHub makes every new package private.
 
@@ -2289,7 +2290,8 @@ Append to the Gotchas list in `CLAUDE.md`:
 - **The first digest published under `:<version>` is final** (D10). A later run adopts it and
   discards its own build. A rebuild never reproduces a digest, because `chisel cut` resolves the
   live Ubuntu archive on every build, so "push the same digest again" is not available as a
-  recovery. `:<minor>` and `:latest` move only forward, compared as numbers.
+  recovery. `:<major>.<minor>` and `:latest` move only forward, compared as numbers. `:<major>`
+  moves the same way, but only once the service leaves `0.x`.
 - A service version is set **by hand**, in a normal pull request, with a `CHANGELOG.md` section.
   release-plz never processes a crate whose Cargo manifest says `publish = false` (MEASURED,
   SMA-658 M7: it is invisible to `release-plz update`, and `git_only` hard-errors on the second

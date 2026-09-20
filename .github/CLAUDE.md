@@ -250,7 +250,9 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
 - **The first digest published under `:<version>` is final** (D10). A later run adopts it and
   discards its own build. A rebuild never reproduces a digest, because `chisel cut` resolves the
   live Ubuntu archive on every build, so "push the same digest again" is not available as a
-  recovery. `:<major>`, `:<minor>` and `:latest` move only forward, compared as numbers.
+  recovery. `:<major>.<minor>` and `:latest` move only forward, compared as numbers. `:<major>`
+  moves the same way, but only once the service leaves `0.x` — a `0.x` release writes no
+  `:<major>` tag at all.
 - A service version is set **by hand**, in a normal pull request, with a `CHANGELOG.md` section.
   release-plz never processes a crate whose Cargo manifest says `publish = false` (MEASURED,
   SMA-658 M7: it is invisible to `release-plz update`, and `git_only` hard-errors on the second

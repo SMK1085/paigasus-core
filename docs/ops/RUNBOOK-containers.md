@@ -440,28 +440,50 @@ yet".
    the same time, and update this note with the result. The security floor holds either way: a
    human must approve before any step that publishes or tags an image runs.
 4. The `publish-images-<svc>` job pushes to GHCR, copies the index to Docker Hub, signs both,
-   moves `:<major>`, `:<minor>` and `:latest` only forward, and verifies the result. The
+   moves `:<major>.<minor>` and `:latest` only forward, and verifies the result. A release still in
+   `0.x` does not move `:<major>`. That tag starts once the service reaches `1.0.0` or later. The
    `tag-<svc>` job then makes `paigasus-<svc>-v<version>`.
 5. After the first push of a new package, set the GHCR package to public and link it to the
    repository. GitHub makes every new package private.
 
 ### Verify a published image
 
+Replace `<svc>` with `iam` or `gateway`, and `<digest>` with the digest from the release job log.
+
+Verify the GHCR image:
+
 ```bash
 cosign verify \
   --certificate-identity "https://github.com/SMK1085/paigasus-core/.github/workflows/release.yml@refs/heads/main" \
   --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-  ghcr.io/smk1085/paigasus-iam@<digest>
+  ghcr.io/smk1085/paigasus-<svc>@<digest>
 
-gh attestation verify "oci://ghcr.io/smk1085/paigasus-iam@<digest>" \
+gh attestation verify "oci://ghcr.io/smk1085/paigasus-<svc>@<digest>" \
   --repo SMK1085/paigasus-core \
   --signer-workflow SMK1085/paigasus-core/.github/workflows/release.yml \
   --source-ref refs/heads/main
 ```
 
-Both registries hold the same index digest. GHCR also stores the attestations; Docker Hub stores
-only the cosign signature. `gh attestation verify` reads the GitHub API, so it works for an image
-pulled from either registry.
+Verify the Docker Hub image, with the same identity and the same issuer:
+
+```bash
+cosign verify \
+  --certificate-identity "https://github.com/SMK1085/paigasus-core/.github/workflows/release.yml@refs/heads/main" \
+  --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+  docker.io/smaschek/paigasus-<svc>@<digest>
+
+gh attestation verify "oci://docker.io/smaschek/paigasus-<svc>@<digest>" \
+  --repo SMK1085/paigasus-core \
+  --signer-workflow SMK1085/paigasus-core/.github/workflows/release.yml \
+  --source-ref refs/heads/main
+```
+
+Both registries hold the same index digest. GHCR stores the build-provenance attestation, the SBOM
+attestation, and a cosign signature. Docker Hub stores only a cosign signature. The copy step does
+not copy registry referrers, so Docker Hub never receives the two attestations. `gh attestation
+verify` still works for a Docker Hub image, because it queries the GitHub API by digest, not the
+registry. Do not use `cosign download attestation` against a Docker Hub image. That command reads
+registry referrers, and Docker Hub carries none.
 
 ### What a re-run does
 
