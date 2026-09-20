@@ -635,6 +635,70 @@ impl MembershipRepository for InMemoryMemberships {
     }
 }
 
+/// In-memory `MembershipRepository` fake built for `principal_context`'s own paging tests
+/// (SMA-632 Task 2): `seed_for` seeds a fixed row count for one principal, and
+/// `list_call_count` reports how many times `list_by_principal` ran, so a test can assert both
+/// the returned row count and the number of pages the loop fetched. Every other
+/// `MembershipRepository` method panics — this fake exercises paging only, mirroring
+/// `authenticate_token.rs`/`authenticate_api_key.rs`'s own private `InMemoryMemberships` test
+/// fakes' "implement exactly what's exercised" posture.
+#[derive(Default)]
+pub struct InMemoryMembershipRepository {
+    rows: Mutex<HashMap<Uuid, Vec<MembershipRecord>>>,
+    list_calls: AtomicUsize,
+}
+
+impl InMemoryMembershipRepository {
+    /// Seeds `count` membership rows for `principal`.
+    pub fn seed_for(&self, principal: &PrincipalId, count: usize) {
+        let now = DateTime::<Utc>::from_timestamp(0, 0).unwrap();
+        let mut rows = self.rows.lock().unwrap();
+        let entry = rows.entry(principal.uuid()).or_default();
+        for i in 0..count {
+            entry.push(MembershipRecord {
+                id: Uuid::from_u128(i as u128 + 1),
+                principal_prn: principal.canonical(),
+                node_prn: format!("prn:pgs:iam:::organization/{i}"),
+                created_at: now,
+                created_by: None,
+            });
+        }
+    }
+
+    /// How many times `list_by_principal` has been called.
+    pub fn list_call_count(&self) -> usize {
+        self.list_calls.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl MembershipRepository for InMemoryMembershipRepository {
+    async fn attach(&self, _membership: &Membership, _stamp: &Stamp) -> Result<MembershipRecord, RepositoryError> {
+        unimplemented!("InMemoryMembershipRepository only exercises list_by_principal")
+    }
+    async fn attach_in(&self, _tx: &dyn Transaction, _membership: &Membership, _stamp: &Stamp) -> Result<MembershipRecord, RepositoryError> {
+        unimplemented!("InMemoryMembershipRepository only exercises list_by_principal")
+    }
+    async fn find(&self, _id: Uuid) -> Result<Option<MembershipRecord>, RepositoryError> {
+        unimplemented!("InMemoryMembershipRepository only exercises list_by_principal")
+    }
+    async fn detach(&self, _id: Uuid) -> Result<(), RepositoryError> {
+        unimplemented!("InMemoryMembershipRepository only exercises list_by_principal")
+    }
+    async fn detach_in(&self, _tx: &dyn Transaction, _id: Uuid) -> Result<Vec<MembershipRecord>, RepositoryError> {
+        unimplemented!("InMemoryMembershipRepository only exercises list_by_principal")
+    }
+    async fn list_by_principal(&self, principal: Uuid, limit: u64, offset: u64) -> Result<Vec<MembershipRecord>, RepositoryError> {
+        self.list_calls.fetch_add(1, Ordering::SeqCst);
+        let rows = self.rows.lock().unwrap();
+        let items = rows.get(&principal).cloned().unwrap_or_default();
+        Ok(items.into_iter().skip(offset as usize).take(limit as usize).collect())
+    }
+    async fn list_by_node(&self, _node: &TenancyNodeRef, _limit: u64, _offset: u64) -> Result<Vec<MembershipRecord>, RepositoryError> {
+        unimplemented!("InMemoryMembershipRepository only exercises list_by_principal")
+    }
+}
+
 /// Settable fake clock: `FixedClock::default()` starts at the Unix epoch; `set` drives it
 /// forward so tests can assert `updated_at` semantics deterministically.
 #[derive(Clone, Default)]

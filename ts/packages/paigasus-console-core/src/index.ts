@@ -16,7 +16,7 @@ export { createIamClients, type IamClients } from './iam-clients';
 export { createIntrospectPrincipalResolver } from './principal-resolver';
 export { createConsoleRuntime, type ConsoleRuntime } from './runtime';
 
-export { introspectWithProvisioning, type Principal } from './principal';
+export { whoAmI, type Principal } from './principal';
 export { IAM_ACTIONS, createMayI, type IamAction, type MayI } from './authorize';
 export { SCOPE_CAP, cedarCapabilityOf, loadMyScopes, switcherOrgs, type MyScopes, type ScopeEntry } from './scopes';
 export { createAppDiscovery, descriptorCacheFor, resetDiscoveryForTest } from './discovery';

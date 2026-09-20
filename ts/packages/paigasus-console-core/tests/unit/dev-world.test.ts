@@ -55,6 +55,12 @@ describe('devWorld', () => {
     expect(Object.keys(handlers)).not.toContain('serviceInfo.getServiceInfo');
   });
 
+  it('scripts authn.whoAmI with the same dev principal as authn.introspect, so the console sees its scopes', () => {
+    const handlers = devWorld();
+    expect(Object.keys(handlers)).toContain('authn.whoAmI');
+    expect(handlers['authn.whoAmI']?.({} as never, {} as never)).toEqual(handlers['authn.introspect']?.({ token: 't' } as never, {} as never));
+  });
+
   it('allows every action, so a dev session is never denied', () => {
     const handlers = devWorld();
     const isAuthorized = handlers['authz.isAuthorized'];

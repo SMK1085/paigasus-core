@@ -12,10 +12,10 @@
 // `iamClientsForToken` and `iamClientsForAction`, see their own comments) is a React `cache()`
 // wrapper, and `cache()` memoizes by the WRAPPER's identity, not by its arguments. A second
 // `createConsoleRuntime()` call therefore makes a second, independent memoization identity for the
-// same request: every accessor built from it runs its live call again — a second `Introspect`, a
+// same request: every accessor built from it runs its live call again — a second `WhoAmI`, a
 // second `ListRoleGrants` walk (up to 50 tenancy reads), a second discovery probe. Outside a React
 // server render `cache()` is a pass-through (measured on react 19.2.8), so no vitest tier can
-// observe two calls behaving differently from one — only an e2e `Introspect` count can (PR 3).
+// observe two calls behaving differently from one — only an e2e `WhoAmI` count can (PR 3).
 import 'server-only';
 import { cache } from 'react';
 import { after } from 'next/server';
@@ -26,7 +26,7 @@ import type { ConsoleLogger } from './logger';
 import { sessionExpired, type IamResult } from './errors';
 import { createIamClients, type IamClients } from './iam-clients';
 import { requestCorrelationId } from './correlation';
-import { introspectWithProvisioning, type Principal } from './principal';
+import { whoAmI, type Principal } from './principal';
 import { createMayI, type MayI } from './authorize';
 import { cedarCapabilityOf, loadMyScopes, type MyScopes } from './scopes';
 import { createAppDiscovery } from './discovery';
@@ -95,8 +95,8 @@ export function createConsoleRuntime(deps: { config: () => ConsoleCoreConfig; au
     return { ok: true, value: iamClientsForToken(session.accessToken, await requestCorrelationId()) };
   };
 
-  /** Per request: a LIVE Introspect, with one provisioning retry on `identity-not-provisioned`. */
-  const currentPrincipal: () => Promise<IamResult<Principal>> = cache(async () => introspectWithProvisioning(await iamClients(), await sessionToken(), { provisionFirst: false }));
+  /** Per request: a LIVE WhoAmI. Bearer enforcement provisions the caller, so there is no retry. */
+  const currentPrincipal: () => Promise<IamResult<Principal>> = cache(async () => whoAmI(await iamClients()));
 
   /** One MayI per request, so the memo lives exactly one request. */
   const mayI: () => Promise<MayI> = cache(async () => {

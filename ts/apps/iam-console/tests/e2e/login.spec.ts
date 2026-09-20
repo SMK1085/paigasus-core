@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // AC 1. The login flows under the /iam basePath (spec § 7.1): the proxy, /auth/login, the callback's
-// redirect_uri, and requireSession(). And the provisioning order (spec § 4.5): IAM provisions a
-// principal only inside a bearer-enforced call, so GetServiceInfo must come before Introspect.
+// redirect_uri, and requireSession(). And the provisioning call (spec § 4.5):
+// IAM provisions a principal only inside a bearer-enforced call. WhoAmI IS that call (SMA-632),
+// so the login makes one gRPC call where it used to make two.
 import { ORG_NAME, OTHER_PROJECT_NAME, TEAM_NAME } from './support/world';
 import { redirectChain, signIn } from './support/login';
 import { expect, test } from './support/harness';
@@ -28,9 +29,10 @@ test('R2: an unauthenticated /iam/orgs logs in through the IdP and lands on "You
   // From ListRoleGrants: the default descriptor reports iam.authz.cedar.
   await expect(scopes.getByRole('link', { name: OTHER_PROJECT_NAME })).toBeVisible();
 
+  // WhoAmI also answers the memberships myScopes() renders (SMA-632), so no separate Introspect
+  // call follows it — the visible scopes above already prove the data flowed through this call.
   const mine = harness.iam.calls.filter((call) => call.token === accessToken);
-  expect(mine[0]?.method).toBe('serviceInfo.getServiceInfo');
-  expect(mine.some((call) => call.method === 'authn.introspect')).toBe(true);
+  expect(mine[0]?.method).toBe('authn.whoAmI');
 
   // The login callback's own IAM calls carry the id proxy.ts minted for the callback request
   // (final whole-branch review, minor 4). Before the fix lib/auth.ts sent none, so a login-time
@@ -46,10 +48,8 @@ test('R3: a first-time identity that IAM has never seen lands on the same screen
 
   expect(harness.iam.provisioned.has(accessToken)).toBe(true);
   const mine = harness.iam.calls.filter((call) => call.token === accessToken);
-  const firstProvisioning = mine.findIndex((call) => call.method === 'serviceInfo.getServiceInfo');
-  const firstIntrospect = mine.findIndex((call) => call.method === 'authn.introspect');
+  const firstProvisioning = mine.findIndex((call) => call.method === 'authn.whoAmI');
   expect(firstProvisioning).toBe(0);
-  expect(firstIntrospect).toBeGreaterThan(firstProvisioning);
 
   const scopes = page.getByRole('region', { name: 'Your organizations' });
   await expect(scopes.getByText('You have no organizations yet')).toBeVisible();

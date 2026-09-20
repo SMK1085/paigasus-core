@@ -920,7 +920,10 @@ fn app_routes(state: AppState) -> Router {
         .merge(service_accounts::router())
         .merge(dead_letters::router())
         // The descriptor itself is always mounted and always inside the bearer layer (SMA-505).
-        .merge(service_info::router());
+        .merge(service_info::router())
+        // WhoAmI is always mounted too, and for the same reason it is bearer-enforced: being
+        // inside this layer is what provisions the caller (SMA-632 D11 — no capability gate).
+        .merge(authn::whoami_router());
     // SMA-505: a disabled capability's routes are NOT REGISTERED, so they 404 exactly as they
     // would on a build predating the feature. `is-authorized` is deliberately outside this
     // branch — it is the gateway's per-request primitive, not policy administration.
@@ -1043,6 +1046,7 @@ mod tests {
                         .merge(service_accounts::router())
                         .merge(dead_letters::router())
                         .merge(service_info::router())
+                        .merge(authn::whoami_router())
                         .merge(authz::decision_router());
                     if authz_admin {
                         r = r.merge(authz::admin_router()).merge(system_retirement::router());
@@ -1057,6 +1061,22 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// SMA-632 put `/v1/authn/whoami` INSIDE `protected` while `/v1/authn/introspect` stays
+    /// OUTSIDE it. axum panics at REGISTRATION time on a pattern conflict, so this proves that
+    /// `/v1/authn/whoami` does not collide with `authn::router`'s or `api_keys::introspect_router`'s
+    /// paths across the outer merge, and fails here rather than at the first request in
+    /// production. This is a stand-in for `app_routes`'s outer merge, not a full reproduction:
+    /// `app_routes` merges about ten routers, and this test's stand-in holds only a few of them.
+    /// A collision involving a router absent from this stand-in would not be caught here.
+    #[test]
+    fn outer_router_merge_has_no_path_conflicts() {
+        let protected: Router<AppState> = Router::new().merge(service_info::router()).merge(authn::whoami_router());
+        let authn_api: Router<AppState> = authn::router(4096);
+        let api_key_introspect_api: Router<AppState> = api_keys::introspect_router(4096);
+        // The merge itself is the assertion: a conflicting pair panics here.
+        let _merged: Router<AppState> = Router::new().merge(protected).merge(authn_api).merge(api_key_introspect_api);
     }
 
     /// SMA-485 D1: the API-key introspect cache reuses the authz connection on TEXTUAL equality

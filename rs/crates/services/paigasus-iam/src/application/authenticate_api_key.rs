@@ -41,10 +41,6 @@ use paigasus_iam_core::{
 };
 use std::sync::Arc;
 
-/// `list_by_principal` page size for introspection's membership assembly — identical to
-/// `AuthenticateToken`'s own constant (`authenticate_token.rs:49`), same rationale (§6.1).
-const MEMBERSHIP_PAGE_SIZE: u64 = 200;
-
 /// Wraps any `RepositoryError` as `AuthnError::Backend` — the catch-all for repository failures
 /// this use case doesn't specifically interpret, mirroring `authenticate_token.rs::backend`.
 fn backend(err: RepositoryError) -> AuthnError {
@@ -255,24 +251,12 @@ where
     }
 
     /// Full authorization context for an API-key-authenticated request: `resolve` plus every
-    /// membership row, paged internally — mirrors `AuthenticateToken::introspect`'s shape
-    /// exactly (`authenticate_token.rs:144-166`), including `role_grants` staying empty (no
+    /// membership row, paged by `principal_context::load_all_memberships` — the same helper
+    /// `AuthenticateToken::introspect` uses, since SMA-632. `role_grants` stays empty (no
     /// current caller populates it from the `RoleGrantStore` here either).
     pub async fn introspect(&self, token: &str) -> Result<PrincipalContext, AuthnError> {
         let principal = self.resolve(token).await?;
-
-        let mut memberships = Vec::new();
-        let mut offset = 0u64;
-        loop {
-            let page = self.memberships.list_by_principal(principal.principal_id.uuid(), MEMBERSHIP_PAGE_SIZE, offset).await.map_err(backend)?;
-            let page_len = page.len() as u64;
-            memberships.extend(page);
-            if page_len < MEMBERSHIP_PAGE_SIZE {
-                break;
-            }
-            offset += MEMBERSHIP_PAGE_SIZE;
-        }
-
+        let memberships = crate::application::principal_context::load_all_memberships(&self.memberships, &principal.principal_id).await?;
         Ok(PrincipalContext {
             principal,
             memberships,

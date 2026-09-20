@@ -7,17 +7,22 @@
 //! (authorization) and M5 (audit) will consume both from here.
 
 use axum::http::{HeaderMap, header};
-use paigasus_iam_core::{Credential, PrincipalId};
+use paigasus_iam_core::{Credential, PrincipalId, PrincipalKind, PrincipalStatus};
 
-/// The authenticated request context the enforcement layers attach on success (D13: the
-/// hot path resolves the principal only — no membership fetch; that stays in `Introspect`).
-/// M2 handlers don't read it yet; M3 (authorization) and M5 (audit) will. The HTTP
-/// middleware and the gRPC layer attach this exact same shape, so the field set is
-/// deliberately fixed here. `credential` carries the OIDC/API-key distinction (SMA-445);
-/// every producer today still builds `Credential::Oidc` (Task 19 adds the API-key path).
+/// The bearer-resolved caller, attached to a request's extensions by the gRPC `AuthEnforce`
+/// layer and by the HTTP `require_bearer` middleware. Both attach the SAME shape, which is what
+/// "fixed" means here — a field added for one transport must be filled by both.
+///
+/// `kind` and `status` were added by SMA-632: `WhoAmI` returns the caller's principal, and
+/// `WhoAmIResponse.status` needs the status. Both middlewares already hold a full
+/// `AuthnPrincipal` and used to discard these two fields, so carrying them costs no extra query.
 #[derive(Clone)]
 pub struct AuthContext {
     pub principal_id: PrincipalId,
+    /// Carried so a handler can rebuild a complete `AuthnPrincipal`. No mapper reads it
+    /// directly — do not delete it as unused without checking `grpc::authn::who_am_i`.
+    pub kind: PrincipalKind,
+    pub status: PrincipalStatus,
     pub credential: Credential,
 }
 

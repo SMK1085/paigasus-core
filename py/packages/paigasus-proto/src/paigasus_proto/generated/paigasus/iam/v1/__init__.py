@@ -117,6 +117,8 @@ __all__ = (
     "Team",
     "TenancyServiceStub",
     "UserServiceStub",
+    "WhoAmIRequest",
+    "WhoAmIResponse",
 )
 
 import datetime
@@ -1953,6 +1955,75 @@ class Team(betterproto2.Message):
 default_message_pool.register_message("paigasus.iam.v1", "Team", Team)
 
 
+@dataclass(eq=False, repr=False)
+class WhoAmIRequest(betterproto2.Message):
+    pass
+
+
+default_message_pool.register_message("paigasus.iam.v1", "WhoAmIRequest", WhoAmIRequest)
+
+
+@dataclass(eq=False, repr=False)
+class WhoAmIResponse(betterproto2.Message):
+    """
+    The caller's own principal, as resolved by bearer enforcement. Mirrors IntrospectResponse's
+    fields, with two differences that the WhoAmI RPC's doc explains: `issuer`/`subject` are empty
+    for an API-key bearer, and `expires_at` is absent when the credential has no expiry.
+
+    A SEPARATE message from IntrospectResponse because buf lint STANDARD's
+    RPC_REQUEST_RESPONSE_UNIQUE forbids one message serving two RPCs, and
+    RPC_RESPONSE_STANDARD_NAME requires this exact name. Field numbering starts clean: this
+    message has no history, so `role_grants` takes 7, where IntrospectResponse reserves 7 for the
+    retired `role_group_prns` and puts `role_grants` at 8.
+    """
+
+    principal_prn: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
+
+    status: "str" = betterproto2.field(2, betterproto2.TYPE_STRING)
+    """
+    principal status
+    """
+
+    issuer: "str" = betterproto2.field(3, betterproto2.TYPE_STRING)
+    """
+    empty for an API-key bearer
+    """
+
+    subject: "str" = betterproto2.field(4, betterproto2.TYPE_STRING)
+    """
+    empty for an API-key bearer
+    """
+
+    expires_at: "datetime.datetime | None" = betterproto2.field(
+        5,
+        betterproto2.TYPE_MESSAGE,
+        unwrap=lambda: ___google__protobuf__.Timestamp,
+        optional=True,
+    )
+    """
+    absent when the credential has no expiry
+    """
+
+    memberships: "list[Membership]" = betterproto2.field(
+        6, betterproto2.TYPE_MESSAGE, repeated=True
+    )
+    """
+    reuse tenancy message
+    """
+
+    role_grants: "list[RoleGrantRef]" = betterproto2.field(
+        7, betterproto2.TYPE_MESSAGE, repeated=True
+    )
+    """
+    empty until SMA-633 populates it
+    """
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "WhoAmIResponse", WhoAmIResponse
+)
+
+
 class AuditServiceStub(betterproto2_grpclib.ServiceStub):
     async def list_audit_entries(
         self,
@@ -2005,6 +2076,41 @@ class AuthnServiceStub(betterproto2_grpclib.ServiceStub):
             "/paigasus.iam.v1.AuthnService/IntrospectApiKey",
             message,
             IntrospectApiKeyResponse,
+            timeout=timeout,
+            deadline=deadline,
+            metadata=metadata,
+        )
+
+    async def who_am_i(
+        self,
+        message: "WhoAmIRequest | None" = None,
+        *,
+        timeout: "float | None" = None,
+        deadline: "Deadline | None" = None,
+        metadata: "MetadataLike | None" = None,
+    ) -> "WhoAmIResponse":
+        """
+        The caller's own principal. BEARER-ENFORCED: this RPC is deliberately ABSENT from
+        `is_exempt` (rs/crates/services/paigasus-iam/src/adapters/grpc/authn.rs), so `AuthEnforce`
+        resolves the bearer with `Provisioning::Enabled` and seeds the bootstrap platform_admin
+        grant BEFORE the handler runs. That omission is the whole mechanism — the handler never
+        sees a token.
+
+        Provisioning still obeys the issuer's JIT policy: an issuer whose jit flag is off yields
+        `identity-not-provisioned`, the same answer Introspect gives.
+
+        Serves both credential kinds. For a Paigasus API-key bearer, `issuer` and `subject` are
+        empty: a service account has no (issuer, subject) pair, and this response carries no
+        `key_id`/`scope_prn` (those are IntrospectApiKeyResponse's).
+        """
+
+        if message is None:
+            message = WhoAmIRequest()
+
+        return await self._unary_unary(
+            "/paigasus.iam.v1.AuthnService/WhoAmI",
+            message,
+            WhoAmIResponse,
             timeout=timeout,
             deadline=deadline,
             metadata=metadata,

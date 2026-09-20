@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // AC 1. The login flows under the /gateway basePath (spec § 7.1): the proxy, /auth/login, the
-// callback's redirect_uri, and requireSession(). And the provisioning order (spec § 4.5): IAM
-// provisions a principal only inside a bearer-enforced call, so GetServiceInfo must come before
-// Introspect.
+// callback's redirect_uri, and requireSession(). And the provisioning call (spec § 4.5):
+// IAM provisions a principal only inside a bearer-enforced call. WhoAmI IS that call (SMA-632),
+// so the login makes one gRPC call where it used to make two.
 import { signIn } from './support/login';
 import { expect, test } from './support/harness';
 
@@ -16,17 +16,15 @@ test('R2: an unauthenticated /gateway/overview logs in through the IdP and lands
   // is never cleared between tests), so an unfiltered check can pick up an earlier test's calls
   // instead of this one's — MEASURED, when this test ran after R4/R4b/R7 in the same worker.
   //
-  // Assert on the ORDER of the filtered calls, not on both being present: IAM provisions a
-  // principal only inside a bearer-enforced call, and the login callback's own first such call is
-  // the gRPC GetServiceInfo the principal resolver makes (lib/auth.ts, byte-identical to
-  // iam-console's own — its login.spec.ts R2 asserts the same call as `mine[0]`). Introspect is
-  // exempt from bearer enforcement and never provisions on its own (spec § 4.5). MEASURED (debug
-  // capture of `mine.map(call => call.method)`): the discovery package's HTTP service-info probe
-  // (`http.getServiceInfo`) runs LATER, during the overview page's own render — after, not before,
-  // this first Introspect — so that call is not the one this assertion is about.
+  // IAM provisions a principal only inside a bearer-enforced call, and the login callback's own
+  // first such call is the gRPC WhoAmI the principal resolver makes (lib/auth.ts, byte-identical
+  // to iam-console's own — its login.spec.ts R2 asserts the same call as `mine[0]`). WhoAmI also
+  // answers the memberships myScopes() renders (SMA-632), so no separate Introspect call follows
+  // it. MEASURED (debug capture of `mine.map(call => call.method)`): the discovery package's HTTP
+  // service-info probe (`http.getServiceInfo`) runs LATER, during the overview page's own render —
+  // after, not before, this first WhoAmI — so that call is not the one this assertion is about.
   const mine = harness.iam.calls.filter((call) => call.token === accessToken);
-  expect(mine[0]?.method).toBe('serviceInfo.getServiceInfo');
-  expect(mine.some((call) => call.method === 'authn.introspect')).toBe(true);
+  expect(mine[0]?.method).toBe('authn.whoAmI');
 });
 
 test('R3: a first-time, unprovisioned user reaches the same screen, with no organization switcher (AC 1)', async ({ page, harness }) => {

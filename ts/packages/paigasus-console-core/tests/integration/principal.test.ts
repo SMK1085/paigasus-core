@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// Provisioning (spec § 4.5, § 9.3), against the fake IAM over the real SDK transport:
-//   - the login resolver calls GetServiceInfo BEFORE Introspect, and never fails the login;
-//   - introspectWithProvisioning retries ONCE after identity-not-provisioned.
+// Provisioning (SMA-632), against the fake IAM over the real SDK transport:
+//   - the login resolver makes ONE WhoAmI call, and never fails the login;
+//   - whoAmI needs no retry, because a bearer-enforced call provisions its caller.
 import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { ErrorReason } from '@paigasus/sdk/errors';
 import { disposeTransports } from '@paigasus/sdk/iam';
 import { createMayI } from '../../src/authorize';
-import { introspectWithProvisioning } from '../../src/principal';
+import { whoAmI } from '../../src/principal';
 import { createIamClients, type IamClients } from '../../src/iam-clients';
 import { createJsonLogger } from '../../src/logger';
 import { createIntrospectPrincipalResolver } from '../../src/principal-resolver';
@@ -32,12 +32,12 @@ describe('provisioning', () => {
   afterAll(() => disposeTransports());
 
   describe('the login resolver', () => {
-    it('provisions with GetServiceInfo first, then maps Introspect, reporting grants as unknown', async () => {
-      fake.setHandlers({ 'authn.introspect': (req) => ({ memberships: [{ id: 'm-1', principalPrn: fake.principalPrnFor(req.token), nodePrn: ORG }] }) });
+    it('makes one WhoAmI call and maps it, reporting grants as unknown', async () => {
+      fake.setHandlers({ 'authn.whoAmI': (_req, ctx) => ({ memberships: [{ id: 'm-1', principalPrn: fake.principalPrnFor(ctx.token ?? ''), nodePrn: ORG }] }) });
       const { logger, events } = captureLogger();
       const resolver = createIntrospectPrincipalResolver({ clientsForToken: clientsFor, logger });
       const principal = await resolver.resolve({ accessToken: 'first-login', idTokenClaims: CLAIMS });
-      expect(fake.calls.map((call) => call.method)).toEqual(['serviceInfo.getServiceInfo', 'authn.introspect']);
+      expect(fake.calls.map((call) => call.method)).toEqual(['authn.whoAmI']);
       expect(principal).toEqual({
         principalPrn: fake.principalPrnFor('first-login'),
         issuer: FAKE_IAM_ISSUER,
@@ -50,10 +50,10 @@ describe('provisioning', () => {
     });
 
     // The app's `lib/auth.ts`'s factory is async: it reads the request's correlation id, so the login callback's
-    // two IAM calls join the id proxy.ts minted for that request. Drop the `await` in
-    // principal-resolver.ts and `clients` is a Promise, so `clients.serviceInfo` is undefined and
+    // IAM call joins the id proxy.ts minted. Drop the `await` in
+    // principal-resolver.ts and `clients` is a Promise, so `clients.authn` is undefined and
     // this case logs resolve_crashed instead.
-    it('awaits an async client factory, so the login calls carry the request correlation id', async () => {
+    it('awaits an async client factory, so the login call carries the request correlation id', async () => {
       const correlationId = '0190a1e5-0000-7000-8000-0000000000c1';
       const { logger, events } = captureLogger();
       const resolver = createIntrospectPrincipalResolver({
@@ -64,15 +64,15 @@ describe('provisioning', () => {
       const principal = await resolver.resolve({ accessToken: 'with-correlation', idTokenClaims: CLAIMS });
 
       expect(principal.principalPrn).toBe(fake.principalPrnFor('with-correlation'));
-      expect(fake.calls.map((call) => call.method)).toEqual(['serviceInfo.getServiceInfo', 'authn.introspect']);
-      expect(fake.calls.map((call) => call.correlationId)).toEqual([correlationId, correlationId]);
+      expect(fake.calls.map((call) => call.method)).toEqual(['authn.whoAmI']);
+      expect(fake.calls.map((call) => call.correlationId)).toEqual([correlationId]);
       expect(events()).toEqual([]);
     });
 
     // The other half of the ONE reading (review, defect 1): the login snapshot reports an empty
     // `principal_prn` as null, and the live path above must agree with it.
     it('reads an empty principal_prn as a null principalPrn', async () => {
-      fake.setHandlers({ 'authn.introspect': () => ({ principalPrn: '' }) });
+      fake.setHandlers({ 'authn.whoAmI': () => ({ principalPrn: '' }) });
       const { logger } = captureLogger();
 
       const principal = await createIntrospectPrincipalResolver({ clientsForToken: clientsFor, logger }).resolve({ accessToken: 'blank', idTokenClaims: CLAIMS });
@@ -92,7 +92,7 @@ describe('provisioning', () => {
 
     it('degrades to a null principal and logs principal.resolve_failed when IAM refuses', async () => {
       fake.setHandlers({
-        'serviceInfo.getServiceInfo': () => {
+        'authn.whoAmI': () => {
           throw denial();
         },
       });
@@ -103,7 +103,7 @@ describe('provisioning', () => {
     });
 
     it('degrades within its short timeout when IAM does not answer', async () => {
-      fake.setHandlers({ 'serviceInfo.getServiceInfo': () => new Promise(() => undefined) });
+      fake.setHandlers({ 'authn.whoAmI': () => new Promise(() => undefined) });
       const { logger, events } = captureLogger();
       const started = Date.now();
       const principal = await createIntrospectPrincipalResolver({ clientsForToken: clientsFor, logger, timeoutMs: 200 }).resolve({ accessToken: 't', idTokenClaims: CLAIMS });
@@ -127,10 +127,9 @@ describe('provisioning', () => {
 
     it('logs resolve_crashed, not resolve_failed, when the response mapping throws', async () => {
       const { logger, events } = captureLogger();
-      const crashingClients: Pick<IamClients, 'authn' | 'serviceInfo'> = {
-        serviceInfo: { getServiceInfo: () => Promise.resolve({}) } as unknown as IamClients['serviceInfo'],
+      const crashingClients: Pick<IamClients, 'authn'> = {
         authn: {
-          introspect: () =>
+          whoAmI: () =>
             Promise.resolve({
               principalPrn: 'prn:pgs:iam:::principal/crash-test',
               issuer: FAKE_IAM_ISSUER,
@@ -148,18 +147,42 @@ describe('provisioning', () => {
     });
   });
 
-  describe('introspectWithProvisioning', () => {
-    it('retries ONCE after identity-not-provisioned, provisioning in between', async () => {
-      const result = await introspectWithProvisioning(clientsFor('new-user'), 'new-user', { provisionFirst: false });
+  describe('whoAmI', () => {
+    // SMA-632's deliverable. This is the assertion the old code could not make: provisioning was
+    // a side effect of a GetServiceInfo call, so a cold identity always cost two calls plus a
+    // conditional third. It now costs one, for a cold identity and a warm one alike.
+    it('makes exactly ONE call for an identity IAM has never seen', async () => {
+      const result = await whoAmI(clientsFor('new-user'));
       expect(result).toEqual({ ok: true, value: { prn: fake.principalPrnFor('new-user'), memberships: [] } });
-      expect(fake.calls.map((call) => call.method)).toEqual(['authn.introspect', 'serviceInfo.getServiceInfo', 'authn.introspect']);
+      expect(fake.calls.map((call) => call.method)).toEqual(['authn.whoAmI']);
     });
 
-    it('makes one Introspect call for a provisioned user', async () => {
+    it('makes exactly one call for an already-provisioned user too', async () => {
       fake.provisioned.add('known-user');
-      const result = await introspectWithProvisioning(clientsFor('known-user'), 'known-user');
+      const result = await whoAmI(clientsFor('known-user'));
       expect(result).toEqual({ ok: true, value: { prn: fake.principalPrnFor('known-user'), memberships: [] } });
-      expect(fake.calls.map((call) => call.method)).toEqual(['authn.introspect']);
+      expect(fake.calls.map((call) => call.method)).toEqual(['authn.whoAmI']);
+    });
+
+    // WhoAmI and Introspect must name the SAME principal for one token, or a page that reads one
+    // and a test that drives the other disagree about who is logged in.
+    it('names the same principal Introspect names for the same token', async () => {
+      const mine = await whoAmI(clientsFor('same-user'));
+      const theirs = await clientsFor('same-user').authn.introspect({ token: 'same-user' });
+      expect(mine.ok ? mine.value.prn : null).toBe(theirs.principalPrn);
+    });
+
+    // Bearer enforcement is necessary but not sufficient: IAM still checks the issuer's JIT flag
+    // (authenticate_token.rs:107-109), so this error survives and the console keeps a branch.
+    it('returns identity-not-provisioned as an error rather than retrying', async () => {
+      fake.setHandlers({
+        'authn.whoAmI': () => {
+          throw denial({ reason: 'identity-not-provisioned' });
+        },
+      });
+      const result = await whoAmI(clientsFor('jit-off'));
+      expect(result.ok ? null : result.error.reason).toBe(ErrorReason.IDENTITY_NOT_PROVISIONED);
+      expect(fake.callsTo('authn.whoAmI')).toHaveLength(1);
     });
 
     // Review, defect 1. IAM's `principal_prn` is a proto3 string, so an unset one arrives as `''`.
@@ -169,9 +192,9 @@ describe('provisioning', () => {
     // principal-prn.ts now, so they answer the same thing.
     it('reads an empty principal_prn as no principal, like the login resolver does', async () => {
       fake.provisioned.add('blank-prn');
-      fake.setHandlers({ 'authn.introspect': () => ({ principalPrn: '', memberships: [{ id: 'm-1', principalPrn: '', nodePrn: ORG }] }) });
+      fake.setHandlers({ 'authn.whoAmI': () => ({ principalPrn: '', memberships: [{ id: 'm-1', principalPrn: '', nodePrn: ORG }] }) });
 
-      const result = await introspectWithProvisioning(clientsFor('blank-prn'), 'blank-prn');
+      const result = await whoAmI(clientsFor('blank-prn'));
 
       // The memberships IAM did send stay usable; only the NAME is missing.
       expect(result).toEqual({ ok: true, value: { prn: null, memberships: [{ nodePrn: ORG }] } });
@@ -181,30 +204,16 @@ describe('provisioning', () => {
     // unnamed principal must produce NO IsAuthorized call, and the fail-open answer must be logged.
     it('an empty principal_prn produces a mayI that never queries IAM, and says so in the log', async () => {
       fake.provisioned.add('blank-prn-2');
-      fake.setHandlers({ 'authn.introspect': () => ({ principalPrn: '' }) });
+      fake.setHandlers({ 'authn.whoAmI': () => ({ principalPrn: '' }) });
       const { logger, events } = captureLogger();
 
-      const principal = await introspectWithProvisioning(clientsFor('blank-prn-2'), 'blank-prn-2');
+      const principal = await whoAmI(clientsFor('blank-prn-2'));
       const clients = clientsFor('blank-prn-2');
       const mayI = createMayI({ authz: clients.authz, principalPrn: principal.ok ? principal.value.prn : null, logger });
 
       expect(await mayI('CreateOrganization', ORG)).toBe(true);
       expect(fake.callsTo('authz.isAuthorized')).toHaveLength(0);
       expect(events()).toEqual([{ event: 'authorize.no_principal', fields: { action: 'CreateOrganization' }, time: expect.any(String) as string }]);
-    });
-
-    it('returns the second identity-not-provisioned as an error instead of looping', async () => {
-      // The fake provisions a token BEFORE it runs the handler, so this handler undoes it: the
-      // provisioning call succeeds and the retry still finds no principal.
-      fake.setHandlers({
-        'serviceInfo.getServiceInfo': (_req, ctx) => {
-          if (ctx.token !== null) fake.provisioned.delete(ctx.token);
-          return { serviceInfo: { service: 'iam', version: 'x', capabilities: [] } };
-        },
-      });
-      const result = await introspectWithProvisioning(clientsFor('ghost'), 'ghost');
-      expect(result.ok ? null : result.error.reason).toBe(ErrorReason.IDENTITY_NOT_PROVISIONED);
-      expect(fake.callsTo('authn.introspect')).toHaveLength(2);
     });
   });
 });

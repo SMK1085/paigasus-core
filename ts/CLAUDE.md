@@ -169,10 +169,10 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   package only an app could depend on both. Its `createConsoleRuntime` factory must be called
   EXACTLY ONCE per app, at module scope: every accessor but `iamClientsForToken` and
   `iamClientsForAction` is a React `cache()` wrapper, and a second call makes a second memoization
-  identity — a second `Introspect`, a second `ListRoleGrants` walk, and up to 50 more tenancy reads
-  per render. Outside a React server render `cache()` is a pass-through, so NO unit or integration
-  test can catch a violation; only an e2e `Introspect` count can, and that lives in a later pull
-  request. `iamClientsForAction` is deliberately not memoized: it returns a `relogin` failure
+  identity — a second `WhoAmI` (SMA-632; previously `Introspect`), a second `ListRoleGrants` walk,
+  and up to 50 more tenancy reads per render. Outside a React server render `cache()` is a
+  pass-through, so NO unit or integration test can catch a violation; only an e2e `WhoAmI` count
+  can, and that lives in a later pull request. `iamClientsForAction` is deliberately not memoized: it returns a `relogin` failure
   rather than redirecting, so a Server Action can render an inline error. Its `testing/` subpath is
   OUTSIDE `src/` and carries no `server-only` guard, on purpose: vitest and Playwright harnesses
   import it outside a Next server. "Every file under `src/` imports `server-only`" has ONE exception:

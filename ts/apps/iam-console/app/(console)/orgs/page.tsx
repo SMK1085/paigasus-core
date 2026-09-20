@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // "Your organizations" (spec § 5.1, AC 1). The login ends at /iam/, which sends a signed-in user
-// here. The page never uses the login snapshot: myScopes() runs a live Introspect per request.
+// here. The page never uses the login snapshot: myScopes() runs a live WhoAmI per request (SMA-632).
 import type { ReactElement } from 'react';
 import { Breadcrumbs, ZoneLink } from '@paigasus/app-shell';
 import { EmptyState, Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@paigasus/ui';

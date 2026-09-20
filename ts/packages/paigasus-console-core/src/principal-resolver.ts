@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // @paigasus/auth's PrincipalResolver port, implemented over IAM (spec § 4.5). The login callback
-// calls it once (ts/packages/paigasus-auth/src/http/routes.ts:293), with the new access token.
+// calls it once (ts/packages/paigasus-auth/src/http/routes.ts:293), with the new access token,
+// and the resolver itself makes ONE IAM call (SMA-632): WhoAmI is bearer-enforced, so it
+// provisions the caller as a side effect and there is nothing left to retry.
 //
 // It lives in the APP because @paigasus/auth must not import @paigasus/sdk
 // (ts/packages/paigasus-auth/src/ports/principal-resolver.ts:3-8), and the sdk boundary rule bans
@@ -37,7 +39,7 @@ export function createIntrospectPrincipalResolver(deps: {
    * calls join the id proxy.ts minted. A factory that throws — or a promise that rejects — is a bug,
    * not an IAM answer, so it lands in the `resolve_crashed` catch below like any other throw.
    */
-  clientsForToken: (token: string) => Pick<IamClients, 'authn' | 'serviceInfo'> | Promise<Pick<IamClients, 'authn' | 'serviceInfo'>>;
+  clientsForToken: (token: string) => Pick<IamClients, 'authn'> | Promise<Pick<IamClients, 'authn'>>;
   logger: ConsoleLogger;
   timeoutMs?: number;
 }): PrincipalResolver {
@@ -57,7 +59,7 @@ export function createIntrospectPrincipalResolver(deps: {
         deps.logger.appEvent('principal.resolve_failed', { presentation });
         return degradedPrincipal();
       };
-      // The try is broad ON PURPOSE (spec § 4.5): it wraps the two calls AND the response mapping.
+      // The try is broad ON PURPOSE (spec § 4.5): it wraps the call AND the response mapping.
       // By the time this runs, the login callback has already spent the single-use OIDC code, so a
       // throw here would strand the user with no way to retry — a degraded login is the right
       // outcome whether IAM refused or this function has a bug. The two causes still need to read
@@ -67,15 +69,13 @@ export function createIntrospectPrincipalResolver(deps: {
       // logs `principal.resolve_crashed`, so an operator can tell a console bug from an IAM outage.
       try {
         const clients = await deps.clientsForToken(accessToken);
-        // 1. The provisioning call, with the NEW token as the bearer.
-        const provisioned = await callIam(() => clients.serviceInfo.getServiceInfo({}, { timeoutMs }));
-        if (!provisioned.ok) return degraded(provisioned.error.presentation);
-        // 2. Introspect reads the token from the REQUEST field (authn.rs:59), not from the header.
-        const answer = await callIam(() => clients.authn.introspect({ token: accessToken }, { timeoutMs }));
+        // ONE bearer-enforced call (SMA-632). WhoAmI provisions the caller because enforcement
+        // covers it, so the GetServiceInfo-then-Introspect sequence this used to run is gone.
+        const answer = await callIam(() => clients.authn.whoAmI({}, { timeoutMs }));
         if (!answer.ok) return degraded(answer.error.presentation);
         const me = answer.value;
-        // 3. IAM reports no role grants here (authenticate_token.rs:161-165), and the port says
-        //    to treat that as UNKNOWN (ports/principal-resolver.ts:32-36).
+        // IAM reports no role grants here (authenticate_token.rs:161-165), and the port says to
+        // treat that as UNKNOWN (ports/principal-resolver.ts:32-36). SMA-633 owns filling it.
         return {
           // The SAME reading as the live path (principal-prn.ts). The two used to disagree.
           principalPrn: principalPrnOf(me.principalPrn),

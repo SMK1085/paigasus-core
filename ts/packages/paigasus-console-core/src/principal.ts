@@ -1,17 +1,18 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// Who the current user is, according to IAM, NOW (spec § 4.5). The pages use this, never the
-// login snapshot in the session record: a degraded login must not stay degraded for the session,
-// and a membership change must appear on the next render.
+// Who the current user is, according to IAM, NOW. The pages use this, never the login snapshot
+// in the session record: a degraded login must not stay degraded for the session, and a
+// membership change must appear on the next render.
 //
-// PROVISIONING. Introspect is exempt from bearer enforcement and runs with Provisioning::Disabled,
-// so for an identity IAM has never seen it answers PermissionDenied `identity-not-provisioned`
-// (rs/crates/services/paigasus-iam/src/adapters/grpc/authn.rs:139-141;
-// application/authenticate_token.rs:104-105). IAM provisions only inside a bearer-enforced RPC
-// (authn.rs:182-190). GetServiceInfo is bearer-enforced and checks no Cedar action
-// (adapters/grpc/service_info.rs:1-44), so it is the provisioning call.
+// ONE CALL (SMA-632). WhoAmI is bearer-enforced — it is deliberately absent from `is_exempt`
+// (rs/crates/services/paigasus-iam/src/adapters/grpc/authn.rs:139-141) — so IAM resolves the
+// bearer with Provisioning::Enabled and JIT-provisions the caller before the handler runs.
+// Provisioning is no longer a side effect of GetServiceInfo, and there is nothing left to retry.
+//
+// `identity-not-provisioned` can still come back: enforcement is necessary but not sufficient,
+// because `resolve` also checks the issuer's JIT flag (application/authenticate_token.rs:107-109).
+// A retry would not help — the issuer's configuration is what refused — so it is reported.
 import 'server-only';
-import { ErrorReason } from '@paigasus/sdk/errors';
 import type { IamClients } from './iam-clients';
 import { callIam, type IamResult } from './errors';
 import { principalPrnOf } from './principal-prn';
@@ -25,27 +26,9 @@ import { principalPrnOf } from './principal-prn';
  */
 export type Principal = { prn: string | null; memberships: readonly { nodePrn: string }[] };
 
-export async function introspectWithProvisioning(
-  clients: Pick<IamClients, 'authn' | 'serviceInfo'>,
-  token: string,
-  opts: { timeoutMs?: number; provisionFirst?: boolean } = {},
-): Promise<IamResult<Principal>> {
+export async function whoAmI(clients: Pick<IamClients, 'authn'>, opts: { timeoutMs?: number } = {}): Promise<IamResult<Principal>> {
   const callOptions = opts.timeoutMs === undefined ? {} : { timeoutMs: opts.timeoutMs };
-  const provision = () => callIam(() => clients.serviceInfo.getServiceInfo({}, callOptions));
-  const introspect = () => callIam(() => clients.authn.introspect({ token }, callOptions));
-
-  if (opts.provisionFirst === true) {
-    const provisioned = await provision();
-    if (!provisioned.ok) return provisioned;
-  }
-  let answer = await introspect();
-  if (!answer.ok && opts.provisionFirst !== true && answer.error.reason === ErrorReason.IDENTITY_NOT_PROVISIONED) {
-    // ONE retry, after one provisioning call. A second `identity-not-provisioned` is returned as
-    // the error it is; looping would hide a provisioning failure behind a hang.
-    const provisioned = await provision();
-    if (!provisioned.ok) return provisioned;
-    answer = await introspect();
-  }
+  const answer = await callIam(() => clients.authn.whoAmI({}, callOptions));
   if (!answer.ok) return answer;
   return { ok: true, value: { prn: principalPrnOf(answer.value.principalPrn), memberships: answer.value.memberships.map((m) => ({ nodePrn: m.nodePrn })) } };
 }

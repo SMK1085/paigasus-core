@@ -92,7 +92,8 @@ describe('OverviewPage', () => {
     const TEAM_A1 = teamPrn(IDS.orgA, IDS.teamA1);
     const PROJECT_A1 = projectPrn(IDS.orgA, IDS.projectA1);
     env.iam.setHandlers({
-      'authn.introspect': () => ({
+      // myScopes() sources memberships from currentPrincipal(), which calls WhoAmI (SMA-632).
+      'authn.whoAmI': () => ({
         memberships: [
           { id: '0190a1d4-0000-7000-8000-0000000000c1', principalPrn: 'prn:pgs:iam:::principal/0190a1e5-0000-7000-8000-0000000000e0', nodePrn: TEAM_A1 },
           { id: '0190a1d4-0000-7000-8000-0000000000c2', principalPrn: 'prn:pgs:iam:::principal/0190a1e5-0000-7000-8000-0000000000e0', nodePrn: PROJECT_A1 },

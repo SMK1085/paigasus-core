@@ -162,17 +162,22 @@ export function devWorld(): FakeIamHandlers {
     return project;
   }
 
+  const devPrincipal = () => ({
+    principalPrn: PRINCIPAL_PRN,
+    status: 'active',
+    issuer: 'fake-idp',
+    subject: 'dev-user',
+    memberships: [
+      { id: '0190a1d4-0000-7000-8000-00000000d101', principalPrn: PRINCIPAL_PRN, nodePrn: ORG_PRN },
+      { id: '0190a1d4-0000-7000-8000-00000000d102', principalPrn: PRINCIPAL_PRN, nodePrn: TEAM_PRN },
+    ],
+  });
+
   return {
-    'authn.introspect': () => ({
-      principalPrn: PRINCIPAL_PRN,
-      status: 'active',
-      issuer: 'fake-idp',
-      subject: 'dev-user',
-      memberships: [
-        { id: '0190a1d4-0000-7000-8000-00000000d101', principalPrn: PRINCIPAL_PRN, nodePrn: ORG_PRN },
-        { id: '0190a1d4-0000-7000-8000-00000000d102', principalPrn: PRINCIPAL_PRN, nodePrn: TEAM_PRN },
-      ],
-    }),
+    // Both authn reads answer the SAME dev principal. The console calls whoAmI; introspect stays
+    // scripted because IAM still serves it and a test may drive it directly.
+    'authn.introspect': devPrincipal,
+    'authn.whoAmI': devPrincipal,
     'authz.isAuthorized': () => ({ allowed: true, determiningPolicies: [], reason: '' }),
     'authz.listRoleGrants': () => ({ grants: [{ id: '0190a1d4-0000-7000-8000-00000000d103', principalPrn: PRINCIPAL_PRN, roleKey: 'project_viewer', scopePrn: PROJECT_PRN }] }),
     // `serviceInfo.getServiceInfo` is deliberately NOT scripted here. `dispatch()` in fake-iam.ts

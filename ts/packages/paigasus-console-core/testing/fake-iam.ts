@@ -135,8 +135,10 @@ export type FakeIam = {
   setHandlers(handlers: FakeIamHandlers): void;
   /**
    * A descriptor changes both the gRPC and the HTTP answer. `{ status }` changes ONLY the HTTP
-   * route (the discovery probe): the gRPC GetServiceInfo keeps the last descriptor, because it is
-   * also the provisioning call and a degraded-discovery scenario must not fail every first login.
+   * route (the discovery probe): the gRPC GetServiceInfo keeps the last descriptor, because
+   * `IamClients.serviceInfo` has no production caller today — only a test reads it directly, and
+   * a test that scripts a real descriptor must not have it clobbered by an unrelated HTTP status
+   * override.
    */
   setServiceInfo(descriptor: ServiceDescriptorBody | { status: number }): void;
   close(): Promise<void>;
@@ -144,7 +146,12 @@ export type FakeIam = {
 
 const DEFAULT_DESCRIPTOR: ServiceDescriptorBody = { service: 'iam', version: '0.0.0-fake', capabilities: ['iam.authz.cedar', 'iam.audit'] };
 
-/** Calls IAM serves WITHOUT bearer enforcement (authn.rs:139-141). */
+/**
+ * Calls IAM serves WITHOUT bearer enforcement (authn.rs:139-141).
+ *
+ * `authn.whoAmI` is deliberately NOT here: enforcement is what provisions its caller, which is
+ * the whole of SMA-632. Adding it would make the fake diverge from IAM and hide the regression.
+ */
 const UNENFORCED: ReadonlySet<string> = new Set(['authn.introspect', 'authn.introspectApiKey']);
 
 /** A ConnectError shaped the way IAM's `iam_status` shapes one (convert.rs:76-80). */
@@ -248,6 +255,31 @@ export async function startFakeIam(opts: { handlers?: FakeIamHandlers } = {}): P
     };
   }
 
+  /**
+   * WhoAmI's answer. Two differences from `introspect` above, both load-bearing:
+   *
+   * 1. It keys on `context.token`, NOT `request.token`. `WhoAmIRequest` is EMPTY — the bearer
+   *    header is the only input — so reading `request.token` yields `undefined` and every
+   *    answer would name a principal for the token `undefined`.
+   * 2. It never checks `provisioned`. `dispatch` adds the token to that set before it gets here,
+   *    because WhoAmI is not in UNENFORCED. That IS the behaviour under test: a bearer-enforced
+   *    call provisions its caller, so WhoAmI never answers identity-not-provisioned.
+   */
+  async function whoAmI(context: FakeIamContext): Promise<unknown> {
+    const token = context.token ?? '';
+    const handler = scripted('authn.whoAmI');
+    const extra = handler === undefined ? {} : ((await handler({}, context)) as object);
+    return {
+      principalPrn: principalPrnFor(token),
+      status: 'active',
+      issuer: FAKE_IAM_ISSUER,
+      subject: `subject-of-${principalPrnFor(token).slice(-12)}`,
+      memberships: [],
+      ...extra,
+      roleGrants: [],
+    };
+  }
+
   function defaults(method: string): unknown {
     switch (method) {
       case 'serviceInfo.getServiceInfo':
@@ -276,6 +308,7 @@ export async function startFakeIam(opts: { handlers?: FakeIamHandlers } = {}): P
         provisioned.add(token);
       }
       if (method === 'authn.introspect') return await introspect(request as { token: string }, context);
+      if (method === 'authn.whoAmI') return await whoAmI(context);
       const handler = scripted(method);
       return handler === undefined ? defaults(method) : await handler(request, context);
     } catch (err) {

@@ -13,13 +13,14 @@ use axum::extract::{DefaultBodyLimit, State};
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
-use axum::{Json, Router};
-use paigasus_iam_core::AuthnError;
+use axum::{Extension, Json, Router};
+use paigasus_iam_core::{AuthnError, AuthnPrincipal, TokenDefect};
 use serde_json::json;
 
 use super::AppState;
-use super::dto::{IntrospectBody, IntrospectResponseDto};
+use super::dto::{IntrospectBody, IntrospectResponseDto, WhoAmIResponseDto};
 use super::json::EnvelopeJson;
+use crate::adapters::auth::AuthContext;
 
 /// The `WWW-Authenticate` challenge attached to every 401 (RFC 6750 §3).
 const BEARER_CHALLENGE: &str = "Bearer error=\"invalid_token\"";
@@ -85,6 +86,37 @@ pub fn router(body_limit: usize) -> Router<AppState> {
 /// rejected by the validator's own length cap — no pre-filtering, no echo).
 async fn introspect(State(state): State<AppState>, EnvelopeJson(body): EnvelopeJson<IntrospectBody>) -> Result<Json<IntrospectResponseDto>, AuthnApiError> {
     let ctx = state.authn.introspect(&body.token).await?;
+    Ok(Json(ctx.into()))
+}
+
+/// The `whoami` sub-router. Unlike [`router`] above, this one is merged INSIDE `app_routes`'s
+/// `protected` group, so `require_bearer` covers it — which is the point: enforcement is what
+/// provisions the caller.
+///
+/// POST, not GET (SMA-632 D7): the call creates a principal row and a user row, and for a
+/// configured bootstrap identity it seeds a platform_admin grant. RFC 9110 makes GET a safe
+/// method, and browsers, proxies and Next.js prefetch GETs freely.
+pub fn whoami_router() -> Router<AppState> {
+    Router::new().route("/v1/authn/whoami", post(whoami))
+}
+
+/// `POST /v1/authn/whoami`: the caller's own principal, the HTTP twin of the WhoAmI RPC.
+///
+/// `require_bearer` has already resolved, provisioned and seeded by the time this runs, and it
+/// inserted the `AuthContext` this reads. The extension cannot be absent inside `protected`, but
+/// the `Option` keeps the failure inside the `{"error":{code,message}}` envelope instead of
+/// axum's plain-text extension rejection.
+async fn whoami(State(state): State<AppState>, actor: Option<Extension<AuthContext>>) -> Result<Json<WhoAmIResponseDto>, AuthnApiError> {
+    let Some(Extension(actor)) = actor else {
+        return Err(AuthnApiError(AuthnError::InvalidToken(TokenDefect::Malformed)));
+    };
+    let principal = AuthnPrincipal {
+        principal_id: actor.principal_id,
+        kind: actor.kind,
+        status: actor.status,
+        credential: actor.credential,
+    };
+    let ctx = state.authn.context_for(principal).await?;
     Ok(Json(ctx.into()))
 }
 
