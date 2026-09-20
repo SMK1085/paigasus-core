@@ -207,17 +207,21 @@ SMA-632 (the WhoAmI RPC) is specified and planned but not implemented. Its
 `WhoAmIResponse` carries its own `repeated RoleGrantRef role_grants = 7`, which its D8
 leaves empty and assigns to this issue.
 
-This issue waits for SMA-632 to merge, then rebases onto it. SMA-632's plan puts a
-`context_for(&self, principal: AuthnPrincipal) -> Result<PrincipalContext, AuthnError>`
-helper on `AuthenticateToken` itself (Task 3), with `introspect` delegating to it. So
-populating grants inside `context_for` covers `Introspect` and `WhoAmI` from one site.
+**Resolved on 2026-09-20.** SMA-632 merged as `314ec074` and this branch is rebased onto it.
+The prediction held: `AuthenticateToken::context_for` (`authenticate_token.rs:149-156`) is the
+single place a `PrincipalContext` is built for the OIDC path, and `introspect` (`:160-163`)
+delegates to it. So one edit fills `IntrospectResponse` and `WhoAmIResponse` together. Buf
+lint's `RPC_REQUEST_RESPONSE_UNIQUE` forbade reusing the existing message, so `WhoAmI` carries
+its own — two messages, one source field, no WhoAmI-specific work.
+
 `principal_context.rs` holds only `load_all_memberships`, not `context_for`.
 
-SMA-632 also deletes `MEMBERSHIP_PAGE_SIZE` and both paging loops. Every line number in
-§ 4 and § 5 below is therefore pre-rebase. The implementer re-derives them after the
-rebase and does not trust them blindly.
-
-The session that owns SMA-632 was asked to report the merge.
+**One divergence to know about.** SMA-632's merged spec (§ 3.2 and § 9.5) withdrew its
+`scope_prn` filtering claim and now states that SMA-633 reports the full grant set for **both**
+credential kinds. This spec's D2 says otherwise: the API-key path stays empty. The two were
+decided on different evidence. SMA-632's author did not have the measurement that
+`IntrospectApiKey` runs on the gateway's per-request path with no reader of the field; D2 does.
+Where they disagree, D2 governs this issue, and § 9 records why.
 
 ## 4. Change list
 

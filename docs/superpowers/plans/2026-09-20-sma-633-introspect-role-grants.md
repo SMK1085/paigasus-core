@@ -18,13 +18,25 @@
 - Branch: `feature/sma-633-iam-populate-role_grants-in-introspect`. Worktree: `.claude/worktrees/sma-633-role-grants`.
 - Prefix every shell command with `export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"` so moon, cargo, buf and nextest resolve to the repo-pinned versions.
 - The capability wire key is `iam.authn.grants`. The enum value is `CAPABILITY_IAM_AUTHN_GRANTS = 6`. The generated names are `Capability::IamAuthnGrants` (Rust) and `Capability.IAM_AUTHN_GRANTS` (TypeScript and Python).
-- **This plan starts blocked.** Task 1 does not begin until SMA-632 is merged to `main`.
+- **Task 1 is done.** SMA-632 merged as `314ec074`; this branch is rebased onto it. Every line number below was re-derived against the merged tree on 2026-09-20 and is current.
+- The target is `AuthenticateToken::context_for` (`authenticate_token.rs:149-156`), **not** `introspect` — `introspect` now delegates to it (`:160-163`). One edit therefore fills `IntrospectResponse` **and** the new `WhoAmIResponse`, because both read `PrincipalContext.role_grants`. There is no WhoAmI-specific work.
+- `pnpm -C ts --filter <pkg> test` exits 0 with zero output when the package declares no `test` script, which several do. Always use the Moon target instead.
+- `buf breaking --against '.git#branch=…'` fails inside a worktree: a worktree's `.git` is a gitlink file, not a directory. Pass `git rev-parse --git-common-dir` as the target.
 
 ---
 
-### Task 1: Rebase onto merged SMA-632 and re-derive the line numbers
+### Task 1: Rebase onto merged SMA-632 and re-derive the line numbers — DONE 2026-09-20
 
-SMA-632 rewrites `introspect` into a `context_for` helper and deletes `MEMBERSHIP_PAGE_SIZE` and both paging loops. Every line number in Tasks 2-4 is pre-rebase. This task makes them true again.
+Completed by the coordinator before Task 2 was dispatched. Findings, all verified against the merged tree:
+
+- SMA-632 is `314ec074` on `main`. The rebase was clean; only this branch's four documentation commits moved.
+- `PrincipalContext` is built at exactly **two** sites: `authenticate_token.rs:151` (inside `context_for`) and `authenticate_api_key.rs:260`. Task 2 changes the first one only; D2 leaves the second empty.
+- `introspect` (`:160-163`) is now three lines that delegate to `context_for`. `WhoAmI` calls `context_for` directly.
+- `AuthenticateToken::new` is at `:79` and has 14 call sites: one production (`adapters/http/mod.rs:772`) and 13 in the file's own test module (`:480,501,523,543,562,581,603,622,655,690,729,746,774`).
+- The three gRPC mappers (`convert.rs:417,443,539`) and the three HTTP mappers (`dto.rs:274,315,592`) all already forward `ctx.role_grants`. None needs a code change.
+- `authenticate_token.rs:148` carries a new stale comment SMA-632 added: "`role_grants` stays empty, exactly as in `introspect` — SMA-633 owns populating it." Task 5 now owns six comments, not five.
+
+SMA-632 rewrote `introspect` into a `context_for` helper. The steps below are kept for the record; do not re-run them.
 
 **Files:**
 - Modify: none yet. This task only rebases and records findings.
@@ -342,9 +354,12 @@ pub struct AuthenticateToken<A, E, P, M, I, C> {
     }
 ```
 
-- [ ] **Step 4: Populate and sort at the `PrincipalContext` construction site**
+- [ ] **Step 4: Populate and sort inside `context_for`**
 
-Replace `role_grants: Vec::new(),` at the site Task 1 Step 3 identified:
+Replace `role_grants: Vec::new(),` at `authenticate_token.rs:153`, inside
+`context_for` (`:149-156`). Do **not** edit `introspect` (`:160-163`) — it delegates. Do not
+touch `authenticate_api_key.rs:260`, which spec D2 leaves empty. Editing `context_for` fills
+`IntrospectResponse` and `WhoAmIResponse` at once, because both read this one struct.
 
 ```rust
         // Spec D3/D4/D7: the principal's own grants, projected to the wire type and sorted.
@@ -635,8 +650,12 @@ export type CapabilityKey = 'iam.authz.cedar' | 'iam.apikeys' | 'iam.audit' | 'g
 export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
 cd rs && cargo nextest run -p paigasus-proto -p paigasus-iam
 cd .. && uv run --project py pytest packages/paigasus-proto/tests/test_service_info_smoke.py
-pnpm -C ts test --filter @paigasus/discovery
+moon run paigasus-discovery-ts:test
 ```
+
+Do **not** substitute `pnpm -C ts --filter @paigasus/discovery test`. It exits 0 with zero
+output when the package declares no `test` script, so it reports a green from a command that
+ran nothing.
 
 Expected: PASS everywhere.
 
@@ -656,6 +675,7 @@ git commit -m "feat(contracts): register the iam.authn.grants capability (SMA-63
 ### Task 5: Correct the doc comments the change falsifies
 
 **Files:**
+- Modify: `rs/crates/services/paigasus-iam/src/application/authenticate_token.rs:148` (SMA-632 added it: "`role_grants` stays empty, exactly as in `introspect` — SMA-633 owns populating it")
 - Modify: `rs/crates/libs/paigasus-iam-core/src/authn.rs:133-134`
 - Modify: `rs/crates/services/paigasus-iam/src/adapters/http/dto.rs:242`
 - Modify: `rs/crates/services/paigasus-iam/src/adapters/grpc/convert.rs:398`
@@ -674,7 +694,15 @@ grep -rn "until a later M3 task\|role_grants staying empty\|always returns an em
 
 Expected: the five sites above. Read each before editing — the surrounding sentence differs at each one.
 
-- [ ] **Step 2: Rewrite the four Rust comments**
+- [ ] **Step 2: Rewrite the five Rust comments**
+
+`authenticate_token.rs:148`, on `context_for` — SMA-632 wrote it while the field was still empty:
+
+```rust
+    /// `role_grants` carries the principal's own grants, sorted by `(scope_prn, role_key)`
+    /// (SMA-633). `Introspect` and `WhoAmI` both read this one struct, so both report them.
+```
+
 
 `paigasus-iam-core/src/authn.rs:133-134` — this sits on `PrincipalContext`, the type every introspection path returns, so it is the most load-bearing of the five:
 
@@ -756,6 +784,14 @@ moon ci :build :test :lint :fmt :deny :osv :machete :actionlint :typecheck :brea
 ```
 
 Expected: PASS. `:breaking` runs because the proto changed; a new enum value is additive, so it must not report a break. If it does, read its output before assuming the gate is wrong.
+
+If `:breaking` fails to even start with a git or clone error, that is the worktree gitlink
+trap, not a contract break: a worktree's `.git` is a file, so `--against '.git#branch=…'`
+cannot clone it. Run the check by hand against the common dir to get a real verdict:
+
+```bash
+buf breaking contracts --against "$(git rev-parse --git-common-dir)#branch=origin/main,subdir=contracts"
+```
 
 - [ ] **Step 2: Re-run the gates this machine's bash cannot serve**
 
