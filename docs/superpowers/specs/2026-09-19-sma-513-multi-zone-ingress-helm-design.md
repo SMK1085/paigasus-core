@@ -325,8 +325,8 @@ zones:
       image: { repository: …, tag: "" }
     backend:
       image: { repository: …, tag: "" }
-      http: { port: 8080 }
-      grpc: { port: 9090 }        # measured default, F9
+      httpPort: 8080
+      grpcPort: 9090              # measured default, F9
   gateway:
     enabled: false
     basePath: /gateway
@@ -334,7 +334,7 @@ zones:
       image: { repository: …, tag: "" }
     backend:
       image: { repository: …, tag: "" }
-      http: { port: 8088 }        # measured default, F9
+      httpPort: 8088              # measured default, F9
 ```
 
 Six projections derive from that map and from nothing else:

@@ -480,6 +480,7 @@ Model the container naming on the existing `RUN_ID`/`$$` convention, so two conc
 # asserts the served chunk instead, which is the only form that fails on the real defect.
 smoke_consoles() {
   local service app base_path other name port origin html chunk bytes code uid
+  local ec=0 bad
   trap 'for n in $CONSOLE_NAMES; do docker rm -f "$n" >/dev/null 2>&1 || true; done' RETURN
   CONSOLE_NAMES=""
   for service in iam gateway; do
@@ -496,34 +497,44 @@ smoke_consoles() {
     port="$(docker port "$name" 3000/tcp)"; port="${port##*:}"
     origin="http://127.0.0.1:${port}"
 
-    html="$(curl -fsS --retry 30 --retry-delay 1 --retry-all-errors "${origin}${base_path}/")"
-    chunk="$(printf '%s' "$html" | grep -oE "${base_path}/_next/static/[^\"']+\.js" | sort -u | sed -n 1p)"
+    bad=0
+    html="$(curl -fsS --retry 30 --retry-delay 1 --retry-all-errors "${origin}${base_path}/")" || bad=1
+    chunk=""
+    if [ "$bad" -eq 0 ]; then
+      chunk="$(printf '%s' "$html" | grep -oE "${base_path}/_next/static/[^\"']+\.js" | sort -u | sed -n 1p)"
+    fi
     if [ -z "$chunk" ]; then
-      echo "::error::${app}: no ${base_path}/_next/static/*.js URL in the rendered page — .next/static was not staged into the image." >&2
-      return 1
+      echo "::error::${app}: no ${base_path}/_next/static/*.js URL in the rendered page - .next/static was not staged into the image." >&2
+      ec=1; bad=1
     fi
-    bytes="$(curl -fsS "${origin}${chunk}" | wc -c | tr -d ' ')"
-    if [ "${bytes:-0}" -lt 1 ]; then
-      echo "::error::${app}: ${chunk} served an empty body — .next/static was not staged into the image." >&2
-      return 1
-    fi
-    code="$(curl -s -o /dev/null -w '%{http_code}' "${origin}${other}${chunk#"$base_path"}")"
-    if [ "$code" != "404" ]; then
-      echo "::error::${app}: ${other} also served the chunk (HTTP ${code}); the two zones' asset prefixes collide." >&2
-      return 1
+    if [ "$bad" -eq 0 ]; then
+      bytes="$(curl -fsS "${origin}${chunk}" | wc -c | tr -d ' ')"
+      if [ "${bytes:-0}" -lt 1 ]; then
+        echo "::error::${app}: ${chunk} served an empty body - .next/static was not staged into the image." >&2
+        ec=1
+      fi
+      code="$(curl -s -o /dev/null -w '%{http_code}' "${origin}${other}${chunk#"$base_path"}")"
+      if [ "$code" != "404" ]; then
+        echo "::error::${app}: ${other} also served the chunk (HTTP ${code}); the two zones' asset prefixes collide." >&2
+        ec=1
+      fi
     fi
 
     uid="$(docker top "$name" -o uid | sed -n 2p | tr -d ' ')"
     if [ "$uid" != "65532" ]; then
       echo "::error::${app} runs as uid ${uid}; the console images must run as 65532." >&2
-      return 1
+      ec=1
     fi
     if docker run --rm --entrypoint /bin/sh "${app}:dev" -c true >/dev/null 2>&1; then
       echo "::error::${app}:dev has a shell; the runtime base must stay distroless." >&2
-      return 1
+      ec=1
     fi
+    if [ "$ec" -ne 0 ]; then continue; fi
     echo "  ${app}: serves ${chunk} (${bytes} bytes), 404 under ${other}, uid 65532, no shell"
   done
+  # One failing console must not hide the other. Every `return 1` above is now `ec=1`, and
+  # the verdict is taken once, after both services have been checked.
+  if [ "$ec" -ne 0 ]; then return 1; fi
   echo "== CONSOLE SMOKE OK =="
 }
 ```
@@ -841,8 +852,9 @@ expect_fail() {
 
 expect_render() {
   local label="$1"; shift
-  if render "$@" >/dev/null; then echo "  ok [$label]: renders"; else
-    echo "FAIL [$label]: expected a successful render"; render "$@"; ec=1
+  local out
+  if out="$(render "$@")"; then echo "  ok [$label]: renders"; else
+    echo "FAIL [$label]: expected a successful render"; printf '%s\n' "$out"; ec=1
   fi
 }
 
@@ -1089,7 +1101,9 @@ keys() {  # keys() <json>
 check() {
   local label="$1" want="$2"; shift 2
   local out zones services
-  out="$(helm template t "$CHART" "${BASE[@]}" "$@")"
+  if ! out="$(helm template t "$CHART" "${BASE[@]}" "$@" 2>&1)"; then
+    echo "FAIL [$name]: render failed"; printf '%s\n' "$out"; ec=1; return
+  fi
   zones="$(printf '%s' "$out" | python3 -c '
 import sys,yaml
 for d in yaml.safe_load_all(sys.stdin):
@@ -1234,7 +1248,9 @@ spec:
         # keeps the old value indefinitely.
         checksum/zonemap: {{ include (print $root.Template.BasePath "/zonemap-configmap.yaml") $root | sha256sum }}
         checksum/console-env: {{ include (print $root.Template.BasePath "/console-env-configmap.yaml") $root | sha256sum }}
-        checksum/secret: {{ $root.Values.oidc.existingSecret | sha256sum }}
+        # oidc.secretVersion, NOT oidc.existingSecret. Hashing the Secret NAME never changes
+        # when its contents rotate, so that form could never fire (found in the local review).
+        checksum/secret: {{ $root.Values.oidc.secretVersion | sha256sum }}
     spec:
       securityContext:
         runAsUser: 65532
@@ -1516,7 +1532,9 @@ ec=0
 coupling() {
   local label="$1" want="$2"; shift 2
   local out got
-  out="$(helm template t "$CHART" --kube-version 1.31.0 --set ingress.host=console.example.test "$@")"
+  if ! out="$(helm template t "$CHART" --kube-version 1.31.0 --set ingress.host=console.example.test "$@" 2>&1)"; then
+    echo "FAIL [$name]: render failed"; printf '%s\n' "$out"; ec=1; return
+  fi
   got="$(printf '%s' "$out" | python3 -c '
 import sys,yaml,json
 docs=[d for d in yaml.safe_load_all(sys.stdin) if d]
@@ -1526,7 +1544,7 @@ cm=[d for d in docs if d["kind"]=="ConfigMap" and d["metadata"]["name"].endswith
 zones=json.loads(cm["data"]["PAIGASUS_ZONES"]); services=json.loads(cm["data"]["PAIGASUS_SERVICES"])
 print("paths=%s zones=%s services=%s" % (",".join(paths), ",".join(sorted(zones)), ",".join(sorted(services))))
 print("COUPLED" if sorted(zones)==sorted(services) and paths==sorted(zones.values()) else "DRIFT")')"
-  if printf '%s' "$got" | grep -qF -- "DRIFT"; then
+  if grep -qF -- "DRIFT" < <(printf '%s' "$got"); then
     echo "FAIL [$label]: $got"; ec=1
   else
     echo "  ok [$label]: $(printf '%s' "$got" | sed -n 1p)"
@@ -1535,7 +1553,7 @@ print("COUPLED" if sorted(zones)==sorted(services) and paths==sorted(zones.value
   # compares sets that all derive from one `range` and cannot see a value written outside it.
   local absent
   for absent in $want; do
-    if printf '%s' "$out" | grep -qF -- "$absent"; then
+    if grep -qF -- "$absent" < <(printf '%s' "$out"); then
       echo "FAIL [$label]: disabled zone \"$absent\" appears in the rendered output"; ec=1
     fi
   done
@@ -1693,7 +1711,9 @@ FIXED=(
 render_one() {
   local name="$1"; shift
   local want="$HERE/golden/${name}.yaml" got
-  got="$(helm template paigasus "$CHART" "${FIXED[@]}" "$@")"
+  if ! got="$(helm template paigasus "$CHART" "${FIXED[@]}" "$@" 2>&1)"; then
+    echo "FAIL [$name]: render failed"; printf '%s\n' "$got"; ec=1; return
+  fi
   if [ "$UPDATE" -eq 1 ]; then
     mkdir -p "$HERE/golden"; printf '%s\n' "$got" > "$want"
     echo "  updated ${name}.yaml"; return

@@ -52,13 +52,27 @@ spec:
               value: {{ $id | quote }}
             - name: PORT
               value: "3000"
+            # NOT envFrom.secretRef. That form turns each Secret KEY into an env var NAME, and the
+            # documented keys are hyphenated — `oidc-client-secret`, `session-redis-url`. A hyphen
+            # is illegal in an env var name, so the kubelet SKIPS those keys and records an
+            # InvalidVariableNames event rather than failing. The container then starts with
+            # neither secret, PAIGASUS_SESSION_STORE is forced to `redis`, and readiness can never
+            # succeed. Map each key to its own name explicitly.
+            - name: PAIGASUS_OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $root.Values.oidc.existingSecret }}
+                  key: oidc-client-secret
+            - name: PAIGASUS_SESSION_REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $root.Values.oidc.existingSecret }}
+                  key: session-redis-url
           envFrom:
             - configMapRef:
                 name: {{ include "paigasus.name" (list $root "zonemap") }}
             - configMapRef:
                 name: {{ include "paigasus.name" (list $root "console-env") }}
-            - secretRef:
-                name: {{ $root.Values.oidc.existingSecret }}
           # Liveness is a TCP check, NOT httpGet on /healthz. That route runs the FULL config
           # parse and its failure is deliberately not memoized, so using it for liveness puts a
           # misconfigured pod into CrashLoopBackOff instead of leaving it running and NotReady
