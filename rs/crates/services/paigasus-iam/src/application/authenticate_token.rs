@@ -137,17 +137,29 @@ where
         })
     }
 
-    /// Full authorization context for a request (§6.1): `resolve(.., Disabled)` (D10, never
-    /// provisions) plus every membership row, paged by `principal_context` (D13 — that helper
-    /// is the only place an authn context's memberships are fetched).
-    pub async fn introspect(&self, token: &str) -> Result<PrincipalContext, AuthnError> {
-        let principal = self.resolve(token, Provisioning::Disabled).await?;
+    /// The full context for an ALREADY-RESOLVED principal — the bearer-enforced path's peer of
+    /// `introspect`, which resolves a token first.
+    ///
+    /// `WhoAmI` (SMA-632) uses this. `AuthEnforce`/`require_bearer` have already verified the
+    /// bearer, provisioned the caller and seeded the bootstrap grant by the time a handler runs,
+    /// so re-verifying the token here would repeat a JWKS-backed verification and could answer
+    /// differently from the middleware that let the request through.
+    ///
+    /// `role_grants` stays empty, exactly as in `introspect` — SMA-633 owns populating it.
+    pub async fn context_for(&self, principal: AuthnPrincipal) -> Result<PrincipalContext, AuthnError> {
         let memberships = crate::application::principal_context::load_all_memberships(&self.memberships, &principal.principal_id).await?;
         Ok(PrincipalContext {
             principal,
             memberships,
             role_grants: Vec::new(),
         })
+    }
+
+    /// Full authorization context for a request (§6.1): `resolve(.., Disabled)` (D10, never
+    /// provisions) plus `context_for`'s memberships.
+    pub async fn introspect(&self, token: &str) -> Result<PrincipalContext, AuthnError> {
+        let principal = self.resolve(token, Provisioning::Disabled).await?;
+        self.context_for(principal).await
     }
 
     /// Just-in-time provisioning (§6.2). `email` is required (absent, or unparseable ->
@@ -196,7 +208,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::application::fakes::{FixedClock, SeqIds};
+    use crate::application::fakes::{FixedClock, InMemoryMembershipRepository, SeqIds};
     use async_trait::async_trait;
     use chrono::{TimeZone, Utc};
     use paigasus_iam_core::{Membership, MembershipRecord, Stamp, TenancyNodeRef, TokenDefect, Transaction};
@@ -400,6 +412,18 @@ mod tests {
     impl Authenticator for FakeAuthenticator {
         async fn authenticate(&self, _token: &str) -> Result<ValidatedClaims, AuthnError> {
             self.result.lock().unwrap().take().expect("FakeAuthenticator.authenticate called more than once")
+        }
+    }
+
+    /// Proves `context_for_does_not_re_authenticate`: any call panics the test immediately, so
+    /// a passing test is definitive evidence `context_for` never called `authenticate` — it
+    /// takes an already-resolved principal and must not verify a token at all.
+    struct PanicIfCalledAuthenticator;
+
+    #[async_trait]
+    impl Authenticator for PanicIfCalledAuthenticator {
+        async fn authenticate(&self, _token: &str) -> Result<ValidatedClaims, AuthnError> {
+            panic!("Authenticator must not be called by context_for — it takes an already-resolved principal")
         }
     }
 
@@ -731,5 +755,61 @@ mod tests {
 
         let err = uc.resolve("token", Provisioning::Enabled).await.unwrap_err();
         assert!(matches!(err, AuthnError::InvalidToken(TokenDefect::BadSignature)));
+    }
+
+    /// Builds an `AuthenticateToken` whose authenticator panics if `authenticate` is ever
+    /// called (proving `context_for` never re-verifies a token), with one membership seeded
+    /// for the returned, already-resolved `AuthnPrincipal`.
+    async fn context_for_fixture() -> (
+        AuthenticateToken<PanicIfCalledAuthenticator, InMemoryIdentities, InMemoryPrincipals, InMemoryMembershipRepository, SeqIds, FixedClock>,
+        AuthnPrincipal,
+    ) {
+        let store = AuthnStore::default();
+        let issuer = Issuer::parse("https://idp.example.com").unwrap();
+        let pid = principal_id(1);
+
+        let memberships = InMemoryMembershipRepository::default();
+        memberships.seed_for(&pid, 1);
+
+        let uc = AuthenticateToken::new(
+            PanicIfCalledAuthenticator,
+            InMemoryIdentities(store.clone()),
+            InMemoryPrincipals(store.clone()),
+            memberships,
+            SeqIds::default(),
+            FixedClock::default(),
+            JitPolicy::from_issuers(&[(issuer.clone(), true)]),
+        );
+
+        let principal = AuthnPrincipal {
+            principal_id: pid,
+            kind: PrincipalKind::User,
+            status: PrincipalStatus::Active,
+            credential: Credential::Oidc {
+                issuer,
+                subject: "sub-1".into(),
+                expires_at: epoch(),
+            },
+        };
+
+        (uc, principal)
+    }
+
+    /// `context_for` must NOT verify the token again — it takes an already-resolved principal.
+    /// The fake authenticator here would panic if called, so a future implementation that
+    /// re-resolves fails this test loudly rather than silently costing a JWKS round trip.
+    #[tokio::test]
+    async fn context_for_does_not_re_authenticate() {
+        let (use_case, principal) = context_for_fixture().await;
+        let ctx = use_case.context_for(principal.clone()).await.unwrap();
+        assert_eq!(ctx.principal.principal_id, principal.principal_id);
+        assert!(ctx.role_grants.is_empty());
+    }
+
+    #[tokio::test]
+    async fn context_for_returns_the_principals_memberships() {
+        let (use_case, principal) = context_for_fixture().await;
+        let ctx = use_case.context_for(principal).await.unwrap();
+        assert_eq!(ctx.memberships.len(), 1);
     }
 }
