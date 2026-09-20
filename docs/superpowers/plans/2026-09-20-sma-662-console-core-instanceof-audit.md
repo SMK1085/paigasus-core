@@ -6,8 +6,9 @@
 contract the audit's headline rests on, and a comment at every classification site saying why it
 cannot fail across Next's two module copies.
 
-**Architecture:** No behaviour changes. One test row is added to an existing file. Five source
-files gain comments, two of which also correct a claim that is now known to be wrong.
+**Architecture:** No behaviour changes. One test row is added to an existing file. Four source
+files gain comments — `discovery.ts`, `errors.ts`, `iam-clients.ts` and `principal-resolver.ts` —
+two of which also correct a claim that is now known to be wrong, plus one test file gains a row.
 
 **Tech Stack:** TypeScript, vitest 5, `@connectrpc/connect` 2.2.0, Moon.
 
@@ -228,7 +229,7 @@ Insert these two paragraphs between the `(ADR-0019 E8).` line and `import 'serve
 
 ```ts
 //
-// MODULE COPIES, AND WHY LINE 23 IS SAFE (SMA-662). Next gives a route handler and a page SEPARATE
+// MODULE COPIES, AND WHY THE CHECK BELOW IS SAFE (SMA-662). Next gives a route handler and a page SEPARATE
 // module graphs, so this package exists twice in one process and a class has two identities. The
 // `instanceof` below survives that, and the reason lives in the DEPENDENCY, not here:
 // `ConnectError` declares a static Symbol.hasInstance that falls back to a duck-type BRAND —
@@ -246,6 +247,9 @@ Insert these two paragraphs between the `(ADR-0019 E8).` line and `import 'serve
 // themselves never cross. The full audit, and the rule it applies (SMA-657 D7), are in
 // docs/superpowers/specs/2026-09-20-sma-662-console-core-instanceof-audit-design.md.
 ```
+
+(The header text says "the check below" rather than "line 23" because inserting this header block
+pushes that check about twenty lines down, so "line 23" would have been false on arrival.)
 
 - [ ] **Step 2: Add the one-line reason at the site**
 

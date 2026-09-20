@@ -14,8 +14,10 @@
 // (they call currentPrincipal()), so a degraded login costs nothing after the first render.
 //
 // THIS IS THE ONE PRODUCT OF THIS PACKAGE THAT LIVES ON SHARED STATE (SMA-662). The app's
-// lib/auth.ts hands this resolver to getAuthRuntime, a process singleton whose FIRST call fixes it
-// for the life of the process, so one copy's resolver serves requests the other copy handles. It
+// lib/auth.ts hands this resolver to getAuthRuntime, whose singleton lives on globalThis under a
+// key carrying the ZONE (@paigasus/auth's runtime.ts:203) — one per zone per process, not one per
+// process. Its FIRST call fixes the resolver for the life of that zone, so one copy's resolver
+// serves requests the other copy handles. It
 // is safe because the closure supplies BOTH sides: deps.clientsForToken builds the client and
 // callIam below classifies its errors, and both belong to the copy that built this resolver. The
 // two `err instanceof Error` reads in the catch test a BUILTIN, which both copies share.

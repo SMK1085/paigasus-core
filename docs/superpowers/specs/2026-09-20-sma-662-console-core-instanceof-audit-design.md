@@ -48,7 +48,10 @@ They are judged by analogy to it, and saying so plainly is clearer than stretchi
   subject.
 
 - **D2. Each of the six sites gets a comment stating why it cannot cross**, using § 3's reason and
-  preferring the strongest available argument. This is the third acceptance criterion.
+  preferring the strongest available argument. This is the third acceptance criterion. At the
+  `errors.ts` site the brand argument replaces the closure argument, because the brand argument is
+  strictly stronger — it holds even if a client did cross. The closure argument for that site
+  remains available, in § 3 row 1's Path A and Path B.
 
 - **D3. The sharing model is stated in a header block in `src/errors.ts`.** The full table stays in
   this document; the header states the model and points here. This mirrors how SMA-657 put its rule
@@ -85,6 +88,9 @@ They are judged by analogy to it, and saying so plainly is clearer than stretchi
 `src/` holds SIX `instanceof` operators. One tests a class this package defines, three test a
 third-party class, and two test the builtin `Error`. **None can cross.**
 
+Line numbers in the table below are pre-change; post-merge they are `errors.ts:46`,
+`discovery.ts:109`, `:110`, and `:286`.
+
 | Site | Right side | Category | Crosses? | Why |
 | --- | --- | --- | --- | --- |
 | `errors.ts:23` | `ConnectError` | third party | No | The class carries a `Symbol.hasInstance` brand check. Row 1. |
@@ -94,11 +100,12 @@ third-party class, and two test the builtin `Error`. **None can cross.**
 | `principal-resolver.ts:83` | `Error` | builtin | No | One isolate, one builtin. |
 | `principal-resolver.ts:84` | `Error` | builtin | No | One isolate, one builtin. |
 
-Six more operators live OUTSIDE `src/`: `testing/fake-iam.ts:177` (`errorInfoOf`) and `:190`
-(`stampCorrelation`), both on `ConnectError`; and `tests/unit/testing-tls.test.ts:30`,
+Seven more operators live OUTSIDE `src/`: `testing/fake-iam.ts:177` (`errorInfoOf`) and `:190`
+(`stampCorrelation`), both on `ConnectError`; `tests/unit/testing-tls.test.ts:30`,
 `tests/unit/authorize.test.ts:17`, `tests/containers/descriptor-cache-idle.test.ts:101` and
-`:210`. `testing/` is a published subpath that both apps' test harnesses import, never app code,
-and a harness runs in one process with one module graph. All six are out of scope (§ 9).
+`:210`; and `tests/unit/call-iam.test.ts`'s own new row (this issue's — see § 6), also on
+`ConnectError`. `testing/` is a published subpath that both apps' test harnesses import, never app
+code, and a harness runs in one process with one module graph. All seven are out of scope (§ 9).
 
 ### Row 1 — `errors.ts:23`, `err instanceof ConnectError` inside `callIam`
 
@@ -235,11 +242,13 @@ a per-copy product:**
    passes it `descriptorCacheFor(...)`, the `globalThis` singleton. The handle is per copy and per
    request; the cache beneath it is one per process. That is the wanted behaviour, stated at
    `discovery.ts:50-56`: one cache for every zone composed into the process.
-2. **The `AuthRuntime` — one per process.** `deps.authRuntime()` reaches `@paigasus/auth`'s
-   singleton, whose first call fixes FIVE object-valued fields, not two: `store`, `resolver`,
-   `logger` and `oidc`, plus every scalar (`paigasus-auth/src/runtime.ts:155-172`). `store` is the
-   field whose cross-copy identity produced SMA-653, and `oidc` the one that produced SMA-657; both
-   are fixed inside `@paigasus/auth` and neither reaches a console-core classifier. `resolver` is
+2. **The `AuthRuntime` — one per zone per process.** `deps.authRuntime()` reaches
+   `@paigasus/auth`'s singleton, keyed by zone: `runtime.ts:203` builds the globalThis symbol from
+   `` Symbol.for(`${RUNTIME_KEY_PREFIX}:${zone}`) ``, so a process composing two zones holds two.
+   Its first call per zone fixes FOUR object-valued fields, not two: `store`, `resolver`, `logger`
+   and `oidc`, plus every scalar (`paigasus-auth/src/runtime.ts:155-172`). `store` is the field
+   whose cross-copy identity produced SMA-653, and `oidc` the one that produced SMA-657; both are
+   fixed inside `@paigasus/auth` and neither reaches a console-core classifier. `resolver` is
    console-core's own, and row 1 Path B covers it.
 3. **The SDK's transport cache — one per COPY, not per process.** `@paigasus/sdk`'s `getTransport`
    reads a module-level `Map` (`sdk/src/transport.ts:215`) and holds an `Http2SessionManager` per
@@ -389,7 +398,7 @@ Line numbers are pre-change.
   of proportion to the risk — but the exposure is now written down.
 - **The two-graph `next/headers` premise is unmeasured** (§ 7). Its failure mode is a lost
   correlation id on the login callback's two IAM calls, not a wrong classification.
-- **The six `instanceof` operators outside `src/` are not audited.** Test harness and tests, one
+- **The seven `instanceof` operators outside `src/` are not audited.** Test harness and tests, one
   process, one module graph. If `testing/` ever gains a module app code imports, the two in
   `fake-iam.ts` come back into scope.
 - **This audit is a snapshot.** A future edit that stores a client, a `Discovery` handle or any
@@ -440,7 +449,7 @@ measurement.
   `@connectrpc/connect` builds the error led to `Symbol.hasInstance`, which makes the site safe by
   construction rather than by a call-graph snapshot. Path A's three-hop chain through
   `@paigasus/sdk` replaces the two-hop claim, which named a module that does not import the class.
-- § 4 named two fixed `AuthRuntime` fields; there are five, `store` and `oidc` included. The SDK's
+- § 4 named two fixed `AuthRuntime` fields; there are four, `store` and `oidc` included. The SDK's
   per-copy transport cache is added as a third shared item.
 - Row 2's "at most once per process / no race" is falsifiable through the exported
   `resetDiscoveryForTest`. The comment now carries the unbreakable pairing argument instead.

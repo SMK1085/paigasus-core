@@ -6,8 +6,9 @@
 // a navigation into an error page or hide the bug. The app branches on presentation, domain and
 // reason only, never on message text (ADR-0019 E8).
 //
-// MODULE COPIES, AND WHY THE CHECK BELOW IS SAFE (SMA-662). Next gives a route handler and a page SEPARATE
-// module graphs, so this package exists twice in one process and a class has two identities. The
+// MODULE COPIES, AND WHY THE CHECK BELOW IS SAFE (SMA-662). Next gives a route handler and a
+// page SEPARATE module graphs, so this package exists twice in one process and a class has
+// two identities. The
 // `instanceof` below survives that, and the reason lives in the DEPENDENCY, not here:
 // `ConnectError` declares a static Symbol.hasInstance that falls back to a duck-type BRAND —
 // `name === 'ConnectError'` plus `code`, `metadata`, `details`, `rawMessage` and `cause` —
@@ -19,10 +20,12 @@
 //
 // WHAT CROSSES AND WHAT DOES NOT. createConsoleRuntime builds every product fresh per call and
 // reads no globalThis. Three things are shared: the descriptor cache and its Redis client, one per
-// process (discovery.ts's globalThis symbol); the AuthRuntime, one per process, owned by
-// @paigasus/auth; and @paigasus/sdk's transport cache, one per module COPY. The IAM clients
-// themselves never cross. The full audit, and the rule it applies (SMA-657 D7), are in
-// docs/superpowers/specs/2026-09-20-sma-662-console-core-instanceof-audit-design.md.
+// process (discovery.ts's globalThis symbol); the AuthRuntime, one per ZONE per process — its
+// globalThis key carries the zone (@paigasus/auth's runtime.ts:203), so a process composing two
+// zones holds two; and @paigasus/sdk's transport cache, one per module COPY. This does not weaken
+// the audit: a per-zone singleton is still shared across the two module copies that serve that
+// zone. The IAM clients themselves never cross. The full audit, and the rule it applies (SMA-657
+// D7), are in docs/superpowers/specs/2026-09-20-sma-662-console-core-instanceof-audit-design.md.
 import 'server-only';
 import { ConnectError } from '@connectrpc/connect';
 import { mapError, type PaigasusError } from '@paigasus/sdk/errors';
