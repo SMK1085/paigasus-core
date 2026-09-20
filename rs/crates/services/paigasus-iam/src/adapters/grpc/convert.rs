@@ -394,8 +394,9 @@ pub fn to_proto_role_grant(g: &RoleGrant) -> ProtoRoleGrant {
 
 /// Projects a `PrincipalContext` into the wire `IntrospectResponse` (spec §7.2/§7.3): PRN
 /// strings, principal status as its stable `as_str`, `expires_at` as a prost `Timestamp`,
-/// memberships via the shared tenancy `Membership` mapping, and `role_grants` from the
-/// core's structured role-grant refs — always empty until a later M3 task populates it (D4).
+/// memberships via the shared tenancy `Membership` mapping, and `role_grants` is whatever
+/// the application layer assembled: populated for the OIDC `Introspect` path, empty for
+/// `IntrospectApiKey` (SMA-633 D2).
 pub fn to_introspect_response(ctx: &PrincipalContext) -> IntrospectResponse {
     // Token introspection only ever validates a JWT (`AuthenticateToken::introspect` always
     // resolves via the OIDC authenticator), so `ApiKey` is unreachable here — Task 19 adds a

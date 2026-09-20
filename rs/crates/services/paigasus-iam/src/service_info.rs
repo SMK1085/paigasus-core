@@ -119,7 +119,7 @@ mod tests {
     /// SMA-629 D2 / SMA-633 D9: neither OutboxService nor Introspect's `role_grants` population
     /// has a config switch, so every flag off still advertises both unconditional keys.
     #[test]
-    fn all_flags_off_advertises_only_iam_deadletters() {
+    fn all_flags_off_advertises_only_the_unconditional_keys() {
         assert_eq!(caps(false, false, false), HashSet::from([Capability::IamDeadletters, Capability::IamAuthnGrants]));
     }
 

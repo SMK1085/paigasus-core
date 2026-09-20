@@ -158,8 +158,8 @@ where
     /// so re-verifying the token here would repeat a JWKS-backed verification and could answer
     /// differently from the middleware that let the request through.
     ///
-    /// `role_grants` is the principal's own role grants (SMA-633), sorted for a
-    /// deterministic response.
+    /// `role_grants` carries the principal's own grants, sorted by `(scope_prn, role_key)`
+    /// (SMA-633). `Introspect` and `WhoAmI` both read this one struct, so both report them.
     pub async fn context_for(&self, principal: AuthnPrincipal) -> Result<PrincipalContext, AuthnError> {
         let memberships = crate::application::principal_context::load_all_memberships(&self.memberships, &principal.principal_id).await?;
 

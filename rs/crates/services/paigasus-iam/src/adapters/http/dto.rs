@@ -239,7 +239,8 @@ impl From<RoleGrantRef> for RoleGrantRefDto {
 
 /// `IntrospectResponse`-shaped JSON (spec §7.2): mirrors proto
 /// `paigasus.iam.v1.IntrospectResponse` field-for-field — snake_case, PRN strings,
-/// `expires_at` as RFC3339, `role_grants` empty until a later M3 task populates it.
+/// `expires_at` as RFC3339. `role_grants` is whatever the application layer assembled:
+/// populated for the OIDC `Introspect` path, empty for `IntrospectApiKey` (SMA-633 D2).
 #[derive(Debug, Clone, Serialize)]
 pub struct IntrospectResponseDto {
     pub principal_prn: String,

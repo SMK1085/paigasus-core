@@ -130,8 +130,12 @@ impl AuthnPrincipal {
 }
 
 /// The full authorization context for a request: the authenticated principal plus the
-/// tenancy memberships and role grants it carries. `role_grants` is always empty until a
-/// later M3 task populates it from the `RoleGrantStore`.
+/// tenancy memberships and role grants it carries.
+///
+/// `role_grants` carries the principal's own role grants, sorted by `(scope_prn, role_key)`
+/// (SMA-633). The OIDC `Introspect` path populates it; `IntrospectApiKey` leaves it empty by
+/// decision (SMA-633 D2), so a reader must not treat an empty list from an API-key
+/// introspection as "this service account holds no grants".
 #[derive(Debug, Clone, PartialEq)]
 pub struct PrincipalContext {
     pub principal: AuthnPrincipal,
