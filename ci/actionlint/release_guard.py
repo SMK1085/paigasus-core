@@ -1124,6 +1124,13 @@ SCOPED_SECRET_ENVIRONMENT = "release-images"
 SCOPED_SECRET_JOBS = frozenset(f"publish-images-{service}" for service in CHAIN_APPROVALS)
 
 
+def _scoped_secret_referenced(names: set[str]) -> bool:
+    """SMA-658 Task 8 fix round 1. One casefold comparison, shared by both
+    `credential_scope_violations` arms below, so a future edit to how a secret name is matched
+    changes it once."""
+    return SCOPED_SECRET.casefold() in {n.casefold() for n in names}
+
+
 def credential_scope_violations(doc: dict, name: str) -> list[str]:
     """V13. DOCKERHUB_TOKEN only in a `release-images` job, and that environment only on a
     publish job.
@@ -1146,7 +1153,7 @@ def credential_scope_violations(doc: dict, name: str) -> list[str]:
     # up to the workflow root would silently escape this rule.
     names, _ = secret_refs(
         yaml.safe_dump({"env": doc.get("env") or {}}, width=10**9, default_flow_style=False))
-    if SCOPED_SECRET.casefold() in {n.casefold() for n in names}:
+    if _scoped_secret_referenced(names):
         out.append(f"{name}: V13: the workflow-level env: reads {SCOPED_SECRET}. That scope "
                    f"reaches every job in the file, including one UNGATED_JOBS exempts from the "
                    f"release gate, and nothing can scope it to a single job from there. Move the "
@@ -1170,8 +1177,7 @@ def credential_scope_violations(doc: dict, name: str) -> list[str]:
         # span for a long secret name, which `_EXPR_SPAN`'s `re.S` would then misparse. PyYAML
         # only folds at a space, so today's names survive — but the next one might not.
         names, _ = secret_refs(yaml.safe_dump(job, width=10**9, default_flow_style=False))
-        if (SCOPED_SECRET.casefold() in {n.casefold() for n in names}
-                and env_name != SCOPED_SECRET_ENVIRONMENT):
+        if _scoped_secret_referenced(names) and env_name != SCOPED_SECRET_ENVIRONMENT:
             out.append(f"{name}: V13: job '{jid}' reads {SCOPED_SECRET} but its environment is "
                        f"{env_name or '(none)'!r}, not {SCOPED_SECRET_ENVIRONMENT!r}. That "
                        f"environment is the only thing that scopes the token to one job.")

@@ -1421,6 +1421,15 @@ jobs:
           REVISION: ${{ steps.decide.outputs.revision }}
         run: |
           set -euo pipefail
+          # SMA-658 Task 8 fix round 1. Shared by the already-released branch and the adopt
+          # branch below: two copies of this same extraction, differing only in their
+          # argument, is what let the already-released branch drift wrong in the first place
+          # (Task 8's own fix). Spec section 7.1 still holds -- the registry commands stay
+          # literal in this step; this only removes the duplication inside it.
+          revision_of() {
+            crane config "$1" | uv run --no-project --python '>=3.12' python3 -c \
+              'import json,sys; c=json.load(sys.stdin); print(c["config"]["Labels"]["org.opencontainers.image.revision"])'
+          }
           # D10: the FIRST digest published under :<version> is final. A later run adopts it and
           # discards its own build, so a rebuild -- which never reproduces a digest, because the
           # chisel cut resolves the live archive -- can never replace a published image.
@@ -1448,7 +1457,7 @@ jobs:
               echo "::error::the git tag paigasus-${SERVICE}-v${VERSION} exists, but neither registry holds a :${VERSION} digest to read the revision from." >&2
               exit 1
             fi
-            already_revision="$(crane config "${already_image}@${already_existing}" | uv run --no-project --python '>=3.12' python3 -c 'import json,sys; c=json.load(sys.stdin); print(c["config"]["Labels"]["org.opencontainers.image.revision"])')"
+            already_revision="$(revision_of "${already_image}@${already_existing}")"
             echo "revision=${already_revision}" >> "$GITHUB_OUTPUT"
             echo "action=already-released" >> "$GITHUB_OUTPUT"
             echo "copy_to=none" >> "$GITHUB_OUTPUT"
@@ -1510,7 +1519,7 @@ jobs:
             # commit). GHCR now holds the adopted digest -- either it always did, or the branch
             # above just copied it there -- so read the label back with a REGISTRY reference:
             # crane accepts that (C1 above is about a LOCAL archive only).
-            adopted_revision="$(crane config "${GHCR_IMAGE}@${index}" | uv run --no-project --python '>=3.12' python3 -c 'import json,sys; c=json.load(sys.stdin); print(c["config"]["Labels"]["org.opencontainers.image.revision"])')"
+            adopted_revision="$(revision_of "${GHCR_IMAGE}@${index}")"
             echo "revision=${adopted_revision}" >> "$GITHUB_OUTPUT"
           fi
 
