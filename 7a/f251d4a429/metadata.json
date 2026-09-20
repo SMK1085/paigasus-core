@@ -1,0 +1,26 @@
+{
+  "cli_version": "0.10.6",
+  "checkpoint_id": "7af251d4a429",
+  "strategy": "manual-commit",
+  "branch": "feature/sma-664-split-claude-md-into-nested-memories",
+  "checkpoints_count": 4,
+  "files_touched": [
+    "CLAUDE.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/7a/f251d4a429/0/metadata.json",
+      "transcript": "/7a/f251d4a429/0/full.jsonl",
+      "compact_transcript": "/7a/f251d4a429/0/transcript.jsonl",
+      "content_hash": "/7a/f251d4a429/0/content_hash.txt",
+      "prompt": "/7a/f251d4a429/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 36,
+    "cache_creation_tokens": 239382,
+    "cache_read_tokens": 4317506,
+    "output_tokens": 12524,
+    "api_call_count": 18
+  }
+}
