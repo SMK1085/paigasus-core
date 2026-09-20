@@ -389,24 +389,26 @@ negative_control() {
   # "--github-output always exits 0" contract on a shape neither row 5 nor row 6 reaches.
   #
   # `github_output()` hardcodes `$HERE`, so it cannot be pointed at a synthetic tree the way rows
-  # 3/4 are (see the comment above this function). The real `$HERE/release_plan.py` is swapped for
-  # a fixture reproducing exactly this shape, and is unconditionally restored by a subshell EXIT
-  # trap — which fires even if the invocation below exits non-zero under the subshell's inherited
-  # `set -e` — so a failure mid-test cannot leave the real checker file swapped out.
-  local stub_backup stub_out rc9=0
-  stub_backup="$(mktemp)"
-  stub_out="$(mktemp)"
-  cp "$HERE/release_plan.py" "$stub_backup"
-  (
-    trap 'cp "$stub_backup" "$HERE/release_plan.py"' EXIT
-    cat > "$HERE/release_plan.py" <<'PYEOF'
+  # 3/4 are (see the comment above this function) — UNLESS the invoked run.sh's own `$HERE`
+  # resolves into the tree. So the whole `$HERE` tree (pyproject.toml, uv.lock, release_plan.py,
+  # run.sh) is copied under a stub REPO_ROOT, only the COPY's release_plan.py is replaced with the
+  # fixture, and the COPY of run.sh is invoked — never "$0". `BASH_SOURCE[0]` inside that copy
+  # resolves `REPO_ROOT` to the stub root, so `HERE` there is the stub directory and the real,
+  # tracked `release_plan.py` is never touched: no swap, no restore, and nothing left corrupted if
+  # this test is killed mid-run (a signal an EXIT trap cannot catch).
+  local stub_root stub_out rc9=0
+  stub_root="$tmp/github-output-stub/ci/release-plan"
+  mkdir -p "$stub_root"
+  cp -R "$HERE/." "$stub_root/"
+  cat > "$stub_root/release_plan.py" <<'PYEOF'
 print("release-plan: fixture -- a malformed decision missing one service key")
 print("nothing_to_release=true")
 print("skip_iam=true")
 print("version_iam=1.0.0")
 PYEOF
-    GITHUB_OUTPUT="$stub_out" GITHUB_EVENT_NAME=push bash "$0" --github-output >/dev/null 2>&1
-  ) || rc9=$?
+  stub_out="$(mktemp)"
+  GITHUB_OUTPUT="$stub_out" GITHUB_EVENT_NAME=push bash "$stub_root/run.sh" --github-output \
+    >/dev/null 2>&1 || rc9=$?
   if [ "$rc9" -ne 0 ]; then
     printf '  FAIL row 9: the wrapper exited %s against a checker output missing one service\n' \
       "$rc9" >&2
@@ -420,7 +422,7 @@ PYEOF
       failures=$((failures + 1))
     fi
   done
-  rm -f "$stub_backup" "$stub_out"
+  rm -f "$stub_out"
 
   rm -rf "$tmp"
   if [ "$failures" -gt 0 ]; then
