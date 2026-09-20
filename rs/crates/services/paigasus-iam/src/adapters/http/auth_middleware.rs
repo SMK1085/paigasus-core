@@ -68,6 +68,8 @@ pub async fn require_bearer(State(state): State<AppState>, mut request: Request,
             }
             request.extensions_mut().insert(AuthContext {
                 principal_id: principal.principal_id,
+                kind: principal.kind,
+                status: principal.status,
                 credential: principal.credential,
             });
             next.run(request).await

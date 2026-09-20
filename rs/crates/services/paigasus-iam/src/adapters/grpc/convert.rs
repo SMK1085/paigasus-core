@@ -26,7 +26,7 @@ use paigasus_proto::paigasus::common::v1::{Actor, AuditMetadata, ErrorReason};
 use paigasus_proto::paigasus::iam::v1::{
     ApiKey as ProtoApiKey, ApiKeyStatus as ProtoApiKeyStatus, DeadLetterEntry as ProtoDeadLetterEntry, IntrospectApiKeyResponse, IntrospectResponse, IssueApiKeyResponse, Membership,
     NodeStatus as ProtoNodeStatus, Organization as ProtoOrganization, Policy as ProtoPolicy, Project as ProtoProject, RetireSystemPolicyResponse, RetiredPolicy, RetirementBlocked,
-    RetirementNeedsAcknowledgement, RoleGrant as ProtoRoleGrant, RoleGrantRef as ProtoRoleGrantRef, ServiceAccount as ProtoServiceAccount, SurvivingGrant, Team as ProtoTeam,
+    RetirementNeedsAcknowledgement, RoleGrant as ProtoRoleGrant, RoleGrantRef as ProtoRoleGrantRef, ServiceAccount as ProtoServiceAccount, SurvivingGrant, Team as ProtoTeam, WhoAmIResponse,
 };
 use tonic::{Code, Status};
 use tonic_types::{ErrorDetails, StatusExt};
@@ -413,6 +413,32 @@ pub fn to_introspect_response(ctx: &PrincipalContext) -> IntrospectResponse {
         issuer,
         subject,
         expires_at: Some(ts(expires_at)),
+        memberships: ctx.memberships.iter().map(to_proto_membership).collect(),
+        role_grants: ctx.role_grants.iter().map(to_proto_role_grant_ref).collect(),
+    }
+}
+
+/// `WhoAmIResponse` for an already-resolved caller.
+///
+/// Deliberately NOT `to_introspect_response`. That function asserts its `ApiKey` arm is
+/// unreachable, which is true of `Introspect` (it resolves only through the OIDC authenticator)
+/// and false of `WhoAmI` (`AuthEnforce` accepts an API-key bearer). Keeping two mappers lets
+/// `Introspect` keep its guarantee instead of loosening it for a second caller's sake.
+pub fn to_who_am_i_response(ctx: &PrincipalContext) -> WhoAmIResponse {
+    let (issuer, subject) = match &ctx.principal.credential {
+        Credential::Oidc { issuer, subject, .. } => (issuer.as_str().to_string(), subject.clone()),
+        // A service account has no (issuer, subject) pair, and this response carries no
+        // key_id/scope_prn — those belong to IntrospectApiKeyResponse.
+        Credential::ApiKey { .. } => (String::new(), String::new()),
+    };
+    WhoAmIResponse {
+        principal_prn: ctx.principal.principal_id.canonical(),
+        status: ctx.principal.status.as_str().to_string(),
+        issuer,
+        subject,
+        // Option, not a fabricated `Utc::now()`: an API key may have been minted without an
+        // expiry. `AuthnPrincipal::expires_at()` already answers for both credential kinds.
+        expires_at: ctx.principal.expires_at().map(ts),
         memberships: ctx.memberships.iter().map(to_proto_membership).collect(),
         role_grants: ctx.role_grants.iter().map(to_proto_role_grant_ref).collect(),
     }
@@ -1479,5 +1505,78 @@ mod tests {
             offenders.is_empty(),
             "these reasons are declared HTTP-only in error.proto but are constructed on the gRPC surface: {offenders:?}"
         );
+    }
+
+    /// `PrincipalContext` fixture for an API-key-authenticated caller — mirrors
+    /// `introspect_api_key_response_carries_scope_prn`'s construction. `expires_at` is a
+    /// parameter because `Credential::ApiKey.expires_at` is an `Option`: a key may have been
+    /// minted with no expiry, and `to_who_am_i_response_omits_an_absent_expiry` exercises that.
+    fn api_key_context(expires_at: Option<DateTime<Utc>>) -> PrincipalContext {
+        use paigasus_iam_core::{ApiKeyId, AuthnPrincipal, PrincipalKind, PrincipalStatus};
+
+        PrincipalContext {
+            principal: AuthnPrincipal {
+                principal_id: principal(50),
+                kind: PrincipalKind::ServiceAccount,
+                status: PrincipalStatus::Active,
+                credential: Credential::ApiKey {
+                    key_id: ApiKeyId::from_uuid(Uuid::from_u128(50)),
+                    expires_at,
+                    scope_prn: "prn:pgs:iam:::organization/0192f1c0-0000-7000-8000-000000000050".to_string(),
+                },
+            },
+            memberships: Vec::new(),
+            role_grants: Vec::new(),
+        }
+    }
+
+    /// `PrincipalContext` fixture for an OIDC-authenticated caller — `Issuer::parse` mirrors
+    /// `application::authenticate_token`'s own test fixtures.
+    fn oidc_context() -> PrincipalContext {
+        use paigasus_iam_core::{AuthnPrincipal, Issuer, PrincipalKind, PrincipalStatus};
+
+        PrincipalContext {
+            principal: AuthnPrincipal {
+                principal_id: principal(51),
+                kind: PrincipalKind::User,
+                status: PrincipalStatus::Active,
+                credential: Credential::Oidc {
+                    issuer: Issuer::parse("https://idp.example.com").unwrap(),
+                    subject: "subject-51".to_string(),
+                    expires_at: Utc::now() + chrono::Duration::hours(1),
+                },
+            },
+            memberships: Vec::new(),
+            role_grants: Vec::new(),
+        }
+    }
+
+    /// An API-key bearer is reachable here — AuthEnforce accepts one — so unlike
+    /// `to_introspect_response`, this mapper has no `debug_assert!` on the ApiKey arm.
+    #[test]
+    fn to_who_am_i_response_leaves_issuer_and_subject_empty_for_an_api_key() {
+        let expiry = Utc::now() + chrono::Duration::hours(1);
+        let ctx = api_key_context(Some(expiry));
+        let response = to_who_am_i_response(&ctx);
+        assert_eq!(response.issuer, "");
+        assert_eq!(response.subject, "");
+        assert_eq!(response.expires_at, Some(ts(expiry)));
+    }
+
+    /// An API key may be minted with no expiry (`Credential::ApiKey.expires_at` is an Option).
+    /// The old shared mapper answered `Utc::now()` here, which is a fabricated value.
+    #[test]
+    fn to_who_am_i_response_omits_an_absent_expiry() {
+        let ctx = api_key_context(None);
+        assert_eq!(to_who_am_i_response(&ctx).expires_at, None);
+    }
+
+    #[test]
+    fn to_who_am_i_response_reports_an_oidc_caller_in_full() {
+        let ctx = oidc_context();
+        let response = to_who_am_i_response(&ctx);
+        assert!(!response.issuer.is_empty());
+        assert!(!response.subject.is_empty());
+        assert!(response.expires_at.is_some());
     }
 }

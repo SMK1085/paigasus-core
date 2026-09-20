@@ -20,10 +20,10 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::Instant;
 
-use paigasus_iam_core::{AuthnError, Credential, TokenDefect};
+use paigasus_iam_core::{AuthnError, AuthnPrincipal, Credential, TokenDefect};
 use paigasus_observability::record_grpc;
 use paigasus_proto::paigasus::iam::v1::authn_service_server::AuthnService;
-use paigasus_proto::paigasus::iam::v1::{IntrospectApiKeyRequest, IntrospectApiKeyResponse, IntrospectRequest, IntrospectResponse};
+use paigasus_proto::paigasus::iam::v1::{IntrospectApiKeyRequest, IntrospectApiKeyResponse, IntrospectRequest, IntrospectResponse, WhoAmIRequest, WhoAmIResponse};
 use tonic::body::Body;
 use tonic::codegen::http;
 use tonic::{Request, Response, Status};
@@ -82,6 +82,41 @@ impl AuthnService for AuthnGrpc {
         record_grpc("Authentication", "IntrospectApiKey", started, &result);
         result
     }
+
+    /// `WhoAmI` (SMA-632): the caller's own principal.
+    ///
+    /// BEARER-ENFORCED BY OMISSION. This RPC is deliberately absent from `is_exempt` below, so
+    /// `AuthEnforce` has already verified the bearer, JIT-provisioned an unknown identity (when
+    /// the issuer's JIT flag allows it) and seeded the bootstrap platform_admin grant before
+    /// this runs. That omission is the whole feature — `who_am_i_is_not_exempt` pins it.
+    ///
+    /// The handler never sees a token. It reads the `AuthContext` the middleware inserted and
+    /// asks for the memberships, so it repeats no verification work.
+    async fn who_am_i(&self, request: Request<WhoAmIRequest>) -> Result<Response<WhoAmIResponse>, Status> {
+        let started = Instant::now();
+        let result: Result<Response<WhoAmIResponse>, Status> = async {
+            let actor = actor_context(&request)?;
+            let principal = AuthnPrincipal {
+                principal_id: actor.principal_id,
+                kind: actor.kind,
+                status: actor.status,
+                credential: actor.credential,
+            };
+            let ctx = self.state.authn.context_for(principal).await.map_err(|e| convert::authn_status(&e))?;
+            Ok(Response::new(convert::to_who_am_i_response(&ctx)))
+        }
+        .await;
+        record_grpc("Authentication", "WhoAmI", started, &result);
+        result
+    }
+}
+
+/// Extracts the bearer-resolved [`AuthContext`] from a gRPC request's extensions — mirrors
+/// the identical private helper in `grpc::tenancy`/`grpc::users`/`grpc::authz`/`grpc::audit`/
+/// `grpc::service_accounts`/`grpc::dead_letters`. `WhoAmI` is the first bearer-enforced RPC on
+/// this service, which is why this module did not need one before SMA-632.
+fn actor_context<T>(request: &Request<T>) -> Result<AuthContext, Status> {
+    request.extensions().get::<AuthContext>().cloned().ok_or_else(convert::missing_auth_context)
 }
 
 /// The bearer-enforcement tower `Layer`, applied to the whole gRPC server via
@@ -136,6 +171,13 @@ pub struct AuthEnforce<S> {
 /// only ever sees requests the outer boot routes' fallback forwarded to it. The arm stays live for
 /// the eleven Docker-gated suites that drive `grpc::router` directly (`AuthLayer` still wraps the
 /// WHOLE `Server` there, health included), which is why it is kept rather than deleted.
+///
+/// `WhoAmI` is deliberately ABSENT from this list, and that absence is a feature, not an
+/// oversight. It is the RPC the consoles call to get provisioned: being enforced is what makes
+/// `AuthEnforce` resolve its bearer with `Provisioning::Enabled` and seed the bootstrap grant.
+/// Adding it here would silently break console login. `who_am_i_is_not_exempt` fails if anyone
+/// does, and `who_am_i_provisions_a_new_identity` (tests/grpc_whoami.rs) fails for a second,
+/// independent reason.
 fn is_exempt(path: &str) -> bool {
     path.starts_with("/grpc.health.v1.Health/") || path == "/paigasus.iam.v1.AuthnService/Introspect" || path == "/paigasus.iam.v1.AuthnService/IntrospectApiKey"
 }
@@ -190,6 +232,8 @@ where
                     }
                     req.extensions_mut().insert(AuthContext {
                         principal_id: principal.principal_id,
+                        kind: principal.kind,
+                        status: principal.status,
                         credential: principal.credential,
                     });
                     inner.call(req).await
@@ -205,4 +249,25 @@ where
 /// `Status::into_http` — never a bare HTTP 401, which a gRPC client can't interpret.
 fn reject(err: &AuthnError) -> http::Response<Body> {
     convert::authn_status(err).into_http()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// SMA-632's mechanism, asserted directly. WhoAmI provisions its caller ONLY because
+    /// enforcement covers it; adding it to `is_exempt` would make console login fail with
+    /// `identity-not-provisioned` for every new user.
+    #[test]
+    fn who_am_i_is_not_exempt() {
+        assert!(!is_exempt("/paigasus.iam.v1.AuthnService/WhoAmI"));
+    }
+
+    /// The two RPCs that ARE exempt stay exempt — this test fails if someone "fixes" the one
+    /// above by widening the predicate rather than leaving WhoAmI out of it.
+    #[test]
+    fn the_two_introspection_rpcs_are_still_exempt() {
+        assert!(is_exempt("/paigasus.iam.v1.AuthnService/Introspect"));
+        assert!(is_exempt("/paigasus.iam.v1.AuthnService/IntrospectApiKey"));
+    }
 }
