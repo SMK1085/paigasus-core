@@ -240,7 +240,17 @@ a gate. Do not copy it here.
 
 - **Standing rule: No single local bash runs every gate. `repo:affected-smoke` needs system bash
   3.2. `repo:ruff-ci`, `repo:next-public-free` and `repo:publish-metadata` need bash 4+.
-  `repo:actionlint`'s full gate has no working local bash at all.**
+  `repo:actionlint`'s full gate needs bash 5 AND a healthy pipe: it completes under Homebrew
+  bash 5.3.15 when the host pipe holds 65536 bytes, and has no working local bash when the pipe
+  holds 512.**
+  CORRECTED AGAIN (SMA-664, MEASURED 2026-09-20): `ci/actionlint/run.sh` DOES complete locally
+  under Homebrew `/opt/homebrew/bin/bash` 5.3.15 — twice, in 47 s each, rc 0, with no FAIL row.
+  The gate's own preflight reported `pipe capacity 65536 bytes (floor 8192)` on both runs. So
+  the flat claim below is conditional on the SMALL-PIPE state, not a property of the gate: read
+  the preflight line before you conclude there is no local verdict. The same session measured
+  the bash 3.2 half unchanged — the gate finished in 47 s and printed exactly the two FALSE
+  `cargo-lock-step` rows. The 2026-09-14 facts below stay as written; the host was in the
+  small-pipe state then and is not now.
   LOCAL ONLY, CORRECTED (SMA-512): no local bash currently runs `ci/actionlint/run.sh` to
   completion. The 512-byte pipe (see the next entry) is most probably the same cause; nobody
   measured the pipe state on these 2026-09-14 runs (spec §2). When the host is in that
@@ -278,11 +288,11 @@ a gate. Do not copy it here.
   So on this class of machine, no single local bash satisfies every
   gate: `repo:affected-smoke` needs 3.2 (no `mapfile`, and no here-string deadlock);
   `repo:ruff-ci`, `repo:next-public-free` and `repo:publish-metadata` need 4+; and
-  `repo:actionlint` has no working local
-  bash at all, per the correction above. A local full-graph `moon ci` run must pick one bash for the
+  `repo:actionlint` needs bash 5 and a
+  healthy pipe, per the correction above. A local full-graph `moon ci` run must pick one bash for the
   whole invocation, then re-run the gates that need the other bash directly
   (`<bash-binary> ci/<gate>/run.sh`) and read those results instead of the `moon ci` verdict for
-  them — `repo:actionlint` has no local substitute verdict today. CI runs a single Linux bash and
+  them — `repo:actionlint` yields a local verdict only when its pipe preflight passes. CI runs a single Linux bash and
   never sees this split.
 - **A new pipe on the development Mac can hold only 512 bytes, and two local hangs come from
   it** (SMA-612). A new pipe on that host holds 512 bytes (M4), not the nominal 16384 that
