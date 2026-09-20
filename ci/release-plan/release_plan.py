@@ -282,7 +282,7 @@ def repo_tags(repo_root: Path) -> set[str]:
 # design and release-plz never processes them (M7). They need their own reader, and a STRICT pin:
 # a service crate that is missing from the tree is inconclusive for that service, never a silent
 # skip.
-SERVICES: dict[str, str] = {"iam": "paigasus-iam", "gateway": "paigasus-gateway"}
+EXPECTED_SERVICES: dict[str, str] = {"iam": "paigasus-iam", "gateway": "paigasus-gateway"}
 
 _CHANGELOG_HEADING = re.compile(r"^##\s+\[?(?P<version>[0-9][^\]\s]*)\]?", re.M)
 
@@ -313,7 +313,7 @@ def service_state(rs_root: Path, tags: set[str]) -> dict[str, tuple[bool, str]]:
     not change because of that.
     """
     out: dict[str, tuple[bool, str]] = {}
-    for service, crate in SERVICES.items():
+    for service, crate in EXPECTED_SERVICES.items():
         try:
             manifest = crate_manifests(rs_root)[crate]
             pkg = load_toml(manifest).get("package") or {}
@@ -858,6 +858,46 @@ def _service_state_is_a_separate_failure_domain() -> str | None:
         shutil.rmtree(tmp)
 
 
+# SMA-658 fix round 1. `UnicodeDecodeError` is a `ValueError`, not an `OSError` — the original
+# `except OSError` around the CHANGELOG.md read in `_assert_repo` did not catch it, so a
+# non-UTF-8 file escaped past `main()` and crashed the interpreter at rc 1. That reproduces the
+# exact class SMA-608 fixed for the collection layer (a bare exception mapped to `die_infra` = 2
+# by `run.sh`, instead of "the repository is wrong" = 3), for a different read site. `load_toml`'s
+# `except (OSError, tomllib.TOMLDecodeError)` is the pattern this follows: name every expected
+# failure mode explicitly.
+def _changelog_undecodable_asserts_three() -> str | None:
+    tmp = tempfile.mkdtemp()
+    try:
+        rs_root = Path(tmp) / "rs"
+        kernel_dir = rs_root / "crates" / "libs" / "paigasus-kernel"
+        iam_dir = rs_root / "crates" / "services" / "paigasus-iam"
+        kernel_dir.mkdir(parents=True)
+        iam_dir.mkdir(parents=True)
+        (rs_root / "Cargo.toml").write_text(
+            '[workspace]\nmembers = ["crates/libs/paigasus-kernel", '
+            '"crates/services/paigasus-iam"]\n')
+        (rs_root / "release-plz.toml").write_text(
+            '[[package]]\nname = "paigasus-iam"\nrelease = false\n')
+        (kernel_dir / "Cargo.toml").write_text(
+            '[package]\nname = "paigasus-kernel"\nversion = "1.0.0"\n')
+        (iam_dir / "Cargo.toml").write_text(
+            '[package]\nname = "paigasus-iam"\nversion = "0.1.0"\npublish = false\n')
+        # An invalid UTF-8 byte (0xFF is never valid in any UTF-8 sequence position).
+        (iam_dir / "CHANGELOG.md").write_bytes(b"## [0.1.0]\n\xff\n")
+        subprocess.run(["git", "init", "-q", tmp], check=True)
+        try:
+            with contextlib.redirect_stderr(io.StringIO()):
+                rc = _assert_repo(Path(tmp))
+        except Exception as exc:  # deliberately broad; catching it IS the RED signal pre-fix
+            return (f"_assert_repo raised {type(exc).__name__}: {exc} for a non-UTF-8 "
+                    f"CHANGELOG.md instead of returning 3 — this is the rc=1 crash")
+        if rc != 3:
+            return f"_assert_repo returned {rc} for a non-UTF-8 CHANGELOG.md, expected 3"
+        return None
+    finally:
+        shutil.rmtree(tmp)
+
+
 # The collection-layer rows: paths a pure-function fixture cannot reach. Fourteen of the fifteen
 # need a filesystem (they build throwaway trees under tempfile.mkdtemp()); row 15
 # (_markers_are_mutually_exclusive) needs none, but still cannot be expressed as a decide()-only
@@ -888,6 +928,8 @@ COLLECTION_ROWS: tuple[tuple[str, Callable[[], str | None]], ...] = (
     ("SMA-658 service skip rows", _service_fixture_rows),
     ("SMA-658 changelog reader rows", _changelog_reader_rows),
     ("SMA-658 service_state is a separate failure domain", _service_state_is_a_separate_failure_domain),
+    ("SMA-658 fix round 1: a non-UTF-8 CHANGELOG.md makes --assert exit 3, not 1",
+     _changelog_undecodable_asserts_three),
 )
 
 
@@ -987,15 +1029,19 @@ def _assert_repo(repo_root: Path) -> int:
     for service, (_skip, version) in service_state(repo_root / "rs", tags).items():
         if not version or version == "0.0.0":
             continue
-        changelog = repo_root / "rs" / "crates" / "services" / SERVICES[service] / "CHANGELOG.md"
+        changelog = repo_root / "rs" / "crates" / "services" / EXPECTED_SERVICES[service] / "CHANGELOG.md"
         try:
             text = changelog.read_text(encoding="utf-8")
-        except OSError as exc:
-            problems.append(f"{SERVICES[service]} is at {version} but {changelog} cannot be read "
+        # SMA-658 fix round 1: UnicodeDecodeError is a ValueError, not an OSError, so a
+        # non-UTF-8 CHANGELOG.md escaped this except and crashed main() at rc 1 — the same class
+        # SMA-608 fixed for the collection layer. Named explicitly, like load_toml's
+        # `except (OSError, tomllib.TOMLDecodeError)` above.
+        except (OSError, UnicodeDecodeError) as exc:
+            problems.append(f"{EXPECTED_SERVICES[service]} is at {version} but {changelog} cannot be read "
                             f"({exc}). A hand-bumped service needs a changelog section.")
             continue
         if not changelog_names_version(text, version):
-            problems.append(f"{SERVICES[service]} is at {version} but {changelog} has no "
+            problems.append(f"{EXPECTED_SERVICES[service]} is at {version} but {changelog} has no "
                             f"`## [{version}]` heading. Add the section in the same PR as the "
                             f"bump: nothing else records what that release contains.")
     for p in problems:
