@@ -65,6 +65,11 @@ expect_fail "unknown zone id" "is not a known service slug" \
 expect_fail "external backend without url" "backend.url is required" \
   --set zones.gateway.enabled=true --set zones.gateway.backend.deploy=false \
   --set zones.gateway.backend.url=""
+# ingress.host is supplied by the CALLER via BASE, so without this row nothing ever exercised its
+# refusal — the one required value whose check was written first and tested last. A row-level
+# --set comes after BASE and wins.
+expect_fail "ingress.host empty" "ingress.host is required" \
+  --set ingress.host=""
 expect_fail "ingress.tlsSecretName empty" "ingress.tlsSecretName is required" \
   --set ingress.tlsSecretName=""
 expect_fail "oidc.issuer empty" "oidc.issuer is required" \

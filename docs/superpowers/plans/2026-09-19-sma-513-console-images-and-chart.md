@@ -1732,7 +1732,7 @@ render_one() {
   local name="$1"; shift
   local want="$HERE/golden/${name}.yaml" got
   if ! got="$(helm template paigasus "$CHART" "${FIXED[@]}" "$@" 2>&1)"; then
-    echo "FAIL [$label]: render failed"; printf '%s\n' "$got"; ec=1; return
+    echo "FAIL [$name]: render failed"; printf '%s\n' "$got"; ec=1; return
   fi
   if [ "$UPDATE" -eq 1 ]; then
     mkdir -p "$HERE/golden"; printf '%s\n' "$got" > "$want"
@@ -1833,7 +1833,7 @@ This is the same class § 7.7 exists to close: a values combination that cannot 
 
 - [ ] **Step 1: Add a refusal row per required value, and watch them fail**
 
-Six new rows in `refusals.sh`, one per value that is documented REQUIRED and not yet refused: `ingress.tlsSecretName`, `oidc.issuer`, `oidc.clientId`, `oidc.existingSecret`, `postgres.existingSecret`, and `zones.iam.backend.apiKeysPepperSecret` (six, not seven — `postgres.host` is NOT a chart value: the complete DSN lives in the Secret, so a check for it would target nothing and could fail every render). Each sets only its own value to `""` on top of an otherwise-valid invocation, and expects a message naming that value. Run the script: all seven must fail before the validation exists.
+Seven new rows in `refusals.sh`, one per value that is documented REQUIRED and not yet refused: `ingress.tlsSecretName`, `oidc.issuer`, `oidc.clientId`, `oidc.existingSecret`, `postgres.existingSecret`, and `zones.iam.backend.apiKeysPepperSecret` plus `ingress.host`, which BASE supplies so a row must set it empty explicitly (seven, not eight — `postgres.host` is NOT a chart value: the complete DSN lives in the Secret, so a check for it would target nothing and could fail every render). Each sets only its own value to `""` on top of an otherwise-valid invocation, and expects a message naming that value. Run the script: all seven must fail before the validation exists.
 
 Note the rows must supply every *other* required value, or a row will pass for the wrong reason — refused by a different check than the one it names. That is the same trap Task 8's `unknown zone id` row carried. Confirm each failure text names the value the row is about.
 
