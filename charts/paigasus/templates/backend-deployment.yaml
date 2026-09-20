@@ -1,0 +1,145 @@
+{{/* SPDX-License-Identifier: Apache-2.0 */}}
+{{- include "paigasus.validate" . -}}
+{{- $root := . -}}
+{{- range $id, $z := .Values.zones }}
+{{- if and $z.enabled $z.backend.deploy }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "paigasus.name" (list $root (printf "%s-backend" $id)) }}
+spec:
+{{- if eq $id "iam" }}
+  replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      # DELIBERATE DEVIATION, not the runbook's instruction. RUNBOOK-containers.md § 5 says
+      # maxSurge need no longer be pinned to 0 now that the boot migration takes an advisory lock
+      # (SMA-559). It is kept at 0 because that relaxation carries an unmet precondition:
+      # AppState::new's reconcile_starter writes system policies and roles on EVERY boot with no
+      # lock of its own and has never been tested under concurrency. That is a Rust concurrency
+      # question needing a concurrency test, not a chart default, and it is filed separately.
+      # Raise this only after that issue closes.
+      maxSurge: 0
+      maxUnavailable: 1
+{{- else }}
+  replicas: {{ $z.backend.replicas }}
+{{- end }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ $id }}-backend
+      app.kubernetes.io/instance: {{ $root.Release.Name | quote }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ $id }}-backend
+        app.kubernetes.io/instance: {{ $root.Release.Name | quote }}
+      annotations:
+        # The chart does not own these Secrets and cannot observe their contents, so rotating one
+        # IN PLACE changes nothing in the pod template and the running pod keeps the old value.
+        # Two concrete consequences for IAM, which runs a single replica: a revoked database DSN
+        # survives until someone restarts that replica by hand, and a rotated API-key pepper does
+        # not revoke keys consistently, because an old pod keeps accepting what a new pod refuses.
+        # These are the operator's explicit signals — bump the matching version after a rotation
+        # and the pod rolls. Same shape as the console Deployment's checksum/secret.
+        checksum/postgres-secret: {{ $root.Values.postgres.secretVersion | sha256sum }}
+        checksum/pepper-secret: {{ $z.backend.apiKeysSecretVersion | sha256sum }}
+    spec:
+      securityContext:
+        runAsUser: 65532
+        runAsGroup: 65532
+        runAsNonRoot: true
+        # NO readOnlyRootFilesystem. RUNBOOK-containers.md § 7: that posture is untested for
+        # every image in this repo. It is a follow-up to measure, not a default to ship.
+      # 45s, not the 30s default. IAM drains a JoinSet of relays and maintainers on SIGTERM and
+      # no worst-case drain time has ever been measured — treat 30s as a floor to widen from, and
+      # revisit if a rolling update is observed truncating a drain.
+      terminationGracePeriodSeconds: 45
+      containers:
+        - name: backend
+          image: "{{ $z.backend.image.repository }}:{{ $z.backend.image.tag | default $root.Chart.AppVersion }}"
+          securityContext:
+            allowPrivilegeEscalation: false
+            # NO readOnlyRootFilesystem. RUNBOOK-containers.md § 7: that posture is untested for
+            # every image in this repo. It is a follow-up to measure, not a default to ship.
+{{- if eq $id "iam" }}
+          ports:
+            - name: http
+              containerPort: {{ $z.backend.httpPort }}
+            - name: grpc
+              containerPort: {{ $z.backend.grpcPort }}
+          env:
+            # Bind explicitly to the configured ports rather than trusting the binary's own
+            # 8080/9090 defaults, so a values.yaml override of httpPort/grpcPort can never drift
+            # from what the container actually listens on (the F9 failure mode, one layer up).
+            - name: IAM_HTTP_ADDR
+              value: {{ printf "0.0.0.0:%d" (int $z.backend.httpPort) | quote }}
+            - name: IAM_GRPC_ADDR
+              value: {{ printf "0.0.0.0:%d" (int $z.backend.grpcPort) | quote }}
+            - name: IAM_MIGRATION__LOCK_WAIT_SECS
+              value: {{ $z.backend.migrationLockWaitSeconds | quote }}
+            # IamConfig has no decomposed host/user/db config — figment reads ONE opaque DSN
+            # (IAM_DATABASE_URL). The chart does NOT compose this from a host plus a password: a
+            # password containing @, /, :, ? or # would break the URI or silently redirect it to
+            # another host. postgres.existingSecret must hold the complete DSN under key
+            # "database-url" instead.
+            - name: IAM_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $root.Values.postgres.existingSecret | quote }}
+                  key: database-url
+            # authn.issuers has no default and is a hard boot error if empty (IamConfig::load).
+            # The console's own OIDC client id is the audience IAM must accept: it is the client
+            # the ID tokens IAM validates were issued to.
+            - name: IAM_AUTHN__ISSUERS
+              value: {{ printf "[{issuer=%q,audiences=[%q]}]" $root.Values.oidc.issuer $root.Values.oidc.clientId | quote }}
+            # ApiKeyConfig::pepper decodes this at boot and IamConfig::validate rejects fewer
+            # than 32 decoded bytes. See zones.iam.backend.apiKeysPepperSecret in values.yaml.
+            - name: IAM_API_KEYS__PEPPER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $z.backend.apiKeysPepperSecret | quote }}
+                  key: pepper
+          startupProbe:          # sized for config load + Database::connect ONLY. SMA-571 removed
+            httpGet:             # the coupling to IAM_MIGRATION__LOCK_WAIT_SECS entirely.
+              path: /healthz
+              port: http
+            periodSeconds: 5
+            failureThreshold: 12
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 20
+          readinessProbe:        # /readyz answers 503 {"status":"migrating"} for as long as the
+            httpGet:             # migration takes. A never-ready replica is simply absent from
+              path: /readyz      # the endpoint list; this threshold does NOT bound that window —
+              port: http         # size it for a steady-state database blip.
+            periodSeconds: 10
+            failureThreshold: 3
+{{- else }}
+          ports:
+            - name: http
+              containerPort: {{ $z.backend.httpPort }}
+          env:
+            # Same reasoning as IAM_HTTP_ADDR above: bind to the configured port explicitly so a
+            # values.yaml override can never drift from the container's own listener.
+            - name: GATEWAY_HTTP_ADDR
+              value: {{ printf "0.0.0.0:%d" (int $z.backend.httpPort) | quote }}
+          # 30s floor, not a copy-paste slip. The gateway's /readyz issues a REAL gRPC introspect
+          # call to IAM on every poll, and both its health routes sit inside its metrics and
+          # correlation layers (SMA-504 D10), so probe traffic is metered and load-bearing.
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 30
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 20
+{{- end }}
+{{- end }}
+{{- end }}

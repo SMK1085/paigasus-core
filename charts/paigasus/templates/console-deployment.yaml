@@ -1,0 +1,92 @@
+{{/* SPDX-License-Identifier: Apache-2.0 */}}
+{{- include "paigasus.validate" . -}}
+{{- $root := . -}}
+{{- range $id, $z := .Values.zones }}
+{{- if $z.enabled }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "paigasus.name" (list $root (printf "%s-console" $id)) }}
+spec:
+  replicas: {{ $z.console.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ $id }}-console
+      app.kubernetes.io/instance: {{ $root.Release.Name | quote }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ $id }}-console
+        app.kubernetes.io/instance: {{ $root.Release.Name | quote }}
+      annotations:
+        # All three checksums, not two. With envFrom and no checksum on the SECRET, rotating
+        # PAIGASUS_SESSION_REDIS_URL or the OIDC client secret restarts nothing and every pod
+        # keeps the old value indefinitely.
+        checksum/zonemap: {{ include (print $root.Template.BasePath "/zonemap-configmap.yaml") $root | sha256sum }}
+        checksum/console-env: {{ include (print $root.Template.BasePath "/console-env-configmap.yaml") $root | sha256sum }}
+        # The chart does not own oidc.existingSecret and CANNOT observe its contents: hashing the
+        # Secret's NAME (the old form of this line) never changes when the contents rotate, so it
+        # never triggers the restart it exists to trigger. oidc.secretVersion is the operator's
+        # explicit signal instead — bump it whenever the referenced Secret's contents change.
+        checksum/secret: {{ $root.Values.oidc.secretVersion | sha256sum }}
+    spec:
+      securityContext:
+        runAsUser: 65532
+        runAsGroup: 65532
+        runAsNonRoot: true
+        # NO readOnlyRootFilesystem. RUNBOOK-containers.md § 7: that posture is untested for
+        # every image in this repo. It is a follow-up to measure, not a default to ship.
+      containers:
+        - name: console
+          image: "{{ $z.console.image.repository }}:{{ $z.console.image.tag | default $root.Chart.AppVersion }}"
+          securityContext:
+            allowPrivilegeEscalation: false
+            # NO readOnlyRootFilesystem. RUNBOOK-containers.md § 7: that posture is untested for
+            # every image in this repo. It is a follow-up to measure, not a default to ship.
+          ports:
+            - name: http
+              containerPort: 3000
+          env:
+            - name: PAIGASUS_ZONE
+              value: {{ $id | quote }}
+            - name: PORT
+              value: "3000"
+            # NOT envFrom.secretRef. That form turns each Secret KEY into an env var NAME, and the
+            # documented keys are hyphenated — `oidc-client-secret`, `session-redis-url`. A hyphen
+            # is illegal in an env var name, so the kubelet SKIPS those keys and records an
+            # InvalidVariableNames event rather than failing. The container then starts with
+            # neither secret, PAIGASUS_SESSION_STORE is forced to `redis`, and readiness can never
+            # succeed. Map each key to its own name explicitly.
+            - name: PAIGASUS_OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $root.Values.oidc.existingSecret | quote }}
+                  key: oidc-client-secret
+            - name: PAIGASUS_SESSION_REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $root.Values.oidc.existingSecret | quote }}
+                  key: session-redis-url
+          envFrom:
+            - configMapRef:
+                name: {{ include "paigasus.name" (list $root "zonemap") }}
+            - configMapRef:
+                name: {{ include "paigasus.name" (list $root "console-env") }}
+          # Liveness is a TCP check, NOT httpGet on /healthz. That route runs the FULL config
+          # parse and its failure is deliberately not memoized, so using it for liveness puts a
+          # misconfigured pod into CrashLoopBackOff instead of leaving it running and NotReady
+          # with a readable log — and RUNBOOK-containers.md § 4 requires liveness never to touch
+          # a dependency. The consoles have no /readyz; that is a recorded gap (spec § 7.8).
+          livenessProbe:
+            tcpSocket:
+              port: http
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: {{ $z.basePath }}/healthz
+              port: http
+            periodSeconds: 10
+            failureThreshold: 3
+{{- end }}
+{{- end }}

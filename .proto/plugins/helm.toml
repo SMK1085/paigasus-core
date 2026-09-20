@@ -1,0 +1,54 @@
+# Vendored proto TOML plugin for helm (SMA-513).
+#
+# Resolves official helm.sh release tarballs. Same vendoring rationale as
+# cargo-deny/promtool/actionlint: a static schema over official release assets — nothing
+# upstream to maintain. Chart rendering (`helm template`) varies with the binary, so this
+# pin is what keeps the SMA-513 golden files reproducible instead of red at random.
+#
+# Three facts measured on 2026-09-20 that differ from every other plugin in this directory:
+#
+# 1. The tarballs are NOT GitHub release assets. helm/helm's GitHub releases carry only
+#    `.asc` signature files; the actual archives are hosted at get.helm.sh (verified: HTTP
+#    200 for helm-v3.22.0-linux-amd64.tar.gz and helm-v3.22.0-darwin-arm64.tar.gz).
+# 2. There is no combined checksum file. Every archive has its own sibling
+#    `{download_file}.sha256sum` at the same host (verified: HTTP 200, content is a bare
+#    "<hex>  <filename>" line) — unlike promtool/actionlint's one shared checksums file,
+#    checksum-file here is derived from download_file, not a static name.
+# 3. The version is embedded WITH its "v" prefix in the filename and the exe-path, not just
+#    the tag — unlike promtool, where the tag has the "v" and the filename does not.
+#
+# helm ships one archive per (GOOS, GOARCH), using Go's arch names (amd64/arm64) uniformly
+# across linux/darwin/windows, so — like promtool — a single global [install.arch] remap
+# covers every platform and no [platform.*.arch] override is needed.
+#
+# The binary nests one directory deep ({os}-{arch}/helm), so exe-path is required on every
+# platform (like promtool/cargo-deny).
+
+name = "helm"
+type = "cli"
+
+[platform.linux]
+download-file = "helm-v{version}-linux-{arch}.tar.gz"
+checksum-file = "helm-v{version}-linux-{arch}.tar.gz.sha256sum"
+exe-path = "linux-{arch}/helm"
+
+[platform.macos]
+download-file = "helm-v{version}-darwin-{arch}.tar.gz"
+checksum-file = "helm-v{version}-darwin-{arch}.tar.gz.sha256sum"
+exe-path = "darwin-{arch}/helm"
+
+[platform.windows]
+download-file = "helm-v{version}-windows-{arch}.zip"
+checksum-file = "helm-v{version}-windows-{arch}.zip.sha256sum"
+exe-path = "windows-{arch}/helm.exe"
+
+[install]
+download-url = "https://get.helm.sh/{download_file}"
+checksum-url = "https://get.helm.sh/{checksum_file}"
+
+[install.arch]
+x86_64 = "amd64"
+aarch64 = "arm64"
+
+[resolve]
+git-url = "https://github.com/helm/helm"

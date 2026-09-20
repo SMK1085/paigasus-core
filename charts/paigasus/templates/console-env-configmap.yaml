@@ -1,0 +1,15 @@
+{{/* SPDX-License-Identifier: Apache-2.0 */}}
+{{- include "paigasus.validate" . -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "paigasus.name" (list . "console-env") }}
+data:
+  PAIGASUS_PUBLIC_ORIGIN: {{ printf "https://%s" .Values.ingress.host | quote }}
+  PAIGASUS_OIDC_ISSUER: {{ .Values.oidc.issuer | quote }}
+  PAIGASUS_OIDC_CLIENT_ID: {{ .Values.oidc.clientId | quote }}
+  PAIGASUS_IAM_GRPC_URL: {{ printf "http://%s:%d" (include "paigasus.name" (list . "iam-backend")) (int .Values.zones.iam.backend.grpcPort) | quote }}
+  # Forced, not exposed. createAuthRuntime refuses "memory" once PAIGASUS_ZONES names more than
+  # one zone, and console-core's descriptor cache needs Redis regardless. A knob whose only other
+  # setting crash-loops the pod is not a knob.
+  PAIGASUS_SESSION_STORE: "redis"
