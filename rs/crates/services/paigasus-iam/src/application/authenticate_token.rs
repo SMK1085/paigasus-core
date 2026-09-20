@@ -6,10 +6,11 @@
 //! introspect never provisions, D13 hot path resolves only — no membership fetch).
 
 use paigasus_iam_core::{
-    Authenticator, AuthnError, AuthnPrincipal, Clock, ConflictKind, Credential, Email, ExternalIdentity, ExternalIdentityRepository, IdGenerator, Issuer, MembershipRepository, Principal,
-    PrincipalContext, PrincipalId, PrincipalKind, PrincipalRepository, PrincipalStatus, ProvisioningDefect, RepositoryError, User, ValidatedClaims,
+    Authenticator, AuthnError, AuthnPrincipal, AuthzError, Clock, ConflictKind, Credential, Email, ExternalIdentity, ExternalIdentityRepository, IdGenerator, Issuer, MembershipRepository, Principal,
+    PrincipalContext, PrincipalId, PrincipalKind, PrincipalRepository, PrincipalStatus, ProvisioningDefect, RepositoryError, RoleGrantRef, RoleGrantStore, User, ValidatedClaims,
 };
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// Whether `resolve` may just-in-time provision an unknown `(issuer, subject)` identity.
 /// The middleware calls `resolve(.., Enabled)`; `Introspect` always calls `resolve(..,
@@ -52,6 +53,13 @@ fn backend(err: RepositoryError) -> AuthnError {
     AuthnError::Backend(Box::new(err))
 }
 
+/// Wraps an `AuthzError` as `AuthnError::Backend`. Separate from `backend` above because
+/// the grant store's error type is not `RepositoryError`. Spec D6: a grant-store failure
+/// fails the call — it must never degrade to an empty grant list.
+fn backend_authz(err: AuthzError) -> AuthnError {
+    AuthnError::Backend(Box::new(err))
+}
+
 /// Generic-by-value over the ports it depends on, mirroring the M1 use cases
 /// (`CreateUser` et al.): the composition root instantiates this once per concrete adapter
 /// set (Task 14).
@@ -61,6 +69,10 @@ pub struct AuthenticateToken<A, E, P, M, I, C> {
     identities: E,
     principals: P,
     memberships: M,
+    /// Spec D3: a trait object, not a generic parameter — the composition root clones the
+    /// one `Arc` it already composes into `PolicySnapshot`, exactly as `RoleService` does
+    /// (`application/roles.rs:91`).
+    grants: Arc<dyn RoleGrantStore>,
     id_gen: I,
     clock: C,
     jit: JitPolicy,
@@ -76,12 +88,13 @@ where
     C: Clock,
 {
     #[allow(clippy::too_many_arguments)]
-    pub fn new(authenticator: A, identities: E, principals: P, memberships: M, id_gen: I, clock: C, jit: JitPolicy) -> Self {
+    pub fn new(authenticator: A, identities: E, principals: P, memberships: M, grants: Arc<dyn RoleGrantStore>, id_gen: I, clock: C, jit: JitPolicy) -> Self {
         AuthenticateToken {
             authenticator,
             identities,
             principals,
             memberships,
+            grants,
             id_gen,
             clock,
             jit,
@@ -145,14 +158,29 @@ where
     /// so re-verifying the token here would repeat a JWKS-backed verification and could answer
     /// differently from the middleware that let the request through.
     ///
-    /// `role_grants` stays empty, exactly as in `introspect` — SMA-633 owns populating it.
+    /// `role_grants` is the principal's own role grants (SMA-633), sorted for a
+    /// deterministic response.
     pub async fn context_for(&self, principal: AuthnPrincipal) -> Result<PrincipalContext, AuthnError> {
         let memberships = crate::application::principal_context::load_all_memberships(&self.memberships, &principal.principal_id).await?;
-        Ok(PrincipalContext {
-            principal,
-            memberships,
-            role_grants: Vec::new(),
-        })
+
+        // Spec D3/D4/D7: the principal's own grants, projected to the wire type and sorted.
+        // `list_by_principal` is unbounded and unordered (`PgRoleGrantStore` issues no
+        // `ORDER BY`), so the sort is what makes the response deterministic. The pair is a
+        // total order in the database: `uq_role_grant_principal_role_scope`.
+        let mut role_grants: Vec<RoleGrantRef> = self
+            .grants
+            .list_by_principal(&principal.principal_id)
+            .await
+            .map_err(backend_authz)?
+            .into_iter()
+            .map(|g| RoleGrantRef {
+                scope_prn: g.scope.canonical_prn(),
+                role_key: g.role_key,
+            })
+            .collect();
+        role_grants.sort_by(|a, b| (&a.scope_prn, &a.role_key).cmp(&(&b.scope_prn, &b.role_key)));
+
+        Ok(PrincipalContext { principal, memberships, role_grants })
     }
 
     /// Full authorization context for a request (§6.1): `resolve(.., Disabled)` (D10, never
@@ -208,10 +236,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::application::fakes::{FixedClock, InMemoryMembershipRepository, SeqIds};
+    use crate::application::fakes::{FixedClock, InMemoryMembershipRepository, InMemoryRoleGrants, SeqIds};
     use async_trait::async_trait;
     use chrono::{TimeZone, Utc};
-    use paigasus_iam_core::{Membership, MembershipRecord, Stamp, TenancyNodeRef, TokenDefect, Transaction};
+    use paigasus_iam_core::{GrantScope, Membership, MembershipRecord, RoleGrant, Stamp, TenancyNodeRef, TokenDefect, Transaction};
     use paigasus_kernel::Prn;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
@@ -457,6 +485,35 @@ mod tests {
         }
     }
 
+    /// Every method fails. Only `list_by_principal` is reached by `introspect`; the rest
+    /// satisfy the trait. Mirrors `roles.rs`'s own `FailingGrantStore`.
+    struct FailingGrants;
+
+    #[async_trait]
+    impl RoleGrantStore for FailingGrants {
+        async fn grant(&self, _g: &RoleGrant) -> Result<(), AuthzError> {
+            Err(AuthzError::Backend("boom".into()))
+        }
+        async fn revoke(&self, _id: Uuid) -> Result<(), AuthzError> {
+            Err(AuthzError::Backend("boom".into()))
+        }
+        async fn grant_in(&self, _tx: &dyn Transaction, _g: &RoleGrant) -> Result<(), AuthzError> {
+            Err(AuthzError::Backend("boom".into()))
+        }
+        async fn revoke_in(&self, _tx: &dyn Transaction, _id: Uuid) -> Result<bool, AuthzError> {
+            Err(AuthzError::Backend("boom".into()))
+        }
+        async fn list_all(&self) -> Result<Vec<RoleGrant>, AuthzError> {
+            Err(AuthzError::Backend("boom".into()))
+        }
+        async fn list_by_principal(&self, _p: &PrincipalId) -> Result<Vec<RoleGrant>, AuthzError> {
+            Err(AuthzError::Backend("boom".into()))
+        }
+        async fn find(&self, _id: Uuid) -> Result<Option<RoleGrant>, AuthzError> {
+            Err(AuthzError::Backend("boom".into()))
+        }
+    }
+
     #[tokio::test]
     async fn known_identity_resolves_without_provisioning() {
         let store = AuthnStore::default();
@@ -482,6 +539,7 @@ mod tests {
             InMemoryIdentities(store.clone()),
             InMemoryPrincipals(store.clone()),
             InMemoryMemberships::default(),
+            Arc::new(InMemoryRoleGrants::default()),
             SeqIds::default(),
             FixedClock::default(),
             JitPolicy::from_issuers(&[(issuer.clone(), true)]),
@@ -503,6 +561,7 @@ mod tests {
             InMemoryIdentities(store.clone()),
             InMemoryPrincipals(store.clone()),
             InMemoryMemberships::default(),
+            Arc::new(InMemoryRoleGrants::default()),
             SeqIds::default(),
             FixedClock::default(),
             JitPolicy::from_issuers(&[(issuer.clone(), true)]),
@@ -525,6 +584,7 @@ mod tests {
             InMemoryIdentities(store.clone()),
             InMemoryPrincipals(store.clone()),
             InMemoryMemberships::default(),
+            Arc::new(InMemoryRoleGrants::default()),
             SeqIds::default(),
             FixedClock::default(),
             JitPolicy::from_issuers(&[(issuer.clone(), false)]),
@@ -545,6 +605,7 @@ mod tests {
             InMemoryIdentities(store.clone()),
             InMemoryPrincipals(store.clone()),
             InMemoryMemberships::default(),
+            Arc::new(InMemoryRoleGrants::default()),
             SeqIds::default(),
             FixedClock::default(),
             JitPolicy::from_issuers(&[(issuer.clone(), true)]),
@@ -564,6 +625,7 @@ mod tests {
             InMemoryIdentities(store.clone()),
             InMemoryPrincipals(store.clone()),
             InMemoryMemberships::default(),
+            Arc::new(InMemoryRoleGrants::default()),
             SeqIds::default(),
             FixedClock::default(),
             JitPolicy::from_issuers(&[(issuer.clone(), true)]),
@@ -583,6 +645,7 @@ mod tests {
             InMemoryIdentities(store.clone()),
             InMemoryPrincipals(store.clone()),
             InMemoryMemberships::default(),
+            Arc::new(InMemoryRoleGrants::default()),
             SeqIds::default(),
             FixedClock::default(),
             JitPolicy::from_issuers(&[(issuer, true)]),
@@ -605,6 +668,7 @@ mod tests {
             InMemoryIdentities(store.clone()),
             InMemoryPrincipals(store.clone()),
             InMemoryMemberships::default(),
+            Arc::new(InMemoryRoleGrants::default()),
             SeqIds::default(),
             FixedClock::default(),
             JitPolicy::from_issuers(&[(issuer, true)]),
@@ -631,6 +695,7 @@ mod tests {
             InMemoryIdentities(store.clone()),
             InMemoryPrincipals(store.clone()),
             InMemoryMemberships::default(),
+            Arc::new(InMemoryRoleGrants::default()),
             SeqIds::default(),
             FixedClock::default(),
             JitPolicy::from_issuers(&[(issuer, true)]),
@@ -657,6 +722,7 @@ mod tests {
             InMemoryIdentities(store.clone()),
             InMemoryPrincipals(store.clone()),
             InMemoryMemberships::default(),
+            Arc::new(InMemoryRoleGrants::default()),
             SeqIds::default(),
             FixedClock::default(),
             JitPolicy::from_issuers(&[(issuer.clone(), true)]),
@@ -692,6 +758,7 @@ mod tests {
             RaceOnceIdentities::new(InMemoryIdentities(store.clone())),
             InMemoryPrincipals(store.clone()),
             InMemoryMemberships::default(),
+            Arc::new(InMemoryRoleGrants::default()),
             SeqIds::default(),
             FixedClock::default(),
             JitPolicy::from_issuers(&[(issuer.clone(), true)]),
@@ -731,6 +798,7 @@ mod tests {
             InMemoryIdentities(store.clone()),
             InMemoryPrincipals(store.clone()),
             memberships,
+            Arc::new(InMemoryRoleGrants::default()),
             SeqIds::default(),
             FixedClock::default(),
             JitPolicy::from_issuers(&[(issuer.clone(), true)]),
@@ -738,6 +806,9 @@ mod tests {
 
         let ctx = uc.introspect("token").await.unwrap();
         assert_eq!(ctx.memberships.len(), 450);
+        // This principal holds no grants, so the list is empty for that reason — not
+        // because the field is hardcoded. `introspect_returns_the_principals_role_grants`
+        // is what proves the field is populated.
         assert!(ctx.role_grants.is_empty());
     }
 
@@ -748,6 +819,7 @@ mod tests {
             PanicIfCalledIdentities,
             PanicIfCalledPrincipals,
             InMemoryMemberships::default(),
+            Arc::new(FailingGrants),
             SeqIds::default(),
             FixedClock::default(),
             JitPolicy::from_issuers(&[]),
@@ -776,6 +848,7 @@ mod tests {
             InMemoryIdentities(store.clone()),
             InMemoryPrincipals(store.clone()),
             memberships,
+            Arc::new(InMemoryRoleGrants::default()),
             SeqIds::default(),
             FixedClock::default(),
             JitPolicy::from_issuers(&[(issuer.clone(), true)]),
@@ -803,6 +876,9 @@ mod tests {
         let (use_case, principal) = context_for_fixture().await;
         let ctx = use_case.context_for(principal.clone()).await.unwrap();
         assert_eq!(ctx.principal.principal_id, principal.principal_id);
+        // This principal holds no grants, so the list is empty for that reason — not
+        // because the field is hardcoded. `introspect_returns_the_principals_role_grants`
+        // is what proves the field is populated.
         assert!(ctx.role_grants.is_empty());
     }
 
@@ -811,5 +887,163 @@ mod tests {
         let (use_case, principal) = context_for_fixture().await;
         let ctx = use_case.context_for(principal).await.unwrap();
         assert_eq!(ctx.memberships.len(), 1);
+    }
+
+    /// Helper: a store seeded with one principal and its external identity, returning the
+    /// pieces the four grant tests need. Mirrors `introspect_pages_through_memberships`'s
+    /// own setup, which predates this helper.
+    fn seeded_principal(store: &AuthnStore, issuer: &Issuer, subject: &str) -> PrincipalId {
+        let pid = principal_id(1);
+        let principal = Principal::new(pid.clone(), PrincipalKind::User, PrincipalStatus::Active, epoch(), epoch());
+        let user = User::new(pid.clone(), Email::parse("grants@example.com").unwrap(), "Grants".into(), None, None, epoch(), epoch());
+        store.principals.lock().unwrap().insert(pid.uuid(), (principal, user));
+        store.identities.lock().unwrap().insert(
+            (issuer.as_str().to_string(), subject.to_string()),
+            ExternalIdentity {
+                id: Uuid::from_u128(7),
+                principal_id: pid.clone(),
+                issuer: issuer.clone(),
+                subject: subject.into(),
+                created_at: epoch(),
+                updated_at: epoch(),
+            },
+        );
+        pid
+    }
+
+    /// A grant at Root and a grant at a node both reach the caller, each carrying the
+    /// canonical PRN of its own scope (spec D4).
+    #[tokio::test]
+    async fn introspect_returns_the_principals_role_grants() {
+        let store = AuthnStore::default();
+        let issuer = Issuer::parse("https://idp.example.com").unwrap();
+        let pid = seeded_principal(&store, &issuer, "sub-grants");
+
+        let org = TenancyNodeRef::from_prn(Prn::parse("prn:pgs:iam:::organization/11111111-1111-1111-1111-111111111111").unwrap()).unwrap();
+        let grants = InMemoryRoleGrants::default();
+        grants
+            .grant(&RoleGrant {
+                id: Uuid::from_u128(1),
+                principal: pid.clone(),
+                role_key: "platform_admin".into(),
+                scope: GrantScope::Root,
+                linked_policy_id: "lp-1".into(),
+                created_at: epoch(),
+            })
+            .await
+            .unwrap();
+        grants
+            .grant(&RoleGrant {
+                id: Uuid::from_u128(2),
+                principal: pid.clone(),
+                role_key: "org_admin".into(),
+                scope: GrantScope::Node(org.clone()),
+                linked_policy_id: "lp-2".into(),
+                created_at: epoch(),
+            })
+            .await
+            .unwrap();
+
+        let uc = AuthenticateToken::new(
+            FakeAuthenticator::ok(claims("https://idp.example.com", "sub-grants", Some("grants@example.com"), Some("Grants"))),
+            InMemoryIdentities(store.clone()),
+            InMemoryPrincipals(store.clone()),
+            InMemoryMemberships::default(),
+            Arc::new(grants),
+            SeqIds::default(),
+            FixedClock::default(),
+            JitPolicy::from_issuers(&[(issuer.clone(), true)]),
+        );
+
+        let ctx = uc.introspect("token").await.unwrap();
+        assert_eq!(ctx.role_grants.len(), 2);
+        assert!(ctx.role_grants.iter().any(|g| g.role_key == "platform_admin" && g.scope_prn == GrantScope::Root.canonical_prn()));
+        assert!(ctx.role_grants.iter().any(|g| g.role_key == "org_admin" && g.scope_prn == org.canonical()));
+    }
+
+    /// Spec D7: the order is `(scope_prn, role_key)`, not insertion order and not the
+    /// fake's `HashMap` iteration order. The two grants share a scope and differ only in
+    /// role key, which the database's `uq_role_grant_principal_role_scope` permits.
+    #[tokio::test]
+    async fn introspect_sorts_role_grants_deterministically() {
+        let store = AuthnStore::default();
+        let issuer = Issuer::parse("https://idp.example.com").unwrap();
+        let pid = seeded_principal(&store, &issuer, "sub-sorted");
+
+        let grants = InMemoryRoleGrants::default();
+        for (n, role) in [(1u128, "zeta_role"), (2, "alpha_role")] {
+            grants
+                .grant(&RoleGrant {
+                    id: Uuid::from_u128(n),
+                    principal: pid.clone(),
+                    role_key: role.into(),
+                    scope: GrantScope::Root,
+                    linked_policy_id: format!("lp-{n}"),
+                    created_at: epoch(),
+                })
+                .await
+                .unwrap();
+        }
+
+        let uc = AuthenticateToken::new(
+            FakeAuthenticator::ok(claims("https://idp.example.com", "sub-sorted", Some("grants@example.com"), Some("Grants"))),
+            InMemoryIdentities(store.clone()),
+            InMemoryPrincipals(store.clone()),
+            InMemoryMemberships::default(),
+            Arc::new(grants),
+            SeqIds::default(),
+            FixedClock::default(),
+            JitPolicy::from_issuers(&[(issuer.clone(), true)]),
+        );
+
+        let ctx = uc.introspect("token").await.unwrap();
+        let keys: Vec<&str> = ctx.role_grants.iter().map(|g| g.role_key.as_str()).collect();
+        assert_eq!(keys, vec!["alpha_role", "zeta_role"], "grants must be sorted, not insertion-ordered");
+    }
+
+    /// Spec D6: a grant-store failure fails the call. It must NOT degrade to an empty
+    /// list, because a consumer reads an empty list as "this principal holds no grants".
+    #[tokio::test]
+    async fn introspect_fails_when_the_grant_store_fails() {
+        let store = AuthnStore::default();
+        let issuer = Issuer::parse("https://idp.example.com").unwrap();
+        seeded_principal(&store, &issuer, "sub-broken");
+
+        let uc = AuthenticateToken::new(
+            FakeAuthenticator::ok(claims("https://idp.example.com", "sub-broken", Some("grants@example.com"), Some("Grants"))),
+            InMemoryIdentities(store.clone()),
+            InMemoryPrincipals(store.clone()),
+            InMemoryMemberships::default(),
+            Arc::new(FailingGrants),
+            SeqIds::default(),
+            FixedClock::default(),
+            JitPolicy::from_issuers(&[(issuer.clone(), true)]),
+        );
+
+        let err = uc.introspect("token").await.unwrap_err();
+        assert!(matches!(err, AuthnError::Backend(_)), "expected Backend, got {err:?}");
+    }
+
+    /// A principal with no grants gets an empty list and a SUCCESSFUL call — the
+    /// discriminator against the failure case above.
+    #[tokio::test]
+    async fn introspect_returns_an_empty_list_for_a_principal_without_grants() {
+        let store = AuthnStore::default();
+        let issuer = Issuer::parse("https://idp.example.com").unwrap();
+        seeded_principal(&store, &issuer, "sub-none");
+
+        let uc = AuthenticateToken::new(
+            FakeAuthenticator::ok(claims("https://idp.example.com", "sub-none", Some("grants@example.com"), Some("Grants"))),
+            InMemoryIdentities(store.clone()),
+            InMemoryPrincipals(store.clone()),
+            InMemoryMemberships::default(),
+            Arc::new(InMemoryRoleGrants::default()),
+            SeqIds::default(),
+            FixedClock::default(),
+            JitPolicy::from_issuers(&[(issuer.clone(), true)]),
+        );
+
+        let ctx = uc.introspect("token").await.unwrap();
+        assert!(ctx.role_grants.is_empty());
     }
 }
