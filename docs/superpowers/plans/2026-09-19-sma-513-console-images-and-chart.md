@@ -61,8 +61,15 @@ The spec records this as *"a claim to verify in the first task of PR 1, not a me
 export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
 cd /Users/smaschek/dev/paigasus/paigasus-core/.claude/worktrees/sma-513-console-helm
 SCRATCH="$(mktemp -d)"
-pnpm -C ts install --frozen-lockfile --filter @paigasus/iam-console... \
-  --virtual-store-dir "$SCRATCH/.pnpm" --modules-dir "$SCRATCH/node_modules" 2>&1 | tail -20
+LOG="$(mktemp)"
+if pnpm -C ts install --frozen-lockfile --filter @paigasus/iam-console... \
+  --virtual-store-dir "$SCRATCH/.pnpm" --modules-dir "$SCRATCH/node_modules" >"$LOG" 2>&1; then
+  tail -20 "$LOG"
+else
+  echo "pnpm install failed:" >&2
+  cat "$LOG" >&2
+  exit 1
+fi
 ls "$SCRATCH/node_modules/@paigasus" 2>/dev/null || echo "(no @paigasus dir)"
 ```
 
@@ -142,7 +149,11 @@ origin="http://127.0.0.1:${port}"
 html="$(curl -fsS --retry 20 --retry-delay 1 --retry-all-errors "${origin}${base_path}/")"
 
 # Step 2: extract one chunk URL. No pipe into an early-exit reader: capture, then read.
-chunk="$(printf '%s' "$html" | grep -oE "${base_path}/_next/static/[^\"']+\.js" | sort -u | sed -n 1p)"
+# `grep -oE` exits 1 on no match even after reading its whole input; under set -euo pipefail an
+# unguarded assignment from that pipeline would exit the script here instead of reaching the
+# named failure branch below, so the trailing `|| true` hands the empty-string case to the `-z`
+# check instead.
+chunk="$(printf '%s' "$html" | grep -oE "${base_path}/_next/static/[^\"']+\.js" | sort -u | sed -n 1p)" || true
 if [ -z "$chunk" ]; then
   echo "::error::${image}: no ${base_path}/_next/static/*.js URL in the rendered page" >&2
   exit 1
@@ -501,7 +512,9 @@ smoke_consoles() {
     html="$(curl -fsS --retry 30 --retry-delay 1 --retry-all-errors "${origin}${base_path}/")" || bad=1
     chunk=""
     if [ "$bad" -eq 0 ]; then
-      chunk="$(printf '%s' "$html" | grep -oE "${base_path}/_next/static/[^\"']+\.js" | sort -u | sed -n 1p)"
+      # `grep -oE` exits 1 on no match; under set -e that would abort the whole function and
+      # skip the other service's checks, not just this one's failure branch below.
+      chunk="$(printf '%s' "$html" | grep -oE "${base_path}/_next/static/[^\"']+\.js" | sort -u | sed -n 1p)" || true
     fi
     if [ -z "$chunk" ]; then
       echo "::error::${app}: no ${base_path}/_next/static/*.js URL in the rendered page - .next/static was not staged into the image." >&2
@@ -632,7 +645,7 @@ Expected: one block, `directory: /rs`. `ts/Dockerfile` is uncovered, so its dige
 
 - [ ] **Step 2: Add a `/ts` docker block**
 
-Insert after the `/rs` docker block, mirroring its schedule and its grouping. Add `ignore` entries for major, minor and patch on the distroless image, with the reason stated:
+Insert after the `/rs` docker block, mirroring its schedule and its grouping. Add an `ignore` entry for major-version updates on the distroless image, with the reason stated — minor and patch stay open, since a digest update within the pinned major must still flow through:
 
 ```yaml
   # SMA-513: ts/Dockerfile pins gcr.io/distroless/nodejs24-debian12 by digest. Covered here for
@@ -958,11 +971,14 @@ oidc:
   issuer: ""             # REQUIRED
   clientId: ""           # REQUIRED
   existingSecret: ""     # REQUIRED. Must hold keys: oidc-client-secret, session-redis-url.
+  secretVersion: ""      # NOT required. The chart cannot observe the external Secret's contents,
+                         # so it cannot detect a rotation on its own. Operators bump this value
+                         # (any string) after rotating oidc.existingSecret, which feeds the console
+                         # Deployments' checksum/secret annotation and rolls both consoles.
 
 redis: {}                # the URL lives in oidc.existingSecret, since it may carry a password
 
 postgres:
-  host: ""               # REQUIRED by the IAM backend
   existingSecret: ""     # REQUIRED
 ```
 
@@ -1724,7 +1740,6 @@ FIXED=(
   --set oidc.issuer=https://idp.example.test/realms/paigasus
   --set oidc.clientId=paigasus-console
   --set oidc.existingSecret=paigasus-console-secret
-  --set postgres.host=postgres.example.test
   --set postgres.existingSecret=paigasus-postgres-secret
 )
 
@@ -1784,9 +1799,15 @@ Expected: `ok` on both and `== chart render OK ==`.
 - [ ] **Step 4: Verify the goldens move when the chart does**
 
 ```bash
-sed -i.bak 's/runAsUser: 65532/runAsUser: 1000/' charts/paigasus/templates/console-deployment.yaml
+cp charts/paigasus/templates/console-deployment.yaml /tmp/console-deployment.sma513.bak
+python3 - <<'PY'
+import pathlib
+p = pathlib.Path("charts/paigasus/templates/console-deployment.yaml")
+p.write_text(p.read_text().replace("runAsUser: 65532", "runAsUser: 1000"))
+PY
 charts/paigasus/tests/render.sh || echo "red as expected"
-mv charts/paigasus/templates/console-deployment.yaml.bak charts/paigasus/templates/console-deployment.yaml
+cp /tmp/console-deployment.sma513.bak charts/paigasus/templates/console-deployment.yaml
+rm -f /tmp/console-deployment.sma513.bak
 charts/paigasus/tests/render.sh
 ```
 

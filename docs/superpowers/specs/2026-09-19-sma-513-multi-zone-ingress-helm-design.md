@@ -343,7 +343,7 @@ Six projections derive from that map and from nothing else:
 | -- | -- |
 | `Ingress.spec.rules[0].http.paths` | one entry per enabled zone, `path: <basePath>`, `pathType: Prefix` |
 | `PAIGASUS_ZONES` | `{id: basePath}` over enabled zones |
-| `PAIGASUS_SERVICES` | `{id: <backend http in-cluster URL>}` over enabled zones |
+| `PAIGASUS_SERVICES` | `{id: backend.deploy ? <backend http in-cluster URL> : backend.url}` over enabled zones |
 | `PAIGASUS_IAM_GRPC_URL` | the `iam` zone's backend gRPC URL |
 | Console `Deployment` set | one per enabled zone |
 | Backend `Deployment` and `Service` set | one per enabled zone **whose `backend.deploy` is true** (D9) |
@@ -446,8 +446,15 @@ error does not depend on Helm's template evaluation order.
 | no zone enabled | `fail` — a chart with no zone serves nothing |
 | `gateway` enabled, `iam` disabled | `fail` — `gateway-console`'s `servicesWithIamAndGateway` refuses to construct without an `iam` entry (`ts/apps/gateway-console/lib/config.ts:52-63`) |
 | a zone id outside `SERVICE_SLUGS` | `fail` — `parseServiceMap` would throw in **both** consoles at first request (F8) |
+| `ingress.tlsSecretName` empty | `fail`, naming the value — the ingress must terminate TLS (§ 7.5) |
+| `oidc.issuer`, `oidc.clientId` or `oidc.existingSecret` empty | `fail`, naming the value |
+| `postgres.existingSecret` empty | `fail`, naming the value |
+| `zones.iam.backend.apiKeysPepperSecret` empty | `fail`, naming the value — `IamConfig::validate` hard-fails boot without it |
 | `iam` only | valid |
 | `iam` and `gateway` | valid |
+
+Each required-value refusal has a matching row in `charts/paigasus/tests/refusals.sh`, which sets
+only that value to `""` on top of an otherwise-valid invocation and expects the named message.
 
 ### 7.8 Probes
 
