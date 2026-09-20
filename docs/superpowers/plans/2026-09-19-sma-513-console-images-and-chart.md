@@ -1777,6 +1777,52 @@ git commit -m "feat(repo): golden render and helm lint for the paigasus chart (S
 
 ---
 
+### Task 14: Refuse every value the chart documents as REQUIRED
+
+**Added 2026-09-20, after Task 13's golden files enshrined an invalid manifest.** `values.yaml` marks eight values REQUIRED, but `paigasus.validate` refuses only `ingress.host`. The rest are required by comment alone. `render.sh`'s fixture happens to set most of them, which masks the gap — and the one it does not set, `zones.iam.backend.apiKeysPepperSecret`, renders `secretKeyRef: {name: "", key: pepper}` into both golden files. Kubernetes rejects an empty `secretKeyRef.name`, so `helm install` with chart defaults produces a Deployment the API server will not accept.
+
+This is the same class § 7.7 exists to close: a values combination that cannot work must fail at render time with a named message, never render something invalid.
+
+**Files:**
+- Modify: `charts/paigasus/templates/_helpers.tpl` (`paigasus.validate`)
+- Modify: `charts/paigasus/tests/refusals.sh`
+- Modify: `charts/paigasus/tests/render.sh` (fixture)
+- Re-baseline: `charts/paigasus/tests/golden/*.yaml`
+- Modify: `charts/paigasus/README.md`
+
+- [ ] **Step 1: Add a refusal row per required value, and watch them fail**
+
+Seven new rows in `refusals.sh`, one per value that is documented REQUIRED and not yet refused: `ingress.tlsSecretName`, `oidc.issuer`, `oidc.clientId`, `oidc.existingSecret`, `postgres.host`, `postgres.existingSecret`, and `zones.iam.backend.apiKeysPepperSecret`. Each sets only its own value to `""` on top of an otherwise-valid invocation, and expects a message naming that value. Run the script: all seven must fail before the validation exists.
+
+Note the rows must supply every *other* required value, or a row will pass for the wrong reason — refused by a different check than the one it names. That is the same trap Task 8's `unknown zone id` row carried. Confirm each failure text names the value the row is about.
+
+- [ ] **Step 2: Add the checks to `paigasus.validate`**
+
+One `fail` per value, each message naming the values path and what it feeds. Keep them after the zone-slug check and before the zone-count check, so a wrong zone id still reports as a wrong zone id.
+
+- [ ] **Step 3: Re-baseline the fixtures and the goldens**
+
+`render.sh`'s `FIXED` array gains `--set zones.iam.backend.apiKeysPepperSecret=paigasus-iam-pepper`. Then `render.sh --update`, and **read the diff** — the only change should be that `secretKeyRef.name` is now populated. A golden re-baseline is a reviewed act; if anything else moved, stop and find out why.
+
+- [ ] **Step 4: Prove the battery**
+
+All five scripts green. Then delete one `fail` line from `paigasus.validate` and confirm exactly its own row reds and no other. Restore by reverting that line, not with `git checkout --`.
+
+- [ ] **Step 5: Update the README**
+
+Record that every REQUIRED value is refused at render time, and that this is what stops a default `helm install` producing an invalid manifest.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add charts/paigasus
+git commit -m "fix(repo): refuse every value the chart documents as required (SMA-513)"
+```
+
+**A plan defect worth recording for anyone re-running Task 13 Step 4:** `sed -i.bak` on macOS leaves the backup **inside `templates/`**, and Helm renders every file in that directory regardless of extension. The stray `.bak` renders as a duplicate Deployment and fails `helm lint`'s extension check, burying the real diff in noise. Mutate with `python3` in place, or write the backup outside `templates/`.
+
+---
+
 ## Before opening either PR
 
 - [ ] Run the full graph the way CI does. Per-project tasks do not run the repo gates.
