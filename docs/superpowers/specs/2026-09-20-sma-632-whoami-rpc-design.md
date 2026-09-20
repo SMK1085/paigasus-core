@@ -101,10 +101,18 @@ without an expiry has `None`. `AuthnPrincipal::expires_at()` (`authn.rs:104-109`
 proto field is a message, so absence is already expressible on the wire.
 
 **Known consequence.** `WhoAmIResponse` carries no discriminator, so a caller tells the two
-credential kinds apart only by `issuer` and `subject` being empty. SMA-633 inherits a related
-problem: an API-key caller's role grants must respect the key's `scope_prn`, which this message
-cannot carry. Neither blocks this issue; both are recorded in § 9 so SMA-633 does not discover
-them.
+credential kinds apart only by `issuer` and `subject` being empty. That does not block this issue;
+§ 9.4 records it so SMA-633 does not discover it.
+
+**A consequence this spec previously claimed, and withdraws.** Revision 2 said an API-key caller's
+role grants must respect the key's `scope_prn`. **That is wrong, and the codebase says so.**
+`ApiKey.scope_actions` and `scope_roles` are never read — `authenticate_api_key.rs:32-34` calls
+them "stored, v1-UNENFORCED metadata" — and `application/api_keys.rs:7-22` (D15) states that an
+API key is a bearer credential for the service account's **entire** current grant set, narrowed
+only at mint time by an anti-escalation check. A scope filter at introspection time would
+therefore report **less** authority than the key actually wields, which is worse than reporting
+none: it would describe a key as weaker than it is. SMA-633 reports the full grant set for both
+credential kinds. § 9.5 carries the corrected note.
 
 ### 3.3 Why D7 is POST, not GET
 
@@ -490,9 +498,14 @@ the claim in a comment; the test itself only checks the generated client and doe
    principal's memberships uses `TenancyService.ListMemberships`, which is Cedar-checked.
 4. **`WhoAmIResponse` carries no credential discriminator** (§ 3.2). A caller distinguishes an
    API-key answer only by empty `issuer`/`subject`.
-5. **SMA-633 inherits two messages and a scope problem.** It must fill `role_grants` in both
-   `IntrospectResponse` and `WhoAmIResponse`, and for an API-key caller the grants must respect
-   the key's `scope_prn` — a field neither message carries.
+5. **SMA-633 inherits two messages, and no scope problem.** It must fill `role_grants` in both
+   `IntrospectResponse` and `WhoAmIResponse`. It must **not** filter an API-key caller's grants by
+   the key's `scope_prn`: a key is a bearer credential for the service account's entire current
+   grant set (`application/api_keys.rs:7-22`, D15), and the scope fields are unread v1 metadata
+   (`authenticate_api_key.rs:32-34`). Filtering would understate the authority the key wields.
+   Revision 2 of this spec claimed the opposite; § 3.2 records the withdrawal and the evidence.
+   Because both RPCs read the same `PrincipalContext.role_grants` field, SMA-633 fills both at
+   once with no further change here.
 6. **One PR is large** (D1). It spans `contracts/`, `rs/` and `ts/`, and the challenge widened it
    with a second proto message and a second mapper. The codegen-drift gate wants the proto and
    its bindings in one commit, and an RPC with no caller proves nothing, so the split stays
