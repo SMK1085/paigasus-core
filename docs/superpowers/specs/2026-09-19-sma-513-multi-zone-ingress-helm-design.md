@@ -389,7 +389,7 @@ Three objects, and the spec names all of them because revision 1 left five keys 
 | -- | -- | -- |
 | `<release>-zonemap` ConfigMap | `PAIGASUS_ZONES`, `PAIGASUS_SERVICES` | both console Deployments |
 | `<release>-console-env` ConfigMap | `PAIGASUS_IAM_GRPC_URL`, `PAIGASUS_PUBLIC_ORIGIN`, `PAIGASUS_OIDC_ISSUER`, `PAIGASUS_OIDC_CLIENT_ID`, `PAIGASUS_SESSION_STORE` | both console Deployments |
-| `<release>-console-secret` Secret | `PAIGASUS_OIDC_CLIENT_SECRET`, `PAIGASUS_SESSION_REDIS_URL` | both console Deployments (`checksum/secret`) |
+| the Secret named by `oidc.existingSecret` — **externally managed, the chart does not create it** | keys `oidc-client-secret`, `session-redis-url`, each mapped to its env var by an explicit `secretKeyRef` | both console Deployments (`checksum/secret`, over `oidc.secretVersion`) |
 
 The Secret needs its own annotation for a concrete reason: with `envFrom` and no checksum,
 **rotating `PAIGASUS_SESSION_REDIS_URL` or the OIDC client secret restarts nothing**, and every pod

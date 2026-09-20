@@ -557,7 +557,8 @@ Append inside the `for service` loop, after the identity checks:
       if [ "$img_list" != "$host_list" ]; then
         echo "::error::${app}: the image's staged .next/static differs from the host build's — ts/Dockerfile and ts/apps/${app}/moon.yml have drifted." >&2
         diff <(printf '%s\n' "$host_list") <(printf '%s\n' "$img_list") >&2 || true
-        return 1
+        # ec=1, not `return 1`: the gateway console's checks still have to run.
+        ec=1
       fi
       echo "  ${app}: staged tree matches the host build"
     else
@@ -1116,7 +1117,11 @@ for d in yaml.safe_load_all(sys.stdin):
         print(d["data"]["PAIGASUS_SERVICES"]); break')"
   for pair in "zones:$zones" "services:$services"; do
     local name="${pair%%:*}" json="${pair#*:}" got
-    got="$(keys "$json")"
+    # An empty or malformed map would abort the whole battery here under `set -e`, so the
+    # row reports and execution continues.
+    if ! got="$(keys "$json" 2>&1)"; then
+      echo "FAIL [$label/$name]: could not read the map: $got"; ec=1; continue
+    fi
     if [ "$got" != "$want" ]; then
       echo "FAIL [$label/$name]: got \"$got\", want \"$want\""; ec=1
     else
@@ -1730,9 +1735,10 @@ render_one() {
 
 helm lint "$CHART" "${FIXED[@]}" >/dev/null || { echo "FAIL: helm lint"; helm lint "$CHART" "${FIXED[@]}"; ec=1; }
 render_one "iam-only"        --set zones.gateway.enabled=false
-render_one "iam-and-gateway" --set zones.gateway.enabled=true
+render_one "iam-and-gateway" --set zones.gateway.enabled=true \
+  --set zones.gateway.backend.url=http://gw.example.test:8088
 
-[ "$ec" -eq 0 ] && echo "== chart render OK =="
+if [ "$ec" -eq 0 ]; then echo "== chart render OK =="; fi
 exit "$ec"
 ```
 

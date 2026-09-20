@@ -78,6 +78,10 @@ Service. When `deploy` is `false`, the chart deploys no backend for that zone at
 holding the full base URL of an existing backend elsewhere (the same shape as `postgres.host` and
 `oidc.existingSecret`, which also point at infrastructure this chart does not create).
 
+**This applies to every zone except `iam`.** `zones.iam.backend.deploy=false` is refused: `PAIGASUS_IAM_GRPC_URL` is built from the chart-managed IAM Service, so an external IAM would leave every console pointing at a Service that does not exist. An external IAM needs its own values key, and that is not in this chart yet.
+
+**And `zones.gateway.backend.deploy=true` is refused too**, in the other direction: `GatewayConfig::validate` hard-fails on an empty `upstream.openai.api_key`, and `iam.grpc_addr` accepts `LoopbackInsecure` only for a loopback host, so an in-cluster gateway-to-IAM link needs a TLS design this chart does not have. Rendering that Deployment would produce a pod that cannot boot.
+
 The `gateway` zone ships with `backend.deploy: false` because the gateway backend cannot
 currently be deployed safely by this chart:
 
