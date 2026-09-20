@@ -784,7 +784,22 @@ jq '.actions[] | select(.status=="failed")
 
 Then read `.moon/cache/states/<project>/<task>/stdout.log` and `stderr.log`. A `cargo metadata` error naming a `.napi-stage-<random>` path is a known CI-only concurrency flake, not a defect in this diff.
 
-- [ ] **Step 4: Record the evidence**
+- [ ] **Step 4: Check the diff for napi glue drift**
+
+```bash
+git status --short rs/crates/bindings/paigasus-node-bindings/
+```
+
+Expected: no change. A local `paigasus-kernel-ts:build` rewrites the committed napi glue
+(`index.js` and `index.d.ts`, roughly 250 lines: a new `__napiBindingTarget` export and a
+reworked WASI loader). This task's `moon ci :build` can select that target, because Task 4
+changes `contracts/`. Nothing gates the drift — the codegen-drift step covers only the three
+`**/generated` proto directories. Revert any such change with
+`git checkout -- rs/crates/bindings/paigasus-node-bindings/` before committing; it does not
+belong in this diff. Reported by the SMA-513 session on 2026-09-20, hit three times there,
+not independently measured here.
+
+- [ ] **Step 5: Record the evidence**
 
 Write the gate result into the PR body at Stage 6: which targets ran, which passed, and which were re-run under a different bash. Do not claim a gate passed that only skipped.
 
