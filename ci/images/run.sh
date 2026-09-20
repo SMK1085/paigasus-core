@@ -160,8 +160,9 @@ assert_pins() {
 # an oversight. A distroless bump that crosses a major reds here rather than shipping a runtime
 # the repo does not pin.
 assert_console_pins() {
-  local df="$ROOT/ts/Dockerfile" want_major base_major proto_node
+  local df="$ROOT/ts/Dockerfile" want_major base_major proto_node proto_pnpm builder_node builder_pnpm
   proto_node="$(sed -n 's/^node = "\([0-9.]*\)"$/\1/p' "$ROOT/.prototools")"
+  proto_pnpm="$(sed -n 's/^pnpm = "\([0-9.]*\)"$/\1/p' "$ROOT/.prototools")"
   want_major="${proto_node%%.*}"
   base_major="$(sed -n 's#^FROM gcr\.io/distroless/nodejs\([0-9]*\)-debian12.*#\1#p' "$df")"
   if [ -z "$base_major" ]; then
@@ -172,15 +173,47 @@ assert_console_pins() {
     echo "::error::ts/Dockerfile pins Node ${base_major} but .prototools pins ${proto_node}." >&2
     return 1
   fi
-  if grep -qE '^ENV +PAIGASUS_' "$df"; then
+  # The runtime stage's FROM line above only pins Node's MAJOR (distroless publishes no
+  # patch-level tags). The builder stage is a full node:X.Y.Z-bookworm tag and CAN be held to the
+  # exact .prototools version, so it is — a builder bump that drifts from .prototools would
+  # otherwise compile the console with a Node the repo does not pin, unnoticed by the check above.
+  builder_node="$(sed -n 's/^FROM node:\([0-9.]*\)-bookworm.*/\1/p' "$df" | sed -n 1p)"
+  if [ -z "$builder_node" ]; then
+    echo "::error::ts/Dockerfile: no FROM node:X.Y.Z-bookworm builder-stage line found." >&2
+    return 1
+  fi
+  if [ "$builder_node" != "$proto_node" ]; then
+    echo "::error::ts/Dockerfile builder pins Node ${builder_node} but .prototools pins ${proto_node}." >&2
+    return 1
+  fi
+  # pnpm is a THIRD pin, alongside Node: .prototools names the exact version corepack must
+  # activate, and a drift here would build the lockfile-frozen install with a pnpm the repo does
+  # not pin, even though the install itself still succeeds.
+  builder_pnpm="$(sed -n 's/.*corepack prepare pnpm@\([0-9.]*\).*/\1/p' "$df" | sed -n 1p)"
+  if [ -z "$builder_pnpm" ]; then
+    echo "::error::ts/Dockerfile: no 'corepack prepare pnpm@X.Y.Z' line found." >&2
+    return 1
+  fi
+  if [ "$builder_pnpm" != "$proto_pnpm" ]; then
+    echo "::error::ts/Dockerfile pins pnpm ${builder_pnpm} but .prototools pins ${proto_pnpm}." >&2
+    return 1
+  fi
+  # Matches ENV/ARG anywhere a PAIGASUS_ assignment could hide: as a later variable on a
+  # multi-variable ENV line (ts/Dockerfile's own house style, e.g. `ENV PORT=3000 HOSTNAME=...`),
+  # on an indented instruction, or on an ARG. A prefix-anchored `^ENV +PAIGASUS_` would miss all
+  # three, seeing only a PAIGASUS_ that happens to be the very first, unindented ENV variable.
+  if grep -qE '^[[:space:]]*(ENV|ARG)[[:space:]]+.*PAIGASUS_' "$df"; then
     echo "::error::ts/Dockerfile bakes a PAIGASUS_* env var; console config is deployment-varying and must stay runtime-only." >&2
     return 1
   fi
-  if ! grep -qF -- '--frozen-lockfile' "$df"; then
+  # Anchored to the install instruction itself, not a file-wide search: the explanatory comment
+  # directly above this RUN line also contains the literal string "--frozen-lockfile", so a
+  # file-wide `grep -qF` stays green even after the flag is deleted from the actual install.
+  if ! grep -qE '^RUN pnpm install .*--frozen-lockfile' "$df"; then
     echo "::error::ts/Dockerfile installs without --frozen-lockfile; the image would not be built from the committed lockfile." >&2
     return 1
   fi
-  echo "  ts/Dockerfile: Node ${base_major} matches .prototools, no baked PAIGASUS_*, --frozen-lockfile present"
+  echo "  ts/Dockerfile: distroless Node ${base_major} and builder Node ${builder_node}/pnpm ${builder_pnpm} match .prototools, no baked PAIGASUS_* ENV/ARG, --frozen-lockfile install present"
 }
 
 # Writes the chisel package list that a build log names into $2, and fails when it is empty
