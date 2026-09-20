@@ -11,6 +11,11 @@ KUBE_VERSION="1.31.0"
 UPDATE=0
 if [ "${1:-}" = "--update" ]; then UPDATE=1; shift; fi
 ec=0
+
+# The "${X[@]+...}" guards below are load-bearing, not noise. MEASURED: bash 3.2.57
+# treats "${A[@]}" on an EMPTY array as an unbound variable under `set -u`, so a
+# no-argument run would abort before the first row. bash 5.x does not. Some gates in
+# this repo run under 3.2.
 BASE=("$@")
 
 FIXED=(
@@ -34,7 +39,7 @@ render_one() {
   # A bare `got="$(cmd)"` assignment aborts the whole script under set -e if cmd fails, cancelling
   # every row after it. Capture inside the if-condition instead, so a failing render is reported
   # and the battery keeps going.
-  if ! got="$(helm template paigasus "$CHART" "${FIXED[@]}" "${BASE[@]}" "$@" 2>&1)"; then
+  if ! got="$(helm template paigasus "$CHART" "${FIXED[@]+"${FIXED[@]}"}" "${BASE[@]+"${BASE[@]}"}" "$@" 2>&1)"; then
     echo "FAIL [$name]: expected a successful render"; printf '%s\n' "$got"; ec=1; return
   fi
   if [ "$UPDATE" -eq 1 ]; then
@@ -51,10 +56,10 @@ render_one() {
   fi
 }
 
-if helm lint "$CHART" "${FIXED[@]}" "${BASE[@]}" >/dev/null; then
+if helm lint "$CHART" "${FIXED[@]+"${FIXED[@]}"}" "${BASE[@]+"${BASE[@]}"}" >/dev/null; then
   :
 else
-  echo "FAIL: helm lint"; helm lint "$CHART" "${FIXED[@]}" "${BASE[@]}" || true; ec=1
+  echo "FAIL: helm lint"; helm lint "$CHART" "${FIXED[@]+"${FIXED[@]}"}" "${BASE[@]+"${BASE[@]}"}" || true; ec=1
 fi
 render_one "iam-only"        --set zones.gateway.enabled=false
 render_one "iam-and-gateway" --set zones.gateway.enabled=true

@@ -32,6 +32,11 @@ BASE=(
 )
 ec=0
 
+# The "${X[@]+...}" guards below are load-bearing, not noise. MEASURED: bash 3.2.57
+# treats "${A[@]}" on an EMPTY array as an unbound variable under `set -u`, so a
+# no-argument run would abort before the first row. bash 5.x does not. Some gates in
+# this repo run under 3.2.
+
 REQUIRED="PAIGASUS_ZONE PAIGASUS_ZONES PAIGASUS_SERVICES PAIGASUS_IAM_GRPC_URL \
 PAIGASUS_PUBLIC_ORIGIN PAIGASUS_OIDC_ISSUER PAIGASUS_OIDC_CLIENT_ID \
 PAIGASUS_OIDC_CLIENT_SECRET PAIGASUS_SESSION_STORE PAIGASUS_SESSION_REDIS_URL"
@@ -39,7 +44,7 @@ PAIGASUS_OIDC_CLIENT_SECRET PAIGASUS_SESSION_STORE PAIGASUS_SESSION_REDIS_URL"
 check() {
   local label="$1"; shift
   local out
-  if ! out="$(helm template paigasus "$CHART" "${BASE[@]}" "$@" 2>&1)"; then
+  if ! out="$(helm template paigasus "$CHART" "${BASE[@]+"${BASE[@]}"}" "$@" 2>&1)"; then
     echo "FAIL [$label]: render failed"; printf '%s\n' "$out"; ec=1; return
   fi
   local verdict

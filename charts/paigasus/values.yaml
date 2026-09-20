@@ -48,7 +48,7 @@ zones:
       # (rs/crates/services/paigasus-gateway/src/config.rs:278), and iam.grpc_addr accepts
       # LoopbackInsecure only for a loopback host (:209-222) — so an in-cluster gateway->IAM
       # link needs a TLS design that is out of scope here. Supply the address of an existing
-      # gateway backend instead, the same way postgres.host and oidc.existingSecret do.
+      # gateway backend instead, the same way postgres.existingSecret and oidc.existingSecret do.
       deploy: false
       image:
         repository: ghcr.io/smk1085/paigasus-gateway

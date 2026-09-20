@@ -19,6 +19,11 @@ BASE=(--kube-version 1.31.0 --set ingress.host=console.example.test \
   --set zones.gateway.backend.url=http://gw.example.test:8088 "$@")
 ec=0
 
+# The "${X[@]+...}" guards below are load-bearing, not noise. MEASURED: bash 3.2.57
+# treats "${A[@]}" on an EMPTY array as an unbound variable under `set -u`, so a
+# no-argument run would abort before the first row. bash 5.x does not. Some gates in
+# this repo run under 3.2.
+
 keys() {  # keys() <json>
   printf '%s' "$1" | python3 -c 'import json,sys;print(" ".join(sorted(json.load(sys.stdin))))'
 }
@@ -26,7 +31,7 @@ keys() {  # keys() <json>
 check() {
   local label="$1" want="$2"; shift 2
   local out zones services
-  if ! out="$(helm template t "$CHART" "${BASE[@]}" "$@" 2>&1)"; then
+  if ! out="$(helm template t "$CHART" "${BASE[@]+"${BASE[@]}"}" "$@" 2>&1)"; then
     echo "FAIL [$label]: expected a successful render"; printf '%s\n' "$out"; ec=1; return
   fi
   zones="$(printf '%s' "$out" | python3 -c '

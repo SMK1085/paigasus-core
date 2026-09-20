@@ -838,7 +838,8 @@ CHART="$(cd "$HERE/.." && pwd)"
 KUBE_VERSION="1.31.0"
 ec=0
 
-render() { helm template t "$CHART" --kube-version "$KUBE_VERSION" "$@" 2>&1; }
+BASE=("$@")   # the script's OWN argv; a helper never sees it otherwise
+render() { helm template t "$CHART" --kube-version "$KUBE_VERSION" "${BASE[@]+"${BASE[@]}"}" "$@" 2>&1; }
 
 expect_fail() {
   local label="$1" needle="$2"; shift 2
@@ -1103,7 +1104,7 @@ check() {
   local label="$1" want="$2"; shift 2
   local out zones services
   if ! out="$(helm template t "$CHART" "${BASE[@]}" "$@" 2>&1)"; then
-    echo "FAIL [$name]: render failed"; printf '%s\n' "$out"; ec=1; return
+    echo "FAIL [$label]: render failed"; printf '%s\n' "$out"; ec=1; return
   fi
   zones="$(printf '%s' "$out" | python3 -c '
 import sys,yaml
@@ -1274,13 +1275,27 @@ spec:
               value: {{ $id | quote }}
             - name: PORT
               value: "3000"
+            # NOT envFrom.secretRef. That form turns each Secret KEY into an env var NAME, and the
+            # documented keys are hyphenated — `oidc-client-secret`, `session-redis-url`. A hyphen
+            # is illegal in an env var name, so the kubelet SKIPS those keys and records an
+            # InvalidVariableNames event rather than failing. The container then starts with
+            # neither secret, PAIGASUS_SESSION_STORE is forced to `redis`, and readiness can never
+            # succeed. This shipped once and the remote review caught it; do not reintroduce it.
+            - name: PAIGASUS_OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $root.Values.oidc.existingSecret }}
+                  key: oidc-client-secret
+            - name: PAIGASUS_SESSION_REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $root.Values.oidc.existingSecret }}
+                  key: session-redis-url
           envFrom:
             - configMapRef:
                 name: {{ $full }}-zonemap
             - configMapRef:
                 name: {{ $full }}-console-env
-            - secretRef:
-                name: {{ $root.Values.oidc.existingSecret }}
           # Liveness is a TCP check, NOT httpGet on /healthz. That route runs the FULL config
           # parse and its failure is deliberately not memoized, so using it for liveness puts a
           # misconfigured pod into CrashLoopBackOff instead of leaving it running and NotReady
@@ -1538,7 +1553,7 @@ coupling() {
   local label="$1" want="$2"; shift 2
   local out got
   if ! out="$(helm template t "$CHART" --kube-version 1.31.0 --set ingress.host=console.example.test "$@" 2>&1)"; then
-    echo "FAIL [$name]: render failed"; printf '%s\n' "$out"; ec=1; return
+    echo "FAIL [$label]: render failed"; printf '%s\n' "$out"; ec=1; return
   fi
   got="$(printf '%s' "$out" | python3 -c '
 import sys,yaml,json
@@ -1717,7 +1732,7 @@ render_one() {
   local name="$1"; shift
   local want="$HERE/golden/${name}.yaml" got
   if ! got="$(helm template paigasus "$CHART" "${FIXED[@]}" "$@" 2>&1)"; then
-    echo "FAIL [$name]: render failed"; printf '%s\n' "$got"; ec=1; return
+    echo "FAIL [$label]: render failed"; printf '%s\n' "$got"; ec=1; return
   fi
   if [ "$UPDATE" -eq 1 ]; then
     mkdir -p "$HERE/golden"; printf '%s\n' "$got" > "$want"
@@ -1818,7 +1833,7 @@ This is the same class § 7.7 exists to close: a values combination that cannot 
 
 - [ ] **Step 1: Add a refusal row per required value, and watch them fail**
 
-Seven new rows in `refusals.sh`, one per value that is documented REQUIRED and not yet refused: `ingress.tlsSecretName`, `oidc.issuer`, `oidc.clientId`, `oidc.existingSecret`, `postgres.host`, `postgres.existingSecret`, and `zones.iam.backend.apiKeysPepperSecret`. Each sets only its own value to `""` on top of an otherwise-valid invocation, and expects a message naming that value. Run the script: all seven must fail before the validation exists.
+Six new rows in `refusals.sh`, one per value that is documented REQUIRED and not yet refused: `ingress.tlsSecretName`, `oidc.issuer`, `oidc.clientId`, `oidc.existingSecret`, `postgres.existingSecret`, and `zones.iam.backend.apiKeysPepperSecret` (six, not seven — `postgres.host` is NOT a chart value: the complete DSN lives in the Secret, so a check for it would target nothing and could fail every render). Each sets only its own value to `""` on top of an otherwise-valid invocation, and expects a message naming that value. Run the script: all seven must fail before the validation exists.
 
 Note the rows must supply every *other* required value, or a row will pass for the wrong reason — refused by a different check than the one it names. That is the same trap Task 8's `unknown zone id` row carried. Confirm each failure text names the value the row is about.
 

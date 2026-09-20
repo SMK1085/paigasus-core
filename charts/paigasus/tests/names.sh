@@ -26,10 +26,15 @@ BASE=(
 )
 ec=0
 
+# The "${X[@]+...}" guards below are load-bearing, not noise. MEASURED: bash 3.2.57
+# treats "${A[@]}" on an EMPTY array as an unbound variable under `set -u`, so a
+# no-argument run would abort before the first row. bash 5.x does not. Some gates in
+# this repo run under 3.2.
+
 check() {
   local label="$1" release="$2"; shift 2
   local out
-  if ! out="$(helm template "$release" "$CHART" "${BASE[@]}" "$@" 2>&1)"; then
+  if ! out="$(helm template "$release" "$CHART" "${BASE[@]+"${BASE[@]}"}" "$@" 2>&1)"; then
     echo "FAIL [$label]: render failed"; printf '%s\n' "$out"; ec=1; return
   fi
   local verdict

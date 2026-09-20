@@ -75,8 +75,8 @@ zone. This is the change an operator is most likely to add by reflex, so it is c
 Service itself, and `paigasus.serviceMapJson` points `PAIGASUS_SERVICES` at that in-cluster
 Service. When `deploy` is `false`, the chart deploys no backend for that zone at all, and
 `zones.<id>.backend.url` becomes required — `paigasus.validate` refuses the render otherwise —
-holding the full base URL of an existing backend elsewhere (the same shape as `postgres.host` and
-`oidc.existingSecret`, which also point at infrastructure this chart does not create).
+holding the full base URL of an existing backend elsewhere (the same shape as `postgres.existingSecret` and
+`oidc.existingSecret`, which also name infrastructure this chart does not create).
 
 **This applies to every zone except `iam`.** `zones.iam.backend.deploy=false` is refused: `PAIGASUS_IAM_GRPC_URL` is built from the chart-managed IAM Service, so an external IAM would leave every console pointing at a Service that does not exist. An external IAM needs its own values key, and that is not in this chart yet.
 

@@ -9,6 +9,11 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CHART="$(cd "$HERE/.." && pwd)"
 KUBE_VERSION="1.31.0"
 ec=0
+
+# The "${X[@]+...}" guards below are load-bearing, not noise. MEASURED: bash 3.2.57
+# treats "${A[@]}" on an EMPTY array as an unbound variable under `set -u`, so a
+# no-argument run would abort before the first row. bash 5.x does not. Some gates in
+# this repo run under 3.2.
 BASE=("$@")
 
 # Every other REQUIRED value, held valid by default, so each expect_fail row below can set only
@@ -24,7 +29,7 @@ FIXED=(
   --set zones.iam.backend.apiKeysPepperSecret=paigasus-iam-pepper
 )
 
-render() { helm template t "$CHART" --kube-version "$KUBE_VERSION" "${FIXED[@]}" "${BASE[@]}" "$@" 2>&1; }
+render() { helm template t "$CHART" --kube-version "$KUBE_VERSION" "${FIXED[@]+"${FIXED[@]}"}" "${BASE[@]+"${BASE[@]}"}" "$@" 2>&1; }
 
 expect_fail() {
   local label="$1" needle="$2"; shift 2
