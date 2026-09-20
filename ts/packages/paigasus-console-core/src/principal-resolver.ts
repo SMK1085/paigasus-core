@@ -74,8 +74,9 @@ export function createIntrospectPrincipalResolver(deps: {
         const answer = await callIam(() => clients.authn.whoAmI({}, { timeoutMs }));
         if (!answer.ok) return degraded(answer.error.presentation);
         const me = answer.value;
-        // IAM reports no role grants here (authenticate_token.rs:161-165), and the port says to
-        // treat that as UNKNOWN (ports/principal-resolver.ts:32-36). SMA-633 owns filling it.
+        // IAM now reports role grants here (authenticate_token.rs:161-165, SMA-633), but this
+        // resolver still discards them: consuming `me.roleGrants` and gating on the
+        // `iam.authn.grants` capability is a deliberate follow-up, not this branch (spec D1).
         return {
           // The SAME reading as the live path (principal-prn.ts). The two used to disagree.
           principalPrn: principalPrnOf(me.principalPrn),
