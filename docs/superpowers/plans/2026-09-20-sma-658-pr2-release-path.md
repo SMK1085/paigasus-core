@@ -94,7 +94,7 @@ GATE 1). This plan covers **PR 2 only** (spec § 10). PR 1 is merged (`ff926404`
 | `rs/crates/services/paigasus-gateway/CHANGELOG.md` | Create | The same for the gateway. |
 | `rs/Cargo.lock` | Modify | The two new versions. |
 | `rs/crates/services/*/src/service_info.rs` | Modify | Correct the `0.0.0` doc comments and the test comment. |
-| `rs/release-plz.toml` | Modify | Say why `release = false` stays (M7). |
+| `rs/release-plz.toml` | Modify | Say why `release = false` stays (M7), and correct the stale "0.0.0 deliberately" section header (S8). |
 | `ci/release-plan/release_plan.py` | Modify | Service versions, `skip_<svc>`, the changelog assertion, fixture rows. |
 | `ci/release-plan/run.sh` | Modify | Write the six new outputs, in the real path and in the fail-safe path. |
 | `ci/affected-graph/ci_targets.py` | Modify | Re-pin the `run.sh` lines that change. |
@@ -292,12 +292,20 @@ Then, in `rs/crates/services/paigasus-iam/src/service_info.rs`, find this commen
 and replace it with:
 
 ```rust
-        // Now PROVEN: this crate is 0.1.0 and the shared library crates are not, so a version
-        // read from the wrong crate no longer matches (SMA-658, spec § 3.4).
-        assert_eq!(info.version, "0.1.0");
+        // The service crate is 0.1.0 and the shared library crates it depends on (paigasus-iam-
+        // core, paigasus-logging) stay at 0.0.0 (SMA-658, spec § 3.4). This test asserts no
+        // specific literal here, because a hard-pinned "0.1.0" would break on every future
+        // service bump; the check above already proves the value came from THIS crate's own
+        // env!("CARGO_PKG_VERSION").
 ```
 
-- [ ] **Step 5: Update the release-plz comment**
+S7 (should-fix): the plan's original replacement added `assert_eq!(info.version, "0.1.0")` under a
+claim that this "proves" the version came from the right crate. It does not — the line above it
+already does that, by reading `env!("CARGO_PKG_VERSION")` directly — and the new literal only pins
+a value that the next service bump breaks. This corrected comment states the true, weaker claim and
+adds no fragile assertion.
+
+- [ ] **Step 5: Update the release-plz comments**
 
 In `rs/release-plz.toml`, find the `[[package]]` entries for `paigasus-iam` and `paigasus-gateway`
 and add this comment line above each `release = false`:
@@ -308,6 +316,24 @@ and add this comment line above each `release = false`:
 # maintainer bumps this service by hand, and release.yml's tag-<svc> job makes its tag.
 ```
 
+S8 (should-fix): a second, STALE comment survives above these two `[[package]]` entries, in the
+shared "Not releasable" section header. Replace it too. Find this text (line 107):
+
+```toml
+# paigasus-gateway / paigasus-iam stay at 0.0.0 deliberately: their
+# `env!("CARGO_PKG_VERSION")` feeds the ServiceInfo descriptor, and ADR-0020 skew
+# reporting is parked on that value (SMA-505 R7).
+```
+
+and replace it with:
+
+```toml
+# paigasus-gateway / paigasus-iam are versioned BY HAND (SMA-658): each moved to 0.1.0 at the
+# first image release, because release-plz never processes a crate whose Cargo manifest sets
+# `publish = false` (M7). `env!("CARGO_PKG_VERSION")` feeds the ServiceInfo descriptor, and
+# ADR-0020 skew reporting is parked on that value (SMA-505 R7).
+```
+
 - [ ] **Step 6: Run the service tests**
 
 Run:
@@ -315,8 +341,10 @@ Run:
 export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
 cd rs && cargo nextest run -p paigasus-iam -p paigasus-gateway --no-tests=pass -E 'test(service_info)' 2>&1 | tail -5
 ```
-Expected: the `service_info` tests pass, including the new `assert_eq!(info.version, "0.1.0")`.
-If Docker is unreachable, the Docker-gated suites skip; that does not affect these tests.
+Expected: the `service_info` tests pass, including
+`the_descriptor_names_this_service_and_this_crates_build_version` with its corrected comment
+(Step 4, S7). If Docker is unreachable, the Docker-gated suites skip; that does not affect these
+tests.
 
 - [ ] **Step 7: Confirm no gate asserts the old version**
 
@@ -406,13 +434,55 @@ def _changelog_reader_rows() -> str | None:
         if got != want:
             return f"{label!r}: expected {want}, got {got}"
     return None
+
+
+# S9 (SMA-658). Spec § 6.1's fail-safe direction as a fixture: a service that cannot be read is
+# inconclusive for THAT SERVICE alone — never a silent skip, and never cross-talk into the other
+# service or into run()'s own kernel verdict. This mirrors _broken_crate_manifest_tree's shape,
+# but leaves `paigasus-iam` OUT of `[workspace] members` entirely (rather than malforming its
+# manifest), so `crate_manifests(rs_root)["paigasus-iam"]` fails with a plain KeyError that never
+# touches the scan for the healthy `paigasus-gateway` crate or for run()'s own kernel packages.
+def _mixed_service_tree(tmp: str) -> Path:
+    rs_root = Path(tmp) / "rs"
+    kernel_dir = rs_root / "crates" / "libs" / "paigasus-kernel"
+    gateway_dir = rs_root / "crates" / "services" / "paigasus-gateway"
+    kernel_dir.mkdir(parents=True)
+    gateway_dir.mkdir(parents=True)
+    (rs_root / "Cargo.toml").write_text(
+        '[workspace]\nmembers = ["crates/libs/*", "crates/services/paigasus-gateway"]\n')
+    (rs_root / "release-plz.toml").write_text("")
+    (kernel_dir / "Cargo.toml").write_text(
+        '[package]\nname = "paigasus-kernel"\nversion = "0.1.0"\n')
+    (gateway_dir / "Cargo.toml").write_text(
+        '[package]\nname = "paigasus-gateway"\nversion = "0.1.0"\npublish = false\n')
+    return rs_root
+
+
+def _service_state_is_a_separate_failure_domain() -> str | None:
+    tmp = tempfile.mkdtemp()
+    try:
+        rs_root = _mixed_service_tree(tmp)
+        state = service_state(rs_root, set())
+        if state.get("iam") != (False, ""):
+            return f"the missing iam crate did not read as (False, ''): {state.get('iam')!r}"
+        if state.get("gateway") != (False, "0.1.0"):
+            return (f"the healthy gateway crate was affected by iam's failure: "
+                    f"{state.get('gateway')!r}")
+        try:
+            run(Path(tmp), "push")
+        except Exception as exc:  # deliberately broad; run() must never raise (see its docstring)
+            return f"run() raised {type(exc).__name__}: {exc} — a service failure must not reach it"
+        return None
+    finally:
+        shutil.rmtree(tmp)
 ```
 
-Then register the two rows. Find the `COLLECTION_ROWS` tuple and add these two entries at its end:
+Then register the three rows. Find the `COLLECTION_ROWS` tuple and add these three entries at its end:
 
 ```python
     ("SMA-658 service skip rows", _service_fixture_rows),
     ("SMA-658 changelog reader rows", _changelog_reader_rows),
+    ("SMA-658 service_state is a separate failure domain", _service_state_is_a_separate_failure_domain),
 ```
 
 - [ ] **Step 2: Run the self-test to watch it fail**
@@ -422,10 +492,15 @@ Run:
 export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
 uv run --locked --project ci/release-plan --python '>=3.12' python3 ci/release-plan/release_plan.py --self-test
 ```
-Expected: FAIL for both new rows, with `raised NameError: name 'service_skips' is not defined` and
-the same for `changelog_names_version`. Exit code 3.
+Expected: FAIL for all three new rows, with `raised NameError: name 'service_skips' is not
+defined`, the same for `changelog_names_version`, and the same for `service_state` (S9). Exit
+code 3.
 
 - [ ] **Step 3: Write the readers**
+
+First, add `import re` to the module's import block, in alphabetical order (between `import io`
+and `import shutil`). The module does not import `re` today, and `_CHANGELOG_HEADING` below needs
+it — without this line, the module fails to import with `NameError: name 're' is not defined`.
 
 Add to `ci/release-plan/release_plan.py`, directly below `def repo_tags(...)`:
 
@@ -480,7 +555,7 @@ def service_state(rs_root: Path, tags: set[str]) -> dict[str, tuple[bool, str]]:
     return out
 ```
 
-Confirm `re` and `sys` are already imported at the top of the file. Both are.
+Confirm `sys` is already imported at the top of the file — it is; this step is what adds `re`.
 
 - [ ] **Step 4: Run the self-test to watch it pass**
 
@@ -627,16 +702,23 @@ Then replace the real branch's single `grep … | tail -n 1 >> …` line with:
 ```bash
   printf '%s\n' "$out" | grep -E '^nothing_to_release=(true|false)$' | tail -n 1 \
     >> "${GITHUB_OUTPUT:-/dev/stdout}"
-  # SMA-658. The four service lines, each taken LAST for the same forged-line reason as the
-  # verdict above. A missing line writes nothing, and an unset output makes that chain run.
-  printf '%s\n' "$out" | grep -E '^skip_(iam|gateway)=(true|false)$' \
+  # SMA-658. Four separate greps, one per key, each taken LAST for the same forged-line reason as
+  # the verdict above: a service line inside a heredoc or an echoed error message must not be
+  # read as the real decision. S6: a single combined grep over two keys cannot use `tail -n 1`
+  # without dropping one of the two services, so each key gets its own grep and its own tail.
+  printf '%s\n' "$out" | grep -E '^skip_iam=(true|false)$' | tail -n 1 \
     >> "${GITHUB_OUTPUT:-/dev/stdout}"
-  printf '%s\n' "$out" | grep -E '^version_(iam|gateway)=' \
+  printf '%s\n' "$out" | grep -E '^skip_gateway=(true|false)$' | tail -n 1 \
+    >> "${GITHUB_OUTPUT:-/dev/stdout}"
+  printf '%s\n' "$out" | grep -E '^version_iam=' | tail -n 1 \
+    >> "${GITHUB_OUTPUT:-/dev/stdout}"
+  printf '%s\n' "$out" | grep -E '^version_gateway=' | tail -n 1 \
     >> "${GITHUB_OUTPUT:-/dev/stdout}"
 ```
 
-Note both new `grep` calls read their whole input and write every match, so neither is a pipe into
-an early-exit reader.
+Every `grep` here is followed by a fixed-count `tail -n 1`, which reads its whole input before
+writing — this is not a pipe into an early-exit reader (`grep -q`/`-m`, `head`, an `awk … exit`);
+`tail -n 1` only trims what it already read in full.
 
 - [ ] **Step 3: Run the negative control and the self-test**
 
@@ -669,20 +751,24 @@ correct, and it is the state after the first release.
 
 - [ ] **Step 5: Re-pin the changed lines**
 
-Two pinned entries in `ci/affected-graph/ci_targets.py`'s `RELEASE_PLAN_SH_CALL_SITES` name lines
-this task rewrote. Replace this entry:
+One pinned entry in `ci/affected-graph/ci_targets.py`'s `RELEASE_PLAN_SH_CALL_SITES` names a line
+this task kept unchanged (S16: it is kept verbatim, not rewritten), and two new entries are added
+for the lines this task adds. Keep this entry as it is:
 
 ```python
     "printf 'nothing_to_release=false\\n' >> \"${GITHUB_OUTPUT:-/dev/stdout}\"",
 ```
 
-with these three, keeping the tuple's other entries unchanged:
+and add these two new entries directly after it, keeping the tuple's other entries unchanged:
 
 ```python
-    "printf 'nothing_to_release=false\\n' >> \"${GITHUB_OUTPUT:-/dev/stdout}\"",
     "printf 'skip_iam=false\\nskip_gateway=false\\n' >> \"${GITHUB_OUTPUT:-/dev/stdout}\"",
-    "printf '%s\\n' \"$out\" | grep -E '^skip_(iam|gateway)=(true|false)$' \\",
+    "printf '%s\\n' \"$out\" | grep -E '^skip_iam=(true|false)$' | tail -n 1 \\",
 ```
+
+One representative real-branch grep line is enough for the pin: the same reachability guard
+(`T_AFFECTED_SMOKE_REQUIRED_INPUTS`, see below) covers all four new grep lines, and the other
+three follow the same one-line shape.
 
 - [ ] **Step 6: Run the affected-graph gate**
 
@@ -735,10 +821,25 @@ hide the version's origin one hop further from the gate.
 Add to `ci/actionlint/release_guard.py`, directly below the `_OK_MAIN` string:
 
 ```python
-# SMA-658. A second control: the release file with both service chains present. _OK_MAIN stays as
-# it is, so every existing row keeps its meaning, and the per-chain rules must tolerate a file
-# with no image chain at all — which is exactly what _OK_MAIN asserts for them.
-_OK_IMAGES_MAIN = _OK_MAIN + """
+# SMA-658. A second control: the release file with BOTH service chains present (S11 — the row
+# below is named "both chains present", so the fixture must actually hold both, not the iam chain
+# alone). _OK_MAIN stays as it is, so every existing row keeps its meaning, and the per-chain
+# rules must tolerate a file with no image chain at all — which is exactly what _OK_MAIN asserts
+# for them.
+#
+# B3: `_OK_MAIN`'s `plan` job outputs only `nothing_to_release`. The new V9c loop (Step 6) checks
+# every service's `skip_*`/`version_*` output, so a fixture built on `_OK_MAIN` without adding
+# those four output lines would collect four V9c violations on every row below — including every
+# row that expects a clean verdict or an unrelated violation. The control fixture must model the
+# file the rule requires.
+_OK_IMAGES_MAIN = _OK_MAIN.replace(
+    "      nothing_to_release: ${{ steps.decide.outputs.nothing_to_release }}\n",
+    "      nothing_to_release: ${{ steps.decide.outputs.nothing_to_release }}\n"
+    "      skip_iam: ${{ steps.decide.outputs.skip_iam }}\n"
+    "      version_iam: ${{ steps.decide.outputs.version_iam }}\n"
+    "      skip_gateway: ${{ steps.decide.outputs.skip_gateway }}\n"
+    "      version_gateway: ${{ steps.decide.outputs.version_gateway }}\n"
+) + """
   images-build-iam:
     needs: [plan]
     if: needs.plan.outputs.skip_iam != 'true'
@@ -764,6 +865,31 @@ _OK_IMAGES_MAIN = _OK_MAIN + """
     environment: release-publish
     runs-on: ubuntu-latest
     steps: [{run: gh api repos/o/r/git/refs}]
+  images-build-gateway:
+    needs: [plan]
+    if: needs.plan.outputs.skip_gateway != 'true'
+    runs-on: ubuntu-latest
+    steps: [{run: ci/images/run.sh build-oci paigasus-gateway out}]
+  approve-images-gateway:
+    needs: [images-build-gateway]
+    environment: release-approval
+    runs-on: ubuntu-latest
+    steps: [{run: echo approved}]
+  publish-images-gateway:
+    needs: [plan, images-build-gateway, approve-images-gateway]
+    if: needs.plan.outputs.skip_gateway != 'true'
+    environment: release-images
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+      id-token: write
+      attestations: write
+    steps: [{run: crane push layout ghcr.io/smk1085/paigasus-gateway:x}]
+  tag-gateway:
+    needs: [publish-images-gateway]
+    environment: release-publish
+    runs-on: ubuntu-latest
+    steps: [{run: gh api repos/o/r/git/refs}]
 """
 ```
 
@@ -771,6 +897,20 @@ Add these rows to `FIXTURES`, at the end of the list:
 
 ```python
     ("SMA-658 both chains present is clean", "main", _OK_IMAGES_MAIN, None),
+    # S11: a row for each of the three graph shapes spec AC 9 asks for — kernel only (_OK_MAIN
+    # itself, already covered by every pre-existing row), image only, and combined (the row
+    # above). `build`, `wheels` and `release` are the only _OK_MAIN jobs an image-only file would
+    # not have; `approve-release` stays, orphaned but harmless — V8a requires only that an
+    # approval a chain actually uses exists and names an environment.
+    ("SMA-658 only the image chains are present (no kernel chain)", "main",
+     _OK_IMAGES_MAIN
+     .replace("  build:\n    needs: [plan]\n    if: needs.plan.outputs.nothing_to_release != 'true'"
+              "\n    runs-on: ubuntu-latest\n    steps: [{run: echo build}]\n", "")
+     .replace("  wheels:\n    needs: [plan]\n    if: ${{ needs.plan.outputs.nothing_to_release != "
+              "'true' }}\n    runs-on: ubuntu-latest\n    steps: [{run: echo wheels}]\n", "")
+     .replace("  release:\n    needs: [build, approve-release]\n    runs-on: ubuntu-latest\n"
+              "    steps: [{run: release-plz release}]\n", ""),
+     None),
     ("SMA-658 a publisher without its own approval", "main",
      _OK_IMAGES_MAIN.replace("    needs: [plan, images-build-iam, approve-images-iam]",
                              "    needs: [plan, images-build-iam]"), "V8c"),
@@ -793,8 +933,11 @@ Run:
 export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
 uv run --locked --project py --python '>=3.12' python3 ci/actionlint/release_guard.py --self-test
 ```
-Expected: FAIL for `SMA-658 both chains present is clean` (V8c and V9b report the new jobs), and
-FAIL for the three rows that expect a specific verdict but get a different blob. Exit code 1.
+Expected: FAIL for every new row. `SMA-658 both chains present is clean` and `SMA-658 only the
+image chains are present` both expect a clean verdict but get violations — V9b already fires,
+because today's `ACCEPTED_PLAN_FORMS` does not know the per-service gate literal. The four
+remaining rows each expect a specific "V8a"/"V8c"/"V9b" substring that the unmodified V8/V9 code
+does not yet produce. Exit code 1.
 
 - [ ] **Step 3: Add the per-chain approval map**
 
@@ -882,15 +1025,13 @@ docstring stays; add one paragraph to it saying the rule is per chain.
 ```
 
 De-duplicate the V8b output: a job upstream of two approval jobs would otherwise be reported twice.
-Add this directly above `return out`:
+Replace the function's final `return out` with this three-line block:
 
 ```python
     seen: set[str] = set()
     deduped = [v for v in out if not (v in seen or seen.add(v))]
     return deduped
 ```
-
-and change the final `return out` to `return deduped` by keeping only the block above.
 
 - [ ] **Step 5: Accept the new gate literals in V9b**
 
@@ -920,8 +1061,6 @@ def accepted_plan_forms(job_id: str) -> frozenset[str]:
     return ACCEPTED_PLAN_FORMS
 ```
 
-Move this block below `_CHAIN_JOB_PREFIXES`, so the name is defined before use.
-
 In `plan_contract_violations`, replace the V9b loop body:
 
 ```python
@@ -944,26 +1083,33 @@ In `plan_contract_violations`, directly above `return out`, add:
     # V9c, SMA-658. The service outputs need the same full-match treatment as the kernel verdict:
     # `${{ steps.decide.outputs.skip_iam || 'true' }}` resolves to 'true' on an unset output and
     # silently drops that chain. The step id must be the one V9c already resolved.
-    for service in SERVICE_PLAN_GATE_EXPRS:
-        for key in (f"skip_{service}", f"version_{service}"):
-            expr = outs.get(key) if isinstance(outs, dict) else None
-            if not isinstance(expr, str):
-                out.append(f"{name}: V9c: job '{PLAN_JOB}' declares no outputs.{key}. Its chain "
-                           f"would read the empty string, which runs the chain but carries no "
-                           f"version.")
-                continue
-            want = "${{ steps." + str(decision.get("id") if decision else "") + f".outputs.{key} }}}}"
-            if expr.strip() != want:
-                out.append(f"{name}: V9c: outputs.{key} is {expr!r}, not {want!r}. Anything else "
-                           f"can resolve to a constant, and a `|| 'true'` tail drops the chain "
-                           f"on an unset output.")
+    #
+    # B4: the loop is guarded — it runs only when this file actually declares a chain job (one
+    # whose approval differs from the kernel's). Unguarded, it would also red `_OK_MAIN` and every
+    # fixture built on it, and the real release.yml before Task 7 lands: none of those declare the
+    # four service outputs, and none of them needs to, because none of them has a chain job to run.
+    if any(approval_for_job(jid) != APPROVAL_JOB for jid in jobs):
+        for service in SERVICE_PLAN_GATE_EXPRS:
+            for key in (f"skip_{service}", f"version_{service}"):
+                expr = outs.get(key) if isinstance(outs, dict) else None
+                if not isinstance(expr, str):
+                    out.append(f"{name}: V9c: job '{PLAN_JOB}' declares no outputs.{key}. Its "
+                               f"chain would read the empty string, which runs the chain but "
+                               f"carries no version.")
+                    continue
+                want = "${{ steps." + str(decision.get("id") if decision else "") + f".outputs.{key} }}}}"
+                if expr.strip() != want:
+                    out.append(f"{name}: V9c: outputs.{key} is {expr!r}, not {want!r}. Anything "
+                               f"else can resolve to a constant, and a `|| 'true'` tail drops the "
+                               f"chain on an unset output.")
 ```
 
 - [ ] **Step 7: Run the self-test to watch it pass**
 
 Run: the Step 2 command.
 Expected: no FAIL lines, exit code 0. Every pre-existing row still passes: `_OK_MAIN` has no image
-chain, so `required` holds only `approve-release` and the behaviour is unchanged.
+chain, so `required` holds only `approve-release`, the guard's `any(...)` is `False`, and the V9c
+loop above does not run — the behaviour on every `_OK_MAIN`-based row is unchanged.
 
 - [ ] **Step 8: Run the guard against the real file**
 
@@ -972,9 +1118,8 @@ Run:
 export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
 uv run --locked --project py --python '>=3.12' python3 ci/actionlint/release_guard.py .github/workflows/release.yml; echo "rc=$?"
 ```
-Expected: rc 0. `release.yml` has no image chain yet, and V9c's new loop reports the missing
-`skip_*` outputs only when a chain job exists. If it reports them now, guard the new V9c loop with
-`if any(approval_for_job(jid) != APPROVAL_JOB for jid in jobs)` and re-run.
+Expected: rc 0. `release.yml` has no image chain yet, so the same guard keeps the new V9c loop from
+running against it, exactly as it does for `_OK_MAIN`.
 
 - [ ] **Step 9: Lint and commit**
 
@@ -1002,12 +1147,15 @@ EOF
 
 **Files:**
 - Modify: `ci/actionlint/release_guard.py`
-- Test: the same file (`FIXTURES`, one new `COLLECTION`-style helper for the other-workflow case)
+- Test: the same file (`FIXTURES`, one new `COLLECTION`-style helper for the other-workflow case,
+  and one new self-test helper for the widened `PUBLISH_MARKERS` table, B7)
 
 **Interfaces:**
 - Consumes: Task 5's `_OK_IMAGES_MAIN`, `CHAIN_APPROVALS`, `approval_for_job`.
 - Produces: `credential_scope_violations()`, `capability_violations()`, an extended
-  `PUBLISH_MARKERS` and `EXPECTED_RELEASE_SECRETS`. Task 7's `release.yml` must satisfy all three.
+  `PUBLISH_MARKERS`, and an extended `OIDC_PUBLISH_JOBS` (S1). Task 7's `release.yml` must satisfy
+  all of these; Task 7 ALSO adds `DOCKERHUB_TOKEN` to `EXPECTED_RELEASE_SECRETS`, in the same
+  commit as the reference it pins, so that check never sees a pin with no matching reference (B5).
 
 - [ ] **Step 1: Write the failing rows**
 
@@ -1037,7 +1185,12 @@ Add to `FIXTURES`, at the end:
      _OK_IMAGES_MAIN.replace("    steps: [{run: crane push layout ghcr.io/smk1085/paigasus-iam:x}]",
                              "    steps: [{run: ci/images/run.sh publish}]"),
      None),
-    ("SMA-658 imagetools create is a publish", "main",
+    # B7: this row's name used to claim it exercises the `imagetools create` marker; it does not
+    # — it reroutes tag-iam past its own chain's publish and approval jobs, and the violation it
+    # gets is V8c on the `git/refs` marker. Renamed to say what it actually tests. The real
+    # `imagetools\s+create` marker, and the other ten new markers, get their own fixtures in
+    # Step 6 below.
+    ("SMA-658 tag-iam skips its chain's publish and approval jobs", "main",
      _OK_IMAGES_MAIN.replace("    steps: [{run: crane push layout ghcr.io/smk1085/paigasus-iam:x}]\n  tag-iam:\n    needs: [publish-images-iam]",
                              "    steps: [{run: echo x}]\n  tag-iam:\n    needs: [images-build-iam]"),
      "V8c"),
@@ -1057,22 +1210,14 @@ uv run --locked --project py --python '>=3.12' python3 ci/actionlint/release_gua
 ```
 Expected: FAIL for every row that expects `V13` or `V14`, because neither rule exists yet.
 
-- [ ] **Step 3: Add the Docker Hub secret to the pin**
+B5: `EXPECTED_RELEASE_SECRETS` does NOT get `DOCKERHUB_TOKEN` added here. `secret_reference_violations`
+reds `release.yml` for any pinned name the file does not yet reference, and `release.yml` gets its
+`DOCKERHUB_TOKEN` reference only in Task 7. Adding the pin here would make this task's own later
+step that runs the guard against the real file fail with a real, unexpected rc 1 — Task 7 makes
+this edit instead, in the same commit as the reference, so the pin and its reference always land
+together.
 
-Replace the `EXPECTED_RELEASE_SECRETS` tuple with:
-
-```python
-EXPECTED_RELEASE_SECRETS = (
-    "PAIGASUS_BOT_APP_ID",
-    "PAIGASUS_BOT_PRIVATE_KEY",
-    # SMA-658 D7. Docker Hub offers OIDC connections only to organizations with a Team, Business
-    # or DHI subscription, or in its Sponsored Open Source program. `smaschek` is a personal
-    # account, so this token cannot be an OIDC exchange. V13 below scopes it to one job.
-    "DOCKERHUB_TOKEN",
-)
-```
-
-- [ ] **Step 4: Write V13**
+- [ ] **Step 3: Write V13**
 
 Add directly above `def approval_boundary_violations(`:
 
@@ -1113,7 +1258,10 @@ def credential_scope_violations(doc: dict, name: str) -> list[str]:
                        f"{SCOPED_SECRET} cannot be checked. Name the environment literally.")
             continue
         env_name = (_environment_name(job) or "").casefold()
-        names, _ = secret_refs(yaml.safe_dump(job))
+        # S14 (SMA-658): the default 80-column fold can insert a newline inside a `${{ ... }}`
+        # span for a long secret name, which `_EXPR_SPAN`'s `re.S` would then misparse. PyYAML
+        # only folds at a space, so today's names survive — but the next one might not.
+        names, _ = secret_refs(yaml.safe_dump(job, width=10**9, default_flow_style=False))
         if SCOPED_SECRET in names and env_name != SCOPED_SECRET_ENVIRONMENT:
             out.append(f"{name}: V13: job '{jid}' reads {SCOPED_SECRET} but its environment is "
                        f"{env_name or '(none)'!r}, not {SCOPED_SECRET_ENVIRONMENT!r}. That "
@@ -1125,7 +1273,7 @@ def credential_scope_violations(doc: dict, name: str) -> list[str]:
     return out
 ```
 
-- [ ] **Step 5: Write V14**
+- [ ] **Step 4: Write V14**
 
 Add directly below `credential_scope_violations`:
 
@@ -1139,9 +1287,18 @@ CAPABILITY_ENVIRONMENTS = ("release-images", "release-publish")
 _APP_TOKEN_ACTION = "actions/create-github-app-token"
 
 
-def _holds_write_capability(job: dict) -> str | None:
-    """The capability this job holds, or None. The reason is returned for the message."""
+def _holds_write_capability(job: dict, workflow_perms: object = None) -> str | None:
+    """The capability this job holds, or None. The reason is returned for the message.
+
+    S13 (SMA-658): a job-level `permissions:` block always wins — and, per GitHub's own semantics,
+    sets every scope it does not name to `none` — so the workflow-level block is consulted only
+    when the job declares none at all. This is the same fallback `id_token_violations` already
+    applies; without it, a workflow-level `packages: write` would grant every job that declares no
+    block of its own, invisibly to V14.
+    """
     perms = job.get("permissions")
+    if perms is None:
+        perms = workflow_perms
     if isinstance(perms, dict):
         for scope in WRITE_SCOPES:
             if scope == "contents":
@@ -1164,13 +1321,13 @@ def _holds_write_capability(job: dict) -> str | None:
     return None
 
 
-def capability_violations(jobs: dict, name: str) -> list[str]:
+def capability_violations(jobs: dict, workflow_perms: object, name: str) -> list[str]:
     """V14. Every job that holds a publish capability sits behind its chain's approval."""
     out: list[str] = []
     for jid, job in jobs.items():
         if not isinstance(job, dict) or jid in UNGATED_JOBS:
             continue
-        reason = _holds_write_capability(job)
+        reason = _holds_write_capability(job, workflow_perms)
         if reason is None:
             continue
         approval = approval_for_job(jid)
@@ -1181,7 +1338,7 @@ def capability_violations(jobs: dict, name: str) -> list[str]:
     return out
 ```
 
-- [ ] **Step 6: Add the new publish and tag markers**
+- [ ] **Step 5: Add the new publish and tag markers**
 
 Replace the `PUBLISH_MARKERS` tuple's closing lines by adding these entries before the `)`:
 
@@ -1201,34 +1358,140 @@ Replace the `PUBLISH_MARKERS` tuple's closing lines by adding these entries befo
     r"git/refs(?![-\w])",
 ```
 
-- [ ] **Step 7: Call both rules from `check_main` and V13 from every file**
+- [ ] **Step 6: Give each new marker its own reding fixture (B7)**
+
+B7: ten of these eleven markers have no fixture anywhere in `FIXTURES`, so any one of them could be
+deleted later and nothing would notice. Add this directly above `self_test()`, never as a new
+`*_self_test` table (Global Constraints: `SELF_TEST_COUNT` stays 16) — it registers into the
+EXISTING `(check_name, fn)` list the same way `_v11_id_token_write_required` and the other
+standalone helpers already do:
+
+```python
+# SMA-658 B7. One case per new PUBLISH_MARKERS entry, plus a release-pr `git push` negative
+# control (S10) so the widened marker list does not red the real repository's own branch push.
+# Driven straight at job_publishes(), at the granularity the markers were written for: a FIXTURES
+# row would bury a deleted marker under whatever OTHER violation the same synthetic file happens
+# to produce (see the renamed row in Step 1 above), where this helper reds on that one marker
+# alone.
+_SMA658_MARKER_CASES: tuple[tuple[str, bool], ...] = (
+    ("docker push ghcr.io/smk1085/paigasus-iam:latest", True),
+    ("docker buildx build --push -t ghcr.io/smk1085/paigasus-iam:latest .", True),
+    ("docker buildx build --output type=registry -t ghcr.io/smk1085/paigasus-iam:latest .", True),
+    ("docker manifest push ghcr.io/smk1085/paigasus-iam:latest", True),
+    ("docker buildx imagetools create --tag ghcr.io/smk1085/paigasus-iam:latest "
+     "x@sha256:" + "0" * 64, True),
+    ("crane push /tmp/layout ghcr.io/smk1085/paigasus-iam:latest", True),
+    ("crane copy ghcr.io/smk1085/paigasus-iam:latest docker.io/smaschek/paigasus-iam:latest", True),
+    ("crane tag ghcr.io/smk1085/paigasus-iam@sha256:" + "0" * 64 + " latest", True),
+    ("skopeo copy oci:layout docker://ghcr.io/smk1085/paigasus-iam:latest", True),
+    ("regctl image copy ghcr.io/smk1085/paigasus-iam:latest docker.io/smaschek/paigasus-iam:latest",
+     True),
+    ("oras push ghcr.io/smk1085/paigasus-iam:latest ./file", True),
+    ("cosign sign --yes ghcr.io/smk1085/paigasus-iam@sha256:" + "0" * 64, True),
+    ('gh api --method POST "repos/o/r/git/refs" -f "ref=refs/tags/x"', True),
+    # S10: release-pr's own branch push must stay green against the widened marker list.
+    ('git push "$AUTH_REMOTE" "HEAD:$BRANCH"', False),
+)
+
+
+def _sma658_new_publish_markers_bite() -> str | None:
+    for cmd, want in _SMA658_MARKER_CASES:
+        got = job_publishes({"steps": [{"run": cmd}]}, "fixture")
+        if got != want:
+            return f"{cmd!r}: expected job_publishes()={want}, got {got}"
+    return None
+```
+
+Register it in `self_test()`'s existing tuple list, alongside `_v12_npm_floor_pinned`:
+
+```python
+        ("sma-658 every new publish marker has a reding fixture", _sma658_new_publish_markers_bite),
+```
+
+- [ ] **Step 7: Scope `id-token: write` to the image chains (S1)**
+
+Spec § 7.2 asks for two things: `publish-images-<svc>` joins the jobs that must HOLD
+`id-token: write` (V11's existing direction), and `tag-<svc>` must NOT hold it (a direction V11
+does not check today — no job outside `OIDC_PUBLISH_JOBS` is currently forbidden from holding the
+grant). Extend `id_token_violations` with the second half. Replace the `OIDC_PUBLISH_JOBS` line:
+
+```python
+OIDC_PUBLISH_JOBS = ("publish-pypi", "publish-npm")
+```
+
+with:
+
+```python
+OIDC_PUBLISH_JOBS = ("publish-pypi", "publish-npm", "publish-images-iam", "publish-images-gateway")
+```
+
+In `id_token_violations`, directly above its final `return out`, add:
+
+```python
+    # SMA-658 S1. The grant is scoped: a job outside OIDC_PUBLISH_JOBS that holds
+    # id-token: write can run its own OIDC exchange against a registry or a publisher this rule
+    # never audited for it. tag-<svc> only calls the tag API with an App token, so it must never
+    # hold this grant.
+    for jid, job in jobs.items():
+        if jid in OIDC_PUBLISH_JOBS or not isinstance(job, dict):
+            continue
+        job_grant = _grants_scope(job.get("permissions"), ID_TOKEN_SCOPE)
+        if job_grant is None:
+            job_grant = bool(workflow_grant)
+        if job_grant:
+            out.append(
+                f"{name}: V11: job '{jid}' grants `{ID_TOKEN_SCOPE}: write` but is not in "
+                f"OIDC_PUBLISH_JOBS. Only a job that runs a trusted-publishing exchange may hold "
+                f"this scope; add it to OIDC_PUBLISH_JOBS if that is now true, or drop the grant."
+            )
+```
+
+Add one FIXTURES row proving `tag-iam` reds if it ever gains the grant:
+
+```python
+    ("SMA-658 tag-iam gains id-token: write it does not need (V11 spec 7.2)", "main",
+     _OK_IMAGES_MAIN.replace("  tag-iam:\n    needs: [publish-images-iam]",
+                             "  tag-iam:\n    permissions: {id-token: write}\n    needs: [publish-images-iam]"),
+     "V11"),
+```
+
+`_v11_id_token_write_required`'s existing test cases build a document with only `publish-pypi` and
+`publish-npm` jobs, so the new loop above — which only fires for a job NOT in `OIDC_PUBLISH_JOBS`
+— finds nothing there and that helper needs no change.
+
+- [ ] **Step 8: Call both rules from `check_main` and V13 from every file**
 
 In `check_main`, directly above its `return`, add:
 
 ```python
-    violations += credential_scope_violations(doc, name)
-    violations += capability_violations(doc["jobs"], name)
+    out += credential_scope_violations(doc, name)
+    out += capability_violations(doc["jobs"], doc.get("permissions"), name)
 ```
 
-Match the local variable name `check_main` already uses for its accumulator.
+C3: `check_main`'s own accumulator is named `out`, not `violations` — that name belongs to `main()`'s
+top-level accumulator (used two blocks below, in the `main()` snippet).
 
 In `main()`, after the `callee_boundary_violations` call, add:
 
 ```python
     # V13 runs over EVERY workflow file, not only the release path: any workflow with a `main`
-    # trigger could name the release-images environment and read the same secret.
-    for path in sorted(Path(".github/workflows").glob("*.yml")):
+    # trigger could name the release-images environment and read the same secret. C6 (SMA-658):
+    # glob both suffixes GitHub Actions accepts, so a future `.yaml` workflow is not invisible to
+    # this sweep.
+    workflow_paths = sorted(Path(".github/workflows").glob("*.yml")) \
+        + sorted(Path(".github/workflows").glob("*.yaml"))
+    for path in workflow_paths:
         if path.resolve() == main_path.resolve():
             continue
         violations += credential_scope_violations(load_workflow(path), path.name)
 ```
 
-- [ ] **Step 8: Run the self-test to watch it pass**
+- [ ] **Step 9: Run the self-test to watch it pass**
 
 Run: the Step 2 command.
 Expected: no FAIL lines, exit code 0.
 
-- [ ] **Step 9: Run the guard against every real workflow**
+- [ ] **Step 10: Run the guard against every real workflow**
 
 Run:
 ```bash
@@ -1236,8 +1499,11 @@ export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
 uv run --locked --project py --python '>=3.12' python3 ci/actionlint/release_guard.py .github/workflows/release.yml; echo "rc=$?"
 ```
 Expected: rc 0. `release.yml` has no image chain yet, and no other workflow names `release-images`.
+`DOCKERHUB_TOKEN` is not yet in `EXPECTED_RELEASE_SECRETS` (B5 — Task 7 adds it), and `release.yml`
+does not yet reference it either, so `secret_reference_violations` sees a matched empty set on both
+sides and stays clean.
 
-- [ ] **Step 10: Lint and commit**
+- [ ] **Step 11: Lint and commit**
 
 Run: `uv run --locked --project py ruff check --config py/pyproject.toml ci/actionlint/`
 Expected: `All checks passed!`
@@ -1251,7 +1517,8 @@ V13 allows the token only in a job whose environment is release-images,
 and allows that environment only on a publish job. It compares
 environment names case-folded and fails closed on an expression. V14
 gates the capability itself, so a publish with a tool no marker names
-still reds.
+still reds. V11 now also forbids id-token: write outside the jobs that
+run a trusted-publishing exchange.
 
 Co-Authored-By: <your model name> <noreply@anthropic.com>
 EOF
@@ -1264,17 +1531,26 @@ EOF
 
 **Files:**
 - Modify: `.github/workflows/release.yml`
+- Modify: `ci/actionlint/release_guard.py` (`EXPECTED_RELEASE_SECRETS` only — B5)
 
 **Interfaces:**
 - Consumes: Task 4's outputs (`skip_<svc>`, `version_<svc>`), PR 1's `ci/images/run.sh build-oci`,
   `load-oci`, `smoke`, and `ci/images/release_decision.py`'s `oci-digests`, `adopt`, `floating`.
 - Produces: six jobs — `images-build-<svc>`, `approve-images-<svc>`, `publish-images-<svc>`,
-  `tag-<svc>` for `iam` and `gateway`. Task 8 mutates them; Task 9 documents them.
+  `tag-<svc>` for `iam` and `gateway`, plus `DOCKERHUB_TOKEN` added to `EXPECTED_RELEASE_SECRETS`
+  in the same commit as the job that references it (B5). Task 8 mutates them; Task 9 documents
+  them.
 
 **Decision this task makes (the spec does not fix it):** the two chains share their step lists
-through YAML anchors defined in a top-level `x-image-chain:` key. GitHub Actions ignores an
-unknown top-level key that starts with `x-`, and PyYAML expands the anchors before
-`release_guard.py` sees the document, so every job is checked in full.
+through YAML anchors. MEASURED with actionlint 1.7.12 (B2): a top-level `x-image-chain:` key fails
+`syntax-check` (`unexpected key "x-image-chain" for "workflow" section`) — GitHub's own workflow
+schema uses the same fixed allowlist of top-level keys, and it does not include an `x-` escape
+hatch the way `docker-compose` does. So each anchor (`&image-build-steps`, `&image-publish-steps`,
+`&image-tag-steps`) is defined directly on the `iam` job that needs it first, as that job's own
+`steps:` value, and aliased (`*image-build-steps`, …) from the matching `gateway` job's `steps:`.
+YAML anchors and aliases are supported on any node, not only inside a dedicated block, and PyYAML
+still expands the alias before `release_guard.py` reads the document, so every job is still
+checked in full — MEASURED rc 0 with this shape.
 
 - [ ] **Step 1: Add the plan outputs**
 
@@ -1290,89 +1566,33 @@ In the `plan` job's `outputs:` block, below the `nothing_to_release:` line, add:
       version_gateway: ${{ steps.decide.outputs.version_gateway }}
 ```
 
-- [ ] **Step 2: Add the anchor block**
+- [ ] **Step 2: Add the Docker Hub secret to the pin (B5)**
 
-Directly above the `jobs:` key, add:
+In `ci/actionlint/release_guard.py`, replace the `EXPECTED_RELEASE_SECRETS` tuple with:
 
-```yaml
-# SMA-658. The two service chains differ only in the service name, so their step lists live here
-# once and each job aliases them. GitHub Actions ignores an unknown top-level `x-` key, and it
-# supports anchors and aliases but NOT merge keys (`<<:`), so every alias below is a whole-value
-# alias. PyYAML expands them before release_guard.py reads the document, so the guard still sees
-# each job in full.
-x-image-chain:
-  build-steps: &image-build-steps
-    - name: Reclaim runner disk (drop unused preinstalled toolchains)
-      run: |
-        sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup \
-          /opt/hostedtoolcache/CodeQL || true
-        sudo docker image prune --all --force > /dev/null 2>&1 || true
-
-    - name: Checkout
-      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-      with:
-        persist-credentials: false
-
-    - name: Set up Buildx
-      uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e  # v4.3.0
-
-    - name: Set up proto (pinned via .prototools)
-      uses: moonrepo/setup-toolchain@261c62cb5b0f580c7be7c8cd0f023a2e96756095  # v0
-      with:
-        cache: false
-
-    - name: Install crane, syft and uv
-      run: |
-        proto install crane
-        proto install syft
-        proto install uv
-
-    - name: Build the image as an OCI archive
-      run: ci/images/run.sh build-oci "${SERVICE}" out
-
-    - name: Load the archive and check its identity
-      id: load
-      run: |
-        set -euo pipefail
-        archive="out/paigasus-${SERVICE}-${ARCH}.oci.tar"
-        ci/images/run.sh load-oci "$archive" "paigasus-${SERVICE}:dev"
-        digests="$(uv run --no-project --python '>=3.12' python3 ci/images/release_decision.py oci-digests "$archive")"
-        manifest="$(printf '%s\n' "$digests" | sed -n 's/^manifest=//p')"
-        echo "digest=${manifest}" >> "$GITHUB_OUTPUT"
-
-    - name: Smoke this service
-      run: ci/images/run.sh smoke "${SERVICE}"
-
-    - name: SBOM for this platform
-      run: syft "oci-archive:out/paigasus-${SERVICE}-${ARCH}.oci.tar" -o "spdx-json=out/sbom-paigasus-${SERVICE}-${ARCH}.spdx.json"
-
-    - name: Report the SBOM contents (spec AC 7)
-      run: |
-        set -euo pipefail
-        summary="$(uv run --no-project --python '>=3.12' python3 ci/images/release_decision.py sbom-summary "out/sbom-paigasus-${SERVICE}-${ARCH}.spdx.json")"
-        echo "M8 image=paigasus-${SERVICE} arch=${ARCH} ${summary}"
-        cargo_count="$(printf '%s\n' "$summary" | sed -n 's/^cargo=//p')"
-        if [ "${cargo_count:-0}" -lt 1 ]; then
-          echo "::error::the SBOM lists no Rust crates; the binary was not built with cargo auditable (spec AC 7)." >&2
-          exit 1
-        fi
-
-    - name: Upload the archive and its SBOM
-      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-      with:
-        name: image-${{ env.SERVICE }}-${{ matrix.arch }}
-        path: |
-          out/paigasus-${{ env.SERVICE }}-${{ matrix.arch }}.oci.tar
-          out/sbom-paigasus-${{ env.SERVICE }}-${{ matrix.arch }}.spdx.json
-        if-no-files-found: error
-        retention-days: 7
+```python
+EXPECTED_RELEASE_SECRETS = (
+    "PAIGASUS_BOT_APP_ID",
+    "PAIGASUS_BOT_PRIVATE_KEY",
+    # SMA-658 D7. Docker Hub offers OIDC connections only to organizations with a Team, Business
+    # or DHI subscription, or in its Sponsored Open Source program. `smaschek` is a personal
+    # account, so this token cannot be an OIDC exchange. V13 (Task 6) scopes it to one job.
+    "DOCKERHUB_TOKEN",
+)
 ```
+
+B5: this pin and the `secrets.DOCKERHUB_TOKEN` reference this task adds below (Steps 3 and 4, the
+`Fail on an empty Docker Hub token` step of each chain's publish job) land in the SAME commit.
+`secret_reference_violations` reds `release.yml` for a pinned name the file does not reference, so
+pinning this in Task 6 — before `release.yml` names the secret — would red Task 6's own guard run
+against the real file.
 
 - [ ] **Step 3: Add the `iam` chain**
 
-At the end of the `jobs:` mapping, add. The `gateway` chain in Step 4 is the same text with the
-service name changed; both are written out in full, because an implementer may read one task's
-steps without the other's.
+The two chains share their step lists through YAML anchors (see the task's Decision note above).
+`&image-build-steps`, `&image-publish-steps` and `&image-tag-steps` are each defined here, on the
+`iam` job that needs them first, and aliased from the matching `gateway` job in Step 4. At the end
+of the `jobs:` mapping, add:
 
 ```yaml
   # SMA-658. THE IMAGE CHAINS. Each service has its own four jobs and its own approval, so a
@@ -1395,15 +1615,82 @@ steps without the other's.
           - amd64
           - arm64
     # NO job outputs. A matrix job writes ONE set of outputs, so both legs would write the same
-    # name and the last leg would win — the amd64 digest could arrive under `digest_arm64`.
+    # name and the last leg would win -- the amd64 digest could arrive under `digest_arm64`.
     # `publish-images-<svc>` reads each per-platform digest from its own archive instead, which is
-    # the only source that cannot be crossed (spec § 4.2's "job output" wording is corrected here;
-    # see the self-review record).
+    # the only source that cannot be crossed (spec Section 4.2's "job output" wording is corrected
+    # here; see the self-review record).
     env:
       SERVICE: iam
       ARCH: ${{ matrix.arch }}
       PROTO_REPORTER: text
-    steps: *image-build-steps
+    # SMA-658 B2. This anchor is defined HERE, on the first job that needs it, and aliased
+    # (*image-build-steps) from images-build-gateway. MEASURED with actionlint 1.7.12: a top-level
+    # x-image-chain: key fails schema validation; an anchor on an ordinary job key does not.
+    steps: &image-build-steps
+      - name: Reclaim runner disk (drop unused preinstalled toolchains)
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup \
+            /opt/hostedtoolcache/CodeQL || true
+          sudo docker image prune --all --force > /dev/null 2>&1 || true
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e  # v4.3.0
+
+      - name: Set up proto (pinned via .prototools)
+        uses: moonrepo/setup-toolchain@261c62cb5b0f580c7be7c8cd0f023a2e96756095  # v0
+        with:
+          cache: false
+
+      - name: Install crane, syft and uv
+        run: |
+          proto install crane
+          proto install syft
+          proto install uv
+
+      - name: Build the image as an OCI archive
+        run: ci/images/run.sh build-oci "${SERVICE}" out
+
+      - name: Load the archive and check its identity
+        id: load
+        run: |
+          set -euo pipefail
+          archive="out/paigasus-${SERVICE}-${ARCH}.oci.tar"
+          ci/images/run.sh load-oci "$archive" "paigasus-${SERVICE}:dev"
+          digests="$(uv run --no-project --python '>=3.12' python3 ci/images/release_decision.py oci-digests "$archive")"
+          manifest="$(printf '%s\n' "$digests" | sed -n 's/^manifest=//p')"
+          echo "digest=${manifest}" >> "$GITHUB_OUTPUT"
+
+      - name: Smoke this service
+        run: ci/images/run.sh smoke "${SERVICE}"
+
+      - name: SBOM for this platform
+        run: syft "oci-archive:out/paigasus-${SERVICE}-${ARCH}.oci.tar" -o "spdx-json=out/sbom-paigasus-${SERVICE}-${ARCH}.spdx.json"
+
+      - name: Report the SBOM contents (spec AC 7)
+        run: |
+          set -euo pipefail
+          summary="$(uv run --no-project --python '>=3.12' python3 ci/images/release_decision.py sbom-summary "out/sbom-paigasus-${SERVICE}-${ARCH}.spdx.json")"
+          echo "M8 image=paigasus-${SERVICE} arch=${ARCH} ${summary}"
+          cargo_count="$(printf '%s\n' "$summary" | sed -n 's/^cargo=//p')"
+          if [ "${cargo_count:-0}" -lt 1 ]; then
+            echo "::error::the SBOM lists no Rust crates; the binary was not built with cargo auditable (spec AC 7)." >&2
+            exit 1
+          fi
+
+      - name: Upload the archive and its SBOM
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: image-${{ env.SERVICE }}-${{ matrix.arch }}
+          path: |
+            out/paigasus-${{ env.SERVICE }}-${{ matrix.arch }}.oci.tar
+            out/sbom-paigasus-${{ env.SERVICE }}-${{ matrix.arch }}.spdx.json
+          if-no-files-found: error
+          retention-days: 7
 
   approve-images-iam:
     name: approve the iam image release
@@ -1438,11 +1725,260 @@ steps without the other's.
       GHCR_IMAGE: ghcr.io/smk1085/paigasus-iam
       HUB_IMAGE: docker.io/smaschek/paigasus-iam
       PROTO_REPORTER: text
-    steps: *image-publish-steps
+    steps: &image-publish-steps
+      - name: Fail on an empty Docker Hub token
+        env:
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          if [ -z "$DOCKERHUB_TOKEN" ]; then
+            echo "::error::DOCKERHUB_TOKEN is empty or unset; the release-images environment secret did not reach this job." >&2
+            exit 1
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e  # v4.3.0
+
+      - name: Set up proto (pinned via .prototools)
+        uses: moonrepo/setup-toolchain@261c62cb5b0f580c7be7c8cd0f023a2e96756095  # v0
+        with:
+          cache: false
+
+      - name: Install crane, cosign and uv
+        run: |
+          proto install crane
+          proto install cosign
+          proto install uv
+
+      - name: Download both archives
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          pattern: image-${{ env.SERVICE }}-*
+          merge-multiple: true
+          path: in
+
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Check the artifact hop and read the decision
+        id: decide
+        run: |
+          set -euo pipefail
+          # S3 (SMA-658): only a registry's own "no such tag" answer may read as "the digest is
+          # absent". Any other crane failure -- a timeout, an auth error, a transient 5xx -- must
+          # fail the job, because reading it as absent would push a second digest under a
+          # published version (D10).
+          digest_or_none() {
+            local image="$1" rc=0 out
+            out="$(crane digest "$image" 2>&1)" || rc=$?
+            if [ "$rc" -eq 0 ]; then
+              printf '%s\n' "$out"
+              return 0
+            fi
+            case "$out" in
+              *MANIFEST_UNKNOWN*|*NAME_UNKNOWN*|*"unexpected status code 404"*)
+                echo none
+                ;;
+              *)
+                echo "::error::crane digest failed for ${image}: ${out}" >&2
+                exit 1
+                ;;
+            esac
+          }
+          for arch in amd64 arm64; do
+            archive="in/paigasus-${SERVICE}-${arch}.oci.tar"
+            digests="$(uv run --no-project --python '>=3.12' python3 ci/images/release_decision.py oci-digests "$archive")"
+            printf '%s\n' "$digests" | sed -n "s/^manifest=/digest_${arch}=/p" >> "$GITHUB_OUTPUT"
+          done
+          label="$(crane config "oci-archive:in/paigasus-${SERVICE}-amd64.oci.tar" | uv run --no-project --python '>=3.12' python3 -c 'import json,sys; c=json.load(sys.stdin); print(c["config"]["Labels"]["org.opencontainers.image.version"])')"
+          if [ "$label" != "$VERSION" ]; then
+            echo "::error::the archive carries version ${label}, but plan says ${VERSION}." >&2
+            exit 1
+          fi
+          revision="$(crane config "oci-archive:in/paigasus-${SERVICE}-amd64.oci.tar" | uv run --no-project --python '>=3.12' python3 -c 'import json,sys; c=json.load(sys.stdin); print(c["config"]["Labels"]["org.opencontainers.image.revision"])')"
+          echo "revision=${revision}" >> "$GITHUB_OUTPUT"
+          tag="paigasus-${SERVICE}-v${VERSION}"
+          if git ls-remote --tags --exit-code origin "refs/tags/${tag}" > /dev/null 2>&1; then
+            git_tag=present
+          else
+            git_tag=absent
+          fi
+          ghcr="$(digest_or_none "${GHCR_IMAGE}:${VERSION}")"
+          hub="$(digest_or_none "${HUB_IMAGE}:${VERSION}")"
+          echo "ghcr=${ghcr} dockerhub=${hub} git_tag=${git_tag}"
+          echo "ghcr=${ghcr}" >> "$GITHUB_OUTPUT"
+          echo "dockerhub=${hub}" >> "$GITHUB_OUTPUT"
+          echo "git_tag=${git_tag}" >> "$GITHUB_OUTPUT"
+
+      - name: Push, copy, tag and sign
+        id: publish
+        env:
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          DIGEST_AMD64: ${{ steps.decide.outputs.digest_amd64 }}
+          DIGEST_ARM64: ${{ steps.decide.outputs.digest_arm64 }}
+          GHCR_EXISTING: ${{ steps.decide.outputs.ghcr }}
+          HUB_EXISTING: ${{ steps.decide.outputs.dockerhub }}
+          GIT_TAG_STATE: ${{ steps.decide.outputs.git_tag }}
+          REVISION: ${{ steps.decide.outputs.revision }}
+        run: |
+          set -euo pipefail
+          # D10: the FIRST digest published under :<version> is final. A later run adopts it and
+          # discards its own build, so a rebuild -- which never reproduces a digest, because the
+          # chisel cut resolves the live archive -- can never replace a published image.
+          # C5 (SMA-658): --new-digest feeds only the push-new branch below, so it must be a real
+          # digest, not a placeholder -- pass the amd64 archive's own manifest digest.
+          decision="$(uv run --no-project --python '>=3.12' python3 ci/images/release_decision.py adopt \
+            --new-digest "$DIGEST_AMD64" \
+            --ghcr "$GHCR_EXISTING" --dockerhub "$HUB_EXISTING" --git-tag "$GIT_TAG_STATE")"
+          action="$(printf '%s\n' "$decision" | sed -n 's/^action=//p')"
+          if [ "$action" = "already-released" ]; then
+            echo "already released: the tag paigasus-${SERVICE}-v${VERSION} exists. Nothing to do."
+            echo "index=" >> "$GITHUB_OUTPUT"
+            echo "revision=${REVISION}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$action" = "push-new" ]; then
+            refs=()
+            for arch in amd64 arm64; do
+              layout="$(mktemp -d)"
+              tar -xf "in/paigasus-${SERVICE}-${arch}.oci.tar" -C "$layout"
+              crane push "$layout" "${GHCR_IMAGE}:${GITHUB_SHA}-${arch}"
+              got="$(crane digest "${GHCR_IMAGE}:${GITHUB_SHA}-${arch}")"
+              # S5 (SMA-658): images-rehearsal.yml carries this exact check (run 35498922565). A
+              # changed per-platform digest would later name an attest-sbom subject the registry
+              # does not hold.
+              case "$arch" in
+                amd64) want="$DIGEST_AMD64" ;;
+                arm64) want="$DIGEST_ARM64" ;;
+              esac
+              if [ "$got" != "$want" ]; then
+                echo "::error::crane push changed the ${arch} digest: ${want} -> ${got}" >&2
+                exit 1
+              fi
+              refs+=("${GHCR_IMAGE}@${got}")
+            done
+            docker buildx imagetools create --tag "${GHCR_IMAGE}:${GITHUB_SHA}" "${refs[@]}"
+            index="$(crane digest "${GHCR_IMAGE}:${GITHUB_SHA}")"
+            echo "index=${index}" >> "$GITHUB_OUTPUT"
+            echo "revision=${REVISION}" >> "$GITHUB_OUTPUT"
+            echo "$DOCKERHUB_TOKEN" | docker login docker.io --username smaschek --password-stdin
+            docker buildx imagetools create --tag "${HUB_IMAGE}:${GITHUB_SHA}" "${GHCR_IMAGE}@${index}"
+            hub_index="$(crane digest "${HUB_IMAGE}:${GITHUB_SHA}")"
+            if [ "$hub_index" != "$index" ]; then
+              echo "::error::the Docker Hub copy changed the digest: ${index} -> ${hub_index}" >&2
+              exit 1
+            fi
+          else
+            index="$(printf '%s\n' "$decision" | sed -n 's/^digest=//p')"
+            copy_to="$(printf '%s\n' "$decision" | sed -n 's/^copy_to=//p')"
+            echo "adopting the published digest ${index} (copy_to=${copy_to})"
+            echo "index=${index}" >> "$GITHUB_OUTPUT"
+            echo "revision=${REVISION}" >> "$GITHUB_OUTPUT"
+            # S4 (SMA-658): `adopt` names which registry is MISSING the digest. Copying from the
+            # wrong registry fails outright, because that registry may not hold it at all.
+            if [ "$copy_to" = "dockerhub" ]; then
+              echo "$DOCKERHUB_TOKEN" | docker login docker.io --username smaschek --password-stdin
+              docker buildx imagetools create --tag "${HUB_IMAGE}:${GITHUB_SHA}" "${GHCR_IMAGE}@${index}"
+              hub_index="$(crane digest "${HUB_IMAGE}:${GITHUB_SHA}")"
+              if [ "$hub_index" != "$index" ]; then
+                echo "::error::the Docker Hub copy changed the digest: ${index} -> ${hub_index}" >&2
+                exit 1
+              fi
+            elif [ "$copy_to" = "ghcr" ]; then
+              echo "$DOCKERHUB_TOKEN" | docker login docker.io --username smaschek --password-stdin
+              docker buildx imagetools create --tag "${GHCR_IMAGE}:${GITHUB_SHA}" "${HUB_IMAGE}@${index}"
+              ghcr_index="$(crane digest "${GHCR_IMAGE}:${GITHUB_SHA}")"
+              if [ "$ghcr_index" != "$index" ]; then
+                echo "::error::the GHCR copy changed the digest: ${index} -> ${ghcr_index}" >&2
+                exit 1
+              fi
+            else
+              echo "$DOCKERHUB_TOKEN" | docker login docker.io --username smaschek --password-stdin
+            fi
+          fi
+          cosign sign --yes "${GHCR_IMAGE}@${index}"
+          cosign sign --yes "${HUB_IMAGE}@${index}"
+          git tag -l > /tmp/tags.txt
+          floating="$(uv run --no-project --python '>=3.12' python3 ci/images/release_decision.py floating \
+            --service "$SERVICE" --version "$VERSION" --tags-file /tmp/tags.txt)"
+          move="$(printf '%s\n' "$floating" | sed -n 's/^move=//p')"
+          minor="$(printf '%s\n' "$floating" | sed -n 's/^minor_tag=//p')"
+          for image in "$GHCR_IMAGE" "$HUB_IMAGE"; do
+            crane tag "${image}@${index}" "$VERSION"
+            if [ "$move" = "true" ]; then
+              crane tag "${image}@${index}" "$minor"
+              crane tag "${image}@${index}" latest
+            fi
+          done
+          # S15 (SMA-658, should-fix): spec Section 4.3 step 6 says logout happens "at once" after
+          # the Hub cosign sign. It happens here instead, because the crane tag loop above ALSO
+          # writes to Docker Hub and needs the same credential -- moving logout earlier would
+          # break that write. This is a deliberate, recorded deviation (spec Section 16 P15);
+          # verify on the first live release whether a later measurement lets it move up.
+          docker logout docker.io
+
+      - name: Attest build provenance (index)
+        if: steps.publish.outputs.index != ''
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8  # v4.2.2
+        with:
+          subject-name: ${{ env.GHCR_IMAGE }}
+          subject-digest: ${{ steps.publish.outputs.index }}
+          push-to-registry: true
+
+      - name: Attest the amd64 SBOM (per-platform subject)
+        if: steps.publish.outputs.index != ''
+        uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e  # v4.1.0
+        with:
+          subject-name: ${{ env.GHCR_IMAGE }}
+          subject-digest: ${{ steps.decide.outputs.digest_amd64 }}
+          sbom-path: in/sbom-paigasus-${{ env.SERVICE }}-amd64.spdx.json
+          push-to-registry: true
+
+      - name: Attest the arm64 SBOM (per-platform subject)
+        if: steps.publish.outputs.index != ''
+        uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e  # v4.1.0
+        with:
+          subject-name: ${{ env.GHCR_IMAGE }}
+          subject-digest: ${{ steps.decide.outputs.digest_arm64 }}
+          sbom-path: in/sbom-paigasus-${{ env.SERVICE }}-arm64.spdx.json
+          push-to-registry: true
+
+      # SMA-658 B6. The plan's original single "Push, copy, tag, sign and verify" step ran
+      # `gh attestation verify` BEFORE the three attest-* steps above created anything to verify
+      # -- on a first release that check always failed. Verification is its own, later step.
+      - name: Verify the signature and attestations
+        if: steps.publish.outputs.index != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INDEX: ${{ steps.publish.outputs.index }}
+        run: |
+          set -euo pipefail
+          index="$INDEX"
+          for image in "$GHCR_IMAGE" "$HUB_IMAGE"; do
+            cosign verify \
+              --certificate-identity "https://github.com/SMK1085/paigasus-core/.github/workflows/release.yml@refs/heads/main" \
+              --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+              "${image}@${index}"
+            gh attestation verify "oci://${image}@${index}" \
+              --repo SMK1085/paigasus-core \
+              --signer-workflow SMK1085/paigasus-core/.github/workflows/release.yml \
+              --source-ref refs/heads/main
+          done
+          echo "PUBLISHED ${SERVICE} ${VERSION}: ${index}"
 
   tag-iam:
     name: tag the iam release
-    needs: [publish-images-iam]
+    needs: [plan, publish-images-iam]
+    if: needs.plan.outputs.skip_iam != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     environment: release-publish
@@ -1452,245 +1988,58 @@ steps without the other's.
       SERVICE: iam
       VERSION: ${{ needs.plan.outputs.version_iam }}
       REVISION: ${{ needs.publish-images-iam.outputs.revision }}
-    steps: *image-tag-steps
-```
+    steps: &image-tag-steps
+      - name: Mint the App installation token
+        id: app_token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # v3.2.0
+        with:
+          client-id: ${{ secrets.PAIGASUS_BOT_APP_ID }}
+          private-key: ${{ secrets.PAIGASUS_BOT_PRIVATE_KEY }}
+          permission-contents: write
 
-`tag-iam` reads `needs.plan.outputs.version_iam`, so add `plan` to its `needs:` and the gate
-literal to its `if:`; otherwise actionlint reds the expression. Use:
-
-```yaml
-    needs: [plan, publish-images-iam]
-    if: needs.plan.outputs.skip_iam != 'true'
-```
-
-- [ ] **Step 4: Add the publish and tag anchors**
-
-Add to the `x-image-chain:` block, below `build-steps`:
-
-```yaml
-  publish-steps: &image-publish-steps
-    - name: Fail on an empty Docker Hub token
-      env:
-        DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
-      run: |
-        if [ -z "$DOCKERHUB_TOKEN" ]; then
-          echo "::error::DOCKERHUB_TOKEN is empty or unset; the release-images environment secret did not reach this job." >&2
-          exit 1
-        fi
-
-    - name: Checkout
-      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-      with:
-        fetch-depth: 0
-        persist-credentials: false
-
-    - name: Set up Buildx
-      uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e  # v4.3.0
-
-    - name: Set up proto (pinned via .prototools)
-      uses: moonrepo/setup-toolchain@261c62cb5b0f580c7be7c8cd0f023a2e96756095  # v0
-      with:
-        cache: false
-
-    - name: Install crane, cosign and uv
-      run: |
-        proto install crane
-        proto install cosign
-        proto install uv
-
-    - name: Download both archives
-      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
-      with:
-        pattern: image-${{ env.SERVICE }}-*
-        merge-multiple: true
-        path: in
-
-    - name: Log in to GHCR
-      uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
-      with:
-        registry: ghcr.io
-        username: ${{ github.actor }}
-        password: ${{ github.token }}
-
-    - name: Check the artifact hop and read the decision
-      id: decide
-      run: |
-        set -euo pipefail
-        for arch in amd64 arm64; do
-          archive="in/paigasus-${SERVICE}-${arch}.oci.tar"
-          digests="$(uv run --no-project --python '>=3.12' python3 ci/images/release_decision.py oci-digests "$archive")"
-          printf '%s\n' "$digests" | sed -n "s/^manifest=/digest_${arch}=/p" >> "$GITHUB_OUTPUT"
-        done
-        label="$(crane config "oci-archive:in/paigasus-${SERVICE}-amd64.oci.tar" | uv run --no-project --python '>=3.12' python3 -c 'import json,sys; c=json.load(sys.stdin); print(c["config"]["Labels"]["org.opencontainers.image.version"])')"
-        if [ "$label" != "$VERSION" ]; then
-          echo "::error::the archive carries version ${label}, but plan says ${VERSION}." >&2
-          exit 1
-        fi
-        revision="$(crane config "oci-archive:in/paigasus-${SERVICE}-amd64.oci.tar" | uv run --no-project --python '>=3.12' python3 -c 'import json,sys; c=json.load(sys.stdin); print(c["config"]["Labels"]["org.opencontainers.image.revision"])')"
-        echo "revision=${revision}" >> "$GITHUB_OUTPUT"
-        tag="paigasus-${SERVICE}-v${VERSION}"
-        if git ls-remote --tags --exit-code origin "refs/tags/${tag}" > /dev/null 2>&1; then
-          git_tag=present
-        else
-          git_tag=absent
-        fi
-        ghcr="$(crane digest "${GHCR_IMAGE}:${VERSION}" 2> /dev/null || echo none)"
-        hub="$(crane digest "${HUB_IMAGE}:${VERSION}" 2> /dev/null || echo none)"
-        echo "ghcr=${ghcr} dockerhub=${hub} git_tag=${git_tag}"
-        echo "ghcr=${ghcr}" >> "$GITHUB_OUTPUT"
-        echo "dockerhub=${hub}" >> "$GITHUB_OUTPUT"
-        echo "git_tag=${git_tag}" >> "$GITHUB_OUTPUT"
-
-    - name: Push, copy, tag, sign and verify
-      id: publish
-      env:
-        DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
-        DIGEST_AMD64: ${{ steps.decide.outputs.digest_amd64 }}
-        DIGEST_ARM64: ${{ steps.decide.outputs.digest_arm64 }}
-        GHCR_EXISTING: ${{ steps.decide.outputs.ghcr }}
-        HUB_EXISTING: ${{ steps.decide.outputs.dockerhub }}
-        GIT_TAG_STATE: ${{ steps.decide.outputs.git_tag }}
-        REVISION: ${{ steps.decide.outputs.revision }}
-        GH_TOKEN: ${{ github.token }}
-      run: |
-        set -euo pipefail
-        # D10: the FIRST digest published under :<version> is final. A later run adopts it and
-        # discards its own build, so a rebuild — which never reproduces a digest, because the
-        # chisel cut resolves the live archive — can never replace a published image.
-        decision="$(uv run --no-project --python '>=3.12' python3 ci/images/release_decision.py adopt \
-          --new-digest "sha256:0000000000000000000000000000000000000000000000000000000000000000" \
-          --ghcr "$GHCR_EXISTING" --dockerhub "$HUB_EXISTING" --git-tag "$GIT_TAG_STATE")"
-        action="$(printf '%s\n' "$decision" | sed -n 's/^action=//p')"
-        if [ "$action" = "already-released" ]; then
-          echo "already released: the tag paigasus-${SERVICE}-v${VERSION} exists. Nothing to do."
-          echo "index=" >> "$GITHUB_OUTPUT"
-          echo "revision=${REVISION}" >> "$GITHUB_OUTPUT"
-          exit 0
-        fi
-        if [ "$action" = "push-new" ]; then
-          refs=()
-          for arch in amd64 arm64; do
-            layout="$(mktemp -d)"
-            tar -xf "in/paigasus-${SERVICE}-${arch}.oci.tar" -C "$layout"
-            crane push "$layout" "${GHCR_IMAGE}:${GITHUB_SHA}-${arch}"
-            refs+=("${GHCR_IMAGE}@$(crane digest "${GHCR_IMAGE}:${GITHUB_SHA}-${arch}")")
-          done
-          docker buildx imagetools create --tag "${GHCR_IMAGE}:${GITHUB_SHA}" "${refs[@]}"
-          index="$(crane digest "${GHCR_IMAGE}:${GITHUB_SHA}")"
-        else
-          index="$(printf '%s\n' "$decision" | sed -n 's/^digest=//p')"
-          echo "adopting the published digest ${index}"
-        fi
-        echo "index=${index}" >> "$GITHUB_OUTPUT"
-        echo "revision=${REVISION}" >> "$GITHUB_OUTPUT"
-        echo "$DOCKERHUB_TOKEN" | docker login docker.io --username smaschek --password-stdin
-        docker buildx imagetools create --tag "${HUB_IMAGE}:${GITHUB_SHA}" "${GHCR_IMAGE}@${index}"
-        hub_index="$(crane digest "${HUB_IMAGE}:${GITHUB_SHA}")"
-        if [ "$hub_index" != "$index" ]; then
-          echo "::error::the Docker Hub copy changed the digest: ${index} -> ${hub_index}" >&2
-          exit 1
-        fi
-        cosign sign --yes "${GHCR_IMAGE}@${index}"
-        cosign sign --yes "${HUB_IMAGE}@${index}"
-        git tag -l > /tmp/tags.txt
-        floating="$(uv run --no-project --python '>=3.12' python3 ci/images/release_decision.py floating \
-          --service "$SERVICE" --version "$VERSION" --tags-file /tmp/tags.txt)"
-        move="$(printf '%s\n' "$floating" | sed -n 's/^move=//p')"
-        minor="$(printf '%s\n' "$floating" | sed -n 's/^minor_tag=//p')"
-        for image in "$GHCR_IMAGE" "$HUB_IMAGE"; do
-          crane tag "${image}@${index}" "$VERSION"
-          if [ "$move" = "true" ]; then
-            crane tag "${image}@${index}" "$minor"
-            crane tag "${image}@${index}" latest
+      - name: Make the release tag
+        env:
+          GH_TOKEN: ${{ steps.app_token.outputs.token }}
+        run: |
+          set -euo pipefail
+          tag="paigasus-${SERVICE}-v${VERSION}"
+          existing="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${tag}" --jq .object.sha 2> /dev/null || echo none)"
+          if [ "$existing" = "$REVISION" ]; then
+            echo "the tag ${tag} already points at ${REVISION}. Nothing to do."
+            exit 0
           fi
-        done
-        docker logout docker.io
-        for image in "$GHCR_IMAGE" "$HUB_IMAGE"; do
-          cosign verify \
-            --certificate-identity "https://github.com/SMK1085/paigasus-core/.github/workflows/release.yml@refs/heads/main" \
-            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-            "${image}@${index}"
-          gh attestation verify "oci://${image}@${index}" \
-            --repo SMK1085/paigasus-core \
-            --signer-workflow SMK1085/paigasus-core/.github/workflows/release.yml \
-            --source-ref refs/heads/main
-        done
-        echo "PUBLISHED ${SERVICE} ${VERSION}: ${index}"
-
-    - name: Attest build provenance (index)
-      if: steps.publish.outputs.index != ''
-      uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8  # v4.2.2
-      with:
-        subject-name: ${{ env.GHCR_IMAGE }}
-        subject-digest: ${{ steps.publish.outputs.index }}
-        push-to-registry: true
-
-    - name: Attest the amd64 SBOM (per-platform subject)
-      if: steps.publish.outputs.index != ''
-      uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e  # v4.1.0
-      with:
-        subject-name: ${{ env.GHCR_IMAGE }}
-        subject-digest: ${{ steps.decide.outputs.digest_amd64 }}
-        sbom-path: in/sbom-paigasus-${{ env.SERVICE }}-amd64.spdx.json
-        push-to-registry: true
-
-    - name: Attest the arm64 SBOM (per-platform subject)
-      if: steps.publish.outputs.index != ''
-      uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e  # v4.1.0
-      with:
-        subject-name: ${{ env.GHCR_IMAGE }}
-        subject-digest: ${{ steps.decide.outputs.digest_arm64 }}
-        sbom-path: in/sbom-paigasus-${{ env.SERVICE }}-arm64.spdx.json
-        push-to-registry: true
-
-  tag-steps: &image-tag-steps
-    - name: Mint the App installation token
-      id: app_token
-      uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # v3.2.0
-      with:
-        client-id: ${{ secrets.PAIGASUS_BOT_APP_ID }}
-        private-key: ${{ secrets.PAIGASUS_BOT_PRIVATE_KEY }}
-        permission-contents: write
-
-    - name: Make the release tag
-      env:
-        GH_TOKEN: ${{ steps.app_token.outputs.token }}
-      run: |
-        set -euo pipefail
-        tag="paigasus-${SERVICE}-v${VERSION}"
-        existing="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${tag}" --jq .object.sha 2> /dev/null || echo none)"
-        if [ "$existing" = "$REVISION" ]; then
-          echo "the tag ${tag} already points at ${REVISION}. Nothing to do."
-          exit 0
-        fi
-        if [ "$existing" != "none" ]; then
-          echo "::error::the tag ${tag} points at ${existing}, not at the image's revision ${REVISION}." >&2
-          exit 1
-        fi
-        gh api --method POST "repos/${GITHUB_REPOSITORY}/git/refs" \
-          -f "ref=refs/tags/${tag}" -f "sha=${REVISION}"
-        echo "TAGGED ${tag} at ${REVISION}"
+          if [ "$existing" != "none" ]; then
+            echo "::error::the tag ${tag} points at ${existing}, not at the image's revision ${REVISION}." >&2
+            exit 1
+          fi
+          gh api --method POST "repos/${GITHUB_REPOSITORY}/git/refs" \
+            -f "ref=refs/tags/${tag}" -f "sha=${REVISION}"
+          echo "TAGGED ${tag} at ${REVISION}"
 ```
 
-- [ ] **Step 5: Add the `gateway` chain**
+- [ ] **Step 4: Add the `gateway` chain**
 
 Copy the four `iam` jobs from Step 3, and change in the copies: every job id suffix `-iam` to
 `-gateway`, `SERVICE: iam` to `SERVICE: gateway`, `skip_iam` to `skip_gateway`, `version_iam` to
 `version_gateway`, `needs.publish-images-iam` to `needs.publish-images-gateway`,
 `group: release-images-iam` to `group: release-images-gateway`, and both image names from
-`paigasus-iam` to `paigasus-gateway`. The three `steps:` aliases stay the same, because the anchors
-read the service from `env:`.
+`paigasus-iam` to `paigasus-gateway`. The three `steps:` VALUES become aliases
+(`steps: *image-build-steps`, `steps: *image-publish-steps`, `steps: *image-tag-steps`) instead of
+repeating the step lists — the anchors read the service from `env:`, so no step text differs
+between the two chains. Drop the `# SMA-658 B2. This anchor is defined HERE…` comment from the
+copy; it applies only to the job that defines the anchor.
 
-- [ ] **Step 6: Lint the workflow**
+- [ ] **Step 5: Lint the workflow**
 
 Run:
 ```bash
 export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
 actionlint -shellcheck= .github/workflows/release.yml; echo "rc=$?"
 ```
-Expected: rc 0.
+Expected: rc 0. B2 was MEASURED against this exact anchor-on-the-iam-job shape with actionlint
+1.7.12: rc 0, where a top-level `x-image-chain:` key rc's 1.
 
-- [ ] **Step 7: Run the guard against the real file**
+- [ ] **Step 6: Run the guard against the real file**
 
 Run:
 ```bash
@@ -1698,9 +2047,10 @@ export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
 uv run --locked --project py --python '>=3.12' python3 ci/actionlint/release_guard.py .github/workflows/release.yml; echo "rc=$?"
 ```
 Expected: rc 0. If V8c reds a chain job, its `needs:` is missing its own approval job. If V13 reds,
-a job outside `publish-images-<svc>` names `release-images` or reads the token.
+a job outside `publish-images-<svc>` names `release-images` or reads the token. If V11 reds
+`tag-iam` or `tag-gateway`, one of them gained `id-token: write` it does not need (S1).
 
-- [ ] **Step 8: Prove the anchors expand**
+- [ ] **Step 7: Prove the anchors expand**
 
 Run:
 ```bash
@@ -1716,26 +2066,29 @@ for jid in ('images-build-iam', 'publish-images-gateway', 'tag-iam'):
 Expected: each job reports a step count above zero. A zero, or a `KeyError`, means an alias did not
 resolve, and the guard would then check an empty job.
 
-- [ ] **Step 9: Check the early-exit-reader ban**
+- [ ] **Step 8: Check the early-exit-reader ban**
 
 Run:
 ```bash
-grep -nE "\|[[:space:]]*(grep[[:space:]]+-[a-zA-Z]*q|grep[[:space:]]+-[a-zA-Z]*m|head|awk)" .github/workflows/release.yml | grep -v "^[[:space:]]*#" | head
+grep -nE "\|[[:space:]]*(grep[[:space:]]+-[a-zA-Z]*q|grep[[:space:]]+-[a-zA-Z]*m|head|awk)" .github/workflows/release.yml | grep -v "^[[:space:]]*#"
 ```
-Expected: no output. Every pipe in the new steps reads its whole input (`sed -n 's/…/p'`).
+Expected: no output. Every pipe in the new steps reads its whole input (`sed -n 's/…/p'`). This
+verification command itself does not pipe into `head` (C4: an earlier draft did, in violation of
+the Global Constraints' own ban) — it is an interactive check, not a gated script, but there is no
+reason for it to break its own rule.
 
-- [ ] **Step 10: Commit**
+- [ ] **Step 9: Commit**
 
 ```bash
-git add .github/workflows/release.yml
+git add .github/workflows/release.yml ci/actionlint/release_guard.py
 git commit -m "$(cat <<'EOF'
 feat(ci): release each service image from its own chain
 
 Each service gets build, approve, publish and tag jobs. The publish job
 adopts a digest that is already published, copies the index to Docker
 Hub, signs both, moves the floating tags only forward, and verifies the
-result. The tag job runs last, so a tag never names an image that does
-not exist.
+result in its own step, after the attestations exist. The tag job runs
+last, so a tag never names an image that does not exist.
 
 Co-Authored-By: <your model name> <noreply@anthropic.com>
 EOF
@@ -1795,9 +2148,9 @@ Expected: FAIL for `SMA-658 a write capability upstream of the approval`. Restor
 
 Delete the `r"imagetools\s+create(?![-\w])",` entry from `PUBLISH_MARKERS`.
 Run: the same self-test.
-Expected: FAIL for a row that expects a publish verdict on an `imagetools create` step. If no row
-fails, the marker has no fixture: add one before restoring, because an unfixtured marker can be
-deleted silently.
+Expected: FAIL for `"sma-658 every new publish marker has a reding fixture"` — the B7 helper
+(Task 6 Step 6) catches this directly, naming the `docker buildx imagetools create …` case. Restore
+the entry.
 
 - [ ] **Step 7: Mutate the service skip rule**
 
@@ -1846,7 +2199,10 @@ EOF
 ### Task 9: Document the release path
 
 **Files:**
-- Modify: `docs/ops/RUNBOOK-containers.md`, `CLAUDE.md`, `docs/superpowers/specs/2026-09-19-sma-658-container-release-design.md`
+- Modify: `docs/ops/RUNBOOK-containers.md`, `CLAUDE.md`,
+  `docs/superpowers/specs/2026-09-19-sma-658-container-release-design.md`
+- Modify: `ci/actionlint/release_guard.py`, `.github/workflows/release.yml` (one reworded string
+  in each, S2 — no behavior change)
 
 **Interfaces:**
 - Consumes: every earlier task.
@@ -1900,6 +2256,15 @@ The first digest published under `:<version>` is final. A later run reads that d
 its own build and continues with the published one, so a re-run can never replace a released
 image. A rebuild never reproduces a digest: the chisel cut resolves the live Ubuntu archive on
 every build.
+
+### If the release plan itself cannot be read
+
+`ci/release-plan/run.sh`'s fail-safe branch writes `skip_iam=false` and `skip_gateway=false` (S12,
+so both chains RUN — the fail-safe direction), but it writes no `version_iam` or `version_gateway`
+at all. Every chain job that got past its gate then hard-fails at the label compare (`the archive
+carries version , but plan says .`), because `plan`'s version output is empty. Read that specific
+failure as "the release plan could not be read" — check the `plan` job's own log — not as a build
+problem in `images-build-<svc>`.
 ```
 
 - [ ] **Step 2: Add the CLAUDE.md entries**
@@ -1935,18 +2300,76 @@ Append to the Gotchas list in `CLAUDE.md`:
   slice does NOT help — it writes a chisel-specific manifest that syft cannot read.
 ```
 
-- [ ] **Step 3: Record the plan's decisions in the spec**
+S8 (should-fix): a second, stale `0.0.0` statement survives in the existing `release-plz.toml`
+bullet. Find this text (lines 451-452):
+
+```markdown
+one explicitly. `paigasus-gateway` / `paigasus-iam` stay at `0.0.0` deliberately: their
+`env!("CARGO_PKG_VERSION")` feeds `ServiceInfo`, and ADR-0020 skew reporting is parked on that
+value (SMA-505 R7).
+```
+
+and replace it with:
+
+```markdown
+one explicitly. `paigasus-gateway` / `paigasus-iam` are versioned BY HAND (SMA-658): each moved
+to `0.1.0` at the first image release, because release-plz never processes a crate whose Cargo
+manifest sets `publish = false` (M7). `env!("CARGO_PKG_VERSION")` feeds `ServiceInfo`, and
+ADR-0020 skew reporting is parked on that value (SMA-505 R7).
+```
+
+- [ ] **Step 3: Reword the ADR-0011 tag-ownership statement (S2)**
+
+Spec § 13 makes an ADR-0011 amendment a precondition of this plan and asks for two existing
+"release-plz owns every tag" statements to be reworded, since `tag-<svc>` (Task 7) now cuts a tag
+too. In `ci/actionlint/release_guard.py`, in `napi_violations`, replace:
+
+```python
+                        f"{name}: job '{job_id}' runs `napi prepublish` without "
+                        f"--no-gh-release. release-plz owns every tag (ADR-0011 S3); napi "
+                        f"must never cut one."
+```
+
+with:
+
+```python
+                        f"{name}: job '{job_id}' runs `napi prepublish` without "
+                        f"--no-gh-release. release-plz owns every CRATE tag (ADR-0011 S3, "
+                        f"amended); napi must never cut one."
+```
+
+In `.github/workflows/release.yml` (near line 1066), in the `publish-npm` job's comment above
+`--no-gh-release`, replace these two lines:
+
+```yaml
+      # defaults ON). release-plz owns every tag — ADR-0011 S3, "the tool owns every tag",
+      # singular. ci/actionlint/release_guard.py's V5 fails if this flag is ever dropped.
+```
+
+with:
+
+```yaml
+      # defaults ON). release-plz owns every CRATE tag — ADR-0011 S3, amended. tag-<svc>
+      # (SMA-658) separately owns each service's IMAGE tag. ci/actionlint/release_guard.py's V5
+      # fails if this flag is ever dropped.
+```
+
+The line above and the four lines below stay unchanged. Record in the task report that ADR-0011
+itself needs the matching amendment in Notion — this plan cannot edit Notion directly.
+
+- [ ] **Step 4: Record the plan's decisions in the spec**
 
 Append to § 16 of `docs/superpowers/specs/2026-09-19-sma-658-container-release-design.md`:
 
 ```markdown
 | P11 | `plan` outputs a VERSION for each service, not only a skip flag. § 6.1 lists only `skip_*`, but § 4.3 step 2 compares the image label with "plan's version", and no other job knows it. |
 | P12 | `publish-images-<svc>` and `tag-<svc>` name `plan` in `needs:` and carry their chain's gate literal. V9b's subject is every direct consumer of `plan`, so a consumer without a literal would red. |
-| P13 | The two chains share their step lists through YAML anchors under a top-level `x-image-chain:` key. GitHub ignores an unknown `x-` key, and PyYAML expands the anchors before `release_guard.py` reads the file, so each job is still checked in full. |
+| P13 | The two chains share their step lists through YAML anchors. MEASURED (SMA-658 B2, actionlint 1.7.12): a top-level `x-image-chain:` key fails schema validation (`unexpected key`), so each anchor (`&image-build-steps`, `&image-publish-steps`, `&image-tag-steps`) is defined on the `iam` job that needs it first, as that job's own `steps:` value, and aliased from the matching `gateway` job. PyYAML still expands the alias before `release_guard.py` reads the file, so each job is checked in full. |
 | P14 | `cargo-auditable` is pinned at `0.7.6` with `cargo install --locked --version`, in the builder stage. It has no proto plugin, so this is the only pin available to it. |
+| P15 | `docker logout docker.io` runs after the `crane tag` loop, not immediately after the Hub `cosign sign` (§ 4.3 step 6's "at once" wording). `crane tag`'s Hub write also needs the credential `docker login` set, so logging out earlier would break it (SMA-658 S15, should-fix — not measured live; verify on the first live release whether that constraint still holds). |
 ```
 
-- [ ] **Step 4: Check the markers are intact**
+- [ ] **Step 5: Check the markers are intact**
 
 Run:
 ```bash
@@ -1954,10 +2377,18 @@ grep -c "ci-targets:begin\|ci-targets:end" CLAUDE.md; grep -c "moon-diagnosis:be
 ```
 Expected: `2` and `2`. A third copy of either marker reds `repo:affected-smoke`.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Lint and commit**
+
+Run:
+```bash
+export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
+uv run --locked --project py ruff check --config py/pyproject.toml ci/actionlint/
+actionlint -shellcheck= .github/workflows/release.yml; echo "rc=$?"
+```
+Expected: `All checks passed!` and `rc=0` — Step 3's reword touches both files.
 
 ```bash
-git add docs/ops/RUNBOOK-containers.md CLAUDE.md docs/superpowers/specs/2026-09-19-sma-658-container-release-design.md
+git add docs/ops/RUNBOOK-containers.md CLAUDE.md docs/superpowers/specs/2026-09-19-sma-658-container-release-design.md ci/actionlint/release_guard.py .github/workflows/release.yml
 git commit -m "$(cat <<'EOF'
 docs(docs): document the service image release path
 
@@ -1995,11 +2426,12 @@ After the pull request is open, collect and record:
 ## Self-review record
 
 - **Spec coverage.** § 3.1 V-a → Tasks 2, 3. § 3.3 the bump → Task 2. § 3.4 the comments → Task 2.
-  § 4.1 the gates → Tasks 4, 7. § 4.2 the build job → Task 7. § 4.3 the publish job, all eight
-  steps → Task 7. § 4.4 the tag job → Task 7. § 4.5 and AC 7 → Task 1. § 5 recovery (D10) → Task 7
-  Step 4. § 6.1 and § 6.2 → Tasks 3, 4. § 7.1 V8, V9b, V9c and the markers → Tasks 5, 6. § 7.2 V10,
-  V13, V11 → Task 6. § 7.3 the fixtures and the mutation pass → Tasks 5, 6, 8. § 7.4 no registry
-  change → the File Structure note. § 11 AC 1 to AC 9 → Tasks 7, 8, 10. § 14 the documents →
+  § 4.1 the gates → Tasks 4, 7. § 4.2 the build job → Task 7. § 4.3 the publish job, now split into
+  the push/adopt/copy/sign step, the three `attest-*` steps and the Verify step (B6) → Task 7.
+  § 4.4 the tag job → Task 7. § 4.5 and AC 7 → Task 1. § 5 recovery (D10) → Task 7 Step 3. § 6.1 and
+  § 6.2 → Tasks 3, 4. § 7.1 V8, V9b, V9c and the markers → Tasks 5, 6. § 7.2 V10, V13, V11 → Task 6.
+  § 7.3 the fixtures and the mutation pass → Tasks 5, 6, 8. § 7.4 no registry change → the File
+  Structure note. § 11 AC 1 to AC 9 → Tasks 7, 8, 10. § 13 ADR-0011 → Task 9. § 14 the documents →
   Task 9.
 - **Gaps found in the spec, and what this plan does.** § 6.1 omits the version outputs (P11). § 4.3
   omits that a `needs: plan` job must carry a gate literal (P12). § 4.2's "the per-platform digest
@@ -2011,3 +2443,12 @@ After the pull request is open, collect and record:
   Docker Hub and its digest equality, the cosign signature on Docker Hub, `gh attestation verify`
   against a `release.yml` identity, the App token's tag API call, and each approval's pause. The
   GHCR half of the sequence is proven by `images-rehearsal.yml` on `main`.
+- **Corrections from the SMA-658 PR 2 pre-flight scan (2026-09-20), applied throughout this plan.**
+  The two chains' shared step lists no longer live under a top-level `x-image-chain:` key — MEASURED,
+  actionlint 1.7.12 rejects that key — so each anchor sits on the `iam` job that needs it first
+  (B2). `gh attestation verify` moved out of the publish step into its own, later "Verify the
+  signature and attestations" step, run after the `attest-*` action steps actually create something
+  to verify (B6). `EXPECTED_RELEASE_SECRETS` gains `DOCKERHUB_TOKEN` in Task 7, alongside the job
+  that references it, not in Task 6 (B5). V11 now also forbids `id-token: write` outside
+  `OIDC_PUBLISH_JOBS` (S1). `docker logout` stays after the `crane tag` loop rather than moving
+  next to `cosign sign`, because `crane tag`'s Hub write needs the same credential (S15, P15).
