@@ -150,3 +150,30 @@ updates:
           - "version-update:semver-major"
           - "version-update:semver-minor"
           - "version-update:semver-patch"
+
+  # SMA-513: ts/Dockerfile pins gcr.io/distroless/nodejs24-debian12 by digest. Covered here for
+  # the same reason the /rs block exists — a pinned-and-never-updated base is the mirror image of
+  # the floating-tag risk. The version-update ignores are deliberate: assert_console_pins in
+  # ci/images/run.sh couples the base's Node MAJOR to .prototools' node pin, so an automated
+  # major bump is a red Dependabot cannot fix on its own. Digest updates within a major still
+  # flow through.
+  - package-ecosystem: docker
+    directory: /ts
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Etc/UTC
+    commit-message:
+      prefix: "build(deps)"
+      prefix-development: "build(deps)"
+    groups:
+      docker-minor-patch:
+        applies-to: version-updates
+        update-types:
+          - minor
+          - patch
+    ignore:
+      - dependency-name: "gcr.io/distroless/nodejs24-debian12"
+        update-types:
+          - "version-update:semver-major"
