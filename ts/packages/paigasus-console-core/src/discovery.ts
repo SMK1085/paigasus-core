@@ -97,6 +97,13 @@ export type ConnectionLossSource = {
  * node-redis error message can embed the DSN, the error classes do not set `name`, and a
  * production bundle can mangle `constructor.name`. SocketTimeoutDuringMaintenanceError is not a
  * subclass of SocketTimeoutError, so it maps to `other`.
+ *
+ * Safe across the two module copies (SMA-662). watchConnectionLoss registers this listener below,
+ * inside the same redisDescriptorCache call that created the client, so the copy whose `redis`
+ * import built the error object is always the copy whose `redis` import these two checks resolve.
+ * That pairing is the whole argument, and it holds however many clients exist: it does NOT rest on
+ * descriptorCacheFor running once per process, which the exported resetDiscoveryForTest can
+ * defeat.
  */
 function connectionLossReason(error: unknown): ConnectionLossReason {
   if (error instanceof SocketTimeoutError) return 'socket_timeout';
@@ -271,6 +278,11 @@ export function withOperationDeadline(inner: DescriptorCache, client: ReadySourc
         }),
       ]);
     } catch (error) {
+      // Safe across the two module copies (SMA-662): this class is thrown just above, at the
+      // circuit-open guard and in the deadline timer, and caught here — all inside the one
+      // `bounded` closure, which the other copy reaches through globalThis and runs verbatim. The
+      // error that escapes below DOES cross, and nothing out there classifies it:
+      // @paigasus/discovery bare-catches every cache failure and names no class.
       if (error instanceof DescriptorCacheTimeoutError && error.phase === 'deadline') {
         // D6: concurrent operations all expire together. Only the FIRST opens the circuit and logs,
         // or one wedge would log a line per operation and the cooldown would never elapse.
