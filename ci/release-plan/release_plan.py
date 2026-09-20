@@ -284,6 +284,18 @@ def repo_tags(repo_root: Path) -> set[str]:
 # skip.
 EXPECTED_SERVICES: dict[str, str] = {"iam": "paigasus-iam", "gateway": "paigasus-gateway"}
 
+# PR 2 review, minor: a service version must be exactly MAJOR.MINOR.PATCH. Without this,
+# `0.1.0-rc1` was read as an ordinary version, ran the whole chain — GHCR push, both
+# attestations, the Docker Hub copy, both signatures — and only failed at the very end, in
+# `ci/images/release_decision.py`'s `floating` step, whose own VERSION_RE has the same shape but
+# cannot help a release that has already written to two registries. Catching it here, at the one
+# place the version is first read, makes the release-images `decide` step's label compare
+# (`"${label}" != "${VERSION}"`) reject it BEFORE the first registry write, since an invalid
+# version is treated the same as any other inconclusive read (see service_state's docstring): the
+# chain still runs (fail-safe), but with an EMPTY plan version, which mismatches the archive's
+# real label immediately.
+_SERVICE_VERSION_RE = re.compile(r"\d+\.\d+\.\d+")
+
 _CHANGELOG_HEADING = re.compile(r"^##\s+\[?(?P<version>[0-9][^\]\s]*)\]?", re.M)
 
 
@@ -297,10 +309,15 @@ def changelog_names_version(text: str, version: str) -> bool:
 
 
 def service_skips(version: str, service: str, tags: set[str]) -> bool:
-    """Spec § 6.1. Skip when there is no real version yet, or when the tag already exists."""
+    """Spec § 6.1. Skip when there is no real version yet, or when the tag already exists.
+
+    PR 2 review, minor: the crate name comes from EXPECTED_SERVICES, the one source this module
+    already keeps for it (see its own comment above) — not rebuilt here as `f"paigasus-{service}"`,
+    which duplicated the naming convention in a second place for no reason.
+    """
     if version == "0.0.0":
         return True
-    return tag_for(f"paigasus-{service}", version) in tags
+    return tag_for(EXPECTED_SERVICES[service], version) in tags
 
 
 def service_state(rs_root: Path, tags: set[str]) -> dict[str, tuple[bool, str]]:
@@ -320,6 +337,9 @@ def service_state(rs_root: Path, tags: set[str]) -> dict[str, tuple[bool, str]]:
             version = pkg.get("version")
             if not isinstance(version, str):
                 raise InconclusiveError(f"{crate} has no literal [package] version in {manifest}")
+            if version != "0.0.0" and _SERVICE_VERSION_RE.fullmatch(version) is None:
+                raise InconclusiveError(
+                    f"{crate}'s version {version!r} in {manifest} is not MAJOR.MINOR.PATCH")
             out[service] = (service_skips(version, service, tags), version)
         except Exception as exc:  # deliberately broad; see the docstring above.
             print(f"release-plan: {service} is inconclusive ({type(exc).__name__}: {exc}) — run",
@@ -839,6 +859,50 @@ def _mixed_service_tree(tmp: str) -> Path:
     return rs_root
 
 
+def _malformed_service_version_tree(tmp: str) -> Path:
+    """A service crate with a version that is not MAJOR.MINOR.PATCH.
+
+    PR 2 review, minor. MEASURED before this check existed: `0.1.0-rc1` read as an ordinary
+    version — it is not `0.0.0` and no tag named it yet, so `service_skips` returned False (run)
+    — and the chain ran all the way through the GHCR push, both attestations, the Docker Hub copy
+    and both signatures before `ci/images/release_decision.py`'s `floating` step finally rejected
+    it. `paigasus-gateway` stays healthy, mirroring `_mixed_service_tree`'s shape, to prove the
+    rejection stays scoped to `iam` alone.
+    """
+    rs_root = Path(tmp) / "rs"
+    kernel_dir = rs_root / "crates" / "libs" / "paigasus-kernel"
+    iam_dir = rs_root / "crates" / "services" / "paigasus-iam"
+    gateway_dir = rs_root / "crates" / "services" / "paigasus-gateway"
+    for d in (kernel_dir, iam_dir, gateway_dir):
+        d.mkdir(parents=True)
+    (rs_root / "Cargo.toml").write_text(
+        '[workspace]\nmembers = ["crates/libs/*", "crates/services/*"]\n')
+    (rs_root / "release-plz.toml").write_text("")
+    (kernel_dir / "Cargo.toml").write_text(
+        '[package]\nname = "paigasus-kernel"\nversion = "0.1.0"\n')
+    (iam_dir / "Cargo.toml").write_text(
+        '[package]\nname = "paigasus-iam"\nversion = "0.1.0-rc1"\npublish = false\n')
+    (gateway_dir / "Cargo.toml").write_text(
+        '[package]\nname = "paigasus-gateway"\nversion = "0.1.0"\npublish = false\n')
+    return rs_root
+
+
+def _service_version_format_is_rejected() -> str | None:
+    tmp = tempfile.mkdtemp()
+    try:
+        rs_root = _malformed_service_version_tree(tmp)
+        state = service_state(rs_root, set())
+        if state.get("iam") != (False, ""):
+            return (f"the malformed iam version did not read as (False, '') (run with an empty, "
+                     f"never-matching plan version): {state.get('iam')!r}")
+        if state.get("gateway") != (False, "0.1.0"):
+            return (f"the healthy gateway crate was affected by iam's malformed version: "
+                     f"{state.get('gateway')!r}")
+        return None
+    finally:
+        shutil.rmtree(tmp)
+
+
 def _service_state_is_a_separate_failure_domain() -> str | None:
     tmp = tempfile.mkdtemp()
     try:
@@ -930,6 +994,8 @@ COLLECTION_ROWS: tuple[tuple[str, Callable[[], str | None]], ...] = (
     ("SMA-658 service_state is a separate failure domain", _service_state_is_a_separate_failure_domain),
     ("SMA-658 fix round 1: a non-UTF-8 CHANGELOG.md makes --assert exit 3, not 1",
      _changelog_undecodable_asserts_three),
+    ("PR 2 review: a non-MAJOR.MINOR.PATCH service version is rejected",
+     _service_version_format_is_rejected),
 )
 
 

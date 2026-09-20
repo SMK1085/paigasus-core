@@ -1223,8 +1223,10 @@ jobs:
           manifest="$(printf '%s\n' "$digests" | sed -n 's/^manifest=//p')"
           # I2 (SMA-658 fix round 1): write the digest into the uploaded artifact, BEFORE
           # upload, so the publish job can compare it against a digest it computes itself from
-          # the DOWNLOADED archive. Without this file, both sides of that comparison would read
-          # the same archive, and a corrupted or swapped artifact hop would be undetectable.
+          # the DOWNLOADED archive. This file travels in the SAME artifact as the tar it
+          # describes (PR 2 review, I3): the comparison proves the upload/download hop did not
+          # CORRUPT the tar. It does not prove the tar and this file were not swapped together --
+          # that would need a digest recorded somewhere outside this artifact.
           printf '%s\n' "$manifest" > "out/digest-${ARCH}.txt"
 
       - name: Smoke this service
@@ -1334,6 +1336,8 @@ jobs:
 
       - name: Check the artifact hop and read the decision
         id: decide
+        env:
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
         run: |
           set -euo pipefail
           # S3 (SMA-658): only a registry's own "no such tag" answer may read as "the digest is
@@ -1362,10 +1366,11 @@ jobs:
             digests="$(uv run --no-project --python '>=3.12' python3 ci/images/release_decision.py oci-digests "$archive")"
             manifest_digest="$(printf '%s\n' "$digests" | sed -n 's/^manifest=//p')"
             # I2 (SMA-658 fix round 1): the build job wrote this file from the archive it just
-            # built, before upload. Comparing it against the digest computed here, from the
-            # DOWNLOADED archive, is what proves the artifact hop did not corrupt or swap
-            # anything -- without an independent source, both sides of the check would read the
-            # same bytes.
+            # built, before upload. This file and the archive travel in the SAME artifact
+            # (PR 2 review, I3), so comparing it against the digest computed here, from the
+            # DOWNLOADED archive, proves the upload/download hop did not CORRUPT the archive. It
+            # does not prove the two were not swapped together -- that would need a digest
+            # recorded somewhere outside this artifact.
             built_digest="$(cat "in/digest-${arch}.txt")"
             if [ "$manifest_digest" != "$built_digest" ]; then
               echo "::error::the ${arch} archive's digest changed between build and download: built ${built_digest}, downloaded ${manifest_digest}." >&2
@@ -1398,11 +1403,20 @@ jobs:
             git_tag=absent
           fi
           ghcr="$(digest_or_none "${GHCR_IMAGE}:${VERSION}")"
+          # I2 (SMA-658 PR 2 review): the first live run reads Docker Hub before this job ever
+          # logs in. An anonymous read of a missing or private repository answers 401, which
+          # digest_or_none (correctly, S3 above) treats as fatal -- only MANIFEST_UNKNOWN,
+          # NAME_UNKNOWN and 404 read as "absent". Authenticate first, with the same trap
+          # discipline the later steps that write to Docker Hub already use.
+          echo "$DOCKERHUB_TOKEN" | docker login docker.io --username smaschek --password-stdin
+          trap 'docker logout docker.io || true' EXIT
           hub="$(digest_or_none "${HUB_IMAGE}:${VERSION}")"
           echo "ghcr=${ghcr} dockerhub=${hub} git_tag=${git_tag}"
-          echo "ghcr=${ghcr}" >> "$GITHUB_OUTPUT"
-          echo "dockerhub=${hub}" >> "$GITHUB_OUTPUT"
-          echo "git_tag=${git_tag}" >> "$GITHUB_OUTPUT"
+          {
+            echo "ghcr=${ghcr}"
+            echo "dockerhub=${hub}"
+            echo "git_tag=${git_tag}"
+          } >> "$GITHUB_OUTPUT"
 
       # I3 (SMA-658 fix round 1): this used to be one step that pushed, copied to Docker Hub,
       # signed BOTH registries and wrote the floating tags, all before the attest-* steps below
@@ -1459,9 +1473,11 @@ jobs:
               exit 1
             fi
             already_revision="$(revision_of "${already_image}@${already_existing}")"
-            echo "revision=${already_revision}" >> "$GITHUB_OUTPUT"
-            echo "action=already-released" >> "$GITHUB_OUTPUT"
-            echo "copy_to=none" >> "$GITHUB_OUTPUT"
+            {
+              echo "revision=${already_revision}"
+              echo "action=already-released"
+              echo "copy_to=none"
+            } >> "$GITHUB_OUTPUT"
             exit 0
           fi
           if [ "$action" = "push-new" ]; then
@@ -1509,9 +1525,11 @@ jobs:
             fi
           fi
           cosign sign --yes "${GHCR_IMAGE}@${index}"
-          echo "index=${index}" >> "$GITHUB_OUTPUT"
-          echo "action=${action}" >> "$GITHUB_OUTPUT"
-          echo "copy_to=${copy_to}" >> "$GITHUB_OUTPUT"
+          {
+            echo "index=${index}"
+            echo "action=${action}"
+            echo "copy_to=${copy_to}"
+          } >> "$GITHUB_OUTPUT"
           if [ "$action" = "push-new" ]; then
             echo "revision=${REVISION}" >> "$GITHUB_OUTPUT"
           else

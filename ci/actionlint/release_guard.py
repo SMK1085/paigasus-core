@@ -178,7 +178,14 @@ STATUS_FUNCS = ("always", "cancelled", "success", "failure")
 #
 # `npm\s+publish` deliberately also matches `pnpm publish` (the substring is contained in it).
 # That is a superset in the safe direction: it detects more publish mechanisms, never fewer.
-PUBLISH_MARKERS = (
+# V8e (SMA-658 fix round 2 review, I1). Split into two classes, not one flat tuple, because a
+# CHAIN approval (a service image chain's own gate) must authorise only ITS OWN registry — a
+# package-registry marker matching downstream of a chain approval is a crates.io/npm/PyPI publish
+# riding on an image approval, which spec § 7.1 and CHAIN_APPROVALS' own comment both say must
+# never happen. PACKAGE_PUBLISH_MARKERS is the original V6/V7 vocabulary (pre-SMA-658);
+# CONTAINER_PUBLISH_MARKERS is the SMA-658 addition. PUBLISH_MARKERS stays the union, used by every
+# existing V6/V7/V8b/V8c consumer that must not care which class matched.
+PACKAGE_PUBLISH_MARKERS = (
     r"release-plz\s+release(?![-\w])",
     r"npm\s+publish",
     r"yarn\s+publish",
@@ -189,6 +196,8 @@ PUBLISH_MARKERS = (
     r"maturin\s+publish",
     r"maturin\s+upload",
     r"uv\s+publish",
+)
+CONTAINER_PUBLISH_MARKERS = (
     # SMA-658. Container registries and the tag API. Bounded ends, like the release-plz marker
     # above: `crane pusher` must not match `crane push`.
     r"docker\s+push(?![-\w])",
@@ -207,7 +216,11 @@ PUBLISH_MARKERS = (
     # today, and a false positive here costs a human look, not a missed publish.
     r"git/refs(?![-\w])",
 )
+PUBLISH_MARKERS = PACKAGE_PUBLISH_MARKERS + CONTAINER_PUBLISH_MARKERS
 _PUBLISH_RE = re.compile("|".join(PUBLISH_MARKERS))
+# V8e's own regex — package-registry markers ONLY. A chain job may match CONTAINER_PUBLISH_MARKERS
+# freely (that is its whole job); matching this one is the violation.
+_PACKAGE_PUBLISH_RE = re.compile("|".join(PACKAGE_PUBLISH_MARKERS))
 
 # V5: matches V6's own whitespace tolerance (`napi\s+prepublish` in PUBLISH_MARKERS above). V5 used
 # to test the literal substring "napi prepublish", so `napi  prepublish` (two spaces) or a tab
@@ -702,10 +715,14 @@ def _dry_run_exempts(segment: str, after: int) -> bool:
     return False
 
 
-def job_publishes(job: dict, where: str = "a job") -> bool:
+def job_publishes(job: dict, where: str = "a job", *, pattern: re.Pattern[str] = _PUBLISH_RE) -> bool:
     """V6 detection. Used for called workflows, and (fix round 1, Critical 1) as the shared
     step-level primitive `approval_boundary_violations` and `callee_boundary_violations` both
     build V8 on.
+
+    `pattern` defaults to the full union (_PUBLISH_RE); V8e passes _PACKAGE_PUBLISH_RE to ask the
+    narrower question "does this job match a PACKAGE-registry marker", reusing the same
+    per-segment, dry-run-aware scan rather than a second hand-rolled loop.
 
     Fix round 1, Important 3: evaluated per LINE, not per whole `run:` block. A `--dry-run`
     occurrence reaches no registry — `napi prepublish --dry-run --no-gh-release` (prebuild.yml)
@@ -730,7 +747,7 @@ def job_publishes(job: dict, where: str = "a job") -> bool:
         blob = f"{step.get('run', '')}\n{step.get('uses', '')}"
         for line in blob.splitlines():
             for segment in command_segments(line):
-                m = _PUBLISH_RE.search(segment)
+                m = pattern.search(segment)
                 if not m:
                     continue
                 if _dry_run_exempts(segment, m.end()):
@@ -1330,6 +1347,39 @@ def approval_boundary_violations(jobs: dict, name: str) -> list[str]:
     return deduped
 
 
+def chain_scope_violations(jobs: dict, name: str) -> list[str]:
+    """V8e (SMA-658 fix round 2 review, I1). V8b/V8c prove every publish step sits downstream of
+    SOME approval gate; neither asks WHICH gate. MEASURED: inserting `run: cargo publish -p
+    paigasus-iam` into `publish-images-iam` left the guard at exit 0 — the job already sits
+    downstream of `approve-images-iam`, so V8c is satisfied, but that gate is an IMAGE approval
+    and letting it authorise a crates.io publish contradicts the invariant CHAIN_APPROVALS'
+    own comment states and spec § 7.1: an image approval must not authorise a crates.io publish.
+
+    A job whose `approval_for_job` resolves to a CHAIN approval (one of CHAIN_APPROVALS' values,
+    never the kernel APPROVAL_JOB) may reach a registry only through the container/tag marker
+    class. A PACKAGE_PUBLISH_MARKERS match on such a job is a violation regardless of where the
+    job sits relative to any gate — V8b/V8c already proved the gate exists; this proves it is the
+    RIGHT one.
+    """
+    out: list[str] = []
+    for jid, job in jobs.items():
+        if not isinstance(job, dict):
+            continue
+        approval = approval_for_job(jid)
+        if approval == APPROVAL_JOB:
+            continue
+        if job_publishes(job, f"{name}: job '{jid}'", pattern=_PACKAGE_PUBLISH_RE):
+            out.append(
+                f"{name}: V8e: job '{jid}' is gated by the chain approval '{approval}', not the "
+                f"kernel gate '{APPROVAL_JOB}'. It contains a step matching a package-registry "
+                f"publish marker (cargo/npm/yarn/pypi/napi/maturin/uv/release-plz). A chain "
+                f"approval authorises only that chain's own container publish; a package publish "
+                f"must sit behind '{APPROVAL_JOB}' instead."
+            )
+    seen: set[str] = set()
+    return [v for v in out if not (v in seen or seen.add(v))]
+
+
 def plan_run_segments(run_text: str) -> list[str]:
     """Every non-empty command segment of a `run:` block, comments already stripped."""
     return [seg.strip()
@@ -1598,6 +1648,9 @@ def check_main(doc: dict, name: str) -> list[str]:
     # V8: the approval boundary, both directions. Called once, outside the per-job loop above —
     # that loop has `continue` statements that would skip a call placed inside it.
     out += approval_boundary_violations(jobs, name)
+    # V8e: a chain approval must not authorise a package-registry publish. Same reason as V8
+    # above: called once, outside the per-job loop.
+    out += chain_scope_violations(jobs, name)
     # V9: the plan job's output wiring and fail-safe polarity. Same reason as V8: called once,
     # outside the per-job loop, which the loop's `continue` statements would otherwise skip.
     out += plan_contract_violations(jobs, name)
@@ -2768,6 +2821,24 @@ FIXTURES: list[tuple[str, str, str, str | None]] = [
                              "    needs: [plan, images-build-iam, approve-release]")
      .replace("steps: [{run: crane push layout ghcr.io/smk1085/paigasus-iam:x}]",
               "steps: [{run: cargo publish}]"), "'approve-images-iam' is not on its needs: path"),
+    # V8e (SMA-658 fix round 2 review, I1). MEASURED: inserting `run: cargo publish -p
+    # paigasus-iam` into `publish-images-iam` left the OLD guard at exit 0 — the job already sits
+    # downstream of its own chain's approval, so V8b/V8c see nothing wrong, and nothing else in
+    # this file asked WHICH gate authorised it. One row each way: a chain publisher matching only
+    # the container/tag marker class stays clean (below swaps `crane push` for `cosign sign`,
+    # still container-class, to prove the new code does not overreact to every marker change);
+    # the same job additionally matching a package-registry marker reds.
+    ("SMA-658 V8e: a chain publisher matching only a container marker stays clean", "main",
+     _OK_IMAGES_MAIN.replace(
+         "steps: [{run: crane push layout ghcr.io/smk1085/paigasus-iam:x}]",
+         "steps: [{run: cosign sign --yes ghcr.io/smk1085/paigasus-iam@sha256:x}]"),
+     None),
+    ("SMA-658 V8e: a chain publisher also matching a package-registry marker reds", "main",
+     _OK_IMAGES_MAIN.replace(
+         "steps: [{run: crane push layout ghcr.io/smk1085/paigasus-iam:x}]",
+         "steps: [{run: 'crane push layout ghcr.io/smk1085/paigasus-iam:x && "
+         "cargo publish -p paigasus-iam'}]"),
+     "V8e: job 'publish-images-iam' is gated by the chain approval 'approve-images-iam'"),
     ("SMA-658 the service approval loses its environment", "main",
      _OK_IMAGES_MAIN.replace("    needs: [images-build-iam]\n    environment: release-approval",
                              "    needs: [images-build-iam]"), "V8a"),
@@ -3505,6 +3576,24 @@ def _non_list_steps_fails_closed() -> str | None:
     return None
 
 
+def _ungated_jobs_pinned() -> str | None:
+    """I4 (PR 2 review). Nothing pinned `UNGATED_JOBS`'s membership. MEASURED: adding an id to
+    that frozenset switches off V1 (the gating rule) AND V7 (the publish detector V7 applies to
+    every member) for it, with the whole suite still green — an exemption this file's own comment
+    at UNGATED_JOBS says must be paired with a publish-detector check would otherwise be
+    extendable to any job by a one-line edit nothing here notices.
+
+    Strict equality, the same shape as EXPECTED_RELEASE_SECRETS above: a superset is exactly as
+    dangerous as an unpinned set, since either lets a new ungated, unchecked job through silently.
+    If this reds: re-baseline it DELIBERATELY, with a comment saying why the new job cannot reach
+    a registry (V7 still applies to it and will catch a publish step that contradicts that claim).
+    """
+    expected_ungated_jobs = {"release-pr"}
+    if expected_ungated_jobs != UNGATED_JOBS:
+        return f"UNGATED_JOBS is {sorted(UNGATED_JOBS)!r}, expected exactly ['release-pr']"
+    return None
+
+
 def _important5_regressions() -> list[str]:
     """Regression tests for Important 5: a file that IS a readable path (`is_file()` True) but
     cannot actually be read must still infra (exit 2), never surface an unhandled traceback that
@@ -3624,6 +3713,7 @@ def self_test() -> int:
         ("sma-658 every new publish marker has a reding fixture", _sma658_new_publish_markers_bite),
         ("sma-658 fix round 1, I3: V13's cross-workflow sweep", _v13_cross_workflow_sweep),
         ("f7 non-list steps: fails closed", _non_list_steps_fails_closed),
+        ("pr2 review i4: UNGATED_JOBS is pinned by strict equality", _ungated_jobs_pinned),
     ):
         err = fn()
         if err:
