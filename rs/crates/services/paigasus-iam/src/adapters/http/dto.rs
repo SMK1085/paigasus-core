@@ -276,6 +276,47 @@ impl From<PrincipalContext> for IntrospectResponseDto {
     }
 }
 
+/// `WhoAmIResponse`-shaped JSON: mirrors proto `paigasus.iam.v1.WhoAmIResponse` field-for-field.
+///
+/// Separate from [`IntrospectResponseDto`] for the same reason the proto messages are separate:
+/// this one must express an API-key caller, whose `issuer`/`subject` are empty and whose expiry
+/// may be absent. `IntrospectResponseDto` keeps its non-optional `expires_at`, so
+/// `POST /v1/authn/introspect`'s response shape is unchanged.
+#[derive(Debug, Clone, Serialize)]
+pub struct WhoAmIResponseDto {
+    pub principal_prn: String,
+    pub status: String,
+    pub issuer: String,
+    pub subject: String,
+    /// Absent, not null: a key minted without an expiry has none to report.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<DateTime<Utc>>,
+    pub memberships: Vec<MembershipDto>,
+    pub role_grants: Vec<RoleGrantRefDto>,
+}
+
+impl From<PrincipalContext> for WhoAmIResponseDto {
+    fn from(ctx: PrincipalContext) -> Self {
+        let expires_at = ctx.principal.expires_at();
+        let principal = ctx.principal;
+        let (issuer, subject) = match principal.credential {
+            Credential::Oidc { issuer, subject, .. } => (issuer.as_str().to_string(), subject),
+            // A service account has no (issuer, subject) pair. No debug_assert here: unlike
+            // Introspect's, this arm IS reachable — AuthEnforce accepts an API-key bearer.
+            Credential::ApiKey { .. } => (String::new(), String::new()),
+        };
+        WhoAmIResponseDto {
+            principal_prn: principal.principal_id.canonical(),
+            status: principal.status.as_str().to_string(),
+            issuer,
+            subject,
+            expires_at,
+            memberships: ctx.memberships.into_iter().map(MembershipDto::from).collect(),
+            role_grants: ctx.role_grants.into_iter().map(RoleGrantRefDto::from).collect(),
+        }
+    }
+}
+
 /// Body for `POST /v1/authz/is-authorized` (spec §9.1's `IsAuthorizedRequest` field-for-
 /// field). `context` defaults to empty when the key is omitted entirely, matching proto3's
 /// default-empty-map semantics for `map<string,string> context = 4`.
@@ -812,5 +853,46 @@ mod tests {
 
         let dto = IntrospectApiKeyResponseDto::from(ctx);
         assert_eq!(dto.scope_prn, scope_prn, "the HTTP introspect DTO must carry the key's scope_prn (SMA-446, D11)");
+    }
+
+    /// `PrincipalContext` fixture for an API-key-authenticated caller — mirrors
+    /// `introspect_api_key_dto_carries_scope_prn`'s construction and `grpc::convert`'s own
+    /// `api_key_context` test fixture. `expires_at` is a parameter because
+    /// `Credential::ApiKey.expires_at` is an `Option`: a key may have been minted with no
+    /// expiry, and `who_am_i_response_dto_omits_an_absent_expiry` exercises that.
+    fn api_key_context(expires_at: Option<DateTime<Utc>>) -> PrincipalContext {
+        PrincipalContext {
+            principal: AuthnPrincipal {
+                principal_id: principal(50),
+                kind: PrincipalKind::ServiceAccount,
+                status: PrincipalStatus::Active,
+                credential: Credential::ApiKey {
+                    key_id: ApiKeyId::from_uuid(Uuid::from_u128(50)),
+                    expires_at,
+                    scope_prn: "prn:pgs:iam:::organization/0192f1c0-0000-7000-8000-000000000050".to_string(),
+                },
+            },
+            memberships: Vec::new(),
+            role_grants: Vec::new(),
+        }
+    }
+
+    /// An API key minted with no expiry must produce NO `expires_at` key — not `null`, and not
+    /// a fabricated timestamp. `IntrospectResponseDto` cannot express this, which is why
+    /// WhoAmI has its own DTO.
+    #[test]
+    fn who_am_i_response_dto_omits_an_absent_expiry() {
+        let dto = WhoAmIResponseDto::from(api_key_context(None));
+        let json = serde_json::to_value(&dto).unwrap();
+        assert!(json.get("expires_at").is_none(), "expected no expires_at key, got {json}");
+    }
+
+    #[test]
+    fn who_am_i_response_dto_reports_an_api_key_expiry_when_there_is_one() {
+        let expiry = Utc::now() + chrono::Duration::hours(1);
+        let dto = WhoAmIResponseDto::from(api_key_context(Some(expiry)));
+        assert_eq!(dto.expires_at, Some(expiry));
+        assert_eq!(dto.issuer, "");
+        assert_eq!(dto.subject, "");
     }
 }
