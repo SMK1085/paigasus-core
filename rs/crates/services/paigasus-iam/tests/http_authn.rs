@@ -15,8 +15,8 @@ use axum::body::to_bytes;
 use axum::http::StatusCode;
 use paigasus_iam::adapters::http::{AppState, router};
 use paigasus_iam::application::authenticate_token::Provisioning;
-use serde_json::json;
 use paigasus_iam_core::authz::model::root_prn;
+use serde_json::json;
 use support::{app_with_state, seed_platform_admin, send, send_raw, send_raw_parts, start_mock_idp, test_config, test_config_with};
 use uuid::Uuid;
 
