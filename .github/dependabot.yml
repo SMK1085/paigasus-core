@@ -177,3 +177,12 @@ updates:
       - dependency-name: "gcr.io/distroless/nodejs24-debian12"
         update-types:
           - "version-update:semver-major"
+      # assert_console_pins in ci/images/run.sh holds the builder's exact X.Y.Z equal to
+      # .prototools' node pin, so an automated bump is a red Dependabot cannot fix on its own.
+      # Only a digest refresh on this exact version can flow through automatically; a version
+      # bump stays deliberate, human, and moves the Dockerfile and .prototools together.
+      - dependency-name: "node"
+        update-types:
+          - "version-update:semver-major"
+          - "version-update:semver-minor"
+          - "version-update:semver-patch"
