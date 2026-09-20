@@ -514,6 +514,38 @@ mod tests {
         }
     }
 
+    /// Returns `list_by_principal` in a FIXED, code-chosen order — never `InMemoryRoleGrants`'s
+    /// `HashMap` iteration order, which reseeds its `RandomState` every process and made an
+    /// earlier version of the sort mutation check a coin flip (SMA-633 review finding 1: the
+    /// first `.sort_by` deletion run passed, and only 3 of 5 re-runs failed). Only
+    /// `list_by_principal` is reached by `introspect`; the rest satisfy the trait.
+    struct FixedOrderGrants(Vec<RoleGrant>);
+
+    #[async_trait]
+    impl RoleGrantStore for FixedOrderGrants {
+        async fn grant(&self, _g: &RoleGrant) -> Result<(), AuthzError> {
+            unimplemented!("this fake only exercises list_by_principal")
+        }
+        async fn revoke(&self, _id: Uuid) -> Result<(), AuthzError> {
+            unimplemented!("this fake only exercises list_by_principal")
+        }
+        async fn grant_in(&self, _tx: &dyn Transaction, _g: &RoleGrant) -> Result<(), AuthzError> {
+            unimplemented!("this fake only exercises list_by_principal")
+        }
+        async fn revoke_in(&self, _tx: &dyn Transaction, _id: Uuid) -> Result<bool, AuthzError> {
+            unimplemented!("this fake only exercises list_by_principal")
+        }
+        async fn list_all(&self) -> Result<Vec<RoleGrant>, AuthzError> {
+            unimplemented!("this fake only exercises list_by_principal")
+        }
+        async fn list_by_principal(&self, _p: &PrincipalId) -> Result<Vec<RoleGrant>, AuthzError> {
+            Ok(self.0.clone())
+        }
+        async fn find(&self, _id: Uuid) -> Result<Option<RoleGrant>, AuthzError> {
+            unimplemented!("this fake only exercises list_by_principal")
+        }
+    }
+
     #[tokio::test]
     async fn known_identity_resolves_without_provisioning() {
         let store = AuthnStore::default();
@@ -961,29 +993,43 @@ mod tests {
         assert!(ctx.role_grants.iter().any(|g| g.role_key == "org_admin" && g.scope_prn == org.canonical()));
     }
 
-    /// Spec D7: the order is `(scope_prn, role_key)`, not insertion order and not the
-    /// fake's `HashMap` iteration order. The two grants share a scope and differ only in
-    /// role key, which the database's `uq_role_grant_principal_role_scope` permits.
+    /// Spec D7: the order is `(scope_prn, role_key)` — `scope_prn` PRIMARY, `role_key`
+    /// secondary. `grant_org` and `grant_root` deliberately disagree on the two components:
+    /// by `scope_prn` alone, `"organization/…"` sorts before `"root/…"` (so `grant_org`
+    /// comes first); by `role_key` alone, `"aaa_role"` sorts before `"zzz_role"` (so
+    /// `grant_root` would come first). A `sort_by` narrowed to `role_key` only — or deleted
+    /// entirely — therefore produces the WRONG order here, unlike the two-scope test above
+    /// where `.any()` can't see order at all (SMA-633 review finding 2). The fixture is
+    /// returned via `FixedOrderGrants` in a fixed insertion order that also disagrees with
+    /// the correct order, so this is not a coin flip on `InMemoryRoleGrants`'s `HashMap`
+    /// iteration order either (SMA-633 review finding 1).
     #[tokio::test]
     async fn introspect_sorts_role_grants_deterministically() {
         let store = AuthnStore::default();
         let issuer = Issuer::parse("https://idp.example.com").unwrap();
         let pid = seeded_principal(&store, &issuer, "sub-sorted");
 
-        let grants = InMemoryRoleGrants::default();
-        for (n, role) in [(1u128, "zeta_role"), (2, "alpha_role")] {
-            grants
-                .grant(&RoleGrant {
-                    id: Uuid::from_u128(n),
-                    principal: pid.clone(),
-                    role_key: role.into(),
-                    scope: GrantScope::Root,
-                    linked_policy_id: format!("lp-{n}"),
-                    created_at: epoch(),
-                })
-                .await
-                .unwrap();
-        }
+        let org = TenancyNodeRef::from_prn(Prn::parse("prn:pgs:iam:::organization/11111111-1111-1111-1111-111111111111").unwrap()).unwrap();
+        let grant_org = RoleGrant {
+            id: Uuid::from_u128(1),
+            principal: pid.clone(),
+            role_key: "zzz_role".into(),
+            scope: GrantScope::Node(org),
+            linked_policy_id: "lp-1".into(),
+            created_at: epoch(),
+        };
+        let grant_root = RoleGrant {
+            id: Uuid::from_u128(2),
+            principal: pid.clone(),
+            role_key: "aaa_role".into(),
+            scope: GrantScope::Root,
+            linked_policy_id: "lp-2".into(),
+            created_at: epoch(),
+        };
+        // Fixed insertion order (root, then org) matches neither the correct
+        // `(scope_prn, role_key)` order below nor a `role_key`-only order — both wrong
+        // orderings are distinguishable failures, not a lucky pass.
+        let grants = FixedOrderGrants(vec![grant_root, grant_org]);
 
         let uc = AuthenticateToken::new(
             FakeAuthenticator::ok(claims("https://idp.example.com", "sub-sorted", Some("grants@example.com"), Some("Grants"))),
@@ -998,7 +1044,12 @@ mod tests {
 
         let ctx = uc.introspect("token").await.unwrap();
         let keys: Vec<&str> = ctx.role_grants.iter().map(|g| g.role_key.as_str()).collect();
-        assert_eq!(keys, vec!["alpha_role", "zeta_role"], "grants must be sorted, not insertion-ordered");
+        assert_eq!(
+            keys,
+            vec!["zzz_role", "aaa_role"],
+            "scope_prn is the PRIMARY key: organization/… sorts before root/…, so grant_org (zzz_role) must come first even though \
+             role_key alone would put grant_root (aaa_role) first"
+        );
     }
 
     /// Spec D6: a grant-store failure fails the call. It must NOT degrade to an empty
