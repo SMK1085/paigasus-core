@@ -74,6 +74,12 @@ expect_fail "apiKeysPepperSecret empty" "apiKeysPepperSecret is required" \
   --set zones.iam.backend.apiKeysPepperSecret=""
 expect_fail "iam backend.deploy false" "an external IAM is not supported yet" \
   --set zones.iam.backend.deploy=false
+# The needle is a phrase unique to THIS message. An earlier row matched on the values path
+# "zones.gateway.backend.deploy", which is also a substring of the generic backend.url refusal —
+# so the row passed without the check existing. Only the mutation battery found that.
+expect_fail "gateway backend.deploy true" "this chart cannot run the gateway backend" \
+  --set zones.gateway.enabled=true --set zones.gateway.backend.deploy=true \
+  --set zones.gateway.backend.url=http://gw.example.test:8088
 expect_render "iam only" --set zones.gateway.enabled=false
 expect_render "iam and gateway" --set zones.gateway.enabled=true \
   --set zones.gateway.backend.url=http://gw.example.test:8088

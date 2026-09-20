@@ -137,7 +137,7 @@ silently broken.
 | # | Topic | Decision |
 | -- | -- | -- |
 | D1 | Scope | All four pieces in SMA-513, started after PR 270 (SMA-658) merges |
-| D2 | Chart boundary | One chart deploying both consoles, `paigasus-iam`, `paigasus-gateway` and the ingress. Postgres, Redis and the OIDC issuer are required values naming existing endpoints |
+| D2 | Chart boundary | **Amended 2026-09-20.** One chart deploying both consoles, the `paigasus-iam` backend and the ingress. `paigasus-gateway` is **not** deployed — it is supplied through `zones.gateway.backend.url`, for the reasons in § 7.3. Postgres, Redis and the OIDC issuer are required values naming existing endpoints |
 | D3 | Console base image | `gcr.io/distroless/nodejs24-debian12:nonroot`, digest-pinned |
 | D4 | AC verification | A required static gate for AC 2 and 5; a container smoke assertion for AC 3; a non-required kind job for AC 1 and 4 |
 | D5 | `reconcile_starter` | The chart keeps `replicas: 1` and `maxSurge: 0` for IAM. The concurrency question is filed separately, not asserted here |

@@ -78,6 +78,9 @@ template would fire only when that template happens to render first.
 {{- if not .Values.zones.iam.backend.apiKeysPepperSecret -}}
 {{- fail "zones.iam.backend.apiKeysPepperSecret is required; IamConfig::validate hard-fails boot without it" -}}
 {{- end -}}
+{{- if and .Values.zones.gateway.enabled .Values.zones.gateway.backend.deploy -}}
+{{- fail "zones.gateway.backend.deploy is true: this chart cannot run the gateway backend. GatewayConfig::validate hard-fails on an empty upstream.openai.api_key, and iam.grpc_addr accepts LoopbackInsecure only for a loopback host, so an in-cluster gateway-to-IAM link needs a TLS design this chart does not have. Supply the address through zones.gateway.backend.url instead (decision D9)" -}}
+{{- end -}}
 {{- if not .Values.zones.iam.backend.deploy -}}
 {{- fail "zones.iam.backend.deploy is false: this chart deploys the IAM backend itself (see decision D2), and an external IAM is not supported yet" -}}
 {{- end -}}

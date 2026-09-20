@@ -34,13 +34,21 @@ check() {
   fi
   local verdict
   verdict="$(printf '%s' "$out" | python3 -c '
-import sys, yaml, collections
+import sys, yaml, collections, re
 docs = [d for d in yaml.safe_load_all(sys.stdin) if d]
 names = [(d["kind"], d["metadata"]["name"]) for d in docs]
 problems = []
+# DNS-1123 label, which is what a Kubernetes object name must be: lowercase alphanumerics and
+# hyphens only, no leading or trailing hyphen, at most 63 characters. Length alone is not enough —
+# a truncation that lands on a hyphen, or a suffix source that ever admits an underscore or an
+# uppercase letter, produces a name the API server rejects at apply time and nothing here would
+# have said so.
+DNS1123 = re.compile(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
 for kind, name in names:
     if len(name) > 63:
         problems.append(f"{kind}/{name} is {len(name)} chars, over the 63 limit")
+    elif not DNS1123.match(name):
+        problems.append(f"{kind}/{name} is not a valid DNS-1123 label")
 for (kind, name), n in collections.Counter(names).items():
     if n > 1:
         problems.append(f"{n} {kind} objects share the name {name}")
