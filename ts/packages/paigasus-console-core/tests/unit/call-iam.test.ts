@@ -72,3 +72,57 @@ describe('callIam', () => {
     expect(JSON.stringify(fields)).not.toContain('secret internal detail');
   });
 });
+
+// SMA-662. `callIam` classifies with `instanceof ConnectError`, and this package exists TWICE in
+// one process: Next gives a route handler and a page separate module graphs. What makes that safe
+// is not this package — it is `ConnectError`'s static Symbol.hasInstance, which falls back to a
+// duck-type BRAND (`name === 'ConnectError'` plus code/metadata/details/rawMessage/cause) when the
+// prototype does not match (@connectrpc/connect 2.2.0, dist/esm/connect-error.js:82-98). This row
+// pins that third-party contract, because nothing else in the repository would notice a connect-es
+// release dropping it.
+//
+// The fixture is a LOCAL class, not a second module copy. `vi.resetModules()` plus a dynamic
+// import does NOT duplicate a node_modules package under this config (MEASURED, spec § 10: vitest
+// externalizes node_modules, and resetModules clears Vite's registry, not Node's ESM cache), so a
+// local class is what reproduces "an object the other copy built" — a foreign prototype carrying
+// the right brand.
+class ForeignConnectError extends Error {
+  readonly code: number;
+  readonly metadata = new Headers();
+  readonly details: unknown[] = [];
+  readonly rawMessage: string;
+
+  constructor(rawMessage: string, code: number) {
+    super(`[permission_denied] ${rawMessage}`);
+    this.name = 'ConnectError';
+    this.code = code;
+    this.rawMessage = rawMessage;
+    this.cause = undefined;
+  }
+
+  /** The brand does not require this; `mapError` calls it. */
+  findDetails(): never[] {
+    return [];
+  }
+}
+
+describe('callIam across two module copies (SMA-662)', () => {
+  it('maps a ConnectError whose prototype belongs to another copy, instead of rethrowing it', async () => {
+    const err = new ForeignConnectError('denied', Code.PermissionDenied);
+
+    // The precondition comes FIRST. Without it the row passes vacuously against a real
+    // ConnectError, which is the whole thing it is trying not to be.
+    expect(Object.getPrototypeOf(err)).not.toBe(ConnectError.prototype);
+    // The BRAND admits it, not the prototype. This is the assertion that reds if connect-es
+    // removes Symbol.hasInstance.
+    expect(err instanceof ConnectError).toBe(true);
+
+    const result = await callIam(() => Promise.reject(err));
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.presentation).toBe('forbidden');
+      expect(result.error.transport).toEqual({ kind: 'grpc', code: 7, codeName: 'PermissionDenied' });
+    }
+  });
+});
