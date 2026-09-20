@@ -55,8 +55,10 @@ Three consecutive full runs of the three binaries (`authz_policy_store`, `tenanc
 | 2 | 7.694s | 8.134s | 39 tests run: 39 passed, 0 skipped |
 | 3 | 7.579s | 8.007s | 39 tests run: 39 passed, 0 skipped |
 
-All three runs passed identically, with no order-dependence or flakiness at the new waits. The
-nextest summary time and the wall-clock `time` differ because `time` also covers cargo's
+All three runs passed, with no failure and no retry in any of them. Stated exactly: all three used
+the same invocation, so they show that nothing here fails intermittently across repeated runs — they
+do NOT establish order-independence, which would need a randomized or reversed order and was not
+run. The nextest summary time and the wall-clock `time` differ because `time` also covers cargo's
 up-to-date check and process startup; nextest's own summary is the tighter measure of test
 execution time.
 
