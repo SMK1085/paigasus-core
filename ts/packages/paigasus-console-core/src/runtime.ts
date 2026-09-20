@@ -26,7 +26,7 @@ import type { ConsoleLogger } from './logger';
 import { sessionExpired, type IamResult } from './errors';
 import { createIamClients, type IamClients } from './iam-clients';
 import { requestCorrelationId } from './correlation';
-import { introspectWithProvisioning, type Principal } from './principal';
+import { whoAmI, type Principal } from './principal';
 import { createMayI, type MayI } from './authorize';
 import { cedarCapabilityOf, loadMyScopes, type MyScopes } from './scopes';
 import { createAppDiscovery } from './discovery';
@@ -95,8 +95,8 @@ export function createConsoleRuntime(deps: { config: () => ConsoleCoreConfig; au
     return { ok: true, value: iamClientsForToken(session.accessToken, await requestCorrelationId()) };
   };
 
-  /** Per request: a LIVE Introspect, with one provisioning retry on `identity-not-provisioned`. */
-  const currentPrincipal: () => Promise<IamResult<Principal>> = cache(async () => introspectWithProvisioning(await iamClients(), await sessionToken(), { provisionFirst: false }));
+  /** Per request: a LIVE WhoAmI. Bearer enforcement provisions the caller, so there is no retry. */
+  const currentPrincipal: () => Promise<IamResult<Principal>> = cache(async () => whoAmI(await iamClients()));
 
   /** One MayI per request, so the memo lives exactly one request. */
   const mayI: () => Promise<MayI> = cache(async () => {
