@@ -91,7 +91,7 @@ impl AuthnService for AuthnGrpc {
     /// this runs. That omission is the whole feature — `who_am_i_is_not_exempt` pins it.
     ///
     /// The handler never sees a token. It reads the `AuthContext` the middleware inserted and
-    /// asks for the memberships, so it repeats no verification work.
+    /// asks for the memberships and the role grants, so it repeats no verification work.
     async fn who_am_i(&self, request: Request<WhoAmIRequest>) -> Result<Response<WhoAmIResponse>, Status> {
         let started = Instant::now();
         let result: Result<Response<WhoAmIResponse>, Status> = async {

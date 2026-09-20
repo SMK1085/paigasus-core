@@ -89,8 +89,9 @@ describe('devWorld', () => {
   it('pins the two descriptors the consoles switch on', () => {
     // myScopes() lists role grants only when discovery reports iam.authz.cedar
     // (src/scopes.ts:116-118), the audit page needs iam.audit, and the dead-letters page needs
-    // iam.deadletters. The dev world is a CURRENT IAM, which always reports that key (SMA-629).
-    expect(DEV_IAM_DESCRIPTOR.capabilities).toEqual(['iam.authz.cedar', 'iam.audit', 'iam.deadletters']);
+    // iam.deadletters. The dev world is a CURRENT IAM, which always reports both iam.deadletters
+    // (SMA-629) and iam.authn.grants (SMA-633).
+    expect(DEV_IAM_DESCRIPTOR.capabilities).toEqual(['iam.authz.cedar', 'iam.audit', 'iam.deadletters', 'iam.authn.grants']);
     expect(DEV_GATEWAY_DESCRIPTOR.capabilities).toEqual(['gateway.chat.stream']);
   });
 

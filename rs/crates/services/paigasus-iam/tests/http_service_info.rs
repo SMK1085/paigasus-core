@@ -178,7 +178,7 @@ async fn disabling_apikey_management_removes_management_but_keeps_introspection(
 /// `rs/crates/services/paigasus-gateway/tests/service_info.rs:281-295` and by
 /// `rs/crates/libs/paigasus-service-info/src/lib.rs:107`.
 #[tokio::test]
-async fn all_capability_flags_off_serves_only_iam_deadletters() {
+async fn all_flags_off_advertises_only_the_unconditional_keys() {
     let Some((_node, db)) = support::start_migrated_postgres().await else {
         return;
     };

@@ -43,9 +43,14 @@ type ProjectNode = typeof PROJECT;
 
 /**
  * iam.authz.cedar gates myScopes() (src/scopes.ts:116-118); iam.audit gates the audit page;
- * iam.deadletters gates the dead-letters page. A current IAM always reports the last one (SMA-629 D2).
+ * iam.deadletters gates the dead-letters page (SMA-629 D2); iam.authn.grants means WhoAmI
+ * populates role_grants (SMA-633 D9). A current IAM always reports the last two.
  */
-export const DEV_IAM_DESCRIPTOR: ServiceDescriptorBody = { service: 'iam', version: '0.0.0-dev', capabilities: ['iam.authz.cedar', 'iam.audit', 'iam.deadletters'] };
+export const DEV_IAM_DESCRIPTOR: ServiceDescriptorBody = {
+  service: 'iam',
+  version: '0.0.0-dev',
+  capabilities: ['iam.authz.cedar', 'iam.audit', 'iam.deadletters', 'iam.authn.grants'],
+};
 
 export const DEV_GATEWAY_DESCRIPTOR: GatewayDescriptorBody = { service: 'gateway', version: '0.0.0-dev', capabilities: ['gateway.chat.stream'] };
 

@@ -165,9 +165,11 @@ export enum Capability {
   IAM_DEADLETTERS = 5,
 
   /**
-   * "iam.authn.grants" — Introspect populates `role_grants`. IAM always reports it: the
-   * population has no config switch. A client that does not see this key must treat an
-   * empty `role_grants` as UNKNOWN, not as "this principal holds no grants" (SMA-633 D9).
+   * "iam.authn.grants" — the OIDC paths, `Introspect` and `WhoAmI`, populate `role_grants`. IAM
+   * always reports this key: the population has no config switch. A client that does not see
+   * this key must treat an empty `role_grants` as UNKNOWN, not as "this principal holds no
+   * grants" (SMA-633 D9). `IntrospectApiKey` returns an empty `role_grants` by design even when
+   * this key is present (SMA-633 D2) — this key does not promise grants on that path.
    *
    * @generated from enum value: CAPABILITY_IAM_AUTHN_GRANTS = 6;
    */

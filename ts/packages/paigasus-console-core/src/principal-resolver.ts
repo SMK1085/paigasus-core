@@ -74,7 +74,7 @@ export function createIntrospectPrincipalResolver(deps: {
         const answer = await callIam(() => clients.authn.whoAmI({}, { timeoutMs }));
         if (!answer.ok) return degraded(answer.error.presentation);
         const me = answer.value;
-        // IAM now reports role grants here (authenticate_token.rs:161-165, SMA-633), but this
+        // IAM now reports role grants here (authenticate_token.rs:170-181, SMA-633), but this
         // resolver still discards them: consuming `me.roleGrants` and gating on the
         // `iam.authn.grants` capability is a deliberate follow-up, not this branch (spec D1).
         return {

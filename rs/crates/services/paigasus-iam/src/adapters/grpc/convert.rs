@@ -1580,4 +1580,21 @@ mod tests {
         assert!(!response.subject.is_empty());
         assert!(response.expires_at.is_some());
     }
+
+    /// SMA-633 whole-branch review finding 2: nothing previously asserted that `WhoAmI` reports
+    /// role grants at all — deleting the `role_grants:` line from `to_who_am_i_response` left the
+    /// suite green. A `PrincipalContext` carrying one grant must produce a response carrying the
+    /// same `scope_prn` and `role_key`.
+    #[test]
+    fn to_who_am_i_response_reports_the_callers_role_grants() {
+        let mut ctx = oidc_context();
+        ctx.role_grants = vec![RoleGrantRef {
+            scope_prn: "prn:pgs:iam:::organization/0192f1c0-0000-7000-8000-0000000000aa".to_string(),
+            role_key: "billing-admin".to_string(),
+        }];
+        let response = to_who_am_i_response(&ctx);
+        assert_eq!(response.role_grants.len(), 1);
+        assert_eq!(response.role_grants[0].scope_prn, "prn:pgs:iam:::organization/0192f1c0-0000-7000-8000-0000000000aa");
+        assert_eq!(response.role_grants[0].role_key, "billing-admin");
+    }
 }
