@@ -2014,6 +2014,27 @@ pub mod authn_service_client {
                 );
             self.inner.unary(req, path, codec).await
         }
+        pub async fn who_am_i(
+            &mut self,
+            request: impl tonic::IntoRequest<super::WhoAmIRequest>,
+        ) -> std::result::Result<tonic::Response<super::WhoAmIResponse>, tonic::Status> {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/paigasus.iam.v1.AuthnService/WhoAmI",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("paigasus.iam.v1.AuthnService", "WhoAmI"));
+            self.inner.unary(req, path, codec).await
+        }
     }
 }
 /// Generated server implementations.
@@ -2043,6 +2064,10 @@ pub mod authn_service_server {
             tonic::Response<super::IntrospectApiKeyResponse>,
             tonic::Status,
         >;
+        async fn who_am_i(
+            &self,
+            request: tonic::Request<super::WhoAmIRequest>,
+        ) -> std::result::Result<tonic::Response<super::WhoAmIResponse>, tonic::Status>;
     }
     #[derive(Debug)]
     pub struct AuthnServiceServer<T> {
@@ -2196,6 +2221,51 @@ pub mod authn_service_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = IntrospectApiKeySvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/paigasus.iam.v1.AuthnService/WhoAmI" => {
+                    #[allow(non_camel_case_types)]
+                    struct WhoAmISvc<T: AuthnService>(pub Arc<T>);
+                    impl<
+                        T: AuthnService,
+                    > tonic::server::UnaryService<super::WhoAmIRequest>
+                    for WhoAmISvc<T> {
+                        type Response = super::WhoAmIResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::WhoAmIRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as AuthnService>::who_am_i(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = WhoAmISvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(
@@ -3340,7 +3410,6 @@ pub mod service_account_service_client {
                 );
             self.inner.unary(req, path, codec).await
         }
-        ///
         pub async fn issue_api_key(
             &mut self,
             request: impl tonic::IntoRequest<super::IssueApiKeyRequest>,
@@ -3370,7 +3439,6 @@ pub mod service_account_service_client {
                 );
             self.inner.unary(req, path, codec).await
         }
-        ///
         pub async fn revoke_api_key(
             &mut self,
             request: impl tonic::IntoRequest<super::RevokeApiKeyRequest>,
@@ -3476,7 +3544,6 @@ pub mod service_account_service_server {
             tonic::Response<super::ArchiveServiceAccountResponse>,
             tonic::Status,
         >;
-        ///
         async fn issue_api_key(
             &self,
             request: tonic::Request<super::IssueApiKeyRequest>,
@@ -3484,7 +3551,6 @@ pub mod service_account_service_server {
             tonic::Response<super::IssueApiKeyResponse>,
             tonic::Status,
         >;
-        ///
         async fn revoke_api_key(
             &self,
             request: tonic::Request<super::RevokeApiKeyRequest>,

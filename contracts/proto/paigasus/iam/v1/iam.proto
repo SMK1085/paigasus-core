@@ -242,6 +242,28 @@ message IntrospectResponse {
   reserved "role_group_prns";
   repeated RoleGrantRef role_grants = 8;
 }
+
+message WhoAmIRequest {}
+
+// The caller's own principal, as resolved by bearer enforcement. Mirrors IntrospectResponse's
+// fields, with two differences that the WhoAmI RPC's doc explains: `issuer`/`subject` are empty
+// for an API-key bearer, and `expires_at` is absent when the credential has no expiry.
+//
+// A SEPARATE message from IntrospectResponse because buf lint STANDARD's
+// RPC_REQUEST_RESPONSE_UNIQUE forbids one message serving two RPCs, and
+// RPC_RESPONSE_STANDARD_NAME requires this exact name. Field numbering starts clean: this
+// message has no history, so `role_grants` takes 7, where IntrospectResponse reserves 7 for the
+// retired `role_group_prns` and puts `role_grants` at 8.
+message WhoAmIResponse {
+  string principal_prn = 1;
+  string status = 2; // principal status
+  string issuer = 3; // empty for an API-key bearer
+  string subject = 4; // empty for an API-key bearer
+  google.protobuf.Timestamp expires_at = 5; // absent when the credential has no expiry
+  repeated Membership memberships = 6; // reuse tenancy message
+  repeated RoleGrantRef role_grants = 7; // empty until SMA-633 populates it
+}
+
 message RoleGrantRef {
   string scope_prn = 1;
   string role_key = 2;
@@ -289,6 +311,19 @@ service TenancyService {
 service AuthnService {
   rpc Introspect(IntrospectRequest) returns (IntrospectResponse);
   rpc IntrospectApiKey(IntrospectApiKeyRequest) returns (IntrospectApiKeyResponse);
+  // The caller's own principal. BEARER-ENFORCED: this RPC is deliberately ABSENT from
+  // `is_exempt` (rs/crates/services/paigasus-iam/src/adapters/grpc/authn.rs), so `AuthEnforce`
+  // resolves the bearer with `Provisioning::Enabled` and seeds the bootstrap platform_admin
+  // grant BEFORE the handler runs. That omission is the whole mechanism — the handler never
+  // sees a token.
+  //
+  // Provisioning still obeys the issuer's JIT policy: an issuer whose jit flag is off yields
+  // `identity-not-provisioned`, the same answer Introspect gives.
+  //
+  // Serves both credential kinds. For a Paigasus API-key bearer, `issuer` and `subject` are
+  // empty: a service account has no (issuer, subject) pair, and this response carries no
+  // `key_id`/`scope_prn` (those are IntrospectApiKeyResponse's).
+  rpc WhoAmI(WhoAmIRequest) returns (WhoAmIResponse);
 }
 
 message IsAuthorizedRequest {
