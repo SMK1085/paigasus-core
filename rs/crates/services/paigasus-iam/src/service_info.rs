@@ -7,10 +7,10 @@
 //! transitively carries `RawPepper` and every `RedactedUrl`, so storing it would clone the
 //! API-key pepper into every HTTP and gRPC worker.
 //!
-//! `enabled()` is a pure function of three booleans, plus one unconditional key
-//! (`iam.deadletters`, SMA-629). That is what makes AC 3's central assertion ("flip the flag, the
-//! key disappears, the siblings remain") an ordinary unit test with no `AppState`, no Postgres and
-//! no Docker.
+//! `enabled()` is a pure function of three booleans, plus two unconditional keys
+//! (`iam.deadletters`, SMA-629; `iam.authn.grants`, SMA-633). That is what makes AC 3's central
+//! assertion ("flip the flag, the key disappears, the siblings remain") an ordinary unit test
+//! with no `AppState`, no Postgres and no Docker.
 
 use paigasus_proto::paigasus::common::v1::{Capability, ServiceInfo};
 
@@ -49,11 +49,12 @@ impl Capabilities {
     /// The registered capabilities this build currently has enabled. Pure — the unit under
     /// test for AC 3.
     ///
-    /// `iam.deadletters` is UNCONDITIONAL (SMA-629 D2). `OutboxService` is registered on gRPC and
-    /// HTTP with no config switch, because a break-glass surface must not be disable-able
-    /// (`adapters/grpc/dead_letters.rs:13-18`). The key therefore means "this build serves
-    /// `OutboxService`". It has no field on `Capabilities`: a field that is always `true` would be
-    /// a false degree of freedom.
+    /// `iam.deadletters` and `iam.authn.grants` are UNCONDITIONAL. `iam.deadletters` (SMA-629 D2):
+    /// `OutboxService` is registered on gRPC and HTTP with no config switch, because a break-glass
+    /// surface must not be disable-able (`adapters/grpc/dead_letters.rs:13-18`). The key therefore
+    /// means "this build serves `OutboxService`". `iam.authn.grants` (SMA-633 D9): Introspect
+    /// populates `role_grants`, and the population has no config switch either. Neither key has a
+    /// field on `Capabilities`: a field that is always `true` would be a false degree of freedom.
     #[must_use]
     pub fn enabled(&self) -> Vec<Capability> {
         let mut caps = Vec::new();
@@ -67,6 +68,11 @@ impl Capabilities {
             caps.push(Capability::IamAudit);
         }
         caps.push(Capability::IamDeadletters);
+        // SMA-633 D9: unconditional, for the same reason as `iam.deadletters`. The population
+        // has no config switch, and a `Capabilities` field that is always `true` would be a
+        // false degree of freedom. The key means "this build populates `role_grants` in
+        // `Introspect`".
+        caps.push(Capability::IamAuthnGrants);
         caps
     }
 
@@ -100,14 +106,21 @@ mod tests {
     fn all_enabled_advertises_every_iam_capability() {
         assert_eq!(
             caps(true, true, true),
-            HashSet::from([Capability::IamAuthzCedar, Capability::IamApikeys, Capability::IamAudit, Capability::IamDeadletters])
+            HashSet::from([
+                Capability::IamAuthzCedar,
+                Capability::IamApikeys,
+                Capability::IamAudit,
+                Capability::IamDeadletters,
+                Capability::IamAuthnGrants
+            ])
         );
     }
 
-    /// SMA-629 D2: OutboxService has no config switch, so every flag off still advertises it.
+    /// SMA-629 D2 / SMA-633 D9: neither OutboxService nor Introspect's `role_grants` population
+    /// has a config switch, so every flag off still advertises both unconditional keys.
     #[test]
     fn all_flags_off_advertises_only_iam_deadletters() {
-        assert_eq!(caps(false, false, false), HashSet::from([Capability::IamDeadletters]));
+        assert_eq!(caps(false, false, false), HashSet::from([Capability::IamDeadletters, Capability::IamAuthnGrants]));
     }
 
     /// AC 3's central assertion. Asserting only "the key is absent" would pass against an
@@ -115,13 +128,22 @@ mod tests {
     /// siblings survive.
     #[test]
     fn disabling_one_flag_removes_exactly_its_key() {
-        assert_eq!(caps(false, true, true), HashSet::from([Capability::IamApikeys, Capability::IamAudit, Capability::IamDeadletters]));
-        assert_eq!(caps(true, false, true), HashSet::from([Capability::IamAuthzCedar, Capability::IamAudit, Capability::IamDeadletters]));
-        assert_eq!(caps(true, true, false), HashSet::from([Capability::IamAuthzCedar, Capability::IamApikeys, Capability::IamDeadletters]));
+        assert_eq!(
+            caps(false, true, true),
+            HashSet::from([Capability::IamApikeys, Capability::IamAudit, Capability::IamDeadletters, Capability::IamAuthnGrants])
+        );
+        assert_eq!(
+            caps(true, false, true),
+            HashSet::from([Capability::IamAuthzCedar, Capability::IamAudit, Capability::IamDeadletters, Capability::IamAuthnGrants])
+        );
+        assert_eq!(
+            caps(true, true, false),
+            HashSet::from([Capability::IamAuthzCedar, Capability::IamApikeys, Capability::IamDeadletters, Capability::IamAuthnGrants])
+        );
     }
 
     /// R3: the real risk surface is combinations, not single flags. All 8 are cheap here
-    /// because this is a pure function. The dead-letters key is in EVERY combination.
+    /// because this is a pure function. Both unconditional keys are in EVERY combination.
     #[test]
     fn every_combination_advertises_exactly_its_enabled_keys() {
         for authz in [false, true] {
@@ -132,6 +154,7 @@ mod tests {
                     assert_eq!(got.contains(&Capability::IamApikeys), apikeys);
                     assert_eq!(got.contains(&Capability::IamAudit), audit);
                     assert!(got.contains(&Capability::IamDeadletters), "iam.deadletters must be advertised for ({authz}, {apikeys}, {audit})");
+                    assert!(got.contains(&Capability::IamAuthnGrants), "iam.authn.grants must be advertised for ({authz}, {apikeys}, {audit})");
                 }
             }
         }

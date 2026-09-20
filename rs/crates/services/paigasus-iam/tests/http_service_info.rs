@@ -49,7 +49,13 @@ async fn the_descriptor_requires_a_bearer_and_reports_every_enabled_capability()
     assert!(body["version"].as_str().is_some_and(|v| !v.is_empty()), "version must be a non-empty string");
     assert_eq!(
         capability_set(&body),
-        std::collections::HashSet::from(["iam.authz.cedar".to_string(), "iam.apikeys".to_string(), "iam.audit".to_string(), "iam.deadletters".to_string()])
+        std::collections::HashSet::from([
+            "iam.authz.cedar".to_string(),
+            "iam.apikeys".to_string(),
+            "iam.audit".to_string(),
+            "iam.deadletters".to_string(),
+            "iam.authn.grants".to_string()
+        ])
     );
 }
 
@@ -78,6 +84,7 @@ async fn disabling_audit_query_removes_both_the_route_and_the_key() {
     assert!(caps.contains("iam.authz.cedar"), "siblings must survive: {body}");
     assert!(caps.contains("iam.apikeys"), "siblings must survive: {body}");
     assert!(caps.contains("iam.deadletters"), "siblings must survive: {body}");
+    assert!(caps.contains("iam.authn.grants"), "siblings must survive: {body}");
 }
 
 #[tokio::test]
@@ -121,7 +128,7 @@ async fn disabling_authz_admin_removes_policy_role_grant_and_retirement_routes()
     let caps = capability_set(&body);
     assert!(!caps.contains("iam.authz.cedar"), "{body}");
     assert!(
-        caps.contains("iam.apikeys") && caps.contains("iam.audit") && caps.contains("iam.deadletters"),
+        caps.contains("iam.apikeys") && caps.contains("iam.audit") && caps.contains("iam.deadletters") && caps.contains("iam.authn.grants"),
         "siblings must survive: {body}"
     );
 }
@@ -158,14 +165,15 @@ async fn disabling_apikey_management_removes_management_but_keeps_introspection(
     let caps = capability_set(&body);
     assert!(!caps.contains("iam.apikeys"), "{body}");
     assert!(
-        caps.contains("iam.authz.cedar") && caps.contains("iam.audit") && caps.contains("iam.deadletters"),
+        caps.contains("iam.authz.cedar") && caps.contains("iam.audit") && caps.contains("iam.deadletters") && caps.contains("iam.authn.grants"),
         "siblings must survive: {body}"
     );
 }
 
-/// Every capability flag off (SMA-629 D2). IAM can no longer emit an empty list, because
-/// `iam.deadletters` is unconditional. The test keeps its second purpose, R3's multi-flag
-/// combination: conditional router merging must not panic at registration with every flag off.
+/// Every capability flag off (SMA-629 D2, SMA-633 D9). IAM can no longer emit an empty list,
+/// because `iam.deadletters` and `iam.authn.grants` are unconditional. The test keeps its second
+/// purpose, R3's multi-flag combination: conditional router merging must not panic at
+/// registration with every flag off.
 /// The empty-array rule itself (SMA-499 § 2.7's MUST-emit-defaults) stays proven by
 /// `rs/crates/services/paigasus-gateway/tests/service_info.rs:281-295` and by
 /// `rs/crates/libs/paigasus-service-info/src/lib.rs:107`.
@@ -186,5 +194,9 @@ async fn all_capability_flags_off_serves_only_iam_deadletters() {
 
     let (status, body) = send(&app, "GET", "/v1/service-info", None, Some(token.as_str())).await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body["capabilities"], serde_json::json!(["iam.deadletters"]), "only the unconditional key remains: {body}");
+    assert_eq!(
+        body["capabilities"],
+        serde_json::json!(["iam.deadletters", "iam.authn.grants"]),
+        "only the unconditional keys remain: {body}"
+    );
 }

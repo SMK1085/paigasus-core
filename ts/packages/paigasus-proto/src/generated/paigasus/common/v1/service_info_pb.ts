@@ -12,7 +12,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file paigasus/common/v1/service_info.proto.
  */
 export const file_paigasus_common_v1_service_info: GenFile = /*@__PURE__*/
-  fileDesc("CiVwYWlnYXN1cy9jb21tb24vdjEvc2VydmljZV9pbmZvLnByb3RvEhJwYWlnYXN1cy5jb21tb24udjEiRQoLU2VydmljZUluZm8SDwoHc2VydmljZRgBIAEoCRIPCgd2ZXJzaW9uGAIgASgJEhQKDGNhcGFiaWxpdGllcxgDIAMoCSIXChVHZXRTZXJ2aWNlSW5mb1JlcXVlc3QiTwoWR2V0U2VydmljZUluZm9SZXNwb25zZRI1CgxzZXJ2aWNlX2luZm8YASABKAsyHy5wYWlnYXN1cy5jb21tb24udjEuU2VydmljZUluZm8qwgEKCkNhcGFiaWxpdHkSGgoWQ0FQQUJJTElUWV9VTlNQRUNJRklFRBAAEh4KGkNBUEFCSUxJVFlfSUFNX0FVVEhaX0NFREFSEAESGgoWQ0FQQUJJTElUWV9JQU1fQVBJS0VZUxACEhgKFENBUEFCSUxJVFlfSUFNX0FVRElUEAMSIgoeQ0FQQUJJTElUWV9HQVRFV0FZX0NIQVRfU1RSRUFNEAQSHgoaQ0FQQUJJTElUWV9JQU1fREVBRExFVFRFUlMQBTJ9ChJTZXJ2aWNlSW5mb1NlcnZpY2USZwoOR2V0U2VydmljZUluZm8SKS5wYWlnYXN1cy5jb21tb24udjEuR2V0U2VydmljZUluZm9SZXF1ZXN0GioucGFpZ2FzdXMuY29tbW9uLnYxLkdldFNlcnZpY2VJbmZvUmVzcG9uc2ViBnByb3RvMw");
+  fileDesc("CiVwYWlnYXN1cy9jb21tb24vdjEvc2VydmljZV9pbmZvLnByb3RvEhJwYWlnYXN1cy5jb21tb24udjEiRQoLU2VydmljZUluZm8SDwoHc2VydmljZRgBIAEoCRIPCgd2ZXJzaW9uGAIgASgJEhQKDGNhcGFiaWxpdGllcxgDIAMoCSIXChVHZXRTZXJ2aWNlSW5mb1JlcXVlc3QiTwoWR2V0U2VydmljZUluZm9SZXNwb25zZRI1CgxzZXJ2aWNlX2luZm8YASABKAsyHy5wYWlnYXN1cy5jb21tb24udjEuU2VydmljZUluZm8q4wEKCkNhcGFiaWxpdHkSGgoWQ0FQQUJJTElUWV9VTlNQRUNJRklFRBAAEh4KGkNBUEFCSUxJVFlfSUFNX0FVVEhaX0NFREFSEAESGgoWQ0FQQUJJTElUWV9JQU1fQVBJS0VZUxACEhgKFENBUEFCSUxJVFlfSUFNX0FVRElUEAMSIgoeQ0FQQUJJTElUWV9HQVRFV0FZX0NIQVRfU1RSRUFNEAQSHgoaQ0FQQUJJTElUWV9JQU1fREVBRExFVFRFUlMQBRIfChtDQVBBQklMSVRZX0lBTV9BVVRITl9HUkFOVFMQBjJ9ChJTZXJ2aWNlSW5mb1NlcnZpY2USZwoOR2V0U2VydmljZUluZm8SKS5wYWlnYXN1cy5jb21tb24udjEuR2V0U2VydmljZUluZm9SZXF1ZXN0GioucGFpZ2FzdXMuY29tbW9uLnYxLkdldFNlcnZpY2VJbmZvUmVzcG9uc2ViBnByb3RvMw");
 
 /**
  * @generated from message paigasus.common.v1.ServiceInfo
@@ -163,6 +163,15 @@ export enum Capability {
    * @generated from enum value: CAPABILITY_IAM_DEADLETTERS = 5;
    */
   IAM_DEADLETTERS = 5,
+
+  /**
+   * "iam.authn.grants" — Introspect populates `role_grants`. IAM always reports it: the
+   * population has no config switch. A client that does not see this key must treat an
+   * empty `role_grants` as UNKNOWN, not as "this principal holds no grants" (SMA-633 D9).
+   *
+   * @generated from enum value: CAPABILITY_IAM_AUTHN_GRANTS = 6;
+   */
+  IAM_AUTHN_GRANTS = 6,
 }
 
 /**

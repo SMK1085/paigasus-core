@@ -107,7 +107,13 @@ async fn get_service_info_reports_the_enabled_capabilities() {
     let caps: HashSet<String> = info.capabilities.into_iter().collect();
     assert_eq!(
         caps,
-        HashSet::from(["iam.authz.cedar".to_string(), "iam.apikeys".to_string(), "iam.audit".to_string(), "iam.deadletters".to_string()])
+        HashSet::from([
+            "iam.authz.cedar".to_string(),
+            "iam.apikeys".to_string(),
+            "iam.audit".to_string(),
+            "iam.deadletters".to_string(),
+            "iam.authn.grants".to_string()
+        ])
     );
 
     server.abort();
@@ -186,7 +192,7 @@ async fn the_grpc_and_http_transports_describe_the_same_build() {
         let grpc_caps: HashSet<String> = grpc_info.capabilities.into_iter().collect();
         assert!(!grpc_caps.contains("iam.audit"), "the disabled key must be absent from gRPC: {grpc_caps:?}");
         assert!(
-            grpc_caps.contains("iam.authz.cedar") && grpc_caps.contains("iam.apikeys") && grpc_caps.contains("iam.deadletters"),
+            grpc_caps.contains("iam.authz.cedar") && grpc_caps.contains("iam.apikeys") && grpc_caps.contains("iam.deadletters") && grpc_caps.contains("iam.authn.grants"),
             "siblings must survive: {grpc_caps:?}"
         );
 
