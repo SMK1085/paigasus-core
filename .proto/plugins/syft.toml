@@ -1,0 +1,40 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Vendored proto TOML plugin for syft (SMA-658).
+#
+# Resolves official anchore/syft GitHub release archives. No proto plugin exists upstream
+# (`proto plugin search syft`, proto 0.61.1: no results).
+#
+# Asset names embed the bare version (syft_1.52.0_linux_amd64.tar.gz) and use Go's GOARCH names
+# on every OS, so one global [install.arch] remaps both arches. The binary sits at the archive
+# root; exe-path is kept explicit here (unlike actionlint.toml/maturin.toml). Windows ships a
+# .zip, not a .tar.gz. One syft_{version}_checksums.txt covers all assets.
+
+name = "syft"
+type = "cli"
+
+[platform.linux]
+download-file = "syft_{version}_linux_{arch}.tar.gz"
+checksum-file = "syft_{version}_checksums.txt"
+exe-path = "syft"
+
+[platform.macos]
+download-file = "syft_{version}_darwin_{arch}.tar.gz"
+checksum-file = "syft_{version}_checksums.txt"
+exe-path = "syft"
+
+[platform.windows]
+download-file = "syft_{version}_windows_{arch}.zip"
+checksum-file = "syft_{version}_checksums.txt"
+exe-path = "syft.exe"
+
+[install]
+download-url = "https://github.com/anchore/syft/releases/download/v{version}/{download_file}"
+checksum-url = "https://github.com/anchore/syft/releases/download/v{version}/{checksum_file}"
+
+[install.arch]
+x86_64 = "amd64"
+aarch64 = "arm64"
+
+[resolve]
+git-url = "https://github.com/anchore/syft"

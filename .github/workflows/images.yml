@@ -13,11 +13,14 @@ on:
       - 'rs/**'
       - 'ci/images/**'
       - '.github/workflows/images.yml'
+      - '.prototools'
+      - '.proto/plugins/crane.toml'
+      - '.proto/plugins/syft.toml'
 
   # PRE-merge verification of the BUILD INPUTS only. `rs/**` is deliberately absent: most PRs
   # here touch it, and two cold --release builds on every one of them would raise the bill
   # (SMA-520). These are the inputs that can actually break an image build — a new dependency,
-  # a toolchain bump, or the build machinery itself.
+  # a toolchain bump, a tool pin, or the build machinery itself.
   pull_request:
     branches:
       - main
@@ -29,8 +32,12 @@ on:
       - 'rs/.dockerignore'
       - 'ci/images/**'
       - '.github/workflows/images.yml'
+      - '.prototools'
+      - '.proto/plugins/crane.toml'
+      - '.proto/plugins/syft.toml'
 
-# Build-and-verify only: no registry, no credentials, nothing is pushed (SMA-500 D1).
+# Build-and-verify only: no registry, no credentials, nothing is pushed (SMA-500 D1). The
+# `rehearse` step pushes only to two registry:2 containers on the runner itself.
 permissions:
   contents: read
 
@@ -41,13 +48,24 @@ concurrency:
 
 jobs:
   images:
-    name: build + smoke
-    runs-on: ubuntu-latest
+    name: build + smoke (${{ matrix.arch }})
+    # SMA-658: the RELEASE build path (OCI archive -> load -> identity check -> per-service
+    # smoke -> rehearse), one leg per architecture on a NATIVE runner. A pull request runs amd64
+    # only; `main` and a dispatch also run arm64 (spec M5), so a PR can get the arm64 evidence
+    # with `gh workflow run images.yml --ref <branch>`.
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
     # Two cold --release builds of a tree that has already overflowed the runner disk once.
-    # Deliberately ONE job, not a per-service matrix: the smoke suite needs BOTH images present,
-    # and matrix legs run on separate runners with no shared image store — a matrix would have to
-    # rebuild the other service inside one leg to smoke anything.
+    # Both services build in ONE leg: the smoke suite needs both images on one daemon.
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: ${{ fromJSON(github.event_name == 'pull_request' && '["amd64"]' || '["amd64", "arm64"]') }}
+    env:
+      ARCH: ${{ matrix.arch }}
+      # SMA-609: every captured shim output must set this, so `$(uv run …)` never captures proto's
+      # NDJSON preamble.
+      PROTO_REPORTER: text
     steps:
       # Same reclaim as ci.yml: this builds the cedar-policy tree in --release on a ~14 GB disk.
       - name: Reclaim runner disk (drop unused preinstalled toolchains)
@@ -66,17 +84,71 @@ jobs:
       - name: Set up Buildx
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e  # v4.3.0
 
-      - name: Build + smoke both images
-        run: ci/images/run.sh all
+      - name: Set up proto (pinned via .prototools)
+        uses: moonrepo/setup-toolchain@261c62cb5b0f580c7be7c8cd0f023a2e96756095  # v0
+        with:
+          cache: false
+
+      # Narrow installs, not a bare `proto install`: this job needs only these three.
+      - name: Install crane, syft and uv
+        run: |
+          proto install crane
+          proto install syft
+          proto install uv
+
+      - name: Decision script self-test
+        run: uv run --no-project --python '>=3.12' python3 ci/images/release_decision.py --self-test
+
+      - name: Build both images as OCI archives
+        run: |
+          ci/images/run.sh build-oci iam out
+          ci/images/run.sh build-oci gateway out
+
+      # Prints one `M3 …` line per image: this runner's image store and what the loaded image
+      # reports as its ID (spec M3). The load goes through a throwaway local registry, not
+      # `docker load`, because `docker load` of an OCI-layout archive needs the containerd image
+      # store, which this runner does not carry (CI fix, PR 270; see ci/images/run.sh's
+      # load_oci comment).
+      - name: Load each archive and check its identity
+        run: |
+          for crate in paigasus-iam paigasus-gateway; do
+            ci/images/run.sh load-oci "out/${crate}-${ARCH}.oci.tar" "${crate}:dev"
+          done
+
+      - name: Smoke each service on its own
+        run: |
+          ci/images/run.sh smoke gateway
+          ci/images/run.sh smoke iam
+
+      - name: Rehearse the publish steps against local registries
+        run: ci/images/run.sh rehearse "out/paigasus-gateway-${ARCH}.oci.tar"
+
+      # A MEASUREMENT for spec M8, not an assertion: does syft see libc6 and the Rust crates?
+      - name: SBOM for each archive
+        run: |
+          for crate in paigasus-iam paigasus-gateway; do
+            syft "oci-archive:out/${crate}-${ARCH}.oci.tar" -o "spdx-json=sbom-${crate}-${ARCH}.spdx.json"
+            summary="$(uv run --no-project --python '>=3.12' python3 ci/images/release_decision.py sbom-summary "sbom-${crate}-${ARCH}.spdx.json")"
+            echo "M8 image=${crate} arch=${ARCH} $(printf '%s' "$summary" | tr '\n' ' ')"
+          done
 
       - name: Upload chisel package manifests
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: chisel-manifests
+          name: chisel-manifests-${{ matrix.arch }}
           path: chisel-manifest-*.txt
           if-no-files-found: ignore
           # 90, not the 14-day default: any image built from this manifest can and does outlive
           # a 14-day artifact expiry, and the manifest is the only record of which chisel-cut
           # package versions (including libc6) that image actually shipped.
+          retention-days: 90
+
+      - name: Upload SBOMs
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: sboms-${{ matrix.arch }}
+          path: sbom-*.spdx.json
+          if-no-files-found: ignore
           retention-days: 90

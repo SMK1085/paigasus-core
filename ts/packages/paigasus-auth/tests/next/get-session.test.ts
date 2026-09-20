@@ -254,6 +254,32 @@ describe('getSession failure attribution (SMA-626 § 2.4)', () => {
     expect(events.some(([name]) => name === 'store.unavailable')).toBe(false);
   });
 
+  // SMA-657. The end-to-end half of the fix, and the only unit-level place it is observable.
+  // A LIVE access token inside the skew window is required: before the fix `resolveSession`
+  // degrades and getSession returns a session with refreshState 'failed'; after it, the call
+  // throws and getSession returns null. With a hard-expired token the row passes either way.
+  it('returns null when the IdP rejects with a RefreshRejected from a SECOND module copy', async () => {
+    vi.resetModules();
+    const foreign = await import('../../src/core/errors.js');
+    expect(foreign.RefreshRejected).not.toBe(RefreshRejected);
+    cookiesMock.mockResolvedValue(cookieJar('sid-needs-refresh'));
+    const store = new MemorySessionStore();
+    // baseRuntime's skewMs is 30_000, so +15_000 is inside the window and still live.
+    await store.set('sid-needs-refresh', { ...liveRecord(), accessExpiresAt: Date.now() + 15_000, refreshToken: 'RT' }, 999_000, null);
+    const { logger, events } = recordingLogger();
+
+    await expect(
+      getSession({
+        ...baseRuntime(store),
+        logger,
+        oidc: { ...unusedOidc(), refresh: () => Promise.reject(new foreign.RefreshRejected('invalid_grant')) },
+      }),
+    ).resolves.toBeNull();
+
+    expect(events).toContainEqual(['session.refresh_failed', { sid: sidTag('sid-needs-refresh'), reason: 'rejected', degraded: false }]);
+    expect(await store.get('sid-needs-refresh')).toBeNull();
+  });
+
   // The SessionStore port is exported publicly and an injected store, a decorator, or a future
   // adapter may fail with any error class. This outcome is DELIBERATE and documented in
   // ports/session-store.ts, not an accident — the test exists so the decision is visible rather

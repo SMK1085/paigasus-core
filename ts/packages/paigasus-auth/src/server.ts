@@ -108,6 +108,10 @@ export function createAuthRouteHandler(runtime: AuthRuntime): AuthRoutes['handle
     try {
       return await routes.handle(withUrl(req, publicRequestUrl(runtime, routePaths, req.url)));
     } catch (err) {
+      // `instanceof` is SAFE here, unlike core/single-flight.ts's (SMA-657). This catch lives
+      // inside the `handle` function createAuthRouteHandler RETURNED, closing over the `routes`
+      // object built above — so the copy of this package that built the handler is the copy that
+      // throws at http/routes.ts's `reject()` and the copy that catches here.
       if (!(err instanceof CallbackRejected)) throw err;
 
       switch (err.reason) {

@@ -9,14 +9,33 @@
 # .github/workflows/images.yml instead.
 #
 # usage: ci/images/run.sh build [iam|gateway]     # [iam|gateway] scopes the build
-#        ci/images/run.sh smoke                    # always smokes BOTH images; takes no service arg
+#        ci/images/run.sh smoke [iam|gateway]...   # no argument: both images; else exactly those
 #        ci/images/run.sh all                       # build both + smoke; takes no service arg
+#        ci/images/run.sh build-oci <iam|gateway> <outdir>   # SMA-658: OCI archive, no --load
+#        ci/images/run.sh load-oci <archive> <image-name>     # load + identity check (prints M3)
+#        ci/images/run.sh rehearse <archive.oci.tar>...      # SMA-658: publish steps vs two local registries
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"
 REGISTRY="${PAIGASUS_IMAGE_REGISTRY:-ghcr.io/smk1085}"
 REVISION="$(git -C "$ROOT" rev-parse HEAD)"
+
+# proto prints an NDJSON preamble on STDOUT inside an agent session, and that poisons every
+# `$(...)` capture of a shimmed tool such as `uv` (CLAUDE.md, SMA-609). Exported once here so every
+# capture below inherits it.
+export PROTO_REPORTER=text
+
+# The release decisions live in release_decision.py so a self-test can prove them (SMA-658).
+# Standard library only: no project, no lock, any Python >= 3.12 that uv can find.
+decide() {
+  uv run --no-project --python '>=3.12' python3 "$HERE/release_decision.py" "$@"
+}
+
+# kv "<key=value lines>" <key> — the value of one key, or an empty string.
+kv() {
+  printf '%s\n' "$1" | sed -n "s/^$2=//p"
+}
 
 # Digest-pinned smoke-test dependencies. This branch's whole design argument is that a floating
 # tag is the least-pinned input in a repo that pins everything else, so the smoke path pins its
@@ -28,6 +47,10 @@ REVISION="$(git -C "$ROOT" rev-parse HEAD)"
 #   docker buildx imagetools inspect curlimages/curl:8.11.1 --format '{{.Manifest.Digest}}'
 POSTGRES_16_ALPINE_DIGEST="postgres:16-alpine@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685"
 CURL_8_11_1_DIGEST="curlimages/curl:8.11.1@sha256:c1fe1679c34d9784c1b0d1e5f62ac0a79fca01fb6377cdd33e90473c6f9f9a69"
+
+# SMA-658: the two throwaway registries that `rehearse` pushes to. Refresh with:
+#   docker buildx imagetools inspect registry:2 --format '{{.Manifest.Digest}}'
+REGISTRY_2_DIGEST="registry:2@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373"
 
 crate_for() {
   case "$1" in
@@ -130,6 +153,29 @@ assert_pins() {
   echo "  pins OK: rustc ${channel}, bookworm builder, ubuntu ${ubuntu_from} == chisel release, no baked service config, start-period ${start_period}s >= 30s"
 }
 
+# Writes the chisel package list that a build log names into $2, and fails when it is empty
+# (SMA-500 fix-round 1: an empty manifest answers nothing when someone asks which libc shipped).
+extract_chisel_manifest() {
+  local build_log="$1" out="$2"
+  grep -oE 'Fetching pool/[^ ]+\.deb' "$build_log" | sort -u > "$out" || true
+  if [ ! -s "$out" ]; then
+    echo "::error::$(basename "$out") is empty; the package-fetch log format may have changed — update the grep pattern in ci/images/run.sh." >&2
+    return 1
+  fi
+}
+
+# The version line of a service crate's own Cargo.toml. Both services carry a literal version
+# (not `version.workspace = true`), which is what the image's version label must equal.
+version_for() {
+  local crate="$1" v
+  v="$(sed -n 's/^version = "\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)"$/\1/p' "$ROOT/rs/crates/services/${crate}/Cargo.toml" | sed -n 1p)"
+  if [ -z "$v" ]; then
+    echo "::error::no literal version line in rs/crates/services/${crate}/Cargo.toml" >&2
+    return 1
+  fi
+  echo "$v"
+}
+
 build_one() {
   local service="$1" crate tag build_log
   crate="$(crate_for "$service")"
@@ -152,13 +198,17 @@ build_one() {
   # always re-execute is what the comment above already assumed ("re-resolves ... on every
   # build") and costs one small apt/chisel fetch, not a rebuild of the (cache-mounted) Rust
   # compile.
+  # `docker buildx build`, not bare `docker build` (SMA-658 PR1 CI fix): plain `docker build` is
+  # not guaranteed to route through the builder that `docker buildx use` (what
+  # docker/setup-buildx-action selects) made current — build_oci below hit exactly this gap, so
+  # both build paths now say `buildx` explicitly. See build_oci's comment for the measured proof.
   # --load: docker/setup-buildx-action makes a `docker-container` builder CURRENT, and that
   # driver does not reliably auto-load its output into the local `docker images` store on every
   # Docker version (it happens to on 29.6.2, but the CI runner's version is not guaranteed to
   # match). Without --load the failure mode is silent here and loud at the first `docker run`
   # below ("No such image"). Under the plain `docker` driver (no buildx container) --load is a
   # no-op-safe `--output=type=docker`, so it costs nothing locally.
-  docker build \
+  docker buildx build \
     --progress=plain \
     --no-cache-filter=rootfs \
     --load \
@@ -171,16 +221,166 @@ build_one() {
     --label "org.opencontainers.image.licenses=Apache-2.0" \
     -t "$tag" -t "${crate}:dev" \
     "$ROOT/rs" 2>&1 | tee "$build_log"
-  grep -oE 'Fetching pool/[^ ]+\.deb' "$build_log" | sort -u > "$ROOT/chisel-manifest-${service}.txt" || true
-  # Defense in depth on top of --no-cache-filter=rootfs above: if the manifest is EVER empty
-  # (a future chisel version changing its log wording, buildkit changing --progress=plain
-  # formatting, etc.), fail loudly instead of shipping a 0-byte file that silently answers
-  # nothing when someone asks "which libc did this image ship?" (SMA-500 fix-round 1).
-  if [ ! -s "$ROOT/chisel-manifest-${service}.txt" ]; then
-    echo "::error::chisel-manifest-${service}.txt is empty; the package-fetch log format may have changed — update the grep pattern in ci/images/run.sh." >&2
+  extract_chisel_manifest "$build_log" "$ROOT/chisel-manifest-${service}.txt"
+  echo "  built ${tag}"
+}
+
+# SMA-658: the release build. The same image as build_one, exported as an OCI ARCHIVE instead of
+# being loaded, so its bytes (and so its digest) are fixed before anything is pushed.
+# --provenance=false --sbom=false: buildx would otherwise wrap the image in an index with its own
+# attestation manifests; the release path attests through GitHub instead (spec D4).
+# name=<crate>:dev: records the image's own identity inside the archive; load_oci tags it as
+# whatever name its caller passes (smoke expects <crate>:dev), by digest, not from this name.
+#
+# `docker buildx build`, never bare `docker build` (SMA-658 PR1 CI fix, PR 270). MEASURED on the
+# GitHub-hosted runner: bare `docker build --output type=oci,...` failed with "OCI exporter is
+# not supported for the docker driver", although images.yml already runs
+# docker/setup-buildx-action, which creates a `docker-container` builder and switches to it
+# (`use: true`, its default). The action's own docs describe that switch as making the builder
+# current "for subsequent docker buildx commands", not for the classic `docker build` CLI path —
+# and Docker's own exporter docs are explicit: "The docker driver doesn't support these
+# exporters. You must use docker-container or some other driver." So on this runner, plain
+# `docker build` resolved to the classic `docker` driver regardless of the builder
+# docker/setup-buildx-action had selected, and the OCI exporter has no path there. Spelling the
+# command as `docker buildx build` removes that ambiguity: it always talks to buildx and always
+# uses the current builder — the `docker-container` one in CI (OCI export works, per Docker's
+# docs), and whatever builder is current locally (unchanged behaviour there: Docker Desktop
+# already aliases `docker build` to the same buildx call, which is how the containerd-image-store
+# Mac measurement in docs/ops/RUNBOOK-containers.md was taken). Do NOT "simplify" this back to
+# bare `docker build` — that is the exact regression this comment exists to prevent.
+build_oci() {
+  local service="$1" outdir="$2" crate version arch archive build_log
+  crate="$(crate_for "$service")"
+  version="$(version_for "$crate")"
+  arch="$(docker version --format '{{.Server.Arch}}')"
+  mkdir -p "$outdir"
+  archive="${outdir}/${crate}-${arch}.oci.tar"
+  build_log="$(mktemp "${TMPDIR:-/tmp}/paigasus-build-${service}.XXXXXX")"
+  trap 'rm -f "$build_log"' RETURN
+  echo "== build-oci ${crate} ${version} (${arch}) =="
+  docker buildx build \
+    --progress=plain \
+    --no-cache-filter=rootfs \
+    --provenance=false --sbom=false \
+    --output "type=oci,dest=${archive},name=${crate}:dev" \
+    -f "$ROOT/rs/Dockerfile" \
+    --build-arg "BIN=${crate}" \
+    --label "org.opencontainers.image.title=${crate}" \
+    --label "org.opencontainers.image.description=Paigasus ${service} service" \
+    --label "org.opencontainers.image.source=https://github.com/SMK1085/paigasus-core" \
+    --label "org.opencontainers.image.revision=${REVISION}" \
+    --label "org.opencontainers.image.version=${version}" \
+    --label "org.opencontainers.image.licenses=Apache-2.0" \
+    "$ROOT/rs" 2>&1 | tee "$build_log"
+  extract_chisel_manifest "$build_log" "$ROOT/chisel-manifest-${service}-${arch}.txt"
+  echo "  built ${archive}"
+}
+
+# SMA-658 spec § 4.2: the image the smoke suite tests must be the image in the archive. What a
+# local image's `.Id` reports depends on the daemon's image store (measured M3, local Docker
+# 29.8): the containerd store gives the MANIFEST digest, the classic store gives the CONFIG
+# digest. So the check accepts the one value that matches this daemon's store, and prints every
+# value once per runner so CI records M3 for each runner label.
+#
+# CI fix (PR 270): `docker load -i <oci-archive>` of a buildx OCI-layout archive needs the
+# CONTAINERD image store to parse it. MEASURED on `ubuntu-latest` and `ubuntu-24.04-arm` (both
+# arch legs): it fails with `open .../blobs/json: no such file or directory`, because those
+# runners' Docker uses the CLASSIC store. It only works on this Mac because Docker Desktop uses
+# the containerd store. So the archive is no longer handed to `docker load` at all — it goes
+# through a throwaway local registry instead: start one (the same `registry:2` container and free
+# -port pattern `start_registry`/`rehearse` below already use), push the archive with `crane push`
+# (crane is proto-pinned; `rehearse` already pushes this way), then `docker pull` it back BY
+# DIGEST and tag it as $name. Docker verifies the manifest bytes it downloads hash to the digest
+# it was asked for and fails the pull otherwise, so a successful pull is already proof the
+# manifest is intact; the store-dependent `.Id` check below then gives the SAME guarantee the old
+# `docker load`-based check gave, because it is the STORE, not the ingestion path, that decides
+# whether a local image's `.Id` is its manifest digest (containerd) or its config digest
+# (classic) — both a `docker load` and a `docker pull` land in the same local store afterwards.
+# A second `--output type=docker` export would run the smoke test on different bytes than the
+# published archive, which defeats the check; skopeo's docker-daemon transport would add an
+# unpinned tool. The registry (and its scratch dir) are removed in an EXIT trap so they are gone
+# on every exit path, including a `set -e` abort partway through — measured: a RETURN trap, the
+# pattern `build_one`/`build_oci` use for their build log, does NOT fire when `set -e` aborts a
+# function from inside, only on that function's normal return, so it would leak the registry
+# container on exactly the failures this check exists to catch.
+#
+# CI fix, PR 270: the EXIT trap must not read a variable the function it was set in declared
+# `local` — a trap fires at SCRIPT exit, after the function has already returned and its locals
+# have gone out of scope, so under `set -u` the trap itself dies with `reg_name: unbound
+# variable` (MEASURED on all three CI legs: every one printed M3 for the first crate, then died
+# on that exact line before reaching the second crate). `LOAD_OCI_REG`/`LOAD_OCI_TMPDIR` below
+# are script-global instead, initialised to the empty string so `load_oci_cleanup` is a safe
+# no-op for every command that never runs `load_oci` at all, and the trap that calls it is
+# registered ONCE, at top level — not re-registered per call, so a second `load-oci` invocation
+# in the same script process reads the same always-defined globals rather than risking a second,
+# possibly stale, trap body. `load_oci` also calls `load_oci_cleanup` explicitly once it is done
+# with the registry, so a normal, successful call leaves nothing behind for a second call to
+# collide with; the trap remains as the backstop for a `set -e` abort or a signal before that
+# point is reached.
+LOAD_OCI_REG=""
+LOAD_OCI_TMPDIR=""
+
+load_oci_cleanup() {
+  if [ -n "$LOAD_OCI_REG" ]; then
+    docker rm -f "$LOAD_OCI_REG" >/dev/null 2>&1 || true
+    LOAD_OCI_REG=""
+  fi
+  if [ -n "$LOAD_OCI_TMPDIR" ]; then
+    rm -rf "$LOAD_OCI_TMPDIR"
+    LOAD_OCI_TMPDIR=""
+  fi
+}
+trap load_oci_cleanup EXIT
+
+load_oci() {
+  local archive="$1" name="$2" digests manifest config store driver loaded size expected
+  local reg repo
+  digests="$(decide oci-digests "$archive")"
+  manifest="$(kv "$digests" manifest)"
+  config="$(kv "$digests" config)"
+
+  if ! command -v crane >/dev/null 2>&1; then
+    echo "::error::crane is not on PATH; run 'proto install crane'" >&2
+    return 2
+  fi
+  LOAD_OCI_REG="load-oci-registry-$$"
+  reg="$(start_registry "$LOAD_OCI_REG")"
+  # `127.0.0.1`, not the `localhost` `start_registry` returns (kept as-is for `rehearse`, which
+  # needs it — see its own comment): measured on this Mac, `docker pull`/`docker tag` resolve
+  # `localhost` to `::1` first and time out, because the registry container is published on
+  # `127.0.0.1` only. `crane push` below is unaffected either way (it is given `--insecure`
+  # explicitly), so using the literal IP for the whole function sidesteps the resolution order
+  # entirely rather than depending on it.
+  reg="${reg/localhost/127.0.0.1}"
+  repo="${reg}/paigasus-load-oci"
+
+  LOAD_OCI_TMPDIR="$(mktemp -d "${TMPDIR:-/tmp}/paigasus-load-oci.XXXXXX")"
+  tar -xf "$archive" -C "$LOAD_OCI_TMPDIR"
+  crane push --insecure "$LOAD_OCI_TMPDIR" "${repo}:load" >/dev/null
+  rm -rf "$LOAD_OCI_TMPDIR"
+  LOAD_OCI_TMPDIR=""
+
+  docker pull "${repo}@${manifest}" >/dev/null
+  docker tag "${repo}@${manifest}" "$name"
+
+  loaded="$(docker image inspect --format '{{.Id}}' "$name")"
+  size="$(docker image inspect --format '{{.Size}}' "$name")"
+  driver="$(docker info --format '{{json .DriverStatus}}')"
+  store="classic"
+  case "$driver" in *io.containerd.snapshotter*) store="containerd" ;; esac
+  expected="$config"
+  [ "$store" = "containerd" ] && expected="$manifest"
+  echo "M3 arch=$(docker version --format '{{.Server.Arch}}') docker=$(docker version --format '{{.Server.Version}}') store=${store} loaded_id=${loaded} manifest=${manifest} config=${config} size=${size}"
+  # Clean up now rather than waiting for the script-exit trap: a successful call must not leave
+  # its registry running for a SECOND `load-oci` call in the same script process to collide
+  # with. The trap above stays registered as the backstop for every path that returns before
+  # this line runs.
+  load_oci_cleanup
+  if [ "$loaded" != "$expected" ]; then
+    echo "::error::${name} loaded as ${loaded} (pulled by digest via a local registry), but the ${store} store should report ${expected}: the loaded image is not the archive's image." >&2
     return 1
   fi
-  echo "  built ${tag}"
+  echo "  ${name} is the archive's image (${store} store, loaded via a local registry)"
 }
 
 # Every container/network name carries the same $$ suffix so two concurrent
@@ -360,11 +560,20 @@ assert_base_intact() {
   echo "  ${image}: no shell, ${certs} CA certs, $((size / 1024 / 1024)) MB"
 }
 
-smoke() {
-  trap cleanup EXIT
-  cleanup
-  docker network create "$NET" >/dev/null
+# The image under test must be the one THIS checkout built. This replaces the old rule that
+# `smoke` took no service argument (SMA-500): the danger was that `smoke` would test a stale or
+# absent image of the OTHER service and still report SMOKE OK. A per-service smoke never touches
+# the other service's image, and this check refuses a stale image of the service it does test.
+assert_fresh() {
+  local image="$1" rev
+  rev="$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$image" 2>/dev/null || true)"
+  if [ "$rev" != "$REVISION" ]; then
+    echo "::error::${image} carries revision '${rev:-<none>}', expected ${REVISION}: a stale or absent image would be smoke-tested." >&2
+    return 1
+  fi
+}
 
+smoke_gateway() {
   echo "== gateway: standalone =="
   # Runtime-only config (AC-2): env vars ONLY, no mounted file, no --env-file. Success IS the
   # proof. The key is a literal dummy and must never be a real one.
@@ -389,7 +598,9 @@ smoke() {
     *) echo "::error::gateway readyz probe exited ${readyz_rc}, expected exactly 1 (unhealthy)" >&2; return 1 ;;
   esac
   assert_base_intact paigasus-gateway:dev
+}
 
+smoke_iam() {
   echo "== iam: with postgres, reached BY HOSTNAME =="
   # --health-cmd/--health-interval + wait_healthy, not a fixed `sleep`: sea-orm's
   # Database::connect does not retry, so IAM's own boot attempt must land AFTER postgres is
@@ -416,45 +627,238 @@ smoke() {
   expect_status "iam /healthz" "http://${IAM_NAME}:8080/healthz" 200
   expect_status "iam /readyz"  "http://${IAM_NAME}:8080/readyz"  200
   assert_base_intact paigasus-iam:dev
-
-  echo "== runs as the non-root uid it claims =="
-  # `docker top`, not `docker inspect .Config.User`: the latter reads IMAGE config, so a
-  # `--user 0` invocation would still pass it.
-  # `-o pid,uid`, not `-o pid,user` or `-o user` alone: `pid` stays required — some docker
-  # engines (observed on Docker Desktop 29.6.2) need it present in the ps format to correlate
-  # host processes back to the container and error `Couldn't find PID field in ps output`
-  # otherwise — but `user` is resolved through NSS, so on a Linux runner where uid 65532
-  # resolves to a synthesized name (e.g. nss-systemd on GitHub-hosted ubuntu-latest) this would
-  # print a username instead of "65532" and false-negative CI on a correct image. `uid` is the
-  # raw numeric column and is never name-resolved. Do NOT "simplify" this back to `-o user`.
-  # `awk '{print $NF}'` takes the last column so the field order doesn't matter.
-  for c in "$GW_NAME" "$IAM_NAME"; do
-    uid="$(docker top "$c" -o pid,uid 2>/dev/null | tail -1 | awk '{print $NF}')"
-    [ "$uid" = "65532" ] || { echo "::error::$c runs as ${uid}, expected 65532" >&2; return 1; }
-    echo "  $c runs as uid ${uid}"
-  done
-  echo "SMOKE OK"
 }
 
-cmd="${1:?usage: ci/images/run.sh build [iam|gateway] | ci/images/run.sh \{smoke\|all\}}"
+# `docker top`, not `docker inspect .Config.User`: the latter reads IMAGE config, so a
+# `--user 0` invocation would still pass it.
+# `-o pid,uid`, not `-o pid,user` or `-o user` alone: `pid` stays required — some docker
+# engines (observed on Docker Desktop 29.6.2) need it present in the ps format to correlate
+# host processes back to the container and error `Couldn't find PID field in ps output`
+# otherwise — but `user` is resolved through NSS, so on a Linux runner where uid 65532
+# resolves to a synthesized name (e.g. nss-systemd on GitHub-hosted ubuntu-latest) this would
+# print a username instead of "65532" and false-negative CI on a correct image. `uid` is the
+# raw numeric column and is never name-resolved. Do NOT "simplify" this back to `-o user`.
+# `awk '{print $NF}'` takes the last column so the field order doesn't matter.
+assert_uid() {
+  local c="$1" uid
+  uid="$(docker top "$c" -o pid,uid 2>/dev/null | tail -1 | awk '{print $NF}')"
+  [ "$uid" = "65532" ] || { echo "::error::$c runs as ${uid}, expected 65532" >&2; return 1; }
+  echo "  $c runs as uid ${uid}"
+}
+
+smoke() {
+  local s
+  trap cleanup EXIT
+  cleanup
+  docker network create "$NET" >/dev/null
+  for s in "$@"; do
+    case "$s" in
+      gateway) assert_fresh paigasus-gateway:dev; smoke_gateway; assert_uid "$GW_NAME" ;;
+      iam)     assert_fresh paigasus-iam:dev;     smoke_iam;     assert_uid "$IAM_NAME" ;;
+      *) echo "unknown service: $s" >&2; return 1 ;;
+    esac
+  done
+  echo "SMOKE OK ($*)"
+}
+
+# --- rehearse (SMA-658 spec § 8) -----------------------------------------------------------------
+# Runs the publish sequence of the future release path against two LOCAL registries: A stands in
+# for GHCR and B for Docker Hub. It needs no credential, so images.yml runs it on a pull request.
+# It proves the parts that do not need OIDC or a secret: push by digest, the index, the
+# digest-preserving copy, the D10 adoption rule, the conflict refusal and the floating-tag rule.
+# The decisions come from release_decision.py, so PR 2 runs the SAME decision code; the registry
+# commands here are a copy of PR 2's sequence, which is the residual (spec § 7.1 wants them
+# literal in release.yml).
+REH_A_NAME="rehearse-a-${RUN_ID}"
+REH_B_NAME="rehearse-b-${RUN_ID}"
+REH_TMP=""
+
+rehearse_cleanup() {
+  docker rm -f "$REH_A_NAME" "$REH_B_NAME" >/dev/null 2>&1 || true
+  if [ -n "$REH_TMP" ]; then rm -rf "$REH_TMP"; fi
+}
+
+rh_fail() {
+  echo "::error::rehearse: $*" >&2
+  return 1
+}
+
+# Starts a registry:2 on a free localhost port and prints `localhost:<port>`. `localhost`, not
+# 127.0.0.1, because crane and buildx both treat a `localhost` registry as plain HTTP.
+start_registry() {
+  local name="$1" hostport port i
+  docker run -d --name "$name" -p 127.0.0.1::5000 "$REGISTRY_2_DIGEST" >/dev/null
+  hostport="$(docker port "$name" 5000/tcp | sed -n 1p)"
+  port="${hostport##*:}"
+  for i in $(seq 1 30); do
+    if crane catalog --insecure "localhost:${port}" >/dev/null 2>&1; then
+      echo "localhost:${port}"
+      return 0
+    fi
+    sleep 1
+  done
+  rh_fail "registry ${name} never answered on localhost:${port} (${i}s)"
+}
+
+# The digest that `$1:$2` resolves to, or `none` when the tag does not exist. Any OTHER failure
+# (a network error, a registry 5xx, auth) is fatal: reading it as "absent" would let a real
+# release push a second digest under a published version (spec D10). PR 2 keeps this rule.
+tag_digest() {
+  local ref="$1:$2" out rc=0
+  out="$(crane digest --insecure "$ref" 2>&1)" || rc=$?
+  if [ "$rc" -eq 0 ]; then
+    printf '%s\n' "$out"
+    return 0
+  fi
+  case "$out" in
+    *MANIFEST_UNKNOWN*|*NAME_UNKNOWN*) echo "none" ;;
+    *) rh_fail "cannot read ${ref}: ${out}" ;;
+  esac
+}
+
+expect_kv() {
+  local got
+  got="$(kv "$1" "$2")"
+  [ "$got" = "$3" ] || rh_fail "expected $2=$3, got $2=${got:-<empty>}"
+}
+
+expect_tag() {
+  local got
+  got="$(tag_digest "$1" "$2")"
+  [ "$got" = "$3" ] || rh_fail "$1:$2 is ${got}, expected $3"
+}
+
+rehearse() {
+  if [ "$#" -lt 1 ]; then
+    echo "usage: ci/images/run.sh rehearse <archive.oci.tar>..." >&2
+    return 1
+  fi
+  if ! command -v crane >/dev/null 2>&1; then
+    echo "::error::crane is not on PATH; run 'proto install crane'" >&2
+    return 2
+  fi
+  trap rehearse_cleanup EXIT
+  REH_TMP="$(mktemp -d "${TMPDIR:-/tmp}/paigasus-rehearse.XXXXXX")"
+  local a b repo_a repo_b archive digests manifest platform arch refs first index index2 rebuilt ga gb out rc r t
+  refs=()
+  a="$(start_registry "$REH_A_NAME")"
+  b="$(start_registry "$REH_B_NAME")"
+  repo_a="${a}/paigasus-rehearse"
+  repo_b="${b}/paigasus-rehearse"
+
+  echo "== rehearse: push each platform to A and keep its digest =="
+  for archive in "$@"; do
+    digests="$(decide oci-digests "$archive")"
+    manifest="$(kv "$digests" manifest)"
+    platform="$(kv "$digests" platform)"
+    arch="${platform#*/}"
+    mkdir -p "$REH_TMP/$arch"
+    tar -xf "$archive" -C "$REH_TMP/$arch"
+    crane push --insecure "$REH_TMP/$arch" "${repo_a}:${REVISION}-${arch}" >/dev/null
+    expect_tag "$repo_a" "${REVISION}-${arch}" "$manifest"
+    refs+=("${repo_a}@${manifest}")
+    echo "  ${arch}: ${manifest}"
+  done
+  first="${refs[0]#*@}"
+  docker buildx imagetools create --tag "${repo_a}:${REVISION}" "${refs[@]}"
+  index="$(tag_digest "$repo_a" "$REVISION")"
+  echo "  index: ${index}"
+
+  echo "== case 1: nothing published -> push-new, copy to B, tag both =="
+  ga="$(tag_digest "$repo_a" 0.1.0)"
+  gb="$(tag_digest "$repo_b" 0.1.0)"
+  out="$(decide adopt --new-digest "$index" --ghcr "$ga" --dockerhub "$gb" --git-tag absent)"
+  expect_kv "$out" action push-new
+  docker buildx imagetools create --tag "${repo_b}:${REVISION}" "${repo_a}@${index}"
+  expect_tag "$repo_b" "$REVISION" "$index"
+  : > "$REH_TMP/tags"
+  out="$(decide floating --service gateway --version 0.1.0 --tags-file "$REH_TMP/tags")"
+  expect_kv "$out" move true
+  for r in "$repo_a" "$repo_b"; do
+    crane tag --insecure "${r}@${index}" 0.1.0
+    crane tag --insecure "${r}@${index}" "$(kv "$out" minor_tag)"
+    crane tag --insecure "${r}@${index}" latest
+    for t in 0.1.0 0.1 latest; do expect_tag "$r" "$t" "$index"; done
+  done
+
+  echo "== case 2: a rebuild of a published version -> adopt the first digest, overwrite nothing =="
+  crane mutate --insecure "${repo_a}@${first}" --label org.opencontainers.image.description=rehearsal-rebuild -t "${repo_a}:rebuild" >/dev/null
+  rebuilt="$(tag_digest "$repo_a" rebuild)"
+  [ "$rebuilt" != "$first" ] || rh_fail "the rebuild kept the first digest; the case proves nothing"
+  docker buildx imagetools create --tag "${repo_a}:rebuild-index" "${repo_a}@${rebuilt}"
+  index2="$(tag_digest "$repo_a" rebuild-index)"
+  ga="$(tag_digest "$repo_a" 0.1.0)"
+  gb="$(tag_digest "$repo_b" 0.1.0)"
+  out="$(decide adopt --new-digest "$index2" --ghcr "$ga" --dockerhub "$gb" --git-tag absent)"
+  expect_kv "$out" action adopt
+  expect_kv "$out" digest "$index"
+  expect_kv "$out" copy_to none
+  # A real "overwrite nothing" claim needs a write that COULD have happened. Gate a tag move to
+  # the rebuild's index behind the same condition PR 2 will use, so a branch that pushed
+  # unconditionally would move the tag to $index2 and the assertion below would catch it.
+  if [ "$(kv "$out" action)" = push-new ]; then
+    for r in "$repo_a" "$repo_b"; do crane tag --insecure "${r}@${index2}" 0.1.0; done
+  fi
+  expect_tag "$repo_a" 0.1.0 "$index"
+  expect_tag "$repo_b" 0.1.0 "$index"
+
+  echo "== case 3: only A holds the version -> adopt A's digest and copy it to B =="
+  crane tag --insecure "${repo_a}@${index2}" 0.1.1
+  ga="$(tag_digest "$repo_a" 0.1.1)"
+  gb="$(tag_digest "$repo_b" 0.1.1)"
+  out="$(decide adopt --new-digest "$index" --ghcr "$ga" --dockerhub "$gb" --git-tag absent)"
+  expect_kv "$out" action adopt
+  expect_kv "$out" digest "$index2"
+  expect_kv "$out" copy_to dockerhub
+  docker buildx imagetools create --tag "${repo_b}:0.1.1" "${repo_a}@${index2}"
+  expect_tag "$repo_b" 0.1.1 "$index2"
+
+  echo "== case 4: the registries disagree -> refuse (exit 3) =="
+  crane tag --insecure "${repo_a}@${index}" 0.1.2
+  docker buildx imagetools create --tag "${repo_b}:0.1.2" "${repo_a}@${index2}"
+  ga="$(tag_digest "$repo_a" 0.1.2)"
+  gb="$(tag_digest "$repo_b" 0.1.2)"
+  rc=0
+  out="$(decide adopt --new-digest "$index" --ghcr "$ga" --dockerhub "$gb" --git-tag absent)" || rc=$?
+  [ "$rc" -eq 3 ] || rh_fail "a digest conflict must exit 3, got ${rc}"
+  expect_kv "$out" action conflict
+
+  echo "== case 5: an older version than a released one -> the floating tags hold =="
+  printf 'abc123\trefs/tags/paigasus-gateway-v0.2.0\n' > "$REH_TMP/tags"
+  out="$(decide floating --service gateway --version 0.1.1 --tags-file "$REH_TMP/tags")"
+  expect_kv "$out" move false
+  # Same reasoning as case 2: gate the case-1 tag-move loop behind the real condition, using
+  # $index2 (already known to differ from $index) as the would-be new value, so a branch that
+  # moved the tags unconditionally would be caught below.
+  if [ "$(kv "$out" move)" = true ]; then
+    for r in "$repo_a" "$repo_b"; do
+      crane tag --insecure "${r}@${index2}" 0.1.1
+      crane tag --insecure "${r}@${index2}" "$(kv "$out" minor_tag)"
+      crane tag --insecure "${r}@${index2}" latest
+    done
+  fi
+  expect_tag "$repo_a" latest "$index"
+  expect_tag "$repo_b" latest "$index"
+
+  echo "REHEARSE OK"
+}
+
+# One usage string for both the missing-command case and the unknown-command case below, so the
+# two never drift apart. Lists every command the case block accepts, in the order it accepts them.
+USAGE="usage: ci/images/run.sh build [iam|gateway] | ci/images/run.sh build-oci <iam|gateway> <outdir> | ci/images/run.sh load-oci <archive> <image-name> | ci/images/run.sh smoke [iam|gateway]... | ci/images/run.sh all | ci/images/run.sh rehearse <archive.oci.tar>..."
+cmd="${1:?$USAGE}"
 target="${2:-}"
 services=("iam" "gateway")
 [ -n "$target" ] && services=("$target")
 
-# `smoke` and `all` always exercise BOTH images (§ 5.2: the negative case on the gateway needs
-# no IAM reachable, and the positive case needs IAM's own postgres) — a service argument on
-# either of them is silently ignored by `build_one`'s scoping but NOT by `smoke`, which has no
-# way to honour it. `run.sh all iam` would then build only iam while still smoke-testing
-# whatever `paigasus-gateway:dev` happens to already be on the daemon (stale or absent), and
-# report SMOKE OK regardless. Reject the argument outright rather than let it lie.
+# `smoke` with no argument smokes both images, gateway first (the old behaviour). With service
+# arguments it smokes exactly those; assert_fresh (above) is what stops a stale image from being
+# tested. `all` still takes no argument: it builds with --load and smokes both.
 case "$cmd" in
   build) assert_pins; for s in "${services[@]}"; do build_one "$s"; done ;;
   smoke)
-    if [ -n "$target" ]; then
-      echo "usage: ci/images/run.sh smoke takes no service argument — it always smokes both images" >&2
-      exit 1
-    fi
-    smoke
+    shift
+    if [ "$#" -eq 0 ]; then smoke gateway iam; else smoke "$@"; fi
     ;;
   all)
     if [ -n "$target" ]; then
@@ -463,7 +867,27 @@ case "$cmd" in
     fi
     assert_pins
     for s in "${services[@]}"; do build_one "$s"; done
-    smoke
+    smoke gateway iam
     ;;
-  *) echo "unknown command: $cmd" >&2; exit 1 ;;
+  build-oci)
+    if [ -z "$target" ] || [ -z "${3:-}" ]; then
+      echo "usage: ci/images/run.sh build-oci <iam|gateway> <outdir>" >&2
+      exit 1
+    fi
+    assert_pins
+    build_oci "$target" "$3"
+    ;;
+  load-oci)
+    if [ -z "$target" ] || [ -z "${3:-}" ]; then
+      echo "usage: ci/images/run.sh load-oci <archive> <image-name>" >&2
+      exit 1
+    fi
+    load_oci "$target" "$3"
+    ;;
+  rehearse) shift; rehearse "$@" ;;
+  *)
+    echo "unknown command: $cmd" >&2
+    echo "$USAGE" >&2
+    exit 1
+    ;;
 esac

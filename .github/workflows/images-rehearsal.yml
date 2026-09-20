@@ -1,0 +1,235 @@
+# SPDX-License-Identifier: Apache-2.0
+name: images-rehearsal
+
+# SMA-658 PR 1 (spec § 8). Runs the signing and attestation steps of the future release path FOR
+# REAL, against a scratch GHCR package, so they have run once before the first real release:
+# cosign keyless, attest-build-provenance, attest-sbom (per-platform subject), cosign verify and
+# gh attestation verify. It publishes no release image. It reads one probe secret, never a real
+# release credential, to prove an environment secret reaches a main-only, no-reviewer job (M9).
+#
+# workflow_dispatch ONLY. A pull_request trigger would let a PR mint an OIDC token
+# (repo:workflow-credentials bans that shape), and both jobs refuse any ref but main.
+# Run it with: gh workflow run images-rehearsal.yml --ref main
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: images-rehearsal
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/smk1085/paigasus-rehearsal
+
+jobs:
+  build:
+    name: build gateway (${{ matrix.arch }})
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        arch:
+          - amd64
+          - arm64
+    env:
+      ARCH: ${{ matrix.arch }}
+      # SMA-609: every captured shim output must set this (CLAUDE.md).
+      PROTO_REPORTER: text
+    steps:
+      - name: Refuse any ref but main
+        run: |
+          if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+            echo "::error::images-rehearsal runs only from main (got ${GITHUB_REF})." >&2
+            exit 1
+          fi
+
+      - name: Reclaim runner disk (drop unused preinstalled toolchains)
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup \
+            /opt/hostedtoolcache/CodeQL || true
+          sudo docker image prune --all --force > /dev/null 2>&1 || true
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e  # v4.3.0
+
+      - name: Set up proto (pinned via .prototools)
+        uses: moonrepo/setup-toolchain@261c62cb5b0f580c7be7c8cd0f023a2e96756095  # v0
+        with:
+          cache: false
+
+      - name: Install syft
+        run: proto install syft
+
+      - name: Build the gateway image as an OCI archive
+        run: ci/images/run.sh build-oci gateway out
+
+      - name: SBOM for this platform
+        run: syft "oci-archive:out/paigasus-gateway-${ARCH}.oci.tar" -o "spdx-json=out/sbom-paigasus-gateway-${ARCH}.spdx.json"
+
+      - name: Upload the archive and its SBOM
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: rehearsal-${{ matrix.arch }}
+          path: |
+            out/paigasus-gateway-${{ matrix.arch }}.oci.tar
+            out/sbom-paigasus-gateway-${{ matrix.arch }}.spdx.json
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: push, attest, sign and verify on GHCR
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # The `images-rehearsal` environment, its main-only deployment rule and no reviewers, and
+    # the REHEARSAL_ENV_PROBE secret are a MANUAL setup step (runbook) in the repo settings, not
+    # something this file creates. Spec § 9 M9 needs a job with that exact shape to confirm an
+    # environment secret reaches it before the same pattern is trusted for a real release.
+    environment: images-rehearsal
+    permissions:
+      contents: read
+      packages: write       # push to ghcr.io/smk1085/paigasus-rehearsal
+      id-token: write       # cosign keyless and the attestations
+      attestations: write   # actions/attest-*
+    steps:
+      - name: Refuse any ref but main
+        run: |
+          if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+            echo "::error::images-rehearsal runs only from main (got ${GITHUB_REF})." >&2
+            exit 1
+          fi
+
+      # Spec § 9 M9: the `images-rehearsal` environment carries a main-only deployment rule and
+      # no reviewers. This confirms an environment secret actually reaches a job shaped like that,
+      # before a real release trusts the same pattern. Read through `env:`, never interpolated
+      # into the script, and never printed.
+      - name: Confirm the environment secret reaches this job (spec M9)
+        env:
+          REHEARSAL_ENV_PROBE: ${{ secrets.REHEARSAL_ENV_PROBE }}
+        run: |
+          if [ -z "$REHEARSAL_ENV_PROBE" ]; then
+            echo "::error::REHEARSAL_ENV_PROBE is empty or unset; the images-rehearsal environment secret did not reach this job." >&2
+            exit 1
+          fi
+          echo "M9 environment secret reached the job (length ${#REHEARSAL_ENV_PROBE})"
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e  # v4.3.0
+
+      - name: Set up proto (pinned via .prototools)
+        uses: moonrepo/setup-toolchain@261c62cb5b0f580c7be7c8cd0f023a2e96756095  # v0
+        with:
+          cache: false
+
+      - name: Install crane, cosign and uv
+        run: |
+          proto install crane
+          proto install cosign
+          proto install uv
+
+      - name: Download both archives and SBOMs
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          pattern: rehearsal-*
+          merge-multiple: true
+          path: in
+
+      # github.token, never secrets.GITHUB_TOKEN: the latter is a `secrets` reference, and PR 2
+      # copies these steps into release.yml, where V10 rule 1 pins the secret names.
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Push each platform by digest, then the index
+        id: push
+        run: |
+          set -euo pipefail
+          export PROTO_REPORTER=text
+          refs=()
+          for arch in amd64 arm64; do
+            archive="in/paigasus-gateway-${arch}.oci.tar"
+            digests="$(uv run --no-project --python '>=3.12' python3 ci/images/release_decision.py oci-digests "$archive")"
+            manifest="$(printf '%s\n' "$digests" | sed -n 's/^manifest=//p')"
+            layout="$(mktemp -d)"
+            tar -xf "$archive" -C "$layout"
+            crane push "$layout" "${IMAGE}:${GITHUB_SHA}-${arch}"
+            got="$(crane digest "${IMAGE}:${GITHUB_SHA}-${arch}")"
+            if [ "$got" != "$manifest" ]; then
+              echo "::error::crane push changed the ${arch} digest: ${manifest} -> ${got}" >&2
+              exit 1
+            fi
+            echo "digest_${arch}=${manifest}" >> "$GITHUB_OUTPUT"
+            refs+=("${IMAGE}@${manifest}")
+          done
+          docker buildx imagetools create --tag "${IMAGE}:${GITHUB_SHA}" "${refs[@]}"
+          index="$(crane digest "${IMAGE}:${GITHUB_SHA}")"
+          echo "index=${index}" >> "$GITHUB_OUTPUT"
+
+      - name: Attest build provenance (index)
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8  # v4.2.2
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.push.outputs.index }}
+          push-to-registry: true
+
+      - name: Attest the amd64 SBOM (per-platform subject)
+        uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e  # v4.1.0
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.push.outputs.digest_amd64 }}
+          sbom-path: in/sbom-paigasus-gateway-amd64.spdx.json
+          push-to-registry: true
+
+      - name: Attest the arm64 SBOM (per-platform subject)
+        uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e  # v4.1.0
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.push.outputs.digest_arm64 }}
+          sbom-path: in/sbom-paigasus-gateway-arm64.spdx.json
+          push-to-registry: true
+
+      - name: Sign the index (cosign keyless)
+        env:
+          INDEX: ${{ steps.push.outputs.index }}
+        run: cosign sign --yes "${IMAGE}@${INDEX}"
+
+      - name: Verify the signature and the attestations
+        env:
+          INDEX: ${{ steps.push.outputs.index }}
+          DIGEST_AMD64: ${{ steps.push.outputs.digest_amd64 }}
+          DIGEST_ARM64: ${{ steps.push.outputs.digest_arm64 }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cosign verify \
+            --certificate-identity "https://github.com/SMK1085/paigasus-core/.github/workflows/images-rehearsal.yml@refs/heads/main" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            "${IMAGE}@${INDEX}"
+          gh attestation verify "oci://${IMAGE}@${INDEX}" \
+            --repo SMK1085/paigasus-core \
+            --signer-workflow SMK1085/paigasus-core/.github/workflows/images-rehearsal.yml \
+            --source-ref refs/heads/main
+          for d in "$DIGEST_AMD64" "$DIGEST_ARM64"; do
+            gh attestation verify "oci://${IMAGE}@${d}" \
+              --repo SMK1085/paigasus-core \
+              --signer-workflow SMK1085/paigasus-core/.github/workflows/images-rehearsal.yml \
+              --predicate-type https://spdx.dev/Document/v2.3 \
+              --source-ref refs/heads/main
+          done
+          echo "REHEARSAL OK: ${IMAGE}@${INDEX}"
