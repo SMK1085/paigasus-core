@@ -189,6 +189,19 @@ PUBLISH_MARKERS = (
     r"maturin\s+publish",
     r"maturin\s+upload",
     r"uv\s+publish",
+    # SMA-658. Container registries and the tag API. Bounded ends, like the release-plz marker
+    # above: `crane pusher` must not match `crane push`.
+    r"docker\s+push(?![-\w])",
+    r"docker\s+buildx\s+build[^\n]*--push(?![-\w])",
+    r"--output\s+type=registry(?![-\w])",
+    r"docker\s+manifest\s+push(?![-\w])",
+    r"imagetools\s+create(?![-\w])",
+    r"crane\s+(push|copy|cp|tag|index|append)(?![-\w])",
+    r"skopeo\s+copy(?![-\w])",
+    r"regctl\s+(image\s+(copy|cp)|tag|index\s+create)(?![-\w])",
+    r"oras\s+(push|cp|attach)(?![-\w])",
+    r"cosign\s+(sign|attest|attach|copy)(?![-\w])",
+    r"git/refs(?![-\w])",
 )
 _PUBLISH_RE = re.compile("|".join(PUBLISH_MARKERS))
 
@@ -360,7 +373,16 @@ RELEASE_WORKFLOW_NAME = "release.yml"
 # (wheels.yml builds, it does not publish), and `repo:workflow-credentials` actively BANS the
 # grant in any pull_request-triggered workflow — so applying this rule file-wide would red a
 # correct repository.
-OIDC_PUBLISH_JOBS = ("publish-pypi", "publish-npm")
+# SMA-658 correction. The brief's Step 7 text omitted `release`: it holds `id-token: write` for
+# the crates.io OIDC exchange since SMA-602 (`# crates.io OIDC exchange`, release.yml:560), the
+# same legitimate shape as `publish-pypi` and `publish-npm`. Before S1 below existed, the omission
+# was harmless — the (pre-existing) first loop only checked jobs NAMED in this tuple, never
+# forbade the grant elsewhere. S1 adds exactly that forbidding direction, so leaving `release` out
+# would permanently red the real `release.yml` on its own long-standing, correct grant — measured
+# running this guard against the checked-in file (Step 10).
+OIDC_PUBLISH_JOBS = (
+    "release", "publish-pypi", "publish-npm", "publish-images-iam", "publish-images-gateway",
+)
 ID_TOKEN_SCOPE = "id-token"
 
 # V12 (SMA-602 fix wave, F3). The npm OIDC floor is duplicated across release.yml's `publish-npm`
@@ -1018,6 +1040,22 @@ def id_token_violations(doc: dict, name: str) -> list[str]:
                 f"published. A job-level permissions: block sets every scope it omits to none, "
                 f"so adding a narrower block is the same defect as deleting the grant."
             )
+    # SMA-658 S1. The grant is scoped: a job outside OIDC_PUBLISH_JOBS that holds
+    # id-token: write can run its own OIDC exchange against a registry or a publisher this rule
+    # never audited for it. tag-<svc> only calls the tag API with an App token, so it must never
+    # hold this grant.
+    for jid, job in jobs.items():
+        if jid in OIDC_PUBLISH_JOBS or not isinstance(job, dict):
+            continue
+        job_grant = _grants_scope(job.get("permissions"), ID_TOKEN_SCOPE)
+        if job_grant is None:
+            job_grant = bool(workflow_grant)
+        if job_grant:
+            out.append(
+                f"{name}: V11: job '{jid}' grants `{ID_TOKEN_SCOPE}: write` but is not in "
+                f"OIDC_PUBLISH_JOBS. Only a job that runs a trusted-publishing exchange may hold "
+                f"this scope; add it to OIDC_PUBLISH_JOBS if that is now true, or drop the grant."
+            )
     return out
 
 
@@ -1068,6 +1106,117 @@ def _environment_name(job: dict) -> str | None:
         if isinstance(raw_name, str) and raw_name.strip():
             return raw_name.strip()
     return None
+
+
+# V13 (SMA-658). The Docker Hub token is the one long-lived publish credential in this repository.
+# V10 pins WHICH secret names may appear; V13 pins WHERE one may appear. Without it, V10 accepts
+# the token in any job of the release file.
+SCOPED_SECRET = "DOCKERHUB_TOKEN"
+SCOPED_SECRET_ENVIRONMENT = "release-images"
+SCOPED_SECRET_JOBS = frozenset(f"publish-images-{service}" for service in CHAIN_APPROVALS)
+
+
+def credential_scope_violations(doc: dict, name: str) -> list[str]:
+    """V13. DOCKERHUB_TOKEN only in a `release-images` job, and that environment only on a
+    publish job.
+
+    Environment names are compared CASE-FOLDED, because GitHub treats them case-insensitively: a
+    `Release-Images` job reaches the same secrets as `release-images`. An `environment:` built from
+    an expression fails closed — this file cannot resolve it, and an unresolvable environment must
+    never satisfy a scoping rule.
+
+    This runs over EVERY workflow file, not only release.yml: any workflow with a `main` trigger
+    could name the same environment and read the same secret.
+    """
+    out: list[str] = []
+    jobs = doc.get("jobs")
+    if not isinstance(jobs, dict):
+        return out
+    for jid, job in jobs.items():
+        if not isinstance(job, dict):
+            continue
+        raw_env = job.get("environment")
+        raw_text = raw_env if isinstance(raw_env, str) else str(
+            raw_env.get("name") if isinstance(raw_env, dict) else "")
+        if "${{" in raw_text:
+            out.append(f"{name}: V13: job '{jid}' builds its environment: from an expression "
+                       f"({raw_text!r}). This guard cannot resolve it, so the scoping rule for "
+                       f"{SCOPED_SECRET} cannot be checked. Name the environment literally.")
+            continue
+        env_name = (_environment_name(job) or "").casefold()
+        # S14 (SMA-658): the default 80-column fold can insert a newline inside a `${{ ... }}`
+        # span for a long secret name, which `_EXPR_SPAN`'s `re.S` would then misparse. PyYAML
+        # only folds at a space, so today's names survive — but the next one might not.
+        names, _ = secret_refs(yaml.safe_dump(job, width=10**9, default_flow_style=False))
+        if SCOPED_SECRET in names and env_name != SCOPED_SECRET_ENVIRONMENT:
+            out.append(f"{name}: V13: job '{jid}' reads {SCOPED_SECRET} but its environment is "
+                       f"{env_name or '(none)'!r}, not {SCOPED_SECRET_ENVIRONMENT!r}. That "
+                       f"environment is the only thing that scopes the token to one job.")
+        if env_name == SCOPED_SECRET_ENVIRONMENT and jid not in SCOPED_SECRET_JOBS:
+            out.append(f"{name}: V13: job '{jid}' names the {SCOPED_SECRET_ENVIRONMENT!r} "
+                       f"environment, but only {sorted(SCOPED_SECRET_JOBS)} may. Every job that "
+                       f"names it can read {SCOPED_SECRET}.")
+    return out
+
+
+# V14 (SMA-658). A CAPABILITY rule, not a spelling rule. The marker list can only ever catch a
+# command someone already thought of; a job that HOLDS a write capability can publish with a tool
+# nobody listed, a `with: push: true`, or a command inside a script. So the capability itself must
+# sit behind an approval.
+WRITE_SCOPES = ("packages", "id-token", "attestations", "contents")
+CAPABILITY_ENVIRONMENTS = ("release-images", "release-publish")
+_APP_TOKEN_ACTION = "actions/create-github-app-token"
+
+
+def _holds_write_capability(job: dict, workflow_perms: object = None) -> str | None:
+    """The capability this job holds, or None. The reason is returned for the message.
+
+    S13 (SMA-658): a job-level `permissions:` block always wins — and, per GitHub's own semantics,
+    sets every scope it does not name to `none` — so the workflow-level block is consulted only
+    when the job declares none at all. This is the same fallback `id_token_violations` already
+    applies; without it, a workflow-level `packages: write` would grant every job that declares no
+    block of its own, invisibly to V14.
+    """
+    perms = job.get("permissions")
+    if perms is None:
+        perms = workflow_perms
+    if isinstance(perms, dict):
+        for scope in WRITE_SCOPES:
+            if scope == "contents":
+                continue  # `contents: write` alone is not a registry capability.
+            if perms.get(scope) == "write":
+                return f"permissions.{scope}: write"
+    if isinstance(perms, str) and perms.strip() == "write-all":
+        return "permissions: write-all"
+    env_name = (_environment_name(job) or "").casefold()
+    if env_name in CAPABILITY_ENVIRONMENTS:
+        return f"environment: {env_name}"
+    for step in steps_of(job, "a job"):
+        if not isinstance(step, dict):
+            continue
+        uses = str(step.get("uses") or "")
+        with_block = step.get("with")
+        if _APP_TOKEN_ACTION in uses and isinstance(with_block, dict) \
+                and with_block.get("permission-contents") == "write":
+            return "an App token with contents: write"
+    return None
+
+
+def capability_violations(jobs: dict, workflow_perms: object, name: str) -> list[str]:
+    """V14. Every job that holds a publish capability sits behind its chain's approval."""
+    out: list[str] = []
+    for jid, job in jobs.items():
+        if not isinstance(job, dict) or jid in UNGATED_JOBS:
+            continue
+        reason = _holds_write_capability(job, workflow_perms)
+        if reason is None:
+            continue
+        approval = approval_for_job(jid)
+        if approval not in gated_path_jobs(jid, jobs):
+            out.append(f"{name}: V14: job '{jid}' holds {reason}, but '{approval}' is not on its "
+                       f"needs: path. A job with that capability can reach a registry with a tool "
+                       f"no marker list names, so the capability itself must sit behind the gate.")
+    return out
 
 
 def approval_boundary_violations(jobs: dict, name: str) -> list[str]:
@@ -1421,6 +1570,8 @@ def check_main(doc: dict, name: str) -> list[str]:
     # V9: the plan job's output wiring and fail-safe polarity. Same reason as V8: called once,
     # outside the per-job loop, which the loop's `continue` statements would otherwise skip.
     out += plan_contract_violations(jobs, name)
+    out += credential_scope_violations(doc, name)
+    out += capability_violations(doc["jobs"], doc.get("permissions"), name)
     return out
 
 
@@ -2630,6 +2781,43 @@ FIXTURES: list[tuple[str, str, str, str | None]] = [
      _OK_IMAGES_MAIN.replace(
          "      skip_gateway: ${{ steps.decide.outputs.skip_gateway }}\n", ""),
      "V9c: job 'plan' declares no outputs.skip_gateway"),
+    ("SMA-658 the Docker Hub token outside its environment", "main",
+     _OK_IMAGES_MAIN.replace("    steps: [{run: gh api repos/o/r/git/refs}]",
+                             "    steps: [{run: echo x, env: {T: '${{ secrets.DOCKERHUB_TOKEN }}'}}]"),
+     "V13"),
+    ("SMA-658 the release-images environment on another job", "main",
+     _OK_IMAGES_MAIN.replace("  tag-iam:\n    needs: [publish-images-iam]\n    environment: release-publish",
+                             "  tag-iam:\n    needs: [publish-images-iam]\n    environment: release-images"),
+     "V13"),
+    ("SMA-658 an environment name that differs only by case", "main",
+     _OK_IMAGES_MAIN.replace("    environment: release-images", "    environment: Release-Images"),
+     None),
+    ("SMA-658 an environment name built from an expression", "main",
+     _OK_IMAGES_MAIN.replace("    environment: release-images",
+                             "    environment: ${{ github.event.inputs.env }}"),
+     "V13"),
+    ("SMA-658 a write capability upstream of the approval", "main",
+     _OK_IMAGES_MAIN.replace("  images-build-iam:\n    needs: [plan]",
+                             "  images-build-iam:\n    permissions: {packages: write}\n    needs: [plan]"),
+     "V14"),
+    ("SMA-658 a publish hidden inside a script", "main",
+     _OK_IMAGES_MAIN.replace("    steps: [{run: crane push layout ghcr.io/smk1085/paigasus-iam:x}]",
+                             "    steps: [{run: ci/images/run.sh publish}]"),
+     None),
+    # B7: this row's name used to claim it exercises the `imagetools create` marker; it does not
+    # — it reroutes tag-iam past its own chain's publish and approval jobs, and the violation it
+    # gets is V8c on the `git/refs` marker. Renamed to say what it actually tests. The real
+    # `imagetools\s+create` marker, and the other ten new markers, get their own fixtures in
+    # Step 6 below.
+    # S1 (V11 spec 7.2, tag-iam gaining id-token: write it does not need) is NOT expressible as a
+    # FIXTURES row: self_test() calls check_main with the name "fixture", and id_token_violations
+    # fires only for RELEASE_WORKFLOW_NAME. It is asserted instead inside
+    # _v11_id_token_write_required, the established location for every other name-scoped V11/V10/
+    # V12 case in this file.
+    ("SMA-658 tag-iam skips its chain's publish and approval jobs", "main",
+     _OK_IMAGES_MAIN.replace("    steps: [{run: crane push layout ghcr.io/smk1085/paigasus-iam:x}]\n  tag-iam:\n    needs: [publish-images-iam]",
+                             "    steps: [{run: echo x}]\n  tag-iam:\n    needs: [images-build-iam]"),
+     "V8c"),
 ]
 
 
@@ -3034,10 +3222,22 @@ def _v11_id_token_write_required() -> str | None:
     same defect as deleting the grant, and a rule that only tested for the literal absence of a
     `permissions:` key would miss it.
     """
+    grant = {"id-token": "write", "contents": "read"}
+    narrowed = {"contents": "read"}
+
     def doc_with(pypi_perms, npm_perms, workflow_perms=None):
         out = {"jobs": {
             "publish-pypi": {"permissions": pypi_perms, "steps": [{"run": "echo hi"}]},
             "publish-npm": {"permissions": npm_perms, "steps": [{"run": "echo hi"}]},
+            # SMA-658 S1 + correction: OIDC_PUBLISH_JOBS now also names `release` (the pre-existing
+            # crates.io OIDC job) and the two image-publish jobs, and the EXISTING (pre-S1) loop
+            # above demands every member of that tuple exist and hold the grant. This helper tests
+            # the pypi/npm pair only, so the other three always carry the grant here — a stub
+            # present purely to keep that loop silent about jobs this helper is not exercising, not
+            # a claim that their behaviour needs its own case (that is the tag-iam block below).
+            "release": {"permissions": grant, "steps": [{"run": "echo hi"}]},
+            "publish-images-iam": {"permissions": grant, "steps": [{"run": "echo hi"}]},
+            "publish-images-gateway": {"permissions": grant, "steps": [{"run": "echo hi"}]},
         }}
         for jid in ("publish-pypi", "publish-npm"):
             if out["jobs"][jid]["permissions"] is None:
@@ -3045,9 +3245,6 @@ def _v11_id_token_write_required() -> str | None:
         if workflow_perms is not None:
             out["permissions"] = workflow_perms
         return out
-
-    grant = {"id-token": "write", "contents": "read"}
-    narrowed = {"contents": "read"}
 
     def v11(doc):
         return [ln for ln in id_token_violations(doc, RELEASE_WORKFLOW_NAME) if ": V11:" in ln]
@@ -3072,6 +3269,20 @@ def _v11_id_token_write_required() -> str | None:
     renamed["jobs"]["publish-pypi-v2"] = renamed["jobs"].pop("publish-pypi")
     if not any("no job named 'publish-pypi'" in line for line in v11(renamed)):
         return "renaming publish-pypi did not red the V11 floor"
+    # SMA-658 S1: a job OUTSIDE OIDC_PUBLISH_JOBS — tag-iam, say — must never hold the grant.
+    # tag-<svc> only calls the tag API with an App token, so id-token: write on it is a live
+    # OIDC exchange this rule never audited for. Expressed here, not as a FIXTURES row: self_test()
+    # calls check_main with the name "fixture", and id_token_violations fires only for
+    # RELEASE_WORKFLOW_NAME, so a FIXTURES row built on _OK_IMAGES_MAIN can never produce a V11
+    # finding — the same scoping reason every other V11/V10-rule-1/V12 case lives here instead.
+    tag_doc = doc_with(grant, grant)
+    tag_doc["jobs"]["tag-iam"] = {
+        "permissions": grant, "needs": ["publish-images-iam"], "steps": [{"run": "echo hi"}],
+    }
+    found = v11(tag_doc)
+    if not any("job 'tag-iam' grants" in line and "not in OIDC_PUBLISH_JOBS" in line
+               for line in found):
+        return f"tag-iam holding id-token: write did not red: {found or '(clean)'}"
     # And the scoping: no other document may inherit release.yml's rule.
     if id_token_violations(doc_with(None, None), "fixture"):
         return "V11 leaked past RELEASE_WORKFLOW_NAME onto a fixture document"
@@ -3184,6 +3395,41 @@ def _important5_regressions() -> list[str]:
     return errs
 
 
+# SMA-658 B7. One case per new PUBLISH_MARKERS entry, plus a release-pr `git push` negative
+# control (S10) so the widened marker list does not red the real repository's own branch push.
+# Driven straight at job_publishes(), at the granularity the markers were written for: a FIXTURES
+# row would bury a deleted marker under whatever OTHER violation the same synthetic file happens
+# to produce (see the renamed row in Step 1 above), where this helper reds on that one marker
+# alone.
+_SMA658_MARKER_CASES: tuple[tuple[str, bool], ...] = (
+    ("docker push ghcr.io/smk1085/paigasus-iam:latest", True),
+    ("docker buildx build --push -t ghcr.io/smk1085/paigasus-iam:latest .", True),
+    ("docker buildx build --output type=registry -t ghcr.io/smk1085/paigasus-iam:latest .", True),
+    ("docker manifest push ghcr.io/smk1085/paigasus-iam:latest", True),
+    ("docker buildx imagetools create --tag ghcr.io/smk1085/paigasus-iam:latest "
+     "x@sha256:" + "0" * 64, True),
+    ("crane push /tmp/layout ghcr.io/smk1085/paigasus-iam:latest", True),
+    ("crane copy ghcr.io/smk1085/paigasus-iam:latest docker.io/smaschek/paigasus-iam:latest", True),
+    ("crane tag ghcr.io/smk1085/paigasus-iam@sha256:" + "0" * 64 + " latest", True),
+    ("skopeo copy oci:layout docker://ghcr.io/smk1085/paigasus-iam:latest", True),
+    ("regctl image copy ghcr.io/smk1085/paigasus-iam:latest docker.io/smaschek/paigasus-iam:latest",
+     True),
+    ("oras push ghcr.io/smk1085/paigasus-iam:latest ./file", True),
+    ("cosign sign --yes ghcr.io/smk1085/paigasus-iam@sha256:" + "0" * 64, True),
+    ('gh api --method POST "repos/o/r/git/refs" -f "ref=refs/tags/x"', True),
+    # S10: release-pr's own branch push must stay green against the widened marker list.
+    ('git push "$AUTH_REMOTE" "HEAD:$BRANCH"', False),
+)
+
+
+def _sma658_new_publish_markers_bite() -> str | None:
+    for cmd, want in _SMA658_MARKER_CASES:
+        got = job_publishes({"steps": [{"run": cmd}]}, "fixture")
+        if got != want:
+            return f"{cmd!r}: expected job_publishes()={want}, got {got}"
+    return None
+
+
 def self_test() -> int:
     rc = 0
     for name, kind, text, want in FIXTURES:
@@ -3223,6 +3469,7 @@ def self_test() -> int:
         ("v10 rule 1 strict equality (the missing-name half)", _v10_rule1_strict_equality),
         ("v11 id-token: write on both OIDC publish jobs", _v11_id_token_write_required),
         ("v12 npm OIDC floor pinned in both workflows", _v12_npm_floor_pinned),
+        ("sma-658 every new publish marker has a reding fixture", _sma658_new_publish_markers_bite),
         ("f7 non-list steps: fails closed", _non_list_steps_fails_closed),
     ):
         err = fn()
@@ -3268,6 +3515,17 @@ def main(argv: list[str]) -> int:
     # gate's own needs: path — must be checked against the SAME boundary a direct publisher is
     # (fix round 1, Critical 1). Fail-closed on anything it cannot resolve (Important 1).
     violations += callee_boundary_violations(main_doc["jobs"], main_path.name)
+
+    # V13 runs over EVERY workflow file, not only the release path: any workflow with a `main`
+    # trigger could name the release-images environment and read the same secret. C6 (SMA-658):
+    # glob both suffixes GitHub Actions accepts, so a future `.yaml` workflow is not invisible to
+    # this sweep.
+    workflow_paths = sorted(Path(".github/workflows").glob("*.yml")) \
+        + sorted(Path(".github/workflows").glob("*.yaml"))
+    for path in workflow_paths:
+        if path.resolve() == main_path.resolve():
+            continue
+        violations += credential_scope_violations(load_workflow(path), path.name)
 
     for v in violations:
         print(v)
