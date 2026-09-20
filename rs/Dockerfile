@@ -18,10 +18,6 @@ ENV RUSTUP_TOOLCHAIN=1.95.0
 ARG BIN
 WORKDIR /src
 COPY . .
-# The binary is copied OUT of the cache mount inside this same RUN: a cache mount is not part of
-# the resulting layer, so `COPY --from=builder /src/target/...` in a later stage finds nothing.
-# Distinct cache ids per binary — the default sharing mode is `shared`, so two concurrent builds
-# would otherwise contend on cargo's lock.
 # `cargo auditable` embeds the crate list in the binary, which is what makes the image SBOM list
 # the Rust dependencies. MEASURED on 2026-09-20 (spec § 4.5): a plain `cargo build` gives
 # `cargo=0` in the SBOM, and `cargo auditable build` gives real purls. syft's
