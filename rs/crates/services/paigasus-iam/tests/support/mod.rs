@@ -62,6 +62,10 @@ use uuid::Uuid;
 /// `mod support;` include the same file directly via `#[path = "support/docker.rs"]`.
 pub mod docker;
 
+/// Waiting for a racer to reach a lock — see `support/race.rs`. `pub` for the same reason as
+/// `docker` above: the test binaries reach it as `support::race::*` (SMA-660).
+pub mod race;
+
 /// Starts an ephemeral Postgres container, connects, and runs migrations.
 ///
 /// The skip-versus-panic decision lives once, in `docker::start_or_skip` (SMA-538).
