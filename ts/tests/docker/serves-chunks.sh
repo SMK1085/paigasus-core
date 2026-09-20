@@ -42,16 +42,33 @@ docker run -d --name "$name" -p 0:3000 \
 port="$(docker port "$name" 3000/tcp)"; port="${port##*:}"
 origin="http://127.0.0.1:${port}"
 
-# Step 1: the page renders. Fetch the CANONICAL url (no trailing slash) — Next compiles an
+# Step 1: the page renders. Two curl calls, not one.
+#
+# First, a status-only probe. Fetch the CANONICAL url (no trailing slash) — Next compiles an
 # internal, priority 308 redirect for "<basePath>/" -> "<basePath>" whenever trailingSlash is
 # false (the default; neither console's next.config.ts sets it), confirmed by reading
-# .next/routes-manifest.json out of the built image. `curl -fsS` alone does not follow a
-# redirect, so a request to the trailing-slash form "succeeds" with the tiny redirect body (e.g.
-# 4 bytes: "/iam") instead of the real page — indistinguishable, from this script's point of
-# view, from a page that failed to render. `-L --max-redirs 3` is kept even though the canonical
-# URL does not redirect today, so this keeps working if trailingSlash is ever flipped to true and
-# the redirect direction reverses.
-html="$(curl -fsSL --max-redirs 3 --retry 20 --retry-delay 1 --retry-all-errors "${origin}${base_path}")"
+# .next/routes-manifest.json out of the built image. `-L --max-redirs 3` follows that redirect if
+# it ever fires (kept even though the canonical URL does not redirect today, so this keeps working
+# if trailingSlash is ever flipped to true and the redirect direction reverses); `--max-time`
+# bounds the request so a hung connection, or `-L` chasing an off-origin redirect (e.g. a future
+# auth gate sending this to a real IdP), cannot run the CI gate this feeds into indefinitely.
+# Fix round 2 (SMA-513, Important 1): this call is now GUARDED — without the `|| true`, a page 500
+# (an invalid runtime config) or any other non-2xx would abort the script under `set -e` on curl's
+# own generic message, after ~20s of retries, with no `::error::` annotation naming the cause. The
+# `-w '%{http_code}'` on a status-only probe (`-o /dev/null`, no `-f`) carries the HTTP status into
+# the failure message without entangling status-line parsing with the page BODY the second call
+# grabs — a combined single-curl capture (body + trailing status code) was considered and rejected
+# as the more fragile of the two shapes.
+status="$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 -L --max-redirs 3 \
+  --retry 20 --retry-delay 1 --retry-all-errors "${origin}${base_path}")" || true
+if [ "$status" != "200" ]; then
+  echo "::error::${image}: ${base_path} did not render (HTTP ${status:-no response}) —" \
+    "check the container's runtime configuration (the runtime_env array above) or its logs" >&2
+  exit 1
+fi
+# Second call: the status probe already confirmed 200, so this grabs the body with no retry
+# needed — only a --max-time bound, for the same off-origin-redirect reason as above.
+html="$(curl -fsSL --max-redirs 3 --max-time 30 "${origin}${base_path}")"
 
 # Step 2: extract one chunk URL. No pipe into an early-exit reader: capture, then read.
 # `grep -oE` exits 1 on no match even after reading its whole input; under set -euo pipefail an
@@ -60,9 +77,13 @@ html="$(curl -fsSL --max-redirs 3 --retry 20 --retry-delay 1 --retry-all-errors 
 # check instead.
 chunk="$(printf '%s' "$html" | grep -oE "${base_path}/_next/static/[^\"']+\.js" | sort -u | sed -n 1p)" || true
 if [ -z "$chunk" ]; then
-  echo "::error::${image}: no ${base_path}/_next/static/*.js URL in the rendered page" \
-    "— either .next/static was not staged into the image, or the page did not render at all" \
-    "(an unfollowed redirect, or invalid runtime configuration)" >&2
+  # Fix round 2: Step 1 already confirmed HTTP 200 and followed any redirect, so an invalid
+  # runtime configuration and an unfollowed redirect are no longer possible causes HERE — naming
+  # them would send a future reader to the wrong place. What is left, given a confirmed 200 page,
+  # is a markup or basePath-wiring problem, not a staging or configuration failure.
+  echo "::error::${image}: ${base_path} rendered (HTTP 200) but no ${base_path}/_next/static/*.js" \
+    "URL appears in the page — check the page markup or the basePath wiring, not staging or" \
+    "runtime configuration" >&2
   exit 1
 fi
 
@@ -71,14 +92,16 @@ fi
 # `curl -fsS` fails outright. Guarded the same way as Step 2's `grep -oE`: without the trailing
 # `|| true`, `set -e` would abort the script right here on that 404, before the informative
 # message below ever runs.
-bytes="$(curl -fsS "${origin}${chunk}" | wc -c | tr -d ' ')" || true
+bytes="$(curl -fsS --max-time 30 "${origin}${chunk}" | wc -c | tr -d ' ')" || true
 if [ "${bytes:-0}" -lt 1 ]; then
-  echo "::error::${image}: ${chunk} served an empty body — .next/static was not staged into the image" >&2
+  # Fix round 2 (Minor): the measured failure here is a 404, not a 200 with an empty body — the
+  # wording covers both so the message does not teach the wrong mechanism.
+  echo "::error::${image}: ${chunk} is not served (404 or empty body) — .next/static was not staged into the image" >&2
   exit 1
 fi
 
 # Step 4: the other zone's prefix does not serve it.
-code="$(curl -s -o /dev/null -w '%{http_code}' "${origin}${other_prefix}${chunk#"$base_path"}")"
+code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 "${origin}${other_prefix}${chunk#"$base_path"}")"
 if [ "$code" != "404" ]; then
   echo "::error::${image}: ${other_prefix} also served the chunk (HTTP ${code}); zone asset prefixes collide" >&2
   exit 1

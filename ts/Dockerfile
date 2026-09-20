@@ -25,6 +25,10 @@ RUN test -f "apps/${APP}/.next/standalone/apps/${APP}/server.js" \
   || (echo "standalone entry point missing — output: 'standalone' did not take effect" >&2; exit 1)
 RUN set -eu; \
     cd "apps/${APP}"; \
+    manifest_base="$(sed -n 's/.*"basePath": *"\([^"]*\)".*/\1/p' .next/routes-manifest.json | sed -n 1p)"; \
+    if [ "$manifest_base" != "$BASE_PATH" ]; then \
+      echo "BASE_PATH build-arg '${BASE_PATH}' does not match the compiled basePath '${manifest_base}' in .next/routes-manifest.json for ${APP} — check --build-arg BASE_PATH against apps/${APP}/next.config.ts" >&2; exit 1; \
+    fi; \
     dest=".next/standalone/apps/${APP}"; \
     rm -rf "$dest/.next/static" "$dest/public"; \
     cp -R .next/static "$dest/.next/static"; \
