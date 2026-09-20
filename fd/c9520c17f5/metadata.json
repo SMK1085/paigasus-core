@@ -3,7 +3,7 @@
   "checkpoint_id": "fdc9520c17f5",
   "strategy": "manual-commit",
   "branch": "feature/sma-664-split-claude-md-into-nested-memories",
-  "checkpoints_count": 7,
+  "checkpoints_count": 11,
   "files_touched": [
     ".github/CLAUDE.md",
     "CLAUDE.md",
@@ -20,20 +20,27 @@
       "compact_transcript": "/fd/c9520c17f5/0/transcript.jsonl",
       "content_hash": "/fd/c9520c17f5/0/content_hash.txt",
       "prompt": "/fd/c9520c17f5/0/prompt.txt"
+    },
+    {
+      "metadata": "/fd/c9520c17f5/1/metadata.json",
+      "transcript": "/fd/c9520c17f5/1/full.jsonl",
+      "compact_transcript": "/fd/c9520c17f5/1/transcript.jsonl",
+      "content_hash": "/fd/c9520c17f5/1/content_hash.txt",
+      "prompt": "/fd/c9520c17f5/1/prompt.txt"
     }
   ],
   "token_usage": {
-    "input_tokens": 548,
-    "cache_creation_tokens": 1360675,
-    "cache_read_tokens": 88520443,
-    "output_tokens": 181679,
-    "api_call_count": 253,
+    "input_tokens": 672,
+    "cache_creation_tokens": 1572454,
+    "cache_read_tokens": 98974109,
+    "output_tokens": 244489,
+    "api_call_count": 315,
     "subagent_tokens": {
-      "input_tokens": 4070,
-      "cache_creation_tokens": 6096989,
-      "cache_read_tokens": 221775796,
-      "output_tokens": 1085558,
-      "api_call_count": 1492
+      "input_tokens": 4174,
+      "cache_creation_tokens": 6579705,
+      "cache_read_tokens": 225383792,
+      "output_tokens": 1143610,
+      "api_call_count": 1544
     }
   }
 }
