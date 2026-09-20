@@ -58,6 +58,27 @@ UNGATED_JOBS = frozenset({"release-pr"})
 # `release` job's needs: removes the only gate in the file and passes V1, V3, V4, V7 and V8a/b.
 APPROVAL_JOB = "approve-release"
 
+# SMA-658. Each service image chain carries its OWN approval job, separate from the kernel's. A
+# kernel approval must not authorise an image push, and an image approval must not authorise a
+# crates.io publish, so the rule is per chain rather than per file. A file with no image chain —
+# every fixture built on _OK_MAIN — keeps exactly the old behaviour.
+CHAIN_APPROVALS: dict[str, str] = {
+    "iam": "approve-images-iam",
+    "gateway": "approve-images-gateway",
+}
+# The jobs each service chain owns, by suffix. `publish-images-iam` and `tag-iam` must both sit
+# behind `approve-images-iam`, never behind the kernel gate.
+_CHAIN_JOB_PREFIXES = ("images-build-", "publish-images-", "tag-")
+
+
+def approval_for_job(job_id: str) -> str:
+    """The approval job that must gate this job. The kernel gate is the default."""
+    for service, approval in CHAIN_APPROVALS.items():
+        for prefix in _CHAIN_JOB_PREFIXES:
+            if job_id == f"{prefix}{service}":
+                return approval
+    return APPROVAL_JOB
+
 # V9. The plan job decides whether a release happens at all, and it sits upstream of the approval
 # gate — so a wrong polarity here fails GREEN, silently dropping every release. The producer side
 # is covered by ci/release-plan's fixture table; this pins the WIRING, which no fixture can reach.
@@ -71,6 +92,26 @@ PLAN_SCRIPT_FLAG = "--github-output"
 # admit `== 'false'`, which is NOT equivalent — it fails closed on an unset output.
 PLAN_GATE_EXPR = f"needs.{PLAN_JOB}.outputs.{PLAN_OUTPUT} != 'true'"
 ACCEPTED_PLAN_FORMS = frozenset({PLAN_GATE_EXPR, "${{ " + PLAN_GATE_EXPR + " }}"})
+# SMA-658. Each service chain gates on its own skip output, with the same `!=` polarity and the
+# same literal pinning: `== 'true'` inverts the decision and `== 'false'` drops the chain on an
+# unset output. A chain job may carry EITHER its own service's literal or the kernel one — never a
+# different service's, which would tie two chains together.
+SERVICE_PLAN_GATE_EXPRS: dict[str, frozenset[str]] = {
+    service: frozenset({
+        f"needs.{PLAN_JOB}.outputs.skip_{service} != 'true'",
+        "${{ " + f"needs.{PLAN_JOB}.outputs.skip_{service} != 'true'" + " }}",
+    })
+    for service in ("iam", "gateway")
+}
+
+
+def accepted_plan_forms(job_id: str) -> frozenset[str]:
+    """The `if:` literals this consumer of `plan` may carry."""
+    for service, forms in SERVICE_PLAN_GATE_EXPRS.items():
+        for prefix in _CHAIN_JOB_PREFIXES:
+            if job_id == f"{prefix}{service}":
+                return forms
+    return ACCEPTED_PLAN_FORMS
 # SMA-603 fix wave, 2d. FULL-MATCH, not `search`. The old regex only had to occur SOMEWHERE in
 # the outputs expression, so any expression that merely CONTAINED the step reference passed —
 # including ones that resolve to a constant. The measured shape is
@@ -1031,41 +1072,67 @@ def approval_boundary_violations(jobs: dict, name: str) -> list[str]:
     Both V8b and V8c here are STEPS-shaped only (via job_publishes, which reads `steps:`). A
     job-level `uses:` publisher — the shape `wheels` and `prebuild` already use — is invisible to
     job_publishes and is covered separately by callee_boundary_violations (V8d), which needs the
-    filesystem this function deliberately does not touch (fix round 1, Critical 1)."""
+    filesystem this function deliberately does not touch (fix round 1, Critical 1).
+
+    SMA-658: the rule is now PER CHAIN. Each service image chain carries its own approval job
+    (approval_for_job), separate from the kernel's `approve-release`. A kernel approval must not
+    authorise an image push, and an image approval must not authorise a crates.io publish, so V8a
+    is checked once per approval job this file actually uses, V8b once per approval job's own
+    upstream path, and V8c resolves each publisher's OWN chain's approval rather than the single
+    kernel one. A file with no image chain — every fixture built on _OK_MAIN — exercises only the
+    kernel approval, exactly as before."""
     out: list[str] = []
-    gate = jobs.get(APPROVAL_JOB)
-    if not isinstance(gate, dict):
-        return [f"{name}: V8a: no job named '{APPROVAL_JOB}' exists. Every other clause of V8 is "
-                f"defined relative to it, so without it this verdict would pass vacuously."]
-    if not _environment_name(gate):
-        out.append(f"{name}: V8a: job '{APPROVAL_JOB}' declares no NAMED environment:. The pause "
-                   f"that makes it a gate comes from that named environment's required "
-                   f"reviewers; a missing environment:, or one with no name:, is an ordinary job "
-                   f"that always succeeds.")
-
-    for jid in sorted(gated_path_jobs(APPROVAL_JOB, jobs)):
-        job = jobs.get(jid)
-        if not isinstance(job, dict) or not job_publishes(job, f"{name}: job '{jid}'"):
+    # V8a. Every approval job that the file actually uses must exist and must name an environment.
+    # A chain's approval job is only required when that chain has a job in this file.
+    required = {APPROVAL_JOB}
+    for jid in jobs:
+        required.add(approval_for_job(jid))
+    for approval in sorted(required):
+        gate = jobs.get(approval)
+        if not isinstance(gate, dict):
+            if approval == APPROVAL_JOB:
+                return [f"{name}: V8a: no job named '{APPROVAL_JOB}' exists. Every other clause "
+                        f"of V8 is defined relative to it, so without it this verdict would pass "
+                        f"vacuously."]
+            out.append(f"{name}: V8a: no job named '{approval}' exists, but a job of its chain "
+                       f"does. Each service chain carries its own approval.")
             continue
-        if jid == APPROVAL_JOB:
-            # Fix round 1, Minor 1: gated_path_jobs(APPROVAL_JOB, jobs) includes APPROVAL_JOB
-            # itself (trivially, on its own needs: path), so "runs upstream of 'approve-release'"
-            # about approve-release itself read as nonsense. Word this case on its own terms.
-            out.append(f"{name}: V8b: job '{APPROVAL_JOB}' IS the approval gate and contains a "
-                       f"step that can reach a registry. The gate itself must never publish — "
-                       f"move the step to a job downstream of it.")
-        else:
-            out.append(f"{name}: V8b: job '{jid}' runs upstream of '{APPROVAL_JOB}' and contains "
-                       f"a step that can reach a registry. That publishes before any human "
-                       f"approves. Add --dry-run, or move the step downstream of the gate.")
+        if not _environment_name(gate):
+            out.append(f"{name}: V8a: job '{approval}' declares no NAMED environment:. The pause "
+                       f"that makes it a gate comes from that named environment's required "
+                       f"reviewers; a missing environment:, or one with no name:, is an ordinary "
+                       f"job that always succeeds.")
 
+    # V8b. Nothing upstream of an approval job may publish.
+    for approval in sorted(required):
+        if not isinstance(jobs.get(approval), dict):
+            continue
+        for jid in sorted(gated_path_jobs(approval, jobs)):
+            job = jobs.get(jid)
+            if not isinstance(job, dict) or not job_publishes(job, f"{name}: job '{jid}'"):
+                continue
+            if jid == approval:
+                out.append(f"{name}: V8b: job '{approval}' IS an approval gate and contains a "
+                           f"step that can reach a registry. The gate itself must never publish "
+                           f"— move the step to a job downstream of it.")
+            else:
+                out.append(f"{name}: V8b: job '{jid}' runs upstream of '{approval}' and contains "
+                           f"a step that can reach a registry. That publishes before any human "
+                           f"approves. Add --dry-run, or move the step downstream of the gate.")
+
+    # V8c. Every publisher must sit downstream of ITS OWN chain's approval job.
     for jid, job in jobs.items():
         if not isinstance(job, dict) or not job_publishes(job, f"{name}: job '{jid}'"):
             continue
-        if APPROVAL_JOB not in gated_path_jobs(jid, jobs):
-            out.append(f"{name}: V8c: job '{jid}' can reach a registry, but '{APPROVAL_JOB}' is "
-                       f"not on its needs: path. It would publish without passing the gate.")
-    return out
+        approval = approval_for_job(jid)
+        if approval not in gated_path_jobs(jid, jobs):
+            out.append(f"{name}: V8c: job '{jid}' can reach a registry, but '{approval}' is "
+                       f"not on its needs: path. It would publish without passing the gate that "
+                       f"owns its chain.")
+
+    seen: set[str] = set()
+    deduped = [v for v in out if not (v in seen or seen.add(v))]
+    return deduped
 
 
 def plan_run_segments(run_text: str) -> list[str]:
@@ -1116,13 +1183,14 @@ def plan_contract_violations(jobs: dict, name: str) -> list[str]:
         out.append(f"{name}: V9a: no job names '{PLAN_JOB}' in needs:. The decision is computed "
                    f"and then read by nothing.")
     for jid in sorted(consumers):
-        if if_text(jobs[jid]) not in ACCEPTED_PLAN_FORMS:
+        accepted = accepted_plan_forms(jid)
+        if if_text(jobs[jid]) not in accepted:
             out.append(f"{name}: V9b: job '{jid}' needs '{PLAN_JOB}' but its if: is "
-                       f"{if_text(jobs[jid])!r}, not {PLAN_GATE_EXPR!r}. Only `!=` fails safe: "
-                       f"`== 'true'` inverts the decision and `== 'false'` skips on an unset "
-                       f"output. A whitespace variant of an accepted form (an extra space, a "
-                       f"different quote style) also reds here — literal pinning, exactly as V2 "
-                       f"pins GATE_EXPR.")
+                       f"{if_text(jobs[jid])!r}, not one of {sorted(accepted)!r}. Only `!=` "
+                       f"fails safe: `== 'true'` inverts the decision and `== 'false'` skips on "
+                       f"an unset output. A whitespace variant of an accepted form (an extra "
+                       f"space, a different quote style) also reds here — literal pinning, "
+                       f"exactly as V2 pins GATE_EXPR.")
 
     # V9c resolves the DECISION STEP: outputs.nothing_to_release must reference a
     # steps.<id>.outputs... expression naming a step that actually exists in this job. `decision`
@@ -1201,6 +1269,29 @@ def plan_contract_violations(jobs: dict, name: str) -> list[str]:
                        f"same step can overwrite $GITHUB_OUTPUT after the checker wrote it, "
                        f"which passes V9c and V9d and silently drops every release. Move setup "
                        f"work into its own step.")
+
+    # V9c, SMA-658. The service outputs need the same full-match treatment as the kernel verdict:
+    # `${{ steps.decide.outputs.skip_iam || 'true' }}` resolves to 'true' on an unset output and
+    # silently drops that chain. The step id must be the one V9c already resolved.
+    #
+    # B4: the loop is guarded — it runs only when this file actually declares a chain job (one
+    # whose approval differs from the kernel's). Unguarded, it would also red `_OK_MAIN` and every
+    # fixture built on it, and the real release.yml before Task 7 lands: none of those declare the
+    # four service outputs, and none of them needs to, because none of them has a chain job to run.
+    if any(approval_for_job(jid) != APPROVAL_JOB for jid in jobs):
+        for service in SERVICE_PLAN_GATE_EXPRS:
+            for key in (f"skip_{service}", f"version_{service}"):
+                expr = outs.get(key) if isinstance(outs, dict) else None
+                if not isinstance(expr, str):
+                    out.append(f"{name}: V9c: job '{PLAN_JOB}' declares no outputs.{key}. Its "
+                               f"chain would read the empty string, which runs the chain but "
+                               f"carries no version.")
+                    continue
+                want = "${{ steps." + str(decision.get("id") if decision else "") + f".outputs.{key} }}}}"
+                if expr.strip() != want:
+                    out.append(f"{name}: V9c: outputs.{key} is {expr!r}, not {want!r}. Anything "
+                               f"else can resolve to a constant, and a `|| 'true'` tail drops the "
+                               f"chain on an unset output.")
     return out
 
 
@@ -1505,6 +1596,77 @@ jobs:
     steps: [{run: release-plz release}]
 """
 
+# SMA-658. A second control: the release file with BOTH service chains present (S11 — the row
+# below is named "both chains present", so the fixture must actually hold both, not the iam chain
+# alone). _OK_MAIN stays as it is, so every existing row keeps its meaning, and the per-chain
+# rules must tolerate a file with no image chain at all — which is exactly what _OK_MAIN asserts
+# for them.
+#
+# B3: `_OK_MAIN`'s `plan` job outputs only `nothing_to_release`. The new V9c loop (Step 6) checks
+# every service's `skip_*`/`version_*` output, so a fixture built on `_OK_MAIN` without adding
+# those four output lines would collect four V9c violations on every row below — including every
+# row that expects a clean verdict or an unrelated violation. The control fixture must model the
+# file the rule requires.
+_OK_IMAGES_MAIN = _OK_MAIN.replace(
+    "      nothing_to_release: ${{ steps.decide.outputs.nothing_to_release }}\n",
+    "      nothing_to_release: ${{ steps.decide.outputs.nothing_to_release }}\n"
+    "      skip_iam: ${{ steps.decide.outputs.skip_iam }}\n"
+    "      version_iam: ${{ steps.decide.outputs.version_iam }}\n"
+    "      skip_gateway: ${{ steps.decide.outputs.skip_gateway }}\n"
+    "      version_gateway: ${{ steps.decide.outputs.version_gateway }}\n"
+) + """
+  images-build-iam:
+    needs: [plan]
+    if: needs.plan.outputs.skip_iam != 'true'
+    runs-on: ubuntu-latest
+    steps: [{run: ci/images/run.sh build-oci paigasus-iam out}]
+  approve-images-iam:
+    needs: [images-build-iam]
+    environment: release-approval
+    runs-on: ubuntu-latest
+    steps: [{run: echo approved}]
+  publish-images-iam:
+    needs: [plan, images-build-iam, approve-images-iam]
+    if: needs.plan.outputs.skip_iam != 'true'
+    environment: release-images
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+      id-token: write
+      attestations: write
+    steps: [{run: crane push layout ghcr.io/smk1085/paigasus-iam:x}]
+  tag-iam:
+    needs: [publish-images-iam]
+    environment: release-publish
+    runs-on: ubuntu-latest
+    steps: [{run: gh api repos/o/r/git/refs}]
+  images-build-gateway:
+    needs: [plan]
+    if: needs.plan.outputs.skip_gateway != 'true'
+    runs-on: ubuntu-latest
+    steps: [{run: ci/images/run.sh build-oci paigasus-gateway out}]
+  approve-images-gateway:
+    needs: [images-build-gateway]
+    environment: release-approval
+    runs-on: ubuntu-latest
+    steps: [{run: echo approved}]
+  publish-images-gateway:
+    needs: [plan, images-build-gateway, approve-images-gateway]
+    if: needs.plan.outputs.skip_gateway != 'true'
+    environment: release-images
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+      id-token: write
+      attestations: write
+    steps: [{run: crane push layout ghcr.io/smk1085/paigasus-gateway:x}]
+  tag-gateway:
+    needs: [publish-images-gateway]
+    environment: release-publish
+    runs-on: ubuntu-latest
+    steps: [{run: gh api repos/o/r/git/refs}]
+"""
+
 FIXTURES: list[tuple[str, str, str, str | None]] = [
     ("healthy control", "main", _OK_MAIN, None),
     ("ungated job", "main", _OK_MAIN.replace("    if: vars.PAIGASUS_RELEASE_ENABLED == 'true'\n", ""),
@@ -1672,9 +1834,12 @@ FIXTURES: list[tuple[str, str, str, str | None]] = [
                       "steps: [{run: npm publish --dry-run=false}]"), "V8b"),
     # Minor 1: the V8b message for a publish step inside approve-release ITSELF used to read
     # "runs upstream of 'approve-release'" about approve-release, which is nonsense.
+    # SMA-658: the wording moved from "IS the approval gate" to "IS an approval gate" when V8
+    # became per-chain (a file may now have more than one approval job, so "the" no longer
+    # holds). This fixture is updated to match the new, deliberate wording.
     ("V8 fix1 Minor 1: a publish step inside approve-release itself gets its own wording", "main",
      _OK_MAIN.replace("steps: [{run: echo approved}]", "steps: [{run: cargo publish}]"),
-     "IS the approval gate"),
+     "IS an approval gate"),
     # Minor 4: an environment: mapping with a url: but no name: is not a NAMED environment —
     # GitHub rejects it outright, so it must not satisfy V8a either.
     ("V8 fix1 Minor 4: environment: {url: ...} with no name: is not a named gate", "main",
@@ -2351,6 +2516,58 @@ FIXTURES: list[tuple[str, str, str, str | None]] = [
          "    steps: [{run: release-plz release}]",
          '    steps: [{run: \'npm config set _auth "$LEGACY"\'}]'),
      "sets an npm _auth credential"),
+    ("SMA-658 both chains present is clean", "main", _OK_IMAGES_MAIN, None),
+    # S11: a row for each of the three graph shapes spec AC 9 asks for — kernel only (_OK_MAIN
+    # itself, already covered by every pre-existing row), image only, and combined (the row
+    # above). `build`, `wheels` and `release` are the only _OK_MAIN jobs an image-only file would
+    # not have; `approve-release` stays, orphaned but harmless — V8a requires only that an
+    # approval a chain actually uses exists and names an environment.
+    ("SMA-658 only the image chains are present (no kernel chain)", "main",
+     _OK_IMAGES_MAIN
+     .replace("  build:\n    needs: [plan]\n    if: needs.plan.outputs.nothing_to_release != 'true'"
+              "\n    runs-on: ubuntu-latest\n    steps: [{run: echo build}]\n", "")
+     .replace("  wheels:\n    needs: [plan]\n    if: ${{ needs.plan.outputs.nothing_to_release != "
+              "'true' }}\n    runs-on: ubuntu-latest\n    steps: [{run: echo wheels}]\n", "")
+     .replace("  release:\n    needs: [build, approve-release]\n    runs-on: ubuntu-latest\n"
+              "    steps: [{run: release-plz release}]\n", "")
+     # Removing `build` above leaves `approve-release`'s `needs: [build]` dangling (a
+     # reference to a job that no longer exists), which V1's is_gated() reads as "not gated"
+     # — a spurious violation this row does not intend to exercise. Retargeting the `needs:`
+     # to `plan` instead trades one spurious violation for another: it makes `approve-release`
+     # a DIRECT consumer of `plan` in V9b's terms, and V9b then reds because it carries no
+     # `if:` naming one of the accepted `plan` gate forms. So drop `needs:` entirely and gate
+     # `approve-release` directly on the same top-level toggle `plan` itself uses — genuinely
+     # gated, genuinely orphaned (nothing needs it), and no longer a `plan` consumer. This is
+     # the ONLY thing this row tests: a document with no kernel chain is clean. Do not re-add
+     # `build`, and do not make `approve-release` a `plan` consumer again — either change
+     # reintroduces the spurious violation this comment exists to prevent.
+     .replace("  approve-release:\n    needs: [build]\n",
+              "  approve-release:\n    if: vars.PAIGASUS_RELEASE_ENABLED == 'true'\n"),
+     None),
+    # V8c is a TOPOLOGY rule ("a publisher must sit downstream of its own chain's approval"),
+    # not a marker-detection rule. `PUBLISH_MARKERS` does not learn `crane push` until Task 6,
+    # so these two rows swap the still-unrecognized `crane push` step for `cargo publish`, a
+    # marker job_publishes() already detects today — that is enough to exercise the ROUTING
+    # V8c checks, without pulling Task 6's markers forward. Task 6 must add the equivalent
+    # topology rows using the real container markers once PUBLISH_MARKERS learns them, so the
+    # two halves meet.
+    ("SMA-658 a publisher without its own approval", "main",
+     _OK_IMAGES_MAIN.replace("    needs: [plan, images-build-iam, approve-images-iam]",
+                             "    needs: [plan, images-build-iam]")
+     .replace("steps: [{run: crane push layout ghcr.io/smk1085/paigasus-iam:x}]",
+              "steps: [{run: cargo publish}]"), "V8c"),
+    ("SMA-658 a publisher behind the KERNEL approval only", "main",
+     _OK_IMAGES_MAIN.replace("    needs: [plan, images-build-iam, approve-images-iam]",
+                             "    needs: [plan, images-build-iam, approve-release]")
+     .replace("steps: [{run: crane push layout ghcr.io/smk1085/paigasus-iam:x}]",
+              "steps: [{run: cargo publish}]"), "V8c"),
+    ("SMA-658 the service approval loses its environment", "main",
+     _OK_IMAGES_MAIN.replace("    needs: [images-build-iam]\n    environment: release-approval",
+                             "    needs: [images-build-iam]"), "V8a"),
+    ("SMA-658 a chain job with the wrong gate literal", "main",
+     _OK_IMAGES_MAIN.replace("    if: needs.plan.outputs.skip_iam != 'true'\n    runs-on: ubuntu-latest\n    steps: [{run: ci/images/run.sh build-oci",
+                             "    if: needs.plan.outputs.skip_iam == 'true'\n    runs-on: ubuntu-latest\n    steps: [{run: ci/images/run.sh build-oci"),
+     "V9b"),
 ]
 
 
