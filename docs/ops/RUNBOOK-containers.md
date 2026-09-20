@@ -478,12 +478,22 @@ gh attestation verify "oci://docker.io/smaschek/paigasus-<svc>@<digest>" \
   --source-ref refs/heads/main
 ```
 
-Both registries hold the same index digest. GHCR stores the build-provenance attestation, the SBOM
-attestation, and a cosign signature. Docker Hub stores only a cosign signature. The copy step does
-not copy registry referrers, so Docker Hub never receives the two attestations. `gh attestation
-verify` still works for a Docker Hub image, because it queries the GitHub API by digest, not the
-registry. Do not use `cosign download attestation` against a Docker Hub image. That command reads
-registry referrers, and Docker Hub carries none.
+Both registries hold the same index digest. GHCR stores three attestations and a cosign signature.
+The build-provenance attestation has the INDEX digest as its subject, which is the digest the two
+commands above use. The two SBOM attestations have a PER-PLATFORM digest as their subject, one for
+amd64 and one for arm64, because each architecture has its own SBOM. So an SBOM query against the
+index digest finds nothing. Get the two per-platform digests from the index itself:
+
+```bash
+crane manifest ghcr.io/smk1085/paigasus-<svc>@<digest> \
+  | jq -r '.manifests[] | "\(.platform.architecture) \(.digest)"'
+```
+
+Docker Hub stores only a cosign signature. The copy step does not copy registry referrers, so
+Docker Hub never receives any of the three attestations. `gh attestation verify` still works for a
+Docker Hub image, because it queries the GitHub API by digest, not the registry. Do not use
+`cosign download attestation` against a Docker Hub image. That command reads registry referrers,
+and Docker Hub carries none.
 
 ### What a re-run does
 
