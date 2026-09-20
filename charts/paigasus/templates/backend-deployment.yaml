@@ -1,14 +1,13 @@
 {{/* SPDX-License-Identifier: Apache-2.0 */}}
 {{- include "paigasus.validate" . -}}
 {{- $root := . -}}
-{{- $full := include "paigasus.fullname" . -}}
 {{- range $id, $z := .Values.zones }}
 {{- if and $z.enabled $z.backend.deploy }}
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ $full }}-{{ $id }}-backend
+  name: {{ include "paigasus.name" (list $root (printf "%s-backend" $id)) }}
 spec:
 {{- if eq $id "iam" }}
   replicas: 1
@@ -50,6 +49,10 @@ spec:
       containers:
         - name: backend
           image: "{{ $z.backend.image.repository }}:{{ $z.backend.image.tag | default $root.Chart.AppVersion }}"
+          securityContext:
+            allowPrivilegeEscalation: false
+            # NO readOnlyRootFilesystem. RUNBOOK-containers.md § 7: that posture is untested for
+            # every image in this repo. It is a follow-up to measure, not a default to ship.
 {{- if eq $id "iam" }}
           ports:
             - name: http
@@ -67,19 +70,15 @@ spec:
             - name: IAM_MIGRATION__LOCK_WAIT_SECS
               value: {{ $z.backend.migrationLockWaitSeconds | quote }}
             # IamConfig has no decomposed host/user/db config — figment reads ONE opaque DSN
-            # (IAM_DATABASE_URL). POSTGRES_HOST and POSTGRES_PASSWORD are composed into it here
-            # via Kubernetes' own $(VAR) dependent env-var expansion (resolved by the kubelet,
-            # never by Helm), against a fixed "iam" database and role name — values.yaml has no
-            # knob for either yet. postgres.existingSecret must hold key "password".
-            - name: POSTGRES_HOST
-              value: {{ $root.Values.postgres.host | quote }}
-            - name: POSTGRES_PASSWORD
+            # (IAM_DATABASE_URL). The chart does NOT compose this from a host plus a password: a
+            # password containing @, /, :, ? or # would break the URI or silently redirect it to
+            # another host. postgres.existingSecret must hold the complete DSN under key
+            # "database-url" instead.
+            - name: IAM_DATABASE_URL
               valueFrom:
                 secretKeyRef:
                   name: {{ $root.Values.postgres.existingSecret }}
-                  key: password
-            - name: IAM_DATABASE_URL
-              value: "postgres://iam:$(POSTGRES_PASSWORD)@$(POSTGRES_HOST):5432/iam"
+                  key: database-url
             # authn.issuers has no default and is a hard boot error if empty (IamConfig::load).
             # The console's own OIDC client id is the audience IAM must accept: it is the client
             # the ID tokens IAM validates were issued to.

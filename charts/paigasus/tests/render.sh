@@ -20,7 +20,6 @@ FIXED=(
   --set oidc.issuer=https://idp.example.test/realms/paigasus
   --set oidc.clientId=paigasus-console
   --set oidc.existingSecret=paigasus-console-secret
-  --set postgres.host=postgres.example.test
   --set postgres.existingSecret=paigasus-postgres-secret
   --set zones.iam.backend.apiKeysPepperSecret=paigasus-iam-pepper
   # zones.gateway.backend.url is REQUIRED whenever the gateway zone is enabled (Task 11b): the

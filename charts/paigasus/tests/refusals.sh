@@ -20,7 +20,6 @@ FIXED=(
   --set oidc.issuer=https://idp.example.test/realms/paigasus
   --set oidc.clientId=paigasus-console
   --set oidc.existingSecret=paigasus-console-secret
-  --set postgres.host=postgres.example.test
   --set postgres.existingSecret=paigasus-postgres-secret
   --set zones.iam.backend.apiKeysPepperSecret=paigasus-iam-pepper
 )
@@ -69,12 +68,12 @@ expect_fail "oidc.clientId empty" "oidc.clientId is required" \
   --set oidc.clientId=""
 expect_fail "oidc.existingSecret empty" "oidc.existingSecret is required" \
   --set oidc.existingSecret=""
-expect_fail "postgres.host empty" "postgres.host is required" \
-  --set postgres.host=""
 expect_fail "postgres.existingSecret empty" "postgres.existingSecret is required" \
   --set postgres.existingSecret=""
 expect_fail "apiKeysPepperSecret empty" "apiKeysPepperSecret is required" \
   --set zones.iam.backend.apiKeysPepperSecret=""
+expect_fail "iam backend.deploy false" "an external IAM is not supported yet" \
+  --set zones.iam.backend.deploy=false
 expect_render "iam only" --set zones.gateway.enabled=false
 expect_render "iam and gateway" --set zones.gateway.enabled=true \
   --set zones.gateway.backend.url=http://gw.example.test:8088

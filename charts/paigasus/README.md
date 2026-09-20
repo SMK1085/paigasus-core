@@ -40,7 +40,7 @@ with its own message, rather than letting a bad values file produce broken Kuber
   `_helpers.tpl` must be kept equal to it by hand.
 - **A backend the chart does not deploy, with no `backend.url`.** See the next section.
 - **Every value `values.yaml` marks REQUIRED, when it is empty.** `ingress.host`,
-  `ingress.tlsSecretName`, `oidc.issuer`, `oidc.clientId`, `oidc.existingSecret`, `postgres.host`,
+  `ingress.tlsSecretName`, `oidc.issuer`, `oidc.clientId`, `oidc.existingSecret`,
   `postgres.existingSecret` and `zones.iam.backend.apiKeysPepperSecret` each fail with their own
   named message the moment they are unset. Before SMA-513 Task 14, `paigasus.validate` refused
   only `ingress.host`; the other seven were required by comment alone, and a default
@@ -51,6 +51,15 @@ with its own message, rather than letting a bad values file produce broken Kuber
 `tests/refusals.sh` renders each refusal case and asserts it fails with its own message, not an
 incidental template error from somewhere else — otherwise the chart could refuse by accident and
 a later edit would silently make it install.
+
+## The chart cannot observe an external Secret's contents
+
+The chart does not own `oidc.existingSecret` and cannot see when its contents rotate. `helm
+template` cannot run `lookup` either, so there is no value to hash. `templates/console-deployment.yaml`
+therefore does not hash the Secret's contents — it hashes `oidc.secretVersion`
+(`values.yaml`), a knob with no default and no required check. Bump it to any new value whenever
+the referenced Secret's contents change, so the `checksum/secret` pod annotation changes and the
+console pods roll. Nothing enforces that an operator remembers to bump it.
 
 ## No rewrite annotation
 

@@ -39,7 +39,7 @@ spec:
             pathType: Prefix
             backend:
               service:
-                name: {{ $full }}-{{ $id }}-console
+                name: {{ include "paigasus.name" (list $root (printf "%s-console" $id)) }}
                 port:
                   name: http
           {{- end }}

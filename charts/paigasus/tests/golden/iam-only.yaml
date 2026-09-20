@@ -30,10 +30,10 @@ data:
 apiVersion: v1
 kind: Service
 metadata:
-  # MUST be exactly <fullname>-<id>-backend: paigasus.serviceMapJson (_helpers.tpl) builds every
-  # PAIGASUS_SERVICES URL from this same shape. A mismatch here is invisible to `helm template`
-  # and renders a permanently `degraded` console tile at runtime instead — the exact state AC 2
-  # exists to distinguish from `absent`.
+  # MUST match paigasus.name's <release>-<chart>-<id>-backend shape exactly: paigasus.serviceMapJson
+  # (_helpers.tpl) builds every PAIGASUS_SERVICES URL from that same helper. A mismatch here is
+  # invisible to `helm template` and renders a permanently `degraded` console tile at runtime
+  # instead — the exact state AC 2 exists to distinguish from `absent`.
   name: paigasus-paigasus-iam-backend
 spec:
   type: ClusterIP
@@ -105,6 +105,10 @@ spec:
       containers:
         - name: backend
           image: "ghcr.io/smk1085/paigasus-iam:0.0.0"
+          securityContext:
+            allowPrivilegeEscalation: false
+            # NO readOnlyRootFilesystem. RUNBOOK-containers.md § 7: that posture is untested for
+            # every image in this repo. It is a follow-up to measure, not a default to ship.
           ports:
             - name: http
               containerPort: 8080
@@ -121,19 +125,15 @@ spec:
             - name: IAM_MIGRATION__LOCK_WAIT_SECS
               value: "120"
             # IamConfig has no decomposed host/user/db config — figment reads ONE opaque DSN
-            # (IAM_DATABASE_URL). POSTGRES_HOST and POSTGRES_PASSWORD are composed into it here
-            # via Kubernetes' own $(VAR) dependent env-var expansion (resolved by the kubelet,
-            # never by Helm), against a fixed "iam" database and role name — values.yaml has no
-            # knob for either yet. postgres.existingSecret must hold key "password".
-            - name: POSTGRES_HOST
-              value: "postgres.example.test"
-            - name: POSTGRES_PASSWORD
+            # (IAM_DATABASE_URL). The chart does NOT compose this from a host plus a password: a
+            # password containing @, /, :, ? or # would break the URI or silently redirect it to
+            # another host. postgres.existingSecret must hold the complete DSN under key
+            # "database-url" instead.
+            - name: IAM_DATABASE_URL
               valueFrom:
                 secretKeyRef:
                   name: paigasus-postgres-secret
-                  key: password
-            - name: IAM_DATABASE_URL
-              value: "postgres://iam:$(POSTGRES_PASSWORD)@$(POSTGRES_HOST):5432/iam"
+                  key: database-url
             # authn.issuers has no default and is a hard boot error if empty (IamConfig::load).
             # The console's own OIDC client id is the audience IAM must accept: it is the client
             # the ID tokens IAM validates were issued to.
@@ -186,7 +186,11 @@ spec:
         # keeps the old value indefinitely.
         checksum/zonemap: e2b85502fe5bf3ae73a2909ca3cae151c7b890d26ef802603d1643502242cd10
         checksum/console-env: f93b3ecec36249ae3672c42238dae5a5df488b011753d7b649ae8e33ee234023
-        checksum/secret: 6029373ad664e85850fc49dc7b30101c6c953167b0a956cf7a4ea4514dd3b8b7
+        # The chart does not own oidc.existingSecret and CANNOT observe its contents: hashing the
+        # Secret's NAME (the old form of this line) never changes when the contents rotate, so it
+        # never triggers the restart it exists to trigger. oidc.secretVersion is the operator's
+        # explicit signal instead — bump it whenever the referenced Secret's contents change.
+        checksum/secret: e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
     spec:
       securityContext:
         runAsUser: 65532
@@ -197,6 +201,10 @@ spec:
       containers:
         - name: console
           image: "ghcr.io/smk1085/paigasus-iam-console:0.0.0"
+          securityContext:
+            allowPrivilegeEscalation: false
+            # NO readOnlyRootFilesystem. RUNBOOK-containers.md § 7: that posture is untested for
+            # every image in this repo. It is a follow-up to measure, not a default to ship.
           ports:
             - name: http
               containerPort: 3000

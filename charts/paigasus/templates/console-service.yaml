@@ -1,14 +1,13 @@
 {{/* SPDX-License-Identifier: Apache-2.0 */}}
 {{- include "paigasus.validate" . -}}
 {{- $root := . -}}
-{{- $full := include "paigasus.fullname" . -}}
 {{- range $id, $z := .Values.zones }}
 {{- if $z.enabled }}
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ $full }}-{{ $id }}-console
+  name: {{ include "paigasus.name" (list $root (printf "%s-console" $id)) }}
 spec:
   type: ClusterIP
   selector:

@@ -13,6 +13,19 @@ iam gateway
 {{- printf "%s-%s" .Release.Name .Chart.Name | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
 
+{{/*
+paigasus.name truncates the COMBINED name (release-chart-suffix), not the base. Callers append a
+suffix such as "-gateway-console" (16 chars), "-iam-console" (12), "-iam-backend" (12), "-zonemap"
+(8) or "-console-env" (12) to paigasus.fullname's already-63-char-truncated base, which can push a
+long release name's resource names past Kubernetes' 63-character limit. Call with a two-element
+list: (list $ "<suffix>"), e.g. (list $ (printf "%s-backend" $id)).
+*/}}
+{{- define "paigasus.name" -}}
+{{- $ctx := index . 0 -}}
+{{- $suffix := index . 1 -}}
+{{- printf "%s-%s-%s" $ctx.Release.Name $ctx.Chart.Name $suffix | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+
 {{- define "paigasus.enabledZones" -}}
 {{- $out := list -}}
 {{- range $id, $z := .Values.zones -}}
@@ -46,14 +59,14 @@ template would fire only when that template happens to render first.
 {{- if not .Values.oidc.existingSecret -}}
 {{- fail "oidc.existingSecret is required; it must hold keys oidc-client-secret and session-redis-url" -}}
 {{- end -}}
-{{- if not .Values.postgres.host -}}
-{{- fail "postgres.host is required by the IAM backend" -}}
-{{- end -}}
 {{- if not .Values.postgres.existingSecret -}}
-{{- fail "postgres.existingSecret is required; it must hold key \"password\"" -}}
+{{- fail "postgres.existingSecret is required; it must hold key \"database-url\", the complete Postgres DSN" -}}
 {{- end -}}
 {{- if not .Values.zones.iam.backend.apiKeysPepperSecret -}}
 {{- fail "zones.iam.backend.apiKeysPepperSecret is required; IamConfig::validate hard-fails boot without it" -}}
+{{- end -}}
+{{- if not .Values.zones.iam.backend.deploy -}}
+{{- fail "zones.iam.backend.deploy is false: this chart deploys the IAM backend itself (see decision D2), and an external IAM is not supported yet" -}}
 {{- end -}}
 {{- if eq (len $enabled) 0 -}}
 {{- fail "at least one zone must be enabled; a chart with no zone serves nothing" -}}
@@ -81,11 +94,12 @@ template would fire only when that template happens to render first.
 
 {{- define "paigasus.serviceMapJson" -}}
 {{- $m := dict -}}
-{{- $full := include "paigasus.fullname" . -}}
+{{- $root := . -}}
 {{- range $id, $z := .Values.zones -}}
 {{- if $z.enabled -}}
 {{- if $z.backend.deploy -}}
-{{- $_ := set $m $id (printf "http://%s-%s-backend:%d" $full $id (int $z.backend.httpPort)) -}}
+{{- $svcName := include "paigasus.name" (list $root (printf "%s-backend" $id)) -}}
+{{- $_ := set $m $id (printf "http://%s:%d" $svcName (int $z.backend.httpPort)) -}}
 {{- else -}}
 {{- $_ := set $m $id $z.backend.url -}}
 {{- end -}}

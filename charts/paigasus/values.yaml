@@ -75,13 +75,18 @@ oidc:
   issuer: ""             # REQUIRED
   clientId: ""           # REQUIRED
   existingSecret: ""     # REQUIRED. Must hold keys: oidc-client-secret, session-redis-url.
+  secretVersion: ""      # NOT required. The chart does not own existingSecret and cannot observe
+                         # its contents, so it cannot detect a rotation on its own. Bump this
+                         # value (any string) whenever the referenced Secret's contents change, so
+                         # the console pods roll — it is the operator's explicit signal, fed into
+                         # the console Deployment's checksum/secret annotation.
 
 redis: {}                # the URL lives in oidc.existingSecret, since it may carry a password
 
 postgres:
-  host: ""               # REQUIRED by the IAM backend
-  existingSecret: ""     # REQUIRED. Must hold key "password". IamConfig has no decomposed
-                         # host/user/db config of its own — figment reads ONE opaque DSN
-                         # (IAM_DATABASE_URL) — so the chart composes it from this password and
-                         # postgres.host via Kubernetes' own $(VAR) dependent env-var expansion,
-                         # against a fixed "iam" database and role name (no knob for either yet).
+  existingSecret: ""     # REQUIRED. Must hold key "database-url", the complete Postgres DSN.
+                         # IamConfig has no decomposed host/user/db config of its own — figment
+                         # reads ONE opaque DSN (IAM_DATABASE_URL) — and the chart never composes
+                         # it from a host plus a password, precisely so no password ever has to
+                         # be percent-encoded by a template: a password containing @, /, :, ? or #
+                         # would break a composed URI or silently redirect it to another host.

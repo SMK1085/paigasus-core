@@ -1,14 +1,13 @@
 {{/* SPDX-License-Identifier: Apache-2.0 */}}
 {{- include "paigasus.validate" . -}}
 {{- $root := . -}}
-{{- $full := include "paigasus.fullname" . -}}
 {{- range $id, $z := .Values.zones }}
 {{- if $z.enabled }}
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ $full }}-{{ $id }}-console
+  name: {{ include "paigasus.name" (list $root (printf "%s-console" $id)) }}
 spec:
   replicas: {{ $z.console.replicas }}
   selector:
@@ -26,7 +25,11 @@ spec:
         # keeps the old value indefinitely.
         checksum/zonemap: {{ include (print $root.Template.BasePath "/zonemap-configmap.yaml") $root | sha256sum }}
         checksum/console-env: {{ include (print $root.Template.BasePath "/console-env-configmap.yaml") $root | sha256sum }}
-        checksum/secret: {{ $root.Values.oidc.existingSecret | sha256sum }}
+        # The chart does not own oidc.existingSecret and CANNOT observe its contents: hashing the
+        # Secret's NAME (the old form of this line) never changes when the contents rotate, so it
+        # never triggers the restart it exists to trigger. oidc.secretVersion is the operator's
+        # explicit signal instead — bump it whenever the referenced Secret's contents change.
+        checksum/secret: {{ $root.Values.oidc.secretVersion | sha256sum }}
     spec:
       securityContext:
         runAsUser: 65532
@@ -37,6 +40,10 @@ spec:
       containers:
         - name: console
           image: "{{ $z.console.image.repository }}:{{ $z.console.image.tag | default $root.Chart.AppVersion }}"
+          securityContext:
+            allowPrivilegeEscalation: false
+            # NO readOnlyRootFilesystem. RUNBOOK-containers.md § 7: that posture is untested for
+            # every image in this repo. It is a follow-up to measure, not a default to ship.
           ports:
             - name: http
               containerPort: 3000
@@ -47,9 +54,9 @@ spec:
               value: "3000"
           envFrom:
             - configMapRef:
-                name: {{ $full }}-zonemap
+                name: {{ include "paigasus.name" (list $root "zonemap") }}
             - configMapRef:
-                name: {{ $full }}-console-env
+                name: {{ include "paigasus.name" (list $root "console-env") }}
             - secretRef:
                 name: {{ $root.Values.oidc.existingSecret }}
           # Liveness is a TCP check, NOT httpGet on /healthz. That route runs the FULL config
