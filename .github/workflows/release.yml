@@ -1220,6 +1220,11 @@ jobs:
           ci/images/run.sh load-oci "$archive" "paigasus-${SERVICE}:dev"
           digests="$(uv run --no-project --python '>=3.12' python3 ci/images/release_decision.py oci-digests "$archive")"
           manifest="$(printf '%s\n' "$digests" | sed -n 's/^manifest=//p')"
+          # I2 (SMA-658 fix round 1): write the digest into the uploaded artifact, BEFORE
+          # upload, so the publish job can compare it against a digest it computes itself from
+          # the DOWNLOADED archive. Without this file, both sides of that comparison would read
+          # the same archive, and a corrupted or swapped artifact hop would be undetectable.
+          printf '%s\n' "$manifest" > "out/digest-${ARCH}.txt"
           echo "digest=${manifest}" >> "$GITHUB_OUTPUT"
 
       - name: Smoke this service
@@ -1246,6 +1251,7 @@ jobs:
           path: |
             out/paigasus-${{ env.SERVICE }}-${{ matrix.arch }}.oci.tar
             out/sbom-paigasus-${{ env.SERVICE }}-${{ matrix.arch }}.spdx.json
+            out/digest-${{ matrix.arch }}.txt
           if-no-files-found: error
           retention-days: 7
 
@@ -1354,14 +1360,36 @@ jobs:
           for arch in amd64 arm64; do
             archive="in/paigasus-${SERVICE}-${arch}.oci.tar"
             digests="$(uv run --no-project --python '>=3.12' python3 ci/images/release_decision.py oci-digests "$archive")"
-            printf '%s\n' "$digests" | sed -n "s/^manifest=/digest_${arch}=/p" >> "$GITHUB_OUTPUT"
+            manifest_digest="$(printf '%s\n' "$digests" | sed -n 's/^manifest=//p')"
+            # I2 (SMA-658 fix round 1): the build job wrote this file from the archive it just
+            # built, before upload. Comparing it against the digest computed here, from the
+            # DOWNLOADED archive, is what proves the artifact hop did not corrupt or swap
+            # anything -- without an independent source, both sides of the check would read the
+            # same bytes.
+            built_digest="$(cat "in/digest-${arch}.txt")"
+            if [ "$manifest_digest" != "$built_digest" ]; then
+              echo "::error::the ${arch} archive's digest changed between build and download: built ${built_digest}, downloaded ${manifest_digest}." >&2
+              exit 1
+            fi
+            echo "digest_${arch}=${manifest_digest}" >> "$GITHUB_OUTPUT"
           done
-          label="$(crane config "oci-archive:in/paigasus-${SERVICE}-amd64.oci.tar" | uv run --no-project --python '>=3.12' python3 -c 'import json,sys; c=json.load(sys.stdin); print(c["config"]["Labels"]["org.opencontainers.image.version"])')"
+          # C1 (SMA-658 fix round 1): `crane config "oci-archive:…"` cannot read a local
+          # archive -- MEASURED against crane 0.22.1: `Error: fetching config: parsing
+          # reference … could not parse reference`, and with a missing file it tries to
+          # resolve a host called `oci-archive`. `oci-archive:` is a syft/skopeo transport;
+          # `crane config` takes a REGISTRY reference only. `release_decision.py labels` reads
+          # the same two labels straight out of the archive this job already downloaded.
+          labels="$(uv run --no-project --python '>=3.12' python3 ci/images/release_decision.py labels "in/paigasus-${SERVICE}-amd64.oci.tar")"
+          label="$(printf '%s\n' "$labels" | sed -n 's/^version=//p')"
+          # minor 7 (SMA-658 fix round 1): this is what catches Task 4's empty-version
+          # fail-safe -- if `plan` ever emits skip_<svc>=false with an empty version, $VERSION
+          # is empty here and no archive's version label can ever equal it, so this step fails
+          # loudly instead of publishing under a blank tag.
           if [ "$label" != "$VERSION" ]; then
             echo "::error::the archive carries version ${label}, but plan says ${VERSION}." >&2
             exit 1
           fi
-          revision="$(crane config "oci-archive:in/paigasus-${SERVICE}-amd64.oci.tar" | uv run --no-project --python '>=3.12' python3 -c 'import json,sys; c=json.load(sys.stdin); print(c["config"]["Labels"]["org.opencontainers.image.revision"])')"
+          revision="$(printf '%s\n' "$labels" | sed -n 's/^revision=//p')"
           echo "revision=${revision}" >> "$GITHUB_OUTPUT"
           tag="paigasus-${SERVICE}-v${VERSION}"
           if git ls-remote --tags --exit-code origin "refs/tags/${tag}" > /dev/null 2>&1; then
@@ -1376,7 +1404,13 @@ jobs:
           echo "dockerhub=${hub}" >> "$GITHUB_OUTPUT"
           echo "git_tag=${git_tag}" >> "$GITHUB_OUTPUT"
 
-      - name: Push, copy, tag and sign
+      # I3 (SMA-658 fix round 1): this used to be one step that pushed, copied to Docker Hub,
+      # signed BOTH registries and wrote the floating tags, all before the attest-* steps below
+      # created anything. A failed attestation then left `:latest` pointing at an image with no
+      # provenance in either registry. Split in three: this step makes GHCR authoritative and
+      # signs it; the three attest-* steps run next (push-new only -- see I4); the final step
+      # makes Docker Hub authoritative, signs it, and only then moves the floating tags.
+      - name: Push to GHCR and sign
         id: publish
         env:
           DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
@@ -1401,6 +1435,8 @@ jobs:
             echo "already released: the tag paigasus-${SERVICE}-v${VERSION} exists. Nothing to do."
             echo "index=" >> "$GITHUB_OUTPUT"
             echo "revision=${REVISION}" >> "$GITHUB_OUTPUT"
+            echo "action=already-released" >> "$GITHUB_OUTPUT"
+            echo "copy_to=none" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           if [ "$action" = "push-new" ]; then
@@ -1425,66 +1461,49 @@ jobs:
             done
             docker buildx imagetools create --tag "${GHCR_IMAGE}:${GITHUB_SHA}" "${refs[@]}"
             index="$(crane digest "${GHCR_IMAGE}:${GITHUB_SHA}")"
-            echo "index=${index}" >> "$GITHUB_OUTPUT"
-            echo "revision=${REVISION}" >> "$GITHUB_OUTPUT"
-            echo "$DOCKERHUB_TOKEN" | docker login docker.io --username smaschek --password-stdin
-            docker buildx imagetools create --tag "${HUB_IMAGE}:${GITHUB_SHA}" "${GHCR_IMAGE}@${index}"
-            hub_index="$(crane digest "${HUB_IMAGE}:${GITHUB_SHA}")"
-            if [ "$hub_index" != "$index" ]; then
-              echo "::error::the Docker Hub copy changed the digest: ${index} -> ${hub_index}" >&2
-              exit 1
-            fi
+            # push-new always needs the Hub copy too: neither registry had the digest before
+            # this run pushed it to GHCR.
+            copy_to=dockerhub
           else
             index="$(printf '%s\n' "$decision" | sed -n 's/^digest=//p')"
             copy_to="$(printf '%s\n' "$decision" | sed -n 's/^copy_to=//p')"
             echo "adopting the published digest ${index} (copy_to=${copy_to})"
-            echo "index=${index}" >> "$GITHUB_OUTPUT"
-            echo "revision=${REVISION}" >> "$GITHUB_OUTPUT"
             # S4 (SMA-658): `adopt` names which registry is MISSING the digest. Copying from the
             # wrong registry fails outright, because that registry may not hold it at all.
-            if [ "$copy_to" = "dockerhub" ]; then
+            if [ "$copy_to" = "ghcr" ]; then
+              # minor 10 (SMA-658 fix round 1): the trap fires on any exit, so a failure between
+              # login and the copy below cannot leave the token on disk.
               echo "$DOCKERHUB_TOKEN" | docker login docker.io --username smaschek --password-stdin
-              docker buildx imagetools create --tag "${HUB_IMAGE}:${GITHUB_SHA}" "${GHCR_IMAGE}@${index}"
-              hub_index="$(crane digest "${HUB_IMAGE}:${GITHUB_SHA}")"
-              if [ "$hub_index" != "$index" ]; then
-                echo "::error::the Docker Hub copy changed the digest: ${index} -> ${hub_index}" >&2
-                exit 1
-              fi
-            elif [ "$copy_to" = "ghcr" ]; then
-              echo "$DOCKERHUB_TOKEN" | docker login docker.io --username smaschek --password-stdin
+              trap 'docker logout docker.io || true' EXIT
               docker buildx imagetools create --tag "${GHCR_IMAGE}:${GITHUB_SHA}" "${HUB_IMAGE}@${index}"
               ghcr_index="$(crane digest "${GHCR_IMAGE}:${GITHUB_SHA}")"
               if [ "$ghcr_index" != "$index" ]; then
                 echo "::error::the GHCR copy changed the digest: ${index} -> ${ghcr_index}" >&2
                 exit 1
               fi
-            else
-              echo "$DOCKERHUB_TOKEN" | docker login docker.io --username smaschek --password-stdin
             fi
           fi
           cosign sign --yes "${GHCR_IMAGE}@${index}"
-          cosign sign --yes "${HUB_IMAGE}@${index}"
-          git tag -l > /tmp/tags.txt
-          floating="$(uv run --no-project --python '>=3.12' python3 ci/images/release_decision.py floating \
-            --service "$SERVICE" --version "$VERSION" --tags-file /tmp/tags.txt)"
-          move="$(printf '%s\n' "$floating" | sed -n 's/^move=//p')"
-          minor="$(printf '%s\n' "$floating" | sed -n 's/^minor_tag=//p')"
-          for image in "$GHCR_IMAGE" "$HUB_IMAGE"; do
-            crane tag "${image}@${index}" "$VERSION"
-            if [ "$move" = "true" ]; then
-              crane tag "${image}@${index}" "$minor"
-              crane tag "${image}@${index}" latest
-            fi
-          done
-          # S15 (SMA-658, should-fix): spec Section 4.3 step 6 says logout happens "at once" after
-          # the Hub cosign sign. It happens here instead, because the crane tag loop above ALSO
-          # writes to Docker Hub and needs the same credential -- moving logout earlier would
-          # break that write. This is a deliberate, recorded deviation (spec Section 16 P15);
-          # verify on the first live release whether a later measurement lets it move up.
-          docker logout docker.io
+          echo "index=${index}" >> "$GITHUB_OUTPUT"
+          echo "action=${action}" >> "$GITHUB_OUTPUT"
+          echo "copy_to=${copy_to}" >> "$GITHUB_OUTPUT"
+          if [ "$action" = "push-new" ]; then
+            echo "revision=${REVISION}" >> "$GITHUB_OUTPUT"
+          else
+            # I5 (SMA-658 fix round 1): spec Section 3.5 -- the tag must name the PUBLISHED
+            # image's own revision, not this run's local build (which may not even be the same
+            # commit). GHCR now holds the adopted digest -- either it always did, or the branch
+            # above just copied it there -- so read the label back with a REGISTRY reference:
+            # crane accepts that (C1 above is about a LOCAL archive only).
+            adopted_revision="$(crane config "${GHCR_IMAGE}@${index}" | uv run --no-project --python '>=3.12' python3 -c 'import json,sys; c=json.load(sys.stdin); print(c["config"]["Labels"]["org.opencontainers.image.revision"])')"
+            echo "revision=${adopted_revision}" >> "$GITHUB_OUTPUT"
+          fi
 
+      # I4 (SMA-658 fix round 1): on the adopt path these three subjects come from THIS run's
+      # local, discarded rebuild, not from the published image -- the registry holds no such
+      # subject for them, and the original push-new run already attested the real one.
       - name: Attest build provenance (index)
-        if: steps.publish.outputs.index != ''
+        if: steps.publish.outputs.index != '' && steps.publish.outputs.action == 'push-new'
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8  # v4.2.2
         with:
           subject-name: ${{ env.GHCR_IMAGE }}
@@ -1492,7 +1511,7 @@ jobs:
           push-to-registry: true
 
       - name: Attest the amd64 SBOM (per-platform subject)
-        if: steps.publish.outputs.index != ''
+        if: steps.publish.outputs.index != '' && steps.publish.outputs.action == 'push-new'
         uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e  # v4.1.0
         with:
           subject-name: ${{ env.GHCR_IMAGE }}
@@ -1501,13 +1520,58 @@ jobs:
           push-to-registry: true
 
       - name: Attest the arm64 SBOM (per-platform subject)
-        if: steps.publish.outputs.index != ''
+        if: steps.publish.outputs.index != '' && steps.publish.outputs.action == 'push-new'
         uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e  # v4.1.0
         with:
           subject-name: ${{ env.GHCR_IMAGE }}
           subject-digest: ${{ steps.decide.outputs.digest_arm64 }}
           sbom-path: in/sbom-paigasus-${{ env.SERVICE }}-arm64.spdx.json
           push-to-registry: true
+
+      - name: Copy to Docker Hub, sign and write the release tags
+        if: steps.publish.outputs.index != ''
+        env:
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          INDEX: ${{ steps.publish.outputs.index }}
+          COPY_TO: ${{ steps.publish.outputs.copy_to }}
+        run: |
+          set -euo pipefail
+          index="$INDEX"
+          echo "$DOCKERHUB_TOKEN" | docker login docker.io --username smaschek --password-stdin
+          # S15 / minor 10 (SMA-658 fix round 1): a trap set right after login, not a final
+          # unconditional `docker logout` line -- it fires on any exit, so a failure anywhere
+          # below (a changed digest, a failed cosign sign) cannot leave the token on disk. Spec
+          # Section 4.3 step 6 says logout happens "at once" after the Hub cosign sign; it is
+          # a trap instead, because the crane tag loop below also writes to Docker Hub and
+          # needs the same credential.
+          trap 'docker logout docker.io || true' EXIT
+          if [ "$COPY_TO" = "dockerhub" ]; then
+            docker buildx imagetools create --tag "${HUB_IMAGE}:${GITHUB_SHA}" "${GHCR_IMAGE}@${index}"
+            hub_index="$(crane digest "${HUB_IMAGE}:${GITHUB_SHA}")"
+            if [ "$hub_index" != "$index" ]; then
+              echo "::error::the Docker Hub copy changed the digest: ${index} -> ${hub_index}" >&2
+              exit 1
+            fi
+          fi
+          cosign sign --yes "${HUB_IMAGE}@${index}"
+          git tag -l > /tmp/tags.txt
+          floating="$(uv run --no-project --python '>=3.12' python3 ci/images/release_decision.py floating \
+            --service "$SERVICE" --version "$VERSION" --tags-file /tmp/tags.txt)"
+          move="$(printf '%s\n' "$floating" | sed -n 's/^move=//p')"
+          minor="$(printf '%s\n' "$floating" | sed -n 's/^minor_tag=//p')"
+          # minor 6 (SMA-658 fix round 1): consumed, not left dead -- :<major> moves too, once
+          # the service is out of 0.x (floating() leaves major_tag empty until then).
+          major="$(printf '%s\n' "$floating" | sed -n 's/^major_tag=//p')"
+          for image in "$GHCR_IMAGE" "$HUB_IMAGE"; do
+            crane tag "${image}@${index}" "$VERSION"
+            if [ "$move" = "true" ]; then
+              crane tag "${image}@${index}" "$minor"
+              if [ -n "$major" ]; then
+                crane tag "${image}@${index}" "$major"
+              fi
+              crane tag "${image}@${index}" latest
+            fi
+          done
 
       # SMA-658 B6. The plan's original single "Push, copy, tag, sign and verify" step ran
       # `gh attestation verify` BEFORE the three attest-* steps above created anything to verify
@@ -1517,6 +1581,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           INDEX: ${{ steps.publish.outputs.index }}
+          ACTION: ${{ steps.publish.outputs.action }}
+          DIGEST_AMD64: ${{ steps.decide.outputs.digest_amd64 }}
+          DIGEST_ARM64: ${{ steps.decide.outputs.digest_arm64 }}
         run: |
           set -euo pipefail
           index="$INDEX"
@@ -1530,6 +1597,19 @@ jobs:
               --signer-workflow SMK1085/paigasus-core/.github/workflows/release.yml \
               --source-ref refs/heads/main
           done
+          # minor 9 (SMA-658 fix round 1): the two per-platform SBOM attestations created above
+          # were never verified -- mirror images-rehearsal.yml's own check. push-new only: on
+          # adopt, DIGEST_AMD64/DIGEST_ARM64 come from THIS run's local, discarded rebuild (I4),
+          # not from the published image, so the registry holds no such subject for them.
+          if [ "$ACTION" = "push-new" ]; then
+            for d in "$DIGEST_AMD64" "$DIGEST_ARM64"; do
+              gh attestation verify "oci://${GHCR_IMAGE}@${d}" \
+                --repo SMK1085/paigasus-core \
+                --signer-workflow SMK1085/paigasus-core/.github/workflows/release.yml \
+                --predicate-type https://spdx.dev/Document/v2.3 \
+                --source-ref refs/heads/main
+            done
+          fi
           echo "PUBLISHED ${SERVICE} ${VERSION}: ${index}"
 
   tag-iam:
@@ -1539,6 +1619,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     environment: release-publish
+    # minor 11 (SMA-658 fix round 1): without this, two concurrent runs could race the same
+    # `gh api POST git/refs` for the same tag.
+    concurrency:
+      group: release-tag-iam
+      cancel-in-progress: false
     permissions:
       contents: read
     env:
@@ -1644,6 +1729,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     environment: release-publish
+    # minor 11 (SMA-658 fix round 1): without this, two concurrent runs could race the same
+    # `gh api POST git/refs` for the same tag.
+    concurrency:
+      group: release-tag-gateway
+      cancel-in-progress: false
     permissions:
       contents: read
     env:
