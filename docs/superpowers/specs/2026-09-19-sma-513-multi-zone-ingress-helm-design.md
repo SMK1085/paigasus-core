@@ -446,6 +446,8 @@ error does not depend on Helm's template evaluation order.
 | no zone enabled | `fail` — a chart with no zone serves nothing |
 | `gateway` enabled, `iam` disabled | `fail` — `gateway-console`'s `servicesWithIamAndGateway` refuses to construct without an `iam` entry (`ts/apps/gateway-console/lib/config.ts:52-63`) |
 | a zone id outside `SERVICE_SLUGS` | `fail` — `parseServiceMap` would throw in **both** consoles at first request (F8) |
+| a zone's `basePath` empty, unrooted, trailing-slashed, or **duplicated** across enabled zones | `fail`, naming the zone — an invalid path renders an Ingress the API server rejects, and a duplicate makes two rules claim one prefix, so one console is unreachable and `zoneMapFromJson` throws in **both** |
+| `ingress.host` empty | `fail`, naming the value — it is the single origin every zone's cookie is scoped to |
 | `ingress.tlsSecretName` empty | `fail`, naming the value — the ingress must terminate TLS (§ 7.5) |
 | `oidc.issuer`, `oidc.clientId` or `oidc.existingSecret` empty | `fail`, naming the value |
 | `postgres.existingSecret` empty | `fail`, naming the value |
