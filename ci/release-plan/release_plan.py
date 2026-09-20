@@ -903,6 +903,87 @@ def _service_version_format_is_rejected() -> str | None:
         shutil.rmtree(tmp)
 
 
+def _service_unparsable_version_asserts_three_tree(tmp: str) -> Path:
+    """A tree built so `_assert_repo` reports EXACTLY ONE problem if the fix under
+    `_service_unparsable_version_asserts_three` is present, and ZERO if it is not.
+
+    PR 2 review, finding 1. `releasable_packages` derives exactly `EXPECTED_RELEASABLE`
+    (kernel, proto, proto-derive, each `publish = true` by default), so the strict-equality
+    pin does not itself add a problem. `git tag` gives `repo_tags` a non-empty set, so the
+    "no tags at all" branch does not add one either. `gateway` sits at the legitimate `0.0.0`
+    skip. That leaves `iam`'s `0.1.0-rc1` — a version `_SERVICE_VERSION_RE` cannot parse — as
+    the ONLY thing that can make `_assert_repo` report a problem, which is what proves the
+    fix is load-bearing rather than incidentally covered by an unrelated problem.
+    """
+    repo_root = Path(tmp)
+    rs_root = repo_root / "rs"
+    kernel_dir = rs_root / "crates" / "libs" / "paigasus-kernel"
+    proto_dir = rs_root / "crates" / "libs" / "paigasus-proto"
+    derive_dir = rs_root / "crates" / "libs" / "paigasus-proto-derive"
+    iam_dir = rs_root / "crates" / "services" / "paigasus-iam"
+    gateway_dir = rs_root / "crates" / "services" / "paigasus-gateway"
+    for d in (kernel_dir, proto_dir, derive_dir, iam_dir, gateway_dir):
+        d.mkdir(parents=True)
+    (rs_root / "Cargo.toml").write_text(
+        '[workspace]\nmembers = ["crates/libs/*", "crates/services/*"]\n')
+    (rs_root / "release-plz.toml").write_text("")
+    (kernel_dir / "Cargo.toml").write_text(
+        '[package]\nname = "paigasus-kernel"\nversion = "1.0.0"\n')
+    (proto_dir / "Cargo.toml").write_text(
+        '[package]\nname = "paigasus-proto"\nversion = "1.0.0"\n')
+    (derive_dir / "Cargo.toml").write_text(
+        '[package]\nname = "paigasus-proto-derive"\nversion = "1.0.0"\n')
+    (iam_dir / "Cargo.toml").write_text(
+        '[package]\nname = "paigasus-iam"\nversion = "0.1.0-rc1"\npublish = false\n')
+    (gateway_dir / "Cargo.toml").write_text(
+        '[package]\nname = "paigasus-gateway"\nversion = "0.0.0"\npublish = false\n')
+    subprocess.run(["git", "init", "-q", tmp], check=True)
+    subprocess.run(["git", "-C", tmp, "config", "user.email", "release-plan-self-test@example.com"],
+                    check=True)
+    subprocess.run(["git", "-C", tmp, "config", "user.name", "release-plan self-test"], check=True)
+    subprocess.run(["git", "-C", tmp, "add", "-A"], check=True)
+    # `-c commit.gpgsign=false` / `-c tag.gpgSign=false`: this repo's global git config signs
+    # every commit and tag (1Password-backed SSH signing). A throwaway fixture tree must not
+    # depend on that being unlocked, and an unsigned, unannotated tag is all `repo_tags` reads.
+    subprocess.run(["git", "-C", tmp, "-c", "commit.gpgsign=false", "commit", "-q", "-m", "init"],
+                    check=True)
+    subprocess.run(["git", "-C", tmp, "-c", "tag.gpgSign=false", "tag", "unrelated-tag"],
+                    check=True)
+    return repo_root
+
+
+def _service_unparsable_version_asserts_three() -> str | None:
+    """PR 2 review, finding 1. Before the fix, `_assert_repo`'s service loop read
+
+        if not version or version == "0.0.0":
+            continue
+
+    which treated `service_state`'s `(False, "")` — a version it could not parse at all — the
+    same as the legitimate `0.0.0` "not released yet" skip. So an unparsable service version
+    made `--assert` exit 0 on the very pull request that introduced it, and the fault surfaced
+    only at runtime, after two architecture builds and two registry pushes.
+
+    This row REDS without the fix: comment out the `problems.append` block added for this
+    finding, re-run `--self-test`, and this row fails with "expected 3" because the fixture
+    tree above manufactures no OTHER problem — `_assert_repo` would report rc 0.
+    """
+    tmp = tempfile.mkdtemp()
+    try:
+        repo_root = _service_unparsable_version_asserts_three_tree(tmp)
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            rc = _assert_repo(repo_root)
+        if rc != 3:
+            return (f"_assert_repo returned {rc} for an unparsable iam service version "
+                     f"(0.1.0-rc1), expected 3 — an unreadable version must not read as the "
+                     f"legitimate 0.0.0 skip")
+        if "could not be read" not in err.getvalue():
+            return (f"_assert_repo returned 3 but did not name the unparsable version as the "
+                     f"cause: {err.getvalue()!r}")
+        return None
+    finally:
+        shutil.rmtree(tmp)
+
+
 def _service_state_is_a_separate_failure_domain() -> str | None:
     tmp = tempfile.mkdtemp()
     try:
@@ -996,6 +1077,8 @@ COLLECTION_ROWS: tuple[tuple[str, Callable[[], str | None]], ...] = (
      _changelog_undecodable_asserts_three),
     ("PR 2 review: a non-MAJOR.MINOR.PATCH service version is rejected",
      _service_version_format_is_rejected),
+    ("PR 2 review finding 1: an unparsable service version makes --assert exit 3, not 0",
+     _service_unparsable_version_asserts_three),
 )
 
 
@@ -1093,7 +1176,22 @@ def _assert_repo(repo_root: Path) -> int:
     # entry. `repo:actionlint` check 11 runs --assert on every pull request, which is what makes
     # this a gate rather than a convention.
     for service, (_skip, version) in service_state(repo_root / "rs", tags).items():
-        if not version or version == "0.0.0":
+        # PR 2 review finding 1: an empty version and "0.0.0" are NOT the same state. `""` means
+        # service_state could not read a literal MAJOR.MINOR.PATCH version at all (a missing
+        # crate, a non-string version, or one that fails _SERVICE_VERSION_RE) — that is a
+        # REPOSITORY PROBLEM this gate exists to catch. "0.0.0" means the crate was read fine and
+        # simply has not shipped yet, which is a legitimate skip. Folding both into one
+        # `not version or version == "0.0.0"` test let an unparsable version pass --assert
+        # silently: the runtime path still fails safe (an empty plan version mismatches the
+        # archive's real label), but only after two architecture builds, with nothing red at
+        # review time.
+        if not version:
+            problems.append(
+                f"{EXPECTED_SERVICES[service]}'s version could not be read (see the "
+                f"'{service} is inconclusive' line above). A hand-bumped service must carry a "
+                f"literal MAJOR.MINOR.PATCH [package] version.")
+            continue
+        if version == "0.0.0":
             continue
         changelog = repo_root / "rs" / "crates" / "services" / EXPECTED_SERVICES[service] / "CHANGELOG.md"
         try:
