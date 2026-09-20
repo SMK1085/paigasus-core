@@ -290,6 +290,10 @@ PYPI_PUBLISH_ACTION = "pypa/gh-action-pypi-publish"
 EXPECTED_RELEASE_SECRETS = (
     "PAIGASUS_BOT_APP_ID",
     "PAIGASUS_BOT_PRIVATE_KEY",
+    # SMA-658 D7. Docker Hub offers OIDC connections only to organizations with a Team, Business
+    # or DHI subscription, or in its Sponsored Open Source program. `smaschek` is a personal
+    # account, so this token cannot be an OIDC exchange. V13 (Task 6) scopes it to one job.
+    "DOCKERHUB_TOKEN",
 )
 
 # Matched against PARSED scalars, never the raw file, so the YAML comments in release.yml that
@@ -3305,10 +3309,18 @@ def _v10_rule1_strict_equality() -> str | None:
         return f"the missing-name half leaked past RELEASE_WORKFLOW_NAME: {other}"
 
     # And the real referencing shape must satisfy it exactly.
+    # SMA-658 (Task 7): EXPECTED_RELEASE_SECRETS now pins DOCKERHUB_TOKEN too, so this fixture
+    # must reference all three or the strict-equality rule fires the same "no longer
+    # references" line on ITS OWN control doc. The added step's other shape (no environment:,
+    # no chain-job id) trips no OTHER rule that this function's `leftover` filter would see —
+    # it keeps only lines mentioning EXPECTED_RELEASE_SECRETS / "no longer references".
     ok = {"jobs": {"release": {"runs-on": "ubuntu-latest", "steps": [{
         "uses": "actions/create-github-app-token@v2",
         "with": {"app-id": "${{ secrets.PAIGASUS_BOT_APP_ID }}",
                  "private-key": "${{ secrets.PAIGASUS_BOT_PRIVATE_KEY }}"},
+    }, {
+        "env": {"DOCKERHUB_TOKEN": "${{ secrets.DOCKERHUB_TOKEN }}"},
+        "run": "echo hi",
     }]}}}
     leftover = [line for line in check_main(ok, RELEASE_WORKFLOW_NAME)
                 if "EXPECTED_RELEASE_SECRETS" in line or "no longer references" in line]
