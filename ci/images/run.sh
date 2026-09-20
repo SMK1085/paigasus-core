@@ -851,17 +851,38 @@ console.log(["public=" + (fs.existsSync(root + "/public") ? "1" : "0")].concat(r
 smoke_consoles() {
   local service app base_path other name port origin status html chunk bytes code uid
   local run_out img_out img_public img_list host_public host_list img_dirs host_dirs
-  local host_std host_static host_id
+  local host_std host_static host_id run_rc sh_rc img_rc
   local ec=0 bad started
+  # This REPLACES the script-global `trap load_oci_cleanup EXIT` at the top of the load-oci
+  # section, exactly as `smoke()` and `rehearse` already do — harmless today because no dispatch
+  # arm reaches `load_oci` and `smoke_consoles` in one process. A future arm that chains them
+  # would leak the load-oci registry container SILENTLY; make that arm call `load_oci_cleanup`
+  # itself, or fold both cleanups into one trap body, rather than assuming this line is inert.
   trap console_smoke_cleanup EXIT
   console_smoke_cleanup
 
-  for service in iam gateway; do
-    # app_for/base_path_for print their own "unknown console: …" before returning 1, so even an
-    # unguarded abort here cannot precede its own cause. $service is a loop literal from the list
-    # both functions accept, so neither can fail at all.
-    app="$(app_for "$service")"
-    base_path="$(base_path_for "$service")"
+  # The zone list comes from the caller (the `all-consoles` arm passes `console_services`), so the
+  # list lives in ONE place rather than being restated here. An empty list must not read as a pass.
+  if [ "$#" -eq 0 ]; then
+    echo "::error::smoke_consoles: called with no zones — nothing was smoked, and an empty run must not report OK." >&2
+    return 1
+  fi
+
+  for service in "$@"; do
+    # GUARDED, because $service is now caller-supplied rather than a loop literal: app_for and
+    # base_path_for print their own "unknown console: …" and return 1, and an unguarded capture
+    # would abort the script there and cancel every remaining zone's rows.
+    app="$(app_for "$service")" || app=""
+    base_path="$(base_path_for "$service")" || base_path=""
+    if [ -z "$app" ] || [ -z "$base_path" ]; then
+      echo "::error::smoke_consoles: unknown console zone '${service}' — add it to app_for and base_path_for." >&2
+      ec=1
+      continue
+    fi
+    # BINARY, not a list. With a third zone C this picks ONE other prefix, so C's chunk would be
+    # probed against /iam alone and the collision check would be two-thirds vacuous with nothing
+    # saying so. The PAIGASUS_ZONES JSON literal in the `docker run` below is a third hardcoded
+    # copy of the same two-zone assumption. A third zone needs both rewritten, not extended.
     if [ "$service" = "iam" ]; then other="/gateway"; else other="/iam"; fi
     name="smoke-${app}-${RUN_ID}"
     # Registered BEFORE the container is created, so a `docker run` that fails part-way still has
@@ -875,13 +896,20 @@ smoke_consoles() {
     # -p 0:3000 asks the daemon for a free ephemeral port. GUARDED: without it a name collision or
     # an image that will not start aborts the script on docker's own message and the gateway
     # console is never checked.
+    # The rc is captured, not folded into an empty string: docker's own message names the real
+    # reason (no such image, name already in use, port already allocated, daemon unreachable) and
+    # discarding it leaves the reader with a guess. It is printed on its own lines rather than
+    # inside the annotation, because a `::error::` line that carries an embedded newline stops
+    # being one annotation.
+    run_rc=0
     run_out="$(docker run -d --name "$name" -p 0:3000 \
       -e PAIGASUS_ZONE="$service" \
       -e PAIGASUS_ZONES="{\"iam\":\"/iam\",\"gateway\":\"/gateway\"}" \
       "${CONSOLE_SMOKE_ENV[@]}" \
-      "${app}:dev" 2>&1)" || run_out=""
-    if [ -z "$run_out" ]; then
-      echo "::error::${app}: the container did not start from ${app}:dev — the image is missing, or 'docker run' refused it. Run 'ci/images/run.sh build-console ${service}' first." >&2
+      "${app}:dev" 2>&1)" || run_rc=$?
+    if [ "$run_rc" -ne 0 ]; then
+      echo "::error::${app}: the container did not start from ${app}:dev — docker exited ${run_rc}; its own message follows. If the image is missing, run 'ci/images/run.sh build-console ${service}' first." >&2
+      printf '%s\n' "$run_out" >&2
       ec=1; bad=1
     else
       started=1
@@ -1007,11 +1035,22 @@ smoke_consoles() {
       echo "::error::${app}: uid not checked — the container never started." >&2
     fi
 
-    if docker run --rm --entrypoint /bin/sh "${app}:dev" -c true >/dev/null 2>&1; then
+    # Only 127 is the pass. MEASURED on this host (Docker 29.8.0): the probe exits 0 when a shell
+    # exists (alpine:latest), 127 when the image has no /bin/sh (the distroless images under test),
+    # and 125 when docker itself refuses before the entrypoint runs — a missing or unpullable
+    # image. A bare `if … else` folds that 125 into the else branch and prints a GREEN
+    # "no shell in the runtime image" row for an image that was never read, which is the shape
+    # the uid check three lines above already avoids.
+    sh_rc=0
+    docker run --rm --entrypoint /bin/sh "${app}:dev" -c true >/dev/null 2>&1 || sh_rc=$?
+    if [ "$sh_rc" -eq 0 ]; then
       echo "::error::${app}:dev has a shell; the runtime base must stay distroless." >&2
       ec=1
-    else
+    elif [ "$sh_rc" -eq 127 ]; then
       echo "  ${app}: no shell in the runtime image"
+    else
+      echo "::error::${app}: shell absence NOT checked — docker exited ${sh_rc} on ${app}:dev before reaching an entrypoint, so the image is missing or unreadable and nothing was proved about the runtime base." >&2
+      ec=1
     fi
 
     # Spec § 5.5 assertion 4 — staged-tree parity. ts/Dockerfile's staging of .next/static and
@@ -1026,10 +1065,24 @@ smoke_consoles() {
     host_std="$ROOT/ts/apps/${app}/.next/standalone/apps/${app}"
     host_static="$host_std/.next/static"
     if [ -d "$host_static" ]; then
+      # Two causes, two messages, and the rc separates them. node's own uncaught ENOENT on
+      # .next/static (or on .next/BUILD_ID) exits 1, and only THAT says the staging copy did not
+      # run. docker refusing the image exits 125/126/127 before node starts, which proves nothing
+      # about staging at all. stderr is captured rather than discarded, for the same reason as the
+      # `docker run -d` above: the tool's own message names the cause.
+      img_rc=0
       img_out="$(docker run --rm --entrypoint /nodejs/bin/node "${app}:dev" \
-        -e "$CONSOLE_STAGED_TREE_JS" "/app/apps/${app}" 2>/dev/null)" || img_out=""
-      if [ -z "$img_out" ]; then
-        echo "::error::${app}: could not read /app/apps/${app}/.next/static inside the image — the staged tree is absent or unreadable, so the staging copy in ts/Dockerfile did not run." >&2
+        -e "$CONSOLE_STAGED_TREE_JS" "/app/apps/${app}" 2>&1)" || img_rc=$?
+      if [ "$img_rc" -eq 1 ]; then
+        echo "::error::${app}: /app/apps/${app}/.next/static is absent or unreadable inside the image — the staging copy in ts/Dockerfile did not run. node's message follows." >&2
+        printf '%s\n' "$img_out" >&2
+        ec=1
+      elif [ "$img_rc" -ne 0 ]; then
+        echo "::error::${app}: staged-tree parity NOT checked — docker exited ${img_rc} on ${app}:dev before node ran, so the image is missing or unreadable and nothing was proved about staging. Its message follows." >&2
+        printf '%s\n' "$img_out" >&2
+        ec=1
+      elif [ -z "$img_out" ]; then
+        echo "::error::${app}: the staged-tree walk exited 0 but printed nothing — that is neither a staging failure nor a docker failure; inspect ${app}:dev by hand." >&2
         ec=1
       else
         # Line 1 is the public= marker, the rest is the tree. `sed -n 1p` / `sed -n '2,$p'` read
@@ -1054,12 +1107,23 @@ smoke_consoles() {
             # places, so they get different messages. A missing or partial staging copy changes
             # which TOP-LEVEL directories exist under .next/static; two builds of different source
             # keep the same directories and change only the content-hashed file names inside them.
+            #
+            # ASSUMPTION, recorded deliberately: a host build and an image build of the SAME source
+            # produce the same chunk file names. Measured true here — Turbopack derives them from
+            # content — but nothing enforces it. Four things would break it, and all four are
+            # toolchain events rather than code changes: a Next or Turbopack bump that changes
+            # chunk hashing; a compile-time variable that differs between the host build and the
+            # builder stage; the platform split (macOS host against a linux builder); and the
+            # Dockerfile's filtered `pnpm install` resolving a different optional platform
+            # dependency. When it breaks it breaks on EVERY run, loudly, into the branch below
+            # whose message already says this is not a Dockerfile-vs-moon.yml drift. That is an
+            # acceptable failure shape, so there is no shape-only fallback here on purpose.
             img_dirs="$(printf '%s\n' "$img_list" | sed 's#/.*##' | LC_ALL=C sort -u)"
             host_dirs="$(printf '%s\n' "$host_list" | sed 's#/.*##' | LC_ALL=C sort -u)"
             if [ "$img_dirs" != "$host_dirs" ]; then
               echo "::error::${app}: the image's staged .next/static holds different top-level directories from the host build's — ts/Dockerfile and ts/apps/${app}/moon.yml have drifted. Diff (< host, > image) follows." >&2
             else
-              echo "::error::${app}: the image's staged .next/static holds the same directories as the host build's but different files, so the two were built from DIFFERENT sources. Re-run 'moon run ${app}-ts:build' so this parity claim compares like with like; on its own this is NOT a ts/Dockerfile vs ts/apps/${app}/moon.yml drift. Diff (< host, > image) follows." >&2
+              echo "::error::${app}: the image's staged .next/static holds the same directories as the host build's but different files, so the two were built from DIFFERENT sources. Re-run 'moon run ${app}-ts:build' so this parity claim compares like with like; on its own this is NOT a ts/Dockerfile vs ts/apps/${app}/moon.yml drift. If a FRESH build does not clear this, that is a finding — report it; do NOT delete .next to silence it, because that only moves this check into its 'not checked' arm. Diff (< host, > image) follows." >&2
             fi
             diff <(printf '%s\n' "$host_list") <(printf '%s\n' "$img_list") >&2 || true
             ec=1
@@ -1069,10 +1133,16 @@ smoke_consoles() {
         fi
       fi
     else
-      # Deliberate, and it says so out loud rather than passing silently: in CI the host build may
-      # not have run, and a check that quietly skips is the failure mode this repository has paid
-      # for repeatedly. Nothing here sets ec — the absence of a host build is not a defect.
-      echo "  ${app}: no host build at ${host_static}; staged-tree parity NOT CHECKED this run"
+      # Deliberate, and it says so out loud rather than passing silently: a check that quietly
+      # skips is the failure mode this repository has paid for repeatedly. Nothing here sets ec —
+      # the absence of a host build is not a defect.
+      #
+      # LOCAL ONLY, and the message says so. .github/workflows/images.yml runs no host build, so
+      # CI ALWAYS takes this arm and the staged-tree parity check gates NOTHING there. Making it
+      # gate would mean adding a TypeScript toolchain and a second Next build to that job. That is
+      # a follow-up, recorded in the PR description and in docs/ops/RUNBOOK-containers.md — until
+      # it lands, do not read a green CI `all-consoles` as parity coverage.
+      echo "  ${app}: no host build at ${host_static}; staged-tree parity NOT CHECKED this run (CI never runs a host build, so a green CI run is NOT parity coverage — run 'moon run ${app}-ts:build' locally to check it)"
     fi
   done
 
@@ -1318,7 +1388,9 @@ case "$cmd" in
     fi
     assert_console_pins
     for s in "${console_services[@]}"; do build_console_one "$s"; done
-    smoke_consoles
+    # The zone list is passed, not restated inside smoke_consoles, so the build loop and the smoke
+    # loop cannot disagree about which zones this run covers.
+    smoke_consoles "${console_services[@]}"
     ;;
   *)
     echo "unknown command: $cmd" >&2
