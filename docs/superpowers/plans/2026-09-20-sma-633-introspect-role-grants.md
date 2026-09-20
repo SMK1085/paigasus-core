@@ -392,7 +392,11 @@ touch `authenticate_api_key.rs:260`, which spec D2 leaves empty. Editing `contex
 grep -n "AuthenticateToken::new(" rs/crates/services/paigasus-iam/src/application/authenticate_token.rs rs/crates/services/paigasus-iam/src/adapters/http/mod.rs
 ```
 
-In each unit-test call, insert `Arc::new(InMemoryRoleGrants::default()),` directly after the memberships argument. For the call that uses `PanicIfCalled*` fakes (`invalid_token_short_circuits`), use `Arc::new(FailingGrants)` instead: that test must fail at token verification, so a grant store that panics-or-fails proves the call never got that far.
+In each unit-test call, insert `Arc::new(InMemoryRoleGrants::default()),` directly after the memberships argument. That includes `context_for_fixture()` at `:773`, which SMA-632 added — it is a helper, not a test, and it is easy to miss.
+
+For the call that uses `PanicIfCalled*` fakes (`invalid_token_short_circuits`), use `Arc::new(FailingGrants)` instead: that test must fail at token verification, so a grant store that would error proves the call never got that far.
+
+The test module already imports everything the new code needs — `Arc`, `Transaction`, `TenancyNodeRef`, `Prn`, `async_trait`, `Uuid` (`:210-218`) — so only `InMemoryRoleGrants` needs adding to the `crate::application::fakes` import at `:211`.
 
 In `adapters/http/mod.rs`, the production call passes the store built at `:371`:
 
@@ -420,9 +424,9 @@ cd rs && cargo nextest run -p paigasus-iam --lib authenticate_token
 
 Expected: PASS for the four new tests. `introspect_pages_through_memberships` still FAILS at its `assert!(ctx.role_grants.is_empty())` — Task 3 fixes it. If it passes, the population code is not running; stop and find out why.
 
-- [ ] **Step 7: Fix the in-file assertion that the change disproves**
+- [ ] **Step 7: Give both surviving in-file assertions their reason**
 
-In `introspect_pages_through_memberships`, that principal has no grants, so replace the line with an explicit statement of why it is empty:
+Two tests assert `ctx.role_grants.is_empty()` and both principals genuinely hold no grants, so both assertions stay true. Left bare they become vacuous pins, so each gets the reason above it: `introspect_pages_through_memberships` (`:741`) and `context_for_does_not_re_authenticate` (`:806`, added by SMA-632).
 
 ```rust
         // This principal holds no grants, so the list is empty for that reason — not
