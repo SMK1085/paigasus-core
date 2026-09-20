@@ -16,6 +16,7 @@ use axum::http::StatusCode;
 use paigasus_iam::adapters::http::{AppState, router};
 use paigasus_iam::application::authenticate_token::Provisioning;
 use serde_json::json;
+use paigasus_iam_core::authz::model::root_prn;
 use support::{app_with_state, seed_platform_admin, send, send_raw, send_raw_parts, start_mock_idp, test_config, test_config_with};
 use uuid::Uuid;
 
@@ -59,8 +60,9 @@ async fn introspect_resolved_identity_returns_full_context() {
     // enforced — seed the already-resolved principal a `platform_admin` grant.
     seed_platform_admin(&state, &principal_prn).await;
 
-    // Introspect over HTTP: 200 with the full context; no memberships yet, and
-    // role_grants stays empty until a later M3 task populates it.
+    // Introspect over HTTP: 200 with the full context; no memberships yet.
+    // SMA-633: `seed_platform_admin` above granted `platform_admin` at Root, so introspection
+    // reports exactly that grant.
     let (status, body) = send(&app, "POST", "/v1/authn/introspect", Some(json!({ "token": token })), None).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["principal_prn"], principal_prn);
@@ -68,7 +70,10 @@ async fn introspect_resolved_identity_returns_full_context() {
     assert_eq!(body["issuer"], idp.issuer);
     assert_eq!(body["subject"], "sub-alice");
     assert!(body["expires_at"].is_string(), "expires_at must be an RFC3339 string: {body}");
-    assert!(body["role_grants"].as_array().expect("role_grants array").is_empty());
+    let grants = body["role_grants"].as_array().expect("role_grants array");
+    assert_eq!(grants.len(), 1, "expected exactly the seeded grant: {body}");
+    assert_eq!(grants[0]["role_key"], "platform_admin");
+    assert_eq!(grants[0]["scope_prn"], root_prn().canonical());
     assert!(body["memberships"].as_array().expect("memberships array").is_empty());
 
     // Attach an org membership; introspect reflects it (D13: introspect is the one
