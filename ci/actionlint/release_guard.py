@@ -201,6 +201,10 @@ PUBLISH_MARKERS = (
     r"regctl\s+(image\s+(copy|cp)|tag|index\s+create)(?![-\w])",
     r"oras\s+(push|cp|attach)(?![-\w])",
     r"cosign\s+(sign|attest|attach|copy)(?![-\w])",
+    # M5 (SMA-658 fix round 1): this also matches a GET read of a ref (`gh api
+    # repos/o/r/git/refs/tags/x`), which reaches no registry. That is fail-closed, not a mistake —
+    # narrowing it to the tag-CREATING verb needs a method-aware rewrite this guard does not do
+    # today, and a false positive here costs a human look, not a missed publish.
     r"git/refs(?![-\w])",
 )
 _PUBLISH_RE = re.compile("|".join(PUBLISH_MARKERS))
@@ -1129,6 +1133,19 @@ def credential_scope_violations(doc: dict, name: str) -> list[str]:
     could name the same environment and read the same secret.
     """
     out: list[str] = []
+    # I4 (SMA-658 fix round 1). A WORKFLOW-LEVEL env: block reaches every job through the `env`
+    # context — UNGATED_JOBS members included — and nothing can scope a workflow-level env: to
+    # one job the way a job's own environment: does. `check_main`'s own workflow-level env: scan
+    # (at its `publish_credential_violations({"env": doc.get("env") or {}}, ...)` call) already
+    # covers V10 the same way; V13 needs the identical scan, or a secret hoisted from a job's env:
+    # up to the workflow root would silently escape this rule.
+    names, _ = secret_refs(
+        yaml.safe_dump({"env": doc.get("env") or {}}, width=10**9, default_flow_style=False))
+    if SCOPED_SECRET in names:
+        out.append(f"{name}: V13: the workflow-level env: reads {SCOPED_SECRET}. That scope "
+                   f"reaches every job in the file, including one UNGATED_JOBS exempts from the "
+                   f"release gate, and nothing can scope it to a single job from there. Move the "
+                   f"reference into one of {sorted(SCOPED_SECRET_JOBS)}'s own env:.")
     jobs = doc.get("jobs")
     if not isinstance(jobs, dict):
         return out
@@ -1163,7 +1180,11 @@ def credential_scope_violations(doc: dict, name: str) -> list[str]:
 # command someone already thought of; a job that HOLDS a write capability can publish with a tool
 # nobody listed, a `with: push: true`, or a command inside a script. So the capability itself must
 # sit behind an approval.
-WRITE_SCOPES = ("packages", "id-token", "attestations", "contents")
+# M2 (SMA-658 fix round 1): "contents" is deliberately NOT a member — the loop below would
+# `continue` past it immediately, so listing it here would be decorative. `contents: write` alone
+# is not a registry capability; see the App-token arm further down for the one shape where
+# `contents: write` DOES matter (minting a token that carries it).
+WRITE_SCOPES = ("packages", "id-token", "attestations")
 CAPABILITY_ENVIRONMENTS = ("release-images", "release-publish")
 _APP_TOKEN_ACTION = "actions/create-github-app-token"
 
@@ -1182,8 +1203,6 @@ def _holds_write_capability(job: dict, workflow_perms: object = None) -> str | N
         perms = workflow_perms
     if isinstance(perms, dict):
         for scope in WRITE_SCOPES:
-            if scope == "contents":
-                continue  # `contents: write` alone is not a registry capability.
             if perms.get(scope) == "write":
                 return f"permissions.{scope}: write"
     if isinstance(perms, str) and perms.strip() == "write-all":
@@ -1571,7 +1590,7 @@ def check_main(doc: dict, name: str) -> list[str]:
     # outside the per-job loop, which the loop's `continue` statements would otherwise skip.
     out += plan_contract_violations(jobs, name)
     out += credential_scope_violations(doc, name)
-    out += capability_violations(doc["jobs"], doc.get("permissions"), name)
+    out += capability_violations(jobs, doc.get("permissions"), name)
     return out
 
 
@@ -2784,22 +2803,76 @@ FIXTURES: list[tuple[str, str, str, str | None]] = [
     ("SMA-658 the Docker Hub token outside its environment", "main",
      _OK_IMAGES_MAIN.replace("    steps: [{run: gh api repos/o/r/git/refs}]",
                              "    steps: [{run: echo x, env: {T: '${{ secrets.DOCKERHUB_TOKEN }}'}}]"),
-     "V13"),
+     "V13: job 'tag-iam' reads DOCKERHUB_TOKEN"),
     ("SMA-658 the release-images environment on another job", "main",
      _OK_IMAGES_MAIN.replace("  tag-iam:\n    needs: [publish-images-iam]\n    environment: release-publish",
                              "  tag-iam:\n    needs: [publish-images-iam]\n    environment: release-images"),
-     "V13"),
+     "V13: job 'tag-iam' names the 'release-images' environment"),
+    # I2 (fix round 1): this row used to put the case-variant on the ALLOWED jobs
+    # (publish-images-iam/gateway, via a broad `.replace` over every "environment: release-images"
+    # occurrence), so it stayed clean with OR without `.casefold()` — it could not tell the two
+    # apart. Kept below as a false-red control (an allowed job spelled differently must NOT red);
+    # the real casefold test is the new row directly below it, which puts the variant on tag-iam —
+    # a job that must NOT hold the environment regardless of how it is spelled.
     ("SMA-658 an environment name that differs only by case", "main",
      _OK_IMAGES_MAIN.replace("    environment: release-images", "    environment: Release-Images"),
      None),
+    ("SMA-658 tag-iam names release-images with different case (V13 casefold)", "main",
+     _OK_IMAGES_MAIN.replace("  tag-iam:\n    needs: [publish-images-iam]\n    environment: release-publish",
+                             "  tag-iam:\n    needs: [publish-images-iam]\n    environment: Release-Images"),
+     "V13: job 'tag-iam' names the"),
     ("SMA-658 an environment name built from an expression", "main",
      _OK_IMAGES_MAIN.replace("    environment: release-images",
                              "    environment: ${{ github.event.inputs.env }}"),
-     "V13"),
+     "V13: job 'publish-images-iam' builds its environment: from an expression"),
     ("SMA-658 a write capability upstream of the approval", "main",
      _OK_IMAGES_MAIN.replace("  images-build-iam:\n    needs: [plan]",
                              "  images-build-iam:\n    permissions: {packages: write}\n    needs: [plan]"),
-     "V14"),
+     "V14: job 'images-build-iam' holds permissions.packages: write"),
+    # I1 (fix round 1): the eight behaviours below had no reding row and could each be deleted
+    # with the suite green. One row per behaviour, driven off the same `images-build-iam` job the
+    # existing V14 row above uses, so each row isolates exactly one arm of
+    # `_holds_write_capability`.
+    ("SMA-658 V14 attestations: write", "main",
+     _OK_IMAGES_MAIN.replace("  images-build-iam:\n    needs: [plan]",
+                             "  images-build-iam:\n    permissions: {attestations: write}\n    needs: [plan]"),
+     "V14: job 'images-build-iam' holds permissions.attestations: write"),
+    ("SMA-658 V14 id-token: write", "main",
+     _OK_IMAGES_MAIN.replace("  images-build-iam:\n    needs: [plan]",
+                             "  images-build-iam:\n    permissions: {id-token: write}\n    needs: [plan]"),
+     "V14: job 'images-build-iam' holds permissions.id-token: write"),
+    ("SMA-658 V14 permissions: write-all", "main",
+     _OK_IMAGES_MAIN.replace("  images-build-iam:\n    needs: [plan]",
+                             "  images-build-iam:\n    permissions: write-all\n    needs: [plan]"),
+     "V14: job 'images-build-iam' holds permissions: write-all"),
+    # The reviewer's own measured shape (I1): covers the `environment:` arm AND the casefold
+    # comparison in `_holds_write_capability` in one row.
+    ("SMA-658 V14 environment: arm, cased differently", "main",
+     _OK_IMAGES_MAIN.replace("  images-build-iam:\n    needs: [plan]",
+                             "  images-build-iam:\n    environment: Release-Publish\n    needs: [plan]"),
+     "V14: job 'images-build-iam' holds environment:"),
+    ("SMA-658 V14 an App token minted with contents: write", "main",
+     _OK_IMAGES_MAIN.replace(
+         "    steps: [{run: ci/images/run.sh build-oci paigasus-iam out}]",
+         "    steps: [{uses: actions/create-github-app-token@v2, with: {app-id: '1', "
+         "private-key: '2', permission-contents: write}}]"),
+     "V14: job 'images-build-iam' holds an App token with contents: write"),
+    ("SMA-658 V14 workflow-level permissions fallback (S13)", "main",
+     _OK_IMAGES_MAIN.replace("jobs:\n  release-pr:", "permissions:\n  packages: write\njobs:\n  release-pr:"),
+     "V14: job 'images-build-iam' holds permissions.packages: write"),
+    # M2's carve-out, pinned CLEAN: `contents: write` alone is not a registry capability, so it
+    # must never trip V14 on its own.
+    ("SMA-658 contents: write alone is not a V14 capability", "main",
+     _OK_IMAGES_MAIN.replace("  images-build-iam:\n    needs: [plan]",
+                             "  images-build-iam:\n    permissions: {contents: write}\n    needs: [plan]"),
+     None),
+    # I4 (fix round 1): a workflow-level env: reaches every job, UNGATED_JOBS members included,
+    # and nothing scopes it back down to one job — V13's per-job loop alone cannot see it.
+    ("SMA-658 the Docker Hub token in the workflow-level env:", "main",
+     _OK_IMAGES_MAIN.replace(
+         "      - main\njobs:\n  release-pr:",
+         "      - main\nenv:\n  T: ${{ secrets.DOCKERHUB_TOKEN }}\njobs:\n  release-pr:"),
+     "V13: the workflow-level env: reads DOCKERHUB_TOKEN"),
     ("SMA-658 a publish hidden inside a script", "main",
      _OK_IMAGES_MAIN.replace("    steps: [{run: crane push layout ghcr.io/smk1085/paigasus-iam:x}]",
                              "    steps: [{run: ci/images/run.sh publish}]"),
@@ -2873,6 +2946,11 @@ def _run_main_in_tempdir(files: dict[str, str], entry: str = "main.yml") -> tupl
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
         for rel, content in files.items():
+            # I3 (fix round 1): the sweep test below needs a real `.github/workflows/` tree, the
+            # first nested-path caller of this helper. Every earlier caller wrote flat filenames,
+            # so `parents=True, exist_ok=True` is a no-op for them (the parent is `tmp_path`
+            # itself, which already exists).
+            (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
             (tmp_path / rel).write_text(content)
         prev_cwd = Path.cwd()
         out_buf, err_buf = io.StringIO(), io.StringIO()
@@ -2887,6 +2965,36 @@ def _run_main_in_tempdir(files: dict[str, str], entry: str = "main.yml") -> tupl
         finally:
             os.chdir(prev_cwd)
     return rc, out_buf.getvalue(), err_buf.getvalue()
+
+
+def _v13_cross_workflow_sweep() -> str | None:
+    """Regression test for I3 (fix round 1): `main()`'s V13 sweep over EVERY OTHER workflow file
+    is untested by the FIXTURES table — `self_test()` calls check_main/check_called DIRECTLY and
+    never reaches `main()`'s own `.github/workflows/*.y*ml` glob, the same gap `_critical2_end_to_end`
+    closes for the local-callee walk. So deleting the whole sweep loop, or dropping only the
+    `*.yaml` half of it, leaves every existing row green.
+
+    Drives `main()` through a real two-file `.github/workflows/` tree: `release.yml` is the
+    healthy control (`_OK_MAIN`, the same yaml the "healthy control" FIXTURES row asserts is
+    clean on its own) and `other.yaml` — the `.yaml` extension is deliberate, to catch a dropped
+    `*.yaml` glob specifically — names the `release-images` environment on a job that may not
+    (`leaky`, not in `SCOPED_SECRET_JOBS`). Only the cross-file sweep can produce that finding;
+    nothing inside `check_main(release.yml, ...)` ever reads `other.yaml`.
+    """
+    other = (
+        "on:\n  push:\n    branches: [main]\n"
+        "jobs:\n  leaky:\n    runs-on: ubuntu-latest\n    environment: release-images\n"
+        "    steps: [{run: echo hi}]\n"
+    )
+    rc, out, err = _run_main_in_tempdir(
+        {".github/workflows/release.yml": _OK_MAIN, ".github/workflows/other.yaml": other},
+        entry=".github/workflows/release.yml",
+    )
+    want = "other.yaml: V13: job 'leaky' names the 'release-images' environment"
+    if rc != 1 or want not in out:
+        return (f"expected exit 1 with {want!r} in output, got exit {rc!r}: stdout={out!r} "
+                f"stderr={err!r}")
+    return None
 
 
 _PUBLISHING_CALLEE = "on:\n  workflow_call:\njobs:\n  build:\n    steps: [{run: cargo publish}]\n"
@@ -3470,6 +3578,7 @@ def self_test() -> int:
         ("v11 id-token: write on both OIDC publish jobs", _v11_id_token_write_required),
         ("v12 npm OIDC floor pinned in both workflows", _v12_npm_floor_pinned),
         ("sma-658 every new publish marker has a reding fixture", _sma658_new_publish_markers_bite),
+        ("sma-658 fix round 1, I3: V13's cross-workflow sweep", _v13_cross_workflow_sweep),
         ("f7 non-list steps: fails closed", _non_list_steps_fails_closed),
     ):
         err = fn()
@@ -3519,7 +3628,10 @@ def main(argv: list[str]) -> int:
     # V13 runs over EVERY workflow file, not only the release path: any workflow with a `main`
     # trigger could name the release-images environment and read the same secret. C6 (SMA-658):
     # glob both suffixes GitHub Actions accepts, so a future `.yaml` workflow is not invisible to
-    # this sweep.
+    # this sweep. M6 (fix round 1): `load_workflow` is FAIL-CLOSED (infra, exit 2) on anything it
+    # cannot parse as one YAML mapping with a `jobs:` mapping — deliberately, since this sweep now
+    # reads every `.github/workflows/*.y*ml` file on disk, so a malformed or non-workflow file
+    # dropped in that directory aborts the whole run rather than being silently skipped.
     workflow_paths = sorted(Path(".github/workflows").glob("*.yml")) \
         + sorted(Path(".github/workflows").glob("*.yaml"))
     for path in workflow_paths:
