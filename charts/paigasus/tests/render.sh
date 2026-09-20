@@ -22,6 +22,7 @@ FIXED=(
   --set oidc.existingSecret=paigasus-console-secret
   --set postgres.host=postgres.example.test
   --set postgres.existingSecret=paigasus-postgres-secret
+  --set zones.iam.backend.apiKeysPepperSecret=paigasus-iam-pepper
   # zones.gateway.backend.url is REQUIRED whenever the gateway zone is enabled (Task 11b): the
   # chart does not deploy the gateway backend, so an "iam-and-gateway" render fails validation
   # without this. A fixture value, not a weakening of the refusal.

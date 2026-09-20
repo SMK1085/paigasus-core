@@ -24,7 +24,7 @@ else, so a zone cannot be routable but unadvertised or advertised but unrouted:
 A disabled zone leaves no trace in any of the six — no path, no map entry, no Deployment, no
 Service. `tests/ingress.sh` and `tests/maps.sh` assert this directly.
 
-## The four refusals
+## The refusals
 
 `paigasus.validate` (`templates/_helpers.tpl`) runs first in every template and fails the render,
 with its own message, rather than letting a bad values file produce broken Kubernetes objects:
@@ -39,6 +39,14 @@ with its own message, rather than letting a bad values file produce broken Kuber
   (`ts/packages/paigasus-discovery/src/core/state.ts`); `paigasus.serviceSlugs` in
   `_helpers.tpl` must be kept equal to it by hand.
 - **A backend the chart does not deploy, with no `backend.url`.** See the next section.
+- **Every value `values.yaml` marks REQUIRED, when it is empty.** `ingress.host`,
+  `ingress.tlsSecretName`, `oidc.issuer`, `oidc.clientId`, `oidc.existingSecret`, `postgres.host`,
+  `postgres.existingSecret` and `zones.iam.backend.apiKeysPepperSecret` each fail with their own
+  named message the moment they are unset. Before SMA-513 Task 14, `paigasus.validate` refused
+  only `ingress.host`; the other seven were required by comment alone, and a default
+  `helm install` rendered a Deployment with an empty `secretKeyRef.name` for the pepper secret —
+  a manifest the Kubernetes API server refuses. This is what stops that: every REQUIRED value is
+  now refused at render time, so a values file missing one never reaches the API server at all.
 
 `tests/refusals.sh` renders each refusal case and asserts it fails with its own message, not an
 incidental template error from somewhere else — otherwise the chart could refuse by accident and
@@ -100,4 +108,6 @@ charts/paigasus/tests/render.sh
 ```
 
 `refusals.sh` needs `--set ingress.host=…` from its caller, since its own valid-render rows have
-no default host. `maps.sh`, `ingress.sh` and `render.sh` set `ingress.host` themselves.
+no default host; it holds the other seven REQUIRED values valid by default in its own `FIXED`
+array, so each refusal row can set only the one value it names to `""`. `maps.sh`, `ingress.sh`
+and `render.sh` set every REQUIRED value themselves, `ingress.host` included.

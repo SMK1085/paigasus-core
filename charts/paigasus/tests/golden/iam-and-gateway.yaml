@@ -159,7 +159,7 @@ spec:
             - name: IAM_API_KEYS__PEPPER
               valueFrom:
                 secretKeyRef:
-                  name: 
+                  name: paigasus-iam-pepper
                   key: pepper
           startupProbe:          # sized for config load + Database::connect ONLY. SMA-571 removed
             httpGet:             # the coupling to IAM_MIGRATION__LOCK_WAIT_SECS entirely.

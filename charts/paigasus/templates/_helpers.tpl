@@ -34,6 +34,27 @@ template would fire only when that template happens to render first.
 {{- fail (printf "zones.%s: \"%s\" is not a known service slug (expected one of %s). parseServiceMap would throw in BOTH consoles at first request." $id $id (join ", " $slugs)) -}}
 {{- end -}}
 {{- end -}}
+{{- if not .Values.ingress.tlsSecretName -}}
+{{- fail "ingress.tlsSecretName is required; PAIGASUS_PUBLIC_ORIGIN is validated as https and __Host-pgs_sid requires Secure, so the ingress must terminate TLS" -}}
+{{- end -}}
+{{- if not .Values.oidc.issuer -}}
+{{- fail "oidc.issuer is required" -}}
+{{- end -}}
+{{- if not .Values.oidc.clientId -}}
+{{- fail "oidc.clientId is required" -}}
+{{- end -}}
+{{- if not .Values.oidc.existingSecret -}}
+{{- fail "oidc.existingSecret is required; it must hold keys oidc-client-secret and session-redis-url" -}}
+{{- end -}}
+{{- if not .Values.postgres.host -}}
+{{- fail "postgres.host is required by the IAM backend" -}}
+{{- end -}}
+{{- if not .Values.postgres.existingSecret -}}
+{{- fail "postgres.existingSecret is required; it must hold key \"password\"" -}}
+{{- end -}}
+{{- if not .Values.zones.iam.backend.apiKeysPepperSecret -}}
+{{- fail "zones.iam.backend.apiKeysPepperSecret is required; IamConfig::validate hard-fails boot without it" -}}
+{{- end -}}
 {{- if eq (len $enabled) 0 -}}
 {{- fail "at least one zone must be enabled; a chart with no zone serves nothing" -}}
 {{- end -}}

@@ -8,7 +8,16 @@
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CHART="$(cd "$HERE/.." && pwd)"
+# Every other REQUIRED value, held valid, so paigasus.validate's per-value refusals (SMA-513
+# Task 14) do not block this script's own render assertions for the wrong reason.
 BASE=(--kube-version 1.31.0 --set ingress.host=console.example.test \
+  --set ingress.tlsSecretName=console-tls \
+  --set oidc.issuer=https://idp.example.test/realms/paigasus \
+  --set oidc.clientId=paigasus-console \
+  --set oidc.existingSecret=paigasus-console-secret \
+  --set postgres.host=postgres.example.test \
+  --set postgres.existingSecret=paigasus-postgres-secret \
+  --set zones.iam.backend.apiKeysPepperSecret=paigasus-iam-pepper \
   --set zones.gateway.backend.url=http://gw.example.test:8088 "$@")
 ec=0
 

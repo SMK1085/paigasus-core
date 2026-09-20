@@ -11,7 +11,21 @@ KUBE_VERSION="1.31.0"
 ec=0
 BASE=("$@")
 
-render() { helm template t "$CHART" --kube-version "$KUBE_VERSION" "${BASE[@]}" "$@" 2>&1; }
+# Every other REQUIRED value, held valid by default, so each expect_fail row below can set only
+# its own value to "" without being refused by a different check for the wrong reason (the same
+# trap the "unknown zone id" row above carries). ingress.host is deliberately NOT here: it stays
+# supplied by the caller via BASE, matching this script's existing calling convention.
+FIXED=(
+  --set ingress.tlsSecretName=console-tls
+  --set oidc.issuer=https://idp.example.test/realms/paigasus
+  --set oidc.clientId=paigasus-console
+  --set oidc.existingSecret=paigasus-console-secret
+  --set postgres.host=postgres.example.test
+  --set postgres.existingSecret=paigasus-postgres-secret
+  --set zones.iam.backend.apiKeysPepperSecret=paigasus-iam-pepper
+)
+
+render() { helm template t "$CHART" --kube-version "$KUBE_VERSION" "${FIXED[@]}" "${BASE[@]}" "$@" 2>&1; }
 
 expect_fail() {
   local label="$1" needle="$2"; shift 2
@@ -47,6 +61,20 @@ expect_fail "unknown zone id" "is not a known service slug" \
 expect_fail "external backend without url" "backend.url is required" \
   --set zones.gateway.enabled=true --set zones.gateway.backend.deploy=false \
   --set zones.gateway.backend.url=""
+expect_fail "ingress.tlsSecretName empty" "ingress.tlsSecretName is required" \
+  --set ingress.tlsSecretName=""
+expect_fail "oidc.issuer empty" "oidc.issuer is required" \
+  --set oidc.issuer=""
+expect_fail "oidc.clientId empty" "oidc.clientId is required" \
+  --set oidc.clientId=""
+expect_fail "oidc.existingSecret empty" "oidc.existingSecret is required" \
+  --set oidc.existingSecret=""
+expect_fail "postgres.host empty" "postgres.host is required" \
+  --set postgres.host=""
+expect_fail "postgres.existingSecret empty" "postgres.existingSecret is required" \
+  --set postgres.existingSecret=""
+expect_fail "apiKeysPepperSecret empty" "apiKeysPepperSecret is required" \
+  --set zones.iam.backend.apiKeysPepperSecret=""
 expect_render "iam only" --set zones.gateway.enabled=false
 expect_render "iam and gateway" --set zones.gateway.enabled=true \
   --set zones.gateway.backend.url=http://gw.example.test:8088
