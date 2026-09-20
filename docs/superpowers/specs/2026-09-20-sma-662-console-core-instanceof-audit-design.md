@@ -37,9 +37,10 @@ be classified by its `code`. A class thrown and caught inside one closure, or th
 two modules of one copy, may use `instanceof`. The boundary is the CLOSURE, not whether state is
 shared.
 
-D7 is stated for a class the declaring package defines. Four of the six sites below test a
-THIRD-PARTY class and two test the builtin `Error`, so the rule does not strictly govern them.
-They are judged by analogy to it, and saying so plainly is clearer than stretching the rule.
+D7 is stated for a class the declaring package defines. Only ONE of the six sites below is such a
+class — `discovery.ts:274`, on `DescriptorCacheTimeoutError` — so only that site falls squarely
+under the rule. Three test a THIRD-PARTY class and two test the builtin `Error`; those five are
+judged by analogy to it, and saying so plainly is clearer than stretching the rule.
 
 ## 2. Decisions
 
@@ -86,7 +87,10 @@ They are judged by analogy to it, and saying so plainly is clearer than stretchi
 ## 3. The audit: every `instanceof` in `src/`
 
 `src/` holds SIX `instanceof` operators. One tests a class this package defines, three test a
-third-party class, and two test the builtin `Error`. **None can cross.**
+third-party class, and two test the builtin `Error`. **No site's classification can fail across
+the copies.** Note the careful wording: one of the errors audited here — `DescriptorCacheTimeoutError`
+— DOES cross into the other copy (row 3). What stays inside one copy is the `instanceof` that
+classifies it, which is the property this audit is about.
 
 Line numbers in the table below are pre-change; post-merge they are `errors.ts:46`,
 `discovery.ts:109`, `:110`, and `:286`.
@@ -328,7 +332,7 @@ audit's headline conclusion is re-opened deliberately. Nothing else in the repos
   assertion 2, which proves the fixture is load-bearing and not accidentally a real `ConnectError`.
 
 Both mutations compile. Revision 1's four-item list is withdrawn: one entry
-("the `degraded(...)` return at `:63` replaced by a throw") reded nothing, because no proposed row
+("the `degraded(...)` return at `:63` replaced by a throw") produced no red, because no proposed row
 made `getServiceInfo` fail, and three others were absorbed by `principal.test.ts`'s existing exact
 `toEqual` assertions, so "at least one row reds" was satisfied without the new rows biting at all.
 
@@ -442,7 +446,7 @@ measurement.
 - **Blocker.** § 6's one non-duplicate row rested on `vi.resetModules()` duplicating an EXTERNAL
   package. Measured: it does not. The row is replaced by a brand-shaped fixture, which needs no
   module duplication.
-- **Blocker.** The mutation list was unverified: one entry reded nothing, and three were absorbed
+- **Blocker.** The mutation list was unverified: one entry produced no red, and three were absorbed
   by existing tests, so the check could not tell a working row from a vacuous one. Replaced with
   two mutations scoped to the new row.
 - Row 1's whole argument was upgraded. Chasing the challenge's question about which
@@ -456,7 +460,7 @@ measurement.
 - § 5 called R11 a gate on D6; it gates the per-request invariant. The provisioning-retry caveat is
   added.
 - A new § 3 block covers classification WITHOUT `instanceof` — four sites, all safe.
-- Corrections: Next is `^16.3.5`, not 16.3.4; six `instanceof` operators outside `src/`, not two;
+- Corrections: Next is `^16.3.5`, not 16.3.4; six `instanceof` operators outside `src/`, not two (this branch's own new row later made it seven, see § 3);
   `createIamClients` is at `iam-clients.ts:49`; the discovery doc block is `:95-100`; the STALE
   path returns `stale`; `single-flight.ts:304`'s `.catch` closes the `after()` question; the
   `SessionStoreUnavailable` paragraph named a `callIam` path that does not exist and is dropped;

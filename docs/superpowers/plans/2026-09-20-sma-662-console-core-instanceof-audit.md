@@ -242,8 +242,9 @@ Insert these two paragraphs between the `(ADR-0019 E8).` line and `import 'serve
 //
 // WHAT CROSSES AND WHAT DOES NOT. createConsoleRuntime builds every product fresh per call and
 // reads no globalThis. Three things are shared: the descriptor cache and its Redis client, one per
-// process (discovery.ts's globalThis symbol); the AuthRuntime, one per process, owned by
-// @paigasus/auth; and @paigasus/sdk's transport cache, one per module COPY. The IAM clients
+// process (discovery.ts's globalThis symbol); the AuthRuntime, one per ZONE per process — its
+// globalThis key carries the zone (@paigasus/auth's runtime.ts:203), so a process composing two
+// zones holds two — and @paigasus/sdk's transport cache, one per module COPY. The IAM clients
 // themselves never cross. The full audit, and the rule it applies (SMA-657 D7), are in
 // docs/superpowers/specs/2026-09-20-sma-662-console-core-instanceof-audit-design.md.
 ```
@@ -468,7 +469,11 @@ diff belongs to — do not add a fourth "formatting" commit.
 
 ```bash
 cd /Users/smaschek/dev/paigasus/paigasus-core/.claude/worktrees/sma-662
-git diff origin/main...HEAD -- ts/packages/paigasus-console-core/src/ | grep -E "^[+-]" | grep -vE "^[+-][+-]" | grep -vE "^[+-]\s*(//|\*|/\*)" | grep -vE "^[+-]\s*$"
+if git diff origin/main...HEAD -- ts/packages/paigasus-console-core/src/ | grep -E "^[+-]" | grep -vE "^[+-][+-]" | grep -vE "^[+-][[:space:]]*(//|\*|/\*)" | grep -E "^[+-][[:space:]]*[^[:space:]]"; then
+  echo "FAIL: a non-comment line changed under src/"; exit 1
+else
+  echo "OK: comment-only"
+fi
 ```
 
 Expected: **no output.** Every line added or removed under `src/` is a comment. If any code line
