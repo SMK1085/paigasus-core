@@ -39,7 +39,7 @@ spec:
   type: ClusterIP
   selector:
     app.kubernetes.io/name: iam-backend
-    app.kubernetes.io/instance: paigasus
+    app.kubernetes.io/instance: "paigasus"
   ports:
     - name: http
       port: 8080
@@ -57,7 +57,7 @@ spec:
   type: ClusterIP
   selector:
     app.kubernetes.io/name: iam-console
-    app.kubernetes.io/instance: paigasus
+    app.kubernetes.io/instance: "paigasus"
   ports:
     - name: http
       port: 3000
@@ -85,12 +85,22 @@ spec:
   selector:
     matchLabels:
       app.kubernetes.io/name: iam-backend
-      app.kubernetes.io/instance: paigasus
+      app.kubernetes.io/instance: "paigasus"
   template:
     metadata:
       labels:
         app.kubernetes.io/name: iam-backend
-        app.kubernetes.io/instance: paigasus
+        app.kubernetes.io/instance: "paigasus"
+      annotations:
+        # The chart does not own these Secrets and cannot observe their contents, so rotating one
+        # IN PLACE changes nothing in the pod template and the running pod keeps the old value.
+        # Two concrete consequences for IAM, which runs a single replica: a revoked database DSN
+        # survives until someone restarts that replica by hand, and a rotated API-key pepper does
+        # not revoke keys consistently, because an old pod keeps accepting what a new pod refuses.
+        # These are the operator's explicit signals — bump the matching version after a rotation
+        # and the pod rolls. Same shape as the console Deployment's checksum/secret.
+        checksum/postgres-secret: e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+        checksum/pepper-secret: e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
     spec:
       securityContext:
         runAsUser: 65532
@@ -132,7 +142,7 @@ spec:
             - name: IAM_DATABASE_URL
               valueFrom:
                 secretKeyRef:
-                  name: paigasus-postgres-secret
+                  name: "paigasus-postgres-secret"
                   key: database-url
             # authn.issuers has no default and is a hard boot error if empty (IamConfig::load).
             # The console's own OIDC client id is the audience IAM must accept: it is the client
@@ -144,7 +154,7 @@ spec:
             - name: IAM_API_KEYS__PEPPER
               valueFrom:
                 secretKeyRef:
-                  name: paigasus-iam-pepper
+                  name: "paigasus-iam-pepper"
                   key: pepper
           startupProbe:          # sized for config load + Database::connect ONLY. SMA-571 removed
             httpGet:             # the coupling to IAM_MIGRATION__LOCK_WAIT_SECS entirely.
@@ -174,12 +184,12 @@ spec:
   selector:
     matchLabels:
       app.kubernetes.io/name: iam-console
-      app.kubernetes.io/instance: paigasus
+      app.kubernetes.io/instance: "paigasus"
   template:
     metadata:
       labels:
         app.kubernetes.io/name: iam-console
-        app.kubernetes.io/instance: paigasus
+        app.kubernetes.io/instance: "paigasus"
       annotations:
         # All three checksums, not two. With envFrom and no checksum on the SECRET, rotating
         # PAIGASUS_SESSION_REDIS_URL or the OIDC client secret restarts nothing and every pod
@@ -222,12 +232,12 @@ spec:
             - name: PAIGASUS_OIDC_CLIENT_SECRET
               valueFrom:
                 secretKeyRef:
-                  name: paigasus-console-secret
+                  name: "paigasus-console-secret"
                   key: oidc-client-secret
             - name: PAIGASUS_SESSION_REDIS_URL
               valueFrom:
                 secretKeyRef:
-                  name: paigasus-console-secret
+                  name: "paigasus-console-secret"
                   key: session-redis-url
           envFrom:
             - configMapRef:

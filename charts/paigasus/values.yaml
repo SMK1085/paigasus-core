@@ -34,6 +34,10 @@ zones:
       # folded into postgres.existingSecret or oidc.existingSecret because it rotates on its own
       # schedule and belongs to neither of those two concerns.
       apiKeysPepperSecret: ""
+      # NOT required. Bump after rotating apiKeysPepperSecret IN PLACE, so the IAM pod
+      # rolls. Without it a stale pod keeps the old pepper and keeps accepting API keys
+      # that a rotated pod rejects, so rotation does not revoke them consistently.
+      apiKeysSecretVersion: ""
   gateway:
     enabled: false
     basePath: /gateway
@@ -84,6 +88,10 @@ oidc:
 redis: {}                # the URL lives in oidc.existingSecret, since it may carry a password
 
 postgres:
+  # NOT required. Bump after rotating existingSecret IN PLACE, so the IAM pod rolls. The
+  # chart cannot observe an external Secret's contents, so without this a revoked DSN
+  # survives in the running pod until someone restarts the single replica by hand.
+  secretVersion: ""
   existingSecret: ""     # REQUIRED. Must hold key "database-url", the complete Postgres DSN.
                          # IamConfig has no decomposed host/user/db config of its own — figment
                          # reads ONE opaque DSN (IAM_DATABASE_URL) — and the chart never composes

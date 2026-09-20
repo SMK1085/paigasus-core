@@ -13,12 +13,12 @@ spec:
   selector:
     matchLabels:
       app.kubernetes.io/name: {{ $id }}-console
-      app.kubernetes.io/instance: {{ $root.Release.Name }}
+      app.kubernetes.io/instance: {{ $root.Release.Name | quote }}
   template:
     metadata:
       labels:
         app.kubernetes.io/name: {{ $id }}-console
-        app.kubernetes.io/instance: {{ $root.Release.Name }}
+        app.kubernetes.io/instance: {{ $root.Release.Name | quote }}
       annotations:
         # All three checksums, not two. With envFrom and no checksum on the SECRET, rotating
         # PAIGASUS_SESSION_REDIS_URL or the OIDC client secret restarts nothing and every pod
@@ -61,12 +61,12 @@ spec:
             - name: PAIGASUS_OIDC_CLIENT_SECRET
               valueFrom:
                 secretKeyRef:
-                  name: {{ $root.Values.oidc.existingSecret }}
+                  name: {{ $root.Values.oidc.existingSecret | quote }}
                   key: oidc-client-secret
             - name: PAIGASUS_SESSION_REDIS_URL
               valueFrom:
                 secretKeyRef:
-                  name: {{ $root.Values.oidc.existingSecret }}
+                  name: {{ $root.Values.oidc.existingSecret | quote }}
                   key: session-redis-url
           envFrom:
             - configMapRef:

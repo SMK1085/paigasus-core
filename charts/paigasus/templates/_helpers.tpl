@@ -90,6 +90,29 @@ template would fire only when that template happens to render first.
 {{- if and (has "gateway" $enabled) (not (has "iam" $enabled)) -}}
 {{- fail "the gateway zone requires the iam zone: gateway-console's PAIGASUS_SERVICES schema refuses to construct without an \"iam\" entry, so its pods would crash-loop" -}}
 {{- end -}}
+{{/*
+Each enabled zone's basePath must be a legal, distinct path prefix.
+
+An empty path, or one without a leading `/`, renders an Ingress the API server rejects. A DUPLICATE
+path is worse and quieter: two rules claim the same prefix, one console becomes unreachable, and
+`PAIGASUS_ZONES` carries two zones on one path — which `zoneMapFromJson` refuses at first request,
+in BOTH consoles. The TypeScript already rejects it; the chart should never render it.
+*/}}
+{{- $seenPaths := dict -}}
+{{- range $id, $z := .Values.zones -}}
+{{- if $z.enabled -}}
+{{- if not (hasPrefix "/" ($z.basePath | toString)) -}}
+{{- fail (printf "zones.%s.basePath is %q: it must be a path beginning with \"/\", such as \"/%s\"" $id $z.basePath $id) -}}
+{{- end -}}
+{{- if hasSuffix "/" ($z.basePath | toString) -}}
+{{- fail (printf "zones.%s.basePath is %q: it must not end in \"/\" — canonicalBasePath in @paigasus/next-config refuses a trailing slash" $id $z.basePath) -}}
+{{- end -}}
+{{- if hasKey $seenPaths ($z.basePath | toString) -}}
+{{- fail (printf "zones.%s.basePath %q is already used by zone %q: two ingress rules would claim one prefix, one console would be unreachable, and zoneMapFromJson refuses a duplicate base path in both consoles" $id $z.basePath (index $seenPaths ($z.basePath | toString))) -}}
+{{- end -}}
+{{- $_ := set $seenPaths ($z.basePath | toString) $id -}}
+{{- end -}}
+{{- end -}}
 {{- range $id, $z := .Values.zones -}}
 {{- if and $z.enabled (not $z.backend.deploy) (not $z.backend.url) -}}
 {{- fail (printf "zones.%s.backend.url is required when zones.%s.backend.deploy is false" $id $id) -}}

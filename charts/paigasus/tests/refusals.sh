@@ -90,6 +90,17 @@ expect_fail "iam backend.deploy false" "an external IAM is not supported yet" \
 expect_fail "gateway backend.deploy true" "this chart cannot run the gateway backend" \
   --set zones.gateway.enabled=true --set zones.gateway.backend.deploy=true \
   --set zones.gateway.backend.url=http://gw.example.test:8088
+# A basePath that is empty, unrooted, trailing-slashed or DUPLICATED renders an Ingress the API
+# server rejects — or worse, two rules claiming one prefix, which makes a console unreachable and
+# makes zoneMapFromJson throw in BOTH consoles at first request.
+expect_fail "basePath without leading slash" "it must be a path beginning with" \
+  --set zones.iam.basePath=iam
+expect_fail "basePath with trailing slash" "it must not end in" \
+  --set zones.iam.basePath=/iam/
+expect_fail "duplicate basePath" "is already used by zone" \
+  --set zones.gateway.enabled=true --set zones.gateway.backend.url=http://gw.example.test:8088 \
+  --set zones.gateway.basePath=/iam
+
 expect_render "iam only" --set zones.gateway.enabled=false
 expect_render "iam and gateway" --set zones.gateway.enabled=true \
   --set zones.gateway.backend.url=http://gw.example.test:8088
