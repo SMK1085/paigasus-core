@@ -39,7 +39,28 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
 - Significant choices get a Notion ADR before code; conventions live in the Notion
   Development Guidelines (both linked from CONTRIBUTING.md).
 
+## Project memory map
+
+This file holds the repo-wide rules. Workspace detail lives in a `CLAUDE.md` next to
+the code, which Claude Code loads only when it reads a file in that directory.
+
+| File | Holds |
+|---|---|
+| `rs/CLAUDE.md` | Cargo, the lockfile, nextest, container images |
+| `ts/CLAUDE.md` | Next, vitest, Tailwind, Playwright, the console zones |
+| `ci/CLAUDE.md` | the affected graph, `repo:*` gate registration, actionlint |
+| `.github/CLAUDE.md` | release-plz, wheels, publishing, workflow guards |
+| `contracts/CLAUDE.md` | codegen drift and the FFI bindings |
+
+Add a new rule to the file that owns the directory it applies to. Keep this root file
+small: it is loaded into every session, and the nested files are not.
+
+Deeper detail for a CI gate lives in `ci/<gate>/README.md`. Read that before you change
+a gate. Do not copy it here.
+
 ## Gotchas
+
+### Moon and proto
 
 - Moon is 2.5.3 and proto is 0.61.1 (SMA-595): `vcs.client` (not `manager`), `codeowners.sync`
   (not `syncOnRun`), Python/uv toolchains keyed `unstable_python` + a separate `unstable_uv`.
@@ -49,7 +70,10 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   `proto::tool::minimum_version_requirement` until the local proto BINARY moves. `proto upgrade`
   reports the target version and then no-ops inside an agent session; upgrade it from a normal
   shell, or set `PROTO_HOME` to an isolated root and `proto install` into it.
-- `proto` prints **NDJSON on stdout** when it detects an agent environment (`AI_AGENT`,
+- **Standing rule: Export `PROTO_REPORTER=text` at the top of any gate script that captures
+  `proto` output. A proto-SHIMMED tool is not exempt (SMA-609). Only `repo:release-parity` was
+  ever affected, and the `unset AI_AGENT …` workaround is obsolete for these gates.**
+  `proto` prints **NDJSON on stdout** when it detects an agent environment (`AI_AGENT`,
   `CLAUDECODE`, `CLAUDE_CODE_ENTRYPOINT`), including a `Detected an AI agent environment…`
   preamble line. That breaks any captured `$(proto <subcommand> …)`: the variable becomes a JSON
   blob, not a path, and the `||` fallbacks never fire because proto **exits 0** — it succeeded, it
@@ -85,35 +109,46 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   with the harness's own `infrastructure error (rc=2)` classifier in the message — the module is
   sourced by `run.sh`, so an exit fires during the source and `run.sh` never reaches its own abort
   lines. That classifier is what keeps such a failure greppable.
-- `repo:affected-smoke` has aborted **twice**, both times under a concurrent `moon ci` on 2.5.3,
-  at ~2.4s against its usual 6–8s: once on SMA-595, which captured no output, and once on
-  SMA-592, which captured its output. The two are matched on SYMPTOM SHAPE alone — a sub-3s abort
-  under a concurrent `moon ci` — so nothing proves they are one and the same failure. Neither
-  session reproduced it: four attempts on SMA-595 (warm, cold `.moon/cache`, cold `MOON_HOME`, and
-  cold `rs/target` with cargo compiling alongside), and three more on SMA-592. An inherited
-  `MOON_BASE` was tested and ruled out (the gate passes with it set). The gate is otherwise green
-  everywhere. If you see a sub-3s `affected-smoke` failure, capture the full task output before
-  re-running, because a re-run passes and destroys the evidence.
-  (SMA-597 measured the mechanism: it is OVERWRITE, not discard. A passing re-run rewrites
-  `stdout.log`, truncates `stderr.log`, rewrites `lastRun.json` and flips the `ciReport.json` row
-  to `passed`. See the diagnosis procedure entry below.)
-  **The mechanism below is measured on the ONE session that captured output (SMA-592), not on
-  both.** In that occurrence the failure is an infrastructure ABORT, not a red verdict: the gate's
-  own nested `moon query projects` dies with `Error: proto-shim:
-  Failed to execute proto for the shimmed command: Permission denied (os error 13)`, writes
-  nothing to stdout, and the reader then raises `JSONDecodeError: Expecting value: line 1 column
-  1`, so `run.sh` prints `FATAL [contracts->proto]: moon query failed` and
-  `== affected-graph guard ABORTED: infrastructure error (rc=2) ==`. So the proximate cause THERE
-  is the **proto shim failing to exec `proto` with EACCES** while a `moon ci` runs concurrently —
-  why the shim is briefly non-executable is still unknown, and SMA-595's four hypotheses above
-  stay ruled out.
-  Two consequences. The gate FAILS SAFE — rc=2 is distinct from rc=1, and it never reports a false
-  green. And the `proto-shim` line is the tell, so grep the captured output for it: if that line
-  is there, the failure is not about the affected graph at all, and re-running the task alone
-  (`moon run repo:affected-smoke --force`) passes in the usual 6s. If it is absent, this entry
-  does not explain your failure — diagnose it on its own terms.
-  The NDJSON entry above is the same root tool, a different symptom; both mean a `moon`/`proto`
-  call inside a gate is the fragile part of an agent-driven local run, never in CI.
+- Bash tool PATH lacks the proto-managed CLIs; prefix commands with
+  `export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"` so moon/uv/buf/nextest resolve to
+  the repo-pinned versions (shims first).
+- `moon query projects --json` **errors** on Moon 2.5.3 too (`unexpected argument '--json' found`,
+  re-checked on the 2.5.3 bump, SMA-595) —
+  bare `moon query projects` already emits JSON. **Measure its exit status UNPIPED (2):** `jq`
+  returns 0 on empty input, so `moon query projects --json | jq …` reports 0 unless `pipefail`
+  is set, and the failure reads as "the reader found nothing" rather than "the flag is invalid".
+  That is not hypothetical — it cost a cycle on this very branch, where the first measurement
+  read `head`'s status through a pipe and recorded exit 0.
+- `moon query tasks --affected` emits each selected task's `deps[]`, and every dep entry carries a
+  `"target"` key of its own. So `grep -o '"target": "[^"]*"'` over the raw JSON counts SCHEDULED
+  upstreams as if they were SELECTIONS — it reported 15 tasks for a `.prototools` edit where the
+  real answer is 12. Parse the JSON and take one target per `tasks[project][task]`. This matters
+  because scheduled-vs-selected is the exact distinction every affectedness measurement in this
+  repo turns on; an extraction that conflates the two cannot measure it. It inflated this branch's
+  own spec table before the numbers were re-derived.
+
+### Before you push: the full gate graph
+
+- Per-project Moon tasks (`<proj>:build/test/lint/fmt`) do NOT run the repo-level gates
+  (e.g. `:deny`, `:osv`, `:machete`, `:affected-smoke`, codegen-drift, CODEOWNERS). Before pushing
+  new crates/deps/proto, run the full graph like CI does. The command between the markers below is
+  gated against `ci.yml`'s `T=(…)` array by `repo:affected-smoke` — keep the two identical, and do
+  not remove **or quote** the markers: a second copy of either one anywhere in this file, even
+  inside backticks in prose, makes the count 2 and reds the gate (SMA-541):
+  <!-- ci-targets:begin -->
+  `moon ci :build :test :lint :fmt :deny :osv :machete :actionlint :typecheck :breaking
+  :affected-smoke :parity-corpus-drift :next-env-drift :wasm-getrandom-free
+  :redis-connect-single-site :iam-docker-policy-single-site :error-code-single-site
+  :http-extractor-envelope :input-liveness :promtool :observability-drift
+  :nats-permissions :release-parity :release-parity-py :release-parity-ts
+  :publish-metadata :version-lockstep :workflow-credentials :pyo3-stub-drift :ruff-ci
+  :next-public-free :test-e2e
+  --base origin/main
+  --include-relations`
+  <!-- ci-targets:end -->
+
+### Diagnosing an unattributed `moon ci` failure
+
 - `paigasus-kernel-ts:build`/`:test` (and a task that depends on it) can fail `moon ci` in GitHub
   Actions with a `cargo metadata` error that names a `.napi-stage-<random>` path under
   `rs/crates/bindings/`. napi's build tooling makes a temporary staging directory there, and
@@ -125,7 +160,7 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   (`paigasus-service-info-rs:{lint,test}`, `paigasus-kernel-ts:test`, `paigasus-kernel-py:test`),
   each time with a `.napi-stage-<random>` path in the error. Treat this as a common failure on this
   repo, not a rare one, and confirm it by the exact error text before assuming a real regression.
-- **Diagnosing an unattributed `moon ci` failure.** The procedure below is MEASURED on moon 2.5.3
+- The procedure below is MEASURED on moon 2.5.3
   (SMA-597); re-take it on a bump. It is for **local** runs — in CI see the note at the end.
   <!-- moon-diagnosis:begin -->
   **Step 0 — capture before you re-run anything.** A re-run overwrites every artifact holding the
@@ -171,7 +206,9 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   cache-hit task's logs may be from an older commit entirely. Use the `moon-diagnostics` artifact
   that `ci.yml` uploads on failure.
   <!-- moon-diagnosis:end -->
-- `cargo nextest` exits non-zero on a workspace with **no tests** — use `--no-tests=pass`.
+
+### Repo conventions and cross-cutting traps
+
 - `.github/CODEOWNERS` is Moon-generated — don't hand-edit.
 - `vcs.hooks` is intentionally empty; lefthook will own `.git/hooks` (SMA-371).
 - A fresh `git worktree` starts with **no installed deps** (empty `ts/node_modules`, no
@@ -193,988 +230,18 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   because it also touched `.moon/**`. The rule is language-neutral: it bit a `.rs` file and a
   `.ts` file the same way. An underscore/hyphen suffix (`prn_canonical`, `prn-fields`,
   `prn-tenancy`) is fine.
-- Per-project Moon tasks (`<proj>:build/test/lint/fmt`) do NOT run the repo-level gates
-  (e.g. `:deny`, `:osv`, `:machete`, `:affected-smoke`, codegen-drift, CODEOWNERS). Before pushing
-  new crates/deps/proto, run the full graph like CI does. The command between the markers below is
-  gated against `ci.yml`'s `T=(…)` array by `repo:affected-smoke` — keep the two identical, and do
-  not remove **or quote** the markers: a second copy of either one anywhere in this file, even
-  inside backticks in prose, makes the count 2 and reds the gate (SMA-541):
-  <!-- ci-targets:begin -->
-  `moon ci :build :test :lint :fmt :deny :osv :machete :actionlint :typecheck :breaking
-  :affected-smoke :parity-corpus-drift :next-env-drift :wasm-getrandom-free
-  :redis-connect-single-site :iam-docker-policy-single-site :error-code-single-site
-  :http-extractor-envelope :input-liveness :promtool :observability-drift
-  :nats-permissions :release-parity :release-parity-py :release-parity-ts
-  :publish-metadata :version-lockstep :workflow-credentials :pyo3-stub-drift :ruff-ci
-  :next-public-free :test-e2e
-  --base origin/main
-  --include-relations`
-  <!-- ci-targets:end -->
-- A new `repo:*` gate reds `:affected-smoke` until it is in **both** `ci.yml`'s `T=(…)` array and
-  the marker-delimited command above — `ci/affected-graph/ci_targets.py` asserts the two agree, and
-  that every `T` entry still resolves to a CI-eligible task. That last half matters because
-  `moon ci` exits **0** on a target that resolves to nothing (even with real targets around it), so
-  a typo is otherwise a silent no-op on every PR. A gate that must stay out of `T` needs a
-  `T_EXEMPT` entry with a reason — `runInCI: false` is NOT a general escape, since Moon then drops
-  the task from `moon run` under `CI=true` too (see the comments in `ts/moon.yml`). `T` must also
-  stay a single-line bash array (SMA-541).
-- A `repo:*` task's `inputs` are now asserted **live**: `repo:input-liveness`
-  (`ci/affected-graph/task_inputs.py`) fails if a declared glob matches zero tracked files or a
-  declared file is untracked, so moving a directory a gate keys on reds CI instead of silently
-  switching that gate off. It also asserts its OWN `inputs: ['**/*']` is unchanged — narrowing it
-  for cost would make it stop noticing exactly the renames it exists to catch. A genuinely dead
-  input needs an `ALLOW_DEAD_INPUT` entry with a reason (SMA-553).
-- A new Rust crate reds `:affected-smoke` until it's added to the `lockfile->all-lint` expected set
-  in `ci/affected-graph/run.sh` — that case lists **every** crate, so **every** new crate changes it
-  (SMA-534) — and, if it `dependsOn` `paigasus-kernel-rs`, to the `kernel->bindings` set as well
-  (strict-equality guard, SMA-409). The parity gate's A4 needs no update: a new crate inherits
-  `lint`'s workspace inputs from `.moon/tasks/rust.yml`. That case now also carries three non-lint
-  rows — `paigasus-kernel-ts:{build,test}` and `paigasus-kernel-py:test`, the tasks that link the
-  cdylibs and compile `wasm32` (SMA-546) — so keep them when re-baselining; a new Rust crate does
-  not change them. New workspace deps may need
-  `rs/deny.toml` `[licenses] exceptions` or a dev-only
-  `[advisories] ignore` (Rust); an npm/pip advisory needs a version bump — a pnpm-workspace
-  `overrides:` selector or `uv lock --upgrade-package` — or a justified `osv-scanner.toml`
-  waiver; a dep consumed only by a later commit needs a temporary
-  `[package.metadata.cargo-machete] ignored` allowlist (prune once consumed).
-- Moon 2.5.3's Rust toolchain resolves `path = "…"` Cargo deps into the project graph **automatically**
-  (`moon query projects` labels them `source=implicit`), but does **not** resolve `workspace = true`
-  inheritance. So a `{ workspace = true }` in-tree dep — the repo's default form — **must** be
-  hand-declared in `dependsOn`, while a `path` dep needs nothing. This is why the drift was scattered
-  rather than systematic, and it is the opposite of the "Cargo path deps are NOT auto-synced" claim
-  that SMA-389 recorded and SMA-524 disproved. Either way the project edge alone is **not enough**:
-  `dependsOn` is what `moon query projects --affected` follows, and a task-level `^:build` is what
-  actually schedules the upstream's build under `moon ci --include-relations` — neither implies the
-  other. `repo:affected-smoke` now asserts both generically for every crate
-  (`ci/affected-graph/cargo_moon_parity.py`), so a new in-tree dep that forgets either one reds CI
-  instead of silently under-building (SMA-524).
-  Neither is enough on its own either: task `inputs` are the **only** thing that confers
-  affectedness in Moon 2.5.3. `dependsOn` and `^:build` schedule an upstream's build but never
-  **select** a downstream — a dependent runs only if independently affected. `--include-relations`
-  is very nearly, but no longer entirely, inert: re-measured at the full 27-target shape on 2.5.3
-  (SMA-595) it selects exactly ONE task the same command without it does not,
-  `paigasus-kernel-py:build` — 44 RunTasks against 43, stable across repeated runs. On 2.3.2 the
-  two sets were byte-identical (SMA-528). One added `build` is NOT a dependent closure, so the rule
-  above still holds; do not read the flag as a working cascade. **Re-run that A/B on the next moon
-  bump** — the delta moved once and can move again. Every Rust crate therefore
-  declares its transitive upstream sources in `fileGroups.upstreams`, consumed by build/test/lint via
-  `@group(upstreams)` in `.moon/tasks/rust.yml`. Omitting the group is a hard graph-load error
-  (`project::unknown_file_group`) for every moon command; mis-declaring it reds
-  `repo:affected-smoke`'s A6 — and **nothing else can**, because a crate's own `moon.yml` is not an
-  input to its tasks, so a wrong group otherwise serves a cached PASS. `^:build` has a second job
-  here: it orders `contracts:generate` before a downstream that keys on
-  `paigasus-proto/src/generated/**`, so removing it as "vestigial" would make those cache keys
-  nondeterministic.
-- Bash tool PATH lacks the proto-managed CLIs; prefix commands with
-  `export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"` so moon/uv/buf/nextest resolve to
-  the repo-pinned versions (shims first).
-- `paigasus-iam`'s Docker-backed suites get their retry budget and container-concurrency cap from
-  `rs/.config/nextest.toml` (`profile.default`), so **Moon, `moon run …:test`, and a bare
-  `cargo nextest` all pick it up** — but `cargo test` does NOT, since nextest config is
-  nextest-only. Don't add `--retries` to a Moon task or a doc: that recreates the
-  documented-vs-executed split SMA-521 closed. A test that fails every attempt still reds; one
-  that passes on a retry is reported FLAKY. The JUnit report itself is NOT on `profile.default` —
-  nextest resolves a profile's report path relative to the shared workspace `target/`, so `moon
-  ci`'s 15+ concurrent nextest runs would clobber a report left on `default`. It lives on a
-  dedicated `[profile.iam]` instead, selected only by `paigasus-iam-rs:test`'s `args: ['--profile',
-  'iam']` — CI uploads it as the `nextest-junit` artifact, but a bare `cargo nextest run -p
-  paigasus-iam` writes no report at all.
-- `paigasus-iam`'s **Docker-backed** suites (65 of its 69 integration binaries) skip when the
-  daemon is unreachable, and that skip is deliberately quiet — nextest discards a passing test's
-  stderr and Moon discards a passing task's output, so no message can surface there. What makes
-  it visible is `tests/docker_preflight.rs`, a canary that FAILS when Docker is unreachable: a
-  Docker-less run yields exactly one red instead of 64 silent passes (SMA-538). The policy itself
-  lives once, in `tests/support/docker.rs`, and `repo:iam-docker-policy-single-site` fails if a
-  new suite hand-rolls its own copy. Two env vars, both parsing `1`/`true`/`yes` (anything else,
-  including `0`, is off — unlike `CI`, which is presence-based):
-  `PAIGASUS_REQUIRE_DOCKER=1` turns every suite's skip into a panic, which is what a FILTERED run
-  (`--test relay_pg`, `-E 'test(foo)'`) needs, since the canary is not in that filter.
-  `PAIGASUS_SKIP_DOCKER=1` restores skipping everywhere including the canary — it is a
-  per-invocation escape hatch for a Docker Hub rate limit or a daemon restart, **not** a
-  shell-profile setting, and a `moon run` that greened under it leaves a cached PASS that replays
-  after Docker returns, so follow it with `moon run … --force`. `CI` outranks both, so no
-  workflow-file env var can green a CI run that tested nothing. A container that fails with a
-  REACHABLE daemon is a hard failure by default — including `keycloak_e2e`'s 240s startup
-  timeout, which used to be a fast local skip — though `PAIGASUS_SKIP_DOCKER=1` still downgrades
-  it to a skip, since that hatch is checked before any classification happens. A stray `CI=false` still counts as "CI present" (the
-  check is presence-based, not value-based) — clear it with `env -u CI cargo nextest run -p
-  paigasus-iam`.
-- Broad `inputs: ['**/*']` Moon tasks (e.g. `repo:actionlint`) stay cheap only because
-  `.moon/workspace.yml`'s `hasher.ignorePatterns` filters gitignored trees out of the hash walk.
-- Adding a **new error-code emission site** in Rust reds `repo:error-code-single-site` until the file
-  is added to `ci/error-registry/check.py`'s `MANIFEST` — as `emits` (which also requires a
-  membership test asserting every code it emits resolves via `ErrorReason::from_wire_reason`),
-  `asserts`, or `excluded` with a stated reason. The gate matches the registry's **declared**
-  vocabulary, so it cannot see a code you invented and never added to
-  `contracts/proto/paigasus/common/v1/error.proto`; adding the code there is what makes it
-  resolvable on any consumer. Code **removal** needs no gate — both service crates carry
-  `test: deps: ['^:build']`, so a contracts change already runs their membership tests.
-  (Until SMA-528 this was aspirational: `^:build` schedules an upstream's build, it does not make a
-  crate affected. What makes it true is `@group(upstreams)` — both service crates' `test` now key on
-  `paigasus-proto`'s sources, so a contracts change that regenerates them selects the test.)
-- Workflow trigger filters are gated by `repo:actionlint`. Write `branches:`, `paths:` **and their
-  `-ignore` variants** as **block sequences**, never the inline `branches: [main]` form — the
-  gate's extractor does not parse inline flow and fails all four keys loudly rather than skipping
-  them in silence. Every wildcard-free
-  `branches:` entry must resolve as `refs/remotes/origin/<name>`; a branch that does not exist yet,
-  or any entry carrying a glob character (`*`, `?`, `+`, `[]` — `+` included, since GitHub reads it
-  as a quantifier), needs a justified `BRANCH_SKIP` entry in `ci/actionlint/run.sh`. A typo'd
-  branch name otherwise disables a workflow silently and permanently (SMA-540).
-- Container images (SMA-500) live behind
-  `ci/images/run.sh {build,smoke,all,build-oci,load-oci,rehearse}` and
-  `.github/workflows/images.yml`, **not** Moon — a `repo:*` task would have to join `ci.yml`'s
-  `T=(…)` array (a `--release` build on every affected PR) or become a `T_EXEMPT` entry. The
-  workflow is **not a required check**, so a broken image build reds `main`, not the PR. Its
-  `pull_request` trigger already covers `rs/Dockerfile`, `rs/Cargo.{lock,toml}`,
-  `rs/rust-toolchain.toml`, `rs/.dockerignore`, `ci/images/**`, the workflow itself, `.prototools`,
-  `.proto/plugins/crane.toml` and `.proto/plugins/syft.toml`, so a PR touching any of those runs
-  it automatically — no manual step needed there.
-  `workflow_dispatch` it instead for a PR touching `rs/**` but **none** of those filtered
-  inputs (a plain service code change, say) — that's the one case the narrower `pull_request`
-  filter misses, and it can still break an image build. (`gh workflow run images.yml --ref
-  <branch>` 404s until `images.yml` itself is on `main`.)
-- The runtime base is a `chisel cut` of Ubuntu 24.04 into `FROM scratch`. Four traps, all
-  measured: `libgcc-s1_libs` is REQUIRED (Rust panic unwinding links `libgcc_s.so.1`) and its
-  absence fails at container START, not build; `ca-certificates_data` is the right variant
-  (`-with-certs` adds ~120 PEMs nothing reads); there is **no `/etc/passwd`**, so `USER` must be
-  numeric; and `chisel cut --root DIR` does not create `DIR`. `/etc/nsswitch.conf` is also absent
-  and that is FINE — glibc falls back to a compiled-in `files dns` default and the NSS modules
-  ship in `libc6_libs`. The smoke suite pins this by reaching Postgres at a CONTAINER
-  HOSTNAME rather than an IP literal; public-name resolution was verified once by hand during
-  design and is NOT covered continuously.
-- `FROM rust:X.Y.Z` does **not** pin the compiler: `rust-toolchain.toml` is inside the build
-  context and rustup honours it over the image, so a channel bump silently changes the compiler
-  behind a pinned-looking `FROM`. `rs/Dockerfile` sets `RUSTUP_TOOLCHAIN` and
-  `ci/images/run.sh` asserts the two agree. The related invariant — builder glibc ≤ runtime
-  glibc (bookworm 2.36 ≤ noble 2.39) — is also asserted there; inverting it fails at container
-  start with `GLIBC_2.4x not found`.
-- Exec-form `ENTRYPOINT`/`HEALTHCHECK` do **not** expand `ARG`/`ENV`, which is why one
-  parameterized `rs/Dockerfile` installs both binaries to the fixed path
-  `/usr/local/bin/paigasus-service`. Service identity comes from `paigasus_logging::init`, not
-  `argv[0]`.
-- This repo now has **four** CA-bundle config knobs and they do NOT share semantics. `authn.extra_ca_bundle_path`
-  and `upstream.openai.extra_ca_bundle_path` (SMA-558) **ADD** to the trust store — reqwest builds one
-  `RootCertStore` by unioning `add_root_certificate` calls with the webpki roots and the platform store, so
-  the workspace pins BOTH `rustls-tls` and `rustls-tls-native-roots` (dropping the former is not a
-  simplification: reqwest accepts an EMPTY platform store silently, and webpki is the floor that stops a bad
-  mount becoming a per-request failure). `outbox.publisher.root_ca_bundle` and the gateway's
-  `iam.tls.ca_cert_path` **REPLACE** it. The `extra_` prefix is the marker — a fifth knob must pick a side
-  and say which in its doc. Anything in an added bundle becomes an **unconstrained** anchor (no `cA` check),
-  so it must contain roots only; a self-signed LEAF works too (put its own cert in the bundle) since rustls
-  applies no `cA` check to a trust anchor.
-- `repo:actionlint` and `repo:affected-smoke` now **guard each other**, and neither can guard
-  itself (SMA-542). `ci/actionlint/run.sh`'s check 8 asserts `:affected-smoke` is still in
-  `ci.yml`'s `T=(…)` array, that no `moon` line discards its exit status (a `||`/`&&`/`;`/`|`
-  tail), and that no step's `continue-on-error:` value suppresses it (anything but the literal
-  `false`) — escape-hatched per line via `COE_SKIP`, keyed by BOTH the line number and the line's
-  own text, so a shifted entry stops matching instead of silently absorbing a different occurrence
-  that lands on the vacated line. In return, `ci_targets.py`'s `ACTIONLINT_SH_CALL_SITES` pins
-  `run_self_tests` and `selftest_mutation_battery` as **whole lines** in `run.sh` (a substring
-  match would survive deleting the call, since the name is a prefix of its own definition). That
-  pin only works because `repo:affected-smoke` lists `ci/actionlint/**/*` in its `inputs` — remove
-  that and the pin stays green on exactly the PR that breaks it. Adding a seventeenth-and-later
-  `*_self_test` table means bumping `SELF_TEST_COUNT` (currently 16 — SMA-579 added the eleventh,
-  `release_guard_self_test` at check 10, SMA-601 the twelfth, `cargo_lock_step_self_test` at
-  check 8f, SMA-603 the thirteenth, `release_plan_self_test` at check 11, SMA-597 the
-  fourteenth, `doc_diagnosis_self_test` at check 12, and SMA-647 the fifteenth,
-  `early_exit_reader_self_test` at check 13, and SMA-612 the sixteenth,
-  `pipe_capacity_self_test` (the full-gate preflight)): the gate asserts
-  invocations AND definitions. The cycle's
-  second half is now closed too (SMA-542 residual closure): check 8c
-  in `ci/actionlint/run.sh` pins `ci/affected-graph/run.sh`'s own two call sites into
-  `ci_targets.py`, mirroring `ci_targets.py`'s `RUN_SH_CALL_SITES` from the other, independently
-  scheduled file — see `ci/actionlint/README.md`'s Limitations section (L6) for what residual
-  still remains (a single combined edit deleting both gates' own call sites at once, the same
-  bounded shape as the `T`-array cycle above).
-- All three `repo:release-parity*` tasks run `ci/release-parity/run.sh --negative-control`
-  before their real run, under an explicit `set -euo pipefail` (SMA-530). Each carries its
-  own control because their *ecosystem-specific* `inputs` are distinct — a PR touching only
-  a `.releaserc.json` selects `-ts` alone. They are not disjoint overall: all three also
-  list `ci/release-parity/**/*` and `.prototools`, so an edit there schedules all three. Two pins guard it, both living in `ci/affected-graph/ci_targets.py`
-  and both running inside `repo:affected-smoke`: `SELF_SCHEDULED_GATES` pins every
-  self-scheduled gate's `moon.yml` invocation lines — `set -euo pipefail` included — for
-  `input-liveness`, the three `release-parity*` tasks, `version-lockstep`,
-  `publish-metadata`, `error-code-single-site`, `affected-smoke`, `actionlint`, (SMA-587)
-  `http-extractor-envelope` and (SMA-593) `workflow-credentials` (whole
-  lines, compared after stripping — reordering a flag or adding a trailing comment still
-  reds it; a bare number here would only rot again as the registry grows, which is why this
-  names its current membership instead), and `RELEASE_PARITY_SH_CALL_SITES` pins five discrete
-  lines inside `run.sh` itself — the flag parse, the `NEGATIVE` guard, the assertion body,
-  and both report arms — because pinning the span as one block left two MEASURED bypasses
-  with different failure shapes: neutering the flag parse (dropping `NEGATIVE=1`) leaves
-  `NEGATIVE` at its initialized 0, so the control branch is never entered and the invocation
-  falls through to the real suite, which then just runs twice and proves nothing; gutting
-  the assertion body (replacing the `check_case` call with a bare `ec=1`) never calls the
-  harness at all yet still prints "reported red as expected" — a control that actively lies
-  rather than one that merely no-ops. Those are the two bypasses closed by pinning five lines
-  instead of one span, not an exhaustive list — see `ci/release-parity/README.md`'s
-  Limitations section L5 for a residual (an inserted `NEGATIVE=0` before the guard, or all
-  five lines parked in a never-executed heredoc) that survives all five pins, and why closing
-  it generally is out of scope. That second pin is reachable only because
-  `repo:affected-smoke` lists `ci/release-parity/**/*` in its `inputs` — do not remove it. A
-  script-pinned gate needs either a `SELF_TASK_EXPECTED_GLOBS` entry or a reasoned
-  `SELF_TASK_GLOBS_EXEMPT` one. Note a `moon.yml`-only edit does NOT select the
-  `release-parity*` tasks (their own `script:` is not among their inputs), so a PR changing
-  those blocks should also touch `ci/release-parity/**` if it wants CI to execute them.
-  `repo:affected-smoke`'s OWN `moon.yml` block is the one member of that registry pinned
-  twice over (SMA-572/SMA-573): its invocation lines are pinned here as above, but its
-  `inputs` are deliberately NOT — those, and its invocation lines' ORDER, are pinned instead
-  by check 8e in `ci/actionlint/run.sh`, a gate scheduled independently of
-  `repo:affected-smoke` itself, since a pin living inside `ci_targets.py` would make that gate
-  the sole judge of its own reachability; `repo:actionlint`'s own `inputs: ['**/*']` — the
-  premise check 8e (and 8/8b/8c/8d) runs on every PR at all — is pinned the ordinary way, from
-  `SELF_TASK_EXPECTED_GLOBS["actionlint"]` in `ci_targets.py`.
-- The kernel family (`paigasus-kernel` + the three binding crates + their `pyproject.toml` /
-  `package.json` faces) carries **one version** across eighteen sites, asserted by
-  `repo:version-lockstep` (`ci/version-lockstep/run.sh`). release-plz owns every Cargo
-  `[package] version` — via per-package `version_group` — **and** the `[workspace.dependencies]`
-  version requirements; both were measured against the pinned 0.3.158, as was the fact that
-  `version_group` applies to crates whose Cargo manifest says `publish = false`. The script owns
-  the six sites Cargo cannot reach (`--write`) and checks all eighteen, because a `version_group`
-  that silently stopped applying would otherwise go unnoticed. Two of the sites drift SILENTLY
-  without it: `py/uv.lock` (its `moon.yml` runs bare `uv sync`, not `--locked`) and the 26
-  `bindingPackageVersion` guards in the committed napi glue (the codegen-drift gate covers only
-  the three `**/generated` proto dirs). `repo:version-lockstep` is script-pinned the same way the
-  `release-parity*` tasks are — `SELF_SCHEDULED_GATES` pins its **four** `moon.yml` lines
-  (`--self-test`, `--negative-control`, the real run, and `set -euo pipefail`; one more than the
-  `release-parity*` tasks, which have no self-test invocation) — and takes the
-  `SELF_TASK_EXPECTED_GLOBS` route through the
-  pairing rule above, listing all sixteen of its literal `inputs`, so it needs no
-  `SELF_TASK_GLOBS_EXEMPT` entry (holding both would itself be reported).
-- `rs/release-plz.toml` declares releasability **per package**, never workspace-wide. A
-  `[workspace] release = false` makes release-plz hard-error (`no public packages found`), and
-  simply deleting it is worse: `dependencies_update = true` cascades a patch bump into every
-  transitive dependent — a crate neither in the version group nor touched by the commit still
-  gets bumped ("dependencies changed") — and Cargo's `publish = false` suppresses publishing but
-  **not tagging**, so the first release would permanently tag most of the workspace. Per-package
-  `release = false` removes a package from the proposal entirely; every non-family crate needs
-  one explicitly. `paigasus-gateway` / `paigasus-iam` stay at `0.0.0` deliberately: their
-  `env!("CARGO_PKG_VERSION")` feeds `ServiceInfo`, and ADR-0020 skew reporting is parked on that
-  value (SMA-505 R7).
-- release-plz's `release_pr()` does all its work in a **tempdir copy** (`copy_to_temp_dir`,
-  measured against the pinned 0.3.158) — it never touches the local working tree or `HEAD`. This
-  nearly shipped a direct push to `main`: deriving the push target with `git rev-parse
-  --abbrev-ref HEAD` after `release-plz release-pr` still reads `main`, so `git push origin
-  "HEAD:$BRANCH"` becomes an unreviewed push to protected `main` (the `Protect main` ruleset has
-  no `pull_request` rule and a `bypass_actors` entry for admin). Always derive the branch from
-  `release-plz release-pr --output json`'s `.prs[0].head_branch`; the `prs` array is empty
-  whenever no release is needed — see the next entry.
-- release-plz's version baseline is the **crates.io registry**, not git tags (no `git_only` is
-  set in `rs/release-plz.toml`). Measured on this repo at the `0.1.0` floor: it logs `WARN
-  Package 'paigasus-kernel@*.*.*' not found`, then proposes `next version is 0.1.0` — the
-  manifest version, no bump. Measured live on 2026-08-28: it still OPENS a PR (`chore: release
-  v0.1.0`) listing all three packages — "empty" means it proposes no version CHANGE, not that no
-  PR appears — so "the release PR is the acceptance evidence" does not hold for the first run. The real hazard here is name
-  squatting — release-plz performs a crates.io lookup for every workspace member name, so a
-  squatted name silently becomes the comparison baseline — not a runaway version proposal.
-- `release.yml` authenticates with a **GitHub App installation token minted per run**
-  (`actions/create-github-app-token`), never a stored secret: an installation token lives one
-  hour, so it CANNOT be a repository secret, and the original `RELEASE_PLZ_TOKEN` shape could
-  only ever have held a long-lived PAT (SMA-589). Three traps. The secret `PAIGASUS_BOT_APP_ID`
-  holds the App's **Client ID**, not the numeric App ID — the NAME is the only stale thing about
-  it, so do not "correct" it by storing the numeric id. The token must request
-  `permission-contents: write` + `permission-pull-requests: write` **explicitly**: without the
-  `permission-*` inputs it inherits every permission the installation holds, so granting the App
-  an unrelated scope later silently widens it (zizmor `github-app`) — and because the requested
-  set must actually be granted, an under-granted App reds at mint time rather than half-working
-  later. And the preflight makes the whole job skip **green** when the App id is absent, so a
-  broken token path is invisible in CI: the only proof is a real run on `main`.
-- Any crate flipping `publish = true` must carry **its own `[lints.*]` table** and **its own
-  `include` allowlist** — enforced by `repo:publish-metadata` Checks 1c/1d (SMA-577). Cargo
-  inlines the resolved lint table into the published manifest and docs.rs builds published
-  crates as the root package on nightly, where `--cap-lints allow` does NOT apply, so an
-  inherited `warnings = "deny"` silently kills docs.rs builds on the first new rustc lint —
-  months after the PR. 1d's membership is LITERAL: `include = ["**/*"]` is rejected, since it
-  would "cover" README.md/LICENSE while reinstating the `moon.yml` leak Check 2b catches.
-  Check 2 runs one `cargo publish --dry-run` per **publish group** (a connected component of
-  the in-set dependency graph), NOT per package: a per-package dry-run of `paigasus-proto`
-  exits 101 (`no matching package named 'paigasus-proto-derive'`) until the derive crate is on
-  crates.io, while `-p paigasus-proto-derive -p paigasus-proto` exits 0. That combined form is
-  registry-faithful, not a workspace shortcut — measured by breaking the derive crate's
-  `include` and watching the run fail. Grouping keeps `paigasus-kernel` in a group of one so
-  it retains its standalone assertion.
-- `paigasus-py-bindings` ships to PyPI as **`cp312-abi3` wheels (six matrix legs, seven wheels)
-  plus a source-verified sdist**, built by `.github/workflows/wheels.yml` (SMA-578) — a
-  *reusable* workflow (`on: workflow_call`) that SMA-579's gated `release` job will consume. It
-  must **never** declare `secrets:` or `id-token: write`: it carries a `pull_request` trigger, so
-  a same-repo PR would receive the credential — `repo:workflow-credentials` asserts this, and it
-  applies the same ban to EVERY `pull_request`/`pull_request_target`-triggered workflow, not to
-  `wheels.yml` alone (SMA-593; it was `repo:publish-metadata`'s P-D6 until then). Four facts
-  that cost a measurement each: (1) maturin injects the apple-darwin `-undefined dynamic_lookup`
-  args **itself**, so an sdist builds on macOS without `rs/.cargo/config.toml` — that file exists
-  for plain `cargo build`, as its own comment says, and the old "no sdist" rule rested on a false
-  premise (measured on ONE host / maturin 1.9.6 / one target, natively — which is why the sdist
-  is verified on three platforms rather than trusted); (2) maturin builds the sdist from `cargo
-  package --list`, so the crate's **Cargo** `include` allowlist is what keeps `moon.yml` out —
-  `[tool.maturin] include` is not needed, and Checks 1c/1d/2b/2c never reach this crate because it
-  is `publish = false`, so the only assertion holding that allowlist honest lives in `wheels.yml`;
-  (3) the sdist ships the **workspace** `Cargo.toml` verbatim, `[workspace.lints.rust] warnings =
-  "deny"` included, and a consumer builds as the ROOT package where `--cap-lints allow` does NOT
-  apply — so every sdist-shipped crate needs its own non-denying `[lints.rust]` table, the
-  Check-1c rule extended past `publish = true`; (4) `pyo3`'s `abi3-py312` means one wheel per
-  (OS, arch) covers CPython 3.12+, so the matrix never multiplies by Python version. maturin also
-  relocates `pyproject.toml` to the sdist **root**, not the crate dir, so the sdist content
-  assertions match on basename.
-- All four **Linux** wheel legs cross-compile with `--zig` — not only the musl ones, unlike
-  `prebuild.yml`. `ubuntu-latest` ships glibc 2.39, so a *native* build tags `manylinux_2_39`,
-  which almost nothing can install. The floor comes from **`--zig` together with
-  `--compatibility`, both passed as FLAGS** (maturin's own `--help`: "`--zig` … Default to
-  manylinux2014/manylinux_2_17 if you do not specify a `--compatibility`"). It does **not** come
-  from cargo-zigbuild's decorated triple: maturin hands `--target` straight to `cargo metadata`,
-  so `x86_64-unknown-linux-gnu.2.17` dies with `could not find specification for target` —
-  measured, it failed both manylinux legs on this workflow's first CI run while the other ten
-  jobs passed.
-  Pass `--compatibility` explicitly so maturin's auditwheel **errors** instead of silently
-  emitting a PyPI-rejected `linux_*` tag, and set `-C target-feature=-crt-static` on musl (the
-  target defaults to a static CRT a cdylib cannot use). A wheel's **tag is not its binary**:
-  assert the compressed tag *set* (split on `.` — `manylinux_2_17_x86_64.manylinux2014_x86_64` is
-  ONE platform FIELD carrying TWO tags, so a cardinality check that counts fields as tags is
-  wrong), and separately assert the binary via `otool -l`'s minimum-macOS on darwin and a
-  max-`GLIBC_` symbol check on manylinux. An ELF-class check proves only the machine type and
-  passes for a wheel that fails at import. **Only the `aarch64-apple-darwin` wheel and the macOS
-  sdist path have been built locally.** The macOS / Windows / manylinux / musllinux tag sets, the
-  `macosx_10_12` minimum-macOS value have all now been **MEASURED green on CI**. The GLIBC floor
-  is per-arch and the two values legitimately differ: x86_64 tops out at **`GLIBC_2.14`** (its
-  base is `GLIBC_2.2.5`; 2.14 is `memcpy`'s versioned symbol) while aarch64 reaches
-  **`GLIBC_2.17`** — do not harmonise them. x86_64 was pinned at 2.17 on the first run and the
-  assertion red with *"needs only [GLIBC_2.14] … safe, but re-pin"*, which is the intended
-  behaviour: a wheel needing LESS than its `manylinux_2_17` tag promises is correct, since the
-  tag declares a minimum platform. When one of these reds, read what the tool produced, confirm
-  it is correct, and re-pin the constant — never loosen the comparison to an inequality.
-- `repo:workflow-credentials` (SMA-593) asserts that no `pull_request`/`pull_request_target`
-  workflow **declares** a credential — a `secrets` key, `id-token: write`, `permissions:
-  write-all`, or a `secrets` context read. It says nothing about whether one could **obtain**
-  a credential by another path; the README's Non-goals list those, and no control in this repo
-  audits per-scope `permissions:` breadth (`repo:actionlint` does not, and zizmor is named in
-  prose but runs nowhere). A new gate of this shape carries **five** registry obligations, and
-  missing any one of them reds `:affected-smoke`, not this gate: `ci.yml`'s `T=(…)` array, the
-  marker-delimited command above, `SELF_SCHEDULED_GATES` (its four `moon.yml` lines —
-  `set -euo pipefail`, `--self-test`, `--negative-control`, the real run),
-  `SELF_TASK_EXPECTED_GLOBS` (both literal `inputs`), and
-  `T_AFFECTED_SMOKE_REQUIRED_INPUTS` in `ci/actionlint/run.sh`, which floors
-  `ci/workflow-credentials/**/*` among `:affected-smoke`'s own inputs — without that last one
-  the script pin below stays green on exactly the PR that breaks it.
-  (Correction, SMA-539: "missing any one of them reds `:affected-smoke`" overstates it —
-  `SELF_SCHEDULED_GATES` and `SELF_TASK_EXPECTED_GLOBS` validate only entries already present as
-  KEYS, so omitting either one was never self-enforcing on its own; see the `repo:ruff-ci` entry
-  below for the measurement and the partial fix.)
-  `WORKFLOW_CREDENTIALS_SH_CALL_SITES` pins **seven** lines in `run.sh`, and three of them are the
-  ASSERTION: with only the flag parse, the dispatch arm and the two report lines pinned,
-  deleting every `_expect` and `grep` row left all four byte-identical and the control exited 0
-  having asserted nothing (MEASURED). SMA-647 split the one assertion line into three: the capture
-  of the real run, the guard on its exit status, and the match. The old pipe failed OPEN when the
-  checker failed, so deleting the status guard alone is a regression, and it is pinned too.
-  The **exit codes differ between the checker and the wrapper, deliberately**:
-  `workflow_credentials.py` exits **3** for an assertion failure, and `run.sh` maps 3 -> 1 and
-  everything else -> 2. `uv` itself exits 1 on a failed resolution, so a shared code would let
-  a PyPI outage read as "a workflow declares a credential". Do not "normalize" the checker to 1.
-  `EXPECTED_PR_SUBJECTS` is a **hand-maintained strict-equality** pin of the five subject
-  filenames — a new `pull_request`-triggered workflow reds this gate until someone adds it,
-  which is the point, so re-baseline it deliberately rather than loosening the comparison.
-- `moon query projects --json` **errors** on Moon 2.5.3 too (`unexpected argument '--json' found`,
-  re-checked on the 2.5.3 bump, SMA-595) —
-  bare `moon query projects` already emits JSON. **Measure its exit status UNPIPED (2):** `jq`
-  returns 0 on empty input, so `moon query projects --json | jq …` reports 0 unless `pipefail`
-  is set, and the failure reads as "the reader found nothing" rather than "the flag is invalid".
-  That is not hypothetical — it cost a cycle on this very branch, where the first measurement
-  read `head`'s status through a pipe and recorded exit 0.
-- The **codegen-drift gate is an inline `ci.yml` step** (`.github/workflows/ci.yml:342-355`), NOT
-  a `repo:*` Moon task — searching `moon.yml` for it finds nothing. That placement is deliberate
-  and load-bearing: the step carries no `if:`, so it runs on EVERY CI run and cannot be
-  deselected, where a `T`-array task would run only when affected and a wrong `inputs` list would
-  switch it off silently. It delegates its freshness to `moon run contracts:generate`, so that
-  task's `inputs` are what make the diff real: they now include `/.prototools` (which pins `buf`
-  itself) and `/py/uv.lock` (which pins the `local:` betterproto2 plugin, run via `uv run
-  --project ../py`), alongside `buf.gen.yaml` which pins the three REMOTE plugins. Before SMA-592
-  the first two were absent, so a generator bump left the hash unchanged, Moon served a cached
-  pass, `buf generate` never ran, and the diff compared the committed output against itself —
-  vacuously green. `.moon/cache` is restored across CI runs (`ci.yml:113-119`), so that was a real
-  CI hole, not a local-only one. `contracts:generate` still declares no `outputs:`; this makes its
-  cache KEY honest, not its output restorable, which is the second reason the drift step stays
-  unconditional. The inputs are pinned to exact equality by `CONTRACTS_GENERATE_INPUTS` in
-  `ci/affected-graph/ci_targets.py` — reachable because `repo:affected-smoke` lists `*/moon.yml`.
-  Cost of the two added inputs, measured on 2.5.3: one `buf generate` is ~0.7s warm, and over
-  `main`'s 163 commits they select it on 32 commits (19%) that no old input would have selected.
-- Two limits on that fix, both measured, neither closed. First, **`repo:input-liveness` cannot see
-  `contracts:generate`.** `ci/affected-graph/task_inputs.py`'s `_repo_tasks` is keyed to
-  `projects.get("repo")` by exact project id, so it liveness-checks `repo:*` tasks and nothing
-  else. If `py/uv.lock` moved, `contracts:generate` would silently stop keying on the betterproto2
-  pin while `CONTRACTS_GENERATE_INPUTS` stayed green — the SMA-553 failure class, on a task the
-  liveness gate cannot reach. Second, the fix is a **CACHE-KEY fix, not an execution fix**:
-  `uv run` executes the installed `py/.venv`, not `py/uv.lock`, and `contracts:generate` declares
-  no `deps:` that syncs `py`. A stale venv can still run a different betterproto2 than the key
-  implies.
-- `rs/.cargo/config.toml` is now an input of every task that runs cargo from `rs/`: all thirteen
-  crates' `build`/`build-release`/`test`/`lint`, the three FFI wrapper tasks, and three `repo:*`
-  gates that shell out to cargo (`repo:parity-corpus-drift`, `repo:observability-drift`,
-  `repo:nats-permissions`). Editing it selects 61 tasks against 3 before — the 52 crate tasks, the
-  3 FFI tasks, and 6 `repo:*` gates (those three, plus `repo:actionlint`, `repo:input-liveness`
-  and `repo:publish-metadata`, which select on everything). **59 of those declarations are now
-  asserted**: 58 by `repo:affected-smoke`'s A10 (`ci/affected-graph/cargo_moon_parity.py`,
-  SMA-599, findings key `a10`), and `paigasus-kernel-py:test` by **A5**, not A10 — it is an FFI
-  wrapper task, so the `FFI_TASK_INPUTS` splat already demands the file. A10 DOES derive it (as
-  `wrapper`, so the verb test passes); what excludes it is the CWD rule — its blob is
-  `uv sync --reinstall-package …` with no cd, and its source dir is `py/packages/paigasus-kernel`. A task is in A10's scope when its cargo subcommand COMPILES or LINKS
-  (`CONFIG_SENSITIVE_VERBS`, deliberately NOT A8's `LOCK_RESOLVING_VERBS`) AND its cwd resolves
-  inside `rs/` — crate tasks and the `repo:*` gates that reach cargo through their own
-  `ci/**/run.sh` alike. `repo:deny` and `repo:machete` are out of scope BY VERB, not on the cwd
-  half: `deny` is in `LOCK_RESOLVING_VERBS` and IS derived, but is absent from
-  `CONFIG_SENSITIVE_VERBS`, so `_cwd_inside_rs` is never called for it; `machete` is absent from
-  `LOCK_RESOLVING_VERBS` entirely and is never derived at all. (`repo:machete` also runs
-  `cargo machete rs`, a bare path ARGUMENT, not `--manifest-path`.) The `--manifest-path` fact
-  belongs to `repo:deny`, and it is still load-bearing for A10's design decision D2 — MEASURED on
-  cargo 1.95.0, a malformed `rs/.cargo/config.toml` fails cwd=rs/ at rc 101 but leaves
-  cwd=root+`--manifest-path` at rc 0, so `--manifest-path` does not move cargo's config walk and
-  a bare `rs`-containing argument must never confer a cwd. A10 reads moon's RESOLVED inputs, so
-  its four inherited lines in `.moon/tasks/rust.yml` (`build`/`build-release`/`test`/`lint`) each
-  cover thirteen crates — deleting one reds thirteen tasks. A10 ships with an EMPTY allowlist;
-  every exclusion is structural. It is deliberately
-  NOT on `fmt`: `cargo fmt --check` neither compiles nor links, so rustflags cannot change its result.
-  `repo:wasm-getrandom-free` is excluded for the same kind of reason — it runs `cargo tree`, which
-  resolves the dependency graph and never applies rustflags. This REVERSES SMA-546's deliberate
-  exclusion, which reasoned that CI is Linux and the darwin flags are inert there. Both are true;
-  the criterion changed to "does this file influence the output" rather than "is it strictly
-  required", because `rustflags` affect every darwin build from `rs/`. Note maturin injects the
-  `-undefined dynamic_lookup` args ITSELF (SMA-578), so the py wheel does not NEED the file — it
-  is keyed on it anyway, under the same one rule, which is why `REQUIRED_FFI_TASKS` needs no
-  carve-out.
-- **A10 enforces the cargo-config rule; nothing enforces the GENERAL one.** A10
-  (`ci/affected-graph/cargo_moon_parity.py`, SMA-599) closes the `rs/.cargo/config.toml` case
-  specifically, including for a gate that reaches cargo only through its own `ci/**/run.sh` —
-  that whole class was outside A8 too until SMA-599. It does not close the general problem: A10
-  shares `derive_cargo_tasks`'s VERB LIST, `LOCK_RESOLVING_VERBS`, with A8's derivation, so a
-  subcommand outside that list (`cargo llvm-cov`, `insta`, `udeps`, `bloat`) yields an empty
-  derivation and stays invisible to A10 too (spec L11). **SMA-605** widened what counts as an
-  INVOCATION without touching that verb list: `cargo_matches` merges the literal arm with a
-  cargo-NAMED variable in command position (`"$CARGO_BIN" build`) and the `CARGO=<path> <tool>`
-  env prefix, the latter carrying wrapper semantics — no flag can ever clear it, since the flag
-  reaches the tool and not the cargo behind it. SMA-605 also made script-following TRANSITIVE
-  over `source`/`.` statements (cycle-guarded, repo-confined, floored by
-  `REQUIRED_SOURCED_SCRIPTS`), which is what finally reaches
-  `ci/release-parity/ecosystems/*.sh`; bare `ci/**/*.sh` MENTIONS stay unfollowed, measured at
-  six prose edges (comments and pin arrays) and zero true positives. Arm 1 reports ZERO rows on
-  the corpus and is labelled forward cover in the code; arm 2 reports one, at
-  `ci/release-parity/ecosystems/release-plz.sh:152`, waived because it runs against a
-  `mktemp -d` fixture outside the repo. What is still true: A4 covers each
-  crate's `lint`/`fmt`, A5 the three derived FFI tasks, and `repo:input-liveness` proves
-  DECLARED inputs are live, never that NEEDED ones are declared. A future `repo:*` task can omit
-  some OTHER input it reads and nothing reds — check by hand when adding a cargo-invoking gate.
-- A hand-written `.pyi` next to a PyO3 crate is an interface contract that basedpyright reads
-  INSTEAD of the Rust, and it lives at the crate ROOT where `src/**/*` does not match it. A7 now
-  demands every `{upstream}/*.pyi` found on disk, disk-conditional exactly like its `build.rs`
-  clause. Do NOT read this as closing SMA-535: it makes a stub edit re-run the FFI smoke test, it
-  does NOT make a stub that disagrees with the Rust fail. That needs a three-set drift gate
-  (`#[pyfunction]` idents × `wrap_pyfunction!` registrations × stub `def` names), which is SMA-535
-  proper and pairs with SMA-536.
-- `moon query tasks --affected` emits each selected task's `deps[]`, and every dep entry carries a
-  `"target"` key of its own. So `grep -o '"target": "[^"]*"'` over the raw JSON counts SCHEDULED
-  upstreams as if they were SELECTIONS — it reported 15 tasks for a `.prototools` edit where the
-  real answer is 12. Parse the JSON and take one target per `tasks[project][task]`. This matters
-  because scheduled-vs-selected is the exact distinction every affectedness measurement in this
-  repo turns on; an extraction that conflates the two cannot measure it. It inflated this branch's
-  own spec table before the numbers were re-derived.
-- release-plz owns every tag it cuts (`<package>-v<version>`, its default), but it **only tags what
-  it PUBLISHES**. MEASURED on the first live release (SMA-580): three tags, not six. The three
-  `publish = false` kernel-family binding crates were never mentioned in the `release` job log at
-  all — not even as skipped — so `release = true` keeps a crate in the version group and does NOT
-  get it tagged. `rs/release-plz.toml`'s comment claimed otherwise and is corrected. Cosmetic: those
-  crates' versions come from `version_group` + `repo:version-lockstep`, neither of which reads a
-  tag. `napi prepublish` always
-  carries `--no-gh-release` — a flag its own `--help` does not list. Two invocations exist:
-  the real publish in `release.yml`'s `publish-npm` job, with the requirement recorded in the
-  comment directly above it; and the dry run in `prebuild.yml`'s `assemble` job.
-  `ci/actionlint/release_guard.py`'s V5 asserts **both** carry it. That sentence used to be
-  aspirational: V5 was inlined in `check_main`, which `main()` runs on `argv[0]` only, so every
-  CALLED workflow — `prebuild.yml` included — got `check_called`, which had no V5 at all. It is
-  now a shared helper invoked from both (SMA-579 fix round 3). Exactly two GitHub Releases land
-  per release commit — the two family heads — not one per published package (SMA-579).
-- `release_guard.py`'s `UNGATED_JOBS` exempts a job from the GATING rule (V1) and from nothing
-  else. V7 applies the publish detector to every member, because the exemption's premise is that
-  the job cannot reach a registry — and `release-pr`, the only member, runs on every push to
-  `main` with a `contents: write` App token. Measured before V7 existed: a `release-pr` job whose
-  steps ran `cargo publish`, `npm publish` and `pypa/gh-action-pypi-publish` passed the guard at
-  **exit 0**, while the same steps in any other job correctly exited 1. The detector's markers are
-  REGEXES, not substrings, and the reason is one entry: `release-plz release` is a strict prefix
-  of `release-plz release-pr`, which is exactly what the real job runs — a substring test reds the
-  real repository, so the marker is bounded with `(?![-\w])` (SMA-579).
-- `ci/actionlint/run.sh`'s check 10 must route **every** exit status of its `release_guard_py`
-  wrapper, not only the guard's own 2. `run.sh` is `set -uo pipefail` with **no `-e`**, so an
-  unrouted status leaves `$RG_OUT` empty, the read loop finds nothing and the gate exits 0 having
-  asserted nothing — measured at rc 127, the status a **missing `uv`** produces from the wrapper
-  rather than from the guard. Do not read "missing uv aborts the gate" as a property of this
-  routing: on the full-gate path that abort comes from `release_guard_self_test`'s
-  `|| infra`. The wrapper also passes `--locked`, so the gate cannot re-lock `py/uv.lock` as a
-  side effect (SMA-579).
-- `release-plz release` requires `publish = false` in `rs/release-plz.toml` for every package
-  whose Cargo manifest already says so. An absent key reads as `publish = true` and hard-errors.
-  This blocked `release-plz release` entirely and stayed invisible because `release-pr` never
-  reaches that validation. Ten packages needed the key added. `release = false` stops the
-  release-PR proposal; `publish = false` is what `release-plz release` itself checks — the two
-  settings govern different phases, and neither substitutes for the other (SMA-579).
-- `release-plz release --dry-run` creates **no** tags: `create_git_tag_and_release` is reachable
-  only from the non-dry-run arm (`release_plz_core` 0.36.14, `release.rs:888` and `:959`) — but
-  `get_git_client()` still runs unconditionally at `release.rs:543` (SMA-579 wording corrected
-  SMA-603: this is not merely "requires a token" — it makes a LIVE authenticated
-  `GET /repos/{owner}/{repo}/commits/{sha}/pulls` call, and dies 401 on a bad token).
-  `git_release_enable = false` does not remove that call.
-- The dry-run cannot pass until `paigasus-proto-derive` is published on crates.io: a per-package
-  `cargo publish --dry-run` cannot resolve a workspace sibling absent from the index. This is
-  true, and permanent, but it applies to the `proto` version group ONLY —
-  `paigasus-kernel` is a publish group of one with no in-tree dependency, so its dry-run resolves
-  fine — and it is no longer the operative reason the release job graph carries no dry-run-based
-  `plan` stage; see the entry below (SMA-603) for the reason that generalizes. A live run is
-  expected to work, since derive publishes before proto — which makes the first live release the
-  first genuine test of that path (SMA-579).
-- `release-plz release --dry-run --output json` prints `{"releases":[]}` at exit 0 **even when it
-  would publish** (SMA-603, spec M6). Measured with only the `kernel` version group bumped:
-  release-plz logged that it would publish `paigasus-kernel` and cut `paigasus-kernel-v0.1.1`,
-  and still reported an empty array. The array records PERFORMED releases, and a dry run performs
-  none — so it cannot distinguish "nothing to release" from "a release is pending", and reading
-  it would silently skip every kernel-group release. `ci/release-plan/` replaces it: it decides
-  on TAG EXISTENCE instead, the same thing release-plz itself short-circuits on before touching a
-  registry or running cargo. This measurement (spec M6) is pinned to release-plz 0.3.158 and
-  must be re-measured on a version bump. The derive-crate bullet above (spec M3) was measured
-  against the same 0.3.158, but its validity turns on whether `paigasus-proto-derive` has been
-  published, not on a release-plz version — do not read it as sharing this re-measure caveat.
-- `release-plz release --output json` is `{"releases":[{package_name,prs,tag,version}]}` — key
-  `releases`, field `package_name`. This is **not** `release-pr`'s `prs`/`package` shape. A
-  package with Cargo `publish = false` never appears in `releases`, which is why any version
-  assertion in `release.yml` binds to `paigasus-kernel` (SMA-579).
-- PyYAML coerces five shapes every workflow parser in `ci/` must handle: a bare `on:` key parses
-  as the boolean `True`; `if: false` and `continue-on-error: false` parse as the boolean `False`;
-  `continue-on-error: "false"` (quoted) parses as the **string** `"false"`, not the boolean;
-  `needs:` may be a scalar string rather than a list, and iterating a string in Python yields its
-  **characters**, not the string itself (SMA-579).
-- `wasm-pack build` **deletes `package.json`** in its `--out-dir`, even with `--no-pack`
-  (`rs/crates/bindings/paigasus-wasm/.gitignore:4-10` records the measured behaviour). Never run
-  it in the crate root. The release path builds into `.wasmpack-release-out`, a third scratch
-  directory beside `build`'s `.wasmpack-out` and `test`'s `.wasmpack-test-out` (SMA-579).
-- `wasm-pack` is **proto-pinned, not Moon-managed** — `moon setup` does not install it. Any job
-  invoking `wasm-pack` needs an explicit `proto install wasm-pack` step first, the same class of
-  gap the documented nextest trap already records for a different tool (SMA-579).
-- `proto` emits NDJSON on stdout inside an agent session — it keys on the `AI_AGENT`,
-  `CLAUDECODE`, and `CLAUDE_CODE_ENTRYPOINT` env vars — which breaks `$(proto bin …)` capture. All
-  three `repo:release-parity*` gates therefore abort **INCONCLUSIVE at rc=2, not red**, inside such
-  a session. Unset those three vars before running a `release-parity` command locally, or an
-  inconclusive abort reads as a pass (SMA-579).
-- `release.yml` must never gain a `pull_request` or `pull_request_target` trigger (SMA-579).
-- GitHub Actions supports YAML **anchors and aliases** (since 2025-09-18) but **not merge keys**
-  (`<<:`) — a workflow using one keeps the literal, unmerged key rather than erroring (SMA-579).
-- An **unlocked cargo invocation repairs a truncated `rs/Cargo.lock` in place, mid-run**, and that
-  is why five Dependabot PRs (83, 96, 140, 149, 181) merged a truncated lock through a green
-  `moon ci`. Measured on PR 181's `72c0ddb52` (176 packages against main's 543, holding 5 of 13
-  workspace members): `cargo tree` and `cargo deny` each re-resolved the lock to **548 packages and
-  exited 0**, both starting at 06:37:55 — twelve seconds before the first `--locked` task. So
-  `paigasus-gateway-rs:lint` and `paigasus-iam-rs:lint` ran `cargo clippy --locked` for real, for
-  24s and 72s, against a lock that had already been repaired, and passed. The repaired lock is
-  never committed, so `main` keeps the truncated one. Two consequences. A gate that reads the lock
-  from the WORKING TREE inside `moon ci` races the repair and is worthless — which is why
-  `ci/cargo-lock-integrity/run.sh` is an unconditional **`ci.yml` step placed before the `moon ci`
-  step** (pinned by check 8f in `ci/actionlint/run.sh`), not a `repo:*` task. That step runs all
-  **three** modes — `--self-test`, `--negative-control`, then the real run, under an explicit
-  `set -euo pipefail` — because the bare mode alone is a gate that can lie: with `--locked` deleted
-  from `run.sh`'s `cargo metadata` line the command exits **0 and repairs the lock itself**, so the
-  gate prints "satisfies every manifest" and becomes the first repairer (MEASURED). Check 8f pins
-  both sides — the step's six `ci.yml` lines whole, in order, inside the step's own window, and six
-  whole lines inside `run.sh` (`T_CARGO_LOCK_SH_CALL_SITES`), the `cargo metadata --locked` line
-  included. It also bans **any `if:` on that step**: a skipped step is a GREEN step, so an `if:`
-  switches the guarantee off for every event it excludes, `pull_request` included — which is
-  exactly where a Dependabot PR ships a truncated lock. And `cargo deny`
-  audits a re-resolved graph whenever the lock does not already satisfy the manifests — not on
-  every PR, since cargo rewrites nothing when the lock is consistent, but on exactly the PRs that
-  matter. Since SMA-601 every cargo-resolving task passes `--locked`, asserted generically by A8
-  (`ci/affected-graph/cargo_moon_parity.py`); the three FFI wrapper tasks cannot, because
-  `napi build` exposes no `--locked` and no cargo passthrough, `uv sync` drives maturin with no
-  flag path, and `wasm-pack` — which DOES forward `-- --locked` — makes its own unlocked cargo
-  call before the forwarded build and repairs the lock there (measured: 176 -> 548 packages,
-  exit 0). All three carry `ALLOW_UNLOCKED_CARGO` entries, and A8 demands one for every
-  wrapper-matched task even when `--locked` appears elsewhere in its script. A8's
-  `LOCK_RESOLVING_VERBS` also lists the verbs that exist to WRITE the lock (`add`, `remove`,
-  `generate-lockfile`, `vendor`, `fix`); none is used today, and they are there so a future
-  `cargo add` in a Moon task becomes a reviewed `ALLOW_UNLOCKED_CARGO` entry instead of an
-  unnoticed repairer. `--locked` proves the lock is
-  CONSISTENT with the manifests, not that it is correct: a swapped-but-compatible version or a
-  tampered checksum still passes.
-- `rs/Cargo.toml`'s `[workspace] members` entries must carry **at most ONE wildcard level each**
-  (`crates/libs/*`, not `crates/*/*`). Cargo reads both forms identically — the member set is the
-  same 13 crates, measured — but Dependabot's cargo file fetcher cannot expand the two-level form:
-  `expand_workspaces` (`cargo/lib/dependabot/cargo/file_fetcher.rb`) lists exactly ONE directory
-  level, so for `crates/*/*` it fetches `crates/` and gets `crates/libs`, `crates/services`,
-  `crates/bindings`, then drops all three because `File.fnmatch?("crates/*/*", "crates/libs")` is
-  false. It finds **zero** members and builds its sandbox from the only in-tree crates still
-  reachable — the five declared with `path =` in `[workspace.dependencies]`. Cargo then re-resolves
-  that 5-member workspace and rewrites the lock at **176 packages against 543**, which is the
-  recurring truncated `rs/Cargo.lock` the entry above describes: SMA-601 gates the SYMPTOM, this is
-  the CAUSE. It also reds the job outright — `cargo update -p serde:1.0.228` reports `Locking 0
-  packages` there, because serde 1.0.229 needs `serde_core =1.0.229` and `serde_core` is not in the
-  `-p` set, so Dependabot raises `Failed to update serde!` and every `cargo in /rs` run from
-  2026-08-17 on exited 1 (SMA-604). serde is not special: it is only the first dependency in the
-  group that needs a companion package unlocked with it. Nothing else in the repo can see this
-  regression — `cargo metadata` is identical either way, and so is every Moon task — so
-  `repo:affected-smoke`'s **A9** (`ci/affected-graph/cargo_moon_parity.py`) now asserts it by
-  TRANSCRIBING Dependabot's expander rather than restating the rule: it fails if a `members` entry
-  resolves to zero members, and separately if any crate directory no entry reaches. Reverting the
-  line to `crates/*/*` reds it with 14 rows (MEASURED). Adding a crate DIRECTORY (a fourth sibling
-  of `libs`/`services`/`bindings`) needs a new `members` entry; adding a crate inside an existing
-  one does not. A8 and A9 are the two halves of one story: A8 catches a truncated lock once it
-  exists, A9 removes the thing that writes one.
-- `repo:ruff-ci` (SMA-539) lints `ci/**/*.py` against `py/pyproject.toml`'s rule set — a new `ci/`
-  Python file must pass it. It routes through `uv run --locked --project py` rather than a
-  dedicated uv project: `repo:actionlint`'s `inputs: ['**/*']` strictly supersets `repo:ruff-ci`'s,
-  so the `py` environment is materialised once per CI run regardless of which task reaches it
-  first — one lockfile therefore means one ruff version, shared with `py:lint`, with no second
-  lockfile to drift out of step. `ruff format` is deliberately NOT gated over `ci/`: MEASURED,
-  `line-length = 200` would rewrite 2,998 of ~15,600 existing lines, joining hand-wrapped lines and
-  collapsing hand-aligned fixture tables in files that are roughly 60% comment by design. The
-  corpus is derived with `git ls-files -- ':(glob)ci/**/*.py' 'ci/*.py'`, not the bare
-  `'ci/**/*.py'` alone: git matches a pathspec's `**` without `FNM_PATHNAME`, so the literal `/` is
-  still required and a top-level `ci/foo.py` would be missed — `'ci/*.py'` (its `*` spans `/`) and
-  the `:(glob)`-magic form each independently fix it, and the gate keeps both, which is mutually
-  redundant and deliberately so.
-  **Registration is seven obligations, not six** — `ci.yml`'s `T=(…)` array, the CLAUDE.md
-  marker-delimited command, `SELF_SCHEDULED_GATES`, `SELF_TASK_EXPECTED_GLOBS`, a script pin
-  (`RUFF_SH_CALL_SITES`, ten lines), `REQUIRED_REPO_TASKS` — the last because this gate
-  carries a `--negative-control`, the same reasoning that put the three `release-parity*` tasks
-  and `workflow-credentials` on that floor — and `moon.yml`'s `repo:affected-smoke` task listing
-  `ci/ruff/**/*` among its own `inputs` (`moon.yml:222-226`), floored by a
-  `T_AFFECTED_SMOKE_REQUIRED_INPUTS` entry in `ci/actionlint/run.sh` (`:2134-2138`) — the same
-  reachability pair the `workflow-credentials` entry above names for that gate: without it, a PR
-  editing `ci/ruff/**` does not schedule `repo:affected-smoke` at all, so none of the other six
-  obligations' pins can ever fire on the PR that breaks them.
-  **This also corrects a belief this repo has been operating on.** MEASURED: `repo:affected-smoke`
-  does NOT red when a brand-new `repo:*` gate is added to `ci.yml`'s `T` array with none of the
-  other obligations done at all. `SELF_SCHEDULED_GATES`, `SELF_TASK_EXPECTED_GLOBS` and
-  `REQUIRED_REPO_TASKS` are hand-maintained tables that validate only entries already present as
-  KEYS — so a brand-new gate with NO entries at all in any of the three still passes, the same
-  true statement the `workflow-credentials` entry above makes for its own registration. That is
-  narrower than it first looks, though: `orphan_globs` is not "a key with no task" (nothing there
-  needs a task) but a `SELF_TASK_EXPECTED_GLOBS` KEY with no matching `SELF_SCHEDULED_GATES`
-  entry — i.e. the reverse-pairing direction — and `check_registry_pairing` (called with all-`None`
-  at `ci_targets.py:2647`, which resolves to the LIVE registries) genuinely IS exercised in
-  production: it runs on the `--self-test` path that `repo:affected-smoke`'s own
-  `--negative-control` invokes (`ci/affected-graph/run.sh:413`), so deleting only
-  `SELF_SCHEDULED_GATES["ruff-ci"]` reds it. Obligation 4 (`SELF_TASK_EXPECTED_GLOBS`) is
-  therefore transitively self-enforcing once obligation 3 (`SELF_SCHEDULED_GATES`) is in place —
-  it is `REQUIRED_REPO_TASKS` and the reachability pair above that remain unpaired, so of the
-  seven, T-membership, the CLAUDE.md mirror, and (once `SELF_SCHEDULED_GATES` exists)
-  `SELF_TASK_EXPECTED_GLOBS` are self-enforcing; the `workflow-credentials` entry above overstated
-  the ORIGINAL claim ("missing any one of them reds `:affected-smoke`") and is corrected there.
-  SMA-539 closes part of the remaining gap with `check_self_scheduled_coverage` in
-  `ci_targets.py`: every `repo:*` task whose resolved `script:` mentions `--self-test` or
-  `--negative-control` must now have a `SELF_SCHEDULED_GATES` entry, with a reasoned
-  `SELF_SCHEDULED_COVERAGE_EXEMPT` table that ships EMPTY. It is deliberately scoped to that ONE
-  registry — the same treatment for `SELF_TASK_EXPECTED_GLOBS` or `REQUIRED_REPO_TASKS` would red
-  the real repo, since several tasks legitimately lack those (`affected-smoke`'s own globs are
-  pinned by check 8e instead; the three `release-parity*` tasks route through
-  `SELF_TASK_GLOBS_EXEMPT`).
-- `ci/affected-graph/ci_targets.py` derives its verdict AND its report from ONE list (SMA-638).
-  `collect_findings` returns 23 `(key, rows, title)` triples; `main()` reads
-  `if not any(rows for _, rows, _ in findings)` for the verdict and iterates that same list for the
-  report, so a check folded into one and not the other cannot exist — the defect SMA-638 reported
-  for `check_tailwind_guard_invocations`, which applied to every check in the file. What stops the
-  list being SHRUNK is `EXPECTED_FINDING_KEYS`, a 23-key tuple whose non-emptiness, arity and exact
-  key sequence `self_test()` asserts. So adding or removing a check reds the gate until that tuple
-  is re-baselined, and the re-baseline is a deliberate act, never a mechanical edit to clear a red.
-  The floor proves MEMBERSHIP, not semantics: a key whose `rows` are always empty satisfies it.
-  Separately, `RUN_SH_CALL_SITES` (in that file) and `T_AFFECTED_GRAPH_CALL_SITES` (in
-  `ci/actionlint/run.sh`) now hold **four** entries each, not two — the two `ci_targets.py`
-  invocations, plus `ci/affected-graph/run.sh`'s `--negative-control` flag parse and its `NEGATIVE`
-  branch guard, because `run.sh` initialises `NEGATIVE=0` and deleting either line let the control
-  fall through and run the real suite twice at exit 0. The two tables are hand-mirrored and
-  **nothing asserts the copies agree**, so every edit to one must be made to the other. Both are
-  SUBSTRING pins (`site not in run_sh_text`; `grep -qF`): MEASURED, deleting a pinned line reds both
-  gates, but COMMENTING IT OUT leaves both green. That is the documented limit
-  (`ci/affected-graph/README.md`, L2), not a defect.
-- `repo:actionlint` now runs shellcheck over every workflow `run:` block, sourced from
-  `shellcheck-py` pinned in `py/uv.lock` (bounded specifier `>=0.11.0.1,<0.12`), resolved via
-  `uv run --locked --project py` and asserted with `[ -x ]`. It FAILS CLOSED at rc 2 — there is
-  deliberately no fallback to whatever `shellcheck` a host happens to have, the silent-downgrade
-  failure SMA-525 refused. shellcheck's own GitHub release ships 13 platform archives and no
-  checksums asset (re-measured 2026-09-02), which is why it is not a proto plugin; three of
-  `shellcheck-py`'s pinned digests were verified by hand against koalaman's release assets, and a
-  version bump re-opens that check.
-  **Coverage limit, stated plainly so "the inline bash is linted now" isn't read as more than it
-  is.** MEASURED: actionlint replaces `${{ }}` expressions with inert placeholders before handing
-  the script to shellcheck. `rm -rf $TARGET` fires `SC2086`; the structurally identical
-  `rm -rf ${{ github.event.inputs.target }}` fires nothing. So the entire GitHub-expression
-  interpolation class — the dominant quoting/injection hazard in `release.yml` and `wheels.yml` —
-  is uncovered by this gate. zizmor is the tool for that class and runs nowhere in this repo. Also
-  structural, not a configuration gap: `SC2148` and `SC2164` can never fire, because actionlint
-  supplies the shell itself and injects `set -e`.
-- **vitest 5 resolves a Node-environment test's imports through `ssr.resolve.conditions`, NOT the
-  top-level `resolve.conditions`** (MEASURED on 5.0.0, SMA-502). Setting only the top-level key has
-  no effect on an `environment: 'node'` project, so a package whose source depends on a resolution
-  condition fails at import with the top-level block present and apparently correct. Set BOTH —
-  `ts/packages/paigasus-next-config/vitest.config.ts` is the worked example. vitest moved 4.1.11 ->
-  5.0.0 in `29c03977`, so nothing in the repo had exercised this before.
-  The case that surfaced it: `@paigasus/next-config/runtime` opens with `import 'server-only'`,
-  whose exports map is `{ "react-server": "./empty.js", "default": "./index.js" }` — and `index.js`
-  is nothing but an unconditional `throw`. Without the `react-server` condition every test in the
-  package dies at import. **The fix is the condition, never deleting the import**: that line is the
-  structural guard keeping the module out of client bundles, and removing it greens the suite while
-  destroying the protection.
-  List the additive module-resolution defaults alongside it — `['react-server', 'node', 'import',
-  'default']`, not a bare `['react-server']`. A single-entry list drops `import`/`default` and
-  breaks source-exports `.ts` resolution for every `@paigasus/*` package, which is the same trap
-  `ts/packages/paigasus-kernel/vitest.config.ts` already records for its browser project.
-  Note `server-only` guards the CLIENT bundle only. Next sets the `react-server` condition for the
-  middleware layer too, so it resolves to `empty.js` there and is a no-op — an explicit
-  `process.env.NEXT_RUNTIME === 'edge'` check is what covers the edge runtime (measured: the guard
-  compiles to an unconditional throw in the edge chunk and is absent from the node chunk).
-- Tailwind v4's automatic scan root is the **current working directory**, and Moon runs `next
-  build` from the app's own directory — not the repo root. So every consumer of `@paigasus/ui`
-  needs its own `@source` line covering `ts/packages/paigasus-ui/src`; forgetting it drops the
-  package's classes silently, and only in a PRODUCTION build (`ts/apps/iam-console/app/globals.css:23`
-  is the first copy). Next 16.3.4 builds with Turbopack and writes CSS to
-  `.next/static/chunks/`, not `.next/static/css/`, and there is **no**
-  `.next/app-build-manifest.json` at all — so `ci/tailwind-source/run.mjs` walks `.next/static`
-  recursively instead of reading a manifest, and `iam-console-ts:build` removes
-  `.next/static` before every build so a stale chunk from an earlier build cannot satisfy that
-  walk. The guard script lives at `ci/tailwind-source/` and must **never** move under
-  any `ts/apps/*` directory, because each one is Tailwind's scan root for its own app and a
-  script holding the sentinel literal (`--paigasus-ui-source-probe`) would make Tailwind generate
-  the very utility it asserts on — and the guard's assertion-3 scan is a **full walk of the named
-  app's own directory** (parameterized by `--app`), not an allowlist, because the old
-  `['app'] + four config files` list missed `moon.yml`, `next-env.d.ts` and `.prettierignore`, all
-  of which Tailwind reads.
-  `iam-console-ts:build` also uses `options.merge: replace`, so
-  it inherits nothing from `.moon/tasks/typescript-project.yml` and lists `/ts/pnpm-lock.yaml`
-  **and `/ts/tsconfig.base.json`** by hand in its own `inputs` (`test` replaces too and needs
-  both; `typecheck` merges and inherits them). `repo:affected-smoke`'s **two** `ui->console`
-  cases (`ci/affected-graph/run.sh`) are the only control on the input list that makes the guard
-  real — they assert a `@paigasus/ui` source edit selects both `iam-console-ts:build` and
-  `iam-console-ts:test`; without them, an input dropped from either task's `inputs` serves a
-  cached `.next` and the guard passes against stale CSS. There are two because one anchors on
-  `src/styles/tokens.css` and one on `src/components/table.tsx`: a single anchor leaves the
-  console's `src/**/*` input narrowable to the other subtree while the case stays green. Note a
-  residual the guard does NOT close: `rm -rf .next/static` lives inside the build task's own
-  `script:`, so a Moon **cache hit** hydrates `.next` without running it and the walk can satisfy
-  both sentinels from a stale chunk (`ci/tailwind-source/README.md`, Limitations). And **the
-  shadcn CLI is unusable in this package** — measured, it adds an unrelated npm package literally
-  named `cn` to the manifest and the lockfile of a public repository, on top of writing to a
-  literal `./@/components/` directory; every component here is hand-written. Read
-  `ts/packages/paigasus-ui/README.md`'s "The `shadcn` CLI is not usable in this package" before
-  running it. (SMA-503)
-  Since SMA-512 the guard is **per app**: `ci/tailwind-source/run.mjs --app <dir>`, invoked by each
-  app's own `test` task, and a BARE run now exits 2 rather than silently checking `iam-console`.
-  `TAILWIND_GUARD_INVOCATIONS` holds **two** apps today (`iam-console`, `gateway-console` — SMA-512
-  pull request 3), each invoking the guard for itself in its own `test` task; a third app repeats
-  the same shape. That registry, in `ci/affected-graph/ci_targets.py`, fails `repo:affected-smoke` if
-  a `ts/apps/*` directory with a `package.json` does not invoke all three modes for itself, in its
-  Moon project's resolved `test` script — the fix wave closed three ways to defeat this: an entry
-  no longer stores hand-copied lines (they are derived from the app name, so an entry cannot name
-  another app's `--app` directory), the check matches moon's resolved script rather than the raw
-  `moon.yml` text (a line parked in another task, or one that never runs, no longer counts), and a
-  `package.json`-bearing directory with no matching Moon project is reported rather than skipped.
-  `repo:next-env-drift` and the Next ESLint blocks are app-agnostic too: the first discovers
-  `ts/apps/*/next.config.*` and asserts every `ts/apps/*` directory that has a `package.json` is in
-  the discovered set, and `ts/eslint.config.js` derives one block per app directory. The next-env
-  gate still has **no negative control**. Its `deps` names one build per app by hand and nothing
-  asserts the list is complete, so a new app must add its own `<app>-ts:build` edge or `next
-  typegen` races that app's `.next`.
-- `repo:next-public-free`'s `APP_CONFIG_FLOOR` is **2** since the second console zone landed,
-  pinned as a whole line (`"APP_CONFIG_FLOOR=2"`) in `ci/affected-graph/ci_targets.py:1251`, so
-  the constant in `ci/next-public/run.sh` and its pin move together or the gate reds. It is a
-  **collapse detector**, not a per-app assertion. MEASURED reason: `APP_CONFIG_GLOB='ts/apps/*/
-  next.config.[tjmc][sj]*'` matches **four** tracked paths today, not two — the two real apps'
-  configs plus `ts/apps/iam-console/tests/fixtures/{client,server}-imports-sdk/next.config.ts` —
-  because a git pathspec's `*` spans `/`, the same pathspec trap this file already records for the
-  ruff gate's `ci/**/*.py` corpus. The gate's own `app_configs()` then filters with
-  `grep -E '/next\.config\.(ts|js|mjs|cjs)$'`, which does **not** exclude those fixtures, since
-  they end in `next.config.ts` too. So deleting one app's `next.config.ts` leaves 3 ≥ 2 and the
-  gate stays **green**. What actually holds a specific app's config in place is that app's own
-  build and `ci/next-env/run.sh`'s per-app discovery — not this floor.
-- **Turbopack (Next 16.3.4) does NOT resolve a `.js` relative specifier to a `.ts` file** (MEASURED,
-  SMA-510): `import { x } from './a.js'` with only `a.ts` on disk fails `next build` with `Module not
-  found`, in app code and in a workspace package's source alike. A clause-level `import type … from
-  './a.js'` is erased first and builds (measured). `import { type A } from './a.js'` is not erased
-  under `verbatimModuleSyntax` (reasoned from the flag's rules, not separately measured). So every
-  file a Next app compiles uses EXTENSIONLESS relative value imports. SMA-511 made that true for every
-  package the IAM console compiles: the `src/` of `@paigasus/auth`, `@paigasus/sdk`,
-  `@paigasus/discovery` and the hand-written `@paigasus/proto` files, and BOTH buf templates
-  (`contracts/buf.gen.yaml`, `contracts/buf.gen.googleapis.yaml`) no longer pass
-  `import_extension=.js`, so the generated protobuf-es code is extensionless too. Two controls hold
-  it. The ESLint rule `paigasus/no-js-relative-specifier` reports an `import`, `export … from` or
-  `import()` whose `./`/`../` specifier ends in `.js`, under `packages/*/src/**`, test files
-  excluded. It ships as `sourceRules` from `@paigasus/next-config/eslint`, NOT inside
-  `boundaryRules` (a `packages/*/src` scope there fails the reverse liveness loop), and
-  `ts/eslint.config.js` spreads it, which a test pins. It is a rule with its OWN name on purpose: in
-  flat config a second `no-restricted-imports` block that matches the same files REPLACES the first
-  and switches the boundary rules off without a word. ESLint ignores `**/generated/**`, so a
-  `@paigasus/proto` test asserts the same thing for `src/generated/`. Test files keep their `.js`
-  imports (vitest resolves both). The two plain-Node loaders that run package source
-  (`paigasus-auth/tests/fixtures/ts-esm-loader.mjs`,
-  `paigasus-discovery/tests/containers/support/ts-esm-loader.mjs`) retry an extensionless specifier
-  as `.ts`, then `/index.ts`, because plain Node does not probe extensions. Vite, vitest, tsc and
-  Playwright accept both forms, so only a Next build or these two controls notices a regression.
-- **`@paigasus/auth` under a Next `basePath`** (MEASURED on Next 16.3.4, SMA-511 spec § 13 row 1).
-  Next removes the basePath before app code sees a path, in three different places. In `proxy.ts`,
-  `req.nextUrl.pathname` has no `/iam`, while `req.nextUrl.basePath` is `/iam` and `req.url` keeps
-  it. In a route handler, `req.url` has no basePath AND carries the server's bind address
-  (`http://0.0.0.0:<port>`); only its scheme follows `X-Forwarded-Proto`. A page
-  `redirect('/auth/login')` gets the basePath added once, and `redirect('/iam/auth/login')` becomes
-  `/iam/iam/auth/login`. So `authRoutePaths()` takes no argument and returns basePath-RELATIVE
-  paths, `requireSession` redirects to the relative login path, `createAuthRouteHandler` rebuilds the
-  URL from `AuthRuntime.publicOrigin` + basePath, and `handleCallback` builds openid-client's
-  `currentUrl` from `runtime.redirectUri`. That last part broke `redirect_uri` equality even with NO
-  basePath. A unit test sees none of this without `new NextRequest(url, { nextConfig: { basePath:
-  '/iam' } })`, and the plain-Node auth e2e harness passes full paths, so the iam-console e2e tier
-  (`iam-console-ts:test-e2e`, row R2) is the only end-to-end control.
-- **Next gives a route handler and a page SEPARATE module graphs, so a module-level singleton is
-  per-layer** (MEASURED, SMA-511). `getAuthRuntime`'s module-level cache produced two memory
-  session stores, one per layer, and login looped forever: a page set a session in its store and
-  redirected, the route handler checked a different, empty store, and sent the user back to log in
-  again. The fix caches the runtime on `globalThis` under a `Symbol.for(...)` key instead, so both
-  layers share one instance. No unit test can catch this: each layer's code is correct in
-  isolation, and only a real Next build with both layers wired together — the iam-console e2e tier
-  — reproduces the split.
-- **`@paigasus/auth`'s `returnTo` loop guard is BYTE-EXACT.** It collapses dot segments and
-  repeated slashes before comparing a path to the auth route prefix, but it does not decode
-  percent-escapes or fold case: `/iam/%61uth/login` and `/iam/AUTH/login` are not refused. No loop
-  exists today, because the route table serves neither spelling (both 404 before the guard would
-  matter). This holds only as long as no proxy or router in front of the app decodes or case-folds
-  a path before routing on it.
-- **`@paigasus/kernel` cannot load its napi binding inside a Next build** (MEASURED 2026-09-11,
-  SMA-634 open). `@paigasus/node-bindings` is a pnpm `file:` dependency whose `files` allowlist is
-  `["index.js", "index.d.ts"]`, so pnpm never copies the `.node` binary into `node_modules`, and
-  `next build` fails at "Collecting page data" with `Cannot find native binding`. Every Node consumer
-  of `@paigasus/kernel` has the same defect.
-  `@paigasus/console-core`'s `src/prn-tenancy.ts` (moved out of iam-console's `lib/` in SMA-512
-  PR 2) is a small reader for the IAM tenancy PRN shapes (decision D6, fallback C). It is a
-  recorded ADR-0005 exception, and its `tests/unit/prn-tenancy.test.ts` replays the kernel parity
-  corpus through it, so a divergence from the kernel reds `paigasus-console-core-ts:test` — not
-  `iam-console-ts:test`, since the file now lives in, and is owned by, the package's own Moon
-  project (`ts/packages/paigasus-console-core/moon.yml`'s `test` task keys on the parity corpus
-  vectors and the kernel's `model.rs` directly). The name carries the `-tenancy` suffix because a
-  bare `prn.ts` is a Windows reserved device name (see the gotcha above).
-- **`@paigasus/console-core`** (`ts/packages/paigasus-console-core`, SMA-512 PR 2) is a source-only,
-  private, server-only package holding the console composition both zones share: the IAM client
-  factory, provisioning and the principal resolver, `mayI()`, `myScopes()`, `callIam`, the
-  JSON-lines logger, discovery, the correlation helpers and the PRN readers. It is the ONE package
-  allowed to import both `@paigasus/auth` and `@paigasus/sdk`: `@paigasus/auth` must not import
-  `@paigasus/sdk`, and the sdk boundary block bans every other `@paigasus/*` import, so before this
-  package only an app could depend on both. Its `createConsoleRuntime` factory must be called
-  EXACTLY ONCE per app, at module scope: every accessor but `iamClientsForToken` and
-  `iamClientsForAction` is a React `cache()` wrapper, and a second call makes a second memoization
-  identity — a second `Introspect`, a second `ListRoleGrants` walk, and up to 50 more tenancy reads
-  per render. Outside a React server render `cache()` is a pass-through, so NO unit or integration
-  test can catch a violation; only an e2e `Introspect` count can, and that lives in a later pull
-  request. `iamClientsForAction` is deliberately not memoized: it returns a `relogin` failure
-  rather than redirecting, so a Server Action can render an inline error. Its `testing/` subpath is
-  OUTSIDE `src/` and carries no `server-only` guard, on purpose: vitest and Playwright harnesses
-  import it outside a Next server. "Every file under `src/` imports `server-only`" has ONE exception:
-  `src/global.d.ts` declares a type only and imports nothing, so it does not import `server-only`
-  either — harmless, since a `.d.ts` emits no runtime code. What actually keeps a client bundle safe
-  is the package's `exports` map, which exposes only `.` (`src/index.ts`) and `./testing`
-  (`testing/index.ts`), so no deep import can reach an unguarded module, together with
-  `src/index.ts`'s own `import 'server-only'`. The per-file rule is defence in depth on top of that,
-  not the guard itself.
-- **node-redis `socket.socketTimeout` is an IDLE timer, not a reply deadline** (read from
-  `@redis/client` 6.2.1, SMA-648). Any read OR write on the socket resets it, so it fires on a
-  quiet, healthy connection, and it bounds a hung command only while the socket is otherwise silent
-  — under steady traffic a Redis that accepts commands and never replies is still unbounded (SMA-650
-  added a per-operation deadline in `@paigasus/console-core`. SMA-651 added the same shape to
-  `@paigasus/auth`'s session store, as the decorator in `src/adapters/operation-deadline.ts`. Its
-  `close()` destroys the connection at once. node-redis's graceful `close()` waits for a reply that
-  never comes, so the decorator does not use it). node-redis's DEFAULT reconnect strategy returns
-  `false` for a `SocketTimeoutError`, so the first idle gap closed the console descriptor cache's
-  client for the life of the process (`The client is closed`, nav degraded). A client that sets
-  `socketTimeout` therefore needs `pingInterval` (at most half of `socketTimeout`) to keep an idle
-  socket alive, and a `socket.reconnectStrategy` that returns a delay for EVERY cause.
-  `createRedisDescriptorCache` asserts all six options; the Redis user needs `+ping`.
-  `paigasus-console-core-ts:test-e2e` is the Docker-backed control, with no skip hatch, so a
-  console-core source edit now needs Docker.
-- **`forbidden()` needs `experimental.authInterrupts`, and a React `cache()` value does not reach
-  `forbidden.tsx`** (MEASURED on Next 16.3.4, SMA-511). Without the flag, `forbidden()` throws
-  instead of rendering the 403 boundary. The iam-console sets it through
-  `createNextConfig({ extend: { experimental: { authInterrupts: true } } })`, and its vitest env needs
-  `__NEXT_EXPERIMENTAL_AUTH_INTERRUPTS=true` or the call throws E488. A nested `forbidden.tsx` is a
-  per-segment boundary: `(console)/forbidden.tsx` renders inside the `(console)` layout with a real
-  HTTP 403. `forbidden()` takes no argument, and a `cache()` holder set before the call is EMPTY in
-  the `forbidden.tsx` render, so the view cannot receive request data that way.
-  The view gets the correlation id from a request header instead: `proxy.ts` mints it,
-  `@paigasus/console-core`'s `iam-clients.ts` sends it to IAM as `paigasus-correlation-id`, IAM
-  adopts it, and `forbidden.tsx` reads it with `headers()`. `@paigasus/console-core`'s
-  `correlation.ts`'s `FORBIDDEN_VIEW_CORRELATION` records which of the two ships,
-  and e2e row R4 fails if the view does the other. The flag is experimental: R4 asserts the real
-  HTTP 403, so a Next upgrade that changes it reds CI.
-- **A Playwright `globalSetup` runs in another process than the tests.** A fake server that a test
-  must script, or whose calls a test must count, cannot start there. The iam-console e2e tier only
-  checks the staged build in `tests/e2e/global-setup.ts` (SMA-655: `build` stages `.next/static`), and starts the fake IAM,
-  the fake IdP, the TLS terminator and the standalone server in a WORKER-scoped fixture
-  (`tests/e2e/support/harness.ts`, `workers: 1`). Playwright starts a new worker after a failed test,
-  and the fixture then starts the whole stack again. Anything that fixture imports runs WITHOUT the
-  vitest `server-only` stub, so `tests/support/` must not import a guarded `@paigasus/sdk` entry or a
-  `lib/` file (use `@paigasus/proto/iam`, which the `apps/*/tests/support/**` boundary exemption allows).
-- **An e2e tier must never write into a build tree** (MEASURED, SMA-655). iam-console's standalone
-  tree serves two tiers — `iam-console-ts:test-e2e` and gateway-console's two-zone tier — and Moon
-  runs them at the same time. When each tier's `global-setup.ts` deleted and re-copied
-  `.next/static` there, one tier's delete wiped the tree under the other: `ENOTEMPTY` in one
-  setup, and `React never hydrated` in 16 of 17 specs of the other. Each app's `build` script now
-  stages the standalone tree (`.next/static`, and `public/` if it exists), and the setups only
-  check it through `tests/e2e/support/staged-build.ts`. Two tests pin this in each app's `test`
-  task: `tests/unit/e2e-read-only.test.ts` is an allowlist scan that reds any `fs` write form
-  (`require`, a dynamic `import(...)` and `process.getBuiltinModule(...)` included — the latter
-  two also catch a plain backtick specifier, not only `'`/`"`) in `tests/e2e/**` or
-  `playwright.config.ts` (its `ALLOWED_EXCEPTIONS` ships empty), AND separately extracts the
-  `test-e2e` task's own `script:` block from `moon.yml` by indentation and checks it against an
-  ALLOWLIST, not a denylist of mutating command words — a denylist missed `sed -i`, `truncate`,
-  `dd` and a `node -e` fs call — so every non-empty trimmed line must be exactly one of
-  `set -euo pipefail` or `pnpm exec playwright test`, any other line reds and is named, and the
-  `pnpm exec playwright test` line must be present so an emptied script cannot pass — because a
-  copy or delete added directly to that script imports no `fs` module at all, so the fs allowlist
-  alone cannot see it — and also resolves `playwright.config.ts`'s `globalSetup`/`globalTeardown`
-  and reds if either points outside `tests/e2e/`. `tests/standalone-staging.test.ts` reds if
-  `build` stops staging.
-  Both `test` tasks list `moon.yml` as an input, because without it a `moon.yml`-only edit selects
-  neither — a cost of this: EVERY edit to an app's `moon.yml`, comment-only included, now selects
-  that app's whole `test` task. After a bare `pnpm exec next build` the staged tree is gone (Next's
-  `cleanDistDir`), and `moon run <app>-ts:build` without `--force` sees an unchanged hash and
-  skips; use `--force`. Residuals: the scan does not see a write through `child_process` or
-  through a helper outside `tests/e2e/`; a Moon cache-hit restore MERGES into `.next`, so a
-  deleted stable-named `public/` file can survive; nothing asserts that a third console app has
-  these tests.
-- The `ts` project's `sources` group names app code directories BY HAND (`apps/*/app/**/*`,
-  `apps/*/lib/**/*`, `apps/*/proxy.ts`). `ts:lint` runs `eslint .` over the whole tree, but Moon
-  re-runs it only for a file in its `sources` or `tests` group (or one of its config inputs), so a
-  new top-level app directory needs a line in `sources`, or an edit to it serves a cached lint PASS.
-  The same holds for a top-level app file such as `playwright.config.ts`.
 - The root `.gitignore`'s bare `build/` rule (line 41) silently ignores ANY directory named
   `build/` anywhere in the tree, not only a top-level one — `ts/apps/*/tests/build/` included. A
   file already tracked there stays tracked, so the trap is invisible until someone adds a NEW file
   under such a directory and it never gets committed. SMA-511 renamed its own directory to
   `tests/build-guard/` to avoid it, rather than fighting the ignore rule.
-- `ci/actionlint/run.sh` check 12 requires a `<!-- moon-diagnosis:ok -->` (or `:superseded`) marker
-  on ANY file that names `ciReport.json`, unless the file is listed in `CIREPORT_MENTIONS_ALLOWED`.
-  This is broader than the `doc_diagnosis_self_test` entry above says: it is not only about this
-  file's own diagnosis procedure block. A new plan or spec that quotes the procedure, or otherwise
-  mentions `ciReport.json`, reds the gate until it carries the marker or is added to the allowlist.
-- **A pipe into a reader that can exit early is a false red under `pipefail`** (MEASURED, SMA-647).
-  `grep -q` stops at its first match. `grep -m N` stops after N matches. `head` stops after N
-  lines. `awk … exit` stops at its `exit`. Each one stops before it reads the rest of its input. A
-  producer that writes again after that gets SIGPIPE and exits 141. Under `pipefail` the pipeline
-  status is then 141, although the reader found the match. On Linux in CI the race is rare and
-  needs CPU load, so a re-run passes: it caused three false check-12 reds in `repo:actionlint`
-  (PRs 223, 255, 258). On macOS with BSD grep 2.6.0 it is near-certain: the old check-12 probe
-  missed on 500 of 500 runs against the real block. Use one of three forms instead. When the
-  producer's status does not
-  matter, use process substitution: `grep -qF -- "$lit" < <(printf '%s' "$block")`. When the
-  status matters, capture the producer into a variable, check its status, then match the variable
-  the same way; declare a `local` on its own line, and under `set -e` write the capture as the left
-  side of `||`. In place of `head -1` or `grep -m1 … | sed`, use `sed -n 1p`; in place of
-  `awk '…{print $2; exit}'`, take the first match in awk's `END` block. Do not use a here-string:
-  Homebrew bash 5.3.15 deadlocks on one over about 512 bytes (see the LOCAL ONLY entry). Do not use
-  `>/dev/null` in place of `-q`, and do not use a `sed` script with `q`. `ci/actionlint/run.sh`
-  check 13 bans the pattern in every tracked `*.sh`, workflow, `moon.yml`, `.moon/**/*.yml` and
-  `lefthook.yml`. The rule reads only the next command word after the pipe, so a reader inside a
-  subshell or a brace group, a reader behind a wrapper word, and a `|&` pipe are not seen — see
-  `ci/actionlint/README.md` L33–L41. Its allowlist, `EARLY_EXIT_READER_ALLOWED`, ships empty. Its
-  fixtures live in `ci/actionlint/fixtures/early-exit/*.txt`, because check 13 also scans
-  `run.sh`. Check 12 keeps
-  a second opinion on each missing literal: a `literal-disagreement` row means `grep` and a bash
-  `case` match disagree, which is evidence of a second mechanism. Keep that run's whole output for
-  SMA-647 before you re-run.
-- LOCAL ONLY, CORRECTED (SMA-512): no local bash currently runs `ci/actionlint/run.sh` to
+
+### This development Mac only
+
+- **Standing rule: No single local bash runs every gate. `repo:affected-smoke` needs system bash
+  3.2. `repo:ruff-ci`, `repo:next-public-free` and `repo:publish-metadata` need bash 4+.
+  `repo:actionlint`'s full gate has no working local bash at all.**
+  LOCAL ONLY, CORRECTED (SMA-512): no local bash currently runs `ci/actionlint/run.sh` to
   completion. The 512-byte pipe (see the next entry) is most probably the same cause; nobody
   measured the pipe state on these 2026-09-14 runs (spec §2). When the host is in that
   small-pipe state, the full gate now exits rc 2 in seconds under either bash, instead of
@@ -1234,73 +301,6 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   actionlint version bump reds the gate on purpose until then (SMA-654). Other gates that use here-strings
   (for example `repo:affected-smoke`) still hang under bash 5.x on such a host. This entry does
   not fix them.
-- **`ts/apps/gateway-console`** (SMA-512 PR 3) is the second console zone: a Next.js 16 App Router
-  app for the AI Gateway, mounted at `/gateway`, Moon id `gateway-console-ts`. Its `lib/config.ts`
-  demands **both** an `iam` entry and a `gateway` entry in `PAIGASUS_SERVICES` — it refuses to
-  parse a map missing either one — and declares no gateway-specific env key of its own; the
-  gateway's address comes only through `PAIGASUS_SERVICES.gateway`, unlike IAM, which also carries
-  its own `PAIGASUS_IAM_GRPC_URL`. The zone overview lives at **`(console)/overview/page.tsx`** →
-  `/gateway/overview`, **not** at `/gateway/` — the public landing page already owns that path, and
-  a second `page.tsx` at the same route fails the Next build (plan D14). `gateway.chat.stream`
-  (`app/_components/gateway-state.ts`) counts only when the service's state is `available`; a
-  `degraded` service can still carry the descriptor of its last good probe, and treating that
-  stale descriptor as a live capability would report a feature the gateway cannot currently serve.
-- **`gateway-console-ts:test-e2e` now needs Docker** (SMA-512 PR 4). It fails loudly when Docker is
-  not reachable. `iam-console`'s own e2e tier does not need Docker. The `PAIGASUS_SESSION_STORE`
-  memory setting is refused when `PAIGASUS_ZONES` names two zones, so a two-zone tier has no
-  alternative store to use instead. Every `iam-console` edit now runs this tier too. An `inputs`
-  entry on `gateway-console-ts:test-e2e` causes this, not a `deps` relation — only `inputs` confers
-  affectedness on Moon 2.5.3. This is the cost of a tier that must re-run when the property it
-  tests can break. A Playwright **worker fixture** now starts a container: the first one in this
-  repository started this way. A worker restart does not overlap two containers. The fixture's
-  teardown runs before the worker restarts. The old container stops and is fully removed before the
-  new worker starts a new one. A measured run showed the old container up at t=15s, no container at
-  all at t=16s, and a brand-new container at t=17s. So this pull request needed no deterministic
-  container label and no stale-container sweep.
-- Playwright's `locator.waitFor()` defaults to **no timeout** (1.63.0), and no `playwright.config.ts`
-  in this repo sets `use.actionTimeout`. So an unbounded `waitFor` is bounded only by the TEST
-  budget — 120 s in CI, 60 s locally — and when it expires it reports the locator, not a cause.
-  That cost SMA-512 pull request 4 two minutes of CI for an unexplained R4 flake. Both consoles'
-  hydration waits now go through `tests/e2e/support/hydration.ts`, bounded at
-  `HYDRATION_TIMEOUT_MS = 15_000` (one value, deliberately not a `process.env.CI` branch: both
-  configs set `retries: isCI ? 2 : 0`, so a branched constant would put the TIGHTER bound on the
-  run with NO retry). The helper takes a hand-written STRUCTURAL page type rather than `Page`,
-  which lets `tests/unit/hydration.test.ts` drive it with a plain stub and exercise the failure
-  path with no browser; a real `Page` satisfies that type on its own, so the module needs no
-  `@playwright/test` import at all — not even a type one. Two traps measured there:
-  `Pick<Page, 'locator'>` does NOT accept a stub (it keeps the full `Locator` return type —
-  `error TS2322`), so the parameter is a structural type; and the helper verifies timeout
-  failures by checking the error's `name` field. MEASURED on 1.63.0: a
-  `waitFor` that exceeds its own `timeout` rejects with `name` `TimeoutError`, but the constructor
-  name is mangled to `TimeoutError2` by bundling, so `error.constructor.name` is not usable either;
-  the check is on `name` because importing the class would give the module a runtime
-  `@playwright/test` dependency. Playwright also rejects a pending `waitFor` with "Target page, context
-  or browser has been closed" during teardown; calling that "the client bundle did not run" is a
-  confident wrong diagnosis. **Residual: nothing gates a third console zone** — a new app that copies
-  `login.ts` gets an unbounded wait and no `hydration.test.ts`, and nothing reds. `stripComments`
-  (SMA-639 local review) is now a single-pass character scanner, not a pair of regexes: it tracks
-  plain code, a single-quoted string, a double-quoted string, a template literal, a line comment,
-  and a block comment as separate states, with backslash escapes consumed inside a string. A `/*`
-  or `//` inside a string literal, or inside a line comment, no longer starts a comment and can no
-  longer eat a real `.waitFor(` call — the false negative the old regex pair had is closed, and a
-  fixture in `hydration.test.ts` proves it (verified by temporarily restoring the old two-regex
-  version, which fails that fixture). A template literal's `${...}` interpolation is now tracked as
-  its own code region too (SMA-639 CR round 2): the scanner resumes plain-code scanning at an
-  unescaped `${`, counts nested `{`/`}` pairs to find the matching closer, so an object literal or
-  a block body inside the interpolation does not end it early, and a nested template literal inside
-  an interpolation is handled the same way, on the same stack. A second fixture in
-  `hydration.test.ts` proves this the same way (temporarily masking the whole template span again
-  fails that fixture). **What remains:** the scanner is not a full tokenizer, so a regex literal is
-  not its own state — a `/*` or `//` sequence inside one would still be read as a comment marker.
-  That shape is absent from the tree today and is not gated. The scan's regex also cannot see the sibling
-  `waitForURL`/`waitForResponse`/`waitForRequest`/`waitForLoadState` APIs, which default to unbounded
-  the same way (`use.navigationTimeout` also defaults to 0) — roughly 15 live call sites across both
-  apps' e2e trees are not covered, and widening the regex is out of scope. The `15_000` literal pin in
-  `hydration.test.ts` case 5 is also the only tight constraint on the value in CI: MEASURED, with the
-  literal removed, a `30_000` constant passes the relational assertions under `CI=1`, since CI's 120 s
-  budget permits up to 30 s — the `/4` bound is tight only locally. `@paigasus/app-shell`'s
-  `loadHydrated` is NOT affected: it uses `expect(...).toHaveCount(1)`, already bounded by the expect
-  timeout.
 
 ## Workflow
 
