@@ -57,6 +57,12 @@ UNGATED_JOBS = frozenset({"release-pr"})
 # V8c says every publisher must be downstream. Without V8c, deleting `approve-release` from the
 # `release` job's needs: removes the only gate in the file and passes V1, V3, V4, V7 and V8a/b.
 APPROVAL_JOB = "approve-release"
+# Fix round 1, Important 3. `_environment_name(gate)` truthy is not enough: `environment:
+# whatever` also names an environment, and satisfies the old V8a with no required reviewers at
+# all unless GitHub's own project settings happen to protect that name too. Spec § 7.1 pins EVERY
+# approval job — the kernel one and each service chain's — to this one, specific environment.
+# Case-folded, since GitHub itself treats environment names case-insensitively.
+APPROVAL_ENVIRONMENT = "release-approval"
 
 # SMA-658. Each service image chain carries its OWN approval job, separate from the kernel's. A
 # kernel approval must not authorise an image push, and an image approval must not authorise a
@@ -96,12 +102,14 @@ ACCEPTED_PLAN_FORMS = frozenset({PLAN_GATE_EXPR, "${{ " + PLAN_GATE_EXPR + " }}"
 # same literal pinning: `== 'true'` inverts the decision and `== 'false'` drops the chain on an
 # unset output. A chain job may carry EITHER its own service's literal or the kernel one — never a
 # different service's, which would tie two chains together.
+# Fix round 1, Minor 7: built from CHAIN_APPROVALS' own keys, not a second hand-maintained
+# ("iam", "gateway") tuple. Two lists naming the same services in one file will drift.
 SERVICE_PLAN_GATE_EXPRS: dict[str, frozenset[str]] = {
     service: frozenset({
         f"needs.{PLAN_JOB}.outputs.skip_{service} != 'true'",
         "${{ " + f"needs.{PLAN_JOB}.outputs.skip_{service} != 'true'" + " }}",
     })
-    for service in ("iam", "gateway")
+    for service in CHAIN_APPROVALS
 }
 
 
@@ -1097,11 +1105,18 @@ def approval_boundary_violations(jobs: dict, name: str) -> list[str]:
             out.append(f"{name}: V8a: no job named '{approval}' exists, but a job of its chain "
                        f"does. Each service chain carries its own approval.")
             continue
-        if not _environment_name(gate):
+        env_name = _environment_name(gate)
+        if not env_name:
             out.append(f"{name}: V8a: job '{approval}' declares no NAMED environment:. The pause "
                        f"that makes it a gate comes from that named environment's required "
                        f"reviewers; a missing environment:, or one with no name:, is an ordinary "
                        f"job that always succeeds.")
+        elif env_name.casefold() != APPROVAL_ENVIRONMENT.casefold():
+            out.append(f"{name}: V8a: job '{approval}' declares environment '{env_name}', not "
+                       f"'{APPROVAL_ENVIRONMENT}'. Spec § 7.1 pins every approval job to this "
+                       f"one environment; a differently named environment might carry no "
+                       f"required reviewers, or a reviewer set the release process never "
+                       f"intended.")
 
     # V8b. Nothing upstream of an approval job may publish.
     for approval in sorted(required):
@@ -1274,24 +1289,29 @@ def plan_contract_violations(jobs: dict, name: str) -> list[str]:
     # `${{ steps.decide.outputs.skip_iam || 'true' }}` resolves to 'true' on an unset output and
     # silently drops that chain. The step id must be the one V9c already resolved.
     #
-    # B4: the loop is guarded — it runs only when this file actually declares a chain job (one
-    # whose approval differs from the kernel's). Unguarded, it would also red `_OK_MAIN` and every
-    # fixture built on it, and the real release.yml before Task 7 lands: none of those declare the
-    # four service outputs, and none of them needs to, because none of them has a chain job to run.
-    if any(approval_for_job(jid) != APPROVAL_JOB for jid in jobs):
-        for service in SERVICE_PLAN_GATE_EXPRS:
-            for key in (f"skip_{service}", f"version_{service}"):
-                expr = outs.get(key) if isinstance(outs, dict) else None
-                if not isinstance(expr, str):
-                    out.append(f"{name}: V9c: job '{PLAN_JOB}' declares no outputs.{key}. Its "
-                               f"chain would read the empty string, which runs the chain but "
-                               f"carries no version.")
-                    continue
-                want = "${{ steps." + str(decision.get("id") if decision else "") + f".outputs.{key} }}}}"
-                if expr.strip() != want:
-                    out.append(f"{name}: V9c: outputs.{key} is {expr!r}, not {want!r}. Anything "
-                               f"else can resolve to a constant, and a `|| 'true'` tail drops the "
-                               f"chain on an unset output.")
+    # B4/Fix round 1 Minor 4: the loop is guarded PER SERVICE — it checks only the services that
+    # actually own a job in this file, the same way `required` in approval_boundary_violations
+    # only demands an approval job a chain uses. `_OK_MAIN` and every fixture built on it declare
+    # no chain job at all, so `services_in_use` is empty and the loop body never runs — the old,
+    # coarser guard's behaviour for those files is unchanged. But a file carrying only the iam
+    # chain no longer reds on the two gateway outputs it has no reason to declare.
+    services_in_use = {
+        service for service in SERVICE_PLAN_GATE_EXPRS
+        if any(jid == f"{prefix}{service}" for jid in jobs for prefix in _CHAIN_JOB_PREFIXES)
+    }
+    for service in sorted(services_in_use):
+        for key in (f"skip_{service}", f"version_{service}"):
+            expr = outs.get(key) if isinstance(outs, dict) else None
+            if not isinstance(expr, str):
+                out.append(f"{name}: V9c: job '{PLAN_JOB}' declares no outputs.{key}. Its "
+                           f"chain would read the empty string, which runs the chain but "
+                           f"carries no version.")
+                continue
+            want = "${{ steps." + str(decision.get("id") if decision else "") + f".outputs.{key} }}}}"
+            if expr.strip() != want:
+                out.append(f"{name}: V9c: outputs.{key} is {expr!r}, not {want!r}. Anything "
+                           f"else can resolve to a constant, and a `|| 'true'` tail drops the "
+                           f"chain on an unset output.")
     return out
 
 
@@ -2551,23 +2571,65 @@ FIXTURES: list[tuple[str, str, str, str | None]] = [
     # V8c checks, without pulling Task 6's markers forward. Task 6 must add the equivalent
     # topology rows using the real container markers once PUBLISH_MARKERS learns them, so the
     # two halves meet.
+    # Fix round 1, Important 2: `want` was the bare "V8c", which the OLD, single-gate V8c
+    # already produces for `publish-images-iam` (it always names `approve-release`, since that
+    # job is never on this publisher's needs: path regardless of what THIS row edits) — so the
+    # row passed for a reason unrelated to the rule it targets. Pin the NEW code's per-chain
+    # wording instead, which names the SERVICE's own approval and never fires under the old code.
     ("SMA-658 a publisher without its own approval", "main",
      _OK_IMAGES_MAIN.replace("    needs: [plan, images-build-iam, approve-images-iam]",
                              "    needs: [plan, images-build-iam]")
      .replace("steps: [{run: crane push layout ghcr.io/smk1085/paigasus-iam:x}]",
-              "steps: [{run: cargo publish}]"), "V8c"),
+              "steps: [{run: cargo publish}]"), "'approve-images-iam' is not on its needs: path"),
     ("SMA-658 a publisher behind the KERNEL approval only", "main",
      _OK_IMAGES_MAIN.replace("    needs: [plan, images-build-iam, approve-images-iam]",
                              "    needs: [plan, images-build-iam, approve-release]")
      .replace("steps: [{run: crane push layout ghcr.io/smk1085/paigasus-iam:x}]",
-              "steps: [{run: cargo publish}]"), "V8c"),
+              "steps: [{run: cargo publish}]"), "'approve-images-iam' is not on its needs: path"),
     ("SMA-658 the service approval loses its environment", "main",
      _OK_IMAGES_MAIN.replace("    needs: [images-build-iam]\n    environment: release-approval",
                              "    needs: [images-build-iam]"), "V8a"),
+    # Fix round 1, Important 3. V8a used to accept ANY named environment. Spec § 7.1 pins every
+    # approval job — the kernel one and each service chain's — to the ONE environment
+    # `release-approval`; renaming a chain approval's environment must red, distinctly from "no
+    # environment at all" (the row above).
+    ("SMA-658 a chain approval renamed to a different environment", "main",
+     _OK_IMAGES_MAIN.replace(
+         "  approve-images-gateway:\n    needs: [images-build-gateway]\n"
+         "    environment: release-approval\n",
+         "  approve-images-gateway:\n    needs: [images-build-gateway]\n"
+         "    environment: images-approval-gateway\n"),
+     "job 'approve-images-gateway' declares environment 'images-approval-gateway'"),
+    # Fix round 1, Minor 9 (same class as Important 2 above): `want` was the bare "V9b", which
+    # already fires on the OTHER three chain jobs in this fixture for an unrelated reason (none
+    # of their `if:` literals match the OLD, kernel-only ACCEPTED_PLAN_FORMS either). Pin the
+    # per-job text, including the NEW "not one of [...]" wording — the old code's message reads
+    # "not <single literal>." instead, so this substring cannot appear under the old code, for
+    # this job or any other in the fixture.
     ("SMA-658 a chain job with the wrong gate literal", "main",
      _OK_IMAGES_MAIN.replace("    if: needs.plan.outputs.skip_iam != 'true'\n    runs-on: ubuntu-latest\n    steps: [{run: ci/images/run.sh build-oci",
                              "    if: needs.plan.outputs.skip_iam == 'true'\n    runs-on: ubuntu-latest\n    steps: [{run: ci/images/run.sh build-oci"),
-     "V9b"),
+     "job 'images-build-iam' needs 'plan' but its if: is \"needs.plan.outputs.skip_iam == 'true'\", not one of ["),
+    # Fix round 1, Important 1. Measured: replacing the whole V9c-for-services loop with
+    # `if False:` left all 131 rows (at the time) green — the rule had no fixture at all and
+    # could be deleted silently. Three rows below, one per failure shape, each wanting the
+    # SPECIFIC message for the key it breaks (not the bare "V9c" rule name, which the two
+    # OTHER, still-correct service outputs in the same fixture do not produce, but a careless
+    # substring could still coincide with a different key's message).
+    ("SMA-658 V9c: skip_iam carries a `|| 'true'` tail", "main",
+     _OK_IMAGES_MAIN.replace(
+         "      skip_iam: ${{ steps.decide.outputs.skip_iam }}\n",
+         "      skip_iam: ${{ steps.decide.outputs.skip_iam || 'true' }}\n"),
+     "V9c: outputs.skip_iam is"),
+    ("SMA-658 V9c: version_iam resolves to a constant, not a step output", "main",
+     _OK_IMAGES_MAIN.replace(
+         "      version_iam: ${{ steps.decide.outputs.version_iam }}\n",
+         "      version_iam: '1.2.3'\n"),
+     "V9c: outputs.version_iam is"),
+    ("SMA-658 V9c: skip_gateway is declared nowhere in plan's outputs", "main",
+     _OK_IMAGES_MAIN.replace(
+         "      skip_gateway: ${{ steps.decide.outputs.skip_gateway }}\n", ""),
+     "V9c: job 'plan' declares no outputs.skip_gateway"),
 ]
 
 
