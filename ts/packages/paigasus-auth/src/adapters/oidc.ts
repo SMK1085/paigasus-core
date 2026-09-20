@@ -150,6 +150,13 @@ function wrapError(stage: string, cause: unknown): Error {
  * Reading challenge parameters to catch that case is deliberately out of scope.
  */
 function classifyRefreshError(cause: unknown): Error {
+  // `instanceof` is SAFE here, unlike core/single-flight.ts's (SMA-657), and it stays safe even
+  // though openid-client may itself be duplicated across Next's two module graphs: this check and
+  // the code that calls `client.refreshTokenGrant` (inside createOidcClient, a sibling top-level
+  // function) both read the one module-level `client` binding. It is the MODULE that stays single,
+  // not any one closure — classifyRefreshError is not part of the object createOidcClient returns.
+  // It is this function's OUTPUT that crosses copies, as RefreshRejected — which is exactly why
+  // that one needs a code check.
   if (cause instanceof client.ResponseBodyError && cause.error === 'invalid_grant') {
     return new RefreshRejected('invalid_grant');
   }

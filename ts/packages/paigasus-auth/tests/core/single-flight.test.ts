@@ -2,7 +2,8 @@
 import { describe, expect, it, vi } from 'vitest';
 import { MemorySessionStore } from '../../src/adapters/memory-store.js';
 import { noopLogger } from '../../src/adapters/noop-logger.js';
-import { RefreshRejected } from '../../src/core/errors.js';
+import { RefreshRejected, SessionStoreTimeout } from '../../src/core/errors.js';
+import { failingStore, type StoreMethod } from '../support/store-failure.js';
 import { shouldRefresh } from '../../src/core/refresh-policy.js';
 import { resolveSession } from '../../src/core/single-flight.js';
 import { makeRecord } from '../store-contract.js';
@@ -490,6 +491,35 @@ describe('a failing refresh (SMA-626 § 2.3)', () => {
     expect(await store.get('s')).toBeNull();
   });
 
+  // SMA-657. The SAME case as the row above, with the error built by a SECOND copy of core/errors
+  // — the shape Next 16 produces, because `refresh` delegates to the shared `runtime.oidc` while
+  // `resolveSession` runs in whichever copy serves the request. `resolveSession` was imported
+  // statically at the top of this file, so it keeps its FIRST-copy binding: this is the real
+  // class-identity split; the refresh dependency is injected here rather than taken from the
+  // runtime.
+  //
+  // The fixture must be inside the skew window AND still live, or single-flight.ts returns early
+  // and never attempts a refresh at all (shouldRefresh is `now >= expiresAt - skewMs`). The live
+  // token is the point: it is the case where the defect changes the RETURN path, not just the log.
+  it('classifies a definitive rejection from a SECOND module copy', async () => {
+    vi.resetModules();
+    const foreign = await import('../../src/core/errors.js');
+    // Precondition: without this, the test passes vacuously if the import returns the same module.
+    expect(foreign.RefreshRejected).not.toBe(RefreshRejected);
+    const foreignRejected = () => Promise.reject(new foreign.RefreshRejected('invalid_grant'));
+
+    const store = new MemorySessionStore();
+    await store.set('s', makeRecord({ accessExpiresAt: Date.now() + 30_000 }), 60_000, null);
+    const { logger, events } = recordingLogger();
+
+    // NOT `toBeInstanceOf(RefreshRejected)`: that is FALSE for a foreign-copy error, which is the
+    // entire defect. Asserting it would red this test both before AND after the fix.
+    await expect(resolveSession({ ...deps(store, foreignRejected), logger, skewMs: 60_000 }, 's')).rejects.toBeInstanceOf(foreign.RefreshRejected);
+    expect(events).toContainEqual(['session.refresh_failed', { sid: sidTag('s'), reason: 'rejected', degraded: false }]);
+    expect(events).toContainEqual(['session.deleted', { sid: sidTag('s'), reason: 'refresh_rejected' }]);
+    expect(await store.get('s')).toBeNull();
+  });
+
   // Without this, a revoked refresh token and a live access token sit in Redis for the full ttlMs
   // and every later getSession() re-takes the lock and re-calls the token endpoint.
   it('DELETES the record on a definitive rejection, and says why', async () => {
@@ -626,5 +656,28 @@ describe('a failing refresh (SMA-626 § 2.3)', () => {
     // satisfied by the outer cap delete, which never touches the code this test exists to guard.
     expect(events).toContainEqual(['session.refresh_timeout', { sid: sidTag('s') }]);
     expect(out).toBeNull();
+  });
+
+  // SMA-657 § 7. The `if (rejected)` delete became reachable from BOTH module copies with this
+  // fix, and that delete goes through the SMA-651 deadline decorator. A store that fails there
+  // REPLACES the RefreshRejected as the thrown value, so `session.deleted` never fires and the
+  // record survives for its TTL. That outcome is accepted, not fixed: getSession returns null on
+  // any throw, so the user is still signed out, and the next request retries the delete. This row
+  // exists so the accepted outcome is pinned rather than discovered later as a surprise.
+  it('a failing delete on the rejection path replaces the error and leaves the record', async () => {
+    const inner = new MemorySessionStore();
+    await inner.set('s', makeRecord({ accessExpiresAt: Date.now() + 30_000 }), 60_000, null);
+    const calls: string[] = [];
+    const store = failingStore(inner, new Set<StoreMethod>(['delete']), () => new SessionStoreTimeout('delete', 4000, 'deadline'), calls);
+    const { logger, events } = recordingLogger();
+
+    await expect(resolveSession({ ...deps(store, rejected), logger, skewMs: 60_000 }, 's')).rejects.toBeInstanceOf(SessionStoreTimeout);
+    // The classification still happened and was logged...
+    expect(events).toContainEqual(['session.refresh_failed', { sid: sidTag('s'), reason: 'rejected', degraded: false }]);
+    // ...the delete WAS attempted...
+    expect(calls).toContain('delete:s');
+    // ...but it did not land, so there is no session.deleted and the record survives.
+    expect(events.some(([name]) => name === 'session.deleted')).toBe(false);
+    expect(await inner.get('s')).not.toBeNull();
   });
 });
