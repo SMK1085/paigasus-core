@@ -766,6 +766,321 @@ smoke() {
   echo "SMOKE OK ($*)"
 }
 
+# --- console smoke (SMA-513 spec § 5.4 and § 5.5) ------------------------------------------------
+# A text allowlist over ts/Dockerfile's COPY instructions cannot see a missing .next/static: Next's
+# standalone output carries none of its own (measured, SMA-510) and the staging copy in the builder
+# stage is what supplies it. An image built without that copy still answers 200 on
+# <basePath>/healthz, so a probe-based smoke passes while every client chunk 404s. These assertions
+# fetch the SERVED CHUNK instead, which is the only form that fails on the real defect.
+#
+# This is ts/tests/docker/serves-chunks.sh, moved here and deleted there: leaving both would create
+# a second, unpinned copy of the assertion.
+#
+# Script-global, not `local`: the EXIT trap fires after smoke_consoles has returned and its locals
+# have gone out of scope, and under `set -u` a trap that reads a dead local dies with `unbound
+# variable` — the measured PR 270 failure recorded on load_oci_cleanup above. An EXIT trap and not
+# the RETURN trap the task brief asked for, for the reason recorded there too: a RETURN trap does
+# NOT fire when `set -e` aborts a function from inside, which is exactly the path that would leak a
+# container.
+CONSOLE_SMOKE_NAMES=""
+
+console_smoke_cleanup() {
+  local n
+  for n in $CONSOLE_SMOKE_NAMES; do
+    docker rm -f "$n" >/dev/null 2>&1 || true
+  done
+  CONSOLE_SMOKE_NAMES=""
+}
+
+# A FULL, schema-valid dummy runtime configuration, not just PAIGASUS_ZONE and PAIGASUS_ZONES. Both
+# consoles validate their ENTIRE runtime config (@paigasus/auth's OIDC/session shape,
+# @paigasus/discovery's PAIGASUS_SERVICES, and PAIGASUS_IAM_GRPC_URL — see ts/apps/<app>/lib/
+# config.ts) on the FIRST request, and a missing or malformed variable throws "Invalid runtime
+# configuration", which the app renders as a 500. From the outside that 500 looks exactly like a
+# missing .next/static — both leave the page with no chunk URL to find — so without this block the
+# assertion cannot tell "not staged" from "not configured" apart.
+#
+# One shared array covers both zones: iam-console only requires an "iam" entry in
+# PAIGASUS_SERVICES, gateway-console requires both "iam" AND "gateway"
+# (ts/apps/gateway-console/lib/config.ts), so the map below carries both unconditionally.
+#
+# WARNING, INTENTIONAL COUPLING: a new required key added to a console's lib/config.ts schema makes
+# this array stale and turns every 200 here into a 500. That is supposed to fail LOUDLY — add the
+# key here; do NOT add a fallback in the app or relax the assertions below.
+CONSOLE_SMOKE_ENV=(
+  -e "PAIGASUS_OIDC_ISSUER=https://idp.example.com"
+  -e "PAIGASUS_OIDC_CLIENT_ID=dummy-client"
+  -e "PAIGASUS_OIDC_CLIENT_SECRET=dummy-secret"
+  -e "PAIGASUS_PUBLIC_ORIGIN=https://console.example.com"
+  -e "PAIGASUS_SESSION_STORE=memory"
+  -e "PAIGASUS_SERVICES={\"iam\":\"http://iam:8080\",\"gateway\":\"http://gateway:8080\"}"
+  -e "PAIGASUS_IAM_GRPC_URL=http://iam:9090"
+)
+
+# Walks the image's staged tree with the image's OWN node — the runtime base is distroless and has
+# no shell, so there is no `find` in there to call. Prints `public=0|1` on line 1 and one staged
+# .next/static path per line after it, with the BUILD_ID directory rewritten to the literal
+# <BUILD_ID>. MEASURED (SMA-513): Next generates BUILD_ID as a random nanoid — no next.config.ts in
+# this repo sets generateBuildId — so the host build and the image build never share one, and an
+# un-normalised comparison of the two trees can NEVER pass. Sorting is left to the caller, which
+# puts both sides through the same `LC_ALL=C sort`: also MEASURED, node's Array.sort and the host's
+# `sort` disagreed on `chunks/3_j6cf7txpq_5.js` vs `chunks/3h4osm35n9wui.js`, which would have
+# reported drift between two byte-identical trees.
+CONSOLE_STAGED_TREE_JS='
+const fs = require("fs");
+const root = process.argv[1];
+const id = fs.readFileSync(root + "/.next/BUILD_ID", "utf8").trim();
+const walk = (d, p = "") =>
+  fs.readdirSync(d, { withFileTypes: true })
+    .flatMap((e) => (e.isDirectory() ? walk(d + "/" + e.name, p + e.name + "/") : [p + e.name]));
+const rel = walk(root + "/.next/static")
+  .map((f) => (id !== "" && f.indexOf(id + "/") === 0 ? "<BUILD_ID>/" + f.slice(id.length + 1) : f));
+console.log(["public=" + (fs.existsSync(root + "/public") ? "1" : "0")].concat(rel).join("\n"));
+'
+
+# Every `$( )` here is either guarded with `|| <var>=""` and followed by an explicit check that
+# prints its own named ::error::, or provably unable to fail before its own message. That is not
+# decoration: under `set -euo pipefail` an unguarded failing capture aborts the whole script on
+# curl's or docker's generic message, BEFORE the branch that would have named the cause, and it
+# also cancels the other console's rows.
+#
+# Likewise `ec=1` and never `return 1` inside the battery: one failing console must not hide the
+# other, and the verdict is taken once at the end. The closing line is an `if`, not
+# `[ "$ec" -eq 0 ] && echo …` — a failing `[ ]` as the last top-level command would make the
+# function return 1 on its own.
+smoke_consoles() {
+  local service app base_path other name port origin status html chunk bytes code uid
+  local run_out img_out img_public img_list host_public host_list img_dirs host_dirs
+  local host_std host_static host_id
+  local ec=0 bad started
+  trap console_smoke_cleanup EXIT
+  console_smoke_cleanup
+
+  for service in iam gateway; do
+    # app_for/base_path_for print their own "unknown console: …" before returning 1, so even an
+    # unguarded abort here cannot precede its own cause. $service is a loop literal from the list
+    # both functions accept, so neither can fail at all.
+    app="$(app_for "$service")"
+    base_path="$(base_path_for "$service")"
+    if [ "$service" = "iam" ]; then other="/gateway"; else other="/iam"; fi
+    name="smoke-${app}-${RUN_ID}"
+    # Registered BEFORE the container is created, so a `docker run` that fails part-way still has
+    # its name cleaned up. $RUN_ID is the same $$ suffix every other container name in this file
+    # carries, so two concurrent runs against one daemon never collide.
+    CONSOLE_SMOKE_NAMES="$CONSOLE_SMOKE_NAMES $name"
+
+    echo "== smoke ${app} =="
+    bad=0
+    started=0
+    # -p 0:3000 asks the daemon for a free ephemeral port. GUARDED: without it a name collision or
+    # an image that will not start aborts the script on docker's own message and the gateway
+    # console is never checked.
+    run_out="$(docker run -d --name "$name" -p 0:3000 \
+      -e PAIGASUS_ZONE="$service" \
+      -e PAIGASUS_ZONES="{\"iam\":\"/iam\",\"gateway\":\"/gateway\"}" \
+      "${CONSOLE_SMOKE_ENV[@]}" \
+      "${app}:dev" 2>&1)" || run_out=""
+    if [ -z "$run_out" ]; then
+      echo "::error::${app}: the container did not start from ${app}:dev — the image is missing, or 'docker run' refused it. Run 'ci/images/run.sh build-console ${service}' first." >&2
+      ec=1; bad=1
+    else
+      started=1
+    fi
+
+    if [ "$bad" -eq 0 ]; then
+      # `sed -n 1p` reads its whole input and is the approved substitute for `head -1` (the
+      # repo bans piping into an early-exit reader). It is needed because `docker port` prints one
+      # line per published binding — an IPv6 line as well as the IPv4 one on some daemons — and
+      # `${port##*:}` over both lines would take the second binding's port.
+      port="$(docker port "$name" 3000/tcp | sed -n 1p)" || port=""
+      port="${port##*:}"
+      case "$port" in
+        ''|*[!0-9]*)
+          echo "::error::${app}: could not read the published host port for container port 3000/tcp ('docker port' gave '${port:-<nothing>}') — the container started but published no port." >&2
+          ec=1; bad=1
+          ;;
+      esac
+    fi
+
+    origin=""
+    if [ "$bad" -eq 0 ]; then origin="http://127.0.0.1:${port}"; fi
+
+    # Step 1: the page renders. Two curl calls, not one.
+    #
+    # The CANONICAL url, with NO trailing slash. Next compiles an internal, priority 308 redirect
+    # for "<basePath>/" -> "<basePath>" whenever trailingSlash is false (the default; neither
+    # console's next.config.ts sets it), confirmed by reading .next/routes-manifest.json out of the
+    # built image. A request to "<basePath>/" without -L therefore reads a 4-byte redirect body and
+    # finds no chunk URL in it — an assertion that can never pass on a correct image.
+    # `-L --max-redirs 3` follows that redirect if it ever fires, so this keeps working if
+    # trailingSlash is flipped to true and the redirect direction reverses. `--max-time` bounds the
+    # request so a hung connection, or -L chasing an off-origin redirect (a future auth gate
+    # sending this to a real IdP), cannot run the CI gate indefinitely.
+    status=""
+    if [ "$bad" -eq 0 ]; then
+      # GUARDED: a 500 from an invalid runtime config, or any other non-2xx, must reach the named
+      # message below rather than abort the script after ~20s of retries on curl's generic one.
+      # `-w '%{http_code}'` on a status-only probe (-o /dev/null, no -f) carries the HTTP status
+      # into that message without entangling status parsing with the page BODY the second call
+      # grabs; a combined single-curl capture was considered and rejected as the more fragile.
+      status="$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 -L --max-redirs 3 \
+        --retry 20 --retry-delay 1 --retry-all-errors "${origin}${base_path}")" || status=""
+      if [ "$status" != "200" ]; then
+        echo "::error::${app}: ${base_path} did not render (HTTP ${status:-no response}) — check the container's runtime configuration (CONSOLE_SMOKE_ENV above) against ts/apps/${app}/lib/config.ts, or read 'docker logs ${name}'." >&2
+        docker logs "$name" 2>&1 | tail -30 >&2 || true
+        ec=1; bad=1
+      fi
+    fi
+
+    html=""
+    if [ "$bad" -eq 0 ]; then
+      # The probe already confirmed 200, but the container can still regress between the two calls
+      # — a connection drop, a timeout the probe's retries happened to dodge, or -L exceeding
+      # --max-redirs — so this call is GUARDED too and carries its own, smaller retry budget.
+      html="$(curl -fsSL --max-redirs 3 --max-time 30 --retry 5 --retry-delay 1 \
+        --retry-all-errors "${origin}${base_path}")" || html=""
+      if [ -z "$html" ]; then
+        echo "::error::${app}: ${base_path} answered HTTP 200 to the status probe, but the body fetch itself failed or returned nothing (connection drop, timeout, or too many redirects) — a transport failure between the two calls, not a staging or runtime-configuration failure." >&2
+        ec=1; bad=1
+      fi
+    fi
+
+    # Step 2: extract one chunk URL. No pipe into an early-exit reader: `grep -oE` and `sort -u`
+    # both read their whole input, and `sed -n 1p` is the approved stand-in for `head -1`.
+    # GUARDED: `grep -oE` exits 1 on no match even after reading everything, and under
+    # `set -o pipefail` an unguarded assignment from that pipeline would abort the script here
+    # instead of reaching the named branch below.
+    chunk=""
+    if [ "$bad" -eq 0 ]; then
+      chunk="$(printf '%s' "$html" | grep -oE "${base_path}/_next/static/[^\"']+\.js" | sort -u | sed -n 1p)" || chunk=""
+      if [ -z "$chunk" ]; then
+        # Step 1 already confirmed HTTP 200 and followed any redirect, so an invalid runtime
+        # configuration and an unfollowed redirect are no longer possible causes HERE; naming them
+        # would send a future reader to the wrong place.
+        echo "::error::${app}: ${base_path} rendered (HTTP 200) but no ${base_path}/_next/static/*.js URL appears in the page — check the page markup or the basePath wiring, not staging or runtime configuration." >&2
+        ec=1; bad=1
+      fi
+    fi
+
+    # Step 3: the chunk is served, with a body. When .next/static was never staged the file is
+    # simply ABSENT from the served tree, so this is a straight 404 rather than a 200 with an empty
+    # body, and `curl -fsS` fails outright — GUARDED for the same reason as step 2.
+    bytes=""
+    if [ "$bad" -eq 0 ]; then
+      bytes="$(curl -fsS --max-time 30 "${origin}${chunk}" | wc -c | tr -d ' ')" || bytes=""
+      if [ "${bytes:-0}" -lt 1 ]; then
+        echo "::error::${app}: ${chunk} is not served (404 or empty body) — .next/static was not staged into the image; see the staging RUN block in ts/Dockerfile." >&2
+        ec=1; bad=1
+      fi
+    fi
+
+    # Step 4: the other zone's prefix does not serve it. GUARDED: `curl` without -f still exits
+    # non-zero on a connection failure or a timeout, and an unguarded capture would abort the
+    # script before the named message — the defect this check was drafted with.
+    if [ "$bad" -eq 0 ]; then
+      code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 \
+        "${origin}${other}${chunk#"$base_path"}")" || code=""
+      if [ -z "$code" ]; then
+        echo "::error::${app}: the ${other} probe got no HTTP response at all (connection failure or timeout) — the zone-collision check could not be made." >&2
+        ec=1
+      elif [ "$code" != "404" ]; then
+        echo "::error::${app}: ${other} also served the chunk (HTTP ${code}); the two zones' asset prefixes collide." >&2
+        ec=1
+      else
+        echo "  ${app}: serves ${chunk} (${bytes} bytes), 404 under ${other}"
+      fi
+    fi
+
+    # The identity checks do not depend on the chunk chain, so they run even when it failed.
+    # `-o pid,uid`, not `-o user`: `user` is resolved through NSS, so on a Linux runner where uid
+    # 65532 has a synthesized name this would print that name and false-negative a correct image.
+    # This mirrors assert_uid above; docker requires `pid` in the format to correlate processes.
+    if [ "$started" -eq 1 ]; then
+      uid="$(docker top "$name" -o pid,uid 2>/dev/null | sed -n 2p | awk '{print $NF}')" || uid=""
+      if [ "$uid" != "65532" ]; then
+        echo "::error::${app} runs as uid ${uid:-<unreadable>}; the console images must run as 65532." >&2
+        ec=1
+      else
+        echo "  ${app}: runs as uid 65532"
+      fi
+    else
+      echo "::error::${app}: uid not checked — the container never started." >&2
+    fi
+
+    if docker run --rm --entrypoint /bin/sh "${app}:dev" -c true >/dev/null 2>&1; then
+      echo "::error::${app}:dev has a shell; the runtime base must stay distroless." >&2
+      ec=1
+    else
+      echo "  ${app}: no shell in the runtime image"
+    fi
+
+    # Spec § 5.5 assertion 4 — staged-tree parity. ts/Dockerfile's staging of .next/static and
+    # public/ and ts/apps/<app>/moon.yml's `build` script are a SECOND staging site each, created
+    # deliberately; this is what keeps the two from drifting apart.
+    #
+    # It compares the staged TREES, not the two scripts' text, so the two divergences the Task 2
+    # review recorded are tolerated by construction: moon.yml's `rm -rf .next/static` before
+    # `next build` (the Dockerfile needs no counterpart — `**/.next` in ts/.dockerignore makes every
+    # builder start cold) and moon.yml's app-name prefix on its two error messages both leave the
+    # staged tree identical.
+    host_std="$ROOT/ts/apps/${app}/.next/standalone/apps/${app}"
+    host_static="$host_std/.next/static"
+    if [ -d "$host_static" ]; then
+      img_out="$(docker run --rm --entrypoint /nodejs/bin/node "${app}:dev" \
+        -e "$CONSOLE_STAGED_TREE_JS" "/app/apps/${app}" 2>/dev/null)" || img_out=""
+      if [ -z "$img_out" ]; then
+        echo "::error::${app}: could not read /app/apps/${app}/.next/static inside the image — the staged tree is absent or unreadable, so the staging copy in ts/Dockerfile did not run." >&2
+        ec=1
+      else
+        # Line 1 is the public= marker, the rest is the tree. `sed -n 1p` / `sed -n '2,$p'` read
+        # their whole input; neither is an early-exit reader.
+        img_public="$(printf '%s\n' "$img_out" | sed -n 1p)"
+        img_list="$(printf '%s\n' "$img_out" | sed -n '2,$p' | LC_ALL=C sort)"
+        host_public="public=0"
+        if [ -d "$host_std/public" ]; then host_public="public=1"; fi
+        host_id="$(cat "$host_std/.next/BUILD_ID" 2>/dev/null)" || host_id=""
+        if [ -z "$host_id" ]; then
+          echo "::error::${app}: the host build at ${host_std} has no .next/BUILD_ID — that build is broken or half-written; re-run 'moon run ${app}-ts:build'." >&2
+          ec=1
+        else
+          host_list="$(cd "$host_static" && find . -type f | sed 's#^\./##' \
+            | sed "s#^${host_id}/#<BUILD_ID>/#" | LC_ALL=C sort)" || host_list=""
+          if [ "$img_public" != "$host_public" ]; then
+            echo "::error::${app}: the image staged ${img_public} but the host build staged ${host_public} — ts/Dockerfile and ts/apps/${app}/moon.yml disagree on staging public/." >&2
+            ec=1
+          fi
+          if [ "$img_list" != "$host_list" ]; then
+            # Two distinct causes produce a difference here, and they send a reader to different
+            # places, so they get different messages. A missing or partial staging copy changes
+            # which TOP-LEVEL directories exist under .next/static; two builds of different source
+            # keep the same directories and change only the content-hashed file names inside them.
+            img_dirs="$(printf '%s\n' "$img_list" | sed 's#/.*##' | LC_ALL=C sort -u)"
+            host_dirs="$(printf '%s\n' "$host_list" | sed 's#/.*##' | LC_ALL=C sort -u)"
+            if [ "$img_dirs" != "$host_dirs" ]; then
+              echo "::error::${app}: the image's staged .next/static holds different top-level directories from the host build's — ts/Dockerfile and ts/apps/${app}/moon.yml have drifted. Diff (< host, > image) follows." >&2
+            else
+              echo "::error::${app}: the image's staged .next/static holds the same directories as the host build's but different files, so the two were built from DIFFERENT sources. Re-run 'moon run ${app}-ts:build' so this parity claim compares like with like; on its own this is NOT a ts/Dockerfile vs ts/apps/${app}/moon.yml drift. Diff (< host, > image) follows." >&2
+            fi
+            diff <(printf '%s\n' "$host_list") <(printf '%s\n' "$img_list") >&2 || true
+            ec=1
+          else
+            echo "  ${app}: staged tree matches the host build ($(printf '%s\n' "$img_list" | grep -c . || true) files, ${img_public})"
+          fi
+        fi
+      fi
+    else
+      # Deliberate, and it says so out loud rather than passing silently: in CI the host build may
+      # not have run, and a check that quietly skips is the failure mode this repository has paid
+      # for repeatedly. Nothing here sets ec — the absence of a host build is not a defect.
+      echo "  ${app}: no host build at ${host_static}; staged-tree parity NOT CHECKED this run"
+    fi
+  done
+
+  console_smoke_cleanup
+  if [ "$ec" -ne 0 ]; then return 1; fi
+  echo "== CONSOLE SMOKE OK =="
+}
+
 # --- rehearse (SMA-658 spec § 8) -----------------------------------------------------------------
 # Runs the publish sequence of the future release path against two LOCAL registries: A stands in
 # for GHCR and B for Docker Hub. It needs no credential, so images.yml runs it on a pull request.
