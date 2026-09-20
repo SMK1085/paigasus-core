@@ -82,8 +82,11 @@ its own DTO, so D9 becomes literally true: `Introspect`'s message, DTO, mapper a
 `debug_assert!` are all untouched, and its Oidc-only invariant keeps its guard. § 5.3 records
 what revision 1 got out of this.
 
-**The honest cost.** A second message with the same field set can drift from the first. § 6.1
-pins them with a test that compares the two shapes field by field.
+**The honest cost.** A second message with the same field set can drift from the first, and **no
+Rust test pins them together.** Revision 2 planned one; prost's generated structs carry no
+field-name reflection, so a direct comparison would mean parsing the `.proto` at test time. What
+ships instead is `buf lint` plus `buf breaking`, which reject a renamed or renumbered field but
+not a field added to one message and forgotten in the other. § 9.7 records the residual.
 
 ### 3.2 Why D4
 
