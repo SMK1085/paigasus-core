@@ -814,6 +814,8 @@ An empty stdout plus a one-line `declare: -A: invalid option` or `mapfile: comma
 
 If a task fails, **capture before you re-run** — a passing re-run overwrites the evidence:
 
+<!-- moon-diagnosis:ok -->
+
 ```bash
 cp .moon/cache/ciReport.json /tmp/sma-633-ciReport.json
 jq '.actions[] | select(.status=="failed")
