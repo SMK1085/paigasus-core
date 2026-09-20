@@ -141,7 +141,8 @@ silently broken.
 | D3 | Console base image | `gcr.io/distroless/nodejs24-debian12:nonroot`, digest-pinned |
 | D4 | AC verification | A required static gate for AC 2 and 5; a container smoke assertion for AC 3; a non-required kind job for AC 1 and 4 |
 | D5 | `reconcile_starter` | The chart keeps `replicas: 1` and `maxSurge: 0` for IAM. The concurrency question is filed separately, not asserted here |
-| D6 | Zone atomicity | A zone's `enabled` flag governs its backend, its console, its ingress rule and both environment entries **together**. "Backend deployed, console zone absent" is not expressible. See § 7.3 |
+| D6 | Zone atomicity | A zone's `enabled` flag governs its console, its ingress rule and both environment entries **together**. "Routable but unadvertised" is not expressible. See § 7.3 |
+| D9 | Where a backend runs | Amended 2026-09-20. `backend.deploy` is a **separate axis** from `enabled`: the chart deploys the IAM backend and takes every other zone's backend as an address. It cannot affect AC 2. See § 7.3 |
 | D7 | Zone id domain | A zone id must be a member of `SERVICE_SLUGS`. The chart fails at render time otherwise (F8) |
 | D8 | `helm` | Proto-pinned like every other CLI gate, with `[ -x ]` asserted and rc 2 on absence |
 
@@ -345,7 +346,10 @@ Six projections derive from that map and from nothing else:
 | `PAIGASUS_SERVICES` | `{id: <backend http in-cluster URL>}` over enabled zones |
 | `PAIGASUS_IAM_GRPC_URL` | the `iam` zone's backend gRPC URL |
 | Console `Deployment` set | one per enabled zone |
-| Backend `Deployment` and `Service` set | one per enabled zone |
+| Backend `Deployment` and `Service` set | one per enabled zone **whose `backend.deploy` is true** (D9) |
+
+Only the first four are AC-2 projections. The backend row keys on a second axis, and a zone whose
+backend is supplied rather than deployed is still fully routed and fully advertised.
 
 ### 7.2 Port pinning
 
@@ -354,17 +358,28 @@ port change that the chart does not follow produces a permanently `degraded` gat
 F9 explains is the failure AC 2 exists to prevent. The gate therefore asserts the four default
 ports in `values.yaml` against the literals in `rs/crates/services/paigasus-{iam,gateway}/src/config.rs`.
 
-### 7.3 Zone atomicity (D6), and what it forbids
+### 7.3 Zone atomicity (D6), and where the backend runs (D9)
 
-A zone's `enabled` flag governs its backend, its console, its ingress rule, its `PAIGASUS_ZONES`
-entry and its `PAIGASUS_SERVICES` entry, together. There is no independent
-`backend.enabled`.
+**Amended 2026-09-20**, after implementation found that the gateway backend cannot boot from this
+chart at all: `GatewayConfig::validate` hard-fails on an empty `upstream.openai.api_key`
+(`rs/crates/services/paigasus-gateway/src/config.rs:278`) and `iam.grpc_addr` accepts
+`LoopbackInsecure` only for a loopback host (`:209-222`), so an in-cluster gateway→IAM link needs
+a TLS design that is out of scope here.
 
-This is the strictest reading of AC 2 and makes the coupling structural rather than asserted.
-The price is that **"the gateway backend is deployed, the gateway console zone is not" cannot be
-expressed.** That is a deliberate limitation, recorded in § 11 with a follow-up, not an oversight.
-The challenge identified this configuration as a hole in revision 1; D6 closes it by removing the
-configuration rather than by adding a check for it.
+**D6, unchanged in substance.** A zone's `enabled` flag governs its console, its ingress rule, its
+`PAIGASUS_ZONES` entry and its `PAIGASUS_SERVICES` entry, together. That is what makes "routable
+but unadvertised" unrepresentable rather than merely checked, and it is the strictest reading of
+AC 2. The price is that **"the gateway zone is advertised but not routed", or the reverse, cannot
+be expressed** — which is the point.
+
+**D9 is a separate axis.** `zones.<id>.backend.deploy` decides whether the chart runs that zone's
+backend or takes its address from `backend.url`. It cannot produce a half-present zone, because
+every AC-2 projection keys on `enabled` alone. Today `iam` deploys and every other zone supplies;
+`zones.iam.backend.deploy=false` is refused outright, because `PAIGASUS_IAM_GRPC_URL` would
+otherwise point at a Service the chart does not render.
+
+Revision 1's claim that a zone's `enabled` flag also governs its backend was therefore too strong.
+It was written before anyone had read the gateway's own configuration validator.
 
 ### 7.4 ConfigMaps, Secrets and what rolls what
 
@@ -379,6 +394,15 @@ Three objects, and the spec names all of them because revision 1 left five keys 
 The Secret needs its own annotation for a concrete reason: with `envFrom` and no checksum,
 **rotating `PAIGASUS_SESSION_REDIS_URL` or the OIDC client secret restarts nothing**, and every pod
 keeps the old value indefinitely.
+
+**Corrected 2026-09-20, after the local review.** The first implementation annotated
+`sha256sum` of `.Values.oidc.existingSecret` — the Secret's *name*, which does not change when its
+contents rotate. The annotation therefore could never fire, and this section described a control
+that did not exist. The chart does not own that Secret and `lookup` returns empty under
+`helm template`, so hashing its contents is not available. The knob is now an explicit
+`oidc.secretVersion` the operator bumps on rotation. That is weaker than hashing real contents and
+the chart says so: it depends on the operator doing something, where the ConfigMap checksums
+depend on nothing.
 
 All three are shared across zones, so a change to any of them rolls both consoles. That is correct
 — the value changed for both — and § 8.1 check 3 accounts for it.
@@ -612,7 +636,10 @@ not the proof.
 - Publishing the chart to an OCI registry.
 - Routing the bare origin root `/`. A visitor gets the ingress controller's 404.
 - A console `/readyz`, and with it the Redis-down readiness gap in § 7.8.
-- Expressing "backend deployed, console zone absent" (D6, § 7.3).
+- An external IAM backend. `zones.iam.backend.deploy=false` is refused (D9, § 7.3), because
+  `PAIGASUS_IAM_GRPC_URL` would point at a Service the chart does not render.
+- Deploying the gateway backend from this chart at all (D9, § 7.3), and with it the in-cluster
+  gateway→IAM TLS design that would be its prerequisite.
 - `readOnlyRootFilesystem`; `NetworkPolicy`, `HorizontalPodAutoscaler`, `PodDisruptionBudget`;
   Gateway API; bundled Postgres, Redis or identity provider.
 - The `reconcile_starter` concurrency question (§ 7.9), filed separately.

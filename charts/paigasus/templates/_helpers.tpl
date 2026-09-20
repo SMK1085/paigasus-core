@@ -20,10 +20,23 @@ suffix such as "-gateway-console" (16 chars), "-iam-console" (12), "-iam-backend
 long release name's resource names past Kubernetes' 63-character limit. Call with a two-element
 list: (list $ "<suffix>"), e.g. (list $ (printf "%s-backend" $id)).
 */}}
+{{/*
+Build a resource name that keeps its SUFFIX intact.
+
+Truncating the combined string is not enough. MEASURED at a 52-character release name: the suffix
+is cut away entirely, so `iam-backend` and `iam-console` both become `<release>-paigasus-i` — two
+Deployments and two Services sharing one name. `helm install` then applies one over the other and
+silently destroys a resource, while `helm template` renders it happily and `helm lint` passes.
+
+So the BASE is truncated to whatever room the suffix leaves, and the suffix is appended afterwards.
+Distinct suffixes therefore always yield distinct names, whatever the release is called.
+*/}}
 {{- define "paigasus.name" -}}
 {{- $ctx := index . 0 -}}
 {{- $suffix := index . 1 -}}
-{{- printf "%s-%s-%s" $ctx.Release.Name $ctx.Chart.Name $suffix | trunc 63 | trimSuffix "-" -}}
+{{- $room := int (sub 63 (add1 (len $suffix))) -}}
+{{- $base := printf "%s-%s" $ctx.Release.Name $ctx.Chart.Name | trunc $room | trimSuffix "-" -}}
+{{- printf "%s-%s" $base $suffix -}}
 {{- end -}}
 
 {{- define "paigasus.enabledZones" -}}
