@@ -284,16 +284,63 @@ build itself — they bite the first operator who deploys without reading this s
   bundle — no `accept_invalid_tls` needed. A small private CA is still the tidier posture once
   more than one host is involved (rotation and revocation stay CA-level instead of per-leaf).
 
-## 6. Conventions the console images must follow
+## 6. Conventions the console images follow
 
-Any future console-facing image in this repo should follow the same shape:
+`ts/Dockerfile` builds one image for both console zones, selected by the `APP` build arg. It
+follows the same shape as the Rust service images:
 
-- A chiseled or otherwise distroless base with **no shell**.
-- A numeric, non-root `USER`.
-- A self-contained probe entrypoint (the binary probes itself) plus a `HEALTHCHECK` instruction
-  that uses it.
-- Runtime environment configuration only — nothing deployment-varying baked into the image.
-- Digest-pinned base images, covered by Dependabot's `docker` ecosystem updater.
+- The runtime stage is the distroless base
+  `gcr.io/distroless/nodejs24-debian12:nonroot@sha256:14d42e2511532589a7c7e01a753667a74fcc96266e137e8125006b87b0c32d0a`.
+  It has **no shell**. `smoke_consoles` in `ci/images/run.sh` asserts that absence against the
+  running container, not only against the pin.
+- The image runs as uid:gid `65532:65532` (`USER 65532:65532`). This is the same uid the Rust
+  service images use, so one Kubernetes `securityContext` (`runAsNonRoot: true`,
+  `runAsUser: 65532`) covers all four images. `smoke_consoles` reads the running container's uid
+  with `docker top` and fails if it is not `65532`.
+- The image writes two fixed-path `.mjs` files, `/app/entrypoint.mjs` and
+  `/app/healthcheck.mjs`, and `ENTRYPOINT`/`HEALTHCHECK` name them literally. This works around a
+  Docker limitation: exec-form `ENTRYPOINT` and `HEALTHCHECK` do **not** expand `ARG` or `ENV`, so
+  neither instruction can reference `${APP}` directly. The files are `.mjs`, not `.js`, because
+  every console `package.json` sets `"type": "module"` and Next copies it into the standalone
+  tree — a CJS `require()` shim would depend on `require(esm)` interop and would break outright.
+  The healthcheck file curls its own `<BASE_PATH>/healthz` over `127.0.0.1:$PORT`.
+  `assert_console_pins` in `ci/images/run.sh` holds the base's Node major, the builder's exact
+  Node version, and the builder's pnpm version to `.prototools`' pins (Node `24.16.0`, pnpm
+  `11.3.0`), and separately refuses any `PAIGASUS_*` `ENV`/`ARG` line in `ts/Dockerfile`.
+- Configuration is runtime-only: the image bakes no `PAIGASUS_*` environment variable, and
+  `assert_console_pins` greps `ts/Dockerfile` to enforce it. The one exception is
+  `PAIGASUS_COMPILED_*` (`PAIGASUS_COMPILED_ZONE`, `PAIGASUS_COMPILED_BASE_PATH`), which
+  `createNextConfig` in `ts/packages/paigasus-next-config` writes at build time on purpose — it
+  is a compiled-in record of the zone the artifact was built for, not deployment-varying
+  configuration, so `runtime.ts` can compare it against the `PAIGASUS_ZONE` a deployment supplies.
+- `.github/dependabot.yml` carries a `docker` ecosystem block for directory `/ts`, mirroring the
+  `/rs` block. It ignores major and minor/patch bumps on both
+  `gcr.io/distroless/nodejs24-debian12` and `node`, because `assert_console_pins` couples both to
+  `.prototools` and an automated version bump would red a gate Dependabot cannot fix on its own;
+  only a digest refresh within the pinned version flows through automatically.
+- **The standalone output has no static assets.** Next writes no `.next/static` and no `public/`
+  into `.next/standalone`. The console image's builder stages both, exactly as
+  `ts/apps/<app>/moon.yml`'s `build` task does. An image built without that copy answers 200 on
+  `<basePath>/healthz` and 404 on every chunk, so a probe-based smoke test cannot see it —
+  `smoke_consoles` in `ci/images/run.sh` asserts a **served chunk** instead, and a staged-tree
+  parity check keeps the two staging sites in agreement.
+
+Two further facts about that staged-tree parity check matter to anyone relying on it:
+
+- **It is local-only today.** It compares the image's staged `.next/static` against a host build
+  at `ts/apps/<app>/.next/standalone/apps/<app>/.next/static`, and it only runs when that host
+  build exists. `.github/workflows/images.yml`'s `images` job (`ci/images/run.sh all-consoles`)
+  never produces one, so in CI the check always takes its "not checked" arm and gates nothing
+  there. Treat it as a local aid, not a CI guarantee — a green CI `all-consoles` run is not parity
+  coverage. Run `moon run <app>-ts:build` locally before relying on it.
+- **Parity rests on an assumption: that chunk names agree between the host build and the image
+  build.** That held in every measurement taken, but nothing guarantees it. Four things would
+  break it: a Next or Turbopack bump that changes the chunk-hashing scheme; a compile-time
+  variable that differs between the two builds; the platform split between a developer's machine
+  and the `node:24.16.0-bookworm` builder; and the filtered `pnpm install` resolving a different
+  optional platform dependency than a full install would. When it breaks it breaks loudly, on
+  every run, into the parity error that already says the mismatch is not a
+  `ts/Dockerfile`-versus-`moon.yml` drift.
 
 ## 7. What the first Deployment needs
 
