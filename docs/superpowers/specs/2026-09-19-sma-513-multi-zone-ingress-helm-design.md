@@ -324,6 +324,8 @@ zones:
     console:
       image: { repository: …, tag: "" }
     backend:
+      deploy: true                # D9: this chart runs the IAM backend. `false` is REFUSED —
+                                  # PAIGASUS_IAM_GRPC_URL is built from the chart-managed Service
       image: { repository: …, tag: "" }
       httpPort: 8080
       grpcPort: 9090              # measured default, F9
@@ -333,8 +335,10 @@ zones:
     console:
       image: { repository: …, tag: "" }
     backend:
-      image: { repository: …, tag: "" }
-      httpPort: 8088              # measured default, F9
+      deploy: false               # D9: `true` is REFUSED — the gateway cannot boot from this
+                                  # chart (§ 7.3). The address is supplied instead:
+      url: ""                     # REQUIRED whenever this zone is enabled and deploy is false
+      httpPort: 8088              # measured default, F9; used only when deploy is true
 ```
 
 Six projections derive from that map and from nothing else:
