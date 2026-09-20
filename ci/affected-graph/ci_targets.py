@@ -1182,7 +1182,16 @@ RELEASE_PLAN_SH_CALL_SITES = (
     "--negative-control)  MODE=negctl; shift ;;",
     "output)   github_output ;;",
     "negctl)   require_uv; negative_control ;;",
-    'if [ "$rc" -ne 0 ] || ! grep -qE \'^nothing_to_release=(true|false)$\' < <(printf \'%s\\n\' "$out"); then',
+    # SMA-658 fix round 2. Six lines replace the old single-line `if`: the presence check now
+    # folds all five keys together (a missing one routes to the fail-safe branch instead of
+    # aborting the pipelines below under pipefail), so a future edit dropping one key's grep back
+    # out of this condition must re-pin here, not pass silently.
+    'if [ "$rc" -ne 0 ] \\',
+    "|| ! grep -qE '^nothing_to_release=(true|false)$' < <(printf '%s\\n' \"$out\") \\",
+    "|| ! grep -qE '^skip_iam=(true|false)$' < <(printf '%s\\n' \"$out\") \\",
+    "|| ! grep -qE '^skip_gateway=(true|false)$' < <(printf '%s\\n' \"$out\") \\",
+    "|| ! grep -qE '^version_iam=' < <(printf '%s\\n' \"$out\") \\",
+    "|| ! grep -qE '^version_gateway=' < <(printf '%s\\n' \"$out\"); then",
     "printf 'nothing_to_release=false\\n' >> \"${GITHUB_OUTPUT:-/dev/stdout}\"",
     "printf 'skip_iam=false\\nskip_gateway=false\\n' >> \"${GITHUB_OUTPUT:-/dev/stdout}\"",
     "printf '%s\\n' \"$out\" | grep -E '^skip_iam=(true|false)$' | tail -n 1 \\",
