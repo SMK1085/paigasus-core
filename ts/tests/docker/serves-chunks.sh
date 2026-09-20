@@ -66,9 +66,19 @@ if [ "$status" != "200" ]; then
     "check the container's runtime configuration (the runtime_env array above) or its logs" >&2
   exit 1
 fi
-# Second call: the status probe already confirmed 200, so this grabs the body with no retry
-# needed — only a --max-time bound, for the same off-origin-redirect reason as above.
-html="$(curl -fsSL --max-redirs 3 --max-time 30 "${origin}${base_path}")"
+# Second call: the status probe already confirmed 200, but the container can still regress
+# between the two calls — a connection drop, a timeout the probe's own retries happened to dodge,
+# or `-L` exceeding --max-redirs on an off-origin redirect — so this call is GUARDED too (Fix
+# round 3: it previously had none, moving Important 1's defect into a narrower window rather than
+# closing it) and carries its OWN, smaller retry budget rather than relying on the probe's.
+html="$(curl -fsSL --max-redirs 3 --max-time 30 --retry 5 --retry-delay 1 --retry-all-errors \
+  "${origin}${base_path}")" || true
+if [ -z "$html" ]; then
+  echo "::error::${image}: ${base_path} answered HTTP 200 to the status probe, but the body fetch" \
+    "itself failed or returned nothing (connection drop, timeout, or too many redirects) — this is" \
+    "a transport failure between the two calls, not a staging or runtime-configuration failure" >&2
+  exit 1
+fi
 
 # Step 2: extract one chunk URL. No pipe into an early-exit reader: capture, then read.
 # `grep -oE` exits 1 on no match even after reading its whole input; under set -euo pipefail an
