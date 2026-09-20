@@ -43,7 +43,40 @@ check() {
     echo "FAIL [$label]: render failed"; printf '%s\n' "$out"; ec=1; return
   fi
   local verdict
-  verdict="$(printf '%s' "$out" | REQUIRED="$REQUIRED" python3 "$HERE/env_check.py")"
+  # Inlined, like every sibling script here. A separate .py under charts/ would be linted by
+  # nothing: repo:ruff-ci's corpus is ci/**/*.py and py:lint's is py/, so charts/**/*.py falls
+  # between them. Use only DOUBLE quotes inside this block — a single quote would close it.
+  verdict="$(printf '%s' "$out" | REQUIRED="$REQUIRED" python3 -c '
+import os, sys, yaml
+required = set(os.environ["REQUIRED"].split())
+docs = [d for d in yaml.safe_load_all(sys.stdin) if d]
+cms = {d["metadata"]["name"]: set(d.get("data", {})) for d in docs if d["kind"] == "ConfigMap"}
+problems, consoles = [], 0
+for d in docs:
+    if d["kind"] != "Deployment" or "console" not in d["metadata"]["name"]:
+        continue
+    consoles += 1
+    name = d["metadata"]["name"]
+    c = d["spec"]["template"]["spec"]["containers"][0]
+    # A key is delivered only if its NAME is a legal env var name. The kubelet drops the rest
+    # silently, so a key that merely appears in the YAML is not evidence that it arrives.
+    seen = set(e["name"] for e in c.get("env", []))
+    for src in c.get("envFrom", []):
+        if "configMapRef" in src:
+            seen |= cms.get(src["configMapRef"]["name"], set())
+        elif "secretRef" in src:
+            problems.append(name + " uses envFrom.secretRef: Secret KEYS become env var NAMES, "
+                            "and a hyphenated key is skipped without error. Use secretKeyRef.")
+    missing = sorted(required - seen)
+    if missing:
+        problems.append(name + " never receives: " + ", ".join(missing))
+    illegal = sorted(n for n in seen if not n.replace("_", "").isalnum() or n[:1].isdigit())
+    if illegal:
+        problems.append(name + " has illegal env var name(s): " + ", ".join(illegal))
+if consoles == 0:
+    problems.append("no console Deployment rendered")
+print("|".join(problems) if problems
+      else "OK {0} console(s), all {1} keys delivered".format(consoles, len(required)))')"
   if [ "${verdict:0:2}" = "OK" ]; then
     echo "  ok [$label]: $verdict"
   else
