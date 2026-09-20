@@ -1,0 +1,262 @@
+---
+# Source: paigasus/templates/console-env-configmap.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: paigasus-paigasus-console-env
+data:
+  PAIGASUS_PUBLIC_ORIGIN: "https://console.example.test"
+  PAIGASUS_OIDC_ISSUER: "https://idp.example.test/realms/paigasus"
+  PAIGASUS_OIDC_CLIENT_ID: "paigasus-console"
+  PAIGASUS_IAM_GRPC_URL: "http://paigasus-paigasus-iam-backend:9090"
+  # Forced, not exposed. createAuthRuntime refuses "memory" once PAIGASUS_ZONES names more than
+  # one zone, and console-core's descriptor cache needs Redis regardless. A knob whose only other
+  # setting crash-loops the pod is not a knob.
+  PAIGASUS_SESSION_STORE: "redis"
+---
+# Source: paigasus/templates/zonemap-configmap.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: paigasus-paigasus-zonemap
+data:
+  # Byte-identical across every console pod BY CONSTRUCTION — one object, mounted by both — rather
+  # than by template discipline. assertCompiledAgreement() throws on a pod whose OWN entry
+  # disagrees, but it does not check the other zones' entries, so this is the control, not it.
+  PAIGASUS_ZONES: "{\"iam\":\"/iam\"}"
+  PAIGASUS_SERVICES: "{\"iam\":\"http://paigasus-paigasus-iam-backend:8080\"}"
+---
+# Source: paigasus/templates/backend-service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  # MUST be exactly <fullname>-<id>-backend: paigasus.serviceMapJson (_helpers.tpl) builds every
+  # PAIGASUS_SERVICES URL from this same shape. A mismatch here is invisible to `helm template`
+  # and renders a permanently `degraded` console tile at runtime instead — the exact state AC 2
+  # exists to distinguish from `absent`.
+  name: paigasus-paigasus-iam-backend
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: iam-backend
+    app.kubernetes.io/instance: paigasus
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+    - name: grpc
+      port: 9090
+      targetPort: grpc
+---
+# Source: paigasus/templates/console-service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: paigasus-paigasus-iam-console
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: iam-console
+    app.kubernetes.io/instance: paigasus
+  ports:
+    - name: http
+      port: 3000
+      targetPort: http
+---
+# Source: paigasus/templates/backend-deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: paigasus-paigasus-iam-backend
+spec:
+  replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      # DELIBERATE DEVIATION, not the runbook's instruction. RUNBOOK-containers.md § 5 says
+      # maxSurge need no longer be pinned to 0 now that the boot migration takes an advisory lock
+      # (SMA-559). It is kept at 0 because that relaxation carries an unmet precondition:
+      # AppState::new's reconcile_starter writes system policies and roles on EVERY boot with no
+      # lock of its own and has never been tested under concurrency. That is a Rust concurrency
+      # question needing a concurrency test, not a chart default, and it is filed separately.
+      # Raise this only after that issue closes.
+      maxSurge: 0
+      maxUnavailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: iam-backend
+      app.kubernetes.io/instance: paigasus
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: iam-backend
+        app.kubernetes.io/instance: paigasus
+    spec:
+      securityContext:
+        runAsUser: 65532
+        runAsGroup: 65532
+        runAsNonRoot: true
+        # NO readOnlyRootFilesystem. RUNBOOK-containers.md § 7: that posture is untested for
+        # every image in this repo. It is a follow-up to measure, not a default to ship.
+      # 45s, not the 30s default. IAM drains a JoinSet of relays and maintainers on SIGTERM and
+      # no worst-case drain time has ever been measured — treat 30s as a floor to widen from, and
+      # revisit if a rolling update is observed truncating a drain.
+      terminationGracePeriodSeconds: 45
+      containers:
+        - name: backend
+          image: "ghcr.io/smk1085/paigasus-iam:0.0.0"
+          ports:
+            - name: http
+              containerPort: 8080
+            - name: grpc
+              containerPort: 9090
+          env:
+            # Bind explicitly to the configured ports rather than trusting the binary's own
+            # 8080/9090 defaults, so a values.yaml override of httpPort/grpcPort can never drift
+            # from what the container actually listens on (the F9 failure mode, one layer up).
+            - name: IAM_HTTP_ADDR
+              value: "0.0.0.0:8080"
+            - name: IAM_GRPC_ADDR
+              value: "0.0.0.0:9090"
+            - name: IAM_MIGRATION__LOCK_WAIT_SECS
+              value: "120"
+            # IamConfig has no decomposed host/user/db config — figment reads ONE opaque DSN
+            # (IAM_DATABASE_URL). POSTGRES_HOST and POSTGRES_PASSWORD are composed into it here
+            # via Kubernetes' own $(VAR) dependent env-var expansion (resolved by the kubelet,
+            # never by Helm), against a fixed "iam" database and role name — values.yaml has no
+            # knob for either yet. postgres.existingSecret must hold key "password".
+            - name: POSTGRES_HOST
+              value: "postgres.example.test"
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: paigasus-postgres-secret
+                  key: password
+            - name: IAM_DATABASE_URL
+              value: "postgres://iam:$(POSTGRES_PASSWORD)@$(POSTGRES_HOST):5432/iam"
+            # authn.issuers has no default and is a hard boot error if empty (IamConfig::load).
+            # The console's own OIDC client id is the audience IAM must accept: it is the client
+            # the ID tokens IAM validates were issued to.
+            - name: IAM_AUTHN__ISSUERS
+              value: "[{issuer=\"https://idp.example.test/realms/paigasus\",audiences=[\"paigasus-console\"]}]"
+            # ApiKeyConfig::pepper decodes this at boot and IamConfig::validate rejects fewer
+            # than 32 decoded bytes. See zones.iam.backend.apiKeysPepperSecret in values.yaml.
+            - name: IAM_API_KEYS__PEPPER
+              valueFrom:
+                secretKeyRef:
+                  name: 
+                  key: pepper
+          startupProbe:          # sized for config load + Database::connect ONLY. SMA-571 removed
+            httpGet:             # the coupling to IAM_MIGRATION__LOCK_WAIT_SECS entirely.
+              path: /healthz
+              port: http
+            periodSeconds: 5
+            failureThreshold: 12
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 20
+          readinessProbe:        # /readyz answers 503 {"status":"migrating"} for as long as the
+            httpGet:             # migration takes. A never-ready replica is simply absent from
+              path: /readyz      # the endpoint list; this threshold does NOT bound that window —
+              port: http         # size it for a steady-state database blip.
+            periodSeconds: 10
+            failureThreshold: 3
+---
+# Source: paigasus/templates/console-deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: paigasus-paigasus-iam-console
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: iam-console
+      app.kubernetes.io/instance: paigasus
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: iam-console
+        app.kubernetes.io/instance: paigasus
+      annotations:
+        # All three checksums, not two. With envFrom and no checksum on the SECRET, rotating
+        # PAIGASUS_SESSION_REDIS_URL or the OIDC client secret restarts nothing and every pod
+        # keeps the old value indefinitely.
+        checksum/zonemap: e2b85502fe5bf3ae73a2909ca3cae151c7b890d26ef802603d1643502242cd10
+        checksum/console-env: f93b3ecec36249ae3672c42238dae5a5df488b011753d7b649ae8e33ee234023
+        checksum/secret: 6029373ad664e85850fc49dc7b30101c6c953167b0a956cf7a4ea4514dd3b8b7
+    spec:
+      securityContext:
+        runAsUser: 65532
+        runAsGroup: 65532
+        runAsNonRoot: true
+        # NO readOnlyRootFilesystem. RUNBOOK-containers.md § 7: that posture is untested for
+        # every image in this repo. It is a follow-up to measure, not a default to ship.
+      containers:
+        - name: console
+          image: "ghcr.io/smk1085/paigasus-iam-console:0.0.0"
+          ports:
+            - name: http
+              containerPort: 3000
+          env:
+            - name: PAIGASUS_ZONE
+              value: "iam"
+            - name: PORT
+              value: "3000"
+          envFrom:
+            - configMapRef:
+                name: paigasus-paigasus-zonemap
+            - configMapRef:
+                name: paigasus-paigasus-console-env
+            - secretRef:
+                name: paigasus-console-secret
+          # Liveness is a TCP check, NOT httpGet on /healthz. That route runs the FULL config
+          # parse and its failure is deliberately not memoized, so using it for liveness puts a
+          # misconfigured pod into CrashLoopBackOff instead of leaving it running and NotReady
+          # with a readable log — and RUNBOOK-containers.md § 4 requires liveness never to touch
+          # a dependency. The consoles have no /readyz; that is a recorded gap (spec § 7.8).
+          livenessProbe:
+            tcpSocket:
+              port: http
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /iam/healthz
+              port: http
+            periodSeconds: 10
+            failureThreshold: 3
+---
+# Source: paigasus/templates/ingress.yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: paigasus-paigasus
+  # DO NOT add a rewrite annotation here or in values. Each console compiles basePath in and
+  # serves its FULL path already — a rewrite that strips /iam breaks every route in that zone.
+  # This is the change an operator is most likely to add by reflex.
+spec:
+  tls:
+    # The ingress MUST terminate TLS: PAIGASUS_PUBLIC_ORIGIN is validated as https, and the
+    # __Host-pgs_sid cookie requires Secure. One host, so the cookie is host-only and every zone
+    # reads it (ADR-0017 decision 2).
+    - hosts:
+        - "console.example.test"
+      secretName: console-tls
+  rules:
+    - host: "console.example.test"
+      http:
+        paths:
+          # This zone's own /iam/auth/* routes are IN-APP route handlers and fall
+          # under its own prefix already, so they need no rule of their own. Written per zone,
+          # not as a single static comment naming both prefixes: a disabled zone must leave no
+          # trace anywhere in the rendered output (see tests/ingress.sh), and a comment naming
+          # the OTHER zone's prefix here would leak it into an iam-only render.
+          - path: /iam
+            pathType: Prefix
+            backend:
+              service:
+                name: paigasus-paigasus-iam-console
+                port:
+                  name: http
