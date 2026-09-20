@@ -14,10 +14,16 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   **not tagging**, so the first release would permanently tag most of the workspace. Per-package
   `release = false` removes a package from the proposal entirely; every non-family crate needs
   one explicitly. `paigasus-gateway` / `paigasus-iam` are versioned BY HAND (SMA-658, option
-  V-a) and are at `0.1.0` as of this PR: release-plz never processes a crate whose Cargo manifest
-  sets `publish = false` (measured, M7), so `release = false` stays and release-plz neither bumps
-  nor tags them. `env!("CARGO_PKG_VERSION")` still feeds `ServiceInfo`, and ADR-0020 skew
-  reporting is still parked on that value (SMA-505 R7).
+  V-a) and are at `0.1.0` as of this PR. `release = false` stays, and release-plz neither bumps
+  nor tags them: `packages_to_process()` filters on Cargo's own `publish` field, and both crates
+  sit in NO `version_group` (SMA-658 M7, measured on 0.3.158). Read that as the scoped claim it
+  is — a `publish = false` crate INSIDE a group whose head is publishable still gets its
+  `[package] version` written, which the version-lockstep entry below records as measured for
+  the three kernel binding crates. M7's fixture had a group with only unpublishable members and
+  produced `version groups: {}`; it did not test the mixed group, and neither result disproves
+  the other. What `publish = false` always excludes is tagging and publishing.
+  `env!("CARGO_PKG_VERSION")` still feeds `ServiceInfo`, and ADR-0020 skew reporting is still
+  parked on that value (SMA-505 R7).
 - release-plz's `release_pr()` does all its work in a **tempdir copy** (`copy_to_temp_dir`,
   measured against the pinned 0.3.158) — it never touches the local working tree or `HEAD`. This
   nearly shipped a direct push to `main`: deriving the push target with `git rev-parse
@@ -254,8 +260,10 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   moves the same way, but only once the service leaves `0.x` — a `0.x` release writes no
   `:<major>` tag at all.
 - A service version is set **by hand**, in a normal pull request, with a `CHANGELOG.md` section.
-  release-plz never processes a crate whose Cargo manifest says `publish = false` (MEASURED,
-  SMA-658 M7: it is invisible to `release-plz update`, and `git_only` hard-errors on the second
-  release when the crate has an unpublished workspace dependency). `ci/release-plan/release_plan.py
+  The two service crates are `publish = false` and sit in no `version_group`, so `release-plz
+  update` never sees them, and `git_only` hard-errors on the second release because each has an
+  unpublished workspace dependency (MEASURED, SMA-658 M7). See the release-plz entry above for
+  the bound on that claim: a `publish = false` crate inside a group with a publishable head IS
+  version-written. `ci/release-plan/release_plan.py
   --assert`, which `repo:actionlint` check 11 runs on every pull request, fails when a bumped
   service has no changelog section.

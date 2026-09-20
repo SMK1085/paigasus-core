@@ -329,9 +329,12 @@ and replace it with:
 
 ```toml
 # paigasus-gateway / paigasus-iam are versioned BY HAND (SMA-658): each moved to 0.1.0 at the
-# first image release, because release-plz never processes a crate whose Cargo manifest sets
-# `publish = false` (M7). `env!("CARGO_PKG_VERSION")` feeds the ServiceInfo descriptor, and
-# ADR-0020 skew reporting is parked on that value (SMA-505 R7).
+# first image release. `packages_to_process()` filters on Cargo's own `publish` field, and
+# neither crate is in a `version_group`, so `release-plz update` never sees them (M7, measured on
+# 0.3.158). That is the scoped claim, not a blanket one: a `publish = false` crate INSIDE a group
+# whose head is publishable still gets its `[package] version` written — the comment on the
+# kernel group above records that, also measured. `env!("CARGO_PKG_VERSION")` feeds the
+# ServiceInfo descriptor, and ADR-0020 skew reporting is parked on that value (SMA-505 R7).
 ```
 
 - [ ] **Step 6: Run the service tests**
@@ -2293,9 +2296,11 @@ Append to the Gotchas list in `CLAUDE.md`:
   recovery. `:<major>.<minor>` and `:latest` move only forward, compared as numbers. `:<major>`
   moves the same way, but only once the service leaves `0.x`.
 - A service version is set **by hand**, in a normal pull request, with a `CHANGELOG.md` section.
-  release-plz never processes a crate whose Cargo manifest says `publish = false` (MEASURED,
-  SMA-658 M7: it is invisible to `release-plz update`, and `git_only` hard-errors on the second
-  release when the crate has an unpublished workspace dependency). `ci/release-plan/release_plan.py
+  The two service crates are `publish = false` and sit in no `version_group`, so `release-plz
+  update` never sees them, and `git_only` hard-errors on the second release because each has an
+  unpublished workspace dependency (MEASURED, SMA-658 M7). See the release-plz entry above for
+  the bound on that claim: a `publish = false` crate inside a group with a publishable head IS
+  version-written. `ci/release-plan/release_plan.py
   --assert`, which `repo:actionlint` check 11 runs on every pull request, fails when a bumped
   service has no changelog section.
 - `rs/Dockerfile` builds the services with **`cargo auditable`**, which is what makes the image
@@ -2318,8 +2323,11 @@ and replace it with:
 
 ```markdown
 one explicitly. `paigasus-gateway` / `paigasus-iam` are versioned BY HAND (SMA-658): each moved
-to `0.1.0` at the first image release, because release-plz never processes a crate whose Cargo
-manifest sets `publish = false` (M7). `env!("CARGO_PKG_VERSION")` feeds `ServiceInfo`, and
+to `0.1.0` at the first image release. `packages_to_process()` filters on Cargo's own `publish`
+field, and neither crate is in a `version_group`, so `release-plz update` never sees them (M7,
+measured on 0.3.158). That is the scoped claim, not a blanket one: a `publish = false` crate
+inside a group whose head is publishable still gets its `[package] version` written, which the
+version-lockstep entry records as measured. `env!("CARGO_PKG_VERSION")` feeds `ServiceInfo`, and
 ADR-0020 skew reporting is parked on that value (SMA-505 R7).
 ```
 

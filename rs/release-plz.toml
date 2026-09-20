@@ -105,9 +105,12 @@ git_release_enable = false
 # dependencies_update cascade from bumping and permanently tagging crates nobody released.
 #
 # paigasus-gateway / paigasus-iam are versioned BY HAND (SMA-658): each moved to 0.1.0 at the
-# first image release, because release-plz never processes a crate whose Cargo manifest sets
-# `publish = false` (M7). `env!("CARGO_PKG_VERSION")` feeds the ServiceInfo descriptor, and
-# ADR-0020 skew reporting is parked on that value (SMA-505 R7).
+# first image release. `packages_to_process()` filters on Cargo's own `publish` field, and
+# neither crate is in a `version_group`, so `release-plz update` never sees them (M7, measured on
+# 0.3.158). That is the scoped claim, not a blanket one: a `publish = false` crate INSIDE a group
+# whose head is publishable still gets its `[package] version` written — the comment on the
+# kernel group above records that, also measured. `env!("CARGO_PKG_VERSION")` feeds the
+# ServiceInfo descriptor, and ADR-0020 skew reporting is parked on that value (SMA-505 R7).
 #
 # publish = false MIRRORS each crate's Cargo manifest, same contradiction as the kernel-family
 # bindings above (SMA-579): all seven of these carry `publish = false` in Cargo.toml, and an
