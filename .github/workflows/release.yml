@@ -1225,7 +1225,6 @@ jobs:
           # the DOWNLOADED archive. Without this file, both sides of that comparison would read
           # the same archive, and a corrupted or swapped artifact hop would be undetectable.
           printf '%s\n' "$manifest" > "out/digest-${ARCH}.txt"
-          echo "digest=${manifest}" >> "$GITHUB_OUTPUT"
 
       - name: Smoke this service
         run: ci/images/run.sh smoke "${SERVICE}"
@@ -1434,7 +1433,23 @@ jobs:
           if [ "$action" = "already-released" ]; then
             echo "already released: the tag paigasus-${SERVICE}-v${VERSION} exists. Nothing to do."
             echo "index=" >> "$GITHUB_OUTPUT"
-            echo "revision=${REVISION}" >> "$GITHUB_OUTPUT"
+            # SMA-658 Task 8 fix, same family as I5 (fix round 1) on the adopt path below.
+            # REVISION is this RUN's own local build, which a re-run at a LATER commit does not
+            # share with the image the existing tag actually names. Read the revision back from
+            # whichever registry holds :${VERSION} instead -- both carry it once a release has
+            # completed, from the `crane tag "${image}@${index}" "$VERSION"` loop below.
+            already_image="$GHCR_IMAGE"
+            already_existing="$GHCR_EXISTING"
+            if [ "$already_existing" = "none" ]; then
+              already_image="$HUB_IMAGE"
+              already_existing="$HUB_EXISTING"
+            fi
+            if [ "$already_existing" = "none" ]; then
+              echo "::error::the git tag paigasus-${SERVICE}-v${VERSION} exists, but neither registry holds a :${VERSION} digest to read the revision from." >&2
+              exit 1
+            fi
+            already_revision="$(crane config "${already_image}@${already_existing}" | uv run --no-project --python '>=3.12' python3 -c 'import json,sys; c=json.load(sys.stdin); print(c["config"]["Labels"]["org.opencontainers.image.revision"])')"
+            echo "revision=${already_revision}" >> "$GITHUB_OUTPUT"
             echo "action=already-released" >> "$GITHUB_OUTPUT"
             echo "copy_to=none" >> "$GITHUB_OUTPUT"
             exit 0

@@ -1128,10 +1128,11 @@ def credential_scope_violations(doc: dict, name: str) -> list[str]:
     """V13. DOCKERHUB_TOKEN only in a `release-images` job, and that environment only on a
     publish job.
 
-    Environment names are compared CASE-FOLDED, because GitHub treats them case-insensitively: a
-    `Release-Images` job reaches the same secrets as `release-images`. An `environment:` built from
-    an expression fails closed — this file cannot resolve it, and an unresolvable environment must
-    never satisfy a scoping rule.
+    Environment names and secret names are both compared CASE-FOLDED, because GitHub treats both
+    case-insensitively: a `Release-Images` job reaches the same secrets as `release-images`, and
+    `secrets.dockerhub_token` reads the same value as `secrets.DOCKERHUB_TOKEN`. An `environment:`
+    built from an expression fails closed — this file cannot resolve it, and an unresolvable
+    environment must never satisfy a scoping rule.
 
     This runs over EVERY workflow file, not only release.yml: any workflow with a `main` trigger
     could name the same environment and read the same secret.
@@ -1145,7 +1146,7 @@ def credential_scope_violations(doc: dict, name: str) -> list[str]:
     # up to the workflow root would silently escape this rule.
     names, _ = secret_refs(
         yaml.safe_dump({"env": doc.get("env") or {}}, width=10**9, default_flow_style=False))
-    if SCOPED_SECRET in names:
+    if SCOPED_SECRET.casefold() in {n.casefold() for n in names}:
         out.append(f"{name}: V13: the workflow-level env: reads {SCOPED_SECRET}. That scope "
                    f"reaches every job in the file, including one UNGATED_JOBS exempts from the "
                    f"release gate, and nothing can scope it to a single job from there. Move the "
@@ -1169,7 +1170,8 @@ def credential_scope_violations(doc: dict, name: str) -> list[str]:
         # span for a long secret name, which `_EXPR_SPAN`'s `re.S` would then misparse. PyYAML
         # only folds at a space, so today's names survive — but the next one might not.
         names, _ = secret_refs(yaml.safe_dump(job, width=10**9, default_flow_style=False))
-        if SCOPED_SECRET in names and env_name != SCOPED_SECRET_ENVIRONMENT:
+        if (SCOPED_SECRET.casefold() in {n.casefold() for n in names}
+                and env_name != SCOPED_SECRET_ENVIRONMENT):
             out.append(f"{name}: V13: job '{jid}' reads {SCOPED_SECRET} but its environment is "
                        f"{env_name or '(none)'!r}, not {SCOPED_SECRET_ENVIRONMENT!r}. That "
                        f"environment is the only thing that scopes the token to one job.")
@@ -2808,6 +2810,14 @@ FIXTURES: list[tuple[str, str, str, str | None]] = [
      _OK_IMAGES_MAIN.replace("    steps: [{run: gh api repos/o/r/git/refs}]",
                              "    steps: [{run: echo x, env: {T: '${{ secrets.DOCKERHUB_TOKEN }}'}}]"),
      "V13: job 'tag-iam' reads DOCKERHUB_TOKEN"),
+    # SMA-658 Task 8 mutation pass. GitHub reads a secret NAME case-insensitively, so
+    # `secrets.dockerhub_token` reaches the exact same value as `secrets.DOCKERHUB_TOKEN` — and
+    # `secret_refs` captures the name as written, lowercase included. A bare `SCOPED_SECRET in
+    # names` set-membership test never matches a differently-cased spelling.
+    ("SMA-658 the Docker Hub token spelled lowercase, outside its environment", "main",
+     _OK_IMAGES_MAIN.replace("    steps: [{run: gh api repos/o/r/git/refs}]",
+                             "    steps: [{run: echo x, env: {T: '${{ secrets.dockerhub_token }}'}}]"),
+     "V13: job 'tag-iam' reads DOCKERHUB_TOKEN"),
     ("SMA-658 the release-images environment on another job", "main",
      _OK_IMAGES_MAIN.replace("  tag-iam:\n    needs: [publish-images-iam]\n    environment: release-publish",
                              "  tag-iam:\n    needs: [publish-images-iam]\n    environment: release-images"),
@@ -2877,6 +2887,15 @@ FIXTURES: list[tuple[str, str, str, str | None]] = [
          "      - main\njobs:\n  release-pr:",
          "      - main\nenv:\n  T: ${{ secrets.DOCKERHUB_TOKEN }}\njobs:\n  release-pr:"),
      "V13: the workflow-level env: reads DOCKERHUB_TOKEN"),
+    # I4 negative control (SMA-658 Task 8 mutation pass): the workflow-level scan must be PINNED
+    # to SCOPED_SECRET, not to "any secret at all". Widening the check above from
+    # `if SCOPED_SECRET in names:` to `if names:` would red this row too, so this is the fixture
+    # that tells the two apart.
+    ("SMA-658 a different secret in the workflow-level env: stays clean", "main",
+     _OK_IMAGES_MAIN.replace(
+         "      - main\njobs:\n  release-pr:",
+         "      - main\nenv:\n  T: ${{ secrets.PAIGASUS_BOT_APP_ID }}\njobs:\n  release-pr:"),
+     None),
     ("SMA-658 a publish hidden inside a script", "main",
      _OK_IMAGES_MAIN.replace("    steps: [{run: crane push layout ghcr.io/smk1085/paigasus-iam:x}]",
                              "    steps: [{run: ci/images/run.sh publish}]"),
@@ -2978,12 +2997,19 @@ def _v13_cross_workflow_sweep() -> str | None:
     closes for the local-callee walk. So deleting the whole sweep loop, or dropping only the
     `*.yaml` half of it, leaves every existing row green.
 
-    Drives `main()` through a real two-file `.github/workflows/` tree: `release.yml` is the
-    healthy control (`_OK_MAIN`, the same yaml the "healthy control" FIXTURES row asserts is
-    clean on its own) and `other.yaml` — the `.yaml` extension is deliberate, to catch a dropped
-    `*.yaml` glob specifically — names the `release-images` environment on a job that may not
-    (`leaky`, not in `SCOPED_SECRET_JOBS`). Only the cross-file sweep can produce that finding;
-    nothing inside `check_main(release.yml, ...)` ever reads `other.yaml`.
+    Drives `main()` through a real two-file `.github/workflows/` tree: `release.yml` is `_OK_MAIN`
+    and `other.yaml` — the `.yaml` extension is deliberate, to catch a dropped `*.yaml` glob
+    specifically — names the `release-images` environment on a job that may not (`leaky`, not in
+    `SCOPED_SECRET_JOBS`). Only the cross-file sweep can produce that finding; nothing inside
+    `check_main(release.yml, ...)` ever reads `other.yaml`.
+
+    SMA-658 Task 8 correction: the check below's `rc != 1` half is VACUOUS, not a second
+    assertion. `_OK_MAIN` is not the "healthy control" here — run through `main()`'s own
+    end-to-end path (rather than `check_main` directly, as the real "healthy control" FIXTURES
+    row does), it is stale against several rules added since (V11, V12, the two App-token names
+    in `EXPECTED_RELEASE_SECRETS`), so this tempdir's run always emits about fourteen unrelated
+    violations from `release.yml` alone. `rc` is 1 whether or not the sweep finds `other.yaml`'s
+    leak. The `want not in out` half is the only thing this regression test actually proves.
     """
     other = (
         "on:\n  push:\n    branches: [main]\n"
