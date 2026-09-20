@@ -420,7 +420,7 @@ their Cargo manifests set `publish = false` (SMA-658, spec § 3.1).
 
 Before you release a service for the first time, create both registry repositories:
 `ghcr.io/smk1085/paigasus-<svc>` and `docker.io/smaschek/paigasus-<svc>`. Set the Docker Hub
-repository to public. The `decide` step reads Docker Hub before it logs in. A missing or private
+repository to public. The `decide` step logs in first, then reads Docker Hub. A missing or private
 repository sends a 401 answer. The step treats a 401 answer as a fatal error, not as "no image
 yet".
 
@@ -430,14 +430,15 @@ yet".
    - add a `## [<version>] - <date>` section to that crate's `CHANGELOG.md`.
    `repo:actionlint` check 11 fails the pull request when the changelog section is missing.
 2. Merge it. The `plan` job selects the service, because its version has no tag.
-3. Approve the `approve-images-<svc>` job. Each service chain has its own approval job, with its
-   own environment name. The intent: approving one chain does not approve another chain, and no
-   chain approval approves the kernel release. **This independence is not verified.** GitHub keys
-   its pending-deployment API by environment. It is not confirmed whether one approval releases
-   every job that waits on the same environment in the run. Confirm this on the first release
-   where two chains wait for approval at the same time, and update this note with the result. The
-   security floor holds either way: a human must approve before any step that publishes or tags
-   an image runs.
+3. Approve the `approve-images-<svc>` job. Each service chain has its own approval job. All three
+   approval jobs (`approve-release`, `approve-images-iam`, `approve-images-gateway`) use the same
+   `release-approval` environment. The intent: approving one chain does not approve another chain,
+   and no chain approval approves the kernel release. **This independence is not verified.** GitHub
+   keys its pending-deployment API by environment, so all three jobs must request approval from the
+   same environment. It is not confirmed whether one approval releases every job that waits on that
+   environment in the run. Confirm this on the first release where two chains wait for approval at
+   the same time, and update this note with the result. The security floor holds either way: a
+   human must approve before any step that publishes or tags an image runs.
 4. The `publish-images-<svc>` job pushes to GHCR, copies the index to Docker Hub, signs both,
    moves `:<major>`, `:<minor>` and `:latest` only forward, and verifies the result. The
    `tag-<svc>` job then makes `paigasus-<svc>-v<version>`.

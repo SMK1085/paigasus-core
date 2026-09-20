@@ -242,8 +242,9 @@ plan ─┬─ wheels / prebuild / proto-dist ─ approve-release ─ release �
 - `timeout-minutes` set. Every action is pinned by SHA.
 - **Steps, in order:**
   1. **Fail on an empty token.** No skip-green preflight, unlike `release-pr` (`release.yml:219-227`).
-  2. **Check the artifact hop.** Each archive's per-platform digest must equal the build job's
-     output. Read the version label from each archive, and compare it with `plan`'s version.
+  2. **Check the artifact hop.** Each archive's per-platform digest travels in a file inside the
+     uploaded artifact. The check proves the archive itself was not corrupted. Read the version label
+     from each archive, and compare it with `plan`'s version.
   3. **Check what already exists (D10).** Read the git tag `paigasus-<svc>-v<version>` from the
      remote, and `:<version>` from both registries.
      - The git tag exists → stop with success: "already released".
