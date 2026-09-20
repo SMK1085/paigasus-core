@@ -1542,7 +1542,10 @@ print("COUPLED" if sorted(zones)==sorted(services) and paths==sorted(zones.value
 }
 
 coupling "iam only" "gateway" --set zones.gateway.enabled=false
-coupling "iam and gateway" "" --set zones.gateway.enabled=true
+# Task 11b made backend.url required for a zone whose backend the chart does not deploy, so the
+# two-zone row must supply it. This is a fixture value, not a weakening of the assertion.
+coupling "iam and gateway" "" --set zones.gateway.enabled=true \
+  --set zones.gateway.backend.url=http://gw.example.test:8088
 
 [ "$ec" -eq 0 ] && echo "== chart ingress coupling OK =="
 exit "$ec"
