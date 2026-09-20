@@ -18,6 +18,7 @@ pub mod memberships;
 pub mod organizations;
 pub mod pagination;
 pub mod policies;
+pub mod principal_context;
 pub mod projects;
 pub mod roles;
 pub mod service_accounts;

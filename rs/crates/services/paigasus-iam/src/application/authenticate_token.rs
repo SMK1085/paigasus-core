@@ -45,9 +45,6 @@ impl JitPolicy {
     }
 }
 
-/// `list_by_principal` page size for introspection's membership assembly (§6.1).
-const MEMBERSHIP_PAGE_SIZE: u64 = 200;
-
 /// Wraps any `RepositoryError` as `AuthnError::Backend` — the catch-all for repository
 /// failures this use case doesn't specifically interpret (§6.2 rule 4: "other repo errors
 /// -> Backend").
@@ -141,23 +138,11 @@ where
     }
 
     /// Full authorization context for a request (§6.1): `resolve(.., Disabled)` (D10, never
-    /// provisions) plus every membership row, paged internally (D13 — this is the only
-    /// entry point that fetches memberships).
+    /// provisions) plus every membership row, paged by `principal_context` (D13 — that helper
+    /// is the only place an authn context's memberships are fetched).
     pub async fn introspect(&self, token: &str) -> Result<PrincipalContext, AuthnError> {
         let principal = self.resolve(token, Provisioning::Disabled).await?;
-
-        let mut memberships = Vec::new();
-        let mut offset = 0u64;
-        loop {
-            let page = self.memberships.list_by_principal(principal.principal_id.uuid(), MEMBERSHIP_PAGE_SIZE, offset).await.map_err(backend)?;
-            let page_len = page.len() as u64;
-            memberships.extend(page);
-            if page_len < MEMBERSHIP_PAGE_SIZE {
-                break;
-            }
-            offset += MEMBERSHIP_PAGE_SIZE;
-        }
-
+        let memberships = crate::application::principal_context::load_all_memberships(&self.memberships, &principal.principal_id).await?;
         Ok(PrincipalContext {
             principal,
             memberships,
