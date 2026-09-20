@@ -780,8 +780,8 @@ def napi_violations(job: dict, job_id: str, name: str) -> list[str]:
                 if m and "--no-gh-release" not in segment[m.end() :]:
                     out.append(
                         f"{name}: job '{job_id}' runs `napi prepublish` without "
-                        f"--no-gh-release. release-plz owns every tag (ADR-0011 S3); napi "
-                        f"must never cut one."
+                        f"--no-gh-release. release-plz owns every CRATE tag (ADR-0011 S3, "
+                        f"amended); napi must never cut one."
                     )
     return out
 

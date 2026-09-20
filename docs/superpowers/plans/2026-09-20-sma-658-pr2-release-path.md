@@ -1799,12 +1799,15 @@ of the `jobs:` mapping, add:
             digests="$(uv run --no-project --python '>=3.12' python3 ci/images/release_decision.py oci-digests "$archive")"
             printf '%s\n' "$digests" | sed -n "s/^manifest=/digest_${arch}=/p" >> "$GITHUB_OUTPUT"
           done
-          label="$(crane config "oci-archive:in/paigasus-${SERVICE}-amd64.oci.tar" | uv run --no-project --python '>=3.12' python3 -c 'import json,sys; c=json.load(sys.stdin); print(c["config"]["Labels"]["org.opencontainers.image.version"])')"
+          # `crane config` reads only a registry reference; it cannot read a local archive
+          # (SMA-658 C1, MEASURED), so read the two labels with `release_decision.py labels`.
+          labels="$(uv run --no-project --python '>=3.12' python3 ci/images/release_decision.py labels "in/paigasus-${SERVICE}-amd64.oci.tar")"
+          label="$(printf '%s\n' "$labels" | sed -n 's/^version=//p')"
           if [ "$label" != "$VERSION" ]; then
             echo "::error::the archive carries version ${label}, but plan says ${VERSION}." >&2
             exit 1
           fi
-          revision="$(crane config "oci-archive:in/paigasus-${SERVICE}-amd64.oci.tar" | uv run --no-project --python '>=3.12' python3 -c 'import json,sys; c=json.load(sys.stdin); print(c["config"]["Labels"]["org.opencontainers.image.revision"])')"
+          revision="$(printf '%s\n' "$labels" | sed -n 's/^revision=//p')"
           echo "revision=${revision}" >> "$GITHUB_OUTPUT"
           tag="paigasus-${SERVICE}-v${VERSION}"
           if git ls-remote --tags --exit-code origin "refs/tags/${tag}" > /dev/null 2>&1; then

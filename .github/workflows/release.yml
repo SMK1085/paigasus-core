@@ -1071,8 +1071,9 @@ jobs:
           fi
 
       # --no-gh-release IS REQUIRED and is NOT in --help (prebuild.yml records this; ghRelease
-      # defaults ON). release-plz owns every tag — ADR-0011 S3, "the tool owns every tag",
-      # singular. ci/actionlint/release_guard.py's V5 fails if this flag is ever dropped.
+      # defaults ON). release-plz owns every CRATE tag — ADR-0011 S3, amended. tag-<svc>
+      # (SMA-658) separately owns each service's IMAGE tag. ci/actionlint/release_guard.py's V5
+      # fails if this flag is ever dropped.
       # `--no-gh-release` immediately after the subcommand, per the task-89 header: the guard
       # splits a `run:` line on shell separators and drops anything after a `#`, and a quoted
       # argument containing `#` placed BEFORE the flag would truncate the segment and produce a
