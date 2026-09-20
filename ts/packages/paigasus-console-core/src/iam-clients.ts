@@ -5,8 +5,11 @@
 // `iamClientsForToken` field; the login callback (the app's `lib/auth.ts`) reads that same field,
 // where no session exists yet.
 //
-// No client and no token lives past the request (ts/packages/paigasus-sdk/src/iam.ts:23-28). Only
-// the SDK's transport is process-scoped.
+// No client and no token lives past the request (ts/packages/paigasus-sdk/src/iam.ts:23-28). The
+// SDK's transport outlives the request, but it is cached per module COPY, not per process
+// (@paigasus/sdk/src/transport.ts:215): Next gives a route handler and a page separate module
+// graphs, so each graph opens its own HTTP/2 session pool to IAM, and disposeTransports() reaches
+// only the copy that calls it (SMA-662).
 import 'server-only';
 import type { DescService } from '@bufbuild/protobuf';
 import type { CallOptions, Client } from '@connectrpc/connect';
