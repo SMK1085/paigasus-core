@@ -950,8 +950,9 @@ smoke_consoles() {
     fi
     # BINARY, not a list. With a third zone C this picks ONE other prefix, so C's chunk would be
     # probed against /iam alone, with nothing saying so. (That step-4 row proves only that a
-    # basePath is in effect — see its comment — not that zones do not collide.) The PAIGASUS_ZONES JSON literal in the `docker run` below is a third hardcoded
-    # copy of the same two-zone assumption. A third zone needs both rewritten, not extended.
+    # basePath is in effect — see its comment — not that zones do not collide.) The
+    # PAIGASUS_ZONES JSON literal in the `docker run` below is a third hardcoded copy of the same
+    # two-zone assumption. A third zone needs both rewritten, not extended.
     if [ "$service" = "iam" ]; then other="/gateway"; else other="/iam"; fi
     name="smoke-${app}-${RUN_ID}"
     # Registered BEFORE the container is created, so a `docker run` that fails part-way still has
