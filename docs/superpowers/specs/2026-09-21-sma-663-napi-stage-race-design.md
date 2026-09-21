@@ -319,7 +319,13 @@ stage=$(cat "$OUT"/b*.fail.log 2>/dev/null | grep -cE '\.paigasus-node-bindings\
 echo "N=$N B=$B napi_fail=$napi_fail b_calls=$calls b_nonzero=$fails b_napi_stage_lines=$stage"
 ```
 
-P4: to be filled with the PR's moon ci run ID.
+P4: PR 286, `moon ci` run
+[35572949585](https://github.com/SMK1085/paigasus-core/actions/runs/35572949585), attempt 1,
+conclusion `success`. The run scheduled `paigasus-kernel-ts:build` and `:test` together with the
+`build`, `lint` and `test` tasks of every crate, and `paigasus-kernel-py:test`. That is the shape that
+failed 9 of 9 on SMA-658. The log has no cargo error that names a staging directory. Its only
+`napi-stage` strings are the branch name and two file names. One green run is not proof by itself;
+P1 and P2 carry the proof.
 
 ## 10. Out of scope
 
