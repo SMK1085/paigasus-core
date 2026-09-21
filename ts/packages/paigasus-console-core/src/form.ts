@@ -19,6 +19,14 @@ import { neverReachedIam, type ActionState, type IamResult } from './errors';
 export const NAME_MAX_CODE_POINTS = 256;
 
 /**
+ * The largest bulk-replay budget the console sends (SMA-661 spec § 6.5, D3). IAM clamps `max_rows`
+ * to BulkReplayRequest::MAX_BULK_REPLAY (paigasus-iam-core dead_letter.rs) and says nothing, so a
+ * larger budget would make the confirmation name a number that IAM never replays. The console
+ * refuses it instead. tests/unit/bulk-replay-ceiling.test.ts holds this value to the Rust constant.
+ */
+export const MAX_BULK_REPLAY_ROWS = 10_000;
+
+/**
  * A name: of a tenancy node, and of a service account (IAM trims it and allows 1–256 characters,
  * SMA-636 spec § 3.1). The bound counts code points (`[...value].length`), as IAM does. The two
  * trims are not identical: this schema trims as JavaScript does, IAM trims Unicode `White_Space`
