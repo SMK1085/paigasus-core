@@ -314,15 +314,15 @@ follows the same shape as the Rust service images:
   is a compiled-in record of the zone the artifact was built for, not deployment-varying
   configuration, so `runtime.ts` can compare it against the `PAIGASUS_ZONE` a deployment supplies.
 - **`.github/dependabot.yml`'s `/ts` docker block treats its two pinned images differently, not
-  identically.** The distroless base's `ignore` entry blocks only its major-version bumps
-  (`.github/dependabot.yml:177-179`); its minor and patch bumps are not ignored, so they still go
-  into the `docker-minor-patch` group as normal proposals, and a digest refresh on the pinned
-  major flows through automatically too. The `node` builder's `ignore` entry blocks all three
-  update types — major, minor, and patch (`.github/dependabot.yml:184-188`) — because
-  `assert_console_pins` holds its exact `X.Y.Z` to `.prototools`' pin; and because
-  `ts/Dockerfile:13` pins the builder by a bare tag with no `@sha256` digest, there is also no
-  digest for Dependabot to refresh, so nothing updates automatically for `node` at all. A version
-  bump for either stays deliberate, human, and moves `ts/Dockerfile` and `.prototools` together.
+  identically.** The `gcr.io/distroless/nodejs24-debian12` entry's `ignore` list blocks only its
+  major-version bumps; its minor and patch bumps are not ignored, so they still go into the
+  `docker-minor-patch` group as normal proposals, and a digest refresh on the pinned major flows
+  through automatically too. The `node` entry's `ignore` list blocks all three update types —
+  major, minor, and patch — because `assert_console_pins` holds its exact `X.Y.Z` to
+  `.prototools`' pin; and because the builder stage's `FROM node:X.Y.Z-bookworm AS builder` line
+  in `ts/Dockerfile` names a bare tag with no `@sha256` digest, there is also no digest for
+  Dependabot to refresh, so nothing updates automatically for `node` at all. A version bump for
+  either stays deliberate, human, and moves `ts/Dockerfile` and `.prototools` together.
 - **The standalone output has no static assets.** Next writes no `.next/static` and no `public/`
   into `.next/standalone`. The console image's builder stages both, exactly as
   `ts/apps/<app>/moon.yml`'s `build` task does. An image built without that copy answers 200 on
