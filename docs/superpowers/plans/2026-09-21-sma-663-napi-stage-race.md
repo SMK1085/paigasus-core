@@ -13,7 +13,7 @@
 ## Global Constraints
 
 - Work only in the worktree `/Users/smaschek/dev/paigasus/paigasus-core/.claude/worktrees/sma-663-napi-stage` on branch `feature/sma-663-napi-stage-race`. Run `git branch --show-current` before the first commit of each task.
-- Prefix shell commands with `export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"` so that `moon`, `cargo`, `pnpm` and `uv` resolve to the repo pins.
+- Prefix shell commands with `export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"` so that `moon`, `pnpm` and `uv` resolve to the repo pins. `cargo` comes from rustup, and `rs/rust-toolchain.toml` selects its toolchain.
 - Use `/opt/homebrew/bin/python3` (3.14) for `cargo_moon_parity.py`. System `/usr/bin/python3` is 3.9 and has no `tomllib`.
 - Conventional commits with a workspace scope and a lowercase subject: `fix(rs): …`, `feat(ci): …`, `docs(repo): …`. Put `(SMA-663)` at the end of the subject. Do not put `#NNN` or `token: value` lines in the body. End each message with `Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>`.
 - Never use `--no-verify`. Never `git commit --amend`. Add new commits only.
