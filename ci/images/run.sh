@@ -376,13 +376,17 @@ base_path_for() {
 # rootfs stage is byte-identical between services and BuildKit would cache-hit it, leaving the
 # second service's chisel manifest empty. Every stage in ts/Dockerfile references APP, so no
 # stage is shared between the two console builds and there is nothing to force.
+# `docker buildx build`, not bare `docker build`, for the same reason as build_one: on the
+# GitHub-hosted runner a bare `docker build` does not reliably route through the builder that
+# docker/setup-buildx-action made current (SMA-658, measured; see build_oci's comment). On this
+# development Mac `docker build` is itself an alias for buildx, so a local run cannot show the gap.
 build_console_one() {
   local service="$1" app base_path tag
   app="$(app_for "$service")"
   base_path="$(base_path_for "$service")"
   tag="${REGISTRY}/paigasus-${app}:${REVISION}"
   echo "== build ${app} =="
-  docker build \
+  docker buildx build \
     --progress=plain \
     --load \
     -f "$ROOT/ts/Dockerfile" \
