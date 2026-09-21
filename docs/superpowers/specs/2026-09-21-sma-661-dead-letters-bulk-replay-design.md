@@ -1,8 +1,9 @@
 # SMA-661 — bulk replay and the parked-time filter on `/iam/dead-letters`
 
 - **Issue:** SMA-661, a follow-up from SMA-629 (spec § 11, decision D1).
-- **Status:** revision 2. Sven approved the design in chat on 2026-09-21. Revision 2 folds in the
-  Stage 2 challenge (§ 12) and adds decision D6.
+- **Status:** revision 3. Sven approved the design in chat on 2026-09-21. Revision 2 folds in the
+  Stage 2 challenge (§ 12) and adds decision D6. Revision 3 corrects six facts that the runtime and
+  the code contradicted while the plan was written (§ 13). It changes no decision.
 - **Parent spec:** `docs/superpowers/specs/2026-09-19-sma-629-dead-letters-capability-design.md`
   (§ 5.3, § 6.3, § 6.4, § 6.5, § 7, § 9, § 11).
 
@@ -155,8 +156,9 @@ Each is measured in the repository. Line numbers were re-derived on 2026-09-21.
 14. `world.ts`'s `authz.isAuthorized` answers `allowed: allow.has(req.action)`, and `allow` defaults
     to `ALL_ACTIONS` declared in the same file. An action absent from `ALL_ACTIONS` is **denied** in
     every e2e test.
-15. `setHandlers` **replaces** the whole handler map; it does not merge. `startFakeIam`'s
-    `options.overrides` merges into the world's base map at construction.
+15. `setHandlers` **replaces** the whole handler map; it does not merge. `startFakeIam` takes only
+    `{ handlers }` (`testing/fake-iam.ts:221`); `overrides` is a field of the e2e world's
+    `WorldOptions` (`tests/e2e/support/world.ts:99,280`). Corrected in revision 3 (§ 13).
 16. `ArchiveButton` (`app/_components/lifecycle-button.tsx:48-89`) renders **no form in step 1**.
     The `<form>` exists only in step 2.
 17. `paigasus-console-core`'s `test` task already declares Rust source as an input
@@ -218,9 +220,10 @@ parser must not rest on that.
 what D2 protects: without a zone the console would have to guess, and the guess would differ from
 what the operator saw.
 
-The two checks are both needed and neither is redundant. The pattern accepts
-`2026-02-30T00:00:00Z`, and `Date.parse` refuses it. `Date.parse` accepts a zone-less value and
-reads it as local time, and the pattern refuses it.
+**Revision 3: there are three checks, not two, and `Date.parse` never sees the operator's spelling.**
+See § 13 items 1 and 2. Revision 2 said here that `Date.parse` refuses `2026-02-30T00:00:00Z`. That
+is false on the pinned Node: V8 reads it as 2026-03-02. `Date.parse` does accept a zone-less value
+and reads it as local time, and the pattern refuses that value.
 
 `MAX_PARKED_BOUND_LENGTH` also goes on the input as `maxLength`. That is a **typing bound only**; it
 is not the validation. The parser itself never truncates, in line with `parseCursor`'s rule that a
@@ -754,3 +757,19 @@ The commands and actions take no authorization question. That rule is unchanged:
 | QUESTION — does `parkedBoundField` accept an absent value | accepted; `preprocess` treats `null`/`undefined`/`''` as "no filter" | § 6.5 |
 | QUESTION — should the form be hidden on an empty list | rejected; it renders, and § 6.4 point 3 is the answer. Hiding it adds a branch that only removes a truthful "Replayed 0 events." | § 6.2 |
 | QUESTION — a revalidated `forbidden` list read loses the result | accepted as a recorded risk. It is unchanged from SMA-629, whose `ok` path already revalidates | R8, § 6.6 |
+
+---
+
+## 13. Revision 3 — facts the implementation plan measured (2026-09-21)
+
+The plan's author measured these while writing exact code, and the coordinator re-ran each one. None
+changes a decision. Each changes how a decision is built.
+
+| # | What revision 2 said | What is true | What the plan does |
+|---|---|---|---|
+| 1 | `Date.parse` refuses `2026-02-30T00:00:00Z` (§ 4.1). The Stage 2 challenger repeated the claim. | On Node 24.18.1, V8 returns 2026-03-02 for that value. A typo would **silently filter on another day**. Neither the spec nor the challenge ran the value. | A third check, `isCalendarDay`, round-trips the date through `Date.UTC`. A test pins the V8 behaviour, so the reason for the check stays visible. |
+| 2 | The basic offset `+0200` is refused because `Date.parse` accepts it only through implementation-specific behaviour (§ 4.1). | The same is true of every D6 spelling: a space separator, a lower-case `z`, omitted seconds and more than three fraction digits are all outside ECMAScript's Date Time String Format. V8 accepts all of them, `+0200` included. | `standardInstant` rebuilds the value in the standard format from the pattern's captures, and `Date.parse` reads only that string. The stated reason for refusing `+0200` is then consistent with what the parser does. Digits past the millisecond are dropped; the canonical instant has millisecond precision anyway. |
+| 3 | The loader uses `timestampFromDate` from `@bufbuild/protobuf/wkt` (§ 4.4). | No file in the repository uses it, and `iam-console` does not depend on `@bufbuild/protobuf` (`ts/apps/iam-console/package.json`). | `lib/time.ts` gains `timestampFromIso(iso)`, which returns a plain `{ seconds, nanos }`. A temporary `tsc` probe confirmed that both request types accept it. |
+| 4 | The client form imports `MAX_BULK_REPLAY_ROWS` (§ 6.3, § 6.5). | The `paigasus-console-core` root imports `server-only` (`src/index.ts:6`), and so does `lib/paging.ts`. A client component can import neither. | The page passes the ceiling to the form as a `ceiling` prop. The `max_rows` pattern lives in a new directive-free module, `max-rows.ts`, that both sides import. The sentence "A page holds 50 events" is a literal, and a test holds it equal to `PAGE_SIZE`. |
+| 5 | A third seeded entry, given through `options.overrides`, produces a "Next" link (§ 7.4). | The seeded map lives in a closure, so an override cannot add an entry to it. And the console always sends `limit: 50`, so three entries never fill a page. | The outbox handlers become a factory, `deadLetterHandlers(map, pageSize)`, with keyset paging. R20 passes its own set, with `pageSize` 1, through `overrides`. |
+| 6 | AC 1's zero-call proof sits in the files § 7.1 lists. | The existing zero-call rule for the row actions lives in `tests/unit/actions-revalidate.test.ts`. | AC 1's proof goes there, next to the rule it extends. |
