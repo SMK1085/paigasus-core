@@ -139,9 +139,10 @@ export const MAX_PARKED_BOUND_LENGTH = 40;
  * seconds, a lower-case `z`, and up to nine fractional digits. A value with no zone is refused: the
  * console would have to guess the zone, and the guess would differ from what the operator saw. The
  * basic-format offset `+0200` is refused too, because the ECMAScript Date Time String Format does
- * not define it.
+ * not define it. The hour runs 00 to 23: ECMAScript reads 24:00 as the next day's midnight, and the
+ * typed day and the canonical day would then differ.
  */
-export const PARKED_BOUND_PATTERN = /^(\d{4}-\d{2}-\d{2})[T ](\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,9}))?)?(Z|z|[+-]\d{2}:\d{2})$/;
+export const PARKED_BOUND_PATTERN = /^(\d{4}-\d{2}-\d{2})[T ]([01]\d|2[0-3]):(\d{2})(?::(\d{2})(?:\.(\d{1,9}))?)?(Z|z|[+-]\d{2}:\d{2})$/;
 
 /**
  * The bound rewritten in ECMAScript's own Date Time String Format, `YYYY-MM-DDTHH:mm:ss.sssZ` or

@@ -140,6 +140,7 @@ describe('parseParkedBound', () => {
     ['a date only', '2026-09-19'],
     ['a day that does not exist', '2026-02-30T00:00:00Z'],
     ['a minute that does not exist', '2026-09-19T00:60:00Z'],
+    ['an hour that does not exist', '2026-09-19T24:00:00Z'],
     ['words', 'not a time'],
     ['41 characters', '9'.repeat(41)],
   ])('refuses %s, echoes it back, and never reached IAM', (_label, raw) => {
@@ -186,6 +187,7 @@ describe('parseParkedBound', () => {
   it('rewrites nothing the pattern refuses', () => {
     expect(standardInstant('2026-09-19T00:00:00')).toBeNull();
     expect(standardInstant('2026-09-19T00:00:00+0200')).toBeNull();
+    expect(standardInstant('2026-09-19T24:00:00Z')).toBeNull();
   });
 
   it('bounds the length at 40, above the 35 characters of the longest legal value', () => {
