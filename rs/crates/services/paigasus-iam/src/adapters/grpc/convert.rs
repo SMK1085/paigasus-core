@@ -394,8 +394,9 @@ pub fn to_proto_role_grant(g: &RoleGrant) -> ProtoRoleGrant {
 
 /// Projects a `PrincipalContext` into the wire `IntrospectResponse` (spec §7.2/§7.3): PRN
 /// strings, principal status as its stable `as_str`, `expires_at` as a prost `Timestamp`,
-/// memberships via the shared tenancy `Membership` mapping, and `role_grants` from the
-/// core's structured role-grant refs — always empty until a later M3 task populates it (D4).
+/// memberships via the shared tenancy `Membership` mapping, and `role_grants` is whatever
+/// the application layer assembled: populated for the OIDC `Introspect` path, empty for
+/// `IntrospectApiKey` (SMA-633 D2).
 pub fn to_introspect_response(ctx: &PrincipalContext) -> IntrospectResponse {
     // Token introspection only ever validates a JWT (`AuthenticateToken::introspect` always
     // resolves via the OIDC authenticator), so `ApiKey` is unreachable here — Task 19 adds a
@@ -1578,5 +1579,22 @@ mod tests {
         assert!(!response.issuer.is_empty());
         assert!(!response.subject.is_empty());
         assert!(response.expires_at.is_some());
+    }
+
+    /// SMA-633 whole-branch review finding 2: nothing previously asserted that `WhoAmI` reports
+    /// role grants at all — deleting the `role_grants:` line from `to_who_am_i_response` left the
+    /// suite green. A `PrincipalContext` carrying one grant must produce a response carrying the
+    /// same `scope_prn` and `role_key`.
+    #[test]
+    fn to_who_am_i_response_reports_the_callers_role_grants() {
+        let mut ctx = oidc_context();
+        ctx.role_grants = vec![RoleGrantRef {
+            scope_prn: "prn:pgs:iam:::organization/0192f1c0-0000-7000-8000-0000000000aa".to_string(),
+            role_key: "billing-admin".to_string(),
+        }];
+        let response = to_who_am_i_response(&ctx);
+        assert_eq!(response.role_grants.len(), 1);
+        assert_eq!(response.role_grants[0].scope_prn, "prn:pgs:iam:::organization/0192f1c0-0000-7000-8000-0000000000aa");
+        assert_eq!(response.role_grants[0].role_key, "billing-admin");
     }
 }

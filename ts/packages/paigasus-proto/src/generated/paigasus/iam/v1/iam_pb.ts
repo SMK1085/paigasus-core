@@ -1183,7 +1183,7 @@ export type WhoAmIResponse = Message<"paigasus.iam.v1.WhoAmIResponse"> & {
   memberships: Membership[];
 
   /**
-   * empty until SMA-633 populates it
+   * the principal's own role grants, sorted by (scope_prn, role_key)
    *
    * @generated from field: repeated paigasus.iam.v1.RoleGrantRef role_grants = 7;
    */

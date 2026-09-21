@@ -2015,7 +2015,7 @@ class WhoAmIResponse(betterproto2.Message):
         7, betterproto2.TYPE_MESSAGE, repeated=True
     )
     """
-    empty until SMA-633 populates it
+    the principal's own role grants, sorted by (scope_prn, role_key)
     """
 
 

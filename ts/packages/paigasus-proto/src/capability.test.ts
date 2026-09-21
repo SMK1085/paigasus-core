@@ -11,6 +11,8 @@ describe('capabilityWireKey', () => {
     expect(capabilityWireKey(Capability.GATEWAY_CHAT_STREAM)).toBe('gateway.chat.stream');
     // SMA-629 D3: one segment, not "iam.dead.letters".
     expect(capabilityWireKey(Capability.IAM_DEADLETTERS)).toBe('iam.deadletters');
+    // SMA-633: three segments, not "iam.authngrants".
+    expect(capabilityWireKey(Capability.IAM_AUTHN_GRANTS)).toBe('iam.authn.grants');
   });
 
   it('has no wire key for the zero sentinel', () => {
@@ -24,10 +26,10 @@ describe('capabilityWireKey', () => {
   });
 
   it('covers exactly the registered capabilities', () => {
-    // Guards against a sixth capability being registered without a
-    // corresponding assertion above. Six members: UNSPECIFIED plus five keys.
+    // Guards against a seventh capability being registered without a
+    // corresponding assertion above. Seven members: UNSPECIFIED plus six keys.
     const members = Object.values(Capability).filter((v) => typeof v === 'number');
-    expect(members).toHaveLength(6);
+    expect(members).toHaveLength(7);
   });
 
   it('produces keys matching the documented grammar for every non-sentinel capability', () => {
