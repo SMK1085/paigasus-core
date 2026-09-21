@@ -17,3 +17,16 @@ export function timestampIso(value: ProtoTimestamp | undefined): string | null {
   const date = new Date(Number(value.seconds) * 1000 + Math.floor(value.nanos / 1_000_000));
   return Number.isNaN(date.getTime()) ? null : date.toISOString();
 }
+
+/**
+ * The inverse of `timestampIso`, for a request (SMA-661 spec § 4.4). `iso` is a value that
+ * lib/paging.ts's `canonicalParkedBound` already accepted, so `Date.parse` is finite. The seconds are
+ * floored, so an instant before the epoch keeps non-negative nanos, as the Timestamp type requires.
+ * The spec named protobuf-es's `timestampFromDate`; this app does not depend on `@bufbuild/protobuf`,
+ * and a plain `{ seconds, nanos }` is a valid message init for a Timestamp field.
+ */
+export function timestampFromIso(iso: string): ProtoTimestamp {
+  const ms = Date.parse(iso);
+  const seconds = Math.floor(ms / 1000);
+  return { seconds: BigInt(seconds), nanos: (ms - seconds * 1000) * 1_000_000 };
+}
