@@ -2,7 +2,7 @@
 
 - **Issue:** SMA-663 (related: SMA-604, SMA-658)
 - **Date:** 2026-09-21
-- **Status:** Revision 2, after the adversarial challenge. For approval.
+- **Status:** Approved at Gate 1 (revision 2, after the adversarial challenge).
 
 ## 1. Problem
 
@@ -267,6 +267,9 @@ failure logs name the real napi staging directory. Under the branch form, the sa
 produces zero failed `cargo metadata` calls out of 2441. This confirms the race exists
 on the main form and is absent on the branch form. `napi_fail` is 0 on both forms:
 `napi build` itself never fails.
+
+Each failed call names the staging directory twice, so `b_napi_stage_lines` is exactly
+twice `b_nonzero` (4424 = 2 × 2212), and every main-form failure was the staging error.
 
 The full text of `p2-race.sh`, so a reviewer can run it again:
 

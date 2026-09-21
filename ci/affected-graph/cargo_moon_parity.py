@@ -1719,8 +1719,8 @@ def dependabot_expand_member(rs_root, entry):
 def read_workspace_members(root, assertion):
     """Return rs/Cargo.toml's `[workspace] members` list, for A9 and A11.
 
-    An absent manifest or an absent/empty `members` key is infrastructure, never a silent pass:
-    both would make the assertion vacuous while it still prints PASS.
+    An absent manifest or an absent/empty `members` key is infrastructure, never a silent pass.
+    Both would make the assertion vacuous while it still prints PASS.
     """
     path = root / "rs" / "Cargo.toml"
     if not path.is_file():
@@ -1803,9 +1803,9 @@ def check_member_literals(root):
     reds on a crate directory that no entry reaches.
     """
     return [
-        f"members entry {entry!r} carries a glob character — it also matches a dot-directory "
-        f"such as napi's `.<crate>.napi-stage-<random>`, and a concurrent `cargo metadata` then "
-        f"fails on its missing Cargo.toml"
+        f"members entry {entry!r} carries a glob character. "
+        f"It also matches a dot-directory such as napi's `.<crate>.napi-stage-<random>`, "
+        f"so a concurrent `cargo metadata` then fails on its missing Cargo.toml"
         for entry in read_workspace_members(root, "A11")
         if any(ch in entry for ch in MEMBER_GLOB_CHARS)
     ]
@@ -2344,12 +2344,13 @@ def self_test():
             "the arity fixture now references a ci/ script but its tmp root does not create one"
         )
     with tempfile.TemporaryDirectory() as tmp:
-        # collect_findings now folds check_dockerfile_locked(root) into a8 and
-        # check_member_globs(root, crates) into a9, and BOTH raise on an absent file — write a
-        # locked Dockerfile and a members list that reaches `crates`' own source dirs, so this
-        # arity check stays about arity. The members list is DERIVED from the same `crates`
-        # fixture the call passes, so a fixture edit cannot leave this row asserting an arity
-        # failure that is really an a9 violation in disguise.
+        # collect_findings now folds check_dockerfile_locked(root) into a8,
+        # check_member_globs(root, crates) into a9, and check_member_literals(root) into a11.
+        # ALL THREE raise on an absent file — write a locked Dockerfile and a members list that
+        # reaches `crates`' own source dirs, so this arity check stays about arity. The members
+        # list is DERIVED from the same `crates` fixture the call passes, so a fixture edit
+        # cannot leave this row asserting an arity failure that is really an a9 or a11
+        # violation in disguise.
         tmp_rs = Path(tmp) / "rs"
         tmp_rs.mkdir()
         (tmp_rs / "Dockerfile").write_text("RUN cargo build --release --locked -p paigasus-iam\n")
@@ -4433,9 +4434,9 @@ def collect_findings(projects, crates, root):
              "    expansion, so its cargo update job resolves a SHORTER workspace than Cargo\n"
              "    does — it proposes a truncated rs/Cargo.lock and reds on any dependency that\n"
              "    needs a companion package unlocked with it (SMA-604).\n"
-             "    Fix: give each `members` entry at most ONE wildcard level\n"
-             "    (`crates/libs/*`, never `crates/*/*`), one entry per crate directory.\n"
-             "    Dependabot lists a single directory level below the glob's literal prefix.\n"
+             "    Fix: add the missing crate directory as a literal `members` entry, with\n"
+             "    no glob (SMA-663). Dependabot lists a single directory level below the\n"
+             "    glob's literal prefix.\n"
              "    An `A9 examines` row means the opposite — cargo_crates() found no crates, so\n"
              "    the comparison covers nothing; fix that first."),
         ("a10", check_cargo_config_inputs(projects, root),

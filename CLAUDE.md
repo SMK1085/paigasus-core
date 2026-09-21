@@ -154,8 +154,9 @@ a gate. Do not copy it here.
   directory `.<crate>.napi-stage-<random>` that has no `Cargo.toml`. The old
   `crates/bindings/*` members glob matched it. Every concurrent `cargo metadata` call then
   failed with exit 101, for the full life of that directory. Only `paigasus-kernel-ts:build`
-  and `:test` stage. Every other task in the error, `paigasus-kernel-py:test` included, was a
-  victim. It reached 9 of 9 `moon ci` runs on SMA-658. Re-runs did not clear it. The fix: every
+  and `:test` stage. Every other task in the error, `paigasus-kernel-py:test` included, only
+  read the workspace while the directory existed. They did not make it. It reached 9 of 9
+  `moon ci` runs on SMA-658. Re-runs did not clear it. The fix: every
   `rs/Cargo.toml` `members` entry is a literal path. `repo:affected-smoke`'s A11 reds on a glob
   character there. Measured with a forced overlap of 200 napi builds: 2212 of 4624 concurrent
   `cargo metadata` calls failed with the glob. 0 of 2441 calls failed with literal entries.

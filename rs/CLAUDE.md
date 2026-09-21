@@ -141,7 +141,8 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   unnoticed repairer. `--locked` proves the lock is
   CONSISTENT with the manifests, not that it is correct: a swapped-but-compatible version or a
   tampered checksum still passes.
-- `rs/Cargo.toml`'s `[workspace] members` entries must carry **at most ONE wildcard level each**
+- `rs/Cargo.toml`'s `[workspace] members` entries **must be literal crate paths, with no glob**
+  (SMA-663). Before SMA-663, the SMA-604 rule allowed at most ONE wildcard level each
   (`crates/libs/*`, not `crates/*/*`). Cargo reads both forms identically — the member set is the
   same 13 crates, measured — but Dependabot's cargo file fetcher cannot expand the two-level form:
   `expand_workspaces` (`cargo/lib/dependabot/cargo/file_fetcher.rb`) lists exactly ONE directory

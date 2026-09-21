@@ -246,8 +246,9 @@ It also runs several checks that the per-case project sets structurally **cannot
   on any `[workspace] members` entry in `rs/Cargo.toml` that carries a glob character (`*`, `?`
   or `[`). A glob also matches a dot-directory. `napi build` (@napi-rs/cli 3.10.3) stages its
   output in `.<crate>.napi-stage-<random>` beside the crate, and that directory has no
-  `Cargo.toml`. While it exists, every concurrent `cargo metadata` fails with exit 101, and
-  `moon ci` runs the napi tasks in parallel with the crate tasks. The rule is blunt on purpose:
+  `Cargo.toml`. `moon ci` runs the napi tasks in parallel with the crate tasks. While the
+  staging directory exists, that overlap makes every concurrent `cargo metadata` fail with
+  exit 101. The rule is blunt on purpose:
   a finer rule would have to model how napi resolves its crate. It reads `--cwd`,
   `--manifest-path`, `-p` and `-o` to do that, and a wrong model passes in silence. A9 and A11
   share `read_workspace_members`, so both raise infra on a missing file or an empty list.
