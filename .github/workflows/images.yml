@@ -22,7 +22,10 @@ on:
   # here touch it, and two cold --release builds on every one of them would raise the bill
   # (SMA-520). These are the inputs that can actually break an image build — a new dependency,
   # a toolchain bump, a tool pin, or the build machinery itself. The same reasoning excludes a
-  # bare `ts/**`: only the console build's own inputs are listed.
+  # bare `ts/**`: only the console build's own inputs are listed. That includes the install
+  # inputs beside the lockfile (`pnpm-workspace.yaml`'s `allowBuilds` changes what the Docker
+  # install does without a lockfile change) and each console's `lib/config.ts`, whose required
+  # keys the console smoke's dummy runtime config must match.
   pull_request:
     branches:
       - main
@@ -35,6 +38,10 @@ on:
       - 'ts/Dockerfile'
       - 'ts/.dockerignore'
       - 'ts/pnpm-lock.yaml'
+      - 'ts/pnpm-workspace.yaml'
+      - 'ts/package.json'
+      - 'ts/.npmrc'
+      - 'ts/apps/*/lib/config.ts'
       - 'ci/images/**'
       - '.github/workflows/images.yml'
       - '.prototools'
@@ -141,8 +148,16 @@ jobs:
       # the `if: always()` upload steps: a console failure here stops the job, but only once every
       # rs artifact this job exists to produce already exists on disk, so the uploads below still
       # carry that evidence instead of the console failure masking it.
+      # `df -h /` before and after: the two Next builds were added to a job whose disk has already
+      # overflowed once, and the job's only other reading is at job start, before the rs builds.
+      # The rc is kept and re-raised, so the second reading is printed on a failure too.
       - name: Build + smoke both consoles
-        run: ci/images/run.sh all-consoles
+        run: |
+          df -h /
+          rc=0
+          ci/images/run.sh all-consoles || rc=$?
+          df -h /
+          exit "$rc"
 
       - name: Upload chisel package manifests
         if: always()
