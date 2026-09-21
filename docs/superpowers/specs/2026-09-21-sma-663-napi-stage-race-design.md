@@ -216,8 +216,107 @@ A green P4 alone is not proof. P1 and P2 (or P3) carry the proof. P4 shows the A
 
 ## 9. Measurements
 
-To be filled during implementation: the P1 results, the P2 (or P3) counts, the P4 run ID, and the
-full text of the P2 script, so that a reviewer can run it again.
+Host: `Darwin 25.6.0 arm64`. napi version: `3.10.3`. Cargo version:
+`cargo 1.95.0 (f2d3ce0bd 2026-03-21)`.
+
+### P1: the deterministic probe
+
+| Item | Value |
+|---|---|
+| main rc | 101 |
+| branch rc | 0 |
+| moon rc | 0 |
+| `grep -c napi-stage` on `moon query projects` output (plain pattern) | 33 |
+| `grep -c napi-stage` on the stderr file (plain pattern) | 0 |
+| `grep -cE '\.paigasus-node-bindings\.napi-stage-'` on the same output (narrow pattern) | 0 |
+| `grep -cE '\.paigasus-node-bindings\.napi-stage-'` on the stderr file (narrow pattern) | 0 |
+| Project count with the probe directory present | 33 |
+| Project count with the probe directory absent | 33 |
+| `restored-rc` | 0 |
+
+The plain pattern `napi-stage` matches 33 lines. Every match is a `"root"` path field.
+Each path contains the worktree's own directory name, `sma-663-napi-stage`. The match
+does not come from the probe directory. The narrow pattern
+`\.paigasus-node-bindings\.napi-stage-` names the real staging-directory shape. It
+matches zero lines. The project count is 33 with the probe directory and 33 without it.
+The two counts are equal. So Moon does not see the probe directory as a project. This
+clears the P1 decision point. P2 proceeds below.
+
+### P2: the forced-overlap race
+
+Each build call is warm. A warm `napi build` took 1.148 seconds for the second of two
+runs. The chunk size is 50 builds per chunk, four chunks per form, for a sum of 200
+builds per form. Every chunk ran in the foreground.
+
+| Form | Chunk | N | B | napi_fail | b_calls | b_nonzero | b_napi_stage_lines |
+|---|---|---|---|---|---|---|---|
+| main | 1 | 50 | 3 | 0 | 1183 | 580 | 1160 |
+| main | 2 | 50 | 3 | 0 | 1150 | 547 | 1094 |
+| main | 3 | 50 | 3 | 0 | 1142 | 539 | 1078 |
+| main | 4 | 50 | 3 | 0 | 1149 | 546 | 1092 |
+| **main** | **sum** | **200** | — | **0** | **4624** | **2212** | **4424** |
+| branch | 1 | 50 | 3 | 0 | 608 | 0 | 0 |
+| branch | 2 | 50 | 3 | 0 | 615 | 0 | 0 |
+| branch | 3 | 50 | 3 | 0 | 606 | 0 | 0 |
+| branch | 4 | 50 | 3 | 0 | 612 | 0 | 0 |
+| **branch** | **sum** | **200** | — | **0** | **2441** | **0** | **0** |
+
+Under the main form, 200 `napi build` calls run beside three loops of concurrent
+`cargo metadata` calls. 2212 of 4624 `cargo metadata` calls fail. 4424 lines in the
+failure logs name the real napi staging directory. Under the branch form, the same load
+produces zero failed `cargo metadata` calls out of 2441. This confirms the race exists
+on the main form and is absent on the branch form. `napi_fail` is 0 on both forms:
+`napi build` itself never fails.
+
+The full text of `p2-race.sh`, so a reviewer can run it again:
+
+```bash
+#!/bin/bash
+# SMA-663 P2: force napi staging to overlap with concurrent `cargo metadata`.
+# Usage: N=200 B=3 OUT=<dir> p2-race.sh <repo-root>
+set -u
+ROOT=$1
+N=${N:-200}
+B=${B:-3}
+OUT=${OUT:?set OUT}
+rm -rf "$OUT"; mkdir -p "$OUT"
+STOP="$OUT/stop"
+
+b_loop() {
+  local id=$1 calls=0 fails=0 rc
+  while [ ! -e "$STOP" ]; do
+    calls=$((calls + 1))
+    cargo metadata --manifest-path "$ROOT/rs/Cargo.toml" --format-version=1 --locked \
+      >/dev/null 2>"$OUT/b$id.last.err"
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
+      fails=$((fails + 1))
+      { echo "--- call=$calls rc=$rc"; cat "$OUT/b$id.last.err"; } >> "$OUT/b$id.fail.log"
+    fi
+  done
+  echo "$calls $fails" > "$OUT/b$id.summary"
+}
+
+for i in $(seq 1 "$B"); do b_loop "$i" & done
+
+napi_fail=0
+for k in $(seq 1 "$N"); do
+  pnpm -C "$ROOT/ts/packages/paigasus-kernel" exec napi build --platform \
+    --cwd ../../../rs/crates/bindings/paigasus-node-bindings >/dev/null 2>>"$OUT/napi.err" \
+    || napi_fail=$((napi_fail + 1))
+done
+touch "$STOP"
+wait
+
+calls=0; fails=0
+for i in $(seq 1 "$B"); do
+  read -r c f < "$OUT/b$i.summary"; calls=$((calls + c)); fails=$((fails + f))
+done
+stage=$(cat "$OUT"/b*.fail.log 2>/dev/null | grep -cE '\.paigasus-node-bindings\.napi-stage-' || true)
+echo "N=$N B=$B napi_fail=$napi_fail b_calls=$calls b_nonzero=$fails b_napi_stage_lines=$stage"
+```
+
+P4: to be filled with the PR's moon ci run ID.
 
 ## 10. Out of scope
 
