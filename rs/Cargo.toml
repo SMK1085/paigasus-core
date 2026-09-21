@@ -1,16 +1,22 @@
 [workspace]
-# Every entry is a LITERAL crate path, one per crate directory (SMA-663). A glob such as
-# `crates/bindings/*` also matches a dot-directory. `napi build` stages its output in a sibling
-# directory `.paigasus-node-bindings.napi-stage-<random>` that has no Cargo.toml, so while it
-# exists every concurrent `cargo metadata` fails with exit 101. `repo:affected-smoke`'s A11 reds
-# on any glob character here. A new crate needs one new line; `cargo new` adds it, and A9 reds if
-# a crate directory is missing.
+# Every entry is a literal crate path, one per crate directory (SMA-663).
+# A glob such as `crates/bindings/*` also matches a dot-directory.
+# `napi build` stages its output in a sibling directory `.paigasus-node-bindings.napi-stage-<random>`.
+# That directory has no Cargo.toml.
+# While it exists, every concurrent `cargo metadata` call fails with exit 101.
+# `repo:affected-smoke`'s A11 reds if any members entry contains a glob character.
+# A new crate needs one new line in members.
+# `cargo new` adds the line.
+# A9 reds if a crate directory is not in the members list.
 #
-# Dependabot (SMA-604): its `expand_workspaces` lists only ONE directory level below a glob's
-# literal prefix, so `crates/*/*` resolved to ZERO members, it built its sandbox from the five
-# `path =` crates in [workspace.dependencies], and it wrote a truncated rs/Cargo.lock (176
-# packages against 543) and failed `Failed to update serde!`. A literal entry is taken verbatim,
-# so it is safe for Dependabot. A9 transcribes that expander.
+# Dependabot (SMA-604): its `expand_workspaces` lists only one directory level below a glob's literal prefix.
+# So `crates/*/*` resolved to zero members.
+# Dependabot built its sandbox from the five `path =` crates in [workspace.dependencies].
+# Dependabot wrote a truncated rs/Cargo.lock (176 packages against 543).
+# Dependabot failed with `Failed to update serde!`.
+# A literal entry is taken verbatim.
+# So it is safe for Dependabot.
+# A9 transcribes that expander.
 members = [
   "crates/bindings/paigasus-node-bindings",
   "crates/bindings/paigasus-py-bindings",
