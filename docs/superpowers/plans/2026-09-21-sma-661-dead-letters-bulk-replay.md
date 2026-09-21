@@ -895,7 +895,7 @@ describe('the parked-time filter (SMA-661 § 4.2–§ 4.5)', () => {
   it('sends the CANONICAL bounds, keys the frame by them, keeps them in both paging links, and echoes the typed values', async () => {
     mocks.listDeadLetters.mockResolvedValue({ entries: [entry], nextCursor: 'c2' });
 
-    const tree = await visit({ eventType: 'orders', parkedFrom: '2026-09-19 02:00+02:00', parkedTo: '2026-09-20t00:00:00z', cursor: 'c1' });
+    const tree = await visit({ eventType: 'orders', parkedFrom: '2026-09-19 02:00+02:00', parkedTo: '2026-09-20T00:00:00z', cursor: 'c1' });
 
     expect(mocks.listDeadLetters).toHaveBeenCalledWith({
       eventType: 'orders',
@@ -913,7 +913,7 @@ describe('the parked-time filter (SMA-661 § 4.2–§ 4.5)', () => {
     // D6: the inputs show what the operator typed. Following a link converges them on the canonical form.
     const inputs = all(tree, Input).map((element) => element.props as { name: string; defaultValue: string });
     expect(inputs.find((input) => input.name === 'parkedFrom')?.defaultValue).toBe('2026-09-19 02:00+02:00');
-    expect(inputs.find((input) => input.name === 'parkedTo')?.defaultValue).toBe('2026-09-20t00:00:00z');
+    expect(inputs.find((input) => input.name === 'parkedTo')?.defaultValue).toBe('2026-09-20T00:00:00z');
   });
 
   it('gives each parked input the example, the typing bound and the inclusive-bounds help (§ 4.3)', async () => {
