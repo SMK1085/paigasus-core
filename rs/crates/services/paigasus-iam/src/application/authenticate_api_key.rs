@@ -252,8 +252,13 @@ where
 
     /// Full authorization context for an API-key-authenticated request: `resolve` plus every
     /// membership row, paged by `principal_context::load_all_memberships` — the same helper
-    /// `AuthenticateToken::introspect` uses, since SMA-632. `role_grants` stays empty (no
-    /// current caller populates it from the `RoleGrantStore` here either).
+    /// `AuthenticateToken::introspect` uses, since SMA-632.
+    ///
+    /// `role_grants` stays EMPTY here by decision (SMA-633 D2), not by omission. This method
+    /// runs on the gateway's per-request path (`paigasus-gateway`'s `require_iam_auth` and
+    /// `require_authenticated` both call it), and nothing reads the field, so it does not pay
+    /// for a `role_grant` read per request. Adding one also puts a `role_grant` outage on the
+    /// gateway's 503 path — read SMA-633 D6 before changing this.
     pub async fn introspect(&self, token: &str) -> Result<PrincipalContext, AuthnError> {
         let principal = self.resolve(token).await?;
         let memberships = crate::application::principal_context::load_all_memberships(&self.memberships, &principal.principal_id).await?;

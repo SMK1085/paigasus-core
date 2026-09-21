@@ -18,6 +18,7 @@ use std::time::Duration;
 
 use paigasus_iam::adapters::grpc;
 use paigasus_iam::adapters::http::AppState;
+use paigasus_iam_core::authz::model::root_prn;
 use paigasus_proto::paigasus::iam::v1::authn_service_client::AuthnServiceClient;
 use paigasus_proto::paigasus::iam::v1::tenancy_service_client::TenancyServiceClient;
 use paigasus_proto::paigasus::iam::v1::{AttachMembershipRequest, CreateOrganizationRequest, IntrospectRequest};
@@ -97,7 +98,17 @@ async fn introspect_over_grpc_round_trips_a_jit_provisioned_principal() {
     assert_eq!(ctx.subject, "grpc-alice");
     assert!(ctx.expires_at.is_some(), "expires_at is set");
     assert!(ctx.memberships.is_empty(), "no memberships yet");
-    assert!(ctx.role_grants.is_empty(), "role grants empty until a later M3 task populates them");
+    // SMA-633: `provision_platform_admin` above granted `platform_admin` at Root, and the
+    // `CreateOrganization` call above that ALSO granted `org_admin` scoped to the new org (D8:
+    // `PgOrganizationRepository::create` seeds the creating principal's owner grant in the same
+    // transaction) — introspection reports both, not only the platform_admin one.
+    assert_eq!(
+        ctx.role_grants.len(),
+        2,
+        "expected the seeded platform_admin grant plus the org_admin grant CreateOrganization seeds (D8): {ctx:?}"
+    );
+    assert!(ctx.role_grants.iter().any(|g| g.role_key == "platform_admin" && g.scope_prn == root_prn().canonical()));
+    assert!(ctx.role_grants.iter().any(|g| g.role_key == "org_admin" && g.scope_prn == org.prn));
     let principal_prn = ctx.principal_prn.clone();
 
     // Attach an org membership to the resolved principal, then re-introspect: the membership

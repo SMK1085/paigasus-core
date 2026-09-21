@@ -774,6 +774,7 @@ impl AppState {
             PgExternalIdentityRepository::new(db.clone()),
             PgPrincipalRepository::new(db.clone()),
             PgMembershipRepository::new(db.clone()),
+            role_grant_store.clone(),
             KernelIdGenerator,
             SystemClock,
             JitPolicy::from_issuers(&jit_flags),

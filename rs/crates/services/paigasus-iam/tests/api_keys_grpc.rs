@@ -140,6 +140,9 @@ async fn grpc_issue_and_introspect_parity() {
     assert_eq!(ctx.status, "active");
     assert!(!ctx.key_id.is_empty(), "{ctx:?}");
     assert!(ctx.memberships.is_empty());
+    // SMA-633 D2: the API-key path reports no grants by decision, not by omission. It runs on
+    // the gateway's per-request path and nothing reads the field, so it does not pay for the
+    // query. Do not "fix" this to match the OIDC path without reading D2 first.
     assert!(ctx.role_grants.is_empty());
     // SMA-446: introspection surfaces the key's tenancy `scope_prn` — the scope the key was
     // issued for (`owner`), matching the issued `ApiKey.scope_prn` (D11 — the gateway authorizes

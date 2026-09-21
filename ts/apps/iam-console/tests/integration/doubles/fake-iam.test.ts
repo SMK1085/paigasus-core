@@ -114,6 +114,9 @@ describe('the fake IAM', () => {
     expect(after.roleGrants).toEqual([]);
   });
 
+  // This double now diverges from real IAM on purpose: `Introspect` populates `role_grants`
+  // there (SMA-633), but the fake still hardcodes an empty list regardless of what a script
+  // returns, because the console does not yet consume it — deferring that work is spec D1.
   it('keeps role_grants empty even when a script returns some', async () => {
     fake.provisioned.add('token-c');
     fake.setHandlers({ 'authn.introspect': () => ({ roleGrants: [{ scopePrn: ALLOWED, roleKey: 'org_admin' }], memberships: [{ id: 'm1', principalPrn: 'p', nodePrn: ALLOWED }] }) });

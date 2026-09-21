@@ -239,7 +239,8 @@ impl From<RoleGrantRef> for RoleGrantRefDto {
 
 /// `IntrospectResponse`-shaped JSON (spec §7.2): mirrors proto
 /// `paigasus.iam.v1.IntrospectResponse` field-for-field — snake_case, PRN strings,
-/// `expires_at` as RFC3339, `role_grants` empty until a later M3 task populates it.
+/// `expires_at` as RFC3339. `role_grants` is whatever the application layer assembled:
+/// populated for the OIDC `Introspect` path, empty for `IntrospectApiKey` (SMA-633 D2).
 #[derive(Debug, Clone, Serialize)]
 pub struct IntrospectResponseDto {
     pub principal_prn: String,
@@ -894,5 +895,22 @@ mod tests {
         assert_eq!(dto.expires_at, Some(expiry));
         assert_eq!(dto.issuer, "");
         assert_eq!(dto.subject, "");
+    }
+
+    /// SMA-633 whole-branch review finding 2: nothing previously asserted that `WhoAmI` reports
+    /// role grants over HTTP either — deleting the `role_grants:` line from `WhoAmIResponseDto`'s
+    /// `From` impl left the suite green. A `PrincipalContext` carrying one grant must produce a
+    /// DTO carrying the same `scope_prn` and `role_key`.
+    #[test]
+    fn who_am_i_response_dto_reports_the_callers_role_grants() {
+        let mut ctx = api_key_context(Some(Utc::now() + chrono::Duration::hours(1)));
+        ctx.role_grants = vec![RoleGrantRef {
+            scope_prn: "prn:pgs:iam:::organization/0192f1c0-0000-7000-8000-0000000000bb".to_string(),
+            role_key: "billing-admin".to_string(),
+        }];
+        let dto = WhoAmIResponseDto::from(ctx);
+        assert_eq!(dto.role_grants.len(), 1);
+        assert_eq!(dto.role_grants[0].scope_prn, "prn:pgs:iam:::organization/0192f1c0-0000-7000-8000-0000000000bb");
+        assert_eq!(dto.role_grants[0].role_key, "billing-admin");
     }
 }

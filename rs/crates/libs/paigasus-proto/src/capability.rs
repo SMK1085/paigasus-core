@@ -66,12 +66,13 @@ mod tests {
     /// Every registered capability. Deliberately explicit: prost generates no
     /// variant iterator. `adding_a_capability_forces_updating_these_tests`
     /// below is what stops this list going stale.
-    const ALL: [Capability; 5] = [
+    const ALL: [Capability; 6] = [
         Capability::IamAuthzCedar,
         Capability::IamApikeys,
         Capability::IamAudit,
         Capability::GatewayChatStream,
         Capability::IamDeadletters,
+        Capability::IamAuthnGrants,
     ];
 
     #[test]
@@ -91,6 +92,9 @@ mod tests {
         // SMA-629 D3. The round-trip test alone would also pass for "iam.dead.letters"; this pins
         // the single-segment spelling.
         assert_eq!(Capability::IamDeadletters.as_wire_key().unwrap(), "iam.deadletters");
+        // SMA-633. The round-trip test alone would also pass for "iam.authngrants"; this pins
+        // the three-segment spelling.
+        assert_eq!(Capability::IamAuthnGrants.as_wire_key().unwrap(), "iam.authn.grants");
     }
 
     #[test]
@@ -156,8 +160,8 @@ mod tests {
 
     #[test]
     fn adding_a_capability_forces_updating_these_tests() {
-        // ALL covers discriminants 1..=5. Registering a sixth value fails here,
+        // ALL covers discriminants 1..=6. Registering a seventh value fails here,
         // which is the signal to extend ALL and the literals test above.
-        assert!(Capability::try_from(6).is_err());
+        assert!(Capability::try_from(7).is_err());
     }
 }

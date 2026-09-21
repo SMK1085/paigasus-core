@@ -12,7 +12,9 @@
 //     application/authenticate_token.rs:104-105).
 //   - EVERY other RPC is bearer-enforced, and provisions the token (authn.rs:182-190). So does the
 //     HTTP route (adapters/http/service_info.rs:10, auth_middleware.rs:54).
-//   - Introspect always returns an empty `role_grants` (authenticate_token.rs:161-165).
+//   - This double returns an empty `role_grants`. Real IAM populates it for `Introspect` since
+//     SMA-633, but the resolver still discards it, so the double matches what the consoles
+//     actually consume. The follow-up that reads grants updates this double with it.
 //   - On a gRPC call, an incoming `paigasus-correlation-id` in the HYPHENATED UUID form (8-4-4-4-12
 //     hex digits, any case) is adopted and echoed in lower case. Any other value, and a missing
 //     header, gets a minted id. Every gRPC error carries the id in

@@ -86,6 +86,15 @@ class Capability(betterproto2.Enum):
     reports it: OutboxService has no config switch (a break-glass surface).
     """
 
+    IAM_AUTHN_GRANTS = 6
+    """
+    "iam.authn.grants" — the OIDC paths, `Introspect` and `WhoAmI`, populate `role_grants`. IAM
+    always reports this key: the population has no config switch. A client that does not see
+    this key must treat an empty `role_grants` as UNKNOWN, not as "this principal holds no
+    grants" (SMA-633 D9). `IntrospectApiKey` returns an empty `role_grants` by design even when
+    this key is present (SMA-633 D2) — this key does not promise grants on that path.
+    """
+
     @classmethod
     def betterproto_value_to_renamed_proto_names(cls) -> dict[int, str]:
         return {
@@ -95,6 +104,7 @@ class Capability(betterproto2.Enum):
             3: "CAPABILITY_IAM_AUDIT",
             4: "CAPABILITY_GATEWAY_CHAT_STREAM",
             5: "CAPABILITY_IAM_DEADLETTERS",
+            6: "CAPABILITY_IAM_AUTHN_GRANTS",
         }
 
     @classmethod
@@ -106,6 +116,7 @@ class Capability(betterproto2.Enum):
             "CAPABILITY_IAM_AUDIT": 3,
             "CAPABILITY_GATEWAY_CHAT_STREAM": 4,
             "CAPABILITY_IAM_DEADLETTERS": 5,
+            "CAPABILITY_IAM_AUTHN_GRANTS": 6,
         }
 
 

@@ -261,7 +261,7 @@ message WhoAmIResponse {
   string subject = 4; // empty for an API-key bearer
   google.protobuf.Timestamp expires_at = 5; // absent when the credential has no expiry
   repeated Membership memberships = 6; // reuse tenancy message
-  repeated RoleGrantRef role_grants = 7; // empty until SMA-633 populates it
+  repeated RoleGrantRef role_grants = 7; // the principal's own role grants, sorted by (scope_prn, role_key)
 }
 
 message RoleGrantRef {

@@ -174,6 +174,9 @@ async fn introspect_endpoint_validates_a_key() {
     assert_eq!(body["status"], "active");
     assert!(body["key_id"].as_str().is_some_and(|s| !s.is_empty()), "{body}");
     assert!(body["memberships"].as_array().expect("memberships array").is_empty());
+    // SMA-633 D2: the API-key path reports no grants by decision, not by omission. It runs on
+    // the gateway's per-request path and nothing reads the field, so it does not pay for the
+    // query. Do not "fix" this to match the OIDC path without reading D2 first.
     assert!(body["role_grants"].as_array().expect("role_grants array").is_empty());
 
     // Garbage input gets the same token-introspect-style rejection: 401 `invalid-token`, no

@@ -65,4 +65,4 @@ export const SERVICE_STATES = ['absent', 'available', 'degraded'] as const;
  * around the `paigasus/boundaries/apps` eslint ban on apps importing `@paigasus/proto`, which
  * cannot see through a re-export.
  */
-export type CapabilityKey = 'iam.authz.cedar' | 'iam.apikeys' | 'iam.audit' | 'gateway.chat.stream' | 'iam.deadletters';
+export type CapabilityKey = 'iam.authz.cedar' | 'iam.apikeys' | 'iam.audit' | 'gateway.chat.stream' | 'iam.deadletters' | 'iam.authn.grants';
