@@ -112,7 +112,7 @@ catalog:
   'eslint-plugin-react-hooks': ^7.1.1
   'eslint-plugin-jsx-a11y': ^6.10.2
   'typescript-eslint': ^8.70.0
-  prettier: ^3.9.6
+  prettier: ^3.9.8
   # Test runner
   vitest: ^5.0.0
   # @paigasus/discovery's browser test harness (SMA-509) uses Vite PROGRAMMATICALLY to bundle and
@@ -214,7 +214,7 @@ catalog:
   # jsdom component-test tier (SMA-503 AC 2 + AC 4). axe-core is used directly rather than
   # through vitest-axe, which last published 2025-01-22 and pulls four transitive deps for a
   # fifteen-line matcher.
-  jsdom: ^30.0.1
+  jsdom: ^30.1.0
   '@testing-library/react': ^16.3.3
   '@testing-library/dom': ^10.4.2
   '@testing-library/user-event': ^14.6.7
