@@ -239,9 +239,19 @@ It also runs several checks that the per-case project sets structurally **cannot
   a crate directory no entry reaches, which is the same shrunken-sandbox failure one crate at a
   time and would survive a check that only tested the zero-resolve case. Nothing else in the repo
   can see this: `cargo metadata` is identical either way, every Moon task is identical, and every
-  other assertion here is identical. **Adding a crate directory** (a fourth sibling of
-  `libs`/`services`/`bindings`) needs a new `members` entry; adding a crate inside an existing one
-  does not.
+  other assertion here is identical. Each `members` entry is a literal crate path since SMA-663,
+  so **every new crate** needs its own `members` line. `cargo new` inside the workspace adds it.
+  If one is missing, A9 reds with a "never reaches" row.
+- **A11** (`check_member_literals` in `cargo_moon_parity.py`, SMA-663, findings key `a11`) reds
+  on any `[workspace] members` entry in `rs/Cargo.toml` that carries a glob character (`*`, `?`
+  or `[`). A glob can match a dot-directory. `napi build` (@napi-rs/cli 3.10.3) stages its
+  output in `.<crate>.napi-stage-<random>` beside the crate, and that directory has no
+  `Cargo.toml`. `moon ci` runs the napi tasks in parallel with the crate tasks. While the
+  staging directory exists, that overlap makes every concurrent `cargo metadata` fail with
+  exit 101. The rule is blunt on purpose:
+  a finer rule would have to model how napi resolves its crate. It reads `--cwd`,
+  `--manifest-path`, `-p` and `-o` to do that, and a wrong model passes in silence. A9 and A11
+  share `read_workspace_members`, so both raise infra on a missing file or an empty list.
 - **A10** (`check_cargo_config_inputs` in `cargo_moon_parity.py`, SMA-599, findings key `a10`) is
   every Moon task whose cargo subcommand COMPILES or LINKS, with cwd inside `rs/`, keying on
   `rs/.cargo/config.toml`. Scope is a CONJUNCTION: the verb predicate (`CONFIG_SENSITIVE_VERBS`,
@@ -337,7 +347,7 @@ It also runs several checks that the per-case project sets structurally **cannot
   degrading to two empty sets. **`:affected-smoke` is load-bearing for every assertion in this
   file**: this gate runs *inside* it, so removing that one entry from `T` (and from CLAUDE.md)
   passes C1-C6 by never executing them, and takes the eight project cascade cases, the five task
-  cases, A1-A10 and `assert_include_relations` with it. Never exempt or drop it — see the design
+  cases, A1-A11 and `assert_include_relations` with it. Never exempt or drop it — see the design
   doc's L6.
   Not covered: whether a `repo:*` task's `inputs` still match anything — see the follow-up in the
   design doc's L3.

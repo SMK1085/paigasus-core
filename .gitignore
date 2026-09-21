@@ -76,3 +76,7 @@ Thumbs.db
 
 # SMA-500: chisel package manifests are CI artifacts, not tracked files.
 chisel-manifest-*.txt
+
+# A leftover `napi build` staging directory (SMA-663). napi removes it in a `finally` block, so it
+# stays only after a SIGINT or SIGKILL. Cargo ignores it now, but `git add -A` would commit it.
+.*.napi-stage-*/
