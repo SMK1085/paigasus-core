@@ -198,22 +198,90 @@ assert_console_pins() {
     echo "::error::ts/Dockerfile pins pnpm ${builder_pnpm} but .prototools pins ${proto_pnpm}." >&2
     return 1
   fi
-  # Matches ENV/ARG anywhere a PAIGASUS_ assignment could hide: as a later variable on a
-  # multi-variable ENV line (ts/Dockerfile's own house style, e.g. `ENV PORT=3000 HOSTNAME=...`),
-  # on an indented instruction, or on an ARG. A prefix-anchored `^ENV +PAIGASUS_` would miss all
-  # three, seeing only a PAIGASUS_ that happens to be the very first, unindented ENV variable.
-  if grep -qE '^[[:space:]]*(ENV|ARG)[[:space:]]+.*PAIGASUS_' "$df"; then
-    echo "::error::ts/Dockerfile bakes a PAIGASUS_* env var; console config is deployment-varying and must stay runtime-only." >&2
+  # SMA-513 final review I3: both base images are digest-pinned, and the digest is asserted, the
+  # way assert_pins asserts it on the rs builder. Without this, deleting `@sha256:…` or swapping
+  # `:nonroot@sha256:…` for `:latest` left every row above green. Code compiled in the builder
+  # stage goes into /app, so the builder's digest matters as much as the runtime's.
+  # `grep -c` over the FILE, not `grep -q` from a pipe: rc 1 (no match) prints 0 and is folded
+  # into the count, and rc 2 (unreadable file) also leaves 0, so both fail closed below.
+  local n_runtime_pin n_builder_pin
+  n_runtime_pin="$(grep -cE '^FROM gcr\.io/distroless/nodejs[0-9]+-debian12:nonroot@sha256:[0-9a-f]{64}([[:space:]]|$)' "$df")" || n_runtime_pin=0
+  if [ "${n_runtime_pin:-0}" -ne 1 ]; then
+    echo "::error::ts/Dockerfile: the runtime FROM line must be exactly one gcr.io/distroless/nodejsNN-debian12:nonroot@sha256:<64 hex> — a missing digest or a different tag leaves the runtime base unpinned." >&2
     return 1
   fi
-  # Anchored to the install instruction itself, not a file-wide search: the explanatory comment
-  # directly above this RUN line also contains the literal string "--frozen-lockfile", so a
-  # file-wide `grep -qF` stays green even after the flag is deleted from the actual install.
-  if ! grep -qE '^RUN pnpm install .*--frozen-lockfile' "$df"; then
-    echo "::error::ts/Dockerfile installs without --frozen-lockfile; the image would not be built from the committed lockfile." >&2
+  n_builder_pin="$(grep -cE '^FROM node:[0-9]+\.[0-9]+\.[0-9]+-bookworm@sha256:[0-9a-f]{64}[[:space:]]+AS[[:space:]]+builder([[:space:]]|$)' "$df")" || n_builder_pin=0
+  if [ "${n_builder_pin:-0}" -ne 1 ]; then
+    echo "::error::ts/Dockerfile: the builder FROM line must be exactly one node:X.Y.Z-bookworm@sha256:<64 hex> AS builder — without the digest, the code compiled into /app comes from an unpinned image." >&2
     return 1
   fi
-  echo "  ts/Dockerfile: distroless Node ${base_major} and builder Node ${builder_node}/pnpm ${builder_pnpm} match .prototools, no baked PAIGASUS_* ENV/ARG, --frozen-lockfile install present"
+
+  # The next two checks read a NORMALISED copy of ts/Dockerfile, written to a temp file, never a
+  # here-string: Homebrew bash 5 deadlocks on a here-string over 512 bytes on the development Mac
+  # (CLAUDE.md, SMA-612). The normalisation follows assert_pins: `\`-continued lines are joined
+  # into one, so a flag or an assignment on a continuation line is seen on its instruction's line.
+  # Comment lines are dropped FIRST, because Docker drops them too, including a comment line in
+  # the middle of a continuation; dropping them also means a comment that mentions PAIGASUS_ or
+  # --frozen-lockfile can neither false-red nor false-green either check.
+  local norm norm_rc=0
+  norm="$(mktemp "${TMPDIR:-/tmp}/paigasus-console-pins.XXXXXX")" || norm=""
+  if [ -z "$norm" ]; then
+    echo "::error::assert_console_pins: mktemp failed; the ENV/ARG and --frozen-lockfile checks could not run." >&2
+    return 1
+  fi
+  awk '/^[[:space:]]*#/ { next } /\\[[:space:]]*$/ { sub(/\\[[:space:]]*$/, " "); printf "%s", $0; next } { print }' "$df" > "$norm" || norm_rc=$?
+  if [ "$norm_rc" -ne 0 ]; then
+    rm -f "$norm"
+    echo "::error::assert_console_pins: awk exited ${norm_rc} while normalising ts/Dockerfile; the ENV/ARG and --frozen-lockfile checks could not run." >&2
+    return 1
+  fi
+
+  # A PAIGASUS_ assignment on an ENV or ARG instruction, in any position on the (joined)
+  # instruction: a later variable on a multi-variable ENV line (ts/Dockerfile's own house style),
+  # a continuation line, an indented instruction, or an ARG. The instruction keyword matches
+  # case-insensitively, because Docker parses `env` and `ENV` the same; PAIGASUS_ stays
+  # case-sensitive, as IAM_/GATEWAY_ do in assert_pins. What this does NOT see: a PAIGASUS_ value
+  # written by a RUN step into a file, or passed in through a COPY — it reads ENV and ARG only.
+  local n_baked baked_rc=0
+  n_baked="$(grep -cE '^[[:space:]]*([Ee][Nn][Vv]|[Aa][Rr][Gg])[[:space:]]+.*PAIGASUS_' "$norm")" || baked_rc=$?
+  if [ "$baked_rc" -gt 1 ]; then
+    rm -f "$norm"
+    echo "::error::assert_console_pins: grep exited ${baked_rc} on the normalised ts/Dockerfile; the PAIGASUS_* check could not run." >&2
+    return 1
+  fi
+  if [ "${n_baked:-0}" -ne 0 ]; then
+    echo "::error::ts/Dockerfile bakes a PAIGASUS_* env var; console config is deployment-varying and must stay runtime-only. The joined instruction(s) follow." >&2
+    grep -nE '^[[:space:]]*([Ee][Nn][Vv]|[Aa][Rr][Gg])[[:space:]]+.*PAIGASUS_' "$norm" >&2 || true
+    rm -f "$norm"
+    return 1
+  fi
+
+  # EVERY `pnpm install` invocation carries --frozen-lockfile, not only the first one found. Each
+  # invocation is cut at the next `&&`, `;` or `|`, so two installs chained in one RUN are two
+  # invocations here. `--frozen-lockfile` must stand as a bare flag. Any `--frozen-lockfile=<value>`
+  # form (`=false` switches it off) and `--no-frozen-lockfile` are rejected outright, even beside
+  # a bare flag, so the check never has to decide which of two conflicting flags pnpm obeys.
+  local inst inst_rc=0 n_inst n_frozen n_unfrozen
+  inst="$(grep -oE 'pnpm[[:space:]]+install([[:space:]][^&;|]*)?' "$norm")" || inst_rc=$?
+  rm -f "$norm"
+  if [ "$inst_rc" -gt 1 ]; then
+    echo "::error::assert_console_pins: grep exited ${inst_rc} on the normalised ts/Dockerfile; the --frozen-lockfile check could not run." >&2
+    return 1
+  fi
+  if [ -z "$inst" ]; then
+    echo "::error::ts/Dockerfile: no 'pnpm install' instruction found; the image would not be built from the committed lockfile." >&2
+    return 1
+  fi
+  # printf into grep -c reads the whole input: grep -c is not an early-exit reader.
+  n_inst="$(printf '%s\n' "$inst" | grep -c .)" || n_inst=0
+  n_frozen="$(printf '%s\n' "$inst" | grep -cE -- '--frozen-lockfile([[:space:]]|$)')" || n_frozen=0
+  n_unfrozen="$(printf '%s\n' "$inst" | grep -cE -- '--frozen-lockfile=|--no-frozen-lockfile')" || n_unfrozen=0
+  if [ "$n_unfrozen" -ne 0 ] || [ "$n_frozen" -ne "$n_inst" ]; then
+    echo "::error::ts/Dockerfile: ${n_frozen} of ${n_inst} 'pnpm install' invocation(s) carry --frozen-lockfile, and ${n_unfrozen} switch it off; every install must be frozen, or the image would not be built from the committed lockfile. The invocations follow." >&2
+    printf '%s\n' "$inst" >&2
+    return 1
+  fi
+  echo "  ts/Dockerfile: distroless Node ${base_major} and builder Node ${builder_node}/pnpm ${builder_pnpm} match .prototools, both FROM lines digest-pinned, no baked PAIGASUS_* ENV/ARG, all ${n_inst} pnpm install(s) --frozen-lockfile"
 }
 
 # Writes the chisel package list that a build log names into $2, and fails when it is empty
@@ -773,8 +841,9 @@ smoke() {
 # <basePath>/healthz, so a probe-based smoke passes while every client chunk 404s. These assertions
 # fetch the SERVED CHUNK instead, which is the only form that fails on the real defect.
 #
-# This is ts/tests/docker/serves-chunks.sh, moved here and deleted there: leaving both would create
-# a second, unpinned copy of the assertion.
+# This is the ONLY copy of the served-chunk assertion. Do not add a second one elsewhere (for
+# example as a script under ts/tests/): a second copy would not be pinned by this gate and would
+# drift from it.
 #
 # Script-global, not `local`: the EXIT trap fires after smoke_consoles has returned and its locals
 # have gone out of scope, and under `set -u` a trap that reads a dead local dies with `unbound
@@ -851,7 +920,7 @@ console.log(["public=" + (fs.existsSync(root + "/public") ? "1" : "0")].concat(r
 smoke_consoles() {
   local service app base_path other name port origin status html chunk bytes code uid
   local run_out img_out img_public img_list host_public host_list img_dirs host_dirs
-  local host_std host_static host_id run_rc sh_rc img_rc
+  local host_std host_static host_id run_rc sh_rc img_rc cstate hc_rc hc_out
   local ec=0 bad started
   # This REPLACES the script-global `trap load_oci_cleanup EXIT` at the top of the load-oci
   # section, exactly as `smoke()` and `rehearse` already do — harmless today because no dispatch
@@ -880,8 +949,8 @@ smoke_consoles() {
       continue
     fi
     # BINARY, not a list. With a third zone C this picks ONE other prefix, so C's chunk would be
-    # probed against /iam alone and the collision check would be two-thirds vacuous with nothing
-    # saying so. The PAIGASUS_ZONES JSON literal in the `docker run` below is a third hardcoded
+    # probed against /iam alone, with nothing saying so. (That step-4 row proves only that a
+    # basePath is in effect — see its comment — not that zones do not collide.) The PAIGASUS_ZONES JSON literal in the `docker run` below is a third hardcoded
     # copy of the same two-zone assumption. A third zone needs both rewritten, not extended.
     if [ "$service" = "iam" ]; then other="/gateway"; else other="/iam"; fi
     name="smoke-${app}-${RUN_ID}"
@@ -924,7 +993,19 @@ smoke_consoles() {
       port="${port##*:}"
       case "$port" in
         ''|*[!0-9]*)
-          echo "::error::${app}: could not read the published host port for container port 3000/tcp ('docker port' gave '${port:-<nothing>}') — the container started but published no port." >&2
+          # A container that starts and then crashes at once also leaves `docker port` empty, so
+          # the state is read to tell the two causes apart. GUARDED: the container can already be
+          # gone, and `docker inspect` then exits non-zero; an empty state takes the generic arm.
+          cstate="$(docker inspect -f '{{.State.Status}} {{.State.ExitCode}}' "$name" 2>/dev/null)" || cstate=""
+          case "$cstate" in
+            exited*|dead*)
+              echo "::error::${app}: the container started and then EXITED (state/exit code: ${cstate}) before its port could be read — the image's entrypoint crashed. Its last log lines follow." >&2
+              ;;
+            *)
+              echo "::error::${app}: could not read the published host port for container port 3000/tcp ('docker port' gave '${port:-<nothing>}', state '${cstate:-<unreadable>}') — the container started but published no port. Its last log lines follow." >&2
+              ;;
+          esac
+          docker logs "$name" 2>&1 | tail -30 >&2 || true
           ec=1; bad=1
           ;;
       esac
@@ -960,11 +1041,32 @@ smoke_consoles() {
       fi
     fi
 
+    # The image's OWN HEALTHCHECK program, run inside the container. Nothing else in this suite
+    # executes /app/healthcheck.mjs: ts/Dockerfile writes it with a `printf` that carries a
+    # backtick template literal and a `%s` substitution, so an escaping or path regression would
+    # otherwise ship with every other row green. `docker exec` of the image's node needs no shell.
+    # It runs only once the page rendered, because the probe it makes is the same server's
+    # <basePath>/healthz. It does not set `bad`: the chunk rows below do not depend on it.
+    # GUARDED: a non-zero exit is the finding, and must reach the named message, not abort.
+    if [ "$bad" -eq 0 ]; then
+      hc_rc=0
+      hc_out="$(docker exec "$name" /nodejs/bin/node /app/healthcheck.mjs 2>&1)" || hc_rc=$?
+      if [ "$hc_rc" -ne 0 ]; then
+        echo "::error::${app}: the image's HEALTHCHECK program (/app/healthcheck.mjs) exited ${hc_rc} against a server that renders ${base_path} — check the healthcheck printf in ts/Dockerfile. Its output follows." >&2
+        printf '%s\n' "$hc_out" >&2
+        ec=1
+      else
+        echo "  ${app}: HEALTHCHECK program /app/healthcheck.mjs exits 0"
+      fi
+    fi
+
     html=""
     if [ "$bad" -eq 0 ]; then
       # The probe already confirmed 200, but the container can still regress between the two calls
       # — a connection drop, a timeout the probe's retries happened to dodge, or -L exceeding
-      # --max-redirs — so this call is GUARDED too and carries its own, smaller retry budget.
+      # --max-redirs — so this call is GUARDED too and carries its own, smaller retry budget: the
+      # probe's 20 retries absorb the container's startup wait, and these 5 cover only a transient
+      # error on a server that already answered 200.
       html="$(curl -fsSL --max-redirs 3 --max-time 30 --retry 5 --retry-delay 1 \
         --retry-all-errors "${origin}${base_path}")" || html=""
       if [ -z "$html" ]; then
@@ -1002,20 +1104,24 @@ smoke_consoles() {
       fi
     fi
 
-    # Step 4: the other zone's prefix does not serve it. GUARDED: `curl` without -f still exits
-    # non-zero on a connection failure or a timeout, and an unguarded capture would abort the
-    # script before the named message — the defect this check was drafted with.
+    # Step 4: the other zone's prefix does not serve it. This proves ONLY that a basePath is in
+    # effect in this one container. It does NOT prove the two zones' assets do not collide:
+    # MEASURED on iam-console:dev, the real chunk also 404s under /zzz/… and with no prefix at all,
+    # so any unknown prefix gives this result. The real acceptance-criterion-3 proof needs both
+    # zones behind one ingress, and belongs to that ingress (SMA-513 PR 2a), not to this row.
+    # GUARDED: `curl` without -f still exits non-zero on a connection failure or a timeout, and an
+    # unguarded capture would abort the script before the named message.
     if [ "$bad" -eq 0 ]; then
       code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 \
         "${origin}${other}${chunk#"$base_path"}")" || code=""
       if [ -z "$code" ]; then
-        echo "::error::${app}: the ${other} probe got no HTTP response at all (connection failure or timeout) — the zone-collision check could not be made." >&2
+        echo "::error::${app}: the ${other} probe got no HTTP response at all (connection failure or timeout) — the basePath check could not be made." >&2
         ec=1
       elif [ "$code" != "404" ]; then
-        echo "::error::${app}: ${other} also served the chunk (HTTP ${code}); the two zones' asset prefixes collide." >&2
+        echo "::error::${app}: ${other} also served the chunk (HTTP ${code}); the chunk is served outside ${base_path}, so no basePath is in effect." >&2
         ec=1
       else
-        echo "  ${app}: serves ${chunk} (${bytes} bytes), 404 under ${other}"
+        echo "  ${app}: serves ${chunk} (${bytes} bytes), 404 under ${other} (a basePath is in effect; cross-zone collision is NOT checked here — that needs the ingress)"
       fi
     fi
 
