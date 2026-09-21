@@ -43,6 +43,7 @@ on:
       - 'ts/.npmrc'
       - 'ts/apps/*/lib/config.ts'
       - 'ts/apps/*/next.config.ts'
+      - 'ts/apps/*/package.json'
       - 'ci/images/**'
       - '.github/workflows/images.yml'
       - '.prototools'

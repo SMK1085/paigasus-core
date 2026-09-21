@@ -181,9 +181,10 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
 - The `pull_request` filter of `images.yml` lists the image build inputs. For `rs/` these are
   `rs/Dockerfile`, `rs/Cargo.{lock,toml}`, `rs/rust-toolchain.toml` and `rs/.dockerignore`. For
   `ts/` these are `ts/Dockerfile`, `ts/.dockerignore`, `ts/pnpm-lock.yaml`,
-  `ts/pnpm-workspace.yaml`, `ts/package.json`, `ts/.npmrc`, `ts/apps/*/lib/config.ts` and
-  `ts/apps/*/next.config.ts`. It also lists `ci/images/**`, the workflow, `.prototools` and the two
-  `.proto/plugins/*.toml` files. A PR that changes one of these runs the workflow automatically.
+  `ts/pnpm-workspace.yaml`, `ts/package.json`, `ts/.npmrc`, `ts/apps/*/lib/config.ts`,
+  `ts/apps/*/next.config.ts` and `ts/apps/*/package.json`. It also lists `ci/images/**`, the
+  workflow, `.prototools` and the two `.proto/plugins/*.toml` files. A PR that changes one of these
+  runs the workflow automatically. The rule for a `ts/` entry is in RUNBOOK-containers.md section 1.
 - The filter does not list `rs/**` or `ts/**`. A PR that changes `rs/**` or `ts/**` but no
   listed input can still break an image build. Start the workflow manually for such a PR with
   `workflow_dispatch`. (`gh workflow run images.yml --ref <branch>` returns 404 until `images.yml`

@@ -35,9 +35,18 @@ The build context is `rs/` (the Cargo workspace root). `.github/workflows/images
 requests that touch the build inputs (`rs/Cargo.lock`, `rs/Cargo.toml`, `rs/rust-toolchain.toml`,
 `rs/Dockerfile`, `rs/.dockerignore`, `ts/Dockerfile`, `ts/.dockerignore`, `ts/pnpm-lock.yaml`,
 `ts/pnpm-workspace.yaml`, `ts/package.json`, `ts/.npmrc`, `ts/apps/*/lib/config.ts`,
-`ts/apps/*/next.config.ts`, `ci/images/**`, `.github/workflows/images.yml`, `.prototools`,
-`.proto/plugins/crane.toml`, `.proto/plugins/syft.toml`). **The workflow is not a required
-check**, so a broken image build reds `main` after merge rather than blocking the PR that broke it.
+`ts/apps/*/next.config.ts`, `ts/apps/*/package.json`, `ci/images/**`,
+`.github/workflows/images.yml`, `.prototools`, `.proto/plugins/crane.toml`,
+`.proto/plugins/syft.toml`). **The workflow is not a required check**, so a broken image build
+reds `main` after merge rather than blocking the PR that broke it.
+
+The `ts/` entries on the `pull_request` filter follow one rule. A file is on the filter when a
+change to it can break the image build but not the ordinary build. `moon ci` already runs
+`next build` for each affected console, so a source fault or a `tsconfig` fault fails the PR
+there. The listed files are the ones that only the Docker path reads, or that it reads
+differently. For example, the Docker install uses `--filter "@paigasus/${APP}..."`, so it depends
+on the package `name` in each app's `package.json`. `ts/pnpm-lock.yaml` keys its importers by
+path, not by name, so a rename does not change the lockfile.
 
 That said, a PR touching any of the filtered inputs above — including `rs/Dockerfile` or
 `ts/Dockerfile` — already triggers the workflow automatically via its `pull_request` path filter;
