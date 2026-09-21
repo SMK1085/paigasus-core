@@ -418,7 +418,8 @@ end of this section only when the API itself is unreachable.
 - **In the IAM console:** a Root user can also list, replay and discard single entries at
   `/iam/dead-letters` (SMA-629). Each row shows the payload and `last_error`, and a discard asks for
   a confirmation first. The screen appears only when IAM reports the `iam.deadletters` capability,
-  which every IAM build since SMA-629 does. Since SMA-661 the screen also filters by parked time (both bounds included) and runs a bulk
+  which every IAM build since SMA-629 does.
+  Since SMA-661 the screen also filters by parked time (both bounds included) and runs a bulk
   replay of the filtered scope. The operator enters a row budget from 1 to 10000, and the
   confirmation names that budget and the scope. A filtered list and a filtered bulk replay both
   leave out a row with no `parked_at`, as described under Confirm above.
