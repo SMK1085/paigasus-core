@@ -15,7 +15,8 @@ becomes window-aware, cursor-aware and bulk-aware, and a new row R20 drives the 
 init shapes, vitest 5 (node and jsdom), Playwright 1.63, Moon 2.5.3.
 
 **Spec:** `docs/superpowers/specs/2026-09-21-sma-661-dead-letters-bulk-replay-design.md`
-(revision 2). Its decisions D1–D6 and its § 12 challenge log are settled. Do not re-open them.
+(revision 3; § 13 records six measured corrections this plan already implements). Its decisions
+D1–D6 and its § 12 challenge log are settled. Do not re-open them.
 
 ## Global Constraints
 
@@ -483,6 +484,9 @@ world-actions.test.ts stays green. Discard stays out of the list." -m "Co-Author
   - `export const PARKED_BOUND_PATTERN: RegExp;`
   - `export function canonicalParkedBound(value: string): string | null;` — `value` is already
     trimmed and non-empty; the answer is `new Date(ms).toISOString()` or `null`.
+  - `export function standardInstant(value: string): string | null;` — the value rewritten in
+    ECMAScript's standard Date Time String Format, the only string `Date.parse` ever reads (spec § 13
+    item 2); exported for its unit test.
   - `export type ParkedBoundField = 'parkedFrom' | 'parkedTo';`
   - `export type ParsedParkedBound = { readonly ok: true; readonly raw: string; readonly iso: string } | { readonly ok: false; readonly raw: string; readonly error: PaigasusError };`
   - `export function parseParkedBound(raw: string | readonly string[] | undefined, field: ParkedBoundField): ParsedParkedBound;`
