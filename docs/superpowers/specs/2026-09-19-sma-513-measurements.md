@@ -38,7 +38,7 @@ The command made no `node_modules` or `.pnpm` directory under `$SCRATCH`, not ev
 **This result does not answer the question.** pnpm decides "up to date" from
 `ts/node_modules/.pnpm-workspace-state-v1.json`, not from the `--modules-dir` or
 `--virtual-store-dir` target. That file exists and is current in this worktree, because a full
-`pnpm -C ts install --frozen-lockfile` prepared the worktree. Thus pnpm found the workspace
+`pnpm -C ts install --frozen-lockfile` prepared the worktree. So pnpm found the workspace
 satisfied, did no linking, and did not fill the scratch directories. In a prepared worktree, this
 command cannot show what a filtered install puts into a new tree. This is a property of the
 up-to-date check in pnpm 11.3.0, not of the `--filter` expression.
@@ -63,7 +63,7 @@ ui
 ```
 
 The list does not contain `@paigasus/kernel` or `@paigasus/node-bindings`. This tree has no
-`ts/packages/paigasus-node-bindings` directory. Thus the brief names a package that does not exist
+`ts/packages/paigasus-node-bindings` directory. So the brief names a package that does not exist
 under that name. The only kernel package in the tree is `ts/packages/paigasus-kernel`
 (`@paigasus/kernel`).
 
@@ -74,12 +74,12 @@ depends on `auth`, `discovery` and `sdk`. `@paigasus/app-shell` depends on `auth
 
 **Verdict: a filtered `pnpm install` is sufficient.** `@paigasus/iam-console` does not get
 `@paigasus/kernel` through `@paigasus/sdk`, `@paigasus/auth` or `@paigasus/discovery`. None of the
-three has it in its dependency tree. Thus the Task 2 Dockerfile does not need to exclude
+three has it in its dependency tree. So the Task 2 Dockerfile does not need to exclude
 `ts/packages/paigasus-kernel` from the build context for this reason.
 
 **What Task 2 must know:**
-- Do not use the exact scratch-install command of the brief as a smoke test in a worktree or
-  checkout that already has `ts/node_modules`. It reports `Already up to date` and proves nothing,
+- Do not use the exact scratch-install command of the brief as a smoke test. Do not use it in a
+  worktree or checkout that already has `ts/node_modules`. It reports `Already up to date` and proves nothing,
   because the up-to-date check reads `ts/node_modules/.pnpm-workspace-state-v1.json` and ignores
   `--modules-dir`. A real Docker build starts from a clean `COPY`, so this short-circuit does not
   occur there. A local check before the build, on a prepared tree, gets the short-circuit.

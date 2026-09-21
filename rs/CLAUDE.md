@@ -172,7 +172,7 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   `.github/workflows/images.yml`, **not** Moon — a `repo:*` task would have to join `ci.yml`'s
   `T=(…)` array (a `--release` build on every affected PR) or become a `T_EXEMPT` entry.
   The console images (SMA-513) use the same script: `build-console [iam|gateway]` and
-  `all-consoles`. The workflow is **not a required check**. Thus a broken image build makes
+  `all-consoles`. The workflow is **not a required check**. So a broken image build makes
   `main` red, not the PR.
 - The `pull_request` filter of `images.yml` lists the image build inputs. For `rs/` these are
   `rs/Dockerfile`, `rs/Cargo.{lock,toml}`, `rs/rust-toolchain.toml` and `rs/.dockerignore`. For

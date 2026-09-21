@@ -154,7 +154,10 @@ updates:
   # SMA-513: ts/Dockerfile pins both of its base images by digest — the builder node:X.Y.Z-bookworm
   # and the runtime gcr.io/distroless/nodejs24-debian12:nonroot. Covered here for the same reason
   # the /rs block exists — a pinned-and-never-updated base is the mirror image of the floating-tag
-  # risk. As in /rs, digest refreshes on the pinned tags flow through and version bumps stay human.
+  # risk. As in /rs, digest refreshes on the pinned tags are expected from the dependabot-core
+  # source, but the `docker_digest_only_update_suppression` experiment could suppress a refresh on
+  # a versioned tag, and whether it is on for this repository is not known. Version bumps stay
+  # human.
   # What Dependabot does with each entry below is read from dependabot-core's docker
   # update_checker.rb and tag.rb (main at 6634a4a4), NOT from GitHub's published docs, which do not
   # describe it: a change in dependabot-core can change it.

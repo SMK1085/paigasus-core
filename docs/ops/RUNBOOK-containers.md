@@ -31,19 +31,21 @@ No CI job runs `build` or `all` any more. `.github/workflows/images.yml` runs `b
 break without turning CI red. Run them yourself before you rely on them.
 
 The build context is `rs/` (the Cargo workspace root). `.github/workflows/images.yml` runs on
-`workflow_dispatch`, on every `push` to `main` that touches `rs/**`, and on pull requests that
-touch the build inputs (`rs/Cargo.lock`, `rs/Cargo.toml`, `rs/rust-toolchain.toml`,
-`rs/Dockerfile`, `rs/.dockerignore`, `ci/images/**`, `.github/workflows/images.yml`,
-`.prototools`, `.proto/plugins/crane.toml`, `.proto/plugins/syft.toml`). **The workflow is not a
-required check**, so a broken image build reds `main` after merge rather than blocking the PR
-that broke it.
+`workflow_dispatch`, on every `push` to `main` that touches `rs/**` or `ts/**`, and on pull
+requests that touch the build inputs (`rs/Cargo.lock`, `rs/Cargo.toml`, `rs/rust-toolchain.toml`,
+`rs/Dockerfile`, `rs/.dockerignore`, `ts/Dockerfile`, `ts/.dockerignore`, `ts/pnpm-lock.yaml`,
+`ts/pnpm-workspace.yaml`, `ts/package.json`, `ts/.npmrc`, `ts/apps/*/lib/config.ts`,
+`ci/images/**`, `.github/workflows/images.yml`, `.prototools`, `.proto/plugins/crane.toml`,
+`.proto/plugins/syft.toml`). **The workflow is not a required check**, so a broken image build
+reds `main` after merge rather than blocking the PR that broke it.
 
-That said, a PR touching any of the filtered inputs above — including `rs/Dockerfile` — already
-triggers the workflow automatically via its `pull_request` path filter; no manual step is needed
-there. Run `gh workflow run images.yml --ref <branch>` instead on a PR that touches `rs/**` but
-**none** of those filtered inputs (a plain service code change, say) — that is the one case the
-narrower `pull_request` filter does not cover, and it can still break an image build. (This 404s
-until `images.yml` itself exists on `main`.)
+That said, a PR touching any of the filtered inputs above — including `rs/Dockerfile` or
+`ts/Dockerfile` — already triggers the workflow automatically via its `pull_request` path filter;
+no manual step is needed there. Run `gh workflow run images.yml --ref <branch>` instead on a PR
+that touches `rs/**` or `ts/**` but **none** of those filtered inputs (a plain service or console
+code change, say) — those are the two cases the narrower `pull_request` filter does not cover, and
+either one can still break an image build. (This 404s until `images.yml` itself exists on
+`main`.)
 
 ## 2. Image names
 
@@ -300,7 +302,7 @@ image has the same shape as the Rust service images:
   `/app`, so this pin controls what the image runs. `assert_console_pins` in `ci/images/run.sh`
   fails if either `FROM` line has no `@sha256:` digest, or if the runtime tag is not `nonroot`.
 - **The image runs as uid:gid `65532:65532`** (`USER 65532:65532`). The Rust service images use
-  the same uid (`rs/Dockerfile`'s `USER 65532:65532`). Thus one Kubernetes `securityContext`
+  the same uid (`rs/Dockerfile`'s `USER 65532:65532`). So one Kubernetes `securityContext`
   (`runAsNonRoot: true`, `runAsUser: 65532`) covers all four images. `smoke_consoles` reads the
   uid of the running container with `docker top`. It fails if the uid is not `65532`.
 - **The image holds two fixed-path `.mjs` files**, `/app/entrypoint.mjs` and
@@ -343,9 +345,10 @@ image has the same shape as the Rust service images:
     guard in case the tag changes to one that holds a version.
   - **The builder, `node`:** the `ignore` list blocks all three version update types (major, minor
     and patch), because `assert_console_pins` holds the exact builder version to `.prototools`.
-    The builder is digest-pinned, so Dependabot refreshes its digest on the same tag, as it does
-    for `/rs`. `dependabot-core` has an experiment, `docker_digest_only_update_suppression`, that
-    stops a digest-only refresh on a versioned tag such as this one. It is not known if that
+    The builder is digest-pinned. Dependabot-core is expected to refresh its digest on the same
+    tag, and the same refresh is expected for `/rs`. But `dependabot-core` has an experiment,
+    `docker_digest_only_update_suppression`, that can stop a digest-only refresh on a versioned
+    tag. This applies to both the `/ts` builder tag and the `/rs` tag. It is not known if that
     experiment is on for this repository.
   - A version bump of either image is a manual change. It changes `ts/Dockerfile` and
     `.prototools` together.
@@ -353,11 +356,11 @@ image has the same shape as the Rust service images:
   into `.next/standalone`. The builder stage of the console image copies both, the same as the
   `build` task in `ts/apps/<app>/moon.yml`. An image without that copy answers 200 on
   `<basePath>/healthz` and 404 on every chunk, so a probe-based smoke test does not see the fault.
-  Thus `smoke_consoles` in `ci/images/run.sh` checks for a **served chunk**. A staged-tree parity
+  So `smoke_consoles` in `ci/images/run.sh` checks for a **served chunk**. A staged-tree parity
   check keeps the two staging sites in agreement.
 - **The zone row of `smoke_consoles` proves only that a basePath is in effect.** It checks that
   the zone's chunk returns 404 under the other zone's prefix. The chunk also returns 404 under an
-  unknown prefix and under no prefix (measured on `iam-console:dev`). Thus the row does not prove
+  unknown prefix and under no prefix (measured on `iam-console:dev`). So the row does not prove
   that the assets of the two zones do not collide. That proof needs both zones behind one ingress,
   and it belongs to the ingress work (SMA-513 PR 2a).
 
@@ -366,7 +369,7 @@ Two more facts about the staged-tree parity check are important:
 - **The check runs locally only.** It compares the staged `.next/static` of the image with a host
   build at `ts/apps/<app>/.next/standalone/apps/<app>/.next/static`. It runs only when that host
   build exists. The `images` job in `.github/workflows/images.yml` (`ci/images/run.sh
-  all-consoles`) does not make a host build. Thus in CI the check always takes its "not checked"
+  all-consoles`) does not make a host build. So in CI the check always takes its "not checked"
   path and gates nothing. Use it as a local aid, not as a CI guarantee. A green CI `all-consoles`
   run does not give parity coverage; run `moon run <app>-ts:build` locally before you use it.
 - **Parity depends on an assumption: the host build and the image build give the same chunk
