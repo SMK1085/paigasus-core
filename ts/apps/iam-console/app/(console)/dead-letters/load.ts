@@ -2,13 +2,14 @@
 //
 // /iam/dead-letters (SMA-629 spec § 6.2, § 6.3). The screen exists only when IAM reports
 // `iam.deadletters`. The gate is a pure function of the ServiceState, so a unit test covers every
-// branch. The loader turns IAM's DeadLetterEntry into plain data for the page.
+// branch. The loader turns IAM's DeadLetterEntry into plain data for the page. SMA-661 added the
+// parked-time window; parkedWindow() is shared with the bulk-replay command.
 import 'server-only';
 import { capabilityOutcome } from '@paigasus/discovery/client';
 import type { ServiceState } from '@paigasus/discovery/types';
 import { callIam, type IamClients, type IamResult } from '@paigasus/console-core';
 import { PAGE_SIZE } from '../../../lib/paging';
-import { timestampIso } from '../../../lib/time';
+import { timestampFromIso, timestampIso, type ProtoTimestamp } from '../../../lib/time';
 
 export type DeadLettersGate = 'not-found' | 'degraded' | 'available';
 
@@ -47,15 +48,31 @@ function noneIfEmpty(value: string): string | null {
   return value === '' ? null : value;
 }
 
+/** The list filter's parked-time window: CANONICAL ISO instants, '' for no bound (SMA-661 spec § 4.4). */
+export type ParkedWindow = { readonly parkedFrom: string; readonly parkedTo: string };
+
+/**
+ * The window as request fields, for the list and the bulk replay alike. An empty bound is LEFT OUT,
+ * and IAM reads an absent timestamp as no filter (iam.proto:662-665). The page and the bulk form's
+ * schema refused every value that lib/paging.ts's canonicalParkedBound does not accept, so the
+ * conversion cannot fail.
+ */
+export function parkedWindow(bounds: ParkedWindow): { parkedFrom?: ProtoTimestamp; parkedTo?: ProtoTimestamp } {
+  return {
+    ...(bounds.parkedFrom === '' ? {} : { parkedFrom: timestampFromIso(bounds.parkedFrom) }),
+    ...(bounds.parkedTo === '' ? {} : { parkedTo: timestampFromIso(bounds.parkedTo) }),
+  };
+}
+
 /**
  * IAM orders the list by id DESCENDING (tests/dead_letters_pg.rs:432), and IAM mints UUIDv7 ids, so
  * this is close to creation order, not park order. The page keeps that order and does not sort.
  */
 export async function loadDeadLettersPage(
   deps: { readonly outbox: Pick<IamClients['outbox'], 'listDeadLetters'> },
-  params: { readonly cursor: string; readonly eventType: string },
+  params: { readonly cursor: string; readonly eventType: string } & ParkedWindow,
 ): Promise<DeadLettersPageData> {
-  const result = await callIam(() => deps.outbox.listDeadLetters({ eventType: params.eventType, cursor: params.cursor, limit: PAGE_SIZE }));
+  const result = await callIam(() => deps.outbox.listDeadLetters({ eventType: params.eventType, cursor: params.cursor, limit: PAGE_SIZE, ...parkedWindow(params) }));
   if (!result.ok) return result;
   const rows = result.value.entries.map((entry): DeadLetterRow => ({
     id: entry.id,
