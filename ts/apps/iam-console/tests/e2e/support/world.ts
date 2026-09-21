@@ -205,21 +205,28 @@ function inScope(entry: DeadLetterFixture, scope: DeadLetterScope): boolean {
  * page, and the next page holds the ids below it.
  */
 export function deadLetterHandlers(deadLetters: Map<string, DeadLetterFixture>, pageSize = Number.POSITIVE_INFINITY): FakeIamHandlers {
-  // IAM orders by id DESCENDING.
-  const matching = (scope: DeadLetterScope): DeadLetterFixture[] => [...deadLetters.values()].filter((entry) => inScope(entry, scope)).sort((a, b) => (a.id < b.id ? 1 : -1));
+  // The ONE shared filter, so list and bulk replay can never disagree on which rows match. Order is
+  // sorted separately by each handler below, since IAM orders the two RPCs differently.
+  const matching = (scope: DeadLetterScope): DeadLetterFixture[] => [...deadLetters.values()].filter((entry) => inScope(entry, scope));
   return {
+    // IAM orders list by id DESCENDING.
     'outbox.listDeadLetters': (req) => {
-      const rest = matching(req).filter((entry) => req.cursor === '' || entry.id < req.cursor);
+      const rest = matching(req)
+        .sort((a, b) => (a.id < b.id ? 1 : -1))
+        .filter((entry) => req.cursor === '' || entry.id < req.cursor);
       const entries = rest.slice(0, Math.min(req.limit, pageSize));
       const last = entries.at(-1);
       return { entries, nextCursor: rest.length > entries.length && last !== undefined ? last.id : '' };
     },
     'outbox.replayDeadLetter': (req) => ({ entry: takeDeadLetter(deadLetters, req.id) }),
     'outbox.discardDeadLetter': (req) => ({ entry: takeDeadLetter(deadLetters, req.id) }),
-    // At most max_rows of the matching entries, newest first. There is no 10000 clamp here: the console
-    // refuses a larger budget before it calls.
+    // At most max_rows of the matching entries, oldest first, as IAM's bulk_replay_sql orders by id
+    // ASCENDING (pg_dead_letters.rs:68), so repeated calls walk the backlog forward. There is no
+    // 10000 clamp here: the console refuses a larger budget before it calls.
     'outbox.bulkReplayDeadLetters': (req) => {
-      const replayed = matching(req).slice(0, Number(req.maxRows));
+      const replayed = matching(req)
+        .sort((a, b) => (a.id < b.id ? -1 : 1))
+        .slice(0, Number(req.maxRows));
       for (const entry of replayed) deadLetters.delete(entry.id);
       return { replayed: BigInt(replayed.length) };
     },
