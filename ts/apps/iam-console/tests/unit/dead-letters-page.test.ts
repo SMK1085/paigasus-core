@@ -318,4 +318,33 @@ describe('the replay affordance (SMA-661 D4, § 6.2, § 8)', () => {
     expect(all(tree, SectionError)).toHaveLength(1);
     expect(all(tree, BulkReplayForm)).toHaveLength(0);
   });
+
+  // SMA-661 spec § 8: the replay question is never serial with the list read. `may` and
+  // `listDeadLetters` each wait for the other to have started before they resolve, so a serial
+  // await (one finishing before the other starts) never settles and the test times out.
+  it('runs the replay question and the list read together, never serially (§ 8)', { timeout: 2000 }, async () => {
+    let releaseMay: () => void;
+    let releaseList: () => void;
+    const mayStarted = new Promise<void>((resolve) => {
+      releaseMay = resolve;
+    });
+    const listStarted = new Promise<void>((resolve) => {
+      releaseList = resolve;
+    });
+
+    mocks.may.mockImplementation(async () => {
+      releaseMay();
+      await listStarted;
+      return true;
+    });
+    mocks.listDeadLetters.mockImplementation(async () => {
+      releaseList();
+      await mayStarted;
+      return { entries: [entry], nextCursor: '' };
+    });
+
+    const tree = await visit({});
+
+    expect(all(tree, DeadLetterTable)).toHaveLength(1);
+  });
 });
