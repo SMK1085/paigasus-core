@@ -342,7 +342,7 @@ and replace it with:
 Run:
 ```bash
 export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
-cd rs && cargo nextest run -p paigasus-iam -p paigasus-gateway --no-tests=pass -E 'test(service_info)' 2>&1 | tail -5
+cd rs && cargo nextest run --locked -p paigasus-iam -p paigasus-gateway --no-tests=pass -E 'test(service_info)' 2>&1 | tail -5
 ```
 Expected: the `service_info` tests pass, including
 `the_descriptor_names_this_service_and_this_crates_build_version` with its corrected comment
@@ -2267,11 +2267,12 @@ every build.
 ### If the release plan itself cannot be read
 
 `ci/release-plan/run.sh`'s fail-safe branch writes `skip_iam=false` and `skip_gateway=false` (S12,
-so both chains RUN — the fail-safe direction), but it writes no `version_iam` or `version_gateway`
-at all. Every chain job that got past its gate then hard-fails at the label compare (`the archive
-carries version , but plan says .`), because `plan`'s version output is empty. Read that specific
-failure as "the release plan could not be read" — check the `plan` job's own log — not as a build
-problem in `images-build-<svc>`.
+so both chains RUN — the fail-safe direction). It also writes `version_iam` and `version_gateway`
+as explicit empty strings; it does not omit them. Every chain job that got past its gate then
+hard-fails at the label compare (`the archive carries version , but plan says .`), because
+`plan`'s version output is an empty string. Read that specific failure as "the release plan could
+not be read" — check the `plan` job's own log, and inspect the empty `version_iam`/`version_gateway`
+outputs there — not as a build problem in `images-build-<svc>`.
 ```
 
 - [ ] **Step 2: Add the CLAUDE.md entries**

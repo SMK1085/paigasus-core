@@ -100,8 +100,8 @@ PLAN_GATE_EXPR = f"needs.{PLAN_JOB}.outputs.{PLAN_OUTPUT} != 'true'"
 ACCEPTED_PLAN_FORMS = frozenset({PLAN_GATE_EXPR, "${{ " + PLAN_GATE_EXPR + " }}"})
 # SMA-658. Each service chain gates on its own skip output, with the same `!=` polarity and the
 # same literal pinning: `== 'true'` inverts the decision and `== 'false'` drops the chain on an
-# unset output. A chain job may carry EITHER its own service's literal or the kernel one — never a
-# different service's, which would tie two chains together.
+# unset output. A chain job must carry ITS OWN service's literal — not the kernel one, and not
+# another service's, which would tie two chains together.
 # Fix round 1, Minor 7: built from CHAIN_APPROVALS' own keys, not a second hand-maintained
 # ("iam", "gateway") tuple. Two lists naming the same services in one file will drift.
 SERVICE_PLAN_GATE_EXPRS: dict[str, frozenset[str]] = {
