@@ -34,10 +34,13 @@ import type { ConsoleLogger } from './logger';
  * The gateway zone asks InvokeModel about a service account through its own fail-closed
  * modelCallState, and ListRoleGrants for another principal needs Root.
  *
- * SMA-629 added ListOutboxDeadLetters, the Dead letters nav entry's question. ReplayOutboxDeadLetter
- * and DiscardOutboxDeadLetter are deliberately ABSENT: they are separate Cedar actions, but the
- * console asks no mayI() question about either one — the buttons show for every user who reaches
- * the page, and IAM decides each action anyway (the UI does not pre-judge, SMA-511 spec § 6.3).
+ * SMA-629 added ListOutboxDeadLetters, the Dead letters nav entry's question. SMA-661 added
+ * ReplayOutboxDeadLetter: the dead-letters page asks it at Root to show the bulk-replay form and
+ * every row's Replay button (SMA-661 spec D4). Bulk replay has no Cedar action of its own; IAM checks
+ * ReplayOutboxDeadLetter for it. The answer is cosmetic and fails open, like every answer here.
+ * DiscardOutboxDeadLetter stays deliberately ABSENT: it is a separate Cedar action, the console asks
+ * no mayI() question about it, and IAM decides each discard anyway (the UI does not pre-judge,
+ * SMA-511 spec § 6.3).
  */
 export const IAM_ACTIONS = [
   'ListOrganizations',
@@ -56,10 +59,11 @@ export const IAM_ACTIONS = [
   'AttachMembership',
   'DetachMembership',
   'ListAuditLog',
-  // SMA-629: the Dead letters nav entry asks this at Root. Replay and discard are deliberately
-  // ABSENT: they are separate Cedar actions, but the console asks no mayI() question about
-  // either one — every button shows, and IAM decides each action anyway.
+  // SMA-629: the Dead letters nav entry asks this at Root.
   'ListOutboxDeadLetters',
+  // SMA-661: the dead-letters page asks this at Root, for the bulk form and the row Replay buttons.
+  // DiscardOutboxDeadLetter is deliberately ABSENT: the console asks no question about discard.
+  'ReplayOutboxDeadLetter',
   'CreateServiceAccount',
   'ArchiveServiceAccount',
   'IssueApiKey',

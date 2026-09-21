@@ -67,6 +67,9 @@ export const ALL_ACTIONS = [
   'ListAuditLog',
   // SMA-629: the Dead letters nav entry.
   'ListOutboxDeadLetters',
+  // SMA-661: the replay affordance of the dead-letters page. Without it the default world DENIES
+  // replay, the page hides every Replay button, and R17 fails at its Replay click.
+  'ReplayOutboxDeadLetter',
   // SMA-636: the gateway settings. This zone asks none of them, but the SET must equal IAM_ACTIONS.
   'CreateServiceAccount',
   'ArchiveServiceAccount',
