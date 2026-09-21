@@ -286,66 +286,97 @@ build itself — they bite the first operator who deploys without reading this s
 
 ## 6. Conventions the console images follow
 
-`ts/Dockerfile` builds one image for both console zones, selected by the `APP` build arg. It
-follows the same shape as the Rust service images:
+`ts/Dockerfile` builds one image for both console zones. The `APP` build arg selects the zone. The
+image has the same shape as the Rust service images:
 
-- **The runtime stage is the distroless base**
-  `gcr.io/distroless/nodejs24-debian12:nonroot@sha256:14d42e2511532589a7c7e01a753667a74fcc96266e137e8125006b87b0c32d0a`.
-  It has **no shell**. `smoke_consoles` in `ci/images/run.sh` asserts that absence against the
-  running container, not only against the pin.
-- **The image runs as uid:gid `65532:65532`** (`USER 65532:65532`). This is the same uid the Rust
-  service images use (`rs/Dockerfile`'s `USER 65532:65532`), so one Kubernetes `securityContext`
+- **The runtime stage uses a distroless base.** The base is
+  `gcr.io/distroless/nodejs24-debian12:nonroot`, pinned by digest on the runtime `FROM` line of
+  `ts/Dockerfile`. That line is the only record of the digest; this runbook does not copy it. The
+  base has **no shell**. `smoke_consoles` in `ci/images/run.sh` checks the running container for
+  a shell, not only the pin.
+- **The builder stage is digest-pinned too.** The builder `FROM` line in `ts/Dockerfile` names a
+  `node:X.Y.Z-bookworm` tag and its multi-platform index digest. The index digest resolves on
+  both the amd64 and the arm64 leg of `images.yml`. Code that the builder compiles goes into
+  `/app`, so this pin controls what the image runs. `assert_console_pins` in `ci/images/run.sh`
+  fails if either `FROM` line has no `@sha256:` digest, or if the runtime tag is not `nonroot`.
+- **The image runs as uid:gid `65532:65532`** (`USER 65532:65532`). The Rust service images use
+  the same uid (`rs/Dockerfile`'s `USER 65532:65532`). Thus one Kubernetes `securityContext`
   (`runAsNonRoot: true`, `runAsUser: 65532`) covers all four images. `smoke_consoles` reads the
-  running container's uid with `docker top` and fails if it is not `65532`.
-- **The image writes two fixed-path `.mjs` files**, `/app/entrypoint.mjs` and
-  `/app/healthcheck.mjs`, and `ENTRYPOINT`/`HEALTHCHECK` name them literally. This works around a
-  Docker limitation: exec-form `ENTRYPOINT` and `HEALTHCHECK` do **not** expand `ARG` or `ENV`, so
-  neither instruction can reference `${APP}` directly. The files are `.mjs`, not `.js`, because
-  every console `package.json` sets `"type": "module"` and Next copies it into the standalone
-  tree — a CJS `require()` shim would depend on `require(esm)` interop and would break outright.
-  The healthcheck file curls its own `<BASE_PATH>/healthz` over `127.0.0.1:$PORT`.
-  `assert_console_pins` in `ci/images/run.sh` holds the base's Node major, the builder's exact
-  Node version, and the builder's pnpm version to `.prototools`' pins (Node `24.16.0`, pnpm
-  `11.3.0`).
-- **Configuration is runtime-only:** the image bakes no `PAIGASUS_*` environment variable, and
-  `assert_console_pins` greps `ts/Dockerfile` to enforce it. The one exception is
-  `PAIGASUS_COMPILED_*` (`PAIGASUS_COMPILED_ZONE`, `PAIGASUS_COMPILED_BASE_PATH`), which
-  `createNextConfig` in `ts/packages/paigasus-next-config` writes at build time on purpose — it
-  is a compiled-in record of the zone the artifact was built for, not deployment-varying
-  configuration, so `runtime.ts` can compare it against the `PAIGASUS_ZONE` a deployment supplies.
-- **`.github/dependabot.yml`'s `/ts` docker block treats its two pinned images differently, not
-  identically.** The `gcr.io/distroless/nodejs24-debian12` entry's `ignore` list blocks only its
-  major-version bumps; its minor and patch bumps are not ignored, so they still go into the
-  `docker-minor-patch` group as normal proposals, and a digest refresh on the pinned major flows
-  through automatically too. The `node` entry's `ignore` list blocks all three update types —
-  major, minor, and patch — because `assert_console_pins` holds its exact `X.Y.Z` to
-  `.prototools`' pin; and because the builder stage's `FROM node:X.Y.Z-bookworm AS builder` line
-  in `ts/Dockerfile` names a bare tag with no `@sha256` digest, there is also no digest for
-  Dependabot to refresh, so nothing updates automatically for `node` at all. A version bump for
-  either stays deliberate, human, and moves `ts/Dockerfile` and `.prototools` together.
+  uid of the running container with `docker top`. It fails if the uid is not `65532`.
+- **The image holds two fixed-path `.mjs` files**, `/app/entrypoint.mjs` and
+  `/app/healthcheck.mjs`. The builder writes them. `ENTRYPOINT` and `HEALTHCHECK` name them
+  literally. This is necessary because exec-form `ENTRYPOINT` and `HEALTHCHECK` do **not** expand
+  `ARG` or `ENV`, so neither instruction can use `${APP}`. The files are `.mjs`, not `.js`, because
+  every console `package.json` sets `"type": "module"`. Next copies that `package.json` into the
+  standalone tree, so a CJS `require()` shim would need `require(esm)` interop and would fail.
+- **The healthcheck file fetches `<BASE_PATH>/healthz` on `127.0.0.1:$PORT`.** `smoke_consoles`
+  runs this file in the running container with `docker exec` and the image's own node. It fails if
+  the file exits with a code that is not 0.
+- **`assert_console_pins` holds three values equal to the pins in `.prototools`.** The three
+  values are the Node major of the runtime base, the exact Node version of the builder, and the
+  pnpm version of the builder. `.prototools` is the only record of those versions; this runbook
+  does not copy them. The runtime base can hold only the major, because distroless publishes no
+  patch-level tags.
+- **The image uses runtime configuration only.** The image bakes no `PAIGASUS_*` environment
+  variable. `assert_console_pins` reads `ENV` and `ARG` instructions in `ts/Dockerfile` to enforce
+  this. It joins continuation lines first and matches `ENV` and `ARG` in any letter case. It does
+  not see a value that a `RUN` step writes into a file. There is one exception:
+  `PAIGASUS_COMPILED_*` (`PAIGASUS_COMPILED_ZONE`, `PAIGASUS_COMPILED_BASE_PATH`).
+  `createNextConfig` in `ts/packages/paigasus-next-config` writes these at build time on purpose.
+  They record the zone that the artifact was built for, so `runtime.ts` can compare them with the
+  `PAIGASUS_ZONE` that a deployment supplies. They are not deployment-varying configuration.
+- **The build context excludes `.env` files.** `ts/.dockerignore` excludes `**/.env` and
+  `**/.env.*`. This is necessary because Next copies an app's `.env` and `.env.production` into
+  `.next/standalone`, and the Next server loads them at runtime. Without the exclusion, a local
+  `build-console` on a tree that holds real values ships those values in the image. CI is not
+  affected, because `.gitignore` ignores `.env*` and CI builds from a clean checkout.
+- **Every `pnpm install` in `ts/Dockerfile` uses `--frozen-lockfile`.** `assert_console_pins`
+  fails if one `pnpm install` has no bare `--frozen-lockfile` flag. It also fails on any
+  `--frozen-lockfile=<value>` form and on `--no-frozen-lockfile`.
+- **Dependabot updates the two pinned images of the `/ts` docker block as follows.** This is
+  read from the source of `dependabot-core`, not from the published GitHub documentation, which
+  does not describe it. A change in `dependabot-core` can change it.
+  - **The runtime base:** the tag `nonroot` holds no version, so Dependabot does not propose a
+    different tag for it. It refreshes only the digest. The Node major is part of the image name
+    (`nodejs24-debian12`), so a Node major bump is a different image, and Dependabot does not
+    propose it. The `semver-major` ignore on this entry thus does not apply today. It stays as a
+    guard in case the tag changes to one that holds a version.
+  - **The builder, `node`:** the `ignore` list blocks all three version update types (major, minor
+    and patch), because `assert_console_pins` holds the exact builder version to `.prototools`.
+    The builder is digest-pinned, so Dependabot refreshes its digest on the same tag, as it does
+    for `/rs`. `dependabot-core` has an experiment, `docker_digest_only_update_suppression`, that
+    stops a digest-only refresh on a versioned tag such as this one. It is not known if that
+    experiment is on for this repository.
+  - A version bump of either image is a manual change. It changes `ts/Dockerfile` and
+    `.prototools` together.
 - **The standalone output has no static assets.** Next writes no `.next/static` and no `public/`
-  into `.next/standalone`. The console image's builder stages both, exactly as
-  `ts/apps/<app>/moon.yml`'s `build` task does. An image built without that copy answers 200 on
-  `<basePath>/healthz` and 404 on every chunk, so a probe-based smoke test cannot see it —
-  `smoke_consoles` in `ci/images/run.sh` asserts a **served chunk** instead, and a staged-tree
-  parity check keeps the two staging sites in agreement.
+  into `.next/standalone`. The builder stage of the console image copies both, the same as the
+  `build` task in `ts/apps/<app>/moon.yml`. An image without that copy answers 200 on
+  `<basePath>/healthz` and 404 on every chunk, so a probe-based smoke test does not see the fault.
+  Thus `smoke_consoles` in `ci/images/run.sh` checks for a **served chunk**. A staged-tree parity
+  check keeps the two staging sites in agreement.
+- **The zone row of `smoke_consoles` proves only that a basePath is in effect.** It checks that
+  the zone's chunk returns 404 under the other zone's prefix. The chunk also returns 404 under an
+  unknown prefix and under no prefix (measured on `iam-console:dev`). Thus the row does not prove
+  that the assets of the two zones do not collide. That proof needs both zones behind one ingress,
+  and it belongs to the ingress work (SMA-513 PR 2a).
 
-Two further facts about that staged-tree parity check matter to anyone relying on it:
+Two more facts about the staged-tree parity check are important:
 
-- **It is local-only today.** It compares the image's staged `.next/static` against a host build
-  at `ts/apps/<app>/.next/standalone/apps/<app>/.next/static`, and it only runs when that host
-  build exists. `.github/workflows/images.yml`'s `images` job (`ci/images/run.sh all-consoles`)
-  never produces one, so in CI the check always takes its "not checked" arm and gates nothing
-  there. Treat it as a local aid, not a CI guarantee — a green CI `all-consoles` run is not parity
-  coverage. Run `moon run <app>-ts:build` locally before relying on it.
-- **Parity rests on an assumption: that chunk names agree between the host build and the image
-  build.** That held in every measurement taken, but nothing guarantees it. Four things would
-  break it: a Next or Turbopack bump that changes the chunk-hashing scheme; a compile-time
-  variable that differs between the two builds; the platform split between a developer's machine
-  and the `node:24.16.0-bookworm` builder; and the filtered `pnpm install` resolving a different
-  optional platform dependency than a full install would. When it breaks it breaks loudly, on
-  every run, into the parity error that already says the mismatch is not a
-  `ts/Dockerfile`-versus-`moon.yml` drift.
+- **The check runs locally only.** It compares the staged `.next/static` of the image with a host
+  build at `ts/apps/<app>/.next/standalone/apps/<app>/.next/static`. It runs only when that host
+  build exists. The `images` job in `.github/workflows/images.yml` (`ci/images/run.sh
+  all-consoles`) does not make a host build. Thus in CI the check always takes its "not checked"
+  path and gates nothing. Use it as a local aid, not as a CI guarantee. A green CI `all-consoles`
+  run does not give parity coverage; run `moon run <app>-ts:build` locally before you use it.
+- **Parity depends on an assumption: the host build and the image build give the same chunk
+  names.** This was true in every measurement, but nothing makes sure of it. Four things can make
+  it false. The first is a Next or Turbopack bump that changes how chunk names are hashed. The
+  second is a compile-time variable that is different between the two builds. The third is the
+  platform difference between a developer's machine and the builder image. The fourth is that the
+  filtered `pnpm install` resolves a different optional platform dependency than a full install.
+  When the assumption fails, it fails on every run. The failure goes to the parity error that
+  already states that the mismatch is not a drift between `ts/Dockerfile` and `moon.yml`.
 
 ## 7. What the first Deployment needs
 

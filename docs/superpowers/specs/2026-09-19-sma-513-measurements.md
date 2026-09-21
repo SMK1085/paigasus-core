@@ -8,8 +8,8 @@ numbered by the task that produced it and states the exact command, the result, 
 
 **Date:** 2026-09-20
 
-**pnpm version:** `11.3.0` (measured with `pnpm --version` under the proto shim). This is a
-resolver behaviour; re-measure on any pnpm bump.
+**pnpm version:** `11.3.0` (measured with `pnpm --version` under the proto shim). The result is a
+property of the pnpm resolver. Measure it again after a pnpm bump.
 
 **Command (as given in the Task 1 brief):**
 
@@ -31,25 +31,23 @@ Already up to date
 Done in 139ms using pnpm v11.3.0
 ```
 
-No `node_modules` or `.pnpm` directory was created under `$SCRATCH` at all — not even an empty
-one. `ls "$SCRATCH/node_modules/@paigasus"` printed `(no @paigasus dir)`. Re-running the same
-command with `--force` added produced the identical `Already up to date` result and still
-created nothing under `$SCRATCH`.
+The command made no `node_modules` or `.pnpm` directory under `$SCRATCH`, not even an empty one.
+`ls "$SCRATCH/node_modules/@paigasus"` printed `(no @paigasus dir)`. The same command with
+`--force` gave the same `Already up to date` result. It also made nothing under `$SCRATCH`.
 
-**This result does not answer the question.** pnpm's "up to date" short-circuit is decided
-against `ts/node_modules/.pnpm-workspace-state-v1.json` (which already exists and is current in
-this worktree, since the worktree was provisioned with a full `pnpm -C ts install
---frozen-lockfile`), not against the custom `--modules-dir`/`--virtual-store-dir` target. Because
-pnpm judged the workspace already satisfied, it skipped all linking work and never populated the
-scratch directories — so this command, run in an already-provisioned worktree, cannot show what a
-filtered install would materialize into a fresh tree. This is a property of pnpm 11.3.0's
-up-to-date check, not of the `--filter` expression itself.
+**This result does not answer the question.** pnpm decides "up to date" from
+`ts/node_modules/.pnpm-workspace-state-v1.json`, not from the `--modules-dir` or
+`--virtual-store-dir` target. That file exists and is current in this worktree, because a full
+`pnpm -C ts install --frozen-lockfile` prepared the worktree. Thus pnpm found the workspace
+satisfied, did no linking, and did not fill the scratch directories. In a prepared worktree, this
+command cannot show what a filtered install puts into a new tree. This is a property of the
+up-to-date check in pnpm 11.3.0, not of the `--filter` expression.
 
-**Supplementary measurement (to answer the actual question):** `ts/` (excluding `node_modules`
-and `.git`) was `rsync`-copied to a scratch directory outside the repo, giving a tree with no
-pre-existing `.pnpm-workspace-state-v1.json` anywhere. The identical filtered-install command was
-then run from that copy (same flags, same lockfile, same pnpm version). This time pnpm did real
-work (`Lockfile is up to date, resolution step is skipped` → `added 944`), and
+**Supplementary measurement (to answer the question):** `rsync` copied `ts/` (without
+`node_modules` and `.git`) to a scratch directory outside the repo. That tree had no
+`.pnpm-workspace-state-v1.json` in it. The same filtered-install command then ran in that copy,
+with the same flags, the same lockfile and the same pnpm version. This time pnpm did the install
+(`Lockfile is up to date, resolution step is skipped` → `added 944`).
 `ls "$SCRATCH/node_modules/@paigasus"` listed:
 
 ```
@@ -64,31 +62,30 @@ sdk
 ui
 ```
 
-Neither `@paigasus/kernel` nor `@paigasus/node-bindings` is present. Note also that there is no
-`ts/packages/paigasus-node-bindings` directory in this tree at all — the brief's premise names a
-package that does not exist under that name; the only kernel-adjacent package present is
-`ts/packages/paigasus-kernel` (`@paigasus/kernel`).
+The list does not contain `@paigasus/kernel` or `@paigasus/node-bindings`. This tree has no
+`ts/packages/paigasus-node-bindings` directory. Thus the brief names a package that does not exist
+under that name. The only kernel package in the tree is `ts/packages/paigasus-kernel`
+(`@paigasus/kernel`).
 
-This is corroborated by the dependency graph: `@paigasus/sdk` and `@paigasus/discovery` depend
-only on `@paigasus/proto`; `@paigasus/auth` has no `@paigasus/*` dependencies;
-`@paigasus/console-core` depends on `auth`, `discovery`, `sdk`; `@paigasus/app-shell` depends on
-`auth`, `discovery`, `ui`, `next-config`. None of these, transitively, depend on
-`@paigasus/kernel`.
+The dependency graph gives the same result. `@paigasus/sdk` and `@paigasus/discovery` depend only
+on `@paigasus/proto`. `@paigasus/auth` has no `@paigasus/*` dependencies. `@paigasus/console-core`
+depends on `auth`, `discovery` and `sdk`. `@paigasus/app-shell` depends on `auth`, `discovery`,
+`ui` and `next-config`. None of these depends on `@paigasus/kernel`, directly or transitively.
 
-**Verdict: a filtered `pnpm install` is sufficient.** `@paigasus/iam-console` does not pull in
-`@paigasus/kernel` through `@paigasus/sdk`, `@paigasus/auth`, or `@paigasus/discovery` — none of
-the three names it in their dependency trees. Task 2's Dockerfile does not need to exclude
-`ts/packages/paigasus-kernel` from the build context on this account.
+**Verdict: a filtered `pnpm install` is sufficient.** `@paigasus/iam-console` does not get
+`@paigasus/kernel` through `@paigasus/sdk`, `@paigasus/auth` or `@paigasus/discovery`. None of the
+three has it in its dependency tree. Thus the Task 2 Dockerfile does not need to exclude
+`ts/packages/paigasus-kernel` from the build context for this reason.
 
 **What Task 2 must know:**
-- Do not reuse the brief's exact scratch-install command as a smoke test inside a
-  worktree/checkout that already has `ts/node_modules` provisioned — it will report
-  `Already up to date` and prove nothing, because the up-to-date check reads
-  `ts/node_modules/.pnpm-workspace-state-v1.json` regardless of `--modules-dir`. A real Docker
-  build starts from a clean `COPY`, so it does not hit this short-circuit, but a *local
-  pre-flight check* run against a provisioned tree will.
-- Re-verify this measurement if pnpm is bumped past 11.3.0, or if `@paigasus/kernel` gains a new
-  consumer among `sdk`, `auth`, `discovery`, `console-core`, `app-shell`, `ui`, or `next-config`.
+- Do not use the exact scratch-install command of the brief as a smoke test in a worktree or
+  checkout that already has `ts/node_modules`. It reports `Already up to date` and proves nothing,
+  because the up-to-date check reads `ts/node_modules/.pnpm-workspace-state-v1.json` and ignores
+  `--modules-dir`. A real Docker build starts from a clean `COPY`, so this short-circuit does not
+  occur there. A local check before the build, on a prepared tree, gets the short-circuit.
+- Do this measurement again if pnpm moves past 11.3.0. Also do it again if `@paigasus/kernel`
+  gets a new consumer among `sdk`, `auth`, `discovery`, `console-core`, `app-shell`, `ui` or
+  `next-config`.
 
 ## M2 — helm version pinned through proto (Task 7)
 
