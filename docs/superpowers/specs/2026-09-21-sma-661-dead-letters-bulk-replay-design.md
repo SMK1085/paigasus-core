@@ -404,7 +404,7 @@ section with an `<h2>Bulk replay</h2>`. It sits with the filter that defines it,
 ```
 ─ Bulk replay ───────────────────────────────
 Scope: event type iam.tenant.created,
-       parked 2026-09-19T00:00:00Z → (no end)
+       parked 2026-09-19T00:00:00.000Z → (no end)
 Max rows [      ]   (Bulk replay…)
   Enter a whole number from 1 to 10000.
 ```
@@ -443,7 +443,8 @@ as `discardConfirmation` is. It names five things:
    because § 6.5 refused anything IAM would clamp. Singular: "Replay up to 1 parked event." This is
    AC 2.
 2. **The scope in words**, with canonical instants and the inclusive bounds: "Scope: event type
-   `iam.tenant.created`, parked from 2026-09-19T00:00:00Z, both bounds included." An absent bound is
+   `iam.tenant.created`, parked from 2026-09-19T00:00:00.000Z, the bound included, with no end." With
+   both bounds set, the text says "both bounds included". An absent bound is
    named as absent. An empty scope reads "The scope is EVERY parked event: no event type and no
    parked-time window." (D5.)
 3. **That the scope reaches past the page.** "The scope can hold events this page does not show. A
@@ -774,3 +775,5 @@ changes a decision. Each changes how a decision is built.
 | 5 | A third seeded entry, given through `options.overrides`, produces a "Next" link (§ 7.4). | The seeded map lives in a closure, so an override cannot add an entry to it. And the console always sends `limit: 50`, so three entries never fill a page. | The outbox handlers become a factory, `deadLetterHandlers(map, pageSize)`, with keyset paging. R20 passes its own set, with `pageSize` 1, through `overrides`. |
 | 6 | AC 1's zero-call proof sits in the files § 7.1 lists. | The existing zero-call rule for the row actions lives in `tests/unit/actions-revalidate.test.ts`. | AC 1's proof goes there, next to the rule it extends. |
 | 7 | § 4.1's pattern takes any two-digit hour. | ECMAScript reads `2026-09-19T24:00:00Z` as `2026-09-20T00:00:00.000Z`. The value passes all three checks, and the typed day and the canonical day differ. `24:30`, second `60` and minute `60` already give `NaN`. Found by the Task 3 review. | The pattern's hour is `([01]\d|2[0-3])`, so `24:00` is refused. A refused value stays in the input (D6), and the operator types the next day's `T00:00`. |
+| 8 | § 4.1 accepts any value that passes the three checks. | Two extreme instants became canonical values that the same checks refuse: a year above 9999 or below 0100 after the zone shift. The link and the bulk form then carried a value that would not parse again. Found by the final review. | A bound is accepted only when its canonical form re-canonicalises to itself. |
+| 9 | § 4.2 keys a refused bound as `''`. | That is the key of "no bound", so a typo after a bulk replay kept the old result on screen. Found by the final review. | A refused bound is keyed as `!` plus its typed value. |
