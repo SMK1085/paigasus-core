@@ -198,15 +198,19 @@ Behaviour:
 - It refuses a value longer than `MAX_PARKED_BOUND_LENGTH` (40 characters). The longest value the
   pattern accepts, `2026-09-19T00:00:00.123456789+02:00`, is 35 characters, so the bound refuses
   nothing legal. It stops an attacker-controlled query string from reaching the pattern at length.
-- It accepts the value only when **both** hold:
-  1. the value matches `PARKED_BOUND_PATTERN`;
-  2. `Number.isFinite(Date.parse(value))`.
+- It accepts the value only when **all four** hold (revision 3; § 13 items 1, 2, 7 and 8):
+  1. the value matches `PARKED_BOUND_PATTERN`, whose hour runs `00` to `23`;
+  2. its date part names a real calendar day (`isCalendarDay`, a round trip through `Date.UTC`);
+  3. `Date.parse` of the value REWRITTEN in ECMAScript's standard Date Time String Format
+     (`standardInstant`) is finite — `Date.parse` never sees the operator's own spelling;
+  4. the resulting canonical instant, `new Date(…).toISOString()`, passes checks 1 to 3 again and
+     maps to itself, so a link or the bulk form never carries a value that would not parse again.
 - Any other value returns `{ ok: false, raw, error: parkedBoundInvalid(field) }`, an `invalid-input`
   `PaigasusError` built like the existing `cursorTooLong()` and `eventTypeTooLong()`: no correlation
   id, because it never reached IAM.
 
 ```ts
-export const PARKED_BOUND_PATTERN = /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(:\d{2}(\.\d{1,9})?)?(Z|z|[+-]\d{2}:\d{2})$/;
+export const PARKED_BOUND_PATTERN = /^(\d{4}-\d{2}-\d{2})[T ]([01]\d|2[0-3]):(\d{2})(?::(\d{2})(?:\.(\d{1,9}))?)?(Z|z|[+-]\d{2}:\d{2})$/;
 ```
 
 So the four spellings of D6 are accepted and normalised: a space instead of `T`, omitted seconds, a
@@ -248,10 +252,10 @@ const parkedTo = parseParkedBound(query.parkedTo, 'parkedTo');
 const cursor = parseCursor(query.cursor);
 ```
 
-The frame key uses the canonical values, so two spellings of one window share a frame:
+The frame key uses the canonical values, so two spellings of one window share a frame. A refused bound is keyed as `!` plus its typed value (revision 3, § 13 item 9), so it never shares a frame with "no bound":
 
 ```ts
-const frameKey = `${eventTypeOr('')}|${parkedFrom.ok ? parkedFrom.iso : ''}|${parkedTo.ok ? parkedTo.iso : ''}|${cursorOr('')}`;
+const frameKey = `${eventType.ok ? eventType.value : ''}|${parkedFrom.ok ? parkedFrom.iso : `!${parkedFrom.raw}`}|${parkedTo.ok ? parkedTo.iso : `!${parkedTo.raw}`}|${cursor.ok ? cursor.cursor : ''}`;
 ```
 
 All four parsers run **before** `iamClients()` is built, so a refused query never becomes an IAM
@@ -290,7 +294,7 @@ A refused bound passes its sentence to that `Field`'s `error` prop, so `aria-des
 one it sends:
 
 - `undefined` when the string is `''`, so the field is absent and the filter is off;
-- `timestampFromDate(new Date(value))` from `@bufbuild/protobuf/wkt` otherwise.
+- `timestampFromIso(value)` from `lib/time.ts` otherwise (revision 3, § 13 item 3: `iam-console` does not depend on `@bufbuild/protobuf`).
 
 The page already refused every value that `new Date` cannot parse, so the conversion cannot throw.
 
@@ -484,9 +488,9 @@ showed. The digits-only regular expression is the same rule § 6.4 gates the con
 two cannot disagree.
 
 `parkedBoundField` accepts `''`, `null` and `undefined` as "no filter" through a `preprocess`, and
-otherwise applies `PARKED_BOUND_PATTERN` plus the `Date.parse` check and normalises with
-`toISOString()`. It is built from the **same exported pattern** as § 4.1, so the GET parser and the
-POST field cannot drift apart. Treating an absent field as "no filter" matters because `formFields`
+otherwise calls `canonicalParkedBound` — the same function behind the GET parser, with all four
+checks of § 4.1 — and uses its canonical instant. So the GET parser and the POST field cannot
+drift apart. Treating an absent field as "no filter" matters because `formFields`
 returns `form.get(name)`, which is `null` for a field a hand-built POST omitted
 (`paigasus-console-core/src/form.ts:47-49`); an omitted optional filter must not read as a missing
 required field.
@@ -509,7 +513,7 @@ export async function bulkReplayDeadLetters(
 ```
 
 It builds the request as § 4.4 builds the list request: an absent timestamp for an empty bound,
-`timestampFromDate` otherwise, and `BigInt(input.maxRows)` for `max_rows`. It calls `callIam`, and
+`timestampFromIso` otherwise, and `BigInt(input.maxRows)` for `max_rows`. It calls `callIam`, and
 on success returns `{ ok: true, replayed: Number(value.replayed) }`. On failure it returns
 `{ ok: false, error }`, the shape `toActionResult` produces.
 
@@ -774,6 +778,6 @@ changes a decision. Each changes how a decision is built.
 | 4 | The client form imports `MAX_BULK_REPLAY_ROWS` (§ 6.3, § 6.5). | The `paigasus-console-core` root imports `server-only` (`src/index.ts:6`), and so does `lib/paging.ts`. A client component can import neither. | The page passes the ceiling to the form as a `ceiling` prop. The `max_rows` pattern lives in a new directive-free module, `max-rows.ts`, that both sides import. The sentence "A page holds 50 events" is a literal, and a test holds it equal to `PAGE_SIZE`. |
 | 5 | A third seeded entry, given through `options.overrides`, produces a "Next" link (§ 7.4). | The seeded map lives in a closure, so an override cannot add an entry to it. And the console always sends `limit: 50`, so three entries never fill a page. | The outbox handlers become a factory, `deadLetterHandlers(map, pageSize)`, with keyset paging. R20 passes its own set, with `pageSize` 1, through `overrides`. |
 | 6 | AC 1's zero-call proof sits in the files § 7.1 lists. | The existing zero-call rule for the row actions lives in `tests/unit/actions-revalidate.test.ts`. | AC 1's proof goes there, next to the rule it extends. |
-| 7 | § 4.1's pattern takes any two-digit hour. | ECMAScript reads `2026-09-19T24:00:00Z` as `2026-09-20T00:00:00.000Z`. The value passes all three checks, and the typed day and the canonical day differ. `24:30`, second `60` and minute `60` already give `NaN`. Found by the Task 3 review. | The pattern's hour is `([01]\d|2[0-3])`, so `24:00` is refused. A refused value stays in the input (D6), and the operator types the next day's `T00:00`. |
+| 7 | § 4.1's pattern takes any two-digit hour. | ECMAScript reads `2026-09-19T24:00:00Z` as `2026-09-20T00:00:00.000Z`. The value passes all three checks, and the typed day and the canonical day differ. `24:30`, second `60` and minute `60` already give `NaN`. Found by the Task 3 review. | The pattern's hour is `([01]\d\|2[0-3])`, so `24:00` is refused. A refused value stays in the input (D6), and the operator types the next day's `T00:00`. |
 | 8 | § 4.1 accepts any value that passes the three checks. | Two extreme instants became canonical values that the same checks refuse: a year above 9999 or below 0100 after the zone shift. The link and the bulk form then carried a value that would not parse again. Found by the final review. | A bound is accepted only when its canonical form re-canonicalises to itself. |
 | 9 | § 4.2 keys a refused bound as `''`. | That is the key of "no bound", so a typo after a bulk replay kept the old result on screen. Found by the final review. | A refused bound is keyed as `!` plus its typed value. |
