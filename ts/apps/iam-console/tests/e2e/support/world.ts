@@ -10,9 +10,12 @@
 // test cannot see the organizations of an earlier test. R6 uses it to prove that the action
 // refreshes the page (P5b-16).
 //
-// SMA-629: three outbox handlers are in the default set too, because every override key must exist
+// SMA-629: the outbox handlers are in the default set too, because every override key must exist
 // there. They hold two seeded dead letters with RFC 4122 ids, per worldHandlers() call; replay and
-// discard remove the entry, and an unknown id answers NotFound, as IAM does.
+// discard remove the entry, and an unknown id answers NotFound, as IAM does. SMA-661 made them a
+// factory, deadLetterHandlers(), so R20 can script a THIRD entry and a page size of one through
+// `overrides` without changing the two-entry world that R17 counts. They match the parked-time
+// window as IAM does (both bounds inclusive), page with a keyset cursor, and serve bulk replay.
 //
 // PRNs are literal strings: @paigasus/console-core's prn-tenancy.ts imports server-only, which
 // throws under Playwright. NodeStatus comes from @paigasus/sdk's guard-free ./iam/types entry, and
@@ -104,7 +107,7 @@ export type WorldOptions = {
 
 const notFound = (): Error => denial({ code: Code.NotFound, reason: 'not-found' });
 
-type DeadLetterFixture = {
+export type DeadLetterFixture = {
   id: string;
   occurredAt: { seconds: bigint; nanos: number };
   eventType: string;
@@ -118,7 +121,8 @@ type DeadLetterFixture = {
   lastError: string;
 };
 
-function seededDeadLetters(): Map<string, DeadLetterFixture> {
+/** The two dead letters every world starts with, plus `extra` (SMA-661: R20's third entry). */
+export function seededDeadLetters(extra: readonly DeadLetterFixture[] = []): Map<string, DeadLetterFixture> {
   const entries: DeadLetterFixture[] = [
     {
       id: DEAD_LETTER_A_ID,
@@ -146,6 +150,7 @@ function seededDeadLetters(): Map<string, DeadLetterFixture> {
       parkedAt: { seconds: 1_788_000_900n, nanos: 0 },
       lastError: '',
     },
+    ...extra,
   ];
   return new Map(entries.map((entry) => [entry.id, entry]));
 }
@@ -155,6 +160,70 @@ function takeDeadLetter(deadLetters: Map<string, DeadLetterFixture>, id: string)
   if (entry === undefined) throw notFound();
   deadLetters.delete(id);
   return entry;
+}
+
+export const DEAD_LETTER_C_ID = '0190a1f0-0000-7000-8000-0000000000d3';
+
+/**
+ * R20's third entry (SMA-661 spec § 7.4). It is NOT in seededDeadLetters()'s default: R17 counts two
+ * rows. It was parked on 2026-08-17, before R20's window starts, so the window leaves it out of the
+ * list and out of the bulk replay. Its id is the highest, so it heads an unfiltered list.
+ */
+export const DEAD_LETTER_C: DeadLetterFixture = {
+  id: DEAD_LETTER_C_ID,
+  occurredAt: { seconds: 1_786_999_700n, nanos: 0 },
+  eventType: 'iam.organization.created',
+  schemaVersion: 1,
+  aggregatePrn: ORG_PRN,
+  actorPrn: PRINCIPAL_PRN,
+  payload: '{"slug":"acme"}',
+  correlationId: 'corr-dead-letter-c',
+  attempts: 5,
+  parkedAt: { seconds: 1_787_000_000n, nanos: 0 },
+  lastError: 'nats: timeout',
+};
+
+/** A protobuf Timestamp, as a fixture and a decoded request both carry it. */
+type Instant = { readonly seconds: bigint; readonly nanos: number };
+
+const nanosOf = (instant: Instant): bigint => instant.seconds * 1_000_000_000n + BigInt(instant.nanos);
+
+/** The list and bulk-replay filter. An absent bound is no filter (iam.proto:662-665). */
+type DeadLetterScope = { readonly eventType: string; readonly parkedFrom?: Instant | undefined; readonly parkedTo?: Instant | undefined };
+
+/** IAM's match: event_type exactly, `parked_at >= from` and `parked_at <= to` (pg_dead_letters.rs:100,104). */
+function inScope(entry: DeadLetterFixture, scope: DeadLetterScope): boolean {
+  if (scope.eventType !== '' && entry.eventType !== scope.eventType) return false;
+  if (scope.parkedFrom !== undefined && nanosOf(entry.parkedAt) < nanosOf(scope.parkedFrom)) return false;
+  return scope.parkedTo === undefined || nanosOf(entry.parkedAt) <= nanosOf(scope.parkedTo);
+}
+
+/**
+ * The four outbox handlers over one map of dead letters (SMA-661 spec § 7.4). `pageSize` bounds a
+ * list page below the console's limit of 50, so a test can page through a few entries; the default
+ * leaves the request's limit alone. The cursor is keyset, like IAM's: the last id of the previous
+ * page, and the next page holds the ids below it.
+ */
+export function deadLetterHandlers(deadLetters: Map<string, DeadLetterFixture>, pageSize = Number.POSITIVE_INFINITY): FakeIamHandlers {
+  // IAM orders by id DESCENDING.
+  const matching = (scope: DeadLetterScope): DeadLetterFixture[] => [...deadLetters.values()].filter((entry) => inScope(entry, scope)).sort((a, b) => (a.id < b.id ? 1 : -1));
+  return {
+    'outbox.listDeadLetters': (req) => {
+      const rest = matching(req).filter((entry) => req.cursor === '' || entry.id < req.cursor);
+      const entries = rest.slice(0, Math.min(req.limit, pageSize));
+      const last = entries.at(-1);
+      return { entries, nextCursor: rest.length > entries.length && last !== undefined ? last.id : '' };
+    },
+    'outbox.replayDeadLetter': (req) => ({ entry: takeDeadLetter(deadLetters, req.id) }),
+    'outbox.discardDeadLetter': (req) => ({ entry: takeDeadLetter(deadLetters, req.id) }),
+    // At most max_rows of the matching entries, newest first. There is no 10000 clamp here: the console
+    // refuses a larger budget before it calls.
+    'outbox.bulkReplayDeadLetters': (req) => {
+      const replayed = matching(req).slice(0, Number(req.maxRows));
+      for (const entry of replayed) deadLetters.delete(entry.id);
+      return { replayed: BigInt(replayed.length) };
+    },
+  };
 }
 
 /**
@@ -201,7 +270,6 @@ export function worldHandlers(options: WorldOptions = {}): FakeIamHandlers {
   const allow = new Set<string>(options.allow ?? ALL_ACTIONS);
   const withScopes = options.memberships ?? true;
   const created: { prn: string; slug: string; name: string; status: NodeStatus; effectiveStatus: NodeStatus }[] = [];
-  const deadLetters = seededDeadLetters();
   const e2ePrincipal = () => ({
     principalPrn: PRINCIPAL_PRN,
     status: 'active',
@@ -273,13 +341,8 @@ export function worldHandlers(options: WorldOptions = {}): FakeIamHandlers {
       ],
       nextCursor: '',
     }),
-    // SMA-629. IAM orders by id DESCENDING and matches event_type exactly.
-    'outbox.listDeadLetters': (req: { eventType: string }) => ({
-      entries: [...deadLetters.values()].filter((entry) => req.eventType === '' || entry.eventType === req.eventType).sort((a, b) => (a.id < b.id ? 1 : -1)),
-      nextCursor: '',
-    }),
-    'outbox.replayDeadLetter': (req: { id: string }) => ({ entry: takeDeadLetter(deadLetters, req.id) }),
-    'outbox.discardDeadLetter': (req: { id: string }) => ({ entry: takeDeadLetter(deadLetters, req.id) }),
+    // SMA-629 and SMA-661: the four outbox handlers over this world's own two seeded entries.
+    ...deadLetterHandlers(seededDeadLetters()),
     ...options.overrides,
   };
 }
