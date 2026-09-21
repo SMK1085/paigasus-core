@@ -2,7 +2,7 @@
 
 Date: 2026-09-20
 Linear: [SMA-633](https://linear.app/smaschek/issue/SMA-633/iam-populate-role-grants-in-introspect)
-Status: approved design, implementation blocked on SMA-632
+Status: approved design, implemented. The SMA-632 dependency is resolved — it merged as `314ec074` (see D10).
 
 Revision 2. The adversarial challenge of 2026-09-20 disproved the first revision's
 D4 and inverted its D8. § 9 records what changed and why.
@@ -159,8 +159,10 @@ and that claim was false. See D6 and § 9.
 
 ### D6 — a store failure fails the call, and what that costs
 
-If the grant store errors, `introspect` returns `AuthnError::Backend`, mapped with the
-same `map_err(backend)` the membership loop already uses. It must not fall back to an
+If the grant store errors, `introspect` returns `AuthnError::Backend`. The conversion is
+`map_err(backend_authz)`, not the membership loop's `map_err(backend)`: the grant store
+returns `AuthzError` where the membership repository returns `RepositoryError`, so each
+needs its own adapter, and both land on the same `AuthnError::Backend`. It must not fall back to an
 empty list, because the follow-up will read an empty list as "this principal holds no
 grants".
 
@@ -310,7 +312,6 @@ New unit tests in `authenticate_token.rs`, on the existing `InMemoryRoleGrants` 
 
 Assertions that flip:
 
-- `src/application/authenticate_token.rs:732` — `ctx.role_grants.is_empty()`.
 - `tests/http_authn.rs:71` and its comment at `:63` — the test already seeds
   `platform_admin` at Root through `support::seed_platform_admin`, so it asserts that grant
   arrives.
@@ -319,6 +320,10 @@ Assertions that flip:
 
 Assertions that stay, and gain a reason:
 
+- `src/application/authenticate_token.rs` — `introspect_pages_through_memberships` and
+  `context_for_does_not_re_authenticate` both assert `ctx.role_grants.is_empty()`. Their
+  principals hold no grants, so the assertions stay true. Each gets a comment saying so;
+  `introspect_returns_the_principals_role_grants` is what proves the field is populated.
 - `tests/http_service_accounts.rs:177` and `tests/api_keys_grpc.rs:143` both assert an empty
   `role_grants` on an API-key introspection. Under D2 they are now deliberate pins, not stale
   ones. Each gets a comment naming D2, so the next reader does not "fix" them.

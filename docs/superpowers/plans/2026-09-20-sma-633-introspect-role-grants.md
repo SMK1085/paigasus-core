@@ -422,7 +422,7 @@ export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
 cd rs && cargo nextest run -p paigasus-iam --lib authenticate_token
 ```
 
-Expected: PASS for the four new tests. `introspect_pages_through_memberships` still FAILS at its `assert!(ctx.role_grants.is_empty())` — Task 3 fixes it. If it passes, the population code is not running; stop and find out why.
+Expected: PASS for the four new tests, and PASS for `introspect_pages_through_memberships` and `context_for_does_not_re_authenticate`. Both of those still assert `ctx.role_grants.is_empty()`, and both stay true, because their principals hold no grants. Their passing is therefore no evidence either way that the population runs — `introspect_returns_the_principals_role_grants` carries that proof, and Step 8's mutations confirm it.
 
 - [ ] **Step 7: Give both surviving in-file assertions their reason**
 
@@ -696,7 +696,7 @@ git commit -m "feat(contracts): register the iam.authn.grants capability (SMA-63
 grep -rn "until a later M3 task\|role_grants staying empty\|always returns an empty" rs ts --include=*.rs --include=*.ts
 ```
 
-Expected: the five sites above. Read each before editing — the surrounding sentence differs at each one.
+Expected: all six listed sites. Read each before editing — the surrounding sentence differs at each one. The grep's pattern will not match every site, because the six are worded differently; treat the Files list, not the grep, as the authority on what Task 5 owns.
 
 - [ ] **Step 2: Rewrite the five Rust comments**
 
