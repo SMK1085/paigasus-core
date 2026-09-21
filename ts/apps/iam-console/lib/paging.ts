@@ -165,6 +165,9 @@ const PARKED_DATE = /^(\d{4})-(\d{2})-(\d{2})/;
  * Whether the date part names a real calendar day. MEASURED on Node 24 (V8): `Date.parse` ACCEPTS
  * `2026-02-30T00:00:00Z` and reads it as 2026-03-02, so a finite `Date.parse` does not prove that the
  * day exists. Without this check, a typo would silently filter on another day.
+ *
+ * Date.UTC reads a year from 0 to 99 as 1900 to 1999, so a year from 0000 to 0099 never round-trips
+ * and is refused.
  */
 function isCalendarDay(value: string): boolean {
   const match = PARKED_DATE.exec(value);
@@ -177,19 +180,30 @@ function isCalendarDay(value: string): boolean {
 }
 
 /**
- * The canonical instant of a trimmed, non-empty bound, or null when the console refuses it. ONE
- * function for the GET filter (`parseParkedBound`) and the bulk form's POST field (commands.ts's
- * `parkedBoundField`), so the two cannot accept different values. Each check refuses something the
- * others let through: the pattern refuses a value with no zone, which `Date.parse` reads as LOCAL
- * time; `isCalendarDay` refuses a day that does not exist; `Date.parse` refuses a time that does not
- * exist (`00:60`).
+ * One pass of the canonicalisation: today's checks, unchanged. The pattern refuses a value with no
+ * zone, which `Date.parse` reads as LOCAL time; `isCalendarDay` refuses a day that does not exist;
+ * `Date.parse` refuses a time that does not exist (`00:60`).
  */
-export function canonicalParkedBound(value: string): string | null {
+function canonicalOnce(value: string): string | null {
   if (value.length > MAX_PARKED_BOUND_LENGTH || !isCalendarDay(value)) return null;
   const standard = standardInstant(value);
   if (standard === null) return null;
   const ms = Date.parse(standard);
   return Number.isFinite(ms) ? new Date(ms).toISOString() : null;
+}
+
+/**
+ * The canonical instant of a trimmed, non-empty bound, or null when the console refuses it. ONE
+ * function for the GET filter (`parseParkedBound`) and the bulk form's POST field (commands.ts's
+ * `parkedBoundField`), so the two cannot accept different values.
+ *
+ * A bound is accepted only when its canonical instant is itself accepted, so the value a link or the
+ * bulk form carries always parses again; this refuses the few instants whose canonical year leaves
+ * 0100–9999.
+ */
+export function canonicalParkedBound(value: string): string | null {
+  const once = canonicalOnce(value);
+  return once !== null && canonicalOnce(once) === once ? once : null;
 }
 
 /** Which parked-time input a bound came from. It only selects the error sentence. */

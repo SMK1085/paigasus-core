@@ -117,7 +117,7 @@ describe('parseParkedBound', () => {
     for (const raw of [undefined, '', '   ']) expect(parseParkedBound(raw, 'parkedFrom')).toEqual({ ok: true, raw: '', iso: '' });
   });
 
-  it.each([
+  const ACCEPTED_PARKED_BOUNDS = [
     ['the canonical Z form', '2026-09-19T00:00:00Z', CANONICAL],
     ['a lower-case z', '2026-09-19T00:00:00z', CANONICAL],
     ['a space instead of T', '2026-09-19 00:00:00Z', CANONICAL],
@@ -125,8 +125,17 @@ describe('parseParkedBound', () => {
     ['fractional seconds, cut to milliseconds', '2026-09-19T00:00:00.123456789Z', '2026-09-19T00:00:00.123Z'],
     ['a +02:00 offset', '2026-09-19T02:00:00+02:00', CANONICAL],
     ['the longest legal value, 35 characters', '2026-09-19T02:00:00.123456789+02:00', '2026-09-19T00:00:00.123Z'],
-  ])('accepts %s and normalises it', (_label, raw, iso) => {
+  ] as const;
+
+  it.each(ACCEPTED_PARKED_BOUNDS)('accepts %s and normalises it', (_label, raw, iso) => {
     expect(parseParkedBound(raw, 'parkedFrom')).toEqual({ ok: true, raw, iso });
+  });
+
+  // Ruling 10 (final review): a bound is accepted only when its own canonical form parses again, so
+  // every accepted value must re-canonicalise to itself.
+  it.each(ACCEPTED_PARKED_BOUNDS)('re-canonicalises %s to itself', (_label, value) => {
+    const iso = canonicalParkedBound(value);
+    expect(canonicalParkedBound(iso as string)).toBe(iso);
   });
 
   it('reads the first value, trims it, and echoes the TRIMMED value as raw', () => {
@@ -143,6 +152,8 @@ describe('parseParkedBound', () => {
     ['an hour that does not exist', '2026-09-19T24:00:00Z'],
     ['words', 'not a time'],
     ['41 characters', '9'.repeat(41)],
+    ['a year that leaves 9999 when made canonical', '9999-12-31T23:30:00-01:00'],
+    ['a year that leaves 0100 when made canonical', '0100-01-01T00:30:00+01:00'],
   ])('refuses %s, echoes it back, and never reached IAM', (_label, raw) => {
     const parsed = parseParkedBound(raw, 'parkedFrom');
 
