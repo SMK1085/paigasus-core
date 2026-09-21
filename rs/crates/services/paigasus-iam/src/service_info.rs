@@ -21,8 +21,9 @@ use crate::config::IamConfig;
 pub const SERVICE: &str = "iam";
 
 /// This build's version. `env!` is evaluated in THIS crate, so it is `paigasus-iam`'s own
-/// `Cargo.toml` version and nothing else's (AC 4). Every crate in the workspace is currently
-/// `0.0.0` and release-plz is dormant, so this reports `0.0.0` until releases are cut.
+/// `Cargo.toml` version and nothing else's (AC 4). A maintainer sets it by hand; release-plz
+/// does not process this crate, because its Cargo manifest sets `publish = false` (SMA-658,
+/// spec § 3.1).
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// The three capability toggles, projected out of `IamConfig` at wiring time.
@@ -243,8 +244,11 @@ mod tests {
             "version core must be numeric: {}",
             info.version
         );
-        // Still NOT proven while every crate is "0.0.0": that this is the SERVICE's version
-        // rather than the shared library's. Both strings are identical today (spec § 6.4).
+        // The service crate is 0.1.0 and the shared library crates it depends on (paigasus-iam-
+        // core, paigasus-logging) stay at 0.0.0 (SMA-658, spec § 3.4). This test asserts no
+        // specific literal here, because a hard-pinned "0.1.0" would break on every future
+        // service bump; the check above already proves the value came from THIS crate's own
+        // env!("CARGO_PKG_VERSION").
     }
 
     #[test]

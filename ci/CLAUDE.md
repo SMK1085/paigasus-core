@@ -314,3 +314,9 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   a second opinion on each missing literal: a `literal-disagreement` row means `grep` and a bash
   `case` match disagree, which is evidence of a second mechanism. Keep that run's whole output for
   SMA-647 before you re-run.
+- `crane config` accepts a **registry reference only**. MEASURED against crane 0.22.1:
+  `crane config "oci-archive:in/paigasus-iam-amd64.oci.tar"` fails with `Error: fetching config:
+  parsing reference … could not parse reference`, and with a missing file it tries to resolve a
+  host named `oci-archive`. `oci-archive:` is a syft/skopeo transport, not a crane one. Read an
+  image config from a local archive with `ci/images/release_decision.py labels <archive>` instead
+  (SMA-658 C1); it prints `version=` and `revision=` from the same labels.

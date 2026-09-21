@@ -80,9 +80,32 @@ github_output() {
   out="$(uv run --locked --project "$HERE" --python '>=3.12' python3 \
     "$HERE/release_plan.py" --event-name "${GITHUB_EVENT_NAME:-}" "$REPO_ROOT" 2>&1)" || rc=$?
   printf '%s\n' "$out"
-  if [ "$rc" -ne 0 ] || ! grep -qE '^nothing_to_release=(true|false)$' < <(printf '%s\n' "$out"); then
+  # SMA-658 fix round 2. Folded all FIVE keys into this one presence check, not just
+  # nothing_to_release: under `set -euo pipefail`, each `grep -E ... | tail -n 1` pipeline below
+  # exits 1 (aborting this function before its `exit 0`) when its pattern has ZERO matches, and
+  # the pre-existing nothing_to_release line was only ever safe because ITS pattern was checked
+  # here first. A checker that prints a verdict but omits one service key — a partial, malformed
+  # write, not the all-or-nothing success/failure this file otherwise assumes — must route into
+  # the fail-safe branch below (which writes every key explicitly) rather than abort. Do not
+  # replace a missing-key check with `|| true` on the pipelines instead: that would let the key
+  # go unwritten silently, which is the worse failure the review named.
+  if [ "$rc" -ne 0 ] \
+    || ! grep -qE '^nothing_to_release=(true|false)$' < <(printf '%s\n' "$out") \
+    || ! grep -qE '^skip_iam=(true|false)$' < <(printf '%s\n' "$out") \
+    || ! grep -qE '^skip_gateway=(true|false)$' < <(printf '%s\n' "$out") \
+    || ! grep -qE '^version_iam=' < <(printf '%s\n' "$out") \
+    || ! grep -qE '^version_gateway=' < <(printf '%s\n' "$out"); then
     printf '::warning::release-plan could not decide (rc=%s) — building, which is the fail-safe direction\n' "$rc"
     printf 'nothing_to_release=false\n' >> "${GITHUB_OUTPUT:-/dev/stdout}"
+    # SMA-658. The image chains read their own outputs, and an unset output makes the chain RUN
+    # (spec § 4.1). Writing them here as well keeps the fail-safe explicit rather than implied.
+    printf 'skip_iam=false\nskip_gateway=false\n' >> "${GITHUB_OUTPUT:-/dev/stdout}"
+    # SMA-658 fix round 2 (ruling). Written EMPTY, deliberately, rather than left unwritten: an
+    # output GitHub never saw and one written as an empty string behave differently in a
+    # `release.yml` expression, and the image chains must not depend on that distinction. Spec
+    # § 6.1 only mandates the skip flags on this branch; an empty version means "unknown" here,
+    # never a real version — a consumer must not read it as one.
+    printf 'version_iam=\nversion_gateway=\n' >> "${GITHUB_OUTPUT:-/dev/stdout}"
     exit 0
   fi
   # `tail -n 1` guards against a second, forged verdict line ahead of the genuine one — e.g. a
@@ -93,6 +116,18 @@ github_output() {
   # confirm whether Actions takes the first or the last of two same-named `>>` output keys, and
   # a fail-safe control must not lean on an assumption nobody checked.
   printf '%s\n' "$out" | grep -E '^nothing_to_release=(true|false)$' | tail -n 1 \
+    >> "${GITHUB_OUTPUT:-/dev/stdout}"
+  # SMA-658. Four separate greps, one per key, each taken LAST for the same forged-line reason as
+  # the verdict above: a service line inside a heredoc or an echoed error message must not be
+  # read as the real decision. S6: a single combined grep over two keys cannot use `tail -n 1`
+  # without dropping one of the two services, so each key gets its own grep and its own tail.
+  printf '%s\n' "$out" | grep -E '^skip_iam=(true|false)$' | tail -n 1 \
+    >> "${GITHUB_OUTPUT:-/dev/stdout}"
+  printf '%s\n' "$out" | grep -E '^skip_gateway=(true|false)$' | tail -n 1 \
+    >> "${GITHUB_OUTPUT:-/dev/stdout}"
+  printf '%s\n' "$out" | grep -E '^version_iam=' | tail -n 1 \
+    >> "${GITHUB_OUTPUT:-/dev/stdout}"
+  printf '%s\n' "$out" | grep -E '^version_gateway=' | tail -n 1 \
     >> "${GITHUB_OUTPUT:-/dev/stdout}"
   exit 0
 }
@@ -344,6 +379,50 @@ negative_control() {
     printf '  --- mutant output ---\n%s\n' "$mut8_out" >&2
     failures=$((failures + 1))
   fi
+
+  # Row 9 — SMA-658 fix round 2. The exact untested case the review named: the checker's stdout
+  # carries a `nothing_to_release=...` verdict but OMITS one service key entirely — a PARTIAL,
+  # malformed write, distinct from row 6's all-broken decision (there rc is non-zero and nothing
+  # parses at all). Before fix round 2's presence check folded all five keys together, this
+  # shape made `github_output()` ABORT under `set -euo pipefail`: the `skip_gateway` grep found
+  # zero matches, exited 1, and the function never reached its `exit 0` — breaking the documented
+  # "--github-output always exits 0" contract on a shape neither row 5 nor row 6 reaches.
+  #
+  # `github_output()` hardcodes `$HERE`, so it cannot be pointed at a synthetic tree the way rows
+  # 3/4 are (see the comment above this function) — UNLESS the invoked run.sh's own `$HERE`
+  # resolves into the tree. So the whole `$HERE` tree (pyproject.toml, uv.lock, release_plan.py,
+  # run.sh) is copied under a stub REPO_ROOT, only the COPY's release_plan.py is replaced with the
+  # fixture, and the COPY of run.sh is invoked — never "$0". `BASH_SOURCE[0]` inside that copy
+  # resolves `REPO_ROOT` to the stub root, so `HERE` there is the stub directory and the real,
+  # tracked `release_plan.py` is never touched: no swap, no restore, and nothing left corrupted if
+  # this test is killed mid-run (a signal an EXIT trap cannot catch).
+  local stub_root stub_out rc9=0
+  stub_root="$tmp/github-output-stub/ci/release-plan"
+  mkdir -p "$stub_root"
+  cp -R "$HERE/." "$stub_root/"
+  cat > "$stub_root/release_plan.py" <<'PYEOF'
+print("release-plan: fixture -- a malformed decision missing one service key")
+print("nothing_to_release=true")
+print("skip_iam=true")
+print("version_iam=1.0.0")
+PYEOF
+  stub_out="$(mktemp)"
+  GITHUB_OUTPUT="$stub_out" GITHUB_EVENT_NAME=push bash "$stub_root/run.sh" --github-output \
+    >/dev/null 2>&1 || rc9=$?
+  if [ "$rc9" -ne 0 ]; then
+    printf '  FAIL row 9: the wrapper exited %s against a checker output missing one service\n' \
+      "$rc9" >&2
+    printf '       key, expected 0 (the fail-safe direction)\n' >&2
+    failures=$((failures + 1))
+  fi
+  for key in nothing_to_release skip_iam skip_gateway version_iam version_gateway; do
+    if ! grep -q "^${key}=" "$stub_out"; then
+      printf '  FAIL row 9: %s was not written when the checker output was missing a service key\n' \
+        "$key" >&2
+      failures=$((failures + 1))
+    fi
+  done
+  rm -f "$stub_out"
 
   rm -rf "$tmp"
   if [ "$failures" -gt 0 ]; then

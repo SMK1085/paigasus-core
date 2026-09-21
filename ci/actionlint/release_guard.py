@@ -57,6 +57,38 @@ UNGATED_JOBS = frozenset({"release-pr"})
 # V8c says every publisher must be downstream. Without V8c, deleting `approve-release` from the
 # `release` job's needs: removes the only gate in the file and passes V1, V3, V4, V7 and V8a/b.
 APPROVAL_JOB = "approve-release"
+# Fix round 1, Important 3. `_environment_name(gate)` truthy is not enough: `environment:
+# whatever` also names an environment, and satisfies the old V8a with no required reviewers at
+# all unless GitHub's own project settings happen to protect that name too. Spec § 7.1 pins EVERY
+# approval job — the kernel one and each service chain's — to this one, specific environment.
+# Case-folded, since GitHub itself treats environment names case-insensitively.
+APPROVAL_ENVIRONMENT = "release-approval"
+
+# SMA-658. Each service image chain carries its OWN approval job, separate from the kernel's — this
+# is a JOB-GRAPH rule: it governs which approval job a publisher's `needs:` must depend on. A
+# kernel approval job must not gate an image push job, and an image approval job must not gate a
+# crates.io publish job, so the rule is per chain rather than per file. It does not mean the
+# approvals are separate human decisions: every approval job above shares the one
+# APPROVAL_ENVIRONMENT ("release-approval"), and GitHub approves a pending deployment by
+# environment, not by job, so one human approval releases every chain pending in the same run
+# (decision recorded 2026-09-21; not yet observed on a live run). A file with no image chain —
+# every fixture built on _OK_MAIN — keeps exactly the old behaviour.
+CHAIN_APPROVALS: dict[str, str] = {
+    "iam": "approve-images-iam",
+    "gateway": "approve-images-gateway",
+}
+# The jobs each service chain owns, by suffix. `publish-images-iam` and `tag-iam` must both sit
+# behind `approve-images-iam`, never behind the kernel gate.
+_CHAIN_JOB_PREFIXES = ("images-build-", "publish-images-", "tag-")
+
+
+def approval_for_job(job_id: str) -> str:
+    """The approval job that must gate this job. The kernel gate is the default."""
+    for service, approval in CHAIN_APPROVALS.items():
+        for prefix in _CHAIN_JOB_PREFIXES:
+            if job_id == f"{prefix}{service}":
+                return approval
+    return APPROVAL_JOB
 
 # V9. The plan job decides whether a release happens at all, and it sits upstream of the approval
 # gate — so a wrong polarity here fails GREEN, silently dropping every release. The producer side
@@ -71,6 +103,28 @@ PLAN_SCRIPT_FLAG = "--github-output"
 # admit `== 'false'`, which is NOT equivalent — it fails closed on an unset output.
 PLAN_GATE_EXPR = f"needs.{PLAN_JOB}.outputs.{PLAN_OUTPUT} != 'true'"
 ACCEPTED_PLAN_FORMS = frozenset({PLAN_GATE_EXPR, "${{ " + PLAN_GATE_EXPR + " }}"})
+# SMA-658. Each service chain gates on its own skip output, with the same `!=` polarity and the
+# same literal pinning: `== 'true'` inverts the decision and `== 'false'` drops the chain on an
+# unset output. A chain job must carry ITS OWN service's literal — not the kernel one, and not
+# another service's, which would tie two chains together.
+# Fix round 1, Minor 7: built from CHAIN_APPROVALS' own keys, not a second hand-maintained
+# ("iam", "gateway") tuple. Two lists naming the same services in one file will drift.
+SERVICE_PLAN_GATE_EXPRS: dict[str, frozenset[str]] = {
+    service: frozenset({
+        f"needs.{PLAN_JOB}.outputs.skip_{service} != 'true'",
+        "${{ " + f"needs.{PLAN_JOB}.outputs.skip_{service} != 'true'" + " }}",
+    })
+    for service in CHAIN_APPROVALS
+}
+
+
+def accepted_plan_forms(job_id: str) -> frozenset[str]:
+    """The `if:` literals this consumer of `plan` may carry."""
+    for service, forms in SERVICE_PLAN_GATE_EXPRS.items():
+        for prefix in _CHAIN_JOB_PREFIXES:
+            if job_id == f"{prefix}{service}":
+                return forms
+    return ACCEPTED_PLAN_FORMS
 # SMA-603 fix wave, 2d. FULL-MATCH, not `search`. The old regex only had to occur SOMEWHERE in
 # the outputs expression, so any expression that merely CONTAINED the step reference passed —
 # including ones that resolve to a constant. The measured shape is
@@ -129,7 +183,14 @@ STATUS_FUNCS = ("always", "cancelled", "success", "failure")
 #
 # `npm\s+publish` deliberately also matches `pnpm publish` (the substring is contained in it).
 # That is a superset in the safe direction: it detects more publish mechanisms, never fewer.
-PUBLISH_MARKERS = (
+# V8e (SMA-658 fix round 2 review, I1). Split into two classes, not one flat tuple, because a
+# CHAIN approval (a service image chain's own gate) must authorise only ITS OWN registry — a
+# package-registry marker matching downstream of a chain approval is a crates.io/npm/PyPI publish
+# riding on an image approval, which spec § 7.1 and CHAIN_APPROVALS' own comment both say must
+# never happen. PACKAGE_PUBLISH_MARKERS is the original V6/V7 vocabulary (pre-SMA-658);
+# CONTAINER_PUBLISH_MARKERS is the SMA-658 addition. PUBLISH_MARKERS stays the union, used by every
+# existing V6/V7/V8b/V8c consumer that must not care which class matched.
+PACKAGE_PUBLISH_MARKERS = (
     r"release-plz\s+release(?![-\w])",
     r"npm\s+publish",
     r"yarn\s+publish",
@@ -141,7 +202,30 @@ PUBLISH_MARKERS = (
     r"maturin\s+upload",
     r"uv\s+publish",
 )
+CONTAINER_PUBLISH_MARKERS = (
+    # SMA-658. Container registries and the tag API. Bounded ends, like the release-plz marker
+    # above: `crane pusher` must not match `crane push`.
+    r"docker\s+push(?![-\w])",
+    r"docker\s+buildx\s+build[^\n]*--push(?![-\w])",
+    r"--output\s+type=registry(?![-\w])",
+    r"docker\s+manifest\s+push(?![-\w])",
+    r"imagetools\s+create(?![-\w])",
+    r"crane\s+(push|copy|cp|tag|index|append)(?![-\w])",
+    r"skopeo\s+copy(?![-\w])",
+    r"regctl\s+(image\s+(copy|cp)|tag|index\s+create)(?![-\w])",
+    r"oras\s+(push|cp|attach)(?![-\w])",
+    r"cosign\s+(sign|attest|attach|copy)(?![-\w])",
+    # M5 (SMA-658 fix round 1): this also matches a GET read of a ref (`gh api
+    # repos/o/r/git/refs/tags/x`), which reaches no registry. That is fail-closed, not a mistake —
+    # narrowing it to the tag-CREATING verb needs a method-aware rewrite this guard does not do
+    # today, and a false positive here costs a human look, not a missed publish.
+    r"git/refs(?![-\w])",
+)
+PUBLISH_MARKERS = PACKAGE_PUBLISH_MARKERS + CONTAINER_PUBLISH_MARKERS
 _PUBLISH_RE = re.compile("|".join(PUBLISH_MARKERS))
+# V8e's own regex — package-registry markers ONLY. A chain job may match CONTAINER_PUBLISH_MARKERS
+# freely (that is its whole job); matching this one is the violation.
+_PACKAGE_PUBLISH_RE = re.compile("|".join(PACKAGE_PUBLISH_MARKERS))
 
 # V5: matches V6's own whitespace tolerance (`napi\s+prepublish` in PUBLISH_MARKERS above). V5 used
 # to test the literal substring "napi prepublish", so `napi  prepublish` (two spaces) or a tab
@@ -224,6 +308,10 @@ PYPI_PUBLISH_ACTION = "pypa/gh-action-pypi-publish"
 EXPECTED_RELEASE_SECRETS = (
     "PAIGASUS_BOT_APP_ID",
     "PAIGASUS_BOT_PRIVATE_KEY",
+    # SMA-658 D7. Docker Hub offers OIDC connections only to organizations with a Team, Business
+    # or DHI subscription, or in its Sponsored Open Source program. `smaschek` is a personal
+    # account, so this token cannot be an OIDC exchange. V13 (Task 6) scopes it to one job.
+    "DOCKERHUB_TOKEN",
 )
 
 # Matched against PARSED scalars, never the raw file, so the YAML comments in release.yml that
@@ -311,7 +399,16 @@ RELEASE_WORKFLOW_NAME = "release.yml"
 # (wheels.yml builds, it does not publish), and `repo:workflow-credentials` actively BANS the
 # grant in any pull_request-triggered workflow — so applying this rule file-wide would red a
 # correct repository.
-OIDC_PUBLISH_JOBS = ("publish-pypi", "publish-npm")
+# SMA-658 correction. The brief's Step 7 text omitted `release`: it holds `id-token: write` for
+# the crates.io OIDC exchange since SMA-602 (`# crates.io OIDC exchange`, release.yml:560), the
+# same legitimate shape as `publish-pypi` and `publish-npm`. Before S1 below existed, the omission
+# was harmless — the (pre-existing) first loop only checked jobs NAMED in this tuple, never
+# forbade the grant elsewhere. S1 adds exactly that forbidding direction, so leaving `release` out
+# would permanently red the real `release.yml` on its own long-standing, correct grant — measured
+# running this guard against the checked-in file (Step 10).
+OIDC_PUBLISH_JOBS = (
+    "release", "publish-pypi", "publish-npm", "publish-images-iam", "publish-images-gateway",
+)
 ID_TOKEN_SCOPE = "id-token"
 
 # V12 (SMA-602 fix wave, F3). The npm OIDC floor is duplicated across release.yml's `publish-npm`
@@ -623,10 +720,14 @@ def _dry_run_exempts(segment: str, after: int) -> bool:
     return False
 
 
-def job_publishes(job: dict, where: str = "a job") -> bool:
+def job_publishes(job: dict, where: str = "a job", *, pattern: re.Pattern[str] = _PUBLISH_RE) -> bool:
     """V6 detection. Used for called workflows, and (fix round 1, Critical 1) as the shared
     step-level primitive `approval_boundary_violations` and `callee_boundary_violations` both
     build V8 on.
+
+    `pattern` defaults to the full union (_PUBLISH_RE); V8e passes _PACKAGE_PUBLISH_RE to ask the
+    narrower question "does this job match a PACKAGE-registry marker", reusing the same
+    per-segment, dry-run-aware scan rather than a second hand-rolled loop.
 
     Fix round 1, Important 3: evaluated per LINE, not per whole `run:` block. A `--dry-run`
     occurrence reaches no registry — `napi prepublish --dry-run --no-gh-release` (prebuild.yml)
@@ -651,7 +752,7 @@ def job_publishes(job: dict, where: str = "a job") -> bool:
         blob = f"{step.get('run', '')}\n{step.get('uses', '')}"
         for line in blob.splitlines():
             for segment in command_segments(line):
-                m = _PUBLISH_RE.search(segment)
+                m = pattern.search(segment)
                 if not m:
                     continue
                 if _dry_run_exempts(segment, m.end()):
@@ -701,8 +802,8 @@ def napi_violations(job: dict, job_id: str, name: str) -> list[str]:
                 if m and "--no-gh-release" not in segment[m.end() :]:
                     out.append(
                         f"{name}: job '{job_id}' runs `napi prepublish` without "
-                        f"--no-gh-release. release-plz owns every tag (ADR-0011 S3); napi "
-                        f"must never cut one."
+                        f"--no-gh-release. release-plz owns every CRATE tag (ADR-0011 S3, "
+                        f"amended); napi must never cut one."
                     )
     return out
 
@@ -969,6 +1070,22 @@ def id_token_violations(doc: dict, name: str) -> list[str]:
                 f"published. A job-level permissions: block sets every scope it omits to none, "
                 f"so adding a narrower block is the same defect as deleting the grant."
             )
+    # SMA-658 S1. The grant is scoped: a job outside OIDC_PUBLISH_JOBS that holds
+    # id-token: write can run its own OIDC exchange against a registry or a publisher this rule
+    # never audited for it. tag-<svc> only calls the tag API with an App token, so it must never
+    # hold this grant.
+    for jid, job in jobs.items():
+        if jid in OIDC_PUBLISH_JOBS or not isinstance(job, dict):
+            continue
+        job_grant = _grants_scope(job.get("permissions"), ID_TOKEN_SCOPE)
+        if job_grant is None:
+            job_grant = bool(workflow_grant)
+        if job_grant:
+            out.append(
+                f"{name}: V11: job '{jid}' grants `{ID_TOKEN_SCOPE}: write` but is not in "
+                f"OIDC_PUBLISH_JOBS. Only a job that runs a trusted-publishing exchange may hold "
+                f"this scope; add it to OIDC_PUBLISH_JOBS if that is now true, or drop the grant."
+            )
     return out
 
 
@@ -1021,6 +1138,140 @@ def _environment_name(job: dict) -> str | None:
     return None
 
 
+# V13 (SMA-658). The Docker Hub token is the one long-lived publish credential in this repository.
+# V10 pins WHICH secret names may appear; V13 pins WHERE one may appear. Without it, V10 accepts
+# the token in any job of the release file.
+SCOPED_SECRET = "DOCKERHUB_TOKEN"
+SCOPED_SECRET_ENVIRONMENT = "release-images"
+SCOPED_SECRET_JOBS = frozenset(f"publish-images-{service}" for service in CHAIN_APPROVALS)
+
+
+def _scoped_secret_referenced(names: set[str]) -> bool:
+    """SMA-658 Task 8 fix round 1. One casefold comparison, shared by both
+    `credential_scope_violations` arms below, so a future edit to how a secret name is matched
+    changes it once."""
+    return SCOPED_SECRET.casefold() in {n.casefold() for n in names}
+
+
+def credential_scope_violations(doc: dict, name: str) -> list[str]:
+    """V13. DOCKERHUB_TOKEN only in a `release-images` job, and that environment only on a
+    publish job.
+
+    Environment names and secret names are both compared CASE-FOLDED, because GitHub treats both
+    case-insensitively: a `Release-Images` job reaches the same secrets as `release-images`, and
+    `secrets.dockerhub_token` reads the same value as `secrets.DOCKERHUB_TOKEN`. An `environment:`
+    built from an expression fails closed — this file cannot resolve it, and an unresolvable
+    environment must never satisfy a scoping rule.
+
+    This runs over EVERY workflow file, not only release.yml: any workflow with a `main` trigger
+    could name the same environment and read the same secret.
+    """
+    out: list[str] = []
+    # I4 (SMA-658 fix round 1). A WORKFLOW-LEVEL env: block reaches every job through the `env`
+    # context — UNGATED_JOBS members included — and nothing can scope a workflow-level env: to
+    # one job the way a job's own environment: does. `check_main`'s own workflow-level env: scan
+    # (at its `publish_credential_violations({"env": doc.get("env") or {}}, ...)` call) already
+    # covers V10 the same way; V13 needs the identical scan, or a secret hoisted from a job's env:
+    # up to the workflow root would silently escape this rule.
+    names, _ = secret_refs(
+        yaml.safe_dump({"env": doc.get("env") or {}}, width=10**9, default_flow_style=False))
+    if _scoped_secret_referenced(names):
+        out.append(f"{name}: V13: the workflow-level env: reads {SCOPED_SECRET}. That scope "
+                   f"reaches every job in the file, including one UNGATED_JOBS exempts from the "
+                   f"release gate, and nothing can scope it to a single job from there. Move the "
+                   f"reference into one of {sorted(SCOPED_SECRET_JOBS)}'s own env:.")
+    jobs = doc.get("jobs")
+    if not isinstance(jobs, dict):
+        return out
+    for jid, job in jobs.items():
+        if not isinstance(job, dict):
+            continue
+        raw_env = job.get("environment")
+        raw_text = raw_env if isinstance(raw_env, str) else str(
+            raw_env.get("name") if isinstance(raw_env, dict) else "")
+        if "${{" in raw_text:
+            out.append(f"{name}: V13: job '{jid}' builds its environment: from an expression "
+                       f"({raw_text!r}). This guard cannot resolve it, so the scoping rule for "
+                       f"{SCOPED_SECRET} cannot be checked. Name the environment literally.")
+            continue
+        env_name = (_environment_name(job) or "").casefold()
+        # S14 (SMA-658): the default 80-column fold can insert a newline inside a `${{ ... }}`
+        # span for a long secret name, which `_EXPR_SPAN`'s `re.S` would then misparse. PyYAML
+        # only folds at a space, so today's names survive — but the next one might not.
+        names, _ = secret_refs(yaml.safe_dump(job, width=10**9, default_flow_style=False))
+        if _scoped_secret_referenced(names) and env_name != SCOPED_SECRET_ENVIRONMENT:
+            out.append(f"{name}: V13: job '{jid}' reads {SCOPED_SECRET} but its environment is "
+                       f"{env_name or '(none)'!r}, not {SCOPED_SECRET_ENVIRONMENT!r}. That "
+                       f"environment is the only thing that scopes the token to one job.")
+        if env_name == SCOPED_SECRET_ENVIRONMENT and jid not in SCOPED_SECRET_JOBS:
+            out.append(f"{name}: V13: job '{jid}' names the {SCOPED_SECRET_ENVIRONMENT!r} "
+                       f"environment, but only {sorted(SCOPED_SECRET_JOBS)} may. Every job that "
+                       f"names it can read {SCOPED_SECRET}.")
+    return out
+
+
+# V14 (SMA-658). A CAPABILITY rule, not a spelling rule. The marker list can only ever catch a
+# command someone already thought of; a job that HOLDS a write capability can publish with a tool
+# nobody listed, a `with: push: true`, or a command inside a script. So the capability itself must
+# sit behind an approval.
+# M2 (SMA-658 fix round 1): "contents" is deliberately NOT a member — the loop below would
+# `continue` past it immediately, so listing it here would be decorative. `contents: write` alone
+# is not a registry capability; see the App-token arm further down for the one shape where
+# `contents: write` DOES matter (minting a token that carries it).
+WRITE_SCOPES = ("packages", "id-token", "attestations")
+CAPABILITY_ENVIRONMENTS = ("release-images", "release-publish")
+_APP_TOKEN_ACTION = "actions/create-github-app-token"
+
+
+def _holds_write_capability(job: dict, workflow_perms: object = None) -> str | None:
+    """The capability this job holds, or None. The reason is returned for the message.
+
+    S13 (SMA-658): a job-level `permissions:` block always wins — and, per GitHub's own semantics,
+    sets every scope it does not name to `none` — so the workflow-level block is consulted only
+    when the job declares none at all. This is the same fallback `id_token_violations` already
+    applies; without it, a workflow-level `packages: write` would grant every job that declares no
+    block of its own, invisibly to V14.
+    """
+    perms = job.get("permissions")
+    if perms is None:
+        perms = workflow_perms
+    if isinstance(perms, dict):
+        for scope in WRITE_SCOPES:
+            if perms.get(scope) == "write":
+                return f"permissions.{scope}: write"
+    if isinstance(perms, str) and perms.strip() == "write-all":
+        return "permissions: write-all"
+    env_name = (_environment_name(job) or "").casefold()
+    if env_name in CAPABILITY_ENVIRONMENTS:
+        return f"environment: {env_name}"
+    for step in steps_of(job, "a job"):
+        if not isinstance(step, dict):
+            continue
+        uses = str(step.get("uses") or "")
+        with_block = step.get("with")
+        if _APP_TOKEN_ACTION in uses and isinstance(with_block, dict) \
+                and with_block.get("permission-contents") == "write":
+            return "an App token with contents: write"
+    return None
+
+
+def capability_violations(jobs: dict, workflow_perms: object, name: str) -> list[str]:
+    """V14. Every job that holds a publish capability sits behind its chain's approval."""
+    out: list[str] = []
+    for jid, job in jobs.items():
+        if not isinstance(job, dict) or jid in UNGATED_JOBS:
+            continue
+        reason = _holds_write_capability(job, workflow_perms)
+        if reason is None:
+            continue
+        approval = approval_for_job(jid)
+        if approval not in gated_path_jobs(jid, jobs):
+            out.append(f"{name}: V14: job '{jid}' holds {reason}, but '{approval}' is not on its "
+                       f"needs: path. A job with that capability can reach a registry with a tool "
+                       f"no marker list names, so the capability itself must sit behind the gate.")
+    return out
+
+
 def approval_boundary_violations(jobs: dict, name: str) -> list[str]:
     """V8a/b/c. The approval gate is the ONE human checkpoint; everything downstream of it is
     irreversible. V8a is the floor (without it the rest of V8 passes vacuously); V8b asserts
@@ -1031,41 +1282,107 @@ def approval_boundary_violations(jobs: dict, name: str) -> list[str]:
     Both V8b and V8c here are STEPS-shaped only (via job_publishes, which reads `steps:`). A
     job-level `uses:` publisher — the shape `wheels` and `prebuild` already use — is invisible to
     job_publishes and is covered separately by callee_boundary_violations (V8d), which needs the
-    filesystem this function deliberately does not touch (fix round 1, Critical 1)."""
+    filesystem this function deliberately does not touch (fix round 1, Critical 1).
+
+    SMA-658: the rule is now PER CHAIN. Each service image chain carries its own approval job
+    (approval_for_job), separate from the kernel's `approve-release`. A kernel approval must not
+    authorise an image push, and an image approval must not authorise a crates.io publish, so V8a
+    is checked once per approval job this file actually uses, V8b once per approval job's own
+    upstream path, and V8c resolves each publisher's OWN chain's approval rather than the single
+    kernel one. A file with no image chain — every fixture built on _OK_MAIN — exercises only the
+    kernel approval, exactly as before."""
     out: list[str] = []
-    gate = jobs.get(APPROVAL_JOB)
-    if not isinstance(gate, dict):
-        return [f"{name}: V8a: no job named '{APPROVAL_JOB}' exists. Every other clause of V8 is "
-                f"defined relative to it, so without it this verdict would pass vacuously."]
-    if not _environment_name(gate):
-        out.append(f"{name}: V8a: job '{APPROVAL_JOB}' declares no NAMED environment:. The pause "
-                   f"that makes it a gate comes from that named environment's required "
-                   f"reviewers; a missing environment:, or one with no name:, is an ordinary job "
-                   f"that always succeeds.")
-
-    for jid in sorted(gated_path_jobs(APPROVAL_JOB, jobs)):
-        job = jobs.get(jid)
-        if not isinstance(job, dict) or not job_publishes(job, f"{name}: job '{jid}'"):
+    # V8a. Every approval job that the file actually uses must exist and must name an environment.
+    # A chain's approval job is only required when that chain has a job in this file.
+    required = {APPROVAL_JOB}
+    for jid in jobs:
+        required.add(approval_for_job(jid))
+    for approval in sorted(required):
+        gate = jobs.get(approval)
+        if not isinstance(gate, dict):
+            if approval == APPROVAL_JOB:
+                return [f"{name}: V8a: no job named '{APPROVAL_JOB}' exists. Every other clause "
+                        f"of V8 is defined relative to it, so without it this verdict would pass "
+                        f"vacuously."]
+            out.append(f"{name}: V8a: no job named '{approval}' exists, but a job of its chain "
+                       f"does. Each service chain carries its own approval.")
             continue
-        if jid == APPROVAL_JOB:
-            # Fix round 1, Minor 1: gated_path_jobs(APPROVAL_JOB, jobs) includes APPROVAL_JOB
-            # itself (trivially, on its own needs: path), so "runs upstream of 'approve-release'"
-            # about approve-release itself read as nonsense. Word this case on its own terms.
-            out.append(f"{name}: V8b: job '{APPROVAL_JOB}' IS the approval gate and contains a "
-                       f"step that can reach a registry. The gate itself must never publish — "
-                       f"move the step to a job downstream of it.")
-        else:
-            out.append(f"{name}: V8b: job '{jid}' runs upstream of '{APPROVAL_JOB}' and contains "
-                       f"a step that can reach a registry. That publishes before any human "
-                       f"approves. Add --dry-run, or move the step downstream of the gate.")
+        env_name = _environment_name(gate)
+        if not env_name:
+            out.append(f"{name}: V8a: job '{approval}' declares no NAMED environment:. The pause "
+                       f"that makes it a gate comes from that named environment's required "
+                       f"reviewers; a missing environment:, or one with no name:, is an ordinary "
+                       f"job that always succeeds.")
+        elif env_name.casefold() != APPROVAL_ENVIRONMENT.casefold():
+            out.append(f"{name}: V8a: job '{approval}' declares environment '{env_name}', not "
+                       f"'{APPROVAL_ENVIRONMENT}'. Spec § 7.1 pins every approval job to this "
+                       f"one environment; a differently named environment might carry no "
+                       f"required reviewers, or a reviewer set the release process never "
+                       f"intended.")
 
+    # V8b. Nothing upstream of an approval job may publish.
+    for approval in sorted(required):
+        if not isinstance(jobs.get(approval), dict):
+            continue
+        for jid in sorted(gated_path_jobs(approval, jobs)):
+            job = jobs.get(jid)
+            if not isinstance(job, dict) or not job_publishes(job, f"{name}: job '{jid}'"):
+                continue
+            if jid == approval:
+                out.append(f"{name}: V8b: job '{approval}' IS an approval gate and contains a "
+                           f"step that can reach a registry. The gate itself must never publish "
+                           f"— move the step to a job downstream of it.")
+            else:
+                out.append(f"{name}: V8b: job '{jid}' runs upstream of '{approval}' and contains "
+                           f"a step that can reach a registry. That publishes before any human "
+                           f"approves. Add --dry-run, or move the step downstream of the gate.")
+
+    # V8c. Every publisher must sit downstream of ITS OWN chain's approval job.
     for jid, job in jobs.items():
         if not isinstance(job, dict) or not job_publishes(job, f"{name}: job '{jid}'"):
             continue
-        if APPROVAL_JOB not in gated_path_jobs(jid, jobs):
-            out.append(f"{name}: V8c: job '{jid}' can reach a registry, but '{APPROVAL_JOB}' is "
-                       f"not on its needs: path. It would publish without passing the gate.")
-    return out
+        approval = approval_for_job(jid)
+        if approval not in gated_path_jobs(jid, jobs):
+            out.append(f"{name}: V8c: job '{jid}' can reach a registry, but '{approval}' is "
+                       f"not on its needs: path. It would publish without passing the gate that "
+                       f"owns its chain.")
+
+    seen: set[str] = set()
+    deduped = [v for v in out if not (v in seen or seen.add(v))]
+    return deduped
+
+
+def chain_scope_violations(jobs: dict, name: str) -> list[str]:
+    """V8e (SMA-658 fix round 2 review, I1). V8b/V8c prove every publish step sits downstream of
+    SOME approval gate; neither asks WHICH gate. MEASURED: inserting `run: cargo publish -p
+    paigasus-iam` into `publish-images-iam` left the guard at exit 0 — the job already sits
+    downstream of `approve-images-iam`, so V8c is satisfied, but that gate is an IMAGE approval
+    and letting it authorise a crates.io publish contradicts the invariant CHAIN_APPROVALS'
+    own comment states and spec § 7.1: an image approval must not authorise a crates.io publish.
+
+    A job whose `approval_for_job` resolves to a CHAIN approval (one of CHAIN_APPROVALS' values,
+    never the kernel APPROVAL_JOB) may reach a registry only through the container/tag marker
+    class. A PACKAGE_PUBLISH_MARKERS match on such a job is a violation regardless of where the
+    job sits relative to any gate — V8b/V8c already proved the gate exists; this proves it is the
+    RIGHT one.
+    """
+    out: list[str] = []
+    for jid, job in jobs.items():
+        if not isinstance(job, dict):
+            continue
+        approval = approval_for_job(jid)
+        if approval == APPROVAL_JOB:
+            continue
+        if job_publishes(job, f"{name}: job '{jid}'", pattern=_PACKAGE_PUBLISH_RE):
+            out.append(
+                f"{name}: V8e: job '{jid}' is gated by the chain approval '{approval}', not the "
+                f"kernel gate '{APPROVAL_JOB}'. It contains a step matching a package-registry "
+                f"publish marker (cargo/npm/yarn/pypi/napi/maturin/uv/release-plz). A chain "
+                f"approval authorises only that chain's own container publish; a package publish "
+                f"must sit behind '{APPROVAL_JOB}' instead."
+            )
+    seen: set[str] = set()
+    return [v for v in out if not (v in seen or seen.add(v))]
 
 
 def plan_run_segments(run_text: str) -> list[str]:
@@ -1116,13 +1433,14 @@ def plan_contract_violations(jobs: dict, name: str) -> list[str]:
         out.append(f"{name}: V9a: no job names '{PLAN_JOB}' in needs:. The decision is computed "
                    f"and then read by nothing.")
     for jid in sorted(consumers):
-        if if_text(jobs[jid]) not in ACCEPTED_PLAN_FORMS:
+        accepted = accepted_plan_forms(jid)
+        if if_text(jobs[jid]) not in accepted:
             out.append(f"{name}: V9b: job '{jid}' needs '{PLAN_JOB}' but its if: is "
-                       f"{if_text(jobs[jid])!r}, not {PLAN_GATE_EXPR!r}. Only `!=` fails safe: "
-                       f"`== 'true'` inverts the decision and `== 'false'` skips on an unset "
-                       f"output. A whitespace variant of an accepted form (an extra space, a "
-                       f"different quote style) also reds here — literal pinning, exactly as V2 "
-                       f"pins GATE_EXPR.")
+                       f"{if_text(jobs[jid])!r}, not one of {sorted(accepted)!r}. Only `!=` "
+                       f"fails safe: `== 'true'` inverts the decision and `== 'false'` skips on "
+                       f"an unset output. A whitespace variant of an accepted form (an extra "
+                       f"space, a different quote style) also reds here — literal pinning, "
+                       f"exactly as V2 pins GATE_EXPR.")
 
     # V9c resolves the DECISION STEP: outputs.nothing_to_release must reference a
     # steps.<id>.outputs... expression naming a step that actually exists in this job. `decision`
@@ -1201,6 +1519,34 @@ def plan_contract_violations(jobs: dict, name: str) -> list[str]:
                        f"same step can overwrite $GITHUB_OUTPUT after the checker wrote it, "
                        f"which passes V9c and V9d and silently drops every release. Move setup "
                        f"work into its own step.")
+
+    # V9c, SMA-658. The service outputs need the same full-match treatment as the kernel verdict:
+    # `${{ steps.decide.outputs.skip_iam || 'true' }}` resolves to 'true' on an unset output and
+    # silently drops that chain. The step id must be the one V9c already resolved.
+    #
+    # B4/Fix round 1 Minor 4: the loop is guarded PER SERVICE — it checks only the services that
+    # actually own a job in this file, the same way `required` in approval_boundary_violations
+    # only demands an approval job a chain uses. `_OK_MAIN` and every fixture built on it declare
+    # no chain job at all, so `services_in_use` is empty and the loop body never runs — the old,
+    # coarser guard's behaviour for those files is unchanged. But a file carrying only the iam
+    # chain no longer reds on the two gateway outputs it has no reason to declare.
+    services_in_use = {
+        service for service in SERVICE_PLAN_GATE_EXPRS
+        if any(jid == f"{prefix}{service}" for jid in jobs for prefix in _CHAIN_JOB_PREFIXES)
+    }
+    for service in sorted(services_in_use):
+        for key in (f"skip_{service}", f"version_{service}"):
+            expr = outs.get(key) if isinstance(outs, dict) else None
+            if not isinstance(expr, str):
+                out.append(f"{name}: V9c: job '{PLAN_JOB}' declares no outputs.{key}. Its "
+                           f"chain would read the empty string, which runs the chain but "
+                           f"carries no version.")
+                continue
+            want = "${{ steps." + str(decision.get("id") if decision else "") + f".outputs.{key} }}}}"
+            if expr.strip() != want:
+                out.append(f"{name}: V9c: outputs.{key} is {expr!r}, not {want!r}. Anything "
+                           f"else can resolve to a constant, and a `|| 'true'` tail drops the "
+                           f"chain on an unset output.")
     return out
 
 
@@ -1307,9 +1653,14 @@ def check_main(doc: dict, name: str) -> list[str]:
     # V8: the approval boundary, both directions. Called once, outside the per-job loop above —
     # that loop has `continue` statements that would skip a call placed inside it.
     out += approval_boundary_violations(jobs, name)
+    # V8e: a chain approval must not authorise a package-registry publish. Same reason as V8
+    # above: called once, outside the per-job loop.
+    out += chain_scope_violations(jobs, name)
     # V9: the plan job's output wiring and fail-safe polarity. Same reason as V8: called once,
     # outside the per-job loop, which the loop's `continue` statements would otherwise skip.
     out += plan_contract_violations(jobs, name)
+    out += credential_scope_violations(doc, name)
+    out += capability_violations(jobs, doc.get("permissions"), name)
     return out
 
 
@@ -1505,6 +1856,77 @@ jobs:
     steps: [{run: release-plz release}]
 """
 
+# SMA-658. A second control: the release file with BOTH service chains present (S11 — the row
+# below is named "both chains present", so the fixture must actually hold both, not the iam chain
+# alone). _OK_MAIN stays as it is, so every existing row keeps its meaning, and the per-chain
+# rules must tolerate a file with no image chain at all — which is exactly what _OK_MAIN asserts
+# for them.
+#
+# B3: `_OK_MAIN`'s `plan` job outputs only `nothing_to_release`. The new V9c loop (Step 6) checks
+# every service's `skip_*`/`version_*` output, so a fixture built on `_OK_MAIN` without adding
+# those four output lines would collect four V9c violations on every row below — including every
+# row that expects a clean verdict or an unrelated violation. The control fixture must model the
+# file the rule requires.
+_OK_IMAGES_MAIN = _OK_MAIN.replace(
+    "      nothing_to_release: ${{ steps.decide.outputs.nothing_to_release }}\n",
+    "      nothing_to_release: ${{ steps.decide.outputs.nothing_to_release }}\n"
+    "      skip_iam: ${{ steps.decide.outputs.skip_iam }}\n"
+    "      version_iam: ${{ steps.decide.outputs.version_iam }}\n"
+    "      skip_gateway: ${{ steps.decide.outputs.skip_gateway }}\n"
+    "      version_gateway: ${{ steps.decide.outputs.version_gateway }}\n"
+) + """
+  images-build-iam:
+    needs: [plan]
+    if: needs.plan.outputs.skip_iam != 'true'
+    runs-on: ubuntu-latest
+    steps: [{run: ci/images/run.sh build-oci paigasus-iam out}]
+  approve-images-iam:
+    needs: [images-build-iam]
+    environment: release-approval
+    runs-on: ubuntu-latest
+    steps: [{run: echo approved}]
+  publish-images-iam:
+    needs: [plan, images-build-iam, approve-images-iam]
+    if: needs.plan.outputs.skip_iam != 'true'
+    environment: release-images
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+      id-token: write
+      attestations: write
+    steps: [{run: crane push layout ghcr.io/smk1085/paigasus-iam:x}]
+  tag-iam:
+    needs: [publish-images-iam]
+    environment: release-publish
+    runs-on: ubuntu-latest
+    steps: [{run: gh api repos/o/r/git/refs}]
+  images-build-gateway:
+    needs: [plan]
+    if: needs.plan.outputs.skip_gateway != 'true'
+    runs-on: ubuntu-latest
+    steps: [{run: ci/images/run.sh build-oci paigasus-gateway out}]
+  approve-images-gateway:
+    needs: [images-build-gateway]
+    environment: release-approval
+    runs-on: ubuntu-latest
+    steps: [{run: echo approved}]
+  publish-images-gateway:
+    needs: [plan, images-build-gateway, approve-images-gateway]
+    if: needs.plan.outputs.skip_gateway != 'true'
+    environment: release-images
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+      id-token: write
+      attestations: write
+    steps: [{run: crane push layout ghcr.io/smk1085/paigasus-gateway:x}]
+  tag-gateway:
+    needs: [publish-images-gateway]
+    environment: release-publish
+    runs-on: ubuntu-latest
+    steps: [{run: gh api repos/o/r/git/refs}]
+"""
+
 FIXTURES: list[tuple[str, str, str, str | None]] = [
     ("healthy control", "main", _OK_MAIN, None),
     ("ungated job", "main", _OK_MAIN.replace("    if: vars.PAIGASUS_RELEASE_ENABLED == 'true'\n", ""),
@@ -1672,9 +2094,12 @@ FIXTURES: list[tuple[str, str, str, str | None]] = [
                       "steps: [{run: npm publish --dry-run=false}]"), "V8b"),
     # Minor 1: the V8b message for a publish step inside approve-release ITSELF used to read
     # "runs upstream of 'approve-release'" about approve-release, which is nonsense.
+    # SMA-658: the wording moved from "IS the approval gate" to "IS an approval gate" when V8
+    # became per-chain (a file may now have more than one approval job, so "the" no longer
+    # holds). This fixture is updated to match the new, deliberate wording.
     ("V8 fix1 Minor 1: a publish step inside approve-release itself gets its own wording", "main",
      _OK_MAIN.replace("steps: [{run: echo approved}]", "steps: [{run: cargo publish}]"),
-     "IS the approval gate"),
+     "IS an approval gate"),
     # Minor 4: an environment: mapping with a url: but no name: is not a NAMED environment —
     # GitHub rejects it outright, so it must not satisfy V8a either.
     ("V8 fix1 Minor 4: environment: {url: ...} with no name: is not a named gate", "main",
@@ -2351,6 +2776,226 @@ FIXTURES: list[tuple[str, str, str, str | None]] = [
          "    steps: [{run: release-plz release}]",
          '    steps: [{run: \'npm config set _auth "$LEGACY"\'}]'),
      "sets an npm _auth credential"),
+    ("SMA-658 both chains present is clean", "main", _OK_IMAGES_MAIN, None),
+    # S11: a row for each of the three graph shapes spec AC 9 asks for — kernel only (_OK_MAIN
+    # itself, already covered by every pre-existing row), image only, and combined (the row
+    # above). `build`, `wheels` and `release` are the only _OK_MAIN jobs an image-only file would
+    # not have; `approve-release` stays, orphaned but harmless — V8a requires only that an
+    # approval a chain actually uses exists and names an environment.
+    ("SMA-658 only the image chains are present (no kernel chain)", "main",
+     _OK_IMAGES_MAIN
+     .replace("  build:\n    needs: [plan]\n    if: needs.plan.outputs.nothing_to_release != 'true'"
+              "\n    runs-on: ubuntu-latest\n    steps: [{run: echo build}]\n", "")
+     .replace("  wheels:\n    needs: [plan]\n    if: ${{ needs.plan.outputs.nothing_to_release != "
+              "'true' }}\n    runs-on: ubuntu-latest\n    steps: [{run: echo wheels}]\n", "")
+     .replace("  release:\n    needs: [build, approve-release]\n    runs-on: ubuntu-latest\n"
+              "    steps: [{run: release-plz release}]\n", "")
+     # Removing `build` above leaves `approve-release`'s `needs: [build]` dangling (a
+     # reference to a job that no longer exists), which V1's is_gated() reads as "not gated"
+     # — a spurious violation this row does not intend to exercise. Retargeting the `needs:`
+     # to `plan` instead trades one spurious violation for another: it makes `approve-release`
+     # a DIRECT consumer of `plan` in V9b's terms, and V9b then reds because it carries no
+     # `if:` naming one of the accepted `plan` gate forms. So drop `needs:` entirely and gate
+     # `approve-release` directly on the same top-level toggle `plan` itself uses — genuinely
+     # gated, genuinely orphaned (nothing needs it), and no longer a `plan` consumer. This is
+     # the ONLY thing this row tests: a document with no kernel chain is clean. Do not re-add
+     # `build`, and do not make `approve-release` a `plan` consumer again — either change
+     # reintroduces the spurious violation this comment exists to prevent.
+     .replace("  approve-release:\n    needs: [build]\n",
+              "  approve-release:\n    if: vars.PAIGASUS_RELEASE_ENABLED == 'true'\n"),
+     None),
+    # V8c is a TOPOLOGY rule ("a publisher must sit downstream of its own chain's approval"),
+    # not a marker-detection rule. `PUBLISH_MARKERS` does not learn `crane push` until Task 6,
+    # so these two rows swap the still-unrecognized `crane push` step for `cargo publish`, a
+    # marker job_publishes() already detects today — that is enough to exercise the ROUTING
+    # V8c checks, without pulling Task 6's markers forward. Task 6 must add the equivalent
+    # topology rows using the real container markers once PUBLISH_MARKERS learns them, so the
+    # two halves meet.
+    # Fix round 1, Important 2: `want` was the bare "V8c", which the OLD, single-gate V8c
+    # already produces for `publish-images-iam` (it always names `approve-release`, since that
+    # job is never on this publisher's needs: path regardless of what THIS row edits) — so the
+    # row passed for a reason unrelated to the rule it targets. Pin the NEW code's per-chain
+    # wording instead, which names the SERVICE's own approval and never fires under the old code.
+    ("SMA-658 a publisher without its own approval", "main",
+     _OK_IMAGES_MAIN.replace("    needs: [plan, images-build-iam, approve-images-iam]",
+                             "    needs: [plan, images-build-iam]")
+     .replace("steps: [{run: crane push layout ghcr.io/smk1085/paigasus-iam:x}]",
+              "steps: [{run: cargo publish}]"), "'approve-images-iam' is not on its needs: path"),
+    ("SMA-658 a publisher behind the KERNEL approval only", "main",
+     _OK_IMAGES_MAIN.replace("    needs: [plan, images-build-iam, approve-images-iam]",
+                             "    needs: [plan, images-build-iam, approve-release]")
+     .replace("steps: [{run: crane push layout ghcr.io/smk1085/paigasus-iam:x}]",
+              "steps: [{run: cargo publish}]"), "'approve-images-iam' is not on its needs: path"),
+    # V8e (SMA-658 fix round 2 review, I1). MEASURED: inserting `run: cargo publish -p
+    # paigasus-iam` into `publish-images-iam` left the OLD guard at exit 0 — the job already sits
+    # downstream of its own chain's approval, so V8b/V8c see nothing wrong, and nothing else in
+    # this file asked WHICH gate authorised it. One row each way: a chain publisher matching only
+    # the container/tag marker class stays clean (below swaps `crane push` for `cosign sign`,
+    # still container-class, to prove the new code does not overreact to every marker change);
+    # the same job additionally matching a package-registry marker reds.
+    ("SMA-658 V8e: a chain publisher matching only a container marker stays clean", "main",
+     _OK_IMAGES_MAIN.replace(
+         "steps: [{run: crane push layout ghcr.io/smk1085/paigasus-iam:x}]",
+         "steps: [{run: cosign sign --yes ghcr.io/smk1085/paigasus-iam@sha256:x}]"),
+     None),
+    ("SMA-658 V8e: a chain publisher also matching a package-registry marker reds", "main",
+     _OK_IMAGES_MAIN.replace(
+         "steps: [{run: crane push layout ghcr.io/smk1085/paigasus-iam:x}]",
+         "steps: [{run: 'crane push layout ghcr.io/smk1085/paigasus-iam:x && "
+         "cargo publish -p paigasus-iam'}]"),
+     "V8e: job 'publish-images-iam' is gated by the chain approval 'approve-images-iam'"),
+    ("SMA-658 the service approval loses its environment", "main",
+     _OK_IMAGES_MAIN.replace("    needs: [images-build-iam]\n    environment: release-approval",
+                             "    needs: [images-build-iam]"), "V8a"),
+    # Fix round 1, Important 3. V8a used to accept ANY named environment. Spec § 7.1 pins every
+    # approval job — the kernel one and each service chain's — to the ONE environment
+    # `release-approval`; renaming a chain approval's environment must red, distinctly from "no
+    # environment at all" (the row above).
+    ("SMA-658 a chain approval renamed to a different environment", "main",
+     _OK_IMAGES_MAIN.replace(
+         "  approve-images-gateway:\n    needs: [images-build-gateway]\n"
+         "    environment: release-approval\n",
+         "  approve-images-gateway:\n    needs: [images-build-gateway]\n"
+         "    environment: images-approval-gateway\n"),
+     "job 'approve-images-gateway' declares environment 'images-approval-gateway'"),
+    # Fix round 1, Minor 9 (same class as Important 2 above): `want` was the bare "V9b", which
+    # already fires on the OTHER three chain jobs in this fixture for an unrelated reason (none
+    # of their `if:` literals match the OLD, kernel-only ACCEPTED_PLAN_FORMS either). Pin the
+    # per-job text, including the NEW "not one of [...]" wording — the old code's message reads
+    # "not <single literal>." instead, so this substring cannot appear under the old code, for
+    # this job or any other in the fixture.
+    ("SMA-658 a chain job with the wrong gate literal", "main",
+     _OK_IMAGES_MAIN.replace("    if: needs.plan.outputs.skip_iam != 'true'\n    runs-on: ubuntu-latest\n    steps: [{run: ci/images/run.sh build-oci",
+                             "    if: needs.plan.outputs.skip_iam == 'true'\n    runs-on: ubuntu-latest\n    steps: [{run: ci/images/run.sh build-oci"),
+     "job 'images-build-iam' needs 'plan' but its if: is \"needs.plan.outputs.skip_iam == 'true'\", not one of ["),
+    # Fix round 1, Important 1. Measured: replacing the whole V9c-for-services loop with
+    # `if False:` left all 131 rows (at the time) green — the rule had no fixture at all and
+    # could be deleted silently. Three rows below, one per failure shape, each wanting the
+    # SPECIFIC message for the key it breaks (not the bare "V9c" rule name, which the two
+    # OTHER, still-correct service outputs in the same fixture do not produce, but a careless
+    # substring could still coincide with a different key's message).
+    ("SMA-658 V9c: skip_iam carries a `|| 'true'` tail", "main",
+     _OK_IMAGES_MAIN.replace(
+         "      skip_iam: ${{ steps.decide.outputs.skip_iam }}\n",
+         "      skip_iam: ${{ steps.decide.outputs.skip_iam || 'true' }}\n"),
+     "V9c: outputs.skip_iam is"),
+    ("SMA-658 V9c: version_iam resolves to a constant, not a step output", "main",
+     _OK_IMAGES_MAIN.replace(
+         "      version_iam: ${{ steps.decide.outputs.version_iam }}\n",
+         "      version_iam: '1.2.3'\n"),
+     "V9c: outputs.version_iam is"),
+    ("SMA-658 V9c: skip_gateway is declared nowhere in plan's outputs", "main",
+     _OK_IMAGES_MAIN.replace(
+         "      skip_gateway: ${{ steps.decide.outputs.skip_gateway }}\n", ""),
+     "V9c: job 'plan' declares no outputs.skip_gateway"),
+    ("SMA-658 the Docker Hub token outside its environment", "main",
+     _OK_IMAGES_MAIN.replace("    steps: [{run: gh api repos/o/r/git/refs}]",
+                             "    steps: [{run: echo x, env: {T: '${{ secrets.DOCKERHUB_TOKEN }}'}}]"),
+     "V13: job 'tag-iam' reads DOCKERHUB_TOKEN"),
+    # SMA-658 Task 8 mutation pass. GitHub reads a secret NAME case-insensitively, so
+    # `secrets.dockerhub_token` reaches the exact same value as `secrets.DOCKERHUB_TOKEN` — and
+    # `secret_refs` captures the name as written, lowercase included. A bare `SCOPED_SECRET in
+    # names` set-membership test never matches a differently-cased spelling.
+    ("SMA-658 the Docker Hub token spelled lowercase, outside its environment", "main",
+     _OK_IMAGES_MAIN.replace("    steps: [{run: gh api repos/o/r/git/refs}]",
+                             "    steps: [{run: echo x, env: {T: '${{ secrets.dockerhub_token }}'}}]"),
+     "V13: job 'tag-iam' reads DOCKERHUB_TOKEN"),
+    ("SMA-658 the release-images environment on another job", "main",
+     _OK_IMAGES_MAIN.replace("  tag-iam:\n    needs: [publish-images-iam]\n    environment: release-publish",
+                             "  tag-iam:\n    needs: [publish-images-iam]\n    environment: release-images"),
+     "V13: job 'tag-iam' names the 'release-images' environment"),
+    # I2 (fix round 1): this row used to put the case-variant on the ALLOWED jobs
+    # (publish-images-iam/gateway, via a broad `.replace` over every "environment: release-images"
+    # occurrence), so it stayed clean with OR without `.casefold()` — it could not tell the two
+    # apart. Kept below as a false-red control (an allowed job spelled differently must NOT red);
+    # the real casefold test is the new row directly below it, which puts the variant on tag-iam —
+    # a job that must NOT hold the environment regardless of how it is spelled.
+    ("SMA-658 an environment name that differs only by case", "main",
+     _OK_IMAGES_MAIN.replace("    environment: release-images", "    environment: Release-Images"),
+     None),
+    ("SMA-658 tag-iam names release-images with different case (V13 casefold)", "main",
+     _OK_IMAGES_MAIN.replace("  tag-iam:\n    needs: [publish-images-iam]\n    environment: release-publish",
+                             "  tag-iam:\n    needs: [publish-images-iam]\n    environment: Release-Images"),
+     "V13: job 'tag-iam' names the"),
+    ("SMA-658 an environment name built from an expression", "main",
+     _OK_IMAGES_MAIN.replace("    environment: release-images",
+                             "    environment: ${{ github.event.inputs.env }}"),
+     "V13: job 'publish-images-iam' builds its environment: from an expression"),
+    ("SMA-658 a write capability upstream of the approval", "main",
+     _OK_IMAGES_MAIN.replace("  images-build-iam:\n    needs: [plan]",
+                             "  images-build-iam:\n    permissions: {packages: write}\n    needs: [plan]"),
+     "V14: job 'images-build-iam' holds permissions.packages: write"),
+    # I1 (fix round 1): the eight behaviours below had no reding row and could each be deleted
+    # with the suite green. One row per behaviour, driven off the same `images-build-iam` job the
+    # existing V14 row above uses, so each row isolates exactly one arm of
+    # `_holds_write_capability`.
+    ("SMA-658 V14 attestations: write", "main",
+     _OK_IMAGES_MAIN.replace("  images-build-iam:\n    needs: [plan]",
+                             "  images-build-iam:\n    permissions: {attestations: write}\n    needs: [plan]"),
+     "V14: job 'images-build-iam' holds permissions.attestations: write"),
+    ("SMA-658 V14 id-token: write", "main",
+     _OK_IMAGES_MAIN.replace("  images-build-iam:\n    needs: [plan]",
+                             "  images-build-iam:\n    permissions: {id-token: write}\n    needs: [plan]"),
+     "V14: job 'images-build-iam' holds permissions.id-token: write"),
+    ("SMA-658 V14 permissions: write-all", "main",
+     _OK_IMAGES_MAIN.replace("  images-build-iam:\n    needs: [plan]",
+                             "  images-build-iam:\n    permissions: write-all\n    needs: [plan]"),
+     "V14: job 'images-build-iam' holds permissions: write-all"),
+    # The reviewer's own measured shape (I1): covers the `environment:` arm AND the casefold
+    # comparison in `_holds_write_capability` in one row.
+    ("SMA-658 V14 environment: arm, cased differently", "main",
+     _OK_IMAGES_MAIN.replace("  images-build-iam:\n    needs: [plan]",
+                             "  images-build-iam:\n    environment: Release-Publish\n    needs: [plan]"),
+     "V14: job 'images-build-iam' holds environment:"),
+    ("SMA-658 V14 an App token minted with contents: write", "main",
+     _OK_IMAGES_MAIN.replace(
+         "    steps: [{run: ci/images/run.sh build-oci paigasus-iam out}]",
+         "    steps: [{uses: actions/create-github-app-token@v2, with: {app-id: '1', "
+         "private-key: '2', permission-contents: write}}]"),
+     "V14: job 'images-build-iam' holds an App token with contents: write"),
+    ("SMA-658 V14 workflow-level permissions fallback (S13)", "main",
+     _OK_IMAGES_MAIN.replace("jobs:\n  release-pr:", "permissions:\n  packages: write\njobs:\n  release-pr:"),
+     "V14: job 'images-build-iam' holds permissions.packages: write"),
+    # M2's carve-out, pinned CLEAN: `contents: write` alone is not a registry capability, so it
+    # must never trip V14 on its own.
+    ("SMA-658 contents: write alone is not a V14 capability", "main",
+     _OK_IMAGES_MAIN.replace("  images-build-iam:\n    needs: [plan]",
+                             "  images-build-iam:\n    permissions: {contents: write}\n    needs: [plan]"),
+     None),
+    # I4 (fix round 1): a workflow-level env: reaches every job, UNGATED_JOBS members included,
+    # and nothing scopes it back down to one job — V13's per-job loop alone cannot see it.
+    ("SMA-658 the Docker Hub token in the workflow-level env:", "main",
+     _OK_IMAGES_MAIN.replace(
+         "      - main\njobs:\n  release-pr:",
+         "      - main\nenv:\n  T: ${{ secrets.DOCKERHUB_TOKEN }}\njobs:\n  release-pr:"),
+     "V13: the workflow-level env: reads DOCKERHUB_TOKEN"),
+    # I4 negative control (SMA-658 Task 8 mutation pass): the workflow-level scan must be PINNED
+    # to SCOPED_SECRET, not to "any secret at all". Widening the check above from
+    # `if SCOPED_SECRET in names:` to `if names:` would red this row too, so this is the fixture
+    # that tells the two apart.
+    ("SMA-658 a different secret in the workflow-level env: stays clean", "main",
+     _OK_IMAGES_MAIN.replace(
+         "      - main\njobs:\n  release-pr:",
+         "      - main\nenv:\n  T: ${{ secrets.PAIGASUS_BOT_APP_ID }}\njobs:\n  release-pr:"),
+     None),
+    ("SMA-658 a publish hidden inside a script", "main",
+     _OK_IMAGES_MAIN.replace("    steps: [{run: crane push layout ghcr.io/smk1085/paigasus-iam:x}]",
+                             "    steps: [{run: ci/images/run.sh publish}]"),
+     None),
+    # B7: this row's name used to claim it exercises the `imagetools create` marker; it does not
+    # — it reroutes tag-iam past its own chain's publish and approval jobs, and the violation it
+    # gets is V8c on the `git/refs` marker. Renamed to say what it actually tests. The real
+    # `imagetools\s+create` marker, and the other ten new markers, get their own fixtures in
+    # Step 6 below.
+    # S1 (V11 spec 7.2, tag-iam gaining id-token: write it does not need) is NOT expressible as a
+    # FIXTURES row: self_test() calls check_main with the name "fixture", and id_token_violations
+    # fires only for RELEASE_WORKFLOW_NAME. It is asserted instead inside
+    # _v11_id_token_write_required, the established location for every other name-scoped V11/V10/
+    # V12 case in this file.
+    ("SMA-658 tag-iam skips its chain's publish and approval jobs", "main",
+     _OK_IMAGES_MAIN.replace("    steps: [{run: crane push layout ghcr.io/smk1085/paigasus-iam:x}]\n  tag-iam:\n    needs: [publish-images-iam]",
+                             "    steps: [{run: echo x}]\n  tag-iam:\n    needs: [images-build-iam]"),
+     "V8c"),
 ]
 
 
@@ -2406,6 +3051,11 @@ def _run_main_in_tempdir(files: dict[str, str], entry: str = "main.yml") -> tupl
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
         for rel, content in files.items():
+            # I3 (fix round 1): the sweep test below needs a real `.github/workflows/` tree, the
+            # first nested-path caller of this helper. Every earlier caller wrote flat filenames,
+            # so `parents=True, exist_ok=True` is a no-op for them (the parent is `tmp_path`
+            # itself, which already exists).
+            (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
             (tmp_path / rel).write_text(content)
         prev_cwd = Path.cwd()
         out_buf, err_buf = io.StringIO(), io.StringIO()
@@ -2420,6 +3070,43 @@ def _run_main_in_tempdir(files: dict[str, str], entry: str = "main.yml") -> tupl
         finally:
             os.chdir(prev_cwd)
     return rc, out_buf.getvalue(), err_buf.getvalue()
+
+
+def _v13_cross_workflow_sweep() -> str | None:
+    """Regression test for I3 (fix round 1): `main()`'s V13 sweep over EVERY OTHER workflow file
+    is untested by the FIXTURES table — `self_test()` calls check_main/check_called DIRECTLY and
+    never reaches `main()`'s own `.github/workflows/*.y*ml` glob, the same gap `_critical2_end_to_end`
+    closes for the local-callee walk. So deleting the whole sweep loop, or dropping only the
+    `*.yaml` half of it, leaves every existing row green.
+
+    Drives `main()` through a real two-file `.github/workflows/` tree: `release.yml` is `_OK_MAIN`
+    and `other.yaml` — the `.yaml` extension is deliberate, to catch a dropped `*.yaml` glob
+    specifically — names the `release-images` environment on a job that may not (`leaky`, not in
+    `SCOPED_SECRET_JOBS`). Only the cross-file sweep can produce that finding; nothing inside
+    `check_main(release.yml, ...)` ever reads `other.yaml`.
+
+    SMA-658 Task 8 correction: the check below's `rc != 1` half is VACUOUS, not a second
+    assertion. `_OK_MAIN` is not the "healthy control" here — run through `main()`'s own
+    end-to-end path (rather than `check_main` directly, as the real "healthy control" FIXTURES
+    row does), it is stale against several rules added since (V11, V12, the two App-token names
+    in `EXPECTED_RELEASE_SECRETS`), so this tempdir's run always emits about fourteen unrelated
+    violations from `release.yml` alone. `rc` is 1 whether or not the sweep finds `other.yaml`'s
+    leak. The `want not in out` half is the only thing this regression test actually proves.
+    """
+    other = (
+        "on:\n  push:\n    branches: [main]\n"
+        "jobs:\n  leaky:\n    runs-on: ubuntu-latest\n    environment: release-images\n"
+        "    steps: [{run: echo hi}]\n"
+    )
+    rc, out, err = _run_main_in_tempdir(
+        {".github/workflows/release.yml": _OK_MAIN, ".github/workflows/other.yaml": other},
+        entry=".github/workflows/release.yml",
+    )
+    want = "other.yaml: V13: job 'leaky' names the 'release-images' environment"
+    if rc != 1 or want not in out:
+        return (f"expected exit 1 with {want!r} in output, got exit {rc!r}: stdout={out!r} "
+                f"stderr={err!r}")
+    return None
 
 
 _PUBLISHING_CALLEE = "on:\n  workflow_call:\njobs:\n  build:\n    steps: [{run: cargo publish}]\n"
@@ -2730,10 +3417,18 @@ def _v10_rule1_strict_equality() -> str | None:
         return f"the missing-name half leaked past RELEASE_WORKFLOW_NAME: {other}"
 
     # And the real referencing shape must satisfy it exactly.
+    # SMA-658 (Task 7): EXPECTED_RELEASE_SECRETS now pins DOCKERHUB_TOKEN too, so this fixture
+    # must reference all three or the strict-equality rule fires the same "no longer
+    # references" line on ITS OWN control doc. The added step's other shape (no environment:,
+    # no chain-job id) trips no OTHER rule that this function's `leftover` filter would see —
+    # it keeps only lines mentioning EXPECTED_RELEASE_SECRETS / "no longer references".
     ok = {"jobs": {"release": {"runs-on": "ubuntu-latest", "steps": [{
         "uses": "actions/create-github-app-token@v2",
         "with": {"app-id": "${{ secrets.PAIGASUS_BOT_APP_ID }}",
                  "private-key": "${{ secrets.PAIGASUS_BOT_PRIVATE_KEY }}"},
+    }, {
+        "env": {"DOCKERHUB_TOKEN": "${{ secrets.DOCKERHUB_TOKEN }}"},
+        "run": "echo hi",
     }]}}}
     leftover = [line for line in check_main(ok, RELEASE_WORKFLOW_NAME)
                 if "EXPECTED_RELEASE_SECRETS" in line or "no longer references" in line]
@@ -2755,10 +3450,22 @@ def _v11_id_token_write_required() -> str | None:
     same defect as deleting the grant, and a rule that only tested for the literal absence of a
     `permissions:` key would miss it.
     """
+    grant = {"id-token": "write", "contents": "read"}
+    narrowed = {"contents": "read"}
+
     def doc_with(pypi_perms, npm_perms, workflow_perms=None):
         out = {"jobs": {
             "publish-pypi": {"permissions": pypi_perms, "steps": [{"run": "echo hi"}]},
             "publish-npm": {"permissions": npm_perms, "steps": [{"run": "echo hi"}]},
+            # SMA-658 S1 + correction: OIDC_PUBLISH_JOBS now also names `release` (the pre-existing
+            # crates.io OIDC job) and the two image-publish jobs, and the EXISTING (pre-S1) loop
+            # above demands every member of that tuple exist and hold the grant. This helper tests
+            # the pypi/npm pair only, so the other three always carry the grant here — a stub
+            # present purely to keep that loop silent about jobs this helper is not exercising, not
+            # a claim that their behaviour needs its own case (that is the tag-iam block below).
+            "release": {"permissions": grant, "steps": [{"run": "echo hi"}]},
+            "publish-images-iam": {"permissions": grant, "steps": [{"run": "echo hi"}]},
+            "publish-images-gateway": {"permissions": grant, "steps": [{"run": "echo hi"}]},
         }}
         for jid in ("publish-pypi", "publish-npm"):
             if out["jobs"][jid]["permissions"] is None:
@@ -2766,9 +3473,6 @@ def _v11_id_token_write_required() -> str | None:
         if workflow_perms is not None:
             out["permissions"] = workflow_perms
         return out
-
-    grant = {"id-token": "write", "contents": "read"}
-    narrowed = {"contents": "read"}
 
     def v11(doc):
         return [ln for ln in id_token_violations(doc, RELEASE_WORKFLOW_NAME) if ": V11:" in ln]
@@ -2793,6 +3497,20 @@ def _v11_id_token_write_required() -> str | None:
     renamed["jobs"]["publish-pypi-v2"] = renamed["jobs"].pop("publish-pypi")
     if not any("no job named 'publish-pypi'" in line for line in v11(renamed)):
         return "renaming publish-pypi did not red the V11 floor"
+    # SMA-658 S1: a job OUTSIDE OIDC_PUBLISH_JOBS — tag-iam, say — must never hold the grant.
+    # tag-<svc> only calls the tag API with an App token, so id-token: write on it is a live
+    # OIDC exchange this rule never audited for. Expressed here, not as a FIXTURES row: self_test()
+    # calls check_main with the name "fixture", and id_token_violations fires only for
+    # RELEASE_WORKFLOW_NAME, so a FIXTURES row built on _OK_IMAGES_MAIN can never produce a V11
+    # finding — the same scoping reason every other V11/V10-rule-1/V12 case lives here instead.
+    tag_doc = doc_with(grant, grant)
+    tag_doc["jobs"]["tag-iam"] = {
+        "permissions": grant, "needs": ["publish-images-iam"], "steps": [{"run": "echo hi"}],
+    }
+    found = v11(tag_doc)
+    if not any("job 'tag-iam' grants" in line and "not in OIDC_PUBLISH_JOBS" in line
+               for line in found):
+        return f"tag-iam holding id-token: write did not red: {found or '(clean)'}"
     # And the scoping: no other document may inherit release.yml's rule.
     if id_token_violations(doc_with(None, None), "fixture"):
         return "V11 leaked past RELEASE_WORKFLOW_NAME onto a fixture document"
@@ -2863,6 +3581,24 @@ def _non_list_steps_fails_closed() -> str | None:
     return None
 
 
+def _ungated_jobs_pinned() -> str | None:
+    """I4 (PR 2 review). Nothing pinned `UNGATED_JOBS`'s membership. MEASURED: adding an id to
+    that frozenset switches off V1 (the gating rule) AND V7 (the publish detector V7 applies to
+    every member) for it, with the whole suite still green — an exemption this file's own comment
+    at UNGATED_JOBS says must be paired with a publish-detector check would otherwise be
+    extendable to any job by a one-line edit nothing here notices.
+
+    Strict equality, the same shape as EXPECTED_RELEASE_SECRETS above: a superset is exactly as
+    dangerous as an unpinned set, since either lets a new ungated, unchecked job through silently.
+    If this reds: re-baseline it DELIBERATELY, with a comment saying why the new job cannot reach
+    a registry (V7 still applies to it and will catch a publish step that contradicts that claim).
+    """
+    expected_ungated_jobs = {"release-pr"}
+    if expected_ungated_jobs != UNGATED_JOBS:
+        return f"UNGATED_JOBS is {sorted(UNGATED_JOBS)!r}, expected exactly ['release-pr']"
+    return None
+
+
 def _important5_regressions() -> list[str]:
     """Regression tests for Important 5: a file that IS a readable path (`is_file()` True) but
     cannot actually be read must still infra (exit 2), never surface an unhandled traceback that
@@ -2905,6 +3641,41 @@ def _important5_regressions() -> list[str]:
     return errs
 
 
+# SMA-658 B7. One case per new PUBLISH_MARKERS entry, plus a release-pr `git push` negative
+# control (S10) so the widened marker list does not red the real repository's own branch push.
+# Driven straight at job_publishes(), at the granularity the markers were written for: a FIXTURES
+# row would bury a deleted marker under whatever OTHER violation the same synthetic file happens
+# to produce (see the renamed row in Step 1 above), where this helper reds on that one marker
+# alone.
+_SMA658_MARKER_CASES: tuple[tuple[str, bool], ...] = (
+    ("docker push ghcr.io/smk1085/paigasus-iam:latest", True),
+    ("docker buildx build --push -t ghcr.io/smk1085/paigasus-iam:latest .", True),
+    ("docker buildx build --output type=registry -t ghcr.io/smk1085/paigasus-iam:latest .", True),
+    ("docker manifest push ghcr.io/smk1085/paigasus-iam:latest", True),
+    ("docker buildx imagetools create --tag ghcr.io/smk1085/paigasus-iam:latest "
+     "x@sha256:" + "0" * 64, True),
+    ("crane push /tmp/layout ghcr.io/smk1085/paigasus-iam:latest", True),
+    ("crane copy ghcr.io/smk1085/paigasus-iam:latest docker.io/smaschek/paigasus-iam:latest", True),
+    ("crane tag ghcr.io/smk1085/paigasus-iam@sha256:" + "0" * 64 + " latest", True),
+    ("skopeo copy oci:layout docker://ghcr.io/smk1085/paigasus-iam:latest", True),
+    ("regctl image copy ghcr.io/smk1085/paigasus-iam:latest docker.io/smaschek/paigasus-iam:latest",
+     True),
+    ("oras push ghcr.io/smk1085/paigasus-iam:latest ./file", True),
+    ("cosign sign --yes ghcr.io/smk1085/paigasus-iam@sha256:" + "0" * 64, True),
+    ('gh api --method POST "repos/o/r/git/refs" -f "ref=refs/tags/x"', True),
+    # S10: release-pr's own branch push must stay green against the widened marker list.
+    ('git push "$AUTH_REMOTE" "HEAD:$BRANCH"', False),
+)
+
+
+def _sma658_new_publish_markers_bite() -> str | None:
+    for cmd, want in _SMA658_MARKER_CASES:
+        got = job_publishes({"steps": [{"run": cmd}]}, "fixture")
+        if got != want:
+            return f"{cmd!r}: expected job_publishes()={want}, got {got}"
+    return None
+
+
 def self_test() -> int:
     rc = 0
     for name, kind, text, want in FIXTURES:
@@ -2944,7 +3715,10 @@ def self_test() -> int:
         ("v10 rule 1 strict equality (the missing-name half)", _v10_rule1_strict_equality),
         ("v11 id-token: write on both OIDC publish jobs", _v11_id_token_write_required),
         ("v12 npm OIDC floor pinned in both workflows", _v12_npm_floor_pinned),
+        ("sma-658 every new publish marker has a reding fixture", _sma658_new_publish_markers_bite),
+        ("sma-658 fix round 1, I3: V13's cross-workflow sweep", _v13_cross_workflow_sweep),
         ("f7 non-list steps: fails closed", _non_list_steps_fails_closed),
+        ("pr2 review i4: UNGATED_JOBS is pinned by strict equality", _ungated_jobs_pinned),
     ):
         err = fn()
         if err:
@@ -2989,6 +3763,20 @@ def main(argv: list[str]) -> int:
     # gate's own needs: path — must be checked against the SAME boundary a direct publisher is
     # (fix round 1, Critical 1). Fail-closed on anything it cannot resolve (Important 1).
     violations += callee_boundary_violations(main_doc["jobs"], main_path.name)
+
+    # V13 runs over EVERY workflow file, not only the release path: any workflow with a `main`
+    # trigger could name the release-images environment and read the same secret. C6 (SMA-658):
+    # glob both suffixes GitHub Actions accepts, so a future `.yaml` workflow is not invisible to
+    # this sweep. M6 (fix round 1): `load_workflow` is FAIL-CLOSED (infra, exit 2) on anything it
+    # cannot parse as one YAML mapping with a `jobs:` mapping — deliberately, since this sweep now
+    # reads every `.github/workflows/*.y*ml` file on disk, so a malformed or non-workflow file
+    # dropped in that directory aborts the whole run rather than being silently skipped.
+    workflow_paths = sorted(Path(".github/workflows").glob("*.yml")) \
+        + sorted(Path(".github/workflows").glob("*.yaml"))
+    for path in workflow_paths:
+        if path.resolve() == main_path.resolve():
+            continue
+        violations += credential_scope_violations(load_workflow(path), path.name)
 
     for v in violations:
         print(v)

@@ -190,11 +190,23 @@ plan ─┬─ wheels / prebuild / proto-dist ─ approve-release ─ release �
   (challenger B1). A job-level `if:` cannot read `matrix`. One approval job that needs both builds
   is skipped when one build is skipped. A static chain for each service avoids all three problems.
 - **Result:** a kernel-only, an image-only, and a combined release all work. A failure in one chain
-  does not block another chain. When two chains are pending, the reviewer approves each one.
+  does not block another chain. **Decision (2026-09-21).** PR 277's review surfaced the API
+  evidence below, and the maintainer chose to keep the one `release-approval` environment for all
+  three approval jobs, rather than add per-chain environments. GitHub approves a pending deployment
+  by environment, not by job. All three approval jobs use the same environment, so one approval
+  releases every chain that waits for approval in the same run. This comes from the shape of
+  GitHub's approval API; it has not yet been observed on a live run. `release_guard.py` V8 stays as
+  a job-graph rule: each publisher must depend on the approval job of its own chain. That still
+  stops a workflow edit from putting an image push behind the kernel's approval job, or from
+  deleting a chain's approval job. It does not make the approvals separate human decisions. Either
+  way, the security floor holds: a human must approve before any step that publishes or tags an
+  image runs.
 
 ### 4.1 The gate on each chain
 
-- `plan` writes one output for each service: `skip_iam` and `skip_gateway` (§ 6.1).
+- `plan` writes two outputs for each service: a skip flag (`skip_iam`, `skip_gateway`, § 6.1) and
+  a version (`version_iam`, `version_gateway`), which § 4.3 step 2 compares with the archive's
+  label (§ 16 P11).
 - The first job of each chain has exactly `if: needs.plan.outputs.skip_<svc> != 'true'`, in the same
   form as the kernel gate. An **unset** output therefore **runs** the chain. That is safe, because
   the checks in § 4.3 make a run for an already released version a no-op.
@@ -212,9 +224,11 @@ plan ─┬─ wheels / prebuild / proto-dist ─ approve-release ─ release �
   archive's image (M3 decides the exact identity check on each runner's image store), and runs the
   smoke suite for this one service.
 - **SBOM:** an SPDX SBOM for this architecture (§ 4.5).
-- **Outputs:** the per-platform manifest digest is a **job output**. It reaches `publish-images`
-  through `needs:`, not through the artifact store, so § 4.3 step 2 can check the artifact hop.
-- **Artifact:** the archive, the SBOM and the chisel manifest.
+- **Outputs:** the per-platform manifest digest travels in the **artifact**, written to
+  `out/digest-<arch>.txt` alongside the archive, not as a job output read through `needs:` (§ 16
+  P16). § 4.3 step 2 checks the artifact hop by comparing this file against the digest it computes
+  from the downloaded archive.
+- **Artifact:** the archive, the SBOM, the chisel manifest and the digest file.
 
 `ci/images/run.sh` changes:
 
@@ -235,8 +249,9 @@ plan ─┬─ wheels / prebuild / proto-dist ─ approve-release ─ release �
 - `timeout-minutes` set. Every action is pinned by SHA.
 - **Steps, in order:**
   1. **Fail on an empty token.** No skip-green preflight, unlike `release-pr` (`release.yml:219-227`).
-  2. **Check the artifact hop.** Each archive's per-platform digest must equal the build job's
-     output. Read the version label from each archive, and compare it with `plan`'s version.
+  2. **Check the artifact hop.** Each archive's per-platform digest travels in a file inside the
+     uploaded artifact. The check proves the archive itself was not corrupted. Read the version label
+     from each archive, and compare it with `plan`'s version.
   3. **Check what already exists (D10).** Read the git tag `paigasus-<svc>-v<version>` from the
      remote, and `:<version>` from both registries.
      - The git tag exists → stop with success: "already released".
@@ -251,8 +266,10 @@ plan ─┬─ wheels / prebuild / proto-dist ─ approve-release ─ release �
      for each architecture, on its **per-platform** digest (the subject that the SBOM describes).
      Both with `push-to-registry: true`. `cosign sign` keyless on the index digest in GHCR.
   6. **Docker Hub.** `docker login`, copy the index by digest from GHCR to Docker Hub
-     (`docker buildx imagetools create`), `cosign sign` on the Docker Hub digest, then
-     `docker logout` at once. The token is on disk only for these steps.
+     (`docker buildx imagetools create`), and `cosign sign` on the Docker Hub digest. `docker
+     logout` runs from an `EXIT` trap when the step ends, after the release tags of step 7, which
+     run in the same step and also need the credential (§ 16 P15). The token is on disk only for
+     that one step.
   7. **Release tags.** Write `:<version>` in both registries. Move `:<major>.<minor>` and `:latest`
      **only when** `<version>` is greater than or equal to the highest existing
      `paigasus-<svc>-v*` git tag, compared as semver and read at this step.
@@ -262,8 +279,13 @@ plan ─┬─ wheels / prebuild / proto-dist ─ approve-release ─ release �
      A failure fails the job, and `tag-<svc>` does not run.
 - **What differs between the registries.** The index digest is the same. The stored metadata is
   not: GHCR holds the GitHub attestations and a cosign signature; Docker Hub holds only a cosign
-  signature. `gh attestation verify` reads from the GitHub API, so it works for an image from either
-  registry. Registry-stored attestations exist only on GHCR.
+  signature. `docker buildx imagetools create` (step 6) copies the index and its blobs. It does
+  not copy registry referrers, so Docker Hub never receives the build-provenance or SBOM
+  attestations that step 5 writes to GHCR. `gh attestation verify` still works for a Docker Hub
+  image, because it queries the GitHub attestation API by digest, not the registry. A Docker Hub
+  consumer must not expect `cosign download attestation` to work there: that command reads
+  registry referrers, and Docker Hub carries none. Registry-stored attestations exist only on
+  GHCR.
 - **Tools.** cosign, syft and the archive push tool (`crane`, `skopeo` or `regctl`, chosen by M2)
   are pinned as proto plugins, the same way as the other CLIs in this repo.
 - **GHCR login** uses `github.token`, not `secrets.GITHUB_TOKEN`. The second form is a `secrets`
@@ -271,7 +293,8 @@ plan ─┬─ wheels / prebuild / proto-dist ─ approve-release ─ release �
 
 ### 4.4 `tag-<svc>` — after the push
 
-- **needs:** `publish-images-<svc>`. **Environment:** the existing `release-publish`.
+- **needs:** `plan` and `publish-images-<svc>` (§ 16 P12). **Environment:** the existing
+  `release-publish`.
 - **Permissions:** `contents: read` and no `id-token: write`. Twelve trusted publishers trust the
   `release-publish` OIDC claim, so a job there that does not publish must not be able to mint one.
 - It mints the App token with `permission-contents: write` only, and makes the tag through
@@ -293,6 +316,36 @@ plain `cargo build`, not `cargo auditable`.
 measures what syft finds today. If it finds too little, the plan adds, in this order of
 preference: `cargo auditable build` (the crates), and the `base-files_chisel` slice (the Ubuntu
 packages). `assert_pins` changes with the Dockerfile if the slice list changes.
+
+**Measured on 2026-09-20** (syft 1.52.0, chisel v1.4.2, the pinned `rust:1.95.0-bookworm` builder,
+a fixture image that copies the real image shape):
+
+- Today the SBOM reports `packages=2 libc6=false cargo=0`. The two "packages" are not real
+  content. One is `gcc-14`, which syft's elf-binary cataloger infers from a version string inside
+  `libgcc_s.so.1`. One is SPDX's own synthetic `DocumentRoot-Image` entry.
+- syft 1.52.0 has only two catalogers for a Debian-family OS package: `dpkg-db-cataloger` (it
+  needs `/var/lib/dpkg/status`) and `deb-archive-cataloger` (it needs `.deb` files). A chisel cut
+  writes neither file.
+- **The `base-files_chisel` slice does not help. This candidate is disproven.** That slice writes
+  `/var/lib/chisel/manifest.wall`, a chisel-specific format. syft 1.52.0 has no cataloger for that
+  format. The result was measured with the slice and without it, and the two results were
+  identical. Drop this candidate from the plan.
+- **`cargo auditable build` does work.** A plain `cargo build --release` gives `cargo=0`.
+  `cargo auditable build --release` gives `cargo=2`, with real purls
+  (`pkg:cargo/anyhow@1.0.104`, `pkg:cargo/hello@0.1.0`). syft's `cargo-auditable-binary-cataloger`
+  is already in the default cataloger set, so no syft flag changes. `cargo auditable build`
+  accepts `--locked`. `cargo-auditable` has no proto plugin, so the builder stage installs it with
+  a version-pinned `cargo install cargo-auditable --locked --version <pin>`.
+- `assert_pins` in `ci/images/run.sh` asserts neither the cargo invocation nor the slice list, so
+  neither option needs a change there.
+- **Rejected: a `syft file:rs/Cargo.lock` scan.** It reports 611 packages (597 cargo), but it
+  describes the whole workspace lockfile, not the one binary in one image. Attesting it against an
+  image digest would claim contents the image does not have.
+
+**So the split is real.** `cargo auditable build` closes the crate half of AC 7. The OS-package
+half — a real `libc6` entry — is not reachable with syft 1.52.0 against a pure chisel cut, for the
+structural reason above, not for a missing flag or a missing slice. AC 7 (§ 11) is amended to the
+crate half only, and the OS-package half is tracked as a follow-up (§ 12, SMA-665).
 
 ## 5. Recovery
 
@@ -431,7 +484,7 @@ A result that contradicts this spec changes the spec first.
 | M5 | Does the per-service smoke pass on `ubuntu-24.04-arm`? | MEASURED (`images.yml` at `fa570040`, the `workflow_dispatch` run that carries the arm64 leg): yes. The arm64 leg produced `SMOKE OK (gateway)` and `SMOKE OK (iam)`, and `REHEARSE OK`. The per-service smoke passes for both services on `ubuntu-24.04-arm`. |
 | M6 | Does any gate assert the services' `0.0.0`? | **Done: no.** `publish-metadata` Check 3 filters out `publish = false` crates first; the `service_info.rs` tests compare against `env!("CARGO_PKG_VERSION")`. A bump to `0.1.0` reds nothing. |
 | M7 | release-plz 0.3.158 and a Cargo `publish = false` crate. | **Done** (§ 3.1): never bumped, never tagged; `git_only` fails on the second release. |
-| M8 | What does syft list for the archive today? | § 4.5, AC 7. MEASURED on every leg (`images.yml` at `fa570040`): `M8 image=paigasus-iam arch=amd64 packages=2 libc6=false cargo=0`, and the same shape for `paigasus-gateway`. Syft finds two packages, no libc6 package and no Rust crates. **AC 7 is therefore NOT satisfied today** ("each SBOM lists libc6 and the Rust crates of the binary"). **Controller ruling:** the fix belongs to PR 2, not PR 1. PR 1 publishes no SBOM attestation, so nothing ships wrong yet. PR 2 must make the SBOM meaningful before it attests one, using the two candidates § 4.5 already names, in order of preference: `cargo auditable build` for the crates, and the `base-files_chisel` slice for the Ubuntu packages. Both change the image content and `rs/Dockerfile`, which is release work. AC 7 is an open obligation of PR 2, with these measured numbers as the evidence. |
+| M8 | What does syft list for the archive today? | § 4.5, AC 7. MEASURED on every leg (`images.yml` at `fa570040`): `M8 image=paigasus-iam arch=amd64 packages=2 libc6=false cargo=0`, and the same shape for `paigasus-gateway`. Syft finds two packages, no libc6 package and no Rust crates. **AC 7 is therefore NOT satisfied today** ("each SBOM lists libc6 and the Rust crates of the binary"). **Controller ruling:** the fix belongs to PR 2, not PR 1. PR 1 publishes no SBOM attestation, so nothing ships wrong yet. PR 2 must make the SBOM meaningful before it attests one, using the two candidates § 4.5 already names, in order of preference: `cargo auditable build` for the crates, and the `base-files_chisel` slice for the Ubuntu packages. AC 7 is an open obligation of PR 2, with these measured numbers as the evidence. **Done, measured on 2026-09-20** (syft 1.52.0, chisel v1.4.2, the pinned builder, a fixture image): `cargo auditable build --release` gives `cargo=2` with real purls — the crate half of AC 7 is closed. The `base-files_chisel` slice is disproven: it writes `/var/lib/chisel/manifest.wall`, and syft 1.52.0 has no cataloger for that format, so the result is identical with and without the slice. syft 1.52.0 has only `dpkg-db-cataloger` (needs `/var/lib/dpkg/status`) and `deb-archive-cataloger` (needs `.deb` files) for a Debian-family OS package, and a chisel cut writes neither. So the OS-package half of AC 7 is not reachable with syft 1.52.0 against a pure chisel cut. AC 7 is amended to the crate half only (§ 11); the OS-package half is tracked as follow-up SMA-665. |
 | M9 | Does an environment secret reach a job in `release.yml` with `environment: release-images` when the environment has no reviewers and a `main`-only rule? | Measured by the rehearsal on `main` (`images-rehearsal.yml`, `publish` job, environment `images-rehearsal`). AC 5. |
 
 ## 10. Rollout order
@@ -476,7 +529,9 @@ The order of the steps:
 5. `DOCKERHUB_TOKEN` is readable only by the `publish-images-<svc>` jobs, and it is the only new
    secret name in `release.yml`. V13 asserts it.
 6. The git tag is made only after the push to both registries and the verification pass.
-7. Each SBOM lists libc6 and the Rust crates of the binary.
+7. Each SBOM lists the Rust crates of the binary, through `cargo auditable`. The OS-package half
+   is out of scope: syft 1.52.0 has no cataloger that reads a chisel cut's output, measured on
+   2026-09-20 (§ 4.5). Follow-up: SMA-665.
 8. A published `:<version>` never changes digest. `run.sh rehearse` asserts the adoption case.
 9. A kernel-only release, an image-only release and a combined release each complete, and a failed
    image chain does not stop the kernel chain. Guard fixture rows cover the three graph shapes.
@@ -491,6 +546,10 @@ The order of the steps:
 - **Retention.** No cleanup of old image tags.
 - **An automated service bump** (V-b, `git-cliff`), if the manual bump becomes a burden.
 - **zizmor.** The GitHub-expression interpolation class in `release.yml` stays unlinted.
+- **The OS-package half of the SBOM.** Measured on 2026-09-20: syft 1.52.0 has no cataloger that
+  reads a chisel cut's manifest, so no `libc6` entry, or any other Ubuntu package, appears in the
+  SBOM (§ 4.5, M8). `cargo auditable build` already closes the crate half. Follow-up:
+  [SMA-665](https://linear.app/smaschek/issue/SMA-665).
 
 ## 13. ADR
 
@@ -551,3 +610,10 @@ ADR-0011 S1 and S3 in Notion, and reword the V5 message to match.
 | P7 | `build_one` and `build_oci` run `docker buildx build`, not bare `docker build` (CI fix, PR 270). | MEASURED: on the `ubuntu-latest` and `ubuntu-24.04-arm` runners, bare `docker build --output type=oci,...` used the classic `docker` driver and failed — that driver has no OCI exporter. `docker buildx build` always talks to buildx and uses the builder `docker/setup-buildx-action` selects, which does support it. Local behaviour is unchanged: Docker Desktop already aliases `docker build` to the same buildx call. |
 | P8 | `load_oci` no longer runs `docker load -i <archive>`. It starts a throwaway local `registry:2` (the same free-port pattern `start_registry`/`rehearse` use), pushes the archive with `crane push`, then `docker pull`s the image back BY DIGEST and tags it, removing the registry in an `EXIT` trap (CI fix, PR 270). | MEASURED: `docker load -i` of a buildx OCI-layout archive needs the containerd image store; the `ubuntu-latest`/`ubuntu-24.04-arm` runners use the classic store and fail with `open .../blobs/json: no such file or directory`. Pulling by digest gives the daemon its own manifest-digest verification and works on both stores, the same guarantee the old `.Id` comparison gave (§ 9 M3). An `EXIT` trap, not the `RETURN` trap `build_one`/`build_oci` use for their build log: MEASURED, a `RETURN` trap does not fire when `set -euo pipefail` aborts a function from inside, only on that function's normal return, so it would leak the registry container on exactly the failures this check exists to catch. A second `--output type=docker` export would smoke-test different bytes than the published archive; skopeo's docker-daemon transport would add an unpinned tool. |
 | P9 | The `load_oci` `EXIT` trap read `reg_name` and `tmpdir`, both `local` to that function, so it failed with `reg_name: unbound variable` under `set -u` at script exit — after the function itself had already run — and left the registry container behind on every leg (CI fix, commit `fa570040`). | MEASURED: all three CI legs printed a correct M3 line for the first crate, then died on that exact line before reaching the second crate, smoke or rehearse. Fixed by moving the registry name and scratch-dir path into two script-global variables (`LOAD_OCI_REG`, `LOAD_OCI_TMPDIR`), cleared explicitly once `load_oci` finishes and by the top-level trap as a backstop. **CI history, worth recording:** the first `images.yml` run on this branch failed on the classic-store OCI exporter gap (fixed by P7); the second failed on the `docker load` gap (fixed by P8); the third failed on this unbound variable. None of the three reproduced on the developer Mac, because it uses the containerd image store rather than the classic store the runners use. This is the measured reason § 8's plan to run the release build path in CI, rather than trust local testing alone, was the correct call: CI was the first place any of these three failures could show up. |
+| P10 | The SBOM lists crates through `cargo auditable`. The OS-package half is deferred to a follow-up issue, not folded into this design. Sven's choice at the gate on 2026-09-20. | Measured on 2026-09-20 (§ 4.5, M8): `cargo auditable build --release` gives `cargo=2` with real purls, so the crate half of AC 7 is reachable now. The OS-package half is not reachable with syft 1.52.0 against a pure chisel cut — the `base-files_chisel` slice is disproven, and syft has no cataloger for a chisel manifest — so closing it needs either a chisel-aware syft cataloger, a generated dpkg-shaped status file, or a change to the SMA-500 runtime-base design. Each of those is bigger than PR 2's scope, so AC 7 is narrowed to the crate half (§ 11) and the OS-package half is tracked as SMA-665. |
+| P11 | `plan` outputs a VERSION for each service, not only a skip flag. | § 6.1 lists only `skip_*`, but § 4.3 step 2 compares the image label with "plan's version", and no other job knows it. |
+| P12 | `publish-images-<svc>` and `tag-<svc>` name `plan` in `needs:` and carry their chain's gate literal. | V9b's subject is every direct consumer of `plan`, so a consumer without a literal would red. |
+| P13 | The two chains share their step lists through YAML anchors. | MEASURED (SMA-658 B2, actionlint 1.7.12): a top-level `x-image-chain:` key fails schema validation (`unexpected key`), so each anchor (`&image-build-steps`, `&image-publish-steps`, `&image-tag-steps`) is defined on the `iam` job that needs it first, as that job's own `steps:` value, and aliased from the matching `gateway` job. PyYAML still expands the alias before `release_guard.py` reads the file, so each job is checked in full. |
+| P14 | `cargo-auditable` is pinned at `0.7.6` with `cargo install --locked --version`, in the builder stage. | It has no proto plugin, so this is the only pin available to it. |
+| P15 | `docker logout docker.io` runs after the `crane tag` loop, not immediately after the Hub `cosign sign` (§ 4.3 step 6's "at once" wording). | `crane tag`'s Hub write also needs the credential `docker login` set, so logging out earlier would break it (SMA-658 S15, should-fix — not measured live; verify on the first live release whether that constraint still holds). |
+| P16 | The per-platform manifest digest travels in the artifact (`out/digest-<arch>.txt`), not as a job output through `needs:`, contrary to § 4.2's original wording (PR 2 review, I3). | A matrix job writes one output map; the last leg to finish wins, so a job output cannot carry two different per-arch values out of a `fail-fast: false` matrix. The artifact file has no such collision, since each leg writes its own file under its own name. The digest file rides in the SAME artifact as the archive it describes, so § 4.3 step 2's comparison proves the archive was not corrupted in the upload/download hop; it does not prove the two were not swapped together by a coordinated attacker who controls both. |

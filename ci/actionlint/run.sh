@@ -4600,7 +4600,7 @@ release_guard_self_test() {
 
   n="$(release_guard_py --fixture-count)" || infra "check 10: release_guard.py --fixture-count failed"
   case "$n" in ''|*[!0-9]*) infra "check 10: --fixture-count printed '$n', expected an integer" ;; esac
-  [ "$n" -ge 120 ] || infra "check 10: release_guard.py reports $n fixtures, expected at least 120"
+  [ "$n" -ge 150 ] || infra "check 10: release_guard.py reports $n fixtures, expected at least 150"
 
   release_guard_py --self-test || { fail "check 10: release_guard.py --self-test reported a broken
       verdict. The release guard is not deciding what it is documented to decide."; rc=1; }
@@ -4633,8 +4633,8 @@ release_plan_self_test() {
   case "$n" in ''|*[!0-9]*) infra "check 11: --fixture-count printed '$n', expected an integer" ;; esac
   # Floor, not a count: it exists to catch an EMPTIED table, and one row of headroom keeps a
   # legitimate row removal from aborting the gate as infra. Check 10's own floor is equally
-  # loose (20 against 84 actual — that citation read 44 until the SMA-603 fix wave; the table
-  # has grown with every V8/V9 round since).
+  # loose (150 against 155 actual — that citation read 20 against 84 until the SMA-658 PR 2
+  # review; the table has grown with every V8/V9 round since).
   [ "$n" -ge 8 ] || infra "check 11: release_plan.py reports $n fixtures, expected at least 8"
 
   # The COLLECTION_ROWS twin. Separate flag, not a widened --fixture-count: that flag's consumer

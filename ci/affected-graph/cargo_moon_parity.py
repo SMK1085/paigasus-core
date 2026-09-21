@@ -174,12 +174,23 @@ LOCK_RESOLVING_VERBS = (
     "run", "test", "tree", "update", "vendor",
 )
 
+# SMA-658 (2026-09-20): `rs/Dockerfile` runs `cargo auditable build --release --locked …` — a
+# cargo SUBCOMMAND WRAPPER that forwards to the named verb and preserves whatever flags the verb
+# accepts, `--locked` included. `cargo auditable` is the only such wrapper this repo ships, so
+# the allowlist below names it explicitly rather than accepting an arbitrary `\S+` between
+# `cargo` and the verb — a widened form would let an UNKNOWN wrapper (a typo, or a tool nobody
+# reviewed) also read as a resolved invocation, silently defeating the floor the general text
+# scan above already ruled out for the opposite reason (prose false positives). An unrecognised
+# wrapper word must still read as "no invocation" and fail A8's floor closed, not open.
+CARGO_SUBCOMMAND_WRAPPERS = ("auditable",)
+
 # NOT the whole story since SMA-605: this is the LITERAL arm only. `cargo_matches` merges it with
 # two INDIRECT arms — a cargo-named variable in command position (CARGO_VAR_CMD_RE) and the
 # `CARGO=` environment prefix (CARGO_ENV_PREFIX_RE) — and every consumer reads that merged list,
 # not this regex. A10 has its own sensitive-verb variant, CARGO_VAR_CMD_SENSITIVE_RE.
 CARGO_INVOCATION_RE = re.compile(
-    r"\bcargo\s+(?:\+\S+\s+)?(?:" + "|".join(LOCK_RESOLVING_VERBS) + r")\b"
+    r"\bcargo\s+(?:\+\S+\s+)?(?:(?:" + "|".join(CARGO_SUBCOMMAND_WRAPPERS) + r")\s+)?(?:"
+    + "|".join(LOCK_RESOLVING_VERBS) + r")\b"
 )
 
 # `--locked` is accepted; `--frozen` is NOT — it implies `--offline`, which false-reds on a cold
@@ -2691,6 +2702,38 @@ def self_test():
         (rs / "Dockerfile").write_text('RUN "$CARGO_BIN" build --release\n')
         if not any("without --locked" in r for r in check_dockerfile_locked(Path(tmp))):
             failures.append("A8 did not fire on an indirect unlocked Dockerfile cargo build")
+        # SMA-658 — the ALLOWLISTED wrapper (`cargo auditable build`, SMA-658's own shape).
+        # A wrapped-and-LOCKED invocation must PASS, the same as a plain `cargo build --locked`.
+        (rs / "Dockerfile").write_text(
+            'RUN cargo auditable build --release --locked -p paigasus-iam\n'
+        )
+        if check_dockerfile_locked(Path(tmp)):
+            failures.append(
+                "A8 reported a violation on a locked, wrapped `cargo auditable build` — the "
+                "wrapper allowlist did not recognise it as resolving"
+            )
+        # A wrapped-and-UNLOCKED invocation must still FIRE: recognising the wrapper must not
+        # exempt it from the --locked demand.
+        (rs / "Dockerfile").write_text(
+            'RUN cargo auditable build --release -p paigasus-iam\n'
+        )
+        if not any("without --locked" in r for r in check_dockerfile_locked(Path(tmp))):
+            failures.append(
+                "A8 did not fire on an unlocked, wrapped `cargo auditable build` — "
+                "recognising the wrapper must not waive --locked"
+            )
+        # An UNKNOWN wrapper word must still read as no invocation at all and fail the floor
+        # CLOSED, not open — CARGO_SUBCOMMAND_WRAPPERS is a narrow allowlist, not a general
+        # `\S+`, precisely so a typo'd or unreviewed wrapper cannot silently pass A8.
+        (rs / "Dockerfile").write_text(
+            'RUN cargo frobnicate build --release --locked -p paigasus-iam\n'
+        )
+        rows = check_dockerfile_locked(Path(tmp))
+        if not any("A8 examines rs/Dockerfile" in r for r in rows):
+            failures.append(
+                "A8 treated `cargo frobnicate build` as a resolved invocation — an "
+                "unallowlisted wrapper word must still read as no cargo invocation at all"
+            )
         (rs / "Dockerfile").unlink()
         try:
             check_dockerfile_locked(Path(tmp))
