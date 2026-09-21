@@ -13,9 +13,10 @@
 // Every view that does not throw renders inside DeadLettersFrame, keyed by
 // `${eventType}|${parkedFrom}|${parkedTo}|${cursor}` with the CANONICAL bounds (SMA-661 spec § 4.2),
 // so a revalidated render after an action keeps the frame and its result, two spellings of one window
-// share a frame, and a move to another page or filter starts an empty frame. The four query parsers
-// are pure and run before the degraded branch ONLY to compute that key; a degraded IAM gets the
-// degraded view whatever the query.
+// share a frame, and a move to another page or filter starts an empty frame. A refused parked bound
+// is keyed by its typed value with a `!` prefix, so it never shares a frame with a valid view. The
+// four query parsers are pure and run before the degraded branch ONLY to compute that key; a
+// degraded IAM gets the degraded view whatever the query.
 import type { ReactElement, ReactNode } from 'react';
 import { notFound } from 'next/navigation';
 import { Breadcrumbs, ZoneLink } from '@paigasus/app-shell';
@@ -104,7 +105,7 @@ export default async function DeadLettersPage({ searchParams }: Props): Promise<
   const parkedFrom = parseParkedBound(query.parkedFrom, 'parkedFrom');
   const parkedTo = parseParkedBound(query.parkedTo, 'parkedTo');
   const cursor = parseCursor(query.cursor);
-  const frameKey = `${eventType.ok ? eventType.value : ''}|${parkedFrom.ok ? parkedFrom.iso : ''}|${parkedTo.ok ? parkedTo.iso : ''}|${cursor.ok ? cursor.cursor : ''}`;
+  const frameKey = `${eventType.ok ? eventType.value : ''}|${parkedFrom.ok ? parkedFrom.iso : `!${parkedFrom.raw}`}|${parkedTo.ok ? parkedTo.iso : `!${parkedTo.raw}`}|${cursor.ok ? cursor.cursor : ''}`;
 
   if (gate === 'degraded') {
     return shell(

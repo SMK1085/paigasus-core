@@ -258,6 +258,17 @@ describe('the parked-time filter (SMA-661 § 4.2–§ 4.5)', () => {
     expect(fields.find((field) => field.htmlFor === fieldId)?.error).toBe(`The "${words}" filter is not a valid time. Use an ISO instant with a zone, for example 2026-09-19T00:00:00Z.`);
     expect(fields.filter((field) => field.error !== undefined)).toHaveLength(1);
   });
+
+  it('keys a refused parked bound by its typed value, not by "no bound" (Ruling 11)', async () => {
+    const refused = await visit({ parkedFrom: 'not-a-time' });
+    mocks.listDeadLetters.mockResolvedValue({ entries: [], nextCursor: '' });
+    const empty = await visit({});
+
+    const [refusedFrame] = all(refused, DeadLettersFrame);
+    const [emptyFrame] = all(empty, DeadLettersFrame);
+    expect(refusedFrame?.key).toBe('|!not-a-time||');
+    expect(refusedFrame?.key).not.toBe(emptyFrame?.key);
+  });
 });
 
 describe('the replay affordance (SMA-661 D4, § 6.2, § 8)', () => {
