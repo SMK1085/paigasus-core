@@ -1,22 +1,29 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// /iam/dead-letters, branch by branch (SMA-629 spec § 6.2–§ 6.4; SMA-661 spec § 4.2–§ 4.5). The
-// page's own accessors are mocked at the lib/console boundary, and the test reads the element tree
-// the page returns. It proves: the 404 gate, the degraded view inside the frame with no IAM call, a
-// refused query that never becomes an IAM call, a refused parked bound that re-renders the filter
-// form (D6), the 403/404 list errors as PageError, every other list error as a SectionError inside
-// the frame, the frame key, the GET form with no `action`, and the paging hrefs.
+// /iam/dead-letters, branch by branch (SMA-629 spec § 6.2–§ 6.4; SMA-661 spec § 4.2–§ 4.5, § 6.2,
+// § 8). The page's own accessors are mocked at the lib/console boundary, and the test reads the
+// element tree the page returns. It proves: the 404 gate, the degraded view inside the frame with no
+// IAM call, a refused query that never becomes an IAM call, a refused parked bound that re-renders
+// the filter form (D6), the 403/404 list errors as PageError, every other list error as a
+// SectionError inside the frame, the frame key, the GET form with no `action`, the paging hrefs, and
+// the replay question: asked at Root only when the list is read, hiding the bulk form and the row
+// Replay buttons on no (D4).
 import { isValidElement, type ReactElement, type ReactNode } from 'react';
 import { Code, ConnectError } from '@connectrpc/connect';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ServiceState } from '@paigasus/discovery/types';
 import type { PaigasusError } from '@paigasus/sdk/errors/types';
 import { Field, Input } from '@paigasus/ui';
+import { MAX_BULK_REPLAY_ROWS, ROOT_PRN } from '@paigasus/console-core';
+
+type May = (action: string, resourcePrn: string) => Promise<boolean>;
 
 const mocks = vi.hoisted(() => ({
   state: { current: { state: 'absent', service: 'iam' } },
   listDeadLetters: vi.fn(),
   iamClients: vi.fn(),
+  may: vi.fn<May>(),
+  mayI: vi.fn<() => Promise<May>>(),
 }));
 
 vi.mock('../../lib/console', () => ({
@@ -24,6 +31,7 @@ vi.mock('../../lib/console', () => ({
   discovery: () => ({ getServiceState: () => Promise.resolve(mocks.state.current) }),
   iamClients: mocks.iamClients,
   iamClientsForAction: vi.fn(),
+  mayI: mocks.mayI,
 }));
 
 const { default: DeadLettersPage } = await import('../../app/(console)/dead-letters/page');
@@ -31,6 +39,7 @@ const { PageError } = await import('../../app/_components/page-error');
 const { SectionError } = await import('../../app/_components/section-error');
 const { DeadLettersFrame } = await import('../../app/(console)/dead-letters/dead-letters-frame');
 const { DeadLetterTable } = await import('../../app/(console)/dead-letters/dead-letter-table');
+const { BulkReplayForm } = await import('../../app/(console)/dead-letters/bulk-replay-form');
 const { PAGE_SIZE } = await import('../../lib/paging');
 
 const ID = '0190a1f0-0000-7000-8000-0000000000d1';
@@ -75,6 +84,10 @@ beforeEach(() => {
   mocks.listDeadLetters.mockReset();
   mocks.iamClients.mockReset();
   mocks.iamClients.mockImplementation(() => Promise.resolve({ outbox: { listDeadLetters: mocks.listDeadLetters } }));
+  mocks.may.mockReset();
+  mocks.may.mockResolvedValue(true);
+  mocks.mayI.mockReset();
+  mocks.mayI.mockImplementation(() => Promise.resolve(mocks.may));
 });
 
 describe('the gate', () => {
@@ -86,6 +99,7 @@ describe('the gate', () => {
 
     await expect(visit({})).rejects.toMatchObject({ digest: 'NEXT_HTTP_ERROR_FALLBACK;404' });
     expect(mocks.iamClients).not.toHaveBeenCalled();
+    expect(mocks.mayI).not.toHaveBeenCalled();
   });
 
   it('renders the degraded view INSIDE the frame, with no IAM call, whatever the query', async () => {
@@ -97,6 +111,7 @@ describe('the gate', () => {
     expect(frame).toBeDefined();
     expect(byTestId(frame, 'dead-letters-degraded')).toHaveLength(1);
     expect(mocks.iamClients).not.toHaveBeenCalled();
+    expect(mocks.mayI).not.toHaveBeenCalled();
   });
 });
 
@@ -112,6 +127,7 @@ describe('the query', () => {
     expect(tree.type).toBe(PageError);
     expect((tree.props as { error: PaigasusError }).error.presentation).toBe('invalid-input');
     expect(mocks.iamClients).not.toHaveBeenCalled();
+    expect(mocks.mayI).not.toHaveBeenCalled();
   });
 });
 
@@ -228,6 +244,7 @@ describe('the parked-time filter (SMA-661 § 4.2–§ 4.5)', () => {
     const tree = await visit({ eventType: 'orders', ...query });
 
     expect(mocks.iamClients).not.toHaveBeenCalled();
+    expect(mocks.mayI).not.toHaveBeenCalled();
     expect(tree.type).not.toBe(PageError);
     expect(all(tree, DeadLettersFrame)).toHaveLength(1);
     expect(all(tree, DeadLetterTable)).toHaveLength(0);
@@ -240,5 +257,54 @@ describe('the parked-time filter (SMA-661 § 4.2–§ 4.5)', () => {
     const fields = all(tree, Field).map((element) => element.props as { htmlFor: string; error?: string });
     expect(fields.find((field) => field.htmlFor === fieldId)?.error).toBe(`The "${words}" filter is not a valid time. Use an ISO instant with a zone, for example 2026-09-19T00:00:00Z.`);
     expect(fields.filter((field) => field.error !== undefined)).toHaveLength(1);
+  });
+});
+
+describe('the replay affordance (SMA-661 D4, § 6.2, § 8)', () => {
+  beforeEach(() => {
+    mocks.state.current = WITH_KEY;
+  });
+
+  it('asks ReplayOutboxDeadLetter at Root and, on yes, renders the bulk form between the filter and the table', async () => {
+    mocks.listDeadLetters.mockResolvedValue({ entries: [entry], nextCursor: '' });
+
+    const tree = await visit({ eventType: 'orders', parkedFrom: '2026-09-19T00:00:00Z' });
+
+    expect(mocks.may).toHaveBeenCalledWith('ReplayOutboxDeadLetter', ROOT_PRN);
+    const bulk = all(tree, BulkReplayForm);
+    expect(bulk).toHaveLength(1);
+    expect(bulk[0]?.props).toEqual({ scope: { eventType: 'orders', parkedFrom: '2026-09-19T00:00:00.000Z', parkedTo: '' }, ceiling: MAX_BULK_REPLAY_ROWS });
+    expect((all(tree, DeadLetterTable)[0]?.props as { canReplay: boolean }).canReplay).toBe(true);
+
+    const order = [...walk(tree)].map((element) => element.type);
+    expect(order.indexOf('form')).toBeLessThan(order.indexOf(BulkReplayForm));
+    expect(order.indexOf(BulkReplayForm)).toBeLessThan(order.indexOf(DeadLetterTable));
+  });
+
+  it('on no, hides the bulk form and passes canReplay=false to the table, whose rows keep Discard', async () => {
+    mocks.may.mockResolvedValue(false);
+    mocks.listDeadLetters.mockResolvedValue({ entries: [entry], nextCursor: '' });
+
+    const tree = await visit({});
+
+    expect(all(tree, BulkReplayForm)).toHaveLength(0);
+    expect((all(tree, DeadLetterTable)[0]?.props as { canReplay: boolean }).canReplay).toBe(false);
+  });
+
+  it('renders the bulk form over an empty list', async () => {
+    mocks.listDeadLetters.mockResolvedValue({ entries: [], nextCursor: '' });
+
+    const tree = await visit({});
+
+    expect(all(tree, BulkReplayForm)).toHaveLength(1);
+  });
+
+  it('renders no bulk form beside a SectionError', async () => {
+    mocks.listDeadLetters.mockRejectedValue(new ConnectError('nope', Code.Unavailable));
+
+    const tree = await visit({});
+
+    expect(all(tree, SectionError)).toHaveLength(1);
+    expect(all(tree, BulkReplayForm)).toHaveLength(0);
   });
 });
