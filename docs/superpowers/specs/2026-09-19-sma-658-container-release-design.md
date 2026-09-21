@@ -204,7 +204,9 @@ plan ─┬─ wheels / prebuild / proto-dist ─ approve-release ─ release �
 
 ### 4.1 The gate on each chain
 
-- `plan` writes one output for each service: `skip_iam` and `skip_gateway` (§ 6.1).
+- `plan` writes two outputs for each service: a skip flag (`skip_iam`, `skip_gateway`, § 6.1) and
+  a version (`version_iam`, `version_gateway`), which § 4.3 step 2 compares with the archive's
+  label (§ 16 P11).
 - The first job of each chain has exactly `if: needs.plan.outputs.skip_<svc> != 'true'`, in the same
   form as the kernel gate. An **unset** output therefore **runs** the chain. That is safe, because
   the checks in § 4.3 make a run for an already released version a no-op.
@@ -264,8 +266,10 @@ plan ─┬─ wheels / prebuild / proto-dist ─ approve-release ─ release �
      for each architecture, on its **per-platform** digest (the subject that the SBOM describes).
      Both with `push-to-registry: true`. `cosign sign` keyless on the index digest in GHCR.
   6. **Docker Hub.** `docker login`, copy the index by digest from GHCR to Docker Hub
-     (`docker buildx imagetools create`), `cosign sign` on the Docker Hub digest, then
-     `docker logout` at once. The token is on disk only for these steps.
+     (`docker buildx imagetools create`), and `cosign sign` on the Docker Hub digest. `docker
+     logout` runs from an `EXIT` trap when the step ends, after the release tags of step 7, which
+     run in the same step and also need the credential (§ 16 P15). The token is on disk only for
+     that one step.
   7. **Release tags.** Write `:<version>` in both registries. Move `:<major>.<minor>` and `:latest`
      **only when** `<version>` is greater than or equal to the highest existing
      `paigasus-<svc>-v*` git tag, compared as semver and read at this step.
@@ -289,7 +293,8 @@ plan ─┬─ wheels / prebuild / proto-dist ─ approve-release ─ release �
 
 ### 4.4 `tag-<svc>` — after the push
 
-- **needs:** `publish-images-<svc>`. **Environment:** the existing `release-publish`.
+- **needs:** `plan` and `publish-images-<svc>` (§ 16 P12). **Environment:** the existing
+  `release-publish`.
 - **Permissions:** `contents: read` and no `id-token: write`. Twelve trusted publishers trust the
   `release-publish` OIDC claim, so a job there that does not publish must not be able to mint one.
 - It mints the App token with `permission-contents: write` only, and makes the tag through
