@@ -28,6 +28,9 @@
 # shrinks Dependabot's sandbox to whatever `path =` deps it can still reach — and a shrunken
 # sandbox both truncates the lock it proposes and reds its own job.
 #
+# A11 (SMA-663) reads the same `members` list and reds on any glob character in it, because a
+# glob can match napi's `.<crate>.napi-stage-<random>` staging directory.
+#
 # usage: cargo_moon_parity.py [--self-test]
 import collections
 import fnmatch
@@ -1713,6 +1716,28 @@ def dependabot_expand_member(rs_root, entry):
     )
 
 
+def read_workspace_members(root, assertion):
+    """Return rs/Cargo.toml's `[workspace] members` list, for A9 and A11.
+
+    An absent manifest or an absent/empty `members` key is infrastructure, never a silent pass.
+    Both would make the assertion vacuous while it still prints PASS.
+    """
+    path = root / "rs" / "Cargo.toml"
+    if not path.is_file():
+        raise MoonOutputError(
+            f"{path} is absent — {assertion}'s members assertion cannot be evaluated. If the "
+            f"workspace root legitimately moved, update read_workspace_members rather than "
+            f"deleting the check"
+        )
+    members = (tomllib.loads(path.read_text()).get("workspace") or {}).get("members")
+    if not members:
+        raise MoonOutputError(
+            f"{path} declares no `[workspace] members` — {assertion} cannot examine a member "
+            f"set that does not exist"
+        )
+    return members
+
+
 def check_member_globs(root, crates):
     """Return the A9 violation list: workspace crates Dependabot's member expansion cannot reach.
 
@@ -1725,18 +1750,7 @@ def check_member_globs(root, crates):
     An absent manifest or an absent `members` key is infrastructure, never a silent pass: both
     would make the comparison vacuous while still printing PASS.
     """
-    path = root / "rs" / "Cargo.toml"
-    if not path.is_file():
-        raise MoonOutputError(
-            f"{path} is absent — A9's member-glob assertion cannot be evaluated. If the workspace "
-            f"root legitimately moved, update check_member_globs rather than deleting the check"
-        )
-    members = (tomllib.loads(path.read_text()).get("workspace") or {}).get("members")
-    if not members:
-        raise MoonOutputError(
-            f"{path} declares no `[workspace] members` — A9 cannot compare an expansion against "
-            f"a member set that does not exist"
-        )
+    members = read_workspace_members(root, "A9")
 
     rows = []
     reachable = set()
@@ -1769,6 +1783,32 @@ def check_member_globs(root, crates):
             "found NO crates at all — this assertion now covers nothing"
         )
     return rows
+
+
+MEMBER_GLOB_CHARS = ("*", "?", "[")
+
+
+def check_member_literals(root):
+    """Return the A11 violation list: `[workspace] members` entries that carry a glob (SMA-663).
+
+    A glob can match a dot-directory. `napi build` (@napi-rs/cli 3.10.3, dist/cli.js:10350)
+    stages every output in `mkdtemp(dirname(outputDir) + "/." + basename(outputDir) +
+    ".napi-stage-")`, a sibling of the crate with no Cargo.toml in it. While it exists, every
+    concurrent `cargo metadata` fails with exit 101 on the missing manifest. `moon ci` runs the
+    two napi tasks in parallel with the crate tasks, so the race reached 9 of 9 runs on SMA-658.
+
+    The rule is deliberately blunt. A finer rule ("no glob may match a napi staging path")
+    would have to model how napi resolves its crate. It reads `--cwd`, `--manifest-path`, `-p`
+    and `-o` to do that, and a wrong model passes in silence. A literal list cannot drift: A9
+    reds on a crate directory that no entry reaches.
+    """
+    return [
+        f"members entry {entry!r} carries a glob character. "
+        f"It can match a dot-directory such as napi's `.<crate>.napi-stage-<random>`, "
+        f"and a concurrent `cargo metadata` then fails on its missing Cargo.toml"
+        for entry in read_workspace_members(root, "A11")
+        if any(ch in entry for ch in MEMBER_GLOB_CHARS)
+    ]
 
 
 def check_ffi_inputs(projects, required=FFI_TASK_INPUTS, floor=REQUIRED_FFI_TASKS):
@@ -2304,12 +2344,13 @@ def self_test():
             "the arity fixture now references a ci/ script but its tmp root does not create one"
         )
     with tempfile.TemporaryDirectory() as tmp:
-        # collect_findings now folds check_dockerfile_locked(root) into a8 and
-        # check_member_globs(root, crates) into a9, and BOTH raise on an absent file — write a
-        # locked Dockerfile and a members list that reaches `crates`' own source dirs, so this
-        # arity check stays about arity. The members list is DERIVED from the same `crates`
-        # fixture the call passes, so a fixture edit cannot leave this row asserting an arity
-        # failure that is really an a9 violation in disguise.
+        # collect_findings now folds check_dockerfile_locked(root) into a8,
+        # check_member_globs(root, crates) into a9, and check_member_literals(root) into a11.
+        # ALL THREE raise on an absent file — write a locked Dockerfile and a members list that
+        # reaches `crates`' own source dirs, so this arity check stays about arity. The members
+        # list is DERIVED from the same `crates` fixture the call passes, so a fixture edit
+        # cannot leave this row asserting an arity failure that is really an a9 or a11
+        # violation in disguise.
         tmp_rs = Path(tmp) / "rs"
         tmp_rs.mkdir()
         (tmp_rs / "Dockerfile").write_text("RUN cargo build --release --locked -p paigasus-iam\n")
@@ -3089,6 +3130,56 @@ def self_test():
         try:
             check_member_globs(root9, crates9)
             failures.append("A9 did not raise infra on a missing rs/Cargo.toml")
+        except MoonOutputError:
+            pass
+
+    # A11 (SMA-663): no `members` entry may carry a glob character. A glob can match a
+    # dot-directory, and `napi build` stages its output in `.<crate>.napi-stage-<random>` beside
+    # the crate, with no Cargo.toml in it. A concurrent `cargo metadata` then exits 101.
+    with tempfile.TemporaryDirectory() as tmp:
+        root11 = Path(tmp)
+        rs11 = root11 / "rs"
+        rs11.mkdir()
+
+        def write_members11(entries):
+            (rs11 / "Cargo.toml").write_text(
+                f"""[workspace]\nmembers = [{", ".join(f'"{e}"' for e in entries)}]\n"""
+            )
+
+        # a: the SMA-663 shape itself.
+        write_members11(["crates/bindings/*"])
+        rows = check_member_literals(root11)
+        if len(rows) != 1 or "crates/bindings/*" not in rows[0]:
+            failures.append(f"A11 did not fire exactly once on `crates/bindings/*`: {rows}")
+
+        # b: the fixed shape — every entry literal.
+        write_members11(["crates/bindings/node", "crates/libs/kernel", "crates/services/iam"])
+        if check_member_literals(root11):
+            failures.append("A11 fired on a members list with only literal entries")
+
+        # c: mixed — one literal, one `*`, one `[` class. Exactly the two globs fire.
+        write_members11(["crates/libs/kernel", "crates/services/*", "crates/x/[ab]"])
+        rows = check_member_literals(root11)
+        if len(rows) != 2 or not any("crates/services/*" in r for r in rows) \
+                or not any("crates/x/[ab]" in r for r in rows):
+            failures.append(f"A11 did not fire exactly on the `*` and `[` entries: {rows}")
+
+        # d: `?` is a glob character too.
+        write_members11(["crates/libs/paigasus-?"])
+        if len(check_member_literals(root11)) != 1:
+            failures.append("A11 did not fire on a `?` members entry")
+
+        # Infra: the same two shapes as A9, through the shared reader.
+        (rs11 / "Cargo.toml").write_text("[workspace]\nresolver = \"3\"\n")
+        try:
+            check_member_literals(root11)
+            failures.append("A11 did not raise infra on a workspace with no `members` key")
+        except MoonOutputError:
+            pass
+        (rs11 / "Cargo.toml").unlink()
+        try:
+            check_member_literals(root11)
+            failures.append("A11 did not raise infra on a missing rs/Cargo.toml")
         except MoonOutputError:
             pass
 
@@ -4210,7 +4301,7 @@ def self_test():
     if failures:
         print("negative-control FAILED: the parity gate can pass vacuously", file=sys.stderr)
         return 1
-    print("  OK   [parity] all ten assertions fire on synthetic violations")
+    print("  OK   [parity] all eleven assertions fire on synthetic violations")
     return 0
 
 
@@ -4227,7 +4318,7 @@ def self_test():
 # rather than a bare count.
 #
 # Adding a check means adding its key here AND its tuple there, in the same order.
-EXPECTED_FINDING_KEYS = ("a1", "a2", "a3", "a4-lint", "a4-fmt", "a5", "a6", "a7", "a8", "a9", "a10")
+EXPECTED_FINDING_KEYS = ("a1", "a2", "a3", "a4-lint", "a4-fmt", "a5", "a6", "a7", "a8", "a9", "a10", "a11")
 
 
 def collect_findings(projects, crates, root):
@@ -4343,9 +4434,9 @@ def collect_findings(projects, crates, root):
              "    expansion, so its cargo update job resolves a SHORTER workspace than Cargo\n"
              "    does — it proposes a truncated rs/Cargo.lock and reds on any dependency that\n"
              "    needs a companion package unlocked with it (SMA-604).\n"
-             "    Fix: give each `members` entry at most ONE wildcard level\n"
-             "    (`crates/libs/*`, never `crates/*/*`), one entry per crate directory.\n"
-             "    Dependabot lists a single directory level below the glob's literal prefix.\n"
+             "    Fix: add the missing crate directory as a literal `members` entry, with\n"
+             "    no glob (SMA-663). Dependabot lists a single directory level below the\n"
+             "    glob's literal prefix.\n"
              "    An `A9 examines` row means the opposite — cargo_crates() found no crates, so\n"
              "    the comparison covers nothing; fix that first."),
         ("a10", check_cargo_config_inputs(projects, root),
@@ -4359,6 +4450,13 @@ def collect_findings(projects, crates, root):
              "    are out of scope BY VERB (they never compile or link) — see\n"
              "    CONFIG_SENSITIVE_VERBS. A `FLOOR:` row means the check itself cannot be\n"
              "    trusted; fix that first, every other A10 row is meaningless until it passes."),
+        ("a11", check_member_literals(root),
+             "A `[workspace] members` entry in rs/Cargo.toml carries a glob character. A glob\n"
+             "    can match a dot-directory. `napi build` stages its output in\n"
+             "    `.<crate>.napi-stage-<random>` beside the crate, with no Cargo.toml in it.\n"
+             "    Every concurrent `cargo metadata` then fails with exit 101 (SMA-663).\n"
+             "    Fix: list each crate directory as its own literal entry. A9 reds if one is\n"
+             "    missing."),
     ]
 
     return findings
@@ -4384,7 +4482,8 @@ def main():
             f"too, every crate keys on its upstream sources, and every py/ts wrapper keys on the "
             f"Rust crates it builds, every cargo-resolving task passes --locked, and every "
             f"workspace crate is reachable through Dependabot's member expansion, and "
-            f"every compiling cargo task inside rs/ keys on .cargo/config.toml"
+            f"every compiling cargo task inside rs/ keys on .cargo/config.toml, and every "
+            f"workspace members entry is a literal path"
         )
         return 0
 

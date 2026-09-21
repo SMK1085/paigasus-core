@@ -141,7 +141,8 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   unnoticed repairer. `--locked` proves the lock is
   CONSISTENT with the manifests, not that it is correct: a swapped-but-compatible version or a
   tampered checksum still passes.
-- `rs/Cargo.toml`'s `[workspace] members` entries must carry **at most ONE wildcard level each**
+- `rs/Cargo.toml`'s `[workspace] members` entries **must be literal crate paths, with no glob**
+  (SMA-663). Before SMA-663, the SMA-604 rule allowed at most ONE wildcard level each
   (`crates/libs/*`, not `crates/*/*`). Cargo reads both forms identically — the member set is the
   same 13 crates, measured — but Dependabot's cargo file fetcher cannot expand the two-level form:
   `expand_workspaces` (`cargo/lib/dependabot/cargo/file_fetcher.rb`) lists exactly ONE directory
@@ -160,10 +161,13 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   `repo:affected-smoke`'s **A9** (`ci/affected-graph/cargo_moon_parity.py`) now asserts it by
   TRANSCRIBING Dependabot's expander rather than restating the rule: it fails if a `members` entry
   resolves to zero members, and separately if any crate directory no entry reaches. Reverting the
-  line to `crates/*/*` reds it with 14 rows (MEASURED). Adding a crate DIRECTORY (a fourth sibling
-  of `libs`/`services`/`bindings`) needs a new `members` entry; adding a crate inside an existing
-  one does not. A8 and A9 are the two halves of one story: A8 catches a truncated lock once it
-  exists, A9 removes the thing that writes one.
+  line to `crates/*/*` reds it with 14 rows (MEASURED). Since SMA-663, every entry is a LITERAL
+  crate path. So **every new crate** needs its own `members` line. `cargo new` adds it. A9 reds
+  if one is missing. A8 and A9 are the two halves of one story: A8 catches a truncated lock once
+  it exists, A9 removes the thing that writes one. **No glob at all (SMA-663).** A glob can
+  match a dot-directory. `napi build` stages its output in `.<crate>.napi-stage-<random>`
+  beside the crate, with no `Cargo.toml`. A concurrent `cargo metadata` then exits 101.
+  `repo:affected-smoke`'s **A11** reds on any `*`, `?` or `[` in `members`.
 
 ## Container images
 
