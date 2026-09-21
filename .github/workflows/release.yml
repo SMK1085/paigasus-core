@@ -1153,9 +1153,11 @@ jobs:
           set -euo pipefail
           npm publish --provenance --access public
 
-  # SMA-658. THE IMAGE CHAINS. Each service has its own four jobs and its own approval, so a
-  # kernel release and an image release never block each other, and approving one never authorises
-  # the other. release_guard.py V8 asserts the per-chain boundary and V14 the capabilities.
+  # SMA-658. THE IMAGE CHAINS. Each service has its own four jobs and its own approval job, so a
+  # kernel release and an image release never block each other in the job graph. release_guard.py
+  # V8 asserts the per-chain boundary and V14 the capabilities. All approval jobs share the
+  # `release-approval` environment, so one human approval releases every chain pending in the run
+  # (GitHub approves by environment, not by job; not yet observed on a live run).
   images-build-iam:
     name: build the iam image (${{ matrix.arch }})
     needs: [plan]

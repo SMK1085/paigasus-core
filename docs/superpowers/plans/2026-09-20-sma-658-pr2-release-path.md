@@ -1598,9 +1598,11 @@ The two chains share their step lists through YAML anchors (see the task's Decis
 of the `jobs:` mapping, add:
 
 ```yaml
-  # SMA-658. THE IMAGE CHAINS. Each service has its own four jobs and its own approval, so a
-  # kernel release and an image release never block each other, and approving one never authorises
-  # the other. release_guard.py V8 asserts the per-chain boundary and V14 the capabilities.
+  # SMA-658. THE IMAGE CHAINS. Each service has its own four jobs and its own approval job, so a
+  # kernel release and an image release never block each other in the job graph. release_guard.py
+  # V8 asserts the per-chain boundary and V14 the capabilities. All approval jobs share the
+  # `release-approval` environment, so one human approval releases every chain pending in the run
+  # (GitHub approves by environment, not by job; not yet observed on a live run).
   images-build-iam:
     name: build the iam image (${{ matrix.arch }})
     needs: [plan]
@@ -2230,8 +2232,13 @@ their Cargo manifests set `publish = false` (SMA-658, spec § 3.1).
    - add a `## [<version>] - <date>` section to that crate's `CHANGELOG.md`.
    `repo:actionlint` check 11 fails the pull request when the changelog section is missing.
 2. Merge it. The `plan` job selects the service, because its version has no tag.
-3. Approve the `approve-images-<svc>` job. Each service has its own approval: approving one does
-   not approve the other, and neither approves the kernel release.
+3. Approve the `approve-images-<svc>` job. Each service chain has its own approval job, but all
+   three approval jobs use the same `release-approval` environment. GitHub approves a pending
+   deployment by environment, not by job. So one approval releases every chain that waits for
+   approval in the same run. This comes from the shape of GitHub's approval API. It has not yet
+   been observed on a live run. To release only one chain, keep only that chain pending: put only
+   that service's version bump in the release, and do not combine it with a kernel release you
+   want to hold back.
 4. The `publish-images-<svc>` job pushes to GHCR, copies the index to Docker Hub, signs both,
    moves `:<major>.<minor>` and `:latest` only forward, and verifies the result. While the version
    is `0.x`, no `:<major>` tag is made. The `tag-<svc>` job then makes
@@ -2284,13 +2291,17 @@ Append to the Gotchas list in `CLAUDE.md`:
   `approve-images-<svc>` → `publish-images-<svc>` → `tag-<svc>`, for `iam` and `gateway`. The
   chains are independent of the kernel chain and of each other, so a kernel-only release, an
   image-only release and a combined release all work, and a failed image chain does not stop the
-  kernel release. `release_guard.py` V8 asserts that a publisher sits behind the approval of ITS
-  OWN chain — a kernel approval never authorises an image push. V14 asserts the same for the
-  CAPABILITY (`packages: write`, `id-token: write`, `attestations: write`, the `release-images`
-  or `release-publish` environment, an App token with `contents: write`), so a publish with a tool
-  no marker names still reds. V13 allows `DOCKERHUB_TOKEN` only in a job whose environment is
-  `release-images`, compares environment names case-folded, and fails closed on an `environment:`
-  built from an expression.
+  kernel release. `release_guard.py` V8 asserts that a publisher's job depends, in the job graph,
+  on the approval job of ITS OWN chain — a kernel approval job never gates an image push job. All
+  three approval jobs (`approve-release`, `approve-images-iam`, `approve-images-gateway`) share the
+  one `release-approval` environment, though. GitHub approves a pending deployment by environment,
+  not by job, so one human approval releases every chain that waits for approval in the same run.
+  This comes from the shape of GitHub's approval API; it has not yet been observed on a live run.
+  V14 asserts the same job-graph rule for the CAPABILITY (`packages: write`, `id-token: write`,
+  `attestations: write`, the `release-images` or `release-publish` environment, an App token with
+  `contents: write`), so a publish with a tool no marker names still reds. V13 allows
+  `DOCKERHUB_TOKEN` only in a job whose environment is `release-images`, compares environment names
+  case-folded, and fails closed on an `environment:` built from an expression.
 - **The first digest published under `:<version>` is final** (D10). A later run adopts it and
   discards its own build. A rebuild never reproduces a digest, because `chisel cut` resolves the
   live Ubuntu archive on every build, so "push the same digest again" is not available as a
@@ -2424,7 +2435,8 @@ After the pull request is open, collect and record:
 - [ ] `repo:affected-smoke` passes with the re-pinned `RELEASE_PLAN_SH_CALL_SITES`.
 - [ ] The whole `moon ci` graph passes. SMA-663 records that the napi-stage race can red this
       branch repeatedly; a red there with a `.napi-stage-` path in the error is that known race.
-- [ ] **After the merge, on the live release run:** each chain pauses at its own approval; the
+- [ ] **After the merge, on the live release run:** the run pauses for approval on
+      `release-approval`, and one approval releases every pending chain; the
       published index digest is identical on both registries; `cosign verify` and
       `gh attestation verify` pass; `paigasus-iam-v0.1.0` and `paigasus-gateway-v0.1.0` point at
       the image's revision label. Record the digests in the Linear issue.

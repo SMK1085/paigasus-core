@@ -430,15 +430,14 @@ yet".
    - add a `## [<version>] - <date>` section to that crate's `CHANGELOG.md`.
    `repo:actionlint` check 11 fails the pull request when the changelog section is missing.
 2. Merge it. The `plan` job selects the service, because its version has no tag.
-3. Approve the `approve-images-<svc>` job. Each service chain has its own approval job. All three
-   approval jobs (`approve-release`, `approve-images-iam`, `approve-images-gateway`) use the same
-   `release-approval` environment. The intent: approving one chain does not approve another chain,
-   and no chain approval approves the kernel release. **This independence is not verified.** GitHub
-   keys its pending-deployment API by environment, so all three jobs must request approval from the
-   same environment. It is not confirmed whether one approval releases every job that waits on that
-   environment in the run. Confirm this on the first release where two chains wait for approval at
-   the same time, and update this note with the result. The security floor holds either way: a
-   human must approve before any step that publishes or tags an image runs.
+3. Approve the `approve-images-<svc>` job. Each service chain has its own approval job, but all
+   three approval jobs (`approve-release`, `approve-images-iam`, `approve-images-gateway`) use the
+   same `release-approval` environment. GitHub approves a pending deployment by environment, not by
+   job. So one approval releases every chain that waits for approval in the same run. This comes
+   from the shape of GitHub's approval API. It has not yet been observed on a live run. To release
+   only one chain, keep only that chain pending: put only that service's version bump in the
+   release, and do not combine it with a kernel release you want to hold back. The security floor
+   holds either way: a human must approve before any step that publishes or tags an image runs.
 4. The `publish-images-<svc>` job pushes to GHCR, copies the index to Docker Hub, signs both,
    moves `:<major>.<minor>` and `:latest` only forward, and verifies the result. A release still in
    `0.x` does not move `:<major>`. That tag starts once the service reaches `1.0.0` or later. The

@@ -246,13 +246,17 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   `approve-images-<svc>` → `publish-images-<svc>` → `tag-<svc>`, for `iam` and `gateway`. The
   chains are independent of the kernel chain and of each other, so a kernel-only release, an
   image-only release and a combined release all work, and a failed image chain does not stop the
-  kernel release. `release_guard.py` V8 asserts that a publisher sits behind the approval of ITS
-  OWN chain — a kernel approval never authorises an image push. V14 asserts the same for the
-  CAPABILITY (`packages: write`, `id-token: write`, `attestations: write`, the `release-images`
-  or `release-publish` environment, an App token with `contents: write`), so a publish with a tool
-  no marker names still reds. V13 allows `DOCKERHUB_TOKEN` only in a job whose environment is
-  `release-images`, compares environment names case-folded, and fails closed on an `environment:`
-  built from an expression.
+  kernel release. `release_guard.py` V8 asserts that a publisher's job depends, in the job graph,
+  on the approval job of ITS OWN chain — a kernel approval job never gates an image push job. All
+  three approval jobs (`approve-release`, `approve-images-iam`, `approve-images-gateway`) share the
+  one `release-approval` environment, though. GitHub approves a pending deployment by environment,
+  not by job, so one human approval releases every chain that waits for approval in the same run.
+  This comes from the shape of GitHub's approval API; it has not yet been observed on a live run.
+  V14 asserts the same job-graph rule for the CAPABILITY (`packages: write`, `id-token: write`,
+  `attestations: write`, the `release-images` or `release-publish` environment, an App token with
+  `contents: write`), so a publish with a tool no marker names still reds. V13 allows
+  `DOCKERHUB_TOKEN` only in a job whose environment is `release-images`, compares environment names
+  case-folded, and fails closed on an `environment:` built from an expression.
 - **The first digest published under `:<version>` is final** (D10). A later run adopts it and
   discards its own build. A rebuild never reproduces a digest, because `chisel cut` resolves the
   live Ubuntu archive on every build, so "push the same digest again" is not available as a

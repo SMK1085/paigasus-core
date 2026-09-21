@@ -64,9 +64,14 @@ APPROVAL_JOB = "approve-release"
 # Case-folded, since GitHub itself treats environment names case-insensitively.
 APPROVAL_ENVIRONMENT = "release-approval"
 
-# SMA-658. Each service image chain carries its OWN approval job, separate from the kernel's. A
-# kernel approval must not authorise an image push, and an image approval must not authorise a
-# crates.io publish, so the rule is per chain rather than per file. A file with no image chain —
+# SMA-658. Each service image chain carries its OWN approval job, separate from the kernel's — this
+# is a JOB-GRAPH rule: it governs which approval job a publisher's `needs:` must depend on. A
+# kernel approval job must not gate an image push job, and an image approval job must not gate a
+# crates.io publish job, so the rule is per chain rather than per file. It does not mean the
+# approvals are separate human decisions: every approval job above shares the one
+# APPROVAL_ENVIRONMENT ("release-approval"), and GitHub approves a pending deployment by
+# environment, not by job, so one human approval releases every chain pending in the same run
+# (decision recorded 2026-09-21; not yet observed on a live run). A file with no image chain —
 # every fixture built on _OK_MAIN — keeps exactly the old behaviour.
 CHAIN_APPROVALS: dict[str, str] = {
     "iam": "approve-images-iam",

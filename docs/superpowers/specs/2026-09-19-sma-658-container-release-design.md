@@ -190,12 +190,17 @@ plan ─┬─ wheels / prebuild / proto-dist ─ approve-release ─ release �
   (challenger B1). A job-level `if:` cannot read `matrix`. One approval job that needs both builds
   is skipped when one build is skipped. A static chain for each service avoids all three problems.
 - **Result:** a kernel-only, an image-only, and a combined release all work. A failure in one chain
-  does not block another chain. **Intent, not a verified fact:** when two chains are pending, the
-  reviewer approves each one separately. GitHub's pending-deployment API is keyed by environment,
-  and whether approving one chain also releases another job waiting on the same environment is not
-  confirmed (PR 2 review). Confirm this on the first release where two chains are pending at once.
-  Either way, the security floor holds: a human must approve before any step that publishes or tags
-  an image runs.
+  does not block another chain. **Decision (2026-09-21).** PR 277's review surfaced the API
+  evidence below, and the maintainer chose to keep the one `release-approval` environment for all
+  three approval jobs, rather than add per-chain environments. GitHub approves a pending deployment
+  by environment, not by job. All three approval jobs use the same environment, so one approval
+  releases every chain that waits for approval in the same run. This comes from the shape of
+  GitHub's approval API; it has not yet been observed on a live run. `release_guard.py` V8 stays as
+  a job-graph rule: each publisher must depend on the approval job of its own chain. That still
+  stops a workflow edit from putting an image push behind the kernel's approval job, or from
+  deleting a chain's approval job. It does not make the approvals separate human decisions. Either
+  way, the security floor holds: a human must approve before any step that publishes or tags an
+  image runs.
 
 ### 4.1 The gate on each chain
 
