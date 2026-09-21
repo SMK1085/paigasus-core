@@ -19,7 +19,7 @@ import { PageError } from '../../_components/page-error';
 import { SectionError } from '../../_components/section-error';
 import { discovery, iamClients, sessionToken } from '../../../lib/console';
 import { listHref, MAX_EVENT_TYPE_LENGTH, MAX_PARKED_BOUND_LENGTH, parseCursor, parseEventType, parseParkedBound, type ParkedBoundField, type ParsedParkedBound } from '../../../lib/paging';
-import { discardDeadLetterAction, replayDeadLetterAction } from './actions';
+import { bulkReplayDeadLettersAction, discardDeadLetterAction, replayDeadLetterAction } from './actions';
 import { DeadLetterTable } from './dead-letter-table';
 import { DeadLettersFrame } from './dead-letters-frame';
 import { deadLettersGate, loadDeadLettersPage } from './load';
@@ -42,7 +42,7 @@ function shell(frameKey: string, body: ReactNode): ReactElement {
     <div className="flex flex-col gap-6 p-6">
       <Breadcrumbs items={[{ label: 'Dead letters' }]} />
       <h1 className="text-2xl font-semibold">Dead letters</h1>
-      <DeadLettersFrame key={frameKey} actions={{ replay: replayDeadLetterAction, discard: discardDeadLetterAction }}>
+      <DeadLettersFrame key={frameKey} actions={{ replay: replayDeadLetterAction, discard: discardDeadLetterAction, bulkReplay: bulkReplayDeadLettersAction }}>
         {body}
       </DeadLettersFrame>
     </div>

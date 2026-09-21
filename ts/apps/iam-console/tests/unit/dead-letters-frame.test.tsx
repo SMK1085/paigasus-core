@@ -7,7 +7,7 @@
 // service-account-section.test.tsx.
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import type { ReactNode } from 'react';
+import type { ReactElement, ReactNode } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ZoneProvider } from '@paigasus/app-shell';
 import type { ActionState } from '@paigasus/console-core';
@@ -15,7 +15,8 @@ import type { PaigasusError, Presentation } from '@paigasus/sdk/errors/types';
 import { DEAD_LETTER_GONE, PRESENTATION_COPY } from '../../app/_components/error-copy';
 import { SectionError } from '../../app/_components/section-error';
 import { DeadLetterTable } from '../../app/(console)/dead-letters/dead-letter-table';
-import { DeadLettersFrame, discardConfirmation, UNREACHED_TEXT, type DeadLetterActions } from '../../app/(console)/dead-letters/dead-letters-frame';
+import { bulkReplayedText, DeadLettersFrame, discardConfirmation, UNREACHED_TEXT, useRunner, type DeadLetterActions } from '../../app/(console)/dead-letters/dead-letters-frame';
+import type { BulkReplayAction, BulkReplayState } from '../../app/(console)/dead-letters/commands';
 import type { DeadLetterRow } from '../../app/(console)/dead-letters/load';
 
 vi.mock('next/link', () => ({
@@ -71,11 +72,29 @@ function errorWith(presentation: Presentation): PaigasusError {
 
 type Sig = (previous: ActionState, form: FormData) => Promise<ActionState>;
 
-function actions(overrides: Partial<Record<'replay' | 'discard', Sig>> = {}) {
+function actions(overrides: Partial<Record<'replay' | 'discard', Sig>> & { readonly bulkReplay?: BulkReplayAction } = {}) {
   return {
     replay: vi.fn<Sig>(overrides.replay ?? (() => Promise.resolve({ ok: true }))),
     discard: vi.fn<Sig>(overrides.discard ?? (() => Promise.resolve({ ok: true }))),
+    bulkReplay: vi.fn<BulkReplayAction>(overrides.bulkReplay ?? (() => Promise.resolve({ ok: true, replayed: 2 }))),
   };
+}
+
+/** A stand-in for the bulk form: it hands the runner a FormData with NO id, as the real form does. */
+function BulkProbe(): ReactElement {
+  const runner = useRunner();
+  return (
+    <button
+      type="button"
+      onClick={() => {
+        const form = new FormData();
+        form.append('maxRows', '5');
+        runner.runBulk(form);
+      }}
+    >
+      Run bulk
+    </button>
+  );
 }
 
 function frame(children: ReactNode, a: DeadLetterActions): ReactNode {
@@ -257,6 +276,139 @@ describe('the table', () => {
     const rows = screen.getAllByTestId('dead-letter-row');
     expect(rows.map((element) => element.getAttribute('data-id'))).toEqual([B, A]);
     expect(within(rows[0] as HTMLElement).getAllByText('—').length).toBeGreaterThan(0);
-    expect(screen.getByText('Newest events first.')).toBeDefined();
+    expect(screen.getByText('Newest events first. With a parked-time filter set, an event with no parked time is not listed.')).toBeDefined();
+  });
+
+  it('hides Replay and keeps Discard when canReplay is false (SMA-661 D4)', () => {
+    render(frame(<DeadLetterTable canReplay={false} rows={[ROW_A]} />, actions()));
+
+    expect(within(controlsOf(A)).queryByRole('button', { name: 'Replay' })).toBeNull();
+    expect(screen.queryByRole('form', { name: `Replay event ${A}` })).toBeNull();
+    expect(within(controlsOf(A)).getByRole('button', { name: 'Discard' })).toBeDefined();
+  });
+});
+
+describe('bulk replay through the runner (SMA-661 spec § 6.1, § 6.7)', () => {
+  it('words the count: plural, singular, and zero as a real answer', () => {
+    expect(bulkReplayedText(8)).toBe('Replayed 8 events.');
+    expect(bulkReplayedText(1)).toBe('Replayed 1 event.');
+    expect(bulkReplayedText(0)).toBe('Replayed 0 events. No parked event matched the scope.');
+  });
+
+  it('shows the count, reads no id, and keeps the result across a refresh', async () => {
+    const user = userEvent.setup();
+    const a = actions();
+    const { rerender } = render(
+      frame(
+        <>
+          <BulkProbe />
+          <DeadLetterTable rows={[ROW_A]} />
+        </>,
+        a,
+      ),
+    );
+
+    await user.click(screen.getByRole('button', { name: 'Run bulk' }));
+    await within(region()).findByText('Replayed 2 events.');
+    expect(a.bulkReplay).toHaveBeenCalledTimes(1);
+    expect(a.bulkReplay.mock.calls[0]?.[0]).toBeNull();
+    expect(a.bulkReplay.mock.calls[0]?.[1].get('id')).toBeNull();
+    expect(a.bulkReplay.mock.calls[0]?.[1].get('maxRows')).toBe('5');
+    expect(a.replay).not.toHaveBeenCalled();
+
+    await refresh(
+      rerender,
+      frame(
+        <>
+          <BulkProbe />
+          <p>No dead letters</p>
+        </>,
+        a,
+      ),
+    );
+    expect(within(region()).getByText('Replayed 2 events.')).toBeDefined();
+  });
+
+  it('shows a failure as FormError, and never the dead-letter sentence', async () => {
+    const user = userEvent.setup();
+    render(frame(<BulkProbe />, actions({ bulkReplay: () => Promise.resolve({ ok: false, error: errorWith('not-found') }) })));
+
+    await user.click(screen.getByRole('button', { name: 'Run bulk' }));
+
+    expect((await within(region()).findByTestId('form-error')).getAttribute('data-presentation')).toBe('not-found');
+    expect(within(region()).queryByText(DEAD_LETTER_GONE)).toBeNull();
+  });
+
+  it('shows the unreached text for a rejected bulk action', async () => {
+    const user = userEvent.setup();
+    render(frame(<BulkProbe />, actions({ bulkReplay: () => Promise.reject(new TypeError('Failed to fetch')) })));
+
+    await user.click(screen.getByRole('button', { name: 'Run bulk' }));
+
+    expect(await within(region()).findByText(UNREACHED_TEXT)).toBeDefined();
+  });
+
+  it('lets a NEWER row submission win over an older bulk submission', async () => {
+    let finishBulk: (state: BulkReplayState) => void = () => undefined;
+    const a = actions({
+      bulkReplay: () =>
+        new Promise<BulkReplayState>((resolve) => {
+          finishBulk = resolve;
+        }),
+      replay: () => Promise.resolve({ ok: false, error: errorWith('forbidden') }),
+    });
+    render(
+      frame(
+        <>
+          <BulkProbe />
+          <DeadLetterTable rows={[ROW_A]} />
+        </>,
+        a,
+      ),
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Run bulk' }));
+    fireEvent.submit(screen.getByRole('form', { name: `Replay event ${A}` }));
+    await within(region()).findByText(PRESENTATION_COPY.forbidden.body);
+    await act(async () => {
+      finishBulk({ ok: true, replayed: 9 });
+      await Promise.resolve();
+    });
+
+    expect(within(region()).queryByText('Replayed 9 events.')).toBeNull();
+    expect(within(region()).getByTestId('form-error').getAttribute('data-presentation')).toBe('forbidden');
+  });
+
+  it('disables every row button while a bulk replay runs', async () => {
+    let finish: (state: BulkReplayState) => void = () => undefined;
+    render(
+      frame(
+        <>
+          <BulkProbe />
+          <DeadLetterTable rows={[ROW_A, ROW_B]} />
+        </>,
+        actions({
+          bulkReplay: () =>
+            new Promise<BulkReplayState>((resolve) => {
+              finish = resolve;
+            }),
+        }),
+      ),
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Run bulk' }));
+
+    // isPending can lag the transition's own setState, so wait for the busy state.
+    await waitFor(() => {
+      expect(rowButtons()).toHaveLength(4);
+      for (const button of rowButtons()) expect(button.disabled).toBe(true);
+    });
+    await act(async () => {
+      finish({ ok: true, replayed: 1 });
+      await Promise.resolve();
+    });
+    await waitFor(() => {
+      for (const button of rowButtons()) expect(button.disabled).toBe(false);
+    });
   });
 });
