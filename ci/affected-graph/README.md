@@ -244,7 +244,7 @@ It also runs several checks that the per-case project sets structurally **cannot
   If one is missing, A9 reds with a "never reaches" row.
 - **A11** (`check_member_literals` in `cargo_moon_parity.py`, SMA-663, findings key `a11`) reds
   on any `[workspace] members` entry in `rs/Cargo.toml` that carries a glob character (`*`, `?`
-  or `[`). A glob also matches a dot-directory. `napi build` (@napi-rs/cli 3.10.3) stages its
+  or `[`). A glob can match a dot-directory. `napi build` (@napi-rs/cli 3.10.3) stages its
   output in `.<crate>.napi-stage-<random>` beside the crate, and that directory has no
   `Cargo.toml`. `moon ci` runs the napi tasks in parallel with the crate tasks. While the
   staging directory exists, that overlap makes every concurrent `cargo metadata` fail with

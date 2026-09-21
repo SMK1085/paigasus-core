@@ -29,7 +29,7 @@
 # sandbox both truncates the lock it proposes and reds its own job.
 #
 # A11 (SMA-663) reads the same `members` list and reds on any glob character in it, because a
-# glob also matches napi's `.<crate>.napi-stage-<random>` staging directory.
+# glob can match napi's `.<crate>.napi-stage-<random>` staging directory.
 #
 # usage: cargo_moon_parity.py [--self-test]
 import collections
@@ -1791,7 +1791,7 @@ MEMBER_GLOB_CHARS = ("*", "?", "[")
 def check_member_literals(root):
     """Return the A11 violation list: `[workspace] members` entries that carry a glob (SMA-663).
 
-    A glob also matches a dot-directory. `napi build` (@napi-rs/cli 3.10.3, dist/cli.js:10350)
+    A glob can match a dot-directory. `napi build` (@napi-rs/cli 3.10.3, dist/cli.js:10350)
     stages every output in `mkdtemp(dirname(outputDir) + "/." + basename(outputDir) +
     ".napi-stage-")`, a sibling of the crate with no Cargo.toml in it. While it exists, every
     concurrent `cargo metadata` fails with exit 101 on the missing manifest. `moon ci` runs the
@@ -1804,8 +1804,8 @@ def check_member_literals(root):
     """
     return [
         f"members entry {entry!r} carries a glob character. "
-        f"It also matches a dot-directory such as napi's `.<crate>.napi-stage-<random>`, "
-        f"so a concurrent `cargo metadata` then fails on its missing Cargo.toml"
+        f"It can match a dot-directory such as napi's `.<crate>.napi-stage-<random>`, "
+        f"and a concurrent `cargo metadata` then fails on its missing Cargo.toml"
         for entry in read_workspace_members(root, "A11")
         if any(ch in entry for ch in MEMBER_GLOB_CHARS)
     ]
@@ -3133,7 +3133,7 @@ def self_test():
         except MoonOutputError:
             pass
 
-    # A11 (SMA-663): no `members` entry may carry a glob character. A glob also matches a
+    # A11 (SMA-663): no `members` entry may carry a glob character. A glob can match a
     # dot-directory, and `napi build` stages its output in `.<crate>.napi-stage-<random>` beside
     # the crate, with no Cargo.toml in it. A concurrent `cargo metadata` then exits 101.
     with tempfile.TemporaryDirectory() as tmp:
@@ -4452,7 +4452,7 @@ def collect_findings(projects, crates, root):
              "    trusted; fix that first, every other A10 row is meaningless until it passes."),
         ("a11", check_member_literals(root),
              "A `[workspace] members` entry in rs/Cargo.toml carries a glob character. A glob\n"
-             "    also matches a dot-directory. `napi build` stages its output in\n"
+             "    can match a dot-directory. `napi build` stages its output in\n"
              "    `.<crate>.napi-stage-<random>` beside the crate, with no Cargo.toml in it.\n"
              "    Every concurrent `cargo metadata` then fails with exit 101 (SMA-663).\n"
              "    Fix: list each crate directory as its own literal entry. A9 reds if one is\n"
