@@ -160,10 +160,13 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   `repo:affected-smoke`'s **A9** (`ci/affected-graph/cargo_moon_parity.py`) now asserts it by
   TRANSCRIBING Dependabot's expander rather than restating the rule: it fails if a `members` entry
   resolves to zero members, and separately if any crate directory no entry reaches. Reverting the
-  line to `crates/*/*` reds it with 14 rows (MEASURED). Adding a crate DIRECTORY (a fourth sibling
-  of `libs`/`services`/`bindings`) needs a new `members` entry; adding a crate inside an existing
-  one does not. A8 and A9 are the two halves of one story: A8 catches a truncated lock once it
-  exists, A9 removes the thing that writes one.
+  line to `crates/*/*` reds it with 14 rows (MEASURED). Since SMA-663, every entry is a LITERAL
+  crate path. So **every new crate** needs its own `members` line. `cargo new` adds it. A9 reds
+  if one is missing. A8 and A9 are the two halves of one story: A8 catches a truncated lock once
+  it exists, A9 removes the thing that writes one. **No glob at all (SMA-663).** A glob also
+  matches a dot-directory. `napi build` stages its output in `.<crate>.napi-stage-<random>`
+  beside the crate, with no `Cargo.toml`. A concurrent `cargo metadata` then exits 101.
+  `repo:affected-smoke`'s **A11** reds on any `*`, `?` or `[` in `members`.
 
 ## Container images
 

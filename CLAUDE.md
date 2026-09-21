@@ -149,17 +149,19 @@ a gate. Do not copy it here.
 
 ### Diagnosing an unattributed `moon ci` failure
 
-- `paigasus-kernel-ts:build`/`:test` (and a task that depends on it) can fail `moon ci` in GitHub
-  Actions with a `cargo metadata` error that names a `.napi-stage-<random>` path under
-  `rs/crates/bindings/`. napi's build tooling makes a temporary staging directory there, and
-  `rs/Cargo.toml`'s `crates/bindings/*` workspace-member glob can pick it up mid-creation or
-  mid-teardown, while a concurrent task's `cargo metadata` call hard-errors on it instead of
-  skipping it. This is a CI-only concurrency flake, not a defect in the PR's diff; a re-run clears
-  it, and it never reproduces locally, since it needs CI's own parallel job scheduling. **Observed
-  rate on the SMA-658 branch: 4 of 4 `moon ci` runs**, each time on a different task
-  (`paigasus-service-info-rs:{lint,test}`, `paigasus-kernel-ts:test`, `paigasus-kernel-py:test`),
-  each time with a `.napi-stage-<random>` path in the error. Treat this as a common failure on this
-  repo, not a rare one, and confirm it by the exact error text before assuming a real regression.
+- **FIXED (SMA-663): a `cargo metadata` error that names a `.napi-stage-<random>` path under
+  `rs/crates/bindings/`.** `napi build` (@napi-rs/cli 3.10.3) stages every output in a sibling
+  directory `.<crate>.napi-stage-<random>` that has no `Cargo.toml`. The old
+  `crates/bindings/*` members glob matched it. Every concurrent `cargo metadata` call then
+  failed with exit 101, for the full life of that directory. Only `paigasus-kernel-ts:build`
+  and `:test` stage. Every other task in the error, `paigasus-kernel-py:test` included, was a
+  victim. It reached 9 of 9 `moon ci` runs on SMA-658. Re-runs did not clear it. The fix: every
+  `rs/Cargo.toml` `members` entry is a literal path. `repo:affected-smoke`'s A11 reds on a glob
+  character there. Measured with a forced overlap of 200 napi builds: 2212 of 4624 concurrent
+  `cargo metadata` calls failed with the glob. 0 of 2441 calls failed with literal entries.
+  Moon does not count the staging directory as a project. The project count was 33, with or
+  without a probe directory. **This error must not occur any more.** If it does, it is a new
+  defect. Check first for a glob back in `members`, or a new crate path outside the list.
 - The procedure below is MEASURED on moon 2.5.3
   (SMA-597); re-take it on a bump. It is for **local** runs — in CI see the note at the end.
   <!-- moon-diagnosis:begin -->
