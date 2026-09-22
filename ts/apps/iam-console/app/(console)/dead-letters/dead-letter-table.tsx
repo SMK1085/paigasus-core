@@ -18,10 +18,14 @@ function Code({ value }: { readonly value: string | null }): ReactElement {
   return value === null ? <>{NONE}</> : <code className="text-xs">{value}</code>;
 }
 
-export function DeadLetterTable({ rows }: { readonly rows: readonly DeadLetterRow[] }): ReactElement {
+/**
+ * `canReplay` (SMA-661 D4) reaches every row's controls; it defaults to true. The caption names the
+ * NULL `parked_at` blind spot (SMA-661 § 4.6): with a time bound set, IAM never lists such a row.
+ */
+export function DeadLetterTable({ rows, canReplay = true }: { readonly rows: readonly DeadLetterRow[]; readonly canReplay?: boolean }): ReactElement {
   return (
     <Table>
-      <caption className="text-muted-foreground mb-2 caption-top text-left text-sm">Newest events first.</caption>
+      <caption className="text-muted-foreground mb-2 caption-top text-left text-sm">Newest events first. With a parked-time filter set, an event with no parked time is not listed.</caption>
       <TableHeader>
         <TableRow>
           <TableHead>Event id</TableHead>
@@ -50,7 +54,7 @@ export function DeadLetterTable({ rows }: { readonly rows: readonly DeadLetterRo
                 <Code value={row.correlationId} />
               </TableCell>
               <TableCell>
-                <DeadLetterRowControls id={row.id} />
+                <DeadLetterRowControls canReplay={canReplay} id={row.id} />
               </TableCell>
             </TableRow>
             <TableRow>

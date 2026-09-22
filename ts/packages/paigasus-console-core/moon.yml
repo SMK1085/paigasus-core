@@ -62,6 +62,12 @@ tasks:
       # `repo:*` tasks only, so the SMA-630 plan (Task 2) confirmed with `moon task … --json` that
       # this entry resolves to a tracked file.
       - '/rs/crates/libs/paigasus-iam-core/src/authz/action.rs'
+      # SMA-661 spec § 7.2. tests/unit/bulk-replay-ceiling.test.ts reads the bulk-replay clamp as TEXT.
+      # Without this input, a changed Rust clamp selects no paigasus-console-core-ts task, and Moon
+      # serves a cached PASS on exactly the PR that breaks the ceiling. The iam-console `test` task
+      # cannot carry it instead: it has no /rs/** input, and adding one would rebuild the console on
+      # every dead_letter.rs edit, because that task depends on `~:build`.
+      - '/rs/crates/libs/paigasus-iam-core/src/dead_letter.rs'
   test-e2e:
     # SMA-648 § 4.4: the Docker-backed tier. It drives the REAL call site, descriptorCacheFor, against
     # a real Redis, because the defect lived in the client options that call site passes.

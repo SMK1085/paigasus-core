@@ -43,10 +43,12 @@ const { tenancy, outbox, failNext } = vi.hoisted(() => {
       archiveProject: call,
       restoreProject: call,
     },
-    // SMA-629: recording mocks, so a test can count the calls an invalid id must NOT make.
+    // SMA-629: recording mocks, so a test can count the calls an invalid id must NOT make. SMA-661
+    // added bulk replay, which answers a count.
     outbox: {
       replayDeadLetter: vi.fn<(request: { id: string }) => Promise<Record<string, never>>>(call),
       discardDeadLetter: vi.fn<(request: { id: string }) => Promise<Record<string, never>>>(call),
+      bulkReplayDeadLetters: vi.fn<(request: { eventType: string; maxRows: bigint }) => Promise<{ replayed: bigint }>>(() => call().then(() => ({ replayed: 3n }))),
     },
   };
 });
@@ -59,7 +61,7 @@ const { attachMembershipAction, createOrganizationAction, detachMembershipAction
 const { archiveOrganizationAction, createTeamAction, renameOrganizationAction, restoreOrganizationAction } = await import('../../app/(console)/orgs/[org]/actions');
 const { archiveTeamAction, createProjectAction, renameTeamAction, restoreTeamAction } = await import('../../app/(console)/orgs/[org]/teams/[team]/actions');
 const { archiveProjectAction, renameProjectAction, restoreProjectAction } = await import('../../app/(console)/orgs/[org]/teams/[team]/projects/[project]/actions');
-const { discardDeadLetterAction, replayDeadLetterAction } = await import('../../app/(console)/dead-letters/actions');
+const { bulkReplayDeadLettersAction, discardDeadLetterAction, replayDeadLetterAction } = await import('../../app/(console)/dead-letters/actions');
 
 const ORG_PRN = 'prn:pgs:iam:::organization/0190a100-0000-7000-8000-00000000000a';
 const TEAM_PRN = 'prn:pgs:iam::0190a100-0000-7000-8000-00000000000a:team/0190a1b2-0000-7000-8000-0000000000a1';
@@ -233,6 +235,48 @@ describe('the two dead-letter actions', () => {
 
     expect(result).toMatchObject({ ok: false, error: { presentation: 'invalid-input' } });
     expect(rpc.mock.calls.length).toBe(before);
+    expect(revalidatedPaths).toEqual([]);
+  });
+});
+
+// SMA-661 spec § 6.5, § 6.6 and AC 1. The action parses the form, so a bulk replay with no valid
+// max_rows never reaches IAM. On a success it refreshes the one page; on a failure it refreshes
+// nothing (bulk replay never answers not-found).
+const bulkForm = (fields: Record<string, string>): FormData => form({ eventType: '', parkedFrom: '', parkedTo: '', ...fields });
+
+describe('the bulk-replay action', () => {
+  it('sends the budget as a bigint and the canonical bound, answers the count, and refreshes the page', async () => {
+    const result = await bulkReplayDeadLettersAction(null, bulkForm({ maxRows: '500', parkedFrom: '2026-09-19 00:00Z' }));
+
+    expect(result).toEqual({ ok: true, replayed: 3 });
+    expect(outbox.bulkReplayDeadLetters.mock.calls.at(-1)?.[0]).toMatchObject({ eventType: '', maxRows: 500n, parkedFrom: { seconds: 1_789_776_000n, nanos: 0 } });
+    expect(revalidatedPaths).toEqual(PAGE_REFRESH);
+  });
+
+  it.each<[string, Record<string, string>]>([
+    ['no maxRows field at all', {}],
+    ['an empty maxRows', { maxRows: '' }],
+    ['zero', { maxRows: '0' }],
+    ['one past the ceiling', { maxRows: '10001' }],
+    ['a hexadecimal budget', { maxRows: '0x10' }],
+    ['a fractional budget', { maxRows: '7.5' }],
+    ['a parked bound with no zone', { maxRows: '5', parkedFrom: '2026-09-19T00:00:00' }],
+  ])('refuses %s as invalid input and makes ZERO IAM calls (AC 1)', async (_label, fields) => {
+    const before = outbox.bulkReplayDeadLetters.mock.calls.length;
+
+    const result = await bulkReplayDeadLettersAction(null, bulkForm(fields));
+
+    expect(result).toMatchObject({ ok: false, error: { presentation: 'invalid-input' } });
+    expect(outbox.bulkReplayDeadLetters.mock.calls.length).toBe(before);
+    expect(revalidatedPaths).toEqual([]);
+  });
+
+  it('refreshes nothing when IAM answers forbidden', async () => {
+    failNext(Code.PermissionDenied);
+
+    const result = await bulkReplayDeadLettersAction(null, bulkForm({ maxRows: '5' }));
+
+    expect(result).toMatchObject({ ok: false, error: { presentation: 'forbidden' } });
     expect(revalidatedPaths).toEqual([]);
   });
 });
