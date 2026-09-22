@@ -100,6 +100,7 @@ export function BulkReplayForm({ scope, ceiling }: { readonly scope: BulkReplayS
         <input type="hidden" name="parkedTo" value={scope.parkedTo} />
         <Field label="Max rows" htmlFor="dead-letters-max-rows" description={`Enter a whole number from 1 to ${String(ceiling)}.`}>
           <Input
+            required
             name="maxRows"
             value={maxRows}
             inputMode="numeric"

@@ -150,6 +150,12 @@ describe('the form (§ 6.3, § 6.4)', () => {
     expect(firstButton().disabled).toBe(true);
   });
 
+  it('marks the row budget as required, so assistive technology announces it', () => {
+    render(page(actions()));
+
+    expect(maxRowsInput().required).toBe(true);
+  });
+
   it.each(['0', '10001', '7.5', '0x10'])('keeps the first button disabled for %j, so no confirmation opens without a valid number', async (value) => {
     const user = userEvent.setup();
     render(page(actions()));
