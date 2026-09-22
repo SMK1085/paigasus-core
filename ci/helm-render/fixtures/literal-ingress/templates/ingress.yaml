@@ -1,0 +1,46 @@
+{{/* SPDX-License-Identifier: Apache-2.0 */}}
+{{- include "paigasus.validate" . -}}
+{{- $root := . -}}
+{{- $full := include "paigasus.fullname" . -}}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ $full }}
+  {{- with .Values.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  # DO NOT add a rewrite annotation here or in values. Each console compiles basePath in and
+  # serves its FULL path already — a rewrite that strips /iam breaks every route in that zone.
+  # This is the change an operator is most likely to add by reflex.
+spec:
+  {{- with .Values.ingress.className }}
+  ingressClassName: {{ . }}
+  {{- end }}
+  tls:
+    # The ingress MUST terminate TLS: PAIGASUS_PUBLIC_ORIGIN is validated as https, and the
+    # __Host-pgs_sid cookie requires Secure. One host, so the cookie is host-only and every zone
+    # reads it (ADR-0017 decision 2).
+    - hosts:
+        - {{ .Values.ingress.host | quote }}
+      secretName: {{ .Values.ingress.tlsSecretName }}
+  rules:
+    - host: {{ .Values.ingress.host | quote }}
+      http:
+        paths:
+          # NEGATIVE-CONTROL FIXTURE (ci/helm-render): both rules written literally, NOT ranged
+          # over the enabled zones. Check 1.1 must fail for the iam-only subset.
+          - path: /iam
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "paigasus.name" (list $root "iam-console") }}
+                port:
+                  name: http
+          - path: /gateway
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "paigasus.name" (list $root "gateway-console") }}
+                port:
+                  name: http
