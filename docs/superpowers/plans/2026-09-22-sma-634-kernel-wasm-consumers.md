@@ -1,3 +1,9 @@
+<!-- moon-diagnosis:ok -->
+<!-- The marker above is for check 12 of repo:actionlint: Task 11 names the ciReport token when it
+points the implementer at CLAUDE.md's moon-diagnosis block, so this file needs the marker. The
+reference is the corrected procedure — read operations[] on the task-execution entry — not the
+broken action-level exitCode advice. -->
+
 # SMA-634 — Node consumers load the kernel through its wasm entry — Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development
