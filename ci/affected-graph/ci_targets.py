@@ -1001,7 +1001,7 @@ ACTIONLINT_SH_INDENTED_CALL_SITES = (
     # actual 98, so 78 rows — the whole V10 credential control among them — could be deleted with
     # the gate still green. Raise it with the table, to just under the current `--fixture-count`,
     # and re-pin it in all three places in this file.
-    '[ "$n" -ge 120 ] || infra "check 10: release_guard.py reports $n fixtures, expected at least 120"',
+    '[ "$n" -ge 150 ] || infra "check 10: release_guard.py reports $n fixtures, expected at least 150"',
     # ...and the SELF-TEST invocation. Deleting it leaves the production call (in
     # ACTIONLINT_SH_CALL_SITES above) running against a verdict function nothing has proved
     # correct. This is also the one entry across every registry that is a MID-LINE FRAGMENT, not
@@ -1182,8 +1182,19 @@ RELEASE_PLAN_SH_CALL_SITES = (
     "--negative-control)  MODE=negctl; shift ;;",
     "output)   github_output ;;",
     "negctl)   require_uv; negative_control ;;",
-    'if [ "$rc" -ne 0 ] || ! grep -qE \'^nothing_to_release=(true|false)$\' < <(printf \'%s\\n\' "$out"); then',
+    # SMA-658 fix round 2. Six lines replace the old single-line `if`: the presence check now
+    # folds all five keys together (a missing one routes to the fail-safe branch instead of
+    # aborting the pipelines below under pipefail), so a future edit dropping one key's grep back
+    # out of this condition must re-pin here, not pass silently.
+    'if [ "$rc" -ne 0 ] \\',
+    "|| ! grep -qE '^nothing_to_release=(true|false)$' < <(printf '%s\\n' \"$out\") \\",
+    "|| ! grep -qE '^skip_iam=(true|false)$' < <(printf '%s\\n' \"$out\") \\",
+    "|| ! grep -qE '^skip_gateway=(true|false)$' < <(printf '%s\\n' \"$out\") \\",
+    "|| ! grep -qE '^version_iam=' < <(printf '%s\\n' \"$out\") \\",
+    "|| ! grep -qE '^version_gateway=' < <(printf '%s\\n' \"$out\"); then",
     "printf 'nothing_to_release=false\\n' >> \"${GITHUB_OUTPUT:-/dev/stdout}\"",
+    "printf 'skip_iam=false\\nskip_gateway=false\\n' >> \"${GITHUB_OUTPUT:-/dev/stdout}\"",
+    "printf '%s\\n' \"$out\" | grep -E '^skip_iam=(true|false)$' | tail -n 1 \\",
     "if ! grep -qx 'nothing_to_release=false' \"$nouv_out\"; then",
     'if [ "$mut_rc" != "3" ]; then',
     "printf 'release-plan negative control: %d row(s) failed\\n' \"$failures\" >&2",
@@ -2527,7 +2538,7 @@ def self_test():
         # ...and check 10's fixture-table arity floor and self-test invocation (SMA-579),
         # matched via ACTIONLINT_SH_INDENTED_CALL_SITES instead: both sit inside
         # release_guard_self_test(), so they carry real, executing leading whitespace.
-        '  [ "$n" -ge 120 ] || infra "check 10: release_guard.py reports $n fixtures, expected at least 120"\n'
+        '  [ "$n" -ge 150 ] || infra "check 10: release_guard.py reports $n fixtures, expected at least 150"\n'
         '  release_guard_py --self-test || { fail "check 10: release_guard.py --self-test reported a broken\n'
         # ...and check 11's invocation inside run_self_tests, its own self-test invocation, and
         # its negative-control invocation (SMA-603, the last added in fix round 1's I2), matched
@@ -2763,8 +2774,8 @@ def self_test():
             "(the done < <(...) swallow class, run.sh:2050)"
         )
     no_rg_arity_call = wired_actionlint.replace(
-        '  [ "$n" -ge 120 ] || infra "check 10: release_guard.py reports $n fixtures, '
-        'expected at least 120"\n',
+        '  [ "$n" -ge 150 ] || infra "check 10: release_guard.py reports $n fixtures, '
+        'expected at least 150"\n',
         "",
     )
     if not check_self_invocation(wired, scripts, no_rg_arity_call, wired_release_parity, wired_workflow_credentials, wired_release_plan, wired_ruff, wired_next_public_free):

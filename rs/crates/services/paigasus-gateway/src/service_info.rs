@@ -12,7 +12,8 @@ use crate::config::GatewayConfig;
 pub const SERVICE: &str = "gateway";
 
 /// This build's version — `env!` evaluated in THIS crate, so it is `paigasus-gateway`'s own
-/// `Cargo.toml` version (AC 4). Reports `0.0.0` until release-plz is activated.
+/// `Cargo.toml` version (AC 4). A maintainer sets it by hand; release-plz does not process this
+/// crate, because its Cargo manifest sets `publish = false` (SMA-658, spec § 3.1).
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

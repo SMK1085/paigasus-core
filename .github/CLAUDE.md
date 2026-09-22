@@ -13,9 +13,17 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   gets bumped ("dependencies changed") — and Cargo's `publish = false` suppresses publishing but
   **not tagging**, so the first release would permanently tag most of the workspace. Per-package
   `release = false` removes a package from the proposal entirely; every non-family crate needs
-  one explicitly. `paigasus-gateway` / `paigasus-iam` stay at `0.0.0` deliberately: their
-  `env!("CARGO_PKG_VERSION")` feeds `ServiceInfo`, and ADR-0020 skew reporting is parked on that
-  value (SMA-505 R7).
+  one explicitly. `paigasus-gateway` / `paigasus-iam` are versioned BY HAND (SMA-658, option
+  V-a) and are at `0.1.0` as of this PR. `release = false` stays, and release-plz neither bumps
+  nor tags them: `packages_to_process()` filters on Cargo's own `publish` field, and both crates
+  sit in NO `version_group` (SMA-658 M7, measured on 0.3.158). Read that as the scoped claim it
+  is — a `publish = false` crate INSIDE a group whose head is publishable still gets its
+  `[package] version` written, which the version-lockstep entry below records as measured for
+  the three kernel binding crates. M7's fixture had a group with only unpublishable members and
+  produced `version groups: {}`; it did not test the mixed group, and neither result disproves
+  the other. What `publish = false` always excludes is tagging and publishing.
+  `env!("CARGO_PKG_VERSION")` still feeds `ServiceInfo`, and ADR-0020 skew reporting is still
+  parked on that value (SMA-505 R7).
 - release-plz's `release_pr()` does all its work in a **tempdir copy** (`copy_to_temp_dir`,
   measured against the pinned 0.3.158) — it never touches the local working tree or `HEAD`. This
   nearly shipped a direct push to `main`: deriving the push target with `git rev-parse
@@ -234,3 +242,42 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   V7 is NOT the last check: the roster has since grown through V8 to V12 (SMA-602), so read
   `ci/actionlint/release_guard.py`'s `^# V` comments rather than this entry alone.
 - `release.yml` must never gain a `pull_request` or `pull_request_target` trigger (SMA-579).
+- Each service image releases through **its own chain** in `release.yml`: `images-build-<svc>` →
+  `approve-images-<svc>` → `publish-images-<svc>` → `tag-<svc>`, for `iam` and `gateway`. The
+  chains are independent of the kernel chain and of each other, so a kernel-only release, an
+  image-only release and a combined release all work, and a failed image chain does not stop the
+  kernel release. `release_guard.py` V8 asserts that a publisher's job depends, in the job graph,
+  on the approval job of ITS OWN chain — a kernel approval job never gates an image push job. All
+  three approval jobs (`approve-release`, `approve-images-iam`, `approve-images-gateway`) share the
+  one `release-approval` environment, though. GitHub approves a pending deployment by environment,
+  not by job, so one human approval releases every chain that waits for approval in the same run.
+  MEASURED on the first live release (run 35648073131, 2026-09-21): the run listed one pending
+  deployment for the two waiting approval jobs, and one approval released both chains.
+  V14 asserts the same job-graph rule for the CAPABILITY (`packages: write`, `id-token: write`,
+  `attestations: write`, the `release-images` or `release-publish` environment, an App token with
+  `contents: write`), so a publish with a tool no marker names still reds. V13 allows
+  `DOCKERHUB_TOKEN` only in a job whose environment is `release-images`, compares environment names
+  case-folded, and fails closed on an `environment:` built from an expression.
+- **The first digest published under `:<version>` is final** (D10). A later run adopts it and
+  discards its own build. A rebuild never reproduces a digest, because `chisel cut` resolves the
+  live Ubuntu archive on every build, so "push the same digest again" is not available as a
+  recovery. `:<major>.<minor>` and `:latest` move only forward, compared as numbers. `:<major>`
+  moves the same way, but only once the service leaves `0.x` — a `0.x` release writes no
+  `:<major>` tag at all.
+- A service version is set **by hand**, in a normal pull request, with a `CHANGELOG.md` section.
+  The two service crates are `publish = false` and sit in no `version_group`, so `release-plz
+  update` never sees them, and `git_only` hard-errors on the second release because each has an
+  unpublished workspace dependency (MEASURED, SMA-658 M7). See the release-plz entry above for
+  the bound on that claim: a `publish = false` crate inside a group with a publishable head IS
+  version-written. `ci/release-plan/release_plan.py
+  --assert`, which `repo:actionlint` check 11 runs on every pull request, fails when a bumped
+  service has no changelog section.
+- **`gh api` on a 404 exits 1 AND prints GitHub's JSON error body on STDOUT.** `--jq` is not
+  applied to the error body, and `2> /dev/null` does not hide it. MEASURED on the first live image
+  release (run 35648073131): `existing="$(gh api …/git/ref/tags/<tag> --jq .object.sha 2> /dev/null
+  || echo none)"` captured `{"message":"Not Found",…}none`, so both `tag-<svc>` jobs read a MISSING
+  tag as a conflicting one and failed, after the images were already published. Never capture a
+  `gh api` result with an `|| echo <default>` fallback. Branch on the exit status, and on a failure
+  accept only the 404 body (`"status":"404"`) as "absent"; any other failure must stop the job.
+  `release.yml`'s "Make the release tag" step is the worked example. A `git ls-remote --exit-code`
+  probe, which the publish job uses, does not have this trap.

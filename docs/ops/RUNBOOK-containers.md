@@ -507,3 +507,101 @@ none of those steps. PR 2's first real release is their first test.
 The rehearsal pushes to `ghcr.io/smk1085/paigasus-rehearsal`. GitHub makes this package private
 after its first push. It holds only rehearsal images. Delete old versions in the package settings
 when you do not need them.
+
+## Release a service image
+
+A maintainer sets a service version by hand. release-plz does not process these crates, because
+their Cargo manifests set `publish = false` (SMA-658, spec § 3.1).
+
+Before you release a service for the first time, create both registry repositories:
+`ghcr.io/smk1085/paigasus-<svc>` and `docker.io/smaschek/paigasus-<svc>`. Set the Docker Hub
+repository to public. The `decide` step logs in first, then reads Docker Hub. A missing or private
+repository sends a 401 answer. The step treats a 401 answer as a fatal error, not as "no image
+yet".
+
+1. Open a pull request with the title `chore(rs): release paigasus-<svc> v<version>`. In it:
+   - set `version` in `rs/crates/services/paigasus-<svc>/Cargo.toml`;
+   - run `cargo update --manifest-path rs/Cargo.toml -p paigasus-<svc> --offline`;
+   - add a `## [<version>] - <date>` section to that crate's `CHANGELOG.md`.
+   `repo:actionlint` check 11 fails the pull request when the changelog section is missing.
+2. Merge it. The `plan` job selects the service, because its version has no tag.
+3. Approve the `approve-images-<svc>` job. Each service chain has its own approval job, but all
+   three approval jobs (`approve-release`, `approve-images-iam`, `approve-images-gateway`) use the
+   same `release-approval` environment. GitHub approves a pending deployment by environment, not by
+   job. So one approval releases every chain that waits for approval in the same run. This was
+   measured on the first live release (run 35648073131): one approval released both image
+   chains. To release
+   only one chain, keep only that chain pending: put only that service's version bump in the
+   release, and do not combine it with a kernel release you want to hold back. The security floor
+   holds either way: a human must approve before any step that publishes or tags an image runs.
+4. The `publish-images-<svc>` job pushes to GHCR, copies the index to Docker Hub, signs both,
+   moves `:<major>.<minor>` and `:latest` only forward, and verifies the result. A release still in
+   `0.x` does not move `:<major>`. That tag starts once the service reaches `1.0.0` or later. The
+   `tag-<svc>` job then makes `paigasus-<svc>-v<version>`.
+5. After the first push of a new package, set the GHCR package to public and link it to the
+   repository. GitHub makes every new package private.
+
+### Verify a published image
+
+Replace `<svc>` with `iam` or `gateway`, and `<digest>` with the digest from the release job log.
+
+Verify the GHCR image:
+
+```bash
+cosign verify \
+  --certificate-identity "https://github.com/SMK1085/paigasus-core/.github/workflows/release.yml@refs/heads/main" \
+  --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+  ghcr.io/smk1085/paigasus-<svc>@<digest>
+
+gh attestation verify "oci://ghcr.io/smk1085/paigasus-<svc>@<digest>" \
+  --repo SMK1085/paigasus-core \
+  --signer-workflow SMK1085/paigasus-core/.github/workflows/release.yml \
+  --source-ref refs/heads/main
+```
+
+Verify the Docker Hub image, with the same identity and the same issuer:
+
+```bash
+cosign verify \
+  --certificate-identity "https://github.com/SMK1085/paigasus-core/.github/workflows/release.yml@refs/heads/main" \
+  --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+  docker.io/smaschek/paigasus-<svc>@<digest>
+
+gh attestation verify "oci://docker.io/smaschek/paigasus-<svc>@<digest>" \
+  --repo SMK1085/paigasus-core \
+  --signer-workflow SMK1085/paigasus-core/.github/workflows/release.yml \
+  --source-ref refs/heads/main
+```
+
+Both registries hold the same index digest. GHCR stores three attestations and a cosign signature.
+The build-provenance attestation has the INDEX digest as its subject, which is the digest the two
+commands above use. The two SBOM attestations have a PER-PLATFORM digest as their subject, one for
+amd64 and one for arm64, because each architecture has its own SBOM. So an SBOM query against the
+index digest finds nothing. Get the two per-platform digests from the index itself:
+
+```bash
+crane manifest ghcr.io/smk1085/paigasus-<svc>@<digest> \
+  | jq -r '.manifests[] | "\(.platform.architecture) \(.digest)"'
+```
+
+Docker Hub stores only a cosign signature. The copy step does not copy registry referrers, so
+Docker Hub never receives any of the three attestations. `gh attestation verify` still works for a
+Docker Hub image, because it queries the GitHub API by digest, not the registry. Do not use
+`cosign download attestation` against a Docker Hub image. That command reads registry referrers,
+and Docker Hub carries none.
+
+### What a re-run does
+
+The first digest published under `:<version>` is final. A later run reads that digest, discards
+its own build and continues with the published one, so a re-run can never replace a released
+image. A rebuild never reproduces a digest: the chisel cut resolves the live Ubuntu archive on
+every build.
+
+### If the release plan itself cannot be read
+
+`ci/release-plan/run.sh`'s fail-safe branch writes `skip_iam=false` and `skip_gateway=false` (S12,
+so both chains RUN — the fail-safe direction), and it writes `version_iam` and `version_gateway` as
+explicit EMPTY strings, not as outputs left unwritten. Every chain job that got past its gate then
+hard-fails at the label compare (`the archive carries version , but plan says .`), because `plan`'s
+version output is empty. Read that specific failure as "the release plan could not be read" — check
+the `plan` job's own log — not as a build problem in `images-build-<svc>`.

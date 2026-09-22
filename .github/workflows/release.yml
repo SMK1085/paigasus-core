@@ -420,6 +420,13 @@ jobs:
       # fails safe, but the feature would never fire. release_guard.py V9c asserts this key AND
       # that `steps.decide` names a step that exists in this job.
       nothing_to_release: ${{ steps.decide.outputs.nothing_to_release }}
+      # SMA-658. One skip flag and one version for each service chain. The version is what
+      # publish-images-<svc> compares against the image's own label, so a chain can never publish
+      # an archive built for a different version.
+      skip_iam: ${{ steps.decide.outputs.skip_iam }}
+      skip_gateway: ${{ steps.decide.outputs.skip_gateway }}
+      version_iam: ${{ steps.decide.outputs.version_iam }}
+      version_gateway: ${{ steps.decide.outputs.version_gateway }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -1064,8 +1071,9 @@ jobs:
           fi
 
       # --no-gh-release IS REQUIRED and is NOT in --help (prebuild.yml records this; ghRelease
-      # defaults ON). release-plz owns every tag — ADR-0011 S3, "the tool owns every tag",
-      # singular. ci/actionlint/release_guard.py's V5 fails if this flag is ever dropped.
+      # defaults ON). release-plz owns every CRATE tag — ADR-0011 S3, amended. tag-<svc>
+      # (SMA-658) separately owns each service's IMAGE tag. ci/actionlint/release_guard.py's V5
+      # fails if this flag is ever dropped.
       # `--no-gh-release` immediately after the subcommand, per the task-89 header: the guard
       # splits a `run:` line on shell separators and drops anything after a `#`, and a quoted
       # argument containing `#` placed BEFORE the flag would truncate the segment and produce a
@@ -1144,3 +1152,653 @@ jobs:
         run: |
           set -euo pipefail
           npm publish --provenance --access public
+
+  # SMA-658. THE IMAGE CHAINS. Each service has its own four jobs and its own approval job, so a
+  # kernel release and an image release never block each other in the job graph. release_guard.py
+  # V8 asserts the per-chain boundary and V14 the capabilities. All approval jobs share the
+  # `release-approval` environment, so one human approval releases every chain pending in the run
+  # (GitHub approves by environment, not by job; measured on the first live release, run 35648073131).
+  images-build-iam:
+    name: build the iam image (${{ matrix.arch }})
+    needs: [plan]
+    # FAIL-SAFE POLARITY, exactly like the kernel gate above: anything but the literal 'true'
+    # runs. An already released version is a no-op in publish-images-iam, not a red.
+    if: needs.plan.outputs.skip_iam != 'true'
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        arch:
+          - amd64
+          - arm64
+    # NO job outputs. A matrix job writes ONE set of outputs, so both legs would write the same
+    # name and the last leg would win -- the amd64 digest could arrive under `digest_arm64`.
+    # `publish-images-<svc>` reads each per-platform digest from its own archive instead, which is
+    # the only source that cannot be crossed (spec Section 4.2's "job output" wording is corrected
+    # here; see the self-review record).
+    env:
+      SERVICE: iam
+      ARCH: ${{ matrix.arch }}
+      PROTO_REPORTER: text
+    # SMA-658 B2. This anchor is defined HERE, on the first job that needs it, and aliased
+    # (*image-build-steps) from images-build-gateway. MEASURED with actionlint 1.7.12: a top-level
+    # x-image-chain: key fails schema validation; an anchor on an ordinary job key does not.
+    steps: &image-build-steps
+      - name: Reclaim runner disk (drop unused preinstalled toolchains)
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup \
+            /opt/hostedtoolcache/CodeQL || true
+          sudo docker image prune --all --force > /dev/null 2>&1 || true
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e  # v4.3.0
+
+      - name: Set up proto (pinned via .prototools)
+        uses: moonrepo/setup-toolchain@261c62cb5b0f580c7be7c8cd0f023a2e96756095  # v0
+        with:
+          cache: false
+
+      - name: Install crane, syft and uv
+        run: |
+          proto install crane
+          proto install syft
+          proto install uv
+
+      - name: Build the image as an OCI archive
+        run: ci/images/run.sh build-oci "${SERVICE}" out
+
+      - name: Load the archive and check its identity
+        id: load
+        run: |
+          set -euo pipefail
+          archive="out/paigasus-${SERVICE}-${ARCH}.oci.tar"
+          ci/images/run.sh load-oci "$archive" "paigasus-${SERVICE}:dev"
+          digests="$(uv run --no-project --python '>=3.12' python3 ci/images/release_decision.py oci-digests "$archive")"
+          manifest="$(printf '%s\n' "$digests" | sed -n 's/^manifest=//p')"
+          # I2 (SMA-658 fix round 1): write the digest into the uploaded artifact, BEFORE
+          # upload, so the publish job can compare it against a digest it computes itself from
+          # the DOWNLOADED archive. This file travels in the SAME artifact as the tar it
+          # describes (PR 2 review, I3): the comparison proves the upload/download hop did not
+          # CORRUPT the tar. It does not prove the tar and this file were not swapped together --
+          # that would need a digest recorded somewhere outside this artifact.
+          printf '%s\n' "$manifest" > "out/digest-${ARCH}.txt"
+
+      - name: Smoke this service
+        run: ci/images/run.sh smoke "${SERVICE}"
+
+      - name: SBOM for this platform
+        run: syft "oci-archive:out/paigasus-${SERVICE}-${ARCH}.oci.tar" -o "spdx-json=out/sbom-paigasus-${SERVICE}-${ARCH}.spdx.json"
+
+      - name: Report the SBOM contents (spec AC 7)
+        run: |
+          set -euo pipefail
+          summary="$(uv run --no-project --python '>=3.12' python3 ci/images/release_decision.py sbom-summary "out/sbom-paigasus-${SERVICE}-${ARCH}.spdx.json")"
+          echo "M8 image=paigasus-${SERVICE} arch=${ARCH} ${summary}"
+          cargo_count="$(printf '%s\n' "$summary" | sed -n 's/^cargo=//p')"
+          if [ "${cargo_count:-0}" -lt 1 ]; then
+            echo "::error::the SBOM lists no Rust crates; the binary was not built with cargo auditable (spec AC 7)." >&2
+            exit 1
+          fi
+
+      - name: Upload the archive and its SBOM
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: image-${{ env.SERVICE }}-${{ matrix.arch }}
+          path: |
+            out/paigasus-${{ env.SERVICE }}-${{ matrix.arch }}.oci.tar
+            out/sbom-paigasus-${{ env.SERVICE }}-${{ matrix.arch }}.spdx.json
+            out/digest-${{ matrix.arch }}.txt
+          if-no-files-found: error
+          retention-days: 7
+
+  approve-images-iam:
+    name: approve the iam image release
+    needs: [images-build-iam]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: release-approval
+    steps:
+      - run: echo "Approved. Everything below this point is irreversible."
+
+  publish-images-iam:
+    name: publish the iam image
+    needs: [plan, images-build-iam, approve-images-iam]
+    if: needs.plan.outputs.skip_iam != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: release-images
+    concurrency:
+      group: release-images-iam
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    outputs:
+      digest: ${{ steps.publish.outputs.index }}
+      revision: ${{ steps.publish.outputs.revision }}
+    env:
+      SERVICE: iam
+      VERSION: ${{ needs.plan.outputs.version_iam }}
+      GHCR_IMAGE: ghcr.io/smk1085/paigasus-iam
+      HUB_IMAGE: docker.io/smaschek/paigasus-iam
+      PROTO_REPORTER: text
+    steps: &image-publish-steps
+      - name: Fail on an empty Docker Hub token
+        env:
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          if [ -z "$DOCKERHUB_TOKEN" ]; then
+            echo "::error::DOCKERHUB_TOKEN is empty or unset; the release-images environment secret did not reach this job." >&2
+            exit 1
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e  # v4.3.0
+
+      - name: Set up proto (pinned via .prototools)
+        uses: moonrepo/setup-toolchain@261c62cb5b0f580c7be7c8cd0f023a2e96756095  # v0
+        with:
+          cache: false
+
+      - name: Install crane, cosign and uv
+        run: |
+          proto install crane
+          proto install cosign
+          proto install uv
+
+      - name: Download both archives
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          pattern: image-${{ env.SERVICE }}-*
+          merge-multiple: true
+          path: in
+
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Check the artifact hop and read the decision
+        id: decide
+        env:
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # S3 (SMA-658): only a registry's own "no such tag" answer may read as "the digest is
+          # absent". Any other crane failure -- a timeout, an auth error, a transient 5xx -- must
+          # fail the job, because reading it as absent would push a second digest under a
+          # published version (D10).
+          digest_or_none() {
+            local image="$1" rc=0 out
+            out="$(crane digest "$image" 2>&1)" || rc=$?
+            if [ "$rc" -eq 0 ]; then
+              printf '%s\n' "$out"
+              return 0
+            fi
+            case "$out" in
+              *MANIFEST_UNKNOWN*|*NAME_UNKNOWN*|*"unexpected status code 404"*)
+                echo none
+                ;;
+              *)
+                echo "::error::crane digest failed for ${image}: ${out}" >&2
+                exit 1
+                ;;
+            esac
+          }
+          for arch in amd64 arm64; do
+            archive="in/paigasus-${SERVICE}-${arch}.oci.tar"
+            digests="$(uv run --no-project --python '>=3.12' python3 ci/images/release_decision.py oci-digests "$archive")"
+            manifest_digest="$(printf '%s\n' "$digests" | sed -n 's/^manifest=//p')"
+            # I2 (SMA-658 fix round 1): the build job wrote this file from the archive it just
+            # built, before upload. This file and the archive travel in the SAME artifact
+            # (PR 2 review, I3), so comparing it against the digest computed here, from the
+            # DOWNLOADED archive, proves the upload/download hop did not CORRUPT the archive. It
+            # does not prove the two were not swapped together -- that would need a digest
+            # recorded somewhere outside this artifact.
+            built_digest="$(cat "in/digest-${arch}.txt")"
+            if [ "$manifest_digest" != "$built_digest" ]; then
+              echo "::error::the ${arch} archive's digest changed between build and download: built ${built_digest}, downloaded ${manifest_digest}." >&2
+              exit 1
+            fi
+            echo "digest_${arch}=${manifest_digest}" >> "$GITHUB_OUTPUT"
+          done
+          # C1 (SMA-658 fix round 1): `crane config "oci-archive:…"` cannot read a local
+          # archive -- MEASURED against crane 0.22.1: `Error: fetching config: parsing
+          # reference … could not parse reference`, and with a missing file it tries to
+          # resolve a host called `oci-archive`. `oci-archive:` is a syft/skopeo transport;
+          # `crane config` takes a REGISTRY reference only. `release_decision.py labels` reads
+          # the same two labels straight out of the archive this job already downloaded.
+          labels="$(uv run --no-project --python '>=3.12' python3 ci/images/release_decision.py labels "in/paigasus-${SERVICE}-amd64.oci.tar")"
+          label="$(printf '%s\n' "$labels" | sed -n 's/^version=//p')"
+          # minor 7 (SMA-658 fix round 1): this is what catches Task 4's empty-version
+          # fail-safe -- if `plan` ever emits skip_<svc>=false with an empty version, $VERSION
+          # is empty here and no archive's version label can ever equal it, so this step fails
+          # loudly instead of publishing under a blank tag.
+          if [ "$label" != "$VERSION" ]; then
+            echo "::error::the archive carries version ${label}, but plan says ${VERSION}." >&2
+            exit 1
+          fi
+          revision="$(printf '%s\n' "$labels" | sed -n 's/^revision=//p')"
+          echo "revision=${revision}" >> "$GITHUB_OUTPUT"
+          tag="paigasus-${SERVICE}-v${VERSION}"
+          if git ls-remote --tags --exit-code origin "refs/tags/${tag}" > /dev/null 2>&1; then
+            git_tag=present
+          else
+            git_tag=absent
+          fi
+          ghcr="$(digest_or_none "${GHCR_IMAGE}:${VERSION}")"
+          # I2 (SMA-658 PR 2 review): the first live run reads Docker Hub before this job ever
+          # logs in. An anonymous read of a missing or private repository answers 401, which
+          # digest_or_none (correctly, S3 above) treats as fatal -- only MANIFEST_UNKNOWN,
+          # NAME_UNKNOWN and 404 read as "absent". Authenticate first, with the same trap
+          # discipline the later steps that write to Docker Hub already use.
+          echo "$DOCKERHUB_TOKEN" | docker login docker.io --username smaschek --password-stdin
+          trap 'docker logout docker.io || true' EXIT
+          hub="$(digest_or_none "${HUB_IMAGE}:${VERSION}")"
+          echo "ghcr=${ghcr} dockerhub=${hub} git_tag=${git_tag}"
+          {
+            echo "ghcr=${ghcr}"
+            echo "dockerhub=${hub}"
+            echo "git_tag=${git_tag}"
+          } >> "$GITHUB_OUTPUT"
+
+      # I3 (SMA-658 fix round 1): this used to be one step that pushed, copied to Docker Hub,
+      # signed BOTH registries and wrote the floating tags, all before the attest-* steps below
+      # created anything. A failed attestation then left `:latest` pointing at an image with no
+      # provenance in either registry. Split in three: this step makes GHCR authoritative and
+      # signs it; the three attest-* steps run next (push-new only -- see I4); the final step
+      # makes Docker Hub authoritative, signs it, and only then moves the floating tags.
+      - name: Push to GHCR and sign
+        id: publish
+        env:
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          DIGEST_AMD64: ${{ steps.decide.outputs.digest_amd64 }}
+          DIGEST_ARM64: ${{ steps.decide.outputs.digest_arm64 }}
+          GHCR_EXISTING: ${{ steps.decide.outputs.ghcr }}
+          HUB_EXISTING: ${{ steps.decide.outputs.dockerhub }}
+          GIT_TAG_STATE: ${{ steps.decide.outputs.git_tag }}
+          REVISION: ${{ steps.decide.outputs.revision }}
+        run: |
+          set -euo pipefail
+          # SMA-658 Task 8 fix round 1. Shared by the already-released branch and the adopt
+          # branch below: two copies of this same extraction, differing only in their
+          # argument, is what let the already-released branch drift wrong in the first place
+          # (Task 8's own fix). Spec section 7.1 still holds -- the registry commands stay
+          # literal in this step; this only removes the duplication inside it.
+          revision_of() {
+            crane config "$1" | uv run --no-project --python '>=3.12' python3 -c \
+              'import json,sys; c=json.load(sys.stdin); print(c["config"]["Labels"]["org.opencontainers.image.revision"])'
+          }
+          # D10: the FIRST digest published under :<version> is final. A later run adopts it and
+          # discards its own build, so a rebuild -- which never reproduces a digest, because the
+          # chisel cut resolves the live archive -- can never replace a published image.
+          # C5 (SMA-658): --new-digest feeds only the push-new branch below, so it must be a real
+          # digest, not a placeholder -- pass the amd64 archive's own manifest digest.
+          decision="$(uv run --no-project --python '>=3.12' python3 ci/images/release_decision.py adopt \
+            --new-digest "$DIGEST_AMD64" \
+            --ghcr "$GHCR_EXISTING" --dockerhub "$HUB_EXISTING" --git-tag "$GIT_TAG_STATE")"
+          action="$(printf '%s\n' "$decision" | sed -n 's/^action=//p')"
+          if [ "$action" = "already-released" ]; then
+            echo "already released: the tag paigasus-${SERVICE}-v${VERSION} exists. Nothing to do."
+            echo "index=" >> "$GITHUB_OUTPUT"
+            # SMA-658 Task 8 fix, same family as I5 (fix round 1) on the adopt path below.
+            # REVISION is this RUN's own local build, which a re-run at a LATER commit does not
+            # share with the image the existing tag actually names. Read the revision back from
+            # whichever registry holds :${VERSION} instead -- both carry it once a release has
+            # completed, from the `crane tag "${image}@${index}" "$VERSION"` loop below.
+            already_image="$GHCR_IMAGE"
+            already_existing="$GHCR_EXISTING"
+            if [ "$already_existing" = "none" ]; then
+              already_image="$HUB_IMAGE"
+              already_existing="$HUB_EXISTING"
+            fi
+            if [ "$already_existing" = "none" ]; then
+              echo "::error::the git tag paigasus-${SERVICE}-v${VERSION} exists, but neither registry holds a :${VERSION} digest to read the revision from." >&2
+              exit 1
+            fi
+            already_revision="$(revision_of "${already_image}@${already_existing}")"
+            {
+              echo "revision=${already_revision}"
+              echo "action=already-released"
+              echo "copy_to=none"
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$action" = "push-new" ]; then
+            refs=()
+            for arch in amd64 arm64; do
+              layout="$(mktemp -d)"
+              tar -xf "in/paigasus-${SERVICE}-${arch}.oci.tar" -C "$layout"
+              crane push "$layout" "${GHCR_IMAGE}:${GITHUB_SHA}-${arch}"
+              got="$(crane digest "${GHCR_IMAGE}:${GITHUB_SHA}-${arch}")"
+              # S5 (SMA-658): images-rehearsal.yml carries this exact check (run 35498922565). A
+              # changed per-platform digest would later name an attest-sbom subject the registry
+              # does not hold.
+              case "$arch" in
+                amd64) want="$DIGEST_AMD64" ;;
+                arm64) want="$DIGEST_ARM64" ;;
+              esac
+              if [ "$got" != "$want" ]; then
+                echo "::error::crane push changed the ${arch} digest: ${want} -> ${got}" >&2
+                exit 1
+              fi
+              refs+=("${GHCR_IMAGE}@${got}")
+            done
+            docker buildx imagetools create --tag "${GHCR_IMAGE}:${GITHUB_SHA}" "${refs[@]}"
+            index="$(crane digest "${GHCR_IMAGE}:${GITHUB_SHA}")"
+            # push-new always needs the Hub copy too: neither registry had the digest before
+            # this run pushed it to GHCR.
+            copy_to=dockerhub
+          else
+            index="$(printf '%s\n' "$decision" | sed -n 's/^digest=//p')"
+            copy_to="$(printf '%s\n' "$decision" | sed -n 's/^copy_to=//p')"
+            echo "adopting the published digest ${index} (copy_to=${copy_to})"
+            # S4 (SMA-658): `adopt` names which registry is MISSING the digest. Copying from the
+            # wrong registry fails outright, because that registry may not hold it at all.
+            if [ "$copy_to" = "ghcr" ]; then
+              # minor 10 (SMA-658 fix round 1): the trap fires on any exit, so a failure between
+              # login and the copy below cannot leave the token on disk.
+              echo "$DOCKERHUB_TOKEN" | docker login docker.io --username smaschek --password-stdin
+              trap 'docker logout docker.io || true' EXIT
+              docker buildx imagetools create --tag "${GHCR_IMAGE}:${GITHUB_SHA}" "${HUB_IMAGE}@${index}"
+              ghcr_index="$(crane digest "${GHCR_IMAGE}:${GITHUB_SHA}")"
+              if [ "$ghcr_index" != "$index" ]; then
+                echo "::error::the GHCR copy changed the digest: ${index} -> ${ghcr_index}" >&2
+                exit 1
+              fi
+            fi
+          fi
+          cosign sign --yes "${GHCR_IMAGE}@${index}"
+          {
+            echo "index=${index}"
+            echo "action=${action}"
+            echo "copy_to=${copy_to}"
+          } >> "$GITHUB_OUTPUT"
+          if [ "$action" = "push-new" ]; then
+            echo "revision=${REVISION}" >> "$GITHUB_OUTPUT"
+          else
+            # I5 (SMA-658 fix round 1): spec Section 3.5 -- the tag must name the PUBLISHED
+            # image's own revision, not this run's local build (which may not even be the same
+            # commit). GHCR now holds the adopted digest -- either it always did, or the branch
+            # above just copied it there -- so read the label back with a REGISTRY reference:
+            # crane accepts that (C1 above is about a LOCAL archive only).
+            adopted_revision="$(revision_of "${GHCR_IMAGE}@${index}")"
+            echo "revision=${adopted_revision}" >> "$GITHUB_OUTPUT"
+          fi
+
+      # I4 (SMA-658 fix round 1): on the adopt path these three subjects come from THIS run's
+      # local, discarded rebuild, not from the published image -- the registry holds no such
+      # subject for them, and the original push-new run already attested the real one.
+      - name: Attest build provenance (index)
+        if: steps.publish.outputs.index != '' && steps.publish.outputs.action == 'push-new'
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8  # v4.2.2
+        with:
+          subject-name: ${{ env.GHCR_IMAGE }}
+          subject-digest: ${{ steps.publish.outputs.index }}
+          push-to-registry: true
+
+      - name: Attest the amd64 SBOM (per-platform subject)
+        if: steps.publish.outputs.index != '' && steps.publish.outputs.action == 'push-new'
+        uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e  # v4.1.0
+        with:
+          subject-name: ${{ env.GHCR_IMAGE }}
+          subject-digest: ${{ steps.decide.outputs.digest_amd64 }}
+          sbom-path: in/sbom-paigasus-${{ env.SERVICE }}-amd64.spdx.json
+          push-to-registry: true
+
+      - name: Attest the arm64 SBOM (per-platform subject)
+        if: steps.publish.outputs.index != '' && steps.publish.outputs.action == 'push-new'
+        uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e  # v4.1.0
+        with:
+          subject-name: ${{ env.GHCR_IMAGE }}
+          subject-digest: ${{ steps.decide.outputs.digest_arm64 }}
+          sbom-path: in/sbom-paigasus-${{ env.SERVICE }}-arm64.spdx.json
+          push-to-registry: true
+
+      - name: Copy to Docker Hub, sign and write the release tags
+        if: steps.publish.outputs.index != ''
+        env:
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          INDEX: ${{ steps.publish.outputs.index }}
+          COPY_TO: ${{ steps.publish.outputs.copy_to }}
+        run: |
+          set -euo pipefail
+          index="$INDEX"
+          echo "$DOCKERHUB_TOKEN" | docker login docker.io --username smaschek --password-stdin
+          # S15 / minor 10 (SMA-658 fix round 1): a trap set right after login, not a final
+          # unconditional `docker logout` line -- it fires on any exit, so a failure anywhere
+          # below (a changed digest, a failed cosign sign) cannot leave the token on disk. Spec
+          # Section 4.3 step 6 says logout happens "at once" after the Hub cosign sign; it is
+          # a trap instead, because the crane tag loop below also writes to Docker Hub and
+          # needs the same credential.
+          trap 'docker logout docker.io || true' EXIT
+          if [ "$COPY_TO" = "dockerhub" ]; then
+            docker buildx imagetools create --tag "${HUB_IMAGE}:${GITHUB_SHA}" "${GHCR_IMAGE}@${index}"
+            hub_index="$(crane digest "${HUB_IMAGE}:${GITHUB_SHA}")"
+            if [ "$hub_index" != "$index" ]; then
+              echo "::error::the Docker Hub copy changed the digest: ${index} -> ${hub_index}" >&2
+              exit 1
+            fi
+          fi
+          cosign sign --yes "${HUB_IMAGE}@${index}"
+          git tag -l > /tmp/tags.txt
+          floating="$(uv run --no-project --python '>=3.12' python3 ci/images/release_decision.py floating \
+            --service "$SERVICE" --version "$VERSION" --tags-file /tmp/tags.txt)"
+          move="$(printf '%s\n' "$floating" | sed -n 's/^move=//p')"
+          minor="$(printf '%s\n' "$floating" | sed -n 's/^minor_tag=//p')"
+          # minor 6 (SMA-658 fix round 1): consumed, not left dead -- :<major> moves too, once
+          # the service is out of 0.x (floating() leaves major_tag empty until then).
+          major="$(printf '%s\n' "$floating" | sed -n 's/^major_tag=//p')"
+          for image in "$GHCR_IMAGE" "$HUB_IMAGE"; do
+            crane tag "${image}@${index}" "$VERSION"
+            if [ "$move" = "true" ]; then
+              crane tag "${image}@${index}" "$minor"
+              if [ -n "$major" ]; then
+                crane tag "${image}@${index}" "$major"
+              fi
+              crane tag "${image}@${index}" latest
+            fi
+          done
+
+      # SMA-658 B6. The plan's original single "Push, copy, tag, sign and verify" step ran
+      # `gh attestation verify` BEFORE the three attest-* steps above created anything to verify
+      # -- on a first release that check always failed. Verification is its own, later step.
+      - name: Verify the signature and attestations
+        if: steps.publish.outputs.index != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INDEX: ${{ steps.publish.outputs.index }}
+          ACTION: ${{ steps.publish.outputs.action }}
+          DIGEST_AMD64: ${{ steps.decide.outputs.digest_amd64 }}
+          DIGEST_ARM64: ${{ steps.decide.outputs.digest_arm64 }}
+        run: |
+          set -euo pipefail
+          index="$INDEX"
+          for image in "$GHCR_IMAGE" "$HUB_IMAGE"; do
+            cosign verify \
+              --certificate-identity "https://github.com/SMK1085/paigasus-core/.github/workflows/release.yml@refs/heads/main" \
+              --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+              "${image}@${index}"
+            gh attestation verify "oci://${image}@${index}" \
+              --repo SMK1085/paigasus-core \
+              --signer-workflow SMK1085/paigasus-core/.github/workflows/release.yml \
+              --source-ref refs/heads/main
+          done
+          # minor 9 (SMA-658 fix round 1): the two per-platform SBOM attestations created above
+          # were never verified -- mirror images-rehearsal.yml's own check. push-new only: on
+          # adopt, DIGEST_AMD64/DIGEST_ARM64 come from THIS run's local, discarded rebuild (I4),
+          # not from the published image, so the registry holds no such subject for them.
+          if [ "$ACTION" = "push-new" ]; then
+            for d in "$DIGEST_AMD64" "$DIGEST_ARM64"; do
+              gh attestation verify "oci://${GHCR_IMAGE}@${d}" \
+                --repo SMK1085/paigasus-core \
+                --signer-workflow SMK1085/paigasus-core/.github/workflows/release.yml \
+                --predicate-type https://spdx.dev/Document/v2.3 \
+                --source-ref refs/heads/main
+            done
+          fi
+          echo "PUBLISHED ${SERVICE} ${VERSION}: ${index}"
+
+  tag-iam:
+    name: tag the iam release
+    needs: [plan, publish-images-iam]
+    if: needs.plan.outputs.skip_iam != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: release-publish
+    # minor 11 (SMA-658 fix round 1): without this, two concurrent runs could race the same
+    # `gh api POST git/refs` for the same tag.
+    concurrency:
+      group: release-tag-iam
+      cancel-in-progress: false
+    permissions:
+      contents: read
+    env:
+      SERVICE: iam
+      VERSION: ${{ needs.plan.outputs.version_iam }}
+      REVISION: ${{ needs.publish-images-iam.outputs.revision }}
+    steps: &image-tag-steps
+      - name: Mint the App installation token
+        id: app_token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # v3.2.0
+        with:
+          client-id: ${{ secrets.PAIGASUS_BOT_APP_ID }}
+          private-key: ${{ secrets.PAIGASUS_BOT_PRIVATE_KEY }}
+          permission-contents: write
+
+      - name: Make the release tag
+        env:
+          GH_TOKEN: ${{ steps.app_token.outputs.token }}
+        run: |
+          set -euo pipefail
+          tag="paigasus-${SERVICE}-v${VERSION}"
+          # MEASURED on the first live release (run 35648073131): for a missing ref, `gh api`
+          # exits 1 AND prints GitHub's JSON error body on STDOUT. `--jq` is not applied to it and
+          # `2> /dev/null` does not hide it. The old `$(… || echo none)` form therefore captured
+          # `{"message":"Not Found",…}none`, and every FIRST tag of a version read as a conflict.
+          # Branch on the exit status, and on a failure accept only a 404 as "absent"; any other
+          # failure (auth, rate limit, 5xx) stops the job rather than guessing.
+          if probe="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${tag}" --jq .object.sha 2> /dev/null)"; then
+            existing="$probe"
+          else
+            case "$probe" in
+              *'"status":"404"'*) existing=none ;;
+              *)
+                echo "::error::could not read the tag ${tag}: ${probe:-no output}" >&2
+                exit 1
+                ;;
+            esac
+          fi
+          if [ "$existing" = "$REVISION" ]; then
+            echo "the tag ${tag} already points at ${REVISION}. Nothing to do."
+            exit 0
+          fi
+          if [ "$existing" != "none" ]; then
+            echo "::error::the tag ${tag} points at ${existing}, not at the image's revision ${REVISION}." >&2
+            exit 1
+          fi
+          gh api --method POST "repos/${GITHUB_REPOSITORY}/git/refs" \
+            -f "ref=refs/tags/${tag}" -f "sha=${REVISION}"
+          echo "TAGGED ${tag} at ${REVISION}"
+
+  # SMA-658. The gateway chain. Same shape as the iam chain above; the step lists are aliased
+  # from the anchors defined there, so no step text differs between the two chains.
+  images-build-gateway:
+    name: build the gateway image (${{ matrix.arch }})
+    needs: [plan]
+    # FAIL-SAFE POLARITY, exactly like the kernel gate above: anything but the literal 'true'
+    # runs. An already released version is a no-op in publish-images-gateway, not a red.
+    if: needs.plan.outputs.skip_gateway != 'true'
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        arch:
+          - amd64
+          - arm64
+    # NO job outputs. A matrix job writes ONE set of outputs, so both legs would write the same
+    # name and the last leg would win -- the amd64 digest could arrive under `digest_arm64`.
+    # `publish-images-<svc>` reads each per-platform digest from its own archive instead, which is
+    # the only source that cannot be crossed (spec Section 4.2's "job output" wording is corrected
+    # here; see the self-review record).
+    env:
+      SERVICE: gateway
+      ARCH: ${{ matrix.arch }}
+      PROTO_REPORTER: text
+    steps: *image-build-steps
+
+  approve-images-gateway:
+    name: approve the gateway image release
+    needs: [images-build-gateway]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: release-approval
+    steps:
+      - run: echo "Approved. Everything below this point is irreversible."
+
+  publish-images-gateway:
+    name: publish the gateway image
+    needs: [plan, images-build-gateway, approve-images-gateway]
+    if: needs.plan.outputs.skip_gateway != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: release-images
+    concurrency:
+      group: release-images-gateway
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    outputs:
+      digest: ${{ steps.publish.outputs.index }}
+      revision: ${{ steps.publish.outputs.revision }}
+    env:
+      SERVICE: gateway
+      VERSION: ${{ needs.plan.outputs.version_gateway }}
+      GHCR_IMAGE: ghcr.io/smk1085/paigasus-gateway
+      HUB_IMAGE: docker.io/smaschek/paigasus-gateway
+      PROTO_REPORTER: text
+    steps: *image-publish-steps
+
+  tag-gateway:
+    name: tag the gateway release
+    needs: [plan, publish-images-gateway]
+    if: needs.plan.outputs.skip_gateway != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: release-publish
+    # minor 11 (SMA-658 fix round 1): without this, two concurrent runs could race the same
+    # `gh api POST git/refs` for the same tag.
+    concurrency:
+      group: release-tag-gateway
+      cancel-in-progress: false
+    permissions:
+      contents: read
+    env:
+      SERVICE: gateway
+      VERSION: ${{ needs.plan.outputs.version_gateway }}
+      REVISION: ${{ needs.publish-images-gateway.outputs.revision }}
+    steps: *image-tag-steps

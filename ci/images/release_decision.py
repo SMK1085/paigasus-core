@@ -7,6 +7,10 @@ Subcommands. Each one prints `key=value` lines on stdout, in a fixed order:
 
   oci-digests ARCHIVE
       manifest=, config=, platform= of a single-image buildx OCI archive.
+  labels ARCHIVE
+      version=, revision= (the org.opencontainers.image.* labels) of a single-image buildx OCI
+      archive. SMA-658 C1: `crane config` takes a REGISTRY reference only -- it cannot read a
+      local `oci-archive:` path -- so this is what release.yml reads the labels with instead.
   adopt --new-digest D --ghcr D|none --dockerhub D|none --git-tag present|absent
       action=already-released | push-new | adopt, then digest= and copy_to=.
       The FIRST digest published under :<version> is final (spec D10). A new build never
@@ -150,8 +154,10 @@ def _require_list(value: object, what: str) -> list[Any]:
     return value
 
 
-def oci_digests_from(tar: tarfile.TarFile) -> dict[str, str]:
-    """The manifest and config digests of a single-image buildx OCI export."""
+def _image_config_from(tar: tarfile.TarFile) -> tuple[dict[str, Any], str, str]:
+    """The parsed image config of a single-image buildx OCI export, plus the two digests that
+    identify it. Shared by `oci_digests_from` (which only needs the digests) and `labels_from`
+    (SMA-658 C1, which needs the config's own `Labels`)."""
     index = _require_dict(json.loads(_member(tar, "index.json")), "index.json")
     manifests_value = index.get("manifests")
     manifests = [] if manifests_value is None else _require_list(manifests_value, "index.json's manifests")
@@ -166,6 +172,12 @@ def oci_digests_from(tar: tarfile.TarFile) -> dict[str, str]:
     config_ref = {} if config_ref_value is None else config_ref_value
     config_digest = require_digest(str(_require_dict(config_ref, "the image manifest's config").get("digest", "")))
     config = _require_dict(json.loads(_blob(tar, config_digest)), "the image config")
+    return config, manifest_digest, config_digest
+
+
+def oci_digests_from(tar: tarfile.TarFile) -> dict[str, str]:
+    """The manifest and config digests of a single-image buildx OCI export."""
+    config, manifest_digest, config_digest = _image_config_from(tar)
     platform = f"{config.get('os', 'unknown')}/{config.get('architecture', 'unknown')}"
     return {"manifest": manifest_digest, "config": config_digest, "platform": platform}
 
@@ -174,6 +186,35 @@ def oci_digests(path: Path) -> dict[str, str]:
     try:
         with tarfile.open(path) as tar:
             return oci_digests_from(tar)
+    except (OSError, tarfile.TarError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise UsageError(f"cannot read {path}: {exc}") from exc
+
+
+def labels_from(tar: tarfile.TarFile) -> dict[str, str]:
+    """SMA-658 C1: `crane config "oci-archive:…"` cannot read a local archive. MEASURED against
+    crane 0.22.1: `Error: fetching config: parsing reference … could not parse reference`, and
+    with a missing file it tries to resolve a host called `oci-archive`. `oci-archive:` is a
+    syft/skopeo transport; `crane config` takes a REGISTRY reference only. This reads the same
+    two labels straight out of the archive `release_decision.py` already has on disk, so
+    `release.yml` never shells out to `crane config` for a config it already extracted."""
+    config, _manifest_digest, _config_digest = _image_config_from(tar)
+    config_obj_value = config.get("config")
+    config_obj = {} if config_obj_value is None else _require_dict(config_obj_value, "the image config's 'config' object")
+    labels_value = config_obj.get("Labels")
+    label_map = {} if labels_value is None else _require_dict(labels_value, "the image config's Labels")
+    version = str(label_map.get("org.opencontainers.image.version", ""))
+    revision = str(label_map.get("org.opencontainers.image.revision", ""))
+    if not version:
+        raise UsageError("the image config carries no org.opencontainers.image.version label")
+    if not revision:
+        raise UsageError("the image config carries no org.opencontainers.image.revision label")
+    return {"version": version, "revision": revision}
+
+
+def labels(path: Path) -> dict[str, str]:
+    try:
+        with tarfile.open(path) as tar:
+            return labels_from(tar)
     except (OSError, tarfile.TarError, json.JSONDecodeError, UnicodeDecodeError) as exc:
         raise UsageError(f"cannot read {path}: {exc}") from exc
 
@@ -221,10 +262,18 @@ def _archive_from_files(files: dict[str, bytes]) -> tarfile.TarFile:
 
 
 def _fixture_archive(
-    *, media_type: str = "application/vnd.oci.image.manifest.v1+json", manifests: int = 1
+    *,
+    media_type: str = "application/vnd.oci.image.manifest.v1+json",
+    manifests: int = 1,
+    config_extra: dict[str, Any] | None = None,
 ) -> tuple[tarfile.TarFile, str, str]:
-    """An in-memory OCI archive shaped like a buildx single-image export."""
-    config = json.dumps({"os": "linux", "architecture": "arm64"}).encode()
+    """An in-memory OCI archive shaped like a buildx single-image export. `config_extra` merges
+    into the image config object -- SMA-658 C1's `labels` self-test rows use it to add or
+    malform a `config.Labels` object without duplicating the whole fixture shape."""
+    config_obj: dict[str, Any] = {"os": "linux", "architecture": "arm64"}
+    if config_extra:
+        config_obj.update(config_extra)
+    config = json.dumps(config_obj).encode()
     config_digest = "sha256:" + hashlib.sha256(config).hexdigest()
     manifest = json.dumps({"config": {"digest": config_digest}}).encode()
     manifest_digest = "sha256:" + hashlib.sha256(manifest).hexdigest()
@@ -304,6 +353,44 @@ def self_test() -> int:
         ("oci: two manifests are refused", lambda: oci_digests_from(_fixture_archive(manifests=2)[0]), "UsageError"),
         ("oci: index.json is not an object", lambda: oci_digests_from(_fixture_archive_bad_index()), "UsageError"),
         ("oci: the manifest blob is not an object", lambda: oci_digests_from(_fixture_archive_bad_manifest()), "UsageError"),
+        # labels (spec SMA-658 C1: crane config cannot read a local oci-archive)
+        (
+            "labels: a version and revision label",
+            lambda: labels_from(
+                _fixture_archive(
+                    config_extra={
+                        "config": {
+                            "Labels": {
+                                "org.opencontainers.image.version": "1.2.3",
+                                "org.opencontainers.image.revision": "abc123",
+                            }
+                        }
+                    }
+                )[0]
+            ),
+            {"version": "1.2.3", "revision": "abc123"},
+        ),
+        ("labels: no Labels at all (missing-label case)", lambda: labels_from(_fixture_archive()[0]), "UsageError"),
+        (
+            "labels: Labels present but missing the version key (missing-label case)",
+            lambda: labels_from(_fixture_archive(config_extra={"config": {"Labels": {"org.opencontainers.image.revision": "abc123"}}})[0]),
+            "UsageError",
+        ),
+        (
+            "labels: Labels present but missing the revision key (missing-label case)",
+            lambda: labels_from(_fixture_archive(config_extra={"config": {"Labels": {"org.opencontainers.image.version": "1.2.3"}}})[0]),
+            "UsageError",
+        ),
+        (
+            "labels: the 'config' object is not a dict (malformed-config case)",
+            lambda: labels_from(_fixture_archive(config_extra={"config": "oops"})[0]),
+            "UsageError",
+        ),
+        (
+            "labels: Labels is not a dict (malformed-config case)",
+            lambda: labels_from(_fixture_archive(config_extra={"config": {"Labels": "oops"}})[0]),
+            "UsageError",
+        ),
         # sbom-summary (spec M8)
         (
             "sbom: counts libc6 and cargo packages",
@@ -363,6 +450,8 @@ def main(argv: list[str]) -> int:
     sub = parser.add_subparsers(dest="command")
     p_oci = sub.add_parser("oci-digests")
     p_oci.add_argument("archive", type=Path)
+    p_labels = sub.add_parser("labels")
+    p_labels.add_argument("archive", type=Path)
     p_adopt = sub.add_parser("adopt")
     p_adopt.add_argument("--new-digest", required=True)
     p_adopt.add_argument("--ghcr", required=True)
@@ -384,6 +473,8 @@ def main(argv: list[str]) -> int:
     try:
         if args.command == "oci-digests":
             _emit(oci_digests(args.archive))
+        elif args.command == "labels":
+            _emit(labels(args.archive))
         elif args.command == "adopt":
             _emit(
                 adopt(
