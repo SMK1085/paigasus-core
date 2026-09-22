@@ -44,9 +44,36 @@ function requireUuid(label: string, value: string): string {
   return value.toLowerCase();
 }
 
+/** The kernel's reading of a PRN: the fields IAM's tenancy rule needs, all canonical. */
+type KernelFields = { resourceType: string; resourceId: string; org: string };
+
+/**
+ * The kernel's view of `prn`, or null when the kernel rejects it, when it names another service,
+ * when it carries a region, OR WHEN A KERNEL CALL FAILS.
+ *
+ * That last case is why the try is here. `parseTenancyPrn` returns `TenancyRef | null`, so it must
+ * be TOTAL — a Next server component calls it on a URL segment, and a throw there is a 500 where a
+ * 404 belongs, on input an attacker controls. An empty `prnErrorKind` happens to imply the other
+ * five accessors succeed today, because all six call the same `Prn::parse`, but NOTHING pins that:
+ * a wasm runtime failure, or an accessor that one day validates more than `parse` does, would break
+ * the invariant. The catch covers the kernel calls ONLY. IAM's tenancy rule stays outside it, in
+ * the caller below, so a programming error of ours is never swallowed as "not a tenancy PRN".
+ */
+function readKernelFields(prn: string): KernelFields | null {
+  try {
+    // The kernel is the grammar: a non-empty kind is any malformed PRN.
+    if (prnErrorKind(prn) !== '') return null;
+    if (prnService(prn) !== 'iam' || prnRegion(prn) !== '') return null;
+    // prnOrg returns '' for an ABSENT org field; a malformed one is already an error kind above.
+    return { resourceType: prnResourceType(prn), resourceId: prnResourceId(prn), org: prnOrg(prn) };
+  } catch {
+    return null;
+  }
+}
+
 /**
  * The tenancy node a PRN names, or null for any other resource and for an invalid PRN. The kernel
- * decides validity and returns the canonical, lower-case fields.
+ * decides validity and returns the canonical, lower-case fields. This function never throws.
  *
  * A NON-EMPTY REGION IS REJECTED, well formed or not. `TenancyRef` has no region field and the three
  * builders always emit an empty one, so a regionful PRN read here would be REWRITTEN without its
@@ -56,15 +83,12 @@ function requireUuid(label: string, value: string): string {
  */
 export function parseTenancyPrn(prn: string): TenancyRef | null {
   if (prn.length === 0 || prn.length > MAX_LEN) return null;
-  // The kernel is the grammar: a non-empty kind is any malformed PRN.
-  if (prnErrorKind(prn) !== '') return null;
-  if (prnService(prn) !== 'iam' || prnRegion(prn) !== '') return null;
-  const type = prnResourceType(prn);
-  if (!TENANCY_KINDS.has(type)) return null;
-  const kind = type as TenancyKind;
-  const id = prnResourceId(prn);
-  // prnOrg returns '' for an ABSENT org field; a malformed one is already an error kind above.
-  const org = prnOrg(prn);
+  const fields = readKernelFields(prn);
+  if (fields === null) return null;
+  // From here down is IAM's tenancy rule, deliberately outside the catch above.
+  const { resourceType, resourceId: id, org } = fields;
+  if (!TENANCY_KINDS.has(resourceType)) return null;
+  const kind = resourceType as TenancyKind;
   if (kind === 'organization') return org === '' ? { kind, orgId: id, id } : null;
   return org === '' ? null : { kind, orgId: org, id };
 }
