@@ -11,13 +11,17 @@
 // The task has no "unchanged" early exit. The binary bytes depend on the host (spec F12), so there
 // is nothing a rebuild could compare itself against.
 import { execFileSync } from 'node:child_process';
-import { copyFileSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 // scripts -> paigasus-kernel -> packages -> ts -> repo root: four `../`.
 const ROOT = new URL('../../../../', import.meta.url);
 const CRATE = new URL('rs/crates/bindings/paigasus-wasm/', ROOT);
-const OUT = new URL('.wasmpack-out/', CRATE);
+// Its own scratch dir, distinct from the `build` task's `.wasmpack-out` and the `test` task's
+// `.wasmpack-test-out`: wasm-pack wipes its --out-dir at the start of a run, so sharing a name
+// with a task that can run concurrently would let a wipe interleave with this task's copy and
+// leave a mixed artifact set in the crate directory.
+const OUT = new URL('.wasmpack-regen-out/', CRATE);
 const GLUE = ['paigasus_wasm.js', 'paigasus_wasm_bg.js', 'paigasus_wasm.d.ts', 'paigasus_wasm_bg.wasm.d.ts'];
 const BINARY = 'paigasus_wasm_bg.wasm';
 const TOUCH = ['rs/crates/libs/paigasus-kernel/src/lib.rs', 'rs/crates/bindings/paigasus-wasm/src/lib.rs'];
@@ -61,6 +65,17 @@ function pre() {
 }
 
 function post() {
+  // Cheap guard before any crate-directory write: confirm every file wasm-pack was meant to
+  // produce is actually there. Not a substitute for an atomic rename (rejected — a rename would
+  // break pnpm's hard link to the installed copy, spec F14): an I/O failure partway through the
+  // copy below can still leave a mixed set, and the remedy there is to re-run the task. This only
+  // catches the case where wasm-pack itself produced an incomplete scratch dir.
+  for (const name of [...GLUE, BINARY]) {
+    if (!existsSync(new URL(name, OUT))) {
+      fail(`${name} is missing from the wasm-pack scratch output. wasm-pack did not produce a complete artifact set, and nothing was copied into the crate directory.`);
+    }
+  }
+
   const binary = readFileSync(new URL(BINARY, OUT));
   // CARGO_HOME can sit outside the home directory, so both roots are searched, not $HOME.
   const text = binary.toString('latin1');

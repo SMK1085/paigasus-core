@@ -177,8 +177,11 @@ tasks:
       - '/rs/.cargo/config.toml'
 
   # SMA-634. The ONLY writer of the five committed wasm artifacts
-  # (rs/crates/bindings/paigasus-wasm/paigasus_wasm*). `build` and `test` never write them any more:
-  # `build` stopped calling wasm-pack, and `test` builds into its own .wasmpack-test-out.
+  # (rs/crates/bindings/paigasus-wasm/paigasus_wasm*). `test` already builds into its own,
+  # non-committing `.wasmpack-test-out`. `build` still calls wasm-pack too as of this task; a later
+  # task in this PR removes that call so `build` stops writing wasm-pack output at all. This task
+  # uses its own `.wasmpack-regen-out`, distinct from `build`'s `.wasmpack-out`, precisely so the
+  # two can run concurrently without one's wasm-pack wipe interleaving with the other's copy.
   #
   # Run it after an edit to the Rust kernel or the wasm binding, then commit all five files.
   # tests/committed-wasm.test.ts reds until the committed files agree with the source.
@@ -199,7 +202,7 @@ tasks:
     script: |
       set -euo pipefail
       node scripts/generate-wasm.mjs --pre
-      ( cd ../../../rs/crates/bindings/paigasus-wasm && wasm-pack build . --target bundler --release --no-pack --out-dir .wasmpack-out --out-name paigasus_wasm -- --config 'target.wasm32-unknown-unknown.rustflags=["--remap-path-prefix=/Users=/redacted","--remap-path-prefix=/home=/redacted"]' --locked )
+      ( cd ../../../rs/crates/bindings/paigasus-wasm && wasm-pack build . --target bundler --release --no-pack --out-dir .wasmpack-regen-out --out-name paigasus_wasm -- --config 'target.wasm32-unknown-unknown.rustflags=["--remap-path-prefix=/Users=/redacted","--remap-path-prefix=/home=/redacted"]' --locked )
       node scripts/generate-wasm.mjs --post
     deps: ['^:build']
     # A5 demands the five workspace inputs on every FFI task, and A7 the sources and manifests of

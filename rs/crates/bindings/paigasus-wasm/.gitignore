@@ -12,6 +12,7 @@
 .wasmpack-out/
 .wasmpack-test-out/
 .wasmpack-release-out/
+.wasmpack-regen-out/
 
 # The release path's UPLOAD staging dir, and the one scratch dir here that is deliberately NOT
 # dot-prefixed: `actions/upload-artifact` excludes hidden files by default, so a dot-prefixed path
