@@ -194,8 +194,9 @@ plan ─┬─ wheels / prebuild / proto-dist ─ approve-release ─ release �
   evidence below, and the maintainer chose to keep the one `release-approval` environment for all
   three approval jobs, rather than add per-chain environments. GitHub approves a pending deployment
   by environment, not by job. All three approval jobs use the same environment, so one approval
-  releases every chain that waits for approval in the same run. This comes from the shape of
-  GitHub's approval API; it has not yet been observed on a live run. `release_guard.py` V8 stays as
+  releases every chain that waits for approval in the same run. MEASURED on the first live
+  release (run 35648073131, 2026-09-21): the run listed one pending deployment for the two
+  waiting approval jobs, and one approval released both chains. `release_guard.py` V8 stays as
   a job-graph rule: each publisher must depend on the approval job of its own chain. That still
   stops a workflow edit from putting an image push behind the kernel's approval job, or from
   deleting a chain's approval job. It does not make the approvals separate human decisions. Either

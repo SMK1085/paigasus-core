@@ -71,7 +71,7 @@ APPROVAL_ENVIRONMENT = "release-approval"
 # approvals are separate human decisions: every approval job above shares the one
 # APPROVAL_ENVIRONMENT ("release-approval"), and GitHub approves a pending deployment by
 # environment, not by job, so one human approval releases every chain pending in the same run
-# (decision recorded 2026-09-21; not yet observed on a live run). A file with no image chain —
+# (decision recorded 2026-09-21; measured on the first live release, run 35648073131). A file with no image chain —
 # every fixture built on _OK_MAIN — keeps exactly the old behaviour.
 CHAIN_APPROVALS: dict[str, str] = {
     "iam": "approve-images-iam",

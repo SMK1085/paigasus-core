@@ -1157,7 +1157,7 @@ jobs:
   # kernel release and an image release never block each other in the job graph. release_guard.py
   # V8 asserts the per-chain boundary and V14 the capabilities. All approval jobs share the
   # `release-approval` environment, so one human approval releases every chain pending in the run
-  # (GitHub approves by environment, not by job; not yet observed on a live run).
+  # (GitHub approves by environment, not by job; measured on the first live release, run 35648073131).
   images-build-iam:
     name: build the iam image (${{ matrix.arch }})
     needs: [plan]
@@ -1690,7 +1690,23 @@ jobs:
         run: |
           set -euo pipefail
           tag="paigasus-${SERVICE}-v${VERSION}"
-          existing="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${tag}" --jq .object.sha 2> /dev/null || echo none)"
+          # MEASURED on the first live release (run 35648073131): for a missing ref, `gh api`
+          # exits 1 AND prints GitHub's JSON error body on STDOUT. `--jq` is not applied to it and
+          # `2> /dev/null` does not hide it. The old `$(… || echo none)` form therefore captured
+          # `{"message":"Not Found",…}none`, and every FIRST tag of a version read as a conflict.
+          # Branch on the exit status, and on a failure accept only a 404 as "absent"; any other
+          # failure (auth, rate limit, 5xx) stops the job rather than guessing.
+          if probe="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${tag}" --jq .object.sha 2> /dev/null)"; then
+            existing="$probe"
+          else
+            case "$probe" in
+              *'"status":"404"'*) existing=none ;;
+              *)
+                echo "::error::could not read the tag ${tag}: ${probe:-no output}" >&2
+                exit 1
+                ;;
+            esac
+          fi
           if [ "$existing" = "$REVISION" ]; then
             echo "the tag ${tag} already points at ${REVISION}. Nothing to do."
             exit 0
