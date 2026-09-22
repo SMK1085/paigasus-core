@@ -201,15 +201,25 @@ tasks:
   # ci/affected-graph/cargo_moon_parity.py derives an FFI task from the resolved invocation
   # (FFI_MARKERS), and an invocation behind a wrapper would drop this task out of A5, A7 and A8.
   # The path remap travels as `--config`, never as RUSTFLAGS: cargo reads one rustflags source
-  # only, and a `--config` value also survives a path that holds a space.
+  # only, and a `--config` value also survives a path that holds a space. Its VALUE is no longer a
+  # literal: `--remap-path-prefix=/Users=/redacted` rewrote the first segment only and shipped the
+  # user name (`/redacted/<user>/.cargo/...`) in a public repository, so scripts/generate-wasm.mjs
+  # now computes one remap per whole root ($HOME, CARGO_HOME, RUSTUP_HOME) and `--remap` prints it.
+  # `export PROTO_REPORTER=text` guards that capture: a proto-shimmed `node` otherwise writes an
+  # NDJSON preamble to stdout and exits 0, and `$remap` would become a JSON blob (SMA-609). The
+  # `case` is the fail-closed assertion on the captured value, the analog of the `[ -x ]` check the
+  # release-parity modules make.
   #
   # runInCI: false — CI never regenerates; it only compares. cache: false — the task writes tracked
   # files, and a cached replay would write nothing.
   generate-wasm:
     script: |
       set -euo pipefail
+      export PROTO_REPORTER=text
       node scripts/generate-wasm.mjs --pre
-      ( cd ../../../rs/crates/bindings/paigasus-wasm && wasm-pack build . --target bundler --release --no-pack --out-dir .wasmpack-regen-out --out-name paigasus_wasm -- --config 'target.wasm32-unknown-unknown.rustflags=["--remap-path-prefix=/Users=/redacted","--remap-path-prefix=/home=/redacted"]' --locked )
+      remap="$(node scripts/generate-wasm.mjs --remap)"
+      case "$remap" in '['*--remap-path-prefix=*']') ;; *) echo "generate-wasm: --remap produced \"$remap\", not a rustflags array. Refusing to build a binary that would hold absolute host paths." >&2; exit 2 ;; esac
+      ( cd ../../../rs/crates/bindings/paigasus-wasm && wasm-pack build . --target bundler --release --no-pack --out-dir .wasmpack-regen-out --out-name paigasus_wasm -- --config "target.wasm32-unknown-unknown.rustflags=$remap" --locked )
       node scripts/generate-wasm.mjs --post
     deps: ['^:build']
     # A5 demands the five workspace inputs on every FFI task, and A7 the sources and manifests of

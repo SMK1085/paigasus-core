@@ -6,12 +6,15 @@
 // that hides the call would make the task invisible to the A5, A7 and A8 assertions.
 //
 //   node scripts/generate-wasm.mjs --pre     the guards, and the mtime bump cargo needs
-//   node scripts/generate-wasm.mjs --post    the home-path rejection, the copy, the cleanup
+//   node scripts/generate-wasm.mjs --remap   the path-redaction rustflags, as a TOML array
+//   node scripts/generate-wasm.mjs --post    the identity rejection, the copy, the cleanup
 //
 // The task has no "unchanged" early exit. The binary bytes depend on the host (spec F12), so there
 // is nothing a rebuild could compare itself against.
 import { execFileSync } from 'node:child_process';
-import { copyFileSync, existsSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, readFileSync, realpathSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import { homedir, userInfo } from 'node:os';
+import { basename, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 // scripts -> paigasus-kernel -> packages -> ts -> repo root: four `../`.
@@ -29,6 +32,62 @@ const TOUCH = ['rs/crates/libs/paigasus-kernel/src/lib.rs', 'rs/crates/bindings/
 function fail(message) {
   process.stderr.write(`generate-wasm: ${message}\n`);
   process.exit(1);
+}
+
+function realpathOrNull(path) {
+  try {
+    return realpathSync(path);
+  } catch {
+    return null;
+  }
+}
+
+// The absolute host paths rustc writes into the binary's panic strings and debug info. The old
+// remap was `--remap-path-prefix=/Users=/redacted`, which rewrites the FIRST SEGMENT ONLY: the
+// output held `/redacted/smaschek/.rustup/...` and `/redacted/smaschek/.cargo/...`, so the user
+// name of whoever regenerated the artifacts shipped in a public Apache-2.0 repository. Each entry
+// below maps a whole ROOT instead, so no user name and no machine-specific absolute path survives.
+//
+// CARGO_HOME and RUSTUP_HOME are honoured, because either can sit outside the home directory. The
+// roots are ordered from the least to the most specific, since rustc applies the LAST matching
+// remap — but the order is a belt-and-braces measure only: on a default installation both roots sit
+// under $HOME, so either precedence removes the user name. `post()` is what proves the output.
+function redactions() {
+  const home = homedir();
+  const cargo = process.env.CARGO_HOME ?? resolve(home, '.cargo');
+  const rustup = process.env.RUSTUP_HOME ?? resolve(home, '.rustup');
+
+  const seen = new Set();
+  const pairs = [];
+  for (const [root, placeholder] of [
+    [home, '/redacted-home'],
+    [resolve(cargo), '/redacted-cargo'],
+    [resolve(rustup), '/redacted-rustup'],
+  ]) {
+    // A symlinked root reaches rustc resolved, so both spellings are remapped.
+    for (const spelling of [root, realpathOrNull(root)]) {
+      if (spelling === null || spelling === '' || spelling === '/' || seen.has(spelling)) continue;
+      // rustc splits `--remap-path-prefix` on the FIRST `=`, so a root holding one would be parsed
+      // into the wrong prefix and the redaction would silently not apply. Fail rather than ship it.
+      if (spelling.includes('=')) {
+        fail(`the path "${spelling}" holds an "=", which --remap-path-prefix cannot express. Move the directory, or set CARGO_HOME/RUSTUP_HOME to a path without one.`);
+      }
+      seen.add(spelling);
+      pairs.push([spelling, placeholder]);
+    }
+  }
+  return pairs;
+}
+
+// The `--config target.wasm32-unknown-unknown.rustflags=<value>` argument the moon.yml script
+// passes to cargo. It stays on the `--config` channel and never becomes RUSTFLAGS: cargo reads one
+// rustflags source only, so an exported RUSTFLAGS would REPLACE this and ship the raw paths (`pre`
+// refuses to run when one is set). A `--config` value also survives a path that holds a space.
+// JSON.stringify emits a TOML-compatible array of basic strings and escapes a backslash or a quote.
+function remap() {
+  const flags = redactions().map(([from, to]) => `--remap-path-prefix=${from}=${to}`);
+  if (flags.length === 0) fail('no redaction roots were resolved, so the binary would hold absolute host paths.');
+  process.stdout.write(`${JSON.stringify(flags)}\n`);
 }
 
 function pinnedWasmPackVersion() {
@@ -77,11 +136,29 @@ function post() {
   }
 
   const binary = readFileSync(new URL(BINARY, OUT));
-  // CARGO_HOME can sit outside the home directory, so both roots are searched, not $HOME.
   const text = binary.toString('latin1');
-  for (const marker of ['/Users/', '/home/']) {
+  // Two families of marker, and the second is why this guard exists in its present form.
+  //
+  // The PATH markers catch a remap that did not take effect at all. They are not sufficient: the
+  // old `/Users` -> `/redacted` remap produced `/redacted/smaschek/.cargo/...`, which holds neither
+  // `/Users/` nor `/home/`, so this guard passed a binary carrying the user name — it searched for
+  // the two prefixes AFTER the remap had already rewritten them.
+  //
+  // The IDENTITY markers close that. They reject the name of the user running the task and the last
+  // segment of the home directory, anywhere in the binary, whatever path they appear in.
+  const home = homedir();
+  const identity = [userInfo().username, basename(home), basename(realpathOrNull(home) ?? '')];
+  const markers = new Map();
+  for (const value of ['/Users/', '/home/']) markers.set(value, 'an absolute host path');
+  // A one-character name would match almost any binary. Two is the shortest that can be meaningful,
+  // and a false positive here BLOCKS the regeneration rather than leaking, which is the safe side.
+  for (const value of identity) if (value.length >= 2) markers.set(value, 'the identity of the user running this task');
+
+  for (const [marker, kind] of markers) {
     if (text.includes(marker)) {
-      fail(`the new ${BINARY} holds the absolute path marker "${marker}". The --config remap did not take effect, and the binary must not be committed. Check the rustflags of the moon.yml script.`);
+      fail(
+        `the new ${BINARY} holds "${marker}", which is ${kind}. The path redaction did not cover it, and the binary must not be committed into a public repository. Nothing was copied into the crate directory. Widen redactions() in this script — never weaken this guard.`,
+      );
     }
   }
 
@@ -97,5 +174,6 @@ function post() {
 
 const mode = process.argv[2];
 if (mode === '--pre') pre();
+else if (mode === '--remap') remap();
 else if (mode === '--post') post();
-else fail(`unknown mode ${JSON.stringify(mode)} — use --pre or --post`);
+else fail(`unknown mode ${JSON.stringify(mode)} — use --pre, --remap or --post`);
