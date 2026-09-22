@@ -94,6 +94,18 @@ tasks:
       # cannot carry it instead: it has no /rs/** input, and adding one would rebuild the console on
       # every dead_letter.rs edit, because that task depends on `~:build`.
       - '/rs/crates/libs/paigasus-iam-core/src/dead_letter.rs'
+      # SMA-634 fix wave. tests/unit/wasm-gate-wiring.test.ts reads these files as TEXT, to pin the
+      # wiring of the four-check wasm drift gate: the kernel vitest config's `include` entry that
+      # selects checks 1-3, and each console vitest config's `setupFiles` entry plus the setup
+      # file's own check 4 call. Without these inputs, deleting one of those entries selects no
+      # paigasus-console-core-ts task and Moon serves a cached PASS on exactly the commit that
+      # switches the gate off. The app paths are GLOBS on purpose: the test discovers every
+      # ts/apps/* directory with a package.json, so a third console zone must re-key this task too.
+      - '/ts/packages/paigasus-kernel/vitest.config.ts'
+      - '/ts/packages/paigasus-kernel/tests/committed-wasm.test.ts'
+      - '/ts/apps/*/vitest.config.ts'
+      - '/ts/apps/*/tests/support/setup.ts'
+      - '/ts/apps/*/package.json'
   test-e2e:
     # SMA-648 § 4.4: the Docker-backed tier. It drives the REAL call site, descriptorCacheFor, against
     # a real Redis, because the defect lived in the client options that call site passes.
