@@ -2,8 +2,8 @@
 //
 // The frame of /iam/dead-letters (SMA-629 spec § 6.4). CLIENT component. The page renders it for
 // EVERY view that does not throw — the table, the empty list, the degraded view and a SectionError —
-// keyed by `${eventType}|${cursor}`, with the view as children. The design is the gateway console's
-// ServiceAccountFrame (ts/apps/gateway-console/app/_components/service-account-frame.tsx:1-27).
+// keyed by `${eventType}|${parkedFrom}|${parkedTo}|${cursor}`, with the view as children. The design
+// is the gateway console's ServiceAccountFrame (ts/apps/gateway-console/app/_components/service-account-frame.tsx:1-27).
 //
 // WHY A FRAME. React 19 resets a form before every action. A successful replay or discard removes the
 // row, and the revalidated render can also replace the table with an error view. A control that held
@@ -15,11 +15,19 @@
 // records the id from the FormData, so the result can name it. A generation counter makes the newest
 // submission's result win. While any action runs, EVERY Replay and Discard button is disabled.
 //
+// BULK REPLAY (SMA-661 spec § 6.1). The bulk form (bulk-replay-form.tsx) hands its FormData to the
+// runner's SECOND method, runBulk. It shares the generation counter and the busy lock with `run`, and
+// it reads no id. Its answer carries the replayed count, so it has its own result arm.
+// DeadLetterControl stays the two row controls, so successText can never answer "Discarded" for a
+// bulk submission.
+//
 // A REJECTED ACTION (a network drop, a server fault). The runner catches it and shows a client-built
 // error. It never rethrows: a rethrow reaches (console)/error.tsx, which unmounts this frame. The
 // action may still have run on the server, so the text says the result is unknown and asks for a
 // reload. A later retry of the same id answers not-found only while the row is not parked: if the
-// new publish failed, the relay parks the row again and a retry replays it again (§ 9).
+// new publish failed, the relay parks the row again and a retry replays it again (§ 9). For a bulk
+// replay the same text is correct, and more important: a rejected call can have replayed an unknown
+// number of events (SMA-661 fact 5).
 'use client';
 
 import { createContext, use, useRef, useState, useTransition, type FormEvent, type ReactElement, type ReactNode } from 'react';
@@ -28,19 +36,29 @@ import type { ActionResult, FormAction } from '@paigasus/console-core';
 import type { PaigasusError } from '@paigasus/sdk/errors/types';
 import { DEAD_LETTER_GONE } from '../../_components/error-copy';
 import { FormError } from '../../_components/form-error';
+import type { BulkReplayAction, BulkReplayResult } from './commands';
 
 export type DeadLetterControl = 'replay' | 'discard';
 
-export type DeadLetterActions = { readonly replay: FormAction; readonly discard: FormAction };
+export type DeadLetterActions = { readonly replay: FormAction; readonly discard: FormAction; readonly bulkReplay: BulkReplayAction };
 
 type FrameResult =
-  null | { readonly kind: 'answer'; readonly control: DeadLetterControl; readonly id: string; readonly state: ActionResult } | { readonly kind: 'unreached'; readonly error: PaigasusError };
+  | null
+  | { readonly kind: 'answer'; readonly control: DeadLetterControl; readonly id: string; readonly state: ActionResult }
+  | { readonly kind: 'bulk-answer'; readonly state: BulkReplayResult }
+  | { readonly kind: 'unreached'; readonly error: PaigasusError };
 
 /** The action's promise rejected: no answer came back. The action can still have run on the server. */
 export const UNREACHED_TEXT = 'No answer came back from the server, so the result is unknown. Reload the page to see the current queue.';
 
 export function successText(control: DeadLetterControl, id: string): string {
   return control === 'replay' ? `Replayed event ${id}.` : `Discarded event ${id}.`;
+}
+
+/** SMA-661 spec § 6.7. Zero is a real and useful answer, not a failure. */
+export function bulkReplayedText(replayed: number): string {
+  if (replayed === 0) return 'Replayed 0 events. No parked event matched the scope.';
+  return replayed === 1 ? 'Replayed 1 event.' : `Replayed ${String(replayed)} events.`;
 }
 
 /** § 6.4 (application/dead_letters.rs:215-229): a discard deletes the entry; the audit log keeps a copy. */
@@ -68,23 +86,28 @@ function unreachedError(): PaigasusError {
 function ResultMessage({ result }: { readonly result: FrameResult }): ReactElement | null {
   if (result === null) return null;
   if (result.kind === 'unreached') return <FormError error={result.error} message={UNREACHED_TEXT} />;
+  // SMA-661 § 6.7: bulk replay cannot answer not-found, so DEAD_LETTER_GONE stays on the two row actions.
+  if (result.kind === 'bulk-answer') return result.state.ok ? <p className="text-sm">{bulkReplayedText(result.state.replayed)}</p> : <FormError error={result.state.error} />;
   if (result.state.ok) return <p className="text-sm">{successText(result.control, result.id)}</p>;
   const error = result.state.error;
   // § 6.5: only a not-found answer of these two actions gets the dead-letter sentence.
   return <FormError error={error} message={error.presentation === 'not-found' ? DEAD_LETTER_GONE : undefined} />;
 }
 
-type Runner = {
-  /** True while any action of the frame runs. Every Replay and Discard button is disabled then. */
+export type Runner = {
+  /** True while any action of the frame runs. Every Replay, Discard and bulk-replay button is disabled then. */
   readonly busy: boolean;
   run(control: DeadLetterControl, form: FormData): void;
+  /** The bulk form's submission (SMA-661 § 6.1). It reads no id: the scope and the budget are in the FormData. */
+  runBulk(form: FormData): void;
 };
 
 const RunnerContext = createContext<Runner | null>(null);
 
-function useRunner(): Runner {
+/** Exported for bulk-replay-form.tsx (SMA-661 § 6.1). */
+export function useRunner(): Runner {
   const runner = use(RunnerContext);
-  if (runner === null) throw new Error('DeadLetterRowControls must render inside DeadLettersFrame.');
+  if (runner === null) throw new Error('A dead-letter control must render inside DeadLettersFrame.');
   return runner;
 }
 
@@ -110,6 +133,19 @@ export function DeadLettersFrame({ actions, children }: { readonly actions: Dead
         }
       });
     },
+    runBulk(form) {
+      generationRef.current += 1;
+      const mine = generationRef.current;
+      setResult(null);
+      startWork(async () => {
+        try {
+          const state = await actions.bulkReplay(null, form);
+          if (state !== null && generationRef.current === mine) setResult({ kind: 'bulk-answer', state });
+        } catch {
+          if (generationRef.current === mine) setResult({ kind: 'unreached', error: unreachedError() });
+        }
+      });
+    },
   };
 
   return (
@@ -127,8 +163,11 @@ export function DeadLettersFrame({ actions, children }: { readonly actions: Dead
 /**
  * Replay (one step: it is the normal recovery path) and Discard (two steps, the ArchiveButton
  * pattern of app/_components/lifecycle-button.tsx:42-80). No result of their own: the frame shows it.
+ * Replay renders only when `canReplay` (SMA-661 D4): the page asks mayI() about ReplayOutboxDeadLetter.
+ * It defaults to true, so a caller that does not ask shows Replay. Discard is a separate permission,
+ * and the console asks nothing about it.
  */
-export function DeadLetterRowControls({ id }: { readonly id: string }): ReactElement {
+export function DeadLetterRowControls({ id, canReplay = true }: { readonly id: string; readonly canReplay?: boolean }): ReactElement {
   const runner = useRunner();
   const [confirming, setConfirming] = useState(false);
 
@@ -142,12 +181,14 @@ export function DeadLetterRowControls({ id }: { readonly id: string }): ReactEle
 
   return (
     <div data-testid={`dead-letter-controls-${id}`} className="flex flex-col gap-2">
-      <form aria-label={`Replay event ${id}`} onSubmit={submit('replay')}>
-        <input type="hidden" name="id" value={id} />
-        <button type="submit" disabled={runner.busy} className={PRIMARY_BUTTON_CLASS}>
-          Replay
-        </button>
-      </form>
+      {canReplay ? (
+        <form aria-label={`Replay event ${id}`} onSubmit={submit('replay')}>
+          <input type="hidden" name="id" value={id} />
+          <button type="submit" disabled={runner.busy} className={PRIMARY_BUTTON_CLASS}>
+            Replay
+          </button>
+        </form>
+      ) : null}
       {confirming ? (
         <form aria-label={`Confirm the discard of event ${id}`} className="flex flex-col gap-2" onSubmit={submit('discard')}>
           <p className="text-sm">{discardConfirmation(id)}</p>

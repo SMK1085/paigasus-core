@@ -10,7 +10,7 @@ export { ROOT_PRN, isUuid, organizationPrn, parseTenancyPrn, projectPrn, teamPrn
 export { CORRELATION_HEADER, REQUEST_PATH_HEADER } from './correlation-header';
 export { createJsonLogger, logger, type AppEventFields, type AppEventName, type ConsoleLogger } from './logger';
 export { callIam, neverReachedIam, sessionExpired, type ActionState, type IamResult } from './errors';
-export { NAME_MAX_CODE_POINTS, formFields, invalidFormInput, nameField, prnField, toActionResult, type ActionResult, type FormAction } from './form';
+export { MAX_BULK_REPLAY_ROWS, NAME_MAX_CODE_POINTS, formFields, invalidFormInput, nameField, prnField, toActionResult, type ActionResult, type FormAction } from './form';
 export { FORBIDDEN_VIEW_CORRELATION, requestCorrelationId, requestPath } from './correlation';
 export { createIamClients, type IamClients } from './iam-clients';
 export { createIntrospectPrincipalResolver } from './principal-resolver';
