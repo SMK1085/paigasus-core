@@ -66,7 +66,9 @@ export function assertInstalledWasmMatchesCommitted(): void {
     // ts/node_modules; assert that, so the day the layout changes this fails loudly instead of
     // going quiet.
     if (`${resolve(installed)}${sep}`.startsWith(`${BINDINGS_DIR}${sep}`)) {
-      throw new Error(`the installed @paigasus/wasm/${name} resolves INTO the crate directory (${installed}). The check would compare a file with itself, so it proves nothing. @paigasus/wasm must install as a copy under ts/node_modules.`);
+      throw new Error(
+        `the installed @paigasus/wasm/${name} resolves INTO the crate directory (${installed}). The check would compare a file with itself, so it proves nothing. @paigasus/wasm must install as a copy under ts/node_modules.`,
+      );
     }
     const committed = join(CRATE_DIR, name);
     if (!existsSync(committed)) throw new Error(`${committed} is missing from the tree — the committed wasm artifacts are incomplete.`);
