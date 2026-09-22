@@ -13,7 +13,8 @@ dependsOn:
   - 'paigasus-wasm-rs'
 
 tasks:
-  # Produce the .node + regenerate the committed glue, THEN typecheck. Overrides the inherited
+  # Produce the .node, THEN typecheck. It does NOT touch the committed wasm glue — `generate-wasm`
+  # below is that glue's only writer (SMA-634). Overrides the inherited
   # `tsc --noEmit` build (which would not produce the addon). `^:build` only builds the upstream
   # cargo gate, not this artifact (review F1).
   #
@@ -106,13 +107,16 @@ tasks:
   # install time and never re-copies a rebuilt binary, so loading via the package name would import
   # a STALE store .node (verified: a kernel edit otherwise passes against the old value).
   #
-  # wasm: this task builds into its OWN scratch out-dir `.wasmpack-test-out` (distinct from the build
-  # task's `.wasmpack-out`) and vitest.config.ts aliases @paigasus/wasm straight at THAT scratch glue —
-  # it does NOT copy into the crate dir. build and test run concurrently under `moon ci`, so if both
-  # copied the freshly-built glue into the shared crate dir they'd race (`cp: … File exists` on the
-  # gitignored .wasm — SMA-427 CI). build is the sole crate-dir writer (for the committed glue); test
-  # reads its own fresh scratch. The two wasm-pack cargo builds still share rs/target and serialize on
-  # cargo's target-dir lock (safe).
+  # wasm: this task builds into its OWN scratch out-dir `.wasmpack-test-out` and vitest.config.ts
+  # aliases @paigasus/wasm straight at THAT scratch glue — it does NOT copy into the crate dir. That
+  # is what the drift gate compares the committed files against.
+  #
+  # SMA-634: `build` no longer runs wasm-pack at all, so the old race between `build` and `test` over
+  # the shared crate dir (`cp: … File exists` on the gitignored .wasm — SMA-427 CI) cannot happen any
+  # more. `generate-wasm` is the ONLY writer of the crate directory now, and CI never runs it
+  # (`runInCI: false`). The separate scratch out-dirs stay: `generate-wasm` and this task can still
+  # run in the same local invocation, and `wasm-pack build` CLEANS its --out-dir. The wasm-pack cargo
+  # builds share rs/target and serialize on cargo's target-dir lock (safe).
   #
   # `touch` first (highest priority — this is the assertion): cargo/`napi build` incrementality is
   # mtime-based, so a warm rs/target/ + a git op that leaves a Rust source OLDER than its artifact
@@ -175,10 +179,9 @@ tasks:
 
   # SMA-634. The ONLY writer of the five committed wasm artifacts
   # (rs/crates/bindings/paigasus-wasm/paigasus_wasm*). `test` already builds into its own,
-  # non-committing `.wasmpack-test-out`. `build` still calls wasm-pack too as of this task; a later
-  # task in this PR removes that call so `build` stops writing wasm-pack output at all. This task
-  # uses its own `.wasmpack-regen-out`, distinct from `build`'s `.wasmpack-out`, precisely so the
-  # two can run concurrently without one's wasm-pack wipe interleaving with the other's copy.
+  # non-committing `.wasmpack-test-out`, and `build` no longer calls wasm-pack at all. This task
+  # uses a third out-dir, `.wasmpack-regen-out`, so a concurrent `test` run's wasm-pack wipe cannot
+  # interleave with this task's copy into the crate directory.
   #
   # Run it after an edit to the Rust kernel or the wasm binding, then commit all five files.
   # tests/committed-wasm.test.ts reds until the committed files agree with the source.

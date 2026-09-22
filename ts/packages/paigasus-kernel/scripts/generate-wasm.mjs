@@ -20,8 +20,8 @@ import { fileURLToPath } from 'node:url';
 // scripts -> paigasus-kernel -> packages -> ts -> repo root: four `../`.
 const ROOT = new URL('../../../../', import.meta.url);
 const CRATE = new URL('rs/crates/bindings/paigasus-wasm/', ROOT);
-// Its own scratch dir, distinct from the `build` task's `.wasmpack-out` and the `test` task's
-// `.wasmpack-test-out`: wasm-pack wipes its --out-dir at the start of a run, so sharing a name
+// Its own scratch dir, distinct from the `test` task's `.wasmpack-test-out` (the `build` task runs
+// no wasm-pack since SMA-634): wasm-pack wipes its --out-dir at the start of a run, so sharing a name
 // with a task that can run concurrently would let a wipe interleave with this task's copy and
 // leave a mixed artifact set in the crate directory.
 const OUT = new URL('.wasmpack-regen-out/', CRATE);
