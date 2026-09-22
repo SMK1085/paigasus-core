@@ -27,6 +27,7 @@ import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import yaml
 
@@ -73,6 +74,10 @@ CHECK3_EXPECT = {
     "3b": {"iam-console": "differs", "gateway-console": "differs", "iam-backend": "differs"},
     "3c": {"iam-console": "differs", "gateway-console": "absent", "iam-backend": "equal"},
 }
+
+# Check 4's pod-level identity (spec § 5, check 4). A container may omit these keys, but may not
+# set one to another value.
+POD_IDENTITY = {"runAsUser": 65532, "runAsGroup": 65532, "runAsNonRoot": True}
 
 
 class InfraError(Exception):
@@ -415,6 +420,132 @@ def check3(chart):
     return rows
 
 
+# --------------------------------------------------------------------------- check 4
+
+
+def _as_int(value, what):
+    try:
+        return int(value)
+    except (TypeError, ValueError) as exc:
+        raise ShapeError(f"{what} {value!r} is not an integer") from exc
+
+
+def _container_port(container, name):
+    ports = [p for p in container.get("ports") or [] if p.get("name") == name]
+    return _as_int(_get(_one(ports, f"container port named {name}"), "containerPort"), f"containerPort {name}")
+
+
+def _addr_port(value, what):
+    try:
+        return int(str(value).rsplit(":", 1)[1])
+    except (IndexError, ValueError) as exc:
+        raise ShapeError(f"{what} {value!r} carries no port") from exc
+
+
+def _url_port(value, what):
+    try:
+        port = urlsplit(str(value)).port
+    except ValueError as exc:
+        raise ShapeError(f"{what} {value!r} carries no valid port") from exc
+    if port is None:
+        raise ShapeError(f"{what} {value!r} carries no port")
+    return port
+
+
+def _same(got, want):
+    """Equal AND the same type: True == 1 in Python, and runAsNonRoot: 1 is not runAsNonRoot: true."""
+    return type(got) is type(want) and got == want
+
+
+def _resolve_target(service_port, container):
+    """A Service targetPort as a number: a named port resolves through the container's ports."""
+    target = _get(service_port, "targetPort")
+    if isinstance(target, int):
+        return target
+    return _container_port(container, str(target))
+
+
+def check4(label, docs):
+    def iam_backend():
+        dep = _one(_deployments(docs, "iam-backend"), "iam-backend Deployment")
+        container = _get(_containers(dep), 0)
+        svc = _one([s for s in _of_kind(docs, "Service") if _selects(s, dep)], "Service selecting the iam-backend Deployment")
+        return dep, container, svc
+
+    def iam_http():
+        _dep, container, svc = iam_backend()
+        port = _service_port(svc, "http")
+        got = {
+            "containerPort http": _container_port(container, "http"),
+            "IAM_HTTP_ADDR": _addr_port(_get(_env(container), "IAM_HTTP_ADDR"), "IAM_HTTP_ADDR"),
+            "Service port http": _as_int(_get(port, "port"), "Service port http"),
+            "Service targetPort http": _resolve_target(port, container),
+            "PAIGASUS_SERVICES.iam": _url_port(_get(_json_map(docs, "PAIGASUS_SERVICES"), "iam"), "PAIGASUS_SERVICES.iam"),
+        }
+        return [] if len(set(got.values())) == 1 else [f"IAM HTTP ports disagree: {got}"]
+
+    def iam_grpc():
+        _dep, container, svc = iam_backend()
+        port = _service_port(svc, "grpc")
+        env_cm = _configmap_with(docs, "PAIGASUS_IAM_GRPC_URL")
+        got = {
+            "containerPort grpc": _container_port(container, "grpc"),
+            "IAM_GRPC_ADDR": _addr_port(_get(_env(container), "IAM_GRPC_ADDR"), "IAM_GRPC_ADDR"),
+            "Service port grpc": _as_int(_get(port, "port"), "Service port grpc"),
+            "Service targetPort grpc": _resolve_target(port, container),
+            "PAIGASUS_IAM_GRPC_URL": _url_port(_get(env_cm, "data", "PAIGASUS_IAM_GRPC_URL"), "PAIGASUS_IAM_GRPC_URL"),
+        }
+        return [] if len(set(got.values())) == 1 else [f"IAM gRPC ports disagree: {got}"]
+
+    def console_port():
+        problems = []
+        consoles = [d for d in _of_kind(docs, "Deployment") if str(_app_label(d)).endswith("-console")]
+        if not consoles:
+            raise ShapeError("no console Deployment rendered")
+        for dep in consoles:
+            container = _get(_containers(dep), 0)
+            svc = _one([s for s in _of_kind(docs, "Service") if _selects(s, dep)], f"Service selecting {_name(dep)}")
+            got = {
+                "containerPort http": _container_port(container, "http"),
+                "PORT": _as_int(_get(_env(container), "PORT"), "PORT"),
+                "Service targetPort http": _resolve_target(_service_port(svc, "http"), container),
+            }
+            if len(set(got.values())) != 1:
+                problems.append(f"{_name(dep)} ports disagree: {got}")
+        return problems
+
+    def security_context():
+        problems = []
+        deps = _of_kind(docs, "Deployment")
+        if not deps:
+            raise ShapeError("no Deployment rendered")
+        for dep in deps:
+            pod = _get(dep, "spec", "template", "spec")
+            psc = pod.get("securityContext") or {}
+            for key, want in POD_IDENTITY.items():
+                if not _same(psc.get(key), want):
+                    problems.append(f"{_name(dep)}: pod securityContext.{key} is {psc.get(key)!r}, must be {want!r}")
+            if "readOnlyRootFilesystem" in psc:
+                problems.append(f"{_name(dep)}: pod securityContext carries readOnlyRootFilesystem (RUNBOOK-containers.md § 7: untested)")
+            for c in (pod.get("containers") or []) + (pod.get("initContainers") or []):
+                csc = c.get("securityContext") or {}
+                if csc.get("allowPrivilegeEscalation") is not False:
+                    problems.append(f"{_name(dep)}/{c.get('name')}: allowPrivilegeEscalation must be false")
+                for key, want in POD_IDENTITY.items():
+                    if key in csc and not _same(csc[key], want):
+                        problems.append(f"{_name(dep)}/{c.get('name')}: container securityContext.{key} is {csc[key]!r}, must be absent or {want!r}")
+                if "readOnlyRootFilesystem" in csc:
+                    problems.append(f"{_name(dep)}/{c.get('name')}: container securityContext carries readOnlyRootFilesystem (RUNBOOK-containers.md § 7: untested)")
+        return problems
+
+    return [
+        _row(f"4 iam-http {label}", iam_http),
+        _row(f"4 iam-grpc {label}", iam_grpc),
+        _row(f"4 console-port {label}", console_port),
+        _row(f"4 security-context {label}", security_context),
+    ]
+
+
 # --------------------------------------------------------------------------- run
 
 
@@ -436,6 +567,7 @@ def run_checks(chart):
         rows += check1(label, docs, enabled, paths, slugs)
         if enabled == ("iam",):
             rows.append(check2(docs, raw))
+        rows += check4(label, docs)
     rows += check3(chart)
     return rows
 
@@ -687,6 +819,46 @@ def self_test():
     console_same = synthetic(iam_only)
     _find(console_same, "Deployment", "r-iam-console")["spec"]["template"] = copy.deepcopy(_find(synthetic(both), "Deployment", "r-iam-console")["spec"]["template"])
     expect("check3 c IAM console unchanged", [compare_templates("3c", synthetic(both), console_same)], fail=("3c",))
+
+    # ---- check 4
+    four = ("4 iam-http t", "4 iam-grpc t", "4 console-port t", "4 security-context t")
+    expect("check4 good", check4("t", synthetic(both)), passing=four)
+
+    def mutated(fn):
+        docs = synthetic(both)
+        fn(docs)
+        return check4("t", docs)
+
+    def backend_env(docs):
+        return _containers(_find(docs, "Deployment", "r-iam-backend"))[0]["env"]
+
+    def pod_sc(docs, name):
+        return _find(docs, "Deployment", name)["spec"]["template"]["spec"]["securityContext"]
+
+    def container_sc(docs, name):
+        return _containers(_find(docs, "Deployment", name))[0]["securityContext"]
+
+    def services_port(docs):
+        _configmap_with(docs, "PAIGASUS_SERVICES")["data"]["PAIGASUS_SERVICES"] = json.dumps({"gateway": "http://gw:1", "iam": "http://r-iam-backend:18080"})
+
+    expect("check4 IAM_HTTP_ADDR drifts", mutated(lambda d: backend_env(d)[0].update(value="0.0.0.0:8081")), fail=("4 iam-http t",), passing=("4 iam-grpc t",))
+    expect("check4 Service http port drifts", mutated(lambda d: _find(d, "Service", "r-iam-backend")["spec"]["ports"][0].update(port=80)), fail=("4 iam-http t",))
+    expect("check4 PAIGASUS_SERVICES.iam port drifts", mutated(services_port), fail=("4 iam-http t",))
+    expect("check4 IAM_GRPC_ADDR drifts", mutated(lambda d: backend_env(d)[1].update(value="0.0.0.0:9091")), fail=("4 iam-grpc t",), passing=("4 iam-http t",))
+    expect(
+        "check4 PAIGASUS_IAM_GRPC_URL drifts",
+        mutated(lambda d: _configmap_with(d, "PAIGASUS_IAM_GRPC_URL")["data"].update(PAIGASUS_IAM_GRPC_URL="http://r-iam-backend:9999")),
+        fail=("4 iam-grpc t",),
+    )
+    expect("check4 console PORT drifts", mutated(lambda d: _containers(_find(d, "Deployment", "r-iam-console"))[0]["env"][1].update(value="8080")), fail=("4 console-port t",))
+    expect("check4 console PORT is not a number", mutated(lambda d: _containers(_find(d, "Deployment", "r-iam-console"))[0]["env"][1].update(value="http")), fail=("4 console-port t",))
+    expect("check4 console Service targets another port", mutated(lambda d: _find(d, "Service", "r-gateway-console")["spec"]["ports"][0].update(targetPort=8080)), fail=("4 console-port t",))
+    expect("check4 pod drops runAsNonRoot", mutated(lambda d: pod_sc(d, "r-iam-console").pop("runAsNonRoot")), fail=("4 security-context t",))
+    expect("check4 runAsNonRoot: 1 is not true", mutated(lambda d: pod_sc(d, "r-iam-backend").update(runAsNonRoot=1)), fail=("4 security-context t",))
+    expect("check4 container runs as root", mutated(lambda d: container_sc(d, "r-gateway-console").update(runAsUser=0)), fail=("4 security-context t",))
+    expect("check4 privilege escalation not denied", mutated(lambda d: container_sc(d, "r-iam-backend").pop("allowPrivilegeEscalation")), fail=("4 security-context t",))
+    expect("check4 readOnlyRootFilesystem on the pod", mutated(lambda d: pod_sc(d, "r-iam-console").update(readOnlyRootFilesystem=True)), fail=("4 security-context t",))
+    expect("check4 readOnlyRootFilesystem on a container", mutated(lambda d: container_sc(d, "r-iam-console").update(readOnlyRootFilesystem=True)), fail=("4 security-context t",))
 
     # ---- the exit-code contract and the parser's infrastructure errors
     if report([Row("x", True)], io.StringIO()) != 0 or report([Row("x", True), Row("y", False, "bad")], io.StringIO()) != 3:
