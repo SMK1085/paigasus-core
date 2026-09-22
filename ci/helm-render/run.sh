@@ -66,7 +66,7 @@ export HELM_CACHE_HOME="$TMP/helm-cache" HELM_CONFIG_HOME="$TMP/helm-config" HEL
 resolve_helm() {
   local want got bin
   # Digits and dots only: the [plugins] table also has a `helm = "file://..."` line.
-  want="$(sed -n 's/^helm = "\([0-9][0-9.]*\)"$/\1/p' "$REPO_ROOT/.prototools")"
+  want="$(sed -n 's/^helm = "\([0-9][0-9.]*\)"$/\1/p' "$REPO_ROOT/.prototools")" || die_infra "cannot read .prototools"
   case "$want" in
     ''|*[!0-9.]*) die_infra "expected one 'helm = \"X.Y.Z\"' pin in .prototools, got: ${want:-<none>}" ;;
   esac

@@ -3805,7 +3805,7 @@ EXPECTED_FINDING_KEYS = (
 )
 
 # The eight shell sources check_self_invocation reads, keyed so collect_findings' signature does
-# not grow seven positional parameters that a caller could silently transpose.
+# not grow eight positional parameters that a caller could silently transpose.
 _CALL_SITE_SOURCE_KEYS = (
     "run", "actionlint", "release_parity", "workflow_credentials", "release_plan", "ruff",
     "next_public_free", "helm_render",

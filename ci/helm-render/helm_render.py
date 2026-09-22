@@ -79,6 +79,34 @@ CHECK3_EXPECT = {
 # set one to another value.
 POD_IDENTITY = {"runAsUser": 65532, "runAsGroup": 65532, "runAsNonRoot": True}
 
+# The row labels a real run_checks() call produces, IN ORDER. This is the floor: a check whose
+# production call is deleted (or reordered, or duplicated) makes the produced list diverge from
+# this constant, and run_checks() then raises InfraError instead of silently reporting fewer rows
+# as "all N rows passed" (F1). Re-baseline this deliberately when a row is genuinely added,
+# removed or reordered — never to make a red run_checks() call green again.
+EXPECTED_ROW_LABELS = (
+    "1a",
+    "1.1 iam",
+    "1.2 iam",
+    "1.3 iam",
+    "2",
+    "4 iam-http iam",
+    "4 iam-grpc iam",
+    "4 console-port iam",
+    "4 security-context iam",
+    "1.1 iam+gateway",
+    "1.2 iam+gateway",
+    "1.3 iam+gateway",
+    "4 iam-http iam+gateway",
+    "4 iam-grpc iam+gateway",
+    "4 console-port iam+gateway",
+    "4 security-context iam+gateway",
+    "3a",
+    "3a-prime",
+    "3b",
+    "3c",
+)
+
 
 class InfraError(Exception):
     """Exit 2: the module could not obtain or parse its input."""
@@ -322,6 +350,8 @@ def check1(label, docs, enabled, paths, slugs):
                     got = _env(_get(_containers(dep), 0)).get("PAIGASUS_ZONE")
                     if zone is None or got != zone:
                         problems.append(f"{path} routes to Service {_name(svc)}, whose Deployment serves PAIGASUS_ZONE={got!r}, not {zone!r}")
+                    # An assertion, not a lookup: the return value is discarded, but a missing
+                    # port named after the Ingress backend raises ShapeError, which fails this row.
                     _service_port(svc, _get(p, "backend", "service", "port", "name"))
         return problems
 
@@ -353,6 +383,10 @@ def check2(docs, raw, disabled="gateway"):
 
     def body():
         problems = []
+        # This structured walk is redundant with the raw-text search below for DETECTION — the raw
+        # render also contains every string this walk visits. It runs first anyway because it
+        # names the exact document and field a leak sits in, which is a better message than "the
+        # raw render contains X somewhere".
         for i, doc in enumerate(docs):
             for where, text in _strings(doc, f"doc[{i}]"):
                 hits = sorted(n for n in needles if n in text.lower())
@@ -394,6 +428,7 @@ def compare_templates(row, before, after):
 
 
 def _bumped_app_version(chart, dest):
+    """Copy `chart` to `dest` and bump the copy's Chart.yaml appVersion, for case 3b's restart check."""
     shutil.copytree(chart, dest)
     chart_yaml = Path(dest) / "Chart.yaml"
     text, n = re.subn(r"(?m)^appVersion:.*$", 'appVersion: "0.0.0-helm-render-bump"', chart_yaml.read_text())
@@ -404,6 +439,7 @@ def _bumped_app_version(chart, dest):
 
 
 def check3(chart):
+    """Rows 3a, 3a-prime, 3b and 3c; EXPECTED_ROW_LABELS is the inventory that floors this set."""
     both = ("gateway", "iam")
     base = parse_docs(helm_template(chart, both))
     rows = []
@@ -549,6 +585,35 @@ def check4(label, docs):
 # --------------------------------------------------------------------------- run
 
 
+def _row_inventory_diff(got, want):
+    """A human-readable difference between two row-label tuples: missing, extra, or reordered."""
+    missing = [r for r in want if r not in got]
+    extra = [r for r in got if r not in want]
+    parts = []
+    if missing:
+        parts.append(f"missing {missing}")
+    if extra:
+        parts.append(f"extra {extra}")
+    if not parts and list(got) != list(want):
+        parts.append(f"reordered: got {list(got)}, want {list(want)}")
+    return "; ".join(parts) if parts else "(no difference)"
+
+
+def _check_row_inventory(got_labels, want_labels=EXPECTED_ROW_LABELS):
+    """Raise InfraError unless `got_labels` equals `want_labels` exactly, in order (F1).
+
+    Without this floor, a deleted check-3 call (or any other production call) makes run_checks()
+    return fewer rows, and the gate still prints "all N rows passed" at the smaller N — a green
+    run over a silently smaller check set. A mismatch here is an infrastructure error (rc 2), not
+    an assertion failure: the gate itself is malformed, not the chart under test.
+    """
+    got_labels = tuple(got_labels)
+    if got_labels == tuple(want_labels):
+        return
+    diff = _row_inventory_diff(got_labels, tuple(want_labels))
+    raise InfraError(f"helm-render row inventory does not match EXPECTED_ROW_LABELS: {diff}")
+
+
 def run_checks(chart):
     """Every row for the chart in `chart`. Each render must succeed, or this raises InfraError."""
     chart = Path(chart).resolve()
@@ -569,6 +634,7 @@ def run_checks(chart):
             rows.append(check2(docs, raw))
         rows += check4(label, docs)
     rows += check3(chart)
+    _check_row_inventory([r.row for r in rows])
     return rows
 
 
@@ -865,6 +931,20 @@ def self_test():
         failures.append("report: the exit code does not follow the rows (want 0 and 3)")
     expect_infra("parse_docs invalid YAML", lambda: parse_docs("a: [\n"))
     expect_infra("parse_docs a non-mapping document", lambda: parse_docs("- a\n- b\n"))
+
+    # ---- row inventory floor (F1): EXPECTED_ROW_LABELS' own arity and content, plus
+    # _check_row_inventory's behaviour on a missing, an extra and a reordered row.
+    if len(EXPECTED_ROW_LABELS) != 20:
+        failures.append(f"EXPECTED_ROW_LABELS: expected 20 labels, got {len(EXPECTED_ROW_LABELS)}")
+    if len(set(EXPECTED_ROW_LABELS)) != len(EXPECTED_ROW_LABELS):
+        failures.append("EXPECTED_ROW_LABELS: contains a duplicate label")
+    _check_row_inventory(EXPECTED_ROW_LABELS)  # the constant against itself: must not raise
+    expect_infra("row inventory: a truncated row list raises InfraError", lambda: _check_row_inventory(EXPECTED_ROW_LABELS[:-2]))
+    expect_infra("row inventory: an extra row raises InfraError", lambda: _check_row_inventory((*EXPECTED_ROW_LABELS, "extra")))
+    expect_infra(
+        "row inventory: a reordered row list raises InfraError",
+        lambda: _check_row_inventory((EXPECTED_ROW_LABELS[1], EXPECTED_ROW_LABELS[0], *EXPECTED_ROW_LABELS[2:])),
+    )
 
     for f in failures:
         print(f"  FAIL {f}")
