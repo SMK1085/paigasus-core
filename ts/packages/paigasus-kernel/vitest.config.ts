@@ -36,9 +36,9 @@ export default defineConfig({
       {
         // browser/wasm path: `browser` + the additive module-resolution defaults (NOT a bare
         // ['browser'] — that drops module/import and breaks source-exports `.ts` resolution —
-        // SMA-427 M4), vite-plugin-wasm to instantiate the bundler-target `.wasm`, the
-        // @paigasus/kernel→src/wasm.ts alias (see the kernelWasmEntry note above), and the
-        // @paigasus/wasm crate-dir alias for fresh glue.
+        // SMA-427 M4), vite-plugin-wasm to instantiate the bundler-target `.wasm`, and the
+        // @paigasus/wasm crate-dir alias for fresh glue. @paigasus/kernel itself needs no alias
+        // here since SMA-634 — see the package-level comment above.
         //
         // vite-plugin-top-level-await is intentionally NOT used: the plan paired it with
         // vite-plugin-wasm, but (a) the `--target bundler` glue is synchronous — `import * as wasm`
