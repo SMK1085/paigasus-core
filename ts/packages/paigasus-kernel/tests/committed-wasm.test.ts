@@ -64,6 +64,14 @@ const EXPECTED_IMPORTS = [/^\.\/paigasus_wasm_bg\.js\.__wbg_Error_[0-9a-f]{16}:f
 
 const REGENERATE = 'Run `moon run paigasus-kernel-ts:generate-wasm` and commit all five files under rs/crates/bindings/paigasus-wasm/ (paigasus_wasm_bg.wasm and the four glue files).';
 
+// The remedy for the two literal assertions below, which `generate-wasm` alone CANNOT repair. When a
+// kernel export is added, removed or renamed on purpose, a regeneration makes both binaries carry
+// the new surface and both then fail against the old literal — so a message naming only the
+// regeneration would send the reader in a circle. Same standard as the 16-hex hash field above.
+const SURFACE_CHANGED =
+  "If the kernel's exported surface changed ON PURPOSE, update EXPECTED_EXPORTS and EXPECTED_IMPORTS in this file to the new surface; a regeneration cannot fix this case. If it did not, the committed binary is stale: " +
+  REGENERATE;
+
 interface Interfaces {
   imports: string[];
   exports: string[];
@@ -107,10 +115,10 @@ describe('the committed wasm artifacts agree with the Rust source', () => {
       ['fresh', FRESH],
     ] as [string, URL][]) {
       const actual = probe('--interfaces', dir) as Interfaces;
-      expect(actual.exports, `the ${label} binary does not export the kernel's 21 names. ${REGENERATE}`).toEqual(EXPECTED_EXPORTS);
-      expect(actual.imports, `the ${label} binary does not import the glue's 2 callbacks. ${REGENERATE}`).toHaveLength(EXPECTED_IMPORTS.length);
+      expect(actual.exports, `the ${label} binary does not export the kernel's 21 names. ${SURFACE_CHANGED}`).toEqual(EXPECTED_EXPORTS);
+      expect(actual.imports, `the ${label} binary does not import the glue's 2 callbacks. ${SURFACE_CHANGED}`).toHaveLength(EXPECTED_IMPORTS.length);
       EXPECTED_IMPORTS.forEach((pattern, index) => {
-        expect(actual.imports[index], `the ${label} binary's import ${index} does not match ${String(pattern)}. ${REGENERATE}`).toMatch(pattern);
+        expect(actual.imports[index], `the ${label} binary's import ${index} does not match ${String(pattern)}. ${SURFACE_CHANGED}`).toMatch(pattern);
       });
     }
   });
