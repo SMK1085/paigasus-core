@@ -1602,7 +1602,7 @@ of the `jobs:` mapping, add:
   # kernel release and an image release never block each other in the job graph. release_guard.py
   # V8 asserts the per-chain boundary and V14 the capabilities. All approval jobs share the
   # `release-approval` environment, so one human approval releases every chain pending in the run
-  # (GitHub approves by environment, not by job; not yet observed on a live run).
+  # (GitHub approves by environment, not by job; measured on the first live release, run 35648073131).
   images-build-iam:
     name: build the iam image (${{ matrix.arch }})
     needs: [plan]
@@ -2296,7 +2296,8 @@ Append to the Gotchas list in `CLAUDE.md`:
   three approval jobs (`approve-release`, `approve-images-iam`, `approve-images-gateway`) share the
   one `release-approval` environment, though. GitHub approves a pending deployment by environment,
   not by job, so one human approval releases every chain that waits for approval in the same run.
-  This comes from the shape of GitHub's approval API; it has not yet been observed on a live run.
+  MEASURED on the first live release (run 35648073131, 2026-09-21): the run listed one pending
+  deployment for the two waiting approval jobs, and one approval released both chains.
   V14 asserts the same job-graph rule for the CAPABILITY (`packages: write`, `id-token: write`,
   `attestations: write`, the `release-images` or `release-publish` environment, an App token with
   `contents: write`), so a publish with a tool no marker names still reds. V13 allows

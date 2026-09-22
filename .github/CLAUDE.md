@@ -251,7 +251,8 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   three approval jobs (`approve-release`, `approve-images-iam`, `approve-images-gateway`) share the
   one `release-approval` environment, though. GitHub approves a pending deployment by environment,
   not by job, so one human approval releases every chain that waits for approval in the same run.
-  This comes from the shape of GitHub's approval API; it has not yet been observed on a live run.
+  MEASURED on the first live release (run 35648073131, 2026-09-21): the run listed one pending
+  deployment for the two waiting approval jobs, and one approval released both chains.
   V14 asserts the same job-graph rule for the CAPABILITY (`packages: write`, `id-token: write`,
   `attestations: write`, the `release-images` or `release-publish` environment, an App token with
   `contents: write`), so a publish with a tool no marker names still reds. V13 allows
@@ -271,3 +272,12 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   version-written. `ci/release-plan/release_plan.py
   --assert`, which `repo:actionlint` check 11 runs on every pull request, fails when a bumped
   service has no changelog section.
+- **`gh api` on a 404 exits 1 AND prints GitHub's JSON error body on STDOUT.** `--jq` is not
+  applied to the error body, and `2> /dev/null` does not hide it. MEASURED on the first live image
+  release (run 35648073131): `existing="$(gh api …/git/ref/tags/<tag> --jq .object.sha 2> /dev/null
+  || echo none)"` captured `{"message":"Not Found",…}none`, so both `tag-<svc>` jobs read a MISSING
+  tag as a conflicting one and failed, after the images were already published. Never capture a
+  `gh api` result with an `|| echo <default>` fallback. Branch on the exit status, and on a failure
+  accept only the 404 body (`"status":"404"`) as "absent"; any other failure must stop the job.
+  `release.yml`'s "Make the release tag" step is the worked example. A `git ls-remote --exit-code`
+  probe, which the publish job uses, does not have this trap.

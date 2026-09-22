@@ -433,8 +433,9 @@ yet".
 3. Approve the `approve-images-<svc>` job. Each service chain has its own approval job, but all
    three approval jobs (`approve-release`, `approve-images-iam`, `approve-images-gateway`) use the
    same `release-approval` environment. GitHub approves a pending deployment by environment, not by
-   job. So one approval releases every chain that waits for approval in the same run. This comes
-   from the shape of GitHub's approval API. It has not yet been observed on a live run. To release
+   job. So one approval releases every chain that waits for approval in the same run. This was
+   measured on the first live release (run 35648073131): one approval released both image
+   chains. To release
    only one chain, keep only that chain pending: put only that service's version bump in the
    release, and do not combine it with a kernel release you want to hold back. The security floor
    holds either way: a human must approve before any step that publishes or tags an image runs.
