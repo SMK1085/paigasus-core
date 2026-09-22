@@ -85,6 +85,46 @@ describe('parseTenancyPrn delegates the grammar to the kernel', () => {
 });
 
 /**
+ * The `MAX_LEN` guard in src/prn-tenancy.ts is a RESOURCE limit, not grammar. The kernel enforces
+ * its own 512-byte rule, but only AFTER the string is copied into wasm linear memory, which never
+ * shrinks — so a 10 MB URL segment would be copied before it was refused.
+ *
+ * The corpus replay cannot control this. Its one over-long row is refused by the region rule and by
+ * the kernel independently, so deleting the guard leaves that suite green. The kernel is mocked
+ * here, and the mocks accept everything, so the ONLY thing that can reject an over-long input is
+ * the guard. The assertion is that no kernel call happens at all — a null return alone would not
+ * prove the string never reached wasm.
+ */
+describe('parseTenancyPrn bounds the input before the first kernel call', () => {
+  // MAX_LEN is 512 in src/prn-tenancy.ts. Spelled here so the boundary case below is exact.
+  const MAX_LEN = 512;
+
+  it('does not call the kernel for an over-long PRN', () => {
+    const overLong = `prn:pgs:iam::${ORG}:team/${'a'.repeat(MAX_LEN)}`;
+    expect(overLong.length).toBeGreaterThan(MAX_LEN);
+    expect(parseTenancyPrn(overLong)).toBeNull();
+    for (const accessor of [prnErrorKind, prnService, prnRegion, prnResourceType, prnResourceId, prnOrg]) {
+      expect(vi.mocked(accessor)).not.toHaveBeenCalled();
+    }
+  });
+
+  it('does not call the kernel for an empty PRN', () => {
+    expect(parseTenancyPrn('')).toBeNull();
+    expect(vi.mocked(prnErrorKind)).not.toHaveBeenCalled();
+  });
+
+  // The boundary, so the guard cannot be tightened into a `>=` that rejects a legal PRN, and so the
+  // over-long case above is not satisfied by a guard that refuses everything.
+  it('passes a PRN of exactly MAX_LEN characters to the kernel', () => {
+    const head = `prn:pgs:iam::${ORG}:team/`;
+    const exact = head + 'a'.repeat(MAX_LEN - head.length);
+    expect(exact.length).toBe(MAX_LEN);
+    expect(parseTenancyPrn(exact)).toEqual({ kind: 'team', orgId: ORG, id: TEAM });
+    expect(vi.mocked(prnErrorKind)).toHaveBeenCalledWith(exact);
+  });
+});
+
+/**
  * `parseTenancyPrn` returns `TenancyRef | null`, so it must be TOTAL: no input may make it throw.
  * The adapter reads six kernel functions, and every one of them can throw. An empty `prnErrorKind`
  * happens to imply the other five succeed today, because all seven call the same `Prn::parse` — but
