@@ -175,3 +175,52 @@ tasks:
       - '/rs/rust-toolchain.toml'
       - '/.prototools'
       - '/rs/.cargo/config.toml'
+
+  # SMA-634. The ONLY writer of the five committed wasm artifacts
+  # (rs/crates/bindings/paigasus-wasm/paigasus_wasm*). `build` and `test` never write them any more:
+  # `build` stopped calling wasm-pack, and `test` builds into its own .wasmpack-test-out.
+  #
+  # Run it after an edit to the Rust kernel or the wasm binding, then commit all five files.
+  # tests/committed-wasm.test.ts reds until the committed files agree with the source.
+  #
+  # ONE host regenerates them. The binary bytes differ per host (spec F12), so a second host
+  # produces a diff that says nothing. The four glue files are byte-identical on macOS, Linux arm64
+  # and Linux amd64 (spec F15), which is what makes the gate valid in CI.
+  #
+  # The literal `wasm-pack` call stays HERE, not inside the script file:
+  # ci/affected-graph/cargo_moon_parity.py derives an FFI task from the resolved invocation
+  # (FFI_MARKERS), and an invocation behind a wrapper would drop this task out of A5, A7 and A8.
+  # The path remap travels as `--config`, never as RUSTFLAGS: cargo reads one rustflags source
+  # only, and a `--config` value also survives a path that holds a space.
+  #
+  # runInCI: false — CI never regenerates; it only compares. cache: false — the task writes tracked
+  # files, and a cached replay would write nothing.
+  generate-wasm:
+    script: |
+      set -euo pipefail
+      node scripts/generate-wasm.mjs --pre
+      ( cd ../../../rs/crates/bindings/paigasus-wasm && wasm-pack build . --target bundler --release --no-pack --out-dir .wasmpack-out --out-name paigasus_wasm -- --config 'target.wasm32-unknown-unknown.rustflags=["--remap-path-prefix=/Users=/redacted","--remap-path-prefix=/home=/redacted"]' --locked )
+      node scripts/generate-wasm.mjs --post
+    deps: ['^:build']
+    # A5 demands the five workspace inputs on every FFI task, and A7 the sources and manifests of
+    # the dependsOn closure (paigasus-kernel-rs, paigasus-node-bindings-rs, paigasus-wasm-rs), plus
+    # the napi crate's build.rs. They are declared although the task is `cache: false`: the
+    # assertions read the declaration, not the cache.
+    inputs:
+      - 'scripts/**/*'
+      - 'package.json'
+      - '/rs/crates/libs/paigasus-kernel/src/**/*'
+      - '/rs/crates/libs/paigasus-kernel/Cargo.toml'
+      - '/rs/crates/bindings/paigasus-node-bindings/build.rs'
+      - '/rs/crates/bindings/paigasus-node-bindings/src/**/*'
+      - '/rs/crates/bindings/paigasus-node-bindings/Cargo.toml'
+      - '/rs/crates/bindings/paigasus-wasm/src/**/*'
+      - '/rs/crates/bindings/paigasus-wasm/Cargo.toml'
+      - '/rs/Cargo.lock'
+      - '/rs/Cargo.toml'
+      - '/rs/rust-toolchain.toml'
+      - '/.prototools'
+      - '/rs/.cargo/config.toml'
+    options:
+      runInCI: false
+      cache: false
