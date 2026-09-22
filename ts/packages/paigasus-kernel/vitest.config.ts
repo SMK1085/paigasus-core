@@ -28,7 +28,7 @@ export default defineConfig({
         test: {
           name: 'node',
           environment: 'node',
-          include: ['tests/sum.test.ts', 'tests/uuid7.test.ts', 'tests/prn-canonical.test.ts', 'tests/prn-fields.test.ts', 'tests/cedar.test.ts'],
+          include: ['tests/sum.test.ts', 'tests/uuid7.test.ts', 'tests/prn-canonical.test.ts', 'tests/prn-fields.test.ts', 'tests/cedar.test.ts', 'tests/committed-wasm.test.ts'],
           server: { deps: { external: [/\.node$/] } },
         },
         resolve: { alias: { '@paigasus/node-bindings': nodeBindingDir } },

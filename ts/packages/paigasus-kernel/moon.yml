@@ -163,6 +163,13 @@ tasks:
       - '/rs/crates/bindings/paigasus-wasm/src/**/*'
       - '/rs/crates/bindings/paigasus-wasm/Cargo.toml'
       - '/rs/crates/bindings/paigasus-wasm/package.json'
+      # SMA-634: the five committed artifacts the drift gate compares. Named one by one, not as a
+      # `paigasus_wasm*` glob, so a new scratch file beside them cannot re-key this task.
+      - '/rs/crates/bindings/paigasus-wasm/paigasus_wasm_bg.wasm'
+      - '/rs/crates/bindings/paigasus-wasm/paigasus_wasm_bg.js'
+      - '/rs/crates/bindings/paigasus-wasm/paigasus_wasm.js'
+      - '/rs/crates/bindings/paigasus-wasm/paigasus_wasm.d.ts'
+      - '/rs/crates/bindings/paigasus-wasm/paigasus_wasm_bg.wasm.d.ts'
       # Parity corpus (SMA-433): a corpus change must re-key the ts replay. Task-hash input only —
       # it does not make this project affected by a corpus-only edit (see affected-smoke parity-oneway).
       - '/rs/crates/libs/paigasus-kernel-parity/vectors/**/*'
