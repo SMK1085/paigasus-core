@@ -214,7 +214,14 @@ catalog:
   # jsdom component-test tier (SMA-503 AC 2 + AC 4). axe-core is used directly rather than
   # through vitest-axe, which last published 2025-01-22 and pulls four transitive deps for a
   # fifteen-line matcher.
-  jsdom: ^30.1.0
+  #
+  # PINNED at 30.0.1 (PR 289, measured 2026-09-22). Under jsdom 30.1.0, an in-page focus move
+  # can fire a native `blur` event on `window`. A real browser does not do this. Radix's <Menu>
+  # (behind @paigasus/ui's DropdownMenu) closes on a window blur, so the menu closes as soon as
+  # FocusScope focuses its first item. The effect depends on test order inside one vitest file,
+  # because jsdom's Window is shared per file. 5 paigasus-app-shell-ts tests failed. Bisected:
+  # only this entry changed, 30.0.1 passes 186/186 and 30.1.0 fails 5. Re-check on a jsdom bump.
+  jsdom: 30.0.1
   '@testing-library/react': ^16.3.3
   '@testing-library/dom': ^10.4.2
   '@testing-library/user-event': ^14.6.7
