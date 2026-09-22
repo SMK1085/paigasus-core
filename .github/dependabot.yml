@@ -150,3 +150,54 @@ updates:
           - "version-update:semver-major"
           - "version-update:semver-minor"
           - "version-update:semver-patch"
+
+  # SMA-513: ts/Dockerfile pins both of its base images by digest — the builder node:X.Y.Z-bookworm
+  # and the runtime gcr.io/distroless/nodejs24-debian12:nonroot. Covered here for the same reason
+  # the /rs block exists — a pinned-and-never-updated base is the mirror image of the floating-tag
+  # risk. As in /rs, digest refreshes on the pinned tags are expected from the dependabot-core
+  # source, but the `docker_digest_only_update_suppression` experiment could suppress a refresh on
+  # a versioned tag, and whether it is on for this repository is not known. Version bumps stay
+  # human.
+  # What Dependabot does with each entry below is read from dependabot-core's docker
+  # update_checker.rb and tag.rb (main at 6634a4a4), NOT from GitHub's published docs, which do not
+  # describe it: a change in dependabot-core can change it.
+  - package-ecosystem: docker
+    directory: /ts
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Etc/UTC
+    commit-message:
+      prefix: "build(deps)"
+      prefix-development: "build(deps)"
+    groups:
+      docker-minor-patch:
+        applies-to: version-updates
+        update-types:
+          - minor
+          - patch
+    ignore:
+      # The runtime tag `nonroot` holds no digits, so dependabot-core treats it as a
+      # NON-comparable tag: it never proposes another tag for it and only refreshes its digest.
+      # This ignore therefore never fires today. It is kept as a guard in case the tag is ever
+      # changed to a versioned one. The Node major is part of the image NAME (nodejs24-…), so a
+      # Node major bump is a different image that Dependabot never proposes; assert_console_pins
+      # in ci/images/run.sh holds that major equal to .prototools' node pin.
+      - dependency-name: "gcr.io/distroless/nodejs24-debian12"
+        update-types:
+          - "version-update:semver-major"
+      # assert_console_pins in ci/images/run.sh holds the builder's exact X.Y.Z equal to
+      # .prototools' node pin, so an automated version bump is a red Dependabot cannot fix on its
+      # own; all three semver update-types are ignored. The builder is digest-pinned
+      # (`FROM node:X.Y.Z-bookworm@sha256:… AS builder`), so with every newer tag ignored
+      # Dependabot stays on the same tag and refreshes only its digest — the /rs behaviour. One
+      # caveat from the same source: a digest-only refresh on a VERSIONED tag is suppressed when
+      # dependabot-core's `docker_digest_only_update_suppression` experiment is on, and whether it
+      # is on for this repository is not known. A version bump stays deliberate, human, and moves
+      # the Dockerfile and .prototools together.
+      - dependency-name: "node"
+        update-types:
+          - "version-update:semver-major"
+          - "version-update:semver-minor"
+          - "version-update:semver-patch"

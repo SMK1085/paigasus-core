@@ -174,16 +174,21 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
 - Container images (SMA-500) live behind
   `ci/images/run.sh {build,smoke,all,build-oci,load-oci,rehearse}` and
   `.github/workflows/images.yml`, **not** Moon — a `repo:*` task would have to join `ci.yml`'s
-  `T=(…)` array (a `--release` build on every affected PR) or become a `T_EXEMPT` entry. The
-  workflow is **not a required check**, so a broken image build reds `main`, not the PR. Its
-  `pull_request` trigger already covers `rs/Dockerfile`, `rs/Cargo.{lock,toml}`,
-  `rs/rust-toolchain.toml`, `rs/.dockerignore`, `ci/images/**`, the workflow itself, `.prototools`,
-  `.proto/plugins/crane.toml` and `.proto/plugins/syft.toml`, so a PR touching any of those runs
-  it automatically — no manual step needed there.
-  `workflow_dispatch` it instead for a PR touching `rs/**` but **none** of those filtered
-  inputs (a plain service code change, say) — that's the one case the narrower `pull_request`
-  filter misses, and it can still break an image build. (`gh workflow run images.yml --ref
-  <branch>` 404s until `images.yml` itself is on `main`.)
+  `T=(…)` array (a `--release` build on every affected PR) or become a `T_EXEMPT` entry.
+  The console images (SMA-513) use the same script: `build-console [iam|gateway]` and
+  `all-consoles`. The workflow is **not a required check**. So a broken image build makes
+  `main` red, not the PR.
+- The `pull_request` filter of `images.yml` lists the image build inputs. For `rs/` these are
+  `rs/Dockerfile`, `rs/Cargo.{lock,toml}`, `rs/rust-toolchain.toml` and `rs/.dockerignore`. For
+  `ts/` these are `ts/Dockerfile`, `ts/.dockerignore`, `ts/pnpm-lock.yaml`,
+  `ts/pnpm-workspace.yaml`, `ts/package.json`, `ts/.npmrc`, `ts/apps/*/lib/config.ts`,
+  `ts/apps/*/next.config.ts` and `ts/apps/*/package.json`. It also lists `ci/images/**`, the
+  workflow, `.prototools` and the two `.proto/plugins/*.toml` files. A PR that changes one of these
+  runs the workflow automatically. The rule for a `ts/` entry is in RUNBOOK-containers.md section 1.
+- The filter does not list `rs/**` or `ts/**`. A PR that changes `rs/**` or `ts/**` but no
+  listed input can still break an image build. Start the workflow manually for such a PR with
+  `workflow_dispatch`. (`gh workflow run images.yml --ref <branch>` returns 404 until `images.yml`
+  is on `main`.)
 - The runtime base is a `chisel cut` of Ubuntu 24.04 into `FROM scratch`. Four traps, all
   measured: `libgcc-s1_libs` is REQUIRED (Rust panic unwinding links `libgcc_s.so.1`) and its
   absence fails at container START, not build; `ca-certificates_data` is the right variant

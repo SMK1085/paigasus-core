@@ -14,6 +14,8 @@
 #        ci/images/run.sh build-oci <iam|gateway> <outdir>   # SMA-658: OCI archive, no --load
 #        ci/images/run.sh load-oci <archive> <image-name>     # load + identity check (prints M3)
 #        ci/images/run.sh rehearse <archive.oci.tar>...      # SMA-658: publish steps vs two local registries
+#        ci/images/run.sh build-console [iam|gateway]   # SMA-513: console image; [iam|gateway] scopes the build
+#        ci/images/run.sh all-consoles                    # SMA-513: build both consoles + smoke; takes no service arg
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -153,6 +155,135 @@ assert_pins() {
   echo "  pins OK: rustc ${channel}, bookworm builder, ubuntu ${ubuntu_from} == chisel release, no baked service config, start-period ${start_period}s >= 30s"
 }
 
+# The console image's Node major is a SECOND pin beside .prototools. distroless publishes no
+# patch-level tags, so only the major can be held equal — that is the ceiling of this check, not
+# an oversight. A distroless bump that crosses a major reds here rather than shipping a runtime
+# the repo does not pin.
+assert_console_pins() {
+  local df="$ROOT/ts/Dockerfile" want_major base_major proto_node proto_pnpm builder_node builder_pnpm
+  proto_node="$(sed -n 's/^node = "\([0-9.]*\)"$/\1/p' "$ROOT/.prototools")"
+  proto_pnpm="$(sed -n 's/^pnpm = "\([0-9.]*\)"$/\1/p' "$ROOT/.prototools")"
+  want_major="${proto_node%%.*}"
+  base_major="$(sed -n 's#^FROM gcr\.io/distroless/nodejs\([0-9]*\)-debian12.*#\1#p' "$df")"
+  if [ -z "$base_major" ]; then
+    echo "::error::ts/Dockerfile: no gcr.io/distroless/nodejsNN-debian12 FROM line found." >&2
+    return 1
+  fi
+  if [ "$base_major" != "$want_major" ]; then
+    echo "::error::ts/Dockerfile pins Node ${base_major} but .prototools pins ${proto_node}." >&2
+    return 1
+  fi
+  # The runtime stage's FROM line above only pins Node's MAJOR (distroless publishes no
+  # patch-level tags). The builder stage is a full node:X.Y.Z-bookworm tag and CAN be held to the
+  # exact .prototools version, so it is — a builder bump that drifts from .prototools would
+  # otherwise compile the console with a Node the repo does not pin, unnoticed by the check above.
+  builder_node="$(sed -n 's/^FROM node:\([0-9.]*\)-bookworm.*/\1/p' "$df" | sed -n 1p)"
+  if [ -z "$builder_node" ]; then
+    echo "::error::ts/Dockerfile: no FROM node:X.Y.Z-bookworm builder-stage line found." >&2
+    return 1
+  fi
+  if [ "$builder_node" != "$proto_node" ]; then
+    echo "::error::ts/Dockerfile builder pins Node ${builder_node} but .prototools pins ${proto_node}." >&2
+    return 1
+  fi
+  # pnpm is a THIRD pin, alongside Node: .prototools names the exact version corepack must
+  # activate, and a drift here would build the lockfile-frozen install with a pnpm the repo does
+  # not pin, even though the install itself still succeeds.
+  builder_pnpm="$(sed -n 's/.*corepack prepare pnpm@\([0-9.]*\).*/\1/p' "$df" | sed -n 1p)"
+  if [ -z "$builder_pnpm" ]; then
+    echo "::error::ts/Dockerfile: no 'corepack prepare pnpm@X.Y.Z' line found." >&2
+    return 1
+  fi
+  if [ "$builder_pnpm" != "$proto_pnpm" ]; then
+    echo "::error::ts/Dockerfile pins pnpm ${builder_pnpm} but .prototools pins ${proto_pnpm}." >&2
+    return 1
+  fi
+  # SMA-513 final review I3: both base images are digest-pinned, and the digest is asserted, the
+  # way assert_pins asserts it on the rs builder. Without this, deleting `@sha256:…` or swapping
+  # `:nonroot@sha256:…` for `:latest` left every row above green. Code compiled in the builder
+  # stage goes into /app, so the builder's digest matters as much as the runtime's.
+  # `grep -c` over the FILE, not `grep -q` from a pipe: rc 1 (no match) prints 0 and is folded
+  # into the count, and rc 2 (unreadable file) also leaves 0, so both fail closed below.
+  local n_runtime_pin n_builder_pin
+  n_runtime_pin="$(grep -cE '^FROM gcr\.io/distroless/nodejs[0-9]+-debian12:nonroot@sha256:[0-9a-f]{64}([[:space:]]|$)' "$df")" || n_runtime_pin=0
+  if [ "${n_runtime_pin:-0}" -ne 1 ]; then
+    echo "::error::ts/Dockerfile: the runtime FROM line must be exactly one gcr.io/distroless/nodejsNN-debian12:nonroot@sha256:<64 hex> — a missing digest or a different tag leaves the runtime base unpinned." >&2
+    return 1
+  fi
+  n_builder_pin="$(grep -cE '^FROM node:[0-9]+\.[0-9]+\.[0-9]+-bookworm@sha256:[0-9a-f]{64}[[:space:]]+AS[[:space:]]+builder([[:space:]]|$)' "$df")" || n_builder_pin=0
+  if [ "${n_builder_pin:-0}" -ne 1 ]; then
+    echo "::error::ts/Dockerfile: the builder FROM line must be exactly one node:X.Y.Z-bookworm@sha256:<64 hex> AS builder — without the digest, the code compiled into /app comes from an unpinned image." >&2
+    return 1
+  fi
+
+  # The next two checks read a NORMALISED copy of ts/Dockerfile, written to a temp file, never a
+  # here-string: Homebrew bash 5 deadlocks on a here-string over 512 bytes on the development Mac
+  # (CLAUDE.md, SMA-612). The normalisation follows assert_pins: `\`-continued lines are joined
+  # into one, so a flag or an assignment on a continuation line is seen on its instruction's line.
+  # Comment lines are dropped FIRST, because Docker drops them too, including a comment line in
+  # the middle of a continuation; dropping them also means a comment that mentions PAIGASUS_ or
+  # --frozen-lockfile can neither false-red nor false-green either check.
+  local norm norm_rc=0
+  norm="$(mktemp "${TMPDIR:-/tmp}/paigasus-console-pins.XXXXXX")" || norm=""
+  if [ -z "$norm" ]; then
+    echo "::error::assert_console_pins: mktemp failed; the ENV/ARG and --frozen-lockfile checks could not run." >&2
+    return 1
+  fi
+  awk '/^[[:space:]]*#/ { next } /\\[[:space:]]*$/ { sub(/\\[[:space:]]*$/, " "); printf "%s", $0; next } { print }' "$df" > "$norm" || norm_rc=$?
+  if [ "$norm_rc" -ne 0 ]; then
+    rm -f "$norm"
+    echo "::error::assert_console_pins: awk exited ${norm_rc} while normalising ts/Dockerfile; the ENV/ARG and --frozen-lockfile checks could not run." >&2
+    return 1
+  fi
+
+  # A PAIGASUS_ assignment on an ENV or ARG instruction, in any position on the (joined)
+  # instruction: a later variable on a multi-variable ENV line (ts/Dockerfile's own house style),
+  # a continuation line, an indented instruction, or an ARG. The instruction keyword matches
+  # case-insensitively, because Docker parses `env` and `ENV` the same; PAIGASUS_ stays
+  # case-sensitive, as IAM_/GATEWAY_ do in assert_pins. What this does NOT see: a PAIGASUS_ value
+  # written by a RUN step into a file, or passed in through a COPY — it reads ENV and ARG only.
+  local n_baked baked_rc=0
+  n_baked="$(grep -cE '^[[:space:]]*([Ee][Nn][Vv]|[Aa][Rr][Gg])[[:space:]]+.*PAIGASUS_' "$norm")" || baked_rc=$?
+  if [ "$baked_rc" -gt 1 ]; then
+    rm -f "$norm"
+    echo "::error::assert_console_pins: grep exited ${baked_rc} on the normalised ts/Dockerfile; the PAIGASUS_* check could not run." >&2
+    return 1
+  fi
+  if [ "${n_baked:-0}" -ne 0 ]; then
+    echo "::error::ts/Dockerfile bakes a PAIGASUS_* env var; console config is deployment-varying and must stay runtime-only. The joined instruction(s) follow." >&2
+    grep -nE '^[[:space:]]*([Ee][Nn][Vv]|[Aa][Rr][Gg])[[:space:]]+.*PAIGASUS_' "$norm" >&2 || true
+    rm -f "$norm"
+    return 1
+  fi
+
+  # EVERY `pnpm install` invocation carries --frozen-lockfile, not only the first one found. Each
+  # invocation is cut at the next `&&`, `;` or `|`, so two installs chained in one RUN are two
+  # invocations here. `--frozen-lockfile` must stand as a bare flag. Any `--frozen-lockfile=<value>`
+  # form (`=false` switches it off) and `--no-frozen-lockfile` are rejected outright, even beside
+  # a bare flag, so the check never has to decide which of two conflicting flags pnpm obeys.
+  local inst inst_rc=0 n_inst n_frozen n_unfrozen
+  inst="$(grep -oE 'pnpm[[:space:]]+install([[:space:]][^&;|]*)?' "$norm")" || inst_rc=$?
+  rm -f "$norm"
+  if [ "$inst_rc" -gt 1 ]; then
+    echo "::error::assert_console_pins: grep exited ${inst_rc} on the normalised ts/Dockerfile; the --frozen-lockfile check could not run." >&2
+    return 1
+  fi
+  if [ -z "$inst" ]; then
+    echo "::error::ts/Dockerfile: no 'pnpm install' instruction found; the image would not be built from the committed lockfile." >&2
+    return 1
+  fi
+  # printf into grep -c reads the whole input: grep -c is not an early-exit reader.
+  n_inst="$(printf '%s\n' "$inst" | grep -c .)" || n_inst=0
+  n_frozen="$(printf '%s\n' "$inst" | grep -cE -- '--frozen-lockfile([[:space:]]|$)')" || n_frozen=0
+  n_unfrozen="$(printf '%s\n' "$inst" | grep -cE -- '--frozen-lockfile=|--no-frozen-lockfile')" || n_unfrozen=0
+  if [ "$n_unfrozen" -ne 0 ] || [ "$n_frozen" -ne "$n_inst" ]; then
+    echo "::error::ts/Dockerfile: ${n_frozen} of ${n_inst} 'pnpm install' invocation(s) carry --frozen-lockfile, and ${n_unfrozen} switch it off; every install must be frozen, or the image would not be built from the committed lockfile. The invocations follow." >&2
+    printf '%s\n' "$inst" >&2
+    return 1
+  fi
+  echo "  ts/Dockerfile: distroless Node ${base_major} and builder Node ${builder_node}/pnpm ${builder_pnpm} match .prototools, both FROM lines digest-pinned, no baked PAIGASUS_* ENV/ARG, all ${n_inst} pnpm install(s) --frozen-lockfile"
+}
+
 # Writes the chisel package list that a build log names into $2, and fails when it is empty
 # (SMA-500 fix-round 1: an empty manifest answers nothing when someone asks which libc shipped).
 extract_chisel_manifest() {
@@ -222,6 +353,52 @@ build_one() {
     -t "$tag" -t "${crate}:dev" \
     "$ROOT/rs" 2>&1 | tee "$build_log"
   extract_chisel_manifest "$build_log" "$ROOT/chisel-manifest-${service}.txt"
+  echo "  built ${tag}"
+}
+
+app_for() {
+  case "$1" in
+    iam)     echo "iam-console" ;;
+    gateway) echo "gateway-console" ;;
+    *) echo "unknown console: $1" >&2; return 1 ;;
+  esac
+}
+
+base_path_for() {
+  case "$1" in
+    iam)     echo "/iam" ;;
+    gateway) echo "/gateway" ;;
+    *) echo "unknown console: $1" >&2; return 1 ;;
+  esac
+}
+
+# There is no --no-cache-filter here. That flag exists on build_one because rs/Dockerfile's
+# rootfs stage is byte-identical between services and BuildKit would cache-hit it, leaving the
+# second service's chisel manifest empty. Every stage in ts/Dockerfile references APP, so no
+# stage is shared between the two console builds and there is nothing to force.
+# `docker buildx build`, not bare `docker build`, for the same reason as build_one: on the
+# GitHub-hosted runner a bare `docker build` does not reliably route through the builder that
+# docker/setup-buildx-action made current (SMA-658, measured; see build_oci's comment). On this
+# development Mac `docker build` is itself an alias for buildx, so a local run cannot show the gap.
+build_console_one() {
+  local service="$1" app base_path tag
+  app="$(app_for "$service")"
+  base_path="$(base_path_for "$service")"
+  tag="${REGISTRY}/paigasus-${app}:${REVISION}"
+  echo "== build ${app} =="
+  docker buildx build \
+    --progress=plain \
+    --load \
+    -f "$ROOT/ts/Dockerfile" \
+    --build-arg "APP=${app}" \
+    --build-arg "BASE_PATH=${base_path}" \
+    --label "org.opencontainers.image.title=paigasus-${app}" \
+    --label "org.opencontainers.image.description=Paigasus ${service} console" \
+    --label "org.opencontainers.image.source=https://github.com/SMK1085/paigasus-core" \
+    --label "org.opencontainers.image.revision=${REVISION}" \
+    --label "org.opencontainers.image.licenses=Apache-2.0" \
+    -t "$tag" -t "${app}:dev" \
+    "$ROOT/ts"
   echo "  built ${tag}"
 }
 
@@ -661,6 +838,430 @@ smoke() {
   echo "SMOKE OK ($*)"
 }
 
+# --- console smoke (SMA-513 spec § 5.4 and § 5.5) ------------------------------------------------
+# A text allowlist over ts/Dockerfile's COPY instructions cannot see a missing .next/static: Next's
+# standalone output carries none of its own (measured, SMA-510) and the staging copy in the builder
+# stage is what supplies it. An image built without that copy still answers 200 on
+# <basePath>/healthz, so a probe-based smoke passes while every client chunk 404s. These assertions
+# fetch the SERVED CHUNK instead, which is the only form that fails on the real defect.
+#
+# This is the ONLY copy of the served-chunk assertion. Do not add a second one elsewhere (for
+# example as a script under ts/tests/): a second copy would not be pinned by this gate and would
+# drift from it.
+#
+# Script-global, not `local`: the EXIT trap fires after smoke_consoles has returned and its locals
+# have gone out of scope, and under `set -u` a trap that reads a dead local dies with `unbound
+# variable` — the measured PR 270 failure recorded on load_oci_cleanup above. An EXIT trap and not
+# the RETURN trap the task brief asked for, for the reason recorded there too: a RETURN trap does
+# NOT fire when `set -e` aborts a function from inside, which is exactly the path that would leak a
+# container.
+CONSOLE_SMOKE_NAMES=""
+
+console_smoke_cleanup() {
+  local n
+  for n in $CONSOLE_SMOKE_NAMES; do
+    docker rm -f "$n" >/dev/null 2>&1 || true
+  done
+  CONSOLE_SMOKE_NAMES=""
+}
+
+# A FULL, schema-valid dummy runtime configuration, not just PAIGASUS_ZONE and PAIGASUS_ZONES. Both
+# consoles validate their ENTIRE runtime config (@paigasus/auth's OIDC/session shape,
+# @paigasus/discovery's PAIGASUS_SERVICES, and PAIGASUS_IAM_GRPC_URL — see ts/apps/<app>/lib/
+# config.ts) on the FIRST request, and a missing or malformed variable throws "Invalid runtime
+# configuration", which the app renders as a 500. From the outside that 500 looks exactly like a
+# missing .next/static — both leave the page with no chunk URL to find — so without this block the
+# assertion cannot tell "not staged" from "not configured" apart.
+#
+# One shared array covers both zones: iam-console only requires an "iam" entry in
+# PAIGASUS_SERVICES, gateway-console requires both "iam" AND "gateway"
+# (ts/apps/gateway-console/lib/config.ts), so the map below carries both unconditionally.
+#
+# WARNING, INTENTIONAL COUPLING: a new required key added to a console's lib/config.ts schema makes
+# this array stale and turns every 200 here into a 500. That is supposed to fail LOUDLY — add the
+# key here; do NOT add a fallback in the app or relax the assertions below.
+CONSOLE_SMOKE_ENV=(
+  -e "PAIGASUS_OIDC_ISSUER=https://idp.example.com"
+  -e "PAIGASUS_OIDC_CLIENT_ID=dummy-client"
+  -e "PAIGASUS_OIDC_CLIENT_SECRET=dummy-secret"
+  -e "PAIGASUS_PUBLIC_ORIGIN=https://console.example.com"
+  -e "PAIGASUS_SESSION_STORE=memory"
+  -e "PAIGASUS_SERVICES={\"iam\":\"http://iam:8080\",\"gateway\":\"http://gateway:8080\"}"
+  -e "PAIGASUS_IAM_GRPC_URL=http://iam:9090"
+)
+
+# Walks the image's staged tree with the image's OWN node — the runtime base is distroless and has
+# no shell, so there is no `find` in there to call. Prints `public=0|1` on line 1 and one staged
+# .next/static path per line after it, with the BUILD_ID directory rewritten to the literal
+# <BUILD_ID>. MEASURED (SMA-513): Next generates BUILD_ID as a random nanoid — no next.config.ts in
+# this repo sets generateBuildId — so the host build and the image build never share one, and an
+# un-normalised comparison of the two trees can NEVER pass. Sorting is left to the caller, which
+# puts both sides through the same `LC_ALL=C sort`: also MEASURED, node's Array.sort and the host's
+# `sort` disagreed on `chunks/3_j6cf7txpq_5.js` vs `chunks/3h4osm35n9wui.js`, which would have
+# reported drift between two byte-identical trees.
+CONSOLE_STAGED_TREE_JS='
+const fs = require("fs");
+const root = process.argv[1];
+const id = fs.readFileSync(root + "/.next/BUILD_ID", "utf8").trim();
+const walk = (d, p = "") =>
+  fs.readdirSync(d, { withFileTypes: true })
+    .flatMap((e) => (e.isDirectory() ? walk(d + "/" + e.name, p + e.name + "/") : [p + e.name]));
+const rel = walk(root + "/.next/static")
+  .map((f) => (id !== "" && f.indexOf(id + "/") === 0 ? "<BUILD_ID>/" + f.slice(id.length + 1) : f));
+console.log(["public=" + (fs.existsSync(root + "/public") ? "1" : "0")].concat(rel).join("\n"));
+'
+
+# Every `$( )` here is either guarded with `|| <var>=""` and followed by an explicit check that
+# prints its own named ::error::, or provably unable to fail before its own message. That is not
+# decoration: under `set -euo pipefail` an unguarded failing capture aborts the whole script on
+# curl's or docker's generic message, BEFORE the branch that would have named the cause, and it
+# also cancels the other console's rows.
+#
+# Likewise `ec=1` and never `return 1` inside the battery: one failing console must not hide the
+# other, and the verdict is taken once at the end. The closing line is an `if`, not
+# `[ "$ec" -eq 0 ] && echo …` — a failing `[ ]` as the last top-level command would make the
+# function return 1 on its own.
+smoke_consoles() {
+  local service app base_path other name port origin status html chunk bytes code uid
+  local run_out img_out img_public img_list host_public host_list img_dirs host_dirs
+  local host_std host_static host_id run_rc sh_rc img_rc cstate hc_rc hc_out
+  local ec=0 bad started
+  # This REPLACES the script-global `trap load_oci_cleanup EXIT` at the top of the load-oci
+  # section, exactly as `smoke()` and `rehearse` already do — harmless today because no dispatch
+  # arm reaches `load_oci` and `smoke_consoles` in one process. A future arm that chains them
+  # would leak the load-oci registry container SILENTLY; make that arm call `load_oci_cleanup`
+  # itself, or fold both cleanups into one trap body, rather than assuming this line is inert.
+  trap console_smoke_cleanup EXIT
+  console_smoke_cleanup
+
+  # The zone list comes from the caller (the `all-consoles` arm passes `console_services`), so the
+  # list lives in ONE place rather than being restated here. An empty list must not read as a pass.
+  if [ "$#" -eq 0 ]; then
+    echo "::error::smoke_consoles: called with no zones — nothing was smoked, and an empty run must not report OK." >&2
+    return 1
+  fi
+
+  for service in "$@"; do
+    # GUARDED, because $service is now caller-supplied rather than a loop literal: app_for and
+    # base_path_for print their own "unknown console: …" and return 1, and an unguarded capture
+    # would abort the script there and cancel every remaining zone's rows.
+    app="$(app_for "$service")" || app=""
+    base_path="$(base_path_for "$service")" || base_path=""
+    if [ -z "$app" ] || [ -z "$base_path" ]; then
+      echo "::error::smoke_consoles: unknown console zone '${service}' — add it to app_for and base_path_for." >&2
+      ec=1
+      continue
+    fi
+    # BINARY, not a list. With a third zone C this picks ONE other prefix, so C's chunk would be
+    # probed against /iam alone, with nothing saying so. (That step-4 row proves only that a
+    # basePath is in effect — see its comment — not that zones do not collide.) The
+    # PAIGASUS_ZONES JSON literal in the `docker run` below is a third hardcoded copy of the same
+    # two-zone assumption. A third zone needs both rewritten, not extended.
+    if [ "$service" = "iam" ]; then other="/gateway"; else other="/iam"; fi
+    name="smoke-${app}-${RUN_ID}"
+    # Registered BEFORE the container is created, so a `docker run` that fails part-way still has
+    # its name cleaned up. $RUN_ID is the same $$ suffix every other container name in this file
+    # carries, so two concurrent runs against one daemon never collide.
+    CONSOLE_SMOKE_NAMES="$CONSOLE_SMOKE_NAMES $name"
+
+    echo "== smoke ${app} =="
+    bad=0
+    started=0
+    # -p 0:3000 asks the daemon for a free ephemeral port. GUARDED: without it a name collision or
+    # an image that will not start aborts the script on docker's own message and the gateway
+    # console is never checked.
+    # The rc is captured, not folded into an empty string: docker's own message names the real
+    # reason (no such image, name already in use, port already allocated, daemon unreachable) and
+    # discarding it leaves the reader with a guess. It is printed on its own lines rather than
+    # inside the annotation, because a `::error::` line that carries an embedded newline stops
+    # being one annotation.
+    run_rc=0
+    run_out="$(docker run -d --name "$name" -p 0:3000 \
+      -e PAIGASUS_ZONE="$service" \
+      -e PAIGASUS_ZONES="{\"iam\":\"/iam\",\"gateway\":\"/gateway\"}" \
+      "${CONSOLE_SMOKE_ENV[@]}" \
+      "${app}:dev" 2>&1)" || run_rc=$?
+    if [ "$run_rc" -ne 0 ]; then
+      echo "::error::${app}: the container did not start from ${app}:dev — docker exited ${run_rc}; its own message follows. If the image is missing, run 'ci/images/run.sh build-console ${service}' first." >&2
+      printf '%s\n' "$run_out" >&2
+      ec=1; bad=1
+    else
+      started=1
+    fi
+
+    if [ "$bad" -eq 0 ]; then
+      # `sed -n 1p` reads its whole input and is the approved substitute for `head -1` (the
+      # repo bans piping into an early-exit reader). It is needed because `docker port` prints one
+      # line per published binding — an IPv6 line as well as the IPv4 one on some daemons — and
+      # `${port##*:}` over both lines would take the second binding's port.
+      port="$(docker port "$name" 3000/tcp | sed -n 1p)" || port=""
+      port="${port##*:}"
+      case "$port" in
+        ''|*[!0-9]*)
+          # A container that starts and then crashes at once also leaves `docker port` empty, so
+          # the state is read to tell the two causes apart. GUARDED: the container can already be
+          # gone, and `docker inspect` then exits non-zero; an empty state takes the generic arm.
+          cstate="$(docker inspect -f '{{.State.Status}} {{.State.ExitCode}}' "$name" 2>/dev/null)" || cstate=""
+          case "$cstate" in
+            exited*|dead*)
+              echo "::error::${app}: the container started and then EXITED (state/exit code: ${cstate}) before its port could be read — the image's entrypoint crashed. Its last log lines follow." >&2
+              ;;
+            *)
+              echo "::error::${app}: could not read the published host port for container port 3000/tcp ('docker port' gave '${port:-<nothing>}', state '${cstate:-<unreadable>}') — the container started but published no port. Its last log lines follow." >&2
+              ;;
+          esac
+          docker logs "$name" 2>&1 | tail -30 >&2 || true
+          ec=1; bad=1
+          ;;
+      esac
+    fi
+
+    origin=""
+    if [ "$bad" -eq 0 ]; then origin="http://127.0.0.1:${port}"; fi
+
+    # Step 1: the page renders. Two curl calls, not one.
+    #
+    # The CANONICAL url, with NO trailing slash. Next compiles an internal, priority 308 redirect
+    # for "<basePath>/" -> "<basePath>" whenever trailingSlash is false (the default; neither
+    # console's next.config.ts sets it), confirmed by reading .next/routes-manifest.json out of the
+    # built image. A request to "<basePath>/" without -L therefore reads a 4-byte redirect body and
+    # finds no chunk URL in it — an assertion that can never pass on a correct image.
+    # `-L --max-redirs 3` follows that redirect if it ever fires, so this keeps working if
+    # trailingSlash is flipped to true and the redirect direction reverses. `--max-time` bounds the
+    # request so a hung connection, or -L chasing an off-origin redirect (a future auth gate
+    # sending this to a real IdP), cannot run the CI gate indefinitely.
+    status=""
+    if [ "$bad" -eq 0 ]; then
+      # GUARDED: a 500 from an invalid runtime config, or any other non-2xx, must reach the named
+      # message below rather than abort the script after ~20s of retries on curl's generic one.
+      # `-w '%{http_code}'` on a status-only probe (-o /dev/null, no -f) carries the HTTP status
+      # into that message without entangling status parsing with the page BODY the second call
+      # grabs; a combined single-curl capture was considered and rejected as the more fragile.
+      status="$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 -L --max-redirs 3 \
+        --retry 20 --retry-delay 1 --retry-all-errors "${origin}${base_path}")" || status=""
+      if [ "$status" != "200" ]; then
+        echo "::error::${app}: ${base_path} did not render (HTTP ${status:-no response}) — check the container's runtime configuration (CONSOLE_SMOKE_ENV above) against ts/apps/${app}/lib/config.ts, or read 'docker logs ${name}'." >&2
+        docker logs "$name" 2>&1 | tail -30 >&2 || true
+        ec=1; bad=1
+      fi
+    fi
+
+    # The image's OWN HEALTHCHECK program, run inside the container. Nothing else in this suite
+    # executes /app/healthcheck.mjs: ts/Dockerfile writes it with a `printf` that carries a
+    # backtick template literal and a `%s` substitution, so an escaping or path regression would
+    # otherwise ship with every other row green. `docker exec` of the image's node needs no shell.
+    # It runs only once the page rendered, because the probe it makes is the same server's
+    # <basePath>/healthz. It does not set `bad`: the chunk rows below do not depend on it.
+    # GUARDED: a non-zero exit is the finding, and must reach the named message, not abort.
+    if [ "$bad" -eq 0 ]; then
+      hc_rc=0
+      hc_out="$(docker exec "$name" /nodejs/bin/node /app/healthcheck.mjs 2>&1)" || hc_rc=$?
+      if [ "$hc_rc" -ne 0 ]; then
+        echo "::error::${app}: the image's HEALTHCHECK program (/app/healthcheck.mjs) exited ${hc_rc} against a server that renders ${base_path} — check the healthcheck printf in ts/Dockerfile. Its output follows." >&2
+        printf '%s\n' "$hc_out" >&2
+        ec=1
+      else
+        echo "  ${app}: HEALTHCHECK program /app/healthcheck.mjs exits 0"
+      fi
+    fi
+
+    html=""
+    if [ "$bad" -eq 0 ]; then
+      # The probe already confirmed 200, but the container can still regress between the two calls
+      # — a connection drop, a timeout the probe's retries happened to dodge, or -L exceeding
+      # --max-redirs — so this call is GUARDED too and carries its own, smaller retry budget: the
+      # probe's 20 retries absorb the container's startup wait, and these 5 cover only a transient
+      # error on a server that already answered 200.
+      html="$(curl -fsSL --max-redirs 3 --max-time 30 --retry 5 --retry-delay 1 \
+        --retry-all-errors "${origin}${base_path}")" || html=""
+      if [ -z "$html" ]; then
+        echo "::error::${app}: ${base_path} answered HTTP 200 to the status probe, but the body fetch itself failed or returned nothing (connection drop, timeout, or too many redirects) — a transport failure between the two calls, not a staging or runtime-configuration failure." >&2
+        ec=1; bad=1
+      fi
+    fi
+
+    # Step 2: extract one chunk URL. No pipe into an early-exit reader: `grep -oE` and `sort -u`
+    # both read their whole input, and `sed -n 1p` is the approved stand-in for `head -1`.
+    # GUARDED: `grep -oE` exits 1 on no match even after reading everything, and under
+    # `set -o pipefail` an unguarded assignment from that pipeline would abort the script here
+    # instead of reaching the named branch below.
+    chunk=""
+    if [ "$bad" -eq 0 ]; then
+      chunk="$(printf '%s' "$html" | grep -oE "${base_path}/_next/static/[^\"']+\.js" | sort -u | sed -n 1p)" || chunk=""
+      if [ -z "$chunk" ]; then
+        # Step 1 already confirmed HTTP 200 and followed any redirect, so an invalid runtime
+        # configuration and an unfollowed redirect are no longer possible causes HERE; naming them
+        # would send a future reader to the wrong place.
+        echo "::error::${app}: ${base_path} rendered (HTTP 200) but no ${base_path}/_next/static/*.js URL appears in the page — check the page markup or the basePath wiring, not staging or runtime configuration." >&2
+        ec=1; bad=1
+      fi
+    fi
+
+    # Step 3: the chunk is served, with a body. When .next/static was never staged the file is
+    # simply ABSENT from the served tree, so this is a straight 404 rather than a 200 with an empty
+    # body, and `curl -fsS` fails outright — GUARDED for the same reason as step 2.
+    bytes=""
+    if [ "$bad" -eq 0 ]; then
+      bytes="$(curl -fsS --max-time 30 "${origin}${chunk}" | wc -c | tr -d ' ')" || bytes=""
+      if [ "${bytes:-0}" -lt 1 ]; then
+        echo "::error::${app}: ${chunk} is not served (404 or empty body) — .next/static was not staged into the image; see the staging RUN block in ts/Dockerfile." >&2
+        ec=1; bad=1
+      fi
+    fi
+
+    # Step 4: the other zone's prefix does not serve it. This proves ONLY that a basePath is in
+    # effect in this one container. It does NOT prove the two zones' assets do not collide:
+    # MEASURED on iam-console:dev, the real chunk also 404s under /zzz/… and with no prefix at all,
+    # so any unknown prefix gives this result. The real acceptance-criterion-3 proof needs both
+    # zones behind one ingress, and belongs to that ingress (SMA-513 PR 2a), not to this row.
+    # GUARDED: `curl` without -f still exits non-zero on a connection failure or a timeout, and an
+    # unguarded capture would abort the script before the named message.
+    if [ "$bad" -eq 0 ]; then
+      code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 \
+        "${origin}${other}${chunk#"$base_path"}")" || code=""
+      if [ -z "$code" ]; then
+        echo "::error::${app}: the ${other} probe got no HTTP response at all (connection failure or timeout) — the basePath check could not be made." >&2
+        ec=1
+      elif [ "$code" != "404" ]; then
+        echo "::error::${app}: ${other} also served the chunk (HTTP ${code}); the chunk is served outside ${base_path}, so no basePath is in effect." >&2
+        ec=1
+      else
+        echo "  ${app}: serves ${chunk} (${bytes} bytes), 404 under ${other} (a basePath is in effect; cross-zone collision is NOT checked here — that needs the ingress)"
+      fi
+    fi
+
+    # The identity checks do not depend on the chunk chain, so they run even when it failed.
+    # `-o pid,uid`, not `-o user`: `user` is resolved through NSS, so on a Linux runner where uid
+    # 65532 has a synthesized name this would print that name and false-negative a correct image.
+    # This mirrors assert_uid above; docker requires `pid` in the format to correlate processes.
+    if [ "$started" -eq 1 ]; then
+      uid="$(docker top "$name" -o pid,uid 2>/dev/null | sed -n 2p | awk '{print $NF}')" || uid=""
+      if [ "$uid" != "65532" ]; then
+        echo "::error::${app} runs as uid ${uid:-<unreadable>}; the console images must run as 65532." >&2
+        ec=1
+      else
+        echo "  ${app}: runs as uid 65532"
+      fi
+    else
+      echo "::error::${app}: uid not checked — the container never started." >&2
+    fi
+
+    # Only 127 is the pass. MEASURED on this host (Docker 29.8.0): the probe exits 0 when a shell
+    # exists (alpine:latest), 127 when the image has no /bin/sh (the distroless images under test),
+    # and 125 when docker itself refuses before the entrypoint runs — a missing or unpullable
+    # image. A bare `if … else` folds that 125 into the else branch and prints a GREEN
+    # "no shell in the runtime image" row for an image that was never read, which is the shape
+    # the uid check three lines above already avoids.
+    sh_rc=0
+    docker run --rm --entrypoint /bin/sh "${app}:dev" -c true >/dev/null 2>&1 || sh_rc=$?
+    if [ "$sh_rc" -eq 0 ]; then
+      echo "::error::${app}:dev has a shell; the runtime base must stay distroless." >&2
+      ec=1
+    elif [ "$sh_rc" -eq 127 ]; then
+      echo "  ${app}: no shell in the runtime image"
+    else
+      echo "::error::${app}: shell absence NOT checked — docker exited ${sh_rc} on ${app}:dev before reaching an entrypoint, so the image is missing or unreadable and nothing was proved about the runtime base." >&2
+      ec=1
+    fi
+
+    # Spec § 5.5 assertion 4 — staged-tree parity. ts/Dockerfile's staging of .next/static and
+    # public/ and ts/apps/<app>/moon.yml's `build` script are a SECOND staging site each, created
+    # deliberately; this is what keeps the two from drifting apart.
+    #
+    # It compares the staged TREES, not the two scripts' text, so the two divergences the Task 2
+    # review recorded are tolerated by construction: moon.yml's `rm -rf .next/static` before
+    # `next build` (the Dockerfile needs no counterpart — `**/.next` in ts/.dockerignore makes every
+    # builder start cold) and moon.yml's app-name prefix on its two error messages both leave the
+    # staged tree identical.
+    host_std="$ROOT/ts/apps/${app}/.next/standalone/apps/${app}"
+    host_static="$host_std/.next/static"
+    if [ -d "$host_static" ]; then
+      # Two causes, two messages, and the rc separates them. node's own uncaught ENOENT on
+      # .next/static (or on .next/BUILD_ID) exits 1, and only THAT says the staging copy did not
+      # run. docker refusing the image exits 125/126/127 before node starts, which proves nothing
+      # about staging at all. stderr is captured rather than discarded, for the same reason as the
+      # `docker run -d` above: the tool's own message names the cause.
+      img_rc=0
+      img_out="$(docker run --rm --entrypoint /nodejs/bin/node "${app}:dev" \
+        -e "$CONSOLE_STAGED_TREE_JS" "/app/apps/${app}" 2>&1)" || img_rc=$?
+      if [ "$img_rc" -eq 1 ]; then
+        echo "::error::${app}: /app/apps/${app}/.next/static is absent or unreadable inside the image — the staging copy in ts/Dockerfile did not run. node's message follows." >&2
+        printf '%s\n' "$img_out" >&2
+        ec=1
+      elif [ "$img_rc" -ne 0 ]; then
+        echo "::error::${app}: staged-tree parity NOT checked — docker exited ${img_rc} on ${app}:dev before node ran, so the image is missing or unreadable and nothing was proved about staging. Its message follows." >&2
+        printf '%s\n' "$img_out" >&2
+        ec=1
+      elif [ -z "$img_out" ]; then
+        echo "::error::${app}: the staged-tree walk exited 0 but printed nothing — that is neither a staging failure nor a docker failure; inspect ${app}:dev by hand." >&2
+        ec=1
+      else
+        # Line 1 is the public= marker, the rest is the tree. `sed -n 1p` / `sed -n '2,$p'` read
+        # their whole input; neither is an early-exit reader.
+        img_public="$(printf '%s\n' "$img_out" | sed -n 1p)"
+        img_list="$(printf '%s\n' "$img_out" | sed -n '2,$p' | LC_ALL=C sort)"
+        host_public="public=0"
+        if [ -d "$host_std/public" ]; then host_public="public=1"; fi
+        host_id="$(cat "$host_std/.next/BUILD_ID" 2>/dev/null)" || host_id=""
+        if [ -z "$host_id" ]; then
+          echo "::error::${app}: the host build at ${host_std} has no .next/BUILD_ID — that build is broken or half-written; re-run 'moon run ${app}-ts:build'." >&2
+          ec=1
+        else
+          host_list="$(cd "$host_static" && find . -type f | sed 's#^\./##' \
+            | sed "s#^${host_id}/#<BUILD_ID>/#" | LC_ALL=C sort)" || host_list=""
+          if [ "$img_public" != "$host_public" ]; then
+            echo "::error::${app}: the image staged ${img_public} but the host build staged ${host_public} — ts/Dockerfile and ts/apps/${app}/moon.yml disagree on staging public/." >&2
+            ec=1
+          fi
+          if [ "$img_list" != "$host_list" ]; then
+            # Two distinct causes produce a difference here, and they send a reader to different
+            # places, so they get different messages. A missing or partial staging copy changes
+            # which TOP-LEVEL directories exist under .next/static; two builds of different source
+            # keep the same directories and change only the content-hashed file names inside them.
+            #
+            # ASSUMPTION, recorded deliberately: a host build and an image build of the SAME source
+            # produce the same chunk file names. Measured true here — Turbopack derives them from
+            # content — but nothing enforces it. Four things would break it, and all four are
+            # toolchain events rather than code changes: a Next or Turbopack bump that changes
+            # chunk hashing; a compile-time variable that differs between the host build and the
+            # builder stage; the platform split (macOS host against a linux builder); and the
+            # Dockerfile's filtered `pnpm install` resolving a different optional platform
+            # dependency. When it breaks it breaks on EVERY run, loudly, into the branch below
+            # whose message already says this is not a Dockerfile-vs-moon.yml drift. That is an
+            # acceptable failure shape, so there is no shape-only fallback here on purpose.
+            img_dirs="$(printf '%s\n' "$img_list" | sed 's#/.*##' | LC_ALL=C sort -u)"
+            host_dirs="$(printf '%s\n' "$host_list" | sed 's#/.*##' | LC_ALL=C sort -u)"
+            if [ "$img_dirs" != "$host_dirs" ]; then
+              echo "::error::${app}: the image's staged .next/static holds different top-level directories from the host build's — ts/Dockerfile and ts/apps/${app}/moon.yml have drifted. Diff (< host, > image) follows." >&2
+            else
+              echo "::error::${app}: the image's staged .next/static holds the same directories as the host build's but different files, so the two were built from DIFFERENT sources. Re-run 'moon run ${app}-ts:build' so this parity claim compares like with like; on its own this is NOT a ts/Dockerfile vs ts/apps/${app}/moon.yml drift. If a FRESH build does not clear this, that is a finding — report it; do NOT delete .next to silence it, because that only moves this check into its 'not checked' arm. Diff (< host, > image) follows." >&2
+            fi
+            diff <(printf '%s\n' "$host_list") <(printf '%s\n' "$img_list") >&2 || true
+            ec=1
+          else
+            echo "  ${app}: staged tree matches the host build ($(printf '%s\n' "$img_list" | grep -c . || true) files, ${img_public})"
+          fi
+        fi
+      fi
+    else
+      # Deliberate, and it says so out loud rather than passing silently: a check that quietly
+      # skips is the failure mode this repository has paid for repeatedly. Nothing here sets ec —
+      # the absence of a host build is not a defect.
+      #
+      # LOCAL ONLY, and the message says so. .github/workflows/images.yml runs no host build, so
+      # CI ALWAYS takes this arm and the staged-tree parity check gates NOTHING there. Making it
+      # gate would mean adding a TypeScript toolchain and a second Next build to that job. That is
+      # a follow-up, recorded in the PR description and in docs/ops/RUNBOOK-containers.md — until
+      # it lands, do not read a green CI `all-consoles` as parity coverage.
+      echo "  ${app}: no host build at ${host_static}; staged-tree parity NOT CHECKED this run (CI never runs a host build, so a green CI run is NOT parity coverage — run 'moon run ${app}-ts:build' locally to check it)"
+    fi
+  done
+
+  console_smoke_cleanup
+  if [ "$ec" -ne 0 ]; then return 1; fi
+  echo "== CONSOLE SMOKE OK =="
+}
+
 # --- rehearse (SMA-658 spec § 8) -----------------------------------------------------------------
 # Runs the publish sequence of the future release path against two LOCAL registries: A stands in
 # for GHCR and B for Docker Hub. It needs no credential, so images.yml runs it on a pull request.
@@ -845,11 +1446,13 @@ rehearse() {
 
 # One usage string for both the missing-command case and the unknown-command case below, so the
 # two never drift apart. Lists every command the case block accepts, in the order it accepts them.
-USAGE="usage: ci/images/run.sh build [iam|gateway] | ci/images/run.sh build-oci <iam|gateway> <outdir> | ci/images/run.sh load-oci <archive> <image-name> | ci/images/run.sh smoke [iam|gateway]... | ci/images/run.sh all | ci/images/run.sh rehearse <archive.oci.tar>..."
+USAGE="usage: ci/images/run.sh build [iam|gateway] | ci/images/run.sh build-oci <iam|gateway> <outdir> | ci/images/run.sh load-oci <archive> <image-name> | ci/images/run.sh smoke [iam|gateway]... | ci/images/run.sh all | ci/images/run.sh rehearse <archive.oci.tar>... | ci/images/run.sh build-console [iam|gateway] | ci/images/run.sh all-consoles"
 cmd="${1:?$USAGE}"
 target="${2:-}"
 services=("iam" "gateway")
 [ -n "$target" ] && services=("$target")
+console_services=("iam" "gateway")
+[ -n "$target" ] && console_services=("$target")
 
 # `smoke` with no argument smokes both images, gateway first (the old behaviour). With service
 # arguments it smokes exactly those; assert_fresh (above) is what stops a stale image from being
@@ -885,6 +1488,21 @@ case "$cmd" in
     load_oci "$target" "$3"
     ;;
   rehearse) shift; rehearse "$@" ;;
+  build-console)
+    assert_console_pins
+    for s in "${console_services[@]}"; do build_console_one "$s"; done
+    ;;
+  all-consoles)
+    if [ -n "$target" ]; then
+      echo "usage: ci/images/run.sh all-consoles takes no service argument — use 'build-console [iam|gateway]' to build one" >&2
+      exit 1
+    fi
+    assert_console_pins
+    for s in "${console_services[@]}"; do build_console_one "$s"; done
+    # The zone list is passed, not restated inside smoke_consoles, so the build loop and the smoke
+    # loop cannot disagree about which zones this run covers.
+    smoke_consoles "${console_services[@]}"
+    ;;
   *)
     echo "unknown command: $cmd" >&2
     echo "$USAGE" >&2

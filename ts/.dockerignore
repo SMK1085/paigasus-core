@@ -1,0 +1,12 @@
+# SPDX-License-Identifier: Apache-2.0
+node_modules
+**/node_modules
+**/.next
+**/.turbo
+**/test-results
+**/playwright-report
+# Next's standalone output copies an app's .env and .env.production into .next/standalone
+# (writeStandaloneDirectory in next/dist/build/index.js), and the server loads them at runtime.
+# A local build on a tree that holds real values would ship them in the image.
+**/.env
+**/.env.*

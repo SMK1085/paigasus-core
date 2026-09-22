@@ -4,13 +4,14 @@ name: images
 on:
   workflow_dispatch:
 
-  # POST-merge verification. `rs/**` because any service or dependency change can break an
-  # image build, and this is the only place that is checked.
+  # POST-merge verification. `rs/**` and `ts/**` because any service, console or dependency
+  # change can break an image build, and this is the only place that is checked.
   push:
     branches:
       - main
     paths:
       - 'rs/**'
+      - 'ts/**'
       - 'ci/images/**'
       - '.github/workflows/images.yml'
       - '.prototools'
@@ -20,7 +21,11 @@ on:
   # PRE-merge verification of the BUILD INPUTS only. `rs/**` is deliberately absent: most PRs
   # here touch it, and two cold --release builds on every one of them would raise the bill
   # (SMA-520). These are the inputs that can actually break an image build — a new dependency,
-  # a toolchain bump, a tool pin, or the build machinery itself.
+  # a toolchain bump, a tool pin, or the build machinery itself. The same reasoning excludes a
+  # bare `ts/**`: only the console build's own inputs are listed. That includes the install
+  # inputs beside the lockfile (`pnpm-workspace.yaml`'s `allowBuilds` changes what the Docker
+  # install does without a lockfile change) and each console's `lib/config.ts`, whose required
+  # keys the console smoke's dummy runtime config must match.
   pull_request:
     branches:
       - main
@@ -30,6 +35,15 @@ on:
       - 'rs/rust-toolchain.toml'
       - 'rs/Dockerfile'
       - 'rs/.dockerignore'
+      - 'ts/Dockerfile'
+      - 'ts/.dockerignore'
+      - 'ts/pnpm-lock.yaml'
+      - 'ts/pnpm-workspace.yaml'
+      - 'ts/package.json'
+      - 'ts/.npmrc'
+      - 'ts/apps/*/lib/config.ts'
+      - 'ts/apps/*/next.config.ts'
+      - 'ts/apps/*/package.json'
       - 'ci/images/**'
       - '.github/workflows/images.yml'
       - '.prototools'
@@ -131,6 +145,21 @@ jobs:
             summary="$(uv run --no-project --python '>=3.12' python3 ci/images/release_decision.py sbom-summary "sbom-${crate}-${ARCH}.spdx.json")"
             echo "M8 image=${crate} arch=${ARCH} $(printf '%s' "$summary" | tr '\n' ' ')"
           done
+
+      # Placed AFTER the rs release-path evidence (build, load, smoke, rehearse, SBOM) and BEFORE
+      # the `if: always()` upload steps: a console failure here stops the job, but only once every
+      # rs artifact this job exists to produce already exists on disk, so the uploads below still
+      # carry that evidence instead of the console failure masking it.
+      # `df -h /` before and after: the two Next builds were added to a job whose disk has already
+      # overflowed once, and the job's only other reading is at job start, before the rs builds.
+      # The rc is kept and re-raised, so the second reading is printed on a failure too.
+      - name: Build + smoke both consoles
+        run: |
+          df -h /
+          rc=0
+          ci/images/run.sh all-consoles || rc=$?
+          df -h /
+          exit "$rc"
 
       - name: Upload chisel package manifests
         if: always()

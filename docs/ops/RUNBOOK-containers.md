@@ -31,19 +31,30 @@ No CI job runs `build` or `all` any more. `.github/workflows/images.yml` runs `b
 break without turning CI red. Run them yourself before you rely on them.
 
 The build context is `rs/` (the Cargo workspace root). `.github/workflows/images.yml` runs on
-`workflow_dispatch`, on every `push` to `main` that touches `rs/**`, and on pull requests that
-touch the build inputs (`rs/Cargo.lock`, `rs/Cargo.toml`, `rs/rust-toolchain.toml`,
-`rs/Dockerfile`, `rs/.dockerignore`, `ci/images/**`, `.github/workflows/images.yml`,
-`.prototools`, `.proto/plugins/crane.toml`, `.proto/plugins/syft.toml`). **The workflow is not a
-required check**, so a broken image build reds `main` after merge rather than blocking the PR
-that broke it.
+`workflow_dispatch`, on every `push` to `main` that touches `rs/**` or `ts/**`, and on pull
+requests that touch the build inputs (`rs/Cargo.lock`, `rs/Cargo.toml`, `rs/rust-toolchain.toml`,
+`rs/Dockerfile`, `rs/.dockerignore`, `ts/Dockerfile`, `ts/.dockerignore`, `ts/pnpm-lock.yaml`,
+`ts/pnpm-workspace.yaml`, `ts/package.json`, `ts/.npmrc`, `ts/apps/*/lib/config.ts`,
+`ts/apps/*/next.config.ts`, `ts/apps/*/package.json`, `ci/images/**`,
+`.github/workflows/images.yml`, `.prototools`, `.proto/plugins/crane.toml`,
+`.proto/plugins/syft.toml`). **The workflow is not a required check**, so a broken image build
+reds `main` after merge rather than blocking the PR that broke it.
 
-That said, a PR touching any of the filtered inputs above — including `rs/Dockerfile` — already
-triggers the workflow automatically via its `pull_request` path filter; no manual step is needed
-there. Run `gh workflow run images.yml --ref <branch>` instead on a PR that touches `rs/**` but
-**none** of those filtered inputs (a plain service code change, say) — that is the one case the
-narrower `pull_request` filter does not cover, and it can still break an image build. (This 404s
-until `images.yml` itself exists on `main`.)
+The `ts/` entries on the `pull_request` filter follow one rule. A file is on the filter when a
+change to it can break the image build but not the ordinary build. `moon ci` already runs
+`next build` for each affected console, so a source fault or a `tsconfig` fault fails the PR
+there. The listed files are the ones that only the Docker path reads, or that it reads
+differently. For example, the Docker install uses `--filter "@paigasus/${APP}..."`, so it depends
+on the package `name` in each app's `package.json`. `ts/pnpm-lock.yaml` keys its importers by
+path, not by name, so a rename does not change the lockfile.
+
+That said, a PR touching any of the filtered inputs above — including `rs/Dockerfile` or
+`ts/Dockerfile` — already triggers the workflow automatically via its `pull_request` path filter;
+no manual step is needed there. Run `gh workflow run images.yml --ref <branch>` instead on a PR
+that touches `rs/**` or `ts/**` but **none** of those filtered inputs (a plain service or console
+code change, say) — those are the two cases the narrower `pull_request` filter does not cover, and
+either one can still break an image build. (This 404s until `images.yml` itself exists on
+`main`.)
 
 ## 2. Image names
 
@@ -284,16 +295,100 @@ build itself — they bite the first operator who deploys without reading this s
   bundle — no `accept_invalid_tls` needed. A small private CA is still the tidier posture once
   more than one host is involved (rotation and revocation stay CA-level instead of per-leaf).
 
-## 6. Conventions the console images must follow
+## 6. Conventions the console images follow
 
-Any future console-facing image in this repo should follow the same shape:
+`ts/Dockerfile` builds one image for both console zones. The `APP` build arg selects the zone. The
+image has the same shape as the Rust service images:
 
-- A chiseled or otherwise distroless base with **no shell**.
-- A numeric, non-root `USER`.
-- A self-contained probe entrypoint (the binary probes itself) plus a `HEALTHCHECK` instruction
-  that uses it.
-- Runtime environment configuration only — nothing deployment-varying baked into the image.
-- Digest-pinned base images, covered by Dependabot's `docker` ecosystem updater.
+- **The runtime stage uses a distroless base.** The base is
+  `gcr.io/distroless/nodejs24-debian12:nonroot`, pinned by digest on the runtime `FROM` line of
+  `ts/Dockerfile`. That line is the only record of the digest; this runbook does not copy it. The
+  base has **no shell**. `smoke_consoles` in `ci/images/run.sh` checks the running container for
+  a shell, not only the pin.
+- **The builder stage is digest-pinned too.** The builder `FROM` line in `ts/Dockerfile` names a
+  `node:X.Y.Z-bookworm` tag and its multi-platform index digest. The index digest resolves on
+  both the amd64 and the arm64 leg of `images.yml`. Code that the builder compiles goes into
+  `/app`, so this pin controls what the image runs. `assert_console_pins` in `ci/images/run.sh`
+  fails if either `FROM` line has no `@sha256:` digest, or if the runtime tag is not `nonroot`.
+- **The image runs as uid:gid `65532:65532`** (`USER 65532:65532`). The Rust service images use
+  the same uid (`rs/Dockerfile`'s `USER 65532:65532`). So one Kubernetes `securityContext`
+  (`runAsNonRoot: true`, `runAsUser: 65532`) covers all four images. `smoke_consoles` reads the
+  uid of the running container with `docker top`. It fails if the uid is not `65532`.
+- **The image holds two fixed-path `.mjs` files**, `/app/entrypoint.mjs` and
+  `/app/healthcheck.mjs`. The builder writes them. `ENTRYPOINT` and `HEALTHCHECK` name them
+  literally. This is necessary because exec-form `ENTRYPOINT` and `HEALTHCHECK` do **not** expand
+  `ARG` or `ENV`, so neither instruction can use `${APP}`. The files are `.mjs`, not `.js`, because
+  every console `package.json` sets `"type": "module"`. Next copies that `package.json` into the
+  standalone tree, so a CJS `require()` shim would need `require(esm)` interop and would fail.
+- **The healthcheck file fetches `<BASE_PATH>/healthz` on `127.0.0.1:$PORT`.** `smoke_consoles`
+  runs this file in the running container with `docker exec` and the image's own node. It fails if
+  the file exits with a code that is not 0.
+- **`assert_console_pins` holds three values equal to the pins in `.prototools`.** The three
+  values are the Node major of the runtime base, the exact Node version of the builder, and the
+  pnpm version of the builder. `.prototools` is the only record of those versions; this runbook
+  does not copy them. The runtime base can hold only the major, because distroless publishes no
+  patch-level tags.
+- **The image uses runtime configuration only.** The image bakes no `PAIGASUS_*` environment
+  variable. `assert_console_pins` reads `ENV` and `ARG` instructions in `ts/Dockerfile` to enforce
+  this. It joins continuation lines first and matches `ENV` and `ARG` in any letter case. It does
+  not see a value that a `RUN` step writes into a file. There is one exception:
+  `PAIGASUS_COMPILED_*` (`PAIGASUS_COMPILED_ZONE`, `PAIGASUS_COMPILED_BASE_PATH`).
+  `createNextConfig` in `ts/packages/paigasus-next-config` writes these at build time on purpose.
+  They record the zone that the artifact was built for, so `runtime.ts` can compare them with the
+  `PAIGASUS_ZONE` that a deployment supplies. They are not deployment-varying configuration.
+- **The build context excludes `.env` files.** `ts/.dockerignore` excludes `**/.env` and
+  `**/.env.*`. This is necessary because Next copies an app's `.env` and `.env.production` into
+  `.next/standalone`, and the Next server loads them at runtime. Without the exclusion, a local
+  `build-console` on a tree that holds real values ships those values in the image. CI is not
+  affected, because `.gitignore` ignores `.env*` and CI builds from a clean checkout.
+- **Every `pnpm install` in `ts/Dockerfile` uses `--frozen-lockfile`.** `assert_console_pins`
+  fails if one `pnpm install` has no bare `--frozen-lockfile` flag. It also fails on any
+  `--frozen-lockfile=<value>` form and on `--no-frozen-lockfile`.
+- **Dependabot updates the two pinned images of the `/ts` docker block as follows.** This is
+  read from the source of `dependabot-core`, not from the published GitHub documentation, which
+  does not describe it. A change in `dependabot-core` can change it.
+  - **The runtime base:** the tag `nonroot` holds no version, so Dependabot does not propose a
+    different tag for it. It refreshes only the digest. The Node major is part of the image name
+    (`nodejs24-debian12`), so a Node major bump is a different image, and Dependabot does not
+    propose it. The `semver-major` ignore on this entry thus does not apply today. It stays as a
+    guard in case the tag changes to one that holds a version.
+  - **The builder, `node`:** the `ignore` list blocks all three version update types (major, minor
+    and patch), because `assert_console_pins` holds the exact builder version to `.prototools`.
+    The builder is digest-pinned. Dependabot-core is expected to refresh its digest on the same
+    tag, and the same refresh is expected for `/rs`. But `dependabot-core` has an experiment,
+    `docker_digest_only_update_suppression`, that can stop a digest-only refresh on a versioned
+    tag. This applies to both the `/ts` builder tag and the `/rs` tag. It is not known if that
+    experiment is on for this repository.
+  - A version bump of either image is a manual change. It changes `ts/Dockerfile` and
+    `.prototools` together.
+- **The standalone output has no static assets.** Next writes no `.next/static` and no `public/`
+  into `.next/standalone`. The builder stage of the console image copies both, the same as the
+  `build` task in `ts/apps/<app>/moon.yml`. An image without that copy answers 200 on
+  `<basePath>/healthz` and 404 on every chunk, so a probe-based smoke test does not see the fault.
+  So `smoke_consoles` in `ci/images/run.sh` checks for a **served chunk**. A staged-tree parity
+  check keeps the two staging sites in agreement.
+- **The zone row of `smoke_consoles` proves only that a basePath is in effect.** It checks that
+  the zone's chunk returns 404 under the other zone's prefix. The chunk also returns 404 under an
+  unknown prefix and under no prefix (measured on `iam-console:dev`). So the row does not prove
+  that the assets of the two zones do not collide. That proof needs both zones behind one ingress,
+  and it belongs to the ingress work (SMA-513 PR 2a).
+
+Two more facts about the staged-tree parity check are important:
+
+- **The check runs locally only.** It compares the staged `.next/static` of the image with a host
+  build at `ts/apps/<app>/.next/standalone/apps/<app>/.next/static`. It runs only when that host
+  build exists. The `images` job in `.github/workflows/images.yml` (`ci/images/run.sh
+  all-consoles`) does not make a host build. So in CI the check always takes its "not checked"
+  path and gates nothing. Use it as a local aid, not as a CI guarantee. A green CI `all-consoles`
+  run does not give parity coverage; run `moon run <app>-ts:build` locally before you use it.
+- **Parity depends on an assumption: the host build and the image build give the same chunk
+  names.** This was true in every measurement, but nothing makes sure of it. Four things can make
+  it false. The first is a Next or Turbopack bump that changes how chunk names are hashed. The
+  second is a compile-time variable that is different between the two builds. The third is the
+  platform difference between a developer's machine and the builder image. The fourth is that the
+  filtered `pnpm install` resolves a different optional platform dependency than a full install.
+  When the assumption fails, it fails on every run. The failure goes to the parity error that
+  already states that the mismatch is not a drift between `ts/Dockerfile` and `moon.yml`.
 
 ## 7. What the first Deployment needs
 
