@@ -21,18 +21,24 @@
 import { createHash } from 'node:crypto';
 import { createRequire } from 'node:module';
 import { existsSync, readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const HERE = fileURLToPath(import.meta.url);
 // testing -> paigasus-console-core -> packages -> ts -> repo root: four levels up.
 const ROOT = join(dirname(HERE), '../../../../');
 const CRATE_DIR = join(ROOT, 'rs/crates/bindings/paigasus-wasm');
+// The whole bindings directory, not just the wasm crate, is off limits for an INSTALLED path — see
+// the symlink assertion below.
+const BINDINGS_DIR = resolve(ROOT, 'rs/crates/bindings');
 // @paigasus/wasm is the KERNEL's dependency, not this package's, so the require is anchored at the
 // kernel's own manifest. Its own exports map does not expose ./package.json, so the anchor is the
 // file path, not a package specifier.
 const KERNEL_MANIFEST = join(ROOT, 'ts/packages/paigasus-kernel/package.json');
-const FILES = ['paigasus_wasm_bg.wasm', 'paigasus_wasm_bg.js'];
+// ALL FIVE committed artifacts (SMA-634 fix wave). The earlier list held two, and neither was
+// `paigasus_wasm.js` — the entry a console actually imports (the crate manifest's `main`/`module`),
+// so the one file whose staleness changes what the console runs went unchecked.
+const FILES = ['paigasus_wasm.js', 'paigasus_wasm_bg.js', 'paigasus_wasm_bg.wasm', 'paigasus_wasm.d.ts', 'paigasus_wasm_bg.wasm.d.ts'];
 
 const REPAIR = 'Run `rm -rf ts/node_modules && pnpm -C ts install`. pnpm does not refresh a file: dependency after a git operation replaces it (SMA-634 spec F14).';
 
@@ -52,6 +58,15 @@ export function assertInstalledWasmMatchesCommitted(): void {
       installed = require.resolve(`@paigasus/wasm/${name}`);
     } catch {
       throw new Error(`@paigasus/wasm/${name} is not installed. ${REPAIR}`);
+    }
+    // The check compares the INSTALLED copy with the committed one. If pnpm ever resolved
+    // @paigasus/wasm to a symlink into the crate directory, both sides would be the same file and
+    // every comparison below would pass by construction — a vacuous gate, not a green one. pnpm
+    // hard-links a `file:` dependency into its store today, so the resolved path is under
+    // ts/node_modules; assert that, so the day the layout changes this fails loudly instead of
+    // going quiet.
+    if (`${resolve(installed)}${sep}`.startsWith(`${BINDINGS_DIR}${sep}`)) {
+      throw new Error(`the installed @paigasus/wasm/${name} resolves INTO the crate directory (${installed}). The check would compare a file with itself, so it proves nothing. @paigasus/wasm must install as a copy under ts/node_modules.`);
     }
     const committed = join(CRATE_DIR, name);
     if (!existsSync(committed)) throw new Error(`${committed} is missing from the tree — the committed wasm artifacts are incomplete.`);
