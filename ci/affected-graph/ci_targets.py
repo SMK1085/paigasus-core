@@ -1794,8 +1794,8 @@ def check_self_invocation(
     task-script and actionlint, a required token is a strict PREFIX of something else in the file
     — `task_inputs.py` of `task_inputs.py --self-test`, and `run_self_tests` of
     `run_self_tests() {` — so a substring-over-the-whole-text match would be satisfied by the
-    wrong occurrence. Release-parity, workflow-credentials, release-plan, ruff and
-    next-public-free have no such
+    wrong occurrence. Release-parity, workflow-credentials, release-plan, ruff,
+    next-public-free and helm-render have no such
     prefix hazard; there,
     whole-line matching is what makes a COMMENTED-OUT copy of a pinned line
     (e.g. `# if [ "$NEGATIVE" = 1 ]; then`) report missing rather than silently satisfy the pin —
@@ -1810,10 +1810,10 @@ def check_self_invocation(
     whitespace that a column-0 rule would reject outright. Splitting it into its own tuple, rather
     than loosening the column-0 haystack wholesale, is what keeps the stronger guarantee intact
     for the entries that can hold it. Task-script, release-parity, workflow-credentials,
-    release-plan, ruff and next-public-free are stripped for the same reason — their real lines
+    release-plan, ruff, next-public-free and helm-render are stripped for the same reason — their real lines
     are indented inside
     `case` arms and `if` bodies.
-    The eight texts are checked SEPARATELY rather than against one concatenated haystack, so a
+    The nine texts are checked SEPARATELY rather than against one concatenated haystack, so a
     call site living in the wrong file cannot satisfy another's requirement.
 
     `actionlint_sh_text`, `release_parity_sh_text`, `workflow_credentials_sh_text`,
@@ -1825,7 +1825,7 @@ def check_self_invocation(
         present = {line.strip() for line in scripts.get(task, "").splitlines()}
         missing.extend(f"{task} script: {site}" for site in required if site not in present)
     # COLUMN 0 only (rstrip, no lstrip) — see the comment at ACTIONLINT_SH_CALL_SITES above for why
-    # this one haystack, alone of the eight, requires the line to carry NO leading whitespace: an
+    # this one haystack, alone of the nine, requires the line to carry NO leading whitespace: an
     # indented copy (e.g. wrapped in `if false; then … fi`) must not satisfy the pin.
     actionlint_lines = {
         line.rstrip() for line in actionlint_sh_text.splitlines() if line == line.lstrip()
@@ -3804,7 +3804,7 @@ EXPECTED_FINDING_KEYS = (
     "pairing-orphan-globs", "tw-unregistered", "tw-missing-lines", "tw-stale", "tw-no-project",
 )
 
-# The seven shell sources check_self_invocation reads, keyed so collect_findings' signature does
+# The eight shell sources check_self_invocation reads, keyed so collect_findings' signature does
 # not grow seven positional parameters that a caller could silently transpose.
 _CALL_SITE_SOURCE_KEYS = (
     "run", "actionlint", "release_parity", "workflow_credentials", "release_plan", "ruff",
