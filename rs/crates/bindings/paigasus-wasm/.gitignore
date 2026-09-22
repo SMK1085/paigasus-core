@@ -4,16 +4,18 @@
 #
 # NOTE: `wasm-pack build` CLEANS its --out-dir each run (it overwrites .gitignore with a bare `*`
 # and DELETES package.json, even with --no-pack), so every task builds into a gitignored scratch
-# dir and copies out of it: generate-wasm uses .wasmpack-regen-out, the kernel's `build` task uses
-# .wasmpack-out, its `test` task uses .wasmpack-test-out (the fresh build the drift gate compares
-# against), and prebuild.yml uses .wasmpack-release-out. The committed package.json/.gitignore/glue
-# (what the `@paigasus/wasm` file: link resolves) are never clobbered.
-# See ts/packages/paigasus-kernel/moon.yml.
+# dir and copies out of it: `paigasus-kernel-ts:generate-wasm` uses .wasmpack-regen-out, that
+# project's `test` task uses .wasmpack-test-out (the fresh build the drift gate compares against),
+# and prebuild.yml uses .wasmpack-release-out. The `build` task runs no wasm-pack at all since
+# SMA-634, so the fourth name it used to own, `.wasmpack-out`, has NO writer left and its ignore
+# entry is gone with it — a dead ignore rule would hide a stale directory of that name from
+# `git status` for good. If you have one left from an older checkout, delete it.
+# The committed package.json/.gitignore/glue (what the `@paigasus/wasm` file: link resolves) are
+# never clobbered. See ts/packages/paigasus-kernel/moon.yml.
 *.wasm
 # ...except the committed binary. The leading slash anchors the negation at the crate root, so a
 # same-named file in a future sub-directory stays ignored.
 !/paigasus_wasm_bg.wasm
-.wasmpack-out/
 .wasmpack-test-out/
 .wasmpack-release-out/
 .wasmpack-regen-out/
