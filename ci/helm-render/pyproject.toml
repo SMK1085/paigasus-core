@@ -1,0 +1,11 @@
+# SPDX-License-Identifier: Apache-2.0
+# A DEDICATED one-dependency project, the same layout as ci/workflow-credentials/ (SMA-593). py/
+# is a uv workspace whose members build a PyO3 cdylib, so `uv run --project py` would put a
+# maturin build on every chart-edit PR. run.sh resolves this project's interpreter ONCE, with
+# --locked, and runs everything else through it (spec § 4).
+[project]
+name = "paigasus-helm-render"
+version = "0.0.0"
+description = "Static render checks for charts/paigasus (repo:helm-render)"
+requires-python = ">=3.12"
+dependencies = ["pyyaml==6.0.3"]
