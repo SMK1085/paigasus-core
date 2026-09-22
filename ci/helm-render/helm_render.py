@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import io
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -28,6 +29,17 @@ from pathlib import Path
 import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+PROTO = REPO_ROOT / "contracts" / "proto" / "paigasus" / "common" / "v1" / "service_info.proto"
+STATE_TS = REPO_ROOT / "ts" / "packages" / "paigasus-discovery" / "src" / "core" / "state.ts"
+CAPABILITY_TS = REPO_ROOT / "ts" / "packages" / "paigasus-proto" / "src" / "capability.ts"
+
+# The two TypeScript lines that derive SERVICE_SLUGS. Check 1a re-implements them in Python, so
+# a change to either line must stop a human (spec § 5, check 1a). Compared as stripped lines.
+STATE_TS_LINE = (
+    "export const SERVICE_SLUGS: readonly string[] = "
+    "[...new Set(CAPABILITY_KEYS.map((k) => k.slice(0, k.indexOf('.'))))];"
+)
+CAPABILITY_TS_LINE = "return name.slice(PREFIX.length).toLowerCase().replace(/_/g, '.');"
 
 KUBE_VERSION = "1.31.0"
 RELEASE = "paigasus"
@@ -209,15 +221,120 @@ def base_paths(chart):
     return out
 
 
+# --------------------------------------------------------------------------- check 1a
+
+
+def proto_slugs(text):
+    """The service-slug set derived from the proto's `enum Capability` block (spec check 1a)."""
+    blocks = re.findall(r"^enum Capability \{\n(.*?)^\}", text, re.MULTILINE | re.DOTALL)
+    if len(blocks) != 1:
+        raise InfraError(f"expected one `enum Capability {{ ... }}` block in {PROTO.name}, found {len(blocks)}")
+    slugs = set()
+    for raw in blocks[0].splitlines():
+        line = raw.split("//", 1)[0].strip()
+        if not line or line.startswith(("option ", "reserved ")):
+            continue
+        m = re.fullmatch(r"([A-Z][A-Z0-9_]*)\s*=\s*-?\d+\s*(\[[^\]]*\])?\s*;", line)
+        if m is None:
+            raise InfraError(f"cannot parse enum Capability line {raw.strip()!r}")
+        name = m.group(1)
+        if name == "CAPABILITY_UNSPECIFIED":
+            continue
+        if not name.startswith("CAPABILITY_"):
+            raise InfraError(f"enum value {name} does not carry the CAPABILITY_ prefix capabilityWireKey strips")
+        key = name[len("CAPABILITY_"):].lower().replace("_", ".")
+        if "." not in key:
+            raise InfraError(
+                f"capability key {key!r} ({name}) has no '.'; state.ts's k.slice(0, k.indexOf('.')) would drop its last "
+                "character, so Python and TypeScript would disagree on the slug. Re-confirm the rule before registering it."
+            )
+        slugs.add(key.split(".", 1)[0])
+    if not slugs:
+        raise InfraError("enum Capability registers no capability, so the slug set is empty")
+    return slugs
+
+
+def chart_slugs(helpers_text):
+    """The literal of `paigasus.serviceSlugs`, split with split(" ") as paigasus.validate splits it."""
+    blocks = re.findall(r'\{\{-?\s*define\s+"paigasus\.serviceSlugs"\s*-?\}\}(.*?)\{\{-?\s*end\s*-?\}\}', helpers_text, re.DOTALL)
+    if len(blocks) != 1:
+        raise InfraError(f"expected one paigasus.serviceSlugs define in _helpers.tpl, found {len(blocks)}")
+    return set(blocks[0].strip().split(" "))
+
+
+def check1a(chart_set, proto_set, state_ts, capability_ts):
+    def body():
+        problems = []
+        if chart_set != proto_set:
+            problems.append(f"paigasus.serviceSlugs is {sorted(chart_set)}, the proto registry derives {sorted(proto_set)}; they must be EQUAL (spec A2)")
+        for label, text, line in (("state.ts", state_ts, STATE_TS_LINE), ("capability.ts", capability_ts, CAPABILITY_TS_LINE)):
+            if line not in {raw.strip() for raw in text.splitlines()}:
+                problems.append(f"{label} no longer carries the derivation line this check mirrors; re-confirm the rule, then update it here: {line}")
+        return problems
+
+    return _row("1a", body)
+
+
+# --------------------------------------------------------------------------- check 1
+
+
+def check1(label, docs, enabled, paths, slugs):
+    want = sorted(enabled)
+
+    def coupling():
+        ingress_paths = [
+            _get(p, "path") for ing in _of_kind(docs, "Ingress") for rule in _get(ing, "spec", "rules") for p in _get(rule, "http", "paths")
+        ]
+        ingress_ids = sorted(paths.get(p, f"<unmapped path {p}>") for p in ingress_paths)
+        zones = sorted(_json_map(docs, "PAIGASUS_ZONES"))
+        services = sorted(_json_map(docs, "PAIGASUS_SERVICES"))
+        problems = []
+        for what, got in (("Ingress paths", ingress_ids), ("PAIGASUS_ZONES keys", zones), ("PAIGASUS_SERVICES keys", services)):
+            if got != want:
+                problems.append(f"{what} give {got}, enabled zones are {want}")
+        return problems
+
+    def routing():
+        problems = []
+        for ing in _of_kind(docs, "Ingress"):
+            for rule in _get(ing, "spec", "rules"):
+                for p in _get(rule, "http", "paths"):
+                    path = _get(p, "path")
+                    zone = paths.get(path)
+                    svc = _service(docs, _get(p, "backend", "service", "name"))
+                    dep = _selected_deployment(docs, svc)
+                    got = _env(_get(_containers(dep), 0)).get("PAIGASUS_ZONE")
+                    if zone is None or got != zone:
+                        problems.append(f"{path} routes to Service {_name(svc)}, whose Deployment serves PAIGASUS_ZONE={got!r}, not {zone!r}")
+                    _service_port(svc, _get(p, "backend", "service", "port", "name"))
+        return problems
+
+    def membership():
+        unknown = sorted(set(enabled) - slugs)
+        return [f"enabled zone(s) {unknown} are not in the proto-derived slug set {sorted(slugs)}"] if unknown else []
+
+    return [_row(f"1.1 {label}", coupling), _row(f"1.2 {label}", routing), _row(f"1.3 {label}", membership)]
+
+
 # --------------------------------------------------------------------------- run
 
 
 def run_checks(chart):
     """Every row for the chart in `chart`. Each render must succeed, or this raises InfraError."""
     chart = Path(chart).resolve()
-    rows = []
-    for _label, enabled in SUBSETS:
-        parse_docs(helm_template(chart, enabled))
+    try:
+        slugs = proto_slugs(PROTO.read_text())
+        state_ts = STATE_TS.read_text()
+        capability_ts = CAPABILITY_TS.read_text()
+        helpers = (chart / "templates" / "_helpers.tpl").read_text()
+    except OSError as exc:
+        raise InfraError(f"cannot read a source file: {exc}") from exc
+    paths = base_paths(chart)
+    rows = [check1a(chart_slugs(helpers), slugs, state_ts, capability_ts)]
+    for label, enabled in SUBSETS:
+        raw = helm_template(chart, enabled)
+        docs = parse_docs(raw)
+        rows += check1(label, docs, enabled, paths, slugs)
     return rows
 
 
@@ -393,6 +510,50 @@ def self_test():
     got_iam = sorted(d["kind"] for d in synthetic(iam_only))
     if got_iam != want_iam:
         failures.append(f"synthetic(iam only): kinds are {got_iam}, want {want_iam}")
+
+    # ---- check 1
+    slugs = {"iam", "gateway"}
+    rows1 = ("1.1 t", "1.2 t", "1.3 t")
+    expect("check1 good, both zones", check1("t", synthetic(both), both, _SYN_PATHS, slugs), passing=rows1)
+    expect("check1 good, iam only", check1("t", synthetic(iam_only), iam_only, _SYN_PATHS, slugs), passing=rows1)
+    # A zone missing from ALL THREE sets: they agree with each other, so only "equal to E" sees it.
+    expect("check1 zone absent everywhere", check1("t", synthetic(iam_only), both, _SYN_PATHS, slugs), fail=("1.1 t",))
+    literal = synthetic(both)
+    zonemap = _configmap_with(literal, "PAIGASUS_ZONES")
+    zonemap["data"]["PAIGASUS_ZONES"] = json.dumps({"iam": "/iam"})
+    zonemap["data"]["PAIGASUS_SERVICES"] = json.dumps({"iam": "http://r-iam-backend:8080"})
+    expect("check1 literal ingress, iam only", check1("t", literal, iam_only, _SYN_PATHS, slugs), fail=("1.1 t",))
+    omits = synthetic(both)
+    _configmap_with(omits, "PAIGASUS_ZONES")["data"]["PAIGASUS_ZONES"] = json.dumps({"iam": "/iam"})
+    expect("check1 PAIGASUS_ZONES omits a zone", check1("t", omits, both, _SYN_PATHS, slugs), fail=("1.1 t",))
+    # Routing: /gateway sent to the IAM console. The key sets all stay equal, so 1.1 passes.
+    swapped = synthetic(both)
+    for p in _one(_of_kind(swapped, "Ingress"), "Ingress")["spec"]["rules"][0]["http"]["paths"]:
+        p["backend"]["service"]["name"] = "r-iam-console"
+    expect("check1 /gateway routes to the IAM console", check1("t", swapped, both, _SYN_PATHS, slugs), fail=("1.2 t",), passing=("1.1 t",))
+    wrong_zone = synthetic(both)
+    _containers(_find(wrong_zone, "Deployment", "r-gateway-console"))[0]["env"][0]["value"] = "iam"
+    expect("check1 a console serves the wrong PAIGASUS_ZONE", check1("t", wrong_zone, both, _SYN_PATHS, slugs), fail=("1.2 t",))
+    expect("check1 enabled id outside the slug set", check1("t", synthetic(both), both, _SYN_PATHS, {"iam"}), fail=("1.3 t",))
+
+    # ---- check 1a
+    if proto_slugs(_SYN_PROTO) != {"iam", "gateway"}:
+        failures.append(f"proto_slugs: got {sorted(proto_slugs(_SYN_PROTO))}, want ['gateway', 'iam']")
+    expect_infra("proto_slugs no-dot key", lambda: proto_slugs(_SYN_PROTO.replace("CAPABILITY_IAM_APIKEYS", "CAPABILITY_SOLO")))
+    expect_infra("proto_slugs no enum block", lambda: proto_slugs("enum Other {\n  X = 0;\n}\n"))
+    expect_infra("proto_slugs unparseable line", lambda: proto_slugs(_SYN_PROTO.replace("reserved 5;", "CAPABILITY_IAM_X = ;")))
+    expect_infra("proto_slugs only UNSPECIFIED", lambda: proto_slugs("enum Capability {\n  CAPABILITY_UNSPECIFIED = 0;\n}\n"))
+    if chart_slugs(_SYN_HELPERS) != {"iam", "gateway"}:
+        failures.append(f"chart_slugs: got {sorted(chart_slugs(_SYN_HELPERS))}, want ['gateway', 'iam']")
+    state_ok, cap_ok = f"  {STATE_TS_LINE}\n", f"  {CAPABILITY_TS_LINE}\n"
+    expect("check1a equal sets", [check1a(chart_slugs(_SYN_HELPERS), slugs, state_ok, cap_ok)], passing=("1a",))
+    extra = chart_slugs(_SYN_HELPERS.replace("iam gateway", "iam gateway billing"))
+    expect("check1a extra chart slug", [check1a(extra, slugs, state_ok, cap_ok)], fail=("1a",))
+    double = chart_slugs(_SYN_HELPERS.replace("iam gateway", "iam  gateway"))
+    expect("check1a double space", [check1a(double, slugs, state_ok, cap_ok)], fail=("1a",))
+    expect("check1a proto has a slug the chart lacks", [check1a({"iam"}, slugs, state_ok, cap_ok)], fail=("1a",))
+    expect("check1a state.ts line changed", [check1a(slugs, slugs, state_ok.replace("indexOf", "lastIndexOf"), cap_ok)], fail=("1a",))
+    expect("check1a capability.ts line changed", [check1a(slugs, slugs, state_ok, cap_ok.replace("'.'", "'-'"))], fail=("1a",))
 
     # ---- the exit-code contract and the parser's infrastructure errors
     if report([Row("x", True)], io.StringIO()) != 0 or report([Row("x", True), Row("y", False, "bad")], io.StringIO()) != 3:
