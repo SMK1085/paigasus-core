@@ -17,12 +17,14 @@ module directly with another helm and read its verdict as the gate's.
 from __future__ import annotations
 
 import argparse
+import copy
 import io
 import json
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -62,6 +64,15 @@ STUB_VALUES = (
 
 # The valid zone subsets: (row label, enabled zone ids).
 SUBSETS = (("iam", ("iam",)), ("iam+gateway", ("gateway", "iam")))
+
+# Check 3: row -> the required result per pod template, keyed by the `app.kubernetes.io/name`
+# label of spec.template. "differs" is a POSITIVE assertion (spec § 5, check 3).
+CHECK3_EXPECT = {
+    "3a": {"iam-console": "differs", "gateway-console": "equal", "iam-backend": "equal"},
+    "3a-prime": {"iam-console": "equal", "gateway-console": "differs", "iam-backend": "equal"},
+    "3b": {"iam-console": "differs", "gateway-console": "differs", "iam-backend": "differs"},
+    "3c": {"iam-console": "differs", "gateway-console": "absent", "iam-backend": "equal"},
+}
 
 
 class InfraError(Exception):
@@ -352,6 +363,58 @@ def check2(docs, raw, disabled="gateway"):
     return _row("2", body)
 
 
+# --------------------------------------------------------------------------- check 3
+
+
+def compare_templates(row, before, after):
+    """Compare spec.template of each CHECK3_EXPECT Deployment, as parsed YAML."""
+
+    def body():
+        problems = []
+        for name, want in CHECK3_EXPECT[row].items():
+            b = _get(_one(_deployments(before, name), f"{name} Deployment before the change"), "spec", "template")
+            found = _deployments(after, name)
+            if want == "absent":
+                if found:
+                    problems.append(f"{name}: the Deployment is still rendered; it must be absent")
+                continue
+            a = _get(_one(found, f"{name} Deployment after the change"), "spec", "template")
+            if want == "differs" and a == b:
+                problems.append(f"{name}: spec.template is equal; it must differ")
+            if want == "equal" and a != b:
+                problems.append(f"{name}: spec.template differs; it must be equal")
+        return problems
+
+    return _row(row, body)
+
+
+def _bumped_app_version(chart, dest):
+    shutil.copytree(chart, dest)
+    chart_yaml = Path(dest) / "Chart.yaml"
+    text, n = re.subn(r"(?m)^appVersion:.*$", 'appVersion: "0.0.0-helm-render-bump"', chart_yaml.read_text())
+    if n != 1:
+        raise InfraError(f"expected one appVersion line in {chart}/Chart.yaml, found {n}")
+    chart_yaml.write_text(text)
+    return Path(dest)
+
+
+def check3(chart):
+    both = ("gateway", "iam")
+    base = parse_docs(helm_template(chart, both))
+    rows = []
+    for row, key in (("3a", "zones.iam.console.image.tag"), ("3a-prime", "zones.gateway.console.image.tag")):
+        before = parse_docs(helm_template(chart, both, ("--set", f"{key}=t1")))
+        after = parse_docs(helm_template(chart, both, ("--set", f"{key}=t2")))
+        rows.append(compare_templates(row, before, after))
+    # Case b edits Chart.yaml in a temp COPY only. run.sh exports TMPDIR, so the copy lands under
+    # the gate's own mktemp directory.
+    with tempfile.TemporaryDirectory(prefix="helm-render-3b-") as tmp:
+        bumped = _bumped_app_version(chart, Path(tmp) / "chart")
+        rows.append(compare_templates("3b", base, parse_docs(helm_template(bumped, both))))
+    rows.append(compare_templates("3c", base, parse_docs(helm_template(chart, ("iam",)))))
+    return rows
+
+
 # --------------------------------------------------------------------------- run
 
 
@@ -373,6 +436,7 @@ def run_checks(chart):
         rows += check1(label, docs, enabled, paths, slugs)
         if enabled == ("iam",):
             rows.append(check2(docs, raw))
+    rows += check3(chart)
     return rows
 
 
@@ -603,6 +667,26 @@ def self_test():
     _configmap_with(keyed, "PAIGASUS_IAM_GRPC_URL")["data"]["X_GATEWAY_Y"] = "1"
     expect("check2 zone id in a KEY, upper case", [check2(keyed, "")], fail=("2",))
     expect("check2 zone id in a comment only", [check2(clean, "# serves /gateway too\n")], fail=("2",))
+
+    # ---- check 3
+    def tagged(**tags):
+        return synthetic(both, tags=tags)
+
+    expect("check3 a good", [compare_templates("3a", tagged(iam="t1"), tagged(iam="t2"))], passing=("3a",))
+    expect("check3 a IAM tag moves both consoles", [compare_templates("3a", tagged(iam="t1", gateway="t1"), tagged(iam="t2", gateway="t2"))], fail=("3a",))
+    expect("check3 a IAM tag moves nothing", [compare_templates("3a", tagged(iam="t1"), tagged(iam="t1"))], fail=("3a",))
+    expect("check3 a-prime good", [compare_templates("3a-prime", tagged(gateway="t1"), tagged(gateway="t2"))], passing=("3a-prime",))
+    expect("check3 a-prime gateway tag moves nothing", [compare_templates("3a-prime", tagged(gateway="t1"), tagged(gateway="t1"))], fail=("3a-prime",))
+    bumped = synthetic(both, tags={"iam": "0.0.1", "gateway": "0.0.1"}, backend_tag="0.0.1")
+    expect("check3 b good", [compare_templates("3b", synthetic(both), bumped)], passing=("3b",))
+    backend_same = synthetic(both, tags={"iam": "0.0.1", "gateway": "0.0.1"})
+    expect("check3 b backend unchanged", [compare_templates("3b", synthetic(both), backend_same)], fail=("3b",))
+    expect("check3 c good", [compare_templates("3c", synthetic(both), synthetic(iam_only))], passing=("3c",))
+    expect("check3 c backend restarted", [compare_templates("3c", synthetic(both), synthetic(iam_only, backend_tag="0.0.1"))], fail=("3c",))
+    expect("check3 c gateway console survives", [compare_templates("3c", synthetic(both), synthetic(both))], fail=("3c",))
+    console_same = synthetic(iam_only)
+    _find(console_same, "Deployment", "r-iam-console")["spec"]["template"] = copy.deepcopy(_find(synthetic(both), "Deployment", "r-iam-console")["spec"]["template"])
+    expect("check3 c IAM console unchanged", [compare_templates("3c", synthetic(both), console_same)], fail=("3c",))
 
     # ---- the exit-code contract and the parser's infrastructure errors
     if report([Row("x", True)], io.StringIO()) != 0 or report([Row("x", True), Row("y", False, "bad")], io.StringIO()) != 3:
