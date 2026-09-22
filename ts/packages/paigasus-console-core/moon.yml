@@ -34,6 +34,19 @@ tasks:
       - '/ts/packages/paigasus-discovery/package.json'
       - '/ts/packages/paigasus-proto/src/**/*'
       - '/ts/packages/paigasus-proto/package.json'
+      # SMA-634. @paigasus/console-core reads the kernel's source and, through it, the five
+      # COMMITTED wasm artifacts. There is deliberately no `deps` on a kernel task and no dependsOn
+      # edge: the artifacts are tracked files, so no console task compiles Rust. Inputs are the only
+      # thing that confers affectedness on Moon 2.5.3, so they are what makes a kernel edit re-run
+      # this package. The five artifact paths are named one by one, not as a `paigasus_wasm*` glob.
+      - '/ts/packages/paigasus-kernel/src/**/*'
+      - '/ts/packages/paigasus-kernel/package.json'
+      - '/rs/crates/bindings/paigasus-wasm/paigasus_wasm_bg.wasm'
+      - '/rs/crates/bindings/paigasus-wasm/paigasus_wasm_bg.js'
+      - '/rs/crates/bindings/paigasus-wasm/paigasus_wasm.js'
+      - '/rs/crates/bindings/paigasus-wasm/paigasus_wasm.d.ts'
+      - '/rs/crates/bindings/paigasus-wasm/paigasus_wasm_bg.wasm.d.ts'
+      - '/rs/crates/bindings/paigasus-wasm/package.json'
       # testing/ is a published subpath, not test-only scaffolding: both apps import it. It is
       # outside src/, so @group(sources) does not cover it.
       - 'testing/**/*'
@@ -53,6 +66,19 @@ tasks:
       - '/ts/packages/paigasus-discovery/package.json'
       - '/ts/packages/paigasus-proto/src/**/*'
       - '/ts/packages/paigasus-proto/package.json'
+      # SMA-634. @paigasus/console-core reads the kernel's source and, through it, the five
+      # COMMITTED wasm artifacts. There is deliberately no `deps` on a kernel task and no dependsOn
+      # edge: the artifacts are tracked files, so no console task compiles Rust. Inputs are the only
+      # thing that confers affectedness on Moon 2.5.3, so they are what makes a kernel edit re-run
+      # this package. The five artifact paths are named one by one, not as a `paigasus_wasm*` glob.
+      - '/ts/packages/paigasus-kernel/src/**/*'
+      - '/ts/packages/paigasus-kernel/package.json'
+      - '/rs/crates/bindings/paigasus-wasm/paigasus_wasm_bg.wasm'
+      - '/rs/crates/bindings/paigasus-wasm/paigasus_wasm_bg.js'
+      - '/rs/crates/bindings/paigasus-wasm/paigasus_wasm.js'
+      - '/rs/crates/bindings/paigasus-wasm/paigasus_wasm.d.ts'
+      - '/rs/crates/bindings/paigasus-wasm/paigasus_wasm_bg.wasm.d.ts'
+      - '/rs/crates/bindings/paigasus-wasm/package.json'
       # The parity corpus and the Rust constant the PRN reader is held to.
       - '/rs/crates/libs/paigasus-kernel-parity/vectors/**/*'
       - '/rs/crates/libs/paigasus-iam-core/src/authz/model.rs'
@@ -97,6 +123,19 @@ tasks:
       - '/ts/pnpm-lock.yaml'
       - '/ts/packages/paigasus-discovery/src/**/*'
       - '/ts/packages/paigasus-discovery/package.json'
+      # SMA-634. @paigasus/console-core reads the kernel's source and, through it, the five
+      # COMMITTED wasm artifacts. There is deliberately no `deps` on a kernel task and no dependsOn
+      # edge: the artifacts are tracked files, so no console task compiles Rust. Inputs are the only
+      # thing that confers affectedness on Moon 2.5.3, so they are what makes a kernel edit re-run
+      # this package. The five artifact paths are named one by one, not as a `paigasus_wasm*` glob.
+      - '/ts/packages/paigasus-kernel/src/**/*'
+      - '/ts/packages/paigasus-kernel/package.json'
+      - '/rs/crates/bindings/paigasus-wasm/paigasus_wasm_bg.wasm'
+      - '/rs/crates/bindings/paigasus-wasm/paigasus_wasm_bg.js'
+      - '/rs/crates/bindings/paigasus-wasm/paigasus_wasm.js'
+      - '/rs/crates/bindings/paigasus-wasm/paigasus_wasm.d.ts'
+      - '/rs/crates/bindings/paigasus-wasm/paigasus_wasm_bg.wasm.d.ts'
+      - '/rs/crates/bindings/paigasus-wasm/package.json'
     options:
       # A real container. A cached PASS would replay a green that tested nothing.
       cache: false
