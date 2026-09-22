@@ -81,11 +81,7 @@ async function corpus(dir) {
     same(`prnOrg(${row.prn})`, api.prnOrg(row.prn), row.org);
     same(`prnResourceType(${row.prn})`, api.prnResourceType(row.prn), row.resource_type);
     same(`prnResourceId(${row.prn})`, api.prnResourceId(row.prn), row.resource_id);
-    same(
-      `prnBuild(${row.prn})`,
-      api.prnBuild(row.service, row.region, row.org, row.resource_type, row.resource_id),
-      row.prn,
-    );
+    same(`prnBuild(${row.prn})`, api.prnBuild(row.service, row.region, row.org, row.resource_type, row.resource_id), row.prn);
   }
 
   if (failures.length > 0) {
