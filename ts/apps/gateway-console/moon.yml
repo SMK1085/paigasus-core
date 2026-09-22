@@ -77,6 +77,15 @@ tasks:
         echo "gateway-console: standalone entry point missing — output: 'standalone' did not take effect" >&2
         exit 1
       fi
+      # SMA-634. Turbopack bundles @paigasus/wasm into a server chunk, so the standalone tree must
+      # hold a REGULAR .wasm file. `-type f` without `-L`: a symlink here would mean the binary is
+      # reached outside the tree, which a container would not carry. No pipe into an early-exit
+      # reader (repo:actionlint check 13 scans this script).
+      chunks="$(find .next/standalone/apps/gateway-console/.next/server/chunks -type f -name '*paigasus_wasm_bg*.wasm' | wc -l | tr -d ' ')"
+      if [ "$chunks" -lt 1 ]; then
+        echo "gateway-console: no paigasus_wasm_bg*.wasm chunk in the standalone tree — the kernel's wasm binding was not bundled, and every (console) page would fail at module evaluation" >&2
+        exit 1
+      fi
       dest=.next/standalone/apps/gateway-console
       rm -rf "$dest/.next/static" "$dest/public"
       cp -R .next/static "$dest/.next/static"
