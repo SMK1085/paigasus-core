@@ -1,0 +1,15 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# SMA-634. The kernel's wasm binary is a tracked binary file, and its glue is generated.
+# `binary` keeps git from attempting a text diff or an end-of-line conversion, which also makes the
+# Windows checkout safe without git's NUL heuristic — prebuild.yml checks the tree out on
+# windows-latest.
+#
+# A rebase or merge conflict in these five files is NEVER resolved by hand: take either side, run
+# `moon run paigasus-kernel-ts:generate-wasm`, and commit its result. The drift gate then proves
+# that the five files agree with the Rust source.
+rs/crates/bindings/paigasus-wasm/paigasus_wasm_bg.wasm binary
+rs/crates/bindings/paigasus-wasm/paigasus_wasm_bg.js linguist-generated=true
+rs/crates/bindings/paigasus-wasm/paigasus_wasm.js linguist-generated=true
+rs/crates/bindings/paigasus-wasm/paigasus_wasm.d.ts linguist-generated=true
+rs/crates/bindings/paigasus-wasm/paigasus_wasm_bg.wasm.d.ts linguist-generated=true
