@@ -35,7 +35,8 @@ The build context is `rs/` (the Cargo workspace root). `.github/workflows/images
 requests that touch the build inputs (`rs/Cargo.lock`, `rs/Cargo.toml`, `rs/rust-toolchain.toml`,
 `rs/Dockerfile`, `rs/.dockerignore`, `ts/Dockerfile`, `ts/.dockerignore`, `ts/pnpm-lock.yaml`,
 `ts/pnpm-workspace.yaml`, `ts/package.json`, `ts/.npmrc`, `ts/apps/*/lib/config.ts`,
-`ts/apps/*/next.config.ts`, `ts/apps/*/package.json`, `ci/images/**`,
+`ts/apps/*/next.config.ts`, `ts/apps/*/package.json`, `ts/packages/paigasus-kernel/package.json`,
+`ci/images/**`,
 `.github/workflows/images.yml`, `.prototools`, `.proto/plugins/crane.toml`,
 `.proto/plugins/syft.toml`). **The workflow is not a required check**, so a broken image build
 reds `main` after merge rather than blocking the PR that broke it.

@@ -380,6 +380,13 @@ base_path_for() {
 # GitHub-hosted runner a bare `docker build` does not reliably route through the builder that
 # docker/setup-buildx-action made current (SMA-658, measured; see build_oci's comment). On this
 # development Mac `docker build` is itself an alias for buildx, so a local run cannot show the gap.
+# SMA-634: the console install now reaches @paigasus/kernel, whose two `file:` dependencies live
+# under rs/crates/bindings — outside the ts/ build context. They arrive through a NAMED context.
+# It is rooted at rs/crates/bindings, not at rs/: a sub-directory context carries no .dockerignore
+# of its own, so it needs no edit of rs/.dockerignore (which excludes **/*.wasm) and it cannot
+# upload rs/target/. The path is $ROOT-anchored, like every other path here, so the function does
+# not depend on the caller's working directory. Without the flag the build fails in a recognisable
+# way: `COPY --from=bindings` reads `bindings` as an image reference.
 build_console_one() {
   local service="$1" app base_path tag
   app="$(app_for "$service")"
@@ -390,6 +397,7 @@ build_console_one() {
     --progress=plain \
     --load \
     -f "$ROOT/ts/Dockerfile" \
+    --build-context "bindings=$ROOT/rs/crates/bindings" \
     --build-arg "APP=${app}" \
     --build-arg "BASE_PATH=${base_path}" \
     --label "org.opencontainers.image.title=paigasus-${app}" \
@@ -922,7 +930,7 @@ console.log(["public=" + (fs.existsSync(root + "/public") ? "1" : "0")].concat(r
 # `[ "$ec" -eq 0 ] && echo …` — a failing `[ ]` as the last top-level command would make the
 # function return 1 on its own.
 smoke_consoles() {
-  local service app base_path other name port origin status html chunk bytes code uid
+  local service app base_path other name port origin status html chunk bytes code uid console_status
   local run_out img_out img_public img_list host_public host_list img_dirs host_dirs
   local host_std host_static host_id run_rc sh_rc img_rc cstate hc_rc hc_out
   local ec=0 bad started
@@ -1063,6 +1071,23 @@ smoke_consoles() {
       else
         echo "  ${app}: HEALTHCHECK program /app/healthcheck.mjs exits 0"
       fi
+    fi
+
+    # SMA-634. A (console) route, which imports @paigasus/console-core and so evaluates the kernel's
+    # wasm. Module evaluation happens BEFORE the session redirect, so a wasm that cannot load gives
+    # 500 here while the public page above stays 200. Any non-500 answer passes: the route redirects
+    # to the IdP for an unauthenticated request, and this suite has no session.
+    if [ "$bad" -eq 0 ]; then
+      console_status="$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 --retry 5 --retry-delay 1 \
+        --retry-all-errors "${origin}${base_path}/orgs")" || console_status=""
+      case "$console_status" in
+        ''|5*)
+          echo "::error::${app}: ${base_path}/orgs answered '${console_status:-no response}' — a (console) route must not answer 5xx. The usual cause is the kernel's wasm chunk failing to load, which 500s every (console) page. Read 'docker logs ${name}'." >&2
+          docker logs "$name" 2>&1 | tail -30 >&2 || true
+          ec=1; bad=1
+          ;;
+        *) echo "  ${app}: ${base_path}/orgs answers ${console_status} (not 5xx)" ;;
+      esac
     fi
 
     html=""

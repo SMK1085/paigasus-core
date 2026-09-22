@@ -19,6 +19,13 @@ ARG BASE_PATH
 WORKDIR /build
 RUN corepack enable && corepack prepare pnpm@11.3.0 --activate
 COPY . /build/
+# SMA-634. WORKDIR is /build, which is ts/, so @paigasus/kernel's `file:` specifiers
+# (../../../rs/crates/bindings/…) resolve to /rs/crates/bindings/…. The two directories arrive
+# through the named context that ci/images/run.sh passes. NO Rust is compiled here: the wasm binary
+# and its glue are committed files, and the napi directory is copied only because the kernel
+# declares the dependency — the image never loads it.
+COPY --from=bindings paigasus-wasm /rs/crates/bindings/paigasus-wasm
+COPY --from=bindings paigasus-node-bindings /rs/crates/bindings/paigasus-node-bindings
 # --frozen-lockfile is required, not optional: an unlocked install can resolve versions the
 # committed ts/pnpm-lock.yaml does not name, and the published image would then not be built from
 # the committed lockfile with nothing saying so.
@@ -26,6 +33,11 @@ RUN pnpm install --frozen-lockfile --filter "@paigasus/${APP}..."
 RUN cd "apps/${APP}" && pnpm exec next build
 RUN test -f "apps/${APP}/.next/standalone/apps/${APP}/server.js" \
   || (echo "standalone entry point missing — output: 'standalone' did not take effect" >&2; exit 1)
+RUN set -eu; \
+    chunks="$(find "apps/${APP}/.next/standalone/apps/${APP}/.next/server/chunks" -type f -name '*paigasus_wasm_bg*.wasm' | wc -l | tr -d ' ')"; \
+    if [ "$chunks" -lt 1 ]; then \
+      echo "no paigasus_wasm_bg*.wasm chunk in the standalone tree — the kernel's wasm binding was not bundled" >&2; exit 1; \
+    fi
 RUN set -eu; \
     cd "apps/${APP}"; \
     manifest_base="$(sed -n 's/.*"basePath": *"\([^"]*\)".*/\1/p' .next/routes-manifest.json | sed -n 1p)"; \

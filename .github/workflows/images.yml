@@ -44,6 +44,9 @@ on:
       - 'ts/apps/*/lib/config.ts'
       - 'ts/apps/*/next.config.ts'
       - 'ts/apps/*/package.json'
+      # SMA-634: the kernel's `file:` dependency list. ts/Dockerfile's COPY list is hand-maintained
+      # against it, and only the Docker path reads it.
+      - 'ts/packages/paigasus-kernel/package.json'
       - 'ci/images/**'
       - '.github/workflows/images.yml'
       - '.prototools'
