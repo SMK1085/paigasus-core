@@ -3899,7 +3899,8 @@ def collect_findings(tasks, t_targets, raw_tasks, scripts, ci_yml, doc_targets, 
          "    Fix: restore the exact line; see RUN_SH_CALL_SITES, SELF_SCHEDULED_GATES,\n"
          "    ACTIONLINT_SH_CALL_SITES, RELEASE_PARITY_SH_CALL_SITES,\n"
          "    WORKFLOW_CREDENTIALS_SH_CALL_SITES, RELEASE_PLAN_SH_CALL_SITES and\n"
-         "    RUFF_SH_CALL_SITES in ci/affected-graph/ci_targets.py.\n"
+         "    RUFF_SH_CALL_SITES and HELM_RENDER_SH_CALL_SITES in\n"
+         "    ci/affected-graph/ci_targets.py.\n"
          "    A row prefixed `ci/actionlint/run.sh:` means repo:actionlint would run its checks\n"
          "    while asserting nothing — its self-tests or its mutation battery are no longer\n"
          "    invoked.\n"
@@ -3961,7 +3962,10 @@ def collect_findings(tasks, t_targets, raw_tasks, scripts, ci_yml, doc_targets, 
          "A self-scheduled gate's own `inputs` no longer match what it needs to see. This is the\n"
          "    second, independently-scheduled copy of an assertion that gate also makes about\n"
          "    itself — it exists so the gate is not the sole judge of its own configuration.\n"
-         "    Fix: restore `inputs: ['**/*']` on the task in moon.yml."),
+         "    Fix: restore the task's exact `inputs` list in moon.yml, so that it matches the\n"
+         "    task's entry in SELF_TASK_EXPECTED_GLOBS in ci/affected-graph/ci_targets.py.\n"
+         "    That is `inputs: ['**/*']` for a whole-tree gate, and the literal seven-entry\n"
+         "    list for repo:helm-render."),
         ("generate-inputs", bad_generate_inputs,
          "contracts:generate's inputs have drifted, so ci.yml's codegen-drift gate can serve a\n"
          "    cached pass and compare the committed generated code against itself (SMA-592).\n"
