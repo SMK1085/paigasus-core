@@ -372,6 +372,23 @@ base_path_for() {
   esac
 }
 
+# A route INSIDE that zone's `(console)` route group, relative to its basePath (SMA-634). It is the
+# one runtime proof that the image loads the kernel: the `(console)` layout imports
+# @paigasus/console-core, which evaluates the kernel's wasm at module scope.
+#
+# PER ZONE, and not `/orgs` for both. gateway-console has no `/orgs` page at all — its zone overview
+# is `(console)/overview/page.tsx`, and its only `orgs` routes are parameterised
+# (`orgs/[org]`). `/gateway/orgs` therefore answered 404, from the ROOT not-found, with the
+# `(console)` layout never evaluated — and the probe's old "any non-5xx passes" rule read that as a
+# pass. A zone added here needs a route of its own; there is no default on purpose.
+console_probe_path_for() {
+  case "$1" in
+    iam)     echo "/orgs" ;;
+    gateway) echo "/overview" ;;
+    *) echo "unknown console: $1" >&2; return 1 ;;
+  esac
+}
+
 # There is no --no-cache-filter here. That flag exists on build_one because rs/Dockerfile's
 # rootfs stage is byte-identical between services and BuildKit would cache-hit it, leaving the
 # second service's chisel manifest empty. Every stage in ts/Dockerfile references APP, so no
@@ -930,7 +947,7 @@ console.log(["public=" + (fs.existsSync(root + "/public") ? "1" : "0")].concat(r
 # `[ "$ec" -eq 0 ] && echo …` — a failing `[ ]` as the last top-level command would make the
 # function return 1 on its own.
 smoke_consoles() {
-  local service app base_path other name port origin status html chunk bytes code uid console_status
+  local service app base_path console_path other name port origin status html chunk bytes code uid console_status
   local run_out img_out img_public img_list host_public host_list img_dirs host_dirs
   local host_std host_static host_id run_rc sh_rc img_rc cstate hc_rc hc_out
   local ec=0 bad started
@@ -955,8 +972,9 @@ smoke_consoles() {
     # would abort the script there and cancel every remaining zone's rows.
     app="$(app_for "$service")" || app=""
     base_path="$(base_path_for "$service")" || base_path=""
-    if [ -z "$app" ] || [ -z "$base_path" ]; then
-      echo "::error::smoke_consoles: unknown console zone '${service}' — add it to app_for and base_path_for." >&2
+    console_path="$(console_probe_path_for "$service")" || console_path=""
+    if [ -z "$app" ] || [ -z "$base_path" ] || [ -z "$console_path" ]; then
+      echo "::error::smoke_consoles: unknown console zone '${service}' — add it to app_for, base_path_for and console_probe_path_for." >&2
       ec=1
       continue
     fi
@@ -1074,19 +1092,46 @@ smoke_consoles() {
     fi
 
     # SMA-634. A (console) route, which imports @paigasus/console-core and so evaluates the kernel's
-    # wasm. Module evaluation happens BEFORE the session redirect, so a wasm that cannot load gives
-    # 500 here while the public page above stays 200. Any non-500 answer passes: the route redirects
-    # to the IdP for an unauthenticated request, and this suite has no session.
+    # wasm. A wasm that cannot load 500s every `(console)` page while the public page above stays
+    # 200. This is the only runtime proof this suite has that a console image loads the kernel.
+    #
+    # ONLY A 3xx PASSES. The earlier rule — any non-5xx — accepted a 404, and a 404 is exactly the
+    # answer this probe must not trust: when the route is renamed or removed, Next answers from the
+    # ROOT not-found, the `(console)` layout never evaluates, and the probe reports success on a run
+    # that proved nothing. Deliberately no `-L`: the redirect is the assertion, and following it
+    # would reach the IdP and lose it.
+    #
+    # The route is PER ZONE, and it did not used to be. Both zones were probed at a hardcoded
+    # `/orgs`; gateway-console has no such page — its zone overview is `(console)/overview` and its
+    # only `orgs` routes are parameterised — so `/gateway/orgs` answered from the root not-found on
+    # every run, and that half of this check asserted nothing at all. See console_probe_path_for.
+    #
+    # RESIDUAL, MEASURED on this host, stated so a green here is not read as more than it is. The
+    # 3xx comes from proxy.ts's middleware, not from the route: proxy.ts gates the whole zone on
+    # cookie PRESENCE (ADR-0017 decision 7) and deliberately imports no @paigasus/console-core, so a
+    # cookie-less request is turned back before Next routes it and before any kernel code runs. A
+    # path that does NOT exist answers 307 here too (measured with `/gateway/orgs`). So this probe
+    # rejects a plain 404 and a 500, but it still does not prove the `(console)` layout evaluated.
+    #
+    # The obvious fix does not work in THIS suite, and here is the measurement, so the next person
+    # does not spend the run finding out again. Sending a forged `__Host-pgs_sid` cookie does carry
+    # the request past the middleware — the absent-path control answered 404, the real route did
+    # not — but every `(console)` route then answered 500, from
+    # `AuthConfigError: PAIGASUS_SESSION_STORE cannot be "memory" when PAIGASUS_ZONES declares more
+    # than one zone`, thrown in `authRuntime` before the page renders. A wasm failure 500s the same
+    # way, so the two are not distinguishable by status. Closing this residual means giving the
+    # smoke containers a session store they can actually use, which is a change to CONSOLE_SMOKE_ENV
+    # and to what this suite deploys, not a change to this probe.
     if [ "$bad" -eq 0 ]; then
       console_status="$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 --retry 5 --retry-delay 1 \
-        --retry-all-errors "${origin}${base_path}/orgs")" || console_status=""
+        --retry-all-errors "${origin}${base_path}${console_path}")" || console_status=""
       case "$console_status" in
-        ''|5*)
-          echo "::error::${app}: ${base_path}/orgs answered '${console_status:-no response}' — a (console) route must not answer 5xx. The usual cause is the kernel's wasm chunk failing to load, which 500s every (console) page. Read 'docker logs ${name}'." >&2
+        3??) echo "  ${app}: ${base_path}${console_path} redirects (${console_status}) — the route exists and nothing 500s" ;;
+        *)
+          echo "::error::${app}: ${base_path}${console_path} answered '${console_status:-no response}' — a (console) route must redirect an unauthenticated request (3xx). A 5xx is usually the kernel's wasm chunk failing to load, which 500s every (console) page. A 404 means the route is gone: Next then answers from the ROOT not-found, the (console) layout never evaluates, and nothing here proves the kernel loads — add the zone's route to console_probe_path_for. Read 'docker logs ${name}'." >&2
           docker logs "$name" 2>&1 | tail -30 >&2 || true
           ec=1; bad=1
           ;;
-        *) echo "  ${app}: ${base_path}/orgs answers ${console_status} (not 5xx)" ;;
       esac
     fi
 
