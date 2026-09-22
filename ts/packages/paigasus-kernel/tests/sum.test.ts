@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import { describe, expect, it } from 'vitest';
-import { sum } from '@paigasus/kernel';
+import { sum } from '@paigasus/kernel/napi';
 import { cases } from './corpus';
 
 describe('kernel FFI parity (napi)', () => {

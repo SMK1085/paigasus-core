@@ -330,10 +330,10 @@ jobs:
 
       # A THIRD scratch dir. wasm-pack CLEANS --out-dir and deletes package.json, so it must
       # never run in the crate root (see that crate's .gitignore). ts/packages/paigasus-kernel's
-      # build task owns .wasmpack-out and its test task owns .wasmpack-test-out; this needs its
-      # own name so a concurrent moon ci cannot race it. The wasm32-unknown-unknown target is
-      # already provisioned by the "Install Moon-managed toolchains" step above (declared in
-      # .moon/toolchains.yml's rust.targets), so no `rustup target add` is needed here.
+      # generate-wasm task owns .wasmpack-out and its test task owns .wasmpack-test-out (SMA-634);
+      # this needs its own name so a concurrent moon ci cannot race it. The wasm32-unknown-unknown
+      # target is already provisioned by the "Install Moon-managed toolchains" step above (declared
+      # in .moon/toolchains.yml's rust.targets), so no `rustup target add` is needed here.
       - name: Build the wasm distribution
         run: |
           set -euo pipefail

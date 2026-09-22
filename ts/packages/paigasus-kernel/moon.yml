@@ -31,20 +31,13 @@ tasks:
   # `uv sync --reinstall-package`. `touch` is host-agnostic (CI is Linux, dev is macOS); a per-triple
   # `cargo clean --target <triple>` would have to know the host triple, so we avoid it.
   #
-  # wasm-pack runs from INSIDE the crate dir (`cd ... && wasm-pack build .`), NOT via a path arg from
-  # here: rs/rust-toolchain.toml's `1.95.0` override only applies under rs/, so running wasm-pack from
-  # this ts cwd would resolve rustup's DEFAULT toolchain (on CI, the runner's stable — which lacks the
-  # wasm32 target and is off our pinned toolchain). cwd inside the crate pins wasm-pack's rustup/cargo
-  # to 1.95.0, where CI pre-installs the wasm32 target serially (.github/workflows/ci.yml) — so its
-  # "Checking for the Wasm target" finds it present and the parallel build+test wasm-pack invocations
-  # don't race two concurrent `rustup target add` (SMA-427 CI fix). `--out-dir` stays relative to the
-  # crate, so the glue still lands in the crate dir; the subshell reverts cwd for the copy-back.
-  #
-  # `-- --locked` reaches the `cargo build` wasm-pack forwards to, but wasm-pack makes its own
-  # unlocked cargo call BEFORE that build and repairs an inconsistent lock there first — so this
-  # task cannot guarantee a locked resolution (measured, SMA-601).
+  # SMA-634: this task no longer runs wasm-pack and no longer writes the crate directory. The five
+  # wasm artifacts are committed, and `paigasus-kernel-ts:generate-wasm` is their only writer. The
+  # wasm inputs stay: `napi build` keeps this an FFI task, so A7 demands the dependsOn closure's
+  # sources and manifests, and `tsc` reads the committed paigasus_wasm.d.ts through
+  # src/binding-parity.types.ts.
   build:
-    script: 'touch ../../../rs/crates/libs/paigasus-kernel/src/lib.rs ../../../rs/crates/bindings/paigasus-node-bindings/src/lib.rs ../../../rs/crates/bindings/paigasus-wasm/src/lib.rs && pnpm exec napi build --platform --cwd ../../../rs/crates/bindings/paigasus-node-bindings && ( cd ../../../rs/crates/bindings/paigasus-wasm && wasm-pack build . --target bundler --release --no-pack --out-dir .wasmpack-out --out-name paigasus_wasm -- --locked ) && cp ../../../rs/crates/bindings/paigasus-wasm/.wasmpack-out/paigasus_wasm* ../../../rs/crates/bindings/paigasus-wasm/ && rm -rf ../../../rs/crates/bindings/paigasus-wasm/.wasmpack-out && pnpm exec tsc -p tsconfig.json --noEmit'
+    script: 'touch ../../../rs/crates/libs/paigasus-kernel/src/lib.rs ../../../rs/crates/bindings/paigasus-node-bindings/src/lib.rs ../../../rs/crates/bindings/paigasus-wasm/src/lib.rs && pnpm exec napi build --platform --cwd ../../../rs/crates/bindings/paigasus-node-bindings && pnpm exec tsc -p tsconfig.json --noEmit'
     deps: ['^:build']
     inputs:
       - 'src/**/*'
@@ -106,9 +99,6 @@ tasks:
       # declared output exists on EVERY host — a hardcoded triple fails Moon's output check on Linux.
       # Cross-platform prebuild matrix + publish still deferred (ADR-0006 / SMA-376/407).
       - '/rs/crates/bindings/paigasus-node-bindings/paigasus-node-bindings.*.node'
-      # The wasm binary is gitignored (the JS/.d.ts glue is committed) — declare only it as an
-      # output (mirror napi; M3); the glue files are tracked and not Moon-managed artifacts.
-      - '/rs/crates/bindings/paigasus-wasm/paigasus_wasm_bg.wasm'
   # Rebuild the .node fresh (cache-bust on a Rust edit, review F4), THEN run vitest. The py
   # analog (`uv sync --reinstall-package … && pytest`) refreshes the INSTALLED artifact; here the
   # freshness fix is split: `napi build` rewrites the crate-dir .node, and vitest.config.ts aliases

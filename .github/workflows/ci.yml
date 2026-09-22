@@ -131,11 +131,10 @@ jobs:
       # already present.
       #
       # Same race for the wasm32 target (SMA-427): `wasm-pack build` runs `rustup target add
-      # wasm32-unknown-unknown` itself ("Checking for the Wasm target…"), and kernel-ts's `build` and
-      # `test` tasks both invoke wasm-pack concurrently → two `rustup target add` race the same
-      # ~/.rustup/downloads/ and one dies with the same rename error. `.moon/toolchains.yml`
-      # `rust.targets` does NOT prevent this (wasm-pack re-checks/installs into the rust-toolchain.toml
-      # toolchain regardless), so materialize the target here too, serially, before the parallel graph.
+      # wasm32-unknown-unknown` itself ("Checking for the Wasm target…"). Since SMA-634 only
+      # kernel-ts's `test` task invokes wasm-pack in CI (`generate-wasm` is runInCI: false), but the
+      # serial pre-install stays: it also covers a future second caller, and the components race
+      # above is unrelated to wasm.
       - name: Pre-install Rust components + wasm32 target (serial — avoid rustup concurrent-download races)
         working-directory: rs
         run: |

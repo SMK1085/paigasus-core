@@ -12,13 +12,13 @@ import wasm from 'vite-plugin-wasm';
 const nodeBindingDir = fileURLToPath(new URL('../../../rs/crates/bindings/paigasus-node-bindings/index.js', import.meta.url));
 const wasmBindingDir = fileURLToPath(new URL('../../../rs/crates/bindings/paigasus-wasm/.wasmpack-test-out/paigasus_wasm.js', import.meta.url));
 
-// The browser project must load @paigasus/kernel's `browser` export (src/wasm.ts → @paigasus/wasm),
-// but vitest forces `node` into resolve.conditions for an `environment: 'node'` run, and the kernel's
-// self-referencing exports map declares `node` first — so condition order alone resolves the package
-// to src/index.ts (the napi path). Alias @paigasus/kernel straight to its browser-export entry so the
-// round-trip provably crosses the WASM boundary (src/wasm.ts is exactly what the `browser` condition
-// points at); @paigasus/wasm under it is then aliased to the fresh scratch glue (SMA-427 M4).
-const kernelWasmEntry = fileURLToPath(new URL('./src/wasm.ts', import.meta.url));
+// The browser project resolves @paigasus/kernel through the package's own exports map, which since
+// SMA-634 points `.` at src/wasm.ts under every condition — so no alias is needed for the kernel
+// itself. @paigasus/wasm under it is still aliased to this task's fresh scratch glue, because pnpm
+// does not refresh its `file:` copy after a rebuild (SMA-420, SMA-427 M4).
+//
+// The additive condition list stays: dropping module/import/default breaks source-exports `.ts`
+// resolution for every @paigasus/* package (SMA-427 M4, CLAUDE.md).
 
 export default defineConfig({
   test: {
@@ -59,10 +59,7 @@ export default defineConfig({
         },
         resolve: {
           conditions: ['browser', 'module', 'import', 'default'],
-          alias: {
-            '@paigasus/kernel': kernelWasmEntry,
-            '@paigasus/wasm': wasmBindingDir,
-          },
+          alias: { '@paigasus/wasm': wasmBindingDir },
         },
       },
     ],
