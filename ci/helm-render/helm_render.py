@@ -316,6 +316,42 @@ def check1(label, docs, enabled, paths, slugs):
     return [_row(f"1.1 {label}", coupling), _row(f"1.2 {label}", routing), _row(f"1.3 {label}", membership)]
 
 
+# --------------------------------------------------------------------------- check 2
+
+
+def _strings(node, path="$"):
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if isinstance(key, str):
+                yield f"{path} (key)", key
+            yield from _strings(value, f"{path}.{key}")
+    elif isinstance(node, list):
+        for i, value in enumerate(node):
+            yield from _strings(value, f"{path}[{i}]")
+    elif isinstance(node, str):
+        yield path, node
+
+
+def check2(docs, raw, disabled="gateway"):
+    needles = {disabled, SENTINEL_HOST.lower()} | {v.lower() for k, v in STUB_VALUES if k.startswith(f"zones.{disabled}.")}
+
+    def body():
+        problems = []
+        for i, doc in enumerate(docs):
+            for where, text in _strings(doc, f"doc[{i}]"):
+                hits = sorted(n for n in needles if n in text.lower())
+                if hits:
+                    problems.append(f"{where} = {text!r} contains {hits}")
+        # The raw text too: a comment is not a YAML string, and a zone id leaked into one is still
+        # a trace (ingress.yaml writes its comments per zone for this reason).
+        raw_hits = sorted(n for n in needles if n in raw.lower())
+        if raw_hits and not problems:
+            problems.append(f"the raw render contains {raw_hits} outside any YAML string (a comment?)")
+        return problems
+
+    return _row("2", body)
+
+
 # --------------------------------------------------------------------------- run
 
 
@@ -335,6 +371,8 @@ def run_checks(chart):
         raw = helm_template(chart, enabled)
         docs = parse_docs(raw)
         rows += check1(label, docs, enabled, paths, slugs)
+        if enabled == ("iam",):
+            rows.append(check2(docs, raw))
     return rows
 
 
@@ -554,6 +592,17 @@ def self_test():
     expect("check1a proto has a slug the chart lacks", [check1a({"iam"}, slugs, state_ok, cap_ok)], fail=("1a",))
     expect("check1a state.ts line changed", [check1a(slugs, slugs, state_ok.replace("indexOf", "lastIndexOf"), cap_ok)], fail=("1a",))
     expect("check1a capability.ts line changed", [check1a(slugs, slugs, state_ok, cap_ok.replace("'.'", "'-'"))], fail=("1a",))
+
+    # ---- check 2
+    clean = synthetic(iam_only)
+    expect("check2 clean iam-only render", [check2(clean, "kind: ConfigMap\n")], passing=("2",))
+    leaked = synthetic(iam_only)
+    _configmap_with(leaked, "PAIGASUS_IAM_GRPC_URL")["data"]["PAIGASUS_UPSTREAM_URL"] = SENTINEL_URL
+    expect("check2 sentinel value leaked", [check2(leaked, "")], fail=("2",))
+    keyed = synthetic(iam_only)
+    _configmap_with(keyed, "PAIGASUS_IAM_GRPC_URL")["data"]["X_GATEWAY_Y"] = "1"
+    expect("check2 zone id in a KEY, upper case", [check2(keyed, "")], fail=("2",))
+    expect("check2 zone id in a comment only", [check2(clean, "# serves /gateway too\n")], fail=("2",))
 
     # ---- the exit-code contract and the parser's infrastructure errors
     if report([Row("x", True)], io.StringIO()) != 0 or report([Row("x", True), Row("y", False, "bad")], io.StringIO()) != 3:
