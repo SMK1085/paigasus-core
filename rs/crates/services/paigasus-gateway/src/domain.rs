@@ -124,14 +124,18 @@ mod tests {
         Ok(prn.to_owned())
     }
 
+    /// A single `resolve_org_table` row: a case name, the header, the caller's `node_prns`, and
+    /// the expected canonical-PRN-or-error result. Named so `resolve_org_table` needs no
+    /// `#[allow(clippy::type_complexity)]` — the alias, not an allow, is what clippy wants here.
+    type Case<'a> = (&'a str, OrgHeader<'a>, Vec<&'a str>, Result<String, OrgResolutionError>);
+
     /// SMA-635 spec §4.2: every `OrgHeader` arm, a Root grant, another service, a PRN that does
     /// not parse, and duplicates of one org. Review Focus 2: an upper-case UUID gives the
     /// lower-case canonical PRN, and two spellings of one org count as ONE org.
     #[test]
-    #[allow(clippy::type_complexity)]
     fn resolve_org_table() {
         let upper = A.to_uppercase();
-        let cases: Vec<(&str, OrgHeader<'_>, Vec<&str>, Result<String, OrgResolutionError>)> = vec![
+        let cases: Vec<Case<'_>> = vec![
             ("one_valid", OrgHeader::One(A), vec![], ok(A_PRN)),
             ("one_uppercase", OrgHeader::One(&upper), vec![], ok(A_PRN)),
             ("one_ignores_grants", OrgHeader::One(A), vec![B_PRN], ok(A_PRN)),
@@ -150,6 +154,12 @@ mod tests {
             (
                 "one_urn",
                 OrgHeader::One("urn:uuid:0190a100-0000-7000-8000-0000000000a1"),
+                vec![A_PRN],
+                Err(OrgResolutionError::InvalidOrgHeader),
+            ),
+            (
+                "one_whitespace_padded",
+                OrgHeader::One(" 0190a100-0000-7000-8000-0000000000a1 "),
                 vec![A_PRN],
                 Err(OrgResolutionError::InvalidOrgHeader),
             ),
@@ -172,6 +182,33 @@ mod tests {
         for (name, header, prns, want) in cases {
             let got = resolve_org(header, &prns).map(|prn| prn.canonical());
             assert_eq!(got, want, "{name}");
+        }
+    }
+
+    /// Pins `parse_org_uuid` (domain.rs), a copy of the kernel's private UUID rule
+    /// (`resource_name.rs:101-107`, `parse_uuid_field`), to the kernel's own behavior. The kernel
+    /// rule is private, so it cannot be called directly; instead, for each input, `resolve_org`
+    /// must accept a `One(input)` header exactly when the kernel's own `Prn::parse` accepts the
+    /// same string in the resource-id position of an `organization` PRN. If the kernel rule ever
+    /// changes and this copy does not, this test fails on the input that now disagrees, naming it.
+    #[test]
+    fn parse_org_uuid_matches_kernel_uuid_rule() {
+        let upper = A.to_uppercase();
+        let inputs: &[&str] = &[
+            A,
+            &upper,
+            "0190a1000000700080000000000000a1",
+            "{0190a100-0000-7000-8000-0000000000a1}",
+            "urn:uuid:0190a100-0000-7000-8000-0000000000a1",
+            " 0190a100-0000-7000-8000-0000000000a1",
+            "0190a100-0000-7000-8000-0000000000a1 ",
+            "",
+            "not-a-uuid",
+        ];
+        for input in inputs {
+            let ours = resolve_org(OrgHeader::One(input), &[]).is_ok();
+            let kernel = Prn::parse(&format!("prn:pgs:iam:::organization/{input}")).is_ok();
+            assert_eq!(ours, kernel, "input {input:?}: gateway said {ours}, kernel said {kernel}");
         }
     }
 }
