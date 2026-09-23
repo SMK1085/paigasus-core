@@ -1,0 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Phase B overlay (spec § 4.5): `helm upgrade -f a.yaml -f b.yaml`. It holds only the change.
+zones:
+  gateway:
+    enabled: false
