@@ -1,0 +1,155 @@
+# SPDX-License-Identifier: Apache-2.0
+name: chart
+
+on:
+  workflow_dispatch:
+
+  # POST-merge. Broad paths, so a regression anywhere in the code this job tests starts a run.
+  push:
+    branches:
+      - main
+    paths:
+      - 'rs/**'
+      - 'ts/**'
+      - 'charts/**'
+      - 'ci/kind/**'
+      - 'ci/images/**'
+      - 'ci/helm-render/**'
+      - '.prototools'
+      - '.proto/plugins/helm.toml'
+      - '.github/workflows/chart.yml'
+
+  # PRE-merge: only this job's own inputs, so a console PR does not pay for a cold --release IAM
+  # build (the SMA-520 reason in images.yml). Any other PR can start the job by hand:
+  # `gh workflow run chart.yml --ref <branch>`.
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'charts/**'
+      - 'ci/kind/**'
+      - 'ts/apps/iam-console/tests/cluster/**'
+      - '.github/workflows/chart.yml'
+
+# Nothing is pushed and nothing is published: kind loads the images locally (parent spec § 11).
+permissions:
+  contents: read
+
+concurrency:
+  # `event_name` is in the GROUP so a manual dispatch cannot cancel a running push job.
+  group: chart-${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  kind:
+    name: kind install + upgrade (amd64)
+    # NOT a required check (spec § 7): a broken chart reds main, the same trade images.yml makes.
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      # SMA-609: every captured shim output must set this.
+      PROTO_REPORTER: text
+    steps:
+      # Same reclaim as images.yml: this job builds IAM in --release on a ~14 GB disk.
+      - name: Reclaim runner disk (drop unused preinstalled toolchains)
+        run: |
+          df -h /
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup \
+            /opt/hostedtoolcache/CodeQL || true
+          sudo docker image prune --all --force > /dev/null 2>&1 || true
+          df -h /
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      # ci/images/run.sh builds with `docker buildx build --load`, measured under this builder in
+      # images.yml.
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069  # v4.4.1
+
+      - name: Set up proto (pinned via .prototools)
+        uses: moonrepo/setup-toolchain@261c62cb5b0f580c7be7c8cd0f023a2e96756095  # v0
+        with:
+          cache: false
+
+      # Narrow installs: this job needs only these three.
+      - name: Install helm, node and pnpm
+        run: |
+          proto install helm
+          proto install node
+          proto install pnpm
+
+      - name: Resolve the pnpm store path
+        id: cache-paths
+        run: echo "pnpm-store=$(pnpm store path)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache pnpm store
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ${{ steps.cache-paths.outputs.pnpm-store }}
+          key: pnpm-${{ runner.os }}-${{ hashFiles('ts/pnpm-lock.yaml') }}
+          restore-keys: |
+            pnpm-${{ runner.os }}-
+
+      - name: Install JS workspace dependencies
+        run: pnpm --dir ts install --frozen-lockfile
+
+      # From the PACKAGE: `playwright` is only on that package's node_modules/.bin (ci.yml).
+      - name: Install Playwright Chromium
+        run: pnpm --dir ts/apps/iam-console exec playwright install --with-deps chromium
+
+      # kind v0.31.0 is the newest kind with a Kubernetes 1.31 node image (the golden files render
+      # for 1.31.0); kubectl matches the node's minor. No cluster here: run.sh up makes it.
+      - name: Install kind and kubectl
+        uses: helm/kind-action@06c1ae10762d3b9c1644e7fe69596ae519e015a2  # v1.15.0
+        with:
+          install_only: true
+          version: v0.31.0
+          kubectl_version: v1.31.14
+
+      - name: Cluster up (kind, Traefik, CA, CoreDNS, Postgres, Redis, Keycloak, preflight)
+        timeout-minutes: 15
+        run: bash ci/kind/run.sh up
+
+      - name: Build and load the three images
+        timeout-minutes: 25
+        run: bash ci/kind/run.sh images
+
+      - name: helm install (phase A, both zones)
+        timeout-minutes: 12
+        run: bash ci/kind/run.sh install a
+
+      - name: Specs, phase A (R1, R1-control, R2, R3-control)
+        timeout-minutes: 10
+        run: bash ci/kind/run.sh specs a
+
+      - name: helm upgrade (phase B, gateway zone off) and settle
+        timeout-minutes: 12
+        run: bash ci/kind/run.sh upgrade b
+
+      - name: Specs, phase B (R3)
+        timeout-minutes: 8
+        run: bash ci/kind/run.sh specs b
+
+      # `cancelled()` too: a step or job timeout cancels, and a hang is when evidence matters most.
+      - name: Collect evidence
+        if: failure() || cancelled()
+        timeout-minutes: 5
+        run: bash ci/kind/run.sh diagnose
+
+      - name: Upload evidence
+        if: failure() || cancelled()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: kind-evidence
+          path: ${{ runner.temp }}/paigasus-kind/diagnose
+          if-no-files-found: warn
+          # Short: the Playwright traces hold the per-run (throwaway) password.
+          retention-days: 7
+
+      - name: Cluster down
+        if: always()
+        timeout-minutes: 5
+        run: bash ci/kind/run.sh down

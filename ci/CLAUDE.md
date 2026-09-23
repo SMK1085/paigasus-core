@@ -169,7 +169,7 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   `workflow_credentials.py` exits **3** for an assertion failure, and `run.sh` maps 3 -> 1 and
   everything else -> 2. `uv` itself exits 1 on a failed resolution, so a shared code would let
   a PyPI outage read as "a workflow declares a credential". Do not "normalize" the checker to 1.
-  `EXPECTED_PR_SUBJECTS` is a **hand-maintained strict-equality** pin of the five subject
+  `EXPECTED_PR_SUBJECTS` is a **hand-maintained strict-equality** pin of the seven subject
   filenames — a new `pull_request`-triggered workflow reds this gate until someone adds it,
   which is the point, so re-baseline it deliberately rather than loosening the comparison.
 - **Standing rule: Registration is seven obligations. Only T-membership, the CLAUDE.md mirror

@@ -282,6 +282,7 @@ PR_TRIGGERS = frozenset({"pull_request", "pull_request_target", "issue_comment"}
 # reason: a stale list silently SHRINKS the gate rather than reporting red. A new
 # credential-bearing-trigger workflow reds here until someone adds it, deliberately. (spec §5.2)
 EXPECTED_PR_SUBJECTS = (
+    "chart.yml",
     "ci.yml",
     "cla-retrigger.yml",
     "images.yml",
