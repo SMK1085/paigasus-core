@@ -130,6 +130,10 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   re-runs it only for a file in its `sources` or `tests` group (or one of its config inputs), so a
   new top-level app directory needs a line in `sources`, or an edit to it serves a cached lint PASS.
   The same holds for a top-level app file such as `playwright.config.ts`.
+- The console image rules live in two places already; do not copy them here: the static-asset
+  staging rule is `docs/ops/RUNBOOK-containers.md:364-369`, and the exec-form `ENTRYPOINT`/`HEALTHCHECK`
+  rule (no `ARG`/`ENV` expansion) is `rs/CLAUDE.md:207` and `docs/ops/RUNBOOK-containers.md:317-322`.
+  The kind-only specs in `apps/iam-console/tests/cluster/` run only from `ci/kind/run.sh specs a|b`.
 
 ## Auth, sessions and the console packages
 

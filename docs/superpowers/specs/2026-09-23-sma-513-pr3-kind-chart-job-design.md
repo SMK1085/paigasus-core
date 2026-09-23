@@ -112,7 +112,7 @@ answers 503 while it migrates.
 
 `ci/helm-render/run.sh:33` holds `CHART_SCRIPT_FLOOR=6`, and
 `ci/affected-graph/ci_targets.py:1407` pins that literal line (`HELM_RENDER_SH_CALL_SITES`,
-substring match). A change to one without the other reds `repo:affected-smoke`.
+stripped whole-line match). A change to one without the other reds `repo:affected-smoke`.
 
 ---
 
