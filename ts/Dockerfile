@@ -19,6 +19,24 @@ ARG BASE_PATH
 WORKDIR /build
 RUN corepack enable && corepack prepare pnpm@11.3.0 --activate
 COPY . /build/
+# SMA-634. WORKDIR is /build, which is ts/, so @paigasus/kernel's `file:` specifiers
+# (../../../rs/crates/bindings/…) resolve to /rs/crates/bindings/…. The named context supplies
+# only TRACKED files, named one by one rather than as whole directories, so a local build
+# artifact can never enter the image: this crate directory can hold an untracked, gitignored
+# `paigasus-node-bindings.*.node` left by a prior `napi build`, which does not exist on a fresh
+# CI checkout, and a whole-directory COPY would have picked it up on a machine that has one. NO
+# Rust is compiled here and no compiler is in this stage. paigasus-wasm's five files are exactly
+# its committed, consumer-facing artifacts (its package.json `files` list); paigasus-node-bindings
+# needs only its manifest and loader glue (`index.js`/`index.d.ts`) to let pnpm RESOLVE the
+# `file:` dependency — no console imports the napi entry (`@paigasus/kernel`'s `./napi` export),
+# so the `.node` binary itself is never needed in this image.
+COPY --from=bindings paigasus-wasm/package.json paigasus-wasm/paigasus_wasm.js \
+  paigasus-wasm/paigasus_wasm_bg.js paigasus-wasm/paigasus_wasm_bg.wasm \
+  paigasus-wasm/paigasus_wasm.d.ts paigasus-wasm/paigasus_wasm_bg.wasm.d.ts \
+  /rs/crates/bindings/paigasus-wasm/
+COPY --from=bindings paigasus-node-bindings/package.json paigasus-node-bindings/index.js \
+  paigasus-node-bindings/index.d.ts \
+  /rs/crates/bindings/paigasus-node-bindings/
 # --frozen-lockfile is required, not optional: an unlocked install can resolve versions the
 # committed ts/pnpm-lock.yaml does not name, and the published image would then not be built from
 # the committed lockfile with nothing saying so.
@@ -26,6 +44,11 @@ RUN pnpm install --frozen-lockfile --filter "@paigasus/${APP}..."
 RUN cd "apps/${APP}" && pnpm exec next build
 RUN test -f "apps/${APP}/.next/standalone/apps/${APP}/server.js" \
   || (echo "standalone entry point missing — output: 'standalone' did not take effect" >&2; exit 1)
+RUN set -eu; \
+    chunks="$(find "apps/${APP}/.next/standalone/apps/${APP}/.next/server/chunks" -type f -name '*paigasus_wasm_bg*.wasm' | wc -l | tr -d ' ')"; \
+    if [ "$chunks" -lt 1 ]; then \
+      echo "no paigasus_wasm_bg*.wasm chunk in the standalone tree — the kernel's wasm binding was not bundled" >&2; exit 1; \
+    fi
 RUN set -eu; \
     cd "apps/${APP}"; \
     manifest_base="$(sed -n 's/.*"basePath": *"\([^"]*\)".*/\1/p' .next/routes-manifest.json | sed -n 1p)"; \

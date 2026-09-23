@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import { describe, expect, it } from 'vitest';
-import { prnBuild, prnOrg, prnRegion, prnResourceId, prnResourceType, prnService } from '@paigasus/kernel';
+import { prnBuild, prnOrg, prnRegion, prnResourceId, prnResourceType, prnService } from '@paigasus/kernel/napi';
 import { prnFieldsCases } from './corpus';
 
 describe('kernel PRN fields + build parity (napi)', () => {

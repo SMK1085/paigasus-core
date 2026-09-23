@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import { describe, expect, it } from 'vitest';
-import { prnCedarEntityId, prnCedarEntityType } from '@paigasus/kernel';
+import { prnCedarEntityId, prnCedarEntityType } from '@paigasus/kernel/napi';
 import { prnCedarCases } from './corpus';
 
 describe('kernel PRN→Cedar parity (napi)', () => {

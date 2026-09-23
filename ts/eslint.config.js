@@ -25,6 +25,20 @@ export default tseslint.config(
     files: ['tooling/**/*.{js,mjs,cjs,ts}'],
     languageOptions: { globals: { process: 'readonly', console: 'readonly' } },
   },
+  // Plain-Node ESM INSIDE a package: a build script (packages/*/scripts) and a test probe that must
+  // run under bare `node` rather than under vitest (packages/*/tests). Same case as tooling/ above —
+  // outside the typed graph, so `js.configs.recommended` alone flags `process` as `no-undef`
+  // (SMA-634: 33 errors across generate-wasm.mjs and wasm-probe.mjs).
+  //
+  // `.mjs` ONLY, and only these two directories. A package's `.ts` files are covered by the
+  // type-checked block below, which brings their globals with the program, and widening this to
+  // `packages/**` or to `.ts` would hand Node globals to library and browser code that must not
+  // have them. The list holds exactly the globals the two files use; a fourth one is a fourth
+  // deliberate entry, not an automatic grant.
+  {
+    files: ['packages/*/scripts/**/*.mjs', 'packages/*/tests/**/*.mjs'],
+    languageOptions: { globals: { process: 'readonly', URL: 'readonly', WebAssembly: 'readonly' } },
+  },
   // Type-checked rules only on TS files. JS config files (eslint.config.js itself,
   // .prettierrc.js, next.config.ts) without a tsconfig entry would otherwise fail
   // projectService resolution.

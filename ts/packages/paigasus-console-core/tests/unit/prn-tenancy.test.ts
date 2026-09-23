@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// src/prn-tenancy.ts against the kernel (SMA-511 spec § 4.7, decision D6). The corpus rows are the SAME
-// vectors every kernel binding replays (rs/crates/libs/paigasus-kernel-parity/vectors/), so a reader
-// that drifts from the Rust grammar fails here. This suite tests the INTERFACE, so it is the same for
-// both implementations of src/prn-tenancy.ts (the kernel wasm binding, or the fallback reader).
+// src/prn-tenancy.ts against the kernel (SMA-511 spec § 4.7, decision D6; SMA-634). The corpus rows
+// are the SAME vectors every kernel binding replays (rs/crates/libs/paigasus-kernel-parity/vectors/),
+// so a reader that drifts from the Rust grammar fails here. This suite tests the INTERFACE of the
+// adapter over `@paigasus/kernel`. It cannot tell that adapter from the hand-written reader it
+// replaced: both pass every row. tests/unit/prn-tenancy-delegation.test.ts is what tells them apart.
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
@@ -153,5 +154,19 @@ describe('the builders', () => {
     expect(() => organizationPrn('x')).toThrow(TypeError);
     expect(() => teamPrn(ORG, '../x')).toThrow(TypeError);
     expect(() => projectPrn('x', TEAM)).toThrow(TypeError);
+  });
+});
+
+describe('the module holds no PRN grammar of its own', () => {
+  // A companion to prn-tenancy-delegation.test.ts: that file proves the kernel decides, and this
+  // one keeps the mechanical grammar calls of the old reader from coming back.
+  const source = read('ts/packages/paigasus-console-core/src/prn-tenancy.ts');
+
+  it('imports the kernel', () => {
+    expect(source).toMatch(/from '@paigasus\/kernel'/);
+  });
+
+  it.each(['.split(', '.indexOf(', '.slice('])('does not call %s', (call) => {
+    expect(source).not.toContain(call);
   });
 });

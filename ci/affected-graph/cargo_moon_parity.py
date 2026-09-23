@@ -432,6 +432,12 @@ ALLOW_UNLOCKED_CARGO = {
         "build — but it does not lock the task."
     ),
     "paigasus-kernel-ts:test": "as paigasus-kernel-ts:build",
+    "paigasus-kernel-ts:generate-wasm": (
+        "as paigasus-kernel-ts:build — it reaches cargo through `wasm-pack build ... -- --locked`, "
+        "and wasm-pack makes its OWN unlocked cargo call before that build and repairs the lock "
+        "there (measured, SMA-601). SMA-634 made this task the only writer of the committed wasm "
+        "artifacts; it is runInCI: false, so CI never runs it, but A8 reads the declaration."
+    ),
     "paigasus-kernel-py:test": (
         "reaches cargo through `uv sync --reinstall-package`, which drives maturin, which drives "
         "cargo — no flag path through either (SMA-601)"

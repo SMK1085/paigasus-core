@@ -35,7 +35,10 @@ The build context is `rs/` (the Cargo workspace root). `.github/workflows/images
 requests that touch the build inputs (`rs/Cargo.lock`, `rs/Cargo.toml`, `rs/rust-toolchain.toml`,
 `rs/Dockerfile`, `rs/.dockerignore`, `ts/Dockerfile`, `ts/.dockerignore`, `ts/pnpm-lock.yaml`,
 `ts/pnpm-workspace.yaml`, `ts/package.json`, `ts/.npmrc`, `ts/apps/*/lib/config.ts`,
-`ts/apps/*/next.config.ts`, `ts/apps/*/package.json`, `ci/images/**`,
+`ts/apps/*/next.config.ts`, `ts/apps/*/package.json`, `ts/packages/paigasus-kernel/package.json`,
+`rs/crates/bindings/paigasus-node-bindings/index.js`,
+`rs/crates/bindings/paigasus-node-bindings/index.d.ts`,
+`ci/images/**`,
 `.github/workflows/images.yml`, `.prototools`, `.proto/plugins/crane.toml`,
 `.proto/plugins/syft.toml`). **The workflow is not a required check**, so a broken image build
 reds `main` after merge rather than blocking the PR that broke it.
@@ -47,6 +50,17 @@ there. The listed files are the ones that only the Docker path reads, or that it
 differently. For example, the Docker install uses `--filter "@paigasus/${APP}..."`, so it depends
 on the package `name` in each app's `package.json`. `ts/pnpm-lock.yaml` keys its importers by
 path, not by name, so a rename does not change the lockfile.
+
+The rule also excludes a file that is already a Moon task `input`, even when `ts/Dockerfile` reads
+it too — a bad edit there already reds the ordinary `moon ci` build, so the image workflow adds no
+new coverage. The five committed wasm artifacts and `rs/crates/bindings/paigasus-wasm/package.json`
+are `inputs` of the console `build`/`test` tasks (`ts/apps/*/moon.yml`,
+`ts/packages/paigasus-console-core/moon.yml`) for this reason, and stay off the filter.
+`rs/crates/bindings/paigasus-node-bindings/package.json` is an `input` of
+`paigasus-kernel-ts:build`/`:test` for the same reason. Its two siblings, `index.js` and
+`index.d.ts`, are NOT inputs anywhere — the kernel build task's own `napi build` step regenerates
+them fresh every run, so their committed content can drift without reding the ordinary build — and
+`ts/Dockerfile` copies both by name, so they are on the filter.
 
 That said, a PR touching any of the filtered inputs above — including `rs/Dockerfile` or
 `ts/Dockerfile` — already triggers the workflow automatically via its `pull_request` path filter;
