@@ -3,8 +3,11 @@
 - **Issue:** [SMA-635](https://linear.app/smaschek/issue/SMA-635) (split out of SMA-512, spec decision D11)
 - **Status:** Draft, revision 2 (after the adversarial challenge; changelog in section 11)
 - **Date:** 2026-09-23
-- **ADR:** a Notion ADR (status Proposed) records decisions D1 to D5 and D10. It is written after
-  this spec is approved and is linked here. It must be Accepted before implementation starts.
+- **ADR:** [ADR-0023 — Interactive-user authentication on the gateway chat surface](https://app.notion.com/p/3e4830e8fbaa81819807f9f91b469e60)
+  (status Proposed) records decisions D1 to D5 and D10. It must be Accepted before
+  implementation starts.
+- **Follow-ups:** [SMA-676](https://linear.app/smaschek/issue/SMA-676) (grant control, D10),
+  [SMA-677](https://linear.app/smaschek/issue/SMA-677) (rate limit and spend budget).
 
 ## 1. Problem
 
