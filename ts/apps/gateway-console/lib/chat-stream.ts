@@ -55,6 +55,7 @@ function contentOf(payload: string): string | null {
   const first: unknown = choices[0];
   const delta = typeof first === 'object' && first !== null ? (first as { delta?: unknown }).delta : undefined;
   const content = typeof delta === 'object' && delta !== null ? (delta as { content?: unknown }).content : undefined;
+  // Empty strings are dropped on purpose: appending '' changes nothing and wastes space.
   return typeof content === 'string' && content !== '' ? content : null;
 }
 

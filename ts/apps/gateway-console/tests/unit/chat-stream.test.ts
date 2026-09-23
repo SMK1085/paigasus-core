@@ -58,8 +58,14 @@ describe('createChatStreamParser', () => {
   });
 
   it('bounds the pending record and resynchronises at the next boundary', () => {
-    const huge = `data: ${'x'.repeat(MAX_PENDING_RECORD + 10)}`;
-    expect(all([huge, 'tail-of-the-huge-record\n\n', delta('next'), 'data: [DONE]\n\n'])).toEqual([{ kind: 'delta', text: 'next' }, { kind: 'done' }]);
+    // Create a record with an oversized first data field, then a second data field that should be discarded.
+    const discardedContent = JSON.stringify({ choices: [{ index: 0, delta: { content: 'should-be-discarded' } }] });
+    const oversized = 'x'.repeat(MAX_PENDING_RECORD + 100);
+    const huge = `data: ${oversized}\ndata: ${discardedContent}`;
+    // The huge record spans chunks. When the buffer exceeds MAX_PENDING_RECORD, it's cleared
+    // and resynchronising is set. The tail of the record (with "should-be-discarded") arrives
+    // after the bound is passed. Because resynchronising is true, that record is skipped.
+    expect(all([huge, '\n\n', delta('next'), 'data: [DONE]\n\n'])).toEqual([{ kind: 'delta', text: 'next' }, { kind: 'done' }]);
   });
 
   it('uses a generic message when a paigasus-error event carries no usable JSON', () => {
@@ -68,5 +74,25 @@ describe('createChatStreamParser', () => {
 
   it('accepts CRLF record delimiters', () => {
     expect(all([delta('crlf').replace(/\n\n$/, '\r\n\r\n'), 'data: [DONE]\r\n\r\n'])).toEqual([{ kind: 'delta', text: 'crlf' }, { kind: 'done' }]);
+  });
+
+  it('accepts bare CR (\\r) as a line terminator', () => {
+    expect(all([delta('bare-cr').replace(/\n\n$/, '\r\r'), 'data: [DONE]\r\r'])).toEqual([{ kind: 'delta', text: 'bare-cr' }, { kind: 'done' }]);
+  });
+
+  it('accepts mixed line terminators (\\r\\n\\n)', () => {
+    expect(all([delta('mixed').replace(/\n\n$/, '\r\n\n'), 'data: [DONE]\r\n\n'])).toEqual([{ kind: 'delta', text: 'mixed' }, { kind: 'done' }]);
+  });
+
+  it('accepts data field with no space after the colon', () => {
+    expect(all([`data:${JSON.stringify({ choices: [{ index: 0, delta: { content: 'no-space' } }] })}\n\n`, 'data: [DONE]\n\n'])).toEqual([{ kind: 'delta', text: 'no-space' }, { kind: 'done' }]);
+  });
+
+  it('joins multiple data fields with newlines in the payload', () => {
+    // SSE spec: multiple data: fields in one record are joined with newlines.
+    // Split valid JSON across two data: lines (break after comma).
+    const json1 = '{"choices":[{"index":0,';
+    const json2 = '"delta":{"content":"multi"}}]}';
+    expect(all([`data: ${json1}\ndata: ${json2}\n\n`, 'data: [DONE]\n\n'])).toEqual([{ kind: 'delta', text: 'multi' }, { kind: 'done' }]);
   });
 });
