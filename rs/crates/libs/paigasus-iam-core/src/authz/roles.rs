@@ -672,6 +672,24 @@ mod tests {
                 resource: root_prn(),
                 expect: Effect::Deny,
             },
+            // -- SMA-635 D4 and D10. The gateway authorizes a user's InvokeModel against the ORG
+            // PRN, and org_admin does not carry InvokeModel: a person needs a gateway_user grant,
+            // made out of band with GrantRole. Pinned so a change to either role becomes a
+            // visible test change, not a silent change of who can spend on model calls.
+            Case {
+                name: "org_admin does not hold InvokeModel on its own org (SMA-635 D4, D10)",
+                grants: vec![grant(92, &uni.principal, "org_admin", GrantScope::Node(TenancyNodeRef::Organization(uni.org_o.clone())))],
+                action: Action::InvokeModel,
+                resource: uni.org_o.prn().clone(),
+                expect: Effect::Deny,
+            },
+            Case {
+                name: "gateway_user at an org allows InvokeModel on the org itself (SMA-635 D4)",
+                grants: vec![grant(93, &uni.principal, "gateway_user", GrantScope::Node(TenancyNodeRef::Organization(uni.org_o.clone())))],
+                action: Action::InvokeModel,
+                resource: uni.org_o.prn().clone(),
+                expect: Effect::Allow,
+            },
         ];
 
         for case in cases {
