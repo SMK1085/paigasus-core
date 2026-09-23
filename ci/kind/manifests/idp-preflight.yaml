@@ -1,0 +1,42 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# The discovery preflight (spec § 4.2 step 7). It fetches the discovery document through the
+# in-cluster name, as IAM and the consoles do, and trusts ONLY the throwaway CA from the ConfigMap
+# the chart mounts. run.sh reads its stdout and asserts `issuer` and an https `jwks_uri`. A wrong
+# realm, CA or hostname option then fails here, named, and not later as an unusable IAM (spec F3).
+# The image re-uses the digest pin of ci/images/run.sh:51. Refresh with:
+#   docker buildx imagetools inspect curlimages/curl:8.11.1 --format '{{json .Manifest.Digest}}'
+apiVersion: v1
+kind: Pod
+metadata:
+  name: idp-preflight
+  namespace: paigasus
+spec:
+  restartPolicy: Never
+  containers:
+    - name: curl
+      image: curlimages/curl:8.11.1@sha256:c1fe1679c34d9784c1b0d1e5f62ac0a79fca01fb6377cdd33e90473c6f9f9a69
+      command: ["curl"]
+      args:
+        - "-fsS"
+        - "--retry"
+        - "30"
+        - "--retry-all-errors"
+        - "--retry-delay"
+        - "2"
+        - "--max-time"
+        - "10"
+        - "--cacert"
+        - "/etc/paigasus/idp-ca/ca.crt"
+        - "https://idp.paigasus.test/realms/paigasus/.well-known/openid-configuration"
+      volumeMounts:
+        - name: idp-ca
+          mountPath: /etc/paigasus/idp-ca
+          readOnly: true
+  volumes:
+    - name: idp-ca
+      configMap:
+        name: paigasus-idp-ca
+        items:
+          - key: ca.crt
+            path: ca.crt

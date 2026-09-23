@@ -1,0 +1,35 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Traefik for the kind job — decision B10. ingress-nginx is retired (Kubernetes blog, 2025-11-11;
+# the repository was archived on 2026-03-24), so the job uses a maintained controller that serves
+# plain networking.k8s.io/v1 Ingress. The chart renders an Ingress with no controller annotation,
+# so nothing in charts/ names Traefik. run.sh installs chart 41.6.0 and checks its SHA-256 first.
+#
+# Measured with `helm template` of chart 41.6.0 and these values: the image renders as
+# docker.io/traefik@sha256:…, both hostPorts render, the Service is ClusterIP, the IngressClass is
+# `traefik` and not the default, and websecure has TLS on. An unmatched request gets 404 with the
+# body `404 page not found` (R3 and the settle step depend on that body).
+image:
+  # Traefik v3.7.13 (the chart's appVersion). Refresh with:
+  #   docker buildx imagetools inspect docker.io/traefik:v3.7.13 --format '{{json .Manifest.Digest}}'
+  digest: sha256:24841fe2de7304c149343d877d2923b4c8800a38ba015dea9174c23b20e344a0
+# With a digest the chart cannot read the version; it needs it for its version checks.
+versionOverride: v3.7.13
+ingressClass:
+  enabled: true
+  isDefaultClass: false
+  name: traefik
+ports:
+  web:
+    hostPort: 80
+  websecure:
+    hostPort: 443
+service:
+  spec:
+    # The CoreDNS hosts block maps both names to this ClusterIP; kind has no load balancer.
+    type: ClusterIP
+updateStrategy:
+  rollingUpdate:
+    # A hostPort pod cannot surge on one node: the new pod would wait for the port forever.
+    maxUnavailable: 1
+    maxSurge: 0

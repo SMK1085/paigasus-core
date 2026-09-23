@@ -1,0 +1,19 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# One kind node (SMA-513 PR 3, spec § 4.2 step 1). Host ports 80 and 443 map to the node, and
+# Traefik binds them with hostPort (ci/kind/traefik-values.yaml): the recipe kind documents for an
+# ingress controller. 127.0.0.1 only; Chromium reaches both hosts through --host-resolver-rules.
+# The node image is not here: run.sh passes it with --image, pinned by digest.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+  - role: control-plane
+    extraPortMappings:
+      - containerPort: 80
+        hostPort: 80
+        listenAddress: "127.0.0.1"
+        protocol: TCP
+      - containerPort: 443
+        hostPort: 443
+        listenAddress: "127.0.0.1"
+        protocol: TCP
