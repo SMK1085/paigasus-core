@@ -3,7 +3,7 @@
 #
 # oidc.caBundle (SMA-513 PR 3, spec § 5). The value lets every pod trust an IdP whose chain ends at
 # a private CA. One row per property:
-#   set, set-custom-key, set-subpath-key
+#   set, set-custom-key, set-dotted-key
 #                   each of the three Deployments mounts ONE key of the ConfigMap read-only through
 #                   `items` (so a missing key stops the pod at volume setup, before Node can start
 #                   with only a warning), gets its own env key in the POD env, and no version
@@ -156,7 +156,7 @@ row_version() {  # row_version <label> <version 1> <version 2>
 
 row_set "set" ca.crt --set oidc.caBundle.existingConfigMap=paigasus-idp-ca
 row_set "set-custom-key" bundle.pem --set oidc.caBundle.existingConfigMap=paigasus-idp-ca --set oidc.caBundle.key=bundle.pem
-row_set "set-subpath-key" certs/idp.pem --set oidc.caBundle.existingConfigMap=paigasus-idp-ca --set oidc.caBundle.key=certs/idp.pem
+row_set "set-dotted-key" idp-root.ca.pem --set oidc.caBundle.existingConfigMap=paigasus-idp-ca --set oidc.caBundle.key=idp-root.ca.pem
 row_unset "unset"
 row_unset "null-cabundle" --set oidc.caBundle=null
 row_version "version-strings" v1 v2
