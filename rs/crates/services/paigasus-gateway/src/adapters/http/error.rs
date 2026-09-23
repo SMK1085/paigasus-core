@@ -29,13 +29,14 @@ pub struct ErrorEnvelope {
     pub error: ErrorBody,
 }
 
-/// The body of the OpenAI error envelope. `param` names the request field at fault when there is
-/// one — only `StreamingDisabled` sets it today (SMA-505 D9); every auth- and egress-path error
-/// leaves it `null`, because no request field is at fault in those. `code` is a stable
-/// machine-readable diagnostic drawn from the canonical registry (`common/v1/error.proto`,
-/// SMA-504) — every [`GatewayError`] case emits one, so `code` is no longer `null` in practice;
-/// the field stays `Option` because [`ErrorEnvelope`] has no other case that omits it today.
-/// `r#type` serializes as `"type"`.
+/// The body of the OpenAI error envelope. `param` names what is at fault when something is:
+/// `StreamingDisabled` names the request field `stream` (SMA-505 D9), and `InvalidOrgHeader` and
+/// `OrgRequired` name the request HEADER `paigasus-org` (SMA-635). Naming a header is a
+/// deliberate deviation from OpenAI, which uses `param` only for a body field. Every other case
+/// leaves it `null`. `code` is a stable machine-readable diagnostic drawn from the canonical
+/// registry (`common/v1/error.proto`, SMA-504) — every [`GatewayError`] case emits one, so `code`
+/// is no longer `null` in practice; the field stays `Option` because [`ErrorEnvelope`] has no
+/// other case that omits it today. `r#type` serializes as `"type"`.
 #[derive(Debug, Serialize)]
 pub struct ErrorBody {
     pub message: String,
@@ -95,6 +96,12 @@ pub enum GatewayError {
     /// Streaming is disabled by configuration and the request asked for it → 400. Carries
     /// `param: "stream"` so the client sees exactly which field was refused (SMA-505 D9).
     StreamingDisabled,
+    /// The `paigasus-org` header is not ONE organization UUID in the 36-character form → 400,
+    /// `param: "paigasus-org"` (SMA-635).
+    InvalidOrgHeader,
+    /// An OIDC caller sent no `paigasus-org` header, and reaches zero or several organizations →
+    /// 400, `param: "paigasus-org"` (SMA-635 D3).
+    OrgRequired,
 }
 
 /// Map an [`OpenAiError`] (egress send/connect/timeout/build/CA-bundle failure) to its
@@ -108,6 +115,16 @@ impl From<OpenAiError> for GatewayError {
         match err {
             OpenAiError::Timeout(_) => GatewayError::UpstreamTimeout,
             OpenAiError::Connect(_) | OpenAiError::Transport(_) | OpenAiError::Build(_) | OpenAiError::CaBundle { .. } => GatewayError::UpstreamUnavailable,
+        }
+    }
+}
+
+/// Map a failed organization resolution (SMA-635 spec §4.2) to its 400.
+impl From<crate::domain::OrgResolutionError> for GatewayError {
+    fn from(err: crate::domain::OrgResolutionError) -> Self {
+        match err {
+            crate::domain::OrgResolutionError::InvalidOrgHeader => GatewayError::InvalidOrgHeader,
+            crate::domain::OrgResolutionError::OrgRequired => GatewayError::OrgRequired,
         }
     }
 }
@@ -126,7 +143,7 @@ impl GatewayError {
                 None,
                 "Missing bearer credentials in the Authorization header.",
             ),
-            GatewayError::InvalidCredential => (StatusCode::UNAUTHORIZED, "invalid_request_error", Some("invalid-api-key"), None, "Invalid API key."),
+            GatewayError::InvalidCredential => (StatusCode::UNAUTHORIZED, "invalid_request_error", Some("invalid-api-key"), None, "Invalid credential."),
             GatewayError::AuthzDenied => (
                 StatusCode::FORBIDDEN,
                 "invalid_request_error",
@@ -173,6 +190,20 @@ impl GatewayError {
                 Some("stream"),
                 "Streamed completions are not enabled on this deployment.",
             ),
+            GatewayError::InvalidOrgHeader => (
+                StatusCode::BAD_REQUEST,
+                "invalid_request_error",
+                Some("invalid-org-header"),
+                Some("paigasus-org"),
+                "The paigasus-org header must hold exactly one organization UUID in the 36-character form.",
+            ),
+            GatewayError::OrgRequired => (
+                StatusCode::BAD_REQUEST,
+                "invalid_request_error",
+                Some("org-required"),
+                Some("paigasus-org"),
+                "Send the paigasus-org header with the organization UUID: the gateway cannot choose one organization for this user.",
+            ),
         }
     }
 
@@ -184,7 +215,15 @@ impl GatewayError {
         match self {
             Self::IamUnavailable | Self::UpstreamUnavailable | Self::UpstreamTimeout => Retryable::Yes,
             Self::Internal | Self::MissingScope => Retryable::Unknown,
-            Self::MissingBearer | Self::InvalidCredential | Self::AuthzDenied | Self::BadRequestBody | Self::InvalidRequestSchema | Self::RequestTooLarge | Self::StreamingDisabled => Retryable::No,
+            Self::MissingBearer
+            | Self::InvalidCredential
+            | Self::AuthzDenied
+            | Self::BadRequestBody
+            | Self::InvalidRequestSchema
+            | Self::RequestTooLarge
+            | Self::StreamingDisabled
+            | Self::InvalidOrgHeader
+            | Self::OrgRequired => Retryable::No,
         }
     }
 }
@@ -230,6 +269,8 @@ mod tests {
         assert_eq!(GatewayError::UpstreamUnavailable.into_response().status(), StatusCode::BAD_GATEWAY);
         assert_eq!(GatewayError::UpstreamTimeout.into_response().status(), StatusCode::GATEWAY_TIMEOUT);
         assert_eq!(GatewayError::StreamingDisabled.into_response().status(), StatusCode::BAD_REQUEST);
+        assert_eq!(GatewayError::InvalidOrgHeader.into_response().status(), StatusCode::BAD_REQUEST);
+        assert_eq!(GatewayError::OrgRequired.into_response().status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
@@ -270,7 +311,7 @@ mod tests {
         assert_eq!(err["code"], "invalid-api-key");
         assert!(
             err["param"].is_null(),
-            "InvalidCredential names no request field at fault, so param is null (StreamingDisabled is the one case that sets it, SMA-505 D9)"
+            "InvalidCredential names nothing at fault, so param is null (StreamingDisabled, InvalidOrgHeader and OrgRequired set it)"
         );
     }
 
@@ -350,5 +391,29 @@ mod tests {
         let resp = GatewayError::InvalidRequestSchema.into_response();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
         assert_eq!(GatewayError::InvalidRequestSchema.retryable(), Retryable::No);
+    }
+
+    /// SMA-635 spec §4.5: both org codes name the HEADER in `param` — a deviation from OpenAI,
+    /// which uses `param` for a body field. The resolution errors map one to one.
+    #[tokio::test]
+    async fn the_org_codes_name_the_header_in_param() {
+        for (err, code) in [(GatewayError::InvalidOrgHeader, "invalid-org-header"), (GatewayError::OrgRequired, "org-required")] {
+            let body = body_json(err.into_response()).await;
+            assert_eq!(body["error"]["code"], code);
+            assert_eq!(body["error"]["param"], "paigasus-org");
+            assert_eq!(body["error"]["type"], "invalid_request_error");
+            assert_eq!(err.retryable(), Retryable::No);
+        }
+        assert_eq!(GatewayError::from(crate::domain::OrgResolutionError::InvalidOrgHeader), GatewayError::InvalidOrgHeader);
+        assert_eq!(GatewayError::from(crate::domain::OrgResolutionError::OrgRequired), GatewayError::OrgRequired);
+    }
+
+    /// SMA-635 spec §4.1: the code stays `invalid-api-key` (a compatibility contract), and the
+    /// message no longer says "API key", because a user bearer is rejected with it too.
+    #[tokio::test]
+    async fn the_invalid_credential_message_names_a_credential() {
+        let body = body_json(GatewayError::InvalidCredential.into_response()).await;
+        assert_eq!(body["error"]["code"], "invalid-api-key");
+        assert_eq!(body["error"]["message"], "Invalid credential.");
     }
 }
