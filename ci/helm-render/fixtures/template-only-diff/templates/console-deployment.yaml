@@ -30,6 +30,11 @@ spec:
         # never triggers the restart it exists to trigger. oidc.secretVersion is the operator's
         # explicit signal instead — bump it whenever the referenced Secret's contents change.
         checksum/secret: {{ $root.Values.oidc.secretVersion | sha256sum }}
+{{- if include "paigasus.idpCaVersion" $root }}
+        # oidc.caBundle.version: the operator's signal that the CA ConfigMap changed. Node reads
+        # NODE_EXTRA_CA_CERTS only at process start, so only a restart picks up a new CA.
+        checksum/idp-ca: {{ include "paigasus.idpCaVersion" $root | sha256sum }}
+{{- end }}
     spec:
       securityContext:
         runAsUser: 65532
@@ -69,6 +74,13 @@ spec:
                 secretKeyRef:
                   name: {{ $root.Values.oidc.existingSecret | quote }}
                   key: session-redis-url
+{{- if include "paigasus.idpCaConfigMap" $root }}
+            # oidc.caBundle (SMA-513 PR 3). Node reads this ONCE at start and then trusts the bundle
+            # for EVERY TLS connection of the process, Redis included. In the pod env, not in the
+            # shared console-env ConfigMap, so it appears only on a pod that also mounts the file.
+            - name: NODE_EXTRA_CA_CERTS
+              value: {{ printf "%s/%s" (include "paigasus.idpCaMountPath" $root) (include "paigasus.idpCaKey" $root) | quote }}
+{{- end }}
           envFrom:
             - configMapRef:
                 name: {{ include "paigasus.name" (list $root "zonemap") }}
@@ -89,5 +101,20 @@ spec:
               port: http
             periodSeconds: 10
             failureThreshold: 3
+{{- if include "paigasus.idpCaConfigMap" $root }}
+          volumeMounts:
+            - name: idp-ca
+              mountPath: {{ include "paigasus.idpCaMountPath" $root }}
+              readOnly: true
+      # `items` and no `optional`: a missing ConfigMap or a missing key stops the pod at volume
+      # setup, before Node starts. Without `items`, a missing key gives Node only a warning.
+      volumes:
+        - name: idp-ca
+          configMap:
+            name: {{ include "paigasus.idpCaConfigMap" $root | quote }}
+            items:
+              - key: {{ include "paigasus.idpCaKey" $root | quote }}
+                path: {{ include "paigasus.idpCaKey" $root | quote }}
+{{- end }}
 {{- end }}
 {{- end }}

@@ -94,6 +94,24 @@ currently be deployed safely by this chart:
 The `iam` zone ships with `backend.deploy: true` because IAM has no such dependency and this
 chart can deploy it directly.
 
+## Trusting an IdP with a private CA (`oidc.caBundle`)
+
+Both consumers of the issuer refuse a non-`https` URL, so an IdP with a private CA needs its root
+in the pods. Set `oidc.caBundle.existingConfigMap` to a ConfigMap that holds PEM root certificates
+under `oidc.caBundle.key` (default `ca.crt`). Every console pod and the IAM pod then mount that one
+key read-only under `/etc/paigasus/idp-ca/`. The consoles get `NODE_EXTRA_CA_CERTS`, in the pod
+env and not in the shared `console-env` ConfigMap. IAM gets `IAM_AUTHN__EXTRA_CA_BUNDLE_PATH`.
+
+- The volume uses `items`, so a missing ConfigMap or key stops the pod at volume setup.
+- `existingConfigMap` with an empty `key` is refused at render time.
+- Bump `oidc.caBundle.version` after the ConfigMap changes. Node and IAM read the bundle once, at
+  process start. The version feeds a `checksum/idp-ca` annotation on all three Deployments.
+- The consoles trust the bundle for every TLS connection, Redis included. IAM trusts it only for
+  JWKS fetches. Put only the roots the IdP needs in it.
+
+With the value empty, the render is byte-identical to a chart without it. See
+`docs/ops/RUNBOOK-chart.md` for the failure modes.
+
 ## The golden files
 
 `tests/golden/iam-only.yaml` and `tests/golden/iam-and-gateway.yaml` are a byte-exact pin of
@@ -120,12 +138,14 @@ charts/paigasus/tests/ingress.sh
 charts/paigasus/tests/render.sh
 charts/paigasus/tests/names.sh
 charts/paigasus/tests/env.sh
+charts/paigasus/tests/ca-bundle.sh
 ```
 
 `refusals.sh` needs `--set ingress.host=…` from its caller, since its own valid-render rows have
 no default host; it holds the other seven REQUIRED values valid by default in its own `FIXED`
 array, so each refusal row can set only the one value it names to `""`. `maps.sh`, `ingress.sh`,
-`render.sh`, `names.sh` and `env.sh` set every REQUIRED value themselves, `ingress.host` included.
+`render.sh`, `names.sh`, `env.sh` and `ca-bundle.sh` set every REQUIRED value themselves,
+`ingress.host` included.
 
-`repo:helm-render` runs all six in CI, each with `--set ingress.host=console.example.test`, and
+`repo:helm-render` runs all seven in CI, each with `--set ingress.host=console.example.test`, and
 adds checks the scripts do not make. See `ci/helm-render/README.md`.
