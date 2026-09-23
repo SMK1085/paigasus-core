@@ -129,7 +129,7 @@ substring match). A change to one without the other reds `repo:affected-smoke`.
 | B7 | Spec location | `ts/apps/iam-console/tests/cluster/`, config inside that directory. Not a Moon task |
 | B8 | AC 2 in the cluster | `helm upgrade` to disable the gateway, not a second `helm install` |
 | B9 | Done | `chart.yml` is green on this PR's own run |
-| B10 | Ingress controller | **Open, decided at Gate 1** (§ 4.1) |
+| B10 | Ingress controller | Decided at Gate 1 by a rule: the plan first verifies the ingress-nginx retirement. If it is confirmed, use Traefik. If not, use ingress-nginx (§ 4.1) |
 | B11 | Pull policy | No chart change. Kubernetes gives `IfNotPresent` to every tag that is not `latest`, and the loaded images carry non-`latest` tags |
 
 ---
@@ -143,7 +143,7 @@ substring match). A change to one without the other reds `repo:affected-smoke`.
 Kubernetes 1.31 patch, because the golden files are rendered for 1.31.0
 (`ci/helm-render/helm_render.py:47`). `helm` stays on its proto pin (`.prototools`, 3.22.0).
 
-**The controller is decision B10.** Upstream announced the retirement of ingress-nginx in
+**The controller is decision B10.** Gate 1 approved a rule, not a name: verify the status, then take Traefik if the retirement is confirmed, otherwise ingress-nginx. Upstream announced the retirement of ingress-nginx in
 November 2025. The plan verifies the status first. Two options:
 
 - **ingress-nginx, last release, manifest committed** under `ci/kind/manifests/`. It is the kind
