@@ -192,10 +192,12 @@ async fn authorize_self(iam: &dyn Iam, token: &str, principal_prn: &str, scope_p
             let mapped = authz_error(err);
             if mapped == GatewayError::Internal {
                 // An exposure-gate denial of a self-query should be impossible — log it, since this
-                // is the single most important thing to see (a broken D9 self-query).
+                // is the single most important thing to see (a broken D9 self-query). `key_id` is
+                // logged plainly for an API key; an OIDC caller has none, so the field reads `-`
+                // rather than the `Some(..)`/`None` Debug wrapper.
                 tracing::error!(
                     principal_prn = %principal_prn,
-                    key_id = ?key_id,
+                    key_id = %key_id.unwrap_or("-"),
                     "self-query IsAuthorized returned an unexpected error mapped to 500 — possible broken self-query (SMA-446 D9)"
                 );
             }
@@ -351,7 +353,9 @@ fn is_identity_not_provisioned(status: &Status) -> bool {
     status.code() == Code::PermissionDenied && iam_reason(status).as_deref() == Some(IDENTITY_NOT_PROVISIONED.as_str())
 }
 
-/// Keep an IAM outage visible across [`require_authenticated`]'s two-leg fallback.
+/// Keep an IAM outage visible across the two-leg fallback, in BOTH [`require_authenticated`] and
+/// [`require_iam_auth`] (SMA-635) — the same rule serves each middleware's own key-leg/OIDC-leg
+/// pair.
 ///
 /// When the API-key leg never reached a verdict, a `401` from the OIDC leg is not trustworthy:
 /// the caller may hold a perfectly valid API key that IAM was simply unreachable to check, and
@@ -408,15 +412,17 @@ fn bearer(headers: &HeaderMap) -> Option<String> {
     Some(token.to_owned())
 }
 
-/// Map an [`IamError`] from the **introspect** call to a [`GatewayError`]. `PermissionDenied` here
-/// is an inactive principal on the API-key path — a client-auth failure (401), NOT a 403. Transport
-/// / backend codes are retryable (503); a connect-time failure is likewise 503.
+/// Map an [`IamError`] from the **introspect** call (either leg: `introspect_api_key` or
+/// `introspect_token`, SMA-635) to a [`GatewayError`]. `PermissionDenied` here is an inactive or
+/// unprovisioned principal — a client-auth failure (401), NOT a 403. Transport / backend codes are
+/// retryable (503); a connect-time failure is likewise 503.
 fn introspect_error(err: IamError) -> GatewayError {
     match err {
         IamError::Connect(_) => GatewayError::IamUnavailable,
         IamError::Rpc(status) => match status.code() {
             Code::Unauthenticated => GatewayError::InvalidCredential,
-            // Inactive principal on the API-key introspect path — a client-auth failure, not a 403.
+            // Inactive/unprovisioned principal on either introspect leg — a client-auth failure,
+            // not a 403.
             Code::PermissionDenied => GatewayError::InvalidCredential,
             Code::Unavailable | Code::DeadlineExceeded | Code::Internal => GatewayError::IamUnavailable,
             _ => GatewayError::IamUnavailable,
@@ -785,6 +791,10 @@ mod tests {
 
     // ---- log capture ------------------------------------------------------------------------
 
+    /// A second copy of this helper exists in `tests/chat_proxy.rs` (SMA-635 Task 4). This copy
+    /// stays on `Level::TRACE` (below), not `INFO`: row 9 asserts the `paigasus-org` header value
+    /// is never logged, and TRACE is what makes that assertion see every level, not only the
+    /// `warn!` line it targets.
     #[derive(Clone, Default)]
     struct LogBuffer(Arc<Mutex<Vec<u8>>>);
 
@@ -893,6 +903,33 @@ mod tests {
         };
         let fake = FakeIam::new(IntrospectOutcome::Ok(resp), AuthzOutcome::Ok(true)).with_token_introspect(rejected_token());
         assert_eq!(status_of(fake, req_with_auth("Bearer disabled-key")).await, StatusCode::UNAUTHORIZED);
+    }
+
+    /// SMA-635 review: a key-leg `Ok` answer with a non-`active` status (a disabled key) is a
+    /// VERDICT, not an outage — it must record `introspect` with result `denied`, not `ok`. Read
+    /// via the rendered Prometheus exposition (not the `iam_result` mapping function, which never
+    /// sees this arm) so the assertion fails if the `Ok(_) => record_iam_call("introspect", "denied", ..)`
+    /// arm were changed back to `"ok"`.
+    #[tokio::test]
+    async fn a_disabled_api_key_records_introspect_denied() {
+        let handle = paigasus_observability::init("test-gateway-auth-disabled-key-metric");
+        let resp = IntrospectApiKeyResponse {
+            status: "disabled".to_owned(),
+            ..active_response()
+        };
+        let fake = FakeIam::new(IntrospectOutcome::Ok(resp), AuthzOutcome::Unreachable).with_token_introspect(rejected_token());
+        let _ = status_of(fake, req_with_auth("Bearer disabled-key")).await;
+        let out = handle.render();
+        assert!(
+            out.lines()
+                .any(|l| l.starts_with("gateway_iam_calls_total") && l.contains(r#"operation="introspect""#) && l.contains(r#"result="denied""#)),
+            "expected a denied-result introspect call recorded:\n{out}"
+        );
+        assert!(
+            !out.lines()
+                .any(|l| l.starts_with("gateway_iam_calls_total") && l.contains(r#"operation="introspect""#) && l.contains(r#"result="ok""#)),
+            "a disabled key must never record introspect as ok:\n{out}"
+        );
     }
 
     #[tokio::test]
@@ -1069,12 +1106,6 @@ mod tests {
         );
     }
 
-    /// The relaxation must NOT leak onto the chat path. Drives the SAME details `require_authenticated`
-    /// now accepts on the discovery path — `identity-not-provisioned` `ErrorInfo`, not a bare
-    /// code — so this guard stays meaningful against a future regression that wires
-    /// `is_identity_not_provisioned` into `require_iam_auth`'s introspect arm too: a detail-less
-    /// `PermissionDenied` fails closed everywhere already, so it could NOT catch that leak, and a
-    /// test that always passes for the wrong reason is worse than no test.
     /// The discovery relaxation must NOT leak onto the chat path. Real IAM sends
     /// `identity-not-provisioned` on the TOKEN leg (`convert.rs:142`), so that is where this fake
     /// puts it. A user with no provisioned identity has no grants (SMA-635 spec §4.1 step 3).
@@ -1245,18 +1276,24 @@ mod tests {
     }
 
     /// Row 7 — THE self-query proof for OIDC (D9): the user's OWN token, the INTROSPECTED user PRN,
-    /// `InvokeModel`, and the org PRN built from the header.
+    /// `InvokeModel`, and the org PRN built from the header. The user reaches BOTH `ORG_A` and
+    /// `ORG_B` (inference alone would be ambiguous and give `org-required`), and the header names
+    /// `ORG_B` — proving the header WINS over inference, not merely that it is accepted when it
+    /// happens to agree with the only inferable org.
     #[tokio::test]
     async fn the_oidc_self_query_uses_the_users_token_principal_and_the_org_prn() {
-        let fake = user_fake(user_response(&[ORG_A_PRN], &[]), AuthzOutcome::Ok(true));
+        let fake = user_fake(user_response(&[ORG_A_PRN, ORG_B_PRN], &[]), AuthzOutcome::Ok(true));
         let recorded = fake.recorded.clone();
-        let (status, _) = run(fake, req_with_orgs(USER_TOKEN, &[ORG_A.as_bytes()])).await;
+        let (status, _) = run(fake, req_with_orgs(USER_TOKEN, &[ORG_B.as_bytes()])).await;
         assert_eq!(status, StatusCode::OK);
         let rec = recorded.lock().unwrap().take().expect("is_authorized_self was called");
         assert_eq!(rec.caller_key, USER_TOKEN);
         assert_eq!(rec.principal_prn, USER_PRN);
         assert_eq!(rec.action, INVOKE_MODEL_ACTION);
-        assert_eq!(rec.resource_prn, ORG_A_PRN);
+        assert_eq!(
+            rec.resource_prn, ORG_B_PRN,
+            "the header must win over inference, which alone would be ambiguous between ORG_A and ORG_B"
+        );
     }
 
     /// Review Focus 2: an upper-case header queries the LOWER-case canonical org PRN.
