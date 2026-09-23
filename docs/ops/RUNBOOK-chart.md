@@ -53,10 +53,10 @@ serves its full path. A rewrite that removes `/iam` breaks every route in that z
 
 ## 4. One values block, six projections, and the zone-map upgrade
 
-A zone's `enabled` flag controls six things together: its ingress rule, its `PAIGASUS_ZONES`
-entry, its `PAIGASUS_SERVICES` entry, `PAIGASUS_IAM_GRPC_URL`, its console Deployment and Service,
-and its backend Deployment and Service. So a zone cannot be routed but not shown, or shown but not
-routed. This is decision D6.
+A zone's `enabled` flag controls six things together. These are its ingress rule, its
+`PAIGASUS_ZONES` entry, its `PAIGASUS_SERVICES` entry, `PAIGASUS_IAM_GRPC_URL`, its console
+Deployment and Service, and its backend Deployment and Service. So a zone cannot be routed but not
+shown, or shown but not routed. This is decision D6.
 
 **The limit of D6.** The chart cannot express "the gateway zone is shown but not routed", or the
 reverse. That is on purpose.
