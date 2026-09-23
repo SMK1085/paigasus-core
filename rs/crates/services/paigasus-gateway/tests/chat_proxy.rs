@@ -41,6 +41,47 @@ use paigasus_gateway::config::OpenAiConfig;
 use paigasus_proto::paigasus::iam::v1::{IntrospectApiKeyResponse, IntrospectResponse};
 use support::MockOpenAi;
 
+// ---- log capture (SMA-635) ---------------------------------------------------------------------
+
+/// A shared byte buffer that `tracing_subscriber` writes into. `#[tokio::test]` runs on one
+/// thread, and `oneshot` drives the handler on it, so a thread-local default subscriber sees
+/// every line the handler logs.
+///
+/// A second copy of this helper exists in `src/adapters/http/auth.rs`'s test module (SMA-635
+/// Task 5) — a src unit-test module and an integration-test crate cannot share code without a
+/// new test-support crate, so the controller accepted the duplication.
+#[derive(Clone, Default)]
+struct LogBuffer(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for LogBuffer {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogBuffer {
+    type Writer = LogBuffer;
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+impl LogBuffer {
+    fn text(&self) -> String {
+        String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
+    }
+}
+
+fn capture_logs() -> (LogBuffer, tracing::subscriber::DefaultGuard) {
+    let buffer = LogBuffer::default();
+    let subscriber = tracing_subscriber::fmt().with_writer(buffer.clone()).with_ansi(false).with_max_level(tracing::Level::INFO).finish();
+    (buffer, tracing::subscriber::set_default(subscriber))
+}
+
 /// The real OpenAI key the gateway is configured with — what the upstream MUST see.
 const REAL_KEY: &str = "sk-real-openai-server-key-77aa";
 /// The caller's own paigasus bearer — what the upstream must NEVER see.
@@ -423,6 +464,24 @@ async fn egress_never_forwards_caller_credentials() {
     assert!(recorded.header("cookie").is_none(), "the caller cookie must never reach the upstream");
     // The raw body flowed upstream byte-for-byte.
     assert_eq!(recorded.body, Bytes::from(NON_STREAM_BODY), "the caller's raw body is forwarded verbatim");
+}
+
+/// SMA-635 spec §4.3: the request log names the credential kind and the scope. An API key
+/// keeps its `key_id`; the prompt is still never logged.
+#[tokio::test]
+async fn the_request_log_names_the_credential_and_the_scope() {
+    let (logs, _guard) = capture_logs();
+    let mock = MockOpenAi::spawn_json(StatusCode::OK, "{}").await;
+    let app = app_for(FakeIam::allowed(), mock.base_url.clone(), ONE_MIB);
+    let resp = app.oneshot(chat_request(NON_STREAM_BODY, Some(CALLER_KEY))).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let text = logs.text();
+    let line = text.lines().find(|l| l.contains("chat completion proxied")).expect("one request log line");
+    assert!(line.contains("api_key"), "auth=api_key: {line}");
+    assert!(line.contains(CALLER_SCOPE), "scope: {line}");
+    assert!(line.contains(CALLER_KEY_ID), "key_id for an API key: {line}");
+    assert!(!line.contains("\"hi\""), "the prompt is never logged: {line}");
 }
 
 // ---- raw truncated-stream upstream (mid-stream error) -----------------------------------------

@@ -38,7 +38,7 @@ use tonic_types::StatusExt;
 
 use super::error::GatewayError;
 use crate::adapters::iam::{Iam, IamError};
-use crate::domain::CallerContext;
+use crate::domain::{CallerContext, Credential};
 
 /// The wire action string the gateway authorizes every chat request against. Hardcoded because the
 /// gateway cannot import iam-core's `Action` enum across the gRPC boundary — it sends the literal
@@ -119,7 +119,11 @@ pub async fn require_iam_auth(State(iam): State<Arc<dyn Iam>>, mut req: Request,
     }
 
     // 4. Attach the resolved caller identity and proceed to the handler.
-    req.extensions_mut().insert(CallerContext { principal_prn, scope_prn, key_id });
+    req.extensions_mut().insert(CallerContext {
+        principal_prn,
+        scope_prn,
+        credential: Credential::ApiKey { key_id },
+    });
     next.run(req).await
 }
 
@@ -520,9 +524,13 @@ mod tests {
     }
 
     /// The probe handler: proves the inner handler sees the `CallerContext` the middleware attached
-    /// by echoing its three fields.
+    /// by echoing its three parts. An API key echoes its `key_id`; an OIDC token echoes `oidc`.
     async fn probe(axum::Extension(ctx): axum::Extension<CallerContext>) -> String {
-        format!("{}|{}|{}", ctx.principal_prn, ctx.scope_prn, ctx.key_id)
+        let credential = match &ctx.credential {
+            Credential::ApiKey { key_id } => key_id.clone(),
+            Credential::Oidc => "oidc".to_owned(),
+        };
+        format!("{}|{}|{}", ctx.principal_prn, ctx.scope_prn, credential)
     }
 
     fn build_app(fake: FakeIam) -> Router {

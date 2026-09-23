@@ -1,22 +1,30 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! The authenticated caller identity a request carries after the G5 auth middleware
-//! validates its bearer credential; consumed by the chat handler (G7) to authorize the
-//! request and to log request metadata (never the prompt/response body or any other PII).
+//! The authenticated caller identity a request carries after the auth middleware validates its
+//! bearer credential, and the organization resolution the OIDC path uses (SMA-635). Consumed by
+//! the chat handler to log request metadata (never the prompt/response body or any other PII).
 
-/// The caller identity resolved from a request's bearer credential (an IAM API key or
-/// service-account token — G5 populates this via the IAM introspect call). Carried through
-/// the request extensions so downstream handlers (G7) never need to re-authenticate.
+/// Which credential authenticated the request. `Oidc`, not `User`: an OIDC bearer can belong to a
+/// machine client, and IAM uses the same name (`paigasus-iam` `authn.rs:230`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Credential {
+    /// An IAM API key. `key_id` is the key's identifier, never the secret — safe to log.
+    ApiKey { key_id: String },
+    /// An OIDC access token (a console user, SMA-635).
+    Oidc,
+}
+
+/// The caller identity resolved from a request's bearer credential. Carried through the request
+/// extensions so the handler never re-authenticates.
 #[derive(Debug, Clone)]
 pub struct CallerContext {
-    /// The authenticated principal's PRN (Paigasus Resource Name), e.g. a service account.
+    /// The authenticated principal's PRN: a service account for a key, a user for an OIDC token.
     pub principal_prn: String,
-    /// The scope PRN the caller's credential was issued under (org/team/project), used to
-    /// authorize the request against the target resource.
+    /// The scope the request is authorized against: the key's own `scope_prn` for an API key; the
+    /// resolved organization PRN for an OIDC token.
     pub scope_prn: String,
-    /// The credential's own identifier (the API key's `key_id`, not the secret itself) —
-    /// safe to log; identifies which key authenticated the request without leaking it.
-    pub key_id: String,
+    /// Which credential authenticated the request.
+    pub credential: Credential,
 }
 
 use paigasus_kernel::Prn;

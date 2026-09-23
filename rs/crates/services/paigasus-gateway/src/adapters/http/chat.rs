@@ -46,7 +46,7 @@ use super::error::GatewayError;
 use crate::adapters::http::bytes::EnvelopeBytes;
 use crate::adapters::http::dto::ChatCompletionRequest;
 use crate::adapters::openai::{ChatResponse, OpenAiByteStream};
-use crate::domain::CallerContext;
+use crate::domain::{CallerContext, Credential};
 
 /// The single terminal SSE event emitted when a stream fails mid-flight. Static, caller-safe (no
 /// upstream detail), and shaped like the OpenAI error envelope wrapped in an SSE `data:` frame so
@@ -154,20 +154,34 @@ pub(crate) async fn chat_completions(State(state): State<AppState>, caller: Opti
         }
     };
 
-    // One structured line per request — model/stream/status/latency/principal ONLY. NEVER the
-    // prompt, messages, body, or the OpenAI key. `principal`/`key_id` are the caller's
-    // service-account PRN + non-secret API-key id: internal *service-account* identifiers (not
-    // end-user PII, and not the key secret), retained deliberately for request attribution/audit —
-    // the "never PII" bar is about prompt/message content, not the SA the call was made as.
-    tracing::info!(
-        model = %model,
-        stream = stream,
-        status = status.as_u16(),
-        latency_ms = started.elapsed().as_millis() as u64,
-        principal = %caller.principal_prn,
-        key_id = %caller.key_id,
-        "chat completion proxied"
-    );
+    // One structured line per request — model/stream/status/latency/principal/scope/credential
+    // ONLY. NEVER the prompt, messages, body, or the OpenAI key. `principal` is a service account
+    // for an API key and a USER for an OIDC token (SMA-635): a principal PRN is an opaque id, not
+    // the user's name or e-mail, and it is kept deliberately for attribution and audit. The "never
+    // PII" bar is about prompt/message content. `key_id` is logged only for an API key.
+    match &caller.credential {
+        Credential::ApiKey { key_id } => tracing::info!(
+            model = %model,
+            stream = stream,
+            status = status.as_u16(),
+            latency_ms = started.elapsed().as_millis() as u64,
+            principal = %caller.principal_prn,
+            scope = %caller.scope_prn,
+            auth = "api_key",
+            key_id = %key_id,
+            "chat completion proxied"
+        ),
+        Credential::Oidc => tracing::info!(
+            model = %model,
+            stream = stream,
+            status = status.as_u16(),
+            latency_ms = started.elapsed().as_millis() as u64,
+            principal = %caller.principal_prn,
+            scope = %caller.scope_prn,
+            auth = "oidc",
+            "chat completion proxied"
+        ),
+    }
 
     response
 }

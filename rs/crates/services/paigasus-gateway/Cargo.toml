@@ -102,5 +102,9 @@ tempfile = "3"
 # listener (SMA-558 D6).
 rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "ring"] }
 
+# Captures log lines in the auth and chat tests (SMA-635): one `paigasus-org ignored` warning, and
+# the `auth`/`scope` fields of `chat completion proxied`.
+tracing-subscriber = { workspace = true }
+
 [lints]
 workspace = true

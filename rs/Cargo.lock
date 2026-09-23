@@ -3183,6 +3183,7 @@ dependencies = [
  "tonic-types",
  "tower",
  "tracing",
+ "tracing-subscriber",
  "uuid",
 ]
 
