@@ -222,3 +222,41 @@ updates:
           - "version-update:semver-major"
           - "version-update:semver-minor"
           - "version-update:semver-patch"
+
+  # SMA-513 PR 3: the kind job's dependencies (Postgres, Redis, Keycloak, the preflight curl), pinned
+  # by digest in plain Kubernetes manifests. Read from dependabot-core main at 9743eeaa: the docker
+  # ecosystem fetches every *.yml/*.yaml file directly in `directory` whose FIRST document has
+  # `apiVersion` and `kind` (docker/lib/dependabot/shared/shared_file_fetcher.rb), and parses every
+  # `image: <name>:<tag>@sha256:<digest>` in it (docker/lib/dependabot/docker/file_parser.rb). So each
+  # manifest there must start with a Kubernetes object, never with `---`. NOT covered: the Traefik
+  # chart and image and the kind node image (ci/kind/run.sh, ci/kind/traefik-values.yaml), and the
+  # copies of the Postgres and curl pins in ci/images/run.sh:50-51; each carries its refresh
+  # command. Version bumps stay human: a Keycloak minor can change the realm import and the hostname
+  # and proxy options, and Postgres 16 matches the IAM smoke test.
+  - package-ecosystem: docker
+    directory: /ci/kind/manifests
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Etc/UTC
+    commit-message:
+      prefix: "build(deps)"
+      prefix-development: "build(deps)"
+    groups:
+      docker-minor-patch:
+        applies-to: version-updates
+        update-types:
+          - minor
+          - patch
+    ignore:
+      - dependency-name: "quay.io/keycloak/keycloak"
+        update-types:
+          - "version-update:semver-major"
+          - "version-update:semver-minor"
+      - dependency-name: "postgres"
+        update-types:
+          - "version-update:semver-major"
+      - dependency-name: "redis"
+        update-types:
+          - "version-update:semver-major"
