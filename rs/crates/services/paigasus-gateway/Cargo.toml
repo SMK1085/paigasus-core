@@ -75,6 +75,12 @@ bytes = { workspace = true }
 futures = { workspace = true }
 # `service_info` — the shared ServiceInfo builder + HTTP DTO (SMA-505).
 paigasus-service-info = { workspace = true }
+# `domain::resolve_org` (SMA-635) parses and builds org PRNs with the kernel `Prn` API. NOT
+# paigasus-iam-core: that crate pulls cedar-policy and more into the gateway.
+paigasus-kernel = { workspace = true }
+# `domain::resolve_org` reads the `paigasus-org` header as a UUID (SMA-635). Moved from
+# [dev-dependencies]; the correlation test in `adapters::iam::client` still uses it.
+uuid = { workspace = true }
 
 # figment's `Jail` test helper is feature-gated (`#[cfg(any(test, feature = "test"))]`);
 # the workspace baseline only carries `toml`/`env`, so the "test" feature is added here as a
@@ -87,9 +93,6 @@ tower = { workspace = true, features = ["util"] }
 # cfg(test) so strum_macros never enters the shipped binary, exactly as paigasus-iam does it
 # (SMA-498). Drives the AC 6 exhaustive registry test over `GatewayError` (SMA-504).
 strum = { version = "0.28", features = ["derive"] }
-# `adapters::iam::client`'s correlation-propagation test builds `paigasus_observability::RequestIds`
-# from explicit `Uuid`s (SMA-504) — test-only, so no non-default features (no `v4`/`v7`) are needed.
-uuid = { workspace = true }
 # Writes throwaway CA-bundle fixtures for `adapters::openai::client`'s trust-anchor tests
 # (SMA-558) — the same dev-dep paigasus-iam already carries for its own fixtures.
 tempfile = "3"

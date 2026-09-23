@@ -71,15 +71,9 @@ INFRA_ERRORS = (
 
 # (consumer, upstream) -> why this hand-declared Moon edge has no Cargo backing.
 # An allowlisted edge is a RECORDED DECISION, not a silent exemption: the reason string is required.
-ALLOW_NO_CARGO_BACKING = {
-    ("paigasus-gateway-rs", "paigasus-kernel-rs"): (
-        "Over-approximation, not a defect: the gateway has no Cargo dep on the kernel. Removing the "
-        "edge would change the kernel->bindings expected set that SMA-409 owns (SMA-524 D4). NOTE "
-        "(SMA-528): this is no longer free. The edge now feeds @group(upstreams), so every kernel "
-        "edit runs the gateway's full build+test+lint for a dependency that does not exist. Revisit "
-        "if kernel PRs approach the CI budget — that is the first thing to drop."
-    ),
-}
+# EMPTY since SMA-635: the one entry, ("paigasus-gateway-rs", "paigasus-kernel-rs"), is now backed
+# by a real Cargo dependency (the gateway's `domain::resolve_org`).
+ALLOW_NO_CARGO_BACKING: dict[tuple[str, str], str] = {}
 
 # Build-scope parents injected by a task dep (e.g. `contracts:generate`), never Cargo deps.
 # Used twice: A2 must not report them as unbacked Moon edges, and A6's closure walk must not demand
