@@ -122,7 +122,13 @@ function relay(source: ReadableStream<Uint8Array>, ids: { readonly correlationId
   const reader = source.getReader();
   const parser = createTerminalFrameParser(200, ids);
   const encoder = new TextEncoder();
-  const event = (error: PaigasusError): Uint8Array => encoder.encode(`\n\nevent: paigasus-error\ndata: ${JSON.stringify(withCorrelation(scrub(error), ids.correlationId))}\n\n`);
+  // ALWAYS the generic text, never `scrub`'s conditional one: the upstream controls every byte of
+  // a forwarded frame, including `code: "upstream-error"` paired with any `message` it likes (fix
+  // round 1, item 6). `upstream-error` is itself a REGISTERED reason (ERROR_REASON_UPSTREAM_ERROR
+  // = 307), so `scrub`'s `reason === null` guard does not fire for it and would otherwise let an
+  // upstream-chosen string (a leaked key fragment, for example) straight into the injected event.
+  const event = (error: PaigasusError): Uint8Array =>
+    encoder.encode(`\n\nevent: paigasus-error\ndata: ${JSON.stringify(withCorrelation({ ...error, message: UPSTREAM_REJECTED_MESSAGE }, ids.correlationId))}\n\n`);
   let finished = false;
   return new ReadableStream<Uint8Array>({
     async pull(controller) {
@@ -131,11 +137,16 @@ function relay(source: ReadableStream<Uint8Array>, ids: { readonly correlationId
       try {
         read = await reader.read();
       } catch {
+        if (finished) return;
         finished = true;
         controller.enqueue(event(mapError({ kind: 'transport', cause: 'network', message: 'the gateway stream failed' })));
         controller.close();
         return;
       }
+      // The consumer's cancel() can land while the read above is in flight. Without this check, a
+      // stream already cancelled (finished = true, its controller no longer accepting input) still
+      // has close() called on it below (fix round 1, item 8).
+      if (finished) return;
       if (read.done) {
         finished = true;
         controller.close();

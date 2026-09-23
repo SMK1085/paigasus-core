@@ -41,16 +41,21 @@ function setup(result: ChatResult, overrides: Partial<ChatRouteDeps> = {}) {
   const client: ChatClient = { completions };
   // eslint-disable-next-line @typescript-eslint/no-unused-vars -- the stub's signature must match `ChatRouteDeps['chatClient']`, but the fixed client ignores both arguments.
   const chatClient = vi.fn((_options: { readonly baseUrl: string; readonly headerTimeoutMs: number }, _auth: { readonly bearer: string }): ChatClient => client);
+  // A vi.fn, not a plain arrow: fix round 1 item 1 asserts it is NOT called on the Origin/content-type
+  // paths. `overrides.session`, when given, supplies the spy's IMPLEMENTATION (so the "no session"
+  // test's `() => Promise.resolve(null)` still drives the behavior) while the spy itself is always
+  // observable through the returned `session`.
+  const session = vi.fn(overrides.session ?? (() => Promise.resolve({ accessToken: 'session-token' })));
   const route = createChatRoute({
     publicOrigin: () => Promise.resolve(ORIGIN),
-    session: () => Promise.resolve({ accessToken: 'session-token' }),
     gatewayBaseUrl: () => 'http://gateway.test',
     correlationId: () => Promise.resolve(CORRELATION),
-    chatClient,
     maxBodyBytes: 1_000,
     ...overrides,
+    session,
+    chatClient,
   });
-  return { route, completions, chatClient };
+  return { route, completions, chatClient, session };
 }
 
 function post(body: BodyInit | null, headers: Record<string, string> = {}): Request {
@@ -80,11 +85,63 @@ describe('the local checks, in order', () => {
     expect(completions).not.toHaveBeenCalled();
   });
 
+  // Fix round 1, item 2. Each of these must NOT be accepted as a match for ORIGIN
+  // ('https://console.test'): a same-host-different-scheme, a same-host-different-port, a
+  // same-host-as-suffix attacker domain, and the literal string "null" a browser sends for an
+  // opaque origin (e.g. a sandboxed iframe) — `originOf` cannot parse it as a URL, so it is
+  // treated the same as a foreign origin, not specially allowed.
+  it.each([
+    ['a different scheme', 'http://console.test'],
+    ['a different port', 'https://console.test:8443'],
+    ['a suffix domain, not a subdomain of it', 'https://console.test.evil.test'],
+    ['the literal "null" an opaque origin sends', 'null'],
+  ])('answers 403 for a hostile Origin: %s', async (_label, origin) => {
+    const { route, completions } = setup(streamOk());
+    const request = new Request(`${ORIGIN}/gateway/api/chat`, { method: 'POST', headers: { origin, 'content-type': 'application/json' }, body: JSON.stringify(GOOD) });
+    const response = await route(request);
+    expect(response.status).toBe(403);
+    expect(completions).not.toHaveBeenCalled();
+  });
+
+  // Fix round 1, item 1: the check order itself. The session dependency must not run on either of
+  // the two earlier gate failures, and when BOTH the Origin and the content type are bad, the
+  // Origin check must win (403, not 415) because it runs first.
+  it('does not read the session on the Origin or content-type path, and Origin wins when both are bad', async () => {
+    const { route, completions, session } = setup(streamOk());
+
+    const badOrigin = new Request(`${ORIGIN}/gateway/api/chat`, { method: 'POST', headers: { origin: 'https://evil.test', 'content-type': 'application/json' }, body: JSON.stringify(GOOD) });
+    expect((await route(badOrigin)).status).toBe(403);
+    expect(session).not.toHaveBeenCalled();
+
+    const badContentType = post(JSON.stringify(GOOD), { 'content-type': 'text/plain' });
+    expect((await route(badContentType)).status).toBe(415);
+    expect(session).not.toHaveBeenCalled();
+
+    const bothBad = new Request(`${ORIGIN}/gateway/api/chat`, { method: 'POST', headers: { origin: 'https://evil.test', 'content-type': 'text/plain' }, body: JSON.stringify(GOOD) });
+    const response = await route(bothBad);
+    expect(response.status).toBe(403);
+    expect((await errorOf(response)).presentation).toBe('forbidden');
+    expect(session).not.toHaveBeenCalled();
+    expect(completions).not.toHaveBeenCalled();
+  });
+
   it('answers 415 for a body that is not application/json', async () => {
     const { route } = setup(streamOk());
     const response = await route(post(JSON.stringify(GOOD), { 'content-type': 'text/plain' }));
     expect(response.status).toBe(415);
     expect((await errorOf(response)).rawReason).toBe('unsupported-content-type');
+  });
+
+  // Fix round 1, item 2. Neither shape is `application/json`, whether or not it looks close: a
+  // longer type name that merely starts with the accepted one, and a parameter-looking suffix
+  // that cannot rescue a wrong BASE type (mediaTypeOf reads only the part before the first `;`).
+  it.each([
+    ['a longer type name that only starts with application/json', 'application/jsonx'],
+    ['a wrong base type with the right one stuffed in as a parameter', 'text/plain; application/json'],
+  ])('answers 415 for a hostile content-type: %s', async (_label, contentType) => {
+    const { route } = setup(streamOk());
+    const response = await route(post(JSON.stringify(GOOD), { 'content-type': contentType }));
+    expect(response.status).toBe(415);
   });
 
   it('accepts application/json with parameters', async () => {
@@ -118,6 +175,28 @@ describe('the local checks, in order', () => {
     expect(response.status).toBe(413);
     expect(completions).not.toHaveBeenCalled();
   });
+
+  // Fix round 1, item 3. A source that NEVER closes — its pull() always enqueues another chunk —
+  // proves the 413 path is a RUNNING-TOTAL check, not "read the whole body, then look at its
+  // size": the latter would never finish reading this body and the test would hang. The explicit
+  // low timeout turns that hang into a fast, readable failure instead of the suite stalling.
+  it('answers 413 for a body whose source never closes, and cancels the source', async () => {
+    const encoder = new TextEncoder();
+    let cancelled = false;
+    const neverCloses = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        controller.enqueue(encoder.encode('x'.repeat(600)));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    const { route, completions } = setup(streamOk());
+    const response = await route(post(neverCloses));
+    expect(response.status).toBe(413);
+    expect(cancelled).toBe(true);
+    expect(completions).not.toHaveBeenCalled();
+  }, 2_000);
 
   it('answers 400 invalid-request-body for a body that is not JSON', async () => {
     const { route } = setup(streamOk());
@@ -171,9 +250,36 @@ describe('the gateway call', () => {
     const { route } = setup({ kind: 'stream', body: streamOf(['data: {"choices":[{"delta":{"content":"par', TERMINAL]), correlationId: 'gw-corr', requestId: 'gw-req' });
     const text = await (await route(post(JSON.stringify(GOOD)))).text();
     expect(text.startsWith(`data: {"choices":[{"delta":{"content":"par${TERMINAL}`)).toBe(true);
+    // Fix round 1, item 4: exactly ONE occurrence of the event, not "at least one" — split on the
+    // marker yields 2 parts for exactly 1 occurrence.
+    expect(text.split('event: paigasus-error').length).toBe(2);
     const match = /\n\nevent: paigasus-error\ndata: (.+)\n\n$/.exec(text);
     expect(match).not.toBeNull();
-    const event = JSON.parse(match?.[1] ?? '{}') as { rawReason: string; correlationId: string };
+    const event = JSON.parse(match?.[1] ?? '{}') as { message: string; rawReason: string; correlationId: string };
+    expect(event.message).toBe(UPSTREAM_REJECTED_MESSAGE);
+    expect(event.rawReason).toBe('upstream-error');
+    expect(event.correlationId).toBe('gw-corr');
+  });
+
+  // Fix round 1, item 6 (production change): the injected event's message is ALWAYS the generic
+  // text, never the upstream's own. `upstream-error` is a REGISTERED reason
+  // (ERROR_REASON_UPSTREAM_ERROR), so the null-reason `scrub` used elsewhere would NOT catch this —
+  // the upstream fully controls the forwarded bytes and could otherwise smuggle a leaked secret
+  // (or anything else) straight through the gateway's own side-channel event.
+  it('never lets the upstream-controlled message text into the injected paigasus-error event', async () => {
+    // The RAW upstream frame is relayed verbatim ahead of the injected event, same as every other
+    // chunk (§ "streams ... relays each chunk unchanged"); the browser's own parser (lib/chat-stream.ts)
+    // ignores that raw frame and reads the injected `paigasus-error` event instead. So the assertion
+    // that matters is scoped to the INJECTED EVENT's own data, not the whole response text.
+    const leaking = '\n\ndata: {"error":{"message":"sk-proj-LEAK","type":"api_error","param":null,"code":"upstream-error"}}\n\n';
+    const { route } = setup({ kind: 'stream', body: streamOf(['data: {"choices":[{"delta":{"content":"a"}}]}\n\n', leaking]), correlationId: 'gw-corr', requestId: 'gw-req' });
+    const text = await (await route(post(JSON.stringify(GOOD)))).text();
+    const match = /\n\nevent: paigasus-error\ndata: (.+)\n\n$/.exec(text);
+    expect(match).not.toBeNull();
+    const eventData = match?.[1] ?? '';
+    expect(eventData).not.toContain('sk-proj-LEAK');
+    const event = JSON.parse(eventData || '{}') as { message: string; rawReason: string; correlationId: string };
+    expect(event.message).toBe(UPSTREAM_REJECTED_MESSAGE);
     expect(event.rawReason).toBe('upstream-error');
     expect(event.correlationId).toBe('gw-corr');
   });
@@ -183,9 +289,32 @@ describe('the gateway call', () => {
     const { route } = setup({ kind: 'stream', body: streamOf(['data: {"choices":[{"delta":{"content":"a"}}]}\n\n'], { error: true }), correlationId: null, requestId: null });
     const text = await (await route(post(JSON.stringify(GOOD)))).text();
     const match = /\n\nevent: paigasus-error\ndata: (.+)\n\n$/.exec(text);
-    const event = JSON.parse(match?.[1] ?? '{}') as { transport: { kind: string; cause: string }; correlationId: string };
+    const event = JSON.parse(match?.[1] ?? '{}') as { message: string; transport: { kind: string; cause: string }; correlationId: string };
+    expect(event.message).toBe(UPSTREAM_REJECTED_MESSAGE);
     expect(event.transport).toEqual({ kind: 'transport', cause: 'network' });
     expect(event.correlationId).toBe(CORRELATION);
+  });
+
+  // Fix round 1, item 5. The relay is a PULL-based stream that forwards each chunk as it arrives —
+  // not one that waits for the source to close before it hands anything back. A source that
+  // enqueues a first chunk and then stays open (never closes, never errors) must still let that
+  // chunk reach the response body's own reader.
+  it('lets the first chunk be read from the response while the gateway source is still open', async () => {
+    const encoder = new TextEncoder();
+    let pulls = 0;
+    const staysOpen = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        pulls += 1;
+        if (pulls === 1) controller.enqueue(encoder.encode('chunk 1'));
+        // Every later pull enqueues nothing and never closes: the source stays open.
+      },
+    });
+    const { route } = setup({ kind: 'stream', body: staysOpen, correlationId: 'gw-corr', requestId: 'gw-req' });
+    const response = await route(post(JSON.stringify(GOOD)));
+    const reader = response.body?.getReader();
+    const first = await reader?.read();
+    expect(first?.done).toBe(false);
+    expect(new TextDecoder().decode(first?.value)).toBe('chunk 1');
   });
 
   // Review Focus 4.
