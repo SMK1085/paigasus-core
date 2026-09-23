@@ -47,6 +47,9 @@ tasks:
       # its lockfile is a third pip-ecosystem manifest. It is in ci/osv/run.sh's LOCKFILES
       # array too; this entry is what re-keys the gate when that lockfile changes.
       - 'ci/workflow-credentials/uv.lock'
+      # SMA-513 PR 2b — the same for repo:helm-render's own uv project; it is in
+      # ci/osv/run.sh's LOCKFILES array too. This entry re-keys the gate when that lockfile moves.
+      - 'ci/helm-render/uv.lock'
       - '.prototools'
       - '.proto/plugins/osv-scanner.toml'
 
@@ -246,6 +249,12 @@ tasks:
       # check 8e in ci/actionlint/run.sh floors this array's length and the file's own policy is
       # to keep narrow globs rather than collapse them into the broad one.
       - 'ci/next-public/**/*'
+      # SMA-513 PR 2b — this task pins load-bearing lines inside ci/helm-render/run.sh
+      # (HELM_RENDER_SH_CALL_SITES), so a change under ci/helm-render/ MUST re-key it. The broad
+      # 'ci/**/*' entry already covers it for SCHEDULING; the narrow entry is kept because check
+      # 8e in ci/actionlint/run.sh floors this array's length and the file's own policy is to keep
+      # narrow globs rather than collapse them into the broad one.
+      - 'ci/helm-render/**/*'
       # SMA-541 — this task now asserts that CLAUDE.md's documented full-graph command mirrors
       # ci.yml's `T=(...)` array, so a docs-only edit MUST re-key it; without this the assertion is
       # real but unreachable behind a cached PASS. (repo:actionlint's `**/*` already covers
@@ -965,3 +974,35 @@ tasks:
       - '!ts/packages/*/tests/e2e/fixture/.next/**'
       - 'ci/next-public/**/*'
       - 'ts/**/*'
+
+  helm-render:
+    description: 'Render charts/paigasus and assert zone coupling and routing, no trace of a disabled zone, independent rollout, port and security-context agreement, and run every chart script (SMA-513).'
+    # WHY THIS EXISTS — charts/paigasus/tests/ holds six scripts (lint, golden files, coupling,
+    # maps, names, env, refusals) and until this task nothing ran them in CI. helm_render.py adds
+    # the properties they do not assert: an independent expected zone set, the route target, a
+    # sentinel-value leak search, spec.template-only rollout diffs, and the chart's own port and
+    # security-context agreement (spec 2026-09-22-sma-513-pr2b-helm-render-gate-design.md § 5).
+    #
+    # INPUTS. `.prototools` and `.proto/plugins/helm.toml` are the helm pin: the golden files are
+    # a byte pin of that helm, so without them a helm bump serves a cached PASS. The proto and the
+    # two TypeScript files are what check 1a reads. There are no `deps`: nothing here reads a
+    # build output.
+    #
+    # `--self-test` and `--negative-control` run FIRST and in the SAME block. `set -euo pipefail`
+    # is REQUIRED: Moon does not enable errexit for `script:` blocks and takes the block's status
+    # from its LAST command, so without it a failing control is masked by the passing real run.
+    # These four lines are pinned by SELF_SCHEDULED_GATES.
+    script: |
+      set -euo pipefail
+      bash ci/helm-render/run.sh --self-test
+      bash ci/helm-render/run.sh --negative-control
+      bash ci/helm-render/run.sh
+    toolchain: 'system'
+    inputs:
+      - '.prototools'
+      - '.proto/plugins/helm.toml'
+      - 'charts/**/*'
+      - 'ci/helm-render/**/*'
+      - 'contracts/proto/paigasus/common/v1/service_info.proto'
+      - 'ts/packages/paigasus-discovery/src/core/state.ts'
+      - 'ts/packages/paigasus-proto/src/capability.ts'

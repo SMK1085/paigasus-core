@@ -2157,6 +2157,10 @@ T_AFFECTED_SMOKE_REQUIRED_INPUTS=(
   # PR editing ci/next-public/** does not schedule repo:affected-smoke, and neither the
   # SELF_SCHEDULED_GATES nor the SELF_TASK_EXPECTED_GLOBS pin for that gate can fire.
   'ci/next-public/**/*'
+  # SMA-513 PR 2b — floors the input that makes HELM_RENDER_SH_CALL_SITES reachable. Without it, a
+  # PR editing ci/helm-render/** does not schedule repo:affected-smoke, and neither the
+  # SELF_SCHEDULED_GATES nor the SELF_TASK_EXPECTED_GLOBS pin for that gate can fire.
+  'ci/helm-render/**/*'
   'CLAUDE.md'
   '.prototools'
 )

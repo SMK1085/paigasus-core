@@ -66,7 +66,7 @@ dev = [
     # [tool.uv] constraint-dependencies note at the top of this file.
     "python-semantic-release>=10.6.1,<11",
     "pyyaml==6.0.3",
-    "ruff>=0.16.7,<0.17",
+    "ruff>=0.16.8,<0.17",
     # SMA-539 — shellcheck for actionlint's `run:` blocks. Sourced from PyPI, not a proto plugin,
     # because shellcheck's own release ships 13 archives and NO checksums asset (re-measured
     # 2026-09-02), which SMA-525 D2 refused. shellcheck-py is checksummed on both supported

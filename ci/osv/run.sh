@@ -34,6 +34,9 @@ LOCKFILES=(
   'ts/pnpm-lock.yaml'
   'py/uv.lock'
   'ci/workflow-credentials/uv.lock'
+  # SMA-513 PR 2b — repo:helm-render resolves pyyaml through its own uv project, so its lockfile
+  # is a fourth pip-ecosystem manifest. moon.yml's repo:osv inputs carry the same path.
+  'ci/helm-render/uv.lock'
 )
 
 args=(scan source --config osv-scanner.toml --format json)
