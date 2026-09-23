@@ -45,14 +45,33 @@ function read(path: string): string {
   return readFileSync(path, 'utf8');
 }
 
+/** Every quoted entry of a bracketed list, given the regex that finds each `key: [...]` block. */
+function quotedListEntries(source: string, blockPattern: RegExp): string[] {
+  const entries: string[] = [];
+  for (const block of source.matchAll(blockPattern)) {
+    const body = block[1];
+    if (body === undefined) {
+      throw new Error(`"${blockPattern.source}" matched with no captured list body — the file's shape changed`);
+    }
+    for (const entry of body.matchAll(/['"]([^'"]+)['"]/g)) {
+      const value = entry[1];
+      if (value === undefined) {
+        throw new Error(`a quoted entry in "${body}" matched with no captured value — the file's shape changed`);
+      }
+      entries.push(value);
+    }
+  }
+  return entries;
+}
+
 /** Every quoted entry of every `include: [...]` array in a vitest config. */
 function includeEntries(source: string): string[] {
-  return [...source.matchAll(/include:\s*\[([^\]]*)\]/g)].flatMap((block) => [...block[1].matchAll(/['"]([^'"]+)['"]/g)].map((entry) => entry[1]));
+  return quotedListEntries(source, /include:\s*\[([^\]]*)\]/g);
 }
 
 /** Every quoted entry of every `setupFiles: [...]` array in a vitest config. */
 function setupFileEntries(source: string): string[] {
-  return [...source.matchAll(/setupFiles:\s*\[([^\]]*)\]/g)].flatMap((block) => [...block[1].matchAll(/['"]([^'"]+)['"]/g)].map((entry) => entry[1]));
+  return quotedListEntries(source, /setupFiles:\s*\[([^\]]*)\]/g);
 }
 
 /**
