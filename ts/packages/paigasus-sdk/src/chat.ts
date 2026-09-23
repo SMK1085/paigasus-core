@@ -165,8 +165,42 @@ export type ChatResult =
   | { readonly kind: 'stream'; readonly body: ReadableStream<Uint8Array>; readonly correlationId: string | null; readonly requestId: string | null }
   | { readonly kind: 'error'; readonly error: PaigasusError };
 
+/** The `paigasus-org` request header: the organization a user's call acts in (SMA-635 D2). */
+export const ORG_HEADER = 'paigasus-org';
+
+/**
+ * Per-call options.
+ *
+ * `org` is the organization UUID, sent as `paigasus-org`. The SDK does not check the UUID form;
+ * the gateway is the authority and answers `400 invalid-org-header`. With an API key the gateway
+ * IGNORES it (the key's own scope wins) and logs a warning — no error (SMA-635 D5). Without it,
+ * the gateway infers the organization for a user who reaches exactly one; such a client starts to
+ * get `400 org-required` when its user joins a second organization (D3), so a client that knows
+ * the organization should send it.
+ *
+ * `correlationId` is sent as `paigasus-correlation-id`. The gateway adopts an inbound id, so the
+ * caller's log and the gateway's log share one id.
+ *
+ * A value with CR, LF, NUL or a character above U+00FF is refused with a `TypeError`: it is not a
+ * valid header value, and `fetch` would otherwise throw and read as a network failure.
+ */
+export interface ChatCallOptions {
+  readonly signal?: AbortSignal;
+  readonly org?: string;
+  readonly correlationId?: string;
+}
+
 export interface ChatClient {
-  completions(request: Record<string, unknown>, options?: { readonly signal?: AbortSignal }): Promise<ChatResult>;
+  completions(request: Record<string, unknown>, options?: ChatCallOptions): Promise<ChatResult>;
+}
+
+/** True when `value` cannot be a header value: NUL, CR, LF, or a character outside Latin-1. */
+function invalidHeaderValue(value: string): boolean {
+  for (let i = 0; i < value.length; i += 1) {
+    const code = value.charCodeAt(i);
+    if (code === 0 || code === 10 || code === 13 || code > 0xff) return true;
+  }
+  return false;
 }
 
 /** The two success-arm ids, read off the same header names `mapError` maps an error with. */
@@ -227,6 +261,18 @@ export function createChatClient(options: ChatClientOptions, auth: { readonly be
         throw new TypeError(`@paigasus/sdk: the chat request is not JSON-serializable: ${cause instanceof Error ? cause.message : String(cause)}`, { cause });
       }
 
+      // Refused BEFORE the timer, like the serialization above: the caller's input, not the
+      // service, is at fault (SMA-635 § 5).
+      const headers: Record<string, string> = { authorization: `Bearer ${auth.bearer}`, 'content-type': 'application/json' };
+      for (const [name, value] of [
+        [ORG_HEADER, callOptions?.org],
+        [CORRELATION_HEADER, callOptions?.correlationId],
+      ] as const) {
+        if (value === undefined) continue;
+        if (invalidHeaderValue(value)) throw new TypeError(`@paigasus/sdk: the ${name} value is not a valid HTTP header value (CR, LF, NUL or a character above U+00FF).`);
+        headers[name] = value;
+      }
+
       const controller = new AbortController();
       let timedOut = false;
       const timer = setTimeout(() => {
@@ -238,7 +284,7 @@ export function createChatClient(options: ChatClientOptions, auth: { readonly be
       try {
         response = await fetchImpl(url, {
           method: 'POST',
-          headers: { authorization: `Bearer ${auth.bearer}`, 'content-type': 'application/json' },
+          headers,
           body: payload,
           signal: callerSignal === undefined ? controller.signal : AbortSignal.any([controller.signal, callerSignal]),
         });
