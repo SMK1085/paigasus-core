@@ -27,8 +27,9 @@ use paigasus_gateway::adapters::iam::{Iam, IamError};
 use paigasus_gateway::adapters::openai::OpenAiClient;
 use paigasus_gateway::config::OpenAiConfig;
 use paigasus_gateway::service_info::Capabilities;
-use paigasus_proto::paigasus::iam::v1::{IntrospectApiKeyResponse, IntrospectResponse};
+use paigasus_proto::paigasus::iam::v1::{IntrospectApiKeyResponse, IntrospectResponse, Membership};
 use support::MockOpenAi;
+use tonic::Status;
 
 const CALLER_KEY: &str = "sk-caller-secret";
 const CALLER_SA: &str = "prn:paigasus:iam:default:sa/gw-caller";
@@ -177,4 +178,74 @@ async fn successful_proxied_request_records_iam_and_upstream_metrics() {
     assert!(out.contains("gateway_upstream_requests_total"), "expected an upstream-call counter:\n{out}");
     assert!(out.contains("gateway_upstream_request_duration_seconds"), "expected the upstream-call duration histogram:\n{out}");
     assert!(out.contains(r#"status_class="2xx""#), "expected the upstream call's status_class to be 2xx:\n{out}");
+}
+
+const USER_PRN: &str = "prn:pgs:iam:::principal/0190a1e5-0000-7000-8000-0000000000e0";
+const USER_ORG_PRN: &str = "prn:pgs:iam:::organization/0190a100-0000-7000-8000-0000000000a1";
+
+/// An OIDC user (SMA-635): the key leg rejects, the token leg answers an active user with one
+/// org, and the self-query allows.
+struct UserIam;
+
+#[async_trait::async_trait]
+impl Iam for UserIam {
+    async fn introspect_api_key(&self, _token: &str) -> Result<IntrospectApiKeyResponse, IamError> {
+        Err(IamError::Rpc(Status::unauthenticated("not an API key")))
+    }
+    async fn is_authorized_self(&self, _caller_key: &str, _principal_prn: &str, _action: &str, _resource_prn: &str) -> Result<bool, IamError> {
+        Ok(true)
+    }
+    async fn introspect_token(&self, _token: &str) -> Result<IntrospectResponse, IamError> {
+        Ok(IntrospectResponse {
+            principal_prn: USER_PRN.to_owned(),
+            status: "active".to_owned(),
+            issuer: "https://issuer.example.com".to_owned(),
+            subject: "user-1".to_owned(),
+            expires_at: None,
+            memberships: vec![Membership {
+                principal_prn: USER_PRN.to_owned(),
+                node_prn: USER_ORG_PRN.to_owned(),
+                ..Default::default()
+            }],
+            role_grants: Vec::new(),
+        })
+    }
+}
+
+/// SMA-635 spec §4.4: the OIDC path records the key leg as `denied` (a verdict, not an outage)
+/// and the token leg as `ok`. The label NAMES do not change, so the Grafana panel keeps working.
+#[tokio::test]
+async fn an_oidc_request_records_a_denied_key_leg_and_an_ok_token_leg() {
+    let mock = MockOpenAi::spawn_json(StatusCode::OK, "{}").await;
+    let cfg = OpenAiConfig {
+        base_url: mock.base_url.clone(),
+        api_key: SecretString::from("sk-real-openai-key".to_string()),
+        extra_ca_bundle_path: None,
+    };
+    let openai = OpenAiClient::new(&cfg, Duration::from_secs(10), Duration::from_secs(30), Duration::from_secs(300)).expect("client builds");
+    let handle = paigasus_observability::init("test-gateway-oidc-metrics");
+    let state = AppState {
+        iam: Arc::new(UserIam),
+        openai: Arc::new(openai),
+        max_request_bytes: 1_048_576,
+        capabilities: Capabilities { chat_stream: true },
+    };
+    let app: Router = router(state).merge(paigasus_observability::metrics_router(handle.clone()));
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/chat/completions")
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::AUTHORIZATION, "Bearer user-oidc-access-token")
+        .body(Body::from(NON_STREAM_BODY))
+        .unwrap();
+    assert_eq!(app.oneshot(req).await.unwrap().status(), StatusCode::OK);
+
+    let out = handle.render();
+    let has = |operation: &str, result: &str| {
+        out.lines()
+            .any(|l| l.starts_with("gateway_iam_calls_total") && l.contains(&format!(r#"operation="{operation}""#)) && l.contains(&format!(r#"result="{result}""#)))
+    };
+    assert!(has("introspect", "denied"), "the key leg is a verdict (denied):\n{out}");
+    assert!(has("introspect_token", "ok"), "the token leg succeeded:\n{out}");
+    assert!(has("authorize", "ok"), "the self-query allowed:\n{out}");
 }

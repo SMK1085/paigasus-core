@@ -68,8 +68,9 @@ pub trait Iam: Send + Sync {
     /// EXEMPT**, exactly like [`Iam::introspect_api_key`]: the token is the request body, so no
     /// `authorization` metadata is attached.
     ///
-    /// Used ONLY by the capability-discovery middleware, which must accept a console user's own
-    /// session (ADR-0020 D4). The chat path never calls this.
+    /// Used by BOTH middlewares as their second leg: capability discovery accepts a console
+    /// user's own session (ADR-0020 D4), and since SMA-635 the chat path accepts an OIDC caller
+    /// too (it then authorizes the user against one organization).
     async fn introspect_token(&self, token: &str) -> Result<IntrospectResponse, IamError>;
 }
 

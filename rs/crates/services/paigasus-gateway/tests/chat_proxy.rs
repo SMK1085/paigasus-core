@@ -14,7 +14,8 @@
 //! Covered: missing/invalid bearer → 401; authz denied → 403; allowed non-stream verbatim (incl.
 //! a non-2xx passthrough); malformed body → 400; streaming (ordered, `text/event-stream`);
 //! mid-stream error → terminal SSE event (status stays 200); oversized body → 413 inside the
-//! OpenAI envelope (SMA-588); IAM down → 503;
+//! OpenAI envelope (SMA-588); IAM down → 503; an OIDC user bearer through the real router
+//! (SMA-635); the request log's credential fields;
 //! and the load-bearing egress-hygiene assertion (the caller's credentials never reach upstream).
 //! Client-abort/cancel-on-drop is G8's — see the note on [`mid_stream_error_emits_terminal_sse_event`].
 
@@ -38,7 +39,7 @@ use paigasus_gateway::adapters::http::{AppState, router};
 use paigasus_gateway::adapters::iam::{Iam, IamError};
 use paigasus_gateway::adapters::openai::OpenAiClient;
 use paigasus_gateway::config::OpenAiConfig;
-use paigasus_proto::paigasus::iam::v1::{IntrospectApiKeyResponse, IntrospectResponse};
+use paigasus_proto::paigasus::iam::v1::{IntrospectApiKeyResponse, IntrospectResponse, Membership};
 use support::MockOpenAi;
 
 // ---- log capture (SMA-635) ---------------------------------------------------------------------
@@ -90,6 +91,11 @@ const CALLER_SA: &str = "prn:paigasus:iam:default:sa/gw-caller";
 const CALLER_SCOPE: &str = "prn:paigasus:iam:default:scope/team-a";
 const CALLER_KEY_ID: &str = "key-abc123";
 
+const USER_TOKEN: &str = "user-oidc-access-token";
+const USER_PRN: &str = "prn:pgs:iam:::principal/0190a1e5-0000-7000-8000-0000000000e0";
+const USER_ORG: &str = "0190a100-0000-7000-8000-0000000000a1";
+const USER_ORG_PRN: &str = "prn:pgs:iam:::organization/0190a100-0000-7000-8000-0000000000a1";
+
 /// The gateway's default 1 MiB body cap for the tests that are not exercising the limit.
 const ONE_MIB: usize = 1_048_576;
 
@@ -107,6 +113,9 @@ enum Introspect {
     Unauthenticated,
     /// IAM unreachable/backend error (gRPC `Unavailable` → 503).
     Unavailable,
+    /// An OIDC user (SMA-635): the key leg rejects the bearer, the token leg answers an active
+    /// user with one membership on [`USER_ORG_PRN`].
+    User,
 }
 
 /// A canned `Iam` for the proxy tests — no live IAM. `introspect` selects the auth outcome and
@@ -131,7 +140,7 @@ impl Iam for FakeIam {
     async fn introspect_api_key(&self, _token: &str) -> Result<IntrospectApiKeyResponse, IamError> {
         match self.introspect {
             Introspect::Active => Ok(active_response()),
-            Introspect::Unauthenticated => Err(IamError::Rpc(Status::unauthenticated("invalid key"))),
+            Introspect::Unauthenticated | Introspect::User => Err(IamError::Rpc(Status::unauthenticated("invalid key"))),
             Introspect::Unavailable => Err(IamError::Rpc(Status::unavailable("iam is down"))),
         }
     }
@@ -140,8 +149,26 @@ impl Iam for FakeIam {
         Ok(self.allow)
     }
 
+    /// Since SMA-635 the chat path tries this leg after a rejected or inconclusive key leg. Real
+    /// IAM answers `Unauthenticated` for a bearer that is not a JWT (`convert.rs:141`), which is
+    /// every API key and every garbage credential here.
     async fn introspect_token(&self, _token: &str) -> Result<IntrospectResponse, IamError> {
-        unreachable!("the chat path (require_iam_auth) never calls introspect_token")
+        match self.introspect {
+            Introspect::User => Ok(IntrospectResponse {
+                principal_prn: USER_PRN.to_owned(),
+                status: "active".to_owned(),
+                issuer: "https://issuer.example.com".to_owned(),
+                subject: "user-1".to_owned(),
+                expires_at: None,
+                memberships: vec![Membership {
+                    principal_prn: USER_PRN.to_owned(),
+                    node_prn: USER_ORG_PRN.to_owned(),
+                    ..Default::default()
+                }],
+                role_grants: Vec::new(),
+            }),
+            Introspect::Active | Introspect::Unauthenticated | Introspect::Unavailable => Err(IamError::Rpc(Status::unauthenticated("invalid bearer token"))),
+        }
     }
 }
 
@@ -482,6 +509,73 @@ async fn the_request_log_names_the_credential_and_the_scope() {
     assert!(line.contains(CALLER_SCOPE), "scope: {line}");
     assert!(line.contains(CALLER_KEY_ID), "key_id for an API key: {line}");
     assert!(!line.contains("\"hi\""), "the prompt is never logged: {line}");
+}
+
+/// SMA-635: an OIDC user bearer goes through the REAL router, middleware and handler. The log
+/// line says `oidc` and the org scope and has no `key_id`; the upstream sees the real OpenAI key,
+/// never the user's token and never the `paigasus-org` header.
+#[tokio::test]
+async fn an_oidc_user_is_proxied_with_the_org_scope() {
+    let (logs, _guard) = capture_logs();
+    let mock = MockOpenAi::spawn_json(StatusCode::OK, "{}").await;
+    let app = app_for(
+        FakeIam {
+            introspect: Introspect::User,
+            allow: true,
+        },
+        mock.base_url.clone(),
+        ONE_MIB,
+    );
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/chat/completions")
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::AUTHORIZATION, format!("Bearer {USER_TOKEN}"))
+        .header("paigasus-org", USER_ORG)
+        .body(Body::from(NON_STREAM_BODY.to_owned()))
+        .expect("build request");
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let text = logs.text();
+    let line = text.lines().find(|l| l.contains("chat completion proxied")).expect("one request log line");
+    assert!(line.contains("oidc"), "{line}");
+    assert!(line.contains(USER_ORG_PRN), "{line}");
+    assert!(line.contains(USER_PRN), "{line}");
+    assert!(!line.contains("key_id"), "no key_id for an OIDC caller: {line}");
+
+    let recorded = mock.recorded().expect("the upstream received the proxied request");
+    assert_eq!(recorded.header("authorization"), Some(format!("Bearer {REAL_KEY}").as_str()));
+    assert!(recorded.header("paigasus-org").is_none(), "the org header never reaches the upstream");
+}
+
+/// SMA-635: an OIDC user whose org header is not a UUID gets the 400 through the real router,
+/// and the upstream is never called.
+#[tokio::test]
+async fn an_oidc_user_with_an_invalid_org_header_is_400() {
+    let mock = MockOpenAi::spawn_json(StatusCode::OK, "{}").await;
+    let app = app_for(
+        FakeIam {
+            introspect: Introspect::User,
+            allow: true,
+        },
+        mock.base_url.clone(),
+        ONE_MIB,
+    );
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/chat/completions")
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::AUTHORIZATION, format!("Bearer {USER_TOKEN}"))
+        .header("paigasus-org", "acme")
+        .body(Body::from(NON_STREAM_BODY.to_owned()))
+        .expect("build request");
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(json["error"]["code"], "invalid-org-header");
+    assert!(mock.recorded().is_none(), "a refused request never reaches the upstream");
 }
 
 // ---- raw truncated-stream upstream (mid-stream error) -----------------------------------------

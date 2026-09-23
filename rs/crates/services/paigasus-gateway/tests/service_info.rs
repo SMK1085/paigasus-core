@@ -271,9 +271,9 @@ async fn validated_but_unprovisioned_identity_is_200_on_discovery_and_401_on_cha
     let resp = app.clone().oneshot(discovery_request(Some(CREDENTIAL))).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK, "a validated-but-unprovisioned identity must still pass discovery (ADR-0020 D4)");
 
-    // `require_iam_auth` (the chat path) only ever tries `introspect_api_key`, which this fake
-    // maps to `Unauthenticated` for this same credential — so the SAME token must not gain chat
-    // access.
+    // The chat path (`require_iam_auth`) tries the OIDC leg too since SMA-635, but REJECTS an
+    // unprovisioned identity there: a user with no provisioned identity has no grant. So the SAME
+    // token must not gain chat access.
     let resp = app.oneshot(chat_request(Some(CREDENTIAL))).await.unwrap();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "the same credential must not gain chat access");
 }
