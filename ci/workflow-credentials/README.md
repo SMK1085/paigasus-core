@@ -89,7 +89,7 @@ unchecked.
 
 ### `EXPECTED_PR_SUBJECTS`, and how to re-baseline it
 
-Discovery must match `EXPECTED_PR_SUBJECTS` by strict equality: `ci.yml`,
+Discovery must match `EXPECTED_PR_SUBJECTS` by strict equality: `chart.yml`, `ci.yml`,
 `cla-retrigger.yml`, `images.yml`, `prebuild.yml`, `security-scan.yml`, `wheels.yml`. A
 mismatch in either direction exits
 1. This is deliberate — a stale list would silently shrink the gate instead of turning

@@ -403,6 +403,9 @@ settle_gateway_404() {
   local deadline code body
   deadline=$(( $(date +%s) + 120 ))
   while :; do
+    # A stale body from an earlier curl (or an earlier local re-run with the same state directory)
+    # must not read as this iteration's answer (review Task 7 (2)).
+    rm -f "$STATE/settle-body"
     code="$(curl -sS --max-time 10 --cacert "$STATE/pki/ca.crt" --resolve "$CONSOLE_HOST:443:127.0.0.1" \
       -o "$STATE/settle-body" -w '%{http_code}' "https://$CONSOLE_HOST/gateway/overview" 2>"$STATE/settle-curl.err" || true)"
     body="$(cat "$STATE/settle-body" 2>/dev/null || true)"
@@ -460,9 +463,23 @@ upgrade_b() {
 
 specs() {
   local phase="$1" rc=0 out="$EVIDENCE/playwright/phase-$1" pw gw_name gw failed=""
+  local list_out list_rc=0 total
   pw="$(read_state user-password)" || die_infra "no credentials in $STATE; run 'run.sh up' first"
   need pnpm; need kubectl
   mkdir -p "$out" || die_infra "cannot make $out"
+  # Playwright's rc 1 means "a spec failed" ONLY when the run got as far as running specs. It also
+  # exits 1 for a config that will not load, an unknown --project, an empty test list, or a missing
+  # browser (spec § 4.7). `--list` alone cannot tell those apart from a real run, so read it before
+  # trusting a later rc 1 as an assertion (review Task 7 (1)).
+  list_out="$out/list.txt"
+  PAIGASUS_KIND_USERNAME="$KIND_USER" PAIGASUS_KIND_PASSWORD="$pw" PAIGASUS_KIND_OUTPUT_DIR="$out" \
+    pnpm --dir "$REPO_ROOT/ts/apps/iam-console" exec playwright test \
+      --config tests/cluster/playwright.config.ts --project "phase-$phase" --list >"$list_out" 2>&1 || list_rc=$?
+  [ "$list_rc" = 0 ] \
+    || die_infra "playwright --list exited $list_rc for phase-$phase (a config that will not load, an unknown --project, or a missing browser); see $list_out"
+  total="$(sed -n 's/^Total: \([0-9][0-9]*\) test.*/\1/p' "$list_out")"
+  [ -n "$total" ] && [ "$total" -gt 0 ] \
+    || die_infra "playwright --list found zero tests for phase-$phase; see $list_out"
   PAIGASUS_KIND_USERNAME="$KIND_USER" PAIGASUS_KIND_PASSWORD="$pw" PAIGASUS_KIND_OUTPUT_DIR="$out" \
     pnpm --dir "$REPO_ROOT/ts/apps/iam-console" exec playwright test \
       --config tests/cluster/playwright.config.ts --project "phase-$phase" || rc=$?

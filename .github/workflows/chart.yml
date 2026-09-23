@@ -45,7 +45,14 @@ jobs:
     name: kind install + upgrade (amd64)
     # NOT a required check (spec § 7): a broken chart reds main, the same trade images.yml makes.
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # 150, not 60 (review Minor 1): the "Cluster up" and "helm upgrade" steps below are each sized
+    # to the SUM of ci/kind/run.sh's own --timeout/deadline values for that mode (every one of
+    # those is a generous allowance for Docker Hub throttling, per root CLAUDE.md, so they can
+    # legitimately all run close to their cap on the same slow pull). Raising those two steps
+    # alone already exceeds the old 60-minute job budget, so the job budget must rise with them,
+    # or a slow-but-still-passing run would be killed by the JOB timeout after the step timeouts
+    # were fixed to stop killing it by the STEP timeout. See the per-step comments for the sums.
+    timeout-minutes: 150
     env:
       # SMA-609: every captured shim output must set this.
       PROTO_REPORTER: text
@@ -109,8 +116,14 @@ jobs:
           version: v0.31.0
           kubectl_version: v1.31.14
 
+      # 57, not 15 (review Minor 1). run.sh up's own waits, summed: kind create --wait 180s (3m) +
+      # helm install traefik --timeout 5m (5m) + CoreDNS rollout --timeout=180s (3m) + three
+      # dependency rollouts at --timeout=600s each, postgres/redis/keycloak (30m) + preflight's
+      # own Keycloak Ready wait at --timeout=600s (10m) + the idp-preflight pod's
+      # Succeeded wait --timeout=180s (3m) = 3+5+3+30+10+3 = 54 minutes. +3 min margin for the
+      # untimed steps in between (openssl, sed, kubectl create/apply) = 57.
       - name: Cluster up (kind, Traefik, CA, CoreDNS, Postgres, Redis, Keycloak, preflight)
-        timeout-minutes: 15
+        timeout-minutes: 57
         run: bash ci/kind/run.sh up
 
       - name: Build and load the three images
@@ -125,8 +138,11 @@ jobs:
         timeout-minutes: 10
         run: bash ci/kind/run.sh specs a
 
+      # 17, not 12 (review Minor 1, the reviewer's own worked example). run.sh upgrade_b's own
+      # waits, summed: helm upgrade --timeout 10m (10m) + the old-ReplicaSet settle deadline (3m)
+      # + settle_gateway_404's deadline (2m) = 10+3+2 = 15 minutes. +2 min margin.
       - name: helm upgrade (phase B, gateway zone off) and settle
-        timeout-minutes: 12
+        timeout-minutes: 17
         run: bash ci/kind/run.sh upgrade b
 
       - name: Specs, phase B (R3)
