@@ -47,6 +47,14 @@ on:
       # SMA-634: the kernel's `file:` dependency list. ts/Dockerfile's COPY list is hand-maintained
       # against it, and only the Docker path reads it.
       - 'ts/packages/paigasus-kernel/package.json'
+      # SMA-634 CR round 1: ts/Dockerfile COPYs these two files from the napi crate BY NAME. No
+      # Moon task lists them as `inputs` — the kernel build task's own `napi build` step
+      # regenerates them fresh every run, so a stale or renamed committed copy never reds the
+      # ordinary build, only the Docker COPY. (The crate's `package.json` is NOT listed here: it
+      # IS a `paigasus-kernel-ts:build`/`:test` input already, so the ordinary build already reds
+      # on a bad edit to it.)
+      - 'rs/crates/bindings/paigasus-node-bindings/index.js'
+      - 'rs/crates/bindings/paigasus-node-bindings/index.d.ts'
       - 'ci/images/**'
       - '.github/workflows/images.yml'
       - '.prototools'
