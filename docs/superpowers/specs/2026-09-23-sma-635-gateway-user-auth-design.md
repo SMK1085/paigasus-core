@@ -521,3 +521,16 @@ Folded in:
 
 Not folded in: none. Every finding was justified. The spend question needs a human decision; this
 revision puts it out of scope.
+
+## 12. Measurements (plan Task 1, 2026-09-23)
+
+Measured on the development Mac, on the branch before any code change.
+
+| # | Question (§7.3) | Measured | Verdict |
+|---|---|---|---|
+| M1 | tonic against the connect-node h2c fake IAM, with `ErrorInfo` in `grpc-status-details-bin` | P1a: HTTP 200, calls authn.introspectApiKey,authn.introspect; P1b: HTTP 401 | pass |
+| M2 | Next 16.3.4 standalone: `request.signal` abort on client disconnect | `abort` at 1502 ms (`cancel` also fired, at 1503 ms) | pass, `abort` fired |
+| M3 | `cache-control: no-transform` against Next compression on a route-handler stream | content-encoding (none); chunk arrival 0, 1000, 2002, 3004 ms; control without no-transform: content-encoding (none), chunk arrival 1, 1001, 2003, 3006 ms | pass |
+| M4 | build time of `cargo build --locked --bin paigasus-gateway` | cold 17.95 s, no change 0.20 s, gateway touched 1.14 s, proto touched 1.49 s | pass |
+
+If M2 fired only `cancel`, the route handler's body cancel (§6.2) is the path that stops the upstream.
