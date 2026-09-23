@@ -26,5 +26,6 @@ export {
   type ServiceDescriptorBody,
 } from './fake-iam';
 export { startFakeIdp, type FakeIdp } from './fake-idp';
+export { assertInstalledWasmMatchesCommitted } from './installed-wasm';
 export { testTls, type TlsMaterial } from './tls';
 export { startTlsTerminator, type TerminatorRoute } from './tls-terminator';

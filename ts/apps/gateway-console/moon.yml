@@ -7,8 +7,11 @@ language: 'typescript'
 # Graph documentation, and what `moon query projects --affected` follows. This confers NO
 # affectedness on its own: dependsOn schedules an upstream and never selects a downstream
 # (CLAUDE.md, Moon 2.5.3). The task `inputs` below are what make these tasks affected by a
-# change inside a package. Every package this app compiles is listed, so the `contracts->proto`
-# case in ci/affected-graph/run.sh reaches this project.
+# change inside a package. Every package this app compiles is listed, EXCEPT @paigasus/kernel: the
+# app reaches it through @paigasus/console-core, and it needs no build of its own, because the
+# wasm artifacts it loads are committed files (SMA-634). The task `inputs` below name those files,
+# which is what makes a kernel change select this app. The `contracts->proto` case in
+# ci/affected-graph/run.sh reaches this project.
 #
 # It confers no ORDERING on a task either, which is a third distinct thing. MEASURED with
 # `moon action-graph iam-console-ts:build --dot` (the template this app copies): the entry below
@@ -72,6 +75,26 @@ tasks:
       pnpm exec next build
       if [ ! -f .next/standalone/apps/gateway-console/server.js ]; then
         echo "gateway-console: standalone entry point missing — output: 'standalone' did not take effect" >&2
+        exit 1
+      fi
+      # SMA-634. Turbopack bundles @paigasus/wasm into a server chunk, so the standalone tree must
+      # hold a REGULAR .wasm file. `-type f` without `-L`: a symlink here would mean the binary is
+      # reached outside the tree, which a container would not carry. No pipe into an early-exit
+      # reader (repo:actionlint check 13 scans this script).
+      chunks="$(find .next/standalone/apps/gateway-console/.next/server/chunks -type f -name '*paigasus_wasm_bg*.wasm' | wc -l | tr -d ' ')"
+      if [ "$chunks" -lt 1 ]; then
+        echo "gateway-console: no paigasus_wasm_bg*.wasm chunk in the standalone tree — the kernel's wasm binding was not bundled, and every (console) page would fail at module evaluation" >&2
+        exit 1
+      fi
+      # SMA-634 fix round 1. A count alone passes on a 0-byte or truncated chunk. MEASURED: the
+      # emitted chunk is byte-identical to the committed rs/crates/bindings/paigasus-wasm/
+      # paigasus_wasm_bg.wasm, so content equality is asserted directly rather than a mere
+      # non-empty check — that closes the empty/truncated case and a wrong-content case alike.
+      # `! -exec cmp -s {} … \; -print` prints only the MISMATCHING files; still no pipe into an
+      # early-exit reader, wc/tr consume their whole input.
+      mismatches="$(find .next/standalone/apps/gateway-console/.next/server/chunks -type f -name '*paigasus_wasm_bg*.wasm' ! -exec cmp -s {} ../../../rs/crates/bindings/paigasus-wasm/paigasus_wasm_bg.wasm \; -print | wc -l | tr -d ' ')"
+      if [ "$mismatches" -gt 0 ]; then
+        echo "gateway-console: a paigasus_wasm_bg*.wasm chunk in the standalone tree does not match the committed rs/crates/bindings/paigasus-wasm/paigasus_wasm_bg.wasm — the bundled kernel wasm is empty, truncated, or stale" >&2
         exit 1
       fi
       dest=.next/standalone/apps/gateway-console
@@ -140,6 +163,19 @@ tasks:
       # The composition root imports @paigasus/console-core.
       - '/ts/packages/paigasus-console-core/src/**/*'
       - '/ts/packages/paigasus-console-core/package.json'
+      # SMA-634. @paigasus/console-core reads the kernel's source and, through it, the five
+      # COMMITTED wasm artifacts. There is deliberately no `deps` on a kernel task and no dependsOn
+      # edge: the artifacts are tracked files, so no console task compiles Rust. Inputs are the only
+      # thing that confers affectedness on Moon 2.5.3, so they are what makes a kernel edit re-run
+      # this package. The five artifact paths are named one by one, not as a `paigasus_wasm*` glob.
+      - '/ts/packages/paigasus-kernel/src/**/*'
+      - '/ts/packages/paigasus-kernel/package.json'
+      - '/rs/crates/bindings/paigasus-wasm/paigasus_wasm_bg.wasm'
+      - '/rs/crates/bindings/paigasus-wasm/paigasus_wasm_bg.js'
+      - '/rs/crates/bindings/paigasus-wasm/paigasus_wasm.js'
+      - '/rs/crates/bindings/paigasus-wasm/paigasus_wasm.d.ts'
+      - '/rs/crates/bindings/paigasus-wasm/paigasus_wasm_bg.wasm.d.ts'
+      - '/rs/crates/bindings/paigasus-wasm/package.json'
     outputs:
       # The cache archive must not carry .next/cache, which grows without bound.
       - '.next/**/*'
@@ -193,6 +229,19 @@ tasks:
       # Several test files under tests/**/* import types from @paigasus/console-core/testing.
       # Without this, an edit to a fake's exported type leaves this task's cache key unchanged.
       - '/ts/packages/paigasus-console-core/testing/**/*'
+      # SMA-634. @paigasus/console-core reads the kernel's source and, through it, the five
+      # COMMITTED wasm artifacts. There is deliberately no `deps` on a kernel task and no dependsOn
+      # edge: the artifacts are tracked files, so no console task compiles Rust. Inputs are the only
+      # thing that confers affectedness on Moon 2.5.3, so they are what makes a kernel edit re-run
+      # this package. The five artifact paths are named one by one, not as a `paigasus_wasm*` glob.
+      - '/ts/packages/paigasus-kernel/src/**/*'
+      - '/ts/packages/paigasus-kernel/package.json'
+      - '/rs/crates/bindings/paigasus-wasm/paigasus_wasm_bg.wasm'
+      - '/rs/crates/bindings/paigasus-wasm/paigasus_wasm_bg.js'
+      - '/rs/crates/bindings/paigasus-wasm/paigasus_wasm.js'
+      - '/rs/crates/bindings/paigasus-wasm/paigasus_wasm.d.ts'
+      - '/rs/crates/bindings/paigasus-wasm/paigasus_wasm_bg.wasm.d.ts'
+      - '/rs/crates/bindings/paigasus-wasm/package.json'
 
   test:
     # Two jobs in one task. The vitest suite boots the BUILT standalone server (Task 5), and the
@@ -277,6 +326,19 @@ tasks:
       # The real fakes live here, and every integration test that calls startFakeIam (etc.) runs
       # code from this path.
       - '/ts/packages/paigasus-console-core/testing/**/*'
+      # SMA-634. @paigasus/console-core reads the kernel's source and, through it, the five
+      # COMMITTED wasm artifacts. There is deliberately no `deps` on a kernel task and no dependsOn
+      # edge: the artifacts are tracked files, so no console task compiles Rust. Inputs are the only
+      # thing that confers affectedness on Moon 2.5.3, so they are what makes a kernel edit re-run
+      # this package. The five artifact paths are named one by one, not as a `paigasus_wasm*` glob.
+      - '/ts/packages/paigasus-kernel/src/**/*'
+      - '/ts/packages/paigasus-kernel/package.json'
+      - '/rs/crates/bindings/paigasus-wasm/paigasus_wasm_bg.wasm'
+      - '/rs/crates/bindings/paigasus-wasm/paigasus_wasm_bg.js'
+      - '/rs/crates/bindings/paigasus-wasm/paigasus_wasm.js'
+      - '/rs/crates/bindings/paigasus-wasm/paigasus_wasm.d.ts'
+      - '/rs/crates/bindings/paigasus-wasm/paigasus_wasm_bg.wasm.d.ts'
+      - '/rs/crates/bindings/paigasus-wasm/package.json'
     options:
       merge: replace
 
@@ -336,6 +398,19 @@ tasks:
       # tests/e2e/support/harness.ts imports all four fakes to build the worker-scoped stack every
       # Playwright spec runs against.
       - '/ts/packages/paigasus-console-core/testing/**/*'
+      # SMA-634. @paigasus/console-core reads the kernel's source and, through it, the five
+      # COMMITTED wasm artifacts. There is deliberately no `deps` on a kernel task and no dependsOn
+      # edge: the artifacts are tracked files, so no console task compiles Rust. Inputs are the only
+      # thing that confers affectedness on Moon 2.5.3, so they are what makes a kernel edit re-run
+      # this package. The five artifact paths are named one by one, not as a `paigasus_wasm*` glob.
+      - '/ts/packages/paigasus-kernel/src/**/*'
+      - '/ts/packages/paigasus-kernel/package.json'
+      - '/rs/crates/bindings/paigasus-wasm/paigasus_wasm_bg.wasm'
+      - '/rs/crates/bindings/paigasus-wasm/paigasus_wasm_bg.js'
+      - '/rs/crates/bindings/paigasus-wasm/paigasus_wasm.js'
+      - '/rs/crates/bindings/paigasus-wasm/paigasus_wasm.d.ts'
+      - '/rs/crates/bindings/paigasus-wasm/paigasus_wasm_bg.wasm.d.ts'
+      - '/rs/crates/bindings/paigasus-wasm/package.json'
       - '/ts/packages/paigasus-discovery/src/**/*'
       - '/ts/packages/paigasus-discovery/package.json'
       - '/ts/packages/paigasus-app-shell/src/**/*'

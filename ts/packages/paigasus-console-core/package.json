@@ -21,6 +21,7 @@
     "@connectrpc/connect": "catalog:",
     "@paigasus/auth": "workspace:*",
     "@paigasus/discovery": "workspace:*",
+    "@paigasus/kernel": "workspace:*",
     "@paigasus/sdk": "workspace:*",
     "redis": "catalog:",
     "server-only": "catalog:",

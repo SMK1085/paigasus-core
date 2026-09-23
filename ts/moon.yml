@@ -20,6 +20,9 @@ fileGroups:
     # SMA-512: a package's testing/ subpath (e.g. paigasus-console-core's in-process fakes). Without
     # this, ts:lint does not key on packages/*/testing and an edit there serves a cached lint pass.
     - 'packages/*/testing/**/*'
+    # SMA-634: paigasus-kernel/scripts/generate-wasm.mjs. Without this, ts:lint and ts:fmt do not
+    # key on packages/*/scripts and an edit there serves a cached pass.
+    - 'packages/*/scripts/**/*'
     - 'tooling/**/*' # SMA-406 parity helpers; lint/fmt lint the whole tree, so the cache must track these too
   tests:
     - 'packages/*/tests/**/*'

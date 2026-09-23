@@ -330,10 +330,11 @@ jobs:
 
       # A THIRD scratch dir. wasm-pack CLEANS --out-dir and deletes package.json, so it must
       # never run in the crate root (see that crate's .gitignore). ts/packages/paigasus-kernel's
-      # build task owns .wasmpack-out and its test task owns .wasmpack-test-out; this needs its
-      # own name so a concurrent moon ci cannot race it. The wasm32-unknown-unknown target is
-      # already provisioned by the "Install Moon-managed toolchains" step above (declared in
-      # .moon/toolchains.yml's rust.targets), so no `rustup target add` is needed here.
+      # generate-wasm task owns .wasmpack-regen-out and its test task owns .wasmpack-test-out
+      # (SMA-634; the `build` task runs no wasm-pack and owns no out-dir);
+      # this needs its own name so a concurrent moon ci cannot race it. The wasm32-unknown-unknown
+      # target is already provisioned by the "Install Moon-managed toolchains" step above (declared
+      # in .moon/toolchains.yml's rust.targets), so no `rustup target add` is needed here.
       - name: Build the wasm distribution
         run: |
           set -euo pipefail
@@ -346,7 +347,7 @@ jobs:
       # STAGE INTO A NON-HIDDEN DIRECTORY, and do not "simplify" this away.
       # `actions/upload-artifact` excludes hidden files by default (`include-hidden-files: false`),
       # and `.wasmpack-release-out` is DOT-PREFIXED — it follows the convention its two sibling
-      # scratch dirs use (`.wasmpack-out`, `.wasmpack-test-out`) precisely because they are
+      # scratch dirs use (`.wasmpack-regen-out`, `.wasmpack-test-out`) precisely because they are
       # gitignored build output. Uploading that path directly therefore matched NOTHING and failed
       # the job with "No files were found with the provided path" — MEASURED on this workflow's
       # first CI run, after the build step above had already reported success.

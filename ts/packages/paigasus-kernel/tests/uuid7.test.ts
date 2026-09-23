@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import { describe, expect, it } from 'vitest';
-import { mintUuid7 } from '@paigasus/kernel';
+import { mintUuid7 } from '@paigasus/kernel/napi';
 import { uuid7Cases } from './corpus';
 
 describe('kernel UUIDv7 parity (napi)', () => {

@@ -52,7 +52,8 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
 - `wasm-pack build` **deletes `package.json`** in its `--out-dir`, even with `--no-pack`
   (`rs/crates/bindings/paigasus-wasm/.gitignore:4-10` records the measured behaviour). Never run
   it in the crate root. The release path builds into `.wasmpack-release-out`, a third scratch
-  directory beside `build`'s `.wasmpack-out` and `test`'s `.wasmpack-test-out` (SMA-579).
+  directory beside `generate-wasm`'s `.wasmpack-regen-out` and `test`'s `.wasmpack-test-out`
+  (SMA-579; since SMA-634 the `build` task runs no wasm-pack and owns no out-dir).
 - `wasm-pack` is **proto-pinned, not Moon-managed** — `moon setup` does not install it. Any job
   invoking `wasm-pack` needs an explicit `proto install wasm-pack` step first, the same class of
   gap the documented nextest trap already records for a different tool (SMA-579).
