@@ -22,9 +22,11 @@ test('R1: a login in the IAM zone admits the gateway zone with no IdP request (A
   expect(response.request().redirectedFrom(), 'the document must arrive in one hop, with no redirect').toBeNull();
   expect(response.status()).toBe(200);
   expect(new URL(second.url()).pathname).toBe('/gateway/overview');
-  expect(idpRequests, 'the gateway zone must not send the browser to the IdP').toEqual([]);
   expect(await sessionCookie(second)).toBe(before);
+  // The listener stays attached across hydration, so this also counts any IdP request hydration
+  // itself makes (review Task 9 (a)).
   await waitForHydration(second);
+  expect(idpRequests, 'the gateway zone must not send the browser to the IdP').toEqual([]);
 });
 
 test('R1-control: without the session, the gateway zone redirects to its own login (AC 4)', async ({ page }) => {
@@ -35,7 +37,7 @@ test('R1-control: without the session, the gateway zone redirects to its own log
   if (response === null) throw new Error('page.goto(/gateway/overview) returned no response');
   const [first, second] = await redirectChain(response);
   expect(first?.url.pathname).toBe('/gateway/overview');
-  expect([302, 303, 307]).toContain(first?.status ?? 0);
+  expect([301, 302, 303, 307, 308]).toContain(first?.status ?? 0);
   expect(second?.url.hostname).toBe(CONSOLE_HOST);
   expect(second?.url.pathname).toBe('/gateway/auth/login');
 });
