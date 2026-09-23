@@ -118,9 +118,14 @@ charts/paigasus/tests/refusals.sh --set ingress.host=console.example.test
 charts/paigasus/tests/maps.sh
 charts/paigasus/tests/ingress.sh
 charts/paigasus/tests/render.sh
+charts/paigasus/tests/names.sh
+charts/paigasus/tests/env.sh
 ```
 
 `refusals.sh` needs `--set ingress.host=…` from its caller, since its own valid-render rows have
 no default host; it holds the other seven REQUIRED values valid by default in its own `FIXED`
-array, so each refusal row can set only the one value it names to `""`. `maps.sh`, `ingress.sh`
-and `render.sh` set every REQUIRED value themselves, `ingress.host` included.
+array, so each refusal row can set only the one value it names to `""`. `maps.sh`, `ingress.sh`,
+`render.sh`, `names.sh` and `env.sh` set every REQUIRED value themselves, `ingress.host` included.
+
+`repo:helm-render` runs all six in CI, each with `--set ingress.host=console.example.test`, and
+adds checks the scripts do not make. See `ci/helm-render/README.md`.
