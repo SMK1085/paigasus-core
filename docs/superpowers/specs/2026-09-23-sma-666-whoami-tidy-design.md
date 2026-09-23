@@ -145,7 +145,8 @@ with the `Introspect` RPC. The word `Introspect` in it is correct.
 
 **Do not change** the specs and plans under `docs/superpowers/`. They name the old function in
 about 30 places across the SMA-506, 508, 511, 512, 632, 633 and 662 documents. Each document is a
-record of what was true when it was written.
+record of what was true when it was written. This rule is for the rename only. § 7 adds
+clarification notes to two of these specs, and it changes no existing line in them.
 
 ### 4.2 Verification
 
@@ -305,7 +306,9 @@ twice: after SMA-636 added `serviceAccounts` and after SMA-629 added `outbox`.
   calls `listDeadLetters({})`.
 - Update the `expect` list to six entries.
 - Add a key-set check, so that the name cannot go stale again:
-  `expect(new Set(sent.map(([method]) => method.split('.')[0]))).toEqual(new Set(Object.keys(clients)))`.
+  `expect(new Set(fake.calls.map((call) => call.method.split('.')[0]))).toEqual(new Set(Object.keys(clients)))`.
+  Read `fake.calls`, not `sent`: `sent` holds `string | null` values, and `strict` rejects
+  `.split` on them.
   An eighth client in `IamClients` then reds this test until the test calls it.
 - Rename the test to `'sends the correlation header from every client'`. The key-set check makes
   "every" true, so the name does not need a number.
@@ -346,8 +349,9 @@ SMA-666 removed `serviceInfo`.
   `iam-console-ts:typecheck`, `iam-console-ts:test`, `gateway-console-ts:typecheck` and
   `gateway-console-ts:test`.
 - `ts:fmt` and `ts:lint` pass.
-- **Mutation.** Temporarily remove the `outbox.listDeadLetters` call from the round-trip test.
-  The key-set check must fail. Restore the call.
+- **Mutation.** Temporarily remove the `outbox.listDeadLetters` call AND its row in the ordered
+  `expect` list. The key-set check must fail. Restore both. If only the call is removed, the
+  ordered list fails first, and the key-set check proves nothing.
 
 ## 7. Item 5 — pin the fact, then clarify the SMA-632 and SMA-633 specs
 
