@@ -4,8 +4,7 @@
 - **Status:** Draft, revision 2 (after the adversarial challenge; changelog in section 11)
 - **Date:** 2026-09-23
 - **ADR:** [ADR-0023 — Interactive-user authentication on the gateway chat surface](https://app.notion.com/p/3e4830e8fbaa81819807f9f91b469e60)
-  (status Proposed) records decisions D1 to D5 and D10. It must be Accepted before
-  implementation starts.
+  (status Accepted, 2026-09-23) records decisions D1 to D5 and D10.
 - **Follow-ups:** [SMA-676](https://linear.app/smaschek/issue/SMA-676) (grant control, D10),
   [SMA-677](https://linear.app/smaschek/issue/SMA-677) (rate limit and spend budget).
 
