@@ -554,3 +554,34 @@ challenge said.
 
 **Not folded in:** a BuildKit `type=gha` cache. It is an optimisation, and the first green run
 must come first. If the job does not fit in 60 minutes, it comes back as a separate change.
+
+---
+
+## 14. Corrections found while planning
+
+The plan (`docs/superpowers/plans/2026-09-23-sma-513-pr3-kind-chart-job.md`, last section) records
+each item with evidence. Where this section and an earlier section disagree, this section wins.
+
+1. **The golden files change by one comment line.** The "ID tokens" comment renders into the
+   manifest (`charts/paigasus/tests/golden/iam-only.yaml:149`, `iam-and-gateway.yaml:164`). § 5.3
+   and § 10 say the golden files do not change. The correct rule: the `oidc.caBundle` change leaves
+   them byte-identical, and the comment fix changes exactly that one line in each file, in its own
+   commit.
+2. **Four fixtures need a re-sync, not two.** `slug-mirror` and `zones-omits-enabled` copy
+   `_helpers.tpl`, which this PR also changes.
+3. **B10 is Traefik.** `kubernetes/ingress-nginx` is archived (measured: `gh api
+   repos/kubernetes/ingress-nginx --jq .archived` gives `true`). Source:
+   https://kubernetes.io/blog/2025/11/11/ingress-nginx-retirement/. The Keycloak proxy-buffer hazard
+   in § 6.5 applied to nginx only.
+4. **kind is pinned to v0.31.0**, the newest release with a Kubernetes 1.31 node image, and kubectl
+   to v1.31.14, through `helm/kind-action`'s inputs.
+5. **R1-control uses a browser navigation**, not `request.get`. Playwright's request context runs
+   in Node and does not use Chromium's `--host-resolver-rules`.
+6. **More pins and counts.** The new Moon input is also pinned in `SELF_TASK_EXPECTED_GLOBS`
+   (`ci/affected-graph/ci_targets.py:390-398`). Further stale counts: `moon.yml:980`,
+   `charts/paigasus/README.md:130`, and the self-test pin of row labels in `helm_render.py`.
+7. **R3's "the Deployment does not exist" check runs in `run.sh specs b`**, not in a spec file.
+8. **The `version` annotation renders when `version` is set**, independent of `existingConfigMap`.
+9. **Dependabot covers `ci/kind/manifests/`.** The `docker` ecosystem reads `image:` lines in plain
+   Kubernetes manifests. The Traefik chart and image and the kind node image stay uncovered, with a
+   refresh command in their files.
