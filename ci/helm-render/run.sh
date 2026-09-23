@@ -30,7 +30,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 HERE="$REPO_ROOT/ci/helm-render"
 CHART="$REPO_ROOT/charts/paigasus"
 FIXTURES="$HERE/fixtures"
-CHART_SCRIPT_FLOOR=6
+CHART_SCRIPT_FLOOR=7
 
 # name|rows that must FAIL (";"-separated, exact)|row prefixes that must stay green (";"-separated)
 FIXTURE_TABLE=(

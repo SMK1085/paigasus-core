@@ -52,7 +52,7 @@ section together.
 | -- | -- |
 | 0 | pass |
 | 1 | an assertion failed (the module's 3, or a chart script's 1) |
-| 2 | infrastructure error (a failed render, an unparseable source, a missing tool, a chart script's 127 or 141, fewer than six chart scripts) |
+| 2 | infrastructure error (a failed render, an unparseable source, a missing tool, a chart script's 127 or 141, fewer than seven chart scripts) |
 
 `helm_render.py` exits 3, not 1, for an assertion, because a Python traceback exits 1. Do not
 "normalize" it. Every row runs after a failure; the gate's rc is the worst one seen.
@@ -119,8 +119,8 @@ Nothing in the repository enforces this rule; review does.
    derivation lines catches a change to those lines, not a change elsewhere (for example to
    `PREFIX` in `capability.ts`).
 3. Overlay fixtures copy whole files, so a template refactor can make one stale (above).
-4. `STUB_VALUES` is a seventh copy of the required values. A new required value must go into all
-   seven; a missing one makes every render fail, which is rc 2.
+4. `STUB_VALUES` is an eighth copy of the required values. A new required value must go into all
+   eight, and into `ci/kind/values/a.yaml` (row 7); a missing one makes every render fail, which is rc 2.
 5. `maps.sh` reads only part of its input in a pipe under `pipefail` (`maps.sh:37-46`). On a
    host whose new pipe holds 512 bytes, its `printf` can get SIGPIPE (141), which this gate
    reports as rc 2. A Linux runner's 64 KiB pipe holds the whole render. Not measured. This PR

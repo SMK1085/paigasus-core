@@ -49,7 +49,7 @@ RELEASE = "paigasus"
 SENTINEL_URL = "http://gateway-sentinel.example.test:8088"
 SENTINEL_HOST = "gateway-sentinel.example.test"
 
-# The required values, as ONE constant. A seventh copy of the list the six chart scripts hold
+# The required values, as ONE constant. An eighth copy of the list the seven chart scripts hold
 # (spec § 10 risk 4); it differs from theirs only in zones.gateway.backend.url, which is the
 # sentinel here so check 2 can find it. A missing value makes every render fail, which is rc 2.
 STUB_VALUES = (

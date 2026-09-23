@@ -977,8 +977,8 @@ tasks:
 
   helm-render:
     description: 'Render charts/paigasus and assert zone coupling and routing, no trace of a disabled zone, independent rollout, port and security-context agreement, and run every chart script (SMA-513).'
-    # WHY THIS EXISTS — charts/paigasus/tests/ holds six scripts (lint, golden files, coupling,
-    # maps, names, env, refusals) and until this task nothing ran them in CI. helm_render.py adds
+    # WHY THIS EXISTS — charts/paigasus/tests/ holds seven scripts (render, ingress, maps, names,
+    # env, refusals, ca-bundle) and until this task nothing ran them in CI. helm_render.py adds
     # the properties they do not assert: an independent expected zone set, the route target, a
     # sentinel-value leak search, spec.template-only rollout diffs, and the chart's own port and
     # security-context agreement (spec 2026-09-22-sma-513-pr2b-helm-render-gate-design.md § 5).
