@@ -58,14 +58,23 @@ describe('createChatStreamParser', () => {
   });
 
   it('bounds the pending record and resynchronises at the next boundary', () => {
-    // Create a record with an oversized first data field, then a second data field that should be discarded.
-    const discardedContent = JSON.stringify({ choices: [{ index: 0, delta: { content: 'should-be-discarded' } }] });
-    const oversized = 'x'.repeat(MAX_PENDING_RECORD + 100);
-    const huge = `data: ${oversized}\ndata: ${discardedContent}`;
-    // The huge record spans chunks. When the buffer exceeds MAX_PENDING_RECORD, it's cleared
-    // and resynchronising is set. The tail of the record (with "should-be-discarded") arrives
-    // after the bound is passed. Because resynchronising is true, that record is skipped.
-    expect(all([huge, '\n\n', delta('next'), 'data: [DONE]\n\n'])).toEqual([{ kind: 'delta', text: 'next' }, { kind: 'done' }]);
+    // With the bound: chunk 1's comment line exceeds the limit, buffer is cleared and resync=true.
+    // Chunk 2 completes the same record, but because resync=true, that record is skipped.
+    // Without the bound: chunks 1 and 2 form one record (comment + data). The comment is ignored,
+    // the data field parses successfully, so "should-be-discarded" appears in the output.
+    // This test uses separate push() calls so the bound check runs between them.
+    const parser = createChatStreamParser();
+    const out: ChatStreamEvent[] = [];
+    // Chunk 1: comment line (>64KB) with no delimiter
+    out.push(...parser.push(encode(':' + 'x'.repeat(MAX_PENDING_RECORD + 10) + '\n')));
+    // Chunk 2: data line that closes the record
+    out.push(...parser.push(encode('data: ' + JSON.stringify({ choices: [{ index: 0, delta: { content: 'should-be-discarded' } }] }) + '\n\n')));
+    // Chunk 3: normal record
+    out.push(...parser.push(encode(delta('next'))));
+    // Chunk 4: done
+    out.push(...parser.push(encode('data: [DONE]\n\n')));
+    // "should-be-discarded" must NOT appear; it was skipped due to resynchronisation
+    expect(out).toEqual([{ kind: 'delta', text: 'next' }, { kind: 'done' }]);
   });
 
   it('uses a generic message when a paigasus-error event carries no usable JSON', () => {
