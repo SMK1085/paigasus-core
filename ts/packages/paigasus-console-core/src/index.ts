@@ -13,7 +13,7 @@ export { callIam, neverReachedIam, sessionExpired, type ActionState, type IamRes
 export { MAX_BULK_REPLAY_ROWS, NAME_MAX_CODE_POINTS, formFields, invalidFormInput, nameField, prnField, toActionResult, type ActionResult, type FormAction } from './form';
 export { FORBIDDEN_VIEW_CORRELATION, requestCorrelationId, requestPath } from './correlation';
 export { createIamClients, type IamClients } from './iam-clients';
-export { createIntrospectPrincipalResolver } from './principal-resolver';
+export { createPrincipalResolver } from './principal-resolver';
 export { createConsoleRuntime, type ConsoleRuntime } from './runtime';
 
 export { whoAmI, type Principal } from './principal';
