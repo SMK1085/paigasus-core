@@ -543,6 +543,7 @@ the claim in a comment; the test itself only checks the generated client and doe
    > only) and `WhoAmIResponse` (both credential kinds). SMA-633 filled both. A third message,
    > `IntrospectApiKeyResponse`, stays empty by SMA-633 D2. The note at the end of § 3.2 gives the
    > reason.
+
 6. **One PR is large** (D1). It spans `contracts/`, `rs/` and `ts/`, and the challenge widened it
    with a second proto message and a second mapper. The codegen-drift gate wants the proto and
    its bindings in one commit, and an RPC with no caller proves nothing, so the split stays
