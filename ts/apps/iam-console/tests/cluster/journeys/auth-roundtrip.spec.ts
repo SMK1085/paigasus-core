@@ -21,12 +21,11 @@
 // silent-SSO control cannot pass and a check on the IdP session cannot prove anything. SMA-682
 // owns the product finding and restores both checks.
 //
-// D9: step 4 clicks Keycloak's logout confirmation page. A request with `client_id` and no
-// `id_token_hint` shows this page ("Do you want to log out?") instead of a silent end-session
-// redirect (assumption A2, disproven). This holds until SMA-681 makes logout send
-// `id_token_hint`. The confirmation page renders in context A's own page, not a new tab; the
-// test does not close that page or reuse it for a later check once it navigates back to the
-// console (SMA-652 still holds: the last step opens new contexts, never context A's page).
+// D9: step 4 no longer clicks the logout confirmation page. On the kind stack Keycloak shows
+// no confirmation page because no SSO session exists (SMA-682): a request with `client_id` and
+// no `id_token_hint` redirects at once rather than showing "Do you want to log out?". When
+// SMA-682 restores the SSO session, the page returns until SMA-681 makes logout send
+// `id_token_hint`. The test makes no assumptions about this page and does not interact with it.
 import { expect, test, type Browser, type BrowserContext, type Request, type Response } from '@playwright/test';
 import { CONSOLE_HOST, IDP_HOST, SESSION_COOKIE, credential, redirectChain, sessionCookie, waitForHydration } from '../support/login';
 
@@ -36,8 +35,6 @@ const ZONES = [
   { base: '/gateway', page: '/gateway/overview' },
 ] as const;
 const WAIT = { timeout: 30_000 } as const;
-/** D9: Keycloak's logout confirmation page, until SMA-681 sends `id_token_hint`. */
-const LOGOUT_CONFIRM_BUTTON = 'button[type="submit"], input[type="submit"]';
 
 function isConsolePath(request: Request, pathname: string): boolean {
   const url = new URL(request.url());
@@ -133,12 +130,8 @@ test('J1: a cold visit logs in through the IdP, and logout ends the session in b
     const endSessionRequest = await endSession;
     expect(new URL(endSessionRequest.url()).searchParams.get('client_id'), 'end-session client_id').toBe('paigasus-console');
 
-    // D9: until SMA-681 sends id_token_hint, a client_id request with none shows Keycloak's own
-    // logout confirmation page ("Do you want to log out?", assumption A2 disproven). Confirm it
-    // on context A's own page: the click submits the form, and the page then navigates back to
-    // the console. This page is not reused for a later check (SMA-652; the last step opens new
-    // contexts, never context A's page).
-    await page.locator(LOGOUT_CONFIRM_BUTTON).click();
+    // D9: on the kind stack no SSO session exists (SMA-682), so Keycloak redirects at once
+    // without showing a confirmation page. The test makes no assumptions about this page.
     await back;
     await page.waitForURL((url) => url.hostname === CONSOLE_HOST && /^\/iam\/?$/.test(url.pathname));
     await expect(page.getByTestId('public-home')).toBeVisible();
@@ -147,7 +140,10 @@ test('J1: a cold visit logs in through the IdP, and logout ends the session in b
     const home = documents.filter((doc) => doc.url.hostname === CONSOLE_HOST && /^\/iam\/?$/.test(doc.url.pathname));
     test.info().annotations.push({
       type: 'post-logout documents',
-      description: [`${new URL(endSessionRequest.url()).pathname} (D9: logout confirmation, clicked)`, ...home.map((doc) => `${doc.url.pathname}${doc.url.search} ${String(doc.status)}`)].join(' -> '),
+      description: [
+        `${new URL(endSessionRequest.url()).pathname} (SMA-682: no confirmation page on kind stack)`,
+        ...home.map((doc) => `${doc.url.pathname}${doc.url.search} ${String(doc.status)}`),
+      ].join(' -> '),
     });
     expect(home.at(-1)?.status, 'the public page after logout').toBe(200);
     // The chart sets no PAIGASUS_OIDC_POST_LOGOUT_REDIRECT_URI, so the IdP returns to `${origin}/iam/`.
