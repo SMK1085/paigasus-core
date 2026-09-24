@@ -5,7 +5,7 @@
 // package — contradicting the § 6 dependency graph (apps → {sdk, auth/server}; sdk → proto) and
 // putting paigasus-auth-ts into ci/affected-graph's strict-equality contracts->proto set.
 //
-// When IntrospectPrincipalResolver lands in SMA-508, the ADAPTER maps proto to these types.
+// An IAM-backed ADAPTER maps proto to these types.
 //
 // RoleGrantRef is DEFINED in ../session-view.ts, not here, and re-exported below: src/client.ts
 // needs the type (SessionView.grants is a RoleGrantRef[]) but must never reach ./ports/**, so the

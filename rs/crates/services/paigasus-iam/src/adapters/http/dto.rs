@@ -738,7 +738,7 @@ pub struct BulkReplayResponseDto {
 mod tests {
     use super::*;
     use chrono::TimeZone;
-    use paigasus_iam_core::{ApiKeyId, AuthnPrincipal, PrincipalKind, PrincipalStatus, ProjectId, Slug, TeamId};
+    use paigasus_iam_core::{ApiKeyId, AuthnPrincipal, Issuer, PrincipalKind, PrincipalStatus, ProjectId, Slug, TeamId};
     use paigasus_kernel::Prn;
 
     /// A deterministic `PrincipalId` for audit-actor test fields — mirrors the `principal`
@@ -912,5 +912,37 @@ mod tests {
         assert_eq!(dto.role_grants.len(), 1);
         assert_eq!(dto.role_grants[0].scope_prn, "prn:pgs:iam:::organization/0192f1c0-0000-7000-8000-0000000000bb");
         assert_eq!(dto.role_grants[0].role_key, "billing-admin");
+    }
+
+    /// `PrincipalContext` fixture for an OIDC-authenticated caller. It uses the same literals as
+    /// `grpc::convert`'s own `oidc_context` test fixture. `expires_at` is a parameter so that a
+    /// test can assert the exact expiry.
+    fn oidc_context(expires_at: DateTime<Utc>) -> PrincipalContext {
+        PrincipalContext {
+            principal: AuthnPrincipal {
+                principal_id: principal(51),
+                kind: PrincipalKind::User,
+                status: PrincipalStatus::Active,
+                credential: Credential::Oidc {
+                    issuer: Issuer::parse("https://idp.example.com").unwrap(),
+                    subject: "subject-51".to_string(),
+                    expires_at,
+                },
+            },
+            memberships: Vec::new(),
+            role_grants: Vec::new(),
+        }
+    }
+
+    /// SMA-666: before this test, no test covered the `Credential::Oidc` arm of
+    /// `WhoAmIResponseDto::from`. Literal values catch an issuer/subject transposition, which a
+    /// "not empty" check does not. The exact expiry catches a fabricated timestamp.
+    #[test]
+    fn who_am_i_response_dto_reports_an_oidc_caller_in_full() {
+        let expiry = Utc::now() + chrono::Duration::hours(1);
+        let dto = WhoAmIResponseDto::from(oidc_context(expiry));
+        assert_eq!(dto.issuer, "https://idp.example.com");
+        assert_eq!(dto.subject, "subject-51");
+        assert_eq!(dto.expires_at, Some(expiry));
     }
 }

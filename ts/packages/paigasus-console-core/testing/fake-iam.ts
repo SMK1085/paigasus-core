@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // An in-process fake of IAM for the integration and e2e tiers (spec § 9.1): a real gRPC server over
-// h2c for the seven services the console calls (SMA-636 added ServiceAccountService, SMA-629
-// OutboxService), and a plain HTTP server for `GET /v1/service-info`, which @paigasus/discovery
-// probes.
+// h2c for seven services, and a plain HTTP server for `GET /v1/service-info`, which @paigasus/discovery
+// probes. The console calls six of the services (SMA-636 added ServiceAccountService, SMA-629
+// OutboxService). It has no client for ServiceInfoService (SMA-666); see `setServiceInfo` below.
 //
 // It copies these IAM behaviours, which the console depends on. Each one names its source:
 //   - Introspect is exempt from bearer enforcement and never provisions. It answers
@@ -89,7 +89,7 @@ type Entry = {
   }[Extract<keyof MethodsOf<S>, string>];
 }[ServiceKey];
 
-/** Every RPC the fake serves, as `<client key>.<method localName>` — the same keys as `IamClients`. */
+/** Every RPC the fake serves, as `<client key>.<method localName>` — the keys of `IamClients`, plus `serviceInfo`. */
 export type FakeIamMethod = Entry['key'];
 
 /** What a scripted handler receives besides the request. */
@@ -140,10 +140,13 @@ export type FakeIam = {
   setHandlers(handlers: FakeIamHandlers): void;
   /**
    * A descriptor changes both the gRPC and the HTTP answer. `{ status }` changes ONLY the HTTP
-   * route (the discovery probe): the gRPC GetServiceInfo keeps the last descriptor, because
-   * `IamClients.serviceInfo` has no production caller today — only a test reads it directly, and
-   * a test that scripts a real descriptor must not have it clobbered by an unrelated HTTP status
-   * override.
+   * route (the discovery probe). The gRPC GetServiceInfo keeps the last descriptor, so an unrelated
+   * HTTP status override does not replace a descriptor that a test scripted.
+   *
+   * `IamClients` has no `serviceInfo` client (SMA-666), but the fake keeps the gRPC
+   * `serviceInfo.getServiceInfo` route. The fake serves the full IAM surface, and
+   * ts/apps/iam-console/tests/integration/doubles/fake-iam.test.ts:145-146 calls the route with its
+   * own `ServiceInfoService` client.
    */
   setServiceInfo(descriptor: ServiceDescriptorBody | { status: number }): void;
   close(): Promise<void>;

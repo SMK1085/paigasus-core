@@ -117,6 +117,29 @@ therefore report **less** authority than the key actually wields, which is worse
 none: it would describe a key as weaker than it is. SMA-633 reports the full grant set for both
 credential kinds. § 9.5 carries the corrected note.
 
+> **Clarified (SMA-666, 2026-09-23).** "Both credential kinds" above means both kinds of bearer on
+> `WhoAmI`, and for that RPC the statement is true. `WhoAmI` calls `context_for` for an OIDC token
+> and for an API key (`rs/crates/services/paigasus-iam/src/adapters/grpc/authn.rs:105`,
+> `adapters/http/authn.rs:119`), and SMA-633 fills `role_grants` there. The unit test
+> `context_for_returns_the_grants_of_an_api_key_principal` in
+> `rs/crates/services/paigasus-iam/src/application/authenticate_token.rs` pins this.
+>
+> `IntrospectApiKey` is a different RPC. It returns an empty `role_grants` list
+> (`src/application/authenticate_api_key.rs:262-270`), and SMA-633's D2 decided that. The gateway
+> calls `IntrospectApiKey` on every request, through `require_iam_auth` (the model-invocation path)
+> and through `require_authenticated`
+> (`rs/crates/services/paigasus-gateway/src/adapters/http/auth.rs:64` and `:166`, over
+> `adapters/iam/client.rs:105`). Nothing reads the field. A grant-store read on the
+> `require_iam_auth` path would turn a `role_grant` outage into a gateway 503 for model
+> invocations.
+>
+> This does not mean that the gateway has no `role_grant` dependency. The OIDC leg of
+> `require_authenticated` already reaches the grant store through `Introspect`
+> (`paigasus-gateway/src/adapters/http/auth.rs:187`, SMA-633 D6 at `:169-178` of that spec).
+>
+> This spec never changed `IntrospectApiKey` (§ 8). So the two decisions do not disagree. The rest
+> of this spec is left otherwise unedited.
+
 ### 3.3 Why D7 is POST, not GET
 
 `WhoAmI` performs writes. It creates a principal row and a user row, and for a configured
@@ -515,6 +538,12 @@ the claim in a comment; the test itself only checks the generated client and doe
    Revision 2 of this spec claimed the opposite; § 3.2 records the withdrawal and the evidence.
    Because both RPCs read the same `PrincipalContext.role_grants` field, SMA-633 fills both at
    once with no further change here.
+
+   > **Clarified (SMA-666, 2026-09-23).** "The two messages" above are `IntrospectResponse` (OIDC
+   > only) and `WhoAmIResponse` (both credential kinds). SMA-633 filled both. A third message,
+   > `IntrospectApiKeyResponse`, stays empty by SMA-633 D2. The note at the end of § 3.2 gives the
+   > reason.
+
 6. **One PR is large** (D1). It spans `contracts/`, `rs/` and `ts/`, and the challenge widened it
    with a second proto message and a second mapper. The codegen-drift gate wants the proto and
    its bindings in one commit, and an RPC with no caller proves nothing, so the split stays
