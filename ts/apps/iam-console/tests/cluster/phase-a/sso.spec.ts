@@ -6,11 +6,11 @@
 import { expect, test } from '@playwright/test';
 import { CONSOLE_HOST, IDP_HOST, loginAt, redirectChain, sessionCookie, waitForHydration } from '../support/login';
 
-test('R1: a login in the IAM zone admits the gateway zone with no IdP request (AC 4)', async ({ page, browser }) => {
+test('R1: a login in the IAM zone admits the gateway zone with no IdP request (AC 4)', async ({ page, context }) => {
   await loginAt(page, '/iam/orgs');
   const before = await sessionCookie(page);
 
-  const second = await (await browser.newContext({ baseURL: 'https://console.paigasus.test', ignoreHTTPSErrors: true })).newPage();
+  const second = await context.newPage();
   const idpRequests: string[] = [];
   second.on('request', (request) => {
     const url = new URL(request.url());
