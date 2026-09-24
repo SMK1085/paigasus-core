@@ -41,6 +41,12 @@ export type OrganizationSettings =
       readonly projects: ProjectsView;
     };
 
+/** The page head both the org page and the playground page load first (SMA-635 spec § 6.1). */
+export type OrganizationHead =
+  | { readonly kind: 'not-found' }
+  | { readonly kind: 'error'; readonly error: PaigasusError }
+  | { readonly kind: 'ok'; readonly orgId: string; readonly orgPrn: string; readonly organization: { readonly name: string; readonly slug: string; readonly lifecycle: NodeLifecycle } };
+
 export type OrganizationSettingsDeps = SectionDeps & { readonly tenancy: Pick<Tenancy, 'getOrganization' | 'listTeams' | 'listProjects'> };
 
 function idOf(prn: string, kind: 'team' | 'project'): string | null {
@@ -76,20 +82,28 @@ async function loadProjects(tenancy: Pick<Tenancy, 'listTeams' | 'listProjects'>
   return { kind: 'ok', teams: groups, moreTeams: shown.nextOffset !== null };
 }
 
-export async function loadOrganizationSettings(deps: OrganizationSettingsDeps, params: SettingsParams & { readonly org: string }): Promise<OrganizationSettings> {
-  if (!isUuid(params.org)) return { kind: 'not-found' };
-  const orgId = params.org.toLowerCase();
+/**
+ * The URL's UUID and GetOrganization: a value that is not a UUID, an invalid-input answer (IAM's
+ * prn-mismatch) and a not-found answer are all not-found; any other failure is the page's error,
+ * which PageError renders as the 403 view for a denial.
+ */
+export async function loadOrganizationHead(tenancy: Pick<Tenancy, 'getOrganization'>, org: string): Promise<OrganizationHead> {
+  if (!isUuid(org)) return { kind: 'not-found' };
+  const orgId = org.toLowerCase();
   const orgPrn = organizationPrn(orgId);
-
-  const got = await callIam(() => deps.tenancy.getOrganization({ prn: orgPrn }));
+  const got = await callIam(() => tenancy.getOrganization({ prn: orgPrn }));
   if (!got.ok) return got.error.presentation === 'invalid-input' || got.error.presentation === 'not-found' ? { kind: 'not-found' } : { kind: 'error', error: got.error };
   const organization = got.value.organization;
   if (organization === undefined) return { kind: 'not-found' };
-  const lifecycle = lifecycleOf(organization);
+  return { kind: 'ok', orgId, orgPrn, organization: { name: organization.name, slug: organization.slug, lifecycle: lifecycleOf(organization) } };
+}
 
+export async function loadOrganizationSettings(deps: OrganizationSettingsDeps, params: SettingsParams & { readonly org: string }): Promise<OrganizationSettings> {
+  const head = await loadOrganizationHead(deps.tenancy, params.org);
+  if (head.kind !== 'ok') return head;
   const [section, projects] = await Promise.all([
-    loadServiceAccountSection(deps, { ownerPrn: orgPrn, lifecycle, saOffset: params.saOffset, keyOffset: params.keyOffset, sa: params.sa }),
-    loadProjects(deps.tenancy, orgPrn),
+    loadServiceAccountSection(deps, { ownerPrn: head.orgPrn, lifecycle: head.organization.lifecycle, saOffset: params.saOffset, keyOffset: params.keyOffset, sa: params.sa }),
+    loadProjects(deps.tenancy, head.orgPrn),
   ]);
-  return { kind: 'ok', orgId, orgPrn, organization: { name: organization.name, slug: organization.slug, lifecycle }, section, projects };
+  return { kind: 'ok', orgId: head.orgId, orgPrn: head.orgPrn, organization: head.organization, section, projects };
 }

@@ -11,7 +11,7 @@
 // zone map has an IAM zone (§ 4.4).
 import type { ReactElement } from 'react';
 import { notFound } from 'next/navigation';
-import { Breadcrumbs } from '@paigasus/app-shell';
+import { Breadcrumbs, ZoneLink } from '@paigasus/app-shell';
 import { isUuid } from '@paigasus/console-core';
 import { gatewayView } from '../../../_components/gateway-state';
 import { GatewayStateLine } from '../../../_components/gateway-state-line';
@@ -50,6 +50,11 @@ export default async function OrganizationSettingsPage({ params, searchParams }:
       <Breadcrumbs items={[{ label: 'Overview', href: `${GATEWAY_BASE_PATH}/overview` }, { label: data.organization.name }]} />
       <SettingsHeader name={data.organization.name} status={statusColumnLabel(data.organization.lifecycle)} slug={data.organization.slug} manage={manage} />
       <GatewayStateLine view={gatewayView(gateway)} />
+      <p>
+        <ZoneLink prefetch={false} href={`${path}/playground`} className="hover:underline" data-testid="playground-link">
+          Playground
+        </ZoneLink>
+      </p>
       {await serviceAccountsBlock({ view: data.section, ownerKind: 'organization', ownerPrn: data.orgPrn, path })}
       {await projectsBlock({ orgId: data.orgId, projects: data.projects })}
     </div>
