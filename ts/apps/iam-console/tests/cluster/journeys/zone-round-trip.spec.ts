@@ -69,9 +69,39 @@ function idpRequests(seen: readonly Seen[]): string[] {
   return seen.filter((entry) => new URL(entry.request.url()).hostname === IDP_HOST).map((entry) => entry.request.url());
 }
 
+/**
+ * Waits until the RSC request recording is stable, before a rule check reads it. A recorded RSC
+ * request may still be in flight (a queued Next prefetch, for example a nested
+ * `/iam/gateway/?_rsc=…` under a cross-zone `NextLink`), and a new RSC request may still arrive.
+ * This polls (bound 15 s) until BOTH hold: the count of recorded RSC requests has not changed for
+ * about 2 s, and every recorded RSC request has a status (a response arrived) or has failed (the
+ * `requestfailed` event fired). A failed RSC request still counts as settled: it is still a
+ * violation under the existing zone/path rules, only its 404 check cannot apply to it.
+ */
+async function waitForStableRsc(seen: readonly Seen[], statuses: ReadonlyMap<Request, number>, failed: ReadonlySet<Request>): Promise<void> {
+  const STABLE_MS = 2_000;
+  let lastCount = -1;
+  let stableSince = Date.now();
+  await expect
+    .poll(
+      () => {
+        const rscSeen = seen.filter((entry) => new URL(entry.request.url()).hostname === CONSOLE_HOST && isRsc(entry.request));
+        if (rscSeen.length !== lastCount) {
+          lastCount = rscSeen.length;
+          stableSince = Date.now();
+        }
+        const allSettled = rscSeen.every((entry) => statuses.has(entry.request) || failed.has(entry.request));
+        return allSettled && Date.now() - stableSince >= STABLE_MS;
+      },
+      { message: 'the RSC recording must be stable: the count unchanged for 2 s and every RSC request settled', timeout: 15_000 },
+    )
+    .toBe(true);
+}
+
 test('J2: the shell links IAM to gateway and back with hard navigations, one session and no cross-zone RSC request (SMA-514 scenario 2)', async ({ context, page }) => {
   const seen: Seen[] = [];
   const statuses = new Map<Request, number>();
+  const failed = new Set<Request>();
   const nav = page.getByRole('navigation', { name: 'Primary' });
   const gateway = nav.getByRole('link', { name: 'Gateway', exact: true });
 
@@ -88,6 +118,11 @@ test('J2: the shell links IAM to gateway and back with hard navigations, one ses
     });
     context.on('response', (response) => {
       statuses.set(response.request(), response.status());
+    });
+    // A failed RSC request (for example to the other zone or a nested cross-zone path) never gets
+    // a response, so it must count as SETTLED too, or waitForStableRsc would wait out its timeout.
+    context.on('requestfailed', (request) => {
+      failed.add(request);
     });
   });
 
@@ -115,7 +150,10 @@ test('J2: the shell links IAM to gateway and back with hard navigations, one ses
   });
 
   await test.step('RSC check after hydration, before any click', async () => {
-    // The IAM nav's same-zone NextLinks prefetch after hydration.
+    // The IAM nav's same-zone NextLinks prefetch after hydration. Wait for the recording to settle
+    // first: a queued prefetch (for example a nested cross-zone one) may not have arrived, or may
+    // still be in flight, at the first poll where the positive control already holds (final review).
+    await waitForStableRsc(seen, statuses, failed);
     await expect.poll(() => rscFindings(seen, statuses).sameZone, { message: 'positive control: at least one same-zone RSC request after hydration', timeout: 15_000 }).toBeGreaterThan(0);
     expect.soft(rscFindings(seen, statuses).violations, 'no RSC request may leave its zone (after hydration)').toEqual([]);
   });
@@ -163,7 +201,9 @@ test('J2: the shell links IAM to gateway and back with hard navigations, one ses
     expect(idpRequests(seen.slice(mark)), 'no request may go to the IdP').toEqual([]);
   });
 
-  await test.step('no RSC request leaves its zone', () => {
+  await test.step('no RSC request leaves its zone', async () => {
+    // Same wait as step 4 (final review): the second click's own prefetches may still be settling.
+    await waitForStableRsc(seen, statuses, failed);
     const { violations, sameZone } = rscFindings(seen, statuses);
     expect(sameZone, 'positive control: at least one same-zone RSC request in the whole recording').toBeGreaterThan(0);
     expect.soft(violations, 'no RSC request may leave its zone (the whole recording)').toEqual([]);
