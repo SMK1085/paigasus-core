@@ -124,8 +124,8 @@ renders that list, with one element, into `IAM_AUTHN__ISSUERS` in
 - **Set.** The value replaces `oidc.clientId`. It does not add to it. IAM then refuses a token
   whose `aud` holds only the client id. This includes an ID token.
 - **A number** (`--set oidc.audience=12345`, or an unquoted number in a values file) renders as the
-  string `"12345"`. The template applies `toString` before `%q`. Quote the value in a values file
-  all the same, because a large number can become an exponent form.
+  string `"12345"`. The template applies `toString` before `%q`. Quote the value in a values file.
+  A large number can change to an exponent form.
 - When the value is set, one more YAML comment line renders above `IAM_AUTHN__ISSUERS`:
   `# oidc.audience is set: IAM accepts that audience, not the client id.`
 - A change of the value restarts the IAM pod and no console pod.

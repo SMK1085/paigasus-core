@@ -1,7 +1,7 @@
 # SMA-678: chart value `oidc.audience`
 
 - Linear: SMA-678 (found during SMA-513 PR 3, spec § 11)
-- Status: draft for approval, revised after the spec challenge (§ 7)
+- Status: approved (2026-09-24). The spec challenge is in § 6.
 - Path: bounded change, written as a short spec for the feature-pipeline challenge step
 
 ## 1. Problem
@@ -204,3 +204,25 @@ revert, the IAM parse test (§ 3.5), the § 5 restart row, and the chart README 
 
 Not folded in, recorded as residuals: whitespace validation (R2), token-type confusion (R3), the
 e2e proof (R1).
+
+## 7. As built
+
+This spec's text does not match the built code in three places. Do not fix these places here.
+Read the named file. The file is the authority for the exact text.
+
+1. **§ 3.1, the `values.yaml` comment.** The quoted comment text is the DRAFT text. Task 1's STE
+   fix rewrote the comment for Simplified Technical English. The built comment reads
+   differently. Read `charts/paigasus/values.yaml`, under `oidc:`, for the exact wording.
+2. **§ 3.3, the `check_audience` signature.** This spec gives the signature as
+   `check_audience <label> <expected-audience> [helm args…]`. The built function takes one more
+   argument: `check_audience <label> <expected-audience> <present|absent> [helm args…]`. The third
+   argument states whether the "oidc.audience is set" comment line must be present or absent in
+   the render. Read `charts/paigasus/tests/env.sh` for the exact signature and rows.
+3. **§ 3.4, the `oidc.clientId` row.** This spec gives the changed row text as "…unless
+   `oidc.audience` is set (§ 6)". The built row reads differently. Read
+   `docs/ops/RUNBOOK-chart.md:25` for the exact row text.
+
+Also, the plan added two more test rows than § 3.3's own row table lists: `A5 number-in-file`
+(a number in a values file, not from `--set`) and `A6 restart-scope` (a change of `oidc.audience`
+restarts the IAM pod, not a console pod). So `charts/paigasus/tests/env.sh`'s row counter checks
+for 6 rows, not 4.

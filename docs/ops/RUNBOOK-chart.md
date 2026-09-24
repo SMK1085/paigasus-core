@@ -82,7 +82,7 @@ pods, not for the old pods to go. The kind job waits for both (`ci/kind/run.sh`,
 | the contents of `oidc.existingSecret` | nothing, until you change `oidc.secretVersion` | the chart cannot see the Secret |
 | the contents of `postgres.existingSecret` or the pepper Secret | nothing, until you change its version value | the same |
 | the contents of the CA ConfigMap | nothing, until you change `oidc.caBundle.version` | Node and IAM read the file once, at start |
-| `oidc.audience` | the IAM pod, not the consoles | it changes `IAM_AUTHN__ISSUERS` in the IAM pod template. IAM has one replica and `maxSurge: 0` (`templates/backend-deployment.yaml`). This makes IAM unavailable during the restart |
+| `oidc.audience` | the IAM pod, not the consoles | it changes `IAM_AUTHN__ISSUERS` in the IAM pod template. IAM has one replica and `maxSurge: 0` (`templates/backend-deployment.yaml`). IAM is not available during the restart. |
 
 A change of `oidc.caBundle.version` restarts every pod that mounts the bundle: both consoles and
 IAM. That is expected, as for `oidc.secretVersion`.

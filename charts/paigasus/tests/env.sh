@@ -197,7 +197,7 @@ check_audience "A5 number-in-file"      12345            present -f "$TMP/audien
 check_audience_restart "A6 restart-scope"
 
 if [ "$AUDIENCE_ROWS" -lt "$AUDIENCE_ROWS_WANT" ]; then
-  echo "FAIL [audience rows]: $AUDIENCE_ROWS check_audience row(s) ran, want $AUDIENCE_ROWS_WANT"; ec=1
+  echo "FAIL [audience rows]: $AUDIENCE_ROWS audience row(s) ran, want $AUDIENCE_ROWS_WANT"; ec=1
 fi
 
 if [ "$ec" -eq 0 ]; then echo "== chart env OK =="; fi
