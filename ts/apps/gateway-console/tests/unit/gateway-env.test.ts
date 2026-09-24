@@ -9,10 +9,25 @@ import { describe, expect, it } from 'vitest';
 import { assertDefaultCargoTargetDir, gatewayEnv, parseGatewayLog } from '../e2e/support/gateway-env';
 
 describe('gatewayEnv', () => {
-  it('drops every inherited GATEWAY_* variable and RUST_LOG, and keeps the rest', () => {
+  it('drops every inherited GATEWAY_* variable, RUST_LOG, NODE_ENV and every proxy variable, and keeps the rest', () => {
     const env = gatewayEnv(
       { GATEWAY_LOG_LEVEL: 'info' },
-      { PATH: '/bin', RUST_LOG: 'warn', GATEWAY_STREAM_ENABLED: 'false', GATEWAY_UPSTREAM__OPENAI__API_KEY: 'sk-leak', NODE_ENV: 'test', HOME: '/h' },
+      {
+        PATH: '/bin',
+        RUST_LOG: 'warn',
+        GATEWAY_STREAM_ENABLED: 'false',
+        GATEWAY_UPSTREAM__OPENAI__API_KEY: 'sk-leak',
+        NODE_ENV: 'test',
+        HOME: '/h',
+        HTTP_PROXY: 'http://proxy.test:8080',
+        HTTPS_PROXY: 'http://proxy.test:8080',
+        http_proxy: 'http://proxy.test:8080',
+        https_proxy: 'http://proxy.test:8080',
+        ALL_PROXY: 'http://proxy.test:8080',
+        all_proxy: 'http://proxy.test:8080',
+        NO_PROXY: 'localhost',
+        no_proxy: 'localhost',
+      },
     );
     expect(env['PATH']).toBe('/bin');
     expect(env['HOME']).toBe('/h');
@@ -20,6 +35,20 @@ describe('gatewayEnv', () => {
     expect(env['GATEWAY_STREAM_ENABLED']).toBeUndefined();
     expect(env['GATEWAY_UPSTREAM__OPENAI__API_KEY']).toBeUndefined();
     expect(env['GATEWAY_LOG_LEVEL']).toBe('info');
+    expect(env['NODE_ENV']).toBeUndefined();
+    expect(env['HTTP_PROXY']).toBeUndefined();
+    expect(env['HTTPS_PROXY']).toBeUndefined();
+    expect(env['http_proxy']).toBeUndefined();
+    expect(env['https_proxy']).toBeUndefined();
+    expect(env['ALL_PROXY']).toBeUndefined();
+    expect(env['all_proxy']).toBeUndefined();
+    expect(env['NO_PROXY']).toBeUndefined();
+    expect(env['no_proxy']).toBeUndefined();
+  });
+
+  it('does not inject NODE_ENV, even when the parent has none at all', () => {
+    const env = gatewayEnv({}, { PATH: '/bin' });
+    expect('NODE_ENV' in env).toBe(false);
   });
 });
 

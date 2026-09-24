@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // The playground (SMA-635 spec § 6.3). CLIENT component. The conversation lives in React state
-// only; nothing is stored. Each turn sends the full history, a stopped turn's partial answer stays
-// in it, and a failed turn with no content is not sent again. The browser never holds a token: it
-// posts to the zone's own route handler, which holds the session.
+// only; nothing is stored. Each turn sends the full history, built by historyOf: a stopped turn's
+// partial answer stays in it; an empty stopped turn drops only its assistant entry; an empty
+// failed turn drops the assistant entry AND its user message, so history never holds two user
+// messages in a row. The UI still shows every turn. The browser never holds a token: it posts to
+// the zone's own route handler, which holds the session.
 'use client';
 
 import { useEffect, useRef, useState, type FormEvent, type ReactElement } from 'react';
@@ -44,6 +46,41 @@ function fromStream(error: ChatStreamError): ShownError {
   return shown(error.message, error.correlationId, error.reason);
 }
 
+/**
+ * The incomplete-stream error and a non-JSON non-2xx answer each carry no correlation id of their
+ * own. When that happens, fall back to the `paigasus-correlation-id` header of the fetch response
+ * itself, so the person still has a reference to give support.
+ */
+function withHeaderFallback(error: ShownError, response: Response): ShownError {
+  return error.correlationId === null ? { ...error, correlationId: response.headers.get('paigasus-correlation-id') } : error;
+}
+
+/**
+ * Builds the history sent with the next request. `turns` is a flat sequence of (user, assistant)
+ * pairs, always pushed together by `send` below.
+ * - An empty STOPPED assistant turn is dropped; its user message stays (a stopped turn WITH
+ *   content stays, with its user message).
+ * - An empty FAILED assistant turn is dropped WITH the user message that started it, so the
+ *   history never holds two user messages in a row.
+ * The UI still shows every turn; only the sent history changes.
+ */
+function historyOf(turns: readonly Turn[]): readonly { readonly role: Role; readonly content: string }[] {
+  const kept: { readonly role: Role; readonly content: string }[] = [];
+  for (let i = 0; i < turns.length; i += 2) {
+    const question = turns[i];
+    const answerTurn = turns[i + 1];
+    if (question === undefined) break;
+    if (answerTurn === undefined) {
+      kept.push({ role: question.role, content: question.content });
+      continue;
+    }
+    if (answerTurn.content === '' && answerTurn.status === 'failed') continue;
+    kept.push({ role: question.role, content: question.content });
+    if (!(answerTurn.content === '' && answerTurn.status === 'stopped')) kept.push({ role: answerTurn.role, content: answerTurn.content });
+  }
+  return kept;
+}
+
 export function Playground({ orgId, notice }: { readonly orgId: string; readonly notice: ComposerNotice }): ReactElement {
   const [model, setModel] = useState('');
   const [draft, setDraft] = useState('');
@@ -63,7 +100,7 @@ export function Playground({ orgId, notice }: { readonly orgId: string; readonly
   async function send(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
     if (!notice.enabled || running || model.trim() === '' || draft.trim() === '') return;
-    const history = turns.filter((turn) => !(turn.status === 'failed' && turn.content === '')).map((turn) => ({ role: turn.role, content: turn.content }));
+    const history = historyOf(turns);
     const question: Turn = { id: nextIdRef.current++, role: 'user', content: draft, status: 'done' };
     const answer: Turn = { id: nextIdRef.current++, role: 'assistant', content: '', status: 'streaming' };
     setTurns((all) => [...all, question, answer]);
@@ -84,7 +121,7 @@ export function Playground({ orgId, notice }: { readonly orgId: string; readonly
         signal: controller.signal,
       });
       if (!response.ok || response.body === null) {
-        fail(await errorOfResponse(response));
+        fail(withHeaderFallback(await errorOfResponse(response), response));
         return;
       }
       const parser = createChatStreamParser();
@@ -99,7 +136,7 @@ export function Playground({ orgId, notice }: { readonly orgId: string; readonly
           } else {
             over = true;
             if (item.kind === 'done') update(answer.id, (turn) => ({ ...turn, status: 'done' }));
-            else fail(fromStream(item.error));
+            else fail(withHeaderFallback(fromStream(item.error), response));
           }
         }
         if (over) {

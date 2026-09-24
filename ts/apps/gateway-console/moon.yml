@@ -424,6 +424,13 @@ tasks:
       # SMA-635. The `playground` project runs the real gateway binary, so a gateway edit — its own
       # sources, its manifest, the lock, or any crate in its `fileGroups.upstreams` — must select
       # this task. Without these lines an edit to auth.rs runs no e2e row.
+      #
+      # This list copies rs/crates/services/paigasus-gateway/moon.yml's `fileGroups.upstreams` BY
+      # HAND, plus the gateway's own src/Cargo.toml/lockfile lines above it. No gate keeps the two
+      # lists equal: if the gateway crate's own `deps`/`fileGroups.upstreams` grows a new crate,
+      # that crate's paths must be added here too, or an edit to it selects no e2e row and the
+      # `playground` tier goes stale silently. The binary itself cannot go stale the same way,
+      # because `paigasus-gateway-rs:e2e-bin` is never cached (built fresh every run).
       - '/rs/crates/services/paigasus-gateway/src/**/*'
       - '/rs/crates/services/paigasus-gateway/Cargo.toml'
       - '/rs/Cargo.lock'

@@ -29,7 +29,7 @@ export type { Auth, TransportOptions } from './iam';
 export { ApiKeyStatus, NodeStatus } from './iam/types';
 
 export { DEFAULT_HEADER_TIMEOUT_MS, ORG_HEADER, createChatClient, createTerminalFrameParser } from './chat';
-export type { ChatClient, ChatClientOptions, ChatResult } from './chat';
+export type { ChatCallOptions, ChatClient, ChatClientOptions, ChatResult } from './chat';
 
 export { ErrorDomain, ErrorReason, grpcCodeName, mapError, presentationForGrpcCode, presentationForHttpStatus, presentationForTransportCause, presentationOverride } from './errors';
 export type { ErrorInput, PaigasusError, Presentation, TransportCause, TransportInfo } from './errors';

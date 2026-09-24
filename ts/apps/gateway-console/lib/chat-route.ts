@@ -9,8 +9,9 @@
 // <PaigasusError> }` with the request's correlation id.
 //
 // The stream is relayed UNCHANGED and at once, chunk by chunk. The gateway's terminal frame and a
-// failure of the gateway stream itself each produce ONE injected `event: paigasus-error` record;
-// its leading blank line closes any partial record. A pull-based ReadableStream is used, not a
+// failure of the gateway stream itself each produce ONE injected `event: paigasus-error` record,
+// with the fixed text STREAM_FAILED_MESSAGE; its leading blank line closes any partial record. A
+// pull-based ReadableStream is used, not a
 // TransformStream: a TransformStream is errored together with its source, so it could not inject
 // an event after a source error. Its cancel() cancels the SDK body, so a browser cancel reaches
 // the gateway even when request.signal does not fire (plan Task 1, M2).
@@ -24,8 +25,10 @@ import { isUuid, neverReachedIam, sessionExpired } from '@paigasus/console-core'
 export const CHAT_HEADER_TIMEOUT_MS = 35_000;
 /** The gateway's default `max_request_bytes` (config.rs:190). The gateway enforces its own limit too. */
 export const GATEWAY_DEFAULT_MAX_REQUEST_BYTES = 1_048_576;
-/** Replaces an upstream message that is not a Paigasus envelope: an OpenAI 401 holds a masked piece of the gateway's key. */
+/** Replaces an upstream message that is not a Paigasus envelope: an OpenAI 401 holds a masked piece of the gateway's key. Used ONLY for the error-arm scrub. */
 export const UPSTREAM_REJECTED_MESSAGE = 'The model provider rejected the request.';
+/** Used for every injected `paigasus-error` event on an already-started stream: the gateway's own terminal frame and a source-stream failure alike. Never the upstream's text. */
+export const STREAM_FAILED_MESSAGE = 'The answer stream failed.';
 
 const CORRELATION_HEADER = 'paigasus-correlation-id';
 
@@ -122,13 +125,14 @@ function relay(source: ReadableStream<Uint8Array>, ids: { readonly correlationId
   const reader = source.getReader();
   const parser = createTerminalFrameParser(200, ids);
   const encoder = new TextEncoder();
-  // ALWAYS the generic text, never `scrub`'s conditional one: the upstream controls every byte of
-  // a forwarded frame, including `code: "upstream-error"` paired with any `message` it likes (fix
-  // round 1, item 6). `upstream-error` is itself a REGISTERED reason (ERROR_REASON_UPSTREAM_ERROR
-  // = 307), so `scrub`'s `reason === null` guard does not fire for it and would otherwise let an
+  // ALWAYS the generic STREAM_FAILED_MESSAGE, never `scrub`'s conditional one and never the
+  // upstream's own text: the upstream controls every byte of a forwarded frame, including
+  // `code: "upstream-error"` paired with any `message` it likes (fix round 1, item 6).
+  // `upstream-error` is itself a REGISTERED reason (ERROR_REASON_UPSTREAM_ERROR = 307), so
+  // `scrub`'s `reason === null` guard does not fire for it and would otherwise let an
   // upstream-chosen string (a leaked key fragment, for example) straight into the injected event.
   const event = (error: PaigasusError): Uint8Array =>
-    encoder.encode(`\n\nevent: paigasus-error\ndata: ${JSON.stringify(withCorrelation({ ...error, message: UPSTREAM_REJECTED_MESSAGE }, ids.correlationId))}\n\n`);
+    encoder.encode(`\n\nevent: paigasus-error\ndata: ${JSON.stringify(withCorrelation({ ...error, message: STREAM_FAILED_MESSAGE }, ids.correlationId))}\n\n`);
   let finished = false;
   return new ReadableStream<Uint8Array>({
     async pull(controller) {

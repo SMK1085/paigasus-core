@@ -33,6 +33,19 @@ export async function startGateway(opts: { readonly iamGrpcUrl: string; readonly
     const child: ChildProcess = spawn(GATEWAY_BIN, [], {
       cwd,
       stdio: ['ignore', 'pipe', 'pipe'],
+      // gatewayEnv() returns a plain string record and deliberately carries no NODE_ENV.
+      // child_process.spawn's `env` option is typed NodeJS.ProcessEnv, whose NODE_ENV is a
+      // REQUIRED property only because Next's global augmentation adds it — the gateway is a Rust
+      // binary and never reads it. The double cast documents that gap; the runtime object is
+      // unaffected.
+      //
+      // The cast IS necessary under `tsc -p tsconfig.json` (this app's own config, which includes
+      // next-env.d.ts and so the augmented, NODE_ENV-required ProcessEnv). ESLint's projectService
+      // resolves this file against tests/tsconfig.json instead (the nearest one, extending the
+      // plain workspace base with no Next augmentation), under which NodeJS.ProcessEnv has no
+      // required NODE_ENV and the cast looks redundant. Both tsconfigs are real repo config, not a
+      // mistake on either side — see tests/tsconfig.json's own comment.
+      // eslint-disable-next-line @typescript-eslint/no-unnecessary-type-assertion
       env: gatewayEnv({
         GATEWAY_HTTP_ADDR: `127.0.0.1:${String(port)}`,
         GATEWAY_LOG_LEVEL: 'info',
@@ -42,7 +55,7 @@ export async function startGateway(opts: { readonly iamGrpcUrl: string; readonly
         GATEWAY_UPSTREAM__OPENAI__API_KEY: GATEWAY_OPENAI_KEY,
         GATEWAY_METRICS__ENABLED: 'false',
         GATEWAY_STREAM_ENABLED: 'true',
-      }),
+      }) as unknown as NodeJS.ProcessEnv,
     });
     child.stdout?.on('data', (chunk: Buffer) => {
       output += chunk.toString('utf8');

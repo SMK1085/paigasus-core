@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ChatCallOptions, ChatClient, ChatResult } from '@paigasus/sdk/chat';
 import { mapError } from '@paigasus/sdk/errors';
 import { logger } from '@paigasus/console-core';
-import { CHAT_HEADER_TIMEOUT_MS, UPSTREAM_REJECTED_MESSAGE, createChatRoute, type ChatRouteDeps } from '../../lib/chat-route';
+import { CHAT_HEADER_TIMEOUT_MS, STREAM_FAILED_MESSAGE, UPSTREAM_REJECTED_MESSAGE, createChatRoute, type ChatRouteDeps } from '../../lib/chat-route';
 
 const ORIGIN = 'https://console.test';
 const ORG = '0190a100-0000-7000-8000-0000000000e1';
@@ -256,7 +256,7 @@ describe('the gateway call', () => {
     const match = /\n\nevent: paigasus-error\ndata: (.+)\n\n$/.exec(text);
     expect(match).not.toBeNull();
     const event = JSON.parse(match?.[1] ?? '{}') as { message: string; rawReason: string; correlationId: string };
-    expect(event.message).toBe(UPSTREAM_REJECTED_MESSAGE);
+    expect(event.message).toBe(STREAM_FAILED_MESSAGE);
     expect(event.rawReason).toBe('upstream-error');
     expect(event.correlationId).toBe('gw-corr');
   });
@@ -279,7 +279,7 @@ describe('the gateway call', () => {
     const eventData = match?.[1] ?? '';
     expect(eventData).not.toContain('sk-proj-LEAK');
     const event = JSON.parse(eventData || '{}') as { message: string; rawReason: string; correlationId: string };
-    expect(event.message).toBe(UPSTREAM_REJECTED_MESSAGE);
+    expect(event.message).toBe(STREAM_FAILED_MESSAGE);
     expect(event.rawReason).toBe('upstream-error');
     expect(event.correlationId).toBe('gw-corr');
   });
@@ -290,7 +290,7 @@ describe('the gateway call', () => {
     const text = await (await route(post(JSON.stringify(GOOD)))).text();
     const match = /\n\nevent: paigasus-error\ndata: (.+)\n\n$/.exec(text);
     const event = JSON.parse(match?.[1] ?? '{}') as { message: string; transport: { kind: string; cause: string }; correlationId: string };
-    expect(event.message).toBe(UPSTREAM_REJECTED_MESSAGE);
+    expect(event.message).toBe(STREAM_FAILED_MESSAGE);
     expect(event.transport).toEqual({ kind: 'transport', cause: 'network' });
     expect(event.correlationId).toBe(CORRELATION);
   });

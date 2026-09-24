@@ -6,11 +6,26 @@
 
 export type GatewayLogLine = { readonly fields?: Readonly<Record<string, unknown>> };
 
-/** The parent's env minus RUST_LOG and every GATEWAY_* variable, plus `values`. */
-export function gatewayEnv(values: Readonly<Record<string, string>>, parent: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = { NODE_ENV: 'production' };
+/**
+ * Variables stripped from the parent's env before it reaches the gateway child, on top of every
+ * GATEWAY_* one. NODE_ENV is a Node-only convention the gateway (a Rust binary) never reads, so
+ * it is dropped and NOT re-injected — the child gets no NODE_ENV at all. The proxy variables (both
+ * casings) could redirect the gateway's own OpenAI/IAM egress through an unrelated proxy the test
+ * host happens to have set.
+ */
+const STRIPPED_KEYS = new Set(['NODE_ENV', 'RUST_LOG', 'HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy', 'ALL_PROXY', 'all_proxy', 'NO_PROXY', 'no_proxy']);
+
+/**
+ * The parent's env minus STRIPPED_KEYS and every GATEWAY_* variable, plus `values`. Typed as a
+ * plain string record, not `NodeJS.ProcessEnv`: Next's global augmentation makes that interface's
+ * `NODE_ENV` a REQUIRED property, which this function deliberately does not set (see
+ * STRIPPED_KEYS above). The one caller that must satisfy `child_process.spawn`'s `env` option
+ * casts explicitly at that boundary (gateway-process.ts), not here.
+ */
+export function gatewayEnv(values: Readonly<Record<string, string>>, parent: Readonly<Record<string, string | undefined>> = process.env): Record<string, string> {
+  const env: Record<string, string> = {};
   for (const [key, value] of Object.entries(parent)) {
-    if (key === 'NODE_ENV' || key === 'RUST_LOG' || key.startsWith('GATEWAY_')) continue;
+    if (value === undefined || STRIPPED_KEYS.has(key) || key.startsWith('GATEWAY_')) continue;
     env[key] = value;
   }
   return { ...env, ...values };
