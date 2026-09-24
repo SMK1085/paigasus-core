@@ -100,6 +100,11 @@ expect_fail "basePath with trailing slash" "it must not end in" \
 expect_fail "duplicate basePath" "is already used by zone" \
   --set zones.gateway.enabled=true --set zones.gateway.backend.url=http://gw.example.test:8088 \
   --set zones.gateway.basePath=/iam
+# oidc.caBundle (SMA-513 PR 3, spec § 5.2). The pods mount ONE key of the ConfigMap through
+# `items`, so an empty key would render a volume item with no key, which the API server refuses at
+# apply time, long after `helm template` said yes. Refuse it at render time instead.
+expect_fail "oidc.caBundle key empty" "oidc.caBundle.key is empty while oidc.caBundle.existingConfigMap is set" \
+  --set oidc.caBundle.existingConfigMap=paigasus-idp-ca --set oidc.caBundle.key=""
 
 expect_render "iam only" --set zones.gateway.enabled=false
 expect_render "iam and gateway" --set zones.gateway.enabled=true \

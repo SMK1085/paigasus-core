@@ -1,0 +1,44 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# The kind job's release values, phase A (SMA-513 PR 3, spec § 4.5): both zones on. The names
+# below are the ones ci/kind/run.sh makes: the three Secrets, the CA ConfigMap, the TLS Secret, the
+# endpoint-less gateway Service, and the three images it loads with `kind load` (tag `dev` is not
+# `latest`, so the kubelet uses IfNotPresent and never pulls, decision B11).
+#
+# repo:helm-render row 7 renders this file (and this file plus b.yaml) on every PR. A new REQUIRED
+# chart value must be set here too, or that required check goes red.
+zones:
+  iam:
+    console:
+      image:
+        repository: iam-console
+        tag: dev
+      replicas: 1
+    backend:
+      image:
+        repository: paigasus-iam
+        tag: dev
+      apiKeysPepperSecret: paigasus-iam-pepper
+  gateway:
+    enabled: true
+    console:
+      image:
+        repository: gateway-console
+        tag: dev
+      replicas: 1
+    backend:
+      # A Service with no endpoints (ci/kind/manifests/gateway-absent.yaml). The probe gets a
+      # refused connection, so the gateway zone is `degraded` in phase A (R3-control).
+      url: http://gateway-absent.paigasus.svc.cluster.local:8088
+ingress:
+  host: console.paigasus.test
+  className: traefik
+  tlsSecretName: console-tls
+oidc:
+  issuer: https://idp.paigasus.test/realms/paigasus
+  clientId: paigasus-console
+  existingSecret: paigasus-oidc
+  caBundle:
+    existingConfigMap: paigasus-idp-ca
+postgres:
+  existingSecret: paigasus-postgres

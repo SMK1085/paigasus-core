@@ -1,0 +1,79 @@
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+
+# The kind job (`ci/kind/`)
+
+`.github/workflows/chart.yml` installs `charts/paigasus` into a kind cluster behind Traefik. It uses a real Keycloak and runs the Playwright specs in `ts/apps/iam-console/tests/cluster/`. This job is NOT a required check. A broken chart makes `main` fail, not the pull request. `repo:helm-render` row 7 renders `values/a.yaml` alone, then renders `values/a.yaml` + `values/b.yaml` together on every pull request. A values break makes a required check fail.
+
+Spec: `docs/superpowers/specs/2026-09-23-sma-513-pr3-kind-chart-job-design.md`.
+
+## Modes
+
+| Command | Does |
+| -- | -- |
+| `bash ci/kind/run.sh up` | kind v0.31.0 with a Kubernetes 1.31.14 node; Traefik 3.7.13 (chart 41.6.0, SHA-256 checked); a throwaway CA and two leaves; the CoreDNS `hosts` block; Postgres, Redis and Keycloak; the three chart Secrets; the discovery preflight |
+| `bash ci/kind/run.sh images` | `ci/images/run.sh build iam` and `build-console`, then `kind load` the three images: `paigasus-iam:dev`, `iam-console:dev`, `gateway-console:dev` |
+| `bash ci/kind/run.sh install a` | `helm install` with `values/a.yaml` (both zones, the CA bundle set) |
+| `bash ci/kind/run.sh specs a` | Playwright project `phase-a` (tests R1, R1-control, R2, R3-control) |
+| `bash ci/kind/run.sh upgrade b` | `helm upgrade` with `a.yaml` + `b.yaml` (the gateway zone off), then the settle step |
+| `bash ci/kind/run.sh specs b` | Playwright project `phase-b` (test R3), then check that R3's Deployment does not exist |
+| `bash ci/kind/run.sh diagnose` | write evidence into `<state>/diagnose` |
+| `bash ci/kind/run.sh down` | delete the cluster |
+
+The state directory is `$PAIGASUS_KIND_STATE`, or `$RUNNER_TEMP/paigasus-kind`, or `$TMPDIR/paigasus-kind`. It holds the per-run credentials. Only the `diagnose/` subdirectory is uploaded.
+
+## Exit codes
+
+| Code | Meaning |
+| -- | -- |
+| 0 | pass |
+| 1 | a spec or an assertion failed. A failed `helm install` or `helm upgrade` also reads as 1: the chart is the unit under test |
+| 2 | an infrastructure error: a tool missing, the cluster, a dependency, the preflight, a build or an image load |
+
+## Reading the evidence
+
+On a failure or cancel, `chart.yml` runs `diagnose` and uploads `kind-evidence` (7 days).
+
+- `get-all.txt`, `ingress.txt`, `events.txt`, `coredns.yaml` — the cluster state
+- `logs/<namespace>-<pod>.log` and `.previous.log` — every pod in `paigasus`, `paigasus-deps` and `traefik`. `describe/` holds each pod that is not Ready
+- `helm-manifest.yaml` — what the chart rendered
+- `idp-preflight.json` — the discovery document the pods saw
+- `playwright/phase-a|b/` — the HTML report and the traces of failed tests
+
+Secrets and the realm ConfigMap are never collected. The Playwright traces hold the per-run user password as typed. It is a throwaway that is valid only while that one cluster exists.
+
+Where to look first:
+
+- The login ends on the IAM console, but IAM shows as unusable: IAM refused the token. Read `logs/paigasus-*-iam-backend-*.log` for the JWKS fetch or the `aud` check (spec F3, F4).
+- The preflight fails: read `idp-preflight.json` and the Keycloak log. A wrong `issuer` comes from Keycloak hostname options. A TLS error comes from the CA or the CoreDNS block.
+
+## Hazards
+
+- **Keycloak tabs (SMA-652).** A Keycloak page must not be re-used or closed after a login. The login helper never does either.
+- **nginx proxy buffers.** Keycloak's large `Set-Cookie` headers can exceed an nginx proxy buffer and cause a 502 at login. This job uses Traefik, so this does not apply. If the job moves to an nginx controller, set `proxy-buffer-size` on the Keycloak Ingress.
+- **Here-strings in `images`.** `ci/images/run.sh` uses here-strings, so `run.sh images` can hang on a host whose new pipe holds 512 bytes (see root `CLAUDE.md`). The other modes do not use here-strings.
+- **The CoreDNS `hosts` block is a kind-only device.** A real cluster needs real DNS for the IdP.
+
+## Pins and their refresh
+
+| Pin | Where | Refresh |
+| -- | -- | -- |
+| kind node image | `run.sh` `KIND_NODE_IMAGE` | the release notes of the kind version `chart.yml` pins |
+| kind, kubectl | `chart.yml` (`helm/kind-action` inputs) | kind v0.31.0 is the newest release with a 1.31 node |
+| Traefik chart | `run.sh` `TRAEFIK_CHART_VERSION`, `TRAEFIK_CHART_SHA256` | `helm pull traefik --repo https://traefik.github.io/charts --version <v>`; `shasum -a 256` |
+| Traefik image | `traefik-values.yaml` | `docker buildx imagetools inspect docker.io/traefik:<v> --format '{{json .Manifest.Digest}}'` |
+| Postgres, Redis, Keycloak, curl | `manifests/*.yaml` | Dependabot (`/ci/kind/manifests`); the command is in each file |
+
+## Local run
+
+Best effort only. Docker Desktop's containerd image store differs from the runner's classic store (see root memory: Docker Desktop store vs CI runner), so an image load can fail here and pass in CI. CI is the reference. You need Docker, kind v0.31.0, kubectl, `proto install helm node pnpm`, `pnpm --dir ts install`, the Chromium from `pnpm --dir ts/apps/iam-console exec playwright install chromium`, and free host ports 80 and 443.
+
+```bash
+export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
+bash ci/kind/run.sh up
+bash ci/kind/run.sh images        # set PAIGASUS_KIND_LOAD=archive if docker-image fails
+bash ci/kind/run.sh install a
+bash ci/kind/run.sh specs a
+bash ci/kind/run.sh upgrade b
+bash ci/kind/run.sh specs b
+bash ci/kind/run.sh down
+```

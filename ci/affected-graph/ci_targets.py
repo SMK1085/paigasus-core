@@ -382,7 +382,7 @@ SELF_TASK_EXPECTED_GLOBS = {
         "ci/next-public/**/*",
         "ts/**/*",
     ),
-    # SMA-513 PR 2b. Two globs then five literals, in check_gate_inputs' comparison order (globs
+    # SMA-513 PR 2b. Three globs then five literals, in check_gate_inputs' comparison order (globs
     # sorted, then files sorted — `.proto/plugins/helm.toml` sorts before `.prototools` because
     # `/` < `t`). The two helm files are the byte pin the golden files depend on: drop them and a
     # helm bump serves a cached PASS. The proto and the two TypeScript files are what check 1a
@@ -390,6 +390,8 @@ SELF_TASK_EXPECTED_GLOBS = {
     "helm-render": (
         "charts/**/*",
         "ci/helm-render/**/*",
+        # SMA-513 PR 3: row 7 renders the kind job's values files.
+        "ci/kind/values/**/*",
         ".proto/plugins/helm.toml",
         ".prototools",
         "contracts/proto/paigasus/common/v1/service_info.proto",
@@ -1404,7 +1406,7 @@ HELM_RENDER_SH_CALL_SITES = (
     "real_rc=0; real_run || real_rc=$?",
     'exit "$real_rc"',
     'for s in "$CHART"/tests/*.sh; do',
-    "CHART_SCRIPT_FLOOR=6",
+    "CHART_SCRIPT_FLOOR=7",
     'if [ "${#scripts[@]}" -lt "$CHART_SCRIPT_FLOOR" ]; then',
     'cs_rc=0; run_chart_script "$s" || cs_rc=$?',
     '"$BASH" "$1" --set ingress.host=console.example.test || raw=$?',

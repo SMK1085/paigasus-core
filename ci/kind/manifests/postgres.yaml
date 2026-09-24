@@ -1,0 +1,56 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Postgres for IAM in the kind job (spec § 4.2 step 5). The image re-uses the digest pin of
+# ci/images/run.sh:50. Dependabot (/ci/kind/manifests) can refresh this copy on its own; the two
+# pins can then differ for a week, which is harmless. Refresh by hand with:
+#   docker buildx imagetools inspect postgres:16-alpine --format '{{json .Manifest.Digest}}'
+# The password is per run: run.sh makes the Secret postgres-auth.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  namespace: paigasus-deps
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: postgres
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16-alpine@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685
+          env:
+            - name: POSTGRES_USER
+              value: paigasus
+            - name: POSTGRES_DB
+              value: iam
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-auth
+                  key: password
+          ports:
+            - name: postgres
+              containerPort: 5432
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "paigasus", "-d", "iam"]
+            periodSeconds: 2
+            failureThreshold: 60
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: paigasus-deps
+spec:
+  selector:
+    app.kubernetes.io/name: postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres

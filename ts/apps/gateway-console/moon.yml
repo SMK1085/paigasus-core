@@ -431,6 +431,8 @@ tasks:
       - '!/ts/apps/iam-console/.next/**'
       - '!/ts/apps/iam-console/tests/fixtures/**/.next/**'
       - '!/ts/apps/iam-console/tests/fixtures/*/next-env.d.ts'
+      # SMA-513 PR 3: the iam-console cluster specs run only in the kind job, never in this tier.
+      - '!/ts/apps/iam-console/tests/cluster/**'
     options:
       # A real build and a real Chromium. A cached PASS would replay a green that tested nothing.
       #

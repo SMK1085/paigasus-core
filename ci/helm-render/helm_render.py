@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
-"""repo:helm-render — checks 1, 1a, 2, 3 and 4 over `helm template` renders of a chart.
+"""repo:helm-render — checks 1, 1a, 2, 3, 4 and 7 over `helm template` renders of a chart.
 
 Usage:
     helm_render.py --chart <dir>     run every check against the chart in <dir>
@@ -49,8 +49,12 @@ RELEASE = "paigasus"
 SENTINEL_URL = "http://gateway-sentinel.example.test:8088"
 SENTINEL_HOST = "gateway-sentinel.example.test"
 
-# The required values, as ONE constant. A seventh copy of the list the six chart scripts hold
-# (spec § 10 risk 4); it differs from theirs only in zones.gateway.backend.url, which is the
+# Row 7 (SMA-513 PR 3 spec § 5.5): the kind job's values files. The kind job is not a required
+# check; this row is, so a chart change that breaks those values reds before merge.
+KIND_VALUES = REPO_ROOT / "ci" / "kind" / "values"
+
+# The required values, as ONE constant. One of eight copies of the list the seven chart scripts
+# hold (spec § 10 risk 4); it differs from theirs only in zones.gateway.backend.url, which is the
 # sentinel here so check 2 can find it. A missing value makes every render fail, which is rc 2.
 STUB_VALUES = (
     ("ingress.host", "console.example.test"),
@@ -105,6 +109,7 @@ EXPECTED_ROW_LABELS = (
     "3a-prime",
     "3b",
     "3c",
+    "7 kind-values",
 )
 
 
@@ -582,6 +587,39 @@ def check4(label, docs):
     ]
 
 
+# --------------------------------------------------------------------------- check 7
+
+
+def check7(chart, run=subprocess.run, helm=None, values_dir=KIND_VALUES):
+    """Row 7: ci/kind/values/a.yaml, and a.yaml plus b.yaml, render against `chart` with rc 0.
+
+    A render that fails is an ASSERTION (the row fails, rc 3): the chart and the kind values
+    disagree, which is exactly what this row exists to catch. A missing values file is rc 2.
+    `run`, `helm` and `values_dir` are parameters only so self_test() can drive the row without
+    helm; production never passes them.
+    """
+    helm = helm or shutil.which("helm")
+    if helm is None:
+        raise InfraError("helm is not on PATH; run this module through ci/helm-render/run.sh")
+    a, b = Path(values_dir) / "a.yaml", Path(values_dir) / "b.yaml"
+    for f in (a, b):
+        if not f.is_file():
+            raise InfraError(f"the kind values file {f} does not exist")
+
+    def body():
+        problems = []
+        for label, files in (("a.yaml", (a,)), ("a.yaml + b.yaml", (a, b))):
+            cmd = [helm, "template", RELEASE, str(chart), "--kube-version", KUBE_VERSION]
+            for f in files:
+                cmd += ["-f", str(f)]
+            proc = run(cmd, capture_output=True, text=True, check=False)
+            if proc.returncode != 0:
+                problems.append(f"{label}: helm template exited {proc.returncode}: {proc.stderr.strip()}")
+        return problems
+
+    return _row("7 kind-values", body)
+
+
 # --------------------------------------------------------------------------- run
 
 
@@ -634,6 +672,7 @@ def run_checks(chart):
             rows.append(check2(docs, raw))
         rows += check4(label, docs)
     rows += check3(chart)
+    rows.append(check7(chart))
     _check_row_inventory([r.row for r in rows])
     return rows
 
@@ -932,10 +971,36 @@ def self_test():
     expect_infra("parse_docs invalid YAML", lambda: parse_docs("a: [\n"))
     expect_infra("parse_docs a non-mapping document", lambda: parse_docs("- a\n- b\n"))
 
+    # ---- row 7 (kind values): the row follows helm's exit status; a missing file is rc 2
+    class _Proc:
+        def __init__(self, rc):
+            self.returncode, self.stderr = rc, "stub stderr"
+
+    with tempfile.TemporaryDirectory(prefix="helm-render-7-") as tmp:
+        (Path(tmp) / "a.yaml").write_text("{}\n")
+        (Path(tmp) / "b.yaml").write_text("{}\n")
+        calls = []
+
+        def ok_run(cmd, **_kw):
+            calls.append(cmd)
+            return _Proc(0)
+
+        expect("check7 both renders exit 0", [check7(Path(tmp), run=ok_run, helm="helm-stub", values_dir=tmp)], passing=("7 kind-values",))
+        if [c.count("-f") for c in calls] != [1, 2]:
+            failures.append(f"check7: expected a render with a.yaml and one with a.yaml + b.yaml, got {calls}")
+        expect("check7 a.yaml fails to render", [check7(Path(tmp), run=lambda cmd, **_kw: _Proc(1), helm="helm-stub", values_dir=tmp)], fail=("7 kind-values",))
+        expect(
+            "check7 only the overlay fails to render",
+            [check7(Path(tmp), run=lambda cmd, **_kw: _Proc(1 if cmd.count("-f") == 2 else 0), helm="helm-stub", values_dir=tmp)],
+            fail=("7 kind-values",),
+        )
+        (Path(tmp) / "b.yaml").unlink()
+        expect_infra("check7 a missing b.yaml raises InfraError", lambda: check7(Path(tmp), run=ok_run, helm="helm-stub", values_dir=tmp))
+
     # ---- row inventory floor (F1): EXPECTED_ROW_LABELS' own arity and content, plus
     # _check_row_inventory's behaviour on a missing, an extra and a reordered row.
-    if len(EXPECTED_ROW_LABELS) != 20:
-        failures.append(f"EXPECTED_ROW_LABELS: expected 20 labels, got {len(EXPECTED_ROW_LABELS)}")
+    if len(EXPECTED_ROW_LABELS) != 21:
+        failures.append(f"EXPECTED_ROW_LABELS: expected 21 labels, got {len(EXPECTED_ROW_LABELS)}")
     if len(set(EXPECTED_ROW_LABELS)) != len(EXPECTED_ROW_LABELS):
         failures.append("EXPECTED_ROW_LABELS: contains a duplicate label")
     _check_row_inventory(EXPECTED_ROW_LABELS)  # the constant against itself: must not raise
@@ -956,7 +1021,7 @@ def self_test():
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="repo:helm-render checks 1, 1a, 2, 3 and 4")
+    parser = argparse.ArgumentParser(description="repo:helm-render checks 1, 1a, 2, 3, 4 and 7")
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--chart", type=Path, help="the chart directory to render and check")
     mode.add_argument("--self-test", action="store_true", help="run the in-process rows")

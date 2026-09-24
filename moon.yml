@@ -977,16 +977,17 @@ tasks:
 
   helm-render:
     description: 'Render charts/paigasus and assert zone coupling and routing, no trace of a disabled zone, independent rollout, port and security-context agreement, and run every chart script (SMA-513).'
-    # WHY THIS EXISTS — charts/paigasus/tests/ holds six scripts (lint, golden files, coupling,
-    # maps, names, env, refusals) and until this task nothing ran them in CI. helm_render.py adds
+    # WHY THIS EXISTS — charts/paigasus/tests/ holds seven scripts (render, ingress, maps, names,
+    # env, refusals, ca-bundle) and until this task nothing ran them in CI. helm_render.py adds
     # the properties they do not assert: an independent expected zone set, the route target, a
     # sentinel-value leak search, spec.template-only rollout diffs, and the chart's own port and
     # security-context agreement (spec 2026-09-22-sma-513-pr2b-helm-render-gate-design.md § 5).
     #
     # INPUTS. `.prototools` and `.proto/plugins/helm.toml` are the helm pin: the golden files are
     # a byte pin of that helm, so without them a helm bump serves a cached PASS. The proto and the
-    # two TypeScript files are what check 1a reads. There are no `deps`: nothing here reads a
-    # build output.
+    # two TypeScript files are what check 1a reads. ci/kind/values/**/* is what row 7 renders;
+    # without it an edit to the kind values serves a cached PASS. There are no `deps`: nothing
+    # here reads a build output.
     #
     # `--self-test` and `--negative-control` run FIRST and in the SAME block. `set -euo pipefail`
     # is REQUIRED: Moon does not enable errexit for `script:` blocks and takes the block's status
@@ -1003,6 +1004,7 @@ tasks:
       - '.proto/plugins/helm.toml'
       - 'charts/**/*'
       - 'ci/helm-render/**/*'
+      - 'ci/kind/values/**/*'
       - 'contracts/proto/paigasus/common/v1/service_info.proto'
       - 'ts/packages/paigasus-discovery/src/core/state.ts'
       - 'ts/packages/paigasus-proto/src/capability.ts'

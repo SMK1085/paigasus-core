@@ -161,7 +161,7 @@ spec:
                   key: database-url
             # authn.issuers has no default and is a hard boot error if empty (IamConfig::load).
             # The console's own OIDC client id is the audience IAM must accept: it is the client
-            # the ID tokens IAM validates were issued to.
+            # the access tokens IAM validates were issued to.
             - name: IAM_AUTHN__ISSUERS
               value: "[{issuer=\"https://idp.example.test/realms/paigasus\",audiences=[\"paigasus-console\"]}]"
             # ApiKeyConfig::pepper decodes this at boot and IamConfig::validate rejects fewer
