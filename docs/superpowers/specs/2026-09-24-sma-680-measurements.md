@@ -388,8 +388,12 @@ ci-targets that Moon scheduled. All 6 passed:
 | `repo:affected-smoke` | pass (Homebrew bash 5.3.15; no hang) |
 | `repo:actionlint` | pass; the preflight read a pipe capacity of 65536 bytes, so this is a real local verdict |
 
-`.moon/cache/ciReport.json`: 25 passed, 1 cached, 0 failed — "25 passed, 1 cached" counts all 26
-actions in ciReport.json, which include dependency and setup actions, not only the 6 scheduled
-ci-targets. INFERRED: the `repo:release-parity` cache hit replays a real run on the same inputs,
-since Task 2 ran that gate after the key change. The run was at branch head `86e67431`; the
-commits after it change only files under `docs/superpowers/`.
+Moon's CI report: 25 passed, 1 cached, 0 failed. These numbers count all 26 actions in the report,
+which include dependency and setup actions, not only the 6 scheduled ci-targets. INFERRED: the
+`repo:release-parity` cache hit replays a real run on the same inputs, since Task 2 ran that gate
+after the key change. The run was at branch head `86e67431`.
+
+**Correction (MEASURED in CI, run 36069970478).** A later docs-only commit is not automatically
+safe. The first version of this section named Moon's CI report file by its file name.
+`repo:actionlint` check 12 requires a `moon-diagnosis` marker on every file that names it, so the
+PR's `moon ci` failed. This section now describes the report without its file name.
