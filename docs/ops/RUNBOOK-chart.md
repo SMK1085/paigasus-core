@@ -22,7 +22,8 @@ addenda. `charts/paigasus/README.md` holds the developer detail.
 | `ingress.tlsSecretName` | yes | The TLS Secret for `ingress.host`. The ingress must end TLS |
 | `ingress.annotations` | no | Extra annotations. Do not add a rewrite annotation (§ 3) |
 | `oidc.issuer` | yes | The IdP issuer URL. It must be `https` |
-| `oidc.clientId` | yes | The console's OIDC client. IAM also uses it as the access-token audience (§ 6) |
+| `oidc.clientId` | yes | The console's OIDC client. IAM also uses it as the access-token audience. Set `oidc.audience` to use a different value (§ 6) |
+| `oidc.audience` | no | The access-token audience IAM accepts. Default: `oidc.clientId`. Set it only when the IdP puts another value in `aud` (§ 6) |
 | `oidc.existingSecret` | yes | A Secret with keys `oidc-client-secret` and `session-redis-url` |
 | `oidc.secretVersion` | no | Change it after the Secret changes, so the console pods restart |
 | `oidc.caBundle.existingConfigMap` | no | A ConfigMap with the PEM root certificates of a private IdP CA (§ 7) |
@@ -81,6 +82,7 @@ pods, not for the old pods to go. The kind job waits for both (`ci/kind/run.sh`,
 | the contents of `oidc.existingSecret` | nothing, until you change `oidc.secretVersion` | the chart cannot see the Secret |
 | the contents of `postgres.existingSecret` or the pepper Secret | nothing, until you change its version value | the same |
 | the contents of the CA ConfigMap | nothing, until you change `oidc.caBundle.version` | Node and IAM read the file once, at start |
+| `oidc.audience` | the IAM pod, not the consoles | it changes `IAM_AUTHN__ISSUERS` in the IAM pod template. IAM has one replica and `maxSurge: 0` (`templates/backend-deployment.yaml`). This makes IAM unavailable during the restart |
 
 A change of `oidc.caBundle.version` restarts every pod that mounts the bundle: both consoles and
 IAM. That is expected, as for `oidc.secretVersion`.
@@ -92,9 +94,15 @@ validate the ID token. The login callback calls `authn.whoAmI` with the access t
 token does NOT stop the login. The console then shows IAM as unusable. So a wrong IdP setup shows
 late and unclearly. Check these four items before you install:
 
-1. **Audience.** The access token's `aud` claim must contain `oidc.clientId`. The chart sets IAM's
-   accepted audience to `oidc.clientId`, and no other value (an `oidc.audience` value is future
-   work).
+1. **Audience.** The access token's `aud` claim must contain the audience that IAM accepts. IAM
+   accepts `oidc.audience` when it is set. It accepts `oidc.clientId` when `oidc.audience` is not
+   set. Set `oidc.audience` only when you cannot make the IdP put the client id into `aud`. The
+   value replaces the client id. It does not add another value next to the client id. Before you
+   choose the value, decode a real access token and read its `aud` claim. The value helps only
+   when the IdP issues a JWT access token for the console's scopes (`openid profile email
+   offline_access`). The console sends no `audience` or `resource` parameter. This value does not
+   work with an opaque token, or a token for a different API. A wrong audience shows as a refused
+   token in the IAM log (`ci/kind/README.md`, "Where to look first").
 2. **Email.** The access token must carry an `email` claim. IAM creates the principal on the first
    login from it.
 3. **Algorithm.** The token must be signed with RS256 or ES256, and its header must carry a `kid`.
@@ -123,6 +131,23 @@ Put `basic`, `profile`, `email` and `offline_access` in the client's default cli
 Keycloak 25 and later the `sub` claim comes from the `basic` scope. Give each user an email
 address and the `offline_access` role. The kind job's realm, `ci/kind/realm/paigasus-realm.json`,
 is a complete example.
+
+**Okta example. Not tested against a live Okta tenant.** An Okta authorization server puts its own
+audience into the access token's `aud`, not the client id. The default authorization server uses
+`api://default`.
+
+1. Set `oidc.issuer` to the authorization-server issuer (`https://<org>.okta.com/oauth2/default`,
+   or your custom server). Do not use the org authorization server (`https://<org>.okta.com`).
+   Other parties must not validate its access tokens.
+2. Set `oidc.audience=api://default`, or the audience of your custom server. Quote the value in a
+   values file.
+3. Add an `email` claim (value `user.email`, included in the access token) to that authorization
+   server. IAM needs `email` (item 2).
+
+**Warning.** In Okta's default configuration, the access token's `sub` can be the user's login, not
+the fixed user id. IAM keys the identity on the access token's `(iss, sub)`. If that is true for
+your tenant, a login rename makes a new identity. Check `sub` in a real access token before
+production use. This chart did not verify Okta's `sub` behavior.
 
 ## 7. An IdP with a private CA (`oidc.caBundle`)
 
