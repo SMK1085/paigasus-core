@@ -2,33 +2,31 @@
 //
 // SMA-514 scenario 1 (spec § 5): the auth round trip against the kind stack. A cold visit goes to
 // the IdP and back through the callback. Logout through the shell then kills the session on the
-// server, in BOTH zones, and at the IdP, not only in the browser.
+// server, in BOTH zones, not only in the browser.
 //
-// The six step titles are pinned by ci/kind/journeys-report.mjs (EXPECTED_STEPS): `run.sh specs
+// The five step titles are pinned by ci/kind/journeys-report.mjs (EXPECTED_STEPS): `run.sh specs
 // journeys` checks them in this file before the run and in the JSON report after it, so a step
 // that never ran fails the job although every counter says "passed" (spec § 7.2).
 //
 // A replay context holds ONLY the session cookie; it does not stop the redirect. Measured on
 // Playwright 1.63 (Task 4 review, decision D8): a `context.route` handler never sees a
 // server-side redirect hop, so a route cannot stop one. The real handleLogin therefore runs in
-// step 5: it deletes the presented sid, which is already dead, and sends the new context to the
-// Keycloak form. That context is never reused or closed after it shows Keycloak (SMA-652). Step
-// 3's replay controls have no stop either: if a control fails, handleLogin deletes the LIVE sid,
-// but the test has already failed at that control by then.
+// the last step: it deletes the presented sid, which is already dead, and sends the new context to
+// the Keycloak form. That context is never reused or closed after it shows Keycloak (SMA-652). The
+// third step's replay control has no stop either: if the control fails, handleLogin deletes the
+// LIVE sid, but the test has already failed at that control by then.
 //
-// D10: steps 3 and 6 copy only the `KEYCLOAK_IDENTITY` and `KEYCLOAK_SESSION` cookies of the IdP,
-// not every idp.paigasus.test cookie. CI run 36046478837 copied all four idp cookies
-// (AUTH_SESSION_ID, KC_AUTH_SESSION_HASH, KEYCLOAK_IDENTITY, KEYCLOAK_SESSION) into a new
-// context, and Keycloak served the login form instead of a silent SSO. A local spike on the
-// pinned Keycloak 26.4 image measured the two-cookie subset as a clean, repeatable silent SSO,
-// for both the positive control (step 3) and the negative (step 6).
+// D11: J1 no longer checks the IdP session. After the console's code exchange, Keycloak keeps no
+// SSO session (the offline_access grant; measured in CI diag run 36055036506 and locally), so a
+// silent-SSO control cannot pass and a check on the IdP session cannot prove anything. SMA-682
+// owns the product finding and restores both checks.
 //
 // D9: step 4 clicks Keycloak's logout confirmation page. A request with `client_id` and no
 // `id_token_hint` shows this page ("Do you want to log out?") instead of a silent end-session
 // redirect (assumption A2, disproven). This holds until SMA-681 makes logout send
 // `id_token_hint`. The confirmation page renders in context A's own page, not a new tab; the
 // test does not close that page or reuse it for a later check once it navigates back to the
-// console (SMA-652 still holds: steps 5 and 6 open new contexts, never context A's page).
+// console (SMA-652 still holds: the last step opens new contexts, never context A's page).
 import { expect, test, type Browser, type BrowserContext, type Request, type Response } from '@playwright/test';
 import { CONSOLE_HOST, IDP_HOST, SESSION_COOKIE, credential, redirectChain, sessionCookie, waitForHydration } from '../support/login';
 
@@ -38,8 +36,6 @@ const ZONES = [
   { base: '/gateway', page: '/gateway/overview' },
 ] as const;
 const WAIT = { timeout: 30_000 } as const;
-/** D10: the only two IdP cookies a silent-SSO control may copy (spec § 5 steps 3 and 6). */
-const IDP_SSO_COOKIES = ['KEYCLOAK_IDENTITY', 'KEYCLOAK_SESSION'] as const;
 /** D9: Keycloak's logout confirmation page, until SMA-681 sends `id_token_hint`. */
 const LOGOUT_CONFIRM_BUTTON = 'button[type="submit"], input[type="submit"]';
 
@@ -63,13 +59,7 @@ function firstRequestOf(response: Response): Request {
   return request;
 }
 
-test('J1: a cold visit logs in through the IdP, and logout ends the session in both zones and at the IdP (SMA-514 scenario 1)', async ({ browser, context, page }) => {
-  // Captured in step 3 (the IdP SSO control) and reused by step 6: context A's own IdP cookies are
-  // cleared by Keycloak's logout response in step 4, so context A cannot serve as step 6's negative
-  // control (spec § 5 step 6, final review, 2026-09-24). D10: only the KEYCLOAK_IDENTITY and
-  // KEYCLOAK_SESSION cookies, never the full idp.paigasus.test cookie jar.
-  let idpCookies: Awaited<ReturnType<BrowserContext['cookies']>> = [];
-
+test('J1: a cold visit logs in through the IdP, and logout ends the session in both zones (SMA-514 scenario 1)', async ({ browser, context, page }) => {
   await test.step('cold visit: /iam/orgs goes through /iam/auth/login to the IdP form', async () => {
     expect(await context.cookies(), 'context A starts with no cookie').toEqual([]);
     const response = await page.goto('/iam/orgs');
@@ -98,8 +88,9 @@ test('J1: a cold visit logs in through the IdP, and logout ends the session in b
     return sessionCookie(page);
   });
 
-  await test.step('controls: the sid replays in both zones, and the IdP holds an SSO session', async () => {
-    // Without this control, step 5 could pass because the replay method is broken.
+  await test.step('control: the sid replays in both zones', async () => {
+    // Without this control, the "old sid is refused" step could pass because the replay method is
+    // broken, not because the session is dead.
     for (const zone of ZONES) {
       const replay = await replayContext(browser, sid);
       const replayPage = await replay.newPage();
@@ -110,32 +101,6 @@ test('J1: a cold visit logs in through the IdP, and logout ends the session in b
       expect(new URL(replayPage.url()).pathname).toBe(zone.page);
       await waitForHydration(replayPage);
     }
-    // Without this control, step 6 could pass because Keycloak never kept an SSO session.
-    // D10: copy only KEYCLOAK_IDENTITY and KEYCLOAK_SESSION, never the full idp.paigasus.test
-    // cookie jar. CI run 36046478837 copied every idp cookie (including AUTH_SESSION_ID and the
-    // short-lived KC_AUTH_SESSION_HASH) and Keycloak served the login form instead of a silent
-    // SSO. A local spike on the pinned Keycloak 26.4 image measured this two-cookie subset as a
-    // clean, repeatable silent SSO.
-    const idpCookiesAll = (await context.cookies()).filter((cookie) => cookie.domain.replace(/^\./, '') === IDP_HOST);
-    idpCookies = idpCookiesAll.filter((cookie) => (IDP_SSO_COOKIES as readonly string[]).includes(cookie.name));
-    for (const name of IDP_SSO_COOKIES) {
-      expect(
-        idpCookies.some((cookie) => cookie.name === name),
-        `context A must hold the ${name} cookie after login (D10)`,
-      ).toBe(true);
-    }
-    const sso = await browser.newContext({ baseURL: ORIGIN, ignoreHTTPSErrors: true });
-    await sso.addCookies(idpCookies);
-    const ssoPage = await sso.newPage();
-    const idpPages: string[] = [];
-    ssoPage.on('response', (response) => {
-      const url = new URL(response.url());
-      if (url.hostname === IDP_HOST && response.request().resourceType() === 'document' && response.status() === 200) idpPages.push(url.pathname);
-    });
-    await ssoPage.goto('/iam/orgs');
-    await ssoPage.waitForURL((url) => url.hostname === CONSOLE_HOST && url.pathname === '/iam/orgs');
-    expect(idpPages, 'the IdP must log the new context in silently, with no form page').toEqual([]);
-    await waitForHydration(ssoPage);
   });
 
   await test.step('logout: the shell form ends at the IdP and returns to /iam/ with no session cookie', async () => {
@@ -171,7 +136,7 @@ test('J1: a cold visit logs in through the IdP, and logout ends the session in b
     // D9: until SMA-681 sends id_token_hint, a client_id request with none shows Keycloak's own
     // logout confirmation page ("Do you want to log out?", assumption A2 disproven). Confirm it
     // on context A's own page: the click submits the form, and the page then navigates back to
-    // the console. This page is not reused for a later check (SMA-652; steps 5 and 6 open new
+    // the console. This page is not reused for a later check (SMA-652; the last step opens new
     // contexts, never context A's page).
     await page.locator(LOGOUT_CONFIRM_BUTTON).click();
     await back;
@@ -216,19 +181,5 @@ test('J1: a cold visit logs in through the IdP, and logout ends the session in b
       // here can come only from requireSession()'s store lookup: the Redis record is gone.
       expect(chain[1]?.url.pathname, `${zone.page}: the next hop must be ${zone.base}/auth/login: ${hops.join(' -> ')}`).toBe(`${zone.base}/auth/login`);
     }
-  });
-
-  await test.step('the IdP session is gone: a new page shows the IdP form', async () => {
-    // A new context holding step 3's captured IdP cookies (captured before logout): this is the
-    // exact negative of step 3's IdP SSO control. Context A cannot serve here, because Keycloak's
-    // logout response clears context A's own IdP cookies, so context A would show the form even if
-    // the server-side SSO session were still alive (spec § 5 step 6, final review, 2026-09-24).
-    // This new context is never reused or closed after it shows Keycloak (SMA-652).
-    const idpSession = await browser.newContext({ baseURL: ORIGIN, ignoreHTTPSErrors: true });
-    await idpSession.addCookies(idpCookies);
-    const fresh = await idpSession.newPage();
-    await fresh.goto('/iam/orgs');
-    await expect(fresh).toHaveURL((url) => url.hostname === IDP_HOST);
-    await expect(fresh.locator('#username'), 'the IdP must ask for the password again (no silent SSO)').toBeVisible();
   });
 });
