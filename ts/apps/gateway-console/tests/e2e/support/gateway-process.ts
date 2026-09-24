@@ -64,7 +64,15 @@ export async function startGateway(opts: { readonly iamGrpcUrl: string; readonly
       output += chunk.toString('utf8');
     });
     const url = `http://127.0.0.1:${String(port)}`;
-    const state = await waitForHealth(`${url}/healthz`, child, () => output, 'paigasus-gateway');
+    let state: 'ready' | 'exited';
+    try {
+      state = await waitForHealth(`${url}/healthz`, child, () => output, 'paigasus-gateway');
+    } catch (error) {
+      // waitForHealth throws on a 5xx answer or at its timeout. Either way the child is still
+      // running (it did not report itself exited), so it must be stopped here or it leaks.
+      await stop(child);
+      throw error;
+    }
     if (state === 'ready') return { url, output: () => output, close: () => stop(child) };
     failures.push(`attempt ${String(attempt)}: the gateway exited before it answered\n${output}`);
     await stop(child);
