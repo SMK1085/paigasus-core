@@ -42,7 +42,9 @@ The chart does not deploy the gateway backend. `values/a.yaml` points `zones.gat
 
 ## The journeys checks
 
-`specs journeys` fails with rc 1 when a test file in `tests/cluster/` calls `.skip(`, `.fixme(`, `.fail(` or `.only(`, when a step title in `tests/cluster/journeys/` differs from `EXPECTED_STEPS` in `journeys-report.mjs`, or when the report shows a skipped, failed, flaky or `test.fail()` test or a step that never ran. It fails with rc 2 when `--list` finds any count other than 2, or when the report is missing. Change a step title in the spec file and in `EXPECTED_STEPS` in the same commit. The checkers' unit tests run with `node --test ci/kind/journeys-report.test.mjs ci/kind/stub-check.test.mjs`; no Moon task and no required check runs them, only `specs journeys`.
+`specs journeys` fails with rc 1 when any of these occur. A test file in `tests/cluster/` calls `.skip(`, `.fixme(`, `.fail(` or `.only(`. A step title in `tests/cluster/journeys/` differs from `EXPECTED_STEPS` in `journeys-report.mjs`. The report shows a skipped, failed, flaky or `test.fail()` test, or a step that never ran.
+
+It fails with rc 2 when `--list` finds any count other than 2, or when the report is missing. Change a step title in the spec file and in `EXPECTED_STEPS` in the same commit. The checkers' unit tests run with `node --test ci/kind/journeys-report.test.mjs ci/kind/stub-check.test.mjs`; no Moon task and no required check runs them, only `specs journeys`.
 
 ## Reading the evidence
 

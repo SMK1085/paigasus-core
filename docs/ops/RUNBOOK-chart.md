@@ -178,6 +178,4 @@ To re-run one journey on a local kind cluster after `stub up`:
       pnpm --dir ts/apps/iam-console exec playwright test \
         --config tests/cluster/playwright.config.ts --project journeys journeys/auth-roundtrip.spec.ts
 
-Use `journeys/zone-round-trip.spec.ts` for the other one. This direct run skips the job's guards
-(the skip scan, the exactly-2 count and the report check); only `run.sh specs journeys` applies
-them. In CI there is no per-journey re-run: re-run the failed job with `gh run rerun <run-id> --failed`.
+Use `journeys/zone-round-trip.spec.ts` for the other one. This direct run skips the job's guards (the skip scan, the exactly-2 count and the report check). Only `run.sh specs journeys` applies them. In CI there is no per-journey re-run: re-run the failed job with `gh run rerun <run-id> --failed`.
