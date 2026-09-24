@@ -206,8 +206,9 @@ titles).
    the IdP returns to the default `${PUBLIC_ORIGIN}${basePath}/` (`runtime.ts:130`), and
    `/iam/auth/logout/callback` is NOT requested. Then assert that `__Host-pgs_sid` is gone. This
    step also covers the SMA-653 defect class: a CSP `form-action` that blocks the form's 302 to
-   the IdP. Keycloak then shows its logout confirmation page, because the request has no
-   `id_token_hint`; the test clicks the confirm button (D9, until SMA-681).
+   the IdP. Keycloak shows NO logout confirmation page on this stack: the request has no
+   `id_token_hint`, but no SSO session exists (SMA-682), so Keycloak redirects at once (D9,
+   revised after CI run 36058596986). The test does not click anything on the IdP.
 5. **The session is dead on the server, in both zones.** For each of `/iam/orgs` and
    `/gateway/overview`, use **one new context per URL** that holds only the old `sid` cookie.
    Go to the URL and assert on the redirect chain (`redirectChain(response)`): (a) the first
@@ -356,7 +357,7 @@ output of M3b and M4. The throwaway branches are deleted afterwards and are neve
 | D6 | A post-run check on a well-formed report is rc 1; a missing report is rc 2 | spec challenge, 2026-09-24 |
 | D7 | Mutation M2 runs alone in CI; M3 is proven locally by the pre-run scan | Sven, 2026-09-24 |
 | D8 | § 5 step 5 asserts the redirect chain; no route stop at `/auth/login` (a route cannot see a server redirect hop, measured on Playwright 1.63) | controller ruling, Task 4 review, 2026-09-24 |
-| D9 | § 5 step 4 clicks Keycloak's logout confirmation (A2 disproven); SMA-681 removes the click | Sven, 2026-09-24 |
+| D9 | Sven chose to test logout as the product behaves today. First ruling: click the confirmation page (seen locally with a live SSO session). Revised after CI run 36058596986: on the kind stack no SSO session exists (SMA-682), so Keycloak shows no confirmation page and J1 clicks nothing. When SMA-682 restores the SSO session, the page returns until SMA-681 sends `id_token_hint` | Sven + controller, 2026-09-24 |
 | D10 | § 5 steps 3 and 6 copy only `KEYCLOAK_IDENTITY` and `KEYCLOAK_SESSION`; copying all IdP cookies failed in CI run 36046478837 (cause not reproduced locally; the two-cookie subset is measured for both the control and the negative) | controller, 2026-09-24 |
 | D11 | J1 drops the IdP-SSO control (step 3) and the IdP-session check (step 6): after the offline_access code exchange Keycloak keeps no SSO session (measured in CI diag run 36055036506 and locally); J1 has five steps; SMA-682 owns the product finding and restores the checks. D10 is obsolete. | Sven, 2026-09-24 |
 
