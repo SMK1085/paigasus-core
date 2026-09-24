@@ -15,7 +15,7 @@ The chart makes IAM's issuer configuration from two values
 ```
 
 IAM validates the ACCESS token. It accepts the token only if the `aud` claim contains one of the
-configured audiences (`rs/crates/services/paigasus-iam/src/adapters/oidc/validator.rs:198`,
+configured audiences (`rs/crates/services/paigasus-iam/src/adapters/oidc/validator.rs:197`,
 `jsonwebtoken` `Validation::set_audience`, any-of match). So today the access token's `aud` must
 contain `oidc.clientId`.
 
@@ -32,7 +32,7 @@ Some IdPs put a different value in `aud`. Okta's default authorization server us
 | D4 | The value is OPTIONAL. It does not go into the eight stub-value copies or into `ci/kind/values/a.yaml`. | `ci/helm-render/README.md` risk 4 and `charts/CLAUDE.md` apply to a REQUIRED value only. A missing optional value does not make a render fail. |
 | D5 | Read the value as `$root.Values.oidc.audience`, with no `dig`. | `dig` is necessary for a value under an optional parent map (`oidc.caBundle.*`). `oidc` is always present, because `oidc.issuer` and `oidc.clientId` are required. Under `--reuse-values`, a release made before this change has no `audience` key. The template then reads nil, and `default` gives `oidc.clientId`. Row A2 renders this nil case. |
 | D6 | Do not change the YAML comment lines 97-99 above `IAM_AUTHN__ISSUERS`. Put the design reason in a Go template comment (`{{- /* … */}}`, left-trim only), which does not render. When `oidc.audience` is set, render one extra YAML comment line inside `{{- if $root.Values.oidc.audience }}`. | A YAML comment in a template renders into the manifest and into the golden files (`charts/CLAUDE.md`). A changed unconditional comment breaks AC 1. Lines 97-99 say that the client id is the audience. The conditional line corrects that statement in the manifest when it is not true. |
-| D7 | Convert the value to a string with `toString` before `%q`. | `--set oidc.audience=12345` gives an int64, and `%q` on an integer writes a rune literal. IAM then cannot parse the issuer list and does not boot. `toString` does not change a string, so AC 1 holds. |
+| D7 | Convert the value to a string with `toString` before `%q`. | `--set oidc.audience=12345` gives an int64, and `%q` on an integer writes a rune literal (`'〹'`). Figment parses that to the audience `〹` (measured with figment 0.10.19), so IAM boots and then refuses every token. `toString` does not change a string, so AC 1 holds. |
 | D8 | No change to IAM's production code, to the console, or to the kind job. Add one IAM unit test only (§ 3.5). | IAM already accepts any list of audiences. The console sends only `scope`, with no `audience` or `resource` parameter (`oidc.ts:223`). The gateway has no audience configuration; it introspects through IAM. The kind job uses Keycloak with an audience mapper for the client id, so it keeps the default. |
 | D9 | Put the test rows in the existing `charts/paigasus/tests/env.sh`, in a separate function. Do not add a new `tests/*.sh` file. | By convention, a new chart script raises `CHART_SCRIPT_FLOOR` in `ci/helm-render/run.sh:33`, which `ci/affected-graph/ci_targets.py:1409` pins, plus the prose counts in the README and `helm_render.py`. That is gate machinery for a small test. `env.sh` already checks the environment keys that reach containers. |
 
@@ -54,7 +54,7 @@ Add, under `oidc:`, after `clientId`:
 
 - Lines 97-100 stay byte-identical.
 - Before line 100, add a left-trim-only Go template comment (`{{- /* … */}}`) on its own line. It
-  states D2, D3 and D7. It must not trim on the right: `-}}` would join the next line.
+  states D2, D3 and D7. The left trim is the one that matters: `{{/*` with no trim adds a blank line. A right trim changes nothing here, because the next line starts with `{{-`; keep left-trim only.
 - Before line 100, add a block `{{- if $root.Values.oidc.audience }}` with one YAML comment line:
   `# oidc.audience is set: IAM accepts that audience, not the client id.` The comment is inside
   the block, so the default render does not change.
@@ -77,7 +77,7 @@ with `BASE` plus the arguments. In the inline Python block, it:
   compare also proves that the list holds one element only (D2).
 
 Each call increments a counter. After the rows, the script fails if the counter is less than the
-number of rows (4). So a deleted call line goes red.
+number of rows (the plan adds rows A5 and A6, so 6). So a deleted call line goes red.
 
 The script must stay safe under bash 3.2: no `mapfile`, no `declare -A`, no here-string, and no
 pipe into a reader that exits early (`ci/helm-render/README.md:151`). The Python block uses double
@@ -127,7 +127,7 @@ discards the uncommitted change under test.
   token for the console's scopes (`openid profile email offline_access`). The console sends no
   `audience` or `resource` parameter. So an IdP that then issues an opaque token, or a token for a
   different API, cannot work with this value. A wrong audience shows as a refused token in the IAM
-  log (`ci/kind/README.md:46`).
+  log (`ci/kind/README.md`, "Where to look first").
 - **§ 6 Okta note**, after the Keycloak example. Mark it: "Not tested against a live Okta
   tenant." Three steps:
   1. Set `oidc.issuer` to the authorization-server issuer
@@ -147,8 +147,8 @@ discards the uncommitted change under test.
 
 Add one `figment::Jail` unit test. It sets `IAM_AUTHN__ISSUERS` to the exact string that row A3
 renders and asserts `audiences == ["api://default"]`. It proves the contract between the chart
-string and IAM's parser for a URI-shaped audience. Today the env-form tests use only
-`audiences=["paigasus"]`. Follow the existing Jail tests in that file for the other required
+string and IAM's parser for a URI-shaped audience. No test in `config.rs` sets `IAM_AUTHN__ISSUERS` today. The env form appears only in
+`tests/boot_lifecycle_pg.rs:138` and `ci/images/run.sh:824`, with `audiences=["paigasus"]`. Follow the existing Jail tests in that file for the other required
 settings.
 
 ### 3.6 `charts/paigasus/README.md`
