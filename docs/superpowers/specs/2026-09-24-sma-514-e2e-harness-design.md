@@ -126,7 +126,9 @@ none), so the default timings apply. The 30-s deadline in § 6 step 2 depends on
   `kubectl rollout status` with a timeout that allows a slow Docker Hub pull (the stub image is
   pulled only here). Then one in-cluster GET to
   `http://gateway-stub.paigasus.svc.cluster.local:8088/v1/service-info` with the pinned curl
-  image, in the same pattern as the IdP preflight (`run.sh:265-298`). Assert status 200, the
+  image. It runs as a Pod manifest `ci/kind/manifests/stub-check.yaml`, like the IdP preflight
+  (`run.sh:265-298`), but its log is parsed by the Node module `ci/kind/stub-check.mjs`, not by
+  `python3`. Assert status 200, the
   content type `application/json`, and string `service` and `version`. Any failure exits rc 2
   (infrastructure error) with a message that names the check.
 - **`stub down`**: scale to 0 and wait until the Service has no endpoints. It is for local
@@ -150,8 +152,9 @@ none), so the default timings apply. The 30-s deadline in § 6 step 2 depends on
   `upgrade b` and `specs b` keep the default `if: success()`: phase B runs only when everything
   before it passed.
 - **Job budget.** `timeout-minutes: 150` (`chart.yml:48-55`) is sized to the sum of the step
-  timeouts, and today that sum is 139 min. The job budget grows by the two new step timeouts,
-  and the comment's arithmetic is updated in the same edit.
+  timeouts, and today that sum is 139 min. The two new step timeouts are 9 min (`stub up`) and
+  10 min (`specs journeys`), so the sum is 158 min and the job budget goes from 150 to 169 min. The
+  comment's arithmetic is updated in the same edit.
 - Decision **D3** (Sven, 2026-09-24): widen the `pull_request` paths to the code under test.
   The check stays NOT required. The list:
   `ts/packages/paigasus-app-shell/**`, `ts/packages/paigasus-auth/**`,
@@ -201,16 +204,18 @@ titles).
    `page.waitForRequest` for the end-session hop (the pattern in
    `docs/superpowers/specs/2026-09-09-sma-506-measurements.md:803-838`):
    POST `/iam/auth/logout` → 302; GET `https://idp.paigasus.test/…/protocol/openid-connect/logout`
-   with `client_id`; GET `https://console.paigasus.test/iam/?state=…` → 200 with
-   `data-testid="public-home"`. The chart sets no `PAIGASUS_OIDC_POST_LOGOUT_REDIRECT_URI`, so
+   with `client_id`; a request to `https://console.paigasus.test/iam/?state=…`, and a last document with status 200
+   and `data-testid="public-home"` (Next can answer `/iam/` with a 308 to `/iam` first; the test
+   records the hops as an annotation and does not assert their number). The chart sets no `PAIGASUS_OIDC_POST_LOGOUT_REDIRECT_URI`, so
    the IdP returns to the default `${PUBLIC_ORIGIN}${basePath}/` (`runtime.ts:130`), and
    `/iam/auth/logout/callback` is NOT requested. Then assert that `__Host-pgs_sid` is gone. This
    step also covers the SMA-653 defect class: a CSP `form-action` that blocks the form's 302 to
    the IdP.
 5. **The session is dead on the server, in both zones.** For each of `/iam/orgs` and
    `/gateway/overview`, use **one new context per URL** that holds only the old `sid` cookie.
-   Before the `goto`, add `context.route('**/auth/login*', r => r.fulfill({status: 200, body:
-   'stop'}))`. This stops the chain at the zone's `/auth/login`, so `handleLogin` does not run
+   Before the `goto`, add a `context.route` with a URL predicate (the pathname ends with `/auth/login`, any
+   query) that fulfills with status 200 and the body `stop`. The step-3 replay controls use the same
+   route, so a broken control cannot run `handleLogin` and delete the sid. This stops the chain at the zone's `/auth/login`, so `handleLogin` does not run
    (it would delete the presented sid and clear the cookie, `routes.ts:201-217`), and no page
    shows Keycloak. Assert: (a) the first request carried `__Host-pgs_sid=sid`
    (`request.allHeaders()`); (b) the response redirected to that zone's `/auth/login`. The
@@ -302,14 +307,16 @@ kind is not installed on the development Mac, and CI is the reference (SMA-513 R
 stack-dependent proofs run in CI with `workflow_dispatch` on throwaway branches:
 
 - **Run 1, M1:** `ZoneLink` renders a `NextLink` for a cross-zone target. Scenario 2 must fail
-  at step 4 or step 7 (the nested path) and at step 5. R2 also fails in `specs a`; § 4.5's
-  step condition lets the journeys run anyway.
-- **Run 2, M2 + M3:** `handleLogout` does not call `runtime.store.delete(sid)`, and scenario 2
-  is marked `test.skip`. Scenario 1 must fail at step 5 while step 3 passes, and the step must
-  fail on the pre-run scan.
+  at step 4 or step 7 (the nested path) and at step 5. The RSC rule checks use `expect.soft`,
+  so a failure at step 4 does not stop the test before step 5; the positive controls stay hard.
+  R2 also fails in `specs a`; § 4.5's step condition lets the journeys run anyway.
+- **Run 2, M2:** `handleLogout` does not call `runtime.store.delete(sid)`. Scenario 1 must fail
+  at step 5 while step 3 passes. (Decision D7: M2 runs alone. With a `test.skip` in the same
+  run, the pre-run scan of § 7.2 stops the step before scenario 1 runs, so M2 cannot show.)
 
 These checks run locally, with no stack, because `--list` and the scan never touch it:
 
+- **M3:** one test marked `test.skip` — the pre-run scan fails.
 - **M3b:** both tests marked `test.skip` — the pre-run scan fails.
 - **M4:** a third test — `--list` exits rc 2.
 
@@ -346,6 +353,7 @@ output of M3b and M4. The throwaway branches are deleted afterwards and are neve
 | D4 | The job checks exactly 2 tests, 0 skipped, per-test status and step titles for the `journeys` project | design, 2026-09-24 |
 | D5 | `stub up` and `specs journeys` run when `install a` succeeded, even if `specs a` failed; phase B still needs every earlier step to pass | spec challenge, 2026-09-24 |
 | D6 | A post-run check on a well-formed report is rc 1; a missing report is rc 2 | spec challenge, 2026-09-24 |
+| D7 | Mutation M2 runs alone in CI; M3 is proven locally by the pre-run scan | Sven, 2026-09-24 |
 
 ## 11. Assumptions
 
