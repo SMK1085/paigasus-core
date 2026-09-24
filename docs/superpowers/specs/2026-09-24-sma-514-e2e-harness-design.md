@@ -213,15 +213,18 @@ titles).
    the IdP.
 5. **The session is dead on the server, in both zones.** For each of `/iam/orgs` and
    `/gateway/overview`, use **one new context per URL** that holds only the old `sid` cookie.
-   Before the `goto`, add a `context.route` with a URL predicate (the pathname ends with `/auth/login`, any
-   query) that fulfills with status 200 and the body `stop`. The step-3 replay controls use the same
-   route, so a broken control cannot run `handleLogin` and delete the sid. This stops the chain at the zone's `/auth/login`, so `handleLogin` does not run
-   (it would delete the presented sid and clear the cookie, `routes.ts:201-217`), and no page
-   shows Keycloak. Assert: (a) the first request carried `__Host-pgs_sid=sid`
-   (`request.allHeaders()`); (b) the response redirected to that zone's `/auth/login`. The
-   proxy checks only that the cookie exists (`middleware.ts:122`), so (a) plus (b) proves that
-   the redirect came from `requireSession()`'s store lookup, and that the Redis record is gone
-   for both zones.
+   Go to the URL and assert on the redirect chain (`redirectChain(response)`): (a) the first
+   hop's request carried `__Host-pgs_sid=sid` (`request.allHeaders()`); (b) the first hop's
+   response is a 3xx, and the next hop is that zone's `/auth/login`. The proxy checks only that
+   the cookie exists (`middleware.ts:122`), so (a) plus (b) proves that the redirect came from
+   `requireSession()`'s store lookup, and that the Redis record is gone for both zones.
+   The chain is NOT stopped at `/auth/login`. Measured on Playwright 1.63 (Task 4 review,
+   Decision D8): a `context.route` handler never sees a server-side redirect hop, so a route
+   cannot stop it. The real `handleLogin` therefore runs. It deletes the presented sid, which is
+   already dead, and sends the context to the Keycloak form. That context is new and is never
+   reused or closed after it shows Keycloak, so the SMA-652 rule holds. The step-3 replay
+   controls have no stop either: if a control fails, `handleLogin` deletes the live sid, but the
+   test has already failed at that control.
 6. **The IdP session is dead too.** In a new page of context A, go to `/iam/orgs`. Assert that
    the Keycloak login form is shown (no silent SSO login). Step 3's IdP control makes this
    assertion meaningful.
@@ -354,6 +357,7 @@ output of M3b and M4. The throwaway branches are deleted afterwards and are neve
 | D5 | `stub up` and `specs journeys` run when `install a` succeeded, even if `specs a` failed; phase B still needs every earlier step to pass | spec challenge, 2026-09-24 |
 | D6 | A post-run check on a well-formed report is rc 1; a missing report is rc 2 | spec challenge, 2026-09-24 |
 | D7 | Mutation M2 runs alone in CI; M3 is proven locally by the pre-run scan | Sven, 2026-09-24 |
+| D8 | § 5 step 5 asserts the redirect chain; no route stop at `/auth/login` (a route cannot see a server redirect hop, measured on Playwright 1.63) | controller ruling, Task 4 review, 2026-09-24 |
 
 ## 11. Assumptions
 
@@ -372,7 +376,7 @@ The challenger's verdict: APPROVE WITH CHANGES. All findings were checked agains
 | Finding | Change |
 |---|---|
 | BLOCKER: logout never hits `/auth/logout/callback` | § 5 step 4 asserts the real chain to `/iam/?state=…` |
-| BLOCKER: step 5 cleared its own cookie; the gateway half proved nothing; SMA-652 hazard | § 5 step 5: one context per zone, route-stop at `/auth/login`, assert the cookie was sent |
+| BLOCKER: step 5 cleared its own cookie; the gateway half proved nothing; SMA-652 hazard | § 5 step 5: one context per zone, assert the cookie was sent and the 3xx to `/auth/login` (D8) |
 | MAJOR: nested cross-zone path invisible to the RSC check | § 6 step 7: nested-path and 404 rules |
 | MAJOR: recorder too late, no positive control, header case | § 6 steps 1, 4, 7 |
 | MAJOR: M1 cannot reach the journeys | § 4.5 step condition, D5 |
