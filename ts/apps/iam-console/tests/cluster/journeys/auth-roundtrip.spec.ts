@@ -15,6 +15,20 @@
 // Keycloak form. That context is never reused or closed after it shows Keycloak (SMA-652). Step
 // 3's replay controls have no stop either: if a control fails, handleLogin deletes the LIVE sid,
 // but the test has already failed at that control by then.
+//
+// D10: steps 3 and 6 copy only the `KEYCLOAK_IDENTITY` and `KEYCLOAK_SESSION` cookies of the IdP,
+// not every idp.paigasus.test cookie. CI run 36046478837 copied all four idp cookies
+// (AUTH_SESSION_ID, KC_AUTH_SESSION_HASH, KEYCLOAK_IDENTITY, KEYCLOAK_SESSION) into a new
+// context, and Keycloak served the login form instead of a silent SSO. A local spike on the
+// pinned Keycloak 26.4 image measured the two-cookie subset as a clean, repeatable silent SSO,
+// for both the positive control (step 3) and the negative (step 6).
+//
+// D9: step 4 clicks Keycloak's logout confirmation page. A request with `client_id` and no
+// `id_token_hint` shows this page ("Do you want to log out?") instead of a silent end-session
+// redirect (assumption A2, disproven). This holds until SMA-681 makes logout send
+// `id_token_hint`. The confirmation page renders in context A's own page, not a new tab; the
+// test does not close that page or reuse it for a later check once it navigates back to the
+// console (SMA-652 still holds: steps 5 and 6 open new contexts, never context A's page).
 import { expect, test, type Browser, type BrowserContext, type Request, type Response } from '@playwright/test';
 import { CONSOLE_HOST, IDP_HOST, SESSION_COOKIE, credential, redirectChain, sessionCookie, waitForHydration } from '../support/login';
 
@@ -24,6 +38,10 @@ const ZONES = [
   { base: '/gateway', page: '/gateway/overview' },
 ] as const;
 const WAIT = { timeout: 30_000 } as const;
+/** D10: the only two IdP cookies a silent-SSO control may copy (spec § 5 steps 3 and 6). */
+const IDP_SSO_COOKIES = ['KEYCLOAK_IDENTITY', 'KEYCLOAK_SESSION'] as const;
+/** D9: Keycloak's logout confirmation page, until SMA-681 sends `id_token_hint`. */
+const LOGOUT_CONFIRM_BUTTON = 'button[type="submit"], input[type="submit"]';
 
 function isConsolePath(request: Request, pathname: string): boolean {
   const url = new URL(request.url());
@@ -48,7 +66,8 @@ function firstRequestOf(response: Response): Request {
 test('J1: a cold visit logs in through the IdP, and logout ends the session in both zones and at the IdP (SMA-514 scenario 1)', async ({ browser, context, page }) => {
   // Captured in step 3 (the IdP SSO control) and reused by step 6: context A's own IdP cookies are
   // cleared by Keycloak's logout response in step 4, so context A cannot serve as step 6's negative
-  // control (spec § 5 step 6, final review, 2026-09-24).
+  // control (spec § 5 step 6, final review, 2026-09-24). D10: only the KEYCLOAK_IDENTITY and
+  // KEYCLOAK_SESSION cookies, never the full idp.paigasus.test cookie jar.
   let idpCookies: Awaited<ReturnType<BrowserContext['cookies']>> = [];
 
   await test.step('cold visit: /iam/orgs goes through /iam/auth/login to the IdP form', async () => {
@@ -92,8 +111,19 @@ test('J1: a cold visit logs in through the IdP, and logout ends the session in b
       await waitForHydration(replayPage);
     }
     // Without this control, step 6 could pass because Keycloak never kept an SSO session.
-    idpCookies = (await context.cookies()).filter((cookie) => cookie.domain.replace(/^\./, '') === IDP_HOST);
-    expect(idpCookies.length, 'context A must hold IdP cookies after the login').toBeGreaterThan(0);
+    // D10: copy only KEYCLOAK_IDENTITY and KEYCLOAK_SESSION, never the full idp.paigasus.test
+    // cookie jar. CI run 36046478837 copied every idp cookie (including AUTH_SESSION_ID and the
+    // short-lived KC_AUTH_SESSION_HASH) and Keycloak served the login form instead of a silent
+    // SSO. A local spike on the pinned Keycloak 26.4 image measured this two-cookie subset as a
+    // clean, repeatable silent SSO.
+    const idpCookiesAll = (await context.cookies()).filter((cookie) => cookie.domain.replace(/^\./, '') === IDP_HOST);
+    idpCookies = idpCookiesAll.filter((cookie) => (IDP_SSO_COOKIES as readonly string[]).includes(cookie.name));
+    for (const name of IDP_SSO_COOKIES) {
+      expect(
+        idpCookies.some((cookie) => cookie.name === name),
+        `context A must hold the ${name} cookie after login (D10)`,
+      ).toBe(true);
+    }
     const sso = await browser.newContext({ baseURL: ORIGIN, ignoreHTTPSErrors: true });
     await sso.addCookies(idpCookies);
     const ssoPage = await sso.newPage();
@@ -135,14 +165,25 @@ test('J1: a cold visit logs in through the IdP, and logout ends the session in b
     // request observed below is the proof that the browser actually followed it to the IdP.
     // page.waitForRequest sees the wire: handleLogout's degraded arm never contacts the IdP
     // (docs/superpowers/specs/2026-09-09-sma-506-measurements.md:803-838).
-    expect(new URL((await endSession).url()).searchParams.get('client_id'), 'end-session client_id').toBe('paigasus-console');
+    const endSessionRequest = await endSession;
+    expect(new URL(endSessionRequest.url()).searchParams.get('client_id'), 'end-session client_id').toBe('paigasus-console');
+
+    // D9: until SMA-681 sends id_token_hint, a client_id request with none shows Keycloak's own
+    // logout confirmation page ("Do you want to log out?", assumption A2 disproven). Confirm it
+    // on context A's own page: the click submits the form, and the page then navigates back to
+    // the console. This page is not reused for a later check (SMA-652; steps 5 and 6 open new
+    // contexts, never context A's page).
+    await page.locator(LOGOUT_CONFIRM_BUTTON).click();
     await back;
     await page.waitForURL((url) => url.hostname === CONSOLE_HOST && /^\/iam\/?$/.test(url.pathname));
     await expect(page.getByTestId('public-home')).toBeVisible();
 
     // Measured, not assumed: Next can answer /iam/ with a trailing-slash redirect to /iam.
     const home = documents.filter((doc) => doc.url.hostname === CONSOLE_HOST && /^\/iam\/?$/.test(doc.url.pathname));
-    test.info().annotations.push({ type: 'post-logout documents', description: home.map((doc) => `${doc.url.pathname}${doc.url.search} ${String(doc.status)}`).join(' -> ') });
+    test.info().annotations.push({
+      type: 'post-logout documents',
+      description: [`${new URL(endSessionRequest.url()).pathname} (D9: logout confirmation, clicked)`, ...home.map((doc) => `${doc.url.pathname}${doc.url.search} ${String(doc.status)}`)].join(' -> '),
+    });
     expect(home.at(-1)?.status, 'the public page after logout').toBe(200);
     // The chart sets no PAIGASUS_OIDC_POST_LOGOUT_REDIRECT_URI, so the IdP returns to `${origin}/iam/`.
     expect(
