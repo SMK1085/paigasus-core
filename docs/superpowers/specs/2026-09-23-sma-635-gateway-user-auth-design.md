@@ -160,11 +160,11 @@ body or the OpenAI key.
 
 | Leg | Operation label | Result label |
 |---|---|---|
-| Key leg, active key | `introspect_api_key` | `ok` (no change) |
-| Key leg, rejected bearer | `introspect_api_key` | `denied` (same as `require_authenticated`, `auth.rs:172`) |
-| Key leg, IAM outage | `introspect_api_key` | the existing outage label |
+| Key leg, active key | `introspect` | `ok` (no change) |
+| Key leg, rejected bearer | `introspect` | `denied` (same as `require_authenticated`, `auth.rs:172`) |
+| Key leg, IAM outage | `introspect` | the existing outage label |
 | Token leg | `introspect_token` | `ok`, `denied`, or the outage label |
-| Self-query | `is_authorized` | no change |
+| Self-query | `authorize` | no change |
 
 `require_iam_auth` today records `ok` for a key with a status that is not `active`
 (`auth.rs:64-67`). That row changes to `denied`, to match `require_authenticated`. The Grafana
@@ -324,17 +324,28 @@ helpers (`console-core/src/errors.ts:69-93`):
    - `stream`: status 200, with these headers: `content-type: text/event-stream`,
      `cache-control: no-cache, no-transform`, `x-accel-buffering: no`, and the correlation id.
      `no-transform` stops Next's default response compression, which would otherwise hold the
-     bytes until a flush. The response body is `result.body.pipeThrough(transform)`. So a cancel
-     from the browser reaches the SDK stream too, as a second path next to `request.signal`. The
-     transform:
-     - enqueues each gateway chunk **unchanged and at once**;
-     - pushes the same chunk into `createTerminalFrameParser(200, ids)`. When the parser returns a
-       `PaigasusError`, it enqueues one more event after that chunk:
+     bytes until a flush. `lib/chat-route.ts`'s `relay()` builds the response body as a
+     **pull-based `ReadableStream`**, not `result.body.pipeThrough(transform)`. The reason: a
+     `TransformStream` errors together with its source, so it cannot inject an event after the
+     source fails. `relay()` reads the SDK body directly with `source.getReader()`. Its own
+     `cancel()` calls `reader.cancel()` on that reader, so a cancel from the browser still reaches
+     the SDK body, as a second path next to `request.signal`. On each `pull()`:
+     - it enqueues each gateway chunk **unchanged and at once**;
+     - it pushes the same chunk into `createTerminalFrameParser(200, ids)`. When the parser
+       returns a `PaigasusError`, it enqueues one more event after that chunk:
        `\n\nevent: paigasus-error\ndata: <PaigasusError JSON>\n\n`. The leading blank line closes
        any partial record;
      - on an error of the source stream (a transport failure between the gateway and Next), it
        enqueues a `paigasus-error` event built from `mapError({ kind: 'transport', cause:
        'network' })` with the correlation id, and then closes the stream.
+
+     Every injected `paigasus-error` event, from the terminal frame and from a source-stream
+     error alike, carries the same fixed message: `STREAM_FAILED_MESSAGE`
+     ("The answer stream failed."). This is true even when the upstream sent its own text: the
+     upstream controls every byte of a forwarded frame, so its text is never reused once the
+     stream has started. `UPSTREAM_REJECTED_MESSAGE` ("The model provider rejected the request.")
+     is a separate constant. It is used only by the error-arm scrub below, for a non-stream HTTP
+     error whose body is not a Paigasus envelope.
    - `json`: not expected, because the handler always sends `stream: true`. Answer 502 with a
      `PaigasusError`.
    - `error`: `{ "error": <PaigasusError> }`. The HTTP status is `transport.status` for an HTTP
@@ -520,6 +531,19 @@ Folded in:
 
 Not folded in: none. Every finding was justified. The spend question needs a human decision; this
 revision puts it out of scope.
+
+**Revision 3** aligns this text with the code after implementation. The text now reports what the
+code does. It does not report a new decision.
+
+- §4.4: the metric operation labels are `introspect` (key leg) and `authorize` (self-query), not
+  `introspect_api_key` and `is_authorized`. The token-leg label stays `introspect_token`. Read
+  from `record_iam_call` in `auth.rs`.
+- §6.2: the stream arm builds its response body with a pull-based `ReadableStream` in
+  `lib/chat-route.ts`'s `relay()`, not `result.body.pipeThrough(transform)`. A `TransformStream`
+  errors together with its source, so it cannot inject an event after the source fails. A cancel
+  from the browser still reaches the SDK body, through the pull loop's own reader. Every injected
+  `paigasus-error` event carries the fixed message `STREAM_FAILED_MESSAGE`. The upstream's own
+  text is never reused there. `UPSTREAM_REJECTED_MESSAGE` is used only by the error-arm scrub.
 
 ## 12. Measurements (plan Task 1, 2026-09-23)
 
