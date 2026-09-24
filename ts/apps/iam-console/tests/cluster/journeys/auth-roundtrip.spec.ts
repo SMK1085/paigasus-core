@@ -8,12 +8,14 @@
 // journeys` checks them in this file before the run and in the JSON report after it, so a step
 // that never ran fails the job although every counter says "passed" (spec § 7.2).
 //
-// A replay context holds ONLY the session cookie and answers every request to a zone's
-// /auth/login itself. handleLogin deletes the presented sid and clears the cookie
-// (ts/packages/paigasus-auth/src/http/routes.ts:201-217): if it ran, a later check would pass for
-// the wrong reason, and a replay page would show Keycloak (SMA-652). The route is a URL predicate,
-// not a glob, so the `?returnTo=` query cannot make it miss (Review Focus 5).
-import { expect, test, type Browser, type BrowserContext, type Request } from '@playwright/test';
+// A replay context holds ONLY the session cookie; it does not stop the redirect. Measured on
+// Playwright 1.63 (Task 4 review, decision D8): a `context.route` handler never sees a
+// server-side redirect hop, so a route cannot stop one. The real handleLogin therefore runs in
+// step 5: it deletes the presented sid, which is already dead, and sends the new context to the
+// Keycloak form. That context is never reused or closed after it shows Keycloak (SMA-652). Step
+// 3's replay controls have no stop either: if a control fails, handleLogin deletes the LIVE sid,
+// but the test has already failed at that control by then.
+import { expect, test, type Browser, type BrowserContext, type Request, type Response } from '@playwright/test';
 import { CONSOLE_HOST, IDP_HOST, SESSION_COOKIE, credential, redirectChain, sessionCookie, waitForHydration } from '../support/login';
 
 const ORIGIN = `https://${CONSOLE_HOST}`;
@@ -28,16 +30,19 @@ function isConsolePath(request: Request, pathname: string): boolean {
   return url.hostname === CONSOLE_HOST && url.pathname === pathname;
 }
 
-/** A new context with no state but `sid`; every zone's /auth/login is answered here, never by handleLogin. */
+/** A new context with no state but `sid`. Nothing stops a redirect: handleLogin runs for real. */
 async function replayContext(browser: Browser, sid: string): Promise<BrowserContext> {
   const context = await browser.newContext({ baseURL: ORIGIN, ignoreHTTPSErrors: true });
   // `url`, not `domain`: a __Host- cookie must be host-only (no Domain attribute), Secure, Path=/.
   await context.addCookies([{ name: SESSION_COOKIE, value: sid, url: `${ORIGIN}/`, secure: true, httpOnly: true, sameSite: 'Lax' }]);
-  await context.route(
-    (url) => url.hostname === CONSOLE_HOST && url.pathname.endsWith('/auth/login'),
-    (route) => route.fulfill({ status: 200, contentType: 'text/plain', body: 'stop' }),
-  );
   return context;
+}
+
+/** The earliest request in `response`'s redirect chain (the one the caller's `goto` made). */
+function firstRequestOf(response: Response): Request {
+  let request = response.request();
+  for (let from = request.redirectedFrom(); from !== null; from = request.redirectedFrom()) request = from;
+  return request;
 }
 
 test('J1: a cold visit logs in through the IdP, and logout ends the session in both zones and at the IdP (SMA-514 scenario 1)', async ({ browser, context, page }) => {
@@ -145,18 +150,23 @@ test('J1: a cold visit logs in through the IdP, and logout ends the session in b
 
   await test.step('the old sid is refused by both zones', async () => {
     for (const zone of ZONES) {
-      // One new context per URL (spec § 5 step 5): each sees the old sid exactly once.
+      // One new context per URL (spec § 5 step 5): each sees the old sid exactly once. The chain
+      // is NOT stopped (see the header comment): it runs to the real IdP form, so only the first
+      // two hops are asserted here, never the final URL.
       const replay = await replayContext(browser, sid);
       const replayPage = await replay.newPage();
-      const first = replayPage.waitForRequest((request) => request.isNavigationRequest() && isConsolePath(request, zone.page), WAIT);
-      await replayPage.goto(zone.page);
-      const cookieHeader = (await (await first).allHeaders())['cookie'] ?? '';
+      const response = await replayPage.goto(zone.page);
+      if (response === null) throw new Error(`page.goto(${zone.page}) returned no response`);
+      const chain = await redirectChain(response);
+      const hops = chain.map((hop) => `${hop.url.hostname}${hop.url.pathname} ${String(hop.status)}`);
+      const cookieHeader = (await firstRequestOf(response).allHeaders())['cookie'] ?? '';
       expect(cookieHeader.split(/;\s*/), `${zone.page}: the first request must carry the old sid`).toContain(`${SESSION_COOKIE}=${sid}`);
+      const first = chain[0];
+      expect(first?.status, `${zone.page}: the first hop must be a redirect: ${hops.join(' -> ')}`).toBeGreaterThanOrEqual(300);
+      expect(first?.status, `${zone.page}: the first hop must be a redirect: ${hops.join(' -> ')}`).toBeLessThan(400);
       // The proxy checks only that the cookie exists (middleware.ts:122), so a redirect to login
       // here can come only from requireSession()'s store lookup: the Redis record is gone.
-      await expect(replayPage, `${zone.page}: the old sid must send the browser to ${zone.base}/auth/login`).toHaveURL(
-        (url) => url.hostname === CONSOLE_HOST && url.pathname === `${zone.base}/auth/login`,
-      );
+      expect(chain[1]?.url.pathname, `${zone.page}: the next hop must be ${zone.base}/auth/login: ${hops.join(' -> ')}`).toBe(`${zone.base}/auth/login`);
     }
   });
 
