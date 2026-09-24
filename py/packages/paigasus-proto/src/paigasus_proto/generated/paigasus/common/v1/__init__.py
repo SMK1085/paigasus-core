@@ -489,6 +489,19 @@ class ErrorReason(betterproto2.Enum):
     capability gate — see ERROR_REASON_CAPABILITY_DISABLED for that.
     """
 
+    INVALID_ORG_HEADER = 309
+    """
+    "invalid-org-header" — the paigasus-org header is not ONE organization
+    UUID in the 36-character form (400, param "paigasus-org"). `param` names a
+    HEADER here, a deviation from OpenAI, which uses it for a body field.
+    """
+
+    ORG_REQUIRED = 310
+    """
+    "org-required" — no paigasus-org header, and the user reaches zero or
+    several organizations (400, param "paigasus-org").
+    """
+
     INTERNAL = 900
     """
     ---- Shared (900-999) ----------------------------------------------------
@@ -619,6 +632,8 @@ class ErrorReason(betterproto2.Enum):
             306: "ERROR_REASON_UPSTREAM_TIMEOUT",
             307: "ERROR_REASON_UPSTREAM_ERROR",
             308: "ERROR_REASON_STREAMING_DISABLED",
+            309: "ERROR_REASON_INVALID_ORG_HEADER",
+            310: "ERROR_REASON_ORG_REQUIRED",
             900: "ERROR_REASON_INTERNAL",
             901: "ERROR_REASON_INVALID_REQUEST_BODY",
             902: "ERROR_REASON_REQUEST_TOO_LARGE",
@@ -682,6 +697,8 @@ class ErrorReason(betterproto2.Enum):
             "ERROR_REASON_UPSTREAM_TIMEOUT": 306,
             "ERROR_REASON_UPSTREAM_ERROR": 307,
             "ERROR_REASON_STREAMING_DISABLED": 308,
+            "ERROR_REASON_INVALID_ORG_HEADER": 309,
+            "ERROR_REASON_ORG_REQUIRED": 310,
             "ERROR_REASON_INTERNAL": 900,
             "ERROR_REASON_INVALID_REQUEST_BODY": 901,
             "ERROR_REASON_REQUEST_TOO_LARGE": 902,

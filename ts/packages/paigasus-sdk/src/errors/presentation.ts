@@ -9,7 +9,7 @@
 // refactor to `Partial<Record<…>>`, which the test notices; the test alone runs later.
 //
 // The `Exclude` is load-bearing: UNSPECIFIED is the zero sentinel, the test skips it, and
-// demanding an entry for it would make the table 58 keys rather than 57.
+// demanding an entry for it would make the table 60 keys rather than 59.
 import { ErrorReason } from '@paigasus/proto';
 
 import type { Presentation } from './types';
@@ -67,6 +67,10 @@ export const PRESENTATION: Record<Exclude<ErrorReason, ErrorReason.UNSPECIFIED>,
   [ErrorReason.UPSTREAM_TIMEOUT]: 'degraded',
   [ErrorReason.UPSTREAM_ERROR]: 'degraded',
   [ErrorReason.STREAMING_DISABLED]: 'from-transport',
+  // SMA-635. Both answer 400, which the transport table already presents as invalid input, as it
+  // does for the other gateway 400 codes.
+  [ErrorReason.INVALID_ORG_HEADER]: 'from-transport',
+  [ErrorReason.ORG_REQUIRED]: 'from-transport',
   [ErrorReason.INTERNAL]: 'from-transport',
   [ErrorReason.INVALID_REQUEST_BODY]: 'from-transport',
   [ErrorReason.REQUEST_TOO_LARGE]: 'from-transport',

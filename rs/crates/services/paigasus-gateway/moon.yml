@@ -6,11 +6,9 @@ language: 'rust'
 
 dependsOn:
   - 'paigasus-proto-rs'
-  # No Cargo dep backs this edge — the gateway does not use the kernel. Kept deliberately as an
-  # over-approximation: removing it would change the `kernel->bindings` expected set that SMA-409
-  # owns. Allowlisted in ci/affected-graph/cargo_moon_parity.py (SMA-524 D4). NOTE (SMA-528): no
-  # longer free — this edge now feeds `fileGroups.upstreams` below, so every kernel edit runs this
-  # crate's full build+test+lint for a dependency that does not exist. See the allowlist entry.
+  # A `{ workspace = true }` Cargo dependency since SMA-635 (`domain::resolve_org` uses the kernel
+  # `Prn` API), so this hand-written edge is REQUIRED (ci/CLAUDE.md: Moon does not resolve
+  # `workspace = true`). It also feeds `fileGroups.upstreams` below.
   - 'paigasus-kernel-rs'
   - 'paigasus-logging-rs'
   - 'paigasus-observability-rs'
@@ -40,3 +38,20 @@ tasks:
     deps: ['^:build']
   test:
     deps: ['^:build']
+  # SMA-635. The gateway-console `playground` Playwright project runs THIS binary, so the e2e tier
+  # must never run an old one. The Rust `build` task declares no `outputs` (.moon/tasks/rust.yml)
+  # and CI restores both rs/target and .moon/cache, so a cache hit on `build` can leave a stale
+  # binary in rs/target/debug. This task is NEVER cached: cargo's own fingerprint decides what to
+  # rebuild, and a no-change run costs seconds (plan Task 1, M4). `--locked` and
+  # `/rs/.cargo/config.toml` satisfy repo:affected-smoke's A8 and A10.
+  e2e-bin:
+    command: 'cargo build --locked --bin paigasus-gateway'
+    deps: ['^:build']
+    inputs:
+      - '@group(sources)'
+      - 'Cargo.toml'
+      - '@group(upstreams)'
+      - '/rs/Cargo.lock'
+      - '/rs/.cargo/config.toml'
+    options:
+      cache: false

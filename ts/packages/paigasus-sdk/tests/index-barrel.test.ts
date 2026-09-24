@@ -6,6 +6,7 @@ import * as chat from '../src/chat.js';
 import * as errors from '../src/errors.js';
 import * as iam from '../src/iam.js';
 import * as iamTypes from '../src/iam/types.js';
+import type { ChatCallOptions } from '../src/index.js';
 
 /**
  * Every runtime key of each submodule, derived rather than hand-listed.
@@ -42,5 +43,14 @@ describe('the root barrel serves every entry surface', () => {
 
   it('exposes NodeStatus as the registry enum (SMA-630)', () => {
     expect(barrel.NodeStatus.ARCHIVED).toBe(2);
+  });
+
+  // ChatCallOptions is a TYPE-only export, erased at runtime, so it cannot appear in ENTRIES
+  // above (which walks Object.keys of the runtime namespace). This is a compile-time check
+  // instead: `tsc` fails if the barrel drops the type export, since the literal below would then
+  // no longer satisfy an imported type.
+  it('exposes ChatCallOptions as a type from the root barrel', () => {
+    const options: ChatCallOptions = { org: 'org-1' };
+    expect(options.org).toBe('org-1');
   });
 });

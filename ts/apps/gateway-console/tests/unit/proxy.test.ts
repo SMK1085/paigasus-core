@@ -49,9 +49,19 @@ function forwarded(res: Response, name: string): string | null {
 }
 
 describe('proxy', () => {
-  it.each(['/gateway', '/gateway/healthz', '/gateway/auth/login', '/gateway/auth/callback', '/gateway/auth/logout', '/gateway/auth/logout/callback'])('lets %s through with no cookie', (path) => {
-    const res = proxy(request(path));
-    expect(res.headers.get('location')).toBeNull();
+  it.each(['/gateway', '/gateway/healthz', '/gateway/auth/login', '/gateway/auth/callback', '/gateway/auth/logout', '/gateway/auth/logout/callback', '/gateway/api/chat'])(
+    'lets %s through with no cookie',
+    (path) => {
+      const res = proxy(request(path));
+      expect(res.headers.get('location')).toBeNull();
+    },
+  );
+
+  // publicPaths is an EXACT-match set (@paigasus/auth middleware.ts), so opening /api/chat opens
+  // no other path.
+  it('still sends a visitor with no cookie on /gateway/api/chat/x to login', () => {
+    const res = proxy(request('/gateway/api/chat/x'));
+    expect(new URL(res.headers.get('location') ?? '', ORIGIN).pathname).toBe('/gateway/auth/login');
   });
 
   it('sends a visitor with no cookie to login ONCE under the basePath, and keeps the basePath in returnTo', () => {
