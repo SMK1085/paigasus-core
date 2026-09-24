@@ -16,6 +16,19 @@ export function gatewayEnv(values: Readonly<Record<string, string>>, parent: Nod
   return { ...env, ...values };
 }
 
+/**
+ * Throws when `CARGO_TARGET_DIR` overrides cargo's default target directory. The playground
+ * harness always runs `rs/target/debug/paigasus-gateway`; with `CARGO_TARGET_DIR` set, a rebuild
+ * writes the binary somewhere else, and the harness would run a stale binary with no warning.
+ */
+export function assertDefaultCargoTargetDir(parent: NodeJS.ProcessEnv = process.env): void {
+  if (parent.CARGO_TARGET_DIR !== undefined) {
+    throw new Error(
+      'CARGO_TARGET_DIR is set. The playground harness always runs rs/target/debug/paigasus-gateway. With CARGO_TARGET_DIR set, a rebuild writes the binary elsewhere, and this harness would run a stale rs/target/debug/paigasus-gateway. Unset CARGO_TARGET_DIR before running the e2e tier.',
+    );
+  }
+}
+
 /** Every complete JSON line of the gateway's output. A partial last line is skipped. */
 export function parseGatewayLog(output: string): GatewayLogLine[] {
   const lines: GatewayLogLine[] = [];

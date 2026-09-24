@@ -41,6 +41,7 @@ test('R29: the playground composer is disabled with a notice when the gateway do
   harness.useWorld({ gatewayDescriptor: { service: 'gateway', version: '0.0.0-e2e', capabilities: [] } });
   await signIn(page, harness, `/gateway/orgs/${ORG_ID}/playground`);
   await expect(page.getByTestId('composer-notice')).toHaveText('Streaming is off on this gateway.');
+  await expect(page.getByLabel('Model')).toBeDisabled();
   await expect(page.getByLabel('Message')).toBeDisabled();
   await expect(page.getByRole('button', { name: 'Send' })).toBeDisabled();
 });

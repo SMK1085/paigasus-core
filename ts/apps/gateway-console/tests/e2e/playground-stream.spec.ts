@@ -9,6 +9,10 @@ import { ORG_ID, ORG_PRN, PRINCIPAL_PRN } from './support/world';
 import { GATEWAY_OPENAI_KEY } from './support/gateway-process';
 
 const PLAYGROUND = `/gateway/orgs/${ORG_ID}/playground`;
+// lib/chat-route.ts UPSTREAM_REJECTED_MESSAGE. Copied, not imported: that module opens with
+// `import 'server-only'`, and this file runs under plain Playwright.
+const UPSTREAM_REJECTED_MESSAGE = 'The model provider rejected the request.';
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 async function send(page: Page, text = 'hello'): Promise<void> {
   await page.getByLabel('Model').fill('gpt-e2e');
@@ -57,6 +61,7 @@ test('R27: an upstream failure inside a record reaches the page as a paigasus-er
   await send(page);
   const error = page.getByTestId('playground-error');
   await expect(error).toBeVisible();
-  await expect(error).toHaveAttribute('data-correlation-id', /^[0-9a-f-]{36}$/);
+  await expect(error).toContainText(UPSTREAM_REJECTED_MESSAGE);
+  await expect(error).toHaveAttribute('data-correlation-id', UUID_RE);
   await expect(page.getByTestId('assistant-turn').last().getByTestId('turn-text')).toContainText('partial');
 });

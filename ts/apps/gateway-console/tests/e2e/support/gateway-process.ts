@@ -10,7 +10,7 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
-import { gatewayEnv } from './gateway-env';
+import { assertDefaultCargoTargetDir, gatewayEnv } from './gateway-env';
 import { freePort, stop, waitForHealth } from './harness';
 import { REPO_ROOT } from './paths';
 
@@ -22,6 +22,7 @@ const MAX_START_ATTEMPTS = 3;
 export type GatewayProcess = { readonly url: string; output(): string; close(): Promise<void> };
 
 export async function startGateway(opts: { readonly iamGrpcUrl: string; readonly openAiUrl: string }): Promise<GatewayProcess> {
+  assertDefaultCargoTargetDir();
   if (!existsSync(GATEWAY_BIN)) throw new Error(`${GATEWAY_BIN} does not exist. Run \`moon run paigasus-gateway-rs:e2e-bin\` (gateway-console-ts:test-e2e depends on it).`);
   const cwd = path.dirname(GATEWAY_BIN);
   if (existsSync(path.join(cwd, 'gateway.toml'))) throw new Error(`${cwd} holds a gateway.toml; the e2e gateway must be configured only through GATEWAY_* variables`);

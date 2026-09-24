@@ -6,7 +6,7 @@
 import { describe, expect, it } from 'vitest';
 // gateway-env.ts has no import at all: harness.ts calls @playwright/test's `test.extend` at module
 // scope, which must not run under vitest.
-import { gatewayEnv, parseGatewayLog } from '../e2e/support/gateway-env';
+import { assertDefaultCargoTargetDir, gatewayEnv, parseGatewayLog } from '../e2e/support/gateway-env';
 
 describe('gatewayEnv', () => {
   it('drops every inherited GATEWAY_* variable and RUST_LOG, and keeps the rest', () => {
@@ -27,5 +27,15 @@ describe('parseGatewayLog', () => {
   it('reads JSON lines and skips everything else', () => {
     const lines = parseGatewayLog('{"fields":{"message":"chat completion proxied","auth":"oidc"}}\nplain text\n{"fields":{"mess');
     expect(lines).toEqual([{ fields: { message: 'chat completion proxied', auth: 'oidc' } }]);
+  });
+});
+
+describe('assertDefaultCargoTargetDir', () => {
+  it('throws, naming the stale-binary risk, when CARGO_TARGET_DIR is set', () => {
+    expect(() => assertDefaultCargoTargetDir({ NODE_ENV: 'test', CARGO_TARGET_DIR: '/tmp/other-target' })).toThrow(/rs\/target\/debug\/paigasus-gateway/);
+  });
+
+  it('does nothing when CARGO_TARGET_DIR is unset', () => {
+    expect(() => assertDefaultCargoTargetDir({ NODE_ENV: 'test' })).not.toThrow();
   });
 });
