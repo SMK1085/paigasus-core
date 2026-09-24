@@ -157,6 +157,16 @@ test('a missing, unparseable or shapeless report is rc 2; so is a bad command li
   assert.equal(run('report', 'a', 'b').status, 2);
 });
 
+test('a nested suites that is not an array fails with rc 2', () => {
+  const file = tempFile('report.json', JSON.stringify({
+    suites: [{ suites: {} }],
+    stats: { expected: 0, unexpected: 0, flaky: 0, skipped: 0 },
+  }));
+  const r = run('report', file);
+  assert.equal(r.status, 2, r.output);
+  assert.ok(r.output.includes('non-array'), `want "non-array" in:\n${r.output}`);
+});
+
 function sourcesDir(overrides = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'journeys-sources-'));
   mkdirSync(dir, { recursive: true });

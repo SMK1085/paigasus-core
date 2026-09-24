@@ -76,12 +76,15 @@ export function parseReport(text) {
 }
 
 function collectSpecs(suites, out) {
+  if (!Array.isArray(suites)) throw new MalformedInput('`suites` is not an array');
   for (const suite of suites) {
     if (typeof suite !== 'object' || suite === null) throw new MalformedInput('a suite is not an object');
+    if (suite.specs !== undefined && !Array.isArray(suite.specs)) throw new MalformedInput('a suite has a non-array `specs`');
     for (const spec of suite.specs ?? []) {
       if (typeof spec !== 'object' || spec === null || !Array.isArray(spec.tests)) throw new MalformedInput('a spec has no `tests` array');
       out.push(spec);
     }
+    if (suite.suites !== undefined && !Array.isArray(suite.suites)) throw new MalformedInput('a suite has a non-array `suites`');
     collectSpecs(suite.suites ?? [], out);
   }
   return out;
