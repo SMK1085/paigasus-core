@@ -60,6 +60,16 @@ test('pass.json prints its annotation after the pass summary (controller ruling 
     r.output.includes('note') && r.output.includes('SMA-514 scenario 1: logout hops across both zones and the IdP'),
     `want the J1 annotation type and description in:\n${r.output}`,
   );
+  // A description holding a newline must still print as exactly one output line: type and
+  // description are JSON.stringify'd, so a real newline character becomes the two characters `\n`.
+  const file = variant((d) => {
+    d.suites[0].specs[0].tests[0].annotations[0].description = 'first line\nsecond line';
+  });
+  const withNewline = run('report', file);
+  assert.equal(withNewline.status, 0, withNewline.output);
+  const annotationLines = withNewline.output.split('\n').filter((line) => line.includes('annotation [auth-roundtrip.spec.ts]'));
+  assert.equal(annotationLines.length, 1, `want exactly one annotation line in:\n${withNewline.output}`);
+  assert.ok(annotationLines[0].includes('first line\\nsecond line'), `want the escaped newline in:\n${withNewline.output}`);
 });
 
 test('fail-expected.json: test.fail() counts as expected, the checker refuses it', () => {
@@ -79,6 +89,15 @@ test('early-return.json: every counter passes, the missing steps do not', () => 
 
 test('a result with no `steps` key fails (Playwright omits the key when no step ran)', () => {
   expectFail(variant((d) => { delete d.suites[1].specs[0].tests[0].results[0].steps; }), '7 step(s) never ran');
+});
+
+test('a step with a caught error on a passing test fails, even though the test passed', () => {
+  expectFail(
+    variant((d) => {
+      d.suites[0].specs[0].tests[0].results[0].steps[0].error = { message: 'boom' };
+    }),
+    'a caught step error',
+  );
 });
 
 test('a failed test fails', () => {

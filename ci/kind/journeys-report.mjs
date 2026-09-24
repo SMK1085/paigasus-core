@@ -96,6 +96,17 @@ function collectStepTitles(steps, out) {
   return out;
 }
 
+/** Every step, at any depth, that holds a caught error (Playwright's JSONReportTestStep.error). */
+function collectStepErrors(steps, out) {
+  for (const step of steps ?? []) {
+    if (typeof step === 'object' && step !== null && step.error !== undefined && step.error !== null) {
+      out.push({ title: step.title, message: String(step.error.message ?? step.error) });
+    }
+    collectStepErrors(step.steps, out);
+  }
+  return out;
+}
+
 export function checkReport(doc) {
   const problems = [];
   for (const key of ['skipped', 'unexpected', 'flaky']) {
@@ -126,7 +137,14 @@ export function checkReport(doc) {
       problems.push(`${name}: no result`);
       continue;
     }
-    if (last.status !== 'passed') problems.push(`${name}: the last result is ${JSON.stringify(last.status)}, want "passed"`);
+    if (last.status !== 'passed') {
+      problems.push(`${name}: the last result is ${JSON.stringify(last.status)}, want "passed"`);
+    } else {
+      const stepErrors = collectStepErrors(last.steps, []);
+      for (const stepError of stepErrors) {
+        problems.push(`${name}: step ${JSON.stringify(stepError.title)} holds a caught error although the test passed (a caught step error): ${stepError.message}`);
+      }
+    }
     const titles = collectStepTitles(last.steps, new Set());
     const missing = EXPECTED_STEPS[file].filter((title) => !titles.has(title));
     if (missing.length > 0) {
@@ -204,7 +222,10 @@ export function main(argv) {
   console.log(mode === 'report' ? '  ok [journeys report]: 2 tests passed, 0 skipped, 0 flaky, every step ran' : '  ok [journeys sources]: both spec files hold the expected step titles');
   if (mode === 'report') {
     for (const { file, title, annotation } of collectAnnotations(doc)) {
-      console.log(`  annotation [${file}] ${JSON.stringify(title)}: ${annotation.type}${annotation.description ? ` - ${annotation.description}` : ''}`);
+      // JSON.stringify both fields (not string interpolation): a description holding a newline or
+      // another control character would otherwise split this line into more than one job-log line.
+      const description = annotation.description ? ` - ${JSON.stringify(annotation.description)}` : '';
+      console.log(`  annotation [${file}] ${JSON.stringify(title)}: ${JSON.stringify(annotation.type)}${description}`);
     }
   }
   return RC_OK;
