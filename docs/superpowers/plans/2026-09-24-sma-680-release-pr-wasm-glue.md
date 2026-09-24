@@ -10,6 +10,17 @@
 
 **Spec:** `docs/superpowers/specs/2026-09-24-sma-680-release-pr-wasm-glue-design.md`
 
+> **Execution note (read before you re-run this plan).** The M1 and M2 steps below are the
+> ORIGINAL plan, and both were void as written. At `028cdd20` release-plz proposed no bump, so
+> the key never acted. At the branch head a README-only `fix(rs):` commit gave release-plz no
+> commits for the kernel. The procedures that ran are in
+> `docs/superpowers/specs/2026-09-24-sma-680-measurements.md`. M1 attempt 2 added a forced
+> kernel-bump commit and committed the key edit. M2 attempt 2 bumped the four kernel-group
+> manifests by hand and ran `cargo update --workspace`, so it is lockfile-scope evidence only.
+> Every acceptance test run recorded there used `--force`, and its full summary line is recorded.
+> The `| tail` pipelines below do not keep `moon`'s exit status; use `set -o pipefail` if you
+> re-run them.
+
 ## Global Constraints
 
 - Worktree: `/Users/smaschek/dev/paigasus/paigasus-core/.claude/worktrees/sma-680-release-wasm-glue`, branch `feature/sma-680-release-wasm-glue`. Run `git branch --show-current` before every commit. It must print `feature/sma-680-release-wasm-glue`.
