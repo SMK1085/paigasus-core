@@ -505,7 +505,7 @@ async fn the_request_log_names_the_credential_and_the_scope() {
 
     let text = logs.text();
     let line = text.lines().find(|l| l.contains("chat completion proxied")).expect("one request log line");
-    assert!(line.contains("api_key"), "auth=api_key: {line}");
+    assert!(line.contains("auth=\"api_key\""), "auth=\"api_key\": {line}");
     assert!(line.contains(CALLER_SCOPE), "scope: {line}");
     assert!(line.contains(CALLER_KEY_ID), "key_id for an API key: {line}");
     assert!(!line.contains("\"hi\""), "the prompt is never logged: {line}");
