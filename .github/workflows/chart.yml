@@ -19,9 +19,11 @@ on:
       - '.proto/plugins/helm.toml'
       - '.github/workflows/chart.yml'
 
-  # PRE-merge: only this job's own inputs, so a console PR does not pay for a cold --release IAM
-  # build (the SMA-520 reason in images.yml). Any other PR can start the job by hand:
-  # `gh workflow run chart.yml --ref <branch>`.
+  # PRE-merge (SMA-514 D3): this job's own inputs AND the code under test in the journeys: the
+  # shell, the auth routes, discovery, both consoles and the lockfile (a Next bump is the most
+  # probable cause of a prefetch or RSC change). The check is NOT required. Cost: every such PR pays for a
+  # cold --release IAM build in `run.sh images` (the SMA-520 reason in images.yml). Any other PR
+  # can start the job by hand: `gh workflow run chart.yml --ref <branch>`.
   pull_request:
     branches:
       - main
@@ -30,6 +32,15 @@ on:
       - 'ci/kind/**'
       - 'ts/apps/iam-console/tests/cluster/**'
       - '.github/workflows/chart.yml'
+      - 'ts/packages/paigasus-app-shell/**'
+      - 'ts/packages/paigasus-auth/**'
+      - 'ts/packages/paigasus-discovery/**'
+      - 'ts/packages/paigasus-console-core/**'
+      - 'ts/packages/paigasus-next-config/**'
+      - 'ts/packages/paigasus-ui/**'
+      - 'ts/apps/iam-console/**'
+      - 'ts/apps/gateway-console/**'
+      - 'ts/pnpm-lock.yaml'
 
 # Nothing is pushed and nothing is published: kind loads the images locally (parent spec § 11).
 permissions:
@@ -45,14 +56,16 @@ jobs:
     name: kind install + upgrade (amd64)
     # NOT a required check (spec § 7): a broken chart reds main, the same trade images.yml makes.
     runs-on: ubuntu-latest
-    # 150, not 60 (review Minor 1): the "Cluster up" and "helm upgrade" steps below are each sized
-    # to the SUM of ci/kind/run.sh's own --timeout/deadline values for that mode (every one of
-    # those is a generous allowance for Docker Hub throttling, per root CLAUDE.md, so they can
-    # legitimately all run close to their cap on the same slow pull). Raising those two steps
-    # alone already exceeds the old 60-minute job budget, so the job budget must rise with them,
-    # or a slow-but-still-passing run would be killed by the JOB timeout after the step timeouts
-    # were fixed to stop killing it by the STEP timeout. See the per-step comments for the sums.
-    timeout-minutes: 150
+    # 169 (SMA-514). Each step timeout below is sized to the SUM of ci/kind/run.sh's own
+    # --timeout/deadline values for that mode (review Minor 1), because each is a generous allowance
+    # for Docker Hub throttling and can legitimately run close to its cap on the same slow pull. The
+    # job budget must hold them all, or a slow but passing run is killed by the JOB timeout. The
+    # step timeouts sum to 158 minutes: 57 (up) + 25 (images) + 12 (install a) + 10 (specs a) +
+    # 9 (stub up) + 10 (specs journeys) + 17 (upgrade b) + 8 (specs b) + 5 (evidence) + 5 (down).
+    # Before SMA-514 the sum was 139 and the budget 150; the budget grows by the two new step
+    # timeouts (9 + 10), which keeps the same 11-minute room for the untimed steps (reclaim,
+    # checkout, tool and dependency installs, Chromium).
+    timeout-minutes: 169
     env:
       # SMA-609: every captured shim output must set this.
       PROTO_REPORTER: text
@@ -131,12 +144,32 @@ jobs:
         run: bash ci/kind/run.sh images
 
       - name: helm install (phase A, both zones)
+        id: install-a
         timeout-minutes: 12
         run: bash ci/kind/run.sh install a
 
       - name: Specs, phase A (R1, R1-control, R2, R3-control)
         timeout-minutes: 10
         run: bash ci/kind/run.sh specs a
+
+      # SMA-514 decision D5: the stub and the journeys run when `install a` succeeded, EVEN IF
+      # `specs a` failed. Mutation M1 (a cross-zone NextLink) breaks R2 too, and a failed phase A
+      # must still leave journey evidence. `!cancelled()` replaces the implicit success(). Phase B
+      # below keeps the default: it runs only when every step before it passed.
+      # 9 min: run.sh stub_up's own waits, summed: rollout status --timeout=300s (5m) + the old
+      # stub-check pod delete --timeout=60s (1m) + the stub-check pod wait --timeout=120s (2m) =
+      # 8 minutes. +1 min margin.
+      - name: Start the gateway stub (SMA-514)
+        if: ${{ !cancelled() && steps.install-a.outcome == 'success' }}
+        timeout-minutes: 9
+        run: bash ci/kind/run.sh stub up
+
+      # 10 min: two tests at the config's 120-s test timeout (4m), `--list`, the pre-run checks and
+      # the report check (under 1m), and the room phase A's step uses for its four tests.
+      - name: Specs, journeys (SMA-514 scenarios 1 and 2)
+        if: ${{ !cancelled() && steps.install-a.outcome == 'success' }}
+        timeout-minutes: 10
+        run: bash ci/kind/run.sh specs journeys
 
       # 17, not 12 (review Minor 1, the reviewer's own worked example). run.sh upgrade_b's own
       # waits, summed: helm upgrade --timeout 10m (10m) + the old-ReplicaSet settle deadline (3m)
