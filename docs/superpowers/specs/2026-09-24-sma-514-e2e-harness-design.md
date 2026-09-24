@@ -189,17 +189,12 @@ titles).
    this). Assert that the browser returns through `/iam/auth/callback` to `/iam/orgs` with
    status 200, that the page hydrates, and that `__Host-pgs_sid` exists. Keep its value as
    `sid`.
-3. **Positive controls, before logout.**
+3. **Positive control, before logout.**
    - **Replay, both zones.** For each of `/iam/orgs` and `/gateway/overview`: in a new context
      that holds only the cookie `__Host-pgs_sid=sid` (host `console.paigasus.test`, `Secure`,
      path `/`), go to the URL. Expect the protected page with status 200 and no redirect to
      `…/auth/login`. Without this control, step 5 could pass because the replay method is
      broken, not because the session is dead.
-   - **IdP SSO.** In a new context that holds only context A's `KEYCLOAK_IDENTITY` and
-     `KEYCLOAK_SESSION` cookies (D10) but no
-     `__Host-pgs_sid`, go to `/iam/orgs`. Expect a silent login (no Keycloak form) that ends on
-     `/iam/orgs`. Without this control, step 6 could pass because Keycloak never kept an SSO
-     session.
 4. **Logout through the shell.** In context A, open the user menu and select **Sign out**
    (`user-menu.tsx:42-45`, a form POST to `/iam/auth/logout`). Assert this chain, with
    `page.waitForRequest` for the end-session hop (the pattern in
@@ -227,12 +222,10 @@ titles).
    reused or closed after it shows Keycloak, so the SMA-652 rule holds. The step-3 replay
    controls have no stop either: if a control fails, `handleLogin` deletes the live sid, but the
    test has already failed at that control.
-6. **The IdP session is dead too.** In a new context that holds the same `KEYCLOAK_IDENTITY` and
-   `KEYCLOAK_SESSION` values as step 3's IdP control (D10) (captured before logout), go to `/iam/orgs`. Assert that the
-   Keycloak login form is shown (no silent SSO login). This is the exact negative of step 3's
-   control. Context A cannot serve: Keycloak's logout response clears context A's IdP cookies,
-   so context A would show the form even if the server-side SSO session were alive (final
-   review, 2026-09-24). The new context is never reused or closed after it shows Keycloak.
+6. **Removed (D11).** The IdP-session check and its SSO control were removed. After the
+   console's code exchange, Keycloak keeps no SSO session (the `offline_access` grant; SMA-682),
+   so the control cannot pass and the check cannot prove anything. SMA-682 adds them back.
+   J1 has five steps.
 
 ## 6. Scenario 2 — `tests/cluster/journeys/zone-round-trip.spec.ts` (one test)
 
@@ -365,6 +358,7 @@ output of M3b and M4. The throwaway branches are deleted afterwards and are neve
 | D8 | § 5 step 5 asserts the redirect chain; no route stop at `/auth/login` (a route cannot see a server redirect hop, measured on Playwright 1.63) | controller ruling, Task 4 review, 2026-09-24 |
 | D9 | § 5 step 4 clicks Keycloak's logout confirmation (A2 disproven); SMA-681 removes the click | Sven, 2026-09-24 |
 | D10 | § 5 steps 3 and 6 copy only `KEYCLOAK_IDENTITY` and `KEYCLOAK_SESSION`; copying all IdP cookies failed in CI run 36046478837 (cause not reproduced locally; the two-cookie subset is measured for both the control and the negative) | controller, 2026-09-24 |
+| D11 | J1 drops the IdP-SSO control (step 3) and the IdP-session check (step 6): after the offline_access code exchange Keycloak keeps no SSO session (measured in CI diag run 36055036506 and locally); J1 has five steps; SMA-682 owns the product finding and restores the checks. D10 is obsolete. | Sven, 2026-09-24 |
 
 ## 11. Assumptions
 
