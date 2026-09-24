@@ -230,3 +230,102 @@ the committed glue (built against wasm-bindgen 0.2.127) no longer matches a fres
 `true`. This conflicts with the comment at `rs/release-plz.toml:25-28`, which states that
 `version_group` "DOES apply to crates whose Cargo manifest says `publish = false` (measured)."
 Cause: OPEN.
+
+## M2 — forced kernel-group bump on this branch (MEASURED) — VOID
+
+Base: branch `feature/sma-680-release-wasm-glue`, commit `6093e2e9` (Task 2's
+`dependencies_update = false` commit). Clone: `$S/m2`, checked out as local branch `m2` from
+`origin/feature/sma-680-release-wasm-glue`. Step 1 confirmed all three expected values exactly:
+HEAD `6093e2e9`, `dependencies_update = false` (`rs/release-plz.toml:49`), `wasm-bindgen` at
+`0.2.128` in `rs/Cargo.lock`.
+
+Step 2 (provision and warm): `proto install`, `pnpm -C ts install --frozen-lockfile`, and
+`moon run paigasus-kernel-ts:build` each exited 0. Unlike Task 1's original M1 attempt 1, the
+warm-up build did NOT leave `rs/crates/bindings/paigasus-node-bindings/index.js` or
+`index.d.ts` dirty this time. `git status --short` was empty right after the build.
+
+Step 3 (scratch commit): `git status --short` was empty before the edit (clean tree,
+confirming step 2's finding). A blank line was appended to
+`rs/crates/libs/paigasus-kernel/README.md` and committed as `fix(rs): scratch readme edit for
+the sma-680 m2 measurement` (`1c0eed71`). The commitlint hook ran and passed. This is the same
+maneuver M1 attempt 2 used successfully at base `028cdd20`.
+
+Step 4 (`release-plz update`, exit 0). `release-plz` did NOT propose a version for
+`paigasus-kernel` this time:
+
+```
+determining next version for paigasus-kernel 0.1.0
+Getting packaged files for crate at .../m2/rs/crates/libs/paigasus-kernel
+Getting packaged files for crate at .../paigasus-kernel
+paigasus-kernel: already up to date
+...
+paigasus-proto-derive: next version is 0.3.0
+paigasus-proto: next version is 0.3.0
+
+* `paigasus-proto-derive`: 0.2.0 -> 0.3.0
+* `paigasus-proto`: 0.2.0 -> 0.3.0
+```
+
+Lockdiff, `python3 lockdiff.py lock-m2-base lock-m2`, verbatim:
+```
+workspace	paigasus-proto	['0.2.0'] -> ['0.3.0']
+workspace	paigasus-proto-derive	['0.2.0'] -> ['0.3.0']
+```
+Only the `proto` version group moved (a `feat(rs):` commit — `1fd87a15`, already on the branch
+— touches generated code under `paigasus-proto`, which explains its bump under
+`features_always_increment_minor`). `paigasus-proto` and `paigasus-proto-derive` are not
+kernel-group members. The four kernel-group crate `Cargo.toml` versions after step 4:
+
+| Crate | Version after step 4 |
+|---|---|
+| `paigasus-kernel` | 0.1.0 (unchanged) |
+| `paigasus-py-bindings` | 0.1.0 (unchanged) |
+| `paigasus-node-bindings` | 0.1.0 (unchanged) |
+| `paigasus-wasm` | 0.1.0 (unchanged) |
+
+Step 5 (`/opt/homebrew/bin/bash ci/version-lockstep/run.sh --write`, exit 0). Output tail:
+```
+Using CPython 3.12.13
+Resolved 62 packages in 515ms
+Updated paigasus-proto v0.2.0 -> v0.3.0
+   Compiling paigasus-node-bindings v0.1.0 (...)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.30s
+version-lockstep: wrote 1 site(s)
+```
+It wrote one site: `py/packages/paigasus-proto/pyproject.toml` (the `proto` group's lockstep
+follower), which `git status --short` confirmed alongside `py/uv.lock`, `rs/Cargo.lock`,
+`rs/Cargo.toml`, `rs/crates/libs/paigasus-proto-derive/Cargo.toml`,
+`rs/crates/libs/paigasus-proto/CHANGELOG.md`, and `rs/crates/libs/paigasus-proto/Cargo.toml` —
+all `proto`-family paths. No kernel-group path appears in that list. Lockdiff, `lock-m2-base`
+vs `lock-m2-stamped`, is identical to step 4's (same two `proto`-family lines; `lock-m2` and
+`lock-m2-stamped` are byte-identical, MD5 `5deafc7063b3f64fc59a5854120fa88c`). The four
+kernel-group crate `Cargo.toml` versions after step 5, unchanged from step 4:
+
+| Crate | Version after step 5 |
+|---|---|
+| `paigasus-kernel` | 0.1.0 (unchanged) |
+| `paigasus-py-bindings` | 0.1.0 (unchanged) |
+| `paigasus-node-bindings` | 0.1.0 (unchanged) |
+| `paigasus-wasm` | 0.1.0 (unchanged) |
+
+**Verdict: VOID**, per the brief's step 4 rule as the controller amended it: void only if no
+kernel-group crate changed version, checked after both step 4 and step 5. Here, none of the
+four kernel-group crates changed version at either point. This is not the narrower carve-out
+about `paigasus-wasm` alone staying behind a moved `paigasus-kernel` — no kernel-group crate,
+including `paigasus-kernel` itself, moved at all. Per the brief, this stops the run: steps 6
+and 7 (test the committed glue, regenerate and diff) did not run, because no kernel-group bump
+happened to test against. M2 did not exercise a `paigasus-wasm` version change; SMA-634 S3-2
+stays the evidence for that path.
+
+Divergence from M1 attempt 2 (MEASURED, cause OPEN): the identical maneuver — one README-only
+`fix(rs):` commit on `paigasus-kernel`, one commit past the package's last release tag — bumped
+`paigasus-kernel` 0.1.0 -> 0.1.1 at base `028cdd20` (M1 attempt 2), but left it at 0.1.0
+("already up to date") at this branch's base `6093e2e9`. The git-history shape looks the same
+in both cases: `git log paigasus-kernel-v0.1.0..HEAD -- rs/crates/libs/paigasus-kernel` lists
+exactly one commit (the scratch README edit) in this clone, and the tag `paigasus-kernel-v0.1.0`
+(commit `64c96242`, `chore: release v0.1.0 (#170)`) is an ancestor of both `028cdd20` and this
+branch's HEAD. `release-plz`'s own log lines ("Getting packaged files for crate at ...", twice,
+then "already up to date") suggest it compares packaged crate contents rather than reading
+git-log commit-to-package attribution directly, but that mechanism is READ from the log output,
+not read from the `release-plz` source, so it is not confirmed. This file does not resolve why
+the same maneuver produced a bump once and not the other time. Cause: OPEN.
