@@ -127,9 +127,9 @@ in BOTH consoles. The TypeScript already rejects it; the chart should never rend
 {{- end -}}
 
 {{- define "paigasus.zoneMapJson" -}}
-{{- /* NEGATIVE-CONTROL FIXTURE (ci/helm-render): skips an ENABLED gateway zone. */ -}}
 {{- $m := dict -}}
 {{- range $id, $z := .Values.zones -}}
+{{- /* NEGATIVE-CONTROL FIXTURE (ci/helm-render): skips an ENABLED gateway zone. */ -}}
 {{- if and $z.enabled (ne $id "gateway") -}}{{- $_ := set $m $id $z.basePath -}}{{- end -}}
 {{- end -}}
 {{- toJson $m -}}
@@ -162,7 +162,7 @@ always yields a STRING, so a numeric `--set oidc.caBundle.version=2` still hashe
 {{- end -}}
 
 {{- define "paigasus.idpCaKey" -}}
-{{- dig "caBundle" "key" "" .Values.oidc -}}
+{{- dig "caBundle" "key" "ca.crt" .Values.oidc -}}
 {{- end -}}
 
 {{- define "paigasus.idpCaVersion" -}}

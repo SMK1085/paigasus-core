@@ -161,7 +161,7 @@ always yields a STRING, so a numeric `--set oidc.caBundle.version=2` still hashe
 {{- end -}}
 
 {{- define "paigasus.idpCaKey" -}}
-{{- dig "caBundle" "key" "" .Values.oidc -}}
+{{- dig "caBundle" "key" "ca.crt" .Values.oidc -}}
 {{- end -}}
 
 {{- define "paigasus.idpCaVersion" -}}

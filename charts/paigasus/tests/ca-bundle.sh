@@ -23,6 +23,12 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CHART="$(cd "$HERE/.." && pwd)"
 # The eighth copy of the required values (ci/helm-render/README.md, residual risk 4). The gateway
 # zone is ON, so each row sees all three Deployments.
+#
+# reuse-values-no-key
+#                   `helm upgrade --reuse-values` from a release made before oidc.caBundle existed,
+#                   with only existingConfigMap newly set: the release has no `key` at all (not an
+#                   empty string). `paigasus.idpCaKey`'s dig default must be "ca.crt" so this still
+#                   renders, not the empty-key refusal (Review Focus 1).
 BASE=(
   --kube-version 1.31.0
   --set ingress.host=console.example.test
@@ -157,6 +163,7 @@ row_version() {  # row_version <label> <version 1> <version 2>
 row_set "set" ca.crt --set oidc.caBundle.existingConfigMap=paigasus-idp-ca
 row_set "set-custom-key" bundle.pem --set oidc.caBundle.existingConfigMap=paigasus-idp-ca --set oidc.caBundle.key=bundle.pem
 row_set "set-dotted-key" idp-root.ca.pem --set oidc.caBundle.existingConfigMap=paigasus-idp-ca --set oidc.caBundle.key=idp-root.ca.pem
+row_set "reuse-values-no-key" ca.crt --set oidc.caBundle.existingConfigMap=paigasus-idp-ca --set oidc.caBundle.key=null
 row_unset "unset"
 row_unset "null-cabundle" --set oidc.caBundle=null
 row_version "version-strings" v1 v2
