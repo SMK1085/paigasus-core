@@ -15,6 +15,20 @@
 # The ten keys below are the ones @paigasus/auth, @paigasus/discovery and each app's own
 # lib/config.ts declare with no default. Anything missing here is a pod that fails its
 # configuration parse on the first request.
+#
+# The script also checks the IAM backend's IAM_AUTHN__ISSUERS value (SMA-678, check_audience).
+# One row per property of oidc.audience:
+#   A1 unset        the audience is oidc.clientId, and the "oidc.audience is set" comment is absent.
+#   A2 reuse-values-no-key
+#                   `helm upgrade --reuse-values` from a release made before the key existed: the
+#                   template reads nil, and the audience is still oidc.clientId.
+#   A3 set          the value REPLACES oidc.clientId. The exact compare proves a list of one.
+#   A4 number       an int64 from --set renders as the string "12345", not a rune literal.
+#   A5 number-in-file
+#                   a number in a values file (a float64) renders as the string "12345" too.
+#   A6 restart-scope
+#                   a change of the value changes the IAM pod template and no console pod template.
+# A row counter reds the script when a row call line is deleted.
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CHART="$(cd "$HERE/.." && pwd)"
@@ -91,6 +105,97 @@ print("|".join(problems) if problems
 
 check "iam only"        --set zones.gateway.enabled=false
 check "iam and gateway" --set zones.gateway.enabled=true
+
+# oidc.audience (SMA-678). Renders go to a file, not through a pipe: a Linux runner holds the whole
+# render in its pipe, a 512-byte host pipe does not (ci/helm-render/README.md, residual risk 5).
+TMP="$(mktemp -d "${TMPDIR:-/tmp}/env.XXXXXX")"
+trap 'rm -rf "$TMP"' EXIT
+AUDIENCE_ROWS=0
+AUDIENCE_ROWS_WANT=6
+
+# check_audience <label> <expected audience> <present|absent> [helm args...]
+# The third argument is the state of the "oidc.audience is set" YAML comment line.
+check_audience() {
+  local label="$1" want="$2" comment="$3"; shift 3
+  local out
+  AUDIENCE_ROWS=$((AUDIENCE_ROWS + 1))
+  if ! helm template paigasus "$CHART" "${BASE[@]+"${BASE[@]}"}" "$@" >"$TMP/audience.yaml" 2>"$TMP/audience.err"; then
+    echo "FAIL [$label]: render failed"; cat "$TMP/audience.err"; ec=1; return 0
+  fi
+  if ! out="$(WANT="$want" COMMENT="$comment" python3 -c '
+import os, sys, yaml
+want = "[{issuer=\"https://idp.example.test/realms/paigasus\",audiences=[\"" + os.environ["WANT"] + "\"]}]"
+line = "            # oidc.audience is set: IAM accepts that audience, not the client id."
+with open(sys.argv[1]) as fh:
+    raw = fh.read()
+docs = [d for d in yaml.safe_load_all(raw) if d]
+problems = []
+deps = [d for d in docs if d.get("kind") == "Deployment"
+        and d["spec"]["template"]["metadata"]["labels"].get("app.kubernetes.io/name") == "iam-backend"]
+if len(deps) != 1:
+    problems.append(str(len(deps)) + " iam-backend Deployment(s), want 1")
+else:
+    env = deps[0]["spec"]["template"]["spec"]["containers"][0].get("env") or []
+    issuers = [e for e in env if e.get("name") == "IAM_AUTHN__ISSUERS"]
+    if len(issuers) != 1:
+        problems.append(str(len(issuers)) + " IAM_AUTHN__ISSUERS entries, want 1")
+    elif issuers[0].get("value") != want:
+        problems.append("IAM_AUTHN__ISSUERS is " + repr(issuers[0].get("value")) + ", want " + repr(want))
+count = raw.splitlines().count(line)
+if os.environ["COMMENT"] == "present" and count != 1:
+    problems.append("the oidc.audience comment line renders " + str(count) + " time(s), want 1")
+if os.environ["COMMENT"] == "absent" and count != 0:
+    problems.append("the oidc.audience comment line renders " + str(count) + " time(s), want 0")
+print("|".join(problems) if problems else "OK")' "$TMP/audience.yaml" 2>&1)"; then
+    echo "FAIL [$label]: the checker failed"; printf '%s\n' "$out"; ec=1; return 0
+  fi
+  if [ "$out" = "OK" ]; then echo "  ok [$label]"; else echo "FAIL [$label]: $out"; ec=1; fi
+}
+
+# check_audience_restart <label>: a change of oidc.audience restarts the IAM pod and no console pod
+# (docs/ops/RUNBOOK-chart.md § 5). The gateway zone is on, so both consoles are in the render.
+check_audience_restart() {
+  local label="$1" out
+  AUDIENCE_ROWS=$((AUDIENCE_ROWS + 1))
+  if ! helm template paigasus "$CHART" "${BASE[@]+"${BASE[@]}"}" --set zones.gateway.enabled=true >"$TMP/restart-1.yaml" 2>"$TMP/restart.err"; then
+    echo "FAIL [$label]: render failed"; cat "$TMP/restart.err"; ec=1; return 0
+  fi
+  if ! helm template paigasus "$CHART" "${BASE[@]+"${BASE[@]}"}" --set zones.gateway.enabled=true --set oidc.audience=api://default >"$TMP/restart-2.yaml" 2>"$TMP/restart.err"; then
+    echo "FAIL [$label]: render failed"; cat "$TMP/restart.err"; ec=1; return 0
+  fi
+  if ! out="$(python3 -c '
+import sys, yaml
+def templates(path):
+    with open(path) as fh:
+        docs = [d for d in yaml.safe_load_all(fh) if d]
+    return {d["spec"]["template"]["metadata"]["labels"]["app.kubernetes.io/name"]: d["spec"]["template"] for d in docs if d.get("kind") == "Deployment"}
+a, b = templates(sys.argv[1]), templates(sys.argv[2])
+want = ["gateway-console", "iam-backend", "iam-console"]
+problems = []
+if sorted(a) != want or sorted(b) != want:
+    problems.append("Deployments are " + repr(sorted(a)) + " and " + repr(sorted(b)) + ", want " + repr(want))
+elif a["iam-backend"] == b["iam-backend"]:
+    problems.append("iam-backend: spec.template is equal; it must differ")
+problems += [n + ": spec.template differs; it must be equal" for n in ("gateway-console", "iam-console") if n in a and n in b and a[n] != b[n]]
+print("|".join(problems) if problems else "OK")' "$TMP/restart-1.yaml" "$TMP/restart-2.yaml" 2>&1)"; then
+    echo "FAIL [$label]: the checker failed"; printf '%s\n' "$out"; ec=1; return 0
+  fi
+  if [ "$out" = "OK" ]; then echo "  ok [$label]"; else echo "FAIL [$label]: $out"; ec=1; fi
+}
+
+# A5: a number in a VALUES FILE is a float64, not the int64 that --set gives (Review Focus 1).
+printf 'oidc:\n  audience: 12345\n' >"$TMP/audience-number.yaml"
+
+check_audience "A1 unset"               paigasus-console absent
+check_audience "A2 reuse-values-no-key" paigasus-console absent  --set oidc.audience=null
+check_audience "A3 set"                 api://default    present --set oidc.audience=api://default
+check_audience "A4 number"              12345            present --set oidc.audience=12345
+check_audience "A5 number-in-file"      12345            present -f "$TMP/audience-number.yaml"
+check_audience_restart "A6 restart-scope"
+
+if [ "$AUDIENCE_ROWS" -lt "$AUDIENCE_ROWS_WANT" ]; then
+  echo "FAIL [audience rows]: $AUDIENCE_ROWS check_audience row(s) ran, want $AUDIENCE_ROWS_WANT"; ec=1
+fi
 
 if [ "$ec" -eq 0 ]; then echo "== chart env OK =="; fi
 exit "$ec"
