@@ -93,8 +93,9 @@ Rewrite the release-plz bullet at lines 9-14 as whole sentences:
   the packages that release-plz processes.
 - A `publish = false` crate outside a group with a publishable head is not processed (M7), and a
   `publish = false` crate is not tagged (SMA-580). Remove "but **not tagging**".
-- Keep the SMA-407 fixture measurement ("a crate neither in the version group nor touched by the
-  commit still gets bumped"), and give its scope: that fixture had publishable crates.
+- Keep the fixture measurement that `rs/release-plz.toml` records ("a crate neither in the
+  version group nor touched by the commit was still bumped"), and give its scope: that fixture
+  had publishable crates. No issue ID is recorded for it; do not add one.
 - Add: `dependencies_update` is `false` since SMA-680, with the two reasons from 4.1.
 
 ### 4.3 `ts/packages/paigasus-kernel/moon.yml`
