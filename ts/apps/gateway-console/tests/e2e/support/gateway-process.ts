@@ -8,6 +8,7 @@
 //
 // Read-only on disk: `existsSync` is the only fs call (tests/unit/e2e-read-only.test.ts).
 import { spawn, type ChildProcess } from 'node:child_process';
+import { once } from 'node:events';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { assertDefaultCargoTargetDir, gatewayEnv } from './gateway-env';
@@ -57,6 +58,13 @@ export async function startGateway(opts: { readonly iamGrpcUrl: string; readonly
         GATEWAY_STREAM_ENABLED: 'true',
       }) as unknown as NodeJS.ProcessEnv,
     });
+    // A spawn failure (ENOENT, EACCES, ...) emits 'error' asynchronously, after the existsSync
+    // check above already passed. With no listener that event is unhandled and crashes the
+    // worker. Listening here both stops that crash and turns the failure into the same
+    // controlled startup error the health check below throws on.
+    const spawnError: Promise<never> = once(child, 'error').then(([error]) => {
+      throw new Error(`failed to spawn ${GATEWAY_BIN}: ${(error as Error).message}`, { cause: error });
+    });
     child.stdout?.on('data', (chunk: Buffer) => {
       output += chunk.toString('utf8');
     });
@@ -66,10 +74,11 @@ export async function startGateway(opts: { readonly iamGrpcUrl: string; readonly
     const url = `http://127.0.0.1:${String(port)}`;
     let state: 'ready' | 'exited';
     try {
-      state = await waitForHealth(`${url}/healthz`, child, () => output, 'paigasus-gateway');
+      state = await Promise.race([waitForHealth(`${url}/healthz`, child, () => output, 'paigasus-gateway'), spawnError]);
     } catch (error) {
-      // waitForHealth throws on a 5xx answer or at its timeout. Either way the child is still
-      // running (it did not report itself exited), so it must be stopped here or it leaks.
+      // waitForHealth throws on a 5xx answer or at its timeout, with the child still running. A
+      // spawn failure sets exitCode before 'error' fires, so stop() below is a no-op for that
+      // case and a real cleanup for the other two — either way it must run or the child leaks.
       await stop(child);
       throw error;
     }
