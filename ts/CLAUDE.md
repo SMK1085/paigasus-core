@@ -148,7 +148,7 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   staging rule is at `docs/ops/RUNBOOK-containers.md:364-369`. The exec-form
   `ENTRYPOINT`/`HEALTHCHECK` rule (no `ARG`/`ENV` expansion) is at `rs/CLAUDE.md:207` and
   `docs/ops/RUNBOOK-containers.md:317-322`.
-  The kind-only specs in `apps/iam-console/tests/cluster/` run only from `ci/kind/run.sh specs a|b`.
+  The kind-only specs in `apps/iam-console/tests/cluster/` run only from `ci/kind/run.sh specs a|b|journeys`.
 
 ## Auth, sessions and the console packages
 

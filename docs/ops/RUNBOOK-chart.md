@@ -164,3 +164,20 @@ Set `ingress.className` to your controller's class.
 To run the job by hand on a branch: `gh workflow run chart.yml --ref <branch>`. To run it locally,
 see `ci/kind/README.md`. The job maps the two host names with a CoreDNS `hosts` block. That is a
 kind-only device: a real cluster needs real DNS for the IdP host.
+
+The job runs the steps in this order: `up`, `images`, `install a`, `specs a`, `stub up`,
+`specs journeys`, `upgrade b`, `specs b`. `stub up` starts a static gateway stub, so the gateway
+zone is `available` for the two journeys (SMA-514). `stub up` and `specs journeys` run when
+`install a` succeeded, even if `specs a` failed. Phase B runs only when every step before it passed.
+
+To re-run one journey on a local kind cluster after `stub up`:
+
+    STATE="${PAIGASUS_KIND_STATE:-${TMPDIR:-/tmp}/paigasus-kind}"
+    PAIGASUS_KIND_USERNAME=paigasus-kind PAIGASUS_KIND_PASSWORD="$(cat "$STATE/user-password")" \
+      PAIGASUS_KIND_OUTPUT_DIR="$STATE/diagnose/playwright/journeys" \
+      pnpm --dir ts/apps/iam-console exec playwright test \
+        --config tests/cluster/playwright.config.ts --project journeys journeys/auth-roundtrip.spec.ts
+
+Use `journeys/zone-round-trip.spec.ts` for the other one. This direct run skips the job's guards
+(the skip scan, the exactly-2 count and the report check); only `run.sh specs journeys` applies
+them. In CI there is no per-journey re-run: re-run the failed job with `gh run rerun <run-id> --failed`.
