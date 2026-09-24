@@ -195,7 +195,8 @@ titles).
      path `/`), go to the URL. Expect the protected page with status 200 and no redirect to
      `…/auth/login`. Without this control, step 5 could pass because the replay method is
      broken, not because the session is dead.
-   - **IdP SSO.** In a new context that holds context A's `idp.paigasus.test` cookies but no
+   - **IdP SSO.** In a new context that holds only context A's `KEYCLOAK_IDENTITY` and
+     `KEYCLOAK_SESSION` cookies (D10) but no
      `__Host-pgs_sid`, go to `/iam/orgs`. Expect a silent login (no Keycloak form) that ends on
      `/iam/orgs`. Without this control, step 6 could pass because Keycloak never kept an SSO
      session.
@@ -210,7 +211,8 @@ titles).
    the IdP returns to the default `${PUBLIC_ORIGIN}${basePath}/` (`runtime.ts:130`), and
    `/iam/auth/logout/callback` is NOT requested. Then assert that `__Host-pgs_sid` is gone. This
    step also covers the SMA-653 defect class: a CSP `form-action` that blocks the form's 302 to
-   the IdP.
+   the IdP. Keycloak then shows its logout confirmation page, because the request has no
+   `id_token_hint`; the test clicks the confirm button (D9, until SMA-681).
 5. **The session is dead on the server, in both zones.** For each of `/iam/orgs` and
    `/gateway/overview`, use **one new context per URL** that holds only the old `sid` cookie.
    Go to the URL and assert on the redirect chain (`redirectChain(response)`): (a) the first
@@ -225,8 +227,8 @@ titles).
    reused or closed after it shows Keycloak, so the SMA-652 rule holds. The step-3 replay
    controls have no stop either: if a control fails, `handleLogin` deletes the live sid, but the
    test has already failed at that control.
-6. **The IdP session is dead too.** In a new context that holds the same `idp.paigasus.test`
-   cookies as step 3's IdP control (captured before logout), go to `/iam/orgs`. Assert that the
+6. **The IdP session is dead too.** In a new context that holds the same `KEYCLOAK_IDENTITY` and
+   `KEYCLOAK_SESSION` values as step 3's IdP control (D10) (captured before logout), go to `/iam/orgs`. Assert that the
    Keycloak login form is shown (no silent SSO login). This is the exact negative of step 3's
    control. Context A cannot serve: Keycloak's logout response clears context A's IdP cookies,
    so context A would show the form even if the server-side SSO session were alive (final
@@ -361,16 +363,17 @@ output of M3b and M4. The throwaway branches are deleted afterwards and are neve
 | D6 | A post-run check on a well-formed report is rc 1; a missing report is rc 2 | spec challenge, 2026-09-24 |
 | D7 | Mutation M2 runs alone in CI; M3 is proven locally by the pre-run scan | Sven, 2026-09-24 |
 | D8 | § 5 step 5 asserts the redirect chain; no route stop at `/auth/login` (a route cannot see a server redirect hop, measured on Playwright 1.63) | controller ruling, Task 4 review, 2026-09-24 |
+| D9 | § 5 step 4 clicks Keycloak's logout confirmation (A2 disproven); SMA-681 removes the click | Sven, 2026-09-24 |
+| D10 | § 5 steps 3 and 6 copy only `KEYCLOAK_IDENTITY` and `KEYCLOAK_SESSION`; copying all IdP cookies failed in CI run 36046478837 (cause not reproduced locally; the two-cookie subset is measured for both the control and the negative) | controller, 2026-09-24 |
 
 ## 11. Assumptions
 
 - **A1:** default discovery timings (§ 4.3).
-- **A2:** Keycloak's `end_session` accepts `client_id` without `id_token_hint` and returns to
-  the registered `post_logout_redirect_uri` without a confirmation page. The realm already
-  allows it: `ci/kind/realm/paigasus-realm.json:23` sets `post.logout.redirect.uris` to
-  `https://console.paigasus.test/iam/*##https://console.paigasus.test/gateway/*`, and the `*`
-  wildcard is a prefix match. The "no confirmation page" half is measured by § 5 step 4 on the
-  first CI run; if Keycloak shows a confirmation page, a realm change is in scope.
+- **A2 (DISPROVEN, 2026-09-24):** the assumption was that Keycloak accepts `client_id` without
+  `id_token_hint` and returns with no confirmation page. A local run of the pinned Keycloak 26.4
+  image with this realm measured a confirmation page ("Do you want to log out?"). Decision D9
+  (Sven): § 5 step 4 clicks the confirmation, and SMA-681 makes logout send `id_token_hint` and
+  removes the click. The `post.logout.redirect.uris` half holds (`paigasus-realm.json:23`).
 
 ## 12. Changes after the spec challenge (2026-09-24)
 
