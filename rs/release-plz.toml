@@ -8,18 +8,45 @@
 # NO workspace-level `release` key. It was `release = false` while every package sat at the
 # 0.0.0 stub floor; measured against release-plz 0.3.158, that makes the tool hard-error with
 # "no public packages found", so a release-PR job cannot run under it. Releasability is now
-# declared per package below — which is also what stops `dependencies_update` from cascading
-# tags into crates nobody intended to release (spec §8).
+# declared per package below. A per-package `release = false` keeps a crate out of the
+# release-PR proposal, so the "dependencies changed" cascade cannot bump it (spec §8). The
+# cascade itself is unconditional — see the `dependencies_update` note below.
 #
 # Conventional-Commit -> semver classification (the contract SMA-398 asserts).
 # In 0.x: fix -> patch, feat -> minor, breaking (! or BREAKING CHANGE) -> minor.
 features_always_increment_minor = true
-# Kept ON deliberately. It cascades a patch bump into every transitive dependent of a bumped
-# crate (measured: a crate neither in the version group nor touched by the commit was still
-# bumped, logged "dependencies changed"). That is correct for a workspace that vendors its own
-# libs; the per-package `release = false` entries below are what stop the cascade turning into
-# tags. Turning it off instead would change what the parity fixture derives from this file.
-dependencies_update = true
+
+# --- Lockfile scope of the release PR (SMA-680) --------------------------------------------
+# NOT a classification key. The SMA-398 parity harness does not read it:
+# ci/release-parity/ecosystems/release-plz.sh derives only `features_always_increment_minor`.
+#
+# WHAT IT DOES. Read from the release-plz 0.3.158 source, not measured. Read it again when
+# .prototools moves the release-plz pin. Its only reader is `update_cargo_lock`
+# (release_plz_core, src/command/update/mod.rs:142-158). `true` runs `cargo update`, which
+# moves every third-party entry of rs/Cargo.lock. `false` (the release-plz default) runs
+# `cargo update --workspace`, which rewrites only the workspace members' entries. That holds
+# only while the lock satisfies the manifests; ci/cargo-lock-integrity enforces that on main.
+#
+# WHAT IT DOES NOT DO. It does not control the "dependencies changed" cascade, where a
+# dependent is bumped because a workspace dependency of it was bumped. `update_dependencies`
+# (mod.rs:202-232) and `add_dependencies_update_if_any` (updater.rs:749-783) never read this
+# key. An earlier comment here said the opposite. It was wrong.
+#
+# WHY FALSE (SMA-680):
+#   1. The wasm glue under rs/crates/bindings/paigasus-wasm/ is committed (SMA-634), and no
+#      release step regenerates it. A full `cargo update` that moved wasm-bindgen made that glue
+#      stale, and the v0.2.0 release PR failed committed-wasm.test.ts.
+#   2. The release-pr job's stamp step builds with a write-capable App token in its environment
+#      (release.yml, GH_TOKEN_FOR_PUSH). With `true`, third-party build scripts that no person
+#      reviewed ran there.
+# Setting it to `true` again CAN make a release PR fail committed-wasm.test.ts, on a day when the
+# registry has a newer compatible wasm-bindgen. That test's message then asks for a manual
+# `generate-wasm` commit. The real cause is this key. Third-party Rust updates come only from
+# dependabot's cargo group.
+#
+# `false` is not enough if a crate version ever enters the glue. See the note above
+# `generate-wasm` in ts/packages/paigasus-kernel/moon.yml.
+dependencies_update = false
 
 # --- Releasable: the kernel family (ADR-0011 S1) ------------------------------------------
 # One version across crates.io/PyPI/npm. `version_group` holds them together, and it DOES
@@ -102,7 +129,8 @@ git_release_enable = false
 # --- Not releasable ------------------------------------------------------------------------
 # Every other member. `release = false` removes a package from the release-PR proposal
 # ENTIRELY (measured: it is neither bumped nor listed), which is what keeps the
-# dependencies_update cascade from bumping and permanently tagging crates nobody released.
+# "dependencies changed" cascade from bumping crates nobody released. None of these crates can
+# get a tag: release-plz tags only what it publishes (see the TAGS note above).
 #
 # paigasus-gateway / paigasus-iam are versioned BY HAND (SMA-658): each moved to 0.1.0 at the
 # first image release. `packages_to_process()` filters on Cargo's own `publish` field, and

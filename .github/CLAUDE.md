@@ -7,13 +7,15 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
 ## release-plz
 
 - `rs/release-plz.toml` declares releasability **per package**, never workspace-wide. A
-  `[workspace] release = false` makes release-plz hard-error (`no public packages found`), and
-  simply deleting it is worse: `dependencies_update = true` cascades a patch bump into every
-  transitive dependent — a crate neither in the version group nor touched by the commit still
-  gets bumped ("dependencies changed") — and Cargo's `publish = false` suppresses publishing but
-  **not tagging**, so the first release would permanently tag most of the workspace. Per-package
-  `release = false` removes a package from the proposal entirely; every non-family crate needs
-  one explicitly. `paigasus-gateway` / `paigasus-iam` are versioned BY HAND (SMA-658, option
+  `[workspace] release = false` makes release-plz hard-error (`no public packages found`). The
+  "dependencies changed" cascade is unconditional (read from the 0.3.158 source, not measured):
+  a dependent of a bumped crate is bumped too, and `dependencies_update` does not control it. It
+  reaches only the packages that release-plz processes. The fixture measurement that
+  `rs/release-plz.toml` records used publishable crates: a crate neither in the version group nor
+  touched by the commit was still bumped. A `publish = false` crate outside a group with a
+  publishable head is not processed (M7, below), and release-plz tags only what it publishes
+  (SMA-580, below). Per-package `release = false` removes a package from the proposal entirely;
+  every non-family crate needs one explicitly. `paigasus-gateway` / `paigasus-iam` are versioned BY HAND (SMA-658, option
   V-a) and are at `0.1.0` as of this PR. `release = false` stays, and release-plz neither bumps
   nor tags them: `packages_to_process()` filters on Cargo's own `publish` field, and both crates
   sit in NO `version_group` (SMA-658 M7, measured on 0.3.158). Read that as the scoped claim it
@@ -24,6 +26,10 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   the other. What `publish = false` always excludes is tagging and publishing.
   `env!("CARGO_PKG_VERSION")` still feeds `ServiceInfo`, and ADR-0020 skew reporting is still
   parked on that value (SMA-505 R7).
+- `dependencies_update` is `false` since SMA-680. `true` runs a full `cargo update` in the release
+  PR. That made the committed wasm glue stale on v0.2.0, and it ran unreviewed third-party build
+  scripts in the stamp step, which holds a write-capable token. `false` runs
+  `cargo update --workspace`. The reasons and the source lines are in the key's comment.
 - release-plz's `release_pr()` does all its work in a **tempdir copy** (`copy_to_temp_dir`,
   measured against the pinned 0.3.158) — it never touches the local working tree or `HEAD`. This
   nearly shipped a direct push to `main`: deriving the push target with `git rev-parse
