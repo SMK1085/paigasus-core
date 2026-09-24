@@ -5,9 +5,10 @@
 // and the resolver itself makes ONE IAM call (SMA-632): WhoAmI is bearer-enforced, so it
 // provisions the caller as a side effect and there is nothing left to retry.
 //
-// It lives in the APP because @paigasus/auth must not import @paigasus/sdk
-// (ts/packages/paigasus-auth/src/ports/principal-resolver.ts:3-8), and the sdk boundary rule bans
-// every @paigasus/* import except proto. SMA-631 records a shared home for SMA-512.
+// It lives in @paigasus/console-core, not in @paigasus/auth, because @paigasus/auth must not import
+// @paigasus/sdk (ts/packages/paigasus-auth/src/ports/principal-resolver.ts:3-8), and the sdk
+// boundary rule bans every @paigasus/* import except proto. So neither of those two packages can
+// hold a resolver that needs both.
 //
 // IT NEVER FAILS THE LOGIN. On any failure it returns principalPrn: null, empty lists and
 // grantsAvailable: false. An IAM answer that is a failure logs `principal.resolve_failed`; a
@@ -33,7 +34,7 @@ import type { IamClients } from './iam-clients';
 /** The user waits on the login callback, so each call gets 3 s, not the SDK's 10 s (transport.ts:42). */
 const DEFAULT_TIMEOUT_MS = 3_000;
 
-export function createIntrospectPrincipalResolver(deps: {
+export function createPrincipalResolver(deps: {
   /**
    * May be async: the app's `lib/auth.ts` reads the request's correlation id here, so the login callback's IAM
    * calls join the id proxy.ts minted. A factory that throws — or a promise that rejects — is a bug,

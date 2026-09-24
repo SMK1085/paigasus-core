@@ -189,7 +189,7 @@ export function devWorld(): FakeIamHandlers {
     // always prefers a scripted handler over `defaults()`, so scripting it would freeze the gRPC
     // answer at whatever this map returned, even after a later `setServiceInfo()` call moved the
     // HTTP answer — breaking the fake's documented contract that a descriptor change updates both
-    // the gRPC and the HTTP answer (fake-iam.ts:130-134). Leaving it unscripted lets `defaults()`
+    // the gRPC and the HTTP answer (fake-iam.ts:138-147). Leaving it unscripted lets `defaults()`
     // keep serving the mutable `grpcDescriptor`, matching the e2e world's own choice
     // (tests/e2e/support/world.ts), where the harness calls `setServiceInfo()` after startup.
     'tenancy.getOrganization': (req: { prn: string }) => ({ organization: organizationAt(req.prn) }),

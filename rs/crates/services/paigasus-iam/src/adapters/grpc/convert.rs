@@ -1532,8 +1532,9 @@ mod tests {
     }
 
     /// `PrincipalContext` fixture for an OIDC-authenticated caller — `Issuer::parse` mirrors
-    /// `application::authenticate_token`'s own test fixtures.
-    fn oidc_context() -> PrincipalContext {
+    /// `application::authenticate_token`'s own test fixtures. `expires_at` is a parameter, as in
+    /// `api_key_context`, so that a test can assert the exact expiry.
+    fn oidc_context(expires_at: DateTime<Utc>) -> PrincipalContext {
         use paigasus_iam_core::{AuthnPrincipal, Issuer, PrincipalKind, PrincipalStatus};
 
         PrincipalContext {
@@ -1544,7 +1545,7 @@ mod tests {
                 credential: Credential::Oidc {
                     issuer: Issuer::parse("https://idp.example.com").unwrap(),
                     subject: "subject-51".to_string(),
-                    expires_at: Utc::now() + chrono::Duration::hours(1),
+                    expires_at,
                 },
             },
             memberships: Vec::new(),
@@ -1572,13 +1573,17 @@ mod tests {
         assert_eq!(to_who_am_i_response(&ctx).expires_at, None);
     }
 
+    /// SMA-666: literal values, not "not empty". Both fixture values are not empty, so the old
+    /// assertions passed with the issuer and the subject transposed. The exact expiry catches a
+    /// fabricated timestamp.
     #[test]
     fn to_who_am_i_response_reports_an_oidc_caller_in_full() {
-        let ctx = oidc_context();
+        let expiry = Utc::now() + chrono::Duration::hours(1);
+        let ctx = oidc_context(expiry);
         let response = to_who_am_i_response(&ctx);
-        assert!(!response.issuer.is_empty());
-        assert!(!response.subject.is_empty());
-        assert!(response.expires_at.is_some());
+        assert_eq!(response.issuer, "https://idp.example.com");
+        assert_eq!(response.subject, "subject-51");
+        assert_eq!(response.expires_at, Some(ts(expiry)));
     }
 
     /// SMA-633 whole-branch review finding 2: nothing previously asserted that `WhoAmI` reports
@@ -1587,7 +1592,7 @@ mod tests {
     /// same `scope_prn` and `role_key`.
     #[test]
     fn to_who_am_i_response_reports_the_callers_role_grants() {
-        let mut ctx = oidc_context();
+        let mut ctx = oidc_context(Utc::now() + chrono::Duration::hours(1));
         ctx.role_grants = vec![RoleGrantRef {
             scope_prn: "prn:pgs:iam:::organization/0192f1c0-0000-7000-8000-0000000000aa".to_string(),
             role_key: "billing-admin".to_string(),
