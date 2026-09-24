@@ -104,4 +104,24 @@ describe('createChatStreamParser', () => {
     const json2 = '"delta":{"content":"multi"}}]}';
     expect(all([`data: ${json1}\ndata: ${json2}\n\n`, 'data: [DONE]\n\n'])).toEqual([{ kind: 'delta', text: 'multi' }, { kind: 'done' }]);
   });
+
+  it('keeps a CRLF paigasus-error record whole, not split at the single CRLF between its lines', () => {
+    // A single \r\n between the event: line and the data: line is ONE line terminator, not a
+    // record boundary. A regex that can match \r\n as \r followed by \n (backtracking to satisfy
+    // a {2} quantifier) treats it as a blank-line delimiter anyway, splitting the record in two
+    // and losing the event: the resulting "event: paigasus-error" fragment has no data field, and
+    // the "data: {...}" fragment has no event field, so it is read as an ignored plain message.
+    const error = { message: 'upstream stream error', correlationId: 'c-2', rawReason: 'upstream-error' };
+    const record = `event: paigasus-error\r\ndata: ${JSON.stringify(error)}\r\n\r\n`;
+    expect(all([record])).toEqual([{ kind: 'error', error: { message: 'upstream stream error', correlationId: 'c-2', reason: 'upstream-error' } }]);
+  });
+
+  it('keeps a CRLF record delimiter split across two push() calls', () => {
+    const error = { message: 'upstream stream error', correlationId: 'c-3', rawReason: 'upstream-error' };
+    const record = `event: paigasus-error\r\ndata: ${JSON.stringify(error)}\r\n\r\n`;
+    const cut = record.length - 3; // chunk 1 ends with a lone '\r', chunk 2 is '\n\r\n'
+    expect(record.slice(cut)).toBe('\n\r\n');
+    const out = all([record.slice(0, cut), record.slice(cut)]);
+    expect(out).toEqual([{ kind: 'error', error: { message: 'upstream stream error', correlationId: 'c-3', reason: 'upstream-error' } }]);
+  });
 });

@@ -23,8 +23,13 @@ export const MAX_PENDING_RECORD = 64 * 1024;
 export const INCOMPLETE_STREAM_MESSAGE = 'The answer stopped before it was complete.';
 export const GENERIC_STREAM_ERROR = 'The answer failed.';
 
-/** A blank line ends a record; the grammar's line terminator is CRLF, LF or CR. */
-const RECORD_DELIMITER = /(?:\r\n|\r|\n){2}/;
+/**
+ * A blank line ends a record; the grammar's line terminator is CRLF, LF or CR. The `\r(?!\n)`
+ * alternative stops a single CRLF from backtracking into a bare \r plus a bare \n to satisfy the
+ * {2} quantifier: without it, one CRLF between two lines (not a blank line) reads as a record
+ * boundary and splits the record in two.
+ */
+const RECORD_DELIMITER = /(?:\r\n|\r(?!\n)|\n){2}/;
 
 function errorOf(payload: string): ChatStreamError {
   let body: unknown;
