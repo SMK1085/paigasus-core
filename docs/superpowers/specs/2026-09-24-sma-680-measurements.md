@@ -246,6 +246,10 @@ steps 6-7 did not run. Controller ruling: the void is accepted; M2 is redone in 
 below with a manual bump. The divergence from M1 attempt 2 (identical maneuver, different
 outcome at a later base commit) is diagnosed in attempt 2's Part A.
 
+This run was a proto-only release proposal (proto 0.2.0 -> 0.3.0) under `dependencies_update =
+false` at the branch head. This section records the version changes, but no lockdiff was taken,
+so it is not lockfile evidence.
+
 ## M2 attempt 2 — manual kernel-group bump, plus diagnosis (MEASURED)
 
 ### Part A — diagnosis of attempt 1's `release-plz update` decision
@@ -354,6 +358,9 @@ change (SMA-634 S3-2: the version is baked into the binary). **None of the four 
 brief calls out — `paigasus_wasm.js`, `paigasus_wasm_bg.js`, `paigasus_wasm.d.ts`,
 `paigasus_wasm_bg.wasm.d.ts` — appear in the status output.**
 
+The real stamp step (`ci/version-lockstep/run.sh --write`, which runs `cargo update -w`) did not
+run on this manual bump. Its `-w` scope is READ, not measured here.
+
 **Verdict: VALID.** A manual kernel-group bump (0.1.0 -> 0.1.1 on all four crates,
 `cargo update --workspace`-only lockfile scope) leaves the committed wasm glue JS/TS files
 untouched and the fresh build's tests passing against them, on this branch's current head
@@ -369,7 +376,8 @@ did propose and apply the kernel bump, under both `dependencies_update = false` 
 
 Command: the `ci-targets` command from the root `CLAUDE.md`, with `--base origin/main
 --include-relations`, on 2026-09-25, at branch head `86e67431`. It completed in 45.5 s with no
-hang. Moon scheduled 6 of the 33 targets for this diff. All 6 passed:
+hang. Moon scheduled 6 of the 33 targets for this diff — "6 of 33" counts the requested
+ci-targets that Moon scheduled. All 6 passed:
 
 | Gate | Result |
 |---|---|
@@ -380,5 +388,8 @@ hang. Moon scheduled 6 of the 33 targets for this diff. All 6 passed:
 | `repo:affected-smoke` | pass (Homebrew bash 5.3.15; no hang) |
 | `repo:actionlint` | pass; the preflight read a pipe capacity of 65536 bytes, so this is a real local verdict |
 
-`.moon/cache/ciReport.json`: 25 passed, 1 cached, 0 failed. The `repo:release-parity` cache hit
-replays a real run on the same inputs: Task 2 ran that gate after the key change.
+`.moon/cache/ciReport.json`: 25 passed, 1 cached, 0 failed — "25 passed, 1 cached" counts all 26
+actions in ciReport.json, which include dependency and setup actions, not only the 6 scheduled
+ci-targets. INFERRED: the `repo:release-parity` cache hit replays a real run on the same inputs,
+since Task 2 ran that gate after the key change. The run was at branch head `86e67431`; the
+commits after it change only files under `docs/superpowers/`.

@@ -23,14 +23,19 @@ features_always_increment_minor = true
 # WHAT IT DOES. Read from the release-plz 0.3.158 source, not measured. Read it again when
 # .prototools moves the release-plz pin. Its only reader is `update_cargo_lock`
 # (release_plz_core, src/command/update/mod.rs:142-158). `true` runs `cargo update`, which
-# moves every third-party entry of rs/Cargo.lock. `false` (the release-plz default) runs
-# `cargo update --workspace`, which rewrites only the workspace members' entries. That holds
-# only while the lock satisfies the manifests; ci/cargo-lock-integrity enforces that on main.
+# can move any third-party entry of rs/Cargo.lock to the newest compatible version. `false`
+# (the release-plz default) runs `cargo update --workspace`, which rewrites only the workspace
+# members' entries. The key acts only when release-plz proposes a version bump (the guard at
+# mod.rs:53). That holds only while the lock satisfies the manifests; ci/cargo-lock-integrity
+# enforces that on main.
 #
 # WHAT IT DOES NOT DO. It does not control the "dependencies changed" cascade, where a
 # dependent is bumped because a workspace dependency of it was bumped. `update_dependencies`
 # (mod.rs:202-232) and `add_dependencies_update_if_any` (updater.rs:749-783) never read this
 # key. An earlier comment here said the opposite. It was wrong.
+# Measured before SMA-680, with `true`, on publishable fixture crates:
+# a crate neither in the version group nor touched by the commit was still bumped
+# ("dependencies changed").
 #
 # WHY FALSE (SMA-680):
 #   1. The wasm glue under rs/crates/bindings/paigasus-wasm/ is committed (SMA-634), and no
@@ -41,8 +46,8 @@ features_always_increment_minor = true
 #      reviewed ran there.
 # Setting it to `true` again CAN make a release PR fail committed-wasm.test.ts, on a day when the
 # registry has a newer compatible wasm-bindgen. That test's message then asks for a manual
-# `generate-wasm` commit. The real cause is this key. Third-party Rust updates come only from
-# dependabot's cargo group.
+# `generate-wasm` commit. The real cause is this key. Third-party Rust updates come from
+# dependabot's cargo group or a manual PR.
 #
 # `false` is not enough if a crate version ever enters the glue. See the note above
 # `generate-wasm` in ts/packages/paigasus-kernel/moon.yml.
@@ -52,7 +57,10 @@ dependencies_update = false
 # One version across crates.io/PyPI/npm. `version_group` holds them together, and it DOES
 # apply to crates whose Cargo manifest says `publish = false` (measured) — which is exactly
 # what the three binding crates need, since they ship as maturin/napi/wasm byproducts rather
-# than to crates.io. `repo:version-lockstep` asserts the non-Cargo manifests follow.
+# than to crates.io.
+# CONFLICT (SMA-685): SMA-680 M1 measured `release-plz update` NOT carrying the head's bump to
+# these three crates. version-lockstep --write sets their versions in the stamp step. Cause open.
+# `repo:version-lockstep` asserts the non-Cargo manifests follow.
 # GITHUB RELEASES (SMA-579 §2.1). release-plz creates one per released package by default, which
 # would mean SIX release pages per release commit for two lockstep families. Only the two family
 # HEADS carry one, each with its family's changelog. MEASURED on the first live release: exactly

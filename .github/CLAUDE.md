@@ -21,7 +21,8 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   sit in NO `version_group` (SMA-658 M7, measured on 0.3.158). Read that as the scoped claim it
   is — a `publish = false` crate INSIDE a group whose head is publishable still gets its
   `[package] version` written, which the version-lockstep entry below records as measured for
-  the three kernel binding crates. M7's fixture had a group with only unpublishable members and
+  the three kernel binding crates. SMA-680 M1 measured the opposite for `release-plz update`
+  alone; see SMA-685. M7's fixture had a group with only unpublishable members and
   produced `version groups: {}`; it did not test the mixed group, and neither result disproves
   the other. What `publish = false` always excludes is tagging and publishing.
   `env!("CARGO_PKG_VERSION")` still feeds `ServiceInfo`, and ADR-0020 skew reporting is still
