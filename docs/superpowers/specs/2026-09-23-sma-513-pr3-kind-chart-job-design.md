@@ -185,7 +185,8 @@ endpoints for the gateway URL) and `paigasus-deps` (Postgres, Redis, Keycloak).
    - `zones.iam.backend.apiKeysPepperSecret`: key `pepper`, 32 random bytes in base64.
 7. **Preflight.** A pod that mounts the CA ConfigMap fetches
    `https://idp.paigasus.test/realms/paigasus/.well-known/openid-configuration` through the
-   in-cluster name. It asserts `issuer` equals that URL and `jwks_uri` starts with `https://`. A
+   in-cluster name. It asserts `issuer` equals `https://idp.paigasus.test/realms/paigasus` (the
+   realm URL, without the discovery suffix) and `jwks_uri` starts with `https://`. A
    failure is rc 2 with the response in the evidence. This turns F3's late, unclear failure into
    an early, named one.
 
@@ -361,7 +362,7 @@ shared session is proved on a new page.
 | # | Asserts | AC |
 | -- | -- | -- |
 | R1 | Log in at `/iam/orgs`. Open a **new page in the same context** and go to `/gateway/overview`. It lands with **zero requests to `idp.paigasus.test`**, the document response has `redirectedFrom() === null` (one hop), and `__Host-pgs_sid` has the same value before and after | 4 |
-| R1-control | From a **new context** with no cookie, `request.get('/gateway/overview', { maxRedirects: 0 })` redirects to `/gateway/auth/login` (the precedent is `ts/apps/gateway-console/tests/e2e/login.spec.ts:63-65`). This proves that the gateway zone does not admit a request without the session | 4 |
+| R1-control | From a **new context** with no cookie, a browser navigation to `/gateway/overview` redirects to `/gateway/auth/login` (§ 14 item 5: a `request.get` would run in Node and ignore Chromium's `--host-resolver-rules`). This proves that the gateway zone does not admit a request without the session | 4 |
 | R2 | Log in at `/gateway/overview` and wait for hydration. Click `IAM` in `nav[aria-label="Primary"]`. A new **document** request to `/iam/orgs` occurs (a hard navigation; a same-zone link would not make one). The page shows the heading "Your organizations" (`ts/apps/iam-console/app/(console)/orgs/page.tsx:86,94-96`), which renders only when IAM accepted the token. Wait for hydration there too | 1, 3 |
 | R3-control | In the IAM console's primary nav, `getByRole('link', { name: 'Gateway' })` finds one element, and it has `aria-disabled="true"` (the `degraded` state) | 2 |
 
