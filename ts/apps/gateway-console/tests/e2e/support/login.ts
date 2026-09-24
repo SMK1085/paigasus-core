@@ -16,7 +16,7 @@ export { waitForHydration } from './hydration';
  * one page.goto() follows all of them. Returns the tokens the IdP issued for THIS login, after the
  * page hydrated.
  */
-export async function signIn(page: Page, harness: Harness, path = '/gateway/overview'): Promise<SignedIn> {
+export async function signIn(page: Page, harness: Pick<Harness, 'idp' | 'url'>, path = '/gateway/overview'): Promise<SignedIn> {
   const before = harness.idp.issued.length;
   const response = await page.goto(harness.url(path));
   if (response === null) throw new Error(`page.goto(${path}) returned no response`);

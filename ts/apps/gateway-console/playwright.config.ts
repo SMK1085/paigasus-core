@@ -64,8 +64,13 @@ export default defineConfig({
   // — every port is ephemeral and every fake binds 127.0.0.1:0 — but the two-zone project's container
   // may outlive the last two-zone spec by the length of the single-zone project. Do not "fix" that by
   // sharing one fixture: paying for a container on every single-zone row is worse.
+  // SMA-635 adds a THIRD project, `playground`: the real paigasus-gateway binary, its own fake IAM
+  // and a mock OpenAI server (tests/e2e/support/playground-harness.ts). Selected by the file-name
+  // prefix `playground`, with the same basename anchoring as the two above; single-zone excludes
+  // that prefix, so R19, R20 and capabilities.spec.ts keep their exact call sets.
   projects: [
-    { name: 'single-zone', testMatch: /[\\/](?!two-zone)[^\\/]*\.spec\.ts$/, use: { ...devices['Desktop Chrome'] } },
+    { name: 'single-zone', testMatch: /[\\/](?!two-zone|playground)[^\\/]*\.spec\.ts$/, use: { ...devices['Desktop Chrome'] } },
     { name: 'two-zone', testMatch: /[\\/]two-zone[^\\/]*\.spec\.ts$/, use: { ...devices['Desktop Chrome'] } },
+    { name: 'playground', testMatch: /[\\/]playground[^\\/]*\.spec\.ts$/, use: { ...devices['Desktop Chrome'] } },
   ],
 });

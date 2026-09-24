@@ -1,0 +1,59 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// The REAL paigasus-gateway child of the playground project (SMA-635 spec § 7.2, D9). It is built
+// from the commit under test by `paigasus-gateway-rs:e2e-bin` (config.rs:244-248), configured ONLY
+// through GATEWAY_* variables, started from a directory that holds no gateway.toml, and started
+// with every inherited GATEWAY_* variable and RUST_LOG removed (gateway-env.ts). It logs JSON lines
+// on stdout (paigasus-logging), which row R22 reads.
+//
+// Read-only on disk: `existsSync` is the only fs call (tests/unit/e2e-read-only.test.ts).
+import { spawn, type ChildProcess } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import path from 'node:path';
+import { gatewayEnv } from './gateway-env';
+import { freePort, stop, waitForHealth } from './harness';
+import { REPO_ROOT } from './paths';
+
+export const GATEWAY_BIN = path.join(REPO_ROOT, 'rs', 'target', 'debug', 'paigasus-gateway');
+/** The key the gateway sends upstream. The mock records it; a user token must never appear there. */
+export const GATEWAY_OPENAI_KEY = 'sk-e2e-openai-key';
+const MAX_START_ATTEMPTS = 3;
+
+export type GatewayProcess = { readonly url: string; output(): string; close(): Promise<void> };
+
+export async function startGateway(opts: { readonly iamGrpcUrl: string; readonly openAiUrl: string }): Promise<GatewayProcess> {
+  if (!existsSync(GATEWAY_BIN)) throw new Error(`${GATEWAY_BIN} does not exist. Run \`moon run paigasus-gateway-rs:e2e-bin\` (gateway-console-ts:test-e2e depends on it).`);
+  const cwd = path.dirname(GATEWAY_BIN);
+  if (existsSync(path.join(cwd, 'gateway.toml'))) throw new Error(`${cwd} holds a gateway.toml; the e2e gateway must be configured only through GATEWAY_* variables`);
+  const failures: string[] = [];
+  for (let attempt = 1; attempt <= MAX_START_ATTEMPTS; attempt += 1) {
+    const port = await freePort();
+    let output = '';
+    const child: ChildProcess = spawn(GATEWAY_BIN, [], {
+      cwd,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: gatewayEnv({
+        GATEWAY_HTTP_ADDR: `127.0.0.1:${String(port)}`,
+        GATEWAY_LOG_LEVEL: 'info',
+        GATEWAY_IAM__GRPC_ADDR: opts.iamGrpcUrl,
+        GATEWAY_IAM__TLS__MODE: 'loopback_insecure',
+        GATEWAY_UPSTREAM__OPENAI__BASE_URL: opts.openAiUrl,
+        GATEWAY_UPSTREAM__OPENAI__API_KEY: GATEWAY_OPENAI_KEY,
+        GATEWAY_METRICS__ENABLED: 'false',
+        GATEWAY_STREAM_ENABLED: 'true',
+      }),
+    });
+    child.stdout?.on('data', (chunk: Buffer) => {
+      output += chunk.toString('utf8');
+    });
+    child.stderr?.on('data', (chunk: Buffer) => {
+      output += chunk.toString('utf8');
+    });
+    const url = `http://127.0.0.1:${String(port)}`;
+    const state = await waitForHealth(`${url}/healthz`, child, () => output, 'paigasus-gateway');
+    if (state === 'ready') return { url, output: () => output, close: () => stop(child) };
+    failures.push(`attempt ${String(attempt)}: the gateway exited before it answered\n${output}`);
+    await stop(child);
+  }
+  throw new Error(`paigasus-gateway failed to start after ${String(MAX_START_ATTEMPTS)} attempts:\n${failures.join('\n')}`);
+}
