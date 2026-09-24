@@ -239,7 +239,7 @@ mod tests {
     use crate::application::fakes::{FixedClock, InMemoryMembershipRepository, InMemoryRoleGrants, SeqIds};
     use async_trait::async_trait;
     use chrono::{TimeZone, Utc};
-    use paigasus_iam_core::{GrantScope, Membership, MembershipRecord, RoleGrant, Stamp, TenancyNodeRef, TokenDefect, Transaction};
+    use paigasus_iam_core::{ApiKeyId, GrantScope, Membership, MembershipRecord, RoleGrant, Stamp, TenancyNodeRef, TokenDefect, Transaction};
     use paigasus_kernel::Prn;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
@@ -1096,5 +1096,64 @@ mod tests {
 
         let ctx = uc.introspect("token").await.unwrap();
         assert!(ctx.role_grants.is_empty());
+    }
+
+    /// SMA-666. `context_for` reads the grants of an API-key principal too, not only of an OIDC
+    /// principal. `WhoAmI` calls `context_for` for both credential kinds
+    /// (`adapters/grpc/authn.rs:105`, `adapters/http/authn.rs:119`), so a service account that
+    /// calls `WhoAmI` with an API key gets its grants. Only `IntrospectApiKey` returns an empty
+    /// list (SMA-633 D2), and it does not call this function. Before this test, no test read the
+    /// grants of an API-key principal, so a change that skipped the grant read for an API key
+    /// failed no test.
+    #[tokio::test]
+    async fn context_for_returns_the_grants_of_an_api_key_principal() {
+        let org_prn = "prn:pgs:iam:::organization/22222222-2222-2222-2222-222222222222";
+        let pid = principal_id(2);
+        let org = TenancyNodeRef::from_prn(Prn::parse(org_prn).unwrap()).unwrap();
+        let grants = InMemoryRoleGrants::default();
+        grants
+            .grant(&RoleGrant {
+                id: Uuid::from_u128(3),
+                principal: pid.clone(),
+                role_key: "org_viewer".into(),
+                scope: GrantScope::Node(org),
+                linked_policy_id: "lp-3".into(),
+                created_at: epoch(),
+            })
+            .await
+            .unwrap();
+
+        let store = AuthnStore::default();
+        let uc = AuthenticateToken::new(
+            PanicIfCalledAuthenticator,
+            InMemoryIdentities(store.clone()),
+            InMemoryPrincipals(store.clone()),
+            InMemoryMemberships::default(),
+            Arc::new(grants),
+            SeqIds::default(),
+            FixedClock::default(),
+            JitPolicy::from_issuers(&[]),
+        );
+
+        let principal = AuthnPrincipal {
+            principal_id: pid,
+            kind: PrincipalKind::ServiceAccount,
+            status: PrincipalStatus::Active,
+            credential: Credential::ApiKey {
+                key_id: ApiKeyId::from_uuid(Uuid::from_u128(2)),
+                expires_at: None,
+                scope_prn: org_prn.to_string(),
+            },
+        };
+
+        let ctx = uc.context_for(principal).await.unwrap();
+        assert_eq!(
+            ctx.role_grants,
+            vec![RoleGrantRef {
+                scope_prn: org_prn.to_string(),
+                role_key: "org_viewer".to_string(),
+            }],
+            "context_for must read the grants of an API-key principal: WhoAmI reports them for both credential kinds"
+        );
     }
 }

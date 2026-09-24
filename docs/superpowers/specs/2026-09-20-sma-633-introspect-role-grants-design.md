@@ -251,6 +251,15 @@ decided on different evidence. SMA-632's author did not have the measurement tha
 `IntrospectApiKey` runs on the gateway's per-request path with no reader of the field; D2 does.
 Where they disagree, D2 governs this issue, and § 9 records why.
 
+> **Clarified (SMA-666, 2026-09-23).** The divergence above is not real. SMA-632 § 3.2 and § 9.5
+> describe `WhoAmI` and `IntrospectResponse`. They do not describe `IntrospectApiKey`. D2's own
+> paragraph at `:85-94` ("The rule is about the call site, not the credential") gives the same
+> result as SMA-632: an API-key bearer gets its grants through `WhoAmI`, and `IntrospectApiKey`
+> returns an empty list. The SMA-632 spec now has a clarifying note at § 3.2 and at § 9.5. The
+> unit test `context_for_returns_the_grants_of_an_api_key_principal` in
+> `rs/crates/services/paigasus-iam/src/application/authenticate_token.rs` pins the fact.
+> The rest of this spec is left otherwise unedited.
+
 ## 4. Change list
 
 Rust, in `rs/crates/services/paigasus-iam/`:

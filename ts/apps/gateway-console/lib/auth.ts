@@ -6,7 +6,7 @@
 import 'server-only';
 import { getAuthRuntime, type AuthRuntime } from '@paigasus/auth/server';
 import { getRuntimeConfig } from './config';
-import { createIntrospectPrincipalResolver, logger, requestCorrelationId } from '@paigasus/console-core';
+import { createPrincipalResolver, logger, requestCorrelationId } from '@paigasus/console-core';
 import { iamClientsForToken } from './console';
 
 /**
@@ -27,6 +27,6 @@ import { iamClientsForToken } from './console';
 export function authRuntime(): Promise<AuthRuntime> {
   return getAuthRuntime(getRuntimeConfig(), {
     logger,
-    resolver: createIntrospectPrincipalResolver({ clientsForToken: async (token) => iamClientsForToken(token, await requestCorrelationId()), logger }),
+    resolver: createPrincipalResolver({ clientsForToken: async (token) => iamClientsForToken(token, await requestCorrelationId()), logger }),
   });
 }
