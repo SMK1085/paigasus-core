@@ -531,6 +531,9 @@ importers:
       '@paigasus/discovery':
         specifier: workspace:*
         version: link:../paigasus-discovery
+      '@paigasus/kernel':
+        specifier: workspace:*
+        version: link:../paigasus-kernel
       '@paigasus/sdk':
         specifier: workspace:*
         version: link:../paigasus-sdk

@@ -182,9 +182,18 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   `rs/Dockerfile`, `rs/Cargo.{lock,toml}`, `rs/rust-toolchain.toml` and `rs/.dockerignore`. For
   `ts/` these are `ts/Dockerfile`, `ts/.dockerignore`, `ts/pnpm-lock.yaml`,
   `ts/pnpm-workspace.yaml`, `ts/package.json`, `ts/.npmrc`, `ts/apps/*/lib/config.ts`,
-  `ts/apps/*/next.config.ts` and `ts/apps/*/package.json`. It also lists `ci/images/**`, the
+  `ts/apps/*/next.config.ts`, `ts/apps/*/package.json`,
+  `ts/packages/paigasus-kernel/package.json`,
+  `rs/crates/bindings/paigasus-node-bindings/index.js` and
+  `rs/crates/bindings/paigasus-node-bindings/index.d.ts`. It also lists `ci/images/**`, the
   workflow, `.prototools` and the two `.proto/plugins/*.toml` files. A PR that changes one of these
   runs the workflow automatically. The rule for a `ts/` entry is in RUNBOOK-containers.md section 1.
+  A file that is already a Moon task `input` stays off this filter, even if `ts/Dockerfile` reads
+  it too, because a bad edit there already reds the ordinary `moon ci` build — this is why the
+  five committed wasm artifacts, `paigasus-wasm/package.json` and
+  `paigasus-node-bindings/package.json` are absent, but the napi crate's `index.js`/`index.d.ts`
+  are present: those two are Docker-copied by name yet are not Moon `inputs` anywhere, since the
+  kernel build task's own `napi build` step regenerates them fresh every run.
 - The filter does not list `rs/**` or `ts/**`. A PR that changes `rs/**` or `ts/**` but no
   listed input can still break an image build. Start the workflow manually for such a PR with
   `workflow_dispatch`. (`gh workflow run images.yml --ref <branch>` returns 404 until `images.yml`

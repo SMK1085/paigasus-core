@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 export {}; // module marker (isolatedModules); no runtime exports.
 // Compile-time guard (SMA-427 M5 / SMA-448): the wasm and napi FFI surfaces must stay
-// type-identical, because `@paigasus/kernel`'s typecheck only resolves the `node` (napi) condition
-// (tsconfig customConditions), so the shipped browser surface is otherwise never type-checked. No
-// runtime effect; `tsc --noEmit` fails the build if any binding signature drifts.
+// type-identical. Since SMA-634, `@paigasus/kernel`'s `.` export resolves unconditionally to the
+// wasm entry, so an ordinary typecheck of the package (through its export map) only ever sees the
+// wasm surface; the napi entry is reached only via the explicit `./napi` subpath. This guard is
+// what keeps the two bindings' signatures in lockstep. No runtime effect; `tsc --noEmit` fails the
+// build if any binding signature drifts.
 //
 // `typeof import(...)` is a pure type query (no import statement), safe under verbatimModuleSyntax +
 // isolatedModules.

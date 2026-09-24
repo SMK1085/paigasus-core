@@ -710,6 +710,31 @@ run_suite() {
   # worth having, and a re-baseline that quietly added a :build row here would have destroyed it.
   run_task_case_ci "console-core-testing->consumers" "ts/packages/paigasus-console-core/testing/fake-iam.ts" \
     "paigasus-console-core-ts:build,paigasus-console-core-ts:test,iam-console-ts:test,iam-console-ts:test-e2e,gateway-console-ts:test,gateway-console-ts:test-e2e,ts:lint"
+  # SMA-634 Task 8 fix round 1 — nothing anchored on the FIVE COMMITTED wasm artifacts (or on the
+  # kernel source that produces them) and asserted a console task is selected, so a future edit
+  # that dropped one of the eight input lines Task 8 added to console-core/iam-console/
+  # gateway-console would leave every case above green while `repo:affected-smoke` itself missed
+  # it. The three console/app `moon.yml`s deliberately declare no `deps` on a kernel task and no
+  # `dependsOn` edge on the kernel or wasm crates — the artifacts are tracked files, so no console
+  # task compiles Rust — so this pair of cases is the ONLY control on that wiring; no `dependsOn`
+  # edge exists for `assert_task_case`'s `--downstream deep` twin to exercise instead.
+  # First anchor: the committed wasm BINARY itself, `paigasus_wasm_bg.wasm` — the file whose
+  # staleness the whole change is about. `paigasus-kernel-ts:test` is present because the
+  # package's own vitest browser project loads the built `.wasm` file directly; it is NOT built by
+  # `paigasus-kernel-ts:build`, so that row is correctly absent, unlike the second case below.
+  # Expected set MEASURED with the same no-flag `moon query tasks --affected` traversal
+  # `_assert_task_case_impl` uses:
+  #   printf '%s\n' rs/crates/bindings/paigasus-wasm/paigasus_wasm_bg.wasm | moon query tasks --affected | ...
+  run_task_case_ci "wasm-artifact->console" "rs/crates/bindings/paigasus-wasm/paigasus_wasm_bg.wasm" \
+    "paigasus-console-core-ts:build,paigasus-console-core-ts:test,paigasus-console-core-ts:test-e2e,iam-console-ts:build,iam-console-ts:test,iam-console-ts:test-e2e,gateway-console-ts:build,gateway-console-ts:test,gateway-console-ts:test-e2e,paigasus-kernel-ts:test"
+  # Second anchor: `paigasus-kernel/src/wasm.ts`, the hand-written TS loader that wraps the
+  # generated glue — the kernel SOURCE side of the same wiring, one step upstream of the artifact
+  # above. `paigasus-kernel-ts:build` and `ts:lint` join the set here because this file sits under
+  # the package's own `src/**/*`, which those two tasks key on directly; the compiled `.wasm`
+  # binary above triggers neither. Expected set MEASURED the same way:
+  #   printf '%s\n' ts/packages/paigasus-kernel/src/wasm.ts | moon query tasks --affected | ...
+  run_task_case_ci "kernel-wasm-src->console" "ts/packages/paigasus-kernel/src/wasm.ts" \
+    "paigasus-console-core-ts:build,paigasus-console-core-ts:test,paigasus-console-core-ts:test-e2e,iam-console-ts:build,iam-console-ts:test,iam-console-ts:test-e2e,gateway-console-ts:build,gateway-console-ts:test,gateway-console-ts:test-e2e,paigasus-kernel-ts:build,paigasus-kernel-ts:test,ts:lint"
   # SMA-625, spec § 8.4 and § 11.2 obligation 9 — a gateway chat.rs edit must select the SDK's
   # test. This is the ONLY control on the '/rs/.../chat.rs' entry in paigasus-sdk-ts:test's
   # `inputs`. tests/terminal-frame.test.ts reads TERMINAL_SSE_ERROR out of that Rust file by

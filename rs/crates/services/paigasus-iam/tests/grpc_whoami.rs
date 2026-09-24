@@ -28,7 +28,7 @@ use paigasus_iam::adapters::grpc;
 use paigasus_iam::adapters::http::{AppState, router as http_router};
 use paigasus_iam::application::authenticate_token::Provisioning;
 use paigasus_iam::config::BootstrapAdmin;
-use paigasus_iam_core::GrantScope;
+use paigasus_iam_core::{AuthnError, GrantScope};
 use paigasus_proto::paigasus::iam::v1::authn_service_client::AuthnServiceClient;
 use paigasus_proto::paigasus::iam::v1::service_account_service_client::ServiceAccountServiceClient;
 use paigasus_proto::paigasus::iam::v1::tenancy_service_client::TenancyServiceClient;
@@ -230,6 +230,15 @@ async fn who_am_i_seeds_the_bootstrap_admin() {
     let (addr, server) = spawn_server(state.clone()).await;
     let ch = channel(addr).await;
     let mut client = AuthnServiceClient::new(ch);
+
+    // Before-state (SMA-666). The principal does not exist yet, so a query by principal ID is not
+    // possible. A grant needs a principal, so "not provisioned" proves "no grant" before the call.
+    // `Provisioning::Disabled` writes nothing. It only fills the JWKS cache.
+    let before = state.authn.resolve(&token, Provisioning::Disabled).await;
+    assert!(
+        matches!(before, Err(AuthnError::IdentityNotProvisioned)),
+        "the bootstrap identity must not exist before the WhoAmI call, or its grant proves nothing: {before:?}",
+    );
 
     let who = client.who_am_i(authed(WhoAmIRequest {}, &token)).await.unwrap().into_inner();
 

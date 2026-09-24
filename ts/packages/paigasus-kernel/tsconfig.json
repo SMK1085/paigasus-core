@@ -1,14 +1,12 @@
 {
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
-    "noEmit": true,
-    // Resolve the `node` export condition so tsc/eslint's typed projectService walk
-    // src/index.ts (the napi binding, typed via @paigasus/node-bindings' index.d.ts) — NOT the
-    // `browser`/`default` branch (src/wasm.ts → @paigasus/wasm). Both surfaces expose the same
-    // `sum`, so the type view stays single and consistent; the wasm surface is kept in lockstep
-    // not by type-checking it here but by the src/binding-parity.types.ts guard, which fails the
-    // build if the wasm and napi `sum` signatures ever diverge (SMA-427).
-    "customConditions": ["node"]
+    "noEmit": true
+    // SMA-634 removed `customConditions: ["node"]`. It existed so tsc resolved the kernel's `.`
+    // export to the napi entry; `.` is now the wasm entry unconditionally, and `include` below
+    // holds both entry files, so both surfaces are type-checked either way. The wasm and napi
+    // surfaces are kept in lockstep by src/binding-parity.types.ts, which queries the two binding
+    // packages directly and fails `tsc --noEmit` if a signature drifts.
   },
   // tests/ holds the runtime FFI smoke test; vitest.config.ts wires the binding alias. Both must
   // be in the program so the typed eslint projectService covers them (no rootDir — it would reject

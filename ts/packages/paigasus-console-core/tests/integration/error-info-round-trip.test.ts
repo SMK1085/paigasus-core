@@ -45,24 +45,30 @@ describe('the ErrorInfo round trip', () => {
     expect(fake.callsTo('tenancy.getOrganization')).toEqual([expect.objectContaining({ token: 'token-a', correlationId: REQUEST_ID })]);
   });
 
-  it('sends the correlation header from every one of the five clients', async () => {
+  it('sends the correlation header from every client', async () => {
     const clients = createIamClients({ baseUrl: fake.grpcUrl, token: 'token-a', correlationId: REQUEST_ID });
-    // Some calls fail (the beforeEach handler denies getOrganization, and the fake has no default
-    // for listAuditEntries). That does not matter here: the fake records each call as it ARRIVED,
-    // before it runs a handler, so the header of every call is in fake.calls.
+    // Some calls fail. The beforeEach handler denies getOrganization, and the fake has no default
+    // answer for listAuditEntries, listServiceAccounts or listDeadLetters, so each of those three
+    // answers Unimplemented. That does not matter here: the fake records each call as it ARRIVED,
+    // before it runs a handler (also when `defaults()` throws), so the header of every call is in
+    // fake.calls. The last assertion compares the called clients with the keys of IamClients, so a
+    // new client fails this test until the test calls it (SMA-666).
     await callIam(() => clients.tenancy.getOrganization({ prn: ORG }));
-    await callIam(() => clients.serviceInfo.getServiceInfo({}));
     await callIam(() => clients.authn.introspect({ token: 'token-a' }));
     await callIam(() => clients.authz.isAuthorized({ principalPrn: fake.principalPrnFor('token-a'), action: 'ListOrganizations', resourcePrn: ORG }));
     await callIam(() => clients.audit.listAuditEntries({}));
+    await callIam(() => clients.serviceAccounts.listServiceAccounts({}));
+    await callIam(() => clients.outbox.listDeadLetters({}));
     const sent = fake.calls.map((call) => [call.method, call.correlationId]);
     expect(sent).toEqual([
       ['tenancy.getOrganization', REQUEST_ID],
-      ['serviceInfo.getServiceInfo', REQUEST_ID],
       ['authn.introspect', REQUEST_ID],
       ['authz.isAuthorized', REQUEST_ID],
       ['audit.listAuditEntries', REQUEST_ID],
+      ['serviceAccounts.listServiceAccounts', REQUEST_ID],
+      ['outbox.listDeadLetters', REQUEST_ID],
     ]);
+    expect(new Set(fake.calls.map((call) => call.method.split('.')[0]))).toEqual(new Set(Object.keys(clients)));
   });
 
   it('sends no correlation header when the request has none, and IAM then mints one', async () => {

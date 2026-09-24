@@ -10,7 +10,7 @@ import { createMayI } from '../../src/authorize';
 import { whoAmI } from '../../src/principal';
 import { createIamClients, type IamClients } from '../../src/iam-clients';
 import { createJsonLogger } from '../../src/logger';
-import { createIntrospectPrincipalResolver } from '../../src/principal-resolver';
+import { createPrincipalResolver } from '../../src/principal-resolver';
 import { denial, FAKE_IAM_ISSUER, startFakeIam, type FakeIam } from '@paigasus/console-core/testing';
 
 const ORG = 'prn:pgs:iam::0192f1c0-0000-7000-8000-000000000002:organization/0192f1c0-0000-7000-8000-000000000002';
@@ -35,7 +35,7 @@ describe('provisioning', () => {
     it('makes one WhoAmI call and maps it, reporting grants as unknown', async () => {
       fake.setHandlers({ 'authn.whoAmI': (_req, ctx) => ({ memberships: [{ id: 'm-1', principalPrn: fake.principalPrnFor(ctx.token ?? ''), nodePrn: ORG }] }) });
       const { logger, events } = captureLogger();
-      const resolver = createIntrospectPrincipalResolver({ clientsForToken: clientsFor, logger });
+      const resolver = createPrincipalResolver({ clientsForToken: clientsFor, logger });
       const principal = await resolver.resolve({ accessToken: 'first-login', idTokenClaims: CLAIMS });
       expect(fake.calls.map((call) => call.method)).toEqual(['authn.whoAmI']);
       expect(principal).toEqual({
@@ -56,7 +56,7 @@ describe('provisioning', () => {
     it('awaits an async client factory, so the login call carries the request correlation id', async () => {
       const correlationId = '0190a1e5-0000-7000-8000-0000000000c1';
       const { logger, events } = captureLogger();
-      const resolver = createIntrospectPrincipalResolver({
+      const resolver = createPrincipalResolver({
         clientsForToken: (token) => Promise.resolve(createIamClients({ baseUrl: fake.grpcUrl, token, correlationId })),
         logger,
       });
@@ -75,14 +75,14 @@ describe('provisioning', () => {
       fake.setHandlers({ 'authn.whoAmI': () => ({ principalPrn: '' }) });
       const { logger } = captureLogger();
 
-      const principal = await createIntrospectPrincipalResolver({ clientsForToken: clientsFor, logger }).resolve({ accessToken: 'blank', idTokenClaims: CLAIMS });
+      const principal = await createPrincipalResolver({ clientsForToken: clientsFor, logger }).resolve({ accessToken: 'blank', idTokenClaims: CLAIMS });
 
       expect(principal.principalPrn).toBeNull();
     });
 
     it('logs resolve_crashed when an async client factory rejects', async () => {
       const { logger, events } = captureLogger();
-      const resolver = createIntrospectPrincipalResolver({ clientsForToken: () => Promise.reject(new Error('no config')), logger });
+      const resolver = createPrincipalResolver({ clientsForToken: () => Promise.reject(new Error('no config')), logger });
 
       const principal = await resolver.resolve({ accessToken: 't', idTokenClaims: CLAIMS });
 
@@ -97,7 +97,7 @@ describe('provisioning', () => {
         },
       });
       const { logger, events } = captureLogger();
-      const principal = await createIntrospectPrincipalResolver({ clientsForToken: clientsFor, logger }).resolve({ accessToken: 't', idTokenClaims: CLAIMS });
+      const principal = await createPrincipalResolver({ clientsForToken: clientsFor, logger }).resolve({ accessToken: 't', idTokenClaims: CLAIMS });
       expect(principal).toEqual({ principalPrn: null, issuer: CLAIMS.iss, subject: CLAIMS.sub, memberships: [], roleGrants: [], grantsAvailable: false });
       expect(events()).toContainEqual({ event: 'principal.resolve_failed', fields: { presentation: 'forbidden' }, time: expect.any(String) as string });
     });
@@ -106,7 +106,7 @@ describe('provisioning', () => {
       fake.setHandlers({ 'authn.whoAmI': () => new Promise(() => undefined) });
       const { logger, events } = captureLogger();
       const started = Date.now();
-      const principal = await createIntrospectPrincipalResolver({ clientsForToken: clientsFor, logger, timeoutMs: 200 }).resolve({ accessToken: 't', idTokenClaims: CLAIMS });
+      const principal = await createPrincipalResolver({ clientsForToken: clientsFor, logger, timeoutMs: 200 }).resolve({ accessToken: 't', idTokenClaims: CLAIMS });
       expect(Date.now() - started).toBeLessThan(2_000);
       expect(principal.principalPrn).toBeNull();
       expect(events().map((e) => e.fields['presentation'])).toEqual(['degraded']);
@@ -114,7 +114,7 @@ describe('provisioning', () => {
 
     it('degrades when the client factory itself throws, logging resolve_crashed not resolve_failed', async () => {
       const { logger, events } = captureLogger();
-      const resolver = createIntrospectPrincipalResolver({
+      const resolver = createPrincipalResolver({
         clientsForToken: () => {
           throw new Error('no config');
         },
@@ -140,7 +140,7 @@ describe('provisioning', () => {
             }),
         } as unknown as IamClients['authn'],
       };
-      const resolver = createIntrospectPrincipalResolver({ clientsForToken: () => crashingClients, logger });
+      const resolver = createPrincipalResolver({ clientsForToken: () => crashingClients, logger });
       const principal = await resolver.resolve({ accessToken: 't', idTokenClaims: CLAIMS });
       expect(principal).toEqual({ principalPrn: null, issuer: CLAIMS.iss, subject: CLAIMS.sub, memberships: [], roleGrants: [], grantsAvailable: false });
       expect(events()).toEqual([{ event: 'principal.resolve_crashed', fields: { name: 'TypeError', message: 'memberships getter exploded' }, time: expect.any(String) as string }]);

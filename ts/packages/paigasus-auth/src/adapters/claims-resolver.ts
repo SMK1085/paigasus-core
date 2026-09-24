@@ -3,11 +3,9 @@
 // The resolver that ships TODAY. It derives identity from the verified ID-token claims and
 // reports the grant set as UNAVAILABLE.
 //
-// IAM's Introspect is what mints a principal PRN and returns memberships and role grants, and it
-// is not reachable from TypeScript yet: contracts/buf.gen.yaml runs only bufbuild/es for TS
-// (descriptors, no client), @paigasus/proto exports only common/v1, and @paigasus/sdk is a stub.
-// SMA-508 lands the transport; IntrospectPrincipalResolver then slots in behind this same port
-// with no change to the session shape or the store.
+// It uses the ID-token claims only, so it is the resolver for a host that has no IAM transport. A
+// host with IAM (the consoles) supplies an IAM-backed resolver behind this same port, with no
+// change to the session shape or the store.
 //
 // grantsAvailable: false is NOT the same as "no grants". can() must treat it as unknown and fail
 // OPEN, or a console gating navigation on it renders with no navigation at all.

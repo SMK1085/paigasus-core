@@ -305,7 +305,7 @@ export function sum(a, b) {
     const ret = wasm.sum(a, b);
     return ret;
 }
-export function __wbg_Error_92b29b0548f8b746(arg0, arg1) {
+export function __wbg_Error_408e67f47ca7b58b(arg0, arg1) {
     const ret = Error(getStringFromWasm0(arg0, arg1));
     return ret;
 }

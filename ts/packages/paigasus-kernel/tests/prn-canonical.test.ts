@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import { describe, expect, it } from 'vitest';
-import { prnCanonicalize, prnErrorKind } from '@paigasus/kernel';
+import { prnCanonicalize, prnErrorKind } from '@paigasus/kernel/napi';
 import { prnCanonicalCases } from './corpus';
 
 describe('kernel PRN canonical parity (napi)', () => {

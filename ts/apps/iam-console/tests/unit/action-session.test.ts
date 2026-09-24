@@ -99,15 +99,15 @@ describe('iamClientsForAction (the Server Action session read)', () => {
     if (!result.ok) expect(result.error.presentation).toBe('relogin');
   });
 
-  it('returns the seven clients when the session resolves', async () => {
+  it('returns the six clients when the session resolves', async () => {
     setRequestHeaders({});
     signedIn();
 
     const result = await iamClientsForAction();
 
     expect(result.ok).toBe(true);
-    // SMA-636 added serviceAccounts to IamClients, and SMA-629 added outbox.
-    if (result.ok) expect(Object.keys(result.value).sort()).toEqual(['audit', 'authn', 'authz', 'outbox', 'serviceAccounts', 'serviceInfo', 'tenancy']);
+    // SMA-636 added serviceAccounts to IamClients, SMA-629 added outbox, and SMA-666 removed serviceInfo.
+    if (result.ok) expect(Object.keys(result.value).sort()).toEqual(['audit', 'authn', 'authz', 'outbox', 'serviceAccounts', 'tenancy']);
   });
 
   it('reads the session through getSession, so optionalSession never redirects either', async () => {

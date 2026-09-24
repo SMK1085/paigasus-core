@@ -1,17 +1,24 @@
-# wasm-pack emits the binary here; commit the JS + .d.ts glue, ignore the built .wasm (mirrors the
-# napi crate's `*.node` ignore — SMA-427).
+# wasm-pack emits the binary and the glue here. SMA-634: ALL FIVE are committed, and
+# `moon run paigasus-kernel-ts:generate-wasm` is their only writer. A console loads the committed
+# copy, because pnpm links a `file:` dependency once, at install time, before any build task runs.
 #
-# NOTE: `wasm-pack build` CLEANS its --out-dir each run (overwrites .gitignore with a bare `*`,
-# DELETES package.json, even with --no-pack). The kernel-ts tasks therefore build into gitignored
-# scratch dirs, never into the crate root directly: the `build` task uses `.wasmpack-out` and copies
-# only the paigasus_wasm* glue back here (sole crate-dir writer); the `test` task uses its OWN
-# `.wasmpack-test-out` and vitest aliases straight at it (no copy), so the two concurrent `moon ci`
-# tasks don't race the crate-dir copy. The committed package.json/.gitignore/glue (what the
-# `@paigasus/wasm` file: link resolves) are never clobbered. See ts/packages/paigasus-kernel/moon.yml.
+# NOTE: `wasm-pack build` CLEANS its --out-dir each run (it overwrites .gitignore with a bare `*`
+# and DELETES package.json, even with --no-pack), so every task builds into a gitignored scratch
+# dir and copies out of it: `paigasus-kernel-ts:generate-wasm` uses .wasmpack-regen-out, that
+# project's `test` task uses .wasmpack-test-out (the fresh build the drift gate compares against),
+# and prebuild.yml uses .wasmpack-release-out. The `build` task runs no wasm-pack at all since
+# SMA-634, so the fourth name it used to own, `.wasmpack-out`, has NO writer left and its ignore
+# entry is gone with it — a dead ignore rule would hide a stale directory of that name from
+# `git status` for good. If you have one left from an older checkout, delete it.
+# The committed package.json/.gitignore/glue (what the `@paigasus/wasm` file: link resolves) are
+# never clobbered. See ts/packages/paigasus-kernel/moon.yml.
 *.wasm
-.wasmpack-out/
+# ...except the committed binary. The leading slash anchors the negation at the crate root, so a
+# same-named file in a future sub-directory stays ignored.
+!/paigasus_wasm_bg.wasm
 .wasmpack-test-out/
 .wasmpack-release-out/
+.wasmpack-regen-out/
 
 # The release path's UPLOAD staging dir, and the one scratch dir here that is deliberately NOT
 # dot-prefixed: `actions/upload-artifact` excludes hidden files by default, so a dot-prefixed path

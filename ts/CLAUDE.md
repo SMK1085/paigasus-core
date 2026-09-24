@@ -112,19 +112,33 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   `paigasus-discovery/tests/containers/support/ts-esm-loader.mjs`) retry an extensionless specifier
   as `.ts`, then `/index.ts`, because plain Node does not probe extensions. Vite, vitest, tsc and
   Playwright accept both forms, so only a Next build or these two controls notices a regression.
-- **`@paigasus/kernel` cannot load its napi binding inside a Next build** (MEASURED 2026-09-11,
-  SMA-634 open). `@paigasus/node-bindings` is a pnpm `file:` dependency whose `files` allowlist is
-  `["index.js", "index.d.ts"]`, so pnpm never copies the `.node` binary into `node_modules`, and
-  `next build` fails at "Collecting page data" with `Cannot find native binding`. Every Node consumer
-  of `@paigasus/kernel` has the same defect.
-  `@paigasus/console-core`'s `src/prn-tenancy.ts` (moved out of iam-console's `lib/` in SMA-512
-  PR 2) is a small reader for the IAM tenancy PRN shapes (decision D6, fallback C). It is a
-  recorded ADR-0005 exception, and its `tests/unit/prn-tenancy.test.ts` replays the kernel parity
-  corpus through it, so a divergence from the kernel reds `paigasus-console-core-ts:test` — not
-  `iam-console-ts:test`, since the file now lives in, and is owned by, the package's own Moon
-  project (`ts/packages/paigasus-console-core/moon.yml`'s `test` task keys on the parity corpus
-  vectors and the kernel's `model.rs` directly). The name carries the `-tenancy` suffix because a
-  bare `prn.ts` is a Windows reserved device name (see the gotcha above).
+- **`@paigasus/kernel` resolves to its WASM entry, on the server too** (SMA-634, ADR-0022). A Next
+  server build cannot load the napi binding from an in-monorepo `file:` or `link:` dependency:
+  pnpm installs a `file:` target once, at install time, by the package's `files` allowlist, and
+  Turbopack refuses a `link:` symlink whose target is outside its root. So the kernel's `.` export
+  is the wasm entry under every condition, and the napi entry is `@paigasus/kernel/napi`, which only
+  the kernel's own tests name. The published npm model of `@paigasus/node-bindings` (a loader-only
+  package plus seven per-platform packages) is correct and unchanged.
+  `rs/crates/bindings/paigasus-wasm/paigasus_wasm_bg.wasm` and its four glue files are **committed**,
+  because pnpm links the crate before any build task runs. `moon run
+  paigasus-kernel-ts:generate-wasm` is their only writer: run it after a Rust kernel or wasm-binding
+  edit, and commit all five. `paigasus-kernel-ts:test` holds them to the source with four checks —
+  the committed glue equals a fresh build, the binary's import and export lists equal a fresh
+  build's, the committed pair replays all five parity corpora, and (in the console vitest
+  `setupFiles`) the pnpm-installed copy equals the committed files. **No check compares the binary
+  bytes**: they differ on macOS, Linux arm64 and Linux amd64, while the glue and the interface do
+  not. After a `git checkout`, a rebase or a branch switch that replaces those files, run `rm -rf
+  ts/node_modules && pnpm -C ts install`: pnpm hard-links a `file:` dependency and does not repair a
+  broken link, not even with `--force`. Only ONE host regenerates the artifacts; a second host makes
+  different bytes and a diff that says nothing. A conflict in the five files is resolved by taking
+  either side and running `generate-wasm` again.
+  `@paigasus/console-core`'s `src/prn-tenancy.ts` is now an IAM tenancy adapter over the kernel, not
+  an ADR-0005 exception: it keeps IAM's tenancy rule, the UUID guard for a URL segment and a length
+  limit for the FFI boundary. `tests/unit/prn-tenancy-delegation.test.ts` mocks the kernel and fails
+  if the file parses a PRN itself. A wasm that cannot load 500s EVERY `(console)` page, not only the
+  PRN pages, because `src/index.ts` re-exports the module and `@paigasus/wasm` is side-effectful.
+  Node prints an `ExperimentalWarning` for the wasm import in every console vitest run; it is
+  harmless.
 - The `ts` project's `sources` group names app code directories BY HAND (`apps/*/app/**/*`,
   `apps/*/lib/**/*`, `apps/*/proxy.ts`). `ts:lint` runs `eslint .` over the whole tree, but Moon
   re-runs it only for a file in its `sources` or `tests` group (or one of its config inputs), so a
