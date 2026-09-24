@@ -259,7 +259,7 @@ chart_secrets() {
     || die_infra "cannot create the Secret paigasus-postgres"
   k -n "$NS" create secret generic paigasus-iam-pepper --from-file=pepper="$STATE/pepper" >/dev/null \
     || die_infra "cannot create the Secret paigasus-iam-pepper"
-  k apply -f "$HERE/manifests/gateway-absent.yaml" >/dev/null || die_infra "cannot apply gateway-absent"
+  k apply -f "$HERE/manifests/gateway-stub.yaml" >/dev/null || die_infra "cannot apply gateway-stub"
 }
 
 preflight() {
