@@ -171,3 +171,8 @@ test('sources: a renamed, a missing and an extra step title fail', () => {
 test('sources: a missing spec file is rc 2', () => {
   assert.equal(run('sources', sourcesDir({ 'zone-round-trip.spec.ts': null })).status, 2);
 });
+
+test('the real journeys spec files hold exactly the expected step titles', () => {
+  const r = run('sources', join(HERE, '..', '..', 'ts', 'apps', 'iam-console', 'tests', 'cluster', 'journeys'));
+  assert.equal(r.status, 0, r.output);
+});
