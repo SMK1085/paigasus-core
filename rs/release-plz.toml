@@ -59,7 +59,8 @@ dependencies_update = false
 # what the three binding crates need, since they ship as maturin/napi/wasm byproducts rather
 # than to crates.io.
 # CONFLICT (SMA-685): SMA-680 M1 measured `release-plz update` NOT carrying the head's bump to
-# these three crates. version-lockstep --write sets their versions in the stamp step. Cause open.
+# these three crates. version-lockstep --write does NOT write Cargo versions (run.sh:570), and
+# its --check compares them with the head, so it can fail. Cause open.
 # `repo:version-lockstep` asserts the non-Cargo manifests follow.
 # GITHUB RELEASES (SMA-579 §2.1). release-plz creates one per released package by default, which
 # would mean SIX release pages per release commit for two lockstep families. Only the two family
@@ -145,8 +146,10 @@ git_release_enable = false
 # neither crate is in a `version_group`, so `release-plz update` never sees them (M7, measured on
 # 0.3.158). That is the scoped claim, not a blanket one: a `publish = false` crate INSIDE a group
 # whose head is publishable still gets its `[package] version` written — the comment on the
-# kernel group above records that, also measured. `env!("CARGO_PKG_VERSION")` feeds the
-# ServiceInfo descriptor, and ADR-0020 skew reporting is parked on that value (SMA-505 R7).
+# kernel group above records that, also measured. SMA-680 M1 measured the opposite for
+# `release-plz update` alone; see the CONFLICT (SMA-685) note there.
+# `env!("CARGO_PKG_VERSION")` feeds the ServiceInfo descriptor, and ADR-0020 skew reporting is
+# parked on that value (SMA-505 R7).
 #
 # publish = false MIRRORS each crate's Cargo manifest, same contradiction as the kernel-family
 # bindings above (SMA-579): all seven of these carry `publish = false` in Cargo.toml, and an
