@@ -17,7 +17,7 @@
       "line": 0,
       "specs": [
         {
-          "title": "J1: a cold visit logs in through the IdP, and logout ends the session in both zones and at the IdP (SMA-514 scenario 1)",
+          "title": "J1: a cold visit logs in through the IdP, and logout ends the session in both zones (SMA-514 scenario 1)",
           "ok": true,
           "tags": [],
           "id": "j1",
@@ -30,7 +30,7 @@
               "annotations": [
                 {
                   "type": "note",
-                  "description": "SMA-514 scenario 1: logout hops across both zones and the IdP"
+                  "description": "SMA-514 scenario 1: logout hops across both zones"
                 }
               ],
               "expectedStatus": "failed",

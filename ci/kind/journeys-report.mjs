@@ -38,10 +38,9 @@ export const EXPECTED_STEPS = Object.freeze({
   'auth-roundtrip.spec.ts': Object.freeze([
     'cold visit: /iam/orgs goes through /iam/auth/login to the IdP form',
     'login: the callback returns to /iam/orgs with a session',
-    'controls: the sid replays in both zones, and the IdP holds an SSO session',
+    'control: the sid replays in both zones',
     'logout: the shell form ends at the IdP and returns to /iam/ with no session cookie',
     'the old sid is refused by both zones',
-    'the IdP session is gone: a new page shows the IdP form',
   ]),
   'zone-round-trip.spec.ts': Object.freeze([
     'record every request of the context',

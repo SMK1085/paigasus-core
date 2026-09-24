@@ -641,7 +641,9 @@ diagnose() {
   # SMA-514 CI fix 1 (J1): Keycloak's own log, always, under a fixed name. The per-pod loop
   # above already writes it under logs/, but that file name carries the pod's random suffix;
   # this fixed name is what ci/kind/README.md's evidence section points a reader at directly.
-  k -n "$DEPS_NS" logs --all-containers -l app.kubernetes.io/name=keycloak >"$d/keycloak.log" 2>&1 || true
+  # SMA-514 CI fix 2: a selector-based `kubectl logs` defaults to --tail=10, so most of the log
+  # was cut. --tail=-1 writes the whole log.
+  k -n "$DEPS_NS" logs --all-containers --tail=-1 -l app.kubernetes.io/name=keycloak >"$d/keycloak.log" 2>&1 || true
   # SMA-514: the stub's Deployment, pods and endpoints. Its pod logs are in logs/ already.
   k -n "$NS" get deployment "$STUB" -o wide >"$d/gateway-stub.txt" 2>&1 || true
   k -n "$NS" get pods -l "app.kubernetes.io/name=$STUB" -o wide >>"$d/gateway-stub.txt" 2>&1 || true

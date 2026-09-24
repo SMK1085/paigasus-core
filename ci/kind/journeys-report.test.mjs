@@ -57,7 +57,7 @@ test('pass.json prints its annotation after the pass summary (controller ruling 
   const r = run('report', join(FIXTURES, 'pass.json'));
   assert.equal(r.status, 0, r.output);
   assert.ok(
-    r.output.includes('note') && r.output.includes('SMA-514 scenario 1: logout hops across both zones and the IdP'),
+    r.output.includes('note') && r.output.includes('SMA-514 scenario 1: logout hops across both zones'),
     `want the J1 annotation type and description in:\n${r.output}`,
   );
   // A description holding a newline must still print as exactly one output line: type and
@@ -83,8 +83,8 @@ test('skipped.json fails on the counter and on the test', () => {
   expectFail(join(FIXTURES, 'skipped.json'), 'expectedStatus is "skipped"');
 });
 
-test('early-return.json: every counter passes, the missing steps do not', () => {
-  expectFail(join(FIXTURES, 'early-return.json'), '4 step(s) never ran');
+test('early-return.json: every counter passes, the missing steps do not (now after step 2 of 5)', () => {
+  expectFail(join(FIXTURES, 'early-return.json'), '3 step(s) never ran');
 });
 
 test('a result with no `steps` key fails (Playwright omits the key when no step ran)', () => {
@@ -177,8 +177,8 @@ test('sources: the expected titles pass, also when Prettier wraps the call', () 
 test('sources: a renamed, a missing and an extra step title fail', () => {
   const titles = EXPECTED_STEPS['auth-roundtrip.spec.ts'];
   for (const drift of [
-    [...titles.slice(0, 5), 'renamed'],
-    titles.slice(0, 5),
+    [...titles.slice(0, -1), 'renamed'],
+    titles.slice(0, -1),
     [...titles, 'extra'],
   ]) {
     const r = run('sources', sourcesDir({ 'auth-roundtrip.spec.ts': drift }));

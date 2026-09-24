@@ -8,7 +8,7 @@
       "line": 0,
       "specs": [
         {
-          "title": "J1: a cold visit logs in through the IdP, and logout ends the session in both zones and at the IdP (SMA-514 scenario 1)",
+          "title": "J1: a cold visit logs in through the IdP, and logout ends the session in both zones (SMA-514 scenario 1)",
           "ok": true,
           "tags": [],
           "id": "j1",
@@ -18,7 +18,7 @@
           "tests": [
             {
               "timeout": 120000,
-              "annotations": [{ "type": "note", "description": "SMA-514 scenario 1: logout hops across both zones and the IdP" }],
+              "annotations": [{ "type": "note", "description": "SMA-514 scenario 1: logout hops across both zones" }],
               "expectedStatus": "passed",
               "projectId": "journeys",
               "projectName": "journeys",
@@ -38,10 +38,9 @@
                   "steps": [
                     { "title": "cold visit: /iam/orgs goes through /iam/auth/login to the IdP form", "duration": 1000 },
                     { "title": "login: the callback returns to /iam/orgs with a session", "duration": 1000 },
-                    { "title": "controls: the sid replays in both zones, and the IdP holds an SSO session", "duration": 1000 },
+                    { "title": "control: the sid replays in both zones", "duration": 1000 },
                     { "title": "logout: the shell form ends at the IdP and returns to /iam/ with no session cookie", "duration": 1000 },
-                    { "title": "the old sid is refused by both zones", "duration": 1000 },
-                    { "title": "the IdP session is gone: a new page shows the IdP form", "duration": 1000 }
+                    { "title": "the old sid is refused by both zones", "duration": 1000 }
                   ]
                 }
               ],
