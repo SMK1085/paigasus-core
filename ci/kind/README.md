@@ -52,6 +52,7 @@ On a failure or cancel, `chart.yml` runs `diagnose` and uploads `kind-evidence` 
 
 - `get-all.txt`, `ingress.txt`, `events.txt`, `coredns.yaml` — the cluster state
 - `logs/<namespace>-<pod>.log` and `.previous.log` — every pod in `paigasus`, `paigasus-deps` and `traefik`. `describe/` holds each pod that is not Ready
+- `keycloak.log` — Keycloak's own log, under this fixed name, even when the pod name changes
 - `helm-manifest.yaml` — what the chart rendered
 - `idp-preflight.json` — the discovery document the pods saw
 - `playwright/phase-a|b|journeys/` — the HTML report, `report.json`, and the traces of failed tests. For journeys also `skip-scan.txt`, `sources.txt`, `checker-tests.txt`, `list.txt` and `report-check.txt`
@@ -62,7 +63,7 @@ Secrets and the realm ConfigMap are never collected. The Playwright traces hold 
 Where to look first:
 
 - The login ends on the IAM console, but IAM shows as unusable: IAM refused the token. Read `logs/paigasus-*-iam-backend-*.log` for the JWKS fetch or the `aud` check (spec F3, F4).
-- The preflight fails: read `idp-preflight.json` and the Keycloak log. A wrong `issuer` comes from Keycloak hostname options. A TLS error comes from the CA or the CoreDNS block.
+- The preflight fails: read `idp-preflight.json` and `keycloak.log`. A wrong `issuer` comes from Keycloak hostname options. A TLS error comes from the CA or the CoreDNS block.
 
 ## Hazards
 
