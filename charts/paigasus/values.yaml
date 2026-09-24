@@ -78,6 +78,13 @@ ingress:
 oidc:
   issuer: ""             # REQUIRED
   clientId: ""           # REQUIRED
+  audience: ""           # NOT required. This is the access-token audience that IAM accepts.
+                         # Empty: IAM uses oidc.clientId as the audience.
+                         # Set this value only when your IdP writes a different value into the
+                         # access token's `aud` claim. Example: Okta uses api://default.
+                         # A set value REPLACES oidc.clientId. IAM then does not accept
+                         # oidc.clientId as the audience.
+                         # Quote this value in a values file. See docs/ops/RUNBOOK-chart.md § 6.
   existingSecret: ""     # REQUIRED. Must hold keys: oidc-client-secret, session-redis-url.
   secretVersion: ""      # NOT required. The chart does not own existingSecret and cannot observe
                          # its contents, so it cannot detect a rotation on its own. Bump this
