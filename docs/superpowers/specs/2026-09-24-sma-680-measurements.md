@@ -364,3 +364,21 @@ manifests directly — so it is independent evidence of the *lockfile-scope* mec
 alone), not evidence about `release-plz`'s own version-proposal logic. **M1 attempt 2 remains
 the release-plz evidence** for this repo (base `028cdd20`, where `release-plz update` itself
 did propose and apply the kernel bump, under both `dependencies_update = false` and `= true`).
+
+## Gates (MEASURED)
+
+Command: the `ci-targets` command from the root `CLAUDE.md`, with `--base origin/main
+--include-relations`, on 2026-09-25, at branch head `86e67431`. It completed in 45.5 s with no
+hang. Moon scheduled 6 of the 33 targets for this diff. All 6 passed:
+
+| Gate | Result |
+|---|---|
+| `repo:release-parity` | pass (cache hit) |
+| `repo:input-liveness` | pass |
+| `repo:next-public-free` | pass (Homebrew bash 5.3.15) |
+| `repo:publish-metadata` | pass (Homebrew bash 5.3.15) |
+| `repo:affected-smoke` | pass (Homebrew bash 5.3.15; no hang) |
+| `repo:actionlint` | pass; the preflight read a pipe capacity of 65536 bytes, so this is a real local verdict |
+
+`.moon/cache/ciReport.json`: 25 passed, 1 cached, 0 failed. The `repo:release-parity` cache hit
+replays a real run on the same inputs: Task 2 ran that gate after the key change.
