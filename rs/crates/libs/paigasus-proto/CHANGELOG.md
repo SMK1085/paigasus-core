@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0](https://github.com/SMK1085/paigasus-core/compare/paigasus-proto-v0.1.1...paigasus-proto-v0.2.0) - 2026-09-24
+
+### Added
+
+- *(iam)* populate role_grants in Introspect and WhoAmI (SMA-633) ([#278](https://github.com/SMK1085/paigasus-core/pull/278))
+- *(iam)* WhoAmI RPC so the consoles provision a principal explicitly (SMA-632) ([#276](https://github.com/SMK1085/paigasus-core/pull/276))
+- *(ts)* the iam.deadletters capability and the /iam/dead-letters screen (SMA-629) ([#266](https://github.com/SMK1085/paigasus-core/pull/266))
+
 ## [0.1.1](https://github.com/SMK1085/paigasus-core/compare/paigasus-proto-v0.1.0...paigasus-proto-v0.1.1) - 2026-08-30
 
 ### Fixed
