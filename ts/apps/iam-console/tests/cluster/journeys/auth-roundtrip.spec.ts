@@ -46,6 +46,11 @@ function firstRequestOf(response: Response): Request {
 }
 
 test('J1: a cold visit logs in through the IdP, and logout ends the session in both zones and at the IdP (SMA-514 scenario 1)', async ({ browser, context, page }) => {
+  // Captured in step 3 (the IdP SSO control) and reused by step 6: context A's own IdP cookies are
+  // cleared by Keycloak's logout response in step 4, so context A cannot serve as step 6's negative
+  // control (spec § 5 step 6, final review, 2026-09-24).
+  let idpCookies: Awaited<ReturnType<BrowserContext['cookies']>> = [];
+
   await test.step('cold visit: /iam/orgs goes through /iam/auth/login to the IdP form', async () => {
     expect(await context.cookies(), 'context A starts with no cookie').toEqual([]);
     const response = await page.goto('/iam/orgs');
@@ -87,7 +92,7 @@ test('J1: a cold visit logs in through the IdP, and logout ends the session in b
       await waitForHydration(replayPage);
     }
     // Without this control, step 6 could pass because Keycloak never kept an SSO session.
-    const idpCookies = (await context.cookies()).filter((cookie) => cookie.domain.replace(/^\./, '') === IDP_HOST);
+    idpCookies = (await context.cookies()).filter((cookie) => cookie.domain.replace(/^\./, '') === IDP_HOST);
     expect(idpCookies.length, 'context A must hold IdP cookies after the login').toBeGreaterThan(0);
     const sso = await browser.newContext({ baseURL: ORIGIN, ignoreHTTPSErrors: true });
     await sso.addCookies(idpCookies);
@@ -124,8 +129,10 @@ test('J1: a cold visit logs in through the IdP, and logout ends the session in b
     await page.getByRole('banner').locator('button[aria-haspopup="menu"]').last().click();
     await page.getByRole('menuitem', { name: 'Sign out' }).click();
 
-    // A 302 to the IdP also proves that no CSP form-action blocked it (the SMA-653 defect class).
     expect((await (await post).response())?.status(), 'POST /iam/auth/logout').toBe(302);
+    // The 302 alone does not prove the SMA-653 defect class is absent: under a CSP form-action that
+    // blocks the redirect, Chromium gets the 302 and then refuses to follow it. The end-session
+    // request observed below is the proof that the browser actually followed it to the IdP.
     // page.waitForRequest sees the wire: handleLogout's degraded arm never contacts the IdP
     // (docs/superpowers/specs/2026-09-09-sma-506-measurements.md:803-838).
     expect(new URL((await endSession).url()).searchParams.get('client_id'), 'end-session client_id').toBe('paigasus-console');
@@ -171,8 +178,14 @@ test('J1: a cold visit logs in through the IdP, and logout ends the session in b
   });
 
   await test.step('the IdP session is gone: a new page shows the IdP form', async () => {
-    // A NEW page of context A: the logout page is never reused (SMA-652).
-    const fresh = await context.newPage();
+    // A new context holding step 3's captured IdP cookies (captured before logout): this is the
+    // exact negative of step 3's IdP SSO control. Context A cannot serve here, because Keycloak's
+    // logout response clears context A's own IdP cookies, so context A would show the form even if
+    // the server-side SSO session were still alive (spec § 5 step 6, final review, 2026-09-24).
+    // This new context is never reused or closed after it shows Keycloak (SMA-652).
+    const idpSession = await browser.newContext({ baseURL: ORIGIN, ignoreHTTPSErrors: true });
+    await idpSession.addCookies(idpCookies);
+    const fresh = await idpSession.newPage();
     await fresh.goto('/iam/orgs');
     await expect(fresh).toHaveURL((url) => url.hostname === IDP_HOST);
     await expect(fresh.locator('#username'), 'the IdP must ask for the password again (no silent SSO)').toBeVisible();
