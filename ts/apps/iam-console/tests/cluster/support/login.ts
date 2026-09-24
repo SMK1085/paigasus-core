@@ -10,10 +10,11 @@ export const SESSION_COOKIE = '__Host-pgs_sid';
 /** Traefik's body for a request no router matches (spec B10; Review Focus 3). */
 export const TRAEFIK_404_BODY = '404 page not found';
 
-function credential(name: 'PAIGASUS_KIND_USERNAME' | 'PAIGASUS_KIND_PASSWORD'): string {
+/** A per-run credential from `ci/kind/run.sh`. Throws when it is missing, so a run with no stack fails loud. */
+export function credential(name: 'PAIGASUS_KIND_USERNAME' | 'PAIGASUS_KIND_PASSWORD'): string {
   const value = process.env[name];
   if (value === undefined || value === '') {
-    throw new Error(`${name} is not set; run these specs through ci/kind/run.sh specs a|b`);
+    throw new Error(`${name} is not set; run these specs through ci/kind/run.sh specs a|b|journeys`);
   }
   return value;
 }
