@@ -225,9 +225,12 @@ titles).
    reused or closed after it shows Keycloak, so the SMA-652 rule holds. The step-3 replay
    controls have no stop either: if a control fails, `handleLogin` deletes the live sid, but the
    test has already failed at that control.
-6. **The IdP session is dead too.** In a new page of context A, go to `/iam/orgs`. Assert that
-   the Keycloak login form is shown (no silent SSO login). Step 3's IdP control makes this
-   assertion meaningful.
+6. **The IdP session is dead too.** In a new context that holds the same `idp.paigasus.test`
+   cookies as step 3's IdP control (captured before logout), go to `/iam/orgs`. Assert that the
+   Keycloak login form is shown (no silent SSO login). This is the exact negative of step 3's
+   control. Context A cannot serve: Keycloak's logout response clears context A's IdP cookies,
+   so context A would show the form even if the server-side SSO session were alive (final
+   review, 2026-09-24). The new context is never reused or closed after it shows Keycloak.
 
 ## 6. Scenario 2 — `tests/cluster/journeys/zone-round-trip.spec.ts` (one test)
 
