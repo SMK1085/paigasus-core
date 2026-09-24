@@ -40,6 +40,9 @@
 //     authorization decision proves nothing. A test about authorization must SCRIPT
 //     `authz.isAuthorized` — with `denial()` for the deny arm — rather than rely on this default,
 //     which exists only so that a test about something else need not script it.
+//   - An UNSCRIPTED `authn.introspectApiKey` rejects every token as `invalid-token`. IAM also
+//     accepts a real API key (a token with its configured prefix and a stored hash); the fake
+//     knows no key. A test that needs an ACTIVE key must script this method (SMA-635).
 //
 // It imports NO `server-only` module. The Playwright e2e harness (a worker-scoped fixture) loads it
 // under plain Node, where `server-only` resolves to its throwing default export. That is why the
@@ -292,6 +295,11 @@ export async function startFakeIam(opts: { handlers?: FakeIamHandlers } = {}): P
         return { allowed: true, determiningPolicies: [], reason: '' };
       case 'authz.listRoleGrants':
         return { grants: [] };
+      // SMA-635. What IAM answers for a bearer that is not an API key (paigasus-iam convert.rs:141).
+      // The real gateway tries this leg first for EVERY chat request; Unimplemented would read as
+      // an IAM outage there and send every playground request to the 503 branch.
+      case 'authn.introspectApiKey':
+        throw iamError(Code.Unauthenticated, 'invalid-token', 'invalid bearer token');
       default:
         throw new ConnectError(`fake IAM: no handler is scripted for ${method}`, Code.Unimplemented);
     }
