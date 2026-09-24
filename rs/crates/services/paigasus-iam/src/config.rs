@@ -1478,6 +1478,30 @@ mod tests {
     }
 
     #[test]
+    fn issuers_env_in_the_chart_form_parses_a_uri_and_a_digit_audience() {
+        // SMA-678: the exact strings that charts/paigasus renders into IAM_AUTHN__ISSUERS for
+        // oidc.audience=api://default (env.sh row A3) and oidc.audience=12345 (rows A4 and A5).
+        // The chart quotes each audience with %q. Without the quotes figment reads 12345 as a
+        // number, and the extract fails.
+        for (issuers, want) in [
+            (r#"[{issuer="https://idp.example.test/realms/paigasus",audiences=["api://default"]}]"#, "api://default"),
+            (r#"[{issuer="https://idp.example.test/realms/paigasus",audiences=["12345"]}]"#, "12345"),
+        ] {
+            figment::Jail::expect_with(|jail| {
+                jail.set_env("IAM_DATABASE_URL", "postgres://u:p@localhost/db");
+                jail.set_env("IAM_API_KEYS__PEPPER", valid_pepper_b64());
+                jail.set_env("IAM_AUTHN__ISSUERS", issuers);
+                let cfg: IamConfig = IamConfig::figment().extract()?;
+                assert_eq!(cfg.authn.issuers.len(), 1);
+                assert_eq!(cfg.authn.issuers[0].issuer, "https://idp.example.test/realms/paigasus");
+                assert_eq!(cfg.authn.issuers[0].audiences, vec![want.to_string()]);
+                assert!(cfg.validate().is_ok(), "the chart's issuer string must pass validation");
+                Ok(())
+            });
+        }
+    }
+
+    #[test]
     fn missing_issuers_is_a_load_error() {
         figment::Jail::expect_with(|jail| {
             jail.set_env("IAM_DATABASE_URL", "postgres://u:p@localhost/db");
