@@ -141,7 +141,12 @@ audience into the access token's `aud`, not the client id. The default authoriza
    Other parties must not validate its access tokens.
 2. Set `oidc.audience=api://default`, or the audience of your custom server. Quote the value in a
    values file.
-3. Add an `email` claim (value `user.email`, included in the access token) to that authorization
+3. Add an access policy to that authorization server, with a rule for the console client. Okta
+   issues no token without one. The `default` server of an Integrator Free Plan org has no
+   access policy. The rule must allow the authorization code and refresh token grants. It
+   must allow the scopes `openid`, `profile`, `email` and `offline_access`. See the Okta
+   guide "Create access policies".
+4. Add an `email` claim (value `user.email`, included in the access token) to that authorization
    server. IAM needs `email` (item 2).
 
 **Warning.** In Okta's default configuration, the access token's `sub` can be the user's login, not
