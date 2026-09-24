@@ -98,12 +98,14 @@ spec:
             # The console's own OIDC client id is the audience IAM must accept: it is the client
             # the access tokens IAM validates were issued to.
 {{- /*
-  oidc.audience (SMA-678). Empty, or absent (nil under `helm upgrade --reuse-values` from a
-  release made before the key existed): the audience is oidc.clientId, and the render is
-  byte-identical to the render before the value existed. Set: the value REPLACES oidc.clientId.
-  It is not added next to it, so IAM refuses a token whose aud holds only the client id (an ID
-  token among them). toString runs before %q: %q on a number from --set or from a values file
-  writes a rune literal or an error string, not the digits.
+  oidc.audience (SMA-678).
+  This value can be empty. It can also be absent (nil) after `helm upgrade --reuse-values`
+  from a release made before this key existed. Both cases use oidc.clientId as the audience.
+  The render then stays byte-identical to the render before this value existed.
+  A set value REPLACES oidc.clientId. It does not add to it. IAM then refuses a token whose
+  aud holds only the client id. An ID token is one example of such a token.
+  toString runs before %q. Without toString, %q writes a rune literal or an error string for
+  a number. A number can come from --set or from a values file. toString keeps the digits.
 */}}
 {{- if $root.Values.oidc.audience }}
             # oidc.audience is set: IAM accepts that audience, not the client id.

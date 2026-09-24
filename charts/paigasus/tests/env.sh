@@ -18,16 +18,17 @@
 #
 # The script also checks the IAM backend's IAM_AUTHN__ISSUERS value (SMA-678, check_audience).
 # One row per property of oidc.audience:
-#   A1 unset        the audience is oidc.clientId, and the "oidc.audience is set" comment is absent.
+#   A1 unset        The audience is oidc.clientId. The "oidc.audience is set" comment is absent.
 #   A2 reuse-values-no-key
-#                   `helm upgrade --reuse-values` from a release made before the key existed: the
-#                   template reads nil, and the audience is still oidc.clientId.
-#   A3 set          the value REPLACES oidc.clientId. The exact compare proves a list of one.
-#   A4 number       an int64 from --set renders as the string "12345", not a rune literal.
+#                   This is `helm upgrade --reuse-values` from a release made before the key
+#                   existed. The template reads nil. The audience is still oidc.clientId.
+#   A3 set          The value REPLACES oidc.clientId. The exact compare proves a list of one.
+#   A4 number       An int64 from --set renders as the string "12345". It is not a rune literal.
 #   A5 number-in-file
-#                   a number in a values file (a float64) renders as the string "12345" too.
+#                   A number in a values file is a float64. It also renders as the string "12345".
 #   A6 restart-scope
-#                   a change of the value changes the IAM pod template and no console pod template.
+#                   A change of the value changes the IAM pod template. It does not change a
+#                   console pod template.
 # A row counter reds the script when a row call line is deleted.
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -106,8 +107,9 @@ print("|".join(problems) if problems
 check "iam only"        --set zones.gateway.enabled=false
 check "iam and gateway" --set zones.gateway.enabled=true
 
-# oidc.audience (SMA-678). Renders go to a file, not through a pipe: a Linux runner holds the whole
-# render in its pipe, a 512-byte host pipe does not (ci/helm-render/README.md, residual risk 5).
+# oidc.audience (SMA-678). Renders go to a file. They do not go through a pipe.
+# A Linux runner's pipe holds the whole render. A 512-byte host pipe does not.
+# See ci/helm-render/README.md, residual risk 5.
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/env.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT
 AUDIENCE_ROWS=0
@@ -152,8 +154,9 @@ print("|".join(problems) if problems else "OK")' "$TMP/audience.yaml" 2>&1)"; th
   if [ "$out" = "OK" ]; then echo "  ok [$label]"; else echo "FAIL [$label]: $out"; ec=1; fi
 }
 
-# check_audience_restart <label>: a change of oidc.audience restarts the IAM pod and no console pod
-# (docs/ops/RUNBOOK-chart.md § 5). The gateway zone is on, so both consoles are in the render.
+# check_audience_restart <label>
+# A change of oidc.audience restarts the IAM pod. It does not restart a console pod.
+# See docs/ops/RUNBOOK-chart.md § 5. The gateway zone is on. Both consoles are in the render.
 check_audience_restart() {
   local label="$1" out
   AUDIENCE_ROWS=$((AUDIENCE_ROWS + 1))
@@ -183,7 +186,7 @@ print("|".join(problems) if problems else "OK")' "$TMP/restart-1.yaml" "$TMP/res
   if [ "$out" = "OK" ]; then echo "  ok [$label]"; else echo "FAIL [$label]: $out"; ec=1; fi
 }
 
-# A5: a number in a VALUES FILE is a float64, not the int64 that --set gives (Review Focus 1).
+# A5: a number in a VALUES FILE is a float64. --set gives an int64 instead. See Review Focus 1.
 printf 'oidc:\n  audience: 12345\n' >"$TMP/audience-number.yaml"
 
 check_audience "A1 unset"               paigasus-console absent
