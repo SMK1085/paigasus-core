@@ -143,7 +143,6 @@ jobs:
       # + settle_gateway_404's deadline (2m) = 10+3+2 = 15 minutes. +2 min margin.
       - name: helm upgrade (phase B, gateway zone off) and settle
         timeout-minutes: 17
-        if: false
         run: bash ci/kind/run.sh upgrade b
 
       - name: Specs, phase B (R3)
