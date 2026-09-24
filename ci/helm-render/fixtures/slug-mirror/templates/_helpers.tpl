@@ -121,6 +121,9 @@ in BOTH consoles. The TypeScript already rejects it; the chart should never rend
 {{- if not .Values.ingress.host -}}
 {{- fail "ingress.host is required; it is the single origin every zone's cookie is scoped to" -}}
 {{- end -}}
+{{- if and (include "paigasus.idpCaConfigMap" .) (not (include "paigasus.idpCaKey" .)) -}}
+{{- fail "oidc.caBundle.key is empty while oidc.caBundle.existingConfigMap is set: every pod mounts ONE key of that ConfigMap, so the key must name it (the default is ca.crt)" -}}
+{{- end -}}
 {{- end -}}
 
 {{- define "paigasus.zoneMapJson" -}}
@@ -145,4 +148,26 @@ in BOTH consoles. The TypeScript already rejects it; the chart should never rend
 {{- end -}}
 {{- end -}}
 {{- toJson $m -}}
+{{- end -}}
+
+{{/*
+oidc.caBundle (SMA-513 PR 3). Read through `dig`, never as .Values.oidc.caBundle.<key>: a release
+made before this value existed has no caBundle map under `helm upgrade --reuse-values`, and
+`--set oidc.caBundle=null` deletes it, so the plain path is a nil-pointer template error. `include`
+always yields a STRING, so a numeric `--set oidc.caBundle.version=2` still hashes.
+*/}}
+{{- define "paigasus.idpCaConfigMap" -}}
+{{- dig "caBundle" "existingConfigMap" "" .Values.oidc -}}
+{{- end -}}
+
+{{- define "paigasus.idpCaKey" -}}
+{{- dig "caBundle" "key" "ca.crt" .Values.oidc -}}
+{{- end -}}
+
+{{- define "paigasus.idpCaVersion" -}}
+{{- dig "caBundle" "version" "" .Values.oidc -}}
+{{- end -}}
+
+{{- define "paigasus.idpCaMountPath" -}}
+/etc/paigasus/idp-ca
 {{- end -}}

@@ -45,6 +45,11 @@ spec:
         # and the pod rolls. Same shape as the console Deployment's checksum/secret.
         checksum/postgres-secret: {{ $root.Values.postgres.secretVersion | sha256sum }}
         checksum/pepper-secret: {{ $z.backend.apiKeysSecretVersion | sha256sum }}
+{{- if and (eq $id "iam") (include "paigasus.idpCaVersion" $root) }}
+        # oidc.caBundle.version: IAM reads the bundle once at boot, so only a restart picks up a
+        # new CA. Same shape as the checksums above.
+        checksum/idp-ca: {{ include "paigasus.idpCaVersion" $root | sha256sum }}
+{{- end }}
     spec:
       securityContext:
         runAsUser: 65532
@@ -91,7 +96,7 @@ spec:
                   key: database-url
             # authn.issuers has no default and is a hard boot error if empty (IamConfig::load).
             # The console's own OIDC client id is the audience IAM must accept: it is the client
-            # the ID tokens IAM validates were issued to.
+            # the access tokens IAM validates were issued to.
             - name: IAM_AUTHN__ISSUERS
               value: {{ printf "[{issuer=%q,audiences=[%q]}]" $root.Values.oidc.issuer $root.Values.oidc.clientId | quote }}
             # ApiKeyConfig::pepper decodes this at boot and IamConfig::validate rejects fewer
@@ -101,6 +106,12 @@ spec:
                 secretKeyRef:
                   name: {{ $z.backend.apiKeysPepperSecret | quote }}
                   key: pepper
+{{- if include "paigasus.idpCaConfigMap" $root }}
+            # oidc.caBundle (SMA-513 PR 3): authn.extra_ca_bundle_path. IAM reads it once at boot and
+            # uses it ONLY for JWKS fetches. A path with no PEM certificate is a boot failure.
+            - name: IAM_AUTHN__EXTRA_CA_BUNDLE_PATH
+              value: {{ printf "%s/%s" (include "paigasus.idpCaMountPath" $root) (include "paigasus.idpCaKey" $root) | quote }}
+{{- end }}
           startupProbe:          # sized for config load + Database::connect ONLY. SMA-571 removed
             httpGet:             # the coupling to IAM_MIGRATION__LOCK_WAIT_SECS entirely.
               path: /healthz
@@ -118,6 +129,19 @@ spec:
               port: http         # size it for a steady-state database blip.
             periodSeconds: 10
             failureThreshold: 3
+{{- if include "paigasus.idpCaConfigMap" $root }}
+          volumeMounts:
+            - name: idp-ca
+              mountPath: {{ include "paigasus.idpCaMountPath" $root }}
+              readOnly: true
+      volumes:
+        - name: idp-ca
+          configMap:
+            name: {{ include "paigasus.idpCaConfigMap" $root | quote }}
+            items:
+              - key: {{ include "paigasus.idpCaKey" $root | quote }}
+                path: {{ include "paigasus.idpCaKey" $root | quote }}
+{{- end }}
 {{- else }}
           ports:
             - name: http

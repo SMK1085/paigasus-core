@@ -84,6 +84,20 @@ oidc:
                          # value (any string) whenever the referenced Secret's contents change, so
                          # the console pods roll — it is the operator's explicit signal, fed into
                          # the console Deployment's checksum/secret annotation.
+  # NOT required. Trust for an IdP whose certificate chain ends at a private CA (SMA-513 PR 3).
+  # existingConfigMap names a ConfigMap that holds PEM root certificates under `key`. When it is
+  # set, every console pod and the IAM pod mount that ONE key read-only under /etc/paigasus/idp-ca/,
+  # the consoles get NODE_EXTRA_CA_CERTS and IAM gets IAM_AUTHN__EXTRA_CA_BUNDLE_PATH. A missing
+  # ConfigMap or key stops the pod at volume setup. The consoles trust the bundle for EVERY TLS
+  # connection (Redis included); IAM trusts it only for JWKS fetches. Put only the IdP's roots in it.
+  # A CA certificate is public, so this is a ConfigMap, not a Secret. See docs/ops/RUNBOOK-chart.md.
+  caBundle:
+    existingConfigMap: ""
+    key: ca.crt
+    # NOT required. Bump (any string) after the ConfigMap's contents change: Node and IAM read the
+    # bundle once, at process start, so only a restart picks up a new CA. Same shape as
+    # oidc.secretVersion; it feeds a checksum/idp-ca annotation on all three Deployments.
+    version: ""
 
 redis: {}                # the URL lives in oidc.existingSecret, since it may carry a password
 

@@ -13,7 +13,7 @@ replaces § 8 of `docs/superpowers/specs/2026-09-19-sma-513-multi-zone-ingress-h
 
 | Command | Does |
 | -- | -- |
-| `bash ci/helm-render/run.sh` | Checks 1–4 (`helm_render.py --chart charts/paigasus`), then every `charts/paigasus/tests/*.sh` (checks 5 and 6) |
+| `bash ci/helm-render/run.sh` | Checks 1–4 and 7 (`helm_render.py --chart charts/paigasus`), then every `charts/paigasus/tests/*.sh` (checks 5 and 6) |
 | `bash ci/helm-render/run.sh --self-test` | `helm_render.py --self-test` (in-process rows over inline YAML and proto text), then the wrapper's rc rows |
 | `bash ci/helm-render/run.sh --negative-control` | Each fixture under `fixtures/` must make the module exit 3 with its own named row failed |
 
@@ -22,7 +22,8 @@ replaces § 8 of `docs/superpowers/specs/2026-09-19-sma-513-multi-zone-ingress-h
 ## Checks
 
 Every render is `helm template paigasus <chart> --kube-version 1.31.0` with the stub values in
-`helm_render.py`'s `STUB_VALUES`. The valid subsets are `iam` and `iam+gateway`.
+`helm_render.py`'s `STUB_VALUES`. The valid subsets are `iam` and `iam+gateway`. Row 7 is the one
+exception: it renders against the kind job's own values files, not `STUB_VALUES`.
 
 | Row | Check | It fails when |
 | -- | -- | -- |
@@ -36,6 +37,7 @@ Every render is `helm template paigasus <chart> --kube-version 1.31.0` with the 
 | `4 iam-grpc <subset>` | Ports agree | The IAM `grpc` containerPort, `IAM_GRPC_ADDR`, the Service's `grpc` port and target, and `PAIGASUS_IAM_GRPC_URL` disagree |
 | `4 console-port <subset>` | Ports agree | A console's containerPort, `PORT` and its Service's resolved target port disagree |
 | `4 security-context <subset>` | Security context | A pod lacks `runAsUser: 65532`, `runAsGroup: 65532`, `runAsNonRoot: true`; a container lacks `allowPrivilegeEscalation: false` or sets an identity key to another value; either level carries `readOnlyRootFilesystem` |
+| `7 kind-values` | The kind job's values render (SMA-513 PR 3) | `helm template` with `ci/kind/values/a.yaml`, or with `a.yaml` plus `b.yaml`, exits non-zero. A missing values file is rc 2 |
 | `6 <script>` | Every chart script | A `charts/paigasus/tests/*.sh` exits non-zero. `render.sh` is check 5 (lint and golden files) |
 
 **Why equality for the slug mirror (spec A2).** The safety property is "chart ⊆ proto".
@@ -52,7 +54,7 @@ section together.
 | -- | -- |
 | 0 | pass |
 | 1 | an assertion failed (the module's 3, or a chart script's 1) |
-| 2 | infrastructure error (a failed render, an unparseable source, a missing tool, a chart script's 127 or 141, fewer than six chart scripts) |
+| 2 | infrastructure error (a failed render, an unparseable source, a missing tool, a chart script's 127 or 141, fewer than seven chart scripts) |
 
 `helm_render.py` exits 3, not 1, for an assertion, because a Python traceback exits 1. Do not
 "normalize" it. Every row runs after a failure; the gate's rc is the worst one seen.
@@ -94,6 +96,17 @@ self-test went red (rc 3): check 1.2 routing (2 rows red), check 3 case b (1), c
 in turn (3 to 3, any to 1, any to 0) and `--self-test` exited 1 each time. Deleting any one of
 the 35 `HELM_RENDER_SH_CALL_SITES` lines from `run.sh` makes `ci_targets.py` report it.
 
+Row 7 (SMA-513 PR 3), both measured on 2026-09-23: deleting `rows.append(check7(chart))` from
+`run_checks` and running `helm_render.py --chart charts/paigasus` directly (the module, as
+`run.sh` calls it, not the full wrapper) exits `rc=2` and prints exactly `INFRA  helm-render:
+helm-render row inventory does not match EXPECTED_ROW_LABELS: missing ['7 kind-values']`. A
+straight delete of the `problems.append(...)` line inside `check7`'s body is a Python syntax
+error (an empty `if` block), so the mutation was `pass` in its place; `bash
+ci/helm-render/run.sh --self-test` then exits `rc=1`, not `rc=2`, because `check7` still returns
+(the row FAILS, module rc 3), and the wrapper maps rc 3 to 1. The two rows that go red are `check7
+a.yaml fails to render` and `check7 only the overlay fails to render`, and the summary line reads
+`FAIL helm_render.py --self-test passes: expected 0, got 1`.
+
 ## Tool resolution
 
 - `helm` resolves once through `proto --reporter text bin helm` from the repo root, and must be
@@ -119,8 +132,8 @@ Nothing in the repository enforces this rule; review does.
    derivation lines catches a change to those lines, not a change elsewhere (for example to
    `PREFIX` in `capability.ts`).
 3. Overlay fixtures copy whole files, so a template refactor can make one stale (above).
-4. `STUB_VALUES` is a seventh copy of the required values. A new required value must go into all
-   seven; a missing one makes every render fail, which is rc 2.
+4. `STUB_VALUES` is an eighth copy of the required values. A new required value must go into all
+   eight, and into `ci/kind/values/a.yaml` (row 7); a missing one makes every render fail, which is rc 2.
 5. `maps.sh` reads only part of its input in a pipe under `pipefail` (`maps.sh:37-46`). On a
    host whose new pipe holds 512 bytes, its `printf` can get SIGPIPE (141), which this gate
    reports as rc 2. A Linux runner's 64 KiB pipe holds the whole render. Not measured. This PR

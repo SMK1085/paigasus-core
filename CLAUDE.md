@@ -51,6 +51,7 @@ the code, which Claude Code loads only when it reads a file in that directory.
 | `ci/CLAUDE.md` | the affected graph, `repo:*` gate registration, actionlint |
 | `.github/CLAUDE.md` | release-plz, wheels, publishing, workflow guards |
 | `contracts/CLAUDE.md` | codegen drift and the FFI bindings |
+| `charts/CLAUDE.md` | the Helm chart: no rewrite, the three projections, the helm-render pins |
 
 Add a new rule to the file that owns the directory it applies to. Keep this root file
 small: it is loaded into every session, and the nested files are not.
