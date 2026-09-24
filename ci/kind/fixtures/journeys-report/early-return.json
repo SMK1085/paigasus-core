@@ -1,0 +1,152 @@
+{
+  "config": {
+    "projects": [
+      {
+        "id": "journeys",
+        "name": "journeys",
+        "testDir": "journeys",
+        "retries": 0
+      }
+    ]
+  },
+  "suites": [
+    {
+      "title": "journeys/auth-roundtrip.spec.ts",
+      "file": "journeys/auth-roundtrip.spec.ts",
+      "column": 0,
+      "line": 0,
+      "specs": [
+        {
+          "title": "J1: a cold visit logs in through the IdP, and logout ends the session in both zones and at the IdP (SMA-514 scenario 1)",
+          "ok": true,
+          "tags": [],
+          "id": "j1",
+          "file": "journeys/auth-roundtrip.spec.ts",
+          "line": 40,
+          "column": 5,
+          "tests": [
+            {
+              "timeout": 120000,
+              "annotations": [
+                {
+                  "type": "note",
+                  "description": "SMA-514 scenario 1: logout hops across both zones and the IdP"
+                }
+              ],
+              "expectedStatus": "passed",
+              "projectId": "journeys",
+              "projectName": "journeys",
+              "results": [
+                {
+                  "workerIndex": 0,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 30000,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-09-24T12:00:00.000Z",
+                  "annotations": [],
+                  "attachments": [],
+                  "steps": [
+                    {
+                      "title": "cold visit: /iam/orgs goes through /iam/auth/login to the IdP form",
+                      "duration": 1000
+                    },
+                    {
+                      "title": "login: the callback returns to /iam/orgs with a session",
+                      "duration": 1000
+                    }
+                  ]
+                }
+              ],
+              "status": "expected"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "title": "journeys/zone-round-trip.spec.ts",
+      "file": "journeys/zone-round-trip.spec.ts",
+      "column": 0,
+      "line": 0,
+      "specs": [
+        {
+          "title": "J2: the shell links IAM to gateway and back with hard navigations, one session and no cross-zone RSC request (SMA-514 scenario 2)",
+          "ok": true,
+          "tags": [],
+          "id": "j2",
+          "file": "journeys/zone-round-trip.spec.ts",
+          "line": 60,
+          "column": 5,
+          "tests": [
+            {
+              "timeout": 120000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "journeys",
+              "projectName": "journeys",
+              "results": [
+                {
+                  "workerIndex": 0,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 30000,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-09-24T12:01:00.000Z",
+                  "annotations": [],
+                  "attachments": [],
+                  "steps": [
+                    {
+                      "title": "record every request of the context",
+                      "duration": 1
+                    },
+                    {
+                      "title": "log in at /iam/orgs",
+                      "duration": 1000
+                    },
+                    {
+                      "title": "wait until the Gateway nav entry is a link",
+                      "duration": 1000
+                    },
+                    {
+                      "title": "RSC check after hydration, before any click",
+                      "duration": 1000
+                    },
+                    {
+                      "title": "IAM to gateway: a hard navigation with the same session",
+                      "duration": 1000
+                    },
+                    {
+                      "title": "gateway to IAM: a hard navigation with the same session",
+                      "duration": 1000
+                    },
+                    {
+                      "title": "no RSC request leaves its zone",
+                      "duration": 1
+                    }
+                  ]
+                }
+              ],
+              "status": "expected"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "errors": [],
+  "stats": {
+    "startTime": "2026-09-24T12:00:00.000Z",
+    "duration": 60000,
+    "expected": 2,
+    "unexpected": 0,
+    "flaky": 0,
+    "skipped": 0
+  }
+}
