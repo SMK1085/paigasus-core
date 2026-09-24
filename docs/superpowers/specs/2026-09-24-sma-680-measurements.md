@@ -8,7 +8,7 @@ Spec: `2026-09-24-sma-680-release-pr-wasm-glue-design.md`. Host: macOS (this dev
 Source: release-plz tarball at tag `release-plz-v0.3.158` (`release_plz_core`, `release_plz`
 crates), fetched with `gh api repos/release-plz/release-plz/tarball/release-plz-v0.3.158`.
 
-Command: `grep -rn "dependencies_update\|update_dependencies\b|should_update_dependencies|update_all_dependencies" crates/release_plz_core/src crates/release_plz/src`
+Command: `grep -rn "dependencies_update\|update_dependencies\b\|should_update_dependencies\|update_all_dependencies" crates/release_plz_core/src crates/release_plz/src`
 
 Every hit, file and line, with the matched line:
 
@@ -75,8 +75,10 @@ byte-identical (MD5 `f4492f95b2cf502b900b95e138d70dad`). Root cause: `release-pl
 `028cdd20` logged all three checked packages (`paigasus-kernel`, `paigasus-proto-derive`,
 `paigasus-proto`) as "already up to date" — no package needed a version bump — so (per P1) the
 `mod.rs:53` guard around `update_cargo_lock` was false in both runs, and `dependencies_update`
-had no chance to act either way. Verdict: VOID per step 7. Controller ruling: re-run M1 with a
-forced kernel-group version bump (see attempt 2).
+had no chance to act either way. Run A used `release-plz update --allow-dirty` after reverting
+the napi `index.js`/`index.d.ts` churn from the build warm-up, since only the intentional
+`rs/release-plz.toml` edit was left uncommitted. Verdict: VOID per step 7. Controller ruling:
+re-run M1 with a forced kernel-group version bump (see attempt 2).
 
 ## M1 attempt 2 — forced kernel-group bump (MEASURED)
 
@@ -110,11 +112,15 @@ and after each run (all four started at 0.1.0):
 | B (true), after | 0.1.1 | 0.1.0 | 0.1.0 | 0.1.0 |
 
 `release-plz update` proposed `paigasus-kernel: 0.1.0 -> 0.1.1` in both runs — a kernel-group
-bump was proposed in both, so the new void condition (step 5 of the controller's ruling) does
-not apply. INFERRED: only the group head's own manifest was rewritten; the three `publish =
-false` binding crates did not follow in either run. That is consistent with the `dependencies_
-update` cascade (not the direct-commit bump) being the mechanism that would otherwise propagate
-a version change to dependents — and `dependencies_update` is exactly the flag under test.
+bump was proposed in both, so the new void condition (the controller's fix-round-1 ruling,
+"Finding 2 ... New void condition") does not apply. MEASURED: `version_group = "kernel"` did not
+carry `paigasus-kernel`'s bump to the three `publish = false` members
+(`paigasus-py-bindings`, `paigasus-node-bindings`, `paigasus-wasm`) at this base, with this
+forced bump, under `dependencies_update = false` AND under `dependencies_update = true`. Only
+the group head's own manifest was rewritten in either run. This conflicts with the comment at
+`rs/release-plz.toml:25-28`, which states `version_group` "DOES apply to crates whose Cargo
+manifest says `publish = false` (measured)." Cause: OPEN. The two measurements disagree and
+this file does not resolve why.
 
 | Run | Key | wasm-bindgen after | Workspace entries moved | Third-party entries moved | `paigasus-kernel-ts:test` |
 |---|---|---|---|---|---|
@@ -191,6 +197,13 @@ third-party	zerofrom-derive	['0.1.7'] -> ['0.1.8']
  Test Files  11 passed (11)
       Tests  264 passed (264)
 ```
+Fix round 1 correction: the first run A test above ran without `--force`, while run B's ran with
+it, so run A's PASS was not proven uncached. Re-measured: in the scratch clone, run A's state was
+recreated exactly (README commit `8ef4bf04` + the committed `false` edit, then
+`release-plz update`), and the resulting `Cargo.lock` MD5 (`43e5d68f670fe87601cc6742b1967750`)
+matched `lock-A2` exactly. `moon run paigasus-kernel-ts:test --force` was then run, forcing a
+fresh, uncached execution. Result: unchanged — `Test Files 11 passed (11)`,
+`Tests 264 passed (264)`. The original PASS was not a stale cache hit.
 
 `paigasus-kernel-ts:test`, run B, failing test names (verbatim):
 ```
@@ -204,14 +217,16 @@ Check 1 diffed the committed glue's wbindgen hash against the fresh build's:
 failed for the same reason (the fresh binary's import name differs from the committed one's).
 
 Verdict: VALID, not void. `wasm-bindgen` differs between `lock-A2` (0.2.127, unchanged) and
-`lock-B2` (0.2.128, moved). This replays the v0.2.0 incident: with `dependencies_update = false`,
-a kernel-group version bump moves only the workspace `paigasus-kernel` entry in `Cargo.lock` and
-leaves every third-party crate, including wasm-bindgen, untouched, so the committed wasm glue
-stays valid (`paigasus-kernel-ts:test` PASS). With `dependencies_update = true`, the same
-kernel-group bump also runs a full dependency update: 53 third-party entries move, including
-wasm-bindgen 0.2.127 -> 0.2.128, and the committed glue (built against wasm-bindgen 0.2.127) no
-longer matches a fresh build (`paigasus-kernel-ts:test` FAIL, checks 1 and 2). MEASURED: only the
-kernel-group head (`paigasus-kernel`) had its own manifest version rewritten in either run; the
-three `publish = false` binding crates in the same version group did not (INFERRED: consistent
-with the `dependencies_update`-gated cascade, not the direct-commit bump, being what would
-otherwise propagate the version change to dependents).
+`lock-B2` (0.2.128, moved). This replays the wasm-bindgen drift of the v0.2.0 incident: with
+`dependencies_update = false`, a kernel-group version bump moves only the workspace
+`paigasus-kernel` entry in `Cargo.lock` and leaves every third-party crate, including
+wasm-bindgen, untouched, so the committed wasm glue stays valid (`paigasus-kernel-ts:test`
+PASS). With `dependencies_update = true`, the same kernel-group bump also runs a full
+dependency update: 53 third-party entries move, including wasm-bindgen 0.2.127 -> 0.2.128, and
+the committed glue (built against wasm-bindgen 0.2.127) no longer matches a fresh build
+(`paigasus-kernel-ts:test` FAIL, checks 1 and 2). MEASURED: only the kernel-group head
+(`paigasus-kernel`) had its own manifest version rewritten in either run; the three
+`publish = false` binding crates in the same version group did not, under `false` AND under
+`true`. This conflicts with the comment at `rs/release-plz.toml:25-28`, which states that
+`version_group` "DOES apply to crates whose Cargo manifest says `publish = false` (measured)."
+Cause: OPEN.
