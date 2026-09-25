@@ -29,6 +29,14 @@ endpoint returned 200 for the case-B access token and 401 for the case-B ID toke
 
 The raw evidence follows unchanged, except for redacted scratch credentials and demoted headings.
 
+**Note on the rule named below.** This round was measured against the DRAFT rule of the spec
+challenge: payload `typ` equal to `ID`, or an `at_hash` claim, or a `c_hash` claim. This round
+showed that every Dex access token has `at_hash`, so that draft rule was replaced. The
+implemented rule checks only the payload `typ` for `ID` or `Logout` (spec D2, D3). Where the
+evidence below says a token "carries a marker" or "would be caught", read it against the draft
+rule. Do not use those statements to add an `at_hash` or `c_hash` check: it refuses every Dex
+access token.
+
 ### SMA-686 measurement evidence: real OIDC tokens from Dex and Keycloak
 
 All facts below are MEASURED against locally run containers. Anything not run is
