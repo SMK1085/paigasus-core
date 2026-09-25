@@ -33,7 +33,7 @@ REPO="$(cd "$HERE/../.." && pwd)"
 RUN_SH="$HERE/run.sh"
 
 # The functions copied out of run.sh. A task that adds a function to run.sh adds its name here.
-FUNCS="assert_console_pins with_deadline console_node_version_row smoke_consoles console_image_config_row"
+FUNCS="assert_console_pins with_deadline console_node_version_row smoke_consoles console_image_config_row console_healthcheck_row"
 
 T="$(mktemp -d "${TMPDIR:-/tmp}/paigasus-console-selftest.XXXXXX")"
 HC_CTR="selftest-hc-$$"
@@ -512,6 +512,28 @@ run_fn E6 1 ".env scan NOT checked — grep exited 2" "" "$T/argv-config" consol
 
 # shellcheck disable=SC2016 # the pinned call line is literal text
 pin_rows P1b "$T/fn-smoke_consoles.sh" 'console_image_config_row "$app" || ec=1'
+
+# --- console_healthcheck_row (H rows) ----------------------------------------------------------
+# The argv that console_healthcheck_row must hand to docker (through with_deadline).
+printf '%s\n' exec smoke-selftest /nodejs/bin/node /app/healthcheck.mjs -- > "$T/argv-health"
+
+stub_reset
+run_fn H0 0 "" "::error::" "$T/argv-health" console_healthcheck_row smoke-selftest iam-console /iam 5
+stub_reset; STUB_EXEC_SLEEP=10
+run_fn H1 1 "did not finish within 2s" "" "$T/argv-health" console_healthcheck_row smoke-selftest iam-console /iam 2
+stub_reset; STUB_EXEC_RC=1
+run_fn H2 1 "exited 1" "did not finish" "$T/argv-health" console_healthcheck_row smoke-selftest iam-console /iam 5
+stub_reset; STUB_EXEC_RC=137
+run_fn H3 1 "exited 137" "did not finish" "$T/argv-health" console_healthcheck_row smoke-selftest iam-console /iam 5
+stub_reset
+run_fn H4 1 "positive integer" "" none console_healthcheck_row smoke-selftest iam-console /iam abc
+stub_reset
+run_fn H5 1 "positive integer" "" none console_healthcheck_row smoke-selftest iam-console /iam 0
+
+# shellcheck disable=SC2016 # the pinned call lines are literal text
+pin_rows P1c "$T/fn-smoke_consoles.sh" 'console_healthcheck_row "$name" "$app" "$base_path" "$CONSOLE_HC_DEADLINE" || ec=1'
+# shellcheck disable=SC2016 # the pinned call lines are literal text
+pin_rows P2 "$T/fn-console_healthcheck_row.sh" 'with_deadline "$deadline" docker exec "$name" /nodejs/bin/node /app/healthcheck.mjs >"$out" 2>&1 || hc_rc=$?'
 
 # --- summary -----------------------------------------------------------------------------------
 echo "console-selftest: ${N_PASS} passed, ${N_FAIL} failed, ${N_SKIP} skipped"

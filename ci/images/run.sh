@@ -1035,6 +1035,11 @@ CONSOLE_SMOKE_ENV=(
   -e "PAIGASUS_IAM_GRPC_URL=http://iam:9090"
 )
 
+# SMA-670 gap 3: the wall-clock bound, in seconds, on the smoke row that runs the image's own
+# HEALTHCHECK program with `docker exec`. The program's own fetch signal (2500 ms, ts/Dockerfile)
+# ends a hang first; this bound is for a hang that the signal does not end.
+CONSOLE_HC_DEADLINE=20
+
 # Walks the image's staged tree with the image's OWN node — the runtime base is distroless and has
 # no shell, so there is no `find` in there to call. Prints `public=0|1` on line 1 and one staged
 # .next/static path per line after it, with the BUILD_ID directory rewritten to the literal
@@ -1178,6 +1183,50 @@ console.log(["walked=" + walked].concat(found).join("\n"));
   echo "  ${app}: no PAIGASUS_* in Config.Env and no .env file in /app (${n} files walked)"
 }
 
+# R-HEALTH (SMA-670 gap 3). The image's OWN HEALTHCHECK program, run inside the running container.
+# Nothing else in this suite executes /app/healthcheck.mjs: ts/Dockerfile writes it with a `printf`
+# that carries a backtick template literal and a `%s` substitution, so an escaping or path
+# regression would otherwise ship with every other row green. `docker exec` of the image's node
+# needs no shell. The call runs under with_deadline, so a probe that hangs cannot hang this suite.
+# Its output goes to a mktemp FILE, never to a `$( )` capture: MEASURED (SMA-670 M7), a captured
+# with_deadline waits for its full deadline under bash 5, because the watchdog's orphan `sleep`
+# holds the capture pipe open. A timeout is reported only when the rc is 143 or 137 AND the elapsed
+# time reached the deadline; any other 137 (for example from the OOM killer) takes the "exited"
+# message. A killed `docker exec` client can leave node running in the container;
+# console_smoke_cleanup and the EXIT trap remove the container.
+console_healthcheck_row() {
+  local name="$1" app="$2" base_path="$3" deadline="$4" out hc_rc=0 start elapsed deadline_ok
+  case "$deadline" in
+    ''|*[!0-9]*) deadline_ok=0 ;;
+    *) deadline_ok=1 ;;
+  esac
+  if [ "$deadline_ok" -eq 0 ] || [ "$deadline" -lt 1 ]; then
+    echo "::error::${app}: HEALTHCHECK program NOT checked — the deadline '${deadline}' is not a positive integer number of seconds." >&2
+    return 1
+  fi
+  out="$(mktemp "${TMPDIR:-/tmp}/paigasus-console-hc.XXXXXX")" || out=""
+  if [ -z "$out" ]; then
+    echo "::error::${app}: HEALTHCHECK program NOT checked — mktemp failed." >&2
+    return 1
+  fi
+  start=$SECONDS
+  with_deadline "$deadline" docker exec "$name" /nodejs/bin/node /app/healthcheck.mjs >"$out" 2>&1 || hc_rc=$?
+  elapsed=$((SECONDS - start))
+  if [ "$hc_rc" -eq 0 ]; then
+    rm -f "$out"
+    echo "  ${app}: HEALTHCHECK program /app/healthcheck.mjs exits 0"
+    return 0
+  fi
+  if { [ "$hc_rc" -eq 143 ] || [ "$hc_rc" -eq 137 ]; } && [ "$elapsed" -ge "$deadline" ]; then
+    echo "::error::${app}: the image's HEALTHCHECK program (/app/healthcheck.mjs) did not finish within ${deadline}s against a server that renders ${base_path} — the probe hangs; check the fetch timeout in ts/Dockerfile's healthcheck printf. Its output follows." >&2
+  else
+    echo "::error::${app}: the image's HEALTHCHECK program (/app/healthcheck.mjs) exited ${hc_rc} against a server that renders ${base_path} — check the healthcheck printf in ts/Dockerfile. Its output follows." >&2
+  fi
+  cat "$out" >&2 || true
+  rm -f "$out"
+  return 1
+}
+
 # Every `$( )` here is either guarded with `|| <var>=""` and followed by an explicit check that
 # prints its own named ::error::, or provably unable to fail before its own message. That is not
 # decoration: under `set -euo pipefail` an unguarded failing capture aborts the whole script on
@@ -1191,7 +1240,7 @@ console.log(["walked=" + walked].concat(found).join("\n"));
 smoke_consoles() {
   local service app base_path console_path other name port origin status html chunk bytes code uid console_status
   local run_out img_out img_public img_list host_public host_list img_dirs host_dirs
-  local host_std host_static host_id run_rc sh_rc img_rc cstate hc_rc hc_out
+  local host_std host_static host_id run_rc sh_rc img_rc cstate
   local ec=0 bad started
   # This REPLACES the script-global `trap load_oci_cleanup EXIT` at the top of the load-oci
   # section, exactly as `smoke()` and `rehearse` already do — harmless today because no dispatch
@@ -1314,23 +1363,11 @@ smoke_consoles() {
       fi
     fi
 
-    # The image's OWN HEALTHCHECK program, run inside the container. Nothing else in this suite
-    # executes /app/healthcheck.mjs: ts/Dockerfile writes it with a `printf` that carries a
-    # backtick template literal and a `%s` substitution, so an escaping or path regression would
-    # otherwise ship with every other row green. `docker exec` of the image's node needs no shell.
-    # It runs only once the page rendered, because the probe it makes is the same server's
+    # The image's OWN HEALTHCHECK program (console_healthcheck_row above, SMA-670 gap 3). It runs
+    # only once the page rendered, because the probe it makes is the same server's
     # <basePath>/healthz. It does not set `bad`: the chunk rows below do not depend on it.
-    # GUARDED: a non-zero exit is the finding, and must reach the named message, not abort.
     if [ "$bad" -eq 0 ]; then
-      hc_rc=0
-      hc_out="$(docker exec "$name" /nodejs/bin/node /app/healthcheck.mjs 2>&1)" || hc_rc=$?
-      if [ "$hc_rc" -ne 0 ]; then
-        echo "::error::${app}: the image's HEALTHCHECK program (/app/healthcheck.mjs) exited ${hc_rc} against a server that renders ${base_path} — check the healthcheck printf in ts/Dockerfile. Its output follows." >&2
-        printf '%s\n' "$hc_out" >&2
-        ec=1
-      else
-        echo "  ${app}: HEALTHCHECK program /app/healthcheck.mjs exits 0"
-      fi
+      console_healthcheck_row "$name" "$app" "$base_path" "$CONSOLE_HC_DEADLINE" || ec=1
     fi
 
     # SMA-634. A (console) route, which imports @paigasus/console-core and so evaluates the kernel's
