@@ -136,12 +136,22 @@ every push to `main`.
 
 The wrapper gets the key list once, from `release_plan.py --keys`. It then loops over the keys for
 all three places. Each key keeps its own `grep … | tail -n 1`, for the forged-line reason in the
-existing comment. If `--keys` fails or prints no key, the wrapper takes the fail-safe branch and
-writes `nothing_to_release=false`, and it exits non-zero, because it cannot name the chain
-outputs it must write. A non-zero exit fails the `plan` job, and a failed `plan` skips every
-chain (their `needs:` fail). That is the fail-closed direction for the chains, and the kernel
-release waits for a fix. This is a deliberate exception to "always build": a chain output that
-nobody writes runs the chain with an empty version.
+existing comment.
+
+If `--keys` fails, prints no key, or prints an invalid key (for example, `uv` is missing on the
+runner), the wrapper reads the key list from `ci/images/chains.toml` with bash only
+(`sed -n 's/^\[chain\.\([a-z][a-z0-9-]*\)\]$/\1/p'`). It then takes the existing fail-safe branch:
+`nothing_to_release=false`, and `skip_<key>=false` and an empty `version_<key>=` for every key. It
+exits 0. This keeps the SMA-603 C1 contract ("always exits 0"), and it is the same fail-safe that
+the two services have today: the chain runs, waits at its approval, and fails at the label
+compare before the first registry write.
+
+Only when the bash read also finds no key (a missing, unreadable or empty `chains.toml`) does the
+wrapper exit 2. It then cannot name the chain outputs it must write, and an unwritten output runs
+the chain with an empty version. A non-zero exit fails the `plan` job, which skips every chain and
+the kernel release until a fix. (Revised after Gate 1, on Sven's decision of 2026-09-26: the first
+revision failed closed on any `--keys` failure, which brought back the SMA-603 C1 defect for a
+runner without `uv`.)
 
 Negative-control rows 5 and 9 cover all nine outputs. `RELEASE_PLAN_SH_CALL_SITES` in
 `ci/affected-graph/ci_targets.py` (`:1211-1234`) is re-pinned in the same commit, because those
