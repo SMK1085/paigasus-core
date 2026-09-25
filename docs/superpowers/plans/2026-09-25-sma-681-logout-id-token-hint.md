@@ -1585,7 +1585,11 @@ Expected: every target passes. `ts:lint` is the only lint target (finding F3: th
 ```bash
 export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
 cd /Users/smaschek/dev/paigasus/paigasus-core/.claude/worktrees/sma-681-id-token-hint
-docker info >/dev/null 2>&1 && moon run paigasus-auth-ts:test-e2e gateway-console-ts:test-e2e || echo "DOCKER_MISSING: the Docker tiers are NOT RUN LOCALLY; CI runs them"
+if docker info >/dev/null 2>&1; then
+  moon run paigasus-auth-ts:test-e2e gateway-console-ts:test-e2e
+else
+  echo "DOCKER_MISSING: the Docker tiers are NOT RUN LOCALLY; CI runs them"
+fi
 ```
 
 Expected with Docker: both pass. Without Docker: record the line in the report.

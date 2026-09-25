@@ -419,7 +419,8 @@ async function handleLogout(runtime: AuthRuntime, req: Request): Promise<Respons
   // STEP 1: delete first, before any network call.
   //
   // The read finds the refresh token for step 3 and the ID token for step 4.
-  // Its failure must NEVER cost the delete (SMA-653 D5): a failed read leaves `refreshToken` undefined, and the delete still runs.
+  // Its failure must NEVER cost the delete (SMA-653 D5): a failed read leaves `refreshToken`
+  // undefined, and the delete still runs.
   // That rescues a TRANSIENT failure. During a real wedge the read opens the SMA-651 circuit, the
   // circuit then refuses the delete at once, and the delete branch below answers 503 — the usual
   // outcome of a wedge (spec § 4 row 8).
