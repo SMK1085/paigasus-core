@@ -244,7 +244,9 @@ run: `git reset -q --hard <recorded sha> && git clean -fdq -e target -e node_mod
   2. Reset to the same scratch commit. New `run.sh` (copied in from the worktree): `--write`,
      then `--check`. Expected: exit 0.
   3. Lockdiff of `rs/Cargo.lock` against the scratch-commit baseline (M1's lock before any
-     `--write`): expected four kernel-family workspace entries; zero third-party entries. And
+     `--write`): expected three entries, the three binding crates, because M1's release-plz run
+     already moved the kernel entry (corrected after M3 measured three); zero third-party
+     entries. And
      against `cb772393`: four kernel-family and two proto workspace entries; zero third-party.
   4. `moon run paigasus-kernel-ts:test --force`: expected pass.
 - **Mutations.** Apply each as a marked insert (`# MUTATION-SMA-685`), and restore by deleting
