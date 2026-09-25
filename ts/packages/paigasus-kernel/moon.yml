@@ -203,6 +203,15 @@ tasks:
   # `case` is the fail-closed assertion on the captured value, the analog of the `[ -x ]` check the
   # release-parity modules make.
   #
+  # WHEN A CRATE VERSION ENTERS THE GLUE (SMA-680 spec F5/F6). wasm-bindgen hashes the compiling
+  # crate's CARGO_PKG_NAME and CARGO_PKG_VERSION into shim names. Export names are restored, and
+  # import names keep the hash. Today the only hashed import is `__wbg_Error_*`, which wasm-bindgen
+  # declares itself, so the glue follows the wasm-bindgen version and not ours. If the kernel or
+  # paigasus-wasm gets its own `#[wasm_bindgen] extern "C"` block, `inline_js` or `module = "..."`,
+  # our version enters an import name. Then every kernel-group release PR fails check 1
+  # (inferred, not measured) of tests/committed-wasm.test.ts, also with
+  # `dependencies_update = false` in rs/release-plz.toml.
+  #
   # runInCI: false — CI never regenerates; it only compares. cache: false — the task writes tracked
   # files, and a cached replay would write nothing.
   generate-wasm:
