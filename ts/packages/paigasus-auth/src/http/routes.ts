@@ -367,6 +367,25 @@ async function bestEffortRevoke(runtime: AuthRuntime, refreshToken: string): Pro
   }
 }
 
+/**
+ * SMA-681. True when the stored ID token's payload `aud` (a string or an array) contains
+ * `clientId`. Any decode failure gives false, so logout sends no hint. There is no signature
+ * check: the result only selects the logout request, and our own login stored the token.
+ */
+function hintAudienceMatches(idToken: string, clientId: string): boolean {
+  const segments = idToken.split('.');
+  if (segments.length !== 3 || segments[1] === undefined) return false;
+  let payload: unknown;
+  try {
+    payload = JSON.parse(Buffer.from(segments[1], 'base64url').toString('utf8'));
+  } catch {
+    return false;
+  }
+  if (typeof payload !== 'object' || payload === null) return false;
+  const aud: unknown = (payload as { aud?: unknown }).aud;
+  return aud === clientId || (Array.isArray(aud) && aud.includes(clientId));
+}
+
 // POST /auth/logout — AC 3: "a stolen cookie is dead immediately after". Design doc § 9.5.
 //
 // ORDER IS THE ACCEPTANCE CRITERION. Step 1 (delete) happens before ANY network call, so a slow
@@ -376,7 +395,8 @@ async function bestEffortRevoke(runtime: AuthRuntime, refreshToken: string): Pro
 // is against the IdP specifically, and step 1's own record-lookup finds the refresh token for
 // step 3 and the ID token for step 4.
 //
-// `id_token_hint` IS SENT WHEN THE RECORD HOLDS AN ID TOKEN (SMA-681). This reverses SMA-506.
+// `id_token_hint` IS SENT WHEN THE RECORD HOLDS AN ID TOKEN WHOSE `aud` CONTAINS THIS ZONE'S
+// CLIENT ID (SMA-681). This reverses SMA-506.
 // SMA-506 (design doc § 9.5) did not store the raw ID token. It argued that `client_id` plus a
 // registered `post_logout_redirect_uri` is sufficient for Keycloak, and that the raw token is a
 // third bearer credential in Redis. The SMA-506 measurement saw no confirmation page only because
@@ -408,31 +428,13 @@ async function bestEffortRevoke(runtime: AuthRuntime, refreshToken: string): Pro
 //
 // NAMED RESIDUAL: an identity provider that REQUIRES `id_token_hint` still fails when there is no
 // token to send: no session cookie, no record (absolute expiry, or the `version: 2` deploy removed
-// it), or a failed store read. The server-side logout still succeeds then (step 1 already ran);
-// only the end-session redirect does not complete.
+// it), a failed store read, or a stored token whose `aud` does not contain this zone's client id.
+// The server-side logout still succeeds then (step 1 already ran); only the end-session redirect
+// does not complete, or (in the `aud` case) completes with Keycloak's confirmation page instead.
 //
 // A STORE FAILURE (SMA-653). A failed read does not stop the delete (D5). A failed delete answers
 // 503 with a POST retry form and keeps the session cookie (D6): the user must see that logout did
 // not finish, never a false "signed out".
-/**
- * SMA-681. True when the stored ID token's payload `aud` (a string or an array) contains
- * `clientId`. Any decode failure gives false, so logout sends no hint. There is no signature
- * check: the result only selects the logout request, and our own login stored the token.
- */
-function hintAudienceMatches(idToken: string, clientId: string): boolean {
-  const segments = idToken.split('.');
-  if (segments.length !== 3 || segments[1] === undefined) return false;
-  let payload: unknown;
-  try {
-    payload = JSON.parse(Buffer.from(segments[1], 'base64url').toString('utf8'));
-  } catch {
-    return false;
-  }
-  if (typeof payload !== 'object' || payload === null) return false;
-  const aud: unknown = (payload as { aud?: unknown }).aud;
-  return aud === clientId || (Array.isArray(aud) && aud.includes(clientId));
-}
-
 async function handleLogout(runtime: AuthRuntime, req: Request): Promise<Response> {
   const cookies = readCookies(req.headers.get('cookie'));
   const sid = cookies.get(SESSION_COOKIE);

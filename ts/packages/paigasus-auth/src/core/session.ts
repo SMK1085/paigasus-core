@@ -24,7 +24,7 @@ export interface SessionRecord {
    * see a login loop until the rollout ends. A rollback forces a second logout. Both zones default
    * their image tag to `.Chart.AppVersion` (charts/paigasus/values.yaml), so the mixed state lasts
    * only for the rollout. After the deploy, a logout or any other read of a version 1 record
-   * deletes it before its refresh token can be revoked (http/routes.ts reads no token from it).
+   * deletes it before its refresh token can be revoked. http/routes.ts reads no token from it.
    * That refresh token stays valid at the IdP until its idle timeout. Under the default scope
    * (`offline_access`, config.ts) it is an offline token. No deployment existed on 2026-09-25
    * (spec § 4.1).

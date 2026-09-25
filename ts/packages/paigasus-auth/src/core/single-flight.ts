@@ -278,6 +278,9 @@ export async function resolveSession(deps: ResolveDeps, sid: string): Promise<Re
             orphanNewRefreshToken();
             return null; // logout resurrection guard — never re-insert
           }
+          // Revokes nothing here. The winner may hold a token from the same IdP session: a lock
+          // TTL expired and two holders both refreshed. Keycloak revocation acts on the client
+          // session, so a revoke here could sign out the live record this call is about to return.
           if (winner.rev !== fresh.rev) return winner; // another writer already owns it
           // winner.rev === fresh.rev: unchanged state, a genuine write failure. Retry once.
           written = { ...next, rev: winner.rev + 1 };
@@ -287,6 +290,10 @@ export async function resolveSession(deps: ResolveDeps, sid: string): Promise<Re
           // Retried once and still could not persist. A clean re-login beats a session that can
           // never refresh again, so delete rather than leave the revoked token in place.
           orphanNewRefreshToken(); // before the delete, so a failed delete still revokes it
+          // A non-rotating IdP returns no new refresh token, so the old one (`refreshToken`) is
+          // still the live token at the IdP. The delete below removes the only record that held
+          // it, so nothing else will ever revoke it unless it is queued here too. The Set dedups.
+          if (tokens.refreshToken === undefined) orphaned.add(refreshToken);
           await store.delete(sid);
           logger.event('session.refresh.persist_failed', { sid: sidTag(sid) });
           return null;

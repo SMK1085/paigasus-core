@@ -35,7 +35,7 @@ to every user when SMA-682 restores the SSO session.
 | D3 | Schema change | `idToken` is **required**, and the record changes to `version: 2`. No deployment exists, so the forced logout costs nothing. | An optional field with `version: 1`. |
 | D4 | An expired stored token | Always send it. No local `exp` check. | Omit an expired token (the user would see the page after about 5 minutes without a refresh). |
 | D5 | A refreshed ID token | Store it when its `iss` and `sub` match the login claims. | Ignore refreshed tokens (the stored token then ages without limit; harmless per § 3 M-d, but staler than necessary). |
-| D6 | A refreshed ID token whose `iss` or `sub` does NOT match | A definitive refresh failure: delete the record, revoke the new refresh token best effort, return `null`. The user signs in again. (Spec challenge, MAJOR 1.) | Keep the old ID token and store the new access token: the record would join the login principal with an access token that the IdP issued for a different subject. |
+| D6 | A refreshed ID token whose `iss` or `sub` does NOT match | A definitive refresh failure: delete the record, and revoke the new refresh token AND the record's old one, in one deduplicated `Set`, best effort, after the lock releases (runtime.ts invariant 3). A non-rotating IdP keeps the old refresh token live, so it must be queued too. Return `null`. The user signs in again. (Spec challenge, MAJOR 1.) | Keep the old ID token and store the new access token: the record would join the login principal with an access token that the IdP issued for a different subject. |
 
 ### Why D1 is acceptable (the reversal of SMA-506)
 
@@ -159,10 +159,14 @@ export interface SessionRecord {
   same `wrapError('authorization_code_grant', …)` path. This check only narrows the type: with
   `idTokenExpected: true`, oauth4webapi already rejects a missing or empty `id_token`
   (`oauth4webapi/build/index.js:1480-1482`). It is unreachable, so it gets no test.
-- The core port type `RefreshedTokens` in `src/core/single-flight.ts:10-14` gets
-  `idToken?: string` and `idTokenClaims?: IdTokenClaims`. `IdTokenClaims` is imported from
-  `ports/principal-resolver`, as `core/session.ts` does. Core must not import from `adapters/`.
-  The adapter's `RefreshedTokens` in `adapters/oidc.ts` gets the same two fields.
+- `RefreshedTokens` is defined ONCE, in `src/core/single-flight.ts`, with a single
+  `rotatedIdToken?: { token: string; claims: IdTokenClaims }` field. The token and its claims are
+  then both present or both absent, enforced by the compiler rather than by a runtime check.
+  `IdTokenClaims` is imported from `ports/principal-resolver`, as `core/session.ts` does. Core must
+  not import from `adapters/`. `src/adapters/oidc.ts` re-exports this same type (`export type {
+  RefreshedTokens }`) rather than declaring its own. Its `OidcTokens` extends `RefreshedTokens` with
+  `rotatedIdToken` omitted, and adds its own required `idToken` and `idTokenClaims`: the callback
+  path has no prior token to compare a rotation against.
 - `refresh` sets both only when the response contains an ID token (`tokens.id_token` is a string
   and `tokens.claims()` is defined). Validation of such a token: oauth4webapi checks presence, `iss`
   against the discovered issuer, `aud`, `exp`/`iat`/`nbf` and the `sub` type
@@ -180,12 +184,24 @@ The refresh write builds `next` from `fresh`. The new `idToken` rule:
 - The response has an ID token, but `iss` or `sub` differs (D6): OIDC Core § 12.2 requires the
   match, and nothing upstream checks it (§ 4.2). This is a definitive refresh failure, with the same
   shape as the `refresh_rejected` branch (`single-flight.ts:182-185`): do not write `next`, delete
-  the record, revoke `tokens.refreshToken` best effort when it exists, log
+  the record, and best-effort revoke the new refresh token (`tokens.refreshToken`, when it exists)
+  AND the record's OLD refresh token, both queued in one deduplicated `Set`. The old token matters
+  for a non-rotating IdP: it is then still live, and the delete removes the only record that held
+  it. Both revokes run after the lock releases (runtime.ts invariant 3), never under it. Log
   `session.refresh.id_token_mismatch` and `session.deleted` with `reason: 'id_token_mismatch'`
   (both carry `{ sid: sidTag(sid) }` only), and return `null`. The `iss` half cannot occur in
   production, because oauth4webapi requires `iss === as.issuer` on every response, and the login
   token has the same value. The check stays, because it costs nothing.
 - The response has no ID token: keep `fresh.idToken`.
+- The compare-and-set write can also fail (`single-flight.ts`'s own doc comment, invariant 5, on
+  a FAILED COMPARE-AND-SET). Two of its three outcomes revoke a refresh token that no record holds,
+  best effort, after the lock releases: `winner === null` (a concurrent logout deleted the record)
+  and the retried write also failing (`session.refresh.persist_failed`). The persist-failed branch
+  additionally revokes the record's old refresh token when the IdP did not rotate it, for the same
+  reason as the mismatch path above. The third outcome, `winner.rev !== fresh.rev` (another writer
+  already owns the record), revokes nothing: the winner may hold a token from the same IdP session —
+  a lock TTL expired and two holders both refreshed — and Keycloak revocation acts on the client
+  session, so a revoke there could sign out the live record this call returns.
 - `session.refreshed` gets `idTokenRotated: boolean` (true when a new ID token was stored). Then
   production shows whether refreshes deliver ID tokens, which is the reason D5 exists.
 - Both new event names go into the closed `AuthEventName` union (`src/ports/logger.ts:14-26`).
@@ -202,6 +218,13 @@ The new record sets `version: 2` and `idToken: tokens.idToken`.
 - Step 1 already reads the record to find the refresh token. The same read now also gives
   `idToken`. A failed read (`STORE_DOWN`) or no record gives no token. This does not change the
   delete-first order or the SMA-653 store-failure rules.
+- The hint is sent only when the stored token's payload `aud` contains this runtime's own client id
+  (`AuthRuntime.clientId`), via `hintAudienceMatches`. A malformed token, or a token whose `aud`
+  names another client, gives the pre-SMA-681 request and `idTokenHintSent: false`. Reason: two
+  zones share one session cookie and one store (design doc § 6.7), so a zone can read a record that
+  another zone's login wrote, and § 3 row M-g shows Keycloak answers a mismatched `aud` with 400.
+  `hintAudienceMatches` checks no signature: the value only selects the shape of the logout request,
+  and our own login stored the token.
 - Step 4 calls `buildEndSessionUrl({ postLogoutRedirectUri, state, idTokenHint })`, with
   `idTokenHint` only when a token exists.
 - The fallback (AC 3): no session cookie, no record, or a failed read. The request is then the same
@@ -310,6 +333,14 @@ above.
 - An IdP that rejects an expired hint behaves as before this change (§ 2 D4). Only Keycloak is
   measured.
 - An IdP that requires `id_token_hint` still fails in the no-record cases (§ 4.5).
+- A zone whose client id differs from the one that stored the token still sees Keycloak's
+  confirmation page: `hintAudienceMatches` gives no hint rather than send a rejected one (§ 4.5).
+- Not measured: whether Keycloak's revocation endpoint can end a whole offline client session, not
+  only the one refresh token passed to it. The mismatch path (§ 4.3, D6) and the two orphan paths
+  (§ 4.3) together add three call sites that now revoke a refresh token best effort.
+- A mismatch or orphan revoke runs in the `finally` block, after the lock releases but before
+  `resolveSession` returns, so it can add up to one `PAIGASUS_OIDC_HTTP_TIMEOUT_MS` to the
+  wall-clock time of the `getSession` call that triggered it.
 
 ## 6. Acceptance criteria
 
@@ -329,3 +360,20 @@ above.
 - Encryption at rest for any token.
 - Logout by POST.
 - Updating `idTokenClaims` on refresh.
+
+## Changes after review (2026-09-26)
+
+- § 2 D6 and § 4.3: the mismatch path now revokes the new refresh token AND the record's old one,
+  deduplicated, because a non-rotating IdP keeps the old token live. Both revokes run after the lock
+  releases (runtime.ts invariant 3).
+- § 4.3: the `winner === null` and persist-failed write outcomes also revoke a refresh token that no
+  record holds; persist-failed also revokes the record's old token for a non-rotating IdP. The
+  `winner.rev !== fresh.rev` outcome revokes nothing, because the winner may hold a token from the
+  same IdP session and Keycloak revocation acts on the client session.
+- § 4.2 / § 4.3: corrected `RefreshedTokens` to its actual shape: one `rotatedIdToken` field, defined
+  once in core and re-exported by the adapter, not two separate optional fields duplicated in both
+  files.
+- § 4.5: documented `hintAudienceMatches` — the hint is sent only when the stored token's `aud`
+  contains this runtime's own client id.
+- § 5: added the other-`aud` residual, the unmeasured scope of Keycloak's revocation endpoint, and
+  the added latency of a mismatch or orphan revoke.
