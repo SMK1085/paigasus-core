@@ -5,17 +5,30 @@ import { shouldRefresh } from './refresh-policy';
 import type { SessionRecord } from './session';
 import type { AuthLogger, StoreUnavailableStage } from '../ports/logger';
 import { sidTag } from '../ports/logger';
+import type { IdTokenClaims } from '../ports/principal-resolver';
 import type { SessionStore } from '../ports/session-store';
 
 export interface RefreshedTokens {
   accessToken: string;
   refreshToken?: string;
   expiresIn: number; // seconds
+  /**
+   * SMA-681. Both are set, or neither: only when the refresh response carries an ID token.
+   * adapters/oidc.ts validates the token itself. resolveSession compares its `iss` and `sub` with
+   * the login claims.
+   */
+  idToken?: string;
+  idTokenClaims?: IdTokenClaims;
 }
 
 export interface ResolveDeps {
   store: SessionStore;
   refresh: (refreshToken: string) => Promise<RefreshedTokens>;
+  /**
+   * RFC 7009 revocation (SMA-681). Called only on the ID-token-mismatch path, for the NEW refresh
+   * token that the refresh just issued. Best effort: a rejection is swallowed.
+   */
+  revoke: (token: string) => Promise<void>;
   logger: AuthLogger;
   skewMs: number;
   lockTtlMs: number;
@@ -96,7 +109,7 @@ const MIN_ACCESS_TTL_BUFFER_MS = 1_000;
  *     re-login is the recoverable outcome.
  */
 export async function resolveSession(deps: ResolveDeps, sid: string): Promise<ResolvedSession | null> {
-  const { store, refresh, logger, skewMs, lockTtlMs, lockWaitMs, ttlMs } = deps;
+  const { store, refresh, revoke, logger, skewMs, lockTtlMs, lockWaitMs, ttlMs } = deps;
 
   const rec = await store.get(sid);
   if (rec === null) return null;
@@ -185,6 +198,40 @@ export async function resolveSession(deps: ResolveDeps, sid: string): Promise<Re
           }
           throw err;
         }
+        // SMA-681 D5, D6 (spec § 4.3). A refresh response MAY carry a new ID token. OIDC Core
+        // § 12.2 requires its `iss` and `sub` to equal the login token's, and nothing upstream
+        // compares them: adapters/oidc.ts validates the new token on its own only. The `iss` half
+        // cannot fail in production, because oauth4webapi requires `iss === as.issuer` on every
+        // response, and the login token has the same value. It stays because it costs nothing.
+        // `sid` is not compared: § 12.2 names only `iss` and `sub`, and only Keycloak is measured.
+        //
+        // A MISMATCH is a definitive refresh failure, with the shape of the refresh_rejected branch
+        // above. Nothing is written: the record would join the login principal with an access
+        // token issued for a different subject. The delete runs first, then the revoke of the NEW
+        // refresh token, best effort. The revoke is in `finally`, so a failed delete still revokes
+        // it: nothing else would ever revoke that token. A failed delete then propagates, as it
+        // does on the refresh_rejected path. Neither event carries a token.
+        //
+        // `idTokenClaims` never changes here (spec § 4.1): the principal and the display name read
+        // the login claims, and only logout reads `idToken`.
+        let idToken = fresh.idToken;
+        let idTokenRotated = false;
+        if (tokens.idToken !== undefined && tokens.idTokenClaims !== undefined) {
+          if (tokens.idTokenClaims.iss !== fresh.idTokenClaims.iss || tokens.idTokenClaims.sub !== fresh.idTokenClaims.sub) {
+            logger.event('session.refresh.id_token_mismatch', { sid: sidTag(sid) });
+            const newRefreshToken = tokens.refreshToken;
+            try {
+              await store.delete(sid);
+              logger.event('session.deleted', { sid: sidTag(sid), reason: 'id_token_mismatch' });
+            } finally {
+              if (newRefreshToken !== undefined) await revoke(newRefreshToken).catch(() => undefined);
+            }
+            return null;
+          }
+          idToken = tokens.idToken;
+          idTokenRotated = true;
+        }
+
         const accessTtlMs = Math.max(tokens.expiresIn * 1000, skewMs + MIN_ACCESS_TTL_BUFFER_MS); // F7
         const next: SessionRecord = {
           ...fresh,
@@ -192,6 +239,7 @@ export async function resolveSession(deps: ResolveDeps, sid: string): Promise<Re
           accessToken: tokens.accessToken,
           refreshToken: tokens.refreshToken ?? fresh.refreshToken,
           accessExpiresAt: Math.min(Date.now() + accessTtlMs, fresh.absoluteExpiresAt),
+          idToken,
         };
 
         // Invariant 5 / F1. See the function doc for the three cases a `false` here can mean.
@@ -213,7 +261,9 @@ export async function resolveSession(deps: ResolveDeps, sid: string): Promise<Re
           return null;
         }
 
-        logger.event('session.refreshed', { sid: sidTag(sid), rev: written.rev }); // F6
+        // `idTokenRotated` (SMA-681) shows in production whether refreshes deliver ID tokens. D5
+        // exists only for IdPs that do.
+        logger.event('session.refreshed', { sid: sidTag(sid), rev: written.rev, idTokenRotated }); // F6
         return written;
       } finally {
         // F2: never let a release-time store error mask the try block's own outcome — a
