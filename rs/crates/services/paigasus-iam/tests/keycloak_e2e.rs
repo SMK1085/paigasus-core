@@ -34,7 +34,9 @@ use base64::Engine;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use paigasus_iam::adapters::http::{AppState, router};
 use paigasus_iam::adapters::persistence::entities::user;
+use paigasus_iam::application::authenticate_token::Provisioning;
 use paigasus_iam::config::{ApiKeyConfig, AuditConfig, AuthnConfig, AuthzConfig, IamConfig, IssuerConfig, JwksCacheBackend, JwksCacheConfig, MetricsConfig, MigrationConfig, OutboxConfig};
+use paigasus_iam_core::{AuthnError, TokenDefect};
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 use serde_json::{Value, json};
 use std::time::Duration;
@@ -134,6 +136,22 @@ async fn keycloak_end_to_end_config_only_oidc() {
     assert!(token_status.is_success(), "password grant failed ({token_status}): {token_body}\n{}", dump_logs(&keycloak).await);
     let access_token = token_body["access_token"].as_str().expect("access_token in token response").to_string();
 
+    // SMA-686: `scope=openid` also returns an ID token. Pin the Keycloak markers this change
+    // relies on, so a Keycloak upgrade that drops them reds here rather than silently
+    // re-opening the gap (spec § 5.2).
+    let id_token = token_body["id_token"].as_str().expect("id_token in token response (scope=openid)").to_string();
+    let id_claims = jwt_payload(&id_token);
+    assert_eq!(id_claims["typ"], "ID", "keycloak ID token must carry typ=ID: {id_claims}");
+    assert_eq!(id_claims["aud"], "paigasus-cli", "keycloak ID token aud is the client id: {id_claims}");
+    let access_claims = jwt_payload(&access_token);
+    assert_eq!(access_claims["typ"], "Bearer", "keycloak access token must carry typ=Bearer: {access_claims}");
+    let access_aud_has_paigasus = match &access_claims["aud"] {
+        Value::String(aud) => aud == "paigasus",
+        Value::Array(auds) => auds.iter().any(|aud| aud == "paigasus"),
+        _ => false,
+    };
+    assert!(access_aud_has_paigasus, "keycloak access token aud must contain paigasus: {access_claims}");
+
     // The access token is RS256 — closes the RS256 end-to-end accept-path coverage (the mock
     // IdP is ES256-only, spec §8).
     let header_segment = access_token.split('.').next().expect("jwt has a header segment");
@@ -147,9 +165,29 @@ async fn keycloak_end_to_end_config_only_oidc() {
     let state = AppState::new(db, &cfg).await.expect("AppState::new");
     let app = router(state.clone());
 
+    // SMA-686 AC1: the configured audiences include the client id (`paigasus-cli`, see
+    // `keycloak_config`), exactly like the chart default — so the ID token passes the issuer,
+    // signature, audience and expiry checks and reaches the `typ` check. Assert the DEFECT
+    // through the use case: every defect renders the same 401, so a 401 alone cannot prove
+    // which check refused the token.
+    let err = state.authn.resolve(&id_token, Provisioning::Enabled).await.expect_err("an ID token must not authenticate");
+    assert!(
+        matches!(err, AuthnError::InvalidToken(TokenDefect::NotAnAccessToken)),
+        "ID token must be refused as NotAnAccessToken, got {err:?}"
+    );
+
+    // The wire contract on both HTTP paths: the bearer middleware and the exempt introspect.
+    let (status, body) = send(&app, "POST", "/v1/organizations", Some(json!({ "slug": "idtok", "name": "ID token" })), Some(&id_token)).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+    assert_eq!(body["error"]["code"], "invalid-token", "{body}");
+    let (status, body) = send(&app, "POST", "/v1/authn/introspect", Some(json!({ "token": id_token })), None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+    assert_eq!(body["error"]["code"], "invalid-token", "{body}");
+
     // A protected write with the real Keycloak bearer: the middleware's `resolve(.., Enabled)`
     // JIT-provisions the principal (which REQUIRES the `email` claim, spec §6.2), so a 201 here
-    // is itself proof the audience + email mappers landed both claims in the ACCESS token.
+    // is itself proof the email mapper landed its claim in the ACCESS token (the audience is
+    // asserted on the decoded payload above).
     // SMA-444 Task 20: `POST /v1/organizations` is now also authorization-enforced — seed a
     // `platform_admin` grant up front (`provision_platform_admin`'s `state.authn.resolve` runs
     // the exact same JIT path against the REAL Keycloak issuer the middleware itself would).
@@ -187,9 +225,10 @@ async fn keycloak_end_to_end_config_only_oidc() {
     assert_eq!(second["subject"], subject);
 }
 
-/// An `IamConfig` pointed at the running Keycloak: a single issuer (audience `paigasus`, JIT
-/// on) with `accept_invalid_tls` for the self-signed dev cert. Standard test defaults
-/// otherwise — this is the ENTIRE production-facing surface exercised by AC 1 (config only).
+/// An `IamConfig` pointed at the running Keycloak: a single issuer (audiences `paigasus` and
+/// the client id `paigasus-cli`, JIT on) with `accept_invalid_tls` for the self-signed dev
+/// cert. Standard test defaults otherwise — this is the ENTIRE production-facing surface
+/// exercised by AC 1 (config only).
 fn keycloak_config(issuer: &str) -> IamConfig {
     IamConfig {
         http_addr: "127.0.0.1:0".parse().unwrap(),
@@ -210,7 +249,10 @@ fn keycloak_config(issuer: &str) -> IamConfig {
             },
             issuers: vec![IssuerConfig {
                 issuer: issuer.to_string(),
-                audiences: vec!["paigasus".to_string()],
+                // `paigasus` is the access token's aud (audience mapper); `paigasus-cli` is the
+                // client id, which the chart accepts by default — and which is the ID token's
+                // aud. Both are accepted so the ID token reaches the SMA-686 `typ` check.
+                audiences: vec!["paigasus".to_string(), "paigasus-cli".to_string()],
                 jit_provisioning: true,
             }],
         },
@@ -225,6 +267,13 @@ fn keycloak_config(issuer: &str) -> IamConfig {
         metrics: MetricsConfig::default(),
         migration: MigrationConfig::default(),
     }
+}
+
+/// Decodes a JWT's payload segment WITHOUT verifying it — test inspection only.
+fn jwt_payload(token: &str) -> Value {
+    let segment = token.split('.').nth(1).expect("jwt has a payload segment");
+    let bytes = URL_SAFE_NO_PAD.decode(segment).expect("base64url-decodable payload");
+    serde_json::from_slice(&bytes).expect("json payload")
 }
 
 /// Best-effort container stdout+stderr, for the failure panics only (realm-import errors and
