@@ -94,11 +94,13 @@ doc comment: the payload `typ` claim marks a Keycloak ID token or logout token (
 `docs/ops/RUNBOOK-chart.md` § 6:
 
 - Item 1 (Audience) currently says to set `oidc.audience` "only when you cannot make the IdP put
-  the client id into `aud`". Add: also set it when the IdP's ID token has the same `aud` as the
-  access token and no Keycloak `typ` claim, as described in the new paragraph.
+  the client id into `aud`". Change it to name two cases: that one, and an IdP whose ID token has
+  no Keycloak `typ` claim, for which the new paragraph tells how to choose the value.
+  (Corrected after the final review: the first wording said "the same `aud` as the access
+  token", which is exactly the case where no value exists.)
 - A new paragraph after the four items:
   - IAM refuses a bearer token whose `typ` claim is `ID` or `Logout`. Keycloak sets these values on
-    its ID token and its back-channel logout token. The IAM log shows the refusal at `info`.
+    its ID token and its back-channel logout token. The IAM log shows the refusal at `info`, with the issuer and the matched value.
   - This adds no requirement on the IdP. No Keycloak or Dex access token measured for SMA-686
     carries these values. A hardcoded-claim mapper that sets `typ` on an access token is not
     supported.

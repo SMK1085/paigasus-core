@@ -96,14 +96,15 @@ late and unclearly. Check these four items before you install:
 
 1. **Audience.** The access token's `aud` claim must contain the audience that IAM accepts. IAM
    accepts `oidc.audience` when it is set. It accepts `oidc.clientId` when `oidc.audience` is not
-   set. Set `oidc.audience` only when you cannot make the IdP put the client id into `aud`. The
-   value replaces the client id. It does not add another value next to the client id. Also set `oidc.audience` when the IdP's ID token has the same `aud` as the access token and
-   no Keycloak `typ` claim. The paragraph after this list tells you why. Before you
-   choose the value, decode a real access token and read its `aud` claim. The value helps only
-   when the IdP issues a JWT access token for the console's scopes (`openid profile email
-   offline_access`). The console sends no `audience` or `resource` parameter. This value does not
-   work with an opaque token, or a token for a different API. A wrong audience shows as a refused
-   token in the IAM log (`ci/kind/README.md`, "Where to look first").
+   set. Set `oidc.audience` in two cases. First, set it when you cannot make the IdP put the
+   client id into `aud`. Second, set it when the IdP's ID token has no Keycloak `typ` claim. The
+   paragraph after this list tells you how to choose the value in that case. The value replaces
+   the client id. It does not add another value next to the client id. Before you choose the
+   value, decode a real access token and read its `aud` claim. The value helps only when the IdP
+   issues a JWT access token for the console's scopes (`openid profile email offline_access`).
+   The console sends no `audience` or `resource` parameter. This value does not work with an
+   opaque token, or a token for a different API. A wrong audience shows as a refused token in
+   the IAM log (`ci/kind/README.md`, "Where to look first").
 2. **Email.** The access token must carry an `email` claim. IAM creates the principal on the first
    login from it.
 3. **Algorithm.** The token must be signed with RS256 or ES256, and its header must carry a `kid`.
@@ -113,7 +114,7 @@ late and unclearly. Check these four items before you install:
 **IAM refuses a token that is not an access token (SMA-686).** IAM refuses a bearer token whose
 `typ` claim is `ID` or `Logout`, in any letter case. Keycloak sets these values on its ID token
 and on its back-channel logout token. Its access token has `typ: Bearer`. The IAM log shows each
-refusal at `info`, with the issuer and the `typ` value.
+refusal at `info`, with the issuer and the matched value (`ID` or `Logout`).
 
 This adds no requirement on the IdP. No Keycloak or Dex access token measured for SMA-686 has
 one of these values. Do not add a mapper that sets `typ` on the access token.
