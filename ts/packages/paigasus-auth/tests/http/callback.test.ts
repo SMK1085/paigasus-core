@@ -155,11 +155,12 @@ const fakePrincipal: ResolvedPrincipal = {
 
 function seededRecord(overrides: Partial<SessionRecord> = {}): SessionRecord {
   return {
-    version: 1,
+    version: 2,
     rev: 0,
     accessToken: 'old-access-token',
     accessExpiresAt: Date.now() + 60_000,
     absoluteExpiresAt: Date.now() + 60_000,
+    idToken: 'old-id-token',
     idTokenClaims: { iss: 'https://issuer.example.com', sub: 'old-subject' },
     principal: fakePrincipal,
     ...overrides,
@@ -333,6 +334,23 @@ describe('GET /auth/callback — success', () => {
     expect(record).not.toBeNull();
     expect(record?.absoluteExpiresAt).toBeGreaterThanOrEqual(before + runtime.absoluteTtlMs);
     expect(record?.absoluteExpiresAt).toBeLessThanOrEqual(after + runtime.absoluteTtlMs);
+  });
+
+  // SMA-681 § 4.4: the login writes a version 2 record that carries the raw ID token the IdP
+  // returned, byte for byte. Logout sends it as id_token_hint.
+  it('writes a version 2 record carrying the raw id_token from the code exchange', async () => {
+    const state = 'state-success-id-token';
+    await seedTransaction(state);
+    const minted = await fixture.mintIdToken({ nonce: NONCE });
+    fixture.setNextIdToken(minted);
+
+    const res = await createAuthRoutes(runtime).handle(callbackRequest(state, cookieHeaderFor(state, CORRECT_SECRET)));
+
+    const setCookie = res.headers.getSetCookie().find((c) => c.startsWith(`${SESSION_COOKIE}=`));
+    const sid = setCookie?.split(';')[0]?.split('=')[1] ?? '';
+    const record = await store.get(sid);
+    expect(record?.version).toBe(2);
+    expect(record?.idToken).toBe(minted);
   });
 
   it('redirects to the validated returnTo', async () => {

@@ -5,12 +5,13 @@ import type { SessionRecord } from '../src/core/session.js';
 
 export function makeRecord(over: Partial<SessionRecord> = {}): SessionRecord {
   return {
-    version: 1,
+    version: 2,
     rev: 0,
     accessToken: 'AT',
     refreshToken: 'RT',
     accessExpiresAt: Date.now() + 300_000,
     absoluteExpiresAt: Date.now() + 86_400_000,
+    idToken: 'IDT',
     idTokenClaims: { iss: 'https://idp', sub: 'u1' },
     principal: { principalPrn: null, issuer: 'https://idp', subject: 'u1', memberships: [], roleGrants: [], grantsAvailable: false },
     ...over,

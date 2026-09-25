@@ -320,12 +320,13 @@ async function handleCallback(runtime: AuthRuntime, req: Request, url: URL): Pro
   const sid = newSessionId();
   const now = Date.now();
   const record: SessionRecord = {
-    version: 1,
+    version: 2,
     rev: 0,
     accessToken: tokens.accessToken,
     ...(tokens.refreshToken !== undefined ? { refreshToken: tokens.refreshToken } : {}),
     accessExpiresAt: now + tokens.expiresIn * 1000,
     absoluteExpiresAt: now + runtime.absoluteTtlMs,
+    idToken: tokens.idToken,
     idTokenClaims: tokens.idTokenClaims,
     principal,
   };

@@ -31,12 +31,13 @@ const OLD_SID = 'old-session-id-0123456789';
 
 function record(overrides: Partial<SessionRecord> = {}): SessionRecord {
   return {
-    version: 1,
+    version: 2,
     rev: 0,
     accessToken: 'old-access-token',
     refreshToken: 'old-refresh-token',
     accessExpiresAt: Date.now() + 60_000,
     absoluteExpiresAt: Date.now() + 60_000,
+    idToken: 'old-id-token',
     idTokenClaims: { iss: 'https://issuer.example.com', sub: 'a-subject' },
     principal: { principalPrn: null, issuer: 'https://issuer.example.com', subject: 'a-subject', memberships: [], roleGrants: [], grantsAvailable: false },
     ...overrides,

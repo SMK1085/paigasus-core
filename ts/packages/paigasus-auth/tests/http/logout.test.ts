@@ -43,6 +43,8 @@ const LOGOUT_URL = 'https://rp.example.com/iam/auth/logout';
 const LOGOUT_CALLBACK_URL = 'https://rp.example.com/iam/auth/logout/callback';
 const POST_LOGOUT_REDIRECT_URI = 'https://rp.example.com/iam/';
 const END_SESSION_URL = 'https://issuer.example.com/logout';
+/** The raw ID token that seededRecord() stores. JWT-shaped, not signed. */
+const STORED_ID_TOKEN = 'stored-header.stored-payload.stored-signature';
 
 const fakePrincipal: ResolvedPrincipal = {
   principalPrn: null,
@@ -55,12 +57,13 @@ const fakePrincipal: ResolvedPrincipal = {
 
 function seededRecord(overrides: Partial<SessionRecord> = {}): SessionRecord {
   return {
-    version: 1,
+    version: 2,
     rev: 0,
     accessToken: 'an-access-token',
     refreshToken: 'a-refresh-token',
     accessExpiresAt: Date.now() + 60_000,
     absoluteExpiresAt: Date.now() + 60_000,
+    idToken: STORED_ID_TOKEN,
     idTokenClaims: { iss: 'https://issuer.example.com', sub: 'a-subject' },
     principal: fakePrincipal,
     ...overrides,

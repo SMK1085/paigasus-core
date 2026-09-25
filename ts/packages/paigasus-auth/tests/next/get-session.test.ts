@@ -87,11 +87,12 @@ function baseRuntime(store: SessionStore): AuthRuntime {
 function liveRecord(): SessionRecord {
   const now = Date.now();
   return {
-    version: 1,
+    version: 2,
     rev: 0,
     accessToken: 'AT-live',
     accessExpiresAt: now + 999_000,
     absoluteExpiresAt: now + 999_000,
+    idToken: 'IDT-live',
     idTokenClaims: { iss: 'https://idp.example.com', sub: 'u1' },
     principal: { principalPrn: null, issuer: 'https://idp.example.com', subject: 'u1', memberships: [], roleGrants: [], grantsAvailable: false },
   };
