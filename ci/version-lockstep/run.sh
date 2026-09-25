@@ -77,7 +77,7 @@ declare -A LOCK_MEMBERS=(
 )
 
 SELF_TESTS_RAN=0
-SELF_TEST_COUNT=2   # site_verdict, lock_reader
+SELF_TEST_COUNT=3   # site_verdict, lock_reader, cargo_package_writer
 
 site_verdict() { # $1 expected  $2 actual
   if [ -n "$2" ] && [ "$1" = "$2" ]; then printf 'OK'; else printf 'MISMATCH'; fi
@@ -285,10 +285,115 @@ lock_reader_self_test() {
   SELF_TESTS_RAN=$((SELF_TESTS_RAN + 1))
 }
 
+# SMA-685: fixture table for the cargo-package writer. The fixtures deliberately vary the
+# layout (spacing, comments, table order, CRLF, no trailing newline), because a writer tested
+# on one layout only passes on the layout its author assumed.
+cargo_package_writer_self_test() {
+  local tmp rc got before after
+  tmp="$(mktemp -d)" || die_infra "cannot create a scratch dir"
+  # shellcheck disable=SC2064
+  trap "rm -rf '$tmp'" RETURN
+
+  _cpw() { # $1 fixture file (relative to $tmp)  $2 head version -> sets rc and got
+    rc=0
+    got="$(REPO_ROOT="$tmp" write_site cargo-package "$1" "$2" 2>/dev/null)" || rc=$?
+  }
+  _cpw_expect() { # $1 fixture  $2 expected file content (printf format)
+    local want
+    want="$(printf "$2")"
+    [ "$(cat "$tmp/$1")" = "$want" ] \
+      || { fail "self-test: cargo-package writer produced the wrong text for $1"; return 1; }
+  }
+
+  # F1: plain layout; rust-version, a dependency version and an inline table stay untouched.
+  printf '[package]\nname = "a"\nversion = "0.1.0"\nrust-version = "1.95"\n\n[dependencies]\nfoo = { version = "0.1.0" }\n\n[dependencies.bar]\nversion = "0.1.0"\n' >"$tmp/f1.toml"
+  _cpw f1.toml 0.2.0
+  [ "$rc" -eq 0 ] && [ "$got" = 1 ] || { fail "self-test: F1 rc=$rc got='$got', expected rc 0 and 1"; return 1; }
+  _cpw_expect f1.toml '[package]\nname = "a"\nversion = "0.2.0"\nrust-version = "1.95"\n\n[dependencies]\nfoo = { version = "0.1.0" }\n\n[dependencies.bar]\nversion = "0.1.0"' || return 1
+
+  # F2: idempotent — same version prints 0, changes no byte and keeps the mtime.
+  touch -t 200001010000 "$tmp/f1.toml"
+  before="$(python3 -c 'import os,sys;print(os.stat(sys.argv[1]).st_mtime_ns)' "$tmp/f1.toml")"
+  _cpw f1.toml 0.2.0
+  after="$(python3 -c 'import os,sys;print(os.stat(sys.argv[1]).st_mtime_ns)' "$tmp/f1.toml")"
+  [ "$rc" -eq 0 ] && [ "$got" = 0 ] && [ "$before" = "$after" ] \
+    || { fail "self-test: F2 idempotence rc=$rc got='$got' mtime $before -> $after"; return 1; }
+
+  # F3: spacing variants and a trailing comment on the version line.
+  printf '[package]\nname="b"\nversion   =  "0.1.0"   # the floor\n' >"$tmp/f3.toml"
+  _cpw f3.toml 0.1.1
+  [ "$rc" -eq 0 ] && [ "$got" = 1 ] || { fail "self-test: F3 rc=$rc got='$got'"; return 1; }
+  _cpw_expect f3.toml '[package]\nname="b"\nversion   =  "0.1.1"   # the floor' || return 1
+
+  # F4: a commented header and comment lines between [package] and version.
+  printf '# top\n[package] # the crate\nname = "c"\n# The floor. version = "9.9.9" in a comment.\n# more\nversion = "0.1.0"\n' >"$tmp/f4.toml"
+  _cpw f4.toml 0.3.0
+  [ "$rc" -eq 0 ] || { fail "self-test: F4 rc=$rc"; return 1; }
+  _cpw_expect f4.toml '# top\n[package] # the crate\nname = "c"\n# The floor. version = "9.9.9" in a comment.\n# more\nversion = "0.3.0"' || return 1
+
+  # F5: CRLF line endings are kept.
+  printf '[package]\r\nname = "d"\r\nversion = "0.1.0"\r\n' >"$tmp/f5.toml"
+  _cpw f5.toml 0.2.0
+  [ "$rc" -eq 0 ] || { fail "self-test: F5 rc=$rc"; return 1; }
+  [ "$(od -An -c "$tmp/f5.toml" | tr -d ' \n')" = "$(printf '[package]\r\nname = "d"\r\nversion = "0.2.0"\r\n' | od -An -c | tr -d ' \n')" ] \
+    || { fail "self-test: F5 CRLF was not kept"; return 1; }
+
+  # F6: [package] is not the first table, and [package.metadata.x] has its own version key.
+  printf '[lib]\npath = "src/lib.rs"\n\n[package]\nname = "e"\nversion = "0.1.0"\n\n[package.metadata.x]\nversion = "7.7.7"\n' >"$tmp/f6.toml"
+  _cpw f6.toml 0.2.0
+  [ "$rc" -eq 0 ] || { fail "self-test: F6 rc=$rc"; return 1; }
+  _cpw_expect f6.toml '[lib]\npath = "src/lib.rs"\n\n[package]\nname = "e"\nversion = "0.2.0"\n\n[package.metadata.x]\nversion = "7.7.7"' || return 1
+
+  # F7: a version key in a table BEFORE [package] stays untouched.
+  printf '[dependencies.foo]\nversion = "0.1.0"\n\n[package]\nname = "f"\nversion = "0.1.0"\n' >"$tmp/f7.toml"
+  _cpw f7.toml 0.2.0
+  [ "$rc" -eq 0 ] || { fail "self-test: F7 rc=$rc"; return 1; }
+  _cpw_expect f7.toml '[dependencies.foo]\nversion = "0.1.0"\n\n[package]\nname = "f"\nversion = "0.2.0"' || return 1
+
+  # F8-F9, F11: shapes the writer must refuse with rc 2, leaving the file unchanged.
+  local f
+  printf '[package]\nname = "g"\nversion.workspace = true\n' >"$tmp/f8a.toml"
+  printf '[lib]\npath = "x"\n' >"$tmp/f8b.toml"
+  printf '[package]\nname = "g"\n' >"$tmp/f8c.toml"
+  printf '[package]\nname = "g"\nversion = "0.1.0"\nversion = "0.1.0"\n' >"$tmp/f9.toml"
+  printf '[package]\nname = "g"\nversion = "0.1.0-rc.1"\n' >"$tmp/f11.toml"
+  for f in f8a f8b f8c f9 f11; do
+    before="$(cat "$tmp/$f.toml")"
+    _cpw "$f.toml" 0.2.0
+    [ "$rc" -eq 2 ] || { fail "self-test: $f must be refused with rc 2, got rc=$rc"; return 1; }
+    [ "$(cat "$tmp/$f.toml")" = "$before" ] || { fail "self-test: $f was changed although refused"; return 1; }
+  done
+
+  # F10: refuses to lower a version (rc 1), file unchanged.
+  printf '[package]\nname = "h"\nversion = "0.2.0"\n' >"$tmp/f10.toml"
+  _cpw f10.toml 0.1.0
+  [ "$rc" -eq 1 ] || { fail "self-test: F10 lowering must be rc 1, got rc=$rc"; return 1; }
+  _cpw_expect f10.toml '[package]\nname = "h"\nversion = "0.2.0"' || return 1
+
+  # F12: a multi-line description with a line that starts with "[" — never a wrong edit.
+  printf '[package]\nname = "i"\ndescription = """\n[not a table]\nversion = "5.5.5"\n"""\nversion = "0.1.0"\n' >"$tmp/f12.toml"
+  _cpw f12.toml 0.2.0
+  if [ "$rc" -eq 0 ]; then
+    _cpw_expect f12.toml '[package]\nname = "i"\ndescription = """\n[not a table]\nversion = "5.5.5"\n"""\nversion = "0.2.0"' || return 1
+  else
+    [ "$rc" -eq 2 ] || { fail "self-test: F12 must be a correct edit or rc 2, got rc=$rc"; return 1; }
+  fi
+
+  # F13: no trailing newline — none is added.
+  printf '[package]\nname = "j"\nversion = "0.1.0"' >"$tmp/f13.toml"
+  _cpw f13.toml 0.2.0
+  [ "$rc" -eq 0 ] || { fail "self-test: F13 rc=$rc"; return 1; }
+  [ "$(od -An -c "$tmp/f13.toml" | tr -d ' \n')" = "$(printf '[package]\nname = "j"\nversion = "0.2.0"' | od -An -c | tr -d ' \n')" ] \
+    || { fail "self-test: F13 changed the file end"; return 1; }
+
+  SELF_TESTS_RAN=$((SELF_TESTS_RAN + 1))
+}
+
 run_self_tests() {
   SELF_TESTS_RAN=0
   site_verdict_self_test
   lock_reader_self_test
+  cargo_package_writer_self_test
   [ "$SELF_TESTS_RAN" -eq "$SELF_TEST_COUNT" ] \
     || die_infra "self-tests ran $SELF_TESTS_RAN, expected $SELF_TEST_COUNT"
   printf '== version-lockstep self-tests passed (%d tables) ==\n' "$SELF_TESTS_RAN"
@@ -559,7 +664,66 @@ open(p, "w", encoding="utf-8").write(new)
 print(int(new != s))
 PY
       ;;
-    *) printf '0' ;;   # release-plz- and regeneration-owned kinds are not written here
+    cargo-package)
+      # SMA-685: the [package] version of a Cargo manifest, edited in place (no TOML
+      # round-trip, so no unrelated churn). release-plz 0.3.158 never writes the version of a
+      # crate whose Cargo manifest says `publish = false`, version_group or not (READ,
+      # updater.rs:283-302), so --write stamps those. stamp_sites decides WHICH sites; this arm
+      # only edits one file. It fails closed (rc 2) on any shape it does not understand, and it
+      # refuses to lower a version (rc 1).
+      python3 - "$abs" "$version" <<'PY'
+import re, sys, tomllib
+
+def fatal(msg):
+    print(f"FATAL: {msg}", file=sys.stderr); raise SystemExit(2)
+
+def plain(v, what):
+    m = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", v)
+    if m is None:
+        fatal(f"{what} version '{v}' is not plain X.Y.Z")
+    return tuple(int(x) for x in m.groups())
+
+p, v = sys.argv[1], sys.argv[2]
+head = plain(v, "head")
+raw = open(p, "rb").read()
+try:
+    s = raw.decode("utf-8")
+    old_doc = tomllib.loads(s)
+except Exception as e:
+    fatal(f"malformed {p}: {e}")
+hdrs = list(re.finditer(r"(?m)^[ \t]*\[package\][ \t]*(?:#[^\r\n]*)?\r?$", s))
+if len(hdrs) != 1:
+    fatal(f"{p}: expected one [package] table header, found {len(hdrs)}")
+start = hdrs[0].end()
+nxt = re.search(r"(?m)^[ \t]*\[", s[start:])
+end = start + nxt.start() if nxt else len(s)
+body = s[start:end]
+keys = list(re.finditer(r"(?m)^[ \t]*version[ \t]*[=.]", body))
+if len(keys) != 1:
+    fatal(f"{p}: expected one version key in [package], found {len(keys)}")
+vm = re.search(r'(?m)^([ \t]*version[ \t]*=[ \t]*")([^"\r\n]*)(")', body)
+if vm is None:
+    fatal(f"{p}: the [package] version is not a literal string")
+cur = plain(vm.group(2), "site")
+if cur > head:
+    print(f"FAIL: {p} is at {vm.group(2)}, higher than the head {v}; not lowered", file=sys.stderr)
+    raise SystemExit(1)
+if cur == head:
+    print(0); raise SystemExit(0)
+a, b = start + vm.start(2), start + vm.end(2)
+new = s[:a] + v + s[b:]
+try:
+    new_doc = tomllib.loads(new)
+except Exception as e:
+    fatal(f"{p}: the edit made invalid TOML: {e}")
+old_doc.setdefault("package", {})["version"] = v
+if new_doc != old_doc:
+    fatal(f"{p}: the edit changed more than package.version")
+open(p, "wb").write(new.encode("utf-8"))
+print(1)
+PY
+      ;;
+    *) printf '0' ;;   # regeneration-owned kinds (cargo-wsdep, the locks, the napi glue) are not written here
   esac
 }
 
