@@ -385,19 +385,56 @@ assert_console_pins() {
   # AbortSignal.timeout(<ms>), the HEALTHCHECK instruction must hold --timeout=<s>s, and the signal
   # must fire before Docker kills the probe. Without the signal, a server that accepts the
   # connection and never answers hangs the probe until Docker kills it, and only undici's 300 s
-  # headersTimeout bounds a `docker exec` of the same program.
-  local hc_line hc_line_rc=0 n_hc_line n_sig sig_ms hc_to_s
+  # headersTimeout bounds a `docker exec` of the same program. ts/Dockerfile must also hold exactly
+  # one HEALTHCHECK instruction (SMA-670 review finding 3): Docker obeys only the LAST one, and the
+  # read below always takes the FIRST, so a second instruction would check the wrong timeout.
+  local hc_line hc_line_rc=0 n_hc_line sig_grep sig_grep_rc=0 n_sig sig_ms
+  local hc_instr hc_instr_rc=0 n_hc_instr to_grep to_grep_rc=0 hc_to_s
   hc_line="$(grep -E '^RUN printf .*> /app/healthcheck\.mjs$' "$df")" || hc_line_rc=$?
   if [ "$hc_line_rc" -gt 1 ]; then
     echo "::error::assert_console_pins: grep exited ${hc_line_rc} on ts/Dockerfile; the healthcheck timeout check could not run." >&2
     return 1
   fi
   n_hc_line="$(printf '%s\n' "$hc_line" | grep -c .)" || n_hc_line=0
-  n_sig="$(printf '%s\n' "$hc_line" | grep -oE 'AbortSignal\.timeout\([0-9]+\)' | grep -c .)" || n_sig=0
+  # Each grep below is captured on its own, and its rc is read before the next one runs (SMA-670
+  # review finding 4): piping two greps together lets `pipefail` report the RIGHTMOST one's rc, so
+  # a real failure (rc > 1) in the first grep of the pair was silently folded into "no match".
+  sig_grep="$(printf '%s\n' "$hc_line" | grep -oE 'AbortSignal\.timeout\([0-9]+\)')" || sig_grep_rc=$?
+  if [ "$sig_grep_rc" -gt 1 ]; then
+    echo "::error::assert_console_pins: grep exited ${sig_grep_rc} on the healthcheck printf line; the healthcheck timeout check could not run." >&2
+    return 1
+  fi
+  n_sig="$(printf '%s\n' "$sig_grep" | grep -c .)" || n_sig=0
   sig_ms="$(printf '%s\n' "$hc_line" | sed -n 's/.*AbortSignal\.timeout(\([0-9][0-9]*\)).*/\1/p' | sed -n 1p)" || sig_ms=""
-  hc_to_s="$(grep -E '^[[:space:]]*HEALTHCHECK[[:space:]]' "$df" | grep -oE -- '--timeout=[0-9]+s' | sed -n 's/^--timeout=\([0-9]*\)s$/\1/p' | sed -n 1p)" || hc_to_s=""
+  hc_instr="$(grep -E '^[[:space:]]*HEALTHCHECK[[:space:]]' "$df")" || hc_instr_rc=$?
+  if [ "$hc_instr_rc" -gt 1 ]; then
+    echo "::error::assert_console_pins: grep exited ${hc_instr_rc} on ts/Dockerfile; the healthcheck timeout check could not run." >&2
+    return 1
+  fi
+  n_hc_instr="$(printf '%s\n' "$hc_instr" | grep -c .)" || n_hc_instr=0
+  if [ "$n_hc_instr" -ne 1 ]; then
+    echo "::error::ts/Dockerfile holds ${n_hc_instr} HEALTHCHECK instructions; exactly one is required, because Docker obeys only the LAST one and this check reads the FIRST." >&2
+    return 1
+  fi
+  to_grep="$(printf '%s\n' "$hc_instr" | grep -oE -- '--timeout=[0-9]+s')" || to_grep_rc=$?
+  if [ "$to_grep_rc" -gt 1 ]; then
+    echo "::error::assert_console_pins: grep exited ${to_grep_rc} on the HEALTHCHECK instruction; the healthcheck timeout check could not run." >&2
+    return 1
+  fi
+  hc_to_s="$(printf '%s\n' "$to_grep" | sed -n 's/^--timeout=\([0-9]*\)s$/\1/p' | sed -n 1p)" || hc_to_s=""
+  # SMA-670 review finding 1: refuse a --timeout value of more than 5 digits before it is read as
+  # an arithmetic operand, so the multiplication below cannot overflow. The same `case` also
+  # catches a LEADING ZERO (--timeout=08s): bash reads a leading 0 as an octal prefix, `08` is not
+  # a valid octal digit, and the bare `$((hc_to_s * 1000))` this replaces threw and aborted the
+  # whole script with no ::error:: line at all.
+  case "$hc_to_s" in
+    ??????*)
+      echo "::error::ts/Dockerfile's HEALTHCHECK --timeout=${hc_to_s}s has more than 5 digits, which is not a sane seconds value; the healthcheck timeout check could not run." >&2
+      return 1
+      ;;
+  esac
   if [ "$n_hc_line" -ne 1 ] || [ "$n_sig" -ne 1 ] || [ -z "$sig_ms" ] || [ -z "$hc_to_s" ] \
-    || [ "$sig_ms" -ge $((hc_to_s * 1000)) ]; then
+    || [ "$sig_ms" -ge $((10#$hc_to_s * 1000)) ]; then
     echo "::error::ts/Dockerfile's healthcheck.mjs fetch has no AbortSignal.timeout(<ms>) below the HEALTHCHECK --timeout (found: ${n_hc_line} healthcheck printf line(s), ${n_sig} signal(s), signal ${sig_ms:-<none>} ms, HEALTHCHECK --timeout ${hc_to_s:-<none>} s; only a --timeout=<N>s value in whole seconds is read); without it, a server that stops answering hangs the probe until Docker kills it." >&2
     return 1
   fi
@@ -1118,8 +1155,10 @@ console_node_version_row() {
 # starts with `.env` may be there outside node_modules: Next loads `.env*` from the server's own
 # directory at runtime, so a value in such a file is baked configuration. A dependency can ship an
 # `.env.example`, so a path with a node_modules directory in it is not reported. The walk still
-# counts those files, and a count under 100 means that it read the wrong tree (measured: 1367 files
-# in iam-console, 1324 in gateway-console).
+# counts those files, and a count under 100 means that it read the wrong tree. Both zones measure
+# well over 1000 files; the per-zone count moves with every dependency bump, so the floor is set
+# far below either zone's count rather than pinned to a value that goes stale (SMA-670 review
+# finding 5: an earlier comment named 1367 and 1324, and a later measurement already read 1353).
 console_image_config_row() {
   local app="$1" rc=0 env_out env_rc=0 keys key walk_out walk_rc=0 first n paths paths_rc=0
   local walk_js='
@@ -1196,8 +1235,12 @@ console.log(["walked=" + walked].concat(found).join("\n"));
 # console_smoke_cleanup and the EXIT trap remove the container.
 console_healthcheck_row() {
   local name="$1" app="$2" base_path="$3" deadline="$4" out hc_rc=0 start elapsed deadline_ok
+  # SMA-670 review finding 2: a `case` pattern of `??????*` also refuses 6-or-more digits (for
+  # example 99999999999999999999), never reaching `[ "$deadline" -lt 1 ]` on such a value. That
+  # comparison overflows bash's integer test, exits 2 (an error, not a true/false answer), and the
+  # `||` above it then read that 2 as "false" — so the huge deadline was ACCEPTED, fail-open.
   case "$deadline" in
-    ''|*[!0-9]*) deadline_ok=0 ;;
+    ''|*[!0-9]*|??????*) deadline_ok=0 ;;
     *) deadline_ok=1 ;;
   esac
   if [ "$deadline_ok" -eq 0 ] || [ "$deadline" -lt 1 ]; then

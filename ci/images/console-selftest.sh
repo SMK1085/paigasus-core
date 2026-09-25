@@ -125,14 +125,17 @@ done
 
 # --- static rows (assert_console_pins) ---------------------------------------------------------
 # run_pins <row> <root> <want_rc> <present> — the production shape: a plain command under
-# `set -euo pipefail`, with errexit ON inside the function.
+# `set -euo pipefail`, with errexit ON inside the function. PINS_PATH_EXTRA, when set, goes ahead
+# of PATH inside the subshell only — the S6g row uses it to put a stub `grep` in front of the real
+# one, without touching any other row's PATH.
+PINS_PATH_EXTRA=""
 run_pins() {
   local row="$1" root="$2" want_rc="$3" present="$4" rc o e
   o="$T/$row.out"
   e="$T/$row.err"
   set +e
   # shellcheck disable=SC2034 # ROOT is read by the function under test.
-  ( ROOT="$root"; set -euo pipefail; assert_console_pins ) >"$o" 2>"$e"
+  ( PATH="${PINS_PATH_EXTRA:+$PINS_PATH_EXTRA:}$PATH"; ROOT="$root"; set -euo pipefail; assert_console_pins ) >"$o" 2>"$e"
   rc=$?
   set -e
   check_row "$row" "$rc" "$want_rc" "$present" "" "$o" "$e"
@@ -251,6 +254,46 @@ pins_mut S6b 1 'no AbortSignal.timeout'
 mk_tree S6c
 sed_df S6c 's/--timeout=3s/--timeout=3000ms/'
 pins_mut S6c 1 'HEALTHCHECK --timeout <none> s'
+
+# S6d (SMA-670 review finding 1): a LEADING ZERO in --timeout must not make bash read the value as
+# octal. --timeout=08s is a valid, larger-than-the-signal timeout (8000 ms > the 2500 ms signal),
+# so the row must PASS.
+mk_tree S6d
+sed_df S6d 's/--timeout=3s/--timeout=08s/'
+pins_mut S6d 0 ""
+
+# S6e (SMA-670 review finding 1): a --timeout value of more than 5 digits must be refused before
+# it is read as an arithmetic operand, so the multiplication cannot overflow.
+mk_tree S6e
+sed_df S6e 's/--timeout=3s/--timeout=999999s/'
+pins_mut S6e 1 'more than 5 digits'
+
+# S6f (SMA-670 review finding 3): exactly one HEALTHCHECK instruction is required. Docker obeys
+# only the LAST one; the read above always takes the FIRST, so a second instruction must red
+# rather than silently check the wrong timeout.
+mk_tree S6f
+append_df S6f 'HEALTHCHECK --timeout=1s CMD ["/nodejs/bin/node", "/app/healthcheck.mjs"]'
+pins_mut S6f 1 'exactly one is required'
+
+# S6g (SMA-670 review finding 4): a grep rc > 1 (grep itself could not run) inside the hc_to_s
+# pipeline must get its own "could not run" ::error::, not fold into "<none>". A stub `grep` ahead
+# of the real one on PATH execs the real binary for every pattern except the HEALTHCHECK
+# --timeout= one, which it always fails with rc 2 — so every earlier check in assert_console_pins
+# still runs normally on the real ts/Dockerfile, and only the pipeline this row targets sees a
+# broken grep. Built with `printf`, not a heredoc, for the same reason as the docker stub below.
+REAL_GREP="$(command -v grep)" || infra "no system grep on PATH"
+mkdir -p "$T/stub-grep-to"
+{
+  printf '%s\n' '#!/usr/bin/env bash'
+  printf '%s\n' 'case "$*" in'
+  printf '%s\n' '  *--timeout=*) exit 2 ;;'
+  printf '%s\n' 'esac'
+  printf '%s\n' "exec '${REAL_GREP}' \"\$@\""
+} > "$T/stub-grep-to/grep"
+chmod +x "$T/stub-grep-to/grep"
+PINS_PATH_EXTRA="$T/stub-grep-to"
+run_pins S6g "$REPO" 1 "healthcheck timeout check could not run"
+PINS_PATH_EXTRA=""
 
 # --- the real fetch timeout (F0, F1) -----------------------------------------------------------
 # The rendered healthcheck.mjs runs in the RUNTIME image that the runtime FROM line names, digest
@@ -529,6 +572,12 @@ stub_reset
 run_fn H4 1 "positive integer" "" none console_healthcheck_row smoke-selftest iam-console /iam abc
 stub_reset
 run_fn H5 1 "positive integer" "" none console_healthcheck_row smoke-selftest iam-console /iam 0
+# H6 (SMA-670 review finding 2): a deadline of more than 5 digits must be refused by the `case`
+# itself, before `[ "$deadline" -lt 1 ]` ever runs on it. That comparison overflows bash's integer
+# test on a value this size, exits 2 (an error, not a verdict), and the `||` above it then read
+# that 2 as "false" — so this huge deadline was ACCEPTED and docker was called, fail-open.
+stub_reset
+run_fn H6 1 "positive integer" "" none console_healthcheck_row smoke-selftest iam-console /iam 99999999999999999999
 
 # shellcheck disable=SC2016 # the pinned call lines are literal text
 pin_rows P1c "$T/fn-smoke_consoles.sh" 'console_healthcheck_row "$name" "$app" "$base_path" "$CONSOLE_HC_DEADLINE" || ec=1'

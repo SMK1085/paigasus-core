@@ -350,7 +350,8 @@ image has the same shape as the Rust service images:
   holds the probe until Docker kills it. `assert_console_pins` fails if the `printf` line that
   writes the file does not hold exactly one `AbortSignal.timeout(<ms>)`. It also fails if that
   value is not less than the `HEALTHCHECK --timeout`. It reads only a `--timeout=<N>s` value in
-  whole seconds.
+  whole seconds, of at most 5 digits. `ts/Dockerfile` must hold exactly one `HEALTHCHECK`
+  instruction. Docker obeys only the last one, and this check always reads the first.
 - **`smoke_consoles` runs the healthcheck file in the running container, with a deadline.** It
   uses `docker exec` and the image's own node, under `with_deadline` with `CONSOLE_HC_DEADLINE`
   (20 s). It fails if the file exits with a code that is not 0. It reports a timeout only when the
