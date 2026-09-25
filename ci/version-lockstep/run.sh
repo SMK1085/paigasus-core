@@ -407,6 +407,18 @@ s, n = re.subn(r'(?m)^version = "[^"]*"$', 'version = "9.9.9"', s, count=1)
 assert n == 1, "no kernel version line"
 open(p, "w", encoding="utf-8").write(s)
 PY
+  # Move the proto head to a SECOND, different sentinel. paigasus-proto-derive is a publishable
+  # (not publish = false) non-head cargo-package site, already at the same version as the proto
+  # head in the real tree — so without this second, distinct sentinel, a mutation that deletes
+  # the publish = false filter would still leave derive_before == derive_after by coincidence,
+  # and this table would not catch it.
+  python3 - "$tmp/rs/crates/libs/paigasus-proto/Cargo.toml" <<'PY'
+import re, sys
+p = sys.argv[1]; s = open(p, encoding="utf-8").read()
+s, n = re.subn(r'(?m)^version = "[^"]*"$', 'version = "8.8.8"', s, count=1)
+assert n == 1, "no proto version line"
+open(p, "w", encoding="utf-8").write(s)
+PY
   REPO_ROOT="$tmp" stamp_sites >/dev/null || rc=$?
   [ "$rc" -eq 0 ] || { fail "self-test: stamp_sites on the staged tree returned $rc"; return 1; }
   for entry in "${SITES[@]}"; do
@@ -415,6 +427,13 @@ PY
     case "$kind" in cargo-package|pyproject|pyproject-dep|packagejson) ;; *) continue ;; esac
     got="$(REPO_ROOT="$tmp" read_version "$kind" "$target" "$group")" || return 2
     [ "$got" = "9.9.9" ] || { fail "self-test: stamp_sites left $kind $target at '$got', expected 9.9.9"; return 1; }
+  done
+  for entry in "${SITES[@]}"; do
+    IFS='|' read -r group kind target <<<"$entry"
+    [ "$group" = proto ] || continue
+    case "$kind" in pyproject|pyproject-dep|packagejson) ;; *) continue ;; esac
+    got="$(REPO_ROOT="$tmp" read_version "$kind" "$target" "$group")" || return 2
+    [ "$got" = "8.8.8" ] || { fail "self-test: stamp_sites left $kind $target at '$got', expected 8.8.8"; return 1; }
   done
   derive_after="$(REPO_ROOT="$tmp" read_version cargo-package rs/crates/libs/paigasus-proto-derive/Cargo.toml)" || return 2
   [ "$derive_before" = "$derive_after" ] \
