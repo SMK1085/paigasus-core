@@ -169,14 +169,18 @@ jobs:
       - name: Console image self-test
         run: ci/images/console-selftest.sh
 
-      # SMA-688 (spec section 5.3). This step runs the console RELEASE sequence. It is the same
-      # sequence that release.yml runs for each images-build-<key> job: build the OCI archive,
-      # load it, check its identity, smoke it, take its SBOM, and check the SBOM floor. This
-      # workflow builds two console keys here: iam-console and gateway-console. The step runs on
-      # each pull request that changes a console's package.json or ci/images/**. A pull request
-      # leg builds only the amd64 archive. Start this workflow by hand on the branch to get the
-      # arm64 leg (spec R1). The "Build + smoke both consoles" step below still runs. It smokes
-      # the build-console path only.
+      # SMA-688 (spec section 5.3). This step runs the console RELEASE sequence. It matches the
+      # sequence that release.yml runs for each images-build-<key> job. The sequence has six
+      # actions. It builds the OCI archive, loads it, and checks its identity. It then smokes the
+      # image, takes its SBOM, and checks the SBOM floor.
+      #
+      # This workflow builds two console keys here: iam-console and gateway-console. The step
+      # runs on each pull request that changes a console's package.json or ci/images/**. A pull
+      # request leg builds only the amd64 archive. Start this workflow by hand on the branch to
+      # get the arm64 leg (spec R1).
+      #
+      # The "Build + smoke both consoles" step below still runs. It smokes the build-console path
+      # only.
       - name: Console release sequence
         run: |
           set -euo pipefail
