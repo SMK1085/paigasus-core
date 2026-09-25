@@ -65,9 +65,8 @@ crate_for() {
 }
 
 # SMA-688: every release key, mapped ONCE. A key is a chain key of ci/images/chains.toml. This
-# file keeps its own bash table on purpose (spec § 4.1): images.yml runs build-oci for every key
-# on each pull request that changes ci/images/**, so a key that the registry names and this
-# table does not know fails that pull request.
+# file keeps its own bash table on purpose (spec § 4.1). A key that the registry names and this
+# table does not know fails kind_for_key, and so fails build-oci and smoke for that key.
 kind_for_key() {
   case "$1" in
     iam|gateway) echo cargo ;;
