@@ -1458,11 +1458,15 @@ smoke_consoles() {
       fi
     fi
 
-    # Step 4: the other zone's prefix does not serve it. This proves ONLY that a basePath is in
-    # effect in this one container. It does NOT prove the two zones' assets do not collide:
+    # Step 4: the other zone's prefix does not serve it. SMA-513 acceptance criterion 3 has two
+    # halves (SMA-670 spec § 4.4). Steps 2 to 4 of this smoke test prove the PER-IMAGE half
+    # (SMA-513 spec D4): each zone emits its asset URLs under its own basePath and serves them
+    # there. This step alone proves only that a basePath is in effect in this one container:
     # MEASURED on iam-console:dev, the real chunk also 404s under /zzz/… and with no prefix at all,
-    # so any unknown prefix gives this result. The real acceptance-criterion-3 proof needs both
-    # zones behind one ingress, and belongs to that ingress (SMA-513 PR 2a), not to this row.
+    # so any unknown prefix gives this result, and this step does not prove that the two zones'
+    # assets do not collide. The ONE-ORIGIN half is kind row R2
+    # (ts/apps/iam-console/tests/cluster/phase-a/cross-zone.spec.ts): both zones hydrate through
+    # one Traefik ingress.
     # GUARDED: `curl` without -f still exits non-zero on a connection failure or a timeout, and an
     # unguarded capture would abort the script before the named message.
     if [ "$bad" -eq 0 ]; then
@@ -1475,7 +1479,7 @@ smoke_consoles() {
         echo "::error::${app}: ${other} also served the chunk (HTTP ${code}); the chunk is served outside ${base_path}, so no basePath is in effect." >&2
         ec=1
       else
-        echo "  ${app}: serves ${chunk} (${bytes} bytes), 404 under ${other} (a basePath is in effect; cross-zone collision is NOT checked here — that needs the ingress)"
+        echo "  ${app}: serves ${chunk} (${bytes} bytes), 404 under ${other} (a basePath is in effect: the per-image half of AC 3; the one-origin half is kind row R2, cross-zone.spec.ts)"
       fi
     fi
 
