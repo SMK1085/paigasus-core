@@ -373,8 +373,8 @@ async function bestEffortRevoke(runtime: AuthRuntime, refreshToken: string): Pro
 // or unreachable identity provider can never leave a live session behind: whatever happens to
 // steps 3-4 afterwards, the record this cookie pointed at is already gone. The `store.get` read
 // below is a local store lookup, not a call to the identity provider — the ordering this protects
-// is against the IdP specifically, and it is what step 1's own record-lookup needs to find a
-// refresh token worth revoking in step 3.
+// is against the IdP specifically, and step 1's own record-lookup finds the refresh token for
+// step 3 and the ID token for step 4.
 //
 // `id_token_hint` IS SENT WHEN THE RECORD HOLDS AN ID TOKEN (SMA-681). This reverses SMA-506.
 // SMA-506 (design doc § 9.5) did not store the raw ID token. It argued that `client_id` plus a
@@ -418,8 +418,8 @@ async function handleLogout(runtime: AuthRuntime, req: Request): Promise<Respons
 
   // STEP 1: delete first, before any network call.
   //
-  // The read only finds a refresh token worth revoking in step 3. Its failure must NEVER cost the
-  // delete (SMA-653 D5): a failed read leaves `refreshToken` undefined, and the delete still runs.
+  // The read finds the refresh token for step 3 and the ID token for step 4.
+  // Its failure must NEVER cost the delete (SMA-653 D5): a failed read leaves `refreshToken` undefined, and the delete still runs.
   // That rescues a TRANSIENT failure. During a real wedge the read opens the SMA-651 circuit, the
   // circuit then refuses the delete at once, and the delete branch below answers 503 — the usual
   // outcome of a wedge (spec § 4 row 8).
