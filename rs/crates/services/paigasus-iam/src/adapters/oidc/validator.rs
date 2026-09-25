@@ -193,6 +193,14 @@ fn check_access_token_type(issuer: &Issuer, claims: &WireClaims) -> Result<(), A
     }
 }
 
+/// Logs a refused token whose `aud` holds none of the accepted audiences (SMA-686 R2, spec D11).
+/// Only a correctly signed token reaches this: `jsonwebtoken` verifies the signature before it
+/// validates `aud`. Logs the issuer and the CONFIGURED audiences only — never the token's own
+/// `aud` or any other claim (the operator decodes the token for that, RUNBOOK-chart.md § 6).
+fn log_audience_mismatch(issuer: &Issuer, accepted: &[String]) {
+    tracing::info!(issuer = issuer.as_str(), accepted = ?accepted, "refused a bearer token: its aud claim holds none of the accepted audiences");
+}
+
 #[async_trait]
 impl<F: JwksFetcher, K: JwksCache, C: Clock> Authenticator for OidcAuthenticator<F, K, C> {
     async fn authenticate(&self, token: &str) -> Result<ValidatedClaims, AuthnError> {
@@ -226,7 +234,13 @@ impl<F: JwksFetcher, K: JwksCache, C: Clock> Authenticator for OidcAuthenticator
         validation.leeway = self.leeway_secs;
         validation.validate_nbf = true;
 
-        let token_data = decode::<WireClaims>(token, &decoding_key, &validation).map_err(map_jwt_error)?;
+        let token_data = decode::<WireClaims>(token, &decoding_key, &validation).map_err(|err| {
+            let err = map_jwt_error(err);
+            if matches!(err, AuthnError::InvalidToken(TokenDefect::AudienceMismatch)) {
+                log_audience_mismatch(&issuer, &issuer_config.audiences);
+            }
+            err
+        })?;
 
         // 6. Token-type check on the verified claims (SMA-686): a Keycloak ID or logout token.
         check_access_token_type(&issuer, &token_data.claims)?;
@@ -740,5 +754,40 @@ mod tests {
         for secret in ["sub-1", "alice@example.com", "\"id\""] {
             assert!(!text.contains(secret), "the log must not contain {secret:?}:\n{text}");
         }
+    }
+
+    #[tokio::test]
+    async fn audience_mismatch_logs_issuer_and_accepted_audiences_only() {
+        // SMA-686 R2 / spec D11: the runbook tells operators a wrong audience shows in the IAM
+        // log. One info line with the issuer and the CONFIGURED audiences — never the token's aud.
+        let (logs, _guard) = capture_logs();
+        let err = authenticate_json(&claims_with(serde_json::json!({ "aud": "token-aud-xyz" }))).await.unwrap_err();
+        assert!(matches!(err, AuthnError::InvalidToken(TokenDefect::AudienceMismatch)), "got {err:?}");
+
+        let text = logs.text();
+        let lines: Vec<&str> = text.lines().filter(|line| line.contains("holds none of the accepted audiences")).collect();
+        assert_eq!(lines.len(), 1, "exactly one audience-mismatch line expected, got:\n{text}");
+        let line = lines[0];
+        assert!(line.contains("INFO"), "logs at info: {line}");
+        assert!(line.contains(ISSUER), "names the issuer: {line}");
+        assert!(line.contains("\"aud\""), "names the configured audience: {line}");
+        for secret in ["token-aud-xyz", "sub-1", "alice@example.com"] {
+            assert!(!text.contains(secret), "the log must not contain {secret:?}:\n{text}");
+        }
+    }
+
+    #[tokio::test]
+    async fn bad_signature_with_wrong_audience_logs_nothing() {
+        // Spec D11 flood safety: jsonwebtoken verifies the signature before `aud`, so a forged
+        // token with a wrong aud is BadSignature and never reaches the audience log line.
+        let (logs, _guard) = capture_logs();
+        let (signing_key, _jwk_a, kid) = es256_keypair();
+        let (_other_key, served_jwk, _kid_b) = es256_keypair();
+        let token = sign(&signing_key, Some(&kid), &claims_with(serde_json::json!({ "aud": "token-aud-xyz" })));
+        let authenticator = make_authenticator(StubFetcher::new(served_jwk), vec![issuer_config(ISSUER, &["aud"])], 60, 16_384);
+
+        let err = authenticator.authenticate(&token).await.unwrap_err();
+        assert!(matches!(err, AuthnError::InvalidToken(TokenDefect::BadSignature)), "got {err:?}");
+        assert!(!logs.text().contains("accepted audiences"), "a forged token must not reach the audience log:\n{}", logs.text());
     }
 }

@@ -103,8 +103,9 @@ late and unclearly. Check these four items before you install:
    value, decode a real access token and read its `aud` claim. The value helps only when the IdP
    issues a JWT access token for the console's scopes (`openid profile email offline_access`).
    The console sends no `audience` or `resource` parameter. This value does not work with an
-   opaque token, or a token for a different API. A wrong audience shows as a refused token in
-   the IAM log (`ci/kind/README.md`, "Where to look first").
+   opaque token, or a token for a different API. A wrong audience shows in the IAM log at `info`,
+   with the issuer and the accepted audiences
+   (`ci/kind/README.md`, "Where to look first"). The log does not show the token's `aud`.
 2. **Email.** The access token must carry an `email` claim. IAM creates the principal on the first
    login from it.
 3. **Algorithm.** The token must be signed with RS256 or ES256, and its header must carry a `kid`.

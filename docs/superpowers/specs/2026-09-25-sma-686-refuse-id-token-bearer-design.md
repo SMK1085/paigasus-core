@@ -69,6 +69,7 @@ Conclusions:
 | D8 | The validator logs the refusal once, at `info`, with the issuer and the matched value as a static string (`"ID"` or `"Logout"`). It logs no other claim and no token material. | Today nothing logs an `InvalidToken` defect: the two funnels log only `Backend`, and the middleware and the validator do not log. An operator who gets 401s must be able to see why. The level is `info` because the default `log_level` is `info`. Only a correctly signed token from a configured issuer reaches this line, so an unauthenticated caller cannot flood the log with it. |
 | D9 | The check applies to every configured issuer and every audience configuration. There is no switch. | No measured access token has a marker (§ 2), so an operator who set `oidc.audience` (SMA-678) sees no change. A switch adds configuration with no known use (YAGNI). |
 | D10 | No Notion ADR. | Sven chose this on 2026-09-25. The change hardens one check and changes no interface. The decision is recorded here and in the validator doc comment. |
+| D11 | The validator logs an `AudienceMismatch` once, at `info`, with the issuer and the CONFIGURED audiences. It logs no token claim. No other defect is logged. | Sven chose on 2026-09-25 to fold R2 into this PR. The runbook and `ci/kind/README.md` told operators this line exists. `jsonwebtoken` 11.1.0 verifies the signature (`decoding.rs:284`) before `aud` (`decoding.rs:288`), so only a signed token reaches it. `Expired` stays unlogged: every stale client token would write a line. |
 
 ## 4. Change
 
@@ -221,9 +222,7 @@ record the run URL in the PR body. That run is the AC2 proof for the kind realm.
   configuration, their ID token still passes when its `aud` contains the client id. The runbook
   tells the operator to use `oidc.audience`. For Dex, the access token and the ID token have the
   same `aud`, so that remedy does not work either.
-- **R2: The runbook and `ci/kind/README.md:65` say a wrong audience shows in the IAM log.** No code
-  logs `AudienceMismatch` (challenge finding). D8 logs only the new refusal. Fixing the audience
-  log claim is a separate issue.
+- **R2: folded in (D11).** The runbook and `ci/kind/README.md` said a wrong audience shows in the IAM log, and no code logged it. D11 adds the line.
 - **R3: Other Keycloak token types.** The refresh token is HS512, so the algorithm allowlist
   (`validator.rs:26`) already refuses it. No other Keycloak JWT type was measured.
 
@@ -234,7 +233,7 @@ Challenger: `feature-factory:spec-challenger` (Opus), 2026-09-25. Verdict: NEEDS
 | Finding | Severity | Action |
 |---|---|---|
 | D1 not proven outside Keycloak; `at_hash` probably refuses every Dex access token | BLOCKER | Measured Dex v2.45.1: confirmed. Sven chose "Keycloak `typ` only". D1, D2, D3 rewritten. |
-| Nothing logs the refusal; the runbook log claim is false | MAJOR | Folded in: D8 adds one `info` line and test 12. The same false claim for `aud` is R2. |
+| Nothing logs the refusal; the runbook log claim is false | MAJOR | Folded in: D8 adds one `info` line and test 12. The same false claim for `aud` was R2, later folded in as D11. |
 | The integration test cannot show which check caused the 401 | MAJOR | Folded in: § 5.2 asserts the defect through `state.authn`. |
 | The kind journeys do not run on this PR, so AC2 is not covered | MAJOR | Folded in: § 7, a manual `chart.yml` run. |
 | The § 5.3 mutation does not compile under `warnings = "deny"` | MAJOR | Folded in: the `let _ =` mutation. |
