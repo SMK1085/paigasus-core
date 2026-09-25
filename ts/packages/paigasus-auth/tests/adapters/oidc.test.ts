@@ -223,15 +223,15 @@ describe('createOidcClient — refresh and the ID token (SMA-681)', () => {
     const minted = await fixture.mintIdToken({ sub: 'refreshed-subject' });
     fixture.setNextIdToken(minted);
     const refreshed = await makeClient().refresh('some-refresh-token');
-    expect(refreshed.idToken).toBe(minted);
-    expect(refreshed.idTokenClaims?.sub).toBe('refreshed-subject');
-    expect(refreshed.idTokenClaims?.iss).toBe(fixture.issuer);
+    expect(refreshed.rotatedIdToken?.token).toBe(minted);
+    expect(refreshed.rotatedIdToken?.claims.sub).toBe('refreshed-subject');
+    expect(refreshed.rotatedIdToken?.claims.iss).toBe(fixture.issuer);
   });
 
-  it('returns neither field when the refresh response carries no id_token', async () => {
+  it('returns no rotatedIdToken when the refresh response carries no id_token', async () => {
     const refreshed = await makeClient().refresh('some-refresh-token');
+    expect(refreshed).not.toHaveProperty('rotatedIdToken');
     expect(refreshed).not.toHaveProperty('idToken');
-    expect(refreshed).not.toHaveProperty('idTokenClaims');
   });
 
   // A GUARD, not red-first: openid-client's non-repudiation hook runs on every refresh response

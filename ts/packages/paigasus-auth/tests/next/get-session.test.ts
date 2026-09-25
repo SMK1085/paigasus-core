@@ -72,6 +72,7 @@ function baseRuntime(store: SessionStore): AuthRuntime {
     publicOrigin: 'https://app.example.com',
     redirectUri: 'https://app.example.com/iam/auth/callback',
     postLogoutRedirectUri: 'https://app.example.com/iam/',
+    clientId: 'paigasus-console',
     cookieDomainless: true,
     skewMs: 30_000,
     lockTtlMs: 10_000,
@@ -160,6 +161,32 @@ describe('getSession', () => {
     expect(events).toContainEqual(['session.refresh_failed', { sid: sidTag('sid-needs-refresh'), reason: 'transient', degraded: false }]);
     expect(events).toContainEqual(['session.resolve_failed', { sid: sidTag('sid-needs-refresh'), stage: 'get_session' }]);
     expect(events.some(([name]) => name === 'store.unavailable')).toBe(false);
+  });
+
+  // SMA-681 D6. getSession must hand resolveSession the runtime's real `revoke`: on an ID-token
+  // mismatch nothing else revokes the refresh tokens. A no-op `revoke` there reds this test.
+  it('revokes through runtime.oidc and returns null when a refreshed ID token names another subject', async () => {
+    cookiesMock.mockResolvedValue(cookieJar('sid-mismatch'));
+    const store = new MemorySessionStore();
+    await store.set('sid-mismatch', { ...liveRecord(), accessExpiresAt: Date.now() - 1, refreshToken: 'RT-old' }, 999_000, null);
+    const revoked: string[] = [];
+    const runtime = {
+      ...baseRuntime(store),
+      oidc: {
+        ...unusedOidc(),
+        refresh: () =>
+          Promise.resolve({ accessToken: 'AT2', refreshToken: 'RT-new', expiresIn: 300, rotatedIdToken: { token: 'IDT-other', claims: { iss: 'https://idp.example.com', sub: 'someone-else' } } }),
+        revoke: (token: string) => {
+          revoked.push(token);
+          return Promise.resolve();
+        },
+      },
+    };
+
+    await expect(getSession(runtime)).resolves.toBeNull();
+
+    expect(revoked).toEqual(['RT-new', 'RT-old']);
+    expect(await store.get('sid-mismatch')).toBeNull();
   });
 });
 

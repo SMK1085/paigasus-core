@@ -19,11 +19,15 @@ export interface SessionRecord {
    * OPERATIONAL CONSEQUENCE: the deploy that bumps this logs out every active user. Say so in
    * the release note.
    *
-   * Version 2 (SMA-681) added the required `idToken`. A bump has two more costs. During a rolling
-   * update, old and new pods read each other's records as absent and delete them, so a user can
+   * Version 2 (SMA-681) added the required `idToken`. A bump has three more costs. During a rolling
+   * update, old and new pods read each other's records as absent and delete them. A user can then
    * see a login loop until the rollout ends. A rollback forces a second logout. Both zones default
    * their image tag to `.Chart.AppVersion` (charts/paigasus/values.yaml), so the mixed state lasts
-   * only for the rollout. No deployment existed on 2026-09-25 (spec § 4.1).
+   * only for the rollout. After the deploy, a logout or any other read of a version 1 record
+   * deletes it before its refresh token can be revoked (http/routes.ts reads no token from it).
+   * That refresh token stays valid at the IdP until its idle timeout. Under the default scope
+   * (`offline_access`, config.ts) it is an offline token. No deployment existed on 2026-09-25
+   * (spec § 4.1).
    */
   version: 2;
   /**

@@ -13,20 +13,21 @@ export interface RefreshedTokens {
   refreshToken?: string;
   expiresIn: number; // seconds
   /**
-   * SMA-681. Both are set, or neither: only when the refresh response carries an ID token.
-   * adapters/oidc.ts validates the token itself. resolveSession compares its `iss` and `sub` with
-   * the login claims.
+   * SMA-681. Set only when the refresh response carries an ID token. One field, so the token and
+   * its claims are both present or both absent. adapters/oidc.ts validates the token itself.
+   * resolveSession compares its `iss` and `sub` with the login claims.
    */
-  idToken?: string;
-  idTokenClaims?: IdTokenClaims;
+  rotatedIdToken?: { token: string; claims: IdTokenClaims };
 }
 
 export interface ResolveDeps {
   store: SessionStore;
   refresh: (refreshToken: string) => Promise<RefreshedTokens>;
   /**
-   * RFC 7009 revocation (SMA-681). Called only on the ID-token-mismatch path, for the NEW refresh
-   * token that the refresh just issued. Best effort: a rejection is swallowed.
+   * RFC 7009 revocation (SMA-681). Called only for a refresh token that no record will hold: on the
+   * ID-token-mismatch path (the new and the old token), and after a successful refresh whose
+   * write returns null (the new token). Best effort: a rejection or a synchronous throw is
+   * swallowed. It runs after the lock is released, never under it.
    */
   revoke: (token: string) => Promise<void>;
   logger: AuthLogger;
@@ -51,6 +52,22 @@ export interface ResolveDeps {
 export type ResolvedSession = SessionRecord & { refreshState?: 'pending' | 'failed' };
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * SMA-681. Revoke each token once, in parallel, best effort. `await` inside `try` also catches a
+ * `revoke` that throws synchronously, which `.catch` on its result would not. Never throws.
+ */
+async function revokeAll(revoke: ResolveDeps['revoke'], tokens: ReadonlySet<string>): Promise<void> {
+  await Promise.all(
+    [...tokens].map(async (token) => {
+      try {
+        await revoke(token);
+      } catch {
+        // Best effort. Never logged: the error may embed a URL (adapters/oidc.ts's rule).
+      }
+    }),
+  );
+}
 
 /** Exponential with jitter. A fixed backoff synchronises every waiter onto the same wake-up. */
 const backoff = (attempt: number): number => Math.min(25 * 2 ** attempt, 250) * (0.5 + Math.random());
@@ -125,6 +142,10 @@ export async function resolveSession(deps: ResolveDeps, sid: string): Promise<Re
 
   for (let attempt = 0; ; attempt += 1) {
     if (await store.tryAcquireLock(sid, lockToken, lockTtlMs)) {
+      // SMA-681. Refresh tokens that no record will hold. The `finally` below revokes them after it
+      // releases the lock: runtime.ts invariant 3 budgets only the refresh's own two HTTP calls
+      // inside the lock TTL, and a revoke is a third IdP call.
+      const orphaned = new Set<string>();
       try {
         const fresh = await store.get(sid);
         if (fresh === null) return null; // concurrent logout
@@ -207,28 +228,28 @@ export async function resolveSession(deps: ResolveDeps, sid: string): Promise<Re
         //
         // A MISMATCH is a definitive refresh failure, with the shape of the refresh_rejected branch
         // above. Nothing is written: the record would join the login principal with an access
-        // token issued for a different subject. The delete runs first, then the revoke of the NEW
-        // refresh token, best effort. The revoke is in `finally`, so a failed delete still revokes
-        // it: nothing else would ever revoke that token. A failed delete then propagates, as it
-        // does on the refresh_rejected path. Neither event carries a token.
+        // token issued for a different subject. The delete runs first. The NEW refresh token and
+        // the record's OLD one are revoked after the lock is released, best effort. The old one
+        // matters for an IdP that does not rotate: it is then still valid. Both are queued before
+        // the delete, so a failed delete still revokes them: nothing else would ever revoke them.
+        // A failed delete then propagates, as it does on the refresh_rejected path. Neither event
+        // carries a token.
         //
         // `idTokenClaims` never changes here (spec § 4.1): the principal and the display name read
         // the login claims, and only logout reads `idToken`.
         let idToken = fresh.idToken;
         let idTokenRotated = false;
-        if (tokens.idToken !== undefined && tokens.idTokenClaims !== undefined) {
-          if (tokens.idTokenClaims.iss !== fresh.idTokenClaims.iss || tokens.idTokenClaims.sub !== fresh.idTokenClaims.sub) {
+        const rotated = tokens.rotatedIdToken;
+        if (rotated !== undefined) {
+          if (rotated.claims.iss !== fresh.idTokenClaims.iss || rotated.claims.sub !== fresh.idTokenClaims.sub) {
             logger.event('session.refresh.id_token_mismatch', { sid: sidTag(sid) });
-            const newRefreshToken = tokens.refreshToken;
-            try {
-              await store.delete(sid);
-              logger.event('session.deleted', { sid: sidTag(sid), reason: 'id_token_mismatch' });
-            } finally {
-              if (newRefreshToken !== undefined) await revoke(newRefreshToken).catch(() => undefined);
-            }
+            if (tokens.refreshToken !== undefined) orphaned.add(tokens.refreshToken);
+            orphaned.add(refreshToken); // a Set: an IdP that repeats the old token gets one revoke
+            await store.delete(sid);
+            logger.event('session.deleted', { sid: sidTag(sid), reason: 'id_token_mismatch' });
             return null;
           }
-          idToken = tokens.idToken;
+          idToken = rotated.token;
           idTokenRotated = true;
         }
 
@@ -242,12 +263,21 @@ export async function resolveSession(deps: ResolveDeps, sid: string): Promise<Re
           idToken,
         };
 
+        // SMA-681. On the two branches below that return null, the IdP has issued a refresh token
+        // that no record holds. A token equal to the old one is not new, so it is not revoked.
+        const orphanNewRefreshToken = (): void => {
+          if (tokens.refreshToken !== undefined && tokens.refreshToken !== refreshToken) orphaned.add(tokens.refreshToken);
+        };
+
         // Invariant 5 / F1. See the function doc for the three cases a `false` here can mean.
         let written: SessionRecord = next;
         let ok = await store.set(sid, next, ttlMs, fresh.rev);
         if (!ok) {
           const winner = await store.get(sid);
-          if (winner === null) return null; // logout resurrection guard — never re-insert
+          if (winner === null) {
+            orphanNewRefreshToken();
+            return null; // logout resurrection guard — never re-insert
+          }
           if (winner.rev !== fresh.rev) return winner; // another writer already owns it
           // winner.rev === fresh.rev: unchanged state, a genuine write failure. Retry once.
           written = { ...next, rev: winner.rev + 1 };
@@ -256,6 +286,7 @@ export async function resolveSession(deps: ResolveDeps, sid: string): Promise<Re
         if (!ok) {
           // Retried once and still could not persist. A clean re-login beats a session that can
           // never refresh again, so delete rather than leave the revoked token in place.
+          orphanNewRefreshToken(); // before the delete, so a failed delete still revokes it
           await store.delete(sid);
           logger.event('session.refresh.persist_failed', { sid: sidTag(sid) });
           return null;
@@ -274,6 +305,9 @@ export async function resolveSession(deps: ResolveDeps, sid: string): Promise<Re
         } catch {
           logger.event('store.unavailable', { sid: sidTag(sid), stage: 'release_lock' satisfies StoreUnavailableStage });
         }
+        // SMA-681: after the release, and awaited, so they finish before resolveSession returns.
+        // revokeAll never throws, so it cannot replace the try block's own outcome.
+        if (orphaned.size > 0) await revokeAll(revoke, orphaned);
       }
     }
 

@@ -58,6 +58,10 @@ test('R3: a first-time identity that IAM has never seen lands on the same screen
 });
 
 test('R12: sign out posts /iam/auth/logout, and /iam/orgs then redirects to login again (AC 1)', async ({ page, harness }) => {
+  // The fake IdP's arrays are worker-scoped, so earlier tests left entries in them. Only the entries
+  // added after these marks belong to this test.
+  const idTokensBefore = harness.idp.idTokens.length;
+  const hintsBefore = harness.idp.endSessionHints.length;
   await signIn(page, harness);
   const logout = page.waitForRequest((request) => request.method() === 'POST' && new URL(request.url()).pathname === '/iam/auth/logout');
 
@@ -74,12 +78,14 @@ test('R12: sign out posts /iam/auth/logout, and /iam/orgs then redirects to logi
   expect((await request.response())?.status()).toBe(302);
 
   // SMA-681 AC 1, in a REQUIRED tier: the end-session request carried the login ID token as
-  // id_token_hint. The fake IdP issues no ID token on a refresh, so the last one issued is the
-  // login's. J1 (tests/cluster/journeys/auth-roundtrip.spec.ts) proves the same against Keycloak,
-  // in the chart job, which is not a required check.
-  const loginIdToken = harness.idp.idTokens.at(-1);
-  expect(loginIdToken, 'the fake IdP issued an id_token at login').toBeDefined();
-  expect(harness.idp.endSessionHints.at(-1), 'the end-session request carries the login id_token as id_token_hint').toBe(loginIdToken);
+  // id_token_hint. The fake IdP issues no ID token on a refresh, so this login issued exactly one.
+  // J1 (tests/cluster/journeys/auth-roundtrip.spec.ts) proves the same against Keycloak, in the
+  // chart job, which is not a required check.
+  const newIdTokens = harness.idp.idTokens.slice(idTokensBefore);
+  expect(newIdTokens, 'this login made the fake IdP issue exactly one id_token').toHaveLength(1);
+  const newHints = harness.idp.endSessionHints.slice(hintsBefore);
+  expect(newHints, 'this logout made exactly one end-session request').toHaveLength(1);
+  expect(newHints[0], 'the end-session request carries the login id_token as id_token_hint').toBe(newIdTokens[0]);
 
   expect((await page.context().cookies()).filter((cookie) => cookie.name === '__Host-pgs_sid')).toEqual([]);
   const again = await page.request.get(harness.url('/iam/orgs'), { maxRedirects: 0 });

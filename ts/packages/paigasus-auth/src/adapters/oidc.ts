@@ -33,22 +33,17 @@
 import * as client from 'openid-client';
 import type { IdTokenClaims } from '../ports/principal-resolver';
 import { RefreshRejected } from '../core/errors';
+import type { RefreshedTokens } from '../core/single-flight';
 
-export interface RefreshedTokens {
-  accessToken: string;
-  refreshToken?: string;
-  expiresIn: number; // seconds
-  /**
-   * SMA-681. `refresh` sets both of these, and only when the response carries an ID token.
-   * openid-client has then validated that token as it validates a login token, signature included
-   * (see `refresh` below). Nothing in this file compares its `sub` with the login token:
-   * core/single-flight.ts does that.
-   */
-  idToken?: string;
-  idTokenClaims?: IdTokenClaims;
-}
+/**
+ * Defined once, in core/single-flight.ts (SMA-681). This adapter implements it. `refresh` sets
+ * `rotatedIdToken` only when the response carries an ID token. openid-client has then validated
+ * that token as it validates a login token, signature included (see `refresh` below). Nothing in
+ * this file compares its `sub` with the login token: core/single-flight.ts does that.
+ */
+export type { RefreshedTokens };
 
-export interface OidcTokens extends RefreshedTokens {
+export interface OidcTokens extends Omit<RefreshedTokens, 'rotatedIdToken'> {
   /**
    * The raw, signed ID token JWT from the code exchange (SMA-681). The session record stores it,
    * and logout sends it as `id_token_hint`. Never log it: see ports/logger.ts.
@@ -258,15 +253,8 @@ export function createOidcClient(opts: CreateOidcClientOptions): OidcClient {
           idTokenExpected: true,
         });
         const claims = tokens.claims();
-        if (claims === undefined) {
-          throw new Error('no id_token in the token response');
-        }
-        // SMA-681. This check only narrows the type of `tokens.id_token`. With
-        // `idTokenExpected: true`, oauth4webapi already rejects a response whose `id_token` is
-        // missing or not a string (oauth4webapi/build/index.js:1480-1482), so this line cannot
-        // run, and no test covers it. It stays inside this `try`, so it goes through
-        // wrapError('authorization_code_grant', …) like every other failure here.
-        if (typeof tokens.id_token !== 'string') {
+        // The `id_token` half only narrows its type and cannot fail (oauth4webapi/build/index.js:1480-1482).
+        if (claims === undefined || typeof tokens.id_token !== 'string') {
           throw new Error('no id_token in the token response');
         }
         // RFC 6749 § 5.1 marks `expires_in` RECOMMENDED, not REQUIRED, but this package requires
@@ -308,12 +296,12 @@ export function createOidcClient(opts: CreateOidcClientOptions): OidcClient {
         // non-repudiation hook has checked its signature (openid-client/build/index.js:1029),
         // because getConfig() enables that hook. Nothing here compares `sub` with the login token.
         const claims = tokens.claims();
-        const refreshedIdToken = typeof tokens.id_token === 'string' && claims !== undefined ? { idToken: tokens.id_token, idTokenClaims: toIdTokenClaims(claims) } : {};
+        const rotatedIdToken = typeof tokens.id_token === 'string' && claims !== undefined ? { rotatedIdToken: { token: tokens.id_token, claims: toIdTokenClaims(claims) } } : {};
         return {
           accessToken: tokens.access_token,
           ...(tokens.refresh_token !== undefined ? { refreshToken: tokens.refresh_token } : {}),
           expiresIn,
-          ...refreshedIdToken,
+          ...rotatedIdToken,
         };
       } catch (err) {
         throw classifyRefreshError(err);

@@ -38,8 +38,13 @@ const LOGOUT_URL = 'https://rp.example.com/iam/auth/logout';
 const LOGOUT_CALLBACK_URL = 'https://rp.example.com/iam/auth/logout/callback';
 const POST_LOGOUT_REDIRECT_URI = 'https://rp.example.com/iam/';
 const END_SESSION_URL = 'https://issuer.example.com/logout';
-/** The raw ID token that seededRecord() stores. JWT-shaped, not signed. */
-const STORED_ID_TOKEN = 'stored-header.stored-payload.stored-signature';
+/** The test runtime's own OIDC client id (baseRuntime). */
+const CLIENT_ID = 'paigasus-console';
+const b64 = (value: unknown): string => Buffer.from(JSON.stringify(value)).toString('base64url');
+/** A JWT-shaped, unsigned token. Logout reads only its payload `aud` (routes.ts, review F5). */
+const jwt = (payload: Record<string, unknown>): string => `${b64({ alg: 'RS256', typ: 'JWT' })}.${b64(payload)}.signature`;
+/** The raw ID token that seededRecord() stores. Its `aud` is this runtime's client id. */
+const STORED_ID_TOKEN = jwt({ iss: 'https://issuer.example.com', sub: 'a-subject', aud: CLIENT_ID });
 
 const fakePrincipal: ResolvedPrincipal = {
   principalPrn: null,
@@ -134,6 +139,7 @@ function baseRuntime(oidc: OidcClient): AuthRuntime {
     publicOrigin: 'https://rp.example.com',
     redirectUri: 'https://rp.example.com/iam/auth/callback',
     postLogoutRedirectUri: POST_LOGOUT_REDIRECT_URI,
+    clientId: CLIENT_ID,
     cookieDomainless: true,
     skewMs: 30_000,
     lockTtlMs: 10_000,
@@ -443,8 +449,7 @@ describe('POST /auth/logout — id_token_hint (SMA-681)', () => {
   // D4: there is no local `exp` check. Keycloak 26.4 accepts a hint 15 s past `exp` (spec § 3
   // row M-d), and RP-Initiated Logout 1.0 § 2 says the OP SHOULD accept an expired hint.
   it('sends an expired JWT-shaped stored token unchanged', async () => {
-    const b64 = (value: unknown): string => Buffer.from(JSON.stringify(value)).toString('base64url');
-    const expired = `${b64({ alg: 'RS256', typ: 'JWT' })}.${b64({ sub: 'a-subject', exp: Math.floor(Date.now() / 1000) - 3600 })}.signature`;
+    const expired = jwt({ sub: 'a-subject', aud: CLIENT_ID, exp: Math.floor(Date.now() / 1000) - 3600 });
     const sid = 'sid-expired-hint';
     await store.set(sid, seededRecord({ idToken: expired }), 60_000, null);
     const oidc = fakeOidc();
@@ -454,6 +459,60 @@ describe('POST /auth/logout — id_token_hint (SMA-681)', () => {
 
     expect(oidc.buildEndSessionUrlCalls[0]?.idTokenHint).toBe(expired);
     expect(completed()?.['idTokenHintSent']).toBe(true);
+  });
+
+  // Review F5. Two zones share one session cookie and one store (design doc § 6.7). A zone whose
+  // client id differs from the token's `aud` would send a hint that Keycloak rejects with 400
+  // (spec § 3 row M-g). So the hint goes only to a runtime whose client id is in `aud`.
+  it("sends the hint when `aud` is an array that contains this runtime's client id", async () => {
+    const token = jwt({ sub: 'a-subject', aud: ['other-client', CLIENT_ID] });
+    const sid = 'sid-aud-array';
+    await store.set(sid, seededRecord({ idToken: token }), 60_000, null);
+    const oidc = fakeOidc();
+    runtime = baseRuntime(oidc);
+
+    await createAuthRoutes(runtime).handle(logoutRequest(`${SESSION_COOKIE}=${sid}`));
+
+    expect(oidc.buildEndSessionUrlCalls[0]?.idTokenHint).toBe(token);
+    expect(completed()?.['idTokenHintSent']).toBe(true);
+  });
+
+  it.each([
+    ['a string aud of another client', jwt({ sub: 'a-subject', aud: 'gateway-console' })],
+    ['an array aud without this client', jwt({ sub: 'a-subject', aud: ['gateway-console', 'account'] })],
+    ['no aud', jwt({ sub: 'a-subject' })],
+  ])('sends no hint for %s, and the redirect still goes to the IdP', async (_case, token) => {
+    const sid = 'sid-other-aud';
+    await store.set(sid, seededRecord({ idToken: token }), 60_000, null);
+    const oidc = fakeOidc();
+    runtime = baseRuntime(oidc);
+
+    const res = await createAuthRoutes(runtime).handle(logoutRequest(`${SESSION_COOKIE}=${sid}`));
+
+    expect(res.headers.get('location')).toBe(END_SESSION_URL);
+    expect(await store.get(sid)).toBeNull();
+    expect(oidc.buildEndSessionUrlCalls[0]).not.toHaveProperty('idTokenHint');
+    expect(completed()?.['idTokenHintSent']).toBe(false);
+  });
+
+  it.each([
+    ['not three segments', 'not-a-jwt'],
+    ['a payload that is not base64url JSON', 'header.%%%not-base64%%%.signature'],
+    ['a payload that is JSON but not an object', `${b64({ alg: 'RS256' })}.${b64('a string')}.signature`],
+    ['a payload that is JSON null', `${b64({ alg: 'RS256' })}.${b64(null)}.signature`],
+  ])('sends no hint for a malformed stored token (%s), and logout still completes', async (_case, token) => {
+    const sid = 'sid-malformed';
+    await store.set(sid, seededRecord({ idToken: token }), 60_000, null);
+    const oidc = fakeOidc();
+    runtime = baseRuntime(oidc);
+
+    const res = await createAuthRoutes(runtime).handle(logoutRequest(`${SESSION_COOKIE}=${sid}`));
+
+    expect(res.status).toBe(302);
+    expect(res.headers.get('location')).toBe(END_SESSION_URL);
+    expect(await store.get(sid)).toBeNull();
+    expect(oidc.buildEndSessionUrlCalls[0]).not.toHaveProperty('idTokenHint');
+    expect(completed()?.['idTokenHintSent']).toBe(false);
   });
 
   it('logs idTokenHintSent: false when buildEndSessionUrl throws, although the record held a token', async () => {

@@ -131,15 +131,15 @@ test('J1: a cold visit logs in through the IdP, and logout ends the session in b
     const endSessionRequest = await endSession;
     expect(new URL(endSessionRequest.url()).searchParams.get('client_id'), 'end-session client_id').toBe('paigasus-console');
 
-    // SMA-681 AC 2: the end-session request carries the stored ID token. Keycloak's ID token names
-    // the client in `aud`, and also in `azp`.
+    // SMA-681 AC 2: the end-session request carries the stored ID token. Its `aud` must name the
+    // client: logout sends the hint only then (http/routes.ts), and Keycloak rejects any other `aud`.
     const hint = new URL(endSessionRequest.url()).searchParams.get('id_token_hint');
     expect(hint, 'end-session id_token_hint (SMA-681)').not.toBeNull();
     const parts = (hint ?? '').split('.');
     expect(parts, 'id_token_hint is a three-part JWT').toHaveLength(3);
-    const claims = JSON.parse(Buffer.from(parts[1] ?? '', 'base64url').toString('utf8')) as { aud?: unknown; azp?: unknown };
-    const audiences = Array.isArray(claims.aud) ? claims.aud : [claims.aud];
-    expect(audiences.includes('paigasus-console') || claims.azp === 'paigasus-console', 'id_token_hint was issued to paigasus-console (aud or azp)').toBe(true);
+    const claims = JSON.parse(Buffer.from(parts[1] ?? '', 'base64url').toString('utf8')) as { aud?: unknown };
+    const audiences: unknown[] = Array.isArray(claims.aud) ? claims.aud : [claims.aud];
+    expect(audiences.includes('paigasus-console'), 'id_token_hint aud names paigasus-console').toBe(true);
 
     // D9: on the kind stack no SSO session exists (SMA-682), so Keycloak redirects at once. With
     // the hint asserted above, it also redirects at once when a session exists (SMA-681 spec § 3).

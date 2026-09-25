@@ -15,6 +15,7 @@ import {
   BASE_PATH,
   END_SESSION_URL,
   FAILURE_KINDS,
+  FAKE_ID_TOKEN,
   NEW_REFRESH_TOKEN,
   ORIGIN,
   SENTINEL_DSN,
@@ -37,7 +38,8 @@ function record(overrides: Partial<SessionRecord> = {}): SessionRecord {
     refreshToken: 'old-refresh-token',
     accessExpiresAt: Date.now() + 60_000,
     absoluteExpiresAt: Date.now() + 60_000,
-    idToken: 'old-id-token',
+    // A token logout would send as the hint, so row 6 shows that only the failed read stops it.
+    idToken: FAKE_ID_TOKEN,
     idTokenClaims: { iss: 'https://issuer.example.com', sub: 'a-subject' },
     principal: { principalPrn: null, issuer: 'https://issuer.example.com', subject: 'a-subject', memberships: [], roleGrants: [], grantsAvailable: false },
     ...overrides,

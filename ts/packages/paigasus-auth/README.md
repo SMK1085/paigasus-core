@@ -195,14 +195,19 @@ own end-session endpoint.
 
 ### Logout sends `id_token_hint`
 
-The session record stores the raw ID token (`idToken`, SMA-681), and logout sends it to the IdP's
-end-session endpoint as `id_token_hint`. Without the hint, OpenID Connect RP-Initiated Logout 1.0
-requires the IdP to ask "Do you want to log out?", and Keycloak 26.4 does when an SSO session is
-live. The token is sent also after its `exp`, because Keycloak 26.4 accepted a hint 15 s past its
-`exp` (SMA-681 spec § 3, row M-d). With no session cookie, no record, or a failed store read,
-logout sends no hint and still redirects to the IdP. The hint puts the ID token into the redirect
-URL, so the browser history and the IdP's access log hold it. The record changed to `version: 2`
-for this: the deploy logs out every active user.
+The session record stores the raw ID token (`idToken`, SMA-681). Logout sends it to the IdP's
+end-session endpoint as `id_token_hint`. OpenID Connect RP-Initiated Logout 1.0 requires the IdP
+to ask "Do you want to log out?" when the hint is missing. Keycloak 26.4 asks when an SSO session is
+live. Logout sends the token also after its `exp`. Keycloak 26.4 accepted a hint 15 s past its
+`exp` (SMA-681 spec § 3, row M-d).
+
+Logout sends the hint only when the token's `aud` contains the runtime's own client id. All zones
+share one session cookie and one store. Keycloak rejects a hint whose `aud` is another client
+(SMA-681 spec § 3, row M-g). With no session cookie, no record, a failed store read, or another
+`aud`, logout sends no hint. It still redirects to the IdP.
+
+The hint puts the ID token into the redirect URL, so the browser history and the IdP's access log
+hold it. The record changed to `version: 2` for this, so the deploy logs out every active user.
 
 ## Middleware does no authorization (AC 4)
 

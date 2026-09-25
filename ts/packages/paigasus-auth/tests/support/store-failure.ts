@@ -22,8 +22,14 @@ export const ORIGIN = 'https://rp.example.com';
 export const BASE_PATH = '/iam';
 export const END_SESSION_URL = 'https://issuer.example.com/logout';
 export const NEW_REFRESH_TOKEN = 'new-refresh-token';
-/** The raw ID token that `fakeOidc().authorizationCodeGrant` returns. JWT-shaped, not signed. */
-export const FAKE_ID_TOKEN = 'fake-header.fake-payload.fake-signature';
+/** The harness runtime's OIDC client id. */
+export const CLIENT_ID = 'paigasus-console';
+const b64 = (value: unknown): string => Buffer.from(JSON.stringify(value)).toString('base64url');
+/**
+ * The raw ID token that `fakeOidc().authorizationCodeGrant` returns. JWT-shaped, not signed. Its
+ * `aud` is CLIENT_ID, so logout would send it as the hint (http/routes.ts `hintAudienceMatches`).
+ */
+export const FAKE_ID_TOKEN = `${b64({ alg: 'RS256', typ: 'JWT' })}.${b64({ iss: 'https://issuer.example.com', sub: 'a-subject', aud: CLIENT_ID })}.fake-signature`;
 
 export type FailureKind = 'unavailable' | 'timeout';
 export const FAILURE_KINDS: readonly FailureKind[] = ['unavailable', 'timeout'];
@@ -110,6 +116,7 @@ export function harness(failOn: readonly StoreMethod[], makeError: () => Error):
     publicOrigin: ORIGIN,
     redirectUri: `${ORIGIN}${BASE_PATH}/auth/callback`,
     postLogoutRedirectUri: `${ORIGIN}${BASE_PATH}/`,
+    clientId: CLIENT_ID,
     cookieDomainless: true,
     skewMs: 30_000,
     lockTtlMs: 10_000,

@@ -393,8 +393,10 @@ async function bestEffortRevoke(runtime: AuthRuntime, refreshToken: string): Pro
 //
 // `openid-client@6.8.8` still appends `client_id` whenever the caller supplies none
 // (`build/index.js:1129-1141`), asserted in tests/adapters/oidc.test.ts. Keycloak rejects a hint
-// whose `aud` is a different client (§ 3 row M-g). The adapter's `client_id` is the client the hint
-// was issued to, so that case does not apply here.
+// whose `aud` is a different client with 400 (§ 3 row M-g). Two zones share one session cookie and
+// one store (design doc § 6.7), so a zone with another client id can read a record that another zone
+// wrote. So the hint is sent only when the token's `aud` contains this runtime's own client id (see
+// `hintAudienceMatches`). Otherwise the request is the pre-SMA-681 request, with no hint.
 //
 // RESIDUAL RISK (spec § 5). The ID token is now in the redirect URL, so it goes into the browser
 // history, the IdP's access log and the log of any TLS-terminating proxy. It carries the user's
@@ -412,6 +414,25 @@ async function bestEffortRevoke(runtime: AuthRuntime, refreshToken: string): Pro
 // A STORE FAILURE (SMA-653). A failed read does not stop the delete (D5). A failed delete answers
 // 503 with a POST retry form and keeps the session cookie (D6): the user must see that logout did
 // not finish, never a false "signed out".
+/**
+ * SMA-681. True when the stored ID token's payload `aud` (a string or an array) contains
+ * `clientId`. Any decode failure gives false, so logout sends no hint. There is no signature
+ * check: the result only selects the logout request, and our own login stored the token.
+ */
+function hintAudienceMatches(idToken: string, clientId: string): boolean {
+  const segments = idToken.split('.');
+  if (segments.length !== 3 || segments[1] === undefined) return false;
+  let payload: unknown;
+  try {
+    payload = JSON.parse(Buffer.from(segments[1], 'base64url').toString('utf8'));
+  } catch {
+    return false;
+  }
+  if (typeof payload !== 'object' || payload === null) return false;
+  const aud: unknown = (payload as { aud?: unknown }).aud;
+  return aud === clientId || (Array.isArray(aud) && aud.includes(clientId));
+}
+
 async function handleLogout(runtime: AuthRuntime, req: Request): Promise<Response> {
   const cookies = readCookies(req.headers.get('cookie'));
   const sid = cookies.get(SESSION_COOKIE);
@@ -425,12 +446,14 @@ async function handleLogout(runtime: AuthRuntime, req: Request): Promise<Respons
   // circuit then refuses the delete at once, and the delete branch below answers 503 — the usual
   // outcome of a wedge (spec § 4 row 8).
   let refreshToken: string | undefined;
-  // SMA-681: the same read gives the hint for step 4. A failed read or no record gives none.
+  // SMA-681: the same read gives the hint for step 4. A failed read, no record, or a token whose
+  // `aud` does not contain this runtime's client id gives none.
   let idToken: string | undefined;
   if (sid !== undefined) {
     const rec = await storeStep(runtime, 'logout_get', sid, () => runtime.store.get(sid));
     refreshToken = rec === STORE_DOWN ? undefined : rec?.refreshToken;
-    idToken = rec === STORE_DOWN ? undefined : rec?.idToken;
+    const storedIdToken = rec === STORE_DOWN ? undefined : rec?.idToken;
+    idToken = storedIdToken !== undefined && hintAudienceMatches(storedIdToken, runtime.clientId) ? storedIdToken : undefined;
 
     const deleted = await storeStep(runtime, 'logout_delete', sid, () => runtime.store.delete(sid));
     if (deleted === STORE_DOWN) {
