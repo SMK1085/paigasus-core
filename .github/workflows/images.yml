@@ -157,6 +157,14 @@ jobs:
             echo "M8 image=${crate} arch=${ARCH} $(printf '%s' "$summary" | tr '\n' ' ')"
           done
 
+      # SMA-670: the self-test of the console image checks in ci/images/run.sh. Each static check
+      # and each console smoke row must red on its own mutation, against a stub docker, and the
+      # healthcheck's fetch signal must end a hang in the pinned runtime image. It sits directly
+      # before the console build, so all rs evidence above already exists when it runs. With
+      # CI=true a skipped row is a failure.
+      - name: Console image self-test
+        run: ci/images/console-selftest.sh
+
       # Placed AFTER the rs release-path evidence (build, load, smoke, rehearse, SBOM) and BEFORE
       # the `if: always()` upload steps: a console failure here stops the job, but only once every
       # rs artifact this job exists to produce already exists on disk, so the uploads below still
