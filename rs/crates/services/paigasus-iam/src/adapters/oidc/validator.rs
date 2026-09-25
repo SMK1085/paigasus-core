@@ -178,12 +178,17 @@ fn check_kty_matches_alg(jwk: &Jwk, alg: Algorithm) -> Result<(), AuthnError> {
 
 /// Refuses a token whose payload `typ` is one of `NON_ACCESS_TOKEN_TYPES` (SMA-686). Runs on
 /// signature-verified claims only (spec D5). A missing, `null` or non-string `typ` passes.
-fn check_access_token_type(_issuer: &Issuer, claims: &WireClaims) -> Result<(), AuthnError> {
+/// Logs the refusal at `info` with the issuer and the CANONICAL marker only — never the
+/// token's own `typ` spelling or any other claim (spec D8).
+fn check_access_token_type(issuer: &Issuer, claims: &WireClaims) -> Result<(), AuthnError> {
     let Some(serde_json::Value::String(typ)) = &claims.typ else {
         return Ok(());
     };
     match NON_ACCESS_TOKEN_TYPES.iter().find(|marker| typ.eq_ignore_ascii_case(marker)) {
-        Some(_marker) => Err(invalid(TokenDefect::NotAnAccessToken)),
+        Some(marker) => {
+            tracing::info!(issuer = issuer.as_str(), typ = *marker, "refused a bearer token: its typ claim marks it as not an access token");
+            Err(invalid(TokenDefect::NotAnAccessToken))
+        }
         None => Ok(()),
     }
 }
@@ -678,5 +683,62 @@ mod tests {
         let claims = claims_with(serde_json::json!({ "typ": "ID", "exp": Utc::now().timestamp() - 120 }));
         let err = authenticate_json(&claims).await.unwrap_err();
         assert!(matches!(err, AuthnError::InvalidToken(TokenDefect::Expired)), "got {err:?}");
+    }
+
+    // ---- log capture (copy of the `LogBuffer` helper in paigasus-gateway's
+    // `adapters/http/auth.rs` tests; a crate cannot share a `#[cfg(test)]` helper) ----------
+
+    #[derive(Clone, Default)]
+    struct LogBuffer(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for LogBuffer {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogBuffer {
+        type Writer = LogBuffer;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    impl LogBuffer {
+        fn text(&self) -> String {
+            String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
+        }
+    }
+
+    /// TRACE, not INFO: the "no personal data" assertion below must see every level.
+    fn capture_logs() -> (LogBuffer, tracing::subscriber::DefaultGuard) {
+        let buffer = LogBuffer::default();
+        let subscriber = tracing_subscriber::fmt().with_writer(buffer.clone()).with_ansi(false).with_max_level(tracing::Level::TRACE).finish();
+        (buffer, tracing::subscriber::set_default(subscriber))
+    }
+
+    #[tokio::test]
+    async fn refusal_logs_issuer_and_marker_only() {
+        // Spec D8 / § 5.1 test 12. `#[tokio::test]` is current-thread, so the thread-local
+        // subscriber from `set_default` sees the validator's log line.
+        let (logs, _guard) = capture_logs();
+        let err = authenticate_json(&claims_with(serde_json::json!({ "typ": "id" }))).await.unwrap_err();
+        assert!(matches!(err, AuthnError::InvalidToken(TokenDefect::NotAnAccessToken)));
+
+        let text = logs.text();
+        let refusal_lines: Vec<&str> = text.lines().filter(|line| line.contains("not an access token")).collect();
+        assert_eq!(refusal_lines.len(), 1, "exactly one refusal line expected, got:\n{text}");
+        let line = refusal_lines[0];
+        assert!(line.contains("INFO"), "the refusal logs at info: {line}");
+        assert!(line.contains(ISSUER), "the refusal names the issuer: {line}");
+        // The canonical marker, not the token's own spelling ("id").
+        assert!(line.contains("\"ID\"") || line.contains("=ID"), "the refusal names the canonical marker: {line}");
+        for secret in ["sub-1", "alice@example.com", "\"id\""] {
+            assert!(!text.contains(secret), "the log must not contain {secret:?}:\n{text}");
+        }
     }
 }
