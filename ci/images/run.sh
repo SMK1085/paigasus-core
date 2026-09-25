@@ -1056,6 +1056,57 @@ const rel = walk(root + "/.next/static")
 console.log(["public=" + (fs.existsSync(root + "/public") ? "1" : "0")].concat(rel).join("\n"));
 '
 
+# --- SMA-670 smoke rows ----------------------------------------------------------------------------
+# smoke_consoles calls each function in this section as `<fn> … || ec=1`. Because of the `||`,
+# errexit is OFF inside them: each one checks the rc of every command itself and must not depend on
+# `set -e`. Each one keeps its JS program in a `local`, so it needs no global except ROOT (and
+# with_deadline, for the HEALTHCHECK row). ci/images/console-selftest.sh copies them out of this
+# file with awk and calls them in this same `|| rc=$?` shape against a stub `docker`.
+
+# R-NODE (SMA-670 gap 1). The runtime base pins only the Node MAJOR (distroless publishes no
+# patch-level tags), so nothing else records which Node the image runs. This row prints it. A
+# different major, an unparseable version or an unreadable .prototools pin is an error. A different
+# minor or patch is a WARNING and the row stays green (SMA-670 D1): no change in this repository can
+# make the patch equal, because the runtime tag `nonroot` holds no version and the digest is the only
+# pin. It needs only the image, not a running container. stdout only is parsed; docker's own stderr
+# passes through.
+console_node_version_row() {
+  local app="$1" pin ver_out ver_rc=0 line maj min pat pmaj pmin ppat advice
+  local pin_re='^([0-9]+)\.([0-9]+)\.([0-9]+)$' ver_re='^v([0-9]+)\.([0-9]+)\.([0-9]+)$'
+  pin="$(sed -n 's/^node = "\([0-9.]*\)"$/\1/p' "$ROOT/.prototools")" || pin=""
+  if ! [[ $pin =~ $pin_re ]]; then
+    echo "::error::${app}: runtime Node version NOT checked — no node = \"X.Y.Z\" pin in .prototools." >&2
+    return 1
+  fi
+  pmaj="${BASH_REMATCH[1]}"; pmin="${BASH_REMATCH[2]}"; ppat="${BASH_REMATCH[3]}"
+  ver_out="$(docker run --rm --entrypoint /nodejs/bin/node "${app}:dev" --version)" || ver_rc=$?
+  if [ "$ver_rc" -ne 0 ]; then
+    echo "::error::${app}: runtime Node version NOT checked — docker exited ${ver_rc} on ${app}:dev before node printed a version, so the image is missing or unreadable." >&2
+    return 1
+  fi
+  line="$(printf '%s\n' "$ver_out" | sed -n 1p)" || line=""
+  if ! [[ $line =~ $ver_re ]]; then
+    echo "::error::${app}: could not parse the runtime Node version from '${line}' — /nodejs/bin/node --version must print vX.Y.Z." >&2
+    return 1
+  fi
+  maj="${BASH_REMATCH[1]}"; min="${BASH_REMATCH[2]}"; pat="${BASH_REMATCH[3]}"
+  if [ "$maj" -ne "$pmaj" ]; then
+    echo "::error::${app}: the runtime image runs Node ${line#v}, but .prototools pins ${pin} — a different major; the runtime FROM line in ts/Dockerfile and .prototools disagree." >&2
+    return 1
+  fi
+  if [ "$min" -ne "$pmin" ] || [ "$pat" -ne "$ppat" ]; then
+    if [ "$min" -lt "$pmin" ] || { [ "$min" -eq "$pmin" ] && [ "$pat" -lt "$ppat" ]; }; then
+      advice="The runtime is older: a later runtime digest refresh closes the gap."
+    else
+      advice="The runtime is newer: bump .prototools and the builder FROM line together."
+    fi
+    echo "::warning::${app}: the runtime image runs Node ${line#v}, .prototools pins ${pin}. distroless publishes no patch-level tags, so only the major is held. ${advice}" >&2
+    echo "  ${app}: runtime Node ${line#v}, same major as .prototools ${pin} (minor/patch differ, see the warning)"
+    return 0
+  fi
+  echo "  ${app}: runtime Node ${line#v} matches .prototools"
+}
+
 # Every `$( )` here is either guarded with `|| <var>=""` and followed by an explicit check that
 # prints its own named ::error::, or provably unable to fail before its own message. That is not
 # decoration: under `set -euo pipefail` an unguarded failing capture aborts the whole script on
@@ -1353,6 +1404,10 @@ smoke_consoles() {
       echo "::error::${app}: shell absence NOT checked — docker exited ${sh_rc} on ${app}:dev before reaching an entrypoint, so the image is missing or unreadable and nothing was proved about the runtime base." >&2
       ec=1
     fi
+
+    # SMA-670: image-only rows. They need only the image, so they run whether or not the
+    # container started. ci/images/console-selftest.sh pins each call line, `|| ec=1` included.
+    console_node_version_row "$app" || ec=1
 
     # Spec § 5.5 assertion 4 — staged-tree parity. ts/Dockerfile's staging of .next/static and
     # public/ and ts/apps/<app>/moon.yml's `build` script are a SECOND staging site each, created

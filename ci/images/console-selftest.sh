@@ -33,7 +33,7 @@ REPO="$(cd "$HERE/../.." && pwd)"
 RUN_SH="$HERE/run.sh"
 
 # The functions copied out of run.sh. A task that adds a function to run.sh adds its name here.
-FUNCS="assert_console_pins with_deadline"
+FUNCS="assert_console_pins with_deadline console_node_version_row smoke_consoles"
 
 T="$(mktemp -d "${TMPDIR:-/tmp}/paigasus-console-selftest.XXXXXX")"
 HC_CTR="selftest-hc-$$"
@@ -325,6 +325,157 @@ else
     docker rmi "$HC_RUNTIME_REF" >/dev/null 2>&1 || true
   fi
 fi
+
+# --- smoke-row rows (a stub docker) ------------------------------------------------------------
+# The stub records its argv (one argument per line, a multi-line argument as <multi-line>, and a
+# `--` line after each call) and answers from STUB_* variables. Each row puts the stub first on
+# PATH inside its own subshell only, so the F rows above use the real docker. `exec sleep` makes
+# the sleep the process that with_deadline kills.
+stub_docker_main() {
+  local a
+  for a in "$@"; do
+    case "$a" in *$'\n'*) a="<multi-line>" ;; esac
+    printf '%s\n' "$a" >> "$STUB_ARGV"
+  done
+  printf '%s\n' "--" >> "$STUB_ARGV"
+  case "${1:-}" in
+    run)
+      for a in "$@"; do
+        if [ "$a" = "--version" ]; then
+          if [ -n "$STUB_VERSION_ERR" ]; then printf '%s\n' "$STUB_VERSION_ERR" >&2; fi
+          if [ -n "$STUB_VERSION_OUT" ]; then printf '%s\n' "$STUB_VERSION_OUT"; fi
+          exit "$STUB_VERSION_RC"
+        fi
+      done
+      if [ -n "$STUB_WALK_OUT" ]; then printf '%s\n' "$STUB_WALK_OUT"; fi
+      exit "$STUB_WALK_RC"
+      ;;
+    image)
+      if [ -n "$STUB_ENV_OUT" ]; then printf '%s\n' "$STUB_ENV_OUT"; fi
+      exit "$STUB_ENV_RC"
+      ;;
+    exec)
+      if [ "$STUB_EXEC_SLEEP" -gt 0 ]; then exec sleep "$STUB_EXEC_SLEEP"; fi
+      exit "$STUB_EXEC_RC"
+      ;;
+  esac
+  echo "stub docker: unexpected argv: $*" >&2
+  exit 99
+}
+# `declare -f`, not a heredoc: bash 5 writes a heredoc into a pipe before its reader starts, and
+# on a host whose new pipe holds only 512 bytes that write can hang (CLAUDE.md, SMA-612).
+mkdir -p "$T/stub"
+{
+  printf '%s\n' '#!/usr/bin/env bash'
+  declare -f stub_docker_main
+  # shellcheck disable=SC2016 # the line is written into the stub file literally
+  printf '%s\n' 'stub_docker_main "$@"'
+} > "$T/stub/docker"
+chmod +x "$T/stub/docker"
+
+stub_reset() {
+  STUB_VERSION_OUT="v24.16.0"; STUB_VERSION_RC=0; STUB_VERSION_ERR=""
+  STUB_ENV_OUT="PATH=/usr/bin"; STUB_ENV_RC=0
+  STUB_WALK_OUT="walked=1300"; STUB_WALK_RC=0
+  STUB_EXEC_SLEEP=0; STUB_EXEC_RC=0
+  FX_ROOT="$T/fx-node"
+}
+
+# The fixture .prototools for the N rows: a fixed node pin, so a Node bump in the real
+# .prototools does not red this self-test.
+mkdir -p "$T/fx-node" "$T/fx-nopin"
+printf '%s\n' 'node = "24.16.0"' 'pnpm = "11.3.0"' > "$T/fx-node/.prototools"
+printf '%s\n' 'pnpm = "11.3.0"' > "$T/fx-nopin/.prototools"
+
+# The argv that console_node_version_row must hand to docker.
+printf '%s\n' run --rm --entrypoint /nodejs/bin/node iam-console:dev --version -- > "$T/argv-node"
+
+# run_fn <row> <want_rc> <present> <absent> <want-argv-file|none> <fn> [<arg>...] — the
+# production shape: `fn … || rc=$?`, so errexit is off inside the function.
+run_fn() {
+  local row="$1" want_rc="$2" present="$3" absent="$4" want_argv="$5" rc=0 o e
+  shift 5
+  o="$T/$row.out"
+  e="$T/$row.err"
+  rm -f "$T/argv"
+  (
+    PATH="$T/stub:$PATH"
+    STUB_ARGV="$T/argv"
+    export PATH STUB_ARGV STUB_VERSION_OUT STUB_VERSION_RC STUB_VERSION_ERR STUB_ENV_OUT STUB_ENV_RC \
+      STUB_WALK_OUT STUB_WALK_RC STUB_EXEC_SLEEP STUB_EXEC_RC
+    # shellcheck disable=SC2034 # ROOT is read by the function under test.
+    ROOT="$FX_ROOT"
+    set -uo pipefail
+    "$@"
+  ) >"$o" 2>"$e" || rc=$?
+  if [ "$want_argv" = "none" ]; then
+    if [ -e "$T/argv" ]; then
+      say_fail "$row" "the stub docker was called, and it must not be" "$T/argv" "$o" "$e"
+      return 0
+    fi
+  elif ! cmp -s "$want_argv" "$T/argv"; then
+    diff "$want_argv" "$T/argv" > "$T/$row.argv-diff" 2>&1 || true
+    say_fail "$row" "the stub docker got a different argv (< expected, > got)" "$T/$row.argv-diff" "$o" "$e"
+    return 0
+  fi
+  check_row "$row" "$rc" "$want_rc" "$present" "$absent" "$o" "$e"
+}
+
+stub_reset
+run_fn N0 0 "" "::warning::" "$T/argv-node" console_node_version_row iam-console
+stub_reset; STUB_VERSION_OUT="v24.14.0"
+run_fn N1 0 "::warning::iam-console: the runtime image runs Node 24.14.0|refresh closes the gap" "::error::" "$T/argv-node" console_node_version_row iam-console
+stub_reset; STUB_VERSION_OUT="v24.18.0"
+run_fn N1b 0 "::warning::iam-console: the runtime image runs Node 24.18.0|bump .prototools" "::error::" "$T/argv-node" console_node_version_row iam-console
+stub_reset; STUB_VERSION_OUT="v23.1.0"
+run_fn N2 1 "a different major" "" "$T/argv-node" console_node_version_row iam-console
+stub_reset; STUB_VERSION_OUT="garbage"
+run_fn N3 1 "could not parse" "" "$T/argv-node" console_node_version_row iam-console
+stub_reset; STUB_VERSION_OUT=""; STUB_VERSION_RC=125
+run_fn N4 1 "NOT checked — docker exited 125" "" "$T/argv-node" console_node_version_row iam-console
+stub_reset; FX_ROOT="$T/fx-nopin"
+run_fn N5 1 'no node = "X.Y.Z" pin' "" none console_node_version_row iam-console
+# docker prints a platform-mismatch WARNING on stderr when an amd64 image runs on an arm64 host.
+# Only stdout is parsed, so the row stays green.
+stub_reset; STUB_VERSION_ERR="WARNING: The requested image's platform (linux/amd64) does not match the detected host platform (linux/arm64/v8)"
+run_fn N6 0 "" "could not parse" "$T/argv-node" console_node_version_row iam-console
+
+# --- call-site rows (P1, P2) -------------------------------------------------------------------
+# A row function that smoke_consoles no longer calls proves nothing, and every row above stays
+# green. So the call lines are pinned as WHOLE lines (leading blanks allowed), `|| ec=1` included.
+# Each pin has a mutation that deletes its line, and the pin must then red.
+count_line() {
+  awk -v want="$2" '{ l = $0; sub(/^[[:space:]]+/, "", l); if (l == want) n++ } END { print n + 0 }' "$1"
+}
+
+drop_line() {
+  awk -v want="$2" '{ l = $0; sub(/^[[:space:]]+/, "", l); if (l != want) print }' "$1"
+}
+
+# pin_rows <row> <fn-file> <line> — the pin on the real text, then on a copy without the line.
+pin_rows() {
+  local row="$1" file="$2" line="$3" n
+  n="$(count_line "$file" "$line")"
+  if [ "$n" -eq 1 ]; then
+    say_pass "$row"
+  else
+    say_fail "$row" "found ${n} copies of the line '${line}' in ${file##*/}, expected exactly 1"
+  fi
+  drop_line "$file" "$line" > "$T/$row-mut.sh"
+  if cmp -s "$file" "$T/$row-mut.sh"; then
+    say_fail "$row-mut" "mutation did not apply"
+    return 0
+  fi
+  n="$(count_line "$T/$row-mut.sh" "$line")"
+  if [ "$n" -eq 0 ]; then
+    say_pass "$row-mut"
+  else
+    say_fail "$row-mut" "the pin still found the line after the mutation deleted it"
+  fi
+}
+
+# shellcheck disable=SC2016 # the pinned call line is literal text
+pin_rows P1a "$T/fn-smoke_consoles.sh" 'console_node_version_row "$app" || ec=1'
 
 # --- summary -----------------------------------------------------------------------------------
 echo "console-selftest: ${N_PASS} passed, ${N_FAIL} failed, ${N_SKIP} skipped"
