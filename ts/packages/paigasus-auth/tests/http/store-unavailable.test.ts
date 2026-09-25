@@ -217,9 +217,12 @@ describe.each(FAILURE_KINDS)('POST /auth/logout with the store down (%s)', (kind
     expect(h.oidc.revokeCalls).toEqual([]);
     expect(h.events).toEqual([
       ['store.unavailable', { zone: 'iam', stage: 'logout_get', sid: sidTag(OLD_SID) }],
-      ['logout.completed', { zone: 'iam', sid: sidTag(OLD_SID), revoked: false, endSessionRedirected: true }],
+      ['logout.completed', { zone: 'iam', sid: sidTag(OLD_SID), revoked: false, endSessionRedirected: true, idTokenHintSent: false }],
     ]);
     expectEventsClean(h.events);
+    // SMA-681 AC 3: a failed read gives no token, so the end-session request carries no hint.
+    expect(h.oidc.endSessionCalls).toHaveLength(1);
+    expect(h.oidc.endSessionCalls[0]).not.toHaveProperty('idTokenHint');
   });
 
   it('row 7: the delete fails -> revoke the read token, 503 with a POST form, cookie kept (D6)', async () => {
@@ -233,6 +236,8 @@ describe.each(FAILURE_KINDS)('POST /auth/logout with the store down (%s)', (kind
     expect(await h.inner.get(OLD_SID)).not.toBeNull();
     expect(h.events).toEqual([['store.unavailable', { zone: 'iam', stage: 'logout_delete', sid: sidTag(OLD_SID) }]]);
     expectEventsClean(h.events);
+    // Review Focus 2: the 503 branch does not redirect to the IdP, so no hint leaves the server.
+    expect(h.oidc.endSessionCalls).toEqual([]);
   });
 
   it('row 7: a failing revoke still gives the same 503, and logs nothing more', async () => {

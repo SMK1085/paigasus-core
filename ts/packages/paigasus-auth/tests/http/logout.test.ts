@@ -13,18 +13,13 @@
 // forged POST arrives with no session and does nothing — asserted here so the reasoning is
 // recorded rather than assumed (matching the omission comment in routes.ts's dispatcher).
 //
-// `id_token_hint` IS DELIBERATELY OMITTED, not a known gap left to close later (final fix wave,
-// finding 7: this comment previously called it a "KNOWN GAP" — superseded). `SessionRecord`
-// stores only decoded `idTokenClaims`, never the raw ID token JWT the parameter needs, and
-// `OidcTokens` (adapters/oidc.ts) does not surface it either — storing the raw token would add a
-// THIRD bearer credential to `SessionRecord` for no benefit to either provider this design
-// targets (design doc § 9.5, routes.ts's own "NAMED RESIDUAL" comment on `handleLogout`).
-// M12 (docs/superpowers/specs/2026-09-09-sma-506-measurements.md) measured Keycloak 26.4 on the
-// wire: it completes the end-session redirect immediately on `client_id` alone, with no
-// `id_token_hint` and no confirmation interstitial — `openid-client@6.8.8` appends `client_id`
-// unconditionally when the caller supplies none. The test below for the end-session redirect
-// therefore asserts `post_logout_redirect_uri` and `state`, and explicitly that `id_token_hint`
-// is absent — a positive assertion of the design, not a placeholder for missing coverage.
+// `id_token_hint` IS SENT WHEN THE SESSION RECORD HOLDS AN ID TOKEN (SMA-681). This reverses the
+// SMA-506 decision that this header used to record. OpenID Connect RP-Initiated Logout 1.0,
+// section 2, says the OP MUST ask the user to confirm when no hint is provided, and Keycloak 26.4
+// does when an SSO session is live (SMA-681 spec § 3 row M-b). The SMA-506 measurement (M12) saw no
+// page only because its realm created no online SSO session (SMA-682). The tests below assert the
+// hint equals the stored token. With no cookie, no record, or a failed read (store-unavailable.test.ts
+// row 6), there is no hint and the redirect still goes to the IdP (spec AC 3).
 import { beforeEach, describe, expect, it } from 'vitest';
 import { claimsPrincipalResolver } from '../../src/adapters/claims-resolver.js';
 import { MemorySessionStore } from '../../src/adapters/memory-store.js';
@@ -308,7 +303,7 @@ describe('POST /auth/logout — cookies', () => {
 });
 
 describe('POST /auth/logout — end-session redirect', () => {
-  it('redirects to end_session_endpoint carrying post_logout_redirect_uri and a state', async () => {
+  it('redirects to end_session_endpoint carrying post_logout_redirect_uri, a state and the stored id_token_hint', async () => {
     const sid = 'sid-redirect';
     await store.set(sid, seededRecord(), 60_000, null);
     const oidc = fakeOidc({ endSessionUrl: END_SESSION_URL });
@@ -322,11 +317,8 @@ describe('POST /auth/logout — end-session redirect', () => {
     const call = oidc.buildEndSessionUrlCalls[0];
     expect(call?.postLogoutRedirectUri).toBe(POST_LOGOUT_REDIRECT_URI);
     expect(call?.state).toBeTruthy();
-    // DELIBERATE, not a gap (see routes.ts's "NAMED RESIDUAL" comment and design doc § 9.5):
-    // SessionRecord never carries the raw ID token JWT, only its decoded claims, and M12 measured
-    // Keycloak 26.4 completing the end-session redirect on `client_id` alone with no
-    // `id_token_hint` needed.
-    expect(call?.idTokenHint).toBeUndefined();
+    // SMA-681 AC 1: the hint is the raw ID token the record holds, byte for byte.
+    expect(call?.idTokenHint).toBe(STORED_ID_TOKEN);
   });
 
   it('mints a fresh state per logout call', async () => {
@@ -387,6 +379,95 @@ describe('POST /auth/logout — end-session redirect', () => {
 
     const completed = events.find(([name]) => name === 'logout.completed');
     expect(completed?.[1]['endSessionRedirected']).toBe(false);
+  });
+});
+
+// SMA-681 § 4.5. The hint comes from the step 1 read. With no token to send, the request is the
+// pre-SMA-681 request (client_id, post_logout_redirect_uri, state), and logout still completes.
+describe('POST /auth/logout — id_token_hint (SMA-681)', () => {
+  function completed(): Readonly<Record<string, string | number | boolean>> | undefined {
+    return events.find(([name]) => name === 'logout.completed')?.[1];
+  }
+
+  it('logs idTokenHintSent: true when the redirect carries the hint, and never logs the token', async () => {
+    const sid = 'sid-hint-sent';
+    await store.set(sid, seededRecord(), 60_000, null);
+    runtime = baseRuntime(fakeOidc());
+
+    await createAuthRoutes(runtime).handle(logoutRequest(`${SESSION_COOKIE}=${sid}`));
+
+    expect(completed()?.['idTokenHintSent']).toBe(true);
+    // Review Focus 1: the event says THAT a hint went out, never WHAT it was.
+    expect(JSON.stringify(events)).not.toContain(STORED_ID_TOKEN);
+  });
+
+  it('with no session cookie: no hint, the redirect still goes to the IdP, idTokenHintSent: false', async () => {
+    const oidc = fakeOidc();
+    runtime = baseRuntime(oidc);
+
+    const res = await createAuthRoutes(runtime).handle(logoutRequest());
+
+    expect(res.headers.get('location')).toBe(END_SESSION_URL);
+    expect(oidc.buildEndSessionUrlCalls).toHaveLength(1);
+    expect(oidc.buildEndSessionUrlCalls[0]).not.toHaveProperty('idTokenHint');
+    expect(completed()?.['idTokenHintSent']).toBe(false);
+  });
+
+  it('with a cookie but no record: no hint, the redirect still goes to the IdP, idTokenHintSent: false', async () => {
+    const oidc = fakeOidc();
+    runtime = baseRuntime(oidc);
+
+    const res = await createAuthRoutes(runtime).handle(logoutRequest(`${SESSION_COOKIE}=sid-with-no-record`));
+
+    expect(res.headers.get('location')).toBe(END_SESSION_URL);
+    expect(oidc.buildEndSessionUrlCalls[0]).not.toHaveProperty('idTokenHint');
+    expect(completed()?.['idTokenHintSent']).toBe(false);
+  });
+
+  // Review Focus 5: the deploy moment. A record written before SMA-681 is version 1. The store reads
+  // it as absent and deletes it, so logout sends no hint, and still completes at the IdP.
+  it('a version 1 record from before the deploy: deleted, no hint, the redirect still goes to the IdP', async () => {
+    const sid = 'sid-version-1';
+    await store.set(sid, { ...seededRecord(), version: 1 } as unknown as SessionRecord, 60_000, null);
+    const oidc = fakeOidc();
+    runtime = baseRuntime(oidc);
+
+    const res = await createAuthRoutes(runtime).handle(logoutRequest(`${SESSION_COOKIE}=${sid}`));
+
+    expect(res.headers.get('location')).toBe(END_SESSION_URL);
+    expect(await store.get(sid)).toBeNull();
+    expect(oidc.buildEndSessionUrlCalls[0]).not.toHaveProperty('idTokenHint');
+    expect(completed()?.['idTokenHintSent']).toBe(false);
+  });
+
+  // D4: there is no local `exp` check. Keycloak 26.4 accepts a hint 15 s past `exp` (spec § 3
+  // row M-d), and RP-Initiated Logout 1.0 § 2 says the OP SHOULD accept an expired hint.
+  it('sends an expired JWT-shaped stored token unchanged', async () => {
+    const b64 = (value: unknown): string => Buffer.from(JSON.stringify(value)).toString('base64url');
+    const expired = `${b64({ alg: 'RS256', typ: 'JWT' })}.${b64({ sub: 'a-subject', exp: Math.floor(Date.now() / 1000) - 3600 })}.signature`;
+    const sid = 'sid-expired-hint';
+    await store.set(sid, seededRecord({ idToken: expired }), 60_000, null);
+    const oidc = fakeOidc();
+    runtime = baseRuntime(oidc);
+
+    await createAuthRoutes(runtime).handle(logoutRequest(`${SESSION_COOKIE}=${sid}`));
+
+    expect(oidc.buildEndSessionUrlCalls[0]?.idTokenHint).toBe(expired);
+    expect(completed()?.['idTokenHintSent']).toBe(true);
+  });
+
+  it('logs idTokenHintSent: false when buildEndSessionUrl throws, although the record held a token', async () => {
+    const sid = 'sid-hint-degraded';
+    await store.set(sid, seededRecord(), 60_000, null);
+    const oidc = fakeOidc();
+    oidc.buildEndSessionUrl = (): Promise<string> => Promise.reject(new Error('no end_session_endpoint'));
+    runtime = baseRuntime(oidc);
+
+    const res = await createAuthRoutes(runtime).handle(logoutRequest(`${SESSION_COOKIE}=${sid}`));
+
+    expect(res.headers.get('location')).toBe(POST_LOGOUT_REDIRECT_URI);
+    expect(completed()?.['endSessionRedirected']).toBe(false);
+    expect(completed()?.['idTokenHintSent']).toBe(false);
   });
 });
 
