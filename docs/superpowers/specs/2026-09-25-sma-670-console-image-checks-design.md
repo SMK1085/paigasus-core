@@ -3,7 +3,9 @@
 **Linear:** [SMA-670](https://linear.app/smaschek/issue/SMA-670/ops-harden-the-console-image-checks-in-ciimagesrunsh)
 **Follows:** SMA-513 PR 1 (PR 279, merged as `8528676e`)
 **Date:** 2026-09-25
-**Revision:** 2, after the adversarial challenge. § 9 records what changed and why.
+**Revision:** 3. Revision 2 came after the adversarial challenge (§ 9). Revision 3 corrects S1c,
+the place of the `node_modules` filter and the S-INSTALL token strip, from measurements taken for
+the plan (`docs/superpowers/plans/2026-09-25-sma-670-console-image-checks.md`, "Deviations").
 
 ---
 
@@ -116,7 +118,8 @@ the pins read the same view of the file.
 **S-INSTALL (gap 2b).** The install extraction changes. The check first extracts every `pnpm`
 invocation: from the word `pnpm` to the next `&&`, `;` or `|` (`grep -oE
 '(^|[^[:alnum:]_./-])pnpm([[:space:]][^&;|]*)?'`). An `awk` step then splits each invocation into
-whitespace-separated tokens, and keeps the invocation when a token is exactly `install`, `i`,
+whitespace-separated tokens, removes `"`, `'`, `` ` ``, `(` and `)` from each token (so
+`sh -c "pnpm install"` still counts), and keeps the invocation when a token is exactly `install`, `i`,
 `install-test` or `it`. So `pnpm --filter x install`, `pnpm -C ts i` and `pnpm i` at end of line
 are installs, and `pnpm info`, `pnpm import`, `pnpm init` and `pnpm exec next build` are not. The
 tokenising uses `awk`, not `\b`, `\<` or `\>`, because those are not POSIX ERE and BSD grep and
@@ -190,8 +193,8 @@ image, so it also runs whether or not the container started.
    <rc> …`. A line that starts with `PAIGASUS_` is `::error::<app>:dev bakes <KEY> into
    Config.Env …`. The error names the key only, never the value.
 2. The image's own node walks `/app` without following symlinks. It prints `walked=<N>` on the
-   first line, and then one path for each file whose base name starts with `.env`. It does not
-   report a path that has a `node_modules` directory in it, because Next loads `.env*` only from
+   first line, and then one path for each file whose base name starts with `.env`. The function
+   (in bash, not in the walk) ignores a path that holds `/node_modules/`, because Next loads `.env*` only from
    the server's own directory and a dependency can ship an `.env.example`. The walk still counts
    `node_modules` files in `walked`.
 
@@ -307,7 +310,7 @@ that the copy changed, and it is a FAIL named "mutation did not apply" if it did
 | S0 | none (the real file) | rc 0 |
 | S1 | append `FROM node:latest AS extra` | rc 1, `FROM instruction(s)` |
 | S1b | append `from node:latest as extra` | rc 1, `FROM instruction(s)` |
-| S1c | a `RUN true \` line is inserted before the builder `FROM`, and its `@sha256:…` is removed | rc 1, `FROM instruction(s)` |
+| S1c | a `RUN true \` line is inserted before the builder `FROM` (the digest stays; removing it makes the existing builder-pin check red first) | rc 1, `FROM instruction(s)` |
 | S1d | prepend `# syntax=docker/dockerfile:1` | rc 1, `parser directive` |
 | S1e | append `COPY --from=alpine:latest /x /y` | rc 1, `which is not the builder stage` |
 | S1f | append `RUN --mount=type=bind,from=alpine:latest,target=/x true` | rc 1, `which is not the builder stage` |
