@@ -261,8 +261,8 @@ assert_console_pins() {
   # instruction: a later variable on a multi-variable ENV line (ts/Dockerfile's own house style),
   # a continuation line, an indented instruction, or an ARG. The instruction keyword matches
   # case-insensitively, because Docker parses `env` and `ENV` the same; PAIGASUS_ stays
-  # case-sensitive, as IAM_/GATEWAY_ do in assert_pins. What this does NOT see: a PAIGASUS_ value
-  # written by a RUN step into a file, or passed in through a COPY — it reads ENV and ARG only.
+  # case-sensitive, as IAM_/GATEWAY_ do in assert_pins. This check reads ENV and ARG only. A
+  # PAIGASUS_ in a RUN, COPY, ADD or ONBUILD step or in a heredoc body is S-PAIGASUS's job, below.
   local n_baked baked_rc=0
   n_baked="$(grep -cE '^[[:space:]]*([Ee][Nn][Vv]|[Aa][Rr][Gg])[[:space:]]+.*PAIGASUS_' "$norm")" || baked_rc=$?
   if [ "$baked_rc" -gt 1 ]; then
@@ -318,6 +318,27 @@ assert_console_pins() {
     while IFS= read -r cf_v; do
       echo "::error::ts/Dockerfile reads from '${cf_v}', which is not the builder stage or the bindings context; a --from=<image> pulls an image that no FROM line pins." >&2
     done < <(printf '%s\n' "$cf_bad")
+    rm -f "$norm"
+    return 1
+  fi
+
+  # S-PAIGASUS (SMA-670 gap 2c, the text half). The ENV/ARG check above has passed, so every
+  # PAIGASUS_ that is left is outside an ENV or ARG instruction: a RUN, COPY, ADD or ONBUILD step,
+  # a heredoc body line, or a continuation that the normaliser does not join (a blank line inside
+  # an ENV value). None may name PAIGASUS_ at all. There is no PAIGASUS_COMPILED_* exemption:
+  # ts/Dockerfile never writes those values, createNextConfig does (SMA-670 D7). Comment lines
+  # cannot trigger this, because the normaliser dropped them. The lines are printed without line
+  # numbers, because a normalised line number is not a ts/Dockerfile line number.
+  local n_named named_rc=0
+  n_named="$(grep -c 'PAIGASUS_' "$norm")" || named_rc=$?
+  if [ "$named_rc" -gt 1 ]; then
+    rm -f "$norm"
+    echo "::error::assert_console_pins: grep exited ${named_rc} on the normalised ts/Dockerfile; the PAIGASUS_ outside ENV/ARG check could not run." >&2
+    return 1
+  fi
+  if [ "${n_named:-0}" -ne 0 ]; then
+    echo "::error::ts/Dockerfile names PAIGASUS_ outside an ENV/ARG instruction (a RUN, COPY, ADD or ONBUILD step, or a heredoc body); console config is deployment-varying and must stay runtime-only. The line(s) of the normalised file follow." >&2
+    grep 'PAIGASUS_' "$norm" >&2 || true
     rm -f "$norm"
     return 1
   fi

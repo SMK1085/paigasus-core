@@ -228,6 +228,18 @@ mk_tree C1
 append_df C1 'RUN pnpm info x && pnpm import && pnpm init'
 pins_mut C1 0 ""
 
+mk_tree S3
+append_df S3 'RUN echo PAIGASUS_X=1 > /app/.env'
+pins_mut S3 1 'names PAIGASUS_ outside an ENV/ARG'
+
+mk_tree S4
+append_df S4 'COPY --from=builder /x /app/PAIGASUS_X'
+pins_mut S4 1 'names PAIGASUS_ outside an ENV/ARG'
+
+mk_tree S5
+append_df S5 'RUN <<EOF' 'PAIGASUS_X=1' 'EOF'
+pins_mut S5 1 'names PAIGASUS_ outside an ENV/ARG'
+
 # --- summary -----------------------------------------------------------------------------------
 echo "console-selftest: ${N_PASS} passed, ${N_FAIL} failed, ${N_SKIP} skipped"
 if [ "$N_FAIL" -ne 0 ]; then
