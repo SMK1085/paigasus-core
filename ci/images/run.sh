@@ -380,7 +380,28 @@ assert_console_pins() {
     printf '%s\n' "$inst" >&2
     return 1
   fi
-  echo "  ts/Dockerfile: distroless Node ${base_major} and builder Node ${builder_node}/pnpm ${builder_pnpm} match .prototools, both FROM lines digest-pinned, no baked PAIGASUS_* ENV/ARG, all ${n_inst} pnpm install(s) --frozen-lockfile"
+
+  # S-HCTIMEOUT (SMA-670 D2). On the RAW file. The healthcheck printf line must hold exactly one
+  # AbortSignal.timeout(<ms>), the HEALTHCHECK instruction must hold --timeout=<s>s, and the signal
+  # must fire before Docker kills the probe. Without the signal, a server that accepts the
+  # connection and never answers hangs the probe until Docker kills it, and only undici's 300 s
+  # headersTimeout bounds a `docker exec` of the same program.
+  local hc_line hc_line_rc=0 n_hc_line n_sig sig_ms hc_to_s
+  hc_line="$(grep -E '^RUN printf .*> /app/healthcheck\.mjs$' "$df")" || hc_line_rc=$?
+  if [ "$hc_line_rc" -gt 1 ]; then
+    echo "::error::assert_console_pins: grep exited ${hc_line_rc} on ts/Dockerfile; the healthcheck timeout check could not run." >&2
+    return 1
+  fi
+  n_hc_line="$(printf '%s\n' "$hc_line" | grep -c .)" || n_hc_line=0
+  n_sig="$(printf '%s\n' "$hc_line" | grep -oE 'AbortSignal\.timeout\([0-9]+\)' | grep -c .)" || n_sig=0
+  sig_ms="$(printf '%s\n' "$hc_line" | sed -n 's/.*AbortSignal\.timeout(\([0-9][0-9]*\)).*/\1/p' | sed -n 1p)" || sig_ms=""
+  hc_to_s="$(grep -E '^[[:space:]]*HEALTHCHECK[[:space:]]' "$df" | grep -oE -- '--timeout=[0-9]+s' | sed -n 's/^--timeout=\([0-9]*\)s$/\1/p' | sed -n 1p)" || hc_to_s=""
+  if [ "$n_hc_line" -ne 1 ] || [ "$n_sig" -ne 1 ] || [ -z "$sig_ms" ] || [ -z "$hc_to_s" ] \
+    || [ "$sig_ms" -ge $((hc_to_s * 1000)) ]; then
+    echo "::error::ts/Dockerfile's healthcheck.mjs fetch has no AbortSignal.timeout(<ms>) below the HEALTHCHECK --timeout (found: ${n_hc_line} healthcheck printf line(s), ${n_sig} signal(s), signal ${sig_ms:-<none>} ms, HEALTHCHECK --timeout ${hc_to_s:-<none>} s; only a --timeout=<N>s value in whole seconds is read); without it, a server that stops answering hangs the probe until Docker kills it." >&2
+    return 1
+  fi
+  echo "  ts/Dockerfile: distroless Node ${base_major} and builder Node ${builder_node}/pnpm ${builder_pnpm} match .prototools, both FROM lines digest-pinned, no parser directive, exactly 2 FROM stages, every --from= is builder/bindings, no PAIGASUS_* anywhere, all ${n_inst} pnpm install(s) --frozen-lockfile, healthcheck signal ${sig_ms} ms < --timeout=${hc_to_s}s"
 }
 
 # Writes the chisel package list that a build log names into $2, and fails when it is empty

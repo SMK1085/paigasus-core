@@ -240,6 +240,92 @@ mk_tree S5
 append_df S5 'RUN <<EOF' 'PAIGASUS_X=1' 'EOF'
 pins_mut S5 1 'names PAIGASUS_ outside an ENV/ARG'
 
+mk_tree S6
+sed_df S6 's/, { signal: AbortSignal\.timeout(2500) }//'
+pins_mut S6 1 'no AbortSignal.timeout'
+
+mk_tree S6b
+sed_df S6b 's/AbortSignal\.timeout(2500)/AbortSignal.timeout(3000)/'
+pins_mut S6b 1 'no AbortSignal.timeout'
+
+mk_tree S6c
+sed_df S6c 's/--timeout=3s/--timeout=3000ms/'
+pins_mut S6c 1 'HEALTHCHECK --timeout <none> s'
+
+# --- the real fetch timeout (F0, F1) -----------------------------------------------------------
+# The rendered healthcheck.mjs runs in the RUNTIME image that the runtime FROM line names, digest
+# included: that is the node that runs it in production. A driver starts a server on
+# 127.0.0.1:3000 that accepts connections and never answers, and then imports the program from a
+# data: URL. F0: with the 2500 ms signal the program must end by itself, rc exactly 1, with
+# TimeoutError in its output. F1: with the signal removed it must hang until the watchdog kills
+# it (rc 143 or 137). Together they prove that the signal is what ends the hang. with_deadline
+# writes to a FILE, never to a `$( )` capture (SMA-670 M7).
+HC_DRIVER_JS='
+const net = require("net");
+const server = net.createServer(() => {});
+server.listen(3000, "127.0.0.1", () => {
+  import("data:text/javascript," + encodeURIComponent(process.env.HC_SRC));
+});
+'
+HC_RC=0
+# hc_run <src-file> <deadline> <out-file> — sets HC_RC.
+hc_run() {
+  local src
+  src="$(cat "$1")"
+  docker rm -f "$HC_CTR" >/dev/null 2>&1 || true
+  HC_RC=0
+  with_deadline "$2" docker run --rm --init --network none --name "$HC_CTR" \
+    -e "HC_SRC=${src}" --entrypoint /nodejs/bin/node "$HC_RUNTIME_REF" -e "$HC_DRIVER_JS" >"$3" 2>&1 || HC_RC=$?
+  docker rm -f "$HC_CTR" >/dev/null 2>&1 || true
+}
+
+HC_RUNTIME_REF=""
+if ! docker info >/dev/null 2>&1; then
+  say_skip F0 "docker info failed, so no daemon can run the runtime image"
+  say_skip F1 "docker info failed, so no daemon can run the runtime image"
+else
+  hc_line="$(grep -E '^RUN printf .*> /app/healthcheck\.mjs$' "$REPO/ts/Dockerfile")" || hc_line=""
+  hc_fmt="${hc_line#*\'}"
+  hc_fmt="${hc_fmt%%\'*}"
+  HC_RUNTIME_REF="$(grep -oE '^FROM gcr\.io/distroless/nodejs[0-9]+-debian12:nonroot@sha256:[0-9a-f]{64}' "$REPO/ts/Dockerfile" | sed 's/^FROM //')" || HC_RUNTIME_REF=""
+  if [ -z "$hc_line" ] || [ "$hc_fmt" = "$hc_line" ]; then
+    say_fail F0 "healthcheck printf not found in ts/Dockerfile"
+    say_fail F1 "healthcheck printf not found in ts/Dockerfile"
+  elif [ -z "$HC_RUNTIME_REF" ]; then
+    say_fail F0 "no digest-pinned runtime FROM line in ts/Dockerfile"
+    say_fail F1 "no digest-pinned runtime FROM line in ts/Dockerfile"
+  elif ! docker pull "$HC_RUNTIME_REF" >"$T/pull.log" 2>&1; then
+    say_fail F0 "could not pull the runtime image ${HC_RUNTIME_REF}" "$T/pull.log"
+    say_fail F1 "could not pull the runtime image ${HC_RUNTIME_REF}" "$T/pull.log"
+  else
+    # The format string holds only `\n` and one `%s`, which every printf renders the same way.
+    # shellcheck disable=SC2059
+    printf "$hc_fmt" /iam > "$T/hc.mjs"
+    hc_run "$T/hc.mjs" 15 "$T/F0.out"
+    case "$HC_RC" in
+      1)
+        case "$(cat "$T/F0.out")" in
+          *TimeoutError*) say_pass F0 ;;
+          *) say_fail F0 "rc 1, but the output holds no TimeoutError" "$T/F0.out" ;;
+        esac
+        ;;
+      143|137) say_fail F0 "the healthcheck hung until the watchdog killed it (rc ${HC_RC})" "$T/F0.out" ;;
+      *) say_fail F0 "rc ${HC_RC}, expected exactly 1 with TimeoutError" "$T/F0.out" ;;
+    esac
+    sed 's/, { signal: AbortSignal\.timeout(2500) }//' "$T/hc.mjs" > "$T/hc-nosignal.mjs"
+    if cmp -s "$T/hc.mjs" "$T/hc-nosignal.mjs"; then
+      say_fail F1 "mutation did not apply" "$T/hc.mjs"
+    else
+      hc_run "$T/hc-nosignal.mjs" 6 "$T/F1.out"
+      case "$HC_RC" in
+        143|137) say_pass F1 ;;
+        *) say_fail F1 "rc ${HC_RC}; without the signal the program must hang until the watchdog kills it (143 or 137)" "$T/F1.out" ;;
+      esac
+    fi
+    docker rmi "$HC_RUNTIME_REF" >/dev/null 2>&1 || true
+  fi
+fi
+
 # --- summary -----------------------------------------------------------------------------------
 echo "console-selftest: ${N_PASS} passed, ${N_FAIL} failed, ${N_SKIP} skipped"
 if [ "$N_FAIL" -ne 0 ]; then
