@@ -1116,7 +1116,7 @@ console_node_version_row() {
 # counts those files, and a count under 100 means that it read the wrong tree (measured: 1367 files
 # in iam-console, 1324 in gateway-console).
 console_image_config_row() {
-  local app="$1" rc=0 env_out env_rc=0 keys key walk_out walk_rc=0 first n paths
+  local app="$1" rc=0 env_out env_rc=0 keys key walk_out walk_rc=0 first n paths paths_rc=0
   local walk_js='
 const fs = require("fs");
 let walked = 0;
@@ -1159,8 +1159,16 @@ console.log(["walked=" + walked].concat(found).join("\n"));
     return 1
   fi
   # The node_modules filter is here, not in the JS, so the self-test's stub rows exercise it.
-  # grep -v rc 1 means "every path was under node_modules", which leaves `paths` empty.
-  paths="$(printf '%s\n' "$walk_out" | sed -n '2,$p' | grep -v '/node_modules/')" || paths=""
+  # grep -v rc 1 means "every path was under node_modules", which leaves `paths` empty. Under
+  # pipefail, this pipeline's own rc is grep's rc (printf and sed do not fail here), so rc 0/1
+  # both read as today; rc > 1 means grep itself could not run, and a silent paths="" there would
+  # be a false-clear on a secret scan (global-constraints.md: a grep rc > 1 needs its own
+  # ::error::, per assert_console_pins's cf_from_rc/cf_mount_rc precedent).
+  paths="$(printf '%s\n' "$walk_out" | sed -n '2,$p' | grep -v '/node_modules/')" || paths_rc=$?
+  if [ "$paths_rc" -gt 1 ]; then
+    echo "::error::${app}: .env scan NOT checked — grep exited ${paths_rc} while filtering the walk output for node_modules paths." >&2
+    return 1
+  fi
   if [ -n "$paths" ]; then
     echo "::error::${app}: the image holds .env file(s) under /app outside node_modules; Next loads them at runtime, so a value in them is baked configuration. The paths follow." >&2
     printf '%s\n' "$paths" >&2

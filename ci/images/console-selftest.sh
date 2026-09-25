@@ -379,6 +379,9 @@ stub_reset() {
   STUB_WALK_OUT="walked=1300"; STUB_WALK_RC=0
   STUB_EXEC_SLEEP=0; STUB_EXEC_RC=0
   FX_ROOT="$T/fx-node"
+  # A row-scoped extra PATH entry, prepended ahead of the docker stub, empty by default. E6 (the
+  # grep-rc-2 row) is the only row that sets it.
+  STUB_PATH_EXTRA=""
 }
 
 # The fixture .prototools for the N rows: a fixed node pin, so a Node bump in the real
@@ -399,7 +402,7 @@ run_fn() {
   e="$T/$row.err"
   rm -f "$T/argv"
   (
-    PATH="$T/stub:$PATH"
+    PATH="${STUB_PATH_EXTRA:+$STUB_PATH_EXTRA:}$T/stub:$PATH"
     STUB_ARGV="$T/argv"
     export PATH STUB_ARGV STUB_VERSION_OUT STUB_VERSION_RC STUB_VERSION_ERR STUB_ENV_OUT STUB_ENV_RC \
       STUB_WALK_OUT STUB_WALK_RC STUB_EXEC_SLEEP STUB_EXEC_RC
@@ -497,6 +500,15 @@ stub_reset; STUB_WALK_OUT=""; STUB_WALK_RC=125
 run_fn E4 1 ".env scan NOT checked" "" "$T/argv-config" console_image_config_row iam-console
 stub_reset; STUB_WALK_OUT="walked=0"
 run_fn E5 1 "too few to prove anything" "" "$T/argv-config" console_image_config_row iam-console
+# E6: a grep rc > 1 (grep itself could not run) must not silently clear the .env scan. A stub
+# `grep` ahead of the docker stub on PATH always exits 2; console_image_config_row's only grep
+# call is the node_modules filter, so this is an honest stand-in for "grep could not run" without
+# touching the harness's own grep-free control flow (check_row/say_fail use `case`, not grep).
+mkdir -p "$T/stub-grep"
+printf '%s\n' '#!/usr/bin/env bash' 'exit 2' > "$T/stub-grep/grep"
+chmod +x "$T/stub-grep/grep"
+stub_reset; STUB_PATH_EXTRA="$T/stub-grep"
+run_fn E6 1 ".env scan NOT checked — grep exited 2" "" "$T/argv-config" console_image_config_row iam-console
 
 # shellcheck disable=SC2016 # the pinned call line is literal text
 pin_rows P1b "$T/fn-smoke_consoles.sh" 'console_image_config_row "$app" || ec=1'
