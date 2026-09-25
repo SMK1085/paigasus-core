@@ -169,6 +169,9 @@ pub enum TokenDefect {
     IssuerNotConfigured,
     AudienceMismatch,
     Oversized,
+    /// The payload `typ` claim marks the token as a Keycloak ID token or back-channel logout
+    /// token, not an access token (SMA-686).
+    NotAnAccessToken,
 }
 
 /// Why just-in-time provisioning of a new identity failed.

@@ -3,7 +3,9 @@
 //! The `Authenticator` v1 implementation (spec §4.1): a provider-agnostic OIDC access token
 //! validator. Pipeline: length cap -> header decode + alg allowlist + `kid` presence ->
 //! unverified `iss` read -> exact issuer match -> JWKS `kid` lookup -> JWK/alg family
-//! consistency -> signature + claims validation (issuer/audience/expiry) -> `ValidatedClaims`.
+//! consistency -> signature + claims validation (issuer/audience/expiry) -> payload `typ`
+//! check -> `ValidatedClaims`. The `typ` check is the one Keycloak-specific rule (SMA-686): it
+//! refuses a Keycloak ID token or logout token, and passes every token without such a `typ`.
 //! Never logs token or claim material (`TokenDefect` itself carries no payload).
 
 use async_trait::async_trait;
@@ -24,6 +26,12 @@ use crate::config::IssuerConfig;
 /// verification artifact sign forged tokens) and `none` (which `jsonwebtoken` doesn't even
 /// model as an `Algorithm` variant).
 const ALLOWED_ALGORITHMS: [Algorithm; 2] = [Algorithm::RS256, Algorithm::ES256];
+
+/// Payload `typ` values that mark a token as NOT an access token (SMA-686 spec D2). Keycloak
+/// sets `ID` on its ID token and `Logout` on its back-channel logout token; its access token
+/// carries `Bearer` (or `DPoP`). Compared ASCII case-insensitively. A denylist, not an
+/// allowlist: an IdP that sets no `typ` (Dex, measured) must keep working (spec D1).
+const NON_ACCESS_TOKEN_TYPES: [&str; 2] = ["ID", "Logout"];
 
 /// One configured issuer, parsed once at construction — replacing the per-request
 /// `Issuer::parse` the request path used to run after every issuer match.
@@ -128,7 +136,8 @@ impl WireAudience {
 /// The claims this validator reads off a token, deserialized only AFTER `jsonwebtoken` has
 /// verified the signature (spec §4.1). `sub`/`exp`/`aud` are required — their absence (or a
 /// wrong-shaped value) is a serde failure, which `map_jwt_error` collapses to `Malformed`;
-/// the profile claims are optional since an IdP may omit any of them.
+/// the profile claims are optional since an IdP may omit any of them. `typ` is an untyped
+/// `Value` on purpose (SMA-686 spec D6): a non-string `typ` must not become `Malformed`.
 #[derive(Deserialize)]
 struct WireClaims {
     sub: String,
@@ -138,6 +147,7 @@ struct WireClaims {
     name: Option<String>,
     locale: Option<String>,
     zoneinfo: Option<String>,
+    typ: Option<serde_json::Value>,
 }
 
 /// Maps a `jsonwebtoken` decode/validation failure to a `TokenDefect` (spec §4.1). Every
@@ -164,6 +174,18 @@ fn check_kty_matches_alg(jwk: &Jwk, alg: Algorithm) -> Result<(), AuthnError> {
         (AlgorithmParameters::RSA(_), Algorithm::RS256) | (AlgorithmParameters::EllipticCurve(_), Algorithm::ES256)
     );
     if consistent { Ok(()) } else { Err(invalid(TokenDefect::UnsupportedAlg)) }
+}
+
+/// Refuses a token whose payload `typ` is one of `NON_ACCESS_TOKEN_TYPES` (SMA-686). Runs on
+/// signature-verified claims only (spec D5). A missing, `null` or non-string `typ` passes.
+fn check_access_token_type(_issuer: &Issuer, claims: &WireClaims) -> Result<(), AuthnError> {
+    let Some(serde_json::Value::String(typ)) = &claims.typ else {
+        return Ok(());
+    };
+    match NON_ACCESS_TOKEN_TYPES.iter().find(|marker| typ.eq_ignore_ascii_case(marker)) {
+        Some(_marker) => Err(invalid(TokenDefect::NotAnAccessToken)),
+        None => Ok(()),
+    }
 }
 
 #[async_trait]
@@ -200,6 +222,9 @@ impl<F: JwksFetcher, K: JwksCache, C: Clock> Authenticator for OidcAuthenticator
         validation.validate_nbf = true;
 
         let token_data = decode::<WireClaims>(token, &decoding_key, &validation).map_err(map_jwt_error)?;
+
+        // 6. Token-type check on the verified claims (SMA-686): a Keycloak ID or logout token.
+        check_access_token_type(&issuer, &token_data.claims)?;
 
         let expires_at = i64::try_from(token_data.claims.exp)
             .ok()
@@ -587,5 +612,71 @@ mod tests {
         let authenticator = make_authenticator(StubFetcher::new(jwk), vec![issuer_config(issuer, &["expected-aud"])], 60, 16_384);
         let err = authenticator.authenticate(&token).await.unwrap_err();
         assert!(matches!(err, AuthnError::InvalidToken(TokenDefect::AudienceMismatch)));
+    }
+
+    // ---- SMA-686: the payload `typ` check -------------------------------------------------
+
+    const ISSUER: &str = "https://idp.example.com";
+
+    /// A token that passes every other check (issuer, audience `aud`, one hour of life),
+    /// plus the claims in `extra`. So only the extra claims differ from an accepted token.
+    fn claims_with(extra: serde_json::Value) -> serde_json::Value {
+        let mut claims = serde_json::json!({
+            "iss": ISSUER,
+            "sub": "sub-1",
+            "aud": "aud",
+            "exp": Utc::now().timestamp() + 3600,
+            "email": "alice@example.com",
+        });
+        let extra = extra.as_object().expect("extra claims are a JSON object").clone();
+        claims.as_object_mut().expect("claims are a JSON object").extend(extra);
+        claims
+    }
+
+    /// Signs `claims` with a fresh ES256 key and runs the full validator pipeline on it.
+    async fn authenticate_json(claims: &serde_json::Value) -> Result<ValidatedClaims, AuthnError> {
+        let (encoding_key, jwk, kid) = es256_keypair();
+        let token = sign(&encoding_key, Some(&kid), claims);
+        let authenticator = make_authenticator(StubFetcher::new(jwk), vec![issuer_config(ISSUER, &["aud"])], 60, 16_384);
+        authenticator.authenticate(&token).await
+    }
+
+    #[tokio::test]
+    async fn refuses_keycloak_id_and_logout_typ() {
+        // Spec § 5.1 tests 1-4: Keycloak sets `typ: ID` on the ID token and `typ: Logout` on the
+        // back-channel logout token (measured, SMA-686 measurements). Case-insensitive.
+        for typ in ["ID", "id", "Logout", "LOGOUT"] {
+            let err = authenticate_json(&claims_with(serde_json::json!({ "typ": typ }))).await.unwrap_err();
+            assert!(
+                matches!(err, AuthnError::InvalidToken(TokenDefect::NotAnAccessToken)),
+                "typ {typ:?} must be refused as NotAnAccessToken, got {err:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn accepts_non_marker_typ_values() {
+        // Spec § 5.1 tests 5-10. The check is a denylist of two values: every other shape passes.
+        let cases = [
+            ("Bearer (Keycloak access token)", serde_json::json!({ "typ": "Bearer" })),
+            ("DPoP (Keycloak DPoP-bound access token)", serde_json::json!({ "typ": "DPoP" })),
+            // Every Dex access token: no `typ`, but `at_hash` and `nonce` (measured). `c_hash`
+            // added too: none of the three is a marker (spec D3).
+            ("Dex shape", serde_json::json!({ "at_hash": "x", "c_hash": "y", "nonce": "abc123" })),
+            ("typ null", serde_json::json!({ "typ": null })),
+            ("typ number", serde_json::json!({ "typ": 1 })),
+            ("typ with leading space", serde_json::json!({ "typ": " ID" })),
+        ];
+        for (name, extra) in cases {
+            authenticate_json(&claims_with(extra)).await.unwrap_or_else(|err| panic!("{name}: must be accepted, got {err:?}"));
+        }
+    }
+
+    #[tokio::test]
+    async fn expired_id_token_reports_expired() {
+        // Spec D5: the check runs after `decode`, so the expiry defect wins.
+        let claims = claims_with(serde_json::json!({ "typ": "ID", "exp": Utc::now().timestamp() - 120 }));
+        let err = authenticate_json(&claims).await.unwrap_err();
+        assert!(matches!(err, AuthnError::InvalidToken(TokenDefect::Expired)), "got {err:?}");
     }
 }
