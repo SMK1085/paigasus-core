@@ -154,7 +154,7 @@ git show cb772393:rs/Cargo.lock > $S/sma685/lock-base
 
 ```bash
 cd "$C"
-curl -s -A 'sma-685-probe (smaschek@outlook.com)' -o /dev/null -w '%{http_code}\n' https://crates.io/api/v1/crates/paigasus-wasm
+curl -s -A 'sma-685-probe' -o /dev/null -w '%{http_code}\n' https://crates.io/api/v1/crates/paigasus-wasm
 ```
 Expected: `404`. If it is `200`, repeat with `paigasus-node-bindings` and use the first name
 that gives 404; write the choice down.

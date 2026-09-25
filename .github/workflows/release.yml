@@ -315,11 +315,11 @@ jobs:
         if: steps.preflight.outputs.configured == 'true'
         run: pnpm --dir ts install --frozen-lockfile
 
-      # release-plz first, ALWAYS, then --write (next step). release-plz owns the
-      # publishable crates' Cargo versions and the [workspace.dependencies] requirements;
-      # --write then brings the nine sites it cannot reach (the three publish = false binding
-      # manifests, pyproject/package.json/the dependency pin) plus the three regenerated sites
-      # into line (SMA-685).
+      # release-plz first, ALWAYS, then --write (next step). release-plz owns the publishable
+      # crates' Cargo versions and the [workspace.dependencies] requirements. --write then
+      # writes the nine sites release-plz cannot reach: the three publish = false binding
+      # manifests, the pyproject/package.json sites, and the dependency pin. It also
+      # regenerates three derived files (SMA-685).
       #
       # Run from rs/: release-plz's config/manifest discovery (./release-plz.toml,
       # ./Cargo.toml) is CWD-relative with no upward search, so this is what makes it find

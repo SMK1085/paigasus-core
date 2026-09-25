@@ -109,7 +109,7 @@ regardless of what its file actually contained, would pass both the real check (
 the negative control for any of those five kinds (since the control never touches that
 reader's file).
 
-**L2 — Fixture-table coverage now spans two of the eight `read_version` kinds, plus the
+**L2 — Fixture-table coverage now spans six of the eight `read_version` kinds, plus the
 cargo-package writer and the production stamping call site.**
 `--self-test` (`SELF_TEST_COUNT=4`) runs four tables: `site_verdict_self_test` (OK/MISMATCH
 logic), `lock_reader_self_test`, `cargo_package_writer_self_test` (SMA-685), and
@@ -133,14 +133,21 @@ tree. It moves the kernel head and the proto head to two distinct sentinels. It 
 every `cargo-package`, `pyproject`, `pyproject-dep` and `packagejson` site back through
 `read_version`; each site must match its own group's sentinel. It also asserts the publishable
 `paigasus-proto-derive` (`cargo-package`, non-head) stayed untouched. This proves the real
-production path, not a synthetic fixture, so it closes the READ half for those four kinds only
-on the real tree's own file shapes.
+production path, not a synthetic fixture. It closes the READ half for those four kinds, but
+only on the real tree's own file shapes.
 
-The remaining three kinds (`cargo-wsdep`, `napi-glue`, and `cargo-package` on a shape other
-than the real tree's own) still have no fixture of their own, so a broken parser inside one
-of them — the wrong TOML key, an off-by-one on the `[[package]]` block split, a regex that
-matches the wrong table — is caught only if it happens to manifest on the real repo's current
-files or on the one non-lock site (`packagejson`) the negative control drifts.
+**Limit, stated plainly.** `stamp_sites_self_test` reads back through `read_version`. This is
+the same function it is meant to check. A `cargo-package` reader that always printed the
+head's version would still pass this table. The site's real value and the head sentinel are
+the same value, by construction. This table proves `stamp_sites` writes the right sites. It
+does not prove `read_version` reads them correctly, on its own.
+
+The remaining two kinds (`cargo-wsdep` and `napi-glue`) still have no fixture of their own, so
+a broken parser inside one of them — the wrong TOML key, an off-by-one on the `[[package]]`
+block split, a regex that matches the wrong table — is caught only if it happens to manifest on
+the real repo's current files or on the one non-lock site (`packagejson`) the negative control
+drifts. The `cargo-package` kind's READ side is also proven only on the real tree's own file
+shapes, not on the varied layouts the write-side fixtures cover.
 
 **L3 — The non-vacuity anchors are literals, not derived.** Both the `checked == ${#SITES[@]}`
 loop guard and the `EXPECTED_SITE_COUNT` anchor above it are numbers, not a comparison against

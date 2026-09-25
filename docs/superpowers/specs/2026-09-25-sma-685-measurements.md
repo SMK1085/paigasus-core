@@ -175,7 +175,7 @@ MEASURED: tag `m1-result` = `37cced8b114e85769023451897a899dd57d05b79`.
 Crates.io check (as run):
 
 ```bash
-curl -s -A 'sma-685-probe (smaschek@outlook.com)' -o /dev/null -w '%{http_code}\n' https://crates.io/api/v1/crates/paigasus-wasm
+curl -s -A 'sma-685-probe' -o /dev/null -w '%{http_code}\n' https://crates.io/api/v1/crates/paigasus-wasm
 ```
 
 Verbatim output: `404`. MEASURED. This meets the expectation, so `paigasus-wasm` is the
@@ -458,11 +458,22 @@ rs/crates/libs/paigasus-proto-derive/Cargo.toml:8:version = "0.3.0"
 rs/crates/libs/paigasus-proto/Cargo.toml:6:version = "0.3.0"
 ```
 
-`git diff --stat` (in the clone, after the run) touched 12 files. These are the copied-in
-`ci/version-lockstep/run.sh` itself, and the two kernel/proto `pyproject.toml` sites. They
-also include `py/uv.lock`, `rs/Cargo.lock`, and the three binding `Cargo.toml` files. Two
-more are the node binding's generated `index.js` and `package.json`. The last is the wasm
-binding's `package.json`.
+`git diff --stat` (in the clone, after the run) touched 12 files. The stored output for this
+step does not list the file names. The list below is reconstructed from the SITES table, not
+from the stored output. The 12 files:
+
+- the copied-in `ci/version-lockstep/run.sh`
+- `rs/crates/bindings/paigasus-py-bindings/pyproject.toml` (kernel)
+- `py/packages/paigasus-kernel/pyproject.toml` (kernel)
+- `py/packages/paigasus-proto/pyproject.toml` (proto)
+- `py/uv.lock`
+- `rs/Cargo.lock`
+- `rs/crates/bindings/paigasus-py-bindings/Cargo.toml`
+- `rs/crates/bindings/paigasus-node-bindings/Cargo.toml`
+- `rs/crates/bindings/paigasus-wasm/Cargo.toml`
+- `rs/crates/bindings/paigasus-node-bindings/index.js`
+- `rs/crates/bindings/paigasus-node-bindings/package.json`
+- `rs/crates/bindings/paigasus-wasm/package.json`
 
 MEASURED: `--write` exits 0 and writes 9 sites, three more than M3.1 (the three
 `publish = false` bindings). `--check` exits 0 and reports all 20 sites agree. The kernel and

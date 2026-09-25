@@ -148,18 +148,20 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   the sole judge of its own reachability; `repo:actionlint`'s own `inputs: ['**/*']` — the
   premise check 8e (and 8/8b/8c/8d) runs on every PR at all — is pinned the ordinary way, from
   `SELF_TASK_EXPECTED_GLOBS["actionlint"]` in `ci_targets.py`.
-- The kernel family (`paigasus-kernel`, the three binding crates, and their `pyproject.toml` /
-  `package.json` faces) carries **one version** across twenty sites. `repo:version-lockstep`
-  (`ci/version-lockstep/run.sh`) asserts this. release-plz owns the Cargo `[package] version`
+- `repo:version-lockstep` (`ci/version-lockstep/run.sh`) checks twenty sites across two
+  lockstep families: thirteen kernel sites and seven proto sites. Each family carries one
+  version across its own sites. The kernel family is `paigasus-kernel`, its three binding
+  crates, and their `pyproject.toml` and `package.json` files. The proto family is
+  `paigasus-proto` and `paigasus-proto-derive`. release-plz owns the Cargo `[package] version`
   of each group's publishable crates, and the `[workspace.dependencies]` version requirements
-  (measured against 0.3.158). It does NOT write a Cargo `publish = false` crate (SMA-685). The
-  script owns nine sites (`--write`): the six non-Cargo sites and the three `publish = false`
-  binding manifests. It checks all twenty sites, because an applying `version_group` could
-  silently stop working. Today that risk is real only for `paigasus-proto-derive`. Two of the
-  sites drift SILENTLY without it: `py/uv.lock` (its `moon.yml` runs bare `uv sync`, not
-  `--locked`) and the 26 `bindingPackageVersion` guards in the committed napi glue (the
-  codegen-drift gate covers only the three `**/generated` proto dirs).
-  `repo:version-lockstep` is script-pinned the same way the
+  (measured against 0.3.158). It does NOT write a Cargo `publish = false` crate (SMA-685).
+- `--write` owns nine sites: five kernel non-Cargo sites, one proto pyproject site, and three
+  binding manifests. The script checks all twenty sites, because a `version_group` fault could
+  stop applying silently. Today that risk is real only for `paigasus-proto-derive`. Two sites
+  drift silently without this check. `py/uv.lock` drifts because its `moon.yml` runs bare
+  `uv sync`, not `--locked`. The 26 `bindingPackageVersion` guards in the committed napi glue
+  drift because the codegen-drift gate covers only the three `**/generated` proto dirs.
+- `repo:version-lockstep` is script-pinned the same way the
   `release-parity*` tasks are — `SELF_SCHEDULED_GATES` pins its **four** `moon.yml` lines
   (`--self-test`, `--negative-control`, the real run, and `set -euo pipefail`; one more than the
   `release-parity*` tasks, which have no self-test invocation) — and takes the
