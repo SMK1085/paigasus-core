@@ -73,6 +73,14 @@ test('R12: sign out posts /iam/auth/logout, and /iam/orgs then redirects to logi
   await page.waitForURL((url) => /^\/iam\/?$/.test(url.pathname));
   expect((await request.response())?.status()).toBe(302);
 
+  // SMA-681 AC 1, in a REQUIRED tier: the end-session request carried the login ID token as
+  // id_token_hint. The fake IdP issues no ID token on a refresh, so the last one issued is the
+  // login's. J1 (tests/cluster/journeys/auth-roundtrip.spec.ts) proves the same against Keycloak,
+  // in the chart job, which is not a required check.
+  const loginIdToken = harness.idp.idTokens.at(-1);
+  expect(loginIdToken, 'the fake IdP issued an id_token at login').toBeDefined();
+  expect(harness.idp.endSessionHints.at(-1), 'the end-session request carries the login id_token as id_token_hint').toBe(loginIdToken);
+
   expect((await page.context().cookies()).filter((cookie) => cookie.name === '__Host-pgs_sid')).toEqual([]);
   const again = await page.request.get(harness.url('/iam/orgs'), { maxRedirects: 0 });
   expect([302, 303, 307]).toContain(again.status());

@@ -26,6 +26,10 @@ export type FakeIdp = {
   readonly tokenRedirectUris: string[];
   /** Every token pair /token issued, in order (authorization_code and refresh_token grants). */
   readonly issued: { accessToken: string; refreshToken: string }[];
+  /** Every id_token /token issued, in order. Only an authorization_code grant issues one. */
+  readonly idTokens: string[];
+  /** The `id_token_hint` of every /logout request, in order: `null` when a request had none (SMA-681). */
+  readonly endSessionHints: (string | null)[];
   close(): Promise<void>;
 };
 
@@ -73,6 +77,8 @@ export async function startFakeIdp(opts: { cert: TlsMaterial; subject?: string; 
   const authorizeRedirectUris: string[] = [];
   const tokenRedirectUris: string[] = [];
   const issued: { accessToken: string; refreshToken: string }[] = [];
+  const idTokens: string[] = [];
+  const endSessionHints: (string | null)[] = [];
   let issuer = '';
 
   const mint = (): { accessToken: string; refreshToken: string } => {
@@ -120,7 +126,9 @@ export async function startFakeIdp(opts: { cert: TlsMaterial; subject?: string; 
         return;
       }
       const pair = mint();
-      json(res, 200, { access_token: pair.accessToken, refresh_token: pair.refreshToken, id_token: await idToken(pending.nonce), token_type: 'Bearer', expires_in: 3600 });
+      const issuedIdToken = await idToken(pending.nonce);
+      idTokens.push(issuedIdToken);
+      json(res, 200, { access_token: pair.accessToken, refresh_token: pair.refreshToken, id_token: issuedIdToken, token_type: 'Bearer', expires_in: 3600 });
       return;
     }
     if (grant === 'refresh_token') {
@@ -191,6 +199,7 @@ export async function startFakeIdp(opts: { cert: TlsMaterial; subject?: string; 
       return;
     }
     if (req.method === 'GET' && url.pathname === '/logout') {
+      endSessionHints.push(url.searchParams.get('id_token_hint'));
       const target = url.searchParams.get('post_logout_redirect_uri');
       if (target === null) {
         res.writeHead(200, { 'content-type': 'text/plain' });
@@ -238,6 +247,8 @@ export async function startFakeIdp(opts: { cert: TlsMaterial; subject?: string; 
     authorizeRedirectUris,
     tokenRedirectUris,
     issued,
+    idTokens,
+    endSessionHints,
     close: () =>
       new Promise<void>((resolve, reject) => {
         server.closeAllConnections();
