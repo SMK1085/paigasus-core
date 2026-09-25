@@ -466,8 +466,13 @@ mkdir -p "$T/fx-node" "$T/fx-nopin"
 printf '%s\n' 'node = "24.16.0"' 'pnpm = "11.3.0"' > "$T/fx-node/.prototools"
 printf '%s\n' 'pnpm = "11.3.0"' > "$T/fx-nopin/.prototools"
 
+# SMA-688: each image row takes `<app> <image>` and must hand docker the IMAGE, never a name it
+# builds from `<app>`. The rows pass the load-oci name, which differs from `<app>:dev`, so a row
+# that tests `${app}:dev` gets a different argv and reds.
+T_IMAGE="paigasus-iam-console:dev"
+
 # The argv that console_node_version_row must hand to docker.
-printf '%s\n' run --rm --entrypoint /nodejs/bin/node iam-console:dev --version -- > "$T/argv-node"
+printf '%s\n' run --rm --entrypoint /nodejs/bin/node "$T_IMAGE" --version -- > "$T/argv-node"
 
 # run_fn <row> <want_rc> <present> <absent> <want-argv-file|none> <fn> [<arg>...] — the
 # production shape: `fn … || rc=$?`, so errexit is off inside the function.
@@ -501,23 +506,23 @@ run_fn() {
 }
 
 stub_reset
-run_fn N0 0 "" "::warning::" "$T/argv-node" console_node_version_row iam-console
+run_fn N0 0 "" "::warning::" "$T/argv-node" console_node_version_row iam-console "$T_IMAGE"
 stub_reset; STUB_VERSION_OUT="v24.14.0"
-run_fn N1 0 "::warning::iam-console: the runtime image runs Node 24.14.0|refresh closes the gap" "::error::" "$T/argv-node" console_node_version_row iam-console
+run_fn N1 0 "::warning::iam-console: the runtime image runs Node 24.14.0|refresh closes the gap" "::error::" "$T/argv-node" console_node_version_row iam-console "$T_IMAGE"
 stub_reset; STUB_VERSION_OUT="v24.18.0"
-run_fn N1b 0 "::warning::iam-console: the runtime image runs Node 24.18.0|bump .prototools" "::error::" "$T/argv-node" console_node_version_row iam-console
+run_fn N1b 0 "::warning::iam-console: the runtime image runs Node 24.18.0|bump .prototools" "::error::" "$T/argv-node" console_node_version_row iam-console "$T_IMAGE"
 stub_reset; STUB_VERSION_OUT="v23.1.0"
-run_fn N2 1 "a different major" "" "$T/argv-node" console_node_version_row iam-console
+run_fn N2 1 "a different major" "" "$T/argv-node" console_node_version_row iam-console "$T_IMAGE"
 stub_reset; STUB_VERSION_OUT="garbage"
-run_fn N3 1 "could not parse" "" "$T/argv-node" console_node_version_row iam-console
+run_fn N3 1 "could not parse" "" "$T/argv-node" console_node_version_row iam-console "$T_IMAGE"
 stub_reset; STUB_VERSION_OUT=""; STUB_VERSION_RC=125
-run_fn N4 1 "NOT checked — docker exited 125" "" "$T/argv-node" console_node_version_row iam-console
+run_fn N4 1 "NOT checked — docker exited 125" "" "$T/argv-node" console_node_version_row iam-console "$T_IMAGE"
 stub_reset; FX_ROOT="$T/fx-nopin"
-run_fn N5 1 'no node = "X.Y.Z" pin' "" none console_node_version_row iam-console
+run_fn N5 1 'no node = "X.Y.Z" pin' "" none console_node_version_row iam-console "$T_IMAGE"
 # docker prints a platform-mismatch WARNING on stderr when an amd64 image runs on an arm64 host.
 # Only stdout is parsed, so the row stays green.
 stub_reset; STUB_VERSION_ERR="WARNING: The requested image's platform (linux/amd64) does not match the detected host platform (linux/arm64/v8)"
-run_fn N6 0 "" "could not parse" "$T/argv-node" console_node_version_row iam-console
+run_fn N6 0 "" "could not parse" "$T/argv-node" console_node_version_row iam-console "$T_IMAGE"
 
 # --- call-site rows (P1, P2) -------------------------------------------------------------------
 # A row function that smoke_consoles no longer calls proves nothing, and every row above stays
@@ -554,28 +559,28 @@ pin_rows() {
 }
 
 # shellcheck disable=SC2016 # the pinned call line is literal text
-pin_rows P1a "$T/fn-smoke_consoles.sh" 'console_node_version_row "$app" || ec=1'
+pin_rows P1a "$T/fn-smoke_consoles.sh" 'console_node_version_row "$app" "$image" || ec=1'
 
 # --- console_image_config_row (E rows) ---------------------------------------------------------
 # The argv that console_image_config_row must hand to docker: the Config.Env read, then the walk.
-printf '%s\n' image inspect --format '{{range .Config.Env}}{{println .}}{{end}}' iam-console:dev -- \
-  run --rm --entrypoint /nodejs/bin/node iam-console:dev -e '<multi-line>' /app -- > "$T/argv-config"
+printf '%s\n' image inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$T_IMAGE" -- \
+  run --rm --entrypoint /nodejs/bin/node "$T_IMAGE" -e '<multi-line>' /app -- > "$T/argv-config"
 
 stub_reset
-run_fn E0 0 "" "::error::" "$T/argv-config" console_image_config_row iam-console
+run_fn E0 0 "" "::error::" "$T/argv-config" console_image_config_row iam-console "$T_IMAGE"
 # The error names the key and never the value.
 stub_reset; STUB_ENV_OUT="$(printf '%s\n' 'PATH=/usr/bin' 'PAIGASUS_X=secret-value')"
-run_fn E1 1 "bakes PAIGASUS_X" "secret-value" "$T/argv-config" console_image_config_row iam-console
+run_fn E1 1 "bakes PAIGASUS_X" "secret-value" "$T/argv-config" console_image_config_row iam-console "$T_IMAGE"
 stub_reset; STUB_WALK_OUT="$(printf '%s\n' 'walked=1300' '/app/apps/x/.env')"
-run_fn E2 1 "holds .env file" "" "$T/argv-config" console_image_config_row iam-console
+run_fn E2 1 "holds .env file" "" "$T/argv-config" console_image_config_row iam-console "$T_IMAGE"
 stub_reset; STUB_WALK_OUT="$(printf '%s\n' 'walked=1300' '/app/node_modules/p/.env.example')"
-run_fn E2b 0 "" "::error::" "$T/argv-config" console_image_config_row iam-console
+run_fn E2b 0 "" "::error::" "$T/argv-config" console_image_config_row iam-console "$T_IMAGE"
 stub_reset; STUB_ENV_OUT=""; STUB_ENV_RC=1
-run_fn E3 1 "image config NOT checked" "" "$T/argv-config" console_image_config_row iam-console
+run_fn E3 1 "image config NOT checked" "" "$T/argv-config" console_image_config_row iam-console "$T_IMAGE"
 stub_reset; STUB_WALK_OUT=""; STUB_WALK_RC=125
-run_fn E4 1 ".env scan NOT checked" "" "$T/argv-config" console_image_config_row iam-console
+run_fn E4 1 ".env scan NOT checked" "" "$T/argv-config" console_image_config_row iam-console "$T_IMAGE"
 stub_reset; STUB_WALK_OUT="walked=0"
-run_fn E5 1 "too few to prove anything" "" "$T/argv-config" console_image_config_row iam-console
+run_fn E5 1 "too few to prove anything" "" "$T/argv-config" console_image_config_row iam-console "$T_IMAGE"
 # E6: a grep rc > 1 (grep itself could not run) must not silently clear the .env scan. A stub
 # `grep` ahead of the docker stub on PATH always exits 2; console_image_config_row's only grep
 # call is the node_modules filter, so this is an honest stand-in for "grep could not run" without
@@ -584,10 +589,10 @@ mkdir -p "$T/stub-grep"
 printf '%s\n' '#!/usr/bin/env bash' 'exit 2' > "$T/stub-grep/grep"
 chmod +x "$T/stub-grep/grep"
 stub_reset; STUB_PATH_EXTRA="$T/stub-grep"
-run_fn E6 1 ".env scan NOT checked — grep exited 2" "" "$T/argv-config" console_image_config_row iam-console
+run_fn E6 1 ".env scan NOT checked — grep exited 2" "" "$T/argv-config" console_image_config_row iam-console "$T_IMAGE"
 
 # shellcheck disable=SC2016 # the pinned call line is literal text
-pin_rows P1b "$T/fn-smoke_consoles.sh" 'console_image_config_row "$app" || ec=1'
+pin_rows P1b "$T/fn-smoke_consoles.sh" 'console_image_config_row "$app" "$image" || ec=1'
 
 # --- console_healthcheck_row (H rows) ----------------------------------------------------------
 # The argv that console_healthcheck_row must hand to docker (through with_deadline).
