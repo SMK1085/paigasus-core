@@ -407,11 +407,12 @@ s, n = re.subn(r'(?m)^version = "[^"]*"$', 'version = "9.9.9"', s, count=1)
 assert n == 1, "no kernel version line"
 open(p, "w", encoding="utf-8").write(s)
 PY
-  # Move the proto head to a SECOND, different sentinel. paigasus-proto-derive is a publishable
-  # (not publish = false) non-head cargo-package site, already at the same version as the proto
-  # head in the real tree — so without this second, distinct sentinel, a mutation that deletes
-  # the publish = false filter would still leave derive_before == derive_after by coincidence,
-  # and this table would not catch it.
+  # Move the proto head to a SECOND, different sentinel.
+  # paigasus-proto-derive is publishable, not publish = false, and it is a non-head cargo-package
+  # site. In the real tree, it starts at the same version as the proto head.
+  # So this test needs a second, different sentinel. Without it, a mutation could delete the
+  # publish = false filter, and derive_before could then equal derive_after by coincidence.
+  # This table would then miss the mutation.
   python3 - "$tmp/rs/crates/libs/paigasus-proto/Cargo.toml" <<'PY'
 import re, sys
 p = sys.argv[1]; s = open(p, encoding="utf-8").read()

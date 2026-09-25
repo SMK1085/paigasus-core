@@ -54,14 +54,21 @@ features_always_increment_minor = true
 dependencies_update = false
 
 # --- Releasable: the kernel family (ADR-0011 S1) ------------------------------------------
-# One version across crates.io/PyPI/npm. `version_group` holds them together, and it DOES
-# apply to crates whose Cargo manifest says `publish = false` (measured) — which is exactly
-# what the three binding crates need, since they ship as maturin/napi/wasm byproducts rather
-# than to crates.io.
-# CONFLICT (SMA-685): SMA-680 M1 measured `release-plz update` NOT carrying the head's bump to
-# these three crates. version-lockstep --write does NOT write Cargo versions (run.sh:570), and
-# its --check compares them with the head, so it can fail. Cause open.
-# `repo:version-lockstep` asserts the non-Cargo manifests follow.
+# One version across crates.io/PyPI/npm. release-plz 0.3.158 bumps ONLY `paigasus-kernel` here.
+# It never writes the version of a crate whose Cargo manifest says `publish = false`, version
+# group or not (READ: `packages_to_process()`, release_plz_core updater.rs:283-302, takes only
+# Cargo-publishable and `git_only` crates; version groups are computed over that set only,
+# updater.rs:162-189; MEASURED, SMA-685 M1 and M1b). So `version_group` and `release = true`
+# on the three binding crates below are INERT today. They stay as the declaration, in case a
+# later pin changes the filter; read the source again when .prototools moves the pin.
+# The binding versions come from `ci/version-lockstep/run.sh --write`, which the release-PR
+# job's stamp step runs (SMA-685). It writes each `publish = false` non-head crate's version
+# from the head. `repo:version-lockstep` then checks every site.
+# An earlier comment here said `version_group` applies to these crates "(measured)". It was
+# wrong: the bindings reached 0.1.0 by hand (e2007d55). The SMA-407 fixture most probably ran
+# with `git_only = true` (INFERRED). M1c could not test this. `git_only` failed with a
+# repository NotFound error at manifest_dir rs/ instead, a new failure mode on this layout
+# (MEASURED, SMA-685 M1c). That error also counts against `git_only` as a fix.
 # GITHUB RELEASES (SMA-579 §2.1). release-plz creates one per released package by default, which
 # would mean SIX release pages per release commit for two lockstep families. Only the two family
 # HEADS carry one, each with its family's changelog. MEASURED on the first live release: exactly
@@ -87,11 +94,10 @@ release = true
 # publish = false MIRRORS each crate's Cargo manifest. release-plz reads an ABSENT publish key as
 # `publish = true` and hard-errors on the contradiction ("has `publish = false` ... in the
 # Cargo.toml, but it has `publish = true` in the release-plz configuration"), which blocked
-# `release-plz release` entirely — measured on this repo before SMA-579 fixed it. `release = true`
-# stays: it keeps these crates in the version group repo:version-lockstep asserts.
-# It does NOT get them tagged — see the TAGS note above; the first live release tagged only the
-# three crates it published. Version-grouped, never tagged, never uploaded to crates.io — they
-# ship as maturin/napi/wasm byproducts to PyPI and npm instead.
+# `release-plz release` entirely — measured on this repo before SMA-579 fixed it.
+# `release = true` and `version_group` are inert on these crates (see the kernel-family note
+# above): release-plz neither bumps nor tags them. Their versions come from
+# `version-lockstep --write`. They ship as maturin/napi/wasm byproducts to PyPI and npm.
 [[package]]
 name = "paigasus-py-bindings"
 version_group = "kernel"
@@ -144,10 +150,8 @@ git_release_enable = false
 # paigasus-gateway / paigasus-iam are versioned BY HAND (SMA-658): each moved to 0.1.0 at the
 # first image release. `packages_to_process()` filters on Cargo's own `publish` field, and
 # neither crate is in a `version_group`, so `release-plz update` never sees them (M7, measured on
-# 0.3.158). That is the scoped claim, not a blanket one: a `publish = false` crate INSIDE a group
-# whose head is publishable still gets its `[package] version` written — the comment on the
-# kernel group above records that, also measured. SMA-680 M1 measured the opposite for
-# `release-plz update` alone; see the CONFLICT (SMA-685) note there.
+# 0.3.158). The same filter applies to every Cargo `publish = false` crate, in a version group or
+# not (READ, SMA-685; see the kernel-family note above).
 # `env!("CARGO_PKG_VERSION")` feeds the ServiceInfo descriptor, and ADR-0020 skew reporting is
 # parked on that value (SMA-505 R7).
 #

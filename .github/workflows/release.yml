@@ -315,10 +315,11 @@ jobs:
         if: steps.preflight.outputs.configured == 'true'
         run: pnpm --dir ts install --frozen-lockfile
 
-      # release-plz first, ALWAYS, then --write (next step). release-plz owns every Cargo
-      # version and the [workspace.dependencies] requirements; --write then brings the six
-      # sites it cannot reach (pyproject/package.json/the dependency pin) plus the three
-      # regenerated sites into line.
+      # release-plz first, ALWAYS, then --write (next step). release-plz owns the
+      # publishable crates' Cargo versions and the [workspace.dependencies] requirements;
+      # --write then brings the nine sites it cannot reach (the three publish = false binding
+      # manifests, pyproject/package.json/the dependency pin) plus the three regenerated sites
+      # into line (SMA-685).
       #
       # Run from rs/: release-plz's config/manifest discovery (./release-plz.toml,
       # ./Cargo.toml) is CWD-relative with no upward search, so this is what makes it find
@@ -351,7 +352,7 @@ jobs:
       # is therefore NEVER the branch to act on — the branch comes only from the JSON above,
       # never from `git rev-parse --abbrev-ref HEAD` (which would still read "main" here and
       # push straight to it).
-      - name: Stamp the non-Cargo manifests onto the release PR branch
+      - name: Stamp the lockstep manifests onto the release PR branch
         if: steps.preflight.outputs.configured == 'true'
         env:
           PR_JSON: ${{ steps.release_pr.outputs.json }}
@@ -392,7 +393,7 @@ jobs:
           git config user.name  "paigasusbot[bot]"
           git config user.email "285361405+paigasusbot[bot]@users.noreply.github.com"
           git add -A
-          git commit -m "chore(rs): stamp the non-Cargo manifests to the release version"
+          git commit -m "chore(rs): stamp the lockstep manifests to the release version"
           git push "$AUTH_REMOTE" "HEAD:$BRANCH"
 
   # THE SKIP DECISION (SMA-603). Without this, every push to `main` with the flag on builds the
@@ -630,8 +631,9 @@ jobs:
       # `{"releases":[{"package_name":...,"version":...}]}` (measured against release_plz_core
       # 0.36.14 — "releases"/"package_name", NOT "prs"/"package", which is the OTHER command's
       # shape). paigasus-py-bindings is Cargo `publish = false`, so release-plz never reports
-      # it — bind against paigasus-kernel instead, which it definitely reports and which
-      # version_group holds to the identical number (repo:version-lockstep asserts that).
+      # it — bind against paigasus-kernel instead, which it definitely reports and which the
+      # stamp step's version-lockstep --write holds to the identical number (repo:version-lockstep
+      # asserts that).
       - name: Read the released version
         id: relinfo
         env:
