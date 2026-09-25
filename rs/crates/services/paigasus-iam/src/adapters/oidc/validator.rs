@@ -227,7 +227,8 @@ impl WireAudience {
 /// wrong-shaped value) is a serde failure, which `map_jwt_error` collapses to `Malformed`. `aud`
 /// is `Option` so that a token WITHOUT `aud` reaches `jsonwebtoken::validate`, which refuses it
 /// with `MissingRequiredClaim("aud")` because `authenticate` puts `aud` in
-/// `required_spec_claims` (SMA-686 D13); a wrong-typed `aud` still fails serde (`Malformed`).
+/// `required_spec_claims` (SMA-686 D13); a wrong-typed `aud` still fails serde (`Malformed`); a
+/// JSON `null` `aud` counts as missing (`AudienceMismatch`).
 /// The profile claims are optional since an IdP may omit any of them. `typ` and `events` are
 /// untyped `Value`s on purpose (SMA-686 D6, D12): a non-string `typ` or a non-object `events`
 /// must not become `Malformed`.
@@ -955,6 +956,13 @@ mod tests {
         // D13: a wrong-typed aud fails serde first — Malformed, as before.
         let err = authenticate_json(&claims_with(serde_json::json!({ "aud": 7 }))).await.unwrap_err();
         assert!(matches!(err, AuthnError::InvalidToken(TokenDefect::Malformed)), "got {err:?}");
+    }
+
+    #[tokio::test]
+    async fn null_audience_is_audience_mismatch() {
+        // D13: `aud: null` deserializes as None and jsonwebtoken reports it as missing.
+        let err = authenticate_json(&claims_with(serde_json::json!({ "aud": null }))).await.unwrap_err();
+        assert!(matches!(err, AuthnError::InvalidToken(TokenDefect::AudienceMismatch)), "got {err:?}");
     }
 
     #[tokio::test]
