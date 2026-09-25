@@ -1107,6 +1107,69 @@ console_node_version_row() {
   echo "  ${app}: runtime Node ${line#v} matches .prototools"
 }
 
+# R-CONFIG (SMA-670 gap 2c, the behavioural half). Two reads of the image, and both need only the
+# image. (1) Config.Env must hold no PAIGASUS_* key; the error names the key, never the value.
+# (2) The image's own node walks /app without following symlinks, and no file whose base name
+# starts with `.env` may be there outside node_modules: Next loads `.env*` from the server's own
+# directory at runtime, so a value in such a file is baked configuration. A dependency can ship an
+# `.env.example`, so a path with a node_modules directory in it is not reported. The walk still
+# counts those files, and a count under 100 means that it read the wrong tree (measured: 1367 files
+# in iam-console, 1324 in gateway-console).
+console_image_config_row() {
+  local app="$1" rc=0 env_out env_rc=0 keys key walk_out walk_rc=0 first n paths
+  local walk_js='
+const fs = require("fs");
+let walked = 0;
+const found = [];
+const walk = (d) => {
+  for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+    const p = d + "/" + e.name;
+    if (e.isDirectory()) { walk(p); continue; }
+    walked++;
+    if (e.name.startsWith(".env")) found.push(p);
+  }
+};
+walk(process.argv[1]);
+console.log(["walked=" + walked].concat(found).join("\n"));
+'
+  env_out="$(docker image inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "${app}:dev")" || env_rc=$?
+  if [ "$env_rc" -ne 0 ]; then
+    echo "::error::${app}: image config NOT checked — docker image inspect exited ${env_rc} on ${app}:dev, so the image is missing or unreadable." >&2
+    rc=1
+  else
+    keys="$(printf '%s\n' "$env_out" | sed -n 's/^\(PAIGASUS_[^=]*\)=.*$/\1/p')" || keys=""
+    if [ -n "$keys" ]; then
+      while IFS= read -r key; do
+        echo "::error::${app}:dev bakes ${key} into Config.Env — console config is deployment-varying and must stay runtime-only (the value is not printed)." >&2
+      done < <(printf '%s\n' "$keys")
+      rc=1
+    fi
+  fi
+  walk_out="$(docker run --rm --entrypoint /nodejs/bin/node "${app}:dev" -e "$walk_js" /app)" || walk_rc=$?
+  if [ "$walk_rc" -ne 0 ]; then
+    echo "::error::${app}: .env scan NOT checked — the walk exited ${walk_rc} on ${app}:dev, so the image is missing or unreadable." >&2
+    return 1
+  fi
+  first="$(printf '%s\n' "$walk_out" | sed -n 1p)" || first=""
+  n=""
+  case "$first" in walked=*) n="${first#walked=}" ;; esac
+  case "$n" in ''|*[!0-9]*) n="" ;; esac
+  if [ -z "$n" ] || [ "$n" -lt 100 ]; then
+    echo "::error::${app}: .env scan walked ${n:-an unreadable number of ('${first}')} files under /app — too few to prove anything; the walk read the wrong tree." >&2
+    return 1
+  fi
+  # The node_modules filter is here, not in the JS, so the self-test's stub rows exercise it.
+  # grep -v rc 1 means "every path was under node_modules", which leaves `paths` empty.
+  paths="$(printf '%s\n' "$walk_out" | sed -n '2,$p' | grep -v '/node_modules/')" || paths=""
+  if [ -n "$paths" ]; then
+    echo "::error::${app}: the image holds .env file(s) under /app outside node_modules; Next loads them at runtime, so a value in them is baked configuration. The paths follow." >&2
+    printf '%s\n' "$paths" >&2
+    return 1
+  fi
+  if [ "$rc" -ne 0 ]; then return 1; fi
+  echo "  ${app}: no PAIGASUS_* in Config.Env and no .env file in /app (${n} files walked)"
+}
+
 # Every `$( )` here is either guarded with `|| <var>=""` and followed by an explicit check that
 # prints its own named ::error::, or provably unable to fail before its own message. That is not
 # decoration: under `set -euo pipefail` an unguarded failing capture aborts the whole script on
@@ -1408,6 +1471,7 @@ smoke_consoles() {
     # SMA-670: image-only rows. They need only the image, so they run whether or not the
     # container started. ci/images/console-selftest.sh pins each call line, `|| ec=1` included.
     console_node_version_row "$app" || ec=1
+    console_image_config_row "$app" || ec=1
 
     # Spec § 5.5 assertion 4 — staged-tree parity. ts/Dockerfile's staging of .next/static and
     # public/ and ts/apps/<app>/moon.yml's `build` script are a SECOND staging site each, created

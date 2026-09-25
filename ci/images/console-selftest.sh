@@ -33,7 +33,7 @@ REPO="$(cd "$HERE/../.." && pwd)"
 RUN_SH="$HERE/run.sh"
 
 # The functions copied out of run.sh. A task that adds a function to run.sh adds its name here.
-FUNCS="assert_console_pins with_deadline console_node_version_row smoke_consoles"
+FUNCS="assert_console_pins with_deadline console_node_version_row smoke_consoles console_image_config_row"
 
 T="$(mktemp -d "${TMPDIR:-/tmp}/paigasus-console-selftest.XXXXXX")"
 HC_CTR="selftest-hc-$$"
@@ -476,6 +476,30 @@ pin_rows() {
 
 # shellcheck disable=SC2016 # the pinned call line is literal text
 pin_rows P1a "$T/fn-smoke_consoles.sh" 'console_node_version_row "$app" || ec=1'
+
+# --- console_image_config_row (E rows) ---------------------------------------------------------
+# The argv that console_image_config_row must hand to docker: the Config.Env read, then the walk.
+printf '%s\n' image inspect --format '{{range .Config.Env}}{{println .}}{{end}}' iam-console:dev -- \
+  run --rm --entrypoint /nodejs/bin/node iam-console:dev -e '<multi-line>' /app -- > "$T/argv-config"
+
+stub_reset
+run_fn E0 0 "" "::error::" "$T/argv-config" console_image_config_row iam-console
+# The error names the key and never the value.
+stub_reset; STUB_ENV_OUT="$(printf '%s\n' 'PATH=/usr/bin' 'PAIGASUS_X=secret-value')"
+run_fn E1 1 "bakes PAIGASUS_X" "secret-value" "$T/argv-config" console_image_config_row iam-console
+stub_reset; STUB_WALK_OUT="$(printf '%s\n' 'walked=1300' '/app/apps/x/.env')"
+run_fn E2 1 "holds .env file" "" "$T/argv-config" console_image_config_row iam-console
+stub_reset; STUB_WALK_OUT="$(printf '%s\n' 'walked=1300' '/app/node_modules/p/.env.example')"
+run_fn E2b 0 "" "::error::" "$T/argv-config" console_image_config_row iam-console
+stub_reset; STUB_ENV_OUT=""; STUB_ENV_RC=1
+run_fn E3 1 "image config NOT checked" "" "$T/argv-config" console_image_config_row iam-console
+stub_reset; STUB_WALK_OUT=""; STUB_WALK_RC=125
+run_fn E4 1 ".env scan NOT checked" "" "$T/argv-config" console_image_config_row iam-console
+stub_reset; STUB_WALK_OUT="walked=0"
+run_fn E5 1 "too few to prove anything" "" "$T/argv-config" console_image_config_row iam-console
+
+# shellcheck disable=SC2016 # the pinned call line is literal text
+pin_rows P1b "$T/fn-smoke_consoles.sh" 'console_image_config_row "$app" || ec=1'
 
 # --- summary -----------------------------------------------------------------------------------
 echo "console-selftest: ${N_PASS} passed, ${N_FAIL} failed, ${N_SKIP} skipped"
