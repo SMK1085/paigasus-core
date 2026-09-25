@@ -38,6 +38,14 @@ export interface RefreshedTokens {
   accessToken: string;
   refreshToken?: string;
   expiresIn: number; // seconds
+  /**
+   * SMA-681. `refresh` sets both of these, and only when the response carries an ID token.
+   * openid-client has then validated that token as it validates a login token, signature included
+   * (see `refresh` below). Nothing in this file compares its `sub` with the login token:
+   * core/single-flight.ts does that.
+   */
+  idToken?: string;
+  idTokenClaims?: IdTokenClaims;
 }
 
 export interface OidcTokens extends RefreshedTokens {
@@ -294,10 +302,18 @@ export function createOidcClient(opts: CreateOidcClientOptions): OidcClient {
         if (expiresIn === undefined) {
           throw new Error('token response is missing expires_in');
         }
+        // SMA-681 § 4.2. When the response carries an ID token, oauth4webapi has checked its
+        // presence, `iss` against the discovered issuer, `aud`, `exp`/`iat`/`nbf` and the type of
+        // `sub` (oauth4webapi/build/index.js:1321-1331, 1393-1398). openid-client's
+        // non-repudiation hook has checked its signature (openid-client/build/index.js:1029),
+        // because getConfig() enables that hook. Nothing here compares `sub` with the login token.
+        const claims = tokens.claims();
+        const refreshedIdToken = typeof tokens.id_token === 'string' && claims !== undefined ? { idToken: tokens.id_token, idTokenClaims: toIdTokenClaims(claims) } : {};
         return {
           accessToken: tokens.access_token,
           ...(tokens.refresh_token !== undefined ? { refreshToken: tokens.refresh_token } : {}),
           expiresIn,
+          ...refreshedIdToken,
         };
       } catch (err) {
         throw classifyRefreshError(err);
