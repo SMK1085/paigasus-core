@@ -77,7 +77,7 @@ declare -A LOCK_MEMBERS=(
 )
 
 SELF_TESTS_RAN=0
-SELF_TEST_COUNT=3   # site_verdict, lock_reader, cargo_package_writer
+SELF_TEST_COUNT=4   # site_verdict, lock_reader, cargo_package_writer, stamp_sites
 
 site_verdict() { # $1 expected  $2 actual
   if [ -n "$2" ] && [ "$1" = "$2" ]; then printf 'OK'; else printf 'MISMATCH'; fi
@@ -389,11 +389,49 @@ cargo_package_writer_self_test() {
   SELF_TESTS_RAN=$((SELF_TESTS_RAN + 1))
 }
 
+# SMA-685: run the PRODUCTION loop (stamp_sites) on a staged copy of the real tree. The fixture
+# table above tests write_site alone and cannot see a kind dropped from stamp_sites' filter; this
+# table can, and it runs the writer on the real manifest shapes.
+stamp_sites_self_test() {
+  local tmp rc=0 entry group kind target got derive_before derive_after
+  tmp="$(mktemp -d)" || die_infra "cannot create a scratch dir"
+  # shellcheck disable=SC2064
+  trap "rm -rf '$tmp'" RETURN
+  stage_pristine_tree "$tmp"
+  derive_before="$(REPO_ROOT="$tmp" read_version cargo-package rs/crates/libs/paigasus-proto-derive/Cargo.toml)" || return 2
+  # Move the kernel head to a sentinel, independently of the writer under test.
+  python3 - "$tmp/rs/crates/libs/paigasus-kernel/Cargo.toml" <<'PY'
+import re, sys
+p = sys.argv[1]; s = open(p, encoding="utf-8").read()
+s, n = re.subn(r'(?m)^version = "[^"]*"$', 'version = "9.9.9"', s, count=1)
+assert n == 1, "no kernel version line"
+open(p, "w", encoding="utf-8").write(s)
+PY
+  REPO_ROOT="$tmp" stamp_sites >/dev/null || rc=$?
+  [ "$rc" -eq 0 ] || { fail "self-test: stamp_sites on the staged tree returned $rc"; return 1; }
+  for entry in "${SITES[@]}"; do
+    IFS='|' read -r group kind target <<<"$entry"
+    [ "$group" = kernel ] || continue
+    case "$kind" in cargo-package|pyproject|pyproject-dep|packagejson) ;; *) continue ;; esac
+    got="$(REPO_ROOT="$tmp" read_version "$kind" "$target" "$group")" || return 2
+    [ "$got" = "9.9.9" ] || { fail "self-test: stamp_sites left $kind $target at '$got', expected 9.9.9"; return 1; }
+  done
+  derive_after="$(REPO_ROOT="$tmp" read_version cargo-package rs/crates/libs/paigasus-proto-derive/Cargo.toml)" || return 2
+  [ "$derive_before" = "$derive_after" ] \
+    || { fail "self-test: stamp_sites touched the publishable paigasus-proto-derive ($derive_before -> $derive_after)"; return 1; }
+  SELF_TESTS_RAN=$((SELF_TESTS_RAN + 1))
+}
+
 run_self_tests() {
   SELF_TESTS_RAN=0
+  local defs
+  defs="$(grep -cE '^[a-z_]+_self_test\(\) \{$' "${BASH_SOURCE[0]}")" || die_infra "cannot count self-test definitions"
+  [ "$defs" -eq "$SELF_TEST_COUNT" ] \
+    || die_infra "found $defs *_self_test definitions, expected $SELF_TEST_COUNT"
   site_verdict_self_test
   lock_reader_self_test
   cargo_package_writer_self_test
+  stamp_sites_self_test
   [ "$SELF_TESTS_RAN" -eq "$SELF_TEST_COUNT" ] \
     || die_infra "self-tests ran $SELF_TESTS_RAN, expected $SELF_TEST_COUNT"
   printf '== version-lockstep self-tests passed (%d tables) ==\n' "$SELF_TESTS_RAN"
@@ -464,11 +502,12 @@ stage_pristine_tree() { # $1 destination dir
 # the real run_check (not a reimplementation) is what makes this a control rather than a
 # second, differently-wrong checker.
 negative_control() {
-  local tmp1 tmp2
+  local tmp1 tmp2 tmp3
   tmp1="$(mktemp -d)" || die_infra "cannot create a scratch dir"
   tmp2="$(mktemp -d)" || die_infra "cannot create a scratch dir"
+  tmp3="$(mktemp -d)" || die_infra "cannot create a scratch dir"
   # shellcheck disable=SC2064
-  trap "rm -rf '$tmp1' '$tmp2'" RETURN
+  trap "rm -rf '$tmp1' '$tmp2' '$tmp3'" RETURN
 
   stage_pristine_tree "$tmp1"
 
@@ -530,7 +569,77 @@ PY
     return 1
   fi
   printf '== negative control: version-lockstep reported red on both a packagejson and a lock drift ==\n'
+
+  stage_pristine_tree "$tmp3"
+
+  # Third drift (SMA-685): a cargo-package binding manifest. README L1 recorded that this kind had
+  # no end-to-end drift, and a release-plz bump of the kernel alone produces exactly this shape.
+  python3 - "$tmp3/rs/crates/bindings/paigasus-wasm/Cargo.toml" <<'PY'
+import re, sys
+p = sys.argv[1]; s = open(p, encoding="utf-8").read()
+s, n = re.subn(r'(?m)^version = "[^"]*"$', 'version = "99.99.99"', s, count=1)
+assert n == 1, "no version line"
+open(p, "w", encoding="utf-8").write(s)
+PY
+
+  local ec3=0
+  REPO_ROOT="$tmp3" run_check >/dev/null 2>&1 || ec3=$?
+  if [ "$ec3" -eq 2 ]; then
+    fail "negative control: run_check hit an infrastructure failure (exit 2) instead of
+      reporting the cargo-package drift."
+    return 1
+  fi
+  if [ "$ec3" -ne 1 ]; then
+    fail "negative control: a drifted binding manifest was ACCEPTED (run_check exited $ec3, expected 1)."
+    return 1
+  fi
+  printf '== negative control: version-lockstep reported red on a packagejson, a lock and a cargo-package drift ==\n'
   return 0
+}
+
+cargo_publish_false() { # $1 target -> prints 1 if Cargo `publish` is false or [], else 0
+  local abs="$REPO_ROOT/$1"
+  [ -r "$abs" ] || die_infra "cannot read $1"
+  python3 - "$abs" <<'PY'
+import sys, tomllib
+p = sys.argv[1]
+try:
+    pub = tomllib.load(open(p, "rb"))["package"].get("publish", True)
+except Exception as e:
+    print(f"malformed {p}: {e}", file=sys.stderr); sys.exit(2)
+print(1 if pub is False or pub == [] else 0)
+PY
+}
+
+# SMA-685: the per-site loop of --write, split out of run_write so the self-test runs the SAME
+# loop on a staged tree. It writes the pyproject, pyproject-dep and packagejson sites, and the
+# cargo-package sites that are NOT the group head and whose Cargo manifest says
+# `publish = false`. release-plz 0.3.158 never writes those (READ, updater.rs:283-302). A
+# publishable non-head (paigasus-proto-derive) is left to release-plz, so --check still sees a
+# version_group fault there. Prints the count of changed sites.
+stamp_sites() {
+  local wrote=0 group kind target head expected changed pf rc
+  for entry in "${SITES[@]}"; do
+    IFS='|' read -r group kind target <<<"$entry"
+    head="${SOURCE_OF_TRUTH[$group]}"
+    case "$kind" in
+      pyproject|pyproject-dep|packagejson) ;;
+      cargo-package)
+        [ "$target" != "$head" ] || continue
+        pf="$(cargo_publish_false "$target")" || return 2
+        [ "$pf" = 1 ] || continue
+        ;;
+      *) continue ;;
+    esac
+    # Explicit status handling rather than errexit: stamp_sites may be called on the left of
+    # `||`, which suspends errexit (same discipline as run_check, SMA-576).
+    expected="$(read_version cargo-package "$head")" || return 2
+    rc=0
+    changed="$(write_site "$kind" "$target" "$expected")" || rc=$?
+    [ "$rc" -eq 0 ] || return "$rc"
+    wrote=$((wrote + changed))
+  done
+  printf '%d\n' "$wrote"
 }
 
 write_site() { # $1 kind  $2 target  $3 version  -> prints 1 if it changed the file, else 0
@@ -671,6 +780,7 @@ PY
       # updater.rs:283-302), so --write stamps those. stamp_sites decides WHICH sites; this arm
       # only edits one file. It fails closed (rc 2) on any shape it does not understand, and it
       # refuses to lower a version (rc 1).
+      [ -r "$abs" ] || die_infra "cannot read $target"
       python3 - "$abs" "$version" <<'PY'
 import re, sys, tomllib
 
@@ -678,7 +788,7 @@ def fatal(msg):
     print(f"FATAL: {msg}", file=sys.stderr); raise SystemExit(2)
 
 def plain(v, what):
-    m = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", v)
+    m = re.fullmatch(r"([0-9]+)\.([0-9]+)\.([0-9]+)", v)
     if m is None:
         fatal(f"{what} version '{v}' is not plain X.Y.Z")
     return tuple(int(x) for x in m.groups())
@@ -728,18 +838,9 @@ PY
 }
 
 run_write() {
-  local wrote=0 group kind target expected changed
-  for entry in "${SITES[@]}"; do
-    IFS='|' read -r group kind target <<<"$entry"
-    case "$kind" in pyproject|pyproject-dep|packagejson) ;; *) continue ;; esac
-    # Explicit `|| return 2` rather than relying on errexit: run_write may be invoked from
-    # inside an `||` list, which suspends errexit for it and everything it calls, so a
-    # failing capture would otherwise be swallowed into an empty string instead of
-    # propagating as an infrastructure failure (same discipline as run_check, SMA-576).
-    expected="$(read_version cargo-package "${SOURCE_OF_TRUTH[$group]}")" || return 2
-    changed="$(write_site "$kind" "$target" "$expected")" || return 2
-    wrote=$((wrote + changed))
-  done
+  local wrote rc=0
+  wrote="$(stamp_sites)" || rc=$?
+  [ "$rc" -eq 0 ] || return "$rc"
 
   # Regenerate the three derived files (SITES rows 16-20 — kernel's and proto's cargo-lock and
   # uv-lock rows each point at the same file, so five rows resolve to three files). Each file is
