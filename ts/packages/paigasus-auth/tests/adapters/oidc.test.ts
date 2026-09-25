@@ -62,6 +62,15 @@ describe('createOidcClient — authorizationCodeGrant ID Token validation', () =
     expect(tokens.accessToken.length).toBeGreaterThan(0);
   });
 
+  // SMA-681 § 4.2: logout sends this exact string as `id_token_hint`, so the adapter must hand back
+  // the raw JWT the IdP issued, not a re-encoding of its claims.
+  it('returns the raw id_token string, equal to the minted token', async () => {
+    const minted = await fixture.mintIdToken({ nonce: NONCE });
+    fixture.setNextIdToken(minted);
+    const tokens = await grant(makeClient());
+    expect(tokens.idToken).toBe(minted);
+  });
+
   it('rejects a token with the wrong iss', async () => {
     fixture.setNextIdToken(await fixture.mintIdToken({ nonce: NONCE, iss: 'https://evil.example.com' }));
     await expect(grant(makeClient())).rejects.toThrow();

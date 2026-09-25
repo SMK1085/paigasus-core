@@ -41,6 +41,11 @@ export interface RefreshedTokens {
 }
 
 export interface OidcTokens extends RefreshedTokens {
+  /**
+   * The raw, signed ID token JWT from the code exchange (SMA-681). The session record stores it,
+   * and logout sends it as `id_token_hint`. Never log it: see ports/logger.ts.
+   */
+  idToken: string;
   idTokenClaims: IdTokenClaims;
 }
 
@@ -248,6 +253,14 @@ export function createOidcClient(opts: CreateOidcClientOptions): OidcClient {
         if (claims === undefined) {
           throw new Error('no id_token in the token response');
         }
+        // SMA-681. This check only narrows the type of `tokens.id_token`. With
+        // `idTokenExpected: true`, oauth4webapi already rejects a response whose `id_token` is
+        // missing or not a string (oauth4webapi/build/index.js:1480-1482), so this line cannot
+        // run, and no test covers it. It stays inside this `try`, so it goes through
+        // wrapError('authorization_code_grant', …) like every other failure here.
+        if (typeof tokens.id_token !== 'string') {
+          throw new Error('no id_token in the token response');
+        }
         // RFC 6749 § 5.1 marks `expires_in` RECOMMENDED, not REQUIRED, but this package requires
         // it deliberately: `tokens.expiresIn()` returning `undefined` used to fall back to `0`,
         // which the login path (routes.ts) turns straight into `accessExpiresAt: now`. Every
@@ -263,6 +276,7 @@ export function createOidcClient(opts: CreateOidcClientOptions): OidcClient {
           accessToken: tokens.access_token,
           ...(tokens.refresh_token !== undefined ? { refreshToken: tokens.refresh_token } : {}),
           expiresIn,
+          idToken: tokens.id_token,
           idTokenClaims: toIdTokenClaims(claims),
         };
       } catch (err) {

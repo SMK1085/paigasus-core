@@ -22,6 +22,8 @@ export const ORIGIN = 'https://rp.example.com';
 export const BASE_PATH = '/iam';
 export const END_SESSION_URL = 'https://issuer.example.com/logout';
 export const NEW_REFRESH_TOKEN = 'new-refresh-token';
+/** The raw ID token that `fakeOidc().authorizationCodeGrant` returns. JWT-shaped, not signed. */
+export const FAKE_ID_TOKEN = 'fake-header.fake-payload.fake-signature';
 
 export type FailureKind = 'unavailable' | 'timeout';
 export const FAILURE_KINDS: readonly FailureKind[] = ['unavailable', 'timeout'];
@@ -67,6 +69,7 @@ export function fakeOidc(): FakeOidc {
         accessToken: 'new-access-token',
         refreshToken: NEW_REFRESH_TOKEN,
         expiresIn: 300,
+        idToken: FAKE_ID_TOKEN,
         idTokenClaims: { iss: 'https://issuer.example.com', sub: 'a-subject' },
       }),
     refresh: (): Promise<RefreshedTokens> => Promise.reject(new Error('refresh is not used by the auth routes')),
