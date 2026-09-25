@@ -149,12 +149,12 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   premise check 8e (and 8/8b/8c/8d) runs on every PR at all — is pinned the ordinary way, from
   `SELF_TASK_EXPECTED_GLOBS["actionlint"]` in `ci_targets.py`.
 - The kernel family (`paigasus-kernel` + the three binding crates + their `pyproject.toml` /
-  `package.json` faces) carries **one version** across eighteen sites, asserted by
+  `package.json` faces) carries **one version** across twenty sites, asserted by
   `repo:version-lockstep` (`ci/version-lockstep/run.sh`). release-plz owns the Cargo
   `[package] version` of each group's publishable crates and the `[workspace.dependencies]`
   version requirements (measured against 0.3.158). It does NOT write a Cargo `publish = false`
   crate (SMA-685). The script owns nine sites (`--write`): the six non-Cargo sites and the three
-  `publish = false` binding manifests. It checks all eighteen, because a `version_group`
+  `publish = false` binding manifests. It checks all twenty, because a `version_group`
   that silently stopped applying would otherwise go unnoticed. Two of the sites drift SILENTLY
   without it: `py/uv.lock` (its `moon.yml` runs bare `uv sync`, not `--locked`) and the 26
   `bindingPackageVersion` guards in the committed napi glue (the codegen-drift gate covers only

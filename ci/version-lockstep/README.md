@@ -109,17 +109,35 @@ regardless of what its file actually contained, would pass both the real check (
 the negative control for any of those five kinds (since the control never touches that
 reader's file).
 
-**L2 — Fixture-table coverage now spans two of the eight `read_version` kinds.**
-`--self-test` (`SELF_TEST_COUNT=2`) runs `site_verdict_self_test` (OK/MISMATCH logic) and
+**L2 — Fixture-table coverage now spans two of the eight `read_version` kinds, plus the
+cargo-package writer and the production stamping call site.**
+`--self-test` (`SELF_TEST_COUNT=4`) runs four tables: `site_verdict_self_test` (OK/MISMATCH
+logic), `lock_reader_self_test`, `cargo_package_writer_self_test` (SMA-685), and
+`stamp_sites_self_test` (SMA-685).
+
 `lock_reader_self_test`, added in SMA-577 to close this limitation for the lock kinds
 specifically: before it, neither lock arm had ever been exercised in isolation, so dropping
 `paigasus-proto-derive` from `LOCK_MEMBERS[proto:cargo-lock]` would have been a silent
 false-green on the very change that introduced that table. `lock_reader_self_test` drives
 `read_version` directly against synthetic `Cargo.lock`/`uv.lock` fixtures — a uniform member
 set, a **missing member** (must read `""`, not the survivor's version), a non-uniform set
-(must read `""`), and a `uv-lock` read — covering both `cargo-lock` and `uv-lock`. The
-remaining six kinds (`cargo-package`, `cargo-wsdep`, `pyproject`, `pyproject-dep`,
-`packagejson`, `napi-glue`) still have no fixture of their own, so a broken parser inside one
+(must read `""`), and a `uv-lock` read — covering both `cargo-lock` and `uv-lock`.
+
+`cargo_package_writer_self_test` drives `write_site` directly against thirteen synthetic
+`Cargo.toml` fixtures (varied spacing, comments, table order, CRLF, no trailing newline, and
+refusal cases). It proves the WRITER is honest for the `cargo-package` kind. It does not read
+back through `read_version`, so it closes only the WRITE half of this limitation.
+
+`stamp_sites_self_test` drives the real `stamp_sites` call site on a staged copy of the real
+tree. It moves the kernel head and the proto head to two distinct sentinels. It then reads
+every `cargo-package`, `pyproject`, `pyproject-dep` and `packagejson` site back through
+`read_version`; each site must match its own group's sentinel. It also asserts the publishable
+`paigasus-proto-derive` (`cargo-package`, non-head) stayed untouched. This proves the real
+production path, not a synthetic fixture, so it closes the READ half for those four kinds only
+on the real tree's own file shapes.
+
+The remaining three kinds (`cargo-wsdep`, `napi-glue`, and `cargo-package` on a shape other
+than the real tree's own) still have no fixture of their own, so a broken parser inside one
 of them — the wrong TOML key, an off-by-one on the `[[package]]` block split, a regex that
 matches the wrong table — is caught only if it happens to manifest on the real repo's current
 files or on the one non-lock site (`packagejson`) the negative control drifts.

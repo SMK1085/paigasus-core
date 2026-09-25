@@ -79,12 +79,12 @@ dependencies_update = false
 # `release-plz release` tags only the packages it PUBLISHES. The first live release produced
 # `paigasus-kernel-v0.1.0`, `paigasus-proto-v0.1.0` and `paigasus-proto-derive-v0.1.0` — and the
 # three `publish = false` binding crates below were never mentioned in the job log AT ALL, not
-# even skipped. So `release = true` keeps a `publish = false` crate in the version group; it does
-# NOT get it tagged.
+# even skipped. So `release = true` does NOT get a `publish = false` crate tagged.
 #
-# This is cosmetic, not functional: the binding crates' versions come from `version_group` plus
-# `repo:version-lockstep`, neither of which reads a tag. Recorded so nobody hunts for the missing
-# three. napi is still barred from cutting any tag (`--no-gh-release`, asserted by
+# This is cosmetic, not functional: the binding crates' versions come from
+# `version-lockstep --write`, and `repo:version-lockstep` checks them; neither reads a tag.
+# Recorded so nobody hunts for the missing three. napi is still barred from cutting any tag
+# (`--no-gh-release`, asserted by
 # ci/actionlint/release_guard.py V5).
 [[package]]
 name = "paigasus-kernel"
