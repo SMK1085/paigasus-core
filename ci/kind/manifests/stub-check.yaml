@@ -1,0 +1,31 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# `ci/kind/run.sh stub up`'s in-cluster check (SMA-514 spec § 4.4), in the pattern of
+# idp-preflight.yaml. It GETs the stub through the in-cluster name, as the consoles' discovery
+# probe does. curl follows no redirect (no -L) and fails on no HTTP status (no -f), so a 3xx or a
+# 404 reaches the log and ci/kind/stub-check.mjs names it. The two --write-out lines are the
+# format stub-check.mjs reads. The image re-uses the digest pin of idp-preflight.yaml. Refresh with:
+#   docker buildx imagetools inspect curlimages/curl:8.11.1 --format '{{json .Manifest.Digest}}'
+apiVersion: v1
+kind: Pod
+metadata:
+  name: stub-check
+  namespace: paigasus
+spec:
+  restartPolicy: Never
+  containers:
+    - name: curl
+      image: curlimages/curl:8.11.1@sha256:c1fe1679c34d9784c1b0d1e5f62ac0a79fca01fb6377cdd33e90473c6f9f9a69
+      command: ["curl"]
+      args:
+        - "-sS"
+        - "--retry"
+        - "5"
+        - "--retry-all-errors"
+        - "--retry-delay"
+        - "2"
+        - "--max-time"
+        - "10"
+        - "--write-out"
+        - "\nSTUB-STATUS %{http_code}\nSTUB-CONTENT-TYPE %{content_type}\n"
+        - "http://gateway-stub.paigasus.svc.cluster.local:8088/v1/service-info"

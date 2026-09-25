@@ -1,0 +1,138 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# The gateway stub (SMA-514 spec § 4.2, decision D1). zones.gateway.backend.url in
+# ci/kind/values/a.yaml points at the Service below. The stub is NOT a gateway: nginx answers
+# GET /v1/service-info with a fixed descriptor and 404 on every other path. That makes the
+# discovery probe (ts/packages/paigasus-discovery/src/probe.ts) mark the gateway zone `available`.
+# The consoles, IAM, Keycloak, Redis and Traefik stay real.
+#
+# `replicas: 0` on purpose (decision D2). Until `ci/kind/run.sh stub up` the Service has no
+# endpoints, a connection is refused at once, and the gateway zone is `degraded` in phase A
+# (R3-control), the same condition as the old endpoint-less Service.
+#
+# The Deployment is the FIRST document: Dependabot's docker ecosystem reads a file only when its
+# first document is a Kubernetes object (.github/dependabot.yml). The kubelet pulls the image only
+# at `stub up`. Refresh with:
+#   docker buildx imagetools inspect nginxinc/nginx-unprivileged:1.28-alpine --format '{{json .Manifest.Digest}}'
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gateway-stub
+  namespace: paigasus
+spec:
+  replicas: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: gateway-stub
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: gateway-stub
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 101
+        runAsGroup: 101
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: nginx
+          image: nginxinc/nginx-unprivileged:1.28-alpine@sha256:7377697a821c131a924a7105fafbe7414db4e9fcc77a6f08f776f33f141ec3f8
+          # nginx itself, not the image entrypoint: the entrypoint scripts edit /etc/nginx/conf.d,
+          # and the root filesystem is read-only.
+          command: ["nginx", "-g", "daemon off;"]
+          ports:
+            - name: http
+              containerPort: 8088
+          # "Ready" means that the server answers the probe path, not only that the port is open.
+          readinessProbe:
+            httpGet:
+              path: /v1/service-info
+              port: http
+            periodSeconds: 2
+            failureThreshold: 30
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            # Replaces the image's default.conf (port 8080): stub.conf is the only server.
+            - name: config
+              mountPath: /etc/nginx/conf.d
+              readOnly: true
+            - name: body
+              mountPath: /usr/share/nginx/stub
+              readOnly: true
+            # The image's nginx.conf keeps its pid and temp paths under /tmp.
+            - name: cache
+              mountPath: /var/cache/nginx
+            - name: run
+              mountPath: /run
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: config
+          configMap:
+            name: gateway-stub
+            items:
+              - key: stub.conf
+                path: stub.conf
+        - name: body
+          configMap:
+            name: gateway-stub
+            items:
+              - key: service-info.json
+                path: service-info.json
+        - name: cache
+          emptyDir: {}
+        - name: run
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gateway-stub
+  namespace: paigasus
+spec:
+  selector:
+    app.kubernetes.io/name: gateway-stub
+  ports:
+    - name: http
+      port: 8088
+      targetPort: http
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gateway-stub
+  namespace: paigasus
+data:
+  # nginx takes the content type from the URI's extension, and /v1/service-info has none, so
+  # default_type sets it. An exact location to a file makes no redirect: the probe uses
+  # `redirect: 'error'`. Every other path is a 404, which the probe reads as `not-implemented`.
+  stub.conf: |
+    server {
+        listen 8088;
+        server_name _;
+        location = /v1/service-info {
+            default_type application/json;
+            alias /usr/share/nginx/stub/service-info.json;
+        }
+        location / {
+            return 404;
+        }
+    }
+  # No code checks `service` or `version` beyond their type (spec § 4.2). The stub ignores the
+  # bearer token.
+  service-info.json: |
+    {"service":"gateway","version":"0.0.0-kind-stub","capabilities":[]}

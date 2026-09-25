@@ -2,7 +2,7 @@
 #
 # The kind job's release values, phase A (SMA-513 PR 3, spec § 4.5): both zones on. The names
 # below are the ones ci/kind/run.sh makes: the three Secrets, the CA ConfigMap, the TLS Secret, the
-# endpoint-less gateway Service, and the three images it loads with `kind load` (tag `dev` is not
+# gateway stub Service (SMA-514), and the three images it loads with `kind load` (tag `dev` is not
 # `latest`, so the kubelet uses IfNotPresent and never pulls, decision B11).
 #
 # repo:helm-render row 7 renders this file (and this file plus b.yaml) on every PR. A new REQUIRED
@@ -27,9 +27,11 @@ zones:
         tag: dev
       replicas: 1
     backend:
-      # A Service with no endpoints (ci/kind/manifests/gateway-absent.yaml). The probe gets a
-      # refused connection, so the gateway zone is `degraded` in phase A (R3-control).
-      url: http://gateway-absent.paigasus.svc.cluster.local:8088
+      # The gateway stub (ci/kind/manifests/gateway-stub.yaml, SMA-514). Its Deployment has 0
+      # replicas until `run.sh stub up`, so in phase A the Service has no endpoints, the probe gets
+      # a refused connection, and the gateway zone is `degraded` (R3-control). After `stub up` the
+      # zone is `available` for the journeys (SMA-514 spec § 4).
+      url: http://gateway-stub.paigasus.svc.cluster.local:8088
 ingress:
   host: console.paigasus.test
   className: traefik
