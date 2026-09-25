@@ -309,7 +309,11 @@ CHAIN_HEADER_SED_RE = re.compile(r"^\[chain\.([a-z][a-z0-9-]*)\]$")
 def sed_chain_keys(text: str) -> list[str]:
     """The keys that run.sh's sed fallback reads from this registry text, in file order.
 
-    Split on "\\n" only, like sed: a CRLF line keeps its "\\r", so neither reader matches it.
+    Split on "\\n" only, like sed: a CRLF line keeps its "\\r", so neither reader matches it. This
+    is only true of `text` if it was decoded from the raw bytes: `Path.read_text()` opens in
+    universal-newline mode and silently turns "\\r\\n" into "\\n" before this function ever sees
+    it, which would make a CRLF header match here while real sed still rejects it. Every caller of
+    this function must pass `path.read_bytes().decode("utf-8")`, never `path.read_text(...)`.
     """
     return [m.group(1) for line in text.split("\n") if (m := CHAIN_HEADER_SED_RE.match(line))]
 
@@ -1556,6 +1560,46 @@ def _sed_parity_quoted_key() -> str | None:
     return _sed_parity_case('[chain."iam"]')
 
 
+def _sed_parity_crlf_header() -> str | None:
+    """`[chain.iam]\\r\\n`: tomllib reads iam (TOML accepts CRLF line endings), and real sed does
+    not, because the trailing `\\r` sits before sed's own end-of-line, so `]$` never matches
+    (MEASURED: `printf '[chain.iam]\\r\\n[chain.gw]\\n' | sed -n
+    's/^\\[chain\\.\\([a-z][a-z0-9-]*\\)\\]$/\\1/p'` prints only `gw`).
+
+    This is the row `_sed_parity_case` cannot cover: `_sed_parity_case` writes its variant with
+    `Path.write_text`, which never inserts a `\\r`, so it must write the CRLF byte itself. This
+    row's fixture is built by hand, not through `_sed_parity_case`, so it can control the exact
+    bytes on disk.
+
+    Mutation this row proves: in `_assert_repo`'s sed-parity block, read the registry with
+    `.read_text(encoding="utf-8")` instead of `.read_bytes().decode("utf-8")`. `read_text` opens
+    in universal-newline mode and silently turns the `\\r\\n` into a bare `\\n` before
+    `sed_chain_keys` ever sees it, so the in-process sed read then also finds `iam` — the parity
+    check reports no problem for what is a real mismatch against the sed run.sh actually runs.
+    """
+    tmp = tempfile.mkdtemp()
+    try:
+        repo_root = _complete_chain_tree(tmp)
+        registry = repo_root / CHAIN_REGISTRY
+        data = registry.read_bytes()
+        marker = b"[chain.iam]\n"
+        if marker not in data:
+            return "the fixture registry has no bare [chain.iam] line to replace"
+        registry.write_bytes(data.replace(marker, b"[chain.iam]\r\n", 1))
+        keys = list(chain_registry(repo_root))
+        if keys != ["iam", "gateway", "iam-console", "gateway-console"]:
+            return f"tomllib does not read the four keys from a CRLF [chain.iam] header: {keys!r}"
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            rc = _assert_repo(repo_root)
+        if rc != 3:
+            return f"_assert_repo returned {rc} for a CRLF [chain.iam] header, expected 3"
+        if "the sed read of" not in err.getvalue() or "['gateway', 'gateway-console', 'iam-console']" not in err.getvalue():
+            return f"_assert_repo returned 3 but did not report the sed/tomllib mismatch: {err.getvalue()!r}"
+        return None
+    finally:
+        shutil.rmtree(tmp)
+
+
 def _sed_parity_fixture_registry() -> str | None:
     """The fixture registry, which has the same headers as the real ci/images/chains.toml, gives
     the same keys to both readers. The real file is checked by `--assert .` (Step 4) and by
@@ -1630,6 +1674,8 @@ COLLECTION_ROWS: tuple[tuple[str, Callable[[], str | None]], ...] = (
     ("SMA-688 sed parity: a chain header with a trailing comment fails --assert",
      _sed_parity_trailing_comment),
     ("SMA-688 sed parity: a quoted chain key fails --assert", _sed_parity_quoted_key),
+    ("SMA-688 sed parity: a CRLF chain header fails --assert (real sed, not read_text)",
+     _sed_parity_crlf_header),
     ("SMA-688 sed parity: the fixture registry gives both readers the same keys",
      _sed_parity_fixture_registry),
 )
@@ -1741,7 +1787,13 @@ def _assert_repo(repo_root: Path) -> int:
     # every key the fallback would name.
     if registry:
         try:
-            sed_keys = sed_chain_keys((repo_root / CHAIN_REGISTRY).read_text(encoding="utf-8"))
+            # read_bytes().decode(), NOT read_text(): read_text opens in universal-newline mode
+            # and turns a CRLF header into a bare "\n" one, so a "[chain.iam]\r\n" line would
+            # match CHAIN_HEADER_SED_RE here while real sed, which sees the raw "\r", does not
+            # (MEASURED: `printf '[chain.iam]\r\n[chain.gw]\n' | sed -n
+            # 's/^\[chain\.\([a-z][a-z0-9-]*\)\]$/\1/p'` prints only `gw`). read_bytes() gives
+            # sed_chain_keys the same bytes real sed reads.
+            sed_keys = sed_chain_keys((repo_root / CHAIN_REGISTRY).read_bytes().decode("utf-8"))
         except (OSError, UnicodeDecodeError) as exc:
             problems.append(f"{CHAIN_REGISTRY} cannot be read as text ({exc}).")
         else:
