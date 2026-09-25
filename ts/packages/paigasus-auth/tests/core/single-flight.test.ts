@@ -955,6 +955,24 @@ describe('a refresh token that no record holds (SMA-681)', () => {
     expect(events).toContainEqual(['session.refresh.persist_failed', { sid: sidTag('s') }]);
   });
 
+  it('revokes the old refresh token when a non-rotating IdP echoes it back and persist fails (persist_failed)', async () => {
+    const store = new MemorySessionStore();
+    await store.set('s', makeRecord({ accessExpiresAt: Date.now() - 1 }), 60_000, null); // default refreshToken 'RT'
+    store.set = () => Promise.resolve(false); // every persist fails
+    const { logger, events } = recordingLogger();
+    const { revoke, revoked, lockFree } = recordingRevoke(store);
+
+    // The response echoes the old token 'RT' back: a non-rotating IdP. It equals `refreshToken`,
+    // so `orphanNewRefreshToken()` skips it, and the delete below removes the only record that
+    // held it.
+    const out = await resolveSession({ ...deps(store, () => Promise.resolve({ accessToken: 'AT2', refreshToken: 'RT', expiresIn: 300 })), revoke, logger }, 's');
+
+    expect(out).toBeNull();
+    expect(revoked).toEqual(['RT']);
+    expect(lockFree).toEqual([true]);
+    expect(events).toContainEqual(['session.refresh.persist_failed', { sid: sidTag('s') }]);
+  });
+
   it('persist_failed with a failing delete propagates the store error and still revokes', async () => {
     const inner = new MemorySessionStore();
     await inner.set('s', makeRecord({ accessExpiresAt: Date.now() - 1 }), 60_000, null);

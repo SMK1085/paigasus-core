@@ -293,7 +293,8 @@ export async function resolveSession(deps: ResolveDeps, sid: string): Promise<Re
           // A non-rotating IdP returns no new refresh token, so the old one (`refreshToken`) is
           // still the live token at the IdP. The delete below removes the only record that held
           // it, so nothing else will ever revoke it unless it is queued here too. The Set dedups.
-          if (tokens.refreshToken === undefined) orphaned.add(refreshToken);
+          // A non-rotating IdP can also send the same token back instead of omitting it.
+          if (tokens.refreshToken === undefined || tokens.refreshToken === refreshToken) orphaned.add(refreshToken);
           await store.delete(sid);
           logger.event('session.refresh.persist_failed', { sid: sidTag(sid) });
           return null;
