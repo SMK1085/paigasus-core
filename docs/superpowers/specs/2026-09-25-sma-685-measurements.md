@@ -365,4 +365,217 @@ kernel as already up to date. This matches §2.2's read of `git_cmd/src/lib.rs:4
 
 ## M3 and mutations
 
-Recorded by Task 4.
+**Container ruling (scope decision, not a measurement).** The Host section above MEASURED a
+512-byte pipe on this Mac. That is below the 8192-byte floor. `run.sh` needs bash 4+.
+Homebrew bash 5 hangs on its heredocs under this pipe state. So the controller ruled that no
+M3 step runs `ci/version-lockstep/run.sh` on the host. Every M3 step and every mutation ran
+inside a Linux container instead, built once from a Dockerfile in `$S/sma685/m3img/`.
+
+The image starts `FROM rust:1.95.0-bookworm`. It adds `python3`, `python3-pip`, `curl`,
+`xz-utils`, and `ca-certificates` from apt. It installs `uv==0.11.16` via
+`pip3 install --break-system-packages`. It installs Node 24.16.0 from the official
+`nodejs.org` Linux `arm64` tarball (the build host reports `aarch64`). It installs
+`pnpm@11.3.0` via `npm i -g`.
+
+The build tagged the image `sma685-m3`. It printed `v24.16.0`, `11.3.0`, `Python 3.11.2`,
+`uv 0.11.16 (aarch64-unknown-linux-gnu)`, and `cargo 1.95.0`. MEASURED: the build finished
+with no error. The version-print step shows all five tools present.
+
+Every container run mounted the clone at `/w`. It added anonymous volumes over
+`/w/ts/node_modules`, `/w/py/.venv`, and `/w/rs/target`. So the host's macOS files were
+never read or overwritten:
+
+```bash
+docker run --rm -v "$C":/w -v /w/ts/node_modules -v /w/py/.venv -v /w/rs/target \
+  -v <script>:/tmp/step.sh -w /w sma685-m3 bash /tmp/step.sh
+```
+
+Each container run first ran `pnpm -C ts install --frozen-lockfile` inside the container.
+The napi build needs `@napi-rs/cli`, and the mounted `node_modules` volume starts empty.
+
+Per the controller's instruction, Step 1's host-side `pnpm -C ts install` and `uv sync`
+were skipped. The container path installs its own `ts/node_modules`. It does not read
+`py/.venv` for these steps. So that host provisioning step does no work here. `proto
+install` was also not run on the host for M3.1 through the mutations. It was run once, on
+the host, ahead of M3.4 only (see that section).
+
+### M3.1 — the old `run.sh` (`--write`, then `--check`)
+
+The clone's tree was reset to `m1-result` on the host. The container then ran
+`pnpm -C ts install --frozen-lockfile`, `bash ci/version-lockstep/run.sh --write`, and
+`bash ci/version-lockstep/run.sh`. This used the `run.sh` already at that commit (the one at
+`cb772393`).
+
+Verbatim output (key lines):
+
+```
+version-lockstep: wrote 6 site(s)
+write-rc=0
+group kernel: source of truth = 0.1.1
+group proto: source of truth = 0.3.0
+FAIL: [kernel] cargo-package rs/crates/bindings/paigasus-py-bindings/Cargo.toml: expected '0.1.1', found '0.1.0'
+FAIL: [kernel] cargo-package rs/crates/bindings/paigasus-node-bindings/Cargo.toml: expected '0.1.1', found '0.1.0'
+FAIL: [kernel] cargo-package rs/crates/bindings/paigasus-wasm/Cargo.toml: expected '0.1.1', found '0.1.0'
+FAIL: [kernel] cargo-lock rs/Cargo.lock: expected '0.1.1', found '<absent or non-uniform>'
+check-rc=1
+```
+
+MEASURED: `--write` exits 0 and writes 6 sites. `--check` exits 1 with exactly 4 `FAIL:`
+rows: the three binding `cargo-package` rows and the kernel `cargo-lock` row. This matches
+the brief's expected value in full, with no correction needed.
+
+### M3.2 — the new `run.sh` (`--write`, then `--check`)
+
+The clone's tree was reset to `m1-result` on the host again. The new `run.sh` (Task 3, at
+the worktree HEAD) was then copied over the clone's copy. The container ran
+`pnpm -C ts install --frozen-lockfile`, `bash ci/version-lockstep/run.sh --write`, and
+`bash ci/version-lockstep/run.sh`.
+
+Verbatim output (key lines):
+
+```
+version-lockstep: wrote 9 site(s)
+write-rc=0
+group kernel: source of truth = 0.1.1
+group proto: source of truth = 0.3.0
+== all 20 version-lockstep sites agree ==
+check-rc=0
+rs/crates/libs/paigasus-kernel/Cargo.toml:9:version = "0.1.1"
+rs/crates/bindings/paigasus-node-bindings/Cargo.toml:3:version = "0.1.1"
+rs/crates/bindings/paigasus-py-bindings/Cargo.toml:3:version = "0.1.1"
+rs/crates/bindings/paigasus-wasm/Cargo.toml:3:version = "0.1.1"
+rs/crates/libs/paigasus-proto-derive/Cargo.toml:8:version = "0.3.0"
+rs/crates/libs/paigasus-proto/Cargo.toml:6:version = "0.3.0"
+```
+
+`git diff --stat` (in the clone, after the run) touched 12 files. These are the copied-in
+`ci/version-lockstep/run.sh` itself, and the two kernel/proto `pyproject.toml` sites. They
+also include `py/uv.lock`, `rs/Cargo.lock`, and the three binding `Cargo.toml` files. Two
+more are the node binding's generated `index.js` and `package.json`. The last is the wasm
+binding's `package.json`.
+
+MEASURED: `--write` exits 0 and writes 9 sites, three more than M3.1 (the three
+`publish = false` bindings). `--check` exits 0 and reports all 20 sites agree. The kernel and
+the three bindings read version 0.1.1. Both proto crates read version 0.3.0. This matches the
+brief's expected value in full.
+
+### M3.3 — lockdiff
+
+The `lockdiff.py` script from the brief compared M3.2's `rs/Cargo.lock` against
+`$S/sma685/lock-m1-result` (the lock before any `--write`) and against `$S/sma685/lock-base`
+(the lock at `cb772393`).
+
+Verbatim output, against `lock-m1-result`:
+
+```
+workspace	paigasus-node-bindings	['0.1.0']	->	['0.1.1']
+workspace	paigasus-py-bindings	['0.1.0']	->	['0.1.1']
+workspace	paigasus-wasm	['0.1.0']	->	['0.1.1']
+```
+
+Verbatim output, against `lock-base`:
+
+```
+workspace	paigasus-kernel	['0.1.0']	->	['0.1.1']
+workspace	paigasus-node-bindings	['0.1.0']	->	['0.1.1']
+workspace	paigasus-proto	['0.2.0']	->	['0.3.0']
+workspace	paigasus-proto-derive	['0.2.0']	->	['0.3.0']
+workspace	paigasus-py-bindings	['0.1.0']	->	['0.1.1']
+workspace	paigasus-wasm	['0.1.0']	->	['0.1.1']
+```
+
+MEASURED: against `lock-m1-result`, the diff shows the three binding workspace entries only.
+It shows zero third-party lines. This is three, not the spec §4 M3.3 figure of four. M1's
+own `cargo update --workspace` already moved the kernel lock entry before this diff's
+baseline was taken. So three is the correct count against `m1-result`. This corrects the
+spec's own worked number; it is not a new defect.
+
+MEASURED: against `lock-base`, the diff shows four kernel-family workspace entries (kernel
+and the three bindings) and two proto workspace entries. It shows zero third-party lines.
+This matches the brief's expected value for the `lock-base` comparison in full.
+
+### M3.4 — the kernel-ts test
+
+This step ran on the host, not the container, per the controller's instruction. The
+container's `node_modules` is an anonymous volume, so the host needed its own copy. On the
+host, in the clone, `proto install` exited 0. Then `pnpm -C ts install --frozen-lockfile`
+exited 0. Then `moon run paigasus-kernel-ts:test --force` ran, watched with a 10-minute
+no-progress stop that read `ps` on the background process.
+
+Verbatim output (tail):
+
+```
+paigasus-kernel-ts:test |  Test Files  11 passed (11)
+paigasus-kernel-ts:test |       Tests  264 passed (264)
+paigasus-kernel-ts:test |    Start at  22:44:12
+paigasus-kernel-ts:test |    Duration  381ms (import 67%, transform 22%, tests 9%, worker 1%)
+Tasks: 4 completed
+ Time: 24s 492ms
+```
+
+MEASURED: the task finished on its own within seconds. The 10-minute watchdog never
+triggered. All 11 test files and all 264 tests passed, with no failing test. This matches
+the brief's expected pass. It also re-confirms SMA-680 M2 part B (a manual four-crate bump
+against `committed-wasm.test.ts`), now on this three-binding stamp fix.
+
+### Mutations
+
+Each mutation reset the clone to `m1-result` on the host. It then copied in the new
+`run.sh`, and inserted the marked line with a small Python script. Each script asserted its
+anchor text matched exactly once before writing. A non-matching anchor would abort the
+insert, not silently do nothing. The container then ran `pnpm -C ts install --frozen-lockfile`,
+`--write`, `--check`, and `--self-test` in one pass.
+
+**Mutation 1** inserts `cargo-package) printf '0' ;;  # MUTATION-SMA-685`. This goes directly
+after `write_site`'s `local kind="$1" target="$2" version="$3" abs="$REPO_ROOT/$2"` line and
+its following `case "$kind" in` line. So the writer claims success on a `cargo-package` site
+without writing it.
+
+Verbatim output (key lines):
+
+```
+version-lockstep: wrote 6 site(s)
+write-rc=0
+FAIL: [kernel] cargo-package rs/crates/bindings/paigasus-py-bindings/Cargo.toml: expected '0.1.1', found '0.1.0'
+FAIL: [kernel] cargo-package rs/crates/bindings/paigasus-node-bindings/Cargo.toml: expected '0.1.1', found '0.1.0'
+FAIL: [kernel] cargo-package rs/crates/bindings/paigasus-wasm/Cargo.toml: expected '0.1.1', found '0.1.0'
+FAIL: [kernel] cargo-lock rs/Cargo.lock: expected '0.1.1', found '<absent or non-uniform>'
+check-rc=1
+FAIL: self-test: F1 rc=0 got='0', expected rc 0 and 1
+selftest-rc=1
+```
+
+MEASURED: `--write` exits 0 but writes only 6 sites. The mutated arm intercepts all three
+`cargo-package` writes before they touch a file. `--check` exits 1, with the three binding
+rows red, plus the kernel `cargo-lock` row (the lock is unstamped for the same reason).
+`--self-test` exits 1, on a writer-level fixture (`F1`), not the production-call-site table.
+This matches the brief's expected `--check` and `--self-test` result.
+
+**Mutation 2** inserts `cargo-package) continue ;;  # MUTATION-SMA-685`. This goes directly
+after `stamp_sites`' `case "$kind" in` line. So the per-site loop skips every
+`cargo-package` site before it reaches the writer.
+
+Verbatim output (key lines):
+
+```
+version-lockstep: wrote 6 site(s)
+write-rc=0
+FAIL: [kernel] cargo-package rs/crates/bindings/paigasus-py-bindings/Cargo.toml: expected '0.1.1', found '0.1.0'
+FAIL: [kernel] cargo-package rs/crates/bindings/paigasus-node-bindings/Cargo.toml: expected '0.1.1', found '0.1.0'
+FAIL: [kernel] cargo-package rs/crates/bindings/paigasus-wasm/Cargo.toml: expected '0.1.1', found '0.1.0'
+FAIL: [kernel] cargo-lock rs/Cargo.lock: expected '0.1.1', found '<absent or non-uniform>'
+check-rc=1
+FAIL: self-test: stamp_sites left cargo-package rs/crates/bindings/paigasus-py-bindings/Cargo.toml at '0.1.0', expected 9.9.9
+selftest-rc=1
+```
+
+MEASURED: `--write` exits 0 but writes only 6 sites, for the same reason as Mutation 1.
+`--check` exits 1, with the same three binding rows and the kernel `cargo-lock` row red.
+`--self-test` exits 1, this time on the production-call-site table. It reports that
+`stamp_sites` left a binding site unstamped. This matches the brief's expected `--check` and
+`--self-test` result. It also confirms that this self-test table covers the real production
+call site, not only the writer fixtures.
+
+After each mutation, `git -C $W status --short` (the worktree, not the clone) was empty.
+Both mutations touched only the clone's copy of `ci/version-lockstep/run.sh`. The worktree
+never changed.
