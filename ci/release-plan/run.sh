@@ -7,7 +7,9 @@
 # docstring for why the dry-run reading is silently, permanently wrong (measurement M6).
 #
 # Exit codes: 0 pass | 1 the repo is wrong | 2 infrastructure failed — EXCEPT --github-output,
-# which always exits 0. See the comment on that arm.
+# which exits 0 on every run that can name the chain keys, and 2 only when neither
+# `release_plan.py --keys` nor a bash read of ci/images/chains.toml names one. See the comment on
+# that arm.
 #
 # The checker exits 3, not 1, for an assertion failure. `uv` exits 1 on its own failures, so
 # without a distinct code a PyPI outage would read as "the repo is wrong". This wrapper owns
@@ -63,6 +65,34 @@ run_checker() {
   esac
 }
 
+# SMA-688. $1 a key list, one key on each line. Returns 0 when the list holds at least one key and
+# every line is a key of the shape [a-z][a-z0-9-]*. Both key sources go through this one test:
+# the `release_plan.py --keys` answer and the sed read of ci/images/chains.toml. A key is later
+# split by `for key in $keys`, so the shape also keeps spaces and glob characters out.
+keys_are_valid() {
+  [ -n "$1" ] && ! grep -qvE '^[a-z][a-z0-9-]*$' < <(printf '%s\n' "$1")
+}
+
+# SMA-688. The fail-safe branch. $1 the rc for the annotation, $2 the key list. It writes
+# nothing_to_release=false, and skip_<key>=false and an EMPTY version_<key>= for every key, and
+# exits 0.
+#
+# SMA-658. The image chains read their own outputs, and an unset output makes the chain RUN
+# (spec § 4.1). The version is written EMPTY, deliberately, rather than left unwritten: an output
+# GitHub never saw and one written as an empty string behave differently in a `release.yml`
+# expression, and the chains must not depend on that distinction. An empty version means
+# "unknown" here, never a real version: the publish job's label compare fails on it before the
+# first registry write.
+write_failsafe() {
+  local key
+  printf '::warning::release-plan could not decide (rc=%s) — building, which is the fail-safe direction\n' "$1"
+  printf 'nothing_to_release=false\n' >> "${GITHUB_OUTPUT:-/dev/stdout}"
+  for key in $2; do
+    printf 'skip_%s=false\nversion_%s=\n' "$key" "$key" >> "${GITHUB_OUTPUT:-/dev/stdout}"
+  done
+  exit 0
+}
+
 # THE RUNTIME ARM, and the one place in this repo where a checker failure must NOT fail its
 # caller. A failed `plan` job SKIPS its dependents rather than building them — GitHub applies an
 # implicit success() to a job-level `if:` with no status function — so a broken decision that
@@ -70,65 +100,82 @@ run_checker() {
 # loudly, exit 0, and let the matrix build. The --self-test/--negative-control/--assert modes
 # keep the normal contract, and CI runs those.
 #
-# THIS ARM CALLS NO PREFLIGHT, deliberately. An ABSENT `uv` makes the command substitution below
-# exit 127, which `|| rc=$?` catches like any other failure, so a missing toolchain lands on the
-# fail-safe branch instead of aborting the job. `set -e` does not fire on it: the assignment is
-# the left operand of an `||` list. Negative-control row 6 asserts exactly this, because the
-# `require_uv` call is one line away from being moved back above the dispatch.
+# SMA-688, the chain keys (spec § 4.3). The keys come from `release_plan.py --keys`, which reads
+# ci/images/chains.toml with tomllib. When that call fails, prints no key, or prints a line
+# outside [a-z][a-z0-9-]* (for example, `uv` is missing on the runner), the arm reads the keys
+# from the same file with sed, which needs no toolchain. It then takes the fail-safe branch for
+# every key, and does NOT run the decision: a toolchain that cannot name the keys cannot be
+# trusted to decide. That keeps the SMA-603 C1 contract. Negative-control rows 6, 10 and 11
+# assert it.
+#
+# ONE EXIT 2. When the sed read also finds no key (chains.toml is missing, unreadable or empty),
+# the arm cannot name the chain outputs it must write, and a chain output that nobody writes runs
+# that chain with an empty version. So it writes nothing_to_release=false and EXITS 2: the plan
+# job fails, and every chain and the kernel release skip until a fix. Rows 12 and 13 assert it.
+#
+# THIS ARM CALLS NO PREFLIGHT, deliberately. An ABSENT `uv` makes the command substitutions
+# below exit 127, which `|| keys_rc=$?` and `|| rc=$?` catch like any other failure. `set -e`
+# does not fire on them: each assignment is the left operand of an `||` list.
 github_output() {
-  local rc=0 out
+  local rc=0 out keys keys_rc=0 key failsafe=0
+  keys="$(uv run --locked --project "$HERE" --python '>=3.12' python3 "$HERE/release_plan.py" --keys "$REPO_ROOT")" || keys_rc=$?
+  if [ "$keys_rc" -ne 0 ] || ! keys_are_valid "$keys"; then
+    # The sed pattern admits only a bare `[chain.<key>]` header line, with the key in the same
+    # shape that keys_are_valid tests. The test below still runs, so both sources pass one rule.
+    # TWIN: CHAIN_HEADER_SED_RE in release_plan.py holds the same pattern, and --assert fails
+    # when this read and tomllib find different keys. Change both in the same commit.
+    keys="$(sed -n 's/^\[chain\.\([a-z][a-z0-9-]*\)\]$/\1/p' "$REPO_ROOT/ci/images/chains.toml" 2>/dev/null)" || keys=
+    if ! keys_are_valid "$keys"; then
+      printf '::error::release-plan could not name the chain keys (--keys rc=%s, and ci/images/chains.toml names no key). It writes nothing_to_release=false and fails the plan job: a chain output that nobody writes would run that chain with an empty version.\n' "$keys_rc"
+      # SMA-688. This line writes the same text as write_failsafe's own
+      # `nothing_to_release=false` line, but in a different form. Each pinned line in
+      # RELEASE_PLAN_SH_CALL_SITES must be unique text in this file (see that pin's own
+      # comment). Two byte-identical lines could not each be pinned on their own.
+      printf 'nothing_to_release=%s\n' false >> "${GITHUB_OUTPUT:-/dev/stdout}"
+      exit 2
+    fi
+    printf '::warning::release-plan --keys gave no usable key list (rc=%s). The keys come from a sed read of ci/images/chains.toml.\n' "$keys_rc"
+    write_failsafe "$keys_rc" "$keys"
+  fi
   out="$(uv run --locked --project "$HERE" --python '>=3.12' python3 \
     "$HERE/release_plan.py" --event-name "${GITHUB_EVENT_NAME:-}" "$REPO_ROOT" 2>&1)" || rc=$?
   printf '%s\n' "$out"
-  # SMA-658 fix round 2. Folded all FIVE keys into this one presence check, not just
-  # nothing_to_release: under `set -euo pipefail`, each `grep -E ... | tail -n 1` pipeline below
-  # exits 1 (aborting this function before its `exit 0`) when its pattern has ZERO matches, and
-  # the pre-existing nothing_to_release line was only ever safe because ITS pattern was checked
-  # here first. A checker that prints a verdict but omits one service key — a partial, malformed
-  # write, not the all-or-nothing success/failure this file otherwise assumes — must route into
-  # the fail-safe branch below (which writes every key explicitly) rather than abort. Do not
-  # replace a missing-key check with `|| true` on the pipelines instead: that would let the key
-  # go unwritten silently, which is the worse failure the review named.
-  if [ "$rc" -ne 0 ] \
-    || ! grep -qE '^nothing_to_release=(true|false)$' < <(printf '%s\n' "$out") \
-    || ! grep -qE '^skip_iam=(true|false)$' < <(printf '%s\n' "$out") \
-    || ! grep -qE '^skip_gateway=(true|false)$' < <(printf '%s\n' "$out") \
-    || ! grep -qE '^version_iam=' < <(printf '%s\n' "$out") \
-    || ! grep -qE '^version_gateway=' < <(printf '%s\n' "$out"); then
-    printf '::warning::release-plan could not decide (rc=%s) — building, which is the fail-safe direction\n' "$rc"
-    printf 'nothing_to_release=false\n' >> "${GITHUB_OUTPUT:-/dev/stdout}"
-    # SMA-658. The image chains read their own outputs, and an unset output makes the chain RUN
-    # (spec § 4.1). Writing them here as well keeps the fail-safe explicit rather than implied.
-    printf 'skip_iam=false\nskip_gateway=false\n' >> "${GITHUB_OUTPUT:-/dev/stdout}"
-    # SMA-658 fix round 2 (ruling). Written EMPTY, deliberately, rather than left unwritten: an
-    # output GitHub never saw and one written as an empty string behave differently in a
-    # `release.yml` expression, and the image chains must not depend on that distinction. Spec
-    # § 6.1 only mandates the skip flags on this branch; an empty version means "unknown" here,
-    # never a real version — a consumer must not read it as one.
-    printf 'version_iam=\nversion_gateway=\n' >> "${GITHUB_OUTPUT:-/dev/stdout}"
-    exit 0
+  # SMA-658 fix round 2, widened by SMA-688 to every key. Under `set -euo pipefail`, each
+  # `grep -E ... | tail -n 1` pipeline below exits 1 (aborting this function before its
+  # `exit 0`) when its pattern has ZERO matches. So a checker that prints a verdict but omits
+  # one chain key — a partial write — must route into the fail-safe branch, which writes every
+  # key explicitly. Do not replace a missing-key check with `|| true` on the pipelines: that
+  # would let the key go unwritten silently.
+  #
+  # `for key in $keys` splits on purpose: keys_are_valid admits only [a-z][a-z0-9-]* lines, so
+  # a key holds no space and no glob character.
+  if [ "$rc" -ne 0 ] || ! grep -qE '^nothing_to_release=(true|false)$' < <(printf '%s\n' "$out"); then
+    failsafe=1
+  fi
+  for key in $keys; do
+    if ! grep -qE "^skip_${key}=(true|false)\$" < <(printf '%s\n' "$out") \
+      || ! grep -qE "^version_${key}=" < <(printf '%s\n' "$out"); then
+      failsafe=1
+    fi
+  done
+  if [ "$failsafe" -ne 0 ]; then
+    write_failsafe "$rc" "$keys"
   fi
   # `tail -n 1` guards against a second, forged verdict line ahead of the genuine one — e.g. a
   # releasable package name containing a newline could make the reason line above emit a
   # literal `nothing_to_release=true`, and both would otherwise match the grep and both would
   # get appended. The genuine verdict from `main()` is always printed LAST, so taking only the
-  # final match is safe. This is deliberately unverified-assumption-free: the reviewer could not
-  # confirm whether Actions takes the first or the last of two same-named `>>` output keys, and
-  # a fail-safe control must not lean on an assumption nobody checked.
+  # final match is safe.
   printf '%s\n' "$out" | grep -E '^nothing_to_release=(true|false)$' | tail -n 1 \
     >> "${GITHUB_OUTPUT:-/dev/stdout}"
-  # SMA-658. Four separate greps, one per key, each taken LAST for the same forged-line reason as
-  # the verdict above: a service line inside a heredoc or an echoed error message must not be
-  # read as the real decision. S6: a single combined grep over two keys cannot use `tail -n 1`
-  # without dropping one of the two services, so each key gets its own grep and its own tail.
-  printf '%s\n' "$out" | grep -E '^skip_iam=(true|false)$' | tail -n 1 \
-    >> "${GITHUB_OUTPUT:-/dev/stdout}"
-  printf '%s\n' "$out" | grep -E '^skip_gateway=(true|false)$' | tail -n 1 \
-    >> "${GITHUB_OUTPUT:-/dev/stdout}"
-  printf '%s\n' "$out" | grep -E '^version_iam=' | tail -n 1 \
-    >> "${GITHUB_OUTPUT:-/dev/stdout}"
-  printf '%s\n' "$out" | grep -E '^version_gateway=' | tail -n 1 \
-    >> "${GITHUB_OUTPUT:-/dev/stdout}"
+  # One grep for each key and output, each taken LAST for the same forged-line reason. The `=`
+  # after the key is load-bearing: `skip_iam` is a string prefix of `skip_iam-console`.
+  for key in $keys; do
+    printf '%s\n' "$out" | grep -E "^skip_${key}=(true|false)\$" | tail -n 1 \
+      >> "${GITHUB_OUTPUT:-/dev/stdout}"
+    printf '%s\n' "$out" | grep -E "^version_${key}=" | tail -n 1 \
+      >> "${GITHUB_OUTPUT:-/dev/stdout}"
+  done
   exit 0
 }
 
@@ -253,7 +300,7 @@ negative_control() {
   # that used to red this gate on the release PR. The line-COUNT assertion is a second,
   # independent guard against M2's forged-second-line failure mode reappearing — it is the
   # reason this row asserts more than the regex alone.
-  local gh_out_tmp rc line_count
+  local gh_out_tmp rc line_count key
   gh_out_tmp="$(mktemp)"
   rc=0
   GITHUB_OUTPUT="$gh_out_tmp" bash "$0" --github-output >/dev/null 2>&1 || rc=$?
@@ -270,14 +317,56 @@ negative_control() {
     cat "$gh_out_tmp" >&2
     failures=$((failures + 1))
   fi
+  # SMA-688. Every chain output exactly once. `^<key>=` with the `=` is load-bearing: `skip_iam`
+  # is a string prefix of `skip_iam-console`, so a pattern without it counts two keys as one.
+  for key in skip_iam version_iam skip_gateway version_gateway \
+    skip_iam-console version_iam-console skip_gateway-console version_gateway-console; do
+    line_count="$(grep -c "^${key}=" "$gh_out_tmp" || true)"
+    if [ "$line_count" != "1" ]; then
+      printf '  FAIL row 5: GITHUB_OUTPUT held %s line(s) for %s, expected exactly 1\n' \
+        "$line_count" "$key" >&2
+      failures=$((failures + 1))
+    fi
+  done
   rm -f "$gh_out_tmp"
 
-  # Row 6 — THE C1 REGRESSION ROW. `--github-output` must still write nothing_to_release=false
-  # and exit 0 when `uv` cannot be found at all. The `uv` preflight lived above the mode dispatch
-  # until the SMA-603 fix wave, so the runtime arm exited 2 and wrote NOTHING on a runner with no
-  # proto toolchain — the `plan` job then failed, and because every consumer carries a
-  # status-function-free `if:` (implicit success()), the whole publish path skipped. Reordering
-  # this file re-arms that trap in one edit, which is why the row exists.
+  # SMA-688. $1 a row label, $2 an output file. Asserts the fail-safe write of spec § 4.3: exactly
+  # nine lines, nothing_to_release=false, and skip_<key>=false and an EMPTY version_<key>= for each
+  # of the four registry keys. The exact line count also catches a line for a key that is not in
+  # the registry (for example skip_IAM_X) and a second verdict line.
+  _expect_failsafe_outputs() {
+    local label="$1" file="$2" key n
+    n="$(grep -c '' "$file" || true)"
+    if [ "$n" != "9" ]; then
+      printf '  FAIL %s: GITHUB_OUTPUT held %s line(s), expected the 9 fail-safe lines\n' \
+        "$label" "$n" >&2
+      printf '  --- %s contents ---\n' "$file" >&2
+      cat "$file" >&2
+      failures=$((failures + 1))
+    fi
+    if ! grep -qx 'nothing_to_release=false' "$file"; then
+      printf '  FAIL %s: nothing_to_release=false was not written\n' "$label" >&2
+      failures=$((failures + 1))
+    fi
+    for key in iam gateway iam-console gateway-console; do
+      if ! grep -qx "skip_${key}=false" "$file" || ! grep -qx "version_${key}=" "$file"; then
+        printf '  FAIL %s: the fail-safe pair skip_%s=false and version_%s= was not written\n' \
+          "$label" "$key" "$key" >&2
+        failures=$((failures + 1))
+      fi
+    done
+  }
+
+  # Row 6 — THE C1 REGRESSION ROW, widened by SMA-688. `--github-output` must still exit 0 and
+  # write the fail-safe outputs when `uv` cannot be found at all. The `uv` preflight lived above
+  # the mode dispatch until the SMA-603 fix wave, so the runtime arm exited 2 and wrote NOTHING on
+  # a runner with no proto toolchain — the `plan` job then failed, and because every consumer
+  # carries a status-function-free `if:` (implicit success()), the whole publish path skipped.
+  # Reordering this file re-arms that trap in one edit, which is why the row exists.
+  #
+  # SMA-688: without `uv` the wrapper cannot run `release_plan.py --keys`. It reads the keys from
+  # ci/images/chains.toml with sed, and writes all nine outputs fail-safe (spec § 4.3). So the
+  # restricted PATH now also holds `sed`, and the row asserts all nine outputs, not the verdict only.
   #
   # A hermetic PATH, not a guessed one. `PATH=/usr/bin:/bin` would be a silent no-op on any host
   # that installs uv system-wide; a directory holding symlinks to exactly the externals this arm
@@ -285,7 +374,7 @@ negative_control() {
   local nouv_dir nouv_out rc6=0 t tpath
   nouv_dir="$tmp/nouv-path"
   mkdir -p "$nouv_dir"
-  for t in bash dirname grep tail; do
+  for t in bash dirname grep sed tail; do
     tpath="$(command -v "$t" || true)"
     if [ -z "$tpath" ]; then
       printf '  FAIL row 6 cannot build its restricted PATH: %s is not on PATH\n' "$t" >&2
@@ -312,6 +401,7 @@ negative_control() {
     cat "$nouv_out" >&2
     failures=$((failures + 1))
   fi
+  _expect_failsafe_outputs "row 6 (uv unreachable)" "$nouv_out"
   rm -f "$nouv_out"
 
   # Row 7 — the FIXTURES verdict loop in release_plan.py:self_test(). The loop is deletable in
@@ -401,7 +491,11 @@ negative_control() {
   mkdir -p "$stub_root"
   cp -R "$HERE/." "$stub_root/"
   cat > "$stub_root/release_plan.py" <<'PYEOF'
-print("release-plan: fixture -- a malformed decision missing one service key")
+import sys
+if "--keys" in sys.argv:
+    print("iam\ngateway\niam-console\ngateway-console")
+    raise SystemExit(0)
+print("release-plan: fixture -- a malformed decision missing three chain keys")
 print("nothing_to_release=true")
 print("skip_iam=true")
 print("version_iam=1.0.0")
@@ -410,19 +504,76 @@ PYEOF
   GITHUB_OUTPUT="$stub_out" GITHUB_EVENT_NAME=push bash "$stub_root/run.sh" --github-output \
     >/dev/null 2>&1 || rc9=$?
   if [ "$rc9" -ne 0 ]; then
-    printf '  FAIL row 9: the wrapper exited %s against a checker output missing one service\n' \
+    printf '  FAIL row 9: the wrapper exited %s against a checker output missing one chain\n' \
       "$rc9" >&2
     printf '       key, expected 0 (the fail-safe direction)\n' >&2
     failures=$((failures + 1))
   fi
-  for key in nothing_to_release skip_iam skip_gateway version_iam version_gateway; do
+  # SMA-688: all nine outputs. The stub names four keys and prints one of them, so every other
+  # key must come from the fail-safe branch.
+  for key in nothing_to_release skip_iam version_iam skip_gateway version_gateway \
+    skip_iam-console version_iam-console skip_gateway-console version_gateway-console; do
     if ! grep -q "^${key}=" "$stub_out"; then
-      printf '  FAIL row 9: %s was not written when the checker output was missing a service key\n' \
+      printf '  FAIL row 9: %s was not written when the checker output was missing a chain key\n' \
         "$key" >&2
       failures=$((failures + 1))
     fi
   done
+  if ! grep -qx 'skip_iam-console=false' "$stub_out"; then
+    printf '  FAIL row 9: the fail-safe branch did not write skip_iam-console=false\n' >&2
+    failures=$((failures + 1))
+  fi
   rm -f "$stub_out"
+
+  # Rows 10 to 13 — SMA-688, the keys branch (spec § 4.3). Each stub replaces release_plan.py in a
+  # COPY of this directory under a stub repository root (the row-9 technique), and gives a --keys
+  # answer the wrapper must refuse. The stub's decision run prints a COMPLETE decision for all four
+  # keys with every skip_ set to true. So a wrapper that runs the decision after a refused --keys
+  # answer and trusts it writes true, and the fail-safe assertions red.
+  #   Row 10: --keys prints no key.              chains.toml is present -> the bash read, exit 0.
+  #   Row 11: --keys prints the invalid IAM_X.   chains.toml is present -> the bash read, exit 0.
+  #   Row 12: --keys fails (exit 3).             chains.toml is missing -> exit 2.
+  #   Row 13: --keys fails (exit 3).             chains.toml is empty   -> exit 2.
+  # In rows 12 and 13 no source names a key, so the wrapper cannot name the chain outputs. It
+  # must write nothing_to_release=false only: exactly one line, so no skip_ line.
+  _keys_branch_row() { # $1 row, $2 a Python literal: the --keys stdout, $3 the --keys exit code, $4 copy | missing | empty
+    local label="$1" keys_body="$2" keys_exit="$3" registry="$4" stub out rc=0 want=2 n
+    stub="$tmp/keys-stub-${label}"
+    mkdir -p "$stub/ci/release-plan" "$stub/ci/images"
+    cp -R "$HERE/." "$stub/ci/release-plan/"
+    case "$registry" in
+      copy)    cp "$REPO_ROOT/ci/images/chains.toml" "$stub/ci/images/chains.toml"; want=0 ;;
+      empty)   : > "$stub/ci/images/chains.toml" ;;
+      missing) : ;;
+    esac
+    printf 'import sys\nif "--keys" in sys.argv:\n    sys.stdout.write(%s)\n    raise SystemExit(%s)\nprint("nothing_to_release=true")\nfor k in ("iam", "gateway", "iam-console", "gateway-console"):\n    print(f"skip_{k}=true")\n    print(f"version_{k}=1.0.0")\n' \
+      "$keys_body" "$keys_exit" > "$stub/ci/release-plan/release_plan.py"
+    out="$(mktemp)"
+    GITHUB_OUTPUT="$out" GITHUB_EVENT_NAME=push bash "$stub/ci/release-plan/run.sh" --github-output \
+      >/dev/null 2>&1 || rc=$?
+    if [ "$rc" -ne "$want" ]; then
+      printf '  FAIL row %s: the wrapper exited %s after a --keys answer it must not trust, expected %s\n' \
+        "$label" "$rc" "$want" >&2
+      failures=$((failures + 1))
+    fi
+    if [ "$want" -eq 0 ]; then
+      _expect_failsafe_outputs "row $label" "$out"
+    else
+      n="$(grep -c '' "$out" || true)"
+      if [ "$n" != "1" ] || ! grep -qx 'nothing_to_release=false' "$out"; then
+        printf '  FAIL row %s: expected nothing_to_release=false as the only line, got %s line(s)\n' \
+          "$label" "$n" >&2
+        printf '  --- %s contents ---\n' "$out" >&2
+        cat "$out" >&2
+        failures=$((failures + 1))
+      fi
+    fi
+    rm -f "$out"
+  }
+  _keys_branch_row 10 "''" 0 copy
+  _keys_branch_row 11 "'iam\\nIAM_X\\n'" 0 copy
+  _keys_branch_row 12 "''" 3 missing
+  _keys_branch_row 13 "''" 3 empty
 
   rm -rf "$tmp"
   if [ "$failures" -gt 0 ]; then
