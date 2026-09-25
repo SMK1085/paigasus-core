@@ -204,19 +204,40 @@ assert_console_pins() {
   # stage goes into /app, so the builder's digest matters as much as the runtime's.
   # `grep -c` over the FILE, not `grep -q` from a pipe: rc 1 (no match) prints 0 and is folded
   # into the count, and rc 2 (unreadable file) also leaves 0, so both fail closed below.
-  local n_runtime_pin n_builder_pin
-  n_runtime_pin="$(grep -cE '^FROM gcr\.io/distroless/nodejs[0-9]+-debian12:nonroot@sha256:[0-9a-f]{64}([[:space:]]|$)' "$df")" || n_runtime_pin=0
+  # The two pin regexes are locals because S-FROM below reads them a second time, on the
+  # normalised file, so the count of FROM lines and the pins read the same view (SMA-670 D6).
+  local n_runtime_pin n_builder_pin rt_pin_re bd_pin_re
+  rt_pin_re='^FROM gcr\.io/distroless/nodejs[0-9]+-debian12:nonroot@sha256:[0-9a-f]{64}([[:space:]]|$)'
+  bd_pin_re='^FROM node:[0-9]+\.[0-9]+\.[0-9]+-bookworm@sha256:[0-9a-f]{64}[[:space:]]+AS[[:space:]]+builder([[:space:]]|$)'
+  n_runtime_pin="$(grep -cE "$rt_pin_re" "$df")" || n_runtime_pin=0
   if [ "${n_runtime_pin:-0}" -ne 1 ]; then
     echo "::error::ts/Dockerfile: the runtime FROM line must be exactly one gcr.io/distroless/nodejsNN-debian12:nonroot@sha256:<64 hex> — a missing digest or a different tag leaves the runtime base unpinned." >&2
     return 1
   fi
-  n_builder_pin="$(grep -cE '^FROM node:[0-9]+\.[0-9]+\.[0-9]+-bookworm@sha256:[0-9a-f]{64}[[:space:]]+AS[[:space:]]+builder([[:space:]]|$)' "$df")" || n_builder_pin=0
+  n_builder_pin="$(grep -cE "$bd_pin_re" "$df")" || n_builder_pin=0
   if [ "${n_builder_pin:-0}" -ne 1 ]; then
     echo "::error::ts/Dockerfile: the builder FROM line must be exactly one node:X.Y.Z-bookworm@sha256:<64 hex> AS builder — without the digest, the code compiled into /app comes from an unpinned image." >&2
     return 1
   fi
 
-  # The next two checks read a NORMALISED copy of ts/Dockerfile, written to a temp file, never a
+  # S-DIRECTIVE (SMA-670 D6). On the RAW file, because a parser directive decides how the
+  # normaliser below must read the file. Only the comment lines before the first line that is not a
+  # comment can be directives. A `# syntax=` makes BuildKit pull an unpinned frontend image, and an
+  # `# escape=` changes the continuation character that the normaliser joins on. The match is
+  # case-insensitive, because Docker reads directives case-insensitively. awk reads the FILE, not a
+  # pipe, and it has no `exit`, so it reads its whole input.
+  local directive directive_rc=0
+  directive="$(awk 'done { next } !/^[[:space:]]*#/ { done = 1; next } { l = tolower($0) } l ~ /^#[[:space:]]*(syntax|escape|check)[[:space:]]*=/ { print; done = 1 }' "$df")" || directive_rc=$?
+  if [ "$directive_rc" -ne 0 ]; then
+    echo "::error::assert_console_pins: awk exited ${directive_rc} while reading ts/Dockerfile's parser directives; the directive check could not run." >&2
+    return 1
+  fi
+  if [ -n "$directive" ]; then
+    echo "::error::ts/Dockerfile starts with a parser directive (${directive}); a '# syntax=' pulls an unpinned BuildKit frontend and '# escape=' changes how this check reads the file — remove it." >&2
+    return 1
+  fi
+
+  # The checks below read a NORMALISED copy of ts/Dockerfile, written to a temp file, never a
   # here-string: Homebrew bash 5 deadlocks on a here-string over 512 bytes on the development Mac
   # (CLAUDE.md, SMA-612). The normalisation follows assert_pins: `\`-continued lines are joined
   # into one, so a flag or an assignment on a continuation line is seen on its instruction's line.
@@ -252,6 +273,51 @@ assert_console_pins() {
   if [ "${n_baked:-0}" -ne 0 ]; then
     echo "::error::ts/Dockerfile bakes a PAIGASUS_* env var; console config is deployment-varying and must stay runtime-only. The joined instruction(s) follow." >&2
     grep -nE '^[[:space:]]*([Ee][Nn][Vv]|[Aa][Rr][Gg])[[:space:]]+.*PAIGASUS_' "$norm" >&2 || true
+    rm -f "$norm"
+    return 1
+  fi
+
+  # S-FROM (SMA-670 gap 2a, D6). Every image that the build reads must be one of the two
+  # digest-pinned FROM images. So the normalised file holds exactly two FROM instructions, and each
+  # one matches one of the two pin regexes above. An extra stage, an unpinned stage, or a `from`
+  # instruction in lower case all red here. The count and the pins read the SAME normalised view.
+  local from_lines from_rc=0 n_from n_from_bad
+  from_lines="$(grep -E '^[[:space:]]*[Ff][Rr][Oo][Mm][[:space:]]' "$norm")" || from_rc=$?
+  if [ "$from_rc" -gt 1 ]; then
+    rm -f "$norm"
+    echo "::error::assert_console_pins: grep exited ${from_rc} on the normalised ts/Dockerfile; the FROM check could not run." >&2
+    return 1
+  fi
+  # printf into grep -c reads the whole input: grep -c is not an early-exit reader.
+  n_from="$(printf '%s\n' "$from_lines" | grep -c .)" || n_from=0
+  n_from_bad="$(printf '%s\n' "$from_lines" | grep -vE "$rt_pin_re|$bd_pin_re" | grep -c .)" || n_from_bad=0
+  if [ "$n_from" -ne 2 ] || [ "$n_from_bad" -ne 0 ]; then
+    echo "::error::ts/Dockerfile has ${n_from} FROM instruction(s), or a FROM that is not one of the two digest-pinned stages (the node builder and the distroless runtime); an extra or unpinned stage pulls an unpinned image into the build. The FROM lines of the normalised file follow." >&2
+    printf '%s\n' "$from_lines" >&2
+    rm -f "$norm"
+    return 1
+  fi
+
+  # S-COPYFROM (SMA-670 D6). A `--from=<image>` pulls an image that no FROM line pins. So every
+  # `--from=` value (COPY --from=) and every `from=` inside a `--mount=` argument (RUN --mount=…)
+  # must name the builder stage or the named build context `bindings`. Each extraction is guarded:
+  # grep rc 1 is "none found", and only rc > 1 is a failure.
+  local cf_from cf_from_rc=0 cf_mount cf_mount_rc=0 cf_values cf_bad cf_v
+  cf_from="$(grep -oE -- '--from=[^[:space:],]+' "$norm")" || cf_from_rc=$?
+  cf_mount="$(grep -oE -- '--mount=[^[:space:]]+' "$norm")" || cf_mount_rc=$?
+  if [ "$cf_from_rc" -gt 1 ] || [ "$cf_mount_rc" -gt 1 ]; then
+    rm -f "$norm"
+    echo "::error::assert_console_pins: grep exited ${cf_from_rc}/${cf_mount_rc} on the normalised ts/Dockerfile; the --from= check could not run." >&2
+    return 1
+  fi
+  # grep rc 1 below means "no value at all" or "no bad value", and both leave the variable empty,
+  # which is the correct reading. `from=` also finds the value inside each `--from=` match.
+  cf_values="$(printf '%s\n' "$cf_from" "$cf_mount" | grep -oE 'from=[^[:space:],]+' | sed 's/^from=//')" || cf_values=""
+  cf_bad="$(printf '%s\n' "$cf_values" | grep -vxE 'builder|bindings')" || cf_bad=""
+  if [ -n "$cf_bad" ]; then
+    while IFS= read -r cf_v; do
+      echo "::error::ts/Dockerfile reads from '${cf_v}', which is not the builder stage or the bindings context; a --from=<image> pulls an image that no FROM line pins." >&2
+    done < <(printf '%s\n' "$cf_bad")
     rm -f "$norm"
     return 1
   fi

@@ -175,6 +175,35 @@ mk_tree C2
 append_df C2 '# PAIGASUS_X in a comment'
 pins_mut C2 0 ""
 
+mk_tree S1
+append_df S1 'FROM node:latest AS extra'
+pins_mut S1 1 'FROM instruction(s)'
+
+mk_tree S1b
+append_df S1b 'from node:latest as extra'
+pins_mut S1b 1 'FROM instruction(s)'
+
+mk_tree S1c
+awk '/^FROM node:/ && !done { print "RUN true \\"; done = 1 } { print }' "$T/S1c/ts/Dockerfile" > "$T/S1c/ts/Dockerfile.new"
+mv "$T/S1c/ts/Dockerfile.new" "$T/S1c/ts/Dockerfile"
+pins_mut S1c 1 'FROM instruction(s)'
+
+mk_tree S1d
+{ printf '%s\n' '# syntax=docker/dockerfile:1'; cat "$REPO/ts/Dockerfile"; } > "$T/S1d/ts/Dockerfile"
+pins_mut S1d 1 'parser directive'
+
+mk_tree S1g
+{ printf '%s\n' '#  SYNTAX = docker/dockerfile:1'; cat "$REPO/ts/Dockerfile"; } > "$T/S1g/ts/Dockerfile"
+pins_mut S1g 1 'parser directive'
+
+mk_tree S1e
+append_df S1e 'COPY --from=alpine:latest /x /y'
+pins_mut S1e 1 'which is not the builder stage'
+
+mk_tree S1f
+append_df S1f 'RUN --mount=type=bind,from=alpine:latest,target=/x true'
+pins_mut S1f 1 'which is not the builder stage'
+
 # --- summary -----------------------------------------------------------------------------------
 echo "console-selftest: ${N_PASS} passed, ${N_FAIL} failed, ${N_SKIP} skipped"
 if [ "$N_FAIL" -ne 0 ]; then
