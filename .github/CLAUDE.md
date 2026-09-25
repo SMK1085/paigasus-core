@@ -27,11 +27,11 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   `env!("CARGO_PKG_VERSION")` still feeds `ServiceInfo`, and ADR-0020 skew reporting is still
   parked on that value (SMA-505 R7).
 - **A local `release-plz` measurement needs a branch with no upstream, or an upstream with the
-  same branch name.** release-plz checks out the upstream's branch NAME in its temporary copy
-  (READ, `git_cmd/src/lib.rs:44-60, 177-179`). A scratch branch `m2` that tracks
-  `origin/feature/x` makes it walk `feature/x`, which does not contain the scratch commit, and
-  it reports `already up to date` (MEASURED, SMA-685 M2). `git checkout -B m2 origin/…` sets
-  such an upstream. CI is not affected: `main` tracks `origin/main`.
+  same branch name (READ).** release-plz checks out the upstream's branch name in its temporary
+  copy (READ, `git_cmd/src/lib.rs:44-60, 177-179`). A scratch branch `m2` that tracks
+  `origin/main` makes it walk `main` instead, which lacks the scratch commit (MEASURED, SMA-685
+  M2). release-plz then reports `already up to date`. `git branch -u origin/main` sets this
+  upstream. CI is not affected (INFERRED): `main` tracks `origin/main`.
 - `dependencies_update` is `false` since SMA-680. `true` runs a full `cargo update` in the release
   PR. That made the committed wasm glue stale on v0.2.0, and it ran unreviewed third-party build
   scripts in the stamp step, which holds a write-capable token. `false` runs
@@ -148,17 +148,18 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   the sole judge of its own reachability; `repo:actionlint`'s own `inputs: ['**/*']` — the
   premise check 8e (and 8/8b/8c/8d) runs on every PR at all — is pinned the ordinary way, from
   `SELF_TASK_EXPECTED_GLOBS["actionlint"]` in `ci_targets.py`.
-- The kernel family (`paigasus-kernel` + the three binding crates + their `pyproject.toml` /
-  `package.json` faces) carries **one version** across twenty sites, asserted by
-  `repo:version-lockstep` (`ci/version-lockstep/run.sh`). release-plz owns the Cargo
-  `[package] version` of each group's publishable crates and the `[workspace.dependencies]`
-  version requirements (measured against 0.3.158). It does NOT write a Cargo `publish = false`
-  crate (SMA-685). The script owns nine sites (`--write`): the six non-Cargo sites and the three
-  `publish = false` binding manifests. It checks all twenty, because a `version_group`
-  that silently stopped applying would otherwise go unnoticed. Two of the sites drift SILENTLY
-  without it: `py/uv.lock` (its `moon.yml` runs bare `uv sync`, not `--locked`) and the 26
-  `bindingPackageVersion` guards in the committed napi glue (the codegen-drift gate covers only
-  the three `**/generated` proto dirs). `repo:version-lockstep` is script-pinned the same way the
+- The kernel family (`paigasus-kernel`, the three binding crates, and their `pyproject.toml` /
+  `package.json` faces) carries **one version** across twenty sites. `repo:version-lockstep`
+  (`ci/version-lockstep/run.sh`) asserts this. release-plz owns the Cargo `[package] version`
+  of each group's publishable crates, and the `[workspace.dependencies]` version requirements
+  (measured against 0.3.158). It does NOT write a Cargo `publish = false` crate (SMA-685). The
+  script owns nine sites (`--write`): the six non-Cargo sites and the three `publish = false`
+  binding manifests. It checks all twenty sites, because an applying `version_group` could
+  silently stop working. Today that risk is real only for `paigasus-proto-derive`. Two of the
+  sites drift SILENTLY without it: `py/uv.lock` (its `moon.yml` runs bare `uv sync`, not
+  `--locked`) and the 26 `bindingPackageVersion` guards in the committed napi glue (the
+  codegen-drift gate covers only the three `**/generated` proto dirs).
+  `repo:version-lockstep` is script-pinned the same way the
   `release-parity*` tasks are — `SELF_SCHEDULED_GATES` pins its **four** `moon.yml` lines
   (`--self-test`, `--negative-control`, the real run, and `set -euo pipefail`; one more than the
   `release-parity*` tasks, which have no self-test invocation) — and takes the

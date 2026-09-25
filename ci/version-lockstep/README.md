@@ -123,8 +123,8 @@ false-green on the very change that introduced that table. `lock_reader_self_tes
 set, a **missing member** (must read `""`, not the survivor's version), a non-uniform set
 (must read `""`), and a `uv-lock` read — covering both `cargo-lock` and `uv-lock`.
 
-`cargo_package_writer_self_test` drives `write_site` directly against thirteen synthetic
-`Cargo.toml` fixtures (varied spacing, comments, table order, CRLF, no trailing newline, and
+`cargo_package_writer_self_test` drives `write_site` directly against thirteen fixture
+scenarios (varied spacing, comments, table order, CRLF, no trailing newline, and
 refusal cases). It proves the WRITER is honest for the `cargo-package` kind. It does not read
 back through `read_version`, so it closes only the WRITE half of this limitation.
 

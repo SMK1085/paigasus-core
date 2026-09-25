@@ -55,12 +55,13 @@ dependencies_update = false
 
 # --- Releasable: the kernel family (ADR-0011 S1) ------------------------------------------
 # One version across crates.io/PyPI/npm. release-plz 0.3.158 bumps ONLY `paigasus-kernel` here.
-# It never writes the version of a crate whose Cargo manifest says `publish = false`, version
-# group or not (READ: `packages_to_process()`, release_plz_core updater.rs:283-302, takes only
-# Cargo-publishable and `git_only` crates; version groups are computed over that set only,
-# updater.rs:162-189; MEASURED, SMA-685 M1 and M1b). So `version_group` and `release = true`
-# on the three binding crates below are INERT today. They stay as the declaration, in case a
-# later pin changes the filter; read the source again when .prototools moves the pin.
+# It never writes the version of a `publish = false` crate, in or out of a version group.
+# `packages_to_process()` takes only Cargo-publishable and `git_only` crates (READ,
+# release_plz_core updater.rs:283-302). release-plz computes version groups over that set only
+# (READ, updater.rs:162-189). MEASURED: SMA-685 M1 and M1b confirm this. So `version_group`
+# and `release = true` on the three binding crates below are INERT today. They stay as the
+# declaration, in case a later pin changes the filter; read the source again when .prototools
+# moves the pin.
 # The binding versions come from `ci/version-lockstep/run.sh --write`, which the release-PR
 # job's stamp step runs (SMA-685). It writes each `publish = false` non-head crate's version
 # from the head. `repo:version-lockstep` then checks every site.

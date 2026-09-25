@@ -41,7 +41,9 @@ MEASURED: the release-plz binary is version 0.3.158. This meets the plan's expec
 
 MEASURED: the pipe capacity is 512 bytes. This value is below the plan's 8192-byte floor.
 The check ran four times in total. Each run read 512 bytes. The result is stable. This
-matches a known host condition. The root `CLAUDE.md` file records it under SMA-612. A new
+matches a known host condition.
+
+The root `CLAUDE.md` file records it under SMA-612. A new
 pipe on this development Mac can hold only 512 bytes. That is not the nominal value the
 kernel reports.
 
@@ -117,7 +119,9 @@ grep -n 'checkout' $S/sma685/m1.gittrace
 Note on the tag command: the repo's global git config sets `tag.gpgsign=true`. A plain
 `git tag <name>` under that setting tries to make a signed tag, and a signed tag needs a
 message. The first attempt failed with `fatal: no tag message?`. The fix was
-`git -c tag.gpgsign=false tag m1-scratch`. This ran after `release-plz update` had already
+`git -c tag.gpgsign=false tag m1-scratch`.
+
+This ran after `release-plz update` had already
 run against the correct commit. HEAD had not moved: `release-plz update` only edits files,
 it does not commit. This is a host git-config artifact, not a release-plz result.
 
@@ -145,7 +149,9 @@ Result table:
 | paigasus-proto | 0.2.0 | 0.3.0 | 0.3.0 |
 
 MEASURED: `release-plz update` exits 0. The kernel moves to 0.1.1. The three bindings stay
-at 0.1.0. Both proto crates move to 0.3.0. The log has a `no upstream configured` warning.
+at 0.1.0. Both proto crates move to 0.3.0.
+
+The log has a `no upstream configured` warning.
 The git trace shows a checkout of `m1`. This matches the plan's expectation for the B1
 symptom in full.
 
@@ -269,14 +275,18 @@ unpublished workspace dependency). The debug log shows release-plz entered
 "Processing 1 packages in git_only mode". It then tried to open a git repository directly
 at the Cargo manifest directory (`rs/`), not at the clone's repository root. That directory
 has no `.git` of its own. The repository root is the clone's top level, so git2 reports
-`NotFound`. This is a different failure mode. A `git_only` package whose manifest
+`NotFound`.
+
+This is a different failure mode. A `git_only` package whose manifest
 directory is not the repository root cannot spin its "unreleased" worktree at all. This is
 true for this release-plz version, on this repo's layout.
 
 **M1c verdict: an error, of a kind not previously described in the spec.** The §2.1
 inference is that `git_only = true` would move `paigasus-wasm` to 0.1.1. This run neither
 confirms nor refutes that inference through a `cargo package` failure. An earlier, unrelated
-failure blocks the run first. Record this as open: the SMA-407 fixture's outcome cannot be
+failure blocks the run first.
+
+Record this as open: the SMA-407 fixture's outcome cannot be
 reproduced this way on this repo layout. The exact cause needs a repository-root-vs-manifest-
 dir fix, or a different fixture shape. Do not guess past this point.
 
