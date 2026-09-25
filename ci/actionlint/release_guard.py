@@ -3924,6 +3924,49 @@ def _v16_registry_agreement() -> str | None:
     return None
 
 
+def _main_v16_call_site() -> str | None:
+    """Regression test (SMA-688, review fix round 1): the V16a-c call site in main() — the `if
+    main_path.name == RELEASE_WORKFLOW_NAME: violations += registry_violations(...)` block — is
+    reachable by NOTHING else. `_v16_registry_agreement` calls `registry_violations` DIRECTLY, and
+    the only main()-level release.yml case, `_v13_cross_workflow_sweep`, asserts a V13 line only.
+    MEASURED: deleting those three lines left `--self-test` green (rc 0, 0 FAIL) — once Task 7
+    makes the real release.yml pass, that deletion would silently turn off all V16 checking with
+    every gate green.
+
+    Drives main() through `_run_main_in_tempdir`, entry `.github/workflows/release.yml`, the same
+    shape `_v13_cross_workflow_sweep` uses. Direction 1: a `ci/images/chains.toml` holding one key
+    MORE than CHAIN_APPROVALS. `release.yml` here is `_OK_CONSOLE_MAIN`, whose chain jobs and plan
+    outputs already match every CHAIN_APPROVALS key, so the ONLY way this tree can print the
+    key-set message is through a live call to `registry_violations` inside main() itself — nothing
+    else in check_main can produce it. Direction 2 (fail-closed): a release.yml with NO
+    chains.toml anywhere in the tree must exit 2 (load_chain_registry's infra path), never 0 or 1.
+    """
+    registry_lines = "".join(
+        f"[chain.{key}]\nghcr = 'ghcr.io/smk1085/paigasus-{key}'\n"
+        f"hub = 'docker.io/smaschek/paigasus-{key}'\n"
+        for key in CHAIN_APPROVALS
+    )
+    wider = registry_lines + (
+        "[chain.billing]\nghcr = 'ghcr.io/smk1085/paigasus-billing'\n"
+        "hub = 'docker.io/smaschek/paigasus-billing'\n"
+    )
+    rc, out, err = _run_main_in_tempdir(
+        {".github/workflows/release.yml": _OK_CONSOLE_MAIN, "ci/images/chains.toml": wider},
+        entry=".github/workflows/release.yml",
+    )
+    want = "V16: CHAIN_APPROVALS names"
+    if rc != 1 or want not in out:
+        return (f"a registry with one extra key did not reach V16 through main(): expected exit "
+                f"1 with {want!r} in output, got exit {rc!r}: stdout={out!r} stderr={err!r}")
+
+    rc2, out2, err2 = _run_main_in_tempdir(
+        {".github/workflows/release.yml": _OK_CONSOLE_MAIN}, entry=".github/workflows/release.yml")
+    if rc2 != 2:
+        return (f"release.yml with no ci/images/chains.toml in the tree did not fail closed: "
+                f"expected exit 2, got exit {rc2!r}: stdout={out2!r} stderr={err2!r}")
+    return None
+
+
 def _v12_npm_floor_pinned() -> str | None:
     """V12 (SMA-602 fix wave, F3): every NPM_OIDC_FLOOR_LINES entry, in BOTH subjects.
 
@@ -4125,6 +4168,7 @@ def self_test() -> int:
         ("sma-688 approval_for_job and the derived tables cover the console keys",
          _sma688_console_approvals),
         ("sma-688 V16 registry agreement", _v16_registry_agreement),
+        ("sma-688 the main() V16a-c call site is pinned", _main_v16_call_site),
         ("sma-658 every new publish marker has a reding fixture", _sma658_new_publish_markers_bite),
         ("sma-658 fix round 1, I3: V13's cross-workflow sweep", _v13_cross_workflow_sweep),
         ("f7 non-list steps: fails closed", _non_list_steps_fails_closed),
