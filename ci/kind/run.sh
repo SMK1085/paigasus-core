@@ -5,15 +5,20 @@
 # and the Playwright specs against a real ingress
 # (docs/superpowers/specs/2026-09-23-sma-513-pr3-kind-chart-job-design.md).
 #
-#   run.sh up          kind cluster, Traefik, a throwaway CA and two leaves, the CoreDNS hosts
-#                      block, Postgres, Redis, Keycloak, the three chart Secrets, the preflight
-#   run.sh images      build paigasus-iam, iam-console and gateway-console; load them into kind
-#   run.sh install a   helm install with values/a.yaml (both zones)
-#   run.sh specs a     Playwright project phase-a (R1, R1-control, R2, R3-control)
-#   run.sh upgrade b   helm upgrade with a.yaml + b.yaml (gateway zone off), then settle
-#   run.sh specs b     Playwright project phase-b (R3), then R3's Deployment check
-#   run.sh diagnose    evidence into <state>/diagnose (never a Secret, never the realm ConfigMap)
-#   run.sh down        delete the cluster
+#   run.sh up              kind cluster, Traefik, a throwaway CA and two leaves, the CoreDNS hosts
+#                          block, Postgres, Redis, Keycloak, the three chart Secrets, the gateway
+#                          stub at 0 replicas, the preflight
+#   run.sh images          build paigasus-iam, iam-console and gateway-console; load them into kind
+#   run.sh install a       helm install with values/a.yaml (both zones)
+#   run.sh specs a         Playwright project phase-a (R1, R1-control, R2, R3-control)
+#   run.sh stub up         scale the gateway stub to 1 and check /v1/service-info in-cluster (SMA-514)
+#   run.sh specs journeys  Playwright project journeys (SMA-514's two scenarios) with its guards:
+#                          the skip scan, the step-title check, exactly 2 tests, the JSON report
+#   run.sh stub down       scale the gateway stub to 0 (local re-runs only; README order rule)
+#   run.sh upgrade b       helm upgrade with a.yaml + b.yaml (gateway zone off), then settle
+#   run.sh specs b         Playwright project phase-b (R3), then R3's Deployment check
+#   run.sh diagnose        evidence into <state>/diagnose (never a Secret, never the realm ConfigMap)
+#   run.sh down            delete the cluster
 #
 # Exit codes: 0 pass | 1 a spec or an assertion failed (a failed helm install or upgrade counts:
 # the chart is the unit under test) | 2 an infrastructure error. Only die_assert and a failed spec
@@ -58,7 +63,7 @@ TRAEFIK_CHART_SHA256=cd7254ea853da73bdb88edc896f079b88d43ffa0bfe699fdbf21081361e
 # Traefik's own body for a request no router matches (Review Focus 3).
 TRAEFIK_404_BODY="404 page not found"
 
-USAGE="usage: ci/kind/run.sh up | images | install a | specs a|b | upgrade b | diagnose | down"
+USAGE="usage: ci/kind/run.sh up | images | install a | specs a|b|journeys | stub up|down | upgrade b | diagnose | down"
 
 # helm's cache and config stay in the state directory, never in the operator's home.
 export HELM_CACHE_HOME="$STATE/helm/cache" HELM_CONFIG_HOME="$STATE/helm/config" HELM_DATA_HOME="$STATE/helm/data"
@@ -259,7 +264,7 @@ chart_secrets() {
     || die_infra "cannot create the Secret paigasus-postgres"
   k -n "$NS" create secret generic paigasus-iam-pepper --from-file=pepper="$STATE/pepper" >/dev/null \
     || die_infra "cannot create the Secret paigasus-iam-pepper"
-  k apply -f "$HERE/manifests/gateway-absent.yaml" >/dev/null || die_infra "cannot apply gateway-absent"
+  k apply -f "$HERE/manifests/gateway-stub.yaml" >/dev/null || die_infra "cannot apply gateway-stub"
 }
 
 preflight() {
@@ -461,12 +466,51 @@ upgrade_b() {
 
 # --------------------------------------------------------------------------------------- specs
 
-specs() {
-  local phase="$1" rc=0 out="$EVIDENCE/playwright/phase-$1" pw gw_name gw failed=""
-  local list_out list_rc=0 total
+# SMA-514 spec § 7.2: no test in tests/cluster may skip, fixme, expect a failure or focus. The
+# scan is here and not in iam-console-ts:test, because that task's inputs exclude tests/cluster/**
+# (ts/apps/iam-console/moon.yml), so Moon would serve a cached PASS. Blanks before the "(" are
+# allowed for. NOT seen: a bracket call such as test['skip'](…).
+SKIP_ERE='\.(skip|fixme|fail|only)[[:space:]]*\('
+CLUSTER_TESTS="$REPO_ROOT/ts/apps/iam-console/tests/cluster"
+
+# The journeys guards that need no cluster, before `--list`. $1 = the evidence directory.
+journeys_prerun() {
+  local out="$1" rc=0
+  grep -rnE --include='*.ts' -- "$SKIP_ERE" "$CLUSTER_TESTS" >"$out/skip-scan.txt" 2>&1 || rc=$?
+  case "$rc" in
+    0) die_assert "tests/cluster must not skip, fixme, fail or focus a test (SMA-514 AC 2): $(cat "$out/skip-scan.txt")" ;;
+    1) echo "  ok [scan]: no .skip/.fixme/.fail/.only in tests/cluster" ;;
+    *) die_infra "the skip scan could not read $CLUSTER_TESTS (grep rc $rc): $(cat "$out/skip-scan.txt")" ;;
+  esac
+  rc=0
+  node "$HERE/journeys-report.mjs" sources "$CLUSTER_TESTS/journeys" >"$out/sources.txt" 2>&1 || rc=$?
+  cat "$out/sources.txt"
+  case "$rc" in
+    0) ;;
+    3) die_assert "the journeys step titles and EXPECTED_STEPS in ci/kind/journeys-report.mjs disagree" ;;
+    *) die_infra "journeys-report.mjs sources exited $rc; see $out/sources.txt" ;;
+  esac
+  node --test "$HERE/journeys-report.test.mjs" "$HERE/stub-check.test.mjs" >"$out/checker-tests.txt" 2>&1 \
+    || die_infra "the kind checkers failed their own unit tests; see $out/checker-tests.txt"
+  echo "  ok [checkers]: journeys-report.test.mjs and stub-check.test.mjs pass"
+}
+
+specs() {  # $1 = a | b | journeys
+  local which="$1" project rc=0 out report pw gw_name gw failed="" list_out list_rc=0 total check_rc=0
+  case "$which" in
+    a) project=phase-a ;;
+    b) project=phase-b ;;
+    journeys) project=journeys ;;
+    *) die_infra "$USAGE" ;;
+  esac
+  out="$EVIDENCE/playwright/$project"
+  report="$out/report.json"
   pw="$(read_state user-password)" || die_infra "no credentials in $STATE; run 'run.sh up' first"
-  need pnpm; need kubectl
+  need pnpm
+  if [ "$which" = b ]; then need kubectl; fi
+  if [ "$which" = journeys ]; then need node; fi
   mkdir -p "$out" || die_infra "cannot make $out"
+  if [ "$which" = journeys ]; then journeys_prerun "$out"; fi
   # Playwright's rc 1 means "a spec failed" ONLY when the run got as far as running specs. It also
   # exits 1 for a config that will not load, an unknown --project, an empty test list, or a missing
   # browser (spec § 4.7). `--list` alone cannot tell those apart from a real run, so read it before
@@ -474,21 +518,37 @@ specs() {
   list_out="$out/list.txt"
   PAIGASUS_KIND_USERNAME="$KIND_USER" PAIGASUS_KIND_PASSWORD="$pw" PAIGASUS_KIND_OUTPUT_DIR="$out" \
     pnpm --dir "$REPO_ROOT/ts/apps/iam-console" exec playwright test \
-      --config tests/cluster/playwright.config.ts --project "phase-$phase" --list >"$list_out" 2>&1 || list_rc=$?
+      --config tests/cluster/playwright.config.ts --project "$project" --list >"$list_out" 2>&1 || list_rc=$?
   [ "$list_rc" = 0 ] \
-    || die_infra "playwright --list exited $list_rc for phase-$phase (a config that will not load, an unknown --project, or a missing browser); see $list_out"
+    || die_infra "playwright --list exited $list_rc for $project (a config that will not load, an unknown --project, or a missing browser); see $list_out"
   total="$(sed -n 's/^Total: \([0-9][0-9]*\) test.*/\1/p' "$list_out")"
   [ -n "$total" ] && [ "$total" -gt 0 ] \
-    || die_infra "playwright --list found zero tests for phase-$phase; see $list_out"
+    || die_infra "playwright --list found zero tests for $project; see $list_out"
+  if [ "$which" = journeys ] && [ "$total" != 2 ]; then
+    die_infra "journeys must hold exactly 2 tests (SMA-514 AC 3); --list found $total; see $list_out"
+  fi
+  # A report from an earlier run must not read as this run's (the settle_gateway_404 rule).
+  rm -f "$report" || die_infra "cannot remove $report"
   PAIGASUS_KIND_USERNAME="$KIND_USER" PAIGASUS_KIND_PASSWORD="$pw" PAIGASUS_KIND_OUTPUT_DIR="$out" \
     pnpm --dir "$REPO_ROOT/ts/apps/iam-console" exec playwright test \
-      --config tests/cluster/playwright.config.ts --project "phase-$phase" || rc=$?
+      --config tests/cluster/playwright.config.ts --project "$project" || rc=$?
   case "$rc" in
     0) ;;
-    1) failed="Playwright project phase-$phase" ;;
-    *) die_infra "playwright exited $rc for phase-$phase" ;;
+    1) failed="Playwright project $project" ;;
+    *) die_infra "playwright exited $rc for $project" ;;
   esac
-  if [ "$phase" = b ]; then
+  if [ "$which" = journeys ]; then
+    # SMA-514 spec § 7.2, decision D6: a well-formed report that fails a check is rc 1; a missing
+    # or unreadable report is rc 2. It runs after a failed spec too, for the evidence.
+    node "$HERE/journeys-report.mjs" report "$report" >"$out/report-check.txt" 2>&1 || check_rc=$?
+    cat "$out/report-check.txt"
+    case "$check_rc" in
+      0) ;;
+      3) failed="${failed:+$failed; }the journeys report failed its checks (above)" ;;
+      *) die_infra "the journeys report is missing or unreadable (checker rc $check_rc); see $out/report-check.txt" ;;
+    esac
+  fi
+  if [ "$which" = b ]; then
     # R3's last clause (spec § 6.4): the gateway console Deployment does not exist. Here and not in
     # the spec file, so the TS tier needs no child_process. By NAME: the chart's Deployment
     # metadata has no labels (charts/paigasus/templates/console-deployment.yaml), and install_a
@@ -502,6 +562,50 @@ specs() {
     fi
   fi
   [ -z "$failed" ] || die_assert "$failed"
+}
+
+# ---------------------------------------------------------------------------------------- stub
+
+# SMA-514 spec § 4.3-4.4, decision D2. The stub starts AFTER phase A: R3-control needs the gateway
+# zone `degraded`. The discovery cache keeps a failed probe for 10 s and a good one for 60 s, so
+# after `stub down` wait about 60 s before `specs a` (README).
+STUB=gateway-stub
+
+stub_up() {
+  local out="$EVIDENCE/stub-check.log"
+  need kubectl; need node
+  mkdir -p "$EVIDENCE" || die_infra "cannot make $EVIDENCE"
+  k -n "$NS" scale "deployment/$STUB" --replicas=1 >/dev/null || die_infra "cannot scale $STUB to 1 replica"
+  # 300 s: the stub image is pulled only here, from Docker Hub, and a throttled pull is slow.
+  k -n "$NS" rollout status "deployment/$STUB" --timeout=300s || die_infra "$STUB did not become ready in 300 s"
+  k -n "$NS" delete pod stub-check --ignore-not-found --wait=true --timeout=60s >/dev/null \
+    || die_infra "cannot delete an old stub-check pod"
+  k apply -f "$HERE/manifests/stub-check.yaml" >/dev/null || die_infra "cannot start the stub-check pod"
+  if ! k -n "$NS" wait pod/stub-check --for=jsonpath='{.status.phase}'=Succeeded --timeout=120s; then
+    k -n "$NS" logs pod/stub-check >"$out" 2>&1 || true
+    k -n "$NS" describe pod/stub-check >"$EVIDENCE/stub-check.describe.txt" 2>&1 || true
+    die_infra "the stub-check pod did not succeed in 120 s; evidence in $out"
+  fi
+  k -n "$NS" logs pod/stub-check >"$out" || die_infra "cannot read the stub-check output"
+  node "$HERE/stub-check.mjs" "$out" \
+    || die_infra "the gateway stub does not answer /v1/service-info as the discovery probe needs; evidence in $out"
+  echo "== stub up: done =="
+}
+
+stub_down() {
+  local deadline ips
+  need kubectl
+  k -n "$NS" scale "deployment/$STUB" --replicas=0 >/dev/null || die_infra "cannot scale $STUB to 0 replicas"
+  deadline=$(( $(date +%s) + 120 ))
+  while :; do
+    ips="$(k -n "$NS" get endpoints "$STUB" -o jsonpath='{.subsets[*].addresses[*].ip}')" \
+      || die_infra "cannot read the $STUB endpoints"
+    [ -n "$ips" ] || break
+    [ "$(date +%s)" -lt "$deadline" ] || die_infra "the $STUB Service still has endpoints 120 s after the scale-down: $ips"
+    sleep 2
+  done
+  echo "  $STUB: 0 replicas, no endpoints. Wait about 60 s before 'specs a' (the discovery cache, README)"
+  echo "== stub down: done =="
 }
 
 # ------------------------------------------------------------------------------------ diagnose
@@ -534,6 +638,16 @@ diagnose() {
       if [ "$ready" != "True" ]; then k -n "$ns" describe pod "$p" >"$d/describe/$ns-$p.txt" 2>&1 || true; fi
     done <"$d/pods-$ns.txt"
   done
+  # SMA-514 CI fix 1 (J1): Keycloak's own log, always, under a fixed name. The per-pod loop
+  # above already writes it under logs/, but that file name carries the pod's random suffix;
+  # this fixed name is what ci/kind/README.md's evidence section points a reader at directly.
+  # SMA-514 CI fix 2: a selector-based `kubectl logs` defaults to --tail=10, so most of the log
+  # was cut. --tail=-1 writes the whole log.
+  k -n "$DEPS_NS" logs --all-containers --tail=-1 -l app.kubernetes.io/name=keycloak >"$d/keycloak.log" 2>&1 || true
+  # SMA-514: the stub's Deployment, pods and endpoints. Its pod logs are in logs/ already.
+  k -n "$NS" get deployment "$STUB" -o wide >"$d/gateway-stub.txt" 2>&1 || true
+  k -n "$NS" get pods -l "app.kubernetes.io/name=$STUB" -o wide >>"$d/gateway-stub.txt" 2>&1 || true
+  k -n "$NS" get endpoints "$STUB" -o wide >>"$d/gateway-stub.txt" 2>&1 || true
   if [ -n "${HELM_BIN:-}" ] || resolve_helm_quiet; then
     # The chart renders no Secret: it only refers to existing ones by name.
     h -n "$NS" get manifest "$RELEASE" >"$d/helm-manifest.yaml" 2>&1 || true
@@ -554,8 +668,15 @@ case "$cmd" in
   upgrade) [ "$#" = 2 ] && [ "$2" = b ] || die_infra "$USAGE"; upgrade_b ;;
   specs)
     [ "$#" = 2 ] || die_infra "$USAGE"
-    case "$2" in a|b) ;; *) die_infra "$USAGE" ;; esac
+    case "$2" in a|b|journeys) ;; *) die_infra "$USAGE" ;; esac
     specs "$2" ;;
+  stub)
+    [ "$#" = 2 ] || die_infra "$USAGE"
+    case "$2" in
+      up) stub_up ;;
+      down) stub_down ;;
+      *) die_infra "$USAGE" ;;
+    esac ;;
   diagnose) [ "$#" = 1 ] || die_infra "$USAGE"; diagnose ;;
   down) [ "$#" = 1 ] || die_infra "$USAGE"; down ;;
   *) die_infra "$USAGE" ;;
