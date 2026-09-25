@@ -10,6 +10,13 @@ manifest sets `publish = false` (SMA-658, spec § 3.1).
 
 ## [Unreleased]
 
+### Security
+
+- IAM refuses a bearer token whose `typ` claim is `ID` or `Logout`. Keycloak sets these values
+  on its ID token and its back-channel logout token. Before, IAM accepted such a token when its
+  `aud` held the accepted audience, which is the client id in the default chart configuration.
+  The refusal is logged at `info` (SMA-686).
+
 ## [0.1.0] - 2026-09-20
 
 ### Added

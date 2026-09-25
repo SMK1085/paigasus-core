@@ -97,7 +97,8 @@ late and unclearly. Check these four items before you install:
 1. **Audience.** The access token's `aud` claim must contain the audience that IAM accepts. IAM
    accepts `oidc.audience` when it is set. It accepts `oidc.clientId` when `oidc.audience` is not
    set. Set `oidc.audience` only when you cannot make the IdP put the client id into `aud`. The
-   value replaces the client id. It does not add another value next to the client id. Before you
+   value replaces the client id. It does not add another value next to the client id. Also set `oidc.audience` when the IdP's ID token has the same `aud` as the access token and
+   no Keycloak `typ` claim. The paragraph after this list tells you why. Before you
    choose the value, decode a real access token and read its `aud` claim. The value helps only
    when the IdP issues a JWT access token for the console's scopes (`openid profile email
    offline_access`). The console sends no `audience` or `resource` parameter. This value does not
@@ -108,6 +109,20 @@ late and unclearly. Check these four items before you install:
 3. **Algorithm.** The token must be signed with RS256 or ES256, and its header must carry a `kid`.
 4. **Discovery.** The discovery document's `issuer` must equal `oidc.issuer`, and its `jwks_uri`
    must be `https`.
+
+**IAM refuses a token that is not an access token (SMA-686).** IAM refuses a bearer token whose
+`typ` claim is `ID` or `Logout`, in any letter case. Keycloak sets these values on its ID token
+and on its back-channel logout token. Its access token has `typ: Bearer`. The IAM log shows each
+refusal at `info`, with the issuer and the `typ` value.
+
+This adds no requirement on the IdP. No Keycloak or Dex access token measured for SMA-686 has
+one of these values. Do not add a mapper that sets `typ` on the access token.
+
+The check does not protect an IdP whose ID token has no `typ` claim. Dex is an example. Decode a
+real ID token and a real access token from your IdP. If the ID token has no `typ: ID`, choose an
+audience that is in the access token's `aud` and not in the ID token's `aud`. Then set
+`oidc.audience` to that audience. If your IdP cannot do this, IAM accepts its ID token as a
+bearer token. For Dex, both tokens have the same `aud`, so this remedy does not work.
 
 The console requests the scopes `openid profile email offline_access`.
 
