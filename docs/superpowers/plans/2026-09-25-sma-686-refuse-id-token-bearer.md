@@ -591,6 +591,14 @@ In § 6 item 1, after the sentence "The value replaces the client id. It does no
    no Keycloak `typ` claim. The paragraph after this list tells you why.
 ```
 
+> **Corrected after the final review (commit `docs(rs): correct the runbook audience advice…`).**
+> The text above is wrong: when both tokens have the same `aud`, no `oidc.audience` value can
+> accept the access token and refuse the ID token. The runbook now names two cases for
+> `oidc.audience`: the IdP cannot put the client id into `aud`, or the IdP's ID token has no
+> Keycloak `typ` claim. For the second case, the value must be in the access token's `aud` and
+> absent from the ID token's `aud`. If the two tokens have the same `aud`, no audience-based
+> remedy exists (Dex is an example). See spec § 4.3.
+
 - [ ] **Step 2: The new paragraph**
 
 After item 4 (Discovery) and before the line "The console requests the scopes `openid profile email offline_access`.", insert:
