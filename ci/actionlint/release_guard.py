@@ -22,6 +22,7 @@ import os
 import re
 import sys
 import tempfile
+import tomllib
 from pathlib import Path
 from typing import NoReturn
 
@@ -76,6 +77,11 @@ APPROVAL_ENVIRONMENT = "release-approval"
 CHAIN_APPROVALS: dict[str, str] = {
     "iam": "approve-images-iam",
     "gateway": "approve-images-gateway",
+    # SMA-688. The two console chains. `iam` is a string PREFIX of `iam-console`, and `gateway`
+    # of `gateway-console`. Every lookup below compares a WHOLE job id, never a prefix, so each
+    # key selects its own jobs only. V16 asserts that these keys equal ci/images/chains.toml's.
+    "iam-console": "approve-images-iam-console",
+    "gateway-console": "approve-images-gateway-console",
 }
 # The jobs each service chain owns, by suffix. `publish-images-iam` and `tag-iam` must both sit
 # behind `approve-images-iam`, never behind the kernel gate.
@@ -406,8 +412,11 @@ RELEASE_WORKFLOW_NAME = "release.yml"
 # forbade the grant elsewhere. S1 adds exactly that forbidding direction, so leaving `release` out
 # would permanently red the real `release.yml` on its own long-standing, correct grant — measured
 # running this guard against the checked-in file (Step 10).
+# SMA-688: the image members derive from CHAIN_APPROVALS, like SCOPED_SECRET_JOBS and
+# SERVICE_PLAN_GATE_EXPRS. A literal tuple would leave a new chain's publish job outside V11.
 OIDC_PUBLISH_JOBS = (
-    "release", "publish-pypi", "publish-npm", "publish-images-iam", "publish-images-gateway",
+    "release", "publish-pypi", "publish-npm",
+    *(f"publish-images-{service}" for service in CHAIN_APPROVALS),
 )
 ID_TOKEN_SCOPE = "id-token"
 
@@ -1385,6 +1394,143 @@ def chain_scope_violations(jobs: dict, name: str) -> list[str]:
     return [v for v in out if not (v in seen or seen.add(v))]
 
 
+# V15 (SMA-688). Every publish-images-<key> job must HOLD the three grants its steps use. V14 only
+# forbids a write grant upstream of an approval; nothing required the grants to exist. Without
+# `packages: write` the GHCR push fails. Without `id-token: write` cosign and both attest steps
+# fail. Without `attestations: write` attest-build-provenance fails AFTER the GHCR push, so the
+# chain stops with a pushed and unattested image. A job-level permissions: block sets every scope
+# it omits to none, so the workflow-level block counts only for a job that declares none.
+PUBLISH_JOB_GRANTS = ("packages", "id-token", "attestations")
+
+
+def publish_grant_violations(doc: dict, name: str) -> list[str]:
+    """V15. Applies to every document, so FIXTURES rows can reach it. A missing job is V11's and
+    V16's concern, not this rule's."""
+    out: list[str] = []
+    jobs = doc.get("jobs") or {}
+    workflow_perms = doc.get("permissions")
+    for service in CHAIN_APPROVALS:
+        jid = f"publish-images-{service}"
+        job = jobs.get(jid)
+        if not isinstance(job, dict):
+            continue
+        for scope in PUBLISH_JOB_GRANTS:
+            grant = _grants_scope(job.get("permissions"), scope)
+            if grant is None:
+                grant = bool(_grants_scope(workflow_perms, scope))
+            if not grant:
+                out.append(f"{name}: V15: job '{jid}' does not grant `{scope}: write`. Its steps "
+                           f"need it: the GHCR push, cosign or an attest step fails without it, "
+                           f"and attest-build-provenance fails only after the image is pushed.")
+    return out
+
+
+# V16 (SMA-688). The registry agreement. ci/images/chains.toml names every image chain once (spec
+# D10). This file keeps CHAIN_APPROVALS, and release.yml keeps the chain jobs, the plan outputs
+# and the image names. Three hand-written copies drift unless one rule holds them equal.
+CHAIN_REGISTRY_PATH = Path("ci/images/chains.toml")
+
+
+def load_chain_registry(path: Path) -> dict[str, dict[str, str]]:
+    """key -> {ghcr, hub}. FAIL-CLOSED, this file's convention: anything unreadable is infra."""
+    try:
+        with path.open("rb") as fh:
+            data = tomllib.load(fh)
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        infra(f"cannot read the chain registry {path}: {exc}")
+    chains = data.get("chain")
+    if not isinstance(chains, dict) or not chains:
+        infra(f"{path} has no [chain.<key>] table")
+    out: dict[str, dict[str, str]] = {}
+    for key, entry in chains.items():
+        if not isinstance(entry, dict) or not all(
+                isinstance(entry.get(field), str) and entry.get(field) for field in ("ghcr", "hub")):
+            infra(f"{path}: [chain.{key}] needs string ghcr and hub values")
+        out[key] = {"ghcr": entry["ghcr"], "hub": entry["hub"]}
+    return out
+
+
+def registry_violations(doc: dict, name: str, registry: dict[str, dict[str, str]]) -> list[str]:
+    """V16a-c: the keys, the plan outputs, the chain jobs and the image names agree with the
+    registry. main() calls it for RELEASE_WORKFLOW_NAME only, with the real registry."""
+    out: list[str] = []
+    if set(CHAIN_APPROVALS) != set(registry):
+        out.append(f"{name}: V16: CHAIN_APPROVALS names {sorted(CHAIN_APPROVALS)}, but "
+                   f"{CHAIN_REGISTRY_PATH} names {sorted(registry)}. Add or remove a chain in "
+                   f"both, in one commit.")
+    jobs = doc.get("jobs") or {}
+    plan = jobs.get(PLAN_JOB)
+    outs = plan.get("outputs") if isinstance(plan, dict) else None
+    outs = outs if isinstance(outs, dict) else {}
+    for key, entry in registry.items():
+        for output in (f"skip_{key}", f"version_{key}"):
+            if output not in outs:
+                out.append(f"{name}: V16: job '{PLAN_JOB}' declares no outputs.{output}, but "
+                           f"{CHAIN_REGISTRY_PATH} names the chain '{key}'. The chain would read "
+                           f"an empty string.")
+        for prefix in _CHAIN_JOB_PREFIXES:
+            jid = f"{prefix}{key}"
+            if not isinstance(jobs.get(jid), dict):
+                out.append(f"{name}: V16: no job named '{jid}' exists, but {CHAIN_REGISTRY_PATH} "
+                           f"names the chain '{key}'.")
+        pub = jobs.get(f"publish-images-{key}")
+        env = pub.get("env") if isinstance(pub, dict) else None
+        env = env if isinstance(env, dict) else {}
+        for var, field in (("GHCR_IMAGE", "ghcr"), ("HUB_IMAGE", "hub")):
+            if isinstance(pub, dict) and env.get(var) != entry[field]:
+                out.append(f"{name}: V16: job 'publish-images-{key}' sets {var} to "
+                           f"{env.get(var)!r}, but {CHAIN_REGISTRY_PATH} names {entry[field]!r}.")
+    return out
+
+
+def chain_service_violations(jobs: dict, name: str) -> list[str]:
+    """V16d: each chain job's env.SERVICE equals the key in its job id. Every step of a chain reads
+    SERVICE, so a wrong value builds, downloads or tags another chain's image under this chain's
+    approval. release.yml must declare SERVICE; another document may omit it (the fixtures)."""
+    out: list[str] = []
+    for key in CHAIN_APPROVALS:
+        for prefix in _CHAIN_JOB_PREFIXES:
+            jid = f"{prefix}{key}"
+            job = jobs.get(jid)
+            if not isinstance(job, dict):
+                continue
+            env = job.get("env")
+            service = env.get("SERVICE") if isinstance(env, dict) else None
+            if service is None and name != RELEASE_WORKFLOW_NAME:
+                continue
+            if service != key:
+                out.append(f"{name}: V16: job '{jid}' sets env.SERVICE to {service!r}, not "
+                           f"{key!r}. Every step of the chain reads SERVICE, so a wrong value "
+                           f"handles another chain's image behind this chain's approval.")
+    return out
+
+
+# V17 (SMA-688 D11). A chain job downloads its artifacts by EXACT name. `pattern: image-iam-*`
+# also matches `image-iam-console-*`, because `iam` is a string prefix of `iam-console`. A
+# download with no `name:` at all fetches every artifact of the run.
+_DOWNLOAD_ARTIFACT_ACTION = "actions/download-artifact"
+
+
+def chain_download_violations(jobs: dict, name: str) -> list[str]:
+    out: list[str] = []
+    for jid, job in jobs.items():
+        if not isinstance(job, dict) or approval_for_job(jid) == APPROVAL_JOB:
+            continue
+        for step in steps_of(job, f"{name}: job '{jid}'"):
+            if not isinstance(step, dict) or _DOWNLOAD_ARTIFACT_ACTION not in str(step.get("uses") or ""):
+                continue
+            with_block = step.get("with")
+            with_block = with_block if isinstance(with_block, dict) else {}
+            if "pattern" in with_block:
+                out.append(f"{name}: V17: job '{jid}' downloads artifacts with a `pattern:` "
+                           f"({with_block['pattern']!r}). A chain key can be a string prefix of "
+                           f"another chain's key; download each artifact by its exact `name:`.")
+            elif not with_block.get("name"):
+                out.append(f"{name}: V17: job '{jid}' downloads artifacts without a `name:`. That "
+                           f"fetches every artifact of the run, other chains' archives included.")
+    return out
+
+
 def plan_run_segments(run_text: str) -> list[str]:
     """Every non-empty command segment of a `run:` block, comments already stripped."""
     return [seg.strip()
@@ -1551,7 +1697,7 @@ def plan_contract_violations(jobs: dict, name: str) -> list[str]:
 
 
 def check_main(doc: dict, name: str) -> list[str]:
-    """V1-V5, V7, V8a-c and V9 over the release workflow. V6 applies to CALLED workflows (see
+    """V1-V5, V7, V8a-c, V8e, V9 and V13-V17 over the release workflow (V16a-c runs from main()). V6 applies to CALLED workflows (see
     check_called) and V8d to every job's local callee (see callee_boundary_violations) — both
     need the filesystem, which this function, driven purely off a parsed doc, deliberately does
     not touch."""
@@ -1661,6 +1807,10 @@ def check_main(doc: dict, name: str) -> list[str]:
     out += plan_contract_violations(jobs, name)
     out += credential_scope_violations(doc, name)
     out += capability_violations(jobs, doc.get("permissions"), name)
+    # SMA-688. V15, V16d and V17: once each, outside the per-job loop, like V8 above.
+    out += publish_grant_violations(doc, name)
+    out += chain_service_violations(jobs, name)
+    out += chain_download_violations(jobs, name)
     return out
 
 
@@ -1924,6 +2074,83 @@ _OK_IMAGES_MAIN = _OK_MAIN.replace(
     needs: [publish-images-gateway]
     environment: release-publish
     runs-on: ubuntu-latest
+    steps: [{run: gh api repos/o/r/git/refs}]
+"""
+
+# SMA-688. A SEPARATE console template, so the `.replace` edits of the existing _OK_IMAGES_MAIN
+# rows keep their meaning (spec § 6.2). It is _OK_IMAGES_MAIN plus the four console plan outputs
+# and the eight console jobs. The console jobs carry env.SERVICE and an exact-name download, the
+# shape V16 and V17 require; the two service chains inherited from _OK_IMAGES_MAIN carry neither,
+# which V16 accepts for a document that is not release.yml.
+_OK_CONSOLE_MAIN = _OK_IMAGES_MAIN.replace(
+    "      version_gateway: ${{ steps.decide.outputs.version_gateway }}\n",
+    "      version_gateway: ${{ steps.decide.outputs.version_gateway }}\n"
+    "      skip_iam-console: ${{ steps.decide.outputs.skip_iam-console }}\n"
+    "      version_iam-console: ${{ steps.decide.outputs.version_iam-console }}\n"
+    "      skip_gateway-console: ${{ steps.decide.outputs.skip_gateway-console }}\n"
+    "      version_gateway-console: ${{ steps.decide.outputs.version_gateway-console }}\n"
+) + """
+  images-build-iam-console:
+    needs: [plan]
+    if: needs.plan.outputs.skip_iam-console != 'true'
+    runs-on: ubuntu-latest
+    env: {SERVICE: iam-console}
+    steps: [{run: ci/images/run.sh build-oci iam-console out}]
+  approve-images-iam-console:
+    needs: [images-build-iam-console]
+    environment: release-approval
+    runs-on: ubuntu-latest
+    steps: [{run: echo approved}]
+  publish-images-iam-console:
+    needs: [plan, images-build-iam-console, approve-images-iam-console]
+    if: needs.plan.outputs.skip_iam-console != 'true'
+    environment: release-images
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+      id-token: write
+      attestations: write
+    env: {SERVICE: iam-console}
+    steps:
+      - uses: actions/download-artifact@v8
+        with: {name: image-iam-console-amd64, path: in}
+      - run: crane push layout ghcr.io/smk1085/paigasus-iam-console:x
+  tag-iam-console:
+    needs: [publish-images-iam-console]
+    environment: release-publish
+    runs-on: ubuntu-latest
+    env: {SERVICE: iam-console}
+    steps: [{run: gh api repos/o/r/git/refs}]
+  images-build-gateway-console:
+    needs: [plan]
+    if: needs.plan.outputs.skip_gateway-console != 'true'
+    runs-on: ubuntu-latest
+    env: {SERVICE: gateway-console}
+    steps: [{run: ci/images/run.sh build-oci gateway-console out}]
+  approve-images-gateway-console:
+    needs: [images-build-gateway-console]
+    environment: release-approval
+    runs-on: ubuntu-latest
+    steps: [{run: echo approved}]
+  publish-images-gateway-console:
+    needs: [plan, images-build-gateway-console, approve-images-gateway-console]
+    if: needs.plan.outputs.skip_gateway-console != 'true'
+    environment: release-images
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+      id-token: write
+      attestations: write
+    env: {SERVICE: gateway-console}
+    steps:
+      - uses: actions/download-artifact@v8
+        with: {name: image-gateway-console-amd64, path: in}
+      - run: crane push layout ghcr.io/smk1085/paigasus-gateway-console:x
+  tag-gateway-console:
+    needs: [publish-images-gateway-console]
+    environment: release-publish
+    runs-on: ubuntu-latest
+    env: {SERVICE: gateway-console}
     steps: [{run: gh api repos/o/r/git/refs}]
 """
 
@@ -2996,6 +3223,67 @@ FIXTURES: list[tuple[str, str, str, str | None]] = [
      _OK_IMAGES_MAIN.replace("    steps: [{run: crane push layout ghcr.io/smk1085/paigasus-iam:x}]\n  tag-iam:\n    needs: [publish-images-iam]",
                              "    steps: [{run: echo x}]\n  tag-iam:\n    needs: [images-build-iam]"),
      "V8c"),
+    # SMA-688. The console chains (spec § 6.2). Each row wants its OWN named message.
+    ("SMA-688 the console template is clean", "main", _OK_CONSOLE_MAIN, None),
+    ("SMA-688 publish-images-iam-console without its own approval", "main",
+     _OK_CONSOLE_MAIN.replace("    needs: [plan, images-build-iam-console, approve-images-iam-console]",
+                              "    needs: [plan, images-build-iam-console]"),
+     "V8c: job 'publish-images-iam-console' can reach a registry, but 'approve-images-iam-console'"),
+    # `iam` is a string prefix of `iam-console`. The approval of the WRONG chain must not satisfy
+    # V8c. Under code without the console keys this row names 'approve-release' instead.
+    ("SMA-688 publish-images-iam-console behind approve-images-iam", "main",
+     _OK_CONSOLE_MAIN.replace("    needs: [plan, images-build-iam-console, approve-images-iam-console]",
+                              "    needs: [plan, images-build-iam-console, approve-images-iam]"),
+     "V8c: job 'publish-images-iam-console' can reach a registry, but 'approve-images-iam-console'"),
+    ("SMA-688 images-build-gateway-console gated on skip_gateway", "main",
+     _OK_CONSOLE_MAIN.replace(
+         "    if: needs.plan.outputs.skip_gateway-console != 'true'\n    runs-on: ubuntu-latest\n"
+         "    env: {SERVICE: gateway-console}\n    steps: [{run: ci/images/run.sh build-oci gateway-console out}]",
+         "    if: needs.plan.outputs.skip_gateway != 'true'\n    runs-on: ubuntu-latest\n"
+         "    env: {SERVICE: gateway-console}\n    steps: [{run: ci/images/run.sh build-oci gateway-console out}]"),
+     "job 'images-build-gateway-console' needs 'plan' but its if: is \"needs.plan.outputs.skip_gateway != 'true'\", not one of ["),
+    ("SMA-688 V9c: skip_iam-console is declared nowhere in plan's outputs", "main",
+     _OK_CONSOLE_MAIN.replace("      skip_iam-console: ${{ steps.decide.outputs.skip_iam-console }}\n", ""),
+     "V9c: job 'plan' declares no outputs.skip_iam-console"),
+    ("SMA-688 the Docker Hub token in tag-iam-console", "main",
+     _OK_CONSOLE_MAIN.replace(
+         "    env: {SERVICE: iam-console}\n    steps: [{run: gh api repos/o/r/git/refs}]",
+         "    env: {SERVICE: iam-console, T: '${{ secrets.DOCKERHUB_TOKEN }}'}\n"
+         "    steps: [{run: gh api repos/o/r/git/refs}]"),
+     "V13: job 'tag-iam-console' reads DOCKERHUB_TOKEN"),
+    ("SMA-688 V15 publish-images-iam-console without id-token: write", "main",
+     _OK_CONSOLE_MAIN.replace("      id-token: write\n      attestations: write\n    env: {SERVICE: iam-console}",
+                              "      attestations: write\n    env: {SERVICE: iam-console}"),
+     "V15: job 'publish-images-iam-console' does not grant `id-token: write`"),
+    ("SMA-688 V15 publish-images-iam-console without attestations: write", "main",
+     _OK_CONSOLE_MAIN.replace("      attestations: write\n    env: {SERVICE: iam-console}",
+                              "    env: {SERVICE: iam-console}"),
+     "V15: job 'publish-images-iam-console' does not grant `attestations: write`"),
+    ("SMA-688 V15 publish-images-iam-console without packages: write", "main",
+     _OK_CONSOLE_MAIN.replace(
+         "      packages: write\n      id-token: write\n      attestations: write\n    env: {SERVICE: iam-console}",
+         "      id-token: write\n      attestations: write\n    env: {SERVICE: iam-console}"),
+     "V15: job 'publish-images-iam-console' does not grant `packages: write`"),
+    ("SMA-688 V16 SERVICE: iam in publish-images-iam-console", "main",
+     _OK_CONSOLE_MAIN.replace(
+         "    env: {SERVICE: iam-console}\n    steps:\n      - uses: actions/download-artifact@v8\n"
+         "        with: {name: image-iam-console-amd64, path: in}",
+         "    env: {SERVICE: iam}\n    steps:\n      - uses: actions/download-artifact@v8\n"
+         "        with: {name: image-iam-console-amd64, path: in}"),
+     "V16: job 'publish-images-iam-console' sets env.SERVICE to 'iam', not 'iam-console'"),
+    # D11. `pattern: image-iam-*` also matches `image-iam-console-*`.
+    ("SMA-688 V17 pattern: image-iam-* in publish-images-iam", "main",
+     _OK_CONSOLE_MAIN.replace(
+         "    steps: [{run: crane push layout ghcr.io/smk1085/paigasus-iam:x}]",
+         "    steps:\n      - uses: actions/download-artifact@v8\n"
+         "        with: {pattern: 'image-iam-*', merge-multiple: true, path: in}\n"
+         "      - run: crane push layout ghcr.io/smk1085/paigasus-iam:x"),
+     "V17: job 'publish-images-iam' downloads artifacts with a `pattern:`"),
+    # A download with neither `name:` nor `pattern:` fetches EVERY artifact of the run.
+    ("SMA-688 V17 a download with no name in publish-images-iam-console", "main",
+     _OK_CONSOLE_MAIN.replace("        with: {name: image-iam-console-amd64, path: in}",
+                              "        with: {path: in}"),
+     "V17: job 'publish-images-iam-console' downloads artifacts without a `name:`"),
 ]
 
 
@@ -3092,6 +3380,8 @@ def _v13_cross_workflow_sweep() -> str | None:
     in `EXPECTED_RELEASE_SECRETS`), so this tempdir's run always emits about fourteen unrelated
     violations from `release.yml` alone. `rc` is 1 whether or not the sweep finds `other.yaml`'s
     leak. The `want not in out` half is the only thing this regression test actually proves.
+
+    SMA-688: main() runs V16 on a file named release.yml, and V16 reads the registry.
     """
     other = (
         "on:\n  push:\n    branches: [main]\n"
@@ -3099,7 +3389,11 @@ def _v13_cross_workflow_sweep() -> str | None:
         "    steps: [{run: echo hi}]\n"
     )
     rc, out, err = _run_main_in_tempdir(
-        {".github/workflows/release.yml": _OK_MAIN, ".github/workflows/other.yaml": other},
+        {".github/workflows/release.yml": _OK_MAIN, ".github/workflows/other.yaml": other,
+         # SMA-688: main() runs V16 on a file named release.yml, and V16 reads the registry.
+         # Without it, load_chain_registry fails closed (exit 2) and this row cannot reach V13.
+         "ci/images/chains.toml": "[chain.iam]\nghcr = 'ghcr.io/smk1085/paigasus-iam'\n"
+                                  "hub = 'docker.io/smaschek/paigasus-iam'\n"},
         entry=".github/workflows/release.yml",
     )
     want = "other.yaml: V13: job 'leaky' names the 'release-images' environment"
@@ -3464,8 +3758,10 @@ def _v11_id_token_write_required() -> str | None:
             # present purely to keep that loop silent about jobs this helper is not exercising, not
             # a claim that their behaviour needs its own case (that is the tag-iam block below).
             "release": {"permissions": grant, "steps": [{"run": "echo hi"}]},
-            "publish-images-iam": {"permissions": grant, "steps": [{"run": "echo hi"}]},
-            "publish-images-gateway": {"permissions": grant, "steps": [{"run": "echo hi"}]},
+            # SMA-688: every chain's publish job, derived from CHAIN_APPROVALS like
+            # OIDC_PUBLISH_JOBS itself, so a new chain cannot slip past this helper.
+            **{f"publish-images-{service}": {"permissions": grant, "steps": [{"run": "echo hi"}]}
+               for service in CHAIN_APPROVALS},
         }}
         for jid in ("publish-pypi", "publish-npm"):
             if out["jobs"][jid]["permissions"] is None:
@@ -3511,9 +3807,120 @@ def _v11_id_token_write_required() -> str | None:
     if not any("job 'tag-iam' grants" in line and "not in OIDC_PUBLISH_JOBS" in line
                for line in found):
         return f"tag-iam holding id-token: write did not red: {found or '(clean)'}"
+    # SMA-688: a console publish job without id-token: write reds V11 too.
+    console_doc = doc_with(grant, grant)
+    console_doc["jobs"]["publish-images-iam-console"]["permissions"] = {
+        "packages": "write", "attestations": "write"}
+    if not any("job 'publish-images-iam-console' does not grant" in line for line in v11(console_doc)):
+        return f"publish-images-iam-console without id-token: write did not red: {v11(console_doc)}"
     # And the scoping: no other document may inherit release.yml's rule.
     if id_token_violations(doc_with(None, None), "fixture"):
         return "V11 leaked past RELEASE_WORKFLOW_NAME onto a fixture document"
+    return None
+
+
+def _sma688_console_approvals() -> str | None:
+    """approval_for_job compares WHOLE job ids. `iam` is a string prefix of `iam-console`.
+
+    Mutation: compare with `job_id.startswith(f"{prefix}{service}")`, and the console jobs resolve
+    to approve-images-iam. The derived tables must also cover both console keys: a hand-written
+    tuple would miss them.
+    """
+    cases = {
+        "images-build-iam-console": "approve-images-iam-console",
+        "publish-images-iam-console": "approve-images-iam-console",
+        "tag-iam-console": "approve-images-iam-console",
+        "images-build-gateway-console": "approve-images-gateway-console",
+        "publish-images-gateway-console": "approve-images-gateway-console",
+        "tag-gateway-console": "approve-images-gateway-console",
+        "images-build-iam": "approve-images-iam",
+        "publish-images-iam": "approve-images-iam",
+        "tag-iam": "approve-images-iam",
+        "publish-images-iam-console-x": APPROVAL_JOB,
+    }
+    for jid, want in cases.items():
+        got = approval_for_job(jid)
+        if got != want:
+            return f"approval_for_job({jid!r}) returned {got!r}, want {want!r}"
+    for key in ("iam-console", "gateway-console"):
+        if f"publish-images-{key}" not in SCOPED_SECRET_JOBS:
+            return f"SCOPED_SECRET_JOBS does not hold publish-images-{key}"
+        if f"publish-images-{key}" not in OIDC_PUBLISH_JOBS:
+            return f"OIDC_PUBLISH_JOBS does not hold publish-images-{key}"
+        if key not in SERVICE_PLAN_GATE_EXPRS:
+            return f"SERVICE_PLAN_GATE_EXPRS does not hold {key}"
+    return None
+
+
+def _v16_registry_agreement() -> str | None:
+    """V16 (SMA-688): release.yml, CHAIN_APPROVALS and ci/images/chains.toml agree.
+
+    Here rather than as FIXTURES rows for V11's reason: the rule is scoped to RELEASE_WORKFLOW_NAME
+    and needs a registry, and self_test() names every FIXTURES document "fixture". The healthy
+    document is _OK_CONSOLE_MAIN with the env and image names that release.yml carries.
+    """
+    registry = {key: {"ghcr": f"ghcr.io/smk1085/paigasus-{key}",
+                      "hub": f"docker.io/smaschek/paigasus-{key}"} for key in CHAIN_APPROVALS}
+
+    def healthy() -> dict:
+        doc = yaml.safe_load(_OK_CONSOLE_MAIN)
+        for key in CHAIN_APPROVALS:
+            for prefix in _CHAIN_JOB_PREFIXES:
+                job = doc["jobs"][f"{prefix}{key}"]
+                job["env"] = {**(job.get("env") or {}), "SERVICE": key}
+            doc["jobs"][f"publish-images-{key}"]["env"].update(
+                GHCR_IMAGE=registry[key]["ghcr"], HUB_IMAGE=registry[key]["hub"])
+        return doc
+
+    def v16(doc: dict, reg: dict) -> list[str]:
+        found = registry_violations(doc, RELEASE_WORKFLOW_NAME, reg) \
+            + chain_service_violations(doc["jobs"], RELEASE_WORKFLOW_NAME)
+        return [ln for ln in found if ": V16:" in ln]
+
+    if v16(healthy(), registry):
+        return f"the healthy shape red: {v16(healthy(), registry)}"
+    # A key in CHAIN_APPROVALS and not in chains.toml.
+    narrower = {k: v for k, v in registry.items() if k != "gateway-console"}
+    if not any("V16: CHAIN_APPROVALS names" in ln for ln in v16(healthy(), narrower)):
+        return f"a CHAIN_APPROVALS key missing from the registry did not red: {v16(healthy(), narrower)}"
+    # A key in chains.toml and nowhere else: the plan outputs and the jobs are missing too.
+    wider = {**registry, "billing": {"ghcr": "ghcr.io/smk1085/paigasus-billing",
+                                     "hub": "docker.io/smaschek/paigasus-billing"}}
+    found = v16(healthy(), wider)
+    for want in ("V16: CHAIN_APPROVALS names", "declares no outputs.skip_billing",
+                 "no job named 'images-build-billing'"):
+        if not any(want in ln for ln in found):
+            return f"a registry-only key did not produce {want!r}: {found}"
+    doc = healthy()
+    doc["jobs"]["publish-images-iam-console"]["env"]["GHCR_IMAGE"] = "ghcr.io/smk1085/paigasus-iam"
+    if not any("V16: job 'publish-images-iam-console' sets GHCR_IMAGE" in ln for ln in v16(doc, registry)):
+        return "a GHCR_IMAGE of another chain did not red"
+    doc = healthy()
+    doc["jobs"]["publish-images-gateway-console"]["env"]["HUB_IMAGE"] = "docker.io/smaschek/paigasus-gateway"
+    if not any("V16: job 'publish-images-gateway-console' sets HUB_IMAGE" in ln for ln in v16(doc, registry)):
+        return "a HUB_IMAGE of another chain did not red"
+    doc = healthy()
+    del doc["jobs"]["tag-gateway-console"]["env"]["SERVICE"]
+    if not any("V16: job 'tag-gateway-console' sets env.SERVICE to None" in ln for ln in v16(doc, registry)):
+        return "a release.yml chain job with no SERVICE did not red"
+    doc = healthy()
+    del doc["jobs"]["plan"]["outputs"]["version_iam-console"]
+    if not any("declares no outputs.version_iam-console" in ln for ln in v16(doc, registry)):
+        return "a missing version_iam-console plan output did not red"
+    # The loader fails closed: a missing file or an entry with no hub is infra (exit 2).
+    with tempfile.TemporaryDirectory() as tmp:
+        for label, text in (("missing", None), ("no hub", "[chain.iam]\nghcr = 'g'\n")):
+            path = Path(tmp) / f"{label}.toml"
+            if text is not None:
+                path.write_text(text)
+            try:
+                with contextlib.redirect_stderr(io.StringIO()):
+                    load_chain_registry(path)
+            except SystemExit as exc:
+                if exc.code != 2:
+                    return f"load_chain_registry ({label}) exited {exc.code!r}, want 2"
+                continue
+            return f"load_chain_registry ({label}) returned instead of infra(2)"
     return None
 
 
@@ -3715,6 +4122,9 @@ def self_test() -> int:
         ("v10 rule 1 strict equality (the missing-name half)", _v10_rule1_strict_equality),
         ("v11 id-token: write on both OIDC publish jobs", _v11_id_token_write_required),
         ("v12 npm OIDC floor pinned in both workflows", _v12_npm_floor_pinned),
+        ("sma-688 approval_for_job and the derived tables cover the console keys",
+         _sma688_console_approvals),
+        ("sma-688 V16 registry agreement", _v16_registry_agreement),
         ("sma-658 every new publish marker has a reding fixture", _sma658_new_publish_markers_bite),
         ("sma-658 fix round 1, I3: V13's cross-workflow sweep", _v13_cross_workflow_sweep),
         ("f7 non-list steps: fails closed", _non_list_steps_fails_closed),
@@ -3745,6 +4155,13 @@ def main(argv: list[str]) -> int:
     main_path = Path(argv[0])
     main_doc = load_workflow(main_path)
     violations += check_main(main_doc, main_path.name)
+
+    # V16a-c (SMA-688): the chain registry agreement. Scoped to the release workflow by name,
+    # like V11. The registry path is relative to the repository root, which is where check 10
+    # runs this guard.
+    if main_path.name == RELEASE_WORKFLOW_NAME:
+        violations += registry_violations(main_doc, main_path.name,
+                                          load_chain_registry(CHAIN_REGISTRY_PATH))
 
     # Follow local reusable-workflow calls out of the MAIN workflow only (one level; a called
     # workflow cannot itself call another local one in this repo, and V6 keeps the callees honest).
