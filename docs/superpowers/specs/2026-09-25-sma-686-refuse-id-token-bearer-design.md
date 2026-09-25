@@ -70,6 +70,10 @@ Conclusions:
 | D9 | The check applies to every configured issuer and every audience configuration. There is no switch. | No measured access token has a marker (§ 2), so an operator who set `oidc.audience` (SMA-678) sees no change. A switch adds configuration with no known use (YAGNI). |
 | D10 | No Notion ADR. | Sven chose this on 2026-09-25. The change hardens one check and changes no interface. The decision is recorded here and in the validator doc comment. |
 | D11 | The validator logs an `AudienceMismatch` once, at `info`, with the issuer and the CONFIGURED audiences. It logs no token claim. No other defect is logged. | Sven chose on 2026-09-25 to fold R2 into this PR. The runbook and `ci/kind/README.md` told operators this line exists. `jsonwebtoken` 11.1.0 verifies the signature (`decoding.rs:284`) before `aud` (`decoding.rs:288`), so only a signed token reaches it. `Expired` stays unlogged: every stale client token would write a line. |
+| D12 | IAM also refuses the standard back-channel logout markers: a header `typ` of `logout+jwt` or `application/logout+jwt` (ASCII case-insensitive), or an `events` object with the member `http://schemas.openid.net/event/backchannel-logout`. This amends D4: the header `typ` is read, but only for these two values. | Code review (2026-09-26, finding 1): a logout token from a non-Keycloak IdP passed. OIDC Back-Channel Logout 1.0 § 2.4 defines both markers. No measured access token has either, so D1 holds. |
+| D13 | A token with no `aud` is refused as `AudienceMismatch` and logged like a wrong `aud`. `WireClaims.aud` is optional and `aud` is in `required_spec_claims`. A wrong-typed `aud` stays `Malformed`. | Code review finding 3: a missing `aud` was `Malformed` and silent, and measurement B5 (Keycloak lightweight access token) has no `aud`. `jsonwebtoken` 11.1.0 ACCEPTS a token without `aud` unless `aud` is required (`validation.rs:340`), so the required claim is load-bearing. |
+| D14 | Both refusal log lines are rate-limited: at most one line per (issuer, defect) per 10 s; the next line carries the count of suppressed refusals. The returned error never changes. | Code review finding 2 (Sven chose option b on 2026-09-26): a realm user with one signed token could write one `info` line per request through the unauthenticated introspect endpoint. |
+| D15 | One method (`log_refusal`) decides what is logged. | Code review finding 9: the policy was split between two sites. |
 
 ## 4. Change
 
@@ -221,10 +225,13 @@ record the run URL in the PR body. That run is the AC2 proof for the kind realm.
   every IdP not measured here (Okta, Entra ID, Auth0, Zitadel, authentik, Cognito). In the default
   configuration, their ID token still passes when its `aud` contains the client id. The runbook
   tells the operator to use `oidc.audience`. For Dex, the access token and the ID token have the
-  same `aud`, so that remedy does not work either.
+  same `aud`, so that remedy does not work either. The chart default is the root cause; SMA-691
+  tracks it.
 - **R2: folded in (D11).** The runbook and `ci/kind/README.md` said a wrong audience shows in the IAM log, and no code logged it. D11 adds the line.
 - **R3: Other Keycloak token types.** The refresh token is HS512, so the algorithm allowlist
   (`validator.rs:26`) already refuses it. No other Keycloak JWT type was measured.
+- **R4: sender-constrained tokens (SMA-690).** IAM accepts a DPoP- or mTLS-bound access token
+  (`cnf` claim; Keycloak `typ: DPoP`) as a plain bearer token. Code review finding 4.
 
 ## 9. Spec challenge
 
@@ -247,3 +254,20 @@ Challenger: `feature-factory:spec-challenger` (Opus), 2026-09-25. Verdict: NEEDS
 | The module doc says "provider-agnostic" | MINOR | Folded in: § 4.2. |
 | Does this need a Notion ADR? | QUESTION | Sven: no (D10). |
 | At which level to log? | QUESTION | `info` (D8). |
+
+## 10. Code review (xhigh), 2026-09-26
+
+| # | Finding | Action |
+|---|---|---|
+| 1 | A non-Keycloak logout token passes | Folded in: D12. |
+| 2 | The `info` lines can be flooded by a realm user | Folded in: D14 (Sven chose the rate limit). |
+| 3 | A missing `aud` is `Malformed` and silent | Folded in: D13. |
+| 4 | A DPoP-bound token is accepted as a plain bearer token | Follow-up SMA-690 (R4). |
+| 5 | The chart default audience is the root cause | Follow-up SMA-691 (R1). |
+| 6 | The e2e config does not prove the `oidc.audience` path | Folded in: the access token's `aud` must not contain the client id. |
+| 7 | The ID-token `aud` assertion accepts only a string | Folded in: string or array. |
+| 8 | The tracing callsite cache can flake a log test under `cargo test` | No change: the repo runs nextest (one process per test). Recorded in SMA-689. |
+| 9 | The logging policy is split between two sites | Folded in: D15. |
+| 10 | `LogBuffer` is copied a third time | Follow-up SMA-689. |
+| 11 | `typ: Option<Value>` allocates | No change: the token size is capped, and `typ` is a short string. |
+| 12 | A runbook instruction has 25 words | Folded in: § 6 rewritten. |

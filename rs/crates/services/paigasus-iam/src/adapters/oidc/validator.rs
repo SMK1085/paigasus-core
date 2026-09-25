@@ -4,9 +4,10 @@
 //! validator. Pipeline: length cap -> header decode + alg allowlist + `kid` presence ->
 //! unverified `iss` read -> exact issuer match -> JWKS `kid` lookup -> JWK/alg family
 //! consistency -> signature + claims validation (issuer/audience/expiry) -> payload `typ`
-//! check -> `ValidatedClaims`. The `typ` check is the one Keycloak-specific rule (SMA-686): it
-//! refuses a Keycloak ID token or logout token, and passes every token without such a `typ`.
-//! Never logs token or claim material (`TokenDefect` itself carries no payload).
+//! check -> `ValidatedClaims`. The token-type check (SMA-686) refuses an ID token or a logout
+//! token: a Keycloak payload `typ` (`ID`, `Logout`) or a standard back-channel logout marker
+//! (header `typ: logout+jwt`, the `events` member). Two refusals are logged, rate-limited
+//! (`log_refusal`). Never logs token or claim material (`TokenDefect` itself carries no payload).
 
 use async_trait::async_trait;
 use base64::Engine;
@@ -17,6 +18,9 @@ use jsonwebtoken::jwk::{AlgorithmParameters, Jwk};
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
 use paigasus_iam_core::{Authenticator, AuthnError, Clock, Issuer, TokenDefect, ValidatedClaims};
 use serde::Deserialize;
+use std::collections::HashMap;
+use std::sync::{Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
 use crate::adapters::oidc::jwks::{JwksCache, JwksFetcher, JwksProvider};
 use crate::config::IssuerConfig;
@@ -32,6 +36,66 @@ const ALLOWED_ALGORITHMS: [Algorithm; 2] = [Algorithm::RS256, Algorithm::ES256];
 /// carries `Bearer` (or `DPoP`). Compared ASCII case-insensitively. A denylist, not an
 /// allowlist: an IdP that sets no `typ` (Dex, measured) must keep working (spec D1).
 const NON_ACCESS_TOKEN_TYPES: [&str; 2] = ["ID", "Logout"];
+
+/// Header `typ` values of a back-channel logout token (OIDC Back-Channel Logout 1.0 § 2.4; the
+/// `application/` form per RFC 8725 § 3.11). Compared ASCII case-insensitively (SMA-686 D12).
+const LOGOUT_TOKEN_HEADER_TYPES: [&str; 2] = ["logout+jwt", "application/logout+jwt"];
+
+/// The `events` member every back-channel logout token carries (OIDC Back-Channel Logout 1.0
+/// § 2.4). No access token carries it (SMA-686 D12).
+const BACKCHANNEL_LOGOUT_EVENT: &str = "http://schemas.openid.net/event/backchannel-logout";
+
+/// At most one refusal log line per (issuer, defect) in this interval (SMA-686 D14).
+const REFUSAL_LOG_INTERVAL: Duration = Duration::from_secs(10);
+
+/// Rate limit for the refusal log lines (SMA-686 D14). A realm user with one signed token could
+/// otherwise write one `info` line per request. Keyed by (issuer, defect), so the map holds at
+/// most `issuers × 2` entries. A suppressed refusal is counted, and the next admitted line
+/// reports the count.
+struct RefusalLog {
+    interval: Duration,
+    last: Mutex<HashMap<(String, TokenDefect), (Instant, u64)>>,
+}
+
+impl RefusalLog {
+    fn new(interval: Duration) -> Self {
+        RefusalLog {
+            interval,
+            last: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// `Some(suppressed)` when a line may be written at `now` (with the count of refusals
+    /// suppressed since the last line); `None` when this refusal is suppressed and counted.
+    fn admit_at(&self, issuer: &str, defect: TokenDefect, now: Instant) -> Option<u64> {
+        let mut last = self.last.lock().unwrap_or_else(PoisonError::into_inner);
+        match last.get_mut(&(issuer.to_owned(), defect)) {
+            Some((at, suppressed)) if now.saturating_duration_since(*at) < self.interval => {
+                *suppressed += 1;
+                None
+            }
+            Some((at, suppressed)) => {
+                let count = *suppressed;
+                *at = now;
+                *suppressed = 0;
+                Some(count)
+            }
+            None => {
+                last.insert((issuer.to_owned(), defect), (now, 0));
+                Some(0)
+            }
+        }
+    }
+}
+
+/// What a refusal log line names besides the issuer (SMA-686 D8, D11). Static or configured
+/// values only — never a token claim.
+enum RefusalDetail<'a> {
+    /// The static marker that shows a verified token is not an access token.
+    Marker(&'static str),
+    /// The CONFIGURED audiences of the issuer.
+    Accepted(&'a [String]),
+}
 
 /// One configured issuer, parsed once at construction — replacing the per-request
 /// `Issuer::parse` the request path used to run after every issuer match.
@@ -51,6 +115,7 @@ pub struct OidcAuthenticator<F: JwksFetcher, K: JwksCache, C: Clock> {
     provider: JwksProvider<F, K, C>,
     leeway_secs: u64,
     max_token_bytes: usize,
+    refusal_log: RefusalLog,
 }
 
 impl<F: JwksFetcher, K: JwksCache, C: Clock> OidcAuthenticator<F, K, C> {
@@ -70,6 +135,7 @@ impl<F: JwksFetcher, K: JwksCache, C: Clock> OidcAuthenticator<F, K, C> {
             provider,
             leeway_secs,
             max_token_bytes,
+            refusal_log: RefusalLog::new(REFUSAL_LOG_INTERVAL),
         })
     }
 
@@ -80,6 +146,29 @@ impl<F: JwksFetcher, K: JwksCache, C: Clock> OidcAuthenticator<F, K, C> {
     /// padded issuers before any authenticator is constructed.
     fn find_issuer_config(&self, iss: &str) -> Option<&ConfiguredIssuer> {
         self.issuers.iter().find(|cfg| cfg.issuer.as_str() == iss)
+    }
+
+    /// The one place that decides which refusals are logged (SMA-686 D8, D11, D14, D15): only
+    /// `NotAnAccessToken` and `AudienceMismatch`, both reachable only for a correctly signed
+    /// token from a configured issuer, and both rate-limited per (issuer, defect). Logs the
+    /// issuer and a static or configured detail — never a token claim.
+    fn log_refusal(&self, issuer: &Issuer, defect: TokenDefect, detail: RefusalDetail<'_>) {
+        let Some(suppressed) = self.refusal_log.admit_at(issuer.as_str(), defect, Instant::now()) else {
+            return;
+        };
+        match detail {
+            RefusalDetail::Marker(marker) => {
+                tracing::info!(
+                    issuer = issuer.as_str(),
+                    marker,
+                    suppressed,
+                    "refused a bearer token: a verified marker shows it is not an access token"
+                );
+            }
+            RefusalDetail::Accepted(accepted) => {
+                tracing::info!(issuer = issuer.as_str(), accepted = ?accepted, suppressed, "refused a bearer token: its aud claim holds none of the accepted audiences");
+            }
+        }
     }
 }
 
@@ -134,25 +223,31 @@ impl WireAudience {
 }
 
 /// The claims this validator reads off a token, deserialized only AFTER `jsonwebtoken` has
-/// verified the signature (spec §4.1). `sub`/`exp`/`aud` are required — their absence (or a
-/// wrong-shaped value) is a serde failure, which `map_jwt_error` collapses to `Malformed`;
-/// the profile claims are optional since an IdP may omit any of them. `typ` is an untyped
-/// `Value` on purpose (SMA-686 spec D6): a non-string `typ` must not become `Malformed`.
+/// verified the signature (spec §4.1). `sub`/`exp` are required — their absence (or a
+/// wrong-shaped value) is a serde failure, which `map_jwt_error` collapses to `Malformed`. `aud`
+/// is `Option` so that a token WITHOUT `aud` reaches `jsonwebtoken::validate`, which refuses it
+/// with `MissingRequiredClaim("aud")` because `authenticate` puts `aud` in
+/// `required_spec_claims` (SMA-686 D13); a wrong-typed `aud` still fails serde (`Malformed`).
+/// The profile claims are optional since an IdP may omit any of them. `typ` and `events` are
+/// untyped `Value`s on purpose (SMA-686 D6, D12): a non-string `typ` or a non-object `events`
+/// must not become `Malformed`.
 #[derive(Deserialize)]
 struct WireClaims {
     sub: String,
     exp: u64,
-    aud: WireAudience,
+    aud: Option<WireAudience>,
     email: Option<String>,
     name: Option<String>,
     locale: Option<String>,
     zoneinfo: Option<String>,
     typ: Option<serde_json::Value>,
+    events: Option<serde_json::Value>,
 }
 
 /// Maps a `jsonwebtoken` decode/validation failure to a `TokenDefect` (spec §4.1). Every
 /// kind this validator doesn't specifically distinguish (bad base64, malformed JSON, a
-/// wrong-shaped claim, an unhandled `ErrorKind`) collapses to `Malformed`.
+/// wrong-shaped claim, an unhandled `ErrorKind`) collapses to `Malformed`. A missing `aud`
+/// counts as an audience mismatch (SMA-686 D13).
 fn map_jwt_error(err: jsonwebtoken::errors::Error) -> AuthnError {
     match err.into_kind() {
         ErrorKind::ExpiredSignature => invalid(TokenDefect::Expired),
@@ -160,6 +255,7 @@ fn map_jwt_error(err: jsonwebtoken::errors::Error) -> AuthnError {
         ErrorKind::InvalidSignature => invalid(TokenDefect::BadSignature),
         ErrorKind::InvalidAudience => invalid(TokenDefect::AudienceMismatch),
         ErrorKind::InvalidIssuer => invalid(TokenDefect::IssuerNotConfigured),
+        ErrorKind::MissingRequiredClaim(claim) if claim == "aud" => invalid(TokenDefect::AudienceMismatch),
         _ => invalid(TokenDefect::Malformed),
     }
 }
@@ -176,29 +272,26 @@ fn check_kty_matches_alg(jwk: &Jwk, alg: Algorithm) -> Result<(), AuthnError> {
     if consistent { Ok(()) } else { Err(invalid(TokenDefect::UnsupportedAlg)) }
 }
 
-/// Refuses a token whose payload `typ` is one of `NON_ACCESS_TOKEN_TYPES` (SMA-686). Runs on
-/// signature-verified claims only (spec D5). A missing, `null` or non-string `typ` passes.
-/// Logs the refusal at `info` with the issuer and the CANONICAL marker only — never the
-/// token's own `typ` spelling or any other claim (spec D8).
-fn check_access_token_type(issuer: &Issuer, claims: &WireClaims) -> Result<(), AuthnError> {
-    let Some(serde_json::Value::String(typ)) = &claims.typ else {
-        return Ok(());
-    };
-    match NON_ACCESS_TOKEN_TYPES.iter().find(|marker| typ.eq_ignore_ascii_case(marker)) {
-        Some(marker) => {
-            tracing::info!(issuer = issuer.as_str(), typ = *marker, "refused a bearer token: its typ claim marks it as not an access token");
-            Err(invalid(TokenDefect::NotAnAccessToken))
-        }
-        None => Ok(()),
+/// The static marker that shows a signature-verified token is NOT an access token, or `None`
+/// (SMA-686 D2, D12). Markers: a back-channel logout header `typ`, the back-channel logout
+/// `events` member, or a Keycloak payload `typ` of `ID`/`Logout`. A missing, `null`, non-string
+/// `typ` and a non-object `events` are not markers (D6).
+fn non_access_token_marker(header_typ: Option<&str>, claims: &WireClaims) -> Option<&'static str> {
+    if header_typ.is_some_and(|typ| LOGOUT_TOKEN_HEADER_TYPES.iter().any(|logout| typ.eq_ignore_ascii_case(logout))) {
+        return Some("logout+jwt");
     }
-}
-
-/// Logs a refused token whose `aud` holds none of the accepted audiences (SMA-686 R2, spec D11).
-/// Only a correctly signed token reaches this: `jsonwebtoken` verifies the signature before it
-/// validates `aud`. Logs the issuer and the CONFIGURED audiences only — never the token's own
-/// `aud` or any other claim (the operator decodes the token for that, RUNBOOK-chart.md § 6).
-fn log_audience_mismatch(issuer: &Issuer, accepted: &[String]) {
-    tracing::info!(issuer = issuer.as_str(), accepted = ?accepted, "refused a bearer token: its aud claim holds none of the accepted audiences");
+    if claims
+        .events
+        .as_ref()
+        .and_then(serde_json::Value::as_object)
+        .is_some_and(|events| events.contains_key(BACKCHANNEL_LOGOUT_EVENT))
+    {
+        return Some("backchannel-logout event");
+    }
+    let Some(serde_json::Value::String(typ)) = &claims.typ else {
+        return None;
+    };
+    NON_ACCESS_TOKEN_TYPES.iter().find(|marker| typ.eq_ignore_ascii_case(marker)).copied()
 }
 
 #[async_trait]
@@ -231,19 +324,23 @@ impl<F: JwksFetcher, K: JwksCache, C: Clock> Authenticator for OidcAuthenticator
         let mut validation = Validation::new(header.alg);
         validation.set_issuer(&[issuer.as_str()]);
         validation.set_audience(&issuer_config.audiences);
+        validation.set_required_spec_claims(&["exp", "aud"]);
         validation.leeway = self.leeway_secs;
         validation.validate_nbf = true;
 
         let token_data = decode::<WireClaims>(token, &decoding_key, &validation).map_err(|err| {
             let err = map_jwt_error(err);
             if matches!(err, AuthnError::InvalidToken(TokenDefect::AudienceMismatch)) {
-                log_audience_mismatch(&issuer, &issuer_config.audiences);
+                self.log_refusal(&issuer, TokenDefect::AudienceMismatch, RefusalDetail::Accepted(&issuer_config.audiences));
             }
             err
         })?;
 
-        // 6. Token-type check on the verified claims (SMA-686): a Keycloak ID or logout token.
-        check_access_token_type(&issuer, &token_data.claims)?;
+        // 6. Token-type check on the verified token (SMA-686): an ID token or a logout token.
+        if let Some(marker) = non_access_token_marker(token_data.header.typ.as_deref(), &token_data.claims) {
+            self.log_refusal(&issuer, TokenDefect::NotAnAccessToken, RefusalDetail::Marker(marker));
+            return Err(invalid(TokenDefect::NotAnAccessToken));
+        }
 
         let expires_at = i64::try_from(token_data.claims.exp)
             .ok()
@@ -253,7 +350,9 @@ impl<F: JwksFetcher, K: JwksCache, C: Clock> Authenticator for OidcAuthenticator
         Ok(ValidatedClaims {
             issuer,
             subject: token_data.claims.sub,
-            audiences: token_data.claims.aud.into_vec(),
+            // A second guard: `validate` already refuses a missing `aud` (D13); if that ever
+            // regresses, the token is still refused, as Malformed.
+            audiences: token_data.claims.aud.map(WireAudience::into_vec).ok_or_else(|| invalid(TokenDefect::Malformed))?,
             expires_at,
             email: token_data.claims.email,
             name: token_data.claims.name,
@@ -344,6 +443,13 @@ mod tests {
     fn sign<C: serde::Serialize>(encoding_key: &EncodingKey, kid: Option<&str>, claims: &C) -> String {
         let mut header = jsonwebtoken::Header::new(Algorithm::ES256);
         header.kid = kid.map(str::to_string);
+        jsonwebtoken::encode(&header, claims, encoding_key).expect("signing a test token")
+    }
+
+    fn sign_with_header_typ<C: serde::Serialize>(encoding_key: &EncodingKey, kid: &str, header_typ: &str, claims: &C) -> String {
+        let mut header = jsonwebtoken::Header::new(Algorithm::ES256);
+        header.kid = Some(kid.to_string());
+        header.typ = Some(header_typ.to_string());
         jsonwebtoken::encode(&header, claims, encoding_key).expect("signing a test token")
     }
 
@@ -789,5 +895,102 @@ mod tests {
         let err = authenticator.authenticate(&token).await.unwrap_err();
         assert!(matches!(err, AuthnError::InvalidToken(TokenDefect::BadSignature)), "got {err:?}");
         assert!(!logs.text().contains("accepted audiences"), "a forged token must not reach the audience log:\n{}", logs.text());
+    }
+
+    /// Signs `claims` with a fresh key under `header_typ` and authenticates it.
+    async fn authenticate_with_header_typ(header_typ: &str, claims: &serde_json::Value) -> Result<ValidatedClaims, AuthnError> {
+        let (encoding_key, jwk, kid) = es256_keypair();
+        let token = sign_with_header_typ(&encoding_key, &kid, header_typ, claims);
+        let authenticator = make_authenticator(StubFetcher::new(jwk), vec![issuer_config(ISSUER, &["aud"])], 60, 16_384);
+        authenticator.authenticate(&token).await
+    }
+
+    #[tokio::test]
+    async fn refuses_standard_logout_token_markers() {
+        // SMA-686 D12: OIDC Back-Channel Logout 1.0 § 2.4 markers, for any IdP.
+        for header_typ in ["logout+jwt", "application/logout+jwt", "LOGOUT+JWT"] {
+            let err = authenticate_with_header_typ(header_typ, &claims_with(serde_json::json!({}))).await.unwrap_err();
+            assert!(matches!(err, AuthnError::InvalidToken(TokenDefect::NotAnAccessToken)), "header typ {header_typ:?}: got {err:?}");
+        }
+        let events = serde_json::json!({ "events": { "http://schemas.openid.net/event/backchannel-logout": {} } });
+        let err = authenticate_json(&claims_with(events)).await.unwrap_err();
+        assert!(matches!(err, AuthnError::InvalidToken(TokenDefect::NotAnAccessToken)), "events member: got {err:?}");
+    }
+
+    #[tokio::test]
+    async fn accepts_non_logout_header_typ_and_events() {
+        // D1: access-token header types and unrelated `events` shapes pass.
+        for header_typ in ["JWT", "at+jwt", "application/at+jwt"] {
+            authenticate_with_header_typ(header_typ, &claims_with(serde_json::json!({})))
+                .await
+                .unwrap_or_else(|err| panic!("header typ {header_typ:?} must be accepted, got {err:?}"));
+        }
+        for events in [serde_json::json!({ "other-event": {} }), serde_json::json!("x"), serde_json::json!(null)] {
+            authenticate_json(&claims_with(serde_json::json!({ "events": events.clone() })))
+                .await
+                .unwrap_or_else(|err| panic!("events {events} must be accepted, got {err:?}"));
+        }
+    }
+
+    #[tokio::test]
+    async fn missing_audience_is_audience_mismatch_and_logged() {
+        // SMA-686 D13: a token with NO aud (Keycloak lightweight access token, measurement B5)
+        // is refused and logged like a wrong aud. Without `aud` in required_spec_claims,
+        // jsonwebtoken would ACCEPT it — this test also pins that.
+        let (logs, _guard) = capture_logs();
+        let mut claims = claims_with(serde_json::json!({}));
+        claims.as_object_mut().expect("object").remove("aud");
+        let err = authenticate_json(&claims).await.unwrap_err();
+        assert!(matches!(err, AuthnError::InvalidToken(TokenDefect::AudienceMismatch)), "got {err:?}");
+        let text = logs.text();
+        assert_eq!(
+            text.lines().filter(|line| line.contains("holds none of the accepted audiences")).count(),
+            1,
+            "one audience line expected:\n{text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn wrong_typed_audience_is_malformed() {
+        // D13: a wrong-typed aud fails serde first — Malformed, as before.
+        let err = authenticate_json(&claims_with(serde_json::json!({ "aud": 7 }))).await.unwrap_err();
+        assert!(matches!(err, AuthnError::InvalidToken(TokenDefect::Malformed)), "got {err:?}");
+    }
+
+    #[tokio::test]
+    async fn repeated_refusals_log_once_per_issuer_and_defect() {
+        // SMA-686 D14: one authenticator, three ID tokens and two wrong-aud tokens -> exactly one
+        // line of each kind; the returned error is unchanged every time.
+        let (logs, _guard) = capture_logs();
+        let (encoding_key, jwk, kid) = es256_keypair();
+        let authenticator = make_authenticator(StubFetcher::new(jwk), vec![issuer_config(ISSUER, &["aud"])], 60, 16_384);
+        for _ in 0..3 {
+            let token = sign(&encoding_key, Some(&kid), &claims_with(serde_json::json!({ "typ": "ID" })));
+            let err = authenticator.authenticate(&token).await.unwrap_err();
+            assert!(matches!(err, AuthnError::InvalidToken(TokenDefect::NotAnAccessToken)));
+        }
+        for _ in 0..2 {
+            let token = sign(&encoding_key, Some(&kid), &claims_with(serde_json::json!({ "aud": "other" })));
+            let err = authenticator.authenticate(&token).await.unwrap_err();
+            assert!(matches!(err, AuthnError::InvalidToken(TokenDefect::AudienceMismatch)));
+        }
+        let text = logs.text();
+        assert_eq!(text.lines().filter(|line| line.contains("not an access token")).count(), 1, "typ lines:\n{text}");
+        assert_eq!(text.lines().filter(|line| line.contains("holds none of the accepted audiences")).count(), 1, "aud lines:\n{text}");
+    }
+
+    #[test]
+    fn refusal_log_counts_suppressed_refusals() {
+        // D14 unit: admit, suppress twice within the interval, then admit with the count.
+        let log = RefusalLog::new(Duration::from_secs(10));
+        let t0 = Instant::now();
+        assert_eq!(log.admit_at("iss", TokenDefect::NotAnAccessToken, t0), Some(0));
+        assert_eq!(log.admit_at("iss", TokenDefect::NotAnAccessToken, t0 + Duration::from_secs(1)), None);
+        assert_eq!(log.admit_at("iss", TokenDefect::NotAnAccessToken, t0 + Duration::from_secs(2)), None);
+        // Independent keys: another defect and another issuer are admitted at once.
+        assert_eq!(log.admit_at("iss", TokenDefect::AudienceMismatch, t0 + Duration::from_secs(2)), Some(0));
+        assert_eq!(log.admit_at("other", TokenDefect::NotAnAccessToken, t0 + Duration::from_secs(2)), Some(0));
+        assert_eq!(log.admit_at("iss", TokenDefect::NotAnAccessToken, t0 + Duration::from_secs(11)), Some(2));
+        assert_eq!(log.admit_at("iss", TokenDefect::NotAnAccessToken, t0 + Duration::from_secs(12)), None);
     }
 }

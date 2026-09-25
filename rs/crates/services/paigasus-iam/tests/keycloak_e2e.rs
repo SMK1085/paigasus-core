@@ -142,15 +142,16 @@ async fn keycloak_end_to_end_config_only_oidc() {
     let id_token = token_body["id_token"].as_str().expect("id_token in token response (scope=openid)").to_string();
     let id_claims = jwt_payload(&id_token);
     assert_eq!(id_claims["typ"], "ID", "keycloak ID token must carry typ=ID: {id_claims}");
-    assert_eq!(id_claims["aud"], "paigasus-cli", "keycloak ID token aud is the client id: {id_claims}");
+    assert!(aud_contains(&id_claims, "paigasus-cli"), "keycloak ID token aud must contain the client id: {id_claims}");
     let access_claims = jwt_payload(&access_token);
     assert_eq!(access_claims["typ"], "Bearer", "keycloak access token must carry typ=Bearer: {access_claims}");
-    let access_aud_has_paigasus = match &access_claims["aud"] {
-        Value::String(aud) => aud == "paigasus",
-        Value::Array(auds) => auds.iter().any(|aud| aud == "paigasus"),
-        _ => false,
-    };
-    assert!(access_aud_has_paigasus, "keycloak access token aud must contain paigasus: {access_claims}");
+    assert!(aud_contains(&access_claims, "paigasus"), "keycloak access token aud must contain paigasus: {access_claims}");
+    // The access-token assertions below must prove the `paigasus` audience path (SMA-678
+    // `oidc.audience`), not ride on the client id that the ID-token check needs in the config.
+    assert!(
+        !aud_contains(&access_claims, "paigasus-cli"),
+        "keycloak access token aud must NOT contain the client id: {access_claims}"
+    );
 
     // The access token is RS256 — closes the RS256 end-to-end accept-path coverage (the mock
     // IdP is ES256-only, spec §8).
@@ -166,8 +167,9 @@ async fn keycloak_end_to_end_config_only_oidc() {
     let app = router(state.clone());
 
     // SMA-686 AC1: the configured audiences include the client id (`paigasus-cli`, see
-    // `keycloak_config`), exactly like the chart default — so the ID token passes the issuer,
-    // signature, audience and expiry checks and reaches the `typ` check. Assert the DEFECT
+    // `keycloak_config`), like the chart default, which accepts the client id; this test
+    // accepts two so that both paths run — so the ID token passes the issuer, signature,
+    // audience and expiry checks and reaches the `typ` check. Assert the DEFECT
     // through the use case: every defect renders the same 401, so a 401 alone cannot prove
     // which check refused the token.
     let err = state.authn.resolve(&id_token, Provisioning::Enabled).await.expect_err("an ID token must not authenticate");
@@ -266,6 +268,15 @@ fn keycloak_config(issuer: &str) -> IamConfig {
         outbox: OutboxConfig::default(),
         metrics: MetricsConfig::default(),
         migration: MigrationConfig::default(),
+    }
+}
+
+/// `aud` per RFC 7519 §4.1.3 is a string or an array of strings.
+fn aud_contains(claims: &Value, audience: &str) -> bool {
+    match &claims["aud"] {
+        Value::String(aud) => aud == audience,
+        Value::Array(auds) => auds.iter().any(|aud| aud == audience),
+        _ => false,
     }
 }
 

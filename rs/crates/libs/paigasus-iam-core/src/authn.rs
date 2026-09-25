@@ -158,7 +158,7 @@ pub struct ExternalIdentity {
 /// Why a presented token was rejected. Detail only — never surfaced in `AuthnError`'s
 /// `Display` (no token/claim material in logs); useful for tests and internal diagnostics
 /// via `Debug` (spec §3.3).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TokenDefect {
     Malformed,
     UnsupportedAlg,

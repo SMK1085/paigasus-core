@@ -12,13 +12,14 @@ manifest sets `publish = false` (SMA-658, spec § 3.1).
 
 ### Security
 
-- IAM refuses a bearer token whose `typ` claim is `ID` or `Logout`. Keycloak sets these values
-  on its ID token and its back-channel logout token. Before, IAM accepted such a token when its
-  `aud` held the accepted audience, which is the client id in the default chart configuration.
-  The refusal is logged at `info` (SMA-686).
-- IAM logs a token refused for a wrong audience at `info`, with the issuer and the accepted
-  audiences. Before, nothing logged this refusal, although the chart runbook said it did
-  (SMA-686).
+- IAM refuses a bearer token that is an ID token or a back-channel logout token. The markers are
+  a `typ` claim of `ID` or `Logout` (Keycloak), a header `typ` of `logout+jwt`, or the
+  back-channel logout `events` claim. Before, IAM accepted such a token when its `aud` held the
+  accepted audience, which is the client id in the default chart configuration (SMA-686).
+- IAM refuses a token with no `aud` as an audience mismatch. It logs a wrong or missing audience
+  and a refused non-access token at `info`, with the issuer and a static or configured detail, at
+  most once per issuer and kind in 10 seconds. Before, nothing logged these refusals, although
+  the chart runbook said a wrong audience did (SMA-686).
 
 ## [0.1.0] - 2026-09-20
 
