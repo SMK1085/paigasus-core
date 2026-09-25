@@ -409,9 +409,11 @@ cargo_package_writer_self_test() {
 
 # SMA-685 review F6+F15: force a Cargo [package] version line to an exact literal, independent
 # of write_site (the function under test elsewhere). Used to plant sentinel and drift versions.
-# Prints nothing on success. On failure it prints one message to stderr and returns 2; it never
-# raises an uncaught python error, which under `set -euo pipefail` would abort the whole script
-# and skip the caller's own scratch-dir cleanup.
+# Prints nothing on success. On a known failure, such as no version line found, it prints one
+# FATAL line and returns 2. On an unexpected failure, such as a missing file, it may instead
+# raise an uncaught python error and return non-zero without that FATAL line. Every caller
+# treats any non-zero return as an infrastructure failure, and removes its own scratch
+# directory before it dies.
 _force_cargo_version() { # $1 file  $2 version
   local file="$1" version="$2" rc=0
   python3 - "$file" "$version" <<'PY' || rc=$?
@@ -441,22 +443,33 @@ stamp_sites_self_test() {
   # SMA-685 review F4: the sentinels below must not collide with the real tree's own data, or a
   # writer bug that fails to move a site could coincidentally match the sentinel already there
   # and the assertions below would pass for the wrong reason. Check this BEFORE stamping.
-  local kv pv
-  kv=""
+  #
+  # SMA-685 review F4 (round 2): this guard must read every site the two readback loops below
+  # assert. The old two-loop version read only the cargo-package sites. A kernel pyproject,
+  # pyproject-dep or packagejson site could already hold a sentinel value. So could the one
+  # proto pyproject site. Either case would make part of the readback assertion vacuous.
+  #
+  # This is now ONE loop over every kernel and proto site whose kind the readback loops check:
+  # cargo-package, pyproject, pyproject-dep, and packagejson. It reads each file once. It fails
+  # closed (rc 2) if a group has no such sites, or if any read is empty.
+  local kv="" pv="" kcount=0 pcount=0
   for entry in "${SITES[@]}"; do
     IFS='|' read -r group kind target <<<"$entry"
-    [ "$kind" = cargo-package ] || continue
-    got="$(REPO_ROOT="$tmp" read_version cargo-package "$target")" || return 2
-    [ "$group" = kernel ] && kv="$kv $got"
+    case "$kind" in cargo-package|pyproject|pyproject-dep|packagejson) ;; *) continue ;; esac
+    got="$(REPO_ROOT="$tmp" read_version "$kind" "$target" "$group")" || return 2
+    [ -n "$got" ] \
+      || { rm -rf "$tmp"; die_infra "self-test: $kind $target read back empty while validating the sentinels"; }
+    case "$group" in
+      kernel) kv="$kv $got"; kcount=$((kcount + 1)) ;;
+      proto)  pv="$pv $got"; pcount=$((pcount + 1)) ;;
+    esac
   done
-  pv=""
-  for entry in "${SITES[@]}"; do
-    IFS='|' read -r group kind target <<<"$entry"
-    [ "$kind" = cargo-package ] || continue
-    got="$(REPO_ROOT="$tmp" read_version cargo-package "$target")" || return 2
-    [ "$group" = proto ] && pv="$pv $got"
-  done
-  python3 - "9.9.9" "8.8.8" "$derive_before" "$kv" "$pv" <<'PY' || die_infra "self-test: the sentinel versions are not valid; see stderr above"
+  [ "$kcount" -gt 0 ] \
+    || { rm -rf "$tmp"; die_infra "self-test: the kernel group has no sites to validate the sentinel against"; }
+  [ "$pcount" -gt 0 ] \
+    || { rm -rf "$tmp"; die_infra "self-test: the proto group has no sites to validate the sentinel against"; }
+  python3 - "9.9.9" "8.8.8" "$derive_before" "$kv" "$pv" <<'PY' \
+    || { rm -rf "$tmp"; die_infra "self-test: the sentinel versions are not valid; see stderr above"; }
 import sys
 
 def tup(v):
@@ -516,7 +529,7 @@ PY
   # its own rc 1. It must not pass the raw code through. This is checked at the stamp_sites
   # call site, on its own pristine tree, not only at the write_site level (see F10 above).
   local tmp2 rc3=0
-  tmp2="$(mktemp -d)" || die_infra "cannot create a second scratch dir"
+  tmp2="$(mktemp -d)" || { rm -rf "$tmp"; die_infra "cannot create a second scratch dir"; }
   stage_pristine_tree "$tmp2"
   _force_cargo_version "$tmp2/rs/crates/bindings/paigasus-wasm/Cargo.toml" "99.99.99" \
     || { rm -rf "$tmp2"; die_infra "cannot force the wasm binding above its head version"; }
@@ -592,6 +605,10 @@ run_check() {
 # whether the lock-row drift landed at all (SMA-577 review, Critical). Each drift now gets its
 # own pristine tree, so a later drift added to this control automatically gets isolation
 # instead of silently inheriting the same bug.
+#
+# SMA-685 review (round 2): on a staging failure this removes its OWN $dest before it dies.
+# `die_infra` exits the whole process. An `exit` does not run a caller's RETURN trap, so a
+# caller-owned cleanup would not fire. This function owns $dest, so it cleans $dest itself.
 stage_pristine_tree() { # $1 destination dir
   local dest="$1" entry kind target
   {
@@ -601,7 +618,7 @@ stage_pristine_tree() { # $1 destination dir
       [ "$kind" = cargo-wsdep ] || printf '%s\n' "$target"
     done
   } | sort -u | ( cd "$REPO_ROOT" && tar -cf - -T - ) | ( cd "$dest" && tar -xf - ) \
-    || die_infra "cannot stage a scratch copy of the version-carrying files"
+    || { rm -rf "$dest"; die_infra "cannot stage a scratch copy of the version-carrying files"; }
 }
 
 # Drift ONE site in its OWN pristine scratch tree, and assert the checker reports red. Driving
