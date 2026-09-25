@@ -281,7 +281,7 @@ assert_console_pins() {
   # digest-pinned FROM images. So the normalised file holds exactly two FROM instructions, and each
   # one matches one of the two pin regexes above. An extra stage, an unpinned stage, or a `from`
   # instruction in lower case all red here. The count and the pins read the SAME normalised view.
-  local from_lines from_rc=0 n_from n_from_bad
+  local from_lines from_rc=0 n_from n_from_bad from_bad_lines from_bad_rc=0
   from_lines="$(grep -E '^[[:space:]]*[Ff][Rr][Oo][Mm][[:space:]]' "$norm")" || from_rc=$?
   if [ "$from_rc" -gt 1 ]; then
     rm -f "$norm"
@@ -290,7 +290,16 @@ assert_console_pins() {
   fi
   # printf into grep -c reads the whole input: grep -c is not an early-exit reader.
   n_from="$(printf '%s\n' "$from_lines" | grep -c .)" || n_from=0
-  n_from_bad="$(printf '%s\n' "$from_lines" | grep -vE "$rt_pin_re|$bd_pin_re" | grep -c .)" || n_from_bad=0
+  # The -vE grep is captured on its own, and its rc is read before grep -c runs. Piping the two
+  # greps together lets `pipefail` report grep -c's rc, which is always 0 or 1. A real failure
+  # (rc > 1) in the -vE grep was then folded into "no bad lines" (SMA-670, S-HCTIMEOUT precedent).
+  from_bad_lines="$(printf '%s\n' "$from_lines" | grep -vE "$rt_pin_re|$bd_pin_re")" || from_bad_rc=$?
+  if [ "$from_bad_rc" -gt 1 ]; then
+    rm -f "$norm"
+    echo "::error::assert_console_pins: grep exited ${from_bad_rc} on the FROM lines; the pinned-stage check could not run." >&2
+    return 1
+  fi
+  n_from_bad="$(printf '%s\n' "$from_bad_lines" | grep -c .)" || n_from_bad=0
   if [ "$n_from" -ne 2 ] || [ "$n_from_bad" -ne 0 ]; then
     echo "::error::ts/Dockerfile has ${n_from} FROM instruction(s), or a FROM that is not one of the two digest-pinned stages (the node builder and the distroless runtime); an extra or unpinned stage pulls an unpinned image into the build. The FROM lines of the normalised file follow." >&2
     printf '%s\n' "$from_lines" >&2
@@ -303,6 +312,7 @@ assert_console_pins() {
   # must name the builder stage or the named build context `bindings`. Each extraction is guarded:
   # grep rc 1 is "none found", and only rc > 1 is a failure.
   local cf_from cf_from_rc=0 cf_mount cf_mount_rc=0 cf_values cf_bad cf_v
+  local cf_extract cf_extract_rc=0 cf_bad_rc=0
   cf_from="$(grep -oE -- '--from=[^[:space:],]+' "$norm")" || cf_from_rc=$?
   cf_mount="$(grep -oE -- '--mount=[^[:space:]]+' "$norm")" || cf_mount_rc=$?
   if [ "$cf_from_rc" -gt 1 ] || [ "$cf_mount_rc" -gt 1 ]; then
@@ -311,9 +321,23 @@ assert_console_pins() {
     return 1
   fi
   # grep rc 1 below means "no value at all" or "no bad value", and both leave the variable empty,
-  # which is the correct reading. `from=` also finds the value inside each `--from=` match.
-  cf_values="$(printf '%s\n' "$cf_from" "$cf_mount" | grep -oE 'from=[^[:space:],]+' | sed 's/^from=//')" || cf_values=""
-  cf_bad="$(printf '%s\n' "$cf_values" | grep -vxE 'builder|bindings')" || cf_bad=""
+  # which is the correct reading. `from=` also finds the value inside each `--from=` match. Each
+  # grep is captured on its own, and its rc is read before the next step runs. Piping them together
+  # lets `pipefail` report only the LAST command's rc, so a real failure (rc > 1) in an earlier
+  # grep was folded into "no bad value" (SMA-670, S-HCTIMEOUT precedent).
+  cf_extract="$(printf '%s\n' "$cf_from" "$cf_mount" | grep -oE 'from=[^[:space:],]+')" || cf_extract_rc=$?
+  if [ "$cf_extract_rc" -gt 1 ]; then
+    rm -f "$norm"
+    echo "::error::assert_console_pins: grep exited ${cf_extract_rc} on the --from= values; the --from= check could not run." >&2
+    return 1
+  fi
+  cf_values="$(printf '%s\n' "$cf_extract" | sed 's/^from=//')" || cf_values=""
+  cf_bad="$(printf '%s\n' "$cf_values" | grep -vxE 'builder|bindings')" || cf_bad_rc=$?
+  if [ "$cf_bad_rc" -gt 1 ]; then
+    rm -f "$norm"
+    echo "::error::assert_console_pins: grep exited ${cf_bad_rc} on the --from= values; the --from= check could not run." >&2
+    return 1
+  fi
   if [ -n "$cf_bad" ]; then
     while IFS= read -r cf_v; do
       echo "::error::ts/Dockerfile reads from '${cf_v}', which is not the builder stage or the bindings context; a --from=<image> pulls an image that no FROM line pins." >&2

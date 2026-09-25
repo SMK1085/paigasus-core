@@ -295,6 +295,39 @@ PINS_PATH_EXTRA="$T/stub-grep-to"
 run_pins S6g "$REPO" 1 "healthcheck timeout check could not run"
 PINS_PATH_EXTRA=""
 
+# S1h (SMA-670 fail-open fix): a grep rc > 1 inside the FROM-pin check (the `-vE` grep that finds
+# FROM lines matching neither pin regex) must get its own "could not run" ::error::, not fold into
+# "no bad lines". The stub always fails only the `-vE …distroless…` call, so every earlier check
+# (which uses `-cE`, not `-vE`, on the same regex) still runs normally.
+mkdir -p "$T/stub-grep-s1h"
+{
+  printf '%s\n' '#!/usr/bin/env bash'
+  printf '%s\n' 'case "$*" in'
+  printf '%s\n' '  -vE*distroless*) exit 2 ;;'
+  printf '%s\n' 'esac'
+  printf '%s\n' "exec '${REAL_GREP}' \"\$@\""
+} > "$T/stub-grep-s1h/grep"
+chmod +x "$T/stub-grep-s1h/grep"
+PINS_PATH_EXTRA="$T/stub-grep-s1h"
+run_pins S1h "$REPO" 1 "on the FROM lines"
+PINS_PATH_EXTRA=""
+
+# S1i (SMA-670 fail-open fix): a grep rc > 1 inside the --from=/--mount= check (the
+# `-vxE 'builder|bindings'` grep) must get its own "could not run" ::error::, not fold into "no
+# bad value". The stub always fails only that call.
+mkdir -p "$T/stub-grep-s1i"
+{
+  printf '%s\n' '#!/usr/bin/env bash'
+  printf '%s\n' 'case "$*" in'
+  printf '%s\n' '  -vxE*bindings*) exit 2 ;;'
+  printf '%s\n' 'esac'
+  printf '%s\n' "exec '${REAL_GREP}' \"\$@\""
+} > "$T/stub-grep-s1i/grep"
+chmod +x "$T/stub-grep-s1i/grep"
+PINS_PATH_EXTRA="$T/stub-grep-s1i"
+run_pins S1i "$REPO" 1 "on the --from= values"
+PINS_PATH_EXTRA=""
+
 # --- the real fetch timeout (F0, F1) -----------------------------------------------------------
 # The rendered healthcheck.mjs runs in the RUNTIME image that the runtime FROM line names, digest
 # included: that is the node that runs it in production. A driver starts a server on
