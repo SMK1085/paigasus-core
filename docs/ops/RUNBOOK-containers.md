@@ -326,14 +326,14 @@ image has the same shape as the Rust service images:
   fails if either `FROM` line has no `@sha256:` digest, or if the runtime tag is not `nonroot`.
 - **Every image that the build reads is one of the two digest-pinned `FROM` images.**
   `assert_console_pins` reads `ts/Dockerfile` after it drops comment lines and joins continuation
-  lines. It fails if the file has a number of `FROM` instructions that is not 2, or a `FROM` line
-  that does not match one of the two pin patterns. It fails if a `--from=` value, or a `from=`
-  value in a `RUN --mount=` argument, is not `builder` or `bindings`. A `--from=<image>` pulls an
-  image that no `FROM` line pins. It also fails if the file starts with a parser directive
-  (`# syntax=`, `# escape=` or `# check=`, in any letter case). A `# syntax=` directive pulls an
-  unpinned BuildKit frontend image, and an `# escape=` directive changes how the check reads the
-  file. A heredoc body line that starts with `from` counts as a `FROM` line, so it gives a false
-  failure.
+  lines. It fails if the file has a number of `FROM` instructions that is not 2. It also fails if
+  a `FROM` line does not match one of the two pin patterns. It fails if a `--from=` value, or a
+  `from=` value in a `RUN --mount=` argument, is not `builder` or `bindings`. A `--from=<image>`
+  pulls an image that no `FROM` line pins. It also fails if the file starts with a parser
+  directive (`# syntax=`, `# escape=` or `# check=`, in any letter case). A `# syntax=` directive
+  pulls an unpinned BuildKit frontend image. An `# escape=` directive changes how the check reads
+  the file. A heredoc body line that starts with `from` counts as a `FROM` line, so it gives a
+  false failure.
 - **The image runs as uid:gid `65532:65532`** (`USER 65532:65532`). The Rust service images use
   the same uid (`rs/Dockerfile`'s `USER 65532:65532`). So one Kubernetes `securityContext`
   (`runAsNonRoot: true`, `runAsUser: 65532`) covers all four images. `smoke_consoles` reads the
@@ -348,8 +348,9 @@ image has the same shape as the Rust service images:
   signal.** The `fetch` call passes `signal: AbortSignal.timeout(2500)`. Docker kills the probe
   after `--timeout=3s`. Without the signal, a server that accepts the connection and never answers
   holds the probe until Docker kills it. `assert_console_pins` fails if the `printf` line that
-  writes the file does not hold exactly one `AbortSignal.timeout(<ms>)`, or if that value is not
-  less than the `HEALTHCHECK --timeout`. It reads only a `--timeout=<N>s` value in whole seconds.
+  writes the file does not hold exactly one `AbortSignal.timeout(<ms>)`. It also fails if that
+  value is not less than the `HEALTHCHECK --timeout`. It reads only a `--timeout=<N>s` value in
+  whole seconds.
 - **`smoke_consoles` runs the healthcheck file in the running container, with a deadline.** It
   uses `docker exec` and the image's own node, under `with_deadline` with `CONSOLE_HC_DEADLINE`
   (20 s). It fails if the file exits with a code that is not 0. It reports a timeout only when the
@@ -369,10 +370,10 @@ image has the same shape as the Rust service images:
 - **The image uses runtime configuration only.** The image bakes no `PAIGASUS_*` environment
   variable. `assert_console_pins` reads `ENV` and `ARG` instructions in `ts/Dockerfile` to enforce
   this. It joins continuation lines first and matches `ENV` and `ARG` in any letter case. After
-  that check, no other line of `ts/Dockerfile` can hold the text `PAIGASUS_`: a `RUN`, `COPY`,
-  `ADD` or `ONBUILD` step and a heredoc body line are errors. Comment lines are not read. The text
-  check needs the literal text `PAIGASUS_`, so a name that a step builds from parts, or a name from
-  `--build-arg`, gets past it. There is one exception to the rule:
+  that check, no other line of `ts/Dockerfile` can hold the text `PAIGASUS_`. A `RUN`, `COPY`,
+  `ADD` or `ONBUILD` step and a heredoc body line are errors. The check does not read comment
+  lines. The text check needs the literal text `PAIGASUS_`, so a name that a step builds from
+  parts, or a name from `--build-arg`, gets past it. There is one exception to the rule:
   `PAIGASUS_COMPILED_*` (`PAIGASUS_COMPILED_ZONE`, `PAIGASUS_COMPILED_BASE_PATH`).
   `createNextConfig` in `ts/packages/paigasus-next-config` writes these at build time on purpose.
   They record the zone that the artifact was built for, so `runtime.ts` can compare them with the
