@@ -3166,6 +3166,7 @@ dependencies = [
  "figment",
  "futures",
  "metrics",
+ "paigasus-kernel",
  "paigasus-logging",
  "paigasus-observability",
  "paigasus-proto",
@@ -3183,6 +3184,7 @@ dependencies = [
  "tonic-types",
  "tower",
  "tracing",
+ "tracing-subscriber",
  "uuid",
 ]
 

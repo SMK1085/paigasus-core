@@ -299,23 +299,34 @@ run_suite() {
   # paigasus-proto, so a proto edit must NOT reach it — enforced implicitly by the strict
   # equality of the contracts->proto case above, which lists no derive crate.
   # paigasus-service-info-rs is here via its paigasus-proto edge, wired in SMA-524.
+  # SMA-635: gateway-console-ts is here too, at the PROJECT level. Its test-e2e inputs name every
+  # path in the gateway's fileGroups.upstreams (including paigasus-proto-derive), because the
+  # `playground` e2e project runs the real gateway binary, which those sources feed. MEASURED with
+  # the no-flag `moon query tasks --affected` traversal (assert_task_case_ci's own): a throwaway
+  # kernel edit selects exactly one gateway-console-ts task, test-e2e.
   run_case "proto-derive->proto" "rs/crates/libs/paigasus-proto-derive/src/lib.rs" \
-    "paigasus-proto-derive-rs,paigasus-proto-rs,paigasus-gateway-rs,paigasus-iam-rs,paigasus-service-info-rs"
+    "paigasus-proto-derive-rs,paigasus-proto-rs,paigasus-gateway-rs,paigasus-iam-rs,paigasus-service-info-rs,gateway-console-ts"
   # service-info edit -> the crate + both services that serve the descriptor (SMA-524). Guards the
   # DOWNSTREAM direction, which no case covered before: paigasus-service-info was a graph LEAF, so an
   # edit to ServiceInfoDto — the wire body both services return — retested nothing.
   # One-directional: paigasus-proto-rs is deliberately absent (a consumer edit must not rebuild the
   # contract crate), enforced implicitly by strict equality.
+  # SMA-635: gateway-console-ts keys on the gateway's sources and upstreams (its playground project
+  # runs the real binary), so it is a legitimate PROJECT-level dependent here too.
   run_case "service-info->services" "rs/crates/libs/paigasus-service-info/src/lib.rs" \
-    "paigasus-service-info-rs,paigasus-iam-rs,paigasus-gateway-rs"
+    "paigasus-service-info-rs,paigasus-iam-rs,paigasus-gateway-rs,gateway-console-ts"
   # kernel edit -> kernel + all three bindings (py/node/wasm) + gateway + both language wrappers (SMA-419/420/427)
   # + the IAM crates that consume the kernel's PRN/UUIDv7 (paigasus-iam-core-rs & the paigasus-iam-rs
   # service, SMA-441). paigasus-logging-rs is deliberately ABSENT — it has no kernel edge.
   # + paigasus-observability-rs, whose correlation layer mints UUIDv7 via the kernel (SMA-504).
   # Strict equality (default-deny): any OTHER project appearing (an unrelated *-py/*-ts package, a
   # contracts/py/ts root) fails the case automatically — no forbid enumeration needed.
+  # SMA-635: gateway-console-ts keys on the gateway's sources and upstreams (its playground project
+  # runs the real binary), so it is a legitimate PROJECT-level dependent here too. MEASURED with the
+  # no-flag `moon query tasks --affected` traversal: a throwaway kernel edit selects exactly one
+  # gateway-console-ts task, test-e2e (not build/test/lint/typecheck).
   run_case "kernel->bindings" "rs/crates/libs/paigasus-kernel/src/lib.rs" \
-    "paigasus-kernel-rs,paigasus-py-bindings-rs,paigasus-gateway-rs,paigasus-kernel-py,paigasus-node-bindings-rs,paigasus-kernel-ts,paigasus-wasm-rs,paigasus-kernel-parity-rs,paigasus-iam-core-rs,paigasus-iam-rs,paigasus-observability-rs"
+    "paigasus-kernel-rs,paigasus-py-bindings-rs,paigasus-gateway-rs,paigasus-kernel-py,paigasus-node-bindings-rs,paigasus-kernel-ts,paigasus-wasm-rs,paigasus-kernel-parity-rs,paigasus-iam-core-rs,paigasus-iam-rs,paigasus-observability-rs,gateway-console-ts"
   # py binding edit -> the binding + the py wrapper that depends on it (SMA-419). One-directional
   # w.r.t. the kernel: paigasus-kernel-rs is deliberately ABSENT (a binding edit must not rebuild
   # the kernel), now enforced implicitly by strict equality rather than a forbid-regex.
@@ -338,13 +349,15 @@ run_suite() {
   # A proto edit must SCHEDULE paigasus-service-info's build, test AND lint, not merely mark the
   # project affected. This is the behavioral half of SMA-524 (build/test) and SMA-526 (lint): the
   # parity gate asserts `^:build` is DECLARED, this asserts it takes EFFECT.
+  # SMA-635: gateway-console-ts:test-e2e keys on the gateway's sources and upstreams (its playground project runs the real binary).
   run_task_case "proto->svc-info-deep" "rs/crates/libs/paigasus-proto/src/lib.rs" \
-    "paigasus-proto-rs:build,paigasus-proto-rs:test,paigasus-proto-rs:lint,paigasus-service-info-rs:build,paigasus-service-info-rs:test,paigasus-service-info-rs:lint,paigasus-iam-rs:build,paigasus-iam-rs:test,paigasus-iam-rs:lint,paigasus-gateway-rs:build,paigasus-gateway-rs:test,paigasus-gateway-rs:lint"
+    "paigasus-proto-rs:build,paigasus-proto-rs:test,paigasus-proto-rs:lint,paigasus-service-info-rs:build,paigasus-service-info-rs:test,paigasus-service-info-rs:lint,paigasus-iam-rs:build,paigasus-iam-rs:test,paigasus-iam-rs:lint,paigasus-gateway-rs:build,paigasus-gateway-rs:test,paigasus-gateway-rs:lint,gateway-console-ts:test-e2e"
   # CI-traversal twin of proto->svc-info-deep: a proto edit must SELECT the consumers under the
   # traversal moon ci uses, not merely cascade in the task graph. Expected to equal the deep set:
   # every consumer reaches paigasus-proto through @group(upstreams) now.
+  # SMA-635: gateway-console-ts:test-e2e keys on the gateway's sources and upstreams (its playground project runs the real binary).
   run_task_case_ci "proto->svc-info-ci" "rs/crates/libs/paigasus-proto/src/lib.rs" \
-    "paigasus-proto-rs:build,paigasus-proto-rs:test,paigasus-proto-rs:lint,paigasus-service-info-rs:build,paigasus-service-info-rs:test,paigasus-service-info-rs:lint,paigasus-iam-rs:build,paigasus-iam-rs:test,paigasus-iam-rs:lint,paigasus-gateway-rs:build,paigasus-gateway-rs:test,paigasus-gateway-rs:lint"
+    "paigasus-proto-rs:build,paigasus-proto-rs:test,paigasus-proto-rs:lint,paigasus-service-info-rs:build,paigasus-service-info-rs:test,paigasus-service-info-rs:lint,paigasus-iam-rs:build,paigasus-iam-rs:test,paigasus-iam-rs:lint,paigasus-gateway-rs:build,paigasus-gateway-rs:test,paigasus-gateway-rs:lint,gateway-console-ts:test-e2e"
   # A workspace-level change must schedule EVERY crate's lint, AND the three tasks that compile the
   # FFI cdylibs. `rs/` has no Moon project, so these files belong to `repo`; affectedness reaches
   # both sets through task INPUTS, not through `dependsOn` — which is why no project case above
@@ -373,21 +386,24 @@ run_suite() {
   # (measured for SMA-546 — a kernel edit that made `--reinstall-package` fail 67 tests left plain
   # `uv run pytest` reporting 124 passed), so giving them these inputs would buy cost with no
   # coverage.
+  # SMA-635: gateway-console-ts:test-e2e keys on the gateway's sources and upstreams (its playground project runs the real binary).
   run_task_case "lockfile->all-lint" "rs/Cargo.lock" \
-    "paigasus-gateway-rs:lint,paigasus-iam-core-rs:lint,paigasus-iam-rs:lint,paigasus-kernel-parity-rs:lint,paigasus-kernel-py:test,paigasus-kernel-rs:lint,paigasus-kernel-ts:build,paigasus-kernel-ts:test,paigasus-logging-rs:lint,paigasus-node-bindings-rs:lint,paigasus-observability-rs:lint,paigasus-proto-derive-rs:lint,paigasus-proto-rs:lint,paigasus-py-bindings-rs:lint,paigasus-service-info-rs:lint,paigasus-wasm-rs:lint"
+    "paigasus-gateway-rs:lint,paigasus-iam-core-rs:lint,paigasus-iam-rs:lint,paigasus-kernel-parity-rs:lint,paigasus-kernel-py:test,paigasus-kernel-rs:lint,paigasus-kernel-ts:build,paigasus-kernel-ts:test,paigasus-logging-rs:lint,paigasus-node-bindings-rs:lint,paigasus-observability-rs:lint,paigasus-proto-derive-rs:lint,paigasus-proto-rs:lint,paigasus-py-bindings-rs:lint,paigasus-service-info-rs:lint,paigasus-wasm-rs:lint,gateway-console-ts:test-e2e"
   # CI-traversal twin of lockfile->all-lint. A Cargo.lock touch reaches every crate through `lint`'s
   # workspace inputs (SMA-534) and the three FFI tasks through theirs (SMA-546) — through INPUTS,
   # not dependsOn — so this set is expected to equal the deep one.
+  # SMA-635: gateway-console-ts:test-e2e keys on the gateway's sources and upstreams (its playground project runs the real binary).
   run_task_case_ci "lockfile->all-lint-ci" "rs/Cargo.lock" \
-    "paigasus-gateway-rs:lint,paigasus-iam-core-rs:lint,paigasus-iam-rs:lint,paigasus-kernel-parity-rs:lint,paigasus-kernel-py:test,paigasus-kernel-rs:lint,paigasus-kernel-ts:build,paigasus-kernel-ts:test,paigasus-logging-rs:lint,paigasus-node-bindings-rs:lint,paigasus-observability-rs:lint,paigasus-proto-derive-rs:lint,paigasus-proto-rs:lint,paigasus-py-bindings-rs:lint,paigasus-service-info-rs:lint,paigasus-wasm-rs:lint"
+    "paigasus-gateway-rs:lint,paigasus-iam-core-rs:lint,paigasus-iam-rs:lint,paigasus-kernel-parity-rs:lint,paigasus-kernel-py:test,paigasus-kernel-rs:lint,paigasus-kernel-ts:build,paigasus-kernel-ts:test,paigasus-logging-rs:lint,paigasus-node-bindings-rs:lint,paigasus-observability-rs:lint,paigasus-proto-derive-rs:lint,paigasus-proto-rs:lint,paigasus-py-bindings-rs:lint,paigasus-service-info-rs:lint,paigasus-wasm-rs:lint,gateway-console-ts:test-e2e"
   # SMA-528 — a kernel SOURCE edit must select every consumer's build/test/lint under the traversal
   # `moon ci` uses. This is the case the issue exists for: before SMA-528 a kernel behavioural
   # change ran the kernel's own tests and NOT ONE consumer's, including paigasus-kernel-parity-rs,
   # the ADR-0005 cross-binding harness that exists precisely to catch kernel drift.
   # kernel-ts:{build,test} and kernel-py:test are the FFI tasks; they key on the kernel's sources by
   # hand (SMA-420/546) rather than through @group(upstreams), which is Rust-only.
+  # SMA-635: gateway-console-ts:test-e2e keys on the gateway's sources and upstreams (its playground project runs the real binary).
   run_task_case_ci "kernel->consumer-tasks" "rs/crates/libs/paigasus-kernel/src/lib.rs" \
-    "paigasus-gateway-rs:build,paigasus-gateway-rs:test,paigasus-gateway-rs:lint,paigasus-iam-core-rs:build,paigasus-iam-core-rs:test,paigasus-iam-core-rs:lint,paigasus-iam-rs:build,paigasus-iam-rs:test,paigasus-iam-rs:lint,paigasus-kernel-parity-rs:build,paigasus-kernel-parity-rs:test,paigasus-kernel-parity-rs:lint,paigasus-node-bindings-rs:build,paigasus-node-bindings-rs:test,paigasus-node-bindings-rs:lint,paigasus-observability-rs:build,paigasus-observability-rs:test,paigasus-observability-rs:lint,paigasus-py-bindings-rs:build,paigasus-py-bindings-rs:test,paigasus-py-bindings-rs:lint,paigasus-wasm-rs:build,paigasus-wasm-rs:test,paigasus-wasm-rs:lint,paigasus-kernel-rs:build,paigasus-kernel-rs:test,paigasus-kernel-rs:lint,paigasus-kernel-ts:build,paigasus-kernel-ts:test,paigasus-kernel-py:test"
+    "paigasus-gateway-rs:build,paigasus-gateway-rs:test,paigasus-gateway-rs:lint,paigasus-iam-core-rs:build,paigasus-iam-core-rs:test,paigasus-iam-core-rs:lint,paigasus-iam-rs:build,paigasus-iam-rs:test,paigasus-iam-rs:lint,paigasus-kernel-parity-rs:build,paigasus-kernel-parity-rs:test,paigasus-kernel-parity-rs:lint,paigasus-node-bindings-rs:build,paigasus-node-bindings-rs:test,paigasus-node-bindings-rs:lint,paigasus-observability-rs:build,paigasus-observability-rs:test,paigasus-observability-rs:lint,paigasus-py-bindings-rs:build,paigasus-py-bindings-rs:test,paigasus-py-bindings-rs:lint,paigasus-wasm-rs:build,paigasus-wasm-rs:test,paigasus-wasm-rs:lint,paigasus-kernel-rs:build,paigasus-kernel-rs:test,paigasus-kernel-rs:lint,paigasus-kernel-ts:build,paigasus-kernel-ts:test,paigasus-kernel-py:test,gateway-console-ts:test-e2e"
   # SMA-503 — a @paigasus/ui SOURCE edit must select the console's build and test.
   # `iam-console-ts:test` runs the Tailwind @source guard against the build's output, and
   # the ONLY thing making that proof real is `/ts/packages/paigasus-ui/src/**/*` sitting in
@@ -747,8 +763,9 @@ run_suite() {
   # paigasus-sdk-ts:build or ts:lint — only paigasus-sdk-ts's `test` task carries this input, and
   # ts:lint's own inputs do not reach a Rust file.
   # Strict equality: re-baseline deliberately when the set legitimately changes.
+  # SMA-635: gateway-console-ts:test-e2e keys on the gateway's sources and upstreams (its playground project runs the real binary).
   run_task_case_ci "gateway->sdk" "rs/crates/services/paigasus-gateway/src/adapters/http/chat.rs" \
-    "paigasus-gateway-rs:build,paigasus-gateway-rs:lint,paigasus-gateway-rs:test,paigasus-sdk-ts:test"
+    "paigasus-gateway-rs:build,paigasus-gateway-rs:lint,paigasus-gateway-rs:test,paigasus-sdk-ts:test,gateway-console-ts:test-e2e"
   # Generic Cargo<->Moon parity: catches a MISSING case, which is how SMA-524's bug survived review.
   assert_cargo_moon_parity || SUITE_RC=1
   # assert_include_relations returns only 0/1 (no infra code), so collapsing is correct here.

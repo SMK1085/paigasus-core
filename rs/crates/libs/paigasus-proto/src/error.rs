@@ -138,7 +138,7 @@ mod tests {
     /// hand-maintained list. The scan bound (9999) must stay comfortably above the highest
     /// declared number (999, the top of the shared range — see error.proto) or a value added
     /// above the bound goes invisible to every test derived from `all_reasons`/`all_domains`,
-    /// including the `assert_eq!(actual.len(), 57)` anchor and the range-enforcement test.
+    /// including the `assert_eq!(actual.len(), 59)` anchor and the range-enforcement test.
     fn all_reasons() -> Vec<ErrorReason> {
         (0..=9999).filter_map(|i| ErrorReason::try_from(i).ok()).collect()
     }
@@ -206,6 +206,8 @@ mod tests {
         "upstream-timeout",
         "upstream-error",
         "streaming-disabled",
+        "invalid-org-header",
+        "org-required",
         // Shared
         "internal",
         "invalid-request-body",
@@ -227,7 +229,7 @@ mod tests {
         let unexpected: Vec<_> = actual.difference(&expected).collect();
         assert!(missing.is_empty(), "declared in the test but not in the registry: {missing:?}");
         assert!(unexpected.is_empty(), "in the registry but not declared in the test: {unexpected:?}");
-        assert_eq!(actual.len(), 57, "the registry should hold 57 reasons");
+        assert_eq!(actual.len(), 59, "the registry should hold 59 reasons");
     }
 
     #[test]

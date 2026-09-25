@@ -352,3 +352,57 @@ describe('cancellation', () => {
     }).rejects.toThrow();
   });
 });
+
+describe('per-call headers (SMA-635 § 5)', () => {
+  const ORG = '0190a100-0000-7000-8000-0000000000a1';
+  const CORRELATION = '11111111-2222-4333-8444-555555555555';
+
+  function jsonFetch() {
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars -- the stub's signature must match `fetch`, but it ignores both arguments.
+    return vi.fn((_url: string | URL | Request, _init?: RequestInit) => Promise.resolve(new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } })));
+  }
+
+  function sentHeaders(fetchImpl: ReturnType<typeof jsonFetch>): Headers {
+    const call = fetchImpl.mock.calls[0];
+    if (call === undefined) throw new Error('fetch was not called');
+    return new Headers(call[1]?.headers);
+  }
+
+  it('sends paigasus-org and paigasus-correlation-id when both fields are set', async () => {
+    const fetchImpl = jsonFetch();
+    const client = createChatClient({ baseUrl: BASE, fetch: fetchImpl }, { bearer: 'TOKEN' });
+    await client.completions({ model: 'm', messages: [] }, { org: ORG, correlationId: CORRELATION });
+    const headers = sentHeaders(fetchImpl);
+    expect(headers.get('paigasus-org')).toBe(ORG);
+    expect(headers.get('paigasus-correlation-id')).toBe(CORRELATION);
+  });
+
+  it('sends neither header when neither field is set', async () => {
+    const fetchImpl = jsonFetch();
+    const client = createChatClient({ baseUrl: BASE, fetch: fetchImpl }, { bearer: 'TOKEN' });
+    await client.completions({ model: 'm', messages: [] });
+    const headers = sentHeaders(fetchImpl);
+    expect(headers.has('paigasus-org')).toBe(false);
+    expect(headers.has('paigasus-correlation-id')).toBe(false);
+  });
+
+  // Without the check, fetch throws on such a value and the SDK reports a false `network` failure.
+  it.each([
+    ['CR', 'a\rb'],
+    ['LF', 'a\nb'],
+    ['NUL', 'a\u0000b'],
+    ['a character outside Latin-1', 'org-€'],
+  ])('refuses an org with %s as a TypeError and sends nothing', async (_label, org) => {
+    const fetchImpl = jsonFetch();
+    const client = createChatClient({ baseUrl: BASE, fetch: fetchImpl }, { bearer: 'TOKEN' });
+    await expect(client.completions({ model: 'm', messages: [] }, { org })).rejects.toThrow(TypeError);
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it('refuses a correlation id with a line break as a TypeError', async () => {
+    const fetchImpl = jsonFetch();
+    const client = createChatClient({ baseUrl: BASE, fetch: fetchImpl }, { bearer: 'TOKEN' });
+    await expect(client.completions({ model: 'm', messages: [] }, { correlationId: 'a\nb' })).rejects.toThrow(TypeError);
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+});

@@ -25,7 +25,9 @@ const CORRELATION_HEADER = 'paigasus-correlation-id';
 const REQUEST_PATH_HEADER = 'x-paigasus-request-path';
 
 const authMiddleware = createAuthMiddleware({
-  publicPaths: [...authRoutePaths(), '/', '/healthz'],
+  // '/api/chat' (SMA-635): the playground route answers its own 401 JSON. An exact match, so it
+  // opens no other path.
+  publicPaths: [...authRoutePaths(), '/', '/healthz', '/api/chat'],
   loginPath: '/auth/login',
 });
 

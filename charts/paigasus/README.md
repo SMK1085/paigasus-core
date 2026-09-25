@@ -112,6 +112,28 @@ env and not in the shared `console-env` ConfigMap. IAM gets `IAM_AUTHN__EXTRA_CA
 With the value empty, the render is byte-identical to a chart without it. See
 `docs/ops/RUNBOOK-chart.md` for the failure modes.
 
+## The access-token audience (`oidc.audience`)
+
+IAM accepts an access token only if its `aud` claim contains a configured audience. The chart
+renders that list, with one element, into `IAM_AUTHN__ISSUERS` in
+`templates/backend-deployment.yaml`.
+
+- **Empty or absent (the default).** The audience is `oidc.clientId`. The render is byte-identical
+  to a chart without the value. Under `helm upgrade --reuse-values` from an older release, the key
+  is absent. The template then reads nil. The result is the same.
+- **Set.** The value replaces `oidc.clientId`. It does not add to it. IAM then refuses a token
+  whose `aud` holds only the client id. This includes an ID token.
+- **A number** (`--set oidc.audience=12345`, or an unquoted number in a values file) renders as the
+  string `"12345"`. The template applies `toString` before `%q`. Quote the value in a values file.
+  A large number can change to an exponent form.
+- When the value is set, one more YAML comment line renders above `IAM_AUTHN__ISSUERS`:
+  `# oidc.audience is set: IAM accepts that audience, not the client id.`
+- A change of the value restarts the IAM pod and no console pod.
+
+`tests/env.sh` holds the rows: `A1 unset`, `A2 reuse-values-no-key` (`--set oidc.audience=null`),
+`A3 set`, `A4 number`, `A5 number-in-file` and `A6 restart-scope`. A row counter reds the script
+when a row call line is deleted. See `docs/ops/RUNBOOK-chart.md` § 6 for when to set the value.
+
 ## The golden files
 
 `tests/golden/iam-only.yaml` and `tests/golden/iam-and-gateway.yaml` are a byte-exact pin of

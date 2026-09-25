@@ -207,6 +207,13 @@ enum ErrorReason {
   // A request-PARAMETER refusal (400, param "stream"), not a route-level
   // capability gate — see ERROR_REASON_CAPABILITY_DISABLED for that.
   ERROR_REASON_STREAMING_DISABLED = 308;
+  // "invalid-org-header" — the paigasus-org header is not ONE organization
+  // UUID in the 36-character form (400, param "paigasus-org"). `param` names a
+  // HEADER here, a deviation from OpenAI, which uses it for a body field.
+  ERROR_REASON_INVALID_ORG_HEADER = 309;
+  // "org-required" — no paigasus-org header, and the user reaches zero or
+  // several organizations (400, param "paigasus-org").
+  ERROR_REASON_ORG_REQUIRED = 310;
 
   // ---- Shared (900-999) ----------------------------------------------------
   // Any domain may emit these; `domain` is what distinguishes them.

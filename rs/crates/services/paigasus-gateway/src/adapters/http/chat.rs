@@ -46,7 +46,7 @@ use super::error::GatewayError;
 use crate::adapters::http::bytes::EnvelopeBytes;
 use crate::adapters::http::dto::ChatCompletionRequest;
 use crate::adapters::openai::{ChatResponse, OpenAiByteStream};
-use crate::domain::CallerContext;
+use crate::domain::{CallerContext, Credential};
 
 /// The single terminal SSE event emitted when a stream fails mid-flight. Static, caller-safe (no
 /// upstream detail), and shaped like the OpenAI error envelope wrapped in an SSE `data:` frame so
@@ -60,7 +60,12 @@ use crate::domain::CallerContext;
 /// is by construction the transient mid-stream case (the request already reached the upstream and
 /// was streaming successfully before it failed), so a client that recognizes this code already
 /// knows it may retry.
-const TERMINAL_SSE_ERROR: &str = "data: {\"error\":{\"message\":\"upstream stream error\",\"type\":\"api_error\",\"param\":null,\"code\":\"upstream-error\"}}\n\n";
+///
+/// The frame STARTS with a blank line (SMA-635 spec §4.6). An upstream failure can fall inside a
+/// record; without the blank line the frame would join that partial record and no SSE parser
+/// could read it. After a clean record boundary the extra blank line is an empty record, which
+/// dispatches nothing, so a client that reads a clean boundary sees no change.
+const TERMINAL_SSE_ERROR: &str = "\n\ndata: {\"error\":{\"message\":\"upstream stream error\",\"type\":\"api_error\",\"param\":null,\"code\":\"upstream-error\"}}\n\n";
 
 /// Proxy a chat-completion request to the OpenAI upstream.
 ///
@@ -154,20 +159,34 @@ pub(crate) async fn chat_completions(State(state): State<AppState>, caller: Opti
         }
     };
 
-    // One structured line per request — model/stream/status/latency/principal ONLY. NEVER the
-    // prompt, messages, body, or the OpenAI key. `principal`/`key_id` are the caller's
-    // service-account PRN + non-secret API-key id: internal *service-account* identifiers (not
-    // end-user PII, and not the key secret), retained deliberately for request attribution/audit —
-    // the "never PII" bar is about prompt/message content, not the SA the call was made as.
-    tracing::info!(
-        model = %model,
-        stream = stream,
-        status = status.as_u16(),
-        latency_ms = started.elapsed().as_millis() as u64,
-        principal = %caller.principal_prn,
-        key_id = %caller.key_id,
-        "chat completion proxied"
-    );
+    // One structured line per request — model/stream/status/latency/principal/scope/credential
+    // ONLY. NEVER the prompt, messages, body, or the OpenAI key. `principal` is a service account
+    // for an API key and a USER for an OIDC token (SMA-635): a principal PRN is an opaque id, not
+    // the user's name or e-mail, and it is kept deliberately for attribution and audit. The "never
+    // PII" bar is about prompt/message content. `key_id` is logged only for an API key.
+    match &caller.credential {
+        Credential::ApiKey { key_id } => tracing::info!(
+            model = %model,
+            stream = stream,
+            status = status.as_u16(),
+            latency_ms = started.elapsed().as_millis() as u64,
+            principal = %caller.principal_prn,
+            scope = %caller.scope_prn,
+            auth = "api_key",
+            key_id = %key_id,
+            "chat completion proxied"
+        ),
+        Credential::Oidc => tracing::info!(
+            model = %model,
+            stream = stream,
+            status = status.as_u16(),
+            latency_ms = started.elapsed().as_millis() as u64,
+            principal = %caller.principal_prn,
+            scope = %caller.scope_prn,
+            auth = "oidc",
+            "chat completion proxied"
+        ),
+    }
 
     response
 }
@@ -247,6 +266,23 @@ mod tests {
         assert_eq!(text.matches("\"code\":\"upstream-error\"").count(), 1, "exactly one terminal error event");
     }
 
+    /// SMA-635 spec §4.6: an upstream failure INSIDE a record must not join the terminal frame to
+    /// the partial record. The frame starts with a blank line, so it is a record of its own and
+    /// parses as JSON by itself.
+    #[tokio::test]
+    async fn the_terminal_frame_is_its_own_record_after_a_partial_one() {
+        let inner = futures::stream::iter(vec![Ok(Bytes::from_static(b"data: {\"choices\":[{\"delta\":{\"content\":\"par"))])
+            .chain(futures::stream::once(async { Err(make_reqwest_error().await) }))
+            .boxed();
+        let out: Vec<Bytes> = terminal_sse_error_stream(inner).map(|r| r.unwrap()).collect().await;
+        let text = String::from_utf8(out.iter().flat_map(|b| b.to_vec()).collect()).unwrap();
+        let records: Vec<&str> = text.split("\n\n").filter(|record| !record.is_empty()).collect();
+        let last = records.last().expect("at least one record");
+        let payload = last.strip_prefix("data: ").expect("the last record is a data record of its own");
+        let parsed: serde_json::Value = serde_json::from_str(payload).expect("the terminal record parses as JSON on its own");
+        assert_eq!(parsed["error"]["code"], "upstream-error");
+    }
+
     /// AC 6 for the terminal SSE frame. Parses the frame's JSON and resolves the `code` field
     /// rather than string-comparing the same literal the constant is built from — a comparison
     /// against the literal would pass even if the code were never registered.
@@ -254,7 +290,7 @@ mod tests {
     fn the_terminal_sse_frame_carries_a_registered_code() {
         use paigasus_proto::paigasus::common::v1::ErrorReason;
 
-        let payload = TERMINAL_SSE_ERROR.strip_prefix("data: ").expect("an SSE data frame").trim_end();
+        let payload = TERMINAL_SSE_ERROR.trim_start_matches('\n').strip_prefix("data: ").expect("an SSE data frame").trim_end();
         let parsed: serde_json::Value = serde_json::from_str(payload).expect("the frame must be valid JSON");
         let code = parsed["error"]["code"].as_str().expect("a code");
         assert!(ErrorReason::from_wire_reason(code).is_some(), "{code} is not declared in common/v1/error.proto");

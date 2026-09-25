@@ -97,8 +97,21 @@ spec:
             # authn.issuers has no default and is a hard boot error if empty (IamConfig::load).
             # The console's own OIDC client id is the audience IAM must accept: it is the client
             # the access tokens IAM validates were issued to.
+{{- /*
+  oidc.audience (SMA-678).
+  This value can be empty. It can also be absent (nil) after `helm upgrade --reuse-values`
+  from a release made before this key existed. Both cases use oidc.clientId as the audience.
+  The render then stays byte-identical to the render before this value existed.
+  A set value REPLACES oidc.clientId. It does not add to it. IAM then refuses a token whose
+  aud holds only the client id. An ID token is one example of such a token.
+  toString runs before %q. Without toString, %q writes a rune literal or an error string for
+  a number. A number can come from --set or from a values file. toString keeps the digits.
+*/}}
+{{- if $root.Values.oidc.audience }}
+            # oidc.audience is set: IAM accepts that audience, not the client id.
+{{- end }}
             - name: IAM_AUTHN__ISSUERS
-              value: {{ printf "[{issuer=%q,audiences=[%q]}]" $root.Values.oidc.issuer $root.Values.oidc.clientId | quote }}
+              value: {{ printf "[{issuer=%q,audiences=[%q]}]" $root.Values.oidc.issuer ($root.Values.oidc.audience | default $root.Values.oidc.clientId | toString) | quote }}
             # ApiKeyConfig::pepper decodes this at boot and IamConfig::validate rejects fewer
             # than 32 decoded bytes. See zones.iam.backend.apiKeysPepperSecret in values.yaml.
             - name: IAM_API_KEYS__PEPPER

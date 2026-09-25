@@ -10,7 +10,7 @@ describe('AC 2 — the override table is driven off the registry', () => {
   const reasons = ErrorReasonSchema.values.filter((v) => v.number !== 0);
 
   it('sees the whole registry', () => {
-    expect(reasons).toHaveLength(57);
+    expect(reasons).toHaveLength(59);
   });
 
   it.each(reasons.map((v) => [v.name, v.number] as const))('%s has an entry and round-trips', (_name, number) => {

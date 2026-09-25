@@ -15,3 +15,6 @@ export const TS_ROOT = fileURLToPath(new URL('../../../../..', import.meta.url))
 // path is derived from TS_ROOT, not by composing '..' onto APP_DIR (which names THIS app's root).
 export const IAM_CONSOLE_APP_DIR = path.join(TS_ROOT, 'apps', 'iam-console');
 export const IAM_CONSOLE_STANDALONE_DIR = path.join(IAM_CONSOLE_APP_DIR, '.next', 'standalone', 'apps', 'iam-console');
+
+// The repository root (SMA-635): the playground project runs rs/target/debug/paigasus-gateway.
+export const REPO_ROOT = fileURLToPath(new URL('../../../../../..', import.meta.url));

@@ -41,7 +41,9 @@ describe('the terminal frame is read from the gateway, not hand-built', () => {
   // Without this the test would assert against an object it wrote itself, and could not fail
   // when the gateway changes the frame — which is the one drift it exists to absorb.
   it('is a well-formed SSE data record carrying the registry code', () => {
-    expect(FRAME.startsWith('data: ')).toBe(true);
+    // SMA-635 § 4.6: the frame opens with a blank line, so a failure inside a record cannot join
+    // the frame to the partial record.
+    expect(FRAME.startsWith('\n\ndata: ')).toBe(true);
     expect(FRAME.endsWith('\n\n')).toBe(true);
     expect(FRAME).toContain('"code":"upstream-error"');
   });

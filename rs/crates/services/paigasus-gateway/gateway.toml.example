@@ -28,8 +28,9 @@
 
 # [iam.tls]
 # TLS is the DEFAULT and REQUIRED transport to paigasus-iam: the introspect call carries raw
-# caller-presented API keys, so this link must be encrypted unless you explicitly opt out
-# below AND grpc_addr is a loopback host (D8). Default shown (system trust store, no mTLS):
+# caller-presented API keys AND user OIDC bearers, so this link must be encrypted unless you
+# explicitly opt out below AND grpc_addr is a loopback host (D8). Default shown (system trust
+# store, no mTLS):
 # mode                = "tls"           # "tls" (default) | "loopback_insecure"
 # # ca_cert_path      = "/path/to/ca.pem"       # unset = system trust store only
 # # client_cert_path  = "/path/to/client.pem"   # mTLS — set together with client_key_path
