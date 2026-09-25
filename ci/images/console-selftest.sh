@@ -204,6 +204,30 @@ mk_tree S1f
 append_df S1f 'RUN --mount=type=bind,from=alpine:latest,target=/x true'
 pins_mut S1f 1 'which is not the builder stage'
 
+mk_tree S2
+append_df S2 'RUN pnpm i --filter x'
+pins_mut S2 1 'carry --frozen-lockfile'
+
+mk_tree S2b
+append_df S2b 'RUN pnpm i'
+pins_mut S2b 1 'carry --frozen-lockfile'
+
+mk_tree S2c
+append_df S2c 'RUN pnpm --filter x install'
+pins_mut S2c 1 'carry --frozen-lockfile'
+
+mk_tree S2d
+append_df S2d 'RUN pnpm i --frozen-lockfile && pnpm i'
+pins_mut S2d 1 'carry --frozen-lockfile'
+
+mk_tree S2e
+append_df S2e 'RUN sh -c "pnpm install"'
+pins_mut S2e 1 'carry --frozen-lockfile'
+
+mk_tree C1
+append_df C1 'RUN pnpm info x && pnpm import && pnpm init'
+pins_mut C1 0 ""
+
 # --- summary -----------------------------------------------------------------------------------
 echo "console-selftest: ${N_PASS} passed, ${N_FAIL} failed, ${N_SKIP} skipped"
 if [ "$N_FAIL" -ne 0 ]; then

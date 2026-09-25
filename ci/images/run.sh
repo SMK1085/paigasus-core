@@ -327,15 +327,27 @@ assert_console_pins() {
   # invocations here. `--frozen-lockfile` must stand as a bare flag. Any `--frozen-lockfile=<value>`
   # form (`=false` switches it off) and `--no-frozen-lockfile` are rejected outright, even beside
   # a bare flag, so the check never has to decide which of two conflicting flags pnpm obeys.
-  local inst inst_rc=0 n_inst n_frozen n_unfrozen
-  inst="$(grep -oE 'pnpm[[:space:]]+install([[:space:]][^&;|]*)?' "$norm")" || inst_rc=$?
+  #
+  # S-INSTALL (SMA-670 gap 2b). The extraction takes EVERY pnpm invocation first, from the word
+  # `pnpm` to the next `&&`, `;` or `|`. awk then splits each one into whitespace-separated tokens
+  # and keeps it when a token is exactly `install`, `i`, `install-test` or `it`. So
+  # `pnpm --filter x install`, `pnpm -C ts i` and a bare `pnpm i` are installs, and `pnpm info`,
+  # `pnpm import`, `pnpm init` and `pnpm exec next build` are not. awk tokens, not `\b`, `\<` or
+  # `\>`: those are not POSIX ERE, and BSD grep and GNU grep read them differently. Each token
+  # loses its quote, backtick and parenthesis characters before the compare, so
+  # `sh -c "pnpm install"` stays an install, as it was under the old `pnpm[[:space:]]+install`
+  # match (MEASURED: without the strip the token is `install"` and the install is missed). The awk
+  # has no `exit`, so it reads its whole input. `\047` is the single quote.
+  local inv inv_rc=0 inst n_inst n_frozen n_unfrozen
+  inv="$(grep -oE '(^|[^[:alnum:]_./-])pnpm([[:space:]][^&;|]*)?' "$norm")" || inv_rc=$?
   rm -f "$norm"
-  if [ "$inst_rc" -gt 1 ]; then
-    echo "::error::assert_console_pins: grep exited ${inst_rc} on the normalised ts/Dockerfile; the --frozen-lockfile check could not run." >&2
+  if [ "$inv_rc" -gt 1 ]; then
+    echo "::error::assert_console_pins: grep exited ${inv_rc} on the normalised ts/Dockerfile; the --frozen-lockfile check could not run." >&2
     return 1
   fi
+  inst="$(printf '%s\n' "$inv" | awk '{ for (i = 1; i <= NF; i++) { t = $i; gsub(/["\047()`]/, "", t); if (t == "install" || t == "i" || t == "install-test" || t == "it") { print; next } } }')" || inst=""
   if [ -z "$inst" ]; then
-    echo "::error::ts/Dockerfile: no 'pnpm install' instruction found; the image would not be built from the committed lockfile." >&2
+    echo "::error::ts/Dockerfile: no 'pnpm install'/'pnpm i' instruction found; the image would not be built from the committed lockfile." >&2
     return 1
   fi
   # printf into grep -c reads the whole input: grep -c is not an early-exit reader.
@@ -343,7 +355,7 @@ assert_console_pins() {
   n_frozen="$(printf '%s\n' "$inst" | grep -cE -- '--frozen-lockfile([[:space:]]|$)')" || n_frozen=0
   n_unfrozen="$(printf '%s\n' "$inst" | grep -cE -- '--frozen-lockfile=|--no-frozen-lockfile')" || n_unfrozen=0
   if [ "$n_unfrozen" -ne 0 ] || [ "$n_frozen" -ne "$n_inst" ]; then
-    echo "::error::ts/Dockerfile: ${n_frozen} of ${n_inst} 'pnpm install' invocation(s) carry --frozen-lockfile, and ${n_unfrozen} switch it off; every install must be frozen, or the image would not be built from the committed lockfile. The invocations follow." >&2
+    echo "::error::ts/Dockerfile: ${n_frozen} of ${n_inst} 'pnpm install'/'pnpm i' invocation(s) carry --frozen-lockfile, and ${n_unfrozen} switch it off; every install must be frozen, or the image would not be built from the committed lockfile. The invocations follow." >&2
     printf '%s\n' "$inst" >&2
     return 1
   fi
