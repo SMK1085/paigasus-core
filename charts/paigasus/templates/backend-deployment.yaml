@@ -8,6 +8,16 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: {{ include "paigasus.name" (list $root (printf "%s-backend" $id)) }}
+{{- if and (eq $id "iam") (include "paigasus.iamAudienceWarns" $root) }}
+{{- /*
+  SMA-691: the second signal, for a user of `helm template` who never sees NOTES.txt. It is on
+  the Deployment metadata, not on the pod template, so it does not restart a pod. This is a Go
+  template comment on purpose: the condition is true by default, so a YAML comment here renders
+  into both golden files.
+*/}}
+  annotations:
+    paigasus.io/iam-audience-warning: "the IAM audience equals oidc.clientId, so an ID token passes IAM's audience check. See docs/ops/RUNBOOK-chart.md section 6 (SMA-691)."
+{{- end }}
 spec:
 {{- if eq $id "iam" }}
   replicas: 1
@@ -111,7 +121,7 @@ spec:
             # oidc.audience is set: IAM accepts that audience, not the client id.
 {{- end }}
             - name: IAM_AUTHN__ISSUERS
-              value: {{ printf "[{issuer=%q,audiences=[%q]}]" $root.Values.oidc.issuer ($root.Values.oidc.audience | default $root.Values.oidc.clientId | toString) | quote }}
+              value: {{ printf "[{issuer=%q,audiences=[%q]}]" $root.Values.oidc.issuer (include "paigasus.iamAudience" $root) | quote }}
             # ApiKeyConfig::pepper decodes this at boot and IamConfig::validate rejects fewer
             # than 32 decoded bytes. See zones.iam.backend.apiKeysPepperSecret in values.yaml.
             - name: IAM_API_KEYS__PEPPER
