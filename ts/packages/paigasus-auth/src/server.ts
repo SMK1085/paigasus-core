@@ -83,7 +83,9 @@ function withUrl(req: Request, url: string): Request {
  *    rejection a Next route handler turns into a 500.
  *
  * A session-store failure is NOT mapped here. `createAuthRoutes` already answers it with a 503
- * `Response` (SMA-653, http/store-unavailable.ts), which this handler returns unchanged.
+ * `Response` (SMA-653, http/store-unavailable.ts), which this handler returns unchanged. An OIDC
+ * discovery failure on `/auth/login` or `/auth/callback` is the same: `createAuthRoutes` answers it
+ * with the identity-provider 503 (SMA-656), which this handler returns unchanged.
  *
  * The five reasons split into two outcomes. `txn_missing`, `txn_mismatch`, and `state_unknown` all
  * mean "this callback cannot be completed with what the server has" — a stale tab, an expired
@@ -93,7 +95,8 @@ function withUrl(req: Request, url: string): Request {
  * rather than straight back into another login attempt. `code_exchange_failed` is the one reason
  * that is a genuine failure (an unreachable or erroring token endpoint) rather than an expected
  * outcome, so it surfaces as a 502 rather than a silent redirect — an operator must be able to
- * tell it apart from ordinary traffic.
+ * tell it apart from ordinary traffic. An OIDC discovery failure no longer reaches this 502:
+ * http/routes.ts answers it with a 503 and throws no `CallbackRejected` (SMA-656 D10).
  *
  * The redirect Locations below are FULL paths. A raw `Response` Location from a route handler
  * passes through Next unchanged (measured, spec § 13 row 1).
