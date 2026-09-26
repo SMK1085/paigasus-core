@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import { isRefreshRejected } from './errors';
+import { isRefreshRejected, refreshFailureCode } from './errors';
 import { newLockToken } from './ids';
 import { shouldRefresh } from './refresh-policy';
 import type { SessionRecord } from './session';
@@ -208,8 +208,12 @@ export async function resolveSession(deps: ResolveDeps, sid: string): Promise<Re
           const rejected = isRefreshRejected(err);
           const liveUntil = Math.min(fresh.accessExpiresAt, fresh.absoluteExpiresAt);
           const degraded = !rejected && Date.now() < liveUntil;
+          // SMA-692 D10. The OAuth code of a transient failure, from a closed set. It is never the
+          // error object, its message or a URL. A failure with no OAuth code (a network error, a
+          // timeout) gets no field. A rejection is always `invalid_grant`, so `reason` says it.
+          const oauthError = rejected ? undefined : refreshFailureCode(err);
 
-          logger.event('session.refresh_failed', { sid: sidTag(sid), reason: rejected ? 'rejected' : 'transient', degraded });
+          logger.event('session.refresh_failed', { sid: sidTag(sid), reason: rejected ? 'rejected' : 'transient', degraded, ...(oauthError !== undefined ? { oauthError } : {}) });
 
           // The early return still runs the `finally` below, so the lock is released either way.
           if (degraded) return { ...fresh, refreshState: 'failed' };

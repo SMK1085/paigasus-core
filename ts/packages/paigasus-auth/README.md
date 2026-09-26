@@ -155,6 +155,11 @@ holds even for an unhandled adapter error: this package never logs a caught node
 `openid-client` error object directly (both can embed a URL or a DSN in their own error text) —
 only a fixed name and message are extracted for logging.
 
+`session.refresh_failed` can carry `oauthError` (SMA-692). It is the OAuth error code of a
+transient refresh failure: one code of the RFC 6749 § 5.2 list, or `other` for any other value.
+It shows, for example, an `invalid_scope` after a scope change. A failure with no OAuth code, such
+as a network error, has no `oauthError`.
+
 ## Routes
 
 `createAuthRoutes` / `createAuthRoutes(...).handle` (see `@paigasus/auth/server`) serve four

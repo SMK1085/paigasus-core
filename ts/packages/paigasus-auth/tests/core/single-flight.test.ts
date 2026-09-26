@@ -2,7 +2,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { MemorySessionStore } from '../../src/adapters/memory-store.js';
 import { noopLogger } from '../../src/adapters/noop-logger.js';
-import { RefreshRejected, SessionStoreTimeout } from '../../src/core/errors.js';
+import { RefreshFailed, RefreshRejected, SessionStoreTimeout } from '../../src/core/errors.js';
 import { failingStore, type StoreMethod } from '../support/store-failure.js';
 import { shouldRefresh } from '../../src/core/refresh-policy.js';
 import { resolveSession, type ResolveDeps } from '../../src/core/single-flight.js';
@@ -1003,5 +1003,59 @@ describe('a refresh token that no record holds (SMA-681)', () => {
 
     expect((await resolveSession({ ...deps(store, () => Promise.resolve({ accessToken: 'AT2', refreshToken: 'RT2', expiresIn: 300 })), revoke }, 's'))?.refreshToken).toBe('RT2');
     expect(revoked).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// SMA-692 D10. A transient refresh failure used to log only `reason: 'transient'`. After a scope
+// change, an `invalid_scope` then looked the same as a network error. The log line now carries
+// the OAuth code, from a closed set. It never carries the error object, its message or a URL.
+// ---------------------------------------------------------------------------------------------
+describe('the OAuth code in the refresh log (SMA-692 D10)', () => {
+  it('logs the OAuth code of a transient failure', async () => {
+    const store = new MemorySessionStore();
+    await store.set('s', makeRecord({ accessExpiresAt: Date.now() - 1 }), 60_000, null);
+    const { logger, events } = recordingLogger();
+    const failed = () => Promise.reject(new RefreshFailed('invalid_scope', 'ResponseBodyError'));
+
+    await expect(resolveSession({ ...deps(store, failed), logger }, 's')).rejects.toBeInstanceOf(RefreshFailed);
+    expect(events).toContainEqual(['session.refresh_failed', { sid: sidTag('s'), reason: 'transient', degraded: false, oauthError: 'invalid_scope' }]);
+  });
+
+  it('logs the code on the degraded path too, and keeps the session', async () => {
+    const store = new MemorySessionStore();
+    await store.set('s', makeRecord({ accessExpiresAt: Date.now() + 30_000 }), 60_000, null);
+    const { logger, events } = recordingLogger();
+    const failed = () => Promise.reject(new RefreshFailed('invalid_client', 'ResponseBodyError'));
+
+    const out = await resolveSession({ ...deps(store, failed), logger, skewMs: 60_000 }, 's');
+
+    expect(out?.refreshState).toBe('failed');
+    expect(events).toContainEqual(['session.refresh_failed', { sid: sidTag('s'), reason: 'transient', degraded: true, oauthError: 'invalid_client' }]);
+    expect(await store.get('s')).not.toBeNull();
+  });
+
+  // SMA-657 shape: `refresh` runs in the copy that built the runtime, resolveSession in another.
+  it('logs the code of a RefreshFailed from a SECOND module copy', async () => {
+    vi.resetModules();
+    const foreign = await import('../../src/core/errors.js');
+    expect(foreign.RefreshFailed).not.toBe(RefreshFailed);
+    const store = new MemorySessionStore();
+    await store.set('s', makeRecord({ accessExpiresAt: Date.now() - 1 }), 60_000, null);
+    const { logger, events } = recordingLogger();
+    const failed = () => Promise.reject(new foreign.RefreshFailed('invalid_scope', 'ResponseBodyError'));
+
+    await expect(resolveSession({ ...deps(store, failed), logger }, 's')).rejects.toBeInstanceOf(foreign.RefreshFailed);
+    expect(events).toContainEqual(['session.refresh_failed', { sid: sidTag('s'), reason: 'transient', degraded: false, oauthError: 'invalid_scope' }]);
+  });
+
+  it('logs other, never the raw string, for an error that only claims the code', async () => {
+    const store = new MemorySessionStore();
+    await store.set('s', makeRecord({ accessExpiresAt: Date.now() - 1 }), 60_000, null);
+    const { logger, events } = recordingLogger();
+    const forged = Object.assign(new Error('x'), { code: 'oidc_refresh_failed', oauthError: 'https://idp.example.com/secret' });
+
+    await expect(resolveSession({ ...deps(store, () => Promise.reject(forged)), logger }, 's')).rejects.toBe(forged);
+    expect(events).toContainEqual(['session.refresh_failed', { sid: sidTag('s'), reason: 'transient', degraded: false, oauthError: 'other' }]);
   });
 });
