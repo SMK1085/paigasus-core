@@ -5,15 +5,18 @@
 // runs. The PRN comes from the URL, so an invalid-input answer (IAM's prn-mismatch) or a not-found
 // answer means the URL names no such node: not-found.
 //
-// Then, in parallel: the service-accounts section, and the Projects list — ListTeams (limit 51),
-// then ListProjects (limit 51) for each SHOWN team, at most 8 calls in flight. Any Projects failure
-// is the Projects section's error; the page stays 200.
+// Then, in parallel: the service-accounts section, the Projects list — ListTeams (limit 51),
+// then ListProjects (limit 51) for each SHOWN team, at most 8 calls in flight — and, since SMA-676,
+// the "Model access for people" section (people-model-access/load.ts). Any Projects or people
+// failure is that section's own error; the page stays 200.
 import 'server-only';
 import type { PaigasusError } from '@paigasus/sdk/errors/types';
 import { callIam, isUuid, organizationPrn, parseTenancyPrn, type IamClients, type IamResult } from '@paigasus/console-core';
 import { mapWithLimit } from '../../../../lib/concurrency';
 import { REQUEST_LIMIT, pageOf } from '../../../../lib/paging';
-import { lifecycleOf, type NodeLifecycle } from '../../node-status';
+import { lifecycleOf, lifecycleView, type NodeLifecycle } from '../../node-status';
+import { loadPeopleModelAccess, type PeopleModelAccessDeps } from '../../people-model-access/load';
+import type { PeopleModelAccessView } from '../../people-model-access/view';
 import { loadServiceAccountSection, type SectionDeps } from '../../service-accounts/load';
 import type { SectionView } from '../../service-accounts/view';
 
@@ -39,6 +42,7 @@ export type OrganizationSettings =
       readonly organization: { readonly name: string; readonly slug: string; readonly lifecycle: NodeLifecycle };
       readonly section: SectionView;
       readonly projects: ProjectsView;
+      readonly people: PeopleModelAccessView;
     };
 
 /** The page head both the org page and the playground page load first (SMA-635 spec § 6.1). */
@@ -47,7 +51,7 @@ export type OrganizationHead =
   | { readonly kind: 'error'; readonly error: PaigasusError }
   | { readonly kind: 'ok'; readonly orgId: string; readonly orgPrn: string; readonly organization: { readonly name: string; readonly slug: string; readonly lifecycle: NodeLifecycle } };
 
-export type OrganizationSettingsDeps = SectionDeps & { readonly tenancy: Pick<Tenancy, 'getOrganization' | 'listTeams' | 'listProjects'> };
+export type OrganizationSettingsDeps = SectionDeps & PeopleModelAccessDeps & { readonly tenancy: Pick<Tenancy, 'getOrganization' | 'listTeams' | 'listProjects'> };
 
 function idOf(prn: string, kind: 'team' | 'project'): string | null {
   const ref = parseTenancyPrn(prn);
@@ -101,9 +105,12 @@ export async function loadOrganizationHead(tenancy: Pick<Tenancy, 'getOrganizati
 export async function loadOrganizationSettings(deps: OrganizationSettingsDeps, params: SettingsParams & { readonly org: string }): Promise<OrganizationSettings> {
   const head = await loadOrganizationHead(deps.tenancy, params.org);
   if (head.kind !== 'ok') return head;
-  const [section, projects] = await Promise.all([
+  // SMA-676: the people section runs in parallel with the other two. D14: controls need the org and
+  // its ancestors active, which is the lifecycle view's 'active'.
+  const [section, projects, people] = await Promise.all([
     loadServiceAccountSection(deps, { ownerPrn: head.orgPrn, lifecycle: head.organization.lifecycle, saOffset: params.saOffset, keyOffset: params.keyOffset, sa: params.sa }),
     loadProjects(deps.tenancy, head.orgPrn),
+    loadPeopleModelAccess(deps, { orgPrn: head.orgPrn, orgActive: lifecycleView(head.organization.lifecycle) === 'active' }),
   ]);
-  return { kind: 'ok', orgId: head.orgId, orgPrn: head.orgPrn, organization: head.organization, section, projects };
+  return { kind: 'ok', orgId: head.orgId, orgPrn: head.orgPrn, organization: head.organization, section, projects, people };
 }
