@@ -3237,6 +3237,7 @@ dependencies = [
  "tower",
  "tower-http 0.7.1",
  "tracing",
+ "tracing-subscriber",
  "url",
  "uuid",
 ]
@@ -3317,7 +3318,7 @@ dependencies = [
 
 [[package]]
 name = "paigasus-proto"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "paigasus-proto-derive",
  "prost",
@@ -3329,7 +3330,7 @@ dependencies = [
 
 [[package]]
 name = "paigasus-proto-derive"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "proc-macro2",
  "quote",

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0](https://github.com/SMK1085/paigasus-core/compare/paigasus-proto-v0.2.0...paigasus-proto-v0.3.0) - 2026-09-25
+
+### Added
+
+- *(rs)* interactive-user auth on the gateway chat surface, and the console playground (SMA-635)
+
 ## [0.2.0](https://github.com/SMK1085/paigasus-core/compare/paigasus-proto-v0.1.1...paigasus-proto-v0.2.0) - 2026-09-24
 
 ### Added
