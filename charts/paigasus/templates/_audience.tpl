@@ -54,14 +54,18 @@ oidc.clientId to remove this warning.
 {{- end -}}
 
 {{/*
-paigasus.consoleScopes (SMA-692 D6, D9): oidc.scopes as a string, or "" when it is empty or
-absent. dig reads an absent key as "" (helm upgrade --reuse-values from a release made before
-the key existed). The render fails when the value is set and its whitespace-separated tokens do
-not include openid: without openid the first console login fails, and @paigasus/auth refuses the
-value at pod start with only "PAIGASUS_OIDC_SCOPES: custom". openidx does not count.
-paigasus.validate in _helpers.tpl holds the other refusals. This one is here so that _helpers.tpl
-and its two whole-file fixture copies do not change (spec D8). console-env-configmap.yaml calls
-it, and that file renders on every install, with no condition.
+paigasus.consoleScopes returns oidc.scopes as a string (SMA-692 D6, D9). It returns "" when the
+value is empty or absent. dig reads an absent key as "". This can occur under
+helm upgrade --reuse-values, from a release made before the key existed.
+
+paigasus.consoleScopes splits the value into whitespace-separated tokens. The render fails when
+the value is set and these tokens do not include openid. Without openid, the first console login
+fails. @paigasus/auth also refuses the value at pod start. Its only error text is
+"PAIGASUS_OIDC_SCOPES: custom". openidx does not count.
+
+paigasus.validate in _helpers.tpl holds the other refusals. This helper stays separate
+(spec D8). Because of this, _helpers.tpl and its two whole-file fixture copies do not change.
+console-env-configmap.yaml calls it. That file renders on every install, with no condition.
 */}}
 {{- define "paigasus.consoleScopes" -}}
 {{- $scopes := dig "scopes" "" .Values.oidc -}}
@@ -75,14 +79,17 @@ it, and that file renders on every install, with no condition.
 {{- end -}}
 
 {{/*
-paigasus.consoleAuthorizationAudience (SMA-692 D6, D7): oidc.authorizationAudience as a string,
-or "" when it is empty or absent. The render fails when the value is set and:
-  1. oidc.audience is empty. IAM then accepts only oidc.clientId, and Auth0 refuses a client id
-     as an API audience. This also closes authorizationAudience == clientId.
-  2. it does not equal oidc.audience. The console would then ask for a token that IAM refuses.
-The compare is exact, as strings (toString on both sides, so a number from --set compares by its
-digits). A space-separated list of audiences is out of scope. The placement follows
-paigasus.consoleScopes above.
+paigasus.consoleAuthorizationAudience returns oidc.authorizationAudience as a string
+(SMA-692 D6, D7). It returns "" when the value is empty or absent.
+
+The render fails when the value is set and one of two conditions is true:
+  1. oidc.audience is empty. IAM then accepts only oidc.clientId. Auth0 refuses a client id as
+     an API audience. This also closes authorizationAudience == clientId.
+  2. it does not equal oidc.audience. The console then asks for a token that IAM refuses.
+
+The compare is exact, as strings. Both sides pass through toString first. This means a number
+set with --set compares by its digits. A space-separated list of audiences is out of scope. The
+placement follows paigasus.consoleScopes above.
 */}}
 {{- define "paigasus.consoleAuthorizationAudience" -}}
 {{- $want := dig "authorizationAudience" "" .Values.oidc -}}

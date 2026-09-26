@@ -19,13 +19,14 @@ Operator detail is in `docs/ops/RUNBOOK-chart.md`; developer detail in `charts/p
   lines 1892-1897). Change both pins in one commit, or `repo:affected-smoke` goes red.
 - **A new chart script under `tests/` runs in CI through the `tests/*.sh` glob.** Raise the floor
   with it, and fix the counts in `ci/helm-render/README.md` and `helm_render.py`.
-- **All six negative-control fixtures are whole-file copies** of a live template, under
-  `ci/helm-render/fixtures/`: `templates/_helpers.tpl` (`slug-mirror`, `zones-omits-enabled`),
-  `templates/console-deployment.yaml` (`security-context`, `template-only-diff`),
-  `templates/console-env-configmap.yaml` (`leaked-value`) and `templates/ingress.yaml`
-  (`literal-ingress`). An edit to one of these live files must re-sync its copies in the SAME
-  commit, keeping each mutation. A stale `_helpers.tpl` fixture has none of the new helpers, so its
-  renders fail and the control reports INCONCLUSIVE.
+- **All six negative-control fixtures are whole-file copies of a live template**, under
+  `ci/helm-render/fixtures/`. `templates/_helpers.tpl` holds two: `slug-mirror` and
+  `zones-omits-enabled`. `templates/console-deployment.yaml` holds two: `security-context` and
+  `template-only-diff`. `templates/console-env-configmap.yaml` holds one: `leaked-value`.
+  `templates/ingress.yaml` holds one: `literal-ingress`. An edit to one of these live files must
+  re-sync its copies in the same commit. Keep each mutation when you re-sync. A stale
+  `_helpers.tpl` fixture has none of the new helpers. Its renders then fail. The control reports
+  INCONCLUSIVE.
 - **A YAML comment in a template renders into the manifest,** so it is part of the golden files.
   Put a comment for a conditional block INSIDE the `{{- if }}` block, or the default render and the
   goldens change.
