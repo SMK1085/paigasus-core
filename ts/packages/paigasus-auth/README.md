@@ -193,6 +193,22 @@ dead immediately: the store lookup that `getSession`/`requireSession` performs o
 fails, regardless of whether the browser that presents the stolen cookie ever reaches the IdP's
 own end-session endpoint.
 
+### Logout sends `id_token_hint`
+
+The session record stores the raw ID token (`idToken`, SMA-681). Logout sends it to the IdP's
+end-session endpoint as `id_token_hint`. OpenID Connect RP-Initiated Logout 1.0 requires the IdP
+to ask "Do you want to log out?" when the hint is missing. Keycloak 26.4 asks when an SSO session is
+live. Logout sends the token also after its `exp`. Keycloak 26.4 accepted a hint 15 s past its
+`exp` (SMA-681 spec § 3, row M-d).
+
+Logout sends the hint only when the token's `aud` contains the runtime's own client id. All zones
+share one session cookie and one store. Keycloak rejects a hint whose `aud` is another client
+(SMA-681 spec § 3, row M-g). With no session cookie, no record, a failed store read, or another
+`aud`, logout sends no hint. It still redirects to the IdP.
+
+The hint puts the ID token into the redirect URL, so the browser history and the IdP's access log
+hold it. The record changed to `version: 2` for this, so the deploy logs out every active user.
+
 ## Middleware does no authorization (AC 4)
 
 `createAuthMiddleware` (`@paigasus/auth/middleware`) is its own package entry point, structurally

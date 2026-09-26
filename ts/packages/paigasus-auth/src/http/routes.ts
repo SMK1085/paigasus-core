@@ -320,12 +320,13 @@ async function handleCallback(runtime: AuthRuntime, req: Request, url: URL): Pro
   const sid = newSessionId();
   const now = Date.now();
   const record: SessionRecord = {
-    version: 1,
+    version: 2,
     rev: 0,
     accessToken: tokens.accessToken,
     ...(tokens.refreshToken !== undefined ? { refreshToken: tokens.refreshToken } : {}),
     accessExpiresAt: now + tokens.expiresIn * 1000,
     absoluteExpiresAt: now + runtime.absoluteTtlMs,
+    idToken: tokens.idToken,
     idTokenClaims: tokens.idTokenClaims,
     principal,
   };
@@ -366,37 +367,70 @@ async function bestEffortRevoke(runtime: AuthRuntime, refreshToken: string): Pro
   }
 }
 
+/**
+ * SMA-681. True when the stored ID token's payload `aud` (a string or an array) contains
+ * `clientId`. Any decode failure gives false, so logout sends no hint. There is no signature
+ * check: the result only selects the logout request, and our own login stored the token.
+ */
+function hintAudienceMatches(idToken: string, clientId: string): boolean {
+  const segments = idToken.split('.');
+  if (segments.length !== 3 || segments[1] === undefined) return false;
+  let payload: unknown;
+  try {
+    payload = JSON.parse(Buffer.from(segments[1], 'base64url').toString('utf8'));
+  } catch {
+    return false;
+  }
+  if (typeof payload !== 'object' || payload === null) return false;
+  const aud: unknown = (payload as { aud?: unknown }).aud;
+  return aud === clientId || (Array.isArray(aud) && aud.includes(clientId));
+}
+
 // POST /auth/logout — AC 3: "a stolen cookie is dead immediately after". Design doc § 9.5.
 //
 // ORDER IS THE ACCEPTANCE CRITERION. Step 1 (delete) happens before ANY network call, so a slow
 // or unreachable identity provider can never leave a live session behind: whatever happens to
 // steps 3-4 afterwards, the record this cookie pointed at is already gone. The `store.get` read
 // below is a local store lookup, not a call to the identity provider — the ordering this protects
-// is against the IdP specifically, and it is what step 1's own record-lookup needs to find a
-// refresh token worth revoking in step 3.
+// is against the IdP specifically, and step 1's own record-lookup finds the refresh token for
+// step 3 and the ID token for step 4.
 //
-// `id_token_hint` IS DELIBERATELY OMITTED, and the redirect is NOT identity-free without it.
-// `openid-client@6.8.8` appends `client_id` to the end-session parameters UNCONDITIONALLY
-// whenever the caller does not supply one (`build/index.js:1129-1141` — `if
-// (!parameters.has('client_id')) parameters.set('client_id', c.client_id);`), so the redirect
-// built below already carries `client_id` today, asserted in
-// tests/adapters/oidc.test.ts's "buildEndSessionUrl carries client_id ..." test. `client_id` plus
-// a registered `post_logout_redirect_uri` is enough for both providers this design names —
-// Keycloak (this package's own e2e fixture) and Entra ID — to skip the confirmation interstitial
-// and honour the redirect, with no `id_token_hint` needed.
+// `id_token_hint` IS SENT WHEN THE RECORD HOLDS AN ID TOKEN WHOSE `aud` CONTAINS THIS ZONE'S
+// CLIENT ID (SMA-681). This reverses SMA-506.
+// SMA-506 (design doc § 9.5) did not store the raw ID token. It argued that `client_id` plus a
+// registered `post_logout_redirect_uri` is sufficient for Keycloak, and that the raw token is a
+// third bearer credential in Redis. The SMA-506 measurement saw no confirmation page only because
+// its realm grants `offline_access` as a default client scope: no online SSO session existed, so
+// Keycloak had no session to ask about (SMA-682).
 //
-// The reason `id_token_hint` itself is never sent: it needs the raw, signed ID TOKEN JWT, not
-// decoded claims. `SessionRecord` (core/session.ts) stores only the DECODED `idTokenClaims`, and
-// adapters/oidc.ts's `OidcTokens` (produced by `authorizationCodeGrant`) never surfaces the raw
-// token string either. Storing it would add a THIRD bearer credential to `SessionRecord` beside
-// the access and refresh tokens, widening the blast radius of a Redis compromise, for no benefit
-// to either provider this design targets — a deliberate trade-off, not an oversight (see the task
-// 9 report and design doc § 9.5).
+// OpenID Connect RP-Initiated Logout 1.0, section 2: the OP MUST ask the End-User whether to log
+// out if an `id_token_hint` was not provided. Measured on Keycloak 26.4.7 (SMA-681 spec § 3): with a
+// live SSO session and no hint, it answers 200 "Do you want to log out?" (row M-b). With the hint it
+// redirects to `post_logout_redirect_uri` and ends the session (row M-c), also with a hint 15 s past
+// its `exp` (row M-d) and with a refreshed hint (row M-e). With the shipped `offline_access` scope
+// it also redirects at once (§ 3.1, rows M-i1, M-i2, M-i4). So this file sends the stored token
+// unchanged and does no `exp` check (spec D4).
 //
-// NAMED RESIDUAL: this is insufficient for an identity provider that MANDATES `id_token_hint` and
-// does not accept `client_id` as a substitute — Okta documents it as required. Logging out against
-// such a provider still succeeds server-side (step 1 already deleted the record), but the
-// end-session redirect will not complete: a UX failure there, not a security one.
+// `openid-client@6.8.8` still appends `client_id` whenever the caller supplies none
+// (`build/index.js:1129-1141`), asserted in tests/adapters/oidc.test.ts. Keycloak rejects a hint
+// whose `aud` is a different client with 400 (§ 3 row M-g). Two zones share one session cookie and
+// one store (design doc § 6.7), so a zone with another client id can read a record that another zone
+// wrote. So the hint is sent only when the token's `aud` contains this runtime's own client id (see
+// `hintAudienceMatches`). Otherwise the request is the pre-SMA-681 request, with no hint.
+//
+// RESIDUAL RISK (spec § 5). The ID token is now in the redirect URL, so it goes into the browser
+// history, the IdP's access log and the log of any TLS-terminating proxy. It carries the user's
+// email, name and username in base64url, which is not encryption. A person who has it can end the
+// user's Keycloak SSO session with no cookies (§ 3 row M-h). It gives no access to an API: its `aud`
+// is the console client. Logout by POST would remove this exposure, but it needs an auto-submitting
+// form and a CSP `form-action` change, and it is out of scope. An IdP with large ID tokens can
+// exceed a request-line limit; that is not measured.
+//
+// NAMED RESIDUAL: an identity provider that REQUIRES `id_token_hint` still fails when there is no
+// token to send: no session cookie, no record (absolute expiry, or the `version: 2` deploy removed
+// it), a failed store read, or a stored token whose `aud` does not contain this zone's client id.
+// The server-side logout still succeeds then (step 1 already ran); only the end-session redirect
+// does not complete, or (in the `aud` case) completes with Keycloak's confirmation page instead.
 //
 // A STORE FAILURE (SMA-653). A failed read does not stop the delete (D5). A failed delete answers
 // 503 with a POST retry form and keeps the session cookie (D6): the user must see that logout did
@@ -407,15 +441,21 @@ async function handleLogout(runtime: AuthRuntime, req: Request): Promise<Respons
 
   // STEP 1: delete first, before any network call.
   //
-  // The read only finds a refresh token worth revoking in step 3. Its failure must NEVER cost the
-  // delete (SMA-653 D5): a failed read leaves `refreshToken` undefined, and the delete still runs.
+  // The read finds the refresh token for step 3 and the ID token for step 4.
+  // Its failure must NEVER cost the delete (SMA-653 D5): a failed read leaves `refreshToken`
+  // undefined, and the delete still runs.
   // That rescues a TRANSIENT failure. During a real wedge the read opens the SMA-651 circuit, the
   // circuit then refuses the delete at once, and the delete branch below answers 503 — the usual
   // outcome of a wedge (spec § 4 row 8).
   let refreshToken: string | undefined;
+  // SMA-681: the same read gives the hint for step 4. A failed read, no record, or a token whose
+  // `aud` does not contain this runtime's client id gives none.
+  let idToken: string | undefined;
   if (sid !== undefined) {
     const rec = await storeStep(runtime, 'logout_get', sid, () => runtime.store.get(sid));
     refreshToken = rec === STORE_DOWN ? undefined : rec?.refreshToken;
+    const storedIdToken = rec === STORE_DOWN ? undefined : rec?.idToken;
+    idToken = storedIdToken !== undefined && hintAudienceMatches(storedIdToken, runtime.clientId) ? storedIdToken : undefined;
 
     const deleted = await storeStep(runtime, 'logout_delete', sid, () => runtime.store.delete(sid));
     if (deleted === STORE_DOWN) {
@@ -455,11 +495,22 @@ async function handleLogout(runtime: AuthRuntime, req: Request): Promise<Respons
   // degrades to the zone root rather than surfacing a 500 for what is inherently a courtesy step.
   // The degradation is recorded below via `endSessionRedirected: false` — an operator otherwise
   // gets no signal that this happened, unlike step 3's revocation outcome.
+  // The hint is added only when step 1's read found a token (SMA-681).
+  //
+  // `idTokenHintSent` (SMA-681) is true only when the Location is an end-session URL that carries
+  // the hint. It is NOT named `idTokenHint`, so that no reader and no redaction rule takes it for the
+  // token. It never contains the token.
   const state = newTransactionId();
   let endSessionRedirected = true;
+  let idTokenHintSent = false;
   try {
-    const endSessionUrl = await runtime.oidc.buildEndSessionUrl({ postLogoutRedirectUri: runtime.postLogoutRedirectUri, state });
+    const endSessionUrl = await runtime.oidc.buildEndSessionUrl({
+      postLogoutRedirectUri: runtime.postLogoutRedirectUri,
+      state,
+      ...(idToken !== undefined ? { idTokenHint: idToken } : {}),
+    });
     headers.set('Location', endSessionUrl);
+    idTokenHintSent = idToken !== undefined;
   } catch {
     // Never rethrown and never logged as a raw caught error object — same rule as step 3's catch.
     endSessionRedirected = false;
@@ -471,6 +522,7 @@ async function handleLogout(runtime: AuthRuntime, req: Request): Promise<Respons
     ...(sid !== undefined ? { sid: sidTag(sid) } : {}),
     revoked,
     endSessionRedirected,
+    idTokenHintSent,
   });
 
   return new Response(null, { status: 302, headers });

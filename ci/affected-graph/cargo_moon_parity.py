@@ -451,7 +451,8 @@ ALLOW_UNLOCKED_CARGO_SCRIPT = {
         "MEASURED unreachable from the Moon task (SMA-599 §2.4): repo:version-lockstep runs "
         "run.sh --self-test, --negative-control and bare, while this line is inside "
         "run_write(), reached only by `--write`. `--locked` would defeat the function, whose "
-        "PURPOSE is to regenerate the lock after writing the six non-Cargo version sites. The "
+        "PURPOSE is to regenerate the lock after writing the nine version sites it owns "
+        "(SMA-685). The "
         "scan is path-insensitive and cannot see this (L1), so the waiver stands in for it; "
         "check_version_lockstep_no_write below is what keeps the premise honest."
     ),

@@ -49,6 +49,7 @@ beforeEach(async () => {
     publicOrigin: PUBLIC_ORIGIN,
     redirectUri: `${PUBLIC_ORIGIN}/iam/auth/callback`,
     postLogoutRedirectUri: `${PUBLIC_ORIGIN}/iam/`,
+    clientId: 'paigasus-console',
     cookieDomainless: true,
     skewMs: 30_000,
     lockTtlMs: 10_000,

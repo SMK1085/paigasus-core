@@ -20,6 +20,7 @@ export type AuthEventName =
   | 'session.refresh_timeout'
   | 'session.resolve_failed'
   | 'session.refresh.persist_failed'
+  | 'session.refresh.id_token_mismatch'
   | 'session.deleted'
   | 'logout.completed'
   | 'store.unavailable'

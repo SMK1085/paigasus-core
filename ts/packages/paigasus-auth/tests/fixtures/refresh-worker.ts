@@ -90,7 +90,7 @@ async function main(): Promise<void> {
     return { accessToken: 'AT-REFRESHED', refreshToken: 'RT-REFRESHED', expiresIn: 300 };
   };
 
-  const result = await resolveSession({ store, refresh, logger: noopLogger, skewMs: 30_000, lockTtlMs: 10_000, lockWaitMs: 5_000, ttlMs: 60_000 }, sid);
+  const result = await resolveSession({ store, refresh, revoke: () => Promise.resolve(), logger: noopLogger, skewMs: 30_000, lockTtlMs: 10_000, lockWaitMs: 5_000, ttlMs: 60_000 }, sid);
 
   // The parent reads this line and JSON.parses it — nothing else may write to stdout. `refreshed`
   // reports whether THIS process's own refresh function ran, which is what proves the loser

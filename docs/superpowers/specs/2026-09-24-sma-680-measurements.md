@@ -230,6 +230,7 @@ the committed glue (built against wasm-bindgen 0.2.127) no longer matches a fres
 `true`. This conflicts with the comment at `rs/release-plz.toml:25-28`, which states that
 `version_group` "DOES apply to crates whose Cargo manifest says `publish = false` (measured)."
 Cause: OPEN.
+SMA-685 resolved this cause: see `2026-09-25-sma-685-measurements.md`.
 
 ## M2 attempt 1 — VOID (MEASURED)
 
@@ -245,6 +246,7 @@ at 0.1.0 after both step 4 and step 5. **Verdict: VOID** — the controller-amen
 steps 6-7 did not run. Controller ruling: the void is accepted; M2 is redone in attempt 2
 below with a manual bump. The divergence from M1 attempt 2 (identical maneuver, different
 outcome at a later base commit) is diagnosed in attempt 2's Part A.
+SMA-685 resolved this cause: see `2026-09-25-sma-685-measurements.md`.
 
 This run was a proto-only release proposal (proto 0.2.0 -> 0.3.0) under `dependencies_update =
 false` at the branch head. This section records the version changes, but no lockdiff was taken,
