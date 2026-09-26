@@ -133,6 +133,32 @@ dedicated API audience is the only protection. This works only when the IdP can 
 audience into the access token than into the ID token. Dex cannot: both tokens have the same
 `aud`, so IAM accepts a Dex ID token as a bearer token. See "Dex" below.
 
+**IAM refuses a sender-constrained token (SMA-690).** IAM refuses an access token that has one
+of these markers:
+
+- A `cnf` claim with any value except `null`. A DPoP-bound token (RFC 9449) and an mTLS-bound
+  token (RFC 8705) have this claim.
+- A `typ` claim of `DPoP`, in any letter case. Keycloak sets this value on a DPoP-bound access
+  token.
+
+IAM cannot check the binding of such a token. So it does not accept the token as a bearer token.
+
+Keycloak binds an access token when the client sends a `DPoP` header to the token endpoint. The
+client needs no DPoP setting for this. So a client that calls Paigasus must not send a `DPoP`
+header to the token endpoint. A bound login stays bound when the client refreshes the token. A
+client that got a bound token must log in again without a `DPoP` header.
+
+Do not set the Keycloak client attribute `dpop.bound.access.tokens` on a client that calls
+Paigasus. A Keycloak client policy can also require DPoP. Do not use such a policy for this
+client (not measured).
+
+The console does not send a `DPoP` header. The SDKs do not get tokens. They send the token that
+you give them. If you use an SDK, do not turn on DPoP in your own OIDC library.
+
+The IAM log shows the refusal at `info`: "it is bound to a key, and IAM cannot check the
+binding". The line gives the issuer and the marker `cnf` or `typ DPoP`. The same rate limit
+applies as for the refusal of a token that is not an access token.
+
 The console requests the scopes `openid profile email offline_access`.
 
 **The recommended audience setup (SMA-691).** An OIDC ID token has the client id as its `aud`.
