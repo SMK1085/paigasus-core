@@ -266,9 +266,10 @@ where
     /// `ProvisioningFailed(MissingEmail)`); `display_name` is the `name` claim, falling back
     /// to the email's local part; `locale`/`zoneinfo` pass through untouched. One call to
     /// `ExternalIdentityRepository::provision` spans principal + user + external_identity in
-    /// a single transaction (D9). A lost race (`Conflict(ExternalIdentityExists)`) re-reads
-    /// the winner's row and proceeds with it — no orphan principal/user, no auto-linking by
-    /// email (D5): an email conflict fails provisioning instead.
+    /// a single transaction (D9). A lost race re-reads the winner's row and proceeds with it — no
+    /// orphan principal/user. The race has two forms: `Conflict(ExternalIdentityExists)`, and
+    /// `Conflict(EmailTaken)` with the identity present at the re-read (SMA-698 D1). No
+    /// auto-linking by email (D5): an email conflict with the identity absent fails provisioning.
     async fn jit_provision(&self, claims: &ValidatedClaims) -> Result<PrincipalId, AuthnError> {
         // The `Email::parse` error is dropped here on purpose: `DomainError::InvalidEmail` holds
         // the raw claim, and the helper must never see it (SMA-698 spec 4.3).
@@ -302,7 +303,14 @@ where
                 .map_err(backend)?
                 .map(|winner| winner.principal_id)
                 .ok_or_else(|| AuthnError::Backend(Box::<dyn std::error::Error + Send + Sync>::from("external identity vanished after a provisioning conflict"))),
-            Err(RepositoryError::Conflict(ConflictKind::EmailTaken)) => Err(self.provisioning_failed(&claims.issuer, JitFailure::EmailConflict)),
+            // SMA-698 D1 (spec 4.6). In Postgres, `provision` inserts the `user` row before the
+            // `external_identity` row, and `user.email` is unique. The loser of a race between two
+            // first logins of ONE identity therefore fails on the email first. Its insert waits on
+            // the unique index until the winner commits, so this re-read sees the winner's row.
+            Err(RepositoryError::Conflict(ConflictKind::EmailTaken)) => match self.identities.find_by_issuer_subject(&claims.issuer, &claims.subject).await.map_err(backend)? {
+                Some(winner) => Ok(winner.principal_id),
+                None => Err(self.provisioning_failed(&claims.issuer, JitFailure::EmailConflict)),
+            },
             Err(other) => Err(backend(other)),
         }
     }
@@ -472,6 +480,28 @@ mod tests {
 
         async fn provision(&self, principal: &Principal, user: &User, identity: &ExternalIdentity) -> Result<(), RepositoryError> {
             self.inner.provision(principal, user, identity).await
+        }
+    }
+
+    /// The Postgres form of a lost race (SMA-698 spec 4.6). The winner commits all three rows;
+    /// the loser's `user` insert fails on the email first, so its `provision` returns
+    /// `Conflict(EmailTaken)`. `provision` inserts the winner's identity into the shared store
+    /// and then returns that error, so the identity is present at the re-read.
+    struct EmailTakenRaceIdentities {
+        inner: InMemoryIdentities,
+        winner: ExternalIdentity,
+    }
+
+    #[async_trait]
+    impl ExternalIdentityRepository for EmailTakenRaceIdentities {
+        async fn find_by_issuer_subject(&self, issuer: &Issuer, subject: &str) -> Result<Option<ExternalIdentity>, RepositoryError> {
+            self.inner.find_by_issuer_subject(issuer, subject).await
+        }
+
+        async fn provision(&self, _principal: &Principal, _user: &User, _identity: &ExternalIdentity) -> Result<(), RepositoryError> {
+            let key = (self.winner.issuer.as_str().to_string(), self.winner.subject.clone());
+            self.inner.0.identities.lock().unwrap().insert(key, self.winner.clone());
+            Err(RepositoryError::Conflict(ConflictKind::EmailTaken))
         }
     }
 
@@ -1708,5 +1738,47 @@ mod tests {
         assert_eq!(lines.len(), 1, "the window is over, so the line is admitted:\n{text}");
         assert!(has_field(lines[0], "suppressed", "1"), "the line reports the one suppressed failure: {}", lines[0]);
         assert_no_secrets(&text, &["sub-u15"]);
+    }
+
+    /// U6 (spec 4.6, D1): `Conflict(EmailTaken)` with the identity present at the re-read is a
+    /// lost race, not a conflict. The loser resolves to the winner, with no line and no count.
+    #[tokio::test]
+    async fn jit_email_taken_with_the_identity_present_resolves_to_the_winner() {
+        let (logs, _logs_guard) = capture_logs();
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _metrics_guard = metrics::set_default_local_recorder(&recorder);
+        let store = AuthnStore::default();
+        let issuer = Issuer::parse(ISSUER).unwrap();
+        let winner_id = principal_id(43);
+        seed_user(&store, 43, "racer.u6@example.com");
+        let winner = ExternalIdentity {
+            id: Uuid::from_u128(4343),
+            principal_id: winner_id.clone(),
+            issuer: issuer.clone(),
+            subject: "sub-u6-race".into(),
+            created_at: epoch(),
+            updated_at: epoch(),
+        };
+        let uc = AuthenticateToken::new(
+            FakeAuthenticator::ok(claims(ISSUER, "sub-u6-race", Some("racer.u6@example.com"), None)),
+            EmailTakenRaceIdentities {
+                inner: InMemoryIdentities(store.clone()),
+                winner,
+            },
+            InMemoryPrincipals(store.clone()),
+            InMemoryMemberships::default(),
+            Arc::new(InMemoryRoleGrants::default()),
+            SeqIds::default(),
+            FixedClock::default(),
+            JitPolicy::from_issuers(&[(issuer, true)]),
+        );
+
+        let resolved = uc.resolve("token", Provisioning::Enabled).await.unwrap();
+
+        assert_eq!(resolved.principal_id, winner_id, "the loser resolves to the winner");
+        let text = logs.text();
+        assert!(jit_lines(&text).is_empty(), "a lost race writes no helper line:\n{text}");
+        assert_eq!(jit_series(&snapshotter.snapshot().into_vec()), 0, "a lost race is not counted");
     }
 }
