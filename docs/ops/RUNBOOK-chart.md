@@ -11,9 +11,9 @@ addenda. `charts/paigasus/README.md` holds the developer detail.
 | -- | -- | -- |
 | `zones.<id>.enabled` | — | Turns a zone on or off. It controls six projections together (§ 4) |
 | `zones.<id>.basePath` | — | The zone's path prefix. It must start with `/`, must not end with `/`, and must be unique |
-| `zones.<id>.console.image.{repository,tag}` | — | The console image. `tag` defaults to the chart `appVersion` |
+| `zones.<id>.console.image.{repository,tag}` | — | The console image. `tag` is pinned to the published console version (for example `0.1.0`). An empty `tag` falls back to the chart `appVersion` (`0.0.0`), which names no published image |
 | `zones.<id>.console.replicas` | — | Console replicas (default 2) |
-| `zones.iam.backend.image.{repository,tag}` | — | The IAM image |
+| `zones.iam.backend.image.{repository,tag}` | — | The IAM image. `tag` is pinned to the published IAM version, like the console tags |
 | `zones.iam.backend.apiKeysPepperSecret` | yes | A Secret with key `pepper`: base64 of at least 32 bytes |
 | `zones.iam.backend.apiKeysSecretVersion` | no | Change it after you rotate the pepper Secret, so the IAM pod restarts |
 | `zones.gateway.backend.url` | when `gateway` is on | The base URL of an existing gateway backend. The chart does not deploy it |

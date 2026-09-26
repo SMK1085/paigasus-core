@@ -5,12 +5,15 @@
 Asserts every version-carrying site in a lockstep family agrees with that family's
 source-of-truth Cargo crate (ADR-0011 S1; SMA-576).
 
-## Why 20 sites and not 6
+## Why 20 sites and not 9
 
-release-plz owns the Cargo `[package] version` of every group member and the
+release-plz owns the Cargo `[package] version` of each group's publishable crate and the
 `[workspace.dependencies]` version *requirements* — both measured against the pinned
-0.3.158, not assumed. But four classes of site are owned by nobody:
+0.3.158, not assumed. It does NOT write a Cargo `publish = false` crate's version, group or
+not (SMA-685). So five classes of site are owned by nobody:
 
+- the three `publish = false` binding crates' Cargo `[package] version`
+  (`rs/crates/bindings/*/Cargo.toml`)
 - `pyproject.toml` / `package.json` versions (maturin and napi read these, not Cargo)
 - the `paigasus-py-bindings==X.Y.Z` pin in the Python wrapper — `[tool.uv.sources]` is
   development-only metadata that uv strips from the built wheel
@@ -20,12 +23,15 @@ release-plz owns the Cargo `[package] version` of every group member and the
 
 `py/packages/paigasus-kernel/moon.yml` runs bare `uv sync` (not `--locked`), and
 `ci.yml`'s codegen-drift gate covers only the three `**/generated` proto dirs — so the
-last two drift **silently** today.
+`uv.lock` and napi-glue classes still drift **silently** today.
 
 ## Why `--check` verifies sites release-plz owns
 
 A gate that trusted release-plz to have done its half would not notice a `version_group`
-that silently stopped applying. Checking them costs nothing and closes that.
+that silently stopped applying. Checking them costs nothing and closes that. `--write`
+writes only the `publish = false` non-head `cargo-package` sites (SMA-685), so it cannot
+hide a proto `version_group` fault: `paigasus-proto-derive` is publishable and stays
+release-plz's.
 
 ## Groups are checked independently
 
@@ -37,9 +43,9 @@ passing state — the proto family activates in SMA-577.
 | Mode | Behaviour |
 |---|---|
 | `--check` (default) | Compare all 20 sites. Exit 1 on any drift. |
-| `--write` | Rewrite the six sites release-plz cannot reach and regenerate the three derived files (five `SITES` rows: 16-20). |
+| `--write` | Rewrite the nine sites release-plz cannot reach (the six non-Cargo sites and the three `publish = false` binding manifests) and regenerate the three derived files (five `SITES` rows: 16-20). |
 | `--negative-control` | Prove the checker can still report red. |
-| `--self-test` | Fixture tables for the verdict function. |
+| `--self-test` | Fixture tables for the verdict function, the lock readers and the cargo-package writer, plus `stamp_sites` on a staged copy of the real tree. |
 
 Exit codes: `0` pass, `1` the repo is wrong, `2` infrastructure failed.
 
@@ -72,11 +78,12 @@ wiring:
 
 ## The negative control
 
-`--negative-control` drives two drifts, each staged into its **own** pristine copy of every
+`--negative-control` drives three drifts, each staged into its **own** pristine copy of every
 version-carrying file (`stage_pristine_tree`, one call per drift): the original drift of
-`@paigasus/node-bindings`'s `packagejson` to `99.99.99`, and a second drift of a `cargo-lock`
+`@paigasus/node-bindings`'s `packagejson` to `99.99.99`; a second drift of a `cargo-lock`
 row (`paigasus-proto-derive`'s entry in `rs/Cargo.lock`, made non-uniform against
-`paigasus-proto`'s). Each asserts `run_check` exits 1 against its own tree. It drives the
+`paigasus-proto`'s); and a third drift of a `cargo-package` site, `paigasus-wasm`'s
+`Cargo.toml` (SMA-685). Each asserts `run_check` exits 1 against its own tree. It drives the
 **real** `run_check` rather than a reimplementation — a second, differently-wrong checker
 would prove nothing. Splitting the drifts across separate pristine trees, rather than
 reusing one scratch dir, is itself load-bearing: `run_check`'s loop keeps checking every site
@@ -89,32 +96,58 @@ Measured: with `site_verdict` neutered to always return `OK`, the real run still
 
 ## Limitations
 
-**L1 — The control drifts exactly two sites, of twenty.** `--negative-control` mutates site 13
-(`@paigasus/node-bindings`'s `packagejson`) and one `cargo-lock` row, and asserts `run_check`
-exits 1 against each drift's own pristine tree. That proves the **pipeline** — scratch
-staging, `run_check`'s loop, exit-code plumbing — can still report red for the `packagejson`
-and `cargo-lock` kinds specifically. It does NOT prove the remaining six `read_version`
-**kinds** (`cargo-package`, `cargo-wsdep`, `pyproject`, `pyproject-dep`, `uv-lock`,
-`napi-glue`) are themselves honest — including `uv-lock`, whose kind is exercised by
-`lock_reader_self_test` below but not by an end-to-end drift here. A reader that silently
-always printed the expected value, regardless of what its file actually contained, would pass
-both the real check (vacuously) and the negative control for any of those six kinds (since
-the control never touches that reader's file).
+**L1 — The control drifts exactly three sites, of twenty.** `--negative-control` mutates site 13
+(`@paigasus/node-bindings`'s `packagejson`), one `cargo-lock` row, and one `cargo-package` site
+(`paigasus-wasm`'s `Cargo.toml`, SMA-685), and asserts `run_check` exits 1 against each drift's
+own pristine tree. That proves the **pipeline** — scratch staging, `run_check`'s loop,
+exit-code plumbing — can still report red for the `packagejson`, `cargo-lock` and
+`cargo-package` kinds specifically. It does NOT prove the remaining five `read_version`
+**kinds** (`cargo-wsdep`, `pyproject`, `pyproject-dep`, `uv-lock`, `napi-glue`) are themselves
+honest — including `uv-lock`, whose kind is exercised by `lock_reader_self_test` below but not
+by an end-to-end drift here. A reader that silently always printed the expected value,
+regardless of what its file actually contained, would pass both the real check (vacuously) and
+the negative control for any of those five kinds (since the control never touches that
+reader's file).
 
-**L2 — Fixture-table coverage now spans two of the eight `read_version` kinds.**
-`--self-test` (`SELF_TEST_COUNT=2`) runs `site_verdict_self_test` (OK/MISMATCH logic) and
+**L2 — Fixture-table coverage now spans six of the eight `read_version` kinds, plus the
+cargo-package writer and the production stamping call site.**
+`--self-test` (`SELF_TEST_COUNT=4`) runs four tables: `site_verdict_self_test` (OK/MISMATCH
+logic), `lock_reader_self_test`, `cargo_package_writer_self_test` (SMA-685), and
+`stamp_sites_self_test` (SMA-685).
+
 `lock_reader_self_test`, added in SMA-577 to close this limitation for the lock kinds
 specifically: before it, neither lock arm had ever been exercised in isolation, so dropping
 `paigasus-proto-derive` from `LOCK_MEMBERS[proto:cargo-lock]` would have been a silent
 false-green on the very change that introduced that table. `lock_reader_self_test` drives
 `read_version` directly against synthetic `Cargo.lock`/`uv.lock` fixtures — a uniform member
 set, a **missing member** (must read `""`, not the survivor's version), a non-uniform set
-(must read `""`), and a `uv-lock` read — covering both `cargo-lock` and `uv-lock`. The
-remaining six kinds (`cargo-package`, `cargo-wsdep`, `pyproject`, `pyproject-dep`,
-`packagejson`, `napi-glue`) still have no fixture of their own, so a broken parser inside one
-of them — the wrong TOML key, an off-by-one on the `[[package]]` block split, a regex that
-matches the wrong table — is caught only if it happens to manifest on the real repo's current
-files or on the one non-lock site (`packagejson`) the negative control drifts.
+(must read `""`), and a `uv-lock` read — covering both `cargo-lock` and `uv-lock`.
+
+`cargo_package_writer_self_test` drives `write_site` directly against thirteen fixture
+scenarios (varied spacing, comments, table order, CRLF, no trailing newline, and
+refusal cases). It proves the WRITER is honest for the `cargo-package` kind. It does not read
+back through `read_version`, so it closes only the WRITE half of this limitation.
+
+`stamp_sites_self_test` drives the real `stamp_sites` call site on a staged copy of the real
+tree. It moves the kernel head and the proto head to two distinct sentinels. It then reads
+every `cargo-package`, `pyproject`, `pyproject-dep` and `packagejson` site back through
+`read_version`; each site must match its own group's sentinel. It also asserts the publishable
+`paigasus-proto-derive` (`cargo-package`, non-head) stayed untouched. This proves the real
+production path, not a synthetic fixture. It closes the READ half for those four kinds, but
+only on the real tree's own file shapes.
+
+**Limit, stated plainly.** `stamp_sites_self_test` reads back through `read_version`. This is
+the same function it is meant to check. A `cargo-package` reader that always printed the
+head's version would still pass this table. The site's real value and the head sentinel are
+the same value, by construction. This table proves `stamp_sites` writes the right sites. It
+does not prove `read_version` reads them correctly, on its own.
+
+The remaining two kinds (`cargo-wsdep` and `napi-glue`) still have no fixture of their own, so
+a broken parser inside one of them — the wrong TOML key, an off-by-one on the `[[package]]`
+block split, a regex that matches the wrong table — is caught only if it happens to manifest on
+the real repo's current files or on the one non-lock site (`packagejson`) the negative control
+drifts. The `cargo-package` kind's READ side is also proven only on the real tree's own file
+shapes, not on the varied layouts the write-side fixtures cover.
 
 **L3 — The non-vacuity anchors are literals, not derived.** Both the `checked == ${#SITES[@]}`
 loop guard and the `EXPECTED_SITE_COUNT` anchor above it are numbers, not a comparison against

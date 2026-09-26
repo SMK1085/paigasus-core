@@ -4,7 +4,8 @@
 // <ZoneLink>, a plain <a> with no client router (spec F2), so the click must make a new DOCUMENT
 // request; a same-zone link would not. "Your organizations" renders only when IAM accepted the
 // access token. A hydrated page on both sides proves each zone's `_next` assets load under its own
-// base path through Traefik (docs/ops/RUNBOOK-containers.md:370-374 left that proof open).
+// base path through Traefik: the one-origin half of AC 3 (docs/ops/RUNBOOK-containers.md, section 6,
+// the bullet on the zone row of smoke_consoles).
 import { expect, test } from '@playwright/test';
 import { CONSOLE_HOST, loginAt, waitForHydration } from '../support/login';
 

@@ -18,15 +18,20 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   every non-family crate needs one explicitly. `paigasus-gateway` / `paigasus-iam` are versioned BY HAND (SMA-658, option
   V-a) and are at `0.1.0` as of this PR. `release = false` stays, and release-plz neither bumps
   nor tags them: `packages_to_process()` filters on Cargo's own `publish` field, and both crates
-  sit in NO `version_group` (SMA-658 M7, measured on 0.3.158). Read that as the scoped claim it
-  is — a `publish = false` crate INSIDE a group whose head is publishable still gets its
-  `[package] version` written, which the version-lockstep entry below records as measured for
-  the three kernel binding crates. SMA-680 M1 measured the opposite for `release-plz update`
-  alone; see SMA-685. M7's fixture had a group with only unpublishable members and
-  produced `version groups: {}`; it did not test the mixed group, and neither result disproves
-  the other. What `publish = false` always excludes is tagging and publishing.
+  sit in NO `version_group` (SMA-658 M7, measured on 0.3.158). The same filter applies inside a
+  version group: release-plz 0.3.158 never writes the version of a Cargo `publish = false`
+  crate, even when the group head is publishable (READ, `updater.rs:283-302`; MEASURED,
+  SMA-685 M1/M1b). The kernel binding crates get their versions from `version-lockstep --write`
+  instead. The earlier claim that `version_group` writes them was wrong. What `publish = false`
+  always excludes is tagging and publishing.
   `env!("CARGO_PKG_VERSION")` still feeds `ServiceInfo`, and ADR-0020 skew reporting is still
   parked on that value (SMA-505 R7).
+- **A local `release-plz` measurement needs a branch with no upstream, or an upstream with the
+  same branch name (READ).** release-plz checks out the upstream's branch name in its temporary
+  copy (READ, `git_cmd/src/lib.rs:44-60, 177-179`). A scratch branch `m2` that tracks
+  `origin/main` makes it walk `main` instead, which lacks the scratch commit (MEASURED, SMA-685
+  M2). release-plz then reports `already up to date`. `git branch -u origin/main` sets this
+  upstream. CI is not affected (INFERRED): `main` tracks `origin/main`.
 - `dependencies_update` is `false` since SMA-680. `true` runs a full `cargo update` in the release
   PR. That made the committed wasm glue stale on v0.2.0, and it ran unreviewed third-party build
   scripts in the stamp step, which holds a write-capable token. `false` runs
@@ -47,15 +52,15 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   PR appears — so "the release PR is the acceptance evidence" does not hold for the first run. The real hazard here is name
   squatting — release-plz performs a crates.io lookup for every workspace member name, so a
   squatted name silently becomes the comparison baseline — not a runaway version proposal.
-- **Standing rule: release-plz tags only what it PUBLISHES. `release = true` keeps a `publish =
-  false` crate in the version group and does NOT get it tagged.**
+- **Standing rule: release-plz tags only what it PUBLISHES. `release = true` does not get a
+  `publish = false` crate tagged, and (SMA-685) it does not keep it in the version group
+  either.**
   release-plz owns every tag it cuts (`<package>-v<version>`, its default), but it **only tags what
   it PUBLISHES**. MEASURED on the first live release (SMA-580): three tags, not six. The three
   `publish = false` kernel-family binding crates were never mentioned in the `release` job log at
-  all — not even as skipped — so `release = true` keeps a crate in the version group and does NOT
-  get it tagged. `rs/release-plz.toml`'s comment claimed otherwise and is corrected. Cosmetic: those
-  crates' versions come from `version_group` + `repo:version-lockstep`, neither of which reads a
-  tag. `napi prepublish` always
+  all — not even as skipped — so `release = true` does NOT get it tagged. `rs/release-plz.toml`'s
+  comment claimed otherwise and is corrected. Cosmetic: those crates' versions come from
+  `version-lockstep --write` and are checked by `repo:version-lockstep`. `napi prepublish` always
   carries `--no-gh-release` — a flag its own `--help` does not list. Two invocations exist:
   the real publish in `release.yml`'s `publish-npm` job, with the requirement recorded in the
   comment directly above it; and the dry run in `prebuild.yml`'s `assemble` job.
@@ -143,17 +148,20 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   the sole judge of its own reachability; `repo:actionlint`'s own `inputs: ['**/*']` — the
   premise check 8e (and 8/8b/8c/8d) runs on every PR at all — is pinned the ordinary way, from
   `SELF_TASK_EXPECTED_GLOBS["actionlint"]` in `ci_targets.py`.
-- The kernel family (`paigasus-kernel` + the three binding crates + their `pyproject.toml` /
-  `package.json` faces) carries **one version** across eighteen sites, asserted by
-  `repo:version-lockstep` (`ci/version-lockstep/run.sh`). release-plz owns every Cargo
-  `[package] version` — via per-package `version_group` — **and** the `[workspace.dependencies]`
-  version requirements; both were measured against the pinned 0.3.158, as was the fact that
-  `version_group` applies to crates whose Cargo manifest says `publish = false`. The script owns
-  the six sites Cargo cannot reach (`--write`) and checks all eighteen, because a `version_group`
-  that silently stopped applying would otherwise go unnoticed. Two of the sites drift SILENTLY
-  without it: `py/uv.lock` (its `moon.yml` runs bare `uv sync`, not `--locked`) and the 26
-  `bindingPackageVersion` guards in the committed napi glue (the codegen-drift gate covers only
-  the three `**/generated` proto dirs). `repo:version-lockstep` is script-pinned the same way the
+- `repo:version-lockstep` (`ci/version-lockstep/run.sh`) checks twenty sites across two
+  lockstep families: thirteen kernel sites and seven proto sites. Each family carries one
+  version across its own sites. The kernel family is `paigasus-kernel`, its three binding
+  crates, and their `pyproject.toml` and `package.json` files. The proto family is
+  `paigasus-proto` and `paigasus-proto-derive`. release-plz owns the Cargo `[package] version`
+  of each group's publishable crates, and the `[workspace.dependencies]` version requirements
+  (measured against 0.3.158). It does NOT write a Cargo `publish = false` crate (SMA-685).
+- `--write` owns nine sites: five kernel non-Cargo sites, one proto pyproject site, and three
+  binding manifests. The script checks all twenty sites, because a `version_group` fault could
+  stop applying silently. Today that risk is real only for `paigasus-proto-derive`. Two sites
+  drift silently without this check. `py/uv.lock` drifts because its `moon.yml` runs bare
+  `uv sync`, not `--locked`. The 26 `bindingPackageVersion` guards in the committed napi glue
+  drift because the codegen-drift gate covers only the three `**/generated` proto dirs.
+- `repo:version-lockstep` is script-pinned the same way the
   `release-parity*` tasks are — `SELF_SCHEDULED_GATES` pins its **four** `moon.yml` lines
   (`--self-test`, `--negative-control`, the real run, and `set -euo pipefail`; one more than the
   `release-parity*` tasks, which have no self-test invocation) — and takes the
@@ -249,13 +257,22 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   V7 is NOT the last check: the roster has since grown through V8 to V12 (SMA-602), so read
   `ci/actionlint/release_guard.py`'s `^# V` comments rather than this entry alone.
 - `release.yml` must never gain a `pull_request` or `pull_request_target` trigger (SMA-579).
-- Each service image releases through **its own chain** in `release.yml`: `images-build-<svc>` →
-  `approve-images-<svc>` → `publish-images-<svc>` → `tag-<svc>`, for `iam` and `gateway`. The
-  chains are independent of the kernel chain and of each other, so a kernel-only release, an
+- Each image releases through **its own chain** in `release.yml`: `images-build-<key>` →
+  `approve-images-<key>` → `publish-images-<key>` → `tag-<key>`, for `iam`, `gateway`,
+  `iam-console` and `gateway-console` (SMA-688). `ci/images/chains.toml` is the one registry of
+  the chain keys, their kind, version file, changelog and image names.
+  `release_plan.py`, `release_decision.py`, `helm_render.py` and `release_guard.py` read it.
+  V16 asserts that `release.yml` and `CHAIN_APPROVALS` agree with it.
+  `iam` is a string prefix of `iam-console`:
+  a chain selects its jobs and artifacts by exact name, never by a prefix or a glob (V17).
+  The chains are independent of the kernel chain and of each other, so a kernel-only release, an
   image-only release and a combined release all work, and a failed image chain does not stop the
-  kernel release. `release_guard.py` V8 asserts that a publisher's job depends, in the job graph,
+  kernel release.
+
+  `release_guard.py` V8 asserts that a publisher's job depends, in the job graph,
   on the approval job of ITS OWN chain — a kernel approval job never gates an image push job. All
-  three approval jobs (`approve-release`, `approve-images-iam`, `approve-images-gateway`) share the
+  five approval jobs (`approve-release`, `approve-images-iam`, `approve-images-gateway`,
+  `approve-images-iam-console`, `approve-images-gateway-console`) share the
   one `release-approval` environment, though. GitHub approves a pending deployment by environment,
   not by job, so one human approval releases every chain that waits for approval in the same run.
   MEASURED on the first live release (run 35648073131, 2026-09-21): the run listed one pending
@@ -271,12 +288,15 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   recovery. `:<major>.<minor>` and `:latest` move only forward, compared as numbers. `:<major>`
   moves the same way, but only once the service leaves `0.x` — a `0.x` release writes no
   `:<major>` tag at all.
-- A service version is set **by hand**, in a normal pull request, with a `CHANGELOG.md` section.
-  The two service crates are `publish = false` and sit in no `version_group`, so `release-plz
-  update` never sees them, and `git_only` hard-errors on the second release because each has an
-  unpublished workspace dependency (MEASURED, SMA-658 M7). See the release-plz entry above for
-  the bound on that claim: a `publish = false` crate inside a group with a publishable head IS
-  version-written. `ci/release-plan/release_plan.py
+- A person sets a service or console version **by hand**, in a normal pull request. The pull
+  request adds a `CHANGELOG.md` section. It also updates the image tag in
+  `charts/paigasus/values.yaml`. Row 8 of `repo:helm-render` fails when the tag differs.
+
+  A console's version source is the `version` field of `ts/apps/<app>/package.json`
+  (SMA-688 D1). The two service crates are `publish = false` and sit in no `version_group`, so
+  `release-plz update` never sees them, and `git_only` hard-errors on the second release because
+  each has an unpublished workspace dependency (MEASURED, SMA-658 M7). The same holds inside a
+  version group (SMA-685). `ci/release-plan/release_plan.py
   --assert`, which `repo:actionlint` check 11 runs on every pull request, fails when a bumped
   service has no changelog section.
 - **`gh api` on a 404 exits 1 AND prints GitHub's JSON error body on STDOUT.** `--jq` is not

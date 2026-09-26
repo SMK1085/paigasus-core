@@ -148,6 +148,15 @@ holds `W1 default` to `W14 no-restart`. For the NOTES text it holds `N0 pin` (th
 line is deleted. See `docs/ops/RUNBOOK-chart.md` § 6 for the recommended setup and the migration
 order.
 
+## The default image tags
+
+Each `image.tag` in `values.yaml` is pinned to the published version of that image. The version
+lives in the file that `ci/images/chains.toml` names for the image: a service's `Cargo.toml` or a
+console's `package.json`. `repo:helm-render` row 8a fails when a tag and its version differ, so a
+version bump must update the tag in the same pull request. The tags no longer default to
+`appVersion`. An empty tag still falls back to `.Chart.AppVersion`, which is `0.0.0` and names no
+published image.
+
 ## The golden files
 
 `tests/golden/iam-only.yaml` and `tests/golden/iam-and-gateway.yaml` are a byte-exact pin of

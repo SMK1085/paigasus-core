@@ -382,11 +382,12 @@ SELF_TASK_EXPECTED_GLOBS = {
         "ci/next-public/**/*",
         "ts/**/*",
     ),
-    # SMA-513 PR 2b. Three globs then five literals, in check_gate_inputs' comparison order (globs
+    # SMA-513 PR 2b. Globs first, then literals, in check_gate_inputs' comparison order (globs
     # sorted, then files sorted — `.proto/plugins/helm.toml` sorts before `.prototools` because
     # `/` < `t`). The two helm files are the byte pin the golden files depend on: drop them and a
     # helm bump serves a cached PASS. The proto and the two TypeScript files are what check 1a
     # reads; drop one and a new capability slug or a changed derivation line no longer re-keys it.
+    # SMA-688: the chain registry and the four version files are what row 8a reads.
     "helm-render": (
         "charts/**/*",
         "ci/helm-render/**/*",
@@ -394,7 +395,12 @@ SELF_TASK_EXPECTED_GLOBS = {
         "ci/kind/values/**/*",
         ".proto/plugins/helm.toml",
         ".prototools",
+        "ci/images/chains.toml",
         "contracts/proto/paigasus/common/v1/service_info.proto",
+        "rs/crates/services/paigasus-gateway/Cargo.toml",
+        "rs/crates/services/paigasus-iam/Cargo.toml",
+        "ts/apps/gateway-console/package.json",
+        "ts/apps/iam-console/package.json",
         "ts/packages/paigasus-discovery/src/core/state.ts",
         "ts/packages/paigasus-proto/src/capability.ts",
     ),
@@ -1032,7 +1038,7 @@ ACTIONLINT_SH_INDENTED_CALL_SITES = (
     # actual 98, so 78 rows — the whole V10 credential control among them — could be deleted with
     # the gate still green. Raise it with the table, to just under the current `--fixture-count`,
     # and re-pin it in all three places in this file.
-    '[ "$n" -ge 150 ] || infra "check 10: release_guard.py reports $n fixtures, expected at least 150"',
+    '[ "$n" -ge 162 ] || infra "check 10: release_guard.py reports $n fixtures, expected at least 162"',
     # ...and the SELF-TEST invocation. Deleting it leaves the production call (in
     # ACTIONLINT_SH_CALL_SITES above) running against a verdict function nothing has proved
     # correct. This is also the one entry across every registry that is a MID-LINE FRAGMENT, not
@@ -1173,31 +1179,26 @@ WORKFLOW_CREDENTIALS_SH_CALL_SITES = (
 # ACTIONLINT_SH_INDENTED_CALL_SITES pins only the CALLS, in the other file. So every line below
 # could be deleted with every existing pin still green.
 #
-# What each entry closes, all of it in the ONE direction that matters — a silent SKIP:
-#   1. The `--github-output` flag parse. Neuter it and MODE stays empty, the dispatch falls to
-#      `die_infra`, and the runtime arm exits 2 — the plan job fails and every consumer SKIPS.
-#   2. The `--negative-control` flag parse, for the reason RELEASE_PARITY_SH_CALL_SITES' own
-#      comment measured: without it the control falls through to a mode that proves nothing.
-#   3. `output)   github_output ;;` — a WHOLE line, and that is the point. `require_uv` sits on
-#      the other three arms and MUST NOT sit on this one: putting it back
-#      (`output)   require_uv; github_output ;;`) is exactly the SMA-603 C1 defect, where a
-#      runner without the proto toolchain made the plan job fail and dropped the whole publish
-#      path. Any edit to this line reds here as well as in run.sh's own row 6.
-#   4. The negative control's dispatch arm, so the control cannot be disconnected.
-#   5. The fail-safe GUARD, and 6. the fail-safe WRITE. These two are the branch's central
-#      property. Delete the write and an undecidable run appends nothing, which leaves the job
-#      output unset — that still builds today, but it also removes the only thing that makes the
-#      documented "always exits 0, always writes false" contract true.
-#   7. Row 6's assertion (the C1 regression row) and 8. row 7's assertion (the FIXTURES-loop
-#      mutant). Both are ASSERTION lines, not report lines, for the reason
-#      WORKFLOW_CREDENTIALS_SH_CALL_SITES measured: deleting every assertion left its four
-#      structural pins byte-identical and the control exited 0 having asserted nothing.
-#   9. The control's own failure report arm, so a control that counted failures cannot swallow
-#      them.
-#  10. Row 8's assertion (the collection-layer loop + shape-validation mutant), an ASSERTION
-#      line for the same reason as 7 and 8: WORKFLOW_CREDENTIALS_SH_CALL_SITES measured that
-#      deleting every assertion left its structural pins byte-identical and the control exited 0
-#      having asserted nothing.
+# What each group closes:
+#   - The `--github-output` and `--negative-control` flag parses, and the two dispatch arms.
+#     `output)   github_output ;;` is a WHOLE line on purpose: putting `require_uv` back on it is
+#     the SMA-603 C1 defect, where a runner without the proto toolchain failed the plan job.
+#   - SMA-688, the key sources (spec § 4.3): the shape test that both sources pass, the `--keys`
+#     capture, its guard, the sed read of ci/images/chains.toml, the guard on that read, its
+#     exit-2 verdict write, and the call into the fail-safe branch. Delete the sed read and a
+#     runner without `uv` exits 2 again, which is the C1 defect. Delete a guard and an empty key
+#     list writes no chain output; every chain then runs with an empty version.
+#   - The fail-safe guard for the verdict, and the per-key presence check (two physical lines).
+#     Delete one and a partial checker output aborts under pipefail or writes nothing.
+#   - The fail-safe WRITE of the verdict and of each key's pair, and the second call into the
+#     fail-safe branch. Delete one and an undecidable run leaves an output unset.
+#   - The per-key extraction line for skip_. It carries the `=` that separates `skip_iam` from
+#     `skip_iam-console`.
+#   - The ASSERTION lines of rows 6, 7, 8 and 10 to 13, the shared fail-safe line count, and the
+#     control's failure report, for the reason WORKFLOW_CREDENTIALS_SH_CALL_SITES measured:
+#     deleting every assertion left the structural pins byte-identical and the control exited 0
+#     having asserted nothing. Rows 10 and 12 are pinned by their calls: one proves the sed read,
+#     one proves the exit 2.
 #
 # REACHABILITY IS NOT AUTOMATIC. moon.yml lists `ci/release-plan/**/*` among repo:affected-smoke's
 # inputs and ci/actionlint/run.sh's T_AFFECTED_SMOKE_REQUIRED_INPUTS floors that entry. Without
@@ -1207,30 +1208,37 @@ WORKFLOW_CREDENTIALS_SH_CALL_SITES = (
 # for both of their reasons: the `case` arms and the `if` bodies are indented, so a column-0 rule
 # would reject the real executing lines, while a substring rule would let a COMMENTED-OUT copy
 # satisfy the pin. Every entry was verified to occur EXACTLY ONCE in run.sh before it was written
-# here.
+# here (re-verified for SMA-688, on the stripped line text).
 RELEASE_PLAN_SH_CALL_SITES = (
     "--github-output)     MODE=output; shift ;;",
     "--negative-control)  MODE=negctl; shift ;;",
     "output)   github_output ;;",
     "negctl)   require_uv; negative_control ;;",
-    # SMA-658 fix round 2. Six lines replace the old single-line `if`: the presence check now
-    # folds all five keys together (a missing one routes to the fail-safe branch instead of
-    # aborting the pipelines below under pipefail), so a future edit dropping one key's grep back
-    # out of this condition must re-pin here, not pass silently.
-    'if [ "$rc" -ne 0 ] \\',
-    "|| ! grep -qE '^nothing_to_release=(true|false)$' < <(printf '%s\\n' \"$out\") \\",
-    "|| ! grep -qE '^skip_iam=(true|false)$' < <(printf '%s\\n' \"$out\") \\",
-    "|| ! grep -qE '^skip_gateway=(true|false)$' < <(printf '%s\\n' \"$out\") \\",
-    "|| ! grep -qE '^version_iam=' < <(printf '%s\\n' \"$out\") \\",
-    "|| ! grep -qE '^version_gateway=' < <(printf '%s\\n' \"$out\"); then",
+    "[ -n \"$1\" ] && ! grep -qvE '^[a-z][a-z0-9-]*$' < <(printf '%s\\n' \"$1\")",
+    "keys=\"$(uv run --locked --project \"$HERE\" --python '>=3.12' python3 \"$HERE/release_plan.py\" --keys \"$REPO_ROOT\")\" || keys_rc=$?",
+    'if [ "$keys_rc" -ne 0 ] || ! keys_are_valid "$keys"; then',
+    "keys=\"$(sed -n 's/^\\[chain\\.\\([a-z][a-z0-9-]*\\)\\]$/\\1/p' \"$REPO_ROOT/ci/images/chains.toml\" 2>/dev/null)\" || keys=",
+    'if ! keys_are_valid "$keys"; then',
+    "printf 'nothing_to_release=%s\\n' false >> \"${GITHUB_OUTPUT:-/dev/stdout}\"",
+    'write_failsafe "$keys_rc" "$keys"',
+    "if [ \"$rc\" -ne 0 ] || ! grep -qE '^nothing_to_release=(true|false)$' < <(printf '%s\\n' \"$out\"); then",
+    "if ! grep -qE \"^skip_${key}=(true|false)\\$\" < <(printf '%s\\n' \"$out\") \\",
+    "|| ! grep -qE \"^version_${key}=\" < <(printf '%s\\n' \"$out\"); then",
+    'write_failsafe "$rc" "$keys"',
     "printf 'nothing_to_release=false\\n' >> \"${GITHUB_OUTPUT:-/dev/stdout}\"",
-    "printf 'skip_iam=false\\nskip_gateway=false\\n' >> \"${GITHUB_OUTPUT:-/dev/stdout}\"",
-    "printf '%s\\n' \"$out\" | grep -E '^skip_iam=(true|false)$' | tail -n 1 \\",
+    "printf 'skip_%s=false\\nversion_%s=\\n' \"$key\" \"$key\" >> \"${GITHUB_OUTPUT:-/dev/stdout}\"",
+    "printf '%s\\n' \"$out\" | grep -E \"^skip_${key}=(true|false)\\$\" | tail -n 1 \\",
+    'if [ "$n" != "9" ]; then',
+    'if [ "$rc6" -ne 0 ]; then',
     "if ! grep -qx 'nothing_to_release=false' \"$nouv_out\"; then",
+    '_expect_failsafe_outputs "row 6 (uv unreachable)" "$nouv_out"',
     'if [ "$mut_rc" != "3" ]; then',
     "printf 'release-plan negative control: %d row(s) failed\\n' \"$failures\" >&2",
     'if [ "$mut8_rc" != "3" ]; then',
     "if ! grep -q \"a non-table \\[workspace\\] is inconclusive\" < <(printf '%s\\n' \"$mut8_out\"); then",
+    'if [ "$rc" -ne "$want" ]; then',
+    "_keys_branch_row 10 \"''\" 0 copy",
+    "_keys_branch_row 12 \"''\" 3 missing",
 )
 
 
@@ -2639,7 +2647,7 @@ def self_test():
         # ...and check 10's fixture-table arity floor and self-test invocation (SMA-579),
         # matched via ACTIONLINT_SH_INDENTED_CALL_SITES instead: both sit inside
         # release_guard_self_test(), so they carry real, executing leading whitespace.
-        '  [ "$n" -ge 150 ] || infra "check 10: release_guard.py reports $n fixtures, expected at least 150"\n'
+        '  [ "$n" -ge 162 ] || infra "check 10: release_guard.py reports $n fixtures, expected at least 162"\n'
         '  release_guard_py --self-test || { fail "check 10: release_guard.py --self-test reported a broken\n'
         # ...and check 11's invocation inside run_self_tests, its own self-test invocation, and
         # its negative-control invocation (SMA-603, the last added in fix round 1's I2), matched
@@ -2879,8 +2887,8 @@ def self_test():
             "(the done < <(...) swallow class, run.sh:2050)"
         )
     no_rg_arity_call = wired_actionlint.replace(
-        '  [ "$n" -ge 150 ] || infra "check 10: release_guard.py reports $n fixtures, '
-        'expected at least 150"\n',
+        '  [ "$n" -ge 162 ] || infra "check 10: release_guard.py reports $n fixtures, '
+        'expected at least 162"\n',
         "",
     )
     if not check_self_invocation(wired, scripts, no_rg_arity_call, wired_release_parity, wired_workflow_credentials, wired_release_plan, wired_ruff, wired_next_public_free, wired_helm_render):

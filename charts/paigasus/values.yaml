@@ -14,7 +14,10 @@ zones:
     console:
       image:
         repository: ghcr.io/smk1085/paigasus-iam-console
-        tag: ""          # defaults to .Chart.AppVersion
+        # Pinned to the image version in ts/apps/iam-console/package.json (SMA-688). A version
+        # bump updates this tag in the same PR; repo:helm-render row 8a fails otherwise. An empty
+        # tag falls back to .Chart.AppVersion, which names no published image.
+        tag: "0.1.0"
       replicas: 2
     backend:
       # Deployed by this chart. Kept true: the gRPC-to-IAM link from any other zone's backend has
@@ -23,7 +26,9 @@ zones:
       deploy: true
       image:
         repository: ghcr.io/smk1085/paigasus-iam
-        tag: ""
+        # Pinned to the image version in rs/crates/services/paigasus-iam/Cargo.toml (SMA-688).
+        # repo:helm-render row 8a fails when the two differ.
+        tag: "0.1.0"
       # replicas and maxSurge are pinned; see the comment in templates/backend-deployment.yaml.
       httpPort: 8080
       grpcPort: 9090
@@ -44,7 +49,9 @@ zones:
     console:
       image:
         repository: ghcr.io/smk1085/paigasus-gateway-console
-        tag: ""
+        # Pinned to the image version in ts/apps/gateway-console/package.json (SMA-688).
+        # repo:helm-render row 8a fails when the two differ.
+        tag: "0.1.0"
       replicas: 2
     backend:
       # NOT deployed by this chart (SMA-513 Task 11b). Measured in the tree:
@@ -56,7 +63,10 @@ zones:
       deploy: false
       image:
         repository: ghcr.io/smk1085/paigasus-gateway
-        tag: ""
+        # Pinned to the image version in rs/crates/services/paigasus-gateway/Cargo.toml
+        # (SMA-688). This chart does not render it today; the pin stops a later chart that
+        # deploys it from falling back to 0.0.0. repo:helm-render row 8a fails when the two differ.
+        tag: "0.1.0"
       httpPort: 8088
       # Genuinely missing from the original schema (SMA-513 Task 11) — the gateway backend is
       # stateless and horizontally scalable, unlike IAM's SMA-559-pinned single replica, so it

@@ -34,6 +34,7 @@ function runtime(overrides: Partial<AuthRuntime> = {}): AuthRuntime {
     publicOrigin: 'https://app.example.com',
     redirectUri: 'https://app.example.com/iam/auth/callback',
     postLogoutRedirectUri: 'https://app.example.com/iam/',
+    clientId: 'paigasus-console',
     cookieDomainless: true,
     skewMs: 30_000,
     lockTtlMs: 10_000,

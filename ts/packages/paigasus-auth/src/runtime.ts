@@ -72,6 +72,11 @@ export interface AuthRuntime {
   publicOrigin: string;
   redirectUri: string;
   postLogoutRedirectUri: string;
+  /**
+   * `PAIGASUS_OIDC_CLIENT_ID`. Logout sends `id_token_hint` only when the stored token's `aud`
+   * contains it (SMA-681, http/routes.ts).
+   */
+  clientId: string;
   /** All zones share one cookie on one origin (design doc § 6.7) — never per-zone, never configurable. */
   cookieDomainless: true;
   skewMs: number;
@@ -121,7 +126,8 @@ export async function createAuthRuntime(cfg: ComposedConfig, deps: CreateAuthRun
   // shape) let a cold-cache refresh take up to 2x the timeout while holding a 1x-sized lock,
   // which is exactly the "a refresh outlives its lock" case invariant 5 exists to prevent.
   // "At or above" — not just "above" — because a refresh taking exactly the bound still races a
-  // second holder.
+  // second holder. The best-effort revokes of SMA-681 are not in this bound: single-flight runs
+  // them after it releases the lock.
   if (2 * cfg.PAIGASUS_OIDC_HTTP_TIMEOUT_MS >= cfg.PAIGASUS_SESSION_LOCK_TTL_MS) {
     throw new AuthConfigError('2x PAIGASUS_OIDC_HTTP_TIMEOUT_MS must be strictly below PAIGASUS_SESSION_LOCK_TTL_MS');
   }
@@ -160,6 +166,7 @@ export async function createAuthRuntime(cfg: ComposedConfig, deps: CreateAuthRun
     publicOrigin: cfg.PAIGASUS_PUBLIC_ORIGIN,
     redirectUri,
     postLogoutRedirectUri,
+    clientId: cfg.PAIGASUS_OIDC_CLIENT_ID,
     cookieDomainless: true,
     skewMs: cfg.PAIGASUS_SESSION_REFRESH_SKEW_SECONDS * 1000,
     lockTtlMs: cfg.PAIGASUS_SESSION_LOCK_TTL_MS,

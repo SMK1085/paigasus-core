@@ -30,3 +30,7 @@ Operator detail is in `docs/ops/RUNBOOK-chart.md`; developer detail in `charts/p
   `helm_render.py` `STUB_VALUES`, and `ci/kind/values/a.yaml` (row 7).
 - **Read optional nested values with `dig`**, as the `paigasus.idpCa*` helpers do. A release made
   before the value existed has no map under `--reuse-values`.
+- **Each default image tag is pinned to its image version.** `repo:helm-render` row 8a compares
+  every `image.tag` in `values.yaml` with the version file that `ci/images/chains.toml` names
+  (SMA-688). A version bump updates the tag in the same PR. An empty tag falls back to
+  `appVersion` (`0.0.0`), which names no published image.

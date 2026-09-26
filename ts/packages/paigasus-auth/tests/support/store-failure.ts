@@ -10,7 +10,7 @@
 import { expect } from 'vitest';
 import { claimsPrincipalResolver } from '../../src/adapters/claims-resolver.js';
 import { MemorySessionStore } from '../../src/adapters/memory-store.js';
-import type { AuthorizationRequest, OidcClient, OidcTokens, RefreshedTokens } from '../../src/adapters/oidc.js';
+import type { AuthorizationRequest, BuildEndSessionUrlParams, OidcClient, OidcTokens, RefreshedTokens } from '../../src/adapters/oidc.js';
 import { SessionStoreTimeout, SessionStoreUnavailable } from '../../src/core/errors.js';
 import { STORE_UNAVAILABLE_CSP } from '../../src/http/store-unavailable.js';
 import type { AuthEventFields, AuthEventName } from '../../src/ports/logger.js';
@@ -22,6 +22,14 @@ export const ORIGIN = 'https://rp.example.com';
 export const BASE_PATH = '/iam';
 export const END_SESSION_URL = 'https://issuer.example.com/logout';
 export const NEW_REFRESH_TOKEN = 'new-refresh-token';
+/** The harness runtime's OIDC client id. */
+export const CLIENT_ID = 'paigasus-console';
+const b64 = (value: unknown): string => Buffer.from(JSON.stringify(value)).toString('base64url');
+/**
+ * The raw ID token that `fakeOidc().authorizationCodeGrant` returns. JWT-shaped, not signed. Its
+ * `aud` is CLIENT_ID, so logout would send it as the hint (http/routes.ts `hintAudienceMatches`).
+ */
+export const FAKE_ID_TOKEN = `${b64({ alg: 'RS256', typ: 'JWT' })}.${b64({ iss: 'https://issuer.example.com', sub: 'a-subject', aud: CLIENT_ID })}.fake-signature`;
 
 export type FailureKind = 'unavailable' | 'timeout';
 export const FAILURE_KINDS: readonly FailureKind[] = ['unavailable', 'timeout'];
@@ -54,6 +62,8 @@ export interface FakeOidc extends OidcClient {
   revokeCalls: string[];
   /** When true, `revoke` rejects with an error whose message holds SENTINEL_DSN. */
   failRevoke: boolean;
+  /** The parameters of every `buildEndSessionUrl` call, in order (SMA-681: does it carry a hint?). */
+  endSessionCalls: BuildEndSessionUrlParams[];
 }
 
 /** No network. The code exchange always succeeds and returns NEW_REFRESH_TOKEN. */
@@ -61,12 +71,14 @@ export function fakeOidc(): FakeOidc {
   const oidc: FakeOidc = {
     revokeCalls: [],
     failRevoke: false,
+    endSessionCalls: [],
     buildAuthorizationUrl: (): Promise<AuthorizationRequest> => Promise.resolve({ url: 'https://issuer.example.com/authorize?client_id=test', codeVerifier: 'a-verifier', nonce: 'a-nonce' }),
     authorizationCodeGrant: (): Promise<OidcTokens> =>
       Promise.resolve({
         accessToken: 'new-access-token',
         refreshToken: NEW_REFRESH_TOKEN,
         expiresIn: 300,
+        idToken: FAKE_ID_TOKEN,
         idTokenClaims: { iss: 'https://issuer.example.com', sub: 'a-subject' },
       }),
     refresh: (): Promise<RefreshedTokens> => Promise.reject(new Error('refresh is not used by the auth routes')),
@@ -74,7 +86,10 @@ export function fakeOidc(): FakeOidc {
       oidc.revokeCalls.push(token);
       return oidc.failRevoke ? Promise.reject(new Error(`revoke failed at ${SENTINEL_DSN}`)) : Promise.resolve();
     },
-    buildEndSessionUrl: (): Promise<string> => Promise.resolve(END_SESSION_URL),
+    buildEndSessionUrl: (params: BuildEndSessionUrlParams): Promise<string> => {
+      oidc.endSessionCalls.push(params);
+      return Promise.resolve(END_SESSION_URL);
+    },
   };
   return oidc;
 }
@@ -101,6 +116,7 @@ export function harness(failOn: readonly StoreMethod[], makeError: () => Error):
     publicOrigin: ORIGIN,
     redirectUri: `${ORIGIN}${BASE_PATH}/auth/callback`,
     postLogoutRedirectUri: `${ORIGIN}${BASE_PATH}/`,
+    clientId: CLIENT_ID,
     cookieDomainless: true,
     skewMs: 30_000,
     lockTtlMs: 10_000,

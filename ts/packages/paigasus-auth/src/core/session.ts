@@ -18,8 +18,18 @@ export interface SessionRecord {
    * path by design; the alternative is deserialising into a wrong-typed object.
    * OPERATIONAL CONSEQUENCE: the deploy that bumps this logs out every active user. Say so in
    * the release note.
+   *
+   * Version 2 (SMA-681) added the required `idToken`. A bump has three more costs. During a rolling
+   * update, old and new pods read each other's records as absent and delete them. A user can then
+   * see a login loop until the rollout ends. A rollback forces a second logout. Both zones default
+   * their image tag to `.Chart.AppVersion` (charts/paigasus/values.yaml), so the mixed state lasts
+   * only for the rollout. After the deploy, a logout or any other read of a version 1 record
+   * deletes it before its refresh token can be revoked. http/routes.ts reads no token from it.
+   * That refresh token stays valid at the IdP until its idle timeout. Under the default scope
+   * (`offline_access`, config.ts) it is an offline token. No deployment existed on 2026-09-25
+   * (spec § 4.1).
    */
-  version: 1;
+  version: 2;
   /**
    * Fencing counter. `SessionStore.set` is a compare-and-set on it. Without this, a refresh that
    * outlives its lock TTL lets the slow holder write its now-revoked token over a newer valid
@@ -31,6 +41,18 @@ export interface SessionRecord {
   accessExpiresAt: number;
   /** loginTime + ABSOLUTE_TTL. Never extended by a refresh; a refresh clamps to it. */
   absoluteExpiresAt: number;
+  /**
+   * The raw, signed ID token JWT: the newest one the IdP issued for this session (SMA-681). The
+   * login sets it. A refresh replaces it only when the new token has the same `iss` and `sub` as
+   * `idTokenClaims` (core/single-flight.ts). Only logout reads it, as `id_token_hint`. So after a
+   * refresh it can come from a DIFFERENT token than `idTokenClaims`. `toSessionView` does not
+   * read it, so it never crosses to the browser.
+   */
+  idToken: string;
+  /**
+   * The DECODED claims of the LOGIN ID token. A refresh does not change them (SMA-681 spec § 4.1).
+   * The principal and the display name read these, never `idToken`.
+   */
   idTokenClaims: IdTokenClaims;
   principal: ResolvedPrincipal;
 }
@@ -71,7 +93,8 @@ function isObject(value: unknown): value is Record<string, unknown> {
  *   1. `JSON.parse('null')` SUCCEEDS, so redis-store's parse guard never fires on a stored
  *      literal `null`; reading `.version` off it then throws a TypeError that #guarded converts
  *      into SessionStoreUnavailable — a store-outage signal against a healthy Redis.
- *   2. A body of `{ version: 1 }` passes two NaN comparisons in a row in resolveSession
+ *   2. A body of `{ version: 1 }` (the version then; `{ version: 2 }` today) passes two NaN
+ *      comparisons in a row in resolveSession
  *      (`now >= undefined` and `now >= NaN` are both false), so it is returned as a LIVE session
  *      carrying `accessToken: undefined`.
  *   3. A principal shaped `{ roleGrants: [] }` yields `grantsAvailable: undefined` through
@@ -80,7 +103,8 @@ function isObject(value: unknown): value is Record<string, unknown> {
  *      predicate is what keeps a poisoned record from reaching it.
  *
  * `refreshToken` is the one optional field: absent is legal, an explicit `null` is not
- * (`exactOptionalPropertyTypes`).
+ * (`exactOptionalPropertyTypes`). `idToken` is required and must not be empty: logout sends it as
+ * `id_token_hint` (SMA-681).
  *
  * THIS PREDICATE GATES READS, NOT WRITES. Both store adapters call it only in `get`, never in
  * `set`. A record that fails it could in principle still be WRITTEN — logged as
@@ -92,12 +116,15 @@ function isObject(value: unknown): value is Record<string, unknown> {
  */
 export function isSessionRecord(value: unknown): value is SessionRecord {
   if (!isObject(value)) return false;
-  if (value['version'] !== 1) return false;
+  if (value['version'] !== 2) return false;
   if (!Number.isFinite(value['rev'])) return false;
   if (!Number.isFinite(value['accessExpiresAt'])) return false;
   if (!Number.isFinite(value['absoluteExpiresAt'])) return false;
   if (typeof value['accessToken'] !== 'string') return false;
   if ('refreshToken' in value && typeof value['refreshToken'] !== 'string') return false;
+
+  const idToken = value['idToken'];
+  if (typeof idToken !== 'string' || idToken.length === 0) return false;
 
   const claims = value['idTokenClaims'];
   if (!isObject(claims)) return false;

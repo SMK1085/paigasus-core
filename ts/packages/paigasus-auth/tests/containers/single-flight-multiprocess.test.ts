@@ -75,7 +75,7 @@ it('two forked processes racing an expired token trigger exactly one refresh', a
   const sid = 's';
 
   // Seed with a raw SET rather than through the store: this fixture must stay store-agnostic,
-  // and the wire shape (JSON, `version: 1`) is exactly what RedisSessionStore.get expects.
+  // and the wire shape (JSON, `version: 2`) is exactly what RedisSessionStore.get expects.
   const sessKey = `${keyPrefix}pgs:sess:${sid}`;
   const record = makeRecord({ accessExpiresAt: Date.now() - 1 });
   await admin.set(sessKey, JSON.stringify(record));

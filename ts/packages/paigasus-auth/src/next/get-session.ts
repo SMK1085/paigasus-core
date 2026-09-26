@@ -54,6 +54,7 @@ export async function getSession(runtime: AuthRuntime): Promise<ResolvedSession 
       {
         store: runtime.store,
         refresh: (refreshToken) => runtime.oidc.refresh(refreshToken),
+        revoke: (token) => runtime.oidc.revoke(token),
         logger: runtime.logger,
         skewMs: runtime.skewMs,
         lockTtlMs: runtime.lockTtlMs,
