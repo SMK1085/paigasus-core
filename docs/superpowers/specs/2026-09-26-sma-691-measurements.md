@@ -64,5 +64,7 @@ assumed. No mutation reded fewer rows than expected, so no row failed to bite.
 - M2 (drop the acknowledgement condition) also reded W10 and W14, both of which exercise the
   acknowledgement value directly.
 - M3 (compare the acknowledgement with `"true"`) also reded W10 and W14, the same two rows as M2.
-- M9b (drop `default` in `paigasus.iamAudience`) also reded W11, W12 and W13. The exact mechanism
-  for these three was not traced further; the row is the measured fact, not an explained one.
+- M9b (drop `default` in `paigasus.iamAudience`) also reded W11, W12, W13 and W14. Without
+  `default`, the IAM audience renders as an empty string, so condition 1 of
+  `paigasus.iamAudienceWarns` is false and no warning shows. So every "present" row goes red, and
+  W14's first render has no key.

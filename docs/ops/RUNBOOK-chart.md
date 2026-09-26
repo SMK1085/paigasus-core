@@ -101,10 +101,9 @@ late and unclearly. Check these four items before you install:
    set. The recommended setup is a dedicated API audience. See "The recommended audience setup"
    after this list. The value replaces the client id. It does not add another value next to the
    client id. Before you choose the value, decode a real access token and read its `aud` claim.
-   The value helps only when the IdP
-   issues a JWT access token for the console's scopes (`openid profile email offline_access`).
-   The console sends no `audience` or `resource` parameter. This value does not work with an
-   opaque token, or a token for a different API.
+   The value helps only when the IdP issues a JWT access token for the console's scopes
+   (`openid profile email offline_access`). The console sends no `audience` or `resource`
+   parameter. This value does not work with an opaque token, or a token for a different API.
    A wrong or missing audience shows in the IAM log at `info`, with the issuer and the accepted
    audiences (`ci/kind/README.md`, "Where to look first"). The log does not show the token's
    `aud`.

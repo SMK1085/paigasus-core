@@ -133,9 +133,9 @@ renders that list, with one element, into `IAM_AUTHN__ISSUERS` in
   IAM's audience check. The chart then shows a warning in two places: the release NOTES
   (`templates/NOTES.txt`) and the annotation `paigasus.io/iam-audience-warning` in the IAM backend
   Deployment's `metadata`. `oidc.acknowledgeClientIdAudience`, set to the value of
-  `oidc.clientId`, removes both. It does not change what IAM accepts. The helpers are in
-  `templates/_audience.tpl`. Both signals call `paigasus.iamAudienceWarns`. The recommended setup
-  is a dedicated API audience in `oidc.audience`.
+  `oidc.clientId`, removes both. It does not change what IAM accepts.
+- The helpers are in `templates/_audience.tpl`. Both signals call `paigasus.iamAudienceWarns`. The
+  recommended setup is a dedicated API audience in `oidc.audience`.
 - **NOTES has no offline render.** `helm template` executes `NOTES.txt` but does not print it, and
   `helm install --dry-run` needs a cluster. So `tests/env.sh` wraps the bytes of `NOTES.txt` in a
   named template in a copy of the chart and renders it through a probe ConfigMap. The kind job

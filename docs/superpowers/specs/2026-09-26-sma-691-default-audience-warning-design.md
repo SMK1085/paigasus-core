@@ -3,7 +3,8 @@
 - Linear: SMA-691 (milestone "IAM Gaps")
 - Related: SMA-678 (`oidc.audience`), SMA-686 (IAM refuses a Keycloak ID or logout token)
 - Status: design approved in chat on 2026-09-26. Revised after the adversarial challenge
-  (§ 9). Waits for the written-spec review.
+  (§ 9). The written spec was approved at Gate 1 on 2026-09-26. The implementation is on this
+  branch.
 
 ## 1. Problem
 
