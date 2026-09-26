@@ -2016,6 +2016,8 @@ Expected: every selected task passes, except gates that need bash 4+ and were se
 
 If a task fails, copy `.moon/cache/ciReport.json` and `.moon/cache/states/<project>/<task>/` to the scratchpad BEFORE any re-run, then follow the root `CLAUDE.md` "Diagnosing an unattributed `moon ci` failure" steps.
 
+<!-- moon-diagnosis:ok -->
+
 - [ ] **Step 3: Re-run the bash-4+ gates under Homebrew bash**
 
 For each bash-4+ gate that Step 2 selected, run it directly with the bash-5 shim first in `PATH`, and read this verdict instead of the Step 2 verdict:
