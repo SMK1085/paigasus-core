@@ -10,11 +10,9 @@ import 'server-only';
 import { z } from 'zod';
 import type { PaigasusError } from '@paigasus/sdk/errors/types';
 import { callIam, nameField, neverReachedIam, prnField, toActionResult, type ActionResult, type ConsoleLogger, type IamClients, type IamResult } from '@paigasus/console-core';
+import { GATEWAY_ROLE } from '../gateway-role';
 import { expiresAtFor } from './keys';
 import { EXPIRY_CHOICES, type CreateState, type IssueKeyState } from './view';
-
-/** The role a console-made account gets at its owner node (spec § 1.2). It holds only InvokeModel. */
-export const GATEWAY_ROLE = 'gateway_user';
 
 type ServiceAccounts = IamClients['serviceAccounts'];
 type Authz = IamClients['authz'];
