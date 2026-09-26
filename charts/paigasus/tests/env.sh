@@ -68,6 +68,22 @@
 #   N5 stale-ack    The acknowledgement names another client id. The body.
 #   N6 other-client The client id is not "paigasus-console". The body, with that audience.
 # A third row counter reds the script when an N row call line is deleted.
+#
+# The script also checks the SMA-692 console OIDC values in the console-env ConfigMap
+# (check_console_oidc, check_console_oidc_restart):
+#   O1 unset        PAIGASUS_OIDC_SCOPES and PAIGASUS_OIDC_AUTHORIZATION_AUDIENCE are absent,
+#                   and so are their comment lines.
+#   O2 both-set     Both keys hold the exact values.
+#   O3 reuse-values-no-key
+#                   `--set oidc.scopes=null --set oidc.authorizationAudience=null`. The render
+#                   succeeds, both keys are absent, and the D7 check does not fail.
+#   O4 number       oidc.audience and oidc.authorizationAudience are both the number 123. The
+#                   render succeeds, and the key holds the string "123".
+#   O5 restart-scopes
+#                   A change of oidc.scopes changes both console pod templates, not the IAM one.
+#   O6 restart-audience
+#                   A change of oidc.authorizationAudience does the same.
+# A fourth row counter reds the script when an O row call line is deleted.
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CHART="$(cd "$HERE/.." && pwd)"
@@ -428,6 +444,98 @@ check_notes "N6 other-client"   body  other-client      --set oidc.clientId=othe
 
 if [ "$NOTES_ROWS" -lt "$NOTES_ROWS_WANT" ]; then
   echo "FAIL [notes rows]: $NOTES_ROWS notes row(s) ran, want $NOTES_ROWS_WANT"; ec=1
+fi
+
+# The console OIDC values (SMA-692). Renders go to a file, as for check_audience.
+OIDC_ROWS=0
+OIDC_ROWS_WANT=6
+API_SCOPES="openid profile email offline_access api://paigasus/access"
+
+# check_console_oidc <label> <scopes|-> <authorization audience|-> [helm args...]
+# "-" means the key, and its comment line, must be absent from the whole render.
+check_console_oidc() {
+  local label="$1" scopes="$2" aud="$3"; shift 3
+  local out
+  OIDC_ROWS=$((OIDC_ROWS + 1))
+  if ! helm template paigasus "$CHART" "${BASE[@]+"${BASE[@]}"}" "$@" >"$TMP/oidc.yaml" 2>"$TMP/oidc.err"; then
+    echo "FAIL [$label]: render failed"; cat "$TMP/oidc.err"; ec=1; return 0
+  fi
+  if ! out="$(SCOPES="$scopes" AUD="$aud" python3 -c '
+import os, sys, yaml
+want = {"PAIGASUS_OIDC_SCOPES": os.environ["SCOPES"], "PAIGASUS_OIDC_AUTHORIZATION_AUDIENCE": os.environ["AUD"]}
+marker = {"PAIGASUS_OIDC_SCOPES": "oidc.scopes is set", "PAIGASUS_OIDC_AUTHORIZATION_AUDIENCE": "oidc.authorizationAudience is set"}
+with open(sys.argv[1]) as fh:
+    raw = fh.read()
+docs = [d for d in yaml.safe_load_all(raw) if d]
+cms = [d for d in docs if d.get("kind") == "ConfigMap" and d["metadata"]["name"].endswith("-console-env")]
+problems = []
+if len(cms) != 1:
+    problems.append(str(len(cms)) + " console-env ConfigMap(s), want 1")
+else:
+    data = cms[0].get("data") or {}
+    for key in sorted(want):
+        if want[key] == "-":
+            if key in raw or marker[key] in raw:
+                problems.append(key + " or its comment is in the render, want it absent")
+        elif data.get(key) != want[key]:
+            problems.append(key + " is " + repr(data.get(key)) + ", want " + repr(want[key]))
+print("|".join(problems) if problems else "OK")' "$TMP/oidc.yaml" 2>&1)"; then
+    echo "FAIL [$label]: the checker failed"; printf '%s\n' "$out"; ec=1; return 0
+  fi
+  if [ "$out" = "OK" ]; then echo "  ok [$label]"; else echo "FAIL [$label]: $out"; ec=1; fi
+}
+
+# check_console_oidc_restart <label> <scopes|audience>
+# The second render changes only the named value. Both console pod templates must differ from
+# the first render. The IAM pod template must be equal. The gateway zone is on.
+check_console_oidc_restart() {
+  local label="$1" mode="$2" out
+  local first second
+  if [ "$mode" = "scopes" ]; then
+    first=(--set zones.gateway.enabled=true)
+    second=(--set zones.gateway.enabled=true --set "oidc.scopes=$API_SCOPES")
+  else
+    first=(--set zones.gateway.enabled=true --set oidc.audience=api://paigasus)
+    second=(--set zones.gateway.enabled=true --set oidc.audience=api://paigasus --set oidc.authorizationAudience=api://paigasus)
+  fi
+  OIDC_ROWS=$((OIDC_ROWS + 1))
+  if ! helm template paigasus "$CHART" "${BASE[@]+"${BASE[@]}"}" "${first[@]}" >"$TMP/oidc-restart-1.yaml" 2>"$TMP/oidc-restart.err"; then
+    echo "FAIL [$label]: render failed"; cat "$TMP/oidc-restart.err"; ec=1; return 0
+  fi
+  if ! helm template paigasus "$CHART" "${BASE[@]+"${BASE[@]}"}" "${second[@]}" >"$TMP/oidc-restart-2.yaml" 2>"$TMP/oidc-restart.err"; then
+    echo "FAIL [$label]: render failed"; cat "$TMP/oidc-restart.err"; ec=1; return 0
+  fi
+  if ! out="$(python3 -c '
+import sys, yaml
+def templates(path):
+    with open(path) as fh:
+        docs = [d for d in yaml.safe_load_all(fh) if d]
+    return {d["spec"]["template"]["metadata"]["labels"]["app.kubernetes.io/name"]: d["spec"]["template"] for d in docs if d.get("kind") == "Deployment"}
+a, b = templates(sys.argv[1]), templates(sys.argv[2])
+want = ["gateway-console", "iam-backend", "iam-console"]
+problems = []
+if sorted(a) != want or sorted(b) != want:
+    problems.append("Deployments are " + repr(sorted(a)) + " and " + repr(sorted(b)) + ", want " + repr(want))
+else:
+    problems += [n + ": spec.template is equal; it must differ" for n in ("gateway-console", "iam-console") if a[n] == b[n]]
+    if a["iam-backend"] != b["iam-backend"]:
+        problems.append("iam-backend: spec.template differs; it must be equal")
+print("|".join(problems) if problems else "OK")' "$TMP/oidc-restart-1.yaml" "$TMP/oidc-restart-2.yaml" 2>&1)"; then
+    echo "FAIL [$label]: the checker failed"; printf '%s\n' "$out"; ec=1; return 0
+  fi
+  if [ "$out" = "OK" ]; then echo "  ok [$label]"; else echo "FAIL [$label]: $out"; ec=1; fi
+}
+
+check_console_oidc "O1 unset"              - -
+check_console_oidc "O2 both-set"           "$API_SCOPES" api://paigasus \
+  --set "oidc.scopes=$API_SCOPES" --set oidc.audience=api://paigasus --set oidc.authorizationAudience=api://paigasus
+check_console_oidc "O3 reuse-values-no-key" - - --set oidc.scopes=null --set oidc.authorizationAudience=null
+check_console_oidc "O4 number"             - 123 --set oidc.audience=123 --set oidc.authorizationAudience=123
+check_console_oidc_restart "O5 restart-scopes"   scopes
+check_console_oidc_restart "O6 restart-audience" audience
+
+if [ "$OIDC_ROWS" -lt "$OIDC_ROWS_WANT" ]; then
+  echo "FAIL [oidc rows]: $OIDC_ROWS oidc row(s) ran, want $OIDC_ROWS_WANT"; ec=1
 fi
 
 if [ "$ec" -eq 0 ]; then echo "== chart env OK =="; fi

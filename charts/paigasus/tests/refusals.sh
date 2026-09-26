@@ -106,6 +106,23 @@ expect_fail "duplicate basePath" "is already used by zone" \
 expect_fail "oidc.caBundle key empty" "oidc.caBundle.key is empty while oidc.caBundle.existingConfigMap is set" \
   --set oidc.caBundle.existingConfigMap=paigasus-idp-ca --set oidc.caBundle.key=""
 
+# SMA-692 D7. The console must not ask for a token that IAM refuses. The chart fails when
+# oidc.authorizationAudience is set and oidc.audience is empty (IAM then accepts only the client
+# id, and Auth0 refuses a client id as an API audience), or when the two values differ.
+expect_fail "authorizationAudience with oidc.audience empty" "while oidc.audience is empty" \
+  --set oidc.authorizationAudience=paigasus-console
+expect_fail "authorizationAudience differs from oidc.audience" "does not equal oidc.audience" \
+  --set oidc.audience=api://paigasus --set oidc.authorizationAudience=api://other
+# SMA-692 D9. The scope list must hold the token openid. openidx does not count.
+expect_fail "scopes without openid" "oidc.scopes must contain the scope openid" \
+  --set "oidc.scopes=profile email offline_access"
+expect_fail "scopes with openidx" "oidc.scopes must contain the scope openid" \
+  --set "oidc.scopes=openidx profile email"
+expect_render "authorizationAudience equal to oidc.audience" \
+  --set oidc.audience=api://paigasus --set oidc.authorizationAudience=api://paigasus
+expect_render "scopes with openid not first" \
+  --set "oidc.scopes=profile email openid offline_access"
+
 expect_render "iam only" --set zones.gateway.enabled=false
 expect_render "iam and gateway" --set zones.gateway.enabled=true \
   --set zones.gateway.backend.url=http://gw.example.test:8088

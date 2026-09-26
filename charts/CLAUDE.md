@@ -19,10 +19,13 @@ Operator detail is in `docs/ops/RUNBOOK-chart.md`; developer detail in `charts/p
   lines 1892-1897). Change both pins in one commit, or `repo:affected-smoke` goes red.
 - **A new chart script under `tests/` runs in CI through the `tests/*.sh` glob.** Raise the floor
   with it, and fix the counts in `ci/helm-render/README.md` and `helm_render.py`.
-- **Four negative-control fixtures are whole-file copies** of `templates/_helpers.tpl` (two) and
-  `templates/console-deployment.yaml` (two), under `ci/helm-render/fixtures/`. An edit to either
-  live file must re-sync them in the SAME commit, keeping each mutation. A stale `_helpers.tpl`
-  fixture has none of the new helpers, so its renders fail and the control reports INCONCLUSIVE.
+- **All six negative-control fixtures are whole-file copies** of a live template, under
+  `ci/helm-render/fixtures/`: `templates/_helpers.tpl` (`slug-mirror`, `zones-omits-enabled`),
+  `templates/console-deployment.yaml` (`security-context`, `template-only-diff`),
+  `templates/console-env-configmap.yaml` (`leaked-value`) and `templates/ingress.yaml`
+  (`literal-ingress`). An edit to one of these live files must re-sync its copies in the SAME
+  commit, keeping each mutation. A stale `_helpers.tpl` fixture has none of the new helpers, so its
+  renders fail and the control reports INCONCLUSIVE.
 - **A YAML comment in a template renders into the manifest,** so it is part of the golden files.
   Put a comment for a conditional block INSIDE the `{{- if }}` block, or the default render and the
   goldens change.

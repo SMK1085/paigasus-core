@@ -148,6 +148,31 @@ holds `W1 default` to `W14 no-restart`. For the NOTES text it holds `N0 pin` (th
 line is deleted. See `docs/ops/RUNBOOK-chart.md` § 6 for the recommended setup and the migration
 order.
 
+## The console authorization request (`oidc.scopes`, `oidc.authorizationAudience`)
+
+Two values change what both consoles request from the IdP (SMA-692). Both are empty by default,
+and an empty value renders no key, so the render is byte-identical to a chart without them.
+
+- `oidc.scopes` renders `PAIGASUS_OIDC_SCOPES` into the `console-env` ConfigMap. Empty: the
+  console default, `openid profile email offline_access`. When set, the consoles also send the
+  list as the `scope` of each refresh request. Entra ID needs it (one scope of the API).
+- `oidc.authorizationAudience` renders `PAIGASUS_OIDC_AUTHORIZATION_AUDIENCE`. The consoles send it
+  as the `audience` parameter of the authorization request, never on a refresh. Auth0 needs it.
+- The helpers are `paigasus.consoleScopes` and `paigasus.consoleAuthorizationAudience` in
+  `templates/_audience.tpl`. They read the values with `dig`, so an absent key under
+  `--reuse-values` gives `""`. `console-env-configmap.yaml` calls them. That file renders on every
+  install, so their refusals fire on every render. They are not in `paigasus.validate`, so
+  `_helpers.tpl` and its two fixture copies do not change.
+- The render fails when `oidc.scopes` is set and does not hold the token `openid` (`openidx` does
+  not count), when `oidc.authorizationAudience` is set and `oidc.audience` is empty, and when the
+  two audience values differ. The compare is exact, as strings.
+- A change of either value changes the `console-env` ConfigMap, so `checksum/console-env` restarts
+  both consoles. IAM does not restart.
+
+`tests/env.sh` holds the rows `O1 unset`, `O2 both-set`, `O3 reuse-values-no-key`, `O4 number`,
+`O5 restart-scopes` and `O6 restart-audience`, with a fourth row counter. `tests/refusals.sh` holds
+the four refusals and two valid renders. See `docs/ops/RUNBOOK-chart.md` § 6 for the IdP setup.
+
 ## The default image tags
 
 Each `image.tag` in `values.yaml` is pinned to the published version of that image. The version

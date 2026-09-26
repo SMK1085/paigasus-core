@@ -13,3 +13,13 @@ data:
   # one zone, and console-core's descriptor cache needs Redis regardless. A knob whose only other
   # setting crash-loops the pod is not a knob.
   PAIGASUS_SESSION_STORE: "redis"
+{{- with include "paigasus.consoleScopes" . }}
+  # oidc.scopes is set (SMA-692). Both consoles request these scopes, and send them again on
+  # each refresh.
+  PAIGASUS_OIDC_SCOPES: {{ . | quote }}
+{{- end }}
+{{- with include "paigasus.consoleAuthorizationAudience" . }}
+  # oidc.authorizationAudience is set (SMA-692). Both consoles send it as the audience
+  # parameter of the authorization request. It equals oidc.audience.
+  PAIGASUS_OIDC_AUTHORIZATION_AUDIENCE: {{ . | quote }}
+{{- end }}

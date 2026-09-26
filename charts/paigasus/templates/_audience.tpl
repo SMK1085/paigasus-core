@@ -52,3 +52,49 @@ If your IdP cannot do this (Dex), set oidc.acknowledgeClientIdAudience to the va
 oidc.clientId to remove this warning.
 {{- end -}}
 {{- end -}}
+
+{{/*
+paigasus.consoleScopes (SMA-692 D6, D9): oidc.scopes as a string, or "" when it is empty or
+absent. dig reads an absent key as "" (helm upgrade --reuse-values from a release made before
+the key existed). The render fails when the value is set and its whitespace-separated tokens do
+not include openid: without openid the first console login fails, and @paigasus/auth refuses the
+value at pod start with only "PAIGASUS_OIDC_SCOPES: custom". openidx does not count.
+paigasus.validate in _helpers.tpl holds the other refusals. This one is here so that _helpers.tpl
+and its two whole-file fixture copies do not change (spec D8). console-env-configmap.yaml calls
+it, and that file renders on every install, with no condition.
+*/}}
+{{- define "paigasus.consoleScopes" -}}
+{{- $scopes := dig "scopes" "" .Values.oidc -}}
+{{- if $scopes -}}
+{{- $scopes = toString $scopes -}}
+{{- if not (has "openid" (regexSplit "\\s+" $scopes -1)) -}}
+{{- fail (printf "oidc.scopes must contain the scope openid, got %q. Without it the console login fails. See docs/ops/RUNBOOK-chart.md section 6 (SMA-692)" $scopes) -}}
+{{- end -}}
+{{- $scopes -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+paigasus.consoleAuthorizationAudience (SMA-692 D6, D7): oidc.authorizationAudience as a string,
+or "" when it is empty or absent. The render fails when the value is set and:
+  1. oidc.audience is empty. IAM then accepts only oidc.clientId, and Auth0 refuses a client id
+     as an API audience. This also closes authorizationAudience == clientId.
+  2. it does not equal oidc.audience. The console would then ask for a token that IAM refuses.
+The compare is exact, as strings (toString on both sides, so a number from --set compares by its
+digits). A space-separated list of audiences is out of scope. The placement follows
+paigasus.consoleScopes above.
+*/}}
+{{- define "paigasus.consoleAuthorizationAudience" -}}
+{{- $want := dig "authorizationAudience" "" .Values.oidc -}}
+{{- if $want -}}
+{{- $want = toString $want -}}
+{{- $iam := dig "audience" "" .Values.oidc -}}
+{{- if not $iam -}}
+{{- fail (printf "oidc.authorizationAudience is %q while oidc.audience is empty. IAM then accepts only oidc.clientId, and the IdP refuses a client id as an API audience. Set oidc.audience to the same value. See docs/ops/RUNBOOK-chart.md section 6 (SMA-692)" $want) -}}
+{{- end -}}
+{{- if ne $want (toString $iam) -}}
+{{- fail (printf "oidc.authorizationAudience %q does not equal oidc.audience %q. The console would request a token that IAM refuses. See docs/ops/RUNBOOK-chart.md section 6 (SMA-692)" $want (toString $iam)) -}}
+{{- end -}}
+{{- $want -}}
+{{- end -}}
+{{- end -}}
