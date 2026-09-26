@@ -4,4 +4,4 @@ name: paigasus
 description: Paigasus IAM and AI Gateway, with their console zones behind one origin
 type: application
 version: 0.1.0
-appVersion: "0.1.0"
+appVersion: "0.1.0-helm-render-unreleased"

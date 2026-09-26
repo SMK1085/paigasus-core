@@ -137,6 +137,7 @@ EXPECTED_ROW_LABELS = (
     "7 kind-values",
     "8a default-image-tags",
     "8b default-image-render",
+    "8c chart-app-version",
 )
 
 
@@ -925,6 +926,9 @@ def run_checks(chart):
         helpers = (chart / "templates" / "_helpers.tpl").read_text()
     except OSError as exc:
         raise InfraError(f"cannot read a source file: {exc}") from exc
+    # Row 8c (SMA-696): read the inputs first, so a git fault fails fast, before the renders.
+    app_version = chart_app_version(chart)
+    tags = release_tags()
     paths = base_paths(chart)
     rows = [check1a(chart_slugs(helpers), slugs, state_ts, capability_ts)]
     both_docs = None
@@ -946,6 +950,8 @@ def run_checks(chart):
     registry = chain_registry()
     rows.append(check8a(values, registry, {key: chain_version(entry) for key, entry in registry.items()}))
     rows.append(check8b(values, both_docs))
+    fallback_docs = parse_docs(helm_template(chart, ("gateway", "iam"), CLEARED_TAGS))
+    rows.append(check8c(app_version, registry, tags, fallback_docs))
     _check_row_inventory([r.row for r in rows])
     return rows
 
@@ -1414,8 +1420,8 @@ def self_test():
 
     # ---- row inventory floor (F1): EXPECTED_ROW_LABELS' own arity and content, plus
     # _check_row_inventory's behaviour on a missing, an extra and a reordered row.
-    if len(EXPECTED_ROW_LABELS) != 23:
-        failures.append(f"EXPECTED_ROW_LABELS: expected 23 labels, got {len(EXPECTED_ROW_LABELS)}")
+    if len(EXPECTED_ROW_LABELS) != 24:
+        failures.append(f"EXPECTED_ROW_LABELS: expected 24 labels, got {len(EXPECTED_ROW_LABELS)}")
     if len(set(EXPECTED_ROW_LABELS)) != len(EXPECTED_ROW_LABELS):
         failures.append("EXPECTED_ROW_LABELS: contains a duplicate label")
     _check_row_inventory(EXPECTED_ROW_LABELS)  # the constant against itself: must not raise
