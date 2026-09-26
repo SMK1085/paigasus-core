@@ -872,6 +872,7 @@ def check8c(app_version, registry, tags, fallback_docs, unreleased=UNRELEASED_CH
         if missing:
             problems.append(f"no release tag {missing}. Move appVersion only after every chain released it; "
                             "run git fetch --tags if the tags are not local")
+        # This loop has no count floor. Row 8b's image count covers a render with no Deployment.
         for dep in _of_kind(fallback_docs, "Deployment"):
             pod = _get(dep, "spec", "template", "spec")
             for container in (pod.get("containers") or []) + (pod.get("initContainers") or []):

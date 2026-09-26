@@ -16,7 +16,7 @@ Operator detail is in `docs/ops/RUNBOOK-chart.md`; developer detail in `charts/p
 - **The chart-script floor is pinned twice.** `ci/helm-render/run.sh` `CHART_SCRIPT_FLOOR=7` and
   `ci/affected-graph/ci_targets.py` `HELM_RENDER_SH_CALL_SITES`. The check matches each pinned
   line against the script text as a STRIPPED WHOLE LINE, not a substring (`ci_targets.py`, around
-  lines 1892-1897). Change both pins in one commit, or `repo:affected-smoke` goes red.
+  lines 1903-1907). Change both pins in one commit, or `repo:affected-smoke` goes red.
 - **A new chart script under `tests/` runs in CI through the `tests/*.sh` glob.** Raise the floor
   with it, and fix the counts in `ci/helm-render/README.md` and `helm_render.py`.
 - **Five negative-control fixtures are whole-file copies:** of `templates/_helpers.tpl` (two),

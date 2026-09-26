@@ -111,21 +111,21 @@ ci/helm-render/run.sh --self-test` then exits `rc=1`, not `rc=2`, because `check
 a.yaml fails to render` and `check7 only the overlay fails to render`, and the summary line reads
 `FAIL helm_render.py --self-test passes: expected 0, got 1`.
 
-Row 8c (SMA-696), measured on 2026-09-26: deleting `rows.append(check8c(app_version, registry,
-tags, fallback_docs))` from `run_checks` and running `bash ci/helm-render/run.sh` exits `rc=2`
-and prints `helm-render row inventory does not match EXPECTED_ROW_LABELS: missing ['8c
+Row 8c (SMA-696) was measured on 2026-09-26. Deleting `rows.append(check8c(app_version, registry,
+tags, fallback_docs))` from `run_checks` and running `bash ci/helm-render/run.sh` exits `rc=2`. It
+prints `helm-render row inventory does not match EXPECTED_ROW_LABELS: missing ['8c
 chart-app-version']`. Changing `check8c`'s return to `_row(APP_VERSION_ROW, lambda: [])` makes
-`--self-test` exit `rc=1` with ten red `check8c` rows, and makes `--negative-control` exit `rc=1`
-and report `negative-control FAILED: the module passed a mutated chart (rc=0)` for
+`--self-test` exit `rc=1` with ten red `check8c` rows. It also makes `--negative-control` exit
+`rc=1` and report `negative-control FAILED: the module passed a mutated chart (rc=0)` for
 `app-version-unreleased`. Changing `run_checks`'s `app_version = chart_app_version(chart)` to read
-`charts/paigasus` directly, alone, still gives `negative-control OK [app-version-unreleased]`: the
-fallback render still uses the fixture chart, so item 4's render assertion catches the wrong tag.
-This corrects spec § 4.3 item 3, which expected `FAILED`; item 4 is a second guard for the same
-mistake. Adding mutation 4 on top of this change gives `negative-control FAILED: the module
-passed a mutated chart (rc=0)` and exits `rc=1`, because item 2 alone then reads the repository
-chart's released `0.1.0`. Replacing the `for dep in _of_kind(fallback_docs, "Deployment"):` loop
-body's `problems.append(...)` line with `pass`, alone, makes `--self-test` exit `rc=1` with the
-row `check8c the rendered fallback differs` red.
+`charts/paigasus` directly, alone, still gives `negative-control OK [app-version-unreleased]`. The
+fallback render still uses the fixture chart, so spec § 3.2 item 4's render assertion catches the
+wrong tag. Spec § 4.3 item 3 first expected `FAILED`. Commit aa818caf corrected it. Item 4 is a
+second guard for the same mistake. Adding mutation 4 on top of this change gives `negative-control
+FAILED: the module passed a mutated chart (rc=0)` and exits `rc=1`. This happens because spec
+§ 3.2 item 2 alone then reads the repository chart's released `0.1.0`. Replacing the `for dep in
+_of_kind(fallback_docs, "Deployment"):` loop body's `problems.append(...)` line with `pass`,
+alone, makes `--self-test` exit `rc=1`. The row `check8c the rendered fallback differs` goes red.
 
 ## Tool resolution
 

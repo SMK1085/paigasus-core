@@ -155,12 +155,12 @@ lives in the file that `ci/images/chains.toml` names for the image: a service's 
 console's `package.json`. `repo:helm-render` row 8a fails when a tag and its version differ, so a
 version bump must update the tag in the same pull request. The tags no longer default to
 `appVersion`. An empty tag falls back to `.Chart.AppVersion`.
-`repo:helm-render` row 8c requires `appVersion` to be a version that every image released: the git
+`repo:helm-render` row 8c requires `appVersion` to be a version that every image released. The git
 tag `paigasus-<key>-v<appVersion>` must exist for each chain. So `appVersion` is the fallback tag,
 not the deployed version. It can be older than the pinned tags, and `helm list` then shows that
 older value. To move `appVersion`, use a later pull request, after every image released the new
-version. A pull request that bumps the versions and `appVersion` together fails row 8c until the
-release.
+version. A pull request that bumps the versions and `appVersion` together fails row 8c. It cannot
+merge, because the release runs only after the merge. So split it into two pull requests.
 
 ## The golden files
 
