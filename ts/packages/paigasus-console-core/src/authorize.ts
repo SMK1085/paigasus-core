@@ -29,10 +29,12 @@ import type { ConsoleLogger } from './logger';
  * misspelt name would show its control for ever. tests/unit/action-names.test.ts holds every entry
  * to the Rust wire names, and the e2e world of the IAM console holds its ALL_ACTIONS to this list.
  *
- * SMA-636 added the five names of the gateway settings. InvokeModel and ListRoleGrants are
- * deliberately ABSENT: mayI() asks about the current user, and neither question is about the user.
- * The gateway zone asks InvokeModel about a service account through its own fail-closed
- * modelCallState, and ListRoleGrants for another principal needs Root.
+ * SMA-636 added the five names of the gateway settings. SMA-676 added RevokeRole: the gateway zone's
+ * "Model access for people" section asks GrantRole and RevokeRole at the org. InvokeModel and
+ * ListRoleGrants are deliberately ABSENT: mayI() asks about the current user. The gateway zone asks
+ * InvokeModel about a service account through its own fail-closed modelCallState. ListRoleGrants is
+ * allowed for self and, since SMA-676 D4, at a scope node where the actor administers roles; no page
+ * shows a control that depends on it, so no question is asked.
  *
  * SMA-629 added ListOutboxDeadLetters, the Dead letters nav entry's question. SMA-661 added
  * ReplayOutboxDeadLetter: the dead-letters page asks it at Root to show the bulk-replay form and
@@ -69,6 +71,7 @@ export const IAM_ACTIONS = [
   'IssueApiKey',
   'RevokeApiKey',
   'GrantRole',
+  'RevokeRole',
 ] as const;
 
 export type IamAction = (typeof IAM_ACTIONS)[number];

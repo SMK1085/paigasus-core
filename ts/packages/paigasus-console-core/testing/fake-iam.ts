@@ -21,6 +21,10 @@
 //     `ErrorInfo.metadata["correlation_id"]` (adapters/grpc/convert.rs:59-74).
 //   - A denial is `PermissionDenied` + `ErrorInfo(domain "iam.paigasus.io", reason "forbidden",
 //     metadata { retryable: "false" })` (convert.rs:111-131).
+//   - A list page over 200 rows is refused with `InvalidArgument` + reason `invalid-pagination`
+//     (application/pagination.rs:11, 28-29): on `tenancy.listMemberships` always, and on
+//     `authz.listRoleGrants` when the request sets `scopePrn`, `roleKey` or `principalKind` (SMA-676
+//     D6). The bare principal request ignores its limit, as IAM does.
 //
 // Where the fake does LESS than IAM. No current test depends on these differences. A new test that
 // needs one of them must extend the fake first, or it tests the fake and not IAM:
@@ -65,6 +69,17 @@ export const FAKE_IAM_ISSUER = 'https://idp.fake-iam.test';
 
 const CORRELATION_HEADER = 'paigasus-correlation-id';
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** IAM's Page maximum (application/pagination.rs:11). */
+const MAX_PAGE_LIMIT = 200;
+
+/** The refusal IAM's Page::new gives a list call, or null when the call pages within bounds (SMA-676). */
+function pageRefusal(method: string, request: unknown): ConnectError | null {
+  const req = request as { limit?: number; scopePrn?: string; roleKey?: string; principalKind?: number };
+  const pages = method === 'tenancy.listMemberships' || (method === 'authz.listRoleGrants' && ((req.scopePrn ?? '') !== '' || (req.roleKey ?? '') !== '' || (req.principalKind ?? 0) !== 0));
+  if (!pages || (req.limit ?? 0) <= MAX_PAGE_LIMIT) return null;
+  return iamError(Code.InvalidArgument, 'invalid-pagination', 'invalid pagination parameters');
+}
 
 const SERVICES = {
   tenancy: TenancyService,
@@ -320,6 +335,8 @@ export async function startFakeIam(opts: { handlers?: FakeIamHandlers } = {}): P
         if (token === null) throw iamError(Code.Unauthenticated, 'missing-authorization', 'a bearer token is required');
         provisioned.add(token);
       }
+      const refusal = pageRefusal(method, request);
+      if (refusal !== null) throw refusal;
       if (method === 'authn.introspect') return await introspect(request as { token: string }, context);
       if (method === 'authn.whoAmI') return await whoAmI(context);
       const handler = scripted(method);

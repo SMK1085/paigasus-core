@@ -79,6 +79,8 @@ export const ALL_ACTIONS = [
   'IssueApiKey',
   'RevokeApiKey',
   'GrantRole',
+  // SMA-676: the gateway zone's "Model access for people". This zone asks none, but the SET must equal IAM_ACTIONS.
+  'RevokeRole',
 ] as const satisfies readonly IamAction[];
 
 export type Descriptor = { service: string; version: string; capabilities: string[] } | { status: number };
