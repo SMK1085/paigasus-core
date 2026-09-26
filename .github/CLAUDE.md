@@ -267,7 +267,9 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   a chain selects its jobs and artifacts by exact name, never by a prefix or a glob (V17).
   The chains are independent of the kernel chain and of each other, so a kernel-only release, an
   image-only release and a combined release all work, and a failed image chain does not stop the
-  kernel release. `release_guard.py` V8 asserts that a publisher's job depends, in the job graph,
+  kernel release.
+
+  `release_guard.py` V8 asserts that a publisher's job depends, in the job graph,
   on the approval job of ITS OWN chain — a kernel approval job never gates an image push job. All
   five approval jobs (`approve-release`, `approve-images-iam`, `approve-images-gateway`,
   `approve-images-iam-console`, `approve-images-gateway-console`) share the
@@ -289,12 +291,12 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
 - A person sets a service or console version **by hand**, in a normal pull request. The pull
   request adds a `CHANGELOG.md` section. It also updates the image tag in
   `charts/paigasus/values.yaml`. Row 8 of `repo:helm-render` fails when the tag differs.
+
   A console's version source is the `version` field of `ts/apps/<app>/package.json`
-  (SMA-688 D1).
-  The two service crates are `publish = false` and sit in no `version_group`, so `release-plz
-  update` never sees them, and `git_only` hard-errors on the second release because each has an
-  unpublished workspace dependency (MEASURED, SMA-658 M7). The same holds inside a version group
-  (SMA-685). `ci/release-plan/release_plan.py
+  (SMA-688 D1). The two service crates are `publish = false` and sit in no `version_group`, so
+  `release-plz update` never sees them, and `git_only` hard-errors on the second release because
+  each has an unpublished workspace dependency (MEASURED, SMA-658 M7). The same holds inside a
+  version group (SMA-685). `ci/release-plan/release_plan.py
   --assert`, which `repo:actionlint` check 11 runs on every pull request, fails when a bumped
   service has no changelog section.
 - **`gh api` on a 404 exits 1 AND prints GitHub's JSON error body on STDOUT.** `--jq` is not
