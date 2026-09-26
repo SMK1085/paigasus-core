@@ -202,8 +202,9 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   3. Run `gh pr checkout <N>` (it keeps the `dependabot/*` branch name the pre-push hook needs).
   4. Run `git fetch origin`. Then read `git diff origin/main...HEAD -- rs/Cargo.lock`. Every
      changed entry must have a crates.io source. The wasm family entries must be among the
-     changes. A group PR also holds `reqwest` and other bumps. Then run `generate-wasm` and the
-     test. Commit and push.
+     changes. A group PR also holds `reqwest` and other bumps. Then
+     run `generate-wasm` and the test. Stage the five artifacts with `git add
+     rs/crates/bindings/paigasus-wasm/paigasus_wasm*`. Commit and push.
   5. If the branch goes stale again: run the merge-only `update-branch` call, then `git pull`.
      Run `generate-wasm` again only if the merge changed the kernel, the wasm binding, or the
      five artifacts.

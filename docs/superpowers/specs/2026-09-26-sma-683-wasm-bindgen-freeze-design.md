@@ -116,7 +116,8 @@ moves `wasm-bindgen` (4.3), follow these steps in order:
 4. Run `git fetch origin`. Then read `git diff origin/main...HEAD -- rs/Cargo.lock`. Every
    changed entry must have a crates.io source. The wasm family entries must be among the
    changes. A group PR also holds `reqwest` and other bumps. Then run `generate-wasm` and the
-   test. Commit and push.
+   test. Stage the five artifacts with `git add
+   rs/crates/bindings/paigasus-wasm/paigasus_wasm*`. Commit and push.
 5. If the branch goes stale again: the merge-only `update-branch` call
    (`gh api -X PUT repos/<owner>/<repo>/pulls/<N>/update-branch -f expected_head_sha=<sha>`), then
    `git pull`, then run `generate-wasm` again only if the merge changed the kernel, the wasm
