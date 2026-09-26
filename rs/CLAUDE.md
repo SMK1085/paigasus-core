@@ -168,6 +168,37 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   match a dot-directory. `napi build` stages its output in `.<crate>.napi-stage-<random>`
   beside the crate, with no `Cargo.toml`. A concurrent `cargo metadata` then exits 101.
   `repo:affected-smoke`'s **A11** reds on any `*`, `?` or `[` in `members`.
+- **The wasm-bindgen family does not move through dependabot (SMA-683).** `js-sys`, `web-sys`
+  and `wasm-bindgen-futures` pin `wasm-bindgen` with `=`. Dependabot updates one package at a
+  time, and `cargo update -p wasm-bindgen` then locks 0 packages (MEASURED, spec M0). Since
+  SMA-680 the release PR does not move it either. So `wasm-bindgen` stays frozen until a person
+  moves the whole family. Do that at a `rust-toolchain.toml` or `wasm-pack` bump, at a
+  `repo:deny` advisory for the family, or when a newer `wasm-bindgen` is needed. Use a normal
+  `feature/sma-NNN-<slug>` PR.
+  Before you start: put the proto shims on `PATH`; in a fresh worktree run `proto install` and
+  `pnpm -C ts install`; have network access (`wasm-pack` downloads `wasm-bindgen-cli`); unlock
+  1Password for commit signing.
+  ```bash
+  ( cd rs && cargo update -p wasm-bindgen -p js-sys -p web-sys -p wasm-bindgen-futures )
+  git diff -- rs/Cargo.lock          # only the seven family entries, all crates.io sources
+  moon run paigasus-kernel-ts:generate-wasm
+  moon run paigasus-kernel-ts:test   # the drift gate, before the push
+  git add rs/Cargo.lock rs/crates/bindings/paigasus-wasm/paigasus_wasm*
+  ```
+  Read the `git diff` BEFORE `generate-wasm`: that task compiles the new proc-macro and build
+  scripts on your machine, where your `gh` token and signing agent are available. Run
+  `generate-wasm` on ONE host (SMA-634 F12). If the pinned `wasm-pack` does not support the new
+  0.2.z, bump it in `.prototools` in the same PR (the invariant above `wasm-bindgen` in
+  `rs/Cargo.toml`). Record its error text here when a bump first shows it; it is not measured.
+  **The `reqwest` exception (INFERRED).** A new `reqwest` can need newer wasm crates. Then a
+  `cargo-minor-patch` PR moves `wasm-bindgen` and fails `committed-wasm.test.ts`. Use
+  `gh pr checkout <N>` (it keeps the `dependabot/*` branch name the pre-push hook needs). Run
+  the steps above from the `git diff`, then commit and push. Merge every other open cargo PR
+  first, so the regeneration is the last change before the merge. Update the branch only with a
+  merge: `gh api -X PUT repos/<owner>/<repo>/pulls/<N>/update-branch -f expected_head_sha=<sha>`.
+  Never use `--rebase`, `@dependabot recreate` or `[dependabot skip]`: each one deletes the glue
+  commit. If that merge brings a kernel, wasm-binding or artifact change, run `generate-wasm`
+  again. For a conflict in the five files, take either side and regenerate.
 
 ## Container images
 
