@@ -194,8 +194,8 @@ Each of these places must agree with the new recommendation:
       `ts/packages/paigasus-auth/src/adapters/oidc.ts:221-228`; SMA-678 D8). The tenant
       "Default Audience" setting is a possible path, not measured.
     - Entra ID: an access token for an API application ID URI needs a scope of that API. The
-      console's scopes are fixed (`ts/packages/paigasus-auth/src/config.ts:46`) and the chart has
-      no value for them. So Entra ID cannot use a dedicated audience today. A follow-up issue
+      console reads its scopes from `PAIGASUS_OIDC_SCOPES`, which has a default
+      (`ts/packages/paigasus-auth/src/config.ts:46`), but the chart has no value that sets it. So Entra ID cannot use a dedicated audience today. A follow-up issue
       tracks a configurable scope list (§ 8).
   - § 6, Dex: Dex gives the ID token and the access token the same `aud`, so no audience setting
     helps. The operator sets the acknowledgement to remove the warning. IAM still accepts a Dex
@@ -296,11 +296,11 @@ test).
 | Drop condition 2 (the acknowledgement) | W5, N4 |
 | Compare the acknowledgement with `"true"` in place of the client id | W5, W6 |
 | Move the annotation into `spec.template.metadata.annotations` | W1, W9 |
-| Put the annotation on every backend Deployment (drop `eq $id "iam"`) | W1 (count) |
+| Put the annotation on every backend Deployment (drop `eq $id "iam"`) | nothing: an equivalent mutant. `paigasus.validate` refuses a gateway backend, so every valid render has one backend Deployment (measured while planning). `eq $id "iam"` stays as protection for a future second backend. |
 | `NOTES.txt` without the include | N0 |
 | Change the marker line text | N1 |
 | Delete one W or N call line | the row counter |
-| Inline expression on line 114 changed (for example drop `toString`) | A4, A5 |
+| Drop `default` in `paigasus.iamAudience` | A1, A2. (Dropping `toString` is an equivalent mutant after the refactor: `include` renders a number as its digits. Measured while planning.) |
 | Delete the kind marker check | nothing; see R2 |
 
 ## 6. Rollout
