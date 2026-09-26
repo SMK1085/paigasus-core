@@ -85,6 +85,12 @@ oidc:
                          # A set value REPLACES oidc.clientId. IAM then does not accept
                          # oidc.clientId as the audience.
                          # Quote this value in a values file. See docs/ops/RUNBOOK-chart.md § 6.
+  acknowledgeClientIdAudience: ""   # NOT required. Set it to the value of oidc.clientId to
+                                    # remove the warning (NOTES and the paigasus.io/iam-audience-
+                                    # warning annotation) that shows when the IAM audience equals
+                                    # oidc.clientId. It does not change what IAM accepts. A
+                                    # change of oidc.clientId shows the warning again. Quote the
+                                    # value in a values file. See RUNBOOK-chart.md § 6.
   existingSecret: ""     # REQUIRED. Must hold keys: oidc-client-secret, session-redis-url.
   secretVersion: ""      # NOT required. The chart does not own existingSecret and cannot observe
                          # its contents, so it cannot detect a rotation on its own. Bump this

@@ -15,3 +15,21 @@ changes no render here.
 {{- define "paigasus.iamAudience" -}}
 {{- .Values.oidc.audience | default .Values.oidc.clientId | toString -}}
 {{- end -}}
+
+{{/*
+paigasus.iamAudienceWarns: "true" when both conditions are true, else "".
+  1. The IAM audience (paigasus.iamAudience) equals oidc.clientId. An OIDC ID token has the
+     client id as its aud, so an ID token then passes IAM's audience check.
+  2. oidc.acknowledgeClientIdAudience does not equal oidc.clientId. The compare is exact, as
+     strings. A nil value (helm upgrade --reuse-values from a release made before the key
+     existed) gives "<nil>" from toString, so the warning shows.
+There is no "the IAM backend is deployed" condition: paigasus.validate refuses every render
+without the IAM backend. Both signals (NOTES.txt and the paigasus.io/iam-audience-warning
+annotation) call this helper. No other file repeats the condition.
+*/}}
+{{- define "paigasus.iamAudienceWarns" -}}
+{{- $clientId := toString .Values.oidc.clientId -}}
+{{- if and (eq (include "paigasus.iamAudience" .) $clientId) (ne (toString .Values.oidc.acknowledgeClientIdAudience) $clientId) -}}
+true
+{{- end -}}
+{{- end -}}
