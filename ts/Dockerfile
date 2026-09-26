@@ -66,7 +66,10 @@ RUN set -eu; \
     fi
 RUN mkdir -p /app && cp -R "apps/${APP}/.next/standalone/." /app/
 RUN printf "// SPDX-License-Identifier: Apache-2.0\nawait import('./apps/%s/server.js');\n" "$APP" > /app/entrypoint.mjs
-RUN printf '// SPDX-License-Identifier: Apache-2.0\nconst r = await fetch(`http://127.0.0.1:${process.env.PORT ?? 3000}%s/healthz`);\nprocess.exit(r.ok ? 0 : 1);\n' "$BASE_PATH" > /app/healthcheck.mjs
+# The fetch carries its own 2500 ms signal (SMA-670). Docker kills the probe at --timeout=3s, and
+# without the signal only undici's 300 s headersTimeout bounds a server that accepts the
+# connection and never answers. assert_console_pins holds the signal below the --timeout.
+RUN printf '// SPDX-License-Identifier: Apache-2.0\nconst r = await fetch(`http://127.0.0.1:${process.env.PORT ?? 3000}%s/healthz`, { signal: AbortSignal.timeout(2500) });\nprocess.exit(r.ok ? 0 : 1);\n' "$BASE_PATH" > /app/healthcheck.mjs
 
 FROM gcr.io/distroless/nodejs24-debian12:nonroot@sha256:14d42e2511532589a7c7e01a753667a74fcc96266e137e8125006b87b0c32d0a
 COPY --from=builder /app /app

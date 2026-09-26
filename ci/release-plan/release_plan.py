@@ -17,12 +17,19 @@ no cargo — and it can be fixture-tested, which the dry-run reading could not b
 
 FAIL-SAFE DIRECTION. Every inconclusive outcome returns False, which BUILDS. A false build costs
 runner time; a false skip silently drops a release. Nothing here may invert that.
+
+SMA-688. The image chains come from ci/images/chains.toml, not from a list in this file. A chain
+that cannot be read RUNS (the fail-safe direction above). A registry that cannot be read names no
+chain at all: `--keys` then exits 3. ci/release-plan/run.sh then reads the keys from the registry
+with sed and writes every chain output fail-safe. It fails the plan job only when that read also
+finds no key (spec § 4.3).
 """
 from __future__ import annotations
 
 import argparse
 import contextlib
 import io
+import json
 import re
 import shutil
 import subprocess
@@ -278,11 +285,66 @@ def repo_tags(repo_root: Path) -> set[str]:
     return {line.strip() for line in proc.stdout.splitlines() if line.strip()}
 
 
-# SMA-658. Both services are Cargo `publish = false`, so `releasable_packages` filters them out by
-# design and release-plz never processes them (M7). They need their own reader, and a STRICT pin:
-# a service crate that is missing from the tree is inconclusive for that service, never a silent
-# skip.
-EXPECTED_SERVICES: dict[str, str] = {"iam": "paigasus-iam", "gateway": "paigasus-gateway"}
+# SMA-688. The chain registry (spec D10). It replaces SMA-658's EXPECTED_SERVICES pin: the keys,
+# their kinds, their version files and their changelogs live in ONE file, and four readers use
+# it. A registry that cannot be read is inconclusive for EVERY key and never yields an empty key
+# list: an empty list writes no chain output, and a chain output that nobody writes runs that
+# chain with an empty version.
+CHAIN_REGISTRY = Path("ci") / "images" / "chains.toml"
+CHAIN_KINDS = frozenset({"cargo", "npm"})
+_CHAIN_KEY_RE = re.compile(r"[a-z][a-z0-9-]*")
+_CHAIN_FIELDS = ("kind", "version_file", "changelog", "ghcr", "hub")
+
+# SMA-688. The ONE copy in this file of the registry header shape that ci/release-plan/run.sh
+# reads with sed when `--keys` fails (spec § 4.3):
+#     sed -n 's/^\[chain\.\([a-z][a-z0-9-]*\)\]$/\1/p' "$REPO_ROOT/ci/images/chains.toml"
+# That sed line in run.sh's github_output() is the TWIN of this pattern. Change one, and change
+# the other in the same commit. _assert_repo compares the keys this pattern finds with the
+# tomllib keys. So a header that tomllib reads and the sed read misses (trailing spaces, a
+# trailing comment, a quoted key, a dotted key under a bare [chain]) fails --assert on the pull
+# request, and the sed fallback can never name only part of the chains.
+CHAIN_HEADER_SED_RE = re.compile(r"^\[chain\.([a-z][a-z0-9-]*)\]$")
+
+
+def sed_chain_keys(text: str) -> list[str]:
+    """The keys that run.sh's sed fallback reads from this registry text, in file order.
+
+    Split on "\\n" only, like sed: a CRLF line keeps its "\\r", so neither reader matches it. This
+    is only true of `text` if it was decoded from the raw bytes: `Path.read_text()` opens in
+    universal-newline mode and silently turns "\\r\\n" into "\\n" before this function ever sees
+    it, which would make a CRLF header match here while real sed still rejects it. Every caller of
+    this function must pass `path.read_bytes().decode("utf-8")`, never `path.read_text(...)`.
+    """
+    return [m.group(1) for line in text.split("\n") if (m := CHAIN_HEADER_SED_RE.match(line))]
+
+
+def release_name(key: str) -> str:
+    """`paigasus-<key>`: the git tag prefix and the image title label of a chain (spec § 4.1)."""
+    return f"paigasus-{key}"
+
+
+def chain_registry(repo_root: Path) -> dict[str, dict[str, str]]:
+    """key -> entry, in file order. Every failure is InconclusiveError, and nothing returns {}."""
+    cfg = load_toml(repo_root / CHAIN_REGISTRY)
+    chains = cfg.get("chain")
+    if not isinstance(chains, dict) or not chains:
+        raise InconclusiveError(f"{CHAIN_REGISTRY} has no [chain.<key>] table")
+    out: dict[str, dict[str, str]] = {}
+    for key, entry in chains.items():
+        if _CHAIN_KEY_RE.fullmatch(key) is None:
+            raise InconclusiveError(f"{CHAIN_REGISTRY}: the chain key {key!r} is not [a-z][a-z0-9-]*")
+        if not isinstance(entry, dict):
+            raise InconclusiveError(f"{CHAIN_REGISTRY}: [chain.{key}] is not a table")
+        for field in _CHAIN_FIELDS:
+            value = entry.get(field)
+            if not isinstance(value, str) or not value:
+                raise InconclusiveError(f"{CHAIN_REGISTRY}: [chain.{key}] has no string {field}")
+        if entry["kind"] not in CHAIN_KINDS:
+            raise InconclusiveError(
+                f"{CHAIN_REGISTRY}: [chain.{key}] kind {entry['kind']!r} is not one of "
+                f"{sorted(CHAIN_KINDS)}")
+        out[key] = {field: entry[field] for field in _CHAIN_FIELDS}
+    return out
 
 # PR 2 review, minor: a service version must be exactly MAJOR.MINOR.PATCH. Without this,
 # `0.1.0-rc1` was read as an ordinary version, ran the whole chain — GHCR push, both
@@ -308,43 +370,84 @@ def changelog_names_version(text: str, version: str) -> bool:
     return any(m.group("version") == version for m in _CHANGELOG_HEADING.finditer(text))
 
 
-def service_skips(version: str, service: str, tags: set[str]) -> bool:
-    """Spec § 6.1. Skip when there is no real version yet, or when the tag already exists.
+def service_skips(version: str, key: str, tags: set[str]) -> bool:
+    """Spec § 6.1 (SMA-658). Skip when there is no real version yet, or when the tag exists.
 
-    PR 2 review, minor: the crate name comes from EXPECTED_SERVICES, the one source this module
-    already keeps for it (see its own comment above) — not rebuilt here as `f"paigasus-{service}"`,
-    which duplicated the naming convention in a second place for no reason.
+    SMA-688: the tag name comes from release_name(key), the one place that builds it. The test is
+    set MEMBERSHIP of the whole tag name, never a prefix test: `iam` is a string prefix of
+    `iam-console`, so a prefix test would read one chain's tag as the other's.
     """
     if version == "0.0.0":
         return True
-    return tag_for(EXPECTED_SERVICES[service], version) in tags
+    return tag_for(release_name(key), version) in tags
 
 
-def service_state(rs_root: Path, tags: set[str]) -> dict[str, tuple[bool, str]]:
-    """service -> (skip, version). A SEPARATE FAILURE DOMAIN from the kernel verdict.
+def cargo_version(repo_root: Path, key: str, entry: dict[str, str]) -> str:
+    """The SMA-658 cargo reader: the crate comes from the workspace members, by its release name.
 
-    Each service is read in its own try. A failure for one service writes skip=False for that
-    service — the fail-safe direction, because spec § 4.3 step 3 makes a run for an already
-    released version a no-op — and leaves the other service and the kernel verdict untouched. The
-    negative control's synthetic trees hold no service crate at all, and their kernel verdict must
-    not change because of that.
+    SMA-688 adds one check. The registry's version_file must be that same manifest, because
+    ci/helm-render reads version_file directly. Two readers that read two files would let the
+    chart tag and the release plan disagree.
     """
+    manifest = crate_manifests(repo_root / "rs")[release_name(key)]
+    if manifest.resolve() != (repo_root / entry["version_file"]).resolve():
+        raise InconclusiveError(
+            f"{CHAIN_REGISTRY} names {entry['version_file']} for {key}, but the workspace "
+            f"resolves {release_name(key)} to {manifest}")
+    pkg = load_toml(manifest).get("package") or {}
+    version = pkg.get("version")
+    if not isinstance(version, str):
+        raise InconclusiveError(f"{release_name(key)} has no literal [package] version in {manifest}")
+    return version
+
+
+def npm_version(repo_root: Path, key: str, entry: dict[str, str]) -> str:
+    """SMA-688. The top-level `version` string of a console's package.json (spec D1)."""
+    path = repo_root / entry["version_file"]
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise InconclusiveError(f"cannot read {path}: {exc}") from exc
+    version = doc.get("version") if isinstance(doc, dict) else None
+    if not isinstance(version, str):
+        raise InconclusiveError(
+            f"{path} has no top-level string version for {key} (got {type(version).__name__})")
+    return version
+
+
+def service_state(repo_root: Path, tags: set[str]) -> dict[str, tuple[bool, str]]:
+    """chain key -> (skip, version). A SEPARATE FAILURE DOMAIN from the kernel verdict.
+
+    Each key is read in its own try. A failure for one key writes skip=False for that key — the
+    fail-safe direction, because spec § 4.3 step 3 (SMA-658) makes a run for an already released
+    version a no-op — and leaves the other keys and the kernel verdict untouched.
+
+    SMA-688: the keys come from ci/images/chains.toml, and `repo_root` is the repository root,
+    no longer `rs/`. When the registry itself cannot be read, this returns {} and says so on
+    stderr: it cannot name a key, so it writes none. ci/release-plan/run.sh asks `--keys` first.
+    In that state it reads the keys from the registry with sed and writes every chain output
+    fail-safe, and it fails the plan job only when the sed read finds no key either.
+    """
+    try:
+        registry = chain_registry(repo_root)
+    except Exception as exc:  # deliberately broad; see the docstring above.
+        print(f"release-plan: the chain registry is inconclusive ({type(exc).__name__}: {exc}) "
+              f"— no chain output can be named", file=sys.stderr)
+        return {}
+    readers = {"cargo": cargo_version, "npm": npm_version}
     out: dict[str, tuple[bool, str]] = {}
-    for service, crate in EXPECTED_SERVICES.items():
+    for key, entry in registry.items():
         try:
-            manifest = crate_manifests(rs_root)[crate]
-            pkg = load_toml(manifest).get("package") or {}
-            version = pkg.get("version")
-            if not isinstance(version, str):
-                raise InconclusiveError(f"{crate} has no literal [package] version in {manifest}")
+            version = readers[entry["kind"]](repo_root, key, entry)
             if version != "0.0.0" and _SERVICE_VERSION_RE.fullmatch(version) is None:
                 raise InconclusiveError(
-                    f"{crate}'s version {version!r} in {manifest} is not MAJOR.MINOR.PATCH")
-            out[service] = (service_skips(version, service, tags), version)
+                    f"{release_name(key)}'s version {version!r} in {entry['version_file']} "
+                    f"is not MAJOR.MINOR.PATCH")
+            out[key] = (service_skips(version, key, tags), version)
         except Exception as exc:  # deliberately broad; see the docstring above.
-            print(f"release-plan: {service} is inconclusive ({type(exc).__name__}: {exc}) — run",
+            print(f"release-plan: {key} is inconclusive ({type(exc).__name__}: {exc}) — run",
                   file=sys.stderr)
-            out[service] = (False, "")
+            out[key] = (False, "")
     return out
 
 
@@ -566,12 +669,17 @@ def _malformed_config_asserts_three() -> str | None:
     end to end (a malformed config -> `_assert_repo` -> exit 3) and is kept for that. The
     untyped-failure coverage this row used to be the only source of moved to two new rows,
     `_untyped_collection_failure_asserts_three` and `_untyped_collection_failure_builds`.
+
+    SMA-688: the tree carries the chain registry. Collection fails first, so `_assert_repo`
+    returns 3 before it reads the registry. Mutation this row proves: remove the `try` around
+    collection in _assert_repo, and the helper sees a traceback, not 3.
     """
     tmp = tempfile.mkdtemp()
     try:
         rs_root = Path(tmp) / "rs"
         crate_dir = rs_root / "crates" / "libs" / "a"
         crate_dir.mkdir(parents=True)
+        _write_chain_fixture(Path(tmp))
         (rs_root / "Cargo.toml").write_text('[workspace]\nmembers = ["crates/*/*"]\n')
         (rs_root / "release-plz.toml").write_text("workspace = 3\n")
         (crate_dir / "Cargo.toml").write_text('[package]\nname = "a"\nversion = "1.0.0"\n')
@@ -711,6 +819,10 @@ def _broken_crate_manifest_tree(tmp: str) -> Path:
     int 3, then calls `3.get("name")` -> AttributeError: 'int' object has no attribute 'get'.
     Only a broad `except Exception` converts that. Everything else here is well-formed, so the
     failure is unambiguously the one this fixture names.
+
+    SMA-688: the tree carries the chain registry, so the only untyped failure is the crate
+    manifest's. Mutation proved by its two users: narrow the broad `except Exception` in
+    _assert_repo or in run() to `except InconclusiveError`.
     """
     rs_root = Path(tmp) / "rs"
     crate_dir = rs_root / "crates" / "libs" / "a"
@@ -718,6 +830,7 @@ def _broken_crate_manifest_tree(tmp: str) -> Path:
     (rs_root / "Cargo.toml").write_text('[workspace]\nmembers = ["crates/*/*"]\n')
     (rs_root / "release-plz.toml").write_text("")
     (crate_dir / "Cargo.toml").write_text("package = 3\n")
+    _write_chain_fixture(Path(tmp))
     return rs_root
 
 
@@ -798,22 +911,32 @@ def _markers_are_mutually_exclusive() -> str | None:
     return "; ".join(problems) or None
 
 
-# SMA-658. The services are invisible to `releasable_packages` (they are Cargo `publish = false`),
-# so they need their own reader. A service is SKIPPED when it has no real version yet, or when its
-# tag already exists. Anything else RUNS, which is the fail-safe direction: spec § 4.3 step 3 makes
-# a run for an already released version a no-op.
-SERVICE_FIXTURES: list[tuple[str, str, set[str], bool]] = [
-    ("a version with no tag -> run", "0.1.0", set(), False),
-    ("the tag already exists -> skip", "0.1.0", {"paigasus-iam-v0.1.0"}, True),
-    ("still 0.0.0 -> skip", "0.0.0", set(), True),
-    ("a newer version than the tag -> run", "0.2.0", {"paigasus-iam-v0.1.0"}, False),
-    ("a tag that only PREFIXES the wanted one -> run", "0.1.0", {"paigasus-iam-v0.1.0-rc1"}, False),
+# SMA-658. A chain is SKIPPED when it has no real version yet, or when its tag already exists.
+# Anything else RUNS, which is the fail-safe direction: spec § 4.3 step 3 makes a run for an
+# already released version a no-op.
+#
+# SMA-688: each row names its chain key. `iam` is a string prefix of `iam-console`, so the last
+# three rows prove that the tag test compares the WHOLE tag name. Mutation: replace the set
+# membership in service_skips with `any(t.startswith(release_name(key)) for t in tags)`, and the
+# row "iam at 0.1.0 does not read the iam-console tag" reds.
+SERVICE_FIXTURES: list[tuple[str, str, str, set[str], bool]] = [
+    ("a version with no tag -> run", "iam", "0.1.0", set(), False),
+    ("the tag already exists -> skip", "iam", "0.1.0", {"paigasus-iam-v0.1.0"}, True),
+    ("still 0.0.0 -> skip", "iam", "0.0.0", set(), True),
+    ("a newer version than the tag -> run", "iam", "0.2.0", {"paigasus-iam-v0.1.0"}, False),
+    ("a tag that only PREFIXES the wanted one -> run", "iam", "0.1.0", {"paigasus-iam-v0.1.0-rc1"}, False),
+    ("iam at 0.1.0 does not read the iam-console tag -> run", "iam", "0.1.0",
+     {"paigasus-iam-console-v0.1.0"}, False),
+    ("iam-console does not read the iam tag -> run", "iam-console", "0.1.0",
+     {"paigasus-iam-v0.1.0"}, False),
+    ("iam-console with its own tag -> skip", "iam-console", "0.1.0",
+     {"paigasus-iam-console-v0.1.0"}, True),
 ]
 
 
 def _service_fixture_rows() -> str | None:
-    for label, version, tags, want in SERVICE_FIXTURES:
-        got = service_skips(version, "iam", tags)
+    for label, key, version, tags, want in SERVICE_FIXTURES:
+        got = service_skips(version, key, tags)
         if got != want:
             return f"{label!r}: expected {want}, got {got}"
     return None
@@ -837,12 +960,123 @@ def _changelog_reader_rows() -> str | None:
     return None
 
 
+# SMA-688. The registry that every synthetic tree below carries: the same four keys and the same
+# paths as the real ci/images/chains.toml. A tree that reaches _assert_repo or service_state must
+# hold it and both console package.json files at 0.0.0 (spec § 4.2). Without them each console
+# adds a "could not be read" problem, and a fixture that expects exactly one problem passes for
+# the wrong reason.
+_FIXTURE_CHAINS_TOML = """\
+[chain.iam]
+kind = "cargo"
+version_file = "rs/crates/services/paigasus-iam/Cargo.toml"
+changelog = "rs/crates/services/paigasus-iam/CHANGELOG.md"
+ghcr = "ghcr.io/smk1085/paigasus-iam"
+hub = "docker.io/smaschek/paigasus-iam"
+
+[chain.gateway]
+kind = "cargo"
+version_file = "rs/crates/services/paigasus-gateway/Cargo.toml"
+changelog = "rs/crates/services/paigasus-gateway/CHANGELOG.md"
+ghcr = "ghcr.io/smk1085/paigasus-gateway"
+hub = "docker.io/smaschek/paigasus-gateway"
+
+[chain.iam-console]
+kind = "npm"
+version_file = "ts/apps/iam-console/package.json"
+changelog = "ts/apps/iam-console/CHANGELOG.md"
+ghcr = "ghcr.io/smk1085/paigasus-iam-console"
+hub = "docker.io/smaschek/paigasus-iam-console"
+
+[chain.gateway-console]
+kind = "npm"
+version_file = "ts/apps/gateway-console/package.json"
+changelog = "ts/apps/gateway-console/CHANGELOG.md"
+ghcr = "ghcr.io/smk1085/paigasus-gateway-console"
+hub = "docker.io/smaschek/paigasus-gateway-console"
+"""
+_FIXTURE_CHAINS: dict[str, dict[str, str]] = tomllib.loads(_FIXTURE_CHAINS_TOML)["chain"]
+
+
+def _write_chain_fixture(repo_root: Path, *, console_versions: dict[str, str] | None = None,
+                         console_texts: dict[str, str] | None = None) -> None:
+    """Write ci/images/chains.toml and both console package.json files under `repo_root`.
+
+    A console is at 0.0.0 unless `console_versions` names it. `console_texts` replaces the whole
+    text of a console's package.json, for the malformed-shape rows.
+    """
+    (repo_root / CHAIN_REGISTRY).parent.mkdir(parents=True, exist_ok=True)
+    (repo_root / CHAIN_REGISTRY).write_text(_FIXTURE_CHAINS_TOML)
+    for key in ("iam-console", "gateway-console"):
+        path = repo_root / _FIXTURE_CHAINS[key]["version_file"]
+        path.parent.mkdir(parents=True, exist_ok=True)
+        version = (console_versions or {}).get(key, "0.0.0")
+        default = json.dumps({"name": f"@paigasus/{key}", "version": version, "private": True},
+                             indent=2) + "\n"
+        path.write_text((console_texts or {}).get(key, default))
+
+
+def _git_commit_and_tag(tmp: str, tags: tuple[str, ...]) -> None:
+    """One commit, then each tag in `tags`. Moved here unchanged from
+    _service_unparsable_version_asserts_three_tree, so that several trees can share it."""
+    subprocess.run(["git", "init", "-q", tmp], check=True)
+    subprocess.run(["git", "-C", tmp, "config", "user.email", "release-plan-self-test@example.com"],
+                    check=True)
+    subprocess.run(["git", "-C", tmp, "config", "user.name", "release-plan self-test"], check=True)
+    subprocess.run(["git", "-C", tmp, "add", "-A"], check=True)
+    # `-c commit.gpgsign=false` / `-c tag.gpgSign=false`: this repo's global git config signs
+    # every commit and tag (1Password-backed SSH signing). A throwaway fixture tree must not
+    # depend on that being unlocked, and an unsigned, unannotated tag is all `repo_tags` reads.
+    subprocess.run(["git", "-C", tmp, "-c", "commit.gpgsign=false", "commit", "-q", "-m", "init"],
+                    check=True)
+    for tag in tags:
+        subprocess.run(["git", "-C", tmp, "-c", "tag.gpgSign=false", "tag", tag], check=True)
+
+
+def _complete_chain_tree(tmp: str, *, versions: dict[str, str] | None = None,
+                         changelogs: dict[str, str] | None = None,
+                         console_texts: dict[str, str] | None = None,
+                         tags: tuple[str, ...] = ("unrelated-tag",)) -> Path:
+    """A whole repository that `_assert_repo` reads as CLEAN while every chain is at 0.0.0.
+
+    The derived releasable set equals EXPECTED_RELEASABLE, the tree carries a tag, and every chain
+    of the fixture registry resolves. So a fixture built on it gets exactly the problem it names
+    and no other. `versions` maps a chain key to its version (default 0.0.0). `changelogs` maps a
+    chain key to the text of its CHANGELOG.md. `console_texts` replaces a console's package.json.
+    """
+    all_versions = {"iam": "0.0.0", "gateway": "0.0.0", "iam-console": "0.0.0",
+                    "gateway-console": "0.0.0", **(versions or {})}
+    repo_root = Path(tmp)
+    rs_root = repo_root / "rs"
+    for name in ("paigasus-kernel", "paigasus-proto", "paigasus-proto-derive"):
+        d = rs_root / "crates" / "libs" / name
+        d.mkdir(parents=True)
+        (d / "Cargo.toml").write_text(f'[package]\nname = "{name}"\nversion = "1.0.0"\n')
+    for key in ("iam", "gateway"):
+        d = rs_root / "crates" / "services" / release_name(key)
+        d.mkdir(parents=True)
+        (d / "Cargo.toml").write_text(
+            f'[package]\nname = "{release_name(key)}"\nversion = "{all_versions[key]}"\n'
+            f'publish = false\n')
+    (rs_root / "Cargo.toml").write_text(
+        '[workspace]\nmembers = ["crates/libs/*", "crates/services/*"]\n')
+    (rs_root / "release-plz.toml").write_text("")
+    _write_chain_fixture(
+        repo_root,
+        console_versions={k: all_versions[k] for k in ("iam-console", "gateway-console")},
+        console_texts=console_texts)
+    for key, text in (changelogs or {}).items():
+        (repo_root / _FIXTURE_CHAINS[key]["changelog"]).write_text(text)
+    _git_commit_and_tag(tmp, tags)
+    return repo_root
+
+
 # S9 (SMA-658). Spec § 6.1's fail-safe direction as a fixture: a service that cannot be read is
 # inconclusive for THAT SERVICE alone — never a silent skip, and never cross-talk into the other
 # service or into run()'s own kernel verdict. This mirrors _broken_crate_manifest_tree's shape,
 # but leaves `paigasus-iam` OUT of `[workspace] members` entirely (rather than malforming its
 # manifest), so `crate_manifests(rs_root)["paigasus-iam"]` fails with a plain KeyError that never
 # touches the scan for the healthy `paigasus-gateway` crate or for run()'s own kernel packages.
+# SMA-688: the tree also carries the chain registry and both consoles at 0.0.0.
 def _mixed_service_tree(tmp: str) -> Path:
     rs_root = Path(tmp) / "rs"
     kernel_dir = rs_root / "crates" / "libs" / "paigasus-kernel"
@@ -856,6 +1090,7 @@ def _mixed_service_tree(tmp: str) -> Path:
         '[package]\nname = "paigasus-kernel"\nversion = "0.1.0"\n')
     (gateway_dir / "Cargo.toml").write_text(
         '[package]\nname = "paigasus-gateway"\nversion = "0.1.0"\npublish = false\n')
+    _write_chain_fixture(Path(tmp))
     return rs_root
 
 
@@ -868,6 +1103,9 @@ def _malformed_service_version_tree(tmp: str) -> Path:
     and both signatures before `ci/images/release_decision.py`'s `floating` step finally rejected
     it. `paigasus-gateway` stays healthy, mirroring `_mixed_service_tree`'s shape, to prove the
     rejection stays scoped to `iam` alone.
+
+    SMA-688: the tree carries the chain registry and both consoles at 0.0.0, so the consoles
+    read as a clean skip and add nothing to the iam verdict under test.
     """
     rs_root = Path(tmp) / "rs"
     kernel_dir = rs_root / "crates" / "libs" / "paigasus-kernel"
@@ -884,14 +1122,17 @@ def _malformed_service_version_tree(tmp: str) -> Path:
         '[package]\nname = "paigasus-iam"\nversion = "0.1.0-rc1"\npublish = false\n')
     (gateway_dir / "Cargo.toml").write_text(
         '[package]\nname = "paigasus-gateway"\nversion = "0.1.0"\npublish = false\n')
+    _write_chain_fixture(Path(tmp))
     return rs_root
 
 
 def _service_version_format_is_rejected() -> str | None:
+    """Mutation this row proves: delete the `_SERVICE_VERSION_RE.fullmatch` test in
+    service_state, and iam reads (True-or-False, '0.1.0-rc1') instead of (False, '')."""
     tmp = tempfile.mkdtemp()
     try:
         rs_root = _malformed_service_version_tree(tmp)
-        state = service_state(rs_root, set())
+        state = service_state(rs_root.parent, set())
         if state.get("iam") != (False, ""):
             return (f"the malformed iam version did not read as (False, '') (run with an empty, "
                      f"never-matching plan version): {state.get('iam')!r}")
@@ -907,49 +1148,13 @@ def _service_unparsable_version_asserts_three_tree(tmp: str) -> Path:
     """A tree built so `_assert_repo` reports EXACTLY ONE problem if the fix under
     `_service_unparsable_version_asserts_three` is present, and ZERO if it is not.
 
-    PR 2 review, finding 1. `releasable_packages` derives exactly `EXPECTED_RELEASABLE`
-    (kernel, proto, proto-derive, each `publish = true` by default), so the strict-equality
-    pin does not itself add a problem. `git tag` gives `repo_tags` a non-empty set, so the
-    "no tags at all" branch does not add one either. `gateway` sits at the legitimate `0.0.0`
-    skip. That leaves `iam`'s `0.1.0-rc1` — a version `_SERVICE_VERSION_RE` cannot parse — as
-    the ONLY thing that can make `_assert_repo` report a problem, which is what proves the
-    fix is load-bearing rather than incidentally covered by an unrelated problem.
+    PR 2 review, finding 1. `_complete_chain_tree` derives exactly EXPECTED_RELEASABLE, carries a
+    tag, and holds gateway and both consoles at the legitimate 0.0.0 skip (SMA-688: the chain
+    registry and both console package.json files are part of it). That leaves iam's `0.1.0-rc1`
+    — a version `_SERVICE_VERSION_RE` cannot parse — as the ONLY thing that can make
+    `_assert_repo` report a problem, which is what proves the fix is load-bearing.
     """
-    repo_root = Path(tmp)
-    rs_root = repo_root / "rs"
-    kernel_dir = rs_root / "crates" / "libs" / "paigasus-kernel"
-    proto_dir = rs_root / "crates" / "libs" / "paigasus-proto"
-    derive_dir = rs_root / "crates" / "libs" / "paigasus-proto-derive"
-    iam_dir = rs_root / "crates" / "services" / "paigasus-iam"
-    gateway_dir = rs_root / "crates" / "services" / "paigasus-gateway"
-    for d in (kernel_dir, proto_dir, derive_dir, iam_dir, gateway_dir):
-        d.mkdir(parents=True)
-    (rs_root / "Cargo.toml").write_text(
-        '[workspace]\nmembers = ["crates/libs/*", "crates/services/*"]\n')
-    (rs_root / "release-plz.toml").write_text("")
-    (kernel_dir / "Cargo.toml").write_text(
-        '[package]\nname = "paigasus-kernel"\nversion = "1.0.0"\n')
-    (proto_dir / "Cargo.toml").write_text(
-        '[package]\nname = "paigasus-proto"\nversion = "1.0.0"\n')
-    (derive_dir / "Cargo.toml").write_text(
-        '[package]\nname = "paigasus-proto-derive"\nversion = "1.0.0"\n')
-    (iam_dir / "Cargo.toml").write_text(
-        '[package]\nname = "paigasus-iam"\nversion = "0.1.0-rc1"\npublish = false\n')
-    (gateway_dir / "Cargo.toml").write_text(
-        '[package]\nname = "paigasus-gateway"\nversion = "0.0.0"\npublish = false\n')
-    subprocess.run(["git", "init", "-q", tmp], check=True)
-    subprocess.run(["git", "-C", tmp, "config", "user.email", "release-plan-self-test@example.com"],
-                    check=True)
-    subprocess.run(["git", "-C", tmp, "config", "user.name", "release-plan self-test"], check=True)
-    subprocess.run(["git", "-C", tmp, "add", "-A"], check=True)
-    # `-c commit.gpgsign=false` / `-c tag.gpgSign=false`: this repo's global git config signs
-    # every commit and tag (1Password-backed SSH signing). A throwaway fixture tree must not
-    # depend on that being unlocked, and an unsigned, unannotated tag is all `repo_tags` reads.
-    subprocess.run(["git", "-C", tmp, "-c", "commit.gpgsign=false", "commit", "-q", "-m", "init"],
-                    check=True)
-    subprocess.run(["git", "-C", tmp, "-c", "tag.gpgSign=false", "tag", "unrelated-tag"],
-                    check=True)
-    return repo_root
+    return _complete_chain_tree(tmp, versions={"iam": "0.1.0-rc1"})
 
 
 def _service_unparsable_version_asserts_three() -> str | None:
@@ -985,10 +1190,12 @@ def _service_unparsable_version_asserts_three() -> str | None:
 
 
 def _service_state_is_a_separate_failure_domain() -> str | None:
+    """Mutation this row proves: move service_state's per-key `try` outside the loop, and the
+    healthy gateway crate reads (False, '') with iam."""
     tmp = tempfile.mkdtemp()
     try:
         rs_root = _mixed_service_tree(tmp)
-        state = service_state(rs_root, set())
+        state = service_state(rs_root.parent, set())
         if state.get("iam") != (False, ""):
             return f"the missing iam crate did not read as (False, ''): {state.get('iam')!r}"
         if state.get("gateway") != (False, "0.1.0"):
@@ -1011,6 +1218,13 @@ def _service_state_is_a_separate_failure_domain() -> str | None:
 # `except (OSError, tomllib.TOMLDecodeError)` is the pattern this follows: name every expected
 # failure mode explicitly.
 def _changelog_undecodable_asserts_three() -> str | None:
+    """Mutation this row proves: narrow `except (OSError, UnicodeDecodeError)` in _assert_repo to
+    `except OSError`, and the non-UTF-8 CHANGELOG.md escapes as a traceback.
+
+    SMA-688: the tree carries the chain registry, and the row now also asserts the stderr names
+    the changelog. This tree has other problems too (no tag, a derived releasable set that is
+    not EXPECTED_RELEASABLE), so rc 3 alone does not prove that the decode error was reported.
+    """
     tmp = tempfile.mkdtemp()
     try:
         rs_root = Path(tmp) / "rs"
@@ -1029,18 +1243,376 @@ def _changelog_undecodable_asserts_three() -> str | None:
             '[package]\nname = "paigasus-iam"\nversion = "0.1.0"\npublish = false\n')
         # An invalid UTF-8 byte (0xFF is never valid in any UTF-8 sequence position).
         (iam_dir / "CHANGELOG.md").write_bytes(b"## [0.1.0]\n\xff\n")
+        _write_chain_fixture(Path(tmp))
         subprocess.run(["git", "init", "-q", tmp], check=True)
         try:
-            with contextlib.redirect_stderr(io.StringIO()):
+            with contextlib.redirect_stderr(io.StringIO()) as err:
                 rc = _assert_repo(Path(tmp))
         except Exception as exc:  # deliberately broad; catching it IS the RED signal pre-fix
             return (f"_assert_repo raised {type(exc).__name__}: {exc} for a non-UTF-8 "
                     f"CHANGELOG.md instead of returning 3 — this is the rc=1 crash")
         if rc != 3:
             return f"_assert_repo returned {rc} for a non-UTF-8 CHANGELOG.md, expected 3"
+        if "CHANGELOG.md cannot be read" not in err.getvalue():
+            return (f"_assert_repo returned 3 but did not name the undecodable changelog: "
+                    f"{err.getvalue()!r}")
         return None
     finally:
         shutil.rmtree(tmp)
+
+
+# SMA-688. The malformed registry shapes. Each one must be InconclusiveError whose message holds
+# the marker, and `--keys` must then print NO key and exit 3. An empty or partial key list would
+# leave a chain output unwritten, and ci/release-plan/run.sh would run that chain with an empty
+# version (spec § 4.2, last bullet).
+_REGISTRY_SHAPE_CASES: tuple[tuple[str, str, str], ...] = (
+    ("no chain table", "[other]\nx = 1\n", "has no [chain.<key>] table"),
+    ("an empty chain table", "chain = {}\n", "has no [chain.<key>] table"),
+    ("an entry that is not a table", "[chain]\niam = 3\n", "is not a table"),
+    ("an entry with no version_file",
+     '[chain.iam]\nkind = "cargo"\nchangelog = "c"\nghcr = "g"\nhub = "h"\n',
+     "has no string version_file"),
+    ("an unknown kind",
+     '[chain.iam]\nkind = "pip"\nversion_file = "v"\nchangelog = "c"\nghcr = "g"\nhub = "h"\n',
+     "kind 'pip' is not one of"),
+    ("a key outside [a-z][a-z0-9-]*",
+     '[chain.Iam_X]\nkind = "cargo"\nversion_file = "v"\nchangelog = "c"\nghcr = "g"\nhub = "h"\n',
+     "is not [a-z][a-z0-9-]*"),
+    ("invalid TOML", "[chain.iam\n", "cannot read"),
+)
+
+
+def _keys_of(repo_root: Path) -> tuple[int, str]:
+    """`main(["--keys", repo_root])`: its return code and its stdout. Stderr is discarded."""
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+        rc = main(["--keys", str(repo_root)])
+    return rc, out.getvalue()
+
+
+def _keys_prints_the_registry() -> str | None:
+    """`--keys` prints the registry keys, one on each line, in FILE order, and exits 0.
+
+    ci/release-plan/run.sh reads this output to name the chain outputs it writes. Mutation: print
+    `sorted(registry)` (gateway, gateway-console, iam, iam-console), or all keys on one line, and
+    this row reds.
+    """
+    tmp = tempfile.mkdtemp()
+    try:
+        _write_chain_fixture(Path(tmp))
+        rc, out = _keys_of(Path(tmp))
+        want = "iam\ngateway\niam-console\ngateway-console\n"
+        if rc != 0 or out != want:
+            return f"--keys returned rc {rc} and printed {out!r}, want rc 0 and {want!r}"
+        return None
+    finally:
+        shutil.rmtree(tmp)
+
+
+def _missing_registry_is_inconclusive() -> str | None:
+    """A tree with no ci/images/chains.toml. `--keys` exits 3 and prints nothing, and
+    service_state names no key at all.
+
+    Mutation: fall back to a hard-coded key list when the registry cannot be read, and this row
+    reds on the non-empty stdout.
+    """
+    tmp = tempfile.mkdtemp()
+    try:
+        rc, out = _keys_of(Path(tmp))
+        if rc != 3 or out:
+            return f"--keys on a tree with no registry returned rc {rc} and printed {out!r}, want rc 3 and ''"
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            state = service_state(Path(tmp), set())
+        if state != {}:
+            return f"service_state named keys without a registry: {state!r}"
+        if "the chain registry is inconclusive" not in err.getvalue():
+            return f"service_state did not say why it named no key: {err.getvalue()!r}"
+        return None
+    finally:
+        shutil.rmtree(tmp)
+
+
+def _malformed_registry_is_inconclusive() -> str | None:
+    """Each _REGISTRY_SHAPE_CASES entry: chain_registry raises with the case's own marker, and
+    `--keys` exits 3 with no stdout.
+
+    Mutation: delete any one validation in chain_registry, and its case reds with "did not raise"
+    or with the wrong marker. The marker match, not a bare `except InconclusiveError`, is what
+    makes a neutered check visible (the _tag_name_override_is_inconclusive lesson).
+    """
+    for label, text, marker in _REGISTRY_SHAPE_CASES:
+        tmp = tempfile.mkdtemp()
+        try:
+            (Path(tmp) / CHAIN_REGISTRY).parent.mkdir(parents=True)
+            (Path(tmp) / CHAIN_REGISTRY).write_text(text)
+            try:
+                chain_registry(Path(tmp))
+            except InconclusiveError as exc:
+                if marker not in str(exc):
+                    return f"{label}: InconclusiveError for the wrong reason: {exc!r} (want {marker!r})"
+            else:
+                return f"{label}: chain_registry did not raise"
+            rc, out = _keys_of(Path(tmp))
+            if rc != 3 or out:
+                return f"{label}: --keys returned rc {rc} and printed {out!r}, want rc 3 and ''"
+        finally:
+            shutil.rmtree(tmp)
+    return None
+
+
+def _only_iam_console_bumped() -> str | None:
+    """AC 1: a release that bumps one console runs exactly that console's chain.
+
+    iam and gateway are at 0.1.0 and tagged, iam-console is at 0.1.0 and untagged, and
+    gateway-console is still 0.0.0. Mutation: read every console from one package.json, or look
+    the iam-console tag up under the iam release name, and this row reds.
+    """
+    tmp = tempfile.mkdtemp()
+    try:
+        repo_root = _complete_chain_tree(
+            tmp, versions={"iam": "0.1.0", "gateway": "0.1.0", "iam-console": "0.1.0"})
+        got = service_state(repo_root, {"paigasus-iam-v0.1.0", "paigasus-gateway-v0.1.0"})
+        want = {"iam": (True, "0.1.0"), "gateway": (True, "0.1.0"),
+                "iam-console": (False, "0.1.0"), "gateway-console": (True, "0.0.0")}
+        if got != want:
+            return f"service_state returned {got!r}, want {want!r}"
+        return None
+    finally:
+        shutil.rmtree(tmp)
+
+
+def _console_package_inconclusive(text: str, what: str) -> str | None:
+    """One malformed iam-console package.json: that key reads (False, ''), and no other key
+    changes. Mutation: move service_state's per-key `try` outside the loop, and the other keys
+    read (False, '') too."""
+    tmp = tempfile.mkdtemp()
+    try:
+        repo_root = _complete_chain_tree(
+            tmp, versions={"iam": "0.1.0", "gateway": "0.1.0", "gateway-console": "0.1.0"},
+            console_texts={"iam-console": text})
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            got = service_state(repo_root, set())
+        want = {"iam": (False, "0.1.0"), "gateway": (False, "0.1.0"),
+                "iam-console": (False, ""), "gateway-console": (False, "0.1.0")}
+        if got != want:
+            return f"{what}: service_state returned {got!r}, want {want!r}"
+        if "iam-console is inconclusive" not in err.getvalue():
+            return f"{what}: no 'iam-console is inconclusive' line on stderr: {err.getvalue()!r}"
+        return None
+    finally:
+        shutil.rmtree(tmp)
+
+
+def _console_package_no_version() -> str | None:
+    return _console_package_inconclusive(
+        '{"name": "@paigasus/iam-console", "private": true}\n', "no version")
+
+
+def _console_package_numeric_version() -> str | None:
+    return _console_package_inconclusive(
+        '{"name": "@paigasus/iam-console", "version": 1}\n', '"version": 1')
+
+
+def _console_package_invalid_json() -> str | None:
+    return _console_package_inconclusive(
+        '{"name": "@paigasus/iam-console", "version": "0.1.0",\n', "invalid JSON")
+
+
+def _console_assert_case(changelog: str) -> tuple[int, str]:
+    """_assert_repo over a clean tree with iam-console at 0.1.0 and this CHANGELOG.md text."""
+    tmp = tempfile.mkdtemp()
+    try:
+        repo_root = _complete_chain_tree(
+            tmp, versions={"iam-console": "0.1.0"}, changelogs={"iam-console": changelog})
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            rc = _assert_repo(repo_root)
+        return rc, err.getvalue()
+    finally:
+        shutil.rmtree(tmp)
+
+
+def _console_changelog_missing_asserts_three() -> str | None:
+    """A console at 0.1.0 with no `## [0.1.0]` section fails --assert (spec § 4.2).
+
+    Mutation: restrict the changelog loop in _assert_repo to `kind == "cargo"`, and this row reds.
+    Its twin below proves the tree has no OTHER problem, so rc 3 here is this cause alone.
+    """
+    rc, err = _console_assert_case("# Changelog\n\n## [Unreleased]\n")
+    if rc != 3:
+        return f"_assert_repo returned {rc} for iam-console 0.1.0 with no changelog section, expected 3"
+    if "paigasus-iam-console is at 0.1.0 but" not in err or "`## [0.1.0]` heading" not in err:
+        return f"_assert_repo returned 3 but did not name the missing console section: {err!r}"
+    return None
+
+
+def _console_changelog_present_asserts_zero() -> str | None:
+    """The twin of the row above: the same tree WITH the section is clean."""
+    rc, err = _console_assert_case("# Changelog\n\n## [Unreleased]\n\n## [0.1.0] - 2026-09-25\n")
+    if rc != 0:
+        return f"_assert_repo returned {rc} for a clean console tree, expected 0: {err!r}"
+    return None
+
+
+def _main_prints_every_chain_output() -> str | None:
+    """The runtime path prints `skip_<key>` and `version_<key>` for EVERY registry key, in
+    registry order, and the verdict line last.
+
+    Mutation: loop over a hard-coded ("iam", "gateway") in main(), and the two console pairs are
+    missing. ci/release-plan/run.sh would then take its fail-safe branch on every push.
+    """
+    tmp = tempfile.mkdtemp()
+    try:
+        _complete_chain_tree(tmp, versions={"iam": "0.1.0", "iam-console": "0.1.0"},
+                             tags=("paigasus-iam-v0.1.0",))
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            rc = main(["--event-name", "push", tmp])
+        lines = out.getvalue().splitlines()
+        got = [ln for ln in lines if ln.startswith(("skip_", "version_"))]
+        want = ["skip_iam=true", "version_iam=0.1.0", "skip_gateway=true", "version_gateway=0.0.0",
+                "skip_iam-console=false", "version_iam-console=0.1.0",
+                "skip_gateway-console=true", "version_gateway-console=0.0.0"]
+        if rc != 0 or got != want:
+            return f"main printed {got!r} (rc {rc}), want {want!r}"
+        if not lines or not lines[-1].startswith("nothing_to_release="):
+            return f"the verdict line is not last: {lines[-1:]!r}"
+        return None
+    finally:
+        shutil.rmtree(tmp)
+
+
+def _cargo_version_file_mismatch_is_inconclusive() -> str | None:
+    """The cargo reader finds the crate through the workspace members. The registry's
+    version_file must name that same manifest, because ci/helm-render reads version_file directly.
+
+    Mutation: delete the resolve() comparison in cargo_version, and iam reads (False, '0.1.0').
+    """
+    tmp = tempfile.mkdtemp()
+    try:
+        repo_root = _complete_chain_tree(tmp, versions={"iam": "0.1.0"})
+        registry = repo_root / CHAIN_REGISTRY
+        registry.write_text(registry.read_text().replace(
+            "rs/crates/services/paigasus-iam/Cargo.toml", "rs/crates/services/paigasus-iam/Other.toml"))
+        with contextlib.redirect_stderr(io.StringIO()):
+            state = service_state(repo_root, set())
+        if state.get("iam") != (False, ""):
+            return f"a version_file that names another file did not read as (False, ''): {state.get('iam')!r}"
+        if state.get("gateway") != (True, "0.0.0"):
+            return f"the gateway chain was affected: {state.get('gateway')!r}"
+        return None
+    finally:
+        shutil.rmtree(tmp)
+
+
+def _sed_parity_case(header: str) -> str | None:
+    """_assert_repo over a clean tree whose `[chain.iam]` header line is replaced by `header`.
+
+    tomllib still reads all four keys from each variant, and the row asserts that first. Without
+    that guard, a variant that tomllib also rejects would fail --assert as an unreadable registry,
+    and the row would pass for the wrong reason. _console_changelog_present_asserts_zero is the
+    twin: the same tree with the bare header is clean, so rc 3 here is the parity check alone.
+    """
+    tmp = tempfile.mkdtemp()
+    try:
+        repo_root = _complete_chain_tree(tmp)
+        registry = repo_root / CHAIN_REGISTRY
+        text = registry.read_text()
+        if "[chain.iam]\n" not in text:
+            return "the fixture registry has no bare [chain.iam] line to replace"
+        registry.write_text(text.replace("[chain.iam]\n", header + "\n", 1))
+        keys = list(chain_registry(repo_root))
+        if keys != ["iam", "gateway", "iam-console", "gateway-console"]:
+            return f"tomllib does not read the four keys from {header!r}: {keys!r}"
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            rc = _assert_repo(repo_root)
+        if rc != 3:
+            return f"_assert_repo returned {rc} for the header {header!r}, expected 3"
+        if "the sed read of" not in err.getvalue() or "['gateway', 'gateway-console', 'iam-console']" not in err.getvalue():
+            return f"_assert_repo returned 3 but did not report the sed/tomllib mismatch: {err.getvalue()!r}"
+        return None
+    finally:
+        shutil.rmtree(tmp)
+
+
+def _sed_parity_trailing_spaces() -> str | None:
+    """`[chain.iam]  `: tomllib reads iam, and run.sh's sed read does not (spec § 4.3).
+
+    Mutation: delete the sed parity check in _assert_repo (the `if registry:` block), and this row
+    reds with rc 0. Also: widen CHAIN_HEADER_SED_RE to allow trailing spaces without the same
+    change to run.sh, and this row reds, which is the prompt to change the twin.
+    """
+    return _sed_parity_case("[chain.iam]  ")
+
+
+def _sed_parity_trailing_comment() -> str | None:
+    """`[chain.iam] # the IAM service`: tomllib reads iam, and the sed read does not.
+
+    Mutation: delete the sed parity check in _assert_repo, and this row reds with rc 0.
+    """
+    return _sed_parity_case("[chain.iam] # the IAM service")
+
+
+def _sed_parity_quoted_key() -> str | None:
+    """`[chain."iam"]`: tomllib reads the key iam, and the sed read does not.
+
+    Mutation: delete the sed parity check in _assert_repo, and this row reds with rc 0.
+    """
+    return _sed_parity_case('[chain."iam"]')
+
+
+def _sed_parity_crlf_header() -> str | None:
+    """`[chain.iam]\\r\\n`: tomllib reads iam (TOML accepts CRLF line endings), and real sed does
+    not, because the trailing `\\r` sits before sed's own end-of-line, so `]$` never matches
+    (MEASURED: `printf '[chain.iam]\\r\\n[chain.gw]\\n' | sed -n
+    's/^\\[chain\\.\\([a-z][a-z0-9-]*\\)\\]$/\\1/p'` prints only `gw`).
+
+    This is the row `_sed_parity_case` cannot cover: `_sed_parity_case` writes its variant with
+    `Path.write_text`, which never inserts a `\\r`, so it must write the CRLF byte itself. This
+    row's fixture is built by hand, not through `_sed_parity_case`, so it can control the exact
+    bytes on disk.
+
+    Mutation this row proves: in `_assert_repo`'s sed-parity block, read the registry with
+    `.read_text(encoding="utf-8")` instead of `.read_bytes().decode("utf-8")`. `read_text` opens
+    in universal-newline mode and silently turns the `\\r\\n` into a bare `\\n` before
+    `sed_chain_keys` ever sees it, so the in-process sed read then also finds `iam` — the parity
+    check reports no problem for what is a real mismatch against the sed run.sh actually runs.
+    """
+    tmp = tempfile.mkdtemp()
+    try:
+        repo_root = _complete_chain_tree(tmp)
+        registry = repo_root / CHAIN_REGISTRY
+        data = registry.read_bytes()
+        marker = b"[chain.iam]\n"
+        if marker not in data:
+            return "the fixture registry has no bare [chain.iam] line to replace"
+        registry.write_bytes(data.replace(marker, b"[chain.iam]\r\n", 1))
+        keys = list(chain_registry(repo_root))
+        if keys != ["iam", "gateway", "iam-console", "gateway-console"]:
+            return f"tomllib does not read the four keys from a CRLF [chain.iam] header: {keys!r}"
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            rc = _assert_repo(repo_root)
+        if rc != 3:
+            return f"_assert_repo returned {rc} for a CRLF [chain.iam] header, expected 3"
+        if "the sed read of" not in err.getvalue() or "['gateway', 'gateway-console', 'iam-console']" not in err.getvalue():
+            return f"_assert_repo returned 3 but did not report the sed/tomllib mismatch: {err.getvalue()!r}"
+        return None
+    finally:
+        shutil.rmtree(tmp)
+
+
+def _sed_parity_fixture_registry() -> str | None:
+    """The fixture registry, which has the same headers as the real ci/images/chains.toml, gives
+    the same keys to both readers. The real file is checked by `--assert .` (Step 4) and by
+    repo:actionlint check 11. This row does not read the real file through `__file__`, because
+    run.sh rows 7 and 8 run --self-test on a COPY of this file in a temp directory.
+
+    Mutation: change CHAIN_HEADER_SED_RE so that it drops a hyphenated key (for example
+    `[a-z][a-z0-9]*`), and this row reds.
+    """
+    got = sed_chain_keys(_FIXTURE_CHAINS_TOML)
+    if got != list(_FIXTURE_CHAINS):
+        return f"sed_chain_keys read {got!r} from the fixture registry, want {list(_FIXTURE_CHAINS)!r}"
+    return None
 
 
 # The collection-layer rows: paths a pure-function fixture cannot reach. Fourteen of the fifteen
@@ -1079,6 +1651,33 @@ COLLECTION_ROWS: tuple[tuple[str, Callable[[], str | None]], ...] = (
      _service_version_format_is_rejected),
     ("PR 2 review finding 1: an unparsable service version makes --assert exit 3, not 0",
      _service_unparsable_version_asserts_three),
+    ("SMA-688 --keys prints the registry keys in file order", _keys_prints_the_registry),
+    ("SMA-688 a missing chains.toml is inconclusive for every key", _missing_registry_is_inconclusive),
+    ("SMA-688 a malformed chains.toml is inconclusive, never an empty key list",
+     _malformed_registry_is_inconclusive),
+    ("SMA-688 a tree that bumps only iam-console runs only that chain", _only_iam_console_bumped),
+    ("SMA-688 a console package.json with no version is inconclusive for that key only",
+     _console_package_no_version),
+    ("SMA-688 a console package.json with a non-string version is inconclusive for that key only",
+     _console_package_numeric_version),
+    ("SMA-688 a console package.json with invalid JSON is inconclusive for that key only",
+     _console_package_invalid_json),
+    ("SMA-688 a console at 0.1.0 with no changelog section fails --assert",
+     _console_changelog_missing_asserts_three),
+    ("SMA-688 a console at 0.1.0 with its changelog section passes --assert",
+     _console_changelog_present_asserts_zero),
+    ("SMA-688 main prints skip_<key> and version_<key> for every key", _main_prints_every_chain_output),
+    ("SMA-688 the cargo version file must be the manifest the workspace resolves",
+     _cargo_version_file_mismatch_is_inconclusive),
+    ("SMA-688 sed parity: a chain header with trailing spaces fails --assert",
+     _sed_parity_trailing_spaces),
+    ("SMA-688 sed parity: a chain header with a trailing comment fails --assert",
+     _sed_parity_trailing_comment),
+    ("SMA-688 sed parity: a quoted chain key fails --assert", _sed_parity_quoted_key),
+    ("SMA-688 sed parity: a CRLF chain header fails --assert (real sed, not read_text)",
+     _sed_parity_crlf_header),
+    ("SMA-688 sed parity: the fixture registry gives both readers the same keys",
+     _sed_parity_fixture_registry),
 )
 
 
@@ -1172,28 +1771,54 @@ def _assert_repo(repo_root: Path) -> int:
             f"publishable, re-baseline the pin deliberately — do not loosen the comparison.")
     if not tags:
         problems.append("the repository reports no tags; --assert needs a full checkout")
-    # SMA-658 spec § 3.1: V-a is a bump by hand, so nothing else can catch a forgotten changelog
-    # entry. `repo:actionlint` check 11 runs --assert on every pull request, which is what makes
-    # this a gate rather than a convention.
-    for service, (_skip, version) in service_state(repo_root / "rs", tags).items():
+    # SMA-658 spec § 3.1, widened by SMA-688 to every chain in ci/images/chains.toml: a version is
+    # bumped by hand, so nothing else can catch a forgotten changelog entry. `repo:actionlint`
+    # check 11 runs --assert on every pull request, which is what makes this a gate rather than a
+    # convention.
+    try:
+        registry = chain_registry(repo_root)
+    except InconclusiveError as exc:
+        problems.append(f"the chain registry cannot be read ({exc}). Every chain output of the "
+                        f"release plan depends on it.")
+        registry = {}
+    # SMA-688. The sed twin (see CHAIN_HEADER_SED_RE). When `--keys` fails, run.sh names the chain
+    # outputs from the sed read alone, so that read must find the SAME keys as tomllib. `--keys`
+    # prints the tomllib keys, so this one check also proves that a valid `--keys` answer holds
+    # every key the fallback would name.
+    if registry:
+        try:
+            # read_bytes().decode(), NOT read_text(): read_text opens in universal-newline mode
+            # and turns a CRLF header into a bare "\n" one, so a "[chain.iam]\r\n" line would
+            # match CHAIN_HEADER_SED_RE here while real sed, which sees the raw "\r", does not
+            # (MEASURED: `printf '[chain.iam]\r\n[chain.gw]\n' | sed -n
+            # 's/^\[chain\.\([a-z][a-z0-9-]*\)\]$/\1/p'` prints only `gw`). read_bytes() gives
+            # sed_chain_keys the same bytes real sed reads.
+            sed_keys = sed_chain_keys((repo_root / CHAIN_REGISTRY).read_bytes().decode("utf-8"))
+        except (OSError, UnicodeDecodeError) as exc:
+            problems.append(f"{CHAIN_REGISTRY} cannot be read as text ({exc}).")
+        else:
+            if set(sed_keys) != set(registry):
+                problems.append(
+                    f"the sed read of {CHAIN_REGISTRY} finds {sorted(set(sed_keys))}, but tomllib "
+                    f"finds {sorted(registry)}. Write each chain header as a bare "
+                    f"`[chain.<key>]` line, with nothing after the `]`: ci/release-plan/run.sh "
+                    f"reads the keys with sed when `--keys` fails.")
+    for key, (_skip, version) in service_state(repo_root, tags).items():
+        name = release_name(key)
         # PR 2 review finding 1: an empty version and "0.0.0" are NOT the same state. `""` means
         # service_state could not read a literal MAJOR.MINOR.PATCH version at all (a missing
-        # crate, a non-string version, or one that fails _SERVICE_VERSION_RE) — that is a
-        # REPOSITORY PROBLEM this gate exists to catch. "0.0.0" means the crate was read fine and
-        # simply has not shipped yet, which is a legitimate skip. Folding both into one
-        # `not version or version == "0.0.0"` test let an unparsable version pass --assert
-        # silently: the runtime path still fails safe (an empty plan version mismatches the
-        # archive's real label), but only after two architecture builds, with nothing red at
-        # review time.
+        # file, a non-string version, or one that fails _SERVICE_VERSION_RE) — that is a
+        # REPOSITORY PROBLEM this gate exists to catch. "0.0.0" means the version was read fine
+        # and simply has not shipped yet, which is a legitimate skip.
         if not version:
             problems.append(
-                f"{EXPECTED_SERVICES[service]}'s version could not be read (see the "
-                f"'{service} is inconclusive' line above). A hand-bumped service must carry a "
-                f"literal MAJOR.MINOR.PATCH [package] version.")
+                f"{name}'s version could not be read (see the '{key} is inconclusive' line "
+                f"above). A hand-bumped chain must carry a literal MAJOR.MINOR.PATCH version in "
+                f"{registry[key]['version_file']}.")
             continue
         if version == "0.0.0":
             continue
-        changelog = repo_root / "rs" / "crates" / "services" / EXPECTED_SERVICES[service] / "CHANGELOG.md"
+        changelog = repo_root / registry[key]["changelog"]
         try:
             text = changelog.read_text(encoding="utf-8")
         # SMA-658 fix round 1: UnicodeDecodeError is a ValueError, not an OSError, so a
@@ -1201,11 +1826,11 @@ def _assert_repo(repo_root: Path) -> int:
         # SMA-608 fixed for the collection layer. Named explicitly, like load_toml's
         # `except (OSError, tomllib.TOMLDecodeError)` above.
         except (OSError, UnicodeDecodeError) as exc:
-            problems.append(f"{EXPECTED_SERVICES[service]} is at {version} but {changelog} cannot be read "
-                            f"({exc}). A hand-bumped service needs a changelog section.")
+            problems.append(f"{name} is at {version} but {changelog} cannot be read "
+                            f"({exc}). A hand-bumped chain needs a changelog section.")
             continue
         if not changelog_names_version(text, version):
-            problems.append(f"{EXPECTED_SERVICES[service]} is at {version} but {changelog} has no "
+            problems.append(f"{name} is at {version} but {changelog} has no "
                             f"`## [{version}]` heading. Add the section in the same PR as the "
                             f"bump: nothing else records what that release contains.")
     for p in problems:
@@ -1219,6 +1844,7 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--assert", dest="do_assert", action="store_true")
     ap.add_argument("--fixture-count", action="store_true")
     ap.add_argument("--collection-count", action="store_true")
+    ap.add_argument("--keys", action="store_true")
     ap.add_argument("--event-name", default="")
     ap.add_argument("repo_root", nargs="?", default=".")
     args = ap.parse_args(argv)
@@ -1232,24 +1858,37 @@ def main(argv: list[str]) -> int:
     if args.self_test:
         return self_test()
     root = Path(args.repo_root)
+    if args.keys:
+        # SMA-688. ci/release-plan/run.sh reads this list to name the chain outputs it writes:
+        # one key on each line, in file order. A registry that cannot be read prints NO key and
+        # exits 3, because an empty or partial list would leave a chain output unwritten. The
+        # catch is broad for the reason _assert_repo's is: this mode never exits 1.
+        try:
+            registry = chain_registry(root)
+        except Exception as exc:  # deliberately broad; see the comment above.
+            print(f"release-plan: {type(exc).__name__}: {exc}", file=sys.stderr)
+            return 3
+        for key in registry:
+            print(key)
+        return 0
     if args.do_assert:
         return _assert_repo(root)
 
     nothing, reason = run(root, args.event_name)
     print(f"release-plan: {reason}")
-    # SMA-658. The service lines are computed in their own failure domain, so a broken service
-    # read cannot change the kernel verdict above. `repo_tags` is read once more here on purpose:
-    # `run()` swallows its own failure, and a second failure here must land on the per-service
-    # fail-safe rather than on the kernel one.
+    # SMA-658. The chain lines are computed in their own failure domain, so a broken chain read
+    # cannot change the kernel verdict above. `repo_tags` is read once more here on purpose:
+    # `run()` swallows its own failure, and a second failure here must land on the per-chain
+    # fail-safe rather than on the kernel one. SMA-688: one pair of lines for every registry key.
     try:
         tags = repo_tags(root)
     except Exception as exc:  # deliberately broad; the fail-safe direction is "run".
         print(f"release-plan: tags are inconclusive ({type(exc).__name__}: {exc}) — run",
               file=sys.stderr)
         tags = set()
-    for service, (skip, version) in service_state(root / "rs", tags).items():
-        print(f"skip_{service}={'true' if skip else 'false'}")
-        print(f"version_{service}={version}")
+    for key, (skip, version) in service_state(root, tags).items():
+        print(f"skip_{key}={'true' if skip else 'false'}")
+        print(f"version_{key}={version}")
     print(f"nothing_to_release={'true' if nothing else 'false'}")
     return 0
 

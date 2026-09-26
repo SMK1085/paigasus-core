@@ -8,9 +8,10 @@ Subcommands. Each one prints `key=value` lines on stdout, in a fixed order:
   oci-digests ARCHIVE
       manifest=, config=, platform= of a single-image buildx OCI archive.
   labels ARCHIVE
-      version=, revision= (the org.opencontainers.image.* labels) of a single-image buildx OCI
-      archive. SMA-658 C1: `crane config` takes a REGISTRY reference only -- it cannot read a
-      local `oci-archive:` path -- so this is what release.yml reads the labels with instead.
+      version=, revision=, title= (the org.opencontainers.image.* labels) of a single-image
+      buildx OCI archive. SMA-658 C1: `crane config` takes a REGISTRY reference only -- it cannot
+      read a local `oci-archive:` path -- so this is what release.yml reads the labels with
+      instead.
   adopt --new-digest D --ghcr D|none --dockerhub D|none --git-tag present|absent
       action=already-released | push-new | adopt, then digest= and copy_to=.
       The FIRST digest published under :<version> is final (spec D10). A new build never
@@ -19,7 +20,11 @@ Subcommands. Each one prints `key=value` lines on stdout, in a fixed order:
       move=true|false, minor_tag=, major_tag= (empty while the major version is 0).
       FILE holds bare tag names or `git ls-remote --tags` lines.
   sbom-summary SPDX_JSON
-      packages=, libc6=true|false, cargo= (a measurement for spec M8, not an assertion).
+      packages=, libc6=true|false, cargo=, npm=, next=true|false (a measurement, spec M8).
+  sbom-floor --service KEY SPDX_JSON
+      SMA-688 D5: the sbom-summary lines, then kind= and floor=pass. One floor for each image
+      kind, read from ci/images/chains.toml. A failed floor or an unknown key prints floor=fail
+      and exits 3.
 
 Exit codes: 0 decided | 2 usage or unreadable input | 3 a conflict, or a failed self-test row.
 It never exits 1: `uv` exits 1 on its own failures, so 1 would be ambiguous.
@@ -36,6 +41,7 @@ import json
 import re
 import sys
 import tarfile
+import tomllib
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -62,6 +68,14 @@ class UsageError(Exception):
 
 class ConflictError(Exception):
     """The two registries hold different digests under one version: exit 3."""
+
+
+class FloorError(Exception):
+    """SMA-688: an SBOM below its image kind's floor, or a key that names no chain: exit 3."""
+
+
+# SMA-688 D5. The chain registry sits beside this file. Only `kind` is read here.
+CHAINS_TOML = Path(__file__).resolve().with_name("chains.toml")
 
 
 def parse_version(text: str) -> Version:
@@ -194,9 +208,13 @@ def labels_from(tar: tarfile.TarFile) -> dict[str, str]:
     """SMA-658 C1: `crane config "oci-archive:…"` cannot read a local archive. MEASURED against
     crane 0.22.1: `Error: fetching config: parsing reference … could not parse reference`, and
     with a missing file it tries to resolve a host called `oci-archive`. `oci-archive:` is a
-    syft/skopeo transport; `crane config` takes a REGISTRY reference only. This reads the same
-    two labels straight out of the archive `release_decision.py` already has on disk, so
-    `release.yml` never shells out to `crane config` for a config it already extracted."""
+    syft/skopeo transport; `crane config` takes a REGISTRY reference only. This reads the labels
+    straight out of the archive `release_decision.py` already has on disk, so `release.yml` never
+    shells out to `crane config` for a config it already extracted.
+
+    SMA-688: it also returns the title. The publish job compares it with `paigasus-<key>`, so an
+    archive of another chain stops before the first registry write, even when both chains share
+    one version."""
     config, _manifest_digest, _config_digest = _image_config_from(tar)
     config_obj_value = config.get("config")
     config_obj = {} if config_obj_value is None else _require_dict(config_obj_value, "the image config's 'config' object")
@@ -204,11 +222,14 @@ def labels_from(tar: tarfile.TarFile) -> dict[str, str]:
     label_map = {} if labels_value is None else _require_dict(labels_value, "the image config's Labels")
     version = str(label_map.get("org.opencontainers.image.version", ""))
     revision = str(label_map.get("org.opencontainers.image.revision", ""))
+    title = str(label_map.get("org.opencontainers.image.title", ""))
     if not version:
         raise UsageError("the image config carries no org.opencontainers.image.version label")
     if not revision:
         raise UsageError("the image config carries no org.opencontainers.image.revision label")
-    return {"version": version, "revision": revision}
+    if not title:
+        raise UsageError("the image config carries no org.opencontainers.image.title label")
+    return {"version": version, "revision": revision, "title": title}
 
 
 def labels(path: Path) -> dict[str, str]:
@@ -220,12 +241,17 @@ def labels(path: Path) -> dict[str, str]:
 
 
 def sbom_summary(doc: dict[str, Any]) -> dict[str, str]:
-    """Spec M8: does the SBOM see the Ubuntu packages and the Rust crates at all?"""
+    """Spec M8 (SMA-658): does the SBOM see the OS packages and the Rust crates at all?
+
+    SMA-688 adds the npm count and whether `next` is there. A console image has no Rust crates,
+    and its floor reads those two instead."""
     # A missing "packages" key defaults to []; a present key must be a list (even if falsey).
     packages_value = doc.get("packages")
     packages = [] if packages_value is None else _require_list(packages_value, "packages")
     names = set()
     cargo = 0
+    npm = 0
+    has_next = False
     for p in packages:
         if not isinstance(p, dict):
             raise UsageError(f"packages must be a list of objects, not {type(p).__name__!r}")
@@ -236,9 +262,65 @@ def sbom_summary(doc: dict[str, Any]) -> dict[str, str]:
         for ref in refs:
             if not isinstance(ref, dict):
                 raise UsageError(f"an externalRefs entry must be a JSON object, not {type(ref).__name__!r}")
-            if str(ref.get("referenceLocator", "")).startswith("pkg:cargo/"):
+            locator = str(ref.get("referenceLocator", ""))
+            if locator.startswith("pkg:cargo/"):
                 cargo += 1
-    return {"packages": str(len(packages)), "libc6": "true" if "libc6" in names else "false", "cargo": str(cargo)}
+            elif locator.startswith("pkg:npm/"):
+                npm += 1
+                # The purl of `next` itself. A scoped `@next/env` is pkg:npm/%40next/env@…,
+                # so it does not match.
+                if locator.startswith("pkg:npm/next@"):
+                    has_next = True
+    return {
+        "packages": str(len(packages)),
+        "libc6": "true" if "libc6" in names else "false",
+        "cargo": str(cargo),
+        "npm": str(npm),
+        "next": "true" if has_next else "false",
+    }
+
+
+def chain_kinds(text: str) -> dict[str, str]:
+    """SMA-688: key -> kind, from the text of ci/images/chains.toml. A wrong shape is exit 2."""
+    try:
+        data = tomllib.loads(text)
+    except tomllib.TOMLDecodeError as exc:
+        raise UsageError(f"the chain registry is not TOML: {exc}") from exc
+    chains = _require_dict(data.get("chain"), "the chain registry's [chain] table")
+    kinds: dict[str, str] = {}
+    for key, entry in chains.items():
+        kind = _require_dict(entry, f"[chain.{key}]").get("kind")
+        if not isinstance(kind, str):
+            raise UsageError(f"[chain.{key}] has no string kind")
+        kinds[key] = kind
+    return kinds
+
+
+def sbom_floor(key: str, kinds: dict[str, str], summary: dict[str, str]) -> str:
+    """SMA-688 D5. The kind of `key` when its SBOM reaches that kind's floor. Else FloorError.
+
+    cargo: at least one Rust crate (the binary was built with cargo auditable; the SMA-658 rule).
+    npm:   at least one npm package, libc6 (the distroless base's dpkg data, spec M3) and `next`.
+    """
+    if key not in kinds:
+        raise FloorError(f"{key!r} names no chain in ci/images/chains.toml (known: {sorted(kinds)})")
+    kind = kinds[key]
+    reasons: list[str] = []
+    if kind == "cargo":
+        if int(summary["cargo"]) < 1:
+            reasons.append("the SBOM lists no Rust crates; the binary was not built with cargo auditable")
+    elif kind == "npm":
+        if int(summary["npm"]) < 1:
+            reasons.append("the SBOM lists no npm packages")
+        if summary["libc6"] != "true":
+            reasons.append("the SBOM does not list libc6; the base image's package data is gone")
+        if summary["next"] != "true":
+            reasons.append("the SBOM does not list next; the console's own framework is not seen")
+    else:
+        raise FloorError(f"{key!r} has kind {kind!r}, and no SBOM floor exists for that kind")
+    if reasons:
+        raise FloorError(f"the {kind} floor failed for {key}: " + "; ".join(reasons))
+    return kind
 
 
 # --- self-test -------------------------------------------------------------------------------
@@ -315,6 +397,17 @@ def _outcome(fn: Callable[[], object]) -> object:
         return "UsageError"
     except ConflictError:
         return "ConflictError"
+    except FloorError:
+        return "FloorError"
+
+
+# SMA-688. The kinds that the floor rows use: one key of each kind, the same as the registry.
+FLOOR_KINDS = {"iam": "cargo", "iam-console": "npm"}
+
+
+def _summary(**values: str) -> dict[str, str]:
+    """An sbom_summary() result with every count at zero, then `values` on top."""
+    return {"packages": "0", "libc6": "false", "cargo": "0", "npm": "0", "next": "false", **values}
 
 
 def self_test() -> int:
@@ -355,7 +448,7 @@ def self_test() -> int:
         ("oci: the manifest blob is not an object", lambda: oci_digests_from(_fixture_archive_bad_manifest()), "UsageError"),
         # labels (spec SMA-658 C1: crane config cannot read a local oci-archive)
         (
-            "labels: a version and revision label",
+            "labels: a version, revision and title label",
             lambda: labels_from(
                 _fixture_archive(
                     config_extra={
@@ -363,12 +456,13 @@ def self_test() -> int:
                             "Labels": {
                                 "org.opencontainers.image.version": "1.2.3",
                                 "org.opencontainers.image.revision": "abc123",
+                                "org.opencontainers.image.title": "paigasus-iam-console",
                             }
                         }
                     }
                 )[0]
             ),
-            {"version": "1.2.3", "revision": "abc123"},
+            {"version": "1.2.3", "revision": "abc123", "title": "paigasus-iam-console"},
         ),
         ("labels: no Labels at all (missing-label case)", lambda: labels_from(_fixture_archive()[0]), "UsageError"),
         (
@@ -395,9 +489,9 @@ def self_test() -> int:
         (
             "sbom: counts libc6 and cargo packages",
             lambda: sbom_summary({"packages": [{"name": "libc6"}, {"name": "serde", "externalRefs": [{"referenceLocator": "pkg:cargo/serde@1.0.228"}]}]}),
-            {"packages": "2", "libc6": "true", "cargo": "1"},
+            {"packages": "2", "libc6": "true", "cargo": "1", "npm": "0", "next": "false"},
         ),
-        ("sbom: an empty document", lambda: sbom_summary({}), {"packages": "0", "libc6": "false", "cargo": "0"}),
+        ("sbom: an empty document", lambda: sbom_summary({}), {"packages": "0", "libc6": "false", "cargo": "0", "npm": "0", "next": "false"}),
         ("sbom: packages is not a list", lambda: sbom_summary({"packages": "oops"}), "UsageError"),
         ("sbom: packages list has non-dict elements", lambda: sbom_summary({"packages": [{"name": "libc6"}, "oops", 5]}), "UsageError"),
         (
@@ -414,7 +508,52 @@ def self_test() -> int:
         ("sbom: packages is false (present but falsey)", lambda: sbom_summary({"packages": False}), "UsageError"),
         ("sbom: packages is 0 (present but falsey)", lambda: sbom_summary({"packages": 0}), "UsageError"),
         ("sbom: externalRefs is '' (present but falsey)", lambda: sbom_summary({"packages": [{"name": "test", "externalRefs": ""}]}), "UsageError"),
-        ("sbom: missing packages key gives empty list (no error)", lambda: sbom_summary({}), {"packages": "0", "libc6": "false", "cargo": "0"}),
+        ("sbom: missing packages key gives empty list (no error)", lambda: sbom_summary({}), {"packages": "0", "libc6": "false", "cargo": "0", "npm": "0", "next": "false"}),
+        # SMA-688: the console SBOM (spec M1: 67 npm, 10 deb, next 16.3.5).
+        (
+            "sbom: counts npm packages and sees next",
+            lambda: sbom_summary({"packages": [
+                {"name": "libc6"},
+                {"name": "next", "externalRefs": [{"referenceLocator": "pkg:npm/next@16.3.5"}]},
+                {"name": "react", "externalRefs": [{"referenceLocator": "pkg:npm/react@19.3.0"}]},
+            ]}),
+            {"packages": "3", "libc6": "true", "cargo": "0", "npm": "2", "next": "true"},
+        ),
+        # `@next/env` is a DIFFERENT package. Its purl is pkg:npm/%40next/env@…, so it must not
+        # read as `next`. Mutation: test `"next" in locator`, and this row reds.
+        (
+            "sbom: @next/env is not next",
+            lambda: sbom_summary({"packages": [{"name": "@next/env", "externalRefs": [{"referenceLocator": "pkg:npm/%40next/env@16.3.5"}]}]})["next"],
+            "false",
+        ),
+        # labels: the title is required (SMA-688, the decide step's identity check).
+        (
+            "labels: Labels present but missing the title key (missing-label case)",
+            lambda: labels_from(_fixture_archive(config_extra={"config": {"Labels": {
+                "org.opencontainers.image.version": "1.2.3",
+                "org.opencontainers.image.revision": "abc123"}}})[0]),
+            "UsageError",
+        ),
+        # floating: `iam` is a string prefix of `iam-console`. The pattern is a fullmatch, so the
+        # console's tags never hold back the service's floating tags. Mutation: use re.match
+        # with no `$`, and this row reds.
+        ("floating: iam ignores iam-console tags", lambda: floating("iam", "0.1.0", ["paigasus-iam-console-v0.9.0"])["move"], "true"),
+        # sbom-floor (SMA-688 D5): a pass and a fail for each kind, an unknown key, an unknown kind.
+        ("floor: cargo with one crate", lambda: sbom_floor("iam", FLOOR_KINDS, _summary(cargo="1")), "cargo"),
+        ("floor: cargo with no crate", lambda: sbom_floor("iam", FLOOR_KINDS, _summary()), "FloorError"),
+        ("floor: npm with npm, libc6 and next", lambda: sbom_floor("iam-console", FLOOR_KINDS, _summary(npm="67", libc6="true", next="true")), "npm"),
+        ("floor: npm with no npm package", lambda: sbom_floor("iam-console", FLOOR_KINDS, _summary(libc6="true", next="true")), "FloorError"),
+        ("floor: npm without libc6", lambda: sbom_floor("iam-console", FLOOR_KINDS, _summary(npm="67", next="true")), "FloorError"),
+        ("floor: npm without next", lambda: sbom_floor("iam-console", FLOOR_KINDS, _summary(npm="67", libc6="true")), "FloorError"),
+        # A cargo floor must not accept an npm image: crates are the cargo rule, npm is not.
+        ("floor: a cargo key with only npm packages", lambda: sbom_floor("iam", FLOOR_KINDS, _summary(npm="67", libc6="true", next="true")), "FloorError"),
+        ("floor: an unknown key", lambda: sbom_floor("billing", FLOOR_KINDS, _summary(cargo="1")), "FloorError"),
+        ("floor: an unknown kind", lambda: sbom_floor("x", {"x": "pip"}, _summary(cargo="1")), "FloorError"),
+        # chain_kinds reads the registry text; a wrong shape is exit 2, not 3.
+        ("kinds: a registry", lambda: chain_kinds('[chain.iam]\nkind = "cargo"\n[chain.iam-console]\nkind = "npm"\n'), {"iam": "cargo", "iam-console": "npm"}),
+        ("kinds: no chain table", lambda: chain_kinds("[other]\nx = 1\n"), "UsageError"),
+        ("kinds: an entry with no kind", lambda: chain_kinds("[chain.iam]\nversion_file = 'x'\n"), "UsageError"),
+        ("kinds: not TOML", lambda: chain_kinds("[chain.iam\n"), "UsageError"),
     ]
     failed = 0
     for label, fn, want in rows:
@@ -444,6 +583,16 @@ def _read_text(path: Path) -> str:
         raise UsageError(f"cannot read {path}: {exc}") from exc
 
 
+def _read_sbom(path: Path) -> dict[str, Any]:
+    try:
+        doc = json.loads(_read_text(path))
+    except json.JSONDecodeError as exc:
+        raise UsageError(f"{path} is not JSON: {exc}") from exc
+    if not isinstance(doc, dict):
+        raise UsageError(f"{path} is not an SPDX JSON object")
+    return doc
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="release_decision.py", description="SMA-658 image release decisions")
     parser.add_argument("--self-test", action="store_true", help="run the fixture table and exit")
@@ -463,6 +612,9 @@ def main(argv: list[str]) -> int:
     p_float.add_argument("--tags-file", required=True, type=Path)
     p_sbom = sub.add_parser("sbom-summary")
     p_sbom.add_argument("sbom", type=Path)
+    p_floor = sub.add_parser("sbom-floor")
+    p_floor.add_argument("--service", required=True)
+    p_floor.add_argument("sbom", type=Path)
     try:
         args = parser.parse_args(argv)
     except SystemExit as exc:  # argparse exits 2 on a usage error and 0 on --help
@@ -487,13 +639,12 @@ def main(argv: list[str]) -> int:
         elif args.command == "floating":
             _emit(floating(args.service, args.version, _read_text(args.tags_file).splitlines()))
         elif args.command == "sbom-summary":
-            try:
-                doc = json.loads(_read_text(args.sbom))
-            except json.JSONDecodeError as exc:
-                raise UsageError(f"{args.sbom} is not JSON: {exc}") from exc
-            if not isinstance(doc, dict):
-                raise UsageError(f"{args.sbom} is not an SPDX JSON object")
-            _emit(sbom_summary(doc))
+            _emit(sbom_summary(_read_sbom(args.sbom)))
+        elif args.command == "sbom-floor":
+            summary = sbom_summary(_read_sbom(args.sbom))
+            _emit(summary)
+            kind = sbom_floor(args.service, chain_kinds(_read_text(CHAINS_TOML)), summary)
+            _emit({"kind": kind, "floor": "pass"})
         else:
             parser.print_usage(sys.stderr)
             return 2
@@ -502,6 +653,10 @@ def main(argv: list[str]) -> int:
         return 2
     except ConflictError as exc:
         print("action=conflict")
+        print(f"release_decision: {exc}", file=sys.stderr)
+        return 3
+    except FloorError as exc:
+        print("floor=fail")
         print(f"release_decision: {exc}", file=sys.stderr)
         return 3
     return 0

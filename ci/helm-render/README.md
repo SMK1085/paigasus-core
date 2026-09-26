@@ -32,12 +32,14 @@ exception: it renders against the kind job's own values files, not `STUB_VALUES`
 | `1.2 <subset>` | Routing | An Ingress path routes to a Service whose Deployment serves another `PAIGASUS_ZONE` |
 | `1.3 <subset>` | Membership | An enabled zone id is not in the proto-derived slug set |
 | `2` | No trace of a disabled zone | Any string key or value of the iam-only render, or its raw text, contains `gateway`, the sentinel host or a value set under `zones.gateway` (case-insensitive) |
-| `3a`, `3a-prime`, `3b`, `3c` | Independent rollout (AC 5) | `spec.template` of a Deployment differs, stays equal or survives against the table in spec § 5 check 3 |
+| `3a`, `3a-prime`, `3b`, `3c` | Independent rollout (AC 5) | `spec.template` of a Deployment differs, stays equal or survives against the table in spec § 5 check 3. Row `3b` renders both sides of the `appVersion` bump with every `image.tag` cleared (SMA-688): the "bump `appVersion` to roll every pod" contract holds only when the tags are empty |
 | `4 iam-http <subset>` | Ports agree | The IAM `http` containerPort, `IAM_HTTP_ADDR`, the Service's `http` port and target, and `PAIGASUS_SERVICES.iam` disagree |
 | `4 iam-grpc <subset>` | Ports agree | The IAM `grpc` containerPort, `IAM_GRPC_ADDR`, the Service's `grpc` port and target, and `PAIGASUS_IAM_GRPC_URL` disagree |
 | `4 console-port <subset>` | Ports agree | A console's containerPort, `PORT` and its Service's resolved target port disagree |
 | `4 security-context <subset>` | Security context | A pod lacks `runAsUser: 65532`, `runAsGroup: 65532`, `runAsNonRoot: true`; a container lacks `allowPrivilegeEscalation: false` or sets an identity key to another value; either level carries `readOnlyRootFilesystem` |
 | `7 kind-values` | The kind job's values render (SMA-513 PR 3) | `helm template` with `ci/kind/values/a.yaml`, or with `a.yaml` plus `b.yaml`, exits non-zero. A missing values file is rc 2 |
+| `8a default-image-tags` | The default tags track the image versions (SMA-688) | For a chain of `ci/images/chains.toml`, `values.yaml` does not hold exactly one `image` block with its `ghcr` repository, or that block's `tag` is empty or differs from the version in the chain's version file, or that version is `0.0.0`; or an `image` block names a repository that no chain names |
+| `8b default-image-render` | The rendered images use those tags (SMA-688) | `STUB_VALUES` sets an `image` key, or the `iam+gateway` render does not hold exactly three images, each equal to `<repository>:<tag>` of its `values.yaml` block |
 | `6 <script>` | Every chart script | A `charts/paigasus/tests/*.sh` exits non-zero. `render.sh` is check 5 (lint and golden files) |
 
 **Why equality for the slug mirror (spec A2).** The safety property is "chart ⊆ proto".
