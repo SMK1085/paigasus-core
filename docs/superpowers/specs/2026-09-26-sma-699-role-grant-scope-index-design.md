@@ -86,7 +86,7 @@ Shapes B and C have a principal, so the unique key can serve them when the SQL h
 | E4 | Keep the `SELECT` list, the inner join on `principal`, `ORDER BY g.principal_id, g.id` and `LIMIT/OFFSET`. Keep the type casts on the parameters (`$n::uuid`, `$n::text`). | D6. The mapping through `role_grant::Model::find_by_statement` does not change. |
 | E5 | Build the index without `CONCURRENTLY`, with `SET LOCAL lock_timeout = '5s'` and `IF NOT EXISTS`. After the create, fail the migration if the index is INVALID. | Production runs all pending migrations in one outer transaction, so `CONCURRENTLY` is not possible. `IF NOT EXISTS` makes `up` idempotent and lets an operator build the index `CONCURRENTLY` before the deploy. An INVALID index (from a failed out-of-band build) with the same name would make `IF NOT EXISTS` skip the create while the planner ignores the index. The check reads `pg_index.indisvalid`. |
 | E6 | Expose the builder as `#[doc(hidden)] pub fn find_statement(filter, limit, offset) -> Statement`. | The Docker tests must use the real statement, not a copy that can drift (the SMA-469 precedent). |
-| E7 | An empty filter gives `WHERE FALSE`, with a `debug_assert!`. | D3. No caller can reach this case. If one does, it must return no rows, not every grant. |
+| E7 | An empty filter gives `WHERE FALSE`. No `debug_assert!`: `RoleGrantFilter::new` is the only constructor. An assert would make the `WHERE FALSE` unit test panic in debug. | D3. No caller can reach this case. If one does, it must return no rows, not every grant. |
 
 Also rejected: filter a node scope on the typed columns (`scope_org_id`, `scope_team_id`,
 `scope_project_id`, indexes exist) next to the `scope_node_prn` equality. It needs no migration,
@@ -210,8 +210,11 @@ Do this for shape A at `offset` 0 and at `offset` 800, and for shapes B and C. A
 
 **Controls** (each one can fail):
 
-1. Without the new index (`DROP INDEX` in a transaction, then roll back): shape A's generic plan
-   contains `Seq Scan on role_grant`. This proves that the seed makes the index matter.
+1. Without the new index (`DROP INDEX` in a transaction, then roll back): shape A's custom plan
+   asserts `Seq Scan on role_grant`. The measured generic plan takes a different full read: a full
+   Index Scan on `uq_role_grant_principal_role_scope` (m0004), because PostgreSQL 16 has no B-tree
+   skip scan. Both are full reads of `role_grant`, so either one proves that the seed makes the
+   index matter.
 2. With the index, `PREPARE` the old `IS NULL OR` statement (kept in the test as a fixture) under
    `force_generic_plan`: its plan does not name the new index. This proves that E2 is needed.
 
