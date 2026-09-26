@@ -325,8 +325,8 @@ the last restore, run the whole suite once more.
 
 ## 8. Residuals
 
-- **R1: no DPoP support.** A client that wants DPoP cannot use Paigasus. The follow-up issue (§ 4.5)
-  tracks the proof check.
+- **R1: no DPoP support.** A client that wants DPoP cannot use Paigasus. The follow-up issue SMA-700
+  (§ 4.5) tracks the proof check.
 - **R2: no mTLS binding.** IAM does not see the client certificate (D4). A future check needs the
   ingress to forward a verified certificate hash. No issue is planned.
 - **R3: an IdP that binds a token without `cnf` or `typ: DPoP`.** Such a token passes. RFC 9449
