@@ -200,7 +200,8 @@ provider is not available. Try again in a few seconds." The retry link:
 
 A reload of the callback 503 page sends the callback URL again. The transaction is gone, so that
 request logs `login.callback_rejected` with `reason: 'state_unknown'` and redirects to
-`/auth/login`. This is not a replay attack.
+`/auth/login` with NO `returnTo`. The original destination does not survive the reload. This is not
+a replay attack.
 
 **The `oidc.discovery_failed` event.** Each such 503 logs one event, `{ zone, stage, reason }`.
 `stage` is `login` or `callback`. The event never holds the caught error, its message, its name or
