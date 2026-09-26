@@ -41,10 +41,12 @@ async fn a_refused_query_string_answers_in_the_error_envelope() {
 
     // (uri with a refused query, uri with a well-formed one).
     //
-    // Eight routes carry a numeric field and use `?limit=abc`. `list_role_grants`'s row targets
-    // its `principal_prn` STRING field instead, with a REPEATED key — the same class as the
-    // `?limit=1&limit=2` row below, the other field type, so neither is assumed from the other.
-    // Getting this wrong is how a row ends up asserting nothing.
+    // Every row below but the last uses `?limit=abc` on a route with a numeric field, and three
+    // more such rows follow in the nested-route test below. `list_role_grants` now HAS numeric
+    // fields too (`limit`, `offset`), but its row here targets its `principal_prn` STRING field
+    // instead, with a REPEATED key — the same class as the `?limit=1&limit=2` row further down,
+    // the other field type, so neither is assumed from the other. Getting this wrong is how a
+    // row ends up asserting nothing.
     let cases: Vec<(&str, &str)> = vec![
         ("/v1/organizations?limit=abc", "/v1/organizations?limit=1"),
         ("/v1/authz/policies?limit=abc", "/v1/authz/policies?limit=1"),

@@ -420,7 +420,10 @@ impl From<RoleGrant> for RoleGrantDto {
 /// (`missing-required-field`, D3), refuses an unknown `principal_kind` (D7), and applies
 /// `limit`/`offset` only when a filter beyond the bare principal is set (D6). `Option`, not a
 /// bare `String`, so a missing parameter reaches that SPECIFIC reason rather than
-/// `EnvelopeQuery`'s general `invalid-query-parameter` (SMA-588).
+/// `EnvelopeQuery`'s general `invalid-query-parameter` (SMA-588). On the principal-only path a
+/// numeric `limit`/`offset` value is now type-checked too: a NON-numeric one is a 400
+/// `invalid-query-parameter` (before SMA-676: an ignored unknown key), while a numeric one
+/// still parses and is simply ignored by the service (D6) — no special-cased parsing either way.
 #[derive(Debug, Clone, Deserialize)]
 pub struct RoleGrantQuery {
     pub principal_prn: Option<String>,

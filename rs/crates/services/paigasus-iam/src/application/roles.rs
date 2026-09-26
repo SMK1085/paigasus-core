@@ -772,9 +772,10 @@ mod tests {
     }
 
     fn list_harness(fake: FakeAuthorizer) -> ListHarness {
+        let store = TenancyStore::default();
         let grants = InMemoryRoleGrants::default();
-        let query = InMemoryRoleGrantQuery::over(&grants, &TenancyStore::default());
-        let svc = new_service_with_fakes(fake, Arc::new(grants.clone()), Arc::new(query.clone()), TenancyStore::default()).svc;
+        let query = InMemoryRoleGrantQuery::over(&grants, &store);
+        let svc = new_service_with_fakes(fake, Arc::new(grants.clone()), Arc::new(query.clone()), store).svc;
         ListHarness { svc, grants, query }
     }
 
@@ -792,11 +793,14 @@ mod tests {
         g
     }
 
-    /// D4 (a): an actor may list their OWN grants with no check, with or without a scope.
+    /// D4 (a): an actor may list their OWN grants with no check, with or without a scope. A
+    /// second principal's grant at the SAME scope must not leak in — the self path still
+    /// restricts to the actor's own principal.
     #[tokio::test]
     async fn list_self_needs_no_check_even_with_a_scope() {
         let h = list_harness(FakeAuthorizer::default());
         let mine = seed(&h, 10, 1, "gateway_user", org_scope(100), PrincipalKind::User);
+        seed(&h, 17, 2, "gateway_user", org_scope(100), PrincipalKind::User);
         let input = ListRoleGrantsInput {
             scope_prn: Some(org_prn(100).canonical()),
             ..by_principal(&principal_prn(1).canonical())
