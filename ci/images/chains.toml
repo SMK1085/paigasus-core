@@ -5,14 +5,20 @@
 # `paigasus-<key>`. It is the git tag prefix (`paigasus-<key>-v<version>`) and the image title
 # label.
 #
-# Four readers use this file. Each one reads it with tomllib, which is stdlib:
+# Five readers use this file. Four read it with tomllib, which is stdlib:
 #   ci/release-plan/release_plan.py   the keys, kind, version_file, changelog (the plan outputs)
 #   ci/images/release_decision.py     kind (the SBOM floor)
 #   ci/helm-render/helm_render.py     kind, version_file, ghcr (row 8a)
 #   ci/actionlint/release_guard.py    the keys, ghcr, hub (V16)
-# ci/images/run.sh keeps its own bash tables. No workflow reads every key from this
-# file. images.yml names its own fixed key list. A new key in this file also needs
-# an entry in run.sh and in images.yml, or it never builds.
+# The fifth reader is a sed fallback in ci/release-plan/run.sh. It reads the keys when
+# `uv` is not on PATH. It needs each header as a bare `[chain.<key>]` line, nothing else
+# on that line. `release_plan.py --assert` checks that the sed read and the tomllib read
+# agree.
+#
+# ci/images/run.sh keeps its own bash tables. images.yml also keeps its own fixed key
+# list; it does not read this file. A new key here also needs an entry in run.sh, an
+# entry in images.yml, and its own jobs in release.yml. It also needs a CHAIN_APPROVALS
+# entry in release_guard.py. V16 checks both the release.yml jobs and that entry.
 #
 # kind = "cargo": version_file is the crate's Cargo.toml, and the version is `[package] version`.
 # kind = "npm":   version_file is the app's package.json, and the version is the top-level

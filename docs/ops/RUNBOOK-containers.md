@@ -715,8 +715,9 @@ Before you release a console for the first time, create the public Docker Hub re
 6. Check each default chart image with an anonymous pull:
    `crane manifest ghcr.io/smk1085/paigasus-<key>:<version>`.
 
-If the Docker Hub repository does not exist when you approve, the job pushes the `:<sha>` tags to
-GHCR and then fails at the Docker Hub copy. No `:<version>` tag exists yet in either registry.
-Create the repository and re-run the failed job. The re-run takes the `push-new` path with the
-same build artifacts, so with the same digest. An anonymous read of a missing repository answers
-"no such tag" (measured for SMA-688); the authenticated answer was not measured.
+If the Docker Hub repository does not exist when you approve, the job fails at the decide step or
+at the Docker Hub copy. The decide step reads Docker Hub with a login, before any registry write.
+Both failures are safe: no `:<version>` tag exists yet in either registry. Create the repository
+and re-run the failed job. The re-run takes the `push-new` path with the same build artifacts, so
+with the same digest. An anonymous read of a missing repository answers "no such tag" (measured
+for SMA-688); the authenticated read in the decide step was not measured.

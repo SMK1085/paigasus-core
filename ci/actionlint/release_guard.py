@@ -1505,6 +1505,52 @@ def chain_service_violations(jobs: dict, name: str) -> list[str]:
     return out
 
 
+# V16e (SMA-688). No rule pinned which key each chain job's env.VERSION reads.
+# `publish-images-<key>` and `tag-<key>` set env.VERSION from `needs.plan.outputs.version_<key>`.
+# V16d checks env.SERVICE. V9c and V9e check that plan wires outputs.version_<key> to the
+# decision step. Nothing checked what the CONSUMER reads.
+#
+# A copy-pasted `version_iam` in `tag-iam-console`'s env: would tag every console release with
+# the kernel's version, forever and silently. All four chain versions are 0.1.0 today, so the
+# wrong key still prints the right number. This rule pins the literal, the same way
+# SERVICE_PLAN_GATE_EXPRS does above. It accepts one whitespace variant, an extra space around
+# `${{ }}`. It accepts nothing else.
+VERSION_ENV_EXPRS: dict[str, frozenset[str]] = {
+    service: frozenset({
+        f"needs.{PLAN_JOB}.outputs.version_{service}",
+        "${{ " + f"needs.{PLAN_JOB}.outputs.version_{service}" + " }}",
+    })
+    for service in CHAIN_APPROVALS
+}
+
+
+def chain_version_env_violations(jobs: dict, name: str) -> list[str]:
+    """V16e. Each chain's publish-images-<key> and tag-<key> jobs must set env.VERSION to their
+    own key's plan output, never a sibling's. release.yml must declare VERSION. Another
+    document may omit it, such as a fixture; chain_service_violations gives env.SERVICE the
+    same tolerance."""
+    out: list[str] = []
+    for key in CHAIN_APPROVALS:
+        accepted = VERSION_ENV_EXPRS[key]
+        for prefix in ("publish-images-", "tag-"):
+            jid = f"{prefix}{key}"
+            job = jobs.get(jid)
+            if not isinstance(job, dict):
+                continue
+            env = job.get("env")
+            version = env.get("VERSION") if isinstance(env, dict) else None
+            if version is None and name != RELEASE_WORKFLOW_NAME:
+                continue
+            version_norm = version.strip() if isinstance(version, str) else version
+            if version_norm not in accepted:
+                out.append(f"{name}: V16: job '{jid}' sets env.VERSION to {version!r}, expected "
+                           f"one of {sorted(accepted)!r}. A copy-pasted sibling key here tags or "
+                           f"publishes this chain's image with another chain's version, "
+                           f"permanently and silently, since every chain's version is identical "
+                           f"today.")
+    return out
+
+
 # V17 (SMA-688 D11). A chain job downloads its artifacts by EXACT name. `pattern: image-iam-*`
 # also matches `image-iam-console-*`, because `iam` is a string prefix of `iam-console`. A
 # download with no `name:` at all fetches every artifact of the run.
@@ -1697,7 +1743,8 @@ def plan_contract_violations(jobs: dict, name: str) -> list[str]:
 
 
 def check_main(doc: dict, name: str) -> list[str]:
-    """V1-V5, V7, V8a-c, V8e, V9 and V13-V17 over the release workflow (V16a-c runs from main()). V6 applies to CALLED workflows (see
+    """V1-V5, V7, V8a-c, V8e, V9 and V13-V17 over the release workflow (V16a-c runs from
+    main()). V16e is one of the V13-V17 group. V6 applies to CALLED workflows (see
     check_called) and V8d to every job's local callee (see callee_boundary_violations) — both
     need the filesystem, which this function, driven purely off a parsed doc, deliberately does
     not touch."""
@@ -1807,9 +1854,10 @@ def check_main(doc: dict, name: str) -> list[str]:
     out += plan_contract_violations(jobs, name)
     out += credential_scope_violations(doc, name)
     out += capability_violations(jobs, doc.get("permissions"), name)
-    # SMA-688. V15, V16d and V17: once each, outside the per-job loop, like V8 above.
+    # SMA-688. V15, V16d, V16e and V17: once each, outside the per-job loop, like V8 above.
     out += publish_grant_violations(doc, name)
     out += chain_service_violations(jobs, name)
+    out += chain_version_env_violations(jobs, name)
     out += chain_download_violations(jobs, name)
     return out
 
@@ -3271,6 +3319,18 @@ FIXTURES: list[tuple[str, str, str, str | None]] = [
          "    env: {SERVICE: iam}\n    steps:\n      - uses: actions/download-artifact@v8\n"
          "        with: {name: image-iam-console-amd64, path: in}"),
      "V16: job 'publish-images-iam-console' sets env.SERVICE to 'iam', not 'iam-console'"),
+    # V16e. A copy-pasted sibling key. `tag-iam-console` reads the iam chain's version output,
+    # not its own. Every chain's version is 0.1.0 today. This bypass prints the correct number,
+    # but tags the wrong release forever.
+    ("SMA-688 V16e version_iam in tag-iam-console", "main",
+     _OK_CONSOLE_MAIN.replace(
+         "    needs: [publish-images-iam-console]\n    environment: release-publish\n"
+         "    runs-on: ubuntu-latest\n    env: {SERVICE: iam-console}",
+         "    needs: [publish-images-iam-console]\n    environment: release-publish\n"
+         "    runs-on: ubuntu-latest\n"
+         "    env: {SERVICE: iam-console, VERSION: '${{ needs.plan.outputs.version_iam }}'}"),
+     "V16: job 'tag-iam-console' sets env.VERSION to '${{ needs.plan.outputs.version_iam }}', "
+     "expected one of"),
     # D11. `pattern: image-iam-*` also matches `image-iam-console-*`.
     ("SMA-688 V17 pattern: image-iam-* in publish-images-iam", "main",
      _OK_CONSOLE_MAIN.replace(

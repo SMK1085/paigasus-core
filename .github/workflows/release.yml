@@ -1405,25 +1405,45 @@ jobs:
           # resolve a host called `oci-archive`. `oci-archive:` is a syft/skopeo transport;
           # `crane config` takes a REGISTRY reference only. `release_decision.py labels` reads
           # the same three labels straight out of the archive this job already downloaded.
-          labels="$(uv run --no-project --python '>=3.12' python3 ci/images/release_decision.py labels "in/paigasus-${SERVICE}-amd64.oci.tar")"
-          label="$(printf '%s\n' "$labels" | sed -n 's/^version=//p')"
-          # minor 7 (SMA-658 fix round 1): this is what catches Task 4's empty-version
-          # fail-safe -- if `plan` ever emits skip_<svc>=false with an empty version, $VERSION
-          # is empty here and no archive's version label can ever equal it, so this step fails
-          # loudly instead of publishing under a blank tag.
-          if [ "$label" != "$VERSION" ]; then
-            echo "::error::the archive carries version ${label}, but plan says ${VERSION}." >&2
+          #
+          # Fix wave (SMA-688 whole-branch review, finding 4). This step used to read only the
+          # amd64 archive's labels. The arm64 archive passed the same artifact and digest checks
+          # above. Nothing checked its own version or title label before a registry write. A
+          # mismatched arm64 archive could still publish. Both archives are now checked in the
+          # same loop, and each error names its own arch.
+          for arch in amd64 arm64; do
+            labels="$(uv run --no-project --python '>=3.12' python3 ci/images/release_decision.py labels "in/paigasus-${SERVICE}-${arch}.oci.tar")"
+            label="$(printf '%s\n' "$labels" | sed -n 's/^version=//p')"
+            # minor 7 (SMA-658 fix round 1): this is what catches Task 4's empty-version
+            # fail-safe -- if `plan` ever emits skip_<svc>=false with an empty version, $VERSION
+            # is empty here and no archive's version label can ever equal it, so this step fails
+            # loudly instead of publishing under a blank tag.
+            if [ "$label" != "$VERSION" ]; then
+              echo "::error::the ${arch} archive carries version ${label}, but plan says ${VERSION}." >&2
+              exit 1
+            fi
+            # SMA-688: the archive must BE this chain's image. Four chains share one run, and the
+            # first console release puts all four at 0.1.0, so the version compare above cannot
+            # tell two chains apart. This runs before the first registry write (AC 5).
+            title="$(printf '%s\n' "$labels" | sed -n 's/^title=//p')"
+            if [ "$title" != "paigasus-${SERVICE}" ]; then
+              echo "::error::the ${arch} archive is ${title:-<no title label>}, but this chain publishes paigasus-${SERVICE}." >&2
+              exit 1
+            fi
+            revision_label="$(printf '%s\n' "$labels" | sed -n 's/^revision=//p')"
+            case "$arch" in
+              amd64) revision_amd64="$revision_label" ;;
+              arm64) revision_arm64="$revision_label" ;;
+            esac
+          done
+          # The two platform images in one manifest list must point at the same git commit. A
+          # mismatched revision label means the amd64 and arm64 archives came from different
+          # commits. No earlier check catches this.
+          if [ "$revision_amd64" != "$revision_arm64" ]; then
+            echo "::error::the amd64 archive carries revision ${revision_amd64}, but the arm64 archive carries ${revision_arm64}." >&2
             exit 1
           fi
-          # SMA-688: the archive must BE this chain's image. Four chains share one run, and the
-          # first console release puts all four at 0.1.0, so the version compare above cannot tell
-          # two chains apart. This runs before the first registry write (AC 5).
-          title="$(printf '%s\n' "$labels" | sed -n 's/^title=//p')"
-          if [ "$title" != "paigasus-${SERVICE}" ]; then
-            echo "::error::the archive is ${title:-<no title label>}, but this chain publishes paigasus-${SERVICE}." >&2
-            exit 1
-          fi
-          revision="$(printf '%s\n' "$labels" | sed -n 's/^revision=//p')"
+          revision="$revision_amd64"
           echo "revision=${revision}" >> "$GITHUB_OUTPUT"
           tag="paigasus-${SERVICE}-v${VERSION}"
           if git ls-remote --tags --exit-code origin "refs/tags/${tag}" > /dev/null 2>&1; then
