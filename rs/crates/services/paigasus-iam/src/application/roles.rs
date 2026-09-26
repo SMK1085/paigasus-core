@@ -4,8 +4,9 @@
 //! ADR-0013). `grant` enforces the anti-escalation invariant — only an actor who may already
 //! `GrantRole` AT the target scope itself (Root, or a tenancy node) may grant a role there,
 //! so a principal can never bootstrap authority it doesn't already hold. `list`'s exposure
-//! rule is a deliberate M3 simplification: self is always visible, anyone else's grants
-//! require platform-level (`Root`-scoped) `ListRoleGrants` — see [`RoleService::list`]'s doc.
+//! rule (SMA-676 D4, widening SMA-444's "M3" rule): self is always visible; a request with a
+//! scope needs `ListRoleGrants` AT that scope node; anyone else's grants with no scope need
+//! `ListRoleGrants` at Root — see [`RoleService::list`]'s doc.
 //!
 //! **SMA-444 cross-tenant-escalation fix (defense-in-depth):** `parse_grant_scope` builds a
 //! `TenancyNodeRef` straight from the caller's raw `scope_prn` string, whose org slot
@@ -40,11 +41,13 @@
 
 use crate::application::authorize::Authorize;
 use crate::application::error::TenancyError;
+use crate::application::pagination::Page;
+use crate::application::principal_kind::PrincipalKindFilter;
 use paigasus_iam_core::authz::model::root_prn;
 use paigasus_iam_core::authz::roles as authz_roles;
 use paigasus_iam_core::{
     Action, AuditEntry, AuditLog, AuditOutcome, Clock, DomainEvent, EventType, GrantScope, IdGenerator, OrganizationRepository, Outbox, PolicyGenBumper, PrincipalId, ProjectRepository, RoleGrant,
-    RoleGrantStore, TeamRepository, TenancyNodeRef, UnitOfWork,
+    RoleGrantFilter, RoleGrantQuery, RoleGrantStore, TeamRepository, TenancyNodeRef, UnitOfWork,
 };
 use paigasus_kernel::Prn;
 use std::sync::Arc;
@@ -88,6 +91,26 @@ fn scope_resource_prn(scope: &GrantScope) -> Prn {
     }
 }
 
+/// A raw wire string, or `None` when the caller left it out or sent only whitespace. A proto3
+/// string field is `""` when absent, so blank and absent are one case on both transports.
+fn non_blank(raw: Option<String>) -> Option<String> {
+    raw.filter(|s| !s.trim().is_empty())
+}
+
+/// The raw input of [`RoleService::list`]. Both adapters only move fields in (D10): the
+/// service owns D3, D4, D6 and D7. `limit`/`offset` stay raw because only the query path
+/// validates them (D6) — a `Page` built by the adapter would refuse `limit = 500` on the
+/// principal-only path, which must keep ignoring it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ListRoleGrantsInput {
+    pub principal_prn: Option<String>,
+    pub scope_prn: Option<String>,
+    pub role_key: Option<String>,
+    pub principal_kind: PrincipalKindFilter,
+    pub limit: Option<i64>,
+    pub offset: Option<i64>,
+}
+
 /// Role-grant lifecycle use cases. `grants` is `Arc<dyn RoleGrantStore>` (not generic-DI) —
 /// it's the same shared handle `AppState` composes into `PolicySnapshot`, so a later task's
 /// wiring clones one `Arc` rather than standing up a second store instance. `orgs`/`teams`/
@@ -96,10 +119,13 @@ fn scope_resource_prn(scope: &GrantScope) -> Prn {
 /// `grants`. `uow`/`outbox`/`audit`/`gen_bumper` are SMA-446 Slice B's Unit-of-Work reference
 /// pattern (module docs): `grant`/`revoke` drive the mutation + its outbox event + its audit
 /// entry through `uow` atomically, then run `gen_bumper`'s awaited, best-effort post-commit
-/// bump. `ids`/`clock` stay generic-DI, mirroring `MembershipService`.
+/// bump. `ids`/`clock` stay generic-DI, mirroring `MembershipService`. `query` is the
+/// SMA-676 read port (`RoleGrantQuery`): the list query path and `grant`'s idempotency
+/// pre-check read through it.
 #[derive(Clone)]
 pub struct RoleService<I, C> {
     grants: Arc<dyn RoleGrantStore>,
+    query: Arc<dyn RoleGrantQuery>,
     orgs: Arc<dyn OrganizationRepository>,
     teams: Arc<dyn TeamRepository>,
     projects: Arc<dyn ProjectRepository>,
@@ -119,6 +145,7 @@ pub struct RoleService<I, C> {
 /// silently swap two same-typed dependencies past the compiler.
 pub struct RoleServiceDeps<I, C> {
     pub grants: Arc<dyn RoleGrantStore>,
+    pub query: Arc<dyn RoleGrantQuery>,
     pub orgs: Arc<dyn OrganizationRepository>,
     pub teams: Arc<dyn TeamRepository>,
     pub projects: Arc<dyn ProjectRepository>,
@@ -139,6 +166,7 @@ where
     pub fn new(deps: RoleServiceDeps<I, C>) -> Self {
         Self {
             grants: deps.grants,
+            query: deps.query,
             orgs: deps.orgs,
             teams: deps.teams,
             projects: deps.projects,
@@ -178,6 +206,13 @@ where
         Ok(())
     }
 
+    /// The grant of `role_key` to `principal` at `scope`, if one exists (SMA-676 D9). An exact
+    /// (principal, role, scope) filter: the duplicate key `uq_role_grant_principal_role_scope`.
+    async fn existing_grant(&self, principal: &PrincipalId, role_key: &str, scope: &GrantScope) -> Result<Option<RoleGrant>, TenancyError> {
+        let filter = RoleGrantFilter::new(Some(principal.clone()), Some(scope.clone()), Some(role_key.to_string()), None).ok_or(TenancyError::Internal)?;
+        Ok(self.query.find(&filter, 1, 0).await?.into_iter().next())
+    }
+
     /// Grants `role_key` to `principal_prn` at `scope_prn`. Order of checks: (1) the
     /// principal PRN parses; (2) `role_key` names a known system role (else `UnknownRole`);
     /// (3) `scope_prn` parses into a `GrantScope`; (4) the scope's `NodeKind` is one the role
@@ -196,6 +231,10 @@ where
     /// actually trips. Only after all six succeed is the grant minted; it is then committed
     /// atomically with its `DomainEvent`/`AuditEntry` (module docs, the UoW reference
     /// pattern), and only once that commit succeeds does the awaited `gen_bumper.bump()` run.
+    /// SMA-676 D9: after step 6, an existing grant for the same (principal, role, scope) is
+    /// returned with OK — no event, no audit row, no bump. If the insert loses a race
+    /// (AuthzError::DuplicateGrant), the transaction is dropped and the winner's grant is
+    /// returned.
     pub async fn grant(&self, actor: &Prn, principal_prn: &str, role_key: &str, scope_prn: &str) -> Result<RoleGrant, TenancyError> {
         let principal = parse_principal_prn(principal_prn)?;
         let role = authz_roles::role(role_key).ok_or_else(|| TenancyError::UnknownRole(role_key.to_string()))?;
@@ -206,6 +245,12 @@ where
 
         self.authorize.check(actor, Action::GrantRole, &scope_resource_prn(&scope)).await?;
         self.resolve_scope(&scope).await?;
+
+        // SMA-676 D9: idempotent. AFTER the authorization check, so a caller without
+        // `GrantRole` at the scope learns nothing about existing grants (§6).
+        if let Some(existing) = self.existing_grant(&principal, role.key.as_str(), &scope).await? {
+            return Ok(existing);
+        }
 
         let id = self.ids.new_membership_id();
         let now = self.clock.now();
@@ -242,7 +287,17 @@ where
         };
 
         let tx = self.uow.begin().await?;
-        self.grants.grant_in(&*tx, &grant).await?;
+        match self.grants.grant_in(&*tx, &grant).await {
+            Ok(()) => {}
+            // D9: a concurrent insert of the same (principal, role, scope) won. The database
+            // aborted this transaction; drop it (a rollback) and return the winner's grant.
+            // The winner already wrote its event and audit row and bumped policy_gen.
+            Err(paigasus_iam_core::AuthzError::DuplicateGrant) => {
+                drop(tx);
+                return self.existing_grant(&grant.principal, &grant.role_key, &grant.scope).await?.ok_or(TenancyError::Internal);
+            }
+            Err(e) => return Err(e.into()),
+        }
         self.outbox.enqueue(&*tx, &event).await?;
         self.audit.record(&*tx, &entry).await?;
         tx.commit().await?;
@@ -304,18 +359,35 @@ where
         Ok(())
     }
 
-    /// Lists every grant held by `principal_prn`. Exposure rule (M3 simplification — a full
-    /// per-scope visibility model is out of scope here): an actor may always list their OWN
-    /// grants, no policy check needed; listing anyone ELSE's requires `Action::ListRoleGrants`
-    /// authorized against `root_prn()` — under Cedar's `resource in ?resource` semantics only
-    /// a `Root`-scoped grant (`platform_admin`) satisfies a `Root`-resource check, so this is
-    /// effectively "self, or a platform admin."
-    pub async fn list(&self, actor: &Prn, principal_prn: &str) -> Result<Vec<RoleGrant>, TenancyError> {
-        let principal = parse_principal_prn(principal_prn)?;
-        if actor.canonical() != principal.canonical() {
-            self.authorize.check(actor, Action::ListRoleGrants, &root_prn()).await?;
+    /// Lists role grants (SMA-676). Order of checks: parse the principal and the scope PRN
+    /// (`InvalidPrn`); resolve the kind (D7, `InvalidPrincipalKind`); build the filter (D3,
+    /// `MissingRequiredField("principal_prn|scope_prn")`); then authorize, BEFORE any read (D4):
+    /// (a) the principal is the actor → no check; (b) else a scope is set → `ListRoleGrants` at
+    /// the scope node (`scope_resource_prn`; under Cedar's `resource in ?resource`, an
+    /// `org_admin` passes at its own org only, and a forged team PRN is decided against the
+    /// team's STORED ancestry); (c) else → `ListRoleGrants` at Root (only `platform_admin`).
+    /// Then D6: the bare principal request — the only shape callers sent before SMA-676 —
+    /// returns every row through `list_by_principal` and ignores `limit`/`offset`; every other
+    /// request reads `RoleGrantQuery::find` with `Page::new` (1..=200, default 50), ordered by
+    /// `principal_id`, then `id`.
+    pub async fn list(&self, actor: &Prn, input: ListRoleGrantsInput) -> Result<Vec<RoleGrant>, TenancyError> {
+        let principal = non_blank(input.principal_prn).map(|raw| parse_principal_prn(&raw)).transpose()?;
+        let scope = non_blank(input.scope_prn).map(|raw| parse_grant_scope(&raw)).transpose()?;
+        let role_key = non_blank(input.role_key);
+        let principal_kind = input.principal_kind.resolve()?;
+        let filter = RoleGrantFilter::new(principal, scope, role_key, principal_kind).ok_or(TenancyError::MissingRequiredField("principal_prn|scope_prn"))?;
+
+        let is_self = filter.principal().is_some_and(|p| p.canonical() == actor.canonical());
+        if !is_self {
+            let resource = filter.scope().map_or_else(root_prn, scope_resource_prn);
+            self.authorize.check(actor, Action::ListRoleGrants, &resource).await?;
         }
-        Ok(self.grants.list_by_principal(&principal).await?)
+
+        if let Some(principal) = filter.principal_only() {
+            return Ok(self.grants.list_by_principal(principal).await?);
+        }
+        let page = Page::new(input.limit, input.offset)?;
+        Ok(self.query.find(&filter, page.limit, page.offset).await?)
     }
 }
 
@@ -323,11 +395,13 @@ where
 mod tests {
     use super::*;
     use crate::application::fakes::{
-        FakeAuditLog, FakeAuthorizer, FakeOutbox, FakePolicyGenBumper, FakeUnitOfWork, FixedClock, InMemoryOrgs, InMemoryProjects, InMemoryRoleGrants, InMemoryTeams, SeqIds, TenancyStore, test_stamp,
+        FakeAuditLog, FakeAuthorizer, FakeOutbox, FakePolicyGenBumper, FakeUnitOfWork, FixedClock, InMemoryOrgs, InMemoryProjects, InMemoryRoleGrantQuery, InMemoryRoleGrants, InMemoryTeams, SeqIds,
+        TenancyStore, test_stamp,
     };
+    use crate::application::principal_kind::PrincipalKindFilter;
     use async_trait::async_trait;
     use chrono::{TimeZone, Utc};
-    use paigasus_iam_core::{AuthzError, Organization, OrganizationId, Slug, Team, TeamId, Transaction};
+    use paigasus_iam_core::{AuthzError, Organization, OrganizationId, PrincipalKind, Slug, Team, TeamId, Transaction};
     use uuid::Uuid;
 
     fn principal_prn(n: u128) -> Prn {
@@ -353,7 +427,9 @@ mod tests {
     /// are wired to fresh, unshared fakes — fine for every scenario here that doesn't itself
     /// assert on what got emitted (see `new_service_with_fakes` for those).
     fn new_service_with_store(fake: FakeAuthorizer, store: TenancyStore) -> RoleService<SeqIds, FixedClock> {
-        new_service_with_fakes(fake, Arc::new(InMemoryRoleGrants::default()), store).svc
+        let grants = InMemoryRoleGrants::default();
+        let query = InMemoryRoleGrantQuery::over(&grants, &store);
+        new_service_with_fakes(fake, Arc::new(grants), Arc::new(query), store).svc
     }
 
     /// Bundles a `RoleService` together with the SMA-446 Slice B fakes it was built over, so
@@ -369,12 +445,13 @@ mod tests {
     /// Like `new_service_with_store`, but over a caller-supplied `grants` store (so a test can
     /// inject one that errors mid-txn) and returning the outbox/audit/gen-bumper fakes
     /// alongside the service for direct assertion.
-    fn new_service_with_fakes(fake: FakeAuthorizer, grants: Arc<dyn RoleGrantStore>, store: TenancyStore) -> ServiceWithFakes {
+    fn new_service_with_fakes(fake: FakeAuthorizer, grants: Arc<dyn RoleGrantStore>, query: Arc<dyn RoleGrantQuery>, store: TenancyStore) -> ServiceWithFakes {
         let outbox = FakeOutbox::default();
         let audit = FakeAuditLog::default();
         let bumper = FakePolicyGenBumper::default();
         let svc = RoleService::new(RoleServiceDeps {
             grants,
+            query,
             orgs: Arc::new(InMemoryOrgs(store.clone())),
             teams: Arc::new(InMemoryTeams(store.clone())),
             projects: Arc::new(InMemoryProjects(store)),
@@ -507,7 +584,7 @@ mod tests {
         assert_eq!(grant.scope, GrantScope::Root);
         assert_eq!(grant.linked_policy_id, format!("grant:{}", grant.id));
 
-        let listed = svc.list(&target, &target.canonical()).await.unwrap();
+        let listed = svc.list(&target, by_principal(&target.canonical())).await.unwrap();
         assert_eq!(listed, vec![grant]);
     }
 
@@ -519,7 +596,8 @@ mod tests {
     async fn grant_emits_one_event_and_one_audit_entry_sharing_a_correlation_id_and_awaits_the_bump() {
         let fake = FakeAuthorizer::default();
         fake.allow(Action::GrantRole, &root_prn());
-        let ServiceWithFakes { svc, outbox, audit, bumper } = new_service_with_fakes(fake, Arc::new(InMemoryRoleGrants::default()), TenancyStore::default());
+        let ServiceWithFakes { svc, outbox, audit, bumper } =
+            new_service_with_fakes(fake, Arc::new(InMemoryRoleGrants::default()), Arc::new(InMemoryRoleGrantQuery::default()), TenancyStore::default());
         let actor = principal_prn(1);
         let target = principal_prn(2);
 
@@ -551,7 +629,7 @@ mod tests {
     async fn a_store_error_mid_txn_rolls_back_and_never_emits_or_bumps_guard_d2() {
         let fake = FakeAuthorizer::default();
         fake.allow(Action::GrantRole, &root_prn());
-        let ServiceWithFakes { svc, outbox, audit, bumper } = new_service_with_fakes(fake, Arc::new(FailingGrantStore), TenancyStore::default());
+        let ServiceWithFakes { svc, outbox, audit, bumper } = new_service_with_fakes(fake, Arc::new(FailingGrantStore), Arc::new(InMemoryRoleGrantQuery::default()), TenancyStore::default());
         let actor = principal_prn(1);
         let target = principal_prn(2);
 
@@ -609,7 +687,7 @@ mod tests {
         assert_eq!(err, TenancyError::PrnMismatch);
 
         // No grant was persisted for the forged scope.
-        assert!(svc.list(&target, &target.canonical()).await.unwrap().is_empty());
+        assert!(svc.list(&target, by_principal(&target.canonical())).await.unwrap().is_empty());
     }
 
     /// `resolve_scope` must also reject a scope PRN naming a node that doesn't exist at all
@@ -648,7 +726,7 @@ mod tests {
 
         fake.allow(Action::RevokeRole, &root_prn());
         svc.revoke(&actor, grant.id).await.unwrap();
-        assert!(svc.list(&target, &target.canonical()).await.unwrap().is_empty());
+        assert!(svc.list(&target, by_principal(&target.canonical())).await.unwrap().is_empty());
     }
 
     /// SMA-446 Slice B: `revoke_in` returning `false` (the grant vanished between `find` and
@@ -667,7 +745,12 @@ mod tests {
             linked_policy_id: "grant:42".to_string(),
             created_at: Utc.timestamp_opt(0, 0).unwrap(),
         };
-        let ServiceWithFakes { svc, outbox, audit, bumper } = new_service_with_fakes(fake, Arc::new(VanishesBeforeRevoke { grant: grant.clone() }), TenancyStore::default());
+        let ServiceWithFakes { svc, outbox, audit, bumper } = new_service_with_fakes(
+            fake,
+            Arc::new(VanishesBeforeRevoke { grant: grant.clone() }),
+            Arc::new(InMemoryRoleGrantQuery::default()),
+            TenancyStore::default(),
+        );
         let actor = principal_prn(1);
 
         svc.revoke(&actor, grant.id).await.unwrap();
@@ -683,10 +766,302 @@ mod tests {
         let actor = principal_prn(1);
 
         // Self-listing never consults the (always-deny-by-default) fake authorizer.
-        assert!(svc.list(&actor, &actor.canonical()).await.unwrap().is_empty());
+        assert!(svc.list(&actor, by_principal(&actor.canonical())).await.unwrap().is_empty());
 
         // Listing someone else's grants requires platform-level ListRoleGrants at Root.
         let other = principal_prn(2);
-        assert_eq!(svc.list(&actor, &other.canonical()).await.unwrap_err(), TenancyError::Forbidden);
+        assert_eq!(svc.list(&actor, by_principal(&other.canonical())).await.unwrap_err(), TenancyError::Forbidden);
+    }
+
+    fn by_principal(prn: &str) -> ListRoleGrantsInput {
+        ListRoleGrantsInput {
+            principal_prn: Some(prn.to_string()),
+            ..ListRoleGrantsInput::default()
+        }
+    }
+
+    fn at_scope(scope_prn: &str) -> ListRoleGrantsInput {
+        ListRoleGrantsInput {
+            scope_prn: Some(scope_prn.to_string()),
+            ..ListRoleGrantsInput::default()
+        }
+    }
+
+    fn org_scope(n: u128) -> GrantScope {
+        GrantScope::Node(TenancyNodeRef::Organization(OrganizationId::from_uuid(Uuid::from_u128(n))))
+    }
+
+    /// A service plus direct handles on its grant store and query, for the `list` tests.
+    struct ListHarness {
+        svc: RoleService<SeqIds, FixedClock>,
+        grants: InMemoryRoleGrants,
+        query: InMemoryRoleGrantQuery,
+    }
+
+    fn list_harness(fake: FakeAuthorizer) -> ListHarness {
+        let store = TenancyStore::default();
+        let grants = InMemoryRoleGrants::default();
+        let query = InMemoryRoleGrantQuery::over(&grants, &store);
+        let svc = new_service_with_fakes(fake, Arc::new(grants.clone()), Arc::new(query.clone()), store).svc;
+        ListHarness { svc, grants, query }
+    }
+
+    fn seed(h: &ListHarness, id: u128, principal: u128, role: &str, scope: GrantScope, kind: PrincipalKind) -> RoleGrant {
+        let g = RoleGrant {
+            id: Uuid::from_u128(id),
+            principal: PrincipalId::from_prn(principal_prn(principal)),
+            role_key: role.to_string(),
+            scope,
+            linked_policy_id: format!("grant:{}", Uuid::from_u128(id)),
+            created_at: Utc.timestamp_opt(0, 0).unwrap(),
+        };
+        h.grants.0.lock().unwrap().insert(g.id, g.clone());
+        h.query.set_kind(&g.principal, kind);
+        g
+    }
+
+    /// D4 (a): an actor may list their OWN grants with no check, with or without a scope. A
+    /// second principal's grant at the SAME scope must not leak in — the self path still
+    /// restricts to the actor's own principal.
+    #[tokio::test]
+    async fn list_self_needs_no_check_even_with_a_scope() {
+        let h = list_harness(FakeAuthorizer::default());
+        let mine = seed(&h, 10, 1, "gateway_user", org_scope(100), PrincipalKind::User);
+        seed(&h, 17, 2, "gateway_user", org_scope(100), PrincipalKind::User);
+        let input = ListRoleGrantsInput {
+            scope_prn: Some(org_prn(100).canonical()),
+            ..by_principal(&principal_prn(1).canonical())
+        };
+        assert_eq!(h.svc.list(&principal_prn(1), input).await.unwrap(), vec![mine]);
+    }
+
+    /// D4 (b): the scope path checks `ListRoleGrants` at the scope node, and the filters AND.
+    #[tokio::test]
+    async fn list_scope_path_checks_at_the_scope_node_and_filters() {
+        let fake = FakeAuthorizer::default();
+        fake.allow(Action::ListRoleGrants, &org_prn(100));
+        let h = list_harness(fake);
+        let person = seed(&h, 11, 2, "gateway_user", org_scope(100), PrincipalKind::User);
+        seed(&h, 12, 3, "gateway_user", org_scope(100), PrincipalKind::ServiceAccount);
+        seed(&h, 13, 2, "org_admin", org_scope(100), PrincipalKind::User);
+        seed(&h, 14, 4, "gateway_user", org_scope(101), PrincipalKind::User);
+        let input = ListRoleGrantsInput {
+            role_key: Some("gateway_user".to_string()),
+            principal_kind: PrincipalKindFilter::Only(PrincipalKind::User),
+            ..at_scope(&org_prn(100).canonical())
+        };
+        assert_eq!(h.svc.list(&principal_prn(1), input).await.unwrap(), vec![person]);
+    }
+
+    #[tokio::test]
+    async fn list_scope_path_denies_without_the_grant_at_that_scope() {
+        let fake = FakeAuthorizer::default();
+        fake.allow(Action::ListRoleGrants, &org_prn(101));
+        let h = list_harness(fake);
+        assert_eq!(h.svc.list(&principal_prn(1), at_scope(&org_prn(100).canonical())).await.unwrap_err(), TenancyError::Forbidden);
+    }
+
+    /// D4 (c): another principal with no scope still needs `ListRoleGrants` at Root.
+    #[tokio::test]
+    async fn list_other_principal_without_scope_checks_at_root() {
+        let fake = FakeAuthorizer::default();
+        fake.allow(Action::ListRoleGrants, &org_prn(100));
+        let h = list_harness(fake.clone());
+        assert_eq!(h.svc.list(&principal_prn(1), by_principal(&principal_prn(2).canonical())).await.unwrap_err(), TenancyError::Forbidden);
+        fake.allow(Action::ListRoleGrants, &root_prn());
+        assert!(h.svc.list(&principal_prn(1), by_principal(&principal_prn(2).canonical())).await.is_ok());
+    }
+
+    /// D5: the Root sentinel as a scope matches Root grants, and D4 (b) checks at Root.
+    #[tokio::test]
+    async fn list_root_sentinel_scope_checks_at_root() {
+        let fake = FakeAuthorizer::default();
+        fake.allow(Action::ListRoleGrants, &org_prn(100));
+        let h = list_harness(fake.clone());
+        let root_grant = seed(&h, 15, 2, "platform_admin", GrantScope::Root, PrincipalKind::User);
+        seed(&h, 16, 2, "org_admin", org_scope(100), PrincipalKind::User);
+        assert_eq!(h.svc.list(&principal_prn(1), at_scope(&root_prn().canonical())).await.unwrap_err(), TenancyError::Forbidden);
+        fake.allow(Action::ListRoleGrants, &root_prn());
+        assert_eq!(h.svc.list(&principal_prn(1), at_scope(&root_prn().canonical())).await.unwrap(), vec![root_grant]);
+    }
+
+    /// D3: neither a principal nor a scope is `MissingRequiredField("principal_prn|scope_prn")`.
+    #[tokio::test]
+    async fn list_with_neither_principal_nor_scope_is_missing_required_field() {
+        let h = list_harness(FakeAuthorizer::default());
+        let input = ListRoleGrantsInput {
+            role_key: Some("gateway_user".to_string()),
+            ..ListRoleGrantsInput::default()
+        };
+        assert_eq!(h.svc.list(&principal_prn(1), input).await.unwrap_err(), TenancyError::MissingRequiredField("principal_prn|scope_prn"));
+    }
+
+    /// Review Focus 5: a whitespace-only field is "absent", not a PRN to parse.
+    #[tokio::test]
+    async fn list_treats_blank_strings_as_absent() {
+        let h = list_harness(FakeAuthorizer::default());
+        let input = ListRoleGrantsInput {
+            principal_prn: Some("   ".to_string()),
+            scope_prn: Some(String::new()),
+            role_key: Some(" ".to_string()),
+            ..ListRoleGrantsInput::default()
+        };
+        assert_eq!(h.svc.list(&principal_prn(1), input).await.unwrap_err(), TenancyError::MissingRequiredField("principal_prn|scope_prn"));
+    }
+
+    /// D7: an unknown kind is refused, even on the self path, and never read as "any".
+    #[tokio::test]
+    async fn list_refuses_an_unknown_kind_even_for_self() {
+        let h = list_harness(FakeAuthorizer::default());
+        let input = ListRoleGrantsInput {
+            principal_kind: PrincipalKindFilter::Unknown,
+            ..by_principal(&principal_prn(1).canonical())
+        };
+        assert_eq!(h.svc.list(&principal_prn(1), input).await.unwrap_err(), TenancyError::InvalidPrincipalKind("principal_kind"));
+    }
+
+    /// D6: the scope path honours `Page::new` (1..=200) and orders by principal, then id.
+    #[tokio::test]
+    async fn list_scope_path_honours_page_bounds_and_order() {
+        let fake = FakeAuthorizer::default();
+        fake.allow(Action::ListRoleGrants, &org_prn(100));
+        let h = list_harness(fake);
+        let b = seed(&h, 21, 3, "gateway_user", org_scope(100), PrincipalKind::User);
+        let a2 = seed(&h, 22, 2, "org_admin", org_scope(100), PrincipalKind::User);
+        seed(&h, 20, 2, "gateway_user", org_scope(100), PrincipalKind::User);
+        let too_big = ListRoleGrantsInput {
+            limit: Some(201),
+            ..at_scope(&org_prn(100).canonical())
+        };
+        assert_eq!(h.svc.list(&principal_prn(1), too_big).await.unwrap_err(), TenancyError::InvalidPagination);
+        let second_page = ListRoleGrantsInput {
+            limit: Some(2),
+            offset: Some(1),
+            ..at_scope(&org_prn(100).canonical())
+        };
+        assert_eq!(h.svc.list(&principal_prn(1), second_page).await.unwrap(), vec![a2, b]);
+    }
+
+    /// D6 and Review Focus 2: the principal-only path is unchanged — every row, and `limit`/
+    /// `offset` are ignored, even out of `Page`'s bounds.
+    #[tokio::test]
+    async fn list_principal_only_path_ignores_limit_and_offset() {
+        let h = list_harness(FakeAuthorizer::default());
+        for id in 30..33 {
+            seed(&h, id, 1, "gateway_user", org_scope(100 + id), PrincipalKind::User);
+        }
+        let input = ListRoleGrantsInput {
+            limit: Some(500),
+            offset: Some(-1),
+            ..by_principal(&principal_prn(1).canonical())
+        };
+        assert_eq!(h.svc.list(&principal_prn(1), input).await.unwrap().len(), 3);
+    }
+
+    /// A `RoleGrantStore` whose `grant_in` loses a concurrent-insert race: the winner's row
+    /// appears in the shared map, then the insert fails with `DuplicateGrant` (D9).
+    struct RaceLostGrantStore {
+        map: Arc<std::sync::Mutex<std::collections::HashMap<Uuid, RoleGrant>>>,
+        winner: RoleGrant,
+    }
+
+    #[async_trait]
+    impl RoleGrantStore for RaceLostGrantStore {
+        async fn grant(&self, _g: &RoleGrant) -> Result<(), AuthzError> {
+            unimplemented!("this fake only exercises grant_in")
+        }
+        async fn revoke(&self, _id: Uuid) -> Result<(), AuthzError> {
+            unimplemented!("this fake only exercises grant_in")
+        }
+        async fn grant_in(&self, _tx: &dyn Transaction, _g: &RoleGrant) -> Result<(), AuthzError> {
+            self.map.lock().unwrap().insert(self.winner.id, self.winner.clone());
+            Err(AuthzError::DuplicateGrant)
+        }
+        async fn revoke_in(&self, _tx: &dyn Transaction, _id: Uuid) -> Result<bool, AuthzError> {
+            unimplemented!("this fake only exercises grant_in")
+        }
+        async fn list_all(&self) -> Result<Vec<RoleGrant>, AuthzError> {
+            Ok(Vec::new())
+        }
+        async fn list_by_principal(&self, _p: &PrincipalId) -> Result<Vec<RoleGrant>, AuthzError> {
+            Ok(Vec::new())
+        }
+        async fn find(&self, _id: Uuid) -> Result<Option<RoleGrant>, AuthzError> {
+            Ok(None)
+        }
+    }
+
+    /// D9: a second grant of the same role at the same scope returns the FIRST grant with OK,
+    /// and writes no event, no audit row and no policy-generation bump.
+    #[tokio::test]
+    async fn a_second_grant_returns_the_existing_grant_and_emits_nothing() {
+        let fake = FakeAuthorizer::default();
+        fake.allow(Action::GrantRole, &root_prn());
+        let grants = InMemoryRoleGrants::default();
+        let query = InMemoryRoleGrantQuery::over(&grants, &TenancyStore::default());
+        let ServiceWithFakes { svc, outbox, audit, bumper } = new_service_with_fakes(fake, Arc::new(grants.clone()), Arc::new(query), TenancyStore::default());
+        let (actor, target) = (principal_prn(1), principal_prn(2));
+
+        let first = svc.grant(&actor, &target.canonical(), "platform_admin", &root_prn().canonical()).await.unwrap();
+        let second = svc.grant(&actor, &target.canonical(), "platform_admin", &root_prn().canonical()).await.unwrap();
+
+        assert_eq!(second, first, "D9: the existing grant, not a new one");
+        assert_eq!(grants.0.lock().unwrap().len(), 1);
+        assert_eq!(outbox.0.lock().unwrap().len(), 1, "only the first grant enqueues an event");
+        assert_eq!(audit.0.lock().unwrap().len(), 1, "only the first grant records an audit row");
+        assert_eq!(bumper.calls(), 1, "only the first grant bumps policy_gen");
+    }
+
+    /// D9, §6: the pre-check runs AFTER the authorization check, so an actor without
+    /// `GrantRole` at the scope learns nothing about an existing grant.
+    #[tokio::test]
+    async fn the_existing_grant_is_not_revealed_to_an_actor_without_grant_role() {
+        let grants = InMemoryRoleGrants::default();
+        let existing = RoleGrant {
+            id: Uuid::from_u128(55),
+            principal: PrincipalId::from_prn(principal_prn(2)),
+            role_key: "platform_admin".to_string(),
+            scope: GrantScope::Root,
+            linked_policy_id: "grant:55".to_string(),
+            created_at: Utc.timestamp_opt(0, 0).unwrap(),
+        };
+        grants.0.lock().unwrap().insert(existing.id, existing);
+        let query = InMemoryRoleGrantQuery::over(&grants, &TenancyStore::default());
+        let svc = new_service_with_fakes(FakeAuthorizer::default(), Arc::new(grants), Arc::new(query), TenancyStore::default()).svc;
+        let err = svc
+            .grant(&principal_prn(1), &principal_prn(2).canonical(), "platform_admin", &root_prn().canonical())
+            .await
+            .unwrap_err();
+        assert_eq!(err, TenancyError::Forbidden);
+    }
+
+    /// D9 and Review Focus 4: a concurrent insert won. The transaction rolled back; `grant`
+    /// reads the winner's grant and returns it, and emits nothing of its own.
+    #[tokio::test]
+    async fn a_lost_insert_race_returns_the_winner_s_grant_and_emits_nothing() {
+        let fake = FakeAuthorizer::default();
+        fake.allow(Action::GrantRole, &root_prn());
+        let shared = InMemoryRoleGrants::default();
+        let winner = RoleGrant {
+            id: Uuid::from_u128(777),
+            principal: PrincipalId::from_prn(principal_prn(2)),
+            role_key: "platform_admin".to_string(),
+            scope: GrantScope::Root,
+            linked_policy_id: "grant:777".to_string(),
+            created_at: Utc.timestamp_opt(0, 0).unwrap(),
+        };
+        let store = RaceLostGrantStore {
+            map: shared.0.clone(),
+            winner: winner.clone(),
+        };
+        let query = InMemoryRoleGrantQuery::over(&shared, &TenancyStore::default());
+        let ServiceWithFakes { svc, outbox, audit, bumper } = new_service_with_fakes(fake, Arc::new(store), Arc::new(query), TenancyStore::default());
+
+        let got = svc.grant(&principal_prn(1), &principal_prn(2).canonical(), "platform_admin", &root_prn().canonical()).await.unwrap();
+
+        assert_eq!(got, winner);
+        assert!(outbox.0.lock().unwrap().is_empty(), "the loser enqueues no event");
+        assert!(audit.0.lock().unwrap().is_empty(), "the loser records no audit row");
+        assert_eq!(bumper.calls(), 0, "the loser does not bump; the winner already did");
     }
 }

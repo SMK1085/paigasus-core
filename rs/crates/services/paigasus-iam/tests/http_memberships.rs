@@ -82,6 +82,20 @@ async fn ac1_membership_lifecycle_over_http() {
     assert_eq!(listed[0]["node_prn"], org_prn);
     assert_eq!(listed[1]["node_prn"], team_prn);
 
+    // 6b. SMA-676 D8: `principal_kind=user` keeps both (alice is a `user`); `service_account`
+    // keeps neither; an unrecognized value is refused before any repository read.
+    let (status, listed) = send(&app, "GET", &format!("/v1/memberships?principal={user_prn}&principal_kind=user"), None, Some(token.as_str())).await;
+    assert_eq!(status, StatusCode::OK, "{listed}");
+    assert_eq!(listed.as_array().unwrap().len(), 2);
+
+    let (status, listed) = send(&app, "GET", &format!("/v1/memberships?principal={user_prn}&principal_kind=service_account"), None, Some(token.as_str())).await;
+    assert_eq!(status, StatusCode::OK, "{listed}");
+    assert!(listed.as_array().unwrap().is_empty());
+
+    let (status, err) = send(&app, "GET", &format!("/v1/memberships?principal={user_prn}&principal_kind=bogus"), None, Some(token.as_str())).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{err}");
+    assert_eq!(err["error"]["code"], "invalid-principal-kind");
+
     // 7. Forge a node prn: the correct team uuid, but a different org uuid in the org slot.
     // A fixed low-value uuid never collides with a real (UUIDv7, clock-derived) org id.
     let wrong_org = Uuid::from_u128(9_999);

@@ -104,3 +104,23 @@ export function teamPrn(orgId: string, teamId: string): string {
 export function projectPrn(orgId: string, projectId: string): string {
   return prnBuild('iam', '', requireUuid('orgId', orgId), 'project', requireUuid('projectId', projectId));
 }
+
+/**
+ * IAM's principal PRN (a user or a service account): `resourceType === 'principal'`, no org field
+ * — the same shape rule as `organization`. NOT a tenancy node: a principal is an actor, not a place
+ * in the org/team/project tree, so it is not a `TenancyKind` and `parseTenancyPrn` never returns
+ * one. Kept here because it reads the same kernel calls as the tenancy readers above.
+ */
+export type PrincipalRef = { readonly id: string };
+
+/** The principal a PRN names, or null for any other resource and for an invalid PRN. Never throws. */
+export function parsePrincipalPrn(prn: string): PrincipalRef | null {
+  if (prn.length === 0 || prn.length > MAX_LEN) return null;
+  const fields = readKernelFields(prn);
+  if (fields === null) return null;
+  return fields.resourceType === 'principal' && fields.org === '' ? { id: fields.resourceId } : null;
+}
+
+export function principalPrn(id: string): string {
+  return prnBuild('iam', '', '', 'principal', requireUuid('id', id));
+}

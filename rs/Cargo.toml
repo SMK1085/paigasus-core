@@ -142,12 +142,13 @@ napi = { version = "3", default-features = false, features = ["napi8"] }
 napi-derive = "3"
 napi-build = "2"
 # wasm-bindgen — Rust↔browser/Edge FFI for the wasm binding crate (ADR-0005). Consumed via the
-# #[wasm_bindgen] macro; the cdylib's wasm imports (__wbindgen_*) resolve at INSTANTIATION on the
-# wasm32-unknown-unknown target, so — unlike the PyO3/napi cdylibs — it needs NO rs/.cargo/config.toml
-# link flags. wasm-pack (proto-pinned) fetches the matching wasm-bindgen-cli for whatever 0.2.z this
-# caret resolves to. INVARIANT: the pinned wasm-pack must support that 0.2.z (crate↔CLI compat is exact
-# per 0.2.z) — bump the two together (dependency-bump runbook), or this re-introduces the schema
-# mismatch the proto pin was meant to avoid.
+# #[wasm_bindgen] macro; the cdylib's wasm imports (__wbindgen_*) resolve at INSTANTIATION on
+# the wasm32-unknown-unknown target, so — unlike the PyO3/napi cdylibs — it needs NO
+# rs/.cargo/config.toml link flags. wasm-pack (proto-pinned) fetches the matching
+# wasm-bindgen-cli for whatever 0.2.z this caret resolves to. INVARIANT: the pinned wasm-pack
+# must support that 0.2.z (crate↔CLI compat is exact per 0.2.z) — bump the two together
+# (runbook: rs/CLAUDE.md, "The wasm-bindgen family does not move through dependabot"), or
+# this re-introduces the schema mismatch the proto pin was meant to avoid.
 wasm-bindgen = "0.2"
 # proptest — property-based coverage of the kernel's behavioral properties (the "against the
 # Rust impl" half of the ADR-0005 parity harness, SMA-433). Dev-dependency only — never enters a
