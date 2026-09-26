@@ -8,11 +8,11 @@
 // Every error a row throws carries SENTINEL_IDP_URL in its message, and every row that produces a
 // response asserts that no IDP_SENTINELS string reaches the body, a header or a logged field (T4).
 import { describe, expect, it, vi } from 'vitest';
-import { OIDC_DISCOVERY_FAILURE_REASONS, OidcDiscoveryFailed, type OidcDiscoveryFailureReason } from '../../src/core/errors.js';
+import { CallbackRejected, OIDC_DISCOVERY_FAILURE_REASONS, OidcDiscoveryFailed, type OidcDiscoveryFailureReason } from '../../src/core/errors.js';
 import type { SessionRecord } from '../../src/core/session.js';
 import { SESSION_COOKIE } from '../../src/http/cookies.js';
 import { createAuthRoutes } from '../../src/http/routes.js';
-import { BASE_PATH, IDP_SENTINELS, ORIGIN, SENTINEL_IDP_URL, expectEventsClean, expectStoreUnavailable, harness } from '../support/store-failure.js';
+import { BASE_PATH, IDP_SENTINELS, ORIGIN, SENTINEL_IDP_URL, STATE, callbackRequest, expectEventsClean, expectStoreUnavailable, harness, seedTransaction } from '../support/store-failure.js';
 
 const RETURN_TO = '/iam/orgs';
 const HOSTILE = `/iam/a"b<c>d&e'f#g h`;
@@ -158,5 +158,99 @@ describe('GET /auth/login — OIDC discovery failed (SMA-656)', () => {
 
     const body = await expectIdpUnavailable(res, HOSTILE);
     expect(body).toContain('href="/iam/a&quot;b&lt;c&gt;d&amp;e&#39;f#g h"');
+  });
+});
+
+// Each row seeds a transaction and sends its cookie, so the callback reaches the code exchange.
+describe('GET /auth/callback — OIDC discovery failed (SMA-656 D10)', () => {
+  it.each(OIDC_DISCOVERY_FAILURE_REASONS)('T12, T13, no session cookie (%s): 503, link to login with the transaction returnTo', async (reason) => {
+    const h = harness([], noStoreFailure);
+    await seedTransaction(h, RETURN_TO);
+    h.oidc.codeGrantError = discoveryError(reason);
+
+    const res = await createAuthRoutes(h.runtime).handle(callbackRequest());
+
+    await expectIdpUnavailable(res, LOGIN_TARGET);
+    // Exactly one event: no login.callback_rejected, no session.created.
+    expect(h.events).toEqual([['oidc.discovery_failed', { zone: 'iam', stage: 'callback', reason }]]);
+    // No store call after takeTransaction.
+    expect(h.calls).toEqual([`takeTransaction:${STATE}`]);
+    expectEventsClean(h.events, IDP_SENTINELS);
+    // D10: the one state change on this path. The transaction is consumed, so a retry of this URL cannot complete.
+    expect(await h.inner.takeTransaction(STATE)).toBeNull();
+  });
+
+  it('T12b, T13, with a session cookie: the link goes to the transaction returnTo, and the session survives', async () => {
+    const h = harness([], noStoreFailure);
+    await seedTransaction(h, RETURN_TO);
+    await h.inner.set(OLD_SID, sessionRecord(), 60_000, null);
+    h.oidc.codeGrantError = discoveryError('timeout');
+
+    const res = await createAuthRoutes(h.runtime).handle(callbackRequest(OLD_SID));
+
+    await expectIdpUnavailable(res, RETURN_TO);
+    expect(h.events).toEqual([['oidc.discovery_failed', { zone: 'iam', stage: 'callback', reason: 'timeout' }]]);
+    expect(h.calls).toEqual([`takeTransaction:${STATE}`]);
+    expect(await h.inner.get(OLD_SID)).not.toBeNull();
+    expectEventsClean(h.events, IDP_SENTINELS);
+  });
+
+  it('T14: a plain Error from the exchange is still code_exchange_failed', async () => {
+    const h = harness([], noStoreFailure);
+    await seedTransaction(h, RETURN_TO);
+    h.oidc.codeGrantError = new Error(`oidc authorization_code_grant failed at ${SENTINEL_IDP_URL}`);
+
+    const err: unknown = await createAuthRoutes(h.runtime)
+      .handle(callbackRequest())
+      .catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(CallbackRejected);
+    expect((err as CallbackRejected).reason).toBe('code_exchange_failed');
+    expect(h.events).toEqual([['login.callback_rejected', { reason: 'code_exchange_failed', zone: 'iam' }]]);
+  });
+
+  it('T15: an OidcDiscoveryFailed from a SECOND copy of core/errors gives the T12 503', async () => {
+    vi.resetModules();
+    const foreign = await import('../../src/core/errors.js');
+    expect(foreign.OidcDiscoveryFailed).not.toBe(OidcDiscoveryFailed);
+    const h = harness([], noStoreFailure);
+    await seedTransaction(h, RETURN_TO);
+    h.oidc.codeGrantError = new foreign.OidcDiscoveryFailed(`oidc discovery failed at ${SENTINEL_IDP_URL}`, 'tls');
+
+    const res = await createAuthRoutes(h.runtime).handle(callbackRequest());
+
+    await expectIdpUnavailable(res, LOGIN_TARGET);
+    expect(h.events).toEqual([['oidc.discovery_failed', { zone: 'iam', stage: 'callback', reason: 'tls' }]]);
+  });
+
+  // Review Focus 1.
+  it('round-trips a hostile transaction returnTo through the IdP callback link', async () => {
+    const h = harness([], noStoreFailure);
+    await seedTransaction(h, HOSTILE);
+    h.oidc.codeGrantError = discoveryError('network');
+
+    const res = await createAuthRoutes(h.runtime).handle(callbackRequest());
+
+    const body = await expectIdpUnavailable(res, `/iam/auth/login?returnTo=${encodeURIComponent(HOSTILE)}`);
+    expect(body).toContain('&#39;');
+  });
+
+  // Review Focus 2, D10: a reload of the 503 page sends this callback URL again.
+  it('a reload of the callback 503 gives state_unknown, and no second discovery event', async () => {
+    const h = harness([], noStoreFailure);
+    await seedTransaction(h, RETURN_TO);
+    h.oidc.codeGrantError = discoveryError('network');
+    const routes = createAuthRoutes(h.runtime);
+
+    const first = await routes.handle(callbackRequest());
+    expect(first.status).toBe(503);
+    const err: unknown = await routes.handle(callbackRequest()).catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(CallbackRejected);
+    expect((err as CallbackRejected).reason).toBe('state_unknown');
+    expect(h.events).toEqual([
+      ['oidc.discovery_failed', { zone: 'iam', stage: 'callback', reason: 'network' }],
+      ['login.callback_rejected', { reason: 'state_unknown', zone: 'iam' }],
+    ]);
   });
 });

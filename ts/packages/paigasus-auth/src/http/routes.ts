@@ -308,6 +308,10 @@ async function handleCallback(runtime: AuthRuntime, req: Request, url: URL): Pro
   const currentUrl = new URL(runtime.redirectUri);
   currentUrl.search = url.search;
 
+  // Read ONCE, before the exchange (SMA-656 § 4.6). The discovery 503 below picks its retry target
+  // from it, and the session-fixation delete after the exchange reuses it.
+  const presentedSid = cookies.get(SESSION_COOKIE);
+
   let tokens: OidcTokens;
   try {
     tokens = await runtime.oidc.authorizationCodeGrant({
@@ -316,7 +320,25 @@ async function handleCallback(runtime: AuthRuntime, req: Request, url: URL): Pro
       expectedState: state,
       expectedNonce: tx.nonce,
     });
-  } catch {
+  } catch (err) {
+    // SMA-656 D10. A discovery failure is NOT a failed code exchange, so it does not reject:
+    //   - takeTransaction above has consumed the transaction, so a retry of this URL gives
+    //     `state_unknown`. The retry link starts a new login instead (the SMA-653 row 3 rule).
+    //   - The code is NOT spent, and no tokens exist: OidcDiscoveryFailed comes only from the
+    //     adapter's getConfig(), which runs before any token request (the no-revoke invariant in
+    //     adapters/oidc.ts's header). So nothing is revoked, unlike failAfterExchange below.
+    //   - The retry target follows SMA-656 D6 (the SMA-653 D9 rule): with a session cookie, the
+    //     link goes to tx.returnTo, so a valid session that a second tab created is not deleted by
+    //     a retry through /auth/login. tx.returnTo passed validateReturnTo and the auth-route guard
+    //     at login.
+    //   - No `login.callback_rejected`: the callback was not rejected. `code_exchange_failed` stays
+    //     for a real token-endpoint failure, so the two are different in the log.
+    // Classified by `code`, not `instanceof`: the shared runtime.oidc builds the error in whichever
+    // module copy created the runtime (SMA-657 D7).
+    if (isOidcDiscoveryFailed(err)) {
+      const href = presentedSid !== undefined ? tx.returnTo : loginRetryHref(runtime.basePath, tx.returnTo);
+      return discoveryFailedResponse(runtime, 'callback', err, href);
+    }
     return reject('code_exchange_failed');
   }
 
@@ -340,8 +362,7 @@ async function handleCallback(runtime: AuthRuntime, req: Request, url: URL): Pro
   // re-login, where the browser never sends the old cookie again once `handleLogin`'s 302 clears
   // it. This delete stays for the case that leaves reachable: two tabs sharing one cookie jar,
   // where a second tab's callback can still present the old sid if its request raced ahead of the
-  // first tab's clearing response.
-  const presentedSid = cookies.get(SESSION_COOKIE);
+  // first tab's clearing response. `presentedSid` was read before the exchange (SMA-656 § 4.6).
   if (presentedSid !== undefined) {
     const deleted = await storeStep(runtime, 'callback_delete', presentedSid, () => runtime.store.delete(presentedSid));
     if (deleted === STORE_DOWN) return failAfterExchange();
