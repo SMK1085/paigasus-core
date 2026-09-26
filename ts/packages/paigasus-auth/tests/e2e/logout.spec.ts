@@ -16,15 +16,21 @@ test('AC 3: a stolen cookie is dead immediately after logout', async ({ page, co
   await page.locator('#kc-login').click();
   await expect(page.getByTestId('guarded-heading')).toBeVisible();
 
+  // SMA-681: the realm does not pin a user id, so the subject comes from the page the fixture
+  // server renders (tests/e2e/fixture-server.ts:182).
+  const subject = ((await page.getByTestId('principal-subject').textContent()) ?? '').trim();
+  expect(subject, 'the guarded page must show the principal subject').not.toBe('');
+
   const cookiesBeforeLogout = await context.cookies();
   const stolen = cookiesBeforeLogout.find((c) => c.name === SESSION_COOKIE_NAME);
   expect(stolen, 'must capture a live session cookie before logging out').toBeDefined();
   if (stolen === undefined) throw new Error('unreachable');
 
-  // M12: routes.ts's handleLogout deliberately omits `id_token_hint` from the end-session
-  // redirect (the raw ID token JWT is never stored — see that function's own doc comment) and
-  // relies on openid-client appending `client_id` unconditionally instead. Does Keycloak 26.4
-  // actually receive that combination, and does it honour it without a confirmation page?
+  // SMA-681: routes.ts's handleLogout sends the stored raw ID token as `id_token_hint`, and
+  // openid-client appends `client_id`. Keycloak 26.4 needs the hint to skip its confirmation page
+  // when an SSO session is live (SMA-681 spec § 3). This realm grants `offline_access` as a default
+  // scope, so no SSO session exists here and no page appears either way (SMA-682): this test proves
+  // the hint is SENT, and that Keycloak still completes the redirect with it (§ 3.1 row M-i1).
   //
   // Asserting `public-heading` becomes visible afterward is NOT sufficient on its own (fix round
   // 1, Important 1): `routes.ts`'s handleLogout has a DEGRADED arm — if `buildEndSessionUrl`
@@ -41,7 +47,14 @@ test('AC 3: a stolen cookie is dead immediately after logout', async ({ page, co
   const [endSessionRequest] = await Promise.all([page.waitForRequest((req) => req.url().includes('/protocol/openid-connect/logout')), page.getByTestId('logout-button').click()]);
   const endSessionUrl = new URL(endSessionRequest.url());
   expect(endSessionUrl.searchParams.get('client_id'), 'Keycloak must actually receive client_id on the end-session request').toBe(KEYCLOAK_CLIENT_ID);
-  expect(endSessionUrl.searchParams.has('id_token_hint'), 'id_token_hint must be absent — this package never stores the raw ID token JWT').toBe(false);
+  const hint = endSessionUrl.searchParams.get('id_token_hint');
+  expect(hint, 'id_token_hint must be present: the session record stores the raw ID token (SMA-681)').not.toBeNull();
+  const parts = (hint ?? '').split('.');
+  expect(parts, 'id_token_hint must be a three-part JWT').toHaveLength(3);
+  const payload = JSON.parse(Buffer.from(parts[1] ?? '', 'base64url').toString('utf8')) as { sub?: unknown; aud?: unknown };
+  expect(payload.sub, 'the hint belongs to the signed-in user').toBe(subject);
+  const audiences = Array.isArray(payload.aud) ? payload.aud : [payload.aud];
+  expect(audiences, 'the hint was issued to this client').toContain(KEYCLOAK_CLIENT_ID);
 
   // Only now does completing the redirect chain confirm Keycloak honoured that request rather
   // than interposing a confirmation page — the request-capture above already ruled out the

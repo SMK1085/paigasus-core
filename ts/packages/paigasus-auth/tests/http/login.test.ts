@@ -47,6 +47,7 @@ beforeEach(async () => {
     publicOrigin: 'https://rp.example.com',
     redirectUri: REDIRECT_URI,
     postLogoutRedirectUri: 'https://rp.example.com/',
+    clientId: 'paigasus-console',
     cookieDomainless: true,
     skewMs: 30_000,
     lockTtlMs: 10_000,

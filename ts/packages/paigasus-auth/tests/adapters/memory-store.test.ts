@@ -14,12 +14,12 @@ describe('MemorySessionStore and the shared record predicate (SMA-626 § 4)', ()
   it('returns a well-formed record unchanged', async () => {
     const s = new MemorySessionStore();
     await s.set('s', makeRecord(), 60_000, null);
-    await expect(s.get('s')).resolves.toMatchObject({ version: 1, accessToken: 'AT' });
+    await expect(s.get('s')).resolves.toMatchObject({ version: 2, accessToken: 'AT' });
   });
 
   it('treats a type-violating record as absent and deletes it', async () => {
     const s = new MemorySessionStore();
-    await s.set('s', { version: 1 } as unknown as SessionRecord, 60_000, null);
+    await s.set('s', { version: 2 } as unknown as SessionRecord, 60_000, null);
     await expect(s.get('s')).resolves.toBeNull();
     // Proves DELETION, not merely correct-but-repeated rejection. Calling `get()` twice and
     // checking `null` both times does NOT distinguish "deleted" from "still in the map but

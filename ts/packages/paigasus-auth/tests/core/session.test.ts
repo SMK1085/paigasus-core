@@ -5,12 +5,13 @@ import type { SessionRecord, SessionView } from '../../src/core/session.js';
 import { makeRecord } from '../store-contract.js';
 
 const RECORD: SessionRecord = {
-  version: 1,
+  version: 2,
   rev: 3,
   accessToken: 'AT-secret',
   refreshToken: 'RT-secret',
   accessExpiresAt: 2_000_000,
   absoluteExpiresAt: 9_000_000,
+  idToken: 'IDT-secret',
   idTokenClaims: { iss: 'https://idp', sub: 'u1', email: 'a@b.c', name: 'Alice' },
   principal: {
     principalPrn: 'prn:pgs:iam::org1:user/8f1a2b3c-4d5e-6f70-8192-a3b4c5d6e7f8',
@@ -33,6 +34,8 @@ describe('toSessionView', () => {
     const serialised = JSON.stringify(toSessionView(RECORD));
     expect(serialised).not.toContain('AT-secret');
     expect(serialised).not.toContain('RT-secret');
+    // SMA-681: the raw ID token is in the record now. It must not reach the browser either.
+    expect(serialised).not.toContain('IDT-secret');
     for (const k of Object.keys(toSessionView(RECORD))) {
       expect(k.toLowerCase()).not.toContain('token');
     }
@@ -104,7 +107,7 @@ describe('isSessionRecord (SMA-626 § 4.2)', () => {
     expect(isSessionRecord({ ...makeRecord(), refreshToken: null })).toBe(false);
   });
 
-  it.each(['version', 'rev', 'accessToken', 'accessExpiresAt', 'absoluteExpiresAt', 'idTokenClaims', 'principal'])('rejects a record missing %s', (field) => {
+  it.each(['version', 'rev', 'accessToken', 'accessExpiresAt', 'absoluteExpiresAt', 'idToken', 'idTokenClaims', 'principal'])('rejects a record missing %s', (field) => {
     const rec: Record<string, unknown> = { ...makeRecord() };
     delete rec[field];
     expect(isSessionRecord(rec)).toBe(false);
@@ -135,13 +138,26 @@ describe('isSessionRecord (SMA-626 § 4.2)', () => {
   });
 
   // HOLE 2 (§ 4.1): two NaN comparisons in resolveSession let this through as a LIVE session
-  // carrying accessToken: undefined.
-  it('rejects a body of { version: 1 } and nothing else', () => {
-    expect(isSessionRecord({ version: 1 })).toBe(false);
+  // carrying accessToken: undefined. The body carries the CURRENT version, so the test reaches the
+  // field checks. With any other version it would fail at the version check and prove nothing.
+  it('rejects a body of { version: 2 } and nothing else', () => {
+    expect(isSessionRecord({ version: 2 })).toBe(false);
   });
 
-  it('rejects a version other than 1', () => {
-    expect(isSessionRecord({ ...makeRecord(), version: 2 })).toBe(false);
+  // SMA-681 D3. Version 1 is every record written before the SMA-681 deploy. Rejecting it is the
+  // forced logout that the spec accepts.
+  it.each([1, 3])('rejects a version other than 2 (%p)', (version) => {
+    expect(isSessionRecord({ ...makeRecord(), version })).toBe(false);
+  });
+
+  // SMA-681 § 4.1: logout sends idToken as id_token_hint, so an empty or non-string value is a
+  // poisoned record, not a record with no hint.
+  it.each([
+    ['a number', 42],
+    ['null', null],
+    ['an empty string', ''],
+  ])('rejects an idToken that is %s', (_label, idToken) => {
+    expect(isSessionRecord({ ...makeRecord(), idToken })).toBe(false);
   });
 
   it.each(['rev', 'accessExpiresAt', 'absoluteExpiresAt'])('rejects a non-finite %s', (field) => {

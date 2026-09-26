@@ -71,11 +71,12 @@ export async function installSession(token = 'tok-integration'): Promise<string>
   const sid = randomUUID();
   const now = Date.now();
   const record: SessionRecord = {
-    version: 1,
+    version: 2,
     rev: 0,
     accessToken: token,
     accessExpiresAt: now + SESSION_TTL_MS,
     absoluteExpiresAt: now + SESSION_TTL_MS,
+    idToken: 'id-token-integration',
     idTokenClaims: { iss: 'https://idp.example.test', sub: 'integration-subject' },
     principal: { principalPrn: null, issuer: 'https://idp.example.test', subject: 'integration-subject', memberships: [], roleGrants: [], grantsAvailable: false },
   };

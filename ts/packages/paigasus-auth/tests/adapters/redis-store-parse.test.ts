@@ -40,7 +40,7 @@ beforeEach(() => {
 describe('a poisoned session record is absent-and-deleted, never a store failure', () => {
   it('accepts a well-formed record (the positive control)', async () => {
     state.value = JSON.stringify(makeRecord());
-    await expect((await store()).get('s')).resolves.toMatchObject({ version: 1, accessToken: 'AT' });
+    await expect((await store()).get('s')).resolves.toMatchObject({ version: 2, accessToken: 'AT' });
     expect(state.deleted).toEqual([]);
   });
 
@@ -53,10 +53,11 @@ describe('a poisoned session record is absent-and-deleted, never a store failure
     expect(state.deleted).toEqual(['pgs:sess:s']);
   });
 
-  // HOLE 2. Parses fine, version is 1, everything else is missing. Before the fix this is
-  // returned as a LIVE session carrying accessToken: undefined.
-  it('treats a { version: 1 } body as absent and deletes it', async () => {
-    state.value = '{"version":1}';
+  // HOLE 2. Parses fine, version is CURRENT, everything else is missing. Before the fix this is
+  // returned as a LIVE session carrying accessToken: undefined. The body must carry the current
+  // version, or it fails at the version check and never reaches the field checks.
+  it('treats a { version: 2 } body as absent and deletes it', async () => {
+    state.value = '{"version":2}';
     await expect((await store()).get('s')).resolves.toBeNull();
     expect(state.deleted).toEqual(['pgs:sess:s']);
   });
@@ -75,8 +76,10 @@ describe('a poisoned session record is absent-and-deleted, never a store failure
     expect(state.deleted).toEqual(['pgs:sess:s']);
   });
 
-  it('still treats a version mismatch as absent and deletes it', async () => {
-    state.value = JSON.stringify({ ...makeRecord(), version: 2 });
+  // SMA-681 D3, at the adapter level: a version 1 record written before the deploy is absent and
+  // deleted. This is the forced logout the spec accepts.
+  it('still treats a version mismatch (a version 1 record) as absent and deletes it', async () => {
+    state.value = JSON.stringify({ ...makeRecord(), version: 1 });
     await expect((await store()).get('s')).resolves.toBeNull();
     expect(state.deleted).toEqual(['pgs:sess:s']);
   });

@@ -92,4 +92,23 @@ describe('the fake IdP', () => {
     expect((await refresh(first.refresh_token)).status).toBe(200);
     expect((await refresh(first.refresh_token)).status).toBe(400);
   });
+
+  // SMA-681: the e2e tier asserts that logout sends the login ID token as id_token_hint. It can
+  // only do that when the fake records what it issued and what /logout received.
+  it('records the id_token it issues, and the id_token_hint of each /logout request', async () => {
+    const verifier = randomBytes(32).toString('base64url');
+    const body = JSON.parse((await exchange(await authorize(REDIRECT, verifier), REDIRECT, verifier)).body) as { id_token: string };
+    expect(idp.idTokens.at(-1)).toBe(body.id_token);
+
+    const logout = (params: Record<string, string>): Promise<{ status: number }> => {
+      const url = new URL(`${idp.issuer}/logout`);
+      url.search = new URLSearchParams(params).toString();
+      return httpsRequest(url.toString(), tls);
+    };
+    expect((await logout({ post_logout_redirect_uri: 'https://127.0.0.1:9/iam/', id_token_hint: body.id_token, state: 's' })).status).toBe(302);
+    expect(idp.endSessionHints.at(-1)).toBe(body.id_token);
+
+    expect((await logout({ post_logout_redirect_uri: 'https://127.0.0.1:9/iam/' })).status).toBe(302);
+    expect(idp.endSessionHints.at(-1)).toBeNull();
+  });
 });

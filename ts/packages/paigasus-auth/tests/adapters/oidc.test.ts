@@ -62,6 +62,15 @@ describe('createOidcClient — authorizationCodeGrant ID Token validation', () =
     expect(tokens.accessToken.length).toBeGreaterThan(0);
   });
 
+  // SMA-681 § 4.2: logout sends this exact string as `id_token_hint`, so the adapter must hand back
+  // the raw JWT the IdP issued, not a re-encoding of its claims.
+  it('returns the raw id_token string, equal to the minted token', async () => {
+    const minted = await fixture.mintIdToken({ nonce: NONCE });
+    fixture.setNextIdToken(minted);
+    const tokens = await grant(makeClient());
+    expect(tokens.idToken).toBe(minted);
+  });
+
   it('rejects a token with the wrong iss', async () => {
     fixture.setNextIdToken(await fixture.mintIdToken({ nonce: NONCE, iss: 'https://evil.example.com' }));
     await expect(grant(makeClient())).rejects.toThrow();
@@ -170,16 +179,19 @@ describe('createOidcClient — the rest of the surface', () => {
     const parsed = new URL(url);
     expect(parsed.searchParams.get('post_logout_redirect_uri')).toBe('https://rp.example.com/');
     expect(parsed.searchParams.get('id_token_hint')).toBe('idtok');
+    // § 3 row M-g: Keycloak rejects a hint whose `aud` is not the request's client_id. openid-client
+    // still appends client_id when a hint is present, and it is the client the hint was issued to.
+    expect(parsed.searchParams.get('client_id')).toBe(fixture.clientId);
   });
 
   // WITNESS TEST (task 9 review): openid-client@6.8.8 appends `client_id` to the end-session
-  // parameters UNCONDITIONALLY whenever the caller does not supply one
-  // (build/index.js:1129-1141 — `if (!parameters.has('client_id')) parameters.set('client_id',
-  // c.client_id);`). This is load-bearing: task 9's logout route never sets `idTokenHint`, and
-  // `client_id` plus a registered `post_logout_redirect_uri` is what lets Keycloak and Entra ID
-  // skip the confirmation interstitial in its absence (routes.ts's handleLogout doc comment).
-  // Nothing else in this package would notice a future major version silently dropping this
-  // default, so it is asserted here directly.
+  // parameters whenever the caller does not supply one (build/index.js:1129-1141 — `if
+  // (!parameters.has('client_id')) parameters.set('client_id', c.client_id);`). Since SMA-681 the
+  // logout route also sends `id_token_hint` when the session record holds one. With no record, the
+  // request has `client_id` and `post_logout_redirect_uri` only, and Keycloak then shows its
+  // confirmation page when an SSO session is live (SMA-681 spec § 3 row M-b). With a hint,
+  // Keycloak needs the `client_id` to equal the hint's `aud` (§ 3 row M-g). Nothing else in this
+  // package would notice a future major version dropping this default, so it is asserted here.
   it('buildEndSessionUrl carries client_id even when the caller does not supply one', async () => {
     const oidc = makeClient();
     const url = await oidc.buildEndSessionUrl({ postLogoutRedirectUri: 'https://rp.example.com/' });
@@ -197,6 +209,37 @@ describe('createOidcClient — the rest of the surface', () => {
       allowInsecureRequests: true,
     });
     await expect(oidc.refresh('rt')).rejects.toThrow(/oidc discovery failed/);
+  });
+});
+
+// SMA-681 § 4.2. Keycloak returns a new ID token on a refresh (spec § 3 row M-e). The adapter hands
+// it back only when the response carries one. It does not compare `sub` with the login token:
+// core/single-flight.ts does that. `setNextIdToken` stays set across requests
+// (tests/fixtures/jwks.ts:171), so each case uses a fresh fixture (beforeEach) and sets it itself.
+describe('createOidcClient — refresh and the ID token (SMA-681)', () => {
+  it('returns the raw refreshed id_token and its claims', async () => {
+    // A non-default sub: the fixture default is 'user-1' (tests/fixtures/jwks.ts:216), so a
+    // hard-coded claim in the adapter could not pass this.
+    const minted = await fixture.mintIdToken({ sub: 'refreshed-subject' });
+    fixture.setNextIdToken(minted);
+    const refreshed = await makeClient().refresh('some-refresh-token');
+    expect(refreshed.rotatedIdToken?.token).toBe(minted);
+    expect(refreshed.rotatedIdToken?.claims.sub).toBe('refreshed-subject');
+    expect(refreshed.rotatedIdToken?.claims.iss).toBe(fixture.issuer);
+  });
+
+  it('returns no rotatedIdToken when the refresh response carries no id_token', async () => {
+    const refreshed = await makeClient().refresh('some-refresh-token');
+    expect(refreshed).not.toHaveProperty('rotatedIdToken');
+    expect(refreshed).not.toHaveProperty('idToken');
+  });
+
+  // A GUARD, not red-first: openid-client's non-repudiation hook runs on every refresh response
+  // that carries an id_token (openid-client/build/index.js:1029), so this passes before and after
+  // the change. It fails if a later change disables the hook, or if it stops covering a refresh.
+  it('rejects a refreshed id_token signed by a key the JWKS does not publish', async () => {
+    fixture.setNextIdToken(await fixture.mintIdToken({ sub: 'refreshed-subject', wrongKey: true }));
+    await expect(makeClient().refresh('some-refresh-token')).rejects.toThrow(/oidc refresh_token_grant failed/);
   });
 });
 

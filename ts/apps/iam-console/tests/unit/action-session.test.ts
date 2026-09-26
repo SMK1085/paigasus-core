@@ -57,8 +57,10 @@ const { iamClients, iamClientsForAction, optionalSession } = await import('../..
 const SID = 'sid-for-the-action-path';
 
 function signedIn(): void {
+  // Cast through `unknown`, and this store never calls isSessionRecord: `version` changes only for
+  // consistency with SessionRecord (SMA-681). It proves nothing.
   const record: SessionRecord = {
-    version: 1,
+    version: 2,
     sid: SID,
     principalPrn: 'prn:pgs:iam:::principal/0190a1e5-0000-7000-8000-0000000000e0',
     subject: 'sub-1',

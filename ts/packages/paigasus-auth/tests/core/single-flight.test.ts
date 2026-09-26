@@ -5,7 +5,7 @@ import { noopLogger } from '../../src/adapters/noop-logger.js';
 import { RefreshRejected, SessionStoreTimeout } from '../../src/core/errors.js';
 import { failingStore, type StoreMethod } from '../support/store-failure.js';
 import { shouldRefresh } from '../../src/core/refresh-policy.js';
-import { resolveSession } from '../../src/core/single-flight.js';
+import { resolveSession, type ResolveDeps } from '../../src/core/single-flight.js';
 import { makeRecord } from '../store-contract.js';
 import type { AuthEventFields, AuthEventName, AuthLogger } from '../../src/ports/logger.js';
 import { sidTag } from '../../src/ports/logger.js';
@@ -21,8 +21,10 @@ function recordingLogger(): { logger: AuthLogger; events: Array<[AuthEventName, 
 // never fires unless the test advances timers by hand, so the failure mode is a HANG rather than
 // an assertion failure. Expiry is produced by writing a past accessExpiresAt, never by moving a
 // clock — which is why this package needs no Clock port.
-function deps(store: SessionStore, refresh: (rt: string) => Promise<{ accessToken: string; refreshToken?: string; expiresIn: number }>) {
-  return { store, refresh, logger: noopLogger, skewMs: 30_000, lockTtlMs: 5_000, lockWaitMs: 3_000, ttlMs: 60_000 };
+function deps(store: SessionStore, refresh: ResolveDeps['refresh']) {
+  // `revoke` is called only for a refresh token that no record holds (SMA-681). A test that checks
+  // it passes its own recording function over this one.
+  return { store, refresh, revoke: () => Promise.resolve(), logger: noopLogger, skewMs: 30_000, lockTtlMs: 5_000, lockWaitMs: 3_000, ttlMs: 60_000 };
 }
 
 describe('resolveSession', () => {
@@ -679,5 +681,327 @@ describe('a failing refresh (SMA-626 § 2.3)', () => {
     // ...but it did not land, so there is no session.deleted and the record survives.
     expect(events.some(([name]) => name === 'session.deleted')).toBe(false);
     expect(await inner.get('s')).not.toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// SMA-681 § 4.3 (D5, D6). A refresh response MAY carry a new ID token. OIDC Core § 12.2 requires
+// its `iss` and `sub` to equal the login token's. Nothing upstream compares them (spec § 4.2), so
+// resolveSession does. A match is stored, for logout's id_token_hint. A mismatch is a definitive
+// refresh failure: nothing is written, the record is deleted, and the new and old refresh tokens
+// are revoked after the lock is released.
+// ---------------------------------------------------------------------------------------------
+describe('a refreshed ID token (SMA-681 D5, D6)', () => {
+  // makeRecord()'s own login claims (tests/store-contract.ts).
+  const LOGIN_CLAIMS = { iss: 'https://idp', sub: 'u1' };
+
+  function recordingRevoke(): { revoke: (token: string) => Promise<void>; revoked: string[] } {
+    const revoked: string[] = [];
+    const revoke = (token: string): Promise<void> => {
+      revoked.push(token);
+      return Promise.resolve();
+    };
+    return { revoke, revoked };
+  }
+
+  it('stores a refreshed ID token whose iss and sub match, and leaves idTokenClaims unchanged', async () => {
+    const store = new MemorySessionStore();
+    await store.set('s', makeRecord({ accessExpiresAt: Date.now() - 1 }), 60_000, null);
+    const { logger, events } = recordingLogger();
+    // An extra claim on the refreshed token: if the code copied these claims into the record, the
+    // `toEqual` below would see `email`.
+    const refresh = () => Promise.resolve({ accessToken: 'AT2', refreshToken: 'RT2', expiresIn: 300, rotatedIdToken: { token: 'IDT2', claims: { ...LOGIN_CLAIMS, email: 'new@example.com' } } });
+
+    const out = await resolveSession({ ...deps(store, refresh), logger }, 's');
+
+    expect(out?.idToken).toBe('IDT2');
+    const stored = await store.get('s');
+    expect(stored?.idToken).toBe('IDT2');
+    expect(stored?.idTokenClaims).toEqual(LOGIN_CLAIMS);
+    expect(events).toContainEqual(['session.refreshed', { sid: sidTag('s'), rev: 1, idTokenRotated: true }]);
+    // Review Focus 1: no event carries the token.
+    expect(JSON.stringify(events)).not.toContain('IDT2');
+  });
+
+  it('keeps the stored ID token when the refresh response carries none', async () => {
+    const store = new MemorySessionStore();
+    await store.set('s', makeRecord({ accessExpiresAt: Date.now() - 1 }), 60_000, null);
+    const { logger, events } = recordingLogger();
+
+    const out = await resolveSession({ ...deps(store, () => Promise.resolve({ accessToken: 'AT2', refreshToken: 'RT2', expiresIn: 300 })), logger }, 's');
+
+    expect(out?.idToken).toBe('IDT');
+    expect((await store.get('s'))?.idToken).toBe('IDT');
+    expect(events).toContainEqual(['session.refreshed', { sid: sidTag('s'), rev: 1, idTokenRotated: false }]);
+  });
+
+  it.each([
+    ['sub', { iss: 'https://idp', sub: 'someone-else' }],
+    ['iss', { iss: 'https://other-idp', sub: 'u1' }],
+  ])('a refreshed ID token with a different %s signs out: delete, revoke the new and old refresh tokens, return null', async (_field, claims) => {
+    const store = new MemorySessionStore();
+    await store.set('s', makeRecord({ accessExpiresAt: Date.now() - 1 }), 60_000, null);
+    const { logger, events } = recordingLogger();
+    const { revoke, revoked } = recordingRevoke();
+    const refresh = () => Promise.resolve({ accessToken: 'AT2', refreshToken: 'RT2', expiresIn: 300, rotatedIdToken: { token: 'IDT-OTHER', claims } });
+
+    const out = await resolveSession({ ...deps(store, refresh), revoke, logger }, 's');
+
+    expect(out).toBeNull();
+    expect(await store.get('s')).toBeNull();
+    expect(revoked).toEqual(['RT2', 'RT']);
+    expect(events).toContainEqual(['session.refresh.id_token_mismatch', { sid: sidTag('s') }]);
+    expect(events).toContainEqual(['session.deleted', { sid: sidTag('s'), reason: 'id_token_mismatch' }]);
+    expect(events.some(([name]) => name === 'session.refreshed')).toBe(false);
+    // Review Focus 1: neither the new ID token nor the new refresh token reaches a log line.
+    expect(JSON.stringify(events)).not.toContain('IDT-OTHER');
+    expect(JSON.stringify(events)).not.toContain('RT2');
+  });
+
+  // A non-rotating IdP returns no refresh token. The old one is then still valid at the IdP, and
+  // the delete removes the only copy that anything would ever revoke.
+  it('a mismatch whose response has no refresh token revokes the old one', async () => {
+    const store = new MemorySessionStore();
+    await store.set('s', makeRecord({ accessExpiresAt: Date.now() - 1 }), 60_000, null);
+    const { revoke, revoked } = recordingRevoke();
+    const refresh = () => Promise.resolve({ accessToken: 'AT2', expiresIn: 300, rotatedIdToken: { token: 'IDT-OTHER', claims: { iss: 'https://idp', sub: 'someone-else' } } });
+
+    expect(await resolveSession({ ...deps(store, refresh), revoke }, 's')).toBeNull();
+    expect(revoked).toEqual(['RT']);
+  });
+
+  it('a mismatch whose response repeats the old refresh token revokes it once', async () => {
+    const store = new MemorySessionStore();
+    await store.set('s', makeRecord({ accessExpiresAt: Date.now() - 1 }), 60_000, null);
+    const { revoke, revoked } = recordingRevoke();
+    const refresh = () => Promise.resolve({ accessToken: 'AT2', refreshToken: 'RT', expiresIn: 300, rotatedIdToken: { token: 'IDT-OTHER', claims: { iss: 'https://idp', sub: 'someone-else' } } });
+
+    expect(await resolveSession({ ...deps(store, refresh), revoke }, 's')).toBeNull();
+    expect(revoked).toEqual(['RT']);
+  });
+
+  // runtime.ts invariant 3 budgets only the refresh's two HTTP calls inside the lock TTL. A revoke
+  // is a third IdP call, so it must run after the lock is released.
+  it('the mismatch revokes run after the lock is released', async () => {
+    const store = new MemorySessionStore();
+    await store.set('s', makeRecord({ accessExpiresAt: Date.now() - 1 }), 60_000, null);
+    const order: string[] = [];
+    const release = store.releaseLock.bind(store);
+    store.releaseLock = (sid, token) => {
+      order.push('release');
+      return release(sid, token);
+    };
+    const revoke = (token: string): Promise<void> => {
+      order.push(`revoke:${token}`);
+      return Promise.resolve();
+    };
+    const refresh = () => Promise.resolve({ accessToken: 'AT2', refreshToken: 'RT2', expiresIn: 300, rotatedIdToken: { token: 'IDT-OTHER', claims: { iss: 'https://idp', sub: 'someone-else' } } });
+
+    expect(await resolveSession({ ...deps(store, refresh), revoke }, 's')).toBeNull();
+    expect(order).toEqual(['release', 'revoke:RT2', 'revoke:RT']);
+  });
+
+  it('a revoke that throws synchronously does not change the mismatch outcome', async () => {
+    const store = new MemorySessionStore();
+    await store.set('s', makeRecord({ accessExpiresAt: Date.now() - 1 }), 60_000, null);
+    const attempted: string[] = [];
+    const revoke = (token: string): Promise<void> => {
+      attempted.push(token);
+      throw new Error('synchronous revoke failure');
+    };
+    const refresh = () => Promise.resolve({ accessToken: 'AT2', refreshToken: 'RT2', expiresIn: 300, rotatedIdToken: { token: 'IDT-OTHER', claims: { iss: 'https://idp', sub: 'someone-else' } } });
+
+    expect(await resolveSession({ ...deps(store, refresh), revoke }, 's')).toBeNull();
+    expect(await store.get('s')).toBeNull();
+    // The first throw does not stop the second revoke.
+    expect(attempted).toEqual(['RT2', 'RT']);
+    // The lock is free: a throw inside the revokes did not skip the release.
+    expect(await store.tryAcquireLock('s', 'next', 5_000)).toBe(true);
+  });
+
+  it('a failing revoke on the mismatch path still returns null', async () => {
+    const store = new MemorySessionStore();
+    await store.set('s', makeRecord({ accessExpiresAt: Date.now() - 1 }), 60_000, null);
+    const refresh = () => Promise.resolve({ accessToken: 'AT2', refreshToken: 'RT2', expiresIn: 300, rotatedIdToken: { token: 'IDT-OTHER', claims: { iss: 'https://idp', sub: 'someone-else' } } });
+
+    const out = await resolveSession({ ...deps(store, refresh), revoke: () => Promise.reject(new Error('idp unreachable')) }, 's');
+
+    expect(out).toBeNull();
+    expect(await store.get('s')).toBeNull();
+  });
+
+  // Review Focus 3. The delete goes through the SMA-651 deadline decorator, so it can fail. The
+  // store error then propagates, as on the refresh_rejected path. The new and old refresh tokens
+  // are still revoked, because nothing else would ever revoke them.
+  it('a failing delete on the mismatch path propagates the store error and still revokes', async () => {
+    const inner = new MemorySessionStore();
+    await inner.set('s', makeRecord({ accessExpiresAt: Date.now() - 1 }), 60_000, null);
+    const calls: string[] = [];
+    const store = failingStore(inner, new Set<StoreMethod>(['delete']), () => new SessionStoreTimeout('delete', 4000, 'deadline'), calls);
+    const { logger, events } = recordingLogger();
+    const { revoke, revoked } = recordingRevoke();
+    const refresh = () => Promise.resolve({ accessToken: 'AT2', refreshToken: 'RT2', expiresIn: 300, rotatedIdToken: { token: 'IDT-OTHER', claims: { iss: 'https://idp', sub: 'someone-else' } } });
+
+    await expect(resolveSession({ ...deps(store, refresh), revoke, logger }, 's')).rejects.toBeInstanceOf(SessionStoreTimeout);
+    expect(calls).toContain('delete:s');
+    expect(revoked).toEqual(['RT2', 'RT']);
+    expect(events).toContainEqual(['session.refresh.id_token_mismatch', { sid: sidTag('s') }]);
+    expect(events.some(([name]) => name === 'session.deleted')).toBe(false);
+  });
+
+  // Review Focus 4: the single-flight guarantee holds when the refresh rotates the ID token.
+  it('two concurrent callers during a rotating refresh: one refresh, both see the new ID token', async () => {
+    const store = new MemorySessionStore();
+    let calls = 0;
+    const refresh = async () => {
+      calls += 1;
+      await new Promise((r) => setTimeout(r, 40)); // hold the lock long enough to force contention
+      return { accessToken: 'AT2', refreshToken: 'RT2', expiresIn: 300, rotatedIdToken: { token: 'IDT2', claims: LOGIN_CLAIMS } };
+    };
+    await store.set('s', makeRecord({ accessExpiresAt: Date.now() - 1 }), 60_000, null);
+
+    const results = await Promise.all([resolveSession(deps(store, refresh), 's'), resolveSession(deps(store, refresh), 's')]);
+
+    expect(calls).toBe(1);
+    expect(results.map((r) => r?.idToken)).toEqual(['IDT2', 'IDT2']);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// SMA-681 review F3. Two branches return null after a successful refresh: a concurrent logout
+// deleted the record, or the write failed twice. The IdP has then issued a refresh token that no
+// record holds. It is revoked, best effort, after the lock is released.
+// ---------------------------------------------------------------------------------------------
+describe('a refresh token that no record holds (SMA-681)', () => {
+  /** `lockFree` records, per revoke, whether the lock was free at that moment. */
+  function recordingRevoke(store: SessionStore): { revoke: (token: string) => Promise<void>; revoked: string[]; lockFree: boolean[] } {
+    const revoked: string[] = [];
+    const lockFree: boolean[] = [];
+    const revoke = async (token: string): Promise<void> => {
+      revoked.push(token);
+      const won = await store.tryAcquireLock('s', `probe-${token}`, 5_000);
+      lockFree.push(won);
+      if (won) await store.releaseLock('s', `probe-${token}`);
+    };
+    return { revoke, revoked, lockFree };
+  }
+
+  /** The F1a shape: a concurrent logout deletes the record just before the compare-and-set. */
+  function logoutDuringPersist(store: MemorySessionStore): void {
+    const originalSet = store.set.bind(store);
+    store.set = async (sid, rec, ttl, expectedRev) => {
+      if (expectedRev === 0) await store.delete('s');
+      return originalSet(sid, rec, ttl, expectedRev);
+    };
+  }
+
+  it('revokes the new refresh token when a concurrent logout deleted the record', async () => {
+    const store = new MemorySessionStore();
+    await store.set('s', makeRecord({ accessExpiresAt: Date.now() - 1 }), 60_000, null);
+    logoutDuringPersist(store);
+    const { revoke, revoked, lockFree } = recordingRevoke(store);
+
+    const out = await resolveSession({ ...deps(store, () => Promise.resolve({ accessToken: 'AT2', refreshToken: 'RT2', expiresIn: 300 })), revoke }, 's');
+
+    expect(out).toBeNull();
+    expect(await store.get('s')).toBeNull();
+    expect(revoked).toEqual(['RT2']);
+    expect(lockFree).toEqual([true]);
+  });
+
+  it.each([
+    ['no refresh token', {}],
+    ['the same refresh token', { refreshToken: 'RT' }],
+  ])('revokes nothing after a concurrent logout when the response carries %s', async (_case, extra) => {
+    const store = new MemorySessionStore();
+    await store.set('s', makeRecord({ accessExpiresAt: Date.now() - 1 }), 60_000, null);
+    logoutDuringPersist(store);
+    const { revoke, revoked } = recordingRevoke(store);
+
+    expect(await resolveSession({ ...deps(store, () => Promise.resolve({ accessToken: 'AT2', expiresIn: 300, ...extra })), revoke }, 's')).toBeNull();
+    expect(revoked).toEqual([]);
+  });
+
+  it('revokes the new refresh token when the write fails twice (persist_failed)', async () => {
+    const store = new MemorySessionStore();
+    await store.set('s', makeRecord({ accessExpiresAt: Date.now() - 1 }), 60_000, null);
+    store.set = () => Promise.resolve(false); // every persist fails
+    const { logger, events } = recordingLogger();
+    const { revoke, revoked, lockFree } = recordingRevoke(store);
+
+    const out = await resolveSession({ ...deps(store, () => Promise.resolve({ accessToken: 'AT2', refreshToken: 'RT2', expiresIn: 300 })), revoke, logger }, 's');
+
+    expect(out).toBeNull();
+    expect(revoked).toEqual(['RT2']);
+    expect(lockFree).toEqual([true]);
+    expect(events).toContainEqual(['session.refresh.persist_failed', { sid: sidTag('s') }]);
+    expect(JSON.stringify(events)).not.toContain('RT2');
+  });
+
+  it('revokes the old refresh token when a non-rotating IdP response fails to persist (persist_failed)', async () => {
+    const store = new MemorySessionStore();
+    await store.set('s', makeRecord({ accessExpiresAt: Date.now() - 1 }), 60_000, null); // default refreshToken 'RT'
+    store.set = () => Promise.resolve(false); // every persist fails
+    const { logger, events } = recordingLogger();
+    const { revoke, revoked, lockFree } = recordingRevoke(store);
+
+    // No `refreshToken` in the response: a non-rotating IdP. The old token 'RT' stays live at the
+    // IdP, but the delete below removes the only record that held it.
+    const out = await resolveSession({ ...deps(store, () => Promise.resolve({ accessToken: 'AT2', expiresIn: 300 })), revoke, logger }, 's');
+
+    expect(out).toBeNull();
+    expect(revoked).toEqual(['RT']);
+    expect(lockFree).toEqual([true]);
+    expect(events).toContainEqual(['session.refresh.persist_failed', { sid: sidTag('s') }]);
+  });
+
+  it('revokes the old refresh token when a non-rotating IdP echoes it back and persist fails (persist_failed)', async () => {
+    const store = new MemorySessionStore();
+    await store.set('s', makeRecord({ accessExpiresAt: Date.now() - 1 }), 60_000, null); // default refreshToken 'RT'
+    store.set = () => Promise.resolve(false); // every persist fails
+    const { logger, events } = recordingLogger();
+    const { revoke, revoked, lockFree } = recordingRevoke(store);
+
+    // The response echoes the old token 'RT' back: a non-rotating IdP. It equals `refreshToken`,
+    // so `orphanNewRefreshToken()` skips it, and the delete below removes the only record that
+    // held it.
+    const out = await resolveSession({ ...deps(store, () => Promise.resolve({ accessToken: 'AT2', refreshToken: 'RT', expiresIn: 300 })), revoke, logger }, 's');
+
+    expect(out).toBeNull();
+    expect(revoked).toEqual(['RT']);
+    expect(lockFree).toEqual([true]);
+    expect(events).toContainEqual(['session.refresh.persist_failed', { sid: sidTag('s') }]);
+  });
+
+  it('persist_failed with a failing delete propagates the store error and still revokes', async () => {
+    const inner = new MemorySessionStore();
+    await inner.set('s', makeRecord({ accessExpiresAt: Date.now() - 1 }), 60_000, null);
+    const calls: string[] = [];
+    const store = failingStore(inner, new Set<StoreMethod>(['delete']), () => new SessionStoreTimeout('delete', 4000, 'deadline'), calls);
+    store.set = () => Promise.resolve(false);
+    const { revoke, revoked } = recordingRevoke(inner);
+
+    await expect(resolveSession({ ...deps(store, () => Promise.resolve({ accessToken: 'AT2', refreshToken: 'RT2', expiresIn: 300 })), revoke }, 's')).rejects.toBeInstanceOf(SessionStoreTimeout);
+    expect(revoked).toEqual(['RT2']);
+  });
+
+  it('a revoke that throws synchronously does not change the persist_failed outcome', async () => {
+    const store = new MemorySessionStore();
+    await store.set('s', makeRecord({ accessExpiresAt: Date.now() - 1 }), 60_000, null);
+    store.set = () => Promise.resolve(false);
+    const revoke = (): Promise<void> => {
+      throw new Error('synchronous revoke failure');
+    };
+
+    expect(await resolveSession({ ...deps(store, () => Promise.resolve({ accessToken: 'AT2', refreshToken: 'RT2', expiresIn: 300 })), revoke }, 's')).toBeNull();
+  });
+
+  it('a successful refresh revokes nothing', async () => {
+    const store = new MemorySessionStore();
+    await store.set('s', makeRecord({ accessExpiresAt: Date.now() - 1 }), 60_000, null);
+    const { revoke, revoked } = recordingRevoke(store);
+
+    expect((await resolveSession({ ...deps(store, () => Promise.resolve({ accessToken: 'AT2', refreshToken: 'RT2', expiresIn: 300 })), revoke }, 's'))?.refreshToken).toBe('RT2');
+    expect(revoked).toEqual([]);
   });
 });
