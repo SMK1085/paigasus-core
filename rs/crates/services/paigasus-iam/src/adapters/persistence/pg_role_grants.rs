@@ -34,9 +34,9 @@ use super::entities::role_grant;
 use super::uow::{SeaOrmTransaction, recover_txn};
 use crate::adapters::authz::Generations;
 use async_trait::async_trait;
-use paigasus_iam_core::{AuthzError, GrantScope, PrincipalId, RepositoryError, RoleGrant, RoleGrantStore, TenancyNodeRef, Transaction};
+use paigasus_iam_core::{AuthzError, GrantScope, PrincipalId, RepositoryError, RoleGrant, RoleGrantFilter, RoleGrantQuery, RoleGrantStore, TenancyNodeRef, Transaction};
 use paigasus_kernel::Prn;
-use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseConnection, DbErr, EntityTrait, QueryFilter, Set, SqlErr, TransactionTrait};
+use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseConnection, DbBackend, DbErr, EntityTrait, FromQueryResult, QueryFilter, Set, SqlErr, Statement, TransactionTrait};
 use uuid::Uuid;
 
 // `Clone` lets the composition root hold a store handle inside a `#[derive(Clone)]` service
@@ -93,9 +93,16 @@ fn map_err(e: DbErr) -> AuthzError {
 /// defines the retired role — blocks behind it. When the retirement commits with the row
 /// deleted, that grant resumes, re-runs its FK check and fails. Without this mapping the caller
 /// gets a `500 internal error` for a condition the service understands perfectly well.
+///
+/// SMA-676 adds the unique-violation arm: a duplicate (principal, role, scope) is
+/// AuthzError::DuplicateGrant.
 fn map_grant_err(e: DbErr, role_key: &str) -> AuthzError {
     match e.sql_err() {
         Some(SqlErr::ForeignKeyConstraintViolation(ref msg)) if msg.contains("fk_role_grant_role") => AuthzError::UnknownRole(role_key.to_string()),
+        // SMA-676 D9. By constraint NAME, like the FK arm above: `uq_role_grant_linked_policy`
+        // is a different defect and must stay `Backend`. The caller's transaction is now
+        // aborted at the database; `RoleService::grant` drops it and reads the winner.
+        Some(SqlErr::UniqueConstraintViolation(ref msg)) if msg.contains("uq_role_grant_principal_role_scope") => AuthzError::DuplicateGrant,
         _ => map_err(e),
     }
 }
@@ -183,11 +190,10 @@ impl RoleGrantStore for PgRoleGrantStore {
         // logic lives in exactly one place.
         let txn = self.db.begin().await.map_err(map_err)?;
         let tx: Box<dyn Transaction> = Box::new(SeaOrmTransaction { txn });
-        // A `uq_role_grant_principal_role_scope` (duplicate principal+role+scope) or
-        // `uq_role_grant_linked_policy` (duplicate linked_policy_id) violation surfaces here
-        // as `AuthzError::Backend` wrapping the SeaORM/Postgres error — never silently
-        // swallowed; dropping `tx` without committing rolls the failed insert back, and no
-        // row is written.
+        // A `uq_role_grant_principal_role_scope` violation surfaces here as
+        // `AuthzError::DuplicateGrant` (SMA-676 D9; `map_grant_err`). A
+        // `uq_role_grant_linked_policy` violation stays `AuthzError::Backend`. Either way
+        // dropping `tx` without committing rolls the failed insert back.
         self.grant_in(&*tx, g).await?;
         tx.commit().await.map_err(map_txn_err)?;
         self.bump_policy_gen_best_effort().await;
@@ -236,5 +242,46 @@ impl RoleGrantStore for PgRoleGrantStore {
             return Ok(None);
         };
         Ok(Some(model_to_grant(model)?))
+    }
+}
+
+/// `RoleGrantQuery::find` (SMA-676). One statement: the inner join on `principal` supplies the
+/// kind (every grant has a principal row, `fk_role_grant_principal`, so the join drops nothing
+/// unless a kind filter asks it to). A NULL parameter means "no filter on this column". The
+/// selected columns are exactly `role_grant`'s own, in `role_grant::Model`'s field order, so
+/// `role_grant::Model::find_by_statement` (its `DeriveEntityModel`-generated `FromQueryResult`
+/// impl) maps the row directly — no separate row struct needed.
+const FIND_SQL: &str = r#"
+SELECT g.id, g.principal_id, g.role_key, g.scope_kind, g.scope_node_prn, g.scope_org_id,
+       g.scope_team_id, g.scope_project_id, g.linked_policy_id, g.created_at
+  FROM "role_grant" g JOIN "principal" pr ON pr.id = g.principal_id
+ WHERE ($1::uuid IS NULL OR g.principal_id = $1)
+   AND ($2::text IS NULL OR g.scope_node_prn = $2)
+   AND ($3::boolean IS FALSE OR g.scope_kind = 'root')
+   AND ($4::text IS NULL OR g.role_key = $4)
+   AND ($5::text IS NULL OR pr.kind = $5)
+ ORDER BY g.principal_id, g.id
+ LIMIT $6 OFFSET $7"#;
+
+#[async_trait]
+impl RoleGrantQuery for PgRoleGrantStore {
+    async fn find(&self, f: &RoleGrantFilter, limit: u64, offset: u64) -> Result<Vec<RoleGrant>, AuthzError> {
+        let principal: Option<Uuid> = f.principal().map(PrincipalId::uuid);
+        // D5: the Root sentinel matches `scope_kind = 'root'`; a node matches its stored
+        // canonical PRN exactly (the column the duplicate key already uses).
+        let (scope_prn, root): (Option<String>, bool) = match f.scope() {
+            None => (None, false),
+            Some(GrantScope::Root) => (None, true),
+            Some(scope @ GrantScope::Node(_)) => (Some(scope.canonical_prn()), false),
+        };
+        let role_key: Option<String> = f.role_key().map(str::to_owned);
+        let kind: Option<String> = f.principal_kind().map(|k| k.as_str().to_owned());
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            FIND_SQL,
+            [principal.into(), scope_prn.into(), root.into(), role_key.into(), kind.into(), limit.into(), offset.into()],
+        );
+        let models = role_grant::Model::find_by_statement(stmt).all(&self.db).await.map_err(map_err)?;
+        models.into_iter().map(model_to_grant).collect()
     }
 }

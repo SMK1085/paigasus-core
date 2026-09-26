@@ -12,9 +12,9 @@ use chrono::{DateTime, Utc};
 use paigasus_iam_core::{
     AccessRequest, Action, ApiKey, ApiKeyId, ApiKeyRepository, ApiKeyStatus, AuditEntry, AuditFilter, AuditLog, Authorizer, AuthzError, BulkReplayRequest, Clock, ConflictKind, DeadLetterEntry,
     DeadLetterFilter, DeadLetters, Decision, DomainEvent, Effect, EntityGenBumper, IdGenerator, KeyEntropy, Membership, MembershipRecord, MembershipRepository, Mutated, NodeStatus, NodeView,
-    Organization, OrganizationId, OrganizationRepository, Outbox, PolicyDocument, PolicyGenBumper, PolicyStore, PreconditionKind, Principal, PrincipalId, PrincipalStatus, Project, ProjectId,
-    ProjectRepository, PutOutcome, RepositoryError, RoleGrant, RoleGrantStore, Savepoint, SecretHasher, ServiceAccount, ServiceAccountRecord, ServiceAccountRepository, Slug, Stamp, Team, TeamId,
-    TeamRepository, TenancyNodeRef, Transaction, UnitOfWork,
+    Organization, OrganizationId, OrganizationRepository, Outbox, PolicyDocument, PolicyGenBumper, PolicyStore, PreconditionKind, Principal, PrincipalId, PrincipalKind, PrincipalStatus, Project,
+    ProjectId, ProjectRepository, PutOutcome, RepositoryError, RoleGrant, RoleGrantFilter, RoleGrantQuery, RoleGrantStore, Savepoint, SecretHasher, ServiceAccount, ServiceAccountRecord,
+    ServiceAccountRepository, Slug, Stamp, Team, TeamId, TeamRepository, TenancyNodeRef, Transaction, UnitOfWork,
 };
 use paigasus_kernel::Prn;
 use std::any::Any;
@@ -847,6 +847,47 @@ impl RoleGrantStore for InMemoryRoleGrants {
     }
 }
 
+/// In-memory `RoleGrantQuery` fake (SMA-676). It reads the SAME map as the
+/// `InMemoryRoleGrants` it was built over, so a grant written through the store is visible to
+/// the query. `kinds` stands in for the `principal` table's `kind` column: a principal with no
+/// entry has no row, and `PgRoleGrantStore::find`'s inner join drops its grants from a
+/// kind-filtered answer, so this fake drops them too.
+#[derive(Clone, Default)]
+pub struct InMemoryRoleGrantQuery {
+    grants: Arc<Mutex<HashMap<Uuid, RoleGrant>>>,
+    kinds: Arc<Mutex<HashMap<Uuid, PrincipalKind>>>,
+}
+
+impl InMemoryRoleGrantQuery {
+    pub fn over(store: &InMemoryRoleGrants) -> Self {
+        Self {
+            grants: store.0.clone(),
+            kinds: Arc::default(),
+        }
+    }
+
+    pub fn set_kind(&self, principal: &PrincipalId, kind: PrincipalKind) {
+        self.kinds.lock().unwrap().insert(principal.uuid(), kind);
+    }
+}
+
+#[async_trait]
+impl RoleGrantQuery for InMemoryRoleGrantQuery {
+    async fn find(&self, f: &RoleGrantFilter, limit: u64, offset: u64) -> Result<Vec<RoleGrant>, AuthzError> {
+        let kinds = self.kinds.lock().unwrap().clone();
+        let mut hits: Vec<RoleGrant> = self
+            .grants
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|g| f.matches(g, kinds.get(&g.principal.uuid()).copied()))
+            .cloned()
+            .collect();
+        hits.sort_by_key(|g| (g.principal.uuid(), g.id));
+        Ok(hits.into_iter().skip(offset as usize).take(limit as usize).collect())
+    }
+}
+
 /// In-memory `PolicyStore` fake for `policies.rs` unit tests: rejects mutation of an
 /// already-persisted `system = true` row, mirroring `PgPolicyStore`'s posture, without any
 /// Cedar parse/schema validation (that's `authz::schema::validate_policy`'s own unit suite).
@@ -1517,5 +1558,55 @@ mod tests {
             repo.create(&project, &stamp).await.unwrap_err(),
             RepositoryError::Precondition(PreconditionKind::ParentArchived)
         ));
+    }
+}
+
+#[cfg(test)]
+mod role_grant_query_fake_tests {
+    use super::*;
+    // `fakes.rs` does not import `GrantScope` at the top.
+    use paigasus_iam_core::GrantScope;
+
+    fn pid(n: u128) -> PrincipalId {
+        PrincipalId::from_prn(Prn::build("iam", "", None, "principal", Uuid::from_u128(n)).unwrap())
+    }
+
+    fn grant(id: u128, principal: u128, role: &str, scope: GrantScope) -> RoleGrant {
+        RoleGrant {
+            id: Uuid::from_u128(id),
+            principal: pid(principal),
+            role_key: role.to_string(),
+            scope,
+            linked_policy_id: format!("grant:{id}"),
+            created_at: DateTime::<Utc>::from_timestamp(0, 0).unwrap(),
+        }
+    }
+
+    /// The fake agrees with `PgRoleGrantStore::find`: the same filter semantics, the same
+    /// `principal_id, id` order, and a grantee with no known kind drops out of a kind filter.
+    #[tokio::test]
+    async fn the_in_memory_query_filters_orders_and_pages_like_postgres() {
+        let store = InMemoryRoleGrants::default();
+        let query = InMemoryRoleGrantQuery::over(&store);
+        let org = GrantScope::Node(TenancyNodeRef::Organization(OrganizationId::from_uuid(Uuid::from_u128(100))));
+        for g in [
+            grant(12, 2, "gateway_user", org.clone()),
+            grant(11, 1, "gateway_user", org.clone()),
+            grant(13, 3, "gateway_user", org.clone()),
+            grant(14, 1, "org_admin", org.clone()),
+        ] {
+            store.0.lock().unwrap().insert(g.id, g);
+        }
+        query.set_kind(&pid(1), PrincipalKind::User);
+        query.set_kind(&pid(2), PrincipalKind::User);
+        // Principal 3 has no kind entry: no principal row.
+
+        let users = RoleGrantFilter::new(None, Some(org.clone()), Some("gateway_user".to_string()), Some(PrincipalKind::User)).unwrap();
+        let found: Vec<u128> = query.find(&users, 200, 0).await.unwrap().iter().map(|g| g.id.as_u128()).collect();
+        assert_eq!(found, vec![11, 12]);
+
+        let all = RoleGrantFilter::new(None, Some(org), None, None).unwrap();
+        let page: Vec<u128> = query.find(&all, 2, 1).await.unwrap().iter().map(|g| g.id.as_u128()).collect();
+        assert_eq!(page, vec![14, 12], "order (1,11) (1,14) (2,12) (3,13); offset 1, limit 2");
     }
 }
