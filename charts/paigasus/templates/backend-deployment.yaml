@@ -111,7 +111,7 @@ spec:
             # oidc.audience is set: IAM accepts that audience, not the client id.
 {{- end }}
             - name: IAM_AUTHN__ISSUERS
-              value: {{ printf "[{issuer=%q,audiences=[%q]}]" $root.Values.oidc.issuer ($root.Values.oidc.audience | default $root.Values.oidc.clientId | toString) | quote }}
+              value: {{ printf "[{issuer=%q,audiences=[%q]}]" $root.Values.oidc.issuer (include "paigasus.iamAudience" $root) | quote }}
             # ApiKeyConfig::pepper decodes this at boot and IamConfig::validate rejects fewer
             # than 32 decoded bytes. See zones.iam.backend.apiKeysPepperSecret in values.yaml.
             - name: IAM_API_KEYS__PEPPER
