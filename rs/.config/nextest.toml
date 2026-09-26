@@ -86,6 +86,8 @@ retries = 1
 # must red at once, not show as FLAKY after a retry hides it. Scoped to the whole binary, for
 # the same reason as keycloak_e2e above. Does NOT set `test-group`; it inherits
 # `docker-containers` from the block below.
+# Trade-off, accepted on purpose: this also makes a transient container-start failure red at
+# once, with no retry to absorb it — the binary starts 6 Postgres containers, one per test.
 filter = 'package(=paigasus-iam) and binary(authz_role_grant_query_plan)'
 retries = 0
 

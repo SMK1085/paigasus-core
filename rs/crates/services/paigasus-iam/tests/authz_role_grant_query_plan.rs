@@ -32,7 +32,7 @@ async fn index_validity(db: &DatabaseConnection) -> Option<bool> {
     let row = db
         .query_one_raw(Statement::from_string(
             DbBackend::Postgres,
-            format!("SELECT i.indisvalid FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid WHERE c.relname = '{INDEX}'"),
+            format!("SELECT i.indisvalid FROM pg_index i WHERE i.indexrelid = to_regclass('public.{INDEX}')"),
         ))
         .await
         .unwrap()?;
@@ -411,10 +411,28 @@ async fn the_real_query_shapes_use_an_index_in_custom_and_generic_plans() {
     let store = PgRoleGrantStore::new(db.clone(), Generations::memory());
     let org_page = RoleGrantFilter::new(None, Some(GrantScope::Node(TenancyNodeRef::Organization(org.clone()))), None, Some(PrincipalKind::User)).unwrap();
     let rows = RoleGrantQuery::find(&store, &org_page, 200, 0).await.unwrap();
-    assert!(!rows.is_empty() && rows.len() <= 12, "sanity: the target org holds at most 12 grants, got {}", rows.len());
+    // Sanity: the target org holds exactly 12 grants (the 12 target-org principals 2001, 4001,
+    // 6001, 8001, 10001, 1994, 3994, 5994, 7994, 9994, 1987, 3987 are all users), and every row's
+    // scope is the target org itself.
+    assert_eq!(rows.len(), 12, "sanity: the target org must hold exactly 12 grants, got {}", rows.len());
+    for row in &rows {
+        assert_eq!(row.scope.canonical_prn(), org.canonical(), "every row's scope must be the target org: {row:?}");
+    }
 
     for s in shapes(&org) {
         let stmt = find_statement(&s.filter, s.limit, s.offset);
+        assert_eq!(
+            stmt.values.as_ref().map_or(0, |v| v.0.len()),
+            s.types.len(),
+            "{}: the hand-typed type list must match find_statement's bound value count",
+            s.name
+        );
+        assert_eq!(
+            stmt.values.as_ref().map_or(0, |v| v.0.len()),
+            s.literals.len(),
+            "{}: the hand-typed literal list must match find_statement's bound value count",
+            s.name
+        );
         let (custom, generic) = plans(&db, &stmt.sql, &s.types, &s.literals, false).await;
         eprintln!("=== {} / custom plan ===\n{custom}\n=== {} / generic plan ===\n{generic}\n", s.name, s.name);
 
@@ -439,13 +457,24 @@ async fn the_real_query_shapes_use_an_index_in_custom_and_generic_plans() {
 /// g.principal_id, g.id` over a plan with a lower total cost. Both `Seq Scan on role_grant` and
 /// a full scan of `uq_role_grant_principal_role_scope` are full reads of `role_grant`, so either
 /// one proves the same thing for the generic half: with no index, the generic plan has no cheap
-/// path to the target rows.
+/// path to the target rows. This is measured on PostgreSQL 16 (16-alpine), which has no B-tree
+/// skip scan; a skip scan (PostgreSQL 18+) can change this.
 #[tokio::test]
 async fn control_without_the_index_the_org_page_query_scans_role_grant() {
     let Some((_pg, db)) = support::start_migrated_postgres().await else { return };
     let org = seed_bulk(&db).await;
     let a = shapes(&org).into_iter().next().unwrap();
     let stmt = find_statement(&a.filter, a.limit, a.offset);
+    assert_eq!(
+        stmt.values.as_ref().map_or(0, |v| v.0.len()),
+        a.types.len(),
+        "control 1: the hand-typed type list must match find_statement's bound value count"
+    );
+    assert_eq!(
+        stmt.values.as_ref().map_or(0, |v| v.0.len()),
+        a.literals.len(),
+        "control 1: the hand-typed literal list must match find_statement's bound value count"
+    );
     let (custom, generic) = plans(&db, &stmt.sql, &a.types, &a.literals, true).await;
     eprintln!("=== control 1 / custom ===\n{custom}\n=== control 1 / generic ===\n{generic}");
     assert!(!custom.contains(INDEX), "the index was dropped:\n{custom}");

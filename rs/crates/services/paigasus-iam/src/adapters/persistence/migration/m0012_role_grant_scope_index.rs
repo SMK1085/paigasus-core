@@ -18,6 +18,11 @@
 //! **An INVALID index fails the migration.** A failed `CREATE INDEX CONCURRENTLY` leaves an
 //! INVALID index with this name. `IF NOT EXISTS` would skip the create, and the planner ignores
 //! an INVALID index, so the query would scan again with no signal.
+//!
+//! **`IF NOT EXISTS` also accepts a VALID index with this name but other columns.** An operator
+//! build with a wrong definition passes this migration's check. The operator must build the
+//! index with the exact columns `(scope_node_prn, principal_id, id)`. This migration does not
+//! check the column list.
 
 use sea_orm_migration::prelude::*;
 use sea_orm_migration::sea_orm::{DbBackend, Statement};
@@ -37,7 +42,7 @@ impl MigrationTrait for Migration {
         let row = conn
             .query_one_raw(Statement::from_string(
                 DbBackend::Postgres,
-                format!("SELECT i.indisvalid FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid WHERE c.relname = '{INDEX}'"),
+                format!("SELECT i.indisvalid FROM pg_index i WHERE i.indexrelid = to_regclass('public.{INDEX}')"),
             ))
             .await?;
         let valid = match row {
