@@ -16,6 +16,8 @@ addenda. `charts/paigasus/README.md` holds the developer detail.
 | `zones.iam.backend.image.{repository,tag}` | — | The IAM image. `tag` is pinned to the published IAM version, like the console tags |
 | `zones.iam.backend.apiKeysPepperSecret` | yes | A Secret with key `pepper`: base64 of at least 32 bytes |
 | `zones.iam.backend.apiKeysSecretVersion` | no | Change it after you rotate the pepper Secret, so the IAM pod restarts |
+| `zones.iam.backend.bootstrapAdmins` | no | A list of `{issuer, subject}`. IAM grants `platform_admin` at Root to each identity after its first login. Default `[]`: no user can do anything (§ 9) |
+| `zones.iam.backend.extraEnv` | no | More env entries (Kubernetes `EnvVar`) for the IAM container, for example `RUST_LOG`. Default `[]` (§ 9) |
 | `zones.gateway.backend.url` | when `gateway` is on | The base URL of an existing gateway backend. The chart does not deploy it |
 | `ingress.host` | yes | The one public host. `PAIGASUS_PUBLIC_ORIGIN` is `https://<host>` |
 | `ingress.className` | no | The IngressClass of your controller |
@@ -46,7 +48,15 @@ refuses:
 - `zones.iam.backend.deploy: false` (an external IAM is not supported);
 - `zones.gateway.backend.deploy: true` (the chart cannot run the gateway backend);
 - `zones.<id>.backend.url` empty when the chart does not deploy that backend;
-- `oidc.caBundle.existingConfigMap` set with an empty `oidc.caBundle.key`.
+- `oidc.caBundle.existingConfigMap` set with an empty `oidc.caBundle.key`;
+- a `zones.iam.backend.bootstrapAdmins` value that is not a list, or an entry that is not a map;
+- a bootstrap admin with an empty or missing `issuer` or `subject`, or with a value that is not a
+  string (quote a subject of digits only);
+- a bootstrap admin `issuer` that is not `https`, or that is not equal to `oidc.issuer` (§ 9);
+- a `zones.iam.backend.extraEnv` value that is not a list, an entry without a string `name`, or
+  two entries with one name;
+- an `extraEnv` name that the chart sets itself, or a name that starts with such a name and `__`
+  (§ 9).
 
 ## 3. No rewrite annotation
 
@@ -84,6 +94,7 @@ pods, not for the old pods to go. The kind job waits for both (`ci/kind/run.sh`,
 | the contents of `postgres.existingSecret` or the pepper Secret | nothing, until you change its version value | the same |
 | the contents of the CA ConfigMap | nothing, until you change `oidc.caBundle.version` | Node and IAM read the file once, at start |
 | `oidc.audience` | the IAM pod, not the consoles | it changes `IAM_AUTHN__ISSUERS` in the IAM pod template. IAM has one replica and `maxSurge: 0` (`templates/backend-deployment.yaml`). IAM is not available during the restart. |
+| `zones.iam.backend.bootstrapAdmins` or `zones.iam.backend.extraEnv` | the IAM pod, not the consoles | it changes the env in the IAM pod template (`tests/env.sh` row B7). IAM is not available during the restart, as for `oidc.audience` |
 | `oidc.acknowledgeClientIdAudience` | nothing | it changes only the IAM Deployment's `metadata` annotation and the NOTES, not a pod template (`tests/env.sh` row W14) |
 
 A change of `oidc.caBundle.version` restarts every pod that mounts the bundle: both consoles and
@@ -328,3 +339,49 @@ To re-run one journey on a local kind cluster after `stub up`:
         --config tests/cluster/playwright.config.ts --project journeys journeys/auth-roundtrip.spec.ts
 
 Use `journeys/zone-round-trip.spec.ts` for the other one. This direct run skips the job's guards (the skip scan, the exactly-2 count and the report check). Only `run.sh specs journeys` applies them. In CI there is no per-journey re-run: re-run the failed job with `gh run rerun <run-id> --failed`.
+
+## 9. The first platform admin and extra IAM env (SMA-697)
+
+**Without a bootstrap admin, no user can do anything.** IAM denies every action by default. The
+IAM log shows `default-deny (no matching permit)`. Only a `platform_admin` can grant a role, and
+only `zones.iam.backend.bootstrapAdmins` makes the first one. At boot with an empty list, IAM
+logs the warning `no authz.bootstrap_admins configured`.
+
+```yaml
+zones:
+  iam:
+    backend:
+      bootstrapAdmins:
+        - issuer: https://idp.example.com   # must equal oidc.issuer
+          subject: "392488538992280259"     # the IdP "sub" claim; quote it
+      extraEnv:
+        - name: RUST_LOG
+          value: "paigasus_iam=debug,info"
+```
+
+The chart renders the list into `IAM_AUTHZ__BOOTSTRAP_ADMINS`, in the same figment inline form as
+`IAM_AUTHN__ISSUERS`. After the user logs in and IAM provisions the user, IAM grants
+`platform_admin` at Root scope. IAM does this on each login until the grant exists, so a failed
+grant heals at the next login.
+
+- **The issuer must equal `oidc.issuer`.** IAM compares the `(issuer, subject)` pair as exact
+  strings with the issuer of the validated token. That is always the configured issuer. An entry
+  with another issuer never gets the grant, and IAM gives no signal. IAM itself does not refuse
+  such an entry, so the chart refuses it.
+- **Find the subject.** It is the `sub` claim of the user's access token. For Zitadel, it is the
+  user ID, which is digits only. Quote it. YAML reads digits as a number, and a number with 18
+  digits loses precision. The chart refuses a number. With `--set`, use `--set-string`.
+- **The user must provision first.** IAM grants the role only after JIT provisioning succeeds.
+  Provisioning needs an `email` claim in the access token. Without it, IAM answers
+  `403 provisioning-failed` and grants nothing.
+- **Removing an entry does not revoke the grant.** Revoke `platform_admin` through the IAM API.
+
+**`extraEnv`.** The chart appends these entries after its own entries, as written. Use it for
+`RUST_LOG`, which IAM reads at start (`paigasus_logging::env_filter`). The chart refuses a name
+that it sets itself: `IAM_HTTP_ADDR`, `IAM_GRPC_ADDR`, `IAM_MIGRATION__LOCK_WAIT_SECS`,
+`IAM_DATABASE_URL`, `IAM_AUTHN__ISSUERS`, `IAM_API_KEYS__PEPPER`,
+`IAM_AUTHN__EXTRA_CA_BUNDLE_PATH` and `IAM_AUTHZ__BOOTSTRAP_ADMINS`. It also refuses a name that
+starts with one of these names and `__`. Set those values through their chart values. The list is
+`paigasus.iamReservedEnv` in `templates/_iam-backend.tpl`, and `tests/env.sh` row B6 keeps it
+equal to the rendered names. `extraEnv` can set other `IAM_*` keys, for example
+`IAM_AUTHZ__ENFORCE_TENANCY`. The chart does not check those values; IAM checks them at boot.

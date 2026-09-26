@@ -106,6 +106,47 @@ expect_fail "duplicate basePath" "is already used by zone" \
 expect_fail "oidc.caBundle key empty" "oidc.caBundle.key is empty while oidc.caBundle.existingConfigMap is set" \
   --set oidc.caBundle.existingConfigMap=paigasus-idp-ca --set oidc.caBundle.key=""
 
+# zones.iam.backend.bootstrapAdmins and extraEnv (SMA-697). A bad bootstrap admin is either a
+# boot failure (IamConfig::validate) or an entry that IAM never matches. Both are refused here.
+ADMIN=zones.iam.backend.bootstrapAdmins[0]
+OK_ISSUER=https://idp.example.test/realms/paigasus
+expect_fail "bootstrapAdmins not a list" "zones.iam.backend.bootstrapAdmins must be a list" \
+  --set zones.iam.backend.bootstrapAdmins=admin
+expect_fail "bootstrap admin not a map" "bootstrapAdmins[0] must be a map" \
+  --set "zones.iam.backend.bootstrapAdmins={admin}"
+expect_fail "bootstrap admin subject is a number" "issuer and subject must both be strings" \
+  --set "$ADMIN.issuer=$OK_ISSUER" --set "$ADMIN.subject=392488538992280259"
+expect_fail "bootstrap admin issuer missing" "bootstrapAdmins[0].issuer is empty or missing" \
+  --set "$ADMIN.subject=admin-sub"
+expect_fail "bootstrap admin issuer blank" "bootstrapAdmins[0].issuer is empty or missing" \
+  --set-string "$ADMIN.issuer= " --set "$ADMIN.subject=admin-sub"
+expect_fail "bootstrap admin subject missing" "bootstrapAdmins[0].subject is empty or missing" \
+  --set "$ADMIN.issuer=$OK_ISSUER"
+expect_fail "bootstrap admin issuer not https" "it must be an https URL" \
+  --set "$ADMIN.issuer=http://idp.example.test/realms/paigasus" --set "$ADMIN.subject=admin-sub"
+expect_fail "bootstrap admin issuer not oidc.issuer" "it must equal oidc.issuer" \
+  --set "$ADMIN.issuer=https://other.example.test" --set "$ADMIN.subject=admin-sub"
+expect_fail "bootstrap admin second entry checked" "bootstrapAdmins[1].subject is empty" \
+  --set "$ADMIN.issuer=$OK_ISSUER" --set "$ADMIN.subject=admin-sub" \
+  --set "zones.iam.backend.bootstrapAdmins[1].issuer=$OK_ISSUER" \
+  --set-string "zones.iam.backend.bootstrapAdmins[1].subject= "
+expect_fail "extraEnv not a list" "zones.iam.backend.extraEnv must be a list" \
+  --set zones.iam.backend.extraEnv=RUST_LOG
+expect_fail "extraEnv entry without a name" "extraEnv[0] must be a map with a non-empty string name" \
+  --set "zones.iam.backend.extraEnv[0].value=debug"
+expect_fail "extraEnv repeats a chart name" "the chart sets IAM_DATABASE_URL itself" \
+  --set "zones.iam.backend.extraEnv[0].name=IAM_DATABASE_URL" \
+  --set "zones.iam.backend.extraEnv[0].value=postgres://x"
+expect_fail "extraEnv nests under a chart name" "the chart sets IAM_AUTHZ__BOOTSTRAP_ADMINS itself" \
+  --set "zones.iam.backend.extraEnv[0].name=IAM_AUTHZ__BOOTSTRAP_ADMINS__0__SUBJECT" \
+  --set "zones.iam.backend.extraEnv[0].value=admin-sub"
+expect_fail "extraEnv duplicate name" "is already used by extraEnv[0]" \
+  --set "zones.iam.backend.extraEnv[0].name=RUST_LOG" --set "zones.iam.backend.extraEnv[0].value=info" \
+  --set "zones.iam.backend.extraEnv[1].name=RUST_LOG" --set "zones.iam.backend.extraEnv[1].value=debug"
+expect_render "bootstrap admin and extraEnv" \
+  --set "$ADMIN.issuer=$OK_ISSUER" --set-string "$ADMIN.subject=392488538992280259" \
+  --set "zones.iam.backend.extraEnv[0].name=RUST_LOG" --set "zones.iam.backend.extraEnv[0].value=info"
+
 expect_render "iam only" --set zones.gateway.enabled=false
 expect_render "iam and gateway" --set zones.gateway.enabled=true \
   --set zones.gateway.backend.url=http://gw.example.test:8088
