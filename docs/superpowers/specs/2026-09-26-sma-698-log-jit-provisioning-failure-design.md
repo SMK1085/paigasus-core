@@ -361,7 +361,7 @@ These issues are open in Linear:
 - SMA-706: an alert rule on `increase(iam_jit_provisioning_failures_total[..]) > 0`, with a
   promtool test, and a dashboard panel.
 - SMA-707: a log line for a silent `403 identity-not-provisioned` on the `Enabled` path, when
-  the issuer has JIT disabled (`authenticate_token.rs:117-119`).
+  the issuer has JIT disabled (`authenticate_token.rs:189-190`).
 
 ## 11. Spec challenge changelog (2026-09-26)
 

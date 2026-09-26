@@ -122,9 +122,9 @@ late and unclearly. Check these four items before you install:
    first login from it. Without a valid claim, IAM answers `403 provisioning-failed`. IAM then
    writes a `warn` line that starts with `just-in-time provisioning failed`. The line has the
    fields `defect="missing_email"`, `issuer` and `email_claim`. `email_claim` is `absent` when the
-   token has no `email` claim, and `invalid` when the value is not an email address. When another
-   user already has the email, the line has `defect="email_conflict"`. IAM does not link
-   identities by email. The line does not show the email, the subject or the token. IAM writes
+   token has no `email` claim. `email_claim` is `invalid` when the value is not an email address.
+   When another user already has the email, the line has `defect="email_conflict"`. IAM does not
+   link identities by email. The line does not show the email, the subject or the token. IAM writes
    at most one line for each issuer and defect in 10 seconds. The field `suppressed` gives the
    number of failures since the last line. The counter `iam_jit_provisioning_failures_total`
    counts each refused request.
