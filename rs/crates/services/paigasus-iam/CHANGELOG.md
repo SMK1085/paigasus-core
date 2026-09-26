@@ -10,6 +10,23 @@ manifest sets `publish = false` (SMA-658, spec § 3.1).
 
 ## [Unreleased]
 
+### Added
+
+- IAM logs a refused just-in-time provisioning at `warn`. The line starts with
+  `just-in-time provisioning failed` and names the defect (`missing_email` or `email_conflict`)
+  and the issuer. For `missing_email`, the field `email_claim` tells if the claim is absent or
+  invalid. The line does not show the email, the subject, the name or the token. IAM writes at
+  most one line for each issuer and defect in 10 seconds. Before, IAM answered
+  `403 provisioning-failed` and logged nothing (SMA-698).
+- The counter `iam_jit_provisioning_failures_total`, with the label `defect`. It counts each
+  refused request, and the log rate limit does not apply to it. Both series start at zero when
+  metrics are on (SMA-698).
+
+### Fixed
+
+- Two first logins of the same identity at the same time both succeed. Before, in Postgres the
+  second login failed on the email and got `403 provisioning-failed` (SMA-698).
+
 ### Security
 
 - IAM refuses a bearer token that is an ID token or a back-channel logout token. The markers are

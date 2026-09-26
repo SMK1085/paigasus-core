@@ -356,12 +356,12 @@ No new dependency.
 
 ## 10. Follow-up issues
 
-Open these in Linear after the spec is approved:
+These issues are open in Linear:
 
-- An alert rule on `increase(iam_jit_provisioning_failures_total[..]) > 0`, with a
+- SMA-706: an alert rule on `increase(iam_jit_provisioning_failures_total[..]) > 0`, with a
   promtool test, and a dashboard panel.
-- A log line for a silent `403 identity-not-provisioned` on the `Enabled` path, when the
-  issuer has JIT disabled (`authenticate_token.rs:117-119`).
+- SMA-707: a log line for a silent `403 identity-not-provisioned` on the `Enabled` path, when
+  the issuer has JIT disabled (`authenticate_token.rs:117-119`).
 
 ## 11. Spec challenge changelog (2026-09-26)
 

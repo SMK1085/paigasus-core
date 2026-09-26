@@ -118,8 +118,16 @@ late and unclearly. Check these four items before you install:
    A wrong or missing audience shows in the IAM log at `info`, with the issuer and the accepted
    audiences (`ci/kind/README.md`, "Where to look first"). The log does not show the token's
    `aud`.
-2. **Email.** The access token must carry an `email` claim. IAM creates the principal on the first
-   login from it.
+2. **Email.** The access token must carry a valid `email` claim. IAM creates the principal on the
+   first login from it. Without a valid claim, IAM answers `403 provisioning-failed`. IAM then
+   writes a `warn` line that starts with `just-in-time provisioning failed`. The line has the
+   fields `defect="missing_email"`, `issuer` and `email_claim`. `email_claim` is `absent` when the
+   token has no `email` claim, and `invalid` when the value is not an email address. When another
+   user already has the email, the line has `defect="email_conflict"`. IAM does not link
+   identities by email. The line does not show the email, the subject or the token. IAM writes
+   at most one line for each issuer and defect in 10 seconds. The field `suppressed` gives the
+   number of failures since the last line. The counter `iam_jit_provisioning_failures_total`
+   counts each refused request.
 3. **Algorithm.** The token must be signed with RS256 or ES256, and its header must carry a `kid`.
 4. **Discovery.** The discovery document's `issuer` must equal `oidc.issuer`, and its `jwks_uri`
    must be `https`.
@@ -398,8 +406,9 @@ grant heals at the next login.
   user ID, which is digits only. Quote it. YAML reads digits as a number, and a number with 18
   digits loses precision. The chart refuses a number. With `--set`, use `--set-string`.
 - **The user must provision first.** IAM grants the role only after JIT provisioning succeeds.
-  Provisioning needs an `email` claim in the access token. Without it, IAM answers
-  `403 provisioning-failed` and grants nothing.
+  Provisioning needs a valid `email` claim in the access token. Without it, IAM answers
+  `403 provisioning-failed` and grants nothing. IAM also writes the `warn` line that § 6 item 2
+  describes. Look for `just-in-time provisioning failed` in the IAM log.
 - **Removing an entry does not revoke the grant.** Revoke `platform_admin` through the IAM API.
 
 **`extraEnv`.** The chart appends these entries after its own entries, as written. Use it for
