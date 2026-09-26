@@ -20,10 +20,10 @@ manifest sets `publish = false` (SMA-658, spec § 3.1).
   and a refused non-access token at `info`. The line names the issuer and a static or configured
   detail. IAM writes at most one line per issuer and kind in 10 seconds. Before, nothing logged
   these refusals, although the chart runbook said a wrong audience did (SMA-686).
-- IAM refuses a sender-constrained access token: a token with a `cnf` claim, or with a Keycloak
-  `typ` of `DPoP`. Before, IAM accepted a DPoP-bound or mTLS-bound token as a plain bearer
-  token, so the sender constraint did not protect it. IAM logs the refusal at `info` with the
-  issuer and the marker (SMA-690).
+- IAM refuses a sender-constrained access token: a token with a non-null `cnf` claim, or with a
+  Keycloak `typ` of `DPoP`. Before, IAM accepted a DPoP-bound or mTLS-bound token as a plain
+  bearer token, so the sender constraint did not protect it. IAM logs the refusal at `info` with
+  the issuer and the marker (SMA-690).
 
 ## [0.1.0] - 2026-09-20
 

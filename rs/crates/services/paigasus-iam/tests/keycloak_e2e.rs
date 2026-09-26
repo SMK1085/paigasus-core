@@ -190,16 +190,14 @@ async fn keycloak_end_to_end_config_only_oidc() {
         .expect("DPoP token request");
     let dpop_status = dpop_response.status();
     let dpop_body: Value = dpop_response.json().await.expect("DPoP token response json");
+    // A refused grant has an OAuth error body with no token, so this message prints the body.
     assert!(dpop_status.is_success(), "DPoP password grant failed ({dpop_status}): {dpop_body}\n{}", dump_logs(&keycloak).await);
-    assert_eq!(dpop_body["token_type"], "DPoP", "keycloak must answer a DPoP proof with token_type DPoP: {dpop_body}");
+    // From here the body holds a live token. The messages print only the field under test.
+    assert_eq!(dpop_body["token_type"], "DPoP", "keycloak must answer a DPoP proof with token_type DPoP");
     let dpop_token = dpop_body["access_token"].as_str().expect("access_token in DPoP token response").to_string();
     let dpop_claims = jwt_payload(&dpop_token);
-    assert_eq!(dpop_claims["typ"], "DPoP", "keycloak DPoP-bound access token must carry typ=DPoP: {dpop_claims}");
-    assert_eq!(
-        dpop_claims["cnf"]["jkt"],
-        jwk_thumbprint(&dpop_x, &dpop_y),
-        "cnf.jkt must be the RFC 7638 thumbprint of the proof key: {dpop_claims}"
-    );
+    assert_eq!(dpop_claims["typ"], "DPoP", "keycloak DPoP-bound access token must carry typ=DPoP");
+    assert_eq!(dpop_claims["cnf"]["jkt"], jwk_thumbprint(&dpop_x, &dpop_y), "cnf.jkt must be the RFC 7638 thumbprint of the proof key");
 
     // Config-only: point the wired service at the container's issuer. `accept_invalid_tls` is
     // the sole concession to the self-signed dev cert — it is still a plain config flag.
