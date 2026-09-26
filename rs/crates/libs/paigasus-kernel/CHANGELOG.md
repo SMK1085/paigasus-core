@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1](https://github.com/SMK1085/paigasus-core/compare/paigasus-kernel-v0.1.0...paigasus-kernel-v0.1.1) - 2026-09-26
+
+### Fixed
+
+- *(ci)* stamp the publish = false kernel bindings, and record the release-plz version_group causes (SMA-685) ([#309](https://github.com/SMK1085/paigasus-core/pull/309))
+
 ## [0.1.0](https://github.com/SMK1085/paigasus-core/compare/paigasus-kernel-v0.1.0-alpha.1...paigasus-kernel-v0.1.0) - 2026-08-29
 
 ### Added

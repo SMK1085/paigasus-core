@@ -1,6 +1,6 @@
 {
   "name": "@paigasus/wasm",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "type": "module",
   "license": "Apache-2.0",
   "description": "WebAssembly binding for the Paigasus Rust kernel.",
