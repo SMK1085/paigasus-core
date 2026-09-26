@@ -44,7 +44,8 @@ test('R30: the org creator grants model access to themself, the playground answe
 
   await page.goto(harness.url(ORG_PATH));
   await waitForHydration(page);
-  await section.getByRole('button', { name: 'Revoke' }).click();
+  await section.getByRole('button', { name: 'Revoke', exact: true }).click();
+  await section.getByRole('button', { name: 'Confirm revoke' }).click();
   await expect(section.getByTestId('people-holder-row')).toHaveCount(0);
 
   await page.goto(harness.url(PLAYGROUND));
