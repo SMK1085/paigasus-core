@@ -41,10 +41,10 @@ async fn a_refused_query_string_answers_in_the_error_envelope() {
 
     // (uri with a refused query, uri with a well-formed one).
     //
-    // Eight routes carry a numeric field and use `?limit=abc`. `list_role_grants` carries NO
-    // numeric field — `RoleGrantQuery` is a lone `Option<String>` — so `?limit=abc` there is an
-    // ignored UNKNOWN key and answers 200. It uses a REPEATED key instead, which reaches every
-    // field on every route. Getting this wrong is how a row ends up asserting nothing.
+    // Eight routes carry a numeric field and use `?limit=abc`. `list_role_grants`'s row targets
+    // its `principal_prn` STRING field instead, with a REPEATED key — the same class as the
+    // `?limit=1&limit=2` row below, the other field type, so neither is assumed from the other.
+    // Getting this wrong is how a row ends up asserting nothing.
     let cases: Vec<(&str, &str)> = vec![
         ("/v1/organizations?limit=abc", "/v1/organizations?limit=1"),
         ("/v1/authz/policies?limit=abc", "/v1/authz/policies?limit=1"),

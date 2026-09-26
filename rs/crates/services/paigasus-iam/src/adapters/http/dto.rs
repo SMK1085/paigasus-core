@@ -415,16 +415,20 @@ impl From<RoleGrant> for RoleGrantDto {
     }
 }
 
-/// Query params for `GET /v1/authz/role-grants`: `principal_prn` is REQUIRED (unlike
-/// `PageQuery`'s fields) — `RoleService::list` always lists exactly one principal's grants,
-/// there is no list-everyone mode over HTTP. Kept `Option` here (rather than a bare
-/// `String`) so a missing param maps through `http/authz.rs`'s own
-/// `TenancyError::MissingRequiredField` funnel — a SPECIFIC reason naming the field, rather
-/// than `EnvelopeQuery`'s general `invalid-query-parameter` (SMA-588), which is what a bare
-/// `String` would produce.
+/// Query params for `GET /v1/authz/role-grants` (SMA-676 D10). Every field is optional here:
+/// `RoleService::list` refuses a request with neither `principal_prn` nor `scope_prn`
+/// (`missing-required-field`, D3), refuses an unknown `principal_kind` (D7), and applies
+/// `limit`/`offset` only when a filter beyond the bare principal is set (D6). `Option`, not a
+/// bare `String`, so a missing parameter reaches that SPECIFIC reason rather than
+/// `EnvelopeQuery`'s general `invalid-query-parameter` (SMA-588).
 #[derive(Debug, Clone, Deserialize)]
 pub struct RoleGrantQuery {
     pub principal_prn: Option<String>,
+    pub scope_prn: Option<String>,
+    pub role_key: Option<String>,
+    pub principal_kind: Option<String>,
+    pub limit: Option<i64>,
+    pub offset: Option<i64>,
 }
 
 // --- SMA-445 Task 20: service-account + api-key DTOs ---------------------------------------

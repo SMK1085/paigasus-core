@@ -46,6 +46,8 @@ use super::query::EnvelopeQuery;
 use crate::adapters::auth::AuthContext;
 use crate::application::error::TenancyError;
 use crate::application::pagination::Page;
+use crate::application::principal_kind::PrincipalKindFilter;
+use crate::application::roles::ListRoleGrantsInput;
 
 /// `POST /v1/authz/is-authorized` — the authorization DECISION endpoint. Always mounted: it is
 /// the service-to-service primitive the gateway calls per request, not policy administration,
@@ -144,8 +146,16 @@ async fn create_role_grant(State(s): State<AppState>, Extension(ctx): Extension<
 
 async fn list_role_grants(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, EnvelopeQuery(q): EnvelopeQuery<RoleGrantQuery>) -> Result<Json<Vec<RoleGrantDto>>, ApiError> {
     let actor = actor_prn(&ctx);
-    let principal_prn = q.principal_prn.filter(|s| !s.trim().is_empty()).ok_or(TenancyError::MissingRequiredField("principal_prn"))?;
-    let grants = s.roles.list(&actor, &principal_prn).await?;
+    // SMA-676 D10: the same input the gRPC handler builds. The service owns every rule.
+    let input = ListRoleGrantsInput {
+        principal_prn: q.principal_prn,
+        scope_prn: q.scope_prn,
+        role_key: q.role_key,
+        principal_kind: PrincipalKindFilter::from_query(q.principal_kind.as_deref()),
+        limit: q.limit,
+        offset: q.offset,
+    };
+    let grants = s.roles.list(&actor, input).await?;
     Ok(Json(grants.into_iter().map(RoleGrantDto::from).collect()))
 }
 
