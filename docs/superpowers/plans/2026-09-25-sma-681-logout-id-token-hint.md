@@ -630,6 +630,12 @@ git log --oneline -1
 
 ### Task 4: The refresh stores a matching ID token and signs out on a mismatch
 
+> **Superseded in part (2026-09-26).** This task is complete. A later review changed its mismatch
+> path. Do not use the mismatch code and tests below. The mismatch path now revokes the new refresh
+> token and the record's old one, after the lock release. `RefreshedTokens` now has one
+> `rotatedIdToken` field. The spec is the authority: see § 4.3 and "Changes after review (2026-09-26)".
+> The code is in commits `c90a99e5`, `40067298` and `bd1f4028`.
+
 **Files:**
 - Modify: `ts/packages/paigasus-auth/src/core/single-flight.ts:1-24` (imports, `RefreshedTokens`, `ResolveDeps`), `:98-99` (destructure `revoke`), `:188-217` (the rule, the write, the event)
 - Modify: `ts/packages/paigasus-auth/src/ports/logger.ts:22` (a new event name)
