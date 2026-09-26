@@ -38,6 +38,20 @@ const POST_GOLDEN = [
   '',
 ].join('\n');
 
+// SMA-656 D4, T8. The IdP page: the same heading, the same link, one different sentence.
+const IDP_LINK_GOLDEN = [
+  '<!doctype html>',
+  '<html lang="en">',
+  '<head><meta charset="utf-8"><title>Sign-in is temporarily unavailable</title></head>',
+  '<body>',
+  '<h1>Sign-in is temporarily unavailable</h1>',
+  '<p>The identity provider is not available. Try again in a few seconds.</p>',
+  '<p><a href="/iam/auth/login">Try again</a></p>',
+  '</body>',
+  '</html>',
+  '',
+].join('\n');
+
 function recorder(): { ctx: { zone: string; logger: { event(name: AuthEventName, fields: AuthEventFields): void } }; events: Array<[AuthEventName, AuthEventFields]> } {
   const events: Array<[AuthEventName, AuthEventFields]> = [];
   return { ctx: { zone: 'iam', logger: { event: (name, fields) => void events.push([name, { ...fields }]) } }, events };
@@ -90,6 +104,33 @@ describe('storeUnavailableResponse — golden bodies (SMA-656 T0)', () => {
 
   it('the post page is byte-identical', async () => {
     expect(await storeUnavailableResponse({ kind: 'post', action: '/iam/auth/logout' }).text()).toBe(POST_GOLDEN);
+  });
+});
+
+describe('storeUnavailableResponse — the identity provider (SMA-656 D4, T8)', () => {
+  it('names the identity provider, with the same headers and no Set-Cookie', async () => {
+    const res = storeUnavailableResponse({ kind: 'link', href: '/iam/auth/login', service: 'identity_provider' });
+    expect(res.status).toBe(503);
+    expect(res.headers.get('retry-after')).toBe('5');
+    expect(res.headers.get('cache-control')).toBe('no-store');
+    expect(res.headers.get('content-type')).toBe('text/html; charset=utf-8');
+    expect(res.headers.get('referrer-policy')).toBe('no-referrer');
+    expect(res.headers.get('content-security-policy')).toBe(STORE_UNAVAILABLE_CSP);
+    expect(res.headers.getSetCookie()).toEqual([]);
+    const body = await res.text();
+    expect(body).toBe(IDP_LINK_GOLDEN);
+    expect(body).not.toContain('The session service did not answer');
+  });
+
+  it('an explicit session_store service gives the T0 page', async () => {
+    expect(await storeUnavailableResponse({ kind: 'link', href: '/iam/auth/login', service: 'session_store' }).text()).toBe(LINK_GOLDEN);
+  });
+
+  // Review Focus 1: the IdP variant escapes the attribute exactly as the store variant does.
+  it('HTML-escapes a hostile href in the IdP page', async () => {
+    const body = await storeUnavailableResponse({ kind: 'link', href: HOSTILE, service: 'identity_provider' }).text();
+    expect(body).toContain('href="/iam/a&quot;b&lt;c&gt;d&amp;e&#39;f#g h"');
+    expect(body).not.toContain('b<c');
   });
 });
 
