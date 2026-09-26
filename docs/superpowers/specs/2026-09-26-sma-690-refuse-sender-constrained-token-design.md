@@ -286,8 +286,9 @@ integration test with `--no-fail-fast`, and run the integration test with
   refuses the token; they pin the order, not the new check. Test 13 calls the function directly.
 
 Mutation B (the log). Restore mutation A. Then replace the step-7 `self.log_refusal(..)` call with
-`let _ = marker;`. This compiles, because `marker` stays used and `log_refusal` stays used by
-step 6. Tests 14-16 must go red. Tests 1-13 must stay green.
+`let _ = RefusalDetail::Binding(marker);`. This compiles, because the `Binding` variant stays
+constructed and `log_refusal` stays used by step 6. (Corrected while writing the plan:
+`let _ = marker;` leaves `Binding` never constructed, which is a dead-code error.) Tests 14-16 must go red. Tests 1-13 must stay green.
 
 Restore each mutation with an edit, not with `git checkout` (the fix is not yet committed). After
 the last restore, run the whole suite once more.
