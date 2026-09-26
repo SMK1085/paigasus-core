@@ -11,9 +11,10 @@
 // `nbf` is the real mechanism this test exercises instead.
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import * as client from 'openid-client';
-import { createOidcClient, type CreateOidcClientOptions, type OidcClient } from '../../src/adapters/oidc.js';
+import { classifyDiscoveryError, createOidcClient, type CreateOidcClientOptions, type OidcClient } from '../../src/adapters/oidc.js';
 import { startOidcFixture, type OidcFixture } from '../fixtures/jwks.js';
-import { RefreshFailed, RefreshRejected } from '../../src/core/errors.js';
+import { closedPortIssuer, startDiscoveryFailureFixture, type DiscoveryFailureFixture } from '../fixtures/discovery-failures.js';
+import { OidcDiscoveryFailed, RefreshFailed, RefreshRejected, isOidcDiscoveryFailed, type OidcDiscoveryFailureReason } from '../../src/core/errors.js';
 
 const REDIRECT_URI = 'https://rp.example.com/auth/callback';
 const STATE = 'txn-state-value';
@@ -348,6 +349,158 @@ describe('createOidcClient — refresh failure classification (SMA-626 § 2.2)',
 
     expect(err).not.toBeInstanceOf(RefreshRejected);
   });
+});
+
+// ---------------------------------------------------------------------------------------------
+// SMA-656 T9. Each row makes discovery fail in one way, through the REAL adapter, and measures the
+// `reason`. The D8 table was reasoned from the library code; these rows are its measurement. If a
+// row measures another reason, the D8 table is corrected, not this test.
+// ---------------------------------------------------------------------------------------------
+describe('createOidcClient — a discovery failure is an OidcDiscoveryFailed with a closed reason (SMA-656 T9)', () => {
+  let failing: DiscoveryFailureFixture | undefined;
+
+  afterEach(async () => {
+    await failing?.close();
+    failing = undefined;
+  });
+
+  function clientFor(issuer: string, httpTimeoutMs = 2000): OidcClient {
+    return createOidcClient({ issuer, clientId: 'test-client', clientSecret: 'test-secret', httpTimeoutMs, clockToleranceSeconds: 30, scopes: 'openid', allowInsecureRequests: true });
+  }
+
+  function buildUrl(oidc: OidcClient): Promise<unknown> {
+    return oidc.buildAuthorizationUrl({ redirectUri: REDIRECT_URI, state: STATE });
+  }
+
+  function expectDiscoveryFailed(err: unknown, reason: OidcDiscoveryFailureReason): void {
+    expect(isOidcDiscoveryFailed(err)).toBe(true);
+    expect(err).toBeInstanceOf(OidcDiscoveryFailed);
+    const failed = err as OidcDiscoveryFailed;
+    expect(failed.name).toBe('OidcDiscoveryFailed');
+    // D3: the name of the library error, nothing else.
+    expect(failed.message).toMatch(/^oidc discovery failed: \w+$/);
+    expect(failed.message).not.toContain('127.0.0.1');
+    expect(failed.cause).toBeUndefined();
+    expect(failed.reason).toBe(reason);
+  }
+
+  // Review Focus 5: port 1 is on the Fetch "bad port" list, so no connect happens at all.
+  it('an issuer on a port that fetch blocks (http://127.0.0.1:1) -> network', async () => {
+    expectDiscoveryFailed(await buildUrl(clientFor('http://127.0.0.1:1')).catch((e: unknown) => e), 'network');
+  });
+
+  it('a refused connection (a closed port) -> network', async () => {
+    expectDiscoveryFailed(await buildUrl(clientFor(await closedPortIssuer())).catch((e: unknown) => e), 'network');
+  });
+
+  it.each([
+    ['status-404', 'http_client_error'],
+    ['status-503', 'http_server_error'],
+    ['not-json', 'invalid_metadata'],
+    ['wrong-issuer', 'issuer_mismatch'],
+    ['issuer-not-a-url', 'invalid_metadata'],
+  ] as const)('%s -> %s', async (mode, reason) => {
+    failing = await startDiscoveryFailureFixture(mode);
+    const err: unknown = await buildUrl(clientFor(failing.issuer)).catch((e: unknown) => e);
+    expect(failing.requests).toBeGreaterThan(0);
+    expectDiscoveryFailed(err, reason);
+  });
+
+  it('hang, with httpTimeoutMs 200 -> timeout', async () => {
+    failing = await startDiscoveryFailureFixture('hang');
+    const err: unknown = await buildUrl(clientFor(failing.issuer, 200)).catch((e: unknown) => e);
+    expect(failing.requests).toBe(1);
+    expectDiscoveryFailed(err, 'timeout');
+  });
+
+  // D10: the callback calls authorizationCodeGrant, which runs getConfig() first too.
+  it('authorizationCodeGrant throws the same class', async () => {
+    const err: unknown = await clientFor('http://127.0.0.1:1')
+      .authorizationCodeGrant({ currentUrl: callbackUrl(), codeVerifier: 'verifier-value', expectedState: STATE, expectedNonce: NONCE })
+      .catch((e: unknown) => e);
+    expectDiscoveryFailed(err, 'network');
+  });
+
+  // Review Focus 3, D5: a failed discovery is not cached, so a retry runs discovery again.
+  it('the next call after a failed discovery runs discovery again', async () => {
+    failing = await startDiscoveryFailureFixture('status-503');
+    const oidc = clientFor(failing.issuer);
+    expectDiscoveryFailed(await buildUrl(oidc).catch((e: unknown) => e), 'http_server_error');
+    expectDiscoveryFailed(await buildUrl(oidc).catch((e: unknown) => e), 'http_server_error');
+    expect(failing.requests).toBe(2);
+  });
+});
+
+// SMA-656 T9b. The D8 rows that a fixture cannot produce cheaply, with constructed errors. The
+// shapes copy openid-client 6.8.8's errorHandler (build/index.js:117-165): a ClientError carries
+// `code`, and for OAUTH_RESPONSE_IS_NOT_CONFORM its `cause` is the Response; for OAUTH_PARSE_ERROR
+// its `cause` is oauth4webapi's error, whose own `cause` is what failed while the body was read.
+describe('classifyDiscoveryError — constructed errors (SMA-656 T9b)', () => {
+  function clientError(code: string | undefined, cause?: unknown): client.ClientError {
+    const err = new client.ClientError('a constructed ClientError', cause === undefined ? undefined : { cause });
+    if (code !== undefined) err.code = code;
+    return err;
+  }
+
+  function parseError(nested: unknown): client.ClientError {
+    return clientError('OAUTH_PARSE_ERROR', new Error('failed to parse "response" body as JSON', { cause: nested }));
+  }
+
+  function fetchFailed(causeCode?: string): TypeError {
+    const cause = causeCode === undefined ? new Error('connect failed') : Object.assign(new Error('connect failed'), { code: causeCode });
+    return new TypeError('fetch failed', { cause });
+  }
+
+  const status = (value: number): Response => new Response(null, { status: value });
+
+  const ROWS: ReadonlyArray<readonly [string, unknown, OidcDiscoveryFailureReason]> = [
+    ['row 1: OAUTH_TIMEOUT', clientError('OAUTH_TIMEOUT', new DOMException('timed out', 'TimeoutError')), 'timeout'],
+    ['row 1: OAUTH_ABORT (defensive)', clientError('OAUTH_ABORT', new DOMException('aborted', 'AbortError')), 'timeout'],
+    ['row 2: NOT_CONFORM, status 500', clientError('OAUTH_RESPONSE_IS_NOT_CONFORM', status(500)), 'http_server_error'],
+    ['row 2: NOT_CONFORM, status 503', clientError('OAUTH_RESPONSE_IS_NOT_CONFORM', status(503)), 'http_server_error'],
+    ['row 2: NOT_CONFORM, status 599', clientError('OAUTH_RESPONSE_IS_NOT_CONFORM', status(599)), 'http_server_error'],
+    ['row 3: NOT_CONFORM, status 499', clientError('OAUTH_RESPONSE_IS_NOT_CONFORM', status(499)), 'http_client_error'],
+    ['row 3: NOT_CONFORM, status 404', clientError('OAUTH_RESPONSE_IS_NOT_CONFORM', status(404)), 'http_client_error'],
+    ['row 3: NOT_CONFORM, no cause', clientError('OAUTH_RESPONSE_IS_NOT_CONFORM'), 'http_client_error'],
+    ['row 3: NOT_CONFORM, a cause that is not a Response', clientError('OAUTH_RESPONSE_IS_NOT_CONFORM', { status: 503 }), 'http_client_error'],
+    ['row 4: PARSE_ERROR, the body timed out', parseError(new DOMException('timed out', 'TimeoutError')), 'timeout'],
+    ['row 4: PARSE_ERROR, the body was aborted', parseError(new DOMException('aborted', 'AbortError')), 'timeout'],
+    ['row 5: PARSE_ERROR, the connection reset during the body', parseError(new TypeError('terminated')), 'network'],
+    ['row 6: PARSE_ERROR, bad JSON', parseError(new SyntaxError('Unexpected token')), 'invalid_metadata'],
+    ['row 6: PARSE_ERROR, no nested cause', clientError('OAUTH_PARSE_ERROR'), 'invalid_metadata'],
+    ['row 6: RESPONSE_IS_NOT_JSON', clientError('OAUTH_RESPONSE_IS_NOT_JSON', status(200)), 'invalid_metadata'],
+    ['row 6: RESPONSE_IS_NOT_JSON, a 503 cause is not read', clientError('OAUTH_RESPONSE_IS_NOT_JSON', status(503)), 'invalid_metadata'],
+    ['row 6: INVALID_RESPONSE', clientError('OAUTH_INVALID_RESPONSE'), 'invalid_metadata'],
+    ['row 6: INVALID_SERVER_METADATA (defensive)', clientError('OAUTH_INVALID_SERVER_METADATA'), 'invalid_metadata'],
+    ['row 6: MISSING_SERVER_METADATA (defensive)', clientError('OAUTH_MISSING_SERVER_METADATA'), 'invalid_metadata'],
+    ['row 7: JSON_ATTRIBUTE_COMPARISON_FAILED', clientError('OAUTH_JSON_ATTRIBUTE_COMPARISON_FAILED', { expected: 'https://idp.invalid/', attribute: 'issuer' }), 'issuer_mismatch'],
+    ['row 8: TypeError with own code ERR_INVALID_URL', Object.assign(new TypeError('Invalid URL'), { code: 'ERR_INVALID_URL' }), 'invalid_metadata'],
+    ['row 9: fetch failed, ENOTFOUND', fetchFailed('ENOTFOUND'), 'dns'],
+    ['row 11: fetch failed, ECONNREFUSED', fetchFailed('ECONNREFUSED'), 'network'],
+    ['row 11: fetch failed, ECONNRESET', fetchFailed('ECONNRESET'), 'network'],
+    ['row 11: fetch failed, EAI_AGAIN', fetchFailed('EAI_AGAIN'), 'network'],
+    ['row 11: fetch failed, a cause with no code', fetchFailed(), 'network'],
+    ['row 11: fetch failed, a cause code that is a URL', fetchFailed('https://idp.invalid/x'), 'network'],
+    ['row 11: a TypeError with no cause', new TypeError('fetch failed'), 'network'],
+    ['row 12: an unknown ClientError code', clientError('OAUTH_SOMETHING_NEW'), 'other'],
+    ['row 12: a ClientError with no code', clientError(undefined), 'other'],
+    ['row 12: HTTP_REQUEST_FORBIDDEN', clientError('OAUTH_HTTP_REQUEST_FORBIDDEN'), 'other'],
+    ['row 12: a TypeError with another own code', Object.assign(new TypeError('bad argument'), { code: 'ERR_INVALID_ARG_TYPE' }), 'other'],
+    ['row 12: a plain Error', new Error('boom'), 'other'],
+    ['row 12: a string', 'https://idp.invalid/x', 'other'],
+    ['row 12: undefined', undefined, 'other'],
+  ];
+
+  it.each(ROWS)('%s', (_label, err, reason) => {
+    expect(classifyDiscoveryError(err)).toBe(reason);
+  });
+
+  it.each(['CERT_HAS_EXPIRED', 'DEPTH_ZERO_SELF_SIGNED_CERT', 'SELF_SIGNED_CERT_IN_CHAIN', 'UNABLE_TO_VERIFY_LEAF_SIGNATURE', 'UNABLE_TO_GET_ISSUER_CERT_LOCALLY', 'ERR_TLS_CERT_ALTNAME_INVALID'])(
+    'row 10: fetch failed, %s -> tls',
+    (code) => {
+      expect(classifyDiscoveryError(fetchFailed(code))).toBe('tls');
+    },
+  );
 });
 
 // SMA-692. The tests read the REAL request: the authorization URL the adapter builds, and the

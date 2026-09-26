@@ -1,18 +1,27 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // The 503 that an auth route returns when the session store is unavailable (SMA-653, SMA-506
-// design § 7.2: "503 with a retry affordance; no partial state").
+// design § 7.2: "503 with a retry affordance; no partial state"), and, since SMA-656, when OIDC
+// discovery fails on /auth/login or /auth/callback (SMA-506 design § 7.1: "login fails, 503 page").
+// The names `storeUnavailableResponse` and `STORE_UNAVAILABLE_CSP` are historical: they predate the
+// identity-provider case, and a rename is out of scope (SMA-656 § 8).
 //
 // PRIVATE to this package: routes.ts is the only caller, and server.ts does not export it.
 //
 // THE PAGE. A fixed HTML document with one retry control: a link for login and callback, and a
 // POST form for logout (a link cannot send a POST). It carries NO error text: the error message of
-// a SessionStoreUnavailable holds the redacted DSN (adapters/redis-store.ts), and the response is
-// not a place for it in any form.
+// a SessionStoreUnavailable holds the redacted DSN (adapters/redis-store.ts), an openid-client error
+// can hold a URL, and the response is not a place for either in any form. The link variant's
+// optional `service` picks the sentence: the session service (the default, so every SMA-653 call
+// site stays byte-identical) or the identity provider (SMA-656 D4). The IdP sentence does not say
+// WHY discovery failed: a 404 or an issuer mismatch is not "did not answer".
 //
 // THE HEADERS (spec § 3).
 //   - Retry-After: 5. With the shipped 1000 ms store timeout, the SMA-651 circuit cooldown is
-//     4000 ms, so a retry after 5 s reaches a closed or re-probing circuit. Advisory only.
+//     4000 ms, so a retry after 5 s reaches a closed or re-probing circuit. Advisory only. For the
+//     identity-provider case it is advisory too: a retry runs discovery again, because the adapter
+//     clears its cached discovery after a failure, and that retry can wait up to
+//     PAIGASUS_OIDC_HTTP_TIMEOUT_MS for its answer (SMA-656 D5).
 //   - Cache-Control: no-store. An error page must never be served from a cache.
 //   - Referrer-Policy: no-referrer. A callback 503 is served at /auth/callback?code=…&state=…, and
 //     the code may not be spent yet. The retry link must not send that URL as a Referer.
@@ -33,7 +42,21 @@ export const RETRY_AFTER_SECONDS = 5;
 
 export const STORE_UNAVAILABLE_CSP = "default-src 'none'; frame-ancestors 'none'; base-uri 'none'";
 
-export type RetryAffordance = { kind: 'link'; href: string } | { kind: 'post'; action: string };
+/** The link variant. `service` picks the sentence; a missing field means 'session_store' (SMA-656 D4). */
+export type RetryLink = { kind: 'link'; href: string; service?: 'session_store' | 'identity_provider' };
+
+/** The post variant (logout) has no `service`, so the type cannot express a state the builder ignores. */
+export type RetryAffordance = RetryLink | { kind: 'post'; action: string };
+
+const SESSION_STORE_SENTENCE = 'The session service did not answer. Try again in a few seconds.';
+const IDENTITY_PROVIDER_SENTENCE = 'The identity provider is not available. Try again in a few seconds.';
+const SIGN_OUT_SENTENCE = 'The session service did not answer, so your session may still be active. Try again in a few seconds.';
+
+function sentenceFor(retry: RetryAffordance): string {
+  if (retry.kind === 'post') return SIGN_OUT_SENTENCE;
+  const service = retry.service ?? 'session_store';
+  return service === 'identity_provider' ? IDENTITY_PROVIDER_SENTENCE : SESSION_STORE_SENTENCE;
+}
 
 /** HTML-escapes a value for a double-quoted attribute. `&` goes first, so no escape is doubled. */
 export function escapeHtmlAttribute(value: string): string {
@@ -49,7 +72,7 @@ export function loginRetryHref(basePath: string, returnTo?: string): string {
 export function storeUnavailableResponse(retry: RetryAffordance): Response {
   const signOut = retry.kind === 'post';
   const heading = signOut ? 'Sign-out did not complete' : 'Sign-in is temporarily unavailable';
-  const sentence = signOut ? 'The session service did not answer, so your session may still be active. Try again in a few seconds.' : 'The session service did not answer. Try again in a few seconds.';
+  const sentence = sentenceFor(retry);
   const control =
     retry.kind === 'post'
       ? `<form method="post" action="${escapeHtmlAttribute(retry.action)}"><button type="submit">Sign out again</button></form>`

@@ -54,9 +54,11 @@ export class SessionStoreTimeout extends SessionStoreUnavailable {
  * THE RULE, stated once (SMA-657 D7). A class thrown by a closure that is reachable through shared
  * state, and caught OUTSIDE that closure, must be classified by its `code`. A class thrown and
  * caught inside one closure, or thrown and caught by two modules of one copy, may use `instanceof`
- * — the boundary is the CLOSURE, not whether state is shared. The three remaining sites in this
+ * — the boundary is the CLOSURE, not whether state is shared. The four remaining sites in this
  * package that test a NON-BUILTIN class each carry a comment saying which side of that line they
- * fall on.
+ * fall on: server.ts's CallbackRejected catch, adapters/operation-deadline.ts's SessionStoreTimeout
+ * check, and adapters/oidc.ts's classifyRefreshError and classifyDiscoveryError (SMA-656). All four
+ * are on the `instanceof` side.
  *
  * The `err instanceof Error` test is an `instanceof` against a BUILTIN, which both copies share in
  * one isolate, so it does not have the defect this function exists to avoid. It is what rejects a
@@ -82,6 +84,54 @@ export function isSessionStoreUnavailable(err: unknown): boolean {
  * `hasAuthErrorCode`. */
 export function isRefreshRejected(err: unknown): boolean {
   return hasAuthErrorCode(err, 'oidc_refresh_rejected');
+}
+
+/** Why OIDC discovery failed (SMA-656 D8). The one list; the type derives from it. */
+export const OIDC_DISCOVERY_FAILURE_REASONS = ['timeout', 'network', 'dns', 'tls', 'http_server_error', 'http_client_error', 'invalid_metadata', 'issuer_mismatch', 'other'] as const;
+export type OidcDiscoveryFailureReason = (typeof OIDC_DISCOVERY_FAILURE_REASONS)[number];
+
+/**
+ * OIDC discovery did not complete (SMA-656). The message holds only the library error's name, and
+ * there is no `cause` (D3): the `cause` of an issuer-mismatch ClientError holds the expected issuer
+ * and the metadata, the `cause` of a 404 ClientError is a Response with a `url`, and Node prints the
+ * `cause` chain when it logs an error. `reason` comes from adapters/oidc.ts's
+ * `classifyDiscoveryError` (D8).
+ *
+ * INVARIANT (D10): thrown only by the adapter's `getConfig()`, which every method awaits before any
+ * other request — so when a caller sees this, no token request was sent, no authorization code was
+ * spent and no token exists. http/routes.ts's callback 503 depends on this: it does not revoke.
+ *
+ * `name` is set explicitly for the reason SessionStoreTimeout records: a production bundle can
+ * mangle `constructor.name`. NOT exported from src/server.ts, for the SMA-657 D4 reason: a caller
+ * of createOidcClient or AuthRuntime.oidc CAN receive one, but no consumer needs to CLASSIFY one.
+ */
+export class OidcDiscoveryFailed extends AuthError {
+  readonly code = 'oidc_discovery_failed';
+  readonly reason: OidcDiscoveryFailureReason;
+
+  constructor(message: string, reason: OidcDiscoveryFailureReason) {
+    super(message);
+    this.name = 'OidcDiscoveryFailed';
+    this.reason = reason;
+  }
+}
+
+/** True for an OidcDiscoveryFailed from ANY copy of this module (SMA-656 D1). The crossing path is
+ * real: the runtime and its `oidc` client are shared through globalThis, so adapters/oidc.ts builds
+ * this class in whichever copy created the runtime, and http/routes.ts classifies it in whichever
+ * copy serves the request. See `hasAuthErrorCode`. */
+export function isOidcDiscoveryFailed(err: unknown): boolean {
+  return hasAuthErrorCode(err, 'oidc_discovery_failed');
+}
+
+/**
+ * The `reason` of a caught discovery error, read defensively (SMA-656 D8). A value outside
+ * OIDC_DISCOVERY_FAILURE_REASONS — a missing field, a foreign string, a number — gives 'other', so
+ * no value that the list does not name can reach a log line.
+ */
+export function oidcDiscoveryReason(err: unknown): OidcDiscoveryFailureReason {
+  const reason: unknown = typeof err === 'object' && err !== null ? (err as { reason?: unknown }).reason : undefined;
+  return OIDC_DISCOVERY_FAILURE_REASONS.find((known) => known === reason) ?? 'other';
 }
 
 /** Configuration is internally inconsistent. Thrown by createAuthRuntime at first request. */
