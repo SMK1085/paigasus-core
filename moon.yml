@@ -990,6 +990,13 @@ tasks:
     # here reads a build output. ci/images/chains.toml and the four version files are what row 8a
     # reads (SMA-688).
     #
+    # Row 8c (SMA-696) reads Chart.yaml and the `paigasus-*` git tags. The tags are no file
+    # input, so a cached PASS survives a deleted tag. Chart.yaml is an input (charts/**/*), so an
+    # appVersion change always runs the row again.
+    #
+    # A chain's first release adds a tag with no new commit. So a stale UNRELEASED_CHAINS entry
+    # goes red only on the next PR that changes a repo:helm-render input.
+    #
     # `--self-test` and `--negative-control` run FIRST and in the SAME block. `set -euo pipefail`
     # is REQUIRED: Moon does not enable errexit for `script:` blocks and takes the block's status
     # from its LAST command, so without it a failing control is masked by the passing real run.

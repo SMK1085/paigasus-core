@@ -8,7 +8,7 @@
 # Five readers use this file. Four read it with tomllib, which is stdlib:
 #   ci/release-plan/release_plan.py   the keys, kind, version_file, changelog (the plan outputs)
 #   ci/images/release_decision.py     kind (the SBOM floor)
-#   ci/helm-render/helm_render.py     kind, version_file, ghcr (row 8a)
+#   ci/helm-render/helm_render.py     the keys (row 8c), kind, version_file, ghcr (row 8a)
 #   ci/actionlint/release_guard.py    the keys, ghcr, hub (V16)
 # The fifth reader is a sed fallback in ci/release-plan/run.sh. It reads the keys when
 # `uv` is not on PATH. It needs each header as a bare `[chain.<key>]` line, nothing else
@@ -19,6 +19,8 @@
 # list; it does not read this file. A new key here also needs an entry in run.sh, an
 # entry in images.yml, and its own jobs in release.yml. It also needs a CHAIN_APPROVALS
 # entry in release_guard.py. V16 checks both the release.yml jobs and that entry.
+# Until the new chain's first release, it also needs an UNRELEASED_CHAINS entry in
+# ci/helm-render/helm_render.py; row 8c fails when that entry stays after the release.
 #
 # kind = "cargo": version_file is the crate's Cargo.toml, and the version is `[package] version`.
 # kind = "npm":   version_file is the app's package.json, and the version is the top-level

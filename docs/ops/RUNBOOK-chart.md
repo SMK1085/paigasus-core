@@ -11,7 +11,7 @@ addenda. `charts/paigasus/README.md` holds the developer detail.
 | -- | -- | -- |
 | `zones.<id>.enabled` | — | Turns a zone on or off. It controls six projections together (§ 4) |
 | `zones.<id>.basePath` | — | The zone's path prefix. It must start with `/`, must not end with `/`, and must be unique |
-| `zones.<id>.console.image.{repository,tag}` | — | The console image. `tag` is pinned to the published console version (for example `0.1.0`). An empty `tag` falls back to the chart `appVersion` (`0.0.0`), which names no published image |
+| `zones.<id>.console.image.{repository,tag}` | — | The console image. `tag` is pinned to the published console version (for example `0.1.0`). An empty `tag` falls back to the chart `appVersion`. That is a released version of every image, but it can be older than the pinned tags. It is the fallback tag, not the deployed version |
 | `zones.<id>.console.replicas` | — | Console replicas (default 2) |
 | `zones.iam.backend.image.{repository,tag}` | — | The IAM image. `tag` is pinned to the published IAM version, like the console tags |
 | `zones.iam.backend.apiKeysPepperSecret` | yes | A Secret with key `pepper`: base64 of at least 32 bytes |
